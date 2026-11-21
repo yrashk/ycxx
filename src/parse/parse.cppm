@@ -3244,9 +3244,13 @@ private:
     spec.type = t;
     spec.has_type = true;
     spec.is_typedef = td;
+    if (cls != EntityId::none) {
+      s_.current_class = cls;
+      return member_declarators(spec, class_decl(cls, true), /*fields_only=*/true);
+    }
     do {
       parse::Declarator d = ps_.declarator(spec.type, false, spec.is_typedef);
-      if (!d.ok || !d.named || cls != EntityId::none || !declare(spec, d, LangLinkage::cxx, false, false)) {
+      if (!d.ok || !d.named || !declare(spec, d, LangLinkage::cxx, false, false)) {
         bad();
         ps_.skip_to_semi();
         return;
@@ -3434,7 +3438,7 @@ private:
     commit_introduction();
   }
 
-  void member_declarators(const DeclSpec& spec, const ast::DeclSema& c) {
+  void member_declarators(const DeclSpec& spec, const ast::DeclSema& c, bool fields_only = false) {
     sema::Types& types = s_.types();
     do {
       bool conversion = ps_.conversion_id_ahead();
@@ -3480,6 +3484,10 @@ private:
         return bad();
       }
       const bool function = types.is_function(d.type);
+      if (fields_only && (function || spec.is_static)) {
+        s_.diag(d.name_at, Diag::not_supported, Tk::kw_enum);
+        return bad();
+      }
       const sema::MemberDeclRec* overridden = function && !member_template_ ? overridden_member(c.entity, d) : nullptr;
       const bool is_virtual = spec.virtual_at.has_value() || overridden;
       if (is_virtual) {
