@@ -271,9 +271,9 @@ initializer takes precedence.
   three member-pointer predicates as `bool` template arguments or defaults, including through
   alias templates
   [#209](https://github.com/yrashk/ycxx/issues/209);
-- `__is_constructible` and `__is_nothrow_constructible` for supported scalar, reference,
-  function and `void` queries, including argument packs in class-template base and
-  variable-template initializer replay.
+- `__is_constructible`, `__is_nothrow_constructible` and `__is_trivially_constructible` for
+  supported scalar, reference, function and `void` queries, including argument packs in
+  class-template base and variable-template initializer replay.
   [Extension guide](docs/EXTENSIONS.md) · [#218](https://github.com/yrashk/ycxx/issues/218)
 - logical negation of a qualified dependent `bool` variable template-id in a `bool` template
   argument or default
