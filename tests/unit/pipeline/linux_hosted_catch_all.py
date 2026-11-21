@@ -1,11 +1,26 @@
-"""Host-link the Stage A objects before enabling source handler lowering."""
+"""Host-link the unwind emitter fixtures and separately compile authored catch-all sources."""
 
 import os
 from pathlib import Path
+import re
 import resource
 import subprocess
 import sys
 import tempfile
+
+
+def check_authored_frames(metadata, frames):
+    functions = {name: (int(start, 16), int(start, 16) + int(size))
+                 for start, size, name in re.findall(
+                     r'^\s*\d+:\s+([0-9a-f]+)\s+(\d+)\s+\S+\s+GLOBAL\s+\S+\s+\d+\s+(chosen|transit)$',
+                     metadata, re.MULTILINE)}
+    assert functions.keys() == {'chosen', 'transit'}, metadata
+    cies = dict(re.findall(r'^([0-9a-f]+) +[0-9a-f]+ +[0-9a-f]+ CIE\n[^\n]+\n'
+                           r'[ \t]*Augmentation:[ \t]*"([^"]+)"', frames, re.MULTILINE))
+    entries = re.findall(r'FDE cie=([0-9a-f]+) pc=([0-9a-f]+)\.\.([0-9a-f]+)', frames)
+    assert len(entries) == 2, frames
+    ranges = {(int(start, 16), int(end, 16)): cies[cie] for cie, start, end in entries}
+    assert len(ranges) == 2 and ranges == {functions['chosen']: 'zPLR', functions['transit']: 'zR'}, (functions, frames)
 
 
 def main():
@@ -24,22 +39,31 @@ def main():
             assert result.returncode == status, (args, result.returncode, status, result.stdout, result.stderr)
             return result
 
-        run(emitter, work)
-        for name in ('handler-first', 'plain-first', 'cleanup-only'):
+        def read_unwind(name):
             metadata = run(readelf, '--wide', '--section-headers', '--relocs', '--symbols', f'{name}.o').stdout
             for expected in ('.eh_frame', '.gcc_except_table', '.data.rel.ro', 'R_X86_64_PC32',
                              'R_X86_64_64', '__gxx_personality_v0', '__cxa_begin_catch', '__cxa_end_catch',
                              '_Unwind_Resume'):
                 assert expected in metadata, (name, expected, metadata)
-            frames = run(readelf, '--debug-dump=frames', f'{name}.o').stdout
+            frames = run(readelf, '--wide', '--debug-dump=frames', f'{name}.o').stdout
             assert '"zR"' in frames and '"zPLR"' in frames, (name, frames)
+            return metadata, frames
+
+        run(emitter, work)
+        orders = ('handler-first', 'plain-first')
+        for name in (*orders, 'cleanup-only'):
+            read_unwind(name)
 
         peer_flags = ('-std=c++26', '-pedantic-errors', '-nostdinc', '-nostdinc++', '-O0', '-fexceptions',
                       '-fPIE', '-fno-lto', '-c')
         run(peer, *peer_flags, fixtures / 'native/hosted.cpp', '-o', 'hosted.o')
-        for name in ('handler-first', 'plain-first'):
+
+        def run_hosted(name):
             run(peer, '-pie', '-Wl,-z,text', '-fno-lto', 'hosted.o', f'{name}.o', '-o', name)
             run(f'./{name}')
+
+        for name in orders:
+            run_hosted(name)
 
         run(peer, *peer_flags, fixtures / 'native/cleanup-hosted.cpp', '-o', 'cleanup-hosted.o')
         run(peer, '-pie', '-Wl,-z,text', '-fno-lto', 'cleanup-hosted.o', 'cleanup-only.o', '-o', 'cleanup-only')
@@ -50,10 +74,19 @@ def main():
         assert 'native ELF linking of exception handlers is unsupported' in native.stderr, native.stderr
         assert not (work / 'native').exists()
 
-        authored = [fixtures / 'native' / f'{name}.cpp' for name in ('handler-first', 'plain-first')]
-        authored.extend(sorted((fixtures / 'scope').glob('*.cpp')))
-        for target in (linux, '--target=arm64-apple-darwin'):
-            for source in authored:
+        darwin = '--target=arm64-apple-darwin'
+        authored = [(name, fixtures / 'native' / f'{name}.cpp') for name in orders]
+        for name, source in authored:
+            output = f'authored-{name}'
+            flags = (ycxx, 'cxx', linux, '-std=c++26')
+            run(*flags, '-fsyntax-only', source)
+            run(*flags, '-c', source, '-o', f'{output}.o')
+            check_authored_frames(*read_unwind(output))
+            run_hosted(output)
+
+        scope = sorted((fixtures / 'scope').glob('*.cpp'))
+        for target, rejected in ((linux, scope), (darwin, scope + [source for _, source in authored])):
+            for source in rejected:
                 flags = (ycxx, 'cxx', target, '-std=c++26')
                 run(*flags, '-fsyntax-only', source)
                 blocked = run(*flags, '-c', source, '-o', 'retained.o', status=1)
