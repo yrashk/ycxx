@@ -43,6 +43,17 @@ struct Analysed {
   }
 };
 
+void prototype_parameters_are_not_body_locals() {
+  Analysed a("struct Token {}; int f(int value) { "
+             "using Plain = int (*)(Token prototype_only) noexcept; "
+             "using Checked = int (*)(Token prototype_only) noexcept(sizeof(prototype_only) == sizeof(Token)); "
+             "return value; }");
+  check(a.diags().empty(), "both local function-prototype aliases are valid");
+  const auto locals = a.body(1).locals;
+  check(a.ins.seqs.size(locals) == 1 && a.ins.names.spelling(a.ins.seqs.at(locals, 0).name) == "value",
+        "only the actual parameter belongs to the enclosing body");
+}
+
 void conversions_and_locals() {
   Analysed a("int f(int a, long b) { return a + b; }");
   check(a.diags().empty(), "no diagnostics");
@@ -322,6 +333,7 @@ void handler_kinds() {
 int main() {
   constant_evaluation();
   conversions_and_locals();
+  prototype_parameters_are_not_body_locals();
   redeclarations_and_linkage();
   unsupported_bit_fields();
   gnu_pointer_qualifiers();

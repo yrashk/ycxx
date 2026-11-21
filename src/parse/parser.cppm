@@ -800,8 +800,13 @@ public:
                         bool reject_parameter_defaults = false) {
     Declarator d;
     d.begin = pos();
+    const std::size_t first_local = s_->locals().size();
+    const bool in_body = s_->current_function != ast::EntityId::none;
     Level top = level(abstract, d.ok, conversion);
-    if (conversion && !top.conversion_target) return d;
+    if (conversion && !top.conversion_target) {
+      if (in_body) s_->discard_local_declarations(first_local);
+      return d;
+    }
     const Suffix* fn = nullptr;
     d.type = build(top, top.conversion_target.value_or(base), fn, d, abstract || typedef_, named_exception);
     const bool spelled_unknown_bound = std::exchange(d.unknown_bound, false);
@@ -847,6 +852,12 @@ public:
         d.asm_label = asm_label(d.ok);
         skip_attributes();
       }
+    }
+    // Prototype names support type and constant-expression checking inside this
+    // declarator. They have no storage in the enclosing function's body.
+    if (in_body) {
+      s_->discard_local_declarations(first_local);
+      d.noexcept_condition.reset();
     }
     return d;
   }
