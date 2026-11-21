@@ -810,6 +810,7 @@ public:
     case is_member_pointer: unary_op = ast::DepOp::is_member_pointer; break;
     case is_member_object_pointer: unary_op = ast::DepOp::is_member_object_pointer; break;
     case is_member_function_pointer: unary_op = ast::DepOp::is_member_function_pointer; break;
+    case is_object: unary_op = ast::DepOp::is_object; break;
     default: break;
     }
     if (unary_op) {
@@ -852,7 +853,6 @@ public:
     case is_rvalue_reference: v = types().is_reference(c) && types().rec(c).rvalue_ref; break;
     case is_bounded_array: v = types().is_array(c) && types().rec(c).bound_value != ConstId::none; break;
     case is_unbounded_array: v = types().is_array(c) && types().rec(c).bound_value == ConstId::none; break;
-    case is_object: v = types().is_object(c); break;
     case is_empty:
       // [meta.unary.prop]: a complete class, not a union, with no non-static data members.
       if (is_union_type(c) == true) v = false;
