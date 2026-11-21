@@ -271,8 +271,20 @@ public:
     case Tk::semi: case Tk::comma:
       return true;
     case Tk::equal: case Tk::l_brace: case Tk::kw_noexcept: case Tk::kw_const: case Tk::kw_volatile:
-    case Tk::amp: case Tk::ampamp:
       return params_ahead(open);
+    case Tk::amp: case Tk::ampamp: {
+      // A ref-qualifier must be followed by more declarator syntax or a
+      // declaration boundary. An operand after it belongs to the expression.
+      const u32 next = past_attributes(after + 1);
+      switch (kind(next)) {
+      case Tk::semi: case Tk::comma: case Tk::equal: case Tk::l_brace: case Tk::kw_noexcept:
+        return params_ahead(open);
+      case Tk::arrow:
+        return params_ahead(open) && trailing_return_type_ahead(next + 1);
+      default:
+        return false;
+      }
+    }
     case Tk::arrow:
       return params_ahead(open) && trailing_return_type_ahead(after + 1);
     default:
