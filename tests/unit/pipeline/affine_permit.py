@@ -7,7 +7,7 @@ import tempfile
 import textwrap
 
 
-compiler, headers, *target = sys.argv[1:]
+compiler, headers, include, *target = sys.argv[1:]
 with tempfile.TemporaryDirectory() as directory:
     root = pathlib.Path(directory)
 
@@ -17,7 +17,7 @@ with tempfile.TemporaryDirectory() as directory:
         return path
 
     def run(path, *flags, error=None):
-        args = [compiler, "cxx", "--no-daemon", *target, "-I", headers, *flags, str(path)]
+        args = [compiler, "cxx", "--no-daemon", *target, "-I", headers, "-I", include, *flags, str(path)]
         result = subprocess.run(args, text=True, capture_output=True, timeout=30)
         if error is None:
             assert result.returncode == 0, (args, result.stderr)

@@ -12,12 +12,16 @@ endif()
 ycxxc_unit_test(pipeline_incremental incremental_test.cpp ycxxc_pipeline)
 
 ycxxc_unit_test(pipeline_elf_executable elf_executable_test.cpp ycxxc_pipeline)
+set(ownership_include ${PROJECT_SOURCE_DIR}/packages/ycxx-policies/include)
 add_test(NAME unit.affine_permit
   COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/affine_permit.py
-          $<TARGET_FILE:ycxxc> ${PROJECT_SOURCE_DIR}/examples/affine --target=arm64-apple-darwin)
+          $<TARGET_FILE:ycxxc> ${PROJECT_SOURCE_DIR}/examples/affine ${ownership_include} --target=arm64-apple-darwin)
 add_test(NAME unit.ownership_policy
   COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/ownership_policy.py
-          $<TARGET_FILE:ycxxc> ${CMAKE_CXX_COMPILER} ${PROJECT_SOURCE_DIR}/include ${PROJECT_SOURCE_DIR}/examples/affine)
+          $<TARGET_FILE:ycxxc> ${CMAKE_CXX_COMPILER} ${ownership_include} ${PROJECT_SOURCE_DIR}/examples/affine)
+add_test(NAME unit.ownership_package
+  COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/ownership_package.py
+          ${CMAKE_COMMAND} ${CMAKE_CXX_COMPILER} ${PROJECT_SOURCE_DIR}/packages/ycxx-policies)
 add_test(NAME unit.dependent_fabsl
   COMMAND ${CMAKE_COMMAND} -DYCXX=$<TARGET_FILE:ycxxc>
           -P ${CMAKE_CURRENT_SOURCE_DIR}/dependent_fabsl.cmake)
@@ -71,7 +75,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_
    AND NOT CMAKE_CROSSCOMPILING)
   add_test(NAME unit.affine_permit_linux
     COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/affine_permit.py
-            $<TARGET_FILE:ycxxc> ${PROJECT_SOURCE_DIR}/examples/affine --target=x86_64-linux-gnu)
+            $<TARGET_FILE:ycxxc> ${PROJECT_SOURCE_DIR}/examples/affine ${ownership_include} --target=x86_64-linux-gnu)
   add_test(NAME unit.linux_compile
     COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/linux_compile.py
             $<TARGET_FILE:ycxxc> ${CMAKE_C_COMPILER} ${CMAKE_READELF} ${CMAKE_AR}

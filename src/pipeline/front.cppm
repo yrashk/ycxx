@@ -88,6 +88,7 @@ struct SemaResult {
   std::vector<std::pair<EntityId, ast::Loc>> declared;
   std::vector<BodyAt> bodies;
   std::vector<OwnershipPolicySite> ownership_policies;
+  std::vector<OwnershipAnnotationSite> ownership_annotations;
   bool has_errors() const {
     return lex_errors || std::ranges::any_of(messages, [](const SemaMessage& m) { return m.error; });
   }
@@ -101,6 +102,7 @@ struct FrontResult {
   std::vector<std::pair<EntityId, ast::Loc>> declared;
   std::vector<BodyAt> bodies;
   std::vector<OwnershipPolicySite> ownership_policies;
+  std::vector<OwnershipAnnotationSite> ownership_annotations;
   bool has_errors() const {
     return std::ranges::any_of(messages, [](const Message& m) { return m.error; });
   }
@@ -1820,6 +1822,7 @@ engine::query_task<FrontResult> TuFront::run(engine::Ctx& cx, TuId tu) {
   out.declared = sema.declared;
   out.bodies = sema.bodies;
   out.ownership_policies = sema.ownership_policies;
+  out.ownership_annotations = sema.ownership_annotations;
   co_return out;
 }
 

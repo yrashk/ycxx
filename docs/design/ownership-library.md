@@ -1,8 +1,8 @@
-# Portable C++ ownership, capabilities, and effects
+# YCXX Policies design
 
-Proposed design. Applications use one ordinary C++20 library and declare one set of contracts for
-resource APIs. Any conforming C++ compiler enforces the constraints expressed by the public types
-and templates. Library adapters check the remaining obligations on executed paths. With checking
+YCXX Policies is a standalone C++20 package for ownership, capabilities, and effects. Applications
+declare one set of contracts for resource APIs. Any conforming C++20 compiler enforces the constraints
+expressed by the public types and templates. Library adapters check the remaining obligations on executed paths. With checking
 enabled, YCXX verifies those contracts against the control flow and calls of the program before
 emitting code. Checked and unchecked translation units use the same declarations, layouts, and
 runtime behavior. The first implementation keeps the runtime checks enabled in both builds.
@@ -41,7 +41,8 @@ interfaces. Keep operations on existing domain types, such as `commit`, `rollbac
 Register contracts by canonical type and selected declaration. Libraries publish reusable
 `policy<...>` types. An application activates one or more fragments with a namespace-scope
 alias of `use_policy<...>` in a translation unit. A typed function pointer identifies the
-selected overload. The public header is `include/ycxx/ownership.hpp`.
+selected overload. The public header is `<ycxx/ownership.hpp>` in the standalone
+[YCXX Policies package](../../packages/ycxx-policies/README.md).
 
 ```cpp
 using transaction_policy = own::policy<
@@ -67,8 +68,22 @@ rejects unknown operations in checked contexts. Check adapter definitions agains
 where the checker can see their bodies and recognize the ownership primitives they use. A contract
 for an opaque implementation is a trust decision. The metadata for an existing dependency can
 live in an adapter header. Portable dynamic enforcement requires routing the operation through a
-wrapper that tracks the resource. Reflection annotations can provide another spelling for the same
-metadata. Class and operation declaration annotations are tracked by
+wrapper that tracks the resource. C++26 declaration annotations can provide the same metadata.
+
+```cpp
+namespace own = ycxx::ownership;
+
+struct [[=own::resource_mode::linear]] Receipt { int value; };
+[[=own::operation::creates]] Receipt open() noexcept;
+[[=own::operation::consumes]] void close(Receipt&&) noexcept;
+
+struct TransactionSelection { using Active = own::use_policy<transaction_policy>; };
+struct [[=TransactionSelection::Active{}]] CheckTransactions {};
+```
+
+Resource annotations go on classes and operation annotations go on functions. An annotation
+holding `use_policy<...>` activates fragments. Both spellings enter the same registry, including
+duplicate and conflict checks. Class and operation declaration annotations are covered by
 [#662](https://github.com/yrashk/ycxx/issues/662). The complete reflection surface is tracked by
 [#324](https://github.com/yrashk/ycxx/issues/324).
 
@@ -155,7 +170,6 @@ to the early return. Add fixtures for transfer followed by source reuse, an uncl
 exception exit, a direct copy rejected by ordinary C++, and a capability check through an indirect
 callee. Keep runtime observations and static verdicts in the same conformance suite.
 
-A scratch probe confirmed that the typed registration alias and runtime-adapter source pass YCXX
-syntax analysis. GCC and Clang ran the valid path and trapped the early return. The current YCXX
-prototype still recognizes its two example protocols. The probe's native Linux build hit the
-nontrivial class result ABI gap tracked under [#440](https://github.com/yrashk/ycxx/issues/440).
+The policy fixtures cover composed fragments, alias and annotation parity, conflicts, and a registry
+with 1,280 resource types. The portable runtime fixture in `examples/affine/runtime_transaction.hpp`
+checks the native adapter with GCC or Clang and YCXX. [Compiler support #661](https://github.com/yrashk/ycxx/issues/661)

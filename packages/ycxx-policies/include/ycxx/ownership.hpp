@@ -2,6 +2,10 @@
 
 namespace ycxx::ownership {
 
+// Constant values for C++26 declaration annotations.
+enum class resource_mode { affine = 1, linear = 2 };
+enum class operation { creates = 1, observes, consumes, transfers };
+
 // Policy fragments are ordinary types. A namespace-scope alias of use_policy<...> activates them.
 template<class Resource> struct affine {};
 template<class Resource> struct linear {};

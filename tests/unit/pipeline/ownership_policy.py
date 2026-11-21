@@ -3,6 +3,7 @@
 import json
 import os
 import pathlib
+import platform
 import resource
 import signal
 import subprocess
@@ -109,6 +110,41 @@ with tempfile.TemporaryDirectory() as directory:
     """)
     syntax(large, "affine resource 'last' may already have been consumed")
 
+    annotated_source = """\
+        #include <ycxx/ownership.hpp>
+        namespace own = ycxx::ownership;
+        struct [[=own::resource_mode::linear]] Receipt { int value; };
+        [[=own::operation::creates]] Receipt open() noexcept;
+        [[=own::operation::consumes]] void close(Receipt&&) noexcept;
+        void run() {
+          auto receipt = open();
+          CLOSE_CALL
+        }
+    """
+    close = "close(static_cast<Receipt&&>(receipt));"
+    syntax(write("annotated_good.cpp", annotated_source.replace("CLOSE_CALL", close)))
+    syntax(write("annotated_missing.cpp", annotated_source.replace("CLOSE_CALL", "")),
+           "linear resource 'receipt' may leave its scope")
+    syntax(write("agree.cpp", annotated_source.replace("CLOSE_CALL", close) + """\
+        using ReceiptRules = own::policy<own::linear<Receipt>, own::consumes<decltype(&close), &close>>;
+        struct ReceiptSelection { using Active = own::use_policy<ReceiptRules>; };
+        struct [[=ReceiptSelection::Active{}]] Activate {};
+    """))
+    disagreement = syntax(write("disagree.cpp", annotated_source.replace("CLOSE_CALL", close) + """\
+        using OtherMode = own::use_policy<own::affine<Receipt>>;
+    """), "conflicting ownership policies for 'Receipt'")
+    assert "disagree.cpp:10:" in disagreement and "previous declaration at" in disagreement, disagreement
+    syntax(write("attribute_activation.cpp", """\
+        #include <ycxx/ownership.hpp>
+        namespace own = ycxx::ownership;
+        struct Receipt { int value; };
+        Receipt open() noexcept;
+        using Rules = own::policy<own::linear<Receipt>, own::creates<decltype(&open), &open>>;
+        struct ReceiptSelection { using Active = own::use_policy<Rules>; };
+        struct [[=ReceiptSelection::Active{}]] Activate {};
+        void run() { auto receipt = open(); }
+    """), "linear resource 'receipt' may leave its scope")
+
     # A policy-only edit must invalidate body proofs when its meaning changes and preserve
     # them when it only changes the spelling of the active policy composition.
     policy_source = """\
@@ -122,7 +158,8 @@ with tempfile.TemporaryDirectory() as directory:
     """
     incremental = write("incremental.cpp", policy_source)
     with tempfile.TemporaryDirectory(prefix="ycp-", dir="/tmp") as sockets:
-        env = os.environ | {"YCXX_RUNTIME_DIR": sockets, "YCXX_ROOT": str(root), "YCXX_THREADS": "2"}
+        env = {k: v for k, v in os.environ.items() if k not in ("YCXX_DAEMON", "YCXX_NO_DAEMON")}
+        env.update(YCXX_RUNTIME_DIR=sockets, YCXX_ROOT=str(root), YCXX_THREADS="2")
 
         def resident(*options):
             return subprocess.run([compiler, "cxx", "--daemon=require", "-fcheck-affine", "-fsyntax-only",
@@ -166,8 +203,26 @@ with tempfile.TemporaryDirectory() as directory:
     """)
     syntax(runtime, "linear resource 'first' may leave its scope")
     executable = root / "portable"
-    subprocess.run([host, "-std=c++20", "-I", examples, str(runtime), "-o", str(executable)], check=True, timeout=30)
+    subprocess.run([host, "-std=c++20", "-I", include, "-I", examples, str(runtime), "-o", str(executable)], check=True, timeout=30)
     resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
     assert subprocess.run([executable], timeout=10).returncode == 0
     for args in (("early",), ("use", "moved"), ("consume", "again", "now")):
         assert subprocess.run([executable, *args], timeout=10).returncode == -signal.SIGABRT
+
+    if sys.platform == "linux" and platform.machine() in ("x86_64", "amd64"):
+        native = root / "native"
+        args = [compiler, "cxx", "--no-daemon", "--target=x86_64-linux-gnu", "-nostdlib", "-I", include, "-I", examples]
+        # Own and discharge the same object through native YCXX, keeping the guard in the ABI.
+        native_good = write("native_good.cpp", """\
+            #include "runtime_transaction.hpp"
+            int main() {
+              auto first = example::start();
+              auto second = example::handoff(static_cast<example::Work&&>(first));
+              example::finish(static_cast<example::Work&&>(second));
+            }
+        """)
+        subprocess.run([*args, "-fcheck-affine", str(native_good), "-o", str(native)], check=True, timeout=30)
+        assert subprocess.run([native], timeout=10).returncode == 0
+        subprocess.run([*args, str(runtime), "-o", str(native)], check=True, timeout=30)
+        assert subprocess.run([native], timeout=10).returncode == 0
+        assert subprocess.run([native, "early"], timeout=10).returncode == -signal.SIGILL

@@ -587,9 +587,10 @@ struct OwnershipRegistryFor {
   using Value = OwnershipRegistry;
   static engine::query_task<Value> run(engine::Ctx& cx, Key tu) {
     const auto& front = co_await cx.fetch<TuFront>(tu);
-    if (front.ownership_policies.empty()) co_return Value{};
+    if (front.ownership_policies.empty() && front.ownership_annotations.empty()) co_return Value{};
     const auto& source = cx.fetch<pp::SourceOf>(pp::FileId{tu.n});
-    co_return read_ownership_policies(*universe().world_for(*source.config.target), front.ownership_policies);
+    co_return read_ownership_policies(*universe().world_for(*source.config.target), front.ownership_policies,
+                                     front.ownership_annotations);
   }
 };
 

@@ -688,8 +688,8 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
   `-std=c++26`. Errors are `path:line:col: error: message` on stderr. It exits 0 on success and 1
   on any error in the input or the command line.
 - `-fcheck-affine` demands the experimental ownership policies before a syntax-only or native
-  build succeeds. It normalizes active C++ policy fragments by canonical types and resolved
-  operations. A per-body control-flow query and worklist check named affine and linear resources,
+  build succeeds. It composes active C++ policy fragments and declaration annotations by canonical
+  types and resolved operations. A per-body control-flow query and worklist check named affine and linear resources,
   including concrete template instances. Transfers invalidate the old owner.
   Execution leaving the scope of a live transaction or reaching a possible unwind is diagnosed.
   See [the protocols and examples](docs/design/affine-permit.md).

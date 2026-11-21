@@ -1,7 +1,7 @@
 #pragma once
 
-#include "../../include/ycxx/ownership.hpp"
-#include "../../include/ycxx/ownership/runtime.hpp"
+#include <ycxx/ownership.hpp>
+#include <ycxx/ownership/runtime.hpp>
 
 namespace example {
 

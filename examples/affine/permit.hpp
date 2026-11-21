@@ -1,6 +1,6 @@
 #pragma once
 
-#include "../../include/ycxx/ownership.hpp"
+#include <ycxx/ownership.hpp>
 
 namespace ycxx_affine {
 
