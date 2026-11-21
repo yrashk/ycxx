@@ -173,8 +173,8 @@ export enum class Op : std::uint16_t {
   // set. The second is how many of the last arguments the callee's ellipsis matches (L1's). The
   // third is 1 + the index of the argument that is the address of an indirect result, which the
   // calling convention passes apart (AArch64: x8), 0 if none.
-  call [[=state({S, Vs}, {S, Vs}).imms({entity, u32, u32, u32})]],
-  // `variadic` keeps the indirect callee type's calling convention when the tail is empty.
+  // `variadic` preserves the callee's calling convention when the tail is empty.
+  call [[=state({S, Vs}, {S, Vs}).imms({entity, u32, u32, u32}).accepts({variadic})]],
   call_ind [[=state({S, V, Vs}, {S, Vs}).imms({u32, u32, u32}).accepts({variadic})]],
 
   // Terminators.

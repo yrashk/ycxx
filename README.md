@@ -91,8 +91,11 @@ Use the host linker to link these objects with libc.
 [#399](https://github.com/yrashk/ycxx/issues/399), [#196](https://github.com/yrashk/ycxx/issues/196)
 
 Fixed-prototype definitions and direct calls on x86-64 Linux also move `float` and `double`
-arguments and results. Direct call result types can be deduced from `auto` or `decltype(auto)`.
+arguments and results. Direct variadic calls support the same scalar floating values and
+promote an unnamed `float` to `double`. Direct call result types can be deduced from `auto` or
+`decltype(auto)`.
 [Linux scalar floating-point ABI](docs/design/linux-scalar-floating-point.md) ·
+[Linux direct variadic floating-point ABI](docs/design/linux-floating-variadic-calls.md) ·
 [#441](https://github.com/yrashk/ycxx/issues/441)
 
 ELF and Mach-O objects support static pointer initializers naming variables, array elements,

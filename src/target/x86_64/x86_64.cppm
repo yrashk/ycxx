@@ -26,7 +26,7 @@ export struct MachineCode {
   bool operator==(const MachineCode&) const = default;
 };
 
-// Compile well-formed L2 with INTEGER ABI values and fixed direct scalar SSE values.
+// Compile well-formed L2 with INTEGER ABI values and direct scalar SSE values.
 // The producer checks original signatures and ellipsis types and flattens INTEGER records.
 // L2 can erase the distinction between scalar and class arguments or results. Pass
 // the entities whose addresses may be resolved directly by a signed RIP-relative displacement
@@ -92,10 +92,10 @@ struct Frame {
   std::int32_t variadic_save = 0;  // RBP-relative, present only for an executing va_start
 };
 
-// These operations only move floating encodings. Other uses need numeric instruction selection.
-bool moves_float(Op op) {
+// Floating value motion and binary32-to-binary64 widening use these instructions.
+bool supports_float(Op op) {
   switch (op) {
-    case Op::const_: case Op::load: case Op::store: case Op::select:
+    case Op::const_: case Op::load: case Op::store: case Op::select: case Op::fpext:
     case Op::call: case Op::call_ind: case Op::ret: return true;
     default: return false;
   }
@@ -139,7 +139,7 @@ std::expected<Frame, std::string> layout(const l2::Function& body) {
       auto operands = body.operands_of(n);
       const bool uses_float_result = std::ranges::any_of(std::views::iota(0u, nd.nres),
           [&](std::uint32_t i) { return is_float(body.result(n, i)); });
-      if (!moves_float(nd.op) && (uses_float_result || std::ranges::any_of(operands, is_float)))
+      if (!supports_float(nd.op) && (uses_float_result || std::ranges::any_of(operands, is_float)))
         return at_node(n, nd.op, "floating-point arithmetic, comparisons and conversions are unsupported");
       if (nd.op == Op::alloca) {
         auto size = imms[0], align = imms[1];
@@ -158,16 +158,25 @@ std::expected<Frame, std::string> layout(const l2::Function& body) {
         frame.variadic_save = -std::int32_t(frame.size);
       }
       if (nd.op == Op::call || nd.op == Op::call_ind) {
-        bool indirect = nd.op == Op::call_ind;
+        const bool indirect = nd.op == Op::call_ind;
+        const bool variadic = nd.flags & ir::bit(ir::Flag::variadic);
         if (indirect && body.type(operands[1]) != Type::ptr)
           return at_node(n, nd.op, "an indirect callee must be a pointer");
-        if (indirect && imms[1] && !(nd.flags & ir::bit(ir::Flag::variadic)))
-          return at_node(n, nd.op, "ellipsis arguments on a nonvariadic indirect call");
-        if (imms[indirect ? 2 : 3] || nd.nres > (indirect || uses_float_result ? 2u : 3u))
-          return at_node(n, nd.op, "unsupported ABI result placement");
         auto args = operands.subspan(indirect ? 2 : 1);
-        if ((indirect || imms[2]) && (uses_float_result || std::ranges::any_of(args, is_float)))
-          return at_node(n, nd.op, "floating-point indirect and variadic calls are unsupported");
+        const auto ellipsis = imms[indirect ? 1 : 2];
+        if (ellipsis && !variadic)
+          return at_node(n, nd.op, indirect ? "ellipsis arguments on a nonvariadic indirect call"
+                                         : "ellipsis arguments on a nonvariadic direct call");
+        if (ellipsis > args.size()) return at_node(n, nd.op, "more ellipsis arguments than arguments");
+        if (imms[indirect ? 2 : 3] || nd.nres > (indirect || variadic || uses_float_result ? 2u : 3u))
+          return at_node(n, nd.op, "unsupported ABI result placement");
+        if (indirect && (uses_float_result || std::ranges::any_of(args, is_float)))
+          return at_node(n, nd.op, "floating-point indirect calls are unsupported");
+        for (ValueId arg : args.last(ellipsis)) {
+          Type type = body.type(arg);
+          if (type != Type::i32 && type != Type::i64 && type != Type::ptr && type != Type::f64)
+            return at_node(n, nd.op, "unsupported promoted ellipsis argument type");
+        }
         Amd64ArgumentPlan plan;
         for (ValueId arg : args) plan.place(body.type(arg));
         scratch_words = std::max(scratch_words, std::uint64_t(plan.stack_slots()));
@@ -336,7 +345,8 @@ class Emitter {
 
   void call(NodeId n) {
     const auto& node = body_.node(n);
-    bool indirect = node.op == Op::call_ind;
+    const bool indirect = node.op == Op::call_ind;
+    const bool variadic = node.flags & ir::bit(ir::Flag::variadic);
     auto ops = body_.operands_of(n);
     auto imms = body_.imms_of(n);
     auto args = ops.subspan(indirect ? 2 : 1);
@@ -358,7 +368,6 @@ class Emitter {
       }
     }
     if (indirect) {
-      const bool variadic = node.flags & ir::bit(ir::Flag::variadic);
       // R11 is caller-saved and holds no argument. Variadic calls reserve AL for the vector
       // register count (AMD64 psABI §3.2.3), so their callee address needs a separate register.
       Reg target = variadic ? r11 : rax;
@@ -366,9 +375,10 @@ class Emitter {
       if (variadic) e_.reg({0x31}, rax, rax, false);  // xor eax, eax
       e_.reg({0xff}, 2, target, false);  // call r/m64
     } else {
-      // AL gives the vector register count for variadic calls (AMD64 psABI §3.2.3).
-      // L2's ellipsis count can be zero for a variadic call, so set AL for every direct call.
-      e_.reg({0x31}, rax, rax, false);  // xor eax, eax
+      // AL counts named and unnamed vector register arguments (AMD64 psABI §3.2.3).
+      const auto vector_count = variadic ? plan.used_sse_registers() : 0u;
+      if (vector_count) e_.emit({0xb0, std::uint8_t(vector_count)});  // mov al, imm8
+      else e_.reg({0x31}, rax, rax, false);  // xor eax, eax
       e_.emit({0xe8});  // call rel32
       relocation(RelocKind::plt32, ir::EntityId(std::uint32_t(imms[0])));
     }
@@ -486,6 +496,10 @@ std::expected<void, std::string> Emitter::node(NodeId n) {
       read(ops[1], rcx);
       e_.reg({0x0f, 0x45}, rax, rcx);  // cmovne
       break;
+    case Op::fpext:
+      e_.widen_float(0, rbp, frame_.slots[raw(ops[0])]);
+      e_.store_scalar_xmm(rbp, frame_.slots[raw(body_.result(n))], 0, 8);
+      return {};
     case Op::sext:
       read(ops[0]);
       sign_extend(rax, body_.type(ops[0]));

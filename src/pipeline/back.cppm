@@ -1012,7 +1012,8 @@ std::string_view linux_signature_error(const ast::Interners& in, const QueryLayo
     auto builtin = ast::builtin_of(in, value);
     if (builtin == ast::Builtin::long_double) return "x87 long double parameters and results are unsupported";
     if (builtin == ast::Builtin::float_ || builtin == ast::Builtin::double_) {
-      if (f.variadic) return "floating-point parameters and results of variadic functions are unsupported";
+      if (f.variadic && use != direct_call)
+        return "floating-point parameters and results of variadic functions are unsupported";
       if (use == indirect_call) return "floating-point parameters and results of indirect calls are unsupported";
       return {};
     }
@@ -1026,6 +1027,8 @@ std::string_view linux_signature_error(const ast::Interners& in, const QueryLayo
       return result ? "unsupported aggregate result layout" : "unsupported aggregate parameter layout";
     if (fixed_direct)
       return result ? "unsupported fixed-prototype result type" : "unsupported fixed-prototype parameter type";
+    if (use == direct_call)
+      return result ? "unsupported direct variadic result type" : "unsupported direct variadic parameter type";
     return result ? "only void, bool, 8-, 16-, 32- and 64-bit integer, pointer and reference results are supported"
                   : "only bool, 8-, 16-, 32- and 64-bit integer, pointer and reference parameters are supported";
   };
@@ -1035,7 +1038,8 @@ std::string_view linux_signature_error(const ast::Interners& in, const QueryLayo
   return {};
 }
 
-std::string_view linux_ellipsis_error(const QueryLayout& layout, const ir::Function& body, ir::NodeId call) {
+std::string_view linux_ellipsis_error(const ast::Interners& in, const QueryLayout& layout,
+                                      const ir::Function& body, ir::NodeId call) {
   const bool indirect = body.node(call).op == ir::Op::call_ind;
   auto imms = body.imms_of(call);
   auto ellipsis = imms[indirect ? 0 : 1], byval = imms[indirect ? 1 : 2];
@@ -1043,10 +1047,15 @@ std::string_view linux_ellipsis_error(const QueryLayout& layout, const ir::Funct
   // The by-value bits distinguish class objects from genuine pointer arguments.
   auto args = body.operands_of(call).subspan(indirect ? 2 : 1);
   for (std::size_t i = args.size() - ellipsis; i < args.size(); ++i) {
-    auto l = layout.type(body.value(args[i]).type.type);
-    if (l.kind == ir::TypeKind::floating) return "floating-point ellipsis arguments are unsupported";
-    if (((byval >> i) & 1) || !linux_ellipsis_scalar(l))
-      return "only 32- and 64-bit integer and pointer ellipsis arguments are supported";
+    QualType type = body.value(args[i]).type.type;
+    auto builtin = ast::builtin_of(in, type);
+    if (builtin == ast::Builtin::long_double) return "x87 long double ellipsis arguments are unsupported";
+    auto l = layout.type(type);
+    if (indirect && l.kind == ir::TypeKind::floating) return "floating-point ellipsis arguments are unsupported";
+    if (!((byval >> i) & 1) && (linux_ellipsis_scalar(l) || (!indirect && builtin == ast::Builtin::double_)))
+      continue;
+    return indirect ? "only 32- and 64-bit integer and pointer ellipsis arguments are supported"
+                    : "only double, 32- and 64-bit integer, and pointer ellipsis arguments are supported";
   }
   return {};
 }
@@ -1105,7 +1114,7 @@ engine::query_task<Lowered> Lower::run(engine::Ctx& cx, FnKey k) {
         if (definition != tu.functions.end() && definition->body.deduced)
           error = linux_signature_error(in, layout, definition->body.deduced_type, use, ordinary_callee);
       }
-      if (error.empty()) error = linux_ellipsis_error(layout, body, n);
+      if (error.empty()) error = linux_ellipsis_error(in, layout, body, n);
       if (error.empty()) continue;
       const ir::FunctionDebug& debug = co_await cx.fetch<FunctionDebug>(k);
       auto at = i < debug.loc.size() ? debug.loc[i] : ast::Loc{def.item, def.body_offset};

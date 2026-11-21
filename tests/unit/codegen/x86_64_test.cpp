@@ -243,7 +243,7 @@ void direct_ellipsis() {
     const l2::Type results[] = {state, i32};
     const ir::ValueId call[] = {b.param(entry, 0), b.param(entry, 1)};
     const std::uint64_t imms[] = {7, 0, ellipsis, 0};
-    auto n = b.emit(Op::call, results, call, imms);
+    auto n = b.emit(Op::call, results, call, imms, ir::bit(ir::Flag::variadic));
     const ir::ValueId ret[] = {b.peek().result(n), b.peek().result(n, 1)};
     b.emit(Op::ret, {}, ret);
     auto machine = x64::compile_function(b.finish({i32}));
