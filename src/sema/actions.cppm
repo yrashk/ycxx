@@ -105,6 +105,7 @@ public:
   // current point ([expr.const]), and a namespace-scope variable as the interpreter sees it.
   virtual interp::Callee function_ir(EntityId f) = 0;
   virtual std::optional<interp::GlobalVar> global(EntityId v) = 0;
+  virtual bool is_immediate_function(EntityId) { return false; }
   virtual bool is_constexpr(EntityId f) = 0;  // a constexpr or consteval function
   // Whether class `c` is complete at the current point ([class.mem.general]): its definition
   // precedes the point and does not enclose it.
@@ -3485,7 +3486,7 @@ public:
   std::optional<EntityId> immediate_result_entity(ConstId value) {
     if (ins().values.is<ast::VEntity>(value)) {
       const auto entity = ins().values.get<ast::VEntity>(value).entity;
-      if (is_consteval(entity)) return entity;
+      if (is_consteval(entity) || q_->is_immediate_function(entity)) return entity;
     } else if (ins().values.is<ast::VLvalue>(value)) {
       return immediate_result_entity(ins().values.get<ast::VLvalue>(value).base);
     } else if (ins().values.is<ast::VAggregate>(value)) {

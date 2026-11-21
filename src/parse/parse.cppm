@@ -817,6 +817,12 @@ public:
     return d && (d->flags & (sema::decl_flag::constexpr_ | sema::decl_flag::consteval_));
   }
 
+  bool is_immediate_function(EntityId f, u32 item) {
+    if (EntityId t = w_->entities.rec(f).templ; t != EntityId::none && !explicitly_specialized(f, item)) f = t;
+    auto d = declaration(f, item);
+    return d && (d->flags & sema::decl_flag::consteval_);
+  }
+
   // A default member initializer's tokens in the region ([class.mem.general]), retained for the
   // constructor or aggregate initialization that uses it.
   struct Dmi {
@@ -1461,6 +1467,7 @@ public:
   void generic_defined(const sema::GenericClosure& g) override { p_->generic_defs_[std::to_underlying(g.call)] = g; }
   std::optional<interp::GlobalVar> global(EntityId v) override { return p_->global(v, value_point(v)); }
   bool is_constexpr(EntityId f) override { return p_->is_constexpr(f, point()); }
+  bool is_immediate_function(EntityId f) override { return p_->is_immediate_function(f, point()); }
   bool is_complete(EntityId c) override {
     return at_point ? p_->is_complete(c, *at_point, true, true) : is_complete_at_item(c);
   }
@@ -1776,6 +1783,7 @@ public:
   void generic_defined(const sema::GenericClosure& g) override { p_->generic_defs_[std::to_underlying(g.call)] = g; }
   std::optional<interp::GlobalVar> global(EntityId v) override { return p_->global(v, p_->end()); }
   bool is_constexpr(EntityId f) override { return p_->is_constexpr(f, p_->end()); }
+  bool is_immediate_function(EntityId f) override { return p_->is_immediate_function(f, p_->end()); }
   bool is_complete(EntityId c) override { return p_->is_complete(c, p_->end(), true, true); }
   bool is_complete_at_source(EntityId c) override { return at_.is_complete_at_source(c); }
   engine::Loc source_loc(engine::Loc loc, u32 offset) override { return at_.source_loc(loc, offset); }
@@ -5914,6 +5922,9 @@ private:
     } else if (!fn && sema::Types::is_const(d.type) && !spec.is_extern) {
       s_.diag(d.name_at, Diag::const_uninitialized, d.name);
     }
+    if (spec.is_constexpr && value != ConstId::none)
+      if (auto entity = s_.immediate_result_entity(value))
+        s_.diag(init.begin, Diag::immediate_address, s_.world().entities.rec(*entity).name);
     s_.permit_constant_initializer(d.begin, d.type, value);
     declarators_.push_back(s_.node(ast::Declarator{ord, sema::Sema::at(init, d.begin), value}, d.begin, ps_.pos()));
     decls_.push_back(sem);
