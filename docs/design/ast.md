@@ -522,13 +522,14 @@ the clause makes ill-formed, no diagnostic required.
 **Dependent type predicates (#209, Astra).** A `VDepOp` represents `__is_same(T, U)`,
 `__is_reference(T)`, `__is_const(T)`, `__is_volatile(T)`, `__is_array(T)`, `__is_pointer(T)`,
 `__is_function(T)`, `__is_enum(T)`, `__is_union(T)`, `__is_class(T)`, `__is_member_pointer(T)`,
-`__is_member_object_pointer(T)`, or `__is_member_function_pointer(T)` in a `bool` template argument
-or default. Its ordered type arguments retain canonical qualification, reference kind and
-parameter positions. Substitution first forms each operand type and propagates failure if a type
-is invalid ([temp.deduct.general]). It rebuilds the operation while any operand remains
-dependent and interns the same `VInt` as an ordinary `bool` constant once all types are concrete
+`__is_member_object_pointer(T)`, `__is_member_function_pointer(T)`, or `__is_object(T)` in a `bool`
+template argument or default. Its ordered type arguments retain canonical qualification,
+reference kind and parameter positions. Substitution first forms each operand type and propagates
+failure if a type is invalid ([temp.deduct.general]). It rebuilds the operation while an operand
+remains dependent and interns the same `VInt` as an ordinary `bool` constant once all types are concrete
 ([temp.alias], [temp.type]).
-The array, pointer and function predicates classify the substituted type ([meta.unary.cat]).
+The array, pointer, function and object predicates classify the substituted type
+([basic.types.general], [meta.unary.cat], [meta.unary.comp]).
 The member-pointer predicates can classify pointers with incomplete owners. The object and
 function predicates inspect the substituted member type ([dcl.mptr], [meta.unary.cat],
 [meta.unary.comp]).

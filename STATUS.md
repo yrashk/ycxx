@@ -1199,8 +1199,8 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
 - [basic.lookup.argdep] finds functions in the namespaces associated with class and enumeration
   arguments, including classes' bases at the lookup point and the inline namespace set. Pointer,
   reference, array, function and pointer-to-member types contribute through their component types.
-  Ordinary calls expand class specializations' canonical template type arguments, including
-  defaults and type packs. Reaching a class as a base or owner contributes its namespace.
+  Ordinary and dependent calls expand class specializations' canonical template type arguments,
+  including defaults and type packs. Reaching a class as a base or owner contributes its namespace.
   A separate occurrence of its type expands its arguments. Member-pointer values still need #411.
 - Ordinary calls also associate the declaring namespace of a namespace-scope type
   template supplied as a template-template argument ([basic.lookup.argdep]).
@@ -1631,8 +1631,8 @@ session's.*
   deduction treats as a non-deduced context, mangled as Clang does (`u11__remove_cvIT_E`).
 - Dependent `__is_same`, `__is_reference`, `__is_const`, `__is_volatile`, `__is_array`,
   `__is_pointer`, `__is_function`, `__is_enum`, `__is_union`, `__is_class`, `__is_member_pointer`,
-  `__is_member_object_pointer`, and `__is_member_function_pointer` in a `bool` template argument or
-  default are `VDepOp` values with canonical qualified type operands. Substitution retains
+  `__is_member_object_pointer`, `__is_member_function_pointer`, and `__is_object` in a `bool` template
+  argument or default are `VDepOp` values with canonical qualified type operands. Substitution retains
   unresolved operands across aliases and forms valid operand types before evaluating the
   predicate. The ordinary `VInt` result shares the specialization for literal `true` or `false`
   ([temp.alias], [temp.type], [temp.deduct.general], #209).
@@ -2288,8 +2288,11 @@ values, end to end; results match Clang's bit for bit.
   (loads, stores, CSEL, moves, constants built in x16 and moved by FMOV). The internal
   disassembler names S and D registers.
 - **Built-ins** (docs/EXTENSIONS.md): `__builtin_fabs*` (`ast::BuiltinCall`, FABS),
-  `__builtin_inf*`, `__builtin_huge_val*` and `__builtin_nan*` (constants); `__has_builtin`
-  answers 1.
+  `__builtin_inf*`, `__builtin_huge_val*` and `__builtin_nan*` (constants). `__has_builtin`
+  reports the `long double` forms on targets with a supported value format.
+- On Linux x86-64, a dependent `__builtin_fabsl` call in a template definition keeps its
+  `long double` result type. When instantiation selects the call and the operand is concrete,
+  a well-formed call receives the unsupported x87 value diagnostic ([stmt.if], [temp.inst], #201).
 - `#include <cmath>`: 4,415 errors before, 4,343 after; it still does not compile (#349).
 - Tests: `tests/own/floating` (84 spec-only, and 4 from the review: literals, conversions, constant evaluation, run
   tests printing with `printf`, mixed-object tests with Clang peers for scalars, many arguments,
@@ -2655,3 +2658,10 @@ checks reject entry into the protected block or a handler. A discarded
 `if constexpr` arm skips the full handler sequence. Retained try blocks
 diagnose unsupported emission. Function-try-blocks, handler matching and
 unwinding remain in [#89](https://github.com/yrashk/ycxx/issues/89).
+
+## Unevaluated calls to known-return function templates (#565)
+
+An unevaluated call to a non-constexpr free function template can use its
+declared return type after signature substitution and constraint checking.
+Evaluated calls and calls that need placeholder return deduction still demand
+the body. A non-generic lambda body uses its own evaluation context.

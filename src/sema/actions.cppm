@@ -852,6 +852,7 @@ public:
     case is_member_pointer: unary_op = ast::DepOp::is_member_pointer; break;
     case is_member_object_pointer: unary_op = ast::DepOp::is_member_object_pointer; break;
     case is_member_function_pointer: unary_op = ast::DepOp::is_member_function_pointer; break;
+    case is_object: unary_op = ast::DepOp::is_object; break;
     default: break;
     }
     if (unary_op) {
@@ -894,7 +895,6 @@ public:
     case is_rvalue_reference: v = types().is_reference(c) && types().rec(c).rvalue_ref; break;
     case is_bounded_array: v = types().is_array(c) && types().rec(c).bound_value != ConstId::none; break;
     case is_unbounded_array: v = types().is_array(c) && types().rec(c).bound_value == ConstId::none; break;
-    case is_object: v = types().is_object(c); break;
     case is_empty:
       // [meta.unary.prop]: a complete class, not a union, with no non-static data members.
       if (is_union_type(c) == true) v = false;
@@ -4717,15 +4717,24 @@ public:
       QualType param = types().pointer(types().add_cv(builtin(Builtin::char_), Cv::const_));
       return builtin_value_call(ast::BuiltinOp::strlen, builtin(w_->target.size_type), param, args.front(), begin, end);
     }
-    Builtin kind = b.type == 'f' ? Builtin::float_ : b.type == 'l' ? Builtin::long_double : Builtin::double_;
-    if (!ast::computes(w_->target[kind].format)) {
-      diag(begin, Diag::extended_float_not_supported);
-      return {NodeId::none, begin, end};
-    }
-    QualType t = builtin(kind);
     std::size_t want = b.function == fabs || b.function == nan ? 1 : 0;
     if (!builtin_arity(want, args.size(), begin)) return {NodeId::none, begin, end};
     if (std::ranges::any_of(args, [](const Ex& a) { return !a.ok(); })) return {NodeId::none, begin, end};
+    Builtin kind = b.type == 'f' ? Builtin::float_ : b.type == 'l' ? Builtin::long_double : Builtin::double_;
+    QualType t = builtin(kind);
+    if (!ast::computes(w_->target[kind].format)) {
+      if (b.function == fabs) {
+        const Ex& arg = args.front();
+        if (!types().is_dependent(arg.type()) && !ics(arg, t).viable) {
+          diag(arg.begin, Diag::no_conversion, arg.type(), t);
+          return {NodeId::none, begin, end};
+        }
+        // Instantiation reparses the selected statement with bound arguments ([stmt.if]).
+        if (dependent(arg)) return dependent_node({arg}, begin, end, t);
+      }
+      diag(begin, Diag::extended_float_not_supported);
+      return {NodeId::none, begin, end};
+    }
     switch (b.function) {
       case addressof:
       case trap:
@@ -7059,8 +7068,12 @@ public:
       const ast::DeclSema& d = *decls[*chosen];
       const Candidate& k = cands[*chosen];
       if (d.flags & decl_flag::consteval_) consteval_.insert(std::to_underlying(k.entity));
-      // A specialization called is one whose definition the program requires ([temp.inst]/8).
-      if (k.pattern) demands.push_back({k.entity, ast::Loc{item_, loc_base_ + callee.begin}});
+      // [temp.inst]: a known return type suffices for unevaluated calls to ordinary templates.
+      // Keep the existing body demand for constant-evaluation candidates and placeholder returns.
+      if (k.pattern &&
+          (!unevaluated || (d.flags & (decl_flag::member | decl_flag::constexpr_ | decl_flag::consteval_)) ||
+           types().has_placeholder(types().rec(k.type).inner)))
+        demands.push_back({k.entity, ast::Loc{item_, loc_base_ + callee.begin}});
       auto kt = deduced_function(k.entity, k.type, callee.begin);
       if (!kt) return {NodeId::none, begin, end};
       ExprInfo ci{*kt, ValueCategory::lvalue, 0};
@@ -7200,11 +7213,10 @@ public:
           add_class(r.entity);
           collect_bases(r.entity);
         }
-        if (!ordinary_call) break;
         auto visit_arg = [&](const TemplateArg& arg) {
           if (arg.kind == ast::TemplateArgKind::type) {
             visit(arg.type);
-          } else if (arg.kind == ast::TemplateArgKind::template_ && arg.templ != EntityId::none) {
+          } else if (ordinary_call && arg.kind == ast::TemplateArgKind::template_ && arg.templ != EntityId::none) {
             // [basic.lookup.argdep]/3: associate the type template itself, not a specialization.
             EntityId scope = w_->entities.rec(arg.templ).scope;
             if (scope == EntityId::none || w_->entities.rec(scope).kind == EntityKind::namespace_)
