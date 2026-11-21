@@ -1856,17 +1856,20 @@ public:
     };
     const ClassRec* c = class_rec(types().class_of(t));
     if (!c || !arithmetic_record(t, *c)) return false;
-    if (c->bases.empty()) return true;
+    // A sole class expression normally uses the class conversion path, including base adjustment.
+    if (c->bases.empty())
+      return args.size() != 1 || (args.front().ok() && !types().is_class(args.front().type()));
     if (!allow_base_copy || c->bases.size() != 1 || c->unapplied_layout || c->layout_requires_virtual_support ||
-        args.size() < 2 || args.size() != c->fields.size() + 1) return false;
+        c->fields.empty() || args.empty() || args.size() - 1 > c->fields.size()) return false;
 
-    // Copy the one direct base from its exact type. The parser admits only nonvirtual
-    // bases, and this slice requires all elements to be supplied.
+    // Copy the one direct nonvirtual base from its exact type. Omitted fields in this
+    // runtime slice are value-initialized, so their suffix must have no written defaults.
     const BaseRec& edge = c->bases.front();
     if (edge.access != ast::Access::public_ || edge.dependent_in_pattern) return false;
     const QualType base_type = types().class_type(edge.cls);
     const Ex& first = args.front();
     if (!first.ok() || types().is_dependent(base_type) || !same_unqualified(first.type(), base_type)) return false;
+    if (std::ranges::any_of(std::span(c->fields).subspan(args.size() - 1), &FieldRec::dmi)) return false;
     const QualType source = types().canonical(first.type());
     if (Types::is_volatile(source)) return false;
     const ClassRec* base = class_rec(edge.cls);
@@ -1877,6 +1880,11 @@ public:
         std::ranges::any_of(base->fields, [&](const FieldRec& f) {
           return Types::is_volatile(types().canonical(f.type));
         })) return false;
+    if (args.size() == 1) {
+      // A conversion function could make the derived copy or move constructor viable.
+      const NameId conversion = ins().names.intern(lex::conversion_function_name);
+      if (!member_functions(edge.cls, conversion).empty()) return false;
+    }
     if (first.cat() == ValueCategory::lvalue) return !Types::is_const(source) || base->defaulted_copy_const;
     return first.cat() == ValueCategory::prvalue && Types::cv(source) == Cv::none &&
            explicit_aggregate_prvalue(first) && base->move_usable && !base->move_nontrivial &&
