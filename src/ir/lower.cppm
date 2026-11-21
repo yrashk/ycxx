@@ -692,6 +692,9 @@ class Lowering {
         out(n, 0, copy_bytes(in(n, 0), in(n, 1), in(n, 2), l, imms[0]));
         return {};
       }
+      case Op::nullptr_value:
+        out(n, 0, constant(T::ptr, 0));
+        return {};
       case Op::load: {
         QualType t = QualType(std::uint32_t(imms[0]));
         auto vt = type_of(t);

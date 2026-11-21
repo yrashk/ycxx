@@ -306,6 +306,16 @@ struct Ops {
 
   static Flow union__activate(M& m, Frame&, N n) { return m.unsupported(n); }
 
+  static Flow nullptr_value(M& m, Frame& f, N n) {
+    QualType t = m.result_type(f, n);
+    M::Place pl;
+    if (!m.shape(t).is_nullptr) return m.fail(Reason::ill_formed);
+    if (Flow fl = m.locate(m.operand(f, n, 1), {}, t, M::Use::lifetime, false, pl); fl != Flow::next) return fl;
+    // [expr.const.core] excludes conversion of an indeterminate object even for nullptr_t.
+    if (constant(m) && m.cells_[pl.cell0].fill == M::Fill::indeterminate) return m.fail(Reason::read_indeterminate);
+    return m.set(f, n, Value::null());
+  }
+
   static Flow load(M& m, Frame& f, N n) {
     QualType t = imm_type(f, n);
     M::Place pl;

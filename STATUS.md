@@ -1262,8 +1262,14 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
 - **decltype(e)** ([dcl.type.decltype]): an unparenthesized id-expression or member access names
   its declared type, else the expression's type and value category. `decltype(auto)` is not
   supported yet.
-- `std::nullptr_t` objects are laid out as pointers and convert to pointers; comparing two of
-  them, and the other gaps the review found, are #199.
+- `std::nullptr_t` objects are laid out as pointers. Equality and inequality evaluate both
+  operands and support two `std::nullptr_t` values or one pointer and one `std::nullptr_t`
+  value ([expr.eq]). The lvalue-to-rvalue conversion evaluates a `std::nullptr_t` glvalue
+  without reading its object, including during constant evaluation ([conv.lval],
+  [expr.const.core], CWG 2907). This includes conversion of ordinary automatic objects
+  during their own initialization and from an enclosing block. The semantics of the
+  `[[indeterminate]]` attribute are tracked in [#305](https://github.com/yrashk/ycxx/issues/305).
+  Other conversion and cast gaps are tracked in [#199](https://github.com/yrashk/ycxx/issues/199).
 - A literal can be folded to a fixed enumeration's constant. The constant evaluator checks
   casts to non-fixed enumerations against their value range (#262). `decltype` reads declared types from
   the declaration that named the entity; a statement that begins with a functional cast is an

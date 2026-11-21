@@ -242,6 +242,8 @@ Both targets accept leading `[[…]]` attributes on ordinary data and function m
   downcasts of object pointers and lvalue references through accessible, unambiguous
   nonvirtual base paths, `sizeof`/`alignof` (classes included), `decltype`, and calls
   through pointers to functions. [#199](https://github.com/yrashk/ycxx/issues/199)
+- equality and inequality between `std::nullptr_t` values and between a `std::nullptr_t`
+  value and a pointer. [#199](https://github.com/yrashk/ycxx/issues/199)
 - constant evaluation on ycxx's own interpreter: `constexpr`, `consteval`, `constinit`,
   `static_assert` and `if consteval`, with errors that explain why something is not constant.
   Scalar enumeration values work in constexpr variables, calls, casts and switch conditions.

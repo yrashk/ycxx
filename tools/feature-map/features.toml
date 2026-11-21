@@ -141,7 +141,7 @@ std = 'C++11'
 detect = '\bnullptr(?:_t)?\b'
 status = 'partial'
 issues = [199]
-note = '`std::nullptr_t` conversions and casts'
+note = 'Ordinary `std::nullptr_t` equality works. Some conversions and casts remain.'
 probe = '''
 int main() { int* p = nullptr; decltype(nullptr) n = nullptr; return (p == nullptr && !n) ? 0 : 1; }
 '''
