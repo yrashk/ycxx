@@ -32,6 +32,7 @@ freestanding C++ subset for x86-64 Linux. The standard library is out of reach. 
 
 Ordinary function pointers and references preserve concrete `noexcept` type identity.
 A nonthrowing function can be used where the corresponding potentially throwing type is expected.
+Ordinary constructor declarations and definitions check that their concrete exception specifications agree.
 Dependent exception specifications remain open. [#219](https://github.com/yrashk/ycxx/issues/219)
 
 **Compile and run programs on macOS.** `ycxx cxx a.cpp -o a` (also `-c`, `-fsyntax-only`, `-E`, `-I`,
@@ -44,8 +45,9 @@ tools/build
 build/bin/ycxx cxx hello.cpp -o hello && ./hello
 ```
 
-Concrete `auto(x)` and `auto{x}` decay-copy expressions support scalar and pointer values,
-including array and function decay. [#286](https://github.com/yrashk/ycxx/issues/286)
+Single-expression `auto(x)` and `auto{x}` perform scalar and pointer decay-copy, including
+array and function decay. Function-template bodies can defer supported dependent operands to
+instantiation. [#286](https://github.com/yrashk/ycxx/issues/286)
 
 **Preprocess binary resources.** Both targets support `#embed` and `__has_embed` with the standard
 parameters. [#125](https://github.com/yrashk/ycxx/issues/125)
@@ -190,6 +192,13 @@ initializer takes precedence. The same rules apply to ordinary non-inline namesp
 whose dynamic initialization runs in definition order.
 [#118](https://github.com/yrashk/ycxx/issues/118)
 
+Automatic declarations such as `Point p(3, 4);` can initialize flat aggregates with public
+arithmetic fields. Supplied expressions initialize the fields in declaration order. Omitted
+fields use their default member initializer when available and otherwise get zero. A runtime
+declaration can also initialize one flat public direct base from an exact-type lvalue or an
+unqualified braced prvalue such as `B{7}`, with an explicit initializer for each derived field.
+[#301](https://github.com/yrashk/ycxx/issues/301)
+
 **Language on macOS.** Programs can use:
 - the fundamental integer, character and floating types, pointers, arrays, references and
   enumerations, including opaque declarations of named enums in their namespaces; `float`,
@@ -206,6 +215,7 @@ whose dynamic initialization runs in definition order.
   by argument-dependent lookup. Unqualified calls can find and rank functions in associated
   namespaces, including those of class template type arguments in ordinary calls. Functions
   support default arguments, recursion, operator overloading and calls through pointers.
+  Ordinary free binary operators use argument-dependent lookup, including associated base namespaces.
   Nonmember operators can be called explicitly by name, including with namespace qualification.
   [#219](https://github.com/yrashk/ycxx/issues/219)
   Overloaded free functions can take braced arguments for arithmetic parameters
@@ -220,11 +230,17 @@ whose dynamic initialization runs in definition order.
 - ordinary scalar `new` and single-object `delete` for integral and pointer objects, including
   cv-qualified objects. Scalar allocation uses the global Itanium allocation functions.
   Syntax checking also covers one-dimensional scalar `new T[n]` and `delete[] p`.
+  On Linux x86-64, `delete[] p` releases one-dimensional arrays of integral or ordinary pointer
+  elements through the unsized global deallocator, including zero-length arrays.
   The usual aligned scalar allocation and deallocation signatures support explicit calls with
   `std::align_val_t`. Written nonthrowing global scalar and array overloads with a final
   `const Tag&` support explicit calls, including `std::nothrow_t` and user-defined class tags.
   The usual global `operator new[]` and `operator delete[]` signatures
   support explicit calls and typed address selection.
+  The four written C++26 non-allocating placement functions support explicit calls, including
+  in constant expressions.
+  Runtime placement `new` supports integral and ordinary pointer objects with one placement
+  argument and a visible written reserved allocation function.
   [#293](https://github.com/yrashk/ycxx/issues/293)
 - pointers and references to arrays of unknown bound, and template partial specializations
   that match unknown-bound array types. [#222](https://github.com/yrashk/ycxx/issues/222)
@@ -275,6 +291,18 @@ whose dynamic initialization runs in definition order.
 - `__is_constructible`, `__is_nothrow_constructible` and `__is_trivially_constructible` for
   supported scalar, reference, function and `void` queries, including argument packs in
   class-template base and variable-template initializer replay.
+  [Extension guide](docs/EXTENSIONS.md) · [#218](https://github.com/yrashk/ycxx/issues/218)
+- `__is_assignable`, `__is_nothrow_assignable` and `__is_trivially_assignable` for arithmetic
+  operands, including dependent operands in supported class-template bases and variable-template
+  initializers. [Extension guide](docs/EXTENSIONS.md) · [#218](https://github.com/yrashk/ycxx/issues/218)
+- `__is_convertible` and `__is_nothrow_convertible` for arithmetic values, arithmetic references
+  and cv `void`, including dependent operands in the same template contexts.
+  [Extension guide](docs/EXTENSIONS.md) · [#218](https://github.com/yrashk/ycxx/issues/218)
+- `__is_base_of` for known class hierarchies, including private and ambiguous bases and dependent
+  operands in supported class-template bases and variable-template initializers.
+  [Extension guide](docs/EXTENSIONS.md) · [#218](https://github.com/yrashk/ycxx/issues/218)
+- `__is_empty` accounts for inherited data members and supports dependent operands in class-template
+  bases and variable-template initializers.
   [Extension guide](docs/EXTENSIONS.md) · [#218](https://github.com/yrashk/ycxx/issues/218)
 - logical negation of a qualified dependent `bool` variable template-id in a `bool` template
   argument or default

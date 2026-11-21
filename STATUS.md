@@ -1028,6 +1028,29 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   The fixtures in `tests/own/classes/scalar-default-member-init/` cover both targets in syntax
   checks and native Linux x86-64 execution.
 
+- An automatic declaration such as `Point p(3, 4);` can initialize a flat aggregate with
+  public arithmetic fields and implicit trivial destruction. The fallback applies when
+  constructor resolution finds no viable candidate ([dcl.init.general]). Each expression
+  copy-initializes the corresponding field in declaration order, allowing narrowing. An
+  omitted field uses its supported scalar default member initializer or is value-initialized.
+  Constant initialization uses the scalar element evaluator, with destination-dependent
+  constant evaluation tracked in [#25](https://github.com/yrashk/ycxx/issues/25).
+- An automatic runtime declaration can also initialize an aggregate with one public nonvirtual
+  direct base and at least one public arithmetic field. Every element has an explicit initializer.
+  The first expression is a nonvolatile lvalue of the exact base type, which is a flat aggregate
+  with nonvolatile arithmetic fields and trivial copy and destruction. The base copy uses the
+  existing subobject layout and is sequenced before the remaining initializers.
+  An unqualified `B{…}` prvalue of the exact base type can also supply that element when each
+  base field has a separately written positional initializer and the base has a usable trivial
+  move constructor. The complete temporary is initialized once before its value is copied into
+  the base subobject.
+- Parenthesized arrays, nested fields, unions, reference members, bit-fields, and nontrivial
+  destruction remain in [#301](https://github.com/yrashk/ycxx/issues/301). The issue also tracks
+  multiple bases, other base prvalues, omitted initializers for derived aggregates, constant
+  evaluation of base copies, static storage and functional casts. Linux x86-64 runtime conversions
+  between floating-point and integer types remain in [#201](https://github.com/yrashk/ycxx/issues/201).
+  Spec-only fixtures are in `tests/own/parenthesized-aggregate/`.
+
 - Ordinary mutable data members can be modified through a const object. A member access
   preserves volatile and the field's declared qualification. Native const globals with mutable
   subobjects are placed in writable storage, including through records and arrays (#373).
@@ -1101,7 +1124,7 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   representation while the class has a user-declared constructor ([dcl.fct.def.default],
   [class.default.ctor], [dcl.init.general], #157).
 - A first-declaration in-class `C(C&) = default` or `C(const C&) = default` is a declared copy
-  constructor, including with `constexpr` or bare `noexcept`. It participates in overload
+  constructor, including with `constexpr` or a concrete `noexcept` specification. It participates in overload
   selection, access checking and deletion. For ordinary namespace-scope records without
   bases, copies proven trivial use the existing representation copy and the usual by-value
   ABI. This includes supported scalar fields, lvalue references, arrays, and class members
@@ -1278,8 +1301,10 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
 - A nondependent call in a template uses its lexical lookup point. Dependent calls also use the
   existing point of instantiation ([temp.dep.candidate]). Per-name incremental scheduling
   remains under #16.
+- Supported ordinary free binary operators use the full ADL association set, including base
+  namespaces and hidden friends. Namespace using-directives do not contribute candidates.
 - Remaining work in #165 includes declarations of functions in blocks, exact lookup for
-  operators, member templates as template arguments, dependent-call template argument associations,
+  other operators, member templates as template arguments, dependent-call template argument associations,
   overload-set arguments and complete unqualified template-id lookup.
 - Tests: `tests/own/argument-dependent-lookup/` and `tests/own/range-for/adl*.run.cpp`.
 
@@ -1400,8 +1425,11 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   the non-members unqualified lookup and argument-dependent lookup find; else the built-in
   operator. `a = b` calls a user-declared member `operator=`. Ranking against the built-in
   candidates, postfix `++`/`--`, `()`, `[]`, `->` and conversion functions are #219.
-- `noexcept` and `noexcept(e)` on function declarators are accepted, not yet part of the type
-  (#219); `N::T(…)` and `N::T{…}` are functional casts.
+- Ordinary constructors support concrete `noexcept` and `noexcept(e)` specifications.
+  Out-of-class definitions check the effective specification of the corresponding declaration.
+  Omission agrees with `noexcept(false)` on ordinary potentially throwing constructors, and
+  bare `noexcept` agrees with `noexcept(true)` (#219).
+- `N::T(…)` and `N::T{…}` are functional casts.
 - `T (*p)(args);` with T a typedef-name declares p ([stmt.ambig]), in sema and in the splitter.
 - **`#include <stdio.h>`** (the SDK's) compiles, and `printf`, `puts`, `fputs` and `stdout` run
   (`tests/own/headers/stdio.run.cpp`). `<cstdio>` still waits for static members of class
@@ -1740,10 +1768,46 @@ session's.*
   `__has_builtin` answers 0 for all three predicates while support is partial ([meta.unary.prop]).
   [Direct design](docs/design/direct-constructibility.md)
   · [Replay design](docs/design/constructibility-tail-pack-replay.md)
+- `__is_assignable(T, U)`, `__is_nothrow_assignable(T, U)` and `__is_trivially_assignable(T, U)`
+  fold to the same Boolean when both underlying types are supported arithmetic types. A non-const
+  lvalue reference destination is assignable, including a volatile referent. The source may be
+  cv-qualified or a reference. Supported class-template base and variable-template initializer
+  replay paths evaluate dependent operands at instantiation. Other operand types and dependent
+  queries outside those contexts get hard diagnostics. `__has_builtin` answers 0 for the three
+  predicates while support is partial ([meta.unary.prop], [expr.assign], #218).
+- `__is_convertible(From, To)` and `__is_nothrow_convertible(From, To)` share a Boolean result
+  for arithmetic values, references to arithmetic types and cv `void`. Two cv `void` operands
+  give true. A single cv `void` operand gives false. Arithmetic reference binding accounts for
+  value category, the referent's qualifiers and temporary conversion between distinct arithmetic
+  types. `__is_convertible` also checks a unique public nonvirtual base path between complete
+  class types. It supports direct reference binding and by-value initialization of a fieldless base
+  with no bases or written constructors of its own, an eligible implicit trivial copy or move
+  constructor, and an eligible implicit trivial destructor. Supported class-template bases and
+  variable-template initializers replay dependent operands and check class completeness at the
+  demand. Other combinations, including class `__is_nothrow_convertible`, get hard diagnostics.
+  `__has_builtin` answers 0 while support is partial ([meta.rel], [dcl.init.ref], #218).
+- `__is_base_of(Base, Derived)` ignores top-level cv. Nonclass and union operands give false.
+  The same nonunion class gives true, including when incomplete. For distinct nonunion classes,
+  `Derived` must be complete. The trait follows the recorded base declarations, including private
+  and ambiguous bases. A dependent occurrence in a supported class-template base or variable-template
+  initializer checks completeness at instantiation. A concrete occurrence checks it at its original
+  source point. Missing graph information gets a hard diagnostic when it prevents a result.
+  `__has_builtin` answers 0 while support is partial ([meta.rel], [class.derived], #218).
+- `__is_empty(T)` gives false for nonclass types and unions. For a complete nonunion class, it
+  checks polymorphism, non-static data members, and emptiness of the recorded bases. Missing base
+  records and skipped layout attributes are diagnosed when they prevent a result. Dependent operands
+  in supported class-template bases and variable-template initializers check completeness when
+  instantiated. Concrete operands in those contexts check at the source point. A surviving use of a
+  potentially constant variable-template specialization in an ordinary namespace-scope item or
+  function body supplies the point for its initializer and nested initializer demands. Unevaluated
+  uses with known types and discarded branches of a templated `if constexpr` leave that point to a
+  later demand. A variable-template partial specialization with a declared type such as
+  `Tag<empty<T>>` remains unsupported.
+  `__has_builtin(__is_empty)` continues to answer 1 ([meta.unary.prop], #218).
 - Listed in docs/EXTENSIONS.md. Tests: `tests/own/builtins/`. `<cstdio>`: 53 → 33 errors.
 - Not yet (#211 follow-up): the built-ins that need the object model, such as
-  class constructibility, `__is_convertible`, `__is_assignable`, remaining `__is_trivially_*` and
-  `__is_nothrow_*` predicates, `__is_base_of`, `__is_standard_layout` and
+  class constructibility, assignability and general convertibility, remaining `__is_trivially_*` and
+  `__is_nothrow_*` predicates, `__is_standard_layout` and
   `__reference_binds_to_temporary`. Other dependent predicates, conversions of a dependent
   predicate to a non-`bool` parameter, dependent array bounds and expression mangling remain in
   #209.
@@ -2741,6 +2805,17 @@ and runtime integration with ycxx's own linker remain under [#89]. See the
   redeclarations share the implicit entities. The Itanium mangler emits `na` and `da`, and
   Linux object tests call providers built with both GCC and Clang. Expression codegen and
   further allocation-function declarations remain in [#293](https://github.com/yrashk/ycxx/issues/293).
+- The four C++26 non-allocating placement functions can be declared and defined at global scope
+  ([new.delete.placement]). The two allocation functions take `size_t, void*` and return `void*`.
+  The two deallocation functions take `void*, void*` and return `void`. These signatures require
+  both arguments and a nonthrowing exception specification. Written `constexpr` definitions can
+  be called explicitly in constant expressions.
+- Runtime scalar placement `new` supports integral and ordinary pointer objects with one placement
+  argument. Overload resolution must select a visible written global `operator new(size_t, void*)`
+  with a nonthrowing exception specification. The call precedes scalar initialization in the returned
+  storage. Native lowering requires a supported nonthrowing initializer. Constant evaluation of
+  storage reuse, placement arrays and classes, and more general lifetime and cleanup rules remain in
+  [#293](https://github.com/yrashk/ycxx/issues/293).
 - Native lowering supports initializers proven nonthrowing from the analyzed expression tree.
   Initializers that need an exception cleanup edge and constant evaluation of allocation remain
   in #293. Namespace-scope allocation uses the existing dynamic initialization path. The issue
@@ -2751,8 +2826,12 @@ and runtime integration with ycxx's own linker remain under [#89]. See the
 - Syntax checking supports one-dimensional `new T[n]` and `delete[] p` for integral and ordinary
   pointer elements ([expr.new], [expr.delete]). The bound converts to `size_t`. A potentially
   evaluated constant bound can be zero and must keep the object size within the positive range
-  of `ptrdiff_t`. The array AST retains default or empty initialization and the typed delete
-  operand. Native lowering and constant evaluation of these operations remain in #293.
+  of `ptrdiff_t`. The array AST retains default or empty initialization and the typed delete operand.
+  On Linux x86-64, array deletion evaluates that operand once and passes the original address to
+  the usual unsized `operator delete[](void*)` when non-null. The call releases the allocation,
+  including zero-length arrays. Native array allocation and broader deletion remain in #293.
+  Constant-evaluated allocation and deletion are tracked in #321.
+  [Cookie-free deletion](docs/design/cookie-free-array-delete.md)
   A file-scope scalar initializer still needs lowered code to qualify for dynamic initialization.
   Type checking covers function-local expressions and unevaluated operands.
 
@@ -2845,10 +2924,14 @@ declared return type after signature substitution and constraint checking.
 Evaluated calls and calls that need placeholder return deduction still demand
 the body. A non-generic lambda body uses its own evaluation context.
 
-## Concrete decay-copy expressions (#286)
+## Scalar and pointer decay-copy expressions (#286)
 
 - Single-expression `auto(x)` and `auto{x}` perform scalar and pointer decay-copy,
   including bit-field reads and array and function decay. Grouped declarations
   still take precedence where the statement can be a declaration.
-- General class objects, member pointers, dependent expressions, and some
-  template-argument contexts remain open. [#286](https://github.com/yrashk/ycxx/issues/286)
+- Function-template bodies replay decay-copy of supported dependent operands with the
+  template arguments bound. A value-dependent operand with known type gives the conversion
+  its decayed prvalue type in the template definition, including in `decltype`.
+- General class objects, member pointers, operands whose type dependence is unresolved, and
+  dependent template arguments, requirements, and exception specifications remain open.
+  [#286](https://github.com/yrashk/ycxx/issues/286)

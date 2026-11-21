@@ -608,7 +608,9 @@ public:
           bump();
           break;
         }
-        if (!any_type() && kind(1) == Tk::l_paren && kind(2) == Tk::kw_auto) {  // `decltype(auto` without `)`
+        // An opening delimiter after `auto` starts a functional conversion expression.
+        if (!any_type() && kind(1) == Tk::l_paren && kind(2) == Tk::kw_auto &&
+            kind(3) != Tk::l_paren && kind(3) != Tk::l_brace) {  // `decltype(auto` without `)`
           s_->diag(pos() + 3, Diag::expected_token, Tk::r_paren);
           d.ok = false;
           goto done;
@@ -1400,11 +1402,18 @@ public:
     return l;
   }
 
+  struct TypeQualifier {
+    sema::Sema::Scope scope;
+    NameId name;
+    u32 at;
+  };
+
   // A nested-name-specifier ([expr.prim.id.qual]) at token `start` ahead: `::`, `N::`, `N::C::`,
   // resolved as it is read, without consuming it. `next` is where the name after it is.
   std::optional<sema::Sema::Scope> nested_name(u32 start, u32& next, bool member_pointer = false,
                                                bool checked = false, bool type_components = false,
-                                               bool check_injected_access = false) {
+                                               bool check_injected_access = false,
+                                               std::vector<TypeQualifier>* type_qualifiers = nullptr) {
     u32 j = start;
     std::optional<sema::Sema::Scope> s;
     if (kind(j) == Tk::kw_decltype && kind(j + 1) == Tk::l_paren) {
@@ -1445,6 +1454,7 @@ public:
         auto m = s_->scope_member(*s, n);
         if (!m) return std::nullopt;
         if (member_pointer || checked) check_type_access(*s, n, pos() + j);
+        else if (type_qualifiers && s->type) type_qualifiers->push_back({*s, n, pos() + j});
         s = m;
         j += 2;
       } else if (auto t = template_id_scope(s, j, /*scope=*/true, checked)) {
@@ -1701,6 +1711,7 @@ public:
   void exception_specifier(Suffix& suffix, bool& ok) {
     suffix.has_noexcept = accept(Tk::kw_noexcept);
     if (!suffix.has_noexcept || !accept(Tk::l_paren)) return;
+    DisableDependentDecayCopy disable{dependent_decay_copy_body};
     const int saved = std::exchange(angle_, 0);
     Ex e = constant_expression();
     angle_ = saved;
@@ -2323,7 +2334,8 @@ public:
     // Value-dependent: in a body its value is known when the body is instantiated; in a declaration
     // it is part of the template's signature, which needs the expression's `VDep*` form (#88).
     if (s_->dependent(e)) {
-      if (body && !(e.info.flags & sema::expr_flag::unrepresented_value))
+      constexpr u8 unavailable = sema::expr_flag::unrepresented_value | sema::expr_flag::deferred_decay_copy;
+      if (body && !(e.info.flags & unavailable))
         return s_->world().ins.intern_value(ast::VDepParam{sema::dependent_depth, 0});
       s_->diag(e.begin, Diag::not_supported, Tk::kw_template);
       return std::nullopt;
@@ -2440,9 +2452,10 @@ public:
   // an instantiation its pattern is read once for each element, with the packs it names bound
   // to that element (ast.md §6.4).
   template <class F>
-  std::vector<Ex> expandable(F read) {
+  std::vector<Ex> expandable(F read, bool* written_expansion = nullptr) {
     u32 begin = pos();
     if (const sema::Expansion* x = s_->expansion_at(begin)) {
+      if (written_expansion) *written_expansion = true;
       sema::Expansion e = *x;
       auto n = s_->expansion_length(e, begin);
       std::vector<Ex> out;
@@ -2468,6 +2481,7 @@ public:
     s_->begin_pattern();
     Ex p = read();
     if (is(Tk::ellipsis)) {
+      if (written_expansion) *written_expansion = true;
       u32 end = pos();
       bump();
       if (s_->end_pattern(true, begin, end).empty()) s_->diag(end, Diag::expansion_without_pack);
@@ -2638,6 +2652,7 @@ public:
   // satisfied, value-dependent while one depends on a template parameter. In a templated entity
   // an invalid requirement makes it false; elsewhere it is ill-formed (/5).
   Ex requires_expression() {
+    DisableDependentDecayCopy disable{dependent_decay_copy_body};
     u32 begin = pos();
     bump();
     s_->push_scope();
@@ -3062,22 +3077,44 @@ public:
     return unary_expression();
   }
 
-  // Ordinary new-expressions ([expr.new]). A parenthesized type-id uses the abstract declarator;
+  // New-expressions ([expr.new]). A parenthesized type-id uses the abstract declarator;
   // a bare new-type-id greedily takes ptr-operators and cannot have function suffixes.
   Ex new_expression(u32 begin) {
     bump();  // new, after an optional ::
     std::optional<QualType> type;
     std::optional<Ex> bound;
+    std::optional<Ex> placement;
     bool excluded = false;
     if (is(Tk::l_paren)) {
       u32 past = i_ + past_parentheses(0);
       bump();
       if (starts_type_id()) {
-        type = type_id(/*placeholder_ok=*/true);
-        if (!expect(Tk::r_paren) || !type) return {NodeId::none, begin, pos()};
-      } else {
-        excluded = true;  // placement arguments
-        i_ = past;
+        // A functional conversion in a placement argument can also start with a type name.
+        u32 back = i_;
+        int saved = angle_;
+        std::size_t diags = s_->diag_count();
+        auto parenthesized = type_id(/*placeholder_ok=*/true);
+        if (parenthesized && accept(Tk::r_paren) && !starts_type_id()) {
+          type = parenthesized;
+        } else {
+          s_->truncate_diags(diags);
+          i_ = back;
+          half_ = false;
+          angle_ = saved;
+        }
+      }
+      if (!type) {
+        if (!is(Tk::r_paren)) {
+          int saved = std::exchange(angle_, 0);
+          placement = is(Tk::l_brace) ? s_->braced_argument(braced_init_list()) : assignment_expression();
+          angle_ = saved;
+        }
+        if (!placement || is(Tk::comma)) {
+          excluded = true;  // only one placement argument
+          i_ = past;
+        } else if (!expect(Tk::r_paren) || !placement->ok()) {
+          return {NodeId::none, begin, pos()};
+        }
         if (accept(Tk::l_paren)) {
           type = type_id(/*placeholder_ok=*/true);
           if (!expect(Tk::r_paren) || !type) return {NodeId::none, begin, pos()};
@@ -3130,12 +3167,12 @@ public:
       angle_ = saved;
       if (!expect(Tk::r_paren)) return {NodeId::none, begin, pos()};
     }
-    if (excluded) {
+    if (excluded || (placement && bound)) {
       s_->diag(begin, Diag::not_supported, Tk::kw_new);
       return {NodeId::none, begin, pos()};
     }
     if (bound) return s_->new_array(*type, *bound, args, braces.get(), begin, pos());
-    return s_->new_object(*type, args, braces.get(), begin, pos());
+    return s_->new_object(*type, args, braces.get(), begin, pos(), placement);
   }
 
   Ex delete_expression(u32 begin) {
@@ -3524,8 +3561,8 @@ public:
           }
           angle_ = saved;
           if (!expect(Tk::r_paren) || !ok) return {NodeId::none, begin, pos()};
-          Ex result = s_->trait_expr(tr->trait, args, begin, pos());
-          if (tr->trait == lex::TypeTrait::is_trivially_copyable && s_->dependent(result))
+          Ex result = s_->trait_expr(tr->trait, n, args, begin, pos());
+          if (tr->replay_dependent && s_->dependent(result))
             ++deferred_argument_checks_;  // Even an alias that erases the argument must replay it.
           return result;
         }
@@ -3574,7 +3611,7 @@ public:
       if (kind(1) == Tk::l_paren || kind(1) == Tk::l_brace) {
         bump();
         Ex operand = single_auto_initializer();
-        Ex result = s_->decay_copy(operand, begin);
+        Ex result = s_->decay_copy(operand, begin, pos(), dependent_decay_copy_body && in_params_ == 0);
         return {result.id, begin, pos(), result.info};
       }
       s_->diag(begin, Diag::expected_expression);
@@ -3659,9 +3696,11 @@ public:
   // `T(args)` or `T{…}` at the `(` or `{` ([expr.type.conv]).
   Ex type_conversion(QualType t, u32 begin) {
     if (is(Tk::l_brace)) {
-      auto b = braced_init_list();
+      bool written_expansion = false;
+      auto b = braced_init_list(&written_expansion);
       if (!s_->unevaluated && !s_->check_destructor_access(t, begin)) return {NodeId::none, begin, pos()};
       Ex r = s_->list_init(t, *b);
+      if (!written_expansion && b->begin == begin + 1) s_->note_explicit_aggregate_prvalue(t, *b, r, begin);
       return {r.id, begin, pos(), r.info};
     }
     if (!expect(Tk::l_paren)) return {NodeId::none, begin, pos()};
@@ -3701,7 +3740,7 @@ public:
 
   // braced-init-list ([dcl.init.general]): `{ initializer-clause, … }`, or with designators
   // `{ .m = e, .n{…} }` ([dcl.init.aggr]).
-  std::unique_ptr<sema::Braced> braced_init_list() {
+  std::unique_ptr<sema::Braced> braced_init_list(bool* written_expansion = nullptr) {
     deep_enough();  // nested braced lists
     auto b = std::make_unique<sema::Braced>();
     b->begin = pos();
@@ -3723,7 +3762,7 @@ public:
         c.list = braced_init_list();
       } else if (!c.designated) {
         // An initializer-clause may be a pack expansion ([dcl.init.general]/1).
-        std::vector<Ex> xs = expandable([&] { return assignment_expression(); });
+        std::vector<Ex> xs = expandable([&] { return assignment_expression(); }, written_expansion);
         for (std::size_t i = 0; i + 1 < xs.size(); ++i) {
           sema::Braced::Clause e;
           e.begin = c.begin;
@@ -3764,7 +3803,9 @@ public:
   Ex qualified_id(u32 begin) {
     u32 next = 0;
     auto address = address_op_ && *address_op_ + 1 == begin ? address_op_ : std::nullopt;
-    auto s = nested_name(0, next, /*member_pointer=*/false, substituting_partial_arguments || address.has_value());
+    std::vector<TypeQualifier> type_qualifiers;
+    auto s = nested_name(0, next, /*member_pointer=*/false, substituting_partial_arguments || address.has_value(),
+                         /*type_components=*/false, /*check_injected_access=*/false, &type_qualifiers);
     // `S::template f<args>`: f names a template ([temp.names]/3).
     bool keyword = s && kind(next) == Tk::kw_template && kind(next + 1) == Tk::identifier;
     if (keyword) ++next;
@@ -3799,6 +3840,8 @@ public:
     // variable of the name hides it.
     if ((is(Tk::l_paren) || is(Tk::l_brace)) && !s_->scope_names_object(*s, n))
       if (auto t = s_->scope_type(*s, n)) {
+        for (const auto& qualifier : type_qualifiers)
+          s_->type_member_access(qualifier.scope, qualifier.name, qualifier.at, /*direct_alias_only=*/true);
         s_->type_member_access(*s, n, name_at, /*direct_alias_only=*/!substituting_partial_arguments);
         return type_conversion(*t, begin);
       }
@@ -3916,6 +3959,7 @@ public:
   // lambda-expression ([expr.prim.lambda]): its introducer and declarator, read in the enclosing
   // context, then its compound-statement as the body of the closure's function call operator.
   Ex lambda_expression() {
+    DisableDependentDecayCopy disable{dependent_decay_copy_body};
     using K = sema::Sema::CaptureSpec::Kind;
     sema::Sema::LambdaSpec spec;
     spec.begin = pos();
@@ -4855,11 +4899,11 @@ public:
 
   // A local usable in constant expressions ([expr.const]): constexpr, or a const integral one
   // with a constant initializer; a constexpr one must have one ([dcl.constexpr]).
-  void constant_local(u32 local, QualType t, bool is_constexpr, Ex& init, bool replayed_defaults = false) {
+  void constant_local(u32 local, QualType t, bool is_constexpr, Ex& init, bool memberwise = false) {
     bool usable_kind = sema::Types::is_const(t) && !sema::Types::is_volatile(t) && s_->types().is_integral(t);
     if (!init.ok() || !(is_constexpr || usable_kind)) return;
     sema::Evaluator evaluator(*s_, questions());
-    const bool scalar_record = replayed_defaults && s_->as<ast::InitList>(init).has_value();
+    const bool scalar_record = memberwise && s_->as<ast::InitList>(init).has_value();
     sema::Evaluated v = scalar_record ? evaluator.evaluate_initializer(init, /*zero_default=*/false)
                                      : evaluator.evaluate(init);
     if (v.value) {
@@ -5481,11 +5525,24 @@ public:
           skip_to_semi();
           return {NodeId::none, begin, pos()};
         }
+        bool memberwise = replay_defaults;
         if (s_->types().is_dependent(d.type) || s_->any_dependent(args)) {
           init = s_->construct(d.type, std::move(args), open, pos());
         } else if (s_->types().is_class(d.type)) {
-          init = s_->has_user_ctors(d.type) || args.size() != 1 ? s_->construct(d.type, std::move(args), open, pos())
-                                                                 : s_->convert(args[0], d.type, open);
+          const bool single = args.size() == 1;
+          const bool allow_base_copy = !spec.is_constexpr && !s_->immediate_context;
+          // Keep the existing class expression path, which also adjusts derived-to-base copies.
+          const bool aggregate_fallback = !spec.is_static &&
+              (!single || (args[0].ok() && !s_->types().is_class(args[0].type()))) &&
+              s_->can_parenthesize_aggregate(d.type, args, allow_base_copy);
+          if (aggregate_fallback || s_->has_user_ctors(d.type) || !single) {
+            const auto form = aggregate_fallback ? sema::Construction::direct_paren_aggregate
+                                                 : sema::Construction::direct;
+            init = s_->construct(d.type, std::move(args), open, pos(), form);
+            memberwise = memberwise || aggregate_fallback;
+          } else {
+            init = s_->convert(args[0], d.type, open);
+          }
         } else if (args.size() != 1 || s_->types().is_array(d.type)) {
           s_->diag(open, Diag::not_supported, Tk::l_paren);  // a parenthesized list for a scalar or array
         } else if (s_->types().is_reference(d.type)) {
@@ -5493,7 +5550,7 @@ public:
         } else {
           init = s_->convert(args[0], d.type, open);
         }
-        if (replay_defaults) constant_local(local, d.type, spec.is_constexpr, init, replay_defaults);
+        if (memberwise) constant_local(local, d.type, spec.is_constexpr, init, memberwise);
       } else if (s_->types().is_reference(d.type)) {
         s_->diag(d.name_at, Diag::reference_uninitialized);  // [dcl.ref]/5
       } else if (s_->types().is_dependent(d.type)) {
@@ -5617,8 +5674,14 @@ private:
   bool half_ = false;           // the current `>>` has had its first `>` taken by a template-id
 public:
   bool body = false;  // the part is a function body, not a declaration part
+  bool dependent_decay_copy_body = false;  // a function template's compound statement, before replay
   bool substituting_partial_arguments = false;
 private:
+  struct DisableDependentDecayCopy {
+    bool& enabled;
+    bool saved = std::exchange(enabled, false);
+    ~DisableDependentDecayCopy() { enabled = saved; }
+  };
   std::optional<u32> address_op_;  // the token of an explicit unary `&`
   std::optional<u32> lambda_result_operand_;  // first token of a deducing lambda's return operand
 };

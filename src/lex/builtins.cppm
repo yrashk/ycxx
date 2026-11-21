@@ -19,6 +19,9 @@ enum class TypeTrait : std::uint8_t {
   underlying_type,
   // Predicates with bounded support.
   is_trivially_copyable, is_constructible, is_nothrow_constructible, is_trivially_constructible,
+  is_assignable, is_nothrow_assignable, is_trivially_assignable,
+  is_convertible, is_nothrow_convertible,
+  is_base_of,
 };
 
 struct TypeTraitInfo {
@@ -28,6 +31,7 @@ struct TypeTraitInfo {
   bool transforms;     // a type, not a `bool`
   bool advertised = true;
   bool variadic = false;
+  bool replay_dependent = false;  // the fixed-arity parser retains the written argument
 };
 
 inline constexpr std::array type_traits{
@@ -54,7 +58,8 @@ inline constexpr std::array type_traits{
     TypeTraitInfo{"__is_object", TypeTrait::is_object, 1, false},
     TypeTraitInfo{"__is_const", TypeTrait::is_const, 1, false},
     TypeTraitInfo{"__is_volatile", TypeTrait::is_volatile, 1, false},
-    TypeTraitInfo{"__is_empty", TypeTrait::is_empty, 1, false},
+    TypeTraitInfo{.name = "__is_empty", .trait = TypeTrait::is_empty, .arity = 1,
+                  .transforms = false, .replay_dependent = true},
     TypeTraitInfo{"__is_aggregate", TypeTrait::is_aggregate, 1, false},
     TypeTraitInfo{"__is_polymorphic", TypeTrait::is_polymorphic, 1, false},
     TypeTraitInfo{"__is_abstract", TypeTrait::is_abstract, 1, false},
@@ -74,10 +79,23 @@ inline constexpr std::array type_traits{
     TypeTraitInfo{"__remove_all_extents", TypeTrait::remove_all_extents, 1, true},
     TypeTraitInfo{"__decay", TypeTrait::decay, 1, true},
     TypeTraitInfo{"__underlying_type", TypeTrait::underlying_type, 1, true},
-    TypeTraitInfo{"__is_trivially_copyable", TypeTrait::is_trivially_copyable, 1, false, false},
+    TypeTraitInfo{.name = "__is_trivially_copyable", .trait = TypeTrait::is_trivially_copyable, .arity = 1,
+                  .transforms = false, .advertised = false, .replay_dependent = true},
     TypeTraitInfo{"__is_constructible", TypeTrait::is_constructible, 1, false, false, true},
     TypeTraitInfo{"__is_nothrow_constructible", TypeTrait::is_nothrow_constructible, 1, false, false, true},
     TypeTraitInfo{"__is_trivially_constructible", TypeTrait::is_trivially_constructible, 1, false, false, true},
+    TypeTraitInfo{.name = "__is_assignable", .trait = TypeTrait::is_assignable, .arity = 2,
+                  .transforms = false, .advertised = false, .replay_dependent = true},
+    TypeTraitInfo{.name = "__is_nothrow_assignable", .trait = TypeTrait::is_nothrow_assignable, .arity = 2,
+                  .transforms = false, .advertised = false, .replay_dependent = true},
+    TypeTraitInfo{.name = "__is_trivially_assignable", .trait = TypeTrait::is_trivially_assignable, .arity = 2,
+                  .transforms = false, .advertised = false, .replay_dependent = true},
+    TypeTraitInfo{.name = "__is_convertible", .trait = TypeTrait::is_convertible, .arity = 2,
+                  .transforms = false, .advertised = false, .replay_dependent = true},
+    TypeTraitInfo{.name = "__is_nothrow_convertible", .trait = TypeTrait::is_nothrow_convertible, .arity = 2,
+                  .transforms = false, .advertised = false, .replay_dependent = true},
+    TypeTraitInfo{.name = "__is_base_of", .trait = TypeTrait::is_base_of, .arity = 2,
+                  .transforms = false, .advertised = false, .replay_dependent = true},
 };
 
 constexpr const TypeTraitInfo* type_trait(std::string_view name) {

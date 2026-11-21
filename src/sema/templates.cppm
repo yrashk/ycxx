@@ -312,10 +312,13 @@ public:
     return ins().intern_value(ast::VDepOp{ast::DepOp::is_same, ins().intern_seq(std::span<const TemplateArg>(operands))});
   }
 
-  // A concrete query needs the source and completeness contexts supplied by its owning replay.
-  std::optional<ConstId> constructibility_pattern(ast::DepOp op, std::span<const TemplateArg> operands)
+  // The owning token replay checks the concrete multi-operand query.
+  std::optional<ConstId> replayed_type_trait_pattern(ast::DepOp op, std::span<const TemplateArg> operands)
     pre(op == ast::DepOp::is_constructible || op == ast::DepOp::is_nothrow_constructible ||
-        op == ast::DepOp::is_trivially_constructible)
+        op == ast::DepOp::is_trivially_constructible ||
+        (operands.size() == 2 && (op == ast::DepOp::is_assignable || op == ast::DepOp::is_nothrow_assignable ||
+                                  op == ast::DepOp::is_trivially_assignable || op == ast::DepOp::is_convertible ||
+                                  op == ast::DepOp::is_nothrow_convertible || op == ast::DepOp::is_base_of)))
   {
     if (!std::ranges::any_of(operands, [&](const TemplateArg& a) { return types().is_dependent(a.type); }) ||
         !std::ranges::all_of(operands, [&](const TemplateArg& a) { return structural_operand(a); })) return std::nullopt;
@@ -332,7 +335,9 @@ public:
   std::optional<ConstId> unary_trait_value(ast::DepOp op, QualType type)
     pre(op != ast::DepOp::is_same && op != ast::DepOp::logical_not &&
         op != ast::DepOp::is_constructible && op != ast::DepOp::is_nothrow_constructible &&
-        op != ast::DepOp::is_trivially_constructible)
+        op != ast::DepOp::is_trivially_constructible && op != ast::DepOp::is_assignable &&
+        op != ast::DepOp::is_nothrow_assignable && op != ast::DepOp::is_trivially_assignable &&
+        op != ast::DepOp::is_convertible && op != ast::DepOp::is_nothrow_convertible && op != ast::DepOp::is_base_of)
   {
     if (types().is_dependent(type)) {
       if (!structural_operand(type)) return std::nullopt;
@@ -371,11 +376,18 @@ public:
       }
       break;
     // The token-owning replay checks completeness and diagnoses a concrete operand.
-    case ast::DepOp::is_trivially_copyable: return std::nullopt;
+    case ast::DepOp::is_trivially_copyable:
+    case ast::DepOp::is_empty: return std::nullopt;
     case ast::DepOp::is_same:
     case ast::DepOp::is_constructible:
     case ast::DepOp::is_nothrow_constructible:
     case ast::DepOp::is_trivially_constructible:
+    case ast::DepOp::is_assignable:
+    case ast::DepOp::is_nothrow_assignable:
+    case ast::DepOp::is_trivially_assignable:
+    case ast::DepOp::is_convertible:
+    case ast::DepOp::is_nothrow_convertible:
+    case ast::DepOp::is_base_of:
     case ast::DepOp::logical_not: std::unreachable();
     }
     return w_->values.integer(types().builtin(Builtin::bool_), result);
@@ -477,9 +489,15 @@ public:
       switch (op.op) {
       case ast::DepOp::is_constructible:
       case ast::DepOp::is_nothrow_constructible:
-      case ast::DepOp::is_trivially_constructible: {
+      case ast::DepOp::is_trivially_constructible:
+      case ast::DepOp::is_assignable:
+      case ast::DepOp::is_nothrow_assignable:
+      case ast::DepOp::is_trivially_assignable:
+      case ast::DepOp::is_convertible:
+      case ast::DepOp::is_nothrow_convertible:
+      case ast::DepOp::is_base_of: {
         auto operands = substitute_args(ins().seqs.elements(op.operands), b);
-        return operands ? constructibility_pattern(op.op, *operands) : std::nullopt;
+        return operands ? replayed_type_trait_pattern(op.op, *operands) : std::nullopt;
       }
       case ast::DepOp::is_same: {
         auto lhs = substitute_arg(ins().seqs.at(op.operands, 0), b);
@@ -509,6 +527,7 @@ public:
       case ast::DepOp::is_member_object_pointer:
       case ast::DepOp::is_member_function_pointer:
       case ast::DepOp::is_trivially_copyable:
+      case ast::DepOp::is_empty:
       case ast::DepOp::is_object: {
         auto operand = substitute_arg(ins().seqs.at(op.operands, 0), b);
         if (!operand) return std::nullopt;
@@ -1619,14 +1638,16 @@ public:
       all12 = all12 && s12;
       all21 = all21 && s21;
     }
-    // [temp.deduct.partial]/11: otherwise equal, a template without a trailing function parameter
-    // pack is more specialized than one with.
+    // [temp.deduct.partial]/11: a trailing function parameter pack breaks a tie only if
+    // the other template has no trailing pack and no declared parameter at that position.
+    // A parameter with an omitted default argument still occupies its declared position.
     if (all12 && all21) {
       auto trailing = [&](const TypeRec& t) {
         return !t.params.empty() && types().kind(t.params.back()) == TypeKind::pack_expansion;
       };
-      if (trailing(t2) && !trailing(t1)) return {true, false};
-      if (trailing(t1) && !trailing(t2)) return {false, true};
+      const bool pack1 = trailing(t1), pack2 = trailing(t2);
+      if (pack2 && !pack1 && t1.params.size() < t2.params.size()) return {true, false};
+      if (pack1 && !pack2 && t2.params.size() < t1.params.size()) return {false, true};
     }
     return {all12, all21};
   }
@@ -1672,6 +1693,7 @@ private:
     return ins().intern_value(ast::VDepOp{ast::DepOp::logical_not, ins().intern_seq(std::span<const TemplateArg>(operands))});
   }
 
+public:
   // Unsupported dependent constructs can still be re-parsed in a template body. Their
   // stand-ins carry no expression identity and must not become operands of an interned value.
   bool structural_operand(QualType t) {
@@ -1697,6 +1719,7 @@ private:
     default: return true;
     }
   }
+private:
   bool structural_operand(const TemplateArg& a) {
     if (a.kind == TemplateArgKind::pack)
       return std::ranges::all_of(elements(a), [&](const TemplateArg& e) { return structural_operand(e); });

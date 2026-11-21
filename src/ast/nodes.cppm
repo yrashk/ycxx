@@ -118,11 +118,12 @@ struct Call {
   [[=indeterminately_sequenced(1)]] ChildList args;
 };
 
-// An ordinary scalar new-expression ([expr.new]): allocation is sequenced before initialization.
+// A scalar new-expression ([expr.new]): allocation is sequenced before initialization.
 struct NewObject {
   ExprInfo info;
   [[=sequenced(0)]] Child allocation;
   [[=sequenced(1)]] Child init;
+  bool placement = false;
 };
 
 // Single-object delete of a complete scalar ([expr.delete]): the operand has been converted
@@ -142,9 +143,10 @@ struct NewArray {
   [[=sequenced(1)]] Child element_init;
 };
 
-// Array delete ([expr.delete]) preserves the typed pointer operand.
+// Array delete ([expr.delete]) preserves the typed pointer operand and the usual unsized deallocator.
 struct DeleteArray {
   ExprInfo info;
+  EntityId function;
   [[=sequenced]] Child operand;
 };
 
@@ -257,11 +259,10 @@ struct AssignmentCall {
   [[=sequenced(1)]] Child object;
 };
 
-// List-initialization of an aggregate ([dcl.init.aggr]), as analysed: one element per array
-// element or non-static data member, in order, with brace elision and designators resolved and the
-// elements without a clause initialized from their defaults. Each element is already converted to its
-// element type; a sub-aggregate's element is an `InitList` or a prvalue of its type. The
-// initializer-clauses are sequenced in order ([dcl.init.list]).
+// Aggregate initialization after analysis ([dcl.init.aggr], [dcl.init.general]). The sequence
+// contains one converted initializer per aggregate element, with omissions filled in and any
+// brace elision and designators resolved. A sub-aggregate's initializer is an `InitList` or a
+// prvalue of its type. Element initializations are sequenced in order.
 struct InitList {
   ExprInfo info;
   [[=sequenced]] ChildList elems;

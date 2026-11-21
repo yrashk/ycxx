@@ -640,6 +640,7 @@ struct FieldRec {
   bool dmi = false;  // it has a default member initializer, constant or not
   u8 bit_width = 0;
   bool mutable_ = false;
+  bool no_unique_address = false;  // the member is potentially overlapping ([intro.object])
 };
 
 // Classification of a defaulted copy affected by an explicit in-class definition. Deletion
@@ -1068,6 +1069,23 @@ struct World {
         ins.names.spelling(entities.rec(tag.entity).name).empty())
       return false;
     return fn.params.size() == 2 || fn.params[1] == types.enum_type(alignment_enum());
+  }
+
+  // [new.delete.placement]: the written non-allocating library signatures. They are separate
+  // from the implicit, replaceable allocation functions.
+  bool matches_reserved_placement_function(std::string_view name, QualType written) {
+    if (!is_allocation_name(name)) return false;
+    const TypeRec fn = types.rec(types.canonical(written));
+    if (fn.kind != TypeKind::function || fn.variadic || fn.linkage != LangLinkage::cxx ||
+        fn.fn_cv != Cv::none || fn.fn_ref != ast::RefQual::none || !fn.fn_noexcept || fn.params.size() != 2)
+      return false;
+
+    const bool allocating = !is_deallocation_name(name);
+    const QualType void_type = types.builtin(Builtin::void_);
+    const QualType void_pointer = types.pointer(void_type);
+    return fn.inner == (allocating ? void_pointer : void_type) &&
+           fn.params.front() == (allocating ? types.builtin(target.size_type) : void_pointer) &&
+           fn.params.back() == void_pointer;
   }
 
   void install_alignment_enum(Classes& classes) {
