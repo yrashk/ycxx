@@ -127,7 +127,9 @@ support those addresses. [#414](https://github.com/yrashk/ycxx/issues/414)
 · [#407](https://github.com/yrashk/ycxx/issues/407)
 
 On x86-64 Linux, direct calls and saved pointers across translation units share one address for
-simple external inline functions. [#422](https://github.com/yrashk/ycxx/issues/422)
+simple external inline functions. Ordinary namespace-scope functions can use GNU hidden visibility,
+including coalesced inline and `constexpr` definitions.
+[#422](https://github.com/yrashk/ycxx/issues/422) · [#602](https://github.com/yrashk/ycxx/issues/602)
 
 External inline namespace variables with relocation-free static initializers share one object
 across x86-64 ELF translation units. This lets two freestanding units using libycxx `<cstddef>`
