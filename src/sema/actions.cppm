@@ -664,16 +664,16 @@ public:
       if (s.entity != EntityId::none && !is_special(s)) decls.push_back(s);
     }
     if (!found && at) {
-      auto matching = std::ranges::find_if(decls, [&](const ast::DeclSema& d) {
+      auto matching = std::find_if(decls.rbegin(), decls.rend(), [&](const ast::DeclSema& d) {
         return d.kind == kind && (d.flags & decl_flag::template_);
       });
-      if (matching != decls.end() && std::ranges::any_of(decls, [&](const ast::DeclSema& d) {
+      if (matching != decls.rend() && std::ranges::any_of(decls, [&](const ast::DeclSema& d) {
             return d.entity != matching->entity && d.kind != ast::DeclKind::class_ && d.kind != ast::DeclKind::enum_;
           })) {
         diag(*at, Diag::ambiguous_name, name);
         return std::nullopt;
       }
-      if (matching != decls.end()) found = *matching;
+      if (matching != decls.rend()) found = *matching;
     }
     if (!found && !decls.empty()) found = decls.back();
     if (!found || found->kind != kind || !(found->flags & decl_flag::template_)) return std::nullopt;
