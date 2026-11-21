@@ -640,6 +640,7 @@ struct FieldRec {
   bool dmi = false;  // it has a default member initializer, constant or not
   u8 bit_width = 0;
   bool mutable_ = false;
+  bool no_unique_address = false;  // the member is potentially overlapping ([intro.object])
 };
 
 // Classification of a defaulted copy affected by an explicit in-class definition. Deletion

@@ -928,14 +928,13 @@ public:
         known = false;
         continue;
       }
-      if (record->union_ || record->polymorphic) return false;
-      if (!record->fields.empty()) {
-        // Skipped attributes can make a class member a zero-size subobject.
-        if (!record->unapplied_layout || std::ranges::any_of(record->fields, [&](const FieldRec& field) {
-              return !types().is_class(field.type);
-            }))
-          return false;
+      if (record->polymorphic) return false;
+      for (const FieldRec& field : record->fields) {
+        if (!field.no_unique_address || !types().is_class(field.type)) return false;
+        // [intro.object]: a nonzero subobject proves this overlapping member has
+        // nonzero size. An otherwise empty member needs a layout fact.
         known = false;
+        pending.push_back(types().class_of(field.type));
       }
       for (const BaseRec& base : record->bases) pending.push_back(base.cls);
     }

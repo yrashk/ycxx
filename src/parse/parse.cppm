@@ -37,7 +37,8 @@ using sema::ConstId;
 enum class LayoutAttributes { affecting_layout, leading_affecting_layout, any };
 
 bool layout_attribute(const pp::Region& region, u32 begin, u32 end, LayoutAttributes mode = LayoutAttributes::affecting_layout,
-                      std::span<const std::pair<u32, u32>> applied = {}) {
+                      std::span<const std::pair<u32, u32>> applied = {},
+                      std::string_view standard_attribute = {}) {
   using enum lex::Tk;
   for (std::uint32_t i = begin; i < end; ++i) {
     while (!applied.empty() && applied.front().second <= i) applied = applied.subspan(1);
@@ -46,7 +47,7 @@ bool layout_attribute(const pp::Region& region, u32 begin, u32 end, LayoutAttrib
       continue;
     }
     auto tok = region.tokens[i];
-    if (tok.kind == kw_alignas) return true;
+    if (tok.kind == kw_alignas && standard_attribute.empty()) return true;
     if (i + 1 == end) break;
     const auto next = region.tokens[i + 1].kind;
     bool bracket = tok.kind == l_square && next == l_square;
@@ -56,18 +57,29 @@ bool layout_attribute(const pp::Region& region, u32 begin, u32 end, LayoutAttrib
       continue;
     }
     if (mode == LayoutAttributes::any) return true;
+    const bool unscoped = !standard_attribute.empty() && bracket && i + 2 < end &&
+                          region.tokens[i + 2].kind != kw_using;
     if (gnu) ++i;
     const auto open = bracket ? l_square : l_paren;
     const auto close = bracket ? r_square : r_paren;
     std::uint32_t depth = 1;
+    std::uint32_t parentheses = 0;
     while (++i < end && depth) {
       auto part = region.tokens[i];
       if (part.kind == open) ++depth;
       else if (part.kind == close && --depth == 0) break;
+      else if (unscoped && part.kind == l_paren) ++parentheses;
+      else if (unscoped && part.kind == r_paren && parentheses) --parentheses;
       else if (part.kind == identifier) {
         auto name = region.name(part);
         if (name.size() > 4 && name.starts_with("__") && name.ends_with("__"))
           name = name.substr(2, name.size() - 4);
+        if (!standard_attribute.empty()) {
+          const auto previous = region.tokens[i - 1].kind;
+          if (unscoped && depth == 2 && parentheses == 0 &&
+              (previous == l_square || previous == comma) && name == standard_attribute) return true;
+          continue;
+        }
         if (name == "packed" || name == "aligned" || name == "mode" || name == "vector_size" ||
             name == "no_unique_address" || name == "ms_struct" || name == "gcc_struct") return true;
       }
@@ -3732,6 +3744,8 @@ private:
 
   void member_declarators(const DeclSpec& spec, const ast::DeclSema& c, bool fields_only = false) {
     sema::Types& types = s_.types();
+    const bool shared_overlap = layout_attribute(p_->region(), it_->begin, ps_.index(),
+                                                 LayoutAttributes::leading_affecting_layout, {}, "no_unique_address");
     do {
       bool conversion = ps_.conversion_id_ahead();
       if (conversion && spec.has_type) {
@@ -3872,6 +3886,12 @@ private:
       sem.is_mutable = spec.mutable_at.has_value();
       sem.linkage = ast::Linkage::none;
       sem.flags = sema::decl_flag::definition;
+      if (shared_overlap || layout_attribute(p_->region(), it_->begin + d.begin, ps_.index(),
+                                             LayoutAttributes::affecting_layout, {}, "no_unique_address")) {
+        const NameId attr_name = s_.ins().names.intern("no_unique_address");
+        const NodeId attr = s_.node(ast::Attribute{s_.no_name(), attr_name, b_.list({})}, d.begin, d.begin).id;
+        sem.attributes = b_.seq({attr});
+      }
       sem.entity = s_.world().entities.entity(
           {sema::EntityKind::data_member, d.name, d.type, LangLinkage::cxx, ast::Linkage::none, {}, c.entity});
       // A default member initializer ([class.mem.general]) is a complete-class context: it is
@@ -6087,8 +6107,11 @@ Program::ClassContent Program::class_content(u32 item, const std::function<const
           out.unapplied_field_layout = layout_attribute(*r_, mi.begin, mi.end);
           inspect_field_layout = false;
         }
+        const bool no_unique_address = std::ranges::any_of(w_->ins.seqs.elements(d.attributes), [&](NodeId attr) {
+          return w_->ins.names.spelling(w_->ins.ast.get<ast::Attribute>(attr).name) == "no_unique_address";
+        });
         fields.push_back({w_->entities.rec(d.entity).name, d.type, d.entity, inits.contains(i) ? inits[i] : ConstId::none,
-                        dmis_.contains(std::to_underlying(d.entity)), d.bit_width, d.is_mutable});
+                        dmis_.contains(std::to_underlying(d.entity)), d.bit_width, d.is_mutable, no_unique_address});
       } else if (d.kind == ast::DeclKind::enum_ || d.kind == ast::DeclKind::type_alias)
         nested.push_back({w_->entities.rec(d.entity).name, d.type, d.entity});
       else if (d.kind == ast::DeclKind::function || d.kind == ast::DeclKind::variable) {
