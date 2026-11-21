@@ -1035,9 +1035,15 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   omitted field uses its supported scalar default member initializer or is value-initialized.
   Constant initialization uses the scalar element evaluator, with destination-dependent
   constant evaluation tracked in [#25](https://github.com/yrashk/ycxx/issues/25).
-- Parenthesized arrays, nested and base-bearing aggregates, unions, reference members,
-  bit-fields, nontrivial destruction, static storage and functional casts remain in
-  [#301](https://github.com/yrashk/ycxx/issues/301). Linux x86-64 runtime conversions between
+- An automatic runtime declaration can also initialize an aggregate with one public nonvirtual
+  direct base and at least one public arithmetic field. Every element has an explicit initializer.
+  The first expression is a nonvolatile lvalue of the exact base type, which is a flat aggregate
+  with nonvolatile arithmetic fields and trivial copy and destruction. The base copy uses the
+  existing subobject layout and is sequenced before the remaining initializers.
+- Parenthesized arrays, nested fields, unions, reference members, bit-fields, and nontrivial
+  destruction remain in [#301](https://github.com/yrashk/ycxx/issues/301). The issue also tracks
+  multiple bases, base prvalues, omitted initializers for derived aggregates, constant evaluation
+  of base copies, static storage and functional casts. Linux x86-64 runtime conversions between
   floating-point and integer types remain in [#201](https://github.com/yrashk/ycxx/issues/201).
   Spec-only fixtures are in `tests/own/parenthesized-aggregate/`.
 
