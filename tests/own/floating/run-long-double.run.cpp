@@ -1,6 +1,7 @@
 // [basic.fundamental], [expr.call]/12: on Apple arm64 long double has the format of double:
 // 8 bytes, the same arithmetic results, and printf reads it with %Lg / %La.
 // REQUIRES: darwin
+// PARITY: #645
 // STDOUT: 8 0x1.5555555555555p-2 0x1.5555555555555p-2
 // STDOUT: 1.5 0.1
 // EXIT: 0

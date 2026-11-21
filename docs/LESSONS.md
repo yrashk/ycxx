@@ -248,6 +248,20 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
     is used. Compile a C++ peer's `main` in hosted mode to retain the ELF entry symbol.
   - Learned on #293. The wider object input work is tracked in #390.
 
+- **x86-64 Linux runs on an arm64 Mac go through Docker's amd64 emulation.** The `gcc:16`
+  image on this Mac is arm64, so CI's `linux-x86_64` job could not be reproduced locally, and
+  x86-64 back-end work waited for CI round trips.
+  - Do: build an image once, `FROM gcc:16` with `ninja-build cmake python3 git rsync`, with
+    `docker build --platform linux/amd64`. Run it with `--platform linux/amd64`, the worktree
+    mounted read-only and a named volume for the build. In the container, `rsync -a --delete
+    --exclude /build --exclude .git` the tree into the volume, then run `cmake -S . -B
+    /vol/build -G Ninja` and `cmake --build`, not `tools/build`, whose submodule sync cannot see a
+    worktree's `.git`. Run CTest fixtures (`ctest -R unit.linux_…`) there. The first build
+    took about 25 minutes under Rosetta, and incremental ones take a few.
+  - Do: the test driver calls ycxx without `--target`, and a Linux host still defaults to
+    Darwin. Until the driver passes the target, run the own run suite through a wrapper that adds
+    `--target=x86_64-pc-linux-gnu -nostdlib` (#646).
+  - Learned on #639.
 - **A module import added during a build can miss the dependency scan.** CMake scanned a test's
   imports before an edit and GCC compiled it afterward, so its module mapper lacked the new import.
   - Do: rerun Ninja in the same build directory after changing imports during a build.

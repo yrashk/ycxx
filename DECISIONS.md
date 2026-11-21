@@ -545,6 +545,21 @@ project must survive any session ending.
      functions, `new`, range-based `for` and block-scope statics until the map. Generated files
      committed by each PR conflicted between every two parallel feature PRs (#366).
 
+10. **The native back ends stay at parity** (#639). AArch64 and x86-64 grew slice by slice, and
+    by 2026-11-21 about 100 run tests compiled for one and not the other, unnoticed, because the
+    run suite runs only on macOS.
+    - A construct one back end supports and the other does not is a gap with its own issue,
+      listed in the parity table #639.
+    - `tools/check-parity` (policy stage) fails when an L2 operation is handled by one back end
+      only and `tools/parity/l2-gaps.tsv` does not name its issue, or when a listed operation is
+      now handled.
+    - A run test limited to one target (`REQUIRES: darwin` or `linux`) carries
+      `// PARITY: #N`, the gap on the other target, or `// PARITY: target-specific: <reason>`
+      for what only exists on one target (Apple's `va_list`, the Mach-O symbol prefix).
+    - A PR that adds a feature to one back end only files the other's gap and adds its row.
+    - *Reason:* a gap that is recorded where the change is made is cheap to keep; a gap found
+      later costs a survey.
+
 ## 7. Third-party libraries
 
 "The whole loop in one program" means ycxx never shells out to another toolchain's assembler,
