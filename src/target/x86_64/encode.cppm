@@ -1,5 +1,5 @@
-// The integer forms used by the first x86-64 emitter (AMD64 Programmer's Manual, vol. 3,
-// Chapter 1 and the instruction reference). Memory operands use ModR/M with disp32.
+// The integer and scalar SSE forms used by the x86-64 emitter (AMD64 Programmer's Manual,
+// vol. 3 and Intel SDM vol. 2). Memory operands use ModR/M with disp32.
 module ycxx.target.x86_64:encode;
 
 import std;
@@ -77,6 +77,12 @@ class Encoder {
   void store_scalar_xmm(Reg base, std::int32_t disp, unsigned xmm, unsigned width) {
     emit({std::uint8_t(width == 4 ? 0xf3 : 0xf2)});
     memory({0x0f, 0x11}, xmm, base, disp, false);
+  }
+
+  // ADD, SUB, MUL and DIV share an opcode between the SS and SD forms (Intel SDM vol. 2).
+  void scalar_float_arithmetic(std::uint8_t opcode, unsigned xmm, Reg base, std::int32_t disp, unsigned width) {
+    emit({std::uint8_t(width == 4 ? 0xf3 : 0xf2)});
+    memory({0x0f, opcode}, xmm, base, disp, false);
   }
 
   // CVTSS2SD converts a binary32 memory operand to a binary64 scalar in XMM.

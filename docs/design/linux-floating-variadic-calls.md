@@ -17,9 +17,10 @@ fixed call. [AMD64 psABI §§3.2.3 and 3.5.7](https://gitlab.com/x86-psABIs/x86-
 
 Only direct calls admit floating variadic signatures and binary64 tail arguments. Variadic
 definitions with floating parameters or results, indirect floating variadic calls and native
-floating `va_arg` remain [#196](https://github.com/yrashk/ycxx/issues/196). Other numeric floating
-operations remain [#201](https://github.com/yrashk/ycxx/issues/201). Fixed INTEGER record calls
-continue to use [#440](linux-integer-aggregates.md) and its register rollback.
+floating `va_arg` remain [#196](https://github.com/yrashk/ycxx/issues/196).
+[Scalar floating arithmetic](linux-scalar-floating-point.md#runtime-arithmetic) covers basic
+binary32 and binary64 operations. Fixed INTEGER record calls continue to use
+[#440](linux-integer-aggregates.md) and its register rollback.
 
 The mixed-object checks use a native `va_list` consumer for exact values, negative zero,
 independent register exhaustion, and mixed stack arguments. An entry observer checks AL before
