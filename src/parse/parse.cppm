@@ -745,6 +745,12 @@ public:
   void set_dmi(EntityId field, Dmi d) { dmis_[std::to_underlying(field)] = d; }
   // A class's base-clause ([class.derived.general]), recorded when its head is analysed.
   void set_bases(EntityId cls, std::vector<sema::BaseRec> bases) { class_bases_[std::to_underlying(cls)] = std::move(bases); }
+  struct ClassBasePattern {
+    ast::BaseSpec base;
+    u32 begin;
+    u32 end;
+    bool replay;
+  };
   std::optional<Dmi> dmi(EntityId field) const {
     auto it = dmis_.find(std::to_underlying(field));
     if (it == dmis_.end()) return std::nullopt;
@@ -904,6 +910,8 @@ public:
   // specialization, its member items analysed with the arguments bound, built whole and then
   // published; none when the template has no definition before `item`, or for a dependent one.
   const sema::ClassRec* instantiate_class(EntityId spec, u32 point);
+  std::optional<sema::BaseRec> instantiate_base(const ClassBasePattern& pattern, u32 item, u32 point,
+                                                std::span<const ast::TemplateParamSema> params, const sema::Bindings& args);
   // The member of a class template specialization a member function entity is, if it is one:
   // its pattern's item and the specialization.
   struct MemberOf {
@@ -1079,6 +1087,7 @@ private:
   std::vector<std::pair<u32, u32>> class_member_order_;  // the cells above, in order of analysis
   std::map<u32, Dmi> dmis_;                       // by field entity
   std::map<u32, std::vector<sema::BaseRec>> class_bases_;  // by class entity
+  std::map<u32, ClassBasePattern> class_base_patterns_;  // by defining item
   std::vector<std::string> ns_of_, eff_ns_;       // by item
   // A namespace definition's components' namespaces, as declared and for lookup, by name
   // (`namespace a::b` declares `a` in the enclosing namespace and `b` in `a`).
@@ -1478,6 +1487,27 @@ std::optional<LangLinkage> linkage_named(const pp::Region& r, u32 tok) {
   if (s == "C") return LangLinkage::c;
   if (s == "C++") return LangLinkage::cxx;
   return std::nullopt;
+}
+
+// A direct base must be a complete non-union class ([class.derived], [class.union.general]).
+std::optional<EntityId> complete_base_class(sema::Sema& s, QualType type, u32 at) {
+  if (!s.types().is_class(type) || s.types().is_dependent(type)) {
+    s.diag(at, Diag::base_not_class, type);
+    return std::nullopt;
+  }
+  if (!s.require_complete(type, at)) return std::nullopt;
+  EntityId base = s.types().class_of(type);
+  if (const sema::ClassRec* r = s.classes().find(base)) {
+    if (r->union_) {
+      s.diag(at, Diag::base_not_class, type);
+      return std::nullopt;
+    }
+    if (r->polymorphic) {
+      s.diag(at, Diag::virtual_base_class, type);
+      return std::nullopt;
+    }
+  }
+  return base;
 }
 
 class ItemAnalysis {
@@ -2610,15 +2640,16 @@ private:
     if (explicit_) return explicit_class_definition(name, name_at);
     if (template_ && ps_.is(Tk::less)) return partial_class_definition(name, name_at);
     std::vector<sema::BaseRec> bases;
-    if (ps_.is(Tk::colon) && !template_) {
+    std::optional<Program::ClassBasePattern> base_pattern;
+    if (ps_.is(Tk::colon)) {
       if (key == Tk::kw_union) {
         s_.diag(ps_.pos(), Diag::union_with_base);  // [class.union.general]/1
         return bad();
       }
-      if (!base_clause(key, name, bases)) return bad();
+      if (!base_clause(key, name, bases, base_pattern)) return bad();
     }
     if (!ps_.is(Tk::l_brace)) {
-      s_.diag(ps_.pos(), Diag::not_supported, ps_.kind());  // bases of templates (#308), `final`
+      s_.diag(ps_.pos(), Diag::not_supported, ps_.kind());  // `final` (#309)
       return bad();
     }
     for (DeclId p : q_.visible_decls(name))
@@ -2642,7 +2673,8 @@ private:
     decls_.push_back(sem);
     s_.own.push_back({name, sem});
     p_->declared(sem, k_);
-    if (!template_) p_->set_bases(sem.entity, std::move(bases));
+    if (!bases.empty()) p_->set_bases(s_.types().class_of(sem.type), std::move(bases));
+    if (base_pattern) p_->class_base_patterns_.emplace(k_, *base_pattern);
     if (template_) p_->current_instantiation(s_.types().class_of(sem.type), k_, sem);
     // The declarators after the closing brace: `struct S { … } s, *p;`, where S is complete.
     ps_.seek(it_->brace_end);
@@ -2706,7 +2738,8 @@ private:
   // A base-clause ([class.derived.general]): `: [virtual] [access] class-name, …`. Each base is a
   // complete class other than this one, named once ([class.mi]/3); its access defaults to
   // private for a `class`, public for a `struct` ([class.access.base]/2).
-  bool base_clause(Tk key, NameId name, std::vector<sema::BaseRec>& bases) {
+  bool base_clause(Tk key, NameId name, std::vector<sema::BaseRec>& bases,
+                   std::optional<Program::ClassBasePattern>& pattern) {
     ps_.bump();
     sema::Types& types = s_.types();
     do {
@@ -2721,8 +2754,28 @@ private:
       else if (ps_.accept(Tk::kw_protected)) access = ast::Access::protected_;
       else if (ps_.accept(Tk::kw_private)) access = ast::Access::private_;
       u32 at = ps_.pos();
+      if (template_ && !ps_.is(Tk::identifier) && !ps_.is(Tk::coloncolon)) {
+        s_.diag(at, Diag::not_supported, ps_.kind());  // computed base types and other base forms (#308)
+        return false;
+      }
+      u32 deferred = ps_.deferred_argument_checks();
       DeclSpec spec = ps_.decl_specifiers();
       if (!spec.ok) return false;
+      if (template_) {
+        if (!spec.has_type || ps_.is(Tk::comma) || ps_.is(Tk::ellipsis) || s_.names_pack(spec.type)) {
+          s_.diag(ps_.pos(), Diag::not_supported, ps_.kind());  // multiple bases and base packs (#308)
+          return false;
+        }
+        Tk last = p_->region().tokens[it_->begin + ps_.pos() - 1].kind;
+        if (last == Tk::kw_const || last == Tk::kw_volatile || spec.elaborated || spec.is_static || spec.is_extern ||
+            spec.is_inline || spec.is_constexpr || spec.is_consteval || spec.is_constinit || spec.is_typedef) {
+          s_.diag(ps_.pos() - 1, Diag::not_supported, last);
+          return false;
+        }
+        spec.type = sema::Types::unqualified(types.canonical(spec.type));
+        pattern = Program::ClassBasePattern{{spec.type, access, 0, 0}, at, ps_.pos(), deferred != ps_.deferred_argument_checks()};
+        if (types.is_dependent(spec.type)) return true;
+      }
       if (!types.is_class(spec.type) || sema::Types::cv(spec.type) != sema::Cv::none) {
         s_.diag(at, Diag::base_not_class, spec.type);
         return false;
@@ -2732,17 +2785,7 @@ private:
         s_.diag(at, Diag::incomplete_type, spec.type);  // the class itself: incomplete here
         return false;
       }
-      if (!s_.require_complete(spec.type, at)) return false;
-      if (const sema::ClassRec* r = p_->classes_.find(b)) {
-        if (r->union_) {
-          s_.diag(at, Diag::base_not_class, spec.type);  // [class.union.general]/1: not a union
-          return false;
-        }
-        if (r->polymorphic) {
-          s_.diag(at, Diag::virtual_base_class, spec.type);
-          return false;
-        }
-      }
+      if (!complete_base_class(s_, spec.type, at)) return false;
       if (std::ranges::any_of(bases, [&](const sema::BaseRec& r) { return r.cls == b; })) {
         s_.diag(at, Diag::duplicate_base, spec.type);
         return false;
@@ -5227,7 +5270,14 @@ const Result<ast::ClassDef>& Program::class_def(u32 item) {
     });
   }
   ast::Builder b(w_->ins, &arena_);
-  def.bases = b.seq(std::span<const ast::BaseSpec>{});
+  std::vector<ast::BaseSpec> bases;
+  if (auto p = class_base_patterns_.find(item); p != class_base_patterns_.end()) {
+    bases.push_back(p->second.base);
+  } else if (cls && *cls != EntityId::none) {
+    if (auto i = class_bases_.find(std::to_underlying(*cls)); i != class_bases_.end())
+      for (const sema::BaseRec& base : i->second) bases.push_back({w_->types.class_type(base.cls), base.access, 0, 0});
+  }
+  def.bases = b.seq(std::span<const ast::BaseSpec>(bases));
   def.members = b.seq(std::span<const ast::MemberRec>(members));
   def.friends = b.seq(std::span<const ast::MemberRec>(c.adl_friends));
   def.synthesized = b.seq(std::span<const ast::DeclSema>{});
@@ -6310,6 +6360,47 @@ std::optional<std::vector<ast::TemplateArg>> Program::substitute_partial_args(
   return back;
 }
 
+std::optional<sema::BaseRec> Program::instantiate_base(const ClassBasePattern& pattern, u32 item, u32 point,
+                                                       std::span<const ast::TemplateParamSema> params, const sema::Bindings& args) {
+  const QualType type = pattern.base.type;
+  const bool dependent = w_->types.is_dependent(type);
+  if (!dependent && !pattern.replay) return sema::BaseRec{w_->types.class_of(type), pattern.base.access};
+
+  std::vector<engine::Diagnostic> sink;
+  ast::Builder b(w_->ins, &arena_);
+  AtItem q(*this, item, false);
+  q.at_point = point;
+  sema::Sema s(*w_, b, q, sink, id(item), 0);
+  std::optional<QualType> substituted;
+  if (pattern.replay) {
+    // An alias can discard an argument whose written type must still substitute ([temp.alias]).
+    const items::Item& it = items_->items[item];
+    Parser ps(*r_, it.begin, it.begin + pattern.end, s);
+    ps.set_questions(q);
+    ps.seek(it.begin + pattern.begin);
+    s.template_scopes.emplace_back(params.begin(), params.end());
+    s.template_args = args;
+    try {
+      DeclSpec spec = ps.decl_specifiers();
+      if (spec.ok && spec.has_type && ps.at_end()) substituted = spec.type;
+    } catch (const TooDeep&) {
+      // The parser has already diagnosed the resource limit.
+    }
+  } else {
+    substituted = s.templates().substitute(type, args);
+  }
+  if (!substituted && !s.has_error_since(0)) s.diag(pattern.begin, Diag::base_substitution, type);
+  // A nondependent base's completeness was checked at the definition, even if its spelling
+  // has dependent arguments whose validity must be checked here.
+  std::optional<EntityId> base;
+  if (substituted && !s.has_error_since(0))
+    base = dependent ? complete_base_class(s, *substituted, pattern.begin) : std::optional(w_->types.class_of(type));
+  for (engine::Diagnostic& d : sink)
+    if (!std::ranges::contains(end_diags_, d)) end_diags_.push_back(std::move(d));
+  if (!base) return std::nullopt;
+  return sema::BaseRec{*base, pattern.base.access, dependent};
+}
+
 const sema::ClassRec* Program::instantiate_class(EntityId spec, u32 point) {
   const u32 key = std::to_underlying(spec);
   // This unit's instantiation: its member records, member patterns and diagnostics are the
@@ -6340,9 +6431,19 @@ const sema::ClassRec* Program::instantiate_class(EntityId spec, u32 point) {
   ast::DeclSema head = w_->ins.seqs.at(item_sema(k).value.decls, 0);
   std::vector<ast::TemplateParamSema> params = w_->ins.seqs.elements(head.template_params);
   sema::Bindings args = partial ? partial->args : sema::Bindings::of(params.empty() ? 0 : params[0].depth, rec.args);
+  classes_instantiating_.insert(key);
+  std::vector<sema::BaseRec> bases;
+  if (auto p = class_base_patterns_.find(k); p != class_base_patterns_.end()) {
+    auto base = instantiate_base(p->second, k, point, params, args);
+    if (!base) {
+      classes_instantiating_.erase(key);
+      return nullptr;
+    }
+    bases.push_back(*base);
+    if (!base->dependent_in_pattern) set_bases(spec, bases);
+  }
   class_args_.emplace(key, args);
   class_patterns_.emplace(key, k);
-  classes_instantiating_.insert(key);
   class_points_.emplace(key, point);
   // Each member item's declaration part, again, with the arguments bound: the members of `spec`,
   // asked at the point of instantiation ([temp.point]).
@@ -6365,6 +6466,7 @@ const sema::ClassRec* Program::instantiate_class(EntityId spec, u32 point) {
   // Built whole, then published once (#156); the first publication wins.
   sema::ClassRec built;
   built.union_ = class_rec_is_union(k);
+  built.bases = std::move(bases);
   built.fields = std::move(c.fields);
   built.members = std::move(c.statics);
   built.types = std::move(c.nested);
