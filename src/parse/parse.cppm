@@ -204,37 +204,20 @@ public:
     return it == member_decls_.end() ? std::nullopt : std::optional(it->second);
   }
 
-  // Whether class `c` is complete at `item` ([class.mem.general]): its definition is an earlier
-  // item that does not enclose `item`.
-  // A function body inside the class is a complete-class context ([class.mem.general]); past
-  // the closing brace of the class an item defines (`own`), that class is complete too.
-  // Whether the class item `item` is a union: its class-head's class-key ([class.union]), the
-  // last one before the brace (a template-head's `class T` comes earlier).
+  // The parsed class-key of a defining item ([class.union]).
   bool class_rec_is_union(u32 item) const {
-    for (u32 t = items_->items[item].brace_begin; t-- > items_->items[item].begin;)
-      if (lex::Tk k = r_->tokens[t].kind; k == lex::Tk::kw_union || k == lex::Tk::kw_struct || k == lex::Tk::kw_class)
-        return k == lex::Tk::kw_union;
-    return false;
-  }
-  // Whether class `c` was declared with `union`, complete or not: the class-key of its first
-  // declaration before `item` (a specialization's, its template's).
-  bool is_union_class(EntityId c, u32 item) {
-    if (EntityId t = w_->entities.rec(c).templ; t != EntityId::none) c = t;
-    auto it = decls_.find(std::to_underlying(c));
-    if (it == decls_.end() || it->second.empty() || it->second.front().first > item) return false;
-    u32 k = it->second.front().first;
-    const items::Item& i = items_->items[k];
-    if (i.kind == ItemKind::class_def) return class_rec_is_union(k);
-    for (u32 t = i.end; t-- > i.begin;)
-      if (lex::Tk kk = r_->tokens[t].kind; kk == lex::Tk::kw_union || kk == lex::Tk::kw_struct || kk == lex::Tk::kw_class)
-        return kk == lex::Tk::kw_union;
-    return false;
+    auto head = class_heads_.find(item);
+    return head != class_heads_.end() && classes_.is_union_class(head->second.entity) == true;
   }
   // An entity's GNU asm label: its symbol as written (docs/EXTENSIONS.md); empty if it has none.
   std::string asm_label(EntityId e) const {
     auto it = asm_labels_.find(std::to_underlying(e));
     return it == asm_labels_.end() ? std::string() : it->second;
   }
+  // Whether class `c` is complete at `item` ([class.mem.general]): its definition is an earlier
+  // item that does not enclose `item`.
+  // A function body inside the class is a complete-class context ([class.mem.general]); past
+  // the closing brace of the class an item defines (`own`), that class is complete too.
   bool is_complete(EntityId c, u32 item, bool body = false, bool own = false) {
     EntityId templ = w_->entities.rec(c).templ;
     if (templ != EntityId::none) specializations_before(item);
@@ -1391,7 +1374,6 @@ public:
   bool instantiation_gave_up() override { return p_->instantiation_gave_up(); }
   std::optional<QualType> specialization_type(EntityId v) override { return p_->specialization_type(v, point()); }
   const std::vector<sema::Expansion>* pattern_expansions() override { return at_point ? p_->expansions(item_, 0) : nullptr; }
-  bool is_union_class(EntityId c) override { return p_->is_union_class(c, point()); }
   std::optional<bool> satisfied(ConstId c) override { return p_->satisfied(c, point()); }
   bool satisfaction_failed(ConstId c) override { return p_->satisfaction_failed(c); }
   bool value_dependent_member(EntityId v) override { return p_->is_value_dependent_member(v); }
@@ -1506,7 +1488,6 @@ public:
   bool instantiation_gave_up() override { return p_->instantiation_gave_up(); }
   std::optional<QualType> specialization_type(EntityId v) override { return p_->specialization_type(v, p_->end()); }
   const std::vector<sema::Expansion>* pattern_expansions() override { return p_->expansions(item_, 1); }
-  bool is_union_class(EntityId c) override { return p_->is_union_class(c, p_->end()); }
   std::optional<bool> satisfied(ConstId c) override { return p_->satisfied(c, p_->end()); }
   bool satisfaction_failed(ConstId c) override { return p_->satisfaction_failed(c); }
   bool value_dependent_member(EntityId v) override { return p_->is_value_dependent_member(v); }
@@ -1599,11 +1580,13 @@ public:
         q_.from = p_->namespace_path(s_.world().entities.rec(c).scope);
       }
     };
-    ps_.declare_class = [this](NameId n) -> std::optional<QualType> {
+    ps_.declare_class = [this](NameId n, Tk key, u32 at) -> std::optional<QualType> {
       if (p_->items().items[k_].parent != items::none &&
           p_->items().items[p_->items().items[k_].parent].kind == ItemKind::class_def)
         return std::nullopt;
-      return s_.types().class_type(class_entity(n));
+      EntityId e = class_entity(n);
+      record_class_key(e, key, at);  // an error leaves the earlier type available for recovery
+      return s_.types().class_type(e);
     };
   }
 
@@ -1744,11 +1727,12 @@ private:
       explicit_ = true;
       ps_.template_ids_in_declarators = true;
       // `template<> class-key X<args>;` declares the specialization; it is incomplete until defined.
-      if ((ps_.is(Tk::kw_struct) || ps_.is(Tk::kw_class)) && ps_.kind(1) == Tk::identifier && ps_.kind(2) != Tk::less) {
+      const Tk key = ps_.kind();
+      if (Parser::is_class_key(key) && ps_.kind(1) == Tk::identifier && ps_.kind(2) != Tk::less) {
         s_.diag(ps_.pos() + 1, Diag::specialization_needs_arguments, ps_.name_of(ps_.tok(1)));
         return bad();
       }
-      if ((ps_.is(Tk::kw_struct) || ps_.is(Tk::kw_class)) && ps_.kind(1) == Tk::identifier && ps_.kind(2) == Tk::less) {
+      if (Parser::is_class_key(key) && ps_.kind(1) == Tk::identifier && ps_.kind(2) == Tk::less) {
         ps_.bump();
         NameId name = ps_.name_of(ps_.tok());
         u32 name_at = ps_.pos();
@@ -1758,8 +1742,7 @@ private:
         if (!ps_.expect(Tk::semi)) return bad();
         ast::DeclSema sem = class_decl(*spec, false);
         sem.flags |= sema::decl_flag::specialization;
-        decls_.push_back(sem);
-        p_->declared(sem, k_);
+        if (!class_declared(sem, key, name_at)) return bad();
         return;
       }
     }
@@ -1787,14 +1770,15 @@ private:
       // `template<…> concept C = constraint-expression;` ([temp.concept]).
       if (ps_.is(Tk::kw_concept)) return concept_definition();
       // `template<…> struct X;` declares a class template ([temp.class]), defined later.
-      if ((ps_.is(Tk::kw_struct) || ps_.is(Tk::kw_class)) && ps_.kind(1) == Tk::identifier && ps_.kind(2) == Tk::semi) {
+      const Tk key = ps_.kind();
+      if (Parser::is_class_key(key) && ps_.kind(1) == Tk::identifier && ps_.kind(2) == Tk::semi) {
         NameId name = ps_.name_of(ps_.tok(1));
+        u32 name_at = ps_.pos() + 1;
         ps_.bump();
         ps_.bump();
         ps_.bump();
         ast::DeclSema sem = class_template_decl(name, false);
-        decls_.push_back(sem);
-        p_->declared(sem, k_);
+        if (!class_declared(sem, key, name_at)) return bad();
         return;
       }
       // `template<…> using N = type-id;` declares an alias template ([temp.alias]).
@@ -1811,7 +1795,7 @@ private:
         return;
       }
       // `template<…> struct X<args>;` declares a partial specialization ([temp.spec.partial]).
-      if ((ps_.is(Tk::kw_struct) || ps_.is(Tk::kw_class)) && ps_.kind(1) == Tk::identifier && ps_.kind(2) == Tk::less) {
+      if (Parser::is_class_key(key) && ps_.kind(1) == Tk::identifier && ps_.kind(2) == Tk::less) {
         ps_.bump();
         NameId name = ps_.name_of(ps_.tok());
         u32 name_at = ps_.pos();
@@ -1822,11 +1806,10 @@ private:
         ast::DeclSema sem = class_decl(*pattern, false);
         sem.flags |= sema::decl_flag::template_ | sema::decl_flag::partial;
         sem.template_params = b_.seq(std::span<const ast::TemplateParamSema>(s_.template_scopes.back()));
-        decls_.push_back(sem);
-        p_->declared(sem, k_);
+        if (!class_declared(sem, key, name_at)) return bad();
         return;
       }
-      if (ps_.is(Tk::kw_template) || ps_.is(Tk::kw_struct) || ps_.is(Tk::kw_class) || ps_.is(Tk::kw_union) ||
+      if (ps_.is(Tk::kw_template) || Parser::is_class_key(key) ||
           ps_.is(Tk::kw_using) || ps_.is(Tk::kw_concept) || (it_->kind != ItemKind::function && !ps_.starts_declaration())) {
         s_.diag(ps_.pos(), Diag::not_supported, ps_.kind());
         return bad();
@@ -1953,12 +1936,10 @@ private:
     if (spec.elaborated && ps_.is(Tk::semi)) {
       s_.settle_type_access(EntityId::none);
       // `class-key identifier ;` declares the class ([dcl.type.elab]); it stays incomplete until
-      // its definition.
+      // its definition. A standalone declaration introduces the name in this scope.
       ps_.bump();
-      if (spec.ok) {
-        decls_.push_back(class_decl(s_.types().class_of(spec.type), false));
-        p_->declared(decls_.back(), k_);  // its class-key says whether it is a union
-      }
+      if (spec.ok && !class_declared(class_decl(class_entity(spec.class_name), false), spec.class_key, spec.class_at))
+        return bad();
       if (!spec.ok || sema::Types::cv(spec.type) != sema::Cv::none || spec.is_static || spec.is_extern) bad();
       return;
     }
@@ -2392,7 +2373,7 @@ private:
   // ([temp.spec.partial]). Its members are analysed as those of `X<args>`, the specialization of
   // its own parameters it is the pattern of, as a class template's are as its current
   // instantiation's.
-  void partial_class_definition(NameId name, u32 name_at) {
+  void partial_class_definition(Tk key, NameId name, u32 name_at) {
     auto spec = partial_class(name, name_at);
     if (!spec) return bad();
     if (!ps_.is(Tk::l_brace)) {
@@ -2407,8 +2388,7 @@ private:
     ast::DeclSema sem = class_decl(pattern, true);
     sem.flags |= sema::decl_flag::template_ | sema::decl_flag::partial;
     sem.template_params = b_.seq(std::span<const ast::TemplateParamSema>(s_.template_scopes.back()));
-    decls_.push_back(sem);
-    p_->declared(sem, k_);
+    if (!class_declared(sem, key, name_at)) return bad();
     p_->current_instantiation(pattern, k_, sem);
     ps_.seek(it_->brace_end);
     q_.own_class_complete = true;
@@ -2463,7 +2443,7 @@ private:
   }
   // `template<> class-key X<args> { … }`: the definition of a class template specialization
   // ([temp.expl.spec]), a class like any other, whose entity is the specialization's.
-  void explicit_class_definition(NameId name, u32 name_at) {
+  void explicit_class_definition(Tk key, NameId name, u32 name_at) {
     auto spec = explicit_class(name, name_at);
     if (!spec) return bad();
     if (!ps_.is(Tk::l_brace)) {
@@ -2476,8 +2456,7 @@ private:
     }
     ast::DeclSema sem = class_decl(*spec, true);
     sem.flags |= sema::decl_flag::specialization;
-    decls_.push_back(sem);
-    p_->declared(sem, k_);
+    if (!class_declared(sem, key, name_at)) return bad();
     ps_.seek(it_->brace_end);
     q_.own_class_complete = true;
     if (!ps_.accept(Tk::semi)) {
@@ -2669,6 +2648,24 @@ private:
     return sem;
   }
 
+  bool record_class_key(EntityId c, Tk key, u32 at) {
+    bool is_union = key == Tk::kw_union;
+    auto previous = sema::Templates(s_.world(), p_->classes_).is_union_class(c);
+    if (previous && *previous != is_union) {
+      s_.diag(at, Diag::conflicting_declaration, s_.world().entities.rec(c).name);
+      return false;
+    }
+    p_->classes_.record_class_key(c, is_union);
+    return true;
+  }
+
+  bool class_declared(const ast::DeclSema& sem, Tk key, u32 at) {
+    if (!record_class_key(sem.entity, key, at)) return false;
+    decls_.push_back(sem);
+    p_->declared(sem, k_);
+    return true;
+  }
+
   // A class definition at namespace scope ([class.pre]): `class-key identifier { … }`, then
   // its declarators. The member-specification is the members' items (§4.2); `class_def` reads
   // them.
@@ -2693,7 +2690,7 @@ private:
     ps_.skip_attributes();
     bool td = ps_.accept(Tk::kw_typedef);  // `typedef class-specifier declarators;` ([dcl.typedef])
     Tk key = ps_.kind();
-    if (key != Tk::kw_struct && key != Tk::kw_class && key != Tk::kw_union) {
+    if (!Parser::is_class_key(key)) {
       s_.diag(ps_.pos(), Diag::not_supported, key);  // other specifiers before the class-key
       return bad();
     }
@@ -2707,8 +2704,8 @@ private:
     NameId name = ps_.is(Tk::identifier) ? ps_.name_of(ps_.tok()) : named->first;
     u32 name_at = ps_.is(Tk::identifier) ? ps_.pos() : named->second;
     if (ps_.is(Tk::identifier)) ps_.bump();
-    if (explicit_) return explicit_class_definition(name, name_at);
-    if (template_ && ps_.is(Tk::less)) return partial_class_definition(name, name_at);
+    if (explicit_) return explicit_class_definition(key, name, name_at);
+    if (template_ && ps_.is(Tk::less)) return partial_class_definition(key, name, name_at);
     std::vector<sema::BaseRec> bases;
     std::optional<Program::ClassBasePattern> base_pattern;
     if (ps_.is(Tk::colon)) {
@@ -2740,9 +2737,8 @@ private:
     if (!template_ && clashes_with_using(name, name_at, ast::DeclKind::class_, s_.types().class_type(class_entity(name))))
       return bad();
     ast::DeclSema sem = template_ ? class_template_decl(name) : class_decl(class_entity(name), true);
-    decls_.push_back(sem);
+    if (!class_declared(sem, key, name_at)) return bad();
     s_.own.push_back({name, sem});
-    p_->declared(sem, k_);
     if (!bases.empty()) p_->set_bases(s_.types().class_of(sem.type), std::move(bases));
     if (base_pattern) p_->class_base_patterns_.emplace(k_, *base_pattern);
     if (template_) p_->current_instantiation(s_.types().class_of(sem.type), k_, sem);
@@ -2791,8 +2787,7 @@ private:
     sema::EntityRec entity{.kind = sema::EntityKind::class_, .name = s_.no_name(), .scope = owner,
                            .unnamed_type_ordinal = it_->unnamed_type_ordinal};
     ast::DeclSema head = class_decl(s_.world().entities.entity(std::move(entity)), true);
-    decls_.push_back(head);
-    p_->declared(head, k_);
+    if (!class_declared(head, key, at)) return bad();
     p_->class_def(k_);
 
     ps_.seek(it_->brace_end);

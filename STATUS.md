@@ -1624,11 +1624,14 @@ session's.*
   (`Templates::transform`); of a dependent type it is a `TTransform` that substitution applies and
   deduction treats as a non-deduced context, mangled as Clang does (`u11__remove_cvIT_E`).
 - Dependent `__is_same`, `__is_reference`, `__is_const`, `__is_volatile`, `__is_array`,
-  `__is_pointer`, and `__is_function` in a `bool` template argument or default are `VDepOp` values
-  with canonical qualified type operands. Substitution retains unresolved operands across aliases
-  and forms valid operand types before evaluating the predicate. The ordinary `VInt` result
-  shares the specialization for literal `true` or `false`
-  ([temp.alias], [temp.type], [temp.deduct.general], #209).
+  `__is_pointer`, `__is_function`, `__is_enum`, `__is_union`, and `__is_class` in a `bool`
+  template argument or default are `VDepOp` values with canonical qualified type operands.
+  Substitution retains unresolved operands across aliases and forms valid operand types before
+  evaluating the predicate. The ordinary `VInt` result shares the specialization for literal
+  `true` or `false` ([temp.alias], [temp.type], [temp.deduct.general], #209).
+- Class and union predicates read the parsed class-key from the current translation unit,
+  including for forward declarations. A class template specialization's primary supplies
+  its kind without instantiation ([temp.class.general], [meta.unary.cat], #209).
 - Listed in docs/EXTENSIONS.md. Tests: `tests/own/builtins/`. `<cstdio>`: 53 → 33 errors.
 - Not yet (#211 follow-up): the built-ins that need the object model, such as
   `__is_constructible`, `__is_convertible`, `__is_assignable`, the `__is_trivially_*` and

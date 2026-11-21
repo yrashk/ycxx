@@ -155,8 +155,6 @@ public:
   // A static local declared ([stmt.dcl]/3), for constant evaluation's questions about it
   // (`global`): its type, and its constant if constant-initialized.
   virtual void static_local(EntityId /*v*/, QualType /*type*/, std::optional<ConstId> /*value*/) {}
-  // Whether class `c`, complete or not, was declared with the class-key `union`.
-  virtual bool is_union_class(EntityId /*c*/) { return false; }
   // The function type of `f`, whose declared return type holds a placeholder, with the return
   // type its definition deduced: a definition before the current point, or a function template
   // specialization's instantiated here ([dcl.spec.auto.general]/11, [temp.inst]/8). None if
@@ -776,11 +774,10 @@ public:
 
   // The built-in `name` names, if it is one ycxx implements.
   const lex::TypeTraitInfo* type_trait(NameId name) { return lex::type_trait(ins().names.spelling(name)); }
-  // Whether a class type is a union: by its class-key, which its first declaration's tokens say.
-  bool is_union_type(QualType t) {
+  // Whether a class type is a union, without requiring its definition.
+  std::optional<bool> is_union_type(QualType t) {
     if (!types().is_class(t)) return false;
-    if (const ClassRec* r = class_rec(types().class_of(t))) return r->union_;
-    return q_->is_union_class(types().class_of(t));
+    return Templates(*w_, classes()).is_union_class(types().class_of(t));
   }
   // `__trait(T)` that transforms a type ([meta.trans]): the type it gives.
   std::optional<QualType> trait_type(lex::TypeTrait t, QualType arg, u32 at) {
@@ -807,11 +804,19 @@ public:
     case is_array: unary_op = ast::DepOp::is_array; break;
     case is_pointer: unary_op = ast::DepOp::is_pointer; break;
     case is_function: unary_op = ast::DepOp::is_function; break;
+    case is_enum: unary_op = ast::DepOp::is_enum; break;
+    case is_union: unary_op = ast::DepOp::is_union; break;
+    case is_class: unary_op = ast::DepOp::is_class; break;
     default: break;
     }
-    if (unary_op)
+    if (unary_op) {
       if (auto v = templates().unary_trait_value(*unary_op, args[0]))
         return literal(b, *v, ValueCategory::prvalue, begin, end);
+      if (!types().is_dependent(args[0])) {
+        diag(begin, Diag::trait_not_applicable, args[0]);
+        return {NodeId::none, begin, end};
+      }
+    }
     // The generic dependent node lets a template body re-parse the operand.
     if (std::ranges::any_of(args, [&](QualType a) { return types().is_dependent(a); })) return dependent_node({}, begin, end, b);
     QualType x = args[0], c = types().canonical(x);
@@ -826,20 +831,16 @@ public:
     case is_integral: v = types().is_integral(c); break;
     case is_floating_point: v = types().is_floating(c); break;
     case is_arithmetic: v = types().is_integral(c) || types().is_floating(c); break;
-    case is_enum: v = types().is_enum(c); break;
     case is_scoped_enum:
       if (types().is_enum(c))
         if (const EnumRec* e = enum_rec(types().enum_of(c))) v = e->scoped;
       break;
-    // The class-key says whether a class is a union, complete or not ([class.pre]).
-    case is_class: v = types().is_class(c) && !is_union_type(c); break;
-    case is_union: v = is_union_type(c); break;
     case is_member_pointer: v = types().is_member_pointer(c); break;
     case is_member_object_pointer: v = types().is_member_pointer(c) && !types().is_function(types().rec(c).inner); break;
     case is_member_function_pointer: v = types().is_member_pointer(c) && types().is_function(types().rec(c).inner); break;
     case is_polymorphic:
     case has_virtual_destructor:
-      if (types().is_class(c) && !is_union_type(c)) {
+      if (types().is_class(c) && is_union_type(c) != true) {
         const ClassRec* r = cls();
         if (!r) return {NodeId::none, begin, end};
         v = t == is_polymorphic ? r->polymorphic : r->virtual_destructor;
@@ -854,7 +855,7 @@ public:
     case is_object: v = types().is_object(c); break;
     case is_empty:
       // [meta.unary.prop]: a complete class, not a union, with no non-static data members.
-      if (is_union_type(c)) v = false;
+      if (is_union_type(c) == true) v = false;
       else if (const ClassRec* r = cls()) v = !r->polymorphic && r->fields.empty();
       else if (types().is_class(c)) return {NodeId::none, begin, end};
       break;
