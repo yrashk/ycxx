@@ -1202,6 +1202,8 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   Ordinary calls expand class specializations' canonical template type arguments, including
   defaults and type packs. Reaching a class as a base or owner contributes its namespace.
   A separate occurrence of its type expands its arguments. Member-pointer values still need #411.
+- Ordinary calls also associate the declaring namespace of a namespace-scope type
+  template supplied as a template-template argument ([basic.lookup.argdep]).
 - Each associated namespace search uses preceding declarations that bind names in the scope.
   It uses namespace using-declarations' fixed targets and the latest redeclaration found
   for each function. Using-directives do not contribute to ADL. Sema merges the candidates with
@@ -1217,7 +1219,7 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   existing point of instantiation ([temp.dep.candidate]). Per-name incremental scheduling
   remains under #16.
 - Remaining work in #165 includes declarations of functions in blocks, exact lookup for
-  operators, template template arguments, dependent-call template argument associations,
+  operators, member templates as template arguments, dependent-call template argument associations,
   overload-set arguments and complete unqualified template-id lookup.
 - Tests: `tests/own/argument-dependent-lookup/` and `tests/own/range-for/adl*.run.cpp`.
 
