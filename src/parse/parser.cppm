@@ -3651,7 +3651,7 @@ public:
     // variable of the name hides it.
     if ((is(Tk::l_paren) || is(Tk::l_brace)) && !s_->scope_names_object(*s, n))
       if (auto t = s_->scope_type(*s, n)) {
-        if (substituting_partial_arguments) s_->type_member_access(*s, n, name_at);
+        s_->type_member_access(*s, n, name_at, /*direct_alias_only=*/!substituting_partial_arguments);
         return type_conversion(*t, begin);
       }
     if (is(Tk::less)) {

@@ -1125,13 +1125,20 @@ public:
     return false;
   }
   // Whether the type `S::n`, named at `at`, is accessible here: a nested type of a class
-  // ([class.access]/4); diagnosed if not.
-  bool type_member_access(const Scope& s, NameId n, u32 at) {
+  // ([class.access]/4); diagnosed if not. Ordinary functional conversions check directly
+  // declared aliases and typedefs of non-template records.
+  bool type_member_access(const Scope& s, NameId n, u32 at, bool direct_alias_only = false) {
     if (!s.type || !types().is_class(*s.type) || types().is_dependent(*s.type)) return true;
     EntityId naming = types().class_of(*s.type);
+    if (direct_alias_only) {
+      const EntityRec& record = w_->entities.rec(naming);
+      if (record.kind != EntityKind::class_ || record.templ != EntityId::none) return true;
+    }
     auto r = nested_member(naming, n);
     if (!r) return true;
     auto [t, c] = *r;
+    if (direct_alias_only && (c != naming || w_->entities.rec(t.entity).kind != EntityKind::type_alias ||
+                              types().is_dependent(t.type))) return true;
     if (defer_type_access && (!accessible(c, class_rec(c)->access_of(t.entity), naming) || !accessible_naming_base(naming, c))) {
       deferred_access_.push_back({c, t.entity, n, at});
       return true;
