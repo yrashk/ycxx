@@ -6,3 +6,6 @@ Current main 9d6eac2 has verified predecessor tree 3704c3bdb5ce.
 Exact combined tree 977291228335 passed GCC 16.2 Debug fast, 67 CTests, and 2,017 driver cases with 924 passes, 484 expected failures, 609 platform-gated, and no unexpected results.
 Independent GCC/Clang fixtures and both ycxx targets passed their focused outcomes. Three native Linux probes and same-daemon edits passed. Pinned c3315ab3 type_traits and iterator now reach #520.
 The original preservation branch and notes remain available. A green current-base PR precedes the explicit takeover notice on the original claimed issues.
+
+Refreshed continuation c420b23195e4 on actual main b688f3fadc2f, tree 85da24a84d1b.
+The first hosted oracles verified that template-base-polymorphic is valid standard C++. It now uses accept classification with a ycxx-specific expected failure. The focused ycxx probe still requires the existing polymorphic-base diagnostic. GCC and Clang repository drivers, strict Darwin arm64 Clang and both ycxx targets passed the focused intended behavior. The exact refreshed gate passed all 67 CTests and 2,017 cases (923 passes, 485 expected failures and 609 platform gates), with no unexpected results.
