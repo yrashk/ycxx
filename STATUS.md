@@ -1286,8 +1286,8 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
 - **Attributes:** `[[…]]` attribute-specifiers on declarations, class heads and statements, and
   GNU `__attribute__((…))` before and after declarators, are parsed. The parser skips
   unrecognized attributes ([dcl.attr.grammar]/6) and diagnoses a standard attribute before a
-  linkage-specification ([dcl.link]). GNU hidden visibility on ordinary namespace-scope functions
-  is implemented for x86-64 ELF. [#602](https://github.com/yrashk/ycxx/issues/602)
+  linkage-specification with a single declaration ([dcl.link]). GNU hidden visibility on ordinary
+  namespace-scope functions is implemented for x86-64 ELF. [#602](https://github.com/yrashk/ycxx/issues/602)
 - **Asm labels:** `__asm("…")` after a declarator gives the entity's symbol exactly as written
   (`Program::asm_label`, `pipeline::Entity::asm_label`), as the SDK's `__DARWIN_ALIAS` needs.
   Both extensions are listed in `docs/EXTENSIONS.md` (DECISIONS §1.2).
