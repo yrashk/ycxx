@@ -139,7 +139,6 @@ draft/dcl/dcl.attr.fallthrough-1.reject.cpp errors elsewhere: '(' not supported 
 draft/dcl/dcl.attr.grammar-1.reject.cpp errors elsewhere: '[' not supported yet
 draft/dcl/dcl.attr.grammar-2.reject.cpp errors elsewhere: '[' not supported yet
 draft/dcl/dcl.attr.nodiscard-1.accept.cpp 'struct' not supported yet
-draft/dcl/dcl.attr.noreturn-1.accept.cpp '[' not supported yet
 draft/dcl/dcl.constexpr-1.reject.cpp errors elsewhere: '&' not supported yet
 draft/dcl/dcl.constexpr-2.reject.cpp errors elsewhere: 'static' is not supported yet
 draft/dcl/dcl.contract.func-2.reject.cpp errors elsewhere: expected ';'
@@ -221,7 +220,6 @@ draft/dcl/namespace.udecl-5.reject.cpp errors elsewhere: 'struct' not supported 
 draft/dcl/namespace.udecl-8.reject.cpp errors elsewhere: 'namespace' not supported yet
 draft/dcl/namespace.udecl-9.reject.cpp errors elsewhere: 'struct' not supported yet
 draft/except/except.ctor-1.accept.cpp 'struct' not supported yet
-draft/except/except.handle-2.accept.cpp 'noexcept' not supported yet
 draft/except/except.pre-1.reject.cpp errors elsewhere: 'goto' not supported yet
 draft/except/except.pre-3.accept.cpp 'class' not supported yet
 draft/except/except.spec-1.reject.cpp errors elsewhere: 'noexcept' not supported yet
