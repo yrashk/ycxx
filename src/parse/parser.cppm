@@ -4704,11 +4704,11 @@ public:
     // A manifestly constant-evaluated expression may consume an immediate pointer.
     // Its initializer checks the final value for an escape.
     if (auto entity = s_->immediate_result_entity(*v.value)) {
-      if (!s_->constant_reference_context) {
+      if (!s_->constant_reference_context && !s_->trial_initializer) {
         s_->diag(call.begin, Diag::immediate_address, s_->world().entities.rec(*entity).name);
         return {NodeId::none, call.begin, call.end};
       }
-      s_->folded_immediate_result = true;
+      s_->folded_immediate_result = *entity;
     }
     return s_->literal(call.type(), *v.value, ast::ValueCategory::prvalue, call.begin, call.end);
   }
@@ -4912,7 +4912,7 @@ public:
     sema::Evaluated v = scalar_record ? evaluator.evaluate_initializer(init, /*zero_default=*/false)
                                      : evaluator.evaluate(init);
     if (v.value) {
-      if (is_constexpr && s_->folded_immediate_result)
+      if (is_constexpr && s_->folded_immediate_result != EntityId::none)
         if (auto entity = s_->immediate_result_entity(*v.value)) {
           s_->diag(init.begin, Diag::immediate_address, s_->world().entities.rec(*entity).name);
           return;

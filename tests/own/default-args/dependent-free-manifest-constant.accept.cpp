@@ -13,3 +13,5 @@ consteval NestedPointer make_pointer() { return nested_target; }
 consteval int invoke_pointer(NestedPointer p = make_pointer()) { return p(); }
 constexpr int consumed = invoke_pointer();
 static_assert(consumed == 7);
+
+int trial_constant = consume_pointer(identity_pointer(nested_target));

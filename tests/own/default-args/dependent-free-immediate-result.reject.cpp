@@ -9,3 +9,6 @@ template<class T> consteval Pointer nested_leak(Pointer p = make_pointer<T>()) {
 Pointer use_nested() { return nested_leak<int>(); } //! error
 constexpr Pointer escaped = make_pointer<int>(); //! error
 constinit Pointer non_constexpr_escape = make_pointer<int>(); //! error
+
+int consume_dynamically(Pointer) { return 8; }
+int dynamic_initializer = consume_dynamically(make_pointer<int>()); //! error

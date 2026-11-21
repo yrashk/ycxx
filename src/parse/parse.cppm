@@ -1712,6 +1712,7 @@ std::optional<NodeId> AtItem::replay_function_default(sema::Sema& caller, const 
   replay.unevaluated = caller.unevaluated;
   replay.immediate_context = caller.immediate_context || caller.is_consteval(function);
   replay.constant_reference_context = caller.constant_reference_context;
+  replay.trial_initializer = caller.trial_initializer;
   const auto params = seqs.elements(decl->template_params);
   if (params.empty()) return std::nullopt;
   replay.template_scopes.push_back(params);
@@ -5426,7 +5427,9 @@ private:
       }
       return declare_alias(d.name, d.name_at, d.type);
     }
-    sema::Sema::ImmediateReferenceScope references(s_, (spec.is_constexpr || spec.is_constinit) && !types.is_function(d.type));
+    sema::Sema::ImmediateReferenceScope references(
+        s_, (spec.is_constexpr || spec.is_constinit) && !types.is_function(d.type),
+        /*trial=*/!types.is_function(d.type));
     u32 ord = static_cast<u32>(decls_.size());
     // `T a[] = {…}`: the bound from the list ([dcl.array]/8), parsed here and used below.
     std::unique_ptr<sema::Braced> early;
@@ -5875,6 +5878,10 @@ private:
     // ([dcl.constexpr], [dcl.constinit]) or is not supported yet: an inline variable's or a
     // variable template's (#368), and a scalar's the front end has no code for.
     auto dynamic_ok = [&](u32 at, std::uint64_t reason) {
+      if (EntityId entity = s_.folded_immediate_result; entity != EntityId::none) {
+        s_.diag(at, Diag::immediate_address, s_.world().entities.rec(entity).name);
+        return false;
+      }
       if (spec.is_constexpr || requires_constinit) {
         s_.diag(at, Diag::not_constant, reason);
         return false;
@@ -6019,7 +6026,7 @@ private:
     } else if (!fn && sema::Types::is_const(d.type) && !spec.is_extern) {
       s_.diag(d.name_at, Diag::const_uninitialized, d.name);
     }
-    if (value != ConstId::none && (spec.is_constinit || (spec.is_constexpr && s_.folded_immediate_result)))
+    if (value != ConstId::none && (requires_constinit || s_.folded_immediate_result != EntityId::none))
       if (auto entity = s_.immediate_result_entity(value))
         s_.diag(init.begin, Diag::immediate_address, s_.world().entities.rec(*entity).name);
     s_.permit_constant_initializer(d.begin, d.type, value);

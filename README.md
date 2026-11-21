@@ -215,6 +215,7 @@ unqualified braced prvalue such as `B{7}`, with an explicit initializer for each
   by argument-dependent lookup. Unqualified calls can find and rank functions in associated
   namespaces, including those of class template type arguments in ordinary calls. Functions
   support default arguments, recursion, operator overloading and calls through pointers.
+  Free function templates can instantiate omitted dependent scalar defaults after overload selection.
   Ordinary free binary operators use argument-dependent lookup, including associated base namespaces.
   Nonmember operators can be called explicitly by name, including with namespace qualification.
   [#219](https://github.com/yrashk/ycxx/issues/219)
