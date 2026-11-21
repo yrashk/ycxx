@@ -772,8 +772,14 @@ public:
     switch (t) {
     case is_same: return structural_trait(templates().is_same_value(args[0], args[1]));
     case is_reference: return structural_trait(templates().unary_trait_value(ast::DepOp::is_reference, args[0]));
-    case is_const: return structural_trait(templates().unary_trait_value(ast::DepOp::is_const, args[0]));
-    case is_volatile: return structural_trait(templates().unary_trait_value(ast::DepOp::is_volatile, args[0]));
+    case is_const:
+    case is_volatile: {
+      auto op = t == is_const ? ast::DepOp::is_const : ast::DepOp::is_volatile;
+      if (auto v = templates().unary_trait_value(op, args[0]))
+        return literal(b, *v, ValueCategory::prvalue, begin, end);
+      // The generic dependent node lets a template body re-parse the operand.
+      break;
+    }
     default: break;
     }
     if (std::ranges::any_of(args, [&](QualType a) { return types().is_dependent(a); })) return dependent_node({}, begin, end, b);
