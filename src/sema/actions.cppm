@@ -3060,12 +3060,49 @@ public:
   // consteval branch of `if consteval`. A call to a consteval function elsewhere is an immediate
   // invocation, evaluated where it appears.
   u32 immediate_context = 0;
+  // Manifestly constant-evaluated initializers and assertions permit these references.
+  // The ordinary immediate-invocation evaluator still performs its existing folding.
+  bool constant_reference_context = false;
+  struct ImmediateReferenceScope {
+    bool& context;
+    bool saved;
+    ImmediateReferenceScope(Sema& sema, bool allowed)
+        : context(sema.constant_reference_context), saved(std::exchange(context, allowed)) {}
+    ~ImmediateReferenceScope() { context = saved; }
+  };
+
+  u8 immediate_reference_flags(bool immediate) {
+    if (!immediate || immediate_context || constant_reference_context || unevaluated) return 0;
+    has_immediate_addresses_ = true;
+    return expr_flag::immediate_address;
+  }
+
+  bool needs_immediate_reference_check() const { return has_immediate_addresses_; }
+
+  // Constant initialization can consume an immediate function reference and produce an
+  // ordinary value. A non-constexpr object still cannot retain an immediate pointer
+  // ([expr.const.const]); a reference variable is not itself such an object.
+  void permit_constant_initializer(u32 declaration, QualType target, ConstId value) {
+    if (!has_immediate_addresses_ || value == ConstId::none) return;
+    auto immediate_value = [&](this auto&& self, ConstId id) -> bool {
+      if (ins().values.is<ast::VEntity>(id)) return is_consteval(ins().values.get<ast::VEntity>(id).entity);
+      if (ins().values.is<ast::VLvalue>(id)) return self(ins().values.get<ast::VLvalue>(id).base);
+      if (ins().values.is<ast::VAggregate>(id))
+        return std::ranges::any_of(ins().seqs.elements(ins().values.get<ast::VAggregate>(id).elems),
+                                   [&](ConstId element) { return self(element); });
+      return false;
+    };
+    if (types().is_reference(target) || !immediate_value(value)) constant_immediate_initializers_.insert(declaration);
+  }
+
   bool is_consteval(EntityId f) const { return consteval_.contains(std::to_underlying(f)); }
   // An immediate function may be named within an immediate invocation ([expr.const]). Wait
   // until the completed tree, where a folded invocation no longer contains the address operand.
   void check_immediate_addresses(NodeId root, u32 offset = 0) {
     if (!has_immediate_addresses_ || root == NodeId::none) return;
     auto check = [&](this const auto& self, const ast::Red& node) -> void {
+      if ((node.is<ast::Declarator>() || node.is<ast::LocalVar>() || node.is<ast::StaticVar>()) &&
+          constant_immediate_initializers_.contains(node.offset())) return;
       if (node.is<ast::DeclRef>()) {
         auto ref = node.get<ast::DeclRef>();
         if (ref.info.flags & expr_flag::immediate_address)
@@ -4751,8 +4788,8 @@ public:
       overloads_[std::to_underlying(r.id)] = std::move(set);
       return r;
     }
-    if (d.kind == ast::DeclKind::function && (d.flags & decl_flag::consteval_))
-      consteval_.insert(std::to_underlying(d.entity));
+    const bool immediate = d.kind == ast::DeclKind::function && (d.flags & decl_flag::consteval_);
+    if (immediate) consteval_.insert(std::to_underlying(d.entity));
     if (d.kind == ast::DeclKind::function && (d.flags & decl_flag::deleted)) deleted_.insert(std::to_underlying(d.entity));
     if (is_type(d.kind)) {  // [expr.prim.id]: a type is not an expression
       diag(begin, Diag::type_as_expression, name);
@@ -4770,7 +4807,12 @@ public:
       if (!t) return {NodeId::none, begin, end};
       dt = *t;
     }
-    ExprInfo info{types().referee(dt), ValueCategory::lvalue, 0};
+    u8 flags = 0;
+    if (immediate) {
+      EntityId scope = w_->entities.rec(d.entity).scope;
+      flags = immediate_reference_flags(scope == EntityId::none || w_->entities.rec(scope).kind == EntityKind::namespace_);
+    }
+    ExprInfo info{types().referee(dt), ValueCategory::lvalue, flags};
     bool object_reference = types().is_reference(dt) && !types().is_function(info.type);
     Ex r = node(ast::DeclRef{info, d.entity, object_reference}, begin, end, info);
     if (adl) unqualified_[std::to_underlying(r.id)] = {d};
@@ -5144,9 +5186,9 @@ public:
     // Taking a specialization's address demands its definition ([temp.inst]).
     if (match.decl->flags & decl_flag::template_)
       demands.push_back({match.entity, ast::Loc{item_, loc_base_ + set->name.begin}});
-    const bool immediate = (match.decl->flags & decl_flag::consteval_) && !immediate_context;
-    has_immediate_addresses_ = has_immediate_addresses_ || immediate;
-    ExprInfo info{match.type, ValueCategory::lvalue, immediate ? expr_flag::immediate_address : u8(0)};
+    const bool immediate = (match.decl->flags & decl_flag::consteval_) != 0;
+    if (immediate) consteval_.insert(std::to_underlying(match.entity));
+    ExprInfo info{match.type, ValueCategory::lvalue, immediate_reference_flags(immediate)};
     Ex r = node(ast::DeclRef{info, match.entity}, set->name.begin, set->name.end, info);
     if (!set->address) return {r.id, e.begin, e.end, r.info};
     ExprInfo pi{types().pointer(match.type), ValueCategory::prvalue, 0};
@@ -6882,12 +6924,22 @@ public:
     }
     EntityId function = EntityId::none;
     QualType ft = callee.type();
-    Ex named = callee;  // `(f)()` takes f's default arguments too ([expr.call]/1)
-    while (auto p = as<ast::Paren>(named)) named = Ex{p->operand.id};
+    auto unparenthesized = [&](Ex expression) {
+      while (auto p = as<ast::Paren>(expression)) expression = Ex{p->operand.id};
+      return expression;
+    };
+    Ex named = unparenthesized(callee);  // `(f)()` takes f's default arguments too ([expr.call]/1)
     if (auto d = as<ast::DeclRef>(named); d && types().is_function(ft) && defaults.empty()) defaults = defaults_of(named, d->entity);
-    if (auto d = as<ast::DeclRef>(callee); d && types().is_function(ft)) {
+    if (auto d = as<ast::DeclRef>(named); d && types().is_function(ft) &&
+        (named.id == callee.id || is_consteval(d->entity))) {
       function = d->entity;
     } else {
+      // The address of a named immediate function is itself a known callee. It does not
+      // supply default arguments because the call is through a pointer ([expr.call]).
+      if (auto address = as<ast::Unary>(named); address && address->op == ast::UnaryOp::address_of) {
+        if (auto d = as<ast::DeclRef>(unparenthesized(Ex{address->operand.id})); d && is_consteval(d->entity))
+          function = d->entity;
+      }
       callee = rvalue(callee);
       ft = callee.type();
       if (types().is_pointer(ft) && types().is_function(types().pointee(ft))) ft = types().pointee(ft);
@@ -7279,6 +7331,7 @@ private:
   };
   std::vector<LabelPoint> labels_, gotos_;
   bool has_immediate_addresses_ = false;
+  std::set<u32> constant_immediate_initializers_;
   std::set<u32> consteval_;                           // consteval functions named so far
   std::map<u32, std::vector<Ex>> list_elems_;         // by draft InitList
   struct DeferredAccess {

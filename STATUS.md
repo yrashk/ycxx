@@ -2470,8 +2470,11 @@ values, end to end; results match Clang's bit for bit.
   ([temp.deduct.call]/6).
 - Related work covers pointers to non-static members (#238), `noexcept` function types (#219),
   a template-id without a target type (#335), and function pointer or reference template
-  arguments (#406). A free immediate function selected from an overload is diagnosed outside an
-  immediate invocation or context. General immediate-function name validation is tracked in #102.
+  arguments (#406).
+- An ordinary free immediate function is diagnosed when its name escapes through a runtime
+  pointer, reference argument, or constructor argument. The same check applies after overload
+  selection. It preserves immediate invocations through a name or parenthesized name,
+  unevaluated operands, and manifestly constant-evaluated initializers and assertions (#102).
 - The Linux x86-64 backend supports calling through the address of an ordinary function with
   internal or external linkage. [#407](https://github.com/yrashk/ycxx/issues/407)
 - Tests are in `tests/own/function-pointers/`, with draft examples for [over.over] and

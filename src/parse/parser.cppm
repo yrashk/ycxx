@@ -3761,7 +3761,11 @@ public:
     }
     u32 body_begin = pos();
     int saved = std::exchange(angle_, 0);
-    Ex body = compound_statement();
+    Ex body;
+    {
+      sema::Sema::ImmediateReferenceScope references(*s_, /*allowed=*/false);
+      body = compound_statement();
+    }
     angle_ = saved;
     Ex r = s_->close_lambda(body, body_begin, pos());
     if (head) s_->template_scopes.pop_back();
@@ -4216,6 +4220,7 @@ public:
       skip_to_semi();
       return {NodeId::none, begin, pos()};
     }
+    sema::Sema::ImmediateReferenceScope references(*s_, /*allowed=*/true);
     Ex e = constant_expression();
     Ex cond = s_->to_bool(e, e.begin);
     sema::ConstId message = sema::ConstId::none;
@@ -4262,7 +4267,8 @@ public:
   // invocation: it must be a constant expression, and it is replaced by its value ([expr.const]).
   Ex immediate(Ex call) {
     auto c = s_->as<ast::Call>(call);
-    if (!c || c->function == ast::EntityId::none || !s_->is_consteval(c->function) || s_->immediate_context) return call;
+    if (!c || c->function == ast::EntityId::none || !s_->is_consteval(c->function) || s_->immediate_context || s_->unevaluated)
+      return call;
     sema::Evaluated v = sema::Evaluator(*s_, questions()).evaluate(call);
     if (!v.constant) {
       s_->diag(call.begin, Diag::not_constant, v.reason);
@@ -4328,6 +4334,7 @@ public:
       skip_param();
       return {NodeId::none, begin, pos()};
     }
+    sema::Sema::ImmediateReferenceScope references(*s_, s_->constant_reference_context || spec.is_constexpr);
     if (spec.is_constexpr) d.type = s_->types().add_cv(d.type, sema::Cv::const_);
     u32 local = s_->declare_local(d.name, d.type, 0, d.name_at);
     Ex init;
@@ -4354,6 +4361,7 @@ public:
     }
     if (!placeholder && !s_->types().is_reference(d.type)) constant_local(local, d.type, spec.is_constexpr, init);
     ast::EntityId dtor = s_->types().is_reference(d.type) ? ast::EntityId::none : s_->destructor_of(d.type);
+    record_local_constant_initializer(local, begin, init);
     Ex var = s_->node(ast::LocalVar{local, sema::Sema::at(init, begin), dtor}, begin, pos());
     s_->set_local_decl(local, var.id);
     if (init.ok() || dtor != ast::EntityId::none) s_->set_initialized(local);
@@ -4419,6 +4427,21 @@ public:
     Ex e = is(Tk::semi) ? Ex{} : s_->discarded(expression());
     if (!expect(Tk::semi)) skip_to_semi();
     return s_->node(ast::ExprStmt{sema::Sema::at(e, begin)}, begin, pos());
+  }
+
+  void record_local_constant_initializer(u32 local, u32 declaration, Ex init) {
+    if (!s_->needs_immediate_reference_check() || !init.ok()) return;
+    QualType target = s_->local(local).type;
+    if (s_->types().is_reference(target) && s_->types().is_function(s_->types().referee(target))) {
+      auto v = sema::Evaluator(*s_, questions()).evaluate_reference_initializer(init);
+      if (v.value) s_->permit_constant_initializer(declaration, target, *v.value);
+    } else if (auto value = s_->local_values()[local]) {
+      s_->permit_constant_initializer(declaration, target, *value);
+    } else if (sema::Types::is_const(target) && !sema::Types::is_volatile(target) &&
+               (s_->types().is_integral(target) || s_->types().is_enum(target))) {
+      auto v = sema::Evaluator(*s_, questions()).evaluate(init);
+      if (v.value) s_->permit_constant_initializer(declaration, target, *v.value);
+    }
   }
 
   // A local usable in constant expressions ([expr.const]): constexpr, or a const integral one
@@ -4731,6 +4754,7 @@ public:
   // constant it is initialized with when its initializer is a constant expression
   // ([basic.start.static]).
   Ex variable_node(const DeclSpec& spec, u32 local, Ex init, ast::EntityId dtor, u32 dbegin) {
+    record_local_constant_initializer(local, dbegin, init);
     if (!spec.is_static) return s_->node(ast::LocalVar{local, sema::Sema::at(init, dbegin), dtor}, dbegin, pos());
     if (s_->types().is_reference(s_->local(local).type)) {
       s_->diag(dbegin, Diag::not_supported, Tk::kw_static);  // a static reference (#367)
@@ -4744,6 +4768,7 @@ public:
       if (v.value) value = *v.value;
       else if (spec.is_constinit && !v.dependent) s_->diag(init.begin, Diag::not_constant, v.reason);
     }
+    s_->permit_constant_initializer(dbegin, s_->local(local).type, value);
     s_->static_value(local, value == ast::ConstId::none ? std::nullopt : std::optional(value));
     return s_->node(ast::StaticVar{local, sema::Sema::at(init, dbegin), value, dtor}, dbegin, pos());
   }
@@ -4934,6 +4959,7 @@ public:
         skip_to_semi();
         return {NodeId::none, begin, pos()};
       }
+      sema::Sema::ImmediateReferenceScope references(*s_, s_->constant_reference_context || spec.is_constexpr);
       // [dcl.constexpr]: a constexpr variable is const.
       if (spec.is_constexpr) d.type = s_->types().add_cv(d.type, sema::Cv::const_);
       // `char s[] = "…"`: the bound from the literal, null included ([dcl.init.string]/1).
