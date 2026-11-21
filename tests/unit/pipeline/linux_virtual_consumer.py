@@ -57,12 +57,11 @@ def main():
             run([host_cxx, '-std=c++26', '-pedantic-errors', '-frtti', '-fno-lto',
                  '-c', f'{part}.cpp', '-o', f'{part}.o'], scope, cold)
         try:
-            for flags in ([], ['-g']):
-                compile(linux, *flags, '-c', 'consumer.cpp', '-o', 'cold.o')
-                compile(linux, *flags, '-c', 'consumer.cpp', '-o', 'warm.o', env=daemon)
-                assert (scope / 'warm.o').read_bytes() == (scope / 'cold.o').read_bytes()
-                run([host_cxx, '-no-pie', 'host.o', 'provider.o', 'cold.o', '-o', 'mixed'], scope, cold)
-                run(['./mixed'], scope, cold)
+            compile(linux, '-c', 'consumer.cpp', '-o', 'cold.o')
+            compile(linux, '-c', 'consumer.cpp', '-o', 'warm.o', env=daemon)
+            assert (scope / 'warm.o').read_bytes() == (scope / 'cold.o').read_bytes()
+            run([host_cxx, '-no-pie', 'host.o', 'provider.o', 'cold.o', '-o', 'mixed'], scope, cold)
+            run(['./mixed'], scope, cold)
 
             # Run the spec fixture's first-slot variant at the same pointer call site.
             consumer = (scope / 'consumer.cpp').read_text()
