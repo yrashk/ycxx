@@ -1,3 +1,2 @@
 int next();
-struct Record { int first = next(); };
-constinit Record one; //! error
+struct Record { int first = next(); }; constinit Record one; //! error

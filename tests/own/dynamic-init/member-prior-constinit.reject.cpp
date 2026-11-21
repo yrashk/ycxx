@@ -1,4 +1,4 @@
 int next();
-struct Record { int first = next(); };
+struct Record;
 extern constinit Record one;
-Record one; //! error
+struct Record { int first = next(); }; Record one; //! error
