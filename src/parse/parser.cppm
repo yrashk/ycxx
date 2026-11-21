@@ -3268,6 +3268,8 @@ public:
           bool ok = true;
           std::optional<u32> pack_at;
           int saved = std::exchange(angle_, 0);
+          // In a variadic trait, `...` applies to the operand, including inside a parameter declarator.
+          const bool saved_packs = std::exchange(packs_in_declarators_, packs_in_declarators_ && !tr->variadic);
           for (int i = 0; i < tr->arity || (ok && tr->variadic && is(Tk::comma)); ++i) {
             if (i > 0 && !expect(Tk::comma)) ok = false;
             auto t = ok ? type_id() : std::nullopt;
@@ -3278,6 +3280,7 @@ public:
               bump();
             }
           }
+          packs_in_declarators_ = saved_packs;
           angle_ = saved;
           if (!expect(Tk::r_paren) || !ok) return {NodeId::none, begin, pos()};
           if (pack_at) {

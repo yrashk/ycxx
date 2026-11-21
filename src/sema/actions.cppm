@@ -913,6 +913,11 @@ public:
       // Unknown-bound arrays are admitted on their own. Known-bound arrays need a complete element.
       while (ts.is_array(type) && ts.rec(type).bound_value != ConstId::none)
         type = ts.canonical(ts.rec(type).inner);
+      // An enumeration without a fixed underlying type is incomplete in its own enumerator list.
+      if (ts.is_enum(type)) {
+        const EnumRec* defining = q_->defining_enum(ts.enum_of(type));
+        if (defining && !defining->fixed) return fail(Diag::constructibility_incomplete, operand);
+      }
       if (ts.is_class(type)) {
         const EntityId cls = ts.class_of(type);
         if (!q_->is_complete_at_source(cls)) {

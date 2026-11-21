@@ -10,9 +10,11 @@ The operand domain is checked before selecting a result. Each type must be compl
 `void`, or an array of unknown bound. A known-bound array needs a complete element type.
 A class check uses the original trait source context, including the position of a default
 member initializer when it is re-read. Pointer and reference types do not require completion
-of the type they designate. An incomplete operand violates the trait's domain and retains
+of the type they designate. An enumeration without a fixed underlying type is incomplete
+in its own enumerator list. An incomplete operand violates the trait's domain and retains
 its diagnostic through substitution. [Type properties](https://eel.is/c++draft/meta.unary.prop)
 · [Complete types](https://eel.is/c++draft/basic.types.general)
+· [Enumerations](https://eel.is/c++draft/dcl.enum)
 
 A function or cv `void` target gives false for every admitted argument sequence. With zero
 arguments, a scalar target gives true and a reference target gives false. For an arithmetic
