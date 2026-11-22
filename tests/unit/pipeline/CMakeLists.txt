@@ -79,7 +79,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_
     COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/linux_executable.py
             $<TARGET_FILE:ycxxc> ${CMAKE_READELF})
   add_test(NAME unit.linux_cleanup_free_unwind
-    COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/linux_cleanup_free_unwind.py
+    COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/linux_cleanup_free_unwind.py
             $<TARGET_FILE:ycxxc> ${CMAKE_CXX_COMPILER} ${CMAKE_READELF} ${CMAKE_OBJDUMP})
   add_test(NAME unit.linux_native_int_throw
     COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/linux_native_int_throw.py
