@@ -13,6 +13,7 @@
 - `--trace-engine=json`: every stderr line is a JSON object (events with their values, the
   diagnostics and exit status, the summary), for tools and agents.
 - Trace details show the compiler's file, line and column for source errors (#404).
+- Source spans (#638): events through the daemon carry the cell's file and lines.
 - Memory (#274): events carry their bytes in the schema docs/TRACE.md gives, the summary its
   totals and kinds, the stream a memory line, and `ctl status` the daemon's memory.
 - `ycxx cxx --watch --trace-engine` builds again when a header the build read changes, and only
@@ -112,6 +113,15 @@ def main(ycxx):
         check(any(o['kind'] == 'Build' and o['outcome'] in ('reused', 'executed') for o in events), 'the JSON trace has the root')
         check(all({'id', 'parent', 'depth', 'outcome', 'duration_ns', 'worker'} <= o.keys() for o in events), 'each event has its fields')
         check(sum('summary' in o for o in objs) == 1 and sum('exit_status' in o for o in objs) == 1, 'one summary, one exit status')
+        # Source spans (#638) cross the daemon's socket, on a build that runs: the unit's cells name
+        # its file; square's IR, its definition's lines.
+        (scope / 'spans.cpp').write_text(SOURCE)
+        sp = cxx('--trace-engine=json', 'spans.cpp', '-o', 'spans')
+        sp_events = [json.loads(l) for l in sp.stderr.splitlines() if l.strip().startswith('{"id"')]
+        check(any(o['kind'] == 'Tu' and o.get('span', {}).get('file', '').endswith('spans.cpp') for o in sp_events), 'a unit names its file')
+        ir = [o for o in sp_events if o['kind'] == 'FunctionIr' and o['key'] == 'square']
+        check(ir and ir[0].get('span', {}).get('line') == 1 and ir[0]['span'].get('end_line') == 1 and ir[0]['span'].get('end_column') == 35,
+              f'a function names its definition: {ir[:1]}')
 
         def traced_error(file, where, message, kinds, *options):
             result = cxx('--trace-engine=json', *options, file)

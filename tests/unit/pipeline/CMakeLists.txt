@@ -17,6 +17,11 @@ add_test(NAME unit.dependent_fabsl
           -P ${CMAKE_CURRENT_SOURCE_DIR}/dependent_fabsl.cmake)
 # PARITY: by design: runs what it links with the host's linker; the Linux block registers its own
 if(APPLE AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(arm64|aarch64)$" AND NOT CMAKE_CROSSCOMPILING)
+  # The Mach-O counterpart of unit.linux_inline (#124).
+  find_program(YCXXC_NM NAMES nm REQUIRED)
+  add_test(NAME unit.darwin_inline
+    COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/darwin_inline.py
+            $<TARGET_FILE:ycxxc> ${CMAKE_CXX_COMPILER} ${YCXXC_NM} ${CMAKE_AR})
   add_test(NAME unit.tu_local_parameter_symbols
     COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/tu_local_parameter_symbols.py
             $<TARGET_FILE:ycxxc> ${CMAKE_CXX_COMPILER} darwin)
