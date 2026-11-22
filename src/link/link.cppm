@@ -300,6 +300,7 @@ std::optional<std::uint64_t> cleanup_table_size(const obj::object& o, const obj:
         (*begin | *size | *landing) % 4 != 0)
       return std::nullopt;
     end = *begin + *size;
+    if (*landing != 0 && *landing >= *begin && *landing < end) return std::nullopt;
     has_cleanup |= *landing != 0;
   }
   return has_cleanup ? std::optional(bytes.size() - after_header.size() + *length) : std::nullopt;
