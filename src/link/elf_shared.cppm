@@ -166,7 +166,12 @@ std::expected<shared_object, std::string> read_shared_object(byte_view file, std
     return error("invalid ELF shared object program header table");
 
   std::vector<segment> loads;
-  std::optional<segment> dynamic;
+  // BOOTSTRAP: -Wmaybe-uninitialized: a flag, not std::optional. At -O3 GCC 16.2 reports the
+  // optional's payload as possibly uninitialized where it is read after the `!dynamic` check
+  // (#726; GCC's known class of std::optional false positives, as PR 114253). Without the bug:
+  //   std::optional<segment> dynamic;   // `dynamic = s;`, `if (!dynamic || dynamic->...)`
+  segment dynamic{};
+  bool has_dynamic = false;
   for (std::size_t i = 0; i < ph_count; ++i) {
     const auto ph = headers->subspan(i * program_header_size, program_header_size);
     const auto type = field<std::uint32_t>(ph, 0);
@@ -181,14 +186,14 @@ std::expected<shared_object, std::string> read_shared_object(byte_view file, std
         (align > 1 && (!std::has_single_bit(align) || s.offset % align != s.address % align)))
       return error("invalid ELF shared object segment bounds or alignment");
     if (type == pt_load) loads.push_back(s);
-    else if (dynamic) return error("multiple PT_DYNAMIC segments in ELF shared object");
+    else if (std::exchange(has_dynamic, true)) return error("multiple PT_DYNAMIC segments in ELF shared object");
     else dynamic = s;
   }
-  if (!dynamic || dynamic->file_size == 0 || dynamic->file_size % dynamic_size != 0 ||
-      mapped_offset(loads, dynamic->address, dynamic->file_size) != dynamic->offset)
+  if (!has_dynamic || dynamic.file_size == 0 || dynamic.file_size % dynamic_size != 0 ||
+      mapped_offset(loads, dynamic.address, dynamic.file_size) != dynamic.offset)
     return error("missing or invalid mapped PT_DYNAMIC in ELF shared object");
 
-  const auto table = file.subspan(dynamic->offset, dynamic->file_size);
+  const auto table = file.subspan(dynamic.offset, dynamic.file_size);
   std::map<std::uint64_t, std::uint64_t> tags;
   bool terminated = false;
   for (std::size_t offset = 0; offset < table.size(); offset += dynamic_size) {
@@ -263,6 +268,7 @@ std::expected<shared_object, std::string> read_shared_object(byte_view file, std
   const auto symbol_address = tags.at(dt_symtab);
   std::optional<gnu_hash_table> gnu;
   byte_view sysv;
+  std::uint64_t symbol_count = 0;
   if (const auto entry = tags.find(dt_gnu_hash); entry != tags.end()) {
     if (const auto size = tags.find(dt_symtabsz); size != tags.end()) {
       const auto count = size->second / symbol_size;
@@ -281,14 +287,19 @@ std::expected<shared_object, std::string> read_shared_object(byte_view file, std
       if (other >= address) bytes = std::min<std::uint64_t>(bytes, other - address);
       else if (address - other < size) bytes = 0;
     };
-    bound(dynamic->address, dynamic->file_size);
+    bound(dynamic.address, dynamic.file_size);
     bound(tags.at(dt_strtab), strings->size());
     bound(symbol_address, 0);
     if (tags.contains(dt_hash)) bound(tags.at(dt_hash), 8);
     const auto parsed = read_gnu_hash(tail->first(bytes), known_symbol_count);
     if (!parsed) return error(parsed.error());
     gnu = *parsed;
-    const auto symbol_bytes = known_symbol_count.value_or(gnu->symbol_end()) * symbol_size;
+    // BOOTSTRAP: -Wmaybe-uninitialized: GCC 16.2 at -O3 reports `gnu`'s payload as possibly
+    // uninitialized after this assignment (#726), so the count is taken from `parsed` and kept
+    // in `symbol_count`. Without the bug, after both branches:
+    //   const auto symbol_count = known_symbol_count ? *known_symbol_count : gnu->symbol_end();
+    symbol_count = known_symbol_count ? *known_symbol_count : parsed->symbol_end();
+    const auto symbol_bytes = symbol_count * symbol_size;
     if (symbol_address < address && symbol_bytes > address - symbol_address)
       return error("ELF shared object symbol table overlaps DT_GNU_HASH");
   } else {
@@ -299,9 +310,9 @@ std::expected<shared_object, std::string> read_shared_object(byte_view file, std
       if (field<std::uint32_t>(sysv, 4 * i) >= *known_symbol_count)
         return error("invalid ELF shared object DT_HASH symbol index");
     }
+    symbol_count = *known_symbol_count;
   }
 
-  const auto symbol_count = known_symbol_count ? *known_symbol_count : gnu->symbol_end();
   const auto symbols = mapped(symbol_address, symbol_count * symbol_size);
   if (!symbols || !std::ranges::all_of(symbols->first(symbol_size), [](auto byte) { return byte == 0; }))
     return error("invalid mapped ELF shared object symbol table");

@@ -3416,13 +3416,20 @@ private:
         return bad();
       }
     }
-    auto named = td ? typedef_name_after_braces() : std::nullopt;
-    if (!ps_.is(Tk::identifier) && !named) {
+    // BOOTSTRAP: -Wmaybe-uninitialized: a pair and a flag, not std::optional. At -O3 GCC 16.2
+    // reports the optional's payload as possibly uninitialized at `named->first` (#726).
+    // Without the bug: `auto named = td ? typedef_name_after_braces() : std::nullopt;`,
+    // `!named`, `named->first`, `named->second`.
+    std::pair<NameId, u32> named{};
+    bool has_named = false;
+    if (td)
+      if (auto n = typedef_name_after_braces()) named = *n, has_named = true;
+    if (!ps_.is(Tk::identifier) && !has_named) {
       s_.diag(ps_.pos(), Diag::not_supported, ps_.kind());  // unnamed classes, attributes
       return bad();
     }
-    NameId name = ps_.is(Tk::identifier) ? ps_.name_of(ps_.tok()) : named->first;
-    u32 name_at = ps_.is(Tk::identifier) ? ps_.pos() : named->second;
+    NameId name = ps_.is(Tk::identifier) ? ps_.name_of(ps_.tok()) : named.first;
+    u32 name_at = ps_.is(Tk::identifier) ? ps_.pos() : named.second;
     if (ps_.is(Tk::identifier)) ps_.bump();
     if (explicit_) return explicit_class_definition(key, name, name_at);
     if (template_ && ps_.is(Tk::less)) return partial_class_definition(key, name, name_at);
@@ -4501,7 +4508,11 @@ private:
                                u32 ordinal, bool explicit_lang) {
     const std::string ns = p_->namespace_path(*d.scope.ns);
     const QualType type = s_.types().canonical(sem.type);
-    std::optional<ast::DeclSema> mem;
+    // BOOTSTRAP: -Wmaybe-uninitialized: a value and a flag, not std::optional. At -O3 GCC 16.2
+    // reports the optional's payload as possibly uninitialized after `if (!mem)` (#726).
+    // Without the bug: `std::optional<ast::DeclSema> mem;`, `mem = ds;`, `mem->entity`.
+    ast::DeclSema mem{};
+    bool has_mem = false;
     std::optional<std::string> c_namespace;
     bool linkage_conflict = false;
     for (DeclId p : p_->declared_in(p_->world().ins.names.spelling(d.name), ns, k_, false)) {
@@ -4533,22 +4544,22 @@ private:
       } else if (fn && type != prior_type) {
         continue;
       }
-      mem = ds;
+      mem = *ds, has_mem = true;
       c_namespace = std::move(target);
     }
-    if (!mem) {
+    if (!has_mem) {
       s_.diag(d.name_at, linkage_conflict ? Diag::linkage_conflict : Diag::no_namespace_member, d.name);
       return false;
     }
-    auto latest = p_->declaration(mem->entity, k_);
+    auto latest = p_->declaration(mem.entity, k_);
     if (definition && latest && (latest->flags & sema::decl_flag::definition)) {
       s_.diag(d.name_at, Diag::redefinition, d.name);
       return false;
     }
-    sem.entity = mem->entity;
-    sem.linkage = mem->linkage;
-    if (c_namespace && (mem->flags & sema::decl_flag::lang_c)) {
-      sem.type = mem->type;
+    sem.entity = mem.entity;
+    sem.linkage = mem.linkage;
+    if (c_namespace && (mem.flags & sema::decl_flag::lang_c)) {
+      sem.type = mem.type;
       sem.flags |= sema::decl_flag::lang_c;
       p_->qualified_c_functions_.emplace(std::pair{k_, ordinal}, std::move(*c_namespace));
     }
@@ -4958,7 +4969,12 @@ private:
     const bool defaulted = p_->defaulted_body(k_);
     const bool ordinary_defaulting = defaulted && !is_virtual;
     const bool defaulted_default = ordinary_defaulting && ctor && fs.params.empty() && !fs.variadic;
-    std::optional<std::pair<u32, u32>> exception_tokens;
+    // BOOTSTRAP: -Wmaybe-uninitialized: a pair and a flag, not std::optional. At -O3 GCC 16.2
+    // reports the optional's payload as possibly uninitialized at `*exception_tokens`, read
+    // under `if (exception_tokens)` (#726). Without the bug:
+    //   std::optional<std::pair<u32, u32>> exception_tokens;
+    std::pair<u32, u32> exception_tokens{};
+    bool has_exception_tokens = false;
     bool written_noexcept = false;
     if (ctor && !member_template_ && s_.template_scopes.empty() && !inst_ &&
         ps_.is(Tk::kw_noexcept) && ps_.kind(1) == Tk::l_paren) {
@@ -4977,6 +4993,7 @@ private:
       }
       fs.has_noexcept = true;
       exception_tokens = {begin, ps_.index()};
+      has_exception_tokens = true;
     } else if (ctor) {
       written_noexcept = constructor_exception_specifier(fs, c.type, ok);
     }
@@ -5089,7 +5106,7 @@ private:
         }
       }
     }
-    if (exception_tokens) p_->constructor_exception_tokens_.emplace(sem.entity, *exception_tokens);
+    if (has_exception_tokens) p_->constructor_exception_tokens_.emplace(sem.entity, exception_tokens);
     if (!ctor) p_->destructor_declarations_.emplace(sem.entity, Program::DestructorDeclaration{name_at, destructor_noexcept});
     remember_member_defaults(sem.entity, fs.params);
     p_->declared(sem, k_);
@@ -6204,11 +6221,18 @@ private:
           // [dcl.constinit]); a constexpr one, and a const integral one that is, are usable in
           // constant expressions ([expr.const]).
           // An enum literal already carries the underlying integer constant.
-          auto lit = types.is_enum(d.type) ? s_.as<ast::Literal>(init) : std::nullopt;
+          // BOOTSTRAP: -Wmaybe-uninitialized: the literal's value, not the std::optional<Literal>,
+          // is kept. At -O3 GCC 16.2 reports the optional's payload as possibly uninitialized at
+          // `lit->value` (#726). Without the bug:
+          //   auto lit = types.is_enum(d.type) ? s_.as<ast::Literal>(init) : std::nullopt;
+          //   ... lit ? sema::Evaluated{lit->value, 0, true} : ...
+          ConstId lit = ConstId::none;
+          if (types.is_enum(d.type))
+            if (auto l = s_.as<ast::Literal>(init)) lit = l->value;
           // A character array from a string literal is its elements' list ([dcl.init.string]).
           sema::Evaluator evaluator(s_, q_);
           sema::Evaluated list = s_.as<ast::InitList>(init) ? evaluator.evaluate_initializer(init) : sema::Evaluated{};
-          sema::Evaluated v = lit ? sema::Evaluated{lit->value, 0, true}
+          sema::Evaluated v = lit != ConstId::none ? sema::Evaluated{lit, 0, true}
                                   : list.value || list.type_trait_failure ? list : evaluator.evaluate(init);
           if (v.value) {
             value = *v.value;

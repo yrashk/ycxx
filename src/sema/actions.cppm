@@ -489,26 +489,31 @@ public:
           if (auto r = nested_member(b, name)) return r->first.type;
       }
     }
-    std::optional<ast::DeclSema> found;
-    for (auto p = own.rbegin(); p != own.rend() && !found; ++p)
-      if (p->name == name) found = p->sema;
-    if (!found)
+    // BOOTSTRAP: -Wmaybe-uninitialized: a value and a flag, not std::optional. At -O3 GCC 16.2
+    // reports the optional's payload as possibly uninitialized after the `!found` checks (#726).
+    // Without the bug: `std::optional<ast::DeclSema> found;`, `found = s;`, `found->kind`.
+    ast::DeclSema found{};
+    bool has_found = false;
+    const auto find = [&](const ast::DeclSema& s) { found = s, has_found = true; };
+    for (auto p = own.rbegin(); p != own.rend() && !has_found; ++p)
+      if (p->name == name) find(p->sema);
+    if (!has_found)
       for (DeclId d : q_->visible_decls(name, directives())) {
         ast::DeclSema s = q_->decl_sema(d);
         if (s.entity == EntityId::none || is_special(s)) continue;
-        if (is_type(s.kind) || !elaborated) found = s;
+        if (is_type(s.kind) || !elaborated) find(s);
         if (!elaborated && !is_type(s.kind)) break;
       }
     if (member_introduction && member_introduction->name == name &&
-        (!found || elaborated || w_->entities.rec(found->entity).scope !=
-                                    w_->entities.rec(member_introduction->sema.entity).scope))
-      found = member_introduction->sema;
-    if (!found && !elaborated && aliases) return builtin_type_name(name);
-    if (!found || !is_type(found->kind)) return std::nullopt;
-    if (found->kind == ast::DeclKind::type_alias && !aliases) return std::nullopt;
+        (!has_found || elaborated || w_->entities.rec(found.entity).scope !=
+                                         w_->entities.rec(member_introduction->sema.entity).scope))
+      find(member_introduction->sema);
+    if (!has_found && !elaborated && aliases) return builtin_type_name(name);
+    if (!has_found || !is_type(found.kind)) return std::nullopt;
+    if (found.kind == ast::DeclKind::type_alias && !aliases) return std::nullopt;
     // A class template's name needs its arguments outside the template ([temp.names]).
-    if (found->flags & decl_flag::template_) return std::nullopt;
-    return found->type;
+    if (found.flags & decl_flag::template_) return std::nullopt;
+    return found.type;
   }
   static bool is_type(ast::DeclKind k) {
     return k == ast::DeclKind::class_ || k == ast::DeclKind::enum_ || k == ast::DeclKind::type_alias;
@@ -3897,7 +3902,9 @@ public:
   // The switch statements being analysed, innermost last ([stmt.switch]): the condition's type
   // after promotion, the variables in scope at the jump to a label, and the labels so far.
   struct SwitchScope {
-    QualType type;
+    // Meaningful only when not `dependent`. Initialized anyway: the scope is copied into
+    // `switches`, and copying an indeterminate value is erroneous ([basic.indet]; #726).
+    QualType type{};
     bool dependent = false;
     std::vector<u32> initialized;
     std::vector<ConstId> values;
@@ -4596,8 +4603,14 @@ public:
       return node(ast::AssignmentCall{info, fe, children->front(), at(o, begin)}, begin, end, info);
     }
     if (virtual_slot) {
-      std::vector<QualType> parameters{o.type()};
-      parameters.insert(parameters.end(), fr.params.begin(), fr.params.end());
+      // BOOTSTRAP: -Warray-bounds: reserved and appended. At -O3 GCC 16.2 reports libycxx's
+      // in-place insert after a one-element vector as writing past its allocation (#726).
+      // Without the bug: `std::vector<QualType> parameters{o.type()};` and
+      // `parameters.insert(parameters.end(), fr.params.begin(), fr.params.end());`
+      std::vector<QualType> parameters;
+      parameters.reserve(1 + fr.params.size());
+      parameters.push_back(o.type());
+      parameters.append_range(fr.params);
       const auto pointer = types().pointer(types().function(fr.inner, parameters, false, LangLinkage::cxx));
       return node(ast::VirtualMemberCall{info, pointer, *virtual_slot, at(o, begin), b_->list(*children)}, begin, end, info);
     }
@@ -8294,8 +8307,12 @@ public:
       }
     }
     if (dependent(callee) || dependent_args) {
-      std::vector<Ex> all{callee};
-      all.insert(all.end(), args.begin(), args.end());
+      // BOOTSTRAP: -Warray-bounds: reserved and appended, as `parameters` in `member_call`.
+      // Without the bug: `std::vector<Ex> all{callee};`, `all.insert(all.end(), args.begin(), args.end());`
+      std::vector<Ex> all;
+      all.reserve(1 + args.size());
+      all.push_back(callee);
+      all.append_range(args);
       return dependent_node(all, begin, end);
     }
     // Keep the direct initialization path for a sole known function
