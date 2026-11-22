@@ -1272,7 +1272,7 @@ int main() { E e = E::b; return static_cast<int>(e) == 1 ? 0 : 1; }
 '''
 status = 'partial'
 issues = [157]
-note = 'Named nested scoped enum definitions support trailing ordinary fields and their initializers. Opaque enum declarations in classes and blocks remain open.'
+note = 'Named nested scoped enum definitions support trailing fields and their initializers and keep enumerator names in the enum scope. Opaque enum declarations in classes and blocks remain open.'
 
 [[feature]]
 id = 'dcl-using-enum'

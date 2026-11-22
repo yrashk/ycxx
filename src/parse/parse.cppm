@@ -1392,6 +1392,13 @@ public:
   }
 
 private:
+  // [dcl.enum]: a scoped enumerator belongs only to the enumeration's scope.
+  bool scoped_enumerator(const ast::DeclSema& declaration) const {
+    if (declaration.kind != ast::DeclKind::enumerator || declaration.entity == EntityId::none) return false;
+    const auto* enumeration = classes_.find_enum(w_->entities.rec(declaration.entity).scope);
+    return enumeration && enumeration->scoped;
+  }
+
   static constexpr u32 class_def_key(u32 item) { return item | 0x80000000u; }
   std::vector<u32> running_;
   std::set<u32> ordinary_friend_items_;  // the source item of each supported unqualified friend
@@ -1650,7 +1657,7 @@ public:
                                     : p_->item_sema(m).value;
       for (const ast::DeclSema& d : p_->world().ins.seqs.elements(ms.decls))
         if (d.entity != EntityId::none && d.kind != ast::DeclKind::class_ && !(d.flags & sema::decl_flag::friend_) &&
-            p_->world().entities.rec(d.entity).name == name)
+            p_->world().entities.rec(d.entity).name == name && !p_->scoped_enumerator(d))
           r = d;
     }
     return r;
@@ -5578,6 +5585,7 @@ private:
     // Functions clash when they have the same type and are both templates with equivalent heads and
     // constraints, or both not templates ([temp.over.link]/4-6, [over.load]).
     auto clash = [&](const ast::DeclSema& d) {
+      if (p_->scoped_enumerator(d)) return false;
       if (!function || d.kind != ast::DeclKind::function) return true;
       auto& types = s_.types();
       if (types.canonical(d.type) != types.canonical(*function)) {
@@ -6560,7 +6568,7 @@ Program::ClassContent Program::class_content(u32 item, const std::function<const
       const auto& names = items_->items[m].names;
       if (i < names.size() && names[i].member_elaborated_candidate) continue;
       ast::DeclSema d = w_->ins.seqs.at(ms.decls, i);
-      if (d.entity == EntityId::none) continue;
+      if (d.entity == EntityId::none || scoped_enumerator(d)) continue;
       // A friend declaration names a function or class that is not a member ([class.friend]/1).
       if (d.flags & sema::decl_flag::friend_) {
         if (std::ranges::find(out.friends, d.entity) == out.friends.end()) out.friends.push_back(d.entity);
