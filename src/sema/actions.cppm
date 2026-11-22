@@ -2533,7 +2533,7 @@ public:
   // [class.base.init], [dcl.init.aggr]: a destination with only ordinary scalar fields
   // needs no subobject destruction if an initializer exits by throwing.
   bool can_replay_default_members(QualType t) {
-    if (templated() || !types().is_class(t)) return false;
+    if (!types().is_class(t)) return false;
     EntityId c = types().class_of(t);
     if (!ordinary_default_member_owner(c)) return false;
     const ClassRec* rec = class_rec(c);
