@@ -213,8 +213,6 @@ std::expected<Frame, std::string> layout(const l2::Function& body) {
         if (result_in_memory > 1 || (result_in_memory && nd.nres > 1) ||
             nd.nres > (variadic || uses_float_result ? 2u : 3u))
           return at_node(n, nd.op, "unsupported ABI result placement");
-        if (indirect && (uses_float_result || std::ranges::any_of(args, is_float)))
-          return at_node(n, nd.op, "floating-point indirect calls are unsupported");
         for (ValueId arg : args.last(ellipsis)) {
           Type type = body.type(arg);
           if (type != Type::i32 && type != Type::i64 && type != Type::ptr && type != Type::f64)
@@ -500,7 +498,11 @@ class Emitter {
       // register count (AMD64 psABI §3.2.3), so their callee address needs a separate register.
       Reg target = variadic ? r11 : rax;
       read(ops[1], target);
-      if (variadic) e_.reg({0x31}, rax, rax, false);  // xor eax, eax
+      if (variadic) {
+        // AL counts the vector registers holding arguments (AMD64 psABI §3.2.3).
+        if (const auto vector_count = plan.used_sse_registers()) e_.emit({0xb0, std::uint8_t(vector_count)});  // mov al, imm8
+        else e_.reg({0x31}, rax, rax, false);  // xor eax, eax
+      }
       call_begin = e_.offset();
       e_.reg({0xff}, 2, target, false);  // call r/m64
     } else {

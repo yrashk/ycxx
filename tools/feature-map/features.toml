@@ -1089,7 +1089,7 @@ std = 'C++98'
 detect = ',\s*\.\.\.\s*\)|\bva_(?:start|arg|list)\b'
 status = 'partial'
 issues = [196, 399, 647]
-note = 'Apple arm64 defines variadic functions with integer, pointer and `double` `va_arg` (#647). Linux x86-64 supports direct variadic calls and ordinary free definitions with scalar INTEGER and SSE values. Unnamed `float` promotes to `double`, and `va_arg` retrieves integers, pointers and `double`. Indirect scalar INTEGER calls work. Indirect floating calls and aggregate variadic classification remain in #196.'
+note = 'Apple arm64 defines variadic functions with integer, pointer and `double` `va_arg` (#647). Linux x86-64 supports direct variadic calls and ordinary free definitions with scalar INTEGER and SSE values. Unnamed `float` promotes to `double`, and `va_arg` retrieves integers, pointers and `double`. Indirect calls pass INTEGER and SSE values, with AL set for variadic ones. Aggregate variadic classification remains in #196.'
 probe = '''
 #include <cstdarg>
 int sum(int n, ...) { std::va_list ap; va_start(ap); int s = 0; for (int i = 0; i < n; ++i) s += va_arg(ap, int); va_end(ap); return s; }
@@ -1272,7 +1272,7 @@ int main() { E e = E::b; return static_cast<int>(e) == 1 ? 0 : 1; }
 '''
 status = 'partial'
 issues = [157]
-note = 'Named nested scoped enum definitions support trailing ordinary fields and their initializers. Opaque enum declarations in classes and blocks remain open.'
+note = 'Named nested scoped enum definitions support trailing fields and their initializers and keep enumerator names in the enum scope. Opaque enum declarations in classes and blocks remain open.'
 
 [[feature]]
 id = 'dcl-using-enum'
@@ -1723,7 +1723,7 @@ std = 'C++98'
 detect = '\bunion\b'
 status = 'partial'
 issues = [203]
-note = 'Named data members can have an unnamed union type. Anonymous unions and further variants are tracked in #203'
+note = 'Named data members can have an unnamed union type. An ordinary named union with a written destructor can contain a nontrivially destructible member with a trivial or deleted copy constructor. Anonymous unions and further variants are tracked in #203'
 probe = '''
 union U { int i; char c; };
 struct S { union { int a; float f; }; };
@@ -2255,8 +2255,8 @@ std = 'C++11'
 ftm = '__cpp_noexcept_function_type'
 detect = '\bnoexcept\b'
 status = 'partial'
-issues = [219]
-note = 'Ordinary function pointers and references preserve concrete noexcept type identity and allow conversion to the corresponding potentially throwing type. Dependent exception specifications remain open.'
+issues = [219, 729, 713]
+note = 'Ordinary function pointers and references preserve concrete noexcept type identity. The unary operator checks calls and constructions. Dependent exception specifications remain open.'
 probe = '''
 void f() noexcept {} void g() {}
 int main() { void (*p)() noexcept = f; return (noexcept(f()) && !noexcept(g()) && p) ? 0 : 1; }

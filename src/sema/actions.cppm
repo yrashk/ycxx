@@ -2191,12 +2191,12 @@ public:
     TypeRec r = types().rec(t);
     if (r.kind == TypeKind::array) return has_member_inits(r.inner);
     if (r.kind != TypeKind::class_) return false;
-    if (const ClassRec* c = class_rec(r.entity); c && c->user_ctors) return true;
     if (const ClassRec* c = class_rec(r.entity)) {
+      if (c->user_ctors) return true;
       for (const BaseRec& b : c->bases)
         if (has_member_inits(types().class_type(b.cls))) return true;
       for (const FieldRec& f : c->fields)
-        if (f.init != ConstId::none || f.dmi || has_member_inits(f.type)) return true;
+        if (f.init != ConstId::none || f.dmi || (!c->union_ && has_member_inits(f.type))) return true;
     }
     return false;
   }
@@ -2365,10 +2365,21 @@ public:
     std::vector<Element> elems = elements(t);
     std::vector<Ex> out;
     const bool replay = replay_default_members_ && can_replay_default_members(t);
+    const bool union_ = is_union(t);
+    const auto omitted = [&](const Element& element, u32 at) {
+      // [dcl.init.aggr]: copy-list-initialize an omitted union element and the
+      // first variant of an empty union list in the absence of a default member initializer.
+      if (element.init == ConstId::none && element.default_member == EntityId::none &&
+          (union_ || (is_union(element.type) && is_aggregate(element.type))))
+        return list_init(element.type, Braced{at, at, {}}, Construction::copy_list);
+      return element_default(element, true, replay, at, at);
+    };
     bool elided = begin != b.begin || end != b.end;
     for (std::size_t i = 0; i < elems.size(); ++i) {
+      if (union_ && !check_destructor_access(types().innermost_array_element(elems[i].type), begin))
+        return fail;
       if (next == b.clauses.size()) {
-        out.push_back(element_default(elems[i], true, replay, end, end));
+        out.push_back(omitted(elems[i], end));
         if (!out.back().ok()) return fail;
         continue;
       }
@@ -2378,7 +2389,7 @@ public:
         // skipped are initialized as if there were no initializer.
         std::size_t j = i;
         while (j < elems.size() && elems[j].name != c.designator) ++j;
-        if (j == elems.size() && is_union(t) && !elided) {
+        if (j == elems.size() && union_ && !elided) {
           diag(c.begin, Diag::not_supported, lex::Tk::period);  // a union's member other than its first
           return fail;
         }
@@ -2387,7 +2398,7 @@ public:
           return fail;
         }
         for (; i < j; ++i) {
-          out.push_back(element_default(elems[i], true, replay, c.begin, c.begin));
+          out.push_back(omitted(elems[i], c.begin));
           if (!out.back().ok()) return fail;
         }
       }
@@ -5435,6 +5446,73 @@ public:
     Ex result = construct(t, std::move(args), begin, end, Construction::direct, ConstructorDestination::lambda_result);
     if (result.ok() && !dependent(result)) lambdas_.back().pending_result = result.id;
     return result;
+  }
+
+  // [expr.unary.noexcept], [except.spec]: inspect the selected operations and their operands
+  // without interpreting the expression or requiring the bodies of its callees.
+  Ex unary_noexcept(Ex operand, u32 begin, u32 end) {
+    Ex fail{NodeId::none, begin, end};
+    if (!operand.ok()) return fail;
+    if (dependent(operand)) return dependent_node({operand}, begin, end, builtin(Builtin::bool_));
+    const auto before = diag_count();
+    auto destructor_throwing = [&](QualType type, u32 at) {
+      if (!types().is_class(type) || !require_complete(type, at) || !check_destructor_access(type, at)) return false;
+      const ClassRec* record = class_rec(types().class_of(type));
+      return record && !record->destructor_noexcept.value_or(record->destructor == EntityId::none);
+    };
+    bool result_throws = !operand.glvalue() && destructor_throwing(operand.type(), operand.begin);
+
+    auto expression_info = [&](NodeId id) {
+      ExprInfo info{};
+      ast::dispatch<ast::Nodes>(ast::kind_of(id), [&]<class T>(std::type_identity<T>) {
+        if constexpr (requires(T value) { value.info; }) info = ins().ast.get<T>(id).info;
+      });
+      return info;
+    };
+    auto discarded_temporary_throwing = [&](Child child, u32 offset) {
+      const auto info = expression_info(child.id);
+      return info.category == ValueCategory::prvalue && destructor_throwing(info.type, offset + child.at);
+    };
+    auto function_throwing = [&](EntityId function) {
+      const auto written = q_->written_member(function);
+      const QualType type = written ? written->type : w_->entities.rec(function).type;
+      return !types().rec(type).fn_noexcept;
+    };
+    auto operation_throwing = [&](const ast::Red& node) {
+      if (node.is<ast::Throw>()) return true;
+      if (node.is<ast::Call>()) {
+        const auto call = node.get<ast::Call>();
+        if (call.function != EntityId::none) return function_throwing(call.function);
+        QualType type = expression_info(call.callee.id).type;
+        if (types().is_pointer(type)) type = types().pointee(type);
+        return !types().rec(type).fn_noexcept;
+      }
+      if (node.is<ast::MemberCall>()) return function_throwing(node.get<ast::MemberCall>().function);
+      if (node.is<ast::AssignmentCall>()) return function_throwing(node.get<ast::AssignmentCall>().function);
+      if (node.is<ast::CtorCall>()) return function_throwing(node.get<ast::CtorCall>().ctor);
+      if (node.is<ast::DeleteObject>()) return function_throwing(node.get<ast::DeleteObject>().function);
+      if (node.is<ast::DeleteArray>()) return function_throwing(node.get<ast::DeleteArray>().function);
+      if (node.is<ast::ImplicitConversion>()) {
+        const auto conversion = node.get<ast::ImplicitConversion>();
+        if (conversion.conversion == ast::ConversionKind::user_defined) return function_throwing(conversion.function);
+        if (conversion.conversion == ast::ConversionKind::to_void)
+          return discarded_temporary_throwing(conversion.operand, node.offset());
+      }
+      if (node.is<ast::Materialize>()) return destructor_throwing(node.get<ast::Materialize>().info.type, node.offset());
+      if (node.is<ast::OrderedBinary>()) {
+        const auto binary = node.get<ast::OrderedBinary>();
+        if (binary.op == ast::OrderedOp::comma) return discarded_temporary_throwing(binary.lhs, node.offset());
+      }
+      return false;
+    };
+    const auto root = b_->commit(ast::Child{operand.id, 0});
+    auto visit = [&](this const auto& self, const ast::Red& node) -> void {
+      result_throws |= operation_throwing(node);
+      node.for_each_child(self);
+    };
+    visit(ast::Red(ins().ast, root.id, operand.begin));
+    if (has_error_since(before)) return fail;
+    return bool_literal(!result_throws, begin, end);
   }
 
   // A void prvalue ([expr.type.conv]/2): `(void)0`.
