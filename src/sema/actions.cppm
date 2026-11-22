@@ -4929,6 +4929,30 @@ public:
     bound_[std::to_underlying(r.id)] = {object, std::move(cands), c, name_at, naming, qualified, explicit_receiver};
     return r;
   }
+
+  Ex bind_prefix_member_functions(NameId name, const std::vector<ast::DeclSema>& declarations, u32 begin, u32 end) {
+    std::vector<MemberDeclRec> records;
+    std::vector<ast::DeclSema> statics;
+    for (const auto& d : declarations | std::views::reverse) {
+      if (std::ranges::contains(records, d.entity, &MemberDeclRec::entity)) continue;
+      const bool is_static = (d.flags & decl_flag::static_) != 0;
+      records.push_back({.name = name, .entity = d.entity, .type = d.type, .is_function = true, .is_static = is_static,
+                         .is_deleted = (d.flags & decl_flag::deleted) != 0,
+                         .is_template = (d.flags & decl_flag::template_) != 0, .defaults = defaults_of(d),
+                         .is_virtual = d.is_virtual, .is_pure = d.is_pure});
+      if (is_static) statics.push_back(d);
+    }
+    std::vector<const MemberDeclRec*> candidates;
+    candidates.reserve(records.size());
+    for (const MemberDeclRec& record : records) candidates.push_back(&record);
+    Ex set = bind_members(current_class, std::move(candidates), std::nullopt, false, begin, end, begin);
+    const u32 key = std::to_underlying(set.id);
+    // The map's binding owns these records at a stable address. Swapping preserves the candidate pointers.
+    bound_.at(key).prefix_candidates.swap(records);
+    overloads_[key] = std::move(statics);  // ordinary function addresses match static members only
+    return set;
+  }
+
   bool is_bound_member(const Ex& e) { return e.ok() && types().is(e.type(), Builtin::bound_member); }
 
   // [expr.prim.id.general]: a non-static data member needs no object in an unevaluated operand.
@@ -6429,12 +6453,13 @@ public:
         std::vector<ast::DeclSema> functions;
         if (auto m = q_->earlier_member(name, /*type_only=*/false, nested_enum_members_begin ? &functions : nullptr)) {
           if (m->kind == ast::DeclKind::enumerator) return enumerator(m->entity, m->type, begin, end);
-          // A static member function needs no object ([class.static.mfct]).
-          if (m->kind == ast::DeclKind::function && (m->flags & decl_flag::static_)) {
-            if (!functions.empty() && std::ranges::all_of(functions, [](const ast::DeclSema& d) {
-                  return (d.flags & decl_flag::static_) != 0;
-                })) return decls_expr(std::move(functions), true, name, begin, end, callee);
-            return decls_expr({*m}, true, name, begin, end, callee);
+          // Rank mixed overloads before checking whether the selected member needs an object.
+          if (m->kind == ast::DeclKind::function) {
+            const auto is_static = [](const ast::DeclSema& d) { return (d.flags & decl_flag::static_) != 0; };
+            if (!functions.empty() && std::ranges::all_of(functions, is_static))
+              return decls_expr(std::move(functions), true, name, begin, end, callee);
+            if (std::ranges::any_of(functions, is_static)) return bind_prefix_member_functions(name, functions, begin, end);
+            if (is_static(*m)) return decls_expr({*m}, true, name, begin, end, callee);
           }
           if (nested_enum_members_begin && unevaluated && m->kind == ast::DeclKind::data_member)
             return unevaluated_data_member(m->entity, m->type, m->bit_width, begin, end);
@@ -9983,6 +10008,7 @@ private:
     EntityId naming = EntityId::none;  // the class they were named in ([class.access.base]/5)
     bool qualified = false;            // an explicit qualifier suppresses virtual dispatch
     bool explicit_receiver = false;    // the member was named by a written `.` or `->`
+    std::vector<MemberDeclRec> prefix_candidates{};  // ordinary bindings borrow from the completed class
   };
   std::map<u32, Bound> bound_;                        // by draft bound-member Member
   std::set<u32> deleted_;                             // deleted functions named so far
