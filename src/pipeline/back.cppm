@@ -465,6 +465,14 @@ struct UnitShapes {
   static engine::query_task<Value> run(engine::Ctx& cx, TuId tu);
 };
 
+// Effective exception specifications needed by native class initializer cleanup.
+struct UnitNonthrowingFunctions {
+  using Key = TuId;
+  static engine::SourceSpan trace_span(const engine::Db& db, const Key& k) { return tu_span(db, k); }
+  using Value = std::vector<EntityId>;
+  static engine::query_task<Value> run(engine::Ctx& cx, TuId tu);
+};
+
 // A function declared with an ellipsis ([dcl.fct]) and how many parameters precede it.
 struct VariadicFunction {
   EntityId entity = EntityId::none;
@@ -477,7 +485,6 @@ struct FunctionSource {
   bool is_main = false;
   std::vector<EntityId> constexpr_functions;        // the unit's, sorted by handle
   std::vector<VariadicFunction> variadic_functions;  // the unit's, sorted by handle
-  std::vector<EntityId> nonthrowing_functions;      // the unit's, sorted by handle
 };
 struct FunctionSourceQ {
   using Key = FnKey;
@@ -972,6 +979,15 @@ engine::SourceSpan function_span(const engine::Db& db, const FnKey& k) {
 }
 
 
+engine::query_task<UnitNonthrowingFunctions::Value> UnitNonthrowingFunctions::run(engine::Ctx& cx, TuId id) {
+  const TranslationUnit& tu = co_await cx.fetch<TuUnit>(id);
+  std::vector<EntityId> functions;
+  for (const Entity& entity : tu.entities)
+    if (entity.nonthrowing) functions.push_back(entity.id);
+  std::ranges::sort(functions);
+  co_return functions;
+}
+
 engine::query_task<FunctionSource> FunctionSourceQ::run(engine::Ctx& cx, FnKey k) {
   const TranslationUnit& tu = co_await cx.fetch<TuUnit>(k.tu);
   FunctionSource out;
@@ -982,12 +998,10 @@ engine::query_task<FunctionSource> FunctionSourceQ::run(engine::Ctx& cx, FnKey k
   for (const Entity& e : tu.entities) {
     if (!e.is_function) continue;
     if (e.is_constexpr) out.constexpr_functions.push_back(e.id);
-    if (e.nonthrowing) out.nonthrowing_functions.push_back(e.id);
     if (auto n = types.parameters_before_ellipsis(e.type)) out.variadic_functions.push_back({e.id, *n});
   }
   std::ranges::sort(out.constexpr_functions);
   std::ranges::sort(out.variadic_functions, {}, &VariadicFunction::entity);
-  std::ranges::sort(out.nonthrowing_functions);
   co_return out;
 }
 
@@ -1039,7 +1053,13 @@ engine::query_task<Generated> FunctionGen::run(engine::Ctx& cx, FnKey k) {
   const FunctionDef& d = src.def;
   irgen::FunctionInput input{d.entity, d.decl, d.body, d.item, d.body_offset};
   input.this_type = d.this_type;
-  input.nonthrowing_functions = src.nonthrowing_functions;
+  const auto& seqs = universe().in->seqs;
+  const auto locals = d.body.locals;
+  for (std::uint32_t index = 0, count = seqs.size(locals); index < count; ++index) {
+    if (facts.classify(seqs.at(locals, index).type) != irgen::TypeClass::record) continue;
+    input.nonthrowing_functions = co_await cx.fetch<UnitNonthrowingFunctions>(k.tu);
+    break;
+  }
   input.guards = d.guards;
   input.guard_acquire = d.guard_acquire;
   input.guard_release = d.guard_release;
