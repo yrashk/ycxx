@@ -249,7 +249,8 @@ public:
   // ABI attributes on declarations outside the entity's ordinary declaration records.
   bool has_unapplied_declaration_attributes(EntityId e) const { return unapplied_declaration_attributes_.contains(e); }
   bool peer_root_vtable_visible(EntityId cls) const;
-  bool peer_automatic_derived_tables(EntityId cls) const;
+  // Empty on unsupported declarations, or EntityId::none when a peer owns the derived table.
+  std::optional<EntityId> automatic_derived_vtable_key(EntityId cls) const;
   bool peer_pure_dispatch(EntityId cls) const;
   // A fieldless virtual root whose destructor may be emitted against a peer's table (#136).
   bool peer_root_destructor_producer(EntityId cls) const;
@@ -5613,16 +5614,21 @@ private:
   bool native_virtual_definition(EntityId cls, const sema::ClassRec& record, EntityId function,
                                  const parse::Declarator& d, const ast::DeclSema& sem) {
     const auto slot = sema::native_virtual_root_slot(record, function);
-    if (record.peer_virtual_layout != sema::PeerVirtualLayout::root || !slot || template_ || explicit_ || inst_ ||
+    const bool derived = record.peer_automatic_primary_base != EntityId::none;
+    if ((!derived && record.peer_virtual_layout != sema::PeerVirtualLayout::root) || !slot || template_ || explicit_ || inst_ ||
         sem.storage != ast::Storage::none || (sem.flags & (sema::decl_flag::inline_ | sema::decl_flag::deleted |
                                                           sema::decl_flag::lang_c)) ||
         it_->kind != ItemKind::function || !it_->has_body() || !d.asm_label.empty()) return false;
     const bool key_function = *slot == 0;
-    if (key_function && !sema::native_virtual_table_slots(record)) return false;
+    if (key_function && !derived && !sema::native_virtual_table_slots(record)) return false;
     const auto& region = p_->region();
     if (region.tokens[it_->body_begin].kind != Tk::l_brace ||
         !plain_virtual_signature(*it_, it_->begin + d.qualifier_at, it_->begin + d.name_at,
                                  /*check_exception=*/true)) return false;
+    // The automatic derived layout certifies one written int() override. Its out-of-class
+    // definition must also use exactly that prototype, without aliases, attributes or suffixes.
+    if (derived && (!key_function || region.tokens[it_->begin].kind != Tk::kw_int || d.qualifier_at != 1 ||
+                    it_->body_begin != it_->begin + d.name_at + 3)) return false;
 
     const auto& entity = s_.world().entities.rec(cls);
     auto defining = p_->class_items_.find(std::to_underlying(cls));
@@ -7346,20 +7352,35 @@ bool Program::peer_root_vtable_visible(EntityId cls) const {
   return true;
 }
 
-bool Program::peer_automatic_derived_tables(EntityId cls) const {
-  if (r_->has_clang_attribute_pragma) return false;
+std::optional<EntityId> Program::automatic_derived_vtable_key(EntityId cls) const {
+  if (r_->has_clang_attribute_pragma) return std::nullopt;
   const EntityId base = classes_.rec(cls).peer_automatic_primary_base;
-  if (base == EntityId::none) return false;
-  const auto only_declarations = [&](EntityId type) {
-    if (!peer_root_vtable_visible(type)) return false;
-    return std::ranges::all_of(classes_.rec(type).members, [&](const sema::MemberDeclRec& member) {
-      if (!member.is_virtual) return true;
-      const auto declarations = decls_.find(std::to_underlying(member.entity));
-      return declarations != decls_.end() && declarations->second.size() == 1 &&
-             !(declarations->second.front().second.flags & sema::decl_flag::definition);
-    });
+  if (base == EntityId::none || !peer_root_vtable_visible(cls) || !peer_root_vtable_visible(base)) return std::nullopt;
+  // The class certificate identifies one direct slot on each class. The pure base must
+  // still have only its declaration; a definition can belong only to the derived override.
+  const auto slot = [&](EntityId owner) {
+    const auto& members = classes_.rec(owner).members;
+    return std::ranges::find(members, true, &sema::MemberDeclRec::is_virtual)->entity;
   };
-  return only_declarations(cls) && only_declarations(base);
+  const auto pure = decls_.find(std::to_underlying(slot(base)));
+  const EntityId key = slot(cls);
+  const auto derived = decls_.find(std::to_underlying(key));
+  if (pure == decls_.end() || pure->second.size() != 1 ||
+      (pure->second.front().second.flags & sema::decl_flag::definition) || derived == decls_.end()) return std::nullopt;
+
+  const auto& declarations = derived->second;
+  const auto definition = std::ranges::find_if(declarations, [](const auto& d) {
+    return d.second.flags & sema::decl_flag::definition;
+  });
+  if (definition == declarations.end())
+    return declarations.size() == 1 ? std::optional(EntityId::none) : std::nullopt;
+  const auto declared = member_decl(key);
+  constexpr u16 excluded = sema::decl_flag::inline_ | sema::decl_flag::deleted | sema::decl_flag::lang_c;
+  if (declarations.size() != 2 || !declared || definition->first == index(declared->item) ||
+      !definition->second.is_virtual || (definition->second.flags & excluded) ||
+      in_attributed_namespace(definition->first) ||
+      !asm_label(key).empty()) return std::nullopt;
+  return key;
 }
 
 bool Program::peer_pure_dispatch(EntityId cls) const {
