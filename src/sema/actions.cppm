@@ -1913,8 +1913,13 @@ public:
         diag(name_at, Diag::no_member, n, *s.type);
         return {NodeId::none, begin, end};
       }
-      if (!require_complete(*s.type, begin)) return {NodeId::none, begin, end};
-      if (auto r = class_member(types().class_of(*s.type), n, begin, end, name_at, address_at)) return *r;
+      const EntityId cls = types().class_of(*s.type);
+      if (!is_complete(*s.type)) {
+        if (auto r = qualified_class_prefix_value(cls, n, begin, end)) return *r;
+        if (!type_trait_failed(*s.type)) diag(begin, Diag::incomplete_type, *s.type);
+        return {NodeId::none, begin, end};
+      }
+      if (auto r = class_member(cls, n, begin, end, name_at, address_at)) return *r;
       diag(name_at, Diag::no_member, n, *s.type);
       return {NodeId::none, begin, end};
     }
@@ -4808,6 +4813,13 @@ public:
   }
   // The enumerator `name` of enumeration `e`, if it has one.
   std::optional<Ex> find_enumerator(EntityId e, NameId name, u32 begin, u32 end) {
+    if (q_->defining_enum(e)) {
+      // Until the closing brace the enumerator still has its in-list type ([dcl.enum]).
+      for (const OwnDecl& d : own)
+        if (d.name == name && d.sema.kind == ast::DeclKind::enumerator && d.sema.entity != EntityId::none &&
+            w_->entities.rec(d.sema.entity).scope == e)
+          return enumerator(d.sema.entity, d.sema.type, begin, end);
+    }
     if (const EnumRec* r = enum_rec(e))
       for (const EnumeratorRec& x : r->enumerators)
         if (x.name == name) {
@@ -4817,6 +4829,37 @@ public:
           if (value.ok()) return value;
           break;
         }
+    return std::nullopt;
+  }
+
+  // [class.member.lookup]: a qualified value read in the incomplete current class sees
+  // declarations that already precede the use, including an unscoped enum's active prefix.
+  std::optional<Ex> qualified_class_prefix_value(EntityId cls, NameId name, u32 begin, u32 end) {
+    bool in_class = cls == current_class;
+    for (const OwnDecl& d : own) {
+      if (d.sema.kind != ast::DeclKind::enum_ || d.sema.entity == EntityId::none ||
+          w_->entities.rec(d.sema.entity).scope != cls) continue;
+      if (const EnumRec* e = q_->defining_enum(d.sema.entity)) {
+        in_class = true;
+        if (!e->scoped)
+          if (auto value = find_enumerator(d.sema.entity, name, begin, end)) return value;
+      }
+    }
+    if (!in_class) return std::nullopt;
+    const auto static_data = [&](const ast::DeclSema& d) {
+      return d.kind == ast::DeclKind::variable && (d.flags & decl_flag::static_) &&
+             d.entity != EntityId::none && w_->entities.rec(d.entity).scope == cls;
+    };
+    for (const OwnDecl& d : own)
+      if (d.name == name && static_data(d.sema)) return static_member(cls, d.sema.entity, d.sema.type, begin, end);
+    if (auto declaration = q_->earlier_member(name)) {
+      if (static_data(*declaration)) return static_member(cls, declaration->entity, declaration->type, begin, end);
+      if (declaration->kind == ast::DeclKind::enumerator && declaration->entity != EntityId::none) {
+        const EntityId enumeration = w_->entities.rec(declaration->entity).scope;
+        if (w_->entities.rec(enumeration).scope == cls)
+          return enumerator(declaration->entity, declaration->type, begin, end);
+      }
+    }
     return std::nullopt;
   }
 
