@@ -71,11 +71,14 @@ public:
   TemplateArg value_arg(QualType t, ConstId v) { return {TemplateArgKind::value, types().canonical(Types::unqualified(t)), v}; }
 
   // The specialization of variable template `templ` for canonical arguments ([temp.spec.general]).
-  EntityId specialize_variable(EntityId templ, std::span<const TemplateArg> args) {
+  // `constraints`: a constrained partial specialization's pattern, keyed by its constraints'
+  // token fingerprint too (Fable's decision on #234).
+  EntityId specialize_variable(EntityId templ, std::span<const TemplateArg> args, Fp128 constraints = {}) {
     const EntityRec& t = w_->entities.rec(templ);
     EntityRec spec{EntityKind::variable, t.name, {}, t.lang, t.linkage, t.first, t.scope};
     spec.templ = templ;
     spec.args.assign(args.begin(), args.end());
+    spec.constraints = constraints;
     return w_->entities.entity(std::move(spec));
   }
 
@@ -1088,11 +1091,12 @@ public:
 
   // The specialization of class template `templ` for `args` ([temp.spec.general]): its entity is
   // the template and the canonical arguments (§B1.5).
-  EntityId specialize_class(EntityId templ, std::span<const TemplateArg> args) {
+  EntityId specialize_class(EntityId templ, std::span<const TemplateArg> args, Fp128 constraints = {}) {
     const EntityRec& t = w_->entities.rec(templ);
     EntityRec r{EntityKind::class_, t.name, {}, LangLinkage::cxx, t.linkage, t.first, t.scope};
     r.templ = templ;
     r.args.assign(args.begin(), args.end());
+    r.constraints = constraints;
     return w_->entities.entity(std::move(r));
   }
 
@@ -1628,12 +1632,29 @@ public:
     for (const auto& a : out) r.push_back(*a);
     return r;
   }
-  // Whether partial specialization 1 (`p1`, `a1`) is more specialized than 2 ([temp.spec.partial.order]):
-  // as the function templates with one parameter of type `X<a1>` and `X<a2>` order ([temp.func.order]),
-  // 2's arguments deduced from 1's with a unique value for each of 1's parameters, and not the converse.
+  // Whether partial specialization 1 (`p1`, `a1`, constraints `c1`) is more specialized than 2
+  // ([temp.spec.partial.order]): as the function templates with one parameter of type `X<a1>` and
+  // `X<a2>` order ([temp.func.order]), 2's arguments deduced from 1's with a unique value for each of
+  // 1's parameters, and not the converse. When each is at least as specialized as the other, with
+  // equal parameter lists and positionally equal arguments, the more constrained one is
+  // ([temp.func.order]/6.2, [temp.constr.order]); both normal forms then name the same positions.
   bool more_specialized_partial(std::span<const ast::TemplateParamSema> p1, std::span<const TemplateArg> a1,
-                                std::span<const ast::TemplateParamSema> p2, std::span<const TemplateArg> a2) {
-    return at_least_as_specialized(p1, a1, p2, a2) && !at_least_as_specialized(p2, a2, p1, a1);
+                                std::span<const ast::TemplateParamSema> p2, std::span<const TemplateArg> a2,
+                                ConstId c1 = ConstId::none, ConstId c2 = ConstId::none) {
+    const bool forward = at_least_as_specialized(p1, a1, p2, a2), backward = at_least_as_specialized(p2, a2, p1, a1);
+    if (forward != backward) return forward;
+    if (!forward || !equivalent_heads(p1, p2) || !std::ranges::equal(a1, a2)) return false;
+    return subsumes(c1, c2) && !subsumes(c2, c1);
+  }
+  // Whether two template-heads have the same parameters, by kind, packness and type
+  // ([temp.over.link]/6), type-constraints apart: those count among the constraints.
+  bool equivalent_heads(std::span<const ast::TemplateParamSema> p1, std::span<const ast::TemplateParamSema> p2) {
+    if (p1.size() != p2.size()) return false;
+    for (std::size_t i = 0; i < p1.size(); ++i)
+      if (p1[i].kind != p2[i].kind || p1[i].pack != p2[i].pack ||
+          (p1[i].kind == TemplateArgKind::value && types().canonical(p1[i].type) != types().canonical(p2[i].type)))
+        return false;
+    return true;
   }
   // Whether every parameter of `params` can be deduced from template arguments `args` that name
   // them, as a partial specialization's must be ([temp.spec.partial.general]): deduced from

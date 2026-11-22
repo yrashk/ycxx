@@ -626,6 +626,11 @@ public:
     if (r.templ != EntityId::none) {
       f = ast::mix(f, ins_->entities.fp(r.templ));
       for (const ast::TemplateArg& a : r.args) f = mix_arg(f, a);
+      // A constrained partial specialization's pattern: its constraints' token fingerprint, so it
+      // differs from the specialization with its arguments and from partials constrained otherwise
+      // (Fable's decision on #234). Zero, and not mixed, for every other specialization.
+      if ((r.kind == EntityKind::class_ || r.kind == EntityKind::variable) && r.constraints != Fp128{})
+        f = ast::mix(ast::mix(f, ast::seed("ycxx.sema.constrained-partial")), r.constraints);
     }
     f = ast::mix(f, std::to_underlying(r.linkage));
     if (r.linkage == ast::Linkage::internal)

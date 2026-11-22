@@ -2136,8 +2136,15 @@ Fable decided the representation (ast.md §6.6); the Opus session wrote the code
   variable-template specialization with explicit non-dependent type arguments checks its associated
   constraints. This includes unevaluated uses such as `decltype`. A type-constraint or a leading
   requires-clause contributes to that check. [#234](https://github.com/yrashk/ycxx/issues/234)
-- Not yet: class and variable template constraints outside those cases, partial specializations
-  and members, broader constrained packs, fold-expanded constraints, constrained placeholders
+- Partial specializations of class and variable templates are matched and ordered by their
+  constraints ([temp.spec.partial.match]/2, [temp.spec.partial.order]). One whose arguments are the
+  primary's own is allowed when it is more constrained, and two with the same arguments are
+  ordered by subsumption or are ambiguous at use. A constrained partial's pattern is keyed by its
+  constraints' token fingerprint too (Fable's decision on #234). Tests:
+  `tests/own/concepts/constrained-partial*`. Its explicit self-reference, out-of-class members and
+  member templates are #832, and head identity for all partials is #833.
+- Not yet: class and variable template constraints outside those cases, members, broader
+  constrained packs, fold-expanded constraints, constrained placeholders
   outside ordinary block declarations, and `noexcept` in compound requirements (#234). Open follow-ups include re-verification of satisfaction at END
   (#235), Itanium constraint mangling (#236), recorded discarded extents for `if constexpr` (#237),
   and value-dependent mapping arguments (#209).
