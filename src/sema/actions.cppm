@@ -83,6 +83,8 @@ struct GenericResult {
 };
 
 class Sema;
+struct Ex;
+enum class AliasCallPattern { none, retained, may_erase };
 
 // What sema asks of its context (§B1.4, §B3). In the engine these are `visible_decls(::, name,
 // at item)` and fetches of `decl_sema`.
@@ -96,6 +98,7 @@ public:
   virtual ast::DeclSema decl_sema(DeclId d) = 0;
   // The written in-class declaration of a member from this unit's class record.
   virtual std::optional<ast::DeclSema> written_member(EntityId) { return std::nullopt; }
+  virtual bool peer_pure_dispatch(EntityId) { return false; }
   // A use of a global allocation function that may lack a written declaration in the unit.
   // An aligned signature also brings its parameter's enum shape into the unit.
   virtual void use_allocation_function(EntityId, bool = false) {}
@@ -147,6 +150,11 @@ public:
   virtual const Classes& classes() = 0;
   // The constant a variable usable in constant expressions holds ([expr.const]), if it is known.
   virtual std::optional<ConstId> constant_value(EntityId v) = 0;
+  virtual std::optional<ConstId> constant_call(Sema&, const Ex&) { return std::nullopt; }
+  virtual AliasCallPattern alias_call_pattern(EntityId) { return AliasCallPattern::none; }
+  virtual std::optional<QualType> replay_alias_calls(Sema&, const ast::DeclSema&, const Bindings&) {
+    return std::nullopt;
+  }
   // In a member declaration of a class being defined: the member named `name` declared before it
   // ([basic.scope.class]; the class's member list is not complete yet).
   virtual std::optional<ast::DeclSema> earlier_member(NameId name, bool type_only = false) = 0;
@@ -506,6 +514,7 @@ public:
                              ClassBodyLookup::before_template_parameter, elaborated)
           .type;
     }
+    if (!elaborated && earlier_nested_enumerator(name)) return std::nullopt;
     // In a class template, its name without arguments is the injected-class-name: the current
     // instantiation, or in an instantiation the specialization ([temp.local]/1).
     if (current_class != EntityId::none) {
@@ -829,9 +838,12 @@ public:
     if (!full) return std::nullopt;
     if (tmpl.kind == ast::DeclKind::type_alias) {
       std::vector<ast::TemplateParamSema> params = ins().seqs.elements(tmpl.template_params);
-      auto t = templates_for_use(at).substitute(tmpl.type, Bindings::of(params.empty() ? 0 : params[0].depth, *full));
+      auto bindings = Bindings::of(params.empty() ? 0 : params[0].depth, *full);
+      const auto before = diag_count();
+      auto t = substitute_alias(tmpl, *full, bindings, at);
       // Past the nesting limit, which was diagnosed, it says nothing more ([temp.inst]/16).
-      if (!t && !q_->instantiation_gave_up()) diag(at, Diag::template_args_mismatch, w_->entities.rec(tmpl.entity).name);
+      if (!t && !has_error_since(before) && !q_->instantiation_gave_up())
+        diag(at, Diag::template_args_mismatch, w_->entities.rec(tmpl.entity).name);
       return t;
     }
     // [temp.names]/9: naming a non-dependent specialization checks the primary's
@@ -849,6 +861,18 @@ public:
       }
     }
     return types().class_type(class_specialization(tmpl.entity, *full));
+  }
+
+  std::optional<QualType> substitute_alias(const ast::DeclSema& tmpl, std::span<const TemplateArg> args,
+                                           const Bindings& bindings, u32 at) {
+    const auto pattern = q_->alias_call_pattern(tmpl.entity);
+    if (pattern != AliasCallPattern::none) {
+      if (std::ranges::none_of(args, [&](const TemplateArg& a) { return dependent(a); }))
+        return q_->replay_alias_calls(*this, tmpl, bindings);
+      // Until signatures can retain the replay, do not form a type that can lose a call check.
+      if (pattern == AliasCallPattern::may_erase) return std::nullopt;
+    }
+    return templates_for_use(at).substitute(tmpl.type, bindings);
   }
 
   // `v<args>` naming a variable template specialization ([temp.pre], [temp.inst]/7): an lvalue of
@@ -2252,7 +2276,8 @@ public:
       c = found->owner;
     }
     if (found->member && found->member->is_function)
-      return bound_member(c, name, object, arrow, begin, end, name_at, naming, qualifier.has_value());
+      return bound_member(c, name, object, arrow, begin, end, name_at, naming, qualifier.has_value(),
+                          /*explicit_receiver=*/true);
     if (!check_access(c, found->member ? found->member->entity : found->field->entity, name, name_at, naming)) return fail;
     if (found->member) {
       // A static data member: the object expression is evaluated, then discarded ([expr.ref]).
@@ -3261,12 +3286,24 @@ public:
     t.member_type = [this](EntityId c, NameId n) { return member_type(c, n); };
     t.template_decl = [this](EntityId tmpl) { return q_->template_decl(tmpl); };
     t.variable_constant = [this](EntityId spec) { return q_->constant_value(spec); };
+    t.call_constant = [this](EntityId templ, std::span<const TemplateArg> args) {
+      return evaluate_dependent_call(templ, args, 0);
+    };
+    t.alias_type = [this](const ast::DeclSema& alias, std::span<const TemplateArg> args, const Bindings& b) {
+      return substitute_alias(alias, args, b, 0);
+    };
     t.variable_global = [this](EntityId spec) { return q_->global(spec); };
     t.variable_specialization_type = [this](EntityId spec) { return q_->specialization_type(spec); };
     return t;
   }
   Templates templates_for_use(u32 at) {
     auto t = templates();
+    t.call_constant = [this, at](EntityId templ, std::span<const TemplateArg> args) {
+      return evaluate_dependent_call(templ, args, at);
+    };
+    t.alias_type = [this, at](const ast::DeclSema& alias, std::span<const TemplateArg> args, const Bindings& b) {
+      return substitute_alias(alias, args, b, at);
+    };
     t.demand_variable = [this, at](EntityId spec, QualType type) {
       demands.push_back({spec, ast::Loc{item_, loc_base_ + at}, type});
     };
@@ -3385,6 +3422,55 @@ public:
     }
     explicit_args_[std::to_underlying(r.id)] = std::move(args);
     return r;
+  }
+
+  std::optional<Ex> dependent_immediate_template_call(Ex callee, std::span<const TemplateArg> args, u32 end) {
+    if (!types().is(callee.type(), Builtin::overload_set)) return std::nullopt;
+    auto t = templates();
+    if (!std::ranges::all_of(args, [&](const TemplateArg& a) {
+          return a.kind == TemplateArgKind::type && t.structural_operand(a.type);
+        })) return std::nullopt;
+    auto found = overloads_.find(std::to_underlying(callee.id));
+    if (found == overloads_.end()) return std::nullopt;
+    const ast::DeclSema* selected = nullptr;
+    for (const ast::DeclSema& d : found->second) {
+      if (!(d.flags & decl_flag::template_)) continue;
+      if (selected || !(d.flags & decl_flag::consteval_) || (d.flags & decl_flag::member))
+        return std::nullopt;
+      selected = &d;
+    }
+    if (!selected) return std::nullopt;
+    auto fn = types().rec(selected->type);
+    if (!fn.params.empty() || fn.variadic) return std::nullopt;
+    const auto params = ins().seqs.elements(selected->template_params);
+    if (!std::ranges::all_of(params, [](const ast::TemplateParamSema& p) { return p.kind == TemplateArgKind::type; }))
+      return std::nullopt;
+    const bool trailing_pack = !params.empty() && params.back().pack;
+    const auto fixed = params.size() - (trailing_pack ? 1 : 0);
+    if (args.size() < fixed || (!trailing_pack && args.size() != fixed) ||
+        std::ranges::any_of(args.first(fixed), [&](const TemplateArg& a) { return t.is_expansion(a); }))
+      return std::nullopt;
+    QualType result = fn.inner;
+    if (!types().is_integral(result) && !types().is_enum(result)) return std::nullopt;
+    auto value = ins().intern_value(ast::VDepCall{selected->entity, ins().intern_seq(args)});
+    return literal(result, value, ValueCategory::prvalue, callee.begin, end);
+  }
+
+  std::optional<TemplateArg> evaluate_dependent_call(EntityId templ, std::span<const TemplateArg> args, u32 at) {
+    auto decl = q_->template_decl(templ);
+    if (!decl || !(decl->flags & decl_flag::consteval_)) return std::nullopt;
+    Ex callee = decls_expr({*decl}, false, w_->entities.rec(templ).name, at, at);
+    explicit_template_args(callee, std::vector<TemplateArg>(args.begin(), args.end()));
+    const auto before = diag_count();
+    Ex invocation = call(callee, {}, at, at);
+    if (!invocation.ok()) {
+      // The synthesized call is in the immediate context of template substitution.
+      drop_failures(before);
+      return std::nullopt;
+    }
+    auto value = q_->constant_call(*this, invocation);
+    if (!value) return std::nullopt;
+    return TemplateArg{TemplateArgKind::value, invocation.type(), *value};
   }
 
 
@@ -4499,11 +4585,20 @@ public:
   };
   std::optional<MemberIntroduction> member_introduction;
   std::optional<EntityId> defining_unnamed_enum_scope;
+  std::optional<std::size_t> nested_enum_members_begin;
+
+  // [basic.scope.enum]: earlier enumerators hide names in the enclosing class.
+  const OwnDecl* earlier_nested_enumerator(NameId name) const {
+    if (!nested_enum_members_begin) return nullptr;
+    const auto enumerators = std::span(own).subspan(*nested_enum_members_begin);
+    const auto member = std::ranges::find(enumerators, name, &OwnDecl::name);
+    return member == enumerators.end() ? nullptr : &*member;
+  }
 
   // ------------------------------------------------------------ member functions ([class.mfct])
 
-  // The class whose member function body is being analysed, and the type of `this` there: none
-  // outside a non-static member function ([expr.prim.this]).
+  // The enclosing class of a declaration or definition, and the type of `this` when the context
+  // supplies a current object ([expr.prim.this]).
   EntityId current_class = EntityId::none;
   std::optional<QualType> this_type;
   // The function whose body is being analysed, none outside one: a friend of a class may name its
@@ -4676,16 +4771,18 @@ public:
   // (none when there is none to bind, as in a static member function). Only a call may follow
   // ([expr.ref]/6.3.2).
   Ex bound_member(EntityId c, NameId name, std::optional<Ex> object, bool arrow, u32 begin, u32 end, u32 name_at,
-                  EntityId naming = EntityId::none, bool qualified = false) {
-    return bind_members(c, member_functions(c, name), object, arrow, begin, end, name_at, naming, qualified);
+                  EntityId naming = EntityId::none, bool qualified = false, bool explicit_receiver = false) {
+    return bind_members(c, member_functions(c, name), object, arrow, begin, end, name_at, naming, qualified,
+                        explicit_receiver);
   }
 
   Ex bind_members(EntityId c, std::vector<const MemberDeclRec*> cands, std::optional<Ex> object, bool arrow,
-                  u32 begin, u32 end, u32 name_at, EntityId naming = EntityId::none, bool qualified = false) {
+                  u32 begin, u32 end, u32 name_at, EntityId naming = EntityId::none, bool qualified = false,
+                  bool explicit_receiver = false) {
     ExprInfo info{builtin(Builtin::bound_member), ValueCategory::prvalue, 0};
     Ex r = node(ast::Member{info, cands.front()->entity, ~u32{0}, arrow ? 1u : 0u, 0, object ? at(*object, begin) : Child{}},
                 begin, end, info);
-    bound_[std::to_underlying(r.id)] = {object, std::move(cands), c, name_at, naming, qualified};
+    bound_[std::to_underlying(r.id)] = {object, std::move(cands), c, name_at, naming, qualified, explicit_receiver};
     return r;
   }
   bool is_bound_member(const Ex& e) { return e.ok() && types().is(e.type(), Builtin::bound_member); }
@@ -5028,6 +5125,9 @@ public:
     if (unevaluated == 0) {
       if (d->is_virtual) {
         const auto* record = virtual_consumer(bound.cls);
+        // The pure interface has a known call shape independently of its object layout.
+        if (!record && d->is_pure && bound.explicit_receiver && !bound.qualified && bound.naming == bound.cls &&
+            q_->peer_pure_dispatch(bound.cls)) record = class_rec(bound.cls);
         if (!record || !object || assignment_notation ||
             (!m.arrow && (object->cat() != ValueCategory::lvalue ||
                           (record->peer_virtual_layout == PeerVirtualLayout::primary_base && !peer_object_lvalue(*object))))) {
@@ -5122,7 +5222,9 @@ public:
       parameters.reserve(1 + fr.params.size());
       parameters.push_back(o.type());
       parameters.append_range(fr.params);
-      const auto pointer = types().pointer(types().function(fr.inner, parameters, false, LangLinkage::cxx));
+      // The pure dispatch profile certifies a nonthrowing prototype for initializer selection.
+      const auto pointer = types().pointer(types().function(fr.inner, parameters, false, LangLinkage::cxx,
+                                                            Cv::none, ast::RefQual::none, d->is_pure && fr.fn_noexcept));
       return node(ast::VirtualMemberCall{info, pointer, *virtual_slot, at(o, begin), b_->list(*children)}, begin, end, info);
     }
     return node(ast::MemberCall{info, fe, at(o, begin), b_->list(*children)}, begin, end, info);
@@ -5284,7 +5386,9 @@ public:
       QualType t = r.inner;
       const bool direct_cat = direct_reference_category(a, r);
       const bool function_conversion = types().function_pointer_conversion(a.type(), t);
-      if (direct_cat && (same_unqualified(a.type(), t) || function_conversion)) {
+      const bool class_prvalue = !a.glvalue() && types().is_class(a.type()) &&
+                                 (r.rvalue_ref || object_cv(t) == Cv::const_);
+      if ((direct_cat || class_prvalue) && (same_unqualified(a.type(), t) || function_conversion)) {
         if (!cv_within(object_cv(a.type()), object_cv(t))) return {};
         Ics v = binding({true, 0, function_conversion ? 1 : 0}, r.rvalue_ref, a.cat() != ValueCategory::lvalue,
                         cv_bits(object_cv(t)) - cv_bits(object_cv(a.type())));
@@ -5292,7 +5396,7 @@ public:
         return v;
       }
       // [over.ics.ref]/1: binding to a base class subobject is a derived-to-base Conversion.
-      if (int d = base_depth(a.type(), t); d && direct_cat) {
+      if (int d = base_depth(a.type(), t); d && (direct_cat || class_prvalue)) {
         if (!cv_within(object_cv(a.type()), object_cv(t))) return {};
         Ics v = binding({true, 2, 0}, r.rvalue_ref, a.cat() != ValueCategory::lvalue, cv_bits(object_cv(t)) - cv_bits(object_cv(a.type())));
         v.base_depth = d;
@@ -5570,7 +5674,11 @@ public:
   // A call returning a reference to a function is an lvalue. For object references the category
   // follows the reference kind ([expr.call]).
   ExprInfo result_info(QualType r) {
-    if (!types().is_reference(r)) return {Types::unqualified(r), ValueCategory::prvalue, 0};
+    if (!types().is_reference(r)) {
+      // [expr.type] removes top-level cv only from non-class, non-array prvalues.
+      QualType t = types().is_class(r) || types().is_array(r) ? r : Types::unqualified(r);
+      return {t, ValueCategory::prvalue, 0};
+    }
     QualType t = types().referee(r);
     return {t, types().rec(r).rvalue_ref && !types().is_function(t) ? ValueCategory::xvalue : ValueCategory::lvalue, 0};
   }
@@ -6019,7 +6127,8 @@ public:
           diag(at_, Diag::bind_drops_qualifiers, e.type(), r);
           return fail;
         }
-        if (!e.glvalue()) return to_base(materialize(e, Types::unqualified(e.type()), extend), types().class_of(t), at_);
+        if (!e.glvalue())
+          return to_base(materialize(e, types().add_cv(e.type(), object_cv(t)), extend), types().class_of(t), at_);
         Ex b = to_base(e, types().class_of(t), at_);
         return b.ok() && extend ? extended(b) : b;
       }
@@ -6033,6 +6142,11 @@ public:
     // [dcl.init.ref]/5.4.4: an rvalue reference does not bind to an lvalue.
     if (rr.rvalue_ref && e.cat() == ValueCategory::lvalue) {
       diag(at_, Diag::bind_to_lvalue, t);
+      return fail;
+    }
+    if (!e.glvalue() && types().is_class(t) && same_unqualified(e.type(), t) &&
+        !cv_within(object_cv(e.type()), object_cv(t))) {
+      diag(at_, Diag::bind_drops_qualifiers, e.type(), r);
       return fail;
     }
     if (!e.glvalue() && types().is_array(t) && same_unqualified(e.type(), t) &&
@@ -6159,7 +6273,9 @@ public:
       ExprInfo info{Types::unqualified(p->type), ValueCategory::prvalue, expr_flag::dependent};
       return node(ast::Literal{info, v}, begin, end, info);
     }
-    // The class's members, in a member function's body ([basic.scope.class]).
+    if (const auto* declaration = earlier_nested_enumerator(name))
+      return enumerator(declaration->sema.entity, declaration->sema.type, begin, end);
+    // The enclosing class's members ([basic.scope.class]).
     if (current_class != EntityId::none) {
       if (auto r = class_member(current_class, name, begin, end, begin, std::nullopt, /*unqualified=*/true)) return *r;
       if (!class_rec(current_class)) {
@@ -9703,6 +9819,7 @@ private:
     u32 name_at = 0;
     EntityId naming = EntityId::none;  // the class they were named in ([class.access.base]/5)
     bool qualified = false;            // an explicit qualifier suppresses virtual dispatch
+    bool explicit_receiver = false;    // the member was named by a written `.` or `->`
   };
   std::map<u32, Bound> bound_;                        // by draft bound-member Member
   std::set<u32> deleted_;                             // deleted functions named so far

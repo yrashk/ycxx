@@ -239,6 +239,9 @@ in class and use it to initialize an `inline constexpr` tag object.
 An explicit class return can select a written move constructor for an eligible named local
 or parameter. [#749](https://github.com/yrashk/ycxx/issues/749)
 
+An ordinary call returning a class by value preserves the result's cv-qualification for
+`decltype` and overload resolution. [#679](https://github.com/yrashk/ycxx/issues/679)
+
 An ordinary class object can be destroyed explicitly through a reference or pointer with
 `object.~Class()` or `pointer->~Class()`. Templates can use a dependent class name, and unary
 `noexcept` uses the destructor's exception specification. [#722](https://github.com/yrashk/ycxx/issues/722)
@@ -273,6 +276,9 @@ members may reuse their names. [#725](https://github.com/yrashk/ycxx/issues/725)
 Nested unscoped enumerators conflict with other non-type members regardless of declaration order.
 They can hide an enum name in ordinary lookup while leaving it available as a qualifier.
 [#731](https://github.com/yrashk/ycxx/issues/731)
+Initializers in a nested enumeration can use preceding enclosing class members by unqualified
+name. Earlier enumerators take precedence over enclosing class names within their enumeration.
+[#760](https://github.com/yrashk/ycxx/issues/760)
 
 Automatic declarations of ordinary non-template classes with only scalar fields and no bases
 or unions can use default member initializers in `S s;` and `S s{…};`. A default runs in
@@ -422,6 +428,9 @@ written default member initializer are value-initialized.
   three member-pointer predicates as `bool` template arguments or defaults, including through
   alias templates
   [#209](https://github.com/yrashk/ycxx/issues/209);
+- dependent non-type template arguments from unqualified parameterless `consteval` function
+  templates with explicit type arguments and an integral or enum result.
+  [#209](https://github.com/yrashk/ycxx/issues/209)
 - `__is_constructible`, `__is_nothrow_constructible` and `__is_trivially_constructible` for
   supported scalar, reference, function and `void` queries, including argument packs in
   class-template base and variable-template initializer replay.
@@ -552,7 +561,9 @@ peer-owned objects with an ordinary root, including a derived class with that si
 base, at most one integral field and at most one override. Consumers can upcast those derived
 views, access ordinary integral members, and query `sizeof` and `alignof` for the Itanium layout.
 A translation unit can also define one non-key virtual member of an eligible root out of class.
-For that case, the peer provides the key function, virtual table and RTTI.
+For that case, the peer provides the key function, virtual table and RTTI. On Linux x86-64,
+a caller can also dispatch through a peer-owned abstract interface with one or two
+public pure virtual slots using fixed integer signatures and bare `noexcept`.
 [#309](https://github.com/yrashk/ycxx/issues/309)
 
 **Structured bindings.** Local bindings can copy or alias scalar-element arrays, including

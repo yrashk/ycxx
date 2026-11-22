@@ -1341,6 +1341,9 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   An enumerator can hide a same-scope enum tag in ordinary lookup. The tag remains available as
   a nested-name-specifier or through an unqualified elaborated enum specifier.
   [#731](https://github.com/yrashk/ycxx/issues/731)
+- Nested enumeration initializers see the enclosing class prefix by unqualified lookup. An
+  earlier enumerator in the same enumeration takes precedence over an enclosing class member
+  ([basic.scope.enum], [basic.scope.class]). [#760](https://github.com/yrashk/ycxx/issues/760)
 - Tests: `tests/own/classes/s4-*enum*`, `s4-scoped-enum`, `s4-unscoped-enum` (spec-only, plus two
   from the review): 7 of 7.
 - Namespace-scope opaque enum declarations ([dcl.enum], #157) supply a complete enum type with a
@@ -1687,6 +1690,13 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
 - Tests: `tests/own/abi` (5), `tests/own/classes/s5-byvalue-lifetimes`, `-temporaries`;
   s1-byvalue-params and -return pass.
 
+## Class prvalues returned by calls (#679)
+
+- Ordinary class-valued calls preserve the result's top-level `const` and `volatile`
+  qualifiers ([expr.call], [expr.type]). The tests in `tests/own/call-result-cv/` cover
+  `decltype`, overload selection, and the existing adjustments for scalar and reference
+  results.
+
 ## Local class prvalue selection (#740)
 
 - The built-in `?:` or comma operator can initialize an automatic class object, an ordinary
@@ -1897,6 +1907,12 @@ template's tokens again with the arguments bound.
 - **Dependent variable-template arguments** (#209): an unqualified namespace variable template
   used as a dependent `bool` template argument keeps the declaration found by ordinary lookup.
   Substitution evaluates the selected specialization once its arguments are concrete.
+- **Dependent immediate calls** (#209, [temp.dep.constexpr], [temp.arg.nontype]): a call to an
+  unqualified, unambiguous namespace `consteval` function template with no function parameters
+  can supply a non-type template argument. The call retains its explicit type arguments, including
+  trailing pack expansions, and evaluates to an integer or enum once those arguments are concrete.
+  Alias type-ids replay calls whose argument validity must be checked at substitution.
+  Dependent uses of aliases that can erase the check require signature replay (#209).
 - **Dependent logical negation** (#209): a `bool` template argument or default can negate a
   qualified dependent `bool` variable template-id. Substitution retains the negation across
   aliases until the selected specialization has concrete arguments and supplies a usable
@@ -2730,7 +2746,17 @@ What the process allocates, attributed to the engine's cells, in the trace and t
   supported root type. The root has an implicit default constructor, a trivial destructor and
   no default member initializer. Lowering stores `_ZTV + 16` in the vptr. The table can come
   from the key definition in the same unit or from a peer. [#309](https://github.com/yrashk/ycxx/issues/309)
-- Broader construction and table emission, pure-slot dispatch, covariant returns and class-head
+- On Linux x86-64, a caller can dispatch through a pointer or lvalue reference to a
+  peer-owned abstract root. The root is an ordinary, externally linked class with no
+  bases or fields and one or two public, directly written pure virtuals. Each slot has
+  an `int` or `unsigned int` result, at most one argument of those types, optional
+  member `const` and bare `noexcept`. The caller uses the address point in the
+  supplied subobject and passes that same pointer to the selected slot.
+  `unit.linux_pure_virtual_dispatch` checks GCC and Clang peers, a secondary base,
+  conditional evaluation, the consumer ELF symbols and cold/resident output across edits.
+  [Itanium call ABI](https://itanium-cxx-abi.github.io/cxx-abi/abi.html#vcall.caller) ·
+  [#309](https://github.com/yrashk/ycxx/issues/309) · [#659](https://github.com/yrashk/ycxx/issues/659)
+- Broader construction and table emission, pure-slot signatures, covariant returns and class-head
   `final` remain in #309. Pure declarations and `final` for virtual destructors and assignment
   operators also remain there. Checking `operator=` includes matching implicitly declared copy
   and move assignments. Virtual destructor entry points, RTTI expressions, virtual bases and

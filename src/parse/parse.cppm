@@ -249,6 +249,7 @@ public:
   // ABI attributes on declarations outside the entity's ordinary declaration records.
   bool has_unapplied_declaration_attributes(EntityId e) const { return unapplied_declaration_attributes_.contains(e); }
   bool peer_root_vtable_visible(EntityId cls) const;
+  bool peer_pure_dispatch(EntityId cls) const;
   // Whether an ordinary written definition can also supply its ELF base-object entry point (#136).
   bool supports_base_object_variant(EntityId function, const std::set<EntityId>& uncertain_layouts) const;
 
@@ -1261,6 +1262,8 @@ private:
   std::set<std::tuple<EntityId, ItemId, u32>> replaying_function_defaults_;
   std::map<u32, std::vector<sema::BaseRec>> class_bases_;  // by class entity
   std::map<u32, ClassBasePattern> class_base_patterns_;  // by defining item
+  struct AliasCallPattern { u32 item, begin, end; sema::AliasCallPattern kind; };
+  std::map<EntityId, AliasCallPattern> alias_call_patterns_;
   std::set<std::pair<u32, u32>> dependent_type_trait_operands_;  // source item and token offset
   std::set<EntityId> failed_type_trait_instantiations_;
   std::vector<std::string> ns_of_, eff_ns_;       // by item
@@ -1560,6 +1563,7 @@ public:
     return p_->defining_enum_.first == e ? p_->defining_enum_.second : nullptr;
   }
   std::set<EntityId> uncertain_object_layouts() override { return p_->uncertain_object_layouts(); }
+  bool peer_pure_dispatch(EntityId cls) override { return p_->peer_pure_dispatch(cls); }
   std::vector<DeclId> visible_decls(ast::NameId name, std::span<const EntityId> directives = {}) override {
     std::vector<std::string> paths;
     for (EntityId ns : directives) paths.push_back(p_->namespace_path(ns));
@@ -1685,6 +1689,15 @@ public:
     return failed;
   }
   std::optional<ConstId> constant_value(EntityId v) override { return p_->constant_value(v, value_point(v)); }
+  std::optional<ConstId> constant_call(sema::Sema& s, const sema::Ex& call) override {
+    return sema::Evaluator(s, *this).evaluate(call).value;
+  }
+  sema::AliasCallPattern alias_call_pattern(EntityId e) override {
+    auto it = p_->alias_call_patterns_.find(e);
+    return it == p_->alias_call_patterns_.end() ? sema::AliasCallPattern::none : it->second.kind;
+  }
+  std::optional<QualType> replay_alias_calls(sema::Sema& caller, const ast::DeclSema& alias,
+                                            const sema::Bindings& args) override;
   bool instantiation_gave_up() override { return p_->instantiation_gave_up(); }
   std::optional<QualType> specialization_type(EntityId v) override { return p_->specialization_type(v, point()); }
   const std::vector<sema::Expansion>* pattern_expansions() override { return at_point ? p_->expansions(item_, 0) : nullptr; }
@@ -1994,6 +2007,29 @@ std::optional<ast::DeclSema> AtItem::template_decl(EntityId t) {
   return decl;
 }
 
+std::optional<QualType> AtItem::replay_alias_calls(sema::Sema& caller, const ast::DeclSema& alias,
+                                                  const sema::Bindings& args) {
+  const auto& pattern = p_->alias_call_patterns_.at(alias.entity);
+  const auto& item = p_->items_->items[pattern.item];
+  AtItem q(*p_, pattern.item, false);
+  q.at_point = default_instantiation_point.value_or(point());
+  q.type_trait_demand = q.at_point;
+  const auto before = caller.diag_count();
+  sema::Sema s(p_->world(), caller.builder(), q, caller.diagnostics(), p_->id(pattern.item), 0);
+  s.template_scopes.push_back(p_->world().ins.seqs.elements(alias.template_params));
+  s.template_args = args;
+  Parser ps(*p_->r_, item.begin, item.begin + pattern.end, s);
+  ps.set_questions(q);
+  ps.seek(item.begin + pattern.begin);
+  try {
+    auto type = ps.type_id();
+    if (type && ps.at_end() && !s.has_error_since(before)) return type;
+  } catch (const TooDeep&) {
+    // The parser has already diagnosed its limit.
+  }
+  return std::nullopt;
+}
+
 std::optional<QualType> AtItem::replay_member_exception(sema::Sema& caller, const ast::DeclSema& decl,
                                                         EntityId function, QualType type) {
   const auto slot = p_->member_exceptions_.find(decl.entity);
@@ -2215,6 +2251,11 @@ public:
   AtInstantiation(Program& p, u32 item) : p_(&p), item_(item), at_(p, item, true) {
     at_.default_instantiation_point = p.end();
   }
+  sema::AliasCallPattern alias_call_pattern(EntityId e) override { return at_.alias_call_pattern(e); }
+  std::optional<QualType> replay_alias_calls(sema::Sema& caller, const ast::DeclSema& alias,
+                                           const sema::Bindings& args) override {
+    return at_.replay_alias_calls(caller, alias, args);
+  }
   std::optional<NodeId> replay_function_default(sema::Sema& caller, const ast::DefaultArg& value,
                                                 EntityId function, QualType parameter) override {
     return at_.replay_function_default(caller, value, function, parameter);
@@ -2227,6 +2268,7 @@ public:
   const sema::Classes& classes() override { return p_->classes(); }
   sema::CopyAssignment require_copy_assignment(EntityId f) override { return p_->require_copy_assignment(f); }
   std::set<EntityId> uncertain_object_layouts() override { return at_.uncertain_object_layouts(); }
+  bool peer_pure_dispatch(EntityId cls) override { return at_.peer_pure_dispatch(cls); }
   bool class_layout_uncertain(EntityId c) override { return at_.class_layout_uncertain(c); }
   bool explicit_specialization(EntityId c) override { return at_.explicit_specialization(c); }
   const sema::ClassRec& publish_class(EntityId c, sema::ClassRec r) override { return p_->publish_class(c, std::move(r), item_); }
@@ -2270,6 +2312,9 @@ public:
   engine::Loc source_loc(engine::Loc loc, u32 offset) override { return at_.source_loc(loc, offset); }
   bool type_trait_instantiation_failed(EntityId e) override { return at_.type_trait_instantiation_failed(e); }
   std::optional<ConstId> constant_value(EntityId v) override { return p_->constant_value(v, p_->end()); }
+  std::optional<ConstId> constant_call(sema::Sema& s, const sema::Ex& call) override {
+    return sema::Evaluator(s, *this).evaluate(call).value;
+  }
   std::optional<ast::DeclSema> earlier_member(ast::NameId, bool) override { return std::nullopt; }
   bool instantiation_gave_up() override { return p_->instantiation_gave_up(); }
   std::optional<QualType> specialization_type(EntityId v) override { return p_->specialization_type(v, p_->end()); }
@@ -2588,8 +2633,16 @@ private:
         ps_.bump();
         ps_.skip_attributes();
         ps_.bump();
+        const auto begin = ps_.pos();
+        const auto calls = ps_.deferred_immediate_calls();
+        const auto checks = ps_.deferred_argument_checks();
         auto t = ps_.type_id();
         if (!t || !alias_template(name, name_at, *t)) return bad();
+        if (ps_.deferred_immediate_calls() != calls) {
+          const auto kind = ps_.deferred_argument_checks() == checks ? sema::AliasCallPattern::retained
+                                                                     : sema::AliasCallPattern::may_erase;
+          p_->alias_call_patterns_.emplace(decls_.back().entity, Program::AliasCallPattern{k_, begin, ps_.pos(), kind});
+        }
         if (!ps_.expect(Tk::semi)) bad();
         return;
       }
@@ -3930,6 +3983,7 @@ private:
   // can have declarators after the enumerator list. In a class (`cls`), it is a member.
   void enum_declaration(EntityId cls) {
     sema::Types& types = s_.types();
+    s_.current_class = cls;
     u32 at = ps_.pos();
     const bool definition = it_->kind == ItemKind::enum_def;
     const u32 after_attributes = definition ? after_definition_attributes() : it_->end;
@@ -4026,6 +4080,7 @@ private:
     if (unnamed) s_.defining_unnamed_enum_scope = scope;
     else p_->defining_enum_ = {e, &er};
     const std::size_t first_enumerator = s_.own.size();
+    if (cls != EntityId::none) s_.nested_enum_members_begin = first_enumerator;
     auto enumerator_entity = [&](NameId n) {
       return s_.world().entities.entity(
           {.kind = sema::EntityKind::enumerator, .name = n, .linkage = ast::Linkage::none, .scope = e});
@@ -4129,6 +4184,7 @@ private:
         break;
       }
     }
+    s_.nested_enum_members_begin.reset();
     // [dcl.enum]/7: without a fixed type, the type holds every value, and is no larger than int
     // unless a value fits neither int nor unsigned int; which one is the implementation's. As the
     // Itanium C++ ABI compilers choose (#220): with no negative value, `unsigned int` if every
@@ -4209,7 +4265,6 @@ private:
     spec.has_type = true;
     spec.is_typedef = td;
     if (cls != EntityId::none) {
-      s_.current_class = cls;
       return member_declarators(spec, class_decl(cls, true), /*fields_only=*/true);
     }
     do {
@@ -7153,6 +7208,90 @@ bool Program::peer_root_vtable_visible(EntityId cls) const {
   return true;
 }
 
+bool Program::peer_pure_dispatch(EntityId cls) const {
+  using enum lex::Tk;
+  const auto* record = classes_.find(cls);
+  if (!record || !record->defined || !record->is_abstract() || !sema::native_virtual_class(*record, w_->types) ||
+      record->peer_virtual_layout != sema::PeerVirtualLayout::none ||
+      record->union_ || record->closure || !record->bases.empty() || !record->fields.empty() ||
+      !record->types.empty() || !record->friends.empty() || record->unapplied_layout || record->explicit_alignment)
+    return false;
+  const auto& owner = w_->entities.rec(cls);
+  const auto definition = class_items_.find(std::to_underlying(cls));
+  if (owner.linkage != ast::Linkage::external || owner.templ != EntityId::none ||
+      !is_namespace(owner.scope) || unnamed(namespace_path(owner.scope)) ||
+      w_->ins.names.spelling(owner.name).empty() || definition == class_items_.end()) return false;
+  const auto& head = items_->items[definition->second];
+  const auto key = r_->tokens[head.begin].kind;
+  if ((key != kw_struct && key != kw_class) || head.template_depth || head.specialization ||
+      layout_attribute(*r_, head.brace_end, head.end, LayoutAttributes::any) || !peer_root_vtable_visible(cls)) return false;
+
+  const auto integer = [&](QualType type) {
+    const auto builtin = w_->types.builtin_of(type);
+    return builtin == sema::Builtin::int_ || builtin == sema::Builtin::unsigned_int;
+  };
+  // Sema canonicalizes aliases and noexcept conditions and can erase ABI attributes. Read the
+  // whole declaration to admit only a directly written fixed integer prototype.
+  const auto plain_signature = [&](const items::Item& source, bool has_parameter) {
+    const auto tokens = std::span(r_->tokens).subspan(source.begin, source.end - source.begin);
+    std::size_t at = 0;
+    const auto accept = [&](lex::Tk kind) {
+      if (at == tokens.size() || tokens[at].kind != kind) return false;
+      ++at;
+      return true;
+    };
+    const auto written_int = [&] {
+      if (accept(kw_signed) || accept(kw_unsigned)) {
+        accept(kw_int);
+        return true;
+      }
+      if (!accept(kw_int)) return false;
+      if (!accept(kw_signed)) accept(kw_unsigned);
+      return true;
+    };
+    if (!accept(kw_virtual) || !written_int() || !accept(identifier) || !accept(l_paren)) return false;
+    if (has_parameter) {
+      if (!written_int()) return false;
+      accept(identifier);
+    } else {
+      accept(kw_void);
+    }
+    if (!accept(r_paren)) return false;
+    accept(kw_const);
+    return accept(kw_noexcept) && accept(equal) && accept(int_lit) && r_->spelling(tokens[at - 1]) == "0" &&
+           accept(semi) && at == tokens.size();
+  };
+
+  unsigned slots = 0;
+  for (const auto& member : record->members) {
+    if (!member.is_virtual) {
+      if (member.copy_assignment == sema::CopyAssignment::none || member.explicit_defaulted_assignment ||
+          member_decl(member.entity)) return false;
+      continue;
+    }
+    if (++slots > 2 || !member.is_pure || member.is_final || record->access_of(member.entity) != ast::Access::public_)
+      return false;
+    const auto& entity = w_->entities.rec(member.entity);
+    const auto signature = w_->types.rec(member.type);
+    if (entity.kind != sema::EntityKind::function || entity.scope != cls || entity.templ != EntityId::none ||
+        entity.linkage != ast::Linkage::external || entity.lang != LangLinkage::cxx || !signature.fn_noexcept ||
+        signature.variadic || signature.fn_ref != ast::RefQual::none || signature.params.size() > 1 ||
+        (signature.fn_cv != sema::Cv::none && signature.fn_cv != sema::Cv::const_) ||
+        !integer(signature.inner) || !std::ranges::all_of(signature.params, integer)) return false;
+    // Rechecked after whole-unit analysis by native emission. A competing definition or an
+    // ABI attribute on a qualified friend must not turn this into a direct entry or another ABI.
+    const auto declarations = decls_.find(std::to_underlying(member.entity));
+    if (declarations == decls_.end() || declarations->second.size() != 1) return false;
+    const auto& [item, decl] = declarations->second.front();
+    constexpr u16 excluded = sema::decl_flag::definition | sema::decl_flag::inline_ | sema::decl_flag::deleted |
+                             sema::decl_flag::template_;
+    const auto& source = items_->items[item];
+    if ((decl.flags & excluded) || source.kind != ItemKind::declaration || source.parent != definition->second ||
+        source.names.size() != 1 || !plain_signature(source, !signature.params.empty())) return false;
+  }
+  return slots != 0;
+}
+
 bool Program::supports_base_object_variant(EntityId function, const std::set<EntityId>& uncertain_layouts) const {
   using sema::EntityKind;
   const auto& fn = w_->entities.rec(function);
@@ -9279,7 +9418,21 @@ const Program::Instance* Program::instance(EntityId spec, u32 point) {
   decl.type = rec.type;
   decl.flags = sema::u16(decl.flags & ~sema::decl_flag::template_);
   decl.template_params = w_->ins.intern_seq(std::span<const ast::TemplateParamSema>{});
+  instantiating_.insert(key);
+  struct Instantiating {
+    std::set<u32>& active;
+    u32 key;
+    ~Instantiating() { active.erase(key); }
+  } instantiating{instantiating_, key};
+  AtItem parameter_questions(*this, k, false);
+  parameter_questions.at_point = point;
+  std::vector<engine::Diagnostic> parameter_diagnostics;
+  ast::Builder parameter_builder(w_->ins, &arena_);
+  sema::Sema parameter_sema(*w_, parameter_builder, parameter_questions, parameter_diagnostics, id(k), 0);
   sema::Templates t = templates();
+  t.call_constant = [&parameter_sema](EntityId templ, std::span<const ast::TemplateArg> args) {
+    return parameter_sema.evaluate_dependent_call(templ, args, 0);
+  };
   std::vector<ast::ParamSema> params;
   // A parameter's type is adjusted again after substitution ([dcl.fct]/5): an array or function
   // becomes a pointer; the body's object keeps its cv-qualifiers. A function parameter pack is a
@@ -9309,11 +9462,10 @@ const Program::Instance* Program::instance(EntityId spec, u32 point) {
   if (!analyze_body(k).diags.empty()) {
     in.failed = true;
   } else {
-    instantiating_.insert(key);
     in.body = BodyAnalysis(*this, k, Instantiation{decl, std::move(args)}).run();
-    instantiating_.erase(key);
     if (in.body.value.deduced) in.decl.type = in.body.value.deduced_type;
   }
+  in.body.diags.append_range(std::move(parameter_diagnostics));
   instance_index_.emplace(key, instances_.size());
   instances_.push_back(std::move(in));
   instance_order_.push_back(&instances_.back());

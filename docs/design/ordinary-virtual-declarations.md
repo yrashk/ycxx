@@ -67,7 +67,8 @@ definitions, allocation and by-value calls and function definitions check the ab
 type. A direct `decltype(make())` can name an abstract result without materializing it.
 `sizeof(make())` and member access on `make()` require materialization. The Linux virtual
 layout admission checks each declaration in the root and derived class. A pure member in
-either keeps the hierarchy outside native emission even when a concrete override exists.
+either prevents admission to the ordinary root or primary-base layout profiles. The
+borrowed-interface call profile below uses the address point in an existing object.
 [[basic.def]](https://eel.is/c++draft/basic.def) · [[dcl.type.decltype]](https://eel.is/c++draft/dcl.type.decltype) ·
 [[conv.rval]](https://eel.is/c++draft/conv.rval) · [#309](https://github.com/yrashk/ycxx/issues/309)
 
@@ -184,7 +185,28 @@ that defines the table. Ownership follows the key definition across the complete
 maker appears first.
 [#309](https://github.com/yrashk/ycxx/issues/309)
 
-Broader table emission, covariant returns, pure-slot dispatch, out-of-class pure member
+## Linux x86-64 borrowed abstract interfaces
+
+An ordinary named, externally linked class with no bases or fields can supply one or two
+public pure slots. The admitted signatures spell `int` or `unsigned int` directly, have
+at most one integer argument, allow member `const` and require bare `noexcept`. The
+same dispatch check applies at the call site and during translation-unit emission,
+which checks the completed declarations and available ABI information.
+
+The caller uses an unqualified written object call on a pointer or lvalue reference.
+Lowering reads the address point from the supplied interface subobject, indexes in
+declaration order and passes the same subobject pointer to the selected function. A
+peer's secondary-base thunk can adjust it to the complete object. The consumer's
+ELF object contains the ordinary peer helper references and the indirect call. A bare
+`noexcept` slot retains its nonthrowing prototype through conditional initialization.
+
+Mixed GCC and Clang fixtures cover slot order, one receiver and argument evaluation,
+and native secondary-base adjustment. Resident edits swap declarations and change
+slot eligibility, comparing the resulting objects or diagnostics with cold compilation.
+[Itanium call ABI](https://itanium-cxx-abi.github.io/cxx-abi/abi.html#vcall.caller) ·
+[#309](https://github.com/yrashk/ycxx/issues/309) · [macOS parity #659](https://github.com/yrashk/ycxx/issues/659)
+
+Broader table emission, covariant returns, further pure-slot signatures, out-of-class pure member
 definitions, class-head `final`, explicit virtual destructor calls and virtual member addresses
 remain in #309. Pure declarations and `final` for virtual destructors and assignment operators
 also remain there. A virtual assignment operator can be overridden by an implicitly declared
