@@ -294,6 +294,8 @@ What is true of the code today. Work in progress and its owners are tracked in
   as black-box inputs. A common symbol becomes a weak definition in its own `__DATA,__common`
   zero-fill section. The reader rejects absolute and indirect symbols, alignments above 2^15,
   scattered and TLV relocations, and section-relative relocations other than UNSIGNED.
+  A SUBTRACTOR must be followed immediately by a non-PC-relative UNSIGNED at the same address
+  and width. Both records describe a 32-bit or 64-bit field. [#702](https://github.com/yrashk/ycxx/issues/702)
 - `ycxx.link` (`src/link/`): `link(objects, options) -> expected<bytes, errors>`.
   - Diagnoses duplicate and undefined symbols and a missing entry point. A strong definition beats
     a weak one; common symbols merge to the largest. `__mh_execute_header` and `___dso_handle` are
@@ -673,10 +675,15 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
   freestanding linker retains these records in the read-only segment. The hosted linker
   supplies unwind discovery for the peer who throws and catches the exception.
   `unit.linux_cleanup_free_unwind` checks mixed hosted execution, omitted frames, and native
-  source, staged, and daemon link parity. Standalone unwind discovery, native handlers, and
-  exceptional cleanups remain under #89.
+  source, staged, and daemon link parity. Standalone unwind discovery and broader handler and
+  exceptional-cleanup support remain under #89.
   [#572](https://github.com/yrashk/ycxx/issues/572) · [#89](https://github.com/yrashk/ycxx/issues/89)
   · [#558](https://github.com/yrashk/ycxx/issues/558)
+- A host-linked ordinary void function can destroy one initialized aggregate local with a
+  nonthrowing destructor when its subsequent direct external `void()` call throws. The normal
+  continuation destroys it once as well. The cleanup-only landing pad resumes the original
+  exception; the mixed-object test checks both paths and the peer's typed handler.
+  [Design](docs/design/linux-hosted-catch-all.md#hosted-local-cleanup-663) · [#663](https://github.com/yrashk/ycxx/issues/663)
 - Explicit native static links keep the first input ELF COMDAT group for each signature. The reader
   validates group membership, including relocation sections, and selection precedes startup and
   layout. `unit.linux_elf_comdat` checks whole-group selection, retained references, startup and
