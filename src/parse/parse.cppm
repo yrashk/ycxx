@@ -5261,6 +5261,16 @@ private:
       if (types.canonical(r.type) == types.canonical(candidate_type) ||
           (r.is_virtual && same_function_parameters(r.type, sem.type) &&
            types.canonical(types.rec(r.type).inner) == types.canonical(types.rec(sem.type).inner))) {
+        if (candidate_type != sem.type && d.noexcept_condition) {
+          // [except.spec]: a condition must agree with the earlier bare specification.
+          bool ok = true;
+          const bool nonthrowing = !s_.dependent(*d.noexcept_condition) && ps_.noexcept_value(d.noexcept_condition, ok);
+          if (!ok) return false;
+          if (!nonthrowing) {
+            s_.diag(d.name_at, Diag::conflicting_declaration, d.name);
+            return false;
+          }
+        }
         m = &r;
         matched_type = candidate_type;
       }
