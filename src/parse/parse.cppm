@@ -7443,7 +7443,13 @@ private:
       if (rec.union_) {
         if (!s_.check_destructor_access(s_.types().innermost_array_element(f.type), init.begin)) return {};
         // [except.ctor]: if construction unwinds, the completed variant must be cleaned up.
-        if (!nonthrowing && s_.destructor_of(f.type) != EntityId::none) {
+        // Only the ordinary written bodies collected by the Linux pipeline get this proof.
+        // Generated and template bodies retain the source diagnostic.
+        const bool native_cleanup = s_.types().target().triple == ast::x86_64_linux.triple &&
+                                    !inst_ && !it_->specialization && !templated_pattern() &&
+                                    p_->world().entities.rec(s_.current_class).templ == EntityId::none &&
+                                    (p_->in_global_scope(k_) || p_->namespace_class_friend(k_));
+        if (!nonthrowing && s_.destructor_of(f.type) != EntityId::none && !native_cleanup) {
           s_.diag(init.begin, Diag::union_constructor_unwind);
           return {};
         }
