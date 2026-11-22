@@ -2623,6 +2623,7 @@ private:
   std::optional<std::pair<NameId, u32>> typedef_name_after_braces() {
     u32 back = it_->begin + ps_.pos();  // `seek` takes a region index, `pos` is in the item
     ps_.seek(it_->brace_end);
+    ps_.skip_attributes(nullptr, 0, Parser::attr_gnu);
     std::optional<std::pair<NameId, u32>> r;
     if (ps_.is(Tk::identifier)) r = std::pair(ps_.name_of(ps_.tok()), ps_.pos());
     ps_.seek(back);
@@ -2755,6 +2756,7 @@ private:
     if (!class_declared(sem, key, name_at)) return bad();
     p_->current_instantiation(pattern, k_, sem);
     ps_.seek(it_->brace_end);
+    ps_.skip_attributes(nullptr, 0, Parser::attr_gnu);
     q_.own_class_complete = true;
     if (ps_.at_end()) {
       ps_.expect(Tk::semi);  // the `;` is missing ([class.pre]/1)
@@ -2822,6 +2824,7 @@ private:
     sem.flags |= sema::decl_flag::specialization;
     if (!class_declared(sem, key, name_at)) return bad();
     ps_.seek(it_->brace_end);
+    ps_.skip_attributes(nullptr, 0, Parser::attr_gnu);
     q_.own_class_complete = true;
     if (!ps_.accept(Tk::semi)) {
       s_.diag(ps_.pos(), Diag::not_supported, ps_.kind());  // declarators after an explicit specialization
@@ -3249,6 +3252,7 @@ private:
     if (template_) p_->current_instantiation(s_.types().class_of(sem.type), k_, sem);
     // The declarators after the closing brace: `struct S { … } s, *p;`, where S is complete.
     ps_.seek(it_->brace_end);
+    ps_.skip_attributes(nullptr, 0, Parser::attr_gnu);
     q_.own_class_complete = true;
     if (ps_.accept(Tk::semi)) return;
     if (ps_.at_end()) {  // the `;` is missing; the definition stands ([class.pre]/1)
@@ -3303,6 +3307,7 @@ private:
     p_->class_def(k_);
 
     ps_.seek(it_->brace_end);
+    ps_.skip_attributes(nullptr, 0, Parser::attr_gnu);
     s_.current_class = owner;
     q_.own_class_complete = true;
     DeclSpec spec;
@@ -3673,6 +3678,7 @@ private:
     }
     p_->classes_.publish_enum(e, std::move(er));
     ps_.seek(it_->brace_end);
+    ps_.skip_attributes(nullptr, 0, Parser::attr_gnu);
     if (ps_.accept(Tk::semi)) return;
     // The item ended at the brace: the `;` is missing, and the definition stands
     // ([class.pre]/1, [dcl.enum]/1).
