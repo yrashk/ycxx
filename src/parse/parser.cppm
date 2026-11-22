@@ -2891,11 +2891,17 @@ public:
         Ex e = expression();
         --s_->unevaluated;
         expect(Tk::r_brace);
-        if (is(Tk::kw_noexcept)) {
-          s_->diag(pos(), Diag::not_supported, Tk::kw_noexcept);
-          bump();
-        }
         bool dep = s_->dependent(e);
+        // `{ e } noexcept`: e is not potentially-throwing ([expr.prim.req.compound]/2), as the
+        // operator `noexcept(e)` answers.
+        if (accept(Tk::kw_noexcept) && !dep && e.ok()) {
+          ++s_->unevaluated;
+          Ex answer = s_->unary_noexcept(e, e.begin, e.end);
+          --s_->unevaluated;
+          auto value = s_->as<ast::Literal>(answer);
+          if (!value || !s_->ins().values.is<ast::VInt>(value->value)) failed = true;
+          else if (s_->ins().values.get<ast::VInt>(value->value).bits.lo == 0) failed = true;
+        }
         if (accept(Tk::arrow)) {  // `-> C<args>`: C<decltype((e)), args…> ([expr.prim.req.compound])
           u32 at = pos();
           if (std::optional<ast::DeclSema> c = concept_name()) {

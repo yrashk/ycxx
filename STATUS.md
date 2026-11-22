@@ -2110,9 +2110,12 @@ Fable decided the representation (ast.md §6.6); the Opus session wrote the code
   variable-template specialization with explicit non-dependent type arguments checks its associated
   constraints. This includes unevaluated uses such as `decltype`. A type-constraint or a leading
   requires-clause contributes to that check. [#234](https://github.com/yrashk/ycxx/issues/234)
+- A compound requirement `{ e } noexcept;` holds when the operator `noexcept(e)` gives true: a
+  call to a potentially-throwing function or a temporary with a throwing destructor fails it
+  ([expr.prim.req.compound]/2, #775, `tests/own/concepts/compound-noexcept.run.cpp`).
 - Not yet: class and variable template constraints outside those cases, partial specializations
   and members, broader constrained packs, fold-expanded constraints, constrained placeholders
-  outside ordinary block declarations, and `noexcept` in compound requirements (#234). Open follow-ups include re-verification of satisfaction at END
+  outside ordinary block declarations (#234). Open follow-ups include re-verification of satisfaction at END
   (#235), Itanium constraint mangling (#236), recorded discarded extents for `if constexpr` (#237),
   and value-dependent mapping arguments (#209).
 
