@@ -527,6 +527,16 @@ with tempfile.TemporaryDirectory() as directory:
     implicit_move = write("implicit_move.cpp", implicit_move_source + direct_move_authorization)
     syntax(implicit_move)
     syntax(write("implicit_move_unmarked.cpp", implicit_move_source), error=needs_move_policy)
+    implicit_reflected_source = implicit_move_source.replace(direct_move_rules, "").replace(
+        "struct Work {", "struct [[=own::resource_mode::linear, =own::move_constructor::transfers]] Work {")
+    implicit_reflected_source = implicit_reflected_source.replace(
+        "Work start() noexcept", "[[=own::operation::creates]] Work start() noexcept").replace(
+        "void finish(Work&& work) noexcept", "[[=own::operation::consumes]] void finish(Work&& work) noexcept")
+    implicit_reflected = write("implicit_move_reflected.cpp", implicit_reflected_source)
+    syntax(implicit_reflected)
+    syntax(write("implicit_move_reflected_leak.cpp", implicit_reflected_source.replace(
+        "  finish(static_cast<Work&&>(second));\n", "")),
+        error="linear resource 'second' may leave its scope")
 
     move_include = '#include "move_type.hpp"\n'
     write("move_type.hpp", "#pragma once\n" + direct_move_type)
@@ -913,7 +923,8 @@ with tempfile.TemporaryDirectory() as directory:
         subprocess.run([*args, *selection_flags, selected, "-o", native], check=True, timeout=30)
         for extra in ((), ("alternate",)):
             subprocess.run([native, *extra], check=True, timeout=10)
-        for source in (composed, local_records, direct_move, tagged_move, annotated_move, reflected_move, implicit_move):
+        for source in (composed, local_records, direct_move, tagged_move, annotated_move, reflected_move,
+                       implicit_move, implicit_reflected):
             subprocess.run([*args, "-fcheck-policies", str(source), "-o", str(native)], check=True, timeout=30)
             assert subprocess.run([native], timeout=10).returncode == 0
         subprocess.run([*args, str(composed_skip), "-o", str(native)], check=True, timeout=30)
