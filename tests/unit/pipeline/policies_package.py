@@ -130,6 +130,25 @@ int check_choice(bool choose_receipt) {
   return !choice.holds_second() || choice.second().value != 31;
 }
 
+struct Counted {
+  int& moves;
+  int& drops;
+  Counted(int& moves, int& drops) noexcept : moves(moves), drops(drops) {}
+  Counted(Counted&& other) noexcept : moves(other.moves), drops(other.drops) { ++moves; }
+  ~Counted() noexcept { ++drops; }
+};
+
+bool check_variant_move() {
+  int moves = 0, drops = 0;
+  {
+    own::variant<Counted, Permit> choice(own::first_t{}, Counted(moves, drops));
+    if (moves != 1 || drops != 1) return false;
+    auto result = choice.take_first();
+    if (moves != 2 || drops != 2 || choice.holds_first()) return false;
+  }
+  return drops == 3;
+}
+
 int unwind_choice(bool choose_receipt) {
   try {
     Choice choice = choose_receipt ? Choice(own::first_t{}, Receipt{{}, 27})
@@ -179,7 +198,7 @@ int main(int argc, char**) {
     return exhausted.first().value;  // no alternative after taking ownership
   }
   if (argc == 9) return unwind_choice(true);  // a live linear alternative during unwind
-  if (check_choice(true) || check_choice(false) || unwind_choice(false)) return 5;
+  if (check_choice(true) || check_choice(false) || unwind_choice(false) || !check_variant_move()) return 5;
   auto editor = Store::editor(2);
   Store::set(editor, 2, 28);
   return Store::get(editor, 2) != 28;

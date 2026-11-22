@@ -17,6 +17,13 @@ union variant_storage {
   variant_storage(second_t, Second&& value) noexcept : second(static_cast<Second&&>(value)) {}
   ~variant_storage() noexcept {}
 };
+
+// End the source alternative's lifetime after constructing the return object.
+template<class Member>
+struct variant_member_cleanup {
+  Member& value;
+  ~variant_member_cleanup() noexcept { value.~Member(); }
+};
 }  // namespace detail
 
 // A local choice owns exactly one active value until that value is taken.
@@ -63,18 +70,16 @@ class variant {
 
   First take_first() noexcept {
     require_active(active::first_selected);
-    First owner(static_cast<First&&>(storage_.first));
+    detail::variant_member_cleanup<First> cleanup{storage_.first};
     active_ = active::empty;
-    storage_.first.~First();
-    return owner;
+    return First(static_cast<First&&>(storage_.first));
   }
 
   Second take_second() noexcept {
     require_active(active::second_selected);
-    Second owner(static_cast<Second&&>(storage_.second));
+    detail::variant_member_cleanup<Second> cleanup{storage_.second};
     active_ = active::empty;
-    storage_.second.~Second();
-    return owner;
+    return Second(static_cast<Second&&>(storage_.second));
   }
 };
 
