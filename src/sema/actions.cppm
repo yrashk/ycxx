@@ -98,6 +98,7 @@ public:
   virtual ast::DeclSema decl_sema(DeclId d) = 0;
   // The written in-class declaration of a member from this unit's class record.
   virtual std::optional<ast::DeclSema> written_member(EntityId) { return std::nullopt; }
+  virtual bool peer_pure_dispatch(EntityId) { return false; }
   // A use of a global allocation function that may lack a written declaration in the unit.
   // An aligned signature also brings its parameter's enum shape into the unit.
   virtual void use_allocation_function(EntityId, bool = false) {}
@@ -2274,7 +2275,8 @@ public:
       c = found->owner;
     }
     if (found->member && found->member->is_function)
-      return bound_member(c, name, object, arrow, begin, end, name_at, naming, qualifier.has_value());
+      return bound_member(c, name, object, arrow, begin, end, name_at, naming, qualifier.has_value(),
+                          /*explicit_receiver=*/true);
     if (!check_access(c, found->member ? found->member->entity : found->field->entity, name, name_at, naming)) return fail;
     if (found->member) {
       // A static data member: the object expression is evaluated, then discarded ([expr.ref]).
@@ -4769,16 +4771,18 @@ public:
   // (none when there is none to bind, as in a static member function). Only a call may follow
   // ([expr.ref]/6.3.2).
   Ex bound_member(EntityId c, NameId name, std::optional<Ex> object, bool arrow, u32 begin, u32 end, u32 name_at,
-                  EntityId naming = EntityId::none, bool qualified = false) {
-    return bind_members(c, member_functions(c, name), object, arrow, begin, end, name_at, naming, qualified);
+                  EntityId naming = EntityId::none, bool qualified = false, bool explicit_receiver = false) {
+    return bind_members(c, member_functions(c, name), object, arrow, begin, end, name_at, naming, qualified,
+                        explicit_receiver);
   }
 
   Ex bind_members(EntityId c, std::vector<const MemberDeclRec*> cands, std::optional<Ex> object, bool arrow,
-                  u32 begin, u32 end, u32 name_at, EntityId naming = EntityId::none, bool qualified = false) {
+                  u32 begin, u32 end, u32 name_at, EntityId naming = EntityId::none, bool qualified = false,
+                  bool explicit_receiver = false) {
     ExprInfo info{builtin(Builtin::bound_member), ValueCategory::prvalue, 0};
     Ex r = node(ast::Member{info, cands.front()->entity, ~u32{0}, arrow ? 1u : 0u, 0, object ? at(*object, begin) : Child{}},
                 begin, end, info);
-    bound_[std::to_underlying(r.id)] = {object, std::move(cands), c, name_at, naming, qualified};
+    bound_[std::to_underlying(r.id)] = {object, std::move(cands), c, name_at, naming, qualified, explicit_receiver};
     return r;
   }
   bool is_bound_member(const Ex& e) { return e.ok() && types().is(e.type(), Builtin::bound_member); }
@@ -5121,6 +5125,9 @@ public:
     if (unevaluated == 0) {
       if (d->is_virtual) {
         const auto* record = virtual_consumer(bound.cls);
+        // The pure interface has a known call shape independently of its object layout.
+        if (!record && d->is_pure && bound.explicit_receiver && !bound.qualified && bound.naming == bound.cls &&
+            q_->peer_pure_dispatch(bound.cls)) record = class_rec(bound.cls);
         if (!record || !object || assignment_notation ||
             (!m.arrow && (object->cat() != ValueCategory::lvalue ||
                           (record->peer_virtual_layout == PeerVirtualLayout::primary_base && !peer_object_lvalue(*object))))) {
@@ -5215,7 +5222,9 @@ public:
       parameters.reserve(1 + fr.params.size());
       parameters.push_back(o.type());
       parameters.append_range(fr.params);
-      const auto pointer = types().pointer(types().function(fr.inner, parameters, false, LangLinkage::cxx));
+      // The pure dispatch profile certifies a nonthrowing prototype for initializer selection.
+      const auto pointer = types().pointer(types().function(fr.inner, parameters, false, LangLinkage::cxx,
+                                                            Cv::none, ast::RefQual::none, d->is_pure && fr.fn_noexcept));
       return node(ast::VirtualMemberCall{info, pointer, *virtual_slot, at(o, begin), b_->list(*children)}, begin, end, info);
     }
     return node(ast::MemberCall{info, fe, at(o, begin), b_->list(*children)}, begin, end, info);
@@ -9838,6 +9847,7 @@ private:
     u32 name_at = 0;
     EntityId naming = EntityId::none;  // the class they were named in ([class.access.base]/5)
     bool qualified = false;            // an explicit qualifier suppresses virtual dispatch
+    bool explicit_receiver = false;    // the member was named by a written `.` or `->`
   };
   std::map<u32, Bound> bound_;                        // by draft bound-member Member
   std::set<u32> deleted_;                             // deleted functions named so far
