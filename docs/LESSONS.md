@@ -307,6 +307,17 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
     window size, and keys written with pauses; the last frame is after the last `ESC [ H`.
   - Learned on #245.
 
+- **Test a terminal UI as a model fed events, and only the terminal around it under a pty.** The
+  trace browser's keys went untested while it read `/dev/tty` itself (#245). Moving its state and
+  drawing into a model that takes key and mouse events and returns frames of a given size (#635)
+  let every click, drag and selection be a unit test against plain-text goldens. A pty test then
+  covers only what the terminal does: modes, signals, resize, escape sequences.
+  - On macOS a pty's slave is revoked when its session leader exits, so the parent cannot read
+    the restored modes. Make the session leader a small process that runs the program as its
+    child and prints the modes once that child has died.
+  - Key a selection by the cells it covers, never by row numbers: a live feed, a sort or a
+    filter moves the rows under it (#636's one P1).
+  - Learned on #635 and #636.
 - **Reduce a compiler crash from the build system's exact command, with a script.** A GCC ICE
   under CMake seemed to vanish when re-run by hand. Two things cost about 20 minutes of
   bisecting:

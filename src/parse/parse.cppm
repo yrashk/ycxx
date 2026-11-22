@@ -98,7 +98,8 @@ bool layout_may_be_packed(const pp::Region& region, u32 begin, u32 end) {
 
 bool record_layout_attribute(const pp::Region& region, const items::Item& item, std::span<const std::pair<u32, u32>> applied) {
   using enum LayoutAttributes;
-  if (item.kind != ItemKind::class_def)
+  // An enum-head's attributes and those right after its closing brace apply to the enumeration.
+  if (item.kind != ItemKind::class_def && item.kind != ItemKind::enum_def)
     return layout_attribute(region, item.begin, item.end, affecting_layout, applied);
   return layout_attribute(region, item.begin, item.brace_begin, affecting_layout, applied) ||
          layout_attribute(region, item.brace_end, item.end, leading_affecting_layout);
@@ -227,6 +228,8 @@ public:
   const Result<ast::ClassDef>& class_def(u32 item);
   // The records of the classes and enumerations this unit has analysed.
   const sema::Classes& classes() const { return classes_; }
+  // Class and enumeration layouts affected by annotations erased from their types.
+  std::set<EntityId> uncertain_object_layouts() const;
   // The defining pattern selected for an instantiated class, including a partial specialization.
   std::optional<u32> class_pattern_item(EntityId c) const {
     auto it = class_patterns_.find(std::to_underlying(c));
@@ -1416,6 +1419,67 @@ private:
   friend class BodyAnalysis;
 };
 
+std::set<EntityId> Program::uncertain_object_layouts() const {
+  const auto& region = this->region();
+  const auto& items = this->items().items;
+  std::set<EntityId> uncertain;
+  std::set<EntityId> annotated_tags;
+  std::set<std::uint32_t> uncertain_definitions;
+  // Sema erases alias types. Remember affected spellings across alias declarations so a
+  // scalar alias that changed layout also makes records using it uncertain.
+  std::set<std::string_view> aliases;
+  auto uncertain_alias = [&](const items::Item& item, u32 end) {
+    if (aliases.empty()) return false;
+    for (std::uint32_t i = item.begin; i < end; ++i) {
+      auto tok = region.tokens[i];
+      if (tok.kind == lex::Tk::identifier && aliases.contains(region.name(tok)) &&
+          !std::ranges::contains(item.names, i - item.begin, &items::DeclName::offset)) return true;
+    }
+    return false;
+  };
+  for (std::uint32_t k = 0; k < items.size(); ++k) {
+    const auto& item = items[k];
+    const auto* analysed = analysed_item(k);
+    const bool definition = item.kind == items::ItemKind::class_def;
+    const bool enum_definition = item.kind == items::ItemKind::enum_def;
+    if (!analysed || (!definition && !enum_definition && item.kind != items::ItemKind::declaration)) continue;
+    bool packed = definition && layout_may_be_packed(region, item.begin, item.brace_end);
+    // The attributes immediately after the type's closing brace can still apply to
+    // the type. Those within a following declarator apply to the declared name.
+    // An alias can also carry such an attribute, into a declaration or an enum-base.
+    bool type_annotated = record_layout_attribute(region, item, class_alignment_specifiers(k)) ||
+                          (!definition && uncertain_alias(item, enum_definition ? item.brace_begin : item.end));
+    bool annotated = type_annotated ||
+        ((definition || enum_definition) && layout_attribute(region, item.brace_end, item.end));
+    if (!packed && !annotated) continue;
+    if (definition && (packed || type_annotated)) uncertain_definitions.insert(k);
+    for (auto d : w_->ins.seqs.elements(analysed->decls)) {
+      if (d.entity == EntityId::none) continue;
+      if (d.kind == ast::DeclKind::class_ && (packed || type_annotated)) {
+        uncertain.insert(d.entity);
+        if (!definition) annotated_tags.insert(d.entity);
+      }
+      if (type_annotated && d.kind == ast::DeclKind::enum_) uncertain.insert(d.entity);
+      if (annotated && d.kind == ast::DeclKind::data_member) {
+        uncertain.insert(w_->entities.rec(d.entity).scope);
+        if (item.parent != items::none) uncertain_definitions.insert(item.parent);
+      }
+      if (annotated && d.kind == ast::DeclKind::type_alias) {
+        if (w_->types.is_class(d.type)) uncertain.insert(w_->types.class_of(d.type));
+        else aliases.insert(w_->ins.names.spelling(w_->entities.rec(d.entity).name));
+      }
+    }
+  }
+  // Instantiated classes have their own entities. Their packing and field declarations
+  // come from the selected pattern, which may be a partial specialization.
+  for (EntityId c : classes().classes()) {
+    auto pattern = class_pattern_item(c);
+    if (pattern && (uncertain_definitions.contains(*pattern) || annotated_tags.contains(w_->entities.rec(c).templ)))
+      uncertain.insert(c);
+  }
+  return uncertain;
+}
+
 // Sema's questions, asked at an item's prefix (§B1.4).
 class AtItem final : public sema::Questions {
 public:
@@ -1426,6 +1490,7 @@ public:
   const sema::EnumRec* defining_enum(EntityId e) override {
     return p_->defining_enum_.first == e ? p_->defining_enum_.second : nullptr;
   }
+  std::set<EntityId> uncertain_object_layouts() override { return p_->uncertain_object_layouts(); }
   std::vector<DeclId> visible_decls(ast::NameId name, std::span<const EntityId> directives = {}) override {
     std::vector<std::string> paths;
     for (EntityId ns : directives) paths.push_back(p_->namespace_path(ns));
@@ -1496,7 +1561,7 @@ public:
   bool is_complete(EntityId c) override {
     return at_point ? p_->is_complete(c, *at_point, true, true) : is_complete_at_item(c);
   }
-  std::optional<NodeId> replay_default_member(sema::Sema& caller, EntityId field) override;
+  std::optional<NodeId> replay_default_member(sema::Sema& caller, EntityId field, EntityId required_base) override;
   std::optional<NodeId> replay_function_default(sema::Sema& caller, const ast::DefaultArg& value,
                                                 EntityId function, QualType parameter) override;
   std::optional<u32> default_instantiation_point;
@@ -1598,6 +1663,11 @@ public:
   bool dependent_call(sema::u32 offset) override { return std::ranges::contains(instantiation_calls, offset); }
 
 private:
+  static bool inherited_default_tokens(sema::Sema& replay, const pp::Region& region,
+                                       const Program::Dmi& dmi, EntityId base);
+  static bool inherited_default_arithmetic(sema::Sema& replay, NodeId root, EntityId base,
+                                           const sema::ClassRec& record);
+
   bool is_complete_at_item(EntityId c) {
     return (completing_class != EntityId::none && completing_class == c) ||
            p_->is_complete(c, item_, self_, own_class_complete);
@@ -1616,7 +1686,117 @@ private:
   bool self_;
 };
 
-std::optional<NodeId> AtItem::replay_default_member(sema::Sema& caller, EntityId field) {
+// Keep the written form before replay can replace an immediate invocation or sizeof with a literal.
+bool AtItem::inherited_default_tokens(sema::Sema& replay, const pp::Region& region,
+                                      const Program::Dmi& dmi, EntityId base) {
+  using enum Tk;
+  auto tokens = std::span(region.tokens).subspan(dmi.begin, dmi.end - dmi.begin);
+  if (dmi.braced) {
+    if (tokens.size() < 2 || tokens.front().kind != l_brace || tokens.back().kind != r_brace) return false;
+    tokens = tokens.subspan(1, tokens.size() - 2);
+    if (!tokens.empty() && tokens.back().kind == comma) tokens = tokens.first(tokens.size() - 1);
+  }
+  Tk previous = eof;
+  for (const auto token : tokens) {
+    switch (token.kind) {
+    case int_lit: case float_lit: {
+      const auto& written = region.literal(token);
+      if (written.bad || written.overflow || written.ud_suffix != lex::no_name) return false;
+      break;
+    }
+    case identifier: {
+      const auto name = replay.ins().names.intern(region.name(token));
+      const auto member = replay.find_member(replay.current_class, name);
+      if (!member || member->ambiguous || !member->field || member->owner != base) return false;
+      break;
+    }
+    case l_paren:
+      if (previous == identifier || previous == r_paren || previous == kw_this || lex::is_literal(previous)) return false;
+      break;
+    case r_paren: case kw_this: case arrow: case plus: case minus: case star: case slash: case percent:
+      break;
+    default:
+      return false;
+    }
+    previous = token.kind;
+  }
+  return true;
+}
+
+bool AtItem::inherited_default_arithmetic(sema::Sema& replay, NodeId root, EntityId base,
+                                          const sema::ClassRec& record) {
+  const auto& tree = replay.ins().ast;
+  const auto base_type = replay.types().pointer(replay.types().class_type(base));
+  auto unparenthesized = [&](NodeId id) {
+    while (id != NodeId::none && tree.is<ast::Paren>(id)) id = tree.get<ast::Paren>(id).operand.id;
+    return id;
+  };
+  const auto field_read = [&](NodeId id) {
+    id = unparenthesized(id);
+    if (id == NodeId::none || !tree.is<ast::Member>(id)) return false;
+    const auto member = tree.get<ast::Member>(id);
+    if (!member.arrow || member.reference || member.info.category != ast::ValueCategory::lvalue ||
+        member.field >= record.fields.size() || record.fields[member.field].entity != member.member ||
+        !replay.types().is_arithmetic(member.info.type) ||
+        sema::Types::is_volatile(replay.types().canonical(member.info.type))) return false;
+    const auto object = unparenthesized(member.object.id);
+    if (object == NodeId::none || !tree.is<ast::ImplicitConversion>(object)) return false;
+    const auto adjusted = tree.get<ast::ImplicitConversion>(object);
+    if (adjusted.conversion != ast::ConversionKind::derived_to_base || adjusted.function != base ||
+        adjusted.info.type != base_type) return false;
+    const auto self = unparenthesized(adjusted.operand.id);
+    return self != NodeId::none && tree.is<ast::This>(self) && tree.get<ast::This>(self).info.type == *replay.this_type;
+  };
+  auto arithmetic = [&](const ast::ExprInfo& info) {
+    return info.category == ast::ValueCategory::prvalue && replay.types().is_arithmetic(info.type);
+  };
+  std::vector<NodeId> pending{root};
+  while (!pending.empty()) {
+    NodeId id = pending.back();
+    pending.pop_back();
+    if (id == NodeId::none) return false;
+    if (tree.is<ast::Literal>(id)) {
+      if (!arithmetic(tree.get<ast::Literal>(id).info)) return false;
+    } else if (tree.is<ast::ValueInit>(id)) {
+      if (!arithmetic(tree.get<ast::ValueInit>(id).info)) return false;
+    } else if (tree.is<ast::Paren>(id)) {
+      const auto paren = tree.get<ast::Paren>(id);
+      if (!arithmetic(paren.info)) return false;
+      pending.push_back(paren.operand.id);
+    } else if (tree.is<ast::Unary>(id)) {
+      const auto unary = tree.get<ast::Unary>(id);
+      if (!arithmetic(unary.info) || (unary.op != ast::UnaryOp::plus && unary.op != ast::UnaryOp::minus)) return false;
+      pending.push_back(unary.operand.id);
+    } else if (tree.is<ast::Binary>(id)) {
+      const auto binary = tree.get<ast::Binary>(id);
+      using enum ast::BinaryOp;
+      if (!arithmetic(binary.info) ||
+          (binary.op != add && binary.op != sub && binary.op != mul && binary.op != div && binary.op != rem))
+        return false;
+      pending.push_back(binary.rhs.id);
+      pending.push_back(binary.lhs.id);
+    } else if (tree.is<ast::ImplicitConversion>(id)) {
+      const auto conversion = tree.get<ast::ImplicitConversion>(id);
+      if (!arithmetic(conversion.info) || conversion.function != EntityId::none) return false;
+      using enum ast::ConversionKind;
+      switch (conversion.conversion) {
+      case lvalue_to_rvalue:
+        if (!field_read(conversion.operand.id)) return false;
+        break;
+      case integral: case floating: case floating_integral: case boolean:
+        pending.push_back(conversion.operand.id);
+        break;
+      default:
+        return false;
+      }
+    } else {
+      return false;
+    }
+  }
+  return true;
+}
+
+std::optional<NodeId> AtItem::replay_default_member(sema::Sema& caller, EntityId field, EntityId required_base) {
   const auto dmi = p_->dmi(field);
   if (!dmi) return std::nullopt;
   const auto& entity = p_->world().entities.rec(field);
@@ -1630,6 +1810,15 @@ std::optional<NodeId> AtItem::replay_default_member(sema::Sema& caller, EntityId
   replay.unevaluated = caller.unevaluated;
   replay.push_scope();
   const sema::Sema::DefaultMemberScope nested(replay, true);
+
+  const sema::ClassRec* base = nullptr;
+  if (required_base != EntityId::none) {
+    base = replay.class_rec(required_base);
+    if (!base || !inherited_default_tokens(replay, p_->region(), *dmi, required_base)) {
+      replay.diag(0, Diag::not_supported, Tk::equal);
+      return NodeId::none;
+    }
+  }
 
   auto& active = p_->replaying_default_members_;
   if (!active.insert(field).second) {
@@ -1660,6 +1849,10 @@ std::optional<NodeId> AtItem::replay_default_member(sema::Sema& caller, EntityId
   }
 
   NodeId root = caller.builder().commit(ast::Child{init.id, 0}).id;
+  if (base && !inherited_default_arithmetic(replay, root, required_base, *base)) {
+    replay.diag(init.begin, Diag::not_supported, Tk::equal);
+    return NodeId::none;
+  }
   replay.check_immediate_addresses(root, init.begin);
   auto check = [&](this const auto& self, const ast::Red& node) -> void {
     if (node.is<ast::DefaultMemberInit>()) return;  // a nested replay checked this child
@@ -1782,6 +1975,8 @@ public:
   }
   const sema::Classes& classes() override { return p_->classes(); }
   sema::CopyAssignment require_copy_assignment(EntityId f) override { return p_->require_copy_assignment(f); }
+  std::set<EntityId> uncertain_object_layouts() override { return at_.uncertain_object_layouts(); }
+  bool class_layout_uncertain(EntityId c) override { return at_.class_layout_uncertain(c); }
   const sema::ClassRec& publish_class(EntityId c, sema::ClassRec r) override { return p_->publish_class(c, std::move(r), item_); }
   std::vector<DeclId> visible_decls(ast::NameId name, std::span<const EntityId> directives = {}) override {
     return at_.visible_decls(name, directives);
