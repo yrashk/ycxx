@@ -276,6 +276,26 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
     Darwin. Until the driver passes the target, run the own run suite through a wrapper that adds
     `--target=x86_64-pc-linux-gnu -nostdlib` (#646).
   - Learned on #639.
+- **Survey a Release build's warnings in one pass, then fix them.** The first Release build
+  (#726) stopped at each `-Werror` failure, and every rebuild under load took 20-40 minutes to
+  find the next one.
+  - Do: build once into a separate directory with
+    `-DCMAKE_CXX_FLAGS="-Wno-error=maybe-uninitialized -Wno-error=array-bounds -Wno-error=stringop-overflow -Wno-error=stringop-overread"`
+    and `ninja -k 0`, then list every warning site with its `inlined from … at src/…` chain.
+    That build found 9 sites in all; fix them, then build with `-Werror` again.
+  - GCC 16.2's false positives at -O3 come in three kinds: `std::optional`'s payload read after
+    a check (`-Wmaybe-uninitialized`), and libycxx's in-place `vector`/`string` insert and
+    `memchr` paths (`-Warray-bounds`, `-Wstringop-*`; yrashk/libycxx#51). The fix that held was
+    a value and a flag instead of the optional. Copying `*opt` into a local after the check did
+    not help.
+  - Debug hides what -O3 shows: a null `Json*` dereferenced by a test returned null at -O0
+    (`unit.lsp`), and a daemon test's edit window, sized for Debug's compile time, closed in
+    Release. `daemon.process` now parks the pooled build at a checkpoint (#746). A Release-only
+    test failure is a test bug as often as a compiler one.
+  - A GCC crash or link failure that a guessed repro misses: copy the intermediate modules
+    verbatim and reduce them. #283's trigger was an inline constructor in an *intermediate*
+    module, and #46's was a template specialization instantiated in the imported interface.
+  - Learned on #726.
 - **A module import added during a build can miss the dependency scan.** CMake scanned a test's
   imports before an edit and GCC compiled it afterward, so its module mapper lacked the new import.
   - Do: rerun Ninja in the same build directory after changing imports during a build.

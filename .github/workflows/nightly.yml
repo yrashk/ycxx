@@ -14,11 +14,15 @@ on:
         description: run only the ThreadSanitizer job (a branch's check before its PR, #105)
         type: boolean
         default: false
+      release-only:
+        description: run only the Release build and test job (#726)
+        type: boolean
+        default: false
 
-# Per ref and kind: a tsan-only run, or one dispatched on a branch, neither cancels main's nightly
-# run nor is cancelled by it.
+# Per ref and kind: a tsan-only or release-only run, or one dispatched on a branch, neither
+# cancels main's nightly run nor is cancelled by it.
 concurrency:
-  group: nightly-${{ github.ref }}-${{ inputs.tsan-only && 'tsan' || 'all' }}
+  group: nightly-${{ github.ref }}-${{ inputs.tsan-only && 'tsan' || inputs.release-only && 'release' || 'all' }}
   cancel-in-progress: true
 
 permissions:
@@ -45,7 +49,7 @@ jobs:
 
   test:
     needs: changed
-    if: needs.changed.outputs.run == 'true' && !inputs.tsan-only
+    if: needs.changed.outputs.run == 'true' && !inputs.tsan-only && !inputs.release-only
     name: ${{ matrix.host.name }}
     strategy:
       fail-fast: false
@@ -97,12 +101,55 @@ jobs:
           path: build/test-logs/
           if-no-files-found: ignore
 
+  # Release (-O3 -DNDEBUG) on both hosts (#726): the build, its unit tests, and tools/test's fast
+  # stages against the Release binary. NDEBUG does not turn contracts off; asserts are gone.
+  release:
+    needs: changed
+    if: needs.changed.outputs.run == 'true' && !inputs.tsan-only
+    name: ${{ matrix.host.name }}-release
+    strategy:
+      fail-fast: false
+      matrix:
+        host:
+          - { name: linux-x86_64, runs-on: ubuntu-24.04, container: 'gcc:16', jobs: 4 }
+          - { name: macos-arm64, runs-on: macos-15, container: '', jobs: 3 }
+    runs-on: ${{ matrix.host.runs-on }}
+    container: ${{ matrix.host.container }}
+    timeout-minutes: 120
+    env:
+      YCXX_BUILD_TYPE: Release
+      YCXX_BUILD_DIR: build-release  # relative: github.workspace is the host path in a container
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Trust the checkout in the Linux container
+        if: matrix.host.name == 'linux-x86_64'
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          git config --global --add safe.directory "$GITHUB_WORKSPACE/deps/libycxx"
+
+      - name: Toolchain (GCC 16)
+        uses: ./.github/actions/setup
+
+      - name: Release build and tests (tools/test --fast)
+        run: tools/test --fast --no-state -j ${{ matrix.host.jobs }}
+
+      - name: Test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-logs-${{ matrix.host.name }}-release
+          path: build/test-logs/
+          if-no-files-found: ignore
+
   # ThreadSanitizer (#105): ycxx and libycxx instrumented, the unit tests once and the concurrent
   # ones repeated (tools/tsan). On the bare runner with a GCC built with libtsan (the action's
   # comment says why not the container); building that GCC takes about 17 minutes on a cache miss.
   tsan:
     needs: changed
-    if: needs.changed.outputs.run == 'true'
+    if: needs.changed.outputs.run == 'true' && !inputs.release-only
     name: linux-x86_64-tsan
     runs-on: ubuntu-24.04
     timeout-minutes: 240
@@ -116,7 +163,7 @@ jobs:
         run: tools/tsan -j 4 --repeat 20
 
   wall-time:
-    needs: [test, tsan]
+    needs: [test, release, tsan]
     if: always() && needs.test.result != 'skipped'
     runs-on: ubuntu-24.04
     steps:

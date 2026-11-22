@@ -84,11 +84,10 @@ std::pair<std::string, std::vector<Message>> preprocess_to_text(Session& s, std:
 // Takes a preprocessor option at `args[i]` (`-I dir`, `-Idir`, `-isystem`, `-iquote`, `-D`,
 // `-U`), advancing `i` past its argument: true if it was one, an error if its argument is missing.
 std::expected<bool, std::string> take_option(std::span<const std::string_view> args, std::size_t& i, Config& cfg);
-// The configuration with the system directories after those the options gave.
 // The system directories after the command line's. A `-I` or `-isystem` directory that names one
 // of them (relative to `cwd`) is dropped, as GCC and Clang do, so it is searched once, at its
 // system place, and `#include_next` from it goes on past it.
-Config with_system_dirs(Config cfg, std::string_view cwd = {});
+Config with_system_dirs(Config cfg, std::string_view cwd = {}, std::string_view sdkroot = {});
 
 // The item of a file-level diagnostic location in the region's file `file` (lex::file_level for
 // the main file). Seam for #34: diagnostics before items exist are located by byte offset.
@@ -451,7 +450,7 @@ std::expected<bool, std::string> take_option(std::span<const std::string_view> a
   return false;
 }
 
-Config with_system_dirs(Config cfg, std::string_view cwd) {
+Config with_system_dirs(Config cfg, std::string_view cwd, std::string_view sdkroot) {
   auto normal = [&](std::string_view d) {
     std::filesystem::path p(d);
     if (p.is_relative() && !cwd.empty()) p = std::filesystem::path(cwd) / p;
@@ -459,7 +458,7 @@ Config with_system_dirs(Config cfg, std::string_view cwd) {
     while (s.size() > 1 && s.ends_with('/')) s.pop_back();
     return s;
   };
-  auto dirs = system_dirs(*cfg.target);
+  auto dirs = system_dirs(*cfg.target, sdkroot);
   auto system = dirs | std::views::transform(normal) | std::ranges::to<std::vector>();
   // A `-I` or `-isystem` directory that is a system directory is searched at the system
   // directory's place only. -isystem directories are system directories too: a `-I` directory

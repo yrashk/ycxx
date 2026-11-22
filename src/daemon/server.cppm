@@ -106,7 +106,9 @@ class Server {
     }
     wake_r_ = std::move(wake->first);
     wake_w_ = std::move(wake->second);
-    for (const std::string& d : pp::system_dirs())
+    // A relative SDK override is resolved against each request's directory and watched when read.
+    const char* sdkroot = std::getenv("SDKROOT");
+    for (const std::string& d : pp::all_system_dirs(sdkroot ? sdkroot : ""))
       system_dirs_.push_back(std::filesystem::path(d).lexically_normal().generic_native_encoded_string());
     start_watching();
     log(std::format("serving {} on {} (watcher: {})", paths_.root, paths_.socket(), watcher_state_));
@@ -201,7 +203,7 @@ class Server {
     if (os_name == "macos") {
       // One recursive stream: the root, the toolchain and the sysroot from the start (§5.5).
       dirs.push_back(paths_.root);
-      for (const std::string& d : pp::system_dirs())
+      for (const std::string& d : system_dirs_)
         if (auto r = real_path(d)) dirs.push_back(*r);
     }
     if (auto err = watcher_->start(std::move(dirs), paths_.root)) {
