@@ -5186,7 +5186,9 @@ public:
     }
     auto m = *as<ast::Member>(callee);
     const Bound& bound = bound_.at(std::to_underlying(callee.id));
-    if (std::ranges::any_of(bound.cands, [&](const MemberDeclRec* candidate) {
+    // An enum-prefix binding has no receiver. Only its selected static candidate can be called.
+    const bool objectless_prefix = !bound.prefix_candidates.empty();
+    if (!objectless_prefix && std::ranges::any_of(bound.cands, [&](const MemberDeclRec* candidate) {
           return candidate->is_virtual && types().rec(candidate->type).fn_ref != ast::RefQual::none;
         })) {
       diag(paren_at, Diag::virtual_ref_call);
@@ -5291,6 +5293,10 @@ public:
     const MemberDeclRec* d = recs[*chosen];
     const Candidate& k = cands[*chosen];
     if (!check_access(bound.cls, d->entity, d->name, bound.name_at, bound.naming)) return fail;
+    if (objectless_prefix && !d->is_static) {
+      diag(begin, Diag::member_without_object, d->name);
+      return fail;
+    }
     std::optional<u32> virtual_slot;
     if (unevaluated == 0) {
       if (d->is_virtual) {
