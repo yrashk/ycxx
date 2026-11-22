@@ -22,6 +22,15 @@ template<int Input> int read_receiver() {
   return named.value * 100 + Receiver{Input + 1}.value;
 }
 
+constexpr int constant_seed() { return 42; }
+struct ConstantRecord { int value = constant_seed(); };
+
+template<int Offset> int read_constexpr() {
+  constexpr ConstantRecord named{};
+  return named.value + Offset;
+}
+
 int main() {
-  return read_constants<2>() != 86 || read_constants<3>() != 87 || read_receiver<5>() != 607;
+  return read_constants<2>() != 86 || read_constants<3>() != 87 || read_receiver<5>() != 607 ||
+         read_constexpr<2>() != 44;
 }

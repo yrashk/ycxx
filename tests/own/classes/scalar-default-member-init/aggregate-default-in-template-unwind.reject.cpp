@@ -8,4 +8,9 @@ template<int Offset> int read() {
   return named.value + Offset;
 }
 
+template<int Offset> int read_in_init_statement() {
+  if constexpr (Record named{}; true) return named.value + Offset; //! error
+}
+
 int read_specialization() { return read<2>(); }
+int read_init_specialization() { return read_in_init_statement<2>(); }
