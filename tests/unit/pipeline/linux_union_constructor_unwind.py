@@ -37,8 +37,8 @@ def main():
             run([*target, '-c', unsupported, '-o', 'rejected.o'], scope, cold, error=diagnostic)
             assert not (Path(scope) / 'rejected.o').exists()
 
-        pattern = original.replace('union Storage', 'template<class T> union Storage')
-        unsupported.write_text(pattern.replace('Storage object;', 'Storage<int> object;'))
+        pattern = original.replace('Storage() :', 'template<class T> Storage(T) :')
+        unsupported.write_text(pattern.replace('Storage object;', 'Storage object(0);'))
         run([*target, '-fsyntax-only', unsupported], scope, cold,
             error='potentially throwing union construction with a nontrivial member')
 
