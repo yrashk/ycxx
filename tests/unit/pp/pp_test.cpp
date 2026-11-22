@@ -87,8 +87,19 @@ void includes() {
 void linux_system_includes() {
   pp::Config cfg;
   cfg.target = &ast::x86_64_linux;
-  auto include = std::filesystem::path(pp::system_dirs(*cfg.target).back()).lexically_normal().generic_native_encoded_string();
+  std::string include = "/usr/include";
   auto multiarch = include + "/x86_64-linux-gnu";
+  auto darwin = pp::system_dirs(ast::aarch64_darwin);
+  check(std::ranges::none_of(darwin, [&](const auto& dir) {
+          return dir == include || dir == multiarch || dir.ends_with("/resources/linux/include");
+        }),
+        "Darwin does not search Linux's include directories");
+  if (pp::native_target != cfg.target) {
+    auto linux_dirs = pp::system_dirs(*cfg.target);
+    check(!std::ranges::contains(linux_dirs, include) && !std::ranges::contains(linux_dirs, multiarch),
+          "foreign Linux does not search native C include directories");
+    return;
+  }
   cfg.angle_dirs = {multiarch, "user"};
   cfg.system_from = 2;
   cfg = pp::with_system_dirs(std::move(cfg));
@@ -103,12 +114,6 @@ void linux_system_includes() {
   auto p = run(s, h);
   check(p.diags.empty() && text(p.region) == "int multiarch ; int fallback ;",
         "the Linux multiarch header comes first and include_next reaches usr/include");
-
-  auto darwin = pp::system_dirs(ast::aarch64_darwin);
-  check(std::ranges::none_of(darwin, [](const auto& dir) {
-          return dir.ends_with("/x86_64-linux-gnu") || dir.ends_with("/resources/linux/include");
-        }),
-        "Darwin does not search Linux's include directories");
 }
 
 void linux_stddef() {

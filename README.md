@@ -57,6 +57,11 @@ tools/build
 build/bin/ycxx cxx hello.cpp -o hello && ./hello
 ```
 
+`tools/build` builds ycxx in Debug. A Release build (`YCXX_BUILD_TYPE=Release
+YCXX_BUILD_DIR=build-release tools/build`, [docs/BUILDING.md](docs/BUILDING.md#release-builds))
+builds and passes its tests on both hosts, and compiles a 40,000-statement function in 0.4 s
+instead of Debug's 5.3 s on an M-series Mac ([#726](https://github.com/yrashk/ycxx/issues/726)).
+
 Single-expression `auto(x)` and `auto{x}` perform scalar and pointer decay-copy, including
 array and function decay. Function-template bodies can defer supported dependent operands to
 instantiation. Concrete constant template arguments can use braced conversions such as
@@ -294,6 +299,11 @@ written default member initializer are value-initialized.
   [#244](https://github.com/yrashk/ycxx/issues/244)
 - user-declared copy and move assignment govern the availability of implicit constructors.
   [#244](https://github.com/yrashk/ycxx/issues/244)
+- ordinary named unions with a written destructor can hold nontrivially destructible members.
+  The member's copy constructor can be trivial or deleted. An explicit union constructor
+  initializes its selected member. Construction of a nontrivially destructible variant
+  uses a nonthrowing constructor. [#203](https://github.com/yrashk/ycxx/issues/203) ·
+  [#738](https://github.com/yrashk/ycxx/issues/738)
 - classes and unions: data and static members, named data members of unnamed union type,
   member functions, constructors including ordinary delegation, and destructors
   with RAII, aggregate and designated initialization, namespace-scope objects initialized by
@@ -329,9 +339,11 @@ written default member initializer are value-initialized.
   Non-template code outside requires-expression bodies also checks constraints on directly named
   primary namespace variable templates with explicit non-dependent type arguments. Templates support
   `if constexpr`, deferred template static assertion failures, and two-phase lookup, with
-  Itanium names identical to Clang's; Clang's
-  `__make_integer_seq`. Template type arguments can use terminal namespace-qualified alias
-  specializations that expand to dependent member types. [#630](https://github.com/yrashk/ycxx/issues/630)
+  Itanium names identical to Clang's. Native function templates can call an unambiguous
+  externally linked target supplied as a function pointer argument, including a concrete
+  `noexcept` signature. The compiler supports Clang's `__make_integer_seq`. Template type
+  arguments can use terminal namespace-qualified alias specializations that expand to
+  dependent member types. [#406](https://github.com/yrashk/ycxx/issues/406) · [#630](https://github.com/yrashk/ycxx/issues/630)
 - dependent `__is_same`, `__is_reference`, `__is_const`, `__is_volatile`, `__is_array`,
   `__is_pointer`, `__is_function`, `__is_enum`, `__is_union`, `__is_class`, `__is_object`, and the
   three member-pointer predicates as `bool` template arguments or defaults, including through
@@ -395,11 +407,14 @@ written default member initializer are value-initialized.
 
 **Preprocessing.** All of translation phase 4: includes, object-like and function-like
 macros, conditionals, `_Pragma` and the predefined macros. `ycxx cxx -E` matches Clang's output.
-`ycxx cxx -E --target=x86_64-linux-gnu` selects Linux macros and glibc's multiarch include path
-and preprocesses glibc's `<stdio.h>`. Linux `<stdarg.h>` supplies the `va_list` declaration, and
-direct `<float.h>` and `<limits.h>` provide the target's numeric limits. glibc's `<stdint.h>` compiles
-(#657); `<inttypes.h>` does not yet (#664).
+`ycxx cxx -E --target=x86_64-linux-gnu` selects Linux macros and resource headers. On native
+x86-64 Linux it also searches glibc's multiarch include path and preprocesses glibc's `<stdio.h>`.
+Linux `<stdarg.h>` supplies the `va_list` declaration, and direct `<float.h>` and `<limits.h>`
+provide the target's numeric limits. glibc's `<stdint.h>` compiles on native Linux (#657), and
+`<inttypes.h>` support remains tracked in #664. A Darwin target can use the configured SDK or one
+selected by `SDKROOT`. Cross-target builds can also supply target headers with `-I` or `-isystem`.
 [#475](https://github.com/yrashk/ycxx/issues/475)
+[#690](https://github.com/yrashk/ycxx/issues/690)
 
 **Incremental builds through a resident daemon.** `ycxx cxx` hands its work to a per-project
 `ycxx daemon` (`YCXX_NO_DAEMON=1` runs in-process), which watches the files it has read and keeps

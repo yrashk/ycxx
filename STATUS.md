@@ -212,8 +212,11 @@ What is true of the code today. Work in progress and its owners are tracked in
 - Directives:
   - `#include` in both forms and the macro-replaced form, and `#include_next`;
   - search directories from `-I`, `-isystem` and `-iquote`, then libycxx's headers and the
-    target's system headers (`:system`, configured by CMake). For x86-64 Linux, ycxx's resource
-    headers (#133) precede the SDK's `usr/include/x86_64-linux-gnu` and `usr/include` (#252);
+    target's system headers (`:system`, configured by CMake). For x86-64 Linux, ycxx searches its
+    resource headers (#133). A native Linux build also searches `/usr/include/x86_64-linux-gnu`
+    and `/usr/include` (#252). Darwin searches the configured SDK's `usr/include`, with a request's
+    `SDKROOT` as an override. Cross-target requests without a target SDK can use explicit include
+    directories (#690);
   - `#define` and `#undef` with the redefinition check, rescanning and painting
     ([cpp.rescan]);
   - function-like macros (`:unit`'s `invocation`, `substitute`, `paste`): arguments across
@@ -1463,8 +1466,7 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   (`ClassRec::union_`, `ClassShape::union_`, `QueryLayout::class_layout`); a braced initializer
   initializes the first member ([dcl.init.aggr]/16), with its default member initializer if it has
   one; class template unions. A reference member is rejected. A designator naming another member,
-  a default member initializer on another member, anonymous unions and variant members with
-  non-trivial special members are diagnosed as not supported (#203).
+  a default member initializer on another member and anonymous unions are tracked in #203.
 - **Floating types as types:** `float`, `double` and `long double` in decl-specifiers, so the
   SDK's `typedef long double max_align_t;` declares; `sizeof`/`alignof` give their sizes. Their
   values (literals, conversions, arithmetic) are #201 and are diagnosed, not miscompiled.
@@ -1488,6 +1490,24 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   checks layout, member lookup, mangling, and cold and warm builds after swapping identical
   sibling unions.
 - Anonymous union member injection and the other union extensions remain tracked in #203.
+
+## Nontrivial union members with a written destructor (#203)
+
+- An ordinary named union can contain a nontrivially destructible member with a trivial or
+  deleted copy constructor if the union declares a destructor. Braced aggregate initialization
+  can initialize the first member. A written constructor initializes its chosen member or
+  leaves the union without an active member. Initializing two members is ill-formed.
+- A union destructor runs its own body and leaves variant members to explicit lifetime
+  management ([class.dtor]). Tests in `tests/own/unions/` check constructor selection and
+  observe the union and member destructor effects independently.
+- An omitted aggregate member of union type is initialized from an empty braced list,
+  so its first variant can run a constructor.
+- A union constructor that selects a nontrivially destructible member requires a
+  nonthrowing exception specification. A potentially throwing delegating constructor
+  with a nontrivial variant also receives a diagnostic. Exceptional cleanup for this
+  shape is tracked in #738.
+- Remaining implicit special-member rules and aggregate designator forms stay in #203.
+  Direct explicit destructor calls are tracked in #722.
 
 ## `<cstdio>`, step 4c: operator functions; `<stdio.h>` compiles (#133, 2026-11-18)
 
@@ -1634,6 +1654,22 @@ template's tokens again with the arguments bound.
   qualified names (`typename T::x`, with the `SSubst` sugar of ast.md §6.4), deduction from an
   overload set argument ([temp.deduct.call]/6), "required from here" notes. Coalesced (weak)
   definitions of specializations are #124.
+
+## Native function pointer template arguments (#406)
+
+- A function pointer template argument can name an unambiguous externally linked C++ or C
+  function. The bare function name and its address identify the same specialization.
+  A C++ pointer type can come from an earlier type argument, including a `noexcept`
+  signature. A null pointer to a C++ function type has its own specialization.
+- Linkage names use the symbolic entity from constant evaluation. The function encoding
+  shares the enclosing name's Itanium substitutions. Native calls use the same entity
+  for the relocated address on x86-64 Linux and arm64 Darwin. A potentially throwing
+  pointer initialized from a `noexcept` function preserves its pointer conversion
+  in the specialization name.
+- Tests: `tests/own/templates/function-pointer-arguments/`. Function references and
+  target-typed selection from overload sets stay in #406. Directly taking the address
+  of a function template specialization as an expression stays in #335.
+  Mangling a C-linkage function type stays in #287.
 
 ## Templates, ζ step 2: class templates (#88, 2026-11-18)
 
@@ -3059,8 +3095,9 @@ miscompiles it (DECISIONS §3.2). Each is removed once ycxx compiles itself.
   `make_qual_type`, `make_decl_ord` in `src/ast/handles.cppm`).
   - Cause: GCC 16.2 does not emit its TU-local contract-violation helper
     (`__tu_has_violation`) in an importer that inlines a non-template inline function with a
-    precondition. The importer fails to link unless it has a contract of its own. Templates and
-    in-class member functions are not affected.
+    precondition. The importer fails to link unless it has a contract of its own. Members of
+    non-template classes are not affected; a class template's member is, when its specialization
+    is instantiated in the imported interface (GCC PR 124264; #46).
   - Fix: belongs in GCC.
 - **A contract predicate inside a lambda that names a member of the enclosing class goes through
   a local `bool`, or a member's precondition** (`src/ast` interner, builder, compaction;
@@ -3087,6 +3124,31 @@ miscompiles it (DECISIONS §3.2). Each is removed once ycxx compiles itself.
   - `CMakeLists.txt` adds the flags to libycxx's `ycxx_modules` target.
   - Without them, `std::meta` is empty. An importer whose `-freflection` does not match the
     BMI's segfaults GCC 16.2.
+- **`FpIndex`'s `Shard` has a user-provided constructor** (`src/ast/store.cppm`, #283).
+  - Cause: at -O1 and above GCC 16.2 segfaults in an importer of `ycxx.ast.interner`, whose
+    `Interners` has an inline constructor and several `FpIndex` specializations, while
+    constant-evaluating `shards_`'s initializer for a constexpr-constructible `Shard`. Debug
+    builds are not affected. Two-file repro on #283; related to GCC PR 124973.
+  - Fix: belongs in GCC. Make `Shard` an aggregate again when ycxx compiles itself.
+- **`compact.cppm` is compiled with `-fkeep-static-functions`** (`src/ast/CMakeLists.txt`, #46).
+  - Cause: at -O1 and above GCC 16.2 inlines `KindTable<…>::kind`'s `pre` into `Compactor`
+    without emitting the TU-local violation helper it calls, so programs linking the AST fail
+    to link (the template case of GCC PR 124264, above). Repro on #46.
+  - Fix: belongs in GCC. Drop the option when ycxx compiles itself.
+- **Release (-O3) false-positive warnings, restructured instead of disabled** (#726; restoring
+  them is #748). Each comment shows the plain form to restore.
+  - `-Wmaybe-uninitialized` on a `std::optional`'s payload read after a check: a value and a flag
+    in `link::elf::read_shared_object` (`dynamic`, and `symbol_count` from `parsed`),
+    `obj::archive::read` (`index`), `parse.cppm` (`named`, `mem`, `exception_tokens`, `lit`)
+    and `Sema::class_name` (`found`).
+  - `-Warray-bounds` through libycxx's in-place `vector` insert: reserved appends in
+    `Sema::member_call` (`parameters`), `Sema::call` (`all`) and
+    `Sema::check_placeholder_constraint` (`args`).
+  - `-Warray-bounds`/`-Wstringop-overflow` through `"literal" + std::string&&`: `std::format` in
+    `daemon/connect.cppm` (four messages).
+  - `-Wstringop-overflow` on the `sun_path` copy: a copy also bounded by the array in the
+    daemon's `socket_address`.
+  - `-Wstringop-overread` on `string::find`: `pp::floating` keeps the position of `e`.
 
 ## Milestones
 
