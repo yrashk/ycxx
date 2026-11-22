@@ -14,6 +14,58 @@ long ycxx_copied(int n, ...);
 long ycxx_forward(int n, ...);
 long peer_vsum(int n, va_list ap);
 int peer_calls();
+double ycxx_fstack(double a, double b, double c, double d, double e, double f, double g, double h, float i,
+                   double j, ...);
+struct Big { long a, b, c; };
+Big ycxx_big(int n, ...);
+}
+
+// A va_list parameter consumed by ycxx functions, and copied from a parameter.
+static long vsum(int n, va_list ap) {
+  long s = 0;
+  for (int i = 0; i < n; ++i) s += __builtin_va_arg(ap, long);
+  return s;
+}
+
+static long vtwice(int n, va_list ap) {
+  va_list c;
+  __builtin_va_copy(c, ap);
+  long a = vsum(n, ap);
+  long b = vsum(n, c);
+  __builtin_va_end(c);
+  return a * 100 + b;
+}
+
+static long sum_twice(int n, ...) {
+  va_list ap;
+  __builtin_va_start(ap, n);
+  long r = vtwice(n, ap);
+  __builtin_va_end(ap);
+  return r;
+}
+
+// Eight named doubles fill v0-v7; `i` and `j` go on the stack (bytes 0 and 8), so the first
+// unnamed argument is at byte 16.
+double ycxx_fstack(double a, double b, double c, double d, double e, double f, double g, double h, float i,
+                   double j, ...) {
+  va_list ap;
+  __builtin_va_start(ap, j);
+  int k = __builtin_va_arg(ap, int);
+  double x = __builtin_va_arg(ap, double);
+  __builtin_va_end(ap);
+  return a + b + c + d + e + f + g + h + i + j + k * 100 + x * 1000;
+}
+
+// A class result through x8 alongside the ellipsis.
+Big ycxx_big(int n, ...) {
+  va_list ap;
+  __builtin_va_start(ap, n);
+  Big b{0, 0, 0};
+  b.a = __builtin_va_arg(ap, long);
+  b.b = __builtin_va_arg(ap, long) * n;
+  b.c = __builtin_va_arg(ap, long) - n;
+  __builtin_va_end(ap);
+  return b;
 }
 
 long ycxx_sum(int n, ...) {
@@ -77,5 +129,9 @@ int main() {
     return 4;
   if (ycxx_copied(3, 1, -2, 30) != 29 * 1000 + 58) return 5;
   if (ycxx_forward(3, 10L, 20L, -5L) != 25) return 6;
+  if (sum_twice(3, 1L, 2L, 3L) != 606) return 7;
+  if (ycxx_fstack(1, 2, 3, 4, 5, 6, 7, 8, 0.5f, 0.25, 3, 0.125) != 36.75 + 300 + 125) return 8;
+  Big b = ycxx_big(2, 7L, 8L, 9L);
+  if (b.a != 7 || b.b != 16 || b.c != 7) return 9;
   return peer_calls();
 }
