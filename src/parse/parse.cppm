@@ -4555,6 +4555,7 @@ private:
         return bad();
       }
       if (!s_.require_complete(d.type, d.name_at)) return bad();
+      if (!s_.require_concrete_object(d.type, d.name_at)) return bad();
       if (p_->class_rec_is_union(it_->parent) && !variant_member(d)) return bad();
       if (member_declared(d.name)) {
         s_.diag(d.name_at, Diag::redeclared_member, d.name);
@@ -5867,7 +5868,8 @@ private:
       }
       sem.type = d.type;
       if (spec.is_inline || spec.is_constexpr) {
-        if (!s_.require_supported_virtual_layout(d.type, d.name_at)) return false;
+        if (!s_.require_concrete_object(d.type, d.name_at) || !s_.require_supported_virtual_layout(d.type, d.name_at))
+          return false;
         flags |= sema::decl_flag::definition;
       }
       sem.entity = s_.world().entities.entity(
@@ -6253,7 +6255,9 @@ private:
     if (deleted) flags |= sema::decl_flag::deleted;
     bool has_init = !deleted && (early || early_expr || ps_.is(Tk::equal) || ps_.is(Tk::l_brace) || (!fn && ps_.is(Tk::l_paren)));
     bool definition = fn ? is_function_def || deleted : !((spec.is_extern || single_linkage_spec_) && !has_init);
-    if (!fn && definition && !s_.require_supported_virtual_layout(d.type, d.name_at)) return false;
+    if (!fn && definition &&
+        (!s_.require_concrete_object(d.type, d.name_at) || !s_.require_supported_virtual_layout(d.type, d.name_at)))
+      return false;
     if (!attach_function_annotations(sem, spec, d, fn && !template_ && !explicit_)) return false;
     if (definition) flags |= sema::decl_flag::definition;
     const bool reference = types.is_reference(d.type);

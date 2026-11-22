@@ -2036,6 +2036,20 @@ public:
     return types().is_class(element) && q_->type_trait_instantiation_failed(types().class_of(element));
   }
 
+  // [basic.def], [basic.lval]: objects other than base subobjects cannot have abstract class type.
+  bool require_concrete_object(QualType t, u32 at) {
+    if (!classes().has_virtual_layouts()) return true;
+    const QualType element = types().innermost_array_element(t);
+    const ClassRec* record = types().is_class(element) ? class_rec(types().class_of(element)) : nullptr;
+    if (!record || !record->is_abstract()) return true;
+    diag(at, Diag::abstract_object, element);
+    return false;
+  }
+
+  bool require_concrete_parameters(const TypeRec& f, u32 at) {
+    return std::ranges::all_of(f.params, [&](QualType p) { return require_concrete_object(p, at); });
+  }
+
   bool require_supported_virtual_layout(QualType t, u32 at) {
     if (!classes().has_virtual_layouts()) return true;
     const QualType element = types().innermost_array_element(t);
@@ -2053,7 +2067,8 @@ public:
   }
 
   bool require_supported_virtual_signature(const TypeRec& f, u32 at) {
-    return require_supported_virtual_layout(f.inner, at) && require_supported_virtual_parameters(f, at);
+    return require_concrete_object(f.inner, at) && require_concrete_parameters(f, at) &&
+           require_supported_virtual_layout(f.inner, at) && require_supported_virtual_parameters(f, at);
   }
 
   bool require_supported_virtual_parameters(const TypeRec& f, u32 at) {
@@ -2425,7 +2440,7 @@ public:
   // members have default member initializers gets them (the implicit default constructor's).
   Ex value_init(QualType t, u32 begin, u32 end) {
     if (types().is_dependent(t)) return dependent_node({}, begin, end);
-    if (!require_supported_virtual_layout(t, begin)) return {NodeId::none, begin, end};
+    if (!require_concrete_object(t, begin) || !require_supported_virtual_layout(t, begin)) return {NodeId::none, begin, end};
     if (is_data_member_pointer(t)) return null_member_pointer(t, begin, end);
     if (types().is_member_pointer(t)) {
       diag(begin, Diag::member_pointer_values);
@@ -2447,7 +2462,7 @@ public:
   }
   Ex default_init(QualType t, u32 begin, u32 end) {
     if (types().is_dependent(t)) return dependent_node({}, begin, end);
-    if (!require_supported_virtual_layout(t, begin)) return {NodeId::none, begin, end};
+    if (!require_concrete_object(t, begin) || !require_supported_virtual_layout(t, begin)) return {NodeId::none, begin, end};
     if (has_user_ctors(t)) return construct(t, {}, begin, end, Construction::default_init);
     if (has_member_inits(t)) return member_inits(t, false, begin, end);
     ExprInfo info{Types::unqualified(t), ValueCategory::prvalue, 0};
@@ -2542,7 +2557,8 @@ public:
     if (types().is_void(t) && b.clauses.empty()) return void_prvalue(b.begin, b.end);  // [expr.type.conv]/2
     if (types().is_reference(t) && types().is_class(types().referee(t)))
       return class_reference_list_init(t, b, extend_reference);
-    if (!require_complete(t, b.begin) || !require_supported_virtual_layout(t, b.begin)) return fail;
+    if (!require_complete(t, b.begin) || !require_concrete_object(t, b.begin) ||
+        !require_supported_virtual_layout(t, b.begin)) return fail;
     // [dcl.init.string]/1: a character array from a string literal in braces.
     if (b.clauses.size() == 1 && !b.clauses[0].list && !b.clauses[0].designated)
       if (auto r = string_init(t, b.clauses[0].expr)) return *r;
@@ -3839,6 +3855,7 @@ public:
   bool function_inline = false;
   // Inside an unevaluated operand (`sizeof`, `decltype`, [expr.context]/1).
   u32 unevaluated = 0;
+  u32 decltype_unevaluated = 0;  // the depth of the innermost decltype operand, or zero
   bool checking_virtual_body = false;
 
   // Ends the body of the innermost lambda (`body`, from `body_begin`, the lambda's tokens ending
@@ -5589,6 +5606,7 @@ public:
     if (types().is_dependent(t) || any_dependent(args))
       return dependent_node(args, begin, end, types().is_dependent(t) ? std::nullopt : std::optional(Types::unqualified(t)));
     if (!require_complete(t, begin) ||
+        ((destination == ConstructorDestination::object || lambda_result) && !require_concrete_object(t, begin)) ||
         (!polymorphic_base && !lambda_result && !require_supported_virtual_layout(t, begin))) return fail;
     QualType ut = Types::unqualified(t);
     EntityId c = types().class_of(ut);
@@ -5710,6 +5728,7 @@ public:
     // A specialization called is one whose definition the program requires ([temp.inst]/8).
     if (k.pattern) demands.push_back({k.entity, ast::Loc{item_, loc_base_ + begin}});
     TypeRec fr = types().rec(k.type);
+    if (!require_concrete_parameters(fr, begin)) return fail;
     if (cr->defaulted_copy != CopyState::ordinary) {
       const bool defaulted = k.entity == EntityId::none ? !fr.params.empty() && !types().rec(fr.params[0]).rvalue_ref :
           std::ranges::contains(cr->defaulted_copy_declarations, k.entity);
@@ -5954,7 +5973,8 @@ public:
   // Temporary materialization ([conv.rval]) of the prvalue `v` as an object of type `t`.
   Ex materialize(Ex v, QualType t, bool extended, bool argument = false) {
     if (!v.ok()) return v;
-    if (!require_supported_virtual_layout(t, v.begin)) return {NodeId::none, v.begin, v.end};
+    if (!require_concrete_object(t, v.begin) || !require_supported_virtual_layout(t, v.begin))
+      return {NodeId::none, v.begin, v.end};
     ExprInfo info{t, ValueCategory::xvalue, 0};
     return node(ast::Materialize{info, destructor_of(t), extended ? 1u : argument ? 2u : 0u, at(v, v.begin)}, v.begin, v.end, info);
   }
@@ -7049,7 +7069,8 @@ public:
     // A class object is copy-initialized from an expression of its own class: a glvalue through
     // the (trivial, implicit) copy constructor, a prvalue directly ([dcl.init.general]/17.6).
     if (types().is_class(target)) {
-      if (!require_complete(target, at_) || !require_supported_virtual_layout(target, at_)) return {NodeId::none, e.begin, e.end};
+      if (!require_complete(target, at_) || !require_concrete_object(target, at_) ||
+          !require_supported_virtual_layout(target, at_)) return {NodeId::none, e.begin, e.end};
       if (initializes(target, e) && !e.glvalue()) return e;  // the prvalue initializes it directly
       const ClassRec* cr = class_rec(types().class_of(target));
       // A copy through a constructor that is not trivial, or one converting another type
@@ -7421,6 +7442,7 @@ public:
       return fail;
     }
     if (types().is_class(t) && !require_complete(t, begin)) return fail;
+    if (!require_concrete_object(t, begin)) return fail;
     if (!scalar_allocation_type(t)) {
       diag(begin, Diag::not_supported, lex::Tk::kw_new);
       return fail;
@@ -7594,6 +7616,7 @@ public:
       diag(begin, Diag::new_requires_object, t);
       return fail;
     }
+    if (!require_concrete_object(t, begin)) return fail;
     if (!scalar_allocation_type(t) || types().has_placeholder(t) || types().is_dependent(t) ||
         (args && !args->empty()) || (braces && !braces->clauses.empty())) {
       diag(begin, Diag::not_supported, lex::Tk::kw_new);
@@ -9545,7 +9568,14 @@ public:
                                               std::span<const NodeId> defaults = {},
                                               DefaultArgumentOrigin origin = DefaultArgumentOrigin::interned,
                                               EntityId function = EntityId::none) {
-    if (unevaluated == 0 && !require_supported_virtual_signature(fr, paren_at)) return std::nullopt;
+    // Unevaluated calls still check parameter initialization. Only a decltype operand may
+    // dispense with the result object. Subexpressions requiring materialization check it separately.
+    if (unevaluated == 0) {
+      if (!require_supported_virtual_signature(fr, paren_at)) return std::nullopt;
+    } else if (!require_concrete_parameters(fr, paren_at) ||
+               (unevaluated != decltype_unevaluated && !require_concrete_object(fr.inner, paren_at))) {
+      return std::nullopt;
+    }
     std::vector<QualType> params = fr.params;  // copied: converting may intern new types
     std::vector<Ex> args(given.begin(), given.end());
     for (std::size_t i = args.size(); i < params.size() && i < defaults.size() && defaults[i] != NodeId::none; ++i) {
@@ -9584,6 +9614,8 @@ public:
   // [expr.call]/12: an argument matched by the ellipsis gets the lvalue conversions, the integral
   // promotions and the floating-point promotion; std::nullptr_t becomes void*; void is no value.
   Ex variadic_argument(Ex e) {
+    if (e.ok() && types().is_class(e.type()) && !require_concrete_object(e.type(), e.begin))
+      return {NodeId::none, e.begin, e.end};
     e = promote(e);
     if (!e.ok()) return e;
     if (types().is(e.type(), Builtin::float_)) return convert_node(e, ast::ConversionKind::floating, builtin(Builtin::double_));
