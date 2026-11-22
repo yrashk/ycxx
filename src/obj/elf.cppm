@@ -381,7 +381,7 @@ std::expected<bytes, std::string> write_object(const object& o) {
       const auto group_index = s.defined() ? group_of[*s.section] : 0;
       if (group_index != 0 && name == o.comdat_groups[group_index - 1].signature.view()) {
         auto& group = sections[group_index];
-        if (group.info != 0 || s.bind != binding::global || !s.weak || !s.object_size)
+        if (group.info != 0 || s.bind != binding::global || !s.weak || s.object_size.value_or(0) == 0)
           return fail(std::format("invalid ELF COMDAT signature symbol '{}'", name));
         group.info = next_symbol;
       }
