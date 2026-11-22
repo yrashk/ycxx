@@ -35,7 +35,8 @@ A nonthrowing function can be used where the corresponding potentially throwing 
 The unary `noexcept` operator checks whether calls and constructions can throw.
 [#729](https://github.com/yrashk/ycxx/issues/729)
 Ordinary constructor declarations and definitions check that their concrete exception specifications agree.
-Dependent exception specifications remain open. [#219](https://github.com/yrashk/ycxx/issues/219)
+Member function templates can substitute a dependent exception specification when it is needed.
+[#713](https://github.com/yrashk/ycxx/issues/713)
 
 A class template can grant private access to the class passed as a type argument using
 `friend Authority;`. Each specialization grants access to its own authority.
