@@ -132,6 +132,9 @@ struct FunctionDef {
   UnwindEligibility unwind = UnwindEligibility::none;
   EntityId catch_all_callee = EntityId::none;  // for the complete-unit exception-specification check
   ast::NodeId cleanup_call = ast::NodeId::none;
+  EntityId constructor_cleanup = EntityId::none;
+  EntityId constructor_initializer_callee = EntityId::none;
+  EntityId unwind_through_constructor = EntityId::none;
 };
 
 // A variable definition at namespace scope with its constant initializer, or `ConstId::none` for
@@ -1041,7 +1044,15 @@ engine::query_task<Generated> FunctionGen::run(engine::Ctx& cx, FnKey k) {
   input.hosted_catch_all = d.unwind == UnwindEligibility::hosted_catch_all;
   const bool linux = facts.target().triple == ast::x86_64_linux.triple;
   input.check_unwind_cleanups = linux;
-  if (d.unwind == UnwindEligibility::hosted_cleanup) input.cleanup_call = d.cleanup_call;
+  if (d.constructor_cleanup != EntityId::none && d.unwind == UnwindEligibility::none) {
+    auto error = co_await located_error(cx, k.tu, ast::Loc{d.item, d.body_offset},
+                                       "unsupported unwind from a union constructor with a nontrivial active member");
+    co_return Generated{std::nullopt, std::move(error)};
+  }
+  if (d.unwind == UnwindEligibility::hosted_cleanup) {
+    input.cleanup_call = d.cleanup_call;
+    input.constructor_cleanup = d.constructor_cleanup;
+  }
   input.native_array_delete = linux;
   input.native_array_new = linux && (d.unwind == UnwindEligibility::cleanup_free ||
                                      d.unwind == UnwindEligibility::cleanup_free_with_throw);
@@ -1206,6 +1217,14 @@ engine::query_task<Lowered> Lower::run(engine::Ctx& cx, FnKey k) {
         if (e != tu.entities.end()) {
           callee = e->type;
           ordinary_callee = ordinary_free_function(*e);
+          if (e->special == Special::constructor && def.unwind_through_constructor != callee_id) {
+            const auto constructor = std::ranges::find(tu.functions, callee_id, &FunctionDef::entity);
+            if (constructor != tu.functions.end() && constructor->constructor_cleanup != EntityId::none) {
+              auto located = co_await located_error(cx, k.tu, ast::Loc{def.item, def.body_offset},
+                                                   "unsupported caller of a potentially throwing union constructor");
+              co_return Lowered{std::nullopt, {}, std::move(located)};
+            }
+          }
         }
       } else if (op == ir::Op::call_ind) {
         QualType ptr = body.value(body.operands_of(n)[1]).type.type;

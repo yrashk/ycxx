@@ -78,3 +78,24 @@ call and passes it to `_Unwind_Resume`. No catch entry or exit occurs on this
 path ([except.handle]). The hosted final link and native linker boundary
 are the same as for the catch-all subset. Broader exceptional lifetime
 cleanup and handlers remain tracked in [#89].
+
+## Hosted union constructor cleanup (#738)
+
+On Linux x86-64, a nondelegating no-argument union constructor can protect one
+direct external `void()` call after its selected aggregate member is initialized.
+The member's initializer consists of scalar expressions and can include one
+direct external `int()` call. The selected member's destructor must be
+nonthrowing. Both providers are defined in separate translation units.
+
+The compiler records the member's address after its initializer completes. The
+exceptional edge of the constructor body call destroys that member and resumes
+the exception ([class.base.init], [except.ctor]). The earlier initializer call
+has a no-pad LSDA entry because the member has not completed initialization.
+Normal construction leaves the selected member live for the union's ordinary
+lifetime rules. A same-unit caller whose whole body constructs one such automatic
+union supplies a cleanup-free frame. Its destructor runs only if construction
+succeeds. The hosted peer supplies the exception runtime and the handler.
+
+The wider lifetime model and Darwin parity are tracked in [#89] and [#648].
+
+[#648]: https://github.com/yrashk/ycxx/issues/648

@@ -708,6 +708,13 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
   continuation destroys it once as well. The cleanup-only landing pad resumes the original
   exception; the mixed-object test checks both paths and the peer's typed handler.
   [Design](docs/design/linux-hosted-catch-all.md#hosted-local-cleanup-663) · [#663](https://github.com/yrashk/ycxx/issues/663)
+- A hosted nondelegating no-argument union constructor can initialize one scalar aggregate
+  variant with a nonthrowing destructor, then run one external `void()` call. If that call
+  throws, the active member is destroyed and the original exception resumes. If an optional
+  external `int()` in the initializer throws first, neither destructor runs. A caller that
+  only constructs one such automatic union in the same unit supplies a cleanup-free frame.
+  [Design](docs/design/linux-hosted-catch-all.md#hosted-union-constructor-cleanup-738)
+  · [#738](https://github.com/yrashk/ycxx/issues/738) · [Darwin parity #648](https://github.com/yrashk/ycxx/issues/648)
 - Explicit native static links keep the first input ELF COMDAT group for each signature. The reader
   validates group membership, including relocation sections, and selection precedes startup and
   layout. `unit.linux_elf_comdat` checks whole-group selection, retained references, startup and

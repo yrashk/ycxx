@@ -180,8 +180,11 @@ A host-linked ycxx function can use one `catch (...)` to return an integer liter
 a direct call on its parameter to an externally defined `int(int)` function throws.
 A host-linked void function can also destroy one initialized aggregate local on both exits
 from an external `void()` call and let the original exception reach a peer handler.
+A supported union constructor can destroy its active member when its body call throws and
+propagate an exception from its initializer before the member's lifetime begins.
 [#572](https://github.com/yrashk/ycxx/issues/572) · [#578](https://github.com/yrashk/ycxx/issues/578)
 · [#583](https://github.com/yrashk/ycxx/issues/583) · [#663](https://github.com/yrashk/ycxx/issues/663)
+· [#738](https://github.com/yrashk/ycxx/issues/738)
 
 Both targets support cooked integer user-defined literals through namespace-scope literal
 operators with an `unsigned long long` parameter, including constant evaluation.
