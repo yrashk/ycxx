@@ -2747,7 +2747,10 @@ specialization's address is taken ([except.spec]/13, [temp.inst]). This uses the
 member templates already had (#713, `replay_member_exception`); an explicit specialization keeps
 its own specification. An invalid condition of a specialization that is never needed is no error.
 In a template, a non-dependent `noexcept` on a pointer's function type is part of the type.
+In a template's definition, `noexcept` on a call of such a function is value-dependent.
 - Tests: `tests/own/template-noexcept/` (one run test, one reject test, one accept test).
+- Not yet: the resolved specification in `decltype` of a template-id, in deduction from one, and
+  in the address of a class template member (#838).
 
 ## Namespace variable lambdas (#338)
 

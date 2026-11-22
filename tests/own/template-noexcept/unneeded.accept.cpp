@@ -10,6 +10,11 @@ template<class T> struct Reader {
 };
 template<class T> void free_delayed() noexcept(T::ready) {}
 
+// Nor one of a candidate that taking an address does not select ([over.over]).
+void select(Missing*) {}
+template<class T> void select(T*) noexcept(T::ready) {}
+void (*selected)(Missing*) = select;
+
 Reader<Missing> unused;
 Reader<Present> demanded;
 static_assert(noexcept(unused.immediate()));

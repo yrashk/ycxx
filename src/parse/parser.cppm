@@ -909,6 +909,9 @@ public:
     bool has_noexcept = false;
     std::optional<Ex> noexcept_condition;
     std::optional<std::pair<u32, u32>> noexcept_tokens;
+    // A named function's own specification in a template, which each specialization decides: its
+    // written type keeps the potentially-throwing form, as its redeclarations' do.
+    bool deferred_exception = false;
     u64 bound = 0;
     bool unknown_bound = false;  // an array suffix with an omitted bound ([dcl.array])
     // A value-dependent bound ([temp.dep.constexpr]): a template parameter's `VDepParam`.
@@ -1470,7 +1473,10 @@ public:
           s_->push_scope();
           for (const Param& p : suffix.params)
             if (p.name != s_->no_name()) s_->declare_local(p.name, p.type, sema::local_flag::parameter, p.at, false);
-          exception_specifier(suffix, ok, defer_exception && l.named && l.suffixes.size() == 1);
+          // A qualified name redeclares a function whose own declaration has the specification
+          // replayed; its condition is compared with that declaration's (`define_member`).
+          suffix.deferred_exception = defer_exception && l.named && !l.qualified && l.suffixes.size() == 1;
+          exception_specifier(suffix, ok, suffix.deferred_exception);
           const bool has_trailing = accept(Tk::arrow);
           if (has_trailing)
             suffix.trailing = type_id(true);
@@ -1842,11 +1848,14 @@ public:
                                            l.named && !s->noexcept_condition;
         if (s->has_noexcept && !s->noexcept_tokens &&
             (allocation || keep_named_exception || bare_member_exception || member_pointer_to_suffix(l) ||
-             (spells_type && !l.inner) || !s->noexcept_condition || (d.ok && !s_->templated()))) {
+             (spells_type && !l.inner) || (!s->noexcept_condition && !l.named) ||
+             (d.ok && !s_->templated()))) {
           nonthrowing = noexcept_value(s->noexcept_condition, d.ok);
-        } else if (s->has_noexcept && !s->noexcept_tokens && d.ok) {
-          // In a templated context, a condition that is not value-dependent is decided here; a
-          // dependent one, by the instantiation that replays this declarator ([temp.dep.constexpr]).
+        } else if (s->has_noexcept && !s->noexcept_tokens && !l.named && d.ok) {
+          // In a templated context, the function type of a pointer, reference or other unnamed
+          // declarator with a condition that is not value-dependent is decided here; a dependent
+          // one, by the instantiation that replays this declarator ([temp.dep.constexpr]). A named
+          // function's keeps its written form for matching redeclarations.
           bool dependent = false;
           const bool value = noexcept_value(s->noexcept_condition, d.ok, &dependent);
           if (!dependent) nonthrowing = value;

@@ -20,6 +20,29 @@ template<class T> int pointer() {
   int (*p)() noexcept = nothrow_fn;
   return noexcept(p()) ? 1 : 0;
 }
+// One specialization, whether called or its address taken ([temp.inst]): one static local.
+namespace {
+template<class T> int counted(T) noexcept { static int n; return ++n; }
+}
+// A function parameter pack in the condition, as an invoker's ([temp.variadic]).
+int nothrow_call(int, long) noexcept { return 0; }
+int may_throw_call() { return 0; }
+template<class F, class... A> void invoke(F&& f, A&&... a) noexcept(noexcept(static_cast<F&&>(f)(static_cast<A&&>(a)...))) {}
+// Argument-dependent lookup at the point of instantiation, as `swap`'s ([temp.dep.candidate]).
+template<class T> void adl(T& t) noexcept(noexcept(lookup(t))) {}
+namespace user {
+struct Good {};
+void lookup(Good&) noexcept {}
+struct Bad {};
+void lookup(Bad&) {}
+}
+// A member's condition naming another member's, directly and through `this`.
+template<class T> struct M {
+  void b() noexcept(sizeof(T) == 4) {}
+  static void c() noexcept(sizeof(T) == 4) {}
+  void a() noexcept(noexcept(this->b())) {}
+  void d() noexcept(noexcept(c())) {}
+};
 // A condition naming another specialization's.
 template<class T> void outer() noexcept(noexcept(sized<T>())) {}
 
@@ -35,6 +58,16 @@ int main() {
   if (!noexcept(wi.h()) || noexcept(wi.k())) return 7;
   if (!noexcept(outer<char>()) || noexcept(outer<int>())) return 8;
   if (pointer<int>() != 1) return 9;
+  int first = counted(1);
+  int (*count)(int) = counted;
+  if (first != 1 || count(1) != 2) return 10;
+  if (!noexcept(invoke(nothrow_call, 1, 2L)) || noexcept(invoke(may_throw_call))) return 11;
+  user::Good good;
+  user::Bad bad;
+  if (!noexcept(adl(good)) || noexcept(adl(bad))) return 12;
+  M<int> mi;
+  M<char> mc;
+  if (!noexcept(mi.a()) || noexcept(mc.a()) || !noexcept(mi.d()) || noexcept(mc.d())) return 13;
   // The pointer to a non-throwing specialization is a pointer to noexcept function.
   void (*p)() noexcept = sized<char>;
   void (*q)() noexcept = value<true>;
