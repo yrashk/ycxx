@@ -3948,16 +3948,22 @@ public:
     bump();
     bump();
     const u32 index_at = pos();
-    const ast::TemplateParamSema* named =
-        kind(0) == Tk::identifier && kind(1) == Tk::r_square ? s_->template_param(name_of(tok())) : nullptr;
+    // `I` or `(I)`, a non-type parameter named alone.
+    u32 open = 0;
+    while (kind(open) == Tk::l_paren) ++open;
+    bool alone = kind(open) == Tk::identifier;
+    for (u32 k = 1; alone && k <= open; ++k) alone = kind(open + k) == Tk::r_paren;
+    alone = alone && kind(2 * open + 1) == Tk::r_square;
+    const ast::TemplateParamSema* named = alone ? s_->template_param(name_of(tok(open))) : nullptr;
     Ex ie = s_->promote(constant_expression());
     const QualType it = ie.type();
     if (ie.ok() && !s_->types().is_dependent(it) && !s_->types().is_integral(it) && !s_->is_unscoped_enum(it)) {
       s_->diag(index_at, Diag::pack_index_not_constant);
       ie = Ex{};
     }
-    const bool own_type = named && named->kind == ast::TemplateArgKind::value && s_->types().is_integral(it);
-    auto index = template_value(ie, own_type ? it : s_->types().builtin(Builtin::unsigned_long));
+    // The parameter's own type, before the promotion the expression went through.
+    const bool own_type = named && named->kind == ast::TemplateArgKind::value && s_->types().is_integral(named->type);
+    auto index = template_value(ie, own_type ? named->type : s_->types().builtin(Builtin::unsigned_long));
     if (!expect(Tk::r_square) || !index) return std::nullopt;
     return s_->pack_index_type(name, at, *index, index_at);
   }

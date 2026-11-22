@@ -1724,7 +1724,8 @@ template's tokens again with the arguments bound.
   parameter-index form, and asm labels pin GCC's constant form.
 - Not yet: pack-index-expressions `t...[I]`, `T...[I]` as a nested-name-specifier
   (`T...[0]::type`) (#297), and dependent index arithmetic such as `T...[sizeof...(T) - 1]` in a
-  signature (#209). In a body that arithmetic works. With these,
+  signature (#209). In a body that arithmetic works. An index written as an enumerator or a
+  constant variable is mangled by its value, where Clang and GCC write its name (#796). With these,
   libycxx's headers move from `invoke.hpp:35` to `invoke.hpp:37` (#776).
 
 ## Templates, ζ step 2: class templates (#88, 2026-11-18)
