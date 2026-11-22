@@ -4488,8 +4488,17 @@ private:
         }
         if (overridden && !validate_override(d, *overridden)) return bad();
       }
+      std::optional<u32> final_at;
       if (function) {
-        if (!member_virt_specifier(overridden != nullptr)) return bad();
+        if (!member_virt_specifiers(overridden != nullptr, &final_at)) return bad();
+        if (final_at && !is_virtual) {
+          s_.diag(*final_at, Diag::final_nonvirtual);
+          return bad();
+        }
+        if (final_at && it_->kind == ItemKind::function && !ps_.at_end()) {
+          s_.diag(ps_.pos(), Diag::unexpected_token, ps_.kind());
+          return bad();
+        }
         const bool ordinary_member = !spec.is_static && s_.template_scopes.empty() && !inst_ &&
                                      p_->is_namespace(s_.world().entities.rec(c.entity).scope);
         if (!is_virtual && !conversion && !ordinary_member && !ps_.check_named_ref_qualifier(d)) return bad();
@@ -4518,7 +4527,7 @@ private:
           s_.diag(d.name_at, Diag::not_supported, Tk::kw_union);
           return bad();
         }
-        if (!member_function_or_static(spec, d, c, is_virtual, overridden)) return bad();
+        if (!member_function_or_static(spec, d, c, is_virtual, final_at.has_value(), overridden)) return bad();
         if (it_->kind == ItemKind::function) return;  // its body follows the declaration part
         continue;
       }
@@ -5216,6 +5225,10 @@ private:
   }
 
   bool validate_override(const parse::Declarator& d, const sema::MemberDeclRec& overridden) {
+    if (overridden.is_final) {
+      s_.diag(d.name_at, Diag::virtual_override_final);
+      return false;
+    }
     const auto& types = s_.types();
     const auto derived = types.rec(d.type);
     const auto base = types.rec(overridden.type);
@@ -5248,27 +5261,31 @@ private:
     return true;
   }
 
-  bool member_virt_specifier(bool overrides) {
-    if (!ps_.is(Tk::identifier)) return true;
-    auto spelling = [&] { return s_.ins().names.spelling(ps_.name_of(ps_.tok())); };
-    if (spelling() == "override") {
-      if (!s_.template_scopes.empty() || inst_) {
+  // The constructor and destructor path supports its existing override checks only.
+  bool member_virt_specifiers(bool overrides, std::optional<u32>* final_at = nullptr) {
+    bool written_override = false;
+    while (ps_.is(Tk::identifier)) {
+      const auto spelling = s_.ins().names.spelling(ps_.name_of(ps_.tok()));
+      const bool is_final = spelling == "final";
+      if (!is_final && spelling != "override") break;
+      if (!s_.template_scopes.empty() || inst_ || (is_final && !final_at)) {
         s_.diag(ps_.pos(), Diag::not_supported, Tk::identifier);
         return false;
       }
-      if (!overrides) {
-        s_.diag(ps_.pos(), Diag::override_without_base);
-        return false;
+      if (is_final) {
+        if (*final_at) {
+          s_.diag(ps_.pos(), Diag::duplicate_final);
+          return false;
+        }
+        *final_at = ps_.pos();
+      } else {
+        if (!overrides || written_override) {
+          s_.diag(ps_.pos(), overrides ? Diag::duplicate_override : Diag::override_without_base);
+          return false;
+        }
+        written_override = true;
       }
       ps_.bump();
-      if (ps_.is(Tk::identifier) && spelling() == "override") {
-        s_.diag(ps_.pos(), Diag::duplicate_override);
-        return false;
-      }
-    }
-    if (ps_.is(Tk::identifier) && spelling() == "final") {
-      s_.diag(ps_.pos(), Diag::not_supported, Tk::identifier);
-      return false;
     }
     return true;
   }
@@ -5337,7 +5354,7 @@ private:
         if (!ok) return bad();
       }
       ps_.skip_attributes();
-      if (!member_virt_specifier(overrides)) return bad();
+      if (!member_virt_specifiers(overrides)) return bad();
       if (is_virtual && !ps_.at_end() && !ps_.is(Tk::semi)) {
         s_.diag(ps_.pos(), Diag::not_supported, ps_.kind());
         return bad();
@@ -5369,7 +5386,7 @@ private:
     } else if (ctor && (flags & sema::decl_flag::constexpr_) && it_->has_body() && !finish_constructor_declarator()) {
       return bad();
     }
-    if (ctor && !member_virt_specifier(false)) return bad();
+    if (ctor && !member_virt_specifiers(false)) return bad();
     std::vector<QualType> ps;
     for (const parse::Param& p : fs.params) ps.push_back(p.type);
     // [except.spec]: completing the supported tag class proves there are no potentially throwing
@@ -5718,7 +5735,7 @@ private:
   // A member function or static data member of class `c` declared in its class ([class.mfct],
   // [class.static]).
   bool member_function_or_static(const DeclSpec& spec, parse::Declarator& d, ast::DeclSema c, bool is_virtual,
-                                 const sema::MemberDeclRec* overridden) {
+                                 bool is_final, const sema::MemberDeclRec* overridden) {
     sema::Types& types = s_.types();
     bool fn = types.is_function(d.type);
     if (fn && !member_operator_ok(d, spec.is_static)) return false;
@@ -5759,6 +5776,7 @@ private:
     sem.has_trailing_return = fn && d.trailing_return;
     sem.linkage = ast::Linkage::external;
     sem.is_virtual = is_virtual;
+    sem.is_final = is_final;
     u16 flags = sema::decl_flag::member;
     if (spec.is_static) flags |= sema::decl_flag::static_;
     if (spec.is_constexpr || defaulted) flags |= sema::decl_flag::constexpr_;
@@ -6998,6 +7016,7 @@ Program::ClassContent Program::class_content(u32 item, const std::function<const
                            (d.flags & sema::decl_flag::template_) != 0, {}, std::move(defaults)});
         statics.back().is_virtual = d.is_virtual;
         statics.back().is_explicit = d.is_explicit;
+        statics.back().is_final = d.is_final;
         if (auto overridden = overridden_virtuals_.find(d.entity); overridden != overridden_virtuals_.end())
           statics.back().overridden_virtual = overridden->second;
         if (w_->ins.names.spelling(statics.back().name) == "operator=" && defaulted_member_definition(m, d))
