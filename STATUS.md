@@ -3089,8 +3089,9 @@ miscompiles it (DECISIONS §3.2). Each is removed once ycxx compiles itself.
   `make_qual_type`, `make_decl_ord` in `src/ast/handles.cppm`).
   - Cause: GCC 16.2 does not emit its TU-local contract-violation helper
     (`__tu_has_violation`) in an importer that inlines a non-template inline function with a
-    precondition. The importer fails to link unless it has a contract of its own. Templates and
-    in-class member functions are not affected.
+    precondition. The importer fails to link unless it has a contract of its own. Members of
+    non-template classes are not affected; a class template's member is, when its specialization
+    is instantiated in the imported interface (GCC PR 124264; #46).
   - Fix: belongs in GCC.
 - **A contract predicate inside a lambda that names a member of the enclosing class goes through
   a local `bool`, or a member's precondition** (`src/ast` interner, builder, compaction;
@@ -3117,6 +3118,31 @@ miscompiles it (DECISIONS §3.2). Each is removed once ycxx compiles itself.
   - `CMakeLists.txt` adds the flags to libycxx's `ycxx_modules` target.
   - Without them, `std::meta` is empty. An importer whose `-freflection` does not match the
     BMI's segfaults GCC 16.2.
+- **`FpIndex`'s `Shard` has a user-provided constructor** (`src/ast/store.cppm`, #283).
+  - Cause: at -O1 and above GCC 16.2 segfaults in an importer of `ycxx.ast.interner`, whose
+    `Interners` has an inline constructor and several `FpIndex` specializations, while
+    constant-evaluating `shards_`'s initializer for a constexpr-constructible `Shard`. Debug
+    builds are not affected. Two-file repro on #283; related to GCC PR 124973.
+  - Fix: belongs in GCC. Make `Shard` an aggregate again when ycxx compiles itself.
+- **`compact.cppm` is compiled with `-fkeep-static-functions`** (`src/ast/CMakeLists.txt`, #46).
+  - Cause: at -O1 and above GCC 16.2 inlines `KindTable<…>::kind`'s `pre` into `Compactor`
+    without emitting the TU-local violation helper it calls, so programs linking the AST fail
+    to link (the template case of GCC PR 124264, above). Repro on #46.
+  - Fix: belongs in GCC. Drop the option when ycxx compiles itself.
+- **Release (-O3) false-positive warnings, restructured instead of disabled** (#726; restoring
+  them is #748). Each comment shows the plain form to restore.
+  - `-Wmaybe-uninitialized` on a `std::optional`'s payload read after a check: a value and a flag
+    in `link::elf::read_shared_object` (`dynamic`, and `symbol_count` from `parsed`),
+    `obj::archive::read` (`index`), `parse.cppm` (`named`, `mem`, `exception_tokens`, `lit`)
+    and `Sema::class_name` (`found`).
+  - `-Warray-bounds` through libycxx's in-place `vector` insert: reserved appends in
+    `Sema::member_call` (`parameters`), `Sema::call` (`all`) and
+    `Sema::check_placeholder_constraint` (`args`).
+  - `-Warray-bounds`/`-Wstringop-overflow` through `"literal" + std::string&&`: `std::format` in
+    `daemon/connect.cppm` (four messages).
+  - `-Wstringop-overflow` on the `sun_path` copy: a copy also bounded by the array in the
+    daemon's `socket_address`.
+  - `-Wstringop-overread` on `string::find`: `pp::floating` keeps the position of `e`.
 
 ## Milestones
 
