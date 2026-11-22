@@ -162,14 +162,15 @@ int main() {
     leak = root / "native_leak.cpp"
     leak.write_text(leak_text)
     check("native_leak", leak_text, "owner variant 'selected' may leave its scope")
-    native = root / "native"
     variants = [ycxx, "cxx", "--no-daemon", "-I", include]
     darwin = [*variants, "--target=arm64-apple-darwin"]
-    mach = root / "native-macho"
-    subprocess.run([*darwin, "-fcheck-policies", direct, "-o", mach], check=True, timeout=90)
-    assert mach.read_bytes()[:4] == bytes.fromhex("cffaedfe")
-    # PARITY: by design: each platform executes its own format and ISA. The macOS case above
-    # cross-links the same source on Linux.
+    programs = (direct, root / "chosen.cpp")
+    for program in programs:
+        mach = root / f"{program.stem}-macho"
+        subprocess.run([*darwin, "-fcheck-policies", program, "-o", mach], check=True, timeout=90)
+        assert mach.read_bytes()[:4] == bytes.fromhex("cffaedfe")
+    # PARITY: by design: each platform executes its own format and ISA. Both checked sources
+    # also cross-link for macOS on Linux.
     if sys.platform == "linux" and platform.machine() in ("x86_64", "amd64"):
         target = [*variants, "--target=x86_64-linux-gnu", "-nostdlib"]
     elif sys.platform == "darwin" and platform.machine() in ("arm64", "aarch64"):
@@ -177,9 +178,14 @@ int main() {
     else:
         target = None
     if target is not None:
-        subprocess.run([*target, "-fcheck-policies", direct, "-o", native], check=True, timeout=90)
-        for args in ((), ("affine",)):
-            subprocess.run([native, *args], check=True, timeout=10)
+        for program in programs:
+            native = root / f"{program.stem}-macho"
+            if target != darwin:
+                native = root / f"{program.stem}-elf"
+                subprocess.run([*target, "-fcheck-policies", program, "-o", native], check=True, timeout=90)
+            for args in ((), ("affine",)):
+                subprocess.run([native, *args], check=True, timeout=10)
+        native = root / "unchecked-leak"
         subprocess.run([*target, leak, "-o", native], check=True, timeout=90)
         result = subprocess.run([native, "strict", "leak"], timeout=10)
         assert result.returncode in (-signal.SIGABRT, -signal.SIGILL, -signal.SIGTRAP)
