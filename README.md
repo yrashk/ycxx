@@ -382,7 +382,9 @@ direct `<float.h>` and `<limits.h>` provide the target's numeric limits.
 `ycxx daemon` (`YCXX_NO_DAEMON=1` runs in-process), which watches the files it has read and keeps
 its analysis between commands. A repeated build re-runs nothing, and an edit re-runs only what
 it affects, through code generation and the link. The daemon serves concurrent requests on a
-thread pool, and its output is byte for byte that of a cold, in-process build.
+thread pool, and its output is byte for byte that of a cold, in-process build. The daemon, its file
+watcher (FSEvents on macOS, inotify on Linux), the engine trace and the LSP server below work the
+same on both hosts. [#659](https://github.com/yrashk/ycxx/issues/659)
 
 **See what the engine does.** `ycxx cxx --trace-engine a.cpp` (or `YCXX_TRACE_ENGINE=stream`)
 prints every query the build went through as a colored tree on stderr: what ran, what was
