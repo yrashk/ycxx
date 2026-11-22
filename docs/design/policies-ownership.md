@@ -117,10 +117,11 @@ require additional checking.
 
 In a checked initializer, `choose ? begin() : handoff(static_cast<Work&&>(previous))`
 checks each alternative as its own ownership path. In `(inspect(previous), begin())`,
-the left operand runs before the new owner is initialized. This works for direct
-owners, owning fields, and fixed array elements in syntax-only checks. Native
-initialization supports nonthrowing class results returned directly by function calls.
-[Class-result lowering #801](https://github.com/yrashk/ycxx/pull/801)
+the left operand runs before the new owner is initialized. In syntax-only and native builds,
+these forms work for named owners, non-overlapping owning fields, and fixed-array elements
+with nonthrowing initialization and cleanup.
+[Local class-result lowering #801](https://github.com/yrashk/ycxx/pull/801) ·
+[Aggregate-element lowering #825](https://github.com/yrashk/ycxx/pull/825)
 
 ## Tagged owner alternatives
 

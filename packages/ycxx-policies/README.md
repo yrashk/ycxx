@@ -112,6 +112,12 @@ a larger expression. For separate builds, include the contract in the caller and
 supports explicit objects and direct calls to unique strong definitions. GCC and Clang accept
 the metadata as ordinary C++20 types.
 
+A local aggregate can hold independent owners in ordinary fields and fixed arrays. Initialize
+each owner with its registered factory or transfer. Use the field path and an integer literal
+for any array index when borrowing or consuming it. A nonthrowing conditional or comma initializer
+can select the owner for a field or an array element in a checked native build.
+[Compositional ownership](../../docs/design/policies-ownership.md#owning-fields)
+
 ## Local variants
 
 Include `<ycxx/ownership/variant.hpp>` for a local choice between two owner types.

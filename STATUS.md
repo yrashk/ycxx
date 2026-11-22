@@ -695,7 +695,8 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
   A `move_transfers<T>` entry or its class annotation authorizes a nonthrowing move. A plain
   wrapper around a move-only guard can use its implicit move constructor.
   Conditional and comma initializers preserve the selected path and evaluate earlier operands
-  in order. The 1,280-resource fixture composes four source fragments and checks that an
+  in order for named owners, non-overlapping fields, and fixed-array elements.
+  The 1,280-resource fixture composes four source fragments and checks that an
   equivalent reflection edit reuses the caller's proof while a conflicting edit reports both origins.
   Local const references can borrow named owners until the end of the reference's scope.
   The checker rejects consuming or transferring an owner during a shared borrow and rejects

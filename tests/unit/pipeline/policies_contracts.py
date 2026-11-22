@@ -717,18 +717,17 @@ with tempfile.TemporaryDirectory() as directory:
           auto source = example::start();
           auto selected = choose ? example::handoff(static_cast<Work&&>(source)) :
                                    (example::inspect(source), example::handoff(static_cast<Work&&>(source)));
-        #ifndef SELECTED_LOCAL_ONLY
-          Fields fields{choose ? example::start() : example::start(),
+          int selected_path = 0;
+          Fields fields{choose ? (selected_path += 1, example::start()) : (selected_path += 2, example::start()),
                         {(example::inspect(selected), example::start())}};
-          Work tasks[2]{choose ? example::start() : example::start(), example::start()};
-        #endif
+          Work tasks[2]{choose ? (selected_path += 4, example::start()) : (selected_path += 8, example::start()),
+                        example::start()};
           example::finish(static_cast<Work&&>(selected));
-        #ifndef SELECTED_LOCAL_ONLY
           example::finish(static_cast<Work&&>(fields.first));
           example::finish(static_cast<Work&&>(fields.inner.value));
           example::finish(static_cast<Work&&>(tasks[0]));
           example::finish(static_cast<Work&&>(tasks[1]));
-        #endif
+          return selected_path != (choose ? 5 : 10);
         }
     """
     selected = write("selected.cpp", selected_source)
@@ -747,11 +746,9 @@ with tempfile.TemporaryDirectory() as directory:
     for extra in ((), ("alternate",)):
         assert subprocess.run([executable, *extra], timeout=10).returncode == 0
 
-    # #740 tracks native lowering for the field and array initializers.
-    selection_flags = ["-fcheck-policies", "-DSELECTED_LOCAL_ONLY"]
     darwin = [compiler, "cxx", "--no-daemon", "--target=arm64-apple-darwin", "-I", include, "-I", examples]
     selected_macho = root / "selected-macho"
-    subprocess.run([*darwin, *selection_flags, selected, "-o", selected_macho], check=True, timeout=30)
+    subprocess.run([*darwin, "-fcheck-policies", selected, "-o", selected_macho], check=True, timeout=30)
     implicit_macho = root / "implicit-move-macho"
     subprocess.run([*darwin, "-fcheck-policies", implicit_move, "-o", implicit_macho], check=True, timeout=30)
     for executable_macho in (selected_macho, implicit_macho):
@@ -978,7 +975,7 @@ with tempfile.TemporaryDirectory() as directory:
         assert subprocess.run([native], timeout=10).returncode == 0
         subprocess.run([*args, str(array_skip), "-o", str(native)], check=True, timeout=30)
         assert subprocess.run([native, "skip"], timeout=10).returncode == -signal.SIGILL
-        subprocess.run([*args, *selection_flags, selected, "-o", native], check=True, timeout=30)
+        subprocess.run([*args, "-fcheck-policies", selected, "-o", native], check=True, timeout=30)
         for extra in ((), ("alternate",)):
             subprocess.run([native, *extra], check=True, timeout=10)
         for source in (composed, local_records, direct_move, tagged_move, annotated_move, reflected_move,
