@@ -327,8 +327,11 @@ What is true of the code today. Work in progress and its owners are tracked in
   - The linker preserves cleanup-free `__TEXT,__eh_frame` contributions with the supported
     PC-relative CIE and FDE format, including address differences and multiple input objects.
     `unit.link` checks the linked ranges and walks through a non-frame-pointer arm64 bridge
-    with the system unwinder on macOS. Compact unwind, personalities and LSDA are tracked in
-    [#72](https://github.com/yrashk/ycxx/issues/72).
+    with the system unwinder on macOS. It also checks the version 1 cleanup-only `zPLR` profile,
+    including its relocated personality GOT cell, owned `__gcc_except_tab` pointer, and cleanup
+    call-site ranges. The macOS cleanup fixture uses a platform-linked typed handler dylib.
+    [#783](https://github.com/yrashk/ycxx/issues/783) tracks this linker slice. Compact unwind and
+    other profiles are tracked in [#72](https://github.com/yrashk/ycxx/issues/72).
   - The arm64 compiler emits these DWARF records for proven cleanup-free functions. Their FDEs
     describe the actual saved frame-pointer and return-address locations at the entry, body,
     and return instructions. `unit.darwin_cleanup_free_unwind` checks the emitted object,
@@ -1220,6 +1223,12 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   with a proven trivial selected copy. A selected nontrivial or unsupported defaulted copy
   is diagnosed at use. Native by-value boundaries require a known copy classification.
   [Design](docs/design/defaulted-copy-constructors.md) · [#157](https://github.com/yrashk/ycxx/issues/157)
+- An ordinary namespace-scope class with no bases and a deleted implicit copy can synthesize its
+  available implicit move constructor for scalar fields and class fields with proven nonthrowing
+  initialization and destruction. The fields initialize in declaration order from the source
+  xvalue. The class retains aggregate initialization, and the inline move definition is emitted
+  only on use.
+  [Design](docs/design/implicit-move-constructors.md) · [#747](https://github.com/yrashk/ycxx/issues/747)
 - **Cleanups** (ast.md §3.7.3 as revised by #135): `LocalVar::destructor`; `function_ir` runs
   destructors on every scope exit from its own scope stack (block end, `return`, `break`,
   `continue`) and ends a full-expression's temporaries at its end. Statements carry no cleanup
@@ -2014,8 +2023,11 @@ session's.*
   The same nonunion class gives true, including when incomplete. For distinct nonunion classes,
   `Derived` must be complete. The trait follows the recorded base declarations, including private
   and ambiguous bases. A dependent occurrence in a supported class-template base or variable-template
-  initializer checks completeness at instantiation. A concrete occurrence checks it at its original
-  source point. Missing graph information gets a hard diagnostic when it prevents a result.
+  initializer checks completeness at instantiation. So does one in a function template body (also
+  a member's, a member template's or a generic lambda's, in a template or not): the body defers it
+  and its instantiation evaluates it, with completeness at the end of the unit
+  (`tests/own/builtins/base_of_dependent_*`).
+  A concrete occurrence checks it at its original source point. Missing graph information gets a hard diagnostic when it prevents a result.
   `__has_builtin` answers 0 while support is partial ([meta.rel], [class.derived], #218).
 - `__is_empty(T)` gives false for nonclass types and unions. For a complete nonunion class, it
   checks polymorphism, non-static data members, and emptiness of the recorded bases. Missing base
