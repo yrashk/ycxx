@@ -19,5 +19,6 @@ struct Aggregate {
 int main() {
   Record defaults;
   Record explicit_value(17);
-  return defaults.value != 42 || explicit_value.value != 17 || Aggregate{}.value != 42;
+  Aggregate aggregate{};
+  return defaults.value != 42 || explicit_value.value != 17 || aggregate.value != 42;
 }
