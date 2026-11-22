@@ -42,7 +42,7 @@ static void* body(void* unused) {
   (void)unused;
   static unsigned char alternate[64 * 1024];
   stack_t ss = {.ss_sp = alternate, .ss_size = sizeof alternate};
-  sigaltstack(&ss, 0);
+  if (sigaltstack(&ss, 0)) _exit(6);
   int r = large_frame(0, 7);
   fprintf(stderr, "large_frame returned %d without touching the guard page; sentinel %s\n", r,
           sentinel_clean() ? "clean" : "written");
@@ -68,7 +68,7 @@ int main(void) {
 
   pthread_attr_t attr;
   pthread_attr_init(&attr);
-  pthread_attr_setstack(&attr, guard + page, stack_pages * page);
+  if (pthread_attr_setstack(&attr, guard + page, stack_pages * page)) return 6;
   pthread_t thread;
   if (pthread_create(&thread, &attr, body, 0)) return 6;
   pthread_join(thread, 0);

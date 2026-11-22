@@ -299,8 +299,10 @@ class Emitter {
       e_.reg({0x81}, 5, rsp);  // sub rsp, imm32
       e_.immediate(bytes, 4);
     };
+    // A frame of a whole page or more is probed: after an unprobed `sub` of a full page, the
+    // first call would push its return address more than a page below the saved RBP.
     const auto size = static_cast<std::uint32_t>(frame_.size);
-    if (size > page) {
+    if (size >= page) {
       e_.emit({0x41, 0xbb});  // mov r11d, imm32: the number of whole pages
       e_.immediate(size / page, 4);
       const auto loop = e_.offset();
@@ -309,7 +311,7 @@ class Emitter {
       e_.emit({0x49, 0xff, 0xcb});              // dec r11
       e_.emit({0x75, std::uint8_t(std::int8_t(loop - (e_.offset() + 2)))});  // jnz loop
     }
-    if (const auto rest = size > page ? size % page : size) lower(rest);
+    if (const auto rest = size >= page ? size % page : size) lower(rest);
   }
 
   void frame_row(FrameState state) {
