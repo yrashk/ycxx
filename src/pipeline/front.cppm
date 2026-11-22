@@ -62,10 +62,14 @@ struct FrontResult {
 };
 
 // One translation unit from its source file (`TuSource::file`), analysed.
+// Where in the source (#638): a unit's cells are its file (defined with the back end's cells).
+engine::SourceSpan tu_span(const engine::Db& db, TuId tu);
+
 struct TuFront {
   using Key = TuId;
   using Value = FrontResult;
   static engine::query_task<Value> run(engine::Ctx& cx, TuId tu);
+  static engine::SourceSpan trace_span(const engine::Db& db, TuId tu) { return tu_span(db, tu); }
   // For traces (#245): its error messages, one a line.
   static std::string errors(const Value& v) {
     std::string out;

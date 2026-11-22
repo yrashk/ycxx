@@ -381,7 +381,8 @@ shows everything reused. A compile error is marked red at the cell where it star
 message is shown up to the root. Diagnostic details include the file, line and column where
 available. `--trace-engine=interactive` opens a browser of the trace after the compile: a tree
 with each function's IR and assembly, a timeline of the pool's workers, and filters.
-`--trace-engine=json` writes the whole trace as JSON Lines, for tools and agents.
+`--trace-engine=json` writes the whole trace as JSON Lines, for tools and agents. Cells that
+come from source (a file, a unit, a function's IR and code) carry their file and lines.
 `ycxx cxx --watch` stays attached and builds again whenever a file the build read changes,
 headers included; with `--trace-engine` each rebuild shows what it re-ran, and
 `--trace-engine=interactive` keeps the browser open and adds each rebuild live. `ycxx ctl trace
