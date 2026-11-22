@@ -41,6 +41,9 @@ and Mach-O linker on arm64 macOS, where `arm64-apple-darwin` is the default targ
 object files from Clang or GCC. Errors are reported as
 `file:line:col: error: …`.
 
+The arm64 Mach-O linker preserves supported cleanup-free DWARF frames from input objects.
+[Mach-O unwind support #72](https://github.com/yrashk/ycxx/issues/72)
+
 ```sh
 tools/build
 build/bin/ycxx cxx hello.cpp -o hello && ./hello
@@ -54,6 +57,10 @@ instantiation. Concrete constant template arguments can use braced conversions s
 
 Functional conversions can construct namespace-qualified class-template specializations with
 parentheses or braces, including through namespace aliases. [#697](https://github.com/yrashk/ycxx/issues/697)
+
+Class templates at namespace scope can delete their copy assignment on its first in-class
+declaration when the member has no ref-qualifier. Specializations retain the deleted overload.
+[#709](https://github.com/yrashk/ycxx/issues/709)
 
 C++26 reflection annotations on class heads and ordinary function declarations accept
 constant payloads and retain their types for compiler consumers.

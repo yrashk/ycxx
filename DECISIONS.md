@@ -47,6 +47,9 @@ reasoning; do not leave decisions only in issue threads.
    - Linux x86-64 [native `int` throws](docs/design/linux-int-throw.md) use the Itanium runtime
      in functions certified to have cleanup-free unwind frames. A hosted peer provides the
      runtime and catches the exception. Astra reviewed the lowering boundary (#578).
+   - The arm64 Mach-O linker retains [cleanup-free DWARF frames](docs/design/macho-cleanup-free-unwind.md)
+     in `__TEXT,__eh_frame`. The frame PC uses the usual address-difference relocation so it
+     follows the backed code through layout and does not need a runtime text relocation (#72).
 4. **Optimization is designed in from the start, and delivered after correctness.** The first
    back end aims for correct, debuggable code of roughly `-O0`/`-O1` quality. The architecture
    (§4.8) is laid out from day one for optimization by search, solvers and measured cost models,

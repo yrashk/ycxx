@@ -318,11 +318,16 @@ What is true of the code today. Work in progress and its owners are tracked in
     (literals, initializers, guarded statics) with ycxx's and the system's linker, dead stripping
     included, in both object orders, with a host-compiler peer and an archive member. Templates,
     closures and static locals of inline functions remain strong (#124).
-  - Not yet: unwind info (`__compact_unwind` and `__eh_frame` input sections are dropped, so C++
-    exceptions cannot cross ycxx-linked frames), thread-local variables, dead stripping, literal
-    merging, branch islands beyond ±128 MiB, other dylibs' re-exports, incremental relinking, and
-    import addends outside 0..255 (`DYLD_CHAINED_IMPORT_ADDEND`). `__LLVM` (embedded bitcode),
-    `__LD` and debug sections are dropped.
+  - The linker preserves cleanup-free `__TEXT,__eh_frame` contributions with the supported
+    PC-relative CIE and FDE format, including address differences and multiple input objects.
+    `unit.link` checks the linked ranges and walks through a non-frame-pointer arm64 bridge
+    with the system unwinder on macOS. Compact unwind, personalities and LSDA are tracked in
+    [#72](https://github.com/yrashk/ycxx/issues/72). AArch64 frame emission and native exception
+    lowering are tracked in [#648](https://github.com/yrashk/ycxx/issues/648).
+  - Not yet: thread-local variables, dead stripping, literal merging, branch islands beyond
+    ±128 MiB, other dylibs' re-exports, incremental relinking, and import addends outside
+    0..255 (`DYLD_CHAINED_IMPORT_ADDEND`). `__LLVM` (embedded bitcode), `__LD` and debug sections
+    are dropped.
 - Objects from ycxx, Clang or GCC are linked by `ycxx cxx a.o b.o -o out`, with libSystem's
   exports read from the SDK (`$SDKROOT`, else `xcrun --show-sdk-path`). There is no separate
   linker binary (DECISIONS §4.7: one binary, many fronts).
@@ -2339,6 +2344,10 @@ What the process allocates, attributed to the engine's cells, in the trace and t
   in order, and returns `*this`. Deleted copy assignments participate in overload resolution.
   [Design](docs/design/implicit-copy-assignment.md#first-declaration-defaulted-copy-assignment) ·
   [#244](https://github.com/yrashk/ycxx/issues/244)
+- Namespace-scope class templates accept a deleted copy assignment without a ref-qualifier
+  on the first in-class declaration. Specializations preserve deletion and diagnose a selected
+  deleted overload.
+  [#709](https://github.com/yrashk/ycxx/issues/709)
 
 ## Ordinary virtual declarations (#309, 2026-11-21)
 
