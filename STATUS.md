@@ -324,8 +324,11 @@ What is true of the code today. Work in progress and its owners are tracked in
   - The linker preserves cleanup-free `__TEXT,__eh_frame` contributions with the supported
     PC-relative CIE and FDE format, including address differences and multiple input objects.
     `unit.link` checks the linked ranges and walks through a non-frame-pointer arm64 bridge
-    with the system unwinder on macOS. Compact unwind, personalities and LSDA are tracked in
-    [#72](https://github.com/yrashk/ycxx/issues/72).
+    with the system unwinder on macOS. It also checks the version 1 cleanup-only `zPLR` profile,
+    including its relocated personality GOT cell, owned `__gcc_except_tab` pointer, and cleanup
+    call-site ranges. The macOS cleanup fixture uses a platform-linked typed handler dylib.
+    [#783](https://github.com/yrashk/ycxx/issues/783) tracks this linker slice. Compact unwind and
+    other profiles are tracked in [#72](https://github.com/yrashk/ycxx/issues/72).
   - The arm64 compiler emits these DWARF records for proven cleanup-free functions. Their FDEs
     describe the actual saved frame-pointer and return-address locations at the entry, body,
     and return instructions. `unit.darwin_cleanup_free_unwind` checks the emitted object,
