@@ -50,6 +50,8 @@ and Mach-O linker on arm64 macOS, where `arm64-apple-darwin` is the default targ
 object files from Clang or GCC. Variadic functions can be defined with `<cstdarg>` on both
 macOS and Linux ([#647](https://github.com/yrashk/ycxx/issues/647)). Errors are reported as
 `file:line:col: error: …`.
+Errors during replay of a written default member initializer point to the initializer.
+[#806](https://github.com/yrashk/ycxx/issues/806)
 
 The arm64 Mach-O linker preserves supported cleanup-free and cleanup-only DWARF frames from input objects.
 [Mach-O unwind support #72](https://github.com/yrashk/ycxx/issues/72)

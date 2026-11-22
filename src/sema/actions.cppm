@@ -396,7 +396,7 @@ public:
 
   template <class... A>
   void diag(u32 at, Diag d, const A&... args) {
-    diag_at({std::to_underlying(item_), loc_base_ + at}, d, args...);
+    diag_at(q_->source_loc({std::to_underlying(item_), loc_base_ + at}, at), d, args...);
   }
   template <class... A>
   void diag_at(engine::Loc loc, Diag d, const A&... args) {
