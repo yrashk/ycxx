@@ -97,6 +97,7 @@ struct Declarator {
   // `T x[] = {…}`: the outermost array bound is left to the initializer ([dcl.array]/8); `type`
   // is then the element type.
   bool unknown_bound = false;
+  bool trailing_return = false;
   bool function = false;  // it has a parameter list of its own, not a function type from a name
   // `f<args>`: a declarator-id that is a template-id, which an explicit specialization declares
   // ([temp.expl.spec]/1); `f<>` has none.
@@ -984,6 +985,7 @@ public:
       d.function = function_type;
       // The declaring context also checks defaults in a nested function type.
       d.params = fn->params;
+      d.trailing_return = fn->trailing.has_value();
       d.variadic = fn->variadic;
       d.ref_at = fn->ref_at;
       d.has_noexcept = fn->has_noexcept;
@@ -2489,6 +2491,21 @@ public:
     return s_->templates().negated_variable_value(literal->value, negations);
   }
 
+  std::optional<sema::ConstId> conjunction_operand(Ex e) {
+    if (!e.ok()) return std::nullopt;
+    if (auto negated = negated_template_variable(e)) return negated;
+    while (auto p = s_->as<ast::Paren>(e)) e.id = p->operand.id;
+    auto literal = s_->as<ast::Literal>(e);
+    if (!literal || !s_->types().is(literal->info.type, Builtin::bool_)) return std::nullopt;
+    const auto value = literal->value;
+    if (s_->ins().values.is<ast::VInt>(value) ||
+        s_->ins().values.is<ast::VDepVariable>(value) ||
+        (s_->ins().values.is<ast::VDepOp>(value) &&
+         s_->ins().values.get<ast::VDepOp>(value).op == ast::DepOp::logical_and))
+      return value;
+    return std::nullopt;
+  }
+
   // The value of a template argument for a non-type parameter of type `t`: a converted constant
   // expression ([temp.arg.nontype]/1). One that names a template parameter is value-dependent and
   // stays a `VDep*` value ([temp.dep.constexpr]).
@@ -3231,6 +3248,17 @@ public:
       u32 at = pos();
       bump();
       Ex r = binary_expression(info->prec + 1);
+      if (!body && in_template_value_argument_ && info->op == sema::Sema::BinOp::logical_and &&
+          (s_->dependent(l) || s_->dependent(r))) {
+        const auto left = conjunction_operand(l);
+        const auto right = conjunction_operand(r);
+        if (left && right) {
+          if (const auto value = s_->templates().conjunction_value(*left, *right)) {
+            l = s_->literal(s_->builtin(Builtin::bool_), *value, ast::ValueCategory::prvalue, l.begin, r.end);
+            continue;
+          }
+        }
+      }
       l = s_->binary(info->op, l, r, at);
     }
   }
