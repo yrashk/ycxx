@@ -2,9 +2,11 @@
 # Stage 1 policy checks (DECISIONS §9.2): fast, no compiler needed. tools/test's `policy` stage
 # and CI run this before building; a new check added here runs everywhere. Today: the
 # preprocessor policy (tools/check-preprocessor) and the feature map's consistency
-# (tools/feature-map/feature-map check, DECISIONS §6.9). Formatting and the provenance leak check
+# (tools/feature-map/feature-map check, DECISIONS §6.9) and back-end parity (tools/check-parity,
+# DECISIONS §6.10). Formatting and the provenance leak check
 # join when they exist.
 set -eu
 root=$(cd "$(dirname "$0")/.." && pwd)
 python3 "$root/tools/check-preprocessor"
+python3 "$root/tools/check-parity"
 exec python3 "$root/tools/feature-map/feature-map" check

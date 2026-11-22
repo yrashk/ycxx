@@ -1,5 +1,5 @@
 // #116: as Clang on arm64 macOS, an empty class passes and returns nothing, in both directions.
-// XFAIL: gcc GCC passes empty classes, which Clang ignores
+// XFAIL: gcc@darwin-arm64 GCC on Darwin passes empty classes, which Clang ignores; on x86-64 Linux they agree
 // PEER: empty-classes-peer.cpp
 // EXIT: 0
 struct E {};
