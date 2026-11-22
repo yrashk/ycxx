@@ -113,6 +113,8 @@ std::expected<Connection, std::string> reach(const std::string& root, bool start
   auto dir = ensure_private_dir(runtime_dir());
   if (!dir) return std::unexpected(dir.error());
   Paths p = paths_for(root, *dir);
+  // BOOTSTRAP: -Wstringop-overflow: std::format, as in `handshake` (#748). Without the bug:
+  // `"socket path too long: " + p.socket()`.
   if (!fits_socket_path(p.socket())) return std::unexpected(std::format("socket path too long: {}", p.socket()));
   bool absent = false;
   auto c = try_connect(p, absent);
@@ -141,6 +143,8 @@ std::expected<compile::Done, Failure> request_compile(Connection& c, const compi
   if (!f) return std::unexpected(Failure{"the daemon closed the connection: " + f.error(), true});
   if (f->kind == Kind::refused) {
     auto why = decode<Refused>(*f);
+    // BOOTSTRAP: -Warray-bounds: std::format, as in `handshake` (#748). Without the bug:
+    // `"the daemon refused: " + (why ? why->reason : "?")`.
     return std::unexpected(Failure{std::format("the daemon refused: {}", why ? why->reason : "?"), false});
   }
   if (f->kind != Kind::done) return std::unexpected(Failure{"unexpected answer", false});
@@ -193,6 +197,8 @@ std::expected<int, std::string> tunnel_lsp(Connection& c, int in, int out) {
   if (!f) return std::unexpected("the daemon closed the connection: " + f.error());
   if (f->kind == Kind::refused) {
     auto why = decode<Refused>(*f);
+    // BOOTSTRAP: -Warray-bounds: std::format, as in `handshake` (#748). Without the bug:
+    // `"the daemon refused: " + (why ? why->reason : "?")`.
     return std::unexpected(std::format("the daemon refused: {}", why ? why->reason : "?"));
   }
   if (f->kind != Kind::lsp) return std::unexpected("unexpected answer");
