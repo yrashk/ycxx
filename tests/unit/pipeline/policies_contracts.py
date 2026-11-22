@@ -438,8 +438,8 @@ with tempfile.TemporaryDirectory() as directory:
             ((caller_object, *other_objects), "requires one strong definition"),
             ((caller_object, covered_without_proof, *other_objects), "no matching guarantee"),
             ((caller_object, stale_object, *other_objects), "no matching guarantee"),
-            ((unmarked_caller, observer_object, *other_objects), "missing checked ownership coverage"),
-            ((incomplete, observer_object, *other_objects), "incomplete checked ownership metadata"),
+            ((unmarked_caller, observer_object, *other_objects), "missing checked policy coverage"),
+            ((incomplete, observer_object, *other_objects), "incomplete checked policy metadata"),
             ((caller_object, observer_object, stale_object, *other_objects), "requires one strong definition"),
         ):
             rejected_output = root / "rejected-link"

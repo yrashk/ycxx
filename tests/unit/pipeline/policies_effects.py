@@ -210,9 +210,97 @@ with tempfile.TemporaryDirectory() as directory:
         native = [*base, "--no-daemon", "--target=x86_64-linux-gnu", "-nostdlib"]
         invoke([*native, "-o", executable, *sources, annotations])
         subprocess.run([executable], check=True, timeout=10)
-        invoke([*native, "-c", *sources], error="effect bounds currently require syntax checking or a source-only checked link")
-        assert not list(root.glob("*.o"))
         invoke([*native, "-o", executable, capability])
         subprocess.run([executable], check=True, timeout=10)
         denied_scope = subprocess.run([executable, "wrong-scope"], timeout=10)
         assert denied_scope.returncode == -signal.SIGILL, denied_scope
+
+        def compile_object(source, name):
+            obj = root / (name + ".o")
+            invoke([*native, "-c", source, "-o", obj])
+            return obj
+
+        def link(*inputs, error=None):
+            return invoke([*native, "-o", executable, *inputs], error)
+
+        # Independent compilations intern the same set in a different order. The provider
+        # forwards through another checked provider, so the first guarantee alone is insufficient.
+        leaf_source = """\
+            #include "effects.hpp"
+            int adapter(int n) noexcept { return n + 4; }
+        """
+        verified_adapter = "fx::bound<decltype(&adapter), &adapter, Read>"
+        leaf = write("leaf.cpp", leaf_source + f"using Leaf = fx::use_policy<{verified_adapter}>;\n")
+        stage_source = """\
+            #include "effects.hpp"
+            int step(int n) noexcept { return adapter(n); }
+        """
+        stage = write("stage.cpp", stage_source + f"""\
+            using Some = fx::set<file::Write, file::Read, file::Read>;
+            using Stage = fx::use_policy<{verified_adapter}, fx::bound<decltype(&step), &step, Some>>;
+        """)
+        entry = write("entry.cpp", caller.read_text() + """\
+            using Effects = fx::set<file::Read, file::Write>;
+            using Entry = fx::use_policy<fx::bound<decltype(&step), &step, Effects>,
+                                         fx::bound<decltype(&run), &run, Effects>>;
+        """)
+        obj_leaf = compile_object(leaf, "leaf")
+        obj_stage = compile_object(stage, "stage")
+        obj_entry = compile_object(entry, "entry")
+        link(obj_entry, obj_stage, obj_leaf)
+        subprocess.run([executable], check=True, timeout=10)
+        invoke([arg for arg in native if arg != "-fcheck-policies"] +
+               ["-o", executable, obj_entry, obj_stage, obj_leaf])
+        subprocess.run([executable], check=True, timeout=10)
+        link(entry, obj_stage, obj_leaf)
+        subprocess.run([executable], check=True, timeout=10)
+        diagnostic = link(obj_entry, obj_stage, error="requires one strong definition")
+        assert "verified effect bound" in diagnostic and obj_stage.name in diagnostic, diagnostic
+
+        unchecked_leaf = compile_object(write("unchecked_leaf.cpp", leaf_source), "unchecked_leaf")
+        diagnostic = link(obj_entry, obj_stage, unchecked_leaf, error="has no matching guarantee")
+        assert "verified effect bound" in diagnostic and unchecked_leaf.name in diagnostic, diagnostic
+        different = write("different.cpp", leaf.read_text().replace("&adapter, Read", "&adapter, Empty"))
+        different_leaf = compile_object(different, "different")
+        diagnostic = link(obj_entry, obj_stage, different_leaf, error="has no matching guarantee")
+        assert "verified effect bound" in diagnostic and different_leaf.name in diagnostic, diagnostic
+
+        trusted_stage = write("trusted_stage.cpp", stage.read_text().replace(
+            verified_adapter, "fx::trusted<decltype(&adapter), &adapter, Read>"))
+        obj_trusted = compile_object(trusted_stage, "trusted_stage")
+        link(obj_entry, obj_trusted, unchecked_leaf)
+        subprocess.run([executable], check=True, timeout=10)
+        diagnostic = link(obj_entry, obj_trusted, obj_leaf, error="conflicts with a verified bound")
+        assert obj_trusted.name in diagnostic and obj_leaf.name in diagnostic, diagnostic
+        other_trust = write("other_trust.cpp", """\
+            #include "effects.hpp"
+            int extra_read(int n) noexcept { return adapter(n); }
+            using Other = fx::use_policy<fx::trusted<decltype(&adapter), &adapter, Write>,
+                                         fx::bound<decltype(&extra_read), &extra_read, Write>>;
+        """)
+        obj_other_trust = compile_object(other_trust, "other_trust")
+        diagnostic = link(obj_entry, obj_trusted, unchecked_leaf, obj_other_trust,
+                          error="conflicting trusted effect bound")
+        assert obj_trusted.name in diagnostic and obj_other_trust.name in diagnostic, diagnostic
+
+        stripped = root / "stripped.o"
+        payload = obj_leaf.read_bytes()
+        stripped.write_bytes(payload.replace(b"__ycxx_policy.2.effect.have.", b"__xxxx_policy.2.effect.have."))
+        assert stripped.read_bytes() != payload
+        link(obj_entry, obj_stage, stripped, error="incomplete checked policy metadata")
+
+        resident_leaf = root / "resident_leaf.o"
+        resident_leaf.write_bytes(payload)
+        with tempfile.TemporaryDirectory(prefix="yef-link-", dir="/tmp") as sockets:
+            link_env = dict(env, YCXX_RUNTIME_DIR=sockets)
+            resident_native = [arg if arg != "--no-daemon" else "--daemon=require" for arg in native]
+            args = [*resident_native, "-o", executable, obj_entry, obj_stage, resident_leaf]
+            try:
+                invoke(args, env=link_env)
+                replacement = root / "replacement.o"
+                replacement.write_bytes(different_leaf.read_bytes())
+                replacement.replace(resident_leaf)
+                error = "has no matching guarantee"
+                assert invoke(args, error, link_env) == link(obj_entry, obj_stage, resident_leaf, error=error)
+            finally:
+                subprocess.run([compiler, "ctl", "shutdown"], cwd=root, env=link_env, capture_output=True, timeout=10)

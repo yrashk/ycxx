@@ -75,7 +75,7 @@ instead of Debug's 5.3 s on an M-series Mac ([#726](https://github.com/yrashk/yc
 
 **Check YCXX Policies.** Opt in with `-fcheck-policies` in a syntax check or a
 build. YCXX checks registered resource policies across branches and loops and verifies
-declared effect bounds across direct calls in a checked source build. Applications can
+declared effect bounds across direct calls in checked sources and explicit objects. Applications can
 combine reusable C++ policy fragments. The standalone YCXX Policies package provides portable
 runtime ownership guards and scoped capability tokens for GCC and Clang builds.
 [YCXX Policies package](packages/ycxx-policies/README.md)

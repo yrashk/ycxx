@@ -95,6 +95,7 @@ struct PolicyRegistry {
   OwnershipPolicy ownership;
   std::map<PolicyOperation, EffectBound> effects;
   std::map<PolicyOperation, PolicyOrigin> effect_origins;
+  std::set<PolicyOperation> external_effect_declarations;
   std::map<ast::u32, std::vector<PolicyProblem>> problems;
 };
 

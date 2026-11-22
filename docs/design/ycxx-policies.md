@@ -188,9 +188,14 @@ typed tree includes calls in default arguments and omits discarded `if constexpr
 Unknown calls and unmodeled implicit operations fail finite-bound checks. The first slice
 requires unique strong external definitions or local definitions among the checked inputs.
 
-For separately compiled code, carry verified bounds and their call requirements to the checked
-link. Match the bound to the selected provider and keep trusted declarations distinct from
-compiler-verified definitions. [YCXX Policies #660](https://github.com/yrashk/ycxx/issues/660)
+For checked objects, separate effect records carry guarantees, requirements, and trusted calls.
+They reuse the observation records' coverage count. The bound digest uses stable type
+fingerprints in sorted order, so input order and process-local handles do not change it.
+The checked link matches each requirement to the unique strong explicit provider with the
+same digest. A forwarding object carries both its guarantee and its callees' requirements.
+Trusted calls carry their digest for agreement across callers. A trusted call conflicts with
+a verified bound for the same function. Archive extraction and dynamic providers remain
+tracked in #660. [YCXX Policies #660](https://github.com/yrashk/ycxx/issues/660)
 
 ## YCXX implementation milestones
 

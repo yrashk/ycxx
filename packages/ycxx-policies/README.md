@@ -142,8 +142,13 @@ change the meaning. Ownership and effect entries can share one `use_policy` frag
 across source inputs.
 
 Start with `ycxx cxx -fcheck-policies -fsyntax-only -I/path/to/include adapter.cpp caller.cpp`.
-To build a native executable, pass all sources in one checked link. The initial subset
-supports direct calls to namespace functions with scalar or reference parameters and a
+For separate builds, compile the caller and provider with `-fcheck-policies -c`, then pass
+the explicit objects to `ycxx cxx -fcheck-policies` at the final link. The provider's
+verified bound must match the declared bound used by the caller. A trusted adapter must
+use the same declared bound at every checked call site. The link also accepts sources
+alongside objects.
+
+The initial subset supports direct calls to namespace functions with scalar or reference parameters and a
 scalar, reference, or void result. It checks default argument calls and diagnoses indirect
 calls, volatile accesses, and unmodeled operations such as class initialization and cleanup.
 `fx::set<>` permits zero declared effects. Ordinary scalar computation and memory accesses

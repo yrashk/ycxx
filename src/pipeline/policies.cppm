@@ -45,10 +45,13 @@ struct OwnershipBodyCheck {
   std::vector<EntityId> observers;
 };
 
-struct ObservationContract {
+enum class PolicyContractKind { observation, effect, trusted_effect };
+
+struct PolicyContract {
   EntityId function;
-  EntityId observer;
+  EntityId target;
   ast::Fp128 signature;
+  PolicyContractKind kind;
   bool provides;
 };
 
@@ -881,8 +884,11 @@ struct PolicyRegistryFor {
         registry.problems[origin.unit].push_back({origin, "effect bound does not support functions with an assembly label"});
       } else if (!bound.trusted) {
         const auto def = checked_effects.find(operation);
-        if (def == checked_effects.end() || !def->second)
+        if (def == checked_effects.end() && !operation.second) {
+          registry.external_effect_declarations.insert(operation);
+        } else if (def == checked_effects.end() || !def->second) {
           registry.problems[origin.unit].push_back({origin, "verified effect bound requires a unique supported definition in the checked source inputs"});
+        }
       }
     }
     co_return registry;
@@ -1005,6 +1011,11 @@ struct EffectCalls {
   std::optional<EffectFinding> unsupported;
 };
 
+struct EffectBodyCheck {
+  std::optional<EffectFinding> finding;
+  std::vector<EntityId> callees;
+};
+
 // A bound includes every possible call, regardless of control flow. Only AST nodes whose
 // evaluation needs no unmodeled calls are allowed. Constructors, class copies, destruction,
 // allocation, exceptions and virtual dispatch must be modeled before adding their nodes.
@@ -1090,39 +1101,44 @@ struct CheckEffectBody {
     EffectBody body;
     bool operator==(const Key&) const = default;
   };
-  using Value = std::optional<EffectFinding>;
+  using Value = EffectBodyCheck;
   static engine::query_task<Value> run(engine::Ctx& cx, Key key) {
     const auto& calls = co_await cx.fetch<EffectCallsFor>(key.body);
-    if (calls.unsupported) co_return calls.unsupported;
+    if (calls.unsupported) co_return Value{calls.unsupported, {}};
     const auto& world = *universe().world_for(key.body.linux_target ? ast::x86_64_linux : ast::aarch64_darwin);
     const auto& caller = co_await cx.fetch<EffectBoundFor>({key.sources, key.tu, key.function});
-    if (!caller || caller->trusted) co_return std::nullopt;
+    if (!caller || caller->trusted) co_return Value{};
+    Value out;
     for (const auto& [target, offset] : calls.calls) {
       const auto& callee = co_await cx.fetch<EffectBoundFor>({key.sources, key.tu, target});
       const auto name = world.ins.names.spelling(world.entities.rec(target).name);
-      if (!callee) co_return EffectFinding{offset, std::format("call to '{}' has no declared effect bound", name)};
+      if (!callee)
+        co_return Value{EffectFinding{offset, std::format("call to '{}' has no declared effect bound", name)}, {}};
       const auto missing = std::ranges::find_if(callee->tags, [&](QualType tag) {
         return !std::ranges::binary_search(caller->tags, tag);
       });
       if (missing != callee->tags.end())
-        co_return EffectFinding{offset, std::format("effect bound of '{}' exceeds the caller's declared bound (effect '{}')",
-                                                   name, world.types.spell(*missing))};
+        co_return Value{EffectFinding{offset, std::format("effect bound of '{}' exceeds the caller's declared bound (effect '{}')",
+                                                         name, world.types.spell(*missing))}, {}};
+      if (!policy_operation(world, target, key.tu.n).second) out.callees.push_back(target);
     }
-    co_return std::nullopt;
+    co_return out;
   }
 };
+
+enum class EffectVerification { complete_sources, deferred_objects, unavailable };
 
 struct PolicyCheckUnit {
   PolicySources sources;
   TuId tu;
   bool defer_observers;
-  bool allow_effect_bounds;
+  EffectVerification effect_verification;
   bool operator==(const PolicyCheckUnit&) const = default;
 };
 
 struct CheckedPolicies {
   std::vector<Message> messages;
-  std::vector<ObservationContract> contracts;
+  std::vector<PolicyContract> contracts;
 };
 
 struct CheckPolicies {
@@ -1137,12 +1153,20 @@ engine::query_task<CheckPolicies::Value> CheckPolicies::run(engine::Ctx& cx, Key
   if (front.has_errors()) co_return Value{};
   const auto& registry = co_await cx.fetch<PolicyRegistryFor>(key.sources);
   if (registry.ownership.resources.empty() && registry.effects.empty() && registry.problems.empty()) co_return Value{};
-  if (!key.allow_effect_bounds && !registry.effects.empty() && registry.problems.empty())
-    co_return Value{{{std::nullopt, true, "effect bounds currently require syntax checking or a source-only checked link", {}}}, {}};
+  if (key.effect_verification == EffectVerification::unavailable && !registry.effects.empty() && registry.problems.empty())
+    co_return Value{{{std::nullopt, true, "checked effect bounds currently require explicit objects or sources at link", {}}}, {}};
   if (front.unit.virtual_emission_blocked && !registry.ownership.resources.empty() && registry.problems.empty())
     co_return Value{{{std::nullopt, true, "ownership analysis is unavailable for this unit's virtual declarations", {}}}, {}};
-  std::span<const PolicyProblem> problems;
+  std::vector<PolicyProblem> problems;
   if (const auto it = registry.problems.find(tu.n); it != registry.problems.end()) problems = it->second;
+  const bool missing_effects = key.effect_verification == EffectVerification::complete_sources &&
+                               !registry.external_effect_declarations.empty();
+  if (missing_effects)
+    for (const auto& operation : registry.external_effect_declarations) {
+      const auto origin = registry.effect_origins.at(operation);
+      if (origin.unit == tu.n)
+        problems.push_back({origin, "verified effect bound requires a unique supported definition in the checked source inputs"});
+    }
 
   const pp::FileId file{tu.n};
   const pp::Source& source = cx.fetch<pp::SourceOf>(file);
@@ -1152,7 +1176,7 @@ engine::query_task<CheckPolicies::Value> CheckPolicies::run(engine::Ctx& cx, Key
   std::vector<OwnershipBody> bodies;
   std::vector<const FunctionDef*> effect_definitions;
   std::vector<CheckEffectBody::Key> effect_bodies;
-  if (registry.problems.empty())
+  if (registry.problems.empty() && !missing_effects)
     for (const auto& def : front.unit.functions) {
       if (def.body.tree == ast::NodeId::none) continue;
       if (!registry.ownership.resources.empty()) {
@@ -1171,7 +1195,7 @@ engine::query_task<CheckPolicies::Value> CheckPolicies::run(engine::Ctx& cx, Key
   Value result;
   if (problems.empty() &&
       std::ranges::none_of(findings, [](const auto& finding) { return finding.get().finding.has_value(); }) &&
-      std::ranges::none_of(effect_findings, [](const auto& finding) { return finding.get().has_value(); })) {
+      std::ranges::none_of(effect_findings, [](const auto& finding) { return finding.get().finding.has_value(); })) {
     if (key.defer_observers) {
       auto signature = [&](EntityId observer) {
         const auto type = world.types.canonical(world.entities.rec(observer).type);
@@ -1183,9 +1207,29 @@ engine::query_task<CheckPolicies::Value> CheckPolicies::run(engine::Ctx& cx, Key
         const auto function = definitions[i]->entity;
         const auto operation = policy_operation(world, function, tu.n);
         if (!operation.second && registry.ownership.effect(operation) == Effect::verified_observe)
-          result.contracts.push_back({function, function, signature(function), true});
+          result.contracts.push_back({function, function, signature(function), PolicyContractKind::observation, true});
         for (const auto observer : findings[i].get().observers)
-          result.contracts.push_back({function, observer, signature(observer), false});
+          result.contracts.push_back({function, observer, signature(observer), PolicyContractKind::observation, false});
+      }
+      auto effect_signature = [&](EntityId function, const EffectBound& bound) {
+        // Handles have process-local order. The digest of an exported set uses stable type IDs.
+        auto tags = bound.tags | std::views::transform([&](QualType tag) { return world.types.fp(tag); })
+                    | std::ranges::to<std::vector>();
+        std::ranges::sort(tags);
+        const auto type = world.types.canonical(world.entities.rec(function).type);
+        return fingerprint(std::tuple{function, type, std::move(tags)});
+      };
+      for (std::size_t i = 0; i < effect_findings.size(); ++i) {
+        const auto function = effect_definitions[i]->entity;
+        const auto operation = policy_operation(world, function, tu.n);
+        const auto& bound = registry.effects.at(operation);
+        if (!operation.second)
+          result.contracts.push_back({function, function, effect_signature(function, bound), PolicyContractKind::effect, true});
+        for (const auto callee : effect_findings[i].get().callees) {
+          const auto& declared = registry.effects.at(policy_operation(world, callee, tu.n));
+          const auto kind = declared.trusted ? PolicyContractKind::trusted_effect : PolicyContractKind::effect;
+          result.contracts.push_back({function, callee, effect_signature(callee, declared), kind, false});
+        }
       }
     }
     co_return result;
@@ -1236,7 +1280,7 @@ engine::query_task<CheckPolicies::Value> CheckPolicies::run(engine::Ctx& cx, Key
     messages.push_back({at ? std::optional(at->offset) : std::nullopt, true, std::move(text), at ? at->where : ""});
   }
   for (std::size_t i = 0; i < effect_findings.size(); ++i) {
-    const auto& finding = effect_findings[i].get();
+    const auto& finding = effect_findings[i].get().finding;
     if (!finding) continue;
     const auto& def = *effect_definitions[i];
     const auto at = locations.at(in, {def.item, def.body_offset + finding->offset});

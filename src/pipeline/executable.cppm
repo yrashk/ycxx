@@ -72,8 +72,9 @@ struct ProgramInputs {
   bool check_policies = false;
 };
 
-bool source_only_policy_link(const ProgramInputs& in) {
-  return in.objects.empty() && !in.dynamic && !in.archive_link;
+EffectVerification effect_link_verification(const ProgramInputs& in) {
+  if (in.dynamic || in.archive_link) return EffectVerification::unavailable;
+  return in.objects.empty() ? EffectVerification::complete_sources : EffectVerification::deferred_objects;
 }
 struct [[=engine::input{engine::Durability::low}]] ProgramIn {
   using Key = ProgramId;
@@ -401,21 +402,21 @@ engine::query_task<Linked> Link::run(engine::Ctx& cx, ProgramId p) {
   if (in.check_policies) {
     const auto units = in.tus | std::views::transform(&TuId::n) | std::ranges::to<std::vector>();
     const auto sources = universe().in->intern_seq<ast::u32>(units);
-    const bool source_only = source_only_policy_link(in);
-    const auto keys = in.tus | std::views::transform([sources, source_only](TuId unit) {
-      return PolicyCheckUnit{sources, unit, true, source_only};
+    const auto effects = effect_link_verification(in);
+    const auto keys = in.tus | std::views::transform([sources, effects](TuId unit) {
+      return PolicyCheckUnit{sources, unit, true, effects};
     });
     const auto policies = co_await cx.par_map<CheckPolicies>(keys);
     for (std::size_t i = 0; i < policies.size(); ++i) {
       const auto& policy = policies[i].get();
       if (!policy.messages.empty()) {
         for (const auto& message : policy.messages) out.errors.push_back(message.text);
-      } else if (auto error = embed_observation_contracts(objects[i], tus[i].get(), policy.contracts)) {
+      } else if (auto error = embed_policy_contracts(objects[i], tus[i].get(), policy.contracts)) {
         out.errors.push_back(std::format("{}: {}", objects[i].name, *error));
       }
     }
     if (!out.errors.empty()) co_return out;
-    out.errors = check_object_observations(objects);
+    out.errors = check_object_policies(objects, effects != EffectVerification::unavailable);
     if (!out.errors.empty()) co_return out;
   }
   if (auto selection = link::elf::select_comdat_groups(objects, in.dynamic.has_value()); !selection) {

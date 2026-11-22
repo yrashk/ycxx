@@ -462,10 +462,11 @@ engine::query_task<Built> Build::run(engine::Ctx& cx, RequestId r) {
     for (std::size_t i = 0; i < k.units.size(); ++i)
       if (out.units[i].readable && !out.units[i].front_failed) checked.push_back(k.units[i].n);
     const auto sources = universe().in->intern_seq<ast::u32>(checked);
-    const bool allow_effect_bounds = k.until == Until::syntax ||
-                                     (k.until == Until::link && source_only_policy_link(cx.fetch<ProgramIn>(k.program)));
-    const auto units = checked | std::views::transform([sources, defer = k.until != Until::syntax, allow_effect_bounds](ast::u32 unit) {
-      return PolicyCheckUnit{sources, TuId{unit}, defer, allow_effect_bounds};
+    auto effects = EffectVerification::complete_sources;
+    if (k.until == Until::object) effects = EffectVerification::deferred_objects;
+    if (k.until == Until::link) effects = effect_link_verification(cx.fetch<ProgramIn>(k.program));
+    const auto units = checked | std::views::transform([sources, defer = k.until != Until::syntax, effects](ast::u32 unit) {
+      return PolicyCheckUnit{sources, TuId{unit}, defer, effects};
     });
     policies = co_await cx.par_map<CheckPolicies>(units);
     std::size_t j = 0;
@@ -497,7 +498,7 @@ engine::query_task<Built> Build::run(engine::Ctx& cx, RequestId r) {
       }
       all = all && v.object.has_value();
       if (u.object && k.check_policies && k.until == Until::object) {
-        if (auto error = embed_observation_contracts(*u.object, v, policies[i].get().contracts)) {
+        if (auto error = embed_policy_contracts(*u.object, v, policies[i].get().contracts)) {
           u.errors.push_back({std::nullopt, true, std::move(*error), {}});
           u.object.reset();
           all = false;
