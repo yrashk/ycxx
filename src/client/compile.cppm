@@ -915,7 +915,8 @@ Done run(const Request& r, pp::Host& host, pipeline::Session& session, const Sto
           std::move(archives), std::move(opts->undefined)});
     if (bad_input) key.until = pipeline::Until::object;
     else key.program = session.program(
-        {key.units, std::move(objects), out.filename().native_encoded_string(), std::move(dynamic), std::move(archive_link)});
+        {key.units, std::move(objects), out.filename().native_encoded_string(), std::move(dynamic),
+         std::move(archive_link), key.check_policies});
   }
   const pipeline::Until until = bad_input ? pipeline::Until::link : key.until;
   pipeline::RunStats rs;

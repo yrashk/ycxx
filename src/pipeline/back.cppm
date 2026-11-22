@@ -704,6 +704,7 @@ struct TuValue {
   std::optional<obj::object> object;  // none when there are errors
   std::vector<BackError> errors;
   std::vector<FirstDemand> first_demands;
+  std::vector<aarch64::Symbol> symbols;
 };
 struct Tu {
   using Key = TuId;
@@ -2349,6 +2350,7 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
     co_return co_await locate_errors(cx, id, std::move(out));
   }
   out.object = std::move(*o);
+  out.symbols = std::move(symbols);
   co_return out;
 }
 

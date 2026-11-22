@@ -99,24 +99,25 @@ duplicate and conflict checks. Class and operation declaration annotations are c
 ## Verified contracts for separately compiled code
 
 YCXX checks `verified_observes` definitions for leaf observation bodies that preserve the
-resource and keep the reference within the call. The first implementation requires the
-definition in the same checked invocation as the call. To support separate object builds,
-check a caller against its declared contract and carry that requirement to the link. The link
-must verify that the definition selected for each required call implements the contract.
-Verify forwarding functions after the checker can carry their callees' requirements to the link.
+resource and keep the reference within the call. A syntax-only check needs the provider in the
+same invocation. A checked native build can compile a caller against its declared contract and
+carry a requirement to the final checked link. That link matches the requirement against the
+definition selected for the call. Forwarding functions are outside the current leaf-body proof.
 
 Astra proposed recording caller requirements and verified provider guarantees as versioned local
 symbols attached to the corresponding function definitions. Both YCXX object formats retain
-these symbols. Use the external ABI symbol, target, and a stable fingerprint of the canonical
-signature and policy to compare records between compiler sessions. Require designated checked
-objects to carry their coverage records. A missing, stripped, malformed, or incompatible record
-fails verification. The checked link trusts unmodified compiler outputs from the build.
+these symbols. The external ABI symbol, the object target, and a stable fingerprint of the
+canonical signature and ownership policy identify a contract between compiler sessions.
+Compile each explicit object with `-fcheck-policies` and use that flag at the final YCXX link.
+Each input must have a coverage record that counts the associated requirements and guarantees.
+Missing, incomplete, malformed, and incompatible records fail verification. The checked link
+trusts unmodified compiler outputs and the usual C++ declaration and definition consistency.
 
-The first checked link can limit required calls to direct references with one strong,
-non-interposable definition in the input objects. Before enabling weak definitions or archives
-for required calls, verify the definition that survives coalescing and archive member selection.
-A matching guarantee in a losing definition or unselected member cannot satisfy a requirement.
-An ordinary link provides the portable runtime enforcement described below.
+The checked link supports explicit objects and source inputs. Each required direct reference
+must have one strong definition, with matching evidence at that definition's text address.
+Archive, weak-definition, and dynamic-provider support need verification against the linker's
+coalescing, member selection, and import rules. An ordinary link provides the portable runtime
+enforcement described below.
 
 ## Enforcement by ordinary C++, the runtime, and YCXX
 

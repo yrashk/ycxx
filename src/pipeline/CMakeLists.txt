@@ -46,6 +46,7 @@ target_sources(ycxxc_pipeline PUBLIC FILE_SET CXX_MODULES
   mangle.cppm
   back.cppm
   ownership_policy.cppm
+  policy_objects.cppm
   front.cppm
   policies.cppm
   executable.cppm

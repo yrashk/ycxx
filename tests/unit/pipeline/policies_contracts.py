@@ -395,6 +395,76 @@ with tempfile.TemporaryDirectory() as directory:
                         "-o", str(native)], check=True, timeout=30)
         assert subprocess.run([native], timeout=10).returncode == 0
 
+        def compile_object(source, checked=True):
+            path = source.with_suffix(".o")
+            mode_flag = ["-fcheck-policies"] if checked else []
+            subprocess.run([*args, *mode_flag, "-c", str(source), "-o", str(path)], check=True, timeout=30)
+            return path
+
+        checked_caller = write("checked_caller.cpp", verified.read_text() + caller.read_text())
+        checked_observer = write("checked_observer.cpp", mode.read_text() + observer_source)
+        caller_object = compile_object(checked_caller)
+        observer_object = compile_object(checked_observer)
+        other_objects = tuple(map(compile_object, (providers, observed_main)))
+
+        def checked_link(inputs, output, daemon="--no-daemon", env=None):
+            command = [option for option in args if option != "--no-daemon"]
+            return subprocess.run([*command, daemon, "-fcheck-policies", *map(str, inputs), "-o", str(output)],
+                                  cwd=root, env=env, text=True, capture_output=True, timeout=30)
+
+        objects = (caller_object, observer_object, *other_objects)
+        linked = checked_link(objects, native)
+        assert linked.returncode == 0, linked.stderr
+        assert subprocess.run([native], timeout=10).returncode == 0
+        mixed = checked_link((checked_caller, observer_object, *other_objects), native)
+        assert mixed.returncode == 0, mixed.stderr
+        assert subprocess.run([native], timeout=10).returncode == 0
+        subprocess.run([*args, *map(str, objects), "-o", str(native)], check=True, timeout=30)
+        assert subprocess.run([native], timeout=10).returncode == 0
+
+        unchecked_source = write("unverified_observer.cpp", observer_source.replace(
+            "[[=own::operation::verified_observes]] ", ""))
+        covered_without_proof = compile_object(unchecked_source)
+        unmarked_caller = compile_object(write("unmarked_caller.cpp", checked_caller.read_text()), checked=False)
+        stale = write("stale_observer.cpp", mode.read_text().replace("use_policy<checkout::Resource>",
+                      "use_policy<checkout::own::affine<checkout::Ticket>>") + observer_source)
+        stale_object = compile_object(stale)
+        incomplete = root / "incomplete_caller.o"
+        contents = caller_object.read_bytes()
+        assert b"__ycxx_policy.1.need." in contents
+        incomplete.write_bytes(contents.replace(b"__ycxx_policy.1.need.", b"__ycxx_otherx.1.need.", 1))
+
+        for inputs, error in (
+            ((caller_object, *other_objects), "requires one strong definition"),
+            ((caller_object, covered_without_proof, *other_objects), "no matching guarantee"),
+            ((caller_object, stale_object, *other_objects), "no matching guarantee"),
+            ((unmarked_caller, observer_object, *other_objects), "missing checked ownership coverage"),
+            ((incomplete, observer_object, *other_objects), "incomplete checked ownership metadata"),
+            ((caller_object, observer_object, stale_object, *other_objects), "requires one strong definition"),
+        ):
+            rejected_output = root / "rejected-link"
+            rejected = checked_link(inputs, rejected_output)
+            assert rejected.returncode == 1 and error in rejected.stderr, (inputs, rejected.returncode, rejected.stderr)
+            assert not rejected_output.exists()
+
+        # Replacing a provider at the same path must not reuse the daemon's previous link verdict.
+        snapshot = root / "provider-snapshot.o"
+        snapshot.write_bytes(observer_object.read_bytes())
+        with tempfile.TemporaryDirectory(prefix="ycp-link-", dir="/tmp") as sockets:
+            env = {k: v for k, v in os.environ.items() if k not in ("YCXX_DAEMON", "YCXX_NO_DAEMON")}
+            env.update(YCXX_RUNTIME_DIR=sockets, YCXX_ROOT=str(root), YCXX_THREADS="2")
+            inputs = (caller_object, snapshot, *other_objects)
+            try:
+                warm = checked_link(inputs, native, "--daemon=require", env)
+                assert warm.returncode == 0, warm.stderr
+                snapshot.write_bytes(stale_object.read_bytes())
+                stale_link = checked_link(inputs, native, "--daemon=require", env)
+                cold = checked_link(inputs, native)
+                assert stale_link.returncode == cold.returncode == 1, stale_link.stderr
+                assert stale_link.stderr == cold.stderr and "no matching guarantee" in cold.stderr, cold.stderr
+            finally:
+                subprocess.run([compiler, "ctl", "shutdown"], cwd=root, env=env, capture_output=True, timeout=10)
+
         # Own and discharge the same object through native YCXX, keeping the guard in the ABI.
         native_good = write("native_good.cpp", """\
             #include "runtime_transaction.hpp"

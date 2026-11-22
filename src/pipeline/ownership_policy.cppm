@@ -66,6 +66,7 @@ struct OwnershipPolicy {
   std::vector<std::pair<QualType, Ownership>> resources;
   std::vector<std::pair<OwnershipOperation, OwnershipEffect>> operations;
   std::vector<OwnershipOperation> observer_definitions;
+  std::vector<OwnershipOperation> labeled_observers;
 
   bool has_observer_definition(OwnershipOperation operation) const {
     return std::ranges::binary_search(observer_definitions, operation);

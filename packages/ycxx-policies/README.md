@@ -54,6 +54,8 @@ no runtime work. YCXX interprets it when ownership checking is enabled. Use type
 arguments for portability and C++26 declaration annotations with compiler support.
 
 An observation marked `verified_observes<decltype(&inspect), &inspect>` asks YCXX to
-verify the observer's body. The caller and the supported observer definition belong in the same
-checked invocation. The first supported bodies can copy scalar fields and update independent
-scalar storage. GCC and Clang accept the metadata as ordinary C++20 types.
+verify the observer's body. Supported bodies can copy scalar fields and update independent
+scalar storage. For separate builds, include the contract in the caller and provider and pass
+`-fcheck-policies` when compiling each object and at the final YCXX link. The checked link
+supports explicit objects and direct calls to unique strong definitions. GCC and Clang accept
+the metadata as ordinary C++20 types.

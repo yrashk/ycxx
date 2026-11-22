@@ -18,6 +18,7 @@ import ycxx.sema;
 import :back;
 import :front;
 import :policies;
+import :policy_objects;
 import :executable;
 import :lines;
 
@@ -429,6 +430,7 @@ engine::query_task<Built> Build::run(engine::Ctx& cx, RequestId r) {
   const BuildKey& k = cx.fetch<BuildIn>(r);
   Built out;
   bool all = true;
+  std::vector<std::reference_wrapper<const CheckedPolicies>> policies;
   // Check each main file in this revision (the file table's, in the daemon).
   const pp::Source* first = nullptr;
   std::vector<TuId> readable;
@@ -460,14 +462,14 @@ engine::query_task<Built> Build::run(engine::Ctx& cx, RequestId r) {
     for (std::size_t i = 0; i < k.units.size(); ++i)
       if (out.units[i].readable && !out.units[i].front_failed) checked.push_back(k.units[i].n);
     const auto sources = universe().in->intern_seq<ast::u32>(checked);
-    const auto units = checked | std::views::transform([sources](ast::u32 unit) {
-      return OwnershipCheckUnit{sources, TuId{unit}};
+    const auto units = checked | std::views::transform([sources, defer = k.until != Until::syntax](ast::u32 unit) {
+      return OwnershipCheckUnit{sources, TuId{unit}, defer};
     });
-    const auto results = co_await cx.par_map<CheckPolicies>(units);
+    policies = co_await cx.par_map<CheckPolicies>(units);
     std::size_t j = 0;
     for (UnitBuilt& u : out.units) {
       if (!u.readable || u.front_failed) continue;
-      const auto& messages = results[j++].get();
+      const auto& messages = policies[j++].get().messages;
       u.messages.append_range(messages);
       u.front_failed = !messages.empty();
       all = all && !u.front_failed;
@@ -492,6 +494,13 @@ engine::query_task<Built> Build::run(engine::Ctx& cx, RequestId r) {
         u.dependencies = region.dependencies;
       }
       all = all && v.object.has_value();
+      if (u.object && k.check_policies && k.until == Until::object) {
+        if (auto error = embed_observation_contracts(*u.object, v, policies[i].get().contracts)) {
+          u.errors.push_back({std::nullopt, true, std::move(*error), {}});
+          u.object.reset();
+          all = false;
+        }
+      }
       for (const BackError& e : v.errors) {
         if (e.source) u.errors.push_back({e.source->offset, true, e.message, e.source->where});
         else u.errors.push_back({std::nullopt, true, e.message, {}});
