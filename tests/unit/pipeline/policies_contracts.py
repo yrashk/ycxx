@@ -1033,6 +1033,26 @@ with tempfile.TemporaryDirectory() as directory:
                 own::creates<decltype(&acquire), &acquire>,
                 own::observes<decltype(&access), &access>,
                 own::consumes<decltype(&release), &release>>;
+            struct
+            #ifdef __ycxx__
+            [[=own::resource_mode::linear, =own::move_constructor::transfers]]
+            #endif
+            Receipt {
+              own::linear_state state;
+              int value;
+            };
+            #ifdef __ycxx__
+            [[=own::operation::creates]]
+            #endif
+            Receipt issue_receipt() noexcept;
+            #ifdef __ycxx__
+            [[=own::operation::observes]]
+            #endif
+            int inspect_receipt(const Receipt&) noexcept;
+            #ifdef __ycxx__
+            [[=own::operation::consumes]]
+            #endif
+            void finish_receipt(Receipt&&) noexcept;
         """))
         capability_provider = write("capability_provider.cpp", """\
             #include "mixed_capability.hpp"
@@ -1042,6 +1062,15 @@ with tempfile.TemporaryDirectory() as directory:
             void set_scope(caps::scope_id scope) noexcept { selected = scope; }
             void access(const Grant& authority) noexcept { authority.require<read_right>(selected); }
             void release(Grant&& authority) noexcept { authority.release(); }
+            Receipt issue_receipt() noexcept {
+              Receipt issued{own::linear_state{}, 42};
+              return Receipt(static_cast<Receipt&&>(issued));
+            }
+            int inspect_receipt(const Receipt& receipt) noexcept {
+              receipt.state.observe();
+              return receipt.value;
+            }
+            void finish_receipt(Receipt&& receipt) noexcept { receipt.state.consume(); }
         """)
         capability_peer = write("capability_peer.cpp", """\
             #include "mixed_capability.hpp"
@@ -1053,6 +1082,11 @@ with tempfile.TemporaryDirectory() as directory:
                 access(view);
               }
               release(static_cast<Grant&&>(authority));
+              auto issued = issue_receipt();
+              Receipt receipt(static_cast<Receipt&&>(issued));
+              int value = inspect_receipt(receipt);
+              finish_receipt(static_cast<Receipt&&>(receipt));
+              return value != 42;
             }
         """)
         dangling_use = write("capability_after_release.cpp", capability_peer.read_text().replace(
