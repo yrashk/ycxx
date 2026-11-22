@@ -522,11 +522,17 @@ public:
       if (!s) return std::nullopt;
       return type_arg(*s);
     }
-    auto v = substitute_value(a.value, b);
-    if (!v) return std::nullopt;
     QualType t = a.type;
     if (types().is_dependent(t))
       if (auto st = substitute(t, b)) t = types().canonical(Types::unqualified(*st));
+    if (ins().values.is<ast::VDepCall>(a.value)) {
+      auto value = substitute_call_value(a.value, b);
+      if (!value) return std::nullopt;
+      if (ins().values.is_dependent(value->value)) return value_arg(t, value->value);
+      return converted_value(*value, t);
+    }
+    auto v = substitute_value(a.value, b);
+    if (!v) return std::nullopt;
     if ((ins().values.is<ast::VDepOp>(a.value) || ins().values.is<ast::VDepOp>(*v)) && !types().is(t, Builtin::bool_))
       return std::nullopt;
     if (ins().values.is<ast::VDepVariable>(a.value) && !ins().values.is_dependent(*v)) {
@@ -555,6 +561,8 @@ public:
       return w_->values.integer(types().builtin(Builtin::unsigned_long), ins().seqs.size(a->elems));
     }
     if (ins().values.is<ast::VDepVariable>(v)) return substitute_variable_value(v, b, variable_constant);
+    if (ins().values.is<ast::VDepCall>(v))
+      return substitute_call_value(v, b).transform([](const TemplateArg& a) { return a.value; });
     if (ins().values.is<ast::VDepOp>(v)) {
       auto op = ins().values.get<ast::VDepOp>(v);
       switch (op.op) {
@@ -870,6 +878,8 @@ public:
     else if (nested && ins().values.is<ast::VDepExpansion>(v)) params_in(ins().values.get<ast::VDepExpansion>(v).pattern, out, nested);
     else if (ins().values.is<ast::VDepVariable>(v))
       for (const TemplateArg& a : ins().seqs.elements(ins().values.get<ast::VDepVariable>(v).args)) params_in(a, out, nested);
+    else if (ins().values.is<ast::VDepCall>(v))
+      for (const TemplateArg& a : ins().seqs.elements(ins().values.get<ast::VDepCall>(v).args)) params_in(a, out, nested);
     else if (ins().values.is<ast::VDepOp>(v))
       for (const TemplateArg& a : ins().seqs.elements(ins().values.get<ast::VDepOp>(v).operands)) params_in(a, out, nested);
   }
@@ -1150,7 +1160,8 @@ public:
     if (is_expansion(x) && is_expansion(y)) return deduce_arg(pattern_of(x), pattern_of(y), depth, out);
     // An expression naming parameters is a non-deduced context ([temp.deduct.type]). The
     // specialized type or substituted partial pattern is checked once the bindings are known.
-    if (ins().values.is<ast::VDepOp>(x.value) || ins().values.is<ast::VDepVariable>(x.value)) return true;
+    if (ins().values.is<ast::VDepOp>(x.value) || ins().values.is<ast::VDepVariable>(x.value) ||
+        ins().values.is<ast::VDepCall>(x.value)) return true;
     return x.value == y.value;
   }
   // The packs an expansion's `pattern` names, each from the arguments `a` in turn: every
@@ -1468,8 +1479,11 @@ public:
     if (!fits) return std::nullopt;
     auto full = complete(*decl, ps, out);
     if (!full) return std::nullopt;
-    if (decl->kind == ast::DeclKind::type_alias)
-      return substitute(decl->type, Bindings::of(ps.empty() ? 0 : ps[0].depth, *full));
+    if (decl->kind == ast::DeclKind::type_alias) {
+      auto bindings = Bindings::of(ps.empty() ? 0 : ps[0].depth, *full);
+      if (alias_type) return alias_type(*decl, *full, bindings);
+      return substitute(decl->type, bindings);
+    }
     return types().class_type(specialize_class(templ, *full));
   }
 
@@ -1567,7 +1581,8 @@ public:
         auto s = substitute(d.type, bindings(depth, out));
         if (!s) return std::nullopt;
         d.type = types().canonical(*s);
-      } else if (ins().values.is<ast::VDepOp>(d.value) || ins().values.is<ast::VDepVariable>(d.value)) {
+      } else if (ins().values.is<ast::VDepOp>(d.value) || ins().values.is<ast::VDepVariable>(d.value) ||
+                 ins().values.is<ast::VDepCall>(d.value)) {
         auto s = substitute_arg(d, bindings(depth, out));
         if (!s) return std::nullopt;
         d = *s;
@@ -1791,6 +1806,17 @@ private:
 
   enum class BooleanSubstitution { evaluate, defer, discard };
 
+  std::optional<TemplateArg> substitute_call_value(ConstId v, const Bindings& b) {
+    auto call = ins().values.get<ast::VDepCall>(v);
+    auto args = substitute_args(ins().seqs.elements(call.args), b);
+    if (!args) return std::nullopt;
+    if (std::ranges::any_of(*args, [&](const TemplateArg& a) { return w_->arg_dependent(a); })) {
+      call.args = ins().intern_seq(std::span<const TemplateArg>(*args));
+      return value_arg(types().builtin(Builtin::dependent), ins().intern_value(call));
+    }
+    return call_constant ? call_constant(call.templ, *args) : std::nullopt;
+  }
+
   std::optional<ConstId> substitute_variable_value(ConstId v, const Bindings& b,
                                                   const std::function<std::optional<ConstId>(EntityId)>& read,
                                                   BooleanSubstitution mode = BooleanSubstitution::evaluate) {
@@ -1913,6 +1939,9 @@ private:
     if (ins().values.is<ast::VDepVariable>(v))
       return std::ranges::all_of(ins().seqs.elements(ins().values.get<ast::VDepVariable>(v).args),
                                  [&](const TemplateArg& a) { return structural_operand(a); });
+    if (ins().values.is<ast::VDepCall>(v))
+      return std::ranges::all_of(ins().seqs.elements(ins().values.get<ast::VDepCall>(v).args),
+                                 [&](const TemplateArg& a) { return structural_operand(a); });
     if (ins().values.is<ast::VDepOp>(v))
       return std::ranges::all_of(ins().seqs.elements(ins().values.get<ast::VDepOp>(v).operands),
                                  [&](const TemplateArg& a) { return structural_operand(a); });
@@ -1964,6 +1993,8 @@ public:
   // The declaration of template `templ` with its head, as lookup at a point finds it.
   std::function<std::optional<ast::DeclSema>(EntityId)> template_decl;
   std::function<std::optional<ConstId>(EntityId)> variable_constant;
+  std::function<std::optional<TemplateArg>(EntityId, std::span<const TemplateArg>)> call_constant;
+  std::function<std::optional<QualType>(const ast::DeclSema&, std::span<const TemplateArg>, const Bindings&)> alias_type;
   std::function<std::optional<interp::GlobalVar>(EntityId)> variable_global;
   std::function<std::optional<QualType>(EntityId)> variable_specialization_type;
   std::function<void(EntityId, QualType)> demand_variable;
