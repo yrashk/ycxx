@@ -1255,7 +1255,13 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   destructors on every scope exit from its own scope stack (block end, `return`, `break`,
   `continue`) and ends a full-expression's temporaries at its end. Statements carry no cleanup
   lists; the `Cleanup` record is gone.
-- Linkage names: `C1`/`D1` (#136 for `C2`/`D2`/`D0`), checked against Clang's symbols.
+- Linux x86-64 emits `C2`/`D2` alongside eligible written, out-of-line `C1`/`D1` definitions.
+  An ordinary, externally linked, nonpolymorphic class with no bases and only supported
+  scalar fields uses one machine body and ELF range for each pair. Named signature types
+  must have known layout and linkage. Callback signatures and class parameters passed by
+  value are outside this scope. GCC and Clang peers check the raw entry names, an adjusted
+  base pointer, and construction and destruction order. Caller-side base entry selection
+  and virtual deleting destructors are tracked in [#136](https://github.com/yrashk/ycxx/issues/136).
 - A non-template constructor can delegate to another ordinary constructor of its class with
   a sole parenthesized or braced initializer ([class.base.init], #157). The target resolves in
   the complete class and constructs the same object. The delegating body starts after the

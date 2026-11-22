@@ -368,6 +368,10 @@ written default member initializer are value-initialized.
   (`public`, `protected`, `private`) and friend functions and classes. Ordinary unqualified
   friend definitions in non-template namespace-scope classes are found by argument-dependent
   lookup or through a matching namespace declaration. [#259](https://github.com/yrashk/ycxx/issues/259)
+- Linux x86-64 can emit the base constructor and destructor entries for an ordinary class
+  with scalar fields, no bases, and written out-of-line definitions. A separately compiled
+  GCC or Clang caller can construct and destroy the ycxx-defined base as a subobject.
+  [#136](https://github.com/yrashk/ycxx/issues/136)
 - named `int` and `unsigned int` bit-fields of width 1 through 32 in ordinary unpacked,
   non-template classes without bases;
 - single and multiple inheritance (not virtual): base classes laid out as Clang does, member
