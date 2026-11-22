@@ -135,6 +135,18 @@ struct TPackExpansion {
   QualType pattern;
 };
 
+// A pack-index-specifier `T...[I]` ([dcl.type.pack.index]) while it is dependent: `pack` is the
+// template type parameter pack's own `TTemplateParam`; once that pack is bound and the index is
+// still dependent (a member template indexing its class's pack), `bound` is set and `elems` are
+// the pack's elements. Substitution selects the element, so it never holds a known one (ast.md
+// §7.6).
+struct TPackIndex {
+  QualType pack;
+  ConstId index;
+  SeqId<TemplateArg> elems;
+  u8 bound;
+};
+
 // A type-transforming built-in applied to a dependent type, `__remove_cv(T)` (docs/EXTENSIONS.md):
 // `trait` is a `lex::TypeTrait`; substitution applies it.
 struct TTransform {
@@ -179,7 +191,7 @@ struct STypedef {
 };
 
 using TypeKinds = closed_list<TBuiltin, TPointer, TLRef, TRRef, TArray, TFunction, TClass, TEnum, STypedef, TTemplateParam,
-                              TDepName, TPackExpansion, TTransform, TDepSpec, TBuiltinSpec, TAuto, TMemberPtr>;
+                              TDepName, TPackExpansion, TTransform, TDepSpec, TBuiltinSpec, TAuto, TMemberPtr, TPackIndex>;
 
 template <class T>
 constexpr bool is_type_kind = TypeKinds::contains<T>;
