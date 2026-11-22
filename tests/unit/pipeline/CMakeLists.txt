@@ -133,6 +133,10 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_
     COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/linux_hosted_catch_all.py
             $<TARGET_FILE:unit_linux_hosted_catch_all_object> $<TARGET_FILE:ycxxc>
             ${CMAKE_CXX_COMPILER} ${CMAKE_READELF})
+  # PARITY: #648 for the Darwin typed-handler counterpart.
+  add_test(NAME unit.linux_hosted_int_catch
+    COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/linux_hosted_int_catch.py
+            $<TARGET_FILE:ycxxc> ${CMAKE_CXX_COMPILER})
   add_test(NAME unit.linux_namespace_lambda
     COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/linux_namespace_lambda.py
             $<TARGET_FILE:ycxxc> ${CMAKE_READELF})
