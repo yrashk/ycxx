@@ -1,5 +1,5 @@
-// The opt-in local ownership policies over typed body occurrences (docs/design/affine-permit.md).
-module ycxx.pipeline:affine;
+// The opt-in local ownership policies over typed body occurrences (docs/design/policies-ownership.md).
+module ycxx.pipeline:policies;
 
 import std;
 import ycxx.ast;
@@ -613,13 +613,13 @@ struct CheckOwnershipBody {
   }
 };
 
-struct CheckAffine {
+struct CheckPolicies {
   using Key = TuId;
   using Value = std::vector<Message>;
   static engine::query_task<Value> run(engine::Ctx&, TuId);
 };
 
-engine::query_task<CheckAffine::Value> CheckAffine::run(engine::Ctx& cx, TuId tu) {
+engine::query_task<CheckPolicies::Value> CheckPolicies::run(engine::Ctx& cx, TuId tu) {
   const FrontResult& front = co_await cx.fetch<TuFront>(tu);
   if (front.has_errors()) co_return Value{};
   const auto& registry = co_await cx.fetch<OwnershipRegistryFor>(tu);

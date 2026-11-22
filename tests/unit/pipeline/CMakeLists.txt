@@ -13,14 +13,14 @@ ycxxc_unit_test(pipeline_incremental incremental_test.cpp ycxxc_pipeline)
 
 ycxxc_unit_test(pipeline_elf_executable elf_executable_test.cpp ycxxc_pipeline)
 set(ownership_include ${PROJECT_SOURCE_DIR}/packages/ycxx-policies/include)
-add_test(NAME unit.affine_permit
-  COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/affine_permit.py
+add_test(NAME unit.policies_ownership
+  COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/policies_ownership.py
           $<TARGET_FILE:ycxxc> ${PROJECT_SOURCE_DIR}/examples/affine ${ownership_include} --target=arm64-apple-darwin)
-add_test(NAME unit.ownership_policy
-  COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/ownership_policy.py
+add_test(NAME unit.policies_contracts
+  COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/policies_contracts.py
           $<TARGET_FILE:ycxxc> ${CMAKE_CXX_COMPILER} ${ownership_include} ${PROJECT_SOURCE_DIR}/examples/affine)
-add_test(NAME unit.ownership_package
-  COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/ownership_package.py
+add_test(NAME unit.policies_package
+  COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/policies_package.py
           ${CMAKE_COMMAND} ${CMAKE_CXX_COMPILER} ${PROJECT_SOURCE_DIR}/packages/ycxx-policies)
 add_test(NAME unit.dependent_fabsl
   COMMAND ${CMAKE_COMMAND} -DYCXX=$<TARGET_FILE:ycxxc>
@@ -73,8 +73,8 @@ endif()
 # can. unit.darwin_virtual runs the virtual tests' fixtures on Mach-O (#650).
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$"
    AND NOT CMAKE_CROSSCOMPILING)
-  add_test(NAME unit.affine_permit_linux
-    COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/affine_permit.py
+  add_test(NAME unit.policies_ownership_linux
+    COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/policies_ownership.py
             $<TARGET_FILE:ycxxc> ${PROJECT_SOURCE_DIR}/examples/affine ${ownership_include} --target=x86_64-linux-gnu)
   add_test(NAME unit.linux_compile
     COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/linux_compile.py

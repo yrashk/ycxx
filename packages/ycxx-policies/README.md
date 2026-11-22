@@ -3,7 +3,7 @@
 YCXX Policies is a standalone C++20 header library for resource ownership, capabilities, and
 effects. The ownership component is available today. GCC and Clang enforce the ordinary C++ type
 rules and run the same adapter guards used by YCXX. YCXX can additionally verify declared
-ownership policies when `-fcheck-affine` is enabled.
+ownership policies when `-fcheck-policies` is enabled.
 
 ## Use with GCC or Clang
 

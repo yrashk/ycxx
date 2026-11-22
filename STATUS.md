@@ -687,12 +687,12 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
 - `ycxx cxx` (also `ycxx -…` with an option first) takes `-o`, `-c`, `-fsyntax-only` and
   `-std=c++26`. Errors are `path:line:col: error: message` on stderr. It exits 0 on success and 1
   on any error in the input or the command line.
-- `-fcheck-affine` demands the experimental ownership policies before a syntax-only or native
+- `-fcheck-policies` applies YCXX Policies to ownership contracts before a syntax-only or native
   build succeeds. It composes active C++ policy fragments and declaration annotations by canonical
   types and resolved operations. A per-body control-flow query and worklist check named affine and linear resources,
   including concrete template instances. Transfers invalidate the old owner.
   Execution leaving the scope of a live transaction or reaching a possible unwind is diagnosed.
-  See [the protocols and examples](docs/design/affine-permit.md).
+  See [the protocols and examples](docs/design/policies-ownership.md).
 - `tests/features/ycxx.txt` lists `syntax` and `run darwin-arm64`: a feature can be limited to
   hosts. CI's macOS job runs the slice before its tier, with `--no-unsupported`.
 - `unit.pipeline`: the line table, linkage names, and the back half from hand-built analysed

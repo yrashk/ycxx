@@ -73,8 +73,8 @@ YCXX_BUILD_DIR=build-release tools/build`, [docs/BUILDING.md](docs/BUILDING.md#r
 builds and passes its tests on both hosts, and compiles a 40,000-statement function in 0.4 s
 instead of Debug's 5.3 s on an M-series Mac ([#726](https://github.com/yrashk/ycxx/issues/726)).
 
-**Check affine and linear ownership.** Opt in with `-fcheck-affine` in a syntax check or a
-build. The [prototype](docs/design/affine-permit.md) checks registered resource policies
+**Check YCXX Policies.** Opt in with `-fcheck-policies` in a syntax check or a
+build. The [prototype](docs/design/policies-ownership.md) checks registered resource policies
 across branches and loops. Applications can combine reusable C++ policy fragments. The
 standalone [YCXX Policies package](packages/ycxx-policies/README.md) provides portable runtime
 guards for GCC and Clang builds.

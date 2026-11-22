@@ -158,7 +158,7 @@ The checker belongs before code generation, including in `-fsyntax-only`. Query 
 instantiated typed bodies and their control flow, and verified per-function summaries. Use canonical
 identities and include contract dependencies in the query keys. Editing a contract must invalidate
 dependent proofs. An unrelated edit should reuse the ownership and effect results of unchanged
-bodies. See [the current prototype](affine-permit.md) and the [query engine design](query-engine.md).
+bodies. See [the ownership checker](policies-ownership.md) and the [query engine design](query-engine.md).
 
 ## First conformance gate
 

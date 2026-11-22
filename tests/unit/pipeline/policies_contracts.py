@@ -22,7 +22,7 @@ with tempfile.TemporaryDirectory() as directory:
         return path
 
     def syntax(path, error=None):
-        args = [compiler, "cxx", "--no-daemon", "-fcheck-affine", "-fsyntax-only", "-I", include, "-I", examples, str(path)]
+        args = [compiler, "cxx", "--no-daemon", "-fcheck-policies", "-fsyntax-only", "-I", include, "-I", examples, str(path)]
         result = subprocess.run(args, text=True, capture_output=True, timeout=90)
         if error is None:
             assert result.returncode == 0, (args, result.stderr)
@@ -162,7 +162,7 @@ with tempfile.TemporaryDirectory() as directory:
         env.update(YCXX_RUNTIME_DIR=sockets, YCXX_ROOT=str(root), YCXX_THREADS="2")
 
         def resident(*options):
-            return subprocess.run([compiler, "cxx", "--daemon=require", "-fcheck-affine", "-fsyntax-only",
+            return subprocess.run([compiler, "cxx", "--daemon=require", "-fcheck-policies", "-fsyntax-only",
                                    "-I", include, *options, str(incremental)], cwd=root, env=env,
                                   text=True, capture_output=True, timeout=30)
 
@@ -221,7 +221,7 @@ with tempfile.TemporaryDirectory() as directory:
               example::finish(static_cast<example::Work&&>(second));
             }
         """)
-        subprocess.run([*args, "-fcheck-affine", str(native_good), "-o", str(native)], check=True, timeout=30)
+        subprocess.run([*args, "-fcheck-policies", str(native_good), "-o", str(native)], check=True, timeout=30)
         assert subprocess.run([native], timeout=10).returncode == 0
         subprocess.run([*args, str(runtime), "-o", str(native)], check=True, timeout=30)
         assert subprocess.run([native], timeout=10).returncode == 0

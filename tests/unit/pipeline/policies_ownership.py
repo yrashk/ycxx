@@ -59,11 +59,11 @@ with tempfile.TemporaryDirectory() as directory:
           redeem(static_cast<Permit&&>(p));
         }
     """)
-    run(good, "-fcheck-affine", "-fsyntax-only")
+    run(good, "-fcheck-policies", "-fsyntax-only")
     # Use the native backend for a local-only body on both supported hosts.
     object_source = source("object", "void build() { auto p = issue(); inspect(p); }\n")
     obj = root / "permit.o"
-    run(object_source, "-fcheck-affine", "-c", "-o", str(obj))
+    run(object_source, "-fcheck-policies", "-c", "-o", str(obj))
     assert obj.is_file()
 
     double = source("double", """\
@@ -75,10 +75,10 @@ with tempfile.TemporaryDirectory() as directory:
     """)
     run(double, "-fsyntax-only")
     spent = "affine resource 'p' may already have been consumed"
-    stderr = run(double, "-fcheck-affine", "-fsyntax-only", error=spent)
+    stderr = run(double, "-fcheck-policies", "-fsyntax-only", error=spent)
     assert ":6:" in stderr and f"previous consumption at {double}:5:" in stderr, stderr
     rejected = root / "rejected.o"
-    run(double, "-fcheck-affine", "-c", "-o", str(rejected), error=spent)
+    run(double, "-fcheck-policies", "-c", "-o", str(rejected), error=spent)
     assert not rejected.exists()
 
     template = source("template", """\
@@ -89,7 +89,7 @@ with tempfile.TemporaryDirectory() as directory:
         }
         void instantiate() { twice<Permit>(); }
     """)
-    run(template, "-fcheck-affine", "-fsyntax-only", error=spent)
+    run(template, "-fcheck-policies", "-fsyntax-only", error=spent)
 
     short_circuit = source("short_circuit", """\
         void short_circuit(bool other) {
@@ -98,18 +98,18 @@ with tempfile.TemporaryDirectory() as directory:
           inspect(p);
         }
     """)
-    run(short_circuit, "-fcheck-affine", "-fsyntax-only", error=spent)
+    run(short_circuit, "-fcheck-policies", "-fsyntax-only", error=spent)
 
     escaped = source("escape", """\
         void evade() { auto p = issue(); const Permit& alias = p; }
     """)
-    run(escaped, "-fcheck-affine", "-fsyntax-only", error="resource aliases are outside the checked protocol")
+    run(escaped, "-fcheck-policies", "-fsyntax-only", error="resource aliases are outside the checked protocol")
 
     overload = source("overload", """\
         namespace ycxx_affine { void inspect(Permit&) noexcept; }
         void call_overload() { auto p = issue(); inspect(p); }
     """)
-    run(overload, "-fcheck-affine", "-fsyntax-only", error="outside the checked protocol")
+    run(overload, "-fcheck-policies", "-fsyntax-only", error="outside the checked protocol")
 
     linear = source("linear", """\
         void safe() noexcept;
@@ -154,7 +154,7 @@ with tempfile.TemporaryDirectory() as directory:
           } while (false);
         }
     """, "transaction.hpp")
-    run(linear, "-fcheck-affine", "-fsyntax-only")
+    run(linear, "-fcheck-policies", "-fsyntax-only")
     native_transaction = source("native_transaction", """\
         void finish() {
           auto tx = begin();
@@ -163,7 +163,7 @@ with tempfile.TemporaryDirectory() as directory:
         }
     """, "transaction.hpp")
     linear_obj = root / "transaction.o"
-    run(native_transaction, "-fcheck-affine", "-c", "-o", str(linear_obj))
+    run(native_transaction, "-fcheck-policies", "-c", "-o", str(linear_obj))
     assert linear_obj.is_file()
 
     unclosed = "linear resource '{}' may leave its scope without being consumed or transferred"
@@ -233,4 +233,4 @@ with tempfile.TemporaryDirectory() as directory:
     for name, body, diagnostic in transaction_errors:
         case = source(name, body, "transaction.hpp")
         run(case, "-fsyntax-only")
-        run(case, "-fcheck-affine", "-fsyntax-only", error=diagnostic)
+        run(case, "-fcheck-policies", "-fsyntax-only", error=diagnostic)
