@@ -1122,6 +1122,25 @@ void histograms(const std::filesystem::path& golden_path, bool update) {
   const std::size_t at_open = b.cursor();
   (void)b.handle(click(5, 8), clock + std::chrono::milliseconds(100));
   check(b.cursor() == at_open, "the second press of a double click on a bar moves nothing");
+  // A bar keeps the user's own at: when it adds a kind; quoted words survive the round trip.
+  check(trace::filter_text(trace::filter_words(R"(is:ex at:"=/my dir/a.cpp" kind:Pp)")) == R"(is:ex at:"=/my dir/a.cpp" kind:Pp)",
+        "filter words round-trip, quotes and all");
+  (void)b.handle(trace::Key{"/"});
+  for (int i = 0; i < 40; ++i) (void)b.handle(trace::Key{"\x7f"});
+  for (char c : std::string_view("at:a.cpp")) (void)b.handle(trace::Key{std::string(1, c)});
+  (void)b.handle(trace::Key{"\r"});
+  (void)b.handle(trace::Key{"b"});
+  (void)b.handle(trace::Key{"\r"});
+  check(trace::strip_sgr(b.frame().lines[1]).contains("filter: at:a.cpp kind:"), std::format("the user's at: stays: {}", trace::strip_sgr(b.frame().lines[1])));
+  // Parent ids that form a cycle (from the wire) end the walk.
+  {
+    std::vector<Event> cyc = {ev(1, 2, "A", "a", Outcome::executed, 0, 10), ev(2, 1, "B", "b", Outcome::executed, 0, 10)};
+    std::ostringstream sink;
+    trace::Stream cs(sink, {false, true, true});
+    cs.batch(cyc);
+    cs.summary();
+    check(sink.str().contains("\"by_kind\""), "a cycle of parents ends");
+  }
   t.set_filter(R"(at:"=/my dir/a.cpp")");
   Event spaced = ev(50, 0, "Pp", "q", Outcome::executed);
   spaced.span = engine::SourceSpan{"/my dir/a.cpp"};

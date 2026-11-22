@@ -1356,13 +1356,13 @@ class Browser {
       return;
     }
     if (group_by_ == Grouping::file && g.name == "(no source)") return;
-    std::string words;
-    for (auto w : filter_ | std::views::split(' ')) {
-      const std::string_view word(w.begin(), w.end());
-      if (!word.empty() && !word.starts_with("kind:") && !word.starts_with("at:")) words += std::string(word) + " ";
-    }
-    const std::string path = g.name.contains(' ') ? std::format("\"={}\"", g.name) : "=" + g.name;
-    filter_ = typed_ = words + (group_by_ == Grouping::kind ? "kind:" + g.name : "at:" + path);
+    // The user's words stay; a word of the same kind as the bar's (an earlier bar's) gives way.
+    const std::string_view prefix = group_by_ == Grouping::kind ? "kind:" : "at:";
+    std::vector<std::string> words;
+    for (std::string& w : filter_words(filter_))
+      if (!w.starts_with(prefix)) words.push_back(std::move(w));
+    words.push_back(group_by_ == Grouping::kind ? "kind:" + g.name : "at:=" + g.name);
+    filter_ = typed_ = filter_text(words);
     tree_.set_filter(filter_);
     clear_selection();
     cursor_ = 0;

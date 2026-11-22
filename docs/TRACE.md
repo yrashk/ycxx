@@ -150,8 +150,9 @@ terminal (`src/trace/browse.cppm`, whose model is `src/trace/view.cppm`). `?` li
     grouping line.
   - `s`, or a click on a column's header, sorts by that metric.
   - `⏎`, or a click on a bar, shows its cells in the tree. A kind adds `kind:Name` to the filter,
-    and a file adds `at:=path` (that path exactly). A child becomes the selection. With `i`, the
-    selected cell stays selected.
+    and a file adds `at:=path` (that path exactly), keeping the words already typed. A child
+    becomes the selection. With `i`, the selected cell stays selected; the filter itself applies
+    to the whole tree.
   - The tree's filter applies to the histogram too.
 - **Source** (#638). The pane names the cell's `source` (`a.cpp:3:1–7:1`). `S` adds a source
   column. `p` copies `path:line:col`. The filter's `at:a.cpp:12` keeps the cells whose span

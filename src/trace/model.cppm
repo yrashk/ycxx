@@ -555,7 +555,38 @@ class Groups {
   std::map<std::string, Group> by_name_;
 };
 // A file's group: its span's file; `(no source)` for a cell with none.
-std::string file_group(const Event& e) { return e.span.file.empty() ? std::string("(no source)") : e.span.file; }
+std::string_view file_group_name(const Event& e) { return e.span.file.empty() ? std::string_view("(no source)") : std::string_view(e.span.file); }
+std::string file_group(const Event& e) { return std::string(file_group_name(e)); }
+// A filter's words: split at spaces outside double quotes, the quotes dropped (`at:"/my dir/a.cpp"`).
+std::vector<std::string> filter_words(std::string_view text) {
+  std::vector<std::string> out;
+  std::string word;
+  bool quoted = false;
+  for (const char c : text) {
+    if (c == '"') quoted = !quoted;
+    else if (c == ' ' && !quoted) {
+      if (!word.empty()) out.push_back(std::move(word));
+      word.clear();
+    } else word += c;
+  }
+  if (!word.empty()) out.push_back(std::move(word));
+  return out;
+}
+// A word as a filter's text: quoted when it has a space.
+std::string filter_text(const std::vector<std::string>& words) {
+  std::string out;
+  for (const std::string& w : words) {
+    if (!out.empty()) out += ' ';
+    if (!w.contains(' ')) {
+      out += w;
+    } else if (const std::size_t colon = w.find(':'); colon != std::string::npos) {
+      out += w.substr(0, colon + 1) + '"' + w.substr(colon + 1) + '"';
+    } else {
+      out += '"' + w + '"';
+    }
+  }
+  return out;
+}
 // `[{"kind":"Tu","cells":3,"self_ns":…,…},…]`: groups for JSON, under `key`.
 std::string groups_json(const std::vector<Group>& gs, std::string_view key) {
   std::string out = "[";
@@ -717,20 +748,9 @@ class Tree {
   // cells whose source span touches that line (or file). Empty: all.
   // Words split at spaces outside double quotes, the quotes dropped: `at:"/my dir/a.cpp"`.
   void set_filter(std::string_view text) {
+    raw_words_ = filter_words(text);
     words_.clear();
-    raw_words_.clear();
-    std::string word;
-    bool quoted = false;
-    const auto end = [&] {
-      if (!word.empty()) words_.emplace_back(lower(word)), raw_words_.emplace_back(std::move(word));
-      word.clear();
-    };
-    for (const char c : text) {
-      if (c == '"') quoted = !quoted;
-      else if (c == ' ' && !quoted) end();
-      else word += c;
-    }
-    end();
+    for (const std::string& w : raw_words_) words_.push_back(lower(w));
   }
   // Only events a worker ran (`std::nullopt`: any), on top of the text filter.
   void set_worker(std::optional<std::int32_t> w) { worker_ = w; }
@@ -878,9 +898,12 @@ class Stream {
     const std::vector<std::uint64_t> self = self_times(events);
     const auto parents = parents_in(events);
     // The outermost cell of its group on its path (no ancestor in the batch has the same name).
+    // Names are compared in place; the walk stops after as many steps as there are events, so a
+    // cycle of parent ids from the wire cannot hang it.
     const auto outermost = [&](std::size_t i, auto name_of) {
-      const std::string name = name_of(events[i]);
-      for (auto p = parents[i]; p; p = parents[*p])
+      const std::string_view name = name_of(events[i]);
+      std::size_t steps = 0;
+      for (auto p = parents[i]; p && steps < events.size(); p = parents[*p], ++steps)
         if (name_of(events[*p]) == name) return false;
       return true;
     };
@@ -895,9 +918,9 @@ class Stream {
       summary_.span_ns = std::max(summary_.span_ns, e.end_ns);
       summary_.add_memory(e);
       kinds_.add(e);
-      const auto kind_of = [](const Event& x) { return x.kind; };
+      const auto kind_of = [](const Event& x) { return std::string_view(x.kind); };
       by_kind_.add(e.kind, e.kind, metrics_of(e, self[i], outermost(i, kind_of)), e.repeat);
-      by_file_.add(file_group(e), file_group(e), metrics_of(e, self[i], outermost(i, file_group)), e.repeat);
+      by_file_.add(file_group(e), file_group(e), metrics_of(e, self[i], outermost(i, file_group_name)), e.repeat);
     }
     *out_ << text << std::flush;
   }
