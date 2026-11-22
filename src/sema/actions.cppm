@@ -4223,6 +4223,25 @@ public:
            types().kind(declared_return_) == TypeKind::placeholder && no_return_deduction == 0;
   }
 
+  // [stmt.return], [expr.prim.id.unqual]: copy-initialize an explicit class result from an
+  // eligible local name as an xvalue. Parentheses preserve the category of the named operand.
+  Ex init_explicit_return(Ex e, QualType type) {
+    if (e.ok() && types().is_class(type) && e.cat() == ValueCategory::lvalue && !dependent(e)) {
+      Ex name = e;
+      while (auto paren = as<ast::Paren>(name)) name.id = paren->operand.id;
+      if (auto ref = as<ast::LocalRef>(name)) {
+        const auto& local = locals_[ref->local];
+        const bool eligible_type = types().is_reference(local.type)
+                                       ? types().rec(local.type).rvalue_ref && types().is_object(e.type())
+                                       : types().is_object(local.type);
+        if (local.entity == EntityId::none && !(local.flags & ast::local_flag::structured_binding) &&
+            eligible_type && cv_within(object_cv(e.type()), Cv::const_))
+          e = convert_node(e, ast::ConversionKind::qualification, e.type(), ValueCategory::xvalue);
+      }
+    }
+    return convert(e, type, e.begin);
+  }
+
   Ex init_deduced_return(Ex e, QualType type) {
     if (e.ok() && !lambdas_.empty()) {
       LambdaFrame& frame = lambdas_.back();
