@@ -622,6 +622,7 @@ void test_hosted_cleanup_metadata() {
   const auto frame_size = prefix + bridge.sections[1].bytes.size() + 4;
   check(frames && frames->bytes.size() == frame_size, "the linked frame stream retains both profiles and one terminator");
   check(tables && tables->bytes.size() == table.size() + 4, "the cleanup table survives after earlier contribution padding");
+  check(got.has_value(), "the linked image retains the personality GOT section");
   if (!frames || frames->bytes.size() != frame_size || !tables || tables->bytes.size() != table.size() + 4 || !got)
     return;
   constexpr std::uint64_t image_base = 0x100000000;
@@ -643,6 +644,59 @@ void test_hosted_cleanup_metadata() {
   const auto personality = trie_lookup(*image, "___gxx_personality_v0");
   check(personality && (pointer >> 63) == 0 && (pointer & ((std::uint64_t{1} << 36) - 1)) == *personality,
         "the personality GOT cell rebases to the resolved personality symbol");
+
+  const auto ordinary = bridge.define("_ordinary_in_cleanup_object", obj::binding::global, 0);
+  bridge.sections[0].emit32(movz_w(0, 0));
+  bridge.sections[0].emit32(ret);
+  add_cleanup_frame(bridge, ordinary, 8, 0x1b, {});
+  auto& combined = bridge.sections[1];
+  const auto second_cie = static_cast<std::uint32_t>(combined.bytes.size());
+  combined.emit(bridge.sections.back().bytes);
+  auto relocation = bridge.sections.back().relocs.front();
+  relocation.offset += second_cie;
+  auto& base = bridge.symbols[*relocation.minus];
+  base.section = 1;
+  base.offset += second_cie;
+  combined.relocs.push_back(relocation);
+  bridge.sections.pop_back();
+  const std::array mixed_object{entry, std::move(bridge)};
+  const auto mixed = link::link(mixed_object, opts);
+  const auto mixed_frames = mixed ? linked_section(*mixed, "__TEXT", "__eh_frame") : std::nullopt;
+  const auto ordinary_start = mixed ? trie_lookup(*mixed, "_ordinary_in_cleanup_object") : std::nullopt;
+  const auto ordinary_field = prefix + second_cie + 28;
+  check(mixed_frames && ordinary_start && mixed_frames->bytes.size() >= ordinary_field + 4 &&
+        mixed_frames->address + ordinary_field + static_cast<std::int32_t>(mo::load32(mixed_frames->bytes, ordinary_field)) ==
+            image_base + *ordinary_start,
+        "one input frame stream can use zPLR and zR CIEs with their respective pointer widths");
+}
+
+void test_rejected_cleanup_metadata() {
+  const auto opts = with_exports({"___gxx_personality_v0", "_fixture_callback", "_fixture_destroy", "__Unwind_Resume"});
+  const auto reject = [&](std::string_view label, auto mutate) {
+    auto bridge = cleanup_bridge_object();
+    mutate(bridge);
+    const std::array objects{return42(), std::move(bridge)};
+    const auto image = link::link(objects, opts);
+    check(!image && image.error().front().message.contains("invalid cleanup-only DWARF"), label);
+  };
+  reject("a different function cannot supply the personality GOT cell", [](obj::object& bridge) {
+    bridge.sections[1].relocs[0].symbol = bridge.reference("_fixture_callback");
+  });
+  reject("a personality pointer cannot address part of a GOT cell", [](obj::object& bridge) {
+    bridge.sections[1].relocs[0].addend = 4;
+  });
+  reject("the LSDA relocation must name the owned exception table", [](obj::object& bridge) {
+    bridge.sections[2].name = "__const";
+  });
+  reject("the cleanup-only LSDA excludes catch actions", [](obj::object& bridge) {
+    bridge.sections[2].bytes[11] = 1;
+  });
+  reject("a cleanup landing pad cannot be its own protected call", [](obj::object& bridge) {
+    bridge.sections[2].bytes[10] = 12;
+  });
+  reject("the call-site row length must fit its contribution", [](obj::object& bridge) {
+    bridge.sections[2].bytes[3] = 13;
+  });
 }
 
 // Findings of the review of #42, one check each.
@@ -1007,6 +1061,7 @@ int main(int argc, char** argv) {
   test_exports_trie();
   test_cleanup_frames();
   test_hosted_cleanup_metadata();
+  test_rejected_cleanup_metadata();
   test_review_cases();
   if (run_dir) {
     test_run(*run_dir);
