@@ -314,6 +314,14 @@ def main():
             assert nonkey_warm.read_bytes() == (scope / 'nonkey-cold.o').read_bytes()
 
             check_owned_root(compile, linux, scope, cold, daemon, host_cxx, readelf)
+            for part, diagnostic in (
+                ('prior-namespace', virtual_definition_error),
+                ('slot-redeclaration-after', native_virtual_error),
+            ):
+                for mode, env in (('cold', cold), ('warm', daemon)):
+                    obj = f'{part}-{mode}.o'
+                    compile(linux, '-c', f'owned-root/{part}.cpp', '-o', obj, env=env, error=diagnostic)
+                    assert not (scope / obj).exists()
 
             providers = [host_cxx]
             clang = shutil.which(cold.get('YCXX_CLANGXX', 'clang++'), path=cold.get('PATH'))
