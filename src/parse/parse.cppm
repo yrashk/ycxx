@@ -3900,6 +3900,8 @@ private:
       decls_.push_back(own.sema);
     }
     p_->classes_.publish_enum(e, std::move(er));
+    // The scoped names were visible while parsing the enumerator list only.
+    if (scoped) s_.own.resize(first_enumerator);
     ps_.seek(it_->brace_end);
     if (ps_.accept(Tk::semi)) return;
     // The item ended at the brace: the `;` is missing, and the definition stands
@@ -5585,7 +5587,6 @@ private:
     // Functions clash when they have the same type and are both templates with equivalent heads and
     // constraints, or both not templates ([temp.over.link]/4-6, [over.load]).
     auto clash = [&](const ast::DeclSema& d) {
-      if (p_->scoped_enumerator(d)) return false;
       if (!function || d.kind != ast::DeclKind::function) return true;
       auto& types = s_.types();
       if (types.canonical(d.type) != types.canonical(*function)) {
@@ -5622,7 +5623,7 @@ private:
       const ast::ItemSema& ms = earlier(m);
       for (const ast::DeclSema& d : p_->world().ins.seqs.elements(ms.decls))
         if (d.entity != EntityId::none && d.kind != ast::DeclKind::class_ && p_->world().entities.rec(d.entity).name == n &&
-            clash(d))
+            !p_->scoped_enumerator(d) && clash(d))
           return true;
     }
     return false;
