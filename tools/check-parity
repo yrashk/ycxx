@@ -40,8 +40,14 @@ def handled(root):
     """{target: set of L2 operation names each back end selects or emits}."""
     patterns = (root / 'src/target/aarch64/aarch64.patterns').read_text()
     select = (root / 'src/target/aarch64/select.cppm').read_text()
-    a64 = {m.group(1) for m in re.finditer(r':\s*\(([a-z_][a-z0-9_]*)\b', patterns)}
-    a64 |= {m.group(1).rstrip('_') for m in re.finditer(r'\bOp::([a-z_][a-z0-9_]*)', select)}
+    # The pattern parser reads one declaration per line. Only its outermost operation is a root.
+    pattern_root = (r'^[ \t\r]*pattern[ \t\r]+[A-Za-z0-9_-]+[ \t\r]*:'
+                    r'[ \t\r]*\([ \t\r]*([a-z_][a-z0-9_]*)\b')
+    a64 = set(re.findall(pattern_root, patterns, re.M))
+    # Handwritten lowering dispatches from root(). Other references can just inspect an operation.
+    select = re.sub(r'//[^\n]*|/\*.*?\*/', ' ', select, flags=re.S)
+    dispatched = function_body(select, 'void root(NodeId n)')
+    a64.update(op.rstrip('_') for op in re.findall(r'\bcase\s+l2::Op::([a-z_][a-z0-9_]*)\s*:', dispatched))
     x86 = (root / 'src/target/x86_64/x86_64.cppm').read_text()
     emitted = function_body(x86, 'std::expected<void, std::string> Emitter::node(NodeId n)')
     x64 = {m.group(1).rstrip('_') for m in re.finditer(r'case Op::([a-z_][a-z0-9_]*)', emitted)}

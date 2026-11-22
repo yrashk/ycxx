@@ -34,7 +34,7 @@ using sema::ConstId;
 
 // The parser skips attributes whose layout semantics we do not implement. Find those
 // that could change a record or field even though its computed offsets look natural.
-enum class LayoutAttributes { affecting_layout, leading_affecting_layout, any };
+enum class LayoutAttributes { affecting_layout, leading_affecting_layout, trailing_definition, any };
 
 bool layout_attribute(const pp::Region& region, u32 begin, u32 end, LayoutAttributes mode = LayoutAttributes::affecting_layout,
                       std::span<const std::pair<u32, u32>> applied = {},
@@ -84,6 +84,9 @@ bool layout_attribute(const pp::Region& region, u32 begin, u32 end, LayoutAttrib
         }
         if (name.size() > 4 && name.starts_with("__") && name.ends_with("__"))
           name = name.substr(2, name.size() - 4);
+        if (mode == LayoutAttributes::trailing_definition && gnu && depth == 2 &&
+            (region.tokens[i - 1].kind == l_paren || region.tokens[i - 1].kind == comma) &&
+            (name == "copy" || name == "trivial_abi")) return true;
         if (name == "packed" || name == "aligned" || name == "mode" || name == "vector_size" ||
             name == "no_unique_address" || name == "ms_struct" || name == "gcc_struct") return true;
       }
@@ -2993,11 +2996,27 @@ private:
     return v >= 0 && (sh.bits >= 64 || v < (std::int64_t(1) << sh.bits));
   }
 
+  u32 after_definition_attributes() {
+    const u32 back = it_->begin + ps_.pos();
+    ps_.seek(it_->brace_end);
+    ps_.skip_attributes(nullptr, 0, nullptr, false, Parser::attr_gnu);
+    const u32 after = it_->begin + ps_.pos();
+    ps_.seek(back);
+    return after;
+  }
+
+  bool supported_definition_attributes(u32 after) {
+    if (!layout_attribute(p_->region(), it_->brace_end, after, LayoutAttributes::trailing_definition)) return true;
+    s_.diag(it_->brace_end - it_->begin, Diag::post_definition_layout_attribute);
+    return false;
+  }
+
   // `typedef class-specifier X …;` with an unnamed class or enumeration: X names it for linkage
   // purposes ([dcl.typedef]/9), and so is its name here; the declarator after the braces.
   std::optional<std::pair<NameId, u32>> typedef_name_after_braces() {
     u32 back = it_->begin + ps_.pos();  // `seek` takes a region index, `pos` is in the item
     ps_.seek(it_->brace_end);
+    ps_.skip_attributes(nullptr, 0, nullptr, false, Parser::attr_gnu);
     std::optional<std::pair<NameId, u32>> r;
     if (ps_.is(Tk::identifier)) r = std::pair(ps_.name_of(ps_.tok()), ps_.pos());
     ps_.seek(back);
@@ -3130,6 +3149,7 @@ private:
     if (!class_declared(sem, key, name_at)) return bad();
     p_->current_instantiation(pattern, k_, sem);
     ps_.seek(it_->brace_end);
+    ps_.skip_attributes(nullptr, 0, nullptr, false, Parser::attr_gnu);
     q_.own_class_complete = true;
     if (ps_.at_end()) {
       ps_.expect(Tk::semi);  // the `;` is missing ([class.pre]/1)
@@ -3197,6 +3217,7 @@ private:
     sem.flags |= sema::decl_flag::specialization;
     if (!class_declared(sem, key, name_at)) return bad();
     ps_.seek(it_->brace_end);
+    ps_.skip_attributes(nullptr, 0, nullptr, false, Parser::attr_gnu);
     q_.own_class_complete = true;
     if (!ps_.accept(Tk::semi)) {
       s_.diag(ps_.pos(), Diag::not_supported, ps_.kind());  // declarators after an explicit specialization
@@ -3539,6 +3560,7 @@ private:
   // its declarators. The member-specification is the members' items (§4.2); `class_def` reads
   // them.
   void class_definition() {
+    if (!supported_definition_attributes(after_definition_attributes())) return bad();
     // A class template ([temp.class]): its head, then the class-head. `template<>` defines an
     // explicit specialization ([temp.expl.spec]).
     if (ps_.is(Tk::kw_template) && ps_.kind(1) == Tk::less && ps_.kind(2) == Tk::greater) {
@@ -3639,6 +3661,7 @@ private:
     if (template_) p_->current_instantiation(s_.types().class_of(sem.type), k_, sem);
     // The declarators after the closing brace: `struct S { … } s, *p;`, where S is complete.
     ps_.seek(it_->brace_end);
+    ps_.skip_attributes(nullptr, 0, nullptr, false, Parser::attr_gnu);
     q_.own_class_complete = true;
     if (ps_.accept(Tk::semi)) {
       if (!leading_annotations.empty()) s_.diag(leading_annotations.front().offset, Diag::attributes_not_allowed);
@@ -3675,6 +3698,7 @@ private:
   // An unnamed union with a declarator in a class ([class.pre], [class.mem.general]). The head
   // occupies declaration slot 0, and the declarators that follow it belong to the enclosing class.
   void unnamed_union_member() {
+    if (!supported_definition_attributes(after_definition_attributes())) return bad();
     const items::Item& outer = p_->items().items[it_->parent];
     ps_.skip_attributes();
     u32 at = ps_.pos();
@@ -3697,6 +3721,7 @@ private:
     p_->class_def(k_);
 
     ps_.seek(it_->brace_end);
+    ps_.skip_attributes(nullptr, 0, nullptr, false, Parser::attr_gnu);
     s_.current_class = owner;
     q_.own_class_complete = true;
     DeclSpec spec;
@@ -3812,6 +3837,8 @@ private:
     sema::Types& types = s_.types();
     u32 at = ps_.pos();
     const bool definition = it_->kind == ItemKind::enum_def;
+    const u32 after_attributes = definition ? after_definition_attributes() : it_->end;
+    if (definition && !supported_definition_attributes(after_attributes)) return bad();
     const bool td = cls == EntityId::none && ps_.accept(Tk::kw_typedef);  // `typedef enum … { … } E;`
     if (!ps_.is(Tk::kw_enum)) {
       s_.diag(ps_.pos(), Diag::not_supported, ps_.kind());
@@ -3835,8 +3862,8 @@ private:
         s_.diag(ps_.pos(), Diag::expected_unqualified_id);
         return bad();
       }
-      if (it_->brace_end < it_->end && p_->region().tokens[it_->brace_end].kind != Tk::semi) {
-        s_.diag(it_->brace_end - it_->begin, Diag::not_supported, p_->region().tokens[it_->brace_end].kind);
+      if (after_attributes < it_->end && p_->region().tokens[after_attributes].kind != Tk::semi) {
+        s_.diag(after_attributes - it_->begin, Diag::not_supported, p_->region().tokens[after_attributes].kind);
         return bad();
       }
     }
@@ -4073,6 +4100,7 @@ private:
     // The scoped names were visible while parsing the enumerator list only.
     if (scoped) s_.own.resize(first_enumerator);
     ps_.seek(it_->brace_end);
+    ps_.skip_attributes(nullptr, 0, nullptr, false, Parser::attr_gnu);
     if (ps_.accept(Tk::semi)) return;
     // The item ended at the brace: the `;` is missing, and the definition stands
     // ([class.pre]/1, [dcl.enum]/1).
@@ -4611,6 +4639,7 @@ private:
     sem.kind = ast::DeclKind::function;
     sem.type = d.type;
     sem.has_written_noexcept = d.has_noexcept;
+    sem.has_trailing_return = d.trailing_return;
     if (d.qualified && d.scope.ns) {
       // `friend R ::f(…);`, `friend R N::f(…);`: a function the namespace declared earlier.
       auto f = s_.namespace_function(*d.scope.ns, d.name, d.type);
@@ -5596,6 +5625,7 @@ private:
                                      s_.template_scopes.empty())) return false;
     sem.type = d.type;
     sem.has_written_noexcept = fn && d.has_noexcept;
+    sem.has_trailing_return = fn && d.trailing_return;
     sem.linkage = ast::Linkage::external;
     sem.is_virtual = is_virtual;
     u16 flags = sema::decl_flag::member;
@@ -6007,6 +6037,7 @@ private:
     sem.kind = fn ? ast::DeclKind::function : ast::DeclKind::variable;
     sem.type = d.type;
     sem.has_written_noexcept = fn && d.has_noexcept;
+    sem.has_trailing_return = fn && d.trailing_return;
     sem.storage = spec.is_static ? ast::Storage::static_ : spec.is_extern ? ast::Storage::extern_ : ast::Storage::none;
     sem.linkage = has_internal_linkage() ? ast::Linkage::internal : ast::Linkage::external;
     sem.access = ast::Access::none;
@@ -8965,6 +8996,13 @@ void Program::instantiate_all() {
     };
     for (u32 j = 0; j < k && !used; ++j)
       used = demanded(item_cells_[j]) || demanded(class_cells_[j]) || demanded(body_cells_[j]);
+    if (!used) {
+      used = std::ranges::any_of(class_member_order_, [&](const auto& key) {
+        const auto& cell = class_member_cells_.at(key);
+        return class_points_.at(key.second) < k && cell.diags.empty() &&
+               std::ranges::any_of(cell.demands, [&](const sema::Demand& d) { return std::to_underlying(d.spec) == e; });
+      });
+    }
     if (!used) continue;
     ast::NameId name = w_->entities.rec(EntityId(e)).name;
     auto at = spec_names_.find(e);
@@ -9043,7 +9081,22 @@ void Program::instantiate_all() {
   std::vector<u32> depth(work.size(), 1);
   const u32 limit = instantiation_limit;
   std::set<u32> seen;
-  for (std::size_t i = 0; i < work.size(); ++i) {
+  std::size_t walked_members = 0;
+  for (std::size_t i = 0; ; ++i) {
+    // Class-specialization replay can add member cells while processing this worklist.
+    for (; walked_members < class_member_order_.size(); ++walked_members) {
+      const auto& key = class_member_order_[walked_members];
+      const auto& cell = class_member_cells_.at(key);
+      if (!cell.diags.empty()) continue;
+      for (sema::Demand demand : cell.demands) {
+        if (!demand.variable_type) continue;
+        const auto point = class_points_.at(key.second);
+        if (point < end()) demand.at = ast::Loc{id(point), 0};
+        work.push_back(demand);
+        depth.push_back(1);
+      }
+    }
+    if (i == work.size()) break;
     if (!seen.insert(std::to_underlying(work[i].spec)).second) continue;
     required_.push_back(work[i].spec);
     if (depth[i] > limit) {

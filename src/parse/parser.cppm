@@ -97,6 +97,7 @@ struct Declarator {
   // `T x[] = {…}`: the outermost array bound is left to the initializer ([dcl.array]/8); `type`
   // is then the element type.
   bool unknown_bound = false;
+  bool trailing_return = false;
   bool function = false;  // it has a parameter list of its own, not a function type from a name
   // `f<args>`: a declarator-id that is a template-id, which an explicit specialization declares
   // ([temp.expl.spec]/1); `f<>` has none.
@@ -984,6 +985,7 @@ public:
       d.function = function_type;
       // The declaring context also checks defaults in a nested function type.
       d.params = fn->params;
+      d.trailing_return = fn->trailing.has_value();
       d.variadic = fn->variadic;
       d.ref_at = fn->ref_at;
       d.has_noexcept = fn->has_noexcept;
@@ -1022,13 +1024,15 @@ public:
   // hidden visibility attribute when requested by the declaring context.
   static constexpr int attr_std = 1, attr_gnu = 2;
   int skip_attributes(bool* hidden_visibility = nullptr, int visibility_forms = attr_std | attr_gnu,
-                      std::vector<ast::AnnotationSema>* annotations = nullptr, bool annotation_type_context = false) {
+                      std::vector<ast::AnnotationSema>* annotations = nullptr, bool annotation_type_context = false,
+                      int forms = attr_std | attr_gnu) {
     int any = 0;
     for (;;) {
       bool std_attr = is(Tk::l_square) && kind(1) == Tk::l_square;
       bool gnu = is(Tk::identifier) && name_spelling() == "__attribute__" && kind(1) == Tk::l_paren;
       if (!std_attr && !gnu) return any;
       const int form = std_attr ? attr_std : attr_gnu;
+      if (!(forms & form)) return any;
       any |= form;
       if (std_attr && kind(2) == Tk::equal) {
         if (annotations) {
@@ -1710,9 +1714,26 @@ public:
   // Whether the `(` here begins a parameter-declaration-clause rather than an initializer
   // ([dcl.ambig.res]: what can be a declaration is one).
   bool params_ahead(u32 open = 0, bool statement = false) {
-    u32 first = open + 1;
-    if (past_attributes(first) != first) return true;  // a parameter's attributes ([dcl.fct]/3)
-    auto can_start_parameter = [&](u32 after_type) {
+    for (u32 first = open + 1;;) {
+      if (past_attributes(first) != first) return true;  // a parameter's attributes ([dcl.fct]/3)
+      const Tk k = kind(first), next = kind(first + 1);
+      u32 after_type = first + 1;
+      if (constrained_auto_ahead(first)) {
+        ++after_type;
+      } else if (!simple_type_keyword(k)) {
+        if (k == Tk::r_paren || k == Tk::ellipsis || starts_decl_specifier(k)) return true;
+        if ((k == Tk::identifier && next == Tk::coloncolon) || k == Tk::coloncolon) {
+          auto q = qualified_type(first);  // `N::S`, `C::E`, `::S`
+          if (!q) return false;
+          after_type = first + q->second;
+        } else if (k == Tk::identifier && next == Tk::less && s_->names_type_template(name_of(tok(first)))) {
+          after_type = past_template_args(first + 1);
+        } else if (transform_trait_ahead(first)) {
+          return true;
+        } else if (k != Tk::identifier || !s_->class_name(name_of(tok(first))).has_value()) {
+          return false;
+        }
+      }
       Tk following = kind(after_type);
       if (following == Tk::l_brace) return false;  // `T{args}` is a functional conversion.
       if (following != Tk::l_paren) return true;
@@ -1725,24 +1746,16 @@ public:
       u32 operand = after_type + 1;
       while (kind(operand) == Tk::l_paren) ++operand;
       Tk first_operand = kind(operand);
-      return !lex::is_literal(first_operand) && first_operand != Tk::kw_true &&
-             first_operand != Tk::kw_false && first_operand != Tk::kw_nullptr &&
-             first_operand != Tk::plus && first_operand != Tk::minus;
-    };
-    Tk k = kind(first);
-    Tk next = kind(first + 1);
-    if (constrained_auto_ahead(first)) return can_start_parameter(first + 2);
-    if (simple_type_keyword(k)) return can_start_parameter(first + 1);
-    if (k == Tk::r_paren || k == Tk::ellipsis || starts_decl_specifier(k)) return true;
-    if ((k == Tk::identifier && next == Tk::coloncolon) || k == Tk::coloncolon) {
-      auto q = qualified_type(first);  // `N::S`, `C::E`, `::S`
-      return q && can_start_parameter(first + q->second);
+      if (lex::is_literal(first_operand) || first_operand == Tk::kw_true || first_operand == Tk::kw_false ||
+          first_operand == Tk::kw_nullptr || first_operand == Tk::plus || first_operand == Tk::minus)
+        return false;
+
+      // A grouped argument such as `T(name)` leaves both readings open. A later argument
+      // can settle the entire list, as in `Holder value(T(name), 2)`.
+      const u32 after_group = past_parentheses(after_type);
+      if (kind(after_group) != Tk::comma) return true;
+      first = after_group + 1;
     }
-    if (k == Tk::identifier && next == Tk::less && s_->names_type_template(name_of(tok(first))))
-      return can_start_parameter(past_template_args(first + 1));
-    if (transform_trait_ahead(first)) return true;
-    return k == Tk::identifier && next != Tk::coloncolon && s_->class_name(name_of(tok(first))).has_value() &&
-           can_start_parameter(first + 1);
   }
 
   std::int64_t i64_of(sema::ConstId c) { return s_->world().values.as_signed(c); }
@@ -2487,6 +2500,21 @@ public:
     auto literal = s_->as<ast::Literal>(e);
     if (!literal || !s_->types().is(literal->info.type, Builtin::bool_)) return std::nullopt;
     return s_->templates().negated_variable_value(literal->value, negations);
+  }
+
+  std::optional<sema::ConstId> conjunction_operand(Ex e) {
+    if (!e.ok()) return std::nullopt;
+    if (auto negated = negated_template_variable(e)) return negated;
+    while (auto p = s_->as<ast::Paren>(e)) e.id = p->operand.id;
+    auto literal = s_->as<ast::Literal>(e);
+    if (!literal || !s_->types().is(literal->info.type, Builtin::bool_)) return std::nullopt;
+    const auto value = literal->value;
+    if (s_->ins().values.is<ast::VInt>(value) ||
+        s_->ins().values.is<ast::VDepVariable>(value) ||
+        (s_->ins().values.is<ast::VDepOp>(value) &&
+         s_->ins().values.get<ast::VDepOp>(value).op == ast::DepOp::logical_and))
+      return value;
+    return std::nullopt;
   }
 
   // The value of a template argument for a non-type parameter of type `t`: a converted constant
@@ -3237,6 +3265,17 @@ public:
       u32 at = pos();
       bump();
       Ex r = binary_expression(info->prec + 1);
+      if (!body && in_template_value_argument_ && info->op == sema::Sema::BinOp::logical_and &&
+          (s_->dependent(l) || s_->dependent(r))) {
+        const auto left = conjunction_operand(l);
+        const auto right = conjunction_operand(r);
+        if (left && right) {
+          if (const auto value = s_->templates().conjunction_value(*left, *right)) {
+            l = s_->literal(s_->builtin(Builtin::bool_), *value, ast::ValueCategory::prvalue, l.begin, r.end);
+            continue;
+          }
+        }
+      }
       l = s_->binary(info->op, l, r, at);
     }
   }

@@ -198,13 +198,14 @@ peer code. [#572](https://github.com/yrashk/ycxx/issues/572) ·
 On x86-64 Linux, an eligible ycxx function can also throw an `int` to a hosted peer's handler.
 A host-linked ycxx function can use one `catch (...)` to return an integer literal when
 a direct call on its parameter to an externally defined `int(int)` function throws.
-A host-linked void function can also destroy one initialized aggregate local on both exits
-from an external `void()` call and let the original exception reach a peer handler.
 A supported union constructor can destroy its active member when its body call throws and
 propagate an exception from its initializer before the member's lifetime begins.
 [#578](https://github.com/yrashk/ycxx/issues/578)
-· [#583](https://github.com/yrashk/ycxx/issues/583) · [#663](https://github.com/yrashk/ycxx/issues/663)
-· [#738](https://github.com/yrashk/ycxx/issues/738)
+· [#583](https://github.com/yrashk/ycxx/issues/583) · [#738](https://github.com/yrashk/ycxx/issues/738)
+
+On both hosts, a system-linked void function can destroy one initialized aggregate local
+on both exits from an external `void()` call and let the original exception reach a peer handler.
+[#663](https://github.com/yrashk/ycxx/issues/663) · [#781](https://github.com/yrashk/ycxx/issues/781)
 
 Both targets support cooked integer user-defined literals through namespace-scope literal
 operators with an `unsigned long long` parameter, including constant evaluation.
@@ -356,7 +357,8 @@ written default member initializer are value-initialized.
   and directives;
 - named function-pointer declarations with qualified return types, qualified names in grouped
   declarators, and unnamed function-pointer parameters;
-- parenthesized direct initialization from functional conversions such as `S b(S(1));`;
+- parenthesized direct initialization from functional conversions such as `S b(S(1));` and
+  `Holder h(Tag(n), 2);`. [#769](https://github.com/yrashk/ycxx/issues/769)
 - `[[…]]` attributes, the GNU attributes and `asm` labels the macOS SDK's headers use, the
   GNU pointer qualifiers glibc uses, and the type-trait built-ins libycxx's headers use
   (`__is_same`, `__remove_cv`, …). `__is_destructible`, `__is_nothrow_destructible`, and
