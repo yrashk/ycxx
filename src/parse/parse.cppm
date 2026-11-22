@@ -881,7 +881,7 @@ public:
   }
 
   // The implicitly defined special members needed by the unit ([special]).
-  enum class SpecialMember { destructor, copy_constructor, copy_assignment };
+  enum class SpecialMember { destructor, copy_constructor, copy_assignment, move_constructor };
   struct Synthesized {
     u32 item;  // the class's
     ast::DeclSema decl;
@@ -890,7 +890,7 @@ public:
   const std::deque<Synthesized>& synthesized() const { return synth_; }
   // Its body, analysed on first use.
   const ast::BodySema& synthesized_body(std::size_t i);
-  void special_members(u32 item, EntityId cls, sema::ClassRec& rec,
+  bool special_members(u32 item, EntityId cls, sema::ClassRec& rec,
                        std::vector<engine::Diagnostic>* class_diags = nullptr);
   void declare_copy_assignment(u32 item, EntityId cls, sema::ClassRec& rec, bool implicit, bool user_move);
   sema::CopyAssignment require_copy_assignment(EntityId f);
@@ -1351,6 +1351,12 @@ private:
     bool emitted = false;
   };
   std::map<EntityId, PendingCopyAssignment> copy_assignments_;
+  struct PendingMoveConstructor {
+    Synthesized definition;
+    ast::BodySema body;
+    std::vector<sema::Demand> demands;
+  };
+  std::map<EntityId, PendingMoveConstructor> move_constructors_;
   std::deque<Instance> instances_;               // a deque: instances are referred to as they are added
   std::vector<const Instance*> instance_order_;  // the completed ones, in order of instantiation
   std::map<u32, std::size_t> instance_index_;    // by specialization: its slot in `instances_`
@@ -1438,6 +1444,7 @@ private:
   std::set<EntityId> replaying_member_exceptions_;
   std::map<EntityId, QualType> resolved_member_exceptions_;
   void check_member_exception_patterns(EntityId cls, const sema::ClassRec& rec, Result<ast::ClassDef>& out);
+  void prepare_move_constructor(u32 item, EntityId cls, sema::ClassRec& rec);
   std::map<u32, std::vector<std::vector<ast::TemplateParamSema>>> outer_heads_;  // by item
   std::map<std::pair<u32, u32>, u32> static_init_ends_;  // by (member item, ordinal): its initializer's end
   std::map<u32, LazyMember> lazy_members_;                 // by member entity
@@ -6982,7 +6989,7 @@ const Result<ast::ClassDef>& Program::class_def(u32 item) {
     rec.adl_friends = c.adl_friends;
     // Classify the written declarations before special_members appends implicit assignments.
     if (member_declarations_valid) rec.trivial_copyability = class_trivial_copyability(item, *cls, rec);
-    special_members(item, *cls, rec, &out.diags);
+    const bool implicit_move = special_members(item, *cls, rec, &out.diags);
     classify_defaulted_default_ctor(rec, out.diags);
     if (rec.polymorphic && w_->target.triple == ast::x86_64_linux.triple)
       rec.peer_virtual_layout = peer_virtual_layout(item, *cls, rec, members);
@@ -6993,6 +7000,7 @@ const Result<ast::ClassDef>& Program::class_def(u32 item) {
       bind_member_defaults(*cls, fresh, out);
       bind_constructor_exceptions(*cls, fresh, out);
       check_member_exception_patterns(*cls, fresh, out);
+      if (member_declarations_valid && implicit_move) prepare_move_constructor(item, *cls, fresh);
     });
   }
   ast::Builder b(w_->ins, &arena_);
@@ -7979,7 +7987,7 @@ sema::TrivialCopyability Program::class_trivial_copyability(u32 item, EntityId c
   return facts;
 }
 
-void Program::special_members(u32 item, EntityId cls, sema::ClassRec& rec,
+bool Program::special_members(u32 item, EntityId cls, sema::ClassRec& rec,
                               std::vector<engine::Diagnostic>* class_diags) {
   sema::Types& types = w_->types;
   QualType ct = types.class_type(cls);
@@ -8139,7 +8147,8 @@ void Program::special_members(u32 item, EntityId cls, sema::ClassRec& rec,
     if (!rec.copy_deleted && nontrivial && !rec.layout_requires_virtual_support) rec.copy_ctor = synthesize(true);
   }
   // [class.copy.ctor]/8, 10–11: implicit move requires no user-declared copy, move or destructor.
-  if (implicit_copy && !user_copy_assignment && !user_dtor) {
+  const bool implicit_move = implicit_copy && !user_copy_assignment && !user_dtor;
+  if (implicit_move) {
     rec.move_usable = !rec.copy_deleted || std::ranges::none_of(subobjects, [&](QualType t) {
                         return !types.is_reference(t) && classes_.unmovable(t);
                       });
@@ -8179,6 +8188,86 @@ void Program::special_members(u32 item, EntityId cls, sema::ClassRec& rec,
             (rec.fields.empty() || !data_in_bases);
   if (!user_copy_assignment || defaulted_assignment)
     declare_copy_assignment(item, cls, rec, !user_copy_assignment, deletes_implicit_copy);
+  return implicit_move;
+}
+
+void Program::prepare_move_constructor(u32 item, EntityId cls, sema::ClassRec& rec) {
+  const auto& owner = w_->entities.rec(cls);
+  if (!rec.copy_deleted || !rec.move_usable || !rec.move_nontrivial || rec.union_ ||
+      rec.layout_requires_virtual_support || rec.unapplied_layout || !rec.bases.empty() ||
+      owner.templ != EntityId::none || !is_namespace(owner.scope) || items_->items[item].template_depth)
+    return;
+  // [class.copy.ctor]: a deleted or inaccessible subobject destructor deletes the move.
+  if (!rec.destructor_usable) return;
+
+  auto& types = w_->types;
+  const QualType type = types.class_type(cls);
+  const QualType parameter = types.rvalue_ref(type);
+  const NameId other = w_->ins.names.intern("other");
+  ast::Builder b(w_->ins, &arena_);
+  std::vector<engine::Diagnostic> diags;
+  AtItem q(*this, item, false);
+  q.completing_class = cls;
+  sema::Sema sm(*w_, b, q, diags, id(item), 0);
+  sm.current_class = cls;
+  sm.this_type = types.pointer(type);
+  sm.push_scope();
+  sm.declare_local(other, parameter, sema::local_flag::parameter, 0, false);
+  const Ex source = sm.static_cast_to(sm.name_expr(other, 0, 0), parameter, 0);
+
+  std::vector<ast::Child> statements;
+  for (u32 i = 0; i < rec.fields.size(); ++i) {
+    const auto& field = rec.fields[i];
+    const bool class_field = types.is_class(field.type);
+    if (!class_field && !types.is_scalar(field.type)) return;
+    // [class.copy.ctor]: direct-initialize each field from the corresponding source xvalue.
+    Ex member = sm.member(source, false, field.name, 0, 0, 0);
+    Ex init = class_field ? sm.construct(field.type, {member}, 0, 0) : sm.convert(member, field.type, 0);
+    if (!init.ok()) return;
+    if (class_field) {
+      const auto nonthrowing = sm.as<ast::Literal>(sm.unary_noexcept(init, 0, 0));
+      if (!nonthrowing || !w_->values.rec(nonthrowing->value).bits) return;
+    }
+    statements.push_back({sm.node(ast::MemberInit{i, field.type, {init.id, 0}}, 0, 0).id, 0});
+  }
+  if (sm.has_error_since(0)) return;
+
+  statements.push_back({sm.node(ast::Compound{b.list({})}, 0, 0).id, 0});
+  const Ex root = sm.node(ast::Compound{b.list(statements)}, 0, 0);
+  sm.pop_scope();
+  const std::vector<ast::LocalRec> locals(sm.locals().begin(), sm.locals().end());
+  const ast::BodySema body = b.commit(ast::BodySema{
+      root.id, b.seq(std::span<const ast::LocalRec>(locals)), b.seq(std::span<const ast::ExpansionRec>{}),
+      b.seq(std::span<const ast::u32>{}), QualType{}, 0, b.seq(std::span<const ast::ClosureDef>{})});
+
+  ast::DeclSema decl{};
+  decl.kind = ast::DeclKind::function;
+  decl.type = types.function(types.builtin(sema::Builtin::void_), std::span(&parameter, 1), false,
+                             LangLinkage::cxx, sema::Cv::none, ast::RefQual::none, true);
+  decl.linkage = ast::Linkage::external;
+  decl.storage = ast::Storage::none;
+  decl.access = ast::Access::public_;
+  decl.flags = sema::decl_flag::member | sema::decl_flag::implicit | sema::decl_flag::definition |
+               sema::decl_flag::inline_ | sema::decl_flag::constructor;
+  decl.attributes = b.seq(std::span<const NodeId>{});
+  decl.annotations = b.seq(std::span<const ast::AnnotationSema>{});
+  decl.constraint = NodeId::none;
+  decl.constraints = ast::ConstId::none;
+  decl.contracts = NodeId::none;
+  const ast::ParamSema param{EntityId::none, parameter, other, NodeId::none, 0};
+  decl.params = b.seq(std::span(&param, 1));
+  decl.template_params = b.seq(std::span<const ast::TemplateParamSema>{});
+  decl.entity = w_->entities.entity({sema::EntityKind::constructor, owner.name, decl.type, LangLinkage::cxx,
+                                     ast::Linkage::external, {}, cls});
+  sema::MemberDeclRec member{};
+  member.name = owner.name;
+  member.type = decl.type;
+  member.entity = decl.entity;
+  member.is_function = true;
+  member.is_ctor = true;
+  rec.members.push_back(std::move(member));
+  move_constructors_.try_emplace(decl.entity, PendingMoveConstructor{
+      {item, b.commit(decl), SpecialMember::move_constructor}, body, std::move(sm.demands)});
 }
 
 void Program::declare_copy_assignment(u32 item, EntityId cls, sema::ClassRec& rec, bool implicit, bool user_move) {
@@ -8867,6 +8956,12 @@ void Program::instantiate_all() {
           !assign->second.emitted) {
         assign->second.emitted = true;
         synth_.push_back(assign->second.definition);
+      }
+      if (auto move = move_constructors_.extract(e); !move.empty()) {
+        auto& pending = move.mapped();
+        synth_bodies_.emplace(synth_.size(), pending.body);
+        synth_.push_back(pending.definition);
+        work.insert(work.end(), pending.demands.begin(), pending.demands.end());
       }
       if (member_patterns_.contains(std::to_underlying(e))) work.push_back({e, ast::Loc{at, 0}});
     }

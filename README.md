@@ -326,6 +326,10 @@ written default member initializer are value-initialized.
   [#244](https://github.com/yrashk/ycxx/issues/244)
 - user-declared copy and move assignment govern the availability of implicit constructors.
   [#244](https://github.com/yrashk/ycxx/issues/244)
+- ordinary namespace-scope classes without bases can implicitly move from an rvalue when their
+  implicit copy is deleted. This covers scalar fields and class fields with proven nonthrowing
+  initialization and destruction.
+  [#747](https://github.com/yrashk/ycxx/issues/747)
 - ordinary named unions with a written destructor can hold nontrivially destructible members.
   The member's copy constructor can be trivial or deleted. An explicit union constructor
   initializes its selected member. A nonthrowing constructor works on both targets, and the
