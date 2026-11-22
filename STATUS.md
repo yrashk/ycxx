@@ -3600,16 +3600,20 @@ checks reject entry into the protected block or a handler. A discarded
 
 On Linux x86-64, a host-linked ELF object can contain an eligible namespace
 function with a protected return that passes its parameter directly to an
-externally defined `int(int)` function. The function has one `catch (...)`
-that returns an integer literal. L1 and L2 carry distinct normal and unwind
-results. The AMD64 emitter records the call range
-and landing address, saves the unwind header and selector, and feeds the ELF
-writer's handler CIE and LSDA. GCC and Clang hosted tests cover the normal and
-caught returns and unwinding through an ordinary frame. The native final
-link diagnoses the hosted runtime requirement. Same-translation-unit callees,
-typed and multiple handlers, cleanup scopes, other target backends and
-freestanding runtime support remain
-in [#89](https://github.com/yrashk/ycxx/issues/89). [#583](https://github.com/yrashk/ycxx/issues/583)
+externally defined `int(int)` function. One `catch (...)` can return an integer
+literal, or one named by-value `int` handler can return its bound value.
+L1 and L2 carry distinct normal and unwind results. The AMD64 emitter records
+the call range and landing address, saves the unwind header and selector, and
+feeds the ELF writer's handler CIE and LSDA. The typed LSDA uses the hosted
+`_ZTIi` to match exceptions, and a different type continues unwinding. The
+native final link diagnoses the hosted runtime requirement.
+[Design](docs/design/linux-hosted-catch-all.md#hosted-by-value-int-handler-919)
+· [#583](https://github.com/yrashk/ycxx/issues/583) · [#919](https://github.com/yrashk/ycxx/issues/919)
+
+Same-translation-unit callees, other typed handlers, multiple or nested
+handlers, rethrow, combined handler cleanup and freestanding runtime discovery
+remain in [#89](https://github.com/yrashk/ycxx/issues/89).
+Darwin parity is tracked in [#648](https://github.com/yrashk/ycxx/issues/648).
 
 ## Unevaluated calls to known-return function templates (#565)
 

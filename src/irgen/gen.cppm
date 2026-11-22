@@ -40,7 +40,7 @@
 //
 // α slice (#39) and δ's aggregates (#86): scalars, pointers, string literals and aggregates; no
 // cleanups or exceptions, and no class parameters or results yet.
-// Ordinary calls let exceptions leave the function. A certified hosted catch-all uses
+// Ordinary calls let exceptions leave the function. A certified hosted handler uses
 // an `invoke` with explicit normal and exceptional continuations.
 export module ycxx.irgen:gen;
 
@@ -81,7 +81,8 @@ struct FunctionInput {
   std::span<const StaticGuard> guards{};
   ast::EntityId guard_acquire = ast::EntityId::none, guard_release = ast::EntityId::none;
   ast::EntityId atexit = ast::EntityId::none, dso = ast::EntityId::none;
-  bool hosted_catch_all = false;  // the native frontend has certified this occurrence
+  bool hosted_catch = false;  // the native frontend has certified this occurrence
+  std::optional<std::uint32_t> catch_int_binding{};  // local index after the handler's return has been checked
   ast::NodeId cleanup_call = ast::NodeId::none;  // the certified hosted cleanup call
   ast::EntityId constructor_cleanup = ast::EntityId::none;  // the selected union member's destructor
   UnwindCleanupChecks unwind_cleanup_checks = UnwindCleanupChecks::none;
@@ -546,7 +547,7 @@ class Gen {
     pop_scope();
   }
 
-  void hosted_catch_all(At a) {
+  void hosted_catch(At a) {
     const auto trial = get<ast::TryBlock>(a);
     const At protected_body = child(a, trial.body);
     const At normal_return = child(protected_body, ast_.children(get<ast::Compound>(protected_body).stmts).front());
@@ -575,8 +576,18 @@ class Gen {
 
     enter(exceptional);
     const ValueId exception[] = {b_.param(exceptional, 1)};
-    const ir::Ty object[] = {vty(facts_.pointer_to(handler.type))};
-    stateful(ir::Op::catch__begin, object, exception);
+    const auto binding = fn_.catch_int_binding;
+    const auto type = binding ? ast::without_cv(in_.canonical(in_.seqs.at(fn_.body.locals, *binding).type)) : handler.type;
+    const ir::Ty object[] = {vty(facts_.pointer_to(type))};
+    const auto begin = stateful(ir::Op::catch__begin, object, exception);
+    if (binding) {
+      // [except.handle]: the by-value binding only supplies this return value.
+      // Take its copy while the adjusted exception object is still alive.
+      const auto value = load({b_.result(begin, 1), type});
+      stateful(ir::Op::catch__end, {}, exception);
+      ret_(value);
+      return;
+    }
     stateful(ir::Op::catch__end, {}, exception);
     stmt(child(handler_at, handler.body));
   }
@@ -591,7 +602,7 @@ class Gen {
       for (ast::Child c : ast_.children(s.stmts)) stmt(child(a, c));
       pop_scope();
     } else if (is<ast::TryBlock>(a)) {
-      if (fn_.hosted_catch_all) hosted_catch_all(a);
+      if (fn_.hosted_catch) hosted_catch(a);
       else unsupported(a, "with a retained try block");
     } else if (is<ast::ExprStmt>(a)) {
       full_expression([&] {
