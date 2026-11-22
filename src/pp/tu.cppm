@@ -196,6 +196,8 @@ class AbiPragmas {
       auto at = u32(region_->tokens.size());
       if (!region_->first_visibility_pragma && line.size() >= 4 && name(line[2], "GCC") && name(line[3], "visibility"))
         region_->first_visibility_pragma = at;
+      if (line.size() >= 4 && name(line[2], "clang") && name(line[3], "attribute"))
+        region_->has_clang_attribute_pragma = true;
       if (line.size() < 3 || !name(line[2], "pack")) continue;
       bool before = capped_;
       change(std::span(line).subspan(3));

@@ -764,6 +764,8 @@ struct ClassRec {
   bool destructor_usable = false;          // its declaration and subobject destruction are known to be usable
   bool layout_requires_virtual_support = false;
   PeerVirtualLayout peer_virtual_layout = PeerVirtualLayout::none;
+  // The sole abstract primary base of a class admitted for plain automatic default initialization.
+  EntityId peer_automatic_primary_base = EntityId::none;
   std::vector<FieldRec> fields;        // in declaration order
   std::vector<MemberDeclRec> members;  // member functions and static data members
   std::vector<EntityId> pure_final_overriders;
