@@ -48,9 +48,9 @@ def fail(what):
 class Env:
     """A private daemon's world: a short runtime directory and a scope marked `.ycxx`."""
 
-    def __init__(self, ycxx, driver):
+    def __init__(self, ycxx, driver=None):
         self.ycxx = ycxx
-        self.driver = driver
+        self.driver = ycxx if driver is None else driver
         self.runtime = tempfile.mkdtemp(prefix='yp', dir='/tmp')  # sun_path holds 104 bytes on macOS
         os.chmod(self.runtime, 0o700)
         self.scope = Path(tempfile.mkdtemp(prefix='ycxx-process-'))
@@ -58,7 +58,8 @@ class Env:
         base = {k: v for k, v in os.environ.items() if k not in ('YCXX_DAEMON', 'YCXX_NO_DAEMON', 'YCXX_ROOT', 'YCXX_NO_WATCH')}
         base['YCXX_RUNTIME_DIR'] = self.runtime
         base['YCXX_DAEMON_IDLE_EXIT'] = '300'
-        base['YCXX_THREADS'] = '2'
+        if driver is not None:
+            base['YCXX_THREADS'] = '2'
         base['XDG_CACHE_HOME'] = str(self.scope / '.cache')  # the persistent cache, once #17 has one
         self.base = base
         self.clients = []  # every client started, killed on close
@@ -193,6 +194,13 @@ def wait_until(pred, seconds, step=0.02):
             return True
         time.sleep(step)
     return False
+
+
+def slow_source(name, value):
+    """A long-running compile fixture shared with daemon.lsp."""
+    statements = 40000
+    body = '\n'.join('  x = x + 1;' for _ in range(statements))
+    return f'int {name}() {{\n  int x = 0;\n{body}\n  return x - {statements} + {value};\n}}\n'
 
 
 def bytes_of(path):
