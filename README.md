@@ -207,6 +207,9 @@ scope with no bases and an implicit trivial destructor can first declare `T() = 
 in class and use it to initialize an `inline constexpr` tag object.
 [#157](https://github.com/yrashk/ycxx/issues/157)
 
+An ordinary class object can be destroyed explicitly through a reference or pointer with
+`object.~Class()` or `pointer->~Class()`. [#722](https://github.com/yrashk/ycxx/issues/722)
+
 In-class conversion functions can name a class type alias as their conversion target,
 including a dependent alias in a class template. A named `static_cast` can call a
 conversion function for an exact non-class value type, including ordinary `&`- and
