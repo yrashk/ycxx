@@ -4283,8 +4283,9 @@ public:
         auto value = s_->ins().intern_value(ast::VDepMember{s_->types().canonical(*s->type), n});
         return s_->literal(s_->builtin(Builtin::dependent), value, ast::ValueCategory::lvalue, begin, pos());
       }
-      return s_->scope_expr(*s, n, begin, name_at, pos(), postfix ? std::nullopt : address,
-                            member_alias_type && in_template_value_argument_ && next == 2);
+      const bool check_all_bases = in_template_value_argument_ && next == 2 &&
+          (member_alias_type || s_->scope_names_static_data_member(*s, n));
+      return s_->scope_expr(*s, n, begin, name_at, pos(), postfix ? std::nullopt : address, check_all_bases);
     };
     if (operator_name) {
       if (is(Tk::less) && s_->scope_names_template(*s, n)) {
