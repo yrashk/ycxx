@@ -5738,7 +5738,11 @@ public:
         s_->diag(init.begin, Diag::immediate_address, s_->world().entities.rec(*entity).name);
     s_->permit_constant_initializer(dbegin, s_->local(local).type, value);
     s_->static_value(local, value == ast::ConstId::none ? std::nullopt : std::optional(value));
-    return s_->node(ast::StaticVar{local, sema::Sema::at(init, dbegin), value, dtor}, dbegin, pos());
+    const QualType type = s_->types().canonical(s_->local(local).type);
+    const bool const_integral_or_enum = sema::Types::is_const(type) && !sema::Types::is_volatile(type) &&
+                                        (s_->types().is_integral(type) || s_->types().is_enum(type));
+    const bool usable = value != ast::ConstId::none && (spec.is_constexpr || const_integral_or_enum);
+    return s_->node(ast::StaticVar{local, sema::Sema::at(init, dbegin), value, dtor, usable}, dbegin, pos());
   }
 
   // A block-scope structured binding ([dcl.pre], [dcl.struct.bind]).

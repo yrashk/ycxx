@@ -1102,6 +1102,10 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   subobject path, including one-past addresses, from the constant's path and byte offset.
 - Errors say why: "not a constant expression: <the interpreter's reason>", located at the
   evaluated expression.
+- A constant evaluation can bypass a block-scope static aggregate ([expr.const], [stmt.dcl]).
+  L1 forms static addresses at their uses and checks the executed declarations for usability in
+  constant expressions. The runtime guard still initializes a static local on its first passage.
+  [#872](https://github.com/yrashk/ycxx/issues/872)
 - Tests: `tests/own/consteval` (spec-only); the draft's [dcl.constexpr]/5 ex. 3, [dcl.constinit]/3
   ex. 1 and [stmt.if]/4 ex. 3 pass.
 - Not yet (#102): naming a consteval function outside a call, static_assert
