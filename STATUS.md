@@ -1988,6 +1988,8 @@ declaration. Instantiation grants access to the class of that specialization's a
 including a cv-qualified or incomplete class, or ignores a non-class argument
 ([class.friend], [temp.friend]). The existing access checks use each specialization's own friend
 list. The declaration introduces no name into lookup.
+A type inherited from a nondependent base takes precedence over the template parameter
+([temp.local]).
 [#689](https://github.com/yrashk/ycxx/issues/689)
 
 ## Templates, ζ step 7: static data members of class templates (#88, 2026-11-18)

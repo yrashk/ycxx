@@ -4293,18 +4293,18 @@ private:
       friend_at = ps_.pos();
       ps_.bump();
     }
-    // [class.friend], [temp.friend]: a type parameter names a friend only when the
-    // specialization's argument designates a class. No name is introduced, and the
-    // friend class need not be complete at the point of substitution.
+    // [class.friend], [temp.friend]: look up and substitute the type of the friend.
+    // The designated class need not be complete here. The declaration introduces no name.
     if (friend_at && ps_.is(Tk::identifier) && ps_.kind(1) == Tk::semi) {
-      const auto* param = s_.template_param(ps_.name_of(ps_.tok()));
+      const NameId name = ps_.name_of(ps_.tok());
+      const auto* param = s_.template_param(name);
       if (param && param->kind == ast::TemplateArgKind::type && !param->pack) {
-        const auto argument = s_.bound_arg(*param);
-        const QualType type = argument ? argument->type : param->type;
+        const auto type = s_.class_template_parameter_type(*param, name, ps_.pos());
+        if (!type) return bad();
         auto& types = s_.types();
-        const EntityId entity = types.is_class(type) ? types.class_of(type) : EntityId::none;
+        const EntityId entity = types.is_class(*type) ? types.class_of(*type) : EntityId::none;
         auto sem = class_decl(entity, false);
-        sem.type = type;
+        sem.type = *type;
         sem.flags = sema::decl_flag::friend_;
         decls_.push_back(sem);
         ps_.bump();
