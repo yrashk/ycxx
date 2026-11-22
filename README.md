@@ -55,6 +55,9 @@ instantiation. Concrete constant template arguments can use braced conversions s
 Functional conversions can construct namespace-qualified class-template specializations with
 parentheses or braces, including through namespace aliases. [#697](https://github.com/yrashk/ycxx/issues/697)
 
+Class templates at namespace scope can delete their copy assignment on its first in-class
+declaration. Specializations retain the deleted overload. [#709](https://github.com/yrashk/ycxx/issues/709)
+
 C++26 reflection annotations on class heads and ordinary function declarations accept
 constant payloads and retain their types for compiler consumers.
 [#662](https://github.com/yrashk/ycxx/issues/662)

@@ -2331,6 +2331,9 @@ What the process allocates, attributed to the engine's cells, in the trace and t
   in order, and returns `*this`. Deleted copy assignments participate in overload resolution.
   [Design](docs/design/implicit-copy-assignment.md#first-declaration-defaulted-copy-assignment) ·
   [#244](https://github.com/yrashk/ycxx/issues/244)
+- Namespace-scope class templates accept a deleted copy assignment on the first in-class
+  declaration. Specializations preserve deletion and diagnose a selected deleted overload.
+  [#709](https://github.com/yrashk/ycxx/issues/709)
 
 ## Ordinary virtual declarations (#309, 2026-11-21)
 
