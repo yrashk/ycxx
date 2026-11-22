@@ -7,6 +7,7 @@ module;
 #include <signal.h>
 #include <sys/ioctl.h>
 #include <sys/select.h>
+#include <sys/wait.h>
 #include <termios.h>
 #include <unistd.h>
 export module ycxx.trace:browse;
@@ -260,6 +261,74 @@ class Terminal {
   std::optional<char> pending_;
 };
 
+// The clipboard beyond the terminal (#636). OSC 52 reaches it from anywhere a terminal supports it
+// (over SSH too), but some terminals (Terminal.app) ignore it, so a local session also runs a
+// command: `YCXX_CLIPBOARD` when set (`osc52`: none), else the first of pbcopy, wl-copy (Wayland),
+// xclip and xsel (X) on the PATH. Over SSH none runs: it would copy on the remote host.
+std::optional<std::string> clipboard_command() {
+  if (const char* c = std::getenv("YCXX_CLIPBOARD"); c && *c) {
+    if (std::string_view(c) == "osc52") return std::nullopt;
+    return std::string(c);
+  }
+  if (std::getenv("SSH_CONNECTION") || std::getenv("SSH_TTY")) return std::nullopt;
+  const auto found = [](std::string_view name) {
+    const char* path = std::getenv("PATH");
+    for (auto dir : std::string_view(path ? path : "/usr/bin:/bin") | std::views::split(':')) {
+      const std::string file = std::format("{}/{}", std::string_view(dir.begin(), dir.end()), name);
+      if (::access(file.c_str(), X_OK) == 0) return true;
+    }
+    return false;
+  };
+  const bool wayland = std::getenv("WAYLAND_DISPLAY"), x11 = std::getenv("DISPLAY");
+  if (found("pbcopy")) return "pbcopy";
+  if (wayland && found("wl-copy")) return "wl-copy";
+  if (x11 && found("xclip")) return "xclip -selection clipboard";
+  if (x11 && found("xsel")) return "xsel --clipboard --input";
+  return std::nullopt;
+}
+// Runs `command` under /bin/sh with `text` on its standard input; true if it exits 0 within 2 s.
+bool run_clipboard(const std::string& command, std::string_view text) {
+  int in[2];
+  if (::pipe(in) != 0) return false;
+  const pid_t pid = ::fork();
+  if (pid < 0) {
+    ::close(in[0]);
+    ::close(in[1]);
+    return false;
+  }
+  if (pid == 0) {
+    // Only async-signal-safe calls between fork and exec: the parent may have threads.
+    ::dup2(in[0], 0);
+    ::close(in[0]);
+    ::close(in[1]);
+    const int null = ::open("/dev/null", O_WRONLY);
+    if (null >= 0) ::dup2(null, 1), ::dup2(null, 2);
+    ::execl("/bin/sh", "sh", "-c", command.c_str(), static_cast<char*>(nullptr));
+    ::_exit(127);
+  }
+  ::close(in[0]);
+  // A command that stops reading must not kill the browser with SIGPIPE.
+  struct sigaction ignore{}, old{};
+  ignore.sa_handler = SIG_IGN;
+  ::sigaction(SIGPIPE, &ignore, &old);
+  for (std::string_view rest = text; !rest.empty();) {
+    const auto n = ::write(in[1], rest.data(), rest.size());
+    if (n < 0 && errno == EINTR) continue;
+    if (n <= 0) break;
+    rest.remove_prefix(static_cast<std::size_t>(n));
+  }
+  ::close(in[1]);
+  ::sigaction(SIGPIPE, &old, nullptr);
+  int status = 0;
+  for (int i = 0; i < 200; ++i) {
+    if (::waitpid(pid, &status, WNOHANG) == pid) return WIFEXITED(status) && WEXITSTATUS(status) == 0;
+    ::usleep(10'000);
+  }
+  ::kill(pid, SIGKILL);
+  ::waitpid(pid, &status, 0);
+  return false;
+}
+
 }  // namespace
 
 bool browse(Tree& tree, Feed* feed) {
@@ -280,7 +349,14 @@ bool browse(Tree& tree, Feed* feed) {
       case Terminal::Wake::input: break;
     }
     const auto now = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start);
-    if (b.handle(parse_input(term.read_input()), now).quit) return true;
+    const Action a = b.handle(parse_input(term.read_input()), now);
+    if (a.quit) return true;
+    if (a.copy) {
+      term.write(osc52(*a.copy, std::getenv("TMUX") != nullptr));
+      const std::optional<std::string> command = clipboard_command();
+      const bool ran = command && run_clipboard(*command, *a.copy);
+      b.note(std::format("{} (OSC 52{})", b.notice(), ran ? ", " + command->substr(0, command->find(' ')) : std::string()));
+    }
   }
 }
 

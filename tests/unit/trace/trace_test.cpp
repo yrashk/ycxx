@@ -631,6 +631,104 @@ void browser(const std::filesystem::path& golden_path, bool update) {
   if (text != want) std::println(std::cerr, "--- got:\n{}", text);
 }
 
+// Selection and copy (#636): what each way of copying puts on the clipboard, exactly.
+void copying() {
+  check(trace::base64("") == "" && trace::base64("f") == "Zg==" && trace::base64("fo") == "Zm8=" && trace::base64("foo") == "Zm9v" &&
+            trace::base64("foobar") == "Zm9vYmFy",
+        "base64 (RFC 4648's examples)");
+  check(trace::osc52("hi", false) == "\x1b]52;c;aGk=\x07", "OSC 52");
+  check(trace::osc52("hi", true) == "\x1b]52;c;aGk=\x07\x1bPtmux;\x1b\x1b]52;c;aGk=\x07\x1b\\", "and tmux's passthrough form");
+  check(trace::slice_columns("héllo", 1, 3) == "él" && trace::slice_columns("ab", 1, 9) == "b" && trace::slice_columns("ab", 5, 9).empty(),
+        "columns of a line");
+  check(trace::strip_sgr(trace::highlight("\x1b[1mabc\x1b[0mdef", 2, 4)) == "abcdef", "a highlight keeps the text");
+  check(trace::highlight("abcd", 1, 3) == "a\x1b[7mbc\x1b[27md", "and marks the columns");
+
+  trace::Tree t;
+  t.add(browser_events());
+  trace::Browser b(t);
+  b.resize(24, 120);
+  (void)b.frame();
+  using M = trace::Mouse::Act;
+  std::chrono::milliseconds clock{0};  // a second apart: no double clicks
+  const auto act = [&](std::size_t x, std::size_t y, M a) { return b.handle(click(x, y, a), clock += std::chrono::seconds(1)); };
+  const auto key = [&](std::string k) { return b.handle(trace::Key{std::move(k)}); };
+
+  // Rows: 0 Tu, 1 Pp, 2–3 FileText, 4 FunctionIr, 5 FunctionGen, 6 Codegen, 7 Optimized, 8 SourceOf;
+  // row r on screen line 3 + r.
+  (void)act(10, 4, M::press);
+  (void)act(10, 5, M::drag);
+  (void)act(10, 6, M::drag);
+  trace::Action a = act(10, 6, M::release);
+  check(a.copy == "* Pp(a.cpp) executed 190µs w1 alloc 20.0KiB, retains 5.0KiB\n"
+                  ".   FileText(a.cpp) input w1 retains 300B\n"
+                  ".   FileText(x.h) input w1 retains 200B\n",
+        std::format("a drag over three rows copies them as the stream prints them: {:?}", a.copy.value_or("(nothing)")));
+  check(trace::strip_sgr(b.frame().lines[1]).contains("copied 3 rows"), "the status line says so");
+  (void)act(10, 9, M::press);
+  a = act(10, 9, M::release);
+  check(!a.copy && b.cursor() == 6, "a click copies nothing");
+  check(!trace::strip_sgr(b.frame().lines[1]).contains("copied"), "and the note goes");
+  (void)act(10, 9, M::press);  // Codegen, whose error starts below it, and Optimized, where it starts
+  (void)act(10, 10, M::drag);
+  a = act(10, 10, M::release);
+  check(a.copy == "* Codegen(main) executed 350µs w0 alloc 500B, 1.2KiB in all, retains 100B (error below: a.cpp:2:5: error: no instruction for this)\n"
+                  "*   Optimized({1, aarch64_macos, 0}) executed 240µs w3 alloc 700B, retains 64B ← error here\n"
+                  "      error: a.cpp:2:5: error: no instruction for this\n",
+        std::format("errors copy as the stream shows them: {:?}", a.copy.value_or("(nothing)")));
+
+  // The pane: a drag over the value's text copies those columns. Its lines start at screen line 3;
+  // FunctionIr's value starts at pane line 20 (`func {`); the wheel scrolls 6 lines down.
+  (void)act(10, 7, M::press);
+  (void)act(10, 7, M::release);
+  (void)act(90, 10, M::wheel_down);
+  (void)act(90, 10, M::wheel_down);
+  (void)b.frame();
+  check(b.detail_scroll() == 6, "scrolled");
+  (void)act(73 + 3, 3 + 21 - 6, M::press);
+  (void)act(73 + 6, 3 + 22 - 6, M::drag);
+  a = act(73 + 6, 3 + 22 - 6, M::release);
+  check(a.copy == "%0 = const.i32 0\n  %1 =", std::format("a drag over the pane copies the text between its ends: {:?}", a.copy.value_or("(nothing)")));
+  check(b.focus() == trace::Focus::detail, "and gives the pane the keys");
+  // Backwards, and from the margin: the margin is never text.
+  (void)act(73 + 6, 3 + 22 - 6, M::press);
+  (void)act(72 + 1, 3 + 21 - 6, M::drag);
+  a = act(72 + 1, 3 + 21 - 6, M::release);
+  check(a.copy == "  %0 = const.i32 0\n  %1 =", std::format("backwards from the margin: {:?}", a.copy.value_or("(nothing)")));
+
+  // V in the pane: whole lines from the top one shown; j extends; y copies.
+  (void)key("V");
+  (void)key("j");
+  (void)key("j");
+  check(trace::strip_sgr(b.frame().lines[1]).contains("V: j/k extend"), "V says what it does");
+  a = key("y");
+  check(a.copy == "started  200µs\ntook     300µs\nworker   w2\n", std::format("V, j, j, y copies three lines: {:?}", a.copy.value_or("(nothing)")));
+  (void)key("V");
+  (void)key("\x1b");
+  a = key("y");
+  check(a.copy && a.copy->starts_with("FunctionIr\nsquare\n"), "Escape drops the selection: y copies the cell again");
+
+  // V in the tree; y with nothing selected copies the cell; Y its subtree.
+  (void)key("\x1b");  // the keys back to the tree
+  (void)key("V");
+  (void)key("j");
+  a = key("y");
+  check(a.copy == "* FunctionIr(square) executed 300µs w2 alloc 1000B, 3.9KiB in all, retains 300B\n"
+                  "*   FunctionGen(square) executed 190µs w2 alloc 2.9KiB\n",
+        std::format("V, j, y in the tree copies two rows: {:?}", a.copy.value_or("(nothing)")));
+  (void)key("g");
+  a = key("y");
+  check(a.copy && a.copy->starts_with("Tu\na.cpp\n\n● executed\nran, value changed\n\nstarted  0ns\ntook     900µs\nworker   w0\n"),
+        std::format("y copies the cell as the pane shows it: {:?}", a.copy.value_or("(nothing)")));
+  check(a.copy && a.copy->ends_with("memory\nalloc    4.0KiB in 128 allocations\npeak     4.0KiB\nretains  1.0KiB\nin all   29.1KiB allocated, 6.9KiB retained\n\nno value shown for this kind\n"),
+        "its memory, and that it has no value");
+  (void)key("E");  // fold everything: Y copies what is folded too
+  a = key("Y");
+  const auto lines = a.copy ? std::ranges::count(*a.copy, '\n') : 0;
+  check(lines == 10 && a.copy->starts_with("* Tu(a.cpp) executed 900µs w0 alloc 4.0KiB, 29.1KiB in all, retains 1.0KiB\n"),
+        std::format("Y copies the whole subtree, folded or not ({} lines: 9 cells and an error line)", lines));
+  check(trace::strip_sgr(b.frame().lines[1]).contains("copied the subtree (9 cells)"), "and says how much");
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -642,6 +740,7 @@ int main(int argc, char** argv) {
   golden(argv[1], update);
   input();
   browser(std::filesystem::path(argv[1]).parent_path() / "browser.golden", update);
+  copying();
   collector();
   tree();
   lines();

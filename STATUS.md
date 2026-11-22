@@ -2144,6 +2144,12 @@ request it serves.
   divider drag, sort, focus, wrap; frames against `browser.golden`); `daemon.trace_tui` (under a
   pty: modes on and off, a click, a resize, SIGTERM and SIGABRT restoring the terminal),
   mutation-checked.
+- Copy (#636): `y` copies the cell (the pane's text, unwrapped) and `Y` its subtree (stream lines
+  with times and memory). A drag over rows or pane text, or `V` with j/k, selects, and the copy
+  happens on release or `y`. `Action::copy` carries the text. `:browse` writes OSC 52 (plus
+  tmux's passthrough form) and, locally, runs `YCXX_CLIPBOARD` or the first of pbcopy, wl-copy,
+  xclip and xsel. Tests: `unit.trace` (the exact text of each way to copy, base64, OSC 52);
+  `daemon.trace_tui` (`y` and a row drag through OSC 52 and the command).
 - Not yet: the analysed tree as a value, and stages linked to source (#254); per-resumption
   spans, so a frame's waits are not drawn as work (#255).
 

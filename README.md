@@ -373,7 +373,9 @@ message is shown up to the root. Diagnostic details include the file, line and c
 available. `--trace-engine=interactive` opens a browser of the trace after the compile: a tree
 with each function's IR and assembly, a timeline of the pool's workers, and filters. It follows
 the terminal's size and takes the mouse: click to select, fold and sort by a column, use the
-wheel to scroll, and drag to resize the pane ([docs/TRACE.md](docs/TRACE.md#the-interactive-browser)).
+wheel to scroll, and drag to resize the pane. It copies a cell, a subtree, selected rows or any
+selected text of the IR and instructions to the clipboard, over SSH too
+([docs/TRACE.md](docs/TRACE.md#the-interactive-browser)).
 `--trace-engine=json` writes the whole trace as JSON Lines, for tools and agents.
 `ycxx cxx --watch` stays attached and builds again whenever a file the build read changes,
 headers included; with `--trace-engine` each rebuild shows what it re-ran, and
