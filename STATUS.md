@@ -1307,13 +1307,14 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   destructors on every scope exit from its own scope stack (block end, `return`, `break`,
   `continue`) and ends a full-expression's temporaries at its end. Statements carry no cleanup
   lists; the `Cleanup` record is gone.
-- Linux x86-64 emits `C2`/`D2` alongside eligible written, out-of-line `C1`/`D1` definitions.
+- Both native targets emit `C2`/`D2` alongside eligible written, out-of-line `C1`/`D1` definitions
+  (on Mach-O, a second symbol at the same address).
   An ordinary, externally linked, nonpolymorphic class with no bases and only supported
   scalar fields uses one machine body and ELF range for each pair. Named signature types
   must have known layout and linkage. Callback signatures and class parameters passed by
   value are outside this scope. GCC and Clang peers check the raw entry names, an adjusted
   base pointer, and construction and destruction order.
-- Linux x86-64 can define the out-of-line virtual destructor of an ordinary fieldless,
+- Both native targets can define the out-of-line virtual destructor of an ordinary fieldless,
   baseless root when the first public virtual is a peer-defined non-inline `int()` key
   function and the second is the public destructor. Both declarations and the destructor
   definition use bare `noexcept`. The `D1` and `D2` entries share a body that restores
@@ -1755,6 +1756,13 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   qualifiers ([expr.call], [expr.type]). The tests in `tests/own/call-result-cv/` cover
   `decltype`, overload selection, and the existing adjustments for scalar and reference
   results.
+
+## Scalar branch temporaries (#902)
+
+- Scalar logical and conditional expressions carry each selected reference-argument temporary
+  to the end of its full-expression ([class.temporary], [expr.log.and], [expr.log.or], [expr.cond]).
+  Both the interpreter and native code use the L1 join with nullable temporary addresses. Conditional
+  nontrivial destruction and reference lifetime extension remain under [#157](https://github.com/yrashk/ycxx/issues/157).
 
 ## Local class prvalue selection (#740)
 
@@ -2850,6 +2858,16 @@ What the process allocates, attributed to the engine's cells, in the trace and t
   conditional evaluation, the consumer ELF symbols and cold/resident output across edits.
   [Itanium call ABI](https://itanium-cxx-abi.github.io/cxx-abi/abi.html#vcall.caller) ·
   [#309](https://github.com/yrashk/ycxx/issues/309) · [#659](https://github.com/yrashk/ycxx/issues/659)
+- arm64 macOS has each of the virtual shapes above that Linux x86-64 has, with the same
+  front end checks and the same lowering: calls on peer-owned roots, primary bases and pure
+  interfaces, the non-key member, automatic roots and derived objects, and the key-owned root
+  and derived tables with their RTTI. The Mach-O producer writes `__ZTV` and `__ZTI` to
+  `__DATA,__const` and the weak `__ZTS` to `__TEXT,__const`. The base class's descriptor and name,
+  which every user emits, follow Apple's arm64 convention for non-unique RTTI: weak private
+  external, with bit 63 set in the descriptor's name pointer so `type_info` compares them by
+  content across images. ycxx's Mach-O linker carries such a pointer's top byte in the chained
+  rebase's `high8`. `unit.darwin_virtual` links the linux_* virtual fixtures with Clang peers,
+  by ycxx's linker and the system linker. [#650](https://github.com/yrashk/ycxx/issues/650)
 - Broader construction and table emission, pure-slot signatures and covariant returns remain in
   #309. Pure declarations and `final` for virtual destructors and assignment
   operators also remain there. Checking `operator=` includes matching implicitly declared copy
