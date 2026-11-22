@@ -5129,7 +5129,9 @@ public:
       parameters.reserve(1 + fr.params.size());
       parameters.push_back(o.type());
       parameters.append_range(fr.params);
-      const auto pointer = types().pointer(types().function(fr.inner, parameters, false, LangLinkage::cxx));
+      // The pure dispatch profile certifies a nonthrowing prototype for initializer selection.
+      const auto pointer = types().pointer(types().function(fr.inner, parameters, false, LangLinkage::cxx,
+                                                            Cv::none, ast::RefQual::none, d->is_pure && fr.fn_noexcept));
       return node(ast::VirtualMemberCall{info, pointer, *virtual_slot, at(o, begin), b_->list(*children)}, begin, end, info);
     }
     return node(ast::MemberCall{info, fe, at(o, begin), b_->list(*children)}, begin, end, info);
