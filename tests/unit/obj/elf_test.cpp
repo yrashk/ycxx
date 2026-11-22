@@ -218,6 +218,114 @@ void rtti_name_group() {
         "unrelated object bytes are outside the RTTI name group");
 }
 
+void rtti_data_group() {
+  constexpr auto signature = "_ZTI1B";
+  constexpr auto type_vtable = "_ZTVN10__cxxabiv117__class_type_infoE";
+  constexpr auto type_name = "_ZTS1B";
+  obj::object input;
+  input.name = "rtti-data.o";
+  input.arch = obj::target::x86_64_linux;
+  const auto member = input.add_section(obj::standard_section::data_const);
+  const auto table = input.reference(type_vtable);
+  const auto descriptor = input.define(signature, obj::binding::global, member);
+  const auto name = input.reference(type_name);
+  input.symbols[descriptor].weak = true;
+  input.symbols[descriptor].object_size = 16;
+  auto& data = input.sections[member];
+  data.align(3);
+  data.emit64(0);
+  data.relocate(obj::reloc_kind::abs64, table, 16);
+  data.emit64(0);
+  data.relocate(obj::reloc_kind::abs64, name);
+  input.comdat_groups.push_back({signature, {member}});
+
+  const auto file = obj::elf::write_object(input);
+  check(file.has_value(), file ? "write relocatable RTTI COMDAT" : file.error());
+  if (!file) return;
+  const auto read = obj::elf::read_object(*file, input.name);
+  check(read && *read == input, "round-trip the RTTI COMDAT and its two named relocations");
+
+  const auto contains = [&](std::uint64_t start, std::uint64_t size) {
+    return start <= file->size() && size <= file->size() - start;
+  };
+  if (!contains(0, 64)) return check(false, "relocatable RTTI ELF header fits the file");
+  const auto shoff = field(*file, 40, 8);
+  const auto shnum = field(*file, 60, 2);
+  if (field(*file, 58, 2) != 64 || !contains(shoff, shnum * 64))
+    return check(false, "relocatable RTTI section headers fit the file");
+  const auto shdr = [&](std::uint64_t index, std::uint64_t offset, std::uint64_t width) {
+    return field(*file, shoff + index * 64 + offset, width);
+  };
+  const auto string_at = [&](std::uint64_t section, std::uint64_t index) -> std::string_view {
+    if (section == 0 || section >= shnum || shdr(section, 4, 4) != 3) return {};
+    const auto start = shdr(section, 24, 8);
+    const auto size = shdr(section, 32, 8);
+    if (!contains(start, size) || index >= size) return {};
+    const std::string_view tail(reinterpret_cast<const char*>(file->data() + start + index), size - index);
+    const auto end = tail.find('\0');
+    return end == tail.npos ? std::string_view{} : tail.substr(0, end);
+  };
+
+  std::uint64_t group = 0, payload = 0, rela = 0;
+  const auto section_names = field(*file, 62, 2);
+  for (std::uint64_t i = 1; i < shnum; ++i) {
+    if (shdr(i, 4, 4) == 17) {
+      check(group == 0, "one relocatable RTTI SHT_GROUP");
+      group = i;
+    }
+    const auto section_name = string_at(section_names, shdr(i, 0, 4));
+    if (section_name == ".data.rel.ro") payload = i;
+    if (section_name == ".rela.data.rel.ro") rela = i;
+  }
+  if (group == 0 || payload <= group || rela <= group)
+    return check(false, "RTTI group header precedes both named members");
+  const auto group_offset = shdr(group, 24, 8);
+  const auto symtab = shdr(group, 40, 4);
+  if (!contains(group_offset, 12) || symtab == 0 || symtab >= shnum || shdr(symtab, 4, 4) != 2)
+    return check(false, "RTTI group data and linked SHT_SYMTAB are present");
+  const auto first = field(*file, group_offset + 4, 4);
+  const auto second = field(*file, group_offset + 8, 4);
+  check(shdr(group, 8, 8) == 0 && shdr(group, 32, 8) == 12 && shdr(group, 56, 8) == 4 &&
+        field(*file, group_offset, 4) == 1 &&
+        ((first == payload && second == rela) || (first == rela && second == payload)),
+        "GRP_COMDAT lists exactly the payload and relocation section indexes");
+  check(shdr(payload, 4, 4) == 1 && shdr(payload, 8, 8) == 0x203 && shdr(payload, 32, 8) == 16,
+        "16-byte RTTI payload uses SHT_PROGBITS and SHF_WRITE, SHF_ALLOC and SHF_GROUP");
+  check(shdr(rela, 4, 4) == 4 && (shdr(rela, 8, 8) & 0x200) != 0 &&
+        shdr(rela, 40, 4) == symtab && shdr(rela, 44, 4) == payload && shdr(rela, 56, 8) == 24,
+        "grouped SHT_RELA links to the symbol table and identifies the RTTI payload");
+
+  const auto symbols = shdr(symtab, 24, 8);
+  const auto symbol_bytes = shdr(symtab, 32, 8);
+  const auto symbol_names = shdr(symtab, 40, 4);
+  const auto signature_index = shdr(group, 44, 4);
+  if (!contains(symbols, symbol_bytes) || shdr(symtab, 56, 8) != 24 || signature_index >= symbol_bytes / 24)
+    return check(false, "RTTI signature index is in the symbol table");
+  const auto symbol_name = [&](std::uint64_t index) -> std::string_view {
+    if (index >= symbol_bytes / 24) return {};
+    return string_at(symbol_names, field(*file, symbols + index * 24, 4));
+  };
+  const auto symbol = symbols + signature_index * 24;
+  check(symbol_name(signature_index) == signature && field(*file, symbol + 4, 1) == 0x21 &&
+        field(*file, symbol + 5, 1) == 0 && field(*file, symbol + 6, 2) == payload &&
+        field(*file, symbol + 8, 8) == 0 && field(*file, symbol + 16, 8) == 16,
+        "sh_info identifies the weak default-visible RTTI object defined in the grouped payload");
+
+  const auto entries = shdr(rela, 24, 8);
+  if (shdr(rela, 32, 8) != 48 || !contains(entries, 48))
+    return check(false, "RTTI payload has exactly two RELA records");
+  const auto has_abs64 = [&](std::uint64_t offset, std::string_view target, std::uint64_t addend) {
+    for (std::uint64_t entry : {entries, entries + 24}) {
+      const auto info = field(*file, entry + 8, 8);
+      if (field(*file, entry, 8) == offset && (info & 0xffffffff) == 1 &&
+          symbol_name(info >> 32) == target && field(*file, entry + 16, 8) == addend) return true;
+    }
+    return false;
+  };
+  check(has_abs64(0, type_vtable, 16) && has_abs64(8, type_name, 0),
+        "RTTI RELA records preserve both R_X86_64_64 targets, offsets and addends");
+}
+
 void read_fixture(const obj::object& input, std::span<const std::uint8_t> file) {
   auto read = obj::elf::read_object(file, "read.o");
   check(read.has_value(), read ? "read ELF fixture" : read.error());
@@ -662,6 +770,7 @@ int main(int argc, char** argv) {
   read_shared_names();
   read_function_symbols();
   rtti_name_group();
+  rtti_data_group();
   read_init_array();
   read_gnu_marker();
 
