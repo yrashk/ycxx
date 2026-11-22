@@ -150,6 +150,12 @@ can be delegated only with the permitted rights and scope. Type constraints can 
 subset. An adapter and its underlying system enforce instance-specific restrictions. Runtime
 handlers can supply scoped effect implementations and enforce limits on those calls.
 
+The portable package provides `token<Issuer, Granted>`, with the issuer as the only constructor
+from a scope identifier. The `grants<Granted, Required>` constraint checks the rights subset.
+The `require<Required>(scope)` operation also checks the numeric scope in the issuer's domain and
+the affine live state. Each issuer controls authorization and assigns stable identifiers to its
+mediated resources. Moving or releasing a token invalidates that token. [Package guide](../../packages/ycxx-policies/README.md#scoped-capabilities)
+
 In YCXX, give functions declared upper bounds on their possible effects. Verify the body against
 its bound, compose callee summaries, and carry callback effects through generic combinators. An
 indirect call needs a verified bound for its targets. An external function's effects come from a

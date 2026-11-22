@@ -701,6 +701,9 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
   definitions in explicit input objects.
   Flat local aggregates track registered owners in distinct fields. Field initialization,
   borrowing, transfer, and consumption use the same checks as individual named resources.
+  The standalone C++20 package also provides move-only issuer-scoped capability tokens with
+  rights constraints and runtime scope checks. Native YCXX use of these tokens depends on
+  [dependent type friends #689](https://github.com/yrashk/ycxx/issues/689).
   Execution leaving the scope of a live transaction or reaching a possible unwind is diagnosed.
   See [the protocols and examples](docs/design/policies-ownership.md).
 - `tests/features/ycxx.txt` lists `syntax` and `run darwin-arm64`: a feature can be limited to

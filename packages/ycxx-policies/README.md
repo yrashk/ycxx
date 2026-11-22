@@ -1,9 +1,8 @@
 # YCXX Policies
 
-YCXX Policies is a standalone C++20 header library for resource ownership, capabilities, and
-effects. The ownership component is available today. GCC and Clang enforce the ordinary C++ type
-rules and run the same adapter guards used by YCXX. YCXX can additionally verify declared
-ownership policies when `-fcheck-policies` is enabled.
+YCXX Policies is a standalone C++20 header library with ownership guards and scoped capability
+tokens. GCC and Clang enforce the ordinary C++ type rules and execute the guards. YCXX can
+additionally verify declared ownership policies when `-fcheck-policies` is enabled.
 
 ## Use with GCC or Clang
 
@@ -59,3 +58,43 @@ scalar storage. For separate builds, include the contract in the caller and prov
 `-fcheck-policies` when compiling each object and at the final YCXX link. The checked link
 supports explicit objects and direct calls to unique strong definitions. GCC and Clang accept
 the metadata as ordinary C++20 types.
+
+## Scoped capabilities
+
+Include `<ycxx/capabilities.hpp>` and choose an issuer type, a bit for each right, and stable
+resource identifiers within the issuer's domain. Only the issuer can construct
+`token<Issuer, Granted>` from a scope identifier. Its grants should come from your application's
+authorization logic. Use identifiers that cannot be reassigned while a token for the old
+resource is live. Instances of the same issuer type share the scope identifier space.
+
+Use `grants<Granted, Required>` to constrain an adapter's interface. Call
+`authority.template require<Required>(scope)` before accessing the resource. That operation
+requires the rights at compile time and checks the scope and the token's live state at runtime.
+
+```cpp
+#include <ycxx/capabilities.hpp>
+
+namespace caps = ycxx::capabilities;
+
+class Store {
+  static constexpr caps::rights_mask write_right = 2;
+  inline static int cells_[2]{};
+
+  // Issuance belongs to the application's trusted authorization path.
+  static caps::token<Store, write_right> issue_primary_writer() noexcept {
+    return {1};
+  }
+
+ public:
+  template<caps::rights_mask Granted> requires caps::grants<Granted, write_right>
+  static void write(const caps::token<Store, Granted>& authority, caps::scope_id scope, int value) noexcept {
+    authority.template require<write_right>(scope);
+    cells_[scope - 1] = value;
+  }
+};
+```
+
+Tokens are move-only. Moving invalidates the source. Calling `release()` invalidates the
+held token before it goes out of scope. Operation guards terminate on a wrong scope, a
+moved-from token, or a released token. GCC and Clang support this API. Native YCXX instantiation
+depends on dependent type friendship. [Compiler prerequisite #689](https://github.com/yrashk/ycxx/issues/689)

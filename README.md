@@ -77,7 +77,7 @@ instead of Debug's 5.3 s on an M-series Mac ([#726](https://github.com/yrashk/yc
 build. The [prototype](docs/design/policies-ownership.md) checks registered resource policies
 across branches and loops. Applications can combine reusable C++ policy fragments. The
 standalone [YCXX Policies package](packages/ycxx-policies/README.md) provides portable runtime
-guards for GCC and Clang builds.
+ownership guards and scoped capability tokens for GCC and Clang builds.
 
 Single-expression `auto(x)` and `auto{x}` perform scalar and pointer decay-copy, including
 array and function decay. Non-type template parameters can have enumeration types
