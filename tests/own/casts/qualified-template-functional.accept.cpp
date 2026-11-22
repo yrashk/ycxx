@@ -1,17 +1,14 @@
-// Functional conversions of namespace-qualified class and alias template-ids ([expr.type.conv]).
-namespace Effects {
-template<class T> struct Tag {};
-template<class T> using TagAlias = Tag<T>;
-template<class T> constexpr int function() { return sizeof(T); }
-template<class T> constexpr int variable = sizeof(T);
+// Functional conversions of namespace-qualified template-ids ([expr.type.conv]).
+namespace source {
+template<class> struct Box {};
+template<class T> constexpr T twice(T v) { return v + v; }
+template<class T> inline constexpr T seed = 6;
 }
+namespace alias = source;
 
-namespace Alias = Effects;
-auto direct = Effects::Tag<int>{};
-auto through_alias = Alias::Tag<int>{};
-static_assert(__is_same(decltype(direct), Effects::Tag<int>));
-static_assert(__is_same(decltype(through_alias), decltype(::Effects::Tag<int>())));
-static_assert(__is_same(decltype(Alias::TagAlias<int>{}), Effects::Tag<int>));
-static_assert(__is_same(decltype(Effects::Tag<Alias::Tag<int>>{}), Effects::Tag<Effects::Tag<int>>));
-static_assert(Effects::function<int>() == sizeof(int));
-static_assert(Alias::variable<int> == sizeof(int));
+auto direct_braces = source::Box<int>{};
+auto direct_parentheses = source::Box<int>();
+auto alias_braces = alias::Box<int>{};
+auto alias_parentheses = alias::Box<int>();
+static_assert(alias::twice<int>(5) == 10);
+static_assert(alias::seed<int> + 1 == 7);
