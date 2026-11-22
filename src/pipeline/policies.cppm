@@ -859,7 +859,7 @@ struct OwnershipRegistryFor {
       for (const auto& def : unit.functions) {
         const auto operation = ownership_operation(world, def.entity, units[i]);
         if (registry.policy.effect(operation) != Effect::verified_observe) continue;
-        const bool strong = !def.weak_elf && !(def.decl.flags & (sema::decl_flag::inline_ | sema::decl_flag::constexpr_));
+        const bool strong = !def.coalesced && !(def.decl.flags & (sema::decl_flag::inline_ | sema::decl_flag::constexpr_));
         const bool supported = def.body.tree != ast::NodeId::none && def.decl.contracts == ast::NodeId::none &&
                                (operation.second || strong);
         const auto [it, fresh] = definitions.try_emplace(operation, supported);
