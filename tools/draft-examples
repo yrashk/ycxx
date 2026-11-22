@@ -446,7 +446,7 @@ INITIALIZER_GAP = re.compile(
     r'(?:/\*(?P<comment>(?:(?!\*/).)*)\*/\s*)?;\s*')
 INITIALIZER_PLACEHOLDER = re.compile(r'\s*some\s+(?:[\w-]+\s+)*expression\b', re.I)
 INITIALIZER_ERROR = re.compile(
-    r"expected (?:expression|primary-expression (?:at end of input|before ';' token))")
+    r"expected (?:expression|primary-expression (?:at end of input|before (?:';'|‘;’) token))")
 
 
 def verdict(ex, status, lines):
