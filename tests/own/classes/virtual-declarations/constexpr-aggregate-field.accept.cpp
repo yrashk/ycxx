@@ -1,4 +1,3 @@
-// XFAIL: ycxx #25 constant evaluation of aggregate field access
 struct Aggregate {
     int value;
 };
