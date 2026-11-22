@@ -457,6 +457,17 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
 
 ## Evidence and tests
 
+- **Map a header chain past its first wall with an overlay, and check both gates.** Every
+  header on `<iostream>`'s path stopped at one line of `move.hpp`, which showed nothing behind it.
+  - Do: copy only the blocking libycxx file into a scratch directory, stub the construct there,
+    and put that directory first with `-isystem`. A copy of the whole include tree breaks
+    `#include_next`.
+  - Do: run `-c` as well as `-fsyntax-only`. The mangler runs only for objects, so the first
+    `-c` error (#773) never showed in a syntax sweep.
+  - Do: reduce each wall to a header-free example and check it with Clang and GCC before filing.
+    Clang and GCC disagreed on the mangling there (#777), which made it a decision, not a fix.
+  - Learned on #776.
+
 - **A feature probe must use nothing but the feature.** On #282, 40 of the first 150 probes failed
   on something else: `auto` to hold a lambda, a nested `struct`, a default argument, `alignas`.
   Each would have filed the wrong status and the wrong failing example.
