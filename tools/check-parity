@@ -3,10 +3,9 @@
 
   - an L2 operation (src/ir/l2.cppm) is handled by one back end and not the other, unless
     tools/parity/l2-gaps.tsv lists it for that back end with its parity issue;
-  - an operation listed there is now handled, so the entry must go;
-  - a tests/own run test is limited to one target (REQUIRES: darwin or linux) without a
-    `// PARITY:` line naming its parity issue (#N), or saying why the test is inherently
-    target-specific (`// PARITY: target-specific: <reason>`).
+  - an operation listed there is now handled, so the entry must go.
+
+Tests limited to one target carry a `PARITY:` line, which tools/check-os-gates checks (#659).
 
 Text checks only: no compiler needed, so it runs in the policy stage.
 """
@@ -83,24 +82,10 @@ def check_ops(root, bad):
             bad.append(f'tools/parity/l2-gaps.tsv: `{op}` is not an L2 operation')
 
 
-def check_tests(root, bad):
-    for path in sorted((root / 'tests/own').rglob('*.run.cpp')):
-        head = path.read_text(errors='replace').splitlines()[:40]
-        gated = [l for l in head if re.match(r'//\s*REQUIRES:.*\b(darwin|linux)\b', l)]
-        if not gated:
-            continue
-        parity = [l for l in head if re.match(r'//\s*PARITY:', l)]
-        if not any(re.match(r'//\s*PARITY:\s*(#\d+|target-specific:\s*\S)', l) for l in parity):
-            bad.append(f'{path.relative_to(root)}: a run test limited to one target needs '
-                       f'`// PARITY: #<issue>` (the gap on the other target) or '
-                       f'`// PARITY: target-specific: <reason>`')
-
-
 def main():
     root = Path(sys.argv[1]) if len(sys.argv) > 1 else ROOT
     bad = []
     check_ops(root, bad)
-    check_tests(root, bad)
     for b in bad:
         print(f'check-parity: {b}', file=sys.stderr)
     return 1 if bad else 0

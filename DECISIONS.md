@@ -553,9 +553,8 @@ project must survive any session ending.
     - `tools/check-parity` (policy stage) fails when an L2 operation is handled by one back end
       only and `tools/parity/l2-gaps.tsv` does not name its issue, or when a listed operation is
       now handled.
-    - A run test limited to one target (`REQUIRES: darwin` or `linux`) carries
-      `// PARITY: #N`, the gap on the other target, or `// PARITY: target-specific: <reason>`
-      for what only exists on one target (Apple's `va_list`, the Mach-O symbol prefix).
+    - A test limited to one target carries `PARITY:` with the other target's gap or the
+      design reason, as `tools/check-os-gates` requires for OS gates (#659).
     - A PR that adds a feature to one back end only files the other's gap and adds its row.
     - *Reason:* a gap that is recorded where the change is made is cheap to keep; a gap found
       later costs a survey.

@@ -120,9 +120,6 @@ or reject test with any warning marker must get warnings exactly at its warning 
 **Directives** (`// KEY: value` lines):
 
 - `REQUIRES: syntax run darwin` — features of the compiler under test, or a platform.
-- `PARITY: #N` or `PARITY: target-specific: <reason>` — required on a run test limited to
-  `darwin` or `linux`: the issue of the gap on the other target, or why the test only means
-  something on one (DECISIONS §6.10, checked by `tools/check-parity`). The driver ignores it.
 - `XFAIL: ycxx,gcc <reason>` (or `*`) — expected to fail with that compiler: reported XFAIL; a
   pass is XPASS, which fails the run, so the mark goes when the cause does.
 - `FLAGS: -O2`, `TIMEOUT: 120` (seconds per command), `TIER: nightly`.

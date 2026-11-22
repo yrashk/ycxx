@@ -2,7 +2,6 @@
 // arm/_types.h makes `__darwin_va_list` (docs/EXTENSIONS.md): `char*` in Apple's arm64 ABI. A
 // declaration of the same name hides it.
 // REQUIRES: darwin
-// PARITY: target-specific: Apple arm64 names `char*` as its va_list
 // EXIT: 0
 typedef __builtin_va_list darwin_va_list;
 static_assert(__is_same(darwin_va_list, char*));
