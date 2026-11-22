@@ -2257,8 +2257,8 @@ std = 'C++11'
 ftm = '__cpp_noexcept_function_type'
 detect = '\bnoexcept\b'
 status = 'partial'
-issues = [219, 729, 713]
-note = 'Ordinary function pointers and references preserve concrete noexcept type identity. The unary operator checks calls and constructions. Dependent exception specifications remain open.'
+issues = [219, 729, 713, 854]
+note = 'Ordinary function pointers and references preserve concrete noexcept type identity. The unary operator checks calls, constructions, and the selected ordinary array allocation. Dependent exception specifications remain open.'
 probe = '''
 void f() noexcept {} void g() {}
 int main() { void (*p)() noexcept = f; return (noexcept(f()) && !noexcept(g()) && p) ? 0 : 1; }
