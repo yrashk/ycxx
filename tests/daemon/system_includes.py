@@ -42,7 +42,11 @@ def sources_without_sdk(world):
         check(world, scope, LINUX, 'glibc.cpp')
         world.same_daemon('native and foreign targets', pid)
     elif sys.platform == 'darwin':
-        (scope / 'darwin.cpp').write_text('#include <TargetConditionals.h>\nstatic_assert(TARGET_OS_OSX);\n')
+        (scope / 'darwin.cpp').write_text('''\
+#if !__has_include(<TargetConditionals.h>)
+#error configured Darwin SDK header was not found
+#endif
+''')
         check(world, scope, DARWIN, 'darwin.cpp')
 
 
