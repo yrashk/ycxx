@@ -1,8 +1,8 @@
 // #773: function templates whose signatures hold a value-dependent template argument, mangled
 // `X <expression> E` (Itanium C++ ABI §5.1.6): a dependent variable-template-id is its
 // <source-name> and <template-args>, `!e` is `nt e`. The Clang peer only declares the templates,
-// so its calls link against the specializations this object defines. Variable templates of the
-// global namespace and of ::std, named without `::`, where Clang and GCC agree (#777).
+// so its calls link against the specializations this object defines. Only forms where Clang and
+// GCC agree: every argument written, no pack, global or unqualified inside ::std (#777).
 // PEER: dependent-template-args-peer.cpp
 // EXIT: 0
 template<bool B, class T, class F> struct cond { using type = T; };

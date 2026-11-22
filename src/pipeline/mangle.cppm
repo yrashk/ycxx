@@ -615,11 +615,11 @@ class Mangler {
   //   <source-name> and <template-args>, `3a_vIT_E`. Neither is a substitution candidate; the
   //   arguments' own types are.
   // - `!e` is `nt <expression>`.
-  // Clang and GCC agree on these for a variable template of the global namespace or of ::std
-  // (also through an inline namespace such as std::__y1) named without a leading `::`. For one in
-  // another namespace Clang adds `sr <namespaces> E`, and `gs` for a leading `::`, depending on
-  // how the name was written; GCC writes the <source-name> alone. Until #777 decides, ycxx writes
-  // GCC's form, which is also what the GCC-built libycxx.a has.
+  // Clang and GCC agree on these for a variable template of the global namespace, or one named
+  // unqualified inside ::std (also through std::__y1), when every argument is written and none is
+  // a pack. Otherwise they differ: Clang mangles the name and the arguments as written (`sr …E`,
+  // `gs`, no defaults, no `J…E`), GCC the <source-name> and the converted arguments. Until #777
+  // decides, ycxx writes GCC's form, which is also what the GCC-built libycxx.a has.
   std::expected<std::string, std::string> expression(ast::ConstId v) {
     if (in_.values.is<ast::VDepVariable>(v)) {
       const ast::VDepVariable& d = in_.values.get<ast::VDepVariable>(v);
