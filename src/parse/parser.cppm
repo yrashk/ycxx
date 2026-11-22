@@ -3713,9 +3713,8 @@ public:
           return {NodeId::none, e.begin, pos()};
         }
         std::optional<NameId> member_class;
-        // This stage recognizes only a direct qualified invocation on the Linux consumer path.
-        if (qualifier == 2 && !keyword && kind(2) == Tk::identifier && kind(3) == Tk::l_paren &&
-            s_->types().target().triple == ast::x86_64_linux.triple) {
+        // This stage recognizes only a direct qualified invocation on the native consumer path.
+        if (qualifier == 2 && !keyword && kind(2) == Tk::identifier && kind(3) == Tk::l_paren) {
           member_class = name_of(tok());
           bump();
           bump();

@@ -43,10 +43,16 @@ if(APPLE AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(arm64|aarch64)$" AND NOT CMAKE_CR
   # libycxx's runtime in a default link, and -nostdlib++ without it (#842).
   add_test(NAME unit.darwin_runtime
     COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/darwin_runtime.py $<TARGET_FILE:ycxxc> ${YCXXC_NM})
+  # The Mach-O counterpart of the linux_* virtual tests, over their fixtures (#650). Its peers
+  # are Clang's, whose libc++ and RTTI conventions are the platform's C++ ABI.
+  find_program(YCXXC_CLANGXX NAMES clang++ REQUIRED)
+  add_test(NAME unit.darwin_virtual
+    COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/darwin_virtual.py
+            $<TARGET_FILE:ycxxc> ${YCXXC_CLANGXX} ${YCXXC_NM})
 endif()
-# PARITY: #647, #649, #650 for the Darwin counterparts of unit.linux_variadic_definitions,
-# unit.linux_array_delete and unit.linux_virtual_consumer; the rest by design: they run x86-64
-# ELF executables, which only Linux can
+# PARITY: #647, #649 for the Darwin counterparts of unit.linux_variadic_definitions and
+# unit.linux_array_delete; the rest by design: they run x86-64 ELF executables, which only Linux
+# can. unit.darwin_virtual runs the virtual tests' fixtures on Mach-O (#650).
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$"
    AND NOT CMAKE_CROSSCOMPILING)
   add_test(NAME unit.linux_compile
@@ -92,7 +98,6 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_
   add_test(NAME unit.linux_peer_derived_default_construction
     COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/linux_peer_derived_default_construction.py
             $<TARGET_FILE:ycxxc> ${CMAKE_CXX_COMPILER} ${CMAKE_READELF})
-  # PARITY: #650 for the Darwin owned derived virtual table and RTTI counterpart.
   add_test(NAME unit.linux_owned_derived_vtable
     COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/linux_owned_derived_vtable.py
             $<TARGET_FILE:ycxxc> ${CMAKE_CXX_COMPILER} ${CMAKE_LINKER})

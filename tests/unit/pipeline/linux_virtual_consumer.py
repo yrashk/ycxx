@@ -146,12 +146,11 @@ def main():
         def compile(target, *args, env=cold, error=None):
             return run([ycxx, 'cxx', target, *args], scope, env, error)
 
-        compile(linux, '-fsyntax-only', 'consumer.cpp')
-        compile(darwin, '-fsyntax-only', 'consumer.cpp',
-                error='a call to a virtual member function is not supported yet')
-        compile(darwin, '-c', 'consumer.cpp', '-o', 'darwin.o',
-                error='a call to a virtual member function is not supported yet')
-        assert not (scope / 'darwin.o').exists()
+        # Darwin accepts what Linux does; unit.darwin_virtual links and runs it there (#650).
+        for target in (linux, darwin):
+            compile(target, '-fsyntax-only', 'consumer.cpp')
+        compile(darwin, '-c', 'consumer.cpp', '-o', 'darwin.o')
+        assert (scope / 'darwin.o').is_file()
 
         root = 'struct B { virtual int read(int); };\n'
         (scope / 'type-only.cpp').write_text(root + 'B* identity(B* object) { return object; }\n')
@@ -159,17 +158,16 @@ def main():
         assert (scope / 'type-only.o').is_file()
         layout_error = 'object layout requiring virtual function support'
         (scope / 'opaque-size.cpp').write_text(root + 'constexpr auto size = sizeof(B);\n')
-        compile(linux, '-fsyntax-only', 'opaque-size.cpp')
-        compile(darwin, '-fsyntax-only', 'opaque-size.cpp', error=layout_error)
+        for target in (linux, darwin):
+            compile(target, '-fsyntax-only', 'opaque-size.cpp')
         scalar = 'struct B { virtual int read(int); unsigned int word; };\n'
         (scope / 'inherited.cpp').write_text(
             scalar + 'struct D : B {}; unsigned int read(D* object) { return object->word; }\n')
-        compile(linux, '-fsyntax-only', 'inherited.cpp')
-        compile(linux, '-c', 'inherited.cpp', '-o', 'inherited.o')
-        assert (scope / 'inherited.o').is_file()
-        compile(darwin, '-fsyntax-only', 'inherited.cpp', error=layout_error)
-        compile(darwin, '-c', 'inherited.cpp', '-o', 'inherited-darwin.o', error=layout_error)
-        assert not (scope / 'inherited-darwin.o').exists()
+        for target in (linux, darwin):
+            compile(target, '-fsyntax-only', 'inherited.cpp')
+            compile(target, '-c', 'inherited.cpp', '-o', 'inherited.o')
+            assert (scope / 'inherited.o').is_file()
+            (scope / 'inherited.o').unlink()
 
         native_virtual_error = 'native output for a translation unit with virtual member functions is not supported yet'
         virtual_definition_error = 'an out-of-class definition of a virtual member function is not supported yet'
@@ -256,18 +254,17 @@ def main():
         for target, source, diagnostic in (
             (linux, 'nonkey/controls/inline.cpp', virtual_definition_error),
             (linux, 'nonkey/controls/in-class.cpp', native_virtual_error),
-            (darwin, 'nonkey/controls/lifetime.cpp', layout_error),
             (linux, 'nonkey/late-key.cpp', native_virtual_error),
             (linux, 'nonkey/extra.cpp', native_virtual_error),
             (linux, 'nonkey/exception-mismatch.cpp', "conflicting declaration of 'measure'"),
             (linux, 'nonkey/exception-parameter-definition.cpp', virtual_definition_error),
             (linux, 'nonkey/exception-parameter-declaration.cpp', virtual_definition_error),
             (linux, 'nonkey/inline-friend.cpp', "'friend' is not supported yet"),
-            (darwin, 'nonkey/measure.cpp', virtual_definition_error),
         ):
             compile(target, '-c', source, '-o', 'nonkey-guard.o', error=diagnostic)
             assert not (scope / 'nonkey-guard.o').exists()
-        compile(darwin, '-fsyntax-only', 'nonkey/measure.cpp', error=virtual_definition_error)
+        compile(darwin, '-c', 'nonkey/controls/lifetime.cpp', '-o', 'nonkey-lifetime-darwin.o')
+        compile(darwin, '-c', 'nonkey/measure.cpp', '-o', 'nonkey-measure-darwin.o')
         compile(linux, '-c', 'nonkey/controls/key-owner.cpp', '-o', 'nonkey-key-owner.o')
         output = run([readelf, '-Ws', 'nonkey-key-owner.o'], scope, cold)
         assert {'_ZTV5Gauge', '_ZTI5Gauge', '_ZTS5Gauge'} <= {fields[7] for fields in defined_symbols(output)}, output
@@ -293,16 +290,13 @@ def main():
             run(['./mixed-first-slot'], scope, cold)
 
             compile(linux, '-fsyntax-only', 'layout-consumer.cpp')
-            compile(darwin, '-c', 'layout-consumer.cpp', '-o', 'layout-darwin.o', error=layout_error)
-            assert not (scope / 'layout-darwin.o').exists()
+            compile(darwin, '-c', 'layout-consumer.cpp', '-o', 'layout-darwin.o')
             compile(linux, '-c', 'layout-consumer.cpp', '-o', 'layout-cold.o')
             compile(linux, '-c', 'layout-consumer.cpp', '-o', 'layout-warm.o', env=daemon)
             assert (scope / 'layout-warm.o').read_bytes() == (scope / 'layout-cold.o').read_bytes()
 
             compile(linux, '-fsyntax-only', 'primary.cpp')
-            compile(darwin, '-fsyntax-only', 'primary.cpp', error=layout_error)
-            compile(darwin, '-c', 'primary.cpp', '-o', 'primary-darwin.o', error=layout_error)
-            assert not (scope / 'primary-darwin.o').exists()
+            compile(darwin, '-c', 'primary.cpp', '-o', 'primary-darwin.o')
             compile(linux, '-c', 'primary.cpp', '-o', 'primary-cold.o')
             compile(linux, '-c', 'primary.cpp', '-o', 'primary-warm.o', env=daemon)
             assert (scope / 'primary-warm.o').read_bytes() == (scope / 'primary-cold.o').read_bytes()

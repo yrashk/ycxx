@@ -808,3 +808,17 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
   - Do: write the new body to a file, check it is not empty (`test -s body.md`, or read it), then
     edit; or write the whole body from what you know rather than editing the old one in a pipe.
   - Learned on #88 step 9.
+- **A one-OS test that asserts the other OS rejects the feature makes the parity change edit it.**
+  `linux_virtual_consumer.py` checked that Darwin rejected each virtual shape. Bringing the shapes
+  to Darwin (#650) meant flipping eleven of those assertions, in a test whose real checks are ELF.
+  Most of the Darwin work was lifting `x86_64_linux` checks that guarded nothing target-specific:
+  the lowering and the AArch64 back end already handled every shape.
+  - Do: state the other host's expectation as "the same as this one" when it is, and gate on the
+    target only where the code is target-specific (object format, calling convention). Before
+    porting a feature, compile its fixtures for both targets and diff the results.
+  - Learned on #650.
+- **On macOS the configured C++ compiler is Homebrew GCC, not the platform's C++ ABI.** Apple's
+  arm64 RTTI convention (private-external vague-linkage descriptors, bit 63 on the name pointer)
+  and libc++ are Clang's, so a test that exchanges RTTI or `typeid` with peers needs `clang++`
+  (`find_program(... clang++)`), not `${CMAKE_CXX_COMPILER}`.
+  - Learned on #650.
