@@ -451,6 +451,13 @@ with tempfile.TemporaryDirectory() as directory:
     move_annotation = "[[=own::move_constructor::transfers]]"
     annotated_move = write("annotated_move.cpp", legacy_move_source.replace("struct Work {", f"struct {move_annotation} Work {{"))
     syntax(annotated_move)
+    reflected_move_type = direct_move_type.replace(
+        "struct Work {", "struct [[=own::resource_mode::linear, =own::move_constructor::transfers]] Work {")
+    reflected_move_type = reflected_move_type.replace(
+        "Work start() noexcept;", "[[=own::operation::creates]] Work start() noexcept;").replace(
+        "void finish(Work&& work) noexcept;", "[[=own::operation::consumes]] void finish(Work&& work) noexcept;")
+    reflected_move = write("reflected_move.cpp", reflected_move_type + direct_move_definitions + direct_move_main)
+    syntax(reflected_move)
 
     move_include = '#include "move_type.hpp"\n'
     write("move_type.hpp", "#pragma once\n" + direct_move_type)
@@ -815,7 +822,7 @@ with tempfile.TemporaryDirectory() as directory:
         assert subprocess.run([native], timeout=10).returncode == 0
         subprocess.run([*args, str(array_skip), "-o", str(native)], check=True, timeout=30)
         assert subprocess.run([native, "skip"], timeout=10).returncode == -signal.SIGILL
-        for source in (composed, local_records, direct_move, tagged_move, annotated_move):
+        for source in (composed, local_records, direct_move, tagged_move, annotated_move, reflected_move):
             subprocess.run([*args, "-fcheck-policies", str(source), "-o", str(native)], check=True, timeout=30)
             assert subprocess.run([native], timeout=10).returncode == 0
         subprocess.run([*args, str(composed_skip), "-o", str(native)], check=True, timeout=30)
