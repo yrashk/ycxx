@@ -219,6 +219,49 @@ void mangling() {
   check(spec("count", w.fn(w.int_t, {dp}), {pack_arg({})}) == "__Z5countIJEEiDpT_", "an empty pack is JE");
 }
 
+void function_pointer_mangling() {
+  World w;
+  const EntityId ns = w.in.entities.add<EntityId>(ast::seed("test namespace ns"));
+  const EntityId arg = w.in.entities.add<EntityId>(ast::seed("test cls Arg"));
+  const QualType arg_type = w.in.intern_type(ast::TClass{arg});
+  const QualType pick_type = w.fn(w.int_t, {arg_type, arg_type});
+  const EntityId pick = w.entity("pick", pick_type, true);
+  const QualType target_params[] = {w.int_t};
+  const QualType target_type = ast::function_type(w.in, w.int_t, target_params, {.noexcept_ = true});
+  const EntityId target = w.entity("target", target_type, true);
+
+  const pl::ClassNames classes = [&](EntityId entity) -> pl::ClassName {
+    if (entity == ns) return {"ns", EntityId::none, EntityId::none, {}, false};
+    if (entity == arg) return {"Arg", ns, EntityId::none, {}, true};
+    return {};
+  };
+  const pl::FunctionNames functions = [&](EntityId entity) -> std::optional<pl::FunctionName> {
+    if (entity == pick) return pl::FunctionName{{"pick", pick_type, ns, false, std::nullopt}};
+    if (entity == target) return pl::FunctionName{{"target", target_type, EntityId::none, false, std::nullopt}};
+    return std::nullopt;
+  };
+  const auto empty_path = w.in.intern_seq(std::span<const ast::u32>{});
+  auto pointer_argument = [&](EntityId entity, QualType type) {
+    const auto base = w.in.intern_value(ast::VEntity{entity});
+    const auto value = w.in.intern_value(ast::VLvalue{base, empty_path, 0});
+    return ast::TemplateArg{ast::TemplateArgKind::value, ast::pointer_to(w.in, type), value};
+  };
+
+  const auto dispatch_type = w.fn(w.int_t, {arg_type});
+  const pl::TemplateSpec dispatch{dispatch_type, {pointer_argument(pick, pick_type)}};
+  auto dispatch_name = pl::symbol_name(w.in, "dispatch", dispatch_type, true, ast::LangLinkage::cxx, classes,
+                                       ns, false, &dispatch, false, functions);
+  check(dispatch_name.value_or("") == "_ZN2ns8dispatchIXadL_ZNS_4pickENS_3ArgES1_EEEEiS1_",
+        "a function argument shares the namespace and class substitutions of its enclosing symbol");
+
+  const auto use_type = w.fn(w.int_t, {});
+  const pl::TemplateSpec use{use_type, {pointer_argument(target, w.fn(w.int_t, {w.int_t}))}};
+  auto use_name = pl::symbol_name(w.in, "use", use_type, true, ast::LangLinkage::cxx, classes,
+                                  EntityId::none, false, &use, false, functions);
+  check(use_name.value_or("") == "_Z3useIXcvPFiiEadL_Z6targetiEEEiv",
+        "a conversion to a potentially throwing function pointer encodes the converted type");
+}
+
 // ------------------------------------------------------------------ programs
 
 std::optional<std::filesystem::path> run_dir;
@@ -408,6 +451,7 @@ int main(int argc, char** argv) {
   if (run_dir) std::filesystem::create_directories(*run_dir);
   lines();
   mangling();
+  function_pointer_mangling();
   alpha0();
   calls_and_globals();
   hello();

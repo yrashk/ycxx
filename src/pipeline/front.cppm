@@ -642,7 +642,7 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
     // Any reachable declaration can mark the entity inline ([dcl.inline]).
     if ((d.flags & sema::decl_flag::inline_) && (d.kind == ast::DeclKind::function || d.kind == ast::DeclKind::variable))
       inline_declarations.insert(e);
-    if (linux && d.kind == ast::DeclKind::function && d.has_written_noexcept) noexcept_declarations.insert(e);
+    if (d.kind == ast::DeclKind::function && d.has_written_noexcept) noexcept_declarations.insert(e);
     if (d.hidden_visibility) hidden_declarations.insert(e);
     if (!seen.insert(std::to_underlying(e)).second) return;
     const sema::EntityRec& r = world.entities.rec(e);
@@ -775,15 +775,19 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
                                      program.asm_label(d.entity).empty();
       // A written ordinary body starts at '{'. Other starts include a function-try-block and a
       // constructor initializer. Synthetic bodies and instantiations never enter this path.
-      if (linux && !member && tu.main != d.entity && !it.specialization &&
+      if (!member && tu.main != d.entity && !it.specialization &&
           program.region().tokens[it.body_begin].kind == lex::Tk::l_brace) {
         auto& f = tu.functions.back();
-        f.catch_all_callee = hosted_catch_all_callee(program, d, body);
-        f.unwind = f.catch_all_callee == EntityId::none ? cleanup_free_definition(program, d, body)
-                                                       : UnwindEligibility::hosted_catch_all;
-        if (f.unwind == UnwindEligibility::none) {
-          f.cleanup_call = hosted_cleanup_call(program, d, body);
-          if (f.cleanup_call != ast::NodeId::none) f.unwind = UnwindEligibility::hosted_cleanup;
+        if (linux) {
+          f.catch_all_callee = hosted_catch_all_callee(program, d, body);
+          f.unwind = f.catch_all_callee == EntityId::none ? cleanup_free_definition(program, d, body)
+                                                         : UnwindEligibility::hosted_catch_all;
+          if (f.unwind == UnwindEligibility::none) {
+            f.cleanup_call = hosted_cleanup_call(program, d, body);
+            if (f.cleanup_call != ast::NodeId::none) f.unwind = UnwindEligibility::hosted_cleanup;
+          }
+        } else if (cleanup_free_definition(program, d, body) == UnwindEligibility::cleanup_free) {
+          f.unwind = UnwindEligibility::cleanup_free;
         }
       }
       closures_of(body.closures, program.id(k), it.body_begin - it.begin);
@@ -1008,6 +1012,17 @@ engine::query_task<FrontResult> TuFront::run(engine::Ctx& cx, TuId tu) {
     shape.trivial_calls = classes.trivial_for_calls(c, unit_source.config.calls());
     shape.layout_uncertain = uncertain.contains(c);
     shape.copy_abi_unknown = record.defaulted_copy == sema::CopyState::unsupported;
+    {
+      // Itanium C++ ABI §3.1.2.3 from the special members one by one ([class.prop]): a
+      // non-trivial destructor or copy or move constructor, or neither constructor usable.
+      using enum sema::CopyOperation;
+      const sema::TrivialCopyability& t = record.trivial_copyability;
+      const bool known = t.destructor != unknown && t.copy_constructor != unknown && t.move_constructor != unknown;
+      const bool nontrivial = t.destructor == eligible_nontrivial || t.copy_constructor == eligible_nontrivial ||
+                              t.move_constructor == eligible_nontrivial ||
+                              (t.copy_constructor == ineligible && t.move_constructor == ineligible);
+      shape.calls_abi_uncertain = !shape.trivial_calls && (!known || !nontrivial);
+    }
     shape.layout_requires_virtual_support = record.layout_requires_virtual_support;
     if (record.peer_virtual_layout != sema::PeerVirtualLayout::none) {
       const bool uncertain_base = record.peer_virtual_layout == sema::PeerVirtualLayout::primary_base &&

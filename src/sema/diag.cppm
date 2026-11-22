@@ -35,6 +35,7 @@ enum class Diag : std::uint32_t {
   asm_label_string [[=message{Severity::error, "an asm label is an ordinary string literal"}]],
   sizeof_incomplete [[=message{Severity::error, "the size of '{0:t}', which is incomplete or a function type"}]],
   union_reference [[=message{Severity::error, "a union cannot have a reference member '{0:n}'"}]],
+  union_constructor_unwind [[=message{Severity::error, "potentially throwing union construction with a nontrivial member requires unsupported exception cleanup"}]],
   function_definition_in_block [[=message{Severity::error, "a function cannot be defined in a block (is a '}' missing?)"}]],
   extraneous_brace [[=message{Severity::error, "a '}' that closes nothing"}]],
   operator_member_only [[=message{Severity::error, "'{0:n}' must be a member function"}]],

@@ -931,7 +931,7 @@ public:
     std::vector<Suffix> suffixes;
   };
 
-  enum class NamedExceptionSpec { ordinary, defaulted_assignment };
+  enum class NamedExceptionSpec { ordinary, class_member, defaulted_assignment };
 
   // declarator, or abstract-declarator when `abstract` ([dcl.decl.general], [dcl.name]).
   Declarator declarator(QualType base, bool abstract, bool typedef_ = false, bool conversion = false,
@@ -1806,7 +1806,10 @@ public:
         // exception specification is non-throwing.
         bool nonthrowing = sema::is_deallocation_name(name) && !s->has_noexcept;
         const bool keep_named_exception = named_exception == NamedExceptionSpec::defaulted_assignment && name == "operator=";
-        if (s->has_noexcept && (allocation || keep_named_exception || member_pointer_to_suffix(l) ||
+        // Bare `noexcept` does not need substitution when a class template's member is used.
+        const bool bare_member_exception = named_exception == NamedExceptionSpec::class_member &&
+                                           l.named && !s->noexcept_condition;
+        if (s->has_noexcept && (allocation || keep_named_exception || bare_member_exception || member_pointer_to_suffix(l) ||
                                 (spells_type && !l.inner)))
           nonthrowing = noexcept_value(s->noexcept_condition, d.ok);
         else if (d.ok && s->has_noexcept && !s_->templated())
@@ -3430,8 +3433,18 @@ public:
       return is(Tk::kw_new) ? new_expression(begin) : delete_expression(begin);
     case Tk::kw_new: return new_expression(begin);
     case Tk::kw_delete: return delete_expression(begin);
+    case Tk::kw_noexcept: {
+      bump();
+      if (!expect(Tk::l_paren)) return {NodeId::none, begin, pos()};
+      const int saved = std::exchange(angle_, 0);
+      ++s_->unevaluated;
+      Ex operand = expression();
+      --s_->unevaluated;
+      angle_ = saved;
+      if (!expect(Tk::r_paren)) return {NodeId::none, begin, pos()};
+      return s_->unary_noexcept(operand, begin, pos());
+    }
     case Tk::kw_co_await:
-    case Tk::kw_noexcept:
     case Tk::caretcaret: {
       s_->diag(begin, Diag::not_supported, kind());
       bump();

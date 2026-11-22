@@ -73,7 +73,13 @@ std::expected<contents, std::string> read(std::string_view bytes, std::string_vi
   if (!bytes.starts_with(magic)) return fail("expected a regular GNU archive");
 
   contents result;
-  std::optional<std::string_view> index, long_names;
+  // BOOTSTRAP: -Wmaybe-uninitialized: `index` is a view and a flag, not std::optional. At -O3
+  // GCC 16.2 reports the optional's payload as possibly uninitialized after `if (!index)`
+  // (#748; GCC's known class of std::optional false positives, as PR 114253). Without the bug:
+  //   std::optional<std::string_view> index, long_names;   // `if (!index)`, `index->size()`
+  std::optional<std::string_view> long_names;
+  std::string_view index;
+  bool has_index = false;
   for (std::size_t offset = magic.size(); offset < bytes.size();) {
     if (bytes.size() - offset < header_size) return fail("truncated archive member header");
     const auto header = bytes.substr(offset, header_size);
@@ -90,7 +96,7 @@ std::expected<contents, std::string> read(std::string_view bytes, std::string_vi
     }
     const auto data = bytes.substr(start, *size);
     if (field == "/") {
-      if (index) return fail("duplicate archive symbol index");
+      if (std::exchange(has_index, true)) return fail("duplicate archive symbol index");
       index = data;
     } else if (field == "//") {
       if (long_names) return fail("duplicate archive long-name table");
@@ -130,16 +136,16 @@ std::expected<contents, std::string> read(std::string_view bytes, std::string_vi
     }
   }
 
-  if (!index) {
+  if (!has_index) {
     if (!result.members.empty()) return fail("nonempty archive has no symbol index");
     return result;
   }
-  if (index->size() < word_size) return fail("truncated archive symbol count");
-  const auto count = big_word(index->substr(0, word_size));
-  if (count > (index->size() - word_size) / (word_size + 1)) return fail("invalid archive symbol count");
-  auto names = index->substr(word_size + std::size_t{count} * word_size);
+  if (index.size() < word_size) return fail("truncated archive symbol count");
+  const auto count = big_word(index.substr(0, word_size));
+  if (count > (index.size() - word_size) / (word_size + 1)) return fail("invalid archive symbol count");
+  auto names = index.substr(word_size + std::size_t{count} * word_size);
   for (std::size_t i = 0; i < count; ++i) {
-    const auto offset = big_word(index->substr(word_size + i * word_size, word_size));
+    const auto offset = big_word(index.substr(word_size + i * word_size, word_size));
     const auto found = std::ranges::lower_bound(result.members, offset, {}, &member::offset);
     if (found == result.members.end() || found->offset != offset)
       return fail("invalid archive index member offset");

@@ -310,6 +310,30 @@ void rejection() {
   }
 }
 
+// A class result in memory (#641): its address arrives first, in RDI, and goes back in RAX
+// (AMD64 psABI §3.2.3), loaded from its home slot just before `leave; ret`.
+void memory_result() {
+  using enum l2::Type;
+  using l2::Op;
+  l2::Builder b;
+  const l2::Type params[] = {state, ptr, i64};
+  auto entry = b.begin_block(params);
+  ir::ValueId ret[] = {b.param(entry, 0)};
+  b.emit(Op::ret, {}, ret);
+  l2::Function body = b.finish({});
+  body.indirect_result = 1;
+  auto code = x64::compile_function(body);
+  check(code.has_value(), "compiles a function with a class result in memory");
+  if (!code) return;
+  const auto& bytes = code->bytes;
+  const bool returns_address = bytes.size() >= 9 && bytes[bytes.size() - 9] == 0x48 &&
+                               bytes[bytes.size() - 8] == 0x8b && bytes[bytes.size() - 7] == 0x85 &&
+                               bytes[bytes.size() - 2] == 0xc9 && bytes[bytes.size() - 1] == 0xc3;
+  check(returns_address, "returns the result's address in RAX");
+  body.indirect_result = 2;
+  check(!x64::compile_function(body), "rejects a result address that is not the first argument");
+}
+
 // A frame of a page or more touches each page before RSP passes it (#644); a smaller one
 // lowers RSP once. The frame here is the alloca's result slot plus the object, 16-aligned.
 void frame_probes() {
@@ -346,6 +370,7 @@ int main() {
   loop_edge();
   direct_ellipsis();
   rejection();
+  memory_result();
   frame_probes();
   return ycxx::unit::result("x86_64");
 }
