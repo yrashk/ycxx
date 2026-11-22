@@ -215,7 +215,7 @@ class Parts(unittest.TestCase):
 
             path = root / patterns
             # Leave the disabled declarations in comments and the selector's load references intact.
-            load_rules = r'^([ \t]*pattern[ \t]+load[\w-]*[ \t]*:[^\n]*)'
+            load_rules = r'^([ \t]*pattern[ \t]+[^:\n]+:[ \t]*\([ \t]*load\b[^\n]*)'
             disabled, count = re.subn(load_rules, r'# \1', path.read_text(), flags=re.M)
             self.assertGreater(count, 0)
             path.write_text(disabled)
