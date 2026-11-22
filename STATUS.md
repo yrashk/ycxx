@@ -310,7 +310,9 @@ What is true of the code today. Work in progress and its owners are tracked in
     lists read from `.tbd` files (`tbd_exports`). A dylib without a list accepts any name.
   - Lays out `__PAGEZERO`, `__TEXT`, `__DATA_CONST`, `__DATA` and `__LINKEDIT` on 16 KiB pages,
     with stubs and a GOT. All imports are bound and all pointers rebased through chained fixups
-    (`DYLD_CHAINED_PTR_64_OFFSET`). No lazy binding.
+    (`DYLD_CHAINED_PTR_64_OFFSET`). No lazy binding. A segment's chained starts cover only its
+    pages with file contents: page-in linking maps every listed page from the file, so a listed
+    zero-fill page would hold `__LINKEDIT` bytes (#842).
   - Writes the exports trie, symbol tables, `LC_MAIN`, `LC_BUILD_VERSION` (macOS 12.0), an
     `LC_UUID` fingerprinted from the image, and an ad-hoc, linker-signed SHA-256 code signature.
   - Output is byte-identical across runs.
@@ -1911,6 +1913,12 @@ template's tokens again with the arguments bound.
   constant variable is mangled by its value, where Clang and GCC write its name (#796). With these,
   libycxx's headers move from `invoke.hpp:35` to `invoke.hpp:37` (#776).
 
+## Functional conversions with pack expansions (#915)
+
+- `T(a...)` expands its arguments as a call does ([expr.type.conv], [temp.variadic]/5). This is
+  also the path a call through a still-dependent alias's member takes at the definition, as in
+  libycxx's `invoke`. Test: `tests/own/templates/functional-cast-pack.run.cpp`.
+
 ## Templates, ζ step 2: class templates (#88, 2026-11-18)
 
 - **Declarations:** class templates at namespace scope (`template<…> struct X {…};` and
@@ -2842,6 +2850,20 @@ What the process allocates, attributed to the engine's cells, in the trace and t
   [#294](https://github.com/yrashk/ycxx/issues/294) · [#310](https://github.com/yrashk/ycxx/issues/310) ·
   [#489](https://github.com/yrashk/ycxx/issues/489)
   [Design](docs/design/ordinary-virtual-declarations.md)
+
+## Borrowed `dynamic_cast` to `cv void*` (#294)
+
+On Linux x86-64, `dynamic_cast<cv void*>(p)` accepts an ordinary complete polymorphic root
+from the existing peer consumer profiles. The result is a pointer prvalue and retains every
+cv-qualifier of the source pointee. The cast evaluates the pointer once and a typed null
+operand yields a null result, including in constant evaluation. On the non-null path, the
+vtable address point supplies the signed offset-to-top. Adding that byte offset to the
+incoming subobject address recovers the address of the most-derived object, including when
+the peer passes a secondary base. The cast introduces no RTTI symbols or calls.
+Typed runtime casts, `typeid`, non-null constant evaluation, and Darwin parity are tracked
+in [#294](https://github.com/yrashk/ycxx/issues/294) and [#659](https://github.com/yrashk/ycxx/issues/659).
+[[expr.dynamic.cast]](https://eel.is/c++draft/expr.dynamic.cast) ·
+[Itanium ABI §2.5.2](https://itanium-cxx-abi.github.io/cxx-abi/abi.html#vtable-components)
 
 ## Deduced polymorphic lambda results (#569)
 

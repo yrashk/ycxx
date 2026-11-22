@@ -755,6 +755,18 @@ class Lowering {
         out(n, 0, add_offset(in(n, 0), -offset(derived, path_at(imms, 1))));
         return {};
       }
+      case Op::rtti__most_derived_addr: {
+        if (!config_.sysv_amd64) return fail("dynamic_cast to a void pointer requires the Linux x86-64 peer ABI");
+        // Itanium C++ ABI §2.5.2: the address point's preceding two words are the signed
+        // ptrdiff_t offset-to-top and the type-info pointer. Read only the offset-to-top.
+        const ValueId state = in(n, 0), object = in(n, 1);
+        const ValueId table = emit1(Op2::load, T::ptr, {state, object}, {0});
+        const ValueId header = constant(T::i64, -2 * ast::x86_64_linux.pointer_size);
+        const ValueId slot = emit1(Op2::ptradd, T::ptr, {table, header});
+        const ValueId offset_to_top = emit1(Op2::load, T::i64, {state, slot}, {0});
+        out(n, 0, emit1(Op2::ptradd, T::ptr, {object, offset_to_top}));
+        return {};
+      }
 
       case Op::alloc: {
         auto storage = Storage(imms[1]);
