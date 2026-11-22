@@ -983,28 +983,33 @@ with tempfile.TemporaryDirectory() as directory:
             "static_cast<Grant&&>(initial)", "initial"))
         syntax(copied, error="deleted")
 
-        # The hosted caller receives the nontrivial capability from a YCXX-built issuer.
-        declarations, implementation = capability.read_text().split("Grant Store::grant()", 1)
-        methods, user_main = implementation.split("int main(", 1)
-        capability_provider = write("capability_provider.cpp", declarations + "Grant Store::grant()" + methods)
-        capability_peer = write("capability_peer.cpp", declarations + "int main(" + user_main)
-        capability_object = compile_object(capability_provider, checked=False)
-        subprocess.run([host, "-std=c++20", "-I", include, str(capability_peer), str(capability_object),
-                        "-o", str(native)], check=True, timeout=30)
-        assert subprocess.run([native], timeout=10).returncode == 0
-        assert subprocess.run([native, "wrong-scope"], timeout=10).returncode == -signal.SIGILL
-
-        checked_capability = declarations + textwrap.dedent("""\
+        # PARITY: by design: this native SysV test uses the x86-64 Linux host linker.
+        declarations = capability.read_text().split("Grant Store::grant()", 1)[0]
+        write("mixed_capability.hpp", declarations + textwrap.dedent("""\
             #include <ycxx/ownership.hpp>
             namespace own = ycxx::ownership;
             Grant acquire() noexcept;
+            void set_scope(caps::scope_id scope) noexcept;
             void access(const Grant&) noexcept;
             void release(Grant&&) noexcept;
             using Policy = own::use_policy<own::affine<Grant>,
                 own::creates<decltype(&acquire), &acquire>,
                 own::observes<decltype(&access), &access>,
                 own::consumes<decltype(&release), &release>>;
-            void use_grant() {
+        """))
+        capability_provider = write("capability_provider.cpp", """\
+            #include "mixed_capability.hpp"
+            static caps::scope_id selected;
+            Grant Store::grant() noexcept { return Grant(1); }
+            Grant acquire() noexcept { return Store::grant(); }
+            void set_scope(caps::scope_id scope) noexcept { selected = scope; }
+            void access(const Grant& authority) noexcept { authority.require<read_right>(selected); }
+            void release(Grant&& authority) noexcept { authority.release(); }
+        """)
+        capability_peer = write("capability_peer.cpp", """\
+            #include "mixed_capability.hpp"
+            int main(int argc, char**) {
+              set_scope(argc == 1 ? 1 : 2);
               auto authority = acquire();
               {
                 const auto& view = authority;
@@ -1013,8 +1018,20 @@ with tempfile.TemporaryDirectory() as directory:
               release(static_cast<Grant&&>(authority));
             }
         """)
-        syntax(write("capability_ownership.cpp", checked_capability))
-        dangling_use = write("capability_after_release.cpp", checked_capability.replace(
+        dangling_use = write("capability_after_release.cpp", capability_peer.read_text().replace(
             "  release(static_cast<Grant&&>(authority));",
             "  release(static_cast<Grant&&>(authority));\n  access(authority);"))
         syntax(dangling_use, error="affine resource 'authority' may already have been consumed")
+
+        ycxx_provider, ycxx_caller = map(compile_object, (capability_provider, capability_peer))
+        host_objects = []
+        for source in (capability_provider, capability_peer):
+            output = source.with_suffix(".host.o")
+            subprocess.run([host, "-std=c++20", "-I", include, "-c", source, "-o", output],
+                           check=True, timeout=30)
+            host_objects.append(output)
+        host_provider, host_caller = host_objects
+        for provider_object, caller_object in ((ycxx_provider, host_caller), (host_provider, ycxx_caller)):
+            subprocess.run([host, provider_object, caller_object, "-o", native], check=True, timeout=30)
+            subprocess.run([native], check=True, timeout=10)
+            assert subprocess.run([native, "wrong-scope"], timeout=10).returncode == -signal.SIGILL

@@ -713,8 +713,8 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
   the obligation to the destination. Checked executables link for arm64 Darwin.
   [x86-64 Linux tag arguments #641](https://github.com/yrashk/ycxx/issues/641)
   The standalone C++20 package also provides move-only issuer-scoped capability tokens with
-  rights constraints and runtime scope checks. Native Linux x86-64 tests exercise a YCXX issuer
-  and hosted GCC and Clang callers with the same token type.
+  rights constraints and runtime scope checks. On Linux x86-64, a checked YCXX object and a
+  hosted GCC or Clang object exchange the token by value in either direction.
   [ABI support #661](https://github.com/yrashk/ycxx/issues/661) · [Dependent type friends #689](https://github.com/yrashk/ycxx/issues/689)
   Finite effect bounds from `<ycxx/effects.hpp>` check every direct callee of an annotated
   function, including calls in default arguments and recursive calls. Typed declarations
