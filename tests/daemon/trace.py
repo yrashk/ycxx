@@ -13,6 +13,7 @@
 - `--trace-engine=json`: every stderr line is a JSON object (events with their values, the
   diagnostics and exit status, the summary), for tools and agents.
 - Trace details show the compiler's file, line and column for source errors (#404).
+- Source spans (#638): events through the daemon carry the cell's file and lines.
 - Memory (#274): events carry their bytes in the schema docs/TRACE.md gives, the summary its
   totals and kinds, the stream a memory line, and `ctl status` the daemon's memory.
 - `ycxx cxx --watch --trace-engine` builds again when a header the build read changes, and only
@@ -46,13 +47,15 @@ def main(ycxx):
     base = {k: v for k, v in os.environ.items() if k not in ('YCXX_DAEMON', 'YCXX_NO_DAEMON', 'YCXX_ROOT', 'NO_COLOR')}
     base.update(YCXX_RUNTIME_DIR=runtime, YCXX_DAEMON_IDLE_EXIT='300', YCXX_THREADS='4')
     daemon = dict(base, YCXX_DAEMON='require')
+    target = '--target=arm64-apple-darwin'
     watchers = []
     try:
         src = scope / 'a.cpp'
         src.write_text(SOURCE)
 
         def cxx(*args, env=daemon):
-            return subprocess.run([ycxx, 'cxx', *args], cwd=scope, env=env, capture_output=True, text=True, timeout=300)
+            return subprocess.run([ycxx, 'cxx', target, *args], cwd=scope, env=env,
+                                  capture_output=True, text=True, timeout=300)
 
         def ctl(*args):
             return subprocess.run([ycxx, 'ctl', *args], cwd=scope, env=base, capture_output=True, text=True, timeout=60)
@@ -110,6 +113,15 @@ def main(ycxx):
         check(any(o['kind'] == 'Build' and o['outcome'] in ('reused', 'executed') for o in events), 'the JSON trace has the root')
         check(all({'id', 'parent', 'depth', 'outcome', 'duration_ns', 'worker'} <= o.keys() for o in events), 'each event has its fields')
         check(sum('summary' in o for o in objs) == 1 and sum('exit_status' in o for o in objs) == 1, 'one summary, one exit status')
+        # Source spans (#638) cross the daemon's socket, on a build that runs: the unit's cells name
+        # its file; square's IR, its definition's lines.
+        (scope / 'spans.cpp').write_text(SOURCE)
+        sp = cxx('--trace-engine=json', 'spans.cpp', '-o', 'spans')
+        sp_events = [json.loads(l) for l in sp.stderr.splitlines() if l.strip().startswith('{"id"')]
+        check(any(o['kind'] == 'Tu' and o.get('span', {}).get('file', '').endswith('spans.cpp') for o in sp_events), 'a unit names its file')
+        ir = [o for o in sp_events if o['kind'] == 'FunctionIr' and o['key'] == 'square']
+        check(ir and ir[0].get('span', {}).get('line') == 1 and ir[0]['span'].get('end_line') == 1 and ir[0]['span'].get('end_column') == 35,
+              f'a function names its definition: {ir[:1]}')
 
         def traced_error(file, where, message, kinds, *options):
             result = cxx('--trace-engine=json', *options, file)
@@ -193,7 +205,7 @@ def main(ycxx):
         # --watch: a build, then one per change of a file the build read.
         (scope / 'k.h').write_text('inline int k() { return 1; }\n')
         src.write_text('#include "k.h"\n' + SOURCE.replace('- 9', '- 8 - k()'))
-        wp = subprocess.Popen([ycxx, 'cxx', '--watch', '--trace-engine', 'a.cpp', '-o', 'w'], cwd=scope, env=daemon,
+        wp = subprocess.Popen([ycxx, 'cxx', target, '--watch', '--trace-engine', 'a.cpp', '-o', 'w'], cwd=scope, env=daemon,
                               stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
         watchers.append(wp)
         log = []
@@ -251,7 +263,11 @@ def main(ycxx):
         check(ctl('status').returncode != 0, 'a stalled watcher does not keep the daemon alive')
         drain.join(timeout=20)
         out = ''.join(seen)
-        check('── #' in out and 'cxx a.cpp -o a' in out, f'the watcher shows each request: {out[:400]}')
+        requests = [line for line in out.splitlines() if line.startswith('── #')]
+        for output in ('a', 'w'):
+            command = f'cxx {target} a.cpp -o {output}'
+            check(any(line.endswith(' ' + command) for line in requests),
+                  f'the watcher shows {command}: {requests[:5]}')
         check('Build(a.cpp → a)' in out and 'trace: ' in out, 'the watcher shows the events and each summary')
         check('the daemon has gone' in out, 'the watcher says the daemon went')
     finally:
