@@ -114,14 +114,23 @@ std::expected<Fd, std::string> lock_file(const std::string& path, std::chrono::m
 // Whether a socket path fits `sun_path` (104 bytes on macOS, 108 on Linux, with the NUL).
 bool fits_socket_path(const std::string& path) { return path.size() < sizeof(sockaddr_un{}.sun_path); }
 
+// The address of a socket at `path`, which `fits_socket_path`.
+// BOOTSTRAP: -Wstringop-overflow: at -O3 GCC 16.2 loses the callers' length check and reports a
+// write of 8 bytes past `sun_path` from the vectorized copy (#748), so the copy is bounded by
+// the array as well. Without the bug: `std::ranges::copy(path, a.sun_path);`
+sockaddr_un socket_address(const std::string& path) {
+  sockaddr_un a{};
+  a.sun_family = AF_UNIX;
+  std::ranges::copy_n(path.data(), std::min(path.size(), sizeof a.sun_path - 1), a.sun_path);
+  return a;
+}
+
 std::expected<Fd, std::string> listen_unix(const std::string& path) {
   if (!fits_socket_path(path)) return std::unexpected("socket path too long: " + path);
   Fd fd(::socket(AF_UNIX, SOCK_STREAM, 0));
   if (!fd) return std::unexpected(os_error("socket"));
   ::fcntl(fd.get(), F_SETFD, FD_CLOEXEC);
-  sockaddr_un a{};
-  a.sun_family = AF_UNIX;
-  std::ranges::copy(path, a.sun_path);
+  auto a = socket_address(path);
   if (::bind(fd.get(), reinterpret_cast<sockaddr*>(&a), sizeof a) != 0) return std::unexpected(os_error("cannot bind " + path));
   if (::listen(fd.get(), 128) != 0) return std::unexpected(os_error("listen"));
   return fd;
@@ -136,9 +145,7 @@ std::expected<Fd, std::string> connect_unix(const std::string& path, bool& absen
   if (!fd) return std::unexpected(os_error("socket"));
   ::fcntl(fd.get(), F_SETFD, FD_CLOEXEC);
   no_sigpipe(fd.get());
-  sockaddr_un a{};
-  a.sun_family = AF_UNIX;
-  std::ranges::copy(path, a.sun_path);
+  auto a = socket_address(path);
   while (::connect(fd.get(), reinterpret_cast<sockaddr*>(&a), sizeof a) != 0) {
     if (errno == EINTR) continue;
     absent = errno == ENOENT || errno == ECONNREFUSED;
