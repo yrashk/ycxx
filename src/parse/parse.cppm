@@ -1632,9 +1632,13 @@ public:
     return p_->dependent_type_trait_operands_.contains({loc.item, loc.offset});
   }
   std::optional<bool> type_trait_at_demand(EntityId c, engine::Loc loc) override {
+    // A generic lambda's specialization outside any template: a trait whose operands were
+    // dependent in its body is answered at the end, as a function template's instantiation is.
+    if (generic_at_end && dependent_type_trait_operand(loc)) return p_->is_complete(c, p_->end(), true, true);
     if (!replaying_type_trait_operand(loc)) return std::nullopt;
     return p_->is_complete(c, *type_trait_demand, true, true);
   }
+  bool generic_at_end = false;
   bool type_trait_instantiation_failed(EntityId e) override {
     const bool failed = p_->failed_type_trait_instantiations_.contains(e);
     observed_type_trait_failure |= failed;
@@ -7314,6 +7318,7 @@ public:
     ps_.set_questions(*q_);
     ps_.body = true;
     at_ = inst_ ? &static_cast<AtInstantiation&>(*q_).pattern_context() : &static_cast<AtItem&>(*q_);
+    if (!inst_ && generic_) static_cast<AtItem&>(*q_).generic_at_end = true;
   }
 
   Result<ast::BodySema> run() {
