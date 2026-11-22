@@ -2166,7 +2166,8 @@ public:
   }
 
   std::optional<u32> member_default_template_args(std::span<const Param> params, std::map<u32, bool>& template_probes) {
-    if ((is(Tk::kw_static_cast) || is(Tk::kw_reinterpret_cast)) && kind(1) == Tk::less) return 1;
+    if ((is(Tk::kw_static_cast) || is(Tk::kw_reinterpret_cast) || is(Tk::kw_dynamic_cast)) && kind(1) == Tk::less)
+      return 1;
     if (is(Tk::kw_template) && kind(1) == Tk::identifier && kind(2) == Tk::less) return 2;
     if ((is(Tk::period) || is(Tk::arrow)) && kind(1) == Tk::identifier && kind(2) == Tk::less) {
       // Lookup of a template through an object needs the type of the expression. A balanced
@@ -4018,9 +4019,10 @@ public:
       }
       s_->diag(begin, Diag::expected_expression);
       return {NodeId::none, begin, pos()};
+    case Tk::kw_dynamic_cast:
     case Tk::kw_static_cast:
     case Tk::kw_reinterpret_cast: {
-      const bool reinterpret = is(Tk::kw_reinterpret_cast);
+      const Tk cast = kind();
       bump();
       if (!expect(Tk::less)) return {NodeId::none, begin, pos()};
       auto t = type_id();
@@ -4029,8 +4031,10 @@ public:
       Ex e = expression();
       angle_ = saved;
       if (!expect(Tk::r_paren)) return {NodeId::none, begin, pos()};
-      Ex r = reinterpret ? s_->reinterpret_cast_to(e, *t, begin)
-                         : s_->static_cast_to(e, *t, begin, /*named_static_cast=*/true);
+      Ex r;
+      if (cast == Tk::kw_dynamic_cast) r = s_->dynamic_cast_to_void(e, *t, begin, pos());
+      else if (cast == Tk::kw_reinterpret_cast) r = s_->reinterpret_cast_to(e, *t, begin);
+      else r = s_->static_cast_to(e, *t, begin, /*named_static_cast=*/true);
       return {r.id, begin, pos(), r.info};
     }
     case Tk::float_lit: {
@@ -4065,7 +4069,6 @@ public:
       [[fallthrough]];
     case Tk::tilde:
     case Tk::kw_typeid:
-    case Tk::kw_dynamic_cast:
     case Tk::kw_const_cast:
       s_->diag(begin, Diag::not_supported, kind());
       bump();
