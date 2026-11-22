@@ -81,9 +81,11 @@ struct FunctionInput {
   ast::EntityId atexit = ast::EntityId::none, dso = ast::EntityId::none;
   bool hosted_catch_all = false;  // the native frontend has certified this occurrence
   ast::NodeId cleanup_call = ast::NodeId::none;  // the certified hosted cleanup call
+  ast::EntityId constructor_cleanup = ast::EntityId::none;  // the selected union member's destructor
   bool check_unwind_cleanups = false;
   bool native_array_delete = false;  // the backend's Linux x86-64 cookie-free array deletion
   bool native_array_new = false;  // the backend's Linux x86-64 allocation in a certified frame
+  std::span<const ast::EntityId> nonthrowing_functions{};  // native declarations, sorted by entity
 };
 
 struct FunctionIr {
@@ -607,6 +609,7 @@ class Gen {
         initialize(p, child(a, m.init), false);
         return 0;
       });
+      if (fn_.constructor_cleanup != ast::EntityId::none) initialized_member_ = p;
     } else if (is<ast::DelegatingInit>(a)) {
       if (!this_) unsupported(a, "outside a constructor");
       auto d = get<ast::DelegatingInit>(a);
@@ -695,10 +698,12 @@ class Gen {
       slots_[v.local] = full_expression([&] { return Place{address(child(a, v.init)), facts_.referee(rec.type)}; });
       return;
     }
-    bool zeroed = has_init && value_initializes(child(a, v.init));
+    const At initializer = child(a, v.init);
+    const bool selection = has_init && cls(rec.type) == TypeClass::record && class_selection(initializer);
+    bool zeroed = has_init && value_initializes(initializer);
     // Conversion of nullptr_t during initialization does not access its object ([conv.lval]).
     // Its storage starts with erroneous bytes ([basic.indet]).
-    bool indeterminate = has_init && !zeroed && !is_nullptr(rec.type) && !default_initializes(child(a, v.init));
+    bool indeterminate = has_init && !zeroed && !is_nullptr(rec.type) && !default_initializes(initializer);
     Place p = begin_object(rec.type, zeroed ? ir::Init::zero
                                      : indeterminate ? ir::Init::indeterminate
                                                      : ir::Init::erroneous);
@@ -707,13 +712,59 @@ class Gen {
     // object whose lifetime has not begun.
     slots_[v.local] = p;
     if (auto b = jump_bindings_.find(v.local); b != jump_bindings_.end()) store(b->second, p.ptr);
-    if (has_init)
+    if (has_init) {
+      selecting_initializer_ = selection;
       full_expression([&] {
-        initialize(initializing_place(p), child(a, v.init), zeroed);
+        if (selection) initialize_selection(initializing_place(p), initializer, zeroed);
+        else initialize(initializing_place(p), initializer, zeroed);
         return 0;
       });
+      selecting_initializer_ = false;
+    }
     bool vacuous = v.destructor == ast::EntityId::none && (!has_init || is<ast::DefaultInit>(child(a, v.init)));
-    start_lifetime(p, v.destructor, vacuous ? std::optional(v.local) : std::nullopt);
+    if (selection) scopes_.back().push_back({p, v.destructor});
+    else start_lifetime(p, v.destructor, vacuous ? std::optional(v.local) : std::nullopt);
+  }
+
+  bool class_selection(At e) {
+    e = strip_parens(e);
+    return (is<ast::Conditional>(e) ||
+            (is<ast::OrderedBinary>(e) && get<ast::OrderedBinary>(e).op == ast::OrderedOp::comma)) &&
+           class_prvalue(info(e));
+  }
+
+  // A class prvalue initializes its result object directly ([dcl.init], [class.copy.elision]).
+  // At the end of a local initializer each selected arm can clean up its own temporaries before
+  // the join. There are no later siblings which could still observe those temporaries.
+  void initialize_selection(const Place& p, At e, bool zeroed) {
+    Position here(*this, e.offset);
+    if (is<ast::Paren>(e)) return initialize_selection(p, child(e, get<ast::Paren>(e).operand), zeroed);
+    if (class_selection(e)) {
+      if (is<ast::OrderedBinary>(e)) {
+        const auto comma = get<ast::OrderedBinary>(e);
+        discard(child(e, comma.lhs));
+        return initialize_selection(p, child(e, comma.rhs), zeroed);
+      }
+      const auto choice = get<ast::Conditional>(e);
+      const auto then_value = child(e, choice.then_), else_value = child(e, choice.else_);
+      if (!class_prvalue(info(then_value)) || !class_prvalue(info(else_value)))
+        unsupported(e, "with a non-value arm in a class initializer");
+      const auto condition = rvalue(child(e, choice.condition));
+      const auto then_block = new_block(), else_block = new_block(), join = new_block();
+      cond_br(condition, edge(then_block), edge(else_block));
+      for (auto [block, value] : {std::pair{then_block, then_value}, std::pair{else_block, else_value}}) {
+        enter(block);
+        full_expression([&] {
+          initialize_selection(p, value, zeroed);
+          return 0;
+        });
+        br(join);
+      }
+      enter(join);
+      return;
+    }
+    initialize(p, e, zeroed);
+    begin_lifetime(p);
   }
 
   // Whether initializer `e` value-initializes some element (`ValueInit`), so the object is
@@ -723,6 +774,10 @@ class Gen {
     if (is<ast::CtorCall>(e)) return get<ast::CtorCall>(e).zero_first != 0;
     if (is<ast::Paren>(e)) return value_initializes(child(e, get<ast::Paren>(e).operand));
     if (is<ast::DefaultArg>(e)) return value_initializes(child(e, get<ast::DefaultArg>(e).arg));
+    if (is<ast::OrderedBinary>(e)) {
+      const auto binary = get<ast::OrderedBinary>(e);
+      if (binary.op == ast::OrderedOp::comma) return value_initializes(child(e, binary.rhs));
+    }
     if (!is<ast::InitList>(e)) return false;
     for (ast::Child c : ast_.children(get<ast::InitList>(e).elems))
       if (value_initializes(child(e, c))) return true;
@@ -915,6 +970,8 @@ class Gen {
   // or, when a reference it is bound to extends it, with that reference's scope.
   Place materialize(At a) {
     auto m = get<ast::Materialize>(a);
+    if (selecting_initializer_ && (m.extended == 1 || branches_ > 0))
+      unsupported(a, "requiring lifetime extension or nested conditional cleanup in a class initializer");
     At v = child(a, m.operand);
     bool zeroed = value_initializes(v);
     Place p = begin_object(m.info.type, zeroed ? ir::Init::zero : ir::Init::indeterminate, ir::Storage::temporary);
@@ -1333,7 +1390,7 @@ class Gen {
   // any `useq` group.
   int effects(At a) {
     if (a.id == NodeId::none) return 0;
-    if (is<ast::Assign>(a)) return 2;
+    if (is<ast::Assign>(a) || is<ast::ExplicitDestroy>(a)) return 2;
     if (is<ast::VariadicBuiltin>(a) && get<ast::VariadicBuiltin>(a).op != ast::VaOp::end) return 2;
     if (is<ast::Unary>(a)) {
       auto op = get<ast::Unary>(a).op;
@@ -1391,10 +1448,19 @@ class Gen {
       delete_array(a);
       return std::nullopt;
     }
+    if (is<ast::ExplicitDestroy>(a)) {
+      const auto d = get<ast::ExplicitDestroy>(a);
+      const At object = child(a, d.object);
+      const ValueId address = rvalue(object);
+      if (d.function != ast::EntityId::none) destroy({address, facts_.pointee(info(object).type)}, d.function);
+      stateful(ir::Op::obj__end, {}, std::span(&address, 1));
+      return std::nullopt;
+    }
     if (is<ast::Call>(a)) return call(a);
     if (member_call_expression(a)) return member_call(a);
     if (is<ast::VariadicBuiltin>(a)) return variadic_builtin(a);
     if (is<ast::Throw>(a)) {
+      if (selecting_initializer_) unsupported(a, "inside a class initializer selection");
       auto expr = get<ast::Throw>(a);
       if (expr.operand.id == NodeId::none) {
         ValueId ops[] = {state_};
@@ -1807,6 +1873,10 @@ class Gen {
       const auto invoke = emit(ir::Op::invoke, results, args, imms, ir::bit(ir::Flag::not_constexpr), successors);
       enter(exceptional);
       exit_scopes(0);
+      if (fn_.constructor_cleanup != ast::EntityId::none) {
+        if (!initialized_member_) throw Unsupported{"unwind before the union member's initialization"};
+        destroy(*initialized_member_, fn_.constructor_cleanup);
+      }
       const ValueId resume[] = {state_, b_.param(exceptional, 1)};
       emit(ir::Op::resume, {}, resume);
       block_ = normal;
@@ -1855,6 +1925,11 @@ class Gen {
     bool has_value = !result_arg && cls(result) != TypeClass::void_;
     if (has_value) results.push_back(vty(result));
     auto f = in_.types.get<ast::TFunction>(in_.types.canon(fn));
+    if (selecting_initializer_) {
+      const auto spec = f.noexcept_;
+      if (spec == ast::ConstId::none || !in_.values.is<ast::VInt>(spec) || in_.values.get<ast::VInt>(spec).bits.lo == 0)
+        throw Unsupported{"a potentially throwing indirect call in a class initializer selection"};
+    }
     std::size_t named = in_.seqs.size(f.params), passed = args.size() - 1 - (result_arg ? 1 : 0);
     std::size_t through_ellipsis = f.variadic && passed > named ? passed - named : 0;
     std::uint64_t imms[] = {through_ellipsis, byval >> 1, result_arg};
@@ -1941,6 +2016,10 @@ class Gen {
   std::optional<ValueId> call_fn(ast::EntityId f, ast::QualType result, std::span<const ValueId> args,
                                  std::size_t implicit, bool void_ = false, uint32_t byval = 0, uint32_t result_arg = 0,
                                  ir::Flags flags = 0) {
+    // The selected arm has a normal cleanup edge. An exception would also need to destroy
+    // any completed argument, older condition temporaries and, during cleanup, the result.
+    if (selecting_initializer_ && !std::ranges::binary_search(fn_.nonthrowing_functions, f))
+      throw Unsupported{"a potentially throwing call in a class initializer selection"};
     std::vector<ir::Ty> results;
     if (args.size() > 32) throw Unsupported{"a call with more than 32 arguments"};
     bool has_value = !void_ && !result_arg && cls(result) != TypeClass::void_;
@@ -2212,7 +2291,9 @@ class Gen {
   uint32_t byval_params_ = 0, result_param_ = 0;  // as ir::Function's
   std::vector<std::vector<Ending>> temps_;   // the open full-expressions' temporaries
   std::vector<At> epilogue_;                 // a destructor's DestroyMember statements
+  std::optional<Place> initialized_member_;  // a constructor's exceptional cleanup only
   int branches_ = 0;                         // conditionally evaluated operands entered
+  bool selecting_initializer_ = false;      // direct local class initializer and its cleanup
   int pinned_ = 0;                           // depth inside trees from other items (`Position`)
 };
 

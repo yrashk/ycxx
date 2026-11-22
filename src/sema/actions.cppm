@@ -1928,6 +1928,61 @@ public:
     });
   }
 
+  // [class.dtor]: use the class selected by the receiver and its destructor name.
+  Ex explicit_destroy(Ex object, bool arrow, NameId name, u32 end, u32 op_at, u32 name_at) {
+    const u32 begin = object.begin;
+    const Ex fail{NodeId::none, begin, end};
+    if (!object.ok()) return fail;
+    const QualType void_type = builtin(Builtin::void_);
+    if (dependent(object)) return dependent_node({object}, begin, end, void_type);
+    QualType type = object.type();
+    if (arrow) {
+      object = rvalue(object);
+      if (!object.ok()) return fail;
+      if (!types().is_pointer(object.type())) {
+        diag(op_at, Diag::arrow_of_non_pointer, object.type());
+        return fail;
+      }
+      type = types().pointee(object.type());
+    }
+    if (!types().is_class(type)) {
+      diag(name_at, Diag::not_supported, lex::Tk::tilde);  // scalar pseudo-destructors
+      return fail;
+    }
+    if (!require_complete(type, op_at)) return fail;
+    const EntityId owner = types().class_of(type);
+    if (w_->entities.rec(owner).name != name) {
+      const auto named = class_name(name, false, true, name_at);
+      if (named && types().is_dependent(*named)) return dependent_node({object}, begin, end, void_type);
+      if (!named || !same_unqualified(*named, type)) {
+        int paths = 0;
+        if (named && types().is_class(*named) && base_path(owner, types().class_of(*named), paths))
+          diag(name_at, Diag::not_supported, lex::Tk::tilde);
+        else
+          diag(name_at, Diag::destructor_type_mismatch, name, type);
+        return fail;
+      }
+    }
+    const ClassRec* record = class_rec(owner);
+    if (!record || record->virtual_destructor) {
+      diag(name_at, Diag::not_supported, lex::Tk::tilde);
+      return fail;
+    }
+    if (!record->destructor_usable) {
+      diag(name_at, Diag::object_unusable_destructor, type);
+      return fail;
+    }
+    if (!check_destructor_access(type, name_at) || !require_supported_virtual_layout(type, name_at)) return fail;
+    if (!arrow) {
+      if (!object.glvalue()) object = materialize(object, type, false);
+      if (!object.ok()) return fail;
+      const ExprInfo pointer{types().pointer(object.type()), ValueCategory::prvalue, 0};
+      object = node(ast::Unary{pointer, ast::UnaryOp::address_of, at(object, begin)}, begin, object.end, pointer);
+    }
+    const ExprInfo info{void_type, ValueCategory::prvalue, 0};
+    return node(ast::ExplicitDestroy{info, record->destructor, at(object, begin)}, begin, end, info);
+  }
+
   // [expr.ref]: `object.name`, or `object->name` with `arrow`.
   // Whether `object.name` names a member function template ([temp.names]/3): the object's class
   // has one of that name.
@@ -5534,6 +5589,10 @@ public:
         return !types().rec(type).fn_noexcept;
       }
       if (node.is<ast::MemberCall>()) return function_throwing(node.get<ast::MemberCall>().function);
+      if (node.is<ast::ExplicitDestroy>()) {
+        const auto receiver = expression_info(node.get<ast::ExplicitDestroy>().object.id).type;
+        return destructor_throwing(types().pointee(receiver), node.offset());
+      }
       if (node.is<ast::AssignmentCall>()) return function_throwing(node.get<ast::AssignmentCall>().function);
       if (node.is<ast::CtorCall>()) return function_throwing(node.get<ast::CtorCall>().ctor);
       if (node.is<ast::DeleteObject>()) return function_throwing(node.get<ast::DeleteObject>().function);

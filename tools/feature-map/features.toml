@@ -595,6 +595,7 @@ clauses = ['class.copy.elision', 'dcl.init.general', 'stmt.return']
 std = 'C++17'
 ftm = '__cpp_guaranteed_copy_elision'
 status = 'done'
+note = 'Direct automatic class initialization from a nonthrowing conditional or comma expression uses the destination object and cleans up the selected temporaries in order (#740).'
 probe = '''
 struct N { int v; N(int x) : v(x) {} N(const N&) = delete; N(N&&) = delete; };
 N make() { return N(7); }
@@ -1599,8 +1600,8 @@ clauses = ['special', 'class.ctor', 'class.ctor.general', 'class.default.ctor', 
 std = 'C++98'
 core = true
 status = 'done'
-issues = [157, 219]
-note = 'Ordinary constructors accept concrete noexcept specifications and check agreement with out-of-class definitions.'
+issues = [157, 219, 722]
+note = 'Ordinary constructors accept concrete noexcept specifications and check agreement with out-of-class definitions. Direct explicit destructor calls support an ordinary complete class with a nonvirtual destructor.'
 probe = '''
 int d = 0;
 struct S { int a, b; S(int x) : a(x), b(x + 1) {} ~S() { ++d; } };
