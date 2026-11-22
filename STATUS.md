@@ -692,7 +692,8 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
   build's source inputs by canonical types and resolved operations. It reports conflicting contracts
   with both origins. A per-body control-flow query and worklist check named affine and linear
   resources, including concrete template instances. Transfers invalidate the old owner.
-  A `move_transfers<T>` entry or its class annotation authorizes a written nonthrowing move.
+  A `move_transfers<T>` entry or its class annotation authorizes a nonthrowing move. A plain
+  wrapper around a move-only guard can use its implicit move constructor.
   Conditional and comma initializers preserve the selected path and evaluate earlier operands
   in order. The 1,280-resource fixture composes four source fragments and checks that an
   equivalent reflection edit reuses the caller's proof while a conflicting edit reports both origins.

@@ -56,12 +56,12 @@ with GCC and Clang while retaining the runtime guards.
 
 Add `move_transfers<Resource>` as a separate policy entry when the resource's
 `Resource(Resource&&) noexcept` constructor moves a live obligation and invalidates its source.
-With that declaration, YCXX can check direct move construction from a named owner. The
-constructor implements the transfer and the checker requires the source to be live and
-unborrowed. Use `[[=ycxx::ownership::move_constructor::transfers]]` on the resource's class
-declaration for the equivalent C++26 annotation.
+With that declaration, YCXX checks that the named source is live and unborrowed. A plain
+wrapper with a nonthrowing, move-only guard can use its implicit move constructor to transfer
+the obligation alongside its scalar fields. Use `[[=ycxx::ownership::move_constructor::transfers]]`
+on the resource's class declaration for the equivalent C++26 annotation.
 
-Save this example as `receipt.cpp`. `issue_receipt()` creates a linear receipt, the move
+Save this example as `receipt.cpp`. `issue_receipt()` creates a linear receipt, the implicit move
 transfers its obligation, and `close_receipt()` discharges it.
 
 ```cpp
@@ -72,13 +72,9 @@ namespace own = ycxx::ownership;
 
 struct Receipt {
   own::linear_state state;
-
-  Receipt() noexcept {}
-  Receipt(Receipt&& other) noexcept
-      : state(static_cast<own::linear_state&&>(other.state)) {}
 };
 
-Receipt issue_receipt() noexcept { return Receipt(); }
+Receipt issue_receipt() noexcept { return Receipt{}; }
 void close_receipt(Receipt&& receipt) noexcept { receipt.state.consume(); }
 
 using Rules = own::use_policy<own::linear<Receipt>, own::move_transfers<Receipt>,
