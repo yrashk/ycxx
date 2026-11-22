@@ -18,6 +18,12 @@ bool is_observation(OwnershipEffect effect) {
   return effect == OwnershipEffect::observe || effect == OwnershipEffect::verified_observe;
 }
 
+bool ownership_observation_value(const sema::World& world, QualType type) {
+  const auto canonical = world.types.canonical(type);
+  return !sema::Types::is_volatile(canonical) &&
+         (world.types.is_arithmetic(canonical) || world.types.rec(canonical).kind == sema::TypeKind::enum_);
+}
+
 struct PolicyAlias {
   EntityId entity;
   bool active;
@@ -278,7 +284,8 @@ bool compatible(const sema::World& world, const OwnershipPolicy& policy, EntityI
   const auto resource = world.types.canonical(arg.inner);
   if (policy.ownership(resource) == Ownership::ordinary) return false;
   if (is_observation(effect))
-    return !arg.rvalue_ref && ast::cv_of(resource) == ast::Cv::const_ && world.types.is_void(result);
+    return !arg.rvalue_ref && ast::cv_of(resource) == ast::Cv::const_ &&
+           (world.types.is_void(result) || ownership_observation_value(world, result));
   if (!arg.rvalue_ref || ast::cv_of(resource) != ast::Cv::none) return false;
   return effect == OwnershipEffect::transfer ? result == resource : world.types.is_void(result);
 }

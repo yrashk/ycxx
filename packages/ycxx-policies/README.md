@@ -1,8 +1,8 @@
 # YCXX Policies
 
-YCXX Policies is a standalone C++20 header library with ownership guards and scoped capability
-tokens. GCC and Clang enforce the ordinary C++ type rules and execute the guards. YCXX can
-additionally verify declared ownership policies when `-fcheck-policies` is enabled.
+YCXX Policies is a standalone C++20 header library with ownership guards, scoped capability
+tokens, effect budgets, and handlers. GCC and Clang enforce the ordinary C++ type rules and
+execute the guards. YCXX also verifies declared ownership and effect policies with `-fcheck-policies`.
 
 ## Use with GCC or Clang
 
@@ -100,8 +100,11 @@ Remove `close_receipt()` from `main` to see the difference in enforcement. YCXX 
 live receipt at compile time. A GCC or Clang build traps at scope exit.
 
 An observation marked `verified_observes<decltype(&inspect), &inspect>` asks YCXX to
-verify the observer's body. Supported bodies can copy scalar fields and update independent
-scalar storage. For separate builds, include the contract in the caller and provider and pass
+verify the observer's body. An observer may return `void`, an arithmetic value, or an enum
+value. A verified observer can return a field value or forward the original shared borrow
+to another verified observer and return its result. It can also update independent scalar
+storage. Bind a result to a local, such as `int value = inspect(owner);`, before using it in
+a larger expression. For separate builds, include the contract in the caller and provider and pass
 `-fcheck-policies` when compiling each object and at the final YCXX link. The checked link
 supports explicit objects and direct calls to unique strong definitions. GCC and Clang accept
 the metadata as ordinary C++20 types.
@@ -166,10 +169,11 @@ moved-from token, or a released token. GCC, Clang, and YCXX enforce the same rig
 On Linux x86-64, a YCXX-built issuer can also return a token to a hosted GCC or Clang caller.
 [Indirect results #661](https://github.com/yrashk/ycxx/issues/661) · [Type friendship #689](https://github.com/yrashk/ycxx/issues/689)
 
-Register a token specialization as an affine resource and describe its adapter functions with
-the ownership policies when callers should also get YCXX's scoped-borrow and use-after-release
-checks. A registered release adapter consumes the token, so subsequent observations are rejected
-in a checked caller.
+Wrap the token in your application's resource adapter to check capability use and ownership
+in one YCXX build. Register the wrapper as affine and declare the namespace functions that
+issue, observe, and release it. The observation calls the token's `require` guard and can
+return a copied value. A registered release consumes the wrapper, and YCXX rejects a later
+observation. The wrapper and its operations use the same C++ types in standard C++20 builds.
 
 ## Transitive effect bounds
 

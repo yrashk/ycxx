@@ -53,9 +53,11 @@ contracts declared with `observes` trust the implementation to keep the referenc
 call. Use `verified_observes<decltype(&inspect), &inspect>` in a policy or
 `[[=ycxx::ownership::operation::verified_observes]]` on the function to check its definition.
 When composed with a trusted observation contract for the same function, verification is required.
-For example, a verified observer can copy an arithmetic field to an independent scalar variable.
-It can also forward the original shared reference directly to another verified observer. The
-checker rejects address escape, mutation, capture, and calls outside this verification chain.
+An observer may return `void`, an arithmetic value, or an enum value. A verified observer can
+copy an arithmetic field into its result or to an independent scalar variable. It can also
+forward the original shared reference and return the next verified observer's result. The checker
+rejects address escape, mutation, capture, and calls outside this verification chain.
+Checked callers can bind a copied result to a local before using it in a larger expression.
 A syntax-only check needs the unique supported observer definition in the same invocation. For
 separate builds, include the observer contract in the caller and provider, compile both with
 `-fcheck-policies -c`, and pass the flag again at the final YCXX link. The checked link supports

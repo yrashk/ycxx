@@ -185,31 +185,56 @@ with tempfile.TemporaryDirectory() as directory:
         #include <ycxx/capabilities.hpp>
         #include "effects.hpp"
         namespace caps = ycxx::capabilities;
+        namespace own = ycxx::ownership;
         struct Store;
         using Grant = caps::token<Store, 1>;
         struct Store {
           static Grant grant() noexcept;
         };
         Grant Store::grant() noexcept { return Grant(1); }
-        int read_store(const Grant& authority, caps::scope_id scope) noexcept {
-          authority.require<1>(scope);
+        struct Permit { Grant grant; };
+        Permit acquire() noexcept { return {Store::grant()}; }
+        void release(Permit&& authority) noexcept { authority.grant.release(); }
+        int read_store(const Permit& authority) noexcept {
+          authority.grant.require<1>(1);
           return 21;
         }
-        int checked_read(const Grant& authority, caps::scope_id scope) noexcept {
-          return read_store(authority, scope);
+        int read_other_scope(const Permit& authority) noexcept {
+          authority.grant.require<1>(2);
+          return 22;
         }
-        using Rules = fx::use_policy<
-            fx::trusted<decltype(&read_store), &read_store, Read>,
-            fx::bound<decltype(&checked_read), &checked_read, Read>>;
+        int checked_read(const Permit& authority) noexcept {
+          int first = read_store(authority);
+          int second = read_store(authority);
+          return first + second;
+        }
+        using Once = fx::set<fx::at_most<file::Read, 1>>;
+        using Twice = fx::set<fx::at_most<file::Read, 2>>;
+        using Rules = own::use_policy<own::affine<Permit>,
+            own::creates<decltype(&acquire), &acquire>, own::consumes<decltype(&release), &release>,
+            own::observes<decltype(&read_store), &read_store>,
+            own::observes<decltype(&read_other_scope), &read_other_scope>,
+            own::observes<decltype(&checked_read), &checked_read>,
+            fx::trusted<decltype(&read_store), &read_store, Once>,
+            fx::trusted<decltype(&read_other_scope), &read_other_scope, Once>,
+            fx::bound<decltype(&checked_read), &checked_read, Twice>>;
         int main(int argc, char**) {
-          auto authority = Store::grant();
-          return checked_read(authority, argc == 1 ? 1 : 2) != 21;
+          auto authority = acquire();
+          if (argc > 1) return read_other_scope(authority);
+          int value = checked_read(authority);
+          release(static_cast<Permit&&>(authority));
+          return value != 42;
         }
     """
     capability = write("capability.cpp", capability_source)
     syntax(capability)
-    denied = write("capability_denied.cpp", capability_source.replace("&checked_read, Read", "&checked_read, Empty"))
+    denied = write("capability_denied.cpp", capability_source.replace("&checked_read, Twice", "&checked_read, Empty"))
     syntax(denied, error="effect bound of 'read_store' exceeds the caller's declared bound")
+    syntax(write("capability_over_budget.cpp", capability_source.replace("&checked_read, Twice", "&checked_read, Once")),
+           error="exceeds its usage grade of 1")
+    syntax(write("capability_after_release.cpp", capability_source.replace(
+        "  return value != 42;", "  int again = checked_read(authority);\n  return again != 42;")),
+        error="affine resource 'authority' may already have been consumed")
 
     handler_source = """\
         #include "effects.hpp"
@@ -319,6 +344,9 @@ with tempfile.TemporaryDirectory() as directory:
         "[[=fx::contract<Empty>{}]] ", ""))
 
     darwin = [*base, "--no-daemon", "--target=arm64-apple-darwin"]
+    darwin_capability = root / "darwin-capability"
+    invoke([*darwin, capability, "-o", darwin_capability])
+    assert darwin_capability.read_bytes().startswith(bytes.fromhex("cffaedfe"))
     darwin_objects = []
     for source in (handler_caller, handler_peer, unchecked_handler_peer):
         obj = source.with_suffix(".darwin.o")
@@ -338,8 +366,13 @@ with tempfile.TemporaryDirectory() as directory:
         namespace own = ycxx::ownership;
         namespace fx = ycxx::effects;
         struct Ticket { int value; };
-        void inspect(const Ticket&) noexcept;
-        void forward_ticket(const Ticket&) noexcept;
+        #ifdef WIDE_RESULT
+        using Observation = long;
+        #else
+        using Observation = int;
+        #endif
+        Observation inspect(const Ticket&) noexcept;
+        int forward_ticket(const Ticket&) noexcept;
         Ticket issue() noexcept;
         void finish(Ticket&&) noexcept;
         #ifndef EFFECT_ONLY
@@ -356,11 +389,11 @@ with tempfile.TemporaryDirectory() as directory:
     """)
     joint_leaf = write("joint_leaf.cpp", """\
         #include "joint.hpp"
-        void inspect(const Ticket& ticket) noexcept { int value = ticket.value; (void)value; }
+        Observation inspect(const Ticket& ticket) noexcept { return ticket.value; }
     """)
     joint_forward = write("joint_forward.cpp", """\
         #include "joint.hpp"
-        void forward_ticket(const Ticket& ticket) noexcept { inspect(ticket); }
+        int forward_ticket(const Ticket& ticket) noexcept { return inspect(ticket); }
     """)
     joint_entry = write("joint_entry.cpp", """\
         #include "joint.hpp"
@@ -368,10 +401,35 @@ with tempfile.TemporaryDirectory() as directory:
         void finish(Ticket&& ticket) noexcept { if (ticket.value != 42) __builtin_trap(); }
         int main() {
           auto ticket = issue();
-          forward_ticket(ticket);
+          int observed = 0;
+          {
+            const auto& view = ticket;
+            int value = forward_ticket(view);
+            observed = value;
+          }
           finish(static_cast<Ticket&&>(ticket));
+          return observed != 42;
         }
     """)
+    joint_annotation = write("joint_annotation.cpp", """\
+        #include "joint.hpp"
+        [[=own::operation::verified_observes]] Observation inspect(const Ticket&) noexcept;
+    """)
+    syntax(joint_entry, joint_forward, joint_leaf, joint_annotation)
+    syntax(write("observer_enum_result.cpp", """\
+        #include <ycxx/ownership.hpp>
+        namespace own = ycxx::ownership;
+        enum class Level { low, high };
+        struct [[=own::resource_mode::affine]] Reading { Level level; };
+        [[=own::operation::verified_observes]] Level inspect(const Reading& reading) noexcept {
+          return reading.level;
+        }
+    """))
+    syntax(write("observer_pointer_result.cpp", """\
+        #include "joint.hpp"
+        const int* expose(const Ticket& ticket) noexcept { return &ticket.value; }
+        using Invalid = own::use_policy<own::verified_observes<decltype(&expose), &expose>>;
+    """), error="ownership operation signature does not match")
 
     def verify_joint_proofs(target, output):
         objects = [source.with_suffix(".joint.o") for source in (joint_entry, joint_forward, joint_leaf)]
@@ -385,6 +443,11 @@ with tempfile.TemporaryDirectory() as directory:
             invoke([*target, f"-D{retained}", "-c", joint_leaf, "-o", incomplete])
             outcome = invoke([*target, *objects[:2], incomplete, "-o", denied], error=missing)
             assert "has no matching guarantee" in outcome and not denied.exists(), outcome
+        invoke([*target, "-DWIDE_RESULT", "-c", joint_leaf, "-o", incomplete])
+        outcome = invoke([*target, *objects[:2], incomplete, "-o", denied], error="has no matching guarantee")
+        assert any("verified observation" in line and "has no matching guarantee" in line
+                   for line in outcome.splitlines()), outcome
+        assert not denied.exists()
 
     joint_darwin = root / "joint-darwin"
     verify_joint_proofs(darwin, joint_darwin)

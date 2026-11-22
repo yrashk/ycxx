@@ -700,7 +700,8 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
   The checker rejects consuming or transferring an owner during a shared borrow and rejects
   exposing the borrow through an address, capture, or unregistered operation.
   A `verified_observes` contract checks the observer's scalar reads and forwarding of the
-  original shared borrow to other verified observers. Checked ELF and Mach-O objects carry
+  original shared borrow to other verified observers. An observer can return a copied
+  arithmetic or enum value. Checked ELF and Mach-O objects carry
   observation requirements and guarantees through each forwarding function. The checked link
   matches them to unique strong definitions in explicit input objects. One forwarded observation
   can also require a verified effect bound from the selected provider.

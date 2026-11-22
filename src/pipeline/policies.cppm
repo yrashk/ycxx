@@ -383,9 +383,7 @@ class OwnershipFlowBuilder {
   }
 
   bool observation_scalar(QualType type) const {
-    const auto canonical = world_.types.canonical(type);
-    if ((std::to_underlying(ast::cv_of(canonical)) & std::to_underlying(ast::Cv::volatile_)) != 0) return false;
-    return world_.types.is_arithmetic(canonical) || world_.types.rec(canonical).kind == sema::TypeKind::enum_;
+    return ownership_observation_value(world_, type);
   }
 
   // Assignments can update scalar storage independent of the borrow. Reference variables
