@@ -7155,7 +7155,7 @@ public:
           if (!s_.deduce_return(nullptr, ps_.pos() > 0 ? ps_.pos() - 1 : 0)) root = {};
       }
       s_.pop_scope();
-      if (root.ok() && ctor) root = constructor_body(std::move(inits), root);
+      if (root.ok() && ctor) root = constructor_body(std::move(inits), root, signature.fn_noexcept);
       if (root.ok() && (f->flags & sema::decl_flag::destructor)) root = destructor_body(s_, s_.current_class, root);
     }
     std::vector<ast::LocalRec> locals(s_.locals().begin(), s_.locals().end());
@@ -7365,17 +7365,23 @@ private:
   // `MemberInit` of field `~0u`); then every member in declaration order, from its
   // mem-initializer, its default member initializer, or default-initialized; then the compound
   // statement.
-  Ex constructor_body(ConstructorInitializers inits, Ex body) {
+  Ex constructor_body(ConstructorInitializers inits, Ex body, bool nonthrowing) {
     std::vector<ast::Child> stmts;
+    const sema::ClassRec& rec = p_->classes_.rec(s_.current_class);
     if (inits.delegation) {
       const Ex& init = *inits.delegation;
       if (!init.ok()) return {};
+      if (rec.union_ && !nonthrowing && std::ranges::any_of(rec.fields, [&](const sema::FieldRec& field) {
+            return s_.destructor_of(field.type) != EntityId::none;
+          })) {
+        s_.diag(init.begin, Diag::union_constructor_unwind);
+        return {};
+      }
       Ex delegate = s_.node(ast::DelegatingInit{sema::Sema::at(init, init.begin)}, init.begin, init.end);
       stmts.push_back(sema::Sema::at(delegate, 0));
       stmts.push_back(sema::Sema::at(body, 0));
       return s_.node(ast::Compound{b_.list(stmts)}, 0, body.end);
     }
-    const sema::ClassRec& rec = p_->classes_.rec(s_.current_class);
     if (rec.union_ && inits.subobjects.size() > 1) {
       s_.diag(body.begin, Diag::too_many_initializers, s_.types().class_type(s_.current_class));
       return {};
@@ -7406,7 +7412,14 @@ private:
       else if (s_.types().is_reference(f.type)) s_.diag(0, Diag::reference_uninitialized);  // [class.base.init]/10
       else init = s_.default_init(f.type, 0, 0);
       if (!init.ok()) continue;
-      if (rec.union_ && !s_.check_destructor_access(s_.types().innermost_array_element(f.type), init.begin)) continue;
+      if (rec.union_) {
+        if (!s_.check_destructor_access(s_.types().innermost_array_element(f.type), init.begin)) return {};
+        // [except.ctor]: if construction unwinds, the completed variant must be cleaned up.
+        if (!nonthrowing && s_.destructor_of(f.type) != EntityId::none) {
+          s_.diag(init.begin, Diag::union_constructor_unwind);
+          return {};
+        }
+      }
       stmts.push_back({s_.node(ast::MemberInit{i, f.type, {init.id, 0}}, 0, 0).id, 0});
     }
     stmts.push_back(sema::Sema::at(body, 0));

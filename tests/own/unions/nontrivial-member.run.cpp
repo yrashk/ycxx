@@ -22,7 +22,7 @@ union Choice {
   long fallback;
   Choice() noexcept {}
   Choice(int n) noexcept : owner{n} {}
-  Choice(long n) noexcept : fallback(n) {}
+  Choice(long n) : fallback(n) {}
   ~Choice() noexcept { destructions += 100; }
 };
 

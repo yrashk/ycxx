@@ -1478,6 +1478,10 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   observe the union and member destructor effects independently.
 - An omitted aggregate member of union type is initialized from an empty braced list,
   so its first variant can run a constructor.
+- A union constructor that selects a nontrivially destructible member requires a
+  nonthrowing exception specification. A potentially throwing delegating constructor
+  with a nontrivial variant also receives a diagnostic. Exceptional cleanup for this
+  shape is tracked in #738.
 - Remaining implicit special-member rules and aggregate designator forms stay in #203.
   Direct explicit destructor calls are tracked in #722.
 

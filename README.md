@@ -285,7 +285,9 @@ written default member initializer are value-initialized.
   [#244](https://github.com/yrashk/ycxx/issues/244)
 - ordinary named unions with a written destructor can hold nontrivially destructible members.
   The member's copy constructor can be trivial or deleted. An explicit union constructor
-  initializes its selected member. [#203](https://github.com/yrashk/ycxx/issues/203)
+  initializes its selected member. Construction of a nontrivially destructible variant
+  uses a nonthrowing constructor. [#203](https://github.com/yrashk/ycxx/issues/203) ·
+  [#738](https://github.com/yrashk/ycxx/issues/738)
 - classes and unions: data and static members, named data members of unnamed union type,
   member functions, constructors including ordinary delegation, and destructors
   with RAII, aggregate and designated initialization, namespace-scope objects initialized by
