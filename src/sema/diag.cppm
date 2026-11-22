@@ -336,6 +336,8 @@ enum class Diag : std::uint32_t {
   expansion_without_pack [[=message{Severity::error, "the pattern of a pack expansion names no parameter pack"}]],
   empty_fold [[=message{Severity::error, "a fold over an empty pack needs an initial value for this operator"}]],
   pack_not_last [[=message{Severity::error, "a template parameter pack is followed by a parameter that is neither deduced nor defaulted"}]],
+  pack_index_range [[=message{Severity::error, "pack index {0} is out of range for a pack of {1} elements"}]],
+  pack_index_not_constant [[=message{Severity::error, "a pack index must be a non-negative integral constant expression"}]],
   member_named_as_class [[=message{Severity::error, "a member type cannot have the name of its class '{0:n}'"}]],
   trait_not_applicable [[=message{Severity::error, "this type trait does not apply to '{0:t}'"}]],
   constraint_not_bool [[=message{Severity::error, "an atomic constraint must be of type bool, not '{0:t}'"}]],
