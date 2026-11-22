@@ -3460,19 +3460,56 @@ public:
     if (args.size() < fixed || (!trailing_pack && args.size() != fixed) ||
         std::ranges::any_of(args.first(fixed), [&](const TemplateArg& a) { return t.is_expansion(a); }))
       return std::nullopt;
-    QualType result = fn.inner;
-    if (!types().is_integral(result) && !types().is_enum(result)) return std::nullopt;
-    auto value = ins().intern_value(ast::VDepCall{selected->entity, ins().intern_seq(args)});
-    return literal(result, value, ValueCategory::prvalue, callee.begin, end);
+    return dependent_call_value(selected->entity, fn.inner, args, callee.begin, end);
   }
 
-  std::optional<TemplateArg> evaluate_dependent_call(EntityId templ, std::span<const TemplateArg> args, u32 at) {
-    auto decl = q_->template_decl(templ);
+  std::optional<Ex> dependent_immediate_call(Ex callee, std::span<const Ex> args, u32 end) {
+    auto function = as<ast::DeclRef>(callee);
+    if (!function || !unqualified_name(callee) || !types().is_function(callee.type()) ||
+        !is_consteval(function->entity) || deleted_.contains(std::to_underlying(function->entity)) || !any_dependent(args))
+      return std::nullopt;
+    const auto& entity = w_->entities.rec(function->entity);
+    if (entity.linkage != ast::Linkage::external || entity.lang != LangLinkage::cxx) return std::nullopt;
+    const auto fn = types().rec(callee.type());
+    if (fn.variadic || fn.params.size() != args.size() ||
+        !std::ranges::all_of(fn.params, [&](QualType parameter) { return types().is_integral(parameter); }))
+      return std::nullopt;
+    std::vector<TemplateArg> operands;
+    operands.reserve(args.size());
+    for (Ex arg : args) {
+      if (!arg.ok() || !types().is_integral(arg.type())) return std::nullopt;
+      while (auto paren = as<ast::Paren>(arg)) arg.id = paren->operand.id;
+      auto value = as<ast::Literal>(arg);
+      if (!value || (!ins().values.is<ast::VInt>(value->value) && !ins().values.is<ast::VDepParam>(value->value)))
+        return std::nullopt;
+      if (ins().values.is<ast::VDepParam>(value->value) &&
+          ins().values.get<ast::VDepParam>(value->value).depth == dependent_depth)
+        return std::nullopt;
+      operands.push_back(TemplateArg{TemplateArgKind::value, types().canonical(Types::unqualified(arg.type())), value->value});
+    }
+    return dependent_call_value(function->entity, fn.inner, operands, callee.begin, end);
+  }
+
+  std::optional<Ex> dependent_call_value(EntityId callee, QualType type, std::span<const TemplateArg> args, u32 begin, u32 end) {
+    if (!types().is_integral(type) && !types().is_enum(type)) return std::nullopt;
+    auto value = ins().intern_value(ast::VDepCall{callee, ins().intern_seq(args)});
+    return literal(type, value, ValueCategory::prvalue, begin, end);
+  }
+
+  std::optional<TemplateArg> evaluate_dependent_call(EntityId function, std::span<const TemplateArg> args, u32 at) {
+    auto decl = q_->template_decl(function);
     if (!decl || !(decl->flags & decl_flag::consteval_)) return std::nullopt;
-    Ex callee = decls_expr({*decl}, false, w_->entities.rec(templ).name, at, at);
-    explicit_template_args(callee, std::vector<TemplateArg>(args.begin(), args.end()));
+    Ex callee = decls_expr({*decl}, false, w_->entities.rec(function).name, at, at);
+    std::vector<Ex> operands;
+    if (decl->flags & decl_flag::template_) {
+      explicit_template_args(callee, std::vector<TemplateArg>(args.begin(), args.end()));
+    } else {
+      operands.reserve(args.size());
+      for (const TemplateArg& arg : args)
+        operands.push_back(literal(arg.type, arg.value, ValueCategory::prvalue, at, at));
+    }
     const auto before = diag_count();
-    Ex invocation = call(callee, {}, at, at);
+    Ex invocation = call(callee, std::move(operands), at, at);
     if (!invocation.ok()) {
       // The synthesized call is in the immediate context of template substitution.
       drop_failures(before);

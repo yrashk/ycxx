@@ -127,9 +127,10 @@ struct [[=dependent]] VDepVariable {
   SeqId<TemplateArg> args;
 };
 
-// A call with no function arguments to a named immediate function template.
+// A call to a named immediate function. The arguments are explicit types for a function
+// template without function arguments, or ordinary values for a non-template function.
 struct [[=dependent]] VDepCall {
-  EntityId templ;
+  EntityId callee;
   SeqId<TemplateArg> args;
 };
 
