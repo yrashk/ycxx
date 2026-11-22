@@ -1,24 +1,21 @@
-// The interactive trace browser (#245): a full-screen view of a finished trace on the terminal,
-// in plain ANSI over termios.
-//
-// - The tree: what each request asked of the engine, nested by demand, with a pane on the right
-//   for the selected cell (its outcome, times, worker, subtree, and its value when the kind can
-//   show one).
-// - The timeline: one lane per pool worker over the trace's span, each slice colored by the
-//   outcome of the deepest cell the worker was in; a cursor scrubs through time and Enter jumps to
-//   the cell under it in the tree.
-// - Filters: `/` by kind, key, `is:<outcome>` or `w:<worker>`; `w` cycles one worker, 0–9 picks
-//   one, `a` shows all again.
+// The interactive trace browser on a terminal (#245): raw mode on the alternate screen over
+// termios, with SGR mouse reports (#635), drawing `:view`'s frames and feeding it what the terminal
+// sends. The terminal is restored when the browser ends, and on a signal or a crash.
 module;
+#include <errno.h>
 #include <fcntl.h>
-#include <sys/select.h>
+#include <poll.h>
+#include <signal.h>
 #include <sys/ioctl.h>
+#include <sys/select.h>
+#include <sys/wait.h>
 #include <termios.h>
 #include <unistd.h>
 export module ycxx.trace:browse;
 
 import std;
 import :model;
+import :view;
 
 export namespace ycxx::trace {
 
@@ -46,7 +43,49 @@ bool browse(Tree& tree, Feed* feed = nullptr);
 namespace ycxx::trace {
 namespace {
 
-// The terminal in raw mode on the alternate screen, restored when this goes away.
+// Mouse reports on: clicks (1000), motion while a button is down (1002), in SGR form (1006), which
+// has no limit on columns and tells a release from a press. Autowrap off (7): a line the terminal
+// draws wider than we count (a glyph it shows double-width) is cut, and never scrolls the screen.
+// Off in the reverse order.
+constexpr std::string_view enter_seq = "\x1b[?1049h\x1b[?25l\x1b[?7l\x1b[?1000h\x1b[?1002h\x1b[?1006h";
+constexpr std::string_view leave_seq = "\x1b[?1006l\x1b[?1002l\x1b[?1000l\x1b[?7h\x1b[0m\x1b[?25h\x1b[?1049l";
+
+// What a signal handler needs to give the terminal back: async-signal-safe calls only.
+struct Restore {
+  int fd = -1;
+  termios saved{};
+  int winch[2] = {-1, -1};  // SIGWINCH wakes the input wait through this pipe
+};
+Restore restore_state;
+// Signals that end the process: the terminal is restored, then the earlier action runs.
+constexpr std::array fatal_signals{SIGHUP, SIGINT, SIGQUIT, SIGTERM, SIGABRT, SIGSEGV, SIGBUS, SIGFPE, SIGILL};
+std::array<struct sigaction, fatal_signals.size()> previous{};
+struct sigaction previous_winch{};
+alignas(16) std::array<char, 64 * 1024> alt_stack{};
+stack_t previous_stack{};
+
+void give_back() noexcept {
+  if (restore_state.fd < 0) return;
+  (void)::write(restore_state.fd, leave_seq.data(), leave_seq.size());
+  ::tcsetattr(restore_state.fd, TCSAFLUSH, &restore_state.saved);
+}
+extern "C" void on_fatal(int sig) {
+  give_back();
+  restore_state.fd = -1;
+  for (std::size_t i = 0; i < fatal_signals.size(); ++i) {
+    if (fatal_signals[i] == sig) ::sigaction(sig, &previous[i], nullptr);
+  }
+  ::raise(sig);
+}
+extern "C" void on_winch(int) {
+  const int saved = errno;
+  const char c = 1;
+  if (restore_state.winch[1] >= 0) (void)::write(restore_state.winch[1], &c, 1);
+  errno = saved;
+}
+
+// The terminal in raw mode on the alternate screen, with mouse reports, restored when this goes
+// away (or on a fatal signal).
 class Terminal {
  public:
   Terminal() {
@@ -57,6 +96,34 @@ class Terminal {
       fd_ = -1;
       return;
     }
+    if (::pipe(restore_state.winch) == 0) {
+      for (int p : restore_state.winch) {
+        ::fcntl(p, F_SETFL, ::fcntl(p, F_GETFL) | O_NONBLOCK);
+        ::fcntl(p, F_SETFD, FD_CLOEXEC);
+      }
+    }
+    restore_state.fd = fd_;
+    restore_state.saved = saved_;
+    // A stack overflow's SIGSEGV runs on a stack of its own.
+    stack_t alt{};
+    alt.ss_sp = alt_stack.data();
+    alt.ss_size = alt_stack.size();
+    ::sigaltstack(&alt, &previous_stack);
+    struct sigaction sa{};
+    sa.sa_handler = on_fatal;
+    sa.sa_flags = SA_ONSTACK;
+    sigfillset(&sa.sa_mask);  // one restore, never nested
+    for (std::size_t i = 0; i < fatal_signals.size(); ++i) {
+      ::sigaction(fatal_signals[i], nullptr, &previous[i]);
+      // An ignored signal (nohup, a background job) stays ignored.
+      if (previous[i].sa_handler != SIG_IGN) ::sigaction(fatal_signals[i], &sa, nullptr);
+    }
+    struct sigaction wa{};
+    wa.sa_handler = on_winch;
+    sigemptyset(&wa.sa_mask);
+    wa.sa_flags = SA_RESTART;
+    ::sigaction(SIGWINCH, &wa, &previous_winch);
+
     termios raw = saved_;
     raw.c_iflag &= ~static_cast<tcflag_t>(BRKINT | ICRNL | INPCK | ISTRIP | IXON);
     raw.c_oflag &= ~static_cast<tcflag_t>(OPOST);
@@ -65,12 +132,19 @@ class Terminal {
     raw.c_cc[VMIN] = 1;
     raw.c_cc[VTIME] = 0;
     ::tcsetattr(fd_, TCSAFLUSH, &raw);
-    write("\x1b[?1049h\x1b[?25l");
+    write(enter_seq);
   }
   ~Terminal() {
     if (fd_ < 0) return;
-    write("\x1b[0m\x1b[?25h\x1b[?1049l");
-    ::tcsetattr(fd_, TCSAFLUSH, &saved_);
+    give_back();
+    restore_state.fd = -1;
+    for (std::size_t i = 0; i < fatal_signals.size(); ++i) ::sigaction(fatal_signals[i], &previous[i], nullptr);
+    ::sigaction(SIGWINCH, &previous_winch, nullptr);
+    ::sigaltstack(&previous_stack, nullptr);
+    for (int& p : restore_state.winch) {
+      if (p >= 0) ::close(p);
+      p = -1;
+    }
     ::close(fd_);
   }
   Terminal(const Terminal&) = delete;
@@ -84,589 +158,242 @@ class Terminal {
   void write(std::string_view s) const {
     while (!s.empty()) {
       const auto n = ::write(fd_, s.data(), s.size());
+      if (n < 0 && errno == EINTR) continue;
       if (n <= 0) return;
       s.remove_prefix(static_cast<std::size_t>(n));
     }
   }
-  // One key: a byte, or an escape sequence as one string; empty when `feed` became readable first.
-  std::string key(int feed = -1) const {
-    if (feed >= 0) {
-      // select, not poll: macOS's poll does not support devices, and flags the terminal invalid.
+  void draw(const Frame& f) const {
+    // Each line at its own row (each is the screen's width): nothing depends on where the last
+    // line left the cursor.
+    std::string out;
+    for (std::size_t i = 0; i < f.lines.size(); ++i) out += std::format("\x1b[{};1H{}", i + 1, f.lines[i]);
+    if (f.cursor) out += std::format("\x1b[{};{}H\x1b[?25h", f.cursor->first + 1, f.cursor->second + 1);
+    else out += "\x1b[?25l";
+    write(out);
+  }
+
+  enum class Wake : std::uint8_t { input, feed, resize, tick };
+  // Waits for the terminal, the feed or a resize. select, not poll: macOS's poll does not support
+  // devices, and flags the terminal invalid.
+  // `tick`: after that long with nothing to read (none: wait however long).
+  Wake wait(int feed, std::optional<std::chrono::milliseconds> tick = std::nullopt) const {
+    if (pending_) return Wake::input;
+    const int winch = restore_state.winch[0];
+    while (true) {
       fd_set in;
-      do {
-        FD_ZERO(&in);
-        FD_SET(fd_, &in);
-        FD_SET(feed, &in);
-      } while (::select(std::max(fd_, feed) + 1, &in, nullptr, nullptr, nullptr) < 0);
-      if (!FD_ISSET(fd_, &in)) return {};
+      FD_ZERO(&in);
+      FD_SET(fd_, &in);
+      if (feed >= 0) FD_SET(feed, &in);
+      if (winch >= 0) FD_SET(winch, &in);
+      timeval tv{0, tick ? static_cast<suseconds_t>(tick->count() * 1000) : 0};
+      const int r = ::select(std::max({fd_, feed, winch}) + 1, &in, nullptr, nullptr, tick ? &tv : nullptr);
+      if (r < 0) continue;
+      if (r == 0) return Wake::tick;
+      if (winch >= 0 && FD_ISSET(winch, &in)) {
+        char drain[64];
+        while (::read(winch, drain, sizeof drain) > 0) {
+        }
+        return Wake::resize;
+      }
+      if (FD_ISSET(fd_, &in)) return Wake::input;
+      if (feed >= 0 && FD_ISSET(feed, &in)) return Wake::feed;
     }
+  }
+  // One input: a byte, or an escape sequence as one string; `q` when the terminal is gone.
+  std::string read_input() {
     char c = 0;
-    if (::read(fd_, &c, 1) != 1) return "q";
+    if (!next(c, -1)) return "q";
     if (c != '\x1b') return std::string(1, c);
     std::string seq(1, c);
-    // The rest of a sequence arrives at once; a lone Escape does not.
-    termios t{};
-    ::tcgetattr(fd_, &t);
-    termios quick = t;
-    quick.c_cc[VMIN] = 0;
-    quick.c_cc[VTIME] = 1;
-    ::tcsetattr(fd_, TCSANOW, &quick);
-    while (seq.size() < 8) {
+    // The rest of a sequence arrives at once; a lone Escape does not. ESC [ … final (0x40–0x7e),
+    // ESC O x, ESC x (Alt+x); mouse reports `ESC [ < b;x;y M` and the legacy `ESC [ M` with three
+    // bytes. Within a mouse report the wait is longer, so one split by a slow link stays whole.
+    while (seq.size() < 32) {
+      const bool report = seq.starts_with("\x1b[<") || seq.starts_with("\x1b[M");
       char n = 0;
-      if (::read(fd_, &n, 1) != 1) break;
+      if (!next(n, report ? 1000 : 100)) break;
+      if (n == '\x1b') {
+        pending_ = n;  // the next sequence starts: this one (a lone Escape) ends here
+        break;
+      }
       seq += n;
-      if (seq.size() > 2 && (std::isalpha(static_cast<unsigned char>(n)) || n == '~')) break;
+      if (seq.size() == 2 && n != '[' && n != 'O') break;
+      if (seq.size() == 3 && seq[1] == 'O') break;
+      if (seq.starts_with("\x1b[M")) {
+        if (seq.size() == 6) break;
+        continue;
+      }
+      if (seq.size() > 2 && seq[1] == '[' && n >= 0x40 && n <= 0x7e && !(seq.size() == 3 && n == '<')) break;
     }
-    ::tcsetattr(fd_, TCSANOW, &t);
     return seq;
   }
 
  private:
+  // The next byte: one pushed back, or one read within `ms` milliseconds (-1: however long).
+  bool next(char& c, int ms) {
+    if (pending_) {
+      c = *pending_;
+      pending_.reset();
+      return true;
+    }
+    if (ms >= 0) {
+      // A signal (a resize) in the middle of the wait waits out the rest, so it never cuts a
+      // sequence in two.
+      const auto until = std::chrono::steady_clock::now() + std::chrono::milliseconds(ms);
+      while (true) {
+        const auto left = std::chrono::duration_cast<std::chrono::microseconds>(until - std::chrono::steady_clock::now()).count();
+        if (left <= 0) return false;
+        fd_set in;
+        FD_ZERO(&in);
+        FD_SET(fd_, &in);
+        timeval tv{static_cast<time_t>(left / 1'000'000), static_cast<suseconds_t>(left % 1'000'000)};
+        const int r = ::select(fd_ + 1, &in, nullptr, nullptr, &tv);
+        if (r > 0) break;
+        if (r == 0 || errno != EINTR) return false;
+      }
+    }
+    while (true) {
+      const auto n = ::read(fd_, &c, 1);
+      if (n == 1) return true;
+      if (n < 0 && errno == EINTR) continue;
+      return false;
+    }
+  }
+
   int fd_ = -1;
   termios saved_{};
+  std::optional<char> pending_;
 };
 
-// Display columns of a string with SGR sequences in it (a code point is one column).
-std::size_t columns(std::string_view s) {
-  std::size_t n = 0;
-  for (std::size_t i = 0; i < s.size(); ++i) {
-    if (s[i] == '\x1b') {
-      while (i < s.size() && s[i] != 'm') ++i;
+// The clipboard beyond the terminal (#636). OSC 52 reaches it from anywhere a terminal supports it
+// (over SSH too), but some terminals (Terminal.app) ignore it, so a local session also runs a
+// command: `YCXX_CLIPBOARD` when set (`osc52`: none), else the first of pbcopy, wl-copy (Wayland),
+// xclip and xsel (X) on the PATH. Over SSH none runs: it would copy on the remote host.
+std::optional<std::string> clipboard_command() {
+  if (const char* c = std::getenv("YCXX_CLIPBOARD"); c && *c) {
+    if (std::string_view(c) == "osc52") return std::nullopt;
+    return std::string(c);
+  }
+  if (std::getenv("SSH_CONNECTION") || std::getenv("SSH_TTY")) return std::nullopt;
+  const auto found = [](std::string_view name) {
+    const char* path = std::getenv("PATH");
+    for (auto dir : std::string_view(path ? path : "/usr/bin:/bin") | std::views::split(':')) {
+      const std::string file = std::format("{}/{}", std::string_view(dir.begin(), dir.end()), name);
+      if (::access(file.c_str(), X_OK) == 0) return true;
+    }
+    return false;
+  };
+  const bool wayland = std::getenv("WAYLAND_DISPLAY"), x11 = std::getenv("DISPLAY");
+  if (found("pbcopy")) return "pbcopy";
+  if (wayland && found("wl-copy")) return "wl-copy";
+  if (x11 && found("xclip")) return "xclip -selection clipboard";
+  if (x11 && found("xsel")) return "xsel --clipboard --input";
+  return std::nullopt;
+}
+// Runs `command` under /bin/sh with `text` on its standard input; true if it exits 0 within 2 s.
+bool run_clipboard(const std::string& command, std::string_view text) {
+  int in[2];
+  if (::pipe(in) != 0) return false;
+  const pid_t pid = ::fork();
+  if (pid < 0) {
+    ::close(in[0]);
+    ::close(in[1]);
+    return false;
+  }
+  if (pid == 0) {
+    // Only async-signal-safe calls between fork and exec: the parent may have threads. A process
+    // group of its own, so a timeout reaches whatever the command started.
+    ::setpgid(0, 0);
+    ::dup2(in[0], 0);
+    ::close(in[0]);
+    ::close(in[1]);
+    const int null = ::open("/dev/null", O_WRONLY);
+    if (null >= 0) ::dup2(null, 1), ::dup2(null, 2);
+    ::execl("/bin/sh", "sh", "-c", command.c_str(), static_cast<char*>(nullptr));
+    ::_exit(127);
+  }
+  ::setpgid(pid, pid);  // as the child does: whichever runs first
+  ::close(in[0]);
+  // Everything within 2 s, the writing too: a command that does not read never holds the browser.
+  const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+  const auto left_ms = [&] {
+    return static_cast<int>(std::max<std::int64_t>(0, std::chrono::duration_cast<std::chrono::milliseconds>(until - std::chrono::steady_clock::now()).count()));
+  };
+  // A command that stops reading must not kill the browser with SIGPIPE.
+  struct sigaction ignore{}, old{};
+  ignore.sa_handler = SIG_IGN;
+  ::sigaction(SIGPIPE, &ignore, &old);
+  ::fcntl(in[1], F_SETFL, ::fcntl(in[1], F_GETFL) | O_NONBLOCK);
+  bool written = true;
+  for (std::string_view rest = text; !rest.empty();) {
+    const auto n = ::write(in[1], rest.data(), rest.size());
+    if (n > 0) {
+      rest.remove_prefix(static_cast<std::size_t>(n));
       continue;
     }
-    if ((static_cast<unsigned char>(s[i]) & 0xc0) != 0x80) ++n;
+    if (n < 0 && errno == EINTR) continue;
+    pollfd p{in[1], POLLOUT, 0};
+    if (n < 0 && errno == EAGAIN && left_ms() > 0 && ::poll(&p, 1, left_ms()) > 0) continue;
+    written = false;
+    break;
   }
-  return n;
+  ::close(in[1]);
+  ::sigaction(SIGPIPE, &old, nullptr);
+  int status = 0;
+  while (true) {
+    if (::waitpid(pid, &status, WNOHANG) == pid) return written && WIFEXITED(status) && WEXITSTATUS(status) == 0;
+    if (left_ms() == 0) break;
+    ::usleep(10'000);
+  }
+  ::kill(-pid, SIGKILL);
+  ::waitpid(pid, &status, 0);
+  return false;
 }
-// `s` cut or padded to exactly `width` columns, with attributes reset at the end.
-std::string fit(std::string_view s, std::size_t width) {
-  std::string out;
-  std::size_t n = 0;
-  for (std::size_t i = 0; i < s.size(); ++i) {
-    if (s[i] == '\x1b') {
-      const std::size_t j = s.find('m', i);
-      out += s.substr(i, j == std::string_view::npos ? s.size() - i : j - i + 1);
-      i = j == std::string_view::npos ? s.size() : j;
-      continue;
-    }
-    const bool lead = (static_cast<unsigned char>(s[i]) & 0xc0) != 0x80;
-    if (lead && n == width) break;
-    if (lead) ++n;
-    out += s[i];
-  }
-  out += "\x1b[0m";
-  out.append(width - n, ' ');
-  return out;
-}
-std::string paint(std::string_view params, std::string_view text) { return std::format("\x1b[{}m{}\x1b[0m", params, text); }
-// The selected row: reverse video, kept across the resets inside it.
-std::string selected(std::string_view line) {
-  std::string out = "\x1b[7m";
-  for (std::size_t i = 0; i < line.size(); ++i) {
-    if (line.substr(i).starts_with("\x1b[0m")) {
-      out += "\x1b[0;7m";
-      i += 3;
-    } else {
-      out += line[i];
-    }
-  }
-  return out;
-}
-
-// Splits text into lines of at most `width` columns.
-std::vector<std::string> wrap(std::string_view text, std::size_t width) {
-  std::vector<std::string> out;
-  for (auto part : text | std::views::split('\n')) {
-    std::string_view line(part.begin(), part.end());
-    do {
-      std::size_t cut = 0, n = 0;
-      while (cut < line.size() && n < width) {
-        ++cut;
-        while (cut < line.size() && (static_cast<unsigned char>(line[cut]) & 0xc0) == 0x80) ++cut;
-        ++n;
-      }
-      out.emplace_back(line.substr(0, cut));
-      line.remove_prefix(cut);
-    } while (!line.empty());
-  }
-  return out;
-}
-
-enum class View { tree, timeline };
-
-class Browser {
- public:
-  Browser(Tree& tree, Terminal& term, Feed* feed) : tree_(tree), term_(term), feed_(feed) {
-    if (feed_) tree_.set_newest_first(true);  // live: the latest request on top
-  }
-
-  void run() {
-    while (true) {
-      draw();
-      const std::string k = term_.key(feed_ ? feed_->fd : -1);
-      if (k.empty()) {
-        // Live: new events; the selection stays where it was.
-        // At the top, the view follows what comes; elsewhere the selected node stays selected.
-        const auto before = tree_.rows();
-        const std::optional<std::int32_t> held =
-            cursor_ > 0 && cursor_ < before.size() ? std::optional(before[cursor_].node) : std::nullopt;
-        if (!feed_->pump()) feed_ = nullptr, ended_ = true;
-        if (held) keep_selected(*held);
-        continue;
-      }
-      if (prompt_) {
-        edit_filter(k);
-        continue;
-      }
-      if (help_) {
-        help_ = false;
-        continue;
-      }
-      if (k == "q" || k == "\x03") return;
-      if (view_ == View::tree) tree_key(k);
-      else timeline_key(k);
-      common_key(k);
-    }
-  }
-
- private:
-  // ---- keys
-  void common_key(const std::string& k) {
-    if (k == "\t" || k == "t") view_ = view_ == View::tree ? View::timeline : View::tree;
-    else if (k == "/") prompt_ = true, typed_ = filter_;
-    else if (k == "?") help_ = true;
-    else if (k == "v") detail_ = !detail_;
-    // The pane: J/K a line, ]/[ a page, }/{ its end and top (clamped when drawn).
-    else if (k == "J") ++detail_scroll_;
-    else if (k == "K") detail_scroll_ = detail_scroll_ > 0 ? detail_scroll_ - 1 : 0;
-    else if (k == "]") detail_scroll_ += body_height() - 1;
-    else if (k == "[") detail_scroll_ = detail_scroll_ > body_height() - 1 ? detail_scroll_ - (body_height() - 1) : 0;
-    else if (k == "}") detail_scroll_ = std::numeric_limits<std::size_t>::max() / 2;
-    else if (k == "{") detail_scroll_ = 0;
-    else if (k == "w") cycle_worker();
-    else if (k == "a") pick_worker(std::nullopt);
-    else if (k.size() == 1 && std::isdigit(static_cast<unsigned char>(k[0]))) pick_worker(k[0] - '0');
-    else if (k == "m") pick_worker(-1);
-    else if (k == "r") {
-      const auto rows = tree_.rows();
-      const std::optional<std::int32_t> held = rows.empty() ? std::nullopt : std::optional(rows[std::min(cursor_, rows.size() - 1)].node);
-      tree_.set_hide_reused(!tree_.hide_reused());
-      if (held) keep_selected(*held);
-    } else if (k == "s") {
-      // Memory first (#274): start order, then most allocated in the subtree, then most retained.
-      const auto rows = tree_.rows();
-      const std::optional<std::int32_t> held = rows.empty() ? std::nullopt : std::optional(rows[std::min(cursor_, rows.size() - 1)].node);
-      tree_.set_order(static_cast<Tree::Order>((std::to_underlying(tree_.order()) + 1) % 3));
-      if (held) keep_selected(*held);
-    } else if (k == "o") {
-      const auto rows = tree_.rows();
-      const std::optional<std::int32_t> held = rows.empty() ? std::nullopt : std::optional(rows[std::min(cursor_, rows.size() - 1)].node);
-      tree_.set_newest_first(!tree_.newest_first());
-      if (held) keep_selected(*held);
-    }
-  }
-  void tree_key(const std::string& k) {
-    const auto rows = tree_.rows();
-    const std::size_t page = body_height();
-    if (k == "j" || k == "\x1b[B" || k == "\x1bOB") move(1, rows.size());
-    else if (k == "k" || k == "\x1b[A" || k == "\x1bOA") move(-1, rows.size());
-    else if (k == "\x1b[6~" || k == "\x06") move(static_cast<long>(page), rows.size());
-    else if (k == "\x1b[5~" || k == "\x02") move(-static_cast<long>(page), rows.size());
-    else if (k == "g" || k == "\x1b[H") cursor_ = 0;
-    else if (k == "G" || k == "\x1b[F") cursor_ = rows.empty() ? 0 : rows.size() - 1;
-    else if (rows.empty()) return;
-    else if (k == "\r" || k == " ") tree_.toggle(rows[cursor_].node);
-    else if (k == "l" || k == "\x1b[C" || k == "\x1bOC") tree_.set_expanded(rows[cursor_].node, true);
-    else if (k == "h" || k == "\x1b[D" || k == "\x1bOD") collapse_or_parent(rows);
-    else if (k == "e") tree_.expand_all(true);
-    else if (k == "E") tree_.expand_all(false), cursor_ = 0;
-    else if (k == "n") next_execution(rows);
-    else if (k == "x") next_error(rows);
-    if (k != "J" && k != "K" && k != "]" && k != "[" && k != "}" && k != "{") detail_scroll_ = 0;
-  }
-  void timeline_key(const std::string& k) {
-    const std::size_t lanes = static_cast<std::size_t>(tree_.summary().workers) + 1;
-    const std::size_t cols = lane_columns();
-    if (k == "j" || k == "\x1b[B" || k == "\x1bOB") lane_ = std::min(lane_ + 1, lanes - 1);
-    else if (k == "k" || k == "\x1b[A" || k == "\x1bOA") lane_ = lane_ > 0 ? lane_ - 1 : 0;
-    else if (k == "l" || k == "\x1b[C" || k == "\x1bOC") time_ = std::min(time_ + 1, cols - 1);
-    else if (k == "h" || k == "\x1b[D" || k == "\x1bOD") time_ = time_ > 0 ? time_ - 1 : 0;
-    else if (k == "L") time_ = std::min(time_ + 10, cols - 1);
-    else if (k == "H") time_ = time_ > 10 ? time_ - 10 : 0;
-    else if (k == "g") time_ = 0;
-    else if (k == "G") time_ = cols - 1;
-    else if (k == "\r" || k == " ") jump_to_slice();
-  }
-  void edit_filter(const std::string& k) {
-    if (k == "\r") {
-      prompt_ = false;
-    } else if (k == "\x1b" || k == "\x03") {
-      prompt_ = false;
-      typed_ = filter_;
-    } else if (k == "\x7f" || k == "\b") {
-      if (!typed_.empty()) typed_.pop_back();
-    } else if (k.size() == 1 && std::isprint(static_cast<unsigned char>(k[0]))) {
-      typed_ += k;
-    }
-    // Live: the view follows each keystroke.
-    filter_ = typed_;
-    tree_.set_filter(filter_);
-    cursor_ = 0;
-  }
-
-  void move(long by, std::size_t n) {
-    if (n == 0) return;
-    const long to = std::clamp(static_cast<long>(cursor_) + by, 0L, static_cast<long>(n) - 1);
-    cursor_ = static_cast<std::size_t>(to);
-  }
-  void collapse_or_parent(const std::vector<Tree::Row>& rows) {
-    const Tree::Node& n = tree_.node(rows[cursor_].node);
-    if (n.expanded) {
-      tree_.set_expanded(rows[cursor_].node, false);
-      return;
-    }
-    for (std::size_t i = cursor_; i-- > 0;) {
-      if (rows[i].node == n.parent) {
-        cursor_ = i;
-        return;
-      }
-    }
-  }
-  // The next cell that ran (executed or cut off), opening the tree to it.
-  void next_execution(const std::vector<Tree::Row>& rows) {
-    const auto nodes = tree_.nodes();
-    const std::int32_t from = rows[cursor_].node;
-    for (std::size_t i = static_cast<std::size_t>(from) + 1; i < nodes.size(); ++i) {
-      const Outcome o = nodes[i].ev.outcome;
-      if ((o == Outcome::executed || o == Outcome::cutoff) && tree_.matches(nodes[i].ev)) {
-        select(static_cast<std::int32_t>(i));
-        return;
-      }
-    }
-  }
-  // The row of `node`, if shown, becomes the selection.
-  void keep_selected(std::int32_t node) {
-    const auto rows = tree_.rows();
-    for (std::size_t i = 0; i < rows.size(); ++i) {
-      if (rows[i].node == node) cursor_ = i;
-    }
-  }
-  // The next node where errors start, after the selection (wrapping), opening the tree to it.
-  void next_error(const std::vector<Tree::Row>& rows) {
-    const auto nodes = tree_.nodes();
-    const auto from = static_cast<std::size_t>(rows[cursor_].node);
-    for (std::size_t k = 1; k <= nodes.size(); ++k) {
-      const auto i = static_cast<std::int32_t>((from + k) % nodes.size());
-      if (tree_.error_here(i) && tree_.matches(nodes[static_cast<std::size_t>(i)].ev)) {
-        select(i);
-        return;
-      }
-    }
-  }
-  void select(std::int32_t node) {
-    tree_.reveal(node);
-    const auto rows = tree_.rows();
-    for (std::size_t i = 0; i < rows.size(); ++i) {
-      if (rows[i].node == node) cursor_ = i;
-    }
-  }
-  void cycle_worker() {
-    const std::int32_t workers = tree_.summary().workers;
-    const auto w = tree_.worker();
-    if (!w) pick_worker(-1);
-    else if (*w + 1 < workers) pick_worker(*w + 1);
-    else pick_worker(std::nullopt);
-  }
-  void pick_worker(std::optional<std::int32_t> w) {
-    tree_.set_worker(w);
-    cursor_ = 0;
-    if (w) lane_ = Timeline::lane_of(*w);
-  }
-  void jump_to_slice() {
-    const Timeline tl = timeline(tree_, lane_columns());
-    if (lane_ >= tl.lanes.size()) return;
-    if (lane_ >= tl.lanes.size() || time_ >= tl.lanes[lane_].size()) return;  // the terminal shrank
-    const std::int32_t node = tl.lanes[lane_][time_];
-    if (node < 0) return;
-    view_ = View::tree;
-    select(node);
-  }
-
-  // ---- layout
-  std::size_t height() const { return term_.size().first; }
-  std::size_t width() const { return term_.size().second; }
-  std::size_t body_height() const { return height() > 4 ? height() - 4 : 1; }
-  bool split() const { return detail_ && width() >= 100; }
-  std::size_t left_width() const { return split() ? width() * 3 / 5 : width(); }
-  std::size_t lane_columns() const { return width() > 12 ? width() - 9 : 1; }
-
-  // ---- drawing
-  void draw() {
-    const auto [h, w] = term_.size();
-    std::string frame = "\x1b[H";
-    std::vector<std::string> lines;
-    lines.push_back(header());
-    lines.push_back(status_line());
-    std::vector<std::string> body = view_ == View::tree ? tree_body() : timeline_body();
-    body.resize(body_height());
-    lines.append_range(body);
-    lines.push_back(footer());
-    if (help_) overlay_help(lines);
-    for (std::size_t i = 0; i < h && i < lines.size(); ++i) {
-      frame += fit(lines[i], w);
-      if (i + 1 < h) frame += "\r\n";
-    }
-    if (prompt_) frame += std::format("\x1b[{};{}H\x1b[?25h", 2, std::min(w, 10 + columns(typed_)));
-    else frame += "\x1b[?25l";
-    term_.write(frame);
-  }
-
-  std::string header() const {
-    const Summary s = tree_.summary();
-    std::string out = paint("1;7", " ycxx engine trace ");
-    for (std::uint8_t i = 0; i < outcome_count; ++i) {
-      const auto o = static_cast<Outcome>(i);
-      if (s.counts[i] == 0) continue;
-      out += "  " + paint(outcome_sgr(o), std::format("{} {} {}", outcome_glyph(o, true), s.counts[i], outcome_name(o)));
-    }
-    out += paint("2", std::format("   {} events, {} workers, {}", s.events, s.workers, format_duration(s.span_ns)));
-    // Memory (#274): what the frames allocated and the cells retain; the process's, when known.
-    std::string mem = std::format("   {} allocated, {} retained", format_bytes(static_cast<std::int64_t>(s.alloc_bytes)), format_bytes(s.retained_bytes));
-    if (const auto m = tree_.memory())
-      mem += std::format("; last build: process {}, peak {}", format_bytes(m->process_current), format_bytes(m->process_peak));
-    return out + paint("2", mem);
-  }
-  std::string status_line() const {
-    const auto tab = [&](View v, std::string_view name) { return view_ == v ? paint("1;4", name) : paint("2", name); };
-    std::string out = std::format(" {} {}  ", tab(View::tree, "tree"), tab(View::timeline, "timeline"));
-    if (prompt_) return std::format(" filter: {}", typed_);
-    if (!filter_.empty()) out += std::format(" filter: {}", paint("1", filter_));
-    out += std::format("  worker: {}", tree_.worker() ? paint("1", format_worker(*tree_.worker())) : std::string("all"));
-    out += tree_.newest_first() ? "  newest first" : "  oldest first";
-    if (tree_.order() == Tree::Order::alloc) out += "  " + paint("1", "by bytes allocated");
-    else if (tree_.order() == Tree::Order::retained) out += "  " + paint("1", "by bytes retained");
-    if (tree_.hide_reused()) out += "  " + paint("1", "reused hidden");
-    if (feed_) out += "  " + paint("1;38;5;208", "● live") + paint("2", " " + feed_->source);
-    else if (ended_) out += "  " + paint("2", "(the daemon has gone)");
-    return out;
-  }
-  std::string footer() const {
-    if (view_ == View::tree)
-      return paint("2", " ↑↓/jk move  ⏎/space fold  ←→ close/open  e/E all  n next run  x next error  r reused  s sort  shift+J/K ]/[ pane  / filter  w/0-9/m/a worker  o order  v pane  t timeline  ? help  q quit");
-    return paint("2", " ↑↓ lane  ←→/HL scrub  ⏎ open in tree  w/0-9/m/a worker  / filter  t tree  ? help  q quit");
-  }
-
-  std::string tree_row(const Tree::Row& r) const {
-    const Tree::Node& n = tree_.node(r.node);
-    const Event& e = n.ev;
-    std::string out(2 * r.depth, ' ');
-    out += n.children.empty() ? "  " : (n.expanded ? "▾ " : "▸ ");
-    if (tree_.error_here(r.node)) {
-      // Where the errors start: the whole line on red, and the first message on it.
-      return out + paint(error_here_sgr, std::format("{} {} {} ← {}", outcome_glyph(e.outcome, true), cell_name(e), outcome_name(e.outcome),
-                                                     first_line(e.errors)));
-    }
-    out += paint(event_sgr(e), outcome_glyph(e.outcome, true));
-    out += ' ';
-    const std::string name = std::format("{}{}", paint(r.match ? "1" : "2", e.kind), e.key.empty() ? "" : std::format("({})", e.key));
-    out += name;
-    out += ' ' + paint(event_sgr(e), outcome_name(e.outcome));
-    if (e.end_ns != e.start_ns) out += paint("2", " " + format_duration(e.end_ns - e.start_ns));
-    out += paint("2", " " + format_workers(e) + memory_text(e, n.incl));
-    if (e.repeat > 1) out += paint("2", std::format(" ×{}", e.repeat));
-    if (!e.errors.empty()) {
-      // The message from where it starts, bubbled up; `x` goes there.
-      const auto at = tree_.error_origin_below(r.node);
-      out += paint(error_sgr, std::format("  (error below: {})", first_line(at ? tree_.node(*at).ev.errors : e.errors)));
-    }
-    if (!n.expanded && n.children.size() > 0) out += paint("2", std::format("  [{} below, {} ran]", n.subtree - 1, ran_below(n)));
-    return out;
-  }
-
-  // Executions under a node, not counting its own (a request's node is no execution).
-  static std::uint64_t ran_below(const Tree::Node& n) {
-    const bool own = !n.group && (n.ev.outcome == Outcome::executed || n.ev.outcome == Outcome::cutoff);
-    return n.executions - (own ? 1 : 0);
-  }
-
-  std::vector<std::string> tree_body() {
-    const auto rows = tree_.rows();
-    const std::size_t hgt = body_height();
-    if (!rows.empty()) cursor_ = std::min(cursor_, rows.size() - 1);
-    else cursor_ = 0;
-    if (cursor_ < top_) top_ = cursor_;
-    if (cursor_ >= top_ + hgt) top_ = cursor_ - hgt + 1;
-    std::vector<std::string> left;
-    for (std::size_t i = top_; i < rows.size() && left.size() < hgt; ++i) {
-      std::string line = tree_row(rows[i]);
-      if (i == cursor_) line = selected(fit(line, left_width()));
-      left.push_back(std::move(line));
-    }
-    if (rows.empty()) left.push_back(paint("2", "  nothing matches"));
-    if (!split()) return left;
-    const std::vector<std::string> right = rows.empty() ? std::vector<std::string>{} : detail(tree_.node(rows[cursor_].node));
-    const std::size_t lw = left_width(), rw = width() - lw - 1;
-    // A pane longer than the screen keeps its last line for where it is and how to move.
-    const bool long_pane = right.size() > hgt && hgt > 1;
-    const std::size_t shown = long_pane ? hgt - 1 : hgt;
-    detail_scroll_ = right.size() > shown ? std::min(detail_scroll_, right.size() - shown) : 0;
-    std::vector<std::string> out;
-    for (std::size_t i = 0; i < hgt; ++i) {
-      std::string l = i < left.size() ? left[i] : std::string();
-      const std::size_t at = i + detail_scroll_;
-      std::string r = at < right.size() ? right[at] : std::string();
-      if (long_pane && i == hgt - 1)
-        r = paint("2;7", std::format(" lines {}–{} of {}   shift+J/K line  ]/[ page  }}/{{ end/top ", detail_scroll_ + 1,
-                                     detail_scroll_ + shown, right.size()));
-      out.push_back(fit(l, lw) + paint("2", "│") + fit(r, rw));
-    }
-    return out;
-  }
-
-  std::vector<std::string> detail(const Tree::Node& n) const {
-    const Event& e = n.ev;
-    const std::size_t rw = width() - left_width() - 2;
-    std::vector<std::string> out;
-    out.push_back(" " + paint("1", e.kind));
-    for (const std::string& l : wrap(e.key.empty() ? "(no key)" : e.key, rw)) out.push_back(" " + l);
-    out.emplace_back();
-    out.push_back(" " + paint(event_sgr(e), std::format("{} {}", outcome_glyph(e.outcome, true), outcome_name(e.outcome))));
-    for (const std::string& l : wrap(outcome_meaning(e.outcome), rw)) out.push_back(" " + paint("2", l));
-    out.emplace_back();
-    out.push_back(std::format(" started  {}", format_duration(e.start_ns)));
-    out.push_back(std::format(" took     {}", e.end_ns == e.start_ns ? std::string("(instant)") : format_duration(e.end_ns - e.start_ns)));
-    out.push_back(std::format(" worker   {}", format_workers(e)));
-    out.push_back(std::format(" depth    {}", e.depth));
-    out.push_back(std::format(" below    {} cells, {} ran", n.subtree - 1, ran_below(n)));
-    if (n.parent >= 0) out.push_back(" for      " + paint("2", cell_name(tree_.node(n.parent).ev)));
-    out.emplace_back();
-    // Memory (#274): this frame's own, its subtree's, and what the cell retains.
-    if (e.alloc_bytes > 0 || n.incl.alloc > 0 || e.retained_bytes != 0) {
-      out.push_back(" " + paint("1;4", "memory"));
-      out.push_back(std::format(" alloc    {} in {} allocations", format_bytes(static_cast<std::int64_t>(e.alloc_bytes)), e.allocs));
-      out.push_back(std::format(" peak     {}", format_bytes(e.peak_bytes)));
-      out.push_back(std::format(" retains  {}", format_bytes(e.retained_bytes)));
-      out.push_back(std::format(" in all   {} allocated, {} retained", format_bytes(static_cast<std::int64_t>(n.incl.alloc)), format_bytes(n.incl.retained)));
-      out.emplace_back();
-    }
-    if (!e.errors.empty()) {
-      out.push_back(" " + paint("1;4;31", "errors"));
-      for (const std::string& l : wrap(e.errors, rw)) out.push_back(" " + paint(error_sgr, l));
-      out.emplace_back();
-    }
-    if (!e.value.empty()) {
-      out.push_back(" " + paint("1;4", "value"));
-      for (const std::string& l : wrap(e.value, rw)) out.push_back(" " + l);
-    } else {
-      out.push_back(paint("2", " no value shown for this kind"));
-    }
-    return out;
-  }
-
-  std::vector<std::string> timeline_body() {
-    const std::size_t cols = lane_columns();
-    time_ = std::min(time_, cols - 1);
-    const Timeline tl = timeline(tree_, cols);
-    lane_ = std::min(lane_, tl.lanes.size() - 1);
-    std::vector<std::string> out;
-    const auto [from, to] = tl.slice(time_, cols);
-    // The axis: 0, the cursor's time, the end.
-    out.push_back(paint("2", std::format(" {:<7}0{:>{}}", "", format_duration(tl.span_ns), cols - 1)));
-    for (std::size_t lane = 0; lane < tl.lanes.size(); ++lane) {
-      std::string line = std::format("{}{:>6} │", lane == lane_ ? "▶" : " ", format_worker(Timeline::worker_of(lane)));
-      for (std::size_t c = 0; c < cols; ++c) {
-        const std::int32_t node = tl.lanes[lane][c];
-        const bool cur = c == time_;
-        if (node < 0) {
-          line += cur ? paint("7;2", "│") : paint("2", "·");
-          continue;
-        }
-        const Event& e = tree_.node(node).ev;
-        // Deeper cells darker: the shade says how far down the demand chain the worker was.
-        const std::string_view block = e.depth == 0 ? "█" : e.depth == 1 ? "▓" : e.depth == 2 ? "▒" : "░";
-        line += paint(std::format("{}{}", event_sgr(e), cur ? ";7" : ""), block);
-      }
-      out.push_back(std::move(line));
-    }
-    out.emplace_back();
-    out.push_back(paint("1", std::format(" at {} – {}", format_duration(from), format_duration(to))));
-    for (std::size_t lane = 0; lane < tl.lanes.size(); ++lane) {
-      const std::int32_t node = tl.lanes[lane][time_];
-      std::string line = std::format(" {}{:>6}  ", lane == lane_ ? "▶" : " ", format_worker(Timeline::worker_of(lane)));
-      if (node < 0) {
-        line += paint("2", "idle");
-      } else {
-        // The chain from the top-level request down to the cell, so a slice says why.
-        std::vector<std::string> chain;
-        for (std::int32_t p = node; p >= 0; p = tree_.node(p).parent) chain.push_back(tree_.node(p).ev.kind);
-        std::ranges::reverse(chain);
-        const Event& e = tree_.node(node).ev;
-        line += paint(event_sgr(e), outcome_glyph(e.outcome, true)) + " " + cell_name(e) + " " +
-                paint(event_sgr(e), outcome_name(e.outcome)) + paint("2", "   " + (chain | std::views::join_with(std::string_view(" › ")) | std::ranges::to<std::string>()));
-      }
-      out.push_back(std::move(line));
-    }
-    out.emplace_back();
-    std::string legend = " ";
-    for (std::uint8_t i = 0; i < outcome_count; ++i) {
-      const auto o = static_cast<Outcome>(i);
-      legend += paint(outcome_sgr(o), "█") + " " + std::string(outcome_name(o)) + "  ";
-    }
-    out.push_back(legend + paint("2", "█▓▒░ shallower to deeper"));
-    return out;
-  }
-
-  void overlay_help(std::vector<std::string>& lines) const {
-    std::vector<std::string> help = {
-        paint("1", " What the engine did with each cell"),
-        "",
-    };
-    for (std::uint8_t i = 0; i < outcome_count; ++i) {
-      const auto o = static_cast<Outcome>(i);
-      help.push_back(std::format("  {} {:<9} {}", paint(outcome_sgr(o), outcome_glyph(o, true)), outcome_name(o), outcome_meaning(o)));
-    }
-    help.insert(help.end(), {
-                                "",
-                                paint("1", " Filter (/)"),
-                                "  words      match kind or key, all of them",
-                                "  is:exec    an outcome (any prefix)",
-                                "  w:3 w:main a worker",
-                                "",
-                                paint("1", " Showing"),
-                                "  r hides reused cells (what ran stays), o flips the order",
-                                "  s sorts siblings: as they started, by bytes allocated below, by bytes retained",
-                                "",
-                                paint("1", " The pane on the right"),
-                                "  shift+J / shift+K a line (j/k move in the tree), ]/[ a page, }/{ end and top",
-                                "",
-                                paint("1", " Workers"),
-                                "  w cycles, 0-9 picks, m the requesting thread, a all",
-                                "",
-                                paint("2", " any key to close"),
-                            });
-    const std::size_t top = 3;
-    for (std::size_t i = 0; i < help.size() && top + i < lines.size(); ++i) lines[top + i] = "  " + help[i];
-  }
-
-  Tree& tree_;
-  Terminal& term_;
-  Feed* feed_;
-  bool ended_ = false;
-  View view_ = View::tree;
-  std::size_t cursor_ = 0, top_ = 0;
-  std::size_t lane_ = 0, time_ = 0;
-  std::size_t detail_scroll_ = 0;
-  bool detail_ = true, help_ = false, prompt_ = false;
-  std::string filter_, typed_;
-};
 
 }  // namespace
 
 bool browse(Tree& tree, Feed* feed) {
   Terminal term;
   if (!term) return false;
-  Browser(tree, term, feed).run();
-  return true;
+  Browser b(tree);
+  if (feed) b.set_live(feed->source);
+  const auto start = std::chrono::steady_clock::now();
+  auto next_tick = start;  // while a drag is held past an edge: ticks on time, whatever else wakes us
+  while (true) {
+    const auto [rows, cols] = term.size();
+    b.resize(rows, cols);
+    term.draw(b.frame());
+    std::optional<std::chrono::milliseconds> wait;
+    if (b.ticking()) {
+      const auto now = std::chrono::steady_clock::now();
+      if (now >= next_tick) {
+        b.tick();
+        next_tick = now + Browser::tick_every;
+        continue;
+      }
+      wait = std::chrono::duration_cast<std::chrono::milliseconds>(next_tick - now) + std::chrono::milliseconds(1);
+    } else {
+      next_tick = std::chrono::steady_clock::now() + Browser::tick_every;
+    }
+    switch (term.wait(feed ? feed->fd : -1, wait)) {
+      case Terminal::Wake::resize: continue;
+      case Terminal::Wake::tick: continue;
+      case Terminal::Wake::feed:
+        if (!b.pump(feed->pump)) feed = nullptr;
+        continue;
+      case Terminal::Wake::input: break;
+    }
+    const auto now = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start);
+    const Action a = b.handle(parse_input(term.read_input()), now);
+    if (a.quit) return true;
+    if (a.copy) {
+      term.write(osc52(*a.copy, std::getenv("TMUX") != nullptr));
+      const std::optional<std::string> command = clipboard_command();
+      const bool ran = command && run_clipboard(*command, *a.copy);
+      b.note(std::format("{} (OSC 52{})", b.notice(), ran ? ", " + command->substr(0, command->find(' ')) : std::string()));
+    }
+  }
 }
 
 }  // namespace ycxx::trace

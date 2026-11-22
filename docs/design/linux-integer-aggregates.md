@@ -6,8 +6,17 @@ with alignment up to eight. The record must be trivial for calls under DECISIONS
 Its non-static data members have naturally aligned, non-overlapping integral scalar
 or ordinary object-pointer layouts. The signature check rejects records with bases,
 bit-fields, unions, nested classes or arrays, and fields requiring other ABI classes.
-Aggregate calls through a function pointer, calls with an ellipsis, and member or
-template functions stay outside this slice.
+Member functions, closure call operators, function template specializations and calls
+through a pointer to a fixed-prototype function use the same placement, with `this` as the
+first INTEGER argument (#640). Calls with an ellipsis stay outside this slice.
+
+Results in memory and classes not trivial for calls (#641). A class result of more than two
+eightbytes, or of a class not trivial for calls, is returned through a hidden pointer. `lower`
+makes that pointer the first L2 argument on both sides, so it takes RDI ahead of `this`, and
+the emitter returns it in RAX (AMD64 psABI §3.2.3; Itanium C++ ABI §3.1.3). A class argument
+not trivial for calls passes by the address of the caller's object, as on AArch64 (Itanium
+§3.1.2.3). A trivially copyable argument of more than two eightbytes is passed by value on the
+stack (MEMORY), which is not implemented yet.
 
 The front end records when a layout attribute or active packing directive makes the
 computed natural layout uncertain. The by-value ABI check rejects those shapes even

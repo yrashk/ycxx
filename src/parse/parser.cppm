@@ -39,6 +39,7 @@ using ast::NodeId;
 struct DeclSpec {
   u32 begin = 0;
   QualType type{};
+  std::optional<u32> constrained_auto_at;  // the concept's name in a constrained placeholder
   bool has_type = false;
   bool is_static = false;
   bool is_extern = false;
@@ -46,6 +47,7 @@ struct DeclSpec {
   bool is_constexpr = false;
   bool is_consteval = false;
   bool is_constinit = false;
+  std::vector<ast::AnnotationSema> annotations;
   bool is_typedef = false;  // [dcl.typedef]: the declarators declare typedef-names
   bool hidden_visibility = false;
   std::optional<u32> virtual_at;
@@ -103,6 +105,7 @@ struct Declarator {
   // A GNU asm label, `__asm("_fopen")`: the symbol as written (docs/EXTENSIONS.md); empty if none.
   std::string asm_label;
   bool hidden_visibility = false;
+  std::vector<ast::AnnotationSema> annotations;
   bool pack = false;  // `T... x`: a declarator-id after an ellipsis ([dcl.fct]/23, [temp.param]/17)
   bool ok = true;
 };
@@ -259,9 +262,14 @@ public:
     return next == close && groups == 0;
   }
 
+  bool constrained_auto_ahead(u32 at = 0) const {
+    return kind(at) == Tk::identifier && kind(at + 1) == Tk::kw_auto;
+  }
+
   // A trailing return type can start with a keyword or a name denoting a type.
   bool trailing_return_type_ahead(u32 next) {
     return starts_decl_specifier(kind(next)) || qualified_ahead(next) || transform_trait_ahead(next) ||
+           constrained_auto_ahead(next) ||
            (kind(next) == Tk::identifier && s_->class_name(name_of(tok(next))).has_value());
   }
 
@@ -299,7 +307,7 @@ public:
   // class names a type only after `typename` ([temp.res.general]/4-5); a namespace-scope or member
   // declaration may imply it.
   bool starts_declaration(bool statement = false) {
-    if (transform_trait_ahead()) return true;
+    if (transform_trait_ahead() || constrained_auto_ahead()) return true;
     // [stmt.ambig]: `int(x) + 1;`, `int(3);` and `void();` are expressions; `int(x);`, `int(x) = 1;`
     // and `int(*f)(int);` declare.
     if (is(Tk::kw_auto) && kind(1) == Tk::l_brace) return false;
@@ -522,7 +530,8 @@ public:
   // decl-specifier-seq ([dcl.spec.general]) with the simple-type-specifiers of [dcl.type.simple],
   // class names and elaborated-type-specifiers ([dcl.type.elab]), and the cv-qualifiers.
   DeclSpec decl_specifiers(bool in_type_id = false, std::optional<u32>* friend_at = nullptr,
-                           bool allow_conversion_id = false, bool class_member = false) {
+                           bool allow_conversion_id = false, bool class_member = false,
+                           bool allow_constrained_auto = false) {
     DeclSpec d;
     d.begin = pos();
     int n_char = 0, n_short = 0, n_int = 0, n_long = 0, n_signed = 0, n_unsigned = 0, n_void = 0, n_bool = 0;
@@ -539,7 +548,8 @@ public:
     };
     for (;;) {
       // A standard attribute after a decl-specifier-seq appertains to its type ([dcl.spec.general]).
-      if (skip_attributes(&d.hidden_visibility, attr_gnu)) continue;
+      const bool annotation_type_context = in_type_id || pos() != d.begin;
+      if (skip_attributes(&d.hidden_visibility, attr_gnu, nullptr, annotation_type_context)) continue;
       Tk k = kind();
       switch (k) {
       case Tk::kw_void: ++n_void; break;
@@ -686,12 +696,20 @@ public:
           continue;
         }
         // A class-specifier where a type is named (a local or unnamed class) is not supported yet.
-        if (kind(1) != Tk::identifier || kind(2) == Tk::l_brace || kind(2) == Tk::colon || kind(2) == Tk::coloncolon) {
+        const u32 after_attrs = past_attributes(1);
+        if (after_attrs != 1 && (in_type_id || kind(after_attrs + 1) != Tk::semi)) {
+          s_->diag(at + 1, Diag::attributes_not_allowed);
+          d.ok = false;
+          goto done;
+        }
+        if (kind(after_attrs) != Tk::identifier || kind(after_attrs + 1) == Tk::l_brace ||
+            kind(after_attrs + 1) == Tk::colon || kind(after_attrs + 1) == Tk::coloncolon) {
           s_->diag(at, Diag::not_supported, k);
           d.ok = false;
           goto done;
         }
         bump();
+        skip_attributes(nullptr, attr_std | attr_gnu, &d.annotations);
         NameId n = name_of(tok());
         u32 name_at = pos();
         bump();
@@ -721,6 +739,25 @@ public:
       case Tk::coloncolon:
       case Tk::identifier:
         if (!any_type()) {
+          if (constrained_auto_ahead()) {
+            const u32 at = pos();
+            const NameId name = name_of(tok());
+            bump();
+            bump();
+            if (!allow_constrained_auto || s_->templated()) {
+              s_->diag(at, Diag::constrained_auto_context);
+              d.ok = false;
+              goto done;
+            }
+            auto concept_ = s_->placeholder_concept(name, at);
+            if (!concept_) {
+              d.ok = false;
+              goto done;
+            }
+            cls = s_->types().placeholder(false, *concept_);
+            d.constrained_auto_at = at;
+            continue;
+          }
           // A type-transforming built-in, `__remove_cv(T)` (docs/EXTENSIONS.md).
           if (const lex::TypeTraitInfo* tr = transform_trait_ahead()) {
             u32 at = pos();
@@ -890,6 +927,7 @@ public:
     std::optional<u32> replay_template_args_at;
     bool pack = false;
     bool hidden_visibility = false;
+    std::vector<ast::AnnotationSema> annotations;
     std::vector<Suffix> suffixes;
   };
 
@@ -971,7 +1009,8 @@ public:
   // Attribute-specifiers ([dcl.attr.grammar]) and GNU `__attribute__((…))`. Keep an explicit
   // hidden visibility attribute when requested by the declaring context.
   static constexpr int attr_std = 1, attr_gnu = 2;
-  int skip_attributes(bool* hidden_visibility = nullptr, int visibility_forms = attr_std | attr_gnu) {
+  int skip_attributes(bool* hidden_visibility = nullptr, int visibility_forms = attr_std | attr_gnu,
+                      std::vector<ast::AnnotationSema>* annotations = nullptr, bool annotation_type_context = false) {
     int any = 0;
     for (;;) {
       bool std_attr = is(Tk::l_square) && kind(1) == Tk::l_square;
@@ -979,18 +1018,77 @@ public:
       if (!std_attr && !gnu) return any;
       const int form = std_attr ? attr_std : attr_gnu;
       any |= form;
+      if (std_attr && kind(2) == Tk::equal) {
+        if (annotations) {
+          annotation_list(*annotations);
+          continue;
+        }
+        if (annotation_type_context) s_->diag(pos() + 2, Diag::attributes_not_allowed);
+      }
       if (gnu) bump();
       const u32 begin = index();
-      Tk open = kind(), close = open == Tk::l_square ? Tk::r_square : Tk::r_paren;
+      const Tk open = kind(), close = std_attr ? Tk::r_square : Tk::r_paren;
       u32 depth = 0;
       do {
         if (is(open)) ++depth;
         else if (is(close)) --depth;
         bump();
       } while (depth > 0 && !at_end());
-      if (hidden_visibility && !*hidden_visibility && (form & visibility_forms) && depth == 0)
+      const bool closed = depth == 0;
+      if ((annotations || annotation_type_context) && std_attr && closed) {
+        if (auto mixed = annotation_in_attribute_list(begin, index()))
+          s_->diag(*mixed - begin_, Diag::annotation_mixed_list);
+      }
+      if (hidden_visibility && !*hidden_visibility && (form & visibility_forms) && closed)
         *hidden_visibility = hidden_visibility_in_attributes(begin, index(), std_attr);
     }
+  }
+
+  // An ordinary attribute's balanced argument may contain a comma followed by '='.
+  std::optional<u32> annotation_in_attribute_list(u32 begin, u32 end) const {
+    u32 depth = 0;
+    for (u32 i = begin + 2; i < end - 2; ++i) {
+      switch (r_->tokens[i].kind) {
+      case Tk::l_paren: case Tk::l_square: case Tk::l_brace: case Tk::l_splice: ++depth; break;
+      case Tk::r_paren: case Tk::r_square: case Tk::r_brace: case Tk::r_splice:
+        if (depth == 0) return std::nullopt;
+        --depth;
+        break;
+      case Tk::comma:
+        if (depth == 0 && r_->tokens[i + 1].kind == Tk::equal) return i + 1;
+        break;
+      default: break;
+      }
+    }
+    return std::nullopt;
+  }
+
+  void annotation_list(std::vector<ast::AnnotationSema>& annotations) {
+    const u32 limit = index() + past_attribute_specifier(0);
+    bump();
+    bump();
+    do {
+      if (!is(Tk::equal)) {
+        s_->diag(pos(), Diag::annotation_mixed_list);
+        seek(limit);
+        return;
+      }
+      const u32 at = pos();
+      bump();
+      sema::Sema::ImmediateReferenceScope references(*s_, /*allowed=*/true);
+      Ex expression = constant_expression();
+      if (accept(Tk::ellipsis)) s_->diag(at, Diag::annotation_not_supported);
+      else if (expression.ok()) {
+        expression = s_->rvalue(expression);
+        if (expression.ok()) {
+          const QualType type = sema::Types::unqualified(s_->types().canonical(expression.type()));
+          if (auto value = sema::Evaluator(*s_, questions()).evaluate_annotation(expression, type)) {
+            annotations.push_back({type, *value, s_->loc_base() + at});
+          }
+        }
+      }
+    } while (accept(Tk::comma));
+    if (!expect(Tk::r_square) || !expect(Tk::r_square)) seek(limit);
   }
 
   bool hidden_visibility_in_attributes(u32 begin, u32 end, bool scoped) const {
@@ -1043,24 +1141,28 @@ public:
     return closing.empty() && matches(entry, limit);
   }
 
+  u32 past_attribute_specifier(u32 ahead) const {
+    Tk open = kind(ahead), close = open == Tk::l_square ? Tk::r_square : Tk::r_paren;
+    u32 depth = 0;
+    do {
+      if (kind(ahead) == open) ++depth;
+      else if (kind(ahead) == close) --depth;
+      ++ahead;
+    } while (depth > 0 && i_ + ahead < end_);
+    return ahead;
+  }
+
   // The token index `ahead` moves to past any attributes that start there.
   u32 past_attributes(u32 ahead) const {
     for (;;) {
       bool std_attr = kind(ahead) == Tk::l_square && kind(ahead + 1) == Tk::l_square;
       bool gnu = kind(ahead) == Tk::identifier && r_->name(tok(ahead)) == "__attribute__" && kind(ahead + 1) == Tk::l_paren;
       if (!std_attr && !gnu) return ahead;
-      if (gnu) ++ahead;
-      Tk open = kind(ahead), close = open == Tk::l_square ? Tk::r_square : Tk::r_paren;
-      u32 depth = 0;
-      do {
-        if (kind(ahead) == open) ++depth;
-        else if (kind(ahead) == close) --depth;
-        ++ahead;
-      } while (depth > 0 && i_ + ahead < end_);
+      ahead = past_attribute_specifier(ahead + (gnu ? 1 : 0));
     }
   }
   // [dcl.attr.grammar]: each attribute argument must have balanced tokens.
-  bool skip_balanced_attributes() {
+  bool balanced_attributes() {
     const u32 count = past_attributes(0);
     std::vector<Tk> closing;
     for (u32 offset = 0; offset < count; ++offset) {
@@ -1090,7 +1192,6 @@ public:
       s_->diag(pos() + count - 1, Diag::expected_token, closing.back());
       return false;
     }
-    seek(index() + count);
     return true;
   }
   // [over.oper.general]/1: the punctuators an operator function may be named by.
@@ -1165,7 +1266,8 @@ public:
         break;
       }
       bump();
-      if (op == Tk::star) skip_attributes();  // appertains to the pointer ([dcl.ptr], [dcl.mptr])
+      if (op == Tk::star)  // appertains to the pointer type ([dcl.ptr], [dcl.mptr])
+        skip_attributes(nullptr, attr_std | attr_gnu, nullptr, /*annotation_type_context=*/true);
       int cv = 0;
       std::optional<u32> restrict_at;
       while (op == Tk::star) {
@@ -1322,7 +1424,8 @@ public:
       s_->diag(pos(), Diag::expected_unqualified_id);
       ok = false;
     }
-    if (l.named) skip_attributes(&l.hidden_visibility);  // appertains to the declarator-id ([dcl.meaning.general]/1)
+    if (l.named)  // appertains to the declarator-id ([dcl.meaning.general]/1)
+      skip_attributes(&l.hidden_visibility, attr_std | attr_gnu, &l.annotations);
     for (;;) {
       if (is(Tk::l_paren) && !abstract && in_params_ == 0 && !params_ahead()) break;  // `T x(args)`: an initializer
       if (is(Tk::l_paren)) {
@@ -1616,6 +1719,7 @@ public:
     };
     Tk k = kind(first);
     Tk next = kind(first + 1);
+    if (constrained_auto_ahead(first)) return can_start_parameter(first + 2);
     if (simple_type_keyword(k)) return can_start_parameter(first + 1);
     if (k == Tk::r_paren || k == Tk::ellipsis || starts_decl_specifier(k)) return true;
     if ((k == Tk::identifier && next == Tk::coloncolon) || k == Tk::coloncolon) {
@@ -1638,7 +1742,7 @@ public:
   }
 
   // The type a declarator gives its name, built from the base type outwards ([dcl.meaning]).
-  QualType build(const Level& l, QualType t, const Suffix*& fn, Declarator& d, bool spells_type,
+  QualType build(Level& l, QualType t, const Suffix*& fn, Declarator& d, bool spells_type,
                  NamedExceptionSpec named_exception = NamedExceptionSpec::ordinary) {
     for (const Level::PtrOp& p : l.pointers) {
       if (p.owner) {
@@ -1688,7 +1792,7 @@ public:
         // `auto f() -> T`: the return type is T, and the declared type `auto` alone ([dcl.fct]/2).
         if (s->trailing) {
           if (s_->types().kind(t) != sema::TypeKind::placeholder || s_->types().rec(t).decltype_auto ||
-              sema::Types::cv(t) != sema::Cv::none) {
+              s_->types().rec(t).entity != ast::EntityId::none || sema::Types::cv(t) != sema::Cv::none) {
             s_->diag(d.begin, Diag::trailing_return_needs_auto);
             d.ok = false;
           }
@@ -1738,6 +1842,7 @@ public:
     d.replay_template_args_at = l.replay_template_args_at;
     d.pack = l.pack;
     d.hidden_visibility = l.hidden_visibility;
+    d.annotations = std::move(l.annotations);
     return t;
   }
 
@@ -3325,8 +3430,18 @@ public:
       return is(Tk::kw_new) ? new_expression(begin) : delete_expression(begin);
     case Tk::kw_new: return new_expression(begin);
     case Tk::kw_delete: return delete_expression(begin);
+    case Tk::kw_noexcept: {
+      bump();
+      if (!expect(Tk::l_paren)) return {NodeId::none, begin, pos()};
+      const int saved = std::exchange(angle_, 0);
+      ++s_->unevaluated;
+      Ex operand = expression();
+      --s_->unevaluated;
+      angle_ = saved;
+      if (!expect(Tk::r_paren)) return {NodeId::none, begin, pos()};
+      return s_->unary_noexcept(operand, begin, pos());
+    }
     case Tk::kw_co_await:
-    case Tk::kw_noexcept:
     case Tk::caretcaret: {
       s_->diag(begin, Diag::not_supported, kind());
       bump();
@@ -3343,6 +3458,25 @@ public:
     address_op_ = saved_address;
     if (*op == ast::UnaryOp::address_of && e.begin == begin) return e;  // qualified member address
     return s_->unary(*op, e, begin, e.end > begin ? e.end : pos(), begin);
+  }
+
+  // [support.types.layout]: a type-id and a direct non-static data member.
+  Ex offsetof_expression(u32 begin) {
+    bump();  // builtin name
+    bump();  // '('
+    int saved = std::exchange(angle_, 0);
+    auto type = type_id();
+    angle_ = saved;
+    if (!type || !expect(Tk::comma)) return {NodeId::none, begin, pos()};
+    if (!is(Tk::identifier)) {
+      expect(Tk::identifier);
+      return {NodeId::none, begin, pos()};
+    }
+    u32 member_at = pos();
+    NameId member = name_of(tok());
+    bump();
+    if (!expect(Tk::r_paren)) return {NodeId::none, begin, pos()};
+    return s_->offset_of(*type, member, begin, pos(), member_at);
   }
 
   // postfix-expression ([expr.post]).
@@ -3610,6 +3744,7 @@ public:
           Ex r = s_->builtin_call(*bf, std::move(args), begin, pos());
           return {r.id, begin, pos(), r.info};
         }
+      if (kind(1) == Tk::l_paren && s_->builtin_offsetof(n)) return offsetof_expression(begin);
       // A type-testing built-in, `__is_same(T, U)` (docs/EXTENSIONS.md).
       if (kind(1) == Tk::l_paren)
         if (const lex::TypeTraitInfo* tr = s_->type_trait(n); tr && !tr->transforms) {
@@ -3914,6 +4049,19 @@ public:
         return {NodeId::none, begin, pos()};
       }
       return scope_expr();
+    }
+    if (s->ns && is(Tk::less)) {
+      // [expr.type.conv] permits a namespace-qualified simple-template-id as the
+      // target type of a functional conversion.
+      const auto diags = s_->diag_count();
+      if (auto tmpl = s_->namespace_expression_type_template(*s->ns, n, name_at)) {
+        auto args = template_argument_list();
+        if (!args) return {NodeId::none, begin, pos()};
+        auto type = type_template_id(*tmpl, *args, name_at);
+        if (!type) return {NodeId::none, begin, pos()};
+        return type_conversion(*type, begin);
+      }
+      if (s_->has_error_since(diags)) return {NodeId::none, begin, pos()};
     }
     // `N::T(args)` or `N::T{…}` ([expr.type.conv]): a qualified type name, unless a function or
     // variable of the name hides it.
@@ -4844,7 +4992,7 @@ public:
     bool placeholder = s_->types().has_placeholder(d.type);
     if (placeholder && (is(Tk::equal) || is(Tk::l_brace))) {
       std::optional<QualType> replaced;
-      init = placeholder_variable(d, local, spec.is_constexpr, replaced);
+      init = placeholder_variable(spec, d, local, replaced);
       if (!init.ok() && s_->types().has_placeholder(d.type)) s_->set_local_type(local, s_->builtin(Builtin::dependent));
     } else if (is(Tk::l_brace) || (is(Tk::equal) && kind(1) == Tk::l_brace)) {
       const auto form = accept(Tk::equal) ? sema::Construction::copy_list : sema::Construction::direct_list;
@@ -5350,6 +5498,10 @@ public:
       return Ex{NodeId::none, begin, pos()};
     };
     if (!spec.ok) return fail();
+    if (spec.constrained_auto_at) {
+      s_->diag(*spec.constrained_auto_at, Diag::constrained_auto_context);
+      return fail();
+    }
     if (types.kind(declared) != sema::TypeKind::placeholder || types.rec(declared).decltype_auto) {
       s_->diag(at, Diag::binding_requires_auto);
       return fail();
@@ -5455,7 +5607,7 @@ public:
   // variable, in scope from the end of its declarator ([basic.scope.pdecl]).
   Ex declaration_statement() {
     u32 begin = pos();
-    DeclSpec spec = decl_specifiers();
+    DeclSpec spec = decl_specifiers(false, nullptr, false, false, /*allow_constrained_auto=*/true);
     if (is(Tk::l_square) || ((is(Tk::amp) || is(Tk::ampamp)) && kind(1) == Tk::l_square))
       return structured_binding(spec, begin);
     if (spec.is_extern || spec.is_inline) {
@@ -5498,7 +5650,7 @@ public:
     do {
       u32 dbegin = pos();
       Declarator d = declarator(spec.type, false);
-      if (!d.ok || !spec.ok) {
+      if (!d.ok || !spec.ok || !constrained_variable_ok(spec, d)) {
         skip_to_semi();
         return {NodeId::none, begin, pos()};
       }
@@ -5538,7 +5690,7 @@ public:
       // declared first, so that its initializer cannot use it ([dcl.spec.auto.general]/11).
       if (s_->types().has_placeholder(d.type)) {
         u32 local = s_->declare_local(d.name, d.type, 0, d.name_at);
-        Ex init = placeholder_variable(d, local, spec.is_constexpr, replaced);
+        Ex init = placeholder_variable(spec, d, local, replaced);
         if (!init.ok()) {
           // Its uses say nothing more ([temp.dep.expr]: as a dependent name would).
           if (s_->types().has_placeholder(s_->local(local).type)) s_->set_local_type(local, s_->builtin(Builtin::dependent));
@@ -5693,11 +5845,22 @@ public:
     return args.front();
   }
 
+  bool constrained_variable_ok(const DeclSpec& spec, const Declarator& d) {
+    if (!spec.constrained_auto_at) return true;
+    if (d.qualified || s_->types().is_function(d.type) || !s_->types().has_placeholder(d.type)) {
+      s_->diag(*spec.constrained_auto_at, Diag::constrained_auto_context);
+      return false;
+    }
+    if (is(Tk::equal) && kind(1) != Tk::l_brace) return true;
+    s_->diag(*spec.constrained_auto_at, Diag::constrained_auto_initializer);
+    return false;
+  }
+
   // The initializer of block-scope variable `d`, declared as `local` with a placeholder type:
   // `= e`, `(e)` or `{e}` ([dcl.type.auto.deduct]/2), from which its type is deduced, then the
   // variable initialized as one of that type. `replaced` holds what an earlier declarator's
   // placeholder deduced. An invalid `Ex` after a diagnosed error.
-  Ex placeholder_variable(Declarator& d, u32 local, bool constexpr_, std::optional<QualType>& replaced) {
+  Ex placeholder_variable(const DeclSpec& spec, Declarator& d, u32 local, std::optional<QualType>& replaced) {
     u32 at = pos();
     Ex e;
     if (accept(Tk::equal)) {
@@ -5716,6 +5879,8 @@ public:
     QualType r{};
     auto t = s_->deduce_placeholder(d.type, e, e.begin, &r);
     if (!t) return {NodeId::none, at, pos()};
+    if (spec.constrained_auto_at && !s_->check_placeholder_constraint(spec.type, r, *spec.constrained_auto_at))
+      return {NodeId::none, at, pos()};
     if (replaced && !s_->types().is_dependent(r) && !s_->types().is_dependent(*replaced) &&
         s_->types().canonical(*replaced) != s_->types().canonical(r)) {
       s_->diag(d.name_at, Diag::auto_inconsistent, d.type, r, *replaced);
@@ -5729,7 +5894,7 @@ public:
     d.type = *t;
     s_->set_local_type(local, d.type);
     Ex init = s_->types().is_reference(d.type) ? s_->bind_reference(e, d.type, e.begin, true) : s_->convert(e, d.type, e.begin);
-    constant_local(local, d.type, constexpr_, init);
+    constant_local(local, d.type, spec.is_constexpr, init);
     return init;
   }
 

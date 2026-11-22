@@ -101,19 +101,18 @@ void copy(const Wrapper& source) { Wrapper destination(source); }
             assert (scope / 'fresh').read_bytes() == (scope / 'resident').read_bytes()
             run('./resident', status=value)
 
+        # A user-provided copy constructor makes Edit non-trivial for calls: it then passes by
+        # address and returns through the hidden result pointer (#641), so the object changes.
         signature = '\n};\nEdit round_trip(Edit input) { return input; }\n'
-        for body, accepted in (('= default;', True), ('{ value = source.value; }', False), ('= default;', True)):
+        objects = []
+        for body in ('= default;', '{ value = source.value; }', '= default;'):
             edit.write_text(head + body + signature)
             args = (linux, '-c', edit.name, '-o')
-            if accepted:
-                compile(*args, 'fresh.o')
-                compile(*args, 'resident.o', env=daemon)
-                assert (scope / 'fresh.o').read_bytes() == (scope / 'resident.o').read_bytes()
-            else:
-                error = 'unsupported aggregate result layout'
-                cold_diagnostic = compile(*args, 'fresh.o', status=1, error=error)
-                warm_diagnostic = compile(*args, 'resident.o', env=daemon, status=1, error=error)
-                assert cold_diagnostic == warm_diagnostic
+            compile(*args, 'fresh.o')
+            compile(*args, 'resident.o', env=daemon)
+            assert (scope / 'fresh.o').read_bytes() == (scope / 'resident.o').read_bytes()
+            objects.append((scope / 'resident.o').read_bytes())
+        assert objects[0] == objects[2] and objects[0] != objects[1]
 
 
 if __name__ == '__main__':

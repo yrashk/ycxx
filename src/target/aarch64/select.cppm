@@ -114,6 +114,7 @@ class Selector {
   std::vector<MInst>* out_ = nullptr;
   std::vector<MBlock> edges_;
   std::uint32_t cur_ = 0, origin_ = nil;
+  std::uint32_t incoming_stack_ = 0;  // bytes of named arguments the caller put on the stack
   std::string error_;
 
   static bool leaf(l2::Op op) { return op == l2::Op::const_ || op == l2::Op::symbol || op == l2::Op::alloca; }
@@ -248,6 +249,20 @@ class Selector {
       }
       ++i;
     }
+    incoming_stack_ = stack;
+  }
+
+  // Apple arm64: the arguments an ellipsis matches follow the named stack arguments, each in an
+  // 8-byte slot of its own (as `call` places them), so `va_start` stores the first slot's address.
+  void va_start(NodeId n) {
+    if (!cc_.variadic_slot) return fail("va_start needs a convention with variadic stack slots");
+    const std::uint32_t slot = cc_.variadic_slot;
+    const std::uint32_t first = cc_.frame_record + (incoming_stack_ + slot - 1) / slot * slot;
+    if (first >= 4096) return fail("the first variadic argument is too far from the frame record");
+    std::uint32_t cursor = vreg(f_.operands_of(n)[1]);
+    std::uint32_t a = new_vreg(Type::ptr);
+    emit({Form::ADDri, true, 3, 3, {MOp::vreg(a), MOp::preg(R::fp), MOp::imm(first)}});
+    emit({Form::STRui, true, 3, 3, {MOp::vreg(a), MOp::vreg(cursor), MOp::imm(0)}});
   }
 
   void root(NodeId n) {
@@ -256,6 +271,7 @@ class Selector {
       case l2::Op::call:
       case l2::Op::call_ind: call(n); return;
       case l2::Op::ret: ret(n); return;
+      case l2::Op::va_start: va_start(n); return;
       default: break;
     }
     std::uint32_t d = nil;

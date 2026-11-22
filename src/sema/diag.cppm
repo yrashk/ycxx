@@ -85,6 +85,9 @@ enum class Diag : std::uint32_t {
   auto_undeduced [[=message{Severity::error, "'{0:n}' is used before its return type is deduced"}]],
   decltype_auto_alone [[=message{Severity::error, "'decltype(auto)' must be the whole declared type"}]],
   auto_not_allowed [[=message{Severity::error, "a placeholder type is not allowed here"}]],
+  constrained_auto_context [[=message{Severity::error, "constrained 'auto' is not supported in this declaration"}]],
+  constrained_auto_initializer [[=message{Severity::error, "this constrained 'auto' initializer is not supported"}]],
+  placeholder_constraint_unresolved [[=message{Severity::error, "evaluating the constraint of '{0:n}' for this placeholder is not supported"}]],
   binding_requires_auto [[=message{Severity::error, "a structured binding declaration requires 'auto'"}]],
   binding_requires_initializer [[=message{Severity::error, "a structured binding declaration requires an initializer"}]],
   binding_unsupported_type [[=message{Severity::error, "structured bindings for initializer type '{0:t}' are not supported yet"}]],
@@ -336,7 +339,12 @@ enum class Diag : std::uint32_t {
   constraint_not_constant [[=message{Severity::error, "an atomic constraint is not a constant expression: {0:r}"}]],
   constraints_not_satisfied [[=message{Severity::error, "the constraints of '{0:n}' are not satisfied"}]],
   not_a_concept [[=message{Severity::error, "'{0:n}' is not a concept"}]],
+  not_a_type_concept [[=message{Severity::error, "'{0:n}' is not a type concept"}]],
   concept_constrained [[=message{Severity::error, "the concept '{0:n}' cannot have associated constraints"}]],
+  offsetof_type [[=message{Severity::error, "offsetof requires a complete class type, but '{0:t}' is not one"}]],
+  offsetof_member [[=message{Severity::error, "offsetof requires a direct non-static data member named '{0:n}' in '{1:t}'"}]],
+  offsetof_bit_field [[=message{Severity::error, "offsetof cannot be applied to a bit-field"}]],
+  offsetof_layout [[=message{Severity::error, "offsetof requires an ordinary standard-layout class with supported layout; '{0:t}' is not one"}]],
   // A GNU built-in function the SDK's or libycxx's headers use and ycxx does not have yet
   // (docs/EXTENSIONS.md), named where lookup finds nothing else.
   builtin_unsupported [[=message{Severity::error, "built-in function '{0:n}' is not supported yet"}]],
@@ -378,6 +386,9 @@ enum class Diag : std::uint32_t {
   destructibility_dependent [[=message{Severity::error, "dependent operands of '{0:n}' are not supported yet"}]],
   destructibility_incomplete [[=message{Severity::error, "incomplete class type '{0:t}' cannot be queried by '{1:n}'"}]],
   destructibility_unsupported [[=message{Severity::error, "'{0:n}' for '{1:t}' is not supported yet"}]],
+  annotation_invalid_type [[=message{Severity::error, "an annotation requires a structural constant value"}]],
+  annotation_not_supported [[=message{Severity::error, "this declaration annotation is not supported yet"}]],
+  annotation_mixed_list [[=message{Severity::error, "annotations and ordinary attributes require separate attribute-specifiers"}]],
 };
 
 // A `{N:r}` argument: why an evaluation was not constant. 0 is an expression the front end
@@ -453,7 +464,8 @@ constexpr bool is_type_trait_failure(engine::DiagId id) {
 // operand outside a type trait's domain also stays an error.
 constexpr bool survives_substitution(engine::DiagId id) {
   return is_limit(id) || id == diag_id(Diag::constraint_not_bool) || id == diag_id(Diag::constraint_not_constant) ||
-         id == diag_id(Diag::not_a_concept) || id == diag_id(Diag::trivial_copyability_incomplete) ||
+         id == diag_id(Diag::not_a_concept) || id == diag_id(Diag::not_a_type_concept) ||
+         id == diag_id(Diag::trivial_copyability_incomplete) ||
          id == diag_id(Diag::constructibility_incomplete) || id == diag_id(Diag::base_of_incomplete) ||
          id == diag_id(Diag::empty_incomplete) || id == diag_id(Diag::convertibility_incomplete) ||
          id == diag_id(Diag::destructibility_incomplete);

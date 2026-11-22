@@ -27,6 +27,7 @@ failures = []
 SLOW_STATEMENTS = 40000
 # ycxx builds AArch64 Mach-O only (DECISIONS §1.3), so its programs run only on Apple arm64, as
 # `run darwin-arm64` in tests/features/ycxx.txt; outputs are compared byte for byte everywhere.
+# PARITY: #390: running the built program on Linux needs a hosted link there.
 CAN_RUN = sys.platform == 'darwin' and platform.machine() == 'arm64'
 
 

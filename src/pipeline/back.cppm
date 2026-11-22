@@ -105,13 +105,13 @@ struct Entity {
   bool guard = false;
   // The mangled parameter types tie this ordinary C++ function to the unit (#582).
   bool local_parameter_binding = false;
-  bool hidden_elf = false;
+  bool hidden = false;  // GNU hidden visibility: ELF STV_HIDDEN, Mach-O private extern (#602, #124)
 
   bool has_local_binding() const { return linkage == ast::Linkage::internal || local_parameter_binding; }
 };
 
 // Certified on the typed definition, before IR drops lifetime information.
-enum class UnwindEligibility : std::uint8_t { none, cleanup_free, cleanup_free_with_throw, hosted_catch_all };
+enum class UnwindEligibility : std::uint8_t { none, cleanup_free, cleanup_free_with_throw, hosted_catch_all, hosted_cleanup };
 
 // A function definition: what `function_ir(F)` reads (irgen::FunctionInput, without a thunk's
 // locals).
@@ -126,9 +126,12 @@ struct FunctionDef {
   // ([stmt.dcl]/3; irgen::FunctionInput).
   std::vector<irgen::FunctionInput::StaticGuard> guards{};
   EntityId guard_acquire = EntityId::none, guard_release = EntityId::none, atexit = EntityId::none, dso = EntityId::none;
-  bool weak_elf = false;  // an ordinary external inline definition in the GNU ELF subset (#422)
+  // An ordinary external inline definition that every unit using it may emit: a weak definition,
+  // coalesced by the linker (ELF #422, Mach-O #124).
+  bool coalesced = false;
   UnwindEligibility unwind = UnwindEligibility::none;
   EntityId catch_all_callee = EntityId::none;  // for the complete-unit exception-specification check
+  ast::NodeId cleanup_call = ast::NodeId::none;
 };
 
 // A variable definition at namespace scope with its constant initializer, or `ConstId::none` for
@@ -139,7 +142,7 @@ struct Variable {
   ConstId init = ConstId::none;
   std::optional<ast::Loc> at;  // its declarator, for diagnostics
   bool dynamic = false;  // also initialized by code ([basic.start.dynamic]): writable, if const
-  bool weak_elf = false;  // eligible external inline namespace definition (#432)
+  bool coalesced = false;  // an eligible external inline namespace definition, weak (#432, #124)
 };
 
 // The classes and enumerations a unit defines, as `layout` reads them: a class's non-static data
@@ -159,6 +162,10 @@ struct ClassShape {
   std::vector<std::uint8_t> bit_widths{};  // parallel to fields, empty for ordinary records
   bool layout_uncertain = false;  // source packing or alignment that native layout does not apply
   bool copy_abi_unknown = false;   // no ABI classification for this defaulted copy
+  // `trivial_calls` false that the destructor and copy and move constructors, taken one by one,
+  // do not confirm: an unknown one, or one explicitly defaulted and trivial that the call rule
+  // still counts as user-declared (#641).
+  bool calls_abi_uncertain = false;
   bool layout_requires_virtual_support = false;
   bool has_mutable_field = false;
   sema::PeerVirtualLayout peer_virtual_layout = sema::PeerVirtualLayout::none;
@@ -188,6 +195,7 @@ struct TranslationUnit {
   std::optional<ast::Loc> virtual_declaration;
   std::optional<ir::IntThrowRuntime> int_throw;
   std::optional<ir::CatchAllRuntime> catch_all;
+  EntityId cleanup_resume = EntityId::none;
 };
 
 // What failed, at a location in an item when there is one. Every error here is something the α
@@ -217,6 +225,7 @@ void hash_into(Hasher& h, const L2Body& b) {
   hash_append(h, f.imms);
   hash_append(h, f.succs);
   hash_append(h, f.results);
+  h.uint(f.indirect_result);  // where the class result's address arrives (x8, or RDI and back in RAX)
   h.uint(f.origins.size());
   for (std::uint32_t n = 0; n < f.origins.size(); ++n) hash_append(h, f.origins.of(ir::NodeId(n)));
 }
@@ -229,6 +238,7 @@ void serialize_into(engine::Sink& out, const L2Body& b) {
   engine::serialize(out, f.imms);
   engine::serialize(out, f.succs);
   engine::serialize(out, f.results);
+  engine::serialize(out, f.indirect_result);
   std::vector<std::vector<ir::Origin>> origins;
   for (std::uint32_t n = 0; n < f.origins.size(); ++n) origins.emplace_back(std::from_range, f.origins.of(ir::NodeId(n)));
   engine::serialize(out, origins);
@@ -243,6 +253,7 @@ L2Body deserialize_from(engine::Source& in, std::type_identity<L2Body>) {
   f.imms = engine::deserialize<decltype(f.imms)>(in);
   f.succs = engine::deserialize<decltype(f.succs)>(in);
   f.results = engine::deserialize<decltype(f.results)>(in);
+  f.indirect_result = engine::deserialize<decltype(f.indirect_result)>(in);
   f.origins = ir::OriginMap(engine::deserialize<std::vector<std::vector<ir::Origin>>>(in));
   return b;
 }
@@ -433,16 +444,22 @@ struct FnKey {
 // (from the bound universe's sema records, else its handle).
 void trace_describe(std::string& out, TuId tu);
 void trace_describe(std::string& out, const FnKey& k);
+// Where in the source (#638): a unit's cells are its file; a function's are its definition (an
+// instantiation's, its pattern's), read from values the engine already holds.
+engine::SourceSpan function_span(const engine::Db& db, const FnKey& k);
+engine::SourceSpan tu_span(const engine::Db& db, TuId tu);
 
 // The unit's definitions.
 struct TuUnit {
   using Key = TuId;
+  static engine::SourceSpan trace_span(const engine::Db& db, const Key& k) { return tu_span(db, k); }
   using Value = TranslationUnit;
   static engine::query_task<Value> run(engine::Ctx& cx, TuId tu);
 };
 // The unit's classes and enumerations alone: an edit elsewhere in the unit stops here.
 struct UnitShapes {
   using Key = TuId;
+  static engine::SourceSpan trace_span(const engine::Db& db, const Key& k) { return tu_span(db, k); }
   using Value = Shapes;
   static engine::query_task<Value> run(engine::Ctx& cx, TuId tu);
 };
@@ -462,6 +479,7 @@ struct FunctionSource {
 };
 struct FunctionSourceQ {
   using Key = FnKey;
+  static engine::SourceSpan trace_span(const engine::Db& db, const Key& k) { return function_span(db, k); }
   using Value = FunctionSource;
   static engine::query_task<Value> run(engine::Ctx& cx, FnKey k);
 };
@@ -473,6 +491,7 @@ struct Generated {
 };
 struct FunctionGen {
   using Key = FnKey;
+  static engine::SourceSpan trace_span(const engine::Db& db, const Key& k) { return function_span(db, k); }
   using Value = Generated;
   static engine::query_task<Value> run(engine::Ctx& cx, FnKey k);
   static std::string errors(const Value& v) { return v.error ? v.error->detail() : std::string(); }  // for traces
@@ -485,6 +504,7 @@ struct FunctionIrValue {
 };
 struct FunctionIr {
   using Key = FnKey;
+  static engine::SourceSpan trace_span(const engine::Db& db, const Key& k) { return function_span(db, k); }
   using Value = FunctionIrValue;
   static engine::query_task<Value> run(engine::Ctx& cx, FnKey k);
   static std::string show(const Value& v);  // the L1 text, for traces (#245)
@@ -494,6 +514,7 @@ struct FunctionIr {
 // `function_debug(F)`: node id → `Loc`, and the variables.
 struct FunctionDebug {
   using Key = FnKey;
+  static engine::SourceSpan trace_span(const engine::Db& db, const Key& k) { return function_span(db, k); }
   using Value = ir::FunctionDebug;
   static engine::query_task<Value> run(engine::Ctx& cx, FnKey k);
 };
@@ -505,6 +526,7 @@ struct Lowered {
 };
 struct Lower {
   using Key = FnKey;
+  static engine::SourceSpan trace_span(const engine::Db& db, const Key& k) { return function_span(db, k); }
   using Value = Lowered;
   static engine::query_task<Value> run(engine::Ctx& cx, FnKey k);
   static std::string show(const Value& v);  // the L2 text, for traces (#245)
@@ -519,6 +541,7 @@ struct UnitRef {
 };
 struct UnitQ {
   using Key = FnKey;
+  static engine::SourceSpan trace_span(const engine::Db& db, const Key& k) { return function_span(db, k); }
   using Value = UnitRef;
   static engine::query_task<Value> run(engine::Ctx& cx, FnKey k);
   static std::string errors(const Value& v) { return v.error ? v.error->detail() : std::string(); }  // for traces
@@ -550,6 +573,7 @@ struct Optimized {
 // for B ≥ 1, so -O0 is level 0 exactly).
 struct Codegen {
   using Key = FnKey;
+  static engine::SourceSpan trace_span(const engine::Db& db, const Key& k) { return function_span(db, k); }
   using Value = Machine;
   static engine::query_task<Value> run(engine::Ctx& cx, FnKey k);
   static std::string show(const Value& v) { return Optimized::show(v); }
@@ -572,6 +596,7 @@ struct TuValue {
 };
 struct Tu {
   using Key = TuId;
+  static engine::SourceSpan trace_span(const engine::Db& db, const Key& k) { return tu_span(db, k); }
   using Value = TuValue;
   static engine::query_task<Value> run(engine::Ctx& cx, TuId tu);
   static std::string errors(const Value& v) {  // for traces (#245)
@@ -700,6 +725,8 @@ ir::TypeLayout QueryLayout::type(QualType q) const {
     l.empty = r->placed.empty;  // no data members, in it or its bases
     l.data = r->placed.nvsize;
     l.copy_abi_unknown = it->second->copy_abi_unknown;
+    l.calls_abi_uncertain = it->second->calls_abi_uncertain;
+    l.layout_uncertain = it->second->layout_uncertain;
     l.contains_explicit_alignment = it->second->explicit_alignment != 0;
     if (target.triple == ast::x86_64_linux.triple)
       l.sysv_integer_eightbytes = sysv_integer_eightbytes(*it->second, *r);
@@ -926,6 +953,20 @@ std::string entity_name(EntityId e) {
 
 void trace_describe(std::string& out, const FnKey& k) { out += entity_name(k.fn); }
 
+engine::SourceSpan tu_span(const engine::Db& db, TuId tu) {
+  const TuSource* src = db.peek<TuSourceIn>(tu);
+  return src && src->file ? pp::file_span(db, pp::FileId{*src->file}) : engine::SourceSpan{};
+}
+
+engine::SourceSpan function_span(const engine::Db& db, const FnKey& k) {
+  const TuSource* src = db.peek<TuSourceIn>(k.tu);
+  const TranslationUnit* tu = db.peek<TuUnit>(k.tu);
+  if (!src || !src->file || !tu) return {};
+  for (const FunctionDef& f : tu->functions)
+    if (f.entity == k.fn) return item_span(db, *universe().in, pp::FileId{*src->file}, f.item);
+  return {};
+}
+
 
 engine::query_task<FunctionSource> FunctionSourceQ::run(engine::Ctx& cx, FnKey k) {
   const TranslationUnit& tu = co_await cx.fetch<TuUnit>(k.tu);
@@ -999,6 +1040,8 @@ engine::query_task<Generated> FunctionGen::run(engine::Ctx& cx, FnKey k) {
   input.dso = d.dso;
   input.hosted_catch_all = d.unwind == UnwindEligibility::hosted_catch_all;
   const bool linux = facts.target().triple == ast::x86_64_linux.triple;
+  input.check_unwind_cleanups = linux;
+  if (d.unwind == UnwindEligibility::hosted_cleanup) input.cleanup_call = d.cleanup_call;
   input.native_array_delete = linux;
   input.native_array_new = linux && (d.unwind == UnwindEligibility::cleanup_free ||
                                      d.unwind == UnwindEligibility::cleanup_free_with_throw);
@@ -1070,20 +1113,25 @@ std::string_view linux_signature_error(const ast::Interners& in, const QueryLayo
   auto f = in.types.get<ast::TFunction>(canonical);
   if (f.variadic && use == definition && !ordinary) return "only ordinary free variadic definitions are supported";
   const bool fixed_direct = !f.variadic && use != indirect_call;
-  const bool allow_aggregates = fixed_direct && ordinary;
+  // Member functions, closure call operators, template specializations and calls through
+  // pointers place INTEGER records as ordinary functions do; `this` is the first INTEGER
+  // argument (#640).
+  const bool allow_aggregates = !f.variadic;
   auto error_for = [&](QualType value, bool result) -> std::string_view {
     auto builtin = ast::builtin_of(in, value);
     if (builtin == ast::Builtin::long_double) return "x87 long double parameters and results are unsupported";
-    if (builtin == ast::Builtin::float_ || builtin == ast::Builtin::double_) {
-      if (use == indirect_call) return "floating-point parameters and results of indirect calls are unsupported";
-      return {};
-    }
+    if (builtin == ast::Builtin::float_ || builtin == ast::Builtin::double_) return {};
     auto l = layout.type(value);
     if (l.copy_abi_unknown)
       return result ? "defaulted copy ABI classification is unavailable for the result"
                     : "defaulted copy ABI classification is unavailable for a parameter";
     if ((result && l.kind == ir::TypeKind::void_) || linux_integer_scalar(l) ||
         (allow_aggregates && l.sysv_integer_eightbytes)) return {};
+    // A class not trivial for calls passes by address and returns through the hidden result
+    // pointer; so does any result of more than two eightbytes (MEMORY) (#641).
+    if (allow_aggregates && l.kind == ir::TypeKind::record && !l.empty && !l.layout_uncertain &&
+        ((!l.trivial_calls && !l.calls_abi_uncertain) || (l.trivial_calls && result && l.size > 16)))
+      return {};
     if (allow_aggregates && l.kind == ir::TypeKind::record)
       return result ? "unsupported aggregate result layout" : "unsupported aggregate parameter layout";
     if (fixed_direct)
@@ -1112,11 +1160,9 @@ std::string_view linux_ellipsis_error(const ast::Interners& in, const QueryLayou
     auto builtin = ast::builtin_of(in, type);
     if (builtin == ast::Builtin::long_double) return "x87 long double ellipsis arguments are unsupported";
     auto l = layout.type(type);
-    if (indirect && l.kind == ir::TypeKind::floating) return "floating-point ellipsis arguments are unsupported";
-    if (!((byval >> i) & 1) && (linux_ellipsis_scalar(l) || (!indirect && builtin == ast::Builtin::double_)))
+    if (!((byval >> i) & 1) && (linux_ellipsis_scalar(l) || builtin == ast::Builtin::double_))
       continue;
-    return indirect ? "only 32- and 64-bit integer and pointer ellipsis arguments are supported"
-                    : "only double, 32- and 64-bit integer, and pointer ellipsis arguments are supported";
+    return "only double, 32- and 64-bit integer, and pointer ellipsis arguments are supported";
   }
   return {};
 }
@@ -1175,7 +1221,7 @@ engine::query_task<Lowered> Lower::run(engine::Ctx& cx, FnKey k) {
         if (definition != tu.functions.end() && definition->body.deduced)
           error = linux_signature_error(in, layout, definition->body.deduced_type, use, ordinary_callee);
       }
-      if (error.empty()) error = linux_ellipsis_error(in, layout, body, n);
+      if (error.empty() && op != ir::Op::invoke) error = linux_ellipsis_error(in, layout, body, n);
       if (error.empty()) continue;
       const ir::FunctionDebug& debug = co_await cx.fetch<FunctionDebug>(k);
       auto at = i < debug.loc.size() ? debug.loc[i] : ast::Loc{def.item, def.body_offset};
@@ -1185,6 +1231,7 @@ engine::query_task<Lowered> Lower::run(engine::Ctx& cx, FnKey k) {
     config.sysv_amd64 = true;
     if (def.unwind == UnwindEligibility::cleanup_free_with_throw) config.int_throw = tu.int_throw;
     if (def.unwind == UnwindEligibility::hosted_catch_all) config.catch_all = tu.catch_all;
+    if (def.unwind == UnwindEligibility::hosted_cleanup) config.cleanup_resume = tu.cleanup_resume;
     // Extend outgoing narrow results for interoperability. Lowering truncates incoming results
     // to the declared width, as the System V AMD64 psABI §3.2.3 leaves excess bits unspecified.
     config.min_result_bits = 32;
@@ -1211,7 +1258,7 @@ std::vector<SymbolReference> references(const l2::Function& body) {
   std::vector<SymbolReference> out;
   for (std::uint32_t n = 0; n < body.nodes.size(); ++n) {
     l2::Op op = body.nodes[n].op;
-    if (op == l2::Op::symbol || op == l2::Op::call || op == l2::Op::invoke)
+    if (op == l2::Op::symbol || op == l2::Op::call || op == l2::Op::invoke || op == l2::Op::invoke_cleanup)
       out.push_back({ir::EntityId(std::uint32_t(body.imms_of(ir::NodeId(n))[0])), op});
   }
   return out;
@@ -1225,6 +1272,7 @@ struct SymbolAddresses {
 // Local definitions can use the symbol itself in a direct displacement.
 struct TuSymbolAddresses {
   using Key = TuId;
+  static engine::SourceSpan trace_span(const engine::Db& db, const Key& k) { return tu_span(db, k); }
   using Value = SymbolAddresses;
   static engine::query_task<Value> run(engine::Ctx& cx, TuId tu) {
     const TranslationUnit& u = co_await cx.fetch<TuUnit>(tu);
@@ -1362,6 +1410,21 @@ std::expected<Bytes, std::string> initial_bytes(const ast::Interners& in, const 
 
 namespace {
 
+// Makes the Mach-O definitions of coalesced inline functions and variables weak, as the ELF
+// assembly does (#124): N_WEAK_DEF, with N_PEXT when hidden, so ycxx's linker and the system's
+// keep one definition.
+void mark_weak_definitions(obj::object& o, std::span<const aarch64::Symbol> symbols,
+                           std::span<const FunctionDef> functions, const std::set<EntityId>& weak_variables) {
+  std::set<EntityId> entities = weak_variables;
+  for (const FunctionDef& f : functions)
+    if (f.coalesced) entities.insert(f.entity);
+  std::set<std::string_view> weak;
+  for (const aarch64::Symbol& s : symbols)
+    if (s.bind != obj::binding::local && entities.contains(s.entity)) weak.insert(s.name);
+  for (obj::symbol& s : o.symbols)
+    if (s.defined() && s.bind != obj::binding::local && weak.contains(s.name_view())) s.weak = true;
+}
+
 struct LinuxFunction {
   EntityId entity;
   const x86_64::MachineCode* code;
@@ -1395,7 +1458,7 @@ std::expected<obj::object, aarch64::CodegenError> assemble_linux(
     const std::uint32_t text = o.add_section(obj::standard_section::text);
     std::optional<std::uint32_t> frames, exception_tables, personality_cell;
     const bool has_handlers = std::ranges::any_of(functions, [](const LinuxFunction& f) {
-      return f.code->catch_all.has_value();
+      return f.code->unwind_sites.has_value();
     });
     if (has_handlers || std::ranges::any_of(functions, &LinuxFunction::cleanup_free_unwind))
       frames = o.add_section(obj::standard_section::eh_frame);
@@ -1428,11 +1491,11 @@ std::expected<obj::object, aarch64::CodegenError> assemble_linux(
           return std::unexpected(aarch64::CodegenError{f.entity, "a text relocation exceeds the object offset limit"});
         sec.relocate(linux_relocation(r.kind), target->second, r.addend, static_cast<std::uint32_t>(base + r.offset));
       }
-      if (f.cleanup_free_unwind || f.code->catch_all) {
+      if (f.cleanup_free_unwind || f.code->unwind_sites) {
         std::optional<std::uint32_t> lsda_anchor;
-        if (f.code->catch_all) {
-          if (f.weak) return std::unexpected(aarch64::CodegenError{f.entity, "catch-all frames require strong definitions"});
-          auto lsda = x86_64::catch_all_lsda(*f.code);
+        if (f.code->unwind_sites) {
+          if (f.weak) return std::unexpected(aarch64::CodegenError{f.entity, "hosted unwind frames require strong definitions"});
+          auto lsda = x86_64::exception_lsda(*f.code);
           if (!lsda) return std::unexpected(aarch64::CodegenError{f.entity, lsda.error()});
           auto& tables = o.sections[*exception_tables];
           if (lsda->size() + tables.size() > std::numeric_limits<std::uint32_t>::max())
@@ -1545,10 +1608,12 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
     bool is_const = (std::to_underlying(ast::cv_of(in.canonical(v.type))) & 1) != 0;
     bool zero = b->relocs.empty() && std::ranges::all_of(b->bytes, [](std::uint8_t x) { return x == 0; });
     aarch64::DataDef d{v.entity, aarch64::DataKind::data, std::move(b->bytes), 0, layout.type(v.type).align, std::move(b->relocs)};
-    if (v.weak_elf && !v.dynamic && d.relocs.empty()) weak_variables.insert(v.entity);
+    if (v.coalesced && !v.dynamic && d.relocs.empty()) weak_variables.insert(v.entity);
     if (is_const && !v.dynamic && !layout.contains_mutable_field(v.type))
       d.kind = d.relocs.empty() ? aarch64::DataKind::rodata : aarch64::DataKind::data_const;
-    else if (zero) {
+    // A weak Mach-O definition stays out of zero-fill: Apple's linkers coalesce weak definitions
+    // in content sections, as Clang emits them, but older ones not in __bss (#124).
+    else if (zero && (linux || !weak_variables.contains(v.entity))) {
       d.kind = aarch64::DataKind::bss;
       d.size = d.bytes.size();
       d.bytes.clear();
@@ -1660,7 +1725,7 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
     if (!e.asm_label.empty()) name = e.asm_label;
     obj::binding binding = obj::binding::global;
     if (e.has_local_binding()) binding = obj::binding::local;
-    else if (linux && e.hidden_elf) binding = obj::binding::hidden;
+    else if (e.hidden) binding = obj::binding::hidden;
     symbols.push_back({e.id, std::move(*name), binding});
   }
   // A static local and its guard: `_ZZ <encoding> E <name> [_<n>]` and `_ZGV` before it, the
@@ -1696,13 +1761,15 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
       std::vector<LinuxFunction> code;
       for (std::size_t i = 0; i < fns.size(); ++i) {
         const auto& def = tu.functions[i];
-        code.push_back({fns[i].fn, &*ms[i].get().linux_code, def.weak_elf, def.unwind != UnwindEligibility::none});
+        code.push_back({fns[i].fn, &*ms[i].get().linux_code, def.coalesced, def.unwind != UnwindEligibility::none});
       }
       return assemble_linux(tu.name, code, data, symbols, weak_variables);
     }
     std::vector<aarch64::CompiledFunction> code;
     for (std::size_t i = 0; i < fns.size(); ++i) code.push_back({fns[i].fn, *ms[i].get().code});
-    return aarch64::assemble(tu.name, code, data, symbols);
+    auto o = aarch64::assemble(tu.name, code, data, symbols);
+    if (o) mark_weak_definitions(*o, symbols, tu.functions, weak_variables);
+    return o;
   }();
   if (!o) {
     std::optional<ast::Loc> at;
