@@ -96,6 +96,13 @@ Consuming `tasks[1]` can proceed while `tasks[0]` has a shared borrow. The array
 aggregate protocol requires nonthrowing destruction. Pointer aliases and runtime indices
 require additional checking.
 
+In a checked initializer, `choose ? begin() : handoff(static_cast<Work&&>(previous))`
+checks each alternative as its own ownership path. In `(inspect(previous), begin())`,
+the left operand runs before the new owner is initialized. This works for direct
+owners, owning fields, and fixed array elements in syntax-only checks. Native
+construction of the selected or sequenced class result is tracked in
+[#740](https://github.com/yrashk/ycxx/issues/740).
+
 ## Try it
 
 From the repository root, save the following as `permit-demo.cpp`.

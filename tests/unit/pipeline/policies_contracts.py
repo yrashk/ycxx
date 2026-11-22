@@ -502,6 +502,43 @@ with tempfile.TemporaryDirectory() as directory:
         }
     """)
     syntax(local_records)
+    selected_source = """\
+        #include "runtime_transaction.hpp"
+        using example::Work;
+        struct Inner { Work value; };
+        struct Fields { Work first; Inner inner; };
+
+        int main(int argc, char**) {
+          const bool choose = argc == 1;
+          auto source = example::start();
+          auto selected = choose ? example::handoff(static_cast<Work&&>(source)) :
+                                   (example::inspect(source), example::handoff(static_cast<Work&&>(source)));
+          Fields fields{choose ? example::start() : example::start(),
+                        {(example::inspect(selected), example::start())}};
+          Work tasks[2]{choose ? example::start() : example::start(), example::start()};
+          example::finish(static_cast<Work&&>(selected));
+          example::finish(static_cast<Work&&>(fields.first));
+          example::finish(static_cast<Work&&>(fields.inner.value));
+          example::finish(static_cast<Work&&>(tasks[0]));
+          example::finish(static_cast<Work&&>(tasks[1]));
+        }
+    """
+    selected = write("selected.cpp", selected_source)
+    syntax(selected)
+    syntax(write("selected_live_branch.cpp", selected_source.replace(
+        "(example::inspect(source), example::handoff(static_cast<Work&&>(source)))", "example::start()")),
+        error="linear resource 'source' may leave its scope")
+    syntax(write("selected_spent_branch.cpp", selected_source.replace(
+        "example::inspect(source)", "example::finish(static_cast<Work&&>(source))")),
+        error="linear resource 'source' may already have been consumed")
+    syntax(write("selected_unwind.cpp", "void potentially_throwing();\n" + selected_source.replace(
+        "example::inspect(source)", "potentially_throwing()")),
+        error="operation may unwind while linear resource 'source' is live")
+    subprocess.run([host, "-std=c++20", "-I", include, "-I", examples, str(selected), "-o", str(executable)],
+                   check=True, timeout=30)
+    for extra in ((), ("alternate",)):
+        assert subprocess.run([executable, *extra], timeout=10).returncode == 0
+
     for source, extra in ((nested, ()), (nested_skip, ("skip",)), (array, ()), (array_skip, ("skip",)),
                           (composed, ()), (composed_skip, ("skip",)), (local_records, ())):
         subprocess.run([host, "-std=c++20", "-I", include, "-I", examples, str(source), "-o", str(executable)],

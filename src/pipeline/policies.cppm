@@ -627,7 +627,21 @@ class OwnershipFlowBuilder {
     return head;
   }
 
-  Point initialize_owner(ast::u32 slot, const ast::Red& initializer, Point next) {
+  Point initialize_owner(ast::u32 slot, ast::Red initializer, Point next, Context context) {
+    initializer = unparenthesized(initializer);
+    if (initializer.is<ast::Conditional>()) {
+      const auto expression = initializer.get<ast::Conditional>();
+      const auto then_ = initialize_owner(slot, at(initializer, expression.then_), next, context);
+      const auto else_ = initialize_owner(slot, at(initializer, expression.else_), next, context);
+      return condition(initializer, expression.condition, then_, else_, context);
+    }
+    if (initializer.is<ast::OrderedBinary>()) {
+      const auto expression = initializer.get<ast::OrderedBinary>();
+      if (expression.op == ast::OrderedOp::comma) {
+        const auto value = initialize_owner(slot, at(initializer, expression.rhs), next, context);
+        return lower_child(initializer, expression.lhs, value, context);
+      }
+    }
     if (initializer.is<ast::Call>()) {
       const auto call = initializer.get<ast::Call>();
       const auto operation = direct_effect(initializer, call);
@@ -644,7 +658,7 @@ class OwnershipFlowBuilder {
     if (slot.owner) {
       if (child.id == ast::NodeId::none)
         return unsupported(parent.offset(), "an owner must be initialized by a registered factory or transfer from a named owner");
-      return initialize_owner(*slot.owner, unparenthesized(at(parent, child)), next);
+      return initialize_owner(*slot.owner, at(parent, child), next, context);
     }
     if (slot.children.empty()) return lower_child(parent, child, next, context);
     if (child.id == ast::NodeId::none || !parent.ast().is<ast::InitList>(child.id))
@@ -673,7 +687,7 @@ class OwnershipFlowBuilder {
     if (const auto it = field_slots_.find(var.local); it != field_slots_.end())
       return initialize_fields(node, var.init, it->second, next, context);
     if (local.ownership != Ownership::ordinary) {
-      if (var.init.id != ast::NodeId::none) return initialize_owner(var.local, unparenthesized(at(node, var.init)), next);
+      if (var.init.id != ast::NodeId::none) return initialize_owner(var.local, at(node, var.init), next, context);
       return unsupported(node.offset(), "an owner must be initialized by a registered factory or transfer from a named owner");
     }
     const auto type = world_.ins.seqs.at(body_.locals, var.local).type;
