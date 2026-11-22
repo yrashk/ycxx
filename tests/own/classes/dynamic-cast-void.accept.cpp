@@ -1,3 +1,6 @@
+// REQUIRES: linux
+// PARITY: #294
+
 struct B { virtual int identify(); };
 
 using QualifiedB = const volatile B;
