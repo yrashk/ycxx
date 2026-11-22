@@ -4491,13 +4491,20 @@ private:
       std::optional<u32> final_at;
       if (function) {
         if (!member_virt_specifiers(overridden != nullptr, &final_at)) return bad();
-        if (final_at && !is_virtual) {
-          s_.diag(*final_at, Diag::final_nonvirtual);
-          return bad();
-        }
-        if (final_at && it_->kind == ItemKind::function && !ps_.at_end()) {
-          s_.diag(ps_.pos(), Diag::unexpected_token, ps_.kind());
-          return bad();
+        if (final_at) {
+          if (!is_virtual) {
+            s_.diag(*final_at, Diag::final_nonvirtual);
+            return bad();
+          }
+          // Implicit copy and move assignment can override a virtual operator= (#309).
+          if (s_.ins().names.spelling(d.name) == "operator=") {
+            s_.diag(*final_at, Diag::not_supported, Tk::identifier);
+            return bad();
+          }
+          if (it_->kind == ItemKind::function && !ps_.at_end()) {
+            s_.diag(ps_.pos(), Diag::unexpected_token, ps_.kind());
+            return bad();
+          }
         }
         const bool ordinary_member = !spec.is_static && s_.template_scopes.empty() && !inst_ &&
                                      p_->is_namespace(s_.world().entities.rec(c.entity).scope);
