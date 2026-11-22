@@ -470,7 +470,9 @@ std::optional<frame_section> linked_frames(std::span<const std::uint8_t> image) 
     if (mo::load32(image, at) != mo::lc_segment_64) continue;
     for (std::size_t i = 0; i < mo::load32(image, at + 64); ++i) {
       const auto section = at + mo::segment_command_64_size + i * mo::section_64_size;
-      if (std::string_view(reinterpret_cast<const char*>(image.data() + section), 16).starts_with("__eh_frame"))
+      const std::string_view names(reinterpret_cast<const char*>(image.data() + section), 32);
+      if (names.starts_with(std::string_view("__eh_frame\0", 11)) &&
+          names.substr(16).starts_with(std::string_view("__TEXT\0", 7)))
         return frame_section{mo::load64(image, section + 32), image.subspan(mo::load32(image, section + 48),
                                                                            mo::load64(image, section + 40))};
     }
@@ -486,6 +488,7 @@ void test_cleanup_frames() {
   second.name = "second.o";
   second.symbols[0].name = "_second";
   add_cleanup_frame(second, 0, 8, 0x10, {});
+  second.sections.back().flags = 0x6800000b;  // S_COALESCED, NO_TOC, STRIP_STATIC_SYMS, LIVE_SUPPORT
   std::vector<obj::object> objects;
   for (const auto* input : {&first, &second}) {
     auto object = mo::read_object(mo::write_object(*input), input->name);
@@ -518,6 +521,13 @@ void test_cleanup_frames() {
   mismatched.sections.back().relocs[0].addend += 4;
   const auto missing = link::link(std::span(&mismatched, 1));
   check(missing && !linked_frames(*missing), "a relocation which does not denote the PC field stays outside the cleanup-frame profile");
+
+  auto debug = second;
+  debug.sections[0].flags |= obj::section_flags::debug;
+  debug.symbols[0].bind = obj::binding::local;
+  const std::array ignored{std::move(debug), return42()};
+  const auto debug_link = link::link(ignored);
+  check(debug_link && !linked_frames(*debug_link), "a frame referring to discarded debug text is also discarded");
 }
 
 // Findings of the review of #42, one check each.

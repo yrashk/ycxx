@@ -247,8 +247,8 @@ std::optional<std::uint32_t> cleanup_frame_size(const obj::object& o, std::uint3
   constexpr std::uint32_t coalesced = 0x0b;  // S_COALESCED, used by Darwin assemblers
   const auto type = section.flags & obj::section_flags::type_mask;
   if ((type != obj::section_flags::regular && type != coalesced) || (section.flags & obj::section_flags::debug) != 0 ||
-      section.align_log2 > 3 || bytes.size() % 4 != 0 || !std::in_range<std::uint32_t>(bytes.size()) ||
-      std::ranges::count_if(o.sections, &obj::section::is_eh_frame) != 1)
+      section.align_log2 < 2 || section.align_log2 > 3 || bytes.size() % 4 != 0 ||
+      !std::in_range<std::uint32_t>(bytes.size()))
     return std::nullopt;
 
   std::map<std::uint32_t, const obj::reloc*> relocations;
@@ -298,6 +298,7 @@ std::optional<std::uint32_t> cleanup_frame_size(const obj::object& o, std::uint3
       const auto& text = o.sections[*code.section];
       const auto size = width == 4 ? mo::load32(record, 8 + width) : mo::load64(record, 8 + width);
       if (text.segment != "__TEXT" || text.name != "__text" || text.is_zerofill() ||
+          (text.flags & obj::section_flags::debug) != 0 ||
           code.offset > text.size() || code.offset % 4 != 0 || size == 0 || size % 4 != 0 || size > text.size() - code.offset)
         return std::nullopt;
       ranges.emplace_back(*code.section, code.offset, code.offset + size);
@@ -492,9 +493,10 @@ private:
     for (std::uint32_t i = 0; i < objs_.size(); ++i) {
       const auto& o = objs_[i];
       placed_[i].resize(o.sections.size());
+      const bool one_unwind = std::ranges::count_if(o.sections, &obj::section::is_eh_frame) == 1;
       for (std::uint32_t j = 0; j < o.sections.size(); ++j) {
         const auto& s = o.sections[j];
-        const auto frame_size = s.is_eh_frame() ? cleanup_frame_size(o, j) : std::nullopt;
+        const auto frame_size = one_unwind && s.is_eh_frame() ? cleanup_frame_size(o, j) : std::nullopt;
         if (dropped(s) && !frame_size) continue;
         const auto t = s.flags & type_mask;
         if (t == thread_local_regular || t == thread_local_zerofill || t == thread_local_variables) {
