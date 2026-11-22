@@ -1955,6 +1955,10 @@ public:
       diag(name_at, Diag::not_supported, lex::Tk::tilde);
       return fail;
     }
+    if (!record->destructor_usable) {
+      diag(name_at, Diag::object_unusable_destructor, type);
+      return fail;
+    }
     if (!check_destructor_access(type, name_at) || !require_supported_virtual_layout(type, name_at)) return fail;
     if (!arrow) {
       if (!object.glvalue()) object = materialize(object, type, false);
