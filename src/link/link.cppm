@@ -238,10 +238,77 @@ std::uint32_t with_adrp_pages(std::uint32_t insn, std::int64_t pages) {
   return (insn & 0x9f00001f) | (p & 3) << 29 | ((p >> 2) & 0x7ffff) << 5;
 }
 
-// DWARF .eh_frame, version 1 zR CIE with AArch64's usual code/data alignment and return
-// address register. Only the initial-location field is relocatable in each cleanup-free FDE.
-// A rejected profile follows the existing behavior for unsupported unwind sections.
-std::optional<std::uint32_t> cleanup_frame_size(const obj::object& o, std::uint32_t si) {
+std::span<const std::uint8_t> frame_record(std::span<const std::uint8_t> bytes) {
+  if (bytes.size() < 8) return {};
+  const auto length = mo::load32(bytes, 0);
+  if (length < 4 || length % 4 != 0 || length > bytes.size() - 4) return {};
+  return bytes.first(length + 4);
+}
+
+constexpr std::uint8_t cleanup_cie_prefix[]{1, 'z', 'P', 'L', 'R', 0, 1, 0x78, 30, 7, 0x9b};
+
+bool has_cleanup_cie(std::span<const std::uint8_t> bytes) {
+  while (bytes.size() >= 14) {
+    if (mo::load32(bytes, 4) == 0 &&
+        std::ranges::equal(bytes.subspan(8, 6), std::span(cleanup_cie_prefix).first<6>()))
+      return true;
+    const auto record = frame_record(bytes);
+    if (record.empty()) break;
+    bytes = bytes.subspan(record.size());
+  }
+  return false;
+}
+
+std::optional<std::uint64_t> read_uleb(std::span<const std::uint8_t>& bytes) {
+  std::uint64_t value = 0;
+  for (unsigned shift = 0; shift < 64 && !bytes.empty(); shift += 7) {
+    const auto byte = bytes.front();
+    bytes = bytes.subspan(1);
+    if (shift == 63 && (byte & 0x7f) > 1) return std::nullopt;
+    value |= std::uint64_t(byte & 0x7f) << shift;
+    if ((byte & 0x80) == 0) return value;
+  }
+  return std::nullopt;
+}
+
+// The supported LSDA omits LPStart and the type table. Its ULEB128 call-site rows refer
+// to offsets within the FDE's own function and carry no catch actions (Itanium EH ABI).
+std::optional<std::uint64_t> cleanup_table_size(const obj::object& o, const obj::symbol& symbol,
+                                               std::uint64_t code_size) {
+  if (symbol.bind != obj::binding::local || symbol.weak || !symbol.section || *symbol.section >= o.sections.size())
+    return std::nullopt;
+  const auto& section = o.sections[*symbol.section];
+  if (section.segment != "__TEXT" || section.name != "__gcc_except_tab" || section.flags != obj::section_flags::regular ||
+      section.zerofill_size != 0 || !section.relocs.empty() || symbol.offset >= section.bytes.size())
+    return std::nullopt;
+  const auto bytes = std::span(section.bytes).subspan(symbol.offset);
+  constexpr std::uint8_t prefix[]{0xff, 0xff, 0x01};  // omitted LPStart and types, ULEB128 sites
+  if (bytes.size() < sizeof(prefix) || !std::ranges::equal(bytes.first(sizeof(prefix)), prefix)) return std::nullopt;
+  auto after_header = bytes.subspan(sizeof(prefix));
+  const auto length = read_uleb(after_header);
+  if (!length || *length > after_header.size()) return std::nullopt;
+  auto rows = after_header.first(*length);
+  std::uint64_t end = 0;
+  bool has_cleanup = false;
+  while (!rows.empty()) {
+    const auto begin = read_uleb(rows);
+    const auto size = read_uleb(rows);
+    const auto landing = read_uleb(rows);
+    const auto action = read_uleb(rows);
+    if (!begin || !size || !landing || !action || *action != 0 || *size == 0 || *begin < end ||
+        *begin > code_size || *size > code_size - *begin || *landing >= code_size ||
+        (*begin | *size | *landing) % 4 != 0)
+      return std::nullopt;
+    end = *begin + *size;
+    if (*landing != 0 && *landing >= *begin && *landing < end) return std::nullopt;
+    has_cleanup |= *landing != 0;
+  }
+  return has_cleanup ? std::optional(bytes.size() - after_header.size() + *length) : std::nullopt;
+}
+
+// Preserve version 1 zR and cleanup-only zPLR DWARF records. Validate ownership of all
+// relocatable fields before section placement. CFI instructions are preserved as supplied.
+std::optional<std::uint32_t> unwind_frame_size(const obj::object& o, std::uint32_t si) {
   const auto& section = o.sections[si];
   const std::span<const std::uint8_t> bytes = section.bytes;
   constexpr std::uint32_t coalesced = 0x0b;  // S_COALESCED, used by Darwin assemblers
@@ -253,14 +320,34 @@ std::optional<std::uint32_t> cleanup_frame_size(const obj::object& o, std::uint3
 
   std::map<std::uint32_t, const obj::reloc*> relocations;
   for (const auto& r : section.relocs) {
-    if (!r.minus || r.symbol >= o.symbols.size() || *r.minus >= o.symbols.size() ||
+    if (r.symbol >= o.symbols.size() || (r.minus && *r.minus >= o.symbols.size()) ||
         !relocations.emplace(r.offset, &r).second)
       return std::nullopt;
   }
+  const auto take = [&](std::uint32_t offset) -> const obj::reloc* {
+    const auto entry = relocations.find(offset);
+    if (entry == relocations.end()) return nullptr;
+    const auto* r = entry->second;
+    relocations.erase(entry);
+    return r;
+  };
+  const auto difference = [&](std::uint32_t field, std::uint32_t width) -> const obj::symbol* {
+    const auto* r = take(field);
+    if (!r || !r->minus || r->kind != (width == 4 ? reloc_kind::abs32 : reloc_kind::abs64)) return nullptr;
+    const auto& base = o.symbols[*r->minus];
+    if (base.bind != obj::binding::local || base.section != si || base.offset > field ||
+        r->addend != static_cast<std::int64_t>(base.offset) - field)
+      return nullptr;
+    return &o.symbols[r->symbol];
+  };
 
-  constexpr std::uint8_t cie_prefix[]{1, 'z', 'R', 0, 1, 0x78, 30, 1};
-  std::map<std::uint32_t, std::uint32_t> cie_widths;
-  std::vector<std::tuple<std::uint32_t, std::uint64_t, std::uint64_t>> ranges;
+  constexpr std::uint8_t ordinary_cie_prefix[]{1, 'z', 'R', 0, 1, 0x78, 30, 1};
+  struct cie_layout {
+    std::uint32_t pc_width;
+    bool cleanup;
+  };
+  std::map<std::uint32_t, cie_layout> cies;
+  std::vector<std::tuple<std::uint32_t, std::uint64_t, std::uint64_t>> code_ranges, table_ranges;
   std::uint32_t at = 0;
   while (at < bytes.size()) {
     const auto length = mo::load32(bytes, at);
@@ -268,50 +355,64 @@ std::optional<std::uint32_t> cleanup_frame_size(const obj::object& o, std::uint3
       if (std::ranges::any_of(bytes.subspan(at), [](auto byte) { return byte != 0; })) return std::nullopt;
       break;
     }
-    if (length < 4 || length % 4 != 0 || length > bytes.size() - at - 4) return std::nullopt;
-    const auto record = bytes.subspan(at, length + 4);
+    const auto record = frame_record(bytes.subspan(at));
+    if (record.empty()) return std::nullopt;
     const auto cie = mo::load32(record, 4);
     if (cie == 0) {
-      if (record.size() < 17 || !std::ranges::equal(record.subspan(8, sizeof(cie_prefix)), cie_prefix))
-        return std::nullopt;
-      // DW_EH_PE_pcrel paired with absptr, sdata4, or sdata8.
-      const auto encoding = record[16];
-      if (encoding != 0x10 && encoding != 0x1b && encoding != 0x1c) return std::nullopt;
-      cie_widths.emplace(at, encoding == 0x1b ? 4 : 8);
+      if (record.size() >= 25 && std::ranges::equal(record.subspan(8, sizeof(cleanup_cie_prefix)), cleanup_cie_prefix)) {
+        // L and R are direct, pointer-sized PC-relative encodings. P is an indirect
+        // PC-relative signed word to the GOT entry of the Darwin C++ personality.
+        if (record[23] != 0x10 || record[24] != 0x10) return std::nullopt;
+        const auto* personality = take(at + 19);
+        if (!personality || personality->kind != reloc_kind::got_rel32 || personality->addend != 0 || personality->minus)
+          return std::nullopt;
+        const auto& symbol = o.symbols[personality->symbol];
+        if (symbol.bind != obj::binding::global || symbol.weak || symbol.name_view() != "___gxx_personality_v0")
+          return std::nullopt;
+        cies.emplace(at, cie_layout{8, true});
+      } else {
+        if (record.size() < 17 || !std::ranges::equal(record.subspan(8, sizeof(ordinary_cie_prefix)), ordinary_cie_prefix))
+          return std::nullopt;
+        // DW_EH_PE_pcrel paired with absptr, sdata4, or sdata8.
+        const auto encoding = record[16];
+        if (encoding != 0x10 && encoding != 0x1b && encoding != 0x1c) return std::nullopt;
+        cies.emplace(at, cie_layout{encoding == 0x1b ? 4u : 8u, false});
+      }
     } else {
       if (cie > at + 4) return std::nullopt;
-      const auto common = cie_widths.find(at + 4 - cie);
-      if (common == cie_widths.end()) return std::nullopt;
-      const auto width = common->second;
-      if (record.size() <= 8 + 2 * width || record[8 + 2 * width] != 0) return std::nullopt;
-      const auto pc = at + 8;
-      const auto entry = relocations.find(pc);
-      if (entry == relocations.end()) return std::nullopt;
-      const auto& r = *entry->second;
-      if (r.kind != (width == 4 ? reloc_kind::abs32 : reloc_kind::abs64)) return std::nullopt;
-      const auto& base = o.symbols[*r.minus];
-      if (base.bind != obj::binding::local || base.section != si || base.offset > pc ||
-          r.addend != static_cast<std::int64_t>(base.offset) - pc)
+      const auto common = cies.find(at + 4 - cie);
+      if (common == cies.end()) return std::nullopt;
+      const auto [width, cleanup] = common->second;
+      const auto augmentation = 8 + 2 * width;
+      const auto lsda_width = cleanup ? 8u : 0u;
+      if (record.size() < augmentation + 1 + lsda_width || record[augmentation] != lsda_width)
         return std::nullopt;
-      const auto& code = o.symbols[r.symbol];
-      if (!code.section || *code.section >= o.sections.size() || code.weak) return std::nullopt;
-      const auto& text = o.sections[*code.section];
+      const auto* code = difference(at + 8, width);
+      if (!code || !code->section || *code->section >= o.sections.size() || code->weak) return std::nullopt;
+      const auto& text = o.sections[*code->section];
       const auto size = width == 4 ? mo::load32(record, 8 + width) : mo::load64(record, 8 + width);
       if (text.segment != "__TEXT" || text.name != "__text" || text.is_zerofill() ||
           (text.flags & obj::section_flags::debug) != 0 ||
-          code.offset > text.size() || code.offset % 4 != 0 || size == 0 || size % 4 != 0 || size > text.size() - code.offset)
+          code->offset > text.size() || code->offset % 4 != 0 || size == 0 || size % 4 != 0 || size > text.size() - code->offset)
         return std::nullopt;
-      ranges.emplace_back(*code.section, code.offset, code.offset + size);
-      relocations.erase(entry);
+      code_ranges.emplace_back(*code->section, code->offset, code->offset + size);
+      if (cleanup) {
+        const auto* table = difference(at + augmentation + 1, lsda_width);
+        const auto extent = table ? cleanup_table_size(o, *table, size) : std::nullopt;
+        if (!extent) return std::nullopt;
+        table_ranges.emplace_back(*table->section, table->offset, table->offset + *extent);
+      }
     }
     at += length + 4;
   }
-  if (ranges.empty() || !relocations.empty()) return std::nullopt;
-  std::ranges::sort(ranges);
-  const auto overlap = std::ranges::adjacent_find(ranges, [](const auto& a, const auto& b) {
-    return std::get<0>(a) == std::get<0>(b) && std::get<2>(a) > std::get<1>(b);
-  });
-  return overlap == ranges.end() ? std::optional(at) : std::nullopt;
+  const auto disjoint = [](auto& ranges) {
+    std::ranges::sort(ranges);
+    return std::ranges::adjacent_find(ranges, [](const auto& first, const auto& second) {
+      return std::get<0>(first) == std::get<0>(second) && std::get<2>(first) > std::get<1>(second);
+    }) == ranges.end();
+  };
+  if (code_ranges.empty() || !relocations.empty() || !disjoint(code_ranges) || !disjoint(table_ranges)) return std::nullopt;
+  return at;
 }
 
 class linker {
@@ -496,8 +597,12 @@ private:
       const bool one_unwind = std::ranges::count_if(o.sections, &obj::section::is_eh_frame) == 1;
       for (std::uint32_t j = 0; j < o.sections.size(); ++j) {
         const auto& s = o.sections[j];
-        const auto frame_size = one_unwind && s.is_eh_frame() ? cleanup_frame_size(o, j) : std::nullopt;
-        if (dropped(s) && !frame_size) continue;
+        const auto frame_size = one_unwind && s.is_eh_frame() ? unwind_frame_size(o, j) : std::nullopt;
+        if (dropped(s) && !frame_size) {
+          if (s.is_eh_frame() && has_cleanup_cie(s.bytes))
+            fail(std::format("{}: invalid cleanup-only DWARF frame, personality, or LSDA", o.name));
+          continue;
+        }
         const auto t = s.flags & type_mask;
         if (t == thread_local_regular || t == thread_local_zerofill || t == thread_local_variables) {
           fail(std::format("{}: thread-local section {},{} is not supported", o.name, s.segment, s.name));

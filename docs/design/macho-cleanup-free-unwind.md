@@ -1,4 +1,4 @@
-# Cleanup-free DWARF frames in Mach-O
+# DWARF frames in Mach-O
 
 The first slice of [#72](https://github.com/yrashk/ycxx/issues/72) preserves call frame
 information from `__TEXT,__eh_frame` in an arm64 Mach-O link. A hosted unwinder can walk a
@@ -23,9 +23,26 @@ each PC encoding from the final addresses, including when multiple objects contr
 frames. The linker preserves the CFI instruction stream as supplied. The usual signed output
 path covers the new section.
 
-The linker retains the existing treatment of sections outside this profile. Compact unwind
-tables and frames with personalities, LSDA pointers, or other encodings are tracked in #72.
 AArch64 [cleanup-free frame emission](aarch64-cleanup-free-unwind.md) uses this profile.
-Native exception lowering is tracked in #648. The binary layouts follow
+
+## Cleanup-only frames
+
+[#783](https://github.com/yrashk/ycxx/issues/783) adds the version 1 `zPLR` CIE profile. Its
+personality field is an indirect signed PC-relative word to the GOT cell for the Darwin symbol
+`___gxx_personality_v0`. The object model carries a zero addend for that field. The FDE
+location and LSDA fields use pointer-sized PC-relative differences. The linker resolves
+both against the exact fields after placement, using a local anchor in the same frame section.
+
+The LSDA points to a local table in the same object's `__TEXT,__gcc_except_tab`. The table omits
+LPStart and types. Its ULEB128 call-site rows have action zero, nonoverlapping ranges within the
+FDE's text extent and any landing pad addresses aligned within the function. A landing pad lies
+outside its own protected range. The linker diagnoses an invalid recognized cleanup frame.
+The `unit.link` controls inspect both metadata profiles after placement and exercise a cleanup
+bridge from a platform-linked typed handler on arm64 macOS.
+
+The GOT wire format is tracked by [#782](https://github.com/yrashk/ycxx/issues/782) and source
+lowering by [#781](https://github.com/yrashk/ycxx/issues/781). Compact unwind and other
+encodings are tracked by [#72](https://github.com/yrashk/ycxx/issues/72). General catch tables
+are tracked by [#648](https://github.com/yrashk/ycxx/issues/648). The binary layouts follow
 the DWARF Call Frame Information format, the Itanium C++ ABI exception handling frame format,
 and Apple's published Mach-O format and ARM64 relocation definitions.

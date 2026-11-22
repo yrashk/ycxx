@@ -50,7 +50,7 @@ object files from Clang or GCC. Variadic functions can be defined with `<cstdarg
 macOS and Linux ([#647](https://github.com/yrashk/ycxx/issues/647)). Errors are reported as
 `file:line:col: error: …`.
 
-The arm64 Mach-O linker preserves supported cleanup-free DWARF frames from input objects.
+The arm64 Mach-O linker preserves supported cleanup-free and cleanup-only DWARF frames from input objects.
 [Mach-O unwind support #72](https://github.com/yrashk/ycxx/issues/72)
 It resolves PC-relative GOT words at nonzero offsets in independently assembled objects.
 [#782](https://github.com/yrashk/ycxx/issues/782)
