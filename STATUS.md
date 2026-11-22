@@ -1671,6 +1671,18 @@ template's tokens again with the arguments bound.
   of a function template specialization as an expression stays in #335.
   Mangling a C-linkage function type stays in #287.
 
+## Value-dependent template arguments in symbols (#773)
+
+- A function template whose signature holds a value-dependent template argument has a symbol:
+  `X <expression> E`, with a dependent variable-template-id as its `<source-name>` and
+  `<template-args>` and `!e` as `nt e` (Itanium C++ ABI §5.1.6). `std::move_if_noexcept`'s
+  return type needs it for any libycxx header in an object.
+- For a variable template outside the global namespace and `::std`, ycxx writes GCC's form; Clang
+  adds the namespaces as written. The choice is #777.
+- Tests: `tests/own/abi/dependent-template-args.run.cpp`, linked with a Clang peer that calls the
+  specializations. `&&` follows #671; type-trait operations (`__is_same(T, U)`) still have no
+  symbol (#773).
+
 ## Templates, ζ step 2: class templates (#88, 2026-11-18)
 
 - **Declarations:** class templates at namespace scope (`template<…> struct X {…};` and
@@ -1934,8 +1946,8 @@ session's.*
   class constructibility, assignability and general convertibility, remaining `__is_trivially_*` and
   `__is_nothrow_*` predicates, `__is_standard_layout` and
   `__reference_binds_to_temporary`. Other dependent predicates, conversions of a dependent
-  predicate to a non-`bool` parameter, dependent array bounds and expression mangling remain in
-  #209.
+  predicate to a non-`bool` parameter and dependent array bounds remain in #209; mangling
+  dependent expressions is #773.
 
 ## Address-of builtin (#330)
 
