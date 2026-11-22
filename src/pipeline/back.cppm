@@ -186,11 +186,12 @@ struct Shapes {
   std::vector<EnumShape> enums;
 };
 
-// The root table this unit owns, as established by its complete declaration set. This does
+// The table this unit owns, as established by its complete declaration set. This does
 // not depend on the functions' bodies or whether this unit ever uses the table.
 struct OwnedVirtualTable {
   EntityId entity;
-  std::array<EntityId, 2> slots;  // in declaration order, starting with the key function
+  std::vector<EntityId> slots;  // in slot order, starting with the key function in the admitted profiles
+  EntityId primary_base = EntityId::none;
 };
 
 // A translation unit's definitions and declarations, in the order of their items.
@@ -1517,7 +1518,8 @@ struct LinuxFunction {
 struct LinuxVirtualTable {
   EntityId entity;
   std::string type_encoding;
-  std::array<EntityId, 2> slots;
+  std::span<const EntityId> slots;
+  std::optional<std::string> base_encoding;
 };
 
 obj::reloc_kind linux_relocation(x86_64::RelocKind kind) {
@@ -1640,42 +1642,62 @@ std::expected<obj::object, aarch64::CodegenError> assemble_linux(
   if (table) {
     const auto symbol = symbol_of.find(table->entity);
     if (symbol == symbol_of.end()) return missing(table->entity);
-    // Itanium C++ ABI §2.5.2 and §2.9.5: the root table has zero offset-to-top, a pointer
-    // to its RTTI, then the function pointers. The root descriptor points to the runtime
-    // __class_type_info table's address point and to the NUL-terminated type encoding.
+    // Itanium C++ ABI §2.5.2 and §2.9.5: a primary table has zero offset-to-top, its
+    // RTTI pointer and the function slots. A single-inheritance descriptor adds the
+    // base RTTI pointer to the runtime address point and type name fields.
     const auto pointers = o.add_section(S::data_const);
-    const auto names = o.add_section(S::rodata);
     constexpr auto pointer_size = 8;
     constexpr auto address_point = 2 * pointer_size;
+    constexpr auto class_type_info = "_ZTVN10__cxxabiv117__class_type_infoE";
+    constexpr auto si_class_type_info = "_ZTVN10__cxxabiv120__si_class_type_infoE";
     const std::uint64_t table_size = address_point + pointer_size * table->slots.size();
-    const std::string type_name = "_ZTS" + table->type_encoding;
     // Code relocations already name this symbol by index. Define the existing entry.
     o.symbols[symbol->second].section = pointers;
     o.symbols[symbol->second].object_size = table_size;
     const auto typeinfo = o.add_symbol({.name = "_ZTI" + table->type_encoding, .section = pointers,
-                                        .offset = table_size, .object_size = 2 * pointer_size});
-    const auto name_object = o.add_symbol({.name = type_name, .section = names, .weak = true,
-                                           .object_size = table->type_encoding.size() + 1});
+                                        .offset = table_size,
+                                        .object_size = table->base_encoding ? 3 * pointer_size : 2 * pointer_size});
     // The name keeps its own vague linkage even when the table and descriptor have a unique
     // owner (Itanium C++ ABI §5.2.4).
-    o.comdat_groups.push_back({type_name, {names}});
-    o.sections[names].emit(table->type_encoding);
-    o.sections[names].bytes.push_back(0);
+    auto emit_type_name = [&](const std::string& encoding) {
+      const auto section = o.add_section(S::rodata);
+      const std::string name = "_ZTS" + encoding;
+      const auto symbol = o.add_symbol({.name = name, .section = section, .weak = true,
+                                        .object_size = encoding.size() + 1});
+      o.comdat_groups.push_back({name, {section}});
+      o.sections[section].emit(encoding);
+      o.sections[section].bytes.push_back(0);
+      return symbol;
+    };
+    const auto name_object = emit_type_name(table->type_encoding);
 
-    auto& section = o.sections[pointers];
-    auto pointer = [&](std::uint32_t symbol, std::int64_t addend = 0) {
+    auto pointer = [&](std::uint32_t index, std::uint32_t symbol, std::int64_t addend = 0) {
+      auto& section = o.sections[index];
       section.emit64(0);
       section.relocate(obj::reloc_kind::abs64, symbol, addend);
     };
-    section.emit64(0);  // offset-to-top
-    pointer(typeinfo);
+    o.sections[pointers].emit64(0);  // offset-to-top
+    pointer(pointers, typeinfo);
     for (EntityId slot : table->slots) {
       const auto target = symbol_of.find(slot);
       if (target == symbol_of.end()) return missing(slot);
-      pointer(target->second);
+      pointer(pointers, target->second);
     }
-    pointer(o.reference("_ZTVN10__cxxabiv117__class_type_infoE"), address_point);
-    pointer(name_object);
+    pointer(pointers, o.reference(table->base_encoding ? si_class_type_info : class_type_info), address_point);
+    pointer(pointers, name_object);
+    if (const auto& base = table->base_encoding) {
+      // The pure base has no key function. Its descriptor and its name are independently
+      // coalesced, and the descriptor's relocations travel with its payload in the group.
+      const auto base_pointers = o.add_section(S::data_const);
+      const std::string base_name = "_ZTI" + *base;
+      const auto base_typeinfo = o.add_symbol({.name = base_name, .section = base_pointers, .weak = true,
+                                               .object_size = 2 * pointer_size});
+      o.comdat_groups.push_back({base_name, {base_pointers}});
+      const auto base_name_object = emit_type_name(*base);
+      pointer(pointers, base_typeinfo);
+      pointer(base_pointers, o.reference(class_type_info), address_point);
+      pointer(base_pointers, base_name_object);
+    }
   }
   return o;
 }
@@ -1869,8 +1891,19 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
         continue;
       }
       symbols.push_back({e.id, "_ZTV" + *encoding, obj::binding::global});
-      if (const auto& owned = tu.owned_virtual_table; owned && owned->entity == e.id)
-        virtual_table = LinuxVirtualTable{e.id, std::move(*encoding), owned->slots};
+      if (const auto& owned = tu.owned_virtual_table; owned && owned->entity == e.id) {
+        std::optional<std::string> base;
+        if (owned->primary_base != EntityId::none) {
+          auto base_encoding = mangled_type(in, in.intern_type(ast::TClass{owned->primary_base}), names);
+          if (!base_encoding) {
+            errors.push_back({e.at, std::format("the virtual table's base type name: {} is not supported yet",
+                                                base_encoding.error())});
+            continue;
+          }
+          base = std::move(*base_encoding);
+        }
+        virtual_table = LinuxVirtualTable{e.id, std::move(*encoding), owned->slots, std::move(base)};
+      }
       continue;
     }
     // Calls still name the complete-object entry. An eligible definition also emits C2 or D2

@@ -601,9 +601,10 @@ signatures. A peer supplies the second virtual. Linux x86-64 also supports ordin
 automatic default initialization (`Root root;`) for that shape with an implicit default
 constructor, a trivial destructor and no field initializer. The local object's vptr uses the
 same table whether the key definition is in this translation unit or a peer. A plain automatic
-derived object can also use a peer's table when its public abstract base has one pure virtual
-and the derived class has one `int` field and one override. The caller can bind the base reference
-and expose it to the peer.
+derived object can also use a table from the same unit or a peer when its public abstract base
+has one pure `int f()` and the derived class has one public `int` field and one override. The
+unit defining the override out of class emits the derived table and both RTTI descriptors. The
+caller can bind the base reference and expose it to the peer.
 [#309](https://github.com/yrashk/ycxx/issues/309)
 
 Linux x86-64 emits all three virtual destructor entries for a fieldless, baseless root when
