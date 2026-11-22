@@ -1,5 +1,4 @@
 // [dcl.enum], [basic.scope.enum]
-// EXIT: 0
 struct Box {
   enum class State { active = 17 };
   int active() const { return static_cast<int>(State::active); }
