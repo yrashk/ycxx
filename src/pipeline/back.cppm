@@ -1277,11 +1277,13 @@ engine::query_task<Lowered> Lower::run(engine::Ctx& cx, FnKey k) {
     config.sysv_amd64 = true;
     if (def.unwind == UnwindEligibility::cleanup_free_with_throw) config.int_throw = tu.int_throw;
     if (def.unwind == UnwindEligibility::hosted_catch_all) config.catch_all = tu.catch_all;
+    if (def.unwind == UnwindEligibility::hosted_cleanup) config.cleanup_resume = tu.cleanup_resume;
     // Extend outgoing narrow results for interoperability. Lowering truncates incoming results
     // to the declared width, as the System V AMD64 psABI §3.2.3 leaves excess bits unspecified.
     config.min_result_bits = 32;
+  } else if ((co_await cx.fetch<FunctionSourceQ>(k)).def.unwind == UnwindEligibility::hosted_cleanup) {
+    config.cleanup_resume = (co_await cx.fetch<TuUnit>(k.tu)).cleanup_resume;
   }
-  if (def.unwind == UnwindEligibility::hosted_cleanup) config.cleanup_resume = tu.cleanup_resume;
   auto l2 = ir::lower(*f.body, k.fn, layout, config);
   if (!l2) {
     // Only an error needs positions.
