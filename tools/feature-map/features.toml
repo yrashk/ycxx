@@ -1089,7 +1089,7 @@ std = 'C++98'
 detect = ',\s*\.\.\.\s*\)|\bva_(?:start|arg|list)\b'
 status = 'partial'
 issues = [196, 399, 647]
-note = 'Apple arm64 defines variadic functions with integer, pointer and `double` `va_arg` (#647). Linux x86-64 supports direct variadic calls and ordinary free definitions with scalar INTEGER and SSE values. Unnamed `float` promotes to `double`, and `va_arg` retrieves integers, pointers and `double`. Indirect scalar INTEGER calls work. Indirect floating calls and aggregate variadic classification remain in #196.'
+note = 'Apple arm64 defines variadic functions with integer, pointer and `double` `va_arg` (#647). Linux x86-64 supports direct variadic calls and ordinary free definitions with scalar INTEGER and SSE values. Unnamed `float` promotes to `double`, and `va_arg` retrieves integers, pointers and `double`. Indirect calls pass INTEGER and SSE values, with AL set for variadic ones. Aggregate variadic classification remains in #196.'
 probe = '''
 #include <cstdarg>
 int sum(int n, ...) { std::va_list ap; va_start(ap); int s = 0; for (int i = 0; i < n; ++i) s += va_arg(ap, int); va_end(ap); return s; }
@@ -2209,8 +2209,9 @@ group = 'concepts'
 clauses = ['dcl.fct', 'dcl.spec.auto', 'temp.param']
 std = 'C++20'
 detect = '''\b(?!if\b|while\b|for\b|switch\b|return\b|decltype\b|sizeof\b|alignof\b|noexcept\b|requires\b|catch\b)\w+\s*\(\s*(?:const\s+)?(?:[\w:]+\s+)?auto\s*(?:&{1,2}|\*)?\s*(?:\.\.\.\s*)?\w*\s*[,)=]'''
-status = 'missing'
+status = 'partial'
 issues = [286, 234]
+note = 'Ordinary block variables support bare unqualified type concepts on auto with equals initialization. Abbreviated function templates and other constrained placeholder contexts remain open.'
 probe = '''
 template<class T> concept Int = sizeof(T) == 4;
 int f(Int auto x) { return x; }

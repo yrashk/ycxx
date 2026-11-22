@@ -631,8 +631,9 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
   cursors advance independently in the register save area and share the overflow stack cursor.
   `va_copy` gives each cursor independent positions and `va_end` evaluates its operand.
   `unit.linux_variadic_definitions` exercises native execution, host peers, and standalone and
-  daemon compilation. Indirect floating calls and aggregate variadic signatures and retrieval
-  remain in #196.
+  daemon compilation. Calls through pointers pass `float` and `double` arguments and results
+  as direct calls do; through a variadic pointer, AL counts the vector registers used
+  (`unit.linux_scalar_sse`, #196). Aggregate variadic signatures and retrieval remain in #196.
   [#417](https://github.com/yrashk/ycxx/issues/417), [#412](https://github.com/yrashk/ycxx/issues/412),
   [#399](https://github.com/yrashk/ycxx/issues/399),
   [#196](https://github.com/yrashk/ycxx/issues/196)
@@ -675,6 +676,13 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
   Member functions (with `this` first), closure call operators, function template
   specializations and calls through pointers use the same placement as ordinary functions
   ([#640](https://github.com/yrashk/ycxx/issues/640)).
+  A class result in memory, of more than two eightbytes or not trivial for calls, goes
+  through a hidden pointer that takes RDI ahead of `this` and comes back in RAX. A class
+  argument not trivial for calls passes by the address of the caller's object. Trivially
+  copyable arguments of more than two eightbytes and empty classes remain unsupported
+  ([#641](https://github.com/yrashk/ycxx/issues/641)), as do SSE records
+  ([#642](https://github.com/yrashk/ycxx/issues/642)). Records with source layout directives
+  native layout does not apply stay out of memory passing too.
   [Design](docs/design/linux-integer-aggregates.md) · [#440](https://github.com/yrashk/ycxx/issues/440)
 - `-c` writes deterministic ELF64 relocatable objects through `src/obj/elf.cppm`. The reader
   accepts the supported x86-64 `ET_REL` subset emitted by ycxx. The native ELF linker consumes
@@ -1957,8 +1965,8 @@ Fable decided the representation (ast.md §6.6); the Opus session wrote the code
   constraints. This includes unevaluated uses such as `decltype`. A type-constraint or a leading
   requires-clause contributes to that check. [#234](https://github.com/yrashk/ycxx/issues/234)
 - Not yet: class and variable template constraints outside those cases, partial specializations
-  and members, broader constrained packs, fold-expanded constraints, `C auto`, and `noexcept` in
-  compound requirements (#234). Open follow-ups include re-verification of satisfaction at END
+  and members, broader constrained packs, fold-expanded constraints, constrained placeholders
+  outside ordinary block declarations, and `noexcept` in compound requirements (#234). Open follow-ups include re-verification of satisfaction at END
   (#235), Itanium constraint mangling (#236), recorded discarded extents for `if constexpr` (#237),
   and value-dependent mapping arguments (#209).
 
@@ -2481,8 +2489,9 @@ What the process allocates, attributed to the engine's cells, in the trace and t
 
 ## Placeholder types, θ step 1 (#279, 2026-11-19)
 
-- **Types:** `TAuto{decltype_auto}` in `types` (ast.md §5.1's `TAuto`, without a type-constraint
-  yet), `TypeKind::placeholder` in sema; `Types::has_placeholder` finds one under pointers,
+- **Types:** `TAuto` in `types` (ast.md §5.1) carries the placeholder kind, resolved concept entity
+  and canonical written argument list. `TypeKind::placeholder` in sema and
+  `Types::has_placeholder` find a placeholder under pointers,
   references, arrays and a function's return type. The parser reads `auto` and `decltype(auto)`
   as type specifiers, and trailing return types `auto f() -> T` ([dcl.fct]/2) with the
   parameters in scope.
@@ -2494,6 +2503,11 @@ What the process allocates, attributed to the engine's cells, in the trace and t
 - **Variables:** block scope (`= e`, `(e)`, `{e}`; the name is declared first, so its own
   initializer cannot use it), namespace scope and variable templates (`= e`, `{e}`), static data
   members; several declarators must deduce one type.
+- **Constrained block variables** (#286): `C auto x = expression;` uses a prior bare unqualified
+  type concept. Sema evaluates the constraint on the invented parameter before completing the
+  variable type, including for cv- and reference-qualified declarators. Namespace declarations,
+  other initializer forms, template contexts, qualified or argument-bearing concept names,
+  constrained `decltype(auto)`, and abbreviated function templates remain open.
 - **Array structured bindings** ([dcl.struct.bind], #285): a block-scope declaration evaluates
   its initializer once and binds the names to elements or whole rows of the hidden array.
   Value bindings copy scalar elements in order and take cv from the declaration (CWG 2506).

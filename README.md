@@ -98,7 +98,8 @@ build/bin/ycxx cxx -nostdlib example.o -o example
 Fixed-prototype calls (free and member functions, lambdas, function templates and calls
 through pointers) support passing and returning nonempty flat records with integral or
 ordinary object-pointer fields by value. The record can occupy up to
-16 bytes and must be trivial for calls. [Linux integer aggregate ABI](docs/design/linux-integer-aggregates.md)
+16 bytes and must be trivial for calls. Larger results and classes that are not trivial for
+calls (with a user-provided copy constructor or destructor) pass through memory, as on macOS. [Linux integer aggregate ABI](docs/design/linux-integer-aggregates.md)
 
 For mixed Linux objects, the pinned libycxx `<cstddef>` byte operator uses the same Itanium
 linkage name in ycxx, GCC and Clang. [#64](https://github.com/yrashk/ycxx/issues/64)
@@ -131,12 +132,12 @@ Use the host linker to link these objects with libc.
 [#399](https://github.com/yrashk/ycxx/issues/399), [#196](https://github.com/yrashk/ycxx/issues/196)
 
 Fixed-prototype definitions and direct calls on x86-64 Linux also move `float` and `double`
-arguments and results. Direct variadic calls support the same scalar floating values and
-promote an unnamed `float` to `double`. Direct call result types can be deduced from `auto` or
-`decltype(auto)`. Runtime addition, subtraction, multiplication, division and unary negation
-work for `float` and `double` at their evaluation width. Both types support the six comparisons,
-conversion to `bool`, conversions to and from every integer type, `double` to `float`, and
-`__builtin_fabs`. [#643](https://github.com/yrashk/ycxx/issues/643)
+arguments and results, directly and through function pointers. Variadic calls support the same
+scalar floating values and promote an unnamed `float` to `double`. Direct call result types can
+be deduced from `auto` or `decltype(auto)`. Runtime addition, subtraction, multiplication,
+division and unary negation work for `float` and `double` at their evaluation width. Both types
+support the six comparisons, conversion to `bool`, conversions to and from every integer type,
+`double` to `float`, and `__builtin_fabs`. [#643](https://github.com/yrashk/ycxx/issues/643)
 [Linux scalar floating-point ABI](docs/design/linux-scalar-floating-point.md) ·
 [Linux scalar floating-point operations](docs/design/linux-scalar-floating-point.md#runtime-arithmetic) ·
 [Linux scalar variadic floating-point ABI](docs/design/linux-floating-variadic-calls.md) ·
@@ -360,7 +361,9 @@ written default member initializer are value-initialized.
   alias-selected dependent base and qualified lookup of its static members.
   [#308](https://github.com/yrashk/ycxx/issues/308)
 - placeholder types: `auto` and `decltype(auto)` variables (`const auto&`, `auto*`, `auto&&`),
-  deduced and trailing return types, in templates too;
+  deduced and trailing return types, in templates too. Ordinary block variables with an
+  `= expression` initializer can use `Concept auto` with a prior unqualified type concept.
+  [#286](https://github.com/yrashk/ycxx/issues/286)
 - lambdas in function bodies: captures by copy and by reference, capture-defaults, `this` and
   `*this`, init-captures, `mutable`, conversion to a pointer to function, generic lambdas (`auto`
   parameters) and template lambdas (`[]<class T>`), and closures passed to and called from
@@ -481,6 +484,11 @@ members. [#285](https://github.com/yrashk/ycxx/issues/285)
 - Automatic Linux CRT and library selection and general-purpose ELF object interoperability.
   [#390](https://github.com/yrashk/ycxx/issues/390)
 - Namespace-scope destruction for x86-64 Linux. [#400](https://github.com/yrashk/ycxx/issues/400)
+- Parity between the two native back ends. x86-64 Linux does not yet pass classes with
+  floating members by value, trivially copyable classes over 16 bytes as arguments, or x87
+  `long double`. AArch64 macOS does not yet have native `int` throws, unwinding through ycxx
+  frames, native array `new`, or virtual calls on peer-owned classes, which x86-64 has. The
+  full table is [#639](https://github.com/yrashk/ycxx/issues/639).
 
 ### In progress
 
@@ -490,6 +498,9 @@ members. [#285](https://github.com/yrashk/ycxx/issues/285)
 - `auto` and lambdas ([#278](https://github.com/yrashk/ycxx/issues/278)): placeholder types,
   lambdas and generic lambdas are done; constexpr lambdas wait on class objects in the
   interpreter ([#262](https://github.com/yrashk/ycxx/issues/262)).
+
+- x86-64 ↔ AArch64 back-end parity ([#639](https://github.com/yrashk/ycxx/issues/639)), one
+  gap per PR in priority order.
 
 Next come exceptions ([#89](https://github.com/yrashk/ycxx/issues/89)).
 
