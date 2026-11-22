@@ -72,7 +72,7 @@ struct TypeRec {
   NameId name{};                     // a dependent member type's name; `inner` is its qualifier
   u16 depth = 0;                     // a template parameter's position ([temp.param])
   u16 index = 0;
-  bool pack = false;
+  bool pack = false;  // a template parameter's; a pack index's: its pack is bound to `args`
   u8 trait = 0;  // a transform's `lex::TypeTrait`; a built-in specialization's `ast::BuiltinTemplate`
   ast::SeqId<ast::TemplateArg> args{};  // a specialization's or a placeholder's written arguments
   bool decltype_auto = false;  // a placeholder's: `decltype(auto)`, not `auto`
@@ -135,8 +135,12 @@ public:
   QualType pack_expansion(QualType pattern) { return ins_->intern_type(ast::TPackExpansion{pattern}); }
   // `__trait(arg)` of a dependent `arg` (docs/EXTENSIONS.md).
   QualType transform(u8 trait, QualType arg) { return ins_->intern_type(ast::TTransform{trait, arg}); }
-  // `T...[I]` while dependent ([dcl.type.pack.index]): `pack` is the pack's own parameter type.
-  QualType pack_index(QualType pack, ConstId index) { return ins_->intern_type(ast::TPackIndex{pack, index}); }
+  // `T...[I]` while dependent ([dcl.type.pack.index]): `pack` is the pack's own parameter type;
+  // with `elems`, that pack is bound to them and `index` is the dependent part.
+  QualType pack_index(QualType pack, ConstId index) { return ins_->intern_type(ast::TPackIndex{pack, index, {}, 0}); }
+  QualType pack_index(QualType pack, ConstId index, ast::SeqId<ast::TemplateArg> elems) {
+    return ins_->intern_type(ast::TPackIndex{pack, index, elems, 1});
+  }
   // A placeholder ([dcl.spec.auto.general]); a bare type-constraint has no written arguments.
   QualType placeholder(bool decltype_auto, EntityId concept_ = EntityId::none) {
     return ins_->intern_type(ast::TAuto{u8(decltype_auto), concept_});
@@ -243,9 +247,12 @@ public:
       r.kind = TypeKind::pack_expansion;
       r.inner = t.get<ast::TPackExpansion>(c).pattern;
     } else if (t.is<ast::TPackIndex>(c)) {
+      auto x = t.get<ast::TPackIndex>(c);
       r.kind = TypeKind::pack_index;
-      r.inner = t.get<ast::TPackIndex>(c).pack;
-      r.bound_value = t.get<ast::TPackIndex>(c).index;
+      r.inner = x.pack;
+      r.bound_value = x.index;
+      r.pack = x.bound != 0;  // the pack is bound to `args`
+      r.args = x.elems;
     } else if (t.is<ast::TTemplateParam>(c)) {
       auto p = t.get<ast::TTemplateParam>(c);
       r.kind = TypeKind::template_param;
@@ -409,7 +416,8 @@ private:
                                         ins_->values.get<ast::VDepParam>(r.bound_value).index)
                       : ins_->values.is<ast::VInt>(r.bound_value) ? std::to_string(ast::int_bits(*ins_, r.bound_value).lo)
                                                                   : std::string("…");
-      return cvs + spell(r.inner) + "...[" + i + "]" + (inner.empty() || inner[0] == '[' ? "" : " ") + inner;
+      std::string p = r.pack ? std::string("<…>") : spell(r.inner);
+      return cvs + p + "...[" + i + "]" + (inner.empty() || inner[0] == '[' ? "" : " ") + inner;
     }
     case TypeKind::transform:
       return cvs + std::string(lex::type_trait_info(lex::TypeTrait(r.trait)).name) + "(" + spell(r.inner) + ")" +

@@ -1706,18 +1706,25 @@ template's tokens again with the arguments bound.
 
 - `T...[I]` ([dcl.type.pack.index]) names the element of a template type parameter pack, with
   `I` converted to std::size_t. It works in alias templates, member aliases, function signatures
-  (leading and trailing return types, parameters), variable templates, bodies and type-trait
-  operands. The index is a constant or a non-type parameter.
-- While the pack is dependent it is the type `TPackIndex` (ast.md §7.6). Substitution selects
-  the element, also past known elements into another pack's expansion (`F<T...>` for
-  `using F = U...[0]`). It is a non-deduced context ([temp.deduct.type]/5).
-- An index out of range, a negative index and a name that is not a pack are diagnosed.
-- In symbols, `Dy <type> <expression>` is a substitution candidate. A constant index is written as
-  GCC writes it, `Lm0E`; Clang writes it as spelled.
+  (leading and trailing return types, parameters), variable templates, bodies, type-trait
+  operands and functional conversions (`T...[I](x)`). The index is an integral constant or a
+  non-type parameter.
+- While it is dependent it is the type `TPackIndex` (ast.md §7.6): over the pack's parameter, or
+  over its elements once the pack is bound and the index is not (a member template indexing its
+  class's pack). Substitution selects the element, also past known elements into another pack's
+  expansion (`F<T...>` for `using F = U...[0]`). It is a non-deduced context
+  ([temp.deduct.type]/5), and partial ordering indexes a pack's unique stand-in.
+- An index out of range, a negative or non-integral index and a name that is not a pack are
+  diagnosed.
+- In symbols, `Dy <type> <expression>` is a substitution candidate, a bound pack `J <args> E`. A
+  written constant index is the converted std::size_t (`Lm0E`) and a substituted one keeps its
+  parameter's type (`Li1E`), as GCC writes them; Clang writes the index as spelled and a bound
+  pack as a placeholder (DECISIONS §1.7).
 - Tests: `tests/own/templates/pack-index/`, `tests/own/abi/pack-index-*`. A Clang peer links the
   parameter-index form, and asm labels pin GCC's constant form.
-- Not yet: pack-index-expressions `t...[I]`, and dependent index arithmetic such as
-  `T...[sizeof...(T) - 1]` in a signature (#209). In a body that arithmetic works. With these,
+- Not yet: pack-index-expressions `t...[I]`, `T...[I]` as a nested-name-specifier
+  (`T...[0]::type`) (#297), and dependent index arithmetic such as `T...[sizeof...(T) - 1]` in a
+  signature (#209). In a body that arithmetic works. With these,
   libycxx's headers move from `invoke.hpp:35` to `invoke.hpp:37` (#776).
 
 ## Templates, ζ step 2: class templates (#88, 2026-11-18)

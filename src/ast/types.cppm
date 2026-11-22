@@ -135,12 +135,16 @@ struct TPackExpansion {
   QualType pattern;
 };
 
-// A pack-index-specifier `T...[I]` ([dcl.type.pack.index]) while `pack` (a template type parameter
-// pack's own `TTemplateParam`) or `index` (converted to std::size_t) is dependent; substitution
-// selects the element, so it never holds a known element (ast.md §7.6).
+// A pack-index-specifier `T...[I]` ([dcl.type.pack.index]) while it is dependent: `pack` is the
+// template type parameter pack's own `TTemplateParam`; once that pack is bound and the index is
+// still dependent (a member template indexing its class's pack), `bound` is set and `elems` are
+// the pack's elements. Substitution selects the element, so it never holds a known one (ast.md
+// §7.6).
 struct TPackIndex {
   QualType pack;
   ConstId index;
+  SeqId<TemplateArg> elems;
+  u8 bound;
 };
 
 // A type-transforming built-in applied to a dependent type, `__remove_cv(T)` (docs/EXTENSIONS.md):

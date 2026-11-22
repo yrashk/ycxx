@@ -799,21 +799,9 @@ public:
             cls = t;
             continue;  // the arguments are consumed
           }
-          // A pack-index-specifier `T...[I]` ([dcl.type.pack.index]): I is a converted constant
-          // expression of type std::size_t.
+          // A pack-index-specifier `T...[I]` ([dcl.type.pack.index]).
           if (kind(1) == Tk::ellipsis && kind(2) == Tk::l_square) {
-            const u32 at = pos();
-            const NameId name = name_of(tok());
-            bump();
-            bump();
-            bump();
-            const u32 index_at = pos();
-            auto index = template_value(s_->promote(constant_expression()), s_->types().builtin(Builtin::unsigned_long));
-            if (!expect(Tk::r_square) || !index) {
-              d.ok = false;
-              goto done;
-            }
-            cls = s_->pack_index_type(name, at, *index, index_at);
+            cls = pack_index_specifier();
             if (!cls) {
               d.ok = false;
               goto done;
@@ -3816,6 +3804,13 @@ public:
         if (!t) return {NodeId::none, begin, pos()};
         return type_conversion(*t, begin);
       }
+      // `T...[I](args)` or `T...[I]{…}` ([expr.type.conv]) for a template type parameter pack T.
+      if (kind(1) == Tk::ellipsis && kind(2) == Tk::l_square)
+        if (const ast::TemplateParamSema* p = s_->template_param(n); p && p->kind == ast::TemplateArgKind::type && p->pack) {
+          auto t = pack_index_specifier();
+          if (!t) return {NodeId::none, begin, pos()};
+          return type_conversion(*t, begin);
+        }
       if ((kind(1) == Tk::l_paren || kind(1) == Tk::l_brace))
         if (auto t = s_->class_name(n, false, true, pos())) {
           // `T(args)` or `T{…}` ([expr.type.conv]), T a type name: a class, an enumeration, a
@@ -3941,6 +3936,30 @@ public:
       return true;
     default: return false;
     }
+  }
+  // A pack-index-specifier `T...[I]` ([dcl.type.pack.index]) from `T`, consumed. I is a converted
+  // constant expression of type std::size_t: integral or unscoped enumeration, not narrowing
+  // ([expr.const]). A non-type template parameter named alone keeps its own type, as symbols
+  // write a substituted index; any other index is converted.
+  std::optional<QualType> pack_index_specifier() {
+    const u32 at = pos();
+    const NameId name = name_of(tok());
+    bump();
+    bump();
+    bump();
+    const u32 index_at = pos();
+    const ast::TemplateParamSema* named =
+        kind(0) == Tk::identifier && kind(1) == Tk::r_square ? s_->template_param(name_of(tok())) : nullptr;
+    Ex ie = s_->promote(constant_expression());
+    const QualType it = ie.type();
+    if (ie.ok() && !s_->types().is_dependent(it) && !s_->types().is_integral(it) && !s_->is_unscoped_enum(it)) {
+      s_->diag(index_at, Diag::pack_index_not_constant);
+      ie = Ex{};
+    }
+    const bool own_type = named && named->kind == ast::TemplateArgKind::value && s_->types().is_integral(it);
+    auto index = template_value(ie, own_type ? it : s_->types().builtin(Builtin::unsigned_long));
+    if (!expect(Tk::r_square) || !index) return std::nullopt;
+    return s_->pack_index_type(name, at, *index, index_at);
   }
   // `T(args)` or `T{…}` at the `(` or `{` ([expr.type.conv]).
   Ex type_conversion(QualType t, u32 begin) {
