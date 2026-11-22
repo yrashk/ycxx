@@ -40,7 +40,7 @@ use, in the headers libycxx's C library headers reach (`<cstdio>`, `<cstdlib>`, 
 | `__builtin_trap()` | libycxx's `<ycxx/core/error.hpp>` | A zero-argument direct call of type `void` terminates execution. Linux x86-64 emits UD2 and Darwin arm64 emits BRK. `__has_builtin` answers 1. | #548 |
 | `__builtin_alloca` | `alloca.h`'s `alloca` | Not yet: diagnosed as above where a program calls `alloca` | — |
 | `__builtin_constant_p` | `libkern/_OSByteOrder.h`'s `__DARWIN_OSSwapInt16/32/64` (`ntohs`, `htonl`, …) | Not yet: diagnosed as above where a program uses the macros | — |
-| `__builtin_offsetof` | `sys/_types.h`'s `__offsetof`, libycxx's `offsetof` | Not yet: diagnosed as above where a program uses `offsetof`, its arguments (a type first) skipped | — |
+| `__builtin_offsetof` | `sys/_types.h`'s `__offsetof`, libycxx's `offsetof` | `size_t` constant from the target record layout for a direct non-static data member of an ordinary standard-layout class or union. Diagnoses an invalid member or bit-field. | #248 |
 | `__builtin_expect` | the SDK's `assert.h`'s `assert` | Not yet: diagnosed as above where a program uses `assert`, which did not compile before #229 either (its other path calls `abort` undeclared; this one also needs `__func__`, [dcl.fct.def.general], which ycxx does not have yet) | — |
 
 The built-in functions marked "not yet" are listed in one table, `lex::lacking_builtins`
