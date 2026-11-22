@@ -4,7 +4,7 @@ struct Public { ~Public() {} };
 struct Private { private: ~Private() {} };
 struct Deleted { ~Deleted() = delete; };
 void reject(Public& value, Private* hidden, Deleted& gone) {
-  value.~Other(); // error: does not match object type
-  hidden->~Private(); // error: private
-  gone.~Deleted(); // error: requires a usable destructor
+  value.~Other(); //! error
+  hidden->~Private(); //! error
+  gone.~Deleted(); //! error
 }
