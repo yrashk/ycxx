@@ -44,6 +44,7 @@ struct ServerOptions {
   std::chrono::milliseconds quantum_floor{50};
   std::chrono::milliseconds cookie_timeout{2000};
   bool watch = true;  // false under YCXX_NO_WATCH=1: every request rescans the table (§5.4)
+  pipeline::BuildCheckpoint build_checkpoint;  // process-test driver only
 };
 
 // Runs the daemon until idle exit, `shutdown` or SIGTERM; the process's exit status.
@@ -905,7 +906,7 @@ class Server {
   pipeline::Session& session() {
     std::call_once(session_once_, [this] {
       pool_ = std::make_unique<engine::Pool>(threads_.count, threads_.chaos_seed);
-      session_ = std::make_unique<pipeline::Session>(*pool_);
+      session_ = std::make_unique<pipeline::Session>(*pool_, o_.build_checkpoint);
       session_->db().set_provider<pp::FileContent>([this](pp::PathId id) { return provide(id); });
       session_->set_reader([this](const std::string& path) { return table_.read(path); });
     });

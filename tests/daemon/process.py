@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Process-level daemon tests (daemon design §7, §8.2, #98).
 
-    tests/daemon/process.py <ycxx>
+    tests/daemon/process.py <ycxx> <ycxxc_daemon_process>
 
 Covered, each answer compared with a cold (in-process) compile of the same files:
 - an edit that lands while a build runs: the build is restarted (§4.1), and its answer is the
@@ -10,21 +10,30 @@ Covered, each answer compared with a cold (in-process) compile of the same files
   next request is right;
 - the daemon killed mid-request: the client starts a new one and asks again (§7.2);
 - shutdown, then a new daemon on the next request (§7.4);
-- several clients at once, on different files and on the same one (they queue today; #139 makes
-  them concurrent, and this test then checks them running at once).
+- several clients at once, on different files and on the same one, checking that distinct
+  build roots actually overlap (#139).
 
 Not yet: the cache across a restart (`executed` below a cold run, `durable + validated > 0`,
 #17), and every answer at 1 and P threads (#139).
 
-A slow translation unit (tens of thousands of statements: 1.5-3 s in the Debug build CI uses;
-a Release build would need more) opens the window in which an edit or a kill lands. Each variant
-changes its constant, so the daemon cannot answer it from cells it already holds.
+The fixture daemon acknowledges a one-shot checkpoint inside each selected build, after it has
+read and analysed its sources. An edit or disconnect wakes the worker through the engine's own
+stop token. For the concurrency check, one root stays parked until a distinct root enters.
 """
-import os, platform, signal, subprocess, sys, tempfile, threading, time, shutil
+import os, platform, shutil, signal, socket, subprocess, sys, tempfile, time
+from contextlib import ExitStack
 from pathlib import Path
 
 failures = []
-SLOW_STATEMENTS = 40000
+GATES = {
+    'mid.cpp': 'stop',
+    'moved.cpp': 'stop',
+    'deleted.cpp': 'stop',
+    'cancel.cpp': 'stop',
+    'c0.cpp': 'release',
+    'c1.cpp': 'observe',
+    'kill.cpp': 'stop',
+}
 # ycxx builds AArch64 Mach-O only (DECISIONS §1.3), so its programs run only on Apple arm64, as
 # `run darwin-arm64` in tests/features/ycxx.txt; outputs are compared byte for byte everywhere.
 # PARITY: #390: running the built program on Linux needs a hosted link there.
@@ -39,8 +48,9 @@ def fail(what):
 class Env:
     """A private daemon's world: a short runtime directory and a scope marked `.ycxx`."""
 
-    def __init__(self, ycxx):
+    def __init__(self, ycxx, driver):
         self.ycxx = ycxx
+        self.driver = driver
         self.runtime = tempfile.mkdtemp(prefix='yp', dir='/tmp')  # sun_path holds 104 bytes on macOS
         os.chmod(self.runtime, 0o700)
         self.scope = Path(tempfile.mkdtemp(prefix='ycxx-process-'))
@@ -48,25 +58,59 @@ class Env:
         base = {k: v for k, v in os.environ.items() if k not in ('YCXX_DAEMON', 'YCXX_NO_DAEMON', 'YCXX_ROOT', 'YCXX_NO_WATCH')}
         base['YCXX_RUNTIME_DIR'] = self.runtime
         base['YCXX_DAEMON_IDLE_EXIT'] = '300'
+        base['YCXX_THREADS'] = '2'
         base['XDG_CACHE_HOME'] = str(self.scope / '.cache')  # the persistent cache, once #17 has one
         self.base = base
         self.clients = []  # every client started, killed on close
         self.pids = set()  # every daemon seen, killed on close
+        self.gates = {}
+        self.fixture_daemon = None
         self.daemon = dict(base, YCXX_DAEMON='require')
         self.cold = dict(base, YCXX_NO_DAEMON='1')
 
     def cxx(self, args, cwd, env, timeout=300):
-        p = subprocess.run([self.ycxx, 'cxx', *args], cwd=cwd, env=env, capture_output=True, timeout=timeout)
+        exe = self.ycxx if env is self.cold else self.driver
+        p = subprocess.run([exe, 'cxx', *args], cwd=cwd, env=env, capture_output=True, timeout=timeout)
         return p.returncode, p.stdout, p.stderr
 
+    def start_fixture_daemon(self):
+        ready, writer = socket.socketpair()
+        with ready, ExitStack() as children:
+            children.enter_context(writer)
+            fds = [writer.fileno()]
+            args = [self.driver, 'serve-process-test', str(fds[0])]
+            for source, mode in GATES.items():
+                peer, child = socket.socketpair()
+                children.enter_context(child)
+                self.gates[source] = peer
+                fds.append(child.fileno())
+                args.extend((mode, source, str(fds[-1])))
+            with (Path(self.runtime) / 'fixture.log').open('wb') as log:
+                self.fixture_daemon = subprocess.Popen(args, cwd=self.scope, env=self.base, pass_fds=fds,
+                                                       stdout=log, stderr=log)
+            children.close()
+            ready.settimeout(15)
+            if ready.recv(1) != b'r':
+                raise RuntimeError('the fixture daemon did not signal readiness')
+
+    def expect_gate(self, source, expected):
+        peer = self.gates[source]
+        peer.settimeout(15)
+        try:
+            got = peer.recv(1)
+        except TimeoutError as e:
+            raise RuntimeError(f'{source}: timed out waiting for build checkpoint {expected!r}') from e
+        if got != expected:
+            raise RuntimeError(f'{source}: expected build checkpoint {expected!r}, got {got!r}')
+
     def start(self, args, cwd):
-        c = subprocess.Popen([self.ycxx, 'cxx', '-v', *args], cwd=cwd, env=self.daemon, stdout=subprocess.PIPE,
+        c = subprocess.Popen([self.driver, 'cxx', '-v', *args], cwd=cwd, env=self.daemon, stdout=subprocess.PIPE,
                              stderr=subprocess.PIPE)
         self.clients.append(c)
         return c
 
     def status(self):
-        p = subprocess.run([self.ycxx, 'ctl', 'status'], cwd=self.scope, env=self.base, capture_output=True, text=True,
+        p = subprocess.run([self.driver, 'ctl', 'status'], cwd=self.scope, env=self.base, capture_output=True, text=True,
                            timeout=60)
         if p.returncode != 0:
             return {}
@@ -97,15 +141,24 @@ class Env:
         """Every step survives a failure of the one before: clients killed (so none retries into
         a new daemon), the daemon asked to shut down, every daemon seen killed if it lingers,
         the log's tail printed after a failure, and the directories removed last."""
+        for peer in self.gates.values():
+            peer.close()  # releases parked workers even if this script is unwinding a failed assertion
         for c in self.clients:
             if c.poll() is None:
                 c.kill()
                 c.wait()
         try:
             self.status()
-            subprocess.run([self.ycxx, 'ctl', 'shutdown'], cwd=self.scope, env=self.base, capture_output=True, timeout=30)
+            subprocess.run([self.driver, 'ctl', 'shutdown'], cwd=self.scope, env=self.base, capture_output=True, timeout=30)
         except subprocess.TimeoutExpired:
             pass
+        if self.fixture_daemon is not None:
+            try:
+                self.fixture_daemon.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                self.fixture_daemon.kill()
+                self.fixture_daemon.wait()
+            self.pids.discard(self.fixture_daemon.pid)
         for pid in self.pids:
             gone(pid, 5)
         if failures:
@@ -142,9 +195,8 @@ def wait_until(pred, seconds, step=0.02):
     return False
 
 
-def slow_source(name, value):
-    body = '\n'.join('  x = x + 1;' for _ in range(SLOW_STATEMENTS))
-    return f'int {name}() {{\n  int x = 0;\n{body}\n  return x - {SLOW_STATEMENTS} + {value};\n}}\n'
+def bytes_of(path):
+    return path.read_bytes() if path.exists() else None
 
 
 def cold_build(env, files, args, out_name):
@@ -154,8 +206,7 @@ def cold_build(env, files, args, out_name):
         for name, text in files.items():
             (d / name).write_text(text)
         r = env.cxx(args, d, env.cold)
-        out = d / out_name
-        return r[0], out.read_bytes() if out.exists() else None
+        return r[0], bytes_of(d / out_name)
     finally:
         shutil.rmtree(d, ignore_errors=True)
 
@@ -172,112 +223,93 @@ def restarts_of(stderr):
 
 
 def edit_during_build(env):
-    """An edit while the slow unit compiles: the request restarts and answers the final state."""
+    """An edit after the root read the old text: it restarts and answers the final state."""
     d = env.scope / 'edit'
     d.mkdir()
-    files = {'mid.cpp': 'int mid() { return 2; }\n', 'main.cpp': 'int slow(); int mid();\nint main() { return slow() + mid(); }\n'}
-    args = ['--target=arm64-apple-darwin', 'slow.cpp', 'mid.cpp', 'main.cpp', '-o', 'prog']
-    for attempt in range(3):
-        files['slow.cpp'] = slow_source('slow', attempt + 1)
-        files['mid.cpp'] = 'int mid() { return 2; }\n'
-        for name, text in files.items():
-            (d / name).write_text(text)
-        # Cheap requests that read every file first: they apply the setup's own batch and give
-        # mid.cpp a table entry, so the counters below move only for the edit made mid-build.
-        for name in files:
-            env.cxx(['-E', name], d, env.daemon)
-        restarts_before = env.number('restarts')
-        revision_before, changed_before = env.number('revision'), env.number('inputs_changed')
-        client = env.start(args, d)
-        if not wait_until(lambda: env.number('live') >= 1, 30):
-            fail('edit during a build: the request never showed as live')
-        time.sleep(0.3)
-        files['mid.cpp'] = f'int mid() {{ return {20 + attempt}; }}\n'
-        (d / 'mid.cpp').write_text(files['mid.cpp'])
-        out, err = client.communicate(timeout=300)
-        want_code, want_bytes = cold_build(env, files, args, 'prog')
-        got_bytes = (d / 'prog').read_bytes() if (d / 'prog').exists() else None
-        if client.returncode != want_code or got_bytes != want_bytes:
-            fail(f'edit during a build (attempt {attempt}): the answer is not the final state\'s (exit {client.returncode}, '
-                 f'cold {want_code}, outputs {"equal" if got_bytes == want_bytes else "differ"})')
-            return
-        if CAN_RUN:
-            run = subprocess.run([str(d / 'prog')], capture_output=True, timeout=60)
-            if run.returncode != attempt + 1 + 20 + attempt:
-                fail(f'edit during a build: the program returned {run.returncode}, want {attempt + 1 + 20 + attempt}')
-        # An edit to a file the build has not read yet changes no table entry (§5.3), and the build
-        # reads the new text anyway; the daemon still restarts it today (#161). Only a restart
-        # with a new revision is the one this test is for: an edit to a file already read.
-        if (restarts_of(err) or 0) >= 1:
-            if env.number('restarts') < restarts_before + 1:
-                fail('edit during a build: `ctl status` does not count the restart')
-            if env.number('revision') > revision_before and env.number('inputs_changed') > changed_before:
-                return
-            print(f'edit during a build (attempt {attempt}): restarted with no changed entry (#161); trying again')
-    fail('an edit during a build never restarted it (3 attempts)')
+    files = {'mid.cpp': 'int mid() { return 2; }\n', 'main.cpp': 'int mid();\nint main() { return mid(); }\n'}
+    args = ['--target=arm64-apple-darwin', 'mid.cpp', 'main.cpp', '-o', 'prog']
+    for name, text in files.items():
+        (d / name).write_text(text)
+    files['mid.cpp'] = 'int mid() { return 20; }\n'
+    replacement = d / 'replacement'
+    replacement.write_text(files['mid.cpp'])
+    client = env.start(args, d)
+    env.expect_gate('mid.cpp', b'P')
+    before = env.status()
+    replacement.replace(d / 'mid.cpp')
+    env.expect_gate('mid.cpp', b'S')
+    _, err = client.communicate(timeout=60)
+    want_code, want_bytes = cold_build(env, files, args, 'prog')
+    if want_code != 0 or want_bytes is None or client.returncode != want_code or bytes_of(d / 'prog') != want_bytes:
+        fail(f'edit during a build: the answer differs from the cold compile of the edit '
+             f'(exit {client.returncode}, cold {want_code}, stderr {err[-300:]!r})')
+    elif CAN_RUN:
+        run = subprocess.run([str(d / 'prog')], capture_output=True, timeout=60)
+        if run.returncode != 20:
+            fail(f'edit during a build: the program returned {run.returncode}, want 20')
+    after = env.status()
+    if (restarts_of(err) or 0) < 1:
+        fail('edit during a build: the client reported no restart')
+    for field in ('restarts', 'revision', 'inputs_changed'):
+        if field not in before or field not in after or int(after[field]) <= int(before[field]):
+            fail(f'edit during a build: {field} did not advance ({before.get(field)} to {after.get(field)})')
 
 
 def edit_error_during_build(env):
-    """An edit that moves an error, and one that deletes a file, while the slow unit compiles:
-    the diagnostics and the exit status are the final state's, rendered against the text the
-    build compiled (#139)."""
+    """Move an analysed error or delete its file, and compare the final diagnostics with cold."""
     d = env.scope / 'edit-error'
     d.mkdir()
     base = 'int err() { return missing; }\n'
     moved = '// one\n// two\n// three\n// four\nint pad = 0;\nint err() {\n  return missing;\n}\n'
-    for attempt, final in enumerate((moved, None)):
-        files = {'slow.cpp': slow_source('slow', attempt + 1), 'err.cpp': base}
-        for name, text in files.items():
-            (d / name).write_text(text)
-        for name in files:
-            env.cxx(['-E', name], d, env.daemon)
-        args = ['-c', 'slow.cpp', 'err.cpp']
+    for name, final in (('moved.cpp', moved), ('deleted.cpp', None)):
+        source = d / name
+        source.write_text(base)
+        replacement = d / 'replacement'
+        if final is not None:
+            replacement.write_text(final)
+        args = ['-c', name]
         client = env.start(args, d)
-        if not wait_until(lambda: env.number('live') >= 1, 30):
-            fail('edit of an error during a build: the request never showed as live')
-        time.sleep(0.3)
+        env.expect_gate(name, b'P')
         if final is None:
-            (d / 'err.cpp').unlink()
-            del files['err.cpp']
+            source.unlink()
         else:
-            (d / 'err.cpp').write_text(final)
-            files['err.cpp'] = final
-        out, err = client.communicate(timeout=300)
-        cold = Path(tempfile.mkdtemp(prefix='ycxx-cold-', dir=env.scope.parent))
-        try:
-            for name, text in files.items():
-                (cold / name).write_text(text)
-            want = env.cxx(args, cold, env.cold)
-        finally:
-            shutil.rmtree(cold, ignore_errors=True)
+            replacement.replace(source)
+        env.expect_gate(name, b'S')
+        out, err = client.communicate(timeout=60)
+        with tempfile.TemporaryDirectory(prefix='ycxx-cold-', dir=env.scope.parent) as cold:
+            if final is not None:
+                (Path(cold) / name).write_text(final)
+            want_code, want_out, want_err = env.cxx(args, cold, env.cold)
         got_err = b''.join(l + b'\n' for l in err.splitlines() if not l.startswith(b'ycxx: answered by daemon'))
-        if client.returncode != want[0] or got_err != want[2]:
-            fail(f'edit of an error during a build ({"deleted" if final is None else "moved"}): '
-                 f'{client.returncode} {got_err!r:.300} != cold {want[0]} {want[2]!r:.300}')
+        if want_code != 1 or (client.returncode, out, got_err) != (want_code, want_out, want_err):
+            fail(f'edit of {name}: {client.returncode} {got_err!r:.300} != cold {want_code} {want_err!r:.300}')
+        if (restarts_of(err) or 0) < 1:
+            fail(f'edit of {name}: the client reported no restart')
 
 
 def killed_client(env):
     """A client killed mid-compile: its request stops and is counted; the next one is right."""
     d = env.scope / 'killed-client'
     d.mkdir()
-    files = {'a.cpp': slow_source('a', 3), 'b.cpp': slow_source('b', 4), 'main.cpp': 'int a(); int b();\nint main() { return a() + b(); }\n'}
+    files = {'cancel.cpp': 'int main() { return 7; }\n'}
     for name, text in files.items():
         (d / name).write_text(text)
-    args = ['--target=arm64-apple-darwin', 'a.cpp', 'b.cpp', 'main.cpp', '-o', 'prog']
+    args = ['--target=arm64-apple-darwin', 'cancel.cpp', '-o', 'prog']
     cancelled = env.number('cancelled')
     client = env.start(args, d)
-    if not wait_until(lambda: env.number('live') >= 1, 30):
-        fail('killed client: the request never showed as live')
-    time.sleep(0.3)
+    env.expect_gate('cancel.cpp', b'P')
     client.kill()
-    client.wait()
-    if not wait_until(lambda: env.number('live') == 0, 120, 0.1):
+    client.wait(timeout=10)
+    env.expect_gate('cancel.cpp', b'S')
+    if not wait_until(lambda: env.number('live') == 0, 15):
         fail('killed client: the request is still live')
     if env.number('cancelled') != cancelled + 1:
         fail(f'killed client: `cancelled` went from {cancelled} to {env.number("cancelled")}, want +1')
-    code, out, err = env.cxx(args, d, env.daemon)
+    if (d / 'prog').exists():
+        fail('killed client: the cancelled request wrote an output')
+    code, _, _ = env.cxx(args, d, env.daemon)
     want_code, want_bytes = cold_build(env, files, args, 'prog')
-    if code != want_code or (d / 'prog').read_bytes() != want_bytes:
+    if want_code != 0 or want_bytes is None or code != want_code or bytes_of(d / 'prog') != want_bytes:
         fail(f'killed client: the next request\'s answer differs from a cold compile (exit {code}, cold {want_code})')
 
 
@@ -285,23 +317,20 @@ def killed_daemon(env):
     """The daemon killed mid-request: the client starts a new one and gets the right answer."""
     d = env.scope / 'killed-daemon'
     d.mkdir()
-    files = {'k.cpp': slow_source('k', 5), 'main.cpp': 'int k();\nint main() { return k(); }\n'}
+    files = {'kill.cpp': 'int main() { return 5; }\n'}
     for name, text in files.items():
         (d / name).write_text(text)
-    args = ['--target=arm64-apple-darwin', 'k.cpp', 'main.cpp', '-o', 'prog']
+    args = ['--target=arm64-apple-darwin', 'kill.cpp', '-o', 'prog']
     client = env.start(args, d)
-    if not wait_until(lambda: env.number('live') >= 1, 30):
-        fail('killed daemon: the request never showed as live')
+    env.expect_gate('kill.cpp', b'P')
     pid = env.pid()
-    if pid is None:
-        client.kill()
-        client.wait()
-        return
+    if pid != env.fixture_daemon.pid:
+        raise RuntimeError(f'killed daemon: fixture pid {env.fixture_daemon.pid}, status pid {pid}')
     os.kill(pid, signal.SIGKILL)
-    out, err = client.communicate(timeout=300)
+    env.fixture_daemon.wait(timeout=10)
+    _, err = client.communicate(timeout=60)
     want_code, want_bytes = cold_build(env, files, args, 'prog')
-    got = (d / 'prog').read_bytes() if (d / 'prog').exists() else None
-    if client.returncode != want_code or got != want_bytes:
+    if want_code != 0 or want_bytes is None or client.returncode != want_code or bytes_of(d / 'prog') != want_bytes:
         fail(f'killed daemon: the client\'s answer differs from a cold compile (exit {client.returncode}): {err[-300:]!r}')
     if env.number('pid') in (pid, -1):
         fail('killed daemon: no new daemon answered')
@@ -317,11 +346,14 @@ def restart(env):
     pid = env.pid()
     if pid is None:
         return
-    subprocess.run([env.ycxx, 'ctl', 'shutdown'], cwd=env.scope, env=env.base, capture_output=True, timeout=60)
-    gone(pid, 10)
+    stop = subprocess.run([env.driver, 'ctl', 'shutdown'], cwd=env.scope, env=env.base, capture_output=True, timeout=15)
+    if stop.returncode != 0 or not wait_until(lambda: not env.status(), 15):
+        fail(f'restart: daemon {pid} did not shut down: {stop.stderr!r}')
+        return
+    (d / 'r.o').unlink(missing_ok=True)
     code, _, _ = env.cxx(args, d, env.daemon)
     want_code, want_bytes = cold_build(env, {'r.cpp': (d / 'r.cpp').read_text()}, args, 'r.o')
-    if code != want_code or (d / 'r.o').read_bytes() != want_bytes:
+    if want_code != 0 or want_bytes is None or code != want_code or bytes_of(d / 'r.o') != want_bytes:
         fail('restart: the new daemon\'s answer differs from a cold compile')
     if env.number('pid') in (pid, -1):
         fail('restart: the same daemon answered after shutdown')
@@ -330,49 +362,46 @@ def restart(env):
 
 
 def concurrent_clients(env):
-    """Six clients at once: four files, and one file twice. Each answer equals a cold compile, and
-    the requests ran in the engine at the same time (#139)."""
+    """Four files, one requested twice, and two distinct roots in the engine together (#139)."""
     d = env.scope / 'concurrent'
     d.mkdir()
-    # Long enough that six requests sent together overlap.
-    body = ''.join(f'int g{{i}}_{k}(int x) {{ return x * {k} + {k % 7}; }}\n' for k in range(400))
-    sources = {f'c{i}.cpp': body.replace('{i}', str(i)) + f'int f{i}() {{ return {i}; }}\nint main() {{ return f{i}() * 2; }}\n'
-               for i in range(4)}
+    sources = {f'c{i}.cpp': f'int f{i}() {{ return {i}; }}\n' for i in range(4)}
     for name, text in sources.items():
         (d / name).write_text(text)
-    jobs = [(f'c{i}.cpp', f'c{i}-{n}.o') for i in range(4) for n in range(1 if i else 2)]
+    jobs = [('c0.cpp', 'c0-0.o'), ('c0.cpp', 'c0-1.o'), ('c1.cpp', 'c1.o'), ('c2.cpp', 'c2.o'), ('c3.cpp', 'c3.o')]
     requests = env.number('requests')
-    results = {}
-
-    def one(src, obj):
-        results[obj] = env.cxx(['-c', src, '-o', obj], d, env.daemon)
-
-    threads = [threading.Thread(target=one, args=job) for job in jobs]
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join()
-    for src, obj in jobs:
+    first, same, *distinct = [['-c', src, '-o', obj] for src, obj in jobs]
+    clients = [env.start(first, d)]
+    env.expect_gate('c0.cpp', b'P')
+    clients.append(env.start(same, d))
+    if not wait_until(lambda: env.number('peak_running') >= 2, 10):
+        raise RuntimeError('concurrent clients: the same-file request did not enter the session')
+    clients.extend(env.start(args, d) for args in distinct)
+    env.expect_gate('c1.cpp', b'P')
+    env.gates['c0.cpp'].sendall(b'R')
+    env.expect_gate('c0.cpp', b'R')
+    for (src, obj), client in zip(jobs, clients):
+        _, err = client.communicate(timeout=60)
         want_code, want_bytes = cold_build(env, {src: sources[src]}, ['-c', src, '-o', obj], obj)
-        if results[obj][0] != want_code or (d / obj).read_bytes() != want_bytes:
-            fail(f'concurrent clients: {obj} differs from a cold compile')
+        if want_code != 0 or want_bytes is None or client.returncode != want_code or bytes_of(d / obj) != want_bytes:
+            fail(f'concurrent clients: {obj} differs from a cold compile: {err[-300:]!r}')
     if env.number('requests') != requests + len(jobs):
         fail(f'concurrent clients: {len(jobs)} requests sent, {env.number("requests") - requests} answered')
-    if env.number('peak_running') < 2:
-        fail(f'concurrent clients: the requests ran one at a time (peak_running {env.number("peak_running")})')
 
 
 def main():
-    ycxx = os.path.abspath(sys.argv[1])
-    env = Env(ycxx)
+    ycxx, driver = map(os.path.abspath, sys.argv[1:])
+    env = Env(ycxx, driver)
     try:
-        # A first request starts the daemon; every test but the two that replace it on purpose
+        env.start_fixture_daemon()
+        # A first request checks the fixture daemon. Every scenario that does not replace it
         # must leave the same daemon answering.
         (env.scope / 'first.cpp').write_text('int main() { return 0; }\n')
-        if env.cxx(['-c', 'first.cpp', '-o', 'first.o'], env.scope, env.daemon)[0] != 0 or env.pid() is None:
+        if (env.cxx(['-c', 'first.cpp', '-o', 'first.o'], env.scope, env.daemon)[0] != 0 or
+                env.pid() != env.fixture_daemon.pid):
             fail('the first request through the daemon failed: no test can run')
             return 1
-        for test in (edit_during_build, edit_error_during_build, killed_client, killed_daemon, restart, concurrent_clients):
+        for test in (edit_during_build, edit_error_during_build, killed_client, concurrent_clients, killed_daemon, restart):
             t0 = time.monotonic()
             pid = env.pid()
             if pid is None:
@@ -380,7 +409,11 @@ def main():
             test(env)
             if test not in (killed_daemon, restart):
                 env.same_daemon(test.__name__, pid)
+            if env.number('live') != 0:
+                fail(f'{test.__name__}: daemon still reports live requests')
             print(f'{test.__name__}: {time.monotonic() - t0:.1f}s')
+    except (OSError, RuntimeError, subprocess.TimeoutExpired) as e:
+        fail(str(e))
     finally:
         env.close()
     if failures:

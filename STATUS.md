@@ -894,9 +894,12 @@ private daemons.
     pinned by a first request) must answer until it is killed, so a crash hidden by the
     client's retry fails it. `KNOWN` lists the divergences of the default run that have their
     own issue (none today).
-  - `daemon.process` (`tests/daemon/process.py`, #98): an edit landing mid-build (restarted,
-    answered as the final state, counted in `ctl status`), a killed client (cancelled), a killed
-    daemon mid-request (the client retries), a restart, and concurrent clients.
+  - `daemon.process` (`tests/daemon/process.py`, #98, #746): a fixture driver parks a pooled build
+    after it has read and analysed its sources. Edits restart the build and get the cold bytes
+    and diagnostics, with the restart counted in `ctl status`. A disconnected client stops,
+    a client whose daemon died retries, and a shutdown leaves a new daemon to answer the next
+    request. Concurrent clients include two requests of one file and a distinct build root
+    reaching the checkpoint while the first is parked.
   - All run on macOS and Linux.
 - Not yet:
   - `progress` messages and `build_time` (#140);
