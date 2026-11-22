@@ -158,8 +158,10 @@ public:
     return std::nullopt;
   }
   // In a member declaration of a class being defined: the member named `name` declared before it
-  // ([basic.scope.class]; the class's member list is not complete yet).
-  virtual std::optional<ast::DeclSema> earlier_member(NameId name, bool type_only = false) = 0;
+  // ([basic.scope.class]; the class's member list is not complete yet). An expression can also
+  // request the function declarations of that name in source order.
+  virtual std::optional<ast::DeclSema> earlier_member(NameId name, bool type_only = false,
+                                                     std::vector<ast::DeclSema>* functions = nullptr) = 0;
   // The direct bases of class `c` while it is being defined (its base-clause), none otherwise.
   virtual std::vector<EntityId> defining_bases(EntityId) { return {}; }
   virtual std::span<const BaseRec> defining_base_records(EntityId) { return {}; }
@@ -4929,6 +4931,14 @@ public:
   }
   bool is_bound_member(const Ex& e) { return e.ok() && types().is(e.type(), Builtin::bound_member); }
 
+  // [expr.prim.id.general]: a non-static data member needs no object in an unevaluated operand.
+  Ex unevaluated_data_member(EntityId member, QualType type, u8 bit_width, u32 begin, u32 end) {
+    ExprInfo info{types().referee(type), ValueCategory::lvalue, 0, bit_width};
+    Ex e = node(ast::DeclRef{info, member}, begin, end, info);
+    declared_types_[std::to_underlying(e.id)] = type;
+    return e;
+  }
+
   // The implicit member access `name` inside a member function of `c` ([class.mfct.non.static]),
   // or a qualified name `C::name`: none if `c` has no such member.
   std::optional<Ex> class_member(EntityId c, NameId name, u32 begin, u32 end, u32 name_at,
@@ -4984,13 +4994,7 @@ public:
         return literal(t, value, ValueCategory::prvalue, *address_at, end);
       }
       if (!has_this) {
-        // [expr.prim.id.general]: a non-static data member needs no object in an unevaluated operand.
-        if (unevaluated) {
-          ExprInfo info{types().referee(field.type), ValueCategory::lvalue, 0, field.bit_width};
-          Ex e = node(ast::DeclRef{info, field.entity}, begin, end, info);
-          declared_types_[std::to_underlying(e.id)] = field.type;
-          return e;
-        }
+        if (unevaluated) return unevaluated_data_member(field.entity, field.type, field.bit_width, begin, end);
         diag(begin, Diag::member_without_object, name);
         return fail;
       }
@@ -6422,11 +6426,18 @@ public:
     if (current_class != EntityId::none) {
       if (auto r = class_member(current_class, name, begin, end, begin, std::nullopt, /*unqualified=*/true)) return *r;
       if (!class_rec(current_class)) {
-        if (auto m = q_->earlier_member(name)) {
+        std::vector<ast::DeclSema> functions;
+        if (auto m = q_->earlier_member(name, /*type_only=*/false, nested_enum_members_begin ? &functions : nullptr)) {
           if (m->kind == ast::DeclKind::enumerator) return enumerator(m->entity, m->type, begin, end);
           // A static member function needs no object ([class.static.mfct]).
-          if (m->kind == ast::DeclKind::function && (m->flags & decl_flag::static_))
+          if (m->kind == ast::DeclKind::function && (m->flags & decl_flag::static_)) {
+            if (!functions.empty() && std::ranges::all_of(functions, [](const ast::DeclSema& d) {
+                  return (d.flags & decl_flag::static_) != 0;
+                })) return decls_expr(std::move(functions), true, name, begin, end, callee);
             return decls_expr({*m}, true, name, begin, end, callee);
+          }
+          if (nested_enum_members_begin && unevaluated && m->kind == ast::DeclKind::data_member)
+            return unevaluated_data_member(m->entity, m->type, m->bit_width, begin, end);
           if (m->kind != ast::DeclKind::variable) {
             diag(begin, Diag::member_without_object, name);
             return {NodeId::none, begin, end};
