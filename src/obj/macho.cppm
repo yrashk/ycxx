@@ -8,7 +8,8 @@
 // Relocations map one to one onto `obj::reloc_kind`, with two pairings the format needs:
 // ARM64_RELOC_ADDEND carries the addend of a following BRANCH26, PAGE21 or PAGEOFF12, and
 // ARM64_RELOC_SUBTRACTOR carries `minus` for a following UNSIGNED. An UNSIGNED relocation's
-// addend is stored in the section bytes. Every relocation the writer emits is external (it names
+// addend is stored in the section bytes. A PC-relative POINTER_TO_GOT stores its addend minus
+// the relocation field's section offset. Every relocation the writer emits is external (it names
 // a symbol); the reader also accepts section-relative UNSIGNED relocations, which it turns into
 // a reference to a nameless local symbol at the start of the section.
 export module ycxx.obj.macho;
@@ -241,10 +242,14 @@ std::vector<std::uint8_t> write_object(const object& o) {
           contract_assert(r.addend == 0);
           entry(r.offset, reloc_word(sym, false, 2, true, reloc_type::got_load_pageoff12));
           break;
-        case reloc_kind::got_rel32:
+        case reloc_kind::got_rel32: {
+          const auto offset = static_cast<std::int64_t>(r.offset);
+          contract_assert(r.addend >= std::numeric_limits<std::int32_t>::min() + offset &&
+                          r.addend <= std::numeric_limits<std::int32_t>::max() + offset);
           entry(r.offset, reloc_word(sym, true, 2, true, reloc_type::pointer_to_got));
-          store32(contents[i], r.offset, static_cast<std::uint32_t>(r.addend));
+          store32(contents[i], r.offset, static_cast<std::uint32_t>(r.addend) - r.offset);
           break;
+        }
         case reloc_kind::abs64:
         case reloc_kind::abs32: {
           const std::uint32_t len = r.kind == reloc_kind::abs64 ? 3 : 2;
@@ -569,7 +574,7 @@ std::expected<object, std::string> read_object(std::span<const std::uint8_t> b, 
         case reloc_type::pointer_to_got:
           if (length != 2 || !pcrel) return fail("POINTER_TO_GOT other than 32-bit pc-relative is not supported");
           r.kind = reloc_kind::got_rel32;
-          r.addend = sign_extend(load32(sec.bytes, address), 32);
+          r.addend = sign_extend(load32(sec.bytes, address), 32) + address;
           std::ranges::fill(std::span(sec.bytes).subspan(address, 4), 0);
           break;
         default: return fail(std::format("relocation type {} is not supported", std::to_underlying(type)));

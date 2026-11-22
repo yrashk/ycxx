@@ -299,6 +299,9 @@ What is true of the code today. Work in progress and its owners are tracked in
   scattered and TLV relocations, and section-relative relocations other than UNSIGNED.
   A SUBTRACTOR must be followed immediately by a non-PC-relative UNSIGNED at the same address
   and width. Both records describe a 32-bit or 64-bit field. [#702](https://github.com/yrashk/ycxx/issues/702)
+  PC-relative `POINTER_TO_GOT` words include the negative offset of their field within the section.
+  The reader and writer translate between this word and the model's addend for `GOT(S) + A - P`.
+  [#782](https://github.com/yrashk/ycxx/issues/782)
 - `ycxx.link` (`src/link/`): `link(objects, options) -> expected<bytes, errors>`.
   - Diagnoses duplicate and undefined symbols and a missing entry point. A strong definition beats
     a weak one; common symbols merge to the largest. `__mh_execute_header` and `___dso_handle` are
