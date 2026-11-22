@@ -215,6 +215,20 @@ has unbounded cost until the checker can establish a finite execution count. An 
 callee cannot satisfy a finite grade. Separate object builds include grades in the effect
 contract digest. A change to a declared grade invalidates summaries that depend on it.
 
+### Explicit handler scopes
+
+A portable `effects::scoped_handler<Tag, Implementation>` borrows a callable implementation
+for one effect. The surrounding scope keeps the callable alive. Each adapter receives the
+handler explicitly and invokes its implementation through `perform`. A nested scope can
+pass a different handler for the same tag. Existing scopes retain their implementations.
+A stateful callable can share a budget and hold the authority required by its operation.
+
+A trusted mediation adapter declares the effects that escape the handler. Verified
+callers use that bound like any other direct call. To verify the mediation itself, the
+compiler must also prove which scoped handler supplies each operation, that its borrow
+stays within the scope, and that its implementation respects the declared outward bound.
+Those checks belong before support for captured resumptions.
+
 ## YCXX implementation milestones
 
 1. **User registration and portable adapters.** Use typed policy aliases to replace the current

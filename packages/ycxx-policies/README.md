@@ -162,3 +162,15 @@ The adapter calls `spend()` for each use. Exhausting the budget traps on the nex
 spend. Declare the limit in the budget's type, for example
 `ycxx::effects::budget<ReadSettings, 3>`. The counter cannot be copied or moved.
 The adapter still needs a capability for the resource it accesses.
+
+## Scoped handlers
+
+Include `<ycxx/effects/handler.hpp>` to bind a callable to an effect. For example, construct
+`fx::scoped_handler<ReadSettings, decltype(read_from_memory)> handler(read_from_memory)`
+and pass it by reference to the adapter. The adapter invokes `handler.perform(args...)`.
+The caller keeps the callable alive for the scope. A nested call can receive a different
+handler for the same effect, while the enclosing handler keeps its original implementation.
+
+A trusted mediation adapter can declare which effects escape its handler. YCXX checks
+its callers against that declaration. The runtime scope and the optional budget use the
+same types with GCC, Clang, and YCXX.

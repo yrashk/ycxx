@@ -211,6 +211,33 @@ with tempfile.TemporaryDirectory() as directory:
     denied = write("capability_denied.cpp", capability_source.replace("&checked_read, Read", "&checked_read, Empty"))
     syntax(denied, error="effect bound of 'read_store' exceeds the caller's declared bound")
 
+    handler_source = """\
+        #include "effects.hpp"
+        #include <ycxx/effects/handler.hpp>
+        struct Reader {
+          int data;
+          int operator()(int index) { return data + index; }
+        };
+        using Scope = fx::scoped_handler<file::Read, Reader>;
+        [[=fx::trusted_contract<Read>{}]] int mediated(Scope& scope, int index) {
+          return scope.perform(index);
+        }
+        [[=fx::contract<Read>{}]] int checked(Scope& scope) { return mediated(scope, 1); }
+        int main() {
+          Reader first{41}, second{51};
+          Scope primary(first);
+          {
+            Scope alternate(second);
+            if (checked(alternate) != 52) return 1;
+          }
+          return checked(primary) != 42;
+        }
+    """
+    scope_handler = write("handler.cpp", handler_source)
+    syntax(scope_handler)
+    syntax(write("handler_denied.cpp", handler_source.replace("fx::contract<Read>", "fx::contract<Empty>")),
+           error="effect bound of 'mediated' exceeds the caller's declared bound")
+
     if sys.platform.startswith("linux") and platform.machine() == "x86_64":
         resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
         executable = root / "effects"
@@ -221,6 +248,8 @@ with tempfile.TemporaryDirectory() as directory:
         subprocess.run([executable], check=True, timeout=10)
         denied_scope = subprocess.run([executable, "wrong-scope"], timeout=10)
         assert denied_scope.returncode == -signal.SIGILL, denied_scope
+        invoke([*native, "-o", executable, scope_handler])
+        subprocess.run([executable], check=True, timeout=10)
 
         def compile_object(source, name):
             obj = root / (name + ".o")

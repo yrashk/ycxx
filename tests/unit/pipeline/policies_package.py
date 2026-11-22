@@ -33,6 +33,7 @@ with tempfile.TemporaryDirectory() as tmp:
 #include <ycxx/ownership/runtime.hpp>
 #include <ycxx/capabilities.hpp>
 #include <ycxx/effects.hpp>
+#include <ycxx/effects/handler.hpp>
 #include <ycxx/effects/runtime.hpp>
 #include <type_traits>
 
@@ -99,6 +100,16 @@ int read(const Reader& authority, ReadBudget& budget) noexcept {
 }
 using ReadPolicy = fx::use_policy<Rule, fx::trusted<decltype(&read), &read, ReadOnce>>;
 
+struct ReadHandler {
+  int contents;
+  int operator()(int offset) { return contents + offset; }
+};
+using ReadScope = fx::scoped_handler<ReadEffect, ReadHandler>;
+static_assert(!std::is_copy_constructible_v<ReadScope>);
+static_assert(!std::is_move_constructible_v<ReadScope>);
+
+int read_in(ReadScope& context, int offset) { return context.perform(offset); }
+
 int main(int argc, char**) {
   ycxx::ownership::linear_state owner;
   auto moved = static_cast<ycxx::ownership::linear_state&&>(owner);
@@ -116,6 +127,13 @@ int main(int argc, char**) {
   ReadBudget budget;
   if (read(next, budget) != 17 || read(next, budget) != 17) return 1;
   if (argc == 5) return read(next, budget);  // exhausted effect budget
+  ReadHandler primary{17}, fallback{22};
+  ReadScope outer(primary);
+  {
+    ReadScope inner(fallback);
+    if (read_in(inner, 1) != 23) return 2;
+  }
+  if (read_in(outer, 1) != 18) return 3;
   auto editor = Store::editor(2);
   Store::set(editor, 2, 28);
   return Store::get(editor, 2) != 28;
