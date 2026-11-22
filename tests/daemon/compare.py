@@ -24,6 +24,9 @@ rest of the β daemon tests (tests/daemon: edits during a build, a killed client
 mid-request, the cache across restarts; .incr through the daemon).
 """
 import hashlib, os, shutil, signal, subprocess, sys, tempfile, time
+from collections import deque
+from concurrent.futures import ThreadPoolExecutor
+from itertools import islice
 from pathlib import Path
 
 failures = []
@@ -61,20 +64,23 @@ def outputs(d):
     return {f.name: f.read_bytes() for f in sorted(Path(d).iterdir()) if f.is_file()}
 
 
-def compare(ycxx, name, args, setup, envs):
-    """Runs `args` in two fresh copies of a directory prepared by `setup`, in-process and through
-    the daemon, and compares everything they produce."""
-    results = []
-    for mode, env in envs:
-        d = Path(tempfile.mkdtemp(prefix='ycxx-cmp-'))
-        try:
-            setup(d)
-            before = set(outputs(d))
-            code, out, err = run(ycxx, args, d, env)
-            results.append((code, out, err, {k: v for k, v in outputs(d).items() if k not in before}))
-        finally:
-            shutil.rmtree(d, ignore_errors=True)
-    (c0, o0, e0, f0), (c1, o1, e1, f1) = results
+def compile_case(ycxx, source, args, env):
+    """Runs one side of a comparison with a fresh copy of the source and its inputs."""
+    d = Path(tempfile.mkdtemp(prefix='ycxx-cmp-'))
+    try:
+        shutil.copy(source, d / source.name)
+        inputs = source.parent / 'inputs'
+        if inputs.is_dir():
+            shutil.copytree(inputs, d / 'inputs')
+        before = set(outputs(d))
+        code, out, err = run(ycxx, args, d, env)
+        return code, out, err, {k: v for k, v in outputs(d).items() if k not in before}
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def compare(name, reference, daemon):
+    (c0, o0, e0, f0), (c1, o1, e1, f1) = reference, daemon
     test = name.split(' ')[0]
     issue, allowed = KNOWN.get(test, (None, ()))
     for what, a, b in (('exit status', c0, c1), ('stdout', o0, o1), ('stderr', e0, e1), ('outputs', f0, f1)):
@@ -100,7 +106,6 @@ def main():
     cold = dict(base, YCXX_NO_DAEMON='1', YCXX_THREADS='1')
     # The daemon takes its pool from the environment of the client that starts it.
     daemon = dict(base, YCXX_DAEMON='require', YCXX_THREADS='8', YCXX_CHAOS_SEED='7')
-    envs = [('in-process', cold), ('daemon', daemon)]
     # Scratch directories are outside any repository: give them one scope, by marker.
     scope = Path(tempfile.mkdtemp(prefix='ycxx-scope-'))
     (scope / '.ycxx').write_text('')
@@ -150,15 +155,30 @@ def main():
             ts = sorted(sub.glob('*.cpp'))
             whole = sub.name in ('slice', 'smoke') or '--all' in sys.argv
             tests += [t for t in ts if whole or sampled(f'{sub.name}/{t.name}') or f'{sub.name}/{t.name}' in ALWAYS]
-        for t in tests:
-            def setup(d, t=t):
-                shutil.copy(t, d / t.name)
-                if (t.parent / 'inputs').is_dir():
-                    shutil.copytree(t.parent / 'inputs', d / 'inputs')
-            for action in ([], ['-c'], ['-fsyntax-only'], ['-E']):
-                args = [*action, t.name] if action else ['--target=arm64-apple-darwin', t.name, '-o', 'prog']
-                compare(ycxx, f'{t.parent.name}/{t.name} {" ".join(action) or "link"}',
-                        args, setup, envs)
+        actions = ([], ['-c'], ['-fsyntax-only'], ['-E'])
+        cases = ((t, action) for t in tests for action in actions)
+        reference_workers = 2
+        workers = ThreadPoolExecutor(max_workers=reference_workers)
+
+        def submit(t, action):
+            args = [*action, t.name] if action else ['--target=arm64-apple-darwin', t.name, '-o', 'prog']
+            name = f'{t.parent.name}/{t.name} {" ".join(action) or "link"}'
+            return t, name, args, workers.submit(compile_case, ycxx, t, args, cold)
+
+        # Refill one slot as each reference result is consumed. Only this thread calls the daemon,
+        # and both results are consumed in the original order even if a reference finishes early.
+        try:
+            pending = deque(submit(*case) for case in islice(cases, reference_workers))
+            while pending:
+                t, name, args, reference = pending.popleft()
+                expected = reference.result()
+                case = next(cases, None)
+                if case is not None:
+                    pending.append(submit(*case))
+                compare(name, expected, compile_case(ycxx, t, args, daemon))
+        finally:
+            # Join running references before the outer cleanup removes their scratch directories.
+            workers.shutdown(wait=True, cancel_futures=True)
 
         same_daemon('the own suites')
 
