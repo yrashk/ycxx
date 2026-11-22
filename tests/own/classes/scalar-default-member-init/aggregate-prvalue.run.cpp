@@ -22,5 +22,5 @@ int main() {
   return Record{}.value != 42 || Record().value != 42 || inferred.value != 42 ||
          named.value != 42 || folded.value != 42 || prvalue_return().value != 42 ||
          braced_return().value != 42 || by_value({}) != 42 || by_value({9}) != 9 ||
-         constant_context.value != 13 || FoldedCall{}.value != 13;
+         constant_context.value != 13;
 }

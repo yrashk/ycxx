@@ -2499,20 +2499,17 @@ public:
       if (auto init = q_->replay_default_member(*this, e.default_member, required_base)) {
         if (*init == NodeId::none) return {NodeId::none, begin, end};
         ExprInfo info{e.type, ValueCategory::prvalue, 0};
-        bool permitted = true;
         if (!replay_default_members_ && required_base == EntityId::none && !unevaluated && !constant_reference_context) {
           const Ex operand{*init, begin, end, info};
           const Ex proof = unary_noexcept(operand, begin, end, /*for_codegen_proof=*/true);
           if (!proof.ok()) return {NodeId::none, begin, end};
           const auto result = as<ast::Literal>(proof);
-          permitted = result && w_->values.rec(result->value).bits;
+          if (!result || !w_->values.rec(result->value).bits) {
+            diag(begin, Diag::aggregate_default_unwind);
+            return {NodeId::none, begin, end};
+          }
         }
-        if (permitted) return node(ast::DefaultMemberInit{info, {*init, 0}}, begin, end, info);
-        // An unproved replay can still use the scalar value available to the original path.
-        if (e.init == ConstId::none) {
-          diag(begin, Diag::aggregate_default_unwind);
-          return {NodeId::none, begin, end};
-        }
+        return node(ast::DefaultMemberInit{info, {*init, 0}}, begin, end, info);
       }
       if (required_base != EntityId::none) {
         diag(begin, Diag::not_supported, lex::Tk::equal);

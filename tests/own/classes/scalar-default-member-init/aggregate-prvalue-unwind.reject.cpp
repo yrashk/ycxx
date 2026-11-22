@@ -9,5 +9,12 @@ int named() { Throws object{}; return object.value; }
 Throws braced_return() { return {}; } //! error
 int temporary() { return Throws{}.value; } //! error
 
+constexpr int source() { return 5; }
+struct CachedBeforeCompletion {
+  int value = source();
+  static int source();
+};
+int cached_default() { return CachedBeforeCompletion{}.value; } //! error
+
 struct Allocates { int* value = new int[2]; };
 Allocates array_return() { return {}; } //! error
