@@ -697,7 +697,8 @@ bool names_unnamed_namespace(parse::Program& program, QualType type) {
 }
 
 // The definitions and declarations of the global namespace, in item order.
-TranslationUnit unit_of(parse::Program& program, sema::World& world, const items::Items& items, std::string name) {
+TranslationUnit unit_of(parse::Program& program, sema::World& world, const items::Items& items, std::string name,
+                        const std::set<EntityId>& uncertain_layouts) {
   ast::Interners& ins = world.ins;
   TranslationUnit tu;
   tu.name = std::move(name);
@@ -906,6 +907,8 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
       if (body.deduced) d.type = body.deduced_type;
       tu.functions.push_back({d.entity, d, body, program.id(k), it.body_begin - it.begin, program.this_type(d)});
       const auto& entity = world.entities.rec(d.entity);
+      if (linux && !member && program.supports_base_object_variant(d.entity, uncertain_layouts))
+        tu.base_object_variants.insert(d.entity);
       tu.functions.back().coalesced = inline_declarations.contains(d.entity) && entity.kind == sema::EntityKind::function &&
                                      entity.linkage == ast::Linkage::external && entity.templ == EntityId::none &&
                                      tu.main != d.entity && ins.seqs.size(body.closures) == 0 &&
@@ -1173,11 +1176,12 @@ engine::query_task<FrontResult> TuFront::run(engine::Ctx& cx, TuId tu) {
                             locations.at(at), program.token(d.at)});
   }
   std::ranges::stable_sort(out.messages, {}, &Message::token);
-  if (!out.has_errors()) out.unit = unit_of(program, world, items, src.name);
   // The unit's own records of its classes and enumerations (#115).
   const sema::Classes& classes = program.classes();
   const bool linux = unit_source.config.target->triple == ast::x86_64_linux.triple;
-  const auto uncertain = linux ? program.uncertain_object_layouts() : std::set<EntityId>{};
+  const auto uncertain = linux ? program.uncertain_object_layouts(/*include_lifecycle_signatures=*/true)
+                               : std::set<EntityId>{};
+  if (!out.has_errors()) out.unit = unit_of(program, world, items, src.name, uncertain);
   auto nontrivial_destructor = [&](this auto&& recurse, EntityId cls) -> bool {
     const auto* record = classes.find(cls);
     if (!record || record->destructor == EntityId::none || record->layout_requires_virtual_support) return false;

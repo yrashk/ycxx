@@ -371,6 +371,10 @@ written default member initializer are value-initialized.
   (`public`, `protected`, `private`) and friend functions and classes. Ordinary unqualified
   friend definitions in non-template namespace-scope classes are found by argument-dependent
   lookup or through a matching namespace declaration. [#259](https://github.com/yrashk/ycxx/issues/259)
+- Linux x86-64 can emit the base constructor and destructor entries for an ordinary class
+  with scalar fields, no bases, and written out-of-line definitions. A separately compiled
+  GCC or Clang caller can construct and destroy the ycxx-defined base as a subobject.
+  [#136](https://github.com/yrashk/ycxx/issues/136)
 - named `int` and `unsigned int` bit-fields of width 1 through 32 in ordinary unpacked,
   non-template classes without bases;
 - single and multiple inheritance (not virtual): base classes laid out as Clang does, member
@@ -460,7 +464,9 @@ written default member initializer are value-initialized.
   `static_assert` and `if consteval`, with errors that explain why something is not constant.
   Scalar enumeration values work in constexpr variables, calls, casts and switch conditions.
   A flat static constexpr aggregate member initialized with `T{...}` has addressable storage
-  and runtime field access. [#262](https://github.com/yrashk/ycxx/issues/262)
+  and runtime field access. Direct-list braces also work for aggregates of public integral
+  fields in namespace-scope classes without bases.
+  [#262](https://github.com/yrashk/ycxx/issues/262)
   Namespace-scope `constexpr` pointers to `void` can retain scalar and array element addresses.
   `__builtin_addressof`, used by libycxx's `std::addressof`, bypasses overloaded `operator&`.
   It supports runtime addresses and constant expressions such as a scalar global's address.

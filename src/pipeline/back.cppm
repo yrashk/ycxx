@@ -209,6 +209,8 @@ struct TranslationUnit {
   std::optional<ir::CatchAllRuntime> catch_all;
   EntityId cleanup_resume = EntityId::none;
   std::optional<OwnedVirtualTable> owned_virtual_table;
+  // The written complete-object definitions whose ELF base-object entries share their code.
+  std::set<EntityId> base_object_variants;
 };
 
 // What failed, at a location in an item when there is one. Every error here is something the α
@@ -1514,6 +1516,7 @@ struct LinuxFunction {
   const x86_64::MachineCode* code;
   bool weak;
   bool cleanup_free_unwind;
+  std::string_view base_object_name;
 };
 
 struct LinuxVirtualTable {
@@ -1573,6 +1576,11 @@ std::expected<obj::object, aarch64::CodegenError> assemble_linux(
       symbol.offset = base;
       symbol.weak = f.weak && symbol.bind != obj::binding::local;
       symbol.function_size = f.code->bytes.size();
+      if (!f.base_object_name.empty()) {
+        obj::symbol base_object = symbol;
+        base_object.name = std::string(f.base_object_name);
+        o.add_symbol(std::move(base_object));
+      }
       sec.emit(f.code->bytes);
       for (const auto& r : f.code->relocs) {
         auto target = symbol_of.find(r.target);
@@ -1845,6 +1853,7 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
   std::optional<LinuxVirtualTable> virtual_table;
   std::vector<const Entity*> locals;  // named after their functions, below
   std::map<std::uint32_t, std::string> mangled;  // by function entity
+  std::map<EntityId, std::string> base_object_names;
   for (const Entity& e : tu.entities) {
     if (!used.contains(ir::raw(e.id))) continue;
     if (e.local_function != EntityId::none) {
@@ -1862,12 +1871,16 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
         virtual_table = LinuxVirtualTable{e.id, std::move(*encoding), owned->slots};
       continue;
     }
-    // The complete-object constructor and destructor (C1, D1): with no virtual bases they are the
-    // base-object ones too (#136).
-    std::string name_ = e.special == Special::constructor ? "C1" : e.special == Special::destructor ? "D1" : e.name;
+    // Calls still name the complete-object entry. An eligible definition also emits C2 or D2
+    // for a caller constructing or destroying a base subobject (Itanium ABI §5.1.4.3, §5.2.5).
+    const std::string_view entry = e.special == Special::constructor ? "C1" :
+                                   e.special == Special::destructor ? "D1" : std::string_view(e.name);
     TemplateSpec spec{e.template_type.value_or(e.type), e.template_args, e.template_params, e.template_same_heads};
-    auto name = symbol_name(in, name_, e.type, e.is_function, e.lang, names, e.scope, e.special != Special::none,
-                            e.template_type ? &spec : nullptr, !linux, function_names);
+    const auto encode = [&](std::string_view name) {
+      return symbol_name(in, name, e.type, e.is_function, e.lang, names, e.scope, e.special != Special::none,
+                         e.template_type ? &spec : nullptr, !linux, function_names);
+    };
+    auto name = encode(entry);
     if (!name) {
       errors.push_back({e.at, std::format("the name of '{}': {} is not supported yet", e.name, name.error())});
       continue;
@@ -1882,6 +1895,14 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
     obj::binding binding = obj::binding::global;
     if (e.has_local_binding()) binding = obj::binding::local;
     else if (e.hidden) binding = obj::binding::hidden;
+    if (linux && tu.base_object_variants.contains(e.id)) {
+      auto base_name = encode(e.special == Special::constructor ? "C2" : "D2");
+      if (!base_name) {
+        errors.push_back({e.at, std::format("the base-object name of '{}': {} is not supported yet", e.name, base_name.error())});
+        continue;
+      }
+      base_object_names.emplace(e.id, std::move(*base_name));
+    }
     symbols.push_back({e.id, std::move(*name), binding});
   }
   // A static local and its guard: `_ZZ <encoding> E <name> [_<n>]` and `_ZGV` before it, the
@@ -1919,7 +1940,9 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
       std::vector<LinuxFunction> code;
       for (std::size_t i = 0; i < fns.size(); ++i) {
         const auto& def = tu.functions[i];
-        code.push_back({fns[i].fn, &*ms[i].get().linux_code, def.coalesced, def.unwind != UnwindEligibility::none});
+        const auto base_name = base_object_names.find(def.entity);
+        const std::string_view name = base_name == base_object_names.end() ? std::string_view{} : base_name->second;
+        code.push_back({fns[i].fn, &*ms[i].get().linux_code, def.coalesced, def.unwind != UnwindEligibility::none, name});
       }
       return assemble_linux(tu.name, code, data, symbols, weak_variables, virtual_table);
     }
