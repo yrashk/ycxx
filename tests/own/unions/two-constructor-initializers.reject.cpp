@@ -2,5 +2,5 @@
 union Choice {
   int first;
   int second;
-  Choice() : first(1), second(2) {} // error: too many initializers
+  Choice() : first(1), second(2) {} //! error
 };

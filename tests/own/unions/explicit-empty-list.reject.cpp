@@ -10,5 +10,5 @@ union Choice {
   ~Choice() noexcept {}
 };
 void construct() {
-  Choice value{}; // error: explicit constructor
+  Choice value{}; //! error
 }
