@@ -782,6 +782,8 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
   for (EntityId c : classes.classes()) {
     const auto& record = classes.rec(c);
     if (!record.layout_requires_virtual_support) continue;
+    // Check the full unit even if a pure call was admitted before a later redeclaration.
+    if (!uncertain_layouts.contains(c) && program.peer_pure_dispatch(c)) continue;
     // The first slot is the key function of the admitted root. Classify its ownership using
     // the complete unit, even when no function uses the class or constructs an object here.
     if (const auto slots = sema::native_virtual_table_slots(record);

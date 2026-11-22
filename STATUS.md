@@ -1906,6 +1906,12 @@ template's tokens again with the arguments bound.
 - **Dependent variable-template arguments** (#209): an unqualified namespace variable template
   used as a dependent `bool` template argument keeps the declaration found by ordinary lookup.
   Substitution evaluates the selected specialization once its arguments are concrete.
+- **Dependent immediate calls** (#209, [temp.dep.constexpr], [temp.arg.nontype]): a call to an
+  unqualified, unambiguous namespace `consteval` function template with no function parameters
+  can supply a non-type template argument. The call retains its explicit type arguments, including
+  trailing pack expansions, and evaluates to an integer or enum once those arguments are concrete.
+  Alias type-ids replay calls whose argument validity must be checked at substitution.
+  Dependent uses of aliases that can erase the check require signature replay (#209).
 - **Dependent logical negation** (#209): a `bool` template argument or default can negate a
   qualified dependent `bool` variable template-id. Substitution retains the negation across
   aliases until the selected specialization has concrete arguments and supplies a usable
@@ -2739,7 +2745,17 @@ What the process allocates, attributed to the engine's cells, in the trace and t
   supported root type. The root has an implicit default constructor, a trivial destructor and
   no default member initializer. Lowering stores `_ZTV + 16` in the vptr. The table can come
   from the key definition in the same unit or from a peer. [#309](https://github.com/yrashk/ycxx/issues/309)
-- Broader construction and table emission, pure-slot dispatch, covariant returns and class-head
+- On Linux x86-64, a caller can dispatch through a pointer or lvalue reference to a
+  peer-owned abstract root. The root is an ordinary, externally linked class with no
+  bases or fields and one or two public, directly written pure virtuals. Each slot has
+  an `int` or `unsigned int` result, at most one argument of those types, optional
+  member `const` and bare `noexcept`. The caller uses the address point in the
+  supplied subobject and passes that same pointer to the selected slot.
+  `unit.linux_pure_virtual_dispatch` checks GCC and Clang peers, a secondary base,
+  conditional evaluation, the consumer ELF symbols and cold/resident output across edits.
+  [Itanium call ABI](https://itanium-cxx-abi.github.io/cxx-abi/abi.html#vcall.caller) ·
+  [#309](https://github.com/yrashk/ycxx/issues/309) · [#659](https://github.com/yrashk/ycxx/issues/659)
+- Broader construction and table emission, pure-slot signatures, covariant returns and class-head
   `final` remain in #309. Pure declarations and `final` for virtual destructors and assignment
   operators also remain there. Checking `operator=` includes matching implicitly declared copy
   and move assignments. Virtual destructor entry points, RTTI expressions, virtual bases and
