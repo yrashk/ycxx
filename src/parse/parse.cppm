@@ -4133,6 +4133,10 @@ private:
     // Before the closing brace an enumerator has its initializer's type, or the previous one's,
     // or the fixed underlying type ([dcl.enum]/5); its value is kept until the type is chosen.
     QualType prev_type = fixed.value_or(s_.builtin(sema::Builtin::int_));
+    const auto initializer_type = [&](QualType t) {
+      if (!types.is_enum(t)) return sema::Types::unqualified(t);
+      return s_.deferred_enum_layout(t) ? s_.builtin(sema::Builtin::dependent) : s_.underlying_of(t);
+    };
     std::set<NameId> enumerator_names;
     std::vector<std::optional<EnumValue>> values;
     while (!ps_.is(Tk::r_brace) && !ps_.at_end()) {
@@ -4151,7 +4155,7 @@ private:
         if (pattern && s_.dependent(v) &&
             (types.is_dependent(v.type()) || types.is_integral(v.type()) || s_.is_unscoped_enum(v.type()))) {
           value.reset();
-          if (!fixed) prev_type = sema::Types::unqualified(v.type());
+          if (!fixed) prev_type = initializer_type(x.type());
         } else {
           value = value.value_or(EnumValue{});
           auto c = v.ok() ? sema::Evaluator(s_, q_).evaluate(v).value : std::nullopt;
@@ -4167,7 +4171,7 @@ private:
               Ex lit = s_.literal(v.type(), *c, ast::ValueCategory::prvalue, x.begin, x.end);
               if (s_.narrows(lit, *fixed)) s_.diag(x.begin, Diag::narrowing, v.type(), *fixed);
             } else {
-              prev_type = sema::Types::unqualified(v.type());
+              prev_type = initializer_type(x.type());
             }
           }
         }

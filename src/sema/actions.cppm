@@ -1207,6 +1207,8 @@ public:
     return r;
   }
   std::optional<QualType> trait_type(lex::TypeTrait t, QualType arg, u32 at) {
+    if (t == lex::TypeTrait::underlying_type && deferred_enum_layout(arg))
+      return types().transform(u8(t), arg);
     auto r = templates().transform(t, arg);
     if (!r) diag(at, Diag::trait_not_applicable, arg);
     return r;
@@ -8017,7 +8019,13 @@ public:
     QualType st = builtin(w_->target.size_type);
     if (types().is_dependent(t)) return dependent_node({}, begin, end, st);
     t = types().referee(t);  // [expr.sizeof]/2, [expr.alignof]/3
-    if (deferred_enum_layout(types().innermost_array_element(t))) return dependent_node({}, begin, end, st);
+    const QualType element = types().innermost_array_element(t);
+    if (const EnumRec* e = types().is_enum(element) ? q_->defining_enum(types().enum_of(element)) : nullptr;
+        e && !e->fixed) {
+      diag(begin, Diag::sizeof_incomplete, t);  // [dcl.enum]/6: incomplete until the closing brace
+      return {NodeId::none, begin, end};
+    }
+    if (deferred_enum_layout(element)) return dependent_node({}, begin, end, st);
     if (!has_peer_virtual_layout(t) && !require_supported_virtual_layout(t, begin)) return {NodeId::none, begin, end};
     std::optional<u64> n = layout_of(t, align);
     if (!n) {
@@ -8026,12 +8034,9 @@ public:
       else diag(begin, Diag::not_supported, align ? lex::Tk::kw_alignof : lex::Tk::kw_sizeof);
       return {NodeId::none, begin, end};
     }
-    if (checking_class_alignment) {
-      const QualType element = types().innermost_array_element(t);
-      if (types().is_class(element) && q_->class_layout_uncertain(types().class_of(element))) {
-        diag(begin, Diag::class_alignment_uncertain_layout);
-        return {NodeId::none, begin, end};
-      }
+    if (checking_class_alignment && types().is_class(element) && q_->class_layout_uncertain(types().class_of(element))) {
+      diag(begin, Diag::class_alignment_uncertain_layout);
+      return {NodeId::none, begin, end};
     }
     return literal(st, w_->values.integer(st, *n), ValueCategory::prvalue, begin, end);
   }
