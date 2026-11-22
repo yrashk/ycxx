@@ -50,7 +50,7 @@ A class template can grant private access to the class passed as a type argument
 **Compile and run programs on macOS.** `ycxx cxx a.cpp -o a` (also `-c`, `-fsyntax-only`, `-E`, `-I`,
 `-D`, `-std=c++26`, and `-fclass-call-abi=apple` to pass classes as Apple Clang does) builds an executable with ycxx's own front end, IR, AArch64 code generator
 and Mach-O linker on arm64 macOS, where `arm64-apple-darwin` is the default target. It also links
-object files from Clang or GCC. Variadic functions can be defined with `<cstdarg>` on both
+object files from Clang or GCC. Variadic functions can be defined with `<cstdarg>` or `<stdarg.h>` on both
 macOS and Linux ([#647](https://github.com/yrashk/ycxx/issues/647)). Errors are reported as
 `file:line:col: error: …`.
 Errors during replay of a written default member initializer point to the initializer.
@@ -528,8 +528,8 @@ written default member initializer are value-initialized.
 macros, conditionals, `_Pragma` and the predefined macros. `ycxx cxx -E` matches Clang's output.
 `ycxx cxx -E --target=x86_64-linux-gnu` selects Linux macros and resource headers. On native
 x86-64 Linux it also searches glibc's multiarch include path and preprocesses glibc's `<stdio.h>`.
-Linux `<stdarg.h>` supplies the `va_list` declaration, and direct `<float.h>` and `<limits.h>`
-provide the target's numeric limits. On native Linux, glibc's `<stdint.h>` and the pinned libycxx's
+`<stdarg.h>` supplies `va_list` and its macros on both targets. On Linux, direct `<float.h>` and
+`<limits.h>` provide the target's numeric limits. On native Linux, glibc's `<stdint.h>` and the pinned libycxx's
 hosted `<cstdint>`, `<cinttypes>`, and `<inttypes.h>` compile. A Darwin target can use the configured
 SDK or one selected by `SDKROOT`. Cross-target builds can also supply target headers with `-I` or
 `-isystem`. When no target `<stdint.h>` is available, `<cstdint>` uses compiler predefines.
