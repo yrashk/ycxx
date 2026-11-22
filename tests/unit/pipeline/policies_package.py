@@ -30,13 +30,14 @@ with tempfile.TemporaryDirectory() as tmp:
 #include <ycxx/ownership.hpp>
 #include <ycxx/ownership/runtime.hpp>
 
-using Empty = ycxx::ownership::policy<>;
-using Check = ycxx::ownership::use_policy<Empty>;
+void inspect(const ycxx::ownership::linear_state& owner) noexcept { owner.observe(); }
+using Rule = ycxx::ownership::verified_observes<decltype(&inspect), &inspect>;
+using Check = ycxx::ownership::use_policy<Rule>;
 
 int main() {
   ycxx::ownership::linear_state owner;
   auto moved = static_cast<ycxx::ownership::linear_state&&>(owner);
-  moved.observe();
+  inspect(moved);
   moved.consume();
 }
 """)

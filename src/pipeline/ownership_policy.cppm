@@ -12,7 +12,11 @@ using ast::QualType;
 
 enum class Ownership { ordinary, affine, linear };
 // Values match the public C++26 `ycxx::ownership::operation` enumerators.
-enum class OwnershipEffect { unknown = 0, issue = 1, observe = 2, consume = 3, transfer = 4 };
+enum class OwnershipEffect { unknown = 0, issue = 1, observe = 2, consume = 3, transfer = 4, verified_observe = 5 };
+
+bool is_observation(OwnershipEffect effect) {
+  return effect == OwnershipEffect::observe || effect == OwnershipEffect::verified_observe;
+}
 
 struct OwnershipPolicyAlias {
   EntityId entity;
@@ -61,6 +65,11 @@ struct OwnershipDeclarations {
 struct OwnershipPolicy {
   std::vector<std::pair<QualType, Ownership>> resources;
   std::vector<std::pair<OwnershipOperation, OwnershipEffect>> operations;
+  std::vector<OwnershipOperation> observer_definitions;
+
+  bool has_observer_definition(OwnershipOperation operation) const {
+    return std::ranges::binary_search(observer_definitions, operation);
+  }
 
   Ownership ownership(QualType canonical) const {
     const auto type = ast::without_cv(canonical);
@@ -81,7 +90,7 @@ struct OwnershipRegistry {
 
 namespace {
 
-enum class Marker { other, policy, use_policy, affine, linear, creates, observes, consumes, transfers };
+enum class Marker { other, policy, use_policy, affine, linear, creates, observes, verified_observes, consumes, transfers };
 
 struct Specialization {
   Marker marker = Marker::other;
@@ -108,6 +117,7 @@ Specialization marker(const sema::World& world, EntityId id) {
   if (name == "linear") return {Marker::linear, specialized};
   if (name == "creates") return {Marker::creates, specialized};
   if (name == "observes") return {Marker::observes, specialized};
+  if (name == "verified_observes") return {Marker::verified_observes, specialized};
   if (name == "consumes") return {Marker::consumes, specialized};
   if (name == "transfers") return {Marker::transfers, specialized};
   return {};
@@ -131,6 +141,7 @@ OwnershipEffect effect_of(Marker item) {
   switch (item) {
   case Marker::creates: return OwnershipEffect::issue;
   case Marker::observes: return OwnershipEffect::observe;
+  case Marker::verified_observes: return OwnershipEffect::verified_observe;
   case Marker::consumes: return OwnershipEffect::consume;
   case Marker::transfers: return OwnershipEffect::transfer;
   default: return OwnershipEffect::unknown;
@@ -167,7 +178,7 @@ bool compatible(const sema::World& world, const OwnershipPolicy& policy, EntityI
   if (arg.kind != sema::TypeKind::reference) return false;
   const auto resource = world.types.canonical(arg.inner);
   if (policy.ownership(resource) == Ownership::ordinary) return false;
-  if (effect == OwnershipEffect::observe)
+  if (is_observation(effect))
     return !arg.rvalue_ref && ast::cv_of(resource) == ast::Cv::const_ && world.types.is_void(result);
   if (!arg.rvalue_ref || ast::cv_of(resource) != ast::Cv::none) return false;
   return effect == OwnershipEffect::transfer ? result == resource : world.types.is_void(result);
@@ -220,7 +231,7 @@ OwnershipDeclarations read_ownership_policies(const sema::World& world, ast::u32
         report(annotation.at, "unknown ownership resource annotation");
       } else resource(type, value.lo == 1 ? Ownership::affine : Ownership::linear, annotation.at);
     } else if (kind == AnnotationKind::operation) {
-      if (value.hi != 0 || value.lo < 1 || value.lo > 4) {
+      if (value.hi != 0 || value.lo < 1 || value.lo > static_cast<ast::u64>(OwnershipEffect::verified_observe)) {
         report(annotation.at, "unknown ownership operation annotation");
       } else operation(annotation.declaration, static_cast<OwnershipEffect>(value.lo), annotation.at);
     }
@@ -284,8 +295,10 @@ OwnershipRegistry compose_ownership_policies(const sema::World& world,
     }
     for (const auto& [operation, effect, origin] : fragment.operations) {
       const auto [it, fresh] = operations.try_emplace(operation, effect, origin);
-      if (!fresh && it->second.first != effect)
-        report(origin, "conflicting contracts for an ownership operation", it->second.second);
+      if (fresh || it->second.first == effect) continue;
+      if (is_observation(it->second.first) && is_observation(effect)) {
+        if (effect == OwnershipEffect::verified_observe) it->second = {effect, origin};
+      } else report(origin, "conflicting contracts for an ownership operation", it->second.second);
     }
   }
   for (const auto& [type, spec] : resources) out.policy.resources.emplace_back(type, spec.first);

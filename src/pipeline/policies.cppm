@@ -92,7 +92,15 @@ class OwnershipFlowBuilder {
   }
 
   Flow build() {
-    if (effect(body_.function) != Effect::unknown || resource_lifetime_body()) return {};
+    const auto operation = effect(body_.function);
+    if (operation == Effect::verified_observe) {
+      if (!has_observer_definition(body_.function))
+        flow_.entry = unsupported(0, "verified observation requires a unique supported definition in the checked sources");
+      else if (const auto at = unsupported_observation(ast::Red(world_.ins.ast, body_.tree)))
+        flow_.entry = unsupported(*at, "verified observation cannot expose or mutate the borrowed resource or call another function");
+      return std::move(flow_);
+    }
+    if (operation != Effect::unknown || resource_lifetime_body()) return {};
     const auto signature = world_.types.rec(body_.type);
     if (mentions_owner(signature.inner) || std::ranges::any_of(signature.params, [&](QualType param) {
           return mentions_owner(param) && ownership(param) == Ownership::ordinary;
@@ -147,6 +155,10 @@ class OwnershipFlowBuilder {
     return policy_.effect(ownership_operation(world_, function, body_.tu.n));
   }
 
+  bool has_observer_definition(EntityId function) const {
+    return policy_.has_observer_definition(ownership_operation(world_, function, body_.tu.n));
+  }
+
   // The registered resource's construction and cleanup implement the adapter's contract.
   bool resource_lifetime_body() const {
     if (body_.this_type == QualType{}) return false;
@@ -195,6 +207,67 @@ class OwnershipFlowBuilder {
   ast::Red unparenthesized(ast::Red node) const {
     while (node.is<ast::Paren>()) node = at(node, node.get<ast::Paren>().operand);
     return node;
+  }
+
+  bool observation_scalar(QualType type) const {
+    const auto canonical = world_.types.canonical(type);
+    if ((std::to_underlying(ast::cv_of(canonical)) & std::to_underlying(ast::Cv::volatile_)) != 0) return false;
+    return world_.types.is_arithmetic(canonical) || world_.types.rec(canonical).kind == sema::TypeKind::enum_;
+  }
+
+  // Assignments can update scalar storage independent of the borrow. Reference variables
+  // would let an assignment address the resource indirectly.
+  bool observation_storage(const ast::Red& node) const {
+    if (node.is<ast::LocalRef>())
+      return observation_scalar(world_.ins.seqs.at(body_.locals, node.get<ast::LocalRef>().local).type);
+    if (node.is<ast::DeclRef>()) {
+      const auto ref = node.get<ast::DeclRef>();
+      return !ref.reference && observation_scalar(ref.info.type);
+    }
+    return false;
+  }
+
+  // The only allowed occurrence of the resource parameter is the base of a plain scalar
+  // member access. Only non-reference locals and variables may be assignment destinations.
+  std::optional<ast::u32> unsupported_observation(const ast::Red& node) const {
+    if (node.is<ast::Member>()) {
+      const auto member = node.get<ast::Member>();
+      const auto object = unparenthesized(at(node, member.object));
+      if (!member.arrow && !member.reference && observation_scalar(member.info.type) && object.is<ast::LocalRef>()) {
+        const auto slot = object.get<ast::LocalRef>().local;
+        if (flow_.locals[slot].parameter && flow_.locals[slot].shared_reference) return std::nullopt;
+      }
+      return node.offset();
+    }
+    const bool supported = ast::dispatch<ast::Nodes>(node.kind(), [&]<class T>(std::type_identity<T>) {
+      const auto n = node.get<T>();
+      if constexpr (std::is_same_v<T, ast::Compound> || std::is_same_v<T, ast::DeclStmt> ||
+                    std::is_same_v<T, ast::If> || std::is_same_v<T, ast::Return> ||
+                    std::is_same_v<T, ast::ExprStmt> || std::is_same_v<T, ast::Paren>) return true;
+      else if constexpr (std::is_same_v<T, ast::LocalRef> || std::is_same_v<T, ast::DeclRef>)
+        return observation_storage(node);
+      else if constexpr (std::is_same_v<T, ast::LocalVar>)
+        return observation_scalar(world_.ins.seqs.at(body_.locals, n.local).type) &&
+               n.init.id != ast::NodeId::none && n.destructor == EntityId::none;
+      else if constexpr (std::is_same_v<T, ast::Assign>)
+        return n.op == ast::AssignOp::assign && observation_storage(unparenthesized(at(node, n.lhs)));
+      else if constexpr (std::is_same_v<T, ast::Unary>) {
+        using enum ast::UnaryOp;
+        return observation_scalar(n.info.type) && (n.op == plus || n.op == minus || n.op == not_ || n.op == compl_);
+      } else if constexpr (std::is_same_v<T, ast::ImplicitConversion>) {
+        using enum ast::ConversionKind;
+        return n.conversion == to_void || (observation_scalar(n.info.type) &&
+               (n.conversion == lvalue_to_rvalue || n.conversion == integral || n.conversion == floating ||
+                n.conversion == floating_integral || n.conversion == boolean));
+      } else if constexpr (std::is_same_v<T, ast::Literal> || std::is_same_v<T, ast::Binary> ||
+                           std::is_same_v<T, ast::Conditional> || std::is_same_v<T, ast::ValueInit>)
+        return observation_scalar(n.info.type);
+      else return false;
+    });
+    if (!supported) return node.offset();
+    std::optional<ast::u32> problem;
+    node.for_each_child([&](const ast::Red& child) { if (!problem) problem = unsupported_observation(child); });
+    return problem;
   }
 
   std::optional<ast::u32> named_local(ast::Red node, bool allow_xvalue = true) const {
@@ -441,7 +514,9 @@ class OwnershipFlowBuilder {
     if (node.is<ast::Call>()) {
       const auto call = node.get<ast::Call>();
       const auto operation = direct_effect(node, call);
-      if (operation == Effect::observe || operation == Effect::consume) {
+      if (is_observation(operation) || operation == Effect::consume) {
+        if (operation == Effect::verified_observe && !has_observer_definition(call.function))
+          return unsupported(node.offset(), "verified observation requires a unique supported definition in the checked sources");
         if (const auto local = operation_argument(node, call)) {
           if (operation == Effect::consume && flow_.locals[*local].shared_reference)
             return unsupported(node.offset(), "a shared borrow cannot be consumed");
@@ -664,7 +739,33 @@ struct OwnershipRegistryFor {
     if (units.empty()) co_return Value{};
     const auto fragments = co_await cx.par_map<OwnershipDeclarationsFor>(units);
     const auto& source = cx.fetch<pp::SourceOf>(pp::FileId{units.front()});
-    co_return compose_ownership_policies(*universe().world_for(*source.config.target), fragments);
+    const auto& world = *universe().world_for(*source.config.target);
+    auto registry = compose_ownership_policies(world, fragments);
+    if (!registry.problems.empty() || std::ranges::none_of(registry.policy.operations, [](const auto& operation) {
+          return operation.second == Effect::verified_observe;
+        }))
+      co_return registry;
+
+    const auto fronts = co_await cx.par_map<TuFront>(units | std::views::transform([](ast::u32 unit) { return TuId{unit}; }));
+    std::map<OwnershipOperation, bool> definitions;
+    std::set<OwnershipOperation> labeled;
+    for (std::size_t i = 0; i < fronts.size(); ++i) {
+      const auto& unit = fronts[i].get().unit;
+      for (const auto& entity : unit.entities)
+        if (!entity.asm_label.empty()) labeled.insert(ownership_operation(world, entity.id, units[i]));
+      for (const auto& def : unit.functions) {
+        const auto operation = ownership_operation(world, def.entity, units[i]);
+        if (registry.policy.effect(operation) != Effect::verified_observe) continue;
+        const bool strong = !def.weak_elf && !(def.decl.flags & (sema::decl_flag::inline_ | sema::decl_flag::constexpr_));
+        const bool supported = def.body.tree != ast::NodeId::none && def.decl.contracts == ast::NodeId::none &&
+                               (operation.second || strong);
+        const auto [it, fresh] = definitions.try_emplace(operation, supported);
+        if (!fresh) it->second = false;
+      }
+    }
+    for (const auto& [operation, supported] : definitions)
+      if (supported && !labeled.contains(operation)) registry.policy.observer_definitions.push_back(operation);
+    co_return registry;
   }
 };
 

@@ -52,3 +52,8 @@ An API can publish metadata in `<ycxx/ownership.hpp>` as reusable `policy<...>` 
 activate several fragments with a namespace-scope alias of `use_policy<...>`. The metadata has
 no runtime work. YCXX interprets it when ownership checking is enabled. Use typed template
 arguments for portability and C++26 declaration annotations with compiler support.
+
+An observation marked `verified_observes<decltype(&inspect), &inspect>` asks YCXX to
+verify the observer's body. The caller and the supported observer definition belong in the same
+checked invocation. The first supported bodies can copy scalar fields and update independent
+scalar storage. GCC and Clang accept the metadata as ordinary C++20 types.

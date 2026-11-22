@@ -44,8 +44,14 @@ operation. A consume or transfer of the owner is an error while any of its borro
 live, including when the reference's last use was earlier. Ending the borrow leaves the
 ownership obligation with the owner. References bound to temporaries, mutable aliases,
 reborrowing, captures, and exposing an address are outside this checked protocol. Observation
-contracts are trusted to keep the reference within the call. Exception handlers and jumps
-outside the supported loop control also receive an error.
+contracts declared with `observes` trust the implementation to keep the reference within the
+call. Use `verified_observes<decltype(&inspect), &inspect>` in a policy or
+`[[=ycxx::ownership::operation::verified_observes]]` on the function to check its definition.
+When composed with a trusted observation contract for the same function, verification is required.
+For example, a verified observer can copy an arithmetic field to an independent scalar variable.
+It cannot take an address, mutate the resource, capture the reference, or call another function.
+The caller and a unique supported observer definition must be available in the same checked
+invocation. Exception handlers and jumps outside the supported loop control also receive an error.
 
 ## Try it
 

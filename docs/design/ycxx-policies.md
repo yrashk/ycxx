@@ -98,11 +98,12 @@ duplicate and conflict checks. Class and operation declaration annotations are c
 
 ## Verified contracts for separately compiled code
 
-A caller can be checked against a declared contract before its provider is available. A checked
-link must verify that the definition selected for each required call implements that contract.
-Start with leaf observation functions whose bodies preserve the resource and keep the reference
-within the call. Verify forwarding functions after the checker can carry their callees'
-requirements to the link.
+YCXX checks `verified_observes` definitions for leaf observation bodies that preserve the
+resource and keep the reference within the call. The first implementation requires the
+definition in the same checked invocation as the call. To support separate object builds,
+check a caller against its declared contract and carry that requirement to the link. The link
+must verify that the definition selected for each required call implements the contract.
+Verify forwarding functions after the checker can carry their callees' requirements to the link.
 
 Astra proposed recording caller requirements and verified provider guarantees as versioned local
 symbols attached to the corresponding function definitions. Both YCXX object formats retain

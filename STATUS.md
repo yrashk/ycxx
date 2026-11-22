@@ -695,6 +695,8 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
   Local const references can borrow named owners until the end of the reference's scope.
   The checker rejects consuming or transferring an owner during a shared borrow and rejects
   exposing the borrow through an address, capture, or unregistered operation.
+  A `verified_observes` contract checks the observer's scalar-only body, including when its
+  definition and caller are in separate source inputs to the same invocation.
   Execution leaving the scope of a live transaction or reaching a possible unwind is diagnosed.
   See [the protocols and examples](docs/design/policies-ownership.md).
 - `tests/features/ycxx.txt` lists `syntax` and `run darwin-arm64`: a feature can be limited to

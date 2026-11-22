@@ -36,7 +36,7 @@ with tempfile.TemporaryDirectory() as directory:
         #include <ycxx/ownership.hpp>
         namespace checkout {
         namespace own = ycxx::ownership;
-        struct Ticket { int value; };
+        struct Ticket { int value; mutable int flag; };
         Ticket acquire() noexcept;
         void inspect(const Ticket&) noexcept;
         void submit(Ticket&&) noexcept;
@@ -158,6 +158,58 @@ with tempfile.TemporaryDirectory() as directory:
     """)
     syntax(mode, operations, private_contract, private_caller, error="outside the checked protocol")
 
+    verified = write("verified.cpp", """\
+        #include "resource.hpp"
+        namespace checkout {
+        using Submit = void (*)(Ticket&&) noexcept;
+        using Verify = own::use_policy<Resource, own::creates<decltype(&acquire), &acquire>,
+            own::verified_observes<decltype(&inspect), &inspect>, own::consumes<Submit, static_cast<Submit>(&submit)>>;
+        }
+    """)
+    observer_source = """\
+        #include "resource.hpp"
+        namespace checkout {
+        int inspected;
+        [[=own::operation::verified_observes]] void inspect(const Ticket& ticket) noexcept {
+          int snapshot = ticket.value;
+          if (snapshot > 0) inspected = snapshot;
+        }
+        }
+    """
+    observer = write("observer.cpp", observer_source)
+    syntax(verified, caller, observer)
+    syntax(verified, caller, error="verified observation requires a unique supported definition")
+    syntax(operations, verified, caller, observer)
+    syntax(verified, operations, caller, observer)
+    syntax(operations, verified, caller, error="verified observation requires a unique supported definition")
+    weak_observer = write("weak_observer.cpp", observer_source.replace("]] void inspect", "]] inline void inspect"))
+    syntax(verified, caller, weak_observer, error="verified observation requires a unique supported definition")
+    labeled_caller = write("labeled_caller.cpp", caller.read_text().replace(
+        "void run()", 'namespace checkout { void inspect(const Ticket&) noexcept asm("other_observer"); }\nvoid run()'))
+    syntax(verified, labeled_caller, observer, error="verified observation requires a unique supported definition")
+
+    escaping_observer = """\
+        #include "resource.hpp"
+        namespace checkout {
+        const Ticket* saved;
+        const int* saved_field;
+        void forward(const Ticket&) noexcept;
+        [[=own::operation::verified_observes]] void inspect(const Ticket& ticket) noexcept {
+          BODY
+        }
+        }
+    """
+    for case, body in (
+        ("resource", "saved = &ticket;"),
+        ("field", "saved_field = &ticket.value;"),
+        ("mutate", "ticket.flag = 42;"),
+        ("forward", "forward(ticket);"),
+        ("capture", "auto saved = [&ticket] { return ticket.value; };"),
+    ):
+        invalid = write(f"observer_{case}.cpp", escaping_observer.replace("BODY", body))
+        diagnostic = syntax(verified, caller, invalid, error="verified observation cannot expose or mutate")
+        assert f"{invalid}:7:" in diagnostic, diagnostic
+
     # More than a thousand distinct resources in separately reusable groups. The last one has a
     # real obligation so the fixture fails if normalization silently drops the tail of the set.
     groups = []
@@ -262,6 +314,14 @@ with tempfile.TemporaryDirectory() as directory:
             assert changed.returncode == 1 and changed.stderr == cold, (changed.stderr, cold)
             single = resident(sources=(incremental,))
             assert single.returncode == 0, single.stderr
+            verified_sources = (verified, caller, observer)
+            accepted = resident(sources=verified_sources)
+            assert accepted.returncode == 0, accepted.stderr
+            write("observer.cpp", escaping_observer.replace("BODY", "saved = &ticket;"))
+            denied = resident(sources=verified_sources)
+            expected = syntax(*verified_sources, error="verified observation cannot expose or mutate")
+            assert denied.returncode == 1 and denied.stderr == expected, (denied.stderr, expected)
+            write("observer.cpp", observer_source)
         finally:
             subprocess.run([compiler, "ctl", "shutdown"], cwd=root, env=env, capture_output=True, timeout=10)
 
@@ -313,6 +373,25 @@ with tempfile.TemporaryDirectory() as directory:
             int main() { run(); }
         """)
         subprocess.run([*args, "-fcheck-policies", *map(str, (mode, operations, adapter, caller, split_main)),
+                        "-o", str(native)], check=True, timeout=30)
+        assert subprocess.run([native], timeout=10).returncode == 0
+
+        providers = write("providers.cpp", """\
+            #include "resource.hpp"
+            namespace checkout {
+            Ticket acquire() noexcept { return {7}; }
+            void submit(Ticket&&) noexcept {}
+            }
+        """)
+        observed_main = write("observed_main.cpp", """\
+            void run();
+            namespace checkout { extern int inspected; }
+            int main() {
+              run();
+              return checkout::inspected != 7;
+            }
+        """)
+        subprocess.run([*args, "-fcheck-policies", *map(str, (verified, caller, observer, providers, observed_main)),
                         "-o", str(native)], check=True, timeout=30)
         assert subprocess.run([native], timeout=10).returncode == 0
 
