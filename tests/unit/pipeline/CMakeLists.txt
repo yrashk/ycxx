@@ -75,6 +75,10 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_
   add_test(NAME unit.linux_virtual_consumer
     COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/linux_virtual_consumer.py
             $<TARGET_FILE:ycxxc> ${CMAKE_CXX_COMPILER} ${CMAKE_READELF})
+  # PARITY: #294 for the Darwin borrowed cast-to-void counterpart.
+  add_test(NAME unit.linux_dynamic_cast_void
+    COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/linux_dynamic_cast_void.py
+            $<TARGET_FILE:ycxxc> ${CMAKE_CXX_COMPILER} ${CMAKE_READELF})
   # PARITY: by design: links maker objects with native x86-64 ELF peers.
   add_test(NAME unit.linux_peer_root_default_construction
     COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/linux_peer_root_default_construction.py

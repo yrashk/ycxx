@@ -842,6 +842,100 @@ void run_and_check(const std::filesystem::path& dir, const std::string& name, st
   check(slurp(out) == output, std::format("{}: prints the expected output", name));
 }
 
+// --- Zero-fill pages and chained fixups (#842) ---------------------------------------------------
+
+// main returns whether the word at _probe, the first byte of __DATA's second page, is nonzero.
+// __DATA holds one rebased pointer, so it has chained fixups, and a zero-fill __bss that ends
+// in the page after the segment's file contents. A fixup page count that covers the zero-fill
+// page makes page-in linking map it from the file, where __LINKEDIT's nonzero bytes follow
+// __DATA. dyld does that only when the file reaches that far, so a long local symbol name
+// makes __LINKEDIT longer than a page.
+obj::object zerofill_program() {
+  constexpr std::uint32_t cmp_x0_zero = 0xf100001f;  // subs xzr, x0, #0
+  constexpr std::uint32_t cset_w0_ne = 0x1a9f07e0;   // csinc w0, wzr, wzr, eq
+  constexpr std::uint64_t page = 0x4000, pointer = 8;
+  obj::object o;
+  o.name = "zerofill.o";
+  auto text = o.add_section(obj::standard_section::text);
+  auto data = o.add_section(obj::standard_section::data);
+  auto bss = o.add_section(obj::standard_section::bss);
+  auto main = o.define("_main", obj::binding::global, text);
+  o.sections[data].align(3);
+  o.sections[data].emit64(0);
+  o.sections[data].relocate(reloc_kind::abs64, main);
+  o.sections[bss].align(3);
+  o.sections[bss].reserve_zerofill(page - pointer);
+  auto probe = o.define("_probe", obj::binding::global, bss);
+  o.sections[bss].reserve_zerofill(pointer);
+  o.define("_" + std::string(2 * page, 'z'), obj::binding::local, text);
+  auto& t = o.sections[text];
+  t.emit32(adrp(8));
+  t.relocate(reloc_kind::page21, probe);
+  t.emit32(ldr_x(0, 8));
+  t.relocate(reloc_kind::pageoff12, probe);
+  t.emit32(cmp_x0_zero);
+  t.emit32(cset_w0_ne);
+  t.emit32(ret);
+  return o;
+}
+
+struct linked_segment {
+  std::uint64_t vmaddr, vmsize, fileoff, filesize;
+};
+
+std::vector<linked_segment> linked_segments(std::span<const std::uint8_t> image) {
+  namespace mo = obj::macho;
+  std::vector<linked_segment> segments;
+  for (std::size_t at = mo::mach_header_64_size, c = 0; c < mo::load32(image, 16); ++c, at += mo::load32(image, at + 4)) {
+    if (mo::load32(image, at) == mo::lc_segment_64)
+      segments.push_back({mo::load64(image, at + 24), mo::load64(image, at + 32), mo::load64(image, at + 40),
+                          mo::load64(image, at + 48)});
+  }
+  return segments;
+}
+
+// Each segment's dyld_chained_starts_in_segment (<mach-o/fixup-chains.h>): its page count.
+std::vector<std::optional<std::uint16_t>> chained_page_counts(std::span<const std::uint8_t> image) {
+  namespace mo = obj::macho;
+  for (std::size_t at = mo::mach_header_64_size, c = 0; c < mo::load32(image, 16); ++c, at += mo::load32(image, at + 4)) {
+    if (mo::load32(image, at) != mo::lc_dyld_chained_fixups) continue;
+    const auto blob = image.subspan(mo::load32(image, at + 8), mo::load32(image, at + 12));
+    const auto starts = mo::load32(blob, 4);
+    std::vector<std::optional<std::uint16_t>> counts;
+    for (std::uint32_t s = 0; s < mo::load32(blob, starts); ++s) {
+      const auto offset = mo::load32(blob, starts + 4 + 4 * s);
+      if (offset == 0) counts.emplace_back();
+      else counts.emplace_back(static_cast<std::uint16_t>(blob[starts + offset + 20] | blob[starts + offset + 21] << 8));
+    }
+    return counts;
+  }
+  return {};
+}
+
+void test_zerofill_pages(const std::optional<std::filesystem::path>& run_dir) {
+  const auto o = zerofill_program();
+  auto image = link::link(std::span(&o, 1), with_exports({}));
+  check(image.has_value(), "zero-fill pages: the program links");
+  if (!image) return;
+  const auto segments = linked_segments(*image);
+  const auto counts = chained_page_counts(*image);
+  check(counts.size() == segments.size(), "zero-fill pages: chained fixups list every segment");
+  bool data_starts = false;
+  for (std::size_t s = 0; s < std::min(counts.size(), segments.size()); ++s) {
+    if (!counts[s]) continue;
+    data_starts |= segments[s].vmsize > segments[s].filesize;
+    check(std::uint64_t{*counts[s]} * 0x4000 == segments[s].filesize,
+          std::format("zero-fill pages: segment {} has chained starts for its {:#x} file bytes only, not {} pages", s,
+                      segments[s].filesize, *counts[s]));
+  }
+  check(data_starts, "zero-fill pages: a segment with fixups extends past its file contents");
+  const auto probe = trie_lookup(*image, "_probe");
+  check(probe && std::ranges::any_of(segments, [&](const linked_segment& sg) {
+          return sg.filesize != 0 && sg.vmaddr + sg.filesize == 0x100000000 + *probe && sg.vmsize > sg.filesize;
+        }), "zero-fill pages: _probe is the first zero-fill page of __DATA");
+  if (run_dir) run_and_check(*run_dir, "zerofill_pages", *image, 0, "");
+}
+
 // The platform linker supplies the peer's typed catch metadata. The executable itself uses
 // only the normalized cleanup-only fixture and a tail-call into the peer.
 void test_hosted_cleanup(const std::filesystem::path& dir) {
@@ -1063,6 +1157,8 @@ int main(int argc, char** argv) {
   test_hosted_cleanup_metadata();
   test_rejected_cleanup_metadata();
   test_review_cases();
+  if (run_dir) std::filesystem::create_directories(*run_dir);
+  test_zerofill_pages(run_dir);
   if (run_dir) {
     test_run(*run_dir);
     if (cc) {

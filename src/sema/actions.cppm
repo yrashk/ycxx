@@ -7691,6 +7691,48 @@ public:
     return converted;
   }
 
+  // [expr.dynamic.cast]: the pointer must designate the source polymorphic subobject.
+  Ex dynamic_cast_to_void(Ex e, QualType to, u32 begin, u32 end) {
+    const Ex fail{NodeId::none, begin, end};
+    if (!e.ok()) return fail;
+    const QualType target = Types::unqualified(types().canonical(to));
+    if (dependent(e) || types().is_dependent(to) || !types().is_pointer(target) ||
+        !types().is_void(types().pointee(target))) {
+      diag(begin, Diag::not_supported, lex::Tk::kw_dynamic_cast);
+      return fail;
+    }
+    const QualType from = e.type();
+    if (!types().is_pointer(from) || !types().is_class(types().pointee(from))) {
+      diag(begin, Diag::dynamic_cast_void_operand);
+      return fail;
+    }
+    const QualType source = types().pointee(from);
+    if (!require_complete(source, begin)) return fail;
+    const EntityId cls = types().class_of(source);
+    const ClassRec* record = classes().find(cls);
+    if (!record || !record->polymorphic) {
+      diag(begin, Diag::dynamic_cast_void_operand);
+      return fail;
+    }
+    if (!cv_within(object_cv(source), object_cv(types().pointee(target)))) {
+      diag(begin, Diag::no_conversion, from, target);
+      return fail;
+    }
+    // Reuse the root classifications for the Linux peer ABI. Accessing the address point
+    // establishes no other object layout or virtual emission support.
+    const auto& entity = w_->entities.rec(cls);
+    if (w_->target.triple != ast::x86_64_linux.triple || entity.linkage != ast::Linkage::external ||
+        record->explicit_alignment || q_->class_layout_uncertain(cls) ||
+        (record->peer_virtual_layout != PeerVirtualLayout::root && !q_->peer_pure_dispatch(cls))) {
+      diag(begin, Diag::not_supported, lex::Tk::kw_dynamic_cast);
+      return fail;
+    }
+    e = rvalue(e);
+    if (!e.ok()) return fail;
+    const ExprInfo info{target, ValueCategory::prvalue, 0};
+    return node(ast::DynamicCastVoid{info, at(e, begin)}, begin, end, info);
+  }
+
   // [except.handle]: no void, rvalue reference, or incomplete object, with the cv void* exception.
   bool check_handler_type(QualType type, u32 at_) {
     if (types().is_dependent(type) && !types().has_placeholder(type)) return true;

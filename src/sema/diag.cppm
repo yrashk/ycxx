@@ -197,6 +197,7 @@ enum class Diag : std::uint32_t {
   too_few_arguments [[=message{Severity::error, "too few arguments in call: expected {0}, have {1}"}]],
   too_many_arguments [[=message{Severity::error, "too many arguments in call: expected {0}, have {1}"}]],
   no_conversion [[=message{Severity::error, "cannot convert '{0:t}' to '{1:t}'"}]],
+  dynamic_cast_void_operand [[=message{Severity::error, "dynamic_cast to a void pointer requires a pointer to a polymorphic class"}]],
   not_contextually_bool [[=message{Severity::error, "'{0:t}' cannot be converted to bool"}]],
   integer_literal_too_large [[=message{Severity::error, "integer literal is too large for any of its types"}]],
   void_value [[=message{Severity::error, "a void expression has no value"}]],

@@ -379,6 +379,7 @@ struct Ops {
   static Flow vfunc(M& m, Frame&, N n) { return m.unsupported(n); }
   static Flow rtti__typeid(M& m, Frame&, N n) { return m.unsupported(n); }
   static Flow rtti__dyncast(M& m, Frame&, N n) { return m.unsupported(n); }
+  static Flow rtti__most_derived_addr(M& m, Frame&, N n) { return m.unsupported(n); }
 
   // ---------------------------------------------------------------- calls
 
