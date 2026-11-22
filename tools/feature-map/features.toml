@@ -1617,8 +1617,8 @@ clauses = ['class.copy.ctor', 'class.copy.assign', 'special']
 std = 'C++98'
 detect = '\boperator\s*=\s*\('
 status = 'partial'
-issues = [244, 360, 309, 157]
-note = 'memberwise implicit and first-declaration defaulted copy assignment for ordinary classes without bases, with user-declared assignment effects on implicit constructors. Remaining defaulted special members, move assignment, virtual members, and base, array and union operations'
+issues = [244, 360, 309, 157, 747]
+note = 'Memberwise implicit and first-declaration defaulted copy assignment for ordinary classes without bases. Ordinary wrappers with a deleted implicit copy can synthesize a nonthrowing implicit move for scalar fields and class fields with nonthrowing initialization and destruction. User-declared assignments affect implicit constructor availability. Remaining defaulted special members, move assignment, virtual members, and base, array and union operations remain open.'
 probe = '''
 struct S { int v; S(int x) : v(x) {} S(const S& o) : v(o.v + 1) {} S& operator=(const S&) = default; };
 int main() { S a(1); S b(a); S c(5); c = b; return c.v == 2 ? 0 : 1; }
