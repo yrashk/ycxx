@@ -1465,8 +1465,15 @@ class Gen {
   // Evaluates an expression for its side effects ([expr.context]).
   void discard(At a) {
     if (a.id == NodeId::none) return;
-    if (is_lvalue(a)) lvalue(a);
-    else rvalue_or_void(a);
+    const auto expr = info(a);
+    if (expr.category == ast::ValueCategory::prvalue) {
+      rvalue_or_void(a);
+      return;
+    }
+    // Discarding a nonvolatile direct field designator does not read its value.
+    const auto cv = ast::cv_of(expr.type);
+    if ((cv == ast::Cv::none || cv == ast::Cv::const_) && default_field(a)) return;
+    lvalue(a);
   }
 
   ValueId rvalue(At a) {
@@ -1635,10 +1642,12 @@ class Gen {
     std::unreachable();
   }
 
-  // A scalar default's receiver is represented only by its initialized field values. This
-  // supplies direct reads without introducing an address that can be used or stored elsewhere.
-  std::optional<ValueId> read_default_field(At operand, ast::QualType type) {
-    const auto& fields = fn_.initialized_fields;
+  // A scalar default's receiver is represented only by its initialized field values.
+  // Recognize side-effect-free designators of that receiver's own non-reference fields.
+  std::optional<u32> default_field(At operand) {
+    const auto owner = fn_.initialized_fields.owner;
+    if (owner == ast::EntityId::none || this_) return std::nullopt;
+    operand = strip_parens(operand);
     if (!is<ast::Member>(operand)) return std::nullopt;
     const auto member = get<ast::Member>(operand);
     if (member.reference) return std::nullopt;
@@ -1649,11 +1658,9 @@ class Gen {
       if (dereference.op != ast::UnaryOp::deref) return std::nullopt;
       receiver = strip_parens(child(receiver, dereference.operand));
     }
-    if (!is<ast::This>(receiver) || facts_.class_entity(facts_.pointee(info(receiver).type)) != fields.owner)
+    if (!is<ast::This>(receiver) || facts_.class_entity(facts_.pointee(info(receiver).type)) != owner)
       return std::nullopt;
-    if (member.field < fields.values.size()) return constant(type, fields.values[member.field]);
-    // This field's initialization has not completed. Let a read fail only if it executes.
-    return load(begin_object(type, ir::Init::indeterminate));
+    return member.field;
   }
 
   ValueId load_glvalue(At operand, ast::QualType type) {
@@ -1673,7 +1680,12 @@ class Gen {
           }
         }
       }
-      if (auto field = read_default_field(operand, type)) return *field;
+      if (auto field = default_field(operand)) {
+        const auto values = fn_.initialized_fields.values;
+        if (*field < values.size()) return constant(type, values[*field]);
+        // This field's initialization has not completed. Let a read fail only if it executes.
+        return load(begin_object(type, ir::Init::indeterminate));
+      }
     }
     return load(lvalue(operand));
   }
