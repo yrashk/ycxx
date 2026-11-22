@@ -1322,6 +1322,10 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   preserves the enumeration type. The interpreter, lowering and layout use the underlying
   integer representation. [#262](https://github.com/yrashk/ycxx/issues/262)
 - Linkage names of named enumerations, nested ones included, match Clang's.
+- A qualified elaborated specifier such as `enum Box::State` uses type-only lookup for the
+  terminal name. A same-name enumerator can hide the enum in ordinary lookup. The elaborated
+  specifier requires an existing enum declaration and diagnoses aliases and other tag kinds
+  ([basic.lookup.elab], [dcl.type.elab], #761).
 - A class member declaration can define a named nested enum and declare ordinary fields in
   the same declaration. The fields participate in lookup, initialization, and class layout.
   Tests in `tests/own/nested-enum-fields/` compare combined and separate declarations and
