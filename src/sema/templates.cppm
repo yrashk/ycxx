@@ -1522,12 +1522,21 @@ public:
     if (ins().values.is<ast::VDepOp>(pattern) && !types().is(t, Builtin::bool_)) return std::nullopt;
     if (types().is_dependent(t) || ins().values.is_dependent(a.value)) return TemplateArg{TemplateArgKind::value, t, a.value};
     if (types().is_integral(t) && ins().values.is<ast::VInt>(a.value)) {
-      ConstId c = ast::convert_integral(ins(), w_->target, a.value, t);
-      ConstId back = ast::convert_integral(ins(), w_->target, c, a.type);
+      // An unscoped enumeration converts through its underlying type ([conv.prom]); a scoped one
+      // does not convert ([dcl.enum]).
+      QualType from = a.type;
+      if (types().is_enum(from)) {
+        const EnumRec* e = classes_->find_enum(types().enum_of(types().canonical(from)));
+        if (!e || e->scoped || !e->underlying) return std::nullopt;
+        from = *e->underlying;
+      }
+      ConstId value = ast::convert_integral(ins(), w_->target, a.value, from);
+      ConstId c = ast::convert_integral(ins(), w_->target, value, t);
+      ConstId back = ast::convert_integral(ins(), w_->target, c, from);
       auto neg = [&](ConstId v, QualType of) {
         return ast::is_signed(w_->target, *types().builtin_of(of)) && ast::is_negative(ast::int_bits(ins(), v));
       };
-      if (back != a.value || neg(c, t) != neg(a.value, a.type)) return std::nullopt;  // narrowing ([dcl.init.list]/7)
+      if (back != value || neg(c, t) != neg(value, from)) return std::nullopt;  // narrowing ([dcl.init.list]/7)
       return TemplateArg{TemplateArgKind::value, t, c};
     }
     if (types().is_pointer(t) && ins().values.is<ast::VNullptr>(a.value)) return TemplateArg{TemplateArgKind::value, t, a.value};

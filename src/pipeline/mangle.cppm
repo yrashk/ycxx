@@ -633,6 +633,15 @@ class Mangler {
       }
       if (ast::is_pointer(in_, a.type) && ast::is_function(in_, ast::pointee_of(in_, a.type)))
         return function_pointer_argument(a);
+      // A value of an enumeration type: `L <type> <value> E`, the type as any <type> is, the value
+      // its integer, `n` before a negative one (§5.1.5.7).
+      if (in_.types.is<ast::TEnum>(in_.types.canon(ast::without_cv(in_.canonical(a.type)))) && in_.values.is<ast::VInt>(a.value)) {
+        auto t = type(a.type);
+        if (!t) return t;
+        ast::Bits128 v = in_.values.get<ast::VInt>(a.value).bits;
+        bool neg = ast::is_negative(v);
+        return std::format("L{}{}{}E", *t, neg ? "n" : "", neg ? ~v.lo + 1 : v.lo);
+      }
       auto b = ast::builtin_of(in_, a.type);
       auto code = b ? builtin_code(*b) : std::nullopt;
       if (!code || !in_.values.is<ast::VInt>(a.value)) return std::unexpected("a template argument that is not a type or an integer");

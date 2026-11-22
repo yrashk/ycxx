@@ -1281,6 +1281,10 @@ engine::query_task<Lowered> Lower::run(engine::Ctx& cx, FnKey k) {
     // Extend outgoing narrow results for interoperability. Lowering truncates incoming results
     // to the declared width, as the System V AMD64 psABI §3.2.3 leaves excess bits unspecified.
     config.min_result_bits = 32;
+  } else if (std::ranges::contains(f.body->nodes, ir::Op::invoke, &ir::Node::op)) {
+    const FunctionDef& def = (co_await cx.fetch<FunctionSourceQ>(k)).def;
+    if (def.unwind == UnwindEligibility::hosted_cleanup)
+      config.cleanup_resume = (co_await cx.fetch<TuUnit>(k.tu)).cleanup_resume;
   }
   auto l2 = ir::lower(*f.body, k.fn, layout, config);
   if (!l2) {
