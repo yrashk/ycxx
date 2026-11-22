@@ -68,11 +68,11 @@ int use() {
 namespace rvalue_base_order {
 struct A {};
 struct B : A { constexpr int operator-() const & { return 51; } };
-struct Related : B { friend constexpr int operator-(A&&) { return 52; } };
+struct Related : B { friend constexpr long operator-(A&&) { return 52; } };
 struct Other {};
-struct Unrelated : B, Other { friend constexpr int operator-(Other&&) { return 53; } };
-static_assert(-Related{} == 51);
-static_assert(-Unrelated{} == 53);
+struct Unrelated : B, Other { friend constexpr long operator-(Other&&) { return 53; } };
+static_assert(__is_same(decltype(-Related{}), int));
+static_assert(__is_same(decltype(-Unrelated{}), long));
 }
 
 namespace nonviable_template {
@@ -84,7 +84,7 @@ constexpr int use() {
     Value value;
     return -value;
 }
-static_assert(use() == 61);
+
 }
 
 int main() {
@@ -100,5 +100,6 @@ int main() {
            -member == 11 && -nonmember == 14 && -builtin == -7 &&
            -derived_value == 21 && -private_base == 24 && -derived::Rvalue{} == 25 &&
            related_bases::same(same_target) == 31 && related_bases::related(related_target) == 31 &&
-           member_beats_ancestor::use() == 41 ? 0 : 1;
+           member_beats_ancestor::use() == 41 && -rvalue_base_order::Related{} == 51 &&
+           -rvalue_base_order::Unrelated{} == 53 && nonviable_template::use() == 61 ? 0 : 1;
 }
