@@ -7563,9 +7563,12 @@ public:
         const QualType target = types().referee(parameter);
         // Ranking an ambiguous base conversion requires retaining the candidate. Until that
         // conversion is supported, diagnose this subset instead of selecting another overload.
+        Ex binding_object = object;
+        if (binding_object.cat() == ValueCategory::prvalue)
+          binding_object.info.category = ValueCategory::xvalue;  // after temporary materialization
         if (types().is_class(target) && types().class_of(target) != types().class_of(lt) &&
             (!types().is_reference(parameter) ||
-             (direct_reference_category(object, types().rec(parameter)) &&
+             (direct_reference_category(binding_object, types().rec(parameter)) &&
               cv_within(object_cv(lt), object_cv(target))))) {
           int paths = 0;
           base_path(types().class_of(lt), types().class_of(target), paths);
