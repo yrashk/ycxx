@@ -125,10 +125,9 @@ the owner out and leaves the variant empty. Access to an inactive alternative tr
 Scope exit destroys the active alternative, so a guarded linear owner still has to
 be discharged. The variant itself stays in its original scope.
 
-The C++20 variant is covered by GCC and Clang conformance. YCXX integration is tracked
-with the compiler support for nontrivial union members, explicit destruction, and
-`noexcept` expressions.
-[Unions #203](https://github.com/yrashk/ycxx/issues/203) · [Explicit destruction #722](https://github.com/yrashk/ycxx/issues/722) · [Noexcept expressions #729](https://github.com/yrashk/ycxx/issues/729)
+GCC and Clang run the portable C++20 variant. YCXX checks ownership of the active alternative
+in syntax-only builds and can emit checked arm64 Darwin executables. Native x86-64 Linux builds
+depend on support for the by-value selection tags. [ABI support #641](https://github.com/yrashk/ycxx/issues/641)
 
 To check the active alternative with YCXX, compose the two resource policies, their
 move-transfer contracts, and the variant's storage contract.

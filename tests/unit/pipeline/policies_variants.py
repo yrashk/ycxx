@@ -169,23 +169,25 @@ int main() {
         mach = root / f"{program.stem}-macho"
         subprocess.run([*darwin, "-fcheck-policies", program, "-o", mach], check=True, timeout=90)
         assert mach.read_bytes()[:4] == bytes.fromhex("cffaedfe")
-    # PARITY: by design: each platform executes its own format and ISA. Both checked sources
-    # also cross-link for macOS on Linux.
+    # PARITY: #641 tracks passing the by-value empty selection tags on Linux x86-64.
+    # Pin the exact ABI rejection until these checked programs can run natively there.
     if sys.platform == "linux" and platform.machine() in ("x86_64", "amd64"):
-        target = [*variants, "--target=x86_64-linux-gnu", "-nostdlib"]
+        linux = [*variants, "--target=x86_64-linux-gnu", "-nostdlib"]
+        for program in programs:
+            native = root / f"{program.stem}-elf"
+            rejected = subprocess.run([*linux, "-fcheck-policies", program, "-o", native],
+                                      capture_output=True, text=True, timeout=90)
+            errors = [line for line in rejected.stderr.splitlines() if ": error:" in line]
+            assert rejected.returncode == 1 and errors and not native.exists(), rejected.stderr
+            assert all("x86-64 System V ABI:" in line and "unsupported aggregate parameter layout" in line
+                       for line in errors), rejected.stderr
+    # PARITY: by design: run the linked Mach-O executable on its native host and ISA.
     elif sys.platform == "darwin" and platform.machine() in ("arm64", "aarch64"):
-        target = darwin
-    else:
-        target = None
-    if target is not None:
         for program in programs:
             native = root / f"{program.stem}-macho"
-            if target != darwin:
-                native = root / f"{program.stem}-elf"
-                subprocess.run([*target, "-fcheck-policies", program, "-o", native], check=True, timeout=90)
             for args in ((), ("affine",)):
                 subprocess.run([native, *args], check=True, timeout=10)
         native = root / "unchecked-leak"
-        subprocess.run([*target, leak, "-o", native], check=True, timeout=90)
+        subprocess.run([*darwin, leak, "-o", native], check=True, timeout=90)
         result = subprocess.run([native, "strict", "leak"], timeout=10)
         assert result.returncode in (-signal.SIGABRT, -signal.SIGILL, -signal.SIGTRAP)

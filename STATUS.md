@@ -708,6 +708,10 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
   Local arrays and aggregates track registered owners by nested field and literal-index
   paths such as `queue.groups[1].tasks[0]`. Initializing, borrowing, transferring, and
   consuming a subobject follow the same checks as individual named resources.
+  `tracks_variant<Choice>` checks the active alternative of a package owner variant. The
+  `holds` tests refine the branch, shared borrows delay extraction, and extraction transfers
+  the obligation to the destination. Checked executables link for arm64 Darwin.
+  [x86-64 Linux tag arguments #641](https://github.com/yrashk/ycxx/issues/641)
   The standalone C++20 package also provides move-only issuer-scoped capability tokens with
   rights constraints and runtime scope checks. Native Linux x86-64 tests exercise a YCXX issuer
   and hosted GCC and Clang callers with the same token type.

@@ -119,8 +119,21 @@ In a checked initializer, `choose ? begin() : handoff(static_cast<Work&&>(previo
 checks each alternative as its own ownership path. In `(inspect(previous), begin())`,
 the left operand runs before the new owner is initialized. This works for direct
 owners, owning fields, and fixed array elements in syntax-only checks. Native
-construction of the selected or sequenced class result is tracked in
-[#740](https://github.com/yrashk/ycxx/issues/740).
+initialization supports nonthrowing class results returned directly by function calls.
+[Class-result lowering #801](https://github.com/yrashk/ycxx/pull/801)
+
+## Tagged owner alternatives
+
+`tracks_variant<Choice>` registers the package's `ownership::variant` specialization.
+The alternatives use their own affine or linear policies and move-transfer contracts.
+The checker records the selected alternative and refines that state with `holds_first()`
+and `holds_second()`. A scoped reference may observe the active alternative. Extraction
+ends that alternative's ownership in the variant and transfers it to the destination.
+An active linear alternative must be discharged before scope exit or unwinding.
+
+The variant protocol works in syntax-only checks and checked arm64 Darwin links.
+Native x86-64 Linux lowering of the selection tags is tracked in
+[#641](https://github.com/yrashk/ycxx/issues/641).
 
 ## Try it
 
