@@ -81,8 +81,9 @@ cleanup and handlers remain tracked in [#89].
 
 ## Hosted union constructor cleanup (#738)
 
-On Linux x86-64, a nondelegating no-argument union constructor can protect one
-direct external `void()` call after its selected aggregate member is initialized.
+On Linux x86-64, a nondelegating no-argument union constructor with an omitted
+exception specification can protect one direct external `void()` call after its
+selected aggregate member is initialized.
 The member's initializer consists of scalar expressions and can include one
 direct external `int()` call. The selected member's destructor must be
 nonthrowing. Both providers are defined in separate translation units.
