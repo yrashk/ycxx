@@ -7083,7 +7083,7 @@ bool Program::supports_base_object_variant(EntityId function, const std::set<Ent
       r_->first_visibility_pragma || uncertain_layouts.contains(function) || !asm_label(function).empty()) return false;
   const auto* record = classes_.find(fn.scope);
   if (!record || !record->defined || record->union_ || !record->bases.empty() || record->polymorphic ||
-      record->layout_requires_virtual_support || record->unapplied_layout || uncertain_layouts.contains(fn.scope) ||
+      record->layout_requires_virtual_support || record->unapplied_layout ||
       !std::ranges::all_of(record->fields, [&](const sema::FieldRec& field) {
         const auto type = w_->types.rec(field.type);
         return field.bit_width == 0 && !field.no_unique_address && w_->types.is_scalar(field.type) &&
@@ -7113,6 +7113,7 @@ bool Program::supports_base_object_variant(EntityId function, const std::set<Ent
       const auto& owner = w_->entities.rec(scope);
       if ((owner.kind != EntityKind::class_ && owner.kind != EntityKind::enum_) ||
           owner.linkage != ast::Linkage::external || owner.templ != EntityId::none ||
+          uncertain_layouts.contains(scope) ||
           w_->ins.names.spelling(owner.name).empty() || !plain_declarations(scope, sema::decl_flag::template_)) return false;
       scope = owner.scope;
     }
@@ -7120,7 +7121,8 @@ bool Program::supports_base_object_variant(EntityId function, const std::set<Ent
   };
   if (!plain_named_type(fn.scope)) return false;
 
-  // Types named by the function's encoding can also restrict its linkage or visibility.
+  // Types named by the encoding can restrict linkage or visibility, or change the call ABI.
+  // A class passed by value would also require proving the ABI of its stored subobjects.
   const auto plain_type = [&](this auto&& check, QualType type) -> bool {
     const auto rec = w_->types.rec(type);
     switch (rec.kind) {
@@ -7132,7 +7134,10 @@ bool Program::supports_base_object_variant(EntityId function, const std::set<Ent
       case reference:
       case array: return check(rec.inner);
       case member_pointer: return check(rec.member_owner) && check(rec.inner);
-      case function: return check(rec.inner) && std::ranges::all_of(rec.params, [&](QualType param) { return check(param); });
+      case function:
+        return check(rec.inner) && std::ranges::all_of(rec.params, [&](QualType param) {
+          return !w_->types.is_class(param) && check(param);
+        });
       default: return false;
     }
   };
