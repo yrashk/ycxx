@@ -29,8 +29,8 @@ One object per cell a request settled, in the collector's batches: whole subtree
 | `peak_bytes` | integer | the high-water mark of the frame's own net bytes (allocated minus freed) during the run |
 | `retained_bytes` | integer | what the cell retains: the net bytes its runs left alive (its value, dependency lists, and what it interned first), or an input's size; may be below zero when a frame freed what another allocated |
 | `incl_alloc_bytes` | integer | `alloc_bytes` summed over the subtree, this event included |
-| `span` | object | where in the source the cell is (#638), when its kind can say: `file`, and `line`, `column` to `end_line`, `end_column` (1-based, columns in bytes, the end inclusive); `line` 0 means the whole file |
 | `incl_retained_bytes` | integer | `retained_bytes` summed over the subtree, counted once per cell where it settles (`executed`, `cutoff`, `verified`, `durable`, `input`), never below zero |
+| `span` | object | where in the source the cell is (#638), when its kind can say: `file`, and `line`, `column` to `end_line`, `end_column`, where its last token starts (1-based, columns in bytes); `line` 0 means the whole file |
 
 Memory that one cell's run allocated and others use (an interned tree, a header's region) counts
 for that cell only. Memory no frame allocated (the engine's tables, the session's state) counts
@@ -46,7 +46,7 @@ for a tracer, so an untraced build pays nothing.
 | --- | --- |
 | a file's: `SourceOf`, `FileText`, `Pp`, `RegionItems` | the whole file |
 | a unit's: `TuFront`, `TuUnit`, `UnitShapes`, `Tu`, `TuSymbolAddresses` | the unit's main file |
-| a function's: `FunctionSourceQ`, `FunctionGen`, `FunctionIr`, `FunctionDebug`, `Lower`, `UnitQ`, `Codegen` | its definition, from its first token to its last; an instantiation's is its pattern's, since its body is the pattern's tokens analysed again |
+| a function's: `FunctionSourceQ`, `FunctionGen`, `FunctionIr`, `FunctionDebug`, `Lower`, `UnitQ`, `Codegen` | its definition, from its first token to where its last starts (a token from a macro is where the macro is used); an instantiation's is its pattern's, since its body is the pattern's tokens analysed again |
 
 These cells have none, and why:
 - `Optimized`: it is keyed by the fingerprint of an optimization unit, which any number of
@@ -62,8 +62,10 @@ Class and variable instantiations, and per-item analysis, have no cells of their
 A cell whose values were not computed in this request at this revision (another request owns them)
 gets no span rather than a stale one.
 
-The browser's filter takes `at:a.cpp:120` (the cells whose span touches line 120 of a file whose
-path ends in `a.cpp`) or `at:a.cpp` (any cell in that file).
+Lines are counted in the text preprocessing read: in the editor view, an open buffer's.
+
+The browser's filter takes `at:a.cpp:120` or `at:a.cpp:120:5` (the cells whose span touches line
+120 of a file whose path ends in `/a.cpp`), or `at:a.cpp` (any cell in that file).
 
 ## The summary
 

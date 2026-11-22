@@ -343,7 +343,8 @@ std::uint64_t heap_footprint(const T& v) {
 enum class Outcome : std::uint8_t { executed, cutoff, verified, reused, durable, input, recomputed, waited, failed };
 
 // Where in the source a cell is (#638): a file, and the part of it from `line`:`column` to
-// `end_line`:`end_column` (1-based; columns in bytes, the end inclusive). `line` 0: the whole file.
+// `end_line`:`end_column`, where its last token starts (1-based; columns in bytes). `line` 0: the
+// whole file.
 // Empty `file`: none.
 struct SourceSpan {
   std::string file;
@@ -2976,6 +2977,8 @@ const typename Q::Value* Db::peek(const typename Q::Key& k) const {
   // A derived value from an earlier revision may be recomputed by another request now; one
   // verified at this revision, or an input (inputs change only between epochs), may not.
   if (!cell.input && verified_of(w) != revision()) return nullptr;
+  // An input no request read (`observed` unset) may be reset under us (`reset_unobserved`).
+  if (cell.input && !cell.observed.load(std::memory_order_acquire)) return nullptr;
   const auto& v = table<Q>().slots[cell.slot].value;
   return v ? &*v : nullptr;
 }

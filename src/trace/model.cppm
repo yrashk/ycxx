@@ -53,14 +53,17 @@ std::string span_text(const engine::SourceSpan& s) {
 // at a `/` (`at:a.cpp:12`). A whole-file span touches every line of its file.
 bool span_touches(const engine::SourceSpan& s, std::string_view where) {
   if (s.file.empty() || where.empty()) return false;
+  // `file:line` or `file:line:column` (as `span_start` writes it): the line counts.
   std::optional<std::uint32_t> line;
-  if (const std::size_t colon = where.rfind(':'); colon != std::string_view::npos) {
+  for (int i = 0; i < 2; ++i) {
+    const std::size_t colon = where.rfind(':');
+    if (colon == std::string_view::npos) break;
     std::uint32_t n = 0;
     const std::string_view digits = where.substr(colon + 1);
-    if (const auto [p, ec] = std::from_chars(digits.data(), digits.data() + digits.size(), n); ec == std::errc{} && p == digits.data() + digits.size()) {
-      line = n;
-      where = where.substr(0, colon);
-    }
+    const auto [p, ec] = std::from_chars(digits.data(), digits.data() + digits.size(), n);
+    if (ec != std::errc{} || p != digits.data() + digits.size()) break;
+    line = n;
+    where = where.substr(0, colon);
   }
   const std::string_view file = s.file;
   if (file != where && !(file.ends_with(where) && file[file.size() - where.size() - 1] == '/')) return false;

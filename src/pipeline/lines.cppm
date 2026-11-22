@@ -44,7 +44,8 @@ class LineTable {
 // The file and byte offset of an item location (ast.md §8.3, steps 1–3).
 std::optional<pp::TokLoc> source_site(ast::Interners& in, const pp::Region& region, const items::Items& items, ast::Loc at);
 
-// For traces (#638): where an item of `file`'s region is, from its first token to its last, as
+// For traces (#638): where an item of `file`'s region is, from its first token to the start of its
+// last, as
 // diagnostics count lines and columns; from values the engine already holds (`Db::peek`), and none
 // when one of them is not there. An item ending in another file than it starts (a macro) is its
 // first token.
@@ -107,8 +108,9 @@ engine::SourceSpan item_span(const engine::Db& db, ast::Interners& in, pp::FileI
   const pp::Region* region = db.peek<pp::Pp>(file);
   const items::Items* items = db.peek<items::RegionItems>(file);
   if (!source || !region || !items || region->locs.empty()) return {};
+  const Fp128 wanted = in.items.fp(item);  // compared as ids: nothing interned per item
   for (const items::Item& it : items->items) {
-    if (in.items.add<ast::ItemId>(it.id) != item || it.end <= it.begin) continue;
+    if (it.id != wanted || it.end <= it.begin) continue;
     const auto last = static_cast<std::uint32_t>(region->locs.size() - 1);
     const pp::TokLoc a = region->site(std::min(it.begin, last));
     pp::TokLoc b = region->site(std::min(it.end - 1, last));
@@ -116,6 +118,8 @@ engine::SourceSpan item_span(const engine::Db& db, ast::Interners& in, pp::FileI
     if (a.file >= region->files.size()) return {};
     const bool main = a.file == 0;
     const std::string& name = main ? source->path : region->files[a.file];
+    // The text preprocessing read, as `source_content` finds it: the editor's buffer first in the
+    // editor view.
     const std::string* text = nullptr;
     if (main && source->config.view == pp::View::disk) {
       text = db.peek<pp::FileText>(file);
@@ -123,11 +127,22 @@ engine::SourceSpan item_span(const engine::Db& db, ast::Interners& in, pp::FileI
       std::filesystem::path p(name);
       if (p.is_relative() && !source->cwd.empty()) p = std::filesystem::path(source->cwd) / p;
       const pp::PathId id = pp::path_id(p.lexically_normal().generic_native_encoded_string());
-      if (const auto* content = db.peek<pp::FileContent>(id); content && *content) text = &**content;
+      if (source->config.view == pp::View::editor)
+        if (const auto* open = db.peek<pp::Buffer>(id); open && *open) text = &**open;
+      if (!text)
+        if (const auto* content = db.peek<pp::FileContent>(id); content && *content) text = &**content;
     }
     if (!text) return {main ? name : region->file_names[a.file]};
-    const LineTable lines(*text);
-    const LineColumn from = lines.line_column(a.offset), to = lines.line_column(b.offset);
+    // One table per thread, for the last text it measured: a unit's functions share it.
+    thread_local struct {
+      const std::string* text = nullptr;
+      std::size_t size = 0;
+      engine::Revision revision = 0;
+      std::optional<LineTable> table;
+    } cache;
+    if (cache.text != text || cache.size != text->size() || cache.revision != db.revision() || !cache.table)
+      cache.text = text, cache.size = text->size(), cache.revision = db.revision(), cache.table.emplace(*text);
+    const LineColumn from = cache.table->line_column(a.offset), to = cache.table->line_column(b.offset);
     return {main ? name : region->file_names[a.file], from.line, from.column, to.line, to.column};
   }
   return {};

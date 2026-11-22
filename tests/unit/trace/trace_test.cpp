@@ -7,6 +7,7 @@
 import std;
 import ycxx.engine;
 import ycxx.pipeline;
+import ycxx.pp;
 import ycxx.trace;
 import ycxx.unit;
 
@@ -370,9 +371,44 @@ void spans() {
     if (e.kind == "Optimized" || e.kind == "LayoutConstant" || e.kind == "CostModelIn" || e.kind == "OptLevel")
       check(e.span.file.empty(), std::format("{} has no span", trace::cell_name(e)));
   }
-  // An untraced build reads no span: `trace_span` runs only from `Db::trace`. (Its cost when off is
-  // none by construction; this checks a traced build's spans are there, and nothing else needs one.)
   check(std::ranges::count_if(all, [](const Event& e) { return !e.span.file.empty(); }) > 10, "most cells of a unit have spans");
+
+  // An edit that moves the function: the second build's cells (cut off or verified) say where it
+  // is now.
+  got.clear();
+  s.set_source(tu, "spans.cpp", "\n\nint square(int x) {\n  return x * x;\n}\nint main() { return square(3) - 9; }\n", "spans.o");
+  (void)s.get<pl::Tu>(tu, &c);
+  c.finish();
+  check(at("FunctionIr(square)") == SourceSpan{"spans.cpp", 3, 1, 5, 1}, std::format("after an edit, where it is now: {}", trace::span_text(at("FunctionIr(square)"))));
+
+  // A function a header defines, read from disk; and in the editor view, from the open buffer.
+  namespace fs = std::filesystem;
+  const fs::path dir = fs::temp_directory_path() / std::format("ycxx-spans-{}", std::chrono::steady_clock::now().time_since_epoch().count());
+  fs::create_directories(dir);
+  const std::string header = "// cube\ninline int cube(int x) { return x * x * x; }\n";
+  const std::string main_text = "#include \"h.h\"\nint main() { return cube(1) - 1; }\n";
+  std::ofstream(dir / "h.h", std::ios::binary) << header;
+  std::ofstream(dir / "m.cpp", std::ios::binary) << main_text;
+  pl::Session hs;
+  constexpr pl::TuId htu{1};
+  got.clear();
+  hs.set_source(htu, "m.cpp", main_text, "m.o", dir.native_encoded_string());
+  (void)hs.get<pl::Tu>(htu, &c);
+  c.finish();
+  const SourceSpan cube = at("FunctionIr(cube)");
+  check(cube.file.ends_with("h.h") && cube.line == 2 && cube.column == 1 && cube.end_line == 2 && cube.end_column == 44,
+        std::format("a header's function, in the header: {}", trace::span_text(cube)));
+  const pl::TuId editor{1u << 31};
+  ycxx::pp::Config editor_config;
+  editor_config.view = ycxx::pp::View::editor;
+  hs.db().set<ycxx::pp::Buffer>(ycxx::pp::path_id((dir / "h.h").lexically_normal().generic_native_encoded_string()), "// a\n// b\n" + header);
+  got.clear();
+  hs.set_source(editor, "m.cpp", "", "m.o", dir.native_encoded_string(), editor_config);
+  (void)hs.get<pl::Tu>(editor, &c);
+  c.finish();
+  const SourceSpan open = at("FunctionIr(cube)");
+  check(open.file.ends_with("h.h") && open.line == 4, std::format("the editor view counts the buffer's lines: {}", trace::span_text(open)));
+  fs::remove_all(dir);
 
   check(trace::span_start(SourceSpan{"a.cpp", 3, 5, 7, 1}) == "a.cpp:3:5" && trace::span_text(SourceSpan{"a.cpp", 3, 5, 7, 1}) == "a.cpp:3:5–7:1" &&
             trace::span_text(SourceSpan{"a.cpp", 3, 5, 3, 12}) == "a.cpp:3:5–12" && trace::span_text(SourceSpan{"a.cpp"}) == "a.cpp" &&
@@ -383,6 +419,7 @@ void spans() {
             !trace::span_touches(f, "foo.cpp:141") && !trace::span_touches(f, "oo.cpp:120") && !trace::span_touches(f, "bar.cpp"),
         "a span touches a line of its file, by a path's tail");
   check(trace::span_touches(SourceSpan{"foo.cpp"}, "foo.cpp:9") && !trace::span_touches(SourceSpan{}, "foo.cpp"), "a whole file touches every line");
+  check(trace::span_touches(f, "foo.cpp:120:7") && !trace::span_touches(f, "foo.cpp:141:1"), "file:line:column, as span_start writes it");
 
   trace::Tree t;
   t.add(all);
