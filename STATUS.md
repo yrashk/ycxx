@@ -625,7 +625,9 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
     libycxx's link options force undefined (`___ycxx_allocation_table_anchor`, read from its
     `ycxx-link-options`). Members are selected as for any Darwin archive, so `<cstdio>` programs
     link against libycxx's linkage marker, and libycxx-abi's `__cxa_*` come before libc++abi's.
-    A trivial program grows from 17 KB to 118 KB with the allocation table. `-nostdlib++` links
+    A trivial program grows from 17 KB to 118 KB with the allocation table. Archive operands are
+    read once per process while their size and modification time hold, and every program's
+    inputs share the bytes (`obj::archive::input`, fingerprinted once). `-nostdlib++` links
     without the runtime. `unit.darwin_runtime`, `own/headers/cstdio.run.cpp` and
     `own/runtime/ios-base-init.run.cpp` (libycxx's `std::ios_base::Init`, through emulated TLS)
     check it.
