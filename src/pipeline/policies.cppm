@@ -1394,8 +1394,10 @@ struct EffectCost {
 };
 
 struct EffectPaths {
-  std::optional<EffectCost> continues = EffectCost{};
-  std::optional<EffectCost> returns;
+  std::optional<EffectCost> next = EffectCost{};
+  std::optional<EffectCost> returns{};
+  std::optional<EffectCost> breaks{};
+  std::optional<EffectCost> continues{};
 };
 
 static EffectPaths sequence(EffectPaths first, EffectPaths second) {
@@ -1405,25 +1407,46 @@ static EffectPaths sequence(EffectPaths first, EffectPaths second) {
       return EffectCost{true};
     return EffectCost{false, a->uses + b->uses};
   };
-  return {add(first.continues, second.continues),
-          std::max(first.returns, add(first.continues, second.returns))};
+  return {add(first.next, second.next),
+          std::max(first.returns, add(first.next, second.returns)),
+          std::max(first.breaks, add(first.next, second.breaks)),
+          std::max(first.continues, add(first.next, second.continues))};
 }
 
 static EffectPaths choice(EffectPaths first, EffectPaths second) {
-  return {std::max(first.continues, second.continues), std::max(first.returns, second.returns)};
+  return {std::max(first.next, second.next), std::max(first.returns, second.returns),
+          std::max(first.breaks, second.breaks), std::max(first.continues, second.continues)};
 }
 
 static EffectCost maximum(EffectPaths paths) {
-  return std::max(paths.continues, paths.returns).value_or(EffectCost{});
+  return std::max({paths.next, paths.returns, paths.breaks, paths.continues}).value_or(EffectCost{});
 }
 
-// Count one tag over the structured AST. A return closes its path. A loop with positive
-// cost in its repeating region widens to unbounded. An initializer in a for loop runs once.
-static EffectPaths effect_usage(const ast::Red& node, const std::map<EntityId, ast::u64>& costs,
+static EffectPaths effect_loop(EffectPaths iteration, EffectPaths tail,
+                               std::optional<EffectCost> entry_exit, bool may_repeat) {
+  const auto again = sequence({std::max(iteration.next, iteration.continues)}, tail).next;
+  if (may_repeat && again && *again > EffectCost{}) return {EffectCost{true}};
+  return {std::max({entry_exit, iteration.breaks, again}), iteration.returns};
+}
+
+static bool false_effect_condition(const sema::World& world, const ast::Red& expr) {
+  const auto node = effect_unparen(expr);
+  if (!node.is<ast::Literal>()) return false;
+  const auto literal = node.get<ast::Literal>();
+  return world.types.is(literal.info.type, ast::Builtin::bool_) && world.ins.values.is<ast::VInt>(literal.value) &&
+         ast::int_bits(world.ins, literal.value).lo == 0;
+}
+
+// Count one tag over the structured AST. A positive repeating cost widens to unbounded.
+// A loop consumes the break and continue paths of its own body.
+static EffectPaths effect_usage(const sema::World& world, const ast::Red& node, const std::map<EntityId, ast::u64>& costs,
                                 const std::map<ast::NodeId, EntityId>& handler_calls) {
   const auto child = [&](ast::Child edge) -> EffectPaths {
     if (edge.id == ast::NodeId::none) return {};
-    return effect_usage(effect_child(node, edge), costs, handler_calls);
+    return effect_usage(world, effect_child(node, edge), costs, handler_calls);
+  };
+  const auto never = [&](ast::Child condition) {
+    return condition.id != ast::NodeId::none && false_effect_condition(world, effect_child(node, condition));
   };
   if (node.is<ast::StaticAssert>()) return {};
   if (node.is<ast::If>()) {
@@ -1437,15 +1460,26 @@ static EffectPaths effect_usage(const ast::Red& node, const std::map<EntityId, a
   }
   if (node.is<ast::For>()) {
     const auto loop = node.get<ast::For>();
-    const auto iteration = sequence(child(loop.condition), sequence(child(loop.body), child(loop.increment)));
-    return sequence(child(loop.init), {EffectCost{maximum(iteration) > EffectCost{}}, {}});
+    const auto test = child(loop.condition);
+    const auto repeated = never(loop.condition) ? test :
+        effect_loop(sequence(test, child(loop.body)), child(loop.increment), test.next, true);
+    return sequence(child(loop.init), repeated);
   }
+  if (node.is<ast::While>()) {
+    const auto loop = node.get<ast::While>();
+    const auto test = child(loop.condition);
+    return never(loop.condition) ? test : effect_loop(sequence(test, child(loop.body)), {}, test.next, true);
+  }
+  if (node.is<ast::Do>()) {
+    const auto loop = node.get<ast::Do>();
+    return effect_loop(child(loop.body), child(loop.condition), std::nullopt, !never(loop.condition));
+  }
+  if (node.is<ast::Break>()) return {.next = std::nullopt, .breaks = EffectCost{}};
+  if (node.is<ast::Continue>()) return {.next = std::nullopt, .continues = EffectCost{}};
 
   EffectPaths paths;
-  node.for_each_child([&](const ast::Red& edge) { paths = sequence(paths, effect_usage(edge, costs, handler_calls)); });
-  if (node.is<ast::While>() || node.is<ast::Do>())
-    return {EffectCost{maximum(paths) > EffectCost{}}, {}};
-  if (node.is<ast::Return>()) return {std::nullopt, std::max(paths.continues, paths.returns)};
+  node.for_each_child([&](const ast::Red& edge) { paths = sequence(paths, effect_usage(world, edge, costs, handler_calls)); });
+  if (node.is<ast::Return>()) return {std::nullopt, std::max(paths.next, paths.returns)};
   EntityId target = EntityId::none;
   if (node.is<ast::Call>()) target = node.get<ast::Call>().function;
   if (node.is<ast::MemberCall>()) target = handler_calls.at(node.id());
@@ -1473,7 +1507,7 @@ static std::optional<EffectFinding> check_usage_grades(const sema::World& world,
     if (costs.empty()) continue;
     if (calls.grade_jump)
       return EffectFinding{*calls.grade_jump, "a finite usage grade with effectful calls requires control flow without goto or switch"};
-    const auto use = maximum(effect_usage(body, costs, calls.handler_calls));
+    const auto use = maximum(effect_usage(world, body, costs, calls.handler_calls));
     if (use.unbounded || use.uses > limit)
       return EffectFinding{body.offset(), std::format("effect '{}' exceeds its usage grade of {}{}",
                                                      world.types.spell(tag), limit,

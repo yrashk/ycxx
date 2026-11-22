@@ -211,10 +211,13 @@ budget by reference. The counter belongs to one scope and cannot be copied or mo
 budget counts uses of an effect. The capability still supplies authority over the resource.
 
 YCXX uses declared callee costs. Sequential operations add their upper bounds, and
-alternative branches take the maximum after the condition. A loop that can spend a use
-has unbounded cost until the checker can establish a finite execution count. An unbounded
-callee cannot satisfy a finite grade. Separate object builds include grades in the effect
-contract digest. A change to a declared grade invalidates summaries that depend on it.
+alternative branches take the maximum after the condition. A loop path that reaches another
+iteration with positive cost is unbounded. Costs on a path that breaks or returns are counted
+once when every path to another iteration has zero cost. The initializer in a `for` runs once,
+and the increment runs only after ordinary completion of the body or `continue`. An explicit
+`while (false)` condition ends a `do` after one iteration. An unbounded callee cannot satisfy a
+finite grade. Separate object builds include grades in the effect contract digest. A change to
+a declared grade invalidates summaries that depend on it.
 
 ### Explicit handler scopes
 

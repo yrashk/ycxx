@@ -58,6 +58,16 @@ with tempfile.TemporaryDirectory() as directory:
         ("condition_spends", "One", "if (send(n)) return send(0); return 0;", "exceeds its usage grade of 1"),
         ("effect_free_loop", "One", "while (n > 0) --n; return send(n);", None),
         ("loop_initializer", "One", "for (int i = send(n); i > 0; --i) {} return 0;", None),
+        ("single_iteration", "One", "do { n = send(n); } while (false); return n;", None),
+        ("skipped_loop", "One", "while (false) send(n); return send(0);", None),
+        ("loop_condition_spends", "One", "while (send(n)) break; return 0;", None),
+        ("break_spends", "One", "while (n-- > 0) { if (!n) { send(n); break; } } return 0;", None),
+        ("break_then_spend", "One", "while (n-- > 0) { if (!n) { send(n); break; } } return send(0);",
+         "exceeds its usage grade of 1"),
+        ("loop_return", "One", "while (n > 0) return send(n); return send(0);", None),
+        ("skipped_increment", "One", "for (; n; send(n)) return send(n); return send(0);", None),
+        ("effectful_continue", "One", "for (; n; send(n)) continue; return 0;", "unbounded usage"),
+        ("nested_break", "One", "while (n-- > 0) { do { send(n); break; } while (n); } return 0;", "unbounded usage"),
         ("effectful_loop", "Two", "while (n-- > 0) send(n); return 0;", "unbounded usage"),
         ("switch", "One", "switch (n) { case 0: return send(n); } return 0;", "without goto or switch"),
         ("recursive", "One", "if (n > 0) return run(n - 1); return send(n);", None),
@@ -140,7 +150,7 @@ with tempfile.TemporaryDirectory() as directory:
               return value;
             }
             [[=fx::contract<Two>{}]] int dispatch(Scope& scope) noexcept {
-              transmit(scope, 1);
+              do { transmit(scope, 1); } while (false);
               return transmit(scope, 2);
             }
             int main(int argc, char**) {
