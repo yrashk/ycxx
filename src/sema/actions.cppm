@@ -2533,7 +2533,7 @@ public:
   // [class.base.init], [dcl.init.aggr]: a destination with only ordinary scalar fields
   // needs no subobject destruction if an initializer exits by throwing.
   bool can_replay_default_members(QualType t) {
-    if (!types().is_class(t) || (templated() && current_function == EntityId::none)) return false;
+    if (!types().is_class(t) || (templated() && !in_function_body)) return false;
     EntityId c = types().class_of(t);
     if (!ordinary_default_member_owner(c)) return false;
     const ClassRec* rec = class_rec(c);
@@ -4473,6 +4473,7 @@ public:
     return_seen_ = false;
   }
   QualType return_type() const { return return_type_; }
+  bool in_function_body = false;  // BodyAnalysis, including any enclosed lambda bodies
   bool variadic_function_body = false;  // BodyAnalysis's function, excluding nested lambda bodies
   // A declared return type holding a placeholder ([dcl.spec.auto.general]/3): each return
   // statement deduces it, and the first one's deduction is the return type from then on (/11).

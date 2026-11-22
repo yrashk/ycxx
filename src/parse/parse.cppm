@@ -8205,6 +8205,7 @@ public:
       // body is looked up in the namespace of what it defines ([basic.lookup.unqual]/9).
       EntityId scope = p_->world().entities.rec(f->entity).scope;
       s_.current_function = f->entity;
+      s_.in_function_body = true;
       s_.checking_virtual_body = f->is_virtual;
       s_.variadic_function_body = signature.variadic;
       // Its closures' members are defined wherever it is: an inline function, a member defined in
