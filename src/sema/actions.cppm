@@ -489,26 +489,31 @@ public:
           if (auto r = nested_member(b, name)) return r->first.type;
       }
     }
-    std::optional<ast::DeclSema> found;
-    for (auto p = own.rbegin(); p != own.rend() && !found; ++p)
-      if (p->name == name) found = p->sema;
-    if (!found)
+    // BOOTSTRAP: -Wmaybe-uninitialized: a value and a flag, not std::optional. At -O3 GCC 16.2
+    // reports the optional's payload as possibly uninitialized after the `!found` checks (#748).
+    // Without the bug: `std::optional<ast::DeclSema> found;`, `found = s;`, `found->kind`.
+    ast::DeclSema found{};
+    bool has_found = false;
+    const auto take = [&](const ast::DeclSema& s) { found = s, has_found = true; };
+    for (auto p = own.rbegin(); p != own.rend() && !has_found; ++p)
+      if (p->name == name) take(p->sema);
+    if (!has_found)
       for (DeclId d : q_->visible_decls(name, directives())) {
         ast::DeclSema s = q_->decl_sema(d);
         if (s.entity == EntityId::none || is_special(s)) continue;
-        if (is_type(s.kind) || !elaborated) found = s;
+        if (is_type(s.kind) || !elaborated) take(s);
         if (!elaborated && !is_type(s.kind)) break;
       }
     if (member_introduction && member_introduction->name == name &&
-        (!found || elaborated || w_->entities.rec(found->entity).scope !=
-                                    w_->entities.rec(member_introduction->sema.entity).scope))
-      found = member_introduction->sema;
-    if (!found && !elaborated && aliases) return builtin_type_name(name);
-    if (!found || !is_type(found->kind)) return std::nullopt;
-    if (found->kind == ast::DeclKind::type_alias && !aliases) return std::nullopt;
+        (!has_found || elaborated || w_->entities.rec(found.entity).scope !=
+                                         w_->entities.rec(member_introduction->sema.entity).scope))
+      take(member_introduction->sema);
+    if (!has_found && !elaborated && aliases) return builtin_type_name(name);
+    if (!has_found || !is_type(found.kind)) return std::nullopt;
+    if (found.kind == ast::DeclKind::type_alias && !aliases) return std::nullopt;
     // A class template's name needs its arguments outside the template ([temp.names]).
-    if (found->flags & decl_flag::template_) return std::nullopt;
-    return found->type;
+    if (found.flags & decl_flag::template_) return std::nullopt;
+    return found.type;
   }
   static bool is_type(ast::DeclKind k) {
     return k == ast::DeclKind::class_ || k == ast::DeclKind::enum_ || k == ast::DeclKind::type_alias;
@@ -1017,9 +1022,14 @@ public:
     if (types().is_dependent(deduced)) return unresolved();
     auto c = q_->template_decl(p.entity);
     if (!c) return unresolved();
-    std::vector<TemplateArg> args{templates().type_arg(deduced)};
+    // BOOTSTRAP: -Warray-bounds: reserved and appended, as `parameters` in `member_call` (#748).
+    // Without the bug: `std::vector<TemplateArg> args{templates().type_arg(deduced)};` and
+    // `args.insert(args.end(), tail.begin(), tail.end());`
     const auto tail = ins().seqs.elements(p.args);
-    args.insert(args.end(), tail.begin(), tail.end());
+    std::vector<TemplateArg> args;
+    args.reserve(1 + tail.size());
+    args.push_back(templates().type_arg(deduced));
+    args.append_range(tail);
     const std::size_t before = diag_count();
     auto nf = concept_constraint(*c, args, at);
     if (!nf) return has_error_since(before) ? false : unresolved();
@@ -2191,12 +2201,12 @@ public:
     TypeRec r = types().rec(t);
     if (r.kind == TypeKind::array) return has_member_inits(r.inner);
     if (r.kind != TypeKind::class_) return false;
-    if (const ClassRec* c = class_rec(r.entity); c && c->user_ctors) return true;
     if (const ClassRec* c = class_rec(r.entity)) {
+      if (c->user_ctors) return true;
       for (const BaseRec& b : c->bases)
         if (has_member_inits(types().class_type(b.cls))) return true;
       for (const FieldRec& f : c->fields)
-        if (f.init != ConstId::none || f.dmi || has_member_inits(f.type)) return true;
+        if (f.init != ConstId::none || f.dmi || (!c->union_ && has_member_inits(f.type))) return true;
     }
     return false;
   }
@@ -2365,10 +2375,21 @@ public:
     std::vector<Element> elems = elements(t);
     std::vector<Ex> out;
     const bool replay = replay_default_members_ && can_replay_default_members(t);
+    const bool union_ = is_union(t);
+    const auto omitted = [&](const Element& element, u32 at) {
+      // [dcl.init.aggr]: copy-list-initialize an omitted union element and the
+      // first variant of an empty union list in the absence of a default member initializer.
+      if (element.init == ConstId::none && element.default_member == EntityId::none &&
+          (union_ || (is_union(element.type) && is_aggregate(element.type))))
+        return list_init(element.type, Braced{at, at, {}}, Construction::copy_list);
+      return element_default(element, true, replay, at, at);
+    };
     bool elided = begin != b.begin || end != b.end;
     for (std::size_t i = 0; i < elems.size(); ++i) {
+      if (union_ && !check_destructor_access(types().innermost_array_element(elems[i].type), begin))
+        return fail;
       if (next == b.clauses.size()) {
-        out.push_back(element_default(elems[i], true, replay, end, end));
+        out.push_back(omitted(elems[i], end));
         if (!out.back().ok()) return fail;
         continue;
       }
@@ -2378,7 +2399,7 @@ public:
         // skipped are initialized as if there were no initializer.
         std::size_t j = i;
         while (j < elems.size() && elems[j].name != c.designator) ++j;
-        if (j == elems.size() && is_union(t) && !elided) {
+        if (j == elems.size() && union_ && !elided) {
           diag(c.begin, Diag::not_supported, lex::Tk::period);  // a union's member other than its first
           return fail;
         }
@@ -2387,7 +2408,7 @@ public:
           return fail;
         }
         for (; i < j; ++i) {
-          out.push_back(element_default(elems[i], true, replay, c.begin, c.begin));
+          out.push_back(omitted(elems[i], c.begin));
           if (!out.back().ok()) return fail;
         }
       }
@@ -3997,7 +4018,9 @@ public:
   // The switch statements being analysed, innermost last ([stmt.switch]): the condition's type
   // after promotion, the variables in scope at the jump to a label, and the labels so far.
   struct SwitchScope {
-    QualType type;
+    // Meaningful only when not `dependent`. Initialized anyway: the scope is copied into
+    // `switches`, and copying an indeterminate value is erroneous ([basic.indet]; #726).
+    QualType type{};
     bool dependent = false;
     std::vector<u32> initialized;
     std::vector<ConstId> values;
@@ -4696,8 +4719,14 @@ public:
       return node(ast::AssignmentCall{info, fe, children->front(), at(o, begin)}, begin, end, info);
     }
     if (virtual_slot) {
-      std::vector<QualType> parameters{o.type()};
-      parameters.insert(parameters.end(), fr.params.begin(), fr.params.end());
+      // BOOTSTRAP: -Warray-bounds: reserved and appended. At -O3 GCC 16.2 reports libycxx's
+      // in-place insert after a one-element vector as writing past its allocation (#748).
+      // Without the bug: `std::vector<QualType> parameters{o.type()};` and
+      // `parameters.insert(parameters.end(), fr.params.begin(), fr.params.end());`
+      std::vector<QualType> parameters;
+      parameters.reserve(1 + fr.params.size());
+      parameters.push_back(o.type());
+      parameters.append_range(fr.params);
       const auto pointer = types().pointer(types().function(fr.inner, parameters, false, LangLinkage::cxx));
       return node(ast::VirtualMemberCall{info, pointer, *virtual_slot, at(o, begin), b_->list(*children)}, begin, end, info);
     }
@@ -8470,8 +8499,12 @@ public:
       }
     }
     if (dependent(callee) || dependent_args) {
-      std::vector<Ex> all{callee};
-      all.insert(all.end(), args.begin(), args.end());
+      // BOOTSTRAP: -Warray-bounds: reserved and appended, as `parameters` in `member_call`.
+      // Without the bug: `std::vector<Ex> all{callee};`, `all.insert(all.end(), args.begin(), args.end());`
+      std::vector<Ex> all;
+      all.reserve(1 + args.size());
+      all.push_back(callee);
+      all.append_range(args);
       return dependent_node(all, begin, end);
     }
     // Keep the direct initialization path for a sole known function

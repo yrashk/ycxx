@@ -68,7 +68,10 @@ std::expected<Connection, std::string> handshake(Fd fd, bool& closed) {
   }
   if (f->kind == Kind::refused) {
     auto r = decode<Refused>(*f);
-    return std::unexpected("the daemon refused: " + (r ? r->reason : "?"));
+    // BOOTSTRAP: -Warray-bounds: messages built from a temporary string use std::format. At -O3
+    // GCC 16.2 reports `"literal" + std::string&&` (libycxx's in-place insert) as writing past
+    // the string (#748). Without the bug: `"the daemon refused: " + (r ? r->reason : "?")`.
+    return std::unexpected(std::format("the daemon refused: {}", r ? r->reason : "?"));
   }
   if (f->kind != Kind::welcome) return std::unexpected("handshake: unexpected message");
   auto w = decode<Welcome>(*f);
@@ -110,7 +113,7 @@ std::expected<Connection, std::string> reach(const std::string& root, bool start
   auto dir = ensure_private_dir(runtime_dir());
   if (!dir) return std::unexpected(dir.error());
   Paths p = paths_for(root, *dir);
-  if (!fits_socket_path(p.socket())) return std::unexpected("socket path too long: " + p.socket());
+  if (!fits_socket_path(p.socket())) return std::unexpected(std::format("socket path too long: {}", p.socket()));
   bool absent = false;
   auto c = try_connect(p, absent);
   if (c || !absent || !start) return c;
@@ -138,7 +141,7 @@ std::expected<compile::Done, Failure> request_compile(Connection& c, const compi
   if (!f) return std::unexpected(Failure{"the daemon closed the connection: " + f.error(), true});
   if (f->kind == Kind::refused) {
     auto why = decode<Refused>(*f);
-    return std::unexpected(Failure{"the daemon refused: " + (why ? why->reason : "?"), false});
+    return std::unexpected(Failure{std::format("the daemon refused: {}", why ? why->reason : "?"), false});
   }
   if (f->kind != Kind::done) return std::unexpected(Failure{"unexpected answer", false});
   auto d = decode<compile::Done>(*f);
@@ -190,7 +193,7 @@ std::expected<int, std::string> tunnel_lsp(Connection& c, int in, int out) {
   if (!f) return std::unexpected("the daemon closed the connection: " + f.error());
   if (f->kind == Kind::refused) {
     auto why = decode<Refused>(*f);
-    return std::unexpected("the daemon refused: " + (why ? why->reason : "?"));
+    return std::unexpected(std::format("the daemon refused: {}", why ? why->reason : "?"));
   }
   if (f->kind != Kind::lsp) return std::unexpected("unexpected answer");
   // One thread per direction: a blocking write one way never holds up a read the other way, so a
