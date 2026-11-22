@@ -152,12 +152,12 @@ def main():
         link('weak.o', 'tail.a', result=37)
         link('weak.o', result=3)
 
-        # A tentative definition selects a member that defines the name.
+        # A tentative definition selects a member that defines the name, as macOS 26's linker
+        # does. macOS 15's keeps the tentative definition (exit 0), so no oracle here.
         (scope / 'common.c').write_text('int shared;\nint main(void) { return shared; }\n')
         (scope / 'shared.c').write_text('int shared = 5;\n')
         run([cc, '-fcommon', '-c', 'common.c', 'shared.c'])
         archive('shared.a', 'shared.o')
-        system_link('common.o', 'shared.a', result=5)
         link('common.o', 'shared.a', result=5)
 
         # An archive member wins over libSystem.

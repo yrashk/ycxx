@@ -13,7 +13,8 @@ from the ELF rules:
 - An archive serves names referenced anywhere on the command line, not only by earlier
   operands: `cc lib.a main.o` links on macOS.
 - A weak reference selects a member, and so does a name defined only tentatively (a common
-  symbol, from `-fcommon` C). The member's definition then replaces the tentative one.
+  symbol, from `-fcommon` C). The member's definition then replaces the tentative one. This
+  last rule is macOS 26's linker; macOS 15's keeps the tentative definition instead.
 - When several archives list a name, the first in operand order supplies it, and within an
   archive the first member that defines it.
 - A definition in an ordinary object wins over every archive, wherever the object comes.
