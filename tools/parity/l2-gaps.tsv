@@ -2,4 +2,3 @@
 # <operation>	<back end missing it>	<parity issue>	<note>
 va_arg	aarch64	#647	by design: Apple arm64 expands va_arg into loads and a store in `lower`
 invoke	aarch64	#648	the hosted catch-all requires Darwin call-site tables and a catch personality
-invoke_cleanup	aarch64	#648	the hosted local destructor from #663 requires a Darwin cleanup landing pad and personality
