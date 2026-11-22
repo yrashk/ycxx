@@ -8421,7 +8421,7 @@ public:
       }
     }
     if (dependent(callee) || dependent_args) {
-      // BOOTSTRAP: -Warray-bounds: reserved and appended, as `parameters` in `member_call`.
+      // BOOTSTRAP: -Warray-bounds: reserved and appended, as `parameters` in `member_call` (#748).
       // Without the bug: `std::vector<Ex> all{callee};`, `all.insert(all.end(), args.begin(), args.end());`
       std::vector<Ex> all;
       all.reserve(1 + args.size());
