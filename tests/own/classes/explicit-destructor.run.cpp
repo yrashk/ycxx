@@ -30,5 +30,22 @@ void destroy_trivial_member(Trivial* pointer) {
   once(pointer)->~Trivial();
 }
 
+template<class Owner>
+void destroy_direct(Owner& object) {
+  object.~Owner();
+}
+
+template<class Owner>
+struct Wrapper {
+  static void destroy_member(Owner& object) {
+    object.~Owner();
+  }
+};
+
+void destroy_instantiated(Resource& first, Resource& second) {
+  destroy_direct(first);
+  Wrapper<Resource>::destroy_member(second);
+}
+
 int peer();
 int main() { return peer(); }

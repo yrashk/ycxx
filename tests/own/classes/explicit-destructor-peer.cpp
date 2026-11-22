@@ -6,6 +6,7 @@ extern int destroyed, receiver_calls;
 void destroy_member(Resource&);
 void destroy_const_member(const Resource*);
 void destroy_trivial_member(Trivial*);
+void destroy_instantiated(Resource&, Resource&);
 
 union Owned {
   Resource member;
@@ -26,5 +27,9 @@ int peer() {
   destroy_const_member(&second.member);
   if (destroyed != 10 || receiver_calls != 1) return 2;
   destroy_trivial_member(&third.member);
-  return destroyed != 10 || receiver_calls != 2;
+  if (destroyed != 10 || receiver_calls != 2) return 3;
+  Owned fourth{{13}};
+  Owned fifth{{17}};
+  destroy_instantiated(fourth.member, fifth.member);
+  return destroyed != 40 || receiver_calls != 2;
 }
