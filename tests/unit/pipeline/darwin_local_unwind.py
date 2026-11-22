@@ -87,15 +87,21 @@ def check_object(path):
     normal_delta = normal_branch & 0x03ffffff
     if normal_delta & 0x02000000:
         normal_delta -= 0x04000000
-    assert call + 4 + 4 * normal_delta != landing
+    normal = call + 4 + 4 * normal_delta
+    assert call + 4 < normal < extent and normal != landing
 
     calls = {address - offset: name for address, kind, (name, _, _, _) in relocations(image, text)
              if offset <= address < offset + extent and kind == 0x2d}
     assert calls.pop(call) == '_may_throw'
     resume, = [address for address, name in calls.items() if name == '__Unwind_Resume']
-    assert resume > landing
+    # Follow the branch and the LSDA rather than assuming their layout order.
+    normal_end = landing if normal < landing else extent
+    landing_end = normal if landing < normal else extent
+    assert landing < resume < landing_end
     destructors = sorted(address for address, name in calls.items() if name.startswith('__ZN5GuardD'))
-    assert len(destructors) == 2 and call < destructors[0] < landing < destructors[1] < resume
+    assert len(destructors) == 2
+    assert any(normal <= address < normal_end for address in destructors)
+    assert any(landing <= address < resume for address in destructors)
     assert {'___cxa_begin_catch', '___cxa_end_catch'}.isdisjoint(name for name, _, _, _ in image.symbols)
 
 
