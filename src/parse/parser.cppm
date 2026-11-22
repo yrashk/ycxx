@@ -2387,7 +2387,9 @@ public:
           if (!t) ok = false;
           else args.push_back({ast::TemplateArgKind::type, s_->types().canonical(*t), sema::ConstId::none});
         } else {
+          const bool saved_value_argument = std::exchange(in_template_value_argument_, true);
           Ex e = conditional_expression();
+          in_template_value_argument_ = saved_value_argument;
           if (e.ok()) {
             // Converted to its parameter's type when the template is known ([temp.arg.nontype]).
             auto v = negated_template_variable(e);
@@ -3608,6 +3610,12 @@ public:
         if (!args) return {NodeId::none, begin, pos()};
         // [temp.dep.expr]/3: a template-id with a dependent argument is type-dependent.
         if (std::ranges::any_of(*args, [&](const ast::TemplateArg& a) { return s_->dependent(a); })) {
+          if (in_template_value_argument_) {
+            const auto diags = s_->diag_count();
+            if (auto v = s_->variable_template(n, begin))
+              return s_->dependent_variable_template_id(*v, *args, begin, pos());
+            if (s_->has_error_since(diags)) return {NodeId::none, begin, pos()};
+          }
           // A call of it is a dependent call ([temp.dep.candidate]): its instantiation adds
           // argument-dependent lookup.
           if (is(Tk::l_paren)) s_->dependent_calls.push_back(begin);
@@ -5674,6 +5682,7 @@ private:
   sema::Questions* q_ = nullptr;
   LangLinkage linkage_ = LangLinkage::cxx;
   int in_params_ = 0;
+  bool in_template_value_argument_ = false;
   int angle_ = 0;               // inside a template argument or parameter list, outside parentheses
   u32 deferred_argument_checks_ = 0;  // checks a dependent canonical argument may not retain
   bool half_ = false;           // the current `>>` has had its first `>` taken by a template-id
