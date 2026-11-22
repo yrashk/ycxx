@@ -292,8 +292,10 @@ are value-initialized when they have no written default member initializer.
   members of class templates, member function and
   constructor templates, parameter packs and fold expressions, alias templates, template
   template parameters, concepts and requires-expressions in overload resolution, including
-  explicit trailing type packs in ordinary constrained function overloads and checking constraints
-  when directly naming a non-dependent primary class specialization with explicit type arguments,
+  explicit trailing type packs in ordinary constrained function overloads. Directly named
+  non-dependent primary class specializations with explicit type arguments check constraints.
+  Non-template code outside requires-expression bodies also checks constraints on directly named
+  primary namespace variable templates with explicit non-dependent type arguments. Templates support
   `if constexpr`, deferred template static assertion failures, and two-phase lookup, with
   Itanium names identical to Clang's; Clang's
   `__make_integer_seq`;
