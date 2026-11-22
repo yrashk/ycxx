@@ -337,7 +337,8 @@ What is true of the code today. Work in progress and its owners are tracked in
     and return instructions. `unit.darwin_cleanup_free_unwind` checks the emitted object,
     omitted frames, native YCXX linking and system-linked exception propagation on macOS.
     The shared proof includes selected defaults in aggregates with scalar fields and trivial
-    destruction. [#849](https://github.com/yrashk/ycxx/issues/849)
+    destruction and indirect calls with fixed scalar prototypes.
+    [#849](https://github.com/yrashk/ycxx/issues/849) · [#851](https://github.com/yrashk/ycxx/issues/851)
     Native throw lowering and landing pads are tracked in [#648](https://github.com/yrashk/ycxx/issues/648).
     [#737](https://github.com/yrashk/ycxx/issues/737)
   - A system-linked arm64 function can destroy one initialized aggregate local on both exits from
@@ -718,7 +719,9 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
 - A hosted peer's exception can unwind through cleanup-free ycxx functions on x86-64 Linux.
   The compiler certifies ordinary strong definitions with fixed scalar signatures using all
   resolved declarations and the typed body. The proof visits selected default member initializers
-  in aggregates with scalar fields and trivial destruction. [#849](https://github.com/yrashk/ycxx/issues/849)
+  in aggregates with scalar fields and trivial destruction. It checks fixed scalar prototypes
+  and the typed operands of indirect calls.
+  [#849](https://github.com/yrashk/ycxx/issues/849) · [#851](https://github.com/yrashk/ycxx/issues/851)
   It tracks written exception specifications across redeclarations and records the AMD64 frame
   state at the actual prologue and epilogue offsets.
   ELF `.eh_frame` records use PC-relative references to local code anchors. The native

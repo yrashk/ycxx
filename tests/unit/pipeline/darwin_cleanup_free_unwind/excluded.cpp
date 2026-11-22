@@ -2,10 +2,6 @@ extern "C" int excluded_noexcept(int value) noexcept {
   return value + 8;
 }
 
-extern "C" int excluded_indirect(int (*callback)(int), int value) {
-  return callback(value);
-}
-
 template<int Extra>
 inline int excluded_specialization(int value) {
   return value + Extra;
