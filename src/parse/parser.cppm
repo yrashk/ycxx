@@ -1809,10 +1809,9 @@ public:
         // exception specification is non-throwing.
         bool nonthrowing = sema::is_deallocation_name(name) && !s->has_noexcept;
         const bool keep_named_exception = named_exception == NamedExceptionSpec::defaulted_assignment && name == "operator=";
-        const bool bare_member_spec = named_exception == NamedExceptionSpec::member_template && !s->noexcept_condition;
         if (s->has_noexcept && !s->noexcept_tokens &&
             (allocation || keep_named_exception || member_pointer_to_suffix(l) || (spells_type && !l.inner) ||
-             (d.ok && (bare_member_spec || !s_->templated()))))
+             (d.ok && !s_->templated())))
           nonthrowing = noexcept_value(s->noexcept_condition, d.ok);
         t = s_->types().function(t, ps, s->variadic, linkage_, s->cv, s->ref, nonthrowing);
         fn = &*s;
