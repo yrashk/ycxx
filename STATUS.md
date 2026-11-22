@@ -1899,7 +1899,7 @@ Fable decided the representation (ast.md §6.6); the Opus session wrote the code
   arguments checks its constraints even when the use does not need a complete class (#234).
 - Not yet: class-template constraints outside that case, constraints on variable templates, partial
   specializations and members,
-  broader constrained packs, fold-expanded constraints, `C auto`, `noexcept` in compound requirements
+  broader constrained packs, fold-expanded constraints, `noexcept` in compound requirements
   (#234); re-verification of satisfaction at END (#235); Itanium constraint mangling (#236);
   recorded discarded extents for `if constexpr` (#237); value-dependent mapping arguments (#209).
 
@@ -2364,8 +2364,9 @@ What the process allocates, attributed to the engine's cells, in the trace and t
 
 ## Placeholder types, θ step 1 (#279, 2026-11-19)
 
-- **Types:** `TAuto{decltype_auto}` in `types` (ast.md §5.1's `TAuto`, without a type-constraint
-  yet), `TypeKind::placeholder` in sema; `Types::has_placeholder` finds one under pointers,
+- **Types:** `TAuto` in `types` (ast.md §5.1) carries the placeholder kind, resolved concept entity
+  and canonical written argument list. `TypeKind::placeholder` in sema and
+  `Types::has_placeholder` find a placeholder under pointers,
   references, arrays and a function's return type. The parser reads `auto` and `decltype(auto)`
   as type specifiers, and trailing return types `auto f() -> T` ([dcl.fct]/2) with the
   parameters in scope.
@@ -2377,6 +2378,11 @@ What the process allocates, attributed to the engine's cells, in the trace and t
 - **Variables:** block scope (`= e`, `(e)`, `{e}`; the name is declared first, so its own
   initializer cannot use it), namespace scope and variable templates (`= e`, `{e}`), static data
   members; several declarators must deduce one type.
+- **Constrained block variables** (#286): `C auto x = expression;` uses a prior bare unqualified
+  type concept. Sema evaluates the constraint on the invented parameter before completing the
+  variable type, including for cv- and reference-qualified declarators. Namespace declarations,
+  other initializer forms, template contexts, qualified or argument-bearing concept names,
+  constrained `decltype(auto)`, and abbreviated function templates remain open.
 - **Array structured bindings** ([dcl.struct.bind], #285): a block-scope declaration evaluates
   its initializer once and binds the names to elements or whole rows of the hidden array.
   Value bindings copy scalar elements in order and take cv from the declaration (CWG 2506).

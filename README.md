@@ -327,7 +327,9 @@ are value-initialized when they have no written default member initializer.
   alias-selected dependent base and qualified lookup of its static members.
   [#308](https://github.com/yrashk/ycxx/issues/308)
 - placeholder types: `auto` and `decltype(auto)` variables (`const auto&`, `auto*`, `auto&&`),
-  deduced and trailing return types, in templates too;
+  deduced and trailing return types, in templates too. Ordinary block variables with an
+  `= expression` initializer can use `Concept auto` with a prior unqualified type concept.
+  [#286](https://github.com/yrashk/ycxx/issues/286)
 - lambdas in function bodies: captures by copy and by reference, capture-defaults, `this` and
   `*this`, init-captures, `mutable`, conversion to a pointer to function, generic lambdas (`auto`
   parameters) and template lambdas (`[]<class T>`), and closures passed to and called from

@@ -2209,8 +2209,9 @@ group = 'concepts'
 clauses = ['dcl.fct', 'dcl.spec.auto', 'temp.param']
 std = 'C++20'
 detect = '''\b(?!if\b|while\b|for\b|switch\b|return\b|decltype\b|sizeof\b|alignof\b|noexcept\b|requires\b|catch\b)\w+\s*\(\s*(?:const\s+)?(?:[\w:]+\s+)?auto\s*(?:&{1,2}|\*)?\s*(?:\.\.\.\s*)?\w*\s*[,)=]'''
-status = 'missing'
+status = 'partial'
 issues = [286, 234]
+note = 'Ordinary block variables support bare unqualified type concepts on auto with equals initialization. Abbreviated function templates and other constrained placeholder contexts remain open.'
 probe = '''
 template<class T> concept Int = sizeof(T) == 4;
 int f(Int auto x) { return x; }
