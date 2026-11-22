@@ -1091,6 +1091,12 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   64 bits. Constant evaluation records the field values and code generation emits addressable
   storage for runtime use ([class.static.data], [dcl.init.list], [dcl.init.aggr]).
   [#262](https://github.com/yrashk/ycxx/issues/262)
+- Constant expressions can read fields of an already initialized namespace-scope constexpr
+  aggregate with a trivial destructor, no bases, and ordinary public integral fields of up
+  to 64 bits. The interpreter uses the ordinary record layout and field indices, including
+  for reads through a pointer during evaluation. It rejects reading a mutable field of the
+  stored object ([expr.ref], [expr.const], [dcl.init.aggr]).
+  [#862](https://github.com/yrashk/ycxx/issues/862)
 - Constant evaluation can read namespace-scope `constexpr` pointers erased to `void`
   ([expr.const], [conv.ptr], #102). The interpreter reconstructs the original scalar or array
   subobject path, including one-past addresses, from the constant's path and byte offset.

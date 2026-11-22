@@ -487,6 +487,8 @@ written default member initializer are value-initialized.
   and runtime field access. Direct-list braces also work for aggregates of public integral
   fields in namespace-scope classes without bases.
   [#262](https://github.com/yrashk/ycxx/issues/262)
+  Constant expressions can read non-mutable integral fields of flat namespace-scope
+  constexpr aggregates. [#862](https://github.com/yrashk/ycxx/issues/862)
   Namespace-scope `constexpr` pointers to `void` can retain scalar and array element addresses.
   `__builtin_addressof`, used by libycxx's `std::addressof`, bypasses overloaded `operator&`.
   It supports runtime addresses and constant expressions such as a scalar global's address.

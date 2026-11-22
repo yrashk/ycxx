@@ -326,7 +326,8 @@ struct Ops {
     if (Flow fl = m.locate(m.operand(f, n, 1), imm_path(f, n, 1), t, use, has(f, n, ir::Flag::volatile_), pl);
         fl != Flow::next)
       return fl;
-    if (pl.ncells != 1 || m.shape(t).kind == M::Kind::array) return m.unsupported(n);
+    const auto kind = m.shape(t).kind;
+    if (pl.ncells != 1 || kind == M::Kind::array || kind == M::Kind::other) return m.unsupported(n);
     M::Cell& c = m.cells_[pl.cell0];
     if (c.fill == M::Fill::constant) {
       // A global's initial value, decoded on its first read; the node runs again if that needs
