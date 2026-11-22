@@ -206,6 +206,7 @@ struct VAtom {
   SeqId<ConstId> mapping;
   SeqId<u32> calls;
   bool fn_params;  // it names a function parameter (a trailing requires-clause's), so it maps all
+  EntityId lookup_class;  // class scope visible at the atom's spelling
 };
 
 // A normal form ([temp.constr.normal]): the conjunction (`op` 0) or disjunction (`op` 1) of normal
