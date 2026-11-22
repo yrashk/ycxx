@@ -420,6 +420,137 @@ struct Summary {
   }
 };
 
+// Histograms (#637): what groups of cells cost, by query kind, by source file, or by the children
+// of a cell. Each metric sums over a group's cells, except `peak`, the highest of them.
+enum class Metric : std::uint8_t { self_time, total_time, alloc, peak, retained, allocs, executions, hits, waits };
+inline constexpr std::size_t metric_count = 9;
+constexpr std::string_view metric_name(Metric m) {
+  switch (m) {
+    case Metric::self_time: return "self time";
+    case Metric::total_time: return "time in all";
+    case Metric::alloc: return "allocated";
+    case Metric::peak: return "peak";
+    case Metric::retained: return "retained";
+    case Metric::allocs: return "allocations";
+    case Metric::executions: return "runs";
+    case Metric::hits: return "cache hits";
+    case Metric::waits: return "waits";
+  }
+  return "?";
+}
+// The JSON field of each.
+constexpr std::string_view metric_field(Metric m) {
+  switch (m) {
+    case Metric::self_time: return "self_ns";
+    case Metric::total_time: return "total_ns";
+    case Metric::alloc: return "alloc_bytes";
+    case Metric::peak: return "peak_bytes";
+    case Metric::retained: return "retained_bytes";
+    case Metric::allocs: return "allocs";
+    case Metric::executions: return "executions";
+    case Metric::hits: return "hits";
+    case Metric::waits: return "waits";
+  }
+  return "?";
+}
+std::string format_metric(Metric m, std::uint64_t v) {
+  switch (m) {
+    case Metric::self_time:
+    case Metric::total_time: return format_duration(v);
+    case Metric::alloc:
+    case Metric::peak:
+    case Metric::retained: return format_bytes(static_cast<std::int64_t>(v));
+    default: return std::to_string(v);
+  }
+}
+// One cell's share of each metric. Self time is its own span less the time its children's spans
+// cover inside it (they may run in parallel: their union counts); time in all is its span; a
+// cache hit is a cell found green (reused, verified, kept by durability); a wait, a cell another
+// frame owned (waited for, or computed privately).
+std::array<std::uint64_t, metric_count> metrics_of(const Event& e, std::uint64_t self_ns) {
+  std::array<std::uint64_t, metric_count> v{};
+  const auto at = [&](Metric m) -> std::uint64_t& { return v[std::to_underlying(m)]; };
+  at(Metric::self_time) = self_ns;
+  at(Metric::total_time) = e.end_ns - std::min(e.end_ns, e.start_ns);
+  at(Metric::alloc) = e.alloc_bytes;
+  at(Metric::peak) = static_cast<std::uint64_t>(std::max<std::int64_t>(0, e.peak_bytes));
+  at(Metric::retained) = static_cast<std::uint64_t>(counted_retained(e));
+  at(Metric::allocs) = e.allocs;
+  at(Metric::executions) = e.outcome == Outcome::executed || e.outcome == Outcome::cutoff;
+  at(Metric::hits) = e.outcome == Outcome::reused || e.outcome == Outcome::verified || e.outcome == Outcome::durable;
+  at(Metric::waits) = e.outcome == Outcome::waited || e.outcome == Outcome::recomputed;
+  return v;
+}
+// [from, to) less the union of `inner` intervals, clipped to it.
+std::uint64_t uncovered(std::uint64_t from, std::uint64_t to, std::vector<std::pair<std::uint64_t, std::uint64_t>> inner) {
+  if (to <= from) return 0;
+  std::ranges::sort(inner);
+  std::uint64_t covered = 0, reach = from;
+  for (auto [a, b] : inner) {
+    a = std::clamp(a, reach, to);
+    b = std::clamp(b, a, to);
+    covered += b - a;
+    reach = std::max(reach, b);
+  }
+  return to - from - covered;
+}
+// Each event's self time, for a pre-order batch with depths (the collector's).
+std::vector<std::uint64_t> self_times(std::span<const Event> events) {
+  std::vector<std::vector<std::pair<std::uint64_t, std::uint64_t>>> kids(events.size());
+  std::vector<std::size_t> open;
+  for (std::size_t i = 0; i < events.size(); ++i) {
+    while (!open.empty() && events[open.back()].depth >= events[i].depth) open.pop_back();
+    if (!open.empty() && events[open.back()].depth + 1 == events[i].depth) kids[open.back()].emplace_back(events[i].start_ns, events[i].end_ns);
+    open.push_back(i);
+  }
+  std::vector<std::uint64_t> out(events.size());
+  for (std::size_t i = 0; i < events.size(); ++i) out[i] = uncovered(events[i].start_ns, events[i].end_ns, std::move(kids[i]));
+  return out;
+}
+
+struct Group {
+  std::string name;
+  std::uint64_t cells = 0;
+  std::array<std::uint64_t, metric_count> v{};
+  std::int32_t node = -1;  // by children: the child
+  std::uint64_t at(Metric m) const { return v[std::to_underlying(m)]; }
+  void add(const std::array<std::uint64_t, metric_count>& x) {
+    ++cells;
+    for (std::size_t i = 0; i < metric_count; ++i) v[i] = i == std::to_underlying(Metric::peak) ? std::max(v[i], x[i]) : v[i] + x[i];
+  }
+};
+// Groups by name, most of `by` first, then by name.
+class Groups {
+ public:
+  void add(const std::string& name, const std::array<std::uint64_t, metric_count>& x) {
+    Group& g = by_name_[name];
+    g.name = name;
+    g.add(x);
+  }
+  std::vector<Group> sorted(Metric by) const {
+    std::vector<Group> out;
+    for (const auto& [_, g] : by_name_) out.push_back(g);
+    std::ranges::stable_sort(out, std::greater{}, [&](const Group& g) { return g.at(by); });
+    return out;
+  }
+  bool empty() const noexcept { return by_name_.empty(); }
+
+ private:
+  std::map<std::string, Group> by_name_;
+};
+// A file's group: its span's file; `(no source)` for a cell with none.
+std::string file_group(const Event& e) { return e.span.file.empty() ? std::string("(no source)") : e.span.file; }
+// `[{"kind":"Tu","cells":3,"self_ns":…,…},…]`: groups for JSON, under `key`.
+std::string groups_json(const std::vector<Group>& gs, std::string_view key) {
+  std::string out = "[";
+  for (const Group& g : gs) {
+    std::format_to(std::back_inserter(out), R"({}{{"{}":{},"cells":{})", out.size() > 1 ? "," : "", key, json_string(g.name), g.cells);
+    for (std::size_t i = 0; i < metric_count; ++i) std::format_to(std::back_inserter(out), R"(,"{}":{})", metric_field(static_cast<Metric>(i)), g.v[i]);
+    out += '}';
+  }
+  return out + "]";
+}
+
 // The browser's tree. Events arrive in collector batches (pre-order); a node's children are in
 // arrival order, which is their start order.
 class Tree {
@@ -593,6 +724,8 @@ class Tree {
       } else if (w.starts_with("w:")) {
         const std::optional<std::int32_t> n = worker_named(std::string_view(w).substr(2));
         if (!n || (e.worker != *n && e.end_worker != *n)) return false;
+      } else if (w.starts_with("kind:")) {
+        if (kind != std::string_view(w).substr(5)) return false;  // a whole kind (a histogram's bar)
       } else if (w.starts_with("at:")) {
         // Paths keep their case: the word as typed, not lowered.
         if (!span_touches(e.span, std::string_view(raw_words_[i]).substr(3))) return false;
@@ -717,6 +850,7 @@ class Stream {
     std::string text;
     const Origins o = error_origins(events);
     const std::vector<Rollup> r = rollups(events);
+    const std::vector<std::uint64_t> self = self_times(events);
     for (std::size_t i = 0; i < events.size(); ++i) {
       const Event& e = events[i];
       const std::optional<std::uint64_t> at = o.at[i] ? std::optional(events[*o.at[i]].id) : std::nullopt;
@@ -728,6 +862,9 @@ class Stream {
       summary_.span_ns = std::max(summary_.span_ns, e.end_ns);
       summary_.add_memory(e);
       kinds_.add(e);
+      const auto m = metrics_of(e, self[i]);
+      by_kind_.add(e.kind, m);
+      by_file_.add(file_group(e), m);
     }
     *out_ << text << std::flush;
   }
@@ -786,7 +923,10 @@ class Stream {
                      first ? "" : ",", json_string(k.kind), k.executions, k.alloc_bytes, k.allocs, k.peak_bytes, k.retained_bytes);
       first = false;
     }
-    return out + "]}}";
+    // Histograms (#637): the browser's groups, by kind and by file, most self time first.
+    out += R"(],"histogram":{"by_kind":)" + groups_json(by_kind_.sorted(Metric::self_time), "kind");
+    out += R"(,"by_file":)" + groups_json(by_file_.sorted(Metric::self_time), "file");
+    return out + "}}}";
   }
   void summary(std::optional<std::uint64_t> total_ns = std::nullopt, const std::optional<BuildMemory>& m = std::nullopt) {
     if (style_.json) {
@@ -800,6 +940,8 @@ class Stream {
   void reset() {
     summary_ = {};
     kinds_ = {};
+    by_kind_ = {};
+    by_file_ = {};
   }
 
  private:
@@ -807,6 +949,7 @@ class Stream {
   Style style_;
   Summary summary_;
   Kinds kinds_;
+  Groups by_kind_, by_file_;
 };
 
 // Times made relative to `base_ns` (a request's start on the daemon's clock).
@@ -815,6 +958,46 @@ void rebase(std::span<Event> events, std::uint64_t base_ns) {
     e.start_ns = e.start_ns > base_ns ? e.start_ns - base_ns : 0;
     e.end_ns = e.end_ns > base_ns ? e.end_ns - base_ns : 0;
   }
+}
+
+// The browser's histogram: groups over the cells the tree's filter keeps (requests' nodes aside),
+// or only those in `within`'s subtree. By children: one group per child of `within` (or per top
+// node), over its subtree.
+enum class Grouping : std::uint8_t { kind, file, children };
+inline constexpr std::size_t grouping_count = 3;
+std::vector<Group> histogram(const Tree& t, Grouping by, std::optional<std::int32_t> within, Metric order) {
+  const auto nodes = t.nodes();
+  // Self times from each node's children.
+  const auto self = [&](std::int32_t i) {
+    const Tree::Node& n = nodes[static_cast<std::size_t>(i)];
+    std::vector<std::pair<std::uint64_t, std::uint64_t>> kids;
+    for (std::int32_t c : n.children) kids.emplace_back(nodes[static_cast<std::size_t>(c)].ev.start_ns, nodes[static_cast<std::size_t>(c)].ev.end_ns);
+    return uncovered(n.ev.start_ns, n.ev.end_ns, std::move(kids));
+  };
+  Groups groups;
+  std::map<std::string, std::int32_t> child_of_name;
+  const auto walk = [&](this const auto& walk, std::int32_t i, const std::string* label) -> void {
+    const Tree::Node& n = nodes[static_cast<std::size_t>(i)];
+    if (!n.group && t.matches(n.ev)) {
+      const std::string name = by == Grouping::kind ? n.ev.kind : by == Grouping::file ? file_group(n.ev) : *label;
+      groups.add(name, metrics_of(n.ev, self(i)));
+    }
+    for (std::int32_t c : n.children) walk(c, label);
+  };
+  std::vector<std::int32_t> tops;
+  if (within) tops = by == Grouping::children ? nodes[static_cast<std::size_t>(*within)].children : std::vector<std::int32_t>{*within};
+  else tops.assign(t.roots().begin(), t.roots().end());
+  // A request's node holds a build: its children are the groups.
+  if (!within && by == Grouping::children && tops.size() == 1 && nodes[static_cast<std::size_t>(tops[0])].group) tops = nodes[static_cast<std::size_t>(tops[0])].children;
+  for (std::int32_t top : tops) {
+    const std::string label = cell_name(nodes[static_cast<std::size_t>(top)].ev);
+    child_of_name.emplace(label, top);
+    walk(top, &label);
+  }
+  std::vector<Group> out = groups.sorted(order);
+  if (by == Grouping::children)
+    for (Group& g : out) g.node = child_of_name.contains(g.name) ? child_of_name[g.name] : -1;
+  return out;
 }
 
 Timeline timeline(const Tree& t, std::size_t columns) {

@@ -80,6 +80,18 @@ One per build, last: `{"summary":{…}}`.
 | `memory.process_current_bytes` | integer | the process's bytes allocated when the build ended (the daemon's, through a daemon) |
 | `memory.process_peak_bytes` | integer | their high-water mark while the build ran, other builds running at the same time included; exact within 64 KiB per thread |
 | `kinds` | array | per query kind with memory: `kind`, `executions`, `alloc_bytes`, `allocs`, `peak_bytes` (its highest frame's), `retained_bytes`; most allocated first |
+| `histogram.by_kind`, `histogram.by_file` | array | the browser's histogram groups (#637), by query kind (`kind`) and by source file (`file`; `(no source)` for cells without a span), most self time first: `cells`, then one field per metric (below) |
+
+Each histogram group sums its cells' metrics; `peak_bytes` is the highest of them.
+
+| field | metric |
+| --- | --- |
+| `self_ns` | self time: a cell's span less the union of its children's spans inside it (children that ran in parallel count once) |
+| `total_ns` | time in all: its span, children included; a group nested in itself counts its inner cells again |
+| `alloc_bytes`, `peak_bytes`, `retained_bytes`, `allocs` | as in the events |
+| `executions` | cells that ran (`executed`, `cutoff`) |
+| `hits` | cells found green: `reused`, `verified`, `durable` |
+| `waits` | cells another frame owned: `waited`, `recomputed` (contention) |
 
 ## Other lines
 
@@ -121,6 +133,19 @@ terminal (`src/trace/browse.cppm`, whose model is `src/trace/view.cppm`). `?` li
     Ghostty. Clicks on tabs, rows and headers, double clicks and the wheel all worked. The pty
     test (`daemon.trace_tui`) sends the SGR bytes a terminal sends, drags included, on every
     host CI runs.
+- **Histogram** (#637). `b`, Tab, or a click on the `histogram` tab shows bar charts of what groups
+  of cells cost. The metrics are the JSON summary's (below): self time, time in all, allocated,
+  peak, retained, allocations, runs, cache hits and waits.
+  - `1`–`9`, or a click on a switch, shows or hides a metric. Each shown metric is a column of bars.
+  - `c`, or a click, groups by query kind, by source file, or by the children of the selected cell
+    (each over its subtree). `i` keeps only the selected cell's subtree.
+  - `s`, or a click on a column's header, sorts by that metric.
+  - `⏎`, or a click on a bar, shows its cells in the tree: a kind as the filter `kind:Name`, a file
+    as `at:file`, a child as the selection.
+  - The tree's filter applies to the histogram too.
+- **Source** (#638). The pane names the cell's `source` (`a.cpp:3:1–7:1`). `S` adds a source
+  column. `p` copies `path:line:col`. The filter's `at:a.cpp:12` keeps the cells whose span
+  touches line 12.
 - **Copy** (#636). What the browser copies goes to the system clipboard. The status line says
   what was copied, and how.
   - `y` copies the selected cell as the pane shows it: its kind and key, outcome, times, memory,

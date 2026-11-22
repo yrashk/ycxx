@@ -818,6 +818,8 @@ void copying() {
   a = key("y");
   check(a.copy && std::ranges::count(*a.copy, '\n') == 2 && a.copy->contains(top_cell) && !a.copy->contains("c.cpp"),
         std::format("V holds its cells while requests arrive above: {:?}", a.copy.value_or("(nothing)")));
+}
+
 // Source spans (#638): which cells say where they are in the source, read from values a traced
 // build already holds; and the model's text, filter and JSON for them.
 void spans() {
@@ -906,6 +908,163 @@ void spans() {
   check(!trace::json_line(ev(1, 0, "Link", "0", Outcome::executed)).contains("span"), "none without one");
 }
 
+// Histograms (#637): what groups of cells cost, the browser's view of them, and the JSON's.
+void histograms(const std::filesystem::path& golden_path, bool update) {
+  using trace::Metric;
+  using trace::Grouping;
+  check(trace::uncovered(0, 100, {{10, 30}, {20, 50}, {90, 120}}) == 50 && trace::uncovered(0, 100, {}) == 100 && trace::uncovered(5, 5, {{0, 9}}) == 0,
+        "self time: the span less the union of its children's, clipped");
+  std::vector<Event> events = browser_events();
+  for (Event& e : events) {
+    if (e.kind == "Pp" || (e.kind == "FileText" && e.key == "a.cpp") || e.kind == "FunctionIr" || e.kind == "FunctionGen")
+      e.span = engine::SourceSpan{"a.cpp", 1, 1, 3, 1};
+    if (e.key == "x.h") e.span = engine::SourceSpan{"x.h"};
+  }
+  const std::vector<std::uint64_t> self = trace::self_times(events);
+  check(self == std::vector<std::uint64_t>{60'000, 190'000, 0, 0, 110'000, 190'000, 110'000, 240'000, 0},
+        std::format("self times: {}", self));
+  trace::Tree t;
+  t.add(events);
+  const auto names = [](const std::vector<trace::Group>& gs) {
+    std::vector<std::string> out;
+    for (const trace::Group& g : gs) out.push_back(std::format("{}:{}", g.name, g.cells));
+    return out;
+  };
+  const auto by_kind = trace::histogram(t, Grouping::kind, std::nullopt, Metric::self_time);
+  check(names(by_kind) == std::vector<std::string>{"Optimized:1", "FunctionGen:1", "Pp:1", "Codegen:1", "FunctionIr:1", "Tu:1", "FileText:2", "SourceOf:1"},
+        std::format("by kind, most self time first, ties by name: {}", names(by_kind)));
+  const trace::Group& tu = by_kind[5];
+  check(tu.at(Metric::self_time) == 60'000 && tu.at(Metric::total_time) == 900'000 && tu.at(Metric::alloc) == 4096 && tu.at(Metric::retained) == 1024 &&
+            tu.at(Metric::executions) == 1 && tu.at(Metric::hits) == 0,
+        "a group's metrics");
+  check(by_kind[7].at(Metric::hits) == 1 && by_kind[6].at(Metric::retained) == 500, "cache hits; sums over cells");
+  check(names(trace::histogram(t, Grouping::kind, std::nullopt, Metric::retained)).front() == "Pp:1", "sorted by another metric");
+  check(names(trace::histogram(t, Grouping::file, std::nullopt, Metric::total_time)) == std::vector<std::string>{"(no source):4", "a.cpp:4", "x.h:1"},
+        std::format("by file: {}", names(trace::histogram(t, Grouping::file, std::nullopt, Metric::total_time))));
+  const auto children = trace::histogram(t, Grouping::children, 0, Metric::total_time);
+  check(names(children) == std::vector<std::string>{"Codegen(main):2", "FunctionIr(square):2", "Pp(a.cpp):3", "SourceOf(a.cpp):1"} &&
+            children[0].node == 6 && children[0].at(Metric::total_time) == 350'000 + 240'000,
+        std::format("by children of Tu, over their subtrees: {}", names(children)));
+  check(names(trace::histogram(t, Grouping::kind, 4, Metric::self_time)) == std::vector<std::string>{"FunctionGen:1", "FunctionIr:1"},
+        "within a cell's subtree");
+  t.set_filter("is:input");
+  check(names(trace::histogram(t, Grouping::kind, std::nullopt, Metric::self_time)) == std::vector<std::string>{"FileText:2"}, "the tree's filter applies");
+  t.set_filter("kind:FileText");
+  check(t.rows().size() == 4 && t.matches(events[2]) && !t.matches(events[0]), "kind: matches a whole kind");
+  t.set_filter("kind:File");
+  check(!t.matches(events[2]), "and only a whole one");
+  t.set_filter("");
+
+  // JSON: the stream's summary carries the same groups.
+  std::ostringstream js;
+  trace::Stream st(js, {false, true, true});
+  st.batch(events);
+  st.summary();
+  const std::string json = js.str();
+  check(json.contains(R"("histogram":{"by_kind":[{"kind":"Optimized","cells":1,"self_ns":240000,"total_ns":240000,"alloc_bytes":700,"peak_bytes":700,"retained_bytes":64,"allocs":21,"executions":1,"hits":0,"waits":0},{"kind":"FunctionGen")") &&
+            json.contains(R"x("by_file":[{"file":"a.cpp","cells":4,"self_ns":490000,"total_ns":680000)x") && json.contains(R"x({"file":"(no source)","cells":4,"self_ns":410000)x"),
+        std::format("the JSON summary's histogram: {}", json.substr(json.find("\"by_file\""), 200)));
+
+  // The view: b opens it; its switches, grouping and headers click; a bar shows its cells.
+  t.expand_all(false);
+  trace::Browser b(t);
+  b.resize(24, 120);
+  std::string got;
+  const auto step = [&](std::string_view name) {
+    got += std::format("## {}\n", name);
+    got += plain(b.frame());
+  };
+  std::chrono::milliseconds clock{0};
+  const auto press = [&](std::size_t x, std::size_t y) {
+    (void)b.handle(click(x, y), clock += std::chrono::seconds(1));
+    return b.handle(click(x, y, trace::Mouse::Act::release), clock);
+  };
+  using H = trace::Hit;
+  (void)b.handle(trace::Key{"b"});
+  check(b.view() == trace::View::histogram, "b opens the histogram");
+  step("the histogram: by kind, most self time first");
+  // Body rows from 2: the switches, the grouping, the headers, the bars.
+  check(b.hit(10, 2) == H{H::Area::metric, 0} && b.hit(24, 2) == H{H::Area::metric, 1}, std::format("the switches ({})", std::to_underlying(b.hit(24, 2).area)));
+  check(b.hit(11, 3) == H{H::Area::grouping, 0} && b.hit(17, 3) == H{H::Area::grouping, 1} && b.hit(23, 3) == H{H::Area::grouping, 2},
+        "the groupings");
+  check(b.hit(37, 3) == H{H::Area::scope}, "the scope");
+  check(b.hit(30, 4) == H{H::Area::order, 0} && b.hit(5, 5) == H{H::Area::bar, 0} && b.hit(5, 12) == H{H::Area::bar, 7} && b.hit(5, 13) == H{},
+        "the headers and the bars");
+  check(b.hit(18, 1) == H{H::Area::tab, std::to_underlying(trace::View::histogram)}, "its tab");
+  press(55, 2);  // □4 peak, the fourth switch (x 54–60)
+  const auto shown = [&](std::string_view m) { return trace::strip_sgr(b.frame().lines[4]).contains(m); };
+  check(shown("peak"), "a click on a switch shows its metric");
+  (void)b.handle(trace::Key{"4"});
+  check(!shown("peak"), "and its key hides it");
+  for (const char* k : {"1", "2", "3", "7"}) (void)b.handle(trace::Key{k});
+  check(shown("runs") && !shown("self time"), "the last metric stays (runs)");
+  for (const char* k : {"2", "3", "7"}) (void)b.handle(trace::Key{k});
+  (void)b.handle(trace::Key{"s"});
+  // Shown: time in all and allocated; the sort moved off each metric switched off, to time in all.
+  check(trace::strip_sgr(b.frame().lines[4]).contains("allocated↓"), "s sorts by the next metric");
+  press(17, 3);
+  step("by file, by time in all");
+  press(5, 6);  // the second bar: (no source)
+  check(b.view() == trace::View::histogram, "a cell with no source opens nothing");
+  press(5, 5);  // a.cpp, the most allocated
+  check(b.view() == trace::View::tree && t.filtering() && t.rows().size() >= 4, "a click on a bar shows its cells in the tree");
+  check(trace::strip_sgr(b.frame().lines[1]).contains("filter: at:a.cpp"), "as a filter");
+  (void)b.handle(trace::Key{"/"});
+  (void)b.handle(trace::Key{"\x7f"});
+  for (int i = 0; i < 12; ++i) (void)b.handle(trace::Key{"\x7f"});
+  (void)b.handle(trace::Key{"\r"});
+  (void)b.handle(trace::Key{"b"});
+  press(11, 3);  // by kind
+  (void)b.handle(trace::Key{"\r"});  // Optimized
+  check(b.view() == trace::View::tree && t.rows().size() == 2 && t.node(t.rows()[1].node).ev.kind == "Pp",
+        "Enter opens the selected bar (Pp: the most allocated, under Tu)");
+  (void)b.handle(trace::Key{"/"});
+  for (int i = 0; i < 20; ++i) (void)b.handle(trace::Key{"\x7f"});
+  (void)b.handle(trace::Key{"\r"});
+  (void)b.handle(trace::Key{"g"});  // Tu
+  (void)b.handle(trace::Key{"b"});
+  (void)b.handle(trace::Key{"c"});
+  (void)b.handle(trace::Key{"c"});
+  step("by the children of the selected cell");
+  (void)b.handle(trace::Key{"j"});
+  (void)b.handle(trace::Key{"\r"});
+  check(b.view() == trace::View::tree && t.node(t.rows()[b.cursor()].node).ev.kind == "FunctionIr", "a child's bar selects it in the tree");
+  (void)b.handle(click(5, 6, trace::Mouse::Act::wheel_down));
+
+  // Spans in the browser (#638): the pane's `source` line, the S column, p to copy.
+  t.expand_all(true);
+  (void)b.handle(trace::Key{"g"});
+  for (int i = 0; i < 4; ++i) (void)b.handle(trace::Key{"j"});  // FunctionIr(square)
+  const auto frame_text = [&] {
+    std::string out;
+    for (const std::string& l : b.frame().lines) out += trace::strip_sgr(l) + '\n';
+    return out;
+  };
+  check(frame_text().contains("source   a.cpp:1:1–3:1"), "the pane says where the cell is");
+  (void)b.handle(trace::Key{"S"});
+  step("the source column (S)");
+  check(frame_text().contains("source") && frame_text().contains("a.cpp:1"), "S shows the source column");
+  trace::Action a = b.handle(trace::Key{"p"});
+  check(a.copy == "a.cpp:1:1", std::format("p copies path:line:col: {:?}", a.copy.value_or("(nothing)")));
+  (void)b.handle(trace::Key{"g"});
+  a = b.handle(trace::Key{"p"});
+  check(!a.copy && trace::strip_sgr(b.frame().lines[1]).contains("no source for this cell"), "a cell without a span copies nothing");
+  (void)b.handle(trace::Key{"/"});
+  for (char c : std::string_view("at:a.cpp:2")) (void)b.handle(trace::Key{std::string(1, c)});
+  (void)b.handle(trace::Key{"\r"});
+  check(t.matches(events[4]) && !t.matches(events[6]), "at: in the browser's filter");
+
+  if (update) {
+    std::ofstream(golden_path, std::ios::binary) << got;
+    std::println("updated {}", golden_path.display_string());
+    return;
+  }
+  std::ifstream in(golden_path, std::ios::binary);
+  const std::string want{std::istreambuf_iterator<char>(in), {}};
+  check(got == want, "the histogram's frames equal histogram.golden (rerun with --update after a deliberate change)");
+  if (got != want) std::println(std::cerr, "--- got:\n{}", got);
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -923,5 +1082,6 @@ int main(int argc, char** argv) {
   lines();
   memory();
   spans();
+  histograms(std::filesystem::path(argv[1]).parent_path() / "histogram.golden", update);
   return ycxx::unit::result("unit.trace");
 }
