@@ -419,7 +419,7 @@ stay open for the rest.
   copies it and `va_end` does nothing. `own/variadic/definitions` calls ycxx's definitions
   from ycxx and from a Clang peer, and lets the peer's `va_arg` read a cursor ycxx started.
   It fails if the named stack size is ignored or the cursor advances by 4. `<stdarg.h>` works
-  as well as `<cstdarg>` (#676, see the compiler resource `<stdarg.h>` section).
+  as well as `<cstdarg>` ([#676](https://github.com/yrashk/ycxx/issues/676), see the compiler resource `<stdarg.h>` section).
 - Not yet: the allocation
   validator and dependence checker (#29), SSA linear scan, list scheduling, unwind info and DWARF,
   a measured `cost_model` (#9), more than one result, frame objects aligned above 16 bytes.
