@@ -310,7 +310,9 @@ What is true of the code today. Work in progress and its owners are tracked in
     lists read from `.tbd` files (`tbd_exports`). A dylib without a list accepts any name.
   - Lays out `__PAGEZERO`, `__TEXT`, `__DATA_CONST`, `__DATA` and `__LINKEDIT` on 16 KiB pages,
     with stubs and a GOT. All imports are bound and all pointers rebased through chained fixups
-    (`DYLD_CHAINED_PTR_64_OFFSET`). No lazy binding.
+    (`DYLD_CHAINED_PTR_64_OFFSET`). No lazy binding. A segment's chained starts cover only its
+    pages with file contents: page-in linking maps every listed page from the file, so a listed
+    zero-fill page would hold `__LINKEDIT` bytes (#842).
   - Writes the exports trie, symbol tables, `LC_MAIN`, `LC_BUILD_VERSION` (macOS 12.0), an
     `LC_UUID` fingerprinted from the image, and an ad-hoc, linker-signed SHA-256 code signature.
   - Output is byte-identical across runs.
@@ -1901,6 +1903,12 @@ template's tokens again with the arguments bound.
   signature (#209). In a body that arithmetic works. An index written as an enumerator or a
   constant variable is mangled by its value, where Clang and GCC write its name (#796). With these,
   libycxx's headers move from `invoke.hpp:35` to `invoke.hpp:37` (#776).
+
+## Functional conversions with pack expansions (#915)
+
+- `T(a...)` expands its arguments as a call does ([expr.type.conv], [temp.variadic]/5). This is
+  also the path a call through a still-dependent alias's member takes at the definition, as in
+  libycxx's `invoke`. Test: `tests/own/templates/functional-cast-pack.run.cpp`.
 
 ## Templates, ζ step 2: class templates (#88, 2026-11-18)
 

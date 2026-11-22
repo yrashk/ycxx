@@ -956,7 +956,10 @@ private:
       if (first == last) continue;
       w.align(8);
       mo::store32(w.bytes, table + 4 * s, static_cast<std::uint32_t>(w.size() - starts_offset));
-      const auto page_count = static_cast<std::uint16_t>(sg.vmsize / page);
+      // Only the pages with file contents. Page-in linking maps every listed page from the file,
+      // so listing the zero-fill pages past them would fill those with what follows in the file
+      // (#842). Fixups never lie there: relocations in zero-fill sections are rejected.
+      const auto page_count = static_cast<std::uint16_t>(sg.filesize / page);
       w.u32(22 + 2u * page_count);  // size of dyld_chained_starts_in_segment with its page_start array
       w.u16(static_cast<std::uint16_t>(page));
       w.u16(6);  // DYLD_CHAINED_PTR_64_OFFSET
@@ -966,6 +969,7 @@ private:
       std::vector<std::uint16_t> starts(page_count, 0xffff);  // DYLD_CHAINED_PTR_START_NONE
       for (auto it = first; it != last; ++it) {
         const std::uint64_t p = (it->addr - sg.vmaddr) / page;
+        contract_assert(p < page_count);  // fixups lie in sections with contents
         if (starts[p] == 0xffff) starts[p] = static_cast<std::uint16_t>((it->addr - sg.vmaddr) % page);
       }
       for (auto v : starts) w.u16(v);
