@@ -505,6 +505,7 @@ public:
                              ClassBodyLookup::before_template_parameter, elaborated)
           .type;
     }
+    if (!elaborated && earlier_nested_enumerator(name)) return std::nullopt;
     // In a class template, its name without arguments is the injected-class-name: the current
     // instantiation, or in an instantiation the specialization ([temp.local]/1).
     if (current_class != EntityId::none) {
@@ -4477,10 +4478,18 @@ public:
   std::optional<EntityId> defining_unnamed_enum_scope;
   std::optional<std::size_t> nested_enum_members_begin;
 
+  // [basic.scope.enum]: earlier enumerators hide names in the enclosing class.
+  const OwnDecl* earlier_nested_enumerator(NameId name) const {
+    if (!nested_enum_members_begin) return nullptr;
+    const auto enumerators = std::span(own).subspan(*nested_enum_members_begin);
+    const auto member = std::ranges::find(enumerators, name, &OwnDecl::name);
+    return member == enumerators.end() ? nullptr : &*member;
+  }
+
   // ------------------------------------------------------------ member functions ([class.mfct])
 
-  // The class whose member function body is being analysed, and the type of `this` there: none
-  // outside a non-static member function ([expr.prim.this]).
+  // The enclosing class of a declaration or definition, and the type of `this` when the context
+  // supplies a current object ([expr.prim.this]).
   EntityId current_class = EntityId::none;
   std::optional<QualType> this_type;
   // The function whose body is being analysed, none outside one: a friend of a class may name its
@@ -6091,10 +6100,8 @@ public:
       ExprInfo info{Types::unqualified(p->type), ValueCategory::prvalue, expr_flag::dependent};
       return node(ast::Literal{info, v}, begin, end, info);
     }
-    // [basic.scope.enum]: earlier enumerators hide names in the enclosing class.
-    if (nested_enum_members_begin)
-      for (const OwnDecl& declaration : std::span(own).subspan(*nested_enum_members_begin))
-        if (declaration.name == name) return enumerator(declaration.sema.entity, declaration.sema.type, begin, end);
+    if (const auto* declaration = earlier_nested_enumerator(name))
+      return enumerator(declaration->sema.entity, declaration->sema.type, begin, end);
     // The enclosing class's members ([basic.scope.class]).
     if (current_class != EntityId::none) {
       if (auto r = class_member(current_class, name, begin, end, begin, std::nullopt, /*unqualified=*/true)) return *r;

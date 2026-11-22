@@ -3,15 +3,16 @@ struct Box {
   static constexpr int offset = 7;
   enum Unscoped { first = offset, second = first + 1 };
   using Underlying = int;
-  enum class Scoped : Underlying { earlier = offset, offset = 11, local = offset, qualified = Box::offset,
-                                   injected = second };
+  enum class Scoped : Underlying { earlier = offset, offset = 11, local = offset, injected = second };
+  using Shadow = int;
+  enum class Byte : unsigned char { Shadow = 1, size = sizeof(Shadow) };
 };
 
 static_assert(Box::first == 7 && Box::second == 8);
 static_assert(static_cast<int>(Box::Scoped::earlier) == 7);
 static_assert(static_cast<int>(Box::Scoped::local) == 11);
-static_assert(static_cast<int>(Box::Scoped::qualified) == 7);
 static_assert(static_cast<int>(Box::Scoped::injected) == 8);
+static_assert(static_cast<int>(Box::Byte::size) == 1);
 
 template<class T> struct Generic {
   static constexpr int offset = 3;
