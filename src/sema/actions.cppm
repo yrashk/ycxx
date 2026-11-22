@@ -638,10 +638,13 @@ public:
     return namespace_template(ns, name, ast::DeclKind::type_alias);
   }
   // The variable template unqualified lookup finds for `name` ([temp.pre]/1), likewise.
-  std::optional<ast::DeclSema> variable_template(NameId name) { return named_template(name, ast::DeclKind::variable); }
+  std::optional<ast::DeclSema> variable_template(NameId name, std::optional<u32> at = std::nullopt) {
+    return named_template(name, ast::DeclKind::variable, at);
+  }
   // The template of kind `kind` unqualified lookup finds for `name`, with the default arguments of
   // every earlier declaration of it ([temp.param]/12).
-  std::optional<ast::DeclSema> named_template(NameId name, ast::DeclKind kind) {
+  std::optional<ast::DeclSema> named_template(NameId name, ast::DeclKind kind,
+                                             std::optional<u32> at = std::nullopt) {
     if (names_member(name)) return std::nullopt;
     for (auto s = scopes_.rbegin(); s != scopes_.rend(); ++s)
       for (auto p = s->rbegin(); p != s->rend(); ++p)
@@ -659,6 +662,18 @@ public:
     for (DeclId d : q_->visible_decls(name, directives())) {
       ast::DeclSema s = q_->decl_sema(d);
       if (s.entity != EntityId::none && !is_special(s)) decls.push_back(s);
+    }
+    if (!found && at) {
+      auto matching = std::find_if(decls.rbegin(), decls.rend(), [&](const ast::DeclSema& d) {
+        return d.kind == kind && (d.flags & decl_flag::template_);
+      });
+      if (matching != decls.rend() && std::ranges::any_of(decls, [&](const ast::DeclSema& d) {
+            return d.entity != matching->entity && d.kind != ast::DeclKind::class_ && d.kind != ast::DeclKind::enum_;
+          })) {
+        diag(*at, Diag::ambiguous_name, name);
+        return std::nullopt;
+      }
+      if (matching != decls.rend()) found = *matching;
     }
     if (!found && !decls.empty()) found = decls.back();
     if (!found || found->kind != kind || !(found->flags & decl_flag::template_)) return std::nullopt;

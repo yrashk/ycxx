@@ -37,7 +37,8 @@ Dependent exception specifications remain open. [#219](https://github.com/yrashk
 
 **Compile and run programs on macOS.** `ycxx cxx a.cpp -o a` (also `-c`, `-fsyntax-only`, `-E`, `-I`,
 `-D`, `-std=c++26`, and `-fclass-call-abi=apple` to pass classes as Apple Clang does) builds an executable with ycxx's own front end, IR, AArch64 code generator
-and Mach-O linker. It also links object files from Clang or GCC. Errors are reported as
+and Mach-O linker on arm64 macOS, where `arm64-apple-darwin` is the default target. It also links
+object files from Clang or GCC. Errors are reported as
 `file:line:col: error: …`.
 
 ```sh
@@ -54,17 +55,19 @@ instantiation. Concrete constant template arguments can use braced conversions s
 **Preprocess binary resources.** Both targets support `#embed` and `__has_embed` with the standard
 parameters. [#125](https://github.com/yrashk/ycxx/issues/125)
 
-**Compile for x86-64 Linux.** Select `--target=x86_64-pc-linux-gnu` to compile with the
-System V AMD64 backend. Use `-c` to write an ELF object, or `-nostdlib` to link C++ sources,
-ycxx-generated `.o` files, or a mixture into a static executable. The startup runs namespace-scope
+**Compile for x86-64 Linux.** A ycxx build for x86-64 Linux defaults to `x86_64-pc-linux-gnu`
+and uses the System V AMD64 backend. `--target` overrides either host default. A build with no
+supported host default requires an explicit target. Use `-c` to write an ELF object or
+`-nostdlib` to link C++ sources, ycxx-generated `.o` files, or a mixture into a static executable.
+The startup runs namespace-scope
 initializers, then calls `int main()` or `int main(int, char**)` and passes its return value to Linux
 as the exit status. A program without such initializers can supply its own `_start`. Given
 `example.cpp` containing
 `int main() { return 0; }`, run the following on x86-64 Linux.
 
 ```sh
-build/bin/ycxx cxx --target=x86_64-pc-linux-gnu -c example.cpp
-build/bin/ycxx cxx --target=x86_64-pc-linux-gnu -nostdlib example.o -o example
+build/bin/ycxx cxx -c example.cpp
+build/bin/ycxx cxx -nostdlib example.o -o example
 ./example
 ```
 
@@ -293,7 +296,8 @@ are value-initialized when they have no written default member initializer.
   when directly naming a non-dependent primary class specialization with explicit type arguments,
   `if constexpr`, deferred template static assertion failures, and two-phase lookup, with
   Itanium names identical to Clang's; Clang's
-  `__make_integer_seq`;
+  `__make_integer_seq`. Template type arguments can use terminal namespace-qualified alias
+  specializations that expand to dependent member types. [#630](https://github.com/yrashk/ycxx/issues/630)
 - dependent `__is_same`, `__is_reference`, `__is_const`, `__is_volatile`, `__is_array`,
   `__is_pointer`, `__is_function`, `__is_enum`, `__is_union`, `__is_class`, `__is_object`, and the
   three member-pointer predicates as `bool` template arguments or defaults, including through
@@ -315,7 +319,8 @@ are value-initialized when they have no written default member initializer.
 - `__is_empty` accounts for inherited data members and supports dependent operands in class-template
   bases and variable-template initializers.
   [Extension guide](docs/EXTENSIONS.md) · [#218](https://github.com/yrashk/ycxx/issues/218)
-- logical negation of a qualified dependent `bool` variable template-id in a `bool` template
+- unqualified dependent `bool` variable template-ids as `bool` template arguments, and
+  logical negation of a qualified dependent `bool` variable template-id in a `bool` template
   argument or default
   [#209](https://github.com/yrashk/ycxx/issues/209);
 - a single nonvirtual, nonpolymorphic base in a primary class template, including an

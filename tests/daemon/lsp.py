@@ -330,19 +330,21 @@ def concurrent_build(env):
     saved = slow_source('main', 0)
     unit = d / 's.cpp'
     unit.write_text(saved)
-    env.cxx(['-c', 's.cpp', '-o', 'warm.o'], d, env.daemon)
+    # The stress body exceeds the Linux emitter's single-page frame limit.
+    args = ['--target=arm64-apple-darwin', '-c', 's.cpp', '-o']
+    env.cxx([*args, 'warm.o'], d, env.daemon)
     ed = Editor(env, d)
     ed.open(unit, saved)
     expect(ed.diagnostics(unit, 1, 'open the slow unit'), [], 'the slow unit on open')
     ed.change(unit, saved + 'int z = gg;\n', 2)
-    build = subprocess.Popen([env.ycxx, 'cxx', '-c', 's.cpp', '-o', 'during.o'], cwd=d, env=env.daemon,
+    build = subprocess.Popen([env.ycxx, 'cxx', *args, 'during.o'], cwd=d, env=env.daemon,
                              stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     env.clients.append(build)
     got = ed.diagnostics(unit, 2, 'the change during a build')
     expect([x[3] for x in got or []], [UNDECLARED], 'the diagnosis during a build is the buffer\'s')
     out, err = build.communicate(timeout=300)
     expect((build.returncode, err), (0, b''), 'a build during a didChange')
-    env.cxx(['-c', 's.cpp', '-o', 'cold.o'], d, env.cold)
+    env.cxx([*args, 'cold.o'], d, env.cold)
     if (d / 'during.o').read_bytes() != (d / 'cold.o').read_bytes():
         fail('a build during a didChange is not a cold compile of the saved file')
     expect(ed.finish(), 0, '`ycxx lsp` after a concurrent build')
