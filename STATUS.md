@@ -690,7 +690,10 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
   copyable arguments of more than two eightbytes and empty classes remain unsupported
   ([#641](https://github.com/yrashk/ycxx/issues/641)), as do SSE records
   ([#642](https://github.com/yrashk/ycxx/issues/642)). Records with source layout directives
-  native layout does not apply stay out of memory passing too.
+  native layout does not apply stay out of memory passing, including records that contain
+  those layouts as fields, array elements, or bases. A wrapper whose member makes its implicit
+  destructor nontrivial uses the indirect result convention even when its copy and move traits
+  are unknown. [#661](https://github.com/yrashk/ycxx/issues/661)
   [Design](docs/design/linux-integer-aggregates.md) · [#440](https://github.com/yrashk/ycxx/issues/440)
 - `-c` writes deterministic ELF64 relocatable objects through `src/obj/elf.cppm`. The reader
   accepts the supported x86-64 `ET_REL` subset emitted by ycxx. The native ELF linker consumes
@@ -1525,6 +1528,15 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
 - Remaining implicit special-member rules and aggregate designator forms stay in #203.
   Direct explicit destructor calls are tracked in #722.
 
+## Concrete nontrivial members of union templates (#203)
+
+- A namespace-scope union template with a written destructor can instantiate nontrivially
+  destructible variants with trivial or deleted copy constructors. Nonthrowing constructors
+  select the active member, and the union destructor leaves variant cleanup explicit.
+- The instantiation checks the concrete variant types and the completed destructor declaration.
+  Tests select both members of a union specialized on a noncopyable resource and diagnose
+  the unsupported implicit-destruction form.
+
 ## `<cstdio>`, step 4c: operator functions; `<stdio.h>` compiles (#133, 2026-11-18)
 
 - **Operator functions** ([over.oper]): `operator@` declarator-ids for the overloadable
@@ -1686,6 +1698,20 @@ template's tokens again with the arguments bound.
   target-typed selection from overload sets stay in #406. Directly taking the address
   of a function template specialization as an expression stays in #335.
   Mangling a C-linkage function type stays in #287.
+
+## Value-dependent template arguments in symbols (#773)
+
+- A function template whose signature holds a value-dependent template argument has a symbol:
+  `X <expression> E`, with a dependent variable-template-id as its `<source-name>` and
+  `<template-args>` and `!e` as `nt e` (Itanium C++ ABI §5.1.6). `std::move_if_noexcept`'s
+  return type needs it for any libycxx header in an object.
+- The arguments are the converted ones and the name is unqualified, as GCC writes them. Clang
+  writes them as spelled: qualified outside the global namespace and `std`, without defaulted
+  arguments, without `J…E` around a pack. The two agree on the tested forms; DECISIONS §1.7 (#777)
+  chose GCC's.
+- Tests: `tests/own/abi/dependent-template-args.run.cpp`, linked with a Clang peer that calls the
+  specializations. `&&` follows #671; type-trait operations (`__is_same(T, U)`) still have no
+  symbol (#780).
 
 ## Templates, ζ step 2: class templates (#88, 2026-11-18)
 
@@ -1950,8 +1976,8 @@ session's.*
   class constructibility, assignability and general convertibility, remaining `__is_trivially_*` and
   `__is_nothrow_*` predicates, `__is_standard_layout` and
   `__reference_binds_to_temporary`. Other dependent predicates, conversions of a dependent
-  predicate to a non-`bool` parameter, dependent array bounds and expression mangling remain in
-  #209.
+  predicate to a non-`bool` parameter and dependent array bounds remain in #209; mangling
+  dependent expressions is #773 and #780.
 
 ## Address-of builtin (#330)
 
@@ -2300,9 +2326,12 @@ request it serves.
 - Copy (#636): `y` copies the cell (the pane's text, unwrapped) and `Y` its subtree (stream lines
   with times and memory). A drag over rows or pane text, or `V` with j/k, selects, and the copy
   happens on release or `y`. `Action::copy` carries the text. `:browse` writes OSC 52 (plus
-  tmux's passthrough form) and, locally, runs `YCXX_CLIPBOARD` or the first of pbcopy, wl-copy,
-  xclip and xsel. Tests: `unit.trace` (the exact text of each way to copy, base64, OSC 52);
-  `daemon.trace_tui` (`y` and a row drag through OSC 52 and the command).
+  tmux's passthrough form) and, locally, runs `YCXX_CLIPBOARD`, or writes the native clipboard
+  (`:clipboard`: macOS NSPasteboard through the Objective-C runtime's C entry points, libobjc and
+  AppKit loaded at the first copy; pbcopy if it refuses), or runs the first of wl-copy, xclip and xsel (Linux, until
+  #730). Tests: `unit.trace` (the exact text of each way to copy, base64, OSC 52, a named
+  pasteboard written and read back on macOS); `daemon.trace_tui` (`y` and a row drag through
+  OSC 52 and the command).
 - Histograms (#637): `Metric` (self time, the span less the union of the children's; time in
   all; allocated; peak; retained; allocations; runs; cache hits; waits), `metrics_of`,
   `self_times`, `Groups`, and `histogram(tree, Grouping, within, order)` (by kind, file or
@@ -2919,9 +2948,15 @@ and runtime integration with ycxx's own linker remain under [#89]. See the
 `noexcept(expression)` is a constant `bool` and leaves its operand unevaluated
 ([expr.unary.noexcept]). The compiler checks the selected function or constructor,
 argument operations, and temporary destruction ([except.spec]). A construction
-in a function template body can be checked after substitution. Dependent
-member-template exception specifications are tracked in
-[#713](https://github.com/yrashk/ycxx/issues/713).
+in a function template body can be checked after substitution.
+
+## Dependent exception specifications on member templates (#713)
+
+A selected ordinary member function template can instantiate its written
+`noexcept(expression)` with the class and function template arguments
+([except.spec], [temp.inst]). Its parameter and class scopes are available
+during replay. Class instantiation leaves the specification of an unused
+member template deferred.
 
 ## The address of an overload set, ι (#313, #337, 2026-11-19)
 
