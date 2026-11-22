@@ -365,8 +365,12 @@ private:
     interp::ready<std::optional<interp::GlobalVar>> global(EntityId v) {
       auto value = q->global(v);
       type_trait_failure |= q->type_trait_instantiation_failed(v);
-      if (value && value->usable && value->value && e->s_->ins().values.is<ast::VAggregate>(*value->value))
-        value->record = e->constant_record_layout(value->type);
+      if (value && value->usable && value->value && e->s_->ins().values.is<ast::VAggregate>(*value->value)) {
+        // Block-scope statics also have stored initializers. Const qualification alone does
+        // not make a class variable potentially constant ([expr.const]).
+        if (e->s_->world().entities.rec(v).linkage != ast::Linkage::none)
+          value->record = e->constant_record_layout(value->type);
+      }
       return {std::move(value)};
     }
     bool stop_requested() const { return false; }  // until the scheduler has stop tokens (#15)
