@@ -83,6 +83,13 @@ with tempfile.TemporaryDirectory() as directory:
     """)
     syntax(annotations, provider, caller)
     syntax(*sources, annotations)
+    direct_annotations = write("direct_annotations.cpp", """\
+        #include "effects.hpp"
+        [[=fx::trusted_contract<fx::set<file::Read, file::Read>>{}]] int adapter(int) noexcept;
+        [[=fx::contract<Read>{}]] int step(int) noexcept;
+        [[=fx::contract<Read>{}]] int run(int) noexcept;
+    """)
+    syntax(*sources, direct_annotations)
     syntax(rules, caller, error="verified effect bound requires a unique supported definition")
     narrower = write("narrower.cpp", metadata.replace("&run, Read", "&run, Empty"))
     syntax(narrower, provider, caller, error="effect bound of 'step' exceeds the caller's declared bound")

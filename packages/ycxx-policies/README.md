@@ -135,11 +135,11 @@ contained in the caller's bound. For example, changing `retry_read` to `fx::set<
 the call to `read_settings`. GCC and Clang accept the same C++20 metadata, and the
 capability guard in the adapter still runs.
 
-For a C++26 declaration annotation, alias `fx::contract<Reads>` as `ReadsContract` and
-write `[[=ReadsContract{}]]` on the function. Use `fx::trusted_contract<Reads>` the same
-way for a trusted adapter. Tags are canonical types. Their order and repetition do not
-change the meaning. Ownership and effect entries can share one `use_policy` fragment
-across source inputs.
+Use `[[=fx::contract<Reads>{}]]` on a C++26 function declaration or name the contract
+type with an alias and write `[[=ReadsContract{}]]`. Use `fx::trusted_contract<Reads>`
+the same way for a trusted adapter. Tags are canonical types. Their order and repetition
+do not change the meaning. Ownership and effect entries can share one `use_policy`
+fragment across source inputs.
 
 Start with `ycxx cxx -fcheck-policies -fsyntax-only -I/path/to/include adapter.cpp caller.cpp`.
 For separate builds, compile the caller and provider with `-fcheck-policies -c`, then pass
