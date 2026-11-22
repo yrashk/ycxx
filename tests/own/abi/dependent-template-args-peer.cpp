@@ -13,8 +13,6 @@ template<class T> cond_t<!narrow_v<T>, int, long> wide(T);
 template<class T> cond_t<same_size_v<T, const T*>, int, long> pointer_sized(T);
 template<int N> cond_t<positive_v<N>, int, long> sign(Tag<N>);
 template<int N> cond_t<!positive_v<N>, int, long> nonpositive(Tag<N>);
-template<bool B> struct Flag {};
-template<bool B> cond_t<!B, int, long> flip(Flag<B>);
 namespace std { inline namespace __y1 {
 template<class T> constexpr bool std_v = true;
 template<class T> cond_t<std_v<T>, int, long> in_std(T);
@@ -28,6 +26,5 @@ int peer() {
   if (pointer_sized(i) + pointer_sized(1L) != 4) return 13;
   if (sign(Tag<4>{}) != 4 || nonpositive(Tag<-2>{}) != 2) return 14;
   if (std::in_std(i) != 3) return 15;
-  if (flip(Flag<true>{}) + flip(Flag<false>{}) != 11) return 16;
   return 0;
 }

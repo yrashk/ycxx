@@ -634,23 +634,14 @@ class Mangler {
       const ast::VDepOp& op = in_.values.get<ast::VDepOp>(v);
       auto operands = in_.seqs.elements(op.operands);
       if (op.op == ast::DepOp::logical_not && operands.size() == 1) {
-        auto e = operand(operands[0]);
+        if (operands[0].kind != ast::TemplateArgKind::value) return std::unexpected("a type operand of '!'");
+        auto e = expression(operands[0].value);
         if (!e) return e;
         return "nt" + *e;
       }
       return std::unexpected("a dependent type-trait operation as a template argument");
     }
     return std::unexpected("a dependent operation as a template argument");
-  }
-  // An operand of a dependent operation: a template parameter, `T_`, or a dependent expression
-  // (§5.1.6).
-  std::expected<std::string, std::string> operand(const ast::TemplateArg& a) {
-    if (a.kind != ast::TemplateArgKind::value) return std::unexpected("a type operand of a dependent operation");
-    if (in_.values.is<ast::VDepParam>(a.value) && in_.values.get<ast::VDepParam>(a.value).depth == 0) {
-      auto i = in_.values.get<ast::VDepParam>(a.value).index;
-      return i == 0 ? std::string("T_") : std::format("T{}_", i - 1);
-    }
-    return expression(a.value);
   }
 
   std::expected<std::string, std::string> function_pointer_argument(const ast::TemplateArg& arg) {
