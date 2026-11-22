@@ -2,11 +2,126 @@
 
 import os
 from pathlib import Path
+import re
 import shutil
 import sys
 import tempfile
 
 from linux_compile import run
+
+
+def defined_symbols(output):
+    rows = [line.split() for line in output.splitlines()]
+    return [fields for fields in rows if len(fields) == 8 and fields[6].isdigit()]
+
+
+def check_owned_root_object(readelf, obj, scope, env, slots):
+    metadata = run([readelf, '-WSsrg', obj], scope, env)
+    vtable = '_ZTVN6abi3094RootE'
+    rtti = '_ZTIN6abi3094RootE'
+    name = '_ZTSN6abi3094RootE'
+    symbols = {}
+    definitions = defined_symbols(metadata)
+    for symbol, size, binding in ((vtable, 32, 'GLOBAL'), (rtti, 16, 'GLOBAL'), (name, 15, 'WEAK')):
+        matches = [fields for fields in definitions if fields[7] == symbol]
+        assert len(matches) == 1, metadata
+        entry = matches[0]
+        assert entry[2:6] == [str(size), 'OBJECT', binding, 'DEFAULT'], metadata
+        symbols[symbol] = int(entry[6]), int(entry[1], 16)
+
+    sections = {}
+    for line in metadata.splitlines():
+        section = re.match(r'\s*\[\s*(\d+)\]\s+(.*)', line)
+        if section:
+            fields = section[2].split()
+            if len(fields) >= 9 and fields[1] in ('PROGBITS', 'RELA'):
+                sections[int(section[1])] = fields
+    destinations = {fields[0]: int(fields[-2]) for fields in sections.values() if fields[1] == 'RELA'}
+    relocations = {}
+    current = None
+    for line in metadata.splitlines():
+        reloc_section = re.match(r"Relocation section '([^']+)'", line)
+        if reloc_section:
+            current = destinations[reloc_section[1]]
+        fields = line.split()
+        if len(fields) == 7 and fields[2].startswith('R_X86_64_'):
+            offset, _, kind, _, target, sign, addend = fields
+            relocations.setdefault(current, []).append((int(offset, 16), kind, target, sign, addend))
+
+    names = tuple(f'_ZN6abi3094Root{len(slot)}{slot}Ev' for slot in slots)
+    for symbol, size, pointers in (
+        (vtable, 32, ((8, rtti, '0'), (16, names[0], '0'), (24, names[1], '0'))),
+        (rtti, 16, ((0, '_ZTVN10__cxxabiv117__class_type_infoE', '10'), (8, name, '0'))),
+        (name, 15, ()),
+    ):
+        ndx, value = symbols[symbol]
+        actual = sorted((offset - value, *fields) for offset, *fields in relocations.get(ndx, ())
+                        if value <= offset < value + size)
+        expected = [(offset, 'R_X86_64_64', target, '+', addend) for offset, target, addend in pointers]
+        assert actual == expected, metadata
+
+    raw = (scope / obj).read_bytes()
+    for symbol, expected in ((vtable, b'\0' * 8), (name, b'N6abi3094RootE\0')):
+        ndx, value = symbols[symbol]
+        start = int(sections[ndx][3], 16) + value
+        assert raw[start:start + len(expected)] == expected, metadata
+    name_section, _ = symbols[name]
+    assert sections[name_section][6] == 'AG', metadata
+    assert re.search(rf'\[{name}\] contains 1 sections:\n.*\n\s*\[\s*{name_section}\]', metadata), metadata
+
+
+def check_owned_root(compile, linux, scope, cold, daemon, host_cxx, readelf):
+    parts = ('first', 'second', 'virtual-call')
+
+    def check_stage(slots, expected_first):
+        owner, peer = slots
+        objects = {}
+        for part in parts:
+            obj = f'root-{part}'
+            source = f'owned-root/{part}.cpp'
+            compile(linux, '-c', source, '-o', f'{obj}-cold.o')
+            compile(linux, '-c', source, '-o', f'{obj}-warm.o', env=daemon)
+            objects[part] = (scope / f'{obj}-warm.o').read_bytes()
+            assert objects[part] == (scope / f'{obj}-cold.o').read_bytes(), part
+            if part != owner:
+                metadata = run([readelf, '-Ws', f'{obj}-warm.o'], scope, cold)
+                assert not any(fields[7].startswith(('_ZTV', '_ZTI', '_ZTS'))
+                               for fields in defined_symbols(metadata)), metadata
+        check_owned_root_object(readelf, f'root-{owner}-warm.o', scope, cold, slots)
+
+        host_flags = [host_cxx, '-std=c++26', '-pedantic-errors', '-frtti', '-fno-lto']
+        run([*host_flags, f'-DEXPECT_FIRST={expected_first}', '-c', 'owned-root/host.cpp',
+             '-o', 'root-host.o'], scope, cold)
+        run([*host_flags, '-c', f'owned-root/{peer}.cpp', '-o', 'root-peer.o'], scope, cold)
+        run([host_cxx, '-no-pie', 'root-host.o', f'root-{owner}-warm.o', 'root-peer.o',
+             'root-virtual-call-warm.o', '-o', 'mixed-root'], scope, cold)
+        run(['./mixed-root'], scope, cold)
+        return objects
+
+    original = check_stage(('first', 'second'), 71)
+
+    first = scope / 'owned-root' / 'first.cpp'
+    first_source = first.read_bytes()
+    assert first_source.count(b'return 71;') == 1
+    first.write_bytes(first_source.replace(b'return 71;', b'return 109;'))
+    body_only = check_stage(('first', 'second'), 109)
+    assert body_only['first'] != original['first']
+    assert all(body_only[part] == original[part] for part in ('second', 'virtual-call'))
+    first.write_bytes(first_source)
+
+    header = scope / 'owned-root' / 'root.hpp'
+    source = header.read_bytes()
+    declarations = b'    virtual int first();\n    virtual int second();\n'
+    assert source.count(declarations) == 1
+    header.write_bytes(source.replace(declarations, b'    virtual int second();\n    virtual int first();\n'))
+    reordered = check_stage(('second', 'first'), 71)
+    assert all(reordered[part] != original[part] for part in parts)
+
+    header.write_bytes(source)
+    for part in parts:
+        obj = f'root-{part}-warm.o'
+        compile(linux, '-c', f'owned-root/{part}.cpp', '-o', obj, env=daemon)
+        assert (scope / obj).read_bytes() == original[part], part
 
 
 def main():
@@ -22,6 +137,7 @@ def main():
                      'primary', 'primary.peer', 'produce', 'const-write'):
             shutil.copyfile(fixtures / f'{part}.cpp', scope / f'{part}.cpp')
         shutil.copytree(fixtures / 'nonkey', scope / 'nonkey')
+        shutil.copytree(fixtures / 'owned-root', scope / 'owned-root')
         base = {k: v for k, v in os.environ.items() if k not in ('YCXX_NO_DAEMON', 'YCXX_DAEMON', 'YCXX_ROOT')}
         base.update(LC_ALL='C', YCXX_RUNTIME_DIR=runtime, YCXX_THREADS='2')
         cold = dict(base, YCXX_NO_DAEMON='1')
@@ -121,11 +237,10 @@ def main():
             assert (scope / 'nonkey-noexcept.o').is_file()
             (scope / 'nonkey-noexcept.o').unlink()
         for target, source, diagnostic in (
-            (linux, 'nonkey/controls/key-owner.cpp', virtual_definition_error),
             (linux, 'nonkey/controls/inline.cpp', virtual_definition_error),
             (linux, 'nonkey/controls/in-class.cpp', native_virtual_error),
             (linux, 'nonkey/controls/lifetime.cpp', layout_error),
-            (linux, 'nonkey/late-key.cpp', virtual_definition_error),
+            (linux, 'nonkey/late-key.cpp', native_virtual_error),
             (linux, 'nonkey/extra.cpp', native_virtual_error),
             (linux, 'nonkey/exception-mismatch.cpp', "conflicting declaration of 'measure'"),
             (linux, 'nonkey/exception-parameter-definition.cpp', virtual_definition_error),
@@ -136,6 +251,9 @@ def main():
             compile(target, '-c', source, '-o', 'nonkey-guard.o', error=diagnostic)
             assert not (scope / 'nonkey-guard.o').exists()
         compile(darwin, '-fsyntax-only', 'nonkey/measure.cpp', error=virtual_definition_error)
+        compile(linux, '-c', 'nonkey/controls/key-owner.cpp', '-o', 'nonkey-key-owner.o')
+        output = run([readelf, '-Ws', 'nonkey-key-owner.o'], scope, cold)
+        assert {'_ZTV5Gauge', '_ZTI5Gauge', '_ZTS5Gauge'} <= {fields[7] for fields in defined_symbols(output)}, output
 
         for part in ('host', 'provider'):
             run([host_cxx, '-std=c++26', '-pedantic-errors', '-frtti', '-fno-lto',
@@ -177,8 +295,7 @@ def main():
             nonkey_warm = scope / 'nonkey-warm.o'
             assert nonkey_warm.read_bytes() == (scope / 'nonkey-cold.o').read_bytes()
             output = run([readelf, '--wide', '--symbols', 'nonkey-cold.o'], scope, cold)
-            symbols = [line.split() for line in output.splitlines()]
-            defined = [fields for fields in symbols if len(fields) == 8 and fields[6].isdigit()]
+            defined = defined_symbols(output)
             methods = [fields for fields in defined if fields[7] == '_ZNK5Gauge7measureEi']
             assert len(methods) == 1 and methods[0][3:5] == ['FUNC', 'GLOBAL'] and int(methods[0][2]) > 0, output
             assert not any(fields[7].startswith(('_ZTV', '_ZTI', '_ZTS')) for fields in defined), output
@@ -187,13 +304,16 @@ def main():
             anchor_decl = b'    virtual int anchor(int) const;\n'
             assert measure_source.count(anchor_decl + measure_decl) == 1
             measure.write_bytes(measure_source.replace(anchor_decl + measure_decl, measure_decl + anchor_decl, 1))
-            nonkey_warm.unlink()
-            compile(linux, '-c', 'nonkey/measure.cpp', '-o', 'nonkey-warm.o', env=daemon,
-                    error=virtual_definition_error)
-            assert not nonkey_warm.exists()
+            compile(linux, '-c', 'nonkey/measure.cpp', '-o', 'nonkey-edited-cold.o')
+            compile(linux, '-c', 'nonkey/measure.cpp', '-o', 'nonkey-warm.o', env=daemon)
+            assert nonkey_warm.read_bytes() == (scope / 'nonkey-edited-cold.o').read_bytes()
+            output = run([readelf, '-Ws', 'nonkey-warm.o'], scope, cold)
+            assert {'_ZTV5Gauge', '_ZTI5Gauge', '_ZTS5Gauge'} <= {f[7] for f in defined_symbols(output)}, output
             measure.write_bytes(measure_source)
             compile(linux, '-c', 'nonkey/measure.cpp', '-o', 'nonkey-warm.o', env=daemon)
             assert nonkey_warm.read_bytes() == (scope / 'nonkey-cold.o').read_bytes()
+
+            check_owned_root(compile, linux, scope, cold, daemon, host_cxx, readelf)
 
             providers = [host_cxx]
             clang = shutil.which(cold.get('YCXX_CLANGXX', 'clang++'), path=cold.get('PATH'))
