@@ -1485,9 +1485,10 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   integers and enumerations (scoped ones too), and from `cv void*` to an object pointer;
   functional casts `T(e)` for keyword types, enumerations and typedef-names, and C-style casts
   `(T)e`, as static_cast does them ([expr.type.conv]/2, [expr.cast]/4).
-- Runtime `static_cast<D*>` and `static_cast<D&>` undo an accessible, unambiguous nonvirtual
-  base conversion to complete `D`, preserving null pointers and lvalue storage. The target
-  can add cv-qualifiers. Rvalue-reference, C-style and functional downcasts, and the
+- Runtime `static_cast<D*>`, `static_cast<D&>` and `static_cast<D&&>` from a base xvalue
+  undo an accessible, unambiguous nonvirtual base conversion to complete `D`. They preserve
+  null pointers and the reference operand's storage and value category. The target can add
+  cv-qualifiers. Rvalue-reference downcasts from lvalues, C-style and functional downcasts, and the
   const_cast and reinterpret_cast parts of C-style casts are tracked in
   [#199](https://github.com/yrashk/ycxx/issues/199). Constant evaluation of a base
   adjustment in a downcast is tracked in [#102](https://github.com/yrashk/ycxx/issues/102).
