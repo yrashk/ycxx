@@ -42,6 +42,15 @@ ref-qualified overload resolution.
 [[except.spec]](https://eel.is/c++draft/except.spec) ·
 [Astra's review](https://github.com/yrashk/ycxx/issues/309#issuecomment-7056328877)
 
+`final` belongs to the individual ordinary virtual member declaration. It can appear with
+`override` in either order. Both specifiers are contextual identifiers and may each appear
+once after the declarator. A later declaration that overrides a member marked `final` is
+ill-formed. The same base-chain match covers implicit overrides of private members and of
+declarations hidden by unrelated overloads.
+[[class.virtual]](https://eel.is/c++draft/class.virtual) ·
+[[class.mem.general]](https://eel.is/c++draft/class.mem.general) ·
+[Scope review](https://github.com/yrashk/ycxx/issues/309#issuecomment-7079653899)
+
 A derived destructor, including an implicit one, is virtual when the base destructor is
 virtual. At class completion an omitted exception specification depends on the effective
 specifications of base and field destructors. An override requires a specification the
@@ -155,8 +164,10 @@ that defines the table. Ownership follows the key definition across the complete
 maker appears first.
 [#309](https://github.com/yrashk/ycxx/issues/309)
 
-Broader table emission, covariant returns, pure virtual functions, `final`, explicit virtual
-destructor calls and virtual member addresses also remain in #309.
+Broader table emission, covariant returns, pure virtual functions,
+`final` on classes, virtual destructors and assignment operators, explicit virtual destructor
+calls and virtual member addresses also remain in #309. A virtual assignment operator can be
+overridden by an implicitly declared copy or move assignment in a derived class.
 Separate issues track virtual destructor entry points, RTTI operations, virtual bases and
 further exception specifications.
 [#309](https://github.com/yrashk/ycxx/issues/309) · [#136](https://github.com/yrashk/ycxx/issues/136) ·
