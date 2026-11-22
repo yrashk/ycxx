@@ -1177,6 +1177,9 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   reads to the initialized object. Required constant aggregate initialization evaluates eligible
   scalar defaults in the completed class.
   [#818](https://github.com/yrashk/ycxx/issues/818)
+- Function-template bodies replay defaults of ordinary non-template scalar aggregates, for named
+  objects and aggregate expressions. Newly replayed runtime defaults use the same nonthrowing
+  operation check. [#846](https://github.com/yrashk/ycxx/issues/846)
 
 - An automatic declaration such as `Point p(3, 4);` can initialize a flat aggregate with
   public arithmetic fields and implicit trivial destruction. The fallback applies when
