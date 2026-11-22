@@ -212,8 +212,11 @@ What is true of the code today. Work in progress and its owners are tracked in
 - Directives:
   - `#include` in both forms and the macro-replaced form, and `#include_next`;
   - search directories from `-I`, `-isystem` and `-iquote`, then libycxx's headers and the
-    target's system headers (`:system`, configured by CMake). For x86-64 Linux, ycxx's resource
-    headers (#133) precede the SDK's `usr/include/x86_64-linux-gnu` and `usr/include` (#252);
+    target's system headers (`:system`, configured by CMake). For x86-64 Linux, ycxx searches its
+    resource headers (#133). A native Linux build also searches `/usr/include/x86_64-linux-gnu`
+    and `/usr/include` (#252). Darwin searches the configured SDK's `usr/include`, with a request's
+    `SDKROOT` as an override. Cross-target requests without a target SDK can use explicit include
+    directories (#690);
   - `#define` and `#undef` with the redefinition check, rescanning and painting
     ([cpp.rescan]);
   - function-like macros (`:unit`'s `invocation`, `substitute`, `paste`): arguments across
@@ -294,6 +297,8 @@ What is true of the code today. Work in progress and its owners are tracked in
   as black-box inputs. A common symbol becomes a weak definition in its own `__DATA,__common`
   zero-fill section. The reader rejects absolute and indirect symbols, alignments above 2^15,
   scattered and TLV relocations, and section-relative relocations other than UNSIGNED.
+  A SUBTRACTOR must be followed immediately by a non-PC-relative UNSIGNED at the same address
+  and width. Both records describe a 32-bit or 64-bit field. [#702](https://github.com/yrashk/ycxx/issues/702)
 - `ycxx.link` (`src/link/`): `link(objects, options) -> expected<bytes, errors>`.
   - Diagnoses duplicate and undefined symbols and a missing entry point. A strong definition beats
     a weak one; common symbols merge to the largest. `__mh_execute_header` and `___dso_handle` are
@@ -316,11 +321,21 @@ What is true of the code today. Work in progress and its owners are tracked in
     (literals, initializers, guarded statics) with ycxx's and the system's linker, dead stripping
     included, in both object orders, with a host-compiler peer and an archive member. Templates,
     closures and static locals of inline functions remain strong (#124).
-  - Not yet: unwind info (`__compact_unwind` and `__eh_frame` input sections are dropped, so C++
-    exceptions cannot cross ycxx-linked frames), thread-local variables, dead stripping, literal
-    merging, branch islands beyond ±128 MiB, other dylibs' re-exports, incremental relinking, and
-    import addends outside 0..255 (`DYLD_CHAINED_IMPORT_ADDEND`). `__LLVM` (embedded bitcode),
-    `__LD` and debug sections are dropped.
+  - The linker preserves cleanup-free `__TEXT,__eh_frame` contributions with the supported
+    PC-relative CIE and FDE format, including address differences and multiple input objects.
+    `unit.link` checks the linked ranges and walks through a non-frame-pointer arm64 bridge
+    with the system unwinder on macOS. Compact unwind, personalities and LSDA are tracked in
+    [#72](https://github.com/yrashk/ycxx/issues/72).
+  - The arm64 compiler emits these DWARF records for proven cleanup-free functions. Their FDEs
+    describe the actual saved frame-pointer and return-address locations at the entry, body,
+    and return instructions. `unit.darwin_cleanup_free_unwind` checks the emitted object,
+    omitted frames, native YCXX linking and system-linked exception propagation on macOS.
+    Native throw lowering and landing pads are tracked in [#648](https://github.com/yrashk/ycxx/issues/648).
+    [#737](https://github.com/yrashk/ycxx/issues/737)
+  - Not yet: thread-local variables, dead stripping, literal merging, branch islands beyond
+    ±128 MiB, other dylibs' re-exports, incremental relinking, and import addends outside
+    0..255 (`DYLD_CHAINED_IMPORT_ADDEND`). `__LLVM` (embedded bitcode), `__LD` and debug sections
+    are dropped.
 - Objects from ycxx, Clang or GCC are linked by `ycxx cxx a.o b.o -o out`, with libSystem's
   exports read from the SDK (`$SDKROOT`, else `xcrun --show-sdk-path`). There is no separate
   linker binary (DECISIONS §4.7: one binary, many fronts).
@@ -376,9 +391,26 @@ stay open for the rest.
     stack arguments both ways, function pointers and the GOT. Mutating `sdiv` or the stack packing
     makes it fail. Two variadic C callees read what generated calls pass through their ellipsis
     with `va_arg`, after named stack arguments and with none.
+- Variadic definitions on Apple arm64 ([#647](https://github.com/yrashk/ycxx/issues/647)):
+  `__builtin_va_list` is `char*`. Each cursor operation takes the address of the variable that
+  holds it, so lowering sees a pointer to a `char*` cursor on both targets. `va_start` stores
+  the address of the first 8-byte slot after the named stack arguments, at `x29 + 16` plus
+  their size rounded to 8. `va_arg` loads the slot and advances the cursor by 8, `va_copy`
+  copies it and `va_end` does nothing. `own/variadic/definitions` calls ycxx's definitions
+  from ycxx and from a Clang peer, and lets the peer's `va_arg` read a cursor ycxx started.
+  It fails if the named stack size is ignored or the cursor advances by 4. `<stdarg.h>`
+  itself is missing on Darwin ([#676](https://github.com/yrashk/ycxx/issues/676)); `<cstdarg>` works.
 - Not yet: the allocation
   validator and dependence checker (#29), SSA linear scan, list scheduling, unwind info and DWARF,
-  a measured `cost_model` (#9), defining a variadic function (`va_start`), more than one result, frame objects aligned above 16 bytes.
+  a measured `cost_model` (#9), more than one result, frame objects aligned above 16 bytes.
+
+## System V AMD64 frames
+
+- x86-64 frames can be up to 16 MiB, as on AArch64. A frame over a page is allocated one page
+  at a time, touching each page before RSP moves past it, so a guard page below the stack
+  faults instead of being skipped. `unit.linux_stack_probe` runs a large frame on a thread
+  stack with writable memory below its guard page and checks that the first fault is in the
+  guard page. [#644](https://github.com/yrashk/ycxx/issues/644)
 
 ## System V AMD64 scalar integer division
 
@@ -607,8 +639,9 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
   cursors advance independently in the register save area and share the overflow stack cursor.
   `va_copy` gives each cursor independent positions and `va_end` evaluates its operand.
   `unit.linux_variadic_definitions` exercises native execution, host peers, and standalone and
-  daemon compilation. Indirect floating calls and aggregate variadic signatures and retrieval
-  remain in #196.
+  daemon compilation. Calls through pointers pass `float` and `double` arguments and results
+  as direct calls do; through a variadic pointer, AL counts the vector registers used
+  (`unit.linux_scalar_sse`, #196). Aggregate variadic signatures and retrieval remain in #196.
   [#417](https://github.com/yrashk/ycxx/issues/417), [#412](https://github.com/yrashk/ycxx/issues/412),
   [#399](https://github.com/yrashk/ycxx/issues/399),
   [#196](https://github.com/yrashk/ycxx/issues/196)
@@ -651,6 +684,16 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
   Member functions (with `this` first), closure call operators, function template
   specializations and calls through pointers use the same placement as ordinary functions
   ([#640](https://github.com/yrashk/ycxx/issues/640)).
+  A class result in memory, of more than two eightbytes or not trivial for calls, goes
+  through a hidden pointer that takes RDI ahead of `this` and comes back in RAX. A class
+  argument not trivial for calls passes by the address of the caller's object. Trivially
+  copyable arguments of more than two eightbytes and empty classes remain unsupported
+  ([#641](https://github.com/yrashk/ycxx/issues/641)), as do SSE records
+  ([#642](https://github.com/yrashk/ycxx/issues/642)). Records with source layout directives
+  native layout does not apply stay out of memory passing, including records that contain
+  those layouts as fields, array elements, or bases. A wrapper whose member makes its implicit
+  destructor nontrivial uses the indirect result convention even when its copy and move traits
+  are unknown. [#661](https://github.com/yrashk/ycxx/issues/661)
   [Design](docs/design/linux-integer-aggregates.md) · [#440](https://github.com/yrashk/ycxx/issues/440)
 - `-c` writes deterministic ELF64 relocatable objects through `src/obj/elf.cppm`. The reader
   accepts the supported x86-64 `ET_REL` subset emitted by ycxx. The native ELF linker consumes
@@ -664,10 +707,22 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
   freestanding linker retains these records in the read-only segment. The hosted linker
   supplies unwind discovery for the peer who throws and catches the exception.
   `unit.linux_cleanup_free_unwind` checks mixed hosted execution, omitted frames, and native
-  source, staged, and daemon link parity. Standalone unwind discovery, native handlers, and
-  exceptional cleanups remain under #89.
+  source, staged, and daemon link parity. Standalone unwind discovery and broader handler and
+  exceptional-cleanup support remain under #89.
   [#572](https://github.com/yrashk/ycxx/issues/572) · [#89](https://github.com/yrashk/ycxx/issues/89)
   · [#558](https://github.com/yrashk/ycxx/issues/558)
+- A host-linked ordinary void function can destroy one initialized aggregate local with a
+  nonthrowing destructor when its subsequent direct external `void()` call throws. The normal
+  continuation destroys it once as well. The cleanup-only landing pad resumes the original
+  exception; the mixed-object test checks both paths and the peer's typed handler.
+  [Design](docs/design/linux-hosted-catch-all.md#hosted-local-cleanup-663) · [#663](https://github.com/yrashk/ycxx/issues/663)
+- A hosted nondelegating no-argument union constructor can initialize one scalar aggregate
+  variant with a nonthrowing destructor, then run one external `void()` call. If that call
+  throws, the active member is destroyed and the original exception resumes. If an optional
+  external `int()` in the initializer throws first, neither destructor runs. A caller that
+  only constructs one such automatic union in the same unit supplies a cleanup-free frame.
+  [Design](docs/design/linux-hosted-catch-all.md#hosted-union-constructor-cleanup-738)
+  · [#738](https://github.com/yrashk/ycxx/issues/738) · [Darwin parity #648](https://github.com/yrashk/ycxx/issues/648)
 - Explicit native static links keep the first input ELF COMDAT group for each signature. The reader
   validates group membership, including relocation sections, and selection precedes startup and
   layout. `unit.linux_elf_comdat` checks whole-group selection, retained references, startup and
@@ -1072,11 +1127,15 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   the base subobject.
   Omitted trailing arithmetic fields are value-initialized when they have no written default
   member initializer. With a sole base expression, the base must have no conversion functions.
+  For a named non-template class at namespace scope, an omitted field's written default can
+  use call-free arithmetic on literals and fields of the initialized base. The replay binds
+  implicit and explicit `this` to the destination object. Explicit clauses keep the enclosing
+  receiver and an explicit field initializer takes precedence over the default.
 - Parenthesized arrays, nested fields, unions, reference members, bit-fields, and nontrivial
   destruction remain in [#301](https://github.com/yrashk/ycxx/issues/301). The issue also tracks
-  multiple bases, other base prvalues, omitted default member initializers in derived aggregates,
-  constant evaluation of base copies, static storage and functional casts. Linux x86-64 runtime
-  conversions between floating-point and integer types remain in
+  multiple bases, other base prvalues, default member initializers with calls, mutation or reads
+  outside the base, constant evaluation of base copies, static storage and functional casts.
+  Linux x86-64 runtime conversions between floating-point and integer types remain in
   [#201](https://github.com/yrashk/ycxx/issues/201).
   Spec-only fixtures are in `tests/own/parenthesized-aggregate/`.
 
@@ -1207,9 +1266,18 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
 - A class member declaration can define a named nested enum and declare ordinary fields in
   the same declaration. The fields participate in lookup, initialization, and class layout.
   Tests in `tests/own/nested-enum-fields/` compare combined and separate declarations and
-  cover scoped enum field initializers. Nested class definitions and `__builtin_offsetof`
-  layout support are tracked separately. [#500](https://github.com/yrashk/ycxx/issues/500) ·
-  [#306](https://github.com/yrashk/ycxx/issues/306) · [#496](https://github.com/yrashk/ycxx/pull/496)
+  cover scoped enum field initializers, and `tests/own/builtins/offsetof-after-nested-enum` their
+  offsets. Nested class definitions are tracked separately.
+  [#500](https://github.com/yrashk/ycxx/issues/500) · [#306](https://github.com/yrashk/ycxx/issues/306) ·
+  [#248](https://github.com/yrashk/ycxx/issues/248)
+- Nested scoped enumerators are looked up in their enumeration's scope in ordinary classes and
+  class templates. A class member can reuse a scoped enumerator's name, including a declarator
+  following the enum definition in the same item. Class-scope lookup still finds unscoped
+  enumerators. [#725](https://github.com/yrashk/ycxx/issues/725)
+- Nested unscoped enumerators contend with earlier members in ordinary classes and class templates.
+  An enumerator can hide a same-scope enum tag in ordinary lookup. The tag remains available as
+  a nested-name-specifier or through an unqualified elaborated enum specifier.
+  [#731](https://github.com/yrashk/ycxx/issues/731)
 - Tests: `tests/own/classes/s4-*enum*`, `s4-scoped-enum`, `s4-unscoped-enum` (spec-only, plus two
   from the review): 7 of 7.
 - Namespace-scope opaque enum declarations ([dcl.enum], #157) supply a complete enum type with a
@@ -1226,6 +1294,17 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
 - Further work includes opaque declarations in classes or blocks, unnamed empty definitions,
   unnamed definitions in classes or followed by declarators, and `E{}` and `E(v)` expressions
   (#157). Enumerations in a block are tracked in #117.
+
+## Direct explicit destructor calls (#722)
+
+- `object.~Class()` and `pointer->~Class()` support the receiver's own complete class
+  with a nonvirtual destructor. A visible type alias for the class works too. The compiler
+  checks the destructor's access and deletion before lowering.
+- The receiver is evaluated once. The IR calls the selected destructor when it is
+  nontrivial and ends the object's lifetime without releasing storage. A trivial destructor
+  still ends the lifetime. The native peer test controls the lifetime of each variant member.
+- A dependent class name works in instantiated free functions and class template members.
+  Unary `noexcept` accounts for the effective exception specification of the selected destructor.
 
 ## Classes, δ step 4b: namespaces (#86, 2026-11-18)
 
@@ -1419,8 +1498,7 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   (`ClassRec::union_`, `ClassShape::union_`, `QueryLayout::class_layout`); a braced initializer
   initializes the first member ([dcl.init.aggr]/16), with its default member initializer if it has
   one; class template unions. A reference member is rejected. A designator naming another member,
-  a default member initializer on another member, anonymous unions and variant members with
-  non-trivial special members are diagnosed as not supported (#203).
+  a default member initializer on another member and anonymous unions are tracked in #203.
 - **Floating types as types:** `float`, `double` and `long double` in decl-specifiers, so the
   SDK's `typedef long double max_align_t;` declares; `sizeof`/`alignof` give their sizes. Their
   values (literals, conversions, arithmetic) are #201 and are diagnosed, not miscompiled.
@@ -1444,6 +1522,33 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   checks layout, member lookup, mangling, and cold and warm builds after swapping identical
   sibling unions.
 - Anonymous union member injection and the other union extensions remain tracked in #203.
+
+## Nontrivial union members with a written destructor (#203)
+
+- An ordinary named union can contain a nontrivially destructible member with a trivial or
+  deleted copy constructor if the union declares a destructor. Braced aggregate initialization
+  can initialize the first member. A written constructor initializes its chosen member or
+  leaves the union without an active member. Initializing two members is ill-formed.
+- A union destructor runs its own body and leaves variant members to explicit lifetime
+  management ([class.dtor]). Tests in `tests/own/unions/` check constructor selection and
+  observe the union and member destructor effects independently.
+- An omitted aggregate member of union type is initialized from an empty braced list,
+  so its first variant can run a constructor.
+- A union constructor that selects a nontrivially destructible member can use the hosted
+  Linux cleanup subset above or a nonthrowing exception specification. A potentially
+  throwing delegating constructor with a nontrivial variant receives a diagnostic.
+  Broader exceptional cleanup remains tracked in #89 and #135.
+- Remaining implicit special-member rules and aggregate designator forms stay in #203.
+  Direct explicit destructor calls are tracked in #722.
+
+## Concrete nontrivial members of union templates (#203)
+
+- A namespace-scope union template with a written destructor can instantiate nontrivially
+  destructible variants with trivial or deleted copy constructors. Nonthrowing constructors
+  select the active member, and the union destructor leaves variant cleanup explicit.
+- The instantiation checks the concrete variant types and the completed destructor declaration.
+  Tests select both members of a union specialized on a noncopyable resource and diagnose
+  the unsupported implicit-destruction form.
 
 ## `<cstdio>`, step 4c: operator functions; `<stdio.h>` compiles (#133, 2026-11-18)
 
@@ -1590,6 +1695,36 @@ template's tokens again with the arguments bound.
   qualified names (`typename T::x`, with the `SSubst` sugar of ast.md §6.4), deduction from an
   overload set argument ([temp.deduct.call]/6), "required from here" notes. Coalesced (weak)
   definitions of specializations are #124.
+
+## Native function pointer template arguments (#406)
+
+- A function pointer template argument can name an unambiguous externally linked C++ or C
+  function. The bare function name and its address identify the same specialization.
+  A C++ pointer type can come from an earlier type argument, including a `noexcept`
+  signature. A null pointer to a C++ function type has its own specialization.
+- Linkage names use the symbolic entity from constant evaluation. The function encoding
+  shares the enclosing name's Itanium substitutions. Native calls use the same entity
+  for the relocated address on x86-64 Linux and arm64 Darwin. A potentially throwing
+  pointer initialized from a `noexcept` function preserves its pointer conversion
+  in the specialization name.
+- Tests: `tests/own/templates/function-pointer-arguments/`. Function references and
+  target-typed selection from overload sets stay in #406. Directly taking the address
+  of a function template specialization as an expression stays in #335.
+  Mangling a C-linkage function type stays in #287.
+
+## Value-dependent template arguments in symbols (#773)
+
+- A function template whose signature holds a value-dependent template argument has a symbol:
+  `X <expression> E`, with a dependent variable-template-id as its `<source-name>` and
+  `<template-args>` and `!e` as `nt e` (Itanium C++ ABI §5.1.6). `std::move_if_noexcept`'s
+  return type needs it for any libycxx header in an object.
+- The arguments are the converted ones and the name is unqualified, as GCC writes them. Clang
+  writes them as spelled: qualified outside the global namespace and `std`, without defaulted
+  arguments, without `J…E` around a pack. The two agree on the tested forms; DECISIONS §1.7 (#777)
+  chose GCC's.
+- Tests: `tests/own/abi/dependent-template-args.run.cpp`, linked with a Clang peer that calls the
+  specializations. `&&` follows #671; type-trait operations (`__is_same(T, U)`) still have no
+  symbol (#780).
 
 ## Templates, ζ step 2: class templates (#88, 2026-11-18)
 
@@ -1854,8 +1989,8 @@ session's.*
   class constructibility, assignability and general convertibility, remaining `__is_trivially_*` and
   `__is_nothrow_*` predicates, `__is_standard_layout` and
   `__reference_binds_to_temporary`. Other dependent predicates, conversions of a dependent
-  predicate to a non-`bool` parameter, dependent array bounds and expression mangling remain in
-  #209.
+  predicate to a non-`bool` parameter and dependent array bounds remain in #209; mangling
+  dependent expressions is #773 and #780.
 
 ## Address-of builtin (#330)
 
@@ -1925,8 +2060,8 @@ Fable decided the representation (ast.md §6.6); the Opus session wrote the code
   constraints. This includes unevaluated uses such as `decltype`. A type-constraint or a leading
   requires-clause contributes to that check. [#234](https://github.com/yrashk/ycxx/issues/234)
 - Not yet: class and variable template constraints outside those cases, partial specializations
-  and members, broader constrained packs, fold-expanded constraints, `C auto`, and `noexcept` in
-  compound requirements (#234). Open follow-ups include re-verification of satisfaction at END
+  and members, broader constrained packs, fold-expanded constraints, constrained placeholders
+  outside ordinary block declarations, and `noexcept` in compound requirements (#234). Open follow-ups include re-verification of satisfaction at END
   (#235), Itanium constraint mangling (#236), recorded discarded extents for `if constexpr` (#237),
   and value-dependent mapping arguments (#209).
 
@@ -1970,6 +2105,17 @@ Fable decided the representation (ast.md §6.6); the Opus session wrote the code
 - Tests: `tests/own/classes/s6-access-*` (five reject tests, two run tests); draft examples
   class.friend-1 and class.name-4 pass.
 
+## Dependent type friends in class templates (#689)
+
+A class template can name a non-pack type parameter in a standalone `friend Authority;`
+declaration. Instantiation grants access to the class of that specialization's argument,
+including a cv-qualified or incomplete class, or ignores a non-class argument
+([class.friend], [temp.friend]). The existing access checks use each specialization's own friend
+list. The declaration introduces no name into lookup.
+A type inherited from a nondependent base takes precedence over the template parameter
+([temp.local]).
+[#689](https://github.com/yrashk/ycxx/issues/689)
+
 ## Templates, ζ step 7: static data members of class templates (#88, 2026-11-18)
 
 - A class template's static data members are declared with its other members. A specialization
@@ -2003,10 +2149,10 @@ Fable decided the representation (ast.md §6.6); the Opus session wrote the code
 - What the SDK's `__GNUC__` paths then use, in the headers libycxx's C headers reach, is in
   docs/EXTENSIONS.md. `__builtin_va_list` names the target's va_list type (`char*` on Darwin)
   where lookup finds nothing else (`ast::Target::va_list`, `Sema::builtin_type_name`).
-  The `__builtin_*` functions ycxx lacks (`__builtin_fabsf`, `__builtin_inff`, `__builtin_alloca`,
-  `__builtin_offsetof`, …) are diagnosed as "built-in function '…' is not supported yet", their
-  arguments skipped (`lex::lacking_builtins`, `Sema::unsupported_builtin`). Any other `__builtin_`
-  name is an ordinary one, so a requires-expression probing it is unsatisfied.
+  The `__builtin_*` functions ycxx lacks (such as `__builtin_alloca`) are diagnosed as
+  "built-in function '…' is not supported yet", their arguments skipped (`lex::lacking_builtins`,
+  `Sema::unsupported_builtin`). Any other `__builtin_` name is an ordinary one, so a
+  requires-expression probing it is unsatisfied.
 - Warnings located in a system header are not reported; errors are, and so is `#warning`, as
   with Clang and GCC. A system header is one found in a system directory (a `-I` directory that
   is also an `-isystem` one is dropped from the `-I` list), or one a system header includes
@@ -2063,6 +2209,14 @@ Fable decided the representation (ast.md §6.6); the Opus session wrote the code
   limits. Other libc providers keep their normal `<limits.h>`, and the resource can
   supply compiler limits when a sysroot has no provider ([climits.syn]).
 
+## glibc `<stdint.h>` (#657)
+
+- The integer-constant macros (`__INT64_C(c)` and the rest) are predefined as `c ## L`, GCC's and
+  glibc's spelling, so glibc's identical redefinitions in `<stdint.h>` are valid
+  ([cpp.replace.general]/2). The expansions are Clang's. `<inttypes.h>` still clashes with
+  libycxx's limit macros (#664). Tests: `own/pp/predefined-int-c-redefine` (both targets) and
+  `own/headers/glibc-stdint` (Linux).
+
 ## Templates, ζ step 8: template template parameters and `__make_integer_seq` (#88, #208, 2026-11-19)
 
 Fable decided the representation (ast.md §6.7); the Opus session wrote the code.
@@ -2103,6 +2257,9 @@ Fable decided the representation (ast.md §6.7); the Opus session wrote the code
   the shapes are built. A reference member is laid out as a pointer. Each reader computes a
   class's layout once (`Sema::class_places_`, `QueryLayout::class_layouts_` and `records_`), so
   nested classes cost linear time.
+- `offsetof` ([support.types.layout], #248) uses the same record layout for direct non-static
+  members in ordinary standard-layout classes and unions, producing a target `size_t`
+  constant. `__has_builtin(__builtin_offsetof)` reports availability.
 - Bases, a vptr and empty-base placement extend `record_layout`'s input when inheritance and
   virtual functions arrive.
 - Ordinary named namespace-scope class heads accept concrete `alignas` values and type operands
@@ -2168,13 +2325,40 @@ request it serves.
   one. The wait first lists the files it watches (`watching`: the file table's existing entries).
 - Tests: `unit.trace` (a golden stream of a unit built cold, again and after a whitespace edit;
   the collector under 8 threads; the tree, filters, summary and timeline); `daemon.trace` (traced
-  builds through the daemon, a watcher, a stalled watcher beside 40 builds, shutdown). The
-  browser's key handling is untested.
+  builds through the daemon, a watcher, a stalled watcher beside 40 builds, shutdown).
+- The browser (#635): `:view` is its model, with no terminal: state, keys, mouse, and frames for a
+  given size. `:browse` runs it on `/dev/tty`. It uses SGR mouse modes 1000, 1002 and 1006 with
+  autowrap off, and draws each line at its row. A `SIGWINCH` self-pipe redraws on resize. Fatal
+  signals restore the terminal, then re-raise. The tree has columns (time, worker, alloc and
+  retains, summed over the subtree) whose headers sort it (`Tree::Order::time` added). The
+  summary wraps on narrow screens. The divider drags (or `<`/`>`) and keeps its share of the
+  width. Tests: `unit.trace` (SGR parsing, hit-testing, click, double click, marker, wheel,
+  divider drag, sort, focus, wrap; frames against `browser.golden`); `daemon.trace_tui` (under a
+  pty: modes on and off, a click, a resize, SIGTERM and SIGABRT restoring the terminal),
+  mutation-checked.
+- Copy (#636): `y` copies the cell (the pane's text, unwrapped) and `Y` its subtree (stream lines
+  with times and memory). A drag over rows or pane text, or `V` with j/k, selects, and the copy
+  happens on release or `y`. `Action::copy` carries the text. `:browse` writes OSC 52 (plus
+  tmux's passthrough form) and, locally, runs `YCXX_CLIPBOARD`, or writes the native clipboard
+  (`:clipboard`: macOS NSPasteboard through the Objective-C runtime's C entry points, libobjc and
+  AppKit loaded at the first copy; pbcopy if it refuses), or runs the first of wl-copy, xclip and xsel (Linux, until
+  #730). Tests: `unit.trace` (the exact text of each way to copy, base64, OSC 52, a named
+  pasteboard written and read back on macOS); `daemon.trace_tui` (`y` and a row drag through
+  OSC 52 and the command).
+- Histograms (#637): `Metric` (self time, the span less the union of the children's; time in
+  all; allocated; peak; retained; allocations; runs; cache hits; waits), `metrics_of`,
+  `self_times`, `Groups`, and `histogram(tree, Grouping, within, order)` (by kind, file or
+  children; the tree's filter applies). The browser's histogram view has metric switches,
+  grouping, scope, sort, and a bar that opens its cells in the tree (`kind:`/`at:` filters,
+  or selection). The JSON summary has `histogram.by_kind`/`by_file`. The browser shows a
+  cell's source in the pane, an `S` column, and `p` copies `path:line:col`. Tests:
+  `unit.trace` (aggregation values, JSON, the view's frames against `histogram.golden`, its
+  hits and keys, the source line, column and copy; self time mutation-checked).
 - Source spans (#638): `engine::SourceSpan` on each `TraceEvent`, from a kind's `trace_span(const
   Db&, const Key&)`, which runs only in `Db::trace`. `Db::peek` reads an input, or a value
   verified at this revision, without a dependency. A file's and a unit's cells are the file; a
   function's cells (FunctionSourceQ to Codegen) are its definition's first to last token
-  (`item_span`, lines as diagnostics count them). The JSON `span`, `at:file[:line]` in the
+  (`item_span`, lines as diagnostics count them). The JSON `span`, `at:file[:line[:col]]` in the
   filter, and `span_text`/`span_start` are in place. Tests: `unit.trace` (the spans of a real
   build, cells without spans, text, filter, JSON; mutation-checked) and `daemon.trace` (spans
   across the socket).
@@ -2308,6 +2492,10 @@ What the process allocates, attributed to the engine's cells, in the trace and t
   in order, and returns `*this`. Deleted copy assignments participate in overload resolution.
   [Design](docs/design/implicit-copy-assignment.md#first-declaration-defaulted-copy-assignment) ·
   [#244](https://github.com/yrashk/ycxx/issues/244)
+- Namespace-scope class templates accept a deleted copy assignment without a ref-qualifier
+  on the first in-class declaration. Specializations preserve deletion and diagnose a selected
+  deleted overload.
+  [#709](https://github.com/yrashk/ycxx/issues/709)
 
 ## Ordinary virtual declarations (#309, 2026-11-21)
 
@@ -2399,8 +2587,9 @@ What the process allocates, attributed to the engine's cells, in the trace and t
 
 ## Placeholder types, θ step 1 (#279, 2026-11-19)
 
-- **Types:** `TAuto{decltype_auto}` in `types` (ast.md §5.1's `TAuto`, without a type-constraint
-  yet), `TypeKind::placeholder` in sema; `Types::has_placeholder` finds one under pointers,
+- **Types:** `TAuto` in `types` (ast.md §5.1) carries the placeholder kind, resolved concept entity
+  and canonical written argument list. `TypeKind::placeholder` in sema and
+  `Types::has_placeholder` find a placeholder under pointers,
   references, arrays and a function's return type. The parser reads `auto` and `decltype(auto)`
   as type specifiers, and trailing return types `auto f() -> T` ([dcl.fct]/2) with the
   parameters in scope.
@@ -2412,6 +2601,11 @@ What the process allocates, attributed to the engine's cells, in the trace and t
 - **Variables:** block scope (`= e`, `(e)`, `{e}`; the name is declared first, so its own
   initializer cannot use it), namespace scope and variable templates (`= e`, `{e}`), static data
   members; several declarators must deduce one type.
+- **Constrained block variables** (#286): `C auto x = expression;` uses a prior bare unqualified
+  type concept. Sema evaluates the constraint on the invented parameter before completing the
+  variable type, including for cv- and reference-qualified declarators. Namespace declarations,
+  other initializer forms, template contexts, qualified or argument-bearing concept names,
+  constrained `decltype(auto)`, and abbreviated function templates remain open.
 - **Array structured bindings** ([dcl.struct.bind], #285): a block-scope declaration evaluates
   its initializer once and binds the names to elements or whole rows of the hidden array.
   Value bindings copy scalar elements in order and take cv from the declaration (CWG 2506).
@@ -2762,6 +2956,21 @@ and runtime integration with ycxx's own linker remain under [#89]. See the
 - The mixed Linux object checks distinguish callback overloads with the Itanium `Do` type
   encoding. Dependent exception specifications remain tracked in [#219](https://github.com/yrashk/ycxx/issues/219).
 
+## Unary noexcept on calls and constructions (#729)
+
+`noexcept(expression)` is a constant `bool` and leaves its operand unevaluated
+([expr.unary.noexcept]). The compiler checks the selected function or constructor,
+argument operations, and temporary destruction ([except.spec]). A construction
+in a function template body can be checked after substitution.
+
+## Dependent exception specifications on member templates (#713)
+
+A selected ordinary member function template can instantiate its written
+`noexcept(expression)` with the class and function template arguments
+([except.spec], [temp.inst]). Its parameter and class scopes are available
+during replay. Class instantiation leaves the specification of an unused
+member template deferred.
+
 ## The address of an overload set, ι (#313, #337, 2026-11-19)
 
 - A pointer or reference target picks a free or static member function by its function type
@@ -2904,6 +3113,27 @@ and runtime integration with ycxx's own linker remain under [#89]. See the
   A file-scope scalar initializer still needs lowered code to qualify for dynamic initialization.
   Type checking covers function-local expressions and unevaluated operands.
 
+## Qualified template functional conversions (#697)
+
+A namespace-qualified class or alias template-id can name the target of a parenthesized
+or braced functional conversion. A namespace alias resolves to the same template, and defaults
+can come from its visible redeclarations. Qualified lookup stops at the first matching namespace
+on each using-directive path. Conflicting declarations across paths are ambiguous. Qualified
+function and variable template expressions use the ordinary expression path
+([expr.type.conv], [temp.names], [basic.lookup.qual]).
+[#697](https://github.com/yrashk/ycxx/issues/697)
+
+## Typed declaration annotations (#662)
+
+Class heads and ordinary function declarations accept C++26 `[[= expression ]]` annotations
+and annotation lists ([dcl.attr.annotation]). The compiler retains each occurrence's canonical
+payload type, evaluated value and item-relative token offset. A translation-unit consumer can
+query all written occurrences by class or function entity, including repeated values and
+redeclarations, while overloads keep separate lists. Enum payloads retain their enumeration type.
+Supported aggregate payloads use structural fields and trivial destruction. Reference-member and
+union payload evaluation, the reflection operator, public `std::meta` APIs, template annotation
+substitution and broader annotation targets remain in [#324](https://github.com/yrashk/ycxx/issues/324).
+
 ## Bootstrap workarounds
 
 Places where ycxx's sources avoid or work around a C++26 feature because GCC 16 lacks it or
@@ -2923,8 +3153,9 @@ miscompiles it (DECISIONS §3.2). Each is removed once ycxx compiles itself.
   `make_qual_type`, `make_decl_ord` in `src/ast/handles.cppm`).
   - Cause: GCC 16.2 does not emit its TU-local contract-violation helper
     (`__tu_has_violation`) in an importer that inlines a non-template inline function with a
-    precondition. The importer fails to link unless it has a contract of its own. Templates and
-    in-class member functions are not affected.
+    precondition. The importer fails to link unless it has a contract of its own. Members of
+    non-template classes are not affected; a class template's member is, when its specialization
+    is instantiated in the imported interface (GCC PR 124264; #46).
   - Fix: belongs in GCC.
 - **A contract predicate inside a lambda that names a member of the enclosing class goes through
   a local `bool`, or a member's precondition** (`src/ast` interner, builder, compaction;
@@ -2951,6 +3182,31 @@ miscompiles it (DECISIONS §3.2). Each is removed once ycxx compiles itself.
   - `CMakeLists.txt` adds the flags to libycxx's `ycxx_modules` target.
   - Without them, `std::meta` is empty. An importer whose `-freflection` does not match the
     BMI's segfaults GCC 16.2.
+- **`FpIndex`'s `Shard` has a user-provided constructor** (`src/ast/store.cppm`, #283).
+  - Cause: at -O1 and above GCC 16.2 segfaults in an importer of `ycxx.ast.interner`, whose
+    `Interners` has an inline constructor and several `FpIndex` specializations, while
+    constant-evaluating `shards_`'s initializer for a constexpr-constructible `Shard`. Debug
+    builds are not affected. Two-file repro on #283; related to GCC PR 124973.
+  - Fix: belongs in GCC. Make `Shard` an aggregate again when ycxx compiles itself.
+- **`compact.cppm` is compiled with `-fkeep-static-functions`** (`src/ast/CMakeLists.txt`, #46).
+  - Cause: at -O1 and above GCC 16.2 inlines `KindTable<…>::kind`'s `pre` into `Compactor`
+    without emitting the TU-local violation helper it calls, so programs linking the AST fail
+    to link (the template case of GCC PR 124264, above). Repro on #46.
+  - Fix: belongs in GCC. Drop the option when ycxx compiles itself.
+- **Release (-O3) false-positive warnings, restructured instead of disabled** (#726; restoring
+  them is #748). Each comment shows the plain form to restore.
+  - `-Wmaybe-uninitialized` on a `std::optional`'s payload read after a check: a value and a flag
+    in `link::elf::read_shared_object` (`dynamic`, and `symbol_count` from `parsed`),
+    `obj::archive::read` (`index`), `parse.cppm` (`named`, `mem`, `exception_tokens`, `lit`)
+    and `Sema::class_name` (`found`).
+  - `-Warray-bounds` through libycxx's in-place `vector` insert: reserved appends in
+    `Sema::member_call` (`parameters`), `Sema::call` (`all`) and
+    `Sema::check_placeholder_constraint` (`args`).
+  - `-Warray-bounds`/`-Wstringop-overflow` through `"literal" + std::string&&`: `std::format` in
+    `daemon/connect.cppm` (four messages).
+  - `-Wstringop-overflow` on the `sun_path` copy: a copy also bounded by the array in the
+    daemon's `socket_address`.
+  - `-Wstringop-overread` on `string::find`: `pp::floating` keeps the position of `e`.
 
 ## Milestones
 

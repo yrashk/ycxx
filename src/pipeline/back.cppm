@@ -111,7 +111,7 @@ struct Entity {
 };
 
 // Certified on the typed definition, before IR drops lifetime information.
-enum class UnwindEligibility : std::uint8_t { none, cleanup_free, cleanup_free_with_throw, hosted_catch_all };
+enum class UnwindEligibility : std::uint8_t { none, cleanup_free, cleanup_free_with_throw, hosted_catch_all, hosted_cleanup };
 
 // A function definition: what `function_ir(F)` reads (irgen::FunctionInput, without a thunk's
 // locals).
@@ -131,6 +131,10 @@ struct FunctionDef {
   bool coalesced = false;
   UnwindEligibility unwind = UnwindEligibility::none;
   EntityId catch_all_callee = EntityId::none;  // for the complete-unit exception-specification check
+  ast::NodeId cleanup_call = ast::NodeId::none;
+  EntityId constructor_cleanup = EntityId::none;
+  EntityId constructor_initializer_callee = EntityId::none;
+  EntityId unwind_through_constructor = EntityId::none;
 };
 
 // A variable definition at namespace scope with its constant initializer, or `ConstId::none` for
@@ -161,6 +165,10 @@ struct ClassShape {
   std::vector<std::uint8_t> bit_widths{};  // parallel to fields, empty for ordinary records
   bool layout_uncertain = false;  // source packing or alignment that native layout does not apply
   bool copy_abi_unknown = false;   // no ABI classification for this defaulted copy
+  // `trivial_calls` false that the destructor and copy and move constructors, taken one by one,
+  // do not confirm: an unknown one, or one explicitly defaulted and trivial that the call rule
+  // still counts as user-declared (#641).
+  bool calls_abi_uncertain = false;
   bool layout_requires_virtual_support = false;
   bool has_mutable_field = false;
   sema::PeerVirtualLayout peer_virtual_layout = sema::PeerVirtualLayout::none;
@@ -190,6 +198,7 @@ struct TranslationUnit {
   std::optional<ast::Loc> virtual_declaration;
   std::optional<ir::IntThrowRuntime> int_throw;
   std::optional<ir::CatchAllRuntime> catch_all;
+  EntityId cleanup_resume = EntityId::none;
 };
 
 // What failed, at a location in an item when there is one. Every error here is something the α
@@ -219,6 +228,7 @@ void hash_into(Hasher& h, const L2Body& b) {
   hash_append(h, f.imms);
   hash_append(h, f.succs);
   hash_append(h, f.results);
+  h.uint(f.indirect_result);  // where the class result's address arrives (x8, or RDI and back in RAX)
   h.uint(f.origins.size());
   for (std::uint32_t n = 0; n < f.origins.size(); ++n) hash_append(h, f.origins.of(ir::NodeId(n)));
 }
@@ -231,6 +241,7 @@ void serialize_into(engine::Sink& out, const L2Body& b) {
   engine::serialize(out, f.imms);
   engine::serialize(out, f.succs);
   engine::serialize(out, f.results);
+  engine::serialize(out, f.indirect_result);
   std::vector<std::vector<ir::Origin>> origins;
   for (std::uint32_t n = 0; n < f.origins.size(); ++n) origins.emplace_back(std::from_range, f.origins.of(ir::NodeId(n)));
   engine::serialize(out, origins);
@@ -245,6 +256,7 @@ L2Body deserialize_from(engine::Source& in, std::type_identity<L2Body>) {
   f.imms = engine::deserialize<decltype(f.imms)>(in);
   f.succs = engine::deserialize<decltype(f.succs)>(in);
   f.results = engine::deserialize<decltype(f.results)>(in);
+  f.indirect_result = engine::deserialize<decltype(f.indirect_result)>(in);
   f.origins = ir::OriginMap(engine::deserialize<std::vector<std::vector<ir::Origin>>>(in));
   return b;
 }
@@ -696,7 +708,7 @@ ir::TypeLayout QueryLayout::type(QualType q) const {
     ir::TypeLayout e = type(a.elem);
     std::uint64_t n = a.bound == ConstId::none ? 0 : in.values.get<ast::VInt>(a.bound).bits.lo;
     return {.kind = array, .size = e.size * n, .align = e.align, .contains_member_pointer = e.contains_member_pointer,
-            .contains_explicit_alignment = e.contains_explicit_alignment};
+            .layout_uncertain = e.layout_uncertain, .contains_explicit_alignment = e.contains_explicit_alignment};
   }
   if (in.types.is<ast::TFunction>(c)) return {function, 0, 1, false, {}};
   // A reference member is held as the address of its object ([dcl.ref]).
@@ -716,6 +728,8 @@ ir::TypeLayout QueryLayout::type(QualType q) const {
     l.empty = r->placed.empty;  // no data members, in it or its bases
     l.data = r->placed.nvsize;
     l.copy_abi_unknown = it->second->copy_abi_unknown;
+    l.calls_abi_uncertain = it->second->calls_abi_uncertain;
+    l.layout_uncertain = it->second->layout_uncertain;
     l.contains_explicit_alignment = it->second->explicit_alignment != 0;
     if (target.triple == ast::x86_64_linux.triple)
       l.sysv_integer_eightbytes = sysv_integer_eightbytes(*it->second, *r);
@@ -729,6 +743,7 @@ ir::TypeLayout QueryLayout::type(QualType q) const {
     std::vector<ir::SubObject> parts;
     for (const ir::SubObject& b : r->bases) {
       const auto base = type(b.type);
+      l.layout_uncertain |= base.layout_uncertain;
       l.contains_explicit_alignment |= base.contains_explicit_alignment;
       if (!base.empty) parts.push_back(b);
     }
@@ -744,6 +759,7 @@ ir::TypeLayout QueryLayout::type(QualType q) const {
       }
       ir::TypeLayout m = type(ft);
       l.contains_member_pointer |= m.contains_member_pointer;
+      l.layout_uncertain |= m.layout_uncertain;
       l.contains_explicit_alignment |= m.contains_explicit_alignment;
       std::uint8_t mb = m.kind == floating ? std::uint8_t(m.size) : m.hfa_bytes;
       std::uint64_t mn = (m.kind == floating ? 1 : m.hfa) * n;
@@ -1029,6 +1045,16 @@ engine::query_task<Generated> FunctionGen::run(engine::Ctx& cx, FnKey k) {
   input.dso = d.dso;
   input.hosted_catch_all = d.unwind == UnwindEligibility::hosted_catch_all;
   const bool linux = facts.target().triple == ast::x86_64_linux.triple;
+  input.check_unwind_cleanups = linux;
+  if (d.constructor_cleanup != EntityId::none && d.unwind == UnwindEligibility::none) {
+    auto error = co_await located_error(cx, k.tu, ast::Loc{d.item, d.body_offset},
+                                       "unsupported unwind from a union constructor with a nontrivial active member");
+    co_return Generated{std::nullopt, std::move(error)};
+  }
+  if (d.unwind == UnwindEligibility::hosted_cleanup) {
+    input.cleanup_call = d.cleanup_call;
+    input.constructor_cleanup = d.constructor_cleanup;
+  }
   input.native_array_delete = linux;
   input.native_array_new = linux && (d.unwind == UnwindEligibility::cleanup_free ||
                                      d.unwind == UnwindEligibility::cleanup_free_with_throw);
@@ -1107,16 +1133,18 @@ std::string_view linux_signature_error(const ast::Interners& in, const QueryLayo
   auto error_for = [&](QualType value, bool result) -> std::string_view {
     auto builtin = ast::builtin_of(in, value);
     if (builtin == ast::Builtin::long_double) return "x87 long double parameters and results are unsupported";
-    if (builtin == ast::Builtin::float_ || builtin == ast::Builtin::double_) {
-      if (use == indirect_call) return "floating-point parameters and results of indirect calls are unsupported";
-      return {};
-    }
+    if (builtin == ast::Builtin::float_ || builtin == ast::Builtin::double_) return {};
     auto l = layout.type(value);
     if (l.copy_abi_unknown)
       return result ? "defaulted copy ABI classification is unavailable for the result"
                     : "defaulted copy ABI classification is unavailable for a parameter";
     if ((result && l.kind == ir::TypeKind::void_) || linux_integer_scalar(l) ||
         (allow_aggregates && l.sysv_integer_eightbytes)) return {};
+    // A class not trivial for calls passes by address and returns through the hidden result
+    // pointer; so does any result of more than two eightbytes (MEMORY) (#641).
+    if (allow_aggregates && l.kind == ir::TypeKind::record && !l.empty && !l.layout_uncertain &&
+        ((!l.trivial_calls && !l.calls_abi_uncertain) || (l.trivial_calls && result && l.size > 16)))
+      return {};
     if (allow_aggregates && l.kind == ir::TypeKind::record)
       return result ? "unsupported aggregate result layout" : "unsupported aggregate parameter layout";
     if (fixed_direct)
@@ -1145,11 +1173,9 @@ std::string_view linux_ellipsis_error(const ast::Interners& in, const QueryLayou
     auto builtin = ast::builtin_of(in, type);
     if (builtin == ast::Builtin::long_double) return "x87 long double ellipsis arguments are unsupported";
     auto l = layout.type(type);
-    if (indirect && l.kind == ir::TypeKind::floating) return "floating-point ellipsis arguments are unsupported";
-    if (!((byval >> i) & 1) && (linux_ellipsis_scalar(l) || (!indirect && builtin == ast::Builtin::double_)))
+    if (!((byval >> i) & 1) && (linux_ellipsis_scalar(l) || builtin == ast::Builtin::double_))
       continue;
-    return indirect ? "only 32- and 64-bit integer and pointer ellipsis arguments are supported"
-                    : "only double, 32- and 64-bit integer, and pointer ellipsis arguments are supported";
+    return "only double, 32- and 64-bit integer, and pointer ellipsis arguments are supported";
   }
   return {};
 }
@@ -1193,6 +1219,14 @@ engine::query_task<Lowered> Lower::run(engine::Ctx& cx, FnKey k) {
         if (e != tu.entities.end()) {
           callee = e->type;
           ordinary_callee = ordinary_free_function(*e);
+          if (e->special == Special::constructor && def.unwind_through_constructor != callee_id) {
+            const auto constructor = std::ranges::find(tu.functions, callee_id, &FunctionDef::entity);
+            if (constructor != tu.functions.end() && constructor->constructor_cleanup != EntityId::none) {
+              auto located = co_await located_error(cx, k.tu, ast::Loc{def.item, def.body_offset},
+                                                   "unsupported caller of a potentially throwing union constructor");
+              co_return Lowered{std::nullopt, {}, std::move(located)};
+            }
+          }
         }
       } else if (op == ir::Op::call_ind) {
         QualType ptr = body.value(body.operands_of(n)[1]).type.type;
@@ -1208,7 +1242,7 @@ engine::query_task<Lowered> Lower::run(engine::Ctx& cx, FnKey k) {
         if (definition != tu.functions.end() && definition->body.deduced)
           error = linux_signature_error(in, layout, definition->body.deduced_type, use, ordinary_callee);
       }
-      if (error.empty()) error = linux_ellipsis_error(in, layout, body, n);
+      if (error.empty() && op != ir::Op::invoke) error = linux_ellipsis_error(in, layout, body, n);
       if (error.empty()) continue;
       const ir::FunctionDebug& debug = co_await cx.fetch<FunctionDebug>(k);
       auto at = i < debug.loc.size() ? debug.loc[i] : ast::Loc{def.item, def.body_offset};
@@ -1218,6 +1252,7 @@ engine::query_task<Lowered> Lower::run(engine::Ctx& cx, FnKey k) {
     config.sysv_amd64 = true;
     if (def.unwind == UnwindEligibility::cleanup_free_with_throw) config.int_throw = tu.int_throw;
     if (def.unwind == UnwindEligibility::hosted_catch_all) config.catch_all = tu.catch_all;
+    if (def.unwind == UnwindEligibility::hosted_cleanup) config.cleanup_resume = tu.cleanup_resume;
     // Extend outgoing narrow results for interoperability. Lowering truncates incoming results
     // to the declared width, as the System V AMD64 psABI §3.2.3 leaves excess bits unspecified.
     config.min_result_bits = 32;
@@ -1244,7 +1279,7 @@ std::vector<SymbolReference> references(const l2::Function& body) {
   std::vector<SymbolReference> out;
   for (std::uint32_t n = 0; n < body.nodes.size(); ++n) {
     l2::Op op = body.nodes[n].op;
-    if (op == l2::Op::symbol || op == l2::Op::call || op == l2::Op::invoke)
+    if (op == l2::Op::symbol || op == l2::Op::call || op == l2::Op::invoke || op == l2::Op::invoke_cleanup)
       out.push_back({ir::EntityId(std::uint32_t(body.imms_of(ir::NodeId(n))[0])), op});
   }
   return out;
@@ -1444,7 +1479,7 @@ std::expected<obj::object, aarch64::CodegenError> assemble_linux(
     const std::uint32_t text = o.add_section(obj::standard_section::text);
     std::optional<std::uint32_t> frames, exception_tables, personality_cell;
     const bool has_handlers = std::ranges::any_of(functions, [](const LinuxFunction& f) {
-      return f.code->catch_all.has_value();
+      return f.code->unwind_sites.has_value();
     });
     if (has_handlers || std::ranges::any_of(functions, &LinuxFunction::cleanup_free_unwind))
       frames = o.add_section(obj::standard_section::eh_frame);
@@ -1477,11 +1512,11 @@ std::expected<obj::object, aarch64::CodegenError> assemble_linux(
           return std::unexpected(aarch64::CodegenError{f.entity, "a text relocation exceeds the object offset limit"});
         sec.relocate(linux_relocation(r.kind), target->second, r.addend, static_cast<std::uint32_t>(base + r.offset));
       }
-      if (f.cleanup_free_unwind || f.code->catch_all) {
+      if (f.cleanup_free_unwind || f.code->unwind_sites) {
         std::optional<std::uint32_t> lsda_anchor;
-        if (f.code->catch_all) {
-          if (f.weak) return std::unexpected(aarch64::CodegenError{f.entity, "catch-all frames require strong definitions"});
-          auto lsda = x86_64::catch_all_lsda(*f.code);
+        if (f.code->unwind_sites) {
+          if (f.weak) return std::unexpected(aarch64::CodegenError{f.entity, "hosted unwind frames require strong definitions"});
+          auto lsda = x86_64::exception_lsda(*f.code);
           if (!lsda) return std::unexpected(aarch64::CodegenError{f.entity, lsda.error()});
           auto& tables = o.sections[*exception_tables];
           if (lsda->size() + tables.size() > std::numeric_limits<std::uint32_t>::max())
@@ -1657,6 +1692,16 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
   auto spec_of = [](const Entity& e) {
     return TemplateSpec{e.template_type.value_or(e.type), e.template_args, e.template_params, e.template_same_heads};
   };
+  const FunctionNames function_names = [&](EntityId id) -> std::optional<FunctionName> {
+    auto found = by_id.find(ir::raw(id));
+    if (found == by_id.end()) return std::nullopt;
+    const Entity& fn = *found->second;
+    if (!fn.is_function || fn.linkage != ast::Linkage::external || fn.local_parameter_binding)
+      return std::nullopt;
+    return FunctionName{
+        {fn.name, fn.type, fn.scope, false, fn.template_type ? std::optional(spec_of(fn)) : std::nullopt},
+        fn.lang};
+  };
   ClassNames names = [&](EntityId c) {
     const sema::World* w = universe().world_for(target);
     if (!w) return ClassName{};
@@ -1697,7 +1742,7 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
     std::string name_ = e.special == Special::constructor ? "C1" : e.special == Special::destructor ? "D1" : e.name;
     TemplateSpec spec{e.template_type.value_or(e.type), e.template_args, e.template_params, e.template_same_heads};
     auto name = symbol_name(in, name_, e.type, e.is_function, e.lang, names, e.scope, e.special != Special::none,
-                            e.template_type ? &spec : nullptr, !linux);
+                            e.template_type ? &spec : nullptr, !linux, function_names);
     if (!name) {
       errors.push_back({e.at, std::format("the name of '{}': {} is not supported yet", e.name, name.error())});
       continue;
@@ -1752,7 +1797,8 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
       return assemble_linux(tu.name, code, data, symbols, weak_variables);
     }
     std::vector<aarch64::CompiledFunction> code;
-    for (std::size_t i = 0; i < fns.size(); ++i) code.push_back({fns[i].fn, *ms[i].get().code});
+    for (std::size_t i = 0; i < fns.size(); ++i)
+      code.push_back({fns[i].fn, *ms[i].get().code, tu.functions[i].unwind == UnwindEligibility::cleanup_free});
     auto o = aarch64::assemble(tu.name, code, data, symbols);
     if (o) mark_weak_definitions(*o, symbols, tu.functions, weak_variables);
     return o;

@@ -735,8 +735,8 @@ clauses = ['expr.static.cast', 'expr.reinterpret.cast', 'expr.const.cast', 'expr
 std = 'C++98'
 detect = '\b(?:static|const|reinterpret)_cast\s*<'
 status = 'partial'
-issues = [199, 59, 216]
-note = 'rvalue-reference, C-style and functional downcasts, `const_cast`, `reinterpret_cast`, and some `void*` and `std::nullptr_t` conversions. Qualified functional casts check access to aliases and typedefs declared directly in ordinary classes.'
+issues = [199, 59, 216, 697]
+note = 'rvalue-reference, C-style and functional downcasts, `const_cast`, `reinterpret_cast`, and some `void*` and `std::nullptr_t` conversions. Qualified functional casts check access to aliases and typedefs declared directly in ordinary classes and accept namespace-qualified class and alias template-ids.'
 probe = '''
 int main() { long l = 5; int i = static_cast<int>(l); const int* c = &i; int* m = const_cast<int*>(c); char* b = reinterpret_cast<char*>(m); return (i == 5 && (int)l == int(l) && b) ? 0 : 1; }
 '''
@@ -1088,8 +1088,8 @@ clauses = ['dcl.fct', 'expr.call', 'over.ics.ellipsis']
 std = 'C++98'
 detect = ',\s*\.\.\.\s*\)|\bva_(?:start|arg|list)\b'
 status = 'partial'
-issues = [196, 399]
-note = 'Linux x86-64 supports direct variadic calls and ordinary free definitions with scalar INTEGER and SSE values. Unnamed `float` promotes to `double`, and `va_arg` retrieves integers, pointers and `double`. Indirect scalar INTEGER calls work. Indirect floating calls and aggregate variadic classification remain in #196.'
+issues = [196, 399, 647]
+note = 'Apple arm64 defines variadic functions with integer, pointer and `double` `va_arg` (#647). Linux x86-64 supports direct variadic calls and ordinary free definitions with scalar INTEGER and SSE values. Unnamed `float` promotes to `double`, and `va_arg` retrieves integers, pointers and `double`. Indirect calls pass INTEGER and SSE values, with AL set for variadic ones. Aggregate variadic classification remains in #196.'
 probe = '''
 #include <cstdarg>
 int sum(int n, ...) { std::va_list ap; va_start(ap); int s = 0; for (int i = 0; i < n; ++i) s += va_arg(ap, int); va_end(ap); return s; }
@@ -1119,7 +1119,7 @@ clauses = ['dcl.init.aggr', 'dcl.init.general']
 std = 'C++17'
 ftm = '__cpp_aggregate_bases'
 status = 'partial'
-note = 'Automatic flat arithmetic records support parenthesized initialization. Runtime declarations can copy one flat public direct base from an exact-type lvalue or a fully written unqualified braced prvalue. An omitted trailing arithmetic field is value-initialized when it has no written default member initializer. Other base forms, arrays, nested and reference fields, and other initialization contexts remain open.'
+note = 'Automatic flat arithmetic records support parenthesized initialization. Runtime declarations can copy one flat public direct base from an exact-type lvalue or a fully written unqualified braced prvalue. Omitted trailing arithmetic fields can replay call-free defaults that read the initialized base, or are value-initialized when they have no default. Other base forms, arrays, nested and reference fields, and other initialization contexts remain open.'
 probe = '''
 struct B { int b; }; struct D : B { int d; }; struct P { int x, y; };
 int main() { D d{{1}, 2}; P p(3, 4); return (d.b + d.d + p.x + p.y == 10) ? 0 : 1; }
@@ -1247,8 +1247,8 @@ clauses = ['enum', 'dcl.enum']
 std = 'C++98'
 detect = '\benum\b'
 status = 'done'
-issues = [157]
-note = 'Named nested enum definitions support trailing ordinary fields in the same member declaration.'
+issues = [157, 731]
+note = 'Named nested enum definitions support trailing fields. Unscoped enumerators enter class scope and hide tags in ordinary lookup.'
 probe = '''
 enum Color { red, green = 5, blue };
 extern "C" { enum { bias = 1, expected = bias + 5 }; }
@@ -1272,7 +1272,7 @@ int main() { E e = E::b; return static_cast<int>(e) == 1 ? 0 : 1; }
 '''
 status = 'partial'
 issues = [157]
-note = 'Named nested scoped enum definitions support trailing ordinary fields and their initializers. Opaque enum declarations in classes and blocks remain open.'
+note = 'Named nested scoped enum definitions support trailing fields and their initializers and keep enumerator names in the enum scope. Opaque enum declarations in classes and blocks remain open.'
 
 [[feature]]
 id = 'dcl-using-enum'
@@ -1406,8 +1406,8 @@ void f(double) = delete;
 int main() { S s; return s.v - 1; }
 '''
 status = 'partial'
-issues = [157, 244]
-note = 'First-declaration in-class copy constructors support trivial member copies and deletion. Other explicitly defaulted forms and nontrivial copy bodies remain open.'
+issues = [157, 244, 709]
+note = 'First-declaration in-class copy constructors support trivial member copies and deletion. Namespace-scope class templates also support first-declaration deleted copy assignment without a ref-qualifier. Other explicitly defaulted forms and nontrivial copy bodies remain open.'
 
 [[feature]]
 id = 'dcl-delete-reason'
@@ -1599,8 +1599,8 @@ clauses = ['special', 'class.ctor', 'class.ctor.general', 'class.default.ctor', 
 std = 'C++98'
 core = true
 status = 'done'
-issues = [157, 219]
-note = 'Ordinary constructors accept concrete noexcept specifications and check agreement with out-of-class definitions.'
+issues = [157, 219, 722]
+note = 'Ordinary constructors accept concrete noexcept specifications and check agreement with out-of-class definitions. Direct explicit destructor calls support an ordinary complete class with a nonvirtual destructor.'
 probe = '''
 int d = 0;
 struct S { int a, b; S(int x) : a(x), b(x + 1) {} ~S() { ++d; } };
@@ -1723,7 +1723,7 @@ std = 'C++98'
 detect = '\bunion\b'
 status = 'partial'
 issues = [203]
-note = 'Named data members can have an unnamed union type. Anonymous unions and further variants are tracked in #203'
+note = 'Named data members can have an unnamed union type. Named ordinary unions and instantiated namespace-scope union templates with written destructors can contain nontrivially destructible variants with trivial or deleted copy constructors. Anonymous unions and further variants are tracked in #203'
 probe = '''
 union U { int i; char c; };
 struct S { union { int a; float f; }; };
@@ -1773,8 +1773,8 @@ clauses = ['class.friend', 'dcl.friend', 'temp.friend']
 std = 'C++98'
 detect = '\bfriend\b'
 status = 'partial'
-issues = [259]
-note = 'C-linkage friend definitions, hidden friend operators, default arguments in friend declarations, and friends in templates'
+issues = [259, 689]
+note = 'Includes type friends naming a class template parameter. Broader template friends, C linkage, hidden operators, and default arguments remain partial.'
 probe = '''
 class C { int p = 2; friend int peek(const C& c) { return c.p; } };
 int main() { C c; return peek(c) - 2; }
@@ -1954,7 +1954,8 @@ clauses = ['temp', 'temp.pre', 'temp.param', 'temp.names', 'temp.arg', 'temp.arg
 std = 'C++98'
 detect = '\btemplate\s*<'
 status = 'done'
-issues = [209, 210]
+issues = [209, 210, 406]
+note = 'Native specialization names support unambiguous externally linked function pointer arguments. Function references and selection from overload sets remain open.'
 probe = '''
 template<class T> T mx(T a, T b) { return a > b ? a : b; }
 template<class T> int k(T*) { return 1; } template<class T> int k(T) { return 2; }
@@ -2209,8 +2210,9 @@ group = 'concepts'
 clauses = ['dcl.fct', 'dcl.spec.auto', 'temp.param']
 std = 'C++20'
 detect = '''\b(?!if\b|while\b|for\b|switch\b|return\b|decltype\b|sizeof\b|alignof\b|noexcept\b|requires\b|catch\b)\w+\s*\(\s*(?:const\s+)?(?:[\w:]+\s+)?auto\s*(?:&{1,2}|\*)?\s*(?:\.\.\.\s*)?\w*\s*[,)=]'''
-status = 'missing'
+status = 'partial'
 issues = [286, 234]
+note = 'Ordinary block variables support bare unqualified type concepts on auto with equals initialization. Abbreviated function templates and other constrained placeholder contexts remain open.'
 probe = '''
 template<class T> concept Int = sizeof(T) == 4;
 int f(Int auto x) { return x; }
@@ -2236,8 +2238,8 @@ clauses = ['except', 'except.pre', 'except.throw', 'except.ctor', 'except.handle
 std = 'C++98'
 detect = '\bthrow\b|\btry\b|\bcatch\s*\('
 status = 'partial'
-issues = [89, 72, 572, 578, 583]
-note = 'throw and block try/catch syntax, with hosted unwinding, int throws from eligible cleanup-free frames and one catch-all around an external call on Linux x86-64'
+issues = [89, 72, 572, 578, 583, 648, 737]
+note = 'Throw and block try/catch syntax. Hosted exceptions can cross eligible cleanup-free frames on Linux x86-64 and macOS arm64. Linux also supports int throws from eligible frames and one catch-all around an external call.'
 probe = '''
 int d = 0; struct G { ~G() { ++d; } };
 int f() { G g; throw 3; }
@@ -2253,8 +2255,8 @@ std = 'C++11'
 ftm = '__cpp_noexcept_function_type'
 detect = '\bnoexcept\b'
 status = 'partial'
-issues = [219]
-note = 'Ordinary function pointers and references preserve concrete noexcept type identity and allow conversion to the corresponding potentially throwing type. Dependent exception specifications remain open.'
+issues = [219, 729, 713]
+note = 'Ordinary function pointers and references preserve concrete noexcept type identity. The unary operator checks calls and constructions. Dependent exception specifications remain open.'
 probe = '''
 void f() noexcept {} void g() {}
 int main() { void (*p)() noexcept = f; return (noexcept(f()) && !noexcept(g()) && p) ? 0 : 1; }
@@ -2546,8 +2548,9 @@ group = 'reflect'
 clauses = ['dcl.attr.annotation']
 std = 'C++26'
 detect = '\[\[\s*='
-status = 'missing'
-issues = [324, 80]
+status = 'partial'
+issues = [662, 324, 80]
+note = 'Typed constants and source occurrences on ordinary class and function declarations.'
 
 [[feature]]
 id = 'stmt-expansion'
@@ -2653,7 +2656,8 @@ probe = '''
 struct S { int a; int b; };
 int main() { return (__builtin_popcount(7u) == 3 && __builtin_offsetof(S, b) == 4) ? 0 : 1; }
 '''
-status = 'missing'
+status = 'partial'
+note = '`__builtin_offsetof` and the `offsetof` macro of `<cstddef>` give the offsets of direct non-static data members of ordinary standard-layout classes. Compound member designators, the `<bit>` and `<limits>` built-ins such as `__builtin_popcount`, and the remaining numeric built-ins are tracked in #248.'
 
 [[feature]]
 id = 'lib-atomic'

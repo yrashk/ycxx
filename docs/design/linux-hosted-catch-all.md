@@ -58,3 +58,45 @@ local lifetime cleanup, rethrow, and other targets remain under [#89].
 [#583]: https://github.com/yrashk/ycxx/issues/583
 [#572]: https://github.com/yrashk/ycxx/issues/572
 [#89]: https://github.com/yrashk/ycxx/issues/89
+
+## Hosted local cleanup (#663)
+
+A strong ordinary void function with scalar parameters can keep one aggregate
+local with a known nonthrowing destructor live across a direct external
+`void()` call. The typed body certifies a single initialized automatic
+declaration followed by the call, and the initializer uses scalar operations
+without calls or temporary class objects. The provider supplies the frames
+from its throw site to ycxx's call site.
+
+L1 emits an `invoke` at the call. Its normal path runs the existing scope
+exit, and the exceptional path runs the same local destruction before
+`resume` ([except.ctor], [class.dtor]). The cleanup-only LSDA uses the existing
+hosted personality and FDE. The protected call-site row names a landing pad
+with action zero and the LSDA omits the type and action tables. The landing
+pad preserves the incoming unwind header from RAX across the destructor
+call and passes it to `_Unwind_Resume`. No catch entry or exit occurs on this
+path ([except.handle]). The hosted final link and native linker boundary
+are the same as for the catch-all subset. Broader exceptional lifetime
+cleanup and handlers remain tracked in [#89].
+
+## Hosted union constructor cleanup (#738)
+
+On Linux x86-64, a nondelegating no-argument union constructor with an omitted
+exception specification can protect one direct external `void()` call after its
+selected aggregate member is initialized.
+The member's initializer consists of scalar expressions and can include one
+direct external `int()` call. The selected member's destructor must be
+nonthrowing. Both providers are defined in separate translation units.
+
+The compiler records the member's address after its initializer completes. The
+exceptional edge of the constructor body call destroys that member and resumes
+the exception ([class.base.init], [except.ctor]). The earlier initializer call
+has a no-pad LSDA entry because the member has not completed initialization.
+Normal construction leaves the selected member live for the union's ordinary
+lifetime rules. A same-unit caller whose whole body constructs one such automatic
+union supplies a cleanup-free frame. Its destructor runs only if construction
+succeeds. The hosted peer supplies the exception runtime and the handler.
+
+The wider lifetime model and Darwin parity are tracked in [#89] and [#648].
+
+[#648]: https://github.com/yrashk/ycxx/issues/648

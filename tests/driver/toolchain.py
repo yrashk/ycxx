@@ -2,7 +2,7 @@
 
 Clang 23 and GCC 16 come from $YCXX_CLANGXX and $YCXX_GXX, else from the toolchains.env that
 libycxx's tools/toolchain/provision writes, else clang++-23 and g++-16 on PATH. ycxx comes
-from $YCXX, else build/bin/ycxx, else build/ycxx.
+from $YCXX, else bin/ycxx or ycxx in $YCXX_BUILD_DIR (default build/; relative to the repository).
 
 Each compiler has features, the kinds of work it can do: `syntax` (accept/reject), `preprocess`
 (-E), `run` (build and run a program; for ycxx, the interpreter first) and `incremental` (the
@@ -136,7 +136,9 @@ def ycxx_xfails(repo, host=HOST):
     path = repo / 'tests' / 'features' / 'ycxx.xfail'
     out = {}
     for line in path.read_text().splitlines() if path.is_file() else ():
-        line = line.split('#', 1)[0].strip()
+        # A comment starts with a `#` that begins the line or follows white space and is not an
+        # issue number: a reason keeps its `#123` or `(#123)`.
+        line = re.split(r'(?:^|\s)#(?!\d)', line, maxsplit=1)[0].strip()
         if line:
             entry, _, why = line.partition(' ')
             test, qualified, entry_host = entry.partition('@')
@@ -151,12 +153,14 @@ def discover(repo):
     out = {}
     exe, why = _find('YCXX', ())
     if not exe:
-        for cand in (repo / 'build' / 'bin' / 'ycxx', repo / 'build' / 'ycxx'):
+        # Relative to the repository, as tools/build; absolute, since tests run in their own directories.
+        build = repo / (os.environ.get('YCXX_BUILD_DIR') or 'build')
+        for cand in (build / 'bin' / 'ycxx', build / 'ycxx'):
             if os.access(cand, os.X_OK):
-                exe = str(cand)
+                exe = os.path.abspath(cand)
                 break
         else:
-            why = 'set $YCXX or build it (build/bin/ycxx)'
+            why = f'set $YCXX or build it ({build / "bin" / "ycxx"})'
     out['ycxx'] = Compiler('ycxx', exe, ycxx_features(repo), ycxx_xfails(repo), why_missing=why)
     for name, var, names in (('clang', 'YCXX_CLANGXX', ('clang++-23',)), ('gcc', 'YCXX_GXX', ('g++-16',))):
         exe, why = _find(var, names)

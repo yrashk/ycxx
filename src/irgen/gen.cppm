@@ -80,6 +80,9 @@ struct FunctionInput {
   ast::EntityId guard_acquire = ast::EntityId::none, guard_release = ast::EntityId::none;
   ast::EntityId atexit = ast::EntityId::none, dso = ast::EntityId::none;
   bool hosted_catch_all = false;  // the native frontend has certified this occurrence
+  ast::NodeId cleanup_call = ast::NodeId::none;  // the certified hosted cleanup call
+  ast::EntityId constructor_cleanup = ast::EntityId::none;  // the selected union member's destructor
+  bool check_unwind_cleanups = false;
   bool native_array_delete = false;  // the backend's Linux x86-64 cookie-free array deletion
   bool native_array_new = false;  // the backend's Linux x86-64 allocation in a certified frame
 };
@@ -605,6 +608,7 @@ class Gen {
         initialize(p, child(a, m.init), false);
         return 0;
       });
+      if (fn_.constructor_cleanup != ast::EntityId::none) initialized_member_ = p;
     } else if (is<ast::DelegatingInit>(a)) {
       if (!this_) unsupported(a, "outside a constructor");
       auto d = get<ast::DelegatingInit>(a);
@@ -1331,7 +1335,7 @@ class Gen {
   // any `useq` group.
   int effects(At a) {
     if (a.id == NodeId::none) return 0;
-    if (is<ast::Assign>(a)) return 2;
+    if (is<ast::Assign>(a) || is<ast::ExplicitDestroy>(a)) return 2;
     if (is<ast::VariadicBuiltin>(a) && get<ast::VariadicBuiltin>(a).op != ast::VaOp::end) return 2;
     if (is<ast::Unary>(a)) {
       auto op = get<ast::Unary>(a).op;
@@ -1387,6 +1391,14 @@ class Gen {
     if (is<ast::NewArray>(a)) return new_array(a);
     if (is<ast::DeleteArray>(a)) {
       delete_array(a);
+      return std::nullopt;
+    }
+    if (is<ast::ExplicitDestroy>(a)) {
+      const auto d = get<ast::ExplicitDestroy>(a);
+      const At object = child(a, d.object);
+      const ValueId address = rvalue(object);
+      if (d.function != ast::EntityId::none) destroy({address, facts_.pointee(info(object).type)}, d.function);
+      stateful(ir::Op::obj__end, {}, std::span(&address, 1));
       return std::nullopt;
     }
     if (is<ast::Call>(a)) return call(a);
@@ -1794,6 +1806,39 @@ class Gen {
   // orders the clause allows.
   std::optional<ValueId> call(At a, std::optional<ValueId> into = std::nullopt) {
     auto c = get<ast::Call>(a);
+    if (a.id == fn_.cleanup_call) {
+      const auto normal = b_.add_block({});
+      const ir::Ty pending[] = {ir::Ty::state(), ir::Ty::exn()};
+      const auto exceptional = b_.add_block(pending);
+      const ValueId args[] = {state_};
+      const ir::Ty results[] = {ir::Ty::state()};
+      const std::uint64_t imms[] = {word(c.function), 0};
+      const ir::SuccRef successors[] = {{normal, {}}, {exceptional, {}}};
+      const auto invoke = emit(ir::Op::invoke, results, args, imms, ir::bit(ir::Flag::not_constexpr), successors);
+      enter(exceptional);
+      exit_scopes(0);
+      if (fn_.constructor_cleanup != ast::EntityId::none) {
+        if (!initialized_member_) throw Unsupported{"unwind before the union member's initialization"};
+        destroy(*initialized_member_, fn_.constructor_cleanup);
+      }
+      const ValueId resume[] = {state_, b_.param(exceptional, 1)};
+      emit(ir::Op::resume, {}, resume);
+      block_ = normal;
+      state_ = b_.result(invoke, 0);
+      return std::nullopt;
+    }
+    if (fn_.check_unwind_cleanups && std::ranges::any_of(scopes_, [](const auto& scope) {
+          return std::ranges::any_of(scope, [](const Ending& e) { return e.destructor != ast::EntityId::none; });
+        })) {
+      ast::QualType callee = info(child(a, c.callee)).type;
+      if (c.function == ast::EntityId::none) callee = facts_.pointee(callee);
+      const auto function = in_.types.canon(callee);
+      if (in_.types.is<ast::TFunction>(function)) {
+        const auto spec = in_.types.get<ast::TFunction>(function).noexcept_;
+        if (spec == ast::ConstId::none || !in_.values.is<ast::VInt>(spec) || in_.values.get<ast::VInt>(spec).bits.lo == 0)
+          throw Unsupported{"a potentially throwing call with an unsupported local unwind cleanup"};
+      }
+    }
     if (class_prvalue(c.info) && !into) unsupported(a, "of class type outside an initialization");
     std::vector<ValueId> args;
     // A call through a pointer to function ([expr.call]/1): the callee, a prvalue pointer, is
@@ -2181,6 +2226,7 @@ class Gen {
   uint32_t byval_params_ = 0, result_param_ = 0;  // as ir::Function's
   std::vector<std::vector<Ending>> temps_;   // the open full-expressions' temporaries
   std::vector<At> epilogue_;                 // a destructor's DestroyMember statements
+  std::optional<Place> initialized_member_;  // a constructor's exceptional cleanup only
   int branches_ = 0;                         // conditionally evaluated operands entered
   int pinned_ = 0;                           // depth inside trees from other items (`Position`)
 };

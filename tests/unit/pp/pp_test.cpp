@@ -87,8 +87,19 @@ void includes() {
 void linux_system_includes() {
   pp::Config cfg;
   cfg.target = &ast::x86_64_linux;
-  auto include = std::filesystem::path(pp::system_dirs(*cfg.target).back()).lexically_normal().generic_native_encoded_string();
+  std::string include = "/usr/include";
   auto multiarch = include + "/x86_64-linux-gnu";
+  auto darwin = pp::system_dirs(ast::aarch64_darwin);
+  check(std::ranges::none_of(darwin, [&](const auto& dir) {
+          return dir == include || dir == multiarch || dir.ends_with("/resources/linux/include");
+        }),
+        "Darwin does not search Linux's include directories");
+  if (pp::native_target != cfg.target) {
+    auto linux_dirs = pp::system_dirs(*cfg.target);
+    check(!std::ranges::contains(linux_dirs, include) && !std::ranges::contains(linux_dirs, multiarch),
+          "foreign Linux does not search native C include directories");
+    return;
+  }
   cfg.angle_dirs = {multiarch, "user"};
   cfg.system_from = 2;
   cfg = pp::with_system_dirs(std::move(cfg));
@@ -103,12 +114,6 @@ void linux_system_includes() {
   auto p = run(s, h);
   check(p.diags.empty() && text(p.region) == "int multiarch ; int fallback ;",
         "the Linux multiarch header comes first and include_next reaches usr/include");
-
-  auto darwin = pp::system_dirs(ast::aarch64_darwin);
-  check(std::ranges::none_of(darwin, [](const auto& dir) {
-          return dir.ends_with("/x86_64-linux-gnu") || dir.ends_with("/resources/linux/include");
-        }),
-        "Darwin does not search Linux's include directories");
 }
 
 void linux_stddef() {
@@ -243,6 +248,53 @@ void function_like() {
   check(s.stats.computed == computed + 1 && text(b.region) == "int u = ( ( 3 ) * 2 ) ;", "a header reused across TUs");
   check(b.region.expansions[1].definition_offset == 10 && b.region.file_names[b.region.expansions[1].definition_file] == "b.cpp",
         "its expansion bound to this TU's definition");
+}
+
+void expansion_names() {
+  MemHost h;
+  pp::Session s(h);
+  // A paste record carries raw spelling ID 0. Give that ID a known spelling before preprocessing.
+  check(s.spellings.name("paste_name_zero") == 0, "the paste spelling occupies session ID zero");
+  auto p = pp::preprocess(s, R"cpp(#define JOIN(left, right) left ## right
+#define A_INNER() shared
+#define Z_OUTER() A_INNER()
+#define present() shared
+#define _unit() shared
+
+head 7_unit
+Z_OUTER() Z_OUTER()
+present present()
+JOIN(pas, ted)
+_unit()
+)cpp", "expansion-names.cpp");
+  const pp::Region& r = p.region;
+  check(p.diags.empty() && text(r) == "head 7_unit shared shared present shared pasted shared", "expanded tokens in order");
+  check(r.names == std::vector<std::string>{"head", "_unit", "shared", "present", "pasted", "Z_OUTER", "A_INNER", "JOIN", "paste_name_zero"},
+        "token spellings precede expansion-only names in first-seen order");
+  check(std::ranges::equal(r.tokens, std::array<pp::u32, 9>{0, 0, 2, 2, 3, 2, 4, 2, 0}, {}, &pp::Tok::payload),
+        "tokens keep their payloads");
+  check(r.literals.size() == 1 && r.literals[0].value == 7 && r.literals[0].ud_suffix == 1,
+        "the cooked suffix keeps its name ID");
+
+  using enum pp::ExpansionKind;
+  const std::vector<pp::Expansion> expansions{
+      {},
+      // Kind, name, parent, site file and offset, definition file and offset, operands.
+      {function, 5, 0, 0, 154, 0, 73, 163},
+      {function, 6, 1, 0, 83, 0, 48, 155},
+      {function, 5, 0, 0, 164, 0, 73, 173},
+      {function, 6, 3, 0, 83, 0, 48, 165},
+      {function, 3, 0, 0, 182, 0, 101, 191},
+      {function, 7, 0, 0, 192, 0, 8, 206},
+      {argument, 7, 6, 0, 26, 0, 8, 0},
+      {argument, 7, 6, 0, 34, 0, 8, 1},
+      {paste, 8, 7, 0, 197, 0, 202},
+      {function, 1, 0, 0, 207, 0, 126, 214},
+  };
+  check(r.expansions == expansions, "expansion names, sentinel and provenance");
+  check(r.locs == std::vector<pp::TokLoc>{{0, 0, 142}, {0, 0, 147}, {0, 2, 58}, {0, 4, 58}, {0, 0, 174},
+                                         {0, 5, 111}, {0, 9, 197}, {0, 10, 134}, {0, 0, 215}},
+        "tokens keep their spelling locations and expansion links");
 }
 
 // The questions a region asks of its entry state.
@@ -550,6 +602,7 @@ int main() {
   source_target();
   object_like();
   function_like();
+  expansion_names();
   conditionals();
   traces();
   reuse();

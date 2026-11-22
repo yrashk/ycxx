@@ -205,6 +205,7 @@ and a node's parent is only ever the cursor chain of the current walk (spike, §
 struct ItemSema { NodeId tree; SeqId<DeclSema> decls; };                 // item_sema(item, ctx)
 struct DeclSema { EntityId entity; QualType type; u8 kind, linkage, storage, access; u16 flags;
                   SeqId<AttrId> attributes; NodeId constraint;
+                  SeqId<AnnotationSema> annotations; // type, constant, and offset inside the item
                   ConstId constraints;          // associated constraints' normal form (§6.6)
                   NodeId contracts;             // non-members only, this declaration's own (§7.5)
                   SeqId<ParamSema> params; };   // flags include explicit_object (§5.4)
@@ -220,6 +221,9 @@ struct BodySema { NodeId tree; SeqId<LocalRec> locals; };                // anal
   members. There is no cycle, because `class_def` fetches only written members.
 - Lists that hold `NodeId`s (`SeqId<DeclSema>`, `SeqId<LocalRec>`) are interned with their tree
   when the frame commits, not eagerly (§9.3).
+- Written declaration annotations ([dcl.attr.annotation]) retain their canonical type, constant
+  value and item-relative offset. Annotated declarations of the same entity contribute separate
+  occurrences. A translation-unit consumer gets each occurrence's item from its owning declaration.
 - A parameter's default argument is in `ParamSema` for a non-member function; for a member it is
   the separate query `default_arg(p, ctx)` in the complete-class context (§B8). Default arguments
   of a function template specialization come from `default_arg` keyed by the specialization's
