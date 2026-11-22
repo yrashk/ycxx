@@ -1255,8 +1255,19 @@ private:
   sema::Classes classes_{w_->ins, w_->types};  // this unit's class and enumeration records (#115)
   void classify_defaulted_default_ctor(sema::ClassRec& rec, std::vector<engine::Diagnostic>& diags);
   void defaulted_copy(EntityId cls, sema::ClassRec& rec, std::span<const QualType> subobjects, bool implicit);
-  // The enumeration whose enumerator list is being analysed, and its record so far.
-  std::pair<EntityId, const sema::EnumRec*> defining_enum_{EntityId::none, nullptr};
+  // An enumerator initializer can synchronously instantiate another enum definition.
+  struct DefiningEnum {
+    const DefiningEnum*& active;
+    EntityId entity;
+    const sema::EnumRec& record;
+    const DefiningEnum* previous;
+
+    DefiningEnum(const DefiningEnum*& active, EntityId entity, const sema::EnumRec& record)
+        : active(active), entity(entity), record(record), previous(std::exchange(active, this)) {}
+    DefiningEnum(const DefiningEnum&) = delete;
+    ~DefiningEnum() { active = previous; }
+  };
+  const DefiningEnum* defining_enum_ = nullptr;
   // What each namespace-scope using-declaration introduces, by (item, name ordinal): the
   // declarations qualified lookup found at it ([namespace.udecl]/1).
   std::map<std::pair<u32, u32>, std::vector<DeclId>> using_targets_;
@@ -1571,7 +1582,9 @@ public:
   sema::CopyAssignment require_copy_assignment(EntityId f) override { return p_->require_copy_assignment(f); }
   const sema::ClassRec& publish_class(EntityId c, sema::ClassRec r) override { return p_->publish_class(c, std::move(r), item_); }
   const sema::EnumRec* defining_enum(EntityId e) override {
-    return p_->defining_enum_.first == e ? p_->defining_enum_.second : nullptr;
+    for (const auto* active = p_->defining_enum_; active; active = active->previous)
+      if (active->entity == e) return &active->record;
+    return nullptr;
   }
   std::set<EntityId> uncertain_object_layouts() override { return p_->uncertain_object_layouts(); }
   bool peer_pure_dispatch(EntityId cls) override { return p_->peer_pure_dispatch(cls); }
@@ -4119,8 +4132,9 @@ private:
       return;
     }
     // The enumerator list sees the definition's record as the list grows (#156).
+    std::optional<Program::DefiningEnum> defining;
     if (unnamed) s_.defining_unnamed_enum_scope = scope;
-    else p_->defining_enum_ = {e, &er};
+    else defining.emplace(p_->defining_enum_, e, er);
     const std::size_t first_enumerator = s_.own.size();
     if (cls != EntityId::none) s_.nested_enum_members_begin = first_enumerator;
     auto enumerator_entity = [&](NameId n) {
@@ -4273,7 +4287,7 @@ private:
                                        .enum_linkage_name = er.enumerators.front().name});
       publish_head();
     } else {
-      p_->defining_enum_ = {EntityId::none, nullptr};
+      defining.reset();
     }
     // Past the closing brace an enumerator has the enumeration's type ([dcl.enum]/5), in the
     // declarators that follow too.
