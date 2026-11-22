@@ -5340,9 +5340,10 @@ private:
       const auto parameter = p_->assignment_parameter({.name = d.name, .type = d.type, .is_function = true,
                                                        .is_static = spec.is_static, .is_template = member_template_,
                                                        .defaults = {}}, c.type);
-      const bool ordinary = s_.template_scopes.empty() && !inst_ &&
-                            p_->is_namespace(s_.world().entities.rec(c.entity).scope);
-      if (!ordinary || !parameter || types.rec(*parameter).rvalue_ref) {
+      const auto& owner = s_.world().entities.rec(c.entity);
+      const bool supported_class = p_->is_namespace(owner.scope) &&
+                                   ((s_.template_scopes.empty() && !inst_) || (deleted && owner.templ != EntityId::none));
+      if (!supported_class || !parameter || types.rec(*parameter).rvalue_ref) {
         s_.diag(d.name_at, Diag::not_supported, defaulted ? Tk::kw_default : Tk::kw_delete);
         return false;
       }
