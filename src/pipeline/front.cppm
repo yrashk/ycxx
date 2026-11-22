@@ -333,11 +333,15 @@ bool unwind_scalar(const sema::Types& types, QualType type, bool allow_void = fa
          t.builtin == B::nullptr_t || (allow_void && t.builtin == B::void_);
 }
 
+bool unwind_scalar_parameters(const sema::Types& types, const sema::TypeRec& f) {
+  return f.kind == sema::TypeKind::function && !f.variadic && f.fn_cv == sema::Cv::none &&
+         f.fn_ref == ast::RefQual::none &&
+         std::ranges::all_of(f.params, [&](QualType t) { return unwind_scalar(types, t); });
+}
+
 bool unwind_scalar_prototype(const sema::Types& types, QualType type) {
   const auto f = types.rec(type);
-  return f.kind == sema::TypeKind::function && !f.variadic && f.fn_cv == sema::Cv::none &&
-         f.fn_ref == ast::RefQual::none && unwind_scalar(types, f.inner, true) &&
-         std::ranges::all_of(f.params, [&](QualType t) { return unwind_scalar(types, t); });
+  return unwind_scalar_parameters(types, f) && unwind_scalar(types, f.inner, true);
 }
 
 // Every subobject of this aggregate can start and end its lifetime without a cleanup.
@@ -350,6 +354,19 @@ bool unwind_scalar_aggregate(parse::Program& program, QualType type) {
          record->destructor == EntityId::none &&
          std::ranges::all_of(record->fields, [&](const sema::FieldRec& field) {
            return unwind_scalar(types, field.type);
+         });
+}
+
+// The result has no exceptional cleanup even if its initialization has started. Native lowering
+// still checks the target's result classification and transports the result as usual.
+bool unwind_aggregate_result(parse::Program& program, QualType type) {
+  if (!unwind_scalar_aggregate(program, type)) return false;
+  const auto cls = program.world().types.class_of(type);
+  const auto& record = program.classes().rec(cls);
+  return !record.fields.empty() && !record.unapplied_layout &&
+         program.classes().trivial_for_calls(cls, ast::CallTriviality::itanium) &&
+         std::ranges::none_of(record.fields, [](const sema::FieldRec& field) {
+           return field.bit_width || field.no_unique_address;
          });
 }
 
@@ -389,7 +406,28 @@ bool unwind_body_node(parse::Program& program, ast::NodeId node, bool& has_throw
           else if (initializer || !unwind_scalar_aggregate(program, n.info.type)) return false;
         }
       }
-      if constexpr (std::is_same_v<T, ast::LocalVar>) {
+      if constexpr (std::is_same_v<T, ast::Return>) {
+        // A named aggregate result can copy its source without calling a constructor.
+        if (n.value.id != ast::NodeId::none && tree.is<ast::ImplicitConversion>(n.value.id)) {
+          const auto copy = tree.get<ast::ImplicitConversion>(n.value.id);
+          if (world.types.is_class(copy.info.type)) {
+            if (initializer || copy.function != EntityId::none || copy.conversion != ast::ConversionKind::lvalue_to_rvalue ||
+                !unwind_aggregate_result(program, copy.info.type)) return false;
+            ast::NodeId source = copy.operand.id;
+            if (source != ast::NodeId::none && tree.is<ast::ImplicitConversion>(source)) {
+              const auto cast = tree.get<ast::ImplicitConversion>(source);
+              // [stmt.return]: implicit move's qualification changes category but still names
+              // the same object. Its operand must pass the ordinary lifetime proof.
+              if (cast.function == EntityId::none && cast.conversion == ast::ConversionKind::qualification &&
+                  cast.info.category == ast::ValueCategory::xvalue &&
+                  sema::Types::unqualified(world.types.canonical(cast.info.type)) ==
+                      sema::Types::unqualified(world.types.canonical(copy.info.type)))
+                source = cast.operand.id;
+            }
+            return unwind_body_node(program, source, has_throw, context);
+          }
+        }
+      } else if constexpr (std::is_same_v<T, ast::LocalVar>) {
         if (n.destructor != EntityId::none) return false;
       } else if constexpr (std::is_same_v<T, ast::Member>) {
         // A selected default can read another field directly from its construction object.
@@ -439,7 +477,9 @@ bool unwind_body_node(parse::Program& program, ast::NodeId node, bool& has_throw
 UnwindEligibility cleanup_free_definition(parse::Program& program, const ast::DeclSema& d, const ast::BodySema& body) {
   using enum UnwindEligibility;
   auto& world = program.world();
-  if (!unwind_scalar_prototype(world.types, d.type) || world.types.rec(d.type).fn_noexcept ||
+  const auto prototype = world.types.rec(d.type);
+  if (!unwind_scalar_parameters(world.types, prototype) || prototype.fn_noexcept ||
+      (!unwind_scalar(world.types, prototype.inner, true) && !unwind_aggregate_result(program, prototype.inner)) ||
       d.contracts != ast::NodeId::none || body.tree == ast::NodeId::none || world.ins.seqs.size(body.closures) != 0)
     return none;
   const auto& entity = world.entities.rec(d.entity);

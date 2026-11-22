@@ -202,8 +202,14 @@ def main():
         compile('-c', fixtures / 'native_throw.cpp', '-o', 'throw.o', status=1, error='`throw` is not in the')
         assert not (scope / 'throw.o').exists()
 
-        def check_scalar_aggregate(obj, functions):
-            object_frames(Image(scope / obj, kind=1), {'_' + name for name in functions})
+        def check_scalar_aggregate(obj, functions, omitted):
+            image = Image(scope / obj, kind=1)
+            names = {name for name, _, section, _ in image.symbols if section == image.text().index}
+            assert {'_' + name for name in omitted} <= names
+            object_frames(image, {'_' + name for name in functions})
+
+        compile('-c', scalar_aggregate_fixtures / 'unsupported_result_cleanup.cpp', '-o', 'unsupported_result_cleanup.o')
+        check_scalar_aggregate('unsupported_result_cleanup.o', (), ('_Z14cleanup_resulti',))
 
         # PARITY: by design: the records are checked everywhere and only macOS runs the Mach-O peers.
         check_scalar_aggregate_unwind(compile, run, check_scalar_aggregate, host[0] if host else None)

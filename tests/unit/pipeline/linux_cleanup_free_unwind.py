@@ -178,15 +178,16 @@ def main():
         run('./hosted', 'normal')
         run('./hosted')
 
-        def check_scalar_aggregate(obj, expected):
+        def check_scalar_aggregate(obj, expected, omitted):
             _, functions, covered, _ = object_frames(scope / obj)
-            assert functions.keys() == set(expected)
+            assert functions.keys() == set(expected) | set(omitted)
             assert set(covered) == {functions[name][1:] for name in expected}
 
         check_scalar_aggregate_unwind(compile, run, check_scalar_aggregate, peer)
-        compile('-c', scalar_aggregate_fixtures / 'unsupported_cleanup.cpp', '-o', 'unsupported_cleanup.o',
-                status=1, error='unsupported local unwind cleanup')
-        assert not (scope / 'unsupported_cleanup.o').exists()
+        for name in ('unsupported_cleanup', 'unsupported_result_cleanup'):
+            compile('-c', scalar_aggregate_fixtures / f'{name}.cpp', '-o', f'{name}.o',
+                    status=1, error='unsupported local unwind cleanup')
+            assert not (scope / f'{name}.o').exists()
 
         omissions = {
             'guard': ('guarded_path',),
