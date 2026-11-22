@@ -192,6 +192,11 @@ def main():
         assert any('excluded_inline' in name for name in names)
         assert any('excluded_specialization' in name for name in names)
         object_frames(excluded, {'_use_inline'})
+
+        redeclarations = fixtures.with_name('linux_cleanup_free_unwind') / 'omission/written-redeclarations.cpp'
+        compile('-c', redeclarations, '-o', 'redeclarations.o')
+        object_frames(Image(scope / 'redeclarations.o', kind=1), {'_eligible'})
+
         compile('-c', fixtures / 'native_throw.cpp', '-o', 'throw.o', status=1, error='`throw` is not in the')
         assert not (scope / 'throw.o').exists()
 

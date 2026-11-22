@@ -2,9 +2,8 @@
 
 The Darwin front end reuses the typed cleanup-free function proof from the Linux slice.
 It certifies ordinary namespace functions over scalar signatures with no hidden lifetime
-cleanup or native throw expression. The complete unit excludes coalesced definitions, inline
-and nonthrowing redeclarations, assembly labels, and static guards. Those exclusions protect
-the accuracy of the unwind record and leave other functions on their existing compilation path.
+cleanup or native throw expression. Emission excludes the entry point, coalesced definitions,
+and functions with inline declarations, written `noexcept`, assembly labels, or static guards.
 
 The arm64 emitter records frame transitions as it emits the saves and restores. At entry,
 the CFA is the incoming SP and the return address is in X30. After the frame-record store,
