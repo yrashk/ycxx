@@ -772,9 +772,69 @@ class Gen {
     return false;
   }
 
+  struct ArmExit {
+    ir::BlockId block;
+    ValueId state;
+    std::optional<ValueId> value;
+    std::vector<Ending> temporaries{};
+    bool reaches_join = true;
+  };
+
+  ArmExit evaluate_arm(ir::BlockId entry, auto&& eval) {
+    enter(entry);
+    temps_.emplace_back();
+    std::optional<ValueId> value = eval();
+    ArmExit arm{block_, state_, value, std::move(temps_.back()), live_};
+    temps_.pop_back();
+    if (!arm.reaches_join) arm.temporaries.clear();
+    if (!arm.temporaries.empty() && temps_.empty()) throw Unsupported{"a temporary outside a full-expression"};
+    return arm;
+  }
+
+  struct ShortCircuit {
+    ir::BlockId rhs;
+    bool is_and;
+  };
+
+  // Each edge supplies its result and the addresses of the temporaries it created. Other
+  // addresses are null. The enclosing full-expression ends the live objects in reverse order.
+  std::optional<ValueId> join_arms(std::span<ArmExit> arms, std::optional<ast::QualType> result_type,
+                                   std::optional<ShortCircuit> shortcut = {}) {
+    std::vector<ir::Ty> parameters{ir::Ty::state()};
+    if (result_type) parameters.push_back(vty(*result_type));
+    for (const auto& arm : arms)
+      for (const auto& temporary : arm.temporaries)
+        parameters.push_back(vty(facts_.pointer_to(temporary.place.type)));
+    const auto join = b_.add_block(parameters);
+    for (const auto& arm : arms) {
+      if (!arm.reaches_join) continue;
+      block_ = arm.block;
+      state_ = arm.state;
+      ir::SuccRef next{join, {state_}};
+      if (arm.value) next.args.push_back(*arm.value);
+      for (const auto& source : arms)
+        for (const auto& temporary : source.temporaries)
+          next.args.push_back(&arm == &source ? temporary.place.ptr : zero(facts_.pointer_to(temporary.place.type)));
+      if (shortcut && &arm == &arms.front()) {
+        // The left operand can jump straight to the join with its own boolean result.
+        if (shortcut->is_and) cond_br(*arm.value, edge(shortcut->rhs), std::move(next));
+        else cond_br(*arm.value, std::move(next), edge(shortcut->rhs));
+      } else {
+        emit(ir::Op::br, {}, {}, {}, 0, std::span(&next, 1));
+      }
+    }
+    enter(join);
+    uint32_t index = result_type ? 2 : 1;
+    for (auto& arm : arms)
+      for (auto& temporary : arm.temporaries) {
+        temporary.place.ptr = b_.param(join, index++);
+        temporary.conditional = true;
+        temps_.back().push_back(temporary);
+      }
+    return result_type ? std::optional(b_.param(join, 1)) : std::nullopt;
+  }
+
   // A class prvalue initializes its result object directly ([dcl.init], [class.copy.elision]).
-  // Keep each selected arm's temporaries alive through the later clauses of the full-expression.
-  // The join takes their addresses; only the executed arm supplies live ones ([class.temporary]).
   void initialize_selection(const Place& p, At e, bool zeroed) {
     if (is<ast::OrderedBinary>(e)) {
       const auto comma = get<ast::OrderedBinary>(e);
@@ -786,44 +846,16 @@ class Gen {
     if (!class_prvalue(info(then_value)) || !class_prvalue(info(else_value)))
       unsupported(e, "with a non-value arm in a class initializer");
     const auto condition = rvalue(child(e, choice.condition));
-    struct Arm {
-      At value;
-      ir::BlockId entry;
-      ir::BlockId exit{};
-      ValueId state{};
-      std::vector<Ending> temporaries{};
+    const auto then_b = new_block(), else_b = new_block();
+    cond_br(condition, edge(then_b), edge(else_b));
+    auto init = [&](ir::BlockId block, At value) {
+      return evaluate_arm(block, [&] {
+        initialize(p, value, zeroed, true);
+        return std::nullopt;
+      });
     };
-    Arm arms[] = {{then_value, new_block()}, {else_value, new_block()}};
-    cond_br(condition, edge(arms[0].entry), edge(arms[1].entry));
-    std::vector<ir::Ty> parameters{ir::Ty::state()};
-    for (Arm& arm : arms) {
-      enter(arm.entry);
-      temps_.emplace_back();
-      initialize(p, arm.value, zeroed, true);
-      arm.exit = block_;
-      arm.state = state_;
-      arm.temporaries = std::move(temps_.back());
-      temps_.pop_back();
-      for (const Ending& temporary : arm.temporaries)
-        parameters.push_back(vty(facts_.pointer_to(temporary.place.type)));
-    }
-    const auto join = b_.add_block(parameters);
-    for (const Arm& arm : arms) {
-      block_ = arm.exit;
-      ir::SuccRef next{join, {arm.state}};
-      for (const Arm& source : arms)
-        for (const Ending& temporary : source.temporaries)
-          next.args.push_back(&arm == &source ? temporary.place.ptr : zero(facts_.pointer_to(temporary.place.type)));
-      emit(ir::Op::br, {}, {}, {}, 0, std::span(&next, 1));
-    }
-    enter(join);
-    uint32_t index = 1;
-    for (Arm& arm : arms)
-      for (Ending& temporary : arm.temporaries) {
-        temporary.place.ptr = b_.param(join, index++);
-        temporary.conditional = true;
-        temps_.back().push_back(temporary);
-      }
+    ArmExit arms[] = {init(then_b, then_value), init(else_b, else_value)};
+    join_arms(arms, std::nullopt);
   }
 
   // Whether initializer `e` value-initializes some element (`ValueInit`), so the object is
@@ -1036,8 +1068,8 @@ class Gen {
   // or, when a reference it is bound to extends it, with that reference's scope.
   Place materialize(At a) {
     auto m = get<ast::Materialize>(a);
-    if (selecting_initializer_ && (m.extended == 1 || branches_ > 0))
-      unsupported(a, "requiring lifetime extension or nested conditional cleanup in a class initializer");
+    if (m.extended == 1 && (selecting_initializer_ || branches_ > 0))
+      unsupported(a, "requiring lifetime extension in a conditional operand or class initializer selection");
     At v = child(a, m.operand);
     bool zeroed = value_initializes(v);
     Place p = begin_object(m.info.type, zeroed ? ir::Init::zero : ir::Init::indeterminate, ir::Storage::temporary);
@@ -1842,16 +1874,12 @@ class Gen {
         // not decide; the join receives whichever decided.
         bool is_and = o.op == ast::OrderedOp::logical_and;
         ValueId x = rvalue(l);
-        ir::BlockId rhs_b = new_block(), join = new_block({t});
-        if (is_and) cond_br(x, edge(rhs_b), edge(join, {x}));
-        else cond_br(x, edge(join, {x}), edge(rhs_b));
-        enter(rhs_b);
+        const auto rhs = new_block();
+        ArmExit left{block_, state_, x};
         ++branches_;
-        ValueId y = rvalue(r);
+        ArmExit arms[] = {std::move(left), evaluate_arm(rhs, [&] { return rvalue(r); })};
         --branches_;
-        br(join, {y});
-        enter(join);
-        return b_.param(join, 1);
+        return join_arms(arms, t, ShortCircuit{rhs, is_and});
       }
       case ast::OrderedOp::comma:
         discard(l);
@@ -2144,39 +2172,35 @@ class Gen {
     ValueId cv = rvalue(child(a, c.condition));
     ir::BlockId then_b = new_block(), else_b = new_block();
     const bool bit_field_result = glvalue && c.info.bit_width != 0;
-    ir::BlockId join = has_value && !bit_field_result ? new_block({jt}) : new_block();
     Place bit_field{};
     cond_br(cv, edge(then_b), edge(else_b));
-    for (auto [blk, arm] : {std::pair{then_b, c.then_}, std::pair{else_b, c.else_}}) {
-      enter(blk);
-      At x = child(a, arm);
-      ++branches_;
+    auto operand = [&](At x) -> std::optional<ValueId> {
       if (!has_value) {
         discard(x);
-        br(join);
-      } else if (cls(info(x).type) == TypeClass::void_) {
+        return {};
+      }
+      if (cls(info(x).type) == TypeClass::void_) {
         // This arm is a throw-expression and never supplies a value to the join.
         discard(x);
         emit(ir::Op::unreachable, {}, {});
         live_ = false;
-      } else if (glvalue) {
-        Place place = lvalue(x);
-        if (bit_field_result) {
-          // The only arm that reaches the join owns the enclosing record pointer.
-          bit_field = place;
-          br(join);
-        } else {
-          br(join, {place.ptr});
-        }
-      } else {
-        br(join, {rvalue(x)});
+        return {};
       }
-      --branches_;
-    }
-    enter(join);
+      if (!glvalue) return rvalue(x);
+      Place place = lvalue(x);
+      if (!bit_field_result) return place.ptr;
+      // The only arm that reaches the join owns the enclosing record pointer.
+      bit_field = place;
+      return {};
+    };
+    ++branches_;
+    ArmExit arms[] = {evaluate_arm(then_b, [&] { return operand(child(a, c.then_)); }),
+                      evaluate_arm(else_b, [&] { return operand(child(a, c.else_)); })};
+    --branches_;
+    auto value = join_arms(arms, has_value && !bit_field_result ? std::optional(jt) : std::nullopt);
     if (!has_value) return {};
     if (bit_field_result) return {std::nullopt, bit_field};
-    ValueId v = b_.param(join, 1);
+    ValueId v = *value;
     return {glvalue ? std::nullopt : std::optional(v), {v, t}};
   }
 

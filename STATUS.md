@@ -1739,6 +1739,13 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   `decltype`, overload selection, and the existing adjustments for scalar and reference
   results.
 
+## Scalar branch temporaries (#902)
+
+- Scalar logical and conditional expressions carry each selected reference-argument temporary
+  to the end of its full-expression ([class.temporary], [expr.log.and], [expr.log.or], [expr.cond]).
+  Both the interpreter and native code use the L1 join with nullable temporary addresses. Conditional
+  nontrivial destruction and reference lifetime extension remain under [#157](https://github.com/yrashk/ycxx/issues/157).
+
 ## Local class prvalue selection (#740)
 
 - The built-in `?:` or comma operator can initialize an automatic class object, an ordinary
