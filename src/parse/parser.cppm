@@ -132,6 +132,7 @@ public:
   bool is(Tk k) const { return kind() == k; }
   u32 pos() const { return i_ - begin_; }  // the current token's offset in the part
   u32 deferred_argument_checks() const { return deferred_argument_checks_; }
+  u32 deferred_immediate_calls() const { return deferred_immediate_calls_; }
   void bump() {
     half_ = false;
     if (i_ < end_) ++i_;
@@ -521,8 +522,11 @@ public:
   std::optional<QualType> type_template_id(const ast::DeclSema& tmpl, std::span<const ast::TemplateArg> args, u32 at) {
     // An alias can erase a dependent argument from the resulting type, but the written argument
     // still has to be valid when substituted ([temp.alias]).
-    if (tmpl.kind == ast::DeclKind::type_alias && std::ranges::any_of(args, [&](const auto& a) { return s_->dependent(a); }))
+    if (tmpl.kind == ast::DeclKind::type_alias && std::ranges::any_of(args, [&](const auto& a) { return s_->dependent(a); })) {
       ++deferred_argument_checks_;
+      if (s_->questions().alias_call_pattern(tmpl.entity) != sema::AliasCallPattern::none)
+        ++deferred_immediate_calls_;
+    }
     return s_->class_template_id(tmpl, args, at);
   }
 
@@ -3928,6 +3932,16 @@ public:
             if (auto v = s_->variable_template(n, begin))
               return s_->dependent_variable_template_id(*v, *args, begin, pos());
             if (s_->has_error_since(diags)) return {NodeId::none, begin, pos()};
+            if (is(Tk::l_paren) && kind(1) == Tk::r_paren) {
+              Ex callee = s_->name_expr(n, begin, pos(), true);
+              if (!callee.ok()) return callee;
+              if (auto call = s_->dependent_immediate_template_call(callee, *args, pos() + 2)) {
+                ++deferred_immediate_calls_;
+                bump();
+                bump();
+                return *call;
+              }
+            }
           }
           // A call of it is a dependent call ([temp.dep.candidate]): its instantiation adds
           // argument-dependent lookup.
@@ -6141,6 +6155,7 @@ private:
   bool in_template_value_argument_ = false;
   int angle_ = 0;               // inside a template argument or parameter list, outside parentheses
   u32 deferred_argument_checks_ = 0;  // checks a dependent canonical argument may not retain
+  u32 deferred_immediate_calls_ = 0;
   bool half_ = false;           // the current `>>` has had its first `>` taken by a template-id
 public:
   bool body = false;  // the part is a function body, not a declaration part

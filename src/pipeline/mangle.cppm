@@ -629,7 +629,8 @@ class Mangler {
         return i == 0 ? std::string("XT_E") : std::format("XT{}_E", i - 1);
       }
       // Any other value-dependent argument: `X <expression> E` (§5.1.5.7, §5.1.6).
-      if (in_.values.is<ast::VDepOp>(a.value) || in_.values.is<ast::VDepVariable>(a.value)) {
+      if (in_.values.is<ast::VDepOp>(a.value) || in_.values.is<ast::VDepVariable>(a.value) ||
+          in_.values.is<ast::VDepCall>(a.value)) {
         auto e = expression(a.value);
         if (!e) return e;
         return "X" + *e + "E";
@@ -668,6 +669,15 @@ class Mangler {
   // `gs`, no defaults, no `J…E`), GCC the <source-name> and the converted arguments. ycxx writes
   // GCC's form, which is also what the GCC-built libycxx.a has (DECISIONS §1.7, #777).
   std::expected<std::string, std::string> expression(ast::ConstId v) {
+    if (in_.values.is<ast::VDepCall>(v)) {
+      const auto& call = in_.values.get<ast::VDepCall>(v);
+      const auto name = classes_ ? classes_(call.templ) : ClassName{};
+      if (name.name.empty()) return std::unexpected("a dependent call whose function name is unknown");
+      auto args = template_args(in_.seqs.elements(call.args));
+      if (!args) return args;
+      // cl <expression>+ E; this call has only the callee's unresolved name.
+      return "cl" + source_name(name.name) + *args + "E";
+    }
     if (in_.values.is<ast::VDepVariable>(v)) {
       const ast::VDepVariable& d = in_.values.get<ast::VDepVariable>(v);
       ClassName n = classes_ ? classes_(d.templ) : ClassName{};
