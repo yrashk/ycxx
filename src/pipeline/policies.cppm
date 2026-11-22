@@ -56,10 +56,21 @@ struct PolicyContract {
 };
 
 struct OwnershipRecord {
+  struct Field {
+    ast::NameId name;
+    Ownership mode;
+    EntityId record = EntityId::none;
+  };
+
   EntityId entity;
-  std::vector<std::pair<ast::NameId, Ownership>> fields;
+  std::vector<Field> fields;
   bool supported;
   EntityId destructor;
+};
+
+struct OwnershipRecords {
+  std::vector<OwnershipRecord> records;
+  std::vector<EntityId> nonthrowing_destructors;
 };
 
 struct OwnershipFlow {
@@ -107,29 +118,25 @@ using Effect = OwnershipEffect;
 class OwnershipFlowBuilder {
  public:
   OwnershipFlowBuilder(const sema::World& world, const OwnershipPolicy& policy,
-                       std::span<const OwnershipRecord> records, OwnershipBody body)
-      : world_(world), policy_(policy), records_(records), body_(body) {
+                       const OwnershipRecords& records, OwnershipBody body)
+      : world_(world), policy_(policy), records_(records.records),
+        nonthrowing_destructors_(records.nonthrowing_destructors), body_(body) {
+    bool has_owner_array = false;
     for (const auto& local : world_.ins.seqs.elements(body.locals)) {
       const auto kind = ownership(local.type);
       flow_.locals.push_back({local.name, kind, (local.flags & sema::local_flag::parameter) != 0, shared_reference(local.type)});
       has_linear_ = has_linear_ || kind == Ownership::linear;
       has_owner_ = has_owner_ || mentions_owner(local.type);
+      has_owner_array = has_owner_array || owner_array(local.type);
     }
     for (ast::u32 index = 0; index < world_.ins.seqs.size(body.locals); ++index) {
       const auto local = world_.ins.seqs.at(body.locals, index);
       if (flow_.locals[index].parameter || ast::cv_of(world_.types.canonical(local.type)) != ast::Cv::none) continue;
       const auto* record = ownership_record(local.type);
       if (!record || !record->supported) continue;
-      auto& fields = field_slots_[index];
-      for (const auto& [name, kind] : record->fields) {
-        if (kind == Ownership::ordinary) fields.push_back(std::nullopt);
-        else {
-          fields.push_back(static_cast<ast::u32>(flow_.locals.size()));
-          flow_.locals.push_back({local.name, kind, false, false, {}, std::string(world_.ins.names.spelling(name))});
-          has_linear_ = has_linear_ || kind == Ownership::linear;
-        }
-      }
+      field_slots_.emplace(index, FieldSlot{std::nullopt, field_slots(*record, local.name, "")});
     }
+    if (has_owner_array) collect_array_slots(ast::Red(world_.ins.ast, body_.tree));
   }
 
   Flow build() {
@@ -162,6 +169,12 @@ class OwnershipFlowBuilder {
   }
 
  private:
+  struct FieldSlot {
+    std::optional<ast::u32> owner;
+    std::vector<FieldSlot> children;
+    bool array = false;
+  };
+
   struct Cleanup {
     ast::u32 local;
     bool throwing_destructor;
@@ -185,11 +198,67 @@ class OwnershipFlowBuilder {
     return policy_.ownership(world_.types.canonical(type));
   }
 
+  bool owner_array(QualType type) const {
+    const auto array = world_.types.rec(type);
+    return array.kind == sema::TypeKind::array && ast::cv_of(world_.types.canonical(array.inner)) == ast::Cv::none &&
+           ownership(array.inner) != Ownership::ordinary;
+  }
+
+  void collect_array_slots(const ast::Red& node) {
+    if (node.is<ast::LocalVar>()) {
+      const auto var = node.get<ast::LocalVar>();
+      const auto local = world_.ins.seqs.at(body_.locals, var.local);
+      // Size comes from the typed initializers, so an unsupported declaration does not
+      // allocate a slot for every element merely because its array bound is large.
+      if (owner_array(local.type) && !flow_.locals[var.local].parameter && var.init.id != ast::NodeId::none &&
+          node.ast().is<ast::InitList>(var.init.id) &&
+          (var.destructor == EntityId::none || nonthrowing(var.destructor))) {
+        const auto array = world_.types.rec(local.type);
+        const auto kind = ownership(array.inner);
+        const auto count = node.ast().children(node.ast().get<ast::InitList>(var.init.id).elems).size();
+        if (count == array.bound) {
+          FieldSlot root{std::nullopt, {}, true};
+          root.children.reserve(count);
+          for (std::size_t i = 0; i < count; ++i) {
+            const auto slot = static_cast<ast::u32>(flow_.locals.size());
+            flow_.locals.push_back({local.name, kind, false, false, {}, std::format("[{}]", i)});
+            root.children.push_back({slot, {}});
+          }
+          has_linear_ = has_linear_ || kind == Ownership::linear;
+          field_slots_.emplace(var.local, std::move(root));
+        }
+      }
+    }
+    node.for_each_child([&](const ast::Red& child) { collect_array_slots(child); });
+  }
+
   const OwnershipRecord* ownership_record(QualType type) const {
     const auto record = world_.types.rec(type);
     if (record.kind != sema::TypeKind::class_) return nullptr;
-    const auto it = std::ranges::lower_bound(records_, record.entity, std::ranges::less{}, &OwnershipRecord::entity);
-    return it != records_.end() && it->entity == record.entity ? &*it : nullptr;
+    return ownership_record(record.entity);
+  }
+
+  const OwnershipRecord* ownership_record(EntityId entity) const {
+    const auto it = std::ranges::lower_bound(records_, entity, std::ranges::less{}, &OwnershipRecord::entity);
+    return it != records_.end() && it->entity == entity ? &*it : nullptr;
+  }
+
+  std::vector<FieldSlot> field_slots(const OwnershipRecord& record, ast::NameId local, const std::string& prefix) {
+    std::vector<FieldSlot> fields;
+    fields.reserve(record.fields.size());
+    for (const auto& field : record.fields) {
+      const auto name = world_.ins.names.spelling(field.name);
+      const auto path = prefix.empty() ? std::string(name) : std::format("{}.{}", prefix, name);
+      auto& slot = fields.emplace_back();
+      if (field.mode != Ownership::ordinary) {
+        slot.owner = static_cast<ast::u32>(flow_.locals.size());
+        flow_.locals.push_back({local, field.mode, false, false, {}, path});
+        has_linear_ = has_linear_ || field.mode == Ownership::linear;
+      } else if (field.record != EntityId::none) {
+        slot.children = field_slots(*ownership_record(field.record), local, path);
+      }
+    }
+    return fields;
   }
 
   bool shared_reference(QualType type) const {
@@ -236,7 +305,7 @@ class OwnershipFlowBuilder {
         const auto operand = unparenthesized(at(node, cast.operand));
         if (operand.is<ast::Member>()) {
           const auto member = operand.get<ast::Member>();
-          if (const auto* slot = field_slot(operand, member); slot && !*slot)
+          if (const auto* slot = field_slot(operand, member); slot && !slot->owner && slot->children.empty())
             return std::nullopt;  // copy the scalar without exposing its containing record
         }
       }
@@ -270,13 +339,38 @@ class OwnershipFlowBuilder {
     return node;
   }
 
-  const std::optional<ast::u32>* field_slot(const ast::Red& node, const ast::Member& member) const {
+  const FieldSlot* field_slot(const ast::Red& node, const ast::Member& member) const {
     if (member.arrow || member.reference) return nullptr;
     const auto object = unparenthesized(at(node, member.object));
-    if (!object.is<ast::LocalRef>()) return nullptr;
-    const auto it = field_slots_.find(object.get<ast::LocalRef>().local);
-    if (it == field_slots_.end() || member.field >= it->second.size()) return nullptr;
-    return &it->second[member.field];
+    const FieldSlot* parent = nullptr;
+    if (object.is<ast::LocalRef>()) {
+      const auto it = field_slots_.find(object.get<ast::LocalRef>().local);
+      if (it != field_slots_.end()) parent = &it->second;
+    } else if (object.is<ast::Member>()) {
+      parent = field_slot(object, object.get<ast::Member>());
+    }
+    return parent && member.field < parent->children.size() ? &parent->children[member.field] : nullptr;
+  }
+
+  std::optional<ast::u32> array_element(const ast::Red& node) const {
+    const auto subscript = node.get<ast::Subscript>();
+    const auto base = unparenthesized(at(node, subscript.base));
+    if (!base.is<ast::ImplicitConversion>()) return std::nullopt;
+    const auto decay = base.get<ast::ImplicitConversion>();
+    if (decay.conversion != ast::ConversionKind::array_to_pointer) return std::nullopt;
+    const auto local = unparenthesized(at(base, decay.operand));
+    if (!local.is<ast::LocalRef>()) return std::nullopt;
+    const auto root = field_slots_.find(local.get<ast::LocalRef>().local);
+    if (root == field_slots_.end() || !root->second.array) return std::nullopt;
+    const auto index = unparenthesized(at(node, subscript.index));
+    // Read the selected integer literal after sema's promotions. Do not peel a
+    // conversion that might have changed which element the expression refers to.
+    if (!index.is<ast::Literal>()) return std::nullopt;
+    const auto value = index.get<ast::Literal>().value;
+    if (!world_.ins.values.is<ast::VInt>(value)) return std::nullopt;
+    const auto number = ast::int_bits(world_.ins, value);
+    if (number.hi != 0 || number.lo >= root->second.children.size()) return std::nullopt;
+    return root->second.children[number.lo].owner;
   }
 
   bool observation_scalar(QualType type) const {
@@ -353,7 +447,8 @@ class OwnershipFlowBuilder {
       if (flow_.locals[local].ownership != Ownership::ordinary || flow_.locals[local].shared_reference) return local;
     }
     if (node.is<ast::Member>())
-      if (const auto* field = field_slot(node, node.get<ast::Member>())) return *field;
+      if (const auto* field = field_slot(node, node.get<ast::Member>())) return field->owner;
+    if (node.is<ast::Subscript>()) return array_element(node);
     return std::nullopt;
   }
 
@@ -389,6 +484,11 @@ class OwnershipFlowBuilder {
     return next;
   }
 
+  void collect_fields(Scope& scope, const FieldSlot& slot) const {
+    if (slot.owner) scope.locals.push_back({*slot.owner, false});
+    for (const auto& field : slot.children) collect_fields(scope, field);
+  }
+
   // Declarations directly in this scope. A backedge can reach the same local slot again after
   // its scope exits. Cleanup events for declarations that were skipped see an absent slot.
   void collect(Scope& scope, const ast::Red& node) const {
@@ -398,8 +498,7 @@ class OwnershipFlowBuilder {
       const auto& local = flow_.locals[var.local];
       if (local.ownership != Ownership::ordinary || local.shared_reference || throws) scope.locals.push_back({var.local, throws});
       if (const auto it = field_slots_.find(var.local); it != field_slots_.end())
-        for (auto field : it->second)
-          if (field) scope.locals.push_back({*field, false});
+        collect_fields(scope, it->second);
     } else if (node.is<ast::DeclStmt>() || node.is<ast::CondDecl>()) {
       node.for_each_child([&](const ast::Red& child) { collect(scope, child); });
     }
@@ -516,6 +615,24 @@ class OwnershipFlowBuilder {
     return unsupported(initializer.offset(), "an owner must be initialized by a registered factory or transfer from a named owner");
   }
 
+  Point initialize_fields(const ast::Red& parent, ast::Child child, const FieldSlot& slot, Point next, Context context) {
+    if (slot.owner) {
+      if (child.id == ast::NodeId::none)
+        return unsupported(parent.offset(), "an owner must be initialized by a registered factory or transfer from a named owner");
+      return initialize_owner(*slot.owner, unparenthesized(at(parent, child)), next);
+    }
+    if (slot.children.empty()) return lower_child(parent, child, next, context);
+    if (child.id == ast::NodeId::none || !parent.ast().is<ast::InitList>(child.id))
+      return unsupported(parent.offset(), "a record with owners requires aggregate initialization");
+    const auto init = at(parent, child);
+    const auto elements = init.ast().children(init.get<ast::InitList>().elems);
+    if (elements.size() != slot.children.size())
+      return unsupported(init.offset(), "cannot match aggregate initializers to owned fields");
+    for (std::size_t i = elements.size(); i-- > 0;)
+      next = initialize_fields(init, elements[i], slot.children[i], next, context);
+    return next;
+  }
+
   Point lower_local(const ast::Red& node, Point next, Context context) {
     const auto var = node.get<ast::LocalVar>();
     auto& local = flow_.locals[var.local];
@@ -528,25 +645,16 @@ class OwnershipFlowBuilder {
         }
       return unsupported(node.offset(), "a shared borrow must bind directly to a named owner");
     }
-    if (const auto it = field_slots_.find(var.local); it != field_slots_.end()) {
-      if (var.init.id == ast::NodeId::none || !node.ast().is<ast::InitList>(var.init.id))
-        return unsupported(node.offset(), "a record with owners requires aggregate initialization");
-      const auto init = at(node, var.init);
-      const auto elements = init.ast().children(init.get<ast::InitList>().elems);
-      const auto& slots = it->second;
-      if (elements.size() != slots.size()) return unsupported(node.offset(), "cannot match aggregate initializers to owned fields");
-      for (std::size_t i = elements.size(); i-- > 0;) {
-        if (slots[i]) next = initialize_owner(*slots[i], unparenthesized(at(init, elements[i])), next);
-        else next = lower_child(init, elements[i], next, context);
-      }
-      return next;
-    }
+    if (const auto it = field_slots_.find(var.local); it != field_slots_.end())
+      return initialize_fields(node, var.init, it->second, next, context);
     if (local.ownership != Ownership::ordinary) {
       if (var.init.id != ast::NodeId::none) return initialize_owner(var.local, unparenthesized(at(node, var.init)), next);
       return unsupported(node.offset(), "an owner must be initialized by a registered factory or transfer from a named owner");
     }
-    const auto& locals = world_.ins.seqs;
-    if (mentions_owner(locals.at(body_.locals, var.local).type))
+    const auto type = world_.ins.seqs.at(body_.locals, var.local).type;
+    if (owner_array(type))
+      return unsupported(node.offset(), "an owner array requires aggregate initialization and nonthrowing destruction");
+    if (mentions_owner(type))
       return unsupported(node.offset(), "resource aliases are outside the checked protocol");
     if (throwing_destructor(var.destructor)) next = add({Event::initialize, node.offset(), next, Flow::exit, var.local});
     return lower_child(node, var.init, next, context);
@@ -642,7 +750,7 @@ class OwnershipFlowBuilder {
 
   bool nonthrowing(EntityId function) const {
     const auto* entity = world_.entities.find(function);
-    return entity && nonthrowing_type(entity->type);
+    return (entity && nonthrowing_type(entity->type)) || std::ranges::binary_search(nonthrowing_destructors_, function);
   }
 
   bool throwing_destructor(EntityId function) const {
@@ -671,9 +779,10 @@ class OwnershipFlowBuilder {
   const sema::World& world_;
   const OwnershipPolicy& policy_;
   std::span<const OwnershipRecord> records_;
+  std::span<const EntityId> nonthrowing_destructors_;
   OwnershipBody body_;
   Flow flow_;
-  std::map<ast::u32, std::vector<std::optional<ast::u32>>> field_slots_;
+  std::map<ast::u32, FieldSlot> field_slots_;
   bool has_owner_ = false;
   bool has_linear_ = false;
 };
@@ -744,7 +853,8 @@ class OwnershipAnalysis {
     const auto name = in_.names.spelling(owner.name);
     const auto kind = owner.shared_reference ? "shared borrow" :
                       owner.ownership == Ownership::linear ? "linear resource" : "affine resource";
-    if (!owner.field.empty()) return std::format("{} '{}.{}'", kind, name, owner.field);
+    if (!owner.field.empty())
+      return std::format("{} '{}{}{}'", kind, name, owner.field.starts_with('[') ? "" : ".", owner.field);
     return std::format("{} '{}'", kind, name.empty() ? "<unnamed>" : name);
   }
 
@@ -901,7 +1011,7 @@ struct OwnershipRecordsFor {
     TuId tu;
     bool operator==(const Key&) const = default;
   };
-  using Value = std::vector<OwnershipRecord>;
+  using Value = OwnershipRecords;
   static engine::query_task<Value> run(engine::Ctx& cx, Key key) {
     const auto& registry = co_await cx.fetch<PolicyRegistryFor>(key.sources);
     if (registry.ownership.resources.empty()) co_return Value{};
@@ -909,12 +1019,15 @@ struct OwnershipRecordsFor {
     const auto& source = cx.fetch<pp::SourceOf>(pp::FileId{key.tu.n});
     const auto& types = universe().world_for(*source.config.target)->types;
 
-    // Trace containment in reverse from the registered owners. This detects nested records
-    // and aliases as well as the flat aggregates that can have independently checked fields.
+    // Trace containment in reverse from registered owners. Affected types outside the
+    // supported value containment remain visible so the checker can reject their use.
     std::map<EntityId, std::vector<EntityId>> enclosing;
     std::map<EntityId, const ClassShape*> by_entity;
+    Value result;
     for (const auto& shape : shapes.classes) {
       by_entity.emplace(shape.entity, &shape);
+      if (shape.nonthrowing_destructor != EntityId::none)
+        result.nonthrowing_destructors.push_back(shape.nonthrowing_destructor);
       for (const auto base : shape.bases) enclosing[base].push_back(shape.entity);
       std::set<QualType> seen;
       auto collect = [&](auto&& self, QualType type) -> void {
@@ -950,7 +1063,8 @@ struct OwnershipRecordsFor {
     }
     for (const auto& [type, mode] : registry.ownership.resources) affected.erase(types.class_of(type));
 
-    Value records;
+    std::ranges::sort(result.nonthrowing_destructors);
+    auto& records = result.records;
     for (const auto id : affected) {
       const auto it = by_entity.find(id);
       if (it == by_entity.end()) continue;
@@ -959,18 +1073,39 @@ struct OwnershipRecordsFor {
       for (std::size_t i = 0; i < shape.fields.size(); ++i) {
         const auto type = types.canonical(shape.fields[i]);
         const auto mode = registry.ownership.ownership(type);
-        if (mode == Ownership::ordinary)
-          record.supported = record.supported && (types.is_arithmetic(type) || types.rec(type).kind == sema::TypeKind::enum_);
-        else record.supported = record.supported && ast::cv_of(type) == ast::Cv::none;
-        record.fields.emplace_back(shape.field_names[i], mode);
-      }
-      if (!record.supported) {
-        record.fields.clear();
-        record.destructor = EntityId::none;
+        const auto field = types.rec(type);
+        auto child = EntityId::none;
+        if (mode != Ownership::ordinary) {
+          record.supported = record.supported && ast::cv_of(type) == ast::Cv::none;
+        } else if (field.kind == sema::TypeKind::class_ && affected.contains(field.entity)) {
+          child = field.entity;
+          record.supported = record.supported && ast::cv_of(type) == ast::Cv::none;
+        } else {
+          record.supported = record.supported && (types.is_arithmetic(type) || field.kind == sema::TypeKind::enum_);
+        }
+        record.fields.push_back({shape.field_names[i], mode, child});
       }
       records.push_back(std::move(record));
     }
-    co_return records;
+    std::map<EntityId, bool> supported;
+    const auto check = [&](auto&& self, const OwnershipRecord& record) -> bool {
+      if (!record.supported) return false;
+      const auto [cached, inserted] = supported.try_emplace(record.entity, false);
+      if (!inserted) return cached->second;
+      for (const auto& field : record.fields) {
+        if (field.record == EntityId::none) continue;
+        const auto child = std::ranges::lower_bound(records, field.record, std::ranges::less{}, &OwnershipRecord::entity);
+        if (child == records.end() || child->entity != field.record || !self(self, *child)) return false;
+      }
+      return cached->second = true;
+    };
+    for (auto& record : records) {
+      if (check(check, record)) continue;
+      record.supported = false;
+      record.fields.clear();
+      record.destructor = EntityId::none;
+    }
+    co_return result;
   }
 };
 

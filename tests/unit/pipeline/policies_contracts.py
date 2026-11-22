@@ -357,6 +357,67 @@ with tempfile.TemporaryDirectory() as directory:
         assert subprocess.run([executable, *args], timeout=10).returncode in (
             -signal.SIGABRT, -signal.SIGILL, -signal.SIGTRAP)
 
+    nested_source = """\
+        #include "runtime_transaction.hpp"
+        using example::Work;
+        struct Branch { Work work; int score; };
+        struct Tree { Branch left; Branch right; };
+        int main() {
+          Tree tree{{example::start(), 11}, {example::start(), 31}};
+          {
+            const auto& view = tree.left.work;
+            example::inspect(view);
+            example::finish(static_cast<Work&&>(tree.right.work));
+          }
+          auto other = example::handoff(static_cast<Work&&>(tree.left.work));
+          example::finish(static_cast<Work&&>(other));
+          return tree.left.score + tree.right.score != 42;
+        }
+    """
+    nested = write("nested.cpp", nested_source)
+    syntax(nested)
+    nested_skip = write("nested_skip.cpp", nested_source.replace("int main()", "int main(int argc, char**)")
+                        .replace("  auto other =", "  if (argc > 1) return 0;\n  auto other ="))
+    syntax(nested_skip, error="linear resource 'tree.left.work' may leave its scope")
+    nested_borrow = write("nested_borrow.cpp", nested_source.replace("tree.right.work", "tree.left.work", 1))
+    syntax(nested_borrow, error="linear resource 'tree.left.work' may still have a live shared borrow 'view'")
+    nested_alias = write("nested_alias.cpp", nested_source.replace(
+        "  auto other =", "  const auto& escaped = tree.left;\n  auto other ="))
+    syntax(nested_alias, error="resource aliases are outside the checked protocol")
+    nested_unwind = write("nested_unwind.cpp", nested_source.replace("int main()", "int score();\nint main()")
+                          .replace("example::start(), 11", "example::start(), score()"))
+    syntax(nested_unwind, error="operation may unwind while linear resource 'tree.left.work' is live")
+    array_source = """\
+        #include "runtime_transaction.hpp"
+        using example::Work;
+        int main(int argc, char**) {
+          Work tasks[2]{example::start(), example::start()};
+          {
+            const auto& view = tasks[0];
+            example::inspect(view);
+            example::finish(static_cast<Work&&>(tasks[1]));
+          }
+          example::finish(static_cast<Work&&>(tasks[0]));
+          return argc < 1;
+        }
+    """
+    array = write("array.cpp", array_source)
+    syntax(array)
+    array_skip = write("array_skip.cpp", array_source.replace(
+        "  example::finish(static_cast<Work&&>(tasks[0]));",
+        "  if (argc > 1) return 0;\n  example::finish(static_cast<Work&&>(tasks[0]));"))
+    syntax(array_skip, error="linear resource 'tasks[0]' may leave its scope")
+    array_index = write("array_index.cpp", array_source.replace("tasks[1]", "tasks[argc % 2]"))
+    syntax(array_index, error="an ownership protocol operation requires a named owner")
+    array_alias = write("array_alias.cpp", array_source.replace(
+        "  return argc < 1;", "  auto* escaped = tasks;\n  return argc < 1;"))
+    syntax(array_alias, error="resource aliases are outside the checked protocol")
+    for source, extra in ((nested, ()), (nested_skip, ("skip",)), (array, ()), (array_skip, ("skip",))):
+        subprocess.run([host, "-std=c++20", "-I", include, "-I", examples, str(source), "-o", str(executable)],
+                       check=True, timeout=30)
+        expected = (-signal.SIGABRT, -signal.SIGILL, -signal.SIGTRAP) if extra else (0,)
+        assert subprocess.run([executable, *extra], timeout=10).returncode in expected
+
     if sys.platform == "linux" and platform.machine() in ("x86_64", "amd64"):
         native = root / "native"
         args = [compiler, "cxx", "--no-daemon", "--target=x86_64-linux-gnu", "-nostdlib", "-I", include, "-I", examples]
@@ -493,6 +554,14 @@ with tempfile.TemporaryDirectory() as directory:
                         "-o", str(executable)], check=True, timeout=30)
         assert subprocess.run([executable, "skip"], timeout=10).returncode == -signal.SIGILL
         subprocess.run([*args, str(unfinished_field), "-o", str(native)], check=True, timeout=30)
+        assert subprocess.run([native, "skip"], timeout=10).returncode == -signal.SIGILL
+        subprocess.run([*args, "-fcheck-policies", str(nested), "-o", str(native)], check=True, timeout=30)
+        assert subprocess.run([native], timeout=10).returncode == 0
+        subprocess.run([*args, str(nested_skip), "-o", str(native)], check=True, timeout=30)
+        assert subprocess.run([native, "skip"], timeout=10).returncode == -signal.SIGILL
+        subprocess.run([*args, "-fcheck-policies", str(array), "-o", str(native)], check=True, timeout=30)
+        assert subprocess.run([native], timeout=10).returncode == 0
+        subprocess.run([*args, str(array_skip), "-o", str(native)], check=True, timeout=30)
         assert subprocess.run([native, "skip"], timeout=10).returncode == -signal.SIGILL
 
         subprocess.run([*args, str(runtime), "-o", str(native)], check=True, timeout=30)

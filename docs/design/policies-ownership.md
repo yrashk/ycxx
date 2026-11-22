@@ -58,8 +58,9 @@ outside the supported loop control also receive an error.
 
 ## Owning fields
 
-A flat local aggregate can hold multiple registered owners alongside arithmetic or enum fields.
-Initialize each owning field with a registered factory or transfer. YCXX tracks each field
+A local aggregate can hold multiple registered owners alongside arithmetic or enum fields and
+can nest other supported aggregates. Initialize each owning field with a registered factory or
+transfer. YCXX tracks the full field path, such as `tree.left.work`, and checks each owner
 independently through observation, borrowing, transfer, consumption, and scope exit. It checks
 the initializers in field order, so a later initializer that can unwind is diagnosed if a linear
 field is already live. Scalar fields can be read by value.
@@ -77,9 +78,21 @@ void finish_pair() {
 }
 ```
 
-The first field protocol covers non-overlapping direct fields and trivial or implicit nonthrowing
-destruction. Whole-record copying and transfer, nested records, unions, and bases that contain
-owners require additional checking.
+The field protocol covers non-overlapping value fields and trivial or implicit nonthrowing
+destruction. Whole-record copying and transfer, unions, and bases that contain owners
+require additional checking.
+
+## Fixed local arrays
+
+A fixed local array of a registered resource can initialize each element with a registered
+factory or transfer. Use an in-bounds integer literal for an access such as `tasks[0]`.
+The checker tracks an obligation and its borrows for each element. Consuming `tasks[1]`
+can proceed while `tasks[0]` has a shared borrow. Scope exit reports any live linear
+element by its index.
+
+The first array protocol requires nonthrowing destruction and supports arrays as local
+variables. Pointer aliases, runtime indices, and arrays stored in records require additional
+checking.
 
 ## Try it
 

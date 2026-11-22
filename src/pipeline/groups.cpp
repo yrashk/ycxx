@@ -377,6 +377,7 @@ engine::query_task<SemaResult> TuSema::run(engine::Ctx& cx, TuId tu) {
           !record.user_ctors && !record.closure && !record.polymorphic &&
           std::ranges::none_of(fields, &sema::FieldRec::no_unique_address);
       if (shape.plain_ownership_record) shape.ownership_destructor = record.destructor;
+      if (record.destructor_noexcept.value_or(false)) shape.nonthrowing_destructor = record.destructor;
       shape.pod = record.pod;
       shape.explicit_alignment = record.explicit_alignment;
       for (const sema::BaseRec& b : record.bases) shape.bases.push_back(b.cls);
