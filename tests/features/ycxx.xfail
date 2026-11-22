@@ -59,7 +59,6 @@ draft/class/class.base.init-2.reject.cpp errors elsewhere: 'struct' not supporte
 draft/class/class.base.init-3.reject.cpp errors elsewhere: 'struct' not supported yet
 draft/class/class.base.init-5.reject.cpp errors elsewhere: 'struct' not supported yet
 draft/class/class.base.init-6.reject.cpp errors elsewhere: 'struct' not supported yet
-draft/class/class.base.init-7.accept.cpp example has a comment-only initializer placeholder (#837)
 draft/class/class.base.init-8.reject.cpp errors elsewhere: 'struct' not supported yet
 draft/class/class.base.init-9.accept.cpp 'struct' not supported yet
 draft/class/class.bit-1.accept.cpp 'enum' not supported yet
