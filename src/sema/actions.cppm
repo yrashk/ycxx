@@ -641,6 +641,21 @@ public:
     if (auto c = namespace_class_template(ns, name)) return c;
     return namespace_template(ns, name, ast::DeclKind::type_alias);
   }
+  // [basic.lookup.qual], [namespace.qual] apply ordinary lookup before a functional
+  // conversion is known to name a type. Distinct declarations can be introduced by
+  // different using-directives even when one of them is a type template.
+  std::optional<ast::DeclSema> namespace_expression_type_template(EntityId ns, NameId name, u32 at) {
+    const auto found = q_->namespace_members(ns, name);
+    const auto type = std::ranges::find_if(found, [](const ast::DeclSema& d) {
+      return (d.flags & decl_flag::template_) && (d.kind == ast::DeclKind::class_ || d.kind == ast::DeclKind::type_alias);
+    });
+    if (type == found.end()) return std::nullopt;
+    if (std::ranges::any_of(found, [&](const ast::DeclSema& d) { return d.entity != type->entity; })) {
+      diag(at, Diag::ambiguous_name, name);
+      return std::nullopt;
+    }
+    return with_template_defaults(*type, found);
+  }
   // The variable template unqualified lookup finds for `name` ([temp.pre]/1), likewise.
   std::optional<ast::DeclSema> variable_template(NameId name, std::optional<u32> at = std::nullopt) {
     return named_template(name, ast::DeclKind::variable, at);
@@ -681,10 +696,15 @@ public:
     }
     if (!found && !decls.empty()) found = decls.back();
     if (!found || found->kind != kind || !(found->flags & decl_flag::template_)) return std::nullopt;
-    std::vector<ast::TemplateParamSema> params = ins().seqs.elements(found->template_params);
+    return with_template_defaults(*found, decls);
+  }
+
+  // [temp.param] combines default arguments from prior declarations of the same template.
+  ast::DeclSema with_template_defaults(ast::DeclSema found, std::span<const ast::DeclSema> decls) {
+    std::vector<ast::TemplateParamSema> params = ins().seqs.elements(found.template_params);
     bool merged = false;
     for (const ast::DeclSema& d : decls) {
-      if (d.entity != found->entity) continue;
+      if (d.entity != found.entity) continue;
       std::vector<ast::TemplateParamSema> other = ins().seqs.elements(d.template_params);
       for (std::size_t i = 0; i < params.size() && i < other.size(); ++i)
         if (!params[i].has_default && other[i].has_default) {
@@ -693,7 +713,7 @@ public:
           merged = true;
         }
     }
-    if (merged) found->template_params = ins().intern_seq(std::span<const ast::TemplateParamSema>(params));
+    if (merged) found.template_params = ins().intern_seq(std::span<const ast::TemplateParamSema>(params));
     return found;
   }
 
