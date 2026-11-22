@@ -4,4 +4,4 @@ template<class T> struct Routine {
 };
 
 using Nonthrowing = int (*)(int) noexcept;
-Nonthrowing cannot_narrow = &Routine<int>::ordinary;
+Nonthrowing cannot_narrow = &Routine<int>::ordinary;  //! error
