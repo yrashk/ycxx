@@ -367,3 +367,59 @@ ycxx cxx -fcheck-policies -fsyntax-only -I/path/to/include handler.cpp
 A trusted mediation adapter can declare which effects escape its handler. YCXX checks
 its callers against that declaration. The runtime scope and the optional budget use the
 same types with GCC, Clang, and YCXX.
+
+### Check a reflected handler's usage grade
+
+Save this example as `reflected_handler.cpp`. The handler spends one `Audit` from the
+caller's budget before returning a setting. The reflection annotations declare that
+outward cost on the trusted adapter, the handler implementation, and the caller.
+
+```cpp
+#include <ycxx/effects.hpp>
+#include <ycxx/effects/handler.hpp>
+#include <ycxx/effects/runtime.hpp>
+
+namespace fx = ycxx::effects;
+struct ReadSettings;
+struct Audit;
+using AuditBudget = fx::budget<Audit, 1>;
+using OneAudit = fx::set<fx::at_most<Audit, 1>>;
+
+#ifdef __ycxx__
+[[=fx::trusted_contract<OneAudit>{}]]
+#endif
+int record_read(AuditBudget& audit, int offset) noexcept {
+  audit.spend();
+  return offset;
+}
+
+#ifdef __ycxx__
+[[=fx::contract<OneAudit>{}]]
+#endif
+int read_from_memory(AuditBudget& audit, int offset) noexcept {
+  return 40 + record_read(audit, offset);
+}
+
+#ifdef __ycxx__
+[[=fx::contract<OneAudit>{}]]
+#endif
+int run(AuditBudget& audit, int offset) {
+  fx::scoped_handler<ReadSettings, decltype(read_from_memory)> handler(read_from_memory);
+  return handler.perform(audit, offset);
+}
+
+int main() {
+  AuditBudget audit;
+  return run(audit, 2) != 42;
+}
+```
+
+```sh
+c++ -std=c++20 -I/path/to/include reflected_handler.cpp -o reflected_handler
+./reflected_handler
+ycxx cxx -fcheck-policies -fsyntax-only -I/path/to/include reflected_handler.cpp
+```
+
+Add `handler.perform(audit, offset);` before the return in `run`. YCXX reports that
+the second call exceeds the `Audit` grade. In a GCC or Clang build, both calls share
+the same budget and the second call traps.
