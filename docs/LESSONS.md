@@ -373,6 +373,12 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
   - Do: commit (or stash with a tag) before mutating, or undo with the same `sed` reversed, and
     check `git diff --stat` after.
   - Learned on #337.
+- **A mutation that does not build leaves the old binary under test.** On #647 a mutation
+  left a variable unused, `-Werror` stopped the build, and the test passed against the
+  previous, correct binary. The "surviving" mutation looked like a test gap.
+  - Do: check the build's exit status, not just the test's, after every mutation, and keep
+    the mutated code warning-free (`+ 0 * x` keeps a variable used).
+  - Learned on #647.
 - **A mutation that changes nothing proves nothing.** On #33 the first mutation of
   `usual_arithmetic` (`>=` to `>` on rank) was equivalent for the standard integer types, and the
   suite rightly stayed green.
