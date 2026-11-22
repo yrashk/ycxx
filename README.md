@@ -178,14 +178,17 @@ object. Symbol names can share suffixes in an input string table.
 [#428](https://github.com/yrashk/ycxx/issues/428), [#419](https://github.com/yrashk/ycxx/issues/419),
 [#484](https://github.com/yrashk/ycxx/issues/484)
 
-On x86-64 Linux, an exception thrown by hosted peer code can unwind through eligible
-cleanup-free ycxx functions with fixed scalar signatures and reach a handler in peer code.
-An eligible ycxx function can also throw an `int` to a hosted peer's handler.
+On x86-64 Linux and arm64 macOS, an exception thrown by hosted peer code can unwind through
+eligible cleanup-free ycxx functions with fixed scalar signatures and reach a handler in
+peer code. [#572](https://github.com/yrashk/ycxx/issues/572) ·
+[#737](https://github.com/yrashk/ycxx/issues/737)
+
+On x86-64 Linux, an eligible ycxx function can also throw an `int` to a hosted peer's handler.
 A host-linked ycxx function can use one `catch (...)` to return an integer literal when
 a direct call on its parameter to an externally defined `int(int)` function throws.
 A host-linked void function can also destroy one initialized aggregate local on both exits
 from an external `void()` call and let the original exception reach a peer handler.
-[#572](https://github.com/yrashk/ycxx/issues/572) · [#578](https://github.com/yrashk/ycxx/issues/578)
+[#578](https://github.com/yrashk/ycxx/issues/578)
 · [#583](https://github.com/yrashk/ycxx/issues/583) · [#663](https://github.com/yrashk/ycxx/issues/663)
 
 Both targets support cooked integer user-defined literals through namespace-scope literal

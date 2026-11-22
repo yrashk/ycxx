@@ -95,6 +95,9 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
   - Do: before pushing to a PR's branch, check that the PR is still open
     (`gh pr view N --json state`). Once it has merged, start a fresh branch from main for anything
     new, even a follow-up to the same issue.
+  - Make the check gate the push: `[ "$(gh pr view N --json state -q .state)" = OPEN ] && git push`.
+    `gh pr view … -q .state && git push` only prints the state and pushes anyway; that pushed to
+    #753's merged branch, and the commit had to move to #770.
   - The coordinator's sweep also checks every merged PR's branch for commits that aren't on main.
   - Rule: AGENTS.md, "PRs and branches".
   - Learned on #116 and #230, 2026-11-18.
