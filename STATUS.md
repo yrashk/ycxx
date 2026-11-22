@@ -1112,6 +1112,8 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   other member types and exceptional cleanup remain in #118.
   The fixtures in `tests/own/classes/scalar-default-member-init/` cover both targets in syntax
   checks and native Linux x86-64 execution.
+  Diagnostics during replay use the written initializer's source position.
+  [#806](https://github.com/yrashk/ycxx/issues/806)
 
 - An automatic declaration such as `Point p(3, 4);` can initialize a flat aggregate with
   public arithmetic fields and implicit trivial destruction. The fallback applies when
