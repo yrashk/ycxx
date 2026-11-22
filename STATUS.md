@@ -1476,7 +1476,9 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
 - A union destructor runs its own body and leaves variant members to explicit lifetime
   management ([class.dtor]). Tests in `tests/own/unions/` check constructor selection and
   observe the union and member destructor effects independently.
-- Implicit union special members and the other aggregate designator forms remain in #203.
+- An omitted aggregate member of union type is initialized from an empty braced list,
+  so its first variant can run a constructor.
+- Remaining implicit special-member rules and aggregate designator forms stay in #203.
   Direct explicit destructor calls are tracked in #722.
 
 ## `<cstdio>`, step 4c: operator functions; `<stdio.h>` compiles (#133, 2026-11-18)
