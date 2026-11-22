@@ -1,7 +1,6 @@
 // #775: `{ e } noexcept;` where e calls function template specializations and a class-template
 // member, as libycxx's __nothrow_swappable_with_ and __nothrow_invocable_ do with std::swap and
 // invoke ([expr.prim.req.compound]/2, [except.spec]/13).
-// XFAIL: ycxx #828: the noexcept-specifier of a function template specialization is ignored
 // EXIT: 0
 template<class T> constexpr bool nothrow_move = true;
 template<class T> void sw(T& a, T& b) noexcept(nothrow_move<T>) {}
