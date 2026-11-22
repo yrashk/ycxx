@@ -230,9 +230,10 @@ An ordinary class object can be destroyed explicitly through a reference or poin
 `object.~Class()` or `pointer->~Class()`. Templates can use a dependent class name, and unary
 `noexcept` uses the destructor's exception specification. [#722](https://github.com/yrashk/ycxx/issues/722)
 
-Both targets construct a class prvalue directly into an automatic variable initialized with the
-built-in conditional or comma operator. The supported nonthrowing initializers sequence temporary
-destruction after the result is constructed. [#740](https://github.com/yrashk/ycxx/issues/740)
+Both targets construct a class prvalue selected by the built-in conditional or comma operator
+directly into an automatic variable, its ordinary aggregate field, or its fixed-array element.
+The supported nonthrowing initializers keep temporaries alive through later initializer clauses
+and destroy them in reverse order. [#740](https://github.com/yrashk/ycxx/issues/740)
 
 In-class conversion functions can name a class type alias as their conversion target,
 including a dependent alias in a class template. A named `static_cast` can call a
