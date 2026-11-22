@@ -170,6 +170,22 @@ boundary outside the library, such as OS isolation. For handlers, begin with exp
 contexts, then single-shot resumptions. Multi-shot resumption needs a restriction on copying live
 ownership in the captured continuation. Allow only copyable captures in its first version.
 
+### First transitive effect bounds
+
+Astra proposed using canonical tag types as effect names and a deduplicated set of tags as a
+function's upper bound. A filesystem read tag can be distinct from a network read tag. The
+issuer's rights mask still governs which capability can authorize the operation. Both typed
+portable declarations and reflection annotations should normalize to the same bound. Trusted
+adapter declarations specify the effects at the mediation boundary.
+
+For the direct-call subset, verify that each callee's declared bound is a subset of the caller's
+bound. Check every verified body against its own declaration, which also covers recursive calls
+without effect inference. Unknown calls and unmodeled implicit operations fail finite-bound
+checks. Constructor calls, cleanup, and default arguments need coverage alongside ordinary calls.
+For separately compiled code, carry verified bounds and their call requirements to the checked
+link. Match the bound to the selected provider and keep trusted declarations distinct from
+compiler-verified definitions.
+
 ## YCXX implementation milestones
 
 1. **User registration and portable adapters.** Use typed policy aliases to replace the current

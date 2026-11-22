@@ -99,3 +99,8 @@ held token before it goes out of scope. Operation guards terminate on a wrong sc
 moved-from token, or a released token. GCC, Clang, and YCXX enforce the same rights constraints.
 On Linux x86-64, a YCXX-built issuer can also return a token to a hosted GCC or Clang caller.
 [Indirect results #661](https://github.com/yrashk/ycxx/issues/661) · [Type friendship #689](https://github.com/yrashk/ycxx/issues/689)
+
+Register a token specialization as an affine resource and describe its adapter functions with
+the ownership policies when callers should also get YCXX's scoped-borrow and use-after-release
+checks. A registered release adapter consumes the token, so subsequent observations are rejected
+in a checked caller.

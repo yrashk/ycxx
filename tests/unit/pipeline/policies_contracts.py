@@ -595,3 +595,28 @@ with tempfile.TemporaryDirectory() as directory:
                         "-o", str(native)], check=True, timeout=30)
         assert subprocess.run([native], timeout=10).returncode == 0
         assert subprocess.run([native, "wrong-scope"], timeout=10).returncode == -signal.SIGILL
+
+        checked_capability = declarations + textwrap.dedent("""\
+            #include <ycxx/ownership.hpp>
+            namespace own = ycxx::ownership;
+            Grant acquire() noexcept;
+            void access(const Grant&) noexcept;
+            void release(Grant&&) noexcept;
+            using Policy = own::use_policy<own::affine<Grant>,
+                own::creates<decltype(&acquire), &acquire>,
+                own::observes<decltype(&access), &access>,
+                own::consumes<decltype(&release), &release>>;
+            void use_grant() {
+              auto authority = acquire();
+              {
+                const auto& view = authority;
+                access(view);
+              }
+              release(static_cast<Grant&&>(authority));
+            }
+        """)
+        syntax(write("capability_ownership.cpp", checked_capability))
+        dangling_use = write("capability_after_release.cpp", checked_capability.replace(
+            "  release(static_cast<Grant&&>(authority));",
+            "  release(static_cast<Grant&&>(authority));\n  access(authority);"))
+        syntax(dangling_use, error="affine resource 'authority' may already have been consumed")
