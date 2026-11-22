@@ -12,7 +12,7 @@ filed against the subclause (`cwg-issues.tsv`): an open one is often the cause, 
 can mean the example or the compiler predates the resolution. Triage notes go in the issue
 that fixes the test or the compiler, not here.
 
-205 tests; both oracles disagree on 105.
+204 tests; both oracles disagree on 104.
 
 | test | draft | Clang 23 | GCC 16 | CWG issues on the subclause |
 |---|---|---|---|---|
@@ -137,7 +137,6 @@ that fixes the test or the compiler, not here.
 | [class.base.init-3](class/class.base.init-3.reject.cpp) | reject | no error at line 4 — 5: constructor for 'C' creates a delegation cycle [-Wdelegating-ctor-cycles] | accepts | open: [2056](https://wg21.link/cwg2056), [2135](https://wg21.link/cwg2135), [2204](https://wg21.link/cwg2204), [2403](https://wg21.link/cwg2403), [2669](https://wg21.link/cwg2669), [3223](https://wg21.link/cwg3223) (+2); 14 resolved |
 | [class.base.init-5](class/class.base.init-5.reject.cpp) | reject | agrees | accepts | open: [2056](https://wg21.link/cwg2056), [2135](https://wg21.link/cwg2135), [2204](https://wg21.link/cwg2204), [2403](https://wg21.link/cwg2403), [2669](https://wg21.link/cwg2669), [3223](https://wg21.link/cwg3223) (+2); 14 resolved |
 | [class.base.init-6](class/class.base.init-6.reject.cpp) | reject | no error at line 12; error at unannotated line 10 — 10: constructor for 'C' must explicitly initialize the member 'b' which does not have a default constructor | no error at line 12; error at unannotated line 10 — 10: no matching function for call to 'B::B()' | open: [2056](https://wg21.link/cwg2056), [2135](https://wg21.link/cwg2135), [2204](https://wg21.link/cwg2204), [2403](https://wg21.link/cwg2403), [2669](https://wg21.link/cwg2669), [3223](https://wg21.link/cwg3223) (+2); 14 resolved |
-| [class.base.init-7](class/class.base.init-7.accept.cpp) | accept | rejects: error at unannotated line 2 — 2: expected expression | rejects: error at unannotated line 2 — 2: expected primary-expression at end of input | open: [2056](https://wg21.link/cwg2056), [2135](https://wg21.link/cwg2135), [2204](https://wg21.link/cwg2204), [2403](https://wg21.link/cwg2403), [2669](https://wg21.link/cwg2669), [3223](https://wg21.link/cwg3223) (+2); 14 resolved |
 | [class.base.init-8](class/class.base.init-8.reject.cpp) | reject | no error at line 6; error at unannotated line 2 — 2: reference member 'v' binds to a temporary object whose lifetime would be shorter than the lifetime of the constructed object | accepts | open: [2056](https://wg21.link/cwg2056), [2135](https://wg21.link/cwg2135), [2204](https://wg21.link/cwg2204), [2403](https://wg21.link/cwg2403), [2669](https://wg21.link/cwg2669), [3223](https://wg21.link/cwg3223) (+2); 14 resolved |
 | [class.inhctor.init-1](class/class.inhctor.init-1.reject.cpp) | reject | agrees | error at unannotated line 12, 26 — 22: use of deleted function 'D1::D1()'; 12: no matching function for call to 'B1::B1()' | 1 resolved |
 | [class.cdtor-1](class/class.cdtor-1.accept.cpp) | accept | rejects: error at unannotated line 19, 20 — 19: redefinition of 'X'; 20: redefinition of 'Y' | rejects: error at unannotated line 19, 20 — 19: redefinition of 'struct X'; 20: redefinition of 'struct Y' | open: [307](https://wg21.link/cwg307), [1517](https://wg21.link/cwg1517), [1855](https://wg21.link/cwg1855), [2757](https://wg21.link/cwg2757); 2 resolved |

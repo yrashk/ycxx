@@ -101,8 +101,11 @@ def main():
 
         # Use the same daemon scope to switch targets, then switch back.
         (scope / 'target.cpp').write_text('''
-#if defined(__linux__) != __has_builtin(__builtin_c23_va_start)
-#error inconsistent variadic builtin availability
+#if !__has_builtin(__builtin_c23_va_start)
+#error the variadic builtins exist on every target (#647)
+#endif
+#if defined(__linux__) != (__SIZEOF_LONG_DOUBLE__ == 16)
+#error the daemon kept the configuration of the other target
 #endif
 int target_control() { return 42; }
 ''')

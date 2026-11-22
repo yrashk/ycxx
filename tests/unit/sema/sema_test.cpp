@@ -7,6 +7,7 @@ import ycxx.ast;
 import ycxx.engine;
 import ycxx.pp;
 import ycxx.items;
+import ycxx.lex;
 import ycxx.sema;
 import ycxx.parse;
 import ycxx.unit;
@@ -118,6 +119,161 @@ void redeclarations_and_linkage() {
   check(v.kind == sema::ValueKind::string && v.units == std::vector<std::uint32_t>{'h', 'i', 0}, "the string's units");
   check(lit.info.category == ast::ValueCategory::lvalue && a.spell(lit.info.type) == "const char[3]",
         "a string literal is an lvalue array");
+}
+
+void declaration_annotations() {
+  Analysed a(R"cpp(
+enum class Role { linear = 2, consumes = 5 };
+enum class Other { consumes = 5 };
+struct Tag { int value; };
+consteval int code(int x) { return x + 1; }
+struct [[= Role::linear]] Owner;
+struct [[deprecated]][[= Role::linear, = Tag{code(6)}]] Owner { int packed; };
+[[deprecated]][[= Role::consumes, = Role::consumes]] int finish(Owner&&);
+[[= Other::consumes]] int finish(int);
+int finish [[=code(6)]] (Owner&&) { return 0; }
+int invoke() { return finish(Owner{}); }
+)cpp");
+  const bool clean = a.pre.diags.empty() && a.diags().empty();
+  check(clean, "declaration annotations accept parsed expressions and separate ordinary attributes");
+  if (!clean) return;
+
+  const auto role = a.decl(a.its.top.at(0));
+  const auto other = a.decl(a.its.top.at(1));
+  const auto tag = a.decl(a.its.top.at(2));
+  const ast::u32 forward = a.its.top.at(4);
+  const ast::u32 definition = a.its.top.at(5);
+  const auto owner = a.decl(definition);
+  check(a.decl(forward).entity == owner.entity, "class declaration and definition share an entity");
+  const auto owner_annotations = a.p->declaration_annotations(owner.entity);
+  check(owner_annotations.size() == 3, "class records retain both redeclarations and repeated constants");
+  if (owner_annotations.size() == 3) {
+    const auto& first = owner_annotations[0];
+    const auto& second = owner_annotations[1];
+    const auto& third = owner_annotations[2];
+    check(first.type == role.type && first.value == second.value && first.item == a.p->id(forward) &&
+              second.item == a.p->id(definition), "enum annotation occurrences carry their type and source item");
+    check(third.type == tag.type && a.ins.values.is<ast::VAggregate>(third.value),
+          "structural aggregate stays typed");
+    for (const auto& annotation : owner_annotations) {
+      const auto& item = a.its.items[a.p->index(annotation.item)];
+      check(a.pre.region.tokens[item.begin + annotation.offset].kind == lex::Tk::equal,
+            "annotation source token is the written equals");
+    }
+  }
+
+  const ast::u32 first_finish = a.its.top.at(6);
+  const ast::u32 int_finish = a.its.top.at(7);
+  const ast::u32 defined_finish = a.its.top.at(8);
+  const ast::u32 invoke = a.its.top.at(9);
+  const auto ret = a.get<ast::Return>(a.children(a.get<ast::Compound>(a.body(invoke).tree).stmts)[0].id);
+  const auto call = a.get<ast::Call>(ret.value.id);
+  check(call.function == a.decl(first_finish).entity && call.function == a.decl(defined_finish).entity,
+        "the selected overload shares the annotated declaration and definition");
+  const auto finish = a.p->declaration_annotations(call.function);
+  const auto different = a.p->declaration_annotations(a.decl(int_finish).entity);
+  check(finish.size() == 3 && different.size() == 1, "annotations remain on their selected overload");
+  if (finish.size() == 3 && different.size() == 1) {
+    check(finish[0].type == role.type && different[0].type == other.type &&
+              finish[0].value == different[0].value, "different enums may have equal underlying values");
+    check(finish[0].item == finish[1].item && finish[0].offset < finish[1].offset,
+          "equal constants on one declaration preserve distinct source positions");
+    check(a.w.types.is(finish[2].type, Builtin::int_) && a.w.values.as_signed(finish[2].value) == 7,
+          "a call in the payload is evaluated");
+    check(a.ins.seqs.size(a.decl(first_finish).annotations) == 2 &&
+              a.ins.seqs.size(a.decl(defined_finish).annotations) == 1,
+          "each declaration exposes just its written occurrences");
+  }
+}
+
+void qualified_template_annotation() {
+  Analysed a(R"cpp(
+namespace effects {
+template<class...> struct Set {};
+template<class> struct Contract {};
+}
+namespace fx = effects;
+struct [[=1]] Read { unsigned flags : 3; };
+[[=fx::Contract<fx::Set<Read>>{}]] int read();
+)cpp");
+  const bool clean = a.pre.diags.empty() && a.diags().empty();
+  check(clean, "a namespace-qualified template annotation and an annotated bit-field class are valid");
+  if (!clean) return;
+
+  const auto fn = a.decl(a.its.top.back());
+  const auto annotations = a.p->declaration_annotations(fn.entity);
+  check(annotations.size() == 1, "one annotation is attached to the function");
+  if (annotations.size() != 1) return;
+
+  const auto& annotation = annotations.front();
+  const bool aggregate = a.ins.values.is<ast::VAggregate>(annotation.value);
+  check(aggregate && a.w.types.is_class(annotation.type), "the payload is a typed class constant");
+  if (!aggregate || !a.w.types.is_class(annotation.type)) return;
+  const auto klass = a.w.entities.rec(a.w.types.class_of(annotation.type));
+  check(klass.templ != ast::EntityId::none && a.ins.names.spelling(klass.name) == "Contract" &&
+            a.ins.values.get<ast::VAggregate>(annotation.value).type == annotation.type,
+        "the annotated payload retains the concrete namespace class specialization");
+}
+
+void parenthesized_annotation_payloads() {
+  Analysed a(R"cpp(
+int unrelated;
+struct Tag { int n; };
+[[=Tag{7}, =(Tag{7}), =((Tag{7})),
+  =true, =(true), =((true)),
+  =7, =(7), =((7))]] void f();
+)cpp");
+  const bool clean = a.pre.diags.empty() && a.diags().empty();
+  check(clean, "parenthesized annotation payloads are constant expressions");
+  if (!clean) return;
+
+  const auto annotations = a.p->declaration_annotations(a.decl(a.its.top.back()).entity);
+  check(annotations.size() == 9, "all written annotation payloads are retained");
+  if (annotations.size() != 9) return;
+
+  const auto tag = a.decl(a.its.top.at(1)).type;
+  const bool aggregate = a.ins.values.is<ast::VAggregate>(annotations[0].value);
+  check(aggregate && a.ins.values.get<ast::VAggregate>(annotations[0].value).type == tag,
+        "the aggregate constant carries the Tag type");
+
+  const auto payloads = std::span{annotations};
+  auto same_payload = [](std::span<const ast::DeclarationAnnotation> occurrences, ast::QualType type) {
+    return std::ranges::all_of(occurrences, [&](const auto& occurrence) {
+      return occurrence.type == type && occurrence.value == occurrences.front().value;
+    });
+  };
+  check(same_payload(payloads.subspan(0, 3), tag), "parentheses preserve the aggregate annotation type and value");
+  check(same_payload(payloads.subspan(3, 3), a.w.types.builtin(Builtin::bool_)),
+        "parentheses preserve the boolean annotation type and value");
+  check(same_payload(payloads.subspan(6, 3), a.w.types.builtin(Builtin::int_)),
+        "parentheses preserve the integer annotation type and value");
+}
+
+void invalid_declaration_annotations() {
+  using sema::Diag;
+  struct Witness {
+    std::string_view source;
+    Diag diagnostic;
+  };
+  for (const Witness& witness : {
+           Witness{"int runtime(); [[=runtime()]] void f();", Diag::not_constant},
+           Witness{"[[=void()]] void f();", Diag::annotation_invalid_type},
+           Witness{R"cpp([[="literal"]] void f();)cpp", Diag::annotation_invalid_type},
+           Witness{"struct Tag { mutable int value; }; [[=Tag{3}]] void f();", Diag::annotation_invalid_type},
+           Witness{"int [[=1]] f();", Diag::attributes_not_allowed},
+           Witness{"static [[=1]] int f();", Diag::attributes_not_allowed},
+           Witness{"int * [[=1]] f();", Diag::attributes_not_allowed},
+           Witness{"consteval int f() { return 1; } [[=&f]] void g();", Diag::annotation_invalid_type},
+           Witness{"constexpr int n=1; struct R { const int& r; }; [[=R{n}]] void f();", Diag::annotation_not_supported},
+           Witness{"[[nodiscard, =3]] int f();", Diag::annotation_mixed_list},
+           Witness{"[[=3, nodiscard]] int f();", Diag::annotation_mixed_list},
+           Witness{"struct C { friend void f [[=1]] (); };", Diag::attributes_not_allowed},
+           Witness{"[[=1]] struct Unattached {};", Diag::attributes_not_allowed},
+       }) {
+    auto diagnostics = Analysed(witness.source).diags();
+    check(std::ranges::any_of(diagnostics, [&](const auto& d) { return d.id == sema::diag_id(witness.diagnostic); }),
+          witness.source);
+  }
 }
 
 void unsupported_bit_fields() {
@@ -418,6 +574,10 @@ int main() {
   conversions_and_locals();
   prototype_parameters_are_not_body_locals();
   redeclarations_and_linkage();
+  declaration_annotations();
+  qualified_template_annotation();
+  parenthesized_annotation_payloads();
+  invalid_declaration_annotations();
   unsupported_bit_fields();
   gnu_pointer_qualifiers();
   constants();

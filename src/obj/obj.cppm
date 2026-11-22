@@ -36,11 +36,15 @@ inline constexpr std::uint32_t cstring_literals = 0x2;
 inline constexpr std::uint32_t non_lazy_symbol_pointers = 0x6;
 inline constexpr std::uint32_t symbol_stubs = 0x8;
 inline constexpr std::uint32_t mod_init_func_pointers = 0x9;
+inline constexpr std::uint32_t coalesced = 0xb;
 inline constexpr std::uint32_t gb_zerofill = 0xc;
 inline constexpr std::uint32_t thread_local_regular = 0x11;
 inline constexpr std::uint32_t thread_local_zerofill = 0x12;
 inline constexpr std::uint32_t thread_local_variables = 0x13;
 inline constexpr std::uint32_t pure_instructions = 0x80000000;
+inline constexpr std::uint32_t no_toc = 0x40000000;
+inline constexpr std::uint32_t strip_static_syms = 0x20000000;
+inline constexpr std::uint32_t live_support = 0x08000000;
 inline constexpr std::uint32_t debug = 0x02000000;
 inline constexpr std::uint32_t some_instructions = 0x00000400;
 
@@ -60,7 +64,7 @@ enum class standard_section : std::uint8_t {
   bss,         // __DATA,__bss: zero-initialized data
   mod_init_func,  // __DATA,__mod_init_func: pointers to the functions dyld runs before main
   init_array,     // ELF .init_array: pointers to the functions startup runs before main
-  eh_frame,       // ELF .eh_frame: call frame information
+  eh_frame,       // __TEXT,__eh_frame / ELF .eh_frame: call frame information
   gcc_except_table,  // ELF .gcc_except_table: language-specific exception data
 };
 
@@ -174,6 +178,7 @@ struct symbol {
   bool weak = false;                     // a weak definition, or a weak reference when undefined
   // Present for an ELF function definition. Zero records an unknown byte extent.
   std::optional<std::uint64_t> function_size = std::nullopt;
+  std::optional<std::uint64_t> object_size = std::nullopt;  // sets STT_OBJECT and st_size on ELF output
 
   std::string_view name_view() const noexcept { return name.view(); }
   bool defined() const noexcept { return section.has_value(); }
@@ -182,7 +187,7 @@ struct symbol {
 
 enum class target : std::uint8_t { aarch64_macos, x86_64_linux };
 
-// An input ELF COMDAT group after relocation sections have been attached to their targets.
+// An ELF COMDAT group. On input, relocation sections have been attached to their targets.
 struct comdat_group {
   symbol_name signature;
   std::vector<std::uint32_t> members;  // indices into object::sections

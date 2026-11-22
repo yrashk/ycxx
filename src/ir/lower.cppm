@@ -55,6 +55,8 @@ export struct TypeLayout {
   // Records: the bits of each INTEGER eightbyte in the supported AMD64 slice, zero otherwise.
   std::uint8_t sysv_integer_eightbytes = 0;
   bool copy_abi_unknown = false;  // records whose defaulted copy has unresolved triviality
+  bool calls_abi_uncertain = false;  // records whose non-triviality for calls is not established
+  bool layout_uncertain = false;     // records whose source layout directives are not applied
   bool contains_explicit_alignment = false;  // a class-head requirement raises this object or a subobject's alignment
 };
 
@@ -114,6 +116,7 @@ export struct LowerConfig {
   bool sysv_amd64 = false;
   std::optional<IntThrowRuntime> int_throw;
   std::optional<CatchAllRuntime> catch_all{};
+  EntityId cleanup_resume = EntityId::none;
 };
 
 export enum class Amd64ArgumentKind : std::uint8_t { integer, sse, stack };
@@ -209,7 +212,7 @@ class Lowering {
       if (block_map_[raw(b)] == none) continue;
       if (auto e = block(b); !e) return std::unexpected(e.error());
     }
-    if (catch_edges_) emit_catch_dispatch();
+    if (catch_edges_ && !catch_edges_->cleanup) emit_catch_dispatch();
     l2::Function out = b_.finish(results_.value_or(std::vector<l2::Type>{}));
     out.indirect_result = indirect_result_;
     return out;
@@ -245,6 +248,7 @@ class Lowering {
     NodeId invoke;
     BlockId normal, handler;  // L1 blocks
     BlockId landing, resume;  // additional L2 blocks
+    bool cleanup = false;
   };
   std::optional<CatchEdges> catch_edges_;
   std::optional<std::vector<T>> results_;
@@ -420,10 +424,31 @@ class Lowering {
     Amd64ArgumentOrder amd64_args;
     std::vector<std::int64_t> l2_of;  // per L1 parameter: its L2 parameter, or -1
     std::uint32_t j = 0;              // the value parameter's index
+    // System V AMD64: a class result in memory takes the first INTEGER argument, ahead of
+    // `this` and every declared parameter (psABI §3.2.3; Itanium C++ ABI §3.1.3).
+    std::optional<ValueId> sysv_result;
+    if (entry && config_.sysv_amd64 && f_.result_param) {
+      std::uint32_t k = 0;
+      for (ValueId p : f_.params_of(b))
+        if (f_.value(p).type.kind == TyKind::cxx && ++k == f_.result_param) {
+          if (sysv_memory_result(layout(cxx(p)).pointee)) sysv_result = p;
+          break;
+        }
+    }
     for (ValueId p : f_.params_of(b)) {
       if (f_.value(p).type.kind == TyKind::state) {
         l2_of.push_back(std::int64_t(params.size()));
         params.push_back(T::state);
+        if (sysv_result && params.size() == 1) {
+          indirect_result_ = std::uint32_t(params.size());  // 1 + its index past `!state`
+          if (place_amd64) amd64_args.add(std::uint32_t(params.size()), T::ptr);
+          params.push_back(T::ptr);
+        }
+        continue;
+      }
+      if (sysv_result && p == *sysv_result) {
+        ++j;
+        l2_of.push_back(std::int64_t(indirect_result_));
         continue;
       }
       if (catch_edges_ && b == catch_edges_->handler && f_.value(p).type.kind == TyKind::exn) {
@@ -446,7 +471,10 @@ class Lowering {
           continue;
         }
         ClassPieces pieces = class_pieces(pc, byval ? &amd64_args : nullptr, std::uint32_t(params.size()));
-        if (config_.sysv_amd64 && !pieces.words) return fail("unsupported System V AMD64 aggregate");
+        // A class that is not trivial for calls passes by the address of its object, as on
+        // AArch64 (Itanium C++ ABI §3.1.2.3).
+        if (config_.sysv_amd64 && !pieces.words && !(byval && !object.trivial_calls))
+          return fail("unsupported System V AMD64 aggregate");
         if (result && pieces.words) {
           objects.push_back({p, 0, true, pieces});
           l2_of.push_back(-1);
@@ -484,13 +512,15 @@ class Lowering {
     const bool normal_invoke = catch_edges_ && b == catch_edges_->normal;
     if (normal_invoke) {
       if (!params.empty()) return fail("hosted invoke normal block must be parameterless in L1");
-      params = {T::state, T::i32};
+      params = {T::state};
+      if (!catch_edges_->cleanup) params.push_back(T::i32);
     }
+    if (catch_edges_ && catch_edges_->cleanup && b == catch_edges_->handler) params.push_back(T::i64);
     BlockId nb = b_.begin_block(params);
     auto param = [&](std::uint32_t i) { return b_.param(nb, index.empty() ? i : index[i]); };
     if (normal_invoke) {
       out(catch_edges_->invoke, 0, param(0));
-      out(catch_edges_->invoke, 1, param(1));
+      if (!catch_edges_->cleanup) out(catch_edges_->invoke, 1, param(1));
     }
     std::uint32_t i = 0;
     for (ValueId p : f_.params_of(b)) {
@@ -740,6 +770,24 @@ class Lowering {
         out(n, 1, p);
         return {};
       }
+      case Op::alloc_peer_root: {
+        const QualType type{std::uint32_t(imms[0])};
+        if constexpr (requires { layout_.peer_root_allocation(type); }) {
+          if (config_.sysv_amd64) {
+            if (const auto storage = layout_.peer_root_allocation(type)) {
+              const ValueId p = emit1(Op2::alloca, T::ptr, {}, {storage->size, storage->align, raw(n)});
+              const ValueId state = zero(in(n, 0), p, *storage, imms[0]);
+              // Itanium ABI §2.5.2: offset-to-top and RTTI precede the root's address point.
+              const ValueId table = emit1(Op2::symbol, T::ptr, {}, {imms[1]});
+              const ValueId address_point = add_offset(table, 2 * ast::x86_64_linux.pointer_size);
+              out(n, 0, emit1(Op2::store, T::state, {state, p, address_point}, {0}));
+              out(n, 1, p);
+              return {};
+            }
+          }
+        }
+        return fail("a peer virtual root needs a supported automatic-object layout");
+      }
       case Op::dealloc:
       case Op::obj__begin:
       case Op::obj__end:
@@ -791,8 +839,22 @@ class Lowering {
       }
       case Op::va_start:
       case Op::va_arg: {
-        if (!config_.sysv_amd64) return fail("variadic cursors require System V AMD64");
         auto o = origin();
+        if (!config_.sysv_amd64 && nd.op == Op::va_arg) {
+          // Apple arm64: the cursor holds the address of the next argument, each in an 8-byte
+          // slot of its own, the value in its low bytes (little-endian).
+          auto fetch = type_of(cxx(f_.results_of(n)[1]));
+          if (!fetch) return fail(fetch.error());
+          ValueId state = in(n, 0), cursor = in(n, 1);
+          ValueId at = emit1(Op2::load, T::ptr, {state, cursor}, {0});
+          ValueId value = emit1(Op2::load, *fetch, {state, at}, {0});
+          T st[] = {T::state};
+          ValueId ops[] = {state, cursor, add_offset(at, 8)};
+          std::uint64_t im[] = {0};
+          out(n, 0, b_.peek().result(b_.emit(Op2::store, st, ops, im, 0, {}, o)));
+          out(n, 1, value);
+          return {};
+        }
         ValueId ops[] = {in(n, 0), in(n, 1)};
         if (nd.op == Op::va_start) {
           T result[] = {T::state};
@@ -808,13 +870,11 @@ class Lowering {
         return {};
       }
       case Op::va_copy: {
-        if (!config_.sysv_amd64) return fail("variadic cursors require System V AMD64");
         QualType cursor = layout(cxx(f_.operands_of(n)[1])).pointee;
         out(n, 0, copy_bytes(in(n, 0), in(n, 1), in(n, 2), layout(cursor), 0));
         return {};
       }
       case Op::va_end:
-        if (!config_.sysv_amd64) return fail("variadic cursors require System V AMD64");
         // The operand has been evaluated. The ABI requires no cleanup of the cursor.
         out(n, 0, in(n, 0));
         return {};
@@ -841,7 +901,19 @@ class Lowering {
         std::optional<ValueId> result_dst;    // a class result in registers: where it goes
         ClassPieces result_pieces;
         ValueId state = in(n, 0);
+        // System V AMD64: a class result in memory goes first, as in `block`.
+        std::optional<std::size_t> sysv_result;
+        if (config_.sysv_amd64 && result_arg) {
+          const std::size_t i = (ind ? 2 : 1) + result_arg - 1;
+          if (i < l1ops.size() && sysv_memory_result(layout(cxx(l1ops[i])).pointee)) {
+            sysv_result = result_arg - 1;
+            if (place_amd64) amd64_args.add(std::uint32_t(ops.size()), T::ptr);
+            ops.push_back(map_[raw(l1ops[i])]);
+            indirect = 1;
+          }
+        }
         for (std::size_t i = ind ? 2 : 1, k = 0; i < l1ops.size(); ++i, ++k) {
+          if (sysv_result && k == *sysv_result) continue;
           ValueId v = map_[raw(l1ops[i])];
           if (k >= 32) return fail("more than 32 arguments are not in the α subset");
           std::size_t at = ops.size() - (ind ? 2 : 1);  // the argument's L2 index
@@ -867,7 +939,9 @@ class Lowering {
           } else if (class_arg) {
             // A class argument represented by pieces of its caller-owned object.
             ClassPieces pieces = class_pieces(c, &amd64_args, std::uint32_t(ops.size()));
-            if (pieces.words) {
+            if (config_.sysv_amd64 && !pieces.words && !layout(c).trivial_calls) {
+              // By the address of the caller's object (Itanium C++ ABI §3.1.2.3), below.
+            } else if (pieces.words) {
               if (!config_.sysv_amd64) {
                 const T piece = pieces.type;
                 std::span<const ValueId> args(ops.begin() + (ind ? 2 : 1), ops.end());
@@ -878,7 +952,7 @@ class Lowering {
                 ops.push_back(load_class_piece(state, v, pieces, w));
               continue;
             }
-            if (config_.sysv_amd64) return fail("unsupported System V AMD64 aggregate argument");
+            else if (config_.sysv_amd64) return fail("unsupported System V AMD64 aggregate argument");
           }
           bool signed_arg = b_.peek().type(v) != T::i1 && b_.peek().type(v) != T::ptr && is_signed(l1ops[i]);
           if (place_amd64) {
@@ -950,6 +1024,18 @@ class Lowering {
         return {};
       }
       case Op::invoke: {
+        if (config_.cleanup_resume != EntityId::none && !catch_edges_ &&
+            nd.nopnd == 1 && nd.nres == 1 && imms[1] == 0) {
+          const auto edges = f_.succs_of(n);
+          if (edges.size() != 2 || edges[0].nargs || edges[1].nargs) return fail("unsupported hosted cleanup successor");
+          const BlockId landing{block_map_[raw(edges[1].target)]};
+          catch_edges_ = CatchEdges{n, edges[0].target, edges[1].target, landing, {}, true};
+          const l2::Builder::SuccArgs paths[] = {{BlockId(block_map_[raw(edges[0].target)]), {}}, {landing, {}}};
+          const ValueId args[] = {in(n, 0)};
+          const std::uint64_t target[] = {imms[0], 0, 0, 0};
+          b_.emit(Op2::invoke_cleanup, {}, args, target, 0, paths, origin());
+          return {};
+        }
         if (!config_.sysv_amd64 || !config_.catch_all || catch_edges_ || nd.nopnd != 2 || nd.nres != 2 ||
             imms[1] != 0 || b_.peek().type(in(n, 1)) != T::i32)
           return fail("unsupported hosted invoke");
@@ -966,6 +1052,17 @@ class Lowering {
         const ValueId args[] = {in(n, 0), in(n, 1)};
         const std::uint64_t target[] = {imms[0], 1, 0, 0};
         b_.emit(Op2::invoke, {}, args, target, 0, paths, origin());
+        return {};
+      }
+      case Op::resume: {
+        if (!catch_edges_ || !catch_edges_->cleanup || nd.block != raw(catch_edges_->handler))
+          return fail("unsupported hosted resume");
+        const ValueId args[] = {in(n, 0), in(n, 1)};
+        const std::uint64_t target[] = {raw(config_.cleanup_resume), 0, 0, 0};
+        const T result[] = {T::state};
+        const auto o = origin();
+        b_.emit(Op2::call, result, args, target, 0, {}, o);
+        b_.emit(Op2::unreachable, {}, {}, {}, 0, {}, o);
         return {};
       }
       case Op::catch__begin:
@@ -1078,6 +1175,14 @@ class Lowering {
     if (l.hfa) return {l.hfa, l.hfa_bytes == 4 ? T::f32 : T::f64, l.size};
     if (l.size > config_.composite_in_registers) return {};
     return {words, T::i64, l.size};
+  }
+  // System V AMD64: a class result the caller provides memory for, whose address it passes
+  // as the first INTEGER argument and the callee returns in RAX. A class not trivial for calls
+  // (Itanium C++ ABI §3.1.3.1), or one of more than two eightbytes (psABI §3.2.3, MEMORY).
+  bool sysv_memory_result(QualType c) const {
+    TypeLayout l = layout(c);
+    return l.kind == TypeKind::record && !l.empty && !l.copy_abi_unknown && !l.layout_uncertain &&
+           ((!l.trivial_calls && !l.calls_abi_uncertain) || l.size > 16);
   }
   // An empty class trivially copyable for calls is not passed at all, as Clang does on arm64
   // macOS (#116).

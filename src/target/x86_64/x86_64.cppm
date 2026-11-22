@@ -32,6 +32,7 @@ export struct UnwindCallSite {
   std::uint32_t begin;        // first byte of the call
   std::uint32_t end;          // first byte after the call
   std::uint32_t landing_pad;  // function-relative, or zero for a call without a pad
+  bool cleanup_only = false;
   bool operator==(const UnwindCallSite&) const = default;
 };
 
@@ -39,7 +40,7 @@ export struct MachineCode {
   std::vector<std::uint8_t> bytes;
   std::vector<Reloc> relocs;
   std::vector<FrameRow> frame_rows;
-  std::optional<std::vector<UnwindCallSite>> catch_all{};
+  std::optional<std::vector<UnwindCallSite>> unwind_sites{};
   bool operator==(const MachineCode&) const = default;
 };
 
@@ -67,8 +68,8 @@ export struct EhFrameFields {
 export std::expected<EhFrameFields, std::string> append_eh_frame(std::vector<std::uint8_t>& section,
                                                                 EhFrameCies& cies, const MachineCode& code);
 
-// Encode the supported catch-all LSDA from the final instruction and landing-pad offsets.
-export std::expected<std::vector<std::uint8_t>, std::string> catch_all_lsda(const MachineCode& code);
+// Encode one hosted handler or cleanup LSDA from the final instruction and landing-pad offsets.
+export std::expected<std::vector<std::uint8_t>, std::string> exception_lsda(const MachineCode& code);
 
 namespace {
 
@@ -137,12 +138,17 @@ bool supports_float(Op op) {
   }
 }
 
+bool is_invoke(Op op) { return op == Op::invoke || op == Op::invoke_cleanup; }
+
 std::expected<Frame, std::string> layout(const l2::Function& body) {
   // A frame over a page is probed page by page in the prologue (`allocate_frame`). The limit
   // matches the AArch64 back end's and keeps every RBP-relative displacement in 32 bits.
   constexpr std::uint64_t max_frame = std::uint64_t{16} << 20;
   const bool float_result = std::ranges::any_of(body.results, l2::is_float);
-  if (body.indirect_result || body.results.size() > (float_result ? 1u : 2u))
+  // A class result in memory: `lower` makes its address the first argument (RDI), and the
+  // function returns that address in RAX (AMD64 psABI §3.2.3).
+  if ((body.indirect_result && (body.indirect_result != 1 || !body.results.empty())) ||
+      body.results.size() > (float_result ? 1u : 2u))
     return std::unexpected("only a scalar SSE result or up to two INTEGER result registers are supported");
   if (std::ranges::contains(body.results, Type::state)) return std::unexpected("unsupported scalar ABI result type");
   auto is_float = [&](ValueId v) { return l2::is_float(body.type(v)); };
@@ -191,7 +197,7 @@ std::expected<Frame, std::string> layout(const l2::Function& body) {
         if (frame.size > max_frame) return at_node(n, nd.op, "a frame larger than 16 MiB is not supported");
         frame.variadic_save = -std::int32_t(frame.size);
       }
-      if (nd.op == Op::call || nd.op == Op::call_ind || nd.op == Op::invoke) {
+      if (nd.op == Op::call || nd.op == Op::call_ind || is_invoke(nd.op)) {
         const bool indirect = nd.op == Op::call_ind;
         const bool variadic = nd.flags & ir::bit(ir::Flag::variadic);
         if (indirect && body.type(operands[1]) != Type::ptr)
@@ -202,10 +208,11 @@ std::expected<Frame, std::string> layout(const l2::Function& body) {
           return at_node(n, nd.op, indirect ? "ellipsis arguments on a nonvariadic indirect call"
                                          : "ellipsis arguments on a nonvariadic direct call");
         if (ellipsis > args.size()) return at_node(n, nd.op, "more ellipsis arguments than arguments");
-        if (imms[indirect ? 2 : 3] || nd.nres > (variadic || uses_float_result ? 2u : 3u))
+        // A class result in memory is the first argument (`lower`) and leaves no result value.
+        const auto result_in_memory = imms[indirect ? 2 : 3];
+        if (result_in_memory > 1 || (result_in_memory && nd.nres > 1) ||
+            nd.nres > (variadic || uses_float_result ? 2u : 3u))
           return at_node(n, nd.op, "unsupported ABI result placement");
-        if (indirect && (uses_float_result || std::ranges::any_of(args, is_float)))
-          return at_node(n, nd.op, "floating-point indirect calls are unsupported");
         for (ValueId arg : args.last(ellipsis)) {
           Type type = body.type(arg);
           if (type != Type::i32 && type != Type::i64 && type != Type::ptr && type != Type::f64)
@@ -233,9 +240,9 @@ class Emitter {
 
   std::expected<MachineCode, std::string> run() {
     for (std::uint32_t n = 0; n < body_.nodes.size(); ++n)
-      if (body_.nodes[n].op == Op::invoke) {
+      if (is_invoke(body_.nodes[n].op)) {
         landing_ = body_.succs_of(NodeId(n))[1].target;
-        out_.catch_all.emplace();
+        out_.unwind_sites.emplace();
       }
     e_.emit({0x55});  // push rbp
     frame_row(FrameState::saved_rbp);
@@ -266,7 +273,7 @@ class Emitter {
     if (!std::in_range<std::uint32_t>(e_.offset())) return std::unexpected("x86-64 function exceeds 4 GiB");
     if (landing_) {
       if (!protected_call_) return std::unexpected("missing protected machine call");
-      (*out_.catch_all)[*protected_call_].landing_pad =
+      (*out_.unwind_sites)[*protected_call_].landing_pad =
           static_cast<std::uint32_t>(block_offsets_[raw(*landing_)]);
     }
     return std::move(out_);
@@ -491,7 +498,11 @@ class Emitter {
       // register count (AMD64 psABI §3.2.3), so their callee address needs a separate register.
       Reg target = variadic ? r11 : rax;
       read(ops[1], target);
-      if (variadic) e_.reg({0x31}, rax, rax, false);  // xor eax, eax
+      if (variadic) {
+        // AL counts the vector registers holding arguments (AMD64 psABI §3.2.3).
+        if (const auto vector_count = plan.used_sse_registers()) e_.emit({0xb0, std::uint8_t(vector_count)});  // mov al, imm8
+        else e_.reg({0x31}, rax, rax, false);  // xor eax, eax
+      }
       call_begin = e_.offset();
       e_.reg({0xff}, 2, target, false);  // call r/m64
     } else {
@@ -503,15 +514,15 @@ class Emitter {
       e_.emit({0xe8});  // call rel32
       relocation(RelocKind::plt32, ir::EntityId(std::uint32_t(imms[0])));
     }
-    const bool invoke = node.op == Op::invoke;
-    if (out_.catch_all) {
-      if (invoke) protected_call_ = out_.catch_all->size();
-      out_.catch_all->push_back({static_cast<std::uint32_t>(call_begin),
-                                static_cast<std::uint32_t>(e_.offset()), 0});
+    const bool invoke = is_invoke(node.op);
+    if (out_.unwind_sites) {
+      if (invoke) protected_call_ = out_.unwind_sites->size();
+      out_.unwind_sites->push_back({static_cast<std::uint32_t>(call_begin),
+                                static_cast<std::uint32_t>(e_.offset()), 0, node.op == Op::invoke_cleanup});
     }
     if (invoke) {
       const auto normal = body_.succs_of(n)[0].target;
-      write(body_.params_of(normal)[1]);
+      if (node.op == Op::invoke) write(body_.params_of(normal)[1]);
       jump(normal);
       return;
     }
@@ -772,7 +783,7 @@ std::expected<void, std::string> Emitter::node(NodeId n) {
     case Op::va_arg:
       if (!va_arg(ops[1], body_.result(n, 1))) return at_node(n, op, "conditional branch displacement out of range");
       return {};
-    case Op::call: case Op::call_ind: case Op::invoke:
+    case Op::call: case Op::call_ind: case Op::invoke: case Op::invoke_cleanup:
       call(n);
       return {};
     case Op::br:
@@ -790,6 +801,7 @@ std::expected<void, std::string> Emitter::node(NodeId n) {
       return {};
     }
     case Op::ret:
+      if (body_.indirect_result) read(body_.params_of(BlockId(0))[body_.indirect_result]);
       if (ops.size() > 2) read(ops[2], rdx);
       if (ops.size() > 1) {
         ValueId result = ops[1];
@@ -861,7 +873,7 @@ std::expected<EhFrameFields, std::string> append_eh_frame(std::vector<std::uint8
     previous = row.offset;
   }
 
-  const bool handler = code.catch_all.has_value();
+  const bool handler = code.unwind_sites.has_value();
   auto& cie = handler ? cies.handler : cies.ordinary;
   constexpr std::size_t word = sizeof(std::uint32_t);
   const std::size_t cie_size = handler ? 32 : 24;  // length field included
@@ -916,35 +928,47 @@ void uleb128(std::vector<std::uint8_t>& bytes, std::size_t value) {
 
 }  // namespace
 
-std::expected<std::vector<std::uint8_t>, std::string> catch_all_lsda(const MachineCode& code) {
-  if (!code.catch_all || code.bytes.empty() || !std::in_range<std::int32_t>(code.bytes.size()))
-    return std::unexpected("missing or oversized catch-all machine code");
+std::expected<std::vector<std::uint8_t>, std::string> exception_lsda(const MachineCode& code) {
+  if (!code.unwind_sites || code.bytes.empty() || !std::in_range<std::int32_t>(code.bytes.size()))
+    return std::unexpected("missing or oversized hosted unwind machine code");
 
   std::vector<std::uint8_t> sites;
   std::uint32_t previous_end = 0;
   bool protected_call = false;
-  for (const UnwindCallSite& site : *code.catch_all) {
+  bool cleanup_only = false;
+  for (const UnwindCallSite& site : *code.unwind_sites) {
     if (site.begin < previous_end || site.begin >= site.end || site.end > code.bytes.size())
-      return std::unexpected("a catch-all call-site range is outside the function or out of order");
+      return std::unexpected("an unwind call-site range is outside the function or out of order");
     previous_end = site.end;
     if (site.landing_pad != 0) {
       if (protected_call || site.landing_pad >= code.bytes.size() ||
           (site.landing_pad >= site.begin && site.landing_pad < site.end))
-        return std::unexpected("invalid catch-all landing pad");
+        return std::unexpected("invalid unwind landing pad");
       if (site.end - site.begin != 5 || code.bytes[site.begin] != 0xe8 ||
           !std::ranges::any_of(code.relocs, [&](const Reloc& r) {
             return r.offset == site.begin + 1 && r.addend == -4 &&
                    (r.kind == RelocKind::plt32 || r.kind == RelocKind::pc32);
           }))
-        return std::unexpected("the catch-all protected range must be one relocated direct call");
+        return std::unexpected("the unwind protected range must be one relocated direct call");
       protected_call = true;
+      cleanup_only = site.cleanup_only;
+    } else if (site.cleanup_only) {
+      return std::unexpected("a cleanup call site needs a landing pad");
     }
     uleb128(sites, site.begin);
     uleb128(sites, site.end - site.begin);
     uleb128(sites, site.landing_pad);
-    uleb128(sites, site.landing_pad != 0 ? 1 : 0);
+    uleb128(sites, site.landing_pad != 0 && !site.cleanup_only ? 1 : 0);
   }
-  if (!protected_call) return std::unexpected("missing catch-all protected call");
+  if (!protected_call) return std::unexpected("missing unwind protected call");
+
+  if (cleanup_only) {
+    // The cleanup entry needs neither a type table nor an action table.
+    std::vector<std::uint8_t> lsda{0xff, 0xff, 0x01};  // omit LPStart and types, ULEB128 sites
+    uleb128(lsda, sites.size());
+    lsda.insert(lsda.end(), sites.begin(), sites.end());
+    return lsda;
+  }
 
   std::vector<std::uint8_t> tables{0x01};  // DW_EH_PE_uleb128 call-site encoding
   uleb128(tables, sites.size());

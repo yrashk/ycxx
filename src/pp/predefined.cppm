@@ -99,12 +99,17 @@ constexpr Builtin unsigned_of(Builtin b) {
 // prints `__FLT_MAX__`: no leading zeros in the exponent.
 std::string floating(double v, int digits, std::string_view suffix) {
   std::string s = std::format("{:.{}e}", v, digits == 0 ? 40 : digits - 1);
-  if (digits == 0) {  // the exact value: trailing zeros of the mantissa dropped
-    auto e = s.find('e');
-    auto last = s.find_last_not_of('0', e - 1);
-    s.erase(s[last] == '.' ? last : last + 1, e - (s[last] == '.' ? last : last + 1));
-  }
+  // BOOTSTRAP: -Wstringop-overread: the position of 'e' is kept across the erase, not found
+  // again. At -O3 GCC 16.2 reports the second `s.find('e')` as reading SIZE_MAX bytes (#748).
+  // Without the bug: the `digits == 0` block finds its own `e`, and `auto e = s.find('e');`
+  // follows it.
   auto e = s.find('e');
+  if (digits == 0) {  // the exact value: trailing zeros of the mantissa dropped
+    auto last = s.find_last_not_of('0', e - 1);
+    auto end = s[last] == '.' ? last : last + 1;
+    s.erase(end, e - end);
+    e = end;
+  }
   std::string mantissa = s.substr(0, e);
   char sign = s[e + 1];
   std::string exponent = s.substr(e + 2);
@@ -274,13 +279,16 @@ std::string target_macros(const ast::Target& t) {
       std::string c = std::format("{}INT{}", u, n);
       def(std::format("__{}_C_SUFFIX__", c), suffix(x));
       std::string_view s = suffix(x);
+      // `c ## L` as GCC and glibc spell it: glibc's <stdint.h> redefines __INT64_C and
+      // __UINT64_C, and a redefinition must match in white-space separation too (#657). The
+      // others follow GCC's spelling for uniformity.
       if (s.empty()) out += std::format("#define __{}_C(c) c\n", c);
-      else out += std::format("#define __{}_C(c) c##{}\n", c, s);
+      else out += std::format("#define __{}_C(c) c ## {}\n", c, s);
     }
   }
   for (auto [name, b] : {std::pair{"INTMAX", t.intmax_type}, {"UINTMAX", unsigned_of(t.intmax_type)}}) {
     def(std::format("__{}_C_SUFFIX__", name), suffix(b));
-    out += std::format("#define __{}_C(c) c##{}\n", name, suffix(b));
+    out += std::format("#define __{}_C(c) c ## {}\n", name, suffix(b));
   }
   // The standard floating types and the _Float16 extension.
   def("__FLT_RADIX__", 2);

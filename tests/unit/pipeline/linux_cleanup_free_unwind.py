@@ -11,6 +11,8 @@ import sys
 import tempfile
 from typing import NamedTuple
 
+from scalar_aggregate_unwind import check_scalar_aggregate_unwind, fixtures as scalar_aggregate_fixtures
+
 
 class Section(NamedTuple):
     name: int
@@ -154,13 +156,13 @@ def main():
         cold = dict(env, YCXX_NO_DAEMON='1')
         daemon = dict(env, YCXX_DAEMON='require')
 
-        def run(*args, status=0, context=cold):
+        def run(*args, status=0, context=cold, error=''):
             result = subprocess.run(args, cwd=scope, env=context, timeout=30, capture_output=True, text=True)
-            assert result.returncode == status, (args, result.returncode, status, result.stderr)
+            assert result.returncode == status and error in result.stderr, (args, result.returncode, status, result.stderr)
             return result.stdout
 
-        def compile(*args, context=cold):
-            return run(ycxx, 'cxx', target, '-std=c++26', *args, context=context)
+        def compile(*args, **options):
+            return run(ycxx, 'cxx', target, '-std=c++26', *args, **options)
 
         compile('-c', fixtures / 'hosted/frames.cpp', '-o', 'frames.o')
         _, functions, covered, _ = object_frames(scope / 'frames.o')
@@ -175,6 +177,26 @@ def main():
         run(peer, '-fno-lto', 'peer.o', 'frames.o', '-o', 'hosted')
         run('./hosted', 'normal')
         run('./hosted')
+
+        indirect = fixtures.with_name('scalar_indirect_unwind')
+        compile('-c', indirect / 'frames.cpp', '-o', 'indirect.o')
+        _, functions, covered, _ = object_frames(scope / 'indirect.o')
+        assert {'reference_callback', 'variadic_callback', 'guarded_callback'} <= functions.keys()
+        eligible = {'pointer_variable', 'typed_callback', 'pointer_default'}
+        assert set(covered) == {functions[name][1:] for name in eligible}
+        run(peer, '-std=c++20', '-pedantic-errors', '-O0', '-fexceptions', '-fno-lto',
+            indirect / 'peer.cpp', 'indirect.o', '-o', 'indirect')
+        run('./indirect')
+
+        def check_scalar_aggregate(obj, expected):
+            _, functions, covered, _ = object_frames(scope / obj)
+            assert functions.keys() == set(expected)
+            assert set(covered) == {functions[name][1:] for name in expected}
+
+        check_scalar_aggregate_unwind(compile, run, check_scalar_aggregate, peer)
+        compile('-c', scalar_aggregate_fixtures / 'unsupported_cleanup.cpp', '-o', 'unsupported_cleanup.o',
+                status=1, error='unsupported local unwind cleanup')
+        assert not (scope / 'unsupported_cleanup.o').exists()
 
         omissions = {
             'guard': ('guarded_path',),

@@ -70,6 +70,26 @@ and `#include <...>` of a system header inside a global module fragment. Configu
 the code as values, such as the configured module `ycxx.version`, never as macros.
 `tools/check-preprocessor` enforces this.
 
+## Release builds
+
+`tools/build` builds Debug unless told otherwise. A Release build (`-O3 -DNDEBUG`, still
+`-Werror`) goes in its own directory:
+
+```sh
+YCXX_BUILD_TYPE=Release YCXX_BUILD_DIR=build-release tools/build
+YCXX_BUILD_TYPE=Release YCXX_BUILD_DIR=build-release tools/test --fast
+```
+
+`YCXX_BUILD_TYPE` is read only when the directory is first configured, so use a separate
+`YCXX_BUILD_DIR` rather than switching `build/`. `tools/test` tests `bin/ycxx` in
+`YCXX_BUILD_DIR`, and its build stage runs `tools/build` with the same environment.
+- `-DNDEBUG` does not turn contracts off: GCC's evaluation semantic stays `enforce`, so every
+  `pre`, `post` and `contract_assert` is still checked. ycxx itself uses no `assert`.
+- GCC warns differently with optimization, and has crashed only with it (#283). The places where
+  ycxx's sources work around that are marked `// BOOTSTRAP:` and listed in STATUS.
+- CI builds Release on Linux in the PR tier (compile only), and builds and tests it on both hosts
+  in the nightly tier (`nightly.yml`'s `release` job, or dispatched alone with `release-only`).
+
 ## Sanitizer builds
 
 `-DYCXXC_SANITIZE=<list>` (`address`, `undefined`, `thread`, comma-separated) instruments ycxx's

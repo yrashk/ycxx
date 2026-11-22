@@ -232,6 +232,11 @@ private:
   u32 item(u32 parent, const std::string& scope, u32& unnamed_types);
   void general(u32 k, u32& unnamed_types);
   u32 ctor_initializer(u32 j);
+  u32 past_gnu_attributes(u32 n) const {
+    while (is_name(n, "__attribute__") && kind(n + 1) == Tk::l_paren) n = match(n + 1);
+    return n;
+  }
+
   // Whether the tokens between a class-key and `{` are a class-head ([class.pre]): attributes,
   // one (qualified, possibly template) name, `final`; not `struct S s{1}`.
   bool is_class_head(u32 key, u32 open) const {
@@ -540,7 +545,7 @@ void Splitter::general(u32 k, u32& unnamed_types) {
         // A class or enum body; declarators may follow it.
         bool is_enum = kind(class_key) == Tk::kw_enum;
         u32 name = class_name_token(class_key, j);
-        u32 alias = name == 0 && typedef_ ? match(j) : 0;
+        u32 alias = name == 0 && typedef_ ? past_gnu_attributes(match(j)) : 0;
         bool named_by_typedef = alias != 0 && kind(alias) == Tk::identifier;
         u32 parent = at(k).parent;
         if (name == 0 && !named_by_typedef && parent != none && at(parent).kind == ItemKind::class_def)
@@ -742,7 +747,10 @@ private:
       }
     }
     // `typedef struct { … } T;`: the class has T for its name ([dcl.typedef]/9), as sema names it.
-    if (head == none && typedef_ && kind(it.brace_end) == Tk::identifier) head = it.brace_end;
+    u32 after_attributes = it.brace_end;
+    while (is_name(after_attributes, "__attribute__") && kind(after_attributes + 1) == Tk::l_paren)
+      after_attributes = match(after_attributes + 1);
+    if (head == none && typedef_ && kind(after_attributes) == Tk::identifier) head = after_attributes;
     if (head != none) {
       if (qual != none) {
         it.qualifier_begin = qual;
@@ -773,8 +781,8 @@ private:
       }
     }
     // Declarators after the body: `struct S { … } s, *p;`.
-    if (kind(it.brace_end) != Tk::semi && it.brace_end < it.end) {
-      declarators(k, it.brace_end, it.end, Flags{.type = typedef_, .definition = !typedef_});
+    if (kind(after_attributes) != Tk::semi && after_attributes < it.end) {
+      declarators(k, after_attributes, it.end, Flags{.type = typedef_, .definition = !typedef_});
     }
   }
 
@@ -938,6 +946,10 @@ private:
                  gnu_extension(n) || (transform_trait(n) && kind(n + 1) == Tk::l_paren)) {
         has_type = has_type || t == Tk::kw_decltype || transform_trait(n);
         n = match(n + 1);
+      } else if (t == Tk::identifier && kind(n + 1) == Tk::ellipsis && kind(n + 2) == Tk::l_square) {
+        // A pack-index-specifier `T...[I]` ([dcl.type.pack.index]) spells a type, not a name.
+        has_type = true;
+        n = match(n + 2);
       } else if (t == Tk::identifier || t == Tk::coloncolon) {
         if (t == Tk::coloncolon || kind(n + 1) == Tk::coloncolon || (kind(n + 1) == Tk::less && angle_then_scope(n + 1, to))) {
           if (qual == none) qual = n;

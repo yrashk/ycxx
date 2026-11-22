@@ -35,6 +35,7 @@ enum class Diag : std::uint32_t {
   asm_label_string [[=message{Severity::error, "an asm label is an ordinary string literal"}]],
   sizeof_incomplete [[=message{Severity::error, "the size of '{0:t}', which is incomplete or a function type"}]],
   union_reference [[=message{Severity::error, "a union cannot have a reference member '{0:n}'"}]],
+  union_constructor_unwind [[=message{Severity::error, "potentially throwing union construction with a nontrivial member requires unsupported exception cleanup"}]],
   function_definition_in_block [[=message{Severity::error, "a function cannot be defined in a block (is a '}' missing?)"}]],
   extraneous_brace [[=message{Severity::error, "a '}' that closes nothing"}]],
   operator_member_only [[=message{Severity::error, "'{0:n}' must be a member function"}]],
@@ -85,6 +86,9 @@ enum class Diag : std::uint32_t {
   auto_undeduced [[=message{Severity::error, "'{0:n}' is used before its return type is deduced"}]],
   decltype_auto_alone [[=message{Severity::error, "'decltype(auto)' must be the whole declared type"}]],
   auto_not_allowed [[=message{Severity::error, "a placeholder type is not allowed here"}]],
+  constrained_auto_context [[=message{Severity::error, "constrained 'auto' is not supported in this declaration"}]],
+  constrained_auto_initializer [[=message{Severity::error, "this constrained 'auto' initializer is not supported"}]],
+  placeholder_constraint_unresolved [[=message{Severity::error, "evaluating the constraint of '{0:n}' for this placeholder is not supported"}]],
   binding_requires_auto [[=message{Severity::error, "a structured binding declaration requires 'auto'"}]],
   binding_requires_initializer [[=message{Severity::error, "a structured binding declaration requires an initializer"}]],
   binding_unsupported_type [[=message{Severity::error, "structured bindings for initializer type '{0:t}' are not supported yet"}]],
@@ -94,6 +98,7 @@ enum class Diag : std::uint32_t {
   binding_bit_field [[=message{Severity::error, "structured binding of bit-field '{0:n}' is not supported yet"}]],
   binding_tuple_unsupported [[=message{Severity::error, "tuple-like structured binding for type '{0:t}' is not supported yet"}]],
   object_unusable_destructor [[=message{Severity::error, "object of type '{0:t}' requires a usable destructor"}]],
+  destructor_type_mismatch [[=message{Severity::error, "destructor name '{0:n}' does not match object type '{1:t}'"}]],
   binding_unusable_destructor [[=message{Severity::error, "structured binding requires a usable destructor for '{0:t}'"}]],
   binding_temporary_lifetime [[=message{Severity::error, "this structured binding initializer needs unsupported temporary lifetime extension"}]],
   not_captured [[=message{Severity::error, "'{0:n}' is not captured: the lambda has no capture-default"}]],
@@ -133,6 +138,7 @@ enum class Diag : std::uint32_t {
   pointer_to_reference [[=message{Severity::error, "cannot form a pointer to a reference type '{0:t}'"}]],
   indirection_to_qualified_function [[=message{Severity::error, "cannot form a pointer or reference to qualified function type '{0:t}'"}]],
   noexcept_narrowing [[=message{Severity::error, "narrowing conversion from '{0:t}' to 'bool' in a noexcept-specifier"}]],
+  recursive_noexcept [[=message{Severity::error, "exception specification depends on itself"}]],
   function_returns_function [[=message{Severity::error, "a function cannot return a function or an array"}]],
   function_initialized [[=message{Severity::error, "function '{0:n}' cannot have an initializer"}]],
   new_requires_object [[=message{Severity::error, "cannot allocate an object of type '{0:t}'"}]],
@@ -330,13 +336,20 @@ enum class Diag : std::uint32_t {
   expansion_without_pack [[=message{Severity::error, "the pattern of a pack expansion names no parameter pack"}]],
   empty_fold [[=message{Severity::error, "a fold over an empty pack needs an initial value for this operator"}]],
   pack_not_last [[=message{Severity::error, "a template parameter pack is followed by a parameter that is neither deduced nor defaulted"}]],
+  pack_index_range [[=message{Severity::error, "pack index {0} is out of range for a pack of {1} elements"}]],
+  pack_index_not_constant [[=message{Severity::error, "a pack index must be a non-negative integral constant expression"}]],
   member_named_as_class [[=message{Severity::error, "a member type cannot have the name of its class '{0:n}'"}]],
   trait_not_applicable [[=message{Severity::error, "this type trait does not apply to '{0:t}'"}]],
   constraint_not_bool [[=message{Severity::error, "an atomic constraint must be of type bool, not '{0:t}'"}]],
   constraint_not_constant [[=message{Severity::error, "an atomic constraint is not a constant expression: {0:r}"}]],
   constraints_not_satisfied [[=message{Severity::error, "the constraints of '{0:n}' are not satisfied"}]],
   not_a_concept [[=message{Severity::error, "'{0:n}' is not a concept"}]],
+  not_a_type_concept [[=message{Severity::error, "'{0:n}' is not a type concept"}]],
   concept_constrained [[=message{Severity::error, "the concept '{0:n}' cannot have associated constraints"}]],
+  offsetof_type [[=message{Severity::error, "offsetof requires a complete class type, but '{0:t}' is not one"}]],
+  offsetof_member [[=message{Severity::error, "offsetof requires a direct non-static data member named '{0:n}' in '{1:t}'"}]],
+  offsetof_bit_field [[=message{Severity::error, "offsetof cannot be applied to a bit-field"}]],
+  offsetof_layout [[=message{Severity::error, "offsetof requires an ordinary standard-layout class with supported layout; '{0:t}' is not one"}]],
   // A GNU built-in function the SDK's or libycxx's headers use and ycxx does not have yet
   // (docs/EXTENSIONS.md), named where lookup finds nothing else.
   builtin_unsupported [[=message{Severity::error, "built-in function '{0:n}' is not supported yet"}]],
@@ -358,6 +371,7 @@ enum class Diag : std::uint32_t {
   class_alignment_weak [[=message{Severity::error, "the requested alignment is weaker than the class's natural alignment"}]],
   class_alignment_mismatch [[=message{Severity::error, "the class is redeclared with a different alignment requirement"}]],
   class_alignment_missing [[=message{Severity::error, "the class definition must specify alignment when a declaration specifies it"}]],
+  post_definition_layout_attribute [[=message{Severity::error, "layout- or ABI-affecting attributes after a class or enum definition are not supported yet"}]],
   class_alignment_uncertain_layout [[=message{Severity::error, "class alignment depends on attributes or packing whose layout is not supported yet"}]],
   constructibility_target_pack [[=message{Severity::error, "a pack expansion as the target of '{0:n}' is not supported yet"}]],
   constructibility_substitution [[=message{Severity::error, "substitution of the operand type '{0:t}' in '{1:n}' failed"}]],
@@ -378,6 +392,9 @@ enum class Diag : std::uint32_t {
   destructibility_dependent [[=message{Severity::error, "dependent operands of '{0:n}' are not supported yet"}]],
   destructibility_incomplete [[=message{Severity::error, "incomplete class type '{0:t}' cannot be queried by '{1:n}'"}]],
   destructibility_unsupported [[=message{Severity::error, "'{0:n}' for '{1:t}' is not supported yet"}]],
+  annotation_invalid_type [[=message{Severity::error, "an annotation requires a structural constant value"}]],
+  annotation_not_supported [[=message{Severity::error, "this declaration annotation is not supported yet"}]],
+  annotation_mixed_list [[=message{Severity::error, "annotations and ordinary attributes require separate attribute-specifiers"}]],
 };
 
 // A `{N:r}` argument: why an evaluation was not constant. 0 is an expression the front end
@@ -453,7 +470,8 @@ constexpr bool is_type_trait_failure(engine::DiagId id) {
 // operand outside a type trait's domain also stays an error.
 constexpr bool survives_substitution(engine::DiagId id) {
   return is_limit(id) || id == diag_id(Diag::constraint_not_bool) || id == diag_id(Diag::constraint_not_constant) ||
-         id == diag_id(Diag::not_a_concept) || id == diag_id(Diag::trivial_copyability_incomplete) ||
+         id == diag_id(Diag::not_a_concept) || id == diag_id(Diag::not_a_type_concept) ||
+         id == diag_id(Diag::trivial_copyability_incomplete) ||
          id == diag_id(Diag::constructibility_incomplete) || id == diag_id(Diag::base_of_incomplete) ||
          id == diag_id(Diag::empty_incomplete) || id == diag_id(Diag::convertibility_incomplete) ||
          id == diag_id(Diag::destructibility_incomplete);

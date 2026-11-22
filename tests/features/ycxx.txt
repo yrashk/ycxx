@@ -4,7 +4,8 @@
 # a feature limit it to them.
 syntax
 preprocess
-# The run suite uses hosted executables. CTest covers freestanding Linux executables separately.
+# The run suite uses hosted executables. CTest covers freestanding Linux executables separately;
+# the run suite on Linux is #646, hosted Linux links #390.
 run darwin-arm64
 # Through the resident daemon (#19, daemon design §8.2).
 incremental

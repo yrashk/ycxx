@@ -38,7 +38,6 @@ draft/basic/class.member.lookup-3.reject.cpp errors elsewhere: 'struct' not supp
 draft/basic/class.member.lookup-4.reject.cpp errors elsewhere: 'struct' not supported yet
 draft/basic/class.member.lookup-5.reject.cpp errors elsewhere: 'struct' not supported yet
 draft/basic/class.temporary-5.accept.cpp preprocessing directives are not supported yet
-draft/basic/intro.execution-2.accept.cpp 'struct' not supported yet
 draft/basic/intro.execution-3.accept.cpp 'union' not supported yet
 draft/basic/intro.memory-1.accept.cpp 'struct' not supported yet
 draft/basic/intro.object-2.accept.cpp preprocessing directives are not supported yet
@@ -164,7 +163,7 @@ draft/dcl/dcl.fct.default-8.reject.cpp errors elsewhere: preprocessing directive
 draft/dcl/dcl.fct.spec-1.reject.cpp errors elsewhere: 'struct' not supported yet
 draft/dcl/dcl.init.aggr-1.accept.cpp 'struct' not supported yet
 draft/dcl/dcl.init.aggr-10.accept.cpp 'struct' not supported yet
-draft/dcl/dcl.init.aggr-11.reject.cpp errors elsewhere: 'struct' not supported yet
+draft/dcl/dcl.init.aggr-11.reject.cpp reference-member initializer recursion is tracked in #118
 draft/dcl/dcl.init.aggr-15.accept.cpp redefinition of 'y' (the example's two definitions are alternatives)
 draft/dcl/dcl.init.aggr-17.accept.cpp 'struct' not supported yet
 draft/dcl/dcl.init.aggr-18.reject.cpp errors elsewhere: 'union' not supported yet
@@ -440,18 +439,16 @@ draft/temp/temp.res.general-4.reject.cpp errors elsewhere: 'struct' not supporte
 draft/temp/temp.res.general-6.reject.cpp errors elsewhere: 'template' not supported yet
 draft/temp/temp.spec.general-2.accept.cpp 'template' not supported yet
 draft/temp/temp.spec.general-3.reject.cpp errors elsewhere: 'template' not supported yet
-draft/temp/temp.spec.partial.general-2.accept.cpp 'template' not supported yet
 draft/temp/temp.spec.partial.general-3.accept.cpp 'template' not supported yet
-draft/temp/temp.spec.partial.match-2.accept.cpp 'template' not supported yet
 draft/temp/temp.spec.partial.match-3.reject.cpp errors elsewhere: 'template' not supported yet
 draft/temp/temp.spec.partial.member-1.reject.cpp errors elsewhere: 'template' not supported yet
 draft/temp/temp.spec.partial.member-2.accept.cpp 'template' not supported yet
 draft/temp/temp.spec.partial.order-1.accept.cpp 'template' not supported yet
-draft/temp/temp.spec.partial.order-2.accept.cpp 'template' not supported yet
 draft/temp/temp.static-1.accept.cpp 'template' not supported yet
 draft/temp/temp.static-2.accept.cpp 'template' not supported yet
 draft/temp/temp.variadic-4.accept.cpp 'auto' not supported yet
 draft/temp/temp.variadic-8.accept.cpp 'template' not supported yet
+own/classes/virtual-declarations/root-layout.accept.cpp@darwin-arm64 Darwin virtual layout of peer-owned roots (#650)
 own/function-pointers/iota-template-argument.run.cpp function pointers and references as constant template arguments (#406)
 own/smoke/exit-status.run.cpp <cstdio> preprocesses; libycxx does not know ycxx yet (yrashk/libycxx#17), then sema needs namespaces (#133)
 own/classes/s1-byvalue-constexpr.run.cpp classes in constant evaluation (#25)

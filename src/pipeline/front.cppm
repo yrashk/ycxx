@@ -199,7 +199,11 @@ struct Runtime {
     const QualType p = vp(), v = world.types.builtin(sema::Builtin::void_);
     return {declared("__cxa_begin_catch", world.types.function(p, std::span(&p, 1), false, lang), true),
             declared("__cxa_end_catch", world.types.function(v, {}, false, lang), true),
-            declared("_Unwind_Resume", world.types.function(v, std::span(&p, 1), false, lang), true)};
+            resume()};
+  }
+  EntityId resume() {
+    const QualType p = vp(), v = world.types.builtin(sema::Builtin::void_);
+    return declared("_Unwind_Resume", world.types.function(v, std::span(&p, 1), false, ast::LangLinkage::c), true);
   }
 };
 
@@ -207,9 +211,10 @@ struct Runtime {
 // constant if it has one, else zero; one initialized by code, or with a destructor, also gets a
 // guard variable, and the function the runtime entry points its initialization calls.
 template <class R>
-void static_locals(sema::World& world, TranslationUnit& tu, FunctionDef& f, R& runtime) {
+void static_locals(sema::World& world, TranslationUnit& tu, FunctionDef& f,
+                   std::span<const ast::LocalRec> locals, R& runtime) {
   ast::Interners& ins = world.ins;
-  for (const ast::LocalRec& l : ins.seqs.elements(f.body.locals)) {
+  for (const ast::LocalRec& l : locals) {
     if (l.entity == EntityId::none || l.decl == ast::NodeId::none || !ins.ast.is<ast::StaticVar>(l.decl)) continue;
     // The function and its statics need ELF group selection (#422), or weak Mach-O statics (#124).
     f.coalesced = false;
@@ -335,39 +340,92 @@ bool unwind_scalar_prototype(const sema::Types& types, QualType type) {
          std::ranges::all_of(f.params, [&](QualType t) { return unwind_scalar(types, t); });
 }
 
-// Prove a subset of the typed tree. Class and temporary lifetimes, static initialization, calls
-// with separately analysed default arguments, and any unfamiliar operation need their own proof.
+bool unwind_indirect_callee(const sema::Types& types, const ast::Ast& tree, ast::NodeId callee) {
+  return ast::dispatch<ast::Nodes>(ast::kind_of(callee), [&]<class T>(std::type_identity<T>) {
+    if constexpr (requires(T n) { n.info; }) {
+      const auto info = tree.get<T>(callee).info;
+      const auto type = types.rec(info.type);
+      return info.category == ast::ValueCategory::prvalue && type.kind == sema::TypeKind::pointer &&
+             unwind_scalar_prototype(types, type.inner);
+    } else {
+      return false;
+    }
+  });
+}
+
+// Every subobject of this aggregate can start and end its lifetime without a cleanup.
+bool unwind_scalar_aggregate(parse::Program& program, QualType type) {
+  const auto& types = program.world().types;
+  if (!types.is_class(type)) return false;
+  const auto* record = program.classes().find(types.class_of(type));
+  return record && record->defined && !record->user_ctors && !record->closure && !record->union_ &&
+         !record->polymorphic && record->bases.empty() && record->destructor_usable &&
+         record->destructor == EntityId::none &&
+         std::ranges::all_of(record->fields, [&](const sema::FieldRec& field) {
+           return unwind_scalar(types, field.type);
+         });
+}
+
+// Prove a subset of the typed tree. Static initialization, calls with separately analysed
+// default arguments, and any unfamiliar operation need their own proof.
 using UnwindNodes = ast::closed_list<
     ast::Compound, ast::Return, ast::ExprStmt, ast::If, ast::While, ast::Do, ast::For, ast::Break,
     ast::Continue, ast::DeclStmt, ast::LocalVar, ast::CondDecl, ast::Switch, ast::Case, ast::Default,
     ast::Label, ast::Goto, ast::Literal, ast::DeclRef, ast::LocalRef, ast::Paren, ast::Unary,
-    ast::Binary, ast::OrderedBinary, ast::Assign, ast::Conditional, ast::Subscript, ast::Call,
-    ast::NewArray, ast::DeleteArray, ast::ImplicitConversion, ast::InitList, ast::ValueInit, ast::DefaultInit, ast::Throw>;
+    ast::Binary, ast::OrderedBinary, ast::Assign, ast::Conditional, ast::Subscript, ast::Call, ast::Member,
+    ast::NewArray, ast::DeleteArray, ast::ImplicitConversion, ast::InitList, ast::DefaultMemberInit,
+    ast::Materialize, ast::This, ast::ValueInit, ast::DefaultInit, ast::Throw>;
+using UnwindAggregateNodes = ast::closed_list<ast::InitList, ast::LocalRef, ast::Materialize, ast::Paren>;
 
-bool unwind_body_node(parse::Program& program, ast::NodeId node, bool& has_throw) {
+enum class UnwindContext { function, cleanup_initializer, default_member };
+
+bool unwind_body_node(parse::Program& program, ast::NodeId node, bool& has_throw,
+                      UnwindContext context = UnwindContext::function) {
   if (node == ast::NodeId::none) return true;
+  const bool initializer = context == UnwindContext::cleanup_initializer;
   auto& world = program.world();
   const auto& tree = world.ins.ast;
   return ast::dispatch<ast::Nodes>(ast::kind_of(node), [&]<class T>(std::type_identity<T>) {
     if constexpr (!UnwindNodes::contains<T>) {
       return false;
     } else {
+      if constexpr (std::is_same_v<T, ast::Call> || std::is_same_v<T, ast::NewArray> ||
+                    std::is_same_v<T, ast::DeleteArray> || std::is_same_v<T, ast::Throw>)
+        if (initializer) return false;
       const T n = tree.get<T>(node);
       if constexpr (std::is_same_v<T, ast::DeclRef>) {
         if (n.reference || (!unwind_scalar(world.types, n.info.type) &&
                             !unwind_scalar_prototype(world.types, n.info.type))) return false;
       } else if constexpr (requires { n.info; }) {
-        if (!unwind_scalar(world.types, n.info.type, true)) return false;
+        if (!unwind_scalar(world.types, n.info.type, true)) {
+          if constexpr (!UnwindAggregateNodes::contains<T>) return false;
+          else if (initializer || !unwind_scalar_aggregate(program, n.info.type)) return false;
+        }
       }
       if constexpr (std::is_same_v<T, ast::LocalVar>) {
         if (n.destructor != EntityId::none) return false;
+      } else if constexpr (std::is_same_v<T, ast::Member>) {
+        // A selected default can read another field directly from its construction object.
+        if (initializer || n.reference || (n.arrow && !tree.is<ast::This>(n.object.id))) return false;
+      } else if constexpr (std::is_same_v<T, ast::DefaultMemberInit>) {
+        if (initializer) return false;
+      } else if constexpr (std::is_same_v<T, ast::This>) {
+        if (context != UnwindContext::default_member) return false;
+      } else if constexpr (std::is_same_v<T, ast::Materialize>) {
+        if (!world.types.is_class(n.info.type) || n.destructor != EntityId::none || n.extended) return false;
       } else if constexpr (std::is_same_v<T, ast::Call>) {
-        if (n.function == EntityId::none || n.callee.id == ast::NodeId::none ||
-            !tree.is<ast::DeclRef>(n.callee.id) || tree.get<ast::DeclRef>(n.callee.id).entity != n.function)
-          return false;
-        const auto& f = world.entities.rec(n.function);
-        if (f.kind != sema::EntityKind::function || f.templ != EntityId::none || !program.is_namespace(f.scope) ||
-            !unwind_scalar_prototype(world.types, tree.get<ast::DeclRef>(n.callee.id).info.type)) return false;
+        if (n.callee.id == ast::NodeId::none) return false;
+        if (n.function == EntityId::none) {
+          // The pointer type supplies the prototype. Its expression and the arguments still
+          // need the same recursive lifetime proof below.
+          if (!unwind_indirect_callee(world.types, tree, n.callee.id)) return false;
+        } else {
+          if (!tree.is<ast::DeclRef>(n.callee.id)) return false;
+          const auto callee = tree.get<ast::DeclRef>(n.callee.id);
+          const auto& f = world.entities.rec(n.function);
+          if (callee.entity != n.function || f.kind != sema::EntityKind::function || f.templ != EntityId::none ||
+              !program.is_namespace(f.scope) || !unwind_scalar_prototype(world.types, callee.info.type)) return false;
+        }
       } else if constexpr (std::is_same_v<T, ast::NewArray>) {
         // The fixed-size allocation may throw before any element lifetime starts.
         if (n.allocation.id == ast::NodeId::none || n.element_init.id == ast::NodeId::none ||
@@ -385,11 +443,12 @@ bool unwind_body_node(parse::Program& program, ast::NodeId node, bool& has_throw
         if (n.operand.id == ast::NodeId::none) return false;
         has_throw = true;  // the runtime-reachable operation checks the exact exception type
       }
+      const auto children = std::is_same_v<T, ast::DefaultMemberInit> ? UnwindContext::default_member : context;
       bool safe = true;
       ast::for_each_ref(n, [&]<class H>(const H& h) {
-        if constexpr (std::is_same_v<H, ast::NodeId>) safe = safe && unwind_body_node(program, h, has_throw);
+        if constexpr (std::is_same_v<H, ast::NodeId>) safe = safe && unwind_body_node(program, h, has_throw, children);
         else if constexpr (std::is_same_v<H, ast::ChildList>)
-          for (ast::Child c : tree.children(h)) safe = safe && unwind_body_node(program, c.id, has_throw);
+          for (ast::Child c : tree.children(h)) safe = safe && unwind_body_node(program, c.id, has_throw, children);
       });
       return safe;
     }
@@ -407,12 +466,139 @@ UnwindEligibility cleanup_free_definition(parse::Program& program, const ast::De
       (entity.linkage != ast::Linkage::external && entity.linkage != ast::Linkage::internal) ||
       sema::is_allocation_name(world.ins.names.spelling(entity.name))) return none;
   if (!std::ranges::all_of(world.ins.seqs.elements(body.locals), [&](const ast::LocalRec& local) {
-        return local.entity == EntityId::none && unwind_scalar(world.types, local.type) &&
+        return local.entity == EntityId::none &&
+               (unwind_scalar(world.types, local.type) || unwind_scalar_aggregate(program, local.type)) &&
                (local.decl == ast::NodeId::none || world.ins.ast.is<ast::LocalVar>(local.decl));
       })) return none;
   bool has_throw = false;
   if (!unwind_body_node(program, body.tree, has_throw)) return none;
   return has_throw ? cleanup_free_with_throw : cleanup_free;
+}
+
+bool hosted_void_definition(parse::Program& program, const ast::DeclSema& d, const ast::BodySema& body) {
+  auto& world = program.world();
+  const auto& tree = world.ins.ast;
+  const auto& definition = world.entities.rec(d.entity);
+  const auto fn = world.types.rec(d.type);
+  return definition.kind == sema::EntityKind::function && definition.templ == EntityId::none &&
+         program.is_namespace(definition.scope) && definition.linkage == ast::Linkage::external &&
+         unwind_scalar_prototype(world.types, d.type) && !fn.fn_noexcept &&
+         world.types.is(fn.inner, sema::Builtin::void_) && d.contracts == ast::NodeId::none &&
+         !(d.flags & (sema::decl_flag::constexpr_ | sema::decl_flag::consteval_)) &&
+         world.ins.seqs.size(body.closures) == 0 && body.tree != ast::NodeId::none && tree.is<ast::Compound>(body.tree);
+}
+
+EntityId hosted_external_call(parse::Program& program, ast::NodeId at, sema::Builtin result) {
+  const auto& world = program.world();
+  const auto& tree = world.ins.ast;
+  if (at == ast::NodeId::none || !tree.is<ast::Call>(at)) return EntityId::none;
+  const auto call = tree.get<ast::Call>(at);
+  if (call.function == EntityId::none || call.callee.id == ast::NodeId::none ||
+      !tree.is<ast::DeclRef>(call.callee.id) || !tree.children(call.args).empty()) return EntityId::none;
+  const auto& entity = world.entities.rec(call.function);
+  const auto callee = tree.get<ast::DeclRef>(call.callee.id);
+  const auto prototype = world.types.rec(callee.info.type);
+  if (callee.reference || callee.entity != call.function || entity.kind != sema::EntityKind::function ||
+      entity.templ != EntityId::none || !program.is_namespace(entity.scope) || entity.linkage != ast::Linkage::external ||
+      !unwind_scalar_prototype(world.types, callee.info.type) || prototype.fn_noexcept ||
+      !world.types.is(prototype.inner, result) || !prototype.params.empty()) return EntityId::none;
+  return call.function;
+}
+
+std::optional<ast::LocalVar> single_local(const ast::Ast& tree, ast::NodeId statement) {
+  if (!tree.is<ast::DeclStmt>(statement)) return std::nullopt;
+  const auto declarations = tree.children(tree.get<ast::DeclStmt>(statement).decls);
+  if (declarations.size() != 1 || !tree.is<ast::LocalVar>(declarations.front().id)) return std::nullopt;
+  return tree.get<ast::LocalVar>(declarations.front().id);
+}
+
+// One aggregate local followed by an external void call. The initializer has no calls,
+// throwing operations, class temporaries, or partially constructed class subobjects.
+ast::NodeId hosted_cleanup_call(parse::Program& program, const ast::DeclSema& d, const ast::BodySema& body) {
+  if (!hosted_void_definition(program, d, body)) return ast::NodeId::none;
+  const auto& world = program.world();
+  const auto& tree = world.ins.ast;
+  const auto statements = tree.children(tree.get<ast::Compound>(body.tree).stmts);
+  if (statements.size() != 2 || !tree.is<ast::ExprStmt>(statements[1].id)) return ast::NodeId::none;
+  const auto local = single_local(tree, statements.front().id);
+  if (!local || local->destructor == EntityId::none || local->init.id == ast::NodeId::none ||
+      !tree.is<ast::InitList>(local->init.id)) return ast::NodeId::none;
+  const auto type = world.ins.seqs.at(body.locals, local->local).type;
+  if (!world.types.is_class(type)) return ast::NodeId::none;
+  const auto& record = program.classes().rec(world.types.class_of(type));
+  if (!record.destructor_noexcept.value_or(false) || record.virtual_destructor) return ast::NodeId::none;
+  bool has_throw = false;
+  for (auto element : tree.children(tree.get<ast::InitList>(local->init.id).elems))
+    if (!unwind_body_node(program, element.id, has_throw, UnwindContext::cleanup_initializer)) return ast::NodeId::none;
+  const auto call = tree.get<ast::ExprStmt>(statements[1].id).expr.id;
+  return hosted_external_call(program, call, sema::Builtin::void_) != EntityId::none ? call : ast::NodeId::none;
+}
+
+// The selected variant needs cleanup only after its scalar aggregate initialization completed.
+// A direct external int() in the initializer can throw before it completes, with no cleanup.
+void hosted_union_constructor(parse::Program& program, FunctionDef& f) {
+  const auto& world = program.world();
+  const auto& tree = world.ins.ast;
+  const auto& entity = world.entities.rec(f.entity);
+  const auto& body = f.body;
+  const auto fn = world.types.rec(f.decl.type);
+  if (entity.kind != sema::EntityKind::constructor || fn.fn_noexcept || body.tree == ast::NodeId::none ||
+      !tree.is<ast::Compound>(body.tree) || !program.classes().rec(entity.scope).union_) return;
+  const auto steps = tree.children(tree.get<ast::Compound>(body.tree).stmts);
+  for (const auto step : steps) {
+    if (!tree.is<ast::MemberInit>(step.id)) continue;
+    const auto member = tree.get<ast::MemberInit>(step.id);
+    f.constructor_cleanup = program.classes().destructor_of(member.type);
+    if (f.constructor_cleanup != EntityId::none) break;
+  }
+  if (f.constructor_cleanup == EntityId::none || steps.size() != 2 || !tree.is<ast::MemberInit>(steps[0].id) ||
+      !tree.is<ast::Compound>(steps[1].id) || entity.templ != EntityId::none || fn.variadic || !fn.params.empty() ||
+      f.decl.contracts != ast::NodeId::none || (f.decl.flags & (sema::decl_flag::constexpr_ | sema::decl_flag::consteval_)) ||
+      world.ins.seqs.size(body.closures) != 0 || world.ins.seqs.size(body.locals) != 0) return;
+  const auto member = tree.get<ast::MemberInit>(steps[0].id);
+  if (member.field == ~0u || member.init.id == ast::NodeId::none || !tree.is<ast::InitList>(member.init.id) ||
+      !world.types.is_class(member.type)) return;
+  const auto& record = program.classes().rec(world.types.class_of(member.type));
+  if (!record.destructor_noexcept.value_or(false) || record.virtual_destructor || record.union_ || !record.bases.empty() ||
+      !std::ranges::all_of(record.fields, [&](const sema::FieldRec& field) {
+        return !field.dmi && unwind_scalar(world.types, field.type);
+      })) return;
+
+  EntityId initializer = EntityId::none;
+  bool has_throw = false;
+  for (const auto element : tree.children(tree.get<ast::InitList>(member.init.id).elems)) {
+    if (unwind_body_node(program, element.id, has_throw, UnwindContext::cleanup_initializer)) continue;
+    if (initializer != EntityId::none) return;
+    initializer = hosted_external_call(program, element.id, sema::Builtin::int_);
+    if (initializer == EntityId::none) return;
+  }
+  const auto statements = tree.children(tree.get<ast::Compound>(steps[1].id).stmts);
+  if (statements.size() != 1 || !tree.is<ast::ExprStmt>(statements.front().id)) return;
+  const auto call = tree.get<ast::ExprStmt>(statements.front().id).expr.id;
+  if (hosted_external_call(program, call, sema::Builtin::void_) == EntityId::none) return;
+  f.cleanup_call = call;
+  f.constructor_initializer_callee = initializer;
+  f.unwind = UnwindEligibility::hosted_cleanup;
+}
+
+// The automatic object's lifetime starts only after its constructor returns. There is no local
+// to clean up if that call throws, so this caller only needs a frame.
+EntityId hosted_union_constructor_caller(parse::Program& program, const ast::DeclSema& d, const ast::BodySema& body) {
+  if (!hosted_void_definition(program, d, body)) return EntityId::none;
+  const auto& world = program.world();
+  const auto& tree = world.ins.ast;
+  const auto statements = tree.children(tree.get<ast::Compound>(body.tree).stmts);
+  if (statements.size() != 1) return EntityId::none;
+  const auto local = single_local(tree, statements.front().id);
+  if (!local || local->destructor == EntityId::none || local->init.id == ast::NodeId::none ||
+      !tree.is<ast::CtorCall>(local->init.id)) return EntityId::none;
+  const auto type = world.ins.seqs.at(body.locals, local->local).type;
+  if (!world.types.is_class(type)) return EntityId::none;
+  const auto& record = program.classes().rec(world.types.class_of(type));
+  const auto init = tree.get<ast::CtorCall>(local->init.id);
+  if (!record.union_ || !record.destructor_noexcept.value_or(false) || init.zero_first ||
+      !tree.children(init.args).empty()) return EntityId::none;
+  return init.ctor;
 }
 
 // Prove the whole handler occurrence while it still has C++ types and lifetime information.
@@ -530,12 +716,12 @@ bool names_unnamed_namespace(parse::Program& program, QualType type) {
 }
 
 // The definitions and declarations of the global namespace, in item order.
-TranslationUnit unit_of(parse::Program& program, sema::World& world, const items::Items& items, std::string name) {
+TranslationUnit unit_of(parse::Program& program, sema::World& world, const items::Items& items, std::string name,
+                        const std::set<EntityId>& uncertain_layouts) {
   ast::Interners& ins = world.ins;
   TranslationUnit tu;
   tu.name = std::move(name);
-  // Native compilation may consume peer-owned Linux objects with supported virtual
-  // declarations, including one non-key definition. The key function and table stay in the peer.
+  // Native compilation may consume peer-owned Linux objects, including one non-key definition.
   const auto& classes = program.classes();
   EntityId defined_nonkey = EntityId::none;
   auto peer_member_declaration = [&](EntityId f) -> std::optional<ast::DeclSema> {
@@ -555,9 +741,22 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
   };
   for (EntityId c : classes.classes()) {
     const auto& record = classes.rec(c);
-    if (!record.layout_requires_virtual_support ||
-        sema::native_virtual_consumer(record, classes, world.types, peer_member_declaration))
+    if (!record.layout_requires_virtual_support) continue;
+    // The first slot is the key function of the admitted root. Classify its ownership using
+    // the complete unit, even when no function uses the class or constructs an object here.
+    if (const auto slots = sema::native_virtual_table_slots(record);
+        slots && program.function_defined_before(slots->front(), program.end())) {
+      // An elaborated declaration may introduce the class with namespace attributes. A friend
+      // may also redeclare either slot with its own attributes, including after the key.
+      if (!tu.owned_virtual_table && !program.function_defined_before(slots->back(), program.end()) &&
+          !program.has_unapplied_declaration_attributes(c) &&
+          std::ranges::none_of(*slots, [&](EntityId f) { return program.has_unapplied_declaration_attributes(f); })) {
+        tu.owned_virtual_table = OwnedVirtualTable{sema::virtual_table_entity(world, c), *slots};
+        continue;
+      }
+    } else if (sema::native_virtual_consumer(record, classes, world.types, peer_member_declaration)) {
       continue;
+    }
     block_virtual_emission(tu, program, record);
     return tu;
   }
@@ -592,7 +791,7 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
     // Any reachable declaration can mark the entity inline ([dcl.inline]).
     if ((d.flags & sema::decl_flag::inline_) && (d.kind == ast::DeclKind::function || d.kind == ast::DeclKind::variable))
       inline_declarations.insert(e);
-    if (linux && d.kind == ast::DeclKind::function && d.has_written_noexcept) noexcept_declarations.insert(e);
+    if (d.kind == ast::DeclKind::function && d.has_written_noexcept) noexcept_declarations.insert(e);
     if (d.hidden_visibility) hidden_declarations.insert(e);
     if (!seen.insert(std::to_underlying(e)).second) return;
     const sema::EntityRec& r = world.entities.rec(e);
@@ -601,7 +800,8 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
         r.kind == sema::EntityKind::function_template || r.kind == sema::EntityKind::variable_template ||
         r.kind == sema::EntityKind::alias_template || r.kind == sema::EntityKind::concept_)
       return;  // no symbol: a template's specializations have them
-    bool fn = r.kind != sema::EntityKind::variable;
+    const bool table = r.kind == sema::EntityKind::virtual_table;
+    bool fn = r.kind != sema::EntityKind::variable && !table;
     std::string id(ins.names.spelling(r.name));
     if (fn && id == "main" && r.scope == EntityId::none) tu.main = e;  // [basic.start.main]: the global one
     // A member of a class local to the unit is local too.
@@ -609,11 +809,18 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
     for (EntityId sc = r.scope; linkage == ast::Linkage::external && sc != EntityId::none; sc = world.entities.rec(sc).scope)
       if (world.entities.rec(sc).kind == sema::EntityKind::class_ && internal_class(sc)) linkage = ast::Linkage::internal;
     tu.entities.push_back({e, std::move(id), d.type, fn, r.lang, linkage, false, at, r.scope,
-                           r.kind == sema::EntityKind::constructor  ? Special::constructor
+                           table ? Special::virtual_table
+                           : r.kind == sema::EntityKind::constructor  ? Special::constructor
                            : r.kind == sema::EntityKind::destructor ? Special::destructor
                                                                     : Special::none});
     Entity& emitted = tu.entities.back();
     emitted.asm_label = program.asm_label(e);
+    if (emitted.special == Special::destructor) {
+      if (const auto* owner = classes.find(r.scope))
+        emitted.nonthrowing = owner->destructor_noexcept.value_or(false);
+    } else if (fn) {
+      emitted.nonthrowing = world.types.rec(d.type).fn_noexcept;
+    }
     if (r.kind == sema::EntityKind::function && r.lang == ast::LangLinkage::cxx &&
         r.linkage == ast::Linkage::external && r.templ == EntityId::none && program.is_namespace(r.scope) &&
         emitted.asm_label.empty()) {
@@ -719,18 +926,31 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
       if (body.deduced) d.type = body.deduced_type;
       tu.functions.push_back({d.entity, d, body, program.id(k), it.body_begin - it.begin, program.this_type(d)});
       const auto& entity = world.entities.rec(d.entity);
+      if (linux && !member && program.supports_base_object_variant(d.entity, uncertain_layouts))
+        tu.base_object_variants.insert(d.entity);
       tu.functions.back().coalesced = inline_declarations.contains(d.entity) && entity.kind == sema::EntityKind::function &&
                                      entity.linkage == ast::Linkage::external && entity.templ == EntityId::none &&
                                      tu.main != d.entity && ins.seqs.size(body.closures) == 0 &&
                                      program.asm_label(d.entity).empty();
       // A written ordinary body starts at '{'. Other starts include a function-try-block and a
       // constructor initializer. Synthetic bodies and instantiations never enter this path.
-      if (linux && !member && tu.main != d.entity && !it.specialization &&
-          program.region().tokens[it.body_begin].kind == lex::Tk::l_brace) {
+      if (linux && entity.kind == sema::EntityKind::constructor) {
+        hosted_union_constructor(program, tu.functions.back());
+      } else if (!member && tu.main != d.entity && !it.specialization &&
+                 program.region().tokens[it.body_begin].kind == lex::Tk::l_brace) {
         auto& f = tu.functions.back();
-        f.catch_all_callee = hosted_catch_all_callee(program, d, body);
-        f.unwind = f.catch_all_callee == EntityId::none ? cleanup_free_definition(program, d, body)
-                                                       : UnwindEligibility::hosted_catch_all;
+        if (linux) {
+          f.catch_all_callee = hosted_catch_all_callee(program, d, body);
+          f.unwind = f.catch_all_callee == EntityId::none ? cleanup_free_definition(program, d, body)
+                                                         : UnwindEligibility::hosted_catch_all;
+        } else if (cleanup_free_definition(program, d, body) == UnwindEligibility::cleanup_free) {
+          f.unwind = UnwindEligibility::cleanup_free;
+        }
+        if (f.unwind == UnwindEligibility::none) {
+          f.cleanup_call = hosted_cleanup_call(program, d, body);
+          if (f.cleanup_call != ast::NodeId::none) f.unwind = UnwindEligibility::hosted_cleanup;
+          else if (linux) f.unwind_through_constructor = hosted_union_constructor_caller(program, d, body);
+        }
       }
       closures_of(body.closures, program.id(k), it.body_begin - it.begin);
       continue;
@@ -817,14 +1037,46 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
     if (world.types.is_dependent(world.types.class_type(cls))) continue;
     declare(s.decl, std::nullopt);
     tu.functions.push_back({s.decl.entity, s.decl, program.synthesized_body(i), program.id(s.item), 0, program.this_type(s.decl)});
-    tu.functions.back().coalesced = s.kind == parse::Program::SpecialMember::copy_assignment && !internal_class(cls);
+    using enum parse::Program::SpecialMember;
+    tu.functions.back().coalesced = (s.kind == copy_assignment || s.kind == move_constructor) && !internal_class(cls);
   }
+  auto unwind_provider = [&](EntityId callee) {
+    return !program.function_defined_before(callee, program.end()) && !noexcept_declarations.contains(callee) &&
+           program.asm_label(callee).empty();
+  };
+  auto unwind_definition = [&](const FunctionDef& f) {
+    return !noexcept_declarations.contains(f.entity) && !f.coalesced && f.guards.empty() &&
+           program.asm_label(f.entity).empty() &&
+           (!inline_declarations.contains(f.entity) || f.constructor_cleanup != EntityId::none);
+  };
+  auto declare_virtual_table = [&](EntityId entity, std::optional<ast::Loc> at) {
+    ast::DeclSema table{};
+    table.kind = ast::DeclKind::variable;
+    table.entity = entity;
+    table.type = world.entities.rec(entity).type;
+    declare(table, at);
+  };
   for (FunctionDef& f : tu.functions) {
-    static_locals(world, tu, f, runtime);
+    const auto locals = ins.seqs.elements(f.body.locals);
+    if (classes.has_virtual_layouts()) {
+      for (const auto& local : locals) {
+        if (local.decl == ast::NodeId::none || !ins.ast.is<ast::LocalVar>(local.decl)) continue;
+        const auto init = ins.ast.get<ast::LocalVar>(local.decl).init.id;
+        if (init == ast::NodeId::none || !ins.ast.is<ast::PeerRootInit>(init)) continue;
+        const EntityId table = ins.ast.get<ast::PeerRootInit>(init).vtable;
+        if (seen.contains(std::to_underlying(table))) continue;
+        const EntityId cls = world.entities.rec(table).scope;
+        if (!program.peer_root_vtable_visible(cls)) {
+          block_virtual_emission(tu, program, classes.rec(cls));
+          return tu;
+        }
+        declare_virtual_table(table, ast::Loc{f.item, f.body_offset});
+      }
+    }
+    static_locals(world, tu, f, locals, runtime);
     // Check the complete unit by entity, including later redeclarations and qualified friends.
     if (f.unwind == UnwindEligibility::none) continue;
-    if (noexcept_declarations.contains(f.entity) || inline_declarations.contains(f.entity) || f.coalesced ||
-        !f.guards.empty() || !program.asm_label(f.entity).empty()) {
+    if (!unwind_definition(f)) {
       f.unwind = UnwindEligibility::none;
     } else if (f.unwind == UnwindEligibility::cleanup_free_with_throw && !tu.int_throw) {
       tu.int_throw = runtime.int_throw();
@@ -832,11 +1084,29 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
       // An external provider supplies its own unwind coverage. A definition in this unit can
       // introduce intervening frames without it. The ordinary function type erases written noexcept.
       const EntityId callee = f.catch_all_callee;
-      if (program.function_defined_before(callee, program.end()) ||
-          noexcept_declarations.contains(callee) || !program.asm_label(callee).empty())
+      if (!unwind_provider(callee))
         f.unwind = UnwindEligibility::none;
       else if (!tu.catch_all) tu.catch_all = runtime.catch_all();
+    } else if (f.unwind == UnwindEligibility::hosted_cleanup) {
+      const EntityId callee = ins.ast.get<ast::Call>(f.cleanup_call).function;
+      if (!unwind_provider(callee) || (f.constructor_initializer_callee != EntityId::none &&
+                                      !unwind_provider(f.constructor_initializer_callee)))
+        f.unwind = UnwindEligibility::none;
+      else if (tu.cleanup_resume == EntityId::none) tu.cleanup_resume = runtime.resume();
     }
+  }
+  // Register the owner after checking the makers. An owned declaration cannot stand in for
+  // the visibility check required when a maker requests the address point.
+  if (const auto& owned = tu.owned_virtual_table) {
+    const auto key = program.member_decl(owned->slots.front());
+    declare_virtual_table(owned->entity, key ? std::optional(ast::Loc{key->item, 0}) : std::nullopt);
+  }
+  for (FunctionDef& f : tu.functions) {
+    if (f.unwind_through_constructor == EntityId::none) continue;
+    const auto constructor = std::ranges::find(tu.functions, f.unwind_through_constructor, &FunctionDef::entity);
+    if (unwind_definition(f) && constructor != tu.functions.end() && constructor->unwind == UnwindEligibility::hosted_cleanup)
+      f.unwind = UnwindEligibility::cleanup_free;
+    else f.unwind_through_constructor = EntityId::none;
   }
   // Written declarations have already supplied their locations and definitions. For the
   // remaining implicit declarations, a code reference alone emits an undefined symbol.
@@ -851,67 +1121,6 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
     for (Entity& e : tu.entities) e.hidden = hidden_declarations.contains(e.id);
   return tu;
 }
-
-namespace {
-
-std::set<EntityId> uncertain_record_layouts(parse::Program& program, sema::World& world) {
-  const auto& region = program.region();
-  const auto& items = program.items().items;
-  std::set<EntityId> records;
-  std::set<EntityId> annotated_tags;
-  std::set<std::uint32_t> uncertain_definitions;
-  // Sema erases alias types. Remember affected spellings across alias declarations so a
-  // scalar alias that changed layout also makes records using it uncertain.
-  std::set<std::string_view> aliases;
-  auto uncertain_alias = [&](const items::Item& item) {
-    if (aliases.empty()) return false;
-    for (std::uint32_t i = item.begin; i < item.end; ++i) {
-      auto tok = region.tokens[i];
-      if (tok.kind == lex::Tk::identifier && aliases.contains(region.name(tok)) &&
-          !std::ranges::contains(item.names, i - item.begin, &items::DeclName::offset)) return true;
-    }
-    return false;
-  };
-  for (std::uint32_t k = 0; k < items.size(); ++k) {
-    const auto& item = items[k];
-    const auto* analysed = program.analysed_item(k);
-    const bool definition = item.kind == items::ItemKind::class_def;
-    if (!analysed || (!definition && item.kind != items::ItemKind::declaration)) continue;
-    bool packed = definition && parse::layout_may_be_packed(region, item.begin, item.brace_end);
-    // The attributes immediately after the type's closing brace can still apply to
-    // the type. Those within a following declarator apply to the declared name.
-    bool record_annotated = parse::record_layout_attribute(region, item, program.class_alignment_specifiers(k)) ||
-                            (!definition && uncertain_alias(item));
-    bool annotated = record_annotated || (definition && parse::layout_attribute(region, item.brace_end, item.end));
-    if (!packed && !annotated) continue;
-    if (definition && (packed || record_annotated)) uncertain_definitions.insert(k);
-    for (auto d : world.ins.seqs.elements(analysed->decls)) {
-      if (d.entity == EntityId::none) continue;
-      if (d.kind == ast::DeclKind::class_ && (packed || record_annotated)) {
-        records.insert(d.entity);
-        if (!definition) annotated_tags.insert(d.entity);
-      }
-      if (annotated && d.kind == ast::DeclKind::data_member) {
-        records.insert(world.entities.rec(d.entity).scope);
-        if (item.parent != items::none) uncertain_definitions.insert(item.parent);
-      }
-      if (annotated && d.kind == ast::DeclKind::type_alias) {
-        if (world.types.is_class(d.type)) records.insert(world.types.class_of(d.type));
-        else aliases.insert(world.ins.names.spelling(world.entities.rec(d.entity).name));
-      }
-    }
-  }
-  // Instantiated classes have their own entities. Their packing and field declarations
-  // come from the selected pattern, which may be a partial specialization.
-  for (EntityId c : program.classes().classes()) {
-    auto pattern = program.class_pattern_item(c);
-    if (pattern && (uncertain_definitions.contains(*pattern) || annotated_tags.contains(world.entities.rec(c).templ)))
-      records.insert(c);
-  }
-  return records;
-}
-
-}  // namespace
 
 engine::query_task<FrontResult> TuFront::run(engine::Ctx& cx, TuId tu) {
   const TuSource& src = cx.fetch<TuSourceIn>(tu);
@@ -986,17 +1195,40 @@ engine::query_task<FrontResult> TuFront::run(engine::Ctx& cx, TuId tu) {
                             locations.at(at), program.token(d.at)});
   }
   std::ranges::stable_sort(out.messages, {}, &Message::token);
-  if (!out.has_errors()) out.unit = unit_of(program, world, items, src.name);
   // The unit's own records of its classes and enumerations (#115).
   const sema::Classes& classes = program.classes();
-  const auto uncertain = unit_source.config.target->triple == ast::x86_64_linux.triple
-      ? uncertain_record_layouts(program, world)
-      : std::set<EntityId>{};
+  const bool linux = unit_source.config.target->triple == ast::x86_64_linux.triple;
+  const auto uncertain = linux ? program.uncertain_object_layouts(/*include_lifecycle_signatures=*/true)
+                               : std::set<EntityId>{};
+  if (!out.has_errors()) out.unit = unit_of(program, world, items, src.name, uncertain);
+  auto nontrivial_destructor = [&](this auto&& recurse, EntityId cls) -> bool {
+    const auto* record = classes.find(cls);
+    if (!record || record->destructor == EntityId::none || record->layout_requires_virtual_support) return false;
+    using enum sema::CopyOperation;
+    if (record->trivial_copyability.destructor != unknown)
+      return record->trivial_copyability.destructor == eligible_nontrivial;
+    if (auto member = std::ranges::find(record->members, record->destructor, &sema::MemberDeclRec::entity);
+        member != record->members.end()) {
+      // Defaulting the first declaration can still yield a trivial destructor ([dcl.fct.def.default]).
+      auto first = program.member_decl(member->entity);
+      return !member->is_deleted && first && !program.defaulted_body(program.index(first->item));
+    }
+    // A variant member does not make the union's own destructor nontrivial ([class.dtor]).
+    if (record->union_) return false;
+    // An implicit destructor is nontrivial when a direct base or by-value member's is nontrivial.
+    return std::ranges::any_of(record->bases, [&](const auto& base) { return recurse(base.cls); }) ||
+           std::ranges::any_of(record->fields, [&](const auto& field) {
+             auto type = world.types.rec(field.type);
+             while (type.kind == sema::TypeKind::array) type = world.types.rec(type.inner);
+             return type.kind == sema::TypeKind::class_ && recurse(type.entity);
+           });
+  };
   for (EntityId c : classes.classes()) {
     ClassShape& shape = out.shapes.classes.emplace_back(ClassShape{c, {}, {}});
     const auto& record = classes.rec(c);
     const auto& fields = record.fields;
     for (const sema::FieldRec& f : fields) {
+      if (f.no_unique_address) shape.overlapping_fields.push_back(std::uint32_t(shape.fields.size()));
       shape.fields.push_back(f.type);
       shape.has_mutable_field |= f.mutable_;
     }
@@ -1009,6 +1241,19 @@ engine::query_task<FrontResult> TuFront::run(engine::Ctx& cx, TuId tu) {
     shape.trivial_calls = classes.trivial_for_calls(c, unit_source.config.calls());
     shape.layout_uncertain = uncertain.contains(c);
     shape.copy_abi_unknown = record.defaulted_copy == sema::CopyState::unsupported;
+    {
+      // Itanium C++ ABI §3.1.2.3 from the special members one by one ([class.prop]): a
+      // non-trivial destructor or copy or move constructor, or neither constructor usable.
+      using enum sema::CopyOperation;
+      const sema::TrivialCopyability& t = record.trivial_copyability;
+      const bool known = t.destructor != unknown && t.copy_constructor != unknown && t.move_constructor != unknown;
+      const bool nontrivial = t.destructor == eligible_nontrivial || t.copy_constructor == eligible_nontrivial ||
+                              t.move_constructor == eligible_nontrivial ||
+                              (t.copy_constructor == ineligible && t.move_constructor == ineligible);
+      // A proven nontrivial destructor settles the ABI even when the copy/move traits are unknown.
+      shape.calls_abi_uncertain = !shape.trivial_calls && (!known || !nontrivial) &&
+                                  !(linux && nontrivial_destructor(c));
+    }
     shape.layout_requires_virtual_support = record.layout_requires_virtual_support;
     if (record.peer_virtual_layout != sema::PeerVirtualLayout::none) {
       const bool uncertain_base = record.peer_virtual_layout == sema::PeerVirtualLayout::primary_base &&
