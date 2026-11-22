@@ -1807,9 +1807,8 @@ public:
         bool nonthrowing = sema::is_deallocation_name(name) && !s->has_noexcept;
         const bool keep_named_exception = named_exception == NamedExceptionSpec::defaulted_assignment && name == "operator=";
         // Bare `noexcept` does not need substitution when a class template's member is used.
-        const bool bare_member_exception = l.named && !s->noexcept_condition &&
-            (named_exception == NamedExceptionSpec::class_member ||
-             (l.qualified && l.scope.type && s_->types().is_class(*l.scope.type)));
+        const bool bare_member_exception = named_exception == NamedExceptionSpec::class_member &&
+                                           l.named && !s->noexcept_condition;
         if (s->has_noexcept && (allocation || keep_named_exception || bare_member_exception || member_pointer_to_suffix(l) ||
                                 (spells_type && !l.inner)))
           nonthrowing = noexcept_value(s->noexcept_condition, d.ok);
