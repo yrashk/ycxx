@@ -1919,6 +1919,16 @@ std::optional<QualType> AtItem::replay_member_exception(sema::Sema& caller, cons
   if (const auto cached = p_->resolved_member_exceptions_.find(function); cached != p_->resolved_member_exceptions_.end())
     return cached->second;
   const auto [item, tokens] = slot->second;
+  const auto written = p_->member_decl(decl.entity);
+  if (!written) return std::nullopt;
+  const auto& record = p_->world().entities.rec(function);
+  // An overload candidate may come from a declaration registered before its builder committed
+  // the parameter lists. Read the committed declaration in this class specialization.
+  const auto& cell = p_->member_patterns_.contains(std::to_underlying(decl.entity))
+      ? p_->class_member_sema(item, record.scope)
+      : p_->item_sema(item).value;
+  auto& ins = p_->world().ins;
+  const auto member = ins.seqs.at(cell.decls, ast::number_of(written->ord));
   const u32 item_begin = p_->items().items[item].begin;
   AtItem source(*p_, item, false);
   source.at_point = default_instantiation_point.value_or(point());
@@ -1926,7 +1936,6 @@ std::optional<QualType> AtItem::replay_member_exception(sema::Sema& caller, cons
     if (!pattern->second) return std::nullopt;
     source.instantiation_calls = *pattern->second;
   }
-  const auto& record = p_->world().entities.rec(function);
   source.completing_class = record.scope;
   sema::Sema replay(p_->world(), caller.builder(), source, caller.diagnostics(), p_->id(item), 0);
   const auto before = replay.diag_count();
@@ -1945,8 +1954,7 @@ std::optional<QualType> AtItem::replay_member_exception(sema::Sema& caller, cons
     ~EndReplay() { active.erase(function); }
   } end_replay{active, function};
 
-  auto& ins = p_->world().ins;
-  auto head = ins.seqs.elements(decl.template_params);
+  auto head = ins.seqs.elements(member.template_params);
   const sema::u16 depth = head.empty() ? 0 : head.front().depth;
   replay.template_scopes = p_->enclosing_heads(item);
   replay.template_scopes.push_back(std::move(head));
@@ -1957,7 +1965,7 @@ std::optional<QualType> AtItem::replay_member_exception(sema::Sema& caller, cons
   replay.template_args.levels[depth] = std::move(member_arguments.levels[depth]);
   replay.push_scope();
   auto t = replay.templates();
-  for (const auto& param : ins.seqs.elements(decl.params)) {
+  for (const auto& param : ins.seqs.elements(member.params)) {
     if (param.name == replay.no_name()) continue;
     if (replay.types().kind(param.type) == sema::TypeKind::pack_expansion) {
       replay.declare_param_pack(param.name);
