@@ -243,8 +243,9 @@ What is true of the code today. Work in progress and its owners are tracked in
 - `#include <cstdio>` preprocesses until libycxx's `#error` for unknown compilers
   (yrashk/libycxx#17).
 - `ycxx cxx -E` prints what Clang's `-E` would, by Clang's line and spacing rules. `preprocess`
-  is in `tests/features/ycxx.txt`. Diagnostics in included files name their file. Darwin is the
-  default target. `-E --target=x86_64-linux-gnu` (also `x86_64-pc-linux-gnu`) selects Linux.
+  is in `tests/features/ycxx.txt`. Diagnostics in included files name their file. The default
+  target follows the configured compiler host. An explicit `--target` also selects the
+  preprocessing target.
 - Tests:
   - `tests/own/pp` (by spec-only authors): 103 tests (`-E`, reject and accept), the draft's
     [cpp.scope], [cpp.subst], [cpp.stringize] and [cpp.concat] examples among them;
@@ -582,8 +583,10 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
 ## x86-64 ELF objects and executables (2026-11-19)
 
 - `--target=x86_64-pc-linux-gnu` (also `x86_64-linux-gnu`) selects Linux preprocessing,
-  layout and code generation. The in-process driver and daemon keep the target in the unit
-  configuration. Darwin remains the default.
+  layout and code generation. The in-process driver and daemon use the same request parser.
+  It defaults to Linux on x86-64 Linux builds and to `arm64-apple-darwin` on arm64 Darwin builds.
+  An explicit `--target` overrides the default. Builds with other configurations require one.
+  A native Linux executable link requires `-nostdlib`. [#651](https://github.com/yrashk/ycxx/issues/651)
 - The scalar System V AMD64 backend in `src/target/x86_64/` supports `bool` and 8-, 16-, 32- and 64-bit
   integer and enum parameters and results, plus pointers, references and void results. It handles
   direct and indirect calls, stack arguments and RIP-relative data references within a unit.
@@ -1710,7 +1713,9 @@ session's.*
   nested-name-specifiers and wherever a class template-id may be) is the type it stands for with
   the arguments substituted, so it has no identity or mangling of its own; packs group as for
   class templates. `Templates::complete_class` completes a class that substituting
-  `typename X<T>::type` needs, instantiating a specialization.
+  `typename X<T>::type` needs, instantiating a specialization. A terminal namespace-qualified
+  alias specialization such as `N::A<T>` stays a type argument when its expansion is a dependent
+  member type ([temp.arg.general], #630).
 - Tests: `tests/own/templates/a5-*`; 2 more draft examples pass. `<cstdio>`: 78 → 53 errors.
 - Also: `C::T` inside the class (being defined or instantiated) and in its out-of-class member
   definitions names its member type, as the current instantiation's ([temp.dep.type]/1).
