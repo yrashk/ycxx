@@ -351,8 +351,9 @@ are value-initialized when they have no written default member initializer.
 - constant evaluation on ycxx's own interpreter: `constexpr`, `consteval`, `constinit`,
   `static_assert` and `if consteval`, with errors that explain why something is not constant.
   Scalar enumeration values work in constexpr variables, calls, casts and switch conditions.
-  A flat static constexpr aggregate member initialized with `T{...}` or, in an ordinary class,
-  with direct-list braces has addressable storage and runtime field access.
+  A flat static constexpr aggregate member initialized with `T{...}` has addressable storage
+  and runtime field access. Direct-list braces also work for aggregates of public integral
+  fields in namespace-scope classes without bases.
   [#262](https://github.com/yrashk/ycxx/issues/262)
   Namespace-scope `constexpr` pointers to `void` can retain scalar and array element addresses.
   `__builtin_addressof`, used by libycxx's `std::addressof`, bypasses overloaded `operator&`.

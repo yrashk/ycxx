@@ -5075,6 +5075,23 @@ private:
     for (const auto& p : params) tokens.push_back(p.default_tokens);
   }
 
+  // [dcl.init.aggr]/1, [dcl.constexpr]: the supported direct-list static initialization has
+  // only flat, public fields whose values fit the static integer representation.
+  bool supports_static_constexpr_aggregate(QualType type) {
+    auto& types = s_.types();
+    if (!types.is_class(type) || types.is_dependent(type)) return false;
+    const auto* record = s_.class_rec(types.class_of(type));
+    return record && !record->union_ && !record->closure && !record->user_ctors &&
+           !record->layout_requires_virtual_support && !record->unapplied_layout && record->bases.empty() &&
+           record->destructor_usable && record->destructor == EntityId::none &&
+           std::ranges::all_of(record->fields, [&](const sema::FieldRec& field) {
+             const QualType field_type = types.canonical(field.type);
+             return record->access_of(field.entity) == ast::Access::public_ && field.bit_width == 0 &&
+                    !sema::Types::is_volatile(field_type) && types.is_integral(field_type) &&
+                    sema::shape(s_.world().target, *types.builtin_of(field_type)).bits <= 64;
+           });
+  }
+
   // A member function or static data member of class `c` declared in its class ([class.mfct],
   // [class.static]).
   bool member_function_or_static(const DeclSpec& spec, parse::Declarator& d, ast::DeclSema c, bool is_virtual,
@@ -5190,12 +5207,22 @@ private:
       }
       sem.entity = s_.world().entities.entity(
           {sema::EntityKind::variable, d.name, d.type, LangLinkage::cxx, ast::Linkage::external, {}, c.entity});
+      sem.flags = flags;
+      // Member lookup in the class being defined handles earlier direct members. The supported
+      // owning class has no enclosing class or bases to search while it is incomplete.
+      const bool direct_list = spec.is_constexpr && ps_.is(Tk::l_brace) && s_.template_scopes.empty() && !inst_ &&
+                               p_->is_namespace(s_.world().entities.rec(c.entity).scope) &&
+                               q_.defining_base_records(c.entity).empty() && supports_static_constexpr_aggregate(d.type);
+      auto declare_member_name = [&] {
+        s_.own.push_back({d.name, sem});
+        if (!member_value_) p_->declared(sem, k_);
+      };
+      // [basic.scope.pdecl]: the member's name and type are visible in its initializer.
+      if (direct_list) declare_member_name();
       // A member whose initializer is in error is still declared, so its uses say nothing more.
       const u32 ordinal = u32(decls_.size());
       auto declare_member = [&](ConstId v, const Ex& e) {
-        sem.flags = flags;
-        s_.own.push_back({d.name, sem});
-        if (!member_value_) p_->declared(sem, k_);
+        if (!direct_list) declare_member_name();
         declarators_.push_back(s_.node(ast::Declarator{ordinal, sema::Sema::at(e, d.begin), v}, d.begin, ps_.pos()));
         decls_.push_back(sem);
       };
@@ -5210,8 +5237,6 @@ private:
           return true;
         }
       }
-      const bool direct_list = spec.is_constexpr && ps_.is(Tk::l_brace) && s_.template_scopes.empty() && !inst_ &&
-                               types.is_class(d.type) && s_.is_aggregate(d.type);
       if (direct_list || early || ps_.accept(Tk::equal)) {
         u32 at;
         if (direct_list) {

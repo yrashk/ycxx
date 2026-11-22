@@ -1000,10 +1000,11 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   outside a non-fixed enumeration's range. Class-valued allocation remains a separate slice.
   [Design](docs/design/constexpr-enum-values.md) · [#262](https://github.com/yrashk/ycxx/issues/262)
 - A static constexpr data member of flat aggregate class type can be initialized from a typed
-  braced expression such as `static constexpr Pt q = Pt{7, 8};`. For an ordinary class, the
-  direct-list spelling `static constexpr Pt q{7, 8};` also works. Constant evaluation records
-  the field values and code generation emits addressable storage for runtime use
-  ([class.static.data], [dcl.init.list], [dcl.init.aggr]).
+  braced expression such as `static constexpr Pt q = Pt{7, 8};`. The direct-list spelling
+  `static constexpr Pt q{7, 8};` also works in a non-template namespace-scope class without
+  bases. The aggregate has trivial destruction and public non-volatile integral fields up to
+  64 bits. Constant evaluation records the field values and code generation emits addressable
+  storage for runtime use ([class.static.data], [dcl.init.list], [dcl.init.aggr]).
   [#262](https://github.com/yrashk/ycxx/issues/262)
 - Constant evaluation can read namespace-scope `constexpr` pointers erased to `void`
   ([expr.const], [conv.ptr], #102). The interpreter reconstructs the original scalar or array
