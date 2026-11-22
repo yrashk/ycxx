@@ -6,8 +6,9 @@ with alignment up to eight. The record must be trivial for calls under DECISIONS
 Its non-static data members have naturally aligned, non-overlapping integral scalar
 or ordinary object-pointer layouts. The signature check rejects records with bases,
 bit-fields, unions, nested classes or arrays, and fields requiring other ABI classes.
-Aggregate calls through a function pointer, calls with an ellipsis, and member or
-template functions stay outside this slice.
+Member functions, closure call operators, function template specializations and calls
+through a pointer to a fixed-prototype function use the same placement, with `this` as the
+first INTEGER argument (#640). Calls with an ellipsis stay outside this slice.
 
 The front end records when a layout attribute or active packing directive makes the
 computed natural layout uncertain. The by-value ABI check rejects those shapes even

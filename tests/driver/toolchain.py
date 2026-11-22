@@ -136,7 +136,9 @@ def ycxx_xfails(repo, host=HOST):
     path = repo / 'tests' / 'features' / 'ycxx.xfail'
     out = {}
     for line in path.read_text().splitlines() if path.is_file() else ():
-        line = line.split('#', 1)[0].strip()
+        # A comment starts with a `#` that begins the line or follows white space and is not an
+        # issue number: a reason keeps its `#123` or `(#123)`.
+        line = re.split(r'(?:^|\s)#(?!\d)', line, maxsplit=1)[0].strip()
         if line:
             entry, _, why = line.partition(' ')
             test, qualified, entry_host = entry.partition('@')

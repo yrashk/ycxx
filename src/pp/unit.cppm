@@ -1507,6 +1507,7 @@ private:
         report(f, operand.empty() ? t : operand.size() > 1 ? operand[1] : operand[0], lex::LexDiag::cond_expected_rparen);
         return number_token(t, 0);
       }
+      if (s_->spellings.name(operand[0].tok.payload) == lex::builtin_offsetof_name) return number_token(t, 1);
       std::string_view name = s_->spellings.name(operand[0].tok.payload);
       const bool variadic = s_->config.target->va_list == ast::VaList::sysv_x86_64 && lex::va_builtin(name);
       const auto* function = lex::builtin_function(name);

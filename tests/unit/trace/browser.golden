@@ -1,0 +1,200 @@
+## start
+ ycxx engine trace   ● 6 executed  ○ 1 reused  · 2 input  9 events, 4 workers, 900µs  29.1KiB allocated, 6.9KiB retained
+ tree  timeline    worker: all  oldest first
+ cell↓                                  time  worker     alloc   retains⇔ cell
+▾ ● Tu(a.cpp) executed                 900µs      w0   29.1KiB    6.9KiB│ Tu
+  ▾ ● Pp(a.cpp) executed               190µs      w1   20.0KiB    5.5KiB│ a.cpp
+      · FileText(a.cpp) input                     w1                300B│
+      · FileText(x.h) input                       w1                200B│ ● executed
+  ▾ ● FunctionIr(square) executed      300µs      w2    3.9KiB      300B│ ran, value changed
+      ● FunctionGen(square) execute    190µs      w2    2.9KiB          │
+  ▾ ● Codegen(main) executed  (erro    350µs      w0    1.2KiB      164B│ started  0ns
+      ● Optimized({1, aarch64_macos    240µs      w3      700B       64B│ took     900µs
+    ○ SourceOf(a.cpp) reused ×3                   w0                    │ worker   w0
+                                                                        │ depth    0
+                                                                        │ below    8 cells, 5 ran
+                                                                        │
+                                                                        │ memory
+                                                                        │ alloc    4.0KiB in 128 allocations
+                                                                        │ peak     4.0KiB
+                                                                        │ retains  1.0KiB
+                                                                        │ in all   29.1KiB allocated, 6.9KiB retained
+                                                                        │
+                                                                        │ no value shown for this kind
+                                                                        │
+ ↑↓/jk move  ⏎/space fold  ←→ close/open  e/E all  n next run  x next error  r reused  s sort  shift+J/K ]/[ pane  </> r
+## a click on a marker folds the row, and selects it
+ ycxx engine trace   ● 6 executed  ○ 1 reused  · 2 input  9 events, 4 workers, 900µs  29.1KiB allocated, 6.9KiB retained
+ tree  timeline    worker: all  oldest first
+ cell↓                                  time  worker     alloc   retains⇔ cell
+▾ ● Tu(a.cpp) executed                 900µs      w0   29.1KiB    6.9KiB│ FunctionIr
+  ▾ ● Pp(a.cpp) executed               190µs      w1   20.0KiB    5.5KiB│ square
+      · FileText(a.cpp) input                     w1                300B│
+      · FileText(x.h) input                       w1                200B│ ● executed
+  ▸ ● FunctionIr(square) executed      300µs      w2    3.9KiB      300B│ ran, value changed
+  ▾ ● Codegen(main) executed  (erro    350µs      w0    1.2KiB      164B│
+      ● Optimized({1, aarch64_macos    240µs      w3      700B       64B│ started  200µs
+    ○ SourceOf(a.cpp) reused ×3                   w0                    │ took     300µs
+                                                                        │ worker   w2
+                                                                        │ depth    1
+                                                                        │ below    1 cells, 1 ran
+                                                                        │ for      Tu(a.cpp)
+                                                                        │
+                                                                        │ memory
+                                                                        │ alloc    1000B in 31 allocations
+                                                                        │ peak     1000B
+                                                                        │ retains  300B
+                                                                        │ in all   3.9KiB allocated, 300B retained
+                                                                        │
+                                                                        │ lines 1–19 of 52   shift+J/K line  ]/[ page  }
+ ↑↓/jk move  ⏎/space fold  ←→ close/open  e/E all  n next run  x next error  r reused  s sort  shift+J/K ]/[ pane  </> r
+## a double click folds a row
+ ycxx engine trace   ● 6 executed  ○ 1 reused  · 2 input  9 events, 4 workers, 900µs  29.1KiB allocated, 6.9KiB retained
+ tree  timeline    worker: all  oldest first
+ cell↓                                  time  worker     alloc   retains⇔ cell
+▾ ● Tu(a.cpp) executed                 900µs      w0   29.1KiB    6.9KiB│ Pp
+  ▸ ● Pp(a.cpp) executed  [2 below,    190µs      w1   20.0KiB    5.5KiB│ a.cpp
+  ▸ ● FunctionIr(square) executed      300µs      w2    3.9KiB      300B│
+  ▾ ● Codegen(main) executed  (erro    350µs      w0    1.2KiB      164B│ ● executed
+      ● Optimized({1, aarch64_macos    240µs      w3      700B       64B│ ran, value changed
+    ○ SourceOf(a.cpp) reused ×3                   w0                    │
+                                                                        │ started  10µs
+                                                                        │ took     190µs
+                                                                        │ worker   w1
+                                                                        │ depth    1
+                                                                        │ below    2 cells, 0 ran
+                                                                        │ for      Tu(a.cpp)
+                                                                        │
+                                                                        │ memory
+                                                                        │ alloc    20.0KiB in 640 allocations
+                                                                        │ peak     20.0KiB
+                                                                        │ retains  5.0KiB
+                                                                        │ in all   20.0KiB allocated, 5.5KiB retained
+                                                                        │
+                                                                        │ no value shown for this kind
+ ↑↓/jk move  ⏎/space fold  ←→ close/open  e/E all  n next run  x next error  r reused  s sort  shift+J/K ]/[ pane  </> r
+## a click on the time header sorts by time
+ ycxx engine trace   ● 6 executed  ○ 1 reused  · 2 input  9 events, 4 workers, 900µs  29.1KiB allocated, 6.9KiB retained
+ tree  timeline    worker: all  oldest first  by time
+ cell                                  time↓  worker     alloc   retains⇔ cell
+▾ ● Tu(a.cpp) executed                 900µs      w0   29.1KiB    6.9KiB│ Pp
+  ▾ ● Codegen(main) executed  (erro    350µs      w0    1.2KiB      164B│ a.cpp
+      ● Optimized({1, aarch64_macos    240µs      w3      700B       64B│
+  ▸ ● FunctionIr(square) executed      300µs      w2    3.9KiB      300B│ ● executed
+  ▸ ● Pp(a.cpp) executed  [2 below,    190µs      w1   20.0KiB    5.5KiB│ ran, value changed
+    ○ SourceOf(a.cpp) reused ×3                   w0                    │
+                                                                        │ started  10µs
+                                                                        │ took     190µs
+                                                                        │ worker   w1
+                                                                        │ depth    1
+                                                                        │ below    2 cells, 0 ran
+                                                                        │ for      Tu(a.cpp)
+                                                                        │
+                                                                        │ memory
+                                                                        │ alloc    20.0KiB in 640 allocations
+                                                                        │ peak     20.0KiB
+                                                                        │ retains  5.0KiB
+                                                                        │ in all   20.0KiB allocated, 5.5KiB retained
+                                                                        │
+                                                                        │ no value shown for this kind
+ ↑↓/jk move  ⏎/space fold  ←→ close/open  e/E all  n next run  x next error  r reused  s sort  shift+J/K ]/[ pane  </> r
+## the wheel scrolls the pane under it
+ ycxx engine trace   ● 6 executed  ○ 1 reused  · 2 input  9 events, 4 workers, 900µs  29.1KiB allocated, 6.9KiB retained
+ tree  timeline    worker: all  oldest first
+ cell↓                                  time  worker     alloc   retains⇔ cell
+▾ ● Tu(a.cpp) executed                 900µs      w0   29.1KiB    6.9KiB│ started  200µs
+  ▸ ● Pp(a.cpp) executed  [2 below,    190µs      w1   20.0KiB    5.5KiB│ took     300µs
+  ▸ ● FunctionIr(square) executed      300µs      w2    3.9KiB      300B│ worker   w2
+  ▾ ● Codegen(main) executed  (erro    350µs      w0    1.2KiB      164B│ depth    1
+      ● Optimized({1, aarch64_macos    240µs      w3      700B       64B│ below    1 cells, 1 ran
+    ○ SourceOf(a.cpp) reused ×3                   w0                    │ for      Tu(a.cpp)
+                                                                        │
+                                                                        │ memory
+                                                                        │ alloc    1000B in 31 allocations
+                                                                        │ peak     1000B
+                                                                        │ retains  300B
+                                                                        │ in all   3.9KiB allocated, 300B retained
+                                                                        │
+                                                                        │ value
+                                                                        │ func {
+                                                                        │   %0 = const.i32 0
+                                                                        │   %1 = const.i32 1
+                                                                        │   %2 = const.i32 4
+                                                                        │   %3 = const.i32 9
+                                                                        │ lines 7–25 of 52   shift+J/K line  ]/[ page  }
+ pane: ↑↓/jk line  PgUp/PgDn page  g/G top/end  ←/h/Esc back to the tree  mouse: wheel scrolls, click the tree  ? help
+## the divider dragged to column 60
+ ycxx engine trace   ● 6 executed  ○ 1 reused  · 2 input  9 events, 4 workers, 900µs  29.1KiB allocated, 6.9KiB retained
+ tree  timeline    worker: all  oldest first
+ cell↓                                time  worker     alloc⇔ cell
+▾ ● Tu(a.cpp) executed               900µs      w0   29.1KiB│ Codegen
+  ▸ ● Pp(a.cpp) executed  [2 belo    190µs      w1   20.0KiB│ main
+  ▸ ● FunctionIr(square) executed    300µs      w2    3.9KiB│
+  ▾ ● Codegen(main) executed  (er    350µs      w0    1.2KiB│ ● executed
+      ● Optimized({1, aarch64_mac    240µs      w3      700B│ ran, value changed
+    ○ SourceOf(a.cpp) reused ×3                 w0          │
+                                                            │ started  500µs
+                                                            │ took     350µs
+                                                            │ worker   w0
+                                                            │ depth    1
+                                                            │ below    1 cells, 1 ran
+                                                            │ for      Tu(a.cpp)
+                                                            │
+                                                            │ memory
+                                                            │ alloc    500B in 15 allocations
+                                                            │ peak     500B
+                                                            │ retains  100B
+                                                            │ in all   1.2KiB allocated, 164B retained
+                                                            │
+                                                            │ lines 1–19 of 23   shift+J/K line  ]/[ page  }/{ end/top
+ ↑↓/jk move  ⏎/space fold  ←→ close/open  e/E all  n next run  x next error  r reused  s sort  shift+J/K ]/[ pane  </> r
+## a narrow screen: the summary wraps
+ ycxx engine trace   ● 6 executed  ○ 1 reused  · 2 input
+ 9 events, 4 workers, 900µs
+ 29.1KiB allocated, 6.9KiB retained
+ tree  timeline    worker: all  oldest first
+ cell↓                                time  worker     alloc
+▾ ● Tu(a.cpp) executed               900µs      w0   29.1KiB
+  ▾ ● Pp(a.cpp) executed             190µs      w1   20.0KiB
+      · FileText(a.cpp) input                   w1
+      · FileText(x.h) input                     w1
+  ▾ ● FunctionIr(square) executed    300µs      w2    3.9KiB
+      ● FunctionGen(square) execu    190µs      w2    2.9KiB
+  ▾ ● Codegen(main) executed  (er    350µs      w0    1.2KiB
+      ● Optimized({1, aarch64_mac    240µs      w3      700B
+    ○ SourceOf(a.cpp) reused ×3                 w0
+
+
+
+
+
+
+
+
+
+ ↑↓/jk move  ⏎/space fold  ←→ close/open  e/E all  n next ru
+## the timeline
+ ycxx engine trace   ● 6 executed  ○ 1 reused  · 2 input  9 events, 4 workers, 900µs  29.1KiB allocated, 6.9KiB retained
+ tree  timeline    worker: all  oldest first
+        0                                                                                                         900µs
+▶  main ││··············································································································
+     w0 │█████████████████████████████████████████████████████████████▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓█▓████
+     w1 ││▒▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓······················································································
+     w2 ││·······················▓▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▓▓▓▓▓▓▓▓▓▓▓▓·················································
+     w3 ││·········································································▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒·······
+
+ at 0ns – 8µs
+ ▶  main  idle
+      w0  ● Tu(a.cpp) executed   Tu
+      w1  idle
+      w2  idle
+      w3  idle
+
+ █ executed  █ cutoff  █ verified  █ reused  █ durable  █ input  █ recomputed  █ waited  █ failed  █▓▒░ shallower to dee
+
+
+
+
+
+
+ ↑↓ lane  ←→/HL scrub  ⏎ open in tree  w/0-9/m/a worker  / filter  t tree  mouse: click a slice, double-click opens it,

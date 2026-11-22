@@ -136,6 +136,7 @@ struct RegionItems {
   using Key = pp::FileId;
   using Value = Items;
   static engine::query_task<Value> run(engine::Ctx& cx, Key file);
+  static engine::SourceSpan trace_span(const engine::Db& db, Key file) { return pp::file_span(db, file); }
 };
 
 }  // namespace ycxx::items

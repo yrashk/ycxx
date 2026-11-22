@@ -342,6 +342,19 @@ std::uint64_t heap_footprint(const T& v) {
 // `failed` a frame that left without publishing (an internal error, or a stop; counted nowhere).
 enum class Outcome : std::uint8_t { executed, cutoff, verified, reused, durable, input, recomputed, waited, failed };
 
+// Where in the source a cell is (#638): a file, and the part of it from `line`:`column` to
+// `end_line`:`end_column`, where its last token starts (1-based; columns in bytes). `line` 0: the
+// whole file.
+// Empty `file`: none.
+struct SourceSpan {
+  std::string file;
+  std::uint32_t line = 0;
+  std::uint32_t column = 0;
+  std::uint32_t end_line = 0;
+  std::uint32_t end_column = 0;
+  bool operator==(const SourceSpan&) const = default;
+};
+
 // One event. Ids are unique in a Db and given in start order; `parent` is the event of the frame
 // that asked for the cell, 0 for the request's own. Times and workers are observations of the
 // run, never part of a value (§A5.1): `worker` started the work, `end_worker` finished it (a frame
@@ -367,6 +380,7 @@ struct TraceEvent {
   std::uint64_t allocs = 0;
   std::int64_t peak_bytes = 0;
   std::int64_t retained_bytes = 0;
+  SourceSpan span;  // where in the source the cell is, when its kind can say (#638)
 };
 
 // Receives a request's events, on any worker, concurrently. A frame reports before it publishes,
@@ -399,6 +413,13 @@ concept ShownValue = requires(const typename Q::Value& v) {
 template <class Q>
 concept ErrorsInValue = requires(const typename Q::Value& v) {
   { Q::errors(v) } -> std::convertible_to<std::string>;
+};
+// A kind whose cells correspond to source says where (#638): `static SourceSpan trace_span(const
+// Db&, const Key&)`. It runs only for a tracer, and reads other cells' values with `Db::peek`,
+// never fetching, so a build without a tracer pays nothing.
+template <class Q>
+concept SpannedKey = requires(const Db& db, const typename Q::Key& k) {
+  { Q::trace_span(db, k) } -> std::convertible_to<SourceSpan>;
 };
 // One whose diagnostics (`SyncCtx::diag`) mix errors and warnings says which are errors, and how
 // they read: `static std::string diagnostic_errors(std::span<const Diagnostic>)`.
@@ -798,6 +819,7 @@ struct KindTableBase {
   // For traces (#245): the key in a slot, and the value in it, if any.
   virtual std::string describe(std::uint32_t slot) = 0;
   virtual std::string show(std::uint32_t slot) = 0;
+  virtual SourceSpan span(const Db& db, std::uint32_t slot) = 0;
   virtual std::string errors(std::uint32_t slot, std::span<const Diagnostic> diags) = 0;
   std::string_view name;
   Fp128 seed;
@@ -845,6 +867,10 @@ struct KindTable final : KindTableBase {
       describe_into(out, k);
       return out;
     }
+  }
+  SourceSpan span(const Db& db, std::uint32_t slot) override {
+    if constexpr (SpannedKey<Q>) return Q::trace_span(db, slots[slot].key);
+    else return {};
   }
   std::string show(std::uint32_t slot) override {
     if constexpr (ShownValue<Q>) {
@@ -999,6 +1025,11 @@ public:
   // How many times a cell's query has run; 0 for a cell that does not exist.
   template <MemoQuery Q>
   std::uint32_t runs(const typename Q::Key& k) const;
+  // For traces only (#638): the value a cell holds, when it has one, no frame owns it and it cannot
+  // change before the epoch ends (an input, or a cell verified at this revision); read without a
+  // dependency and without running anything. Else null.
+  template <MemoQuery Q>
+  const typename Q::Value* peek(const typename Q::Key& k) const;
   // The revision at which a cell's value last changed; 0 for a cell that does not exist.
   template <MemoQuery Q>
   Revision changed_at(const typename Q::Key& k) const;
@@ -2569,6 +2600,7 @@ void Db::trace(Tracer* t, const Frame* by, CellId c, Outcome o, const Span* span
   try {
     ev.key = describe(c);
     ev.cell = e.key_fp.lo ^ e.key_fp.hi;
+    ev.span = table.span(*this, e.slot);
     // Only a cell that is done (not one another frame is computing) is read.
     if (o != Outcome::failed && o != Outcome::waited && o != Outcome::recomputed && e.has_value) {
       if (t->values()) ev.value = table.show(e.slot);
@@ -2933,6 +2965,24 @@ template <MemoQuery Q>
 std::uint32_t Db::runs(const typename Q::Key& k) const {
   const auto c = find_cell<Q>(k);
   return c ? cells_[*c].runs : 0;
+}
+
+template <MemoQuery Q>
+const typename Q::Value* Db::peek(const typename Q::Key& k) const {
+  const auto c = find_cell<Q>(k);
+  if (!c) return nullptr;
+  const Cell& cell = cells_[*c];
+  // An input no request read (`observed` unset) may be reset under us (`reset_unobserved`): the
+  // mark is read first and the word second, as `ensure_input` orders them, so a reset that claims
+  // the cell later sees the mark and backs off.
+  if (cell.input && !cell.observed.load(std::memory_order_seq_cst)) return nullptr;
+  const std::uint64_t w = cell.word.load(std::memory_order_seq_cst);
+  if (state_of(w) != State::done || !cell.has_value) return nullptr;
+  // A derived value from an earlier revision may be recomputed by another request now; one
+  // verified at this revision, or an input (inputs change only between epochs), may not.
+  if (!cell.input && verified_of(w) != revision()) return nullptr;
+  const auto& v = table<Q>().slots[cell.slot].value;
+  return v ? &*v : nullptr;
 }
 
 template <MemoQuery Q>

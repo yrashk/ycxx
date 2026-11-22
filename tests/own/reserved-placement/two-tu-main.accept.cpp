@@ -1,4 +1,3 @@
-// REQUIRES: linux
 #include "placement.hpp"
 
 int main() {

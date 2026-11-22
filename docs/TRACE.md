@@ -30,10 +30,42 @@ One object per cell a request settled, in the collector's batches: whole subtree
 | `retained_bytes` | integer | what the cell retains: the net bytes its runs left alive (its value, dependency lists, and what it interned first), or an input's size; may be below zero when a frame freed what another allocated |
 | `incl_alloc_bytes` | integer | `alloc_bytes` summed over the subtree, this event included |
 | `incl_retained_bytes` | integer | `retained_bytes` summed over the subtree, counted once per cell where it settles (`executed`, `cutoff`, `verified`, `durable`, `input`), never below zero |
+| `span` | object | where in the source the cell is (#638), when its kind can say: `file`, and `line`, `column` to `end_line`, `end_column`, where its last token starts (1-based, columns in bytes); `line` 0 means the whole file |
 
 Memory that one cell's run allocated and others use (an interned tree, a header's region) counts
 for that cell only. Memory no frame allocated (the engine's tables, the session's state) counts
 for no cell.
+
+## Source spans
+
+A cell that corresponds to source says where it is (#638). Its kind's `trace_span` hook
+reads values the build already holds (`Db::peek`, with no dependency and no execution) and runs only
+for a tracer, so an untraced build pays nothing.
+
+| cells | span |
+| --- | --- |
+| a file's: `SourceOf`, `FileText`, `Pp`, `RegionItems` | the whole file |
+| a unit's: `TuFront`, `TuUnit`, `UnitShapes`, `Tu`, `TuSymbolAddresses` | the unit's main file |
+| a function's: `FunctionSourceQ`, `FunctionGen`, `FunctionIr`, `FunctionDebug`, `Lower`, `UnitQ`, `Codegen` | its definition, from its first token to where its last starts (a token from a macro is where the macro is used); an instantiation's is its pattern's, since its body is the pattern's tokens analysed again |
+
+These cells have none, and why:
+- `Optimized`: it is keyed by the fingerprint of an optimization unit, which any number of
+  functions may share.
+- `Build`, `Link`, `ProgramIn`, `OptLevel` and `CostModelIn`: they belong to a program or the
+  configuration, not to source.
+- `LayoutConstant`: a constant's layout has no place in the source.
+- `FileContent`: an include probe of a path, which may not exist.
+- `DiagsOf`: it reads another cell.
+
+Class and variable instantiations, and per-item analysis, have no cells of their own yet (#16).
+
+A cell whose values were not computed in this request at this revision (another request owns them)
+gets no span rather than a stale one.
+
+Lines are counted in the text preprocessing read: in the editor view, an open buffer's.
+
+The browser's filter takes `at:a.cpp:120` or `at:a.cpp:120:5` (the cells whose span touches line
+120 of a file whose path ends in `/a.cpp`), or `at:a.cpp` (any cell in that file).
 
 ## The summary
 
@@ -59,6 +91,40 @@ One per build, last: `{"summary":{…}}`.
 - `{"watching":…,"pid":…}`, `{"request":n,"label":…}`, `{"ended":…}`: with `ctl trace`, the
   attached daemon, each request's start, and the end of the watch.
 - `{"note":…}`: a line of text.
+
+## The interactive browser
+
+`--trace-engine=interactive` and `ycxx ctl trace --interactive` open a full-screen browser on the
+terminal (`src/trace/browse.cppm`, whose model is `src/trace/view.cppm`). `?` lists its keys.
+
+- **Size.** It draws for the terminal's size and redraws at once when that changes (`SIGWINCH`).
+  The summary at the top wraps onto more lines on a narrow screen. Autowrap is off while it runs,
+  so a glyph the terminal draws wider than one column is cut at the edge instead of scrolling the
+  screen.
+- **Mouse** (#635). It asks for SGR mouse reports (modes 1000, 1002 and 1006), which modern
+  terminals and tmux support.
+  - Click a row to select it. Click its `▸`/`▾`, or double-click the row, to fold or open it.
+  - Click a column header (`cell`, `time`, `alloc`, `retains`) to sort by it. Click it again to
+    go back to start order. The `alloc` and `retains` columns sum over the cell's subtree.
+  - Click `tree` or `timeline` in the status line to switch views. Click the pane to give it
+    the keys: arrows, `j`/`k`, PgUp/PgDn and `g`/`G` then scroll it, and `h`, `←` or Escape give
+    them back to the tree.
+  - The wheel scrolls whatever is under it: the tree, the pane, or the timeline's cursor (Shift
+    for bigger steps).
+  - Drag the divider (`│`, marked `⇔` in the title row) to resize the pane; `<` and `>` move it
+    from the keyboard. It keeps its share of the width when the terminal is resized.
+  - In the timeline, click a slice to put the cursor there, or double-click it to open its cell
+    in the tree.
+  - While the browser holds the mouse, the terminal's own text selection needs the terminal's
+    bypass modifier (often Shift; see your terminal's settings).
+  - Checked by hand on macOS: Terminal.app; Terminal.app running tmux 3.8 with `mouse on`; and
+    Ghostty. Clicks on tabs, rows and headers, double clicks and the wheel all worked. The pty
+    test (`daemon.trace_tui`) sends the SGR bytes a terminal sends, drags included, on every
+    host CI runs.
+- **Leaving.** `q` gives the terminal back as it was: the main screen, the cursor, autowrap on,
+  mouse reports off, cooked mode. So do `SIGTERM`, `SIGHUP`, `SIGINT` and `SIGQUIT`, and a crash
+  (`SIGABRT`, `SIGSEGV`, `SIGBUS`, `SIGFPE`, `SIGILL`); after restoring, the signal takes its
+  course.
 
 ## The daemon's memory
 

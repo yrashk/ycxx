@@ -34,8 +34,41 @@ struct Event {
   std::uint64_t allocs = 0;
   std::int64_t peak_bytes = 0;
   std::int64_t retained_bytes = 0;
+  engine::SourceSpan span;  // where in the source the cell is (#638); empty file: none
   bool operator==(const Event&) const = default;
 };
+
+// `a.cpp:3:5`, or `a.cpp` for a whole file: a span's start, as an editor opens it.
+std::string span_start(const engine::SourceSpan& s) {
+  if (s.file.empty()) return {};
+  return s.line == 0 ? s.file : std::format("{}:{}:{}", s.file, s.line, s.column);
+}
+// `a.cpp:3:5–7:1`, `a.cpp:3:5–12` on one line, or `a.cpp`.
+std::string span_text(const engine::SourceSpan& s) {
+  if (s.file.empty() || s.line == 0) return span_start(s);
+  if (s.end_line == s.line) return std::format("{}–{}", span_start(s), s.end_column);
+  return std::format("{}–{}:{}", span_start(s), s.end_line, s.end_column);
+}
+// Whether a span touches `where`: `file` or `file:line`, the file as given or a path ending in it
+// at a `/` (`at:a.cpp:12`). A whole-file span touches every line of its file.
+bool span_touches(const engine::SourceSpan& s, std::string_view where) {
+  if (s.file.empty() || where.empty()) return false;
+  // `file:line` or `file:line:column` (as `span_start` writes it): the line counts.
+  std::optional<std::uint32_t> line;
+  for (int i = 0; i < 2; ++i) {
+    const std::size_t colon = where.rfind(':');
+    if (colon == std::string_view::npos) break;
+    std::uint32_t n = 0;
+    const std::string_view digits = where.substr(colon + 1);
+    const auto [p, ec] = std::from_chars(digits.data(), digits.data() + digits.size(), n);
+    if (ec != std::errc{} || p != digits.data() + digits.size()) break;
+    line = n;
+    where = where.substr(0, colon);
+  }
+  const std::string_view file = s.file;
+  if (file != where && !(file.ends_with(where) && file[file.size() - where.size() - 1] == '/')) return false;
+  return !line || s.line == 0 || (*line >= s.line && *line <= std::max(s.line, s.end_line));
+}
 
 // A build's memory beyond its events (#274): the process's bytes when it ended and their
 // high-water mark while it ran (other builds the daemon ran at the same time included).
@@ -364,6 +397,9 @@ std::string json_line(const Event& e, bool here = false, std::optional<std::uint
   if (!e.errors.empty()) out += std::format(R"(,"errors":{},"error_here":{})", json_string(e.errors), here);
   if (at) out += std::format(R"(,"error_at":{})", *at);
   if (e.repeat > 1) out += std::format(R"(,"repeat":{})", e.repeat);
+  if (!e.span.file.empty())
+    out += std::format(R"(,"span":{{"file":{},"line":{},"column":{},"end_line":{},"end_column":{}}})", json_string(e.span.file), e.span.line,
+                       e.span.column, e.span.end_line, e.span.end_column);
   return out + "}";
 }
 
@@ -400,8 +436,9 @@ class Tree {
     Rollup incl;  // memory in its subtree, itself included (#274)
   };
   // How siblings are ordered: as they started, or most memory first (#274): bytes allocated in
-  // the subtree, or retained in it.
-  enum class Order : std::uint8_t { start, alloc, retained };
+  // the subtree, or retained in it; or longest first (#635).
+  enum class Order : std::uint8_t { start, alloc, retained, time };
+  static constexpr std::uint8_t order_count = 4;
   struct Row {
     std::int32_t node;
     std::uint32_t depth;
@@ -529,12 +566,14 @@ class Tree {
   }
 
   // The filter: words that must all match. `word` matches the kind or key (case-insensitively),
-  // `is:executed` (or a prefix, `is:ex`) an outcome, `w:3` or `w:main` a worker. Empty: all.
+  // `is:executed` (or a prefix, `is:ex`) an outcome, `w:3` or `w:main` a worker, `at:a.cpp:12` the
+  // cells whose source span touches that line (or file). Empty: all.
   void set_filter(std::string_view text) {
     words_.clear();
+    raw_words_.clear();
     for (auto w : text | std::views::split(' ')) {
       std::string_view word(w.begin(), w.end());
-      if (!word.empty()) words_.emplace_back(lower(word));
+      if (!word.empty()) words_.emplace_back(lower(word)), raw_words_.emplace_back(word);
     }
   }
   // Only events a worker ran (`std::nullopt`: any), on top of the text filter.
@@ -546,13 +585,17 @@ class Tree {
     if (worker_ && e.worker != *worker_ && e.end_worker != *worker_) return false;
     if (words_.empty()) return true;
     const std::string kind = lower(e.kind), key = lower(e.key);
-    for (const std::string& w : words_) {
+    for (std::size_t i = 0; i < words_.size(); ++i) {
+      const std::string& w = words_[i];
       if (w.starts_with("is:")) {
         const auto o = outcome_named(std::string_view(w).substr(3));
         if (!o || *o != e.outcome) return false;
       } else if (w.starts_with("w:")) {
         const std::optional<std::int32_t> n = worker_named(std::string_view(w).substr(2));
         if (!n || (e.worker != *n && e.end_worker != *n)) return false;
+      } else if (w.starts_with("at:")) {
+        // Paths keep their case: the word as typed, not lowered.
+        if (!span_touches(e.span, std::string_view(raw_words_[i]).substr(3))) return false;
       } else if (!kind.contains(w) && !key.contains(w)) {
         return false;
       }
@@ -614,6 +657,7 @@ class Tree {
     std::vector<std::int32_t> out(ids.begin(), ids.end());
     if (order_ == Order::alloc) std::ranges::stable_sort(out, std::greater{}, [&](std::int32_t i) { return nodes_[i].incl.alloc; });
     else if (order_ == Order::retained) std::ranges::stable_sort(out, std::greater{}, [&](std::int32_t i) { return nodes_[i].incl.retained; });
+    else if (order_ == Order::time) std::ranges::stable_sort(out, std::greater{}, [&](std::int32_t i) { return nodes_[i].ev.end_ns - nodes_[i].ev.start_ns; });
     return out;
   }
   void walk(std::int32_t i, std::uint32_t depth, std::vector<Row>& out) const {
@@ -646,6 +690,7 @@ class Tree {
   std::set<std::uint64_t> computed_with_errors_;  // cells some node computed with errors
   std::unordered_map<std::uint64_t, std::int32_t> by_id_;
   std::vector<std::string> words_;
+  std::vector<std::string> raw_words_;  // as typed, for paths
   std::optional<std::int32_t> worker_;
 };
 
