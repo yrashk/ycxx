@@ -127,6 +127,12 @@ struct [[=dependent]] VDepVariable {
   SeqId<TemplateArg> args;
 };
 
+// A call with no function arguments to a named immediate function template.
+struct [[=dependent]] VDepCall {
+  EntityId templ;
+  SeqId<TemplateArg> args;
+};
+
 enum class DepOp : u8 {
   is_same, is_reference, is_const, is_volatile, is_array, is_pointer, is_function,
   is_enum, is_union, is_class,
@@ -203,7 +209,8 @@ struct VConstraint {
 };
 
 using ValueKinds = closed_list<VInt, VFloat, VNullptr, VString, VLvalue, VEntity, VAggregate, VDepParam, VDepFnParam, VDepExpansion,
-                               VDepSizeofPack, VType, VAtom, VConstraint, VDepOp, VMemberPtr, VDepVariable, VConstraintPack>;
+                               VDepSizeofPack, VType, VAtom, VConstraint, VDepOp, VMemberPtr, VDepVariable, VConstraintPack,
+                               VDepCall>;
 
 template <class T>
 constexpr bool is_value_kind = ValueKinds::contains<T>;

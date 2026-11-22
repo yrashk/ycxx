@@ -83,6 +83,8 @@ struct GenericResult {
 };
 
 class Sema;
+struct Ex;
+enum class AliasCallPattern { none, retained, may_erase };
 
 // What sema asks of its context (§B1.4, §B3). In the engine these are `visible_decls(::, name,
 // at item)` and fetches of `decl_sema`.
@@ -147,6 +149,11 @@ public:
   virtual const Classes& classes() = 0;
   // The constant a variable usable in constant expressions holds ([expr.const]), if it is known.
   virtual std::optional<ConstId> constant_value(EntityId v) = 0;
+  virtual std::optional<ConstId> constant_call(Sema&, const Ex&) { return std::nullopt; }
+  virtual AliasCallPattern alias_call_pattern(EntityId) { return AliasCallPattern::none; }
+  virtual std::optional<QualType> replay_alias_calls(Sema&, const ast::DeclSema&, const Bindings&) {
+    return std::nullopt;
+  }
   // In a member declaration of a class being defined: the member named `name` declared before it
   // ([basic.scope.class]; the class's member list is not complete yet).
   virtual std::optional<ast::DeclSema> earlier_member(NameId name, bool type_only = false) = 0;
@@ -829,9 +836,12 @@ public:
     if (!full) return std::nullopt;
     if (tmpl.kind == ast::DeclKind::type_alias) {
       std::vector<ast::TemplateParamSema> params = ins().seqs.elements(tmpl.template_params);
-      auto t = templates_for_use(at).substitute(tmpl.type, Bindings::of(params.empty() ? 0 : params[0].depth, *full));
+      auto bindings = Bindings::of(params.empty() ? 0 : params[0].depth, *full);
+      const auto before = diag_count();
+      auto t = substitute_alias(tmpl, *full, bindings, at);
       // Past the nesting limit, which was diagnosed, it says nothing more ([temp.inst]/16).
-      if (!t && !q_->instantiation_gave_up()) diag(at, Diag::template_args_mismatch, w_->entities.rec(tmpl.entity).name);
+      if (!t && !has_error_since(before) && !q_->instantiation_gave_up())
+        diag(at, Diag::template_args_mismatch, w_->entities.rec(tmpl.entity).name);
       return t;
     }
     // [temp.names]/9: naming a non-dependent specialization checks the primary's
@@ -849,6 +859,18 @@ public:
       }
     }
     return types().class_type(class_specialization(tmpl.entity, *full));
+  }
+
+  std::optional<QualType> substitute_alias(const ast::DeclSema& tmpl, std::span<const TemplateArg> args,
+                                           const Bindings& bindings, u32 at) {
+    const auto pattern = q_->alias_call_pattern(tmpl.entity);
+    if (pattern != AliasCallPattern::none) {
+      if (std::ranges::none_of(args, [&](const TemplateArg& a) { return dependent(a); }))
+        return q_->replay_alias_calls(*this, tmpl, bindings);
+      // Until signatures can retain the replay, do not form a type that can lose a call check.
+      if (pattern == AliasCallPattern::may_erase) return std::nullopt;
+    }
+    return templates_for_use(at).substitute(tmpl.type, bindings);
   }
 
   // `v<args>` naming a variable template specialization ([temp.pre], [temp.inst]/7): an lvalue of
@@ -3261,12 +3283,24 @@ public:
     t.member_type = [this](EntityId c, NameId n) { return member_type(c, n); };
     t.template_decl = [this](EntityId tmpl) { return q_->template_decl(tmpl); };
     t.variable_constant = [this](EntityId spec) { return q_->constant_value(spec); };
+    t.call_constant = [this](EntityId templ, std::span<const TemplateArg> args) {
+      return evaluate_dependent_call(templ, args, 0);
+    };
+    t.alias_type = [this](const ast::DeclSema& alias, std::span<const TemplateArg> args, const Bindings& b) {
+      return substitute_alias(alias, args, b, 0);
+    };
     t.variable_global = [this](EntityId spec) { return q_->global(spec); };
     t.variable_specialization_type = [this](EntityId spec) { return q_->specialization_type(spec); };
     return t;
   }
   Templates templates_for_use(u32 at) {
     auto t = templates();
+    t.call_constant = [this, at](EntityId templ, std::span<const TemplateArg> args) {
+      return evaluate_dependent_call(templ, args, at);
+    };
+    t.alias_type = [this, at](const ast::DeclSema& alias, std::span<const TemplateArg> args, const Bindings& b) {
+      return substitute_alias(alias, args, b, at);
+    };
     t.demand_variable = [this, at](EntityId spec, QualType type) {
       demands.push_back({spec, ast::Loc{item_, loc_base_ + at}, type});
     };
@@ -3385,6 +3419,55 @@ public:
     }
     explicit_args_[std::to_underlying(r.id)] = std::move(args);
     return r;
+  }
+
+  std::optional<Ex> dependent_immediate_template_call(Ex callee, std::span<const TemplateArg> args, u32 end) {
+    if (!types().is(callee.type(), Builtin::overload_set)) return std::nullopt;
+    auto t = templates();
+    if (!std::ranges::all_of(args, [&](const TemplateArg& a) {
+          return a.kind == TemplateArgKind::type && t.structural_operand(a.type);
+        })) return std::nullopt;
+    auto found = overloads_.find(std::to_underlying(callee.id));
+    if (found == overloads_.end()) return std::nullopt;
+    const ast::DeclSema* selected = nullptr;
+    for (const ast::DeclSema& d : found->second) {
+      if (!(d.flags & decl_flag::template_)) continue;
+      if (selected || !(d.flags & decl_flag::consteval_) || (d.flags & decl_flag::member))
+        return std::nullopt;
+      selected = &d;
+    }
+    if (!selected) return std::nullopt;
+    auto fn = types().rec(selected->type);
+    if (!fn.params.empty() || fn.variadic) return std::nullopt;
+    const auto params = ins().seqs.elements(selected->template_params);
+    if (!std::ranges::all_of(params, [](const ast::TemplateParamSema& p) { return p.kind == TemplateArgKind::type; }))
+      return std::nullopt;
+    const bool trailing_pack = !params.empty() && params.back().pack;
+    const auto fixed = params.size() - (trailing_pack ? 1 : 0);
+    if (args.size() < fixed || (!trailing_pack && args.size() != fixed) ||
+        std::ranges::any_of(args.first(fixed), [&](const TemplateArg& a) { return t.is_expansion(a); }))
+      return std::nullopt;
+    QualType result = fn.inner;
+    if (!types().is_integral(result) && !types().is_enum(result)) return std::nullopt;
+    auto value = ins().intern_value(ast::VDepCall{selected->entity, ins().intern_seq(args)});
+    return literal(result, value, ValueCategory::prvalue, callee.begin, end);
+  }
+
+  std::optional<TemplateArg> evaluate_dependent_call(EntityId templ, std::span<const TemplateArg> args, u32 at) {
+    auto decl = q_->template_decl(templ);
+    if (!decl || !(decl->flags & decl_flag::consteval_)) return std::nullopt;
+    Ex callee = decls_expr({*decl}, false, w_->entities.rec(templ).name, at, at);
+    explicit_template_args(callee, std::vector<TemplateArg>(args.begin(), args.end()));
+    const auto before = diag_count();
+    Ex invocation = call(callee, {}, at, at);
+    if (!invocation.ok()) {
+      // The synthesized call is in the immediate context of template substitution.
+      drop_failures(before);
+      return std::nullopt;
+    }
+    auto value = q_->constant_call(*this, invocation);
+    if (!value) return std::nullopt;
+    return TemplateArg{TemplateArgKind::value, invocation.type(), *value};
   }
 
 
