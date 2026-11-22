@@ -1578,6 +1578,8 @@ public:
   bool template_ids_in_declarators = false;
   // In a parameter-declaration or a template-parameter, an ellipsis may begin a pack's declarator.
   bool packs_in_declarators_ = false;
+  // An ordinary default of a consteval function is evaluated with that function's call.
+  bool consteval_parameter_defaults = false;
 
   // Whether the `(` here begins a parameter-declaration-clause rather than an initializer
   // ([dcl.ambig.res]: what can be a declaration is one).
@@ -1870,7 +1872,10 @@ public:
           scan_member_default(s.params, template_probes);
           s.params.back().default_tokens = {begin, index()};
         } else {
-          s.params.back().default_arg = default_argument(t);
+          const u32 saved_context = s_->immediate_context;
+          if (consteval_parameter_defaults && in_params_ == 1) ++s_->immediate_context;
+          s.params.back().default_arg = parameter_default_argument(t, s.params);
+          s_->immediate_context = saved_context;
           if (s.params.back().default_arg == NodeId::none) ok = false;  // diagnosed
         }
       }
@@ -1981,10 +1986,24 @@ public:
     return std::nullopt;
   }
 
-  // A default argument ([dcl.fct.default]/1, /5): its names are bound and its copy-initialization
-  // of the parameter is checked here. A template's that depends on its parameters is kept as it
-  // is, and rejected where a call would use it.
+  NodeId parameter_default_argument(QualType type, std::span<const Param> params) {
+    s_->push_scope();
+    struct EndScope {
+      sema::Sema& sema;
+      ~EndScope() { sema.pop_scope(); }
+    } scope{*s_};
+    for (const Param& param : params)
+      if (param.name != s_->no_name())
+        s_->declare_local(param.name, param.type,
+                          sema::local_flag::parameter | sema::local_flag::default_argument_parameter, param.at, false);
+    return default_argument(type);
+  }
+
+  // Bind the written names and check copy-initialization ([dcl.fct.default]/1, /5).
+  // Keep the written range for dependent defaults.
   NodeId default_argument(QualType t) {
+    const u32 source_begin = pos();
+    const auto calls_before = s_->dependent_calls.size();
     // Not in the parameters of a parameter's own function type ([dcl.fct.default]/3).
     if (in_params_ > 1) s_->diag(pos(), Diag::default_arg_not_allowed);
     Ex e;
@@ -2005,8 +2024,18 @@ public:
                                                             : s_->convert(a, t, a.begin);
     }
     if (!e.ok()) return NodeId::none;
-    if (s_->types().is_dependent(t) || s_->dependent(e)) e = s_->dependent_node({e}, e.begin, e.end);
-    return s_->node(ast::DefaultArg{e.info, sema::Sema::at(e, e.begin)}, e.begin, e.end, e.info).id;
+    ast::DefaultArg value{};
+    value.source = s_->item();
+    value.dependent_calls = s_->builder().seq(std::span<const u32>{});
+    if (s_->types().is_dependent(t) || s_->dependent(e)) {
+      e = s_->dependent_node({e}, e.begin, e.end);
+      value.source_begin = source_begin;
+      value.source_end = pos();
+      value.dependent_calls = s_->builder().seq(std::span<const u32>(s_->dependent_calls).subspan(calls_before));
+    }
+    value.info = e.info;
+    value.arg = sema::Sema::at(e, e.begin);
+    return s_->node(value, e.begin, e.end, e.info).id;
   }
 
   // A default member initializer after its optional `=` ([class.mem.general]).
@@ -4724,6 +4753,15 @@ public:
       Ex zero = s_->literal(i, s_->world().values.integer(i, 0), ast::ValueCategory::prvalue, call.begin, call.end);
       return s_->convert_node(zero, ast::ConversionKind::to_void, s_->builtin(sema::Builtin::void_));
     }
+    // A manifestly constant-evaluated expression may consume an immediate pointer.
+    // Its initializer checks the final value for an escape.
+    if (auto entity = s_->immediate_result_entity(*v.value)) {
+      if (!s_->constant_reference_context && !s_->trial_initializer) {
+        s_->diag(call.begin, Diag::immediate_address, s_->world().entities.rec(*entity).name);
+        return {NodeId::none, call.begin, call.end};
+      }
+      s_->folded_immediate_result = *entity;
+    }
     return s_->literal(call.type(), *v.value, ast::ValueCategory::prvalue, call.begin, call.end);
   }
 
@@ -4926,6 +4964,11 @@ public:
     sema::Evaluated v = scalar_record ? evaluator.evaluate_initializer(init, /*zero_default=*/false)
                                      : evaluator.evaluate(init);
     if (v.value) {
+      if (is_constexpr && s_->folded_immediate_result != ast::EntityId::none)
+        if (auto entity = s_->immediate_result_entity(*v.value)) {
+          s_->diag(init.begin, Diag::immediate_address, s_->world().entities.rec(*entity).name);
+          return;
+        }
       s_->set_local_value(local, *v.value);
       if (scalar_record) {
         // The initialization was manifestly constant-evaluated ([expr.const]). Materialize that
@@ -5265,6 +5308,9 @@ public:
       if (v.value) value = *v.value;
       else if (spec.is_constinit && !v.dependent) s_->diag(init.begin, Diag::not_constant, v.reason);
     }
+    if (spec.is_constinit && value != ast::ConstId::none)
+      if (auto entity = s_->immediate_result_entity(value))
+        s_->diag(init.begin, Diag::immediate_address, s_->world().entities.rec(*entity).name);
     s_->permit_constant_initializer(dbegin, s_->local(local).type, value);
     s_->static_value(local, value == ast::ConstId::none ? std::nullopt : std::optional(value));
     return s_->node(ast::StaticVar{local, sema::Sema::at(init, dbegin), value, dtor}, dbegin, pos());
@@ -5456,7 +5502,7 @@ public:
         skip_to_semi();
         return {NodeId::none, begin, pos()};
       }
-      sema::Sema::ImmediateReferenceScope references(*s_, s_->constant_reference_context || spec.is_constexpr);
+      sema::Sema::ImmediateReferenceScope references(*s_, s_->constant_reference_context || spec.is_constexpr || spec.is_constinit);
       // [dcl.constexpr]: a constexpr variable is const.
       if (spec.is_constexpr) d.type = s_->types().add_cv(d.type, sema::Cv::const_);
       const bool replay_defaults = !spec.is_static && s_->can_replay_default_members(d.type);
