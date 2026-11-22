@@ -454,7 +454,56 @@ with tempfile.TemporaryDirectory() as directory:
     array_alias = write("array_alias.cpp", array_source.replace(
         "  return argc < 1;", "  auto* escaped = tasks;\n  return argc < 1;"))
     syntax(array_alias, error="resource aliases are outside the checked protocol")
-    for source, extra in ((nested, ()), (nested_skip, ("skip",)), (array, ()), (array_skip, ("skip",))):
+    composed_source = """\
+        #include "runtime_transaction.hpp"
+        using example::Work;
+        struct Batch { Work tasks[2]; int count; };
+        struct Queue { Batch groups[2]; };
+
+        int main(int argc, char**) {
+          Queue queue{{
+              {{example::start(), example::start()}, 2},
+              {{example::start(), example::start()}, 2}}};
+          {
+            const auto& view = queue.groups[0].tasks[0];
+            example::inspect(view);
+            example::finish(static_cast<Work&&>(queue.groups[0].tasks[1]));
+          }
+          example::finish(static_cast<Work&&>(queue.groups[0].tasks[0]));
+          example::finish(static_cast<Work&&>(queue.groups[1].tasks[0]));
+          example::finish(static_cast<Work&&>(queue.groups[1].tasks[1]));
+          return queue.groups[1].count != 2;
+        }
+    """
+    composed = write("composed.cpp", composed_source)
+    syntax(composed)
+    composed_skip = write("composed_skip.cpp", composed_source.replace(
+        "  example::finish(static_cast<Work&&>(queue.groups[1].tasks[1]));",
+        "  if (argc > 1) return 0;\n  example::finish(static_cast<Work&&>(queue.groups[1].tasks[1]));"))
+    syntax(composed_skip, error="linear resource 'queue.groups[1].tasks[1]' may leave its scope")
+    composed_borrow = write("composed_borrow.cpp", composed_source.replace(
+        "queue.groups[0].tasks[1]", "queue.groups[0].tasks[0]"))
+    syntax(composed_borrow, error="linear resource 'queue.groups[0].tasks[0]' may still have a live shared borrow")
+    composed_index = write("composed_index.cpp", composed_source.replace(
+        "queue.groups[1].tasks[1]", "queue.groups[argc % 2].tasks[1]"))
+    syntax(composed_index, error="an ownership protocol operation requires a named owner")
+    composed_alias = write("composed_alias.cpp", composed_source.replace(
+        "  return queue.groups[1].count", "  auto* escaped = queue.groups[1].tasks;\n  return queue.groups[1].count"))
+    syntax(composed_alias, error="resource aliases are outside the checked protocol")
+    local_records = write("local_record_array.cpp", """
+        #include "runtime_transaction.hpp"
+        using example::Work;
+        struct Batch { Work task; int count; };
+        int main() {
+          Batch batches[2]{{example::start(), 1}, {example::start(), 2}};
+          example::finish(static_cast<Work&&>(batches[0].task));
+          example::finish(static_cast<Work&&>(batches[1].task));
+          return batches[1].count != 2;
+        }
+    """)
+    syntax(local_records)
+    for source, extra in ((nested, ()), (nested_skip, ("skip",)), (array, ()), (array_skip, ("skip",)),
+                          (composed, ()), (composed_skip, ("skip",)), (local_records, ())):
         subprocess.run([host, "-std=c++20", "-I", include, "-I", examples, str(source), "-o", str(executable)],
                        check=True, timeout=30)
         expected = (-signal.SIGABRT, -signal.SIGILL, -signal.SIGTRAP) if extra else (0,)
@@ -612,6 +661,11 @@ with tempfile.TemporaryDirectory() as directory:
         subprocess.run([*args, "-fcheck-policies", str(array), "-o", str(native)], check=True, timeout=30)
         assert subprocess.run([native], timeout=10).returncode == 0
         subprocess.run([*args, str(array_skip), "-o", str(native)], check=True, timeout=30)
+        assert subprocess.run([native, "skip"], timeout=10).returncode == -signal.SIGILL
+        for source in (composed, local_records):
+            subprocess.run([*args, "-fcheck-policies", str(source), "-o", str(native)], check=True, timeout=30)
+            assert subprocess.run([native], timeout=10).returncode == 0
+        subprocess.run([*args, str(composed_skip), "-o", str(native)], check=True, timeout=30)
         assert subprocess.run([native, "skip"], timeout=10).returncode == -signal.SIGILL
 
         subprocess.run([*args, str(runtime), "-o", str(native)], check=True, timeout=30)

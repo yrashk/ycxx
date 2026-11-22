@@ -699,9 +699,9 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
   original shared borrow to other verified observers. Checked ELF and Mach-O objects carry
   observation requirements and guarantees through each forwarding function. The checked link
   matches them to unique strong definitions in explicit input objects.
-  Local aggregates track registered owners by nested field path. Fixed local arrays track
-  them by literal index. Initializing, borrowing, transferring, and consuming a subobject
-  follow the same checks as individual named resources.
+  Local arrays and aggregates track registered owners by nested field and literal-index
+  paths such as `queue.groups[1].tasks[0]`. Initializing, borrowing, transferring, and
+  consuming a subobject follow the same checks as individual named resources.
   The standalone C++20 package also provides move-only issuer-scoped capability tokens with
   rights constraints and runtime scope checks. Native Linux x86-64 tests exercise a YCXX issuer
   and hosted GCC and Clang callers with the same token type.

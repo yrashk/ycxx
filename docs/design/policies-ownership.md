@@ -84,17 +84,17 @@ The field protocol covers non-overlapping value fields and trivial or implicit n
 destruction. Whole-record copying and transfer, unions, and bases that contain owners
 require additional checking.
 
-## Fixed local arrays
+## Fixed arrays of owners
 
-A fixed local array of a registered resource can initialize each element with a registered
-factory or transfer. Use an in-bounds integer literal for an access such as `tasks[0]`.
-The checker tracks an obligation and its borrows for each element. Consuming `tasks[1]`
-can proceed while `tasks[0]` has a shared borrow. Scope exit reports any live linear
-element by its index.
+Fixed arrays can hold registered resources or aggregate elements containing owners. Arrays
+and fields can nest in a local aggregate, so a path such as `queue.groups[0].tasks[1]`
+identifies one obligation and its borrows. Use aggregate initialization and an in-bounds
+integer literal for every array index in an owner path. Scope exit reports the full path
+of any linear owner that remains live.
 
-The first array protocol requires nonthrowing destruction and supports arrays as local
-variables. Pointer aliases, runtime indices, and arrays stored in records require additional
-checking.
+Consuming `tasks[1]` can proceed while `tasks[0]` has a shared borrow. The array and
+aggregate protocol requires nonthrowing destruction. Pointer aliases and runtime indices
+require additional checking.
 
 ## Try it
 
