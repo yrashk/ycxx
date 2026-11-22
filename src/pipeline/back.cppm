@@ -1396,21 +1396,6 @@ std::expected<Bytes, std::string> initial_bytes(const ast::Interners& in, const 
 
 namespace {
 
-// Makes the Mach-O definitions of coalesced inline functions and variables weak, as the ELF
-// assembly does (#124): N_WEAK_DEF, with N_PEXT when hidden, so ycxx's linker and the system's
-// keep one definition.
-void mark_weak_definitions(obj::object& o, std::span<const aarch64::Symbol> symbols,
-                           std::span<const FunctionDef> functions, const std::set<EntityId>& weak_variables) {
-  std::set<EntityId> entities = weak_variables;
-  for (const FunctionDef& f : functions)
-    if (f.coalesced) entities.insert(f.entity);
-  std::set<std::string_view> weak;
-  for (const aarch64::Symbol& s : symbols)
-    if (s.bind != obj::binding::local && entities.contains(s.entity)) weak.insert(s.name);
-  for (obj::symbol& s : o.symbols)
-    if (s.defined() && s.bind != obj::binding::local && weak.contains(s.name_view())) s.weak = true;
-}
-
 struct LinuxFunction {
   EntityId entity;
   const x86_64::MachineCode* code;
@@ -1429,8 +1414,7 @@ obj::reloc_kind linux_relocation(x86_64::RelocKind kind) {
 
 std::expected<obj::object, aarch64::CodegenError> assemble_linux(
     const std::string& name, std::span<const LinuxFunction> functions,
-    std::span<const aarch64::DataDef> data, std::span<const aarch64::Symbol> symbols,
-    const std::set<EntityId>& weak_variables) {
+    std::span<const aarch64::DataDef> data, std::span<const aarch64::Symbol> symbols) {
   obj::object o;
   o.name = name;
   o.arch = obj::target::x86_64_linux;
@@ -1518,7 +1502,7 @@ std::expected<obj::object, aarch64::CodegenError> assemble_linux(
       auto& symbol = o.symbols[sym->second];
       symbol.section = index;
       symbol.offset = base;
-      symbol.weak = symbol.bind == obj::binding::global && weak_variables.contains(d.entity);
+      symbol.weak = symbol.bind == obj::binding::global && d.weak;
       if (kind == K::bss) sec.reserve_zerofill(d.size);
       else sec.emit(d.bytes);
       for (const auto& r : d.relocs) {
@@ -1581,7 +1565,6 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
 
   // Variables: their initial bytes, by what they hold ([basic.start.static]).
   std::vector<aarch64::DataDef> data;
-  std::set<EntityId> weak_variables;
   const Shapes& shapes = co_await cx.fetch<UnitShapes>(id);
   for (const Variable& v : tu.variables) {
     QueryLayout layout(cx, shapes, target);
@@ -1594,12 +1577,12 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
     bool is_const = (std::to_underlying(ast::cv_of(in.canonical(v.type))) & 1) != 0;
     bool zero = b->relocs.empty() && std::ranges::all_of(b->bytes, [](std::uint8_t x) { return x == 0; });
     aarch64::DataDef d{v.entity, aarch64::DataKind::data, std::move(b->bytes), 0, layout.type(v.type).align, std::move(b->relocs)};
-    if (v.coalesced && !v.dynamic && d.relocs.empty()) weak_variables.insert(v.entity);
+    d.weak = v.coalesced && !v.dynamic && d.relocs.empty();
     if (is_const && !v.dynamic && !layout.contains_mutable_field(v.type))
       d.kind = d.relocs.empty() ? aarch64::DataKind::rodata : aarch64::DataKind::data_const;
     // A weak Mach-O definition stays out of zero-fill: Apple's linkers coalesce weak definitions
     // in content sections, as Clang emits them, but older ones not in __bss (#124).
-    else if (zero && (linux || !weak_variables.contains(v.entity))) {
+    else if (zero && (linux || !d.weak)) {
       d.kind = aarch64::DataKind::bss;
       d.size = d.bytes.size();
       d.bytes.clear();
@@ -1749,13 +1732,12 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
         const auto& def = tu.functions[i];
         code.push_back({fns[i].fn, &*ms[i].get().linux_code, def.coalesced, def.unwind != UnwindEligibility::none});
       }
-      return assemble_linux(tu.name, code, data, symbols, weak_variables);
+      return assemble_linux(tu.name, code, data, symbols);
     }
     std::vector<aarch64::CompiledFunction> code;
-    for (std::size_t i = 0; i < fns.size(); ++i) code.push_back({fns[i].fn, *ms[i].get().code});
-    auto o = aarch64::assemble(tu.name, code, data, symbols);
-    if (o) mark_weak_definitions(*o, symbols, tu.functions, weak_variables);
-    return o;
+    for (std::size_t i = 0; i < fns.size(); ++i)
+      code.push_back({fns[i].fn, *ms[i].get().code, tu.functions[i].coalesced});
+    return aarch64::assemble(tu.name, code, data, symbols);
   }();
   if (!o) {
     std::optional<ast::Loc> at;
