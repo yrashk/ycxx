@@ -317,11 +317,16 @@ def main():
             hidden_namespace = (scope / 'owned-root' / 'prior-namespace.cpp').read_bytes()
             forward_declaration = b'    struct Gauge;\n'
             assert hidden_namespace.count(forward_declaration) == 1
-            (scope / 'owned-root' / 'prior-namespace-friend.cpp').write_bytes(hidden_namespace.replace(
-                forward_declaration, b'    struct Witness { friend struct Gauge; };\n'))
+            for suffix, introduction in (
+                ('friend', b'    struct Witness { friend struct Gauge; };\n'),
+                ('parameter', b'    void seed(struct Gauge*);\n'),
+            ):
+                variant = scope / 'owned-root' / f'prior-namespace-{suffix}.cpp'
+                variant.write_bytes(hidden_namespace.replace(forward_declaration, introduction))
             for part, diagnostic in (
                 ('prior-namespace', virtual_definition_error),
                 ('prior-namespace-friend', native_virtual_error),
+                ('prior-namespace-parameter', native_virtual_error),
                 ('slot-redeclaration-after', native_virtual_error),
             ):
                 for mode, env in (('cold', cold), ('warm', daemon)):
