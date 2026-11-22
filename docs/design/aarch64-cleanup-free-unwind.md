@@ -1,7 +1,7 @@
 # Cleanup-free AArch64 Darwin unwind emission
 
 The Darwin front end reuses the typed cleanup-free function proof from the Linux slice.
-It certifies ordinary namespace functions over scalar signatures with no hidden lifetime
+It certifies ordinary namespace functions with fixed scalar parameters and no hidden lifetime
 cleanup or native throw expression. Emission excludes the entry point, coalesced definitions,
 and functions with inline declarations, written `noexcept`, assembly labels, or static guards.
 
@@ -16,6 +16,11 @@ through the construction receiver. An explicit initializer suppresses the corres
 before this walk. A materialized temporary of the same aggregate shape is also eligible when its
 lifetime ends with the full-expression. [dcl.init.aggr], [class.mem.general], [class.temporary].
 [#849](https://github.com/yrashk/ycxx/issues/849)
+
+A result can be a nonempty, flat scalar aggregate that is trivial for calls. A braced result or
+the trivial implicit copy of a named result has no exceptional cleanup ([stmt.return], [except.ctor]).
+The target ABI independently validates and lowers the result, including an indirect result in X8.
+Calls in the body still use the existing scalar signature proof. [#853](https://github.com/yrashk/ycxx/issues/853)
 
 The arm64 emitter records frame transitions as it emits the saves and restores. At entry,
 the CFA is the incoming SP and the return address is in X30. After the frame-record store,

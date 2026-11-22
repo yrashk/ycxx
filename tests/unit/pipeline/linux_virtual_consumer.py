@@ -173,9 +173,24 @@ def main():
 
         native_virtual_error = 'native output for a translation unit with virtual member functions is not supported yet'
         virtual_definition_error = 'an out-of-class definition of a virtual member function is not supported yet'
+        pure = 'struct B { virtual int read(int) = 0; };\n'
+        for name, source in (
+            ('pure-interface', pure + 'B* identity(B* object) { return object; }\n'),
+            ('pure-overridden', pure + 'struct D : B { int read(int) override; };\n'
+                                 'D* identity(D* object) { return object; }\n'),
+        ):
+            (scope / f'{name}.cpp').write_text(source)
+            compile(linux, '-fsyntax-only', f'{name}.cpp')
+            compile(linux, '-c', f'{name}.cpp', '-o', f'{name}.o', error=native_virtual_error)
+            assert not (scope / f'{name}.o').exists()
+
+        (scope / 'pure-call.cpp').write_text(pure + 'int call(B* object) { return object->read(7); }\n')
+        compile(linux, '-c', 'pure-call.cpp', '-o', 'pure-call.o',
+                error='a call to a virtual member function is not supported yet')
+        assert not (scope / 'pure-call.o').exists()
+
         guards = (
             (root + 'int B::read(int n) { return n; }', virtual_definition_error),
-            ('struct B { virtual int read(int) = 0; };', "'=' is not supported yet"),
             (root + 'void consume(B object) {}', layout_error),
             (root + 'struct Enclosing { B object; };', native_virtual_error),
             (scalar + 'B object;', layout_error),

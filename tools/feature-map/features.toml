@@ -1823,7 +1823,7 @@ struct D final : B { int f() override { return 0; } };
 int main() { D d; B& b = d; return b.f(); }
 '''
 issues = [309]
-note = 'Ordinary virtual declarations, single-base overrides, final on ordinary virtual members, and unqualified parenthesized or flat braced initializers of a direct polymorphic base in syntax checking. Linux x86-64 supports virtual calls, size and alignment queries, and ordinary integral member access on peer-owned roots and on derived classes with one public nonvirtual root, at most one integral field, and at most one declaration-only override. A unit can emit one out-of-line non-key virtual member of a supported root. Linux key-owned table and RTTI emission covers one ordinary external default-visible root with one public integral field and two directly written fixed integer virtual signatures. Linux x86-64 supports plain automatic default initialization for that root with an implicit default constructor, a trivial destructor and no default member initializer, using a table from the same unit or a peer. Broader construction and table emission, abstract classes, covariance, further inheritance forms, and final on classes, virtual destructors and assignment operators remain open.'
+note = 'Ordinary virtual declarations, single-base overrides, final and pure-specifiers on ordinary virtual members, abstract type checking, and unqualified parenthesized or flat braced initializers of a direct polymorphic base in syntax checking. Linux x86-64 supports virtual calls, size and alignment queries, and ordinary integral member access on peer-owned roots and on derived classes with one public nonvirtual root, at most one integral field, and at most one declaration-only override. A unit can emit one out-of-line non-key virtual member of a supported root. Linux key-owned table and RTTI emission covers one ordinary external default-visible root with one public integral field and two directly written fixed integer virtual signatures. Linux x86-64 supports plain automatic default initialization for that root with an implicit default constructor, a trivial destructor and no default member initializer, using a table from the same unit or a peer. Broader construction and table emission, pure-slot dispatch, covariance, further inheritance forms, class-head final, and pure declarations and final on virtual destructors and assignment operators remain open.'
 
 [[feature]]
 id = 'class-virtual-base'
@@ -2257,8 +2257,8 @@ std = 'C++11'
 ftm = '__cpp_noexcept_function_type'
 detect = '\bnoexcept\b'
 status = 'partial'
-issues = [219, 729, 713]
-note = 'Ordinary function pointers and references preserve concrete noexcept type identity. The unary operator checks calls and constructions. Dependent exception specifications remain open.'
+issues = [219, 729, 713, 854]
+note = 'Ordinary function pointers and references preserve concrete noexcept type identity. The unary operator checks calls, constructions, and the selected ordinary array allocation. Dependent exception specifications remain open.'
 probe = '''
 void f() noexcept {} void g() {}
 int main() { void (*p)() noexcept = f; return (noexcept(f()) && !noexcept(g()) && p) ? 0 : 1; }

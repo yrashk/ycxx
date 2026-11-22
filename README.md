@@ -200,12 +200,13 @@ object. Symbol names can share suffixes in an input string table.
 [#484](https://github.com/yrashk/ycxx/issues/484)
 
 On x86-64 Linux and arm64 macOS, an exception thrown by hosted peer code can unwind through
-eligible cleanup-free ycxx functions with fixed scalar signatures and reach a handler in
-peer code. This includes calls through function pointers with fixed scalar prototypes and calls
-in selected default member initializers of automatic aggregates with scalar fields and trivial
-destruction. [#572](https://github.com/yrashk/ycxx/issues/572) ·
-[#737](https://github.com/yrashk/ycxx/issues/737) · [#849](https://github.com/yrashk/ycxx/issues/849) ·
-[#851](https://github.com/yrashk/ycxx/issues/851)
+eligible cleanup-free ycxx functions with fixed scalar parameters and reach a handler in peer code.
+This includes calls through function pointers with fixed scalar prototypes, calls in selected default
+member initializers of automatic scalar aggregates, and calls while producing trivial scalar
+aggregate results through the target's supported ABI.
+[#572](https://github.com/yrashk/ycxx/issues/572) · [#737](https://github.com/yrashk/ycxx/issues/737) ·
+[#849](https://github.com/yrashk/ycxx/issues/849) · [#851](https://github.com/yrashk/ycxx/issues/851) ·
+[#853](https://github.com/yrashk/ycxx/issues/853)
 
 On x86-64 Linux, an eligible ycxx function can also throw an `int` to a hosted peer's handler.
 A host-linked ycxx function can use one `catch (...)` to return an integer literal when
@@ -261,6 +262,9 @@ Ordinary named namespace-scope classes and structs support class-head `alignas` 
 Both targets accept nonempty standalone unnamed enum definitions at namespace scope, including
 fixed underlying types and definitions inside `extern "C"` blocks.
 [#157](https://github.com/yrashk/ycxx/issues/157)
+
+Qualified value lookup can read earlier static data members and injected unscoped enumerators
+while their current class is incomplete. [#857](https://github.com/yrashk/ycxx/issues/857)
 
 Both targets support named nested enum definitions followed by ordinary fields in the same
 member declaration, including scoped enum field initializers. [#500](https://github.com/yrashk/ycxx/issues/500)
@@ -333,6 +337,7 @@ written default member initializer are value-initialized.
 - ordinary scalar `new` and single-object `delete` for integral and pointer objects, including
   cv-qualified objects. Scalar allocation uses the global Itanium allocation functions.
   Syntax checking also covers one-dimensional scalar `new T[n]` and `delete[] p`.
+  Unary `noexcept` accounts for the selected global array allocation function.
   On Linux x86-64, ordinary functions with cleanup-free unwind frames can default-initialize
   one-dimensional integral and ordinary pointer arrays with a bound built from integer literals,
   parentheses, unary `+` and `-`, and binary `+`, `-`, and `*`. The allocation returns the
@@ -347,7 +352,7 @@ written default member initializer are value-initialized.
   in constant expressions.
   Runtime placement `new` supports integral and ordinary pointer objects with one placement
   argument and a visible written reserved allocation function.
-  [#293](https://github.com/yrashk/ycxx/issues/293)
+  [#293](https://github.com/yrashk/ycxx/issues/293) · [#854](https://github.com/yrashk/ycxx/issues/854)
 - pointers and references to arrays of unknown bound, and template partial specializations
   that match unknown-bound array types. [#222](https://github.com/yrashk/ycxx/issues/222)
 - implicit lvalue copy assignment for ordinary classes without bases, including class members
@@ -540,9 +545,10 @@ Ordinary non-template member functions in namespace-scope classes can use `&` an
 to distinguish lvalue and rvalue receivers. [#311](https://github.com/yrashk/ycxx/issues/311)
 
 **Virtual declarations.** Syntax checking accepts virtual members and inline definitions in
-ordinary root classes. An ordinary virtual member can use `final` to prevent further
-overrides. Classes derived through one ordinary polymorphic base also support overrides and
-unqualified base initializers with parentheses or flat braces. On Linux x86-64,
+ordinary root classes. Ordinary pure virtual declarations define abstract interfaces through a
+single nonvirtual base at each level. Ordinary virtual members can use `final` to prevent
+further overrides. Derived classes also support unqualified base initializers with parentheses
+or flat braces. On Linux x86-64,
 pointer and reference consumers can call virtual functions with fixed integer signatures on
 peer-owned objects with an ordinary root, including a derived class with that single public
 base, at most one integral field and at most one override. Consumers can upcast those derived

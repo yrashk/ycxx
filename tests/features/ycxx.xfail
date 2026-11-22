@@ -25,7 +25,6 @@ draft/basic/basic.lookup.qual.general-4.accept.cpp 'struct' not supported yet
 draft/basic/basic.lookup.unqual-1.accept.cpp 'struct' not supported yet
 draft/basic/basic.lookup.unqual-2.reject.cpp errors elsewhere: 'using' not supported yet
 draft/basic/basic.scope.namespace-1.accept.cpp 'namespace' not supported yet
-draft/basic/basic.scope.pdecl-4.accept.cpp 'struct' not supported yet
 draft/basic/basic.scope.pdecl-5.accept.cpp 'typedef' not supported yet
 draft/basic/basic.scope.scope-2.reject.cpp errors elsewhere: 'typedef' not supported yet
 draft/basic/basic.scope.scope-3.reject.cpp errors elsewhere: '(' not supported yet
@@ -91,7 +90,6 @@ draft/class/class.inhctor.init-1.reject.cpp errors elsewhere: preprocessing dire
 draft/class/class.inhctor.init-2.accept.cpp 'struct' not supported yet
 draft/class/class.inhctor.init-3.reject.cpp errors elsewhere: 'struct' not supported yet
 draft/class/class.local-1.reject.cpp errors elsewhere: 'static' not supported yet
-draft/class/class.mem.general-1.accept.cpp 'struct' not supported yet
 draft/class/class.mem.general-2.reject.cpp errors elsewhere: 'struct' not supported yet
 draft/class/class.mem.general-4.accept.cpp 'struct' not supported yet
 draft/class/class.mfct-2.accept.cpp 'typedef' not supported yet

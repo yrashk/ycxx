@@ -289,6 +289,8 @@ enum class Diag : std::uint32_t {
   virtual_member_template [[=message{Severity::error, "a member function template cannot be 'virtual'"}]],
   virtual_union_member [[=message{Severity::error, "a union cannot have a virtual member function"}]],
   virtual_placeholder_return [[=message{Severity::error, "a virtual function cannot have a deduced return type"}]],
+  pure_specifier [[=message{Severity::error, "a pure-specifier must be '= 0'"}]],
+  abstract_object [[=message{Severity::error, "cannot form an object of abstract type {0:t}"}]],
   virtual_constraints [[=message{Severity::error, "a virtual function cannot have a requires clause"}]],
   override_without_base [[=message{Severity::error, "'override' requires a matching virtual function in a base class"}]],
   duplicate_override [[=message{Severity::error, "duplicate 'override' specifier"}]],

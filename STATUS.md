@@ -316,14 +316,15 @@ What is true of the code today. Work in progress and its owners are tracked in
   - Output is byte-identical across runs.
   - Weak definitions coalesce: the first in input order is kept, and a strong one beats them.
     The functions and variables the ELF path makes weak (#422, #432) are weak Mach-O definitions
-    too, with `N_PEXT` when hidden (#602), and a zero-initialized one goes in `__DATA,__data`, not
-    zero-fill, as Clang emits it. An object with a weak definition sets
-    `MH_SUBSECTIONS_VIA_SYMBOLS`, so the system linker also keeps one. A name some object defines
-    with default visibility is exported even when the kept definition is hidden, as the system
-    linker does. `unit.darwin_inline` checks the `unit.linux_inline` fixtures and mixed content
-    (literals, initializers, guarded statics) with ycxx's and the system's linker, dead stripping
-    included, in both object orders, with a host-compiler peer and an archive member. Templates,
-    closures and static locals of inline functions remain strong (#124).
+    too, with `N_PEXT` when hidden (#602). Each definition carries its own weak binding, so a
+    strong definition sharing its spelling through an `asm` label retains priority (#694).
+    Zero-initialized writable weak definitions go in `__DATA,__data`. An object with a weak
+    definition sets `MH_SUBSECTIONS_VIA_SYMBOLS`, so the system linker also keeps one. A name
+    some object defines with default visibility is exported even when the kept definition is
+    hidden, as the system linker does. `unit.darwin_inline` checks the `unit.linux_inline` fixtures
+    and mixed content (literals, initializers, guarded statics) with ycxx's and the system's
+    linker, dead stripping included, in both object orders, with a host-compiler peer and an
+    archive member. Templates, closures and static locals of inline functions remain strong (#124).
   - The linker preserves cleanup-free `__TEXT,__eh_frame` contributions with the supported
     PC-relative CIE and FDE format, including address differences and multiple input objects.
     `unit.link` checks the linked ranges and walks through a non-frame-pointer arm64 bridge
@@ -701,6 +702,8 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
   Member functions (with `this` first), closure call operators, function template
   specializations and calls through pointers use the same placement as ordinary functions
   ([#640](https://github.com/yrashk/ycxx/issues/640)).
+  Indirect calls preserve the last by-value argument with or without a class result destination
+  ([#693](https://github.com/yrashk/ycxx/issues/693)).
   A class result in memory, of more than two eightbytes or not trivial for calls, goes
   through a hidden pointer that takes RDI ahead of `this` and comes back in RAX. A class
   argument not trivial for calls passes by the address of the caller's object. Trivially
@@ -717,11 +720,14 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
   the same in-memory objects, resolves absolute and PC-relative relocations, and writes a static
   `ET_EXEC` image with load segments and a non-executable stack.
 - A hosted peer's exception can unwind through cleanup-free ycxx functions on x86-64 Linux.
-  The compiler certifies ordinary strong definitions with fixed scalar signatures using all
+  The compiler certifies ordinary strong definitions with fixed scalar parameters using all
   resolved declarations and the typed body. The proof visits selected default member initializers
   in aggregates with scalar fields and trivial destruction. It checks fixed scalar prototypes
   and the typed operands of indirect calls.
   [#849](https://github.com/yrashk/ycxx/issues/849) · [#851](https://github.com/yrashk/ycxx/issues/851)
+  Returning a nonempty flat scalar aggregate with trivial destruction and call semantics uses the
+  same proof for a braced result or an implicit trivial copy. The target's existing register or
+  indirect result convention still applies. [#853](https://github.com/yrashk/ycxx/issues/853)
   It tracks written exception specifications across redeclarations and records the AMD64 frame
   state at the actual prologue and epilogue offsets.
   ELF `.eh_frame` records use PC-relative references to local code anchors. The native
@@ -941,9 +947,12 @@ private daemons.
     pinned by a first request) must answer until it is killed, so a crash hidden by the
     client's retry fails it. `KNOWN` lists the divergences of the default run that have their
     own issue (none today).
-  - `daemon.process` (`tests/daemon/process.py`, #98): an edit landing mid-build (restarted,
-    answered as the final state, counted in `ctl status`), a killed client (cancelled), a killed
-    daemon mid-request (the client retries), a restart, and concurrent clients.
+  - `daemon.process` (`tests/daemon/process.py`, #98, #746): a fixture driver parks a pooled build
+    after it has read and analysed its sources. Edits restart the build and get the cold bytes
+    and diagnostics, with the restart counted in `ctl status`. A disconnected client stops,
+    a client whose daemon died retries, and a shutdown leaves a new daemon to answer the next
+    request. Concurrent clients include two requests of one file and a distinct build root
+    reaching the checkpoint while the first is parked.
   - All run on macOS and Linux.
 - Not yet:
   - `progress` messages and `build_time` (#140);
@@ -1337,6 +1346,9 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   fixed underlying type before the enumerator list. Omitted scoped bases default to `int`. Unscoped opaque
   declarations spell their base. Compatible redeclarations and a later definition in the same
   namespace share the nominal type, and the enumerators become visible at the definition.
+- A qualified value expression in an incomplete current class can see earlier static data
+  members and injected unscoped enumerators. Within a named enum's own list, qualifying an
+  earlier enumerator uses its in-list type. [#857](https://github.com/yrashk/ycxx/issues/857)
 - Nonempty standalone unnamed unscoped enumeration definitions at namespace scope support fixed
   and inferred underlying types. An `extern "C"` block leaves the enumerators in the enclosing
   namespace. The enum's linkage identity uses its namespace, canonical underlying type and first
@@ -2673,6 +2685,14 @@ What the process allocates, attributed to the engine's cells, in the trace and t
   expression checks. Evaluated construction, constant evaluation of the objects, and native
   emission of their constructors still require virtual layout support.
   [[class.base.init]](https://eel.is/c++draft/class.base.init) · [#309](https://github.com/yrashk/ycxx/issues/309)
+- An ordinary non-template virtual member can use `= 0` in its class declaration. The token
+  after `=` must be exactly `0` after preprocessing. Class completion tracks which final
+  overriders are pure through the single nonvirtual base chain. `__is_abstract` reads that fact.
+  The front end diagnoses definitions of abstract objects and members, allocation,
+  materialization and by-value function definitions or calls. Nondefining namespace-scope
+  `extern` declarations, pointer and reference types, declarations of by-value functions,
+  base subobjects and the result of direct `decltype(make())` follow their ordinary rules.
+  [[class.abstract]](https://eel.is/c++draft/class.abstract) · [[dcl.type.decltype]](https://eel.is/c++draft/dcl.type.decltype) · [#309](https://github.com/yrashk/ycxx/issues/309)
 - On Linux x86-64, the pinned libycxx `<exception>` syntax check reaches unnamed unscoped
   enumerations in `deps/libycxx/include/ycxx/pal.h`, starting at line 61.
   [#157](https://github.com/yrashk/ycxx/issues/157)
@@ -2709,11 +2729,11 @@ What the process allocates, attributed to the engine's cells, in the trace and t
   supported root type. The root has an implicit default constructor, a trivial destructor and
   no default member initializer. Lowering stores `_ZTV + 16` in the vptr. The table can come
   from the key definition in the same unit or from a peer. [#309](https://github.com/yrashk/ycxx/issues/309)
-- Broader construction and table emission, pure virtual functions, covariant returns, and `final` on classes,
-  virtual destructors and assignment operators remain in #309. Checking `final` for
-  `operator=` includes matching implicitly declared copy and move assignments. Virtual
-  destructor entry points, RTTI expressions, virtual bases and native class ABI have their
-  own issues.
+- Broader construction and table emission, pure-slot dispatch, covariant returns and class-head
+  `final` remain in #309. Pure declarations and `final` for virtual destructors and assignment
+  operators also remain there. Checking `operator=` includes matching implicitly declared copy
+  and move assignments. Virtual destructor entry points, RTTI expressions, virtual bases and
+  native class ABI have their own issues.
   [#309](https://github.com/yrashk/ycxx/issues/309) · [#136](https://github.com/yrashk/ycxx/issues/136) ·
   [#294](https://github.com/yrashk/ycxx/issues/294) · [#310](https://github.com/yrashk/ycxx/issues/310) ·
   [#489](https://github.com/yrashk/ycxx/issues/489)
@@ -3161,6 +3181,9 @@ and runtime integration with ycxx's own linker remain under [#89]. See the
 ([expr.unary.noexcept]). The compiler checks the selected function or constructor,
 argument operations, and temporary destruction ([except.spec]). A construction
 in a function template body can be checked after substitution.
+For one-dimensional scalar `new T[n]`, the operator accounts for the selected
+global array allocation function along with the bound and initialization.
+[#854](https://github.com/yrashk/ycxx/issues/854)
 
 ## Exception specifications on member function templates (#713, #804)
 

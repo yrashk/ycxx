@@ -472,8 +472,9 @@ public:
     bump();
     bump();
     int saved = std::exchange(angle_, 0);
-    ++s_->unevaluated;
+    const u32 enclosing_decltype = std::exchange(s_->decltype_unevaluated, ++s_->unevaluated);
     Ex e = expression();
+    s_->decltype_unevaluated = enclosing_decltype;
     --s_->unevaluated;
     angle_ = saved;
     bool closed = expect(Tk::r_paren);
@@ -3532,6 +3533,8 @@ public:
         s_->diag(begin, Diag::bit_field_size);
         return {NodeId::none, begin, pos()};
       }
+      // [expr.sizeof]: a prvalue operand is materialized even though it is unevaluated.
+      if (!e.glvalue() && !s_->require_concrete_object(e.type(), e.begin)) return {NodeId::none, begin, pos()};
       Ex r = s_->size_of(e.type(), false, begin, pos());
       return {r.id, begin, pos(), r.info};
     }
@@ -4585,9 +4588,11 @@ public:
       sema::Sema::ImmediateReferenceScope references(*s_, /*allowed=*/false);
       // A non-generic lambda's body is a separate evaluation context from its captures.
       const u32 enclosing_unevaluated = s_->unevaluated;
+      const u32 enclosing_decltype = std::exchange(s_->decltype_unevaluated, 0);
       if (!head) s_->unevaluated = 0;
       body = compound_statement();
       s_->unevaluated = enclosing_unevaluated;
+      s_->decltype_unevaluated = enclosing_decltype;
     }
     angle_ = saved;
     Ex r = s_->close_lambda(body, body_begin, pos());
@@ -5879,6 +5884,10 @@ public:
         skip_to_semi();
         return {NodeId::none, begin, pos()};
       }
+      if (!s_->require_concrete_object(d.type, d.name_at)) {
+        skip_to_semi();
+        return {NodeId::none, begin, pos()};
+      }
       Ex peer_root;
       if (no_prefix_attributes && !spec.is_static && !spec.is_constexpr && !spec.is_constinit &&
           !d.qualified && is(Tk::semi) && d.name_at == dbegin && d.name_at + 1 == pos() &&
@@ -5909,7 +5918,7 @@ public:
           skip_to_semi();
           return {NodeId::none, begin, pos()};
         }
-        if (!s_->require_supported_virtual_layout(d.type, d.name_at)) {
+        if (!s_->require_concrete_object(d.type, d.name_at) || !s_->require_supported_virtual_layout(d.type, d.name_at)) {
           skip_to_semi();
           return {NodeId::none, begin, pos()};
         }

@@ -44,6 +44,7 @@ export struct DataDef {
   std::uint64_t size = 0;  // bss
   std::uint32_t align = 1;
   std::vector<DataReloc> relocs;
+  bool weak = false;
 };
 
 export struct FunctionDef {
@@ -98,6 +99,7 @@ export struct CompiledFunction {
   ir::EntityId entity{};
   MachineCode code;
   bool cleanup_free_unwind = false;
+  bool weak = false;
 };
 export std::expected<obj::object, CodegenError> assemble(std::string name, std::span<const CompiledFunction> functions,
                                                          std::span<const DataDef> data, std::span<const Symbol> symbols);
@@ -328,12 +330,14 @@ std::expected<obj::object, CodegenError> assemble(std::string name, std::span<co
   for (const CompiledFunction& f : functions) {
     auto s = name_of(f.entity);
     if (!s) return std::unexpected(s.error());
-    symbol_of[ir::raw(f.entity)] = o.add_symbol({(*s)->name, (*s)->bind, *text, 0, false});
+    const bool weak = f.weak && (*s)->bind != obj::binding::local;
+    symbol_of[ir::raw(f.entity)] = o.add_symbol({(*s)->name, (*s)->bind, *text, 0, weak});
   }
   for (const DataDef& d : data) {
     auto s = name_of(d.entity);
     if (!s) return std::unexpected(s.error());
-    symbol_of[ir::raw(d.entity)] = o.add_symbol({(*s)->name, (*s)->bind, sections[d.kind], 0, false});
+    const bool weak = d.weak && (*s)->bind != obj::binding::local;
+    symbol_of[ir::raw(d.entity)] = o.add_symbol({(*s)->name, (*s)->bind, sections[d.kind], 0, weak});
   }
   const auto frame_base = frames ? o.define("ltmp_eh_frame", obj::binding::local, *frames) : 0;
   std::optional<std::uint32_t> personality;
