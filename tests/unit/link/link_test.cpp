@@ -458,12 +458,81 @@ void add_cleanup_frame(obj::object& o, std::uint32_t function, std::uint32_t cod
                    function, -static_cast<std::int64_t>(pc), pc, anchor);
 }
 
-struct frame_section {
+obj::object cleanup_bridge_object() {
+  using obj::binding;
+  using obj::reloc_kind;
+  using obj::standard_section;
+  obj::object object;
+  object.name = "cleanup_bridge.o";
+  const auto code_section = object.add_section(standard_section::text);
+  const auto frame_section = object.add_section(standard_section::eh_frame);
+  const auto table_section = object.add_section(obj::section{"__TEXT", "__gcc_except_tab", 0, 2, {}, 0, {}});
+  const auto bridge = object.define("_cleanup_bridge", binding::global, code_section);
+  const auto frame_base = object.define("ltmp_frame", binding::local, frame_section);
+  const auto lsda = object.define("ltmp_cleanup_lsda", binding::local, table_section);
+  const auto callback = object.reference("_fixture_callback");
+  const auto destroy = object.reference("_fixture_destroy");
+  const auto resume = object.reference("__Unwind_Resume");
+  const auto personality = object.reference("___gxx_personality_v0");
+
+  auto& code = object.sections[code_section];
+  auto call = [&](std::uint32_t callee) {
+    code.emit32(0x94000000);  // bl target
+    code.relocate(reloc_kind::branch26, callee);
+  };
+  code.emit32(0xa9be7bfd);  // stp x29, x30, [sp, #-32]!
+  code.emit32(0x910003fd);  // add x29, sp, #0
+  code.emit32(0xf9000be0);  // str x0, [sp, #16], save the owner pointer
+  call(callback);          // offset 12, the protected call
+  code.emit32(0xf9400be0);  // ldr x0, [sp, #16]
+  call(destroy);
+  code.emit32(0xa8c27bfd);  // ldp x29, x30, [sp], #32
+  code.emit32(0xd65f03c0);  // ret at offset 28
+  code.emit32(0xf9000fe0);  // landing pad at 32, str x0, [sp, #24], save the unwind header
+  code.emit32(0xf9400be0);  // ldr x0, [sp, #16]
+  call(destroy);
+  code.emit32(0xf9400fe0);  // ldr x0, [sp, #24]
+  call(resume);
+  code.emit32(0xd4200020);  // brk #1, resume does not return
+
+  constexpr std::uint8_t sites[]{0xff, 0xff, 0x01, 12, // omit LPStart and types, ULEB call sites
+                                 0, 12, 0, 0,
+                                 12, 4, 32, 0,       // one cleanup, with no catch action
+                                 16, 40, 0, 0};
+  object.sections[table_section].emit(sites);
+
+  auto& frames = object.sections[frame_section];
+  constexpr std::uint8_t cie[]{1, 'z', 'P', 'L', 'R', 0, 1, 0x78, 30, 7,
+                               0x9b, 0, 0, 0, 0, 0x10, 0x10,  // GOT personality, pcrel LSDA and FDE
+                               0x0c, 31, 0, 0x08, 29, 0x08, 30};
+  frames.emit32(28);
+  frames.emit32(0);
+  frames.emit(cie);
+  frames.relocate(reloc_kind::got_rel32, personality, 0, 19);
+  frames.emit32(60);
+  frames.emit32(36);  // the backward CIE reference at offset 36
+  frames.emit64(0);
+  frames.emit64(56);
+  frames.emit(std::array<std::uint8_t, 1>{8});
+  frames.emit64(0);
+  constexpr std::uint8_t rows[]{0x44, 0x0c, 31, 32, 0x9d, 4, 0x9e, 3, // SP+32 after pair save
+                                0x44, 0x0c, 29, 32, 0x9d, 4, 0x9e, 3, // FP+32 after FP set
+                                0x54, 0x0c, 31, 0, 0xdd, 0xde,        // entry rules at ret
+                                0x44, 0x0c, 29, 32, 0x9d, 4, 0x9e, 3}; // body rules at landing
+  frames.emit(rows);
+  frames.align(3);
+  frames.relocate(reloc_kind::abs64, bridge, -40, 40, frame_base);
+  frames.relocate(reloc_kind::abs64, lsda, -57, 57, frame_base);
+  return object;
+}
+
+struct linked_section_view {
   std::uint64_t address;
   std::span<const std::uint8_t> bytes;
 };
 
-std::optional<frame_section> linked_frames(std::span<const std::uint8_t> image) {
+std::optional<linked_section_view> linked_section(std::span<const std::uint8_t> image,
+                                                  std::string_view segment, std::string_view name) {
   namespace mo = obj::macho;
   for (std::size_t at = mo::mach_header_64_size, c = 0; c < mo::load32(image, 16);
        ++c, at += mo::load32(image, at + 4)) {
@@ -471,9 +540,9 @@ std::optional<frame_section> linked_frames(std::span<const std::uint8_t> image) 
     for (std::size_t i = 0; i < mo::load32(image, at + 64); ++i) {
       const auto section = at + mo::segment_command_64_size + i * mo::section_64_size;
       const std::string_view names(reinterpret_cast<const char*>(image.data() + section), 32);
-      if (names.starts_with(std::string_view("__eh_frame\0", 11)) &&
-          names.substr(16).starts_with(std::string_view("__TEXT\0", 7)))
-        return frame_section{mo::load64(image, section + 32), image.subspan(mo::load32(image, section + 48),
+      const auto field = [](std::string_view spelling) { return spelling.substr(0, spelling.find('\0')); };
+      if (field(names.substr(0, 16)) == name && field(names.substr(16)) == segment)
+        return linked_section_view{mo::load64(image, section + 32), image.subspan(mo::load32(image, section + 48),
                                                                            mo::load64(image, section + 40))};
     }
   }
@@ -499,7 +568,7 @@ void test_cleanup_frames() {
   auto image = link::link(objects);
   check(image.has_value(), "objects with cleanup frames link");
   if (!image) return;
-  const auto frames = linked_frames(*image);
+  const auto frames = linked_section(*image, "__TEXT", "__eh_frame");
   check(frames.has_value(), "the final image retains a cleanup-free __eh_frame section");
   if (!frames) return;
   const auto bytes = frames->bytes;
@@ -520,14 +589,60 @@ void test_cleanup_frames() {
   auto mismatched = first;
   mismatched.sections.back().relocs[0].addend += 4;
   const auto missing = link::link(std::span(&mismatched, 1));
-  check(missing && !linked_frames(*missing), "a relocation which does not denote the PC field stays outside the cleanup-frame profile");
+  check(missing && !linked_section(*missing, "__TEXT", "__eh_frame"), "a relocation which does not denote the PC field stays outside the cleanup-frame profile");
 
   auto debug = second;
   debug.sections[0].flags |= obj::section_flags::debug;
   debug.symbols[0].bind = obj::binding::local;
   const std::array ignored{std::move(debug), return42()};
   const auto debug_link = link::link(ignored);
-  check(debug_link && !linked_frames(*debug_link), "a frame referring to discarded debug text is also discarded");
+  check(debug_link && !linked_section(*debug_link, "__TEXT", "__eh_frame"), "a frame referring to discarded debug text is also discarded");
+}
+
+// The cleanup profile and the original zR profile share one terminated stream.
+void test_hosted_cleanup_metadata() {
+  namespace mo = obj::macho;
+  auto entry = return42();
+  add_cleanup_frame(entry, 0, 8, 0x1b, {}, true);
+  entry.define("___gxx_personality_v0", obj::binding::global, 0);
+  entry.sections[0].emit32(ret);
+  const auto padding = entry.add_section({"__TEXT", "__gcc_except_tab", 0, 2, {}, 0, {}});
+  entry.sections[padding].emit32(0);
+  auto bridge = cleanup_bridge_object();
+  const auto prefix = entry.sections[1].bytes.size() - 4;
+  const auto& table = bridge.sections[2].bytes;
+  const auto opts = with_exports({"_fixture_callback", "_fixture_destroy", "__Unwind_Resume"});
+  const std::array objects{entry, bridge};
+  const auto image = link::link(objects, opts);
+  check(image.has_value(), "cleanup-only and cleanup-free objects link together");
+  if (!image) return;
+  const auto frames = linked_section(*image, "__TEXT", "__eh_frame");
+  const auto tables = linked_section(*image, "__TEXT", "__gcc_except_tab");
+  const auto got = linked_section(*image, "__DATA_CONST", "__got");
+  const auto frame_size = prefix + bridge.sections[1].bytes.size() + 4;
+  check(frames && frames->bytes.size() == frame_size, "the linked frame stream retains both profiles and one terminator");
+  check(tables && tables->bytes.size() == table.size() + 4, "the cleanup table survives after earlier contribution padding");
+  if (!frames || frames->bytes.size() != frame_size || !tables || tables->bytes.size() != table.size() + 4 || !got)
+    return;
+  constexpr std::uint64_t image_base = 0x100000000;
+  const auto words = frames->bytes.subspan(prefix);
+  const auto address = frames->address + prefix;
+  check(mo::load32(words, 36) == 36, "the cleanup FDE keeps its backward CIE pointer");
+  const auto start = trie_lookup(*image, "_cleanup_bridge");
+  check(start && address + 40 + mo::load64(words, 40) == image_base + *start && mo::load64(words, 48) == 56,
+        "the cleanup FDE retains its exact function address and extent");
+  check(address + 57 + mo::load64(words, 57) == tables->address + 4, "the FDE's LSDA points to its own contribution");
+  check(std::ranges::equal(tables->bytes.subspan(4), table), "the cleanup-only call-site rows survive byte for byte");
+  check(mo::load32(frames->bytes, frame_size - 4) == 0, "the terminator follows the cleanup FDE");
+  const auto cell = address + 19 + static_cast<std::int32_t>(mo::load32(words, 19));
+  const bool in_got = cell >= got->address && cell - got->address < got->bytes.size() &&
+                      (cell - got->address) % 8 == 0;
+  check(in_got, "the CIE's personality address resolves to a GOT cell");
+  if (!in_got) return;
+  const auto pointer = mo::load64(got->bytes, cell - got->address);
+  const auto personality = trie_lookup(*image, "___gxx_personality_v0");
+  check(personality && (pointer >> 63) == 0 && (pointer & ((std::uint64_t{1} << 36) - 1)) == *personality,
+        "the personality GOT cell rebases to the resolved personality symbol");
 }
 
 // Findings of the review of #42, one check each.
@@ -818,6 +933,7 @@ int main(int argc, char** argv) {
   test_deterministic();
   test_exports_trie();
   test_cleanup_frames();
+  test_hosted_cleanup_metadata();
   test_review_cases();
   if (run_dir) {
     test_run(*run_dir);
