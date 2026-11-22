@@ -411,7 +411,9 @@ available. `--trace-engine=interactive` opens a browser of the trace after the c
 with each function's IR and assembly, a timeline of the pool's workers, and filters. It follows
 the terminal's size and takes the mouse: click to select, fold and sort by a column, use the
 wheel to scroll, and drag to resize the pane. It copies a cell, a subtree, selected rows or any
-selected text of the IR and instructions to the clipboard, over SSH too
+selected text of the IR and instructions to the clipboard, over SSH too. Its histogram view charts
+self and total time, memory, runs, cache hits and waits by query kind, source file or child, and a
+bar opens its cells; cells show and filter by their source position
 ([docs/TRACE.md](docs/TRACE.md#the-interactive-browser)).
 `--trace-engine=json` writes the whole trace as JSON Lines, for tools and agents. Cells that
 come from source (a file, a unit, a function's IR and code) carry their file and lines.

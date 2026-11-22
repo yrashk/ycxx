@@ -2239,11 +2239,20 @@ request it serves.
   tmux's passthrough form) and, locally, runs `YCXX_CLIPBOARD` or the first of pbcopy, wl-copy,
   xclip and xsel. Tests: `unit.trace` (the exact text of each way to copy, base64, OSC 52);
   `daemon.trace_tui` (`y` and a row drag through OSC 52 and the command).
+- Histograms (#637): `Metric` (self time, the span less the union of the children's; time in
+  all; allocated; peak; retained; allocations; runs; cache hits; waits), `metrics_of`,
+  `self_times`, `Groups`, and `histogram(tree, Grouping, within, order)` (by kind, file or
+  children; the tree's filter applies). The browser's histogram view has metric switches,
+  grouping, scope, sort, and a bar that opens its cells in the tree (`kind:`/`at:` filters,
+  or selection). The JSON summary has `histogram.by_kind`/`by_file`. The browser shows a
+  cell's source in the pane, an `S` column, and `p` copies `path:line:col`. Tests:
+  `unit.trace` (aggregation values, JSON, the view's frames against `histogram.golden`, its
+  hits and keys, the source line, column and copy; self time mutation-checked).
 - Source spans (#638): `engine::SourceSpan` on each `TraceEvent`, from a kind's `trace_span(const
   Db&, const Key&)`, which runs only in `Db::trace`. `Db::peek` reads an input, or a value
   verified at this revision, without a dependency. A file's and a unit's cells are the file; a
   function's cells (FunctionSourceQ to Codegen) are its definition's first to last token
-  (`item_span`, lines as diagnostics count them). The JSON `span`, `at:file[:line]` in the
+  (`item_span`, lines as diagnostics count them). The JSON `span`, `at:file[:line[:col]]` in the
   filter, and `span_text`/`span_start` are in place. Tests: `unit.trace` (the spans of a real
   build, cells without spans, text, filter, JSON; mutation-checked) and `daemon.trace` (spans
   across the socket).
