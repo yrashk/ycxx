@@ -117,7 +117,7 @@ namespace {
 enum class Marker {
   other, policy, use_policy, affine, linear, move_transfers, creates, observes, verified_observes, consumes, transfers,
   effect_set, effect_grade, effect_bound, trusted_effect_bound, effect_contract, trusted_effect_contract,
-  scoped_handler,
+  scoped_handler, capability_token, runtime_state,
 };
 
 struct Specialization {
@@ -139,6 +139,8 @@ Specialization marker(const sema::World& world, EntityId id) {
   const auto* primary = world.entities.find(specialized->templ);
   if (!primary || primary->kind != sema::EntityKind::class_template) return {};
   const auto name = world.ins.names.spelling(primary->name);
+  if (name == "token" && in_policy_namespace(world, primary->scope, "capabilities"))
+    return {Marker::capability_token, specialized};
   if (in_policy_namespace(world, primary->scope, "effects")) {
     if (name == "scoped_handler") return {Marker::scoped_handler, specialized};
     if (name == "set") return {Marker::effect_set, specialized};
@@ -160,6 +162,7 @@ Specialization marker(const sema::World& world, EntityId id) {
   if (name == "verified_observes") return {Marker::verified_observes, specialized};
   if (name == "consumes") return {Marker::consumes, specialized};
   if (name == "transfers") return {Marker::transfers, specialized};
+  if (name == "runtime_state") return {Marker::runtime_state, specialized};
   return {};
 }
 
@@ -291,6 +294,26 @@ bool compatible(const sema::World& world, const OwnershipPolicy& policy, EntityI
 }
 
 }  // namespace
+
+EntityId capability_token_issuer(const sema::World& world, QualType type) {
+  const auto [kind, token] = marker(world, class_entity(world, type));
+  if (kind != Marker::capability_token || token->args.size() != 2 ||
+      token->args[0].kind != ast::TemplateArgKind::type || token->args[1].kind != ast::TemplateArgKind::value ||
+      !world.types.is(token->args[1].type, ast::Builtin::unsigned_long_long))
+    return EntityId::none;
+  return class_entity(world, token->args[0].type);
+}
+
+bool is_affine_runtime_state(const sema::World& world, QualType type) {
+  const auto [kind, guard] = marker(world, class_entity(world, type));
+  if (kind != Marker::runtime_state || guard->args.size() != 1 ||
+      guard->args.front().kind != ast::TemplateArgKind::value ||
+      !world.types.is(guard->args.front().type, ast::Builtin::bool_) ||
+      !world.ins.values.is<ast::VInt>(guard->args.front().value))
+    return false;
+  const auto value = ast::int_bits(world.ins, guard->args.front().value);
+  return value.lo == 0 && value.hi == 0;
+}
 
 const sema::EntityRec* scoped_effect_handler(const sema::World& world, QualType type) {
   const auto specialization = marker(world, class_entity(world, type));

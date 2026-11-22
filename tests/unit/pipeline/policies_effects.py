@@ -236,6 +236,67 @@ with tempfile.TemporaryDirectory() as directory:
         "  return value != 42;", "  int again = checked_read(authority);\n  return again != 42;")),
         error="affine resource 'authority' may already have been consumed")
 
+    direct_token_source = """\
+        #include <ycxx/capabilities.hpp>
+        #include "effects.hpp"
+        namespace caps = ycxx::capabilities;
+        namespace own = ycxx::ownership;
+        struct Store;
+        using Token = caps::token<Store, 1>;
+        struct Store { static Token grant() noexcept; };
+        Token Store::grant() noexcept { return Token(1); }
+        Token acquire() noexcept { return Store::grant(); }
+        void release(Token&& token) noexcept { token.release(); }
+        int seen;
+        caps::scope_id selected;
+        void read_settings(const Token& token) noexcept { token.require<1>(selected); ++seen; }
+        void startup(const Token& token) noexcept { read_settings(token); read_settings(token); }
+        using Once = fx::set<fx::at_most<file::Read, 1>>;
+        using Twice = fx::set<fx::at_most<file::Read, 2>>;
+        using Policy = own::use_policy<own::affine<Token>,
+            own::creates<decltype(&acquire), &acquire>, own::consumes<decltype(&release), &release>,
+            own::observes<decltype(&read_settings), &read_settings>, own::observes<decltype(&startup), &startup>,
+            fx::trusted<decltype(&read_settings), &read_settings, Once>,
+            fx::bound<decltype(&startup), &startup, Twice>>;
+        int main(int argc, char**) {
+          selected = argc == 1 ? 1 : 2;
+          auto token = acquire();
+          startup(token);
+          release(static_cast<Token&&>(token));
+          return seen != 2;
+        }
+    """
+    direct_token = write("direct_token.cpp", direct_token_source)
+    syntax(direct_token)
+    syntax(write("direct_token_after_release.cpp", direct_token_source.replace(
+        "  return seen != 2;", "  startup(token);\n  return seen != 2;")),
+        error="affine resource 'token' may already have been consumed")
+    syntax(write("direct_issuer_call.cpp", direct_token_source.replace(
+        "auto token = acquire();", "auto token = Store::grant();")), error="registered factory")
+    syntax(write("issuer_forward.cpp", direct_token_source.replace(
+        "Token Store::grant() noexcept { return Token(1); }",
+        "Token&& existing() noexcept;\nToken Store::grant() noexcept { return Token(existing()); }")),
+        error="disallows resource returns")
+    issuer_source = direct_token_source.replace("Token Store::grant()", """\
+        struct Receipt { caps::scope_id scope; };
+        Receipt issue_receipt() noexcept { return {1}; }
+        Receipt outside{1};
+        caps::scope_id inspect_scope(const Receipt& receipt) noexcept { return receipt.scope; }
+        Token Store::grant()""") + """\
+        using ReceiptPolicy = own::use_policy<own::linear<Receipt>,
+            own::creates<decltype(&issue_receipt), &issue_receipt>,
+            own::observes<decltype(&inspect_scope), &inspect_scope>>;
+    """
+    syntax(write("issuer_scope_escape.cpp", issuer_source.replace("Token(1)", "Token(inspect_scope(outside))")),
+           error="an ownership protocol operation requires a named owner")
+    syntax(write("issuer_leaks_receipt.cpp", issuer_source.replace(
+        "{ return Token(1); }", "{ auto receipt = issue_receipt(); return Token(1); }")),
+        error="disallows resource returns")
+    syntax(write("unrelated_release.cpp", direct_token_source + """\
+        struct Unrelated { int state_; void release() noexcept { ++state_; } };
+        using Extra = own::use_policy<own::affine<Unrelated>>;
+    """), error="this resource use is outside the checked protocol")
+
     handler_source = """\
         #include "effects.hpp"
         #include <ycxx/effects/handler.hpp>
@@ -347,6 +408,9 @@ with tempfile.TemporaryDirectory() as directory:
     darwin_capability = root / "darwin-capability"
     invoke([*darwin, capability, "-o", darwin_capability])
     assert darwin_capability.read_bytes().startswith(bytes.fromhex("cffaedfe"))
+    darwin_direct_token = root / "darwin-direct-token"
+    invoke([*darwin, direct_token, "-o", darwin_direct_token])
+    assert darwin_direct_token.read_bytes().startswith(bytes.fromhex("cffaedfe"))
     darwin_objects = []
     for source in (handler_caller, handler_peer, unchecked_handler_peer):
         obj = source.with_suffix(".darwin.o")
@@ -462,6 +526,10 @@ with tempfile.TemporaryDirectory() as directory:
         invoke([*native, "-o", executable, *sources, annotations])
         subprocess.run([executable], check=True, timeout=10)
         invoke([*native, "-o", executable, capability])
+        subprocess.run([executable], check=True, timeout=10)
+        denied_scope = subprocess.run([executable, "wrong-scope"], timeout=10)
+        assert denied_scope.returncode == -signal.SIGILL, denied_scope
+        invoke([*native, "-o", executable, direct_token])
         subprocess.run([executable], check=True, timeout=10)
         denied_scope = subprocess.run([executable, "wrong-scope"], timeout=10)
         assert denied_scope.returncode == -signal.SIGILL, denied_scope

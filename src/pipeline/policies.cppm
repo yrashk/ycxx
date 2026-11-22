@@ -146,25 +146,30 @@ class OwnershipFlowBuilder {
     }
     if (operation != Effect::unknown || resource_lifetime_body()) return {};
     const auto signature = world_.types.rec(body_.type);
-    if (mentions_owner(signature.inner) || std::ranges::any_of(signature.params, [&](QualType param) {
+    const ast::Red root(world_.ins.ast, body_.tree);
+    const auto scope = capability_factory_scope(root, signature);
+    if ((mentions_owner(signature.inner) && !scope) || std::ranges::any_of(signature.params, [&](QualType param) {
           return mentions_owner(param) && ownership(param) == Ownership::ordinary;
         })) {
       flow_.entry = unsupported(0, "ownership checking requires by-value resource parameters and disallows resource returns");
       return std::move(flow_);
     }
-    ast::Red root(world_.ins.ast, body_.tree);
-    if (!has_owner_ && !owner_use(root)) return {};
+    capability_guard_ = capability_guard(signature);
+    const auto checked_root = scope.value_or(root);
+    if (!has_owner_ && !owner_use(checked_root)) return {};
 
     Scope parameters;
     for (ast::u32 i = 0; i < flow_.locals.size(); ++i)
       if (flow_.locals[i].parameter && flow_.locals[i].ownership != Ownership::ordinary)
         parameters.locals.push_back({i, false});
     const Point end = leave(&parameters, nullptr, Flow::exit, last_token(root));
-    flow_.entry = lower(root, end, {&parameters, nullptr});
+    flow_.entry = lower(checked_root, end, {&parameters, nullptr});
     return std::move(flow_);
   }
 
  private:
+  enum class CapabilityGuard { none, require, release };
+
   struct FieldSlot {
     std::optional<ast::u32> owner;
     std::vector<FieldSlot> children;
@@ -303,6 +308,76 @@ class OwnershipFlowBuilder {
            ownership(type) != Ownership::ordinary;
   }
 
+  // An issuer can return a freshly constructed token. The namespace-scope adapter
+  // still has to register the creation, and ownership checks still visit the scope argument.
+  std::optional<ast::Red> capability_factory_scope(const ast::Red& root, const sema::TypeRec& signature) const {
+    if (body_.this_type != QualType{} || ownership(signature.inner) != Ownership::affine ||
+        !signature.fn_noexcept || signature.variadic || !root.is<ast::Compound>() ||
+        !std::ranges::all_of(signature.params, [&](QualType type) { return observation_scalar(type); }))
+      return std::nullopt;
+    const auto issuer = capability_token_issuer(world_, signature.inner);
+    const auto* function = world_.entities.find(body_.function);
+    if (issuer == EntityId::none || !function || function->kind != sema::EntityKind::function || function->scope != issuer)
+      return std::nullopt;
+    const auto statements = root.ast().children(root.get<ast::Compound>().stmts);
+    if (statements.size() != 1 || !root.ast().is<ast::Return>(statements.front().id)) return std::nullopt;
+    const auto statement = at(root, statements.front());
+    const auto value = statement.get<ast::Return>().value;
+    if (value.id == ast::NodeId::none) return std::nullopt;
+    const auto result = unparenthesized(at(statement, value));
+    if (!result.is<ast::CtorCall>()) return std::nullopt;
+    const auto construct = result.get<ast::CtorCall>();
+    const auto* ctor = world_.entities.find(construct.ctor);
+    if (!ctor || ctor->kind != sema::EntityKind::constructor || ctor->scope != world_.types.class_of(signature.inner))
+      return std::nullopt;
+    const auto prototype = world_.types.rec(ctor->type);
+    const auto arguments = result.ast().children(construct.args);
+    if (prototype.params.size() != 1 || arguments.size() != 1 ||
+        !world_.types.is(prototype.params.front(), ast::Builtin::unsigned_long_long))
+      return std::nullopt;
+    return at(result, arguments.front());
+  }
+
+  CapabilityGuard capability_guard(const sema::TypeRec& signature) const {
+    if (body_.this_type == QualType{} || signature.variadic || signature.fn_ref != ast::RefQual::none ||
+        !world_.types.is_void(signature.inner))
+      return CapabilityGuard::none;
+    const auto type = world_.types.rec(body_.this_type).inner;
+    if (ownership(type) != Ownership::affine || capability_token_issuer(world_, type) == EntityId::none)
+      return CapabilityGuard::none;
+    const auto* function = world_.entities.find(body_.function);
+    if (!function || function->kind != sema::EntityKind::function || function->scope != world_.types.class_of(type))
+      return CapabilityGuard::none;
+    const auto name = world_.ins.names.spelling(function->name);
+    if (name == "release" && signature.fn_noexcept && ast::cv_of(type) == ast::Cv::none && signature.params.empty() &&
+        function->templ == EntityId::none)
+      return CapabilityGuard::release;
+    const auto* primary = world_.entities.find(function->templ);
+    if (name == "require" && ast::cv_of(type) == ast::Cv::const_ && signature.params.size() == 1 &&
+        world_.types.is(signature.params.front(), ast::Builtin::unsigned_long_long) &&
+        primary && primary->kind == sema::EntityKind::function_template && primary->scope == function->scope &&
+        function->args.size() == 1 && function->args.front().kind == ast::TemplateArgKind::value &&
+        world_.types.is(function->args.front().type, ast::Builtin::unsigned_long_long))
+      return CapabilityGuard::require;
+    return CapabilityGuard::none;
+  }
+
+  // The library guard sees its ordinary backing fields. Every other use of the
+  // token's receiver, including an escape or a call on the token itself, stays checked.
+  bool capability_guard_field(const ast::Red& node) const {
+    if (capability_guard_ == CapabilityGuard::none || !node.is<ast::Member>()) return false;
+    const auto member = node.get<ast::Member>();
+    if (!member.arrow || member.reference || !unparenthesized(at(node, member.object)).is<ast::This>() ||
+        mentions_owner(member.info.type))
+      return false;
+    const auto* field = world_.entities.find(member.member);
+    if (!field || field->scope != world_.types.class_of(world_.types.rec(body_.this_type).inner)) return false;
+    const auto name = world_.ins.names.spelling(field->name);
+    if (name == "state_") return is_affine_runtime_state(world_, member.info.type);
+    return capability_guard_ == CapabilityGuard::require && name == "scope_" &&
+           world_.types.is(member.info.type, ast::Builtin::unsigned_long_long);
+  }
+
   bool mentions_owner(QualType type) const {
     if (ownership(type) != Ownership::ordinary || ownership_record(type)) return true;
     const auto t = world_.types.rec(type);
@@ -316,6 +391,7 @@ class OwnershipFlowBuilder {
 
   // The red cursor distinguishes the source occurrences of shared AST nodes.
   std::optional<ast::u32> owner_use(const ast::Red& node) const {
+    if (capability_guard_field(node)) return std::nullopt;
     if (node.is<ast::ImplicitConversion>()) {
       const auto cast = node.get<ast::ImplicitConversion>();
       if (cast.conversion == ast::ConversionKind::lvalue_to_rvalue) {
@@ -850,6 +926,7 @@ class OwnershipFlowBuilder {
   OwnershipBody body_;
   Flow flow_;
   std::map<ast::u32, FieldSlot> field_slots_;
+  CapabilityGuard capability_guard_ = CapabilityGuard::none;
   bool has_owner_ = false;
   bool has_linear_ = false;
 };

@@ -169,11 +169,12 @@ moved-from token, or a released token. GCC, Clang, and YCXX enforce the same rig
 On Linux x86-64, a YCXX-built issuer can also return a token to a hosted GCC or Clang caller.
 [Indirect results #661](https://github.com/yrashk/ycxx/issues/661) · [Type friendship #689](https://github.com/yrashk/ycxx/issues/689)
 
-Wrap the token in your application's resource adapter to check capability use and ownership
-in one YCXX build. Register the wrapper as affine and declare the namespace functions that
-issue, observe, and release it. The observation calls the token's `require` guard and can
-return a copied value. A registered release consumes the wrapper, and YCXX rejects a later
-observation. The wrapper and its operations use the same C++ types in standard C++20 builds.
+Register the token itself or an application wrapper as affine to check capability use and
+ownership in one YCXX build. For direct registration, the issuer's static `noexcept` factory
+returns a fresh token directly, as in `return Token(scope);`. Declare the namespace functions
+that issue, observe, and release the token. The observation calls `require` and can return a
+copied value. The registered release consumes the token, and YCXX rejects a later observation.
+These declarations and runtime guards use the same C++ types in standard C++20 builds.
 
 ## Transitive effect bounds
 

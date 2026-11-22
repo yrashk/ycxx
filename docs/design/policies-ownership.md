@@ -65,6 +65,17 @@ direct calls to unique strong definitions in explicit objects. A forwarding obse
 its own guarantee and a requirement for the observer it calls. Exception handlers and jumps
 outside the supported loop control also receive an error.
 
+## Capability token ownership
+
+A directly registered affine `ycxx::capabilities::token<Issuer, Rights>` can be constructed by
+its issuer's static `noexcept` function with a single direct return from the scope constructor.
+The compiler checks the scope expression for ordinary resource use. Callers acquire the token
+through a namespace-scope adapter registered with `creates`, and observation and consumption use
+their registered adapters. The token's `require` and `release` definitions access their ordinary
+scope and runtime-state storage. Other uses of the token receiver still receive ownership checks.
+[Direct token lifecycle #799](https://github.com/yrashk/ycxx/issues/799) ·
+[Member template exception specifications #804](https://github.com/yrashk/ycxx/issues/804)
+
 ## Owning fields
 
 A local aggregate can hold multiple registered owners alongside arithmetic or enum fields and
