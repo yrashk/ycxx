@@ -468,6 +468,13 @@ public:
       if (auto a = bound_arg(*p)) return a->type;
       return p->type;
     }
+    // One the class's scope hides ([temp.local]/7): what it declares, a type or not.
+    if (declared_template_param(name)) {
+      const ClassRec* cr = class_rec(current_class);
+      return class_body_type(current_class, cr && cr->defined ? *cr : ClassRec{}, name, type_at,
+                             ClassBodyLookup::before_template_parameter, elaborated)
+          .type;
+    }
     // In a class template, its name without arguments is the injected-class-name: the current
     // instantiation, or in an instantiation the specialization ([temp.local]/1).
     if (current_class != EntityId::none) {
@@ -573,6 +580,7 @@ public:
       std::span<const BaseRec> bases = cr.bases;
       if ((qualified || before_parameter) && cls == naming && !cr.defined) bases = q_->defining_base_records(cls);
       for (const BaseRec& b : bases) {
+        if (before_parameter && b.dependent_in_pattern) continue;  // [temp.dep.general]: not searched
         if (const ClassRec* base = class_rec(b.cls)) {
           if (type_at) path.push_back({cls, b.access});
           visit(b.cls, *base);
@@ -2686,7 +2694,7 @@ public:
   u32 declare_local(NameId name, QualType type, u16 flags, u32 at, bool check = true) {
     // [temp.local]/6: a template parameter's name is not redeclared in its scope.
     // (Parameters are checked where the declarator is.)
-    if (!(flags & local_flag::parameter) && name != no_name() && template_param(name)) diag(at, Diag::redeclared_local, name);
+    if (!(flags & local_flag::parameter) && name != no_name() && declared_template_param(name)) diag(at, Diag::redeclared_local, name);
     if (name != no_name() && check) {
       bool clash = std::ranges::any_of(scopes_.back(), [&](auto& p) { return p.first == name; }) ||
                    std::ranges::any_of(block_types_, [&](auto& t) { return t.depth == scopes_.size() - 1 && t.name == name; });
@@ -2764,11 +2772,49 @@ public:
   // an instantiation the arguments bound to their parameters ([temp.inst]).
   std::vector<std::vector<ast::TemplateParamSema>> template_scopes;
   Bindings template_args;
-  const ast::TemplateParamSema* template_param(NameId name) const {
+  // The template parameter `name` declares in the template parameter scopes enclosing this point,
+  // whether or not a class member hides it: what [temp.local]/6 forbids redeclaring.
+  const ast::TemplateParamSema* declared_template_param(NameId name) const {
     for (auto s = template_scopes.rbegin(); s != template_scopes.rend(); ++s)
       for (const ast::TemplateParamSema& p : *s)
         if (p.name == name) return &p;  // an unnamed parameter's name is never looked up
     return nullptr;
+  }
+  // The template parameter unqualified lookup finds for `name`. The template parameter scope of a
+  // class template, or of a definition of its member outside it, is searched after the class's
+  // scope with its nondependent bases ([temp.local]/7), so a member of either hides a parameter of
+  // a head enclosing the class. A member template's own head, inside the class, is searched first.
+  const ast::TemplateParamSema* template_param(NameId name) {
+    const ast::TemplateParamSema* p = declared_template_param(name);
+    return p && p->depth < enclosing_class_heads() && class_scope_declares(name) ? nullptr : p;
+  }
+  // How many template-heads enclose the class whose scope this is, its own included: the depths of
+  // the parameters its scope is inside.
+  u16 enclosing_class_heads() const {
+    u16 n = 0;
+    for (EntityId c = current_class; c != EntityId::none;) {
+      const EntityRec& r = w_->entities.rec(c);
+      if (r.kind != EntityKind::class_) break;
+      if (r.templ != EntityId::none) ++n;
+      c = r.scope;
+    }
+    return n;
+  }
+  // Whether the class whose scope this is declares `name`, or one of its nondependent bases does,
+  // or names a base so ([class.member.lookup], [class.pre]/2: a base's injected-class-name).
+  bool class_scope_declares(NameId name) {
+    const ClassRec* cr = class_rec(current_class);
+    const bool defined = cr && cr->defined;
+    if (defined ? direct_member(current_class, *cr, name).has_value() : q_->earlier_member(name).has_value()) return true;
+    std::span<const BaseRec> bases = defined ? std::span<const BaseRec>(cr->bases) : q_->defining_base_records(current_class);
+    return std::ranges::any_of(bases, [&](const BaseRec& b) { return !b.dependent_in_pattern && base_declares(b.cls, name); });
+  }
+  bool base_declares(EntityId c, NameId name) {
+    if (w_->entities.rec(c).name == name) return true;
+    const ClassRec* cr = class_rec(c);
+    if (!cr) return false;
+    if (direct_member(c, *cr, name)) return true;
+    return std::ranges::any_of(cr->bases, [&](const BaseRec& b) { return base_declares(b.cls, name); });
   }
   // `TT<args>` of template template parameter `p` ([temp.names]): bound, the specialization of its
   // argument; otherwise a dependent type.
@@ -2797,7 +2843,7 @@ public:
     return types().dep_spec(p.depth, p.index, p.pack != 0, *full);
   }
   // The template template parameter `name` names here, if it does.
-  const ast::TemplateParamSema* template_template_param(NameId name) const {
+  const ast::TemplateParamSema* template_template_param(NameId name) {
     const ast::TemplateParamSema* p = template_param(name);
     return p && p->kind == ast::TemplateArgKind::template_ ? p : nullptr;
   }

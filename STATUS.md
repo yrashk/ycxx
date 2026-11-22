@@ -2129,6 +2129,20 @@ A type inherited from a nondependent base takes precedence over the template par
 ([temp.local]).
 [#689](https://github.com/yrashk/ycxx/issues/689)
 
+## Class scope before the template parameter scope (#800)
+
+Unqualified lookup in a class template, and in a definition of its member outside it, searches
+the class's scope with its nondependent bases before the template parameter scope of the class
+template or of that definition ([temp.local]/7). A member of a nondependent base, a base's
+injected-class-name, or in a definition outside the class a member of the class itself, hides a
+template parameter of the same name: in expressions, type names, nested-name-specifiers and
+template names (`Sema::template_param`). A member template's own parameters are still found
+first; a dependent base is not searched. Redeclaring a hidden parameter's name is still an error
+([temp.local]/6, `Sema::declared_template_param`).
+- Tests: `tests/own/temp-local/` (one run test, two reject tests).
+- Not yet: the enclosing classes of a nested class are not searched before the outer head,
+  since nested classes of class templates are not supported (#306).
+
 ## Templates, ζ step 7: static data members of class templates (#88, 2026-11-18)
 
 - A class template's static data members are declared with its other members. A specialization

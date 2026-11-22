@@ -3222,7 +3222,7 @@ private:
       const lex::Tok& t = r.tokens[j];
       if (t.kind == Tk::identifier) {
         NameId n = s_.world().ins.names.intern(r.name(t));
-        if (const ast::TemplateParamSema* p = s_.template_param(n)) {
+        if (const ast::TemplateParamSema* p = s_.declared_template_param(n)) {
           f = ast::mix(ast::mix(ast::mix(f, u64(0xA11)), u64(p->depth)), u64(p->index));
           continue;
         }
@@ -4475,7 +4475,7 @@ private:
     // The designated class need not be complete here. The declaration introduces no name.
     if (friend_at && ps_.is(Tk::identifier) && ps_.kind(1) == Tk::semi) {
       const NameId name = ps_.name_of(ps_.tok());
-      const auto* param = s_.template_param(name);
+      const auto* param = s_.declared_template_param(name);
       if (param && param->kind == ast::TemplateArgKind::type && !param->pack) {
         const auto type = s_.class_template_parameter_type(*param, name, ps_.pos());
         if (!type) return bad();
@@ -4629,7 +4629,7 @@ private:
       return false;
     }
     // [temp.local]/6: not a template parameter's name; [class.mem.general]: not the class's.
-    if (s_.template_param(name)) {
+    if (s_.declared_template_param(name)) {
       s_.diag(at, Diag::redeclared_local, name);
       return false;
     }
@@ -6144,12 +6144,12 @@ private:
         sem.template_params = b_.seq(std::span<const ast::TemplateParamSema>(s_.template_scopes.front()));
       } else if (template_) {
         // [temp.local]/6: neither the template nor its parameters may take a parameter's name.
-        if (s_.template_param(d.name)) {
+        if (s_.declared_template_param(d.name)) {
           s_.diag(d.name_at, Diag::redeclared_local, d.name);
           return false;
         }
         for (const parse::Param& prm : d.params)
-          if (prm.name != s_.no_name() && s_.template_param(prm.name)) {
+          if (prm.name != s_.no_name() && s_.declared_template_param(prm.name)) {
             s_.diag(prm.at, Diag::redeclared_local, prm.name);
             return false;
           }
