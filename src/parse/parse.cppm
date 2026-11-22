@@ -253,7 +253,8 @@ public:
   std::optional<EntityId> automatic_derived_vtable_key(EntityId cls) const;
   bool peer_pure_dispatch(EntityId cls) const;
   bool has_typed_dynamic_cast() const { return has_typed_dynamic_cast_; }
-  bool peer_typed_dynamic_cast(EntityId source, EntityId target) const;
+  enum class TypedCastRtti { unsupported, imported, keyless_base };
+  TypedCastRtti peer_typed_dynamic_cast(EntityId source, EntityId target) const;
   // A fieldless virtual root whose destructor may be emitted against a peer's table (#136).
   bool peer_root_destructor_producer(EntityId cls) const;
   bool peer_root_destructor_observer(EntityId function, EntityId cls) const;
@@ -7437,20 +7438,28 @@ std::optional<EntityId> Program::automatic_derived_vtable_key(EntityId cls) cons
   return key;
 }
 
-bool Program::peer_typed_dynamic_cast(EntityId source, EntityId target) const {
+Program::TypedCastRtti Program::peer_typed_dynamic_cast(EntityId source, EntityId target) const {
   using sema::PeerVirtualLayout;
   const auto* base = classes_.find(source);
   const auto* derived = classes_.find(target);
+  if (w_->target.triple != ast::x86_64_linux.triple || !base || !derived || r_->has_clang_attribute_pragma)
+    return TypedCastRtti::unsupported;
+  // The automatic-primary-base certificate covers the pure base, the public edge and the
+  // directly declared override. A complete-unit check must still leave the key to a peer.
+  if (derived->peer_automatic_primary_base == source) {
+    const auto key = automatic_derived_vtable_key(target);
+    return key && *key == EntityId::none ? TypedCastRtti::keyless_base : TypedCastRtti::unsupported;
+  }
   // The primary-base profile establishes public nonvirtual inheritance at offset zero.
-  if (!base || !derived || base->peer_virtual_layout != PeerVirtualLayout::root ||
+  if (base->peer_virtual_layout != PeerVirtualLayout::root ||
       derived->peer_virtual_layout != PeerVirtualLayout::primary_base || derived->bases.size() != 1 ||
-      derived->bases.front().cls != source || r_->has_clang_attribute_pragma)
-    return false;
+      derived->bases.front().cls != source)
+    return TypedCastRtti::unsupported;
   const auto base_key = sema::borrowed_dynamic_cast_key(*base, w_->types);
   const auto derived_key = sema::borrowed_dynamic_cast_key(*derived, w_->types);
-  if (base_key == EntityId::none || derived_key == EntityId::none) return false;
+  if (base_key == EntityId::none || derived_key == EntityId::none) return TypedCastRtti::unsupported;
   const auto override = std::ranges::find(derived->members, derived_key, &sema::MemberDeclRec::entity);
-  if (override->overridden_virtual != base_key) return false;
+  if (override->overridden_virtual != base_key) return TypedCastRtti::unsupported;
 
   const auto peer_owned = [&](EntityId cls, const sema::ClassRec& record, EntityId key) {
     const auto& owner = w_->entities.rec(cls);
@@ -7469,7 +7478,8 @@ bool Program::peer_typed_dynamic_cast(EntityId source, EntityId target) const {
     return !(decl.flags & excluded) && !decl.hidden_visibility &&
            items_->items[item].kind == ItemKind::declaration && !in_attributed_namespace(item);
   };
-  return peer_owned(source, *base, base_key) && peer_owned(target, *derived, derived_key);
+  return peer_owned(source, *base, base_key) && peer_owned(target, *derived, derived_key)
+             ? TypedCastRtti::imported : TypedCastRtti::unsupported;
 }
 
 bool Program::peer_pure_dispatch(EntityId cls) const {
