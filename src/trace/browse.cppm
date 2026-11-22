@@ -16,6 +16,7 @@ export module ycxx.trace:browse;
 import std;
 import :model;
 import :view;
+import :clipboard;
 
 export namespace ycxx::trace {
 
@@ -267,15 +268,18 @@ class Terminal {
 };
 
 // The clipboard beyond the terminal (#636). OSC 52 reaches it from anywhere a terminal supports it
-// (over SSH too), but some terminals (Terminal.app) ignore it, so a local session also runs a
-// command: `YCXX_CLIPBOARD` when set (`osc52`: none), else the first of pbcopy, wl-copy (Wayland),
-// xclip and xsel (X) on the PATH. Over SSH none runs: it would copy on the remote host.
+// (over SSH too), but some terminals (Terminal.app) ignore it, so a local session also writes the
+// system's clipboard: `YCXX_CLIPBOARD` when set (a command; `osc52`: none); else the native one
+// where there is one (macOS: NSPasteboard, `:clipboard`); else the first of pbcopy, wl-copy
+// (Wayland), xclip and xsel (X) on the PATH (Linux until #730). Over SSH none runs: it would copy
+// on the remote host.
+bool over_ssh() { return std::getenv("SSH_CONNECTION") || std::getenv("SSH_TTY"); }
 std::optional<std::string> clipboard_command() {
   if (const char* c = std::getenv("YCXX_CLIPBOARD"); c && *c) {
     if (std::string_view(c) == "osc52") return std::nullopt;
     return std::string(c);
   }
-  if (std::getenv("SSH_CONNECTION") || std::getenv("SSH_TTY")) return std::nullopt;
+  if (over_ssh()) return std::nullopt;
   const auto found = [](std::string_view name) {
     const char* path = std::getenv("PATH");
     for (auto dir : std::string_view(path ? path : "/usr/bin:/bin") | std::views::split(':')) {
@@ -292,6 +296,15 @@ std::optional<std::string> clipboard_command() {
   return std::nullopt;
 }
 // Runs `command` under /bin/sh with `text` on its standard input; true if it exits 0 within 2 s.
+bool run_clipboard(const std::string& command, std::string_view text);
+// Writes the local clipboard, as above; says how (`pasteboard`, `pbcopy`), or nothing.
+std::optional<std::string> copy_locally(std::string_view text) {
+  const char* given = std::getenv("YCXX_CLIPBOARD");
+  if (!(given && *given) && !over_ssh() && !native_clipboard.empty() && pasteboard_write(text)) return std::string(native_clipboard);
+  const std::optional<std::string> command = clipboard_command();
+  if (command && run_clipboard(*command, text)) return command->substr(0, command->find(' '));
+  return std::nullopt;
+}
 bool run_clipboard(const std::string& command, std::string_view text) {
   int in[2];
   if (::pipe(in) != 0) return false;
@@ -389,9 +402,8 @@ bool browse(Tree& tree, Feed* feed) {
     if (a.quit) return true;
     if (a.copy) {
       term.write(osc52(*a.copy, std::getenv("TMUX") != nullptr));
-      const std::optional<std::string> command = clipboard_command();
-      const bool ran = command && run_clipboard(*command, *a.copy);
-      b.note(std::format("{} (OSC 52{})", b.notice(), ran ? ", " + command->substr(0, command->find(' ')) : std::string()));
+      const std::optional<std::string> how = copy_locally(*a.copy);
+      b.note(std::format("{} (OSC 52{})", b.notice(), how ? ", " + *how : std::string()));
     }
   }
 }

@@ -140,11 +140,13 @@ terminal (`src/trace/browse.cppm`, whose model is `src/trace/view.cppm`). `?` li
     - Inside tmux it also writes tmux's passthrough form. tmux itself takes an application's
       OSC 52 only with `set -g set-clipboard on`, and passes the passthrough form on only with
       `set -g allow-passthrough on`. Its defaults (`external`, `off`) let neither through.
-    - A local session (no `SSH_CONNECTION` or `SSH_TTY`) also runs the first of `pbcopy`,
-      `wl-copy` (Wayland), `xclip` and `xsel` (X) on the `PATH`. That covers Terminal.app and
-      tmux's defaults.
-    - `YCXX_CLIPBOARD` replaces that command (a shell command that reads the text on its
-      standard input). `YCXX_CLIPBOARD=osc52` turns the command off.
+    - A local session (no `SSH_CONNECTION` or `SSH_TTY`) also writes the system's clipboard
+      itself. On macOS that is the pasteboard, written directly (NSPasteboard), with no other
+      program involved. On Linux it runs the first of `wl-copy` (Wayland), `xclip` and `xsel` (X)
+      on the `PATH`; a native clipboard there awaits a decision (#730). This covers Terminal.app
+      and tmux's defaults.
+    - `YCXX_CLIPBOARD` replaces that with a command (a shell command that reads the text on its
+      standard input). `YCXX_CLIPBOARD=osc52` turns it off.
 - **Leaving.** `q` gives the terminal back as it was: the main screen, the cursor, autowrap on,
   mouse reports off, cooked mode. So do `SIGTERM`, `SIGHUP`, `SIGINT` and `SIGQUIT`, and a crash
   (`SIGABRT`, `SIGSEGV`, `SIGBUS`, `SIGFPE`, `SIGILL`); after restoring, the signal takes its

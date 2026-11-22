@@ -2196,9 +2196,12 @@ request it serves.
 - Copy (#636): `y` copies the cell (the pane's text, unwrapped) and `Y` its subtree (stream lines
   with times and memory). A drag over rows or pane text, or `V` with j/k, selects, and the copy
   happens on release or `y`. `Action::copy` carries the text. `:browse` writes OSC 52 (plus
-  tmux's passthrough form) and, locally, runs `YCXX_CLIPBOARD` or the first of pbcopy, wl-copy,
-  xclip and xsel. Tests: `unit.trace` (the exact text of each way to copy, base64, OSC 52);
-  `daemon.trace_tui` (`y` and a row drag through OSC 52 and the command).
+  tmux's passthrough form) and, locally, runs `YCXX_CLIPBOARD`, or writes the native clipboard
+  (`:clipboard`: macOS NSPasteboard through the Objective-C runtime's C entry points, libobjc and
+  AppKit loaded at the first copy), or runs the first of wl-copy, xclip and xsel (Linux, until
+  #730). Tests: `unit.trace` (the exact text of each way to copy, base64, OSC 52, a named
+  pasteboard written and read back on macOS); `daemon.trace_tui` (`y` and a row drag through
+  OSC 52 and the command).
 - Source spans (#638): `engine::SourceSpan` on each `TraceEvent`, from a kind's `trace_span(const
   Db&, const Key&)`, which runs only in `Db::trace`. `Db::peek` reads an input, or a value
   verified at this revision, without a dependency. A file's and a unit's cells are the file; a
