@@ -2797,6 +2797,15 @@ and runtime integration with ycxx's own linker remain under [#89]. See the
 - The mixed Linux object checks distinguish callback overloads with the Itanium `Do` type
   encoding. Dependent exception specifications remain tracked in [#219](https://github.com/yrashk/ycxx/issues/219).
 
+## Unary noexcept on calls and constructions (#729)
+
+`noexcept(expression)` is a constant `bool` and leaves its operand unevaluated
+([expr.unary.noexcept]). The compiler checks the selected function or constructor,
+argument operations, and temporary destruction ([except.spec]). A construction
+in a function template body can be checked after substitution. Dependent
+member-template exception specifications are tracked in
+[#713](https://github.com/yrashk/ycxx/issues/713).
+
 ## The address of an overload set, ι (#313, #337, 2026-11-19)
 
 - A pointer or reference target picks a free or static member function by its function type
