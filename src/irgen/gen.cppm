@@ -1484,7 +1484,7 @@ class Gen {
           op == ast::UnaryOp::post_dec)
         return 2;
     }
-    int e = 0;
+    int e = is<ast::DynamicCastVoid>(a) ? 1 : 0;
     if (is<ast::ImplicitConversion>(a)) {
       auto c = get<ast::ImplicitConversion>(a);
       if (c.conversion == ast::ConversionKind::lvalue_to_rvalue && !is_nullptr(c.info.type)) e = 1;
@@ -1521,6 +1521,7 @@ class Gen {
     if (is<ast::Paren>(a)) return rvalue_or_void(child(a, get<ast::Paren>(a).operand));
     if (is<ast::DefaultArg>(a)) return pinned([&] { return rvalue_or_void(child(a, get<ast::DefaultArg>(a).arg)); });
     if (is<ast::ImplicitConversion>(a)) return conversion(a);
+    if (is<ast::DynamicCastVoid>(a)) return dynamic_cast_void(a);
     if (is<ast::Unary>(a)) return unary(a);
     if (is<ast::Binary>(a)) return binary(a);
     if (is<ast::OrderedBinary>(a)) return ordered(a);
@@ -1587,6 +1588,24 @@ class Gen {
     if (is<ast::Conditional>(a)) return conditional(a, false).value;
     if (is<ast::ValueInit>(a) && cls(t) != TypeClass::record && cls(t) != TypeClass::array) return zero(t);
     unsupported(a);
+  }
+
+  ValueId dynamic_cast_void(At a) {
+    const auto cast = get<ast::DynamicCastVoid>(a);
+    const At operand = child(a, cast.operand);
+    const ValueId object = rvalue(operand);
+    const ValueId nonnull = pure(ir::Op::tobool, facts_.bool_type(), {object});
+    const auto result = cast.info.type;
+    const ValueId null = constant(result, facts_.null_constant(result));
+    const ir::BlockId adjust = new_block({info(operand).type}), join = new_block({result});
+    cond_br(nonnull, edge(adjust, {object}), edge(join, {null}));
+    enter(adjust);
+    ir::Ty results[] = {vty(result)};
+    ValueId operands[] = {state_, b_.param(adjust, 1)};
+    const ValueId most_derived = b_.result(emit(ir::Op::rtti__most_derived_addr, results, operands));
+    br(join, {most_derived});
+    enter(join);
+    return b_.param(join, 1);
   }
 
   ValueId string_length(ast::QualType size, ast::QualType pointer, ValueId start) {

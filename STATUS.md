@@ -2820,6 +2820,20 @@ What the process allocates, attributed to the engine's cells, in the trace and t
   [#489](https://github.com/yrashk/ycxx/issues/489)
   [Design](docs/design/ordinary-virtual-declarations.md)
 
+## Borrowed `dynamic_cast` to `cv void*` (#294)
+
+On Linux x86-64, `dynamic_cast<cv void*>(p)` accepts an ordinary complete polymorphic root
+from the existing peer consumer profiles. The result is a pointer prvalue and retains every
+cv-qualifier of the source pointee. The cast evaluates the pointer once and a typed null
+operand yields a null result, including in constant evaluation. On the non-null path, the
+vtable address point supplies the signed offset-to-top. Adding that byte offset to the
+incoming subobject address recovers the address of the most-derived object, including when
+the peer passes a secondary base. The cast introduces no RTTI symbols or calls.
+Typed runtime casts, `typeid`, non-null constant evaluation, and Darwin parity are tracked
+in [#294](https://github.com/yrashk/ycxx/issues/294) and [#659](https://github.com/yrashk/ycxx/issues/659).
+[[expr.dynamic.cast]](https://eel.is/c++draft/expr.dynamic.cast) ·
+[Itanium ABI §2.5.2](https://itanium-cxx-abi.github.io/cxx-abi/abi.html#vtable-components)
+
 ## Deduced polymorphic lambda results (#569)
 
 - A nongeneric lambda with a deduced value result can directly return a parenthesized
