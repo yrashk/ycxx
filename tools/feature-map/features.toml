@@ -1088,8 +1088,8 @@ clauses = ['dcl.fct', 'expr.call', 'over.ics.ellipsis']
 std = 'C++98'
 detect = ',\s*\.\.\.\s*\)|\bva_(?:start|arg|list)\b'
 status = 'partial'
-issues = [196, 399]
-note = 'Linux x86-64 supports direct variadic calls and ordinary free definitions with scalar INTEGER and SSE values. Unnamed `float` promotes to `double`, and `va_arg` retrieves integers, pointers and `double`. Indirect scalar INTEGER calls work. Indirect floating calls and aggregate variadic classification remain in #196.'
+issues = [196, 399, 647]
+note = 'Apple arm64 defines variadic functions with integer, pointer and `double` `va_arg` (#647). Linux x86-64 supports direct variadic calls and ordinary free definitions with scalar INTEGER and SSE values. Unnamed `float` promotes to `double`, and `va_arg` retrieves integers, pointers and `double`. Indirect scalar INTEGER calls work. Indirect floating calls and aggregate variadic classification remain in #196.'
 probe = '''
 #include <cstdarg>
 int sum(int n, ...) { std::va_list ap; va_start(ap); int s = 0; for (int i = 0; i < n; ++i) s += va_arg(ap, int); va_end(ap); return s; }

@@ -1508,7 +1508,7 @@ private:
         return number_token(t, 0);
       }
       std::string_view name = s_->spellings.name(operand[0].tok.payload);
-      const bool variadic = s_->config.target->va_list == ast::VaList::sysv_x86_64 && lex::va_builtin(name);
+      const bool variadic = lex::va_builtin(name).has_value();
       const auto* function = lex::builtin_function(name);
       const bool ordinary = function && (function->type != 'l' ||
           ast::computes((*s_->config.target)[ast::Builtin::long_double].format));
