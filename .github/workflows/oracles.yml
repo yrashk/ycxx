@@ -96,14 +96,20 @@ jobs:
           oracle: 'true'
 
       - name: Own suite with Clang 23 (tools/test --cxx clang core own)
-        run: tools/test --cxx clang --require-oracles -q core own
+        run: |
+          clang_status=0
+          tools/test --cxx clang --require-oracles -q core own || clang_status=$?
+          if [ -d build/test-logs ]; then
+            mv build/test-logs build/test-logs-clang
+          fi
+          exit "$clang_status"
 
       - name: Clang test reports
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: oracle-test-logs-linux-clang
-          path: build/test-logs/
+          path: build/test-logs-clang/
           if-no-files-found: ignore
 
       - name: Own suite with GCC 16 (tools/test --cxx gcc core own)
