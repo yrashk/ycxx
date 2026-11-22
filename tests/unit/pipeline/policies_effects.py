@@ -244,6 +244,8 @@ with tempfile.TemporaryDirectory() as directory:
         struct Store;
         using Token = caps::token<Store, 1>;
         struct Store { static Token grant() noexcept; };
+        const Token& authority_for_query() noexcept;
+        static_assert(noexcept(authority_for_query().require<1>(1)));
         Token Store::grant() noexcept { return Token(1); }
         Token acquire() noexcept { return Store::grant(); }
         void release(Token&& token) noexcept { token.release(); }
