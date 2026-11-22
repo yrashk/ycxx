@@ -147,6 +147,8 @@ struct TTransform {
 // declared return type, or a variable's before its initializer is seen.
 struct TAuto {
   u8 decltype_auto;
+  EntityId concept_ = EntityId::none;
+  SeqId<TemplateArg> args{};  // canonical arguments written after the concept name
 };
 
 // `TT<args>` where TT is a template template parameter, by position ([temp.param], [temp.dep.type]):

@@ -489,26 +489,31 @@ public:
           if (auto r = nested_member(b, name)) return r->first.type;
       }
     }
-    std::optional<ast::DeclSema> found;
-    for (auto p = own.rbegin(); p != own.rend() && !found; ++p)
-      if (p->name == name) found = p->sema;
-    if (!found)
+    // BOOTSTRAP: -Wmaybe-uninitialized: a value and a flag, not std::optional. At -O3 GCC 16.2
+    // reports the optional's payload as possibly uninitialized after the `!found` checks (#748).
+    // Without the bug: `std::optional<ast::DeclSema> found;`, `found = s;`, `found->kind`.
+    ast::DeclSema found{};
+    bool has_found = false;
+    const auto take = [&](const ast::DeclSema& s) { found = s, has_found = true; };
+    for (auto p = own.rbegin(); p != own.rend() && !has_found; ++p)
+      if (p->name == name) take(p->sema);
+    if (!has_found)
       for (DeclId d : q_->visible_decls(name, directives())) {
         ast::DeclSema s = q_->decl_sema(d);
         if (s.entity == EntityId::none || is_special(s)) continue;
-        if (is_type(s.kind) || !elaborated) found = s;
+        if (is_type(s.kind) || !elaborated) take(s);
         if (!elaborated && !is_type(s.kind)) break;
       }
     if (member_introduction && member_introduction->name == name &&
-        (!found || elaborated || w_->entities.rec(found->entity).scope !=
-                                    w_->entities.rec(member_introduction->sema.entity).scope))
-      found = member_introduction->sema;
-    if (!found && !elaborated && aliases) return builtin_type_name(name);
-    if (!found || !is_type(found->kind)) return std::nullopt;
-    if (found->kind == ast::DeclKind::type_alias && !aliases) return std::nullopt;
+        (!has_found || elaborated || w_->entities.rec(found.entity).scope !=
+                                         w_->entities.rec(member_introduction->sema.entity).scope))
+      take(member_introduction->sema);
+    if (!has_found && !elaborated && aliases) return builtin_type_name(name);
+    if (!has_found || !is_type(found.kind)) return std::nullopt;
+    if (found.kind == ast::DeclKind::type_alias && !aliases) return std::nullopt;
     // A class template's name needs its arguments outside the template ([temp.names]).
-    if (found->flags & decl_flag::template_) return std::nullopt;
-    return found->type;
+    if (found.flags & decl_flag::template_) return std::nullopt;
+    return found.type;
   }
   static bool is_type(ast::DeclKind k) {
     return k == ast::DeclKind::class_ || k == ast::DeclKind::enum_ || k == ast::DeclKind::type_alias;
@@ -906,6 +911,60 @@ public:
   };
   // The concept unqualified lookup finds for `name`.
   std::optional<ast::DeclSema> concept_named(NameId name) { return named_template(name, ast::DeclKind::concept_); }
+  // An ordinary unqualified type-constraint on a placeholder ([basic.lookup.unqual], [temp.param]).
+  std::optional<EntityId> placeholder_concept(NameId name, u32 at) {
+    auto not_concept = [&]() -> std::optional<EntityId> {
+      diag(at, Diag::not_a_concept, name);
+      return std::nullopt;
+    };
+    auto select = [&](std::span<const ast::DeclSema> decls) -> std::optional<EntityId> {
+      auto candidate = std::ranges::find(decls, ast::DeclKind::concept_, &ast::DeclSema::kind);
+      if (candidate == decls.end()) return not_concept();
+      if (std::ranges::any_of(decls, [&](const ast::DeclSema& d) { return d.entity != candidate->entity; })) {
+        diag(at, Diag::ambiguous_name, name);
+        return std::nullopt;
+      }
+      if (ins().seqs.size(candidate->template_params) == 0 ||
+          ins().seqs.at(candidate->template_params, 0).kind != ast::TemplateArgKind::type) {
+        diag(at, Diag::not_a_type_concept, name);
+        return std::nullopt;
+      }
+      return candidate->entity;
+    };
+    for (std::size_t depth = scopes_.size(); depth-- > 0;) {
+      auto names_here = [=](const auto& binding) { return binding.depth == depth && binding.name == name; };
+      if (std::ranges::any_of(scopes_[depth], [&](const auto& local) { return local.first == name; }) ||
+          std::ranges::any_of(block_types_, names_here) || std::ranges::any_of(block_aliases_, names_here))
+        return not_concept();
+      for (const auto& [scope, e] : using_enums_) {
+        if (scope != depth) continue;
+        if (const EnumRec* record = enum_rec(e); record &&
+            std::ranges::any_of(record->enumerators, [&](const EnumeratorRec& x) { return x.name == name; }))
+          return not_concept();
+      }
+      std::vector<ast::DeclSema> from_usings;
+      for (const BlockUsing& u : block_usings_)
+        if (names_here(u)) from_usings.insert(from_usings.end(), u.decls.begin(), u.decls.end());
+      if (!from_usings.empty()) return select(from_usings);
+    }
+    if (template_param(name) || (namespace_lambda && namespace_lambda->name == name)) return not_concept();
+    for (EntityId c = current_class; c != EntityId::none;) {
+      const EntityRec& record = w_->entities.rec(c);
+      if (record.kind != EntityKind::class_ && record.kind != EntityKind::class_template) break;
+      if (record.name == name || find_member(c, name, /*unqualified=*/true) ||
+          (c == current_class && q_->earlier_member(name)))
+        return not_concept();
+      c = record.scope;
+    }
+    for (auto d = own.rbegin(); d != own.rend(); ++d)
+      if (d->name == name) return select(std::span{&d->sema, 1});
+    std::vector<ast::DeclSema> decls;
+    for (DeclId id : q_->visible_decls(name, directives())) {
+      auto d = q_->decl_sema(id);
+      if (d.entity != EntityId::none && !is_special(d)) decls.push_back(d);
+    }
+    return select(decls);
+  }
   // The type-constraints of the template-head being read, in normal form ([temp.constr.decl]/3).
   std::vector<ConstId> head_constraints;
   // An atomic constraint ([temp.constr.atomic]): the expression at [begin, end) of this part, whose
@@ -950,6 +1009,35 @@ public:
     if (!full) return std::nullopt;
     std::vector<ast::TemplateParamSema> params = ins().seqs.elements(c.template_params);
     return templates().substitute_constraint(c.constraints, Bindings::of(params.empty() ? 0 : params[0].depth, *full));
+  }
+  // Check the immediately-declared constraint on the type deduced for the placeholder itself
+  // ([dcl.type.auto.deduct], [temp.param]), before publishing the completed declarator type.
+  bool check_placeholder_constraint(QualType placeholder, QualType deduced, u32 at) {
+    const TypeRec p = types().rec(placeholder);
+    const NameId name = w_->entities.rec(p.entity).name;
+    auto unresolved = [&] {
+      diag(at, Diag::placeholder_constraint_unresolved, name);
+      return false;
+    };
+    if (types().is_dependent(deduced)) return unresolved();
+    auto c = q_->template_decl(p.entity);
+    if (!c) return unresolved();
+    // BOOTSTRAP: -Warray-bounds: reserved and appended, as `parameters` in `member_call` (#748).
+    // Without the bug: `std::vector<TemplateArg> args{templates().type_arg(deduced)};` and
+    // `args.insert(args.end(), tail.begin(), tail.end());`
+    const auto tail = ins().seqs.elements(p.args);
+    std::vector<TemplateArg> args;
+    args.reserve(1 + tail.size());
+    args.push_back(templates().type_arg(deduced));
+    args.append_range(tail);
+    const std::size_t before = diag_count();
+    auto nf = concept_constraint(*c, args, at);
+    if (!nf) return has_error_since(before) ? false : unresolved();
+    auto sat = q_->satisfied(*nf);
+    if (q_->satisfaction_failed(*nf)) return false;
+    if (!sat) return unresolved();
+    if (!*sat) diag(at, Diag::constraints_not_satisfied, name);
+    return *sat;
   }
   // A concept-id as an expression ([temp.names]/8): whether it is satisfied, a `bool` prvalue;
   // value-dependent while its arguments are.
@@ -2113,12 +2201,12 @@ public:
     TypeRec r = types().rec(t);
     if (r.kind == TypeKind::array) return has_member_inits(r.inner);
     if (r.kind != TypeKind::class_) return false;
-    if (const ClassRec* c = class_rec(r.entity); c && c->user_ctors) return true;
     if (const ClassRec* c = class_rec(r.entity)) {
+      if (c->user_ctors) return true;
       for (const BaseRec& b : c->bases)
         if (has_member_inits(types().class_type(b.cls))) return true;
       for (const FieldRec& f : c->fields)
-        if (f.init != ConstId::none || f.dmi || has_member_inits(f.type)) return true;
+        if (f.init != ConstId::none || f.dmi || (!c->union_ && has_member_inits(f.type))) return true;
     }
     return false;
   }
@@ -2287,10 +2375,21 @@ public:
     std::vector<Element> elems = elements(t);
     std::vector<Ex> out;
     const bool replay = replay_default_members_ && can_replay_default_members(t);
+    const bool union_ = is_union(t);
+    const auto omitted = [&](const Element& element, u32 at) {
+      // [dcl.init.aggr]: copy-list-initialize an omitted union element and the
+      // first variant of an empty union list in the absence of a default member initializer.
+      if (element.init == ConstId::none && element.default_member == EntityId::none &&
+          (union_ || (is_union(element.type) && is_aggregate(element.type))))
+        return list_init(element.type, Braced{at, at, {}}, Construction::copy_list);
+      return element_default(element, true, replay, at, at);
+    };
     bool elided = begin != b.begin || end != b.end;
     for (std::size_t i = 0; i < elems.size(); ++i) {
+      if (union_ && !check_destructor_access(types().innermost_array_element(elems[i].type), begin))
+        return fail;
       if (next == b.clauses.size()) {
-        out.push_back(element_default(elems[i], true, replay, end, end));
+        out.push_back(omitted(elems[i], end));
         if (!out.back().ok()) return fail;
         continue;
       }
@@ -2300,7 +2399,7 @@ public:
         // skipped are initialized as if there were no initializer.
         std::size_t j = i;
         while (j < elems.size() && elems[j].name != c.designator) ++j;
-        if (j == elems.size() && is_union(t) && !elided) {
+        if (j == elems.size() && union_ && !elided) {
           diag(c.begin, Diag::not_supported, lex::Tk::period);  // a union's member other than its first
           return fail;
         }
@@ -2309,7 +2408,7 @@ public:
           return fail;
         }
         for (; i < j; ++i) {
-          out.push_back(element_default(elems[i], true, replay, c.begin, c.begin));
+          out.push_back(omitted(elems[i], c.begin));
           if (!out.back().ok()) return fail;
         }
       }
@@ -3131,7 +3230,7 @@ public:
   Ex captured(u32 ctx, u32 key, NameId name, u32 begin, u32 end) {
     const ast::LocalRec* local = nullptr;
     if (!(key & capture_bit)) local = ctx == lambdas_.size() ? &locals_[key] : &lambdas_[ctx].outer_locals[key];
-    if (local && (local->flags & ast::local_flag::structured_binding) && types().has_placeholder(local->type)) {
+    if (local && types().has_placeholder(local->type)) {
       diag(begin, Diag::auto_used_in_initializer, name);
       return {NodeId::none, begin, end};
     }
@@ -3919,7 +4018,9 @@ public:
   // The switch statements being analysed, innermost last ([stmt.switch]): the condition's type
   // after promotion, the variables in scope at the jump to a label, and the labels so far.
   struct SwitchScope {
-    QualType type;
+    // Meaningful only when not `dependent`. Initialized anyway: the scope is copied into
+    // `switches`, and copying an indeterminate value is erroneous ([basic.indet]; #726).
+    QualType type{};
     bool dependent = false;
     std::vector<u32> initialized;
     std::vector<ConstId> values;
@@ -4618,8 +4719,14 @@ public:
       return node(ast::AssignmentCall{info, fe, children->front(), at(o, begin)}, begin, end, info);
     }
     if (virtual_slot) {
-      std::vector<QualType> parameters{o.type()};
-      parameters.insert(parameters.end(), fr.params.begin(), fr.params.end());
+      // BOOTSTRAP: -Warray-bounds: reserved and appended. At -O3 GCC 16.2 reports libycxx's
+      // in-place insert after a one-element vector as writing past its allocation (#748).
+      // Without the bug: `std::vector<QualType> parameters{o.type()};` and
+      // `parameters.insert(parameters.end(), fr.params.begin(), fr.params.end());`
+      std::vector<QualType> parameters;
+      parameters.reserve(1 + fr.params.size());
+      parameters.push_back(o.type());
+      parameters.append_range(fr.params);
       const auto pointer = types().pointer(types().function(fr.inner, parameters, false, LangLinkage::cxx));
       return node(ast::VirtualMemberCall{info, pointer, *virtual_slot, at(o, begin), b_->list(*children)}, begin, end, info);
     }
@@ -5359,6 +5466,73 @@ public:
     return result;
   }
 
+  // [expr.unary.noexcept], [except.spec]: inspect the selected operations and their operands
+  // without interpreting the expression or requiring the bodies of its callees.
+  Ex unary_noexcept(Ex operand, u32 begin, u32 end) {
+    Ex fail{NodeId::none, begin, end};
+    if (!operand.ok()) return fail;
+    if (dependent(operand)) return dependent_node({operand}, begin, end, builtin(Builtin::bool_));
+    const auto before = diag_count();
+    auto destructor_throwing = [&](QualType type, u32 at) {
+      if (!types().is_class(type) || !require_complete(type, at) || !check_destructor_access(type, at)) return false;
+      const ClassRec* record = class_rec(types().class_of(type));
+      return record && !record->destructor_noexcept.value_or(record->destructor == EntityId::none);
+    };
+    bool result_throws = !operand.glvalue() && destructor_throwing(operand.type(), operand.begin);
+
+    auto expression_info = [&](NodeId id) {
+      ExprInfo info{};
+      ast::dispatch<ast::Nodes>(ast::kind_of(id), [&]<class T>(std::type_identity<T>) {
+        if constexpr (requires(T value) { value.info; }) info = ins().ast.get<T>(id).info;
+      });
+      return info;
+    };
+    auto discarded_temporary_throwing = [&](Child child, u32 offset) {
+      const auto info = expression_info(child.id);
+      return info.category == ValueCategory::prvalue && destructor_throwing(info.type, offset + child.at);
+    };
+    auto function_throwing = [&](EntityId function) {
+      const auto written = q_->written_member(function);
+      const QualType type = written ? written->type : w_->entities.rec(function).type;
+      return !types().rec(type).fn_noexcept;
+    };
+    auto operation_throwing = [&](const ast::Red& node) {
+      if (node.is<ast::Throw>()) return true;
+      if (node.is<ast::Call>()) {
+        const auto call = node.get<ast::Call>();
+        if (call.function != EntityId::none) return function_throwing(call.function);
+        QualType type = expression_info(call.callee.id).type;
+        if (types().is_pointer(type)) type = types().pointee(type);
+        return !types().rec(type).fn_noexcept;
+      }
+      if (node.is<ast::MemberCall>()) return function_throwing(node.get<ast::MemberCall>().function);
+      if (node.is<ast::AssignmentCall>()) return function_throwing(node.get<ast::AssignmentCall>().function);
+      if (node.is<ast::CtorCall>()) return function_throwing(node.get<ast::CtorCall>().ctor);
+      if (node.is<ast::DeleteObject>()) return function_throwing(node.get<ast::DeleteObject>().function);
+      if (node.is<ast::DeleteArray>()) return function_throwing(node.get<ast::DeleteArray>().function);
+      if (node.is<ast::ImplicitConversion>()) {
+        const auto conversion = node.get<ast::ImplicitConversion>();
+        if (conversion.conversion == ast::ConversionKind::user_defined) return function_throwing(conversion.function);
+        if (conversion.conversion == ast::ConversionKind::to_void)
+          return discarded_temporary_throwing(conversion.operand, node.offset());
+      }
+      if (node.is<ast::Materialize>()) return destructor_throwing(node.get<ast::Materialize>().info.type, node.offset());
+      if (node.is<ast::OrderedBinary>()) {
+        const auto binary = node.get<ast::OrderedBinary>();
+        if (binary.op == ast::OrderedOp::comma) return discarded_temporary_throwing(binary.lhs, node.offset());
+      }
+      return false;
+    };
+    const auto root = b_->commit(ast::Child{operand.id, 0});
+    auto visit = [&](this const auto& self, const ast::Red& node) -> void {
+      result_throws |= operation_throwing(node);
+      node.for_each_child(self);
+    };
+    visit(ast::Red(ins().ast, root.id, operand.begin));
+    if (has_error_since(before)) return fail;
+    return bool_literal(!result_throws, begin, end);
+  }
+
   // A void prvalue ([expr.type.conv]/2): `(void)0`.
   Ex void_prvalue(u32 begin, u32 end) {
     QualType i = builtin(Builtin::int_);
@@ -5731,7 +5905,6 @@ public:
   }
 
   std::optional<lex::VaBuiltin> va_builtin(NameId name) {
-    if (w_->target.va_list != ast::VaList::sysv_x86_64) return std::nullopt;
     auto b = lex::va_builtin(ins().names.spelling(name));
     return b && !declared(name) ? b : std::nullopt;
   }
@@ -5762,12 +5935,22 @@ public:
       }
     }
 
-    // A local va_list decays to a pointer to its single record; an adjusted parameter is
-    // already a pointer. The pointee's identity and cv-qualifiers must match in either case.
-    const QualType array = w_->builtin_va_list();
-    const QualType pointer = types().pointer(types().rec(array).inner);
+    // System V: a local va_list decays to a pointer to its single record; an adjusted parameter
+    // is already a pointer. The pointee's identity and cv-qualifiers must match in either case.
+    // Apple arm64: the va_list is itself a `char*`, and each operation takes the address of the
+    // variable that holds it, so the cursor is a pointer to a `char*` either way.
+    const QualType va_list = w_->builtin_va_list();
+    const bool pointer_list = w_->target.va_list == ast::VaList::char_pointer;
+    const QualType pointer = types().pointer(pointer_list ? va_list : types().rec(va_list).inner);
     auto normalize = [&](Ex e) {
       if (dependent(e)) return e;
+      if (pointer_list) {
+        if (!e.glvalue() || types().canonical(e.type()) != types().canonical(va_list)) {
+          diag(e.begin, Diag::va_list_operand, e.type());
+          return Ex{NodeId::none, e.begin, e.end};
+        }
+        return builtin_address_of(e, e.begin, e.end, e.begin);
+      }
       Ex p = rvalue(e);
       if (p.ok() && types().canonical(p.type()) != pointer) {
         diag(e.begin, Diag::va_list_operand, e.type());
@@ -8316,8 +8499,12 @@ public:
       }
     }
     if (dependent(callee) || dependent_args) {
-      std::vector<Ex> all{callee};
-      all.insert(all.end(), args.begin(), args.end());
+      // BOOTSTRAP: -Warray-bounds: reserved and appended, as `parameters` in `member_call`.
+      // Without the bug: `std::vector<Ex> all{callee};`, `all.insert(all.end(), args.begin(), args.end());`
+      std::vector<Ex> all;
+      all.reserve(1 + args.size());
+      all.push_back(callee);
+      all.append_range(args);
       return dependent_node(all, begin, end);
     }
     // Keep the direct initialization path for a sole known function

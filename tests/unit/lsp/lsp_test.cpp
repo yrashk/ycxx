@@ -140,7 +140,7 @@ void session() {
   check(r.size() == 3, std::format("an initialize result, the document's publish and elsewhere.h's ({} messages)", r.size()));
   if (r.size() == 3) {
     const Json& e = *r[2]["params"];
-    check(*e["uri"]->string() == "file:///w/elsewhere.h" && !e["version"]->number() && e["diagnostics"]->array()->size() == 1,
+    check(*e["uri"]->string() == "file:///w/elsewhere.h" && !e["version"] && e["diagnostics"]->array()->size() == 1,
           "a file that is not open: its diagnostics, with no version");
     const Json* caps = (*r[0]["result"])["capabilities"];
     check(caps && *(*(*caps)["textDocumentSync"])["change"]->number() == 1, "full-text sync");
