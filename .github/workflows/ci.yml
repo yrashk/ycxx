@@ -58,6 +58,10 @@ jobs:
       - name: Toolchain (GCC 16)
         uses: ./.github/actions/setup
 
+      - name: Test driver self-test
+        if: env.TIER == 'main'
+        run: python3 -m unittest -q tests.driver.selftest
+
       - name: Policy (tools/check-policy)
         run: tools/check-policy
 
@@ -105,7 +109,7 @@ jobs:
             base=$(git rev-parse --verify HEAD^1)
             tools/test -x policy failed affected core --base "$base" -j ${{ matrix.host.jobs }}
           else
-            tools/test --tier main -j ${{ matrix.host.jobs }}
+            tools/test -x failed affected core wider rest -j ${{ matrix.host.jobs }}
           fi
 
       - name: Save test state
@@ -131,8 +135,34 @@ jobs:
           path: build/test-logs/
           if-no-files-found: ignore
 
+  # Release (-O3 -DNDEBUG) compile-only, Linux only: GCC's warnings under -Werror and its crashes
+  # differ by optimization level, and the test job builds Debug (#726). macOS runners are shared
+  # across repositories (LESSONS), so macOS builds Release only in the nightly tier.
+  release-build:
+    name: linux-x86_64-release-build
+    runs-on: ubuntu-24.04
+    container: 'gcc:16'
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Trust the checkout in the Linux container
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          git config --global --add safe.directory "$GITHUB_WORKSPACE/deps/libycxx"
+
+      - name: Toolchain (GCC 16)
+        uses: ./.github/actions/setup
+
+      - name: Release build (tools/build --no-smoke)
+        env:
+          YCXX_BUILD_TYPE: Release
+        run: tools/build -j 4 --no-smoke
+
   wall-time:
-    needs: test
+    needs: [test, release-build]
     if: always()
     runs-on: ubuntu-24.04
     steps:

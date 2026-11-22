@@ -325,8 +325,13 @@ What is true of the code today. Work in progress and its owners are tracked in
     PC-relative CIE and FDE format, including address differences and multiple input objects.
     `unit.link` checks the linked ranges and walks through a non-frame-pointer arm64 bridge
     with the system unwinder on macOS. Compact unwind, personalities and LSDA are tracked in
-    [#72](https://github.com/yrashk/ycxx/issues/72). AArch64 frame emission and native exception
-    lowering are tracked in [#648](https://github.com/yrashk/ycxx/issues/648).
+    [#72](https://github.com/yrashk/ycxx/issues/72).
+  - The arm64 compiler emits these DWARF records for proven cleanup-free functions. Their FDEs
+    describe the actual saved frame-pointer and return-address locations at the entry, body,
+    and return instructions. `unit.darwin_cleanup_free_unwind` checks the emitted object,
+    omitted frames, native YCXX linking and system-linked exception propagation on macOS.
+    Native throw lowering and landing pads are tracked in [#648](https://github.com/yrashk/ycxx/issues/648).
+    [#737](https://github.com/yrashk/ycxx/issues/737)
   - Not yet: thread-local variables, dead stripping, literal merging, branch islands beyond
     ±128 MiB, other dylibs' re-exports, incremental relinking, and import addends outside
     0..255 (`DYLD_CHAINED_IMPORT_ADDEND`). `__LLVM` (embedded bitcode), `__LD` and debug sections
@@ -1515,6 +1520,15 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   Broader exceptional cleanup remains tracked in #89 and #135.
 - Remaining implicit special-member rules and aggregate designator forms stay in #203.
   Direct explicit destructor calls are tracked in #722.
+
+## Concrete nontrivial members of union templates (#203)
+
+- A namespace-scope union template with a written destructor can instantiate nontrivially
+  destructible variants with trivial or deleted copy constructors. Nonthrowing constructors
+  select the active member, and the union destructor leaves variant cleanup explicit.
+- The instantiation checks the concrete variant types and the completed destructor declaration.
+  Tests select both members of a union specialized on a noncopyable resource and diagnose
+  the unsupported implicit-destruction form.
 
 ## `<cstdio>`, step 4c: operator functions; `<stdio.h>` compiles (#133, 2026-11-18)
 
@@ -3096,8 +3110,9 @@ miscompiles it (DECISIONS §3.2). Each is removed once ycxx compiles itself.
   `make_qual_type`, `make_decl_ord` in `src/ast/handles.cppm`).
   - Cause: GCC 16.2 does not emit its TU-local contract-violation helper
     (`__tu_has_violation`) in an importer that inlines a non-template inline function with a
-    precondition. The importer fails to link unless it has a contract of its own. Templates and
-    in-class member functions are not affected.
+    precondition. The importer fails to link unless it has a contract of its own. Members of
+    non-template classes are not affected; a class template's member is, when its specialization
+    is instantiated in the imported interface (GCC PR 124264; #46).
   - Fix: belongs in GCC.
 - **A contract predicate inside a lambda that names a member of the enclosing class goes through
   a local `bool`, or a member's precondition** (`src/ast` interner, builder, compaction;
@@ -3124,6 +3139,31 @@ miscompiles it (DECISIONS §3.2). Each is removed once ycxx compiles itself.
   - `CMakeLists.txt` adds the flags to libycxx's `ycxx_modules` target.
   - Without them, `std::meta` is empty. An importer whose `-freflection` does not match the
     BMI's segfaults GCC 16.2.
+- **`FpIndex`'s `Shard` has a user-provided constructor** (`src/ast/store.cppm`, #283).
+  - Cause: at -O1 and above GCC 16.2 segfaults in an importer of `ycxx.ast.interner`, whose
+    `Interners` has an inline constructor and several `FpIndex` specializations, while
+    constant-evaluating `shards_`'s initializer for a constexpr-constructible `Shard`. Debug
+    builds are not affected. Two-file repro on #283; related to GCC PR 124973.
+  - Fix: belongs in GCC. Make `Shard` an aggregate again when ycxx compiles itself.
+- **`compact.cppm` is compiled with `-fkeep-static-functions`** (`src/ast/CMakeLists.txt`, #46).
+  - Cause: at -O1 and above GCC 16.2 inlines `KindTable<…>::kind`'s `pre` into `Compactor`
+    without emitting the TU-local violation helper it calls, so programs linking the AST fail
+    to link (the template case of GCC PR 124264, above). Repro on #46.
+  - Fix: belongs in GCC. Drop the option when ycxx compiles itself.
+- **Release (-O3) false-positive warnings, restructured instead of disabled** (#726; restoring
+  them is #748). Each comment shows the plain form to restore.
+  - `-Wmaybe-uninitialized` on a `std::optional`'s payload read after a check: a value and a flag
+    in `link::elf::read_shared_object` (`dynamic`, and `symbol_count` from `parsed`),
+    `obj::archive::read` (`index`), `parse.cppm` (`named`, `mem`, `exception_tokens`, `lit`)
+    and `Sema::class_name` (`found`).
+  - `-Warray-bounds` through libycxx's in-place `vector` insert: reserved appends in
+    `Sema::member_call` (`parameters`), `Sema::call` (`all`) and
+    `Sema::check_placeholder_constraint` (`args`).
+  - `-Warray-bounds`/`-Wstringop-overflow` through `"literal" + std::string&&`: `std::format` in
+    `daemon/connect.cppm` (four messages).
+  - `-Wstringop-overflow` on the `sun_path` copy: a copy also bounded by the array in the
+    daemon's `socket_address`.
+  - `-Wstringop-overread` on `string::find`: `pp::floating` keeps the position of `e`.
 
 ## Milestones
 

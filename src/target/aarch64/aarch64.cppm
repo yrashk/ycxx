@@ -19,6 +19,7 @@ import std;
 import ycxx.ir;
 import ycxx.ir.l2;
 import ycxx.obj;
+import ycxx.obj.macho;
 
 namespace ycxx::aarch64 {
 
@@ -71,11 +72,12 @@ export struct CodegenError {
 
 // One function's machine code, apart from any object (the value of `optimized(unit, …, level 0)`):
 // its bytes, which start 4-byte aligned, and their relocations, each naming its target by an index
-// into `targets`, in order of first use.
+// into `targets`, in order of first use, and the emitted changes in the frame rules.
 export struct MachineCode {
   std::vector<std::uint8_t> bytes;
   std::vector<obj::reloc> relocs;
   std::vector<ir::EntityId> targets;
+  std::vector<FrameRow> frame_rows;
 };
 
 // Assembly text of a function's code, for reading (the engine trace, #245): one line per word,
@@ -94,6 +96,7 @@ export std::expected<MachineCode, std::string> compile_function(const l2::Functi
 export struct CompiledFunction {
   ir::EntityId entity{};
   MachineCode code;
+  bool cleanup_free_unwind = false;
 };
 export std::expected<obj::object, CodegenError> assemble(std::string name, std::span<const CompiledFunction> functions,
                                                          std::span<const DataDef> data, std::span<const Symbol> symbols);
@@ -122,8 +125,81 @@ std::expected<MachineCode, std::string> compile_function(const l2::Function& bod
   if (!e) return std::unexpected(e.error());
   out.bytes = std::move(text.bytes);
   out.relocs = std::move(text.relocs);
+  out.frame_rows = std::move(*e);
   return out;
 }
+
+namespace {
+
+std::expected<std::uint32_t, std::string> append_eh_frame(obj::section& section, const MachineCode& code) {
+  // DWARF §6.4 and the AArch64 DWARF register mapping. The CIE starts at section offset zero.
+  constexpr std::uint8_t fp = 29, lr = 30, sp = 31;
+  constexpr std::uint8_t def_cfa = 0x0c, same_value = 0x08, offset = 0x80, restore = 0xc0;
+  constexpr std::uint8_t pcrel_absptr = 0x10;
+  constexpr std::uint8_t cie_body[]{
+      1, 'z', 'R', 0, 1, 0x78, lr, 1, pcrel_absptr,  // code alignment 1, data alignment -8
+      def_cfa, sp, 0, same_value, fp, same_value, lr,
+  };
+  if (code.bytes.size() % 4 != 0 || code.frame_rows.size() < 2 ||
+      code.frame_rows[0].offset != 4 || code.frame_rows[0].state != FrameState::saved_pair ||
+      code.frame_rows[1].offset != 8 || code.frame_rows[1].state != FrameState::frame_pointer)
+    return std::unexpected("cleanup-free unwind requires an Apple frame record");
+
+  obj::macho::byte_writer fde;
+  const auto start = section.bytes.empty() ? 8 + sizeof(cie_body) : section.bytes.size();
+  if (!std::in_range<std::int32_t>(start + 8))
+    return std::unexpected("the unwind section exceeds the Mach-O relocation offset limit");
+  fde.u32(0);  // record length, filled after emission
+  fde.u32(static_cast<std::uint32_t>(start + 4));  // backward distance to the CIE
+  fde.u64(0);  // PC-relative initial location, relocated by the caller
+  fde.u64(code.bytes.size());
+  fde.u8(0);   // FDE augmentation length
+  std::uint32_t previous = 0;
+  for (const auto& row : code.frame_rows) {
+    if (row.offset <= previous || row.offset >= code.bytes.size() || row.offset % 4 != 0)
+      return std::unexpected("an unwind row is outside the function's instruction range");
+    const auto advance = row.offset - previous;
+    if (advance <= 0x3f) {
+      fde.u8(0x40 | static_cast<std::uint8_t>(advance));  // DW_CFA_advance_loc
+    } else if (advance <= 0xff) {
+      fde.u8(0x02);
+      fde.u8(static_cast<std::uint8_t>(advance));
+    } else if (advance <= 0xffff) {
+      fde.u8(0x03);
+      fde.u16(static_cast<std::uint16_t>(advance));
+    } else {
+      fde.u8(0x04);
+      fde.u32(advance);
+    }
+    fde.u8(def_cfa);
+    fde.u8(row.state == FrameState::frame_pointer ? fp : sp);
+    if (row.state == FrameState::entry) {
+      fde.u8(0);
+      fde.u8(restore | fp);
+      fde.u8(restore | lr);
+    } else {
+      fde.u8(16);
+      fde.u8(offset | fp);
+      fde.u8(2);  // FP is at CFA - 16
+      fde.u8(offset | lr);
+      fde.u8(1);  // LR is at CFA - 8
+    }
+    previous = row.offset;
+  }
+  fde.align(8);  // zero padding is DW_CFA_nop
+  if (!std::in_range<std::int32_t>(start + fde.size()))
+    return std::unexpected("the unwind section exceeds the Mach-O relocation offset limit");
+  obj::macho::store32(fde.bytes, 0, static_cast<std::uint32_t>(fde.size() - 4));
+  if (section.bytes.empty()) {
+    section.emit32(4 + sizeof(cie_body));
+    section.emit32(0);  // CIE ID
+    section.emit(cie_body);
+  }
+  section.emit(fde.bytes);
+  return static_cast<std::uint32_t>(start + 8);
+}
+
+}  // namespace
 
 std::expected<obj::object, CodegenError> assemble(std::string name, std::span<const CompiledFunction> functions,
                                                   std::span<const DataDef> data, std::span<const Symbol> symbols) {
@@ -154,6 +230,12 @@ std::expected<obj::object, CodegenError> assemble(std::string name, std::span<co
                                                       : obj::standard_section::mod_init_func;
     sections[k] = o.add_section(s);
   }
+  std::optional<std::uint32_t> frames;
+  if (std::ranges::any_of(functions, &CompiledFunction::cleanup_free_unwind)) {
+    frames = o.add_section(obj::standard_section::eh_frame);
+    o.sections[*frames].flags = obj::section_flags::coalesced | obj::section_flags::no_toc |
+                                obj::section_flags::strip_static_syms | obj::section_flags::live_support;
+  }
 
   // Defined symbols first, functions then variables, at offsets filled in as they are emitted.
   for (const CompiledFunction& f : functions) {
@@ -166,6 +248,7 @@ std::expected<obj::object, CodegenError> assemble(std::string name, std::span<co
     if (!s) return std::unexpected(s.error());
     symbol_of[ir::raw(d.entity)] = o.add_symbol({(*s)->name, (*s)->bind, sections[d.kind], 0, false});
   }
+  const auto frame_base = frames ? o.define("ltmp_eh_frame", obj::binding::local, *frames) : 0;
   std::optional<CodegenError> missing;
   auto symbol = [&](ir::EntityId e) -> std::uint32_t {
     if (auto it = symbol_of.find(ir::raw(e)); it != symbol_of.end()) return it->second;
@@ -199,12 +282,19 @@ std::expected<obj::object, CodegenError> assemble(std::string name, std::span<co
     obj::section& sec = o.sections[*text];
     sec.align(2);
     const auto base = static_cast<std::uint32_t>(sec.bytes.size());
-    o.symbols[symbol_of[ir::raw(f.entity)]].offset = base;
+    const auto fn_symbol = symbol_of[ir::raw(f.entity)];
+    o.symbols[fn_symbol].offset = base;
     sec.emit(f.code.bytes);
     for (obj::reloc r : f.code.relocs) {
       r.offset += base;
       r.symbol = symbol(f.code.targets[r.symbol]);
       sec.relocs.push_back(r);
+    }
+    if (f.cleanup_free_unwind) {
+      auto& unwind = o.sections[*frames];
+      auto location = append_eh_frame(unwind, f.code);
+      if (!location) return std::unexpected(CodegenError{f.entity, location.error()});
+      unwind.relocate(obj::reloc_kind::abs64, fn_symbol, -static_cast<std::int64_t>(*location), *location, frame_base);
     }
   }
   if (missing) return std::unexpected(*missing);

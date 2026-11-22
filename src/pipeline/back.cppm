@@ -1795,7 +1795,8 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
       return assemble_linux(tu.name, code, data, symbols, weak_variables);
     }
     std::vector<aarch64::CompiledFunction> code;
-    for (std::size_t i = 0; i < fns.size(); ++i) code.push_back({fns[i].fn, *ms[i].get().code});
+    for (std::size_t i = 0; i < fns.size(); ++i)
+      code.push_back({fns[i].fn, *ms[i].get().code, tu.functions[i].unwind == UnwindEligibility::cleanup_free});
     auto o = aarch64::assemble(tu.name, code, data, symbols);
     if (o) mark_weak_definitions(*o, symbols, tu.functions, weak_variables);
     return o;

@@ -56,6 +56,11 @@ tools/build
 build/bin/ycxx cxx hello.cpp -o hello && ./hello
 ```
 
+`tools/build` builds ycxx in Debug. A Release build (`YCXX_BUILD_TYPE=Release
+YCXX_BUILD_DIR=build-release tools/build`, [docs/BUILDING.md](docs/BUILDING.md#release-builds))
+builds and passes its tests on both hosts, and compiles a 40,000-statement function in 0.4 s
+instead of Debug's 5.3 s on an M-series Mac ([#726](https://github.com/yrashk/ycxx/issues/726)).
+
 Single-expression `auto(x)` and `auto{x}` perform scalar and pointer decay-copy, including
 array and function decay. Function-template bodies can defer supported dependent operands to
 instantiation. Concrete constant template arguments can use braced conversions such as
@@ -173,16 +178,19 @@ object. Symbol names can share suffixes in an input string table.
 [#428](https://github.com/yrashk/ycxx/issues/428), [#419](https://github.com/yrashk/ycxx/issues/419),
 [#484](https://github.com/yrashk/ycxx/issues/484)
 
-On x86-64 Linux, an exception thrown by hosted peer code can unwind through eligible
-cleanup-free ycxx functions with fixed scalar signatures and reach a handler in peer code.
-An eligible ycxx function can also throw an `int` to a hosted peer's handler.
+On x86-64 Linux and arm64 macOS, an exception thrown by hosted peer code can unwind through
+eligible cleanup-free ycxx functions with fixed scalar signatures and reach a handler in
+peer code. [#572](https://github.com/yrashk/ycxx/issues/572) ·
+[#737](https://github.com/yrashk/ycxx/issues/737)
+
+On x86-64 Linux, an eligible ycxx function can also throw an `int` to a hosted peer's handler.
 A host-linked ycxx function can use one `catch (...)` to return an integer literal when
 a direct call on its parameter to an externally defined `int(int)` function throws.
 A host-linked void function can also destroy one initialized aggregate local on both exits
 from an external `void()` call and let the original exception reach a peer handler.
 A supported union constructor can destroy its active member when its body call throws and
 propagate an exception from its initializer before the member's lifetime begins.
-[#572](https://github.com/yrashk/ycxx/issues/572) · [#578](https://github.com/yrashk/ycxx/issues/578)
+[#578](https://github.com/yrashk/ycxx/issues/578)
 · [#583](https://github.com/yrashk/ycxx/issues/583) · [#663](https://github.com/yrashk/ycxx/issues/663)
 · [#738](https://github.com/yrashk/ycxx/issues/738)
 
@@ -301,6 +309,8 @@ written default member initializer are value-initialized.
   initializes its selected member. A nonthrowing constructor works on both targets, and the
   hosted Linux subset above can unwind the construction. [#203](https://github.com/yrashk/ycxx/issues/203) ·
   [#738](https://github.com/yrashk/ycxx/issues/738)
+- namespace-scope union templates support the same rules for concrete nontrivially destructible
+  variants after instantiation. [#203](https://github.com/yrashk/ycxx/issues/203)
 - classes and unions: data and static members, named data members of unnamed union type,
   member functions, constructors including ordinary delegation, and destructors
   with RAII, aggregate and designated initialization, namespace-scope objects initialized by
