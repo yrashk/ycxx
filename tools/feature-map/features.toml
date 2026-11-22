@@ -1119,7 +1119,7 @@ clauses = ['dcl.init.aggr', 'dcl.init.general']
 std = 'C++17'
 ftm = '__cpp_aggregate_bases'
 status = 'partial'
-note = 'Automatic flat arithmetic records support parenthesized initialization. Runtime declarations can copy one flat public direct base from an exact-type lvalue or a fully written unqualified braced prvalue. An omitted trailing arithmetic field is value-initialized when it has no written default member initializer. Other base forms, arrays, nested and reference fields, and other initialization contexts remain open.'
+note = 'Automatic flat arithmetic records support parenthesized initialization. Runtime declarations can copy one flat public direct base from an exact-type lvalue or a fully written unqualified braced prvalue. Omitted trailing arithmetic fields can replay call-free defaults that read the initialized base, or are value-initialized when they have no default. Other base forms, arrays, nested and reference fields, and other initialization contexts remain open.'
 probe = '''
 struct B { int b; }; struct D : B { int d; }; struct P { int x, y; };
 int main() { D d{{1}, 2}; P p(3, 4); return (d.b + d.d + p.x + p.y == 10) ? 0 : 1; }
@@ -2546,8 +2546,9 @@ group = 'reflect'
 clauses = ['dcl.attr.annotation']
 std = 'C++26'
 detect = '\[\[\s*='
-status = 'missing'
-issues = [324, 80]
+status = 'partial'
+issues = [662, 324, 80]
+note = 'Typed constants and source occurrences on ordinary class and function declarations.'
 
 [[feature]]
 id = 'stmt-expansion'
@@ -2653,7 +2654,8 @@ probe = '''
 struct S { int a; int b; };
 int main() { return (__builtin_popcount(7u) == 3 && __builtin_offsetof(S, b) == 4) ? 0 : 1; }
 '''
-status = 'missing'
+status = 'partial'
+note = '`__builtin_offsetof` and the `offsetof` macro of `<cstddef>` give the offsets of direct non-static data members of ordinary standard-layout classes. Compound member designators, the `<bit>` and `<limits>` built-ins such as `__builtin_popcount`, and the remaining numeric built-ins are tracked in #248.'
 
 [[feature]]
 id = 'lib-atomic'

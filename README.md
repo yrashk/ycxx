@@ -55,6 +55,10 @@ instantiation. Concrete constant template arguments can use braced conversions s
 Functional conversions can construct namespace-qualified class-template specializations with
 parentheses or braces, including through namespace aliases. [#697](https://github.com/yrashk/ycxx/issues/697)
 
+C++26 reflection annotations on class heads and ordinary function declarations accept
+constant payloads and retain their types for compiler consumers.
+[#662](https://github.com/yrashk/ycxx/issues/662)
+
 **Preprocess binary resources.** Both targets support `#embed` and `__has_embed` with the standard
 parameters. [#125](https://github.com/yrashk/ycxx/issues/125)
 
@@ -208,7 +212,8 @@ arithmetic fields. Supplied expressions initialize the fields in declaration ord
 fields use their default member initializer when available and otherwise get zero. A runtime
 declaration can also initialize one flat public direct base from an exact-type lvalue or an
 unqualified braced prvalue such as `B{7}`. Omitted trailing arithmetic fields of that aggregate
-are value-initialized when they have no written default member initializer.
+can use call-free default member initializers that read the initialized base. Fields with no
+written default member initializer are value-initialized.
 [#301](https://github.com/yrashk/ycxx/issues/301)
 
 **Language on macOS.** Programs can use:
@@ -345,10 +350,11 @@ are value-initialized when they have no written default member initializer.
   with addressable static storage and scalar calls ([#338](https://github.com/yrashk/ycxx/issues/338));
 - casts, including `static_cast<T&&>` from a compatible object lvalue and runtime `static_cast`
   downcasts of object pointers and lvalue references through accessible, unambiguous
-  nonvirtual base paths, `sizeof`/`alignof` (classes included), `decltype`, and calls
-  through pointers to functions. Qualified functional casts check access to aliases and typedefs
-  declared directly in an ordinary class. [#199](https://github.com/yrashk/ycxx/issues/199) ·
-  [#216](https://github.com/yrashk/ycxx/issues/216)
+  nonvirtual base paths, `sizeof`/`alignof` (classes included), direct-member `offsetof` for
+  ordinary standard-layout classes, `decltype`, and calls through pointers to functions.
+  Qualified functional casts check access to aliases and typedefs declared directly in an
+  ordinary class. [#199](https://github.com/yrashk/ycxx/issues/199) ·
+  [#216](https://github.com/yrashk/ycxx/issues/216) · [#248](https://github.com/yrashk/ycxx/issues/248)
 - equality and inequality between `std::nullptr_t` values and between a `std::nullptr_t`
   value and a pointer. [#199](https://github.com/yrashk/ycxx/issues/199)
 - constant evaluation on ycxx's own interpreter: `constexpr`, `consteval`, `constinit`,
@@ -385,7 +391,9 @@ memory each cell allocated and retains, with sums per subtree, per query kind an
 shows everything reused. A compile error is marked red at the cell where it starts, and its
 message is shown up to the root. Diagnostic details include the file, line and column where
 available. `--trace-engine=interactive` opens a browser of the trace after the compile: a tree
-with each function's IR and assembly, a timeline of the pool's workers, and filters.
+with each function's IR and assembly, a timeline of the pool's workers, and filters. It follows
+the terminal's size and takes the mouse: click to select, fold and sort by a column, use the
+wheel to scroll, and drag to resize the pane ([docs/TRACE.md](docs/TRACE.md#the-interactive-browser)).
 `--trace-engine=json` writes the whole trace as JSON Lines, for tools and agents. Cells that
 come from source (a file, a unit, a function's IR and code) carry their file and lines.
 `ycxx cxx --watch` stays attached and builds again whenever a file the build read changes,

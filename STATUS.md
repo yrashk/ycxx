@@ -1079,11 +1079,15 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   the base subobject.
   Omitted trailing arithmetic fields are value-initialized when they have no written default
   member initializer. With a sole base expression, the base must have no conversion functions.
+  For a named non-template class at namespace scope, an omitted field's written default can
+  use call-free arithmetic on literals and fields of the initialized base. The replay binds
+  implicit and explicit `this` to the destination object. Explicit clauses keep the enclosing
+  receiver and an explicit field initializer takes precedence over the default.
 - Parenthesized arrays, nested fields, unions, reference members, bit-fields, and nontrivial
   destruction remain in [#301](https://github.com/yrashk/ycxx/issues/301). The issue also tracks
-  multiple bases, other base prvalues, omitted default member initializers in derived aggregates,
-  constant evaluation of base copies, static storage and functional casts. Linux x86-64 runtime
-  conversions between floating-point and integer types remain in
+  multiple bases, other base prvalues, default member initializers with calls, mutation or reads
+  outside the base, constant evaluation of base copies, static storage and functional casts.
+  Linux x86-64 runtime conversions between floating-point and integer types remain in
   [#201](https://github.com/yrashk/ycxx/issues/201).
   Spec-only fixtures are in `tests/own/parenthesized-aggregate/`.
 
@@ -1214,9 +1218,10 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
 - A class member declaration can define a named nested enum and declare ordinary fields in
   the same declaration. The fields participate in lookup, initialization, and class layout.
   Tests in `tests/own/nested-enum-fields/` compare combined and separate declarations and
-  cover scoped enum field initializers. Nested class definitions and `__builtin_offsetof`
-  layout support are tracked separately. [#500](https://github.com/yrashk/ycxx/issues/500) ·
-  [#306](https://github.com/yrashk/ycxx/issues/306) · [#496](https://github.com/yrashk/ycxx/pull/496)
+  cover scoped enum field initializers, and `tests/own/builtins/offsetof-after-nested-enum` their
+  offsets. Nested class definitions are tracked separately.
+  [#500](https://github.com/yrashk/ycxx/issues/500) · [#306](https://github.com/yrashk/ycxx/issues/306) ·
+  [#248](https://github.com/yrashk/ycxx/issues/248)
 - Tests: `tests/own/classes/s4-*enum*`, `s4-scoped-enum`, `s4-unscoped-enum` (spec-only, plus two
   from the review): 7 of 7.
 - Namespace-scope opaque enum declarations ([dcl.enum], #157) supply a complete enum type with a
@@ -2010,10 +2015,10 @@ Fable decided the representation (ast.md §6.6); the Opus session wrote the code
 - What the SDK's `__GNUC__` paths then use, in the headers libycxx's C headers reach, is in
   docs/EXTENSIONS.md. `__builtin_va_list` names the target's va_list type (`char*` on Darwin)
   where lookup finds nothing else (`ast::Target::va_list`, `Sema::builtin_type_name`).
-  The `__builtin_*` functions ycxx lacks (`__builtin_fabsf`, `__builtin_inff`, `__builtin_alloca`,
-  `__builtin_offsetof`, …) are diagnosed as "built-in function '…' is not supported yet", their
-  arguments skipped (`lex::lacking_builtins`, `Sema::unsupported_builtin`). Any other `__builtin_`
-  name is an ordinary one, so a requires-expression probing it is unsatisfied.
+  The `__builtin_*` functions ycxx lacks (such as `__builtin_alloca`) are diagnosed as
+  "built-in function '…' is not supported yet", their arguments skipped (`lex::lacking_builtins`,
+  `Sema::unsupported_builtin`). Any other `__builtin_` name is an ordinary one, so a
+  requires-expression probing it is unsatisfied.
 - Warnings located in a system header are not reported; errors are, and so is `#warning`, as
   with Clang and GCC. A system header is one found in a system directory (a `-I` directory that
   is also an `-isystem` one is dropped from the `-I` list), or one a system header includes
@@ -2110,6 +2115,9 @@ Fable decided the representation (ast.md §6.7); the Opus session wrote the code
   the shapes are built. A reference member is laid out as a pointer. Each reader computes a
   class's layout once (`Sema::class_places_`, `QueryLayout::class_layouts_` and `records_`), so
   nested classes cost linear time.
+- `offsetof` ([support.types.layout], #248) uses the same record layout for direct non-static
+  members in ordinary standard-layout classes and unions, producing a target `size_t`
+  constant. `__has_builtin(__builtin_offsetof)` reports availability.
 - Bases, a vptr and empty-base placement extend `record_layout`'s input when inheritance and
   virtual functions arrive.
 - Ordinary named namespace-scope class heads accept concrete `alignas` values and type operands
@@ -2175,8 +2183,17 @@ request it serves.
   one. The wait first lists the files it watches (`watching`: the file table's existing entries).
 - Tests: `unit.trace` (a golden stream of a unit built cold, again and after a whitespace edit;
   the collector under 8 threads; the tree, filters, summary and timeline); `daemon.trace` (traced
-  builds through the daemon, a watcher, a stalled watcher beside 40 builds, shutdown). The
-  browser's key handling is untested.
+  builds through the daemon, a watcher, a stalled watcher beside 40 builds, shutdown).
+- The browser (#635): `:view` is its model, with no terminal: state, keys, mouse, and frames for a
+  given size. `:browse` runs it on `/dev/tty`. It uses SGR mouse modes 1000, 1002 and 1006 with
+  autowrap off, and draws each line at its row. A `SIGWINCH` self-pipe redraws on resize. Fatal
+  signals restore the terminal, then re-raise. The tree has columns (time, worker, alloc and
+  retains, summed over the subtree) whose headers sort it (`Tree::Order::time` added). The
+  summary wraps on narrow screens. The divider drags (or `<`/`>`) and keeps its share of the
+  width. Tests: `unit.trace` (SGR parsing, hit-testing, click, double click, marker, wheel,
+  divider drag, sort, focus, wrap; frames against `browser.golden`); `daemon.trace_tui` (under a
+  pty: modes on and off, a click, a resize, SIGTERM and SIGABRT restoring the terminal),
+  mutation-checked.
 - Source spans (#638): `engine::SourceSpan` on each `TraceEvent`, from a kind's `trace_span(const
   Db&, const Key&)`, which runs only in `Db::trace`. `Db::peek` reads an input, or a value
   verified at this revision, without a dependency. A file's and a unit's cells are the file; a
@@ -2920,6 +2937,17 @@ on each using-directive path. Conflicting declarations across paths are ambiguou
 function and variable template expressions use the ordinary expression path
 ([expr.type.conv], [temp.names], [basic.lookup.qual]).
 [#697](https://github.com/yrashk/ycxx/issues/697)
+
+## Typed declaration annotations (#662)
+
+Class heads and ordinary function declarations accept C++26 `[[= expression ]]` annotations
+and annotation lists ([dcl.attr.annotation]). The compiler retains each occurrence's canonical
+payload type, evaluated value and item-relative token offset. A translation-unit consumer can
+query all written occurrences by class or function entity, including repeated values and
+redeclarations, while overloads keep separate lists. Enum payloads retain their enumeration type.
+Supported aggregate payloads use structural fields and trivial destruction. Reference-member and
+union payload evaluation, the reflection operator, public `std::meta` APIs, template annotation
+substitution and broader annotation targets remain in [#324](https://github.com/yrashk/ycxx/issues/324).
 
 ## Bootstrap workarounds
 
