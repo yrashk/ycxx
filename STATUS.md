@@ -1686,6 +1686,13 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
 - Tests: `tests/own/abi` (5), `tests/own/classes/s5-byvalue-lifetimes`, `-temporaries`;
   s1-byvalue-params and -return pass.
 
+## Class prvalues returned by calls (#679)
+
+- Ordinary class-valued calls preserve the result's top-level `const` and `volatile`
+  qualifiers ([expr.call], [expr.type]). The tests in `tests/own/call-result-cv/` cover
+  `decltype`, overload selection, and the existing adjustments for scalar and reference
+  results.
+
 ## Local class prvalue selection (#740)
 
 - The built-in `?:` or comma operator can initialize an automatic class object, an ordinary

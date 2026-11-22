@@ -5294,7 +5294,9 @@ public:
       QualType t = r.inner;
       const bool direct_cat = direct_reference_category(a, r);
       const bool function_conversion = types().function_pointer_conversion(a.type(), t);
-      if (direct_cat && (same_unqualified(a.type(), t) || function_conversion)) {
+      const bool class_prvalue = !a.glvalue() && types().is_class(a.type()) &&
+                                 (r.rvalue_ref || object_cv(t) == Cv::const_);
+      if ((direct_cat || class_prvalue) && (same_unqualified(a.type(), t) || function_conversion)) {
         if (!cv_within(object_cv(a.type()), object_cv(t))) return {};
         Ics v = binding({true, 0, function_conversion ? 1 : 0}, r.rvalue_ref, a.cat() != ValueCategory::lvalue,
                         cv_bits(object_cv(t)) - cv_bits(object_cv(a.type())));
@@ -5302,7 +5304,7 @@ public:
         return v;
       }
       // [over.ics.ref]/1: binding to a base class subobject is a derived-to-base Conversion.
-      if (int d = base_depth(a.type(), t); d && direct_cat) {
+      if (int d = base_depth(a.type(), t); d && (direct_cat || class_prvalue)) {
         if (!cv_within(object_cv(a.type()), object_cv(t))) return {};
         Ics v = binding({true, 2, 0}, r.rvalue_ref, a.cat() != ValueCategory::lvalue, cv_bits(object_cv(t)) - cv_bits(object_cv(a.type())));
         v.base_depth = d;
@@ -5580,7 +5582,11 @@ public:
   // A call returning a reference to a function is an lvalue. For object references the category
   // follows the reference kind ([expr.call]).
   ExprInfo result_info(QualType r) {
-    if (!types().is_reference(r)) return {Types::unqualified(r), ValueCategory::prvalue, 0};
+    if (!types().is_reference(r)) {
+      // [expr.type] removes top-level cv only from non-class, non-array prvalues.
+      QualType t = types().is_class(r) || types().is_array(r) ? r : Types::unqualified(r);
+      return {t, ValueCategory::prvalue, 0};
+    }
     QualType t = types().referee(r);
     return {t, types().rec(r).rvalue_ref && !types().is_function(t) ? ValueCategory::xvalue : ValueCategory::lvalue, 0};
   }
@@ -6029,7 +6035,8 @@ public:
           diag(at_, Diag::bind_drops_qualifiers, e.type(), r);
           return fail;
         }
-        if (!e.glvalue()) return to_base(materialize(e, Types::unqualified(e.type()), extend), types().class_of(t), at_);
+        if (!e.glvalue())
+          return to_base(materialize(e, types().add_cv(e.type(), object_cv(t)), extend), types().class_of(t), at_);
         Ex b = to_base(e, types().class_of(t), at_);
         return b.ok() && extend ? extended(b) : b;
       }
@@ -6043,6 +6050,11 @@ public:
     // [dcl.init.ref]/5.4.4: an rvalue reference does not bind to an lvalue.
     if (rr.rvalue_ref && e.cat() == ValueCategory::lvalue) {
       diag(at_, Diag::bind_to_lvalue, t);
+      return fail;
+    }
+    if (!e.glvalue() && types().is_class(t) && same_unqualified(e.type(), t) &&
+        !cv_within(object_cv(e.type()), object_cv(t))) {
+      diag(at_, Diag::bind_drops_qualifiers, e.type(), r);
       return fail;
     }
     if (!e.glvalue() && types().is_array(t) && same_unqualified(e.type(), t) &&
