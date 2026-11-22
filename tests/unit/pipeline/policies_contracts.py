@@ -15,6 +15,8 @@ import textwrap
 compiler, host, include, examples = sys.argv[1:]
 with tempfile.TemporaryDirectory() as directory:
     root = pathlib.Path(directory)
+    native_linux = sys.platform == "linux" and platform.machine() in ("x86_64", "amd64")
+    native_darwin = sys.platform == "darwin" and platform.machine() in ("arm64", "aarch64")
 
     def write(name, source):
         path = root / name
@@ -755,7 +757,7 @@ with tempfile.TemporaryDirectory() as directory:
     for executable_macho in (selected_macho, implicit_macho):
         assert executable_macho.read_bytes()[:4] == bytes.fromhex("cffaedfe")
     # PARITY: by design: run the linked Mach-O executable on its native host and ISA.
-    if sys.platform == "darwin" and platform.machine() in ("arm64", "aarch64"):
+    if native_darwin:
         for extra in ((), ("alternate",)):
             subprocess.run([selected_macho, *extra], check=True, timeout=10)
         subprocess.run([implicit_macho], check=True, timeout=10)
@@ -767,7 +769,63 @@ with tempfile.TemporaryDirectory() as directory:
         expected = (-signal.SIGABRT, -signal.SIGILL, -signal.SIGTRAP) if extra else (0,)
         assert subprocess.run([executable, *extra], timeout=10).returncode in expected
 
-    if sys.platform == "linux" and platform.machine() in ("x86_64", "amd64"):
+    # A hosted peer owns the guard and catches its exception after unwinding through YCXX.
+    cleanup = write("cleanup.cpp", """\
+        #include <ycxx/ownership/runtime.hpp>
+        extern "C" void maybe_throw();
+        struct Completion {
+          ycxx::ownership::linear_state* state;
+          ~Completion() noexcept { state->consume(); }
+        };
+        extern "C" void run_cleanup(ycxx::ownership::linear_state* state) {
+          Completion completion{state};
+          maybe_throw();
+        }
+    """)
+    peer = write("cleanup_peer.cpp", """\
+        #include <ycxx/ownership/runtime.hpp>
+        using ycxx::ownership::linear_state;
+        extern "C" void run_cleanup(linear_state*);
+        bool throwing;
+        extern "C" void maybe_throw() {
+          if (throwing) throw 19;
+        }
+        int main(int argc, char**) {
+          {
+            linear_state state;
+            run_cleanup(&state);
+          }
+          throwing = true;
+          try {
+            linear_state state;
+            if (argc > 1) state.consume();
+            run_cleanup(&state);
+          } catch (int value) {
+            return value == 19 ? 0 : 1;
+          }
+          return 2;
+        }
+    """)
+    compile_cleanup = [compiler, "cxx", "--no-daemon", "-I", include, "-c", cleanup]
+    cleanup_object = root / "cleanup-macho.o"
+    subprocess.run([*compile_cleanup, "--target=arm64-apple-darwin", "-o", cleanup_object],
+                   check=True, timeout=30)
+    image = cleanup_object.read_bytes()
+    assert image[:4] == bytes.fromhex("cffaedfe") and b"__eh_frame" in image and b"__gcc_except_tab" in image
+    # PARITY: by design: the stock linker and exception runtime run on their native host and ISA.
+    if native_linux:
+        cleanup_object = root / "cleanup-elf.o"
+        subprocess.run([*compile_cleanup, "--target=x86_64-linux-gnu", "-o", cleanup_object],
+                       check=True, timeout=30)
+    if native_linux or native_darwin:
+        cleanup_native = root / "cleanup-native"
+        subprocess.run([host, "-std=c++20", "-I", include, peer, cleanup_object, "-o", cleanup_native],
+                       check=True, timeout=30)
+        subprocess.run([cleanup_native], check=True, timeout=10)
+        trapped = subprocess.run([cleanup_native, "already-consumed"], timeout=10)
+        assert trapped.returncode in (-signal.SIGABRT, -signal.SIGILL, -signal.SIGTRAP)
+
+    if native_linux:
         native = root / "native"
         args = [compiler, "cxx", "--no-daemon", "--target=x86_64-linux-gnu", "-nostdlib", "-I", include, "-I", examples]
         adapter = write("adapter.cpp", """\
@@ -933,51 +991,6 @@ with tempfile.TemporaryDirectory() as directory:
         subprocess.run([*args, str(runtime), "-o", str(native)], check=True, timeout=30)
         assert subprocess.run([native], timeout=10).returncode == 0
         assert subprocess.run([native, "early"], timeout=10).returncode == -signal.SIGILL
-
-        # A hosted peer owns the guard and catches its exception after unwinding through YCXX.
-        cleanup = write("cleanup.cpp", """\
-            #include <ycxx/ownership/runtime.hpp>
-            extern "C" void maybe_throw();
-            struct Completion {
-              ycxx::ownership::linear_state* state;
-              ~Completion() noexcept { state->consume(); }
-            };
-            extern "C" void run_cleanup(ycxx::ownership::linear_state* state) {
-              Completion completion{state};
-              maybe_throw();
-            }
-        """)
-        peer = write("cleanup_peer.cpp", """\
-            #include <ycxx/ownership/runtime.hpp>
-            using ycxx::ownership::linear_state;
-            extern "C" void run_cleanup(linear_state*);
-            bool throwing;
-            extern "C" void maybe_throw() {
-              if (throwing) throw 19;
-            }
-            int main(int argc, char**) {
-              {
-                linear_state state;
-                run_cleanup(&state);
-              }
-              throwing = true;
-              try {
-                linear_state state;
-                if (argc > 1) state.consume();
-                run_cleanup(&state);
-              } catch (int value) {
-                return value == 19 ? 0 : 1;
-              }
-              return 2;
-            }
-        """)
-        cleanup_object = root / "cleanup.o"
-        subprocess.run([compiler, "cxx", "--no-daemon", "--target=x86_64-linux-gnu", "-I", include, "-c",
-                        str(cleanup), "-o", str(cleanup_object)], check=True, timeout=30)
-        subprocess.run([host, "-std=c++20", "-I", include, str(peer), str(cleanup_object), "-o", str(native)],
-                       check=True, timeout=30)
-        assert subprocess.run([native], timeout=10).returncode == 0
-        assert subprocess.run([native, "already-consumed"], timeout=10).returncode == -signal.SIGILL
 
         capability = write("capability.cpp", """\
             #include <ycxx/capabilities.hpp>
