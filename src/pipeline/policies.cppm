@@ -328,7 +328,8 @@ class OwnershipFlowBuilder {
     if (function && tracked_variant(type) && function->scope == world_.types.class_of(type))
       return true;  // `tracks_variant` authorizes the package adapter's own operations.
     return function && (function->kind == sema::EntityKind::constructor || function->kind == sema::EntityKind::destructor) &&
-           ownership(type) != Ownership::ordinary;
+           (ownership(type) != Ownership::ordinary ||
+            (function->scope == world_.types.class_of(type) && tracked_variant_helper(world_, policy_, type)));
   }
 
   // An issuer can return a freshly constructed token. The namespace-scope adapter

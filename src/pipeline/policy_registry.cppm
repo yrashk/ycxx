@@ -94,6 +94,8 @@ struct OwnershipPolicy {
   std::vector<PolicyOperation> observer_definitions;
   std::vector<PolicyOperation> labeled_observers;
   std::vector<TrackedVariant> variants;
+  std::vector<std::pair<QualType, QualType>> variant_storage_types;
+  std::vector<QualType> variant_member_types;
 
   bool has_observer_definition(PolicyOperation operation) const {
     return std::ranges::binary_search(observer_definitions, operation);
@@ -133,7 +135,7 @@ namespace {
 
 enum class Marker {
   other, policy, use_policy, affine, linear, move_transfers, creates, observes, verified_observes, consumes, transfers,
-  variant, tracks_variant,
+  variant, tracks_variant, variant_storage, variant_member_cleanup,
   effect_set, effect_grade, effect_bound, trusted_effect_bound, effect_contract, trusted_effect_contract,
   scoped_handler, capability_token, runtime_state,
 };
@@ -168,6 +170,12 @@ Specialization marker(const sema::World& world, EntityId id) {
     if (name == "contract") return {Marker::effect_contract, specialized};
     if (name == "trusted_contract") return {Marker::trusted_effect_contract, specialized};
     return {};
+  }
+  const auto* scope = world.entities.find(primary->scope);
+  if (scope && scope->kind == sema::EntityKind::namespace_ && world.ins.names.spelling(scope->name) == "detail" &&
+      in_policy_namespace(world, scope->scope, "ownership")) {
+    if (name == "variant_storage") return {Marker::variant_storage, specialized};
+    if (name == "variant_member_cleanup") return {Marker::variant_member_cleanup, specialized};
   }
   if (!in_policy_namespace(world, primary->scope, "ownership")) return {};
   if (name == "policy") return {Marker::policy, specialized};
@@ -350,6 +358,22 @@ VariantSide variant_tag(const sema::World& world, QualType type) {
   if (name == "first_t") return VariantSide::first;
   if (name == "second_t") return VariantSide::second;
   return VariantSide::none;
+}
+
+bool tracked_variant_helper(const sema::World& world, const OwnershipPolicy& policy, QualType type) {
+  if (policy.variants.empty()) return false;
+  const auto [kind, helper] = marker(world, class_entity(world, type));
+  if (kind != Marker::variant_storage && kind != Marker::variant_member_cleanup) return false;
+  const std::size_t arity = kind == Marker::variant_storage ? 2 : 1;
+  if (helper->args.size() != arity || std::ranges::any_of(helper->args, [](const auto& argument) {
+        return argument.kind != ast::TemplateArgKind::type;
+      }))
+    return false;
+  const auto first = world.types.canonical(helper->args[0].type);
+  if (kind == Marker::variant_member_cleanup)
+    return std::ranges::binary_search(policy.variant_member_types, first);
+  return std::ranges::binary_search(policy.variant_storage_types,
+                                    std::pair{first, world.types.canonical(helper->args[1].type)});
 }
 
 const sema::EntityRec* scoped_effect_handler(const sema::World& world, QualType type) {
@@ -551,9 +575,17 @@ PolicyRegistry compose_policy_registry(const sema::World& world,
       report(origin, "a tracked variant requires two unqualified registered owners");
     else if (!out.ownership.transfers_on_move(first) || !out.ownership.transfers_on_move(second))
       report(origin, "a tracked variant requires move-transfer contracts for both alternatives");
-    else
+    else {
       out.ownership.variants.push_back({type, first, second, first_mode, second_mode});
+      out.ownership.variant_storage_types.emplace_back(first, second);
+      out.ownership.variant_member_types.push_back(first);
+      out.ownership.variant_member_types.push_back(second);
+    }
   }
+  auto& member_types = out.ownership.variant_member_types;
+  std::ranges::sort(member_types);
+  member_types.erase(std::ranges::unique(member_types).begin(), member_types.end());
+  std::ranges::sort(out.ownership.variant_storage_types);
   for (const auto& [operation, spec] : operations) {
     if (!compatible(world, out.ownership, operation.first, spec.first))
       report(spec.second, "ownership operation signature does not match its contract and registered resource");
