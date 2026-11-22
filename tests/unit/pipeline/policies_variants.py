@@ -54,12 +54,25 @@ def check(name, text, error=None, other_sources=()):
 
 with tempfile.TemporaryDirectory(prefix="ycxx-variant-flow-") as tmp:
     root = pathlib.Path(tmp)
+    resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+    choices = ((), ("affine",))
+    trap_signals = (-signal.SIGABRT, -signal.SIGILL, -signal.SIGTRAP)
     check("chosen", source)
-    portable = root / "portable"
-    subprocess.run([host, "-std=c++20", "-I", include, root / "chosen.cpp", "-o", portable],
-                   check=True, timeout=90)
-    for args in ((), ("affine",)):
-        subprocess.run([portable, *args], check=True, timeout=10)
+    capability = pathlib.Path(__file__).with_name("policies_variant_capability.cpp").read_text()
+    check("capability", capability)
+    check("capability_grade_exceeded", capability.replace("fx::at_most<Read, 2>", "fx::at_most<Read, 1>"),
+          "exceeds its usage grade of 1")
+
+    chosen = root / "chosen.cpp"
+    guarded = root / "capability.cpp"
+    for program in (chosen, guarded):
+        portable = root / f"{program.stem}-portable"
+        subprocess.run([host, "-std=c++20", "-I", include, program, "-o", portable],
+                       check=True, timeout=90)
+        for args in choices:
+            subprocess.run([portable, *args], check=True, timeout=10)
+    result = subprocess.run([root / "capability-portable", "affine", "wrong-scope"], timeout=10)
+    assert result.returncode in trap_signals
     check("direct_operations", source.replace(
         "      const auto& view = choice.first();\n      read(view);", "      read(choice.first());").replace(
         "    auto receipt = choice.take_first();\n    close(static_cast<Receipt&&>(receipt));",
@@ -152,7 +165,6 @@ int main() {
 }
 """)
 
-    resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
     direct = root / "native.cpp"
     native_text = source.split("int handle(", 1)[0] + native_body
     direct.write_text(native_text)
@@ -164,7 +176,7 @@ int main() {
     check("native_leak", leak_text, "owner variant 'selected' may leave its scope")
     variants = [ycxx, "cxx", "--no-daemon", "-I", include]
     darwin = [*variants, "--target=arm64-apple-darwin"]
-    programs = (direct, root / "chosen.cpp")
+    programs = (direct, chosen, guarded)
     for program in programs:
         mach = root / f"{program.stem}-macho"
         subprocess.run([*darwin, "-fcheck-policies", program, "-o", mach], check=True, timeout=90)
@@ -185,9 +197,11 @@ int main() {
     elif sys.platform == "darwin" and platform.machine() in ("arm64", "aarch64"):
         for program in programs:
             native = root / f"{program.stem}-macho"
-            for args in ((), ("affine",)):
+            for args in choices:
                 subprocess.run([native, *args], check=True, timeout=10)
+        bad_scope = subprocess.run([root / "capability-macho", "affine", "wrong-scope"], timeout=10)
+        assert bad_scope.returncode in trap_signals
         native = root / "unchecked-leak"
         subprocess.run([*darwin, leak, "-o", native], check=True, timeout=90)
         result = subprocess.run([native, "strict", "leak"], timeout=10)
-        assert result.returncode in (-signal.SIGABRT, -signal.SIGILL, -signal.SIGTRAP)
+        assert result.returncode in trap_signals

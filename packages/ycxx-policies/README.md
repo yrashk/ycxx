@@ -149,7 +149,9 @@ move, including moves into and out of that storage. With `-fcheck-policies`, a
 its branches. Pass an accessor result to a registered observer or bind it to a scoped
 shared reference. Use the result of a take operation to initialize an owner or pass it
 to a registered consumer. A live shared borrow prevents extraction, and a live linear
-alternative must be discharged or transferred on every path out of scope.
+alternative must be discharged or transferred on every path out of scope. A scoped capability
+token can be an alternative. Its registered observers can keep effect bounds and usage grades
+when called from that branch.
 
 ## Scoped capabilities
 
