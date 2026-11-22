@@ -1618,6 +1618,18 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
 - Tests: `tests/own/abi` (5), `tests/own/classes/s5-byvalue-lifetimes`, `-temporaries`;
   s1-byvalue-params and -return pass.
 
+## Local class prvalue selection (#740)
+
+- The built-in `?:` or comma operator can initialize an automatic class object directly
+  ([expr.cond], [expr.comma], [dcl.init.general]). The conditional evaluates one arm and both
+  arms use the destination's storage. Comma evaluates its left operand before initializing that
+  storage from its right operand. Deleted copies and moves are permitted.
+- The result starts its lifetime before cleanup. The selected arm's temporaries are destroyed in
+  reverse order before the older condition temporaries ([class.temporary]). This slice supports
+  nonthrowing initializers and cleanup. More general cleanup during unwinding remains in #219.
+- Class selection in nested initializer contexts and other conditionally created temporaries
+  remain under #740 and #157. The direct automatic cases are in `tests/own/class-selection/`.
+
 ## Braced arguments in free function overload resolution (#231, 2026-11-20)
 
 - Free non-template candidates can rank a braced argument as a conversion sequence. An empty
