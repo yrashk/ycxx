@@ -7523,6 +7523,7 @@ public:
         return t.specialization_type(pattern, *args);
       };
       bool unsupported = false;
+      bool ambiguous_base = false;
       if (found && found->member && found->member->is_function) {
         const bool rvalue = object.cat() != ValueCategory::lvalue;
         const QualType target = types().class_type(found->owner);
@@ -7561,8 +7562,8 @@ public:
         if (fn.params.size() != 1) continue;
         const QualType parameter = fn.params.front();
         const QualType target = types().referee(parameter);
-        // Ranking an ambiguous base conversion requires retaining the candidate. Until that
-        // conversion is supported, diagnose this subset instead of selecting another overload.
+        // An exact match outranks a repeated-base conversion. Keep the diagnostic for
+        // the remaining cases until repeated-base conversions participate in ranking.
         Ex binding_object = object;
         if (binding_object.cat() == ValueCategory::prvalue)
           binding_object.info.category = ValueCategory::xvalue;  // after temporary materialization
@@ -7573,7 +7574,7 @@ public:
           int paths = 0;
           base_path(types().class_of(lt), types().class_of(target), paths);
           if (paths > 1) {
-            unsupported = true;
+            ambiguous_base = true;
             continue;
           }
         }
@@ -7582,7 +7583,9 @@ public:
         unsupported |= is_template || rank.rank >= Ics::user_defined;
         viable.push_back({rank, target, &candidate});
       }
-      if (unsupported) {
+      if (unsupported || (ambiguous_base && std::ranges::none_of(viable, [](const UnaryCandidate& c) {
+            return c.rank.rank == 0;
+          }))) {
         diag(op_at, Diag::ref_qualified_operator_candidates);
         return Ex{NodeId::none, begin, end};
       }
