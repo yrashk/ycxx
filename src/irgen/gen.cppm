@@ -1484,7 +1484,7 @@ class Gen {
           op == ast::UnaryOp::post_dec)
         return 2;
     }
-    int e = is<ast::DynamicCastVoid>(a) ? 1 : 0;
+    int e = is<ast::DynamicCastVoid>(a) || is<ast::DynamicCastPointer>(a) ? 1 : 0;
     if (is<ast::ImplicitConversion>(a)) {
       auto c = get<ast::ImplicitConversion>(a);
       if (c.conversion == ast::ConversionKind::lvalue_to_rvalue && !is_nullptr(c.info.type)) e = 1;
@@ -1522,6 +1522,7 @@ class Gen {
     if (is<ast::DefaultArg>(a)) return pinned([&] { return rvalue_or_void(child(a, get<ast::DefaultArg>(a).arg)); });
     if (is<ast::ImplicitConversion>(a)) return conversion(a);
     if (is<ast::DynamicCastVoid>(a)) return dynamic_cast_void(a);
+    if (is<ast::DynamicCastPointer>(a)) return dynamic_cast_pointer(a);
     if (is<ast::Unary>(a)) return unary(a);
     if (is<ast::Binary>(a)) return binary(a);
     if (is<ast::OrderedBinary>(a)) return ordered(a);
@@ -1604,6 +1605,52 @@ class Gen {
     ValueId operands[] = {state_, b_.param(adjust, 1)};
     const ValueId most_derived = b_.result(emit(ir::Op::rtti__most_derived_addr, results, operands));
     br(join, {most_derived});
+    enter(join);
+    return b_.param(join, 1);
+  }
+
+  // These expressions produce null in both evaluation modes. Their operands still
+  // need evaluating, for example when a call supplies a std::nullptr_t result.
+  bool known_null_pointer(At a) {
+    a = strip_parens(a);
+    if (is<ast::ValueInit>(a)) return true;
+    if (is<ast::Literal>(a)) return in_.values.is<ast::VNullptr>(get<ast::Literal>(a).value);
+    if (!is<ast::ImplicitConversion>(a)) return false;
+    const auto c = get<ast::ImplicitConversion>(a);
+    if (c.conversion == ast::ConversionKind::null_pointer) return true;
+    return (c.conversion == ast::ConversionKind::qualification || c.conversion == ast::ConversionKind::pointer) &&
+           known_null_pointer(child(a, c.operand));
+  }
+
+  ValueId dynamic_cast_pointer(At a) {
+    const auto cast = get<ast::DynamicCastPointer>(a);
+    const At operand = child(a, cast.operand);
+    const ValueId object = rvalue(operand);
+    const auto result = cast.info.type;
+    const ValueId null = constant(result, facts_.null_constant(result));
+    if (known_null_pointer(operand)) return null;
+
+    const ValueId nonnull = pure(ir::Op::tobool, facts_.bool_type(), {object});
+    const ir::BlockId runtime = new_block({info(operand).type}), join = new_block({result});
+    cond_br(nonnull, edge(runtime, {object}), edge(join, {null}));
+    enter(runtime);
+    auto& in = facts_.interners();
+    const auto opaque = facts_.pointer_to(ast::builtin(in, ast::Builtin::void_, ast::Cv::const_));
+    const auto result_pointer = facts_.pointer_to(ast::builtin(in, ast::Builtin::void_));
+    const auto rtti_pointer = facts_.pointer_to(ast::builtin(in, ast::Builtin::unsigned_char));
+    const auto erase_type = [&](ValueId pointer) {
+      return pure(ir::Op::ptr_cast, opaque, {pointer}, {word(ty(opaque))});
+    };
+    const auto rtti = [&](ast::EntityId entity) {
+      return erase_type(pure(ir::Op::global, rtti_pointer, {}, {word(entity)}));
+    };
+    // Itanium ABI §2.9.7: the source is a unique public nonvirtual base at offset zero.
+    // The runtime takes the original subobject address, including secondary subobjects.
+    const ValueId args[] = {erase_type(b_.param(runtime, 1)), rtti(cast.source_rtti), rtti(cast.target_rtti),
+                            int_constant(facts_.ptrdiff_type(), 0)};
+    const ValueId address = *call_fn(cast.runtime, result_pointer, args, 0);
+    const ValueId adjusted = pure(ir::Op::ptr_cast, result, {address}, {word(ty(result))});
+    br(join, {adjusted});
     enter(join);
     return b_.param(join, 1);
   }
