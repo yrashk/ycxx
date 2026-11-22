@@ -4037,7 +4037,8 @@ private:
     } else if (typedef_name) {
       std::tie(name, name_at) = *typedef_name;
     } else {
-      if (scoped || !definition || p_->in_class(k_) || td || !(ps_.is(Tk::l_brace) || ps_.is(Tk::colon))) {
+      if (scoped || !definition || (p_->in_class(k_) && cls == EntityId::none) || td ||
+          !(ps_.is(Tk::l_brace) || ps_.is(Tk::colon))) {
         s_.diag(ps_.pos(), Diag::expected_unqualified_id);
         return bad();
       }
