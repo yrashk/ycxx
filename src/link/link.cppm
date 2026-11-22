@@ -431,6 +431,19 @@ std::optional<std::uint32_t> unwind_frame_size(const obj::object& o, std::uint32
 
 // A tentative definition, as the Mach-O reader represents one: a weak definition alone at the
 // start of a __DATA,__common zero-fill section.
+// Sections whose contents the linker does not place as they are (debug info, __LD, __LLVM, and
+// __eh_frame, which it rebuilds). Their global symbols define nothing, in archive selection too.
+bool linker_dropped(const obj::section& s) {
+  return (s.flags & obj::section_flags::debug) != 0 || s.segment == "__LD" || s.segment == "__LLVM" ||
+         (s.segment == "__TEXT" && s.name == "__eh_frame");
+}
+
+// A global definition symbol resolution uses: one in a placed section of the object.
+bool linker_defines(const obj::object& o, const obj::symbol& s) {
+  return s.defined() && s.bind != obj::binding::local && *s.section < o.sections.size() &&
+         !linker_dropped(o.sections[*s.section]);
+}
+
 bool linker_is_common(const obj::object& o, const obj::symbol& s) {
   const auto& sec = o.sections[*s.section];
   return s.offset == 0 && sec.segment == "__DATA" && sec.name == "__common" && sec.is_zerofill();
@@ -487,10 +500,7 @@ private:
 
   void fail(std::string m) { errors_.push_back({std::move(m)}); }
 
-  static bool dropped(const obj::section& s) {
-    return (s.flags & obj::section_flags::debug) != 0 || s.segment == "__LD" || s.segment == "__LLVM" ||
-           (s.segment == "__TEXT" && s.name == "__eh_frame");
-  }
+  static bool dropped(const obj::section& s) { return linker_dropped(s); }
 
   static bool is_common(const obj::object& o, const obj::symbol& s) { return linker_is_common(o, s); }
 
@@ -1348,7 +1358,8 @@ std::expected<std::vector<obj::object>, std::string> select_archive_members(std:
       if (s.bind == obj::binding::local) continue;
       const auto name = s.name_view();
       if (!s.defined()) referenced.emplace(name);
-      else if (s.weak && *s.section < o.sections.size() && linker_is_common(o, s)) tentative.emplace(name);
+      else if (!linker_defines(o, s)) continue;
+      else if (s.weak && linker_is_common(o, s)) tentative.emplace(name);
       else defined.emplace(name);
       if (outstanding(name)) queue.emplace_back(name);
     }
@@ -1375,7 +1386,7 @@ std::expected<std::vector<obj::object>, std::string> select_archive_members(std:
       auto object = obj::macho::read_object(data, std::format("{}({})", input->name, member.name));
       if (!object) return std::unexpected(std::move(object.error()));
       if (!std::ranges::any_of(object->symbols, [&](const obj::symbol& s) {
-            return s.defined() && s.bind != obj::binding::local && s.name_view() == name;
+            return linker_defines(*object, s) && s.name_view() == name;
           }))
         return std::unexpected(
             std::format("{}: archive index symbol '{}' is not defined by the member", object->name, name));

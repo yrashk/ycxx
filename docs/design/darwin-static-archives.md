@@ -25,7 +25,9 @@ queue. The selected members follow the ordinary objects in selection order. Name
 outstanding go to the dylibs afterwards (libSystem, then libc++abi), so an archive member wins
 over libSystem as it does for the system linker, which searches libSystem last.
 
-A member is decoded only when selected, and must define the name that selected it. Container
+A global in a section the linker drops (debug, `__LD`, `__LLVM`, `__eh_frame`) defines nothing
+here, as in final resolution: it neither satisfies a name nor counts as the selected member's
+definition. A member is decoded only when selected, and must define the name that selected it. Container
 and index errors are reported whether or not any member would be selected.
 
 Selection reads the ranlib index; the system linker reads the members' symbol tables instead.
