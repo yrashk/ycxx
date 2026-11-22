@@ -1625,7 +1625,11 @@ public:
     p_->dependent_type_trait_operands_.emplace(loc.item, loc.offset);
   }
   bool replaying_type_trait_operand(engine::Loc loc) override {
-    return type_trait_demand && p_->dependent_type_trait_operands_.contains({loc.item, loc.offset});
+    return type_trait_demand && dependent_type_trait_operand(loc);
+  }
+  // Whether the type trait at `loc` had dependent operands where its template defines it.
+  bool dependent_type_trait_operand(engine::Loc loc) const {
+    return p_->dependent_type_trait_operands_.contains({loc.item, loc.offset});
   }
   std::optional<bool> type_trait_at_demand(EntityId c, engine::Loc loc) override {
     if (!replaying_type_trait_operand(loc)) return std::nullopt;
@@ -2156,6 +2160,12 @@ public:
   bool is_immediate_function(EntityId f) override { return p_->is_immediate_function(f, p_->end()); }
   bool is_complete(EntityId c) override { return p_->is_complete(c, p_->end(), true, true); }
   bool is_complete_at_source(EntityId c) override { return at_.is_complete_at_source(c); }
+  // A type trait whose operands were dependent where the template defines it is answered at the
+  // point of instantiation, the end ([temp.point]); a concrete one keeps its definition's answer.
+  std::optional<bool> type_trait_at_demand(EntityId c, engine::Loc loc) override {
+    if (!at_.dependent_type_trait_operand(loc)) return std::nullopt;
+    return p_->is_complete(c, p_->end(), true, true);
+  }
   engine::Loc source_loc(engine::Loc loc, u32 offset) override { return at_.source_loc(loc, offset); }
   bool type_trait_instantiation_failed(EntityId e) override { return at_.type_trait_instantiation_failed(e); }
   std::optional<ConstId> constant_value(EntityId v) override { return p_->constant_value(v, p_->end()); }
