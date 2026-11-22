@@ -249,6 +249,7 @@ public:
   // ABI attributes on declarations outside the entity's ordinary declaration records.
   bool has_unapplied_declaration_attributes(EntityId e) const { return unapplied_declaration_attributes_.contains(e); }
   bool peer_root_vtable_visible(EntityId cls) const;
+  bool peer_pure_dispatch(EntityId cls) const;
   // Whether an ordinary written definition can also supply its ELF base-object entry point (#136).
   bool supports_base_object_variant(EntityId function, const std::set<EntityId>& uncertain_layouts) const;
 
@@ -1560,6 +1561,7 @@ public:
     return p_->defining_enum_.first == e ? p_->defining_enum_.second : nullptr;
   }
   std::set<EntityId> uncertain_object_layouts() override { return p_->uncertain_object_layouts(); }
+  bool peer_pure_dispatch(EntityId cls) override { return p_->peer_pure_dispatch(cls); }
   std::vector<DeclId> visible_decls(ast::NameId name, std::span<const EntityId> directives = {}) override {
     std::vector<std::string> paths;
     for (EntityId ns : directives) paths.push_back(p_->namespace_path(ns));
@@ -2227,6 +2229,7 @@ public:
   const sema::Classes& classes() override { return p_->classes(); }
   sema::CopyAssignment require_copy_assignment(EntityId f) override { return p_->require_copy_assignment(f); }
   std::set<EntityId> uncertain_object_layouts() override { return at_.uncertain_object_layouts(); }
+  bool peer_pure_dispatch(EntityId cls) override { return at_.peer_pure_dispatch(cls); }
   bool class_layout_uncertain(EntityId c) override { return at_.class_layout_uncertain(c); }
   bool explicit_specialization(EntityId c) override { return at_.explicit_specialization(c); }
   const sema::ClassRec& publish_class(EntityId c, sema::ClassRec r) override { return p_->publish_class(c, std::move(r), item_); }
@@ -7151,6 +7154,90 @@ bool Program::peer_root_vtable_visible(EntityId cls) const {
     if (layout_attribute(*r_, item.begin, item.end, LayoutAttributes::any)) return false;
   }
   return true;
+}
+
+bool Program::peer_pure_dispatch(EntityId cls) const {
+  using enum lex::Tk;
+  const auto* record = classes_.find(cls);
+  if (!record || !record->defined || !record->is_abstract() || !sema::native_virtual_class(*record, w_->types) ||
+      record->peer_virtual_layout != sema::PeerVirtualLayout::none ||
+      record->union_ || record->closure || !record->bases.empty() || !record->fields.empty() ||
+      !record->types.empty() || !record->friends.empty() || record->unapplied_layout || record->explicit_alignment)
+    return false;
+  const auto& owner = w_->entities.rec(cls);
+  const auto definition = class_items_.find(std::to_underlying(cls));
+  if (owner.linkage != ast::Linkage::external || owner.templ != EntityId::none ||
+      !is_namespace(owner.scope) || unnamed(namespace_path(owner.scope)) ||
+      w_->ins.names.spelling(owner.name).empty() || definition == class_items_.end()) return false;
+  const auto& head = items_->items[definition->second];
+  const auto key = r_->tokens[head.begin].kind;
+  if ((key != kw_struct && key != kw_class) || head.template_depth || head.specialization ||
+      layout_attribute(*r_, head.brace_end, head.end, LayoutAttributes::any) || !peer_root_vtable_visible(cls)) return false;
+
+  const auto integer = [&](QualType type) {
+    const auto builtin = w_->types.builtin_of(type);
+    return builtin == sema::Builtin::int_ || builtin == sema::Builtin::unsigned_int;
+  };
+  // Sema canonicalizes aliases and noexcept conditions and can erase ABI attributes. Read the
+  // whole declaration to admit only a directly written fixed integer prototype.
+  const auto plain_signature = [&](const items::Item& source, bool has_parameter) {
+    const auto tokens = std::span(r_->tokens).subspan(source.begin, source.end - source.begin);
+    std::size_t at = 0;
+    const auto accept = [&](lex::Tk kind) {
+      if (at == tokens.size() || tokens[at].kind != kind) return false;
+      ++at;
+      return true;
+    };
+    const auto written_int = [&] {
+      if (accept(kw_signed) || accept(kw_unsigned)) {
+        accept(kw_int);
+        return true;
+      }
+      if (!accept(kw_int)) return false;
+      if (!accept(kw_signed)) accept(kw_unsigned);
+      return true;
+    };
+    if (!accept(kw_virtual) || !written_int() || !accept(identifier) || !accept(l_paren)) return false;
+    if (has_parameter) {
+      if (!written_int()) return false;
+      accept(identifier);
+    } else {
+      accept(kw_void);
+    }
+    if (!accept(r_paren)) return false;
+    accept(kw_const);
+    return accept(kw_noexcept) && accept(equal) && accept(int_lit) && r_->spelling(tokens[at - 1]) == "0" &&
+           accept(semi) && at == tokens.size();
+  };
+
+  unsigned slots = 0;
+  for (const auto& member : record->members) {
+    if (!member.is_virtual) {
+      if (member.copy_assignment == sema::CopyAssignment::none || member.explicit_defaulted_assignment ||
+          member_decl(member.entity)) return false;
+      continue;
+    }
+    if (++slots > 2 || !member.is_pure || member.is_final || record->access_of(member.entity) != ast::Access::public_)
+      return false;
+    const auto& entity = w_->entities.rec(member.entity);
+    const auto signature = w_->types.rec(member.type);
+    if (entity.kind != sema::EntityKind::function || entity.scope != cls || entity.templ != EntityId::none ||
+        entity.linkage != ast::Linkage::external || entity.lang != LangLinkage::cxx || !signature.fn_noexcept ||
+        signature.variadic || signature.fn_ref != ast::RefQual::none || signature.params.size() > 1 ||
+        (signature.fn_cv != sema::Cv::none && signature.fn_cv != sema::Cv::const_) ||
+        !integer(signature.inner) || !std::ranges::all_of(signature.params, integer)) return false;
+    // Rechecked after whole-unit analysis by native emission. A competing definition or an
+    // ABI attribute on a qualified friend must not turn this into a direct entry or another ABI.
+    const auto declarations = decls_.find(std::to_underlying(member.entity));
+    if (declarations == decls_.end() || declarations->second.size() != 1) return false;
+    const auto& [item, decl] = declarations->second.front();
+    constexpr u16 excluded = sema::decl_flag::definition | sema::decl_flag::inline_ | sema::decl_flag::deleted |
+                             sema::decl_flag::template_;
+    const auto& source = items_->items[item];
+    if ((decl.flags & excluded) || source.kind != ItemKind::declaration || source.parent != definition->second ||
+        source.names.size() != 1 || !plain_signature(source, !signature.params.empty())) return false;
+  }
+  return slots != 0;
 }
 
 bool Program::supports_base_object_variant(EntityId function, const std::set<EntityId>& uncertain_layouts) const {
