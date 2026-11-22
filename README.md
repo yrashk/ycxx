@@ -41,6 +41,9 @@ and Mach-O linker on arm64 macOS, where `arm64-apple-darwin` is the default targ
 object files from Clang or GCC. Errors are reported as
 `file:line:col: error: …`.
 
+The arm64 Mach-O linker preserves supported cleanup-free DWARF frames from input objects.
+[Mach-O unwind support #72](https://github.com/yrashk/ycxx/issues/72)
+
 ```sh
 tools/build
 build/bin/ycxx cxx hello.cpp -o hello && ./hello
@@ -54,6 +57,10 @@ instantiation. Concrete constant template arguments can use braced conversions s
 
 Functional conversions can construct namespace-qualified class-template specializations with
 parentheses or braces, including through namespace aliases. [#697](https://github.com/yrashk/ycxx/issues/697)
+
+Class templates at namespace scope can delete their copy assignment on its first in-class
+declaration when the member has no ref-qualifier. Specializations retain the deleted overload.
+[#709](https://github.com/yrashk/ycxx/issues/709)
 
 C++26 reflection annotations on class heads and ordinary function declarations accept
 constant payloads and retain their types for compiler consumers.
@@ -163,8 +170,10 @@ cleanup-free ycxx functions with fixed scalar signatures and reach a handler in 
 An eligible ycxx function can also throw an `int` to a hosted peer's handler.
 A host-linked ycxx function can use one `catch (...)` to return an integer literal when
 a direct call on its parameter to an externally defined `int(int)` function throws.
+A host-linked void function can also destroy one initialized aggregate local on both exits
+from an external `void()` call and let the original exception reach a peer handler.
 [#572](https://github.com/yrashk/ycxx/issues/572) · [#578](https://github.com/yrashk/ycxx/issues/578)
-· [#583](https://github.com/yrashk/ycxx/issues/583)
+· [#583](https://github.com/yrashk/ycxx/issues/583) · [#663](https://github.com/yrashk/ycxx/issues/663)
 
 Both targets support cooked integer user-defined literals through namespace-scope literal
 operators with an `unsigned long long` parameter, including constant evaluation.
@@ -375,14 +384,17 @@ written default member initializer are value-initialized.
 macros, conditionals, `_Pragma` and the predefined macros. `ycxx cxx -E` matches Clang's output.
 `ycxx cxx -E --target=x86_64-linux-gnu` selects Linux macros and glibc's multiarch include path
 and preprocesses glibc's `<stdio.h>`. Linux `<stdarg.h>` supplies the `va_list` declaration, and
-direct `<float.h>` and `<limits.h>` provide the target's numeric limits.
+direct `<float.h>` and `<limits.h>` provide the target's numeric limits. glibc's `<stdint.h>` compiles
+(#657); `<inttypes.h>` does not yet (#664).
 [#475](https://github.com/yrashk/ycxx/issues/475)
 
 **Incremental builds through a resident daemon.** `ycxx cxx` hands its work to a per-project
 `ycxx daemon` (`YCXX_NO_DAEMON=1` runs in-process), which watches the files it has read and keeps
 its analysis between commands. A repeated build re-runs nothing, and an edit re-runs only what
 it affects, through code generation and the link. The daemon serves concurrent requests on a
-thread pool, and its output is byte for byte that of a cold, in-process build.
+thread pool, and its output is byte for byte that of a cold, in-process build. The daemon, its file
+watcher (FSEvents on macOS, inotify on Linux), the engine trace and the LSP server below work the
+same on both hosts. [#659](https://github.com/yrashk/ycxx/issues/659)
 
 **See what the engine does.** `ycxx cxx --trace-engine a.cpp` (or `YCXX_TRACE_ENGINE=stream`)
 prints every query the build went through as a colored tree on stderr: what ran, what was

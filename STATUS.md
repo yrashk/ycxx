@@ -294,6 +294,8 @@ What is true of the code today. Work in progress and its owners are tracked in
   as black-box inputs. A common symbol becomes a weak definition in its own `__DATA,__common`
   zero-fill section. The reader rejects absolute and indirect symbols, alignments above 2^15,
   scattered and TLV relocations, and section-relative relocations other than UNSIGNED.
+  A SUBTRACTOR must be followed immediately by a non-PC-relative UNSIGNED at the same address
+  and width. Both records describe a 32-bit or 64-bit field. [#702](https://github.com/yrashk/ycxx/issues/702)
 - `ycxx.link` (`src/link/`): `link(objects, options) -> expected<bytes, errors>`.
   - Diagnoses duplicate and undefined symbols and a missing entry point. A strong definition beats
     a weak one; common symbols merge to the largest. `__mh_execute_header` and `___dso_handle` are
@@ -316,11 +318,16 @@ What is true of the code today. Work in progress and its owners are tracked in
     (literals, initializers, guarded statics) with ycxx's and the system's linker, dead stripping
     included, in both object orders, with a host-compiler peer and an archive member. Templates,
     closures and static locals of inline functions remain strong (#124).
-  - Not yet: unwind info (`__compact_unwind` and `__eh_frame` input sections are dropped, so C++
-    exceptions cannot cross ycxx-linked frames), thread-local variables, dead stripping, literal
-    merging, branch islands beyond ±128 MiB, other dylibs' re-exports, incremental relinking, and
-    import addends outside 0..255 (`DYLD_CHAINED_IMPORT_ADDEND`). `__LLVM` (embedded bitcode),
-    `__LD` and debug sections are dropped.
+  - The linker preserves cleanup-free `__TEXT,__eh_frame` contributions with the supported
+    PC-relative CIE and FDE format, including address differences and multiple input objects.
+    `unit.link` checks the linked ranges and walks through a non-frame-pointer arm64 bridge
+    with the system unwinder on macOS. Compact unwind, personalities and LSDA are tracked in
+    [#72](https://github.com/yrashk/ycxx/issues/72). AArch64 frame emission and native exception
+    lowering are tracked in [#648](https://github.com/yrashk/ycxx/issues/648).
+  - Not yet: thread-local variables, dead stripping, literal merging, branch islands beyond
+    ±128 MiB, other dylibs' re-exports, incremental relinking, and import addends outside
+    0..255 (`DYLD_CHAINED_IMPORT_ADDEND`). `__LLVM` (embedded bitcode), `__LD` and debug sections
+    are dropped.
 - Objects from ycxx, Clang or GCC are linked by `ycxx cxx a.o b.o -o out`, with libSystem's
   exports read from the SDK (`$SDKROOT`, else `xcrun --show-sdk-path`). There is no separate
   linker binary (DECISIONS §4.7: one binary, many fronts).
@@ -672,10 +679,15 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
   freestanding linker retains these records in the read-only segment. The hosted linker
   supplies unwind discovery for the peer who throws and catches the exception.
   `unit.linux_cleanup_free_unwind` checks mixed hosted execution, omitted frames, and native
-  source, staged, and daemon link parity. Standalone unwind discovery, native handlers, and
-  exceptional cleanups remain under #89.
+  source, staged, and daemon link parity. Standalone unwind discovery and broader handler and
+  exceptional-cleanup support remain under #89.
   [#572](https://github.com/yrashk/ycxx/issues/572) · [#89](https://github.com/yrashk/ycxx/issues/89)
   · [#558](https://github.com/yrashk/ycxx/issues/558)
+- A host-linked ordinary void function can destroy one initialized aggregate local with a
+  nonthrowing destructor when its subsequent direct external `void()` call throws. The normal
+  continuation destroys it once as well. The cleanup-only landing pad resumes the original
+  exception; the mixed-object test checks both paths and the peer's typed handler.
+  [Design](docs/design/linux-hosted-catch-all.md#hosted-local-cleanup-663) · [#663](https://github.com/yrashk/ycxx/issues/663)
 - Explicit native static links keep the first input ELF COMDAT group for each signature. The reader
   validates group membership, including relocation sections, and selection precedes startup and
   layout. `unit.linux_elf_comdat` checks whole-group selection, retained references, startup and
@@ -2074,6 +2086,14 @@ Fable decided the representation (ast.md §6.6); the Opus session wrote the code
   limits. Other libc providers keep their normal `<limits.h>`, and the resource can
   supply compiler limits when a sysroot has no provider ([climits.syn]).
 
+## glibc `<stdint.h>` (#657)
+
+- The integer-constant macros (`__INT64_C(c)` and the rest) are predefined as `c ## L`, GCC's and
+  glibc's spelling, so glibc's identical redefinitions in `<stdint.h>` are valid
+  ([cpp.replace.general]/2). The expansions are Clang's. `<inttypes.h>` still clashes with
+  libycxx's limit macros (#664). Tests: `own/pp/predefined-int-c-redefine` (both targets) and
+  `own/headers/glibc-stdint` (Linux).
+
 ## Templates, ζ step 8: template template parameters and `__make_integer_seq` (#88, #208, 2026-11-19)
 
 Fable decided the representation (ast.md §6.7); the Opus session wrote the code.
@@ -2340,6 +2360,10 @@ What the process allocates, attributed to the engine's cells, in the trace and t
   in order, and returns `*this`. Deleted copy assignments participate in overload resolution.
   [Design](docs/design/implicit-copy-assignment.md#first-declaration-defaulted-copy-assignment) ·
   [#244](https://github.com/yrashk/ycxx/issues/244)
+- Namespace-scope class templates accept a deleted copy assignment without a ref-qualifier
+  on the first in-class declaration. Specializations preserve deletion and diagnose a selected
+  deleted overload.
+  [#709](https://github.com/yrashk/ycxx/issues/709)
 
 ## Ordinary virtual declarations (#309, 2026-11-21)
 
