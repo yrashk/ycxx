@@ -88,6 +88,7 @@ struct FunctionInput {
   bool native_array_delete = false;  // the backend's Linux x86-64 cookie-free array deletion
   bool native_array_new = false;  // the backend's Linux x86-64 allocation in a certified frame
   std::span<const ast::EntityId> nonthrowing_functions{};  // native declarations, sorted by entity
+  ast::EntityId root_destructor_table = ast::EntityId::none;
 };
 
 struct FunctionIr {
@@ -621,6 +622,18 @@ class Gen {
       });
     } else if (is<ast::Destructor>(a)) {
       auto d = get<ast::Destructor>(a);
+      if (fn_.root_destructor_table != ast::EntityId::none) {
+        // Itanium ABI §2.5.2: offset-to-top and RTTI precede the root's address point.
+        // [class.cdtor]: destruction of a derived object now dispatches as the root.
+        const auto byte = ast::builtin(facts_.interners(), ast::Builtin::unsigned_char);
+        const auto table_type = facts_.pointer_to(byte);
+        const auto vptr_type = facts_.pointer_to(table_type);
+        const auto table = pure(ir::Op::global, table_type, {}, {word(fn_.root_destructor_table)});
+        const auto header_size = int_constant(facts_.ptrdiff_type(), 2 * ast::x86_64_linux.pointer_size);
+        const auto address_point = pure(ir::Op::ptr_add, table_type, {table, header_size}, {word(ty(byte))});
+        const auto vptr = pure(ir::Op::ptr_cast, vptr_type, {*this_}, {word(ty(vptr_type))});
+        store({vptr, table_type}, address_point);
+      }
       for (ast::Child c : ast_.children(d.members)) epilogue_.push_back(child(a, c));
       stmt(child(a, d.body));
     } else if (is<ast::DeclStmt>(a)) {

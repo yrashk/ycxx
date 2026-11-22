@@ -587,6 +587,11 @@ and the derived class has one `int` field and one override. The caller can bind 
 and expose it to the peer.
 [#309](https://github.com/yrashk/ycxx/issues/309)
 
+Linux x86-64 emits all three virtual destructor entries for a fieldless, baseless root when
+a peer defines its earlier key function. Complete and base destruction restore the root's
+vptr before calling the nonthrowing observer. The deleting entry then uses global sized
+`operator delete`. [#136](https://github.com/yrashk/ycxx/issues/136)
+
 ### Not yet
 
 - The standard library and its headers. On macOS, C headers such as `<stdio.h>` compile without
@@ -599,7 +604,7 @@ and expose it to the peer.
   tuple-like structured bindings and structured bindings to bit-fields or inherited members,
   inheriting constructors, and base packs or multiple bases in a class template.
 - Broader native construction, virtual dispatch and table emission, virtual base classes,
-  `typeid` and `dynamic_cast`, and virtual destructor entry points.
+  `typeid` and `dynamic_cast`, and virtual destruction for other class shapes.
   [#309](https://github.com/yrashk/ycxx/issues/309) · [#310](https://github.com/yrashk/ycxx/issues/310) ·
   [#294](https://github.com/yrashk/ycxx/issues/294) · [#136](https://github.com/yrashk/ycxx/issues/136)
 - Member class and alias templates, conversion function templates, and constraints on class

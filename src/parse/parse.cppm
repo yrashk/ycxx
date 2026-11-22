@@ -251,6 +251,9 @@ public:
   bool peer_root_vtable_visible(EntityId cls) const;
   bool peer_automatic_derived_tables(EntityId cls) const;
   bool peer_pure_dispatch(EntityId cls) const;
+  // A fieldless virtual root whose destructor may be emitted against a peer's table (#136).
+  bool peer_root_destructor_producer(EntityId cls) const;
+  bool peer_root_destructor_observer(EntityId function, EntityId cls) const;
   // Whether an ordinary written definition can also supply its ELF base-object entry point (#136).
   bool supports_base_object_variant(EntityId function, const std::set<EntityId>& uncertain_layouts) const;
 
@@ -1222,6 +1225,7 @@ private:
   void validate_class_alignment(u32 item, EntityId cls, sema::ClassRec& record, std::vector<engine::Diagnostic>& diags);
   bool has_unapplied_class_layout(u32 item, const ClassContent& content) const;
   bool in_attributed_namespace(u32 item) const;
+  std::optional<EntityId> peer_root_destructor_key(EntityId cls) const;
   bool class_layout_uncertain(EntityId cls, const sema::ClassRec& record, u32 point) const;
   std::optional<QualType> copy_move_constructor_parameter(const sema::MemberDeclRec& member, QualType owner) const;
   std::optional<QualType> assignment_parameter(const sema::MemberDeclRec& member, QualType owner) const;
@@ -5064,8 +5068,29 @@ private:
       return bad();
     }
     if (m->is_virtual) {
-      s_.diag(name_at, Diag::virtual_definition);
-      return bad();
+      if (const auto prior = p_->declaration(m->entity, k_); prior && (prior->flags & sema::decl_flag::definition)) {
+        s_.diag(name_at, Diag::redefinition, m->name);
+        return bad();
+      }
+      if (!p_->peer_root_destructor_key(c) || flags || template_ || explicit_ || inst_ || !it_->has_body() ||
+          p_->region().tokens[it_->body_begin].kind != Tk::l_brace ||
+          p_->in_attributed_namespace(k_) ||
+          layout_attribute(p_->region(), it_->begin, it_->body_begin, LayoutAttributes::any) ||
+          !Program::encloses(p_->ns_of(k_), p_->namespace_path(owner)) ||
+          fs.cv != sema::Cv::none || !fs.params.empty() || fs.variadic) {
+        s_.diag(name_at, Diag::virtual_definition);
+        return bad();
+      }
+      ps_.exception_specifier(fs, ok);
+      if (!ok) return bad();
+      if (fs.has_noexcept && !ps_.noexcept_value(fs.noexcept_condition, ok)) {
+        if (ok) s_.diag(name_at, Diag::conflicting_declaration, m->name);
+        return bad();
+      }
+      if (!fs.has_noexcept || fs.noexcept_condition || !ps_.at_end()) {
+        s_.diag(name_at, Diag::virtual_definition);
+        return bad();
+      }
     }
     // Its record, rebuilt in this frame (the declaration's lists belong to the class's item).
     ast::DeclSema sem = *mem;
@@ -7417,6 +7442,113 @@ bool Program::peer_pure_dispatch(EntityId cls) const {
         source.names.size() != 1 || !plain_signature(source, !signature.params.empty())) return false;
   }
   return slots != 0;
+}
+
+std::optional<EntityId> Program::peer_root_destructor_key(EntityId cls) const {
+  using enum lex::Tk;
+  if (r_->has_clang_attribute_pragma) return std::nullopt;
+  const auto* record = classes_.find(cls);
+  if (w_->target.triple != ast::x86_64_linux.triple || !record || !record->defined ||
+      !record->virtual_destructor || !record->destructor_noexcept.value_or(false) ||
+      !record->destructor_usable || record->is_abstract() || record->union_ || record->closure ||
+      !record->bases.empty() || !record->fields.empty() || !record->types.empty() || !record->friends.empty() ||
+      record->unapplied_layout || record->explicit_alignment) return std::nullopt;
+
+  const auto& owner = w_->entities.rec(cls);
+  const auto definition = class_items_.find(std::to_underlying(cls));
+  if (owner.linkage != ast::Linkage::external || owner.templ != EntityId::none ||
+      !is_namespace(owner.scope) || unnamed(namespace_path(owner.scope)) ||
+      w_->ins.names.spelling(owner.name).empty() || definition == class_items_.end()) return std::nullopt;
+  const auto& head = items_->items[definition->second];
+  const auto class_key = r_->tokens[head.begin].kind;
+  if ((class_key != kw_struct && class_key != kw_class) || head.template_depth || head.specialization ||
+      layout_may_be_packed(*r_, head.begin, head.brace_end) ||
+      layout_attribute(*r_, head.brace_end, head.end, LayoutAttributes::any) ||
+      !peer_root_vtable_visible(cls)) return std::nullopt;
+
+  // The two directly written public declarations fix the key and the ordinary root ABI.
+  // Reading the tokens avoids accepting an erased annotation, alias or exception condition.
+  constexpr std::array key_tokens{kw_virtual, kw_int, identifier, l_paren, r_paren, kw_noexcept, semi};
+  constexpr std::array destructor_tokens{kw_virtual, tilde, identifier, l_paren, r_paren, kw_noexcept, semi};
+  EntityId key = EntityId::none;
+  EntityId destructor = EntityId::none;
+  for (u32 item : head.members) {
+    const auto& source = items_->items[item];
+    if (source.kind == ItemKind::access_spec) continue;
+    if (source.kind != ItemKind::declaration || source.names.size() != 1 || destructor != EntityId::none)
+      return std::nullopt;
+    const auto decl = std::ranges::find_if(record->members, [&](const sema::MemberDeclRec& member) {
+      const auto written = member_decl(member.entity);
+      return written && index(written->item) == item;
+    });
+    const bool is_destructor = key != EntityId::none;
+    if (decl == record->members.end() || !decl->is_virtual || decl->is_dtor != is_destructor ||
+        record->access_of(decl->entity) != ast::Access::public_ || !asm_label(decl->entity).empty()) return std::nullopt;
+    const auto tokens = std::span(r_->tokens).subspan(source.begin, source.end - source.begin);
+    if (!std::ranges::equal(tokens, is_destructor ? destructor_tokens : key_tokens, std::ranges::equal_to{}, &lex::Tok::kind))
+      return std::nullopt;
+    if (is_destructor) destructor = decl->entity;
+    else key = decl->entity;
+  }
+  if (key == EntityId::none || destructor != record->destructor) return std::nullopt;
+  return key;
+}
+
+bool Program::peer_root_destructor_producer(EntityId cls) const {
+  const auto key = peer_root_destructor_key(cls);
+  if (!key) return false;
+  const auto destructor = classes_.rec(cls).destructor;
+  const auto def = definitions_.find(std::to_underlying(destructor));
+  const auto key_declarations = decls_.find(std::to_underlying(*key));
+  const auto destructor_declarations = decls_.find(std::to_underlying(destructor));
+  return def != definitions_.end() && in_global_scope(def->second) &&
+         key_declarations != decls_.end() && key_declarations->second.size() == 1 &&
+         destructor_declarations != decls_.end() && destructor_declarations->second.size() == 2;
+}
+
+bool Program::peer_root_destructor_observer(EntityId function, EntityId cls) const {
+  using enum lex::Tk;
+  const auto& observer = w_->entities.rec(function);
+  const auto& root = w_->entities.rec(cls);
+  if (observer.kind != sema::EntityKind::function || observer.templ != EntityId::none ||
+      observer.lang != LangLinkage::cxx || observer.linkage != ast::Linkage::external ||
+      observer.scope != root.scope || !asm_label(function).empty() || has_unapplied_declaration_attributes(function))
+    return false;
+  const auto& types = w_->types;
+  const auto signature = types.rec(observer.type);
+  if (!signature.fn_noexcept || signature.variadic || !types.is_void(signature.inner) ||
+      signature.params.size() != 1 || !types.is_pointer(signature.params.front())) return false;
+  const auto pointee = types.pointee(signature.params.front());
+  if (!types.is_class(pointee) || types.class_of(pointee) != cls || sema::Types::cv(pointee) != sema::Cv::none)
+    return false;
+
+  // The complete unit may add an ABI-affecting redeclaration after the destructor. These
+  // bare declarations name the root directly and carry no attributes or language linkage.
+  const auto declarations = decls_.find(std::to_underlying(function));
+  if (declarations == decls_.end()) return false;
+  const auto scope = namespace_path(observer.scope);
+  return std::ranges::all_of(declarations->second, [&](const auto& entry) {
+    const auto& [item, decl] = entry;
+    const auto& source = items_->items[item];
+    if (source.kind != ItemKind::declaration || source.template_depth || source.specialization ||
+        source.names.size() != 1 || ns_of(item) != scope ||
+        in_attributed_namespace(item) || decl.hidden_visibility) return false;
+    for (u32 parent = source.parent; parent != items::none; parent = items_->items[parent].parent)
+      if (items_->items[parent].kind != ItemKind::namespace_def) return false;
+    const auto tokens = std::span(r_->tokens).subspan(source.begin, source.end - source.begin);
+    std::size_t at = 0;
+    const auto accept = [&](lex::Tk kind) {
+      if (at == tokens.size() || tokens[at].kind != kind) return false;
+      ++at;
+      return true;
+    };
+    const auto named = [&](NameId name) {
+      return accept(identifier) && r_->name(tokens[at - 1]) == w_->ins.names.spelling(name);
+    };
+    if (!accept(kw_void) || !named(observer.name) || !accept(l_paren) || !named(root.name) || !accept(star)) return false;
+    accept(identifier);  // optional parameter name
+    return accept(r_paren) && accept(kw_noexcept) && accept(semi) && at == tokens.size();
+  });
 }
 
 bool Program::supports_base_object_variant(EntityId function, const std::set<EntityId>& uncertain_layouts) const {
