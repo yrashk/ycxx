@@ -2091,12 +2091,12 @@ public:
     TypeRec r = types().rec(t);
     if (r.kind == TypeKind::array) return has_member_inits(r.inner);
     if (r.kind != TypeKind::class_) return false;
-    if (const ClassRec* c = class_rec(r.entity); c && c->user_ctors) return true;
     if (const ClassRec* c = class_rec(r.entity)) {
+      if (c->user_ctors) return true;
       for (const BaseRec& b : c->bases)
         if (has_member_inits(types().class_type(b.cls))) return true;
       for (const FieldRec& f : c->fields)
-        if (f.init != ConstId::none || f.dmi || has_member_inits(f.type)) return true;
+        if (f.init != ConstId::none || f.dmi || (!c->union_ && has_member_inits(f.type))) return true;
     }
     return false;
   }
@@ -2267,6 +2267,8 @@ public:
     const bool replay = replay_default_members_ && can_replay_default_members(t);
     bool elided = begin != b.begin || end != b.end;
     for (std::size_t i = 0; i < elems.size(); ++i) {
+      if (is_union(t) && !check_destructor_access(types().innermost_array_element(elems[i].type), begin))
+        return fail;
       if (next == b.clauses.size()) {
         out.push_back(element_default(elems[i], true, replay, end, end));
         if (!out.back().ok()) return fail;

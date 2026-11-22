@@ -5524,10 +5524,8 @@ private:
   // ([class.mem.general]: a member is declared once).
   // A member function `function` (its type) clashes only with a member that is not a function or
   // one of the same type ([class.mem.general]/5, [over.load]).
-  // A union's member ([class.union.general]): no reference (/2). Variant members whose class has
-  // non-trivial special members or default member initializers (which make the union's deleted,
-  // /3), and a default member initializer on a member other than the first, are not supported
-  // yet.
+  // A union cannot have a reference member ([class.union.general]). Completing an ordinary
+  // named union checks whether it has a written destructor for nontrivial variants.
   bool variant_member(const parse::Declarator& d) {
     sema::Types& types = s_.types();
     if (types.is_reference(d.type)) {
@@ -5536,7 +5534,11 @@ private:
     }
     QualType et = d.type;
     while (types.is_array(et)) et = types.rec(et).inner;
-    if (s_.has_member_inits(et) || s_.destructor_of(et) != EntityId::none || q_.classes().copy_of(et).first) {
+    const bool ordinary = !inst_ && s_.template_scopes.empty() &&
+                          p_->items().items[it_->parent].unnamed_type_ordinal == items::none;
+    const bool nontrivial_destruction = s_.destructor_of(et) != EntityId::none;
+    if (q_.classes().copy_of(et).first ||
+        (!(ordinary && nontrivial_destruction) && (nontrivial_destruction || s_.has_member_inits(et)))) {
       s_.diag(d.name_at, Diag::not_supported, Tk::kw_union);
       return false;
     }
@@ -7219,10 +7221,11 @@ public:
     return own || !p_->enclosing_heads(k_).empty();
   }
 
-  // A destructor's body ([class.dtor]/13): `body`, then its members destroyed, the last first,
+  // A destructor's body ([class.dtor]): `body`, then its non-variant members destroyed, the last first,
   // then its direct bases, the last first (a `DestroyMember` of field `~0u`).
   static Ex destructor_body(sema::Sema& s, EntityId cls, Ex body) {
     const sema::ClassRec& rec = s.classes().rec(cls);
+    if (rec.union_) return body;
     std::vector<ast::Child> members;
     for (u32 i = u32(rec.fields.size()); i-- > 0;) {
       const sema::FieldRec& f = rec.fields[i];
@@ -7373,6 +7376,10 @@ private:
       return s_.node(ast::Compound{b_.list(stmts)}, 0, body.end);
     }
     const sema::ClassRec& rec = p_->classes_.rec(s_.current_class);
+    if (rec.union_ && inits.subobjects.size() > 1) {
+      s_.diag(body.begin, Diag::too_many_initializers, s_.types().class_type(s_.current_class));
+      return {};
+    }
     for (std::size_t i = 0; i < rec.bases.size(); ++i) {
       const EntityId base = rec.bases[i].cls;
       const QualType bt = s_.types().class_type(base);
@@ -7393,11 +7400,13 @@ private:
       const sema::FieldRec& f = rec.fields[i];
       Ex init;
       if (auto it = inits.subobjects.find(i); it != inits.subobjects.end()) init = it->second;
+      else if (rec.union_ && (!inits.subobjects.empty() || !f.dmi)) continue;
       else if (f.init != ConstId::none) init = s_.literal(sema::Types::unqualified(f.type), f.init, ast::ValueCategory::prvalue, 0, 0);
       else if (auto d = p_->dmi(f.entity)) init = member_initializer(f, *d);
       else if (s_.types().is_reference(f.type)) s_.diag(0, Diag::reference_uninitialized);  // [class.base.init]/10
       else init = s_.default_init(f.type, 0, 0);
       if (!init.ok()) continue;
+      if (rec.union_ && !s_.check_destructor_access(s_.types().innermost_array_element(f.type), init.begin)) continue;
       stmts.push_back({s_.node(ast::MemberInit{i, f.type, {init.id, 0}}, 0, 0).id, 0});
     }
     stmts.push_back(sema::Sema::at(body, 0));
@@ -7783,6 +7792,14 @@ void Program::special_members(u32 item, EntityId cls, sema::ClassRec& rec,
   rec.layout_requires_virtual_support = rec.polymorphic || std::ranges::any_of(subobjects, [&](QualType t) {
     return classes_.layout_requires_virtual_support(t);
   });
+  const bool manual_union_destruction = rec.union_ && user_dtor;
+  if (class_diags && rec.union_ && !user_dtor && std::ranges::any_of(subobjects, [&](QualType t) {
+        return classes_.destructor_of(t) != EntityId::none;
+      })) {
+    // The implicit destructor of a nontrivial-member union has separate C++26 rules (#203).
+    class_diags->push_back({{std::to_underlying(id(item)), 0}, sema::diag_id(Diag::not_supported),
+                           {engine::diag_arg(std::to_underlying(lex::Tk::kw_union))}});
+  }
   // [except.spec]: the absence of an explicit destructor specification takes the
   // specification of the destructor that would be implicitly declared.
   const auto declaration = user_dtor ? destructor_declarations_.find(user_dtor->entity) : destructor_declarations_.end();
@@ -7795,13 +7812,14 @@ void Program::special_members(u32 item, EntityId cls, sema::ClassRec& rec,
       if (type.kind != sema::TypeKind::pointer && type.kind != sema::TypeKind::reference &&
           type.kind != sema::TypeKind::member_pointer && types.is_dependent(subobjects[i])) {
         if (implicit_noexcept != false) implicit_noexcept.reset();
-        rec.destructor_usable = false;
+        if (!manual_union_destruction) rec.destructor_usable = false;
       }
       continue;
     }
     const auto* record = classes_.find(type.entity);
     if (record && record->destructor_noexcept == false) implicit_noexcept = false;
     else if ((!record || !record->destructor_noexcept) && implicit_noexcept != false) implicit_noexcept.reset();
+    if (manual_union_destruction) continue;  // no implicit variant destructor calls
     if (!record || !record->destructor_usable) {
       rec.destructor_usable = false;
       continue;
@@ -7835,7 +7853,7 @@ void Program::special_members(u32 item, EntityId cls, sema::ClassRec& rec,
   defaulted_copy(cls, rec, subobjects, implicit_copy);
   // [class.dtor]/8: the implicit destructor is not trivial when a base's or member's is not.
   if (user_dtor) rec.destructor = user_dtor->entity;
-  else if (std::ranges::any_of(subobjects, [&](QualType t) { return classes_.destructor_of(t) != EntityId::none; }))
+  else if (!rec.union_ && std::ranges::any_of(subobjects, [&](QualType t) { return classes_.destructor_of(t) != EntityId::none; }))
     rec.destructor = synthesize(false);
   // [class.copy.ctor]/10–11: the implicit copy constructor is deleted with a member's, and not
   // trivial when a member's is not.
