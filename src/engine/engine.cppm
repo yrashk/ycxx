@@ -2972,13 +2972,15 @@ const typename Q::Value* Db::peek(const typename Q::Key& k) const {
   const auto c = find_cell<Q>(k);
   if (!c) return nullptr;
   const Cell& cell = cells_[*c];
-  const std::uint64_t w = cell.word.load(std::memory_order_acquire);
+  // An input no request read (`observed` unset) may be reset under us (`reset_unobserved`): the
+  // mark is read first and the word second, as `ensure_input` orders them, so a reset that claims
+  // the cell later sees the mark and backs off.
+  if (cell.input && !cell.observed.load(std::memory_order_seq_cst)) return nullptr;
+  const std::uint64_t w = cell.word.load(std::memory_order_seq_cst);
   if (state_of(w) != State::done || !cell.has_value) return nullptr;
   // A derived value from an earlier revision may be recomputed by another request now; one
   // verified at this revision, or an input (inputs change only between epochs), may not.
   if (!cell.input && verified_of(w) != revision()) return nullptr;
-  // An input no request read (`observed` unset) may be reset under us (`reset_unobserved`).
-  if (cell.input && !cell.observed.load(std::memory_order_acquire)) return nullptr;
   const auto& v = table<Q>().slots[cell.slot].value;
   return v ? &*v : nullptr;
 }
