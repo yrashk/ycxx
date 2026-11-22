@@ -1328,6 +1328,9 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   An enumerator can hide a same-scope enum tag in ordinary lookup. The tag remains available as
   a nested-name-specifier or through an unqualified elaborated enum specifier.
   [#731](https://github.com/yrashk/ycxx/issues/731)
+- Nested enumeration initializers see the enclosing class prefix. An earlier enumerator in the
+  same enumeration takes precedence over an enclosing class member ([basic.scope.enum],
+  [basic.scope.class]). [#760](https://github.com/yrashk/ycxx/issues/760)
 - Tests: `tests/own/classes/s4-*enum*`, `s4-scoped-enum`, `s4-unscoped-enum` (spec-only, plus two
   from the review): 7 of 7.
 - Namespace-scope opaque enum declarations ([dcl.enum], #157) supply a complete enum type with a

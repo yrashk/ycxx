@@ -4475,6 +4475,7 @@ public:
   };
   std::optional<MemberIntroduction> member_introduction;
   std::optional<EntityId> defining_unnamed_enum_scope;
+  std::optional<std::size_t> nested_enum_members_begin;
 
   // ------------------------------------------------------------ member functions ([class.mfct])
 
@@ -6090,7 +6091,11 @@ public:
       ExprInfo info{Types::unqualified(p->type), ValueCategory::prvalue, expr_flag::dependent};
       return node(ast::Literal{info, v}, begin, end, info);
     }
-    // The class's members, in a member function's body ([basic.scope.class]).
+    // [basic.scope.enum]: earlier enumerators hide names in the enclosing class.
+    if (nested_enum_members_begin)
+      for (const OwnDecl& declaration : std::span(own).subspan(*nested_enum_members_begin))
+        if (declaration.name == name) return enumerator(declaration.sema.entity, declaration.sema.type, begin, end);
+    // The enclosing class's members ([basic.scope.class]).
     if (current_class != EntityId::none) {
       if (auto r = class_member(current_class, name, begin, end, begin, std::nullopt, /*unqualified=*/true)) return *r;
       if (!class_rec(current_class)) {
