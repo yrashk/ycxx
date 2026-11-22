@@ -17,9 +17,9 @@ DESTRUCTORS = ('_ZN1p4BaseD1Ev', '_ZN1p4BaseD2Ev')
 VARIANTS = frozenset(CONSTRUCTORS + DESTRUCTORS)
 
 
-def lifecycle_symbols(metadata):
+def lifecycle_symbols(metadata, variants=VARIANTS):
     rows = (line.split() for line in metadata.splitlines())
-    return [row for row in rows if len(row) == 8 and row[0].endswith(':') and row[7] in VARIANTS]
+    return [row for row in rows if len(row) == 8 and row[0].endswith(':') and row[7] in variants]
 
 
 def check_provider(readelf, scope, env, obj, *, definitions=True):
@@ -36,6 +36,15 @@ def check_provider(readelf, scope, env, obj, *, definitions=True):
         assert entry[6].isdigit(), metadata
         # st_value, st_size and st_shndx must describe the same range for both names.
         assert by_name[base][1:7] == entry[1:7], metadata
+
+
+def check_wide_enum(readelf, scope, env, obj):
+    complete, base = '_ZN4BaseC1E5Value', '_ZN4BaseC2E5Value'
+    metadata = run([readelf, '-Ws', obj], scope, env)
+    symbols = lifecycle_symbols(metadata, (complete, base))
+    assert [row[7] for row in symbols] == [complete], metadata
+    entry = symbols[0]
+    assert int(entry[2]) > 0 and entry[3:6] == ['FUNC', 'GLOBAL', 'DEFAULT'] and entry[6].isdigit(), metadata
 
 
 def check_peer_calls(readelf, scope, env, obj, expected):
@@ -109,6 +118,9 @@ def main():
             assert build_provider(definitions=False) != baseline
             provider.write_bytes(original)
             assert build_provider() == baseline
+
+            run([*invocation, '-c', fixture / 'wide_enum.cpp', '-o', 'wide-enum.o'], scope, cold)
+            check_wide_enum(readelf, scope, cold, 'wide-enum.o')
 
             for compiler in native_compilers(host, scope, cold):
                 flags = [compiler, '-std=c++20', '-pedantic-errors', '-O0', '-fno-lto', '-fno-pie',
