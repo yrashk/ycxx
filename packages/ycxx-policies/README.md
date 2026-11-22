@@ -153,3 +153,12 @@ scalar, reference, or void result. It checks default argument calls and diagnose
 calls, volatile accesses, and unmodeled operations such as class initialization and cleanup.
 `fx::set<>` permits zero declared effects. Ordinary scalar computation and memory accesses
 are within this subset. [YCXX Policies tracking issue #660](https://github.com/yrashk/ycxx/issues/660)
+
+## Runtime usage budgets
+
+Include `<ycxx/effects/runtime.hpp>` to give a scope a finite budget for one effect.
+Pass the same budget by reference to every mediated adapter that should share its limit.
+The adapter calls `spend()` for each use. Exhausting the budget traps on the next attempted
+spend. Declare the limit in the budget's type, for example
+`ycxx::effects::budget<ReadSettings, 3>`. The counter cannot be copied or moved.
+The adapter still needs a capability for the resource it accesses.

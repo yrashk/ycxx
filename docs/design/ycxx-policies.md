@@ -197,6 +197,24 @@ Trusted calls carry their digest for agreement across callers. A trusted call co
 a verified bound for the same function. Archive extraction and dynamic providers remain
 tracked in #660. [YCXX Policies #660](https://github.com/yrashk/ycxx/issues/660)
 
+### First usage grades
+
+`effects::at_most<Tag, N>` places a positive finite upper bound on a tag in an effect set.
+A bare tag keeps its original unbounded meaning. An absent tag allows zero uses. Duplicate
+entries agree when their canonical tag and count agree. An explicit finite bound and a bare
+tag for the same effect conflict.
+
+On standard C++20 compilers, a mediated operation can take an explicit
+`effects::budget<Tag, N>&` and spend a use when it executes. Repeated calls share the same
+budget by reference. The counter belongs to one scope and cannot be copied or moved. The
+budget counts uses of an effect. The capability still supplies authority over the resource.
+
+YCXX uses declared callee costs. Sequential operations add their upper bounds, and
+alternative branches take the maximum after the condition. A loop that can spend a use
+has unbounded cost until the checker can establish a finite execution count. An unbounded
+callee cannot satisfy a finite grade. Separate object builds include grades in the effect
+contract digest. A change to a declared grade invalidates summaries that depend on it.
+
 ## YCXX implementation milestones
 
 1. **User registration and portable adapters.** Use typed policy aliases to replace the current

@@ -33,6 +33,7 @@ with tempfile.TemporaryDirectory() as tmp:
 #include <ycxx/ownership/runtime.hpp>
 #include <ycxx/capabilities.hpp>
 #include <ycxx/effects.hpp>
+#include <ycxx/effects/runtime.hpp>
 #include <type_traits>
 
 void inspect(const ycxx::ownership::linear_state& owner) noexcept { owner.observe(); }
@@ -84,9 +85,17 @@ static_assert(CanRead<Reader> && !CanWrite<Reader> && CanWrite<Editor>);
 static_assert(!CanRead<caps::token<OtherStore, read_right>>);
 
 struct ReadEffect;
-int read(const Reader& authority) noexcept { return Store::get(authority, 1); }
 namespace fx = ycxx::effects;
-using ReadPolicy = fx::use_policy<Rule, fx::trusted<decltype(&read), &read, fx::set<ReadEffect>>>;
+using ReadBudget = fx::budget<ReadEffect, 2>;
+using ReadOnce = fx::set<fx::at_most<ReadEffect, 1>>;
+static_assert(!std::is_copy_constructible_v<ReadBudget>);
+static_assert(!std::is_move_constructible_v<ReadBudget>);
+
+int read(const Reader& authority, ReadBudget& budget) noexcept {
+  budget.spend();
+  return Store::get(authority, 1);
+}
+using ReadPolicy = fx::use_policy<Rule, fx::trusted<decltype(&read), &read, ReadOnce>>;
 
 int main(int argc, char**) {
   ycxx::ownership::linear_state owner;
@@ -102,7 +111,9 @@ int main(int argc, char**) {
     next.release();
     return Store::get(next, 1);
   }
-  if (read(next) != 17) return 1;
+  ReadBudget budget;
+  if (read(next, budget) != 17 || read(next, budget) != 17) return 1;
+  if (argc == 5) return read(next, budget);  // exhausted effect budget
   auto editor = Store::editor(2);
   Store::set(editor, 2, 28);
   return Store::get(editor, 2) != 28;
@@ -126,6 +137,7 @@ target_link_libraries(consumer PRIVATE YCXXPolicies::policies)
         subprocess.run([cmake, "--build", str(build)], check=True, timeout=30)
         executable = str(build / "consumer")
         subprocess.run([executable], check=True, timeout=10)
-        for args in (("wrong-scope",), ("use", "moved"), ("use", "released", "token")):
+        for args in (("wrong-scope",), ("use", "moved"), ("use", "released", "token"),
+                     ("read", "with", "used", "budget")):
             result = subprocess.run([executable, *args], timeout=10)
             assert result.returncode in (-signal.SIGABRT, -signal.SIGILL, -signal.SIGTRAP), result
