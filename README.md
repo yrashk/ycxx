@@ -265,6 +265,9 @@ Ordinary named namespace-scope classes and structs support class-head `alignas` 
 Both targets accept nonempty standalone unnamed enum definitions at namespace scope, including
 fixed underlying types and definitions inside `extern "C"` blocks.
 [#157](https://github.com/yrashk/ycxx/issues/157)
+Nonempty standalone unnamed enum definitions introduce their enumerators into the enclosing
+class. Class template specializations support the same form with nondependent enumerator
+values. [#859](https://github.com/yrashk/ycxx/issues/859)
 
 Qualified value lookup can read earlier static data members and injected unscoped enumerators
 while their current class is incomplete. [#857](https://github.com/yrashk/ycxx/issues/857)
