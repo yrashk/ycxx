@@ -117,6 +117,10 @@ public:
   virtual std::optional<NodeId> replay_function_default(Sema&, const ast::DefaultArg&, EntityId, QualType) {
     return std::nullopt;
   }
+  // A selected member-template specialization's exception specification ([except.spec]).
+  virtual std::optional<QualType> replay_member_exception(Sema&, const ast::DeclSema&, EntityId, QualType type) {
+    return type;
+  }
   // A concrete source query keeps its original position if its tokens are read again.
   virtual bool is_complete_at_source(EntityId c) { return is_complete(c); }
   // Whether a class's layout, or a base's or stored member's, depends on attributes or packing
@@ -141,7 +145,7 @@ public:
   virtual std::optional<ConstId> constant_value(EntityId v) = 0;
   // In a member declaration of a class being defined: the member named `name` declared before it
   // ([basic.scope.class]; the class's member list is not complete yet).
-  virtual std::optional<ast::DeclSema> earlier_member(NameId name) = 0;
+  virtual std::optional<ast::DeclSema> earlier_member(NameId name, bool type_only = false) = 0;
   // The direct bases of class `c` while it is being defined (its base-clause), none otherwise.
   virtual std::vector<EntityId> defining_bases(EntityId) { return {}; }
   virtual std::span<const BaseRec> defining_base_records(EntityId) { return {}; }
@@ -476,11 +480,13 @@ public:
           auto hit = class_body_type(current_class, *cr, name, type_at);
           if (hit.found) return hit.type;
         }
+        if (!elaborated && unscoped_member_enumerator(current_class, name, /*unqualified=*/true)) return std::nullopt;
         if (auto r = nested_member(current_class, name, true)) return r->first.type;
       } else {
-        if (auto m = q_->earlier_member(name)) {
+        if (auto m = q_->earlier_member(name, elaborated)) {
           if (m->kind == ast::DeclKind::enum_ || m->kind == ast::DeclKind::type_alias) return m->type;
           if (!elaborated && (m->kind == ast::DeclKind::data_member || m->kind == ast::DeclKind::variable ||
+                              m->kind == ast::DeclKind::enumerator ||
                               (m->kind == ast::DeclKind::function && c.name != name)))
             return std::nullopt;
         }
@@ -1629,8 +1635,7 @@ public:
       return std::nullopt;
     }
     if (c == current_class)
-      if (auto m = q_->earlier_member(n); m && (m->kind == ast::DeclKind::enum_ || m->kind == ast::DeclKind::type_alias))
-        return m->type;
+      if (auto m = q_->earlier_member(n, /*type_only=*/true)) return m->type;
     return std::nullopt;
   }
 
@@ -1729,8 +1734,7 @@ public:
     const ClassRec* cls = class_rec(naming);
     if (!cls && naming != current_class) return {};
     if (naming == current_class && (!cls || !cls->defined)) {
-      if (auto earlier = q_->earlier_member(name); earlier &&
-          (!type_only || is_type(earlier->kind))) return {};
+      if (q_->earlier_member(name, type_only)) return {};
     }
     const ClassRec incomplete;
     return class_body_type(naming, cls ? *cls : incomplete, name, at, ClassBodyLookup::qualified, type_only);
@@ -1758,6 +1762,8 @@ public:
   std::optional<QualType> scope_type(const Scope& s, NameId n) {
     auto m = scope_member(s, n);
     if (!m || !m->type) return std::nullopt;
+    if (s.type && types().is_class(*s.type) && unscoped_member_enumerator(types().class_of(*s.type), n))
+      return std::nullopt;
     return m->type;
   }
   // `S::n` as an expression ([expr.prim.id.qual]).
@@ -1913,6 +1919,61 @@ public:
     return std::ranges::all_of(f.params, [&](QualType p) {
       return require_supported_virtual_layout(p, at);
     });
+  }
+
+  // [class.dtor]: use the class selected by the receiver and its destructor name.
+  Ex explicit_destroy(Ex object, bool arrow, NameId name, u32 end, u32 op_at, u32 name_at) {
+    const u32 begin = object.begin;
+    const Ex fail{NodeId::none, begin, end};
+    if (!object.ok()) return fail;
+    const QualType void_type = builtin(Builtin::void_);
+    if (dependent(object)) return dependent_node({object}, begin, end, void_type);
+    QualType type = object.type();
+    if (arrow) {
+      object = rvalue(object);
+      if (!object.ok()) return fail;
+      if (!types().is_pointer(object.type())) {
+        diag(op_at, Diag::arrow_of_non_pointer, object.type());
+        return fail;
+      }
+      type = types().pointee(object.type());
+    }
+    if (!types().is_class(type)) {
+      diag(name_at, Diag::not_supported, lex::Tk::tilde);  // scalar pseudo-destructors
+      return fail;
+    }
+    if (!require_complete(type, op_at)) return fail;
+    const EntityId owner = types().class_of(type);
+    if (w_->entities.rec(owner).name != name) {
+      const auto named = class_name(name, false, true, name_at);
+      if (named && types().is_dependent(*named)) return dependent_node({object}, begin, end, void_type);
+      if (!named || !same_unqualified(*named, type)) {
+        int paths = 0;
+        if (named && types().is_class(*named) && base_path(owner, types().class_of(*named), paths))
+          diag(name_at, Diag::not_supported, lex::Tk::tilde);
+        else
+          diag(name_at, Diag::destructor_type_mismatch, name, type);
+        return fail;
+      }
+    }
+    const ClassRec* record = class_rec(owner);
+    if (!record || record->virtual_destructor) {
+      diag(name_at, Diag::not_supported, lex::Tk::tilde);
+      return fail;
+    }
+    if (!record->destructor_usable) {
+      diag(name_at, Diag::object_unusable_destructor, type);
+      return fail;
+    }
+    if (!check_destructor_access(type, name_at) || !require_supported_virtual_layout(type, name_at)) return fail;
+    if (!arrow) {
+      if (!object.glvalue()) object = materialize(object, type, false);
+      if (!object.ok()) return fail;
+      const ExprInfo pointer{types().pointer(object.type()), ValueCategory::prvalue, 0};
+      object = node(ast::Unary{pointer, ast::UnaryOp::address_of, at(object, begin)}, begin, object.end, pointer);
+    }
+    const ExprInfo info{void_type, ValueCategory::prvalue, 0};
+    return node(ast::ExplicitDestroy{info, record->destructor, at(object, begin)}, begin, end, info);
   }
 
   // [expr.ref]: `object.name`, or `object->name` with `arrow`.
@@ -4271,8 +4332,6 @@ public:
           classes().layout_requires_virtual_support(types().rec(m.type).inner)) continue;
       return Found{nullptr, 0, &m, c};
     }
-    for (const NestedType& nested : cr.types)
-      if (nested.name == name) return Found{.owner = c, .nested_type = nested.entity};
     for (const NestedType& nested : cr.types) {
       // A type alias does not introduce the enumerators of the enumeration it names.
       if (!types().is_enum(nested.type) || types().enum_of(nested.type) != nested.entity) continue;
@@ -4281,6 +4340,8 @@ public:
       for (const EnumeratorRec& value : e->enumerators)
         if (value.name == name) return Found{.owner = c, .nested_type = nested.entity, .enumerator = value.entity};
     }
+    for (const NestedType& nested : cr.types)
+      if (nested.name == name) return Found{.owner = c, .nested_type = nested.entity};
     return std::nullopt;
   }
   std::optional<Found> find_member(EntityId c, NameId name, bool unqualified = false) {
@@ -4303,6 +4364,15 @@ public:
       }
     }
     return r;
+  }
+
+  // Ordinary type lookup is blocked by an unscoped enumerator. Qualifier and
+  // elaborated-type lookup still use the separate type lookup path.
+  bool unscoped_member_enumerator(EntityId c, NameId name, bool unqualified = false) {
+    if (auto member = find_member(c, name, unqualified)) return member->enumerator != EntityId::none;
+    if (c == current_class)
+      if (auto member = q_->earlier_member(name)) return member->kind == ast::DeclKind::enumerator;
+    return false;
   }
 
   // The member functions of `c` named `name`: an overload set ([over.match.funcs]).
@@ -4678,9 +4748,15 @@ public:
       fe = g->spec;
       dt = g->type;
     } else {
-      // A specialization called is one whose definition the program requires ([temp.inst]/8).
-      if (k.pattern) demands.push_back({k.entity, ast::Loc{item_, loc_base_ + begin}});
-      dt = deduced_function(k.entity, k.type, begin);
+      auto type = k.pattern ? q_->replay_member_exception(*this, *k.pattern, k.entity, k.type) : std::optional(k.type);
+      if (!type) return fail;
+      if (k.pattern) {
+        if (*type != k.type) fe = specialization(*k.pattern, w_->entities.rec(k.entity).args, *type);
+        // An unevaluated call needs the exception specification and return type ([temp.inst]).
+        if (!unevaluated || types().has_placeholder(types().rec(*type).inner))
+          demands.push_back({fe, ast::Loc{item_, loc_base_ + begin}});
+      }
+      dt = deduced_function(fe, *type, begin);
     }
     if (!dt) return fail;
     TypeRec fr = types().rec(*dt);
@@ -5506,6 +5582,10 @@ public:
         return !types().rec(type).fn_noexcept;
       }
       if (node.is<ast::MemberCall>()) return function_throwing(node.get<ast::MemberCall>().function);
+      if (node.is<ast::ExplicitDestroy>()) {
+        const auto receiver = expression_info(node.get<ast::ExplicitDestroy>().object.id).type;
+        return destructor_throwing(types().pointee(receiver), node.offset());
+      }
       if (node.is<ast::AssignmentCall>()) return function_throwing(node.get<ast::AssignmentCall>().function);
       if (node.is<ast::CtorCall>()) return function_throwing(node.get<ast::CtorCall>().ctor);
       if (node.is<ast::DeleteObject>()) return function_throwing(node.get<ast::DeleteObject>().function);
@@ -8499,7 +8579,7 @@ public:
       }
     }
     if (dependent(callee) || dependent_args) {
-      // BOOTSTRAP: -Warray-bounds: reserved and appended, as `parameters` in `member_call`.
+      // BOOTSTRAP: -Warray-bounds: reserved and appended, as `parameters` in `member_call` (#748).
       // Without the bug: `std::vector<Ex> all{callee};`, `all.insert(all.end(), args.begin(), args.end());`
       std::vector<Ex> all;
       all.reserve(1 + args.size());

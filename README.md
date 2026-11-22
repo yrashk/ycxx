@@ -23,7 +23,8 @@ The final Linux x86-64 self-check uses the freestanding support in [#380](https:
 **Pre-0.1** (as of 2026-11-21). ycxx compiles a substantial subset of C++ (C-like code, classes,
 templates and constant evaluation) on macOS arm64, from source to a signed, running executable,
 with no external compiler, assembler or linker. It also builds static executables from a
-freestanding C++ subset for x86-64 Linux. The standard library is out of reach. The plan is in
+freestanding C++ subset for x86-64 Linux. The standard library is out of reach: the gaps on
+`<iostream>`'s path are mapped in [#776](https://github.com/yrashk/ycxx/issues/776). The plan is in
 [DECISIONS.md](DECISIONS.md), the details of the code in [STATUS.md](STATUS.md), and the work in
 [GitHub issues](https://github.com/yrashk/ycxx/issues) and the
 [roadmap](https://github.com/yrashk/ycxx/issues/12).
@@ -35,7 +36,8 @@ A nonthrowing function can be used where the corresponding potentially throwing 
 The unary `noexcept` operator checks whether calls and constructions can throw.
 [#729](https://github.com/yrashk/ycxx/issues/729)
 Ordinary constructor declarations and definitions check that their concrete exception specifications agree.
-Dependent exception specifications remain open. [#219](https://github.com/yrashk/ycxx/issues/219)
+Member function templates can substitute a dependent exception specification when it is needed.
+[#713](https://github.com/yrashk/ycxx/issues/713)
 
 A class template can grant private access to the class passed as a type argument using
 `friend Authority;`. Each specialization grants access to its own authority.
@@ -63,7 +65,8 @@ instead of Debug's 5.3 s on an M-series Mac ([#726](https://github.com/yrashk/yc
 
 Single-expression `auto(x)` and `auto{x}` perform scalar and pointer decay-copy, including
 array and function decay. Function-template bodies can defer supported dependent operands to
-instantiation. Concrete constant template arguments can use braced conversions such as
+instantiation, and a function template whose signature holds a dependent variable-template-id
+or its negation compiles to an object ([#773](https://github.com/yrashk/ycxx/issues/773)). Concrete constant template arguments can use braced conversions such as
 `Tag<auto{7}>` and integer-literal-led parenthesized conversions such as `Tag<auto(7)>`.
 [#286](https://github.com/yrashk/ycxx/issues/286)
 
@@ -145,6 +148,10 @@ support the six comparisons, conversion to `bool`, conversions to and from every
 [Linux scalar variadic floating-point ABI](docs/design/linux-floating-variadic-calls.md) ·
 [#441](https://github.com/yrashk/ycxx/issues/441)
 
+On x86-64 Linux, the System V indirect result convention also covers an ownership wrapper
+whose by-value member makes its implicit destructor nontrivial. The returned object is
+constructed in the caller's storage. [#661](https://github.com/yrashk/ycxx/issues/661)
+
 ELF and Mach-O objects support static pointer initializers naming variables, array elements,
 or functions. The referenced symbol may be defined in a separate translation unit.
 [#101](https://github.com/yrashk/ycxx/issues/101)
@@ -178,15 +185,21 @@ object. Symbol names can share suffixes in an input string table.
 [#428](https://github.com/yrashk/ycxx/issues/428), [#419](https://github.com/yrashk/ycxx/issues/419),
 [#484](https://github.com/yrashk/ycxx/issues/484)
 
-On x86-64 Linux, an exception thrown by hosted peer code can unwind through eligible
-cleanup-free ycxx functions with fixed scalar signatures and reach a handler in peer code.
-An eligible ycxx function can also throw an `int` to a hosted peer's handler.
+On x86-64 Linux and arm64 macOS, an exception thrown by hosted peer code can unwind through
+eligible cleanup-free ycxx functions with fixed scalar signatures and reach a handler in
+peer code. [#572](https://github.com/yrashk/ycxx/issues/572) ·
+[#737](https://github.com/yrashk/ycxx/issues/737)
+
+On x86-64 Linux, an eligible ycxx function can also throw an `int` to a hosted peer's handler.
 A host-linked ycxx function can use one `catch (...)` to return an integer literal when
 a direct call on its parameter to an externally defined `int(int)` function throws.
 A host-linked void function can also destroy one initialized aggregate local on both exits
 from an external `void()` call and let the original exception reach a peer handler.
-[#572](https://github.com/yrashk/ycxx/issues/572) · [#578](https://github.com/yrashk/ycxx/issues/578)
+A supported union constructor can destroy its active member when its body call throws and
+propagate an exception from its initializer before the member's lifetime begins.
+[#578](https://github.com/yrashk/ycxx/issues/578)
 · [#583](https://github.com/yrashk/ycxx/issues/583) · [#663](https://github.com/yrashk/ycxx/issues/663)
+· [#738](https://github.com/yrashk/ycxx/issues/738)
 
 Both targets support cooked integer user-defined literals through namespace-scope literal
 operators with an `unsigned long long` parameter, including constant evaluation.
@@ -203,6 +216,10 @@ declaration and use it for trivial member copies. A non-template empty tag class
 scope with no bases and an implicit trivial destructor can first declare `T() = default`
 in class and use it to initialize an `inline constexpr` tag object.
 [#157](https://github.com/yrashk/ycxx/issues/157)
+
+An ordinary class object can be destroyed explicitly through a reference or pointer with
+`object.~Class()` or `pointer->~Class()`. Templates can use a dependent class name, and unary
+`noexcept` uses the destructor's exception specification. [#722](https://github.com/yrashk/ycxx/issues/722)
 
 In-class conversion functions can name a class type alias as their conversion target,
 including a dependent alias in a class template. A named `static_cast` can call a
@@ -223,6 +240,9 @@ Both targets support named nested enum definitions followed by ordinary fields i
 member declaration, including scoped enum field initializers. [#500](https://github.com/yrashk/ycxx/issues/500)
 Scoped enumerators stay in their enumeration's scope, so class members and class template
 members may reuse their names. [#725](https://github.com/yrashk/ycxx/issues/725)
+Nested unscoped enumerators conflict with other non-type members regardless of declaration order.
+They can hide an enum name in ordinary lookup while leaving it available as a qualifier.
+[#731](https://github.com/yrashk/ycxx/issues/731)
 
 Automatic declarations of ordinary non-template classes with only scalar fields and no bases
 or unions can use default member initializers in `S s;` and `S s{…};`. A default runs in
@@ -300,9 +320,11 @@ written default member initializer are value-initialized.
   [#244](https://github.com/yrashk/ycxx/issues/244)
 - ordinary named unions with a written destructor can hold nontrivially destructible members.
   The member's copy constructor can be trivial or deleted. An explicit union constructor
-  initializes its selected member. Construction of a nontrivially destructible variant
-  uses a nonthrowing constructor. [#203](https://github.com/yrashk/ycxx/issues/203) ·
+  initializes its selected member. A nonthrowing constructor works on both targets, and the
+  hosted Linux subset above can unwind the construction. [#203](https://github.com/yrashk/ycxx/issues/203) ·
   [#738](https://github.com/yrashk/ycxx/issues/738)
+- namespace-scope union templates support the same rules for concrete nontrivially destructible
+  variants after instantiation. [#203](https://github.com/yrashk/ycxx/issues/203)
 - classes and unions: data and static members, named data members of unnamed union type,
   member functions, constructors including ordinary delegation, and destructors
   with RAII, aggregate and designated initialization, namespace-scope objects initialized by

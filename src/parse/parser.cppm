@@ -93,6 +93,7 @@ struct Declarator {
   u32 ref_at = 0;
   bool has_noexcept = false;
   std::optional<Ex> noexcept_condition;
+  std::optional<std::pair<u32, u32>> noexcept_tokens;
   // `T x[] = {…}`: the outermost array bound is left to the initializer ([dcl.array]/8); `type`
   // is then the element type.
   bool unknown_bound = false;
@@ -897,6 +898,7 @@ public:
     u32 ref_at = 0;
     bool has_noexcept = false;
     std::optional<Ex> noexcept_condition;
+    std::optional<std::pair<u32, u32>> noexcept_tokens;
     u64 bound = 0;
     bool unknown_bound = false;  // an array suffix with an omitted bound ([dcl.array])
     // A value-dependent bound ([temp.dep.constexpr]): a template parameter's `VDepParam`.
@@ -931,7 +933,7 @@ public:
     std::vector<Suffix> suffixes;
   };
 
-  enum class NamedExceptionSpec { ordinary, defaulted_assignment };
+  enum class NamedExceptionSpec { ordinary, class_member, defaulted_assignment, member_template };
 
   // declarator, or abstract-declarator when `abstract` ([dcl.decl.general], [dcl.name]).
   Declarator declarator(QualType base, bool abstract, bool typedef_ = false, bool conversion = false,
@@ -941,7 +943,7 @@ public:
     d.begin = pos();
     const std::size_t first_local = s_->locals().size();
     const bool in_body = s_->current_function != ast::EntityId::none;
-    Level top = level(abstract, d.ok, conversion);
+    Level top = level(abstract, d.ok, conversion, named_exception == NamedExceptionSpec::member_template);
     if (conversion && !top.conversion_target) {
       if (in_body) s_->discard_local_declarations(first_local);
       return d;
@@ -977,6 +979,7 @@ public:
       d.ref_at = fn->ref_at;
       d.has_noexcept = fn->has_noexcept;
       d.noexcept_condition = fn->noexcept_condition;
+      d.noexcept_tokens = fn->noexcept_tokens;
     } else {
       d.ref_at = d.name_at;
     }
@@ -1337,7 +1340,7 @@ public:
     return sema::allocation_name(f, array);
   }
 
-  Level level(bool abstract, bool& ok, bool conversion = false) {
+  Level level(bool abstract, bool& ok, bool conversion = false, bool defer_exception = false) {
     Level l;
     pointer_operators(l, ok);
     // A parameter pack's declarator ([dcl.fct]/23, [temp.param]/17): `T... x`, `Ts&&...`.
@@ -1448,7 +1451,7 @@ public:
           s_->push_scope();
           for (const Param& p : suffix.params)
             if (p.name != s_->no_name()) s_->declare_local(p.name, p.type, sema::local_flag::parameter, p.at, false);
-          exception_specifier(suffix, ok);
+          exception_specifier(suffix, ok, defer_exception && l.named && l.suffixes.size() == 1);
           const bool has_trailing = accept(Tk::arrow);
           if (has_trailing)
             suffix.trailing = type_id(true);
@@ -1806,10 +1809,12 @@ public:
         // exception specification is non-throwing.
         bool nonthrowing = sema::is_deallocation_name(name) && !s->has_noexcept;
         const bool keep_named_exception = named_exception == NamedExceptionSpec::defaulted_assignment && name == "operator=";
-        if (s->has_noexcept && (allocation || keep_named_exception || member_pointer_to_suffix(l) ||
-                                (spells_type && !l.inner)))
-          nonthrowing = noexcept_value(s->noexcept_condition, d.ok);
-        else if (d.ok && s->has_noexcept && !s_->templated())
+        // Bare `noexcept` does not need substitution when a class template's member is used.
+        const bool bare_member_exception = named_exception == NamedExceptionSpec::class_member &&
+                                           l.named && !s->noexcept_condition;
+        if (s->has_noexcept && !s->noexcept_tokens &&
+            (allocation || keep_named_exception || bare_member_exception || member_pointer_to_suffix(l) ||
+             (spells_type && !l.inner) || (d.ok && !s_->templated())))
           nonthrowing = noexcept_value(s->noexcept_condition, d.ok);
         t = s_->types().function(t, ps, s->variadic, linkage_, s->cv, s->ref, nonthrowing);
         fn = &*s;
@@ -1847,9 +1852,25 @@ public:
   }
 
   // An exception specification on a function declarator ([except.spec]).
-  void exception_specifier(Suffix& suffix, bool& ok) {
+  void exception_specifier(Suffix& suffix, bool& ok, bool defer = false) {
+    const u32 begin = index();
     suffix.has_noexcept = accept(Tk::kw_noexcept);
     if (!suffix.has_noexcept || !accept(Tk::l_paren)) return;
+    if (defer) {
+      unsigned depth = 1;
+      while (!at_end() && depth) {
+        if (is(Tk::l_paren)) ++depth;
+        if (is(Tk::r_paren)) --depth;
+        bump();
+      }
+      if (depth) {
+        s_->diag(pos(), Diag::unexpected_token, kind());
+        ok = false;
+      } else {
+        suffix.noexcept_tokens = {begin, index()};
+      }
+      return;
+    }
     DisableDependentDecayCopy disable{dependent_decay_copy_body};
     const int saved = std::exchange(angle_, 0);
     Ex e = constant_expression();
@@ -3527,6 +3548,19 @@ public:
         u32 qualifier = 0;
         while (kind(qualifier) == Tk::identifier && kind(qualifier + 1) == Tk::coloncolon) qualifier += 2;
         if (kind(qualifier) == Tk::tilde) {
+          if (!qualifier && !keyword) {
+            bump();
+            const u32 name_at = pos();
+            if (!is(Tk::identifier)) {
+              s_->diag(name_at, Diag::expected_unqualified_id);
+              return {NodeId::none, e.begin, pos()};
+            }
+            const NameId name = name_of(tok());
+            bump();
+            if (!expect(Tk::l_paren) || !expect(Tk::r_paren)) return {NodeId::none, e.begin, pos()};
+            e = s_->explicit_destroy(e, arrow, name, pos(), at, name_at);
+            break;
+          }
           s_->diag(pos() + qualifier, Diag::not_supported, Tk::tilde);
           seek(index() + qualifier + 1);
           if (is(Tk::identifier)) bump();

@@ -95,6 +95,9 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
   - Do: before pushing to a PR's branch, check that the PR is still open
     (`gh pr view N --json state`). Once it has merged, start a fresh branch from main for anything
     new, even a follow-up to the same issue.
+  - Make the check gate the push: `[ "$(gh pr view N --json state -q .state)" = OPEN ] && git push`.
+    `gh pr view … -q .state && git push` only prints the state and pushes anyway; that pushed to
+    #753's merged branch, and the commit had to move to #770.
   - The coordinator's sweep also checks every merged PR's branch for commits that aren't on main.
   - Rule: AGENTS.md, "PRs and branches".
   - Learned on #116 and #230, 2026-11-18.
@@ -437,6 +440,13 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
 
 ## Data the front end needs
 
+- **Deferred analysis reads committed parameter lists.** On #713, the exception-specification
+  replay read a declaration copied by `Program::declared` before its item committed. A draft
+  `SeqId<ParamSema>` happened to name a different parameter list in the global interner.
+  - Do: read the committed member item for the relevant class specialization before using the
+    global sequence interner. Check a parameter reference independently in the pattern and its
+    replay when a name is found in the definition and lost after substitution.
+
 - **Unicode tables from Python, plus one UCD file.** Python's `unicodedata` (Unicode 17.0 in the
   pinned Python) gives categories, combining classes, decompositions, normalization and names;
   `str.isidentifier` implements XID_Start/XID_Continue. It cannot enumerate name aliases. The
@@ -453,6 +463,17 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
   - Learned on the α slice (#39), 2026-11-18.
 
 ## Evidence and tests
+
+- **Map a header chain past its first wall with an overlay, and check both gates.** Every
+  header on `<iostream>`'s path stopped at one line of `move.hpp`, which showed nothing behind it.
+  - Do: copy only the blocking libycxx file into a scratch directory, stub the construct there,
+    and put that directory first with `-isystem`. A copy of the whole include tree breaks
+    `#include_next`.
+  - Do: run `-c` as well as `-fsyntax-only`. The mangler runs only for objects, so the first
+    `-c` error (#773) never showed in a syntax sweep.
+  - Do: reduce each wall to a header-free example and check it with Clang and GCC before filing.
+    Clang and GCC disagreed on the mangling there (#777), which made it a decision, not a fix.
+  - Learned on #776.
 
 - **A feature probe must use nothing but the feature.** On #282, 40 of the first 150 probes failed
   on something else: `auto` to hold a lambda, a nested `struct`, a default argument, `alignas`.

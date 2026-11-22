@@ -325,8 +325,13 @@ What is true of the code today. Work in progress and its owners are tracked in
     PC-relative CIE and FDE format, including address differences and multiple input objects.
     `unit.link` checks the linked ranges and walks through a non-frame-pointer arm64 bridge
     with the system unwinder on macOS. Compact unwind, personalities and LSDA are tracked in
-    [#72](https://github.com/yrashk/ycxx/issues/72). AArch64 frame emission and native exception
-    lowering are tracked in [#648](https://github.com/yrashk/ycxx/issues/648).
+    [#72](https://github.com/yrashk/ycxx/issues/72).
+  - The arm64 compiler emits these DWARF records for proven cleanup-free functions. Their FDEs
+    describe the actual saved frame-pointer and return-address locations at the entry, body,
+    and return instructions. `unit.darwin_cleanup_free_unwind` checks the emitted object,
+    omitted frames, native YCXX linking and system-linked exception propagation on macOS.
+    Native throw lowering and landing pads are tracked in [#648](https://github.com/yrashk/ycxx/issues/648).
+    [#737](https://github.com/yrashk/ycxx/issues/737)
   - Not yet: thread-local variables, dead stripping, literal merging, branch islands beyond
     ±128 MiB, other dylibs' re-exports, incremental relinking, and import addends outside
     0..255 (`DYLD_CHAINED_IMPORT_ADDEND`). `__LLVM` (embedded bitcode), `__LD` and debug sections
@@ -685,7 +690,10 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
   copyable arguments of more than two eightbytes and empty classes remain unsupported
   ([#641](https://github.com/yrashk/ycxx/issues/641)), as do SSE records
   ([#642](https://github.com/yrashk/ycxx/issues/642)). Records with source layout directives
-  native layout does not apply stay out of memory passing too.
+  native layout does not apply stay out of memory passing, including records that contain
+  those layouts as fields, array elements, or bases. A wrapper whose member makes its implicit
+  destructor nontrivial uses the indirect result convention even when its copy and move traits
+  are unknown. [#661](https://github.com/yrashk/ycxx/issues/661)
   [Design](docs/design/linux-integer-aggregates.md) · [#440](https://github.com/yrashk/ycxx/issues/440)
 - `-c` writes deterministic ELF64 relocatable objects through `src/obj/elf.cppm`. The reader
   accepts the supported x86-64 `ET_REL` subset emitted by ycxx. The native ELF linker consumes
@@ -708,6 +716,13 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
   continuation destroys it once as well. The cleanup-only landing pad resumes the original
   exception; the mixed-object test checks both paths and the peer's typed handler.
   [Design](docs/design/linux-hosted-catch-all.md#hosted-local-cleanup-663) · [#663](https://github.com/yrashk/ycxx/issues/663)
+- A hosted nondelegating no-argument union constructor can initialize one scalar aggregate
+  variant with a nonthrowing destructor, then run one external `void()` call. If that call
+  throws, the active member is destroyed and the original exception resumes. If an optional
+  external `int()` in the initializer throws first, neither destructor runs. A caller that
+  only constructs one such automatic union in the same unit supplies a cleanup-free frame.
+  [Design](docs/design/linux-hosted-catch-all.md#hosted-union-constructor-cleanup-738)
+  · [#738](https://github.com/yrashk/ycxx/issues/738) · [Darwin parity #648](https://github.com/yrashk/ycxx/issues/648)
 - Explicit native static links keep the first input ELF COMDAT group for each signature. The reader
   validates group membership, including relocation sections, and selection precedes startup and
   layout. `unit.linux_elf_comdat` checks whole-group selection, retained references, startup and
@@ -1260,6 +1275,10 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   class templates. A class member can reuse a scoped enumerator's name, including a declarator
   following the enum definition in the same item. Class-scope lookup still finds unscoped
   enumerators. [#725](https://github.com/yrashk/ycxx/issues/725)
+- Nested unscoped enumerators contend with earlier members in ordinary classes and class templates.
+  An enumerator can hide a same-scope enum tag in ordinary lookup. The tag remains available as
+  a nested-name-specifier or through an unqualified elaborated enum specifier.
+  [#731](https://github.com/yrashk/ycxx/issues/731)
 - Tests: `tests/own/classes/s4-*enum*`, `s4-scoped-enum`, `s4-unscoped-enum` (spec-only, plus two
   from the review): 7 of 7.
 - Namespace-scope opaque enum declarations ([dcl.enum], #157) supply a complete enum type with a
@@ -1276,6 +1295,17 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
 - Further work includes opaque declarations in classes or blocks, unnamed empty definitions,
   unnamed definitions in classes or followed by declarators, and `E{}` and `E(v)` expressions
   (#157). Enumerations in a block are tracked in #117.
+
+## Direct explicit destructor calls (#722)
+
+- `object.~Class()` and `pointer->~Class()` support the receiver's own complete class
+  with a nonvirtual destructor. A visible type alias for the class works too. The compiler
+  checks the destructor's access and deletion before lowering.
+- The receiver is evaluated once. The IR calls the selected destructor when it is
+  nontrivial and ends the object's lifetime without releasing storage. A trivial destructor
+  still ends the lifetime. The native peer test controls the lifetime of each variant member.
+- A dependent class name works in instantiated free functions and class template members.
+  Unary `noexcept` accounts for the effective exception specification of the selected destructor.
 
 ## Classes, δ step 4b: namespaces (#86, 2026-11-18)
 
@@ -1505,12 +1535,21 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   observe the union and member destructor effects independently.
 - An omitted aggregate member of union type is initialized from an empty braced list,
   so its first variant can run a constructor.
-- A union constructor that selects a nontrivially destructible member requires a
-  nonthrowing exception specification. A potentially throwing delegating constructor
-  with a nontrivial variant also receives a diagnostic. Exceptional cleanup for this
-  shape is tracked in #738.
+- A union constructor that selects a nontrivially destructible member can use the hosted
+  Linux cleanup subset above or a nonthrowing exception specification. A potentially
+  throwing delegating constructor with a nontrivial variant receives a diagnostic.
+  Broader exceptional cleanup remains tracked in #89 and #135.
 - Remaining implicit special-member rules and aggregate designator forms stay in #203.
   Direct explicit destructor calls are tracked in #722.
+
+## Concrete nontrivial members of union templates (#203)
+
+- A namespace-scope union template with a written destructor can instantiate nontrivially
+  destructible variants with trivial or deleted copy constructors. Nonthrowing constructors
+  select the active member, and the union destructor leaves variant cleanup explicit.
+- The instantiation checks the concrete variant types and the completed destructor declaration.
+  Tests select both members of a union specialized on a noncopyable resource and diagnose
+  the unsupported implicit-destruction form.
 
 ## `<cstdio>`, step 4c: operator functions; `<stdio.h>` compiles (#133, 2026-11-18)
 
@@ -1673,6 +1712,20 @@ template's tokens again with the arguments bound.
   target-typed selection from overload sets stay in #406. Directly taking the address
   of a function template specialization as an expression stays in #335.
   Mangling a C-linkage function type stays in #287.
+
+## Value-dependent template arguments in symbols (#773)
+
+- A function template whose signature holds a value-dependent template argument has a symbol:
+  `X <expression> E`, with a dependent variable-template-id as its `<source-name>` and
+  `<template-args>` and `!e` as `nt e` (Itanium C++ ABI §5.1.6). `std::move_if_noexcept`'s
+  return type needs it for any libycxx header in an object.
+- The arguments are the converted ones and the name is unqualified, as GCC writes them. Clang
+  writes them as spelled: qualified outside the global namespace and `std`, without defaulted
+  arguments, without `J…E` around a pack. The two agree on the tested forms; DECISIONS §1.7 (#777)
+  chose GCC's.
+- Tests: `tests/own/abi/dependent-template-args.run.cpp`, linked with a Clang peer that calls the
+  specializations. `&&` follows #671; type-trait operations (`__is_same(T, U)`) still have no
+  symbol (#780).
 
 ## Templates, ζ step 2: class templates (#88, 2026-11-18)
 
@@ -1937,8 +1990,8 @@ session's.*
   class constructibility, assignability and general convertibility, remaining `__is_trivially_*` and
   `__is_nothrow_*` predicates, `__is_standard_layout` and
   `__reference_binds_to_temporary`. Other dependent predicates, conversions of a dependent
-  predicate to a non-`bool` parameter, dependent array bounds and expression mangling remain in
-  #209.
+  predicate to a non-`bool` parameter and dependent array bounds remain in #209; mangling
+  dependent expressions is #773 and #780.
 
 ## Address-of builtin (#330)
 
@@ -2287,9 +2340,12 @@ request it serves.
 - Copy (#636): `y` copies the cell (the pane's text, unwrapped) and `Y` its subtree (stream lines
   with times and memory). A drag over rows or pane text, or `V` with j/k, selects, and the copy
   happens on release or `y`. `Action::copy` carries the text. `:browse` writes OSC 52 (plus
-  tmux's passthrough form) and, locally, runs `YCXX_CLIPBOARD` or the first of pbcopy, wl-copy,
-  xclip and xsel. Tests: `unit.trace` (the exact text of each way to copy, base64, OSC 52);
-  `daemon.trace_tui` (`y` and a row drag through OSC 52 and the command).
+  tmux's passthrough form) and, locally, runs `YCXX_CLIPBOARD`, or writes the native clipboard
+  (`:clipboard`: macOS NSPasteboard through the Objective-C runtime's C entry points, libobjc and
+  AppKit loaded at the first copy; pbcopy if it refuses), or runs the first of wl-copy, xclip and xsel (Linux, until
+  #730). Tests: `unit.trace` (the exact text of each way to copy, base64, OSC 52, a named
+  pasteboard written and read back on macOS); `daemon.trace_tui` (`y` and a row drag through
+  OSC 52 and the command).
 - Histograms (#637): `Metric` (self time, the span less the union of the children's; time in
   all; allocated; peak; retained; allocations; runs; cache hits; waits), `metrics_of`,
   `self_times`, `Groups`, and `histogram(tree, Grouping, within, order)` (by kind, file or
@@ -2906,9 +2962,15 @@ and runtime integration with ycxx's own linker remain under [#89]. See the
 `noexcept(expression)` is a constant `bool` and leaves its operand unevaluated
 ([expr.unary.noexcept]). The compiler checks the selected function or constructor,
 argument operations, and temporary destruction ([except.spec]). A construction
-in a function template body can be checked after substitution. Dependent
-member-template exception specifications are tracked in
-[#713](https://github.com/yrashk/ycxx/issues/713).
+in a function template body can be checked after substitution.
+
+## Dependent exception specifications on member templates (#713)
+
+A selected ordinary member function template can instantiate its written
+`noexcept(expression)` with the class and function template arguments
+([except.spec], [temp.inst]). Its parameter and class scopes are available
+during replay. Class instantiation leaves the specification of an unused
+member template deferred.
 
 ## The address of an overload set, ι (#313, #337, 2026-11-19)
 

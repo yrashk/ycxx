@@ -132,6 +132,9 @@ struct FunctionDef {
   UnwindEligibility unwind = UnwindEligibility::none;
   EntityId catch_all_callee = EntityId::none;  // for the complete-unit exception-specification check
   ast::NodeId cleanup_call = ast::NodeId::none;
+  EntityId constructor_cleanup = EntityId::none;
+  EntityId constructor_initializer_callee = EntityId::none;
+  EntityId unwind_through_constructor = EntityId::none;
 };
 
 // A variable definition at namespace scope with its constant initializer, or `ConstId::none` for
@@ -705,7 +708,7 @@ ir::TypeLayout QueryLayout::type(QualType q) const {
     ir::TypeLayout e = type(a.elem);
     std::uint64_t n = a.bound == ConstId::none ? 0 : in.values.get<ast::VInt>(a.bound).bits.lo;
     return {.kind = array, .size = e.size * n, .align = e.align, .contains_member_pointer = e.contains_member_pointer,
-            .contains_explicit_alignment = e.contains_explicit_alignment};
+            .layout_uncertain = e.layout_uncertain, .contains_explicit_alignment = e.contains_explicit_alignment};
   }
   if (in.types.is<ast::TFunction>(c)) return {function, 0, 1, false, {}};
   // A reference member is held as the address of its object ([dcl.ref]).
@@ -740,6 +743,7 @@ ir::TypeLayout QueryLayout::type(QualType q) const {
     std::vector<ir::SubObject> parts;
     for (const ir::SubObject& b : r->bases) {
       const auto base = type(b.type);
+      l.layout_uncertain |= base.layout_uncertain;
       l.contains_explicit_alignment |= base.contains_explicit_alignment;
       if (!base.empty) parts.push_back(b);
     }
@@ -755,6 +759,7 @@ ir::TypeLayout QueryLayout::type(QualType q) const {
       }
       ir::TypeLayout m = type(ft);
       l.contains_member_pointer |= m.contains_member_pointer;
+      l.layout_uncertain |= m.layout_uncertain;
       l.contains_explicit_alignment |= m.contains_explicit_alignment;
       std::uint8_t mb = m.kind == floating ? std::uint8_t(m.size) : m.hfa_bytes;
       std::uint64_t mn = (m.kind == floating ? 1 : m.hfa) * n;
@@ -1041,7 +1046,15 @@ engine::query_task<Generated> FunctionGen::run(engine::Ctx& cx, FnKey k) {
   input.hosted_catch_all = d.unwind == UnwindEligibility::hosted_catch_all;
   const bool linux = facts.target().triple == ast::x86_64_linux.triple;
   input.check_unwind_cleanups = linux;
-  if (d.unwind == UnwindEligibility::hosted_cleanup) input.cleanup_call = d.cleanup_call;
+  if (d.constructor_cleanup != EntityId::none && d.unwind == UnwindEligibility::none) {
+    auto error = co_await located_error(cx, k.tu, ast::Loc{d.item, d.body_offset},
+                                       "unsupported unwind from a union constructor with a nontrivial active member");
+    co_return Generated{std::nullopt, std::move(error)};
+  }
+  if (d.unwind == UnwindEligibility::hosted_cleanup) {
+    input.cleanup_call = d.cleanup_call;
+    input.constructor_cleanup = d.constructor_cleanup;
+  }
   input.native_array_delete = linux;
   input.native_array_new = linux && (d.unwind == UnwindEligibility::cleanup_free ||
                                      d.unwind == UnwindEligibility::cleanup_free_with_throw);
@@ -1206,6 +1219,14 @@ engine::query_task<Lowered> Lower::run(engine::Ctx& cx, FnKey k) {
         if (e != tu.entities.end()) {
           callee = e->type;
           ordinary_callee = ordinary_free_function(*e);
+          if (e->special == Special::constructor && def.unwind_through_constructor != callee_id) {
+            const auto constructor = std::ranges::find(tu.functions, callee_id, &FunctionDef::entity);
+            if (constructor != tu.functions.end() && constructor->constructor_cleanup != EntityId::none) {
+              auto located = co_await located_error(cx, k.tu, ast::Loc{def.item, def.body_offset},
+                                                   "unsupported caller of a potentially throwing union constructor");
+              co_return Lowered{std::nullopt, {}, std::move(located)};
+            }
+          }
         }
       } else if (op == ir::Op::call_ind) {
         QualType ptr = body.value(body.operands_of(n)[1]).type.type;
@@ -1776,7 +1797,8 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
       return assemble_linux(tu.name, code, data, symbols, weak_variables);
     }
     std::vector<aarch64::CompiledFunction> code;
-    for (std::size_t i = 0; i < fns.size(); ++i) code.push_back({fns[i].fn, *ms[i].get().code});
+    for (std::size_t i = 0; i < fns.size(); ++i)
+      code.push_back({fns[i].fn, *ms[i].get().code, tu.functions[i].unwind == UnwindEligibility::cleanup_free});
     auto o = aarch64::assemble(tu.name, code, data, symbols);
     if (o) mark_weak_definitions(*o, symbols, tu.functions, weak_variables);
     return o;

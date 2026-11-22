@@ -242,6 +242,14 @@ struct MemberCall {
   [[=indeterminately_sequenced(1)]] ChildList args;
 };
 
+// An explicit destructor call ([class.dtor]): the object ends its lifetime without
+// releasing its storage. A trivial destructor has no function to call.
+struct ExplicitDestroy {
+  ExprInfo info;
+  EntityId function;
+  [[=sequenced]] Child object;  // the object's address
+};
+
 // A virtual call on an opaque root. The slot is relative to the table's address point.
 struct VirtualMemberCall {
   ExprInfo info;
@@ -544,7 +552,7 @@ using Nodes = closed_list<Literal, DeclRef, Paren, Unary, Binary, OrderedBinary,
                           DepName, CondDecl, Switch, Case, Default, Label, Goto, BuiltinCall, Lambda, DefaultArg,
                           StaticInit, StaticVar, NewObject, DeleteObject, VariadicBuiltin, AssignmentCall,
                           NewArray, DeleteArray, DelegatingInit, VirtualMemberCall, Throw, TryBlock, Handler,
-                          DefaultMemberInit>;
+                          DefaultMemberInit, ExplicitDestroy>;
 
 static_assert(Nodes::size < max_node_kinds);
 
