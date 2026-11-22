@@ -331,6 +331,7 @@ written default member initializer are value-initialized.
 - ordinary scalar `new` and single-object `delete` for integral and pointer objects, including
   cv-qualified objects. Scalar allocation uses the global Itanium allocation functions.
   Syntax checking also covers one-dimensional scalar `new T[n]` and `delete[] p`.
+  Unary `noexcept` accounts for the selected global array allocation function.
   On Linux x86-64, ordinary functions with cleanup-free unwind frames can default-initialize
   one-dimensional integral and ordinary pointer arrays with a bound built from integer literals,
   parentheses, unary `+` and `-`, and binary `+`, `-`, and `*`. The allocation returns the
@@ -345,7 +346,7 @@ written default member initializer are value-initialized.
   in constant expressions.
   Runtime placement `new` supports integral and ordinary pointer objects with one placement
   argument and a visible written reserved allocation function.
-  [#293](https://github.com/yrashk/ycxx/issues/293)
+  [#293](https://github.com/yrashk/ycxx/issues/293) · [#854](https://github.com/yrashk/ycxx/issues/854)
 - pointers and references to arrays of unknown bound, and template partial specializations
   that match unknown-bound array types. [#222](https://github.com/yrashk/ycxx/issues/222)
 - implicit lvalue copy assignment for ordinary classes without bases, including class members
