@@ -51,8 +51,10 @@ object files from Clang or GCC. Variadic functions can be defined with `<cstdarg
 macOS and Linux ([#647](https://github.com/yrashk/ycxx/issues/647)). Errors are reported as
 `file:line:col: error: …`.
 
-The arm64 Mach-O linker preserves supported cleanup-free DWARF frames from input objects.
+The arm64 Mach-O linker preserves supported cleanup-free and cleanup-only DWARF frames from input objects.
 [Mach-O unwind support #72](https://github.com/yrashk/ycxx/issues/72)
+It resolves PC-relative GOT words at nonzero offsets in independently assembled objects.
+[#782](https://github.com/yrashk/ycxx/issues/782)
 
 ```sh
 tools/build
@@ -67,7 +69,9 @@ instead of Debug's 5.3 s on an M-series Mac ([#726](https://github.com/yrashk/yc
 Single-expression `auto(x)` and `auto{x}` perform scalar and pointer decay-copy, including
 array and function decay. Function-template bodies can defer supported dependent operands to
 instantiation, and a function template whose signature holds a dependent variable-template-id
-or its negation compiles to an object ([#773](https://github.com/yrashk/ycxx/issues/773)). Concrete constant template arguments can use braced conversions such as
+or its negation compiles to an object ([#773](https://github.com/yrashk/ycxx/issues/773)). C++26
+pack-index-specifiers `T...[I]` select a type from a pack ([#297](https://github.com/yrashk/ycxx/issues/297);
+the expression form `t...[I]` is not done yet). Concrete constant template arguments can use braced conversions such as
 `Tag<auto{7}>` and integer-literal-led parenthesized conversions such as `Tag<auto(7)>`.
 [#286](https://github.com/yrashk/ycxx/issues/286)
 
@@ -196,8 +200,11 @@ A host-linked ycxx function can use one `catch (...)` to return an integer liter
 a direct call on its parameter to an externally defined `int(int)` function throws.
 A host-linked void function can also destroy one initialized aggregate local on both exits
 from an external `void()` call and let the original exception reach a peer handler.
+A supported union constructor can destroy its active member when its body call throws and
+propagate an exception from its initializer before the member's lifetime begins.
 [#578](https://github.com/yrashk/ycxx/issues/578)
 · [#583](https://github.com/yrashk/ycxx/issues/583) · [#663](https://github.com/yrashk/ycxx/issues/663)
+· [#738](https://github.com/yrashk/ycxx/issues/738)
 
 Both targets support cooked integer user-defined literals through namespace-scope literal
 operators with an `unsigned long long` parameter, including constant evaluation.
@@ -218,6 +225,10 @@ in class and use it to initialize an `inline constexpr` tag object.
 An ordinary class object can be destroyed explicitly through a reference or pointer with
 `object.~Class()` or `pointer->~Class()`. Templates can use a dependent class name, and unary
 `noexcept` uses the destructor's exception specification. [#722](https://github.com/yrashk/ycxx/issues/722)
+
+Both targets construct a class prvalue directly into an automatic variable initialized with the
+built-in conditional or comma operator. The supported nonthrowing initializers sequence temporary
+destruction after the result is constructed. [#740](https://github.com/yrashk/ycxx/issues/740)
 
 In-class conversion functions can name a class type alias as their conversion target,
 including a dependent alias in a class template. A named `static_cast` can call a
@@ -318,8 +329,8 @@ written default member initializer are value-initialized.
   [#244](https://github.com/yrashk/ycxx/issues/244)
 - ordinary named unions with a written destructor can hold nontrivially destructible members.
   The member's copy constructor can be trivial or deleted. An explicit union constructor
-  initializes its selected member. Construction of a nontrivially destructible variant
-  uses a nonthrowing constructor. [#203](https://github.com/yrashk/ycxx/issues/203) ·
+  initializes its selected member. A nonthrowing constructor works on both targets, and the
+  hosted Linux subset above can unwind the construction. [#203](https://github.com/yrashk/ycxx/issues/203) ·
   [#738](https://github.com/yrashk/ycxx/issues/738)
 - namespace-scope union templates support the same rules for concrete nontrivially destructible
   variants after instantiation. [#203](https://github.com/yrashk/ycxx/issues/203)
@@ -429,11 +440,12 @@ macros, conditionals, `_Pragma` and the predefined macros. `ycxx cxx -E` matches
 `ycxx cxx -E --target=x86_64-linux-gnu` selects Linux macros and resource headers. On native
 x86-64 Linux it also searches glibc's multiarch include path and preprocesses glibc's `<stdio.h>`.
 Linux `<stdarg.h>` supplies the `va_list` declaration, and direct `<float.h>` and `<limits.h>`
-provide the target's numeric limits. glibc's `<stdint.h>` compiles on native Linux (#657), and
-`<inttypes.h>` support remains tracked in #664. A Darwin target can use the configured SDK or one
-selected by `SDKROOT`. Cross-target builds can also supply target headers with `-I` or `-isystem`.
-[#475](https://github.com/yrashk/ycxx/issues/475)
-[#690](https://github.com/yrashk/ycxx/issues/690)
+provide the target's numeric limits. On native Linux, glibc's `<stdint.h>` and the pinned libycxx's
+hosted `<cstdint>`, `<cinttypes>`, and `<inttypes.h>` compile. A Darwin target can use the configured
+SDK or one selected by `SDKROOT`. Cross-target builds can also supply target headers with `-I` or
+`-isystem`. When no target `<stdint.h>` is available, `<cstdint>` uses compiler predefines.
+[#475](https://github.com/yrashk/ycxx/issues/475) · [#657](https://github.com/yrashk/ycxx/issues/657) ·
+[#664](https://github.com/yrashk/ycxx/issues/664) · [#690](https://github.com/yrashk/ycxx/issues/690)
 
 **Incremental builds through a resident daemon.** `ycxx cxx` hands its work to a per-project
 `ycxx daemon` (`YCXX_NO_DAEMON=1` runs in-process), which watches the files it has read and keeps

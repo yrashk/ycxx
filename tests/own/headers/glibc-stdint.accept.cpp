@@ -1,6 +1,5 @@
 // #657: glibc's <stdint.h> for the x86-64 Linux target. glibc redefines __INT64_C and
-// __UINT64_C with GCC's spelling, which ycxx's predefined macros must match. (<inttypes.h> is
-// blocked separately by libycxx's limit macros, #664.)
+// __UINT64_C with GCC's spelling, which ycxx's predefined macros must match.
 // REQUIRES: linux
 // PARITY: by design: glibc's headers exist only on Linux hosts
 // FLAGS: --target=x86_64-pc-linux-gnu

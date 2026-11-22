@@ -422,47 +422,130 @@ UnwindEligibility cleanup_free_definition(parse::Program& program, const ast::De
   return has_throw ? cleanup_free_with_throw : cleanup_free;
 }
 
-// One aggregate local followed by an external void call. The initializer has no calls,
-// throwing operations, class temporaries, or partially constructed class subobjects.
-ast::NodeId hosted_cleanup_call(parse::Program& program, const ast::DeclSema& d, const ast::BodySema& body) {
+bool hosted_void_definition(parse::Program& program, const ast::DeclSema& d, const ast::BodySema& body) {
   auto& world = program.world();
   const auto& tree = world.ins.ast;
   const auto& definition = world.entities.rec(d.entity);
   const auto fn = world.types.rec(d.type);
-  if (definition.kind != sema::EntityKind::function || definition.templ != EntityId::none ||
-      !program.is_namespace(definition.scope) || definition.linkage != ast::Linkage::external ||
-      !unwind_scalar_prototype(world.types, d.type) || fn.fn_noexcept ||
-      !world.types.is(fn.inner, sema::Builtin::void_) || d.contracts != ast::NodeId::none ||
-      (d.flags & (sema::decl_flag::constexpr_ | sema::decl_flag::consteval_)) ||
-      world.ins.seqs.size(body.closures) != 0 || body.tree == ast::NodeId::none ||
-      !tree.is<ast::Compound>(body.tree)) return ast::NodeId::none;
-  const auto statements = tree.children(tree.get<ast::Compound>(body.tree).stmts);
-  if (statements.size() != 2 || !tree.is<ast::DeclStmt>(statements[0].id) || !tree.is<ast::ExprStmt>(statements[1].id))
-    return ast::NodeId::none;
-  const auto declarations = tree.children(tree.get<ast::DeclStmt>(statements[0].id).decls);
-  if (declarations.size() != 1 || !tree.is<ast::LocalVar>(declarations.front().id)) return ast::NodeId::none;
-  const auto local = tree.get<ast::LocalVar>(declarations.front().id);
-  const auto type = world.ins.seqs.at(body.locals, local.local).type;
-  if (local.destructor == EntityId::none || !world.types.is_class(type) || local.init.id == ast::NodeId::none ||
-      !tree.is<ast::InitList>(local.init.id)) return ast::NodeId::none;
-  const auto& record = program.classes().rec(world.types.class_of(type));
-  if (!record.destructor_noexcept.value_or(false) || record.virtual_destructor) return ast::NodeId::none;
-  bool has_throw = false;
-  for (auto element : tree.children(tree.get<ast::InitList>(local.init.id).elems))
-    if (!unwind_body_node(program, element.id, has_throw, true)) return ast::NodeId::none;
-  const auto call_at = tree.get<ast::ExprStmt>(statements[1].id).expr.id;
-  if (call_at == ast::NodeId::none || !tree.is<ast::Call>(call_at)) return ast::NodeId::none;
-  const auto call = tree.get<ast::Call>(call_at);
+  return definition.kind == sema::EntityKind::function && definition.templ == EntityId::none &&
+         program.is_namespace(definition.scope) && definition.linkage == ast::Linkage::external &&
+         unwind_scalar_prototype(world.types, d.type) && !fn.fn_noexcept &&
+         world.types.is(fn.inner, sema::Builtin::void_) && d.contracts == ast::NodeId::none &&
+         !(d.flags & (sema::decl_flag::constexpr_ | sema::decl_flag::consteval_)) &&
+         world.ins.seqs.size(body.closures) == 0 && body.tree != ast::NodeId::none && tree.is<ast::Compound>(body.tree);
+}
+
+EntityId hosted_external_call(parse::Program& program, ast::NodeId at, sema::Builtin result) {
+  const auto& world = program.world();
+  const auto& tree = world.ins.ast;
+  if (at == ast::NodeId::none || !tree.is<ast::Call>(at)) return EntityId::none;
+  const auto call = tree.get<ast::Call>(at);
   if (call.function == EntityId::none || call.callee.id == ast::NodeId::none ||
-      !tree.is<ast::DeclRef>(call.callee.id) || !tree.children(call.args).empty()) return ast::NodeId::none;
+      !tree.is<ast::DeclRef>(call.callee.id) || !tree.children(call.args).empty()) return EntityId::none;
   const auto& entity = world.entities.rec(call.function);
   const auto callee = tree.get<ast::DeclRef>(call.callee.id);
   const auto prototype = world.types.rec(callee.info.type);
   if (callee.reference || callee.entity != call.function || entity.kind != sema::EntityKind::function ||
       entity.templ != EntityId::none || !program.is_namespace(entity.scope) || entity.linkage != ast::Linkage::external ||
       !unwind_scalar_prototype(world.types, callee.info.type) || prototype.fn_noexcept ||
-      !world.types.is(prototype.inner, sema::Builtin::void_) || !prototype.params.empty()) return ast::NodeId::none;
-  return call_at;
+      !world.types.is(prototype.inner, result) || !prototype.params.empty()) return EntityId::none;
+  return call.function;
+}
+
+std::optional<ast::LocalVar> single_local(const ast::Ast& tree, ast::NodeId statement) {
+  if (!tree.is<ast::DeclStmt>(statement)) return std::nullopt;
+  const auto declarations = tree.children(tree.get<ast::DeclStmt>(statement).decls);
+  if (declarations.size() != 1 || !tree.is<ast::LocalVar>(declarations.front().id)) return std::nullopt;
+  return tree.get<ast::LocalVar>(declarations.front().id);
+}
+
+// One aggregate local followed by an external void call. The initializer has no calls,
+// throwing operations, class temporaries, or partially constructed class subobjects.
+ast::NodeId hosted_cleanup_call(parse::Program& program, const ast::DeclSema& d, const ast::BodySema& body) {
+  if (!hosted_void_definition(program, d, body)) return ast::NodeId::none;
+  const auto& world = program.world();
+  const auto& tree = world.ins.ast;
+  const auto statements = tree.children(tree.get<ast::Compound>(body.tree).stmts);
+  if (statements.size() != 2 || !tree.is<ast::ExprStmt>(statements[1].id)) return ast::NodeId::none;
+  const auto local = single_local(tree, statements.front().id);
+  if (!local || local->destructor == EntityId::none || local->init.id == ast::NodeId::none ||
+      !tree.is<ast::InitList>(local->init.id)) return ast::NodeId::none;
+  const auto type = world.ins.seqs.at(body.locals, local->local).type;
+  if (!world.types.is_class(type)) return ast::NodeId::none;
+  const auto& record = program.classes().rec(world.types.class_of(type));
+  if (!record.destructor_noexcept.value_or(false) || record.virtual_destructor) return ast::NodeId::none;
+  bool has_throw = false;
+  for (auto element : tree.children(tree.get<ast::InitList>(local->init.id).elems))
+    if (!unwind_body_node(program, element.id, has_throw, true)) return ast::NodeId::none;
+  const auto call = tree.get<ast::ExprStmt>(statements[1].id).expr.id;
+  return hosted_external_call(program, call, sema::Builtin::void_) != EntityId::none ? call : ast::NodeId::none;
+}
+
+// The selected variant needs cleanup only after its scalar aggregate initialization completed.
+// A direct external int() in the initializer can throw before it completes, with no cleanup.
+void hosted_union_constructor(parse::Program& program, FunctionDef& f) {
+  const auto& world = program.world();
+  const auto& tree = world.ins.ast;
+  const auto& entity = world.entities.rec(f.entity);
+  const auto& body = f.body;
+  const auto fn = world.types.rec(f.decl.type);
+  if (entity.kind != sema::EntityKind::constructor || fn.fn_noexcept || body.tree == ast::NodeId::none ||
+      !tree.is<ast::Compound>(body.tree) || !program.classes().rec(entity.scope).union_) return;
+  const auto steps = tree.children(tree.get<ast::Compound>(body.tree).stmts);
+  for (const auto step : steps) {
+    if (!tree.is<ast::MemberInit>(step.id)) continue;
+    const auto member = tree.get<ast::MemberInit>(step.id);
+    f.constructor_cleanup = program.classes().destructor_of(member.type);
+    if (f.constructor_cleanup != EntityId::none) break;
+  }
+  if (f.constructor_cleanup == EntityId::none || steps.size() != 2 || !tree.is<ast::MemberInit>(steps[0].id) ||
+      !tree.is<ast::Compound>(steps[1].id) || entity.templ != EntityId::none || fn.variadic || !fn.params.empty() ||
+      f.decl.contracts != ast::NodeId::none || (f.decl.flags & (sema::decl_flag::constexpr_ | sema::decl_flag::consteval_)) ||
+      world.ins.seqs.size(body.closures) != 0 || world.ins.seqs.size(body.locals) != 0) return;
+  const auto member = tree.get<ast::MemberInit>(steps[0].id);
+  if (member.field == ~0u || member.init.id == ast::NodeId::none || !tree.is<ast::InitList>(member.init.id) ||
+      !world.types.is_class(member.type)) return;
+  const auto& record = program.classes().rec(world.types.class_of(member.type));
+  if (!record.destructor_noexcept.value_or(false) || record.virtual_destructor || record.union_ || !record.bases.empty() ||
+      !std::ranges::all_of(record.fields, [&](const sema::FieldRec& field) {
+        return !field.dmi && unwind_scalar(world.types, field.type);
+      })) return;
+
+  EntityId initializer = EntityId::none;
+  bool has_throw = false;
+  for (const auto element : tree.children(tree.get<ast::InitList>(member.init.id).elems)) {
+    if (unwind_body_node(program, element.id, has_throw, true)) continue;
+    if (initializer != EntityId::none) return;
+    initializer = hosted_external_call(program, element.id, sema::Builtin::int_);
+    if (initializer == EntityId::none) return;
+  }
+  const auto statements = tree.children(tree.get<ast::Compound>(steps[1].id).stmts);
+  if (statements.size() != 1 || !tree.is<ast::ExprStmt>(statements.front().id)) return;
+  const auto call = tree.get<ast::ExprStmt>(statements.front().id).expr.id;
+  if (hosted_external_call(program, call, sema::Builtin::void_) == EntityId::none) return;
+  f.cleanup_call = call;
+  f.constructor_initializer_callee = initializer;
+  f.unwind = UnwindEligibility::hosted_cleanup;
+}
+
+// The automatic object's lifetime starts only after its constructor returns. There is no local
+// to clean up if that call throws, so this caller only needs a frame.
+EntityId hosted_union_constructor_caller(parse::Program& program, const ast::DeclSema& d, const ast::BodySema& body) {
+  if (!hosted_void_definition(program, d, body)) return EntityId::none;
+  const auto& world = program.world();
+  const auto& tree = world.ins.ast;
+  const auto statements = tree.children(tree.get<ast::Compound>(body.tree).stmts);
+  if (statements.size() != 1) return EntityId::none;
+  const auto local = single_local(tree, statements.front().id);
+  if (!local || local->destructor == EntityId::none || local->init.id == ast::NodeId::none ||
+      !tree.is<ast::CtorCall>(local->init.id)) return EntityId::none;
+  const auto type = world.ins.seqs.at(body.locals, local->local).type;
+  if (!world.types.is_class(type)) return EntityId::none;
+  const auto& record = program.classes().rec(world.types.class_of(type));
+  const auto init = tree.get<ast::CtorCall>(local->init.id);
+  if (!record.union_ || !record.destructor_noexcept.value_or(false) || init.zero_first ||
+      !tree.children(init.args).empty()) return EntityId::none;
+  return init.ctor;
 }
 
 // Prove the whole handler occurrence while it still has C++ types and lifetime information.
@@ -664,6 +747,12 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
                                                                     : Special::none});
     Entity& emitted = tu.entities.back();
     emitted.asm_label = program.asm_label(e);
+    if (emitted.special == Special::destructor) {
+      if (const auto* owner = classes.find(r.scope))
+        emitted.nonthrowing = owner->destructor_noexcept.value_or(false);
+    } else if (fn) {
+      emitted.nonthrowing = world.types.rec(d.type).fn_noexcept;
+    }
     if (r.kind == sema::EntityKind::function && r.lang == ast::LangLinkage::cxx &&
         r.linkage == ast::Linkage::external && r.templ == EntityId::none && program.is_namespace(r.scope) &&
         emitted.asm_label.empty()) {
@@ -775,8 +864,10 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
                                      program.asm_label(d.entity).empty();
       // A written ordinary body starts at '{'. Other starts include a function-try-block and a
       // constructor initializer. Synthetic bodies and instantiations never enter this path.
-      if (!member && tu.main != d.entity && !it.specialization &&
-          program.region().tokens[it.body_begin].kind == lex::Tk::l_brace) {
+      if (linux && entity.kind == sema::EntityKind::constructor) {
+        hosted_union_constructor(program, tu.functions.back());
+      } else if (!member && tu.main != d.entity && !it.specialization &&
+                 program.region().tokens[it.body_begin].kind == lex::Tk::l_brace) {
         auto& f = tu.functions.back();
         if (linux) {
           f.catch_all_callee = hosted_catch_all_callee(program, d, body);
@@ -785,6 +876,7 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
           if (f.unwind == UnwindEligibility::none) {
             f.cleanup_call = hosted_cleanup_call(program, d, body);
             if (f.cleanup_call != ast::NodeId::none) f.unwind = UnwindEligibility::hosted_cleanup;
+            else f.unwind_through_constructor = hosted_union_constructor_caller(program, d, body);
           }
         } else if (cleanup_free_definition(program, d, body) == UnwindEligibility::cleanup_free) {
           f.unwind = UnwindEligibility::cleanup_free;
@@ -877,12 +969,20 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
     tu.functions.push_back({s.decl.entity, s.decl, program.synthesized_body(i), program.id(s.item), 0, program.this_type(s.decl)});
     tu.functions.back().coalesced = s.kind == parse::Program::SpecialMember::copy_assignment && !internal_class(cls);
   }
+  auto unwind_provider = [&](EntityId callee) {
+    return !program.function_defined_before(callee, program.end()) && !noexcept_declarations.contains(callee) &&
+           program.asm_label(callee).empty();
+  };
+  auto unwind_definition = [&](const FunctionDef& f) {
+    return !noexcept_declarations.contains(f.entity) && !f.coalesced && f.guards.empty() &&
+           program.asm_label(f.entity).empty() &&
+           (!inline_declarations.contains(f.entity) || f.constructor_cleanup != EntityId::none);
+  };
   for (FunctionDef& f : tu.functions) {
     static_locals(world, tu, f, runtime);
     // Check the complete unit by entity, including later redeclarations and qualified friends.
     if (f.unwind == UnwindEligibility::none) continue;
-    if (noexcept_declarations.contains(f.entity) || inline_declarations.contains(f.entity) || f.coalesced ||
-        !f.guards.empty() || !program.asm_label(f.entity).empty()) {
+    if (!unwind_definition(f)) {
       f.unwind = UnwindEligibility::none;
     } else if (f.unwind == UnwindEligibility::cleanup_free_with_throw && !tu.int_throw) {
       tu.int_throw = runtime.int_throw();
@@ -890,17 +990,23 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
       // An external provider supplies its own unwind coverage. A definition in this unit can
       // introduce intervening frames without it. The ordinary function type erases written noexcept.
       const EntityId callee = f.catch_all_callee;
-      if (program.function_defined_before(callee, program.end()) ||
-          noexcept_declarations.contains(callee) || !program.asm_label(callee).empty())
+      if (!unwind_provider(callee))
         f.unwind = UnwindEligibility::none;
       else if (!tu.catch_all) tu.catch_all = runtime.catch_all();
     } else if (f.unwind == UnwindEligibility::hosted_cleanup) {
       const EntityId callee = ins.ast.get<ast::Call>(f.cleanup_call).function;
-      if (program.function_defined_before(callee, program.end()) ||
-          noexcept_declarations.contains(callee) || !program.asm_label(callee).empty())
+      if (!unwind_provider(callee) || (f.constructor_initializer_callee != EntityId::none &&
+                                      !unwind_provider(f.constructor_initializer_callee)))
         f.unwind = UnwindEligibility::none;
       else if (tu.cleanup_resume == EntityId::none) tu.cleanup_resume = runtime.resume();
     }
+  }
+  for (FunctionDef& f : tu.functions) {
+    if (f.unwind_through_constructor == EntityId::none) continue;
+    const auto constructor = std::ranges::find(tu.functions, f.unwind_through_constructor, &FunctionDef::entity);
+    if (unwind_definition(f) && constructor != tu.functions.end() && constructor->unwind == UnwindEligibility::hosted_cleanup)
+      f.unwind = UnwindEligibility::cleanup_free;
+    else f.unwind_through_constructor = EntityId::none;
   }
   // Written declarations have already supplied their locations and definitions. For the
   // remaining implicit declarations, a code reference alone emits an undefined symbol.
