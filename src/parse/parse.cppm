@@ -4325,6 +4325,25 @@ private:
       friend_at = ps_.pos();
       ps_.bump();
     }
+    // [class.friend], [temp.friend]: look up and substitute the type of the friend.
+    // The designated class need not be complete here. The declaration introduces no name.
+    if (friend_at && ps_.is(Tk::identifier) && ps_.kind(1) == Tk::semi) {
+      const NameId name = ps_.name_of(ps_.tok());
+      const auto* param = s_.template_param(name);
+      if (param && param->kind == ast::TemplateArgKind::type && !param->pack) {
+        const auto type = s_.class_template_parameter_type(*param, name, ps_.pos());
+        if (!type) return bad();
+        auto& types = s_.types();
+        const EntityId entity = types.is_class(*type) ? types.class_of(*type) : EntityId::none;
+        auto sem = class_decl(entity, false);
+        sem.type = *type;
+        sem.flags = sema::decl_flag::friend_;
+        decls_.push_back(sem);
+        ps_.bump();
+        ps_.bump();
+        return;
+      }
+    }
     const bool definition = it_->kind == ItemKind::function;
     if (!definition && !annotations.empty()) {
       s_.diag(annotations.front().offset, Diag::attributes_not_allowed);

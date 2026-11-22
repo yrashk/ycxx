@@ -519,10 +519,14 @@ public:
     std::optional<QualType> type;
   };
 
-  // [class.pre], [class.member.lookup]: an ordinary class's injected name stops the search on
+  enum class ClassBodyLookup { unqualified, qualified, before_template_parameter };
+
+  // [class.pre], [class.member.lookup]: a class's injected name stops the search on
   // that branch. In a nonvirtual graph, distinct base branches cannot dominate one another.
   ClassBodyType class_body_type(EntityId naming, const ClassRec& root, NameId name, std::optional<u32> type_at,
-                               bool qualified = false, bool type_only = false) {
+                               ClassBodyLookup lookup = ClassBodyLookup::unqualified, bool type_only = false) {
+    const bool qualified = lookup == ClassBodyLookup::qualified;
+    const bool before_parameter = lookup == ClassBodyLookup::before_template_parameter;
     struct Edge {
       EntityId derived;
       ast::Access access;
@@ -538,7 +542,8 @@ public:
     std::vector<Edge> path;
     auto collect = [&](this auto&& visit, EntityId cls, const ClassRec& cr) -> void {
       const EntityRec& c = w_->entities.rec(cls);
-      if (c.kind == EntityKind::class_ && c.templ == EntityId::none && c.name == name) {
+      if (c.kind == EntityKind::class_ && c.name == name &&
+          (c.templ == EntityId::none || (before_parameter && cls != naming))) {
         hits.push_back({types().class_type(cls), cls, ast::Access::public_, true, path});
         return;
       }
@@ -555,7 +560,7 @@ public:
         }
       }
       std::span<const BaseRec> bases = cr.bases;
-      if (qualified && cls == naming && !cr.defined) bases = q_->defining_base_records(cls);
+      if ((qualified || before_parameter) && cls == naming && !cr.defined) bases = q_->defining_base_records(cls);
       for (const BaseRec& b : bases) {
         if (const ClassRec* base = class_rec(b.cls)) {
           if (type_at) path.push_back({cls, b.access});
@@ -573,15 +578,16 @@ public:
     auto first = std::ranges::find_if(hits, [](const Hit& h) { return h.type.has_value(); });
     if (first == hits.end()) return {true, std::nullopt};
     // Apply the lookup-set and access checks to names with an injected-class-name candidate.
-    // Ordinary nested member access is handled by its existing lookup paths.
-    if (type_at && injected) {
+    // The caller resolving a potentially hidden template parameter also needs these checks
+    // for ordinary members of nondependent bases ([temp.local]).
+    if (type_at && (injected || before_parameter)) {
       QualType selected = types().canonical(*first->type);
       if (std::ranges::any_of(hits, [&](const Hit& h) { return !h.type || types().canonical(*h.type) != selected; })) {
         diag(*type_at, Diag::ambiguous_member, name, types().class_type(naming));
       } else {
-        auto allowed = [this, naming](const Hit& h) {
+        auto allowed = [this, naming, before_parameter](const Hit& h) {
           return accessible(h.owner, h.access, naming) && std::ranges::all_of(h.path, [&](const Edge& edge) {
-            return accessible(edge.derived, edge.access);
+            return accessible(edge.derived, edge.access, before_parameter ? naming : EntityId::none);
           });
         };
         if (!std::ranges::any_of(hits, allowed)) {
@@ -593,11 +599,27 @@ public:
             });
             return {true, type};
           }
-          diag(*type_at, Diag::inaccessible_base, type, types().class_type(naming));
+          if (before_parameter && !accessible(first->owner, first->access, naming))
+            diag(*type_at, first->access == ast::Access::protected_ ? Diag::protected_member : Diag::private_member,
+                 name, types().class_type(first->owner));
+          else
+            diag(*type_at, Diag::inaccessible_base, type, types().class_type(naming));
         }
       }
     }
     return {true, first->type};
+  }
+  // A class template's nondependent bases are searched before the template parameter scope.
+  std::optional<QualType> class_template_parameter_type(const ast::TemplateParamSema& parameter, NameId name, u32 at) {
+    const auto before = diag_count();
+    const auto hit = class_body_type(current_class, ClassRec{}, name, at, ClassBodyLookup::before_template_parameter);
+    if (hit.found) {
+      if (has_error_since(before)) return std::nullopt;
+      if (!hit.type) diag(at, Diag::not_a_type, name);
+      return hit.type;
+    }
+    if (auto argument = bound_arg(parameter)) return argument->type;
+    return parameter.type;
   }
   // A typedef-name the implementation declares where nothing else does (docs/EXTENSIONS.md):
   // `__builtin_va_list`, the type used by the target's C headers and libycxx's `va_list`.
@@ -884,6 +906,60 @@ public:
   };
   // The concept unqualified lookup finds for `name`.
   std::optional<ast::DeclSema> concept_named(NameId name) { return named_template(name, ast::DeclKind::concept_); }
+  // An ordinary unqualified type-constraint on a placeholder ([basic.lookup.unqual], [temp.param]).
+  std::optional<EntityId> placeholder_concept(NameId name, u32 at) {
+    auto not_concept = [&]() -> std::optional<EntityId> {
+      diag(at, Diag::not_a_concept, name);
+      return std::nullopt;
+    };
+    auto select = [&](std::span<const ast::DeclSema> decls) -> std::optional<EntityId> {
+      auto candidate = std::ranges::find(decls, ast::DeclKind::concept_, &ast::DeclSema::kind);
+      if (candidate == decls.end()) return not_concept();
+      if (std::ranges::any_of(decls, [&](const ast::DeclSema& d) { return d.entity != candidate->entity; })) {
+        diag(at, Diag::ambiguous_name, name);
+        return std::nullopt;
+      }
+      if (ins().seqs.size(candidate->template_params) == 0 ||
+          ins().seqs.at(candidate->template_params, 0).kind != ast::TemplateArgKind::type) {
+        diag(at, Diag::not_a_type_concept, name);
+        return std::nullopt;
+      }
+      return candidate->entity;
+    };
+    for (std::size_t depth = scopes_.size(); depth-- > 0;) {
+      auto names_here = [=](const auto& binding) { return binding.depth == depth && binding.name == name; };
+      if (std::ranges::any_of(scopes_[depth], [&](const auto& local) { return local.first == name; }) ||
+          std::ranges::any_of(block_types_, names_here) || std::ranges::any_of(block_aliases_, names_here))
+        return not_concept();
+      for (const auto& [scope, e] : using_enums_) {
+        if (scope != depth) continue;
+        if (const EnumRec* record = enum_rec(e); record &&
+            std::ranges::any_of(record->enumerators, [&](const EnumeratorRec& x) { return x.name == name; }))
+          return not_concept();
+      }
+      std::vector<ast::DeclSema> from_usings;
+      for (const BlockUsing& u : block_usings_)
+        if (names_here(u)) from_usings.insert(from_usings.end(), u.decls.begin(), u.decls.end());
+      if (!from_usings.empty()) return select(from_usings);
+    }
+    if (template_param(name) || (namespace_lambda && namespace_lambda->name == name)) return not_concept();
+    for (EntityId c = current_class; c != EntityId::none;) {
+      const EntityRec& record = w_->entities.rec(c);
+      if (record.kind != EntityKind::class_ && record.kind != EntityKind::class_template) break;
+      if (record.name == name || find_member(c, name, /*unqualified=*/true) ||
+          (c == current_class && q_->earlier_member(name)))
+        return not_concept();
+      c = record.scope;
+    }
+    for (auto d = own.rbegin(); d != own.rend(); ++d)
+      if (d->name == name) return select(std::span{&d->sema, 1});
+    std::vector<ast::DeclSema> decls;
+    for (DeclId id : q_->visible_decls(name, directives())) {
+      auto d = q_->decl_sema(id);
+      if (d.entity != EntityId::none && !is_special(d)) decls.push_back(d);
+    }
+    return select(decls);
+  }
   // The type-constraints of the template-head being read, in normal form ([temp.constr.decl]/3).
   std::vector<ConstId> head_constraints;
   // An atomic constraint ([temp.constr.atomic]): the expression at [begin, end) of this part, whose
@@ -928,6 +1004,30 @@ public:
     if (!full) return std::nullopt;
     std::vector<ast::TemplateParamSema> params = ins().seqs.elements(c.template_params);
     return templates().substitute_constraint(c.constraints, Bindings::of(params.empty() ? 0 : params[0].depth, *full));
+  }
+  // Check the immediately-declared constraint on the type deduced for the placeholder itself
+  // ([dcl.type.auto.deduct], [temp.param]), before publishing the completed declarator type.
+  bool check_placeholder_constraint(QualType placeholder, QualType deduced, u32 at) {
+    const TypeRec p = types().rec(placeholder);
+    const NameId name = w_->entities.rec(p.entity).name;
+    auto unresolved = [&] {
+      diag(at, Diag::placeholder_constraint_unresolved, name);
+      return false;
+    };
+    if (types().is_dependent(deduced)) return unresolved();
+    auto c = q_->template_decl(p.entity);
+    if (!c) return unresolved();
+    std::vector<TemplateArg> args{templates().type_arg(deduced)};
+    const auto tail = ins().seqs.elements(p.args);
+    args.insert(args.end(), tail.begin(), tail.end());
+    const std::size_t before = diag_count();
+    auto nf = concept_constraint(*c, args, at);
+    if (!nf) return has_error_since(before) ? false : unresolved();
+    auto sat = q_->satisfied(*nf);
+    if (q_->satisfaction_failed(*nf)) return false;
+    if (!sat) return unresolved();
+    if (!*sat) diag(at, Diag::constraints_not_satisfied, name);
+    return *sat;
   }
   // A concept-id as an expression ([temp.names]/8): whether it is satisfied, a `bool` prvalue;
   // value-dependent while its arguments are.
@@ -1623,7 +1723,7 @@ public:
           (!type_only || is_type(earlier->kind))) return {};
     }
     const ClassRec incomplete;
-    return class_body_type(naming, cls ? *cls : incomplete, name, at, /*qualified=*/true, type_only);
+    return class_body_type(naming, cls ? *cls : incomplete, name, at, ClassBodyLookup::qualified, type_only);
   }
 
   // Qualified namespace lookup for an elaborated class name skips non-types and aliases.
@@ -3120,7 +3220,7 @@ public:
   Ex captured(u32 ctx, u32 key, NameId name, u32 begin, u32 end) {
     const ast::LocalRec* local = nullptr;
     if (!(key & capture_bit)) local = ctx == lambdas_.size() ? &locals_[key] : &lambdas_[ctx].outer_locals[key];
-    if (local && (local->flags & ast::local_flag::structured_binding) && types().has_placeholder(local->type)) {
+    if (local && types().has_placeholder(local->type)) {
       diag(begin, Diag::auto_used_in_initializer, name);
       return {NodeId::none, begin, end};
     }
@@ -5720,7 +5820,6 @@ public:
   }
 
   std::optional<lex::VaBuiltin> va_builtin(NameId name) {
-    if (w_->target.va_list != ast::VaList::sysv_x86_64) return std::nullopt;
     auto b = lex::va_builtin(ins().names.spelling(name));
     return b && !declared(name) ? b : std::nullopt;
   }
@@ -5751,12 +5850,22 @@ public:
       }
     }
 
-    // A local va_list decays to a pointer to its single record; an adjusted parameter is
-    // already a pointer. The pointee's identity and cv-qualifiers must match in either case.
-    const QualType array = w_->builtin_va_list();
-    const QualType pointer = types().pointer(types().rec(array).inner);
+    // System V: a local va_list decays to a pointer to its single record; an adjusted parameter
+    // is already a pointer. The pointee's identity and cv-qualifiers must match in either case.
+    // Apple arm64: the va_list is itself a `char*`, and each operation takes the address of the
+    // variable that holds it, so the cursor is a pointer to a `char*` either way.
+    const QualType va_list = w_->builtin_va_list();
+    const bool pointer_list = w_->target.va_list == ast::VaList::char_pointer;
+    const QualType pointer = types().pointer(pointer_list ? va_list : types().rec(va_list).inner);
     auto normalize = [&](Ex e) {
       if (dependent(e)) return e;
+      if (pointer_list) {
+        if (!e.glvalue() || types().canonical(e.type()) != types().canonical(va_list)) {
+          diag(e.begin, Diag::va_list_operand, e.type());
+          return Ex{NodeId::none, e.begin, e.end};
+        }
+        return builtin_address_of(e, e.begin, e.end, e.begin);
+      }
       Ex p = rvalue(e);
       if (p.ok() && types().canonical(p.type()) != pointer) {
         diag(e.begin, Diag::va_list_operand, e.type());

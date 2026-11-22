@@ -632,6 +632,194 @@ void browser(const std::filesystem::path& golden_path, bool update) {
   if (text != want) std::println(std::cerr, "--- got:\n{}", text);
 }
 
+// Selection and copy (#636): what each way of copying puts on the clipboard, exactly.
+void copying() {
+  check(trace::base64("") == "" && trace::base64("f") == "Zg==" && trace::base64("fo") == "Zm8=" && trace::base64("foo") == "Zm9v" &&
+            trace::base64("foobar") == "Zm9vYmFy",
+        "base64 (RFC 4648's examples)");
+  check(trace::osc52("hi", false) == "\x1b]52;c;aGk=\x07", "OSC 52");
+  check(trace::osc52("hi", true) == "\x1b]52;c;aGk=\x07\x1bPtmux;\x1b\x1b]52;c;aGk=\x07\x1b\\", "and tmux's passthrough form");
+  check(trace::slice_columns("héllo", 1, 3) == "él" && trace::slice_columns("ab", 1, 9) == "b" && trace::slice_columns("ab", 5, 9).empty(),
+        "columns of a line");
+  check(trace::strip_sgr(trace::highlight("\x1b[1mabc\x1b[0mdef", 2, 4)) == "abcdef", "a highlight keeps the text");
+  check(trace::highlight("abcd", 1, 3) == "a\x1b[7mbc\x1b[27md", "and marks the columns");
+
+  trace::Tree t;
+  t.add(browser_events());
+  trace::Browser b(t);
+  b.resize(24, 120);
+  (void)b.frame();
+  using M = trace::Mouse::Act;
+  std::chrono::milliseconds clock{0};  // a second apart: no double clicks
+  const auto act = [&](std::size_t x, std::size_t y, M a) { return b.handle(click(x, y, a), clock += std::chrono::seconds(1)); };
+  const auto key = [&](std::string k) { return b.handle(trace::Key{std::move(k)}); };
+
+  // Rows: 0 Tu, 1 Pp, 2–3 FileText, 4 FunctionIr, 5 FunctionGen, 6 Codegen, 7 Optimized, 8 SourceOf;
+  // row r on screen line 3 + r.
+  (void)act(10, 4, M::press);
+  (void)act(10, 5, M::drag);
+  (void)act(10, 6, M::drag);
+  trace::Action a = act(10, 6, M::release);
+  check(a.copy == "* Pp(a.cpp) executed 190µs w1 alloc 20.0KiB, retains 5.0KiB\n"
+                  ".   FileText(a.cpp) input w1 retains 300B\n"
+                  ".   FileText(x.h) input w1 retains 200B\n",
+        std::format("a drag over three rows copies them as the stream prints them: {:?}", a.copy.value_or("(nothing)")));
+  check(trace::strip_sgr(b.frame().lines[1]).contains("copied 3 rows"), "the status line says so");
+  (void)act(10, 9, M::press);
+  a = act(10, 9, M::release);
+  check(!a.copy && b.cursor() == 6, "a click copies nothing");
+  check(!trace::strip_sgr(b.frame().lines[1]).contains("copied"), "and the note goes");
+  (void)act(10, 9, M::press);  // Codegen, whose error starts below it, and Optimized, where it starts
+  (void)act(10, 10, M::drag);
+  a = act(10, 10, M::release);
+  check(a.copy == "* Codegen(main) executed 350µs w0 alloc 500B, 1.2KiB in all, retains 100B (error below: a.cpp:2:5: error: no instruction for this)\n"
+                  "*   Optimized({1, aarch64_macos, 0}) executed 240µs w3 alloc 700B, retains 64B ← error here\n"
+                  "      error: a.cpp:2:5: error: no instruction for this\n",
+        std::format("errors copy as the stream shows them: {:?}", a.copy.value_or("(nothing)")));
+
+  // The pane: a drag over the value's text copies those columns. Its lines start at screen line 3;
+  // FunctionIr's value starts at pane line 20 (`func {`); the wheel scrolls 6 lines down.
+  (void)act(10, 7, M::press);
+  (void)act(10, 7, M::release);
+  (void)act(90, 10, M::wheel_down);
+  (void)act(90, 10, M::wheel_down);
+  (void)b.frame();
+  check(b.detail_scroll() == 6, "scrolled");
+  (void)act(73 + 3, 3 + 21 - 6, M::press);
+  (void)act(73 + 6, 3 + 22 - 6, M::drag);
+  a = act(73 + 6, 3 + 22 - 6, M::release);
+  check(a.copy == "%0 = const.i32 0\n  %1 =", std::format("a drag over the pane copies the text between its ends: {:?}", a.copy.value_or("(nothing)")));
+  check(b.focus() == trace::Focus::detail, "and gives the pane the keys");
+  // Backwards, and from the margin: the margin is never text.
+  (void)act(73 + 6, 3 + 22 - 6, M::press);
+  (void)act(72 + 1, 3 + 21 - 6, M::drag);
+  a = act(72 + 1, 3 + 21 - 6, M::release);
+  check(a.copy == "  %0 = const.i32 0\n  %1 =", std::format("backwards from the margin: {:?}", a.copy.value_or("(nothing)")));
+
+  // V in the pane: whole lines from the top one shown; j extends; y copies.
+  (void)key("V");
+  (void)key("j");
+  (void)key("j");
+  check(trace::strip_sgr(b.frame().lines[1]).contains("V: j/k extend"), "V says what it does");
+  a = key("y");
+  check(a.copy == "started  200µs\ntook     300µs\nworker   w2\n", std::format("V, j, j, y copies three lines: {:?}", a.copy.value_or("(nothing)")));
+  (void)key("V");
+  (void)key("\x1b");
+  a = key("y");
+  check(a.copy && a.copy->starts_with("FunctionIr\nsquare\n"), "Escape drops the selection: y copies the cell again");
+
+  // V in the tree; y with nothing selected copies the cell; Y its subtree.
+  (void)key("\x1b");  // the keys back to the tree
+  (void)key("V");
+  (void)key("j");
+  a = key("y");
+  check(a.copy == "* FunctionIr(square) executed 300µs w2 alloc 1000B, 3.9KiB in all, retains 300B\n"
+                  "*   FunctionGen(square) executed 190µs w2 alloc 2.9KiB\n",
+        std::format("V, j, y in the tree copies two rows: {:?}", a.copy.value_or("(nothing)")));
+  (void)key("g");
+  a = key("y");
+  check(a.copy && a.copy->starts_with("Tu\na.cpp\n\n● executed\nran, value changed\n\nstarted  0ns\ntook     900µs\nworker   w0\n"),
+        std::format("y copies the cell as the pane shows it: {:?}", a.copy.value_or("(nothing)")));
+  check(a.copy && a.copy->ends_with("memory\nalloc    4.0KiB in 128 allocations\npeak     4.0KiB\nretains  1.0KiB\nin all   29.1KiB allocated, 6.9KiB retained\n\nno value shown for this kind\n"),
+        "its memory, and that it has no value");
+  (void)key("E");  // fold everything: Y copies what is folded too
+  a = key("Y");
+  const auto lines = a.copy ? std::ranges::count(*a.copy, '\n') : 0;
+  check(lines == 10 && a.copy->starts_with("* Tu(a.cpp) executed 900µs w0 alloc 4.0KiB, 29.1KiB in all, retains 1.0KiB\n"),
+        std::format("Y copies the whole subtree, folded or not ({} lines: 9 cells and an error line)", lines));
+  check(trace::strip_sgr(b.frame().lines[1]).contains("copied the subtree (9 cells)"), "and says how much");
+
+  // A selection is of cells, not row numbers, and goes when its rows or its pane change under it.
+  const auto status = [&] {
+    const trace::Frame f = b.frame();
+    return trace::strip_sgr(f.lines[b.header_height()]);
+  };
+  (void)key("e");
+  (void)key("g");
+  (void)key("V");
+  (void)key("j");
+  (void)key("j");
+  (void)key("s");  // re-ordered: other cells now lie between its ends
+  a = key("y");
+  check(status().contains("copied the cell"), "a sort drops a selection: y copies the cell");
+  (void)key("s"), (void)key("s"), (void)key("s");  // back to start order
+  (void)act(10, 7, M::press);  // FunctionIr, whose pane is long
+  (void)act(10, 7, M::release);
+  (void)act(90, 6, M::press);
+  (void)act(90, 6, M::release);
+  (void)key("V");
+  (void)key("j");
+  (void)key("h");  // the keys go back to the tree: the pane's selection goes with them
+  (void)key("j");
+  a = key("y");
+  check(status().contains("copied the cell") && a.copy && a.copy->starts_with("FunctionGen"), "leaving the pane drops its selection");
+  (void)act(10, 7, M::press);
+  (void)act(10, 7, M::release);
+  (void)act(73 + 3, 6, M::press);
+  (void)act(73 + 8, 6, M::drag);
+  (void)key("<");  // the pane is wider now: its lines are others
+  a = key("y");
+  check(status().contains("copied the cell"), "a resized pane drops a selection");
+  (void)key(">");
+  // A click on the long pane's last row (where it says which lines it shows) scrolls nothing.
+  (void)b.frame();
+  const std::size_t scroll = b.detail_scroll();
+  (void)act(90, 3 + 19, M::press);
+  (void)act(90, 3 + 19, M::release);
+  check(b.detail_scroll() == scroll, "a click on the pane's last row does not scroll it");
+  // A drag over a blank line copies nothing, and says so.
+  (void)act(73 + 2, 3 + 2 - b.detail_scroll(), M::press);
+  (void)act(73 + 9, 3 + 2 - b.detail_scroll(), M::drag);
+  a = act(73 + 9, 3 + 2 - b.detail_scroll(), M::release);
+  check(!a.copy && status().contains("nothing to copy"), std::format("an empty selection copies nothing: {}", status()));
+
+  // A live feed adding rows above keeps a selection on its cells.
+  b.set_live("test");
+  (void)act(10, 4, M::press);  // Pp (newest first: the one request is still on top)
+  (void)act(10, 6, M::drag);
+  (void)b.pump([&] {
+    Event top = ev(100, 0, "Tu", "b.cpp", Outcome::executed, 950'000, 990'000);
+    t.add(std::vector<Event>{top});
+    return true;
+  });
+  a = act(10, 7, M::release);
+  check(a.copy && a.copy->starts_with("* Pp(a.cpp)") && std::ranges::count(*a.copy, '\n') == 3,
+        std::format("the rows stay the cells that were selected: {:?}", a.copy.value_or("(nothing)")));
+  // A drag held past the bottom edge keeps scrolling on ticks; the wheel moves its end too.
+  b.resize(10, 120);  // 6 tree rows of 11
+  (void)b.frame();
+  const std::size_t y0 = b.header_height() + 2;  // the first tree row
+  (void)key("g");
+  (void)act(10, y0, M::press);
+  (void)act(10, y0 + 6, M::drag);  // the footer: past the edge
+  check(b.ticking(), "a drag past the edge ticks");
+  for (int i = 0; i < 8; ++i) b.tick();
+  check(!b.ticking(), "at the end of the rows ticking stops (a release never reported stops there too)");
+  a = act(10, y0 + 6, M::release);
+  check(a.copy && std::ranges::count(*a.copy, '\n') >= 10, std::format("ticks scrolled the selection to the end: {}", status()));
+  check(!b.ticking(), "and stop with the release");
+  (void)key("g");
+  (void)b.frame();  // the view at the top, as drawn
+  (void)act(10, y0, M::press);
+  (void)act(10, y0 + 1, M::drag);
+  (void)act(10, y0 + 1, M::wheel_down);
+  a = act(10, y0 + 1, M::release);
+  check(status().contains("copied 4 rows"), std::format("the wheel during a drag moves its end: {}", status()));
+  // V at the top of a live view: a request arriving keeps the selection's end where it was.
+  b.resize(24, 120);
+  (void)key("g");
+  (void)key("V");
+  const std::string top_cell = t.node(t.rows()[0].node).ev.key;
+  (void)b.pump([&] {
+    t.add(std::vector<Event>{ev(101, 0, "Tu", "c.cpp", Outcome::executed, 995'000, 999'000)});
+    return true;
+  });
+  (void)key("j");
+  a = key("y");
+  check(a.copy && std::ranges::count(*a.copy, '\n') == 2 && a.copy->contains(top_cell) && !a.copy->contains("c.cpp"),
+        std::format("V holds its cells while requests arrive above: {:?}", a.copy.value_or("(nothing)")));
+}
+
 // Source spans (#638): which cells say where they are in the source, read from values a traced
 // build already holds; and the model's text, filter and JSON for them.
 void spans() {
@@ -720,6 +908,256 @@ void spans() {
   check(!trace::json_line(ev(1, 0, "Link", "0", Outcome::executed)).contains("span"), "none without one");
 }
 
+// Histograms (#637): what groups of cells cost, the browser's view of them, and the JSON's.
+void histograms(const std::filesystem::path& golden_path, bool update) {
+  using trace::Metric;
+  using trace::Grouping;
+  check(trace::uncovered(0, 100, {{10, 30}, {20, 50}, {90, 120}}) == 50 && trace::uncovered(0, 100, {}) == 100 && trace::uncovered(5, 5, {{0, 9}}) == 0,
+        "self time: the span less the union of its children's, clipped");
+  std::vector<Event> events = browser_events();
+  for (Event& e : events) {
+    if (e.kind == "Pp" || (e.kind == "FileText" && e.key == "a.cpp") || e.kind == "FunctionIr" || e.kind == "FunctionGen")
+      e.span = engine::SourceSpan{"a.cpp", 1, 1, 3, 1};
+    if (e.key == "x.h") e.span = engine::SourceSpan{"x.h"};
+  }
+  const std::vector<std::uint64_t> self = trace::self_times(events);
+  check(self == std::vector<std::uint64_t>{60'000, 190'000, 0, 0, 110'000, 190'000, 110'000, 240'000, 0},
+        std::format("self times: {}", self));
+  trace::Tree t;
+  t.add(events);
+  const auto names = [](const std::vector<trace::Group>& gs) {
+    std::vector<std::string> out;
+    for (const trace::Group& g : gs) out.push_back(std::format("{}:{}", g.name, g.cells));
+    return out;
+  };
+  const auto by_kind = trace::histogram(t, Grouping::kind, std::nullopt, Metric::self_time);
+  check(names(by_kind) == std::vector<std::string>{"Optimized:1", "FunctionGen:1", "Pp:1", "Codegen:1", "FunctionIr:1", "Tu:1", "FileText:2", "SourceOf:3"},
+        std::format("by kind, most self time first, ties by name: {}", names(by_kind)));
+  const trace::Group& tu = by_kind[5];
+  check(tu.at(Metric::self_time) == 60'000 && tu.at(Metric::total_time) == 900'000 && tu.at(Metric::alloc) == 4096 && tu.at(Metric::retained) == 1024 &&
+            tu.at(Metric::executions) == 1 && tu.at(Metric::hits) == 0,
+        "a group's metrics");
+  check(by_kind[7].at(Metric::hits) == 3 && by_kind[6].at(Metric::retained) == 500, "cache hits, each read of a folded cell counted; sums over cells");
+  check(names(trace::histogram(t, Grouping::kind, std::nullopt, Metric::retained)).front() == "Pp:1", "sorted by another metric");
+  check(names(trace::histogram(t, Grouping::file, std::nullopt, Metric::total_time)) == std::vector<std::string>{"(no source):6", "a.cpp:4", "x.h:1"},
+        std::format("by file: {}", names(trace::histogram(t, Grouping::file, std::nullopt, Metric::total_time))));
+  const auto children = trace::histogram(t, Grouping::children, 0, Metric::total_time);
+  check(names(children) == std::vector<std::string>{"Codegen(main):2", "FunctionIr(square):2", "Pp(a.cpp):3", "SourceOf(a.cpp):3"} &&
+            children[0].node == 6 && children[0].at(Metric::total_time) == 350'000,
+        std::format("by children of Tu, over their subtrees: {}", names(children)));
+  check(names(trace::histogram(t, Grouping::kind, 4, Metric::self_time)) == std::vector<std::string>{"FunctionGen:1", "FunctionIr:1"},
+        "within a cell's subtree");
+  t.set_filter("is:input");
+  check(names(trace::histogram(t, Grouping::kind, std::nullopt, Metric::self_time)) == std::vector<std::string>{"FileText:2"}, "the tree's filter applies");
+  t.set_filter("kind:FileText");
+  check(t.rows().size() == 4 && t.matches(events[2]) && !t.matches(events[0]), "kind: matches a whole kind");
+  t.set_filter("kind:File");
+  check(!t.matches(events[2]), "and only a whole one");
+  t.set_filter("");
+
+  // JSON: the stream's summary carries the same groups.
+  std::ostringstream js;
+  trace::Stream st(js, {false, true, true});
+  st.batch(events);
+  st.summary();
+  const std::string json = js.str();
+  check(json.contains(R"("histogram":{"by_kind":[{"kind":"Optimized","cells":1,"self_ns":240000,"total_ns":240000,"alloc_bytes":700,"peak_bytes":700,"retained_bytes":64,"allocs":21,"executions":1,"hits":0,"waits":0},{"kind":"FunctionGen")") &&
+            json.contains(R"x("by_file":[{"file":"a.cpp","cells":4,"self_ns":490000,"total_ns":490000)x") && json.contains(R"x({"file":"(no source)","cells":6,"self_ns":410000,"total_ns":900000)x"),
+        std::format("the JSON summary's histogram: {}", json.substr(json.find("\"by_file\""), 200)));
+
+  // The view: b opens it; its switches, grouping and headers click; a bar shows its cells.
+  t.expand_all(false);
+  trace::Browser b(t);
+  b.resize(24, 120);
+  std::string got;
+  const auto step = [&](std::string_view name) {
+    got += std::format("## {}\n", name);
+    got += plain(b.frame());
+  };
+  std::chrono::milliseconds clock{0};
+  const auto press = [&](std::size_t x, std::size_t y) {
+    (void)b.handle(click(x, y), clock += std::chrono::seconds(1));
+    return b.handle(click(x, y, trace::Mouse::Act::release), clock);
+  };
+  using H = trace::Hit;
+  (void)b.handle(trace::Key{"b"});
+  check(b.view() == trace::View::histogram, "b opens the histogram");
+  step("the histogram: by kind, most self time first");
+  // Body rows from 2: the switches, the grouping, the headers, the bars.
+  check(b.hit(10, 2) == H{H::Area::metric, 0} && b.hit(24, 2) == H{H::Area::metric, 1}, std::format("the switches ({})", std::to_underlying(b.hit(24, 2).area)));
+  check(b.hit(11, 3) == H{H::Area::grouping, 0} && b.hit(17, 3) == H{H::Area::grouping, 1} && b.hit(23, 3) == H{H::Area::grouping, 2},
+        "the groupings");
+  check(b.hit(37, 3) == H{H::Area::scope}, "the scope");
+  check(b.hit(30, 4) == H{H::Area::order, 0} && b.hit(5, 5) == H{H::Area::bar, 0} && b.hit(5, 12) == H{H::Area::bar, 7} && b.hit(5, 13) == H{},
+        "the headers and the bars");
+  check(b.hit(18, 1) == H{H::Area::tab, std::to_underlying(trace::View::histogram)}, "its tab");
+  press(41, 2);  // □4 peak, the fourth switch (x 40–46)
+  const auto shown = [&](std::string_view m) { return trace::strip_sgr(b.frame().lines[4]).contains(m); };
+  check(shown("peak"), "a click on a switch shows its metric");
+  (void)b.handle(trace::Key{"4"});
+  check(!shown("peak"), "and its key hides it");
+  for (const char* k : {"1", "2", "3", "7"}) (void)b.handle(trace::Key{k});
+  check(shown("runs") && !shown("self time"), "the last metric stays (runs)");
+  for (const char* k : {"2", "3", "7"}) (void)b.handle(trace::Key{k});
+  (void)b.handle(trace::Key{"s"});
+  // Shown: time in all and allocated; the sort moved off each metric switched off, to time in all.
+  check(trace::strip_sgr(b.frame().lines[4]).contains("allocated↓"), "s sorts by the next metric");
+  press(17, 3);
+  step("by file, by time in all");
+  press(5, 6);  // the second bar: (no source)
+  check(b.view() == trace::View::histogram, "a cell with no source opens nothing");
+  press(5, 5);  // a.cpp, the most allocated
+  check(b.view() == trace::View::tree && t.filtering() && t.rows().size() >= 4, "a click on a bar shows its cells in the tree");
+  check(trace::strip_sgr(b.frame().lines[1]).contains("filter: at:=a.cpp"), "as a filter, exactly that file");
+  (void)b.handle(trace::Key{"/"});
+  (void)b.handle(trace::Key{"\x7f"});
+  for (int i = 0; i < 12; ++i) (void)b.handle(trace::Key{"\x7f"});
+  (void)b.handle(trace::Key{"\r"});
+  (void)b.handle(trace::Key{"b"});
+  press(11, 3);  // by kind
+  (void)b.handle(trace::Key{"\r"});  // Optimized
+  check(b.view() == trace::View::tree && t.rows().size() == 2 && t.node(t.rows()[1].node).ev.kind == "Pp",
+        "Enter opens the selected bar (Pp: the most allocated, under Tu)");
+  (void)b.handle(trace::Key{"/"});
+  for (int i = 0; i < 20; ++i) (void)b.handle(trace::Key{"\x7f"});
+  (void)b.handle(trace::Key{"\r"});
+  (void)b.handle(trace::Key{"g"});  // Tu
+  (void)b.handle(trace::Key{"b"});
+  (void)b.handle(trace::Key{"c"});
+  (void)b.handle(trace::Key{"c"});
+  step("by the children of the selected cell");
+  (void)b.handle(trace::Key{"j"});
+  (void)b.handle(trace::Key{"\r"});
+  check(b.view() == trace::View::tree && t.node(t.rows()[b.cursor()].node).ev.kind == "FunctionIr", "a child's bar selects it in the tree");
+  (void)b.handle(click(5, 6, trace::Mouse::Act::wheel_down));
+
+  // Spans in the browser (#638): the pane's `source` line, the S column, p to copy.
+  t.expand_all(true);
+  (void)b.handle(trace::Key{"g"});
+  for (int i = 0; i < 4; ++i) (void)b.handle(trace::Key{"j"});  // FunctionIr(square)
+  const auto frame_text = [&] {
+    std::string out;
+    for (const std::string& l : b.frame().lines) out += trace::strip_sgr(l) + '\n';
+    return out;
+  };
+  check(frame_text().contains("source   a.cpp:1:1–3:1"), "the pane says where the cell is");
+  (void)b.handle(trace::Key{"S"});
+  step("the source column (S)");
+  check(frame_text().contains("source") && frame_text().contains("a.cpp:1"), "S shows the source column");
+  trace::Action a = b.handle(trace::Key{"p"});
+  check(a.copy == "a.cpp:1:1", std::format("p copies path:line:col: {:?}", a.copy.value_or("(nothing)")));
+  (void)b.handle(trace::Key{"g"});
+  a = b.handle(trace::Key{"p"});
+  check(!a.copy && trace::strip_sgr(b.frame().lines[1]).contains("no source for this cell"), "a cell without a span copies nothing");
+  (void)b.handle(trace::Key{"/"});
+  for (char c : std::string_view("at:a.cpp:2")) (void)b.handle(trace::Key{std::string(1, c)});
+  (void)b.handle(trace::Key{"\r"});
+  check(t.matches(events[4]) && !t.matches(events[6]), "at: in the browser's filter");
+
+  // The JSON and the view agree: the stream's groups are the tree's, for the same events.
+  {
+    trace::Tree all;
+    all.add(events);
+    const std::string from_tree = trace::groups_json(trace::histogram(all, Grouping::kind, std::nullopt, Metric::self_time), "kind");
+    check(json.contains(R"("by_kind":)" + from_tree), "the JSON's groups by kind are the view's");
+    const std::string files = trace::groups_json(trace::histogram(all, Grouping::file, std::nullopt, Metric::self_time), "file");
+    check(json.contains(R"("by_file":)" + files), "and by file");
+  }
+  // A child after unrelated events in a batch (the collector's `finish`) counts under its parent.
+  {
+    std::vector<Event> late = {ev(1, 0, "A", "a", Outcome::executed, 0, 100), ev(2, 0, "B", "b", Outcome::executed, 0, 50),
+                               ev(3, 1, "C", "c", Outcome::executed, 10, 40)};
+    late[2].depth = 1;
+    check(trace::self_times(late) == std::vector<std::uint64_t>{70, 50, 30}, std::format("self times by parent id: {}", trace::self_times(late)));
+  }
+  // A group nested in itself counts its time in all once.
+  {
+    std::vector<Event> nested = {ev(1, 0, "I", "x", Outcome::executed, 0, 100), ev(2, 1, "I", "y", Outcome::executed, 10, 90),
+                                 ev(3, 2, "I", "z", Outcome::executed, 20, 80)};
+    nested[1].depth = 1, nested[2].depth = 2;
+    trace::Tree nt;
+    nt.add(nested);
+    const auto g = trace::histogram(nt, Grouping::kind, std::nullopt, Metric::total_time);
+    check(g.size() == 1 && g[0].at(Metric::total_time) == 100 && g[0].at(Metric::self_time) == 100, "nested in itself: once, in all and by self");
+    Event w = ev(9, 0, "W", "w", Outcome::waited, 0, 500);
+    check(trace::metrics_of(w, 500)[std::to_underlying(Metric::self_time)] == 0 && trace::metrics_of(w, 500)[std::to_underlying(Metric::total_time)] == 0 &&
+              trace::metrics_of(w, 500)[std::to_underlying(Metric::waits)] == 1,
+          "a wait counts as a wait, not as time spent");
+  }
+  // Children of one name are separate bars.
+  {
+    std::vector<Event> twins = {ev(1, 0, "P", "p", Outcome::executed, 0, 100), ev(2, 1, "L", "f", Outcome::executed, 0, 10),
+                                ev(3, 1, "L", "f", Outcome::reused, 20, 20)};
+    twins[1].depth = twins[2].depth = 1;
+    trace::Tree tt;
+    tt.add(twins);
+    const auto g = trace::histogram(tt, Grouping::children, 0, Metric::total_time);
+    check(g.size() == 2 && g[0].node != g[1].node, "two children named alike are two bars");
+  }
+
+  // The view, after the review: Tab keeps to the tree and timeline, 0 does nothing here, the wheel
+  // moves the selected bar, a bar adds to the filter, the second press of a double click on a
+  // bar is no click, and paths with spaces quote.
+  b.resize(24, 120);
+  (void)b.handle(trace::Key{"/"});
+  for (int i = 0; i < 30; ++i) (void)b.handle(trace::Key{"\x7f"});
+  for (char c : std::string_view("is:ex")) (void)b.handle(trace::Key{std::string(1, c)});
+  (void)b.handle(trace::Key{"\r"});
+  (void)b.handle(trace::Key{"\t"});
+  check(b.view() == trace::View::timeline, "Tab goes to the timeline");
+  (void)b.handle(trace::Key{"\t"});
+  check(b.view() == trace::View::tree, "and back to the tree, as ever");
+  (void)b.handle(trace::Key{"b"});
+  (void)b.handle(trace::Key{"0"});
+  check(!t.worker(), "0 picks no worker in the histogram");
+  (void)b.handle(trace::Key{"c"});  // by kind again
+  const std::size_t y_bars = 5;
+  (void)b.handle(click(5, y_bars, trace::Mouse::Act::wheel_down));
+  (void)b.frame();
+  (void)b.handle(click(5, y_bars, trace::Mouse::Act::wheel_up));
+  clock += std::chrono::seconds(5);
+  (void)b.handle(click(5, y_bars), clock);
+  check(b.view() == trace::View::tree && trace::strip_sgr(b.frame().lines[1]).contains("filter: is:ex kind:"),
+        std::format("a bar adds its kind to the filter: {}", trace::strip_sgr(b.frame().lines[1])));
+  const std::size_t at_open = b.cursor();
+  (void)b.handle(click(5, 8), clock + std::chrono::milliseconds(100));
+  check(b.cursor() == at_open, "the second press of a double click on a bar moves nothing");
+  // A bar keeps the user's own at: when it adds a kind; quoted words survive the round trip.
+  check(trace::filter_text(trace::filter_words(R"(is:ex at:"=/my dir/a.cpp" kind:Pp)")) == R"(is:ex at:"=/my dir/a.cpp" kind:Pp)",
+        "filter words round-trip, quotes and all");
+  (void)b.handle(trace::Key{"/"});
+  for (int i = 0; i < 40; ++i) (void)b.handle(trace::Key{"\x7f"});
+  for (char c : std::string_view("at:a.cpp")) (void)b.handle(trace::Key{std::string(1, c)});
+  (void)b.handle(trace::Key{"\r"});
+  (void)b.handle(trace::Key{"b"});
+  (void)b.handle(trace::Key{"\r"});
+  check(trace::strip_sgr(b.frame().lines[1]).contains("filter: at:a.cpp kind:"), std::format("the user's at: stays: {}", trace::strip_sgr(b.frame().lines[1])));
+  // Parent ids that form a cycle (from the wire) end the walk.
+  {
+    std::vector<Event> cyc = {ev(1, 2, "A", "a", Outcome::executed, 0, 10), ev(2, 1, "B", "b", Outcome::executed, 0, 10)};
+    std::ostringstream sink;
+    trace::Stream cs(sink, {false, true, true});
+    cs.batch(cyc);
+    cs.summary();
+    check(sink.str().contains("\"by_kind\""), "a cycle of parents ends");
+  }
+  t.set_filter(R"(at:"=/my dir/a.cpp")");
+  Event spaced = ev(50, 0, "Pp", "q", Outcome::executed);
+  spaced.span = engine::SourceSpan{"/my dir/a.cpp"};
+  check(t.matches(spaced) && !t.matches(events[0]), "a quoted path with a space matches exactly");
+  t.set_filter("");
+
+  if (update) {
+    std::ofstream(golden_path, std::ios::binary) << got;
+    std::println("updated {}", golden_path.display_string());
+    return;
+  }
+  std::ifstream in(golden_path, std::ios::binary);
+  const std::string want{std::istreambuf_iterator<char>(in), {}};
+  check(got == want, "the histogram's frames equal histogram.golden (rerun with --update after a deliberate change)");
+  if (got != want) std::println(std::cerr, "--- got:\n{}", got);
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -731,10 +1169,12 @@ int main(int argc, char** argv) {
   golden(argv[1], update);
   input();
   browser(std::filesystem::path(argv[1]).parent_path() / "browser.golden", update);
+  copying();
   collector();
   tree();
   lines();
   memory();
   spans();
+  histograms(std::filesystem::path(argv[1]).parent_path() / "histogram.golden", update);
   return ycxx::unit::result("unit.trace");
 }
