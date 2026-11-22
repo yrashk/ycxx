@@ -117,8 +117,12 @@ def main():
         assert b'#1/' in (scope / 'chain.a').read_bytes()  # BSD inline names
         image = link('main.cpp', 'chain.a', result=37)
         assert link('main.o', 'chain.a', result=37) == image
-        # Unlike an ELF link, an archive serves references from later operands too.
-        system_link('chain.a', 'main.o', result=37)
+        # Unlike an ELF link, an archive serves references from later operands too. The system
+        # linker gets an archive of objects only: macOS 15's rejects a member that is not Mach-O.
+        archive('objects.a', 'tail.o', 'selected member with a long name.o')
+        for order in (('main.o', 'objects.a'), ('objects.a', 'main.o')):
+            system_link(*order, result=37)
+            assert link(*order, result=37) == image
         assert link('chain.a', 'main.o', result=37) == image
         assert link('chain.a', 'main.cpp', 'chain.a', result=37) == image
 
@@ -136,7 +140,7 @@ def main():
         system_link('main.o', 'tail.a', 'other.a', 'head.a', result=37)
         link('main.o', 'tail.a', 'other.a', 'head.a', result=37)
         # An object's definition wins over every archive, wherever the object comes.
-        system_link('main.o', 'chain.a', 'other-tail.o', result=41)
+        system_link('main.o', 'objects.a', 'other-tail.o', result=41)
         link('main.o', 'chain.a', 'other-tail.o', result=41)
 
         # A weak reference selects a member, as the system linker does.
