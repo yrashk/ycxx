@@ -1888,7 +1888,9 @@ public:
     suffix.noexcept_condition = e;
   }
 
-  bool noexcept_value(const std::optional<Ex>& condition, bool& ok) {
+  // The value of a noexcept-specifier's condition ([except.spec]/2). With `dependent`, a
+  // value-dependent condition sets it instead of being diagnosed.
+  bool noexcept_value(const std::optional<Ex>& condition, bool& ok, bool* dependent = nullptr) {
     if (!condition) return true;
     Ex operand = s_->rvalue(*condition);
     Ex e = s_->to_bool(operand, operand.begin);
@@ -1899,6 +1901,10 @@ public:
         ok = false;
       }
       return s_->world().values.as_signed(*result.value) != 0;
+    }
+    if (result.dependent && dependent) {
+      *dependent = true;
+      return false;
     }
     if (result.dependent) s_->diag(e.begin, Diag::not_supported, Tk::kw_noexcept);
     else if (e.ok()) s_->diag(e.begin, Diag::not_constant, result.reason);
@@ -4439,13 +4445,32 @@ public:
           return fail();
         } else break;
       }
-      if (is(Tk::kw_noexcept)) {  // accepted, not part of the type yet (#219)
-        bump();
-        if (is(Tk::l_paren)) {
-          bump();
+      // The noexcept-specifier applies to the function call operator ([expr.prim.lambda.closure]/4);
+      // its condition is in the scope of the parameters ([basic.scope.param]).
+      if (accept(Tk::kw_noexcept)) {
+        std::optional<Ex> condition;
+        if (accept(Tk::l_paren)) {
+          s_->push_scope();
+          for (const sema::Sema::LambdaParam& p : spec.params)
+            if (p.name != s_->no_name()) s_->declare_local(p.name, p.type, sema::local_flag::parameter, p.at, false);
+          const int saved = std::exchange(angle_, 0);
           Ex e = constant_expression();
-          if (!e.ok() || !expect(Tk::r_paren)) return fail();
+          angle_ = saved;
+          if (!e.ok() || !expect(Tk::r_paren)) {
+            s_->pop_scope();
+            return fail();
+          }
+          condition = e;
         }
+        // In a template's definition, a condition that depends on the template's parameters is
+        // decided by its instantiations ([except.spec]/13, [temp.inst]). One that depends on a
+        // generic lambda's own parameters needs each operator specialization's (#820).
+        const bool enclosing_pattern = !s_->instantiating() && s_->template_scopes.size() > (head ? 1u : 0u);
+        bool ok = true, dependent = false;
+        spec.nonthrowing = noexcept_value(condition, ok, enclosing_pattern ? &dependent : nullptr);
+        spec.noexcept_dependent = dependent;
+        if (condition) s_->pop_scope();
+        if (!ok) return fail();
       }
       skip_attributes();
       if (accept(Tk::arrow)) {
