@@ -7,12 +7,14 @@ import std;
 export namespace ycxx::obj::elf {
 
 // The standard code and data sections, symbols and explicit-addend relocations for x86-64.
-// Supports a COMDAT group with one relocation-free read-only section and a named weak object.
+// A COMDAT group has one read-only payload and a named weak object. A .data.rel.ro payload
+// also groups its generated RELA section for named-symbol ABS64 relocations.
 // Returns a diagnostic if the in-memory object uses a feature outside this subset.
 std::expected<std::vector<std::uint8_t>, std::string> write_object(const object& o);
 
 // Read the x86-64 ELF64 relocatable subset emitted by write_object and the GNU forms
-// used by libycxx's static linkage marker. Preserve defined function types and sizes.
+// used by libycxx's static linkage marker. Preserve types and sizes for defined functions
+// and for objects in COMDAT payloads.
 // Retained sections and symbols keep file order. Preserve COMDAT signatures and member sections.
 std::expected<object, std::string> read_object(std::span<const std::uint8_t> file, std::string name);
 
@@ -284,6 +286,12 @@ std::expected<bytes, std::string> write_object(const object& o) {
   const auto symtab_index = static_cast<std::uint32_t>(count - 3);
   const auto strtab_index = symtab_index + 1;
   const auto first_content_index = static_cast<std::uint32_t>(1 + o.comdat_groups.size());
+  // Group descriptors name the RELA sections before they can be emitted. Place them in the
+  // same target-section order as the relocation pass, after all the content sections.
+  std::vector<std::uint32_t> rela_index(o.sections.size());
+  auto next_rela = first_content_index + static_cast<std::uint32_t>(o.sections.size());
+  for (std::size_t i = 0; i < o.sections.size(); ++i)
+    if (!o.sections[i].relocs.empty()) rela_index[i] = next_rela++;
 
   bytes file(header_size);
   bytes shstrtab{0};
@@ -313,6 +321,7 @@ std::expected<bytes, std::string> write_object(const object& o) {
     bytes words;
     append(words, grp_comdat);
     append(words, first_content_index + member);
+    if (rela_index[member] != 0) append(words, rela_index[member]);
     // Fill sh_info once the signature has an output symbol index.
     add_section(".group", {.type = sht_group, .size = words.size(), .link = symtab_index,
                            .align = 4, .entsize = 4}, words);
@@ -326,9 +335,12 @@ std::expected<bytes, std::string> write_object(const object& o) {
     });
     if (mapping == standard_sections.end()) return fail(std::format("unsupported ELF section {},{}", s.segment, s.name));
     const bool grouped = group_of[section_names.size()] != 0;
-    if (grouped && (mapping->kind != standard_section::rodata || s.flags != section_flags::regular ||
-                    s.zerofill_size != 0 || !s.relocs.empty()))
-      return fail("ELF COMDAT output requires a relocation-free read-only section");
+    if (grouped) {
+      const bool supported = s.relocs.empty() ? mapping->kind == standard_section::rodata
+                                              : mapping->kind == standard_section::data_const;
+      if (!supported || s.flags != section_flags::regular || s.zerofill_size != 0)
+        return fail("ELF COMDAT output requires relocation-free .rodata or relocated .data.rel.ro");
+    }
     if ((mapping->type == sht_nobits) != s.is_zerofill() ||
         (s.is_zerofill() && (!s.bytes.empty() || !s.relocs.empty()))) {
       return fail(std::format("invalid zero-fill section {}", mapping->name));
@@ -404,8 +416,11 @@ std::expected<bytes, std::string> write_object(const object& o) {
 
   for (std::size_t i = 0; i < o.sections.size(); ++i) {
     const section& s = o.sections[i];
-    if (s.relocs.empty()) continue;
+    if (rela_index[i] == 0) continue;
+    contract_assert(sections.size() == rela_index[i]);
+    const bool grouped = group_of[i] != 0;
     bytes rela;
+    std::optional<std::uint32_t> previous_offset;
     for (const reloc& r : s.relocs) {
       const auto mapping = std::ranges::find(relocations, r.kind, &relocation_mapping::kind);
       if (mapping == relocations.end() || r.minus)
@@ -414,6 +429,10 @@ std::expected<bytes, std::string> write_object(const object& o) {
         return fail(std::format("relocation outside section {}", section_names[i]));
       if (r.symbol >= symbol_indices.size()) return fail(std::format("invalid relocation symbol in section {}", section_names[i]));
       const auto& target = o.symbols[r.symbol];
+      if (grouped && (r.kind != reloc_kind::abs64 || target.name_view().empty() || target.bind == binding::local))
+        return fail("ELF COMDAT relocation requires ABS64 to a named nonlocal symbol");
+      if (grouped && r.offset == previous_offset) return fail("composed ELF COMDAT relocations are unsupported");
+      previous_offset = r.offset;
       if (target.bind == binding::local && target.section && group_of[*target.section] != 0)
         return fail(std::format("relocation in section {} references a local ELF COMDAT symbol", section_names[i]));
       append(rela, std::uint64_t{r.offset});
@@ -421,7 +440,7 @@ std::expected<bytes, std::string> write_object(const object& o) {
       append(rela, static_cast<std::uint64_t>(r.addend));
     }
     add_section(std::format(".rela{}", section_names[i]),
-                {.type = sht_rela, .flags = shf_info_link, .size = rela.size(), .link = symtab_index,
+                {.type = sht_rela, .flags = shf_info_link | (grouped ? shf_group : 0), .size = rela.size(), .link = symtab_index,
                  .info = first_content_index + static_cast<std::uint32_t>(i), .align = 8, .entsize = rela_size}, rela);
   }
 
@@ -664,9 +683,10 @@ std::expected<object, std::string> read_object(std::span<const std::uint8_t> fil
         return fail(std::format("ELF function symbol {} is not in executable code", i));
       function_size = size;
     }
+    const auto object_size = type == stt_object && group_owners[index] != 0 ? std::optional{size} : std::nullopt;
     const auto model_binding = local ? binding::local : visibility == stv_hidden ? binding::hidden : binding::global;
     symbols[i].retained = o.add_symbol({read_name(i, name_index), model_binding, sections[index], value, bind == stb_weak,
-                                       function_size});
+                                       function_size, object_size});
     if (local) symbols[i].local_group = group_owners[index];
   }
 
