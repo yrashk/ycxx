@@ -327,8 +327,11 @@ What is true of the code today. Work in progress and its owners are tracked in
   - The linker preserves cleanup-free `__TEXT,__eh_frame` contributions with the supported
     PC-relative CIE and FDE format, including address differences and multiple input objects.
     `unit.link` checks the linked ranges and walks through a non-frame-pointer arm64 bridge
-    with the system unwinder on macOS. Compact unwind, personalities and LSDA are tracked in
-    [#72](https://github.com/yrashk/ycxx/issues/72).
+    with the system unwinder on macOS. It also checks the version 1 cleanup-only `zPLR` profile,
+    including its relocated personality GOT cell, owned `__gcc_except_tab` pointer, and cleanup
+    call-site ranges. The macOS cleanup fixture uses a platform-linked typed handler dylib.
+    [#783](https://github.com/yrashk/ycxx/issues/783) tracks this linker slice. Compact unwind and
+    other profiles are tracked in [#72](https://github.com/yrashk/ycxx/issues/72).
   - The arm64 compiler emits these DWARF records for proven cleanup-free functions. Their FDEs
     describe the actual saved frame-pointer and return-address locations at the entry, body,
     and return instructions. `unit.darwin_cleanup_free_unwind` checks the emitted object,
@@ -1220,6 +1223,12 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   with a proven trivial selected copy. A selected nontrivial or unsupported defaulted copy
   is diagnosed at use. Native by-value boundaries require a known copy classification.
   [Design](docs/design/defaulted-copy-constructors.md) · [#157](https://github.com/yrashk/ycxx/issues/157)
+- An ordinary namespace-scope class with no bases and a deleted implicit copy can synthesize its
+  available implicit move constructor for scalar fields and class fields with proven nonthrowing
+  initialization and destruction. The fields initialize in declaration order from the source
+  xvalue. The class retains aggregate initialization, and the inline move definition is emitted
+  only on use.
+  [Design](docs/design/implicit-move-constructors.md) · [#747](https://github.com/yrashk/ycxx/issues/747)
 - **Cleanups** (ast.md §3.7.3 as revised by #135): `LocalVar::destructor`; `function_ir` runs
   destructors on every scope exit from its own scope stack (block end, `return`, `break`,
   `continue`) and ends a full-expression's temporaries at its end. Statements carry no cleanup
@@ -1739,6 +1748,32 @@ template's tokens again with the arguments bound.
   specializations. `&&` follows #671; type-trait operations (`__is_same(T, U)`) still have no
   symbol (#780).
 
+## Pack-index-specifiers (#297)
+
+- `T...[I]` ([dcl.type.pack.index]) names the element of a template type parameter pack, with
+  `I` converted to std::size_t. It works in alias templates, member aliases, function signatures
+  (leading and trailing return types, parameters), variable templates, bodies, type-trait
+  operands and functional conversions (`T...[I](x)`). The index is an integral constant or a
+  non-type parameter.
+- While it is dependent it is the type `TPackIndex` (ast.md §7.6): over the pack's parameter, or
+  over its elements once the pack is bound and the index is not (a member template indexing its
+  class's pack). Substitution selects the element, also past known elements into another pack's
+  expansion (`F<T...>` for `using F = U...[0]`). It is a non-deduced context
+  ([temp.deduct.type]/5), and partial ordering indexes a pack's unique stand-in.
+- An index out of range, a negative or non-integral index and a name that is not a pack are
+  diagnosed.
+- In symbols, `Dy <type> <expression>` is a substitution candidate, a bound pack `J <args> E`. A
+  written constant index is the converted std::size_t (`Lm0E`) and a substituted one keeps its
+  parameter's type (`Li1E`), as GCC writes them; Clang writes the index as spelled and a bound
+  pack as a placeholder (DECISIONS §1.7).
+- Tests: `tests/own/templates/pack-index/`, `tests/own/abi/pack-index-*`. A Clang peer links the
+  parameter-index form, and asm labels pin GCC's constant form.
+- Not yet: pack-index-expressions `t...[I]`, `T...[I]` as a nested-name-specifier
+  (`T...[0]::type`) (#297), and dependent index arithmetic such as `T...[sizeof...(T) - 1]` in a
+  signature (#209). In a body that arithmetic works. An index written as an enumerator or a
+  constant variable is mangled by its value, where Clang and GCC write its name (#796). With these,
+  libycxx's headers move from `invoke.hpp:35` to `invoke.hpp:37` (#776).
+
 ## Templates, ζ step 2: class templates (#88, 2026-11-18)
 
 - **Declarations:** class templates at namespace scope (`template<…> struct X {…};` and
@@ -1975,8 +2010,11 @@ session's.*
   The same nonunion class gives true, including when incomplete. For distinct nonunion classes,
   `Derived` must be complete. The trait follows the recorded base declarations, including private
   and ambiguous bases. A dependent occurrence in a supported class-template base or variable-template
-  initializer checks completeness at instantiation. A concrete occurrence checks it at its original
-  source point. Missing graph information gets a hard diagnostic when it prevents a result.
+  initializer checks completeness at instantiation. So does one in a function template body (also
+  a member's, a member template's or a generic lambda's, in a template or not): the body defers it
+  and its instantiation evaluates it, with completeness at the end of the unit
+  (`tests/own/builtins/base_of_dependent_*`).
+  A concrete occurrence checks it at its original source point. Missing graph information gets a hard diagnostic when it prevents a result.
   `__has_builtin` answers 0 while support is partial ([meta.rel], [class.derived], #218).
 - `__is_empty(T)` gives false for nonclass types and unions. For a complete nonunion class, it
   checks polymorphism, non-static data members, and emptiness of the recorded bases. Missing base
@@ -2994,13 +3032,16 @@ and runtime integration with ycxx's own linker remain under [#89]. See the
 argument operations, and temporary destruction ([except.spec]). A construction
 in a function template body can be checked after substitution.
 
-## Dependent exception specifications on member templates (#713)
+## Exception specifications on member function templates (#713, #804)
 
 A selected ordinary member function template can instantiate its written
 `noexcept(expression)` with the class and function template arguments
 ([except.spec], [temp.inst]). Its parameter and class scopes are available
 during replay. Class instantiation leaves the specification of an unused
 member template deferred.
+
+Selected member function template specializations preserve bare `noexcept`
+for calls and for selection against a static function-pointer target.
 
 ## The address of an overload set, ι (#313, #337, 2026-11-19)
 

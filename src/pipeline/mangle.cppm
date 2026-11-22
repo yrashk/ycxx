@@ -263,6 +263,41 @@ class Mangler {
         if (!a) return a;
         inner = n + *a;
         candidates_.push_back(full_key(bare));
+      } else if (in_.types.is<ast::TPackIndex>(in_.types.canon(bare))) {
+        // `T...[I]`: `Dy <type> <expression>`, a substitution candidate (§5.1.5); a pack bound to
+        // its elements is the argument pack `J <template-arg>* E`, as GCC writes it. A constant
+        // index is a literal of its own type: std::size_t when written, a parameter's type when
+        // substituted (`Lm0E`, `Li1E`; DECISIONS §1.7).
+        if (auto s = find(full_key(bare))) return qualify(qualifiers, *s, q);
+        auto x = in_.types.get<ast::TPackIndex>(in_.types.canon(bare));
+        std::string pack;
+        if (x.bound) {
+          pack = "J";
+          for (const ast::TemplateArg& e : in_.seqs.elements(x.elems)) {
+            auto m = template_arg(e);
+            if (!m) return m;
+            pack += *m;
+          }
+          pack += "E";
+        } else {
+          auto p = type(x.pack);
+          if (!p) return p;
+          pack = *p;
+        }
+        std::string index;
+        if (in_.values.is<ast::VDepParam>(x.index) && in_.values.get<ast::VDepParam>(x.index).depth == own_depth) {
+          auto i = in_.values.get<ast::VDepParam>(x.index).index;
+          index = i == 0 ? "T_" : std::format("T{}_", i - 1);
+        } else if (in_.values.is<ast::VInt>(x.index)) {
+          auto b = ast::builtin_of(in_, in_.values.get<ast::VInt>(x.index).type);
+          auto code = b ? builtin_code(*b) : std::nullopt;
+          if (!code) return std::unexpected("a pack index of a type other than a fundamental integer");
+          index = std::format("L{}{}E", *code, in_.values.get<ast::VInt>(x.index).bits.lo);
+        } else {
+          return std::unexpected("a pack index that is not a constant or a template parameter");
+        }
+        inner = "Dy" + pack + index;
+        candidates_.push_back(full_key(bare));
       } else if (in_.types.is<ast::TPackExpansion>(in_.types.canon(bare))) {
         // A pack expansion `Dp <type>`, a substitution candidate (§5.1.5).
         if (auto s = find(full_key(bare))) return qualify(qualifiers, *s, q);
@@ -695,7 +730,8 @@ class Mangler {
   bool dependent(ast::QualType q) {
     ast::QualType c = in_.types.canon(ast::without_cv(in_.canonical(q)));
     if (in_.types.is<ast::TTemplateParam>(c) || in_.types.is<ast::TDepName>(c) || in_.types.is<ast::TPackExpansion>(c) ||
-        in_.types.is<ast::TTransform>(c) || in_.types.is<ast::TDepSpec>(c) || in_.types.is<ast::TBuiltinSpec>(c))
+        in_.types.is<ast::TTransform>(c) || in_.types.is<ast::TDepSpec>(c) || in_.types.is<ast::TBuiltinSpec>(c) ||
+        in_.types.is<ast::TPackIndex>(c))
       return true;
     if (in_.types.is<ast::TPointer>(c)) return dependent(in_.types.get<ast::TPointer>(c).pointee);
     if (in_.types.is<ast::TMemberPtr>(c)) {
