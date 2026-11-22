@@ -2171,6 +2171,8 @@ Fable decided the representation (ast.md §6.6); the Opus session wrote the code
 - Ordinary binary hidden friend operators participate in ADL and compete with nonmember
   overloads from the associated namespaces. Qualified ordinary lookup still requires a
   namespace declaration. The existing Linux inline gate checks both object orders.
+- Ordinary unary minus finds hidden friends by ADL and ranks their operand conversions with
+  ordinary nonmember and member candidates. Access and deletion are checked for the selected operator.
 - **Checks** (`Sema::accessible`, `check_access`): a private or protected member may be named in
   a member function or default member initializer of its class, in the class's scope (the
   initializer of a static data member defined outside it), or in a friend function or friend
