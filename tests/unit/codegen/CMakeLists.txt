@@ -9,12 +9,14 @@ ycxxc_unit_test(lower lower_test.cpp ycxxc_unit_codegen)
 
 add_executable(unit_aarch64 aarch64_test.cpp)
 target_link_libraries(unit_aarch64 PRIVATE ycxxc_unit_codegen ycxxc_aarch64 ycxxc_link)
+# PARITY: by design: runs the arm64 Mach-O executables it links, which only macOS can
 if(APPLE AND CMAKE_SYSTEM_PROCESSOR MATCHES "arm64|aarch64")
   add_test(NAME unit.aarch64 COMMAND unit_aarch64 --run ${CMAKE_CURRENT_BINARY_DIR}/run --cc ${CMAKE_CXX_COMPILER})
 else()
   add_test(NAME unit.aarch64 COMMAND unit_aarch64)
 endif()
 
+# PARITY: #639 for code-generation parity with unit.aarch64; it runs x86-64 code, which only Linux can
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
   ycxxc_unit_test(x86_64 x86_64_test.cpp ycxxc_x86_64 ycxxc_pipeline)
   target_sources(unit_x86_64 PRIVATE FILE_SET CXX_MODULES FILES x86_64_native.cppm)

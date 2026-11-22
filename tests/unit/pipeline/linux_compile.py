@@ -253,6 +253,8 @@ system_leaf:
         integer_aggregate_calls(compile, target, aggregates, scope, cold, cc, 'provider', 'client')
         integer_aggregate_calls(compile, target, aggregates, scope, cold, cc,
                                 'pointer-aggregate-peer', 'pointer-aggregate-main')
+        integer_aggregate_calls(compile, target, aggregates, scope, cold, cc,
+                                'member-aggregate-provider', 'member-aggregate-client')
         compile(target, '-isystem', libycxx / 'include', '-nostdlib',
                 aggregates / 'pointer-aggregate-empty-list.cpp', libycxx / 'src/runtime/linkage/static.cpp',
                 '-o', 'aggregate-empty-list')
@@ -330,10 +332,6 @@ system_leaf:
              f'call: {aggregate_parameter}'),
             ('struct X { long a, b, c; }; X g(); long f() { X x = g(); return x.a; }',
              f'call: {aggregate_result}'),
-            ('struct X { int a; }; int f(int (*g)(X)) { return g(X{1}); }', f'call: {parameters}'),
-            ('struct X { int a; }; int f(X (*g)()) { X x = g(); return x.a; }', f'call: {results}'),
-            ('struct X { int a; }; struct B { static int g(X); }; int f() { return B::g(X{1}); }',
-             'call: unsupported fixed-prototype parameter type'),
             ('int f(long double, ...) { return 1; }', 'x87 long double parameters and results are unsupported'),
             ('struct X { int x; }; int f(X, ...) { return 1; }', parameters),
             ('int f(int (*g)(double, ...)) { return g(1.0); }', f'call: {indirect_floating}'),

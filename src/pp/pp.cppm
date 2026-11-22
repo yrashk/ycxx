@@ -97,6 +97,7 @@ constexpr u32 file_loc(u16 file) { return lex::file_level - file; }
 struct [[=engine::input{engine::Durability::low}]] FileText {
   using Key = FileId;
   using Value = std::string;
+  static engine::SourceSpan trace_span(const engine::Db& db, FileId f);
 };
 
 // The bytes of the regular file at a path, or nothing: an input read on demand through the
@@ -166,7 +167,10 @@ Source deserialize_from(engine::Source& in, std::type_identity<Source>) {
 struct [[=engine::input{engine::Durability::low}]] SourceOf {
   using Key = FileId;
   using Value = Source;
+  static engine::SourceSpan trace_span(const engine::Db& db, FileId f);
 };
+// For traces (#638): a file's cells are the whole file, named by its path.
+engine::SourceSpan file_span(const engine::Db& db, FileId f);
 
 // `pp(file)` (§B9). Its diagnostics are at `Loc{file_loc(file index), byte offset}`.
 struct Pp {
@@ -174,6 +178,7 @@ struct Pp {
   using Value = Region;
   static engine::query_task<Value> run(engine::Ctx& cx, Key file);
   static std::string errors(const Value& v) { return v.error_details; }
+  static engine::SourceSpan trace_span(const engine::Db& db, Key file) { return file_span(db, file); }
 };
 
 }  // namespace ycxx::pp
@@ -324,6 +329,13 @@ void name_file(FileId f, std::string name) {
   std::lock_guard lock(n.m);
   n.names.insert_or_assign(f, std::move(name));
 }
+
+engine::SourceSpan file_span(const engine::Db& db, FileId f) {
+  if (const Source* s = db.peek<SourceOf>(f)) return {s->path};
+  return {};
+}
+engine::SourceSpan SourceOf::trace_span(const engine::Db& db, FileId f) { return file_span(db, f); }
+engine::SourceSpan FileText::trace_span(const engine::Db& db, FileId f) { return file_span(db, f); }
 
 void trace_describe(std::string& out, FileId f) {
   FileNames& n = file_names();

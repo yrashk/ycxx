@@ -1844,7 +1844,15 @@ class Gen {
     const ValueId index = int_constant(facts_.ptrdiff_type(), c.slot);
     const ValueId slot = pure(ir::Op::ptr_add, table_type, {table, index}, {word(ty(c.callee))});
     std::vector<ValueId> args{load({slot, c.callee}), receiver};
-    for (ast::Child arg : ast_.children(c.args)) args.push_back(argument(child(a, arg)));
+    // Records by value need the by-value bits and result object of `member_call`; sema admits
+    // only scalar virtual signatures so far (#309), and the back end no longer rejects records
+    // on indirect calls (#640).
+    if (class_prvalue(c.info)) unsupported(a, "of a virtual function returning a class");
+    for (ast::Child arg : ast_.children(c.args)) {
+      At x = child(a, arg);
+      if (argument_object(x)) unsupported(a, "of a virtual function taking a class by value");
+      args.push_back(argument(x));
+    }
     return call_pointer(facts_.pointee(c.callee), result_type(c.info), args, 0, 0);
   }
   bool member_call_expression(At a) {
