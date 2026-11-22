@@ -2041,6 +2041,11 @@ session's.*
   variable-template initializers replay dependent operands and check class completeness at the
   demand. Other combinations, including class `__is_nothrow_convertible`, get hard diagnostics.
   `__has_builtin` answers 0 while support is partial ([meta.rel], [dcl.init.ref], #218).
+- `__reference_converts_from_temporary(T, U)` and `__reference_constructs_from_temporary(T, U)`
+  tell whether a reference T initialized from VAL<U> binds to a temporary: a converted arithmetic
+  value or a materialized prvalue, for arithmetic operands, void and reference-related classes
+  (`tests/own/builtins/reference_temporary.run.cpp`). Unrelated classes, which need user-defined
+  conversions, are diagnosed as not supported yet (#218).
 - `__is_base_of(Base, Derived)` ignores top-level cv. Nonclass and union operands give false.
   The same nonunion class gives true, including when incomplete. For distinct nonunion classes,
   `Derived` must be complete. The trait follows the recorded base declarations, including private
