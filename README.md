@@ -39,6 +39,8 @@ Member function template specializations preserve bare `noexcept` in their funct
 Ordinary constructor declarations and definitions check that their concrete exception specifications agree.
 Member function templates can substitute a dependent exception specification when it is needed.
 [#713](https://github.com/yrashk/ycxx/issues/713)
+A lambda's noexcept-specifier, including one that depends on an enclosing template's
+parameters, is part of its call operator's type. [#807](https://github.com/yrashk/ycxx/issues/807)
 
 A class template can grant private access to the class passed as a type argument using
 `friend Authority;`. Each specialization grants access to its own authority.
@@ -84,6 +86,9 @@ parentheses or braces, including through namespace aliases. [#697](https://githu
 Class templates at namespace scope can delete their copy assignment on its first in-class
 declaration when the member has no ref-qualifier. Specializations retain the deleted overload.
 [#709](https://github.com/yrashk/ycxx/issues/709)
+
+In a class template, and in a member defined outside it, a member of a nondependent base hides a
+template parameter of the same name. [#800](https://github.com/yrashk/ycxx/issues/800)
 
 C++26 reflection annotations on class heads and ordinary function declarations accept
 constant payloads and retain their types for compiler consumers.
@@ -230,9 +235,10 @@ An ordinary class object can be destroyed explicitly through a reference or poin
 `object.~Class()` or `pointer->~Class()`. Templates can use a dependent class name, and unary
 `noexcept` uses the destructor's exception specification. [#722](https://github.com/yrashk/ycxx/issues/722)
 
-Both targets construct a class prvalue directly into an automatic variable initialized with the
-built-in conditional or comma operator. The supported nonthrowing initializers sequence temporary
-destruction after the result is constructed. [#740](https://github.com/yrashk/ycxx/issues/740)
+Both targets construct a class prvalue selected by the built-in conditional or comma operator
+directly into an automatic variable, its ordinary aggregate field, or its fixed-array element.
+The supported nonthrowing initializers keep temporaries alive through later initializer clauses
+and destroy them in reverse order. [#740](https://github.com/yrashk/ycxx/issues/740)
 
 In-class conversion functions can name a class type alias as their conversion target,
 including a dependent alias in a class template. A named `static_cast` can call a
@@ -267,6 +273,8 @@ whose dynamic initialization runs in definition order.
 An out-of-line constructor evaluates a default member initializer with the namespace names
 visible where the initializer was written and lookup in the complete enclosing class.
 [#764](https://github.com/yrashk/ycxx/issues/764)
+Later class members can also hide namespace names in defaults that evaluate to scalar constants.
+[#763](https://github.com/yrashk/ycxx/issues/763)
 
 Automatic declarations such as `Point p(3, 4);` can initialize flat aggregates with public
 arithmetic fields. Supplied expressions initialize the fields in declaration order. Omitted
@@ -366,7 +374,8 @@ written default member initializer are value-initialized.
 - named function-pointer declarations with qualified return types, qualified names in grouped
   declarators, and unnamed function-pointer parameters;
 - parenthesized direct initialization from functional conversions such as `S b(S(1));` and
-  `Holder h(Tag(n), 2);`. [#769](https://github.com/yrashk/ycxx/issues/769)
+  `Holder h(Tag(n), 2);`, including an additive expression inside a grouped operand as in
+  `Holder h(Tag(n), Tag(n + 1));`. [#769](https://github.com/yrashk/ycxx/issues/769) · [#813](https://github.com/yrashk/ycxx/issues/813)
 - `[[…]]` attributes, the GNU attributes and `asm` labels the macOS SDK's headers use, the
   GNU pointer qualifiers glibc uses, and the type-trait built-ins libycxx's headers use
   (`__is_same`, `__remove_cv`, …). `__is_destructible`, `__is_nothrow_destructible`, and
@@ -377,8 +386,8 @@ written default member initializer are value-initialized.
   partial specializations with substitution checks for dependent type arguments, static constexpr
   members of class templates, member function and
   constructor templates, parameter packs and fold expressions, alias templates, template
-  template parameters, concepts and requires-expressions in overload resolution and in choosing
-  partial specializations, including
+  template parameters, concepts and requires-expressions (including `{ e } noexcept;`) in overload
+  resolution and in choosing partial specializations, including
   explicit trailing type packs in ordinary constrained function overloads. Directly named
   non-dependent primary class specializations with explicit type arguments check constraints.
   Non-template code outside requires-expression bodies also checks constraints on directly named
@@ -404,6 +413,8 @@ written default member initializer are value-initialized.
 - `__is_convertible` and `__is_nothrow_convertible` for arithmetic values, arithmetic references
   and cv `void`, including dependent operands in the same template contexts.
   [Extension guide](docs/EXTENSIONS.md) · [#218](https://github.com/yrashk/ycxx/issues/218)
+- `__reference_converts_from_temporary` and `__reference_constructs_from_temporary` for arithmetic
+  and reference-related class operands. [#218](https://github.com/yrashk/ycxx/issues/218)
 - `__is_base_of` for known class hierarchies, including private and ambiguous bases and dependent
   operands in supported class-template bases, variable-template initializers and function template
   bodies.

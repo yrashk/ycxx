@@ -215,6 +215,40 @@ struct [[=1]] Read { unsigned flags : 3; };
         "the annotated payload retains the concrete namespace class specialization");
 }
 
+void parenthesized_annotation_payloads() {
+  Analysed a(R"cpp(
+int unrelated;
+struct Tag { int n; };
+[[=Tag{7}, =(Tag{7}), =((Tag{7})),
+  =true, =(true), =((true)),
+  =7, =(7), =((7))]] void f();
+)cpp");
+  const bool clean = a.pre.diags.empty() && a.diags().empty();
+  check(clean, "parenthesized annotation payloads are constant expressions");
+  if (!clean) return;
+
+  const auto annotations = a.p->declaration_annotations(a.decl(a.its.top.back()).entity);
+  check(annotations.size() == 9, "all written annotation payloads are retained");
+  if (annotations.size() != 9) return;
+
+  const auto tag = a.decl(a.its.top.at(1)).type;
+  const bool aggregate = a.ins.values.is<ast::VAggregate>(annotations[0].value);
+  check(aggregate && a.ins.values.get<ast::VAggregate>(annotations[0].value).type == tag,
+        "the aggregate constant carries the Tag type");
+
+  const auto payloads = std::span{annotations};
+  auto same_payload = [](std::span<const ast::DeclarationAnnotation> occurrences, ast::QualType type) {
+    return std::ranges::all_of(occurrences, [&](const auto& occurrence) {
+      return occurrence.type == type && occurrence.value == occurrences.front().value;
+    });
+  };
+  check(same_payload(payloads.subspan(0, 3), tag), "parentheses preserve the aggregate annotation type and value");
+  check(same_payload(payloads.subspan(3, 3), a.w.types.builtin(Builtin::bool_)),
+        "parentheses preserve the boolean annotation type and value");
+  check(same_payload(payloads.subspan(6, 3), a.w.types.builtin(Builtin::int_)),
+        "parentheses preserve the integer annotation type and value");
+}
+
 void invalid_declaration_annotations() {
   using sema::Diag;
   struct Witness {
@@ -542,6 +576,7 @@ int main() {
   redeclarations_and_linkage();
   declaration_annotations();
   qualified_template_annotation();
+  parenthesized_annotation_payloads();
   invalid_declaration_annotations();
   unsupported_bit_fields();
   gnu_pointer_qualifiers();

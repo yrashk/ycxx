@@ -1750,6 +1750,15 @@ public:
           first_operand == Tk::kw_nullptr || first_operand == Tk::plus || first_operand == Tk::minus)
         return false;
 
+      // An additive operator after a name cannot complete a grouped declarator.
+      // Skip only parentheses opened before the name, staying inside `T(...)`.
+      if (first_operand == Tk::identifier) {
+        u32 after_name = operand + 1;
+        for (u32 groups = operand - after_type - 1; groups != 0 && kind(after_name) == Tk::r_paren; --groups)
+          ++after_name;
+        if (kind(after_name) == Tk::plus || kind(after_name) == Tk::minus) return false;
+      }
+
       // A grouped argument such as `T(name)` leaves both readings open. A later argument
       // can settle the entire list, as in `Holder value(T(name), 2)`.
       const u32 after_group = past_parentheses(after_type);
@@ -1901,7 +1910,9 @@ public:
     suffix.noexcept_condition = e;
   }
 
-  bool noexcept_value(const std::optional<Ex>& condition, bool& ok) {
+  // The value of a noexcept-specifier's condition ([except.spec]/2). With `dependent`, a
+  // value-dependent condition sets it instead of being diagnosed.
+  bool noexcept_value(const std::optional<Ex>& condition, bool& ok, bool* dependent = nullptr) {
     if (!condition) return true;
     Ex operand = s_->rvalue(*condition);
     Ex e = s_->to_bool(operand, operand.begin);
@@ -1912,6 +1923,10 @@ public:
         ok = false;
       }
       return s_->world().values.as_signed(*result.value) != 0;
+    }
+    if (result.dependent && dependent) {
+      *dependent = true;
+      return false;
     }
     if (result.dependent) s_->diag(e.begin, Diag::not_supported, Tk::kw_noexcept);
     else if (e.ok()) s_->diag(e.begin, Diag::not_constant, result.reason);
@@ -2918,11 +2933,17 @@ public:
         Ex e = expression();
         --s_->unevaluated;
         expect(Tk::r_brace);
-        if (is(Tk::kw_noexcept)) {
-          s_->diag(pos(), Diag::not_supported, Tk::kw_noexcept);
-          bump();
-        }
         bool dep = s_->dependent(e);
+        // `{ e } noexcept`: e is not potentially-throwing ([expr.prim.req.compound]/2), as the
+        // operator `noexcept(e)` answers.
+        if (accept(Tk::kw_noexcept) && !dep && e.ok()) {
+          ++s_->unevaluated;
+          Ex answer = s_->unary_noexcept(e, e.begin, e.end);
+          --s_->unevaluated;
+          auto value = s_->as<ast::Literal>(answer);
+          if (!value || !s_->ins().values.is<ast::VInt>(value->value)) failed = true;
+          else if (s_->ins().values.get<ast::VInt>(value->value).bits.lo == 0) failed = true;
+        }
         if (accept(Tk::arrow)) {  // `-> C<args>`: C<decltype((e)), args…> ([expr.prim.req.compound])
           u32 at = pos();
           if (std::optional<ast::DeclSema> c = concept_name()) {
@@ -4477,19 +4498,47 @@ public:
           return fail();
         } else break;
       }
-      if (is(Tk::kw_noexcept)) {  // accepted, not part of the type yet (#219)
-        bump();
-        if (is(Tk::l_paren)) {
-          bump();
+      // The rest of the lambda-declarator is in the scope of the init-captures ([basic.scope.lambda])
+      // and of the parameters ([basic.scope.param]).
+      auto declarator_scope = [&] {
+        s_->push_scope();
+        for (const sema::Sema::CaptureSpec& c : spec.captures)
+          if (auto t = s_->init_capture_type(c)) s_->declare_local(c.name, *t, sema::local_flag::parameter, c.at, false);
+        for (const sema::Sema::LambdaParam& p : spec.params)
+          if (p.name != s_->no_name()) s_->declare_local(p.name, p.type, sema::local_flag::parameter, p.at, false);
+      };
+      // The noexcept-specifier applies to the function call operator ([expr.prim.lambda.closure]/4).
+      if (accept(Tk::kw_noexcept)) {
+        std::optional<Ex> condition;
+        if (accept(Tk::l_paren)) {
+          declarator_scope();
+          const int saved = std::exchange(angle_, 0);
           Ex e = constant_expression();
-          if (!e.ok() || !expect(Tk::r_paren)) return fail();
+          angle_ = saved;
+          if (!e.ok() || !expect(Tk::r_paren)) {
+            s_->pop_scope();
+            return fail();
+          }
+          condition = e;
         }
+        // In a template's definition, a condition that depends on the template's parameters is
+        // decided by its instantiations ([except.spec]/13, [temp.inst]). One that depends on a
+        // generic lambda's own parameters needs each operator specialization's (#820).
+        // Enclosing parameters are those of the heads before the lambda's own; one still unbound
+        // (a template's definition, or an enclosing generic lambda's) defers the condition.
+        bool enclosing_pattern = false;
+        for (std::size_t h = 0; h + (head ? 1 : 0) < s_->template_scopes.size(); ++h)
+          for (const ast::TemplateParamSema& p : s_->template_scopes[h])
+            if (!s_->template_args.at(p.depth, p.index)) enclosing_pattern = true;
+        bool ok = true, dependent = false;
+        spec.nonthrowing = noexcept_value(condition, ok, enclosing_pattern ? &dependent : nullptr);
+        spec.noexcept_dependent = dependent;
+        if (condition) s_->pop_scope();
+        if (!ok) return fail();
       }
       skip_attributes();
       if (accept(Tk::arrow)) {
-        s_->push_scope();
-        for (const sema::Sema::LambdaParam& p : spec.params)
-          if (p.name != s_->no_name()) s_->declare_local(p.name, p.type, sema::local_flag::parameter, p.at, false);
+        declarator_scope();
         auto t = type_id(true);  // `-> auto&`: a placeholder the body deduces ([dcl.spec.auto.general]/3)
         s_->pop_scope();
         if (!t) return fail();

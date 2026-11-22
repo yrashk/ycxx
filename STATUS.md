@@ -1123,6 +1123,9 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   namespace for ordinary and qualified lookup, and its original lexical point for ADL.
   Lookup still sees the enclosing class complete, including its hidden friends.
   [#764](https://github.com/yrashk/ycxx/issues/764)
+- A written constructor replays the initializer before taking a stored scalar value, so later
+  class members can hide namespace declarations in defaults that evaluated during the member scan.
+  [#763](https://github.com/yrashk/ycxx/issues/763)
 
 - An automatic declaration such as `Point p(3, 4);` can initialize a flat aggregate with
   public arithmetic fields and implicit trivial destruction. The fallback applies when
@@ -1643,15 +1646,18 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
 
 ## Local class prvalue selection (#740)
 
-- The built-in `?:` or comma operator can initialize an automatic class object directly
-  ([expr.cond], [expr.comma], [dcl.init.general]). The conditional evaluates one arm and both
-  arms use the destination's storage. Comma evaluates its left operand before initializing that
-  storage from its right operand. Deleted copies and moves are permitted.
-- The result starts its lifetime before cleanup. The selected arm's temporaries are destroyed in
-  reverse order before the older condition temporaries ([class.temporary]). This slice supports
-  nonthrowing initializers and cleanup. More general cleanup during unwinding remains in #219.
-- Class selection in nested initializer contexts and other conditionally created temporaries
-  remain under #740 and #157. The direct automatic cases are in `tests/own/class-selection/`.
+- The built-in `?:` or comma operator can initialize an automatic class object, an ordinary
+  aggregate field, or a fixed-array element directly ([expr.cond], [expr.comma], [dcl.init.aggr],
+  [dcl.init.general]). The conditional evaluates one arm. Comma evaluates its left operand
+  before initializing from its right operand. The selected expression uses the destination's
+  storage, including for types with deleted copies and moves.
+- The result starts its lifetime before cleanup. Temporaries from the selected arm survive
+  later initializer clauses and are destroyed with the rest of the full-expression's
+  temporaries in reverse order ([class.temporary]). Tests in `tests/own/class-selection/`
+  check both arms, later sibling initialization, and temporary and object destruction.
+- This slice supports nonthrowing initializers and cleanup. More general cleanup during
+  unwinding remains in #219. Potentially overlapping subobjects remain under #301 and #304,
+  other class initializer contexts under #740, and other conditional temporaries under #157.
 
 ## Braced arguments in free function overload resolution (#231, 2026-11-20)
 
@@ -1954,6 +1960,9 @@ session's.*
   initial literal, including `S b(S(1));` and `S b(S{1});` ([dcl.ambig.res], #290).
   A later expression can disambiguate a grouped functional conversion, as in
   `Holder h(Tag(n), 2);` ([dcl.ambig.res], #769).
+  An additive operator after an identifier inside the operand also selects the initializer,
+  as in `Holder h(Tag(n), Tag(n + 1));`. The grouped named and adjusted pointer parameter
+  declarations keep their declaration reading ([dcl.ambig.res], #813).
 - Qualified functional conversions check access to aliases and typedefs declared directly in an
   ordinary non-template record, for both `C::T(args)` and `C::T{args}`. They use the existing
   member and friend access rules ([expr.type.conv], [class.access.general], #216).
@@ -2032,6 +2041,11 @@ session's.*
   variable-template initializers replay dependent operands and check class completeness at the
   demand. Other combinations, including class `__is_nothrow_convertible`, get hard diagnostics.
   `__has_builtin` answers 0 while support is partial ([meta.rel], [dcl.init.ref], #218).
+- `__reference_converts_from_temporary(T, U)` and `__reference_constructs_from_temporary(T, U)`
+  tell whether a reference T initialized from VAL<U> binds to a temporary: a converted arithmetic
+  value or a materialized prvalue, for arithmetic operands, void and reference-related classes
+  (`tests/own/builtins/reference_temporary.run.cpp`). Unrelated classes, which need user-defined
+  conversions, are diagnosed as not supported yet (#218).
 - `__is_base_of(Base, Derived)` ignores top-level cv. Nonclass and union operands give false.
   The same nonunion class gives true, including when incomplete. For distinct nonunion classes,
   `Derived` must be complete. The trait follows the recorded base declarations, including private
@@ -2136,6 +2150,9 @@ Fable decided the representation (ast.md §6.6); the Opus session wrote the code
   variable-template specialization with explicit non-dependent type arguments checks its associated
   constraints. This includes unevaluated uses such as `decltype`. A type-constraint or a leading
   requires-clause contributes to that check. [#234](https://github.com/yrashk/ycxx/issues/234)
+- A compound requirement `{ e } noexcept;` holds when the operator `noexcept(e)` gives true: a
+  call to a potentially-throwing function or a temporary with a throwing destructor fails it
+  ([expr.prim.req.compound]/2, #775, `tests/own/concepts/compound-noexcept.run.cpp`).
 - Partial specializations of class and variable templates are matched and ordered by their
   constraints ([temp.spec.partial.match]/2, [temp.spec.partial.order]). One whose arguments are the
   primary's own is allowed when it is more constrained, and two with the same arguments are
@@ -2145,7 +2162,7 @@ Fable decided the representation (ast.md §6.6); the Opus session wrote the code
   member templates are #832, and head identity for all partials is #833.
 - Not yet: class and variable template constraints outside those cases, members, broader
   constrained packs, fold-expanded constraints, constrained placeholders
-  outside ordinary block declarations, and `noexcept` in compound requirements (#234). Open follow-ups include re-verification of satisfaction at END
+  outside ordinary block declarations (#234). Open follow-ups include re-verification of satisfaction at END
   (#235), Itanium constraint mangling (#236), recorded discarded extents for `if constexpr` (#237),
   and value-dependent mapping arguments (#209).
 
@@ -2201,6 +2218,20 @@ list. The declaration introduces no name into lookup.
 A type inherited from a nondependent base takes precedence over the template parameter
 ([temp.local]).
 [#689](https://github.com/yrashk/ycxx/issues/689)
+
+## Class scope before the template parameter scope (#800)
+
+Unqualified lookup in a class template, and in a definition of its member outside it, searches
+the class's scope with its nondependent bases before the template parameter scope of the class
+template or of that definition ([temp.local]/7). A member of a nondependent base, a base's
+injected-class-name, or in a definition outside the class a member of the class itself, hides a
+template parameter of the same name: in expressions, type names, nested-name-specifiers and
+template names (`Sema::template_param`). A member template's own parameters are still found
+first; a dependent base is not searched. Redeclaring a hidden parameter's name is still an error
+([temp.local]/6, `Sema::declared_template_param`).
+- Tests: `tests/own/temp-local/` (one run test, two reject tests).
+- Not yet: the enclosing classes of a nested class are not searched before the outer head,
+  since nested classes of class templates are not supported (#306).
 
 ## Templates, ζ step 7: static data members of class templates (#88, 2026-11-18)
 
@@ -2769,6 +2800,22 @@ checked against Clang 23 and GCC 16 probes).
   non-trivially-copyable classes captured by copy (#353); weak definitions of closure members in
   inline functions (#124). A constant named by a lambda with a capture-default is captured, where
   Clang captures it only when it is odr-used (a layout difference for such closures, #355).
+
+## A lambda's noexcept-specifier (#807)
+
+A lambda's `noexcept`, `noexcept(true)` or `noexcept(false)` is part of its function call
+operator's type ([expr.prim.lambda.closure]/4). The condition is in the scope of the lambda's
+parameters and may not narrow to `bool` ([except.spec]/2). In a template's definition, a
+condition that depends on the template's parameters makes the unary `noexcept` operator on a call
+of the lambda value-dependent; each instantiation evaluates it with its own arguments. A
+captureless non-throwing lambda converts to a pointer to noexcept function, and from it to a
+pointer to function ([expr.prim.lambda.closure]/8, [conv.fctptr]).
+- The init-captures are in scope in the lambda-declarator, as the parameters are
+  ([basic.scope.lambda]): in the condition and in a trailing return type.
+- Tests: `tests/own/lambda-noexcept/` (one run test, two reject tests).
+- Not yet: a generic lambda's condition naming its own template parameters is rejected (#820);
+  a `noexcept` on a pointer-to-function declarator in a template is dropped (#819); a dependent
+  noexcept on a function template or class template member reads as false (#828).
 
 ## Namespace variable lambdas (#338)
 

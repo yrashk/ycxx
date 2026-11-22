@@ -1684,6 +1684,7 @@ public:
       for (const sema::BaseRec& x : b->second) r.push_back(x.cls);
     return r;
   }
+  bool explicit_specialization(EntityId c) override { return p_->explicitly_specialized(c, item_); }
   std::span<const sema::BaseRec> defining_base_records(EntityId c) override {
     if (auto b = p_->class_bases_.find(std::to_underlying(c)); b != p_->class_bases_.end()) return b->second;
     return {};
@@ -2174,6 +2175,7 @@ public:
   sema::CopyAssignment require_copy_assignment(EntityId f) override { return p_->require_copy_assignment(f); }
   std::set<EntityId> uncertain_object_layouts() override { return at_.uncertain_object_layouts(); }
   bool class_layout_uncertain(EntityId c) override { return at_.class_layout_uncertain(c); }
+  bool explicit_specialization(EntityId c) override { return at_.explicit_specialization(c); }
   const sema::ClassRec& publish_class(EntityId c, sema::ClassRec r) override { return p_->publish_class(c, std::move(r), item_); }
   std::vector<DeclId> visible_decls(ast::NameId name, std::span<const EntityId> directives = {}) override {
     return at_.visible_decls(name, directives);
@@ -4578,7 +4580,7 @@ private:
     // The designated class need not be complete here. The declaration introduces no name.
     if (friend_at && ps_.is(Tk::identifier) && ps_.kind(1) == Tk::semi) {
       const NameId name = ps_.name_of(ps_.tok());
-      const auto* param = s_.template_param(name);
+      const auto* param = s_.declared_template_param(name);
       if (param && param->kind == ast::TemplateArgKind::type && !param->pack) {
         const auto type = s_.class_template_parameter_type(*param, name, ps_.pos());
         if (!type) return bad();
@@ -4734,7 +4736,7 @@ private:
       return false;
     }
     // [temp.local]/6: not a template parameter's name; [class.mem.general]: not the class's.
-    if (s_.template_param(name)) {
+    if (s_.declared_template_param(name)) {
       s_.diag(at, Diag::redeclared_local, name);
       return false;
     }
@@ -6251,12 +6253,12 @@ private:
         sem.template_params = b_.seq(std::span<const ast::TemplateParamSema>(s_.template_scopes.front()));
       } else if (template_) {
         // [temp.local]/6: neither the template nor its parameters may take a parameter's name.
-        if (s_.template_param(d.name)) {
+        if (s_.declared_template_param(d.name)) {
           s_.diag(d.name_at, Diag::redeclared_local, d.name);
           return false;
         }
         for (const parse::Param& prm : d.params)
-          if (prm.name != s_.no_name() && s_.template_param(prm.name)) {
+          if (prm.name != s_.no_name() && s_.declared_template_param(prm.name)) {
             s_.diag(prm.at, Diag::redeclared_local, prm.name);
             return false;
           }
@@ -7767,8 +7769,9 @@ private:
       Ex init;
       if (auto it = inits.subobjects.find(i); it != inits.subobjects.end()) init = it->second;
       else if (rec.union_ && (!inits.subobjects.empty() || !f.dmi)) continue;
-      else if (f.init != ConstId::none) init = s_.literal(sema::Types::unqualified(f.type), f.init, ast::ValueCategory::prvalue, 0, 0);
+      // The early scalar value may have been folded before all class members were visible.
       else if (auto d = p_->dmi(f.entity)) init = member_initializer(f, *d);
+      else if (f.init != ConstId::none) init = s_.literal(sema::Types::unqualified(f.type), f.init, ast::ValueCategory::prvalue, 0, 0);
       else if (s_.types().is_reference(f.type)) s_.diag(0, Diag::reference_uninitialized);  // [class.base.init]/10
       else init = s_.default_init(f.type, 0, 0);
       if (!init.ok()) continue;

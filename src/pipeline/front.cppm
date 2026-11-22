@@ -1128,6 +1128,7 @@ engine::query_task<FrontResult> TuFront::run(engine::Ctx& cx, TuId tu) {
     const auto& record = classes.rec(c);
     const auto& fields = record.fields;
     for (const sema::FieldRec& f : fields) {
+      if (f.no_unique_address) shape.overlapping_fields.push_back(std::uint32_t(shape.fields.size()));
       shape.fields.push_back(f.type);
       shape.has_mutable_field |= f.mutable_;
     }

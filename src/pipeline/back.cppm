@@ -164,6 +164,7 @@ struct ClassShape {
   // destructor, and the copy not deleted, so the calling convention may pass it in registers.
   bool trivial_calls = true;
   std::vector<std::uint8_t> bit_widths{};  // parallel to fields, empty for ordinary records
+  std::vector<std::uint32_t> overlapping_fields{};  // [[no_unique_address]] ([intro.object])
   bool layout_uncertain = false;  // source packing or alignment that native layout does not apply
   bool copy_abi_unknown = false;   // no ABI classification for this defaulted copy
   // `trivial_calls` false that the destructor and copy and move constructors, taken one by one,
@@ -1034,6 +1035,11 @@ class UnitFacts : public irgen::TypeFacts {
         if (shape.entity == c && field < shape.fields.size()) return shape.fields[field];
       return std::nullopt;
     };
+    potentially_overlapping_field = [&shapes](EntityId c, std::uint32_t field) {
+      for (const ClassShape& shape : shapes.classes)
+        if (shape.entity == c) return std::ranges::binary_search(shape.overlapping_fields, field);
+      return false;
+    };
   }
   ConstId string_address(ConstId c) { return universe().consts->address_of(c); }
   bool is_constexpr(EntityId e) { return std::ranges::binary_search(src_->constexpr_functions, e); }
@@ -1059,7 +1065,9 @@ engine::query_task<Generated> FunctionGen::run(engine::Ctx& cx, FnKey k) {
   const auto& seqs = universe().in->seqs;
   const auto locals = d.body.locals;
   for (std::uint32_t index = 0, count = seqs.size(locals); index < count; ++index) {
-    if (facts.classify(seqs.at(locals, index).type) != irgen::TypeClass::record) continue;
+    QualType type = seqs.at(locals, index).type;
+    while (facts.classify(type) == irgen::TypeClass::array) type = facts.element(type);
+    if (facts.classify(type) != irgen::TypeClass::record) continue;
     input.nonthrowing_functions = co_await cx.fetch<UnitNonthrowingFunctions>(k.tu);
     break;
   }
