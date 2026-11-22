@@ -39,7 +39,7 @@ def sources_without_sdk(world):
         world.same_daemon('native and foreign targets', pid)
     elif sys.platform == 'darwin':
         (scope / 'darwin.cpp').write_text('#include <TargetConditionals.h>\nstatic_assert(TARGET_OS_OSX);\n')
-        check(world, scope, 'darwin.cpp')
+        check(world, scope, DARWIN, 'darwin.cpp')
 
 
 def sources_with_sdk(world):
