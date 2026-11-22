@@ -1271,6 +1271,10 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   member subobject whose class has an implicit constructor, conditional
   `explicit`, explicit constructor templates, and other `= default` forms (#157, #244).
 
+- Ordinary explicit class returns copy-initialize from an eligible named local or
+  parameter as an xvalue, including parenthesized names. A written move constructor
+  can be selected even when the copy constructor is deleted. [#749](https://github.com/yrashk/ycxx/issues/749)
+
 ## Ordinary destructor access (#259)
 
 - Automatic class objects and evaluated expressions of the form `T(args)` or `T{args}`

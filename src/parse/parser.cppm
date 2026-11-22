@@ -5639,7 +5639,7 @@ public:
         if (e.ok() && !s_->types().is_void(e.type()) && !s_->dependent(e)) s_->diag(begin, Diag::return_value_in_void);
         value = e;
       } else {
-        value = s_->convert(e, rt, e.begin);
+        value = s_->init_explicit_return(e, rt);
       }
     } else if (!s_->types().is_void(rt) && !s_->types().is_dependent(rt)) {
       s_->diag(begin, Diag::return_missing_value);
