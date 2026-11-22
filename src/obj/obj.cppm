@@ -178,6 +178,7 @@ struct symbol {
   bool weak = false;                     // a weak definition, or a weak reference when undefined
   // Present for an ELF function definition. Zero records an unknown byte extent.
   std::optional<std::uint64_t> function_size = std::nullopt;
+  std::optional<std::uint64_t> object_size = std::nullopt;  // sets STT_OBJECT and st_size on ELF output
 
   std::string_view name_view() const noexcept { return name.view(); }
   bool defined() const noexcept { return section.has_value(); }
@@ -186,7 +187,7 @@ struct symbol {
 
 enum class target : std::uint8_t { aarch64_macos, x86_64_linux };
 
-// An input ELF COMDAT group after relocation sections have been attached to their targets.
+// An ELF COMDAT group. On input, relocation sections have been attached to their targets.
 struct comdat_group {
   symbol_name signature;
   std::vector<std::uint32_t> members;  // indices into object::sections
