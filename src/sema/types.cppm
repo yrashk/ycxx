@@ -50,7 +50,7 @@ constexpr std::string_view spelling(Builtin b) {
 
 enum class TypeKind : u8 {
   builtin, pointer, array, function, class_, reference, enum_, template_param, dep_name, pack_expansion, transform,
-  placeholder, dep_spec, builtin_spec, member_pointer, other
+  placeholder, dep_spec, builtin_spec, member_pointer, pack_index, other
 };
 
 // The canonical form of a type, read out by value.
@@ -68,7 +68,7 @@ struct TypeRec {
   ast::RefQual fn_ref = ast::RefQual::none;
   bool fn_noexcept = false;
   bool rvalue_ref = false;           // a reference's kind; `inner` is what it refers to
-  ConstId bound_value = ConstId::none;  // an array's bound as a constant, possibly dependent
+  ConstId bound_value = ConstId::none;  // an array's bound or a pack index, possibly dependent
   NameId name{};                     // a dependent member type's name; `inner` is its qualifier
   u16 depth = 0;                     // a template parameter's position ([temp.param])
   u16 index = 0;
@@ -135,6 +135,8 @@ public:
   QualType pack_expansion(QualType pattern) { return ins_->intern_type(ast::TPackExpansion{pattern}); }
   // `__trait(arg)` of a dependent `arg` (docs/EXTENSIONS.md).
   QualType transform(u8 trait, QualType arg) { return ins_->intern_type(ast::TTransform{trait, arg}); }
+  // `T...[I]` while dependent ([dcl.type.pack.index]): `pack` is the pack's own parameter type.
+  QualType pack_index(QualType pack, ConstId index) { return ins_->intern_type(ast::TPackIndex{pack, index}); }
   // A placeholder ([dcl.spec.auto.general]); a bare type-constraint has no written arguments.
   QualType placeholder(bool decltype_auto, EntityId concept_ = EntityId::none) {
     return ins_->intern_type(ast::TAuto{u8(decltype_auto), concept_});
@@ -240,6 +242,10 @@ public:
     } else if (t.is<ast::TPackExpansion>(c)) {
       r.kind = TypeKind::pack_expansion;
       r.inner = t.get<ast::TPackExpansion>(c).pattern;
+    } else if (t.is<ast::TPackIndex>(c)) {
+      r.kind = TypeKind::pack_index;
+      r.inner = t.get<ast::TPackIndex>(c).pack;
+      r.bound_value = t.get<ast::TPackIndex>(c).index;
     } else if (t.is<ast::TTemplateParam>(c)) {
       auto p = t.get<ast::TTemplateParam>(c);
       r.kind = TypeKind::template_param;
@@ -258,6 +264,7 @@ public:
     case TypeKind::template_param:
     case TypeKind::dep_name:
     case TypeKind::pack_expansion:
+    case TypeKind::pack_index:
     case TypeKind::transform:
     case TypeKind::dep_spec:
     case TypeKind::builtin_spec: return true;
@@ -396,6 +403,14 @@ private:
       // Parameters are positional in the type (ast.md §5.1).
       return cvs + std::format("type-parameter-{}-{}", r.depth, r.index) + (inner.empty() || inner[0] == '[' ? "" : " ") + inner;
     case TypeKind::pack_expansion: return spell(r.inner) + "..." + (inner.empty() ? "" : " " + inner);
+    case TypeKind::pack_index: {
+      std::string i = ins_->values.is<ast::VDepParam>(r.bound_value)
+                          ? std::format("value-parameter-{}-{}", ins_->values.get<ast::VDepParam>(r.bound_value).depth,
+                                        ins_->values.get<ast::VDepParam>(r.bound_value).index)
+                      : ins_->values.is<ast::VInt>(r.bound_value) ? std::to_string(ast::int_bits(*ins_, r.bound_value).lo)
+                                                                  : std::string("…");
+      return cvs + spell(r.inner) + "...[" + i + "]" + (inner.empty() || inner[0] == '[' ? "" : " ") + inner;
+    }
     case TypeKind::transform:
       return cvs + std::string(lex::type_trait_info(lex::TypeTrait(r.trait)).name) + "(" + spell(r.inner) + ")" +
              (inner.empty() ? "" : " " + inner);

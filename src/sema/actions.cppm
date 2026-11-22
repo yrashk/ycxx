@@ -1068,6 +1068,35 @@ public:
     return Templates(*w_, classes()).is_union_class(types().class_of(t));
   }
   // `__trait(T)` that transforms a type ([meta.trans]): the type it gives.
+  // A pack-index-specifier `name...[index]` ([dcl.type.pack.index]): `name` names a template type
+  // parameter pack, `index` is converted to std::size_t. The selected element once the pack is
+  // bound, the dependent specifier until then.
+  std::optional<QualType> pack_index_type(NameId name, u32 at, ConstId index, u32 index_at) {
+    const ast::TemplateParamSema* p = template_param(name);
+    if (!p || p->kind != ast::TemplateArgKind::type || !p->pack) {
+      diag(at, Diag::not_a_pack, name);
+      return std::nullopt;
+    }
+    if (!ins().values.is_dependent(index)) {
+      const auto b = types().builtin_of(ins().values.get<ast::VInt>(index).type);
+      ast::Bits128 v = ast::int_bits(ins(), index);
+      if (v.hi != 0 || (b && ast::is_signed(w_->target, *b) && ast::is_negative(v))) {
+        diag(index_at, Diag::pack_index_not_constant);
+        return std::nullopt;
+      }
+      index = w_->values.integer(types().builtin(Builtin::unsigned_long), v.lo);
+    }
+    auto a = template_args.at(p->depth, p->index);
+    if (!a) return types().pack_index(p->type, index);
+    if (a->kind != ast::TemplateArgKind::pack || ins().values.is_dependent(index)) {
+      diag(index_at, Diag::not_supported, lex::Tk::l_square);
+      return std::nullopt;
+    }
+    std::vector<TemplateArg> es = ins().seqs.elements(a->elems);
+    auto r = templates().select_element(es, index);
+    if (!r) diag(index_at, Diag::pack_index_range, ast::int_bits(ins(), index).lo, es.size());
+    return r;
+  }
   std::optional<QualType> trait_type(lex::TypeTrait t, QualType arg, u32 at) {
     auto r = templates().transform(t, arg);
     if (!r) diag(at, Diag::trait_not_applicable, arg);

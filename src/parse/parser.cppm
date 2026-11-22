@@ -799,6 +799,27 @@ public:
             cls = t;
             continue;  // the arguments are consumed
           }
+          // A pack-index-specifier `T...[I]` ([dcl.type.pack.index]): I is a converted constant
+          // expression of type std::size_t.
+          if (kind(1) == Tk::ellipsis && kind(2) == Tk::l_square) {
+            const u32 at = pos();
+            const NameId name = name_of(tok());
+            bump();
+            bump();
+            bump();
+            const u32 index_at = pos();
+            auto index = template_value(s_->promote(constant_expression()), s_->types().builtin(Builtin::unsigned_long));
+            if (!expect(Tk::r_square) || !index) {
+              d.ok = false;
+              goto done;
+            }
+            cls = s_->pack_index_type(name, at, *index, index_at);
+            if (!cls) {
+              d.ok = false;
+              goto done;
+            }
+            continue;
+          }
           if (kind(1) != Tk::coloncolon)
             if (auto t = s_->class_name(name_of(tok()), false, true, pos())) {
               cls = t;

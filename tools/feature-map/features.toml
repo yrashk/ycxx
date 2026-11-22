@@ -841,7 +841,8 @@ clauses = ['expr.prim.pack.index', 'dcl.type.pack.index']
 std = 'C++26'
 ftm = '__cpp_pack_indexing'
 detect = '\.\.\.\s*\['
-status = 'missing'
+status = 'partial'
+note = 'Pack-index-specifiers `T...[I]` work in aliases, signatures (mangled `Dy`), bodies and type-trait operands, with a constant or non-type-parameter index. Pack-index-expressions `t...[I]` and other dependent index expressions remain.'
 probe = '''
 template<class... T> int second(T... t) { return t...[1]; }
 int main() { return second(1, 0, 2); }

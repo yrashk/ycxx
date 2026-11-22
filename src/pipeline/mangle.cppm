@@ -263,6 +263,25 @@ class Mangler {
         if (!a) return a;
         inner = n + *a;
         candidates_.push_back(full_key(bare));
+      } else if (in_.types.is<ast::TPackIndex>(in_.types.canon(bare))) {
+        // `T...[I]`: `Dy <type> <expression>`, a substitution candidate (§5.1.5). A constant index
+        // is the converted std::size_t, as GCC writes it (DECISIONS §1.7).
+        if (auto s = find(full_key(bare))) return qualify(qualifiers, *s, q);
+        auto x = in_.types.get<ast::TPackIndex>(in_.types.canon(bare));
+        auto p = type(x.pack);
+        if (!p) return p;
+        std::string index;
+        if (in_.values.is<ast::VDepParam>(x.index) && in_.values.get<ast::VDepParam>(x.index).depth == own_depth) {
+          auto i = in_.values.get<ast::VDepParam>(x.index).index;
+          index = i == 0 ? "T_" : std::format("T{}_", i - 1);
+        } else if (in_.values.is<ast::VInt>(x.index)) {
+          auto code = builtin_code(ast::Builtin::unsigned_long);
+          index = std::format("L{}{}E", *code, in_.values.get<ast::VInt>(x.index).bits.lo);
+        } else {
+          return std::unexpected("a pack index that is not a constant or a template parameter");
+        }
+        inner = "Dy" + *p + index;
+        candidates_.push_back(full_key(bare));
       } else if (in_.types.is<ast::TPackExpansion>(in_.types.canon(bare))) {
         // A pack expansion `Dp <type>`, a substitution candidate (§5.1.5).
         if (auto s = find(full_key(bare))) return qualify(qualifiers, *s, q);
@@ -695,7 +714,8 @@ class Mangler {
   bool dependent(ast::QualType q) {
     ast::QualType c = in_.types.canon(ast::without_cv(in_.canonical(q)));
     if (in_.types.is<ast::TTemplateParam>(c) || in_.types.is<ast::TDepName>(c) || in_.types.is<ast::TPackExpansion>(c) ||
-        in_.types.is<ast::TTransform>(c) || in_.types.is<ast::TDepSpec>(c) || in_.types.is<ast::TBuiltinSpec>(c))
+        in_.types.is<ast::TTransform>(c) || in_.types.is<ast::TDepSpec>(c) || in_.types.is<ast::TBuiltinSpec>(c) ||
+        in_.types.is<ast::TPackIndex>(c))
       return true;
     if (in_.types.is<ast::TPointer>(c)) return dependent(in_.types.get<ast::TPointer>(c).pointee);
     if (in_.types.is<ast::TMemberPtr>(c)) {

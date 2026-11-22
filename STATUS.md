@@ -1702,6 +1702,24 @@ template's tokens again with the arguments bound.
   specializations. `&&` follows #671; type-trait operations (`__is_same(T, U)`) still have no
   symbol (#780).
 
+## Pack-index-specifiers (#297)
+
+- `T...[I]` ([dcl.type.pack.index]) names the element of a template type parameter pack, with
+  `I` converted to std::size_t. It works in alias templates, member aliases, function signatures
+  (leading and trailing return types, parameters), variable templates, bodies and type-trait
+  operands. The index is a constant or a non-type parameter.
+- While the pack is dependent it is the type `TPackIndex` (ast.md §7.6). Substitution selects
+  the element, also past known elements into another pack's expansion (`F<T...>` for
+  `using F = U...[0]`). It is a non-deduced context ([temp.deduct.type]/5).
+- An index out of range, a negative index and a name that is not a pack are diagnosed.
+- In symbols, `Dy <type> <expression>` is a substitution candidate. A constant index is written as
+  GCC writes it, `Lm0E`; Clang writes it as spelled.
+- Tests: `tests/own/templates/pack-index/`, `tests/own/abi/pack-index-*`. A Clang peer links the
+  parameter-index form, and asm labels pin GCC's constant form.
+- Not yet: pack-index-expressions `t...[I]`, and dependent index arithmetic such as
+  `T...[sizeof...(T) - 1]` in a signature (#209). In a body that arithmetic works. With these,
+  libycxx's headers move from `invoke.hpp:35` to `invoke.hpp:37` (#776).
+
 ## Templates, ζ step 2: class templates (#88, 2026-11-18)
 
 - **Declarations:** class templates at namespace scope (`template<…> struct X {…};` and
