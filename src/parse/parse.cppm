@@ -56,7 +56,9 @@ bool layout_attribute(const pp::Region& region, u32 begin, u32 end, LayoutAttrib
       if (mode == LayoutAttributes::leading_affecting_layout) return false;
       continue;
     }
-    if (mode == LayoutAttributes::any) return true;
+    // An annotation payload does not participate in layout, even if it names packed or aligned.
+    const bool annotation = bracket && i + 2 < end && region.tokens[i + 2].kind == equal;
+    if (mode == LayoutAttributes::any && !annotation) return true;
     const bool unscoped = !standard_attribute.empty() && bracket && i + 2 < end &&
                           region.tokens[i + 2].kind != kw_using;
     if (gnu) ++i;
@@ -70,7 +72,7 @@ bool layout_attribute(const pp::Region& region, u32 begin, u32 end, LayoutAttrib
       else if (part.kind == close && --depth == 0) break;
       else if (unscoped && part.kind == l_paren) ++parentheses;
       else if (unscoped && part.kind == r_paren && parentheses) --parentheses;
-      else if (part.kind == identifier) {
+      else if (part.kind == identifier && !annotation) {
         auto name = region.name(part);
         if (!standard_attribute.empty()) {
           const auto previous = region.tokens[i - 1].kind;
@@ -756,6 +758,21 @@ public:
       const auto& [point, declaration] = entry;
       return point <= item && (declaration.flags & sema::decl_flag::inline_);
     });
+  }
+  // The annotations of an entity in this translation unit after analyze_all(), in source order.
+  // Distinct declarations contribute separate occurrences even when their constants are equal.
+  std::vector<ast::DeclarationAnnotation> declaration_annotations(EntityId entity) const {
+    std::vector<ast::DeclarationAnnotation> result;
+    const auto found = decls_.find(std::to_underlying(entity));
+    if (found == decls_.end()) return result;
+    for (const auto& [item, declaration] : found->second) {
+      for (const auto& annotation : w_->ins.seqs.elements(declaration.annotations))
+        result.push_back({annotation.type, annotation.value, id(item), annotation.offset});
+    }
+    std::ranges::stable_sort(result, {}, [&](const ast::DeclarationAnnotation& annotation) {
+      return std::pair{index(annotation.item), annotation.offset};
+    });
+    return result;
   }
   // A previous definition of this entity in this TU ([basic.def.odr]). C language linkage
   // can make a definition in another namespace correspond without ordinary lookup finding it.
@@ -2234,7 +2251,8 @@ private:
     bool hidden_visibility = false;
     // [dcl.link]: a linkage-specification has no attribute-specifier-seq.
     // (GNU attributes there are accepted, as GCC and Clang do.)
-    const int attributes = ps_.skip_attributes(&hidden_visibility);
+    std::vector<ast::AnnotationSema> annotations;
+    const int attributes = ps_.skip_attributes(&hidden_visibility, Parser::attr_std | Parser::attr_gnu, &annotations);
     if ((attributes & Parser::attr_std) && ps_.is(Tk::kw_extern) && ps_.kind(1) == Tk::string_lit) {
       s_.diag(attrs_at, Diag::attributes_not_allowed);
       return bad();
@@ -2249,7 +2267,7 @@ private:
       ps_.bump();
       ps_.bump();
       while (ps_.is(Tk::string_lit) && ps_.tok().has(lex::tok_flag::continued)) ps_.bump();
-      ps_.skip_attributes(&hidden_visibility);
+      ps_.skip_attributes(&hidden_visibility, Parser::attr_std | Parser::attr_gnu, &annotations);
     }
     ps_.set_linkage(lang);
     // `template<>`: an explicit specialization ([temp.expl.spec]) of a class, function or variable
@@ -2357,10 +2375,12 @@ private:
       template_ = true;
     }
     if (ps_.is(Tk::semi)) {
+      if (!annotations.empty()) s_.diag(annotations.front().offset, Diag::attributes_not_allowed);
       ps_.bump();
       return;
     }
     if (ps_.is(Tk::kw_static_assert)) {
+      if (!annotations.empty()) s_.diag(annotations.front().offset, Diag::attributes_not_allowed);
       Ex sa = ps_.static_assert_declaration();
       tree_ = sa.id;
       if (!ps_.at_end()) s_.diag(ps_.pos(), Diag::unexpected_token, ps_.kind());
@@ -2480,8 +2500,10 @@ private:
       // `class-key identifier ;` declares the class ([dcl.type.elab]); it stays incomplete until
       // its definition. A standalone declaration introduces the name in this scope.
       ps_.bump();
-      if (spec.ok && !class_declared(class_decl(class_entity(spec.class_name), false), spec.class_key, spec.class_at))
-        return bad();
+      if (!annotations.empty()) s_.diag(annotations.front().offset, Diag::attributes_not_allowed);
+      auto sem = class_decl(class_entity(spec.class_name), false);
+      sem.annotations = b_.seq(std::span<const ast::AnnotationSema>(spec.annotations));
+      if (spec.ok && !class_declared(sem, spec.class_key, spec.class_at)) return bad();
       if (!spec.ok || sema::Types::cv(spec.type) != sema::Cv::none || spec.is_static || spec.is_extern) bad();
       return;
     }
@@ -2492,6 +2514,7 @@ private:
       if (it_->kind != ItemKind::function) ps_.skip_to_semi();
       return;
     }
+    spec.annotations = std::move(annotations);
     bool is_function_def = it_->kind == ItemKind::function;
     u32 declarators = 0;
     do {
@@ -3228,7 +3251,7 @@ private:
   }
 
   // [dcl.align]: evaluate every specifier, even when another is stricter.
-  std::optional<Program::ClassAlignment> read_class_alignment() {
+  std::optional<Program::ClassAlignment> read_class_alignment(std::vector<ast::AnnotationSema>& annotations) {
     sema::Sema::ImmediateReferenceScope references(s_, /*allowed=*/true);
     sema::Sema::ClassAlignmentOperand operand_context(s_);
     Program::ClassAlignment alignment;
@@ -3283,7 +3306,7 @@ private:
         alignment.at = at;
       }
       alignment.specifiers.push_back({begin, ps_.index()});
-      ps_.skip_attributes();
+      ps_.skip_attributes(nullptr, Parser::attr_std | Parser::attr_gnu, &annotations);
     }
     return alignment;
   }
@@ -3293,8 +3316,9 @@ private:
     const Tk key = ps_.kind();
     if (key == Tk::kw_union || single_linkage_spec_) return unsupported_class_alignment();
     ps_.bump();
-    ps_.skip_attributes();
-    auto alignment = read_class_alignment();
+    std::vector<ast::AnnotationSema> annotations;
+    ps_.skip_attributes(nullptr, Parser::attr_std | Parser::attr_gnu, &annotations);
+    auto alignment = read_class_alignment(annotations);
     if (!alignment) return bad();
     if (!ps_.is(Tk::identifier) || (ps_.kind(1) != Tk::semi && ps_.kind(1) != Tk::eof)) {
       s_.diag(alignment->at, Diag::attributes_not_allowed);
@@ -3304,7 +3328,8 @@ private:
     const u32 at = ps_.pos();
     ps_.bump();
     if (!ps_.expect(Tk::semi)) return bad();
-    const auto sem = class_decl(class_entity(name), false);
+    auto sem = class_decl(class_entity(name), false);
+    sem.annotations = b_.seq(std::span<const ast::AnnotationSema>(annotations));
     for (DeclId previous : q_.visible_decls(name))
       if (auto d = p_->decl_sema(previous); d && d->entity != EntityId::none && same_scope(*d) &&
           (d->kind == ast::DeclKind::enum_ ||
@@ -3365,7 +3390,8 @@ private:
       template_ = true;
     }
     u32 at = ps_.pos();
-    ps_.skip_attributes();
+    std::vector<ast::AnnotationSema> leading_annotations;
+    ps_.skip_attributes(nullptr, Parser::attr_std | Parser::attr_gnu, &leading_annotations);
     bool td = ps_.accept(Tk::kw_typedef);  // `typedef class-specifier declarators;` ([dcl.typedef])
     Tk key = ps_.kind();
     if (!Parser::is_class_key(key)) {
@@ -3373,14 +3399,17 @@ private:
       return bad();
     }
     ps_.bump();
-    ps_.skip_attributes();
+    std::vector<ast::AnnotationSema> annotations;
+    ps_.skip_attributes(nullptr, Parser::attr_std | Parser::attr_gnu, &annotations);
+    if (!annotations.empty() && (template_ || explicit_))
+      s_.diag(annotations.front().offset, Diag::annotation_not_supported);
     std::optional<Program::ClassAlignment> alignment;
     if (ps_.is(Tk::kw_alignas)) {
       if (key == Tk::kw_union || template_ || explicit_) {
         s_.diag(ps_.pos(), Diag::not_supported, Tk::kw_alignas);
         return bad();
       }
-      alignment = read_class_alignment();
+      alignment = read_class_alignment(annotations);
       if (!alignment) return bad();
       if (!ps_.is(Tk::identifier) || ps_.kind(1) == Tk::coloncolon || ps_.kind(1) == Tk::less) {
         s_.diag(alignment->at, Diag::not_supported, Tk::kw_alignas);
@@ -3428,6 +3457,7 @@ private:
     if (!template_ && clashes_with_using(name, name_at, ast::DeclKind::class_, s_.types().class_type(class_entity(name))))
       return bad();
     ast::DeclSema sem = template_ ? class_template_decl(name) : class_decl(class_entity(name), true);
+    if (!template_) sem.annotations = b_.seq(std::span<const ast::AnnotationSema>(annotations));
     if (!class_declared(sem, key, name_at)) return bad();
     if (alignment) p_->class_alignments_.emplace(k_, std::move(*alignment));
     s_.own.push_back({name, sem});
@@ -3437,7 +3467,10 @@ private:
     // The declarators after the closing brace: `struct S { … } s, *p;`, where S is complete.
     ps_.seek(it_->brace_end);
     q_.own_class_complete = true;
-    if (ps_.accept(Tk::semi)) return;
+    if (ps_.accept(Tk::semi)) {
+      if (!leading_annotations.empty()) s_.diag(leading_annotations.front().offset, Diag::attributes_not_allowed);
+      return;
+    }
     if (ps_.at_end()) {  // the `;` is missing; the definition stands ([class.pre]/1)
       ps_.expect(Tk::semi);
       return;
@@ -3454,6 +3487,7 @@ private:
     spec.type = sem.type;
     spec.has_type = true;
     spec.is_typedef = td;
+    spec.annotations = std::move(leading_annotations);
     do {
       parse::Declarator d = ps_.declarator(spec.type, false, spec.is_typedef);
       if (!d.ok || !d.named || !declare(spec, d, LangLinkage::cxx, false, false)) {
@@ -3970,9 +4004,11 @@ private:
       }
       return special_member(c, ctor, *flags, virtual_at, explicit_at.has_value());
     }
+    std::vector<ast::AnnotationSema> annotations;
     if (ps_.is(Tk::l_square) && ps_.kind(1) == Tk::l_square) {
       u32 attrs_at = ps_.pos();
-      if (!ps_.skip_balanced_attributes()) return bad();  // [class.mem.general]
+      if (!ps_.balanced_attributes()) return bad();  // [class.mem.general]
+      ps_.skip_attributes(nullptr, Parser::attr_std | Parser::attr_gnu, &annotations);
       // [class.access.spec]: an access label has no attribute-specifier-seq.
       if (ps_.is(Tk::kw_public) || ps_.is(Tk::kw_protected) || ps_.is(Tk::kw_private)) {
         s_.diag(attrs_at, Diag::attributes_not_allowed);
@@ -4026,6 +4062,7 @@ private:
       };
     }
     DeclSpec spec = ps_.decl_specifiers(/*in_type_id=*/false, nullptr, /*allow_conversion_id=*/true, /*class_member=*/true);
+    spec.annotations = std::move(annotations);
     ps_.declare_class = std::move(declare_class);
     auto commit_introduction = [&] {
       if (introduced && decls_.size() == candidate->ordinal && out_.diags.empty() &&
@@ -4247,14 +4284,7 @@ private:
     const items::Item& record = p_->items().items[it_->parent];
     // The first slice covers a non-template record without bases or layout attributes.
     auto attributed = [&](u32 begin, u32 end) {
-      const pp::Region& region = p_->region();
-      for (u32 i = begin; i < end; ++i) {
-        const auto token = region.tokens[i];
-        if (token.kind == Tk::kw_alignas ||
-            (token.kind == Tk::l_square && i + 1 < end && region.tokens[i + 1].kind == Tk::l_square) ||
-            (token.kind == Tk::identifier && region.name(token) == "__attribute__")) return true;
-      }
-      return false;
+      return layout_attribute(p_->region(), begin, end, LayoutAttributes::any);
     };
     if (d.name_at != d.begin || d.template_args || member_template_ || spec.is_static || !q_.defining_bases(owner).empty() ||
         p_->class_rec_is_union(it_->parent) || record.template_depth != 0 || record.specialization ||
@@ -4288,12 +4318,18 @@ private:
   // declaration, of a namespace-scope function or of another class's member. The friend is not a
   // member, and the declaration makes no name visible to ordinary lookup ([class.friend]/7).
   void friend_declaration() {
+    std::vector<ast::AnnotationSema> annotations;
+    ps_.skip_attributes(nullptr, Parser::attr_std | Parser::attr_gnu, &annotations);
     std::optional<u32> friend_at;
     if (ps_.is(Tk::kw_friend)) {
       friend_at = ps_.pos();
       ps_.bump();
     }
     const bool definition = it_->kind == ItemKind::function;
+    if (!definition && !annotations.empty()) {
+      s_.diag(annotations.front().offset, Diag::attributes_not_allowed);
+      return bad();
+    }
     if (ps_.is(Tk::kw_template) || !p_->enclosing_heads(k_).empty() || inst_) {
       s_.diag(friend_at.value_or(ps_.pos()), Diag::not_supported, Tk::kw_friend);  // in or of a template (#259)
       return bad();
@@ -4316,6 +4352,11 @@ private:
     }
     DeclSpec spec = ps_.decl_specifiers(false, &friend_at);
     if (!spec.ok || !friend_at) return bad();
+    if (!spec.annotations.empty() && !definition) {
+      s_.diag(spec.annotations.front().offset, Diag::attributes_not_allowed);
+      return bad();
+    }
+    spec.annotations = std::move(annotations);
     if (ps_.accept(Tk::semi)) {
       if (!types.is_class(spec.type)) {
         s_.diag(spec.begin, Diag::not_supported, Tk::kw_friend);  // a friend that is not a class
@@ -4327,6 +4368,11 @@ private:
     }
     parse::Declarator d = ps_.declarator(spec.type, false);
     if (!d.ok || !d.named) return bad();
+    // [dcl.attr.annotation]: a non-defining friend declaration cannot have an annotation.
+    if (!definition && !d.annotations.empty()) {
+      s_.diag(d.annotations.front().offset, Diag::attributes_not_allowed);
+      return bad();
+    }
     if (literal_operator_named(d.name) &&
         (!defaults_allowed(d.params, types.is_function(d.type), d.name) || !literal_operator_ok(spec, d, LangLinkage::cxx, false)))
       return bad();
@@ -5262,6 +5308,20 @@ private:
     for (const auto& p : params) tokens.push_back(p.default_tokens);
   }
 
+  bool attach_function_annotations(ast::DeclSema& declaration, const DeclSpec& spec,
+                                   const parse::Declarator& d, bool supported) {
+    if (spec.annotations.empty() && d.annotations.empty()) return true;
+    const u32 at = (spec.annotations.empty() ? d.annotations : spec.annotations).front().offset;
+    if (!supported) {
+      s_.diag(at, Diag::annotation_not_supported);
+      return false;
+    }
+    std::vector<ast::AnnotationSema> occurrences = spec.annotations;
+    occurrences.insert(occurrences.end(), d.annotations.begin(), d.annotations.end());
+    declaration.annotations = b_.seq(std::span<const ast::AnnotationSema>(occurrences));
+    return true;
+  }
+
   // A member function or static data member of class `c` declared in its class ([class.mfct],
   // [class.static]).
   bool member_function_or_static(const DeclSpec& spec, parse::Declarator& d, ast::DeclSema c, bool is_virtual,
@@ -5298,6 +5358,8 @@ private:
       }
     }
     ast::DeclSema sem = class_decl(c.entity, false);
+    if (!attach_function_annotations(sem, spec, d, fn && !member_template_ && !inst_ &&
+                                     s_.template_scopes.empty())) return false;
     sem.type = d.type;
     sem.has_written_noexcept = fn && d.has_noexcept;
     sem.linkage = ast::Linkage::external;
@@ -5736,6 +5798,7 @@ private:
     bool has_init = !deleted && (early || early_expr || ps_.is(Tk::equal) || ps_.is(Tk::l_brace) || (!fn && ps_.is(Tk::l_paren)));
     bool definition = fn ? is_function_def || deleted : !((spec.is_extern || single_linkage_spec_) && !has_init);
     if (!fn && definition && !s_.require_supported_virtual_layout(d.type, d.name_at)) return false;
+    if (!attach_function_annotations(sem, spec, d, fn && !template_ && !explicit_)) return false;
     if (definition) flags |= sema::decl_flag::definition;
     const bool reference = types.is_reference(d.type);
     const bool ordinary_reference = reference && !types.is_function(types.referee(d.type)) &&
