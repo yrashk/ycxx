@@ -7530,15 +7530,29 @@ public:
         }
       }
       for (const auto& candidate : set) {
-        auto fn = types().rec(candidate.type);
-        if (fn.params.size() != 1) continue;
-        if (candidate.flags & decl_flag::template_) {
-          unsupported = true;
-          continue;
+        QualType function_type = candidate.type;
+        const bool is_template = (candidate.flags & decl_flag::template_) != 0;
+        if (is_template) {
+          Templates t = templates();
+          const std::array shapes{argument_shape(object)};
+          auto args = t.deduce_call(candidate, shapes, {}, found_defaults(candidate));
+          if (!args) continue;
+          if (candidate.constraints != ConstId::none) {
+            auto params = ins().seqs.elements(candidate.template_params);
+            auto constraint = t.substitute_constraint(candidate.constraints,
+                                                       Bindings::of(params.empty() ? 0 : params[0].depth, *args));
+            auto satisfied = constraint ? q_->satisfied(*constraint) : std::optional<bool>(false);
+            if (satisfied && !*satisfied) continue;
+          }
+          auto specialized = t.specialization_type(candidate, *args);
+          if (!specialized) continue;
+          function_type = *specialized;
         }
+        auto fn = types().rec(function_type);
+        if (fn.params.size() != 1) continue;
         const auto rank = ics(object, fn.params.front());
         if (!rank.viable) continue;
-        unsupported |= rank.rank >= Ics::user_defined;
+        unsupported |= is_template || rank.rank >= Ics::user_defined;
         viable.push_back({rank, types().referee(fn.params.front()), &candidate});
       }
       if (unsupported) {

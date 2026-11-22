@@ -75,6 +75,18 @@ static_assert(-Related{} == 51);
 static_assert(-Unrelated{} == 53);
 }
 
+namespace nonviable_template {
+struct Other {};
+template<class T> int operator-(Other&);
+template<class T = int> int operator-(const Other&);
+struct Value { friend constexpr int operator-(Value&) { return 61; } };
+constexpr int use() {
+    Value value;
+    return -value;
+}
+static_assert(use() == 61);
+}
+
 int main() {
     numbers::Value value{42};
     member_competition::MemberWins member;
