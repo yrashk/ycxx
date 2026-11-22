@@ -727,6 +727,83 @@ void copying() {
   check(lines == 10 && a.copy->starts_with("* Tu(a.cpp) executed 900µs w0 alloc 4.0KiB, 29.1KiB in all, retains 1.0KiB\n"),
         std::format("Y copies the whole subtree, folded or not ({} lines: 9 cells and an error line)", lines));
   check(trace::strip_sgr(b.frame().lines[1]).contains("copied the subtree (9 cells)"), "and says how much");
+
+  // A selection is of cells, not row numbers, and goes when its rows or its pane change under it.
+  const auto status = [&] {
+    const trace::Frame f = b.frame();
+    return trace::strip_sgr(f.lines[b.header_height()]);
+  };
+  (void)key("e");
+  (void)key("g");
+  (void)key("V");
+  (void)key("j");
+  (void)key("j");
+  (void)key("s");  // re-ordered: other cells now lie between its ends
+  a = key("y");
+  check(status().contains("copied the cell"), "a sort drops a selection: y copies the cell");
+  (void)key("s"), (void)key("s"), (void)key("s");  // back to start order
+  (void)act(10, 7, M::press);  // FunctionIr, whose pane is long
+  (void)act(10, 7, M::release);
+  (void)act(90, 6, M::press);
+  (void)act(90, 6, M::release);
+  (void)key("V");
+  (void)key("j");
+  (void)key("h");  // the keys go back to the tree: the pane's selection goes with them
+  (void)key("j");
+  a = key("y");
+  check(status().contains("copied the cell") && a.copy && a.copy->starts_with("FunctionGen"), "leaving the pane drops its selection");
+  (void)act(10, 7, M::press);
+  (void)act(10, 7, M::release);
+  (void)act(73 + 3, 6, M::press);
+  (void)act(73 + 8, 6, M::drag);
+  (void)key("<");  // the pane is wider now: its lines are others
+  a = key("y");
+  check(status().contains("copied the cell"), "a resized pane drops a selection");
+  (void)key(">");
+  // A click on the long pane's last row (where it says which lines it shows) scrolls nothing.
+  (void)b.frame();
+  const std::size_t scroll = b.detail_scroll();
+  (void)act(90, 3 + 19, M::press);
+  (void)act(90, 3 + 19, M::release);
+  check(b.detail_scroll() == scroll, "a click on the pane's last row does not scroll it");
+  // A drag over a blank line copies nothing, and says so.
+  (void)act(73 + 2, 3 + 2 - b.detail_scroll(), M::press);
+  (void)act(73 + 9, 3 + 2 - b.detail_scroll(), M::drag);
+  a = act(73 + 9, 3 + 2 - b.detail_scroll(), M::release);
+  check(!a.copy && status().contains("nothing to copy"), std::format("an empty selection copies nothing: {}", status()));
+
+  // A live feed adding rows above keeps a selection on its cells.
+  b.set_live("test");
+  (void)act(10, 4, M::press);  // Pp (newest first: the one request is still on top)
+  (void)act(10, 6, M::drag);
+  (void)b.pump([&] {
+    Event top = ev(100, 0, "Tu", "b.cpp", Outcome::executed, 950'000, 990'000);
+    t.add(std::vector<Event>{top});
+    return true;
+  });
+  a = act(10, 7, M::release);
+  check(a.copy && a.copy->starts_with("* Pp(a.cpp)") && std::ranges::count(*a.copy, '\n') == 3,
+        std::format("the rows stay the cells that were selected: {:?}", a.copy.value_or("(nothing)")));
+  // A drag held past the bottom edge keeps scrolling on ticks; the wheel moves its end too.
+  b.resize(10, 120);  // 6 tree rows of 11
+  (void)b.frame();
+  const std::size_t y0 = b.header_height() + 2;  // the first tree row
+  (void)key("g");
+  (void)act(10, y0, M::press);
+  (void)act(10, y0 + 6, M::drag);  // the footer: past the edge
+  check(b.ticking(), "a drag past the edge ticks");
+  for (int i = 0; i < 8; ++i) b.tick();
+  a = act(10, y0 + 6, M::release);
+  check(a.copy && std::ranges::count(*a.copy, '\n') >= 10, std::format("ticks scrolled the selection to the end: {}", status()));
+  check(!b.ticking(), "and stop with the release");
+  (void)key("g");
+  (void)b.frame();  // the view at the top, as drawn
+  (void)act(10, y0, M::press);
+  (void)act(10, y0 + 1, M::drag);
+  (void)act(10, y0 + 1, M::wheel_down);
+  a = act(10, y0 + 1, M::release);
+  check(status().contains("copied 4 rows"), std::format("the wheel during a drag moves its end: {}", status()));
+  b.resize(24, 120);
 }
 
 }  // namespace

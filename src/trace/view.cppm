@@ -302,6 +302,7 @@ class Browser {
     const std::string& k = std::get<Key>(in).seq;
     if (k.empty()) return {};
     notice_.clear();
+    drop_stale_selection();
     if (prompt_) {
       edit_filter(k);
       return {};
@@ -317,15 +318,26 @@ class Browser {
     if (view_ == View::tree && pane_focused() && detail_key(k)) return {};
     if (view_ == View::tree) tree_key(k);
     else timeline_key(k);
-    if (visual_ && rows_sel_) rows_sel_->end = cursor_;  // V in the tree: the keys move its end
     common_key(k);
+    // V in the tree: the keys move its end.
+    if (visual_ && rows_sel_)
+      if (const auto n = selected_node()) rows_sel_->end = *n;
     return {};
   }
   // What the last copy was, for the status line.
   void note(std::string text) { notice_ = std::move(text); }
   const std::string& notice() const noexcept { return notice_; }
 
+  // While a drag is held past the edge of the tree or the pane, it keeps scrolling: the terminal
+  // calls `tick` this often, as terminals report the pointer only when it moves.
+  bool ticking() const noexcept { return (drag_ == Drag::rows || drag_ == Drag::text) && past_edge_ && last_drag_; }
+  void tick() {
+    if (ticking()) drag_to(*last_drag_);
+  }
+  static constexpr std::chrono::milliseconds tick_every{60};
+
   Frame frame() {
+    drop_stale_selection();
     Frame f;
     f.lines = header_lines();
     f.lines.push_back(status_line());
@@ -444,7 +456,7 @@ class Browser {
         if (cursor_ != h.index) detail_scroll_ = 0;
         cursor_ = h.index;
         if (twice) tree_.toggle(tree_.rows()[cursor_].node);
-        else rows_sel_ = RowSel{h.index, h.index}, drag_ = Drag::rows;  // a drag selects rows
+        else rows_sel_ = RowSel{node, node}, drag_ = Drag::rows;  // a drag selects rows
         break;
       case Hit::Area::marker:
         focus_ = Focus::tree;
@@ -461,8 +473,8 @@ class Browser {
         break;
       case Hit::Area::detail: {
         focus_ = Focus::detail;
-        const PanePoint p = pane_point(m.x, m.y);
-        text_sel_ = TextSel{p, p}, drag_ = Drag::text;  // a drag selects text
+        const PanePoint p = pane_point(m.x, m.y, false);
+        text_sel_ = TextSel{p, p, false, selected_node().value_or(-1), pane_width()}, drag_ = Drag::text;  // a drag selects text
         break;
       }
       case Hit::Area::lane:
@@ -478,19 +490,29 @@ class Browser {
   // The pointer moved with the button down: the divider, or the selection's end, follows it; past
   // the edge of a list the list scrolls.
   void drag_to(const Mouse& m) {
+    last_drag_ = m;
+    past_edge_ = false;
     if (drag_ == Drag::divider) {
       if (split()) place_divider(m.x);
     } else if (drag_ == Drag::rows && rows_sel_) {
-      const std::size_t n = tree_.rows().size(), first = header_height() + 2, hgt = list_height();
+      const auto rows = tree_.rows();
+      const std::size_t n = rows.size(), first = header_height() + 2, hgt = list_height();
       if (n == 0) return;
       std::size_t row = 0;
+      past_edge_ = m.y < first || m.y - first >= hgt;
       if (m.y < first) row = top_ > 0 ? top_ - 1 : 0;
       else if (m.y - first >= hgt) row = std::min(top_ + hgt, n - 1);
       else row = std::min(top_ + (m.y - first), n - 1);
-      moved_ = moved_ || row != rows_sel_->anchor;
-      rows_sel_->end = cursor_ = row;
+      moved_ = moved_ || rows[row].node != rows_sel_->anchor;
+      cursor_ = row;
+      // The view follows at once, so the next tick goes a row further.
+      if (cursor_ < top_) top_ = cursor_;
+      if (cursor_ >= top_ + hgt) top_ = cursor_ - hgt + 1;
+      rows_sel_->end = rows[row].node;
     } else if (drag_ == Drag::text && text_sel_) {
-      const PanePoint p = pane_point(m.x, m.y);
+      const std::size_t first = header_height() + 2;
+      past_edge_ = m.y < first || m.y - first >= pane_shown(pane_lines().size());
+      const PanePoint p = pane_point(m.x, m.y, true);
       moved_ = moved_ || p != text_sel_->anchor;
       text_sel_->end = p;
     }
@@ -525,6 +547,9 @@ class Browser {
     top_ = dir > 0 ? std::min(top_ + step, last_top) : (top_ > step ? top_ - step : 0);
     if (n > 0) cursor_ = std::clamp(cursor_, top_, std::min(top_ + hgt, n) - 1);
     detail_scroll_ = 0;
+    // A selection being made follows the cursor the wheel moved.
+    if (rows_sel_ && (visual_ || drag_ == Drag::rows))
+      if (const auto s = selected_node()) rows_sel_->end = *s;
   }
   // The divider at column `x`, kept as a share of the width, so a resized terminal keeps it.
   void place_divider(std::size_t x) {
@@ -547,6 +572,7 @@ class Browser {
     reorder(tree_.order() == *order ? Tree::Order::start : *order);
   }
   void reorder(Tree::Order o) {
+    clear_selection();  // rows between two cells are others in another order
     const std::optional<std::int32_t> held = selected_node();
     tree_.set_order(o);
     if (held) keep_selected(*held);
@@ -558,12 +584,16 @@ class Browser {
     std::size_t line = 0, col = 0;
     auto operator<=>(const PanePoint&) const = default;
   };
+  // Rows from one node to another, as shown: nodes, so a live feed adding rows keeps it in place.
   struct RowSel {
-    std::size_t anchor, end;  // rows, in `Tree::rows()`
+    std::int32_t anchor, end;
   };
+  // Text of one node's pane at one width: its line numbers mean nothing for another node or width.
   struct TextSel {
     PanePoint anchor, end;
     bool lines = false;  // whole lines (V)
+    std::int32_t node = -1;
+    std::size_t width = 0;
   };
   // A line of the pane; `cont`: it continues the line above, wrapped.
   struct PaneLine {
@@ -576,16 +606,38 @@ class Browser {
     rows_sel_.reset();
     text_sel_.reset();
     visual_ = false;
+    past_edge_ = false;
+  }
+  // A selection whose rows are no longer shown, or whose pane is another node's or width's, goes.
+  void drop_stale_selection() {
+    if (rows_sel_ && !row_range(*rows_sel_)) clear_selection();
+    if (text_sel_ && (text_sel_->node != selected_node().value_or(-1) || text_sel_->width != pane_width() || !split())) clear_selection();
   }
   Action copy(std::string text, std::string_view what) {
     clear_selection();
+    if (text.empty()) {
+      notice_ = "nothing to copy";
+      return {};
+    }
     notice_ = std::format("copied {}", what);
     Action a;
     a.copy = std::move(text);
     return a;
   }
+  // The rows a selection spans now, first and last; none when one of its ends is not shown.
+  std::optional<std::pair<std::size_t, std::size_t>> row_range(const RowSel& r) const {
+    const auto rows = tree_.rows();
+    std::optional<std::size_t> a, b;
+    for (std::size_t i = 0; i < rows.size(); ++i) {
+      if (rows[i].node == r.anchor) a = i;
+      if (rows[i].node == r.end) b = i;
+    }
+    if (!a || !b) return std::nullopt;
+    return std::minmax(*a, *b);
+  }
   std::string rows_count(const RowSel& r) const {
-    const std::size_t n = (r.anchor > r.end ? r.anchor - r.end : r.end - r.anchor) + 1;
+    const auto range = row_range(r);
+    const std::size_t n = range ? range->second - range->first + 1 : 0;
     return std::format("{} row{}", n, n == 1 ? "" : "s");
   }
   // The pane's lines for the selected node, at the pane's width.
@@ -600,17 +652,18 @@ class Browser {
     const std::size_t hgt = list_height();
     return lines > hgt && hgt > 1 ? hgt - 1 : hgt;
   }
-  // The pane's point under the pointer; above or below the pane, the pane scrolls a line.
-  PanePoint pane_point(std::size_t x, std::size_t y) {
+  // The pane's point under the pointer; above or below the pane, while dragging (`scroll`), the
+  // pane scrolls a line.
+  PanePoint pane_point(std::size_t x, std::size_t y, bool scroll) {
     const std::size_t lines = pane_lines().size(), first = header_height() + 2, shown = pane_shown(lines);
     const std::size_t lw = left_width();
     PanePoint p;
     p.col = x > lw ? x - lw - 1 : 0;
     if (y < first) {
-      if (detail_scroll_ > 0) --detail_scroll_;
+      if (scroll && detail_scroll_ > 0) --detail_scroll_;
       p.line = detail_scroll_;
     } else if (y - first >= shown) {
-      if (detail_scroll_ + shown < lines) ++detail_scroll_;
+      if (scroll && detail_scroll_ + shown < lines) ++detail_scroll_;
       p.line = detail_scroll_ + shown - 1;
     } else {
       p.line = detail_scroll_ + (y - first);
@@ -627,10 +680,10 @@ class Browser {
       if (visual_) {
         clear_selection();
       } else if (pane_focused()) {
-        text_sel_ = TextSel{{detail_scroll_, 0}, {detail_scroll_, 0}, true};
+        text_sel_ = TextSel{{detail_scroll_, 0}, {detail_scroll_, 0}, true, selected_node().value_or(-1), pane_width()};
         visual_ = true;
       } else if (!rows.empty()) {
-        rows_sel_ = RowSel{cursor_, cursor_};
+        rows_sel_ = RowSel{rows[cursor_].node, rows[cursor_].node};
         visual_ = true;
       }
       return Action{};
@@ -680,8 +733,9 @@ class Browser {
   // shallowest.
   std::string rows_text(const RowSel& r) const {
     const auto rows = tree_.rows();
-    if (rows.empty()) return {};
-    const std::size_t lo = std::min({r.anchor, r.end, rows.size() - 1}), hi = std::min(std::max(r.anchor, r.end), rows.size() - 1);
+    const auto range = row_range(r);
+    if (!range) return {};
+    const auto [lo, hi] = *range;
     std::uint32_t base = rows[lo].depth;
     for (std::size_t i = lo; i <= hi; ++i) base = std::min(base, rows[i].depth);
     std::string out;
@@ -742,12 +796,12 @@ class Browser {
     else if (k == "\x1b[5~" || k == "\x02") detail_scroll_ = detail_scroll_ > page ? detail_scroll_ - page : 0;
     else if (k == "g" || k == "\x1b[H") detail_scroll_ = 0;
     else if (k == "G" || k == "\x1b[F") detail_scroll_ = std::numeric_limits<std::size_t>::max() / 2;
-    else if (k == "h" || k == "\x1b[D" || k == "\x1bOD" || k == "\x1b") focus_ = Focus::tree;
+    else if (k == "h" || k == "\x1b[D" || k == "\x1bOD" || k == "\x1b") focus_ = Focus::tree, clear_selection();
     else return false;
     return true;
   }
   void common_key(const std::string& k) {
-    if (k == "\t" || k == "t") view_ = view_ == View::tree ? View::timeline : View::tree;
+    if (k == "\t" || k == "t") view_ = view_ == View::tree ? View::timeline : View::tree, clear_selection();
     else if (k == "/") prompt_ = true, typed_ = filter_;
     else if (k == "?") help_ = true;
     else if (k == "v") detail_ = !detail_, focus_ = Focus::tree;
@@ -765,6 +819,7 @@ class Browser {
     else if (k.size() == 1 && std::isdigit(static_cast<unsigned char>(k[0]))) pick_worker(k[0] - '0');
     else if (k == "m") pick_worker(-1);
     else if (k == "r") {
+      clear_selection();
       const std::optional<std::int32_t> held = selected_node();
       tree_.set_hide_reused(!tree_.hide_reused());
       if (held) keep_selected(*held);
@@ -772,6 +827,7 @@ class Browser {
       // Start order, then most allocated in the subtree, most retained, longest first (#274).
       reorder(static_cast<Tree::Order>((std::to_underlying(tree_.order()) + 1) % Tree::order_count));
     } else if (k == "o") {
+      clear_selection();
       const std::optional<std::int32_t> held = selected_node();
       tree_.set_newest_first(!tree_.newest_first());
       if (held) keep_selected(*held);
@@ -787,7 +843,9 @@ class Browser {
     else if (k == "g" || k == "\x1b[H") cursor_ = 0;
     else if (k == "G" || k == "\x1b[F") cursor_ = rows.empty() ? 0 : rows.size() - 1;
     else if (rows.empty()) return;
-    else if (k == "\r" || k == " ") tree_.toggle(rows[cursor_].node);
+    if (k == "\r" || k == " " || k == "l" || k == "\x1b[C" || k == "\x1bOC" || k == "h" || k == "\x1b[D" || k == "\x1bOD" || k == "e" || k == "E")
+      clear_selection();  // folding moves rows between a selection's ends
+    if (k == "\r" || k == " ") tree_.toggle(rows[cursor_].node);
     else if (k == "l" || k == "\x1b[C" || k == "\x1bOC") tree_.set_expanded(rows[cursor_].node, true);
     else if (k == "h" || k == "\x1b[D" || k == "\x1bOD") collapse_or_parent(rows);
     else if (k == "e") tree_.expand_all(true);
@@ -821,6 +879,7 @@ class Browser {
       typed_ += k;
     }
     // Live: the view follows each keystroke.
+    clear_selection();
     filter_ = typed_;
     tree_.set_filter(filter_);
     cursor_ = 0;
@@ -891,6 +950,7 @@ class Browser {
     else pick_worker(std::nullopt);
   }
   void pick_worker(std::optional<std::int32_t> w) {
+    clear_selection();
     tree_.set_worker(w);
     cursor_ = 0;
     if (w) lane_ = Timeline::lane_of(*w);
@@ -1099,7 +1159,8 @@ class Browser {
     const std::size_t lw = left_width();
     std::vector<std::string> left{column_headers(spans)};
     std::size_t sel_lo = 1, sel_hi = 0;  // none
-    if (rows_sel_) sel_lo = std::min(rows_sel_->anchor, rows_sel_->end), sel_hi = std::max(rows_sel_->anchor, rows_sel_->end);
+    if (rows_sel_)
+      if (const auto r = row_range(*rows_sel_)) std::tie(sel_lo, sel_hi) = *r;
     for (std::size_t i = top_; i < rows.size() && left.size() <= hgt; ++i) {
       std::string line = tree_row(rows[i], spans);
       if (i == cursor_ || (i >= sel_lo && i <= sel_hi)) line = selected(fit(line, lw));
@@ -1136,8 +1197,12 @@ class Browser {
   std::vector<PaneLine> detail(const Tree::Node& n, std::size_t rw) const {
     const Event& e = n.ev;
     std::vector<PaneLine> out;
-    const auto add = [&](std::string s) { out.push_back({" " + std::move(s), false}); };
+    // Every line wraps at the pane's width, so a selection never covers text past its edge.
     const auto wrapped = [&](std::string_view text, std::string_view sgr) {
+      if (text.empty()) {
+        out.push_back({});
+        return;
+      }
       for (auto part : text | std::views::split('\n')) {
         bool first = true;
         for (const std::string& l : wrap(std::string_view(part.begin(), part.end()), rw)) {
@@ -1146,10 +1211,11 @@ class Browser {
         }
       }
     };
-    add(paint("1", e.kind));
+    const auto add = [&](std::string_view text) { wrapped(text, ""); };
+    wrapped(e.kind, "1");
     wrapped(e.key.empty() ? "(no key)" : e.key, "");
     add("");
-    add(paint(event_sgr(e), std::format("{} {}", outcome_glyph(e.outcome, true), outcome_name(e.outcome))));
+    wrapped(std::format("{} {}", outcome_glyph(e.outcome, true), outcome_name(e.outcome)), event_sgr(e));
     wrapped(outcome_meaning(e.outcome), "2");
     add("");
     add(std::format("started  {}", format_duration(e.start_ns)));
@@ -1157,11 +1223,11 @@ class Browser {
     add(std::format("worker   {}", format_workers(e)));
     add(std::format("depth    {}", e.depth));
     add(std::format("below    {} cells, {} ran", n.subtree - 1, ran_below(n)));
-    if (n.parent >= 0) add("for      " + paint("2", cell_name(tree_.node(n.parent).ev)));
+    if (n.parent >= 0) add("for      " + cell_name(tree_.node(n.parent).ev));
     add("");
     // Memory (#274): this frame's own, its subtree's, and what the cell retains.
     if (e.alloc_bytes > 0 || n.incl.alloc > 0 || e.retained_bytes != 0) {
-      add(paint("1;4", "memory"));
+      wrapped("memory", "1;4");
       add(std::format("alloc    {} in {} allocations", format_bytes(static_cast<std::int64_t>(e.alloc_bytes)), e.allocs));
       add(std::format("peak     {}", format_bytes(e.peak_bytes)));
       add(std::format("retains  {}", format_bytes(e.retained_bytes)));
@@ -1169,15 +1235,15 @@ class Browser {
       add("");
     }
     if (!e.errors.empty()) {
-      add(paint("1;4;31", "errors"));
+      wrapped("errors", "1;4;31");
       wrapped(e.errors, error_sgr);
       add("");
     }
     if (!e.value.empty()) {
-      add(paint("1;4", "value"));
+      wrapped("value", "1;4");
       wrapped(e.value, "");
     } else {
-      out.push_back({paint("2", " no value shown for this kind"), false});
+      wrapped("no value shown for this kind", "2");
     }
     return out;
   }
@@ -1307,6 +1373,8 @@ class Browser {
   std::optional<RowSel> rows_sel_;
   std::optional<TextSel> text_sel_;
   bool visual_ = false;  // V: the keys extend the selection
+  std::optional<Mouse> last_drag_;  // where the pointer was last seen in a drag
+  bool past_edge_ = false;          // and that was past the edge of what it selects in
   std::string notice_;   // `copied …`, until the next input
   std::optional<Press> last_press_;
 };

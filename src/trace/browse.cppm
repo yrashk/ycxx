@@ -4,6 +4,7 @@
 module;
 #include <errno.h>
 #include <fcntl.h>
+#include <poll.h>
 #include <signal.h>
 #include <sys/ioctl.h>
 #include <sys/select.h>
@@ -172,10 +173,11 @@ class Terminal {
     write(out);
   }
 
-  enum class Wake : std::uint8_t { input, feed, resize };
+  enum class Wake : std::uint8_t { input, feed, resize, tick };
   // Waits for the terminal, the feed or a resize. select, not poll: macOS's poll does not support
   // devices, and flags the terminal invalid.
-  Wake wait(int feed) const {
+  // `tick`: after that long with nothing to read (none: wait however long).
+  Wake wait(int feed, std::optional<std::chrono::milliseconds> tick = std::nullopt) const {
     if (pending_) return Wake::input;
     const int winch = restore_state.winch[0];
     while (true) {
@@ -184,7 +186,10 @@ class Terminal {
       FD_SET(fd_, &in);
       if (feed >= 0) FD_SET(feed, &in);
       if (winch >= 0) FD_SET(winch, &in);
-      if (::select(std::max({fd_, feed, winch}) + 1, &in, nullptr, nullptr, nullptr) < 0) continue;
+      timeval tv{0, tick ? static_cast<suseconds_t>(tick->count() * 1000) : 0};
+      const int r = ::select(std::max({fd_, feed, winch}) + 1, &in, nullptr, nullptr, tick ? &tv : nullptr);
+      if (r < 0) continue;
+      if (r == 0) return Wake::tick;
       if (winch >= 0 && FD_ISSET(winch, &in)) {
         char drain[64];
         while (::read(winch, drain, sizeof drain) > 0) {
@@ -297,7 +302,9 @@ bool run_clipboard(const std::string& command, std::string_view text) {
     return false;
   }
   if (pid == 0) {
-    // Only async-signal-safe calls between fork and exec: the parent may have threads.
+    // Only async-signal-safe calls between fork and exec: the parent may have threads. A process
+    // group of its own, so a timeout reaches whatever the command started.
+    ::setpgid(0, 0);
     ::dup2(in[0], 0);
     ::close(in[0]);
     ::close(in[1]);
@@ -306,25 +313,40 @@ bool run_clipboard(const std::string& command, std::string_view text) {
     ::execl("/bin/sh", "sh", "-c", command.c_str(), static_cast<char*>(nullptr));
     ::_exit(127);
   }
+  ::setpgid(pid, pid);  // as the child does: whichever runs first
   ::close(in[0]);
+  // Everything within 2 s, the writing too: a command that does not read never holds the browser.
+  const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+  const auto left_ms = [&] {
+    return static_cast<int>(std::max<std::int64_t>(0, std::chrono::duration_cast<std::chrono::milliseconds>(until - std::chrono::steady_clock::now()).count()));
+  };
   // A command that stops reading must not kill the browser with SIGPIPE.
   struct sigaction ignore{}, old{};
   ignore.sa_handler = SIG_IGN;
   ::sigaction(SIGPIPE, &ignore, &old);
+  ::fcntl(in[1], F_SETFL, ::fcntl(in[1], F_GETFL) | O_NONBLOCK);
+  bool written = true;
   for (std::string_view rest = text; !rest.empty();) {
     const auto n = ::write(in[1], rest.data(), rest.size());
+    if (n > 0) {
+      rest.remove_prefix(static_cast<std::size_t>(n));
+      continue;
+    }
     if (n < 0 && errno == EINTR) continue;
-    if (n <= 0) break;
-    rest.remove_prefix(static_cast<std::size_t>(n));
+    pollfd p{in[1], POLLOUT, 0};
+    if (n < 0 && errno == EAGAIN && left_ms() > 0 && ::poll(&p, 1, left_ms()) > 0) continue;
+    written = false;
+    break;
   }
   ::close(in[1]);
   ::sigaction(SIGPIPE, &old, nullptr);
   int status = 0;
-  for (int i = 0; i < 200; ++i) {
-    if (::waitpid(pid, &status, WNOHANG) == pid) return WIFEXITED(status) && WEXITSTATUS(status) == 0;
+  while (true) {
+    if (::waitpid(pid, &status, WNOHANG) == pid) return written && WIFEXITED(status) && WEXITSTATUS(status) == 0;
+    if (left_ms() == 0) break;
     ::usleep(10'000);
   }
-  ::kill(pid, SIGKILL);
+  ::kill(-pid, SIGKILL);
   ::waitpid(pid, &status, 0);
   return false;
 }
@@ -341,8 +363,11 @@ bool browse(Tree& tree, Feed* feed) {
     const auto [rows, cols] = term.size();
     b.resize(rows, cols);
     term.draw(b.frame());
-    switch (term.wait(feed ? feed->fd : -1)) {
+    switch (term.wait(feed ? feed->fd : -1, b.ticking() ? std::optional(Browser::tick_every) : std::nullopt)) {
       case Terminal::Wake::resize: continue;
+      case Terminal::Wake::tick:
+        b.tick();
+        continue;
       case Terminal::Wake::feed:
         if (!b.pump(feed->pump)) feed = nullptr;
         continue;

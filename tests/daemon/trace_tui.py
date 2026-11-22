@@ -177,7 +177,7 @@ def main(ycxx):
         t.send(f'\x1b[<0;10;{y}M\x1b[<32;10;{y + 1}M\x1b[<32;10;{y + 2}M\x1b[<0;10;{y + 2}m'.encode())
         check(t.read_until(lambda o: (osc52_last(o) or '').count('\n') == 3, timeout=10), f'a drag over three rows copies three lines: {osc52_last(t.out)!r}')
         rows = osc52_last(t.out) or ''
-        t.read_until(lambda o: any('copied 3 rows' in l for l in plain_lines(Tui.frame_of(o))), timeout=5)
+        check(t.read_until(lambda o: any('copied 3 rows' in l for l in plain_lines(Tui.frame_of(o))), timeout=5), 'the status line says 3 rows')
         check(rows.startswith('* Build(') and clip.read_text() == rows, f'as the stream prints them: {rows[:60]!r}')
     # A resize redraws at once, at the new width. The last frame is read whole first, so what
     # follows the mark can only be a redraw.
@@ -194,6 +194,22 @@ def main(ycxx):
     check(os.WIFEXITED(status) and os.WEXITSTATUS(status) == 0, f'q quits (status {status})')
     tail = t.out[t.out.rfind(b'\x1b[?1006l'):] if b'\x1b[?1006l' in t.out else b''
     check(b'\x1b[?1000l' in tail and b'\x1b[?7h' in tail and b'\x1b[?1049l' in tail, 'mouse reports and autowrap back as they were, and the main screen')
+
+    # A clipboard command that never reads holds the browser 2 s at most, and is killed with what it
+    # started.
+    marker = scope / 'stuck.txt'
+    # A subshell outlives a kill of `sh` alone: only killing the process group stops its `touch`.
+    t = Tui(ycxx, scope, dict(env, YCXX_CLIPBOARD=f'(sleep 3; touch {marker}) & wait'))
+    check(t.read_until(lambda o: b'ycxx engine trace' in o), 'the browser draws (a stuck clipboard command)')
+    began = time.time()
+    t.send(b'Y')
+    check(t.read_until(lambda o: any('copied the subtree' in l and '(OSC 52)' in l for l in plain_lines(Tui.frame_of(o))), timeout=10),
+          'a command that never reads: the copy goes through OSC 52 alone')
+    check(time.time() - began < 5, f'and the browser waited at most about 2 s ({time.time() - began:.1f} s)')
+    t.send(b'q')
+    t.wait()
+    time.sleep(3)
+    check(not marker.exists(), 'the command was killed, with what it started')
 
     for sig in (signal.SIGTERM, signal.SIGABRT):
         t = Tui(ycxx, scope, env)
