@@ -107,13 +107,26 @@ struct RunStats {
   engine::Stats engine;
 };
 
+// Optional process-test checkpoint, after the pooled Build has read and analysed its sources.
+using BuildCheckpoint = std::function<void(std::string_view, std::inplace_stop_token)>;
+
 class Session {
  public:
   // A session whose queries run on `pool`'s workers, each bound to this session's universe (#137).
   // The pool serves this session only, for as long as it lives.
-  explicit Session(engine::Pool& pool) : db_(pool), pool_(&pool) {
-    scope_ = {this, [](void* self) noexcept { bind_thread(&static_cast<Session*>(self)->universe_); },
-              [] noexcept { bind_thread(nullptr); }};
+  explicit Session(engine::Pool& pool, BuildCheckpoint checkpoint = {})
+      : db_(pool), pool_(&pool), checkpoint_(std::move(checkpoint)) {
+    scope_ = {
+        this,
+        [](void* self) noexcept {
+          auto& s = *static_cast<Session*>(self);
+          bind_thread(&s.universe_);
+          worker_checkpoint_ = s.checkpoint_ ? &s.checkpoint_ : nullptr;
+        },
+        [] noexcept {
+          bind_thread(nullptr);
+          worker_checkpoint_ = nullptr;
+        }};
     pool.claim_scope(&scope_);
     epochs_ = std::make_unique<engine::Epochs>(db_);
     init();
@@ -372,6 +385,8 @@ class Session {
   ast::Interners& interners() { return ins_; }
 
  private:
+  friend struct Build;
+  inline static thread_local const BuildCheckpoint* worker_checkpoint_ = nullptr;
   ast::Interners ins_;
   sema::World world_{ins_};
   sema::World linux_world_{ins_, ast::x86_64_linux};
@@ -380,6 +395,7 @@ class Session {
   Universe universe_{&ins_, &consts_, &ast::aarch64_darwin, &world_, &units_, &linux_world_};
   engine::Db db_;
   engine::Pool* pool_ = nullptr;
+  BuildCheckpoint checkpoint_;
   engine::Pool::Scope scope_;
   std::unique_ptr<engine::Epochs> epochs_;  // with a pool
   std::atomic<std::size_t> in_flight_{0}, peak_in_flight_{0};
@@ -406,9 +422,11 @@ engine::query_task<Built> Build::run(engine::Ctx& cx, RequestId r) {
   Built out;
   bool all = true;
   // Check each main file in this revision (the file table's, in the daemon).
+  const pp::Source* first = nullptr;
   std::vector<TuId> readable;
   for (TuId tu : k.units) {
     const pp::Source& src = cx.fetch<pp::SourceOf>(pp::FileId{tu.n});
+    if (!first) first = &src;
     UnitBuilt& u = out.units.emplace_back();
     u.readable = source_content(cx, src, src.path).has_value();
     if (u.readable) readable.push_back(tu);
@@ -424,6 +442,10 @@ engine::query_task<Built> Build::run(engine::Ctx& cx, RequestId r) {
       u.front_failed = f.has_errors();
       all = all && !f.has_errors();
     }
+  }
+  if (const auto* checkpoint = Session::worker_checkpoint_; checkpoint && first) {
+    (*checkpoint)(first->path, cx.stop_token());
+    co_await cx.stop_point();
   }
   if (k.until == Until::syntax) co_return out;
   std::vector<TuId> compiled;
