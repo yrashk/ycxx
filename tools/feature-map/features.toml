@@ -2334,7 +2334,7 @@ clauses = ['dcl.constexpr', 'expr.const', 'expr.const.general', 'expr.const.core
 std = 'C++11'
 ftm = '__cpp_constexpr'
 detect = '\bconstexpr\b'
-issues = [102, 157, 262, 862, 876]
+issues = [102, 157, 262, 862, 876, 900]
 probe = '''
 constexpr int fact(int n) { int r = 1; for (int i = 2; i <= n; ++i) r *= i; return r; }
 struct P { int x; constexpr P(int v) : x(v) {} };
@@ -2343,7 +2343,7 @@ static_assert(p.x == 24);
 int main() { return 0; }
 '''
 status = 'partial'
-note = '`constexpr` constructor declarations, runtime calls, scalar enum constant evaluation, and constant initialization of flat static aggregate members work. Direct-list initializers cover aggregates of public integral fields in non-template namespace-scope classes without bases. Constant expressions can read non-mutable integral and enumeration fields of supported flat namespace-scope constexpr aggregates. Class-typed constant evaluation is partial.'
+note = '`constexpr` constructor declarations, runtime calls, scalar enum constant evaluation, and constant initialization of flat static aggregate members work. Direct-list initializers cover aggregates of public integral fields in non-template namespace-scope classes without bases. Constant expressions can read integral and enumeration fields of supported flat aggregate temporaries and non-mutable fields of stored namespace-scope constexpr aggregates. Class-typed constant evaluation is partial.'
 
 [[feature]]
 id = 'const-consteval'
