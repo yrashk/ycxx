@@ -5561,6 +5561,10 @@ public:
         return !types().rec(type).fn_noexcept;
       }
       if (node.is<ast::MemberCall>()) return function_throwing(node.get<ast::MemberCall>().function);
+      if (node.is<ast::ExplicitDestroy>()) {
+        const auto receiver = expression_info(node.get<ast::ExplicitDestroy>().object.id).type;
+        return destructor_throwing(types().pointee(receiver), node.offset());
+      }
       if (node.is<ast::AssignmentCall>()) return function_throwing(node.get<ast::AssignmentCall>().function);
       if (node.is<ast::CtorCall>()) return function_throwing(node.get<ast::CtorCall>().ctor);
       if (node.is<ast::DeleteObject>()) return function_throwing(node.get<ast::DeleteObject>().function);

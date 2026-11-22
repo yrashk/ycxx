@@ -1287,6 +1287,8 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
 - The receiver is evaluated once. The IR calls the selected destructor when it is
   nontrivial and ends the object's lifetime without releasing storage. A trivial destructor
   still ends the lifetime. The native peer test controls the lifetime of each variant member.
+- A dependent class name works in instantiated free functions and class template members.
+  Unary `noexcept` accounts for the effective exception specification of the selected destructor.
 
 ## Classes, δ step 4b: namespaces (#86, 2026-11-18)
 
