@@ -61,6 +61,15 @@ ordered lookup by canonical type and entity. A fragment can be shared across hea
 inactive. Registry and body results are engine queries. A source edit that leaves the normalized
 registry equal can reuse checks for unchanged bodies.
 
+A single checked build combines the active policies of its source inputs before checking the
+bodies in those inputs. For example, one source can register an externally linked resource
+declared in a common header, a second can register its operations, and a third can call them.
+The compiler resolves each entry in the scope where it was declared and validates operation
+signatures after collecting the resource declarations. Internal-linkage operations apply in
+their own translation unit. Diagnostic origins identify the source input as well as the
+declaration within it, so conflicts can point to both inputs. Separate compiler invocations
+have separate registries until verified object summaries are available.
+
 The first contract vocabulary covers creation, observation, transfer, and terminal consumption.
 Extend it with parameter and result positions, receiver effects, borrow lifetimes, and outcomes as
 adapters need them. Registry validation checks signatures, resolves conflicting contracts, and

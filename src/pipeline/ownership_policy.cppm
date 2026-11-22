@@ -32,15 +32,35 @@ struct OwnershipAnnotationSite {
   ast::Loc at;
 };
 
-struct OwnershipPolicyProblem {
+struct OwnershipOrigin {
+  ast::u32 unit;
   ast::Loc at;
+};
+
+struct OwnershipPolicyProblem {
+  OwnershipOrigin origin;
   std::string message;
-  std::optional<ast::Loc> previous{};
+  std::optional<OwnershipOrigin> previous{};
+};
+
+// An internal-linkage declaration in a shared header can have the same entity handle in
+// several inputs. Its policy applies to the function in the input that activated it.
+using OwnershipOperation = std::pair<EntityId, std::optional<ast::u32>>;
+
+OwnershipOperation ownership_operation(const sema::World& world, EntityId entity, ast::u32 unit) {
+  const auto* declaration = world.entities.find(entity);
+  return {entity, declaration && declaration->linkage == ast::Linkage::internal ? std::optional(unit) : std::nullopt};
+}
+
+struct OwnershipDeclarations {
+  std::vector<std::tuple<QualType, Ownership, OwnershipOrigin>> resources;
+  std::vector<std::tuple<OwnershipOperation, OwnershipEffect, OwnershipOrigin>> operations;
+  std::vector<OwnershipPolicyProblem> problems;
 };
 
 struct OwnershipPolicy {
   std::vector<std::pair<QualType, Ownership>> resources;
-  std::vector<std::pair<EntityId, OwnershipEffect>> operations;
+  std::vector<std::pair<OwnershipOperation, OwnershipEffect>> operations;
 
   Ownership ownership(QualType canonical) const {
     const auto type = ast::without_cv(canonical);
@@ -48,15 +68,15 @@ struct OwnershipPolicy {
     return it != resources.end() && it->first == type ? it->second : Ownership::ordinary;
   }
 
-  OwnershipEffect effect(EntityId entity) const {
-    const auto it = std::ranges::lower_bound(operations, entity, std::ranges::less{}, &decltype(operations)::value_type::first);
-    return it != operations.end() && it->first == entity ? it->second : OwnershipEffect::unknown;
+  OwnershipEffect effect(OwnershipOperation operation) const {
+    const auto it = std::ranges::lower_bound(operations, operation, std::ranges::less{}, &decltype(operations)::value_type::first);
+    return it != operations.end() && it->first == operation ? it->second : OwnershipEffect::unknown;
   }
 };
 
 struct OwnershipRegistry {
   OwnershipPolicy policy;
-  std::vector<OwnershipPolicyProblem> problems;
+  std::map<ast::u32, std::vector<OwnershipPolicyProblem>> problems;
 };
 
 namespace {
@@ -166,29 +186,24 @@ bool is_ownership_annotation(const sema::World& world, QualType type) {
   return annotation_kind(world, type) != AnnotationKind::other;
 }
 
-OwnershipRegistry read_ownership_policies(const sema::World& world, std::span<const OwnershipPolicySite> sites,
-                                          std::span<const OwnershipAnnotationSite> annotations) {
-  OwnershipRegistry out;
-  std::map<QualType, std::pair<Ownership, ast::Loc>> resources;
-  std::map<EntityId, std::pair<OwnershipEffect, ast::Loc>> operations;
+OwnershipDeclarations read_ownership_policies(const sema::World& world, ast::u32 unit,
+                                              std::span<const OwnershipPolicySite> sites,
+                                              std::span<const OwnershipAnnotationSite> annotations) {
+  OwnershipDeclarations out;
   std::map<EntityId, ast::Loc> definitions;
   std::set<EntityId> seen;
   std::vector<std::pair<EntityId, ast::Loc>> pending;
   for (const auto& site : sites) definitions.try_emplace(site.declaration.entity, site.at);
   for (const auto& site : std::views::reverse(sites))
     if (site.declaration.active) pending.emplace_back(site.declaration.entity, site.at);
-  auto report = [&](ast::Loc at, std::string message, std::optional<ast::Loc> first = {}) {
-    out.problems.push_back({at, std::move(message), first});
+  auto report = [&](ast::Loc at, std::string message) {
+    out.problems.push_back({{unit, at}, std::move(message)});
   };
   auto resource = [&](QualType type, Ownership mode, ast::Loc at) {
-    const auto [it, fresh] = resources.try_emplace(type, mode, at);
-    if (!fresh && it->second.first != mode)
-      report(at, std::format("conflicting ownership policies for '{}'", world.types.spell(type)), it->second.second);
+    out.resources.emplace_back(type, mode, OwnershipOrigin{unit, at});
   };
   auto operation = [&](EntityId entity, OwnershipEffect effect, ast::Loc at) {
-    const auto [it, fresh] = operations.try_emplace(entity, effect, at);
-    if (!fresh && it->second.first != effect)
-      report(at, "conflicting contracts for an ownership operation", it->second.second);
+    out.operations.emplace_back(ownership_operation(world, entity, unit), effect, OwnershipOrigin{unit, at});
   };
   for (const auto& annotation : annotations) {
     const auto kind = annotation_kind(world, annotation.annotation_type);
@@ -249,11 +264,35 @@ OwnershipRegistry read_ownership_policies(const sema::World& world, std::span<co
     }
     operation(*function, effect_of(kind), at);
   }
+  return out;
+}
+
+OwnershipRegistry compose_ownership_policies(const sema::World& world,
+                                            std::span<const std::reference_wrapper<const OwnershipDeclarations>> fragments) {
+  OwnershipRegistry out;
+  std::map<QualType, std::pair<Ownership, OwnershipOrigin>> resources;
+  std::map<OwnershipOperation, std::pair<OwnershipEffect, OwnershipOrigin>> operations;
+  auto report = [&](OwnershipOrigin origin, std::string message, std::optional<OwnershipOrigin> previous = {}) {
+    out.problems[origin.unit].push_back({origin, std::move(message), previous});
+  };
+  for (const OwnershipDeclarations& fragment : fragments) {
+    for (const auto& problem : fragment.problems) out.problems[problem.origin.unit].push_back(problem);
+    for (const auto& [type, mode, origin] : fragment.resources) {
+      const auto [it, fresh] = resources.try_emplace(type, mode, origin);
+      if (!fresh && it->second.first != mode)
+        report(origin, std::format("conflicting ownership policies for '{}'", world.types.spell(type)), it->second.second);
+    }
+    for (const auto& [operation, effect, origin] : fragment.operations) {
+      const auto [it, fresh] = operations.try_emplace(operation, effect, origin);
+      if (!fresh && it->second.first != effect)
+        report(origin, "conflicting contracts for an ownership operation", it->second.second);
+    }
+  }
   for (const auto& [type, spec] : resources) out.policy.resources.emplace_back(type, spec.first);
-  for (const auto& [entity, spec] : operations) {
-    if (!compatible(world, out.policy, entity, spec.first))
+  for (const auto& [operation, spec] : operations) {
+    if (!compatible(world, out.policy, operation.first, spec.first))
       report(spec.second, "ownership operation signature does not match its contract and registered resource");
-    else out.policy.operations.emplace_back(entity, spec.first);
+    else out.policy.operations.emplace_back(operation, spec.first);
   }
   return out;
 }

@@ -456,10 +456,14 @@ engine::query_task<Built> Build::run(engine::Ctx& cx, RequestId r) {
     co_await cx.stop_point();
   }
   if (k.check_policies) {
-    std::vector<TuId> checked;
+    std::vector<ast::u32> checked;
     for (std::size_t i = 0; i < k.units.size(); ++i)
-      if (out.units[i].readable && !out.units[i].front_failed) checked.push_back(k.units[i]);
-    const auto results = co_await cx.par_map<CheckPolicies>(checked);
+      if (out.units[i].readable && !out.units[i].front_failed) checked.push_back(k.units[i].n);
+    const auto sources = universe().in->intern_seq<ast::u32>(checked);
+    const auto units = checked | std::views::transform([sources](ast::u32 unit) {
+      return OwnershipCheckUnit{sources, TuId{unit}};
+    });
+    const auto results = co_await cx.par_map<CheckPolicies>(units);
     std::size_t j = 0;
     for (UnitBuilt& u : out.units) {
       if (!u.readable || u.front_failed) continue;
@@ -468,6 +472,8 @@ engine::query_task<Built> Build::run(engine::Ctx& cx, RequestId r) {
       u.front_failed = !messages.empty();
       all = all && !u.front_failed;
     }
+    // A failed input can withhold part of the policy used to check every other input.
+    if (!all) co_return out;
   }
   if (k.until == Until::syntax) co_return out;
   std::vector<TuId> compiled;

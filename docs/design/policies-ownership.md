@@ -18,6 +18,10 @@ query on the typed body, local table, and signature returns an item-relative fin
 unit query renders it at the source revision's position. The opt-in belongs to the build request,
 so checked and ordinary requests can reuse the same frontend results.
 
+To combine annotations or active policy fragments from several translation units, pass their
+sources together, such as `ycxx cxx -fcheck-policies -fsyntax-only contracts.cpp caller.cpp`.
+All source inputs in that invocation see the combined contracts for externally linked entities.
+
 The same flag checks `examples/affine/transaction.hpp`. `begin()` creates a linear `Transaction`.
 `transfer(Transaction&&)` moves its obligation into a new named local. `commit(Transaction&&)`
 and `rollback(Transaction&&)` discharge it. An affine permit may go out of scope live. A linear

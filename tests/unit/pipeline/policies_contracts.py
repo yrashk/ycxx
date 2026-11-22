@@ -21,8 +21,9 @@ with tempfile.TemporaryDirectory() as directory:
         path.write_text(textwrap.dedent(source))
         return path
 
-    def syntax(path, error=None):
-        args = [compiler, "cxx", "--no-daemon", "-fcheck-policies", "-fsyntax-only", "-I", include, "-I", examples, str(path)]
+    def syntax(*paths, error=None):
+        args = [compiler, "cxx", "--no-daemon", "-fcheck-policies", "-fsyntax-only",
+                "-I", include, "-I", examples, *map(str, paths)]
         result = subprocess.run(args, text=True, capture_output=True, timeout=90)
         if error is None:
             assert result.returncode == 0, (args, result.stderr)
@@ -68,7 +69,7 @@ with tempfile.TemporaryDirectory() as directory:
           auto ticket = checkout::acquire();
           checkout::submit(42);
         }
-    """), "linear resource 'ticket' may leave its scope")
+    """), error="linear resource 'ticket' may leave its scope")
     syntax(write("inactive.cpp", """\
         #include "resource.hpp"
         void inactive() { checkout::acquire(); }
@@ -76,13 +77,80 @@ with tempfile.TemporaryDirectory() as directory:
     conflict = syntax(write("conflict.cpp", """\
         #include "operations.hpp"
         using CompetingPolicy = ycxx::ownership::use_policy<ycxx::ownership::affine<checkout::Ticket>>;
-    """), "conflicting ownership policies")
+    """), error="conflicting ownership policies")
     assert "conflict.cpp:2:" in conflict and "previous declaration at" in conflict and "resource.hpp:" in conflict, conflict
     syntax(write("bad_signature.cpp", """\
         #include "resource.hpp"
         using Invalid = checkout::own::use_policy<checkout::Resource,
             checkout::own::consumes<decltype(&checkout::acquire), &checkout::acquire>>;
-    """), "ownership operation signature does not match")
+    """), error="ownership operation signature does not match")
+
+    mode = write("mode.cpp", """\
+        #include "resource.hpp"
+        using Mode = checkout::own::use_policy<checkout::Resource>;
+    """)
+    operations = write("operations.cpp", """\
+        #include "resource.hpp"
+        namespace checkout {
+        [[=own::operation::creates]] Ticket acquire() noexcept;
+        using Submit = void (*)(Ticket&&) noexcept;
+        using Terminal = own::use_policy<own::consumes<Submit, static_cast<Submit>(&submit)>>;
+        }
+    """)
+    caller = write("caller.cpp", """\
+        #include "resource.hpp"
+        void run() {
+          auto ticket = checkout::acquire();
+          checkout::submit(static_cast<checkout::Ticket&&>(ticket));
+        }
+    """)
+    syntax(operations, error="ownership operation signature does not match")
+    syntax(mode, operations, caller)
+    syntax(caller, operations, mode)
+    omission = write("omission.cpp", """\
+        #include "resource.hpp"
+        void run() { auto ticket = checkout::acquire(); }
+    """)
+    syntax(omission)
+    diagnostic = syntax(mode, operations, omission, error="linear resource 'ticket' may leave its scope")
+    assert "omission.cpp:2:" in diagnostic, diagnostic
+    competing_mode = write("competing_mode.cpp", """\
+        #include "resource.hpp"
+        using CompetingMode = checkout::own::use_policy<checkout::own::affine<checkout::Ticket>>;
+    """)
+    diagnostic = syntax(mode, competing_mode, error="conflicting ownership policies")
+    assert "competing_mode.cpp:2:" in diagnostic and "previous declaration at" in diagnostic and "resource.hpp:" in diagnostic, diagnostic
+    competing_operation = write("competing_operation.cpp", """\
+        #include "resource.hpp"
+        namespace checkout {
+        [[=own::operation::transfers]] void submit(Ticket&&) noexcept;
+        }
+    """)
+    diagnostic = syntax(mode, operations, competing_operation, error="conflicting contracts for an ownership operation")
+    assert "competing_operation.cpp:3:" in diagnostic and "previous declaration at" in diagnostic and "operations.cpp:5:" in diagnostic, diagnostic
+    rejected = subprocess.run([compiler, "cxx", "--no-daemon", "-fcheck-policies", "-c",
+                               "-I", include, *map(str, (mode, operations, competing_operation, caller))],
+                              cwd=root, text=True, capture_output=True, timeout=30)
+    assert rejected.returncode == 1 and "conflicting contracts" in rejected.stderr, rejected.stderr
+    assert not list(root.glob("*.o")), list(root.glob("*.o"))
+
+    # A static function in a header has a separate contract in each translation unit.
+    write("private_submit.hpp", """\
+        #include "resource.hpp"
+        static void private_submit(checkout::Ticket&&) noexcept;
+    """)
+    private_contract = write("private_contract.cpp", """\
+        #include "private_submit.hpp"
+        using Terminal = checkout::own::use_policy<checkout::own::consumes<decltype(&private_submit), &private_submit>>;
+    """)
+    private_caller = write("private_caller.cpp", """\
+        #include "private_submit.hpp"
+        void run() {
+          auto ticket = checkout::acquire();
+          private_submit(static_cast<checkout::Ticket&&>(ticket));
+        }
+    """)
+    syntax(mode, operations, private_contract, private_caller, error="outside the checked protocol")
 
     # More than a thousand distinct resources in separately reusable groups. The last one has a
     # real obligation so the fixture fails if normalization silently drops the tail of the set.
@@ -108,7 +176,7 @@ with tempfile.TemporaryDirectory() as directory:
         }}
         }}
     """)
-    syntax(large, "affine resource 'last' may already have been consumed")
+    syntax(large, error="affine resource 'last' may already have been consumed")
 
     annotated_source = """\
         #include <ycxx/ownership.hpp>
@@ -124,7 +192,7 @@ with tempfile.TemporaryDirectory() as directory:
     close = "close(static_cast<Receipt&&>(receipt));"
     syntax(write("annotated_good.cpp", annotated_source.replace("CLOSE_CALL", close)))
     syntax(write("annotated_missing.cpp", annotated_source.replace("CLOSE_CALL", "")),
-           "linear resource 'receipt' may leave its scope")
+           error="linear resource 'receipt' may leave its scope")
     syntax(write("agree.cpp", annotated_source.replace("CLOSE_CALL", close) + """\
         using ReceiptRules = own::policy<own::linear<Receipt>, own::consumes<decltype(&close), &close>>;
         struct ReceiptSelection { using Active = own::use_policy<ReceiptRules>; };
@@ -132,7 +200,7 @@ with tempfile.TemporaryDirectory() as directory:
     """))
     disagreement = syntax(write("disagree.cpp", annotated_source.replace("CLOSE_CALL", close) + """\
         using OtherMode = own::use_policy<own::affine<Receipt>>;
-    """), "conflicting ownership policies for 'Receipt'")
+    """), error="conflicting ownership policies for 'Receipt'")
     assert "disagree.cpp:10:" in disagreement and "previous declaration at" in disagreement, disagreement
     syntax(write("attribute_activation.cpp", """\
         #include <ycxx/ownership.hpp>
@@ -143,42 +211,51 @@ with tempfile.TemporaryDirectory() as directory:
         struct ReceiptSelection { using Active = own::use_policy<Rules>; };
         struct [[=ReceiptSelection::Active{}]] Activate {};
         void run() { auto receipt = open(); }
-    """), "linear resource 'receipt' may leave its scope")
+    """), error="linear resource 'receipt' may leave its scope")
 
     # A policy-only edit must invalidate body proofs when its meaning changes and preserve
     # them when it only changes the spelling of the active policy composition.
-    policy_source = """\
+    write("incremental.hpp", """\
+        #pragma once
         #include <ycxx/ownership.hpp>
         namespace own = ycxx::ownership;
         struct Handle { int value; };
         Handle acquire() noexcept;
+    """)
+    policy_source = """\
+        #include "incremental.hpp"
         using Fragment = own::policy<own::affine<Handle>, own::creates<decltype(&acquire), &acquire>>;
         using Enabled = own::use_policy<Fragment>;
-        void run() { auto handle = acquire(); }
     """
-    incremental = write("incremental.cpp", policy_source)
+    rules = write("incremental_rules.cpp", policy_source)
+    incremental = write("incremental.cpp", """\
+        #include "incremental.hpp"
+        void run() { auto handle = acquire(); }
+    """)
     with tempfile.TemporaryDirectory(prefix="ycp-", dir="/tmp") as sockets:
         env = {k: v for k, v in os.environ.items() if k not in ("YCXX_DAEMON", "YCXX_NO_DAEMON")}
         env.update(YCXX_RUNTIME_DIR=sockets, YCXX_ROOT=str(root), YCXX_THREADS="2")
 
-        def resident(*options):
+        def resident(*options, sources=(rules, incremental)):
             return subprocess.run([compiler, "cxx", "--daemon=require", "-fcheck-policies", "-fsyntax-only",
-                                   "-I", include, *options, str(incremental)], cwd=root, env=env,
+                                   "-I", include, *options, *map(str, sources)], cwd=root, env=env,
                                   text=True, capture_output=True, timeout=30)
 
         try:
             first = resident("--trace-engine=json")
             assert first.returncode == 0, first.stderr
             assert any(json.loads(line).get("kind") == "BuildOwnershipFlow" for line in first.stderr.splitlines())
-            write("incremental.cpp", policy_source.replace("use_policy<Fragment>", "use_policy<Fragment, Fragment>"))
+            write("incremental_rules.cpp", policy_source.replace("use_policy<Fragment>", "use_policy<Fragment, Fragment>"))
             repeated = resident("--trace-engine=json")
             assert repeated.returncode == 0, repeated.stderr
             assert not any(record.get("kind") == "BuildOwnershipFlow" and record.get("outcome") in ("executed", "cutoff")
                            for record in map(json.loads, repeated.stderr.splitlines())), repeated.stderr
-            write("incremental.cpp", policy_source.replace("own::affine<Handle>", "own::linear<Handle>"))
+            write("incremental_rules.cpp", policy_source.replace("own::affine<Handle>", "own::linear<Handle>"))
             changed = resident()
-            cold = syntax(incremental, "linear resource 'handle' may leave its scope")
+            cold = syntax(rules, incremental, error="linear resource 'handle' may leave its scope")
             assert changed.returncode == 1 and changed.stderr == cold, (changed.stderr, cold)
+            single = resident(sources=(incremental,))
+            assert single.returncode == 0, single.stderr
         finally:
             subprocess.run([compiler, "ctl", "shutdown"], cwd=root, env=env, capture_output=True, timeout=10)
 
@@ -201,7 +278,7 @@ with tempfile.TemporaryDirectory() as directory:
           if (argc == 4) example::finish(static_cast<example::Work&&>(second));
         }
     """)
-    syntax(runtime, "linear resource 'first' may leave its scope")
+    syntax(runtime, error="linear resource 'first' may leave its scope")
     executable = root / "portable"
     subprocess.run([host, "-std=c++20", "-I", include, "-I", examples, str(runtime), "-o", str(executable)], check=True, timeout=30)
     resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
@@ -212,6 +289,21 @@ with tempfile.TemporaryDirectory() as directory:
     if sys.platform == "linux" and platform.machine() in ("x86_64", "amd64"):
         native = root / "native"
         args = [compiler, "cxx", "--no-daemon", "--target=x86_64-linux-gnu", "-nostdlib", "-I", include, "-I", examples]
+        adapter = write("adapter.cpp", """\
+            #include "resource.hpp"
+            namespace checkout {
+            Ticket acquire() noexcept { return {0}; }
+            void submit(Ticket&&) noexcept {}
+            }
+        """)
+        split_main = write("split_main.cpp", """\
+            void run();
+            int main() { run(); }
+        """)
+        subprocess.run([*args, "-fcheck-policies", *map(str, (mode, operations, adapter, caller, split_main)),
+                        "-o", str(native)], check=True, timeout=30)
+        assert subprocess.run([native], timeout=10).returncode == 0
+
         # Own and discharge the same object through native YCXX, keeping the guard in the ABI.
         native_good = write("native_good.cpp", """\
             #include "runtime_transaction.hpp"

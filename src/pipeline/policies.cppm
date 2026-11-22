@@ -14,8 +14,12 @@ import :ownership_policy;
 
 namespace ycxx::pipeline {
 
+// One checked build's ordered input units, shared by all its body queries.
+using OwnershipSources = ast::SeqId<ast::u32>;
+
 // Body-relative offsets let the engine reuse the finding if the whole function moves.
 struct OwnershipBody {
+  OwnershipSources sources;
   TuId tu;
   EntityId function;
   QualType type;
@@ -81,7 +85,7 @@ class OwnershipFlowBuilder {
   }
 
   Flow build() {
-    if (policy_.effect(body_.function) != Effect::unknown || resource_lifetime_body()) return {};
+    if (effect(body_.function) != Effect::unknown || resource_lifetime_body()) return {};
     const auto signature = world_.types.rec(body_.type);
     if (mentions_owner(signature.inner) || std::ranges::any_of(signature.params, [&](QualType param) {
           return mentions_owner(param) && ownership(param) == Ownership::ordinary;
@@ -123,6 +127,10 @@ class OwnershipFlowBuilder {
 
   Ownership ownership(QualType type) const {
     return policy_.ownership(world_.types.canonical(type));
+  }
+
+  Effect effect(EntityId function) const {
+    return policy_.effect(ownership_operation(world_, function, body_.tu.n));
   }
 
   // The registered resource's construction and cleanup implement the adapter's contract.
@@ -193,7 +201,7 @@ class OwnershipFlowBuilder {
     if (call.callee.id == ast::NodeId::none) return Effect::unknown;
     const ast::Red callee = unparenthesized(at(node, call.callee));
     if (!callee.is<ast::DeclRef>() || callee.get<ast::DeclRef>().entity != call.function) return Effect::unknown;
-    return policy_.effect(call.function);
+    return effect(call.function);
   }
 
   std::optional<ast::u32> operation_argument(const ast::Red& node, const ast::Call& call) const {
@@ -582,15 +590,28 @@ class OwnershipAnalysis {
 
 }  // namespace
 
-struct OwnershipRegistryFor {
-  using Key = TuId;
-  using Value = OwnershipRegistry;
-  static engine::query_task<Value> run(engine::Ctx& cx, Key tu) {
+struct OwnershipDeclarationsFor {
+  using Key = ast::u32;
+  using Value = OwnershipDeclarations;
+  static engine::query_task<Value> run(engine::Ctx& cx, Key unit) {
+    const TuId tu{unit};
     const auto& front = co_await cx.fetch<TuFront>(tu);
     if (front.ownership_policies.empty() && front.ownership_annotations.empty()) co_return Value{};
-    const auto& source = cx.fetch<pp::SourceOf>(pp::FileId{tu.n});
-    co_return read_ownership_policies(*universe().world_for(*source.config.target), front.ownership_policies,
+    const auto& source = cx.fetch<pp::SourceOf>(pp::FileId{unit});
+    co_return read_ownership_policies(*universe().world_for(*source.config.target), unit, front.ownership_policies,
                                      front.ownership_annotations);
+  }
+};
+
+struct OwnershipRegistryFor {
+  using Key = OwnershipSources;
+  using Value = OwnershipRegistry;
+  static engine::query_task<Value> run(engine::Ctx& cx, Key sources) {
+    const auto units = universe().in->seqs.elements(sources);
+    if (units.empty()) co_return Value{};
+    const auto fragments = co_await cx.par_map<OwnershipDeclarationsFor>(units);
+    const auto& source = cx.fetch<pp::SourceOf>(pp::FileId{units.front()});
+    co_return compose_ownership_policies(*universe().world_for(*source.config.target), fragments);
   }
 };
 
@@ -598,7 +619,7 @@ struct BuildOwnershipFlow {
   using Key = OwnershipBody;
   using Value = OwnershipFlow;
   static engine::query_task<Value> run(engine::Ctx& cx, Key body) {
-    const auto& registry = co_await cx.fetch<OwnershipRegistryFor>(body.tu);
+    const auto& registry = co_await cx.fetch<OwnershipRegistryFor>(body.sources);
     const auto& target = body.linux_target ? ast::x86_64_linux : ast::aarch64_darwin;
     co_return OwnershipFlowBuilder(*universe().world_for(target), registry.policy, body).build();
   }
@@ -613,19 +634,28 @@ struct CheckOwnershipBody {
   }
 };
 
-struct CheckPolicies {
-  using Key = TuId;
-  using Value = std::vector<Message>;
-  static engine::query_task<Value> run(engine::Ctx&, TuId);
+struct OwnershipCheckUnit {
+  OwnershipSources sources;
+  TuId tu;
+  bool operator==(const OwnershipCheckUnit&) const = default;
 };
 
-engine::query_task<CheckPolicies::Value> CheckPolicies::run(engine::Ctx& cx, TuId tu) {
+struct CheckPolicies {
+  using Key = OwnershipCheckUnit;
+  using Value = std::vector<Message>;
+  static engine::query_task<Value> run(engine::Ctx&, Key);
+};
+
+engine::query_task<CheckPolicies::Value> CheckPolicies::run(engine::Ctx& cx, Key key) {
+  const TuId tu = key.tu;
   const FrontResult& front = co_await cx.fetch<TuFront>(tu);
   if (front.has_errors()) co_return Value{};
-  const auto& registry = co_await cx.fetch<OwnershipRegistryFor>(tu);
+  const auto& registry = co_await cx.fetch<OwnershipRegistryFor>(key.sources);
   if (registry.policy.resources.empty() && registry.problems.empty()) co_return Value{};
   if (front.unit.virtual_emission_blocked && registry.problems.empty())
     co_return Value{{std::nullopt, true, "ownership analysis is unavailable for this unit's virtual declarations", {}}};
+  std::span<const OwnershipPolicyProblem> problems;
+  if (const auto it = registry.problems.find(tu.n); it != registry.problems.end()) problems = it->second;
 
   const pp::FileId file{tu.n};
   const pp::Source& source = cx.fetch<pp::SourceOf>(file);
@@ -636,11 +666,12 @@ engine::query_task<CheckPolicies::Value> CheckPolicies::run(engine::Ctx& cx, TuI
     for (const auto& def : front.unit.functions) {
       if (def.body.tree == ast::NodeId::none) continue;
       definitions.push_back(&def);
-      bodies.push_back({tu, def.entity, def.decl.type, def.body.tree, def.body.locals,
+      bodies.push_back({key.sources, tu, def.entity, def.decl.type, def.body.tree, def.body.locals,
                         def.this_type.value_or(QualType{}), linux_target});
     }
   const auto findings = co_await cx.par_map<CheckOwnershipBody>(bodies);
-  if (registry.problems.empty() && std::ranges::none_of(findings, [](const auto& finding) { return finding.get().has_value(); }))
+  if (problems.empty() &&
+      std::ranges::none_of(findings, [](const auto& finding) { return finding.get().has_value(); }))
     co_return Value{};
 
   const pp::Region& region = co_await cx.fetch<pp::Pp>(file);
@@ -648,12 +679,27 @@ engine::query_task<CheckPolicies::Value> CheckPolicies::run(engine::Ctx& cx, TuI
   SourceLocations locations(cx, source, file, region, items);
   auto& in = *universe().in;
   Value messages;
-  for (const auto& problem : registry.problems) {
-    const auto at = locations.at(in, problem.at);
+  std::map<ast::u32, SourceLocations> previous_units;
+  for (const auto& problem : problems) {
+    const auto at = locations.at(in, problem.origin.at);
     std::string text = problem.message;
-    if (problem.previous)
-      if (const auto previous = locations.at(in, *problem.previous))
+    if (problem.previous) {
+      const auto origin = *problem.previous;
+      SourceLocations* previous_locations = &locations;
+      if (origin.unit != tu.n) {
+        auto it = previous_units.find(origin.unit);
+        if (it == previous_units.end()) {
+          const pp::FileId other{origin.unit};
+          const auto& other_source = cx.fetch<pp::SourceOf>(other);
+          const auto& other_region = co_await cx.fetch<pp::Pp>(other);
+          const auto& other_items = co_await cx.fetch<items::RegionItems>(other);
+          it = previous_units.try_emplace(origin.unit, cx, other_source, other, other_region, other_items).first;
+        }
+        previous_locations = &it->second;
+      }
+      if (const auto previous = previous_locations->at(in, origin.at))
         text += std::format(" (previous declaration at {})", previous->where);
+    }
     messages.push_back({at ? std::optional(at->offset) : std::nullopt, true, std::move(text), at ? at->where : ""});
   }
   for (std::size_t i = 0; i < findings.size(); ++i) {
