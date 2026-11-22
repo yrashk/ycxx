@@ -114,6 +114,7 @@ export struct LowerConfig {
   bool sysv_amd64 = false;
   std::optional<IntThrowRuntime> int_throw;
   std::optional<CatchAllRuntime> catch_all{};
+  EntityId cleanup_resume = EntityId::none;
 };
 
 export enum class Amd64ArgumentKind : std::uint8_t { integer, sse, stack };
@@ -209,7 +210,7 @@ class Lowering {
       if (block_map_[raw(b)] == none) continue;
       if (auto e = block(b); !e) return std::unexpected(e.error());
     }
-    if (catch_edges_) emit_catch_dispatch();
+    if (catch_edges_ && !catch_edges_->cleanup) emit_catch_dispatch();
     l2::Function out = b_.finish(results_.value_or(std::vector<l2::Type>{}));
     out.indirect_result = indirect_result_;
     return out;
@@ -245,6 +246,7 @@ class Lowering {
     NodeId invoke;
     BlockId normal, handler;  // L1 blocks
     BlockId landing, resume;  // additional L2 blocks
+    bool cleanup = false;
   };
   std::optional<CatchEdges> catch_edges_;
   std::optional<std::vector<T>> results_;
@@ -484,13 +486,15 @@ class Lowering {
     const bool normal_invoke = catch_edges_ && b == catch_edges_->normal;
     if (normal_invoke) {
       if (!params.empty()) return fail("hosted invoke normal block must be parameterless in L1");
-      params = {T::state, T::i32};
+      params = {T::state};
+      if (!catch_edges_->cleanup) params.push_back(T::i32);
     }
+    if (catch_edges_ && catch_edges_->cleanup && b == catch_edges_->handler) params.push_back(T::i64);
     BlockId nb = b_.begin_block(params);
     auto param = [&](std::uint32_t i) { return b_.param(nb, index.empty() ? i : index[i]); };
     if (normal_invoke) {
       out(catch_edges_->invoke, 0, param(0));
-      out(catch_edges_->invoke, 1, param(1));
+      if (!catch_edges_->cleanup) out(catch_edges_->invoke, 1, param(1));
     }
     std::uint32_t i = 0;
     for (ValueId p : f_.params_of(b)) {
@@ -791,8 +795,22 @@ class Lowering {
       }
       case Op::va_start:
       case Op::va_arg: {
-        if (!config_.sysv_amd64) return fail("variadic cursors require System V AMD64");
         auto o = origin();
+        if (!config_.sysv_amd64 && nd.op == Op::va_arg) {
+          // Apple arm64: the cursor holds the address of the next argument, each in an 8-byte
+          // slot of its own, the value in its low bytes (little-endian).
+          auto fetch = type_of(cxx(f_.results_of(n)[1]));
+          if (!fetch) return fail(fetch.error());
+          ValueId state = in(n, 0), cursor = in(n, 1);
+          ValueId at = emit1(Op2::load, T::ptr, {state, cursor}, {0});
+          ValueId value = emit1(Op2::load, *fetch, {state, at}, {0});
+          T st[] = {T::state};
+          ValueId ops[] = {state, cursor, add_offset(at, 8)};
+          std::uint64_t im[] = {0};
+          out(n, 0, b_.peek().result(b_.emit(Op2::store, st, ops, im, 0, {}, o)));
+          out(n, 1, value);
+          return {};
+        }
         ValueId ops[] = {in(n, 0), in(n, 1)};
         if (nd.op == Op::va_start) {
           T result[] = {T::state};
@@ -808,13 +826,11 @@ class Lowering {
         return {};
       }
       case Op::va_copy: {
-        if (!config_.sysv_amd64) return fail("variadic cursors require System V AMD64");
         QualType cursor = layout(cxx(f_.operands_of(n)[1])).pointee;
         out(n, 0, copy_bytes(in(n, 0), in(n, 1), in(n, 2), layout(cursor), 0));
         return {};
       }
       case Op::va_end:
-        if (!config_.sysv_amd64) return fail("variadic cursors require System V AMD64");
         // The operand has been evaluated. The ABI requires no cleanup of the cursor.
         out(n, 0, in(n, 0));
         return {};
@@ -950,6 +966,18 @@ class Lowering {
         return {};
       }
       case Op::invoke: {
+        if (config_.sysv_amd64 && config_.cleanup_resume != EntityId::none && !catch_edges_ &&
+            nd.nopnd == 1 && nd.nres == 1 && imms[1] == 0) {
+          const auto edges = f_.succs_of(n);
+          if (edges.size() != 2 || edges[0].nargs || edges[1].nargs) return fail("unsupported hosted cleanup successor");
+          const BlockId landing{block_map_[raw(edges[1].target)]};
+          catch_edges_ = CatchEdges{n, edges[0].target, edges[1].target, landing, {}, true};
+          const l2::Builder::SuccArgs paths[] = {{BlockId(block_map_[raw(edges[0].target)]), {}}, {landing, {}}};
+          const ValueId args[] = {in(n, 0)};
+          const std::uint64_t target[] = {imms[0], 0, 0, 0};
+          b_.emit(Op2::invoke_cleanup, {}, args, target, 0, paths, origin());
+          return {};
+        }
         if (!config_.sysv_amd64 || !config_.catch_all || catch_edges_ || nd.nopnd != 2 || nd.nres != 2 ||
             imms[1] != 0 || b_.peek().type(in(n, 1)) != T::i32)
           return fail("unsupported hosted invoke");
@@ -966,6 +994,17 @@ class Lowering {
         const ValueId args[] = {in(n, 0), in(n, 1)};
         const std::uint64_t target[] = {imms[0], 1, 0, 0};
         b_.emit(Op2::invoke, {}, args, target, 0, paths, origin());
+        return {};
+      }
+      case Op::resume: {
+        if (!catch_edges_ || !catch_edges_->cleanup || nd.block != raw(catch_edges_->handler))
+          return fail("unsupported hosted resume");
+        const ValueId args[] = {in(n, 0), in(n, 1)};
+        const std::uint64_t target[] = {raw(config_.cleanup_resume), 0, 0, 0};
+        const T result[] = {T::state};
+        const auto o = origin();
+        b_.emit(Op2::call, result, args, target, 0, {}, o);
+        b_.emit(Op2::unreachable, {}, {}, {}, 0, {}, o);
         return {};
       }
       case Op::catch__begin:

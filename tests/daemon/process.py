@@ -27,6 +27,7 @@ failures = []
 SLOW_STATEMENTS = 40000
 # ycxx builds AArch64 Mach-O only (DECISIONS §1.3), so its programs run only on Apple arm64, as
 # `run darwin-arm64` in tests/features/ycxx.txt; outputs are compared byte for byte everywhere.
+# PARITY: #390: running the built program on Linux needs a hosted link there.
 CAN_RUN = sys.platform == 'darwin' and platform.machine() == 'arm64'
 
 
@@ -175,7 +176,7 @@ def edit_during_build(env):
     d = env.scope / 'edit'
     d.mkdir()
     files = {'mid.cpp': 'int mid() { return 2; }\n', 'main.cpp': 'int slow(); int mid();\nint main() { return slow() + mid(); }\n'}
-    args = ['slow.cpp', 'mid.cpp', 'main.cpp', '-o', 'prog']
+    args = ['--target=arm64-apple-darwin', 'slow.cpp', 'mid.cpp', 'main.cpp', '-o', 'prog']
     for attempt in range(3):
         files['slow.cpp'] = slow_source('slow', attempt + 1)
         files['mid.cpp'] = 'int mid() { return 2; }\n'
@@ -262,7 +263,7 @@ def killed_client(env):
     files = {'a.cpp': slow_source('a', 3), 'b.cpp': slow_source('b', 4), 'main.cpp': 'int a(); int b();\nint main() { return a() + b(); }\n'}
     for name, text in files.items():
         (d / name).write_text(text)
-    args = ['a.cpp', 'b.cpp', 'main.cpp', '-o', 'prog']
+    args = ['--target=arm64-apple-darwin', 'a.cpp', 'b.cpp', 'main.cpp', '-o', 'prog']
     cancelled = env.number('cancelled')
     client = env.start(args, d)
     if not wait_until(lambda: env.number('live') >= 1, 30):
@@ -287,7 +288,7 @@ def killed_daemon(env):
     files = {'k.cpp': slow_source('k', 5), 'main.cpp': 'int k();\nint main() { return k(); }\n'}
     for name, text in files.items():
         (d / name).write_text(text)
-    args = ['k.cpp', 'main.cpp', '-o', 'prog']
+    args = ['--target=arm64-apple-darwin', 'k.cpp', 'main.cpp', '-o', 'prog']
     client = env.start(args, d)
     if not wait_until(lambda: env.number('live') >= 1, 30):
         fail('killed daemon: the request never showed as live')

@@ -447,8 +447,8 @@ clauses = ['basic.fundamental', 'lex.fcon', 'conv.fpprom', 'conv.double', 'conv.
 std = 'C++98'
 detect = '\b(?:float|double)\b'
 status = 'done'
-issues = [336, 201]
-note = 'Linux x86-64 supports runtime `float` and `double` arithmetic, comparisons, conversion to `bool` and binary32-to-binary64 widening. Other numeric conversions and x87 values remain in #201.'
+issues = [336, 201, 643, 645]
+note = 'Linux x86-64 supports runtime `float` and `double` arithmetic, comparisons and conversions to and from `bool` and the integer types (#643). x87 `long double` remains in #645, strict exception status in #201.'
 probe = '''
 int main() { double d = 1.5; float f = 2.0f; d = d * f + 0.5; return (int)d == 3 ? 0 : 1; }
 '''
@@ -552,7 +552,7 @@ std = 'C++98'
 core = true
 status = 'partial'
 issues = [124, 193, 422]
-note = 'x86-64 ELF weak definitions for ordinary external inline functions and COMDAT input selection in explicit static links. COMDAT emission, grouped archive and dynamic links, Mach-O weak definitions and internal-linkage mangling remain'
+note = 'Weak definitions for ordinary external inline functions on x86-64 ELF and arm64 Mach-O, and COMDAT input selection in explicit static links. COMDAT emission, grouped archive and dynamic links, inline functions with statics or closures, template specializations and internal-linkage mangling remain'
 
 [[feature]]
 id = 'basic-inline-vars'
@@ -564,7 +564,7 @@ ftm = '__cpp_inline_variables'
 detect = '\binline\s+(?:static\s+)?(?:const(?:expr)?\s+)?[\w:<>,]+\s+\w+\s*(?:=|\{|;)|\bstatic\s+(?:constexpr\s+)?inline\s+(?!\w+\s*\()'
 status = 'partial'
 issues = [124, 368, 422, 432]
-note = 'x86-64 ELF shares constant-initialized external namespace variables with relocation-free initial values. Broader inline data and group selection remain'
+note = 'x86-64 ELF and arm64 Mach-O share constant-initialized external namespace variables with relocation-free initial values. Broader inline data and group selection remain'
 probe = '''
 inline int counter = 41;
 struct S { static inline int n = 1; };
@@ -657,7 +657,7 @@ clauses = ['expr.new', 'expr.delete', 'basic.stc.dynamic*', 'dcl.fct.def.replace
 std = 'C++98'
 detect = '\bnew\s+[\w:(]|\bdelete\s*(?:\[\s*\])?\s*[\w(*]'
 status = 'partial'
-note = 'Ordinary global scalar new and delete support integral and pointer objects, with syntax checking for one-dimensional scalar arrays. Linux x86-64 supports cookie-free array deletion and default-initialized scalar arrays with literal bounds in cleanup-free functions. The usual array operators, tagged overloads, and C++26 reserved placement functions support explicit calls. Runtime scalar placement new uses a visible written reserved allocator. Broader array and class allocation, constant evaluation, and exception cleanup remain open.'
+note = 'Ordinary global scalar new and delete support integral and pointer objects, with syntax checking for one-dimensional scalar arrays. Linux x86-64 supports cookie-free array deletion and default-initialized scalar arrays with integer-literal arithmetic bounds in cleanup-free functions. The usual array operators, tagged overloads, and C++26 reserved placement functions support explicit calls. Runtime scalar placement new uses a visible written reserved allocator. Broader array and class allocation, constant evaluation, and exception cleanup remain open.'
 probe = '''
 struct S { int v; S(int x) : v(x) {} };
 int main() { S* p = new S(5); int r = p->v; delete p; int* a = new int[3]; delete[] a; return r == 5 ? 0 : 1; }
@@ -735,8 +735,8 @@ clauses = ['expr.static.cast', 'expr.reinterpret.cast', 'expr.const.cast', 'expr
 std = 'C++98'
 detect = '\b(?:static|const|reinterpret)_cast\s*<'
 status = 'partial'
-issues = [199, 59, 216]
-note = 'rvalue-reference, C-style and functional downcasts, `const_cast`, `reinterpret_cast`, and some `void*` and `std::nullptr_t` conversions. Qualified functional casts check access to aliases and typedefs declared directly in ordinary classes.'
+issues = [199, 59, 216, 697]
+note = 'rvalue-reference, C-style and functional downcasts, `const_cast`, `reinterpret_cast`, and some `void*` and `std::nullptr_t` conversions. Qualified functional casts check access to aliases and typedefs declared directly in ordinary classes and accept namespace-qualified class and alias template-ids.'
 probe = '''
 int main() { long l = 5; int i = static_cast<int>(l); const int* c = &i; int* m = const_cast<int*>(c); char* b = reinterpret_cast<char*>(m); return (i == 5 && (int)l == int(l) && b) ? 0 : 1; }
 '''
@@ -1078,7 +1078,7 @@ int main() { return f(1) == 3 ? 0 : 1; }
 '''
 status = 'partial'
 issues = [356, 354]
-note = 'Ordinary non-template member defaults use complete-class lookup. Dependent defaults, out-of-class additions and defaults on qualified namespace definitions remain'
+note = 'Ordinary non-template member defaults use complete-class lookup. Scalar defaults on free function templates replay when omitted. Other dependent defaults, out-of-class additions and defaults on qualified namespace definitions remain'
 
 [[feature]]
 id = 'dcl-variadic-fn'
@@ -1088,8 +1088,8 @@ clauses = ['dcl.fct', 'expr.call', 'over.ics.ellipsis']
 std = 'C++98'
 detect = ',\s*\.\.\.\s*\)|\bva_(?:start|arg|list)\b'
 status = 'partial'
-issues = [196, 399]
-note = 'Linux x86-64 supports direct variadic calls and ordinary free definitions with scalar INTEGER and SSE values. Unnamed `float` promotes to `double`, and `va_arg` retrieves integers, pointers and `double`. Indirect scalar INTEGER calls work. Indirect floating calls and aggregate variadic classification remain in #196.'
+issues = [196, 399, 647]
+note = 'Apple arm64 defines variadic functions with integer, pointer and `double` `va_arg` (#647). Linux x86-64 supports direct variadic calls and ordinary free definitions with scalar INTEGER and SSE values. Unnamed `float` promotes to `double`, and `va_arg` retrieves integers, pointers and `double`. Indirect scalar INTEGER calls work. Indirect floating calls and aggregate variadic classification remain in #196.'
 probe = '''
 #include <cstdarg>
 int sum(int n, ...) { std::va_list ap; va_start(ap); int s = 0; for (int i = 0; i < n; ++i) s += va_arg(ap, int); va_end(ap); return s; }
@@ -1119,7 +1119,7 @@ clauses = ['dcl.init.aggr', 'dcl.init.general']
 std = 'C++17'
 ftm = '__cpp_aggregate_bases'
 status = 'partial'
-note = 'Automatic flat arithmetic records support parenthesized initialization. Runtime declarations can copy one flat public direct base from an exact-type lvalue or a fully written unqualified braced prvalue. An omitted trailing arithmetic field is value-initialized when it has no written default member initializer. Other base forms, arrays, nested and reference fields, and other initialization contexts remain open.'
+note = 'Automatic flat arithmetic records support parenthesized initialization. Runtime declarations can copy one flat public direct base from an exact-type lvalue or a fully written unqualified braced prvalue. Omitted trailing arithmetic fields can replay call-free defaults that read the initialized base, or are value-initialized when they have no default. Other base forms, arrays, nested and reference fields, and other initialization contexts remain open.'
 probe = '''
 struct B { int b; }; struct D : B { int d; }; struct P { int x, y; };
 int main() { D d{{1}, 2}; P p(3, 4); return (d.b + d.d + p.x + p.y == 10) ? 0 : 1; }
@@ -1406,8 +1406,8 @@ void f(double) = delete;
 int main() { S s; return s.v - 1; }
 '''
 status = 'partial'
-issues = [157, 244]
-note = 'First-declaration in-class copy constructors support trivial member copies and deletion. Other explicitly defaulted forms and nontrivial copy bodies remain open.'
+issues = [157, 244, 709]
+note = 'First-declaration in-class copy constructors support trivial member copies and deletion. Namespace-scope class templates also support first-declaration deleted copy assignment without a ref-qualifier. Other explicitly defaulted forms and nontrivial copy bodies remain open.'
 
 [[feature]]
 id = 'dcl-delete-reason'
@@ -1773,8 +1773,8 @@ clauses = ['class.friend', 'dcl.friend', 'temp.friend']
 std = 'C++98'
 detect = '\bfriend\b'
 status = 'partial'
-issues = [259]
-note = 'Ordinary binary hidden friends and unary minus participate in ADL. Other hidden friend operators, C-linkage friend definitions, default arguments in friend declarations, and friends in templates remain open.'
+issues = [259, 689]
+note = 'Ordinary binary hidden friends and unary minus participate in ADL. Type friends can name a class template parameter. Other hidden friend operators, C-linkage friend definitions, default arguments in friend declarations, and broader template friends remain open.'
 probe = '''
 class C { int p = 2; friend int peek(const C& c) { return c.p; } };
 int main() { C c; return peek(c) - 2; }
@@ -2038,7 +2038,7 @@ template<class T> decltype(T().missing(), 1) h(int) { return 1; }
 template<class T> int h(long) { return 0; }
 int main() { return g(1) + h<int>(0); }
 '''
-note = 'Class and variable partial matches check substituted arguments in lexical order. Template static assertion failures are diagnosed at instantiation. Dependent __is_same, __is_reference, __is_const, __is_volatile, __is_array, __is_pointer, __is_function, __is_enum, __is_union, __is_class, __is_member_pointer, __is_member_object_pointer, __is_member_function_pointer, and __is_object work in bool template arguments and defaults. These arguments and defaults also support logical negation of a qualified dependent bool variable template-id. Other dependent expression identities and expression SFINAE remain open.'
+note = 'Class and variable partial matches check substituted arguments in lexical order. Template static assertion failures are diagnosed at instantiation. Dependent __is_same, __is_reference, __is_const, __is_volatile, __is_array, __is_pointer, __is_function, __is_enum, __is_union, __is_class, __is_member_pointer, __is_member_object_pointer, __is_member_function_pointer, and __is_object work in bool template arguments and defaults. Bool arguments support unqualified dependent bool variable template-ids. Arguments and defaults also support logical negation of a qualified dependent bool variable template-id. Other dependent expression identities and expression SFINAE remain open.'
 
 [[feature]]
 id = 'temp-ttp'
@@ -2080,6 +2080,7 @@ std = 'C++11'
 ftm = '__cpp_alias_templates'
 detect = '\btemplate\s*<[^;{]*>\s*using\s+\w+\s*='
 status = 'done'
+note = 'Terminal namespace-qualified alias specializations stay type arguments when they expand to dependent member types (#630).'
 
 [[feature]]
 id = 'temp-var'
@@ -2193,7 +2194,7 @@ ftm = '__cpp_concepts'
 detect = '\brequires\b'
 status = 'partial'
 issues = [234, 236]
-note = 'Ordinary function overloads support explicit trailing type packs in atomic constraints. Directly named non-dependent primary class specializations with explicit type arguments check constraints. Broader template and member constraints and constraint mangling remain.'
+note = 'Ordinary function overloads support explicit trailing type packs in atomic constraints. Directly named non-dependent primary class specializations with explicit type arguments check constraints. Non-template code outside requires-expression bodies also checks directly named primary namespace variable templates with explicit non-dependent type arguments. Broader template and member constraints and constraint mangling remain.'
 probe = '''
 template<class T> concept Int = sizeof(T) == 4;
 template<Int T> int f(T) { return 1; } template<class T> int f(T) { return 2; }
@@ -2545,8 +2546,9 @@ group = 'reflect'
 clauses = ['dcl.attr.annotation']
 std = 'C++26'
 detect = '\[\[\s*='
-status = 'missing'
-issues = [324, 80]
+status = 'partial'
+issues = [662, 324, 80]
+note = 'Typed constants and source occurrences on ordinary class and function declarations.'
 
 [[feature]]
 id = 'stmt-expansion'
@@ -2652,7 +2654,8 @@ probe = '''
 struct S { int a; int b; };
 int main() { return (__builtin_popcount(7u) == 3 && __builtin_offsetof(S, b) == 4) ? 0 : 1; }
 '''
-status = 'missing'
+status = 'partial'
+note = '`__builtin_offsetof` and the `offsetof` macro of `<cstddef>` give the offsets of direct non-static data members of ordinary standard-layout classes. Compound member designators, the `<bit>` and `<limits>` built-ins such as `__builtin_popcount`, and the remaining numeric built-ins are tracked in #248.'
 
 [[feature]]
 id = 'lib-atomic'

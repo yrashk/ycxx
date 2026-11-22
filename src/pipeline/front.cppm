@@ -62,10 +62,14 @@ struct FrontResult {
 };
 
 // One translation unit from its source file (`TuSource::file`), analysed.
+// Where in the source (#638): a unit's cells are its file (defined with the back end's cells).
+engine::SourceSpan tu_span(const engine::Db& db, TuId tu);
+
 struct TuFront {
   using Key = TuId;
   using Value = FrontResult;
   static engine::query_task<Value> run(engine::Ctx& cx, TuId tu);
+  static engine::SourceSpan trace_span(const engine::Db& db, TuId tu) { return tu_span(db, tu); }
   // For traces (#245): its error messages, one a line.
   static std::string errors(const Value& v) {
     std::string out;
@@ -195,7 +199,11 @@ struct Runtime {
     const QualType p = vp(), v = world.types.builtin(sema::Builtin::void_);
     return {declared("__cxa_begin_catch", world.types.function(p, std::span(&p, 1), false, lang), true),
             declared("__cxa_end_catch", world.types.function(v, {}, false, lang), true),
-            declared("_Unwind_Resume", world.types.function(v, std::span(&p, 1), false, lang), true)};
+            resume()};
+  }
+  EntityId resume() {
+    const QualType p = vp(), v = world.types.builtin(sema::Builtin::void_);
+    return declared("_Unwind_Resume", world.types.function(v, std::span(&p, 1), false, ast::LangLinkage::c), true);
   }
 };
 
@@ -207,7 +215,8 @@ void static_locals(sema::World& world, TranslationUnit& tu, FunctionDef& f, R& r
   ast::Interners& ins = world.ins;
   for (const ast::LocalRec& l : ins.seqs.elements(f.body.locals)) {
     if (l.entity == EntityId::none || l.decl == ast::NodeId::none || !ins.ast.is<ast::StaticVar>(l.decl)) continue;
-    f.weak_elf = false;  // The function and its statics need group selection (#422).
+    // The function and its statics need ELF group selection (#422), or weak Mach-O statics (#124).
+    f.coalesced = false;
     auto s = ins.ast.get<ast::StaticVar>(l.decl);
     bool code = s.destructor != EntityId::none || (s.value == ast::ConstId::none && s.init.id != ast::NodeId::none);
     const sema::EntityRec& r = world.entities.rec(l.entity);
@@ -339,7 +348,7 @@ using UnwindNodes = ast::closed_list<
     ast::Binary, ast::OrderedBinary, ast::Assign, ast::Conditional, ast::Subscript, ast::Call,
     ast::NewArray, ast::DeleteArray, ast::ImplicitConversion, ast::InitList, ast::ValueInit, ast::DefaultInit, ast::Throw>;
 
-bool unwind_body_node(parse::Program& program, ast::NodeId node, bool& has_throw) {
+bool unwind_body_node(parse::Program& program, ast::NodeId node, bool& has_throw, bool initializer = false) {
   if (node == ast::NodeId::none) return true;
   auto& world = program.world();
   const auto& tree = world.ins.ast;
@@ -347,6 +356,9 @@ bool unwind_body_node(parse::Program& program, ast::NodeId node, bool& has_throw
     if constexpr (!UnwindNodes::contains<T>) {
       return false;
     } else {
+      if constexpr (std::is_same_v<T, ast::Call> || std::is_same_v<T, ast::NewArray> ||
+                    std::is_same_v<T, ast::DeleteArray> || std::is_same_v<T, ast::Throw>)
+        if (initializer) return false;
       const T n = tree.get<T>(node);
       if constexpr (std::is_same_v<T, ast::DeclRef>) {
         if (n.reference || (!unwind_scalar(world.types, n.info.type) &&
@@ -382,9 +394,9 @@ bool unwind_body_node(parse::Program& program, ast::NodeId node, bool& has_throw
       }
       bool safe = true;
       ast::for_each_ref(n, [&]<class H>(const H& h) {
-        if constexpr (std::is_same_v<H, ast::NodeId>) safe = safe && unwind_body_node(program, h, has_throw);
+        if constexpr (std::is_same_v<H, ast::NodeId>) safe = safe && unwind_body_node(program, h, has_throw, initializer);
         else if constexpr (std::is_same_v<H, ast::ChildList>)
-          for (ast::Child c : tree.children(h)) safe = safe && unwind_body_node(program, c.id, has_throw);
+          for (ast::Child c : tree.children(h)) safe = safe && unwind_body_node(program, c.id, has_throw, initializer);
       });
       return safe;
     }
@@ -408,6 +420,49 @@ UnwindEligibility cleanup_free_definition(parse::Program& program, const ast::De
   bool has_throw = false;
   if (!unwind_body_node(program, body.tree, has_throw)) return none;
   return has_throw ? cleanup_free_with_throw : cleanup_free;
+}
+
+// One aggregate local followed by an external void call. The initializer has no calls,
+// throwing operations, class temporaries, or partially constructed class subobjects.
+ast::NodeId hosted_cleanup_call(parse::Program& program, const ast::DeclSema& d, const ast::BodySema& body) {
+  auto& world = program.world();
+  const auto& tree = world.ins.ast;
+  const auto& definition = world.entities.rec(d.entity);
+  const auto fn = world.types.rec(d.type);
+  if (definition.kind != sema::EntityKind::function || definition.templ != EntityId::none ||
+      !program.is_namespace(definition.scope) || definition.linkage != ast::Linkage::external ||
+      !unwind_scalar_prototype(world.types, d.type) || fn.fn_noexcept ||
+      !world.types.is(fn.inner, sema::Builtin::void_) || d.contracts != ast::NodeId::none ||
+      (d.flags & (sema::decl_flag::constexpr_ | sema::decl_flag::consteval_)) ||
+      world.ins.seqs.size(body.closures) != 0 || body.tree == ast::NodeId::none ||
+      !tree.is<ast::Compound>(body.tree)) return ast::NodeId::none;
+  const auto statements = tree.children(tree.get<ast::Compound>(body.tree).stmts);
+  if (statements.size() != 2 || !tree.is<ast::DeclStmt>(statements[0].id) || !tree.is<ast::ExprStmt>(statements[1].id))
+    return ast::NodeId::none;
+  const auto declarations = tree.children(tree.get<ast::DeclStmt>(statements[0].id).decls);
+  if (declarations.size() != 1 || !tree.is<ast::LocalVar>(declarations.front().id)) return ast::NodeId::none;
+  const auto local = tree.get<ast::LocalVar>(declarations.front().id);
+  const auto type = world.ins.seqs.at(body.locals, local.local).type;
+  if (local.destructor == EntityId::none || !world.types.is_class(type) || local.init.id == ast::NodeId::none ||
+      !tree.is<ast::InitList>(local.init.id)) return ast::NodeId::none;
+  const auto& record = program.classes().rec(world.types.class_of(type));
+  if (!record.destructor_noexcept.value_or(false) || record.virtual_destructor) return ast::NodeId::none;
+  bool has_throw = false;
+  for (auto element : tree.children(tree.get<ast::InitList>(local.init.id).elems))
+    if (!unwind_body_node(program, element.id, has_throw, true)) return ast::NodeId::none;
+  const auto call_at = tree.get<ast::ExprStmt>(statements[1].id).expr.id;
+  if (call_at == ast::NodeId::none || !tree.is<ast::Call>(call_at)) return ast::NodeId::none;
+  const auto call = tree.get<ast::Call>(call_at);
+  if (call.function == EntityId::none || call.callee.id == ast::NodeId::none ||
+      !tree.is<ast::DeclRef>(call.callee.id) || !tree.children(call.args).empty()) return ast::NodeId::none;
+  const auto& entity = world.entities.rec(call.function);
+  const auto callee = tree.get<ast::DeclRef>(call.callee.id);
+  const auto prototype = world.types.rec(callee.info.type);
+  if (callee.reference || callee.entity != call.function || entity.kind != sema::EntityKind::function ||
+      entity.templ != EntityId::none || !program.is_namespace(entity.scope) || entity.linkage != ast::Linkage::external ||
+      !unwind_scalar_prototype(world.types, callee.info.type) || prototype.fn_noexcept ||
+      !world.types.is(prototype.inner, sema::Builtin::void_) || !prototype.params.empty()) return ast::NodeId::none;
+  return call_at;
 }
 
 // Prove the whole handler occurrence while it still has C++ types and lifetime information.
@@ -585,11 +640,10 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
     EntityId e = d.entity;
     if (e == EntityId::none) return;
     // Any reachable declaration can mark the entity inline ([dcl.inline]).
-    if (linux && (d.flags & sema::decl_flag::inline_) &&
-        (d.kind == ast::DeclKind::function || d.kind == ast::DeclKind::variable))
+    if ((d.flags & sema::decl_flag::inline_) && (d.kind == ast::DeclKind::function || d.kind == ast::DeclKind::variable))
       inline_declarations.insert(e);
     if (linux && d.kind == ast::DeclKind::function && d.has_written_noexcept) noexcept_declarations.insert(e);
-    if (linux && d.hidden_visibility) hidden_declarations.insert(e);
+    if (d.hidden_visibility) hidden_declarations.insert(e);
     if (!seen.insert(std::to_underlying(e)).second) return;
     const sema::EntityRec& r = world.entities.rec(e);
     if (r.kind == sema::EntityKind::class_ || r.kind == sema::EntityKind::data_member || r.kind == sema::EntityKind::type_alias ||
@@ -715,10 +769,10 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
       if (body.deduced) d.type = body.deduced_type;
       tu.functions.push_back({d.entity, d, body, program.id(k), it.body_begin - it.begin, program.this_type(d)});
       const auto& entity = world.entities.rec(d.entity);
-      tu.functions.back().weak_elf = inline_declarations.contains(d.entity) && entity.kind == sema::EntityKind::function &&
-                                    entity.linkage == ast::Linkage::external && entity.templ == EntityId::none &&
-                                    tu.main != d.entity && ins.seqs.size(body.closures) == 0 &&
-                                    program.asm_label(d.entity).empty();
+      tu.functions.back().coalesced = inline_declarations.contains(d.entity) && entity.kind == sema::EntityKind::function &&
+                                     entity.linkage == ast::Linkage::external && entity.templ == EntityId::none &&
+                                     tu.main != d.entity && ins.seqs.size(body.closures) == 0 &&
+                                     program.asm_label(d.entity).empty();
       // A written ordinary body starts at '{'. Other starts include a function-try-block and a
       // constructor initializer. Synthetic bodies and instantiations never enter this path.
       if (linux && !member && tu.main != d.entity && !it.specialization &&
@@ -727,6 +781,10 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
         f.catch_all_callee = hosted_catch_all_callee(program, d, body);
         f.unwind = f.catch_all_callee == EntityId::none ? cleanup_free_definition(program, d, body)
                                                        : UnwindEligibility::hosted_catch_all;
+        if (f.unwind == UnwindEligibility::none) {
+          f.cleanup_call = hosted_cleanup_call(program, d, body);
+          if (f.cleanup_call != ast::NodeId::none) f.unwind = UnwindEligibility::hosted_cleanup;
+        }
       }
       closures_of(body.closures, program.id(k), it.body_begin - it.begin);
       continue;
@@ -738,7 +796,7 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
           !(d.flags & sema::decl_flag::definition))
         continue;
       tu.variables.push_back({d.entity, d.type, declarators[i]->value, at[i]});
-      tu.variables.back().weak_elf = weak_inline_variable(d);
+      tu.variables.back().coalesced = weak_inline_variable(d);
       // Not constant-initialized: initialized dynamically, in order ([basic.start.dynamic]); a
       // destructor runs at exit ([basic.start.term]).
       ast::NodeId init = declarators[i]->value == ast::ConstId::none ? declarators[i]->init.id : ast::NodeId::none;
@@ -813,13 +871,13 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
     if (world.types.is_dependent(world.types.class_type(cls))) continue;
     declare(s.decl, std::nullopt);
     tu.functions.push_back({s.decl.entity, s.decl, program.synthesized_body(i), program.id(s.item), 0, program.this_type(s.decl)});
-    tu.functions.back().weak_elf = linux && s.kind == parse::Program::SpecialMember::copy_assignment && !internal_class(cls);
+    tu.functions.back().coalesced = s.kind == parse::Program::SpecialMember::copy_assignment && !internal_class(cls);
   }
   for (FunctionDef& f : tu.functions) {
     static_locals(world, tu, f, runtime);
     // Check the complete unit by entity, including later redeclarations and qualified friends.
     if (f.unwind == UnwindEligibility::none) continue;
-    if (noexcept_declarations.contains(f.entity) || inline_declarations.contains(f.entity) || f.weak_elf ||
+    if (noexcept_declarations.contains(f.entity) || inline_declarations.contains(f.entity) || f.coalesced ||
         !f.guards.empty() || !program.asm_label(f.entity).empty()) {
       f.unwind = UnwindEligibility::none;
     } else if (f.unwind == UnwindEligibility::cleanup_free_with_throw && !tu.int_throw) {
@@ -832,6 +890,12 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
           noexcept_declarations.contains(callee) || !program.asm_label(callee).empty())
         f.unwind = UnwindEligibility::none;
       else if (!tu.catch_all) tu.catch_all = runtime.catch_all();
+    } else if (f.unwind == UnwindEligibility::hosted_cleanup) {
+      const EntityId callee = ins.ast.get<ast::Call>(f.cleanup_call).function;
+      if (program.function_defined_before(callee, program.end()) ||
+          noexcept_declarations.contains(callee) || !program.asm_label(callee).empty())
+        f.unwind = UnwindEligibility::none;
+      else if (tu.cleanup_resume == EntityId::none) tu.cleanup_resume = runtime.resume();
     }
   }
   // Written declarations have already supplied their locations and definitions. For the
@@ -842,72 +906,11 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
     d.type = world.entities.rec(e).type;
     declare(d, std::nullopt);
   }
-  // A declaration anywhere in the unit can supply the visibility of the one ELF symbol.
+  // A declaration anywhere in the unit can supply the visibility of the one object symbol.
   if (!hidden_declarations.empty())
-    for (Entity& e : tu.entities) e.hidden_elf = hidden_declarations.contains(e.id);
+    for (Entity& e : tu.entities) e.hidden = hidden_declarations.contains(e.id);
   return tu;
 }
-
-namespace {
-
-std::set<EntityId> uncertain_record_layouts(parse::Program& program, sema::World& world) {
-  const auto& region = program.region();
-  const auto& items = program.items().items;
-  std::set<EntityId> records;
-  std::set<EntityId> annotated_tags;
-  std::set<std::uint32_t> uncertain_definitions;
-  // Sema erases alias types. Remember affected spellings across alias declarations so a
-  // scalar alias that changed layout also makes records using it uncertain.
-  std::set<std::string_view> aliases;
-  auto uncertain_alias = [&](const items::Item& item) {
-    if (aliases.empty()) return false;
-    for (std::uint32_t i = item.begin; i < item.end; ++i) {
-      auto tok = region.tokens[i];
-      if (tok.kind == lex::Tk::identifier && aliases.contains(region.name(tok)) &&
-          !std::ranges::contains(item.names, i - item.begin, &items::DeclName::offset)) return true;
-    }
-    return false;
-  };
-  for (std::uint32_t k = 0; k < items.size(); ++k) {
-    const auto& item = items[k];
-    const auto* analysed = program.analysed_item(k);
-    const bool definition = item.kind == items::ItemKind::class_def;
-    if (!analysed || (!definition && item.kind != items::ItemKind::declaration)) continue;
-    bool packed = definition && parse::layout_may_be_packed(region, item.begin, item.brace_end);
-    // The attributes immediately after the type's closing brace can still apply to
-    // the type. Those within a following declarator apply to the declared name.
-    bool record_annotated = parse::record_layout_attribute(region, item, program.class_alignment_specifiers(k)) ||
-                            (!definition && uncertain_alias(item));
-    bool annotated = record_annotated || (definition && parse::layout_attribute(region, item.brace_end, item.end));
-    if (!packed && !annotated) continue;
-    if (definition && (packed || record_annotated)) uncertain_definitions.insert(k);
-    for (auto d : world.ins.seqs.elements(analysed->decls)) {
-      if (d.entity == EntityId::none) continue;
-      if (d.kind == ast::DeclKind::class_ && (packed || record_annotated)) {
-        records.insert(d.entity);
-        if (!definition) annotated_tags.insert(d.entity);
-      }
-      if (annotated && d.kind == ast::DeclKind::data_member) {
-        records.insert(world.entities.rec(d.entity).scope);
-        if (item.parent != items::none) uncertain_definitions.insert(item.parent);
-      }
-      if (annotated && d.kind == ast::DeclKind::type_alias) {
-        if (world.types.is_class(d.type)) records.insert(world.types.class_of(d.type));
-        else aliases.insert(world.ins.names.spelling(world.entities.rec(d.entity).name));
-      }
-    }
-  }
-  // Instantiated classes have their own entities. Their packing and field declarations
-  // come from the selected pattern, which may be a partial specialization.
-  for (EntityId c : program.classes().classes()) {
-    auto pattern = program.class_pattern_item(c);
-    if (pattern && (uncertain_definitions.contains(*pattern) || annotated_tags.contains(world.entities.rec(c).templ)))
-      records.insert(c);
-  }
-  return records;
-}
-
-}  // namespace
 
 engine::query_task<FrontResult> TuFront::run(engine::Ctx& cx, TuId tu) {
   const TuSource& src = cx.fetch<TuSourceIn>(tu);
@@ -986,7 +989,7 @@ engine::query_task<FrontResult> TuFront::run(engine::Ctx& cx, TuId tu) {
   // The unit's own records of its classes and enumerations (#115).
   const sema::Classes& classes = program.classes();
   const auto uncertain = unit_source.config.target->triple == ast::x86_64_linux.triple
-      ? uncertain_record_layouts(program, world)
+      ? program.uncertain_object_layouts()
       : std::set<EntityId>{};
   for (EntityId c : classes.classes()) {
     ClassShape& shape = out.shapes.classes.emplace_back(ClassShape{c, {}, {}});

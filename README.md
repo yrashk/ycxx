@@ -35,10 +35,19 @@ A nonthrowing function can be used where the corresponding potentially throwing 
 Ordinary constructor declarations and definitions check that their concrete exception specifications agree.
 Dependent exception specifications remain open. [#219](https://github.com/yrashk/ycxx/issues/219)
 
+A class template can grant private access to the class passed as a type argument using
+`friend Authority;`. Each specialization grants access to its own authority.
+[#689](https://github.com/yrashk/ycxx/issues/689)
+
 **Compile and run programs on macOS.** `ycxx cxx a.cpp -o a` (also `-c`, `-fsyntax-only`, `-E`, `-I`,
 `-D`, `-std=c++26`, and `-fclass-call-abi=apple` to pass classes as Apple Clang does) builds an executable with ycxx's own front end, IR, AArch64 code generator
-and Mach-O linker. It also links object files from Clang or GCC. Errors are reported as
+and Mach-O linker on arm64 macOS, where `arm64-apple-darwin` is the default target. It also links
+object files from Clang or GCC. Variadic functions can be defined with `<cstdarg>` on both
+macOS and Linux ([#647](https://github.com/yrashk/ycxx/issues/647)). Errors are reported as
 `file:line:col: error: …`.
+
+The arm64 Mach-O linker preserves supported cleanup-free DWARF frames from input objects.
+[Mach-O unwind support #72](https://github.com/yrashk/ycxx/issues/72)
 
 ```sh
 tools/build
@@ -51,25 +60,39 @@ instantiation. Concrete constant template arguments can use braced conversions s
 `Tag<auto{7}>` and integer-literal-led parenthesized conversions such as `Tag<auto(7)>`.
 [#286](https://github.com/yrashk/ycxx/issues/286)
 
+Functional conversions can construct namespace-qualified class-template specializations with
+parentheses or braces, including through namespace aliases. [#697](https://github.com/yrashk/ycxx/issues/697)
+
+Class templates at namespace scope can delete their copy assignment on its first in-class
+declaration when the member has no ref-qualifier. Specializations retain the deleted overload.
+[#709](https://github.com/yrashk/ycxx/issues/709)
+
+C++26 reflection annotations on class heads and ordinary function declarations accept
+constant payloads and retain their types for compiler consumers.
+[#662](https://github.com/yrashk/ycxx/issues/662)
+
 **Preprocess binary resources.** Both targets support `#embed` and `__has_embed` with the standard
 parameters. [#125](https://github.com/yrashk/ycxx/issues/125)
 
-**Compile for x86-64 Linux.** Select `--target=x86_64-pc-linux-gnu` to compile with the
-System V AMD64 backend. Use `-c` to write an ELF object, or `-nostdlib` to link C++ sources,
-ycxx-generated `.o` files, or a mixture into a static executable. The startup runs namespace-scope
+**Compile for x86-64 Linux.** A ycxx build for x86-64 Linux defaults to `x86_64-pc-linux-gnu`
+and uses the System V AMD64 backend. `--target` overrides either host default. A build with no
+supported host default requires an explicit target. Use `-c` to write an ELF object or
+`-nostdlib` to link C++ sources, ycxx-generated `.o` files, or a mixture into a static executable.
+The startup runs namespace-scope
 initializers, then calls `int main()` or `int main(int, char**)` and passes its return value to Linux
 as the exit status. A program without such initializers can supply its own `_start`. Given
 `example.cpp` containing
 `int main() { return 0; }`, run the following on x86-64 Linux.
 
 ```sh
-build/bin/ycxx cxx --target=x86_64-pc-linux-gnu -c example.cpp
-build/bin/ycxx cxx --target=x86_64-pc-linux-gnu -nostdlib example.o -o example
+build/bin/ycxx cxx -c example.cpp
+build/bin/ycxx cxx -nostdlib example.o -o example
 ./example
 ```
 
-Fixed-prototype direct calls to free functions support passing and returning nonempty flat
-records with integral or ordinary object-pointer fields by value. The record can occupy up to
+Fixed-prototype calls (free and member functions, lambdas, function templates and calls
+through pointers) support passing and returning nonempty flat records with integral or
+ordinary object-pointer fields by value. The record can occupy up to
 16 bytes and must be trivial for calls. [Linux integer aggregate ABI](docs/design/linux-integer-aggregates.md)
 
 For mixed Linux objects, the pinned libycxx `<cstddef>` byte operator uses the same Itanium
@@ -106,8 +129,9 @@ Fixed-prototype definitions and direct calls on x86-64 Linux also move `float` a
 arguments and results. Direct variadic calls support the same scalar floating values and
 promote an unnamed `float` to `double`. Direct call result types can be deduced from `auto` or
 `decltype(auto)`. Runtime addition, subtraction, multiplication, division and unary negation
-work for `float` and `double` at their evaluation width. Both types support the six comparisons
-and conversion to `bool`.
+work for `float` and `double` at their evaluation width. Both types support the six comparisons,
+conversion to `bool`, conversions to and from every integer type, `double` to `float`, and
+`__builtin_fabs`. [#643](https://github.com/yrashk/ycxx/issues/643)
 [Linux scalar floating-point ABI](docs/design/linux-scalar-floating-point.md) ·
 [Linux scalar floating-point operations](docs/design/linux-scalar-floating-point.md#runtime-arithmetic) ·
 [Linux scalar variadic floating-point ABI](docs/design/linux-floating-variadic-calls.md) ·
@@ -130,14 +154,15 @@ functions defined in another translation unit. Native static executables and hos
 support those addresses. [#414](https://github.com/yrashk/ycxx/issues/414)
 · [#407](https://github.com/yrashk/ycxx/issues/407)
 
-On x86-64 Linux, direct calls and saved pointers across translation units share one address for
-simple external inline functions. Ordinary namespace-scope functions can use GNU hidden visibility,
-including coalesced inline and `constexpr` definitions.
+On both targets, direct calls and saved pointers across translation units share one address for
+simple external inline functions, with ycxx's linker or the system's. Ordinary namespace-scope
+functions can use GNU hidden visibility, including coalesced inline and `constexpr` definitions.
 [#422](https://github.com/yrashk/ycxx/issues/422) · [#602](https://github.com/yrashk/ycxx/issues/602)
+· [#124](https://github.com/yrashk/ycxx/issues/124)
 
 External inline namespace variables with relocation-free static initializers share one object
-across x86-64 ELF translation units. This lets two freestanding units using libycxx `<cstddef>`
-link with the pinned static library. [#432](https://github.com/yrashk/ycxx/issues/432)
+across translation units on both targets. On Linux this lets two freestanding units using libycxx
+`<cstddef>` link with the pinned static library. [#432](https://github.com/yrashk/ycxx/issues/432)
 
 ycxx ELF objects record function types and code sizes. The ELF linker accepts supported
 system-assembled objects with function symbols and the GNU-built libycxx static linkage-marker
@@ -150,8 +175,10 @@ cleanup-free ycxx functions with fixed scalar signatures and reach a handler in 
 An eligible ycxx function can also throw an `int` to a hosted peer's handler.
 A host-linked ycxx function can use one `catch (...)` to return an integer literal when
 a direct call on its parameter to an externally defined `int(int)` function throws.
+A host-linked void function can also destroy one initialized aggregate local on both exits
+from an external `void()` call and let the original exception reach a peer handler.
 [#572](https://github.com/yrashk/ycxx/issues/572) · [#578](https://github.com/yrashk/ycxx/issues/578)
-· [#583](https://github.com/yrashk/ycxx/issues/583)
+· [#583](https://github.com/yrashk/ycxx/issues/583) · [#663](https://github.com/yrashk/ycxx/issues/663)
 
 Both targets support cooked integer user-defined literals through namespace-scope literal
 operators with an `unsigned long long` parameter, including constant evaluation.
@@ -199,7 +226,8 @@ arithmetic fields. Supplied expressions initialize the fields in declaration ord
 fields use their default member initializer when available and otherwise get zero. A runtime
 declaration can also initialize one flat public direct base from an exact-type lvalue or an
 unqualified braced prvalue such as `B{7}`. Omitted trailing arithmetic fields of that aggregate
-are value-initialized when they have no written default member initializer.
+can use call-free default member initializers that read the initialized base. Fields with no
+written default member initializer are value-initialized.
 [#301](https://github.com/yrashk/ycxx/issues/301)
 
 **Language on macOS.** Programs can use:
@@ -218,6 +246,7 @@ are value-initialized when they have no written default member initializer.
   by argument-dependent lookup. Unqualified calls can find and rank functions in associated
   namespaces, including those of class template type arguments in ordinary calls. Functions
   support default arguments, recursion, operator overloading and calls through pointers.
+  Free function templates can instantiate omitted dependent scalar defaults after overload selection.
   Ordinary free binary operators use argument-dependent lookup, including associated base namespaces.
   Supported dependent binary operators on ordinary non-template classes also find associated
   nonmember candidates at instantiation. Ordinary unary minus can find hidden friends by
@@ -237,9 +266,10 @@ are value-initialized when they have no written default member initializer.
   cv-qualified objects. Scalar allocation uses the global Itanium allocation functions.
   Syntax checking also covers one-dimensional scalar `new T[n]` and `delete[] p`.
   On Linux x86-64, ordinary functions with cleanup-free unwind frames can default-initialize
-  one-dimensional integral and ordinary pointer arrays with a literal bound. The allocation
-  returns the original address. `delete[] p` releases it through the unsized global deallocator,
-  including for zero-length arrays.
+  one-dimensional integral and ordinary pointer arrays with a bound built from integer literals,
+  parentheses, unary `+` and `-`, and binary `+`, `-`, and `*`. The allocation returns the
+  original address. `delete[] p` releases it through the unsized global deallocator, including
+  for zero-length arrays.
   The usual aligned scalar allocation and deallocation signatures support explicit calls with
   `std::align_val_t`. Written nonthrowing global scalar and array overloads with a final
   `const Tag&` support explicit calls, including `std::nothrow_t` and user-defined class tags.
@@ -289,11 +319,14 @@ are value-initialized when they have no written default member initializer.
   members of class templates, member function and
   constructor templates, parameter packs and fold expressions, alias templates, template
   template parameters, concepts and requires-expressions in overload resolution, including
-  explicit trailing type packs in ordinary constrained function overloads and checking constraints
-  when directly naming a non-dependent primary class specialization with explicit type arguments,
+  explicit trailing type packs in ordinary constrained function overloads. Directly named
+  non-dependent primary class specializations with explicit type arguments check constraints.
+  Non-template code outside requires-expression bodies also checks constraints on directly named
+  primary namespace variable templates with explicit non-dependent type arguments. Templates support
   `if constexpr`, deferred template static assertion failures, and two-phase lookup, with
   Itanium names identical to Clang's; Clang's
-  `__make_integer_seq`;
+  `__make_integer_seq`. Template type arguments can use terminal namespace-qualified alias
+  specializations that expand to dependent member types. [#630](https://github.com/yrashk/ycxx/issues/630)
 - dependent `__is_same`, `__is_reference`, `__is_const`, `__is_volatile`, `__is_array`,
   `__is_pointer`, `__is_function`, `__is_enum`, `__is_union`, `__is_class`, `__is_object`, and the
   three member-pointer predicates as `bool` template arguments or defaults, including through
@@ -315,7 +348,8 @@ are value-initialized when they have no written default member initializer.
 - `__is_empty` accounts for inherited data members and supports dependent operands in class-template
   bases and variable-template initializers.
   [Extension guide](docs/EXTENSIONS.md) · [#218](https://github.com/yrashk/ycxx/issues/218)
-- logical negation of a qualified dependent `bool` variable template-id in a `bool` template
+- unqualified dependent `bool` variable template-ids as `bool` template arguments, and
+  logical negation of a qualified dependent `bool` variable template-id in a `bool` template
   argument or default
   [#209](https://github.com/yrashk/ycxx/issues/209);
 - a single nonvirtual, nonpolymorphic base in a primary class template, including an
@@ -331,10 +365,11 @@ are value-initialized when they have no written default member initializer.
   with addressable static storage and scalar calls ([#338](https://github.com/yrashk/ycxx/issues/338));
 - casts, including `static_cast<T&&>` from a compatible object lvalue and runtime `static_cast`
   downcasts of object pointers and lvalue references through accessible, unambiguous
-  nonvirtual base paths, `sizeof`/`alignof` (classes included), `decltype`, and calls
-  through pointers to functions. Qualified functional casts check access to aliases and typedefs
-  declared directly in an ordinary class. [#199](https://github.com/yrashk/ycxx/issues/199) ·
-  [#216](https://github.com/yrashk/ycxx/issues/216)
+  nonvirtual base paths, `sizeof`/`alignof` (classes included), direct-member `offsetof` for
+  ordinary standard-layout classes, `decltype`, and calls through pointers to functions.
+  Qualified functional casts check access to aliases and typedefs declared directly in an
+  ordinary class. [#199](https://github.com/yrashk/ycxx/issues/199) ·
+  [#216](https://github.com/yrashk/ycxx/issues/216) · [#248](https://github.com/yrashk/ycxx/issues/248)
 - equality and inequality between `std::nullptr_t` values and between a `std::nullptr_t`
   value and a pointer. [#199](https://github.com/yrashk/ycxx/issues/199)
 - constant evaluation on ycxx's own interpreter: `constexpr`, `consteval`, `constinit`,
@@ -355,14 +390,17 @@ are value-initialized when they have no written default member initializer.
 macros, conditionals, `_Pragma` and the predefined macros. `ycxx cxx -E` matches Clang's output.
 `ycxx cxx -E --target=x86_64-linux-gnu` selects Linux macros and glibc's multiarch include path
 and preprocesses glibc's `<stdio.h>`. Linux `<stdarg.h>` supplies the `va_list` declaration, and
-direct `<float.h>` and `<limits.h>` provide the target's numeric limits.
+direct `<float.h>` and `<limits.h>` provide the target's numeric limits. glibc's `<stdint.h>` compiles
+(#657); `<inttypes.h>` does not yet (#664).
 [#475](https://github.com/yrashk/ycxx/issues/475)
 
 **Incremental builds through a resident daemon.** `ycxx cxx` hands its work to a per-project
 `ycxx daemon` (`YCXX_NO_DAEMON=1` runs in-process), which watches the files it has read and keeps
 its analysis between commands. A repeated build re-runs nothing, and an edit re-runs only what
 it affects, through code generation and the link. The daemon serves concurrent requests on a
-thread pool, and its output is byte for byte that of a cold, in-process build.
+thread pool, and its output is byte for byte that of a cold, in-process build. The daemon, its file
+watcher (FSEvents on macOS, inotify on Linux), the engine trace and the LSP server below work the
+same on both hosts. [#659](https://github.com/yrashk/ycxx/issues/659)
 
 **See what the engine does.** `ycxx cxx --trace-engine a.cpp` (or `YCXX_TRACE_ENGINE=stream`)
 prints every query the build went through as a colored tree on stderr: what ran, what was
@@ -371,8 +409,15 @@ memory each cell allocated and retains, with sums per subtree, per query kind an
 shows everything reused. A compile error is marked red at the cell where it starts, and its
 message is shown up to the root. Diagnostic details include the file, line and column where
 available. `--trace-engine=interactive` opens a browser of the trace after the compile: a tree
-with each function's IR and assembly, a timeline of the pool's workers, and filters.
-`--trace-engine=json` writes the whole trace as JSON Lines, for tools and agents.
+with each function's IR and assembly, a timeline of the pool's workers, and filters. It follows
+the terminal's size and takes the mouse: click to select, fold and sort by a column, use the
+wheel to scroll, and drag to resize the pane. It copies a cell, a subtree, selected rows or any
+selected text of the IR and instructions to the clipboard, over SSH too. Its histogram view charts
+self and total time, memory, runs, cache hits and waits by query kind, source file or child, and a
+bar opens its cells; cells show and filter by their source position
+([docs/TRACE.md](docs/TRACE.md#the-interactive-browser)).
+`--trace-engine=json` writes the whole trace as JSON Lines, for tools and agents. Cells that
+come from source (a file, a unit, a function's IR and code) carry their file and lines.
 `ycxx cxx --watch` stays attached and builds again whenever a file the build read changes,
 headers included; with `--trace-engine` each rebuild shows what it re-ran, and
 `--trace-engine=interactive` keeps the browser open and adds each rebuild live. `ycxx ctl trace
