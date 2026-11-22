@@ -232,11 +232,20 @@ class Terminal {
       return true;
     }
     if (ms >= 0) {
-      fd_set in;
-      FD_ZERO(&in);
-      FD_SET(fd_, &in);
-      timeval tv{ms / 1000, (ms % 1000) * 1000};
-      if (::select(fd_ + 1, &in, nullptr, nullptr, &tv) <= 0) return false;
+      // A signal (a resize) in the middle of the wait waits out the rest, so it never cuts a
+      // sequence in two.
+      const auto until = std::chrono::steady_clock::now() + std::chrono::milliseconds(ms);
+      while (true) {
+        const auto left = std::chrono::duration_cast<std::chrono::microseconds>(until - std::chrono::steady_clock::now()).count();
+        if (left <= 0) return false;
+        fd_set in;
+        FD_ZERO(&in);
+        FD_SET(fd_, &in);
+        timeval tv{static_cast<time_t>(left / 1'000'000), static_cast<suseconds_t>(left % 1'000'000)};
+        const int r = ::select(fd_ + 1, &in, nullptr, nullptr, &tv);
+        if (r > 0) break;
+        if (r == 0 || errno != EINTR) return false;
+      }
     }
     while (true) {
       const auto n = ::read(fd_, &c, 1);

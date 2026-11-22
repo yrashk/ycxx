@@ -227,7 +227,6 @@ class Browser {
     const auto before = tree_.rows();
     const std::optional<std::int32_t> held = cursor_ > 0 && cursor_ < before.size() ? std::optional(before[cursor_].node) : std::nullopt;
     const bool more = f();
-    ++rows_version_;
     if (!more) live_.reset(), ended_ = true;
     if (held) keep_selected(*held);
     return more;
@@ -358,8 +357,9 @@ class Browser {
     }
     if (m.button != 0) return;
     // Twice on the same thing (row, slice), not merely the same line.
-    const bool twice = last_press_ && now - last_press_->time <= double_click && last_press_->hit == h && rows_version_ == last_press_->rows;
-    last_press_ = twice ? std::nullopt : std::optional(Press{h, now, rows_version_});
+    const std::int32_t node = row_node(h);
+    const bool twice = last_press_ && now - last_press_->time <= double_click && last_press_->hit == h && last_press_->node == node;
+    last_press_ = twice ? std::nullopt : std::optional(Press{h, now, node});
     dragging_ = h.area == Hit::Area::divider;  // a release that never came ends here
     if (prompt_) prompt_ = false;  // a click elsewhere keeps what was typed
     switch (h.area) {
@@ -969,8 +969,14 @@ class Browser {
   struct Press {
     Hit hit;
     std::chrono::milliseconds time;
-    std::uint64_t rows;  // `rows_version_` then: a live feed that moved the rows breaks a double click
+    std::int32_t node;  // the row's node: a live feed that moved the rows breaks a double click
   };
+  // The node of a row or marker hit; -1 for anything else.
+  std::int32_t row_node(const Hit& h) const {
+    if (h.area != Hit::Area::row && h.area != Hit::Area::marker) return -1;
+    const auto rows = tree_.rows();
+    return h.index < rows.size() ? rows[h.index].node : -1;
+  }
   bool pane_focused() const { return focus_ == Focus::detail && split(); }
 
   Tree& tree_;
@@ -987,7 +993,6 @@ class Browser {
   std::size_t split_ = 600;  // the divider's place, in thousandths of the width
   bool dragging_ = false;
   std::optional<Press> last_press_;
-  std::uint64_t rows_version_ = 0;
 };
 
 }  // namespace ycxx::trace

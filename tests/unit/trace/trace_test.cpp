@@ -601,6 +601,24 @@ void browser(const std::filesystem::path& golden_path, bool update) {
   check(t.filtering() && t.rows().size() == 3, std::format("a click ends the prompt, the filter stays (Tu > FunctionIr > FunctionGen): {}", t.rows().size()));
   check(!b.frame().cursor, "and the cursor is hidden again");
 
+  // A row deep enough that its marker is cut off by the columns (cell column 0–34 at 120): no target.
+  {
+    trace::Tree deep;
+    std::vector<Event> chain;
+    for (std::uint32_t d = 0; d < 20; ++d) {
+      chain.push_back(ev(d + 1, d, "K", std::format("{}", d), Outcome::executed));
+      chain.back().depth = d;
+    }
+    deep.add(chain);
+    deep.expand_all(true);
+    trace::Browser db(deep);
+    db.resize(30, 120);
+    (void)db.frame();
+    check(db.hit(32, 2 + 1 + 16) == H{H::Area::marker, 16}, "depth 16: the marker fits (32–33)");
+    check(db.hit(34, 2 + 1 + 17) == H{H::Area::row, 17}, "depth 17: the marker (34–35) is cut off, so the row");
+    check(db.hit(36, 2 + 1 + 18) == H{H::Area::row, 18}, "depth 18: a click in the time column is the row");
+  }
+
   const std::string text = got;
   if (update) {
     std::ofstream(golden_path, std::ios::binary) << text;
