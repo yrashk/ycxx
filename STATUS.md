@@ -1739,6 +1739,17 @@ template's tokens again with the arguments bound.
   specializations. `&&` follows #671; type-trait operations (`__is_same(T, U)`) still have no
   symbol (#780).
 
+## Enumeration-typed template parameters (#774)
+
+- A non-type template parameter may have an enumeration type ([temp.param]/7), scoped or
+  unscoped, with a fixed underlying type, in a namespace. Its arguments are converted constant
+  expressions of that type ([temp.arg.nontype]), so an integer is rejected. Explicit and partial
+  specializations, defaults and deduction from a specialization work.
+- Symbols write an argument as `L <enumeration type> <value> E`, with `n` before a negative value,
+  as Clang and GCC do (`tests/own/abi/enum-template-args.run.cpp`, with a Clang peer).
+- Tests: `tests/own/templates/enum-parameters/`. Not yet: a functional cast as a template argument,
+  `h<E(5)>()`, which the template-argument parser takes for a type-id (#810).
+
 ## Templates, ζ step 2: class templates (#88, 2026-11-18)
 
 - **Declarations:** class templates at namespace scope (`template<…> struct X {…};` and

@@ -2322,10 +2322,9 @@ public:
     else if (s_->types().is_function(t)) t = s_->types().pointer(t);
     t = sema::Types::unqualified(t);
     // [temp.param]/7: a structural type; class types are not supported yet.
-    if (!s_->types().is_integral(t) && !s_->types().is_pointer(t) && !s_->types().is_reference(t) &&
-        !s_->types().is(t, Builtin::nullptr_t) && !s_->types().is_dependent(t)) {
-      bool later = s_->types().is_class(t) || s_->types().kind(t) == sema::TypeKind::enum_ ||
-                   s_->types().is_floating(t);  // structural, not supported yet (floating: #317)
+    if (!s_->types().is_integral(t) && !s_->types().is_enum(t) && !s_->types().is_pointer(t) &&
+        !s_->types().is_reference(t) && !s_->types().is(t, Builtin::nullptr_t) && !s_->types().is_dependent(t)) {
+      bool later = s_->types().is_class(t) || s_->types().is_floating(t);  // structural, not supported yet (floating: #317)
       s_->diag(at, later ? Diag::not_supported : Diag::invalid_template_parameter_type,
                s_->types().is_class(t)      ? Tk::kw_class
                : s_->types().is_floating(t) ? (s_->types().is(t, Builtin::float_) ? Tk::kw_float : Tk::kw_double)
