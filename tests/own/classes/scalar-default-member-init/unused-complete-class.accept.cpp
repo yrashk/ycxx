@@ -14,6 +14,10 @@ struct Nested {
   int value = Source{}.value;
 };
 
+struct Value { int number; };
+struct ClassDefault { Value value = Value{3}; };
+struct UnusedDefault { int value = ClassDefault{}.value.number; };
+
 // [temp.inst]: a dependent default is not instantiated just to determine the layout.
 template<class T> struct Deferred {
   int value = T::missing;

@@ -7210,6 +7210,12 @@ void Program::check_default_member_initializers(const sema::ClassRec& rec, Resul
     } catch (const TooDeep&) {
       // The parser already diagnosed excessive nesting.
     }
+    // Implementation limits in a nested initializer belong to the initialization that uses it.
+    const auto unsupported = sema::diag_id(Diag::not_supported);
+    const auto discarded = std::remove_if(out.diags.begin() + before, out.diags.end(), [&](const auto& diagnostic) {
+      return diagnostic.id == unsupported;
+    });
+    out.diags.erase(discarded, out.diags.end());
     dmi.invalid = caller.has_error_since(before);
     if (!dmi.invalid) out.demands.insert(out.demands.end(), caller.demands.begin(), caller.demands.end());
   }

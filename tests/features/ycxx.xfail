@@ -59,6 +59,7 @@ draft/class/class.base.init-2.reject.cpp errors elsewhere: 'struct' not supporte
 draft/class/class.base.init-3.reject.cpp errors elsewhere: 'struct' not supported yet
 draft/class/class.base.init-5.reject.cpp errors elsewhere: 'struct' not supported yet
 draft/class/class.base.init-6.reject.cpp errors elsewhere: 'struct' not supported yet
+draft/class/class.base.init-7.accept.cpp example has a comment-only initializer placeholder (#837)
 draft/class/class.base.init-8.reject.cpp errors elsewhere: 'struct' not supported yet
 draft/class/class.base.init-9.accept.cpp 'struct' not supported yet
 draft/class/class.bit-1.accept.cpp 'enum' not supported yet
@@ -163,7 +164,7 @@ draft/dcl/dcl.fct.default-8.reject.cpp errors elsewhere: preprocessing directive
 draft/dcl/dcl.fct.spec-1.reject.cpp errors elsewhere: 'struct' not supported yet
 draft/dcl/dcl.init.aggr-1.accept.cpp 'struct' not supported yet
 draft/dcl/dcl.init.aggr-10.accept.cpp 'struct' not supported yet
-draft/dcl/dcl.init.aggr-11.reject.cpp errors elsewhere: 'struct' not supported yet
+draft/dcl/dcl.init.aggr-11.reject.cpp reference-member initializer recursion is tracked in #118
 draft/dcl/dcl.init.aggr-15.accept.cpp redefinition of 'y' (the example's two definitions are alternatives)
 draft/dcl/dcl.init.aggr-17.accept.cpp 'struct' not supported yet
 draft/dcl/dcl.init.aggr-18.reject.cpp errors elsewhere: 'union' not supported yet
