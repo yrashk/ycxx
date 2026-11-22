@@ -4345,7 +4345,9 @@ private:
       ps_.bump();
       ps_.skip_attributes();
       ps_.bump();
+      ps_.member_alias_type = true;
       auto t = ps_.type_id();
+      ps_.member_alias_type = false;
       if (!t || !member_alias(c, n, at, *t)) return bad();
       if (!ps_.expect(Tk::semi)) bad();
       return;

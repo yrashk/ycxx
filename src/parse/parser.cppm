@@ -4266,7 +4266,14 @@ public:
       // operations make the operand something other than the qualified-id itself.
       bool postfix = is(Tk::l_paren) || is(Tk::l_square) || is(Tk::period) || is(Tk::arrow) ||
                      is(Tk::plusplus) || is(Tk::minusminus);
-      return s_->scope_expr(*s, n, begin, name_at, pos(), postfix ? std::nullopt : address);
+      if (member_alias_type && in_template_value_argument_ && !s_->unevaluated && next == 2 &&
+          !postfix && !address && !keyword && s->type &&
+          s_->types().is_dependent(*s->type) && (is(Tk::greater) || is(Tk::greatergreater) || is(Tk::comma))) {
+        auto value = s_->ins().intern_value(ast::VDepMember{s_->types().canonical(*s->type), n});
+        return s_->literal(s_->builtin(Builtin::dependent), value, ast::ValueCategory::lvalue, begin, pos());
+      }
+      return s_->scope_expr(*s, n, begin, name_at, pos(), postfix ? std::nullopt : address,
+                            member_alias_type && in_template_value_argument_ && next == 2);
     };
     if (operator_name) {
       if (is(Tk::less) && s_->scope_names_template(*s, n)) {
@@ -6213,6 +6220,7 @@ public:
   bool body = false;  // the part is a function body, not a declaration part
   bool dependent_decay_copy_body = false;  // a function template's compound statement, before replay
   bool substituting_partial_arguments = false;
+  bool member_alias_type = false;  // the class instantiation reparses this type-id
 private:
   // In a delimited operand, a `>` is an operator again ([temp.names]/4).
   struct Unangle {
