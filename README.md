@@ -41,6 +41,9 @@ and Mach-O linker on arm64 macOS, where `arm64-apple-darwin` is the default targ
 object files from Clang or GCC. Errors are reported as
 `file:line:col: error: …`.
 
+The arm64 Mach-O linker preserves supported cleanup-free DWARF frames from input objects.
+[Mach-O unwind support #72](https://github.com/yrashk/ycxx/issues/72)
+
 ```sh
 tools/build
 build/bin/ycxx cxx hello.cpp -o hello && ./hello
@@ -54,6 +57,10 @@ instantiation. Concrete constant template arguments can use braced conversions s
 
 Functional conversions can construct namespace-qualified class-template specializations with
 parentheses or braces, including through namespace aliases. [#697](https://github.com/yrashk/ycxx/issues/697)
+
+Class templates at namespace scope can delete their copy assignment on its first in-class
+declaration when the member has no ref-qualifier. Specializations retain the deleted overload.
+[#709](https://github.com/yrashk/ycxx/issues/709)
 
 C++26 reflection annotations on class heads and ordinary function declarations accept
 constant payloads and retain their types for compiler consumers.
@@ -163,8 +170,10 @@ cleanup-free ycxx functions with fixed scalar signatures and reach a handler in 
 An eligible ycxx function can also throw an `int` to a hosted peer's handler.
 A host-linked ycxx function can use one `catch (...)` to return an integer literal when
 a direct call on its parameter to an externally defined `int(int)` function throws.
+A host-linked void function can also destroy one initialized aggregate local on both exits
+from an external `void()` call and let the original exception reach a peer handler.
 [#572](https://github.com/yrashk/ycxx/issues/572) · [#578](https://github.com/yrashk/ycxx/issues/578)
-· [#583](https://github.com/yrashk/ycxx/issues/583)
+· [#583](https://github.com/yrashk/ycxx/issues/583) · [#663](https://github.com/yrashk/ycxx/issues/663)
 
 Both targets support cooked integer user-defined literals through namespace-scope literal
 operators with an `unsigned long long` parameter, including constant evaluation.
@@ -376,8 +385,9 @@ macros, conditionals, `_Pragma` and the predefined macros. `ycxx cxx -E` matches
 `ycxx cxx -E --target=x86_64-linux-gnu` selects Linux macros and resource headers. On native
 x86-64 Linux it also searches glibc's multiarch include path and preprocesses glibc's `<stdio.h>`.
 Linux `<stdarg.h>` supplies the `va_list` declaration, and direct `<float.h>` and `<limits.h>`
-provide the target's numeric limits. A Darwin target can use the configured SDK or one selected
-by `SDKROOT`. Cross-target builds can also supply target headers with `-I` or `-isystem`.
+provide the target's numeric limits. glibc's `<stdint.h>` compiles on native Linux (#657), and
+`<inttypes.h>` support remains tracked in #664. A Darwin target can use the configured SDK or one
+selected by `SDKROOT`. Cross-target builds can also supply target headers with `-I` or `-isystem`.
 [#475](https://github.com/yrashk/ycxx/issues/475)
 [#690](https://github.com/yrashk/ycxx/issues/690)
 
@@ -398,7 +408,9 @@ message is shown up to the root. Diagnostic details include the file, line and c
 available. `--trace-engine=interactive` opens a browser of the trace after the compile: a tree
 with each function's IR and assembly, a timeline of the pool's workers, and filters. It follows
 the terminal's size and takes the mouse: click to select, fold and sort by a column, use the
-wheel to scroll, and drag to resize the pane ([docs/TRACE.md](docs/TRACE.md#the-interactive-browser)).
+wheel to scroll, and drag to resize the pane. It copies a cell, a subtree, selected rows or any
+selected text of the IR and instructions to the clipboard, over SSH too
+([docs/TRACE.md](docs/TRACE.md#the-interactive-browser)).
 `--trace-engine=json` writes the whole trace as JSON Lines, for tools and agents. Cells that
 come from source (a file, a unit, a function's IR and code) carry their file and lines.
 `ycxx cxx --watch` stays attached and builds again whenever a file the build read changes,

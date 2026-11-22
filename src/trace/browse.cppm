@@ -4,9 +4,11 @@
 module;
 #include <errno.h>
 #include <fcntl.h>
+#include <poll.h>
 #include <signal.h>
 #include <sys/ioctl.h>
 #include <sys/select.h>
+#include <sys/wait.h>
 #include <termios.h>
 #include <unistd.h>
 export module ycxx.trace:browse;
@@ -171,10 +173,11 @@ class Terminal {
     write(out);
   }
 
-  enum class Wake : std::uint8_t { input, feed, resize };
+  enum class Wake : std::uint8_t { input, feed, resize, tick };
   // Waits for the terminal, the feed or a resize. select, not poll: macOS's poll does not support
   // devices, and flags the terminal invalid.
-  Wake wait(int feed) const {
+  // `tick`: after that long with nothing to read (none: wait however long).
+  Wake wait(int feed, std::optional<std::chrono::milliseconds> tick = std::nullopt) const {
     if (pending_) return Wake::input;
     const int winch = restore_state.winch[0];
     while (true) {
@@ -183,7 +186,10 @@ class Terminal {
       FD_SET(fd_, &in);
       if (feed >= 0) FD_SET(feed, &in);
       if (winch >= 0) FD_SET(winch, &in);
-      if (::select(std::max({fd_, feed, winch}) + 1, &in, nullptr, nullptr, nullptr) < 0) continue;
+      timeval tv{0, tick ? static_cast<suseconds_t>(tick->count() * 1000) : 0};
+      const int r = ::select(std::max({fd_, feed, winch}) + 1, &in, nullptr, nullptr, tick ? &tv : nullptr);
+      if (r < 0) continue;
+      if (r == 0) return Wake::tick;
       if (winch >= 0 && FD_ISSET(winch, &in)) {
         char drain[64];
         while (::read(winch, drain, sizeof drain) > 0) {
@@ -260,6 +266,91 @@ class Terminal {
   std::optional<char> pending_;
 };
 
+// The clipboard beyond the terminal (#636). OSC 52 reaches it from anywhere a terminal supports it
+// (over SSH too), but some terminals (Terminal.app) ignore it, so a local session also runs a
+// command: `YCXX_CLIPBOARD` when set (`osc52`: none), else the first of pbcopy, wl-copy (Wayland),
+// xclip and xsel (X) on the PATH. Over SSH none runs: it would copy on the remote host.
+std::optional<std::string> clipboard_command() {
+  if (const char* c = std::getenv("YCXX_CLIPBOARD"); c && *c) {
+    if (std::string_view(c) == "osc52") return std::nullopt;
+    return std::string(c);
+  }
+  if (std::getenv("SSH_CONNECTION") || std::getenv("SSH_TTY")) return std::nullopt;
+  const auto found = [](std::string_view name) {
+    const char* path = std::getenv("PATH");
+    for (auto dir : std::string_view(path ? path : "/usr/bin:/bin") | std::views::split(':')) {
+      const std::string file = std::format("{}/{}", std::string_view(dir.begin(), dir.end()), name);
+      if (::access(file.c_str(), X_OK) == 0) return true;
+    }
+    return false;
+  };
+  const bool wayland = std::getenv("WAYLAND_DISPLAY"), x11 = std::getenv("DISPLAY");
+  if (found("pbcopy")) return "pbcopy";
+  if (wayland && found("wl-copy")) return "wl-copy";
+  if (x11 && found("xclip")) return "xclip -selection clipboard";
+  if (x11 && found("xsel")) return "xsel --clipboard --input";
+  return std::nullopt;
+}
+// Runs `command` under /bin/sh with `text` on its standard input; true if it exits 0 within 2 s.
+bool run_clipboard(const std::string& command, std::string_view text) {
+  int in[2];
+  if (::pipe(in) != 0) return false;
+  const pid_t pid = ::fork();
+  if (pid < 0) {
+    ::close(in[0]);
+    ::close(in[1]);
+    return false;
+  }
+  if (pid == 0) {
+    // Only async-signal-safe calls between fork and exec: the parent may have threads. A process
+    // group of its own, so a timeout reaches whatever the command started.
+    ::setpgid(0, 0);
+    ::dup2(in[0], 0);
+    ::close(in[0]);
+    ::close(in[1]);
+    const int null = ::open("/dev/null", O_WRONLY);
+    if (null >= 0) ::dup2(null, 1), ::dup2(null, 2);
+    ::execl("/bin/sh", "sh", "-c", command.c_str(), static_cast<char*>(nullptr));
+    ::_exit(127);
+  }
+  ::setpgid(pid, pid);  // as the child does: whichever runs first
+  ::close(in[0]);
+  // Everything within 2 s, the writing too: a command that does not read never holds the browser.
+  const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+  const auto left_ms = [&] {
+    return static_cast<int>(std::max<std::int64_t>(0, std::chrono::duration_cast<std::chrono::milliseconds>(until - std::chrono::steady_clock::now()).count()));
+  };
+  // A command that stops reading must not kill the browser with SIGPIPE.
+  struct sigaction ignore{}, old{};
+  ignore.sa_handler = SIG_IGN;
+  ::sigaction(SIGPIPE, &ignore, &old);
+  ::fcntl(in[1], F_SETFL, ::fcntl(in[1], F_GETFL) | O_NONBLOCK);
+  bool written = true;
+  for (std::string_view rest = text; !rest.empty();) {
+    const auto n = ::write(in[1], rest.data(), rest.size());
+    if (n > 0) {
+      rest.remove_prefix(static_cast<std::size_t>(n));
+      continue;
+    }
+    if (n < 0 && errno == EINTR) continue;
+    pollfd p{in[1], POLLOUT, 0};
+    if (n < 0 && errno == EAGAIN && left_ms() > 0 && ::poll(&p, 1, left_ms()) > 0) continue;
+    written = false;
+    break;
+  }
+  ::close(in[1]);
+  ::sigaction(SIGPIPE, &old, nullptr);
+  int status = 0;
+  while (true) {
+    if (::waitpid(pid, &status, WNOHANG) == pid) return written && WIFEXITED(status) && WEXITSTATUS(status) == 0;
+    if (left_ms() == 0) break;
+    ::usleep(10'000);
+  }
+  ::kill(-pid, SIGKILL);
+  ::waitpid(pid, &status, 0);
+  return false;
+}
+
 }  // namespace
 
 bool browse(Tree& tree, Feed* feed) {
@@ -268,19 +359,40 @@ bool browse(Tree& tree, Feed* feed) {
   Browser b(tree);
   if (feed) b.set_live(feed->source);
   const auto start = std::chrono::steady_clock::now();
+  auto next_tick = start;  // while a drag is held past an edge: ticks on time, whatever else wakes us
   while (true) {
     const auto [rows, cols] = term.size();
     b.resize(rows, cols);
     term.draw(b.frame());
-    switch (term.wait(feed ? feed->fd : -1)) {
+    std::optional<std::chrono::milliseconds> wait;
+    if (b.ticking()) {
+      const auto now = std::chrono::steady_clock::now();
+      if (now >= next_tick) {
+        b.tick();
+        next_tick = now + Browser::tick_every;
+        continue;
+      }
+      wait = std::chrono::duration_cast<std::chrono::milliseconds>(next_tick - now) + std::chrono::milliseconds(1);
+    } else {
+      next_tick = std::chrono::steady_clock::now() + Browser::tick_every;
+    }
+    switch (term.wait(feed ? feed->fd : -1, wait)) {
       case Terminal::Wake::resize: continue;
+      case Terminal::Wake::tick: continue;
       case Terminal::Wake::feed:
         if (!b.pump(feed->pump)) feed = nullptr;
         continue;
       case Terminal::Wake::input: break;
     }
     const auto now = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start);
-    if (b.handle(parse_input(term.read_input()), now).quit) return true;
+    const Action a = b.handle(parse_input(term.read_input()), now);
+    if (a.quit) return true;
+    if (a.copy) {
+      term.write(osc52(*a.copy, std::getenv("TMUX") != nullptr));
+      const std::optional<std::string> command = clipboard_command();
+      const bool ran = command && run_clipboard(*command, *a.copy);
+      b.note(std::format("{} (OSC 52{})", b.notice(), ran ? ", " + command->substr(0, command->find(' ')) : std::string()));
+    }
   }
 }
 
