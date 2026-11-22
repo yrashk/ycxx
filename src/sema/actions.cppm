@@ -1144,7 +1144,7 @@ public:
     for (u32 c : dependent_calls)
       if (c >= begin && c < end) calls.push_back(c - begin);
     return ins().intern_value(ast::VAtom{item_, loc_base_ + begin, loc_base_ + end, depth, ins().intern_seq(std::span<const ConstId>(mapping)),
-                                         ins().intern_seq(std::span<const u32>(calls)), fn_params});
+                                         ins().intern_seq(std::span<const u32>(calls)), fn_params, current_class});
   }
   // `C<args>` in normal form: C's with the arguments substituted into its atoms' mappings
   // ([temp.constr.normal]/1.4); none, diagnosed, when they do not fit or a mapping cannot be formed.
