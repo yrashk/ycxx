@@ -800,7 +800,7 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
   ast::Interners& ins = world.ins;
   TranslationUnit tu;
   tu.name = std::move(name);
-  // Native compilation may consume peer-owned Linux objects, including one non-key definition.
+  // Native compilation may consume peer-owned objects, including one non-key definition.
   const auto& classes = program.classes();
   std::set<EntityId> automatic_primary_bases;
   if (classes.has_virtual_layouts()) {
@@ -1057,7 +1057,7 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
                                 location.item, location.offset, complete.this_type});
         continue;
       }
-      if (linux && !member && program.supports_base_object_variant(d.entity, uncertain_layouts))
+      if (!member && program.supports_base_object_variant(d.entity, uncertain_layouts))
         tu.base_object_variants.insert(d.entity);
       tu.functions.back().coalesced = inline_declarations.contains(d.entity) && entity.kind == sema::EntityKind::function &&
                                      entity.linkage == ast::Linkage::external && entity.templ == EntityId::none &&

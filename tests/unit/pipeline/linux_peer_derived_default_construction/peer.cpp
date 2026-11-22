@@ -3,7 +3,10 @@
 #include <cstring>
 #include <typeinfo>
 
-extern const unsigned char derived_table[24] asm("_ZTV1D");
+// The symbol carries the C prefix (`_` on Darwin, none on ELF).
+#define LABEL_STR(p) #p
+#define LABEL_PREFIX(p) LABEL_STR(p)
+extern const unsigned char derived_table[24] asm(LABEL_PREFIX(__USER_LABEL_PREFIX__) "_ZTV1D");
 
 static_assert(sizeof(D) == 16 && alignof(D) == 8);
 

@@ -577,14 +577,14 @@ to distinguish lvalue and rvalue receivers. [#311](https://github.com/yrashk/ycx
 ordinary root classes. Ordinary pure virtual declarations define abstract interfaces through a
 single nonvirtual base at each level. Ordinary virtual members can use `final` to prevent
 further overrides. Derived classes also support unqualified base initializers with parentheses
-or flat braces. On Linux x86-64,
+or flat braces. On Linux x86-64 and arm64 macOS,
 pointer and reference consumers can call virtual functions with fixed integer signatures on
 peer-owned objects with an ordinary root, including a derived class with that single public
 base, at most one integral field and at most one override. Consumers can upcast those derived
 views, access ordinary integral members, and query `sizeof` and `alignof` for the Itanium layout.
 A translation unit can also define one non-key virtual member of an eligible root out of class.
-For that case, the peer provides the key function, virtual table and RTTI. On Linux x86-64,
-a caller can also dispatch through a peer-owned abstract interface with one or two
+For that case, the peer provides the key function, virtual table and RTTI. A caller can
+also dispatch through a peer-owned abstract interface with one or two
 public pure virtual slots using fixed integer signatures and bare `noexcept`.
 [#309](https://github.com/yrashk/ycxx/issues/309)
 
@@ -593,19 +593,20 @@ multidimensional arrays. They can also copy or alias ordinary non-template class
 bases and bind to their public, addressable data members, including array and reference
 members. [#285](https://github.com/yrashk/ycxx/issues/285)
 
-**Linux virtual tables.** A translation unit with the key definition emits the vtable and
+**Virtual tables.** On Linux x86-64 and arm64 macOS, a translation unit with the key definition emits the vtable and
 RTTI for an ordinary root with one public integral field and two fixed integer virtual
-signatures. A peer supplies the second virtual. Linux x86-64 also supports ordinary
+signatures. A peer supplies the second virtual. Both targets also support ordinary
 automatic default initialization (`Root root;`) for that shape with an implicit default
 constructor, a trivial destructor and no field initializer. The local object's vptr uses the
 same table whether the key definition is in this translation unit or a peer. A plain automatic
 derived object can also use a table from the same unit or a peer when its public abstract base
 has one pure `int f()` and the derived class has one public `int` field and one override. The
 unit defining the override out of class emits the derived table and both RTTI descriptors. The
-caller can bind the base reference and expose it to the peer.
-[#309](https://github.com/yrashk/ycxx/issues/309)
+caller can bind the base reference and expose it to the peer. On macOS the base class's RTTI
+follows Apple's arm64 convention for non-unique type names.
+[#309](https://github.com/yrashk/ycxx/issues/309) · [#650](https://github.com/yrashk/ycxx/issues/650)
 
-Linux x86-64 emits all three virtual destructor entries for a fieldless, baseless root when
+Both targets emit all three virtual destructor entries for a fieldless, baseless root when
 a peer defines its earlier key function. Complete and base destruction restore the root's
 vptr before calling the nonthrowing observer. The deleting entry then uses global sized
 `operator delete`. [#136](https://github.com/yrashk/ycxx/issues/136)
@@ -637,7 +638,7 @@ vptr before calling the nonthrowing observer. The deleting entry then uses globa
 - Parity between the two native back ends. x86-64 Linux does not yet pass classes with
   floating members by value, trivially copyable classes over 16 bytes as arguments, or x87
   `long double`. AArch64 macOS does not yet have native `int` throws, unwinding through ycxx
-  frames, native array `new`, or virtual calls on peer-owned classes, which x86-64 has. The
+  frames or native array `new`, which x86-64 has. The
   full table is [#639](https://github.com/yrashk/ycxx/issues/639).
 
 ### In progress
