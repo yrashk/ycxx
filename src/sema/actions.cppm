@@ -7508,6 +7508,20 @@ public:
       };
       std::vector<UnaryCandidate> viable;
       Ex object = operands.front();
+      auto deduced_type = [&](const ast::DeclSema& pattern, std::span<const ArgShape> shapes,
+                              std::span<const NodeId> defaults) -> std::optional<QualType> {
+        Templates t = templates();
+        auto args = t.deduce_call(pattern, shapes, {}, defaults);
+        if (!args) return std::nullopt;
+        if (pattern.constraints != ConstId::none) {
+          auto params = ins().seqs.elements(pattern.template_params);
+          auto constraint = t.substitute_constraint(pattern.constraints,
+                                                     Bindings::of(params.empty() ? 0 : params[0].depth, *args));
+          auto satisfied = constraint ? q_->satisfied(*constraint) : std::optional<bool>(false);
+          if (satisfied && !*satisfied) return std::nullopt;
+        }
+        return t.specialization_type(pattern, *args);
+      };
       bool unsupported = false;
       if (found && found->member && found->member->is_function) {
         const bool rvalue = object.cat() != ValueCategory::lvalue;
@@ -7515,13 +7529,18 @@ public:
         const int depth = base_depth(lt, target);
         for (const MemberDeclRec* candidate : member_functions(found->owner, name)) {
           if (candidate->is_static) continue;
-          auto fn = types().rec(candidate->type);
+          QualType function_type = candidate->type;
+          if (candidate->is_template) {
+            auto pattern = q_->template_decl(candidate->entity);
+            if (!pattern) continue;
+            auto specialized = deduced_type(*pattern, {}, candidate->defaults);
+            if (!specialized) continue;
+            function_type = *specialized;
+          }
+          auto fn = types().rec(function_type);
           Ics rank = implicit_object_rank(fn, object_cv(lt), rvalue);
           if (!rank.viable || !fn.params.empty()) continue;
-          if (candidate->is_template) {
-            unsupported = true;
-            continue;
-          }
+          unsupported |= candidate->is_template;
           if (depth) {
             rank.rank = 2;  // derived-to-base conversion
             rank.base_depth = depth;
@@ -7533,18 +7552,8 @@ public:
         QualType function_type = candidate.type;
         const bool is_template = (candidate.flags & decl_flag::template_) != 0;
         if (is_template) {
-          Templates t = templates();
           const std::array shapes{argument_shape(object)};
-          auto args = t.deduce_call(candidate, shapes, {}, found_defaults(candidate));
-          if (!args) continue;
-          if (candidate.constraints != ConstId::none) {
-            auto params = ins().seqs.elements(candidate.template_params);
-            auto constraint = t.substitute_constraint(candidate.constraints,
-                                                       Bindings::of(params.empty() ? 0 : params[0].depth, *args));
-            auto satisfied = constraint ? q_->satisfied(*constraint) : std::optional<bool>(false);
-            if (satisfied && !*satisfied) continue;
-          }
-          auto specialized = t.specialization_type(candidate, *args);
+          auto specialized = deduced_type(candidate, shapes, found_defaults(candidate));
           if (!specialized) continue;
           function_type = *specialized;
         }

@@ -79,7 +79,10 @@ namespace nonviable_template {
 struct Other {};
 template<class T> int operator-(Other&);
 template<class T = int> int operator-(const Other&);
-struct Value { friend constexpr int operator-(Value&) { return 61; } };
+struct Value {
+    template<class T> int operator-();
+    friend constexpr int operator-(Value&) { return 61; }
+};
 constexpr int use() {
     Value value;
     return -value;
