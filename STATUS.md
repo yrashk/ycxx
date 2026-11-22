@@ -1387,6 +1387,9 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   fixed underlying type before the enumerator list. Omitted scoped bases default to `int`. Unscoped opaque
   declarations spell their base. Compatible redeclarations and a later definition in the same
   namespace share the nominal type, and the enumerators become visible at the definition.
+- A named enum retains its in-list record across synchronous class-template instantiations that
+  define other enums. Queries can still use the enclosing enum's fixed underlying type
+  ([dcl.enum], [expr.sizeof]). [#897](https://github.com/yrashk/ycxx/issues/897)
 - A qualified value expression in an incomplete current class can see earlier static data
   members and injected unscoped enumerators. Within a named enum's own list, qualifying an
   earlier enumerator uses its in-list type. [#857](https://github.com/yrashk/ycxx/issues/857)
