@@ -263,7 +263,7 @@ std::string in_cwd(const Request& r, const std::string& path) {
 }
 
 pp::Config preprocessing_config(pp::Config config, const Request& r) {
-  auto sdk = std::ranges::find(r.env, "SDKROOT", &std::pair<std::string, std::string>::first);
+  auto sdk = std::ranges::find_if(r.env, [](const auto& entry) { return entry.first == "SDKROOT"; });
   std::string sdkroot;
   if (sdk != r.env.end() && !sdk->second.empty()) sdkroot = in_cwd(r, sdk->second);
   return pp::with_system_dirs(std::move(config), r.cwd, sdkroot);
