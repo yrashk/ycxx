@@ -339,6 +339,31 @@ with tempfile.TemporaryDirectory() as directory:
             expected = syntax(*verified_sources, error="verified observation cannot expose or mutate")
             assert denied.returncode == 1 and denied.stderr == expected, (denied.stderr, expected)
             write("observer.cpp", observer_source)
+
+            array_lifetime = """\
+                #include <ycxx/ownership.hpp>
+                namespace own = ycxx::ownership;
+                struct Work { int value; ~Work() noexcept {} };
+                Work start() noexcept { return {0}; }
+                void finish(Work&&) noexcept {}
+                using Active = own::use_policy<own::linear<Work>,
+                    own::creates<decltype(&start), &start>, own::consumes<decltype(&finish), &finish>>;
+                void drain() {
+                  Work tasks[2]{start(), start()};
+                  finish(static_cast<Work&&>(tasks[0]));
+                  finish(static_cast<Work&&>(tasks[1]));
+                }
+            """
+            destructor = write("array_lifetime.cpp", array_lifetime)
+            positive = resident(sources=(destructor,))
+            assert positive.returncode == 0, positive.stderr
+            write(destructor.name, array_lifetime.replace("~Work() noexcept", "~Work() noexcept(false)"))
+            denied = resident(sources=(destructor,))
+            expected = syntax(destructor, error="an owner array requires aggregate initialization and nonthrowing destruction")
+            assert denied.returncode == 1 and denied.stderr == expected, (denied.stderr, expected)
+            write(destructor.name, array_lifetime)
+            restored = resident(sources=(destructor,))
+            assert restored.returncode == 0, restored.stderr
         finally:
             subprocess.run([compiler, "ctl", "shutdown"], cwd=root, env=env, capture_output=True, timeout=10)
 
