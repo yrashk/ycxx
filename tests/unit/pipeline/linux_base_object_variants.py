@@ -38,13 +38,16 @@ def check_provider(readelf, scope, env, obj, *, definitions=True):
         assert by_name[base][1:7] == entry[1:7], metadata
 
 
-def check_wide_enum(readelf, scope, env, obj):
-    complete, base = '_ZN4BaseC1E5Value', '_ZN4BaseC2E5Value'
+def check_complete_only_constructor(readelf, scope, env, obj, complete, base):
     metadata = run([readelf, '-Ws', obj], scope, env)
     symbols = lifecycle_symbols(metadata, (complete, base))
     assert [row[7] for row in symbols] == [complete], metadata
     entry = symbols[0]
     assert int(entry[2]) > 0 and entry[3:6] == ['FUNC', 'GLOBAL', 'DEFAULT'] and entry[6].isdigit(), metadata
+
+
+def check_wide_enum(readelf, scope, env, obj):
+    check_complete_only_constructor(readelf, scope, env, obj, '_ZN4BaseC1E5Value', '_ZN4BaseC2E5Value')
 
 
 def check_peer_calls(readelf, scope, env, obj, expected):
@@ -121,6 +124,9 @@ def main():
 
             run([*invocation, '-c', fixture / 'wide_enum.cpp', '-o', 'wide-enum.o'], scope, cold)
             check_wide_enum(readelf, scope, cold, 'wide-enum.o')
+            run([*invocation, '-c', fixture / 'callback.cpp', '-o', 'callback.o'], scope, cold)
+            check_complete_only_constructor(readelf, scope, cold, 'callback.o',
+                                            '_ZN8CallbackC1EPFivE', '_ZN8CallbackC2EPFivE')
 
             for compiler in native_compilers(host, scope, cold):
                 flags = [compiler, '-std=c++20', '-pedantic-errors', '-O0', '-fno-lto', '-fno-pie',
