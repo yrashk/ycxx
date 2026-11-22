@@ -1924,6 +1924,12 @@ template's tokens again with the arguments bound.
   constant variable is mangled by its value, where Clang and GCC write its name (#796). With these,
   libycxx's headers move from `invoke.hpp:35` to `invoke.hpp:37` (#776).
 
+## Functional conversions with pack expansions (#915)
+
+- `T(a...)` expands its arguments as a call does ([expr.type.conv], [temp.variadic]/5). This is
+  also the path a call through a still-dependent alias's member takes at the definition, as in
+  libycxx's `invoke`. Test: `tests/own/templates/functional-cast-pack.run.cpp`.
+
 ## Templates, ζ step 2: class templates (#88, 2026-11-18)
 
 - **Declarations:** class templates at namespace scope (`template<…> struct X {…};` and
