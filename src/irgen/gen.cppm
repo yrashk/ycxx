@@ -703,20 +703,32 @@ class Gen {
       return;
     }
     const At initializer = child(a, v.init);
-    const bool selection = has_init && selects_class_initializer(initializer);
+    const bool peer_root = has_init && is<ast::PeerRootInit>(initializer);
+    const bool selection = has_init && !peer_root && selects_class_initializer(initializer);
     bool zeroed = has_init && value_initializes(initializer);
     // Conversion of nullptr_t during initialization does not access its object ([conv.lval]).
     // Its storage starts with erroneous bytes ([basic.indet]).
     bool indeterminate = has_init && !zeroed && !is_nullptr(rec.type) && !default_initializes(initializer);
-    Place p = begin_object(rec.type, zeroed ? ir::Init::zero
-                                     : indeterminate ? ir::Init::indeterminate
-                                                     : ir::Init::erroneous);
+    Place p;
+    if (peer_root) {
+      Position here(*this, initializer.offset);
+      if (fn_.thunk) unsupported(initializer, "in constant evaluation");
+      const auto init = get<ast::PeerRootInit>(initializer);
+      ir::Ty results[] = {vty(facts_.pointer_to(rec.type))};
+      std::uint64_t imms[] = {word(ty(rec.type)), std::to_underlying(init.vtable)};
+      const auto alloc = stateful(ir::Op::alloc_peer_root, results, {}, imms);
+      p = {b_.result(alloc, 1), rec.type};
+    } else {
+      p = begin_object(rec.type, zeroed ? ir::Init::zero
+                                  : indeterminate ? ir::Init::indeterminate
+                                                  : ir::Init::erroneous);
+    }
     debug_.vars.push_back({ir::LocalId(v.local), {last_node()}});
     // The name is in scope in its own initializer ([basic.scope.pdecl]); reading it there reads an
     // object whose lifetime has not begun.
     slots_[v.local] = p;
     if (auto b = jump_bindings_.find(v.local); b != jump_bindings_.end()) store(b->second, p.ptr);
-    if (has_init) {
+    if (has_init && !peer_root) {
       selecting_initializer_ = selection;
       full_expression([&] {
         initialize(initializing_place(p), initializer, zeroed, selection);
