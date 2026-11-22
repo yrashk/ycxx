@@ -28,7 +28,8 @@ reasoning; do not leave decisions only in issue threads.
    - arm64 macOS [archive inputs](docs/design/darwin-static-archives.md) take Darwin archives
      (BSD names, ranlib index) with the system linker's selection, observed as a black box: an
      archive serves references from any operand, weak references and tentative definitions
-     select members, and the first archive in operand order wins (#842).
+     select members, and the first archive in operand order wins (#842). Selection reads the
+     ranlib index where the system linker reads member symbol tables (#925).
    - Linux x86-64 [archive production](docs/design/linux-static-archives.md#native-archive-production)
      uses the standalone `ycxx archive -o` front to create or replace a deterministic regular
      GNU archive in process. It validates inputs with the ELF object reader, retains the original

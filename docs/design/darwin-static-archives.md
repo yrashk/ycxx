@@ -27,6 +27,14 @@ over libSystem as it does for the system linker, which searches libSystem last.
 A member is decoded only when selected, and must define the name that selected it. Container
 and index errors are reported whether or not any member would be selected.
 
+Selection reads the ranlib index; the system linker reads the members' symbol tables instead.
+They agree whenever the index matches the members, which `ar`, `libtool` and `ranlib` ensure for
+every definition they index, weak and hidden ones included. They differ for what the index
+leaves out or gets wrong: common symbols defined in members (`ar` does not index them), stale or
+missing indexes, and 64-bit members misaligned in the file, which the system linker skips. ycxx
+then reports a clean link error. Indexing member symbol tables is
+[#925](https://github.com/yrashk/ycxx/issues/925).
+
 ## Format
 
 A Darwin archive is the BSD variant of `ar(5)`: the `!<arch>\n` signature and 60-byte headers
