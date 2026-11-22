@@ -36,6 +36,10 @@ if(APPLE AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(arm64|aarch64)$" AND NOT CMAKE_CR
   add_test(NAME unit.tu_local_parameter_symbols
     COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/tu_local_parameter_symbols.py
             $<TARGET_FILE:ycxxc> ${CMAKE_CXX_COMPILER} darwin)
+  # The Darwin counterpart of unit.linux_archive (#842), checked against the system linker.
+  add_test(NAME unit.darwin_archive
+    COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/darwin_archive.py
+            $<TARGET_FILE:ycxxc> ${CMAKE_AR} ${CMAKE_C_COMPILER})
   # The Mach-O counterpart of the linux_* virtual tests, over their fixtures (#650). Its peers
   # are Clang's, whose libc++ and RTTI conventions are the platform's C++ ABI.
   find_program(YCXXC_CLANGXX NAMES clang++ REQUIRED)

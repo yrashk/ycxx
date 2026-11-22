@@ -103,10 +103,12 @@ int main() { return g() - 2; }
         # A second producer: the host compiler's peer, linked by both linkers.
         run(host_cxx, '-std=c++20', '-O0', '-c', odr / 'peer.cpp', '-o', 'host-peer.o')
         links('main.o', 'host-peer.o', args=('one', 'two'))
-        # An archive member, through the system linker (ycxx's Mach-O archive input is #388).
+        # An archive member, through both linkers.
         run(ar, 'crs', 'libinline.a', 'peer.o')
         run(host_cxx, 'main.o', 'libinline.a', '-o', 'host-program')
         run('./host-program', 'one', 'two')
+        run(ycxx, 'cxx', 'main.o', 'libinline.a', '-o', 'program')
+        run('./program', 'one', 'two')
 
         friend = fixtures / 'inline-friend'
         for name in ('main', 'peer'):
