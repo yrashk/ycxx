@@ -3018,13 +3018,16 @@ and runtime integration with ycxx's own linker remain under [#89]. See the
 argument operations, and temporary destruction ([except.spec]). A construction
 in a function template body can be checked after substitution.
 
-## Dependent exception specifications on member templates (#713)
+## Exception specifications on member function templates (#713, #804)
 
 A selected ordinary member function template can instantiate its written
 `noexcept(expression)` with the class and function template arguments
 ([except.spec], [temp.inst]). Its parameter and class scopes are available
 during replay. Class instantiation leaves the specification of an unused
 member template deferred.
+
+Selected member function template specializations preserve bare `noexcept`
+for calls and for selection against a static function-pointer target.
 
 ## The address of an overload set, ι (#313, #337, 2026-11-19)
 
