@@ -245,6 +245,8 @@ public:
     auto it = member_decls_.find(std::to_underlying(e));
     return it == member_decls_.end() ? std::nullopt : std::optional(it->second);
   }
+  // Qualified friend declarations can affect the visibility of their target virtual function.
+  bool has_attributed_virtual_friend(EntityId e) const { return attributed_virtual_friends_.contains(e); }
 
   // The parsed class-key of a defining item ([class.union]).
   bool class_rec_is_union(u32 item) const {
@@ -1412,6 +1414,7 @@ private:
   static constexpr u32 class_def_key(u32 item) { return item | 0x80000000u; }
   std::vector<u32> running_;
   std::set<u32> ordinary_friend_items_;  // the source item of each supported unqualified friend
+  std::set<EntityId> attributed_virtual_friends_;  // virtual functions redeclared by an attributed friend
   bool friend_body_ready(u32 definition) const {
     if (!ordinary_friend_items_.contains(definition)) return true;
     const u32 parent = items_->items[definition].parent;
@@ -4682,6 +4685,8 @@ private:
           return bad();
         }
       }
+      if (m->is_virtual && layout_attribute(p_->region(), it_->begin, it_->end, LayoutAttributes::any))
+        p_->attributed_virtual_friends_.insert(m->entity);
       sem.entity = m->entity;
     } else {
       // The function of the innermost enclosing namespace with this name and type
@@ -5409,7 +5414,7 @@ private:
     if (key_function) {
       if (region.first_visibility_pragma && *region.first_visibility_pragma < it_->body_begin) return false;
       // A namespace attribute can set visibility on otherwise unannotated declarations.
-      auto annotated_namespace = [&](u32 item) {
+      auto attributed_namespace = [&](u32 item) {
         const auto& items = p_->items().items;
         for (u32 parent = items[item].parent; parent != items::none; parent = items[parent].parent) {
           const auto& scope = items[parent];
@@ -5418,7 +5423,10 @@ private:
         }
         return false;
       };
-      if (annotated_namespace(defining->second) || annotated_namespace(k_)) return false;
+      const auto& declarations = p_->decls_.at(std::to_underlying(cls));
+      if (attributed_namespace(k_) || std::ranges::any_of(declarations, [&](const auto& decl) {
+            return attributed_namespace(decl.first);
+          })) return false;
     }
 
     // Compare the written qualifier with the owning namespace and class to exclude aliases.
