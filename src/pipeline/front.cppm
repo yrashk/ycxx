@@ -807,12 +807,15 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
     for (EntityId c : classes.classes()) {
       const auto& record = classes.rec(c);
       if (const EntityId base = record.peer_automatic_primary_base; base != EntityId::none) {
-        // Check both classes after the last declaration. The maker never owns either table.
-        if (uncertain_layouts.contains(c) || uncertain_layouts.contains(base) ||
-            !program.peer_automatic_derived_tables(c)) {
+        // Check both classes after the last declaration, even when nothing constructs the derived class.
+        const auto key = program.automatic_derived_vtable_key(c);
+        if (uncertain_layouts.contains(c) || uncertain_layouts.contains(base) || !key ||
+            (*key != EntityId::none && tu.owned_virtual_table)) {
           block_virtual_emission(tu, program, record);
           return tu;
         }
+        if (*key != EntityId::none)
+          tu.owned_virtual_table = OwnedVirtualTable{sema::virtual_table_entity(world, c), {*key}, base};
         automatic_primary_bases.insert(base);
       }
     }
@@ -849,7 +852,8 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
       if (!tu.owned_virtual_table && !program.function_defined_before(slots->back(), program.end()) &&
           !program.has_unapplied_declaration_attributes(c) &&
           std::ranges::none_of(*slots, [&](EntityId f) { return program.has_unapplied_declaration_attributes(f); })) {
-        tu.owned_virtual_table = OwnedVirtualTable{sema::virtual_table_entity(world, c), *slots};
+        tu.owned_virtual_table = OwnedVirtualTable{sema::virtual_table_entity(world, c),
+                                                  {slots->begin(), slots->end()}};
         continue;
       }
     } else if (sema::native_virtual_consumer(record, classes, world.types, peer_member_declaration)) {

@@ -77,6 +77,10 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_
   add_test(NAME unit.linux_peer_derived_default_construction
     COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/linux_peer_derived_default_construction.py
             $<TARGET_FILE:ycxxc> ${CMAKE_CXX_COMPILER} ${CMAKE_READELF})
+  # PARITY: #650 for the Darwin owned derived virtual table and RTTI counterpart.
+  add_test(NAME unit.linux_owned_derived_vtable
+    COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/linux_owned_derived_vtable.py
+            $<TARGET_FILE:ycxxc> ${CMAKE_CXX_COMPILER} ${CMAKE_LINKER})
   add_test(NAME unit.linux_function_addresses
     COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/linux_function_addresses.py
             $<TARGET_FILE:ycxxc> ${CMAKE_C_COMPILER} ${CMAKE_READELF})
