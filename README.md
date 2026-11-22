@@ -348,10 +348,11 @@ written default member initializer are value-initialized.
   with addressable static storage and scalar calls ([#338](https://github.com/yrashk/ycxx/issues/338));
 - casts, including `static_cast<T&&>` from a compatible object lvalue and runtime `static_cast`
   downcasts of object pointers and lvalue references through accessible, unambiguous
-  nonvirtual base paths, `sizeof`/`alignof` (classes included), `decltype`, and calls
-  through pointers to functions. Qualified functional casts check access to aliases and typedefs
-  declared directly in an ordinary class. [#199](https://github.com/yrashk/ycxx/issues/199) ·
-  [#216](https://github.com/yrashk/ycxx/issues/216)
+  nonvirtual base paths, `sizeof`/`alignof` (classes included), direct-member `offsetof` for
+  ordinary standard-layout classes, `decltype`, and calls through pointers to functions.
+  Qualified functional casts check access to aliases and typedefs declared directly in an
+  ordinary class. [#199](https://github.com/yrashk/ycxx/issues/199) ·
+  [#216](https://github.com/yrashk/ycxx/issues/216) · [#248](https://github.com/yrashk/ycxx/issues/248)
 - equality and inequality between `std::nullptr_t` values and between a `std::nullptr_t`
   value and a pointer. [#199](https://github.com/yrashk/ycxx/issues/199)
 - constant evaluation on ycxx's own interpreter: `constexpr`, `consteval`, `constinit`,

@@ -119,7 +119,11 @@ public:
   }
   // A concrete source query keeps its original position if its tokens are read again.
   virtual bool is_complete_at_source(EntityId c) { return is_complete(c); }
+  // Whether a class's layout, or a base's or stored member's, depends on attributes or packing
+  // the layout does not apply (ClassRec::unapplied_layout).
   virtual bool class_layout_uncertain(EntityId /*cls*/) { return false; }
+  // The classes and enumerations whose layout written annotations may change, aliases included.
+  virtual std::set<EntityId> uncertain_object_layouts() { return {}; }
   virtual engine::Loc source_loc(engine::Loc loc, u32) { return loc; }
   // Only a base or initializer with an owning replay can retain this dependent pattern.
   virtual bool in_type_trait_pattern() const { return false; }
@@ -5585,8 +5589,7 @@ public:
   }
   // Whether `name` is a GNU built-in function ycxx does not have yet (`lex::lacking_builtins`,
   // docs/EXTENSIONS.md) that no declaration in scope gives. Its call is diagnosed without parsing
-  // its arguments, which may be types (`__builtin_offsetof(T, m)`). Any other `__builtin_` name
-  // is an ordinary one.
+  // its arguments. Any other `__builtin_` name is an ordinary one.
   bool unsupported_builtin(NameId name) { return lex::lacking_builtin(ins().names.spelling(name)) && !declared(name); }
   // Whether a declaration in scope gives `name`, hiding the built-in function of that name.
   bool declared(NameId name) {
@@ -5606,6 +5609,9 @@ public:
   const lex::BuiltinFunctionInfo* builtin_function(NameId name) {
     const lex::BuiltinFunctionInfo* b = lex::builtin_function(ins().names.spelling(name));
     return b && !declared(name) ? b : nullptr;
+  }
+  bool builtin_offsetof(NameId name) {
+    return ins().names.spelling(name) == lex::builtin_offsetof_name && !declared(name);
   }
   bool builtin_arity(std::size_t want, std::size_t actual, u32 begin) {
     if (actual == want) return true;
@@ -7047,6 +7053,49 @@ public:
     }
     return literal(st, w_->values.integer(st, *n), ValueCategory::prvalue, begin, end);
   }
+  // The supported direct-member slice of [support.types.layout]. Its result uses the
+  // same target record offsets as code generation and the target's size_t.
+  Ex offset_of(QualType t, NameId name, u32 begin, u32 end, u32 name_at) {
+    QualType size = builtin(w_->target.size_type);
+    if (types().is_dependent(t)) return dependent_node({}, begin, end, size);
+    Ex fail{NodeId::none, begin, end};
+    EntityId cls = types().is_class(t) ? types().class_of(t) : EntityId::none;
+    const ClassRec* record = cls != EntityId::none ? class_rec(cls) : nullptr;
+    if (!record) {
+      diag(begin, Diag::offsetof_type, t);
+      return fail;
+    }
+    auto member = direct_member(cls, *record, name);
+    if (!member || !member->field) {
+      diag(name_at, Diag::offsetof_member, name, t);
+      return fail;
+    }
+    if (!check_access(cls, member->field->entity, name, name_at)) return fail;
+    if (member->field->bit_width != 0) {
+      diag(name_at, Diag::offsetof_bit_field);
+      return fail;
+    }
+    const auto uncertain = q_->uncertain_object_layouts();
+    std::set<EntityId> checked;
+    auto ordinary = [&](this const auto& self, EntityId c) -> bool {
+      if (!checked.insert(c).second) return true;
+      const ClassRec* r = class_rec(c);
+      if (!r || !r->bases.empty() || r->closure || uncertain.contains(c) || q_->class_layout_uncertain(c)) return false;
+      return std::ranges::all_of(r->fields, [&](const FieldRec& f) {
+        const QualType field = types().innermost_array_element(f.type);
+        return r->access_of(f.entity) == r->access_of(r->fields.front().entity) && !types().is_reference(field) &&
+               (!types().is_class(field) || self(types().class_of(field))) &&
+               (!types().is_enum(field) || !uncertain.contains(types().enum_of(field)));
+      });
+    };
+    auto layout = ordinary(cls) ? class_layout(cls) : std::nullopt;
+    if (!layout) {
+      diag(begin, Diag::offsetof_layout, t);
+      return fail;
+    }
+    return literal(size, w_->values.integer(size, layout->offsets[member->index]), ValueCategory::prvalue, begin, end);
+  }
+
   // A complete object type's size or alignment: from the target, and for a class by
   // `ast::record_layout` over its members' (#194), the rule the back end lays it out by.
   std::optional<u64> layout_of(QualType t, bool align) {
