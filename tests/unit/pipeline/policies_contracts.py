@@ -434,6 +434,15 @@ with tempfile.TemporaryDirectory() as directory:
     tagged_move = write("tagged_move.cpp", tagged_move_source)
     syntax(tagged_move)
 
+    selected_move_source = direct_move_source.replace("int main()", "int main(int argc, char**)").replace(
+        "  Work second(static_cast<Work&&>(first));",
+        "  auto second = argc == 1 ? Work(static_cast<Work&&>(first)) :\n"
+        "                           (static_cast<void>(0), Work(static_cast<Work&&>(first)));")
+    syntax(write("selected_move.cpp", selected_move_source))
+    syntax(write("selected_move_live_branch.cpp", selected_move_source.replace(
+        "(static_cast<void>(0), Work(static_cast<Work&&>(first)))", "start()")),
+        error="linear resource 'first' may leave its scope")
+
     needs_move_policy = "direct owner move construction requires a move-transfer contract"
     syntax(write("unmarked_move.cpp", legacy_move_source), error=needs_move_policy)
     dishonest_move = write("dishonest_unmarked_move.cpp", legacy_move_source.replace(
