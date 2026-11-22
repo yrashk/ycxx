@@ -66,7 +66,12 @@ bool span_touches(const engine::SourceSpan& s, std::string_view where) {
     where = where.substr(0, colon);
   }
   const std::string_view file = s.file;
-  if (file != where && !(file.ends_with(where) && file[file.size() - where.size() - 1] == '/')) return false;
+  // `=path`: that path exactly (a histogram's bar); else the path or one ending in it at a `/`.
+  if (where.starts_with('=')) {
+    if (file != where.substr(1)) return false;
+  } else if (file != where && !(file.ends_with(where) && file[file.size() - where.size() - 1] == '/')) {
+    return false;
+  }
   return !line || s.line == 0 || (*line >= s.line && *line <= std::max(s.line, s.end_line));
 }
 
@@ -429,7 +434,7 @@ constexpr std::string_view metric_name(Metric m) {
     case Metric::self_time: return "self time";
     case Metric::total_time: return "time in all";
     case Metric::alloc: return "allocated";
-    case Metric::peak: return "peak";
+    case Metric::peak: return "largest peak";
     case Metric::retained: return "retained";
     case Metric::allocs: return "allocations";
     case Metric::executions: return "runs";
@@ -464,20 +469,23 @@ std::string format_metric(Metric m, std::uint64_t v) {
   }
 }
 // One cell's share of each metric. Self time is its own span less the time its children's spans
-// cover inside it (they may run in parallel: their union counts); time in all is its span; a
-// cache hit is a cell found green (reused, verified, kept by durability); a wait, a cell another
-// frame owned (waited for, or computed privately).
-std::array<std::uint64_t, metric_count> metrics_of(const Event& e, std::uint64_t self_ns) {
+// cover inside it (they may run in parallel: their union counts). Time in all is its span, counted
+// only for the outermost cell of a group on each demand path (`outermost`), so a group nested in
+// itself counts its time once. A wait's span is waiting, not work: no time. A cache hit is a cell
+// found green (reused, verified, kept by durability), counted as often as the cell was read
+// (`repeat`); a wait, a cell another frame owned (waited for, or computed privately).
+std::array<std::uint64_t, metric_count> metrics_of(const Event& e, std::uint64_t self_ns, bool outermost = true) {
   std::array<std::uint64_t, metric_count> v{};
   const auto at = [&](Metric m) -> std::uint64_t& { return v[std::to_underlying(m)]; };
-  at(Metric::self_time) = self_ns;
-  at(Metric::total_time) = e.end_ns - std::min(e.end_ns, e.start_ns);
+  const bool waiting = e.outcome == Outcome::waited;
+  at(Metric::self_time) = waiting ? 0 : self_ns;
+  at(Metric::total_time) = waiting || !outermost ? 0 : e.end_ns - std::min(e.end_ns, e.start_ns);
   at(Metric::alloc) = e.alloc_bytes;
   at(Metric::peak) = static_cast<std::uint64_t>(std::max<std::int64_t>(0, e.peak_bytes));
   at(Metric::retained) = static_cast<std::uint64_t>(counted_retained(e));
   at(Metric::allocs) = e.allocs;
   at(Metric::executions) = e.outcome == Outcome::executed || e.outcome == Outcome::cutoff;
-  at(Metric::hits) = e.outcome == Outcome::reused || e.outcome == Outcome::verified || e.outcome == Outcome::durable;
+  at(Metric::hits) = e.outcome == Outcome::reused || e.outcome == Outcome::verified || e.outcome == Outcome::durable ? e.repeat : 0;
   at(Metric::waits) = e.outcome == Outcome::waited || e.outcome == Outcome::recomputed;
   return v;
 }
@@ -494,15 +502,22 @@ std::uint64_t uncovered(std::uint64_t from, std::uint64_t to, std::vector<std::p
   }
   return to - from - covered;
 }
-// Each event's self time, for a pre-order batch with depths (the collector's).
+// Each event's parent in a batch, by its `parent` id (a late child, handed on after its parent's
+// batch, has none here; the collector's `finish` may put one anywhere).
+std::vector<std::optional<std::size_t>> parents_in(std::span<const Event> events) {
+  std::unordered_map<std::uint64_t, std::size_t> at;
+  for (std::size_t i = 0; i < events.size(); ++i) at.emplace(events[i].id, i);
+  std::vector<std::optional<std::size_t>> out(events.size());
+  for (std::size_t i = 0; i < events.size(); ++i)
+    if (const auto it = at.find(events[i].parent); events[i].parent != 0 && it != at.end() && it->second != i) out[i] = it->second;
+  return out;
+}
+// Each event's self time, for a batch (the collector's).
 std::vector<std::uint64_t> self_times(std::span<const Event> events) {
   std::vector<std::vector<std::pair<std::uint64_t, std::uint64_t>>> kids(events.size());
-  std::vector<std::size_t> open;
-  for (std::size_t i = 0; i < events.size(); ++i) {
-    while (!open.empty() && events[open.back()].depth >= events[i].depth) open.pop_back();
-    if (!open.empty() && events[open.back()].depth + 1 == events[i].depth) kids[open.back()].emplace_back(events[i].start_ns, events[i].end_ns);
-    open.push_back(i);
-  }
+  const auto parents = parents_in(events);
+  for (std::size_t i = 0; i < events.size(); ++i)
+    if (parents[i]) kids[*parents[i]].emplace_back(events[i].start_ns, events[i].end_ns);
   std::vector<std::uint64_t> out(events.size());
   for (std::size_t i = 0; i < events.size(); ++i) out[i] = uncovered(events[i].start_ns, events[i].end_ns, std::move(kids[i]));
   return out;
@@ -510,22 +525,23 @@ std::vector<std::uint64_t> self_times(std::span<const Event> events) {
 
 struct Group {
   std::string name;
-  std::uint64_t cells = 0;
+  std::uint64_t cells = 0;  // cells read, counting each repeat
   std::array<std::uint64_t, metric_count> v{};
   std::int32_t node = -1;  // by children: the child
   std::uint64_t at(Metric m) const { return v[std::to_underlying(m)]; }
-  void add(const std::array<std::uint64_t, metric_count>& x) {
-    ++cells;
+  void add(const std::array<std::uint64_t, metric_count>& x, std::uint32_t repeat = 1) {
+    cells += repeat;
     for (std::size_t i = 0; i < metric_count; ++i) v[i] = i == std::to_underlying(Metric::peak) ? std::max(v[i], x[i]) : v[i] + x[i];
   }
 };
-// Groups by name, most of `by` first, then by name.
+// Groups by key (a name, or a node by children), most of `by` first, then by key.
 class Groups {
  public:
-  void add(const std::string& name, const std::array<std::uint64_t, metric_count>& x) {
-    Group& g = by_name_[name];
+  Group& add(const std::string& key, const std::string& name, const std::array<std::uint64_t, metric_count>& x, std::uint32_t repeat = 1) {
+    Group& g = by_name_[key];
     g.name = name;
-    g.add(x);
+    g.add(x, repeat);
+    return g;
   }
   std::vector<Group> sorted(Metric by) const {
     std::vector<Group> out;
@@ -699,13 +715,22 @@ class Tree {
   // The filter: words that must all match. `word` matches the kind or key (case-insensitively),
   // `is:executed` (or a prefix, `is:ex`) an outcome, `w:3` or `w:main` a worker, `at:a.cpp:12` the
   // cells whose source span touches that line (or file). Empty: all.
+  // Words split at spaces outside double quotes, the quotes dropped: `at:"/my dir/a.cpp"`.
   void set_filter(std::string_view text) {
     words_.clear();
     raw_words_.clear();
-    for (auto w : text | std::views::split(' ')) {
-      std::string_view word(w.begin(), w.end());
-      if (!word.empty()) words_.emplace_back(lower(word)), raw_words_.emplace_back(word);
+    std::string word;
+    bool quoted = false;
+    const auto end = [&] {
+      if (!word.empty()) words_.emplace_back(lower(word)), raw_words_.emplace_back(std::move(word));
+      word.clear();
+    };
+    for (const char c : text) {
+      if (c == '"') quoted = !quoted;
+      else if (c == ' ' && !quoted) end();
+      else word += c;
     }
+    end();
   }
   // Only events a worker ran (`std::nullopt`: any), on top of the text filter.
   void set_worker(std::optional<std::int32_t> w) { worker_ = w; }
@@ -851,6 +876,14 @@ class Stream {
     const Origins o = error_origins(events);
     const std::vector<Rollup> r = rollups(events);
     const std::vector<std::uint64_t> self = self_times(events);
+    const auto parents = parents_in(events);
+    // The outermost cell of its group on its path (no ancestor in the batch has the same name).
+    const auto outermost = [&](std::size_t i, auto name_of) {
+      const std::string name = name_of(events[i]);
+      for (auto p = parents[i]; p; p = parents[*p])
+        if (name_of(events[*p]) == name) return false;
+      return true;
+    };
     for (std::size_t i = 0; i < events.size(); ++i) {
       const Event& e = events[i];
       const std::optional<std::uint64_t> at = o.at[i] ? std::optional(events[*o.at[i]].id) : std::nullopt;
@@ -862,9 +895,9 @@ class Stream {
       summary_.span_ns = std::max(summary_.span_ns, e.end_ns);
       summary_.add_memory(e);
       kinds_.add(e);
-      const auto m = metrics_of(e, self[i]);
-      by_kind_.add(e.kind, m);
-      by_file_.add(file_group(e), m);
+      const auto kind_of = [](const Event& x) { return x.kind; };
+      by_kind_.add(e.kind, e.kind, metrics_of(e, self[i], outermost(i, kind_of)), e.repeat);
+      by_file_.add(file_group(e), file_group(e), metrics_of(e, self[i], outermost(i, file_group)), e.repeat);
     }
     *out_ << text << std::flush;
   }
@@ -967,37 +1000,39 @@ enum class Grouping : std::uint8_t { kind, file, children };
 inline constexpr std::size_t grouping_count = 3;
 std::vector<Group> histogram(const Tree& t, Grouping by, std::optional<std::int32_t> within, Metric order) {
   const auto nodes = t.nodes();
+  const auto node = [&](std::int32_t i) -> const Tree::Node& { return nodes[static_cast<std::size_t>(i)]; };
   // Self times from each node's children.
   const auto self = [&](std::int32_t i) {
-    const Tree::Node& n = nodes[static_cast<std::size_t>(i)];
     std::vector<std::pair<std::uint64_t, std::uint64_t>> kids;
-    for (std::int32_t c : n.children) kids.emplace_back(nodes[static_cast<std::size_t>(c)].ev.start_ns, nodes[static_cast<std::size_t>(c)].ev.end_ns);
-    return uncovered(n.ev.start_ns, n.ev.end_ns, std::move(kids));
+    for (std::int32_t c : node(i).children) kids.emplace_back(node(c).ev.start_ns, node(c).ev.end_ns);
+    return uncovered(node(i).ev.start_ns, node(i).ev.end_ns, std::move(kids));
   };
   Groups groups;
-  std::map<std::string, std::int32_t> child_of_name;
-  const auto walk = [&](this const auto& walk, std::int32_t i, const std::string* label) -> void {
-    const Tree::Node& n = nodes[static_cast<std::size_t>(i)];
+  // `path`: the groups that counted time in all above this node, so a group nested in itself
+  // counts it once. By children, a group's key is its child node.
+  const auto walk = [&](this const auto& walk, std::int32_t i, std::int32_t top, std::vector<std::string>& path) -> void {
+    const Tree::Node& n = node(i);
+    bool pushed = false;
     if (!n.group && t.matches(n.ev)) {
-      const std::string name = by == Grouping::kind ? n.ev.kind : by == Grouping::file ? file_group(n.ev) : *label;
-      groups.add(name, metrics_of(n.ev, self(i)));
+      const std::string key = by == Grouping::kind ? n.ev.kind : by == Grouping::file ? file_group(n.ev) : std::to_string(top);
+      const std::string name = by == Grouping::children ? cell_name(node(top).ev) : key;
+      const bool outer = std::ranges::find(path, key) == path.end();
+      groups.add(key, name, metrics_of(n.ev, self(i), outer), n.ev.repeat).node = by == Grouping::children ? top : -1;
+      if (outer) path.push_back(key), pushed = true;
     }
-    for (std::int32_t c : n.children) walk(c, label);
+    for (std::int32_t c : n.children) walk(c, top, path);
+    if (pushed) path.pop_back();
   };
   std::vector<std::int32_t> tops;
-  if (within) tops = by == Grouping::children ? nodes[static_cast<std::size_t>(*within)].children : std::vector<std::int32_t>{*within};
+  if (within) tops = by == Grouping::children ? node(*within).children : std::vector<std::int32_t>{*within};
   else tops.assign(t.roots().begin(), t.roots().end());
   // A request's node holds a build: its children are the groups.
-  if (!within && by == Grouping::children && tops.size() == 1 && nodes[static_cast<std::size_t>(tops[0])].group) tops = nodes[static_cast<std::size_t>(tops[0])].children;
+  if (!within && by == Grouping::children && tops.size() == 1 && node(tops[0]).group) tops = node(tops[0]).children;
   for (std::int32_t top : tops) {
-    const std::string label = cell_name(nodes[static_cast<std::size_t>(top)].ev);
-    child_of_name.emplace(label, top);
-    walk(top, &label);
+    std::vector<std::string> path;
+    walk(top, top, path);
   }
-  std::vector<Group> out = groups.sorted(order);
-  if (by == Grouping::children)
-    for (Group& g : out) g.node = child_of_name.contains(g.name) ? child_of_name[g.name] : -1;
-  return out;
+  return groups.sorted(order);
 }
 
 Timeline timeline(const Tree& t, std::size_t columns) {

@@ -448,6 +448,9 @@ class Browser {
       return {};
     }
     if (m.button != 0) return {};
+    // A double click on a bar: its first press opened the tree, and the second lands on whatever
+    // row is there now; it is no click.
+    if (now - opened_at_ <= double_click) return {};
     // Twice on the same thing (row, slice), not merely the same line.
     const std::int32_t node = row_node(h);
     const bool twice = last_press_ && now - last_press_->time <= double_click && last_press_->hit == h && last_press_->node == node;
@@ -510,6 +513,7 @@ class Browser {
       case Hit::Area::bar:
         bar_ = h.index;
         open_bar();  // a click on a bar shows its cells in the tree
+        opened_at_ = now;
         break;
       default:
         break;
@@ -561,7 +565,10 @@ class Browser {
   void wheel(const Hit& h, int dir, bool fast) {
     const std::size_t step = fast ? wheel_step * 4 : wheel_step;
     if (view_ == View::histogram) {
-      bars_top_ = dir > 0 ? bars_top_ + step : (bars_top_ > step ? bars_top_ - step : 0);  // clamped when drawn
+      // The selected bar moves with the view, as the tree's selection does.
+      const std::size_t n = bars().size();
+      bars_top_ = dir > 0 ? std::min(bars_top_ + step, n > bar_rows() ? n - bar_rows() : 0) : (bars_top_ > step ? bars_top_ - step : 0);
+      if (n > 0) bar_ = std::clamp(bar_, bars_top_, std::min(bars_top_ + bar_rows(), n) - 1);
       return;
     }
     if (view_ == View::timeline) {
@@ -849,9 +856,9 @@ class Browser {
     return true;
   }
   void common_key(const std::string& k) {
-    // t: the tree and the timeline, as ever; Tab: every view in turn; b: the histogram and back.
+    // t and Tab: the tree and the timeline, as ever; b: the histogram and back.
     if (k == "t") view_ = view_ == View::tree ? View::timeline : View::tree, clear_selection();
-    else if (k == "\t") view_ = static_cast<View>((std::to_underlying(view_) + 1) % 3), clear_selection();
+    else if (k == "\t") view_ = view_ == View::tree ? View::timeline : View::tree, clear_selection();  // as ever
     else if (k == "b") view_ = view_ == View::histogram ? View::tree : View::histogram, clear_selection();
     else if (k == "/") prompt_ = true, typed_ = filter_;
     else if (k == "?") help_ = true;
@@ -1068,10 +1075,11 @@ class Browser {
   std::vector<Span> column_spans() const {
     const std::size_t lw = left_width();
     std::size_t used = 0, shown = 0;
-    // The source column (S, #638) comes first when it is on.
+    // The source column (S, #638), when it is on.
     std::vector<std::pair<Column, std::size_t>> wanted;
-    if (show_source_) wanted.emplace_back(Column::source, source_width);
+    // Last, so it goes first when the pane is narrow and never hides the metrics.
     wanted.append_range(metrics);
+    if (show_source_) wanted.emplace_back(Column::source, source_width);
     for (const auto& [c, w] : wanted) {
       if (lw < min_cell + used + w + 1) break;
       used += w + 1;
@@ -1144,7 +1152,7 @@ class Browser {
     if (view_ == View::tree)
       return paint("2", " ↑↓/jk move  ⏎/space fold  ←→ close/open  e/E all  n next run  x next error  r reused  s sort  shift+J/K ]/[ pane  </> resize  / filter  w/0-9/m/a worker  o order  v pane  t timeline  y/Y/p copy cell/subtree/source  S source  V select  mouse: click, wheel, drag  ? help  q quit");
     if (view_ == View::histogram)
-      return paint("2", " ↑↓/jk group  ⏎ its cells in the tree  1-9 metrics  c group by  i in the selected cell  s sort  b tree  Tab views  / filter  mouse: click a switch, a header to sort, a bar to open it, wheel scrolls  ? help  q quit");
+      return paint("2", " ↑↓/jk group  ⏎ its cells in the tree  1-9 metrics  c group by  i in the selected cell  s sort  b tree  / filter  mouse: click a switch, a header to sort, a bar to open it, wheel scrolls  ? help  q quit");
     return paint("2", " ↑↓ lane  ←→/HL scrub  ⏎ open in tree  w/0-9/m/a worker  / filter  t tree  mouse: click a slice, double-click opens it, wheel scrubs  ? help  q quit");
   }
 
@@ -1317,13 +1325,11 @@ class Browser {
   }
 
   // ---- the histogram (#637)
+  // By children, the selected cell's; else, with `i`, the selected cell's subtree.
   std::optional<std::int32_t> bars_within() const {
     return within_ || group_by_ == Grouping::children ? selected_node() : std::nullopt;
   }
-  std::vector<Group> bars() const {
-    // By children with nothing selected: the top nodes; within with nothing selected: everything.
-    return histogram(tree_, group_by_, bars_within(), sort_by_);
-  }
+  std::vector<Group> bars() const { return histogram(tree_, group_by_, bars_within(), sort_by_); }
   std::vector<Metric> shown_metrics() const {
     std::vector<Metric> out;
     for (std::size_t i = 0; i < metric_count; ++i)
@@ -1336,11 +1342,13 @@ class Browser {
     metrics_on_[i] = !metrics_on_[i];
     if (!metrics_on_[std::to_underlying(sort_by_)]) sort_by_ = shown_metrics().front();
   }
-  // The tree shows the bar's cells: a kind or a file as a filter, a child as the selection.
+  // The tree shows the bar's cells: a kind or a file added to the filter (as the bar counted them,
+  // under the same filter), a child as the selection; with `i`, the selected cell stays selected.
   void open_bar() {
     const std::vector<Group> gs = bars();
     if (bar_ >= gs.size()) return;
     const Group& g = gs[bar_];
+    const std::optional<std::int32_t> within = bars_within();
     if (group_by_ == Grouping::children) {
       if (g.node < 0) return;
       view_ = View::tree;
@@ -1348,11 +1356,18 @@ class Browser {
       return;
     }
     if (group_by_ == Grouping::file && g.name == "(no source)") return;
-    filter_ = typed_ = std::format("{}:{}", group_by_ == Grouping::kind ? "kind" : "at", g.name);
+    std::string words;
+    for (auto w : filter_ | std::views::split(' ')) {
+      const std::string_view word(w.begin(), w.end());
+      if (!word.empty() && !word.starts_with("kind:") && !word.starts_with("at:")) words += std::string(word) + " ";
+    }
+    const std::string path = g.name.contains(' ') ? std::format("\"={}\"", g.name) : "=" + g.name;
+    filter_ = typed_ = words + (group_by_ == Grouping::kind ? "kind:" + g.name : "at:" + path);
     tree_.set_filter(filter_);
     clear_selection();
     cursor_ = 0;
     view_ = View::tree;
+    if (within) select(*within);
   }
   bool histogram_key(const std::string& k) {
     const std::size_t n = bars().size();
@@ -1361,6 +1376,7 @@ class Browser {
     else if (k == "g" || k == "\x1b[H") bar_ = 0;
     else if (k == "G" || k == "\x1b[F") bar_ = n ? n - 1 : 0;
     else if (k.size() == 1 && k[0] >= '1' && k[0] <= '9') toggle_metric(static_cast<Metric>(k[0] - '1'));
+    else if (k == "0") {}  // digits are the metrics here, not workers
     else if (k == "c") group_by_ = static_cast<Grouping>((std::to_underlying(group_by_) + 1) % grouping_count), bar_ = bars_top_ = 0;
     else if (k == "i") within_ = !within_, bar_ = bars_top_ = 0;
     else if (k == "s") {
@@ -1380,68 +1396,95 @@ class Browser {
     }
     return "?";
   }
+  // A metric's switch: short, so all nine fit.
+  static std::string_view switch_name(Metric m) {
+    switch (m) {
+      case Metric::self_time: return "self";
+      case Metric::total_time: return "in all";
+      case Metric::alloc: return "alloc";
+      case Metric::peak: return "peak";
+      case Metric::retained: return "retained";
+      case Metric::allocs: return "allocs";
+      case Metric::executions: return "runs";
+      case Metric::hits: return "hits";
+      case Metric::waits: return "waits";
+    }
+    return "?";
+  }
   struct Item {
-    std::size_t x0, x1;
+    std::size_t row, x0, x1;  // row in the body
     Hit hit;
     std::string text;
   };
-  // The switches' line: each metric, numbered as its key.
+  // The switches: each metric, numbered as its key, on as many lines as the width needs.
   std::vector<Item> metric_items() const {
     std::vector<Item> out;
-    std::size_t x = 10;  // after ` metrics: `
+    std::size_t row = 0, x = 10;  // after ` metrics: `
     for (std::size_t i = 0; i < metric_count; ++i) {
-      std::string text = std::format("{}{} {}", metrics_on_[i] ? "■" : "□", i + 1, metric_name(static_cast<Metric>(i)));
+      std::string text = std::format("{}{} {}", metrics_on_[i] ? "■" : "□", i + 1, switch_name(static_cast<Metric>(i)));
       const std::size_t w = columns(text);
-      out.push_back({x, x + w, {Hit::Area::metric, i}, std::move(text)});
+      if (x + w > cols_ && x > 10) ++row, x = 10;
+      out.push_back({row, x, x + w, {Hit::Area::metric, i}, std::move(text)});
       x += w + 2;
     }
     return out;
   }
-  // The grouping's line: by kind, file or children; in everything or the selected cell.
+  std::size_t switch_rows() const { return metric_items().back().row + 1; }
+  // The grouping's line: by kind, file or children; and the scope (by children: the cell).
   std::vector<Item> grouping_items() const {
     std::vector<Item> out;
+    const std::size_t row = switch_rows();
     std::size_t x = 11;  // after ` group by: `
     for (std::size_t i = 0; i < grouping_count; ++i) {
       std::string text(grouping_name(static_cast<Grouping>(i)));
-      out.push_back({x, x + text.size(), {Hit::Area::grouping, i}, text});
+      out.push_back({row, x, x + text.size(), {Hit::Area::grouping, i}, text});
       x += text.size() + 2;
     }
     x += 3;
-    std::string scope = within_ ? "in the selected cell" : "in everything";
-    out.push_back({x, x + scope.size(), {Hit::Area::scope}, scope});
+    std::string scope = group_by_ == Grouping::children ? "of the selected cell" : within_ ? "in the selected cell" : "in everything";
+    out.push_back({row, x, x + scope.size(), {group_by_ == Grouping::children ? Hit::Area::none : Hit::Area::scope}, scope});
     return out;
   }
-  // The columns: the group's name, then one per metric shown, each a bar and its value.
-  std::vector<std::pair<Metric, std::pair<std::size_t, std::size_t>>> bar_columns() const {
+  // The columns after the group's name, one per metric shown that fits, each a bar and its value
+  // in a width every row shares (so bars of one column share one scale).
+  struct BarColumn {
+    Metric metric;
+    std::size_t x0, x1, bar_width;
+  };
+  std::vector<BarColumn> bar_columns(const std::vector<Group>& gs) const {
     const std::vector<Metric> on = shown_metrics();
     const std::size_t avail = cols_ > bar_name_width + 1 ? cols_ - bar_name_width - 1 : 0;
-    const std::size_t w = on.empty() ? 0 : std::max<std::size_t>(12, avail / on.size());
-    std::vector<std::pair<Metric, std::pair<std::size_t, std::size_t>>> out;
+    const std::size_t w = on.empty() ? 0 : std::max<std::size_t>(14, avail / on.size());
+    std::vector<BarColumn> out;
     std::size_t x = bar_name_width + 1;
     for (Metric m : on) {
       if (x + w > cols_) break;
-      out.push_back({m, {x, x + w - 1}});
+      std::size_t value_width = 3;
+      for (const Group& g : gs) value_width = std::max(value_width, columns(format_metric(m, g.at(m))));
+      const std::size_t inner = w - 1;
+      out.push_back({m, x, x + inner, inner > value_width + 1 ? inner - value_width - 1 : 0});
       x += w;
     }
     return out;
   }
-  // Rows of the body: switches, grouping, headers, then the bars.
-  static constexpr std::size_t bar_rows_from = 3;
-  std::size_t bar_rows() const { return body_height() > bar_rows_from ? body_height() - bar_rows_from : 1; }
+  // Rows of the body: the switches, the grouping, the headers, then the bars.
+  std::size_t bar_rows_from() const { return switch_rows() + 2; }
+  std::size_t bar_rows() const { return body_height() > bar_rows_from() ? body_height() - bar_rows_from() : 1; }
   Hit histogram_hit(std::size_t x, std::size_t by) const {
     const auto in = [&](const std::vector<Item>& items) -> Hit {
       for (const Item& it : items)
-        if (x >= it.x0 && x < it.x1) return it.hit;
+        if (it.row == by && x >= it.x0 && x < it.x1) return it.hit;
       return {};
     };
-    if (by == 0) return in(metric_items());
-    if (by == 1) return in(grouping_items());
-    if (by == 2) {
-      for (const auto& [m, span] : bar_columns())
-        if (x >= span.first && x < span.second) return {Hit::Area::order, std::to_underlying(m)};
+    const std::size_t sr = switch_rows();
+    if (by < sr) return in(metric_items());
+    if (by == sr) return in(grouping_items());
+    if (by == sr + 1) {
+      for (const BarColumn& c : bar_columns(bars()))
+        if (x >= c.x0 && x < c.x1) return {Hit::Area::order, std::to_underlying(c.metric)};
       return {};
     }
-    const std::size_t i = bars_top_ + (by - bar_rows_from);
+    const std::size_t i = bars_top_ + (by - bar_rows_from());
     return i < bars().size() ? Hit{Hit::Area::bar, i} : Hit{};
   }
   // A bar of `width` columns, `v` of `most` of it, in eighths.
@@ -1461,21 +1504,24 @@ class Browser {
     if (bar_ < bars_top_) bars_top_ = bar_;
     if (bar_ >= bars_top_ + rows) bars_top_ = bar_ - rows + 1;
     std::vector<std::string> out;
-    std::string line = " metrics: ";
-    for (const Item& it : metric_items()) line += paint(metrics_on_[it.hit.index] ? "1" : "2", it.text) + "  ";
-    out.push_back(line);
-    line = " group by: ";
+    for (const Item& it : metric_items()) {
+      if (out.size() <= it.row) out.push_back(it.row == 0 ? " metrics: " : std::string(10, ' '));
+      out[it.row] += paint(metrics_on_[it.hit.index] ? "1" : "2", it.text) + "  ";
+    }
+    std::string line = " group by: ";
     for (const Item& it : grouping_items()) {
-      if (it.hit.area == Hit::Area::scope) line += "   " + paint("1;4", it.text);
-      else line += paint(static_cast<Grouping>(it.hit.index) == group_by_ ? "1;4" : "2", it.text) + "  ";
+      if (it.hit.area == Hit::Area::grouping) line += paint(static_cast<Grouping>(it.hit.index) == group_by_ ? "1;4" : "2", it.text) + "  ";
+      else line += "   " + paint("1;4", it.text);
     }
     if (const auto w = bars_within()) line += paint("2", "  " + cell_name(tree_.node(*w).ev));
+    const auto cols = bar_columns(gs);
+    line += paint("2", std::format("   sorted by {}", metric_name(sort_by_)));
+    if (cols.size() < shown_metrics().size()) line += paint("2", std::format(", {} more metric{} than fit", shown_metrics().size() - cols.size(), shown_metrics().size() - cols.size() == 1 ? "" : "s"));
     out.push_back(line);
-    const auto columns_ = bar_columns();
     line = paint("1", fit(std::format(" {} ({})", grouping_name(group_by_), gs.size()), bar_name_width)) + " ";
-    for (const auto& [m, span] : columns_) {
-      const std::string title = std::string(metric_name(m)) + (m == sort_by_ ? "↓" : "");
-      line += paint(m == sort_by_ ? "1;4" : "1", fit(title, span.second - span.first)) + " ";
+    for (const BarColumn& c : cols) {
+      const std::string title = std::string(metric_name(c.metric)) + (c.metric == sort_by_ ? "↓" : "");
+      line += paint(c.metric == sort_by_ ? "1;4" : "1", fit(title, c.x1 - c.x0)) + " ";
     }
     out.push_back(line);
     std::array<std::uint64_t, metric_count> most{};
@@ -1484,11 +1530,10 @@ class Browser {
     for (std::size_t i = bars_top_; i < gs.size() && i < bars_top_ + rows; ++i) {
       const Group& g = gs[i];
       line = fit(std::format(" {} ×{}", g.name, g.cells), bar_name_width) + " ";
-      for (const auto& [m, span] : columns_) {
-        const std::size_t w = span.second - span.first;
-        const std::string value = format_metric(m, g.at(m));
-        const std::size_t bw = w > value.size() + 1 ? w - columns(value) - 1 : 0;
-        line += paint("36", fit(bar(g.at(m), most[std::to_underlying(m)], bw), bw)) + " " + pad_left(value, w - bw - 1) + " ";
+      for (const BarColumn& c : cols) {
+        const std::size_t w = c.x1 - c.x0;
+        line += paint("36", fit(bar(g.at(c.metric), most[std::to_underlying(c.metric)], c.bar_width), c.bar_width)) + " " +
+                pad_left(format_metric(c.metric, g.at(c.metric)), w - c.bar_width - 1) + " ";
       }
       out.push_back(i == bar_ ? selected(fit(line, cols_)) : line);
     }
@@ -1636,6 +1681,7 @@ class Browser {
   Grouping group_by_ = Grouping::kind;
   bool within_ = false;
   Metric sort_by_ = Metric::self_time;
+  std::chrono::milliseconds opened_at_{-1'000'000};  // when a bar was opened: a double click's second press is ignored
   std::size_t bar_ = 0, bars_top_ = 0;
   bool past_edge_ = false;          // and that was past the edge of what it selects in
   std::string notice_;   // `copied …`, until the next input
