@@ -1743,8 +1743,10 @@ template's tokens again with the arguments bound.
 
 - A non-type template parameter may have an enumeration type ([temp.param]/7), scoped or
   unscoped, with a fixed underlying type, in a namespace. Its arguments are converted constant
-  expressions of that type ([temp.arg.nontype]), so an integer is rejected. Explicit and partial
-  specializations, defaults and deduction from a specialization work.
+  expressions of that type ([temp.arg.nontype]), so an integer is rejected. For an integral
+  parameter, an unscoped enumeration converts through its underlying type, without narrowing, and a
+  scoped one does not convert. Explicit and partial specializations, defaults and deduction from a
+  specialization work.
 - Symbols write an argument as `L <enumeration type> <value> E`, with `n` before a negative value,
   as Clang and GCC do (`tests/own/abi/enum-template-args.run.cpp`, with a Clang peer).
 - Tests: `tests/own/templates/enum-parameters/`. Not yet: a functional cast as a template argument,
