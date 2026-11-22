@@ -2267,10 +2267,10 @@ public:
     const bool replay = replay_default_members_ && can_replay_default_members(t);
     const bool union_ = is_union(t);
     const auto omitted = [&](const Element& element, u32 at) {
-      // [dcl.init.aggr]: copy-list-initialize an omitted union element. Its first
-      // variant may need construction even when default-initializing the union does not.
+      // [dcl.init.aggr]: copy-list-initialize an omitted union element and the
+      // first variant of an empty union list in the absence of a default member initializer.
       if (element.init == ConstId::none && element.default_member == EntityId::none &&
-          is_union(element.type) && is_aggregate(element.type))
+          (union_ || (is_union(element.type) && is_aggregate(element.type))))
         return list_init(element.type, Braced{at, at, {}}, Construction::copy_list);
       return element_default(element, true, replay, at, at);
     };
