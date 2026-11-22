@@ -7122,7 +7122,7 @@ bool Program::supports_base_object_variant(EntityId function, const std::set<Ent
   if (!plain_named_type(fn.scope)) return false;
 
   // Types named by the encoding can restrict linkage or visibility, or change the call ABI.
-  // A class passed by value would also require proving the ABI of its stored subobjects.
+  // Classes passed by value and callback signatures require a broader call ABI check.
   const auto plain_type = [&](this auto&& check, QualType type) -> bool {
     const auto rec = w_->types.rec(type);
     switch (rec.kind) {
@@ -7134,14 +7134,13 @@ bool Program::supports_base_object_variant(EntityId function, const std::set<Ent
       case reference:
       case array: return check(rec.inner);
       case member_pointer: return check(rec.member_owner) && check(rec.inner);
-      case function:
-        return check(rec.inner) && std::ranges::all_of(rec.params, [&](QualType param) {
-          return !w_->types.is_class(param) && check(param);
-        });
       default: return false;
     }
   };
-  return plain_type(fn.type);
+  const auto signature = w_->types.rec(fn.type);
+  return signature.kind == sema::TypeKind::function && std::ranges::all_of(signature.params, [&](QualType param) {
+    return !w_->types.is_class(param) && plain_type(param);
+  });
 }
 
 bool Program::class_layout_uncertain(EntityId cls, const sema::ClassRec& record, u32 point) const {
