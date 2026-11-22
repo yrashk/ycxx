@@ -2054,10 +2054,11 @@ Fable decided the representation (ast.md §6.6); the Opus session wrote the code
   glibc's spelling, so glibc's identical redefinitions in `<stdint.h>` are valid
   ([cpp.replace.general]/2). The expansions are Clang's. Tests cover both targets in
   `own/pp/predefined-int-c-redefine` and Linux in `own/headers/glibc-stdint`.
-- The pinned libycxx lets glibc's `<stdint.h>` supply integer limits before libycxx supplies
-  fallback macros. Linux integration tests cover `<cstdint>` before `<cinttypes>` and
-  `<inttypes.h>` before `<cstdint>`.
-  [#664](https://github.com/yrashk/ycxx/issues/664) · [libycxx#42](https://github.com/yrashk/libycxx/pull/42)
+- The pinned libycxx lets the target's `<stdint.h>` supply integer limits before libycxx supplies
+  fallback macros. `<cstdint>` uses compiler predefines when a target C header is unavailable or
+  the translation unit is freestanding. Linux integration tests cover `<cstdint>` before
+  `<cinttypes>` and `<inttypes.h>` before `<cstdint>`.
+  [#664](https://github.com/yrashk/ycxx/issues/664) · [libycxx#50](https://github.com/yrashk/libycxx/pull/50)
 
 ## Templates, ζ step 8: template template parameters and `__make_integer_seq` (#88, #208, 2026-11-19)
 
