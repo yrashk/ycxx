@@ -708,6 +708,7 @@ struct MemberDeclRec {
   bool is_virtual = false;
   bool is_explicit = false;
   EntityId overridden_virtual = EntityId::none;
+  bool is_final = false;
 };
 
 struct NestedType {

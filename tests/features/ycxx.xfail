@@ -111,7 +111,6 @@ draft/class/class.union.general-1.accept.cpp preprocessing directives are not su
 draft/class/class.virtual-1.accept.cpp 'struct' not supported yet
 draft/class/class.virtual-10.accept.cpp 'class' not supported yet
 draft/class/class.virtual-2.accept.cpp 'struct' not supported yet
-draft/class/class.virtual-3.reject.cpp errors elsewhere: 'struct' not supported yet
 draft/class/class.virtual-6.reject.cpp errors elsewhere: 'class' not supported yet
 draft/class/class.virtual-7.reject.cpp errors elsewhere: 'struct' not supported yet
 draft/class/class.virtual-8.reject.cpp errors elsewhere: 'struct' not supported yet

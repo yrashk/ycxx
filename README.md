@@ -538,8 +538,9 @@ Ordinary non-template member functions in namespace-scope classes can use `&` an
 to distinguish lvalue and rvalue receivers. [#311](https://github.com/yrashk/ycxx/issues/311)
 
 **Virtual declarations.** Syntax checking accepts virtual members and inline definitions in
-ordinary root classes. Classes derived through one ordinary polymorphic base also support
-overrides and unqualified base initializers with parentheses or flat braces. On Linux x86-64,
+ordinary root classes. An ordinary virtual member can use `final` to prevent further
+overrides. Classes derived through one ordinary polymorphic base also support overrides and
+unqualified base initializers with parentheses or flat braces. On Linux x86-64,
 pointer and reference consumers can call virtual functions with fixed integer signatures on
 peer-owned objects with an ordinary root, including a derived class with that single public
 base, at most one integral field and at most one override. Consumers can upcast those derived
