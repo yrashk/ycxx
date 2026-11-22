@@ -430,7 +430,7 @@ using UnwindNodes = ast::closed_list<
     ast::Label, ast::Goto, ast::Literal, ast::DeclRef, ast::LocalRef, ast::Paren, ast::Unary,
     ast::Binary, ast::OrderedBinary, ast::Assign, ast::Conditional, ast::Subscript, ast::Call, ast::Member,
     ast::NewArray, ast::DeleteArray, ast::ImplicitConversion, ast::InitList, ast::DefaultMemberInit,
-    ast::Materialize, ast::This, ast::ValueInit, ast::DefaultInit, ast::Throw>;
+    ast::Materialize, ast::This, ast::ValueInit, ast::DefaultInit, ast::Throw, ast::DynamicCastVoid>;
 using UnwindAggregateNodes = ast::closed_list<ast::InitList, ast::LocalRef, ast::Materialize, ast::Paren>;
 
 enum class UnwindContext { function, cleanup_initializer, default_member };
