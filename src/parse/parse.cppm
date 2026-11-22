@@ -83,7 +83,7 @@ bool layout_attribute(const pp::Region& region, u32 begin, u32 end, LayoutAttrib
         if (name.size() > 4 && name.starts_with("__") && name.ends_with("__"))
           name = name.substr(2, name.size() - 4);
         if (name == "packed" || name == "aligned" || name == "mode" || name == "vector_size" ||
-            name == "no_unique_address" || name == "ms_struct" || name == "gcc_struct") return true;
+            name == "no_unique_address" || name == "ms_struct" || name == "gcc_struct" || name == "copy") return true;
       }
     }
   }
