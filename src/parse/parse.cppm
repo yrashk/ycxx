@@ -5386,12 +5386,15 @@ private:
            tokens[at + 3].kind == Tk::r_paren;
   }
 
-  bool native_nonkey_virtual_definition(EntityId cls, const sema::ClassRec& record, EntityId function,
-                                        const parse::Declarator& d, const ast::DeclSema& sem) {
-    if (!sema::native_virtual_nonkey_member(record, function) || template_ || explicit_ || inst_ ||
+  bool native_virtual_definition(EntityId cls, const sema::ClassRec& record, EntityId function,
+                                 const parse::Declarator& d, const ast::DeclSema& sem) {
+    const auto slot = sema::native_virtual_root_slot(record, function);
+    if (record.peer_virtual_layout != sema::PeerVirtualLayout::root || !slot || template_ || explicit_ || inst_ ||
         sem.storage != ast::Storage::none || (sem.flags & (sema::decl_flag::inline_ | sema::decl_flag::deleted |
                                                           sema::decl_flag::lang_c)) ||
         it_->kind != ItemKind::function || !it_->has_body() || !d.asm_label.empty()) return false;
+    const bool key_function = *slot == 0;
+    if (key_function && !sema::native_virtual_table_slots(record)) return false;
     const auto& region = p_->region();
     if (region.tokens[it_->body_begin].kind != Tk::l_brace ||
         !plain_virtual_signature(*it_, it_->begin + d.qualifier_at, it_->begin + d.name_at,
@@ -5403,6 +5406,20 @@ private:
     const auto& head = p_->items().items[defining->second];
     const auto key = region.tokens[head.begin].kind;
     if (key != Tk::kw_struct && key != Tk::kw_class) return false;
+    if (key_function) {
+      if (region.first_visibility_pragma && *region.first_visibility_pragma < it_->body_begin) return false;
+      // A namespace attribute can set visibility on otherwise unannotated declarations.
+      auto annotated_namespace = [&](u32 item) {
+        const auto& items = p_->items().items;
+        for (u32 parent = items[item].parent; parent != items::none; parent = items[parent].parent) {
+          const auto& scope = items[parent];
+          if (scope.kind == ItemKind::namespace_def &&
+              layout_attribute(region, scope.begin, scope.brace_begin, LayoutAttributes::any)) return true;
+        }
+        return false;
+      };
+      if (annotated_namespace(defining->second) || annotated_namespace(k_)) return false;
+    }
 
     // Compare the written qualifier with the owning namespace and class to exclude aliases.
     const auto& owner = p_->ns_of(defining->second);
@@ -5424,7 +5441,7 @@ private:
           return region.tokens[p_->items().items[member].begin].kind == Tk::kw_using;
         })) return false;
     // A skipped attribute or an alias in an earlier virtual declaration can change the ABI
-    // evidence used to identify the peer's key function.
+    // evidence used to identify the key function and the table entries.
     for (const auto& member : record.members) {
       if (!member.is_virtual) continue;
       const auto decl = p_->member_decl(member.entity);
@@ -5432,7 +5449,7 @@ private:
       const auto& source = p_->items().items[p_->index(decl->item)];
       if (source.kind != ItemKind::declaration || source.names.size() != 1) return false;
       const u32 name_at = source.begin + source.names.front().offset;
-      if (!plain_virtual_signature(source, name_at, name_at, member.entity == function)) return false;
+      if (!plain_virtual_signature(source, name_at, name_at, key_function || member.entity == function)) return false;
     }
     return true;
   }
@@ -5547,7 +5564,7 @@ private:
       return false;
     }
     if (m->is_virtual) {
-      if (!native_nonkey_virtual_definition(cls, *cr, m->entity, d, sem)) {
+      if (!native_virtual_definition(cls, *cr, m->entity, d, sem)) {
         s_.diag(d.name_at, Diag::virtual_definition);
         return false;
       }

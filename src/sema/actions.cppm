@@ -329,6 +329,23 @@ bool native_virtual_nonkey_member(const ClassRec& root, EntityId function) {
   return slot && *slot != 0;
 }
 
+// The first root table producer uses the existing native root layout. Its two non-pure,
+// non-inline declarations occupy the primary table in order, starting with the key function.
+std::optional<std::array<EntityId, 2>> native_virtual_table_slots(const ClassRec& root) {
+  if (root.peer_virtual_layout != PeerVirtualLayout::root || root.fields.size() != 1 ||
+      root.access_of(root.fields.front().entity) != ast::Access::public_ || !root.friends.empty())
+    return std::nullopt;
+  std::array<EntityId, 2> slots{};
+  std::size_t count = 0;
+  for (const auto& member : root.members) {
+    if (!member.is_virtual) continue;
+    if (count == slots.size()) return std::nullopt;
+    slots[count++] = member.entity;
+  }
+  if (count != slots.size()) return std::nullopt;
+  return slots;
+}
+
 bool native_virtual_derived_declarations(const ClassRec& record, const Classes& classes, const Types& types,
                                         auto&& written_member) {
   if (!native_virtual_class(record, types) || record.bases.size() != 1 || record.fields.size() > 1) return false;
