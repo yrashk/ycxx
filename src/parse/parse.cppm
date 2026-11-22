@@ -8189,6 +8189,8 @@ void Program::prepare_move_constructor(u32 item, EntityId cls, sema::ClassRec& r
       rec.layout_requires_virtual_support || rec.unapplied_layout || !rec.bases.empty() ||
       owner.templ != EntityId::none || !is_namespace(owner.scope) || items_->items[item].template_depth)
     return;
+  // [class.copy.ctor]: a deleted or inaccessible subobject destructor deletes the move.
+  if (!rec.destructor_usable) return;
 
   auto& types = w_->types;
   const QualType type = types.class_type(cls);
