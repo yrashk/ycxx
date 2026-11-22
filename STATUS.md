@@ -2916,6 +2916,16 @@ and runtime integration with ycxx's own linker remain under [#89]. See the
   A file-scope scalar initializer still needs lowered code to qualify for dynamic initialization.
   Type checking covers function-local expressions and unevaluated operands.
 
+## Qualified template functional conversions (#697)
+
+A namespace-qualified class or alias template-id can name the target of a parenthesized
+or braced functional conversion. A namespace alias resolves to the same template, and defaults
+can come from its visible redeclarations. Qualified lookup stops at the first matching namespace
+on each using-directive path. Conflicting declarations across paths are ambiguous. Qualified
+function and variable template expressions use the ordinary expression path
+([expr.type.conv], [temp.names], [basic.lookup.qual]).
+[#697](https://github.com/yrashk/ycxx/issues/697)
+
 ## Bootstrap workarounds
 
 Places where ycxx's sources avoid or work around a C++26 feature because GCC 16 lacks it or

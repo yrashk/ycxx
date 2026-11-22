@@ -3942,6 +3942,19 @@ public:
       }
       return scope_expr();
     }
+    if (s->ns && is(Tk::less)) {
+      // [expr.type.conv] permits a namespace-qualified simple-template-id as the
+      // target type of a functional conversion.
+      const auto diags = s_->diag_count();
+      if (auto tmpl = s_->namespace_expression_type_template(*s->ns, n, name_at)) {
+        auto args = template_argument_list();
+        if (!args) return {NodeId::none, begin, pos()};
+        auto type = type_template_id(*tmpl, *args, name_at);
+        if (!type) return {NodeId::none, begin, pos()};
+        return type_conversion(*type, begin);
+      }
+      if (s_->has_error_since(diags)) return {NodeId::none, begin, pos()};
+    }
     // `N::T(args)` or `N::T{…}` ([expr.type.conv]): a qualified type name, unless a function or
     // variable of the name hides it.
     if ((is(Tk::l_paren) || is(Tk::l_brace)) && !s_->scope_names_object(*s, n))
