@@ -25,6 +25,7 @@ path covers the new section.
 
 The linker retains the existing treatment of sections outside this profile. Compact unwind
 tables and frames with personalities, LSDA pointers, or other encodings are tracked in #72.
-AArch64 frame emission and exception lowering are tracked in #648. The binary layouts follow
+AArch64 [cleanup-free frame emission](aarch64-cleanup-free-unwind.md) uses this profile.
+Native exception lowering is tracked in #648. The binary layouts follow
 the DWARF Call Frame Information format, the Itanium C++ ABI exception handling frame format,
 and Apple's published Mach-O format and ARM64 relocation definitions.

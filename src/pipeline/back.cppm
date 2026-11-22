@@ -705,7 +705,7 @@ ir::TypeLayout QueryLayout::type(QualType q) const {
     ir::TypeLayout e = type(a.elem);
     std::uint64_t n = a.bound == ConstId::none ? 0 : in.values.get<ast::VInt>(a.bound).bits.lo;
     return {.kind = array, .size = e.size * n, .align = e.align, .contains_member_pointer = e.contains_member_pointer,
-            .contains_explicit_alignment = e.contains_explicit_alignment};
+            .layout_uncertain = e.layout_uncertain, .contains_explicit_alignment = e.contains_explicit_alignment};
   }
   if (in.types.is<ast::TFunction>(c)) return {function, 0, 1, false, {}};
   // A reference member is held as the address of its object ([dcl.ref]).
@@ -740,6 +740,7 @@ ir::TypeLayout QueryLayout::type(QualType q) const {
     std::vector<ir::SubObject> parts;
     for (const ir::SubObject& b : r->bases) {
       const auto base = type(b.type);
+      l.layout_uncertain |= base.layout_uncertain;
       l.contains_explicit_alignment |= base.contains_explicit_alignment;
       if (!base.empty) parts.push_back(b);
     }
@@ -755,6 +756,7 @@ ir::TypeLayout QueryLayout::type(QualType q) const {
       }
       ir::TypeLayout m = type(ft);
       l.contains_member_pointer |= m.contains_member_pointer;
+      l.layout_uncertain |= m.layout_uncertain;
       l.contains_explicit_alignment |= m.contains_explicit_alignment;
       std::uint8_t mb = m.kind == floating ? std::uint8_t(m.size) : m.hfa_bytes;
       std::uint64_t mn = (m.kind == floating ? 1 : m.hfa) * n;
@@ -1776,7 +1778,8 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
       return assemble_linux(tu.name, code, data, symbols, weak_variables);
     }
     std::vector<aarch64::CompiledFunction> code;
-    for (std::size_t i = 0; i < fns.size(); ++i) code.push_back({fns[i].fn, *ms[i].get().code});
+    for (std::size_t i = 0; i < fns.size(); ++i)
+      code.push_back({fns[i].fn, *ms[i].get().code, tu.functions[i].unwind == UnwindEligibility::cleanup_free});
     auto o = aarch64::assemble(tu.name, code, data, symbols);
     if (o) mark_weak_definitions(*o, symbols, tu.functions, weak_variables);
     return o;

@@ -5713,8 +5713,8 @@ private:
   // ([class.mem.general]: a member is declared once).
   // A member function `function` (its type) clashes only with a member that is not a function or
   // one of the same type ([class.mem.general]/5, [over.load]).
-  // A union cannot have a reference member ([class.union.general]). Completing an ordinary
-  // named union checks whether it has a written destructor for nontrivial variants.
+  // A union cannot have a reference member ([class.union.general]). Completing a named
+  // union checks whether it has a written destructor for nontrivial variants.
   bool variant_member(const parse::Declarator& d) {
     sema::Types& types = s_.types();
     if (types.is_reference(d.type)) {
@@ -5723,11 +5723,13 @@ private:
     }
     QualType et = d.type;
     while (types.is_array(et)) et = types.rec(et).inner;
-    const bool ordinary = !inst_ && s_.template_scopes.empty() &&
-                          p_->items().items[it_->parent].unnamed_type_ordinal == items::none;
+    const bool supported_scope = inst_
+        ? p_->is_namespace(s_.world().entities.rec(inst_->spec).scope)
+        : s_.template_scopes.empty();
+    const bool named = p_->items().items[it_->parent].unnamed_type_ordinal == items::none;
     const bool nontrivial_destruction = s_.destructor_of(et) != EntityId::none;
     if (q_.classes().copy_of(et).first ||
-        (!(ordinary && nontrivial_destruction) && (nontrivial_destruction || s_.has_member_inits(et)))) {
+        (!(supported_scope && named && nontrivial_destruction) && (nontrivial_destruction || s_.has_member_inits(et)))) {
       s_.diag(d.name_at, Diag::not_supported, Tk::kw_union);
       return false;
     }
@@ -8570,7 +8572,7 @@ const sema::ClassRec* Program::instantiate_class(EntityId spec, u32 point) {
   built.types = std::move(c.nested);
   for (const ast::MemberRec& m : c.members) built.access.push_back({m.entity, m.access});
   built.friends = std::move(c.friends);
-  special_members(k, spec, built);
+  special_members(k, spec, built, built.union_ ? &end_diags_ : nullptr);
   built.defined = true;
   return &classes_.publish(spec, std::move(built));
 }
