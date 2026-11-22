@@ -1634,7 +1634,7 @@ void emit_virtual_table(obj::object& o, const VirtualTable& table, std::uint32_t
       return;
     }
     const auto base_pointers = elf ? o.add_section(S::data_const) : pointers;
-    const auto base_typeinfo = o.add_symbol({.name = prefix + "_ZTI" + *base});
+    const auto base_typeinfo = o.add_symbol({.name = prefix + "_ZTI" + *base, .section = std::nullopt});
     emit_rtti_pointer(o, pointers, base_typeinfo);
     emit_keyless_type_info(o, base_pointers, section(S::rodata), base_typeinfo, *base);
   }
