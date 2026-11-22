@@ -1479,7 +1479,11 @@ public:
   Ex reference_temporary_expr(NameId name, QualType target, QualType source, u32 begin, u32 end) {
     const Types& ts = types();
     const QualType to = ts.canonical(target), from = ts.canonical(source);
-    if (ts.is_dependent(to) || ts.is_dependent(from)) return dependent_node({}, begin, end, builtin(Builtin::bool_));
+    if (ts.is_dependent(to) || ts.is_dependent(from)) {
+      // Completeness is then judged at the point of instantiation, as for `__is_base_of`.
+      q_->record_dependent_type_trait_operand(type_trait_loc(begin));
+      return dependent_node({}, begin, end, builtin(Builtin::bool_));
+    }
     if (!ts.is_reference(to) || ts.is_void(from)) return bool_literal(false, begin, end);
     const QualType to_object = ts.canonical(ts.referee(to));
     const bool prvalue = !ts.is_reference(from);

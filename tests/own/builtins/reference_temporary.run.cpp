@@ -23,6 +23,12 @@ static_assert(!C(void, void) && !C(const int&, void));
 static_assert(!C(const B&, P) && !C(const B&, A) && !K(const B&, P));
 
 template<class R, class F> constexpr bool dangles() { return __reference_converts_from_temporary(R, F); }
+// A class completed after the templates that query it, judged where they are instantiated.
+template<class R, class X> constexpr bool late_converts() { return __reference_converts_from_temporary(R, X); }
+template<class R, class X> constexpr bool late_constructs = __reference_constructs_from_temporary(R, X);
+struct L;
+struct L : B {};
+static_assert(late_converts<const B&, L>() && late_constructs<B&&, L> && !late_converts<const B&, P>());
 int main() {
   if (!dangles<const int&, long>() || dangles<const int&, int&>() || !dangles<const B&, D>()) return 1;
   return 0;
