@@ -102,7 +102,8 @@ YCXX checks `verified_observes` definitions for leaf observation bodies that pre
 resource and keep the reference within the call. A syntax-only check needs the provider in the
 same invocation. A checked native build can compile a caller against its declared contract and
 carry a requirement to the final checked link. That link matches the requirement against the
-definition selected for the call. Forwarding functions are outside the current leaf-body proof.
+definition selected for the call. A verified observer can forward its original shared reference
+to another verified observer and carries the corresponding requirement through the final link.
 
 Astra proposed recording caller requirements and verified provider guarantees as versioned local
 symbols attached to the corresponding function definitions. Both YCXX object formats retain
@@ -223,11 +224,14 @@ handler explicitly and invokes its implementation through `perform`. A nested sc
 pass a different handler for the same tag. Existing scopes retain their implementations.
 A stateful callable can share a budget and hold the authority required by its operation.
 
-A trusted mediation adapter declares the effects that escape the handler. Verified
-callers use that bound like any other direct call. To verify the mediation itself, the
-compiler must also prove which scoped handler supplies each operation, that its borrow
-stays within the scope, and that its implementation respects the declared outward bound.
-Those checks belong before support for captured resumptions.
+A local handler can bind a direct namespace function. YCXX verifies that the selected
+constructor only stores the reference and that `perform` only forwards its arguments to
+that reference. The checked body cannot alias or export the local handler. Each call uses
+the bound and grade of the selected function, and separate object builds record the same
+requirements as direct calls to that function.
+
+A trusted mediation adapter can still declare the outward bound for other callable
+implementations. Captured resumptions require further ownership and effect checks.
 
 ## YCXX implementation milestones
 

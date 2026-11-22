@@ -1167,8 +1167,55 @@ struct EffectFinding {
   std::string message;
 };
 
+struct EffectHandlerBinding {
+  EntityId constructor;
+  EntityId implementation;
+};
+
+static ast::Red effect_child(const ast::Red& node, ast::Child child) {
+  return ast::Red(node.ast(), child.id, node.offset() + child.at);
+}
+
+static ast::Red effect_unparen(ast::Red node) {
+  while (node.is<ast::Paren>()) node = effect_child(node, node.get<ast::Paren>().operand);
+  return node;
+}
+
+static std::optional<EffectHandlerBinding> effect_handler_binding(const sema::World& world,
+                                                                 const sema::EntityRec& handler,
+                                                                 const ast::Red& declaration) {
+  const auto local = declaration.get<ast::LocalVar>();
+  if (local.destructor != EntityId::none || local.init.id == ast::NodeId::none ||
+      handler.args.size() != 2 || handler.args[1].kind != ast::TemplateArgKind::type ||
+      !world.types.is_function(handler.args[1].type))
+    return std::nullopt;
+  const auto init = effect_unparen(effect_child(declaration, local.init));
+  if (!init.is<ast::CtorCall>()) return std::nullopt;
+  const auto constructor = init.get<ast::CtorCall>();
+  const auto args = init.ast().children(constructor.args);
+  if (args.size() != 1) return std::nullopt;
+  const auto argument = effect_unparen(effect_child(init, args.front()));
+  if (!argument.is<ast::DeclRef>()) return std::nullopt;
+  const auto function = argument.get<ast::DeclRef>();
+  const auto* target = world.entities.find(function.entity);
+  if (!target || target->kind != sema::EntityKind::function || function.reference ||
+      world.types.canonical(target->type) != world.types.canonical(handler.args[1].type))
+    return std::nullopt;
+  return EffectHandlerBinding{constructor.ctor, function.entity};
+}
+
+static std::optional<ast::u32> effect_handler_receiver(const ast::Red& node, ast::MemberCall call) {
+  const auto address = effect_unparen(effect_child(node, call.object));
+  if (!address.is<ast::Unary>() || address.get<ast::Unary>().op != ast::UnaryOp::address_of) return std::nullopt;
+  const auto local = effect_unparen(effect_child(address, address.get<ast::Unary>().operand));
+  if (!local.is<ast::LocalRef>()) return std::nullopt;
+  return local.get<ast::LocalRef>().local;
+}
+
 struct EffectCalls {
   std::vector<std::pair<EntityId, ast::u32>> calls;
+  std::vector<std::pair<EntityId, ast::u32>> handler_operations;
+  std::map<ast::NodeId, EntityId> handler_calls;
   std::optional<EffectFinding> unsupported;
   std::optional<ast::u32> grade_jump;
 };
@@ -1189,19 +1236,55 @@ struct EffectCallsFor {
     const auto locals = world.ins.seqs.elements(body.locals);
     Value result;
     std::set<EntityId> seen;
+    std::map<ast::u32, EffectHandlerBinding> handlers;
+    const auto record_call = [&](EntityId target, ast::u32 offset) {
+      if (seen.insert(target).second) result.calls.emplace_back(target, offset);
+    };
     auto visit = [&](auto&& self, const ast::Red& node) -> void {
       if (result.unsupported || node.is<ast::StaticAssert>()) return;
+      if (node.is<ast::LocalVar>()) {
+        const auto local = node.get<ast::LocalVar>().local;
+        if (const auto* handler = scoped_effect_handler(world, locals[local].type)) {
+          if (const auto binding = effect_handler_binding(world, *handler, node);
+              binding && ast::cv_of(world.types.canonical(locals[local].type)) == ast::Cv::none) {
+            handlers.emplace(local, *binding);
+            result.handler_operations.emplace_back(binding->constructor, node.offset());
+          } else
+            result.unsupported = EffectFinding{node.offset(), "a checked scoped handler must bind directly to a named function"};
+          return;
+        }
+      }
+      if (node.is<ast::MemberCall>()) {
+        const auto call = node.get<ast::MemberCall>();
+        if (const auto receiver = effect_handler_receiver(node, call)) {
+          const auto binding = handlers.find(*receiver);
+          const auto* method = world.entities.find(call.function);
+          if (binding != handlers.end() && method && !sema::Types::is_volatile(call.info.type) &&
+              world.ins.names.spelling(method->name) == "perform") {
+            record_call(binding->second.implementation, node.offset());
+            result.handler_operations.emplace_back(call.function, node.offset());
+            result.handler_calls.emplace(node.id(), binding->second.implementation);
+            for (auto argument : node.ast().children(call.args)) self(self, effect_child(node, argument));
+            return;
+          }
+        }
+      }
+      if (node.is<ast::LocalRef>() && handlers.contains(node.get<ast::LocalRef>().local)) {
+        result.unsupported = EffectFinding{node.offset(), "a checked scoped handler cannot escape its local perform calls"};
+        return;
+      }
       if (!result.grade_jump && (node.is<ast::Goto>() || node.is<ast::Switch>()))
         result.grade_jump = node.offset();
       const auto problem = ast::dispatch<ast::Nodes>(node.kind(), [&]<class T>(std::type_identity<T>) -> std::string_view {
         using namespace ast;
         if constexpr (is_expression(^^T)) {
-          if (sema::Types::is_volatile(node.get<T>().info.type)) return "volatile access is outside the checked effect subset";
+          const auto type = node.get<T>().info.type;
+          if (sema::Types::is_volatile(type)) return "volatile access is outside the checked effect subset";
         }
         if constexpr (std::is_same_v<T, Call>) {
           const auto target = node.get<T>().function;
           if (target == EntityId::none) return "indirect call has no verified effect bound";
-          if (seen.insert(target).second) result.calls.emplace_back(target, node.offset());
+          record_call(target, node.offset());
         } else if constexpr (std::is_same_v<T, LocalVar>) {
           const auto local = node.get<T>();
           const auto type = locals[local.local].type;
@@ -1211,6 +1294,10 @@ struct EffectCallsFor {
           const auto conversion = node.get<T>().conversion;
           if (conversion == ConversionKind::user_defined || conversion == ConversionKind::array_copy)
             return "implicit conversion is outside the checked effect subset";
+        } else if constexpr (std::is_same_v<T, Materialize>) {
+          const auto temporary = node.get<T>();
+          if (temporary.destructor != EntityId::none || !world.types.is_scalar(temporary.info.type))
+            return "temporary object cleanup is outside the checked effect subset";
         } else if constexpr (std::is_same_v<T, Assign>) {
           if (node.get<T>().op == AssignOp::trivial_class_copy)
             return "class assignment is outside the checked effect subset";
@@ -1289,10 +1376,11 @@ static EffectCost maximum(EffectPaths paths) {
 
 // Count one tag over the structured AST. A return closes its path. A loop with positive
 // cost in its repeating region widens to unbounded. An initializer in a for loop runs once.
-static EffectPaths effect_usage(const ast::Red& node, const std::map<EntityId, ast::u64>& costs) {
+static EffectPaths effect_usage(const ast::Red& node, const std::map<EntityId, ast::u64>& costs,
+                                const std::map<ast::NodeId, EntityId>& handler_calls) {
   const auto child = [&](ast::Child edge) -> EffectPaths {
     if (edge.id == ast::NodeId::none) return {};
-    return effect_usage(ast::Red(node.ast(), edge.id, node.offset() + edge.at), costs);
+    return effect_usage(effect_child(node, edge), costs, handler_calls);
   };
   if (node.is<ast::StaticAssert>()) return {};
   if (node.is<ast::If>()) {
@@ -1311,13 +1399,15 @@ static EffectPaths effect_usage(const ast::Red& node, const std::map<EntityId, a
   }
 
   EffectPaths paths;
-  node.for_each_child([&](const ast::Red& edge) { paths = sequence(paths, effect_usage(edge, costs)); });
+  node.for_each_child([&](const ast::Red& edge) { paths = sequence(paths, effect_usage(edge, costs, handler_calls)); });
   if (node.is<ast::While>() || node.is<ast::Do>())
     return {EffectCost{maximum(paths) > EffectCost{}}, {}};
   if (node.is<ast::Return>()) return {std::nullopt, std::max(paths.continues, paths.returns)};
-  if (node.is<ast::Call>())
-    if (const auto found = costs.find(node.get<ast::Call>().function); found != costs.end())
-      return sequence(paths, {EffectCost{false, found->second}, {}});
+  EntityId target = EntityId::none;
+  if (node.is<ast::Call>()) target = node.get<ast::Call>().function;
+  if (node.is<ast::MemberCall>()) target = handler_calls.at(node.id());
+  if (const auto found = costs.find(target); found != costs.end())
+    return sequence(paths, {EffectCost{false, found->second}, {}});
   return paths;
 }
 
@@ -1340,7 +1430,7 @@ static std::optional<EffectFinding> check_usage_grades(const sema::World& world,
     if (costs.empty()) continue;
     if (calls.grade_jump)
       return EffectFinding{*calls.grade_jump, "a finite usage grade with effectful calls requires control flow without goto or switch"};
-    const auto use = maximum(effect_usage(body, costs));
+    const auto use = maximum(effect_usage(body, costs, calls.handler_calls));
     if (use.unbounded || use.uses > limit)
       return EffectFinding{body.offset(), std::format("effect '{}' exceeds its usage grade of {}{}",
                                                      world.types.spell(tag), limit,
@@ -1348,6 +1438,95 @@ static std::optional<EffectFinding> check_usage_grades(const sema::World& world,
   }
   return std::nullopt;
 }
+
+// Verify the selected wrapper definitions before treating a perform call as a call to its
+// bound function. Matching a library template name alone would allow a different constructor
+// or a specialization of the method to add operations invisible to the effect checker.
+static bool effect_handler_parameter(ast::Red node, ast::u32 index) {
+  for (node = effect_unparen(node); node.is<ast::ImplicitConversion>(); node = effect_unparen(node)) {
+    const auto conversion = node.get<ast::ImplicitConversion>();
+    if (sema::Types::is_volatile(conversion.info.type) ||
+        (conversion.conversion != ast::ConversionKind::qualification &&
+         conversion.conversion != ast::ConversionKind::lvalue_to_rvalue))
+      return false;
+    node = effect_child(node, conversion.operand);
+  }
+  return node.is<ast::LocalRef>() && node.get<ast::LocalRef>().local == index;
+}
+
+static bool effect_handler_body(const ast::Red& root, bool constructor, std::size_t parameters) {
+  if (!root.is<ast::Compound>()) return false;
+  const auto statements = root.ast().children(root.get<ast::Compound>().stmts);
+  if (constructor) {
+    if (parameters != 1 || statements.size() != 2) return false;
+    const auto init = effect_child(root, statements[0]);
+    const auto body = effect_child(root, statements[1]);
+    if (!init.is<ast::MemberInit>() || !body.is<ast::Compound>() ||
+        !body.ast().children(body.get<ast::Compound>().stmts).empty())
+      return false;
+    const auto field = init.get<ast::MemberInit>();
+    return field.field == 0 && field.init.id != ast::NodeId::none &&
+           effect_handler_parameter(effect_child(init, field.init), 0);
+  }
+  if (statements.size() != 1) return false;
+  const auto statement = effect_child(root, statements.front());
+  if (!statement.is<ast::Return>()) return false;
+  const auto value = statement.get<ast::Return>().value;
+  if (value.id == ast::NodeId::none) return false;
+  const auto expr = effect_unparen(effect_child(statement, value));
+  if (!expr.is<ast::Call>() || expr.get<ast::Call>().callee.id == ast::NodeId::none) return false;
+  const auto call = expr.get<ast::Call>();
+  auto callee = effect_unparen(effect_child(expr, call.callee));
+  if (callee.is<ast::ImplicitConversion>() &&
+      callee.get<ast::ImplicitConversion>().conversion == ast::ConversionKind::function_to_pointer)
+    callee = effect_unparen(effect_child(callee, callee.get<ast::ImplicitConversion>().operand));
+  if (!callee.is<ast::Member>()) return false;
+  const auto field = callee.get<ast::Member>();
+  if (call.function != EntityId::none || !field.reference || field.field != 0 ||
+      !effect_child(callee, field.object).is<ast::This>())
+    return false;
+  const auto arguments = expr.ast().children(call.args);
+  if (arguments.size() != parameters) return false;
+  for (ast::u32 i = 0; i < arguments.size(); ++i)
+    if (!effect_handler_parameter(effect_child(expr, arguments[i]), i)) return false;
+  return true;
+}
+
+struct VerifyEffectHandler {
+  struct Key {
+    TuId tu;
+    EntityId operation;
+    bool linux_target;
+    bool operator==(const Key&) const = default;
+  };
+  using Value = bool;
+  static engine::query_task<Value> run(engine::Ctx& cx, Key key) {
+    const auto& front = co_await cx.fetch<TuFront>(key.tu);
+    const auto definition = std::ranges::find(front.unit.functions, key.operation, &FunctionDef::entity);
+    const auto entity = std::ranges::find(front.unit.entities, key.operation, &Entity::id);
+    if (definition == front.unit.functions.end() || !definition->this_type ||
+        definition->body.tree == ast::NodeId::none || definition->decl.contracts != ast::NodeId::none ||
+        (entity != front.unit.entities.end() && !entity->asm_label.empty()))
+      co_return false;
+    const auto& world = *universe().world_for(key.linux_target ? ast::x86_64_linux : ast::aarch64_darwin);
+    const auto owner = world.types.rec(*definition->this_type).inner;
+    const auto* handler = scoped_effect_handler(world, owner);
+    if (!handler || handler->args.size() != 2 || handler->args[1].kind != ast::TemplateArgKind::type)
+      co_return false;
+    const auto shape = std::ranges::find(front.shapes.classes, world.types.class_of(owner), &ClassShape::entity);
+    if (shape == front.shapes.classes.end() || !shape->bases.empty() || shape->fields.size() != 1 ||
+        shape->union_ || shape->has_mutable_field)
+      co_return false;
+    const auto reference = world.types.rec(shape->fields.front());
+    if (reference.kind != sema::TypeKind::reference || reference.rvalue_ref ||
+        world.types.canonical(reference.inner) != world.types.canonical(handler->args[1].type))
+      co_return false;
+    const auto& function = world.entities.rec(key.operation);
+    const auto signature = world.types.rec(definition->decl.type);
+    co_return effect_handler_body(ast::Red(world.ins.ast, definition->body.tree),
+                                  function.kind == sema::EntityKind::constructor, signature.params.size());
+  }
+};
 
 struct CheckEffectBody {
   struct Key {
@@ -1364,6 +1543,9 @@ struct CheckEffectBody {
     const auto& world = *universe().world_for(key.body.linux_target ? ast::x86_64_linux : ast::aarch64_darwin);
     const auto& caller = co_await cx.fetch<EffectBoundFor>({key.sources, key.tu, key.function});
     if (!caller || caller->trusted) co_return Value{};
+    for (const auto& [operation, offset] : calls.handler_operations)
+      if (!(co_await cx.fetch<VerifyEffectHandler>({key.tu, operation, key.body.linux_target})))
+        co_return Value{EffectFinding{offset, "scoped handler wrapper must bind and forward to its function without other operations"}, {}};
     Value out;
     std::map<EntityId, const EffectBound*> bounds;
     for (const auto& [target, offset] : calls.calls) {

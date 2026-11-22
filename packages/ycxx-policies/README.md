@@ -181,6 +181,12 @@ and pass it by reference to the adapter. The adapter invokes `handler.perform(ar
 The caller keeps the callable alive for the scope. A nested call can receive a different
 handler for the same effect, while the enclosing handler keeps its original implementation.
 
+With `-fcheck-policies`, a checked function can bind a local handler to a named function
+and call `perform` directly. YCXX verifies the wrapper and follows the selected function's
+outward effects and usage grades. The local handler can only appear as the receiver of
+its own `perform` calls. A nested binding can select another function with the same
+signature and a different outward bound.
+
 A trusted mediation adapter can declare which effects escape its handler. YCXX checks
 its callers against that declaration. The runtime scope and the optional budget use the
 same types with GCC, Clang, and YCXX.

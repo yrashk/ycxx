@@ -238,6 +238,78 @@ with tempfile.TemporaryDirectory() as directory:
     syntax(write("handler_denied.cpp", handler_source.replace("fx::contract<Read>", "fx::contract<Empty>")),
            error="effect bound of 'mediated' exceeds the caller's declared bound")
 
+    checked_handler_source = """\
+        #include "effects.hpp"
+        #include <ycxx/effects/handler.hpp>
+        using Once = fx::set<fx::at_most<file::Write, 1>>;
+        [[=fx::contract<Empty>{}]] int pure(int n) noexcept { return n + 1; }
+        [[=fx::trusted_contract<Once>{}]] int write(int n) noexcept { return n + 10; }
+        using Scope = fx::scoped_handler<file::Read, decltype(pure)>;
+        [[=fx::contract<Once>{}]] int checked(int n) {
+          Scope outer(pure);
+          int result = outer.perform(n);
+          {
+            Scope inner(write);
+            result += inner.perform(n);
+          }
+          return result + outer.perform(n);
+        }
+        int main() { return checked(1) != 15; }
+    """
+    direct_handler = write("direct_handler.cpp", checked_handler_source)
+    syntax(direct_handler)
+    typed_handler_source = checked_handler_source.replace("[[=fx::contract<Empty>{}]] ", "")
+    typed_handler_source = typed_handler_source.replace("[[=fx::trusted_contract<Once>{}]] ", "")
+    typed_handler_source = typed_handler_source.replace("[[=fx::contract<Once>{}]] ", "") + """
+        using ActiveHandler = fx::use_policy<
+            fx::bound<decltype(&pure), &pure, Empty>,
+            fx::trusted<decltype(&write), &write, Once>,
+            fx::bound<decltype(&checked), &checked, Once>>;
+    """
+    syntax(write("typed_handler.cpp", typed_handler_source))
+    syntax(write("direct_handler_empty.cpp", checked_handler_source.replace("contract<Once>{}]] int checked",
+                 "contract<Empty>{}]] int checked")),
+           error="effect bound of 'write' exceeds the caller's declared bound")
+    syntax(write("direct_handler_twice.cpp", checked_handler_source.replace("result += inner.perform(n);",
+                 "result += inner.perform(n) + inner.perform(n);")), error="exceeds its usage grade of 1")
+    syntax(write("direct_handler_escape.cpp", checked_handler_source.replace("int result = outer.perform(n);",
+                 "auto& alias = outer; int result = outer.perform(n);")),
+           error="a checked scoped handler cannot escape its local perform calls")
+
+    altered_handler = checked_handler_source.replace("#include <ycxx/effects/handler.hpp>", """
+        void foreign() noexcept;
+        namespace ycxx::effects {
+          template<class Tag, class Implementation>
+          class scoped_handler {
+            Implementation& implementation_;
+          public:
+            scoped_handler(Implementation& implementation) noexcept : implementation_(implementation) { foreign(); }
+            template<class... Args>
+            decltype(auto) perform(Args&&... args) { return implementation_(static_cast<Args&&>(args)...); }
+          };
+        }
+    """)
+    invalid_wrapper = "scoped handler wrapper must bind and forward to its function without other operations"
+    syntax(write("altered_constructor.cpp", altered_handler), error=invalid_wrapper)
+    syntax(write("altered_perform.cpp", altered_handler.replace("{ foreign(); }", "{}").replace(
+        "{ return implementation_", "{ foreign(); return implementation_")), error=invalid_wrapper)
+
+    wrapper_source = (pathlib.Path(include) / "ycxx" / "effects" / "handler.hpp").read_text()
+    wrapper = write("dispatch.hpp", wrapper_source)
+    local_handler = write("local_handler.cpp", checked_handler_source.replace(
+        "<ycxx/effects/handler.hpp>", '"dispatch.hpp"'))
+    with tempfile.TemporaryDirectory(prefix="yef-handler-", dir="/tmp") as sockets:
+        handler_env = dict(env, YCXX_RUNTIME_DIR=sockets)
+        resident_handler = [*base, "--daemon=require", "-fsyntax-only", local_handler]
+        try:
+            invoke(resident_handler, env=handler_env)
+            write(wrapper.name, wrapper_source.replace("namespace ycxx::effects {",
+                "namespace ycxx::effects { void foreign() noexcept;").replace(
+                ": implementation_(implementation) {}", ": implementation_(implementation) { foreign(); }"))
+            assert invoke(resident_handler, invalid_wrapper, handler_env) == syntax(local_handler, error=invalid_wrapper)
+        finally:
+            subprocess.run([compiler, "ctl", "shutdown"], cwd=root, env=handler_env, capture_output=True, timeout=10)
+
     if sys.platform.startswith("linux") and platform.machine() == "x86_64":
         resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
         executable = root / "effects"
@@ -250,6 +322,8 @@ with tempfile.TemporaryDirectory() as directory:
         assert denied_scope.returncode == -signal.SIGILL, denied_scope
         invoke([*native, "-o", executable, scope_handler])
         subprocess.run([executable], check=True, timeout=10)
+        invoke([*native, "-o", executable, direct_handler])
+        subprocess.run([executable], check=True, timeout=10)
 
         def compile_object(source, name):
             obj = root / (name + ".o")
@@ -258,6 +332,20 @@ with tempfile.TemporaryDirectory() as directory:
 
         def link(*inputs, error=None):
             return invoke([*native, "-o", executable, *inputs], error)
+
+        checked_provider_declaration = "[[=fx::contract<Empty>{}]] int pure(int n) noexcept"
+        checked_provider_definition = checked_provider_declaration + " { return n + 1; }"
+        handler_caller = write("handler_caller.cpp", checked_handler_source.replace(
+            checked_provider_definition, checked_provider_declaration + ";"))
+        handler_peer = write("handler_peer.cpp", '#include "effects.hpp"\n' + checked_provider_definition + "\n")
+        unchecked_handler_peer = write("unchecked_handler_peer.cpp", handler_peer.read_text().replace(
+            "[[=fx::contract<Empty>{}]] ", ""))
+        caller_object = compile_object(handler_caller, "handler_caller")
+        peer_object = compile_object(handler_peer, "handler_peer")
+        link(caller_object, peer_object)
+        subprocess.run([executable], check=True, timeout=10)
+        link(caller_object, compile_object(unchecked_handler_peer, "unchecked_handler_peer"),
+             error="has no matching guarantee")
 
         # Independent compilations intern the same set in a different order. The provider
         # forwards through another checked provider, so the first guarantee alone is insufficient.

@@ -105,6 +105,7 @@ namespace {
 enum class Marker {
   other, policy, use_policy, affine, linear, creates, observes, verified_observes, consumes, transfers,
   effect_set, effect_grade, effect_bound, trusted_effect_bound, effect_contract, trusted_effect_contract,
+  scoped_handler,
 };
 
 struct Specialization {
@@ -127,6 +128,7 @@ Specialization marker(const sema::World& world, EntityId id) {
   if (!primary || primary->kind != sema::EntityKind::class_template) return {};
   const auto name = world.ins.names.spelling(primary->name);
   if (in_policy_namespace(world, primary->scope, "effects")) {
+    if (name == "scoped_handler") return {Marker::scoped_handler, specialized};
     if (name == "set") return {Marker::effect_set, specialized};
     if (name == "at_most") return {Marker::effect_grade, specialized};
     if (name == "bound") return {Marker::effect_bound, specialized};
@@ -274,6 +276,11 @@ bool compatible(const sema::World& world, const OwnershipPolicy& policy, EntityI
 }
 
 }  // namespace
+
+const sema::EntityRec* scoped_effect_handler(const sema::World& world, QualType type) {
+  const auto specialization = marker(world, class_entity(world, type));
+  return specialization.marker == Marker::scoped_handler ? specialization.entity : nullptr;
+}
 
 std::optional<PolicyAlias> policy_alias(const sema::World& world, QualType type) {
   const auto entity = class_entity(world, type);
