@@ -81,6 +81,7 @@ struct FunctionInput {
   ast::EntityId atexit = ast::EntityId::none, dso = ast::EntityId::none;
   bool hosted_catch_all = false;  // the native frontend has certified this occurrence
   ast::NodeId cleanup_call = ast::NodeId::none;  // the certified hosted cleanup call
+  ast::EntityId constructor_cleanup = ast::EntityId::none;  // the selected union member's destructor
   bool check_unwind_cleanups = false;
   bool native_array_delete = false;  // the backend's Linux x86-64 cookie-free array deletion
   bool native_array_new = false;  // the backend's Linux x86-64 allocation in a certified frame
@@ -607,6 +608,7 @@ class Gen {
         initialize(p, child(a, m.init), false);
         return 0;
       });
+      if (fn_.constructor_cleanup != ast::EntityId::none) initialized_member_ = p;
     } else if (is<ast::DelegatingInit>(a)) {
       if (!this_) unsupported(a, "outside a constructor");
       auto d = get<ast::DelegatingInit>(a);
@@ -1815,6 +1817,10 @@ class Gen {
       const auto invoke = emit(ir::Op::invoke, results, args, imms, ir::bit(ir::Flag::not_constexpr), successors);
       enter(exceptional);
       exit_scopes(0);
+      if (fn_.constructor_cleanup != ast::EntityId::none) {
+        if (!initialized_member_) throw Unsupported{"unwind before the union member's initialization"};
+        destroy(*initialized_member_, fn_.constructor_cleanup);
+      }
       const ValueId resume[] = {state_, b_.param(exceptional, 1)};
       emit(ir::Op::resume, {}, resume);
       block_ = normal;
@@ -2220,6 +2226,7 @@ class Gen {
   uint32_t byval_params_ = 0, result_param_ = 0;  // as ir::Function's
   std::vector<std::vector<Ending>> temps_;   // the open full-expressions' temporaries
   std::vector<At> epilogue_;                 // a destructor's DestroyMember statements
+  std::optional<Place> initialized_member_;  // a constructor's exceptional cleanup only
   int branches_ = 0;                         // conditionally evaluated operands entered
   int pinned_ = 0;                           // depth inside trees from other items (`Position`)
 };
