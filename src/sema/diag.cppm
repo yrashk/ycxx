@@ -377,6 +377,7 @@ enum class Diag : std::uint32_t {
   constructibility_substitution [[=message{Severity::error, "substitution of the operand type '{0:t}' in '{1:n}' failed"}]],
   recursive_default_member_initializer [[=message{Severity::error, "default member initializer for '{0:n}' would use itself"}]],
   default_member_initializer_cleanup [[=message{Severity::error, "default member initializer requiring cleanup is not supported yet"}]],
+  aggregate_default_unwind [[=message{Severity::error, "potentially throwing aggregate default initializer requires supported unwind coverage"}]],
   nothrow_constructibility_unsupported [[=message{Severity::error, "'__is_nothrow_constructible' for '{0:t}' with these argument types is not supported yet"}]],
   trivial_constructibility_unsupported [[=message{Severity::error, "'__is_trivially_constructible' for '{0:t}' with these argument types is not supported yet"}]],
   assignability_dependent [[=message{Severity::error, "dependent operands of '{0:n}' are not supported yet"}]],

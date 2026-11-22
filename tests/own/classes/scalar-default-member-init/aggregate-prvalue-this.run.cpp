@@ -1,5 +1,5 @@
 int evaluations;
-int transform(int value) { ++evaluations; return value + 1; }
+int transform(int value) noexcept { ++evaluations; return value + 1; }
 
 struct Record {
   int first;

@@ -2499,7 +2499,20 @@ public:
       if (auto init = q_->replay_default_member(*this, e.default_member, required_base)) {
         if (*init == NodeId::none) return {NodeId::none, begin, end};
         ExprInfo info{e.type, ValueCategory::prvalue, 0};
-        return node(ast::DefaultMemberInit{info, {*init, 0}}, begin, end, info);
+        bool permitted = true;
+        if (!replay_default_members_ && required_base == EntityId::none && !unevaluated && !constant_reference_context) {
+          const Ex operand{*init, begin, end, info};
+          const Ex proof = unary_noexcept(operand, begin, end, /*for_codegen_proof=*/true);
+          if (!proof.ok()) return {NodeId::none, begin, end};
+          const auto result = as<ast::Literal>(proof);
+          permitted = result && w_->values.rec(result->value).bits;
+        }
+        if (permitted) return node(ast::DefaultMemberInit{info, {*init, 0}}, begin, end, info);
+        // An unproved replay can still use the scalar value available to the original path.
+        if (e.init == ConstId::none) {
+          diag(begin, Diag::aggregate_default_unwind);
+          return {NodeId::none, begin, end};
+        }
       }
       if (required_base != EntityId::none) {
         diag(begin, Diag::not_supported, lex::Tk::equal);
@@ -5811,7 +5824,7 @@ public:
 
   // [expr.unary.noexcept], [except.spec]: inspect the selected operations and their operands
   // without interpreting the expression or requiring the bodies of its callees.
-  Ex unary_noexcept(Ex operand, u32 begin, u32 end) {
+  Ex unary_noexcept(Ex operand, u32 begin, u32 end, bool for_codegen_proof = false) {
     Ex fail{NodeId::none, begin, end};
     if (!operand.ok()) return fail;
     if (dependent(operand)) return dependent_node({operand}, begin, end, builtin(Builtin::bool_));
@@ -5855,6 +5868,8 @@ public:
     };
     auto operation_throwing = [&](const ast::Red& node) {
       if (node.is<ast::Throw>()) return true;
+      // Array allocation needs its own exception analysis before certifying generated code (#854).
+      if (for_codegen_proof && node.is<ast::NewArray>()) return true;
       if (node.is<ast::Call>()) {
         const auto call = node.get<ast::Call>();
         if (call.function != EntityId::none) return function_throwing(call.function);

@@ -285,10 +285,10 @@ Later class members can also hide namespace names in defaults that evaluate to s
 YCXX checks the non-dependent parts of a written default member initializer once the class is
 complete, even if no initialization selects that default.
 [#732](https://github.com/yrashk/ycxx/issues/732)
-In non-template code, ordinary scalar aggregates evaluate their written defaults in temporaries
-such as `S{4}`, empty value-initialization such as `S()`, return values, and by-value arguments.
-A default can read an earlier field of its temporary, and constant aggregate initialization uses
-the completed class to resolve scalar defaults.
+In non-template code, ordinary scalar aggregates evaluate nonthrowing written defaults in
+temporaries such as `S{4}`, empty value-initialization such as `S()`, return values, and by-value
+arguments. A default can read an earlier field of its temporary. Required constant aggregate
+initialization also uses the completed class to resolve scalar defaults.
 [#818](https://github.com/yrashk/ycxx/issues/818)
 
 Automatic declarations such as `Point p(3, 4);` can initialize flat aggregates with public
