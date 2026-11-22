@@ -106,6 +106,7 @@ struct Entity {
   // The mangled parameter types tie this ordinary C++ function to the unit (#582).
   bool local_parameter_binding = false;
   bool hidden = false;  // GNU hidden visibility: ELF STV_HIDDEN, Mach-O private extern (#602, #124)
+  bool nonthrowing = false;  // including implicit exception specifications on destructors
 
   bool has_local_binding() const { return linkage == ast::Linkage::internal || local_parameter_binding; }
 };
@@ -464,6 +465,14 @@ struct UnitShapes {
   using Key = TuId;
   static engine::SourceSpan trace_span(const engine::Db& db, const Key& k) { return tu_span(db, k); }
   using Value = Shapes;
+  static engine::query_task<Value> run(engine::Ctx& cx, TuId tu);
+};
+
+// Effective exception specifications needed by native class initializer cleanup.
+struct UnitNonthrowingFunctions {
+  using Key = TuId;
+  static engine::SourceSpan trace_span(const engine::Db& db, const Key& k) { return tu_span(db, k); }
+  using Value = std::vector<EntityId>;
   static engine::query_task<Value> run(engine::Ctx& cx, TuId tu);
 };
 
@@ -973,6 +982,15 @@ engine::SourceSpan function_span(const engine::Db& db, const FnKey& k) {
 }
 
 
+engine::query_task<UnitNonthrowingFunctions::Value> UnitNonthrowingFunctions::run(engine::Ctx& cx, TuId id) {
+  const TranslationUnit& tu = co_await cx.fetch<TuUnit>(id);
+  std::vector<EntityId> functions;
+  for (const Entity& entity : tu.entities)
+    if (entity.nonthrowing) functions.push_back(entity.id);
+  std::ranges::sort(functions);
+  co_return functions;
+}
+
 engine::query_task<FunctionSource> FunctionSourceQ::run(engine::Ctx& cx, FnKey k) {
   const TranslationUnit& tu = co_await cx.fetch<TuUnit>(k.tu);
   FunctionSource out;
@@ -1038,6 +1056,13 @@ engine::query_task<Generated> FunctionGen::run(engine::Ctx& cx, FnKey k) {
   const FunctionDef& d = src.def;
   irgen::FunctionInput input{d.entity, d.decl, d.body, d.item, d.body_offset};
   input.this_type = d.this_type;
+  const auto& seqs = universe().in->seqs;
+  const auto locals = d.body.locals;
+  for (std::uint32_t index = 0, count = seqs.size(locals); index < count; ++index) {
+    if (facts.classify(seqs.at(locals, index).type) != irgen::TypeClass::record) continue;
+    input.nonthrowing_functions = co_await cx.fetch<UnitNonthrowingFunctions>(k.tu);
+    break;
+  }
   input.guards = d.guards;
   input.guard_acquire = d.guard_acquire;
   input.guard_release = d.guard_release;

@@ -747,6 +747,12 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
                                                                     : Special::none});
     Entity& emitted = tu.entities.back();
     emitted.asm_label = program.asm_label(e);
+    if (emitted.special == Special::destructor) {
+      if (const auto* owner = classes.find(r.scope))
+        emitted.nonthrowing = owner->destructor_noexcept.value_or(false);
+    } else if (fn) {
+      emitted.nonthrowing = world.types.rec(d.type).fn_noexcept;
+    }
     if (r.kind == sema::EntityKind::function && r.lang == ast::LangLinkage::cxx &&
         r.linkage == ast::Linkage::external && r.templ == EntityId::none && program.is_namespace(r.scope) &&
         emitted.asm_label.empty()) {
