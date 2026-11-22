@@ -1418,7 +1418,8 @@ public:
                                                bool checked = false, bool type_components = false,
                                                bool check_injected_access = false,
                                                std::vector<TypeQualifier>* type_qualifiers = nullptr,
-                                               bool* failed_qualifier = nullptr) {
+                                               bool* failed_qualifier = nullptr,
+                                               std::optional<u32>* committed_failure = nullptr) {
     u32 j = start;
     std::optional<sema::Sema::Scope> s;
     if (kind(j) == Tk::kw_decltype && kind(j + 1) == Tk::l_paren) {
@@ -1439,7 +1440,8 @@ public:
       s = s_->scope_named(name_of(tok(j)));
       if (!s) return std::nullopt;
       j += 2;
-    } else if (auto t = template_id_scope(std::nullopt, j, /*scope=*/true, checked || check_injected_access, failed_qualifier)) {
+    } else if (auto t = template_id_scope(std::nullopt, j, /*scope=*/true, checked || check_injected_access,
+                                          failed_qualifier, committed_failure)) {
       s = t;
     } else {
       return std::nullopt;
@@ -1462,7 +1464,8 @@ public:
         else if (type_qualifiers && s->type) type_qualifiers->push_back({*s, n, pos() + j});
         s = m;
         j += 2;
-      } else if (auto t = template_id_scope(s, j, /*scope=*/true, checked || check_injected_access, failed_qualifier)) {
+      } else if (auto t = template_id_scope(s, j, /*scope=*/true, checked || check_injected_access,
+                                            failed_qualifier, committed_failure)) {
         s = t;
       } else {
         break;
@@ -1484,8 +1487,11 @@ public:
   // A component `X<args>::` at `j` ahead naming a class template specialization, found by
   // unqualified lookup or in namespace `in` ([temp.names]); `j` moves past the `::`. The arguments
   // are parsed ahead of the tokens being taken. A speculative lookup discards its diagnostics.
+  // A chosen expression retains a constraint failure within a complete argument list and records
+  // where to resume after its `::`.
   std::optional<sema::Sema::Scope> template_id_scope(std::optional<sema::Sema::Scope> in, u32& j, bool scope = true,
-                                                     bool checked = false, bool* failed_qualifier = nullptr) {
+                                                     bool checked = false, bool* failed_qualifier = nullptr,
+                                                     std::optional<u32>* committed_failure = nullptr) {
     if (kind(j) != Tk::identifier || kind(j + 1) != Tk::less) return std::nullopt;
     if (in && !in->ns) return std::nullopt;  // member templates of classes come later (#88)
     NameId n = name_of(tok(j));
@@ -1498,9 +1504,10 @@ public:
     std::size_t diags = s_->diag_count();
     const u32 name_at = pos() + j;
     i_ += j + 1;
-    auto args = template_argument_list();
+    bool took_closer = false;
+    auto args = template_argument_list(nullptr, &took_closer);
     u32 after = i_ - saved;
-    bool closed = scope ? !half_ && kind() == Tk::coloncolon : true;
+    bool closed = took_closer && (!scope || (!half_ && kind() == Tk::coloncolon));
     bool ended_half = half_;  // the list ended in the first half of a `>>`
     std::optional<QualType> t;
     if (args && closed)
@@ -1508,12 +1515,16 @@ public:
     i_ = saved;
     half_ = saved_half;
     if (!scope) qualified_half_ = ended_half;
-    if (!t && args && closed && failed_qualifier) {
-      *failed_qualifier = std::ranges::any_of(std::span(s_->diagnostics()).subspan(diags), [](const auto& d) {
+    const bool probe_failure = args && failed_qualifier;
+    const bool commit_argument_failure = scope && !args && committed_failure;
+    if (!t && closed && (probe_failure || commit_argument_failure)) {
+      const bool unsatisfied = std::ranges::any_of(std::span(s_->diagnostics()).subspan(diags), [](const auto& d) {
         return sema::sema_diag_of(d.id) == Diag::constraints_not_satisfied;
       });
+      if (probe_failure) *failed_qualifier = unsatisfied;
+      if (commit_argument_failure && unsatisfied) *committed_failure = after + 1;
     }
-    if (!checked) s_->truncate_diags(diags);
+    if (!checked && (!committed_failure || !*committed_failure)) s_->truncate_diags(diags);
     if (!t) return std::nullopt;
     j = scope ? after + 1 : after;
     return sema::Sema::Scope{std::nullopt, *t};
@@ -2345,7 +2356,9 @@ public:
 
   // A template-argument-list ([temp.arg.general]) after a template-name, from its `<`. An argument
   // that can be a type-id is one ([temp.arg.general]/2).
-  std::optional<std::vector<ast::TemplateArg>> template_argument_list(std::optional<u32>* replay_at = nullptr) {
+  std::optional<std::vector<ast::TemplateArg>> template_argument_list(std::optional<u32>* replay_at = nullptr,
+                                                                     bool* took_closer = nullptr) {
+    if (took_closer) *took_closer = false;
     u32 begin = pos();
     u32 deferred = deferred_argument_checks_;
     if (!expect(Tk::less)) return std::nullopt;
@@ -2421,6 +2434,7 @@ public:
     // [temp.names]/4: `>>` closes this list and the enclosing one.
     if (is(Tk::greatergreater) && !half_) half_ = true;
     else if (!expect(Tk::greater)) return std::nullopt;
+    if (took_closer) *took_closer = true;
     if (!ok) return std::nullopt;
     if (replay_at && deferred != deferred_argument_checks_) *replay_at = begin;
     return args;
@@ -3817,8 +3831,15 @@ public:
     u32 next = 0;
     auto address = address_op_ && *address_op_ + 1 == begin ? address_op_ : std::nullopt;
     std::vector<TypeQualifier> type_qualifiers;
+    std::optional<u32> committed_failure;
     auto s = nested_name(0, next, /*member_pointer=*/false, substituting_partial_arguments || address.has_value(),
-                         /*type_components=*/false, /*check_injected_access=*/false, &type_qualifiers);
+                         /*type_components=*/false, /*check_injected_access=*/false, &type_qualifiers,
+                         /*failed_qualifier=*/nullptr, &committed_failure);
+    if (committed_failure) {
+      for (u32 j = 0; j < *committed_failure; ++j) bump();
+      while (is(Tk::identifier) || is(Tk::coloncolon)) bump();
+      return {NodeId::none, begin, pos()};
+    }
     // `S::template f<args>`: f names a template ([temp.names]/3).
     bool keyword = s && kind(next) == Tk::kw_template && kind(next + 1) == Tk::identifier;
     if (keyword) ++next;
