@@ -1504,6 +1504,13 @@ public:
         q_->record_dependent_type_trait_operand(loc);
         return *pattern;
       }
+      // A template's function body is analysed again with its arguments bound when it is
+      // instantiated ([temp.inst]), which evaluates the trait then, with Derived's completeness at
+      // the point of instantiation ([temp.point]).
+      if (current_function != EntityId::none && templated()) {
+        q_->record_dependent_type_trait_operand(loc);
+        return dependent_node({}, begin, end, builtin(Builtin::bool_));
+      }
       return fail(Diag::base_of_dependent);
     }
     if (!ts.is_class(base) || !ts.is_class(derived)) return bool_literal(false, begin, end);
