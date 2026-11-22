@@ -129,17 +129,18 @@ struct Frame {
 
 bool supports_float(Op op) {
   switch (op) {
-    case Op::const_: case Op::load: case Op::store: case Op::select: case Op::fpext:
-    case Op::fadd: case Op::fsub: case Op::fmul: case Op::fdiv: case Op::fneg: case Op::fcmp:
+    case Op::const_: case Op::load: case Op::store: case Op::select: case Op::fpext: case Op::fptrunc:
+    case Op::fadd: case Op::fsub: case Op::fmul: case Op::fdiv: case Op::fneg: case Op::fabs: case Op::fcmp:
+    case Op::fptosi: case Op::fptoui: case Op::sitofp: case Op::uitofp:
     case Op::call: case Op::call_ind: case Op::ret: case Op::va_arg: return true;
     default: return false;
   }
 }
 
 std::expected<Frame, std::string> layout(const l2::Function& body) {
-  // Keep the frame and the saved frame and return addresses within one page. Larger frames
-  // need stack probing to avoid skipping a guard page.
-  constexpr std::uint64_t max_frame = 4096 - 16;
+  // A frame over a page is probed page by page in the prologue (`allocate_frame`). The limit
+  // matches the AArch64 back end's and keeps every RBP-relative displacement in 32 bits.
+  constexpr std::uint64_t max_frame = std::uint64_t{16} << 20;
   const bool float_result = std::ranges::any_of(body.results, l2::is_float);
   if (body.indirect_result || body.results.size() > (float_result ? 1u : 2u))
     return std::unexpected("only a scalar SSE result or up to two INTEGER result registers are supported");
@@ -153,7 +154,7 @@ std::expected<Frame, std::string> layout(const l2::Function& body) {
     Type t = body.values[i].type;
     if (t == Type::state) continue;
     frame.size += 8;
-    if (frame.size > max_frame) return std::unexpected("x86-64 frame exceeds the single-page limit");
+    if (frame.size > max_frame) return std::unexpected("a frame larger than 16 MiB is not supported");
     frame.slots[i] = -std::int32_t(frame.size);
   }
 
@@ -182,12 +183,12 @@ std::expected<Frame, std::string> layout(const l2::Function& body) {
           return at_node(n, nd.op, "frame object alignment must be a power of two up to 16");
         if (size == 0 || size > max_frame) return at_node(n, nd.op, "unsupported frame object size");
         frame.size = align_up(frame.size + size, align);
-        if (frame.size > max_frame) return at_node(n, nd.op, "x86-64 frame exceeds the single-page limit");
+        if (frame.size > max_frame) return at_node(n, nd.op, "a frame larger than 16 MiB is not supported");
         frame.objects[raw(n)] = -std::int32_t(frame.size);
       }
       if (nd.op == Op::va_start && !frame.variadic_save) {
         frame.size = align_up(frame.size + reg_save_size, xmm_slot);
-        if (frame.size > max_frame) return at_node(n, nd.op, "x86-64 frame exceeds the single-page limit");
+        if (frame.size > max_frame) return at_node(n, nd.op, "a frame larger than 16 MiB is not supported");
         frame.variadic_save = -std::int32_t(frame.size);
       }
       if (nd.op == Op::call || nd.op == Op::call_ind || nd.op == Op::invoke) {
@@ -201,7 +202,7 @@ std::expected<Frame, std::string> layout(const l2::Function& body) {
           return at_node(n, nd.op, indirect ? "ellipsis arguments on a nonvariadic indirect call"
                                          : "ellipsis arguments on a nonvariadic direct call");
         if (ellipsis > args.size()) return at_node(n, nd.op, "more ellipsis arguments than arguments");
-        if (imms[indirect ? 2 : 3] || nd.nres > (indirect || variadic || uses_float_result ? 2u : 3u))
+        if (imms[indirect ? 2 : 3] || nd.nres > (variadic || uses_float_result ? 2u : 3u))
           return at_node(n, nd.op, "unsupported ABI result placement");
         if (indirect && (uses_float_result || std::ranges::any_of(args, is_float)))
           return at_node(n, nd.op, "floating-point indirect calls are unsupported");
@@ -219,7 +220,7 @@ std::expected<Frame, std::string> layout(const l2::Function& body) {
 
   // Share the bottom of the frame between the outgoing stack arguments and parallel edge copies.
   frame.size = align_up(frame.size + 8 * scratch_words, 16);
-  if (frame.size > max_frame) return std::unexpected("x86-64 frame exceeds the single-page limit");
+  if (frame.size > max_frame) return std::unexpected("a frame larger than 16 MiB is not supported");
   return frame;
 }
 
@@ -240,10 +241,7 @@ class Emitter {
     frame_row(FrameState::saved_rbp);
     e_.move(rbp, rsp);
     frame_row(FrameState::frame_pointer);
-    if (frame_.size) {
-      e_.reg({0x81}, 5, rsp);  // sub rsp, imm32
-      e_.immediate(frame_.size, 4);
-    }
+    allocate_frame();
     if (frame_.variadic_save && !save_variadic_registers())
       return std::unexpected("x86-64 register-save branch displacement out of range");
     parameters();
@@ -291,6 +289,31 @@ class Emitter {
     BlockId target;
   };
   std::vector<Branch> branches_;
+
+  // Lower RSP by the frame size without moving it more than a page past memory already
+  // touched, so a guard page below the stack faults instead of being skipped. The pushed RBP
+  // touched the word below the incoming RSP. R11 is caller-saved and carries no argument, and
+  // RAX still holds a variadic callee's vector count here.
+  void allocate_frame() {
+    constexpr std::uint32_t page = 4096;
+    auto lower = [&](std::uint32_t bytes) {
+      e_.reg({0x81}, 5, rsp);  // sub rsp, imm32
+      e_.immediate(bytes, 4);
+    };
+    // A frame of a whole page or more is probed: after an unprobed `sub` of a full page, the
+    // first call would push its return address more than a page below the saved RBP.
+    const auto size = static_cast<std::uint32_t>(frame_.size);
+    if (size >= page) {
+      e_.emit({0x41, 0xbb});  // mov r11d, imm32: the number of whole pages
+      e_.immediate(size / page, 4);
+      const auto loop = e_.offset();
+      lower(page);
+      e_.emit({0x48, 0x83, 0x0c, 0x24, 0x00});  // or qword [rsp], 0
+      e_.emit({0x49, 0xff, 0xcb});              // dec r11
+      e_.emit({0x75, std::uint8_t(std::int8_t(loop - (e_.offset() + 2)))});  // jnz loop
+    }
+    if (const auto rest = size >= page ? size % page : size) lower(rest);
+  }
 
   void frame_row(FrameState state) {
     // `run` checks the final byte extent before returning any offsets.
@@ -384,6 +407,38 @@ class Emitter {
 
     e_.load(rax, rcx, 0, l2::bytes(type));
     write(result);
+    return true;
+  }
+
+  // Convert an i32 or i64 to binary32 or binary64, rounding under MXCSR.
+  bool int_to_float(bool is_signed, ValueId source, ValueId result) {
+    const Type from = body_.type(source);
+    const unsigned width = home_width(result);
+    const std::int32_t slot = frame_.slots[raw(source)];
+    if (is_signed || from == Type::i32) {
+      // `write` zero-extends an i32 home slot, so its unsigned value is the signed i64.
+      e_.integer_to_float(0, rbp, slot, width, !is_signed || from == Type::i64);
+      e_.store_scalar_xmm(rbp, frame_.slots[raw(result)], 0, width);
+      return true;
+    }
+    // An i64 with the top bit set: halve it, keeping the bit shifted out as a sticky low bit
+    // so the signed conversion rounds the same way, then double the result exactly.
+    read(source);
+    e_.reg({0x85}, rax, rax);  // test rax, rax
+    e_.emit({0x0f, 0x89});     // jns rel32
+    auto non_negative = e_.displacement();
+    e_.move(rcx, rax);
+    e_.reg({0xd1}, 5, rcx);              // shr rcx, 1
+    e_.emit({0x83, 0xe0, 0x01});         // and eax, 1
+    e_.reg({0x09}, rax, rcx);            // or rcx, rax
+    e_.integer_to_float(0, rcx, width);
+    e_.double_xmm(0, width);
+    e_.emit({0xe9});  // jmp rel32
+    auto converted = e_.displacement();
+    if (!e_.patch_relative(non_negative, e_.offset())) return false;
+    e_.integer_to_float(0, rax, width);
+    if (!e_.patch_relative(converted, e_.offset())) return false;
+    e_.store_scalar_xmm(rbp, frame_.slots[raw(result)], 0, width);
     return true;
   }
 
@@ -575,6 +630,66 @@ std::expected<void, std::string> Emitter::node(NodeId n) {
         e_.reg({0x31}, rcx, rax);  // xor rax, rcx
       }
       break;
+    case Op::fabs:
+      // Clear only the IEEE sign bit, as for negation.
+      read(ops[0]);
+      if (body_.type(body_.result(n)) == Type::f32) {
+        e_.emit({0x25});  // and eax, imm32
+        e_.immediate(~(std::uint32_t{1} << 31), 4);
+      } else {
+        e_.emit({0x48, 0xb9});  // mov rcx, imm64
+        e_.immediate(~(std::uint64_t{1} << 63), 8);
+        e_.reg({0x21}, rcx, rax);  // and rax, rcx
+      }
+      break;
+    case Op::fptrunc:
+      e_.narrow_float(0, rbp, frame_.slots[raw(ops[0])]);
+      e_.store_scalar_xmm(rbp, frame_.slots[raw(body_.result(n))], 0, 4);
+      return {};
+    case Op::sitofp: case Op::uitofp:
+      if (!int_to_float(op == Op::sitofp, ops[0], body_.result(n)))
+        return at_node(n, op, "conditional branch displacement out of range");
+      return {};
+    case Op::fptosi: case Op::fptoui: {
+      // Values outside the result type are poison (L2), so a truncation that is exact for
+      // every value in range suffices.
+      const Type type = body_.type(body_.result(n));
+      const unsigned width = home_width(ops[0]);
+      const std::int32_t source = frame_.slots[raw(ops[0])];
+      if (op == Op::fptosi || type == Type::i32) {
+        // A uint32 value fits the signed 64-bit conversion; `write` keeps its low 32 bits.
+        e_.truncate_float(rax, rbp, source, width, op == Op::fptoui || type == Type::i64);
+        break;
+      }
+      // Below 2^63 the signed conversion is exact. At or above it, convert x - 2^63, which is
+      // exact there, and set the top bit. Comparing first keeps a valid conversion from raising
+      // the invalid-operation flag (Intel SDM vol. 2, CVTTSD2SI).
+      const std::int32_t scratch = frame_.slots[raw(body_.result(n))];
+      if (width == 4) {
+        e_.emit({0xb8});  // mov eax, imm32: 2^63 as binary32
+        e_.immediate(0x5f000000, 4);
+      } else {
+        e_.emit({0x48, 0xb8});  // mov rax, imm64: 2^63 as binary64
+        e_.immediate(0x43e0000000000000, 8);
+      }
+      e_.store(rbp, scratch, rax, width);
+      e_.load_scalar_xmm(0, rbp, source, width);
+      e_.compare_scalar_xmm(0, rbp, scratch, width);
+      e_.emit({0x0f, 0x83});  // jae rel32: x >= 2^63 (unordered is poison and falls through)
+      auto high = e_.displacement();
+      e_.truncate_float(rax, rbp, source, width, true);
+      e_.emit({0xe9});  // jmp rel32
+      auto converted = e_.displacement();
+      if (!e_.patch_relative(high, e_.offset())) return at_node(n, op, "conditional branch displacement out of range");
+      e_.scalar_float_arithmetic(0x5c, 0, rbp, scratch, width);  // subtract 2^63
+      e_.store_scalar_xmm(rbp, scratch, 0, width);
+      e_.truncate_float(rax, rbp, scratch, width, true);
+      e_.emit({0x48, 0xb9});  // mov rcx, imm64
+      e_.immediate(std::uint64_t{1} << 63, 8);
+      e_.reg({0x31}, rcx, rax);  // xor rax, rcx
+      if (!e_.patch_relative(converted, e_.offset())) return at_node(n, op, "conditional branch displacement out of range");
+      break;
+    }
     case Op::shl: case Op::lshr: case Op::ashr:
       read(ops[0]);
       read(ops[1], rcx);

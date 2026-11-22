@@ -1418,7 +1418,8 @@ public:
                                                bool checked = false, bool type_components = false,
                                                bool check_injected_access = false,
                                                std::vector<TypeQualifier>* type_qualifiers = nullptr,
-                                               bool* failed_qualifier = nullptr) {
+                                               bool* failed_qualifier = nullptr,
+                                               std::optional<u32>* committed_failure = nullptr) {
     u32 j = start;
     std::optional<sema::Sema::Scope> s;
     if (kind(j) == Tk::kw_decltype && kind(j + 1) == Tk::l_paren) {
@@ -1439,7 +1440,8 @@ public:
       s = s_->scope_named(name_of(tok(j)));
       if (!s) return std::nullopt;
       j += 2;
-    } else if (auto t = template_id_scope(std::nullopt, j, /*scope=*/true, checked || check_injected_access, failed_qualifier)) {
+    } else if (auto t = template_id_scope(std::nullopt, j, /*scope=*/true, checked || check_injected_access,
+                                          failed_qualifier, committed_failure)) {
       s = t;
     } else {
       return std::nullopt;
@@ -1462,7 +1464,8 @@ public:
         else if (type_qualifiers && s->type) type_qualifiers->push_back({*s, n, pos() + j});
         s = m;
         j += 2;
-      } else if (auto t = template_id_scope(s, j, /*scope=*/true, checked || check_injected_access, failed_qualifier)) {
+      } else if (auto t = template_id_scope(s, j, /*scope=*/true, checked || check_injected_access,
+                                            failed_qualifier, committed_failure)) {
         s = t;
       } else {
         break;
@@ -1484,8 +1487,11 @@ public:
   // A component `X<args>::` at `j` ahead naming a class template specialization, found by
   // unqualified lookup or in namespace `in` ([temp.names]); `j` moves past the `::`. The arguments
   // are parsed ahead of the tokens being taken. A speculative lookup discards its diagnostics.
+  // A chosen expression retains a constraint failure within a complete argument list and records
+  // where to resume after its `::`.
   std::optional<sema::Sema::Scope> template_id_scope(std::optional<sema::Sema::Scope> in, u32& j, bool scope = true,
-                                                     bool checked = false, bool* failed_qualifier = nullptr) {
+                                                     bool checked = false, bool* failed_qualifier = nullptr,
+                                                     std::optional<u32>* committed_failure = nullptr) {
     if (kind(j) != Tk::identifier || kind(j + 1) != Tk::less) return std::nullopt;
     if (in && !in->ns) return std::nullopt;  // member templates of classes come later (#88)
     NameId n = name_of(tok(j));
@@ -1498,9 +1504,10 @@ public:
     std::size_t diags = s_->diag_count();
     const u32 name_at = pos() + j;
     i_ += j + 1;
-    auto args = template_argument_list();
+    bool took_closer = false;
+    auto args = template_argument_list(nullptr, &took_closer);
     u32 after = i_ - saved;
-    bool closed = scope ? !half_ && kind() == Tk::coloncolon : true;
+    bool closed = took_closer && (!scope || (!half_ && kind() == Tk::coloncolon));
     bool ended_half = half_;  // the list ended in the first half of a `>>`
     std::optional<QualType> t;
     if (args && closed)
@@ -1508,12 +1515,16 @@ public:
     i_ = saved;
     half_ = saved_half;
     if (!scope) qualified_half_ = ended_half;
-    if (!t && args && closed && failed_qualifier) {
-      *failed_qualifier = std::ranges::any_of(std::span(s_->diagnostics()).subspan(diags), [](const auto& d) {
+    const bool probe_failure = args && failed_qualifier;
+    const bool commit_argument_failure = scope && !args && committed_failure;
+    if (!t && closed && (probe_failure || commit_argument_failure)) {
+      const bool unsatisfied = std::ranges::any_of(std::span(s_->diagnostics()).subspan(diags), [](const auto& d) {
         return sema::sema_diag_of(d.id) == Diag::constraints_not_satisfied;
       });
+      if (probe_failure) *failed_qualifier = unsatisfied;
+      if (commit_argument_failure && unsatisfied) *committed_failure = after + 1;
     }
-    if (!checked) s_->truncate_diags(diags);
+    if (!checked && (!committed_failure || !*committed_failure)) s_->truncate_diags(diags);
     if (!t) return std::nullopt;
     j = scope ? after + 1 : after;
     return sema::Sema::Scope{std::nullopt, *t};
@@ -1578,6 +1589,8 @@ public:
   bool template_ids_in_declarators = false;
   // In a parameter-declaration or a template-parameter, an ellipsis may begin a pack's declarator.
   bool packs_in_declarators_ = false;
+  // An ordinary default of a consteval function is evaluated with that function's call.
+  bool consteval_parameter_defaults = false;
 
   // Whether the `(` here begins a parameter-declaration-clause rather than an initializer
   // ([dcl.ambig.res]: what can be a declaration is one).
@@ -1870,7 +1883,10 @@ public:
           scan_member_default(s.params, template_probes);
           s.params.back().default_tokens = {begin, index()};
         } else {
-          s.params.back().default_arg = default_argument(t);
+          const u32 saved_context = s_->immediate_context;
+          if (consteval_parameter_defaults && in_params_ == 1) ++s_->immediate_context;
+          s.params.back().default_arg = parameter_default_argument(t, s.params);
+          s_->immediate_context = saved_context;
           if (s.params.back().default_arg == NodeId::none) ok = false;  // diagnosed
         }
       }
@@ -1981,10 +1997,24 @@ public:
     return std::nullopt;
   }
 
-  // A default argument ([dcl.fct.default]/1, /5): its names are bound and its copy-initialization
-  // of the parameter is checked here. A template's that depends on its parameters is kept as it
-  // is, and rejected where a call would use it.
+  NodeId parameter_default_argument(QualType type, std::span<const Param> params) {
+    s_->push_scope();
+    struct EndScope {
+      sema::Sema& sema;
+      ~EndScope() { sema.pop_scope(); }
+    } scope{*s_};
+    for (const Param& param : params)
+      if (param.name != s_->no_name())
+        s_->declare_local(param.name, param.type,
+                          sema::local_flag::parameter | sema::local_flag::default_argument_parameter, param.at, false);
+    return default_argument(type);
+  }
+
+  // Bind the written names and check copy-initialization ([dcl.fct.default]/1, /5).
+  // Keep the written range for dependent defaults.
   NodeId default_argument(QualType t) {
+    const u32 source_begin = pos();
+    const auto calls_before = s_->dependent_calls.size();
     // Not in the parameters of a parameter's own function type ([dcl.fct.default]/3).
     if (in_params_ > 1) s_->diag(pos(), Diag::default_arg_not_allowed);
     Ex e;
@@ -2005,8 +2035,18 @@ public:
                                                             : s_->convert(a, t, a.begin);
     }
     if (!e.ok()) return NodeId::none;
-    if (s_->types().is_dependent(t) || s_->dependent(e)) e = s_->dependent_node({e}, e.begin, e.end);
-    return s_->node(ast::DefaultArg{e.info, sema::Sema::at(e, e.begin)}, e.begin, e.end, e.info).id;
+    ast::DefaultArg value{};
+    value.source = s_->item();
+    value.dependent_calls = s_->builder().seq(std::span<const u32>{});
+    if (s_->types().is_dependent(t) || s_->dependent(e)) {
+      e = s_->dependent_node({e}, e.begin, e.end);
+      value.source_begin = source_begin;
+      value.source_end = pos();
+      value.dependent_calls = s_->builder().seq(std::span<const u32>(s_->dependent_calls).subspan(calls_before));
+    }
+    value.info = e.info;
+    value.arg = sema::Sema::at(e, e.begin);
+    return s_->node(value, e.begin, e.end, e.info).id;
   }
 
   // A default member initializer after its optional `=` ([class.mem.general]).
@@ -2349,7 +2389,9 @@ public:
 
   // A template-argument-list ([temp.arg.general]) after a template-name, from its `<`. An argument
   // that can be a type-id is one ([temp.arg.general]/2).
-  std::optional<std::vector<ast::TemplateArg>> template_argument_list(std::optional<u32>* replay_at = nullptr) {
+  std::optional<std::vector<ast::TemplateArg>> template_argument_list(std::optional<u32>* replay_at = nullptr,
+                                                                     bool* took_closer = nullptr) {
+    if (took_closer) *took_closer = false;
     u32 begin = pos();
     u32 deferred = deferred_argument_checks_;
     if (!expect(Tk::less)) return std::nullopt;
@@ -2427,6 +2469,7 @@ public:
     // [temp.names]/4: `>>` closes this list and the enclosing one.
     if (is(Tk::greatergreater) && !half_) half_ = true;
     else if (!expect(Tk::greater)) return std::nullopt;
+    if (took_closer) *took_closer = true;
     if (!ok) return std::nullopt;
     if (replay_at && deferred != deferred_argument_checks_) *replay_at = begin;
     return args;
@@ -2698,6 +2741,7 @@ public:
       s_->drop_failures(param_diags);
       return s_->bool_literal(false, begin, pos());
     }
+    const sema::Sema::RequiresBodyScope requirements{*s_};
     bool satisfied = true;
     bool dependent = false;
     while (!is(Tk::r_brace) && !at_end()) {
@@ -3832,8 +3876,15 @@ public:
     u32 next = 0;
     auto address = address_op_ && *address_op_ + 1 == begin ? address_op_ : std::nullopt;
     std::vector<TypeQualifier> type_qualifiers;
+    std::optional<u32> committed_failure;
     auto s = nested_name(0, next, /*member_pointer=*/false, substituting_partial_arguments || address.has_value(),
-                         /*type_components=*/false, /*check_injected_access=*/false, &type_qualifiers);
+                         /*type_components=*/false, /*check_injected_access=*/false, &type_qualifiers,
+                         /*failed_qualifier=*/nullptr, &committed_failure);
+    if (committed_failure) {
+      for (u32 j = 0; j < *committed_failure; ++j) bump();
+      while (is(Tk::identifier) || is(Tk::coloncolon)) bump();
+      return {NodeId::none, begin, pos()};
+    }
     // `S::template f<args>`: f names a template ([temp.names]/3).
     bool keyword = s && kind(next) == Tk::kw_template && kind(next + 1) == Tk::identifier;
     if (keyword) ++next;
@@ -3863,6 +3914,19 @@ public:
         return {NodeId::none, begin, pos()};
       }
       return scope_expr();
+    }
+    if (s->ns && is(Tk::less)) {
+      // [expr.type.conv] permits a namespace-qualified simple-template-id as the
+      // target type of a functional conversion.
+      const auto diags = s_->diag_count();
+      if (auto tmpl = s_->namespace_expression_type_template(*s->ns, n, name_at)) {
+        auto args = template_argument_list();
+        if (!args) return {NodeId::none, begin, pos()};
+        auto type = type_template_id(*tmpl, *args, name_at);
+        if (!type) return {NodeId::none, begin, pos()};
+        return type_conversion(*type, begin);
+      }
+      if (s_->has_error_since(diags)) return {NodeId::none, begin, pos()};
     }
     // `N::T(args)` or `N::T{…}` ([expr.type.conv]): a qualified type name, unless a function or
     // variable of the name hides it.
@@ -4724,6 +4788,15 @@ public:
       Ex zero = s_->literal(i, s_->world().values.integer(i, 0), ast::ValueCategory::prvalue, call.begin, call.end);
       return s_->convert_node(zero, ast::ConversionKind::to_void, s_->builtin(sema::Builtin::void_));
     }
+    // A manifestly constant-evaluated expression may consume an immediate pointer.
+    // Its initializer checks the final value for an escape.
+    if (auto entity = s_->immediate_result_entity(*v.value)) {
+      if (!s_->constant_reference_context && !s_->trial_initializer) {
+        s_->diag(call.begin, Diag::immediate_address, s_->world().entities.rec(*entity).name);
+        return {NodeId::none, call.begin, call.end};
+      }
+      s_->folded_immediate_result = *entity;
+    }
     return s_->literal(call.type(), *v.value, ast::ValueCategory::prvalue, call.begin, call.end);
   }
 
@@ -4926,6 +4999,11 @@ public:
     sema::Evaluated v = scalar_record ? evaluator.evaluate_initializer(init, /*zero_default=*/false)
                                      : evaluator.evaluate(init);
     if (v.value) {
+      if (is_constexpr && s_->folded_immediate_result != ast::EntityId::none)
+        if (auto entity = s_->immediate_result_entity(*v.value)) {
+          s_->diag(init.begin, Diag::immediate_address, s_->world().entities.rec(*entity).name);
+          return;
+        }
       s_->set_local_value(local, *v.value);
       if (scalar_record) {
         // The initialization was manifestly constant-evaluated ([expr.const]). Materialize that
@@ -5265,6 +5343,9 @@ public:
       if (v.value) value = *v.value;
       else if (spec.is_constinit && !v.dependent) s_->diag(init.begin, Diag::not_constant, v.reason);
     }
+    if (spec.is_constinit && value != ast::ConstId::none)
+      if (auto entity = s_->immediate_result_entity(value))
+        s_->diag(init.begin, Diag::immediate_address, s_->world().entities.rec(*entity).name);
     s_->permit_constant_initializer(dbegin, s_->local(local).type, value);
     s_->static_value(local, value == ast::ConstId::none ? std::nullopt : std::optional(value));
     return s_->node(ast::StaticVar{local, sema::Sema::at(init, dbegin), value, dtor}, dbegin, pos());
@@ -5456,7 +5537,7 @@ public:
         skip_to_semi();
         return {NodeId::none, begin, pos()};
       }
-      sema::Sema::ImmediateReferenceScope references(*s_, s_->constant_reference_context || spec.is_constexpr);
+      sema::Sema::ImmediateReferenceScope references(*s_, s_->constant_reference_context || spec.is_constexpr || spec.is_constinit);
       // [dcl.constexpr]: a constexpr variable is const.
       if (spec.is_constexpr) d.type = s_->types().add_cv(d.type, sema::Cv::const_);
       const bool replay_defaults = !spec.is_static && s_->can_replay_default_members(d.type);

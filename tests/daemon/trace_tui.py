@@ -15,7 +15,7 @@ under a pseudo-terminal.
 
 The model behind the frames is unit-tested (`unit.trace`); this checks the terminal around it.
 """
-import base64, fcntl, os, re, select, signal, struct, sys, tempfile, termios, time
+import base64, fcntl, os, re, select, signal, struct, subprocess, sys, tempfile, termios, time
 from pathlib import Path
 
 failures = []
@@ -28,6 +28,9 @@ def check(ok, what):
 
 
 SOURCE = 'int square(int x) { return x * x; }\nint main() { return square(3) - 9; }\n'
+# An object for the first target on any host: a host may have no default target (arm64 Linux) or
+# no linker for it, and the trace would then be empty.
+COMPILE = ['--target=arm64-apple-darwin', '-c']
 SGR = re.compile(r'\x1b\[[0-9;?]*[A-Za-z]')
 
 
@@ -55,7 +58,7 @@ class Tui:
             child = os.fork()
             if child == 0:
                 os.chdir(scope)
-                os.execve(ycxx, [ycxx, 'cxx', '--trace-engine=interactive', source, '-o', 'a'], env)
+                os.execve(ycxx, [ycxx, 'cxx', '--trace-engine=interactive', *COMPILE, source, '-o', 'a.o'], env)
             os.write(w, str(child).encode())
             os.close(w)
             _, status = os.waitpid(child, 0)
@@ -118,6 +121,9 @@ def main(ycxx):
     env = {k: v for k, v in os.environ.items() if k not in ('NO_COLOR', 'YCXX_DAEMON')}
     clip = scope / 'clip.txt'
     env.update(YCXX_NO_DAEMON='1', TERM='xterm-256color', YCXX_CLIPBOARD=f'cat > {clip}')
+    # The browser opens after the compile, and `q` leaves with the compile's own status: whatever the
+    # same command says untraced (a host without a linker for the target fails the link).
+    plain = subprocess.run([ycxx, 'cxx', *COMPILE, 'a.cpp', '-o', 'a.o'], cwd=scope, env=env, capture_output=True, text=True, timeout=300)
 
     t = Tui(ycxx, scope, env)
     check(t.read_until(lambda o: b'ycxx engine trace' in o), 'the browser draws')
@@ -191,7 +197,9 @@ def main(ycxx):
     check(len(lines) == 30 and all(len(l) == 140 for l in lines), f'the new frame is 30×140: {len(lines)} lines, widths {sorted(set(len(l) for l in lines))}')
     t.send(b'q')
     status, _ = t.wait()
-    check(os.WIFEXITED(status) and os.WEXITSTATUS(status) == 0, f'q quits (status {status})')
+    after = t.out[t.out.rfind(b'\x1b[?1049l') + 8:] if b'\x1b[?1049l' in t.out else t.out[-300:]
+    check(os.WIFEXITED(status) and os.WEXITSTATUS(status) == plain.returncode,
+          f'q quits with the compile\'s status ({status}; untraced {plain.returncode}: {plain.stderr[-300:]!r}; traced printed {after[-300:]!r})')
     tail = t.out[t.out.rfind(b'\x1b[?1006l'):] if b'\x1b[?1006l' in t.out else b''
     check(b'\x1b[?1000l' in tail and b'\x1b[?7h' in tail and b'\x1b[?1049l' in tail, 'mouse reports and autowrap back as they were, and the main screen')
 

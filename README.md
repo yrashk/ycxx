@@ -52,6 +52,9 @@ instantiation. Concrete constant template arguments can use braced conversions s
 `Tag<auto{7}>` and integer-literal-led parenthesized conversions such as `Tag<auto(7)>`.
 [#286](https://github.com/yrashk/ycxx/issues/286)
 
+Functional conversions can construct namespace-qualified class-template specializations with
+parentheses or braces, including through namespace aliases. [#697](https://github.com/yrashk/ycxx/issues/697)
+
 **Preprocess binary resources.** Both targets support `#embed` and `__has_embed` with the standard
 parameters. [#125](https://github.com/yrashk/ycxx/issues/125)
 
@@ -71,8 +74,9 @@ build/bin/ycxx cxx -nostdlib example.o -o example
 ./example
 ```
 
-Fixed-prototype direct calls to free functions support passing and returning nonempty flat
-records with integral or ordinary object-pointer fields by value. The record can occupy up to
+Fixed-prototype calls (free and member functions, lambdas, function templates and calls
+through pointers) support passing and returning nonempty flat records with integral or
+ordinary object-pointer fields by value. The record can occupy up to
 16 bytes and must be trivial for calls. [Linux integer aggregate ABI](docs/design/linux-integer-aggregates.md)
 
 For mixed Linux objects, the pinned libycxx `<cstddef>` byte operator uses the same Itanium
@@ -109,8 +113,9 @@ Fixed-prototype definitions and direct calls on x86-64 Linux also move `float` a
 arguments and results. Direct variadic calls support the same scalar floating values and
 promote an unnamed `float` to `double`. Direct call result types can be deduced from `auto` or
 `decltype(auto)`. Runtime addition, subtraction, multiplication, division and unary negation
-work for `float` and `double` at their evaluation width. Both types support the six comparisons
-and conversion to `bool`.
+work for `float` and `double` at their evaluation width. Both types support the six comparisons,
+conversion to `bool`, conversions to and from every integer type, `double` to `float`, and
+`__builtin_fabs`. [#643](https://github.com/yrashk/ycxx/issues/643)
 [Linux scalar floating-point ABI](docs/design/linux-scalar-floating-point.md) ·
 [Linux scalar floating-point operations](docs/design/linux-scalar-floating-point.md#runtime-arithmetic) ·
 [Linux scalar variadic floating-point ABI](docs/design/linux-floating-variadic-calls.md) ·
@@ -133,14 +138,15 @@ functions defined in another translation unit. Native static executables and hos
 support those addresses. [#414](https://github.com/yrashk/ycxx/issues/414)
 · [#407](https://github.com/yrashk/ycxx/issues/407)
 
-On x86-64 Linux, direct calls and saved pointers across translation units share one address for
-simple external inline functions. Ordinary namespace-scope functions can use GNU hidden visibility,
-including coalesced inline and `constexpr` definitions.
+On both targets, direct calls and saved pointers across translation units share one address for
+simple external inline functions, with ycxx's linker or the system's. Ordinary namespace-scope
+functions can use GNU hidden visibility, including coalesced inline and `constexpr` definitions.
 [#422](https://github.com/yrashk/ycxx/issues/422) · [#602](https://github.com/yrashk/ycxx/issues/602)
+· [#124](https://github.com/yrashk/ycxx/issues/124)
 
 External inline namespace variables with relocation-free static initializers share one object
-across x86-64 ELF translation units. This lets two freestanding units using libycxx `<cstddef>`
-link with the pinned static library. [#432](https://github.com/yrashk/ycxx/issues/432)
+across translation units on both targets. On Linux this lets two freestanding units using libycxx
+`<cstddef>` link with the pinned static library. [#432](https://github.com/yrashk/ycxx/issues/432)
 
 ycxx ELF objects record function types and code sizes. The ELF linker accepts supported
 system-assembled objects with function symbols and the GNU-built libycxx static linkage-marker
@@ -221,6 +227,7 @@ are value-initialized when they have no written default member initializer.
   by argument-dependent lookup. Unqualified calls can find and rank functions in associated
   namespaces, including those of class template type arguments in ordinary calls. Functions
   support default arguments, recursion, operator overloading and calls through pointers.
+  Free function templates can instantiate omitted dependent scalar defaults after overload selection.
   Ordinary free binary operators use argument-dependent lookup, including associated base namespaces.
   Supported dependent binary operators on ordinary non-template classes also find associated
   nonmember candidates at instantiation.
@@ -292,8 +299,10 @@ are value-initialized when they have no written default member initializer.
   members of class templates, member function and
   constructor templates, parameter packs and fold expressions, alias templates, template
   template parameters, concepts and requires-expressions in overload resolution, including
-  explicit trailing type packs in ordinary constrained function overloads and checking constraints
-  when directly naming a non-dependent primary class specialization with explicit type arguments,
+  explicit trailing type packs in ordinary constrained function overloads. Directly named
+  non-dependent primary class specializations with explicit type arguments check constraints.
+  Non-template code outside requires-expression bodies also checks constraints on directly named
+  primary namespace variable templates with explicit non-dependent type arguments. Templates support
   `if constexpr`, deferred template static assertion failures, and two-phase lookup, with
   Itanium names identical to Clang's; Clang's
   `__make_integer_seq`. Template type arguments can use terminal namespace-qualified alias
