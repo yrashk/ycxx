@@ -1429,8 +1429,10 @@ private:
     std::pair<u32, u32> tokens;
   };
   std::map<EntityId, MemberException> member_exceptions_;
+  std::map<u32, std::optional<std::vector<u32>>> member_exception_patterns_;
   std::set<EntityId> replaying_member_exceptions_;
   std::map<EntityId, QualType> resolved_member_exceptions_;
+  void check_member_exception_patterns(EntityId cls, const sema::ClassRec& rec, Result<ast::ClassDef>& out);
   std::map<u32, std::vector<std::vector<ast::TemplateParamSema>>> outer_heads_;  // by item
   std::map<std::pair<u32, u32>, u32> static_init_ends_;  // by (member item, ordinal): its initializer's end
   std::map<u32, LazyMember> lazy_members_;                 // by member entity
@@ -1920,6 +1922,10 @@ std::optional<QualType> AtItem::replay_member_exception(sema::Sema& caller, cons
   const u32 item_begin = p_->items().items[item].begin;
   AtItem source(*p_, item, false);
   source.at_point = default_instantiation_point.value_or(point());
+  if (const auto pattern = p_->member_exception_patterns_.find(item); pattern != p_->member_exception_patterns_.end()) {
+    if (!pattern->second) return std::nullopt;
+    source.instantiation_calls = *pattern->second;
+  }
   const auto& record = p_->world().entities.rec(function);
   source.completing_class = record.scope;
   sema::Sema replay(p_->world(), caller.builder(), source, caller.diagnostics(), p_->id(item), 0);
@@ -6918,6 +6924,7 @@ const Result<ast::ClassDef>& Program::class_def(u32 item) {
     classes_.publish(*cls, std::move(rec), [&](sema::ClassRec& fresh) {
       bind_member_defaults(*cls, fresh, out);
       bind_constructor_exceptions(*cls, fresh, out);
+      check_member_exception_patterns(*cls, fresh, out);
     });
   }
   ast::Builder b(w_->ins, &arena_);
@@ -6978,6 +6985,53 @@ void Program::bind_constructor_exceptions(EntityId cls, const sema::ClassRec& re
     slot->second = w_->types.function(signature.inner, signature.params, signature.variadic,
                                       signature.linkage, signature.fn_cv, signature.fn_ref, nonthrowing);
     out.demands.insert(out.demands.end(), s.demands.begin(), s.demands.end());
+  }
+}
+
+// An exception specification is a complete-class context ([class.mem.general]). Check the written
+// expression with the template still unbound, before any specialization needs its value.
+void Program::check_member_exception_patterns(EntityId cls, const sema::ClassRec& rec, Result<ast::ClassDef>& out) {
+  ast::Builder b(w_->ins, &arena_);
+  for (const auto& member : rec.members) {
+    const auto specification = member_exceptions_.find(member.entity);
+    if (specification == member_exceptions_.end()) continue;
+    const auto [item, tokens] = specification->second;
+    if (member_exception_patterns_.contains(item)) continue;
+    const auto written = member_decl(member.entity);
+    const auto decl = written ? decl_sema(*written) : std::nullopt;
+    if (!decl) continue;
+    const u32 item_begin = items_->items[item].begin;
+    AtItem source(*this, item, false);
+    source.completing_class = cls;
+    sema::Sema replay(*w_, b, source, out.diags, id(item), 0);
+    replay.current_class = cls;
+    replay.current_function = member.entity;
+    replay.this_type = this_type(*decl);
+    replay.template_scopes = enclosing_heads(item);
+    replay.template_scopes.push_back(w_->ins.seqs.elements(decl->template_params));
+    replay.push_scope();
+    const auto before = replay.diag_count();
+    for (const auto& param : w_->ins.seqs.elements(decl->params))
+      if (param.name != replay.no_name())
+        replay.declare_local(param.name, param.type, sema::local_flag::parameter, 0, false);
+    Parser parser(*r_, item_begin, tokens.second, replay);
+    parser.set_questions(source);
+    parser.seek(tokens.first);
+    Parser::Suffix exception;
+    bool ok = true;
+    try {
+      parser.exception_specifier(exception, ok);
+      if (ok && exception.noexcept_condition && !replay.dependent(*exception.noexcept_condition))
+        parser.noexcept_value(exception.noexcept_condition, ok);
+    } catch (const TooDeep&) {
+      ok = false;
+    }
+    if (!ok || !parser.at_end() || replay.has_error_since(before)) {
+      member_exception_patterns_.emplace(item, std::nullopt);
+      continue;
+    }
+    member_exception_patterns_.emplace(item, std::move(replay.dependent_calls));
+    out.demands.insert(out.demands.end(), replay.demands.begin(), replay.demands.end());
   }
 }
 

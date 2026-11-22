@@ -1,9 +1,9 @@
 template<class Callback>
 struct Sender {
-  Callback callback;
-
   template<class Value>
   void send(Value value) noexcept(noexcept(callback(value))) {}
+
+  Callback callback;
 };
 
 struct ByArgument {
