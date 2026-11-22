@@ -685,7 +685,10 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
   copyable arguments of more than two eightbytes and empty classes remain unsupported
   ([#641](https://github.com/yrashk/ycxx/issues/641)), as do SSE records
   ([#642](https://github.com/yrashk/ycxx/issues/642)). Records with source layout directives
-  native layout does not apply stay out of memory passing too.
+  native layout does not apply stay out of memory passing, including records that contain
+  those layouts as fields, array elements, or bases. A wrapper whose member makes its implicit
+  destructor nontrivial uses the indirect result convention even when its copy and move traits
+  are unknown. [#661](https://github.com/yrashk/ycxx/issues/661)
   [Design](docs/design/linux-integer-aggregates.md) · [#440](https://github.com/yrashk/ycxx/issues/440)
 - `-c` writes deterministic ELF64 relocatable objects through `src/obj/elf.cppm`. The reader
   accepts the supported x86-64 `ET_REL` subset emitted by ycxx. The native ELF linker consumes

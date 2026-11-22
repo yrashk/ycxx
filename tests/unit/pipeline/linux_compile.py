@@ -85,13 +85,15 @@ def external_data_addresses(compile, target, source_dir, scope, cold, cc, readel
     run(['./interposer'], scope, cold)
 
 
-def integer_aggregate_calls(compile, target, sources, scope, cold, cc, provider, client, host_flags=()):
+def integer_aggregate_calls(compile, target, sources, scope, cold, cc, provider, client,
+                            host_flags=(), *, native_split=True):
     for part, name in (('provider', provider), ('client', client)):
         source = sources / f'{name}.cpp'
         compile(target, '-c', source, '-o', f'aggregate-{part}.o')
         run([cc, '-std=c++26', '-O2', '-fno-pie', *host_flags, '-c', source, '-o', f'host-{part}.o'], scope, cold)
-    compile(target, '-nostdlib', 'aggregate-provider.o', 'aggregate-client.o', '-o', 'aggregate-native')
-    run(['./aggregate-native'], scope, cold)
+    if native_split:
+        compile(target, '-nostdlib', 'aggregate-provider.o', 'aggregate-client.o', '-o', 'aggregate-native')
+        run(['./aggregate-native'], scope, cold)
     for inputs in (('aggregate-provider.o', 'host-client.o'), ('host-provider.o', 'aggregate-client.o')):
         run([cc, '-no-pie', *inputs, '-o', 'aggregate-mixed'], scope, cold)
         run(['./aggregate-mixed'], scope, cold)
@@ -260,8 +262,12 @@ system_leaf:
                 '-o', 'aggregate-empty-list')
         run(['./aggregate-empty-list'], scope, cold)
         # Destructors would otherwise give the host objects unwind tables naming the C++ runtime.
-        integer_aggregate_calls(compile, target, source_dir / 'linux_memory_records', scope, cold, cc,
-                                'provider', 'client', ('-fno-exceptions', '-fno-asynchronous-unwind-tables'))
+        memory_records = source_dir / 'linux_memory_records'
+        without_unwind = ('-fno-exceptions', '-fno-asynchronous-unwind-tables')
+        integer_aggregate_calls(compile, target, memory_records, scope, cold, cc, 'provider', 'client', without_unwind)
+        # Two ycxx objects can both emit Held's implicit destructor as strong (#422).
+        integer_aggregate_calls(compile, target, memory_records, scope, cold, cc, 'held-provider', 'held-client',
+                                without_unwind, native_split=False)
         initializer_lists = source_dir / 'linux_initializer_list'
         compile(target, '-isystem', libycxx / 'include', '-nostdlib',
                 initializer_lists / 'direct-reference.cpp', libycxx / 'src/runtime/linkage/static.cpp',
@@ -334,6 +340,15 @@ system_leaf:
             ('struct X { long a, b, c; }; long f(X x) { return x.a; }', aggregate_parameter),
             # Source packing that native layout does not apply stays out of memory passing (#641).
             ('struct __attribute__((packed)) X { char tag; long a, b; }; X g(); long f() { return g().a; }',
+             f'call: {aggregate_result}'),
+            ('struct __attribute__((packed)) X { char tag; int value; }; '
+             'struct Y { X x; long a, b; }; Y g(); int f() { return g().x.value; }',
+             f'call: {aggregate_result}'),
+            ('struct __attribute__((packed)) X { char tag; int value; }; '
+             'struct Y { X x[1]; ~Y() noexcept {} }; '
+             'Y g() noexcept; int f() { Y y = g(); return y.x[0].value; }', f'call: {aggregate_result}'),
+            ('struct __attribute__((packed)) X { char tag; int value; }; '
+             'struct Y : X { long a, b; }; Y g(); int f() { return g().value; }',
              f'call: {aggregate_result}'),
             ('int f(long double, ...) { return 1; }', 'x87 long double parameters and results are unsupported'),
             ('struct X { int x; }; int f(X, ...) { return 1; }', parameters),
