@@ -252,6 +252,8 @@ public:
   // Empty on unsupported declarations, or EntityId::none when a peer owns the derived table.
   std::optional<EntityId> automatic_derived_vtable_key(EntityId cls) const;
   bool peer_pure_dispatch(EntityId cls) const;
+  bool has_typed_dynamic_cast() const { return has_typed_dynamic_cast_; }
+  bool peer_typed_dynamic_cast(EntityId source, EntityId target) const;
   // A fieldless virtual root whose destructor may be emitted against a peer's table (#136).
   bool peer_root_destructor_producer(EntityId cls) const;
   bool peer_root_destructor_observer(EntityId function, EntityId cls) const;
@@ -1429,6 +1431,7 @@ private:
   std::vector<engine::Diagnostic> end_diags_;    // the END phase's own
   std::vector<EntityId> required_;
   std::vector<EntityId> implicit_allocation_functions_;  // in order of first use
+  bool has_typed_dynamic_cast_ = false;
   std::map<u32, std::optional<irgen::FunctionIr>> instance_irs_;  // instantiated and implicit bodies, by entity
   std::map<u32, std::optional<irgen::FunctionIr>> closure_irs_;  // by closure member
 
@@ -1588,6 +1591,7 @@ public:
   }
   std::set<EntityId> uncertain_object_layouts() override { return p_->uncertain_object_layouts(); }
   bool peer_pure_dispatch(EntityId cls) override { return p_->peer_pure_dispatch(cls); }
+  void use_typed_dynamic_cast() override { p_->has_typed_dynamic_cast_ = true; }
   std::vector<DeclId> visible_decls(ast::NameId name, std::span<const EntityId> directives = {}) override {
     std::vector<std::string> paths;
     for (EntityId ns : directives) paths.push_back(p_->namespace_path(ns));
@@ -2314,6 +2318,7 @@ public:
   sema::CopyAssignment require_copy_assignment(EntityId f) override { return p_->require_copy_assignment(f); }
   std::set<EntityId> uncertain_object_layouts() override { return at_.uncertain_object_layouts(); }
   bool peer_pure_dispatch(EntityId cls) override { return at_.peer_pure_dispatch(cls); }
+  void use_typed_dynamic_cast() override { at_.use_typed_dynamic_cast(); }
   bool class_layout_uncertain(EntityId c) override { return at_.class_layout_uncertain(c); }
   bool explicit_specialization(EntityId c) override { return at_.explicit_specialization(c); }
   const sema::ClassRec& publish_class(EntityId c, sema::ClassRec r) override { return p_->publish_class(c, std::move(r), item_); }
@@ -5661,12 +5666,15 @@ private:
                                  const parse::Declarator& d, const ast::DeclSema& sem) {
     const auto slot = sema::native_virtual_root_slot(record, function);
     const bool derived = record.peer_automatic_primary_base != EntityId::none;
-    if ((!derived && record.peer_virtual_layout != sema::PeerVirtualLayout::root) || !slot || template_ || explicit_ || inst_ ||
+    // Check these key definitions as declarations. Native ownership of their RTTI remains unsupported.
+    const bool borrowed_key = sema::borrowed_dynamic_cast_key(record, s_.types()) == function;
+    if ((!derived && !borrowed_key && record.peer_virtual_layout != sema::PeerVirtualLayout::root) ||
+        !slot || template_ || explicit_ || inst_ ||
         sem.storage != ast::Storage::none || (sem.flags & (sema::decl_flag::inline_ | sema::decl_flag::deleted |
                                                           sema::decl_flag::lang_c)) ||
         it_->kind != ItemKind::function || !it_->has_body() || !d.asm_label.empty()) return false;
     const bool key_function = *slot == 0;
-    if (key_function && !derived && !sema::native_virtual_table_slots(record)) return false;
+    if (key_function && !derived && !borrowed_key && !sema::native_virtual_table_slots(record)) return false;
     const auto& region = p_->region();
     if (region.tokens[it_->body_begin].kind != Tk::l_brace ||
         !plain_virtual_signature(*it_, it_->begin + d.qualifier_at, it_->begin + d.name_at,
@@ -7427,6 +7435,41 @@ std::optional<EntityId> Program::automatic_derived_vtable_key(EntityId cls) cons
       in_attributed_namespace(definition->first) ||
       !asm_label(key).empty()) return std::nullopt;
   return key;
+}
+
+bool Program::peer_typed_dynamic_cast(EntityId source, EntityId target) const {
+  using sema::PeerVirtualLayout;
+  const auto* base = classes_.find(source);
+  const auto* derived = classes_.find(target);
+  // The primary-base profile establishes public nonvirtual inheritance at offset zero.
+  if (!base || !derived || base->peer_virtual_layout != PeerVirtualLayout::root ||
+      derived->peer_virtual_layout != PeerVirtualLayout::primary_base || derived->bases.size() != 1 ||
+      derived->bases.front().cls != source || r_->has_clang_attribute_pragma)
+    return false;
+  const auto base_key = sema::borrowed_dynamic_cast_key(*base, w_->types);
+  const auto derived_key = sema::borrowed_dynamic_cast_key(*derived, w_->types);
+  if (base_key == EntityId::none || derived_key == EntityId::none) return false;
+  const auto override = std::ranges::find(derived->members, derived_key, &sema::MemberDeclRec::entity);
+  if (override->overridden_virtual != base_key) return false;
+
+  const auto peer_owned = [&](EntityId cls, const sema::ClassRec& record, EntityId key) {
+    const auto& owner = w_->entities.rec(cls);
+    if (!record.defined || record.explicit_alignment || class_layout_uncertain(cls, record, end()) ||
+        owner.linkage != ast::Linkage::external || owner.templ != EntityId::none ||
+        !is_namespace(owner.scope) || unnamed(namespace_path(owner.scope)) ||
+        w_->ins.names.spelling(owner.name).empty() || !peer_root_vtable_visible(cls) || !asm_label(key).empty())
+      return false;
+    // The only declaration of each key must be its declaration in the class.
+    // This reads the final declaration set, including later definitions and qualified friends.
+    const auto found = decls_.find(std::to_underlying(key));
+    if (found == decls_.end() || found->second.size() != 1) return false;
+    const auto& [item, decl] = found->second.front();
+    constexpr u16 excluded = sema::decl_flag::definition | sema::decl_flag::inline_ |
+                             sema::decl_flag::deleted | sema::decl_flag::template_;
+    return !(decl.flags & excluded) && !decl.hidden_visibility &&
+           items_->items[item].kind == ItemKind::declaration && !in_attributed_namespace(item);
+  };
+  return peer_owned(source, *base, base_key) && peer_owned(target, *derived, derived_key);
 }
 
 bool Program::peer_pure_dispatch(EntityId cls) const {

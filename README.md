@@ -593,9 +593,13 @@ a caller can also dispatch through a peer-owned abstract interface with one or t
 public pure virtual slots using fixed integer signatures and bare `noexcept`.
 [#309](https://github.com/yrashk/ycxx/issues/309)
 
-**Linux casts to the most-derived object.** `dynamic_cast<cv void*>(p)` accepts a pointer to
+**Linux borrowed runtime casts.** `dynamic_cast<cv void*>(p)` accepts a pointer to
 an admitted peer-owned polymorphic root. The cast preserves the pointee's qualifiers, returns
 null for a null operand, and recovers the most-derived address from a live subobject.
+On Linux x86-64, `dynamic_cast<D*>(p)` also supports a fieldless root `B` and its fieldless
+derived class `D` with one public nonvirtual base `B`. Each class declares one public virtual
+`int` member with no arguments, and `D` overrides that member. The hosted C++ peer defines
+both key functions and links the consumer with their RTTI and the cast runtime.
 [#294](https://github.com/yrashk/ycxx/issues/294)
 
 **Structured bindings.** Local bindings can copy or alias scalar-element arrays, including
@@ -632,7 +636,7 @@ vptr before calling the nonthrowing observer. The deleting entry then uses globa
   tuple-like structured bindings and structured bindings to bit-fields or inherited members,
   inheriting constructors, and base packs or multiple bases in a class template.
 - Broader native construction, virtual dispatch and table emission, virtual base classes,
-  `typeid`, `dynamic_cast` to a class type, and virtual destruction for other class shapes.
+  `typeid`, other `dynamic_cast` forms, and virtual destruction for other class shapes.
   [#309](https://github.com/yrashk/ycxx/issues/309) · [#310](https://github.com/yrashk/ycxx/issues/310) ·
   [#294](https://github.com/yrashk/ycxx/issues/294) · [#136](https://github.com/yrashk/ycxx/issues/136)
 - Member class and alias templates, conversion function templates, and constraints on class

@@ -2860,10 +2860,24 @@ operand yields a null result, including in constant evaluation. On the non-null 
 vtable address point supplies the signed offset-to-top. Adding that byte offset to the
 incoming subobject address recovers the address of the most-derived object, including when
 the peer passes a secondary base. The cast introduces no RTTI symbols or calls.
-Typed runtime casts, `typeid`, non-null constant evaluation, and Darwin parity are tracked
-in [#294](https://github.com/yrashk/ycxx/issues/294) and [#659](https://github.com/yrashk/ycxx/issues/659).
 [[expr.dynamic.cast]](https://eel.is/c++draft/expr.dynamic.cast) ·
 [Itanium ABI §2.5.2](https://itanium-cxx-abi.github.io/cxx-abi/abi.html#vtable-components)
+
+## Borrowed typed downcasts (#294)
+
+Linux x86-64 can cast a borrowed root pointer to a pointer to its direct derived class.
+Both classes are ordinary, fieldless and default-visible. The derived class has one public
+nonvirtual primary base. Each class declares one public virtual `int` member with no
+arguments, with the derived declaration overriding the base member. A hosted C++ peer
+defines the two key functions. The consumer checks eligibility against the complete
+translation unit and uses the peer's two RTTI objects and `__dynamic_cast`.
+The result preserves or adds pointee cv. The cast evaluates its operand once and returns
+a typed null for a null operand or a failed check. A null operand can be used in constant
+evaluation. [Design](docs/design/linux-borrowed-typed-downcast.md) ·
+[#294](https://github.com/yrashk/ycxx/issues/294)
+
+Other cast forms, `typeid`, non-null constant evaluation, and Darwin parity are tracked
+in [#294](https://github.com/yrashk/ycxx/issues/294) and [#659](https://github.com/yrashk/ycxx/issues/659).
 
 ## Deduced polymorphic lambda results (#569)
 
