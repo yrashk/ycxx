@@ -104,6 +104,7 @@ struct out_section {
 struct place {
   std::uint32_t out;
   std::uint64_t offset;
+  std::uint64_t size;
 };
 
 struct symref {
@@ -235,6 +236,81 @@ std::uint32_t load_store_scale(std::uint32_t insn) {
 std::uint32_t with_adrp_pages(std::uint32_t insn, std::int64_t pages) {
   const auto p = static_cast<std::uint32_t>(pages);
   return (insn & 0x9f00001f) | (p & 3) << 29 | ((p >> 2) & 0x7ffff) << 5;
+}
+
+// DWARF .eh_frame, version 1 zR CIE with AArch64's usual code/data alignment and return
+// address register. Only the initial-location field is relocatable in each cleanup-free FDE.
+// A rejected profile follows the existing behavior for unsupported unwind sections.
+std::optional<std::uint32_t> cleanup_frame_size(const obj::object& o, std::uint32_t si) {
+  const auto& section = o.sections[si];
+  const std::span<const std::uint8_t> bytes = section.bytes;
+  constexpr std::uint32_t coalesced = 0x0b;  // S_COALESCED, used by Darwin assemblers
+  const auto type = section.flags & obj::section_flags::type_mask;
+  if ((type != obj::section_flags::regular && type != coalesced) || (section.flags & obj::section_flags::debug) != 0 ||
+      section.align_log2 > 3 || bytes.size() % 4 != 0 || !std::in_range<std::uint32_t>(bytes.size()) ||
+      std::ranges::count_if(o.sections, &obj::section::is_eh_frame) != 1)
+    return std::nullopt;
+
+  std::map<std::uint32_t, const obj::reloc*> relocations;
+  for (const auto& r : section.relocs) {
+    if (!r.minus || r.symbol >= o.symbols.size() || *r.minus >= o.symbols.size() ||
+        !relocations.emplace(r.offset, &r).second)
+      return std::nullopt;
+  }
+
+  constexpr std::uint8_t cie_prefix[]{1, 'z', 'R', 0, 1, 0x78, 30, 1};
+  std::map<std::uint32_t, std::uint32_t> cie_widths;
+  std::vector<std::tuple<std::uint32_t, std::uint64_t, std::uint64_t>> ranges;
+  std::uint32_t at = 0;
+  while (at < bytes.size()) {
+    const auto length = mo::load32(bytes, at);
+    if (length == 0) {
+      if (std::ranges::any_of(bytes.subspan(at), [](auto byte) { return byte != 0; })) return std::nullopt;
+      break;
+    }
+    if (length < 4 || length % 4 != 0 || length > bytes.size() - at - 4) return std::nullopt;
+    const auto record = bytes.subspan(at, length + 4);
+    const auto cie = mo::load32(record, 4);
+    if (cie == 0) {
+      if (record.size() < 17 || !std::ranges::equal(record.subspan(8, sizeof(cie_prefix)), cie_prefix))
+        return std::nullopt;
+      // DW_EH_PE_pcrel paired with absptr, sdata4, or sdata8.
+      const auto encoding = record[16];
+      if (encoding != 0x10 && encoding != 0x1b && encoding != 0x1c) return std::nullopt;
+      cie_widths.emplace(at, encoding == 0x1b ? 4 : 8);
+    } else {
+      if (cie > at + 4) return std::nullopt;
+      const auto common = cie_widths.find(at + 4 - cie);
+      if (common == cie_widths.end()) return std::nullopt;
+      const auto width = common->second;
+      if (record.size() <= 8 + 2 * width || record[8 + 2 * width] != 0) return std::nullopt;
+      const auto pc = at + 8;
+      const auto entry = relocations.find(pc);
+      if (entry == relocations.end()) return std::nullopt;
+      const auto& r = *entry->second;
+      if (r.kind != (width == 4 ? reloc_kind::abs32 : reloc_kind::abs64)) return std::nullopt;
+      const auto& base = o.symbols[*r.minus];
+      if (base.bind != obj::binding::local || base.section != si || base.offset > pc ||
+          r.addend != static_cast<std::int64_t>(base.offset) - pc)
+        return std::nullopt;
+      const auto& code = o.symbols[r.symbol];
+      if (!code.section || *code.section >= o.sections.size() || code.weak) return std::nullopt;
+      const auto& text = o.sections[*code.section];
+      const auto size = width == 4 ? mo::load32(record, 8 + width) : mo::load64(record, 8 + width);
+      if (text.segment != "__TEXT" || text.name != "__text" || text.is_zerofill() ||
+          code.offset > text.size() || code.offset % 4 != 0 || size == 0 || size % 4 != 0 || size > text.size() - code.offset)
+        return std::nullopt;
+      ranges.emplace_back(*code.section, code.offset, code.offset + size);
+      relocations.erase(entry);
+    }
+    at += length + 4;
+  }
+  if (ranges.empty() || !relocations.empty()) return std::nullopt;
+  std::ranges::sort(ranges);
+  const auto overlap = std::ranges::adjacent_find(ranges, [](const auto& a, const auto& b) {
+    return std::get<0>(a) == std::get<0>(b) && std::get<2>(a) > std::get<1>(b);
+  });
+  return overlap == ranges.end() ? std::optional(at) : std::nullopt;
 }
 
 class linker {
@@ -411,13 +487,15 @@ private:
 
   void place_sections() {
     using namespace obj::section_flags;
+    std::optional<std::uint32_t> unwind;
     placed_.resize(objs_.size());
     for (std::uint32_t i = 0; i < objs_.size(); ++i) {
       const auto& o = objs_[i];
       placed_[i].resize(o.sections.size());
       for (std::uint32_t j = 0; j < o.sections.size(); ++j) {
         const auto& s = o.sections[j];
-        if (dropped(s)) continue;
+        const auto frame_size = s.is_eh_frame() ? cleanup_frame_size(o, j) : std::nullopt;
+        if (dropped(s) && !frame_size) continue;
         const auto t = s.flags & type_mask;
         if (t == thread_local_regular || t == thread_local_zerofill || t == thread_local_variables) {
           fail(std::format("{}: thread-local section {},{} is not supported", o.name, s.segment, s.name));
@@ -428,7 +506,8 @@ private:
           fail(std::format("{}: section {},{} is in an unsupported segment", o.name, s.segment, s.name));
           continue;
         }
-        const std::uint32_t k = output_section(*sg, s.name, s.flags);
+        const std::uint32_t k = output_section(*sg, s.name, frame_size ? regular : s.flags);
+        if (frame_size) unwind = k;
         auto& out = sections_[k];
         if (out.zerofill() != s.is_zerofill()) {
           fail(std::format("{}: section {},{} mixes zero-fill and contents", o.name, s.segment, s.name));
@@ -441,13 +520,16 @@ private:
             if (auto c = common_align_.find(sym.name_view()); c != common_align_.end()) align = std::max(align, c->second);
           }
         }
-        const std::uint64_t a = std::uint64_t{1} << align;
+        const std::uint64_t a = frame_size ? 4 : std::uint64_t{1} << align;
         out.align_log2 = std::max(out.align_log2, align);
         out.size = align_up(out.size, a);
-        placed_[i][j] = place{k, out.size};
-        out.size += s.size();
+        const auto size = frame_size ? *frame_size : s.size();
+        placed_[i][j] = place{k, out.size, size};
+        out.size += size;
       }
     }
+    // A single terminator follows the complete record stream.
+    if (unwind) sections_[*unwind].size += 4;
 
     // Stubs for calls to imports, GOT slots for GOT references, in first-reference order.
     for (std::uint32_t i = 0; i < objs_.size(); ++i) {
@@ -595,7 +677,8 @@ private:
       for (std::uint32_t j = 0; j < objs_[i].sections.size(); ++j) {
         const auto& p = placed_[i][j];
         if (!p || objs_[i].sections[j].is_zerofill()) continue;
-        std::ranges::copy(objs_[i].sections[j].bytes, sections_[p->out].bytes.begin() + static_cast<std::ptrdiff_t>(p->offset));
+        std::ranges::copy(std::span(objs_[i].sections[j].bytes).first(p->size),
+                          sections_[p->out].bytes.begin() + static_cast<std::ptrdiff_t>(p->offset));
       }
     }
   }

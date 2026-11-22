@@ -425,6 +425,101 @@ void test_exports_trie() {
   check(!trie_lookup(*image, "_ma"), "a prefix of an exported name is not found");
 }
 
+// DWARF Call Frame Information and the .eh_frame zR augmentation. The code address is a
+// signed, PC-relative difference. A zero-length record optionally terminates the input.
+void add_cleanup_frame(obj::object& o, std::uint32_t function, std::uint32_t code_size,
+                       std::uint8_t encoding, std::initializer_list<std::uint8_t> instructions, bool terminated = false) {
+  namespace mo = obj::macho;
+  mo::byte_writer records;
+  records.u32(16);
+  records.u32(0);  // CIE ID
+  records.raw(std::array<std::uint8_t, 12>{1, 'z', 'R', 0, 1, 0x78, 30, 1, encoding, 0x0c, 31, 0});
+  const auto fde = records.size();
+  records.u32(0);
+  records.u32(static_cast<std::uint32_t>(fde + 4));  // CIE offset backwards from this word
+  const auto pc = static_cast<std::uint32_t>(records.size());
+  if (encoding == 0x1b) {
+    records.u32(0);
+    records.u32(code_size);
+  } else {
+    records.u64(0);
+    records.u64(code_size);
+  }
+  records.u8(0);  // FDE augmentation length
+  records.raw(instructions);
+  records.align(4);
+  mo::store32(records.bytes, fde, static_cast<std::uint32_t>(records.size() - fde - 4));
+  if (terminated) records.u32(0);
+  const auto frame = o.add_section(obj::standard_section::eh_frame);
+  const auto anchor = o.define("l_frame", obj::binding::local, frame, 0);
+  auto& section = o.sections[frame];
+  section.bytes = std::move(records.bytes);
+  section.relocate(encoding == 0x1b ? reloc_kind::abs32 : reloc_kind::abs64,
+                   function, -static_cast<std::int64_t>(pc), pc, anchor);
+}
+
+struct frame_section {
+  std::uint64_t address;
+  std::span<const std::uint8_t> bytes;
+};
+
+std::optional<frame_section> linked_frames(std::span<const std::uint8_t> image) {
+  namespace mo = obj::macho;
+  for (std::size_t at = mo::mach_header_64_size, c = 0; c < mo::load32(image, 16);
+       ++c, at += mo::load32(image, at + 4)) {
+    if (mo::load32(image, at) != mo::lc_segment_64) continue;
+    for (std::size_t i = 0; i < mo::load32(image, at + 64); ++i) {
+      const auto section = at + mo::segment_command_64_size + i * mo::section_64_size;
+      if (std::string_view(reinterpret_cast<const char*>(image.data() + section), 16).starts_with("__eh_frame"))
+        return frame_section{mo::load64(image, section + 32), image.subspan(mo::load32(image, section + 48),
+                                                                           mo::load64(image, section + 40))};
+    }
+  }
+  return std::nullopt;
+}
+
+void test_cleanup_frames() {
+  namespace mo = obj::macho;
+  auto first = return42();
+  add_cleanup_frame(first, 0, 8, 0x1b, {0x44, 0x0e, 0, 0}, true);
+  auto second = return42();
+  second.name = "second.o";
+  second.symbols[0].name = "_second";
+  add_cleanup_frame(second, 0, 8, 0x10, {});
+  std::vector<obj::object> objects;
+  for (const auto* input : {&first, &second}) {
+    auto object = mo::read_object(mo::write_object(*input), input->name);
+    check(object.has_value(), "a cleanup frame round-trips through the Mach-O object reader");
+    if (!object) return;
+    objects.push_back(std::move(*object));
+  }
+  auto image = link::link(objects);
+  check(image.has_value(), "objects with cleanup frames link");
+  if (!image) return;
+  const auto frames = linked_frames(*image);
+  check(frames.has_value(), "the final image retains a cleanup-free __eh_frame section");
+  if (!frames) return;
+  const auto bytes = frames->bytes;
+  const auto second_cie = first.sections.back().bytes.size() - 4;
+  check(bytes.size() == second_cie + second.sections.back().bytes.size() + 4,
+        "input terminators and alignment gaps do not interrupt the linked frame stream");
+  if (bytes.size() != second_cie + second.sections.back().bytes.size() + 4) return;
+  constexpr std::uint64_t image_base = 0x100000000;
+  constexpr std::size_t pc = 28;
+  const auto first_pc = frames->address + pc + static_cast<std::int32_t>(mo::load32(bytes, pc));
+  const auto second_pc = frames->address + second_cie + pc + mo::load64(bytes, second_cie + pc);
+  check(trie_lookup(*image, "_main") == first_pc - image_base, "the 32-bit FDE points to the placed _main");
+  check(trie_lookup(*image, "_second") == second_pc - image_base, "the 64-bit FDE points to the second object's code");
+  check(mo::load32(bytes, 24) == 24 && mo::load32(bytes, second_cie + 24) == 24,
+        "relative CIE pointers survive the merge");
+  check(mo::load32(bytes, bytes.size() - 4) == 0, "one terminator ends the complete stream");
+
+  auto mismatched = first;
+  mismatched.sections.back().relocs[0].addend += 4;
+  const auto missing = link::link(std::span(&mismatched, 1));
+  check(missing && !linked_frames(*missing), "a relocation which does not denote the PC field stays outside the cleanup-frame profile");
+}
+
 // Findings of the review of #42, one check each.
 void test_review_cases() {
   {
@@ -616,6 +711,86 @@ void test_mixed(const std::filesystem::path& dir, std::string_view cc) {
   run_and_check(dir, "mixed", *image, 42, "from C\n");
 }
 
+void test_hosted_unwind(const std::filesystem::path& dir, std::string_view cc) {
+  const auto src = dir / "observe_unwind.c";
+  const auto path = dir / "observe_unwind.o";
+  std::ofstream(src) << "unsigned long _Unwind_GetIP(void*);\n"
+                        "int on_frame(void* context, void* arg) {\n"
+                        "  unsigned long* words = arg;\n"
+                        "  if (_Unwind_GetIP(context) != words[0]) return 0;\n"
+                        "  words[1] = 42;\n"
+                        "  return 5;\n"  // _URC_END_OF_STACK
+                        "}\n";
+  if (shell(std::format("'{}' -x c -O1 -c '{}' -o '{}'", cc, src.native_encoded_string(), path.native_encoded_string())) != 0) {
+    check(false, "the host compiler compiles the unwind callback");
+    return;
+  }
+  const auto bytes = slurp(path);
+  auto callback = obj::macho::read_object(std::span(reinterpret_cast<const std::uint8_t*>(bytes.data()), bytes.size()),
+                                          "observe_unwind.o");
+  check(callback.has_value(), "the unwind callback's object reads");
+  if (!callback) return;
+
+  // main keeps {address after the call, result} on its stack and passes it to the callback.
+  obj::object main;
+  main.name = "unwind_main.o";
+  const auto main_text = main.add_section(obj::standard_section::text);
+  const auto main_symbol = main.define("_main", obj::binding::global, main_text);
+  constexpr std::uint32_t continuation = 40;
+  const auto after_call = main.define("l_continuation", obj::binding::local, main_text, continuation);
+  const auto observer = main.reference("_on_frame");
+  const auto bridge = main.reference("_unwind_bridge");
+  auto& text = main.sections[main_text];
+  auto address = [&](unsigned rd, std::uint32_t symbol) {
+    text.emit32(adrp(rd));
+    text.relocate(reloc_kind::page21, symbol);
+    text.emit32(add_x_imm(rd, rd));
+    text.relocate(reloc_kind::pageoff12, symbol);
+  };
+  text.emit32(0xa9be7bfd);  // stp x29, x30, [sp, #-32]!
+  text.emit32(mov_fp_sp);
+  address(2, after_call);
+  text.emit32(0xf9000be2);  // str x2, [sp, #16]
+  text.emit32(0xf9000fff);  // str xzr, [sp, #24]
+  address(0, observer);
+  text.emit32(0x910043e1);  // add x1, sp, #16
+  text.emit32(bl);
+  text.relocate(reloc_kind::branch26, bridge);
+  check(text.size() == continuation, "the recorded continuation follows the branch");
+  text.emit32(0xb9401be0);  // ldr w0, [sp, #24]
+  text.emit32(0xa8c27bfd);  // ldp x29, x30, [sp], #32
+  text.emit32(ret);
+  add_cleanup_frame(main, main_symbol, static_cast<std::uint32_t>(text.size()), 0x1b,
+                    {0x44, 0x0e, 32, 0x9d, 4, 0x9e, 3, 0x6c, 0xdd, 0xde, 0x0e, 0}, true);
+
+  // The bridge saves LR without changing x29. A frame-pointer walk would skip main's
+  // continuation, but the FDE describes where to recover it from this frame's stack.
+  obj::object leaf;
+  leaf.name = "unwind_bridge.o";
+  const auto leaf_text = leaf.add_section(obj::standard_section::text);
+  const auto leaf_symbol = leaf.define("_unwind_bridge", obj::binding::global, leaf_text);
+  const auto backtrace = leaf.reference("__Unwind_Backtrace");
+  auto& body = leaf.sections[leaf_text];
+  body.emit32(0xd10043ff);  // sub sp, sp, #16
+  body.emit32(0xf90007fe);  // str x30, [sp, #8]
+  body.emit32(bl);
+  body.relocate(reloc_kind::branch26, backtrace);
+  body.emit32(0xf94007fe);  // ldr x30, [sp, #8]
+  body.emit32(0x910043ff);  // add sp, sp, #16
+  body.emit32(ret);
+  add_cleanup_frame(leaf, leaf_symbol, static_cast<std::uint32_t>(body.size()), 0x1b,
+                    {0x44, 0x0e, 16, 0x44, 0x9e, 1, 0x48, 0xde, 0x44, 0x0e, 0});
+
+  std::vector<obj::object> inputs = {std::move(main), std::move(leaf), std::move(*callback)};
+  const auto image = link::link(inputs, with_exports({"__Unwind_Backtrace", "__Unwind_GetIP"}));
+  check(image.has_value(), "the hosted unwind program links");
+  if (!image) {
+    for (const auto& e : image.error()) std::println(std::cerr, "  {}", e.message);
+    return;
+  }
+  run_and_check(dir, "hosted_unwind", *image, 42, "");
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -632,10 +807,14 @@ int main(int argc, char** argv) {
   test_diagnostics();
   test_deterministic();
   test_exports_trie();
+  test_cleanup_frames();
   test_review_cases();
   if (run_dir) {
     test_run(*run_dir);
-    if (cc) test_mixed(*run_dir, *cc);
+    if (cc) {
+      test_mixed(*run_dir, *cc);
+      test_hosted_unwind(*run_dir, *cc);
+    }
   }
   return ycxx::unit::result("unit.link");
 }
