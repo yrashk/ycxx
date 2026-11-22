@@ -151,6 +151,34 @@ def main():
         links(derived, 'native-key.o', 'peer-rtti.o', 'peer-construct.o', 'dispatch.o')
         for first, second in (('key.o', 'peer-rtti.o'), ('peer-rtti.o', 'key.o')):
             links(derived, first, second, 'peer-construct.o', 'dispatch.o')
+        # ycxx's base descriptor, reached through its own `__ZTI1D` (`lib.cpp` defines no copy of
+        # `__ZTI1B`): in a linked program its name pointer keeps bit 63, and in a library it
+        # compares equal to the host's own private copy at another address.
+        (derived / 'lib.cpp').write_text(
+            '#include "base.hpp"\n#include <typeinfo>\n'
+            'const std::type_info& lib_derived() noexcept { return typeid(D); }\n')
+        (derived / 'bit.cpp').write_text(
+            '#include <cstdint>\n#include <cstdio>\n#include <cstring>\n#include <typeinfo>\n'
+            'const std::type_info& lib_derived() noexcept;\n'
+            'int main() {\n'
+            '  const auto* base = reinterpret_cast<const std::type_info* const*>(&lib_derived())[2];\n'
+            '  const auto name = reinterpret_cast<const std::uintptr_t*>(base)[1];\n'
+            '  std::printf("%d %s\\n", int(name >> 63), base->name());\n'
+            '}\n')
+        (derived / 'image.cpp').write_text(
+            '#include "base.hpp"\n#include <cstdio>\n#include <typeinfo>\n'
+            'const std::type_info& lib_derived() noexcept;\n'
+            'int main() {\n'
+            '  const auto* base = reinterpret_cast<const std::type_info* const*>(&lib_derived())[2];\n'
+            '  std::printf("%d %d\\n", int(*base == typeid(B)), int(base != &typeid(B)));\n'
+            '}\n')
+        for part in ('lib', 'bit', 'image'):
+            peer(derived, f'{part}.cpp', f'{part}.o', '-frtti')
+        assert '__ZTI1B' not in symbols(derived, 'lib.o')
+        links(derived, 'bit.o', 'lib.o', 'key.o', expect=lambda out: out == '1 1B\n')
+        run(host_cxx, '-dynamiclib', 'key.o', 'lib.o', '-o', 'libderived.dylib', cwd=derived)
+        run(host_cxx, 'image.o', 'libderived.dylib', '-o', 'image', cwd=derived)
+        assert run('./image', cwd=derived) == '1 1\n'
 
         # The deleting, complete and base-object destructors of a root with a peer key function.
         destructor = fixture('linux_root_virtual_destructor')
@@ -169,6 +197,10 @@ def main():
         # Base-object constructor and destructor entries beside the complete-object ones.
         variants = fixture('linux_base_object_variants')
         compile(variants, 'provider.cpp', 'provider.o')
+        table = symbols(variants, 'provider.o')
+        for complete, base in (('__ZN1p4BaseC1Ei', '__ZN1p4BaseC2Ei'), ('__ZN1p4BaseD1Ev', '__ZN1p4BaseD2Ev')):
+            assert table[complete][:2] == table[base][:2] == ('__TEXT,__text', 'external'), table
+            assert table[complete][2] == table[base][2], (complete, base, table)
         for part in ('derived', 'direct', 'trace'):
             peer(variants, f'{part}.cpp', f'{part}.o', '-fno-exceptions', '-fno-rtti')
         links(variants, 'provider.o', 'derived.o', 'direct.o', 'trace.o')
