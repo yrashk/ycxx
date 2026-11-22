@@ -13,3 +13,6 @@ struct Plain { int value; } __attribute__((unused)) plain;
 
 enum { ordinary = 1 } __attribute__((unused));
 static_assert(ordinary == 1);
+
+struct [[copy]] alignas(16) BracketCopy { int n; };
+static_assert(alignof(BracketCopy) == 16);

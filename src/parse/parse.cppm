@@ -34,7 +34,7 @@ using sema::ConstId;
 
 // The parser skips attributes whose layout semantics we do not implement. Find those
 // that could change a record or field even though its computed offsets look natural.
-enum class LayoutAttributes { affecting_layout, leading_affecting_layout, any };
+enum class LayoutAttributes { affecting_layout, leading_affecting_layout, trailing_definition, any };
 
 bool layout_attribute(const pp::Region& region, u32 begin, u32 end, LayoutAttributes mode = LayoutAttributes::affecting_layout,
                       std::span<const std::pair<u32, u32>> applied = {},
@@ -82,8 +82,11 @@ bool layout_attribute(const pp::Region& region, u32 begin, u32 end, LayoutAttrib
         }
         if (name.size() > 4 && name.starts_with("__") && name.ends_with("__"))
           name = name.substr(2, name.size() - 4);
+        if (mode == LayoutAttributes::trailing_definition && gnu && depth == 2 &&
+            (region.tokens[i - 1].kind == l_paren || region.tokens[i - 1].kind == comma) &&
+            (name == "copy" || name == "trivial_abi")) return true;
         if (name == "packed" || name == "aligned" || name == "mode" || name == "vector_size" ||
-            name == "no_unique_address" || name == "ms_struct" || name == "gcc_struct" || name == "copy") return true;
+            name == "no_unique_address" || name == "ms_struct" || name == "gcc_struct") return true;
       }
     }
   }
@@ -2628,7 +2631,7 @@ private:
   }
 
   bool supported_definition_attributes(u32 after) {
-    if (!layout_attribute(p_->region(), it_->brace_end, after)) return true;
+    if (!layout_attribute(p_->region(), it_->brace_end, after, LayoutAttributes::trailing_definition)) return true;
     s_.diag(it_->brace_end - it_->begin, Diag::post_definition_layout_attribute);
     return false;
   }

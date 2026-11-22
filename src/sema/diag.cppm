@@ -358,7 +358,7 @@ enum class Diag : std::uint32_t {
   class_alignment_weak [[=message{Severity::error, "the requested alignment is weaker than the class's natural alignment"}]],
   class_alignment_mismatch [[=message{Severity::error, "the class is redeclared with a different alignment requirement"}]],
   class_alignment_missing [[=message{Severity::error, "the class definition must specify alignment when a declaration specifies it"}]],
-  post_definition_layout_attribute [[=message{Severity::error, "layout-affecting attributes after a class or enum definition are not supported yet"}]],
+  post_definition_layout_attribute [[=message{Severity::error, "layout- or ABI-affecting attributes after a class or enum definition are not supported yet"}]],
   class_alignment_uncertain_layout [[=message{Severity::error, "class alignment depends on attributes or packing whose layout is not supported yet"}]],
   constructibility_target_pack [[=message{Severity::error, "a pack expansion as the target of '{0:n}' is not supported yet"}]],
   constructibility_substitution [[=message{Severity::error, "substitution of the operand type '{0:t}' in '{1:n}' failed"}]],
