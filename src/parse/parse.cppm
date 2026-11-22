@@ -1428,8 +1428,12 @@ private:
     u32 item;
     std::pair<u32, u32> tokens;
   };
+  struct MemberExceptionPattern {
+    std::vector<u32> calls;
+    std::vector<sema::Expansion> expansions;
+  };
   std::map<EntityId, MemberException> member_exceptions_;
-  std::map<u32, std::optional<std::vector<u32>>> member_exception_patterns_;
+  std::map<u32, std::optional<MemberExceptionPattern>> member_exception_patterns_;
   std::set<EntityId> replaying_member_exceptions_;
   std::map<EntityId, QualType> resolved_member_exceptions_;
   void check_member_exception_patterns(EntityId cls, const sema::ClassRec& rec, Result<ast::ClassDef>& out);
@@ -1932,18 +1936,20 @@ std::optional<QualType> AtItem::replay_member_exception(sema::Sema& caller, cons
   const u32 item_begin = p_->items().items[item].begin;
   AtItem source(*p_, item, false);
   source.at_point = default_instantiation_point.value_or(point());
-  if (const auto pattern = p_->member_exception_patterns_.find(item); pattern != p_->member_exception_patterns_.end()) {
-    if (!pattern->second) return std::nullopt;
-    source.instantiation_calls = *pattern->second;
-  }
   source.completing_class = record.scope;
   sema::Sema replay(p_->world(), caller.builder(), source, caller.diagnostics(), p_->id(item), 0);
+  if (const auto pattern = p_->member_exception_patterns_.find(item); pattern != p_->member_exception_patterns_.end()) {
+    if (!pattern->second) return std::nullopt;
+    source.instantiation_calls = pattern->second->calls;
+    replay.expansions = pattern->second->expansions;
+  }
   const auto before = replay.diag_count();
   replay.current_class = record.scope;
   replay.current_function = function;
   replay.this_type = p_->this_type(decl);
 
   auto& active = p_->replaying_member_exceptions_;
+  if (p_->too_deep(active.size(), item, tokens.first - item_begin)) return std::nullopt;
   if (!active.insert(function).second) {
     replay.diag(tokens.first - item_begin, Diag::recursive_noexcept);
     return std::nullopt;
@@ -7039,7 +7045,7 @@ void Program::check_member_exception_patterns(EntityId cls, const sema::ClassRec
       member_exception_patterns_.emplace(item, std::nullopt);
       continue;
     }
-    member_exception_patterns_.emplace(item, std::move(replay.dependent_calls));
+    member_exception_patterns_.emplace(item, MemberExceptionPattern{std::move(replay.dependent_calls), std::move(replay.expansions)});
     out.demands.insert(out.demands.end(), replay.demands.begin(), replay.demands.end());
   }
 }
