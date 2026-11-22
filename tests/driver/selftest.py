@@ -154,6 +154,20 @@ class Parts(unittest.TestCase):
         self.assertEqual(check({'tests/unit/x/CMakeLists.txt': cmake})[0], 1)
         self.assertEqual(check({'tests/unit/x/CMakeLists.txt': '# PARITY: #5\n' + cmake})[0], 0)
         self.assertEqual(check({'tests/unit/x/CMakeLists.txt': 'if(APPLE)\n  set(X 1)\nendif()\n'})[0], 0)
+        for gate in ('if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64)$" AND CMAKE_SYSTEM_NAME STREQUAL "Linux")\n  add_test(NAME t COMMAND t)\nendif()\n',
+                     'if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64"\n   AND APPLE)\n  add_test(NAME t COMMAND t)\nendif()\n',
+                     'if(APPLE)\n  set(X 1)\nelse()\n  add_test(NAME t COMMAND t)\nendif()\n',
+                     'if(WIN32)\n  add_subdirectory(sub)\nendif()\n'):
+            self.assertEqual(check({'tests/unit/x/CMakeLists.txt': gate})[0], 1, gate)
+        self.assertEqual(check({'tests/incremental/a.incr': '// ACTION: syntax\n--- a.cpp\n// REQUIRES: linux\n'})[0], 0)
+
+    def test_xfail_reasons_keep_issue_numbers(self):
+        with tempfile.TemporaryDirectory() as d:
+            d = Path(d)
+            (d / 'tests' / 'features').mkdir(parents=True)
+            (d / 'tests' / 'features' / 'ycxx.xfail').write_text(
+                '# a comment\nown/a.accept.cpp needs x (#12)\nown/b.accept.cpp needs y #34  # trailing comment\n')
+            self.assertEqual(toolchain.ycxx_xfails(d), {'own/a.accept.cpp': 'needs x (#12)', 'own/b.accept.cpp': 'needs y #34'})
 
     def test_xfails_limited_to_hosts(self):
         with tempfile.TemporaryDirectory() as d:

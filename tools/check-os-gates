@@ -11,8 +11,15 @@ them only hides a gap unless something tracks it. Checked:
   names an issue (`#N`) in its reason;
 - a feature limited to hosts in tests/features/ycxx.txt names an issue on its line or in the
   comment just above it;
-- in tests/**/CMakeLists.txt, an `if(...)` on `APPLE` or `CMAKE_SYSTEM_NAME` that adds tests
-  carries a `# PARITY:` comment on the lines just above it, in the same two forms.
+- in tests/**/CMakeLists.txt, an `if(...)` whose condition names a platform (`APPLE`, `WIN32`,
+  `UNIX`, `LINUX`, `CMAKE_SYSTEM_NAME`, their `CMAKE_HOST_` forms) and that adds tests in any
+  branch (`add_test`, `ycxxc_unit_test`, `add_subdirectory`) carries a `# PARITY:` comment in the
+  comment block directly above it, in the same two forms.
+
+Any issue number satisfies the check; that it is the right one is the reviewer's to see. Not
+detected: an early `if(NOT APPLE) return()`, generator expressions (`$<PLATFORM_ID:Darwin>`), and
+gates inside test scripts (such as `tests/daemon/process.py`'s CAN_RUN), which carry their
+`PARITY:` comment by hand.
 
   tools/check-os-gates [--root DIR]
 """
@@ -25,7 +32,8 @@ ISSUE = re.compile(r'#\d+\b')
 PARITY = re.compile(r'^(?:#\d+\b|by design: \S)')
 DIRECTIVE = re.compile(r'^\s*//\s*(REQUIRES|PARITY):(.*)$')
 OS_WORDS = {'darwin', 'linux'}
-OS_IF = re.compile(r'^\s*(?:else)?if\s*\((?=[^)]*\b(?:APPLE|CMAKE_SYSTEM_NAME)\b)', re.I)
+OS_IF = re.compile(r'^\s*(?:else)?if\s*\(', re.I)
+OS_WORD = re.compile(r'\b(?:APPLE|WIN32|UNIX|LINUX|CMAKE_(?:HOST_)?SYSTEM_NAME|CMAKE_HOST_(?:APPLE|UNIX|LINUX|WIN32))\b')
 CMAKE_PARITY = re.compile(r'^\s*#\s*PARITY:\s*(.*)$')
 SUFFIXES = ('.cpp', '.incr')
 
@@ -37,6 +45,8 @@ def test_gates(root):
             continue
         requires, parity = [], []
         for line in path.read_text(encoding='utf-8', errors='replace').splitlines():
+            if path.suffix == '.incr' and (line.startswith('--- ') or line.startswith('=== ')):
+                break  # an incremental test's directives are in its header (discover.directives_of)
             m = DIRECTIVE.match(line)
             if m:
                 (requires if m[1] == 'REQUIRES' else parity).append(m[2].strip())
@@ -92,7 +102,14 @@ def cmake_gates(root):
         for n, line in enumerate(lines, 1):
             if not OS_IF.match(line):
                 continue
-            # The tests this branch adds: up to its matching else/elseif/endif at the same depth.
+            # The whole condition, over as many lines as its parentheses take.
+            cond, k = line, n
+            while cond.count('(') > cond.count(')') and k < len(lines):
+                cond += ' ' + lines[k]
+                k += 1
+            if not OS_WORD.search(cond):
+                continue
+            # The tests the whole if() adds, in every branch, up to its endif().
             depth, adds = 0, False
             for body in lines[n:]:
                 if re.match(r'^\s*if\s*\(', body, re.I):
@@ -101,9 +118,7 @@ def cmake_gates(root):
                     if depth == 0:
                         break
                     depth -= 1
-                elif depth == 0 and re.match(r'^\s*else(?:if)?\s*\(', body, re.I):
-                    break
-                adds = adds or bool(re.match(r'^\s*(?:add_test|ycxxc_unit_test)\s*\(', body, re.I))
+                adds = adds or bool(re.match(r'^\s*(?:add_test|ycxxc_unit_test|add_subdirectory)\s*\(', body, re.I))
             if not adds:
                 continue
             reasons = []

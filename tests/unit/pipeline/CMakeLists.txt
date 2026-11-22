@@ -21,7 +21,9 @@ if(APPLE AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(arm64|aarch64)$" AND NOT CMAKE_CR
     COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/tu_local_parameter_symbols.py
             $<TARGET_FILE:ycxxc> ${CMAKE_CXX_COMPILER} darwin)
 endif()
-# PARITY: by design: runs x86-64 ELF executables, which only Linux can
+# PARITY: #647, #649, #650 for the Darwin counterparts of unit.linux_variadic_definitions,
+# unit.linux_array_delete and unit.linux_virtual_consumer; the rest by design: they run x86-64
+# ELF executables, which only Linux can
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$"
    AND NOT CMAKE_CROSSCOMPILING)
   add_test(NAME unit.linux_compile
