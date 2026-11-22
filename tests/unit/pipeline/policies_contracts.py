@@ -486,7 +486,7 @@ with tempfile.TemporaryDirectory() as directory:
         other_objects = tuple(map(compile_object, (providers, observed_main)))
         forwarding_object = compile_object(write("checked_forwarding.cpp", mode.read_text() + forwarding_source))
         leaf_object = compile_object(write("checked_leaf.cpp", mode.read_text() + leaf_source))
-        unchecked_leaf_object = compile_object(write("unverified_leaf.cpp", mode.read_text() +
+        unchecked_leaf_object = compile_object(write("unverified_leaf.cpp",
             leaf_source.replace("[[=own::operation::verified_observes]] ", "")))
 
         def checked_link(inputs, output, daemon="--no-daemon", env=None):
