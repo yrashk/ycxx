@@ -3617,6 +3617,24 @@ public:
           } while (accept(Tk::comma));
         }
         if (!expect(Tk::r_paren)) return {NodeId::none, e.begin, pos()};
+        if (in_template_value_argument_ && !s_->unevaluated && std::ranges::all_of(args, [&](Ex argument) {
+              if (!argument.ok()) return false;
+              if (s_->dependent(argument)) return true;
+              while (auto paren = s_->as<ast::Paren>(argument)) {
+                argument.begin += paren->operand.at;
+                --argument.end;
+                argument.id = paren->operand.id;
+              }
+              // Preserve the expression's ABI spelling by accepting only written literals.
+              const auto token = r_->tokens[begin_ + argument.begin].kind;
+              return argument.width() == 1 &&
+                     (token == Tk::int_lit || token == Tk::char_lit || token == Tk::kw_true || token == Tk::kw_false);
+            }))
+          if (auto call = s_->dependent_immediate_call(e, args, pos())) {
+            e = *call;
+            ++deferred_immediate_calls_;
+            break;
+          }
         e = immediate(s_->call(e, std::move(args), pos(), at));
         break;
       }

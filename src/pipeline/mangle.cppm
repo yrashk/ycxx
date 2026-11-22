@@ -671,12 +671,31 @@ class Mangler {
   std::expected<std::string, std::string> expression(ast::ConstId v) {
     if (in_.values.is<ast::VDepCall>(v)) {
       const auto& call = in_.values.get<ast::VDepCall>(v);
-      const auto name = classes_ ? classes_(call.templ) : ClassName{};
-      if (name.name.empty()) return std::unexpected("a dependent call whose function name is unknown");
-      auto args = template_args(in_.seqs.elements(call.args));
-      if (!args) return args;
-      // cl <expression>+ E; this call has only the callee's unresolved name.
-      return "cl" + source_name(name.name) + *args + "E";
+      const auto operands = in_.seqs.elements(call.args);
+      if (operands.empty() || operands.front().kind == ast::TemplateArgKind::type) {
+        const auto name = classes_ ? classes_(call.callee) : ClassName{};
+        if (name.name.empty()) return std::unexpected("a dependent call whose function name is unknown");
+        auto args = template_args(operands);
+        if (!args) return args;
+        return "cl" + source_name(name.name) + *args + "E";
+      }
+      const auto target = functions_ ? functions_(call.callee) : std::nullopt;
+      if (!target) return std::unexpected("a dependent call whose function name is unknown");
+      auto callee = local_encoding(target->declaration);
+      if (!callee) return callee;
+      std::string result = "clL_Z" + *callee + "E";
+      for (const auto& operand : operands) {
+        if (in_.values.is<ast::VDepParam>(operand.value)) {
+          const auto& parameter = in_.values.get<ast::VDepParam>(operand.value);
+          if (parameter.depth != own_depth) return std::unexpected("a dependent call with an enclosing template parameter");
+          result += parameter.index == 0 ? "T_" : std::format("T{}_", parameter.index - 1);
+          continue;
+        }
+        auto value = template_arg(operand);
+        if (!value) return value;
+        result += *value;
+      }
+      return result + "E";
     }
     if (in_.values.is<ast::VDepVariable>(v)) {
       const ast::VDepVariable& d = in_.values.get<ast::VDepVariable>(v);
