@@ -1378,8 +1378,13 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   Tests cover both targets in `tests/own/namespace-unnamed-enums/` and the draft example in
   `tests/draft/dcl/dcl.enum-2.accept.cpp`.
   [#157](https://github.com/yrashk/ycxx/issues/157) · [Itanium C++ ABI #205](https://github.com/itanium-cxx-abi/cxx-abi/issues/205)
+- Nonempty standalone unnamed unscoped enum definitions also work in ordinary classes and class
+  template specializations. Unqualified initializers can read earlier class members and earlier
+  enumerators. Their names enter class scope and use the ordinary member collision checks.
+  The enum identity uses the declaring class, canonical underlying type, and first enumerator.
+  [#859](https://github.com/yrashk/ycxx/issues/859)
 - Further work includes opaque declarations in classes or blocks, unnamed empty definitions,
-  unnamed definitions in classes or followed by declarators, and `E{}` and `E(v)` expressions
+  unnamed definitions followed by declarators, and `E{}` and `E(v)` expressions
   (#157). Enumerations in a block are tracked in #117.
 
 ## Direct explicit destructor calls (#722)
