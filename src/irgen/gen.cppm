@@ -53,6 +53,8 @@ export namespace ycxx::irgen {
 
 namespace ir = ycxx::ir;
 
+enum class UnwindCleanupChecks : std::uint8_t { none, all_calls, aggregate_defaults };
+
 // What `function_ir(F, ctx)` reads (ast.md §3.6): the function's entity and `decl_sema`, its
 // analysed body, and where the body sits in its item, for `Loc`s (§3.4, §8).
 struct FunctionInput {
@@ -82,7 +84,7 @@ struct FunctionInput {
   bool hosted_catch_all = false;  // the native frontend has certified this occurrence
   ast::NodeId cleanup_call = ast::NodeId::none;  // the certified hosted cleanup call
   ast::EntityId constructor_cleanup = ast::EntityId::none;  // the selected union member's destructor
-  bool check_unwind_cleanups = false;
+  UnwindCleanupChecks unwind_cleanup_checks = UnwindCleanupChecks::none;
   bool native_array_delete = false;  // the backend's Linux x86-64 cookie-free array deletion
   bool native_array_new = false;  // the backend's Linux x86-64 allocation in a certified frame
   std::span<const ast::EntityId> nonthrowing_functions{};  // native declarations, sorted by entity
@@ -965,11 +967,15 @@ class Gen {
               ast::QualType pointer = facts_.pointer_to(ast::without_cv(p.type));
               receiver = pure(ir::Op::ptr_cast, pointer, {receiver}, {word(ty(pointer))});
             }
-            struct RestoreThis {
-              std::optional<ValueId>& current;
-              std::optional<ValueId> saved;
-              ~RestoreThis() { current = saved; }
-            } restore{this_, std::exchange(this_, receiver)};
+            struct RestoreDefault {
+              Gen& gen;
+              std::optional<ValueId> receiver;
+              bool in_default;
+              ~RestoreDefault() {
+                gen.this_ = receiver;
+                gen.in_aggregate_default_ = in_default;
+              }
+            } restore{*this, std::exchange(this_, receiver), std::exchange(in_aggregate_default_, true)};
             pinned([&] {
               initialize(initializing_place(destination), child(x, get<ast::DefaultMemberInit>(x).init), false, select_element);
             });
@@ -1924,7 +1930,10 @@ class Gen {
       state_ = b_.result(invoke, 0);
       return std::nullopt;
     }
-    if (fn_.check_unwind_cleanups && std::ranges::any_of(scopes_, [](const auto& scope) {
+    const auto checks = fn_.unwind_cleanup_checks;
+    const bool check_unwind = checks == UnwindCleanupChecks::all_calls ||
+                              (checks == UnwindCleanupChecks::aggregate_defaults && in_aggregate_default_);
+    if (check_unwind && std::ranges::any_of(scopes_, [](const auto& scope) {
           return std::ranges::any_of(scope, [](const Ending& e) { return e.destructor != ast::EntityId::none; });
         })) {
       ast::QualType callee = info(child(a, c.callee)).type;
@@ -2335,6 +2344,7 @@ class Gen {
   std::optional<Place> initialized_member_;  // a constructor's exceptional cleanup only
   int branches_ = 0;                         // conditionally evaluated operands entered
   bool selecting_initializer_ = false;      // local class initializer selection and its cleanup
+  bool in_aggregate_default_ = false;        // evaluating a selected default member initializer
   int pinned_ = 0;                           // depth inside trees from other items (`Position`)
 };
 
