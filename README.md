@@ -40,6 +40,8 @@ Ordinary constructor declarations and definitions check that their concrete exce
 Function templates, member function templates and members of class templates substitute a
 dependent exception specification when it is needed.
 [#713](https://github.com/yrashk/ycxx/issues/713) [#828](https://github.com/yrashk/ycxx/issues/828)
+A lambda's noexcept-specifier, including one that depends on an enclosing template's
+parameters, is part of its call operator's type. [#807](https://github.com/yrashk/ycxx/issues/807)
 
 A class template can grant private access to the class passed as a type argument using
 `friend Authority;`. Each specialization grants access to its own authority.
@@ -85,6 +87,9 @@ parentheses or braces, including through namespace aliases. [#697](https://githu
 Class templates at namespace scope can delete their copy assignment on its first in-class
 declaration when the member has no ref-qualifier. Specializations retain the deleted overload.
 [#709](https://github.com/yrashk/ycxx/issues/709)
+
+In a class template, and in a member defined outside it, a member of a nondependent base hides a
+template parameter of the same name. [#800](https://github.com/yrashk/ycxx/issues/800)
 
 C++26 reflection annotations on class heads and ordinary function declarations accept
 constant payloads and retain their types for compiler consumers.

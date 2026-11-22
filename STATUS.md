@@ -2201,6 +2201,20 @@ A type inherited from a nondependent base takes precedence over the template par
 ([temp.local]).
 [#689](https://github.com/yrashk/ycxx/issues/689)
 
+## Class scope before the template parameter scope (#800)
+
+Unqualified lookup in a class template, and in a definition of its member outside it, searches
+the class's scope with its nondependent bases before the template parameter scope of the class
+template or of that definition ([temp.local]/7). A member of a nondependent base, a base's
+injected-class-name, or in a definition outside the class a member of the class itself, hides a
+template parameter of the same name: in expressions, type names, nested-name-specifiers and
+template names (`Sema::template_param`). A member template's own parameters are still found
+first; a dependent base is not searched. Redeclaring a hidden parameter's name is still an error
+([temp.local]/6, `Sema::declared_template_param`).
+- Tests: `tests/own/temp-local/` (one run test, two reject tests).
+- Not yet: the enclosing classes of a nested class are not searched before the outer head,
+  since nested classes of class templates are not supported (#306).
+
 ## Templates, ζ step 7: static data members of class templates (#88, 2026-11-18)
 
 - A class template's static data members are declared with its other members. A specialization
@@ -2783,6 +2797,20 @@ In a template's definition, `noexcept` on a call of such a function is value-dep
 - Tests: `tests/own/template-noexcept/` (one run test, one reject test, one accept test).
 - Not yet: the resolved specification in `decltype` of a template-id, in deduction from one, and
   in the address of a class template member (#838).
+
+## A lambda's noexcept-specifier (#807)
+
+A lambda's `noexcept`, `noexcept(true)` or `noexcept(false)` is part of its function call
+operator's type ([expr.prim.lambda.closure]/4). The condition is in the scope of the lambda's
+parameters and may not narrow to `bool` ([except.spec]/2). In a template's definition, a
+condition that depends on the template's parameters makes the unary `noexcept` operator on a call
+of the lambda value-dependent; each instantiation evaluates it with its own arguments. A
+captureless non-throwing lambda converts to a pointer to noexcept function, and from it to a
+pointer to function ([expr.prim.lambda.closure]/8, [conv.fctptr]).
+- The init-captures are in scope in the lambda-declarator, as the parameters are
+  ([basic.scope.lambda]): in the condition and in a trailing return type.
+- Tests: `tests/own/lambda-noexcept/` (one run test, two reject tests).
+- Not yet: a generic lambda's condition naming its own template parameters is rejected (#820).
 
 ## Namespace variable lambdas (#338)
 
