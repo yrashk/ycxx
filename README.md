@@ -34,6 +34,7 @@ freestanding C++ subset for x86-64 Linux. The standard library is out of reach: 
 Ordinary function pointers and references preserve concrete `noexcept` type identity.
 A nonthrowing function can be used where the corresponding potentially throwing type is expected.
 The unary `noexcept` operator checks whether calls and constructions can throw.
+Member function template specializations preserve bare `noexcept` in their function types.
 [#729](https://github.com/yrashk/ycxx/issues/729)
 Ordinary constructor declarations and definitions check that their concrete exception specifications agree.
 Member function templates can substitute a dependent exception specification when it is needed.
@@ -328,6 +329,10 @@ written default member initializer are value-initialized.
   [#244](https://github.com/yrashk/ycxx/issues/244)
 - user-declared copy and move assignment govern the availability of implicit constructors.
   [#244](https://github.com/yrashk/ycxx/issues/244)
+- ordinary namespace-scope classes without bases can implicitly move from an rvalue when their
+  implicit copy is deleted. This covers scalar fields and class fields with proven nonthrowing
+  initialization and destruction.
+  [#747](https://github.com/yrashk/ycxx/issues/747)
 - ordinary named unions with a written destructor can hold nontrivially destructible members.
   The member's copy constructor can be trivial or deleted. An explicit union constructor
   initializes its selected member. A nonthrowing constructor works on both targets, and the
@@ -391,7 +396,8 @@ written default member initializer are value-initialized.
   and cv `void`, including dependent operands in the same template contexts.
   [Extension guide](docs/EXTENSIONS.md) · [#218](https://github.com/yrashk/ycxx/issues/218)
 - `__is_base_of` for known class hierarchies, including private and ambiguous bases and dependent
-  operands in supported class-template bases and variable-template initializers.
+  operands in supported class-template bases, variable-template initializers and function template
+  bodies.
   [Extension guide](docs/EXTENSIONS.md) · [#218](https://github.com/yrashk/ycxx/issues/218)
 - `__is_empty` accounts for inherited data members and supports dependent operands in class-template
   bases and variable-template initializers.

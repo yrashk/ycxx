@@ -1223,6 +1223,12 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   with a proven trivial selected copy. A selected nontrivial or unsupported defaulted copy
   is diagnosed at use. Native by-value boundaries require a known copy classification.
   [Design](docs/design/defaulted-copy-constructors.md) · [#157](https://github.com/yrashk/ycxx/issues/157)
+- An ordinary namespace-scope class with no bases and a deleted implicit copy can synthesize its
+  available implicit move constructor for scalar fields and class fields with proven nonthrowing
+  initialization and destruction. The fields initialize in declaration order from the source
+  xvalue. The class retains aggregate initialization, and the inline move definition is emitted
+  only on use.
+  [Design](docs/design/implicit-move-constructors.md) · [#747](https://github.com/yrashk/ycxx/issues/747)
 - **Cleanups** (ast.md §3.7.3 as revised by #135): `LocalVar::destructor`; `function_ir` runs
   destructors on every scope exit from its own scope stack (block end, `return`, `break`,
   `continue`) and ends a full-expression's temporaries at its end. Statements carry no cleanup
@@ -2004,8 +2010,11 @@ session's.*
   The same nonunion class gives true, including when incomplete. For distinct nonunion classes,
   `Derived` must be complete. The trait follows the recorded base declarations, including private
   and ambiguous bases. A dependent occurrence in a supported class-template base or variable-template
-  initializer checks completeness at instantiation. A concrete occurrence checks it at its original
-  source point. Missing graph information gets a hard diagnostic when it prevents a result.
+  initializer checks completeness at instantiation. So does one in a function template body (also
+  a member's, a member template's or a generic lambda's, in a template or not): the body defers it
+  and its instantiation evaluates it, with completeness at the end of the unit
+  (`tests/own/builtins/base_of_dependent_*`).
+  A concrete occurrence checks it at its original source point. Missing graph information gets a hard diagnostic when it prevents a result.
   `__has_builtin` answers 0 while support is partial ([meta.rel], [class.derived], #218).
 - `__is_empty(T)` gives false for nonclass types and unions. For a complete nonunion class, it
   checks polymorphism, non-static data members, and emptiness of the recorded bases. Missing base
@@ -3022,13 +3031,16 @@ and runtime integration with ycxx's own linker remain under [#89]. See the
 argument operations, and temporary destruction ([except.spec]). A construction
 in a function template body can be checked after substitution.
 
-## Dependent exception specifications on member templates (#713)
+## Exception specifications on member function templates (#713, #804)
 
 A selected ordinary member function template can instantiate its written
 `noexcept(expression)` with the class and function template arguments
 ([except.spec], [temp.inst]). Its parameter and class scopes are available
 during replay. Class instantiation leaves the specification of an unused
 member template deferred.
+
+Selected member function template specializations preserve bare `noexcept`
+for calls and for selection against a static function-pointer target.
 
 ## The address of an overload set, ι (#313, #337, 2026-11-19)
 
