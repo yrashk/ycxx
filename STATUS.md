@@ -1372,7 +1372,12 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   [#731](https://github.com/yrashk/ycxx/issues/731)
 - Nested enumeration initializers see the enclosing class prefix by unqualified lookup. An
   earlier enumerator in the same enumeration takes precedence over an enclosing class member
-  ([basic.scope.enum], [basic.scope.class]). [#760](https://github.com/yrashk/ycxx/issues/760)
+  ([basic.scope.enum], [basic.scope.class]). A preceding non-static data member can be named
+  without an object in unevaluated operands such as `sizeof(member)` in an initializer and
+  `decltype(member)` in an enum-base. When a call resolves a mixed static and non-static
+  overload set from the class prefix, the selected function must be static. Tests cover
+  declaration order, ref-qualified candidates, braced arguments, and cold and resident edits.
+  [#760](https://github.com/yrashk/ycxx/issues/760) · [#882](https://github.com/yrashk/ycxx/issues/882)
 - Tests: `tests/own/classes/s4-*enum*`, `s4-scoped-enum`, `s4-unscoped-enum` (spec-only, plus two
   from the review): 7 of 7.
 - Namespace-scope opaque enum declarations ([dcl.enum], #157) supply a complete enum type with a

@@ -158,8 +158,10 @@ public:
     return std::nullopt;
   }
   // In a member declaration of a class being defined: the member named `name` declared before it
-  // ([basic.scope.class]; the class's member list is not complete yet).
-  virtual std::optional<ast::DeclSema> earlier_member(NameId name, bool type_only = false) = 0;
+  // ([basic.scope.class]; the class's member list is not complete yet). An expression can also
+  // request the function declarations of that name in source order.
+  virtual std::optional<ast::DeclSema> earlier_member(NameId name, bool type_only = false,
+                                                     std::vector<ast::DeclSema>* functions = nullptr) = 0;
   // The direct bases of class `c` while it is being defined (its base-clause), none otherwise.
   virtual std::vector<EntityId> defining_bases(EntityId) { return {}; }
   virtual std::span<const BaseRec> defining_base_records(EntityId) { return {}; }
@@ -4937,7 +4939,39 @@ public:
     bound_[std::to_underlying(r.id)] = {object, std::move(cands), c, name_at, naming, qualified, explicit_receiver};
     return r;
   }
+
+  Ex bind_prefix_member_functions(NameId name, const std::vector<ast::DeclSema>& declarations, u32 begin, u32 end) {
+    std::vector<MemberDeclRec> records;
+    std::vector<ast::DeclSema> statics;
+    for (const auto& d : declarations | std::views::reverse) {
+      if (std::ranges::contains(records, d.entity, &MemberDeclRec::entity)) continue;
+      const bool is_static = (d.flags & decl_flag::static_) != 0;
+      records.push_back({.name = name, .entity = d.entity, .type = d.type, .is_function = true, .is_static = is_static,
+                         .is_deleted = (d.flags & decl_flag::deleted) != 0,
+                         .is_template = (d.flags & decl_flag::template_) != 0, .defaults = defaults_of(d),
+                         .is_virtual = d.is_virtual, .is_pure = d.is_pure});
+      if (is_static) statics.push_back(d);
+    }
+    std::vector<const MemberDeclRec*> candidates;
+    candidates.reserve(records.size());
+    for (const MemberDeclRec& record : records) candidates.push_back(&record);
+    Ex set = bind_members(current_class, std::move(candidates), std::nullopt, false, begin, end, begin);
+    const u32 key = std::to_underlying(set.id);
+    // The map's binding owns these records at a stable address. Swapping preserves the candidate pointers.
+    bound_.at(key).prefix_candidates.swap(records);
+    overloads_[key] = std::move(statics);  // ordinary function addresses match static members only
+    return set;
+  }
+
   bool is_bound_member(const Ex& e) { return e.ok() && types().is(e.type(), Builtin::bound_member); }
+
+  // [expr.prim.id.general]: a non-static data member needs no object in an unevaluated operand.
+  Ex unevaluated_data_member(EntityId member, QualType type, u8 bit_width, u32 begin, u32 end) {
+    ExprInfo info{types().referee(type), ValueCategory::lvalue, 0, bit_width};
+    Ex e = node(ast::DeclRef{info, member}, begin, end, info);
+    declared_types_[std::to_underlying(e.id)] = type;
+    return e;
+  }
 
   // The implicit member access `name` inside a member function of `c` ([class.mfct.non.static]),
   // or a qualified name `C::name`: none if `c` has no such member.
@@ -4994,13 +5028,7 @@ public:
         return literal(t, value, ValueCategory::prvalue, *address_at, end);
       }
       if (!has_this) {
-        // [expr.prim.id.general]: a non-static data member needs no object in an unevaluated operand.
-        if (unevaluated) {
-          ExprInfo info{types().referee(field.type), ValueCategory::lvalue, 0, field.bit_width};
-          Ex e = node(ast::DeclRef{info, field.entity}, begin, end, info);
-          declared_types_[std::to_underlying(e.id)] = field.type;
-          return e;
-        }
+        if (unevaluated) return unevaluated_data_member(field.entity, field.type, field.bit_width, begin, end);
         diag(begin, Diag::member_without_object, name);
         return fail;
       }
@@ -5162,13 +5190,19 @@ public:
   Ex member_call(Ex callee, std::vector<Ex> args, u32 end, u32 paren_at, bool assignment_notation = false) {
     u32 begin = callee.begin;
     Ex fail{NodeId::none, begin, end};
-    if (auto b = std::ranges::find_if(args, [&](const Ex& a) { return is_braced(a); }); b != args.end()) {
-      diag(b->begin, Diag::not_supported, lex::Tk::l_brace);  // a braced list for a member function's parameter
-      return fail;
-    }
     auto m = *as<ast::Member>(callee);
     const Bound& bound = bound_.at(std::to_underlying(callee.id));
-    if (std::ranges::any_of(bound.cands, [&](const MemberDeclRec* candidate) {
+    // An enum-prefix binding has no receiver. Only its selected static candidate can be called.
+    const bool objectless_prefix = !bound.prefix_candidates.empty();
+    std::vector<const Braced*> lists;
+    if (auto b = std::ranges::find_if(args, [&](const Ex& a) { return is_braced(a); }); b != args.end()) {
+      if (!objectless_prefix) {
+        diag(b->begin, Diag::not_supported, lex::Tk::l_brace);  // a braced list for a member function's parameter
+        return fail;
+      }
+      for (const Ex& a : args) lists.push_back(braced_list(a));
+    }
+    if (!objectless_prefix && std::ranges::any_of(bound.cands, [&](const MemberDeclRec* candidate) {
           return candidate->is_virtual && types().rec(candidate->type).fn_ref != ast::RefQual::none;
         })) {
       diag(paren_at, Diag::virtual_ref_call);
@@ -5185,8 +5219,8 @@ public:
     std::span<const TemplateArg> explicit_args;
     if (ex != explicit_args_.end()) explicit_args = ex->second;
     std::vector<ArgShape> shapes;
-    for (const Ex& a : args)
-      shapes.push_back(argument_shape(a));
+    if (lists.empty())
+      for (const Ex& a : args) shapes.push_back(argument_shape(a));
     std::vector<Candidate> cands;
     std::vector<const MemberDeclRec*> recs;
     std::deque<ast::DeclSema> patterns;
@@ -5224,6 +5258,13 @@ public:
       auto tmpl = q_->template_decl(c->entity);
       if (!tmpl) continue;
       const ast::DeclSema& td = patterns.emplace_back(*tmpl);
+      if (!lists.empty()) {
+        // Keep the potential candidate until the other arguments are checked (#231).
+        cands.push_back({c->entity, c->type, c->is_static, c->is_deleted, &td, c->defaults});
+        recs.push_back(c);
+        deduced.emplace_back();
+        continue;
+      }
       Templates t = templates_for_use(callee.begin);
       auto targs = t.deduce_call(td, shapes, explicit_args, c->defaults);
       if (!targs) continue;
@@ -5268,11 +5309,16 @@ public:
       }
     }
     const bool object_rvalue = object && !m.arrow && object->cat() != ValueCategory::lvalue;
-    auto chosen = resolve(cands, args, begin, name, object_cv, std::nullopt, {}, object_rvalue);
+    auto chosen = resolve(cands, args, begin, name, object_cv, std::nullopt, lists, object_rvalue,
+                          /*defer_no_viable=*/false, /*scalar_list_arguments=*/objectless_prefix);
     if (!chosen) return fail;
     const MemberDeclRec* d = recs[*chosen];
     const Candidate& k = cands[*chosen];
     if (!check_access(bound.cls, d->entity, d->name, bound.name_at, bound.naming)) return fail;
+    if (objectless_prefix && !d->is_static) {
+      diag(begin, Diag::member_without_object, d->name);
+      return fail;
+    }
     std::optional<u32> virtual_slot;
     if (unevaluated == 0) {
       if (d->is_virtual) {
@@ -5651,7 +5697,7 @@ public:
 
   // [over.ics.list]: rank a braced argument before initializing the selected parameter.
   // A disengaged result is a list conversion this slice does not classify.
-  std::optional<Ics> list_ics(const Braced& list, QualType parameter) {
+  std::optional<Ics> list_ics(const Braced& list, QualType parameter, bool scalar_list_arguments) {
     const bool flat = std::ranges::none_of(list.clauses, [](const Braced::Clause& c) { return c.list || c.designated; });
     const QualType object = types().referee(parameter);
     if (flat && types().is_class(object) && has_user_ctors(object) &&
@@ -5664,7 +5710,8 @@ public:
     }
     if (types().is_scalar(parameter)) {
       if (!flat || list.clauses.size() > 1) return Ics{};
-      if (!types().is_arithmetic(parameter)) return std::nullopt;
+      if (!types().is_arithmetic(parameter) && !(scalar_list_arguments && types().is_pointer(parameter)))
+        return std::nullopt;
       if (list.clauses.empty()) return Ics{true};
       const Ex& expr = list.clauses.front().expr;
       if (expr.ok() && types().is_class(expr.type())) return std::nullopt;
@@ -5682,7 +5729,8 @@ public:
     // A single class-valued clause can instead use the same-class or base conversion.
     for (const Braced::Clause& c : list.clauses) {
       if (!c.expr.ok()) return Ics{};
-      if (!types().is_arithmetic(c.expr.type())) return std::nullopt;
+      if (!types().is_arithmetic(c.expr.type()) && !(scalar_list_arguments && types().is_scalar(c.expr.type())))
+        return std::nullopt;
     }
     if (list.clauses.size() > record->fields.size()) return Ics{};
     for (std::size_t i = 0; i < list.clauses.size(); ++i)
@@ -5709,7 +5757,8 @@ public:
   std::expected<std::size_t, OverloadFailure> resolve(
       std::span<const Candidate> cands, std::span<const Ex> args, u32 at, NameId name,
       std::optional<Cv> object_cv, std::optional<QualType> ctor_of = std::nullopt,
-      std::span<const Braced* const> lists = {}, bool object_rvalue = false, bool defer_no_viable = false) {
+      std::span<const Braced* const> lists = {}, bool object_rvalue = false, bool defer_no_viable = false,
+      bool scalar_list_arguments = false) {
     std::vector<std::pair<std::size_t, std::vector<Ics>>> viable;
     const Braced* first_list = lists.empty() ? nullptr : *std::ranges::find_if(lists, [](const Braced* list) { return list; });
     const Braced* unsupported = nullptr;
@@ -5746,7 +5795,7 @@ public:
       if (first_list && !template_list) {
         for (std::size_t k = 0; k < args.size() && k < fixed && ok; ++k) {
           if (!lists[k]) continue;
-          auto c = list_ics(*lists[k], fr.params[k]);
+          auto c = list_ics(*lists[k], fr.params[k], scalar_list_arguments);
           if (c) {
             ok = c->viable;
             seq[k + 1] = *c;
@@ -6466,11 +6515,19 @@ public:
     if (current_class != EntityId::none) {
       if (auto r = class_member(current_class, name, begin, end, begin, std::nullopt, /*unqualified=*/true)) return *r;
       if (!class_rec(current_class)) {
-        if (auto m = q_->earlier_member(name)) {
+        std::vector<ast::DeclSema> functions;
+        if (auto m = q_->earlier_member(name, /*type_only=*/false, nested_enum_members_begin ? &functions : nullptr)) {
           if (m->kind == ast::DeclKind::enumerator) return enumerator(m->entity, m->type, begin, end);
-          // A static member function needs no object ([class.static.mfct]).
-          if (m->kind == ast::DeclKind::function && (m->flags & decl_flag::static_))
-            return decls_expr({*m}, true, name, begin, end, callee);
+          // Rank mixed overloads before checking whether the selected member needs an object.
+          if (m->kind == ast::DeclKind::function) {
+            const auto is_static = [](const ast::DeclSema& d) { return (d.flags & decl_flag::static_) != 0; };
+            if (!functions.empty() && std::ranges::all_of(functions, is_static))
+              return decls_expr(std::move(functions), true, name, begin, end, callee);
+            if (std::ranges::any_of(functions, is_static)) return bind_prefix_member_functions(name, functions, begin, end);
+            if (is_static(*m)) return decls_expr({*m}, true, name, begin, end, callee);
+          }
+          if (nested_enum_members_begin && unevaluated && m->kind == ast::DeclKind::data_member)
+            return unevaluated_data_member(m->entity, m->type, m->bit_width, begin, end);
           if (m->kind != ast::DeclKind::variable) {
             diag(begin, Diag::member_without_object, name);
             return {NodeId::none, begin, end};
@@ -10016,6 +10073,7 @@ private:
     EntityId naming = EntityId::none;  // the class they were named in ([class.access.base]/5)
     bool qualified = false;            // an explicit qualifier suppresses virtual dispatch
     bool explicit_receiver = false;    // the member was named by a written `.` or `->`
+    std::vector<MemberDeclRec> prefix_candidates{};  // ordinary bindings borrow from the completed class
   };
   std::map<u32, Bound> bound_;                        // by draft bound-member Member
   std::set<u32> deleted_;                             // deleted functions named so far
