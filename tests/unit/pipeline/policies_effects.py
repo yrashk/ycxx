@@ -332,10 +332,70 @@ with tempfile.TemporaryDirectory() as directory:
     invoke([*darwin, darwin_caller, darwin_unchecked, "-o", darwin_rejected], error="has no matching guarantee")
     assert not darwin_rejected.exists()
 
+    write("joint.hpp", """\
+        #pragma once
+        #include <ycxx/effects.hpp>
+        namespace own = ycxx::ownership;
+        namespace fx = ycxx::effects;
+        struct Ticket { int value; };
+        void inspect(const Ticket&) noexcept;
+        void forward_ticket(const Ticket&) noexcept;
+        Ticket issue() noexcept;
+        void finish(Ticket&&) noexcept;
+        #ifndef EFFECT_ONLY
+        using Own = own::use_policy<own::linear<Ticket>,
+            own::verified_observes<decltype(&inspect), &inspect>,
+            own::verified_observes<decltype(&forward_ticket), &forward_ticket>,
+            own::creates<decltype(&issue), &issue>, own::consumes<decltype(&finish), &finish>>;
+        #endif
+        #ifndef OWNERSHIP_ONLY
+        using Bounds = fx::use_policy<
+            fx::bound<decltype(&inspect), &inspect, fx::set<>>,
+            fx::bound<decltype(&forward_ticket), &forward_ticket, fx::set<>>>;
+        #endif
+    """)
+    joint_leaf = write("joint_leaf.cpp", """\
+        #include "joint.hpp"
+        void inspect(const Ticket& ticket) noexcept { int value = ticket.value; (void)value; }
+    """)
+    joint_forward = write("joint_forward.cpp", """\
+        #include "joint.hpp"
+        void forward_ticket(const Ticket& ticket) noexcept { inspect(ticket); }
+    """)
+    joint_entry = write("joint_entry.cpp", """\
+        #include "joint.hpp"
+        Ticket issue() noexcept { return {42}; }
+        void finish(Ticket&& ticket) noexcept { if (ticket.value != 42) __builtin_trap(); }
+        int main() {
+          auto ticket = issue();
+          forward_ticket(ticket);
+          finish(static_cast<Ticket&&>(ticket));
+        }
+    """)
+
+    def verify_joint_proofs(target, output):
+        objects = [source.with_suffix(".joint.o") for source in (joint_entry, joint_forward, joint_leaf)]
+        for source, obj in zip((joint_entry, joint_forward, joint_leaf), objects):
+            invoke([*target, "-c", source, "-o", obj])
+        invoke([*target, *objects, "-o", output])
+        incomplete = root / "joint_incomplete.o"
+        denied = root / "joint_denied"
+        for retained, missing in (("OWNERSHIP_ONLY", "verified effect bound"),
+                                  ("EFFECT_ONLY", "verified observation")):
+            invoke([*target, f"-D{retained}", "-c", joint_leaf, "-o", incomplete])
+            outcome = invoke([*target, *objects[:2], incomplete, "-o", denied], error=missing)
+            assert "has no matching guarantee" in outcome and not denied.exists(), outcome
+
+    joint_darwin = root / "joint-darwin"
+    verify_joint_proofs(darwin, joint_darwin)
+    assert joint_darwin.read_bytes().startswith(bytes.fromhex("cffaedfe"))
+
     if sys.platform.startswith("linux") and platform.machine() == "x86_64":
         resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
         executable = root / "effects"
         native = [*base, "--no-daemon", "--target=x86_64-linux-gnu", "-nostdlib"]
+        verify_joint_proofs(native, executable)
+        subprocess.run([executable], check=True, timeout=10)
         invoke([*native, "-o", executable, *sources, annotations])
         subprocess.run([executable], check=True, timeout=10)
         invoke([*native, "-o", executable, capability])

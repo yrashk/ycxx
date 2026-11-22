@@ -174,6 +174,11 @@ verified bound must match the declared bound used by the caller. A trusted adapt
 use the same declared bound at every checked call site. The link also accepts sources
 alongside objects.
 
+A shared observer can carry both `ownership::verified_observes` and `effects::bound`.
+When it forwards the borrow to another verified observer, the checked call carries both
+the ownership and effect requirements to the final link. The selected provider must
+satisfy both contracts.
+
 The initial subset supports direct calls to namespace functions with scalar or reference parameters and a
 scalar, reference, or void result. It checks default argument calls and diagnoses indirect
 calls, volatile accesses, and unmodeled operations such as class initialization and cleanup.
