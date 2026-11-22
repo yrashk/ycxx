@@ -333,7 +333,7 @@ public:
   }
 
   std::optional<ConstId> unary_trait_value(ast::DepOp op, QualType type)
-    pre(op != ast::DepOp::is_same && op != ast::DepOp::logical_not &&
+    pre(op != ast::DepOp::is_same && op != ast::DepOp::logical_not && op != ast::DepOp::logical_and &&
         op != ast::DepOp::is_constructible && op != ast::DepOp::is_nothrow_constructible &&
         op != ast::DepOp::is_trivially_constructible && op != ast::DepOp::is_assignable &&
         op != ast::DepOp::is_nothrow_assignable && op != ast::DepOp::is_trivially_assignable &&
@@ -391,7 +391,8 @@ public:
     case ast::DepOp::is_convertible:
     case ast::DepOp::is_nothrow_convertible:
     case ast::DepOp::is_base_of:
-    case ast::DepOp::logical_not: std::unreachable();
+    case ast::DepOp::logical_not:
+    case ast::DepOp::logical_and: std::unreachable();
     }
     return w_->values.integer(types().builtin(Builtin::bool_), result);
   }
@@ -402,6 +403,13 @@ public:
     if (!ins().values.is<ast::VDepVariable>(v) || !structural_value(v)) return std::nullopt;
     for (std::size_t i = 0; i < negations; ++i) v = logical_not_value(v);
     return v;
+  }
+
+  std::optional<ConstId> conjunction_value(ConstId left, ConstId right) {
+    if (!structural_value(left) || !structural_value(right)) return std::nullopt;
+    QualType type = types().builtin(Builtin::bool_);
+    const std::array operands{value_arg(type, left), value_arg(type, right)};
+    return ins().intern_value(ast::VDepOp{ast::DepOp::logical_and, ins().intern_seq(std::span<const TemplateArg>(operands))});
   }
 
   // Template arguments `args` with the parameters `b` binds replaced by their arguments; a pack's
@@ -509,14 +517,9 @@ public:
         if (!rhs) return std::nullopt;
         return is_same_value(lhs->type, rhs->type);
       }
-      case ast::DepOp::logical_not: {
-        ConstId operand_value = ins().seqs.at(op.operands, 0).value;
-        auto operand = ins().values.is<ast::VDepVariable>(operand_value)
-            ? substitute_variable_value(operand_value, b, [this](EntityId spec) { return bool_variable_value(spec); })
-            : substitute_value(operand_value, b);
-        if (!operand || !structural_value(*operand)) return std::nullopt;
-        return logical_not_value(*operand);
-      }
+      case ast::DepOp::logical_not:
+      case ast::DepOp::logical_and:
+        return substitute_boolean_operand(v, b, /*defer=*/false);
       case ast::DepOp::is_reference:
       case ast::DepOp::is_const:
       case ast::DepOp::is_volatile:
@@ -1666,11 +1669,12 @@ private:
   static constexpr u16 unique_depth = 0x7fff;
 
   std::optional<ConstId> substitute_variable_value(ConstId v, const Bindings& b,
-                                                  const std::function<std::optional<ConstId>(EntityId)>& read) {
+                                                  const std::function<std::optional<ConstId>(EntityId)>& read,
+                                                  bool defer = false) {
     auto ref = ins().values.get<ast::VDepVariable>(v);
     auto args = substitute_args(ins().seqs.elements(ref.args), b);
     if (!args) return std::nullopt;
-    if (std::ranges::any_of(*args, [&](const TemplateArg& a) { return w_->arg_dependent(a); })) {
+    if (defer || std::ranges::any_of(*args, [&](const TemplateArg& a) { return w_->arg_dependent(a); })) {
       ref.args = ins().intern_seq(std::span<const TemplateArg>(*args));
       return ins().intern_value(ref);
     }
@@ -1690,6 +1694,25 @@ private:
         !types().is(ins().values.get<ast::VInt>(*g->value).type, Builtin::bool_))
       return std::nullopt;
     return g->value;
+  }
+
+  // Preserve the right operand without reading its specialization while the left is dependent.
+  std::optional<ConstId> substitute_boolean_operand(ConstId v, const Bindings& b, bool defer) {
+    if (ins().values.is<ast::VDepVariable>(v))
+      return substitute_variable_value(v, b, [this](EntityId spec) { return bool_variable_value(spec); }, defer);
+    if (!ins().values.is<ast::VDepOp>(v)) return substitute_value(v, b);
+    auto op = ins().values.get<ast::VDepOp>(v);
+    if (op.op != ast::DepOp::logical_not && op.op != ast::DepOp::logical_and)
+      return substitute_value(v, b);
+    auto left = substitute_boolean_operand(ins().seqs.at(op.operands, 0).value, b, defer);
+    if (!left || !structural_value(*left)) return std::nullopt;
+    if (op.op == ast::DepOp::logical_not) return logical_not_value(*left);
+    const bool left_dependent = ins().values.is_dependent(*left);
+    if (!defer && !left_dependent && ast::int_bits(ins(), *left) == ast::Bits128{}) return *left;
+    auto right = substitute_boolean_operand(ins().seqs.at(op.operands, 1).value, b, defer || left_dependent);
+    if (!right || !structural_value(*right)) return std::nullopt;
+    if (defer || left_dependent || ins().values.is_dependent(*right)) return conjunction_value(*left, *right);
+    return *right;
   }
 
   ConstId logical_not_value(ConstId v) {
