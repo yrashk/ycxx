@@ -150,7 +150,7 @@ int main() {
     leak.write_text(leak_text)
     check("native_leak", leak_text, "owner variant 'selected' may leave its scope")
     native = root / "native"
-    variants = [ycxx, "cxx", "--no-daemon", "-nostdlib", "-I", include]
+    variants = [ycxx, "cxx", "--no-daemon", "-I", include]
     darwin = [*variants, "--target=arm64-apple-darwin"]
     mach = root / "native-macho"
     subprocess.run([*darwin, "-fcheck-policies", direct, "-o", mach], check=True, timeout=90)
@@ -158,7 +158,7 @@ int main() {
     # PARITY: by design: each platform executes its own format and ISA. The macOS case above
     # cross-links the same source on Linux.
     if sys.platform == "linux" and platform.machine() in ("x86_64", "amd64"):
-        target = [*variants, "--target=x86_64-linux-gnu"]
+        target = [*variants, "--target=x86_64-linux-gnu", "-nostdlib"]
     elif sys.platform == "darwin" and platform.machine() in ("arm64", "aarch64"):
         target = darwin
     else:
