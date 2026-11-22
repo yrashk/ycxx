@@ -751,6 +751,7 @@ struct TrivialCopyability {
 
 struct ClassRec {
   bool defined = false;
+  bool is_final = false;  // the class property's value from the definition ([class.pre])
   u8 explicit_alignment = 0;  // a validated class-head requirement stricter than the natural alignment
   bool unapplied_layout = false;  // unresolved layout attributes on this definition or its data members
   // Its direct base classes, in declaration order ([class.derived.general]).

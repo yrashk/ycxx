@@ -2414,6 +2414,10 @@ std::optional<EntityId> complete_base_class(sema::Sema& s, QualType type, u32 at
       s.diag(at, Diag::base_not_class, type);
       return std::nullopt;
     }
+    if (r->is_final) {
+      s.diag(at, Diag::final_base, s.types().class_type(base));
+      return std::nullopt;
+    }
     if (r->polymorphic && !allow_polymorphic) {
       s.diag(at, Diag::virtual_base_class, type);
       return std::nullopt;
@@ -3807,6 +3811,19 @@ private:
     if (ps_.is(Tk::identifier)) ps_.bump();
     if (explicit_) return explicit_class_definition(key, name, name_at);
     if (template_ && ps_.is(Tk::less)) return partial_class_definition(key, name, name_at);
+    const auto final_here = [&] { return ps_.is(Tk::identifier) && p_->region().name(ps_.tok()) == "final"; };
+    const bool is_final = final_here();
+    if (is_final) {
+      if (key == Tk::kw_union || template_) {
+        s_.diag(ps_.pos(), Diag::not_supported, Tk::identifier);
+        return bad();
+      }
+      ps_.bump();
+      if (final_here()) {
+        s_.diag(ps_.pos(), Diag::duplicate_final);
+        return bad();
+      }
+    }
     std::vector<sema::BaseRec> bases;
     std::optional<Program::ClassBasePattern> base_pattern;
     if (ps_.is(Tk::colon)) {
@@ -3817,7 +3834,7 @@ private:
       if (!base_clause(key, name, bases, base_pattern)) return bad();
     }
     if (!ps_.is(Tk::l_brace)) {
-      s_.diag(ps_.pos(), Diag::not_supported, ps_.kind());  // `final` (#309)
+      s_.diag(ps_.pos(), Diag::not_supported, ps_.kind());
       return bad();
     }
     for (DeclId p : q_.visible_decls(name))
@@ -3838,6 +3855,7 @@ private:
     if (!template_ && clashes_with_using(name, name_at, ast::DeclKind::class_, s_.types().class_type(class_entity(name))))
       return bad();
     ast::DeclSema sem = template_ ? class_template_decl(name) : class_decl(class_entity(name), true);
+    sem.is_final = is_final;
     if (!template_) sem.annotations = b_.seq(std::span<const ast::AnnotationSema>(annotations));
     if (!class_declared(sem, key, name_at)) return bad();
     if (alignment) p_->class_alignments_.emplace(k_, std::move(*alignment));
@@ -3963,7 +3981,7 @@ private:
         pattern = Program::ClassBasePattern{{spec.type, access, 0, 0}, at, ps_.pos(), deferred != ps_.deferred_argument_checks()};
         if (types.is_dependent(spec.type)) return true;
       }
-      if (!types.is_class(spec.type) || sema::Types::cv(spec.type) != sema::Cv::none) {
+      if (!types.is_class(spec.type)) {
         s_.diag(at, Diag::base_not_class, spec.type);
         return false;
       }
@@ -3974,6 +3992,10 @@ private:
       }
       const bool single_ordinary_base = !template_ && bases.empty() && !ps_.is(Tk::comma);
       if (!complete_base_class(s_, spec.type, at, single_ordinary_base)) return false;
+      if (sema::Types::cv(spec.type) != sema::Cv::none) {
+        s_.diag(at, Diag::base_not_class, spec.type);
+        return false;
+      }
       if (std::ranges::any_of(bases, [&](const sema::BaseRec& r) { return r.cls == b; })) {
         s_.diag(at, Diag::duplicate_base, spec.type);
         return false;
@@ -7767,6 +7789,7 @@ const Result<ast::ClassDef>& Program::class_def(u32 item) {
     // Every unit that defines the class builds its own record (#115), and synthesizes the special
     // members its own object needs.
     sema::ClassRec rec;
+    if (const auto head = class_heads_.find(item); head != class_heads_.end()) rec.is_final = head->second.is_final;
     rec.union_ = class_rec_is_union(item);
     rec.unapplied_layout = has_unapplied_class_layout(item, c);
     rec.fields = std::move(fields);
