@@ -243,8 +243,9 @@ What is true of the code today. Work in progress and its owners are tracked in
 - `#include <cstdio>` preprocesses until libycxx's `#error` for unknown compilers
   (yrashk/libycxx#17).
 - `ycxx cxx -E` prints what Clang's `-E` would, by Clang's line and spacing rules. `preprocess`
-  is in `tests/features/ycxx.txt`. Diagnostics in included files name their file. Darwin is the
-  default target. `-E --target=x86_64-linux-gnu` (also `x86_64-pc-linux-gnu`) selects Linux.
+  is in `tests/features/ycxx.txt`. Diagnostics in included files name their file. The default
+  target follows the configured compiler host. An explicit `--target` also selects the
+  preprocessing target.
 - Tests:
   - `tests/own/pp` (by spec-only authors): 103 tests (`-E`, reject and accept), the draft's
     [cpp.scope], [cpp.subst], [cpp.stringize] and [cpp.concat] examples among them;
@@ -574,8 +575,10 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
 ## x86-64 ELF objects and executables (2026-11-19)
 
 - `--target=x86_64-pc-linux-gnu` (also `x86_64-linux-gnu`) selects Linux preprocessing,
-  layout and code generation. The in-process driver and daemon keep the target in the unit
-  configuration. Darwin remains the default.
+  layout and code generation. The in-process driver and daemon use the same request parser.
+  It defaults to Linux on x86-64 Linux builds and to `arm64-apple-darwin` on arm64 Darwin builds.
+  An explicit `--target` overrides the default. Builds with other configurations require one.
+  A native Linux executable link requires `-nostdlib`. [#651](https://github.com/yrashk/ycxx/issues/651)
 - The scalar System V AMD64 backend in `src/target/x86_64/` supports `bool` and 8-, 16-, 32- and 64-bit
   integer and enum parameters and results, plus pointers, references and void results. It handles
   direct and indirect calls, stack arguments and RIP-relative data references within a unit.
@@ -617,8 +620,16 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
 - Binary32 and binary64 comparisons use the scalar SSE unordered comparison instructions.
   Equality and the four relational operators are false for unordered operands. Inequality and
   conversion of NaN to `bool` are true. Both signed zeros convert to false. Strict exception
-  status, other numeric conversions and x87 values remain [#201](https://github.com/yrashk/ycxx/issues/201).
+  status and x87 values remain [#201](https://github.com/yrashk/ycxx/issues/201), [#645](https://github.com/yrashk/ycxx/issues/645).
   [Design](docs/design/linux-scalar-floating-point.md#runtime-comparisons)
+- Conversions between binary32 or binary64 and 32- or 64-bit integers use the SSE2 conversion
+  instructions; narrower integers and `bool` widen to 32 bits first. Integer-to-floating
+  conversions round under the caller's MXCSR. An unsigned 64-bit value with its top bit set is
+  halved with the shifted-out bit kept as a sticky low bit, converted and doubled. A floating
+  value at or above 2^63 converts to unsigned 64 bits through the conversion of x − 2^63.
+  Binary64 to binary32 rounds under MXCSR, and `fabs` clears the sign bit. `unit.linux_scalar_sse`
+  compares exact bits with a host compiler's conversions at `-O0` and `-O2` under all four
+  rounding directions. [#643](https://github.com/yrashk/ycxx/issues/643)
 - Direct fixed-prototype calls to ordinary free functions support nonempty naturally aligned
   flat records with integral or ordinary object-pointer fields that are trivial for calls,
   up to 16 bytes and alignment eight. The AMD64 INTEGER eightbytes follow from the laid-out
@@ -1616,6 +1627,9 @@ template's tokens again with the arguments bound.
   evaluation (`global`, `constant_value`) at that point, or at the END worklist for code. A
   specialization is emitted as a variable, mangled `_Z1vIiE`, with external linkage even when
   const ([basic.link]/3).
+- **Dependent variable-template arguments** (#209): an unqualified namespace variable template
+  used as a dependent `bool` template argument keeps the declaration found by ordinary lookup.
+  Substitution evaluates the selected specialization once its arguments are concrete.
 - **Dependent logical negation** (#209): a `bool` template argument or default can negate a
   qualified dependent `bool` variable template-id. Substitution retains the negation across
   aliases until the selected specialization has concrete arguments and supplies a usable
@@ -1706,7 +1720,9 @@ session's.*
   nested-name-specifiers and wherever a class template-id may be) is the type it stands for with
   the arguments substituted, so it has no identity or mangling of its own; packs group as for
   class templates. `Templates::complete_class` completes a class that substituting
-  `typename X<T>::type` needs, instantiating a specialization.
+  `typename X<T>::type` needs, instantiating a specialization. A terminal namespace-qualified
+  alias specialization such as `N::A<T>` stays a type argument when its expansion is a dependent
+  member type ([temp.arg.general], #630).
 - Tests: `tests/own/templates/a5-*`; 2 more draft examples pass. `<cstdio>`: 78 → 53 errors.
 - Also: `C::T` inside the class (being defined or instantiated) and in its out-of-class member
   definitions names its member type, as the current instantiation's ([temp.dep.type]/1).
@@ -2611,7 +2627,9 @@ and runtime integration with ycxx's own linker remain under [#89]. See the
   declarations in different scopes have their own. A copy or move constructor's other parameters
   may have defaults. Defaults are rejected where [dcl.fct.default]/3–4 and [over.oper.general]
   forbid them (`defaults_allowed`, `defaults_trail`).
-- Not yet: defaults that depend on template parameters (#356); defaults added by an out-of-class
+- Omitted scalar defaults on free function templates replay with the selected bindings at the
+  written declaration. Explicit arguments bypass replay.
+- Not yet: other dependent defaults (#356); defaults added by an out-of-class
   or qualified definition (#354); defaults added after a using-declaration (#362, the oracles disagree).
 - Tests: `tests/own/default-args/` (spec-only, with XFAILs for #354, #356, #357 and #102).
 
@@ -2850,12 +2868,14 @@ and runtime integration with ycxx's own linker remain under [#89]. See the
   the usual unsized `operator delete[](void*)` when non-null. The call releases the allocation,
   including zero-length arrays.
 - Linux x86-64 can allocate these default-initialized arrays in ordinary functions certified
-  for cleanup-free unwinding when the bound is a single integer literal. The usual global
-  `operator new[](size_t)` receives the checked byte count, including zero. Lowering preserves
-  the returned address and leaves the element bytes alone. A hosted caller can catch an
-  exception from a replacement allocator across the wrapper. `unit.linux_fixed_array_new`
-  checks call relocations, unwind frame coverage, allocation, and release.
-  Broader allocation and deletion remain in #293.
+  for cleanup-free unwinding. The bound can use integer literals, parentheses, built-in unary
+  `+` and `-`, and built-in binary `+`, `-`, and `*`, with integral types up to 64 bits.
+  The usual global `operator new[](size_t)` receives the checked byte count, including zero.
+  Lowering preserves the returned address and leaves the element bytes alone. A hosted caller
+  can catch an exception from a replacement allocator across the wrapper.
+  `unit.linux_fixed_array_new` checks call relocations, unwind frames, allocation, and release
+  for both single literals and computed bounds. Named constants, dynamic bounds, and broader
+  allocation and deletion remain in #293.
   Constant-evaluated allocation and deletion are tracked in #321.
   [Cookie-free deletion](docs/design/cookie-free-array-delete.md)
   A file-scope scalar initializer still needs lowered code to qualify for dynamic initialization.

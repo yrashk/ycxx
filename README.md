@@ -37,7 +37,8 @@ Dependent exception specifications remain open. [#219](https://github.com/yrashk
 
 **Compile and run programs on macOS.** `ycxx cxx a.cpp -o a` (also `-c`, `-fsyntax-only`, `-E`, `-I`,
 `-D`, `-std=c++26`, and `-fclass-call-abi=apple` to pass classes as Apple Clang does) builds an executable with ycxx's own front end, IR, AArch64 code generator
-and Mach-O linker. It also links object files from Clang or GCC. Errors are reported as
+and Mach-O linker on arm64 macOS, where `arm64-apple-darwin` is the default target. It also links
+object files from Clang or GCC. Errors are reported as
 `file:line:col: error: …`.
 
 ```sh
@@ -54,17 +55,19 @@ instantiation. Concrete constant template arguments can use braced conversions s
 **Preprocess binary resources.** Both targets support `#embed` and `__has_embed` with the standard
 parameters. [#125](https://github.com/yrashk/ycxx/issues/125)
 
-**Compile for x86-64 Linux.** Select `--target=x86_64-pc-linux-gnu` to compile with the
-System V AMD64 backend. Use `-c` to write an ELF object, or `-nostdlib` to link C++ sources,
-ycxx-generated `.o` files, or a mixture into a static executable. The startup runs namespace-scope
+**Compile for x86-64 Linux.** A ycxx build for x86-64 Linux defaults to `x86_64-pc-linux-gnu`
+and uses the System V AMD64 backend. `--target` overrides either host default. A build with no
+supported host default requires an explicit target. Use `-c` to write an ELF object or
+`-nostdlib` to link C++ sources, ycxx-generated `.o` files, or a mixture into a static executable.
+The startup runs namespace-scope
 initializers, then calls `int main()` or `int main(int, char**)` and passes its return value to Linux
 as the exit status. A program without such initializers can supply its own `_start`. Given
 `example.cpp` containing
 `int main() { return 0; }`, run the following on x86-64 Linux.
 
 ```sh
-build/bin/ycxx cxx --target=x86_64-pc-linux-gnu -c example.cpp
-build/bin/ycxx cxx --target=x86_64-pc-linux-gnu -nostdlib example.o -o example
+build/bin/ycxx cxx -c example.cpp
+build/bin/ycxx cxx -nostdlib example.o -o example
 ./example
 ```
 
@@ -106,8 +109,9 @@ Fixed-prototype definitions and direct calls on x86-64 Linux also move `float` a
 arguments and results. Direct variadic calls support the same scalar floating values and
 promote an unnamed `float` to `double`. Direct call result types can be deduced from `auto` or
 `decltype(auto)`. Runtime addition, subtraction, multiplication, division and unary negation
-work for `float` and `double` at their evaluation width. Both types support the six comparisons
-and conversion to `bool`.
+work for `float` and `double` at their evaluation width. Both types support the six comparisons,
+conversion to `bool`, conversions to and from every integer type, `double` to `float`, and
+`__builtin_fabs`. [#643](https://github.com/yrashk/ycxx/issues/643)
 [Linux scalar floating-point ABI](docs/design/linux-scalar-floating-point.md) ·
 [Linux scalar floating-point operations](docs/design/linux-scalar-floating-point.md#runtime-arithmetic) ·
 [Linux scalar variadic floating-point ABI](docs/design/linux-floating-variadic-calls.md) ·
@@ -219,6 +223,7 @@ written default member initializer are value-initialized.
   by argument-dependent lookup. Unqualified calls can find and rank functions in associated
   namespaces, including those of class template type arguments in ordinary calls. Functions
   support default arguments, recursion, operator overloading and calls through pointers.
+  Free function templates can instantiate omitted dependent scalar defaults after overload selection.
   Ordinary free binary operators use argument-dependent lookup, including associated base namespaces.
   Supported dependent binary operators on ordinary non-template classes also find associated
   nonmember candidates at instantiation.
@@ -237,9 +242,10 @@ written default member initializer are value-initialized.
   cv-qualified objects. Scalar allocation uses the global Itanium allocation functions.
   Syntax checking also covers one-dimensional scalar `new T[n]` and `delete[] p`.
   On Linux x86-64, ordinary functions with cleanup-free unwind frames can default-initialize
-  one-dimensional integral and ordinary pointer arrays with a literal bound. The allocation
-  returns the original address. `delete[] p` releases it through the unsized global deallocator,
-  including for zero-length arrays.
+  one-dimensional integral and ordinary pointer arrays with a bound built from integer literals,
+  parentheses, unary `+` and `-`, and binary `+`, `-`, and `*`. The allocation returns the
+  original address. `delete[] p` releases it through the unsized global deallocator, including
+  for zero-length arrays.
   The usual aligned scalar allocation and deallocation signatures support explicit calls with
   `std::align_val_t`. Written nonthrowing global scalar and array overloads with a final
   `const Tag&` support explicit calls, including `std::nothrow_t` and user-defined class tags.
@@ -293,7 +299,8 @@ written default member initializer are value-initialized.
   when directly naming a non-dependent primary class specialization with explicit type arguments,
   `if constexpr`, deferred template static assertion failures, and two-phase lookup, with
   Itanium names identical to Clang's; Clang's
-  `__make_integer_seq`;
+  `__make_integer_seq`. Template type arguments can use terminal namespace-qualified alias
+  specializations that expand to dependent member types. [#630](https://github.com/yrashk/ycxx/issues/630)
 - dependent `__is_same`, `__is_reference`, `__is_const`, `__is_volatile`, `__is_array`,
   `__is_pointer`, `__is_function`, `__is_enum`, `__is_union`, `__is_class`, `__is_object`, and the
   three member-pointer predicates as `bool` template arguments or defaults, including through
@@ -315,7 +322,8 @@ written default member initializer are value-initialized.
 - `__is_empty` accounts for inherited data members and supports dependent operands in class-template
   bases and variable-template initializers.
   [Extension guide](docs/EXTENSIONS.md) · [#218](https://github.com/yrashk/ycxx/issues/218)
-- logical negation of a qualified dependent `bool` variable template-id in a `bool` template
+- unqualified dependent `bool` variable template-ids as `bool` template arguments, and
+  logical negation of a qualified dependent `bool` variable template-id in a `bool` template
   argument or default
   [#209](https://github.com/yrashk/ycxx/issues/209);
 - a single nonvirtual, nonpolymorphic base in a primary class template, including an

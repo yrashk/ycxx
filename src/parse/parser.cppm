@@ -1532,7 +1532,8 @@ public:
   // A qualified type name at token `start`: its type and the tokens it takes.
   // `checked`: the name is taken here, so its access is checked ([class.access]/4).
   std::optional<std::pair<QualType, u32>> qualified_type(u32 start, bool checked = false, bool type_only = false,
-                                                       bool* failed_qualifier = nullptr) {
+                                                       bool* failed_qualifier = nullptr,
+                                                       bool* terminal_template_id = nullptr) {
     u32 next = 0;
     bool check_qualifier = checked && substituting_partial_arguments;
     const auto diags = s_->diag_count();
@@ -1545,7 +1546,10 @@ public:
     if (kind(next + 1) == Tk::less && s->ns) {
       u32 j = next;
       const auto diags = s_->diag_count();
-      if (auto t = template_id_scope(s, j, /*scope=*/false, checked)) return std::pair{*t->type, j - start};
+      if (auto t = template_id_scope(s, j, /*scope=*/false, checked)) {
+        if (terminal_template_id && kind(j) != Tk::coloncolon) *terminal_template_id = true;
+        return std::pair{*t->type, j - start};
+      }
       if (checked && s_->has_error_since(diags)) return std::nullopt;
     }
     NameId name = name_of(tok(next));
@@ -1574,6 +1578,8 @@ public:
   bool template_ids_in_declarators = false;
   // In a parameter-declaration or a template-parameter, an ellipsis may begin a pack's declarator.
   bool packs_in_declarators_ = false;
+  // An ordinary default of a consteval function is evaluated with that function's call.
+  bool consteval_parameter_defaults = false;
 
   // Whether the `(` here begins a parameter-declaration-clause rather than an initializer
   // ([dcl.ambig.res]: what can be a declaration is one).
@@ -1866,7 +1872,10 @@ public:
           scan_member_default(s.params, template_probes);
           s.params.back().default_tokens = {begin, index()};
         } else {
-          s.params.back().default_arg = default_argument(t);
+          const u32 saved_context = s_->immediate_context;
+          if (consteval_parameter_defaults && in_params_ == 1) ++s_->immediate_context;
+          s.params.back().default_arg = parameter_default_argument(t, s.params);
+          s_->immediate_context = saved_context;
           if (s.params.back().default_arg == NodeId::none) ok = false;  // diagnosed
         }
       }
@@ -1977,10 +1986,24 @@ public:
     return std::nullopt;
   }
 
-  // A default argument ([dcl.fct.default]/1, /5): its names are bound and its copy-initialization
-  // of the parameter is checked here. A template's that depends on its parameters is kept as it
-  // is, and rejected where a call would use it.
+  NodeId parameter_default_argument(QualType type, std::span<const Param> params) {
+    s_->push_scope();
+    struct EndScope {
+      sema::Sema& sema;
+      ~EndScope() { sema.pop_scope(); }
+    } scope{*s_};
+    for (const Param& param : params)
+      if (param.name != s_->no_name())
+        s_->declare_local(param.name, param.type,
+                          sema::local_flag::parameter | sema::local_flag::default_argument_parameter, param.at, false);
+    return default_argument(type);
+  }
+
+  // Bind the written names and check copy-initialization ([dcl.fct.default]/1, /5).
+  // Keep the written range for dependent defaults.
   NodeId default_argument(QualType t) {
+    const u32 source_begin = pos();
+    const auto calls_before = s_->dependent_calls.size();
     // Not in the parameters of a parameter's own function type ([dcl.fct.default]/3).
     if (in_params_ > 1) s_->diag(pos(), Diag::default_arg_not_allowed);
     Ex e;
@@ -2001,8 +2024,18 @@ public:
                                                             : s_->convert(a, t, a.begin);
     }
     if (!e.ok()) return NodeId::none;
-    if (s_->types().is_dependent(t) || s_->dependent(e)) e = s_->dependent_node({e}, e.begin, e.end);
-    return s_->node(ast::DefaultArg{e.info, sema::Sema::at(e, e.begin)}, e.begin, e.end, e.info).id;
+    ast::DefaultArg value{};
+    value.source = s_->item();
+    value.dependent_calls = s_->builder().seq(std::span<const u32>{});
+    if (s_->types().is_dependent(t) || s_->dependent(e)) {
+      e = s_->dependent_node({e}, e.begin, e.end);
+      value.source_begin = source_begin;
+      value.source_end = pos();
+      value.dependent_calls = s_->builder().seq(std::span<const u32>(s_->dependent_calls).subspan(calls_before));
+    }
+    value.info = e.info;
+    value.arg = sema::Sema::at(e, e.begin);
+    return s_->node(value, e.begin, e.end, e.info).id;
   }
 
   // A default member initializer after its optional `=` ([class.mem.general]).
@@ -2378,12 +2411,14 @@ public:
                                (kind(1) == Tk::l_brace || (kind(1) == Tk::l_paren && kind(2) == Tk::int_lit));
         if (template_name_ahead()) {
           args.push_back(*template_name_argument());
-        } else if (!decay_copy && starts_type_id(/*preserve_failed_qualifier=*/true)) {
+        } else if (!decay_copy && starts_type_id(/*template_argument=*/true)) {
           auto t = type_id();
           if (!t) ok = false;
           else args.push_back({ast::TemplateArgKind::type, s_->types().canonical(*t), sema::ConstId::none});
         } else {
+          const bool saved_value_argument = std::exchange(in_template_value_argument_, true);
           Ex e = conditional_expression();
+          in_template_value_argument_ = saved_value_argument;
           if (e.ok()) {
             // Converted to its parameter's type when the template is known ([temp.arg.nontype]).
             auto v = negated_template_variable(e);
@@ -2425,16 +2460,20 @@ public:
     if (replay_at && deferred != deferred_argument_checks_) *replay_at = begin;
     return args;
   }
-  bool starts_type_id(bool preserve_failed_qualifier = false) {
+  bool starts_type_id(bool template_argument = false) {
     if (transform_trait_ahead()) return true;
     if (starts_decl_specifier(kind())) return !is(Tk::kw_static) && !is(Tk::kw_extern);
     // `X<args>::m` is a type only when m is: the nested name first. A member of a dependent class
     // is a type only after `typename` ([temp.res.general]/4).
     if (qualified_ahead()) {
       bool failed_qualifier = false;
+      bool terminal_template_id = false;
       auto q = qualified_type(0, /*checked=*/false, /*type_only=*/false,
-                              preserve_failed_qualifier ? &failed_qualifier : nullptr);
-      return failed_qualifier || (q && s_->types().kind(q->first) != sema::TypeKind::dep_name);
+                              template_argument ? &failed_qualifier : nullptr,
+                              template_argument ? &terminal_template_id : nullptr);
+      if (failed_qualifier) return true;  // let the committed parse diagnose the qualifier
+      // A terminal namespace type-template-id can expand to a dependent member type.
+      return q && (terminal_template_id || s_->types().kind(q->first) != sema::TypeKind::dep_name);
     }
     if (is(Tk::identifier) && kind(1) == Tk::less && s_->names_type_template(name_of(tok()))) return true;
     return is(Tk::identifier) && kind(1) != Tk::coloncolon && s_->class_name(name_of(tok())).has_value();
@@ -3076,13 +3115,29 @@ public:
     return unary_expression();
   }
 
+  // Keep the written provenance even when semantic analysis has folded an expression.
+  bool literal_arithmetic_tokens(u32 first, u32 last) const {
+    return std::ranges::all_of(std::span(r_->tokens).subspan(first, last - first), [&](Tok token) {
+      switch (token.kind) {
+      case Tk::int_lit: {
+        const auto& written = r_->literal(token);
+        return !written.bad && !written.overflow && written.ud_suffix == lex::no_name;
+      }
+      case Tk::l_paren: case Tk::r_paren: case Tk::plus: case Tk::minus: case Tk::star:
+        return true;
+      default:
+        return false;
+      }
+    });
+  }
+
   // New-expressions ([expr.new]). A parenthesized type-id uses the abstract declarator;
   // a bare new-type-id greedily takes ptr-operators and cannot have function suffixes.
   Ex new_expression(u32 begin) {
     bump();  // new, after an optional ::
     std::optional<QualType> type;
     std::optional<Ex> bound;
-    bool literal_bound = false;
+    bool literal_arithmetic_bound = false;
     std::optional<Ex> placement;
     bool excluded = false;
     if (is(Tk::l_paren)) {
@@ -3145,9 +3200,9 @@ public:
           excluded = true;  // multiple dimensions
           constant_expression();
         } else {
-          literal_bound = is(Tk::int_lit) && kind(1) == Tk::r_square &&
-                          !literal().overflow && literal().ud_suffix == lex::no_name;
+          const u32 first = i_;
           bound = expression();
+          literal_arithmetic_bound = literal_arithmetic_tokens(first, i_);
         }
         angle_ = saved;
         if (!expect(Tk::r_square)) return {NodeId::none, begin, pos()};
@@ -3173,7 +3228,7 @@ public:
       s_->diag(begin, Diag::not_supported, Tk::kw_new);
       return {NodeId::none, begin, pos()};
     }
-    if (bound) return s_->new_array(*type, *bound, literal_bound, args, braces.get(), begin, pos());
+    if (bound) return s_->new_array(*type, *bound, literal_arithmetic_bound, args, braces.get(), begin, pos());
     return s_->new_object(*type, args, braces.get(), begin, pos(), placement);
   }
 
@@ -3584,6 +3639,12 @@ public:
         if (!args) return {NodeId::none, begin, pos()};
         // [temp.dep.expr]/3: a template-id with a dependent argument is type-dependent.
         if (std::ranges::any_of(*args, [&](const ast::TemplateArg& a) { return s_->dependent(a); })) {
+          if (in_template_value_argument_) {
+            const auto diags = s_->diag_count();
+            if (auto v = s_->variable_template(n, begin))
+              return s_->dependent_variable_template_id(*v, *args, begin, pos());
+            if (s_->has_error_since(diags)) return {NodeId::none, begin, pos()};
+          }
           // A call of it is a dependent call ([temp.dep.candidate]): its instantiation adds
           // argument-dependent lookup.
           if (is(Tk::l_paren)) s_->dependent_calls.push_back(begin);
@@ -4692,6 +4753,15 @@ public:
       Ex zero = s_->literal(i, s_->world().values.integer(i, 0), ast::ValueCategory::prvalue, call.begin, call.end);
       return s_->convert_node(zero, ast::ConversionKind::to_void, s_->builtin(sema::Builtin::void_));
     }
+    // A manifestly constant-evaluated expression may consume an immediate pointer.
+    // Its initializer checks the final value for an escape.
+    if (auto entity = s_->immediate_result_entity(*v.value)) {
+      if (!s_->constant_reference_context && !s_->trial_initializer) {
+        s_->diag(call.begin, Diag::immediate_address, s_->world().entities.rec(*entity).name);
+        return {NodeId::none, call.begin, call.end};
+      }
+      s_->folded_immediate_result = *entity;
+    }
     return s_->literal(call.type(), *v.value, ast::ValueCategory::prvalue, call.begin, call.end);
   }
 
@@ -4894,6 +4964,11 @@ public:
     sema::Evaluated v = scalar_record ? evaluator.evaluate_initializer(init, /*zero_default=*/false)
                                      : evaluator.evaluate(init);
     if (v.value) {
+      if (is_constexpr && s_->folded_immediate_result != ast::EntityId::none)
+        if (auto entity = s_->immediate_result_entity(*v.value)) {
+          s_->diag(init.begin, Diag::immediate_address, s_->world().entities.rec(*entity).name);
+          return;
+        }
       s_->set_local_value(local, *v.value);
       if (scalar_record) {
         // The initialization was manifestly constant-evaluated ([expr.const]). Materialize that
@@ -5233,6 +5308,9 @@ public:
       if (v.value) value = *v.value;
       else if (spec.is_constinit && !v.dependent) s_->diag(init.begin, Diag::not_constant, v.reason);
     }
+    if (spec.is_constinit && value != ast::ConstId::none)
+      if (auto entity = s_->immediate_result_entity(value))
+        s_->diag(init.begin, Diag::immediate_address, s_->world().entities.rec(*entity).name);
     s_->permit_constant_initializer(dbegin, s_->local(local).type, value);
     s_->static_value(local, value == ast::ConstId::none ? std::nullopt : std::optional(value));
     return s_->node(ast::StaticVar{local, sema::Sema::at(init, dbegin), value, dtor}, dbegin, pos());
@@ -5424,7 +5502,7 @@ public:
         skip_to_semi();
         return {NodeId::none, begin, pos()};
       }
-      sema::Sema::ImmediateReferenceScope references(*s_, s_->constant_reference_context || spec.is_constexpr);
+      sema::Sema::ImmediateReferenceScope references(*s_, s_->constant_reference_context || spec.is_constexpr || spec.is_constinit);
       // [dcl.constexpr]: a constexpr variable is const.
       if (spec.is_constexpr) d.type = s_->types().add_cv(d.type, sema::Cv::const_);
       const bool replay_defaults = !spec.is_static && s_->can_replay_default_members(d.type);
@@ -5650,6 +5728,7 @@ private:
   sema::Questions* q_ = nullptr;
   LangLinkage linkage_ = LangLinkage::cxx;
   int in_params_ = 0;
+  bool in_template_value_argument_ = false;
   int angle_ = 0;               // inside a template argument or parameter list, outside parentheses
   u32 deferred_argument_checks_ = 0;  // checks a dependent canonical argument may not retain
   bool half_ = false;           // the current `>>` has had its first `>` taken by a template-id
