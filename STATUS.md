@@ -380,6 +380,14 @@ stay open for the rest.
   validator and dependence checker (#29), SSA linear scan, list scheduling, unwind info and DWARF,
   a measured `cost_model` (#9), defining a variadic function (`va_start`), more than one result, frame objects aligned above 16 bytes.
 
+## System V AMD64 frames
+
+- x86-64 frames can be up to 16 MiB, as on AArch64. A frame over a page is allocated one page
+  at a time, touching each page before RSP moves past it, so a guard page below the stack
+  faults instead of being skipped. `unit.linux_stack_probe` runs a large frame on a thread
+  stack with writable memory below its guard page and checks that the first fault is in the
+  guard page. [#644](https://github.com/yrashk/ycxx/issues/644)
+
 ## System V AMD64 scalar integer division
 
 - The x86-64 emitter supports L2 `sdiv`, `udiv`, `srem` and `urem` for `i32` and `i64`.
