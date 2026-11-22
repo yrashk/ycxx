@@ -325,8 +325,13 @@ What is true of the code today. Work in progress and its owners are tracked in
     PC-relative CIE and FDE format, including address differences and multiple input objects.
     `unit.link` checks the linked ranges and walks through a non-frame-pointer arm64 bridge
     with the system unwinder on macOS. Compact unwind, personalities and LSDA are tracked in
-    [#72](https://github.com/yrashk/ycxx/issues/72). AArch64 frame emission and native exception
-    lowering are tracked in [#648](https://github.com/yrashk/ycxx/issues/648).
+    [#72](https://github.com/yrashk/ycxx/issues/72).
+  - The arm64 compiler emits these DWARF records for proven cleanup-free functions. Their FDEs
+    describe the actual saved frame-pointer and return-address locations at the entry, body,
+    and return instructions. `unit.darwin_cleanup_free_unwind` checks the emitted object,
+    omitted frames, native YCXX linking and system-linked exception propagation on macOS.
+    Native throw lowering and landing pads are tracked in [#648](https://github.com/yrashk/ycxx/issues/648).
+    [#737](https://github.com/yrashk/ycxx/issues/737)
   - Not yet: thread-local variables, dead stripping, literal merging, branch islands beyond
     ±128 MiB, other dylibs' re-exports, incremental relinking, and import addends outside
     0..255 (`DYLD_CHAINED_IMPORT_ADDEND`). `__LLVM` (embedded bitcode), `__LD` and debug sections

@@ -15,6 +15,14 @@ ycxxc_unit_test(pipeline_elf_executable elf_executable_test.cpp ycxxc_pipeline)
 add_test(NAME unit.dependent_fabsl
   COMMAND ${CMAKE_COMMAND} -DYCXX=$<TARGET_FILE:ycxxc>
           -P ${CMAKE_CURRENT_SOURCE_DIR}/dependent_fabsl.cmake)
+# PARITY: by design: all hosts check the emitted and linked arm64 Mach-O records.
+# Only an arm64 macOS host can run the Mach-O exception propagation test.
+if(APPLE AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(arm64|aarch64)$" AND NOT CMAKE_CROSSCOMPILING)
+  set(darwin_unwind_host ${CMAKE_CXX_COMPILER})
+endif()
+add_test(NAME unit.darwin_cleanup_free_unwind
+  COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/darwin_cleanup_free_unwind.py
+          $<TARGET_FILE:ycxxc> ${darwin_unwind_host})
 # PARITY: by design: runs what it links with the host's linker; the Linux block registers its own
 if(APPLE AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(arm64|aarch64)$" AND NOT CMAKE_CROSSCOMPILING)
   # The Mach-O counterpart of unit.linux_inline (#124).
