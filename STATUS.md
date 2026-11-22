@@ -1957,6 +1957,9 @@ session's.*
   initial literal, including `S b(S(1));` and `S b(S{1});` ([dcl.ambig.res], #290).
   A later expression can disambiguate a grouped functional conversion, as in
   `Holder h(Tag(n), 2);` ([dcl.ambig.res], #769).
+  An additive operator after an identifier inside the operand also selects the initializer,
+  as in `Holder h(Tag(n), Tag(n + 1));`. The grouped named and adjusted pointer parameter
+  declarations keep their declaration reading ([dcl.ambig.res], #813).
 - Qualified functional conversions check access to aliases and typedefs declared directly in an
   ordinary non-template record, for both `C::T(args)` and `C::T{args}`. They use the existing
   member and friend access rules ([expr.type.conv], [class.access.general], #216).
