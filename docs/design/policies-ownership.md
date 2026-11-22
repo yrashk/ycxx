@@ -38,7 +38,12 @@ recommended this conservative rule for the first milestone before modeling excep
 The prototype covers automatic locals, by-value parameters, `if`, `while`, `do`, `for`, and
 conditional, short-circuit, and comma expressions. Boolean literals select the reachable branch.
 Operations take named owners, with parentheses and qualification conversions such as
-`static_cast<Permit&&>(p)` allowed. A local `const Resource&` can borrow a live named owner
+`static_cast<Permit&&>(p)` allowed. A separate `move_transfers<Resource>` entry authorizes
+direct initialization from a named owner through the resource's ordinary nonthrowing move
+constructor. The equivalent class annotation is `[[=ycxx::ownership::move_constructor::transfers]]`.
+These declarations trust the constructor to move the live obligation and invalidate the
+source. YCXX checks that the named source is live and unborrowed before the call.
+A local `const Resource&` can borrow a live named owner
 from its declaration to the end of its scope. It can be passed to a registered observation
 operation. A consume or transfer of the owner is an error while any of its borrows can still be
 live, including when the reference's last use was earlier. Ending the borrow leaves the

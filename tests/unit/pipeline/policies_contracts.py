@@ -391,6 +391,104 @@ with tempfile.TemporaryDirectory() as directory:
         }
     """)
     syntax(runtime, error="linear resource 'first' may leave its scope")
+    direct_move_type = textwrap.dedent("""\
+        #include <ycxx/ownership.hpp>
+        #include <ycxx/ownership/runtime.hpp>
+
+        namespace own = ycxx::ownership;
+        struct Work {
+          own::linear_state state;
+          int value;
+
+          Work(int n) noexcept : value(n) {}
+          Work(Work&& other) noexcept : state(static_cast<own::linear_state&&>(other.state)), value(other.value) {}
+        };
+
+        Work start() noexcept;
+        void finish(Work&& work) noexcept;
+    """)
+    direct_move_definitions = textwrap.dedent("""\
+        Work start() noexcept { return Work(31); }
+        void finish(Work&& work) noexcept { work.state.consume(); }
+    """)
+    direct_move_rules = textwrap.dedent("""\
+        using Rules = own::use_policy<own::linear<Work>, own::creates<decltype(&start), &start>,
+                                      own::consumes<decltype(&finish), &finish>>;
+    """)
+    direct_move_authorization = "using Moves = own::use_policy<own::move_transfers<Work>>;\n"
+    direct_move_main = textwrap.dedent("""\
+        int main() {
+          auto first = start();
+          Work second(static_cast<Work&&>(first));
+          finish(static_cast<Work&&>(second));
+        }
+    """)
+    legacy_move_source = direct_move_type + direct_move_definitions + direct_move_rules + direct_move_main
+    direct_move_source = legacy_move_source + direct_move_authorization
+    direct_move = write("direct_move.cpp", direct_move_source)
+    syntax(direct_move)
+    syntax(write("direct_move_affine.cpp", direct_move_source.replace("own::linear", "own::affine")))
+
+    needs_move_policy = "direct owner move construction requires a move-transfer contract"
+    syntax(write("unmarked_move.cpp", legacy_move_source), error=needs_move_policy)
+    dishonest_move = write("dishonest_unmarked_move.cpp", legacy_move_source.replace(
+        "state(static_cast<own::linear_state&&>(other.state)), value(other.value)", "value(other.value)"))
+    syntax(dishonest_move, error=needs_move_policy)
+    move_annotation = "[[=own::move_constructor::transfers]]"
+    annotated_move = write("annotated_move.cpp", legacy_move_source.replace("struct Work {", f"struct {move_annotation} Work {{"))
+    syntax(annotated_move)
+
+    move_include = '#include "move_type.hpp"\n'
+    write("move_type.hpp", "#pragma once\n" + direct_move_type)
+    move_rules = write("move_rules.cpp", move_include + direct_move_rules)
+    move_caller = write("move_caller.cpp", move_include + direct_move_main)
+    move_alias_authorization = direct_move_authorization.replace("<Work>", "<MoveAlias>")
+    authorization_source = "#pragma once\n" + move_include + "using MoveAlias = Work;\n" + move_alias_authorization
+    move_header = write("move_authorization.hpp", authorization_source)
+    move_authorizer = write("move_authorization.cpp", '#include "move_authorization.hpp"\n')
+    reflected_authorizer = write("move_authorization_reflected.cpp", move_include + f"struct {move_annotation} Work;\n")
+    syntax(move_rules, move_caller, error=needs_move_policy)
+    syntax(move_rules, move_caller, move_authorizer)
+    syntax(move_rules, move_caller, reflected_authorizer)
+    syntax(move_rules, move_caller, move_authorizer, reflected_authorizer)
+    syntax(move_authorizer, error="requires an affine or linear resource declaration")
+    syntax(write("bad_move_policy.cpp", move_include + direct_move_authorization.replace("<Work>", "<const Work>")),
+           error="a move-transfer contract must name an unqualified class type")
+
+    with tempfile.TemporaryDirectory(prefix="ymove-", dir="/tmp") as sockets:
+        move_env = {key: value for key, value in os.environ.items() if key not in ("YCXX_NO_DAEMON", "YCXX_DAEMON")}
+        move_env.update(YCXX_RUNTIME_DIR=sockets, YCXX_ROOT=str(root), YCXX_THREADS="2")
+        resident_move = [compiler, "cxx", "--daemon=require", "-fcheck-policies", "-fsyntax-only",
+                         "-I", include, *map(str, (move_rules, move_caller, move_authorizer))]
+        try:
+            assert subprocess.run(resident_move, cwd=root, env=move_env, timeout=90).returncode == 0
+            move_header.write_text(authorization_source.replace(move_alias_authorization, ""))
+            denied = subprocess.run(resident_move, cwd=root, env=move_env, text=True,
+                                    capture_output=True, timeout=90)
+            assert denied.returncode == 1 and needs_move_policy in denied.stderr, denied.stderr
+            assert denied.stderr == syntax(move_rules, move_caller, move_authorizer, error=needs_move_policy)
+            move_header.write_text(authorization_source)
+            assert subprocess.run(resident_move, cwd=root, env=move_env, timeout=90).returncode == 0
+        finally:
+            subprocess.run([compiler, "ctl", "shutdown"], cwd=root, env=move_env, capture_output=True, timeout=10)
+
+    moved_source = write("direct_move_reuse.cpp", direct_move_source.replace(
+        "  finish(static_cast<Work&&>(second));",
+        "  finish(static_cast<Work&&>(first));\n  finish(static_cast<Work&&>(second));"))
+    syntax(moved_source, error="linear resource 'first' may already have transferred its obligation")
+    move_during_borrow = write("direct_move_borrowed.cpp", direct_move_source.replace(
+        "  Work second(", "  const auto& view = first;\n  Work second("))
+    syntax(move_during_borrow, error="linear resource 'first' may still have a live shared borrow")
+    syntax(write("direct_move_self.cpp", direct_move_source.replace(
+        "Work second(static_cast<Work&&>(first))", "Work second(static_cast<Work&&>(second))")),
+        error="linear resource 'second' may be unavailable")
+    throwing_move = write("throwing_move.cpp", direct_move_source.replace(
+        "Work(Work&& other) noexcept", "Work(Work&& other) noexcept(false)"))
+    syntax(throwing_move, error="an owner must be initialized by a registered factory or transfer")
+    constructor_template = write("constructor_template.cpp", direct_move_source.replace(
+        "  Work(Work&& other) noexcept",
+        "  ~Work() noexcept {}\n  template<class Other>\n  Work(Other&& other) noexcept"))
+    syntax(constructor_template, error="an owner must be initialized by a registered factory or transfer")
     executable = root / "portable"
     subprocess.run([host, "-std=c++20", "-I", include, "-I", examples, str(runtime), "-o", str(executable)], check=True, timeout=30)
     resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
@@ -398,6 +496,9 @@ with tempfile.TemporaryDirectory() as directory:
     for args in (("early",), ("use", "moved"), ("consume", "again", "now")):
         assert subprocess.run([executable, *args], timeout=10).returncode in (
             -signal.SIGABRT, -signal.SIGILL, -signal.SIGTRAP)
+    for source, expected in ((direct_move, (0,)), (dishonest_move, (-signal.SIGABRT, -signal.SIGILL, -signal.SIGTRAP))):
+        subprocess.run([host, "-std=c++20", "-I", include, str(source), "-o", str(executable)], check=True, timeout=30)
+        assert subprocess.run([executable], timeout=10).returncode in expected
 
     nested_source = """\
         #include "runtime_transaction.hpp"
@@ -699,7 +800,7 @@ with tempfile.TemporaryDirectory() as directory:
         assert subprocess.run([native], timeout=10).returncode == 0
         subprocess.run([*args, str(array_skip), "-o", str(native)], check=True, timeout=30)
         assert subprocess.run([native, "skip"], timeout=10).returncode == -signal.SIGILL
-        for source in (composed, local_records):
+        for source in (composed, local_records, direct_move, annotated_move):
             subprocess.run([*args, "-fcheck-policies", str(source), "-o", str(native)], check=True, timeout=30)
             assert subprocess.run([native], timeout=10).returncode == 0
         subprocess.run([*args, str(composed_skip), "-o", str(native)], check=True, timeout=30)

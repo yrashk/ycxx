@@ -65,6 +65,7 @@ struct EffectBound {
 
 struct PolicyDeclarations {
   std::vector<std::tuple<QualType, Ownership, PolicyOrigin>> resources;
+  std::vector<std::pair<QualType, PolicyOrigin>> move_transfers;
   std::vector<std::tuple<PolicyOperation, OwnershipEffect, PolicyOrigin>> operations;
   std::vector<std::tuple<PolicyOperation, EffectBound, PolicyOrigin>> effect_bounds;
   std::vector<PolicyProblem> problems;
@@ -72,6 +73,7 @@ struct PolicyDeclarations {
 
 struct OwnershipPolicy {
   std::vector<std::pair<QualType, Ownership>> resources;
+  std::vector<QualType> move_transfers;
   std::vector<std::pair<PolicyOperation, OwnershipEffect>> operations;
   std::vector<PolicyOperation> observer_definitions;
   std::vector<PolicyOperation> labeled_observers;
@@ -84,6 +86,10 @@ struct OwnershipPolicy {
     const auto type = ast::without_cv(canonical);
     const auto it = std::ranges::lower_bound(resources, type, std::ranges::less{}, &decltype(resources)::value_type::first);
     return it != resources.end() && it->first == type ? it->second : Ownership::ordinary;
+  }
+
+  bool transfers_on_move(QualType canonical) const {
+    return std::ranges::binary_search(move_transfers, canonical);
   }
 
   OwnershipEffect effect(PolicyOperation operation) const {
@@ -103,7 +109,7 @@ struct PolicyRegistry {
 namespace {
 
 enum class Marker {
-  other, policy, use_policy, affine, linear, creates, observes, verified_observes, consumes, transfers,
+  other, policy, use_policy, affine, linear, move_transfers, creates, observes, verified_observes, consumes, transfers,
   effect_set, effect_grade, effect_bound, trusted_effect_bound, effect_contract, trusted_effect_contract,
   scoped_handler,
 };
@@ -142,6 +148,7 @@ Specialization marker(const sema::World& world, EntityId id) {
   if (name == "use_policy") return {Marker::use_policy, specialized};
   if (name == "affine") return {Marker::affine, specialized};
   if (name == "linear") return {Marker::linear, specialized};
+  if (name == "move_transfers") return {Marker::move_transfers, specialized};
   if (name == "creates") return {Marker::creates, specialized};
   if (name == "observes") return {Marker::observes, specialized};
   if (name == "verified_observes") return {Marker::verified_observes, specialized};
@@ -175,7 +182,7 @@ OwnershipEffect effect_of(Marker item) {
   }
 }
 
-enum class AnnotationKind { other, resource, operation };
+enum class AnnotationKind { other, resource, operation, move_constructor };
 
 AnnotationKind annotation_kind(const sema::World& world, QualType type) {
   const auto t = world.types.rec(type);
@@ -185,6 +192,7 @@ AnnotationKind annotation_kind(const sema::World& world, QualType type) {
   const auto name = world.ins.names.spelling(entity->name);
   if (name == "resource_mode") return AnnotationKind::resource;
   if (name == "operation") return AnnotationKind::operation;
+  if (name == "move_constructor") return AnnotationKind::move_constructor;
   return AnnotationKind::other;
 }
 
@@ -336,10 +344,15 @@ PolicyDeclarations read_policy_declarations(const sema::World& world, ast::u32 u
       continue;
     }
     const auto value = ast::int_bits(world.ins, annotation.value);
-    if (kind == AnnotationKind::resource) {
+    if (kind == AnnotationKind::resource || kind == AnnotationKind::move_constructor) {
       const auto type = world.types.canonical(annotation.declaration_type);
       if (class_entity(world, type) != annotation.declaration) {
-        report(annotation.at, "an ownership resource annotation applies to a class declaration");
+        report(annotation.at, kind == AnnotationKind::resource
+                                ? "an ownership resource annotation applies to a class declaration"
+                                : "a move-transfer annotation applies to a class declaration");
+      } else if (kind == AnnotationKind::move_constructor) {
+        if (value.hi != 0 || value.lo != 1) report(annotation.at, "unknown move-transfer annotation");
+        else out.move_transfers.emplace_back(type, PolicyOrigin{unit, annotation.at});
       } else if (value.hi != 0 || (value.lo != 1 && value.lo != 2)) {
         report(annotation.at, "unknown ownership resource annotation");
       } else resource(type, value.lo == 1 ? Ownership::affine : Ownership::linear, annotation.at);
@@ -370,14 +383,16 @@ PolicyDeclarations read_policy_declarations(const sema::World& world, ast::u32 u
         pending.emplace_back(entry.kind == ast::TemplateArgKind::type ? class_entity(world, entry.type) : EntityId::none, at);
       continue;
     }
-    if (kind == Marker::affine || kind == Marker::linear) {
+    if (kind == Marker::affine || kind == Marker::linear || kind == Marker::move_transfers) {
       if (args.size() != 1 || args.front().kind != ast::TemplateArgKind::type || !world.types.is_class(args.front().type) ||
           ast::cv_of(world.types.canonical(args.front().type)) != ast::Cv::none) {
-        report(at, "an ownership resource must name an unqualified class type");
+        report(at, kind == Marker::move_transfers ? "a move-transfer contract must name an unqualified class type"
+                                                  : "an ownership resource must name an unqualified class type");
         continue;
       }
       const auto type = world.types.canonical(args.front().type);
-      resource(type, kind == Marker::linear ? Ownership::linear : Ownership::affine, at);
+      if (kind == Marker::move_transfers) out.move_transfers.emplace_back(type, PolicyOrigin{unit, at});
+      else resource(type, kind == Marker::linear ? Ownership::linear : Ownership::affine, at);
       continue;
     }
     if (kind == Marker::effect_bound || kind == Marker::trusted_effect_bound) {
@@ -406,6 +421,7 @@ PolicyRegistry compose_policy_registry(const sema::World& world,
                                        std::span<const std::reference_wrapper<const PolicyDeclarations>> fragments) {
   PolicyRegistry out;
   std::map<QualType, std::pair<Ownership, PolicyOrigin>> resources;
+  std::map<QualType, PolicyOrigin> move_transfers;
   std::map<PolicyOperation, std::pair<OwnershipEffect, PolicyOrigin>> operations;
   auto report = [&](PolicyOrigin origin, std::string message, std::optional<PolicyOrigin> previous = {}) {
     out.problems[origin.unit].push_back({origin, std::move(message), previous});
@@ -417,6 +433,7 @@ PolicyRegistry compose_policy_registry(const sema::World& world,
       if (!fresh && it->second.first != mode)
         report(origin, std::format("conflicting ownership policies for '{}'", world.types.spell(type)), it->second.second);
     }
+    for (const auto& [type, origin] : fragment.move_transfers) move_transfers.try_emplace(type, origin);
     for (const auto& [operation, effect, origin] : fragment.operations) {
       const auto [it, fresh] = operations.try_emplace(operation, effect, origin);
       if (fresh || it->second.first == effect) continue;
@@ -435,6 +452,11 @@ PolicyRegistry compose_policy_registry(const sema::World& world,
     if (!effect_signature(world, operation.first))
       report(origin, "effect bound requires a non-variadic namespace function with scalar or reference parameters and result");
   for (const auto& [type, spec] : resources) out.ownership.resources.emplace_back(type, spec.first);
+  for (const auto& [type, origin] : move_transfers) {
+    if (resources.contains(type)) out.ownership.move_transfers.push_back(type);
+    else report(origin, std::format("a move-transfer contract for '{}' requires an affine or linear resource declaration",
+                                    world.types.spell(type)));
+  }
   for (const auto& [operation, spec] : operations) {
     if (!compatible(world, out.ownership, operation.first, spec.first))
       report(spec.second, "ownership operation signature does not match its contract and registered resource");

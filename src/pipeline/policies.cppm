@@ -627,6 +627,27 @@ class OwnershipFlowBuilder {
     return head;
   }
 
+  std::optional<ast::u32> move_construction_source(const ast::Red& node) const {
+    const auto call = node.get<ast::CtorCall>();
+    const auto type = world_.types.canonical(call.info.type);
+    const auto* constructor = world_.entities.find(call.ctor);
+    if (!constructor || constructor->kind != sema::EntityKind::constructor ||
+        constructor->templ != EntityId::none || constructor->head != ast::Fp128{} ||
+        constructor->scope != world_.types.class_of(type))
+      return std::nullopt;
+    const auto signature = world_.types.rec(constructor->type);
+    const auto arguments = node.ast().children(call.args);
+    if (!signature.fn_noexcept || signature.variadic || signature.params.size() != 1 || arguments.size() != 1)
+      return std::nullopt;
+    const auto parameter = world_.types.rec(signature.params.front());
+    if (parameter.kind != sema::TypeKind::reference || !parameter.rvalue_ref ||
+        world_.types.canonical(parameter.inner) != type)
+      return std::nullopt;
+    const auto source = named_local(at(node, arguments.front()));
+    if (!source || flow_.locals[*source].shared_reference) return std::nullopt;
+    return source;
+  }
+
   Point initialize_owner(ast::u32 slot, ast::Red initializer, Point next, Context context) {
     initializer = unparenthesized(initializer);
     if (initializer.is<ast::Conditional>()) {
@@ -640,6 +661,14 @@ class OwnershipFlowBuilder {
       if (expression.op == ast::OrderedOp::comma) {
         const auto value = initialize_owner(slot, at(initializer, expression.rhs), next, context);
         return lower_child(initializer, expression.lhs, value, context);
+      }
+    }
+    if (initializer.is<ast::CtorCall>()) {
+      if (const auto source = move_construction_source(initializer)) {
+        const auto type = world_.types.canonical(initializer.get<ast::CtorCall>().info.type);
+        if (!policy_.transfers_on_move(type))
+          return unsupported(initializer.offset(), "direct owner move construction requires a move-transfer contract");
+        return add({Event::transfer, initializer.offset(), next, Flow::exit, slot, *source});
       }
     }
     if (initializer.is<ast::Call>()) {

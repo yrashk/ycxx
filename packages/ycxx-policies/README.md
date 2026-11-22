@@ -52,6 +52,13 @@ activate several fragments with a namespace-scope alias of `use_policy<...>`. Th
 no runtime work. YCXX interprets it when ownership checking is enabled. Use typed template
 arguments for portability and C++26 declaration annotations with compiler support.
 
+Add `move_transfers<Resource>` as a separate policy entry when the resource's
+`Resource(Resource&&) noexcept` constructor moves a live obligation and invalidates its source.
+With that declaration, YCXX can check direct move construction from a named owner. The
+constructor implements the transfer and the checker requires the source to be live and
+unborrowed. Use `[[=ycxx::ownership::move_constructor::transfers]]` on the resource's class
+declaration for the equivalent C++26 annotation.
+
 An observation marked `verified_observes<decltype(&inspect), &inspect>` asks YCXX to
 verify the observer's body. Supported bodies can copy scalar fields and update independent
 scalar storage. For separate builds, include the contract in the caller and provider and pass
