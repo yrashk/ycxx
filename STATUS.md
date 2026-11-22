@@ -1100,8 +1100,9 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   [#862](https://github.com/yrashk/ycxx/issues/862) · [#876](https://github.com/yrashk/ycxx/issues/876)
 - Constant evaluation of a flat scalar aggregate supplies its initialized field values to
   the selected default member initializer. L1 uses them for direct field reads of the
-  initializer's object. Reading a later field on the executed path fails its lifetime check
-  ([dcl.init.aggr], [expr.const]). [#895](https://github.com/yrashk/ycxx/issues/895)
+  initializer's object, including through a conditional glvalue. Reading a later field on
+  the executed path fails its lifetime check ([dcl.init.aggr], [expr.const]).
+  [#895](https://github.com/yrashk/ycxx/issues/895)
 - Constant evaluation can read namespace-scope `constexpr` pointers erased to `void`
   ([expr.const], [conv.ptr], #102). The interpreter reconstructs the original scalar or array
   subobject path, including one-past addresses, from the constant's path and byte offset.

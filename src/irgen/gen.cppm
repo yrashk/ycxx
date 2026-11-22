@@ -1639,8 +1639,6 @@ class Gen {
   // supplies direct reads without introducing an address that can be used or stored elsewhere.
   std::optional<ValueId> read_default_field(At operand, ast::QualType type) {
     const auto& fields = fn_.initialized_fields;
-    if (fields.owner == ast::EntityId::none || this_) return std::nullopt;
-    operand = strip_parens(operand);
     if (!is<ast::Member>(operand)) return std::nullopt;
     const auto member = get<ast::Member>(operand);
     if (member.reference) return std::nullopt;
@@ -1658,15 +1656,29 @@ class Gen {
     return load(begin_object(type, ir::Init::indeterminate));
   }
 
+  ValueId load_glvalue(At operand, ast::QualType type) {
+    if (fn_.initialized_fields.owner != ast::EntityId::none && !this_) {
+      operand = strip_parens(operand);
+      // The conversion reads only the glvalue selected by the conditional. Join the
+      // values from that read, so neither arm needs an address for any initialized field.
+      if (is<ast::Conditional>(operand)) {
+        const auto kind = cls(type);
+        if (kind == TypeClass::integer || kind == TypeClass::bool_)
+          return *conditional(operand, false, type).value;
+      }
+      if (auto field = read_default_field(operand, type)) return *field;
+    }
+    return load(lvalue(operand));
+  }
+
   std::optional<ValueId> conversion(At a) {
     auto c = get<ast::ImplicitConversion>(a);
     ast::QualType t = c.info.type;
     At from = child(a, c.operand);
     switch (c.conversion) {
       case ast::ConversionKind::lvalue_to_rvalue: {
-        if (auto field = read_default_field(from, t)) return field;
+        if (!is_nullptr(t)) return load_glvalue(from, t);
         Place p = lvalue(from);
-        if (!is_nullptr(t)) return load(p);
         // [conv.lval]: a std::nullptr_t glvalue is evaluated without accessing its object.
         ir::Ty result[] = {vty(t)};
         ValueId operands[] = {state_, p.ptr};
@@ -2165,9 +2177,9 @@ class Gen {
     std::optional<ValueId> value;
     Place place;
   };
-  Chosen conditional(At a, bool glvalue) {
+  Chosen conditional(At a, bool glvalue, std::optional<ast::QualType> load_type = std::nullopt) {
     auto c = get<ast::Conditional>(a);
-    ast::QualType t = c.info.type;
+    ast::QualType t = load_type.value_or(c.info.type);
     bool has_value = glvalue || cls(t) != TypeClass::void_;
     ast::QualType jt = glvalue ? facts_.pointer_to(t) : t;
     ValueId cv = rvalue(child(a, c.condition));
@@ -2198,7 +2210,7 @@ class Gen {
           br(join, {place.ptr});
         }
       } else {
-        br(join, {rvalue(x)});
+        br(join, {load_type ? load_glvalue(x, t) : rvalue(x)});
       }
       --branches_;
     }
