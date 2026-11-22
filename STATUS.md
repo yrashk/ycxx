@@ -2229,9 +2229,13 @@ A type inherited from a nondependent base takes precedence over the template par
 
 - The integer-constant macros (`__INT64_C(c)` and the rest) are predefined as `c ## L`, GCC's and
   glibc's spelling, so glibc's identical redefinitions in `<stdint.h>` are valid
-  ([cpp.replace.general]/2). The expansions are Clang's. `<inttypes.h>` still clashes with
-  libycxx's limit macros (#664). Tests: `own/pp/predefined-int-c-redefine` (both targets) and
-  `own/headers/glibc-stdint` (Linux).
+  ([cpp.replace.general]/2). The expansions are Clang's. Tests cover both targets in
+  `own/pp/predefined-int-c-redefine` and Linux in `own/headers/glibc-stdint`.
+- The pinned libycxx lets the target's `<stdint.h>` supply integer limits before libycxx supplies
+  fallback macros. `<cstdint>` uses compiler predefines when a target C header is unavailable or
+  the translation unit is freestanding. Linux integration tests cover `<cstdint>` before
+  `<cinttypes>` and `<inttypes.h>` before `<cstdint>`.
+  [#664](https://github.com/yrashk/ycxx/issues/664) · [libycxx#50](https://github.com/yrashk/libycxx/pull/50)
 
 ## Templates, ζ step 8: template template parameters and `__make_integer_seq` (#88, #208, 2026-11-19)
 
@@ -3152,8 +3156,8 @@ substitution and broader annotation targets remain in [#324](https://github.com/
 
 ## Bootstrap workarounds
 
-Places where ycxx's sources avoid or work around a C++26 feature because GCC 16 lacks it or
-miscompiles it (DECISIONS §3.2). Each is removed once ycxx compiles itself.
+Workarounds for C++26 and module limitations in the bootstrap toolchain (DECISIONS §3.2).
+Each is removed once ycxx compiles itself.
 
 - **No `std::vector<bool>` in the back end's unit records** (`pipeline::Entity::template_same_heads`,
   `TemplateSpec::same_heads`, `std::vector<std::uint8_t>`).
@@ -3198,6 +3202,10 @@ miscompiles it (DECISIONS §3.2). Each is removed once ycxx compiles itself.
   - `CMakeLists.txt` adds the flags to libycxx's `ycxx_modules` target.
   - Without them, `std::meta` is empty. An importer whose `-freflection` does not match the
     BMI's segfaults GCC 16.2.
+- **The embedded libycxx compiles its implementation units as plain translation units.** The
+  scheduler's `import std` would otherwise make its runtime archive depend on the std module that
+  already links it. `CMakeLists.txt` scopes `YCXX_SOURCE_MODULES=OFF` to the embedded build and
+  keeps the public `std` and `std.compat` modules enabled. [#664](https://github.com/yrashk/ycxx/issues/664)
 - **`FpIndex`'s `Shard` has a user-provided constructor** (`src/ast/store.cppm`, #283).
   - Cause: at -O1 and above GCC 16.2 segfaults in an importer of `ycxx.ast.interner`, whose
     `Interners` has an inline constructor and several `FpIndex` specializations, while

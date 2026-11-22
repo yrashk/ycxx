@@ -33,7 +33,12 @@ set(YCXXC_SANITIZE "" CACHE STRING
 set(YCXX_MODULES ON CACHE BOOL "" FORCE)
 set(YCXX_WERROR OFF CACHE BOOL "" FORCE)
 set(YCXX_SANITIZE "${YCXXC_SANITIZE}" CACHE STRING "" FORCE)
-add_subdirectory(deps/libycxx EXCLUDE_FROM_ALL SYSTEM)
+# BOOTSTRAP: source modules: the scheduler's import std creates a CMake dependency cycle
+# with the embedded runtime archive (STATUS, "Bootstrap workarounds").
+block(SCOPE_FOR VARIABLES)
+  set(YCXX_SOURCE_MODULES OFF)
+  add_subdirectory(deps/libycxx EXCLUDE_FROM_ALL SYSTEM)
+endblock()
 # BOOTSTRAP: modules: the std module's interface is compiled with ycxx::modules' own flags, not
 # the importer's. Without -freflection its std::meta is empty, and GCC 16.2 segfaults importing
 # it with -freflection mismatched (STATUS, "Bootstrap workarounds").
