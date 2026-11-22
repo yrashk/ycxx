@@ -5,7 +5,7 @@ says which in its `// FIXTURE: <code>` line. They run with Clang (else GCC) as t
 under test, so a driver that passes everything, or fails everything, is caught. The rest checks
 the parts that need no compiler: markers, the incremental format, sharding, state and selection.
 """
-import json, os, re, subprocess, sys, tempfile, unittest
+import json, os, re, runpy, subprocess, sys, tempfile, unittest
 from pathlib import Path
 
 from . import discover, incremental, kinds, state, toolchain
@@ -45,6 +45,30 @@ class Fixtures(unittest.TestCase):
 
 
 class Parts(unittest.TestCase):
+    def test_draft_initializer_placeholder_fragments(self):
+        extractor = runpy.run_path(str(REPO / 'tools' / 'draft-examples'))
+
+        def fragment(source, reports):
+            example = extractor['Example']('class.base.init', 'class', 1, 1, 'fixture.tex', 1)
+            example.blocks.append(('codeblock', '', source.splitlines()))
+            example.build()
+            return extractor['is_fragment'](example, reports)
+
+        placeholder = 'struct A {\n  int i = /* some integer expression */ ;\n};\n'
+        clang = (1, [(2, 'expected expression')])
+        gcc_message = 'expected primary-expression at end of input'
+        gcc = (1, [(2, gcc_message)])
+        self.assertIn('line 2: expected expression', fragment(placeholder, (clang, gcc)) or '')
+        self.assertIsNone(fragment(placeholder.replace('/* some integer expression */', ''), (clang, gcc)))
+        self.assertIsNone(fragment(placeholder.replace('int i', 'return i'), (clang, gcc)))
+        self.assertIsNone(fragment('int i = ;\n', ((1, [(1, 'expected expression')]),
+                                                  (1, [(1, "expected primary-expression before ';' token")]))))
+        self.assertIsNone(fragment(placeholder.replace(';\n', '; // OK\n', 1), (clang, gcc)))
+        self.assertIsNone(fragment(placeholder, (clang, (0, []))))
+        self.assertIsNone(fragment(placeholder, (clang, (1, [(3, gcc_message)]))))
+        self.assertIsNone(fragment(placeholder + 'int main(\n',
+                                   (clang, (1, [*gcc[1], (4, "expected ')' at end of input")]))))
+
     def test_markers(self):
         text = 'a //! error\n//! error@+1:5\nb\nc //! error@1 //! error@-1:2\n'
         self.assertEqual(discover.markers_in(text), [(1, None), (3, 5), (1, None), (3, 2)])

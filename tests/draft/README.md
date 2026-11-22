@@ -35,7 +35,9 @@ An example is skipped, with its reason in `examples.tsv`, when it
   names, statements at namespace scope, missing files) on lines the draft does not mark as errors.
 
 The fragment rule is the only one that needs the oracles. Its reason quotes the first error, so a
-wrong call can be checked.
+wrong call can be checked. When a simple declaration with a built-in type has only a nonempty
+block comment for its initializer, both oracles must report a single missing-expression error on
+that unannotated line. An empty initializer without a placeholder remains visible as a disagreement.
 
 ## Oracle disagreements
 
