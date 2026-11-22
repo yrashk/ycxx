@@ -1022,9 +1022,14 @@ public:
     if (types().is_dependent(deduced)) return unresolved();
     auto c = q_->template_decl(p.entity);
     if (!c) return unresolved();
-    std::vector<TemplateArg> args{templates().type_arg(deduced)};
+    // BOOTSTRAP: -Warray-bounds: reserved and appended, as `parameters` in `member_call` (#748).
+    // Without the bug: `std::vector<TemplateArg> args{templates().type_arg(deduced)};` and
+    // `args.insert(args.end(), tail.begin(), tail.end());`
     const auto tail = ins().seqs.elements(p.args);
-    args.insert(args.end(), tail.begin(), tail.end());
+    std::vector<TemplateArg> args;
+    args.reserve(1 + tail.size());
+    args.push_back(templates().type_arg(deduced));
+    args.append_range(tail);
     const std::size_t before = diag_count();
     auto nf = concept_constraint(*c, args, at);
     if (!nf) return has_error_since(before) ? false : unresolved();

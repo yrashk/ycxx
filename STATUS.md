@@ -3087,7 +3087,8 @@ miscompiles it (DECISIONS §3.2). Each is removed once ycxx compiles itself.
     `obj::archive::read` (`index`), `parse.cppm` (`named`, `mem`, `exception_tokens`, `lit`)
     and `Sema::class_name` (`found`).
   - `-Warray-bounds` through libycxx's in-place `vector` insert: reserved appends in
-    `Sema::member_call` (`parameters`) and `Sema::call` (`all`).
+    `Sema::member_call` (`parameters`), `Sema::call` (`all`) and
+    `Sema::check_placeholder_constraint` (`args`).
   - `-Warray-bounds`/`-Wstringop-overflow` through `"literal" + std::string&&`: `std::format` in
     `daemon/connect.cppm` (four messages).
   - `-Wstringop-overflow` on the `sun_path` copy: a copy also bounded by the array in the
