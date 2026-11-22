@@ -7259,6 +7259,7 @@ public:
     if (address_set(e)) return convert(e, to, at_);  // [over.over]: a cast supplies a target type
     QualType target = Types::unqualified(to);
     if (types().is_void(target)) {
+      if (!e.glvalue() && !require_concrete_object(e.type(), e.begin)) return {NodeId::none, e.begin, e.end};
       // A discarded tag prvalue still denotes a temporary object ([expr.context]/2).
       if (is_defaulted_tag_initializer(e)) e = discarded(e);
       return convert_node(e, ast::ConversionKind::to_void, target);  // /6
@@ -8711,7 +8712,10 @@ public:
       return ordered(op == logical_and ? ast::OrderedOp::logical_and : ast::OrderedOp::logical_or, a, c,
                      {builtin(Builtin::bool_), ValueCategory::prvalue, 0});
     }
-    case comma: return ordered(ast::OrderedOp::comma, l, r, r.info);
+    case comma:
+      // [expr.comma]: the left operand is discarded. Only the right produces the result.
+      if (!l.glvalue() && !require_concrete_object(l.type(), l.begin)) return {NodeId::none, begin, end};
+      return ordered(ast::OrderedOp::comma, l, r, r.info);
     case shl:
     case shr: {
       Ex a = promote(l), c = promote(r);
