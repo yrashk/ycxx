@@ -1126,6 +1126,10 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
 - A written constructor replays the initializer before taking a stored scalar value, so later
   class members can hide namespace declarations in defaults that evaluated during the member scan.
   [#763](https://github.com/yrashk/ycxx/issues/763)
+- Class completion checks non-dependent default member initializer expressions at their original
+  lexical point. An unbound class template pattern leaves dependent expressions for a selecting
+  initialization ([class.mem.general], [temp.res], [temp.inst]).
+  [#732](https://github.com/yrashk/ycxx/issues/732)
 
 - An automatic declaration such as `Point p(3, 4);` can initialize a flat aggregate with
   public arithmetic fields and implicit trivial destruction. The fallback applies when

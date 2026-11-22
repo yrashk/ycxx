@@ -275,6 +275,9 @@ visible where the initializer was written and lookup in the complete enclosing c
 [#764](https://github.com/yrashk/ycxx/issues/764)
 Later class members can also hide namespace names in defaults that evaluate to scalar constants.
 [#763](https://github.com/yrashk/ycxx/issues/763)
+YCXX checks the non-dependent parts of a written default member initializer once the class is
+complete, even if no initialization selects that default.
+[#732](https://github.com/yrashk/ycxx/issues/732)
 
 Automatic declarations such as `Point p(3, 4);` can initialize flat aggregates with public
 arithmetic fields. Supplied expressions initialize the fields in declaration order. Omitted
