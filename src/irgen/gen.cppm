@@ -80,6 +80,8 @@ struct FunctionInput {
   ast::EntityId guard_acquire = ast::EntityId::none, guard_release = ast::EntityId::none;
   ast::EntityId atexit = ast::EntityId::none, dso = ast::EntityId::none;
   bool hosted_catch_all = false;  // the native frontend has certified this occurrence
+  ast::NodeId cleanup_call = ast::NodeId::none;  // the certified hosted cleanup call
+  bool check_unwind_cleanups = false;
   bool native_array_delete = false;  // the backend's Linux x86-64 cookie-free array deletion
   bool native_array_new = false;  // the backend's Linux x86-64 allocation in a certified frame
 };
@@ -1794,6 +1796,35 @@ class Gen {
   // orders the clause allows.
   std::optional<ValueId> call(At a, std::optional<ValueId> into = std::nullopt) {
     auto c = get<ast::Call>(a);
+    if (a.id == fn_.cleanup_call) {
+      const auto normal = b_.add_block({});
+      const ir::Ty pending[] = {ir::Ty::state(), ir::Ty::exn()};
+      const auto exceptional = b_.add_block(pending);
+      const ValueId args[] = {state_};
+      const ir::Ty results[] = {ir::Ty::state()};
+      const std::uint64_t imms[] = {word(c.function), 0};
+      const ir::SuccRef successors[] = {{normal, {}}, {exceptional, {}}};
+      const auto invoke = emit(ir::Op::invoke, results, args, imms, ir::bit(ir::Flag::not_constexpr), successors);
+      enter(exceptional);
+      exit_scopes(0);
+      const ValueId resume[] = {state_, b_.param(exceptional, 1)};
+      emit(ir::Op::resume, {}, resume);
+      block_ = normal;
+      state_ = b_.result(invoke, 0);
+      return std::nullopt;
+    }
+    if (fn_.check_unwind_cleanups && std::ranges::any_of(scopes_, [](const auto& scope) {
+          return std::ranges::any_of(scope, [](const Ending& e) { return e.destructor != ast::EntityId::none; });
+        })) {
+      ast::QualType callee = info(child(a, c.callee)).type;
+      if (c.function == ast::EntityId::none) callee = facts_.pointee(callee);
+      const auto function = in_.types.canon(callee);
+      if (in_.types.is<ast::TFunction>(function)) {
+        const auto spec = in_.types.get<ast::TFunction>(function).noexcept_;
+        if (spec == ast::ConstId::none || !in_.values.is<ast::VInt>(spec) || in_.values.get<ast::VInt>(spec).bits.lo == 0)
+          throw Unsupported{"a potentially throwing call with an unsupported local unwind cleanup"};
+      }
+    }
     if (class_prvalue(c.info) && !into) unsupported(a, "of class type outside an initialization");
     std::vector<ValueId> args;
     // A call through a pointer to function ([expr.call]/1): the callee, a prvalue pointer, is

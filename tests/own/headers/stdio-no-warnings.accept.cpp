@@ -1,8 +1,7 @@
-// #229: the macOS SDK's <stdio.h> compiles with no warning: ycxx defines __GNUC__, so sys/cdefs.h
-// no longer warns "Unsupported compiler detected", and a system header's warnings are hidden. The
-// one warning reported is this file's own (a test with a warning marker has all its warnings
-// checked). On Linux, glibc's <stdio.h> still needs a compiler-provided <stddef.h> (#133).
-// REQUIRES: darwin
+// #229: the host C library's <stdio.h> compiles with no warning. On macOS ycxx defines __GNUC__,
+// so the SDK's sys/cdefs.h no longer warns "Unsupported compiler detected"; on Linux ycxx supplies
+// the <stddef.h> glibc asks the compiler for (#133); and a system header's warnings are hidden. The one warning
+// reported is this file's own (a test with a warning marker has all its warnings checked).
 #include <stdio.h>
 
 int main_file() { return 'op'; } //! warning
