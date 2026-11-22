@@ -1,0 +1,14 @@
+// ACTION: syntax
+--- main.cpp
+#include "hierarchy.hpp"
+--- hierarchy.hpp
+struct Base {};
+struct Derived : Base {};
+=== edit
+--- hierarchy.hpp
+struct Base final {};
+struct Derived : Base {}; //! error
+=== edit
+--- hierarchy.hpp
+struct Base {};
+struct Derived : Base {};

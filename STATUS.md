@@ -1409,6 +1409,9 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   fixed underlying type before the enumerator list. Omitted scoped bases default to `int`. Unscoped opaque
   declarations spell their base. Compatible redeclarations and a later definition in the same
   namespace share the nominal type, and the enumerators become visible at the definition.
+- A named enum retains its in-list record across synchronous class-template instantiations that
+  define other enums. Queries can still use the enclosing enum's fixed underlying type
+  ([dcl.enum], [expr.sizeof]). [#897](https://github.com/yrashk/ycxx/issues/897)
 - A qualified value expression in an incomplete current class can see earlier static data
   members and injected unscoped enumerators. Within a named enum's own list, qualifying an
   earlier enumerator uses its in-list type. [#857](https://github.com/yrashk/ycxx/issues/857)
@@ -2777,6 +2780,12 @@ What the process allocates, attributed to the engine's cells, in the trace and t
   appear once. A further override of a `final` declaration is ill-formed even when ordinary
   lookup hides the declaration. [[class.virtual]](https://eel.is/c++draft/class.virtual) ·
   [[class.mem.general]](https://eel.is/c++draft/class.mem.general) · [#309](https://github.com/yrashk/ycxx/issues/309)
+- Ordinary named namespace-scope classes and structs can use class-head `final`, with or
+  without a base clause. A base specifier naming a final class through its name or an alias
+  receives the same diagnostic after the definition, including after a later bare declaration.
+  `final` remains an identifier in class names and object declarators. `__is_final` reads the
+  completed class definition, including for cv-qualified types.
+  [[class.pre]](https://eel.is/c++draft/class.pre) · [#309](https://github.com/yrashk/ycxx/issues/309)
 - A derived constructor can name that base in an unqualified parenthesized or flat braced
   initializer. Syntax checking uses ordinary constructor overload resolution, defaults, access,
   and list narrowing. The base destructor must be usable and accessible in the derived
@@ -2852,8 +2861,8 @@ What the process allocates, attributed to the engine's cells, in the trace and t
   conditional evaluation, the consumer ELF symbols and cold/resident output across edits.
   [Itanium call ABI](https://itanium-cxx-abi.github.io/cxx-abi/abi.html#vcall.caller) ·
   [#309](https://github.com/yrashk/ycxx/issues/309) · [#659](https://github.com/yrashk/ycxx/issues/659)
-- Broader construction and table emission, pure-slot signatures, covariant returns and class-head
-  `final` remain in #309. Pure declarations and `final` for virtual destructors and assignment
+- Broader construction and table emission, pure-slot signatures and covariant returns remain in
+  #309. Pure declarations and `final` for virtual destructors and assignment
   operators also remain there. Checking `operator=` includes matching implicitly declared copy
   and move assignments. Virtual destructor entry points, RTTI expressions, virtual bases and
   native class ABI have their own issues.

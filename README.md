@@ -276,6 +276,8 @@ while their current class is incomplete. [#857](https://github.com/yrashk/ycxx/i
 
 Both targets support named nested enum definitions followed by ordinary fields in the same
 member declaration, including scoped enum field initializers. [#500](https://github.com/yrashk/ycxx/issues/500)
+An enum with a fixed underlying type keeps that layout while its enumerators instantiate other
+enum definitions. [#897](https://github.com/yrashk/ycxx/issues/897)
 Scoped enumerators stay in their enumeration's scope, so class members and class template
 members may reuse their names. [#725](https://github.com/yrashk/ycxx/issues/725)
 Nested unscoped enumerators conflict with other non-type members regardless of declaration order.
@@ -580,7 +582,8 @@ to distinguish lvalue and rvalue receivers. [#311](https://github.com/yrashk/ycx
 **Virtual declarations.** Syntax checking accepts virtual members and inline definitions in
 ordinary root classes. Ordinary pure virtual declarations define abstract interfaces through a
 single nonvirtual base at each level. Ordinary virtual members can use `final` to prevent
-further overrides. Derived classes also support unqualified base initializers with parentheses
+further overrides. Ordinary named namespace-scope classes and structs can use class-head `final`
+to prevent derivation. Derived classes also support unqualified base initializers with parentheses
 or flat braces. On Linux x86-64,
 pointer and reference consumers can call virtual functions with fixed integer signatures on
 peer-owned objects with an ordinary root, including a derived class with that single public

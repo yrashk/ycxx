@@ -51,6 +51,17 @@ declarations hidden by unrelated overloads.
 [[class.mem.general]](https://eel.is/c++draft/class.mem.general) ·
 [Scope review](https://github.com/yrashk/ycxx/issues/309#issuecomment-7079653899)
 
+An ordinary named namespace-scope class or struct can place `final` after its class name
+and before the base clause or body. The grammar still uses `final` as an identifier in
+class names and object declarators. A repeated specifier receives a diagnostic at the
+second token.
+
+The defining declaration supplies the property to the completed class record. Base-clause
+validation reads the complete class resolved by the base type, including through an alias.
+A bare redeclaration leaves the completed property in effect. Class identity and layout use
+the same rules as for a definition without the property.
+[[class.pre]](https://eel.is/c++draft/class.pre) · [#309](https://github.com/yrashk/ycxx/issues/309)
+
 An ordinary non-template virtual member may have a pure-specifier with the exact token `0`
 after `=` and preprocessing. The pure-specifier follows any virt-specifiers. At class
 completion the derived class starts with its base's
@@ -252,7 +263,7 @@ handler.
 [macOS parity #659](https://github.com/yrashk/ycxx/issues/659)
 
 Broader table emission, covariant returns, further pure-slot signatures, out-of-class pure member
-definitions, class-head `final`, explicit virtual destructor calls and virtual member addresses
+definitions, explicit virtual destructor calls and virtual member addresses
 remain in #309. Pure declarations and `final` for virtual destructors and assignment operators
 also remain there. A virtual assignment operator can be overridden by an implicitly declared
 copy or move assignment in a derived class.
