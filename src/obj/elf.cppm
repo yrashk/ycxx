@@ -13,7 +13,8 @@ export namespace ycxx::obj::elf {
 std::expected<std::vector<std::uint8_t>, std::string> write_object(const object& o);
 
 // Read the x86-64 ELF64 relocatable subset emitted by write_object and the GNU forms
-// used by libycxx's static linkage marker. Preserve defined function types and sizes.
+// used by libycxx's static linkage marker. Preserve types and sizes for defined functions
+// and for objects in COMDAT payloads.
 // Retained sections and symbols keep file order. Preserve COMDAT signatures and member sections.
 std::expected<object, std::string> read_object(std::span<const std::uint8_t> file, std::string name);
 
@@ -682,9 +683,10 @@ std::expected<object, std::string> read_object(std::span<const std::uint8_t> fil
         return fail(std::format("ELF function symbol {} is not in executable code", i));
       function_size = size;
     }
+    const auto object_size = type == stt_object && group_owners[index] != 0 ? std::optional{size} : std::nullopt;
     const auto model_binding = local ? binding::local : visibility == stv_hidden ? binding::hidden : binding::global;
     symbols[i].retained = o.add_symbol({read_name(i, name_index), model_binding, sections[index], value, bind == stb_weak,
-                                       function_size});
+                                       function_size, object_size});
     if (local) symbols[i].local_group = group_owners[index];
   }
 
