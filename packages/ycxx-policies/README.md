@@ -59,6 +59,24 @@ scalar storage. For separate builds, include the contract in the caller and prov
 supports explicit objects and direct calls to unique strong definitions. GCC and Clang accept
 the metadata as ordinary C++20 types.
 
+## Local variants
+
+Include `<ycxx/ownership/variant.hpp>` for a local choice between two owner types.
+Construct `ownership::variant<Receipt, Permit>` with `ownership::first_t{}` and a receipt
+or with `ownership::second_t{}` and a permit. Each alternative needs a nonthrowing
+move and destruction when it is selected.
+
+Use `holds_first()` or `holds_second()` to identify the active alternative. The
+corresponding accessor borrows it by const reference. `take_first()` or `take_second()`
+moves the owner out and leaves the variant empty. Access to an inactive alternative
+traps. Scope exit destroys just the active alternative, so a guarded linear owner
+still has to be discharged. The variant itself stays in its original scope.
+
+The C++20 variant is covered by GCC and Clang conformance. YCXX integration is tracked
+with the compiler support for nontrivial union members, explicit destruction, and
+`noexcept` expressions.
+[Unions #203](https://github.com/yrashk/ycxx/issues/203) · [Explicit destruction #722](https://github.com/yrashk/ycxx/issues/722) · [Noexcept expressions #729](https://github.com/yrashk/ycxx/issues/729)
+
 ## Scoped capabilities
 
 Include `<ycxx/capabilities.hpp>` and choose an issuer type, a bit for each right, and stable

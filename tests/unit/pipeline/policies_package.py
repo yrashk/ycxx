@@ -31,6 +31,7 @@ with tempfile.TemporaryDirectory() as tmp:
     (consumer / "main.cpp").write_text("""\
 #include <ycxx/ownership.hpp>
 #include <ycxx/ownership/runtime.hpp>
+#include <ycxx/ownership/variant.hpp>
 #include <ycxx/capabilities.hpp>
 #include <ycxx/effects.hpp>
 #include <ycxx/effects/handler.hpp>
@@ -110,6 +111,25 @@ static_assert(!std::is_move_constructible_v<ReadScope>);
 
 int read_in(ReadScope& context, int offset) { return context.perform(offset); }
 
+namespace own = ycxx::ownership;
+struct Receipt { own::linear_state state; int value; };
+struct Permit { own::affine_state state; int value; };
+using Choice = own::variant<Receipt, Permit>;
+static_assert(!std::is_copy_constructible_v<Choice>);
+static_assert(!std::is_move_constructible_v<Choice>);
+
+int check_choice(bool choose_receipt) {
+  Choice choice = choose_receipt ? Choice(own::first_t{}, Receipt{{}, 27})
+                                 : Choice(own::second_t{}, Permit{{}, 31});
+  if (choice.holds_first()) {
+    if (choice.first().value != 27 || choice.holds_second()) return 4;
+    Receipt owned = choice.take_first();
+    owned.state.consume();
+    return choice.holds_first() || choice.holds_second() || owned.value != 27;
+  }
+  return !choice.holds_second() || choice.second().value != 31;
+}
+
 int main(int argc, char**) {
   ycxx::ownership::linear_state owner;
   auto moved = static_cast<ycxx::ownership::linear_state&&>(owner);
@@ -134,6 +154,21 @@ int main(int argc, char**) {
     if (read_in(inner, 1) != 23) return 2;
   }
   if (read_in(outer, 1) != 18) return 3;
+  if (argc == 6) {
+    Choice abandoned(own::first_t{}, Receipt{{}, 27});
+    return abandoned.first().value != 27;  // a live linear alternative at scope exit
+  }
+  if (argc == 7) {
+    Choice inactive(own::second_t{}, Permit{{}, 31});
+    return inactive.first().value;  // wrong active alternative
+  }
+  if (argc == 8) {
+    Choice exhausted(own::first_t{}, Receipt{{}, 27});
+    Receipt owned = exhausted.take_first();
+    owned.state.consume();
+    return exhausted.first().value;  // no alternative after taking ownership
+  }
+  if (check_choice(true) || check_choice(false)) return 5;
   auto editor = Store::editor(2);
   Store::set(editor, 2, 28);
   return Store::get(editor, 2) != 28;
@@ -158,6 +193,8 @@ target_link_libraries(consumer PRIVATE YCXXPolicies::policies)
         executable = str(build / "consumer")
         subprocess.run([executable], check=True, timeout=10)
         for args in (("wrong-scope",), ("use", "moved"), ("use", "released", "token"),
-                     ("read", "with", "used", "budget")):
+                     ("read", "with", "used", "budget"), ("drop", "a", "live", "linear", "owner"),
+                     ("read", "from", "the", "inactive", "variant", "arm"),
+                     ("read", "a", "variant", "after", "taking", "its", "owner")):
             result = subprocess.run([executable, *args], timeout=10)
             assert result.returncode in (-signal.SIGABRT, -signal.SIGILL, -signal.SIGTRAP), result
