@@ -130,6 +130,16 @@ int check_choice(bool choose_receipt) {
   return !choice.holds_second() || choice.second().value != 31;
 }
 
+int unwind_choice(bool choose_receipt) {
+  try {
+    Choice choice = choose_receipt ? Choice(own::first_t{}, Receipt{{}, 27})
+                                   : Choice(own::second_t{}, Permit{{}, 31});
+    throw 17;
+  } catch (int value) {
+    return value != 17;
+  }
+}
+
 int main(int argc, char**) {
   ycxx::ownership::linear_state owner;
   auto moved = static_cast<ycxx::ownership::linear_state&&>(owner);
@@ -168,7 +178,8 @@ int main(int argc, char**) {
     owned.state.consume();
     return exhausted.first().value;  // no alternative after taking ownership
   }
-  if (check_choice(true) || check_choice(false)) return 5;
+  if (argc == 9) return unwind_choice(true);  // a live linear alternative during unwind
+  if (check_choice(true) || check_choice(false) || unwind_choice(false)) return 5;
   auto editor = Store::editor(2);
   Store::set(editor, 2, 28);
   return Store::get(editor, 2) != 28;
@@ -195,6 +206,7 @@ target_link_libraries(consumer PRIVATE YCXXPolicies::policies)
         for args in (("wrong-scope",), ("use", "moved"), ("use", "released", "token"),
                      ("read", "with", "used", "budget"), ("drop", "a", "live", "linear", "owner"),
                      ("read", "from", "the", "inactive", "variant", "arm"),
-                     ("read", "a", "variant", "after", "taking", "its", "owner")):
+                     ("read", "a", "variant", "after", "taking", "its", "owner"),
+                     ("unwind", "with", "a", "live", "linear", "variant", "arm", "open")):
             result = subprocess.run([executable, *args], timeout=10)
             assert result.returncode in (-signal.SIGABRT, -signal.SIGILL, -signal.SIGTRAP), result
