@@ -316,14 +316,15 @@ What is true of the code today. Work in progress and its owners are tracked in
   - Output is byte-identical across runs.
   - Weak definitions coalesce: the first in input order is kept, and a strong one beats them.
     The functions and variables the ELF path makes weak (#422, #432) are weak Mach-O definitions
-    too, with `N_PEXT` when hidden (#602), and a zero-initialized one goes in `__DATA,__data`, not
-    zero-fill, as Clang emits it. An object with a weak definition sets
-    `MH_SUBSECTIONS_VIA_SYMBOLS`, so the system linker also keeps one. A name some object defines
-    with default visibility is exported even when the kept definition is hidden, as the system
-    linker does. `unit.darwin_inline` checks the `unit.linux_inline` fixtures and mixed content
-    (literals, initializers, guarded statics) with ycxx's and the system's linker, dead stripping
-    included, in both object orders, with a host-compiler peer and an archive member. Templates,
-    closures and static locals of inline functions remain strong (#124).
+    too, with `N_PEXT` when hidden (#602). Each definition carries its own weak binding, so a
+    strong definition sharing its spelling through an `asm` label retains priority (#694).
+    Zero-initialized writable weak definitions go in `__DATA,__data`. An object with a weak
+    definition sets `MH_SUBSECTIONS_VIA_SYMBOLS`, so the system linker also keeps one. A name
+    some object defines with default visibility is exported even when the kept definition is
+    hidden, as the system linker does. `unit.darwin_inline` checks the `unit.linux_inline` fixtures
+    and mixed content (literals, initializers, guarded statics) with ycxx's and the system's
+    linker, dead stripping included, in both object orders, with a host-compiler peer and an
+    archive member. Templates, closures and static locals of inline functions remain strong (#124).
   - The linker preserves cleanup-free `__TEXT,__eh_frame` contributions with the supported
     PC-relative CIE and FDE format, including address differences and multiple input objects.
     `unit.link` checks the linked ranges and walks through a non-frame-pointer arm64 bridge
@@ -2687,6 +2688,14 @@ What the process allocates, attributed to the engine's cells, in the trace and t
   expression checks. Evaluated construction, constant evaluation of the objects, and native
   emission of their constructors still require virtual layout support.
   [[class.base.init]](https://eel.is/c++draft/class.base.init) · [#309](https://github.com/yrashk/ycxx/issues/309)
+- An ordinary non-template virtual member can use `= 0` in its class declaration. The token
+  after `=` must be exactly `0` after preprocessing. Class completion tracks which final
+  overriders are pure through the single nonvirtual base chain. `__is_abstract` reads that fact.
+  The front end diagnoses definitions of abstract objects and members, allocation,
+  materialization and by-value function definitions or calls. Nondefining namespace-scope
+  `extern` declarations, pointer and reference types, declarations of by-value functions,
+  base subobjects and the result of direct `decltype(make())` follow their ordinary rules.
+  [[class.abstract]](https://eel.is/c++draft/class.abstract) · [[dcl.type.decltype]](https://eel.is/c++draft/dcl.type.decltype) · [#309](https://github.com/yrashk/ycxx/issues/309)
 - On Linux x86-64, the pinned libycxx `<exception>` syntax check reaches unnamed unscoped
   enumerations in `deps/libycxx/include/ycxx/pal.h`, starting at line 61.
   [#157](https://github.com/yrashk/ycxx/issues/157)
@@ -2723,11 +2732,11 @@ What the process allocates, attributed to the engine's cells, in the trace and t
   supported root type. The root has an implicit default constructor, a trivial destructor and
   no default member initializer. Lowering stores `_ZTV + 16` in the vptr. The table can come
   from the key definition in the same unit or from a peer. [#309](https://github.com/yrashk/ycxx/issues/309)
-- Broader construction and table emission, pure virtual functions, covariant returns, and `final` on classes,
-  virtual destructors and assignment operators remain in #309. Checking `final` for
-  `operator=` includes matching implicitly declared copy and move assignments. Virtual
-  destructor entry points, RTTI expressions, virtual bases and native class ABI have their
-  own issues.
+- Broader construction and table emission, pure-slot dispatch, covariant returns and class-head
+  `final` remain in #309. Pure declarations and `final` for virtual destructors and assignment
+  operators also remain there. Checking `operator=` includes matching implicitly declared copy
+  and move assignments. Virtual destructor entry points, RTTI expressions, virtual bases and
+  native class ABI have their own issues.
   [#309](https://github.com/yrashk/ycxx/issues/309) · [#136](https://github.com/yrashk/ycxx/issues/136) ·
   [#294](https://github.com/yrashk/ycxx/issues/294) · [#310](https://github.com/yrashk/ycxx/issues/310) ·
   [#489](https://github.com/yrashk/ycxx/issues/489)

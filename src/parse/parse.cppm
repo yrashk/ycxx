@@ -4555,6 +4555,7 @@ private:
         return bad();
       }
       if (!s_.require_complete(d.type, d.name_at)) return bad();
+      if (!s_.require_concrete_object(d.type, d.name_at)) return bad();
       if (p_->class_rec_is_union(it_->parent) && !variant_member(d)) return bad();
       if (member_declared(d.name)) {
         s_.diag(d.name_at, Diag::redeclared_member, d.name);
@@ -5806,8 +5807,19 @@ private:
         return false;
       }
       if (ps_.is(Tk::equal)) {
-        s_.diag(ps_.pos(), Diag::not_supported, Tk::equal);  // pure, defaulted and deleted functions
-        return false;
+        if (!is_virtual || is_def || assignment || ps_.kind(1) == Tk::kw_default || ps_.kind(1) == Tk::kw_delete) {
+          s_.diag(ps_.pos(), Diag::not_supported, Tk::equal);
+          return false;
+        }
+        // [class.abstract], [class.mem.general]: the post-expansion token must be exactly `0`.
+        if (ps_.kind(1) != Tk::int_lit || p_->region().spelling(ps_.tok(1)) != "0" ||
+            (ps_.kind(2) != Tk::comma && ps_.kind(2) != Tk::semi)) {
+          s_.diag(ps_.pos(), Diag::pure_specifier);
+          return false;
+        }
+        ps_.bump();
+        ps_.bump();
+        sem.is_pure = true;
       }
       sem.kind = ast::DeclKind::function;
       if (is_def) flags |= sema::decl_flag::definition;
@@ -5857,7 +5869,9 @@ private:
       }
       sem.type = d.type;
       if (spec.is_inline || spec.is_constexpr) {
-        if (!s_.require_supported_virtual_layout(d.type, d.name_at)) return false;
+        // An inline static member defines an object ([class.static.data]).
+        if (!s_.require_complete(d.type, d.name_at) || !s_.require_concrete_object(d.type, d.name_at) ||
+            !s_.require_supported_virtual_layout(d.type, d.name_at)) return false;
         flags |= sema::decl_flag::definition;
       }
       sem.entity = s_.world().entities.entity(
@@ -6243,7 +6257,9 @@ private:
     if (deleted) flags |= sema::decl_flag::deleted;
     bool has_init = !deleted && (early || early_expr || ps_.is(Tk::equal) || ps_.is(Tk::l_brace) || (!fn && ps_.is(Tk::l_paren)));
     bool definition = fn ? is_function_def || deleted : !((spec.is_extern || single_linkage_spec_) && !has_init);
-    if (!fn && definition && !s_.require_supported_virtual_layout(d.type, d.name_at)) return false;
+    if (!fn && definition &&
+        (!s_.require_concrete_object(d.type, d.name_at) || !s_.require_supported_virtual_layout(d.type, d.name_at)))
+      return false;
     if (!attach_function_annotations(sem, spec, d, fn && !template_ && !explicit_)) return false;
     if (definition) flags |= sema::decl_flag::definition;
     const bool reference = types.is_reference(d.type);
@@ -7025,6 +7041,7 @@ Program::ClassContent Program::class_content(u32 item, const std::function<const
         statics.back().is_virtual = d.is_virtual;
         statics.back().is_explicit = d.is_explicit;
         statics.back().is_final = d.is_final;
+        statics.back().is_pure = d.is_pure;
         if (auto overridden = overridden_virtuals_.find(d.entity); overridden != overridden_virtuals_.end())
           statics.back().overridden_virtual = overridden->second;
         if (w_->ins.names.spelling(statics.back().name) == "operator=" && defaulted_member_definition(m, d))
@@ -7332,6 +7349,17 @@ const Result<ast::ClassDef>& Program::class_def(u32 item) {
     // Classify the written declarations before special_members appends implicit assignments.
     if (member_declarations_valid) rec.trivial_copyability = class_trivial_copyability(item, *cls, rec);
     const bool implicit_move = special_members(item, *cls, rec, &out.diags);
+    if (rec.polymorphic) {
+      if (rec.bases.size() == 1)
+        if (const auto* base = classes_.find(rec.bases.front().cls))
+          rec.pure_final_overriders = base->pure_final_overriders;
+      // The nearest overridden declaration already represents the inherited slot in this chain.
+      for (const auto& member : rec.members) {
+        if (member.overridden_virtual != EntityId::none)
+          std::erase(rec.pure_final_overriders, member.overridden_virtual);
+        if (member.is_pure) rec.pure_final_overriders.push_back(member.entity);
+      }
+    }
     classify_defaulted_default_ctor(rec, out.diags);
     if (rec.polymorphic && w_->target.triple == ast::x86_64_linux.triple)
       rec.peer_virtual_layout = peer_virtual_layout(item, *cls, rec, members);

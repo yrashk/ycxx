@@ -1,5 +1,4 @@
 // [class.abstract], [expr.type.conv]: a factory cannot create an abstract result object.
-// XFAIL: ycxx #309 diagnoses the pure virtual declaration before checking the return
 struct Curtain {
     explicit Curtain(unsigned);
     virtual int width() const = 0;

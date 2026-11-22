@@ -108,6 +108,7 @@ struct DeclSema {
   bool has_written_noexcept = false;
   bool has_trailing_return = false;
   bool hidden_visibility = false;  // an explicit GNU visibility("hidden") attribute on this declaration
+  bool is_pure = false;  // a written pure-specifier ([class.abstract])
   SeqId<AnnotationSema> annotations{};  // the occurrences written on this declaration
   bool is_final = false;  // a written virt-specifier ([class.virtual])
   constexpr bool operator==(const DeclSema&) const = default;
