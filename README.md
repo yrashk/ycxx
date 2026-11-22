@@ -71,8 +71,9 @@ build/bin/ycxx cxx -nostdlib example.o -o example
 ./example
 ```
 
-Fixed-prototype direct calls to free functions support passing and returning nonempty flat
-records with integral or ordinary object-pointer fields by value. The record can occupy up to
+Fixed-prototype calls (free and member functions, lambdas, function templates and calls
+through pointers) support passing and returning nonempty flat records with integral or
+ordinary object-pointer fields by value. The record can occupy up to
 16 bytes and must be trivial for calls. [Linux integer aggregate ABI](docs/design/linux-integer-aggregates.md)
 
 For mixed Linux objects, the pinned libycxx `<cstddef>` byte operator uses the same Itanium
@@ -134,14 +135,15 @@ functions defined in another translation unit. Native static executables and hos
 support those addresses. [#414](https://github.com/yrashk/ycxx/issues/414)
 · [#407](https://github.com/yrashk/ycxx/issues/407)
 
-On x86-64 Linux, direct calls and saved pointers across translation units share one address for
-simple external inline functions. Ordinary namespace-scope functions can use GNU hidden visibility,
-including coalesced inline and `constexpr` definitions.
+On both targets, direct calls and saved pointers across translation units share one address for
+simple external inline functions, with ycxx's linker or the system's. Ordinary namespace-scope
+functions can use GNU hidden visibility, including coalesced inline and `constexpr` definitions.
 [#422](https://github.com/yrashk/ycxx/issues/422) · [#602](https://github.com/yrashk/ycxx/issues/602)
+· [#124](https://github.com/yrashk/ycxx/issues/124)
 
 External inline namespace variables with relocation-free static initializers share one object
-across x86-64 ELF translation units. This lets two freestanding units using libycxx `<cstddef>`
-link with the pinned static library. [#432](https://github.com/yrashk/ycxx/issues/432)
+across translation units on both targets. On Linux this lets two freestanding units using libycxx
+`<cstddef>` link with the pinned static library. [#432](https://github.com/yrashk/ycxx/issues/432)
 
 ycxx ELF objects record function types and code sizes. The ELF linker accepts supported
 system-assembled objects with function symbols and the GNU-built libycxx static linkage-marker
@@ -382,7 +384,8 @@ shows everything reused. A compile error is marked red at the cell where it star
 message is shown up to the root. Diagnostic details include the file, line and column where
 available. `--trace-engine=interactive` opens a browser of the trace after the compile: a tree
 with each function's IR and assembly, a timeline of the pool's workers, and filters.
-`--trace-engine=json` writes the whole trace as JSON Lines, for tools and agents.
+`--trace-engine=json` writes the whole trace as JSON Lines, for tools and agents. Cells that
+come from source (a file, a unit, a function's IR and code) carry their file and lines.
 `ycxx cxx --watch` stays attached and builds again whenever a file the build read changes,
 headers included; with `--trace-engine` each rebuild shows what it re-ran, and
 `--trace-engine=interactive` keeps the browser open and adds each rebuild live. `ycxx ctl trace
