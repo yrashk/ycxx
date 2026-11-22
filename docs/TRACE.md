@@ -92,6 +92,64 @@ One per build, last: `{"summary":{…}}`.
   attached daemon, each request's start, and the end of the watch.
 - `{"note":…}`: a line of text.
 
+## The interactive browser
+
+`--trace-engine=interactive` and `ycxx ctl trace --interactive` open a full-screen browser on the
+terminal (`src/trace/browse.cppm`, whose model is `src/trace/view.cppm`). `?` lists its keys.
+
+- **Size.** It draws for the terminal's size and redraws at once when that changes (`SIGWINCH`).
+  The summary at the top wraps onto more lines on a narrow screen. Autowrap is off while it runs,
+  so a glyph the terminal draws wider than one column is cut at the edge instead of scrolling the
+  screen.
+- **Mouse** (#635). It asks for SGR mouse reports (modes 1000, 1002 and 1006), which modern
+  terminals and tmux support.
+  - Click a row to select it. Click its `▸`/`▾`, or double-click the row, to fold or open it.
+  - Click a column header (`cell`, `time`, `alloc`, `retains`) to sort by it. Click it again to
+    go back to start order. The `alloc` and `retains` columns sum over the cell's subtree.
+  - Click `tree` or `timeline` in the status line to switch views. Click the pane to give it
+    the keys: arrows, `j`/`k`, PgUp/PgDn and `g`/`G` then scroll it, and `h`, `←` or Escape give
+    them back to the tree.
+  - The wheel scrolls whatever is under it: the tree, the pane, or the timeline's cursor (Shift
+    for bigger steps).
+  - Drag the divider (`│`, marked `⇔` in the title row) to resize the pane; `<` and `>` move it
+    from the keyboard. It keeps its share of the width when the terminal is resized.
+  - In the timeline, click a slice to put the cursor there, or double-click it to open its cell
+    in the tree.
+  - While the browser holds the mouse, the terminal's own text selection needs the terminal's
+    bypass modifier (often Shift; see your terminal's settings).
+  - Checked by hand on macOS: Terminal.app; Terminal.app running tmux 3.8 with `mouse on`; and
+    Ghostty. Clicks on tabs, rows and headers, double clicks and the wheel all worked. The pty
+    test (`daemon.trace_tui`) sends the SGR bytes a terminal sends, drags included, on every
+    host CI runs.
+- **Copy** (#636). What the browser copies goes to the system clipboard. The status line says
+  what was copied, and how.
+  - `y` copies the selected cell as the pane shows it: its kind and key, outcome, times, memory,
+    errors and value (L1 or L2 IR, or instructions).
+  - `Y` copies its whole subtree, folded or filtered parts included, as `--trace-engine` prints
+    it: one line per cell, with time, worker and memory.
+  - Drag over tree rows to copy them as shown (folded rows stay folded), in the same format,
+    indented from the shallowest. Drag over the pane's text to copy exactly the characters
+    covered. The copy happens when the button comes up, as with a terminal's own selection.
+  - `V` selects from the keyboard: rows from the selected one in the tree, or whole lines from
+    the top one shown when the pane has the keys. `j`/`k` extend it, `y` copies it and Escape
+    drops it.
+  - **How it reaches the clipboard.**
+    - The browser always writes OSC 52 (`ESC ] 52 ; c ; <base64> BEL`), which works over SSH in
+      the terminals that support it (iTerm2 once clipboard access is allowed in its settings, Ghostty, kitty, WezTerm, foot, xterm with
+      `allowWindowOps`). Terminal.app ignores it.
+    - Inside tmux it also writes tmux's passthrough form. tmux itself takes an application's
+      OSC 52 only with `set -g set-clipboard on`, and passes the passthrough form on only with
+      `set -g allow-passthrough on`. Its defaults (`external`, `off`) let neither through.
+    - A local session (no `SSH_CONNECTION` or `SSH_TTY`) also runs the first of `pbcopy`,
+      `wl-copy` (Wayland), `xclip` and `xsel` (X) on the `PATH`. That covers Terminal.app and
+      tmux's defaults.
+    - `YCXX_CLIPBOARD` replaces that command (a shell command that reads the text on its
+      standard input). `YCXX_CLIPBOARD=osc52` turns the command off.
+- **Leaving.** `q` gives the terminal back as it was: the main screen, the cursor, autowrap on,
+  mouse reports off, cooked mode. So do `SIGTERM`, `SIGHUP`, `SIGINT` and `SIGQUIT`, and a crash
+  (`SIGABRT`, `SIGSEGV`, `SIGBUS`, `SIGFPE`, `SIGILL`); after restoring, the signal takes its
+  course.
+
 ## The daemon's memory
 
 `ycxx ctl status` prints `memory_current`, `memory_peak`, `memory_allocated` and `allocations`

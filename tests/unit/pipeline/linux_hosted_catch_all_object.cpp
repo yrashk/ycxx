@@ -76,7 +76,7 @@ Function catching(obj::object& o) {
     f.code.bytes[resume_branch + byte] = static_cast<std::uint8_t>(distance >> (8 * byte));
   const auto propagate = f.call(o.reference("_Unwind_Resume"));
   f.emit({0x0f, 0x0b});  // ud2 if the unwinder returns
-  f.code.catch_all = std::vector{protected_call, begin, end, propagate};
+  f.code.unwind_sites = std::vector{protected_call, begin, end, propagate};
   return f;
 }
 
@@ -152,11 +152,11 @@ void emit_object(const std::filesystem::path& output, Order order, bool cleanup_
     require(fields.has_value(), fields ? "" : fields.error());
     if (fields->personality) frame.relocate(obj::reloc_kind::x86_64_pc32, personality_cell, 0, *fields->personality);
     frame.relocate(obj::reloc_kind::x86_64_pc32, code_anchor, 0, fields->initial_location);
-    if (f.code.catch_all) {
+    if (f.code.unwind_sites) {
       require(fields->lsda.has_value(), "handler FDE has an LSDA field");
-      auto lsda = x64::catch_all_lsda(f.code);
+      auto lsda = x64::exception_lsda(f.code);
       require(lsda.has_value(), lsda ? "" : lsda.error());
-      const auto action = check_lsda(*lsda, *f.code.catch_all, false);
+      const auto action = check_lsda(*lsda, *f.code.unwind_sites, false);
       // A separate test-only cleanup entry lets the hosted personality provide selector zero.
       // Reuse the exact emitted landing path and keep the production catch-all encoder intact.
       if (cleanup_only) (*lsda)[action] = 0;
@@ -182,7 +182,7 @@ void emit_object(const std::filesystem::path& output, Order order, bool cleanup_
   require(parsed.has_value(), parsed ? "" : parsed.error());
   auto rewritten = obj::elf::write_object(*parsed);
   require(rewritten && *bytes == *rewritten, "own ELF reader and writer preserve handler object bytes");
-  check_lsda(parsed->sections[table].bytes, *handler.code.catch_all, cleanup_only);
+  check_lsda(parsed->sections[table].bytes, *handler.code.unwind_sites, cleanup_only);
 
   const auto& frames = parsed->sections[eh];
   for (const auto& name : {"chosen", "transit"}) {

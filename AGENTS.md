@@ -48,6 +48,12 @@ Work that never reaches `main` is lost. Twice, finished and reviewed work landed
   `std::execution`, `constexpr`. A bootstrap-compiler limitation gets the smallest workaround,
   marked `// BOOTSTRAP: <feature>: <reason>` and listed in STATUS.
 - Run `tools/test --fast` before pushing; CI confirms, it does not debug (DECISIONS §9).
+- macOS and Linux are meant to do the same things. A test or CTest you limit to one OS carries
+  `PARITY:` with the issue that brings it to the other, or `by design:` with the host fact it is
+  about. `tools/check-os-gates` enforces this for `REQUIRES:`, `ycxx.xfail` and `ycxx.txt` (an
+  issue only) and `tests/**/CMakeLists.txt`; a gate inside a test script or CI job needs the
+  comment by hand. A capability you add on one OS only gets a row in the macOS ↔ Linux parity
+  issue (#659) or the ISA parity issue (#639).
 - If you burn time (retries, review rounds that don't converge, a dead end, a brief that came back
   off-target) and then find the way out, record it in `docs/LESSONS.md`, or as a rule in
   DECISIONS or here (DECISIONS §8).

@@ -1,4 +1,3 @@
-// REQUIRES: linux
 #include "placement.hpp"
 
 bool peer_check() {
