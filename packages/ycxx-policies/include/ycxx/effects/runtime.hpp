@@ -12,7 +12,7 @@ class budget {
  public:
   budget() noexcept : remaining_(Maximum) {}
   budget(const budget&) = delete;
-  budget& operator=(const budget&) = delete;
+  budget(budget&&) = delete;
 
   void spend() noexcept {
     if (remaining_ == 0) ownership::detail::ownership_violation();

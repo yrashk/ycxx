@@ -90,6 +90,8 @@ using ReadBudget = fx::budget<ReadEffect, 2>;
 using ReadOnce = fx::set<fx::at_most<ReadEffect, 1>>;
 static_assert(!std::is_copy_constructible_v<ReadBudget>);
 static_assert(!std::is_move_constructible_v<ReadBudget>);
+static_assert(!std::is_copy_assignable_v<ReadBudget>);
+static_assert(!std::is_move_assignable_v<ReadBudget>);
 
 int read(const Reader& authority, ReadBudget& budget) noexcept {
   budget.spend();
