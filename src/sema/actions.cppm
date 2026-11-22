@@ -654,7 +654,7 @@ public:
       diag(at, Diag::ambiguous_name, name);
       return std::nullopt;
     }
-    return *type;
+    return with_template_defaults(*type, found);
   }
   // The variable template unqualified lookup finds for `name` ([temp.pre]/1), likewise.
   std::optional<ast::DeclSema> variable_template(NameId name, std::optional<u32> at = std::nullopt) {
@@ -696,10 +696,15 @@ public:
     }
     if (!found && !decls.empty()) found = decls.back();
     if (!found || found->kind != kind || !(found->flags & decl_flag::template_)) return std::nullopt;
-    std::vector<ast::TemplateParamSema> params = ins().seqs.elements(found->template_params);
+    return with_template_defaults(*found, decls);
+  }
+
+  // [temp.param] combines default arguments from prior declarations of the same template.
+  ast::DeclSema with_template_defaults(ast::DeclSema found, std::span<const ast::DeclSema> decls) {
+    std::vector<ast::TemplateParamSema> params = ins().seqs.elements(found.template_params);
     bool merged = false;
     for (const ast::DeclSema& d : decls) {
-      if (d.entity != found->entity) continue;
+      if (d.entity != found.entity) continue;
       std::vector<ast::TemplateParamSema> other = ins().seqs.elements(d.template_params);
       for (std::size_t i = 0; i < params.size() && i < other.size(); ++i)
         if (!params[i].has_default && other[i].has_default) {
@@ -708,7 +713,7 @@ public:
           merged = true;
         }
     }
-    if (merged) found->template_params = ins().intern_seq(std::span<const ast::TemplateParamSema>(params));
+    if (merged) found.template_params = ins().intern_seq(std::span<const ast::TemplateParamSema>(params));
     return found;
   }
 
