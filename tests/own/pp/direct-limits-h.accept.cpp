@@ -1,6 +1,7 @@
 // #475: the hosted glibc <limits.h> must expose public integer limits and
 // preserve their required promoted types ([climits.syn]).
 // REQUIRES: linux
+// PARITY: by design: glibc's headers exist only on Linux hosts
 // FLAGS: --target=x86_64-pc-linux-gnu
 // XFAIL: gcc GCC selects its target without --target
 #define _POSIX_C_SOURCE 200809L

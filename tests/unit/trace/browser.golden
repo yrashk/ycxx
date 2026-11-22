@@ -1,6 +1,6 @@
 ## start
  ycxx engine trace   ● 6 executed  ○ 1 reused  · 2 input  9 events, 4 workers, 900µs  29.1KiB allocated, 6.9KiB retained
- tree  timeline    worker: all  oldest first
+ tree  timeline  histogram    worker: all  oldest first
  cell↓                                  time  worker     alloc   retains⇔ cell
 ▾ ● Tu(a.cpp) executed                 900µs      w0   29.1KiB    6.9KiB│ Tu
   ▾ ● Pp(a.cpp) executed               190µs      w1   20.0KiB    5.5KiB│ a.cpp
@@ -25,7 +25,7 @@
  ↑↓/jk move  ⏎/space fold  ←→ close/open  e/E all  n next run  x next error  r reused  s sort  shift+J/K ]/[ pane  </> r
 ## a click on a marker folds the row, and selects it
  ycxx engine trace   ● 6 executed  ○ 1 reused  · 2 input  9 events, 4 workers, 900µs  29.1KiB allocated, 6.9KiB retained
- tree  timeline    worker: all  oldest first
+ tree  timeline  histogram    worker: all  oldest first
  cell↓                                  time  worker     alloc   retains⇔ cell
 ▾ ● Tu(a.cpp) executed                 900µs      w0   29.1KiB    6.9KiB│ FunctionIr
   ▾ ● Pp(a.cpp) executed               190µs      w1   20.0KiB    5.5KiB│ square
@@ -50,7 +50,7 @@
  ↑↓/jk move  ⏎/space fold  ←→ close/open  e/E all  n next run  x next error  r reused  s sort  shift+J/K ]/[ pane  </> r
 ## a double click folds a row
  ycxx engine trace   ● 6 executed  ○ 1 reused  · 2 input  9 events, 4 workers, 900µs  29.1KiB allocated, 6.9KiB retained
- tree  timeline    worker: all  oldest first
+ tree  timeline  histogram    worker: all  oldest first
  cell↓                                  time  worker     alloc   retains⇔ cell
 ▾ ● Tu(a.cpp) executed                 900µs      w0   29.1KiB    6.9KiB│ Pp
   ▸ ● Pp(a.cpp) executed  [2 below,    190µs      w1   20.0KiB    5.5KiB│ a.cpp
@@ -75,7 +75,7 @@
  ↑↓/jk move  ⏎/space fold  ←→ close/open  e/E all  n next run  x next error  r reused  s sort  shift+J/K ]/[ pane  </> r
 ## a click on the time header sorts by time
  ycxx engine trace   ● 6 executed  ○ 1 reused  · 2 input  9 events, 4 workers, 900µs  29.1KiB allocated, 6.9KiB retained
- tree  timeline    worker: all  oldest first  by time
+ tree  timeline  histogram    worker: all  oldest first  by time
  cell                                  time↓  worker     alloc   retains⇔ cell
 ▾ ● Tu(a.cpp) executed                 900µs      w0   29.1KiB    6.9KiB│ Pp
   ▾ ● Codegen(main) executed  (erro    350µs      w0    1.2KiB      164B│ a.cpp
@@ -100,7 +100,7 @@
  ↑↓/jk move  ⏎/space fold  ←→ close/open  e/E all  n next run  x next error  r reused  s sort  shift+J/K ]/[ pane  </> r
 ## the wheel scrolls the pane under it
  ycxx engine trace   ● 6 executed  ○ 1 reused  · 2 input  9 events, 4 workers, 900µs  29.1KiB allocated, 6.9KiB retained
- tree  timeline    worker: all  oldest first
+ tree  timeline  histogram    worker: all  oldest first
  cell↓                                  time  worker     alloc   retains⇔ cell
 ▾ ● Tu(a.cpp) executed                 900µs      w0   29.1KiB    6.9KiB│ started  200µs
   ▸ ● Pp(a.cpp) executed  [2 below,    190µs      w1   20.0KiB    5.5KiB│ took     300µs
@@ -122,10 +122,10 @@
                                                                         │   %2 = const.i32 4
                                                                         │   %3 = const.i32 9
                                                                         │ lines 7–25 of 52   shift+J/K line  ]/[ page  }
- pane: ↑↓/jk line  PgUp/PgDn page  g/G top/end  ←/h/Esc back to the tree  mouse: wheel scrolls, click the tree  ? help
+ pane: ↑↓/jk line  PgUp/PgDn page  g/G top/end  V select lines  y copy  ←/h/Esc back to the tree  mouse: drag selects an
 ## the divider dragged to column 60
  ycxx engine trace   ● 6 executed  ○ 1 reused  · 2 input  9 events, 4 workers, 900µs  29.1KiB allocated, 6.9KiB retained
- tree  timeline    worker: all  oldest first
+ tree  timeline  histogram    worker: all  oldest first
  cell↓                                time  worker     alloc⇔ cell
 ▾ ● Tu(a.cpp) executed               900µs      w0   29.1KiB│ Codegen
   ▸ ● Pp(a.cpp) executed  [2 belo    190µs      w1   20.0KiB│ main
@@ -152,7 +152,7 @@
  ycxx engine trace   ● 6 executed  ○ 1 reused  · 2 input
  9 events, 4 workers, 900µs
  29.1KiB allocated, 6.9KiB retained
- tree  timeline    worker: all  oldest first
+ tree  timeline  histogram    worker: all  oldest first
  cell↓                                time  worker     alloc
 ▾ ● Tu(a.cpp) executed               900µs      w0   29.1KiB
   ▾ ● Pp(a.cpp) executed             190µs      w1   20.0KiB
@@ -175,7 +175,7 @@
  ↑↓/jk move  ⏎/space fold  ←→ close/open  e/E all  n next ru
 ## the timeline
  ycxx engine trace   ● 6 executed  ○ 1 reused  · 2 input  9 events, 4 workers, 900µs  29.1KiB allocated, 6.9KiB retained
- tree  timeline    worker: all  oldest first
+ tree  timeline  histogram    worker: all  oldest first
         0                                                                                                         900µs
 ▶  main ││··············································································································
      w0 │█████████████████████████████████████████████████████████████▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓█▓████

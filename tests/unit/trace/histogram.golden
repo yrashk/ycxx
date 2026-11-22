@@ -1,0 +1,100 @@
+## the histogram: by kind, most self time first
+ ycxx engine trace   ● 6 executed  ○ 1 reused  · 2 input  9 events, 4 workers, 900µs  29.1KiB allocated, 6.9KiB retained
+ tree  timeline  histogram    worker: all  oldest first
+ metrics: ■1 self  ■2 in all  ■3 alloc  □4 peak  □5 retained  □6 allocs  ■7 runs  □8 hits  □9 waits
+ group by: kind  file  children     in everything   sorted by self time
+ kind (8)                    self time↓            time in all           allocated             runs
+ Optimized ×1                ███████████████ 240µs ████            240µs ▌                700B █████████████████   1
+ FunctionGen ×1              ███████████▉    190µs ███▎            190µs ██             2.9KiB █████████████████   1
+ Pp ×1                       ███████████▉    190µs ███▎            190µs █████████████ 20.0KiB █████████████████   1
+ Codegen ×1                  ██████▉         110µs █████▉          350µs ▍                500B █████████████████   1
+ FunctionIr ×1               ██████▉         110µs █████           300µs ▊               1000B █████████████████   1
+ Tu ×1                       ███▊             60µs ███████████████ 900µs ██▋            4.0KiB █████████████████   1
+ FileText ×2                                   0ns                   0ns                    0B                     0
+ SourceOf ×3                                   0ns                   0ns                    0B                     0
+
+
+
+
+
+
+
+
+
+
+ ↑↓/jk group  ⏎ its cells in the tree  1-9 metrics  c group by  i in the selected cell  s sort  b tree  / filter  mouse:
+## by file, by time in all
+ ycxx engine trace   ● 6 executed  ○ 1 reused  · 2 input  9 events, 4 workers, 900µs  29.1KiB allocated, 6.9KiB retained
+ tree  timeline  histogram    worker: all  oldest first
+ metrics: □1 self  ■2 in all  ■3 alloc  □4 peak  □5 retained  □6 allocs  □7 runs  □8 hits  □9 waits
+ group by: kind  file  children     in everything   sorted by allocated
+ file (3)                    time in all                                  allocated↓
+ a.cpp ×4                    ████████████████████▊                  490µs ████████████████████████████████████ 23.9KiB
+ (no source) ×6              ██████████████████████████████████████ 900µs ███████▉                              5.2KiB
+ x.h ×1                                                               0ns                                           0B
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+ ↑↓/jk group  ⏎ its cells in the tree  1-9 metrics  c group by  i in the selected cell  s sort  b tree  / filter  mouse:
+## by the children of the selected cell
+ ycxx engine trace   ● 6 executed  ○ 1 reused  · 2 input  9 events, 4 workers, 900µs  29.1KiB allocated, 6.9KiB retained
+ tree  timeline  histogram    worker: all  oldest first
+ metrics: □1 self  ■2 in all  ■3 alloc  □4 peak  □5 retained  □6 allocs  □7 runs  □8 hits  □9 waits
+ group by: kind  file  children     of the selected cell  Tu(a.cpp)   sorted by allocated
+ children (4)                time in all                                  allocated↓
+ Pp(a.cpp) ×3                ████████████████████▊                  190µs ████████████████████████████████████ 20.0KiB
+ FunctionIr(square) ×2       ████████████████████████████████▋      300µs ███████▏                              3.9KiB
+ Codegen(main) ×2            ██████████████████████████████████████ 350µs ██▏                                   1.2KiB
+ SourceOf(a.cpp) ×3                                                   0ns                                           0B
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+ ↑↓/jk group  ⏎ its cells in the tree  1-9 metrics  c group by  i in the selected cell  s sort  b tree  / filter  mouse:
+## the source column (S)
+ ycxx engine trace   ● 6 executed  ○ 1 reused  · 2 input  9 events, 4 workers, 900µs  29.1KiB allocated, 6.9KiB retained
+ tree  timeline  histogram    worker: all  oldest first
+ cell↓                                  time  worker     alloc   retains⇔ cell
+▾ ● Tu(a.cpp) executed                 900µs      w0   29.1KiB    6.9KiB│ FunctionIr
+  ▾ ● Pp(a.cpp) executed               190µs      w1   20.0KiB    5.5KiB│ square
+      · FileText(a.cpp) input                     w1                300B│
+      · FileText(x.h) input                       w1                200B│ ● executed
+  ▾ ● FunctionIr(square) executed      300µs      w2    3.9KiB      300B│ ran, value changed
+      ● FunctionGen(square) execute    190µs      w2    2.9KiB          │
+  ▾ ● Codegen(main) executed  (erro    350µs      w0    1.2KiB      164B│ started  200µs
+      ● Optimized({1, aarch64_macos    240µs      w3      700B       64B│ took     300µs
+    ○ SourceOf(a.cpp) reused ×3                   w0                    │ worker   w2
+                                                                        │ depth    1
+                                                                        │ below    1 cells, 1 ran
+                                                                        │ for      Tu(a.cpp)
+                                                                        │ source   a.cpp:1:1–3:1
+                                                                        │
+                                                                        │ memory
+                                                                        │ alloc    1000B in 31 allocations
+                                                                        │ peak     1000B
+                                                                        │ retains  300B
+                                                                        │ in all   3.9KiB allocated, 300B retained
+                                                                        │ lines 1–19 of 53   shift+J/K line  ]/[ page  }
+ ↑↓/jk move  ⏎/space fold  ←→ close/open  e/E all  n next run  x next error  r reused  s sort  shift+J/K ]/[ pane  </> r

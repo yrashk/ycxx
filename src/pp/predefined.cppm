@@ -275,13 +275,16 @@ std::string target_macros(const ast::Target& t) {
       std::string c = std::format("{}INT{}", u, n);
       def(std::format("__{}_C_SUFFIX__", c), suffix(x));
       std::string_view s = suffix(x);
+      // `c ## L` as GCC and glibc spell it: glibc's <stdint.h> redefines __INT64_C and
+      // __UINT64_C, and a redefinition must match in white-space separation too (#657). The
+      // others follow GCC's spelling for uniformity.
       if (s.empty()) out += std::format("#define __{}_C(c) c\n", c);
-      else out += std::format("#define __{}_C(c) c##{}\n", c, s);
+      else out += std::format("#define __{}_C(c) c ## {}\n", c, s);
     }
   }
   for (auto [name, b] : {std::pair{"INTMAX", t.intmax_type}, {"UINTMAX", unsigned_of(t.intmax_type)}}) {
     def(std::format("__{}_C_SUFFIX__", name), suffix(b));
-    out += std::format("#define __{}_C(c) c##{}\n", name, suffix(b));
+    out += std::format("#define __{}_C(c) c ## {}\n", name, suffix(b));
   }
   // The standard floating types and the _Float16 extension.
   def("__FLT_RADIX__", 2);

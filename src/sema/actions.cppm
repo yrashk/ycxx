@@ -524,10 +524,14 @@ public:
     std::optional<QualType> type;
   };
 
-  // [class.pre], [class.member.lookup]: an ordinary class's injected name stops the search on
+  enum class ClassBodyLookup { unqualified, qualified, before_template_parameter };
+
+  // [class.pre], [class.member.lookup]: a class's injected name stops the search on
   // that branch. In a nonvirtual graph, distinct base branches cannot dominate one another.
   ClassBodyType class_body_type(EntityId naming, const ClassRec& root, NameId name, std::optional<u32> type_at,
-                               bool qualified = false, bool type_only = false) {
+                               ClassBodyLookup lookup = ClassBodyLookup::unqualified, bool type_only = false) {
+    const bool qualified = lookup == ClassBodyLookup::qualified;
+    const bool before_parameter = lookup == ClassBodyLookup::before_template_parameter;
     struct Edge {
       EntityId derived;
       ast::Access access;
@@ -543,7 +547,8 @@ public:
     std::vector<Edge> path;
     auto collect = [&](this auto&& visit, EntityId cls, const ClassRec& cr) -> void {
       const EntityRec& c = w_->entities.rec(cls);
-      if (c.kind == EntityKind::class_ && c.templ == EntityId::none && c.name == name) {
+      if (c.kind == EntityKind::class_ && c.name == name &&
+          (c.templ == EntityId::none || (before_parameter && cls != naming))) {
         hits.push_back({types().class_type(cls), cls, ast::Access::public_, true, path});
         return;
       }
@@ -560,7 +565,7 @@ public:
         }
       }
       std::span<const BaseRec> bases = cr.bases;
-      if (qualified && cls == naming && !cr.defined) bases = q_->defining_base_records(cls);
+      if ((qualified || before_parameter) && cls == naming && !cr.defined) bases = q_->defining_base_records(cls);
       for (const BaseRec& b : bases) {
         if (const ClassRec* base = class_rec(b.cls)) {
           if (type_at) path.push_back({cls, b.access});
@@ -578,15 +583,16 @@ public:
     auto first = std::ranges::find_if(hits, [](const Hit& h) { return h.type.has_value(); });
     if (first == hits.end()) return {true, std::nullopt};
     // Apply the lookup-set and access checks to names with an injected-class-name candidate.
-    // Ordinary nested member access is handled by its existing lookup paths.
-    if (type_at && injected) {
+    // The caller resolving a potentially hidden template parameter also needs these checks
+    // for ordinary members of nondependent bases ([temp.local]).
+    if (type_at && (injected || before_parameter)) {
       QualType selected = types().canonical(*first->type);
       if (std::ranges::any_of(hits, [&](const Hit& h) { return !h.type || types().canonical(*h.type) != selected; })) {
         diag(*type_at, Diag::ambiguous_member, name, types().class_type(naming));
       } else {
-        auto allowed = [this, naming](const Hit& h) {
+        auto allowed = [this, naming, before_parameter](const Hit& h) {
           return accessible(h.owner, h.access, naming) && std::ranges::all_of(h.path, [&](const Edge& edge) {
-            return accessible(edge.derived, edge.access);
+            return accessible(edge.derived, edge.access, before_parameter ? naming : EntityId::none);
           });
         };
         if (!std::ranges::any_of(hits, allowed)) {
@@ -598,11 +604,27 @@ public:
             });
             return {true, type};
           }
-          diag(*type_at, Diag::inaccessible_base, type, types().class_type(naming));
+          if (before_parameter && !accessible(first->owner, first->access, naming))
+            diag(*type_at, first->access == ast::Access::protected_ ? Diag::protected_member : Diag::private_member,
+                 name, types().class_type(first->owner));
+          else
+            diag(*type_at, Diag::inaccessible_base, type, types().class_type(naming));
         }
       }
     }
     return {true, first->type};
+  }
+  // A class template's nondependent bases are searched before the template parameter scope.
+  std::optional<QualType> class_template_parameter_type(const ast::TemplateParamSema& parameter, NameId name, u32 at) {
+    const auto before = diag_count();
+    const auto hit = class_body_type(current_class, ClassRec{}, name, at, ClassBodyLookup::before_template_parameter);
+    if (hit.found) {
+      if (has_error_since(before)) return std::nullopt;
+      if (!hit.type) diag(at, Diag::not_a_type, name);
+      return hit.type;
+    }
+    if (auto argument = bound_arg(parameter)) return argument->type;
+    return parameter.type;
   }
   // A typedef-name the implementation declares where nothing else does (docs/EXTENSIONS.md):
   // `__builtin_va_list`, the type used by the target's C headers and libycxx's `va_list`.
@@ -1628,7 +1650,7 @@ public:
           (!type_only || is_type(earlier->kind))) return {};
     }
     const ClassRec incomplete;
-    return class_body_type(naming, cls ? *cls : incomplete, name, at, /*qualified=*/true, type_only);
+    return class_body_type(naming, cls ? *cls : incomplete, name, at, ClassBodyLookup::qualified, type_only);
   }
 
   // Qualified namespace lookup for an elaborated class name skips non-types and aliases.
@@ -5722,7 +5744,6 @@ public:
   }
 
   std::optional<lex::VaBuiltin> va_builtin(NameId name) {
-    if (w_->target.va_list != ast::VaList::sysv_x86_64) return std::nullopt;
     auto b = lex::va_builtin(ins().names.spelling(name));
     return b && !declared(name) ? b : std::nullopt;
   }
@@ -5753,12 +5774,22 @@ public:
       }
     }
 
-    // A local va_list decays to a pointer to its single record; an adjusted parameter is
-    // already a pointer. The pointee's identity and cv-qualifiers must match in either case.
-    const QualType array = w_->builtin_va_list();
-    const QualType pointer = types().pointer(types().rec(array).inner);
+    // System V: a local va_list decays to a pointer to its single record; an adjusted parameter
+    // is already a pointer. The pointee's identity and cv-qualifiers must match in either case.
+    // Apple arm64: the va_list is itself a `char*`, and each operation takes the address of the
+    // variable that holds it, so the cursor is a pointer to a `char*` either way.
+    const QualType va_list = w_->builtin_va_list();
+    const bool pointer_list = w_->target.va_list == ast::VaList::char_pointer;
+    const QualType pointer = types().pointer(pointer_list ? va_list : types().rec(va_list).inner);
     auto normalize = [&](Ex e) {
       if (dependent(e)) return e;
+      if (pointer_list) {
+        if (!e.glvalue() || types().canonical(e.type()) != types().canonical(va_list)) {
+          diag(e.begin, Diag::va_list_operand, e.type());
+          return Ex{NodeId::none, e.begin, e.end};
+        }
+        return builtin_address_of(e, e.begin, e.end, e.begin);
+      }
       Ex p = rvalue(e);
       if (p.ok() && types().canonical(p.type()) != pointer) {
         diag(e.begin, Diag::va_list_operand, e.type());

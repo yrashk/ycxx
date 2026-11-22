@@ -294,6 +294,8 @@ What is true of the code today. Work in progress and its owners are tracked in
   as black-box inputs. A common symbol becomes a weak definition in its own `__DATA,__common`
   zero-fill section. The reader rejects absolute and indirect symbols, alignments above 2^15,
   scattered and TLV relocations, and section-relative relocations other than UNSIGNED.
+  A SUBTRACTOR must be followed immediately by a non-PC-relative UNSIGNED at the same address
+  and width. Both records describe a 32-bit or 64-bit field. [#702](https://github.com/yrashk/ycxx/issues/702)
 - `ycxx.link` (`src/link/`): `link(objects, options) -> expected<bytes, errors>`.
   - Diagnoses duplicate and undefined symbols and a missing entry point. A strong definition beats
     a weak one; common symbols merge to the largest. `__mh_execute_header` and `___dso_handle` are
@@ -316,11 +318,16 @@ What is true of the code today. Work in progress and its owners are tracked in
     (literals, initializers, guarded statics) with ycxx's and the system's linker, dead stripping
     included, in both object orders, with a host-compiler peer and an archive member. Templates,
     closures and static locals of inline functions remain strong (#124).
-  - Not yet: unwind info (`__compact_unwind` and `__eh_frame` input sections are dropped, so C++
-    exceptions cannot cross ycxx-linked frames), thread-local variables, dead stripping, literal
-    merging, branch islands beyond ±128 MiB, other dylibs' re-exports, incremental relinking, and
-    import addends outside 0..255 (`DYLD_CHAINED_IMPORT_ADDEND`). `__LLVM` (embedded bitcode),
-    `__LD` and debug sections are dropped.
+  - The linker preserves cleanup-free `__TEXT,__eh_frame` contributions with the supported
+    PC-relative CIE and FDE format, including address differences and multiple input objects.
+    `unit.link` checks the linked ranges and walks through a non-frame-pointer arm64 bridge
+    with the system unwinder on macOS. Compact unwind, personalities and LSDA are tracked in
+    [#72](https://github.com/yrashk/ycxx/issues/72). AArch64 frame emission and native exception
+    lowering are tracked in [#648](https://github.com/yrashk/ycxx/issues/648).
+  - Not yet: thread-local variables, dead stripping, literal merging, branch islands beyond
+    ±128 MiB, other dylibs' re-exports, incremental relinking, and import addends outside
+    0..255 (`DYLD_CHAINED_IMPORT_ADDEND`). `__LLVM` (embedded bitcode), `__LD` and debug sections
+    are dropped.
 - Objects from ycxx, Clang or GCC are linked by `ycxx cxx a.o b.o -o out`, with libSystem's
   exports read from the SDK (`$SDKROOT`, else `xcrun --show-sdk-path`). There is no separate
   linker binary (DECISIONS §4.7: one binary, many fronts).
@@ -376,9 +383,18 @@ stay open for the rest.
     stack arguments both ways, function pointers and the GOT. Mutating `sdiv` or the stack packing
     makes it fail. Two variadic C callees read what generated calls pass through their ellipsis
     with `va_arg`, after named stack arguments and with none.
+- Variadic definitions on Apple arm64 ([#647](https://github.com/yrashk/ycxx/issues/647)):
+  `__builtin_va_list` is `char*`. Each cursor operation takes the address of the variable that
+  holds it, so lowering sees a pointer to a `char*` cursor on both targets. `va_start` stores
+  the address of the first 8-byte slot after the named stack arguments, at `x29 + 16` plus
+  their size rounded to 8. `va_arg` loads the slot and advances the cursor by 8, `va_copy`
+  copies it and `va_end` does nothing. `own/variadic/definitions` calls ycxx's definitions
+  from ycxx and from a Clang peer, and lets the peer's `va_arg` read a cursor ycxx started.
+  It fails if the named stack size is ignored or the cursor advances by 4. `<stdarg.h>`
+  itself is missing on Darwin ([#676](https://github.com/yrashk/ycxx/issues/676)); `<cstdarg>` works.
 - Not yet: the allocation
   validator and dependence checker (#29), SSA linear scan, list scheduling, unwind info and DWARF,
-  a measured `cost_model` (#9), defining a variadic function (`va_start`), more than one result, frame objects aligned above 16 bytes.
+  a measured `cost_model` (#9), more than one result, frame objects aligned above 16 bytes.
 
 ## System V AMD64 frames
 
@@ -672,10 +688,15 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
   freestanding linker retains these records in the read-only segment. The hosted linker
   supplies unwind discovery for the peer who throws and catches the exception.
   `unit.linux_cleanup_free_unwind` checks mixed hosted execution, omitted frames, and native
-  source, staged, and daemon link parity. Standalone unwind discovery, native handlers, and
-  exceptional cleanups remain under #89.
+  source, staged, and daemon link parity. Standalone unwind discovery and broader handler and
+  exceptional-cleanup support remain under #89.
   [#572](https://github.com/yrashk/ycxx/issues/572) · [#89](https://github.com/yrashk/ycxx/issues/89)
   · [#558](https://github.com/yrashk/ycxx/issues/558)
+- A host-linked ordinary void function can destroy one initialized aggregate local with a
+  nonthrowing destructor when its subsequent direct external `void()` call throws. The normal
+  continuation destroys it once as well. The cleanup-only landing pad resumes the original
+  exception; the mixed-object test checks both paths and the peer's typed handler.
+  [Design](docs/design/linux-hosted-catch-all.md#hosted-local-cleanup-663) · [#663](https://github.com/yrashk/ycxx/issues/663)
 - Explicit native static links keep the first input ELF COMDAT group for each signature. The reader
   validates group membership, including relocation sections, and selection precedes startup and
   layout. `unit.linux_elf_comdat` checks whole-group selection, retained references, startup and
@@ -1981,6 +2002,17 @@ Fable decided the representation (ast.md §6.6); the Opus session wrote the code
 - Tests: `tests/own/classes/s6-access-*` (five reject tests, two run tests); draft examples
   class.friend-1 and class.name-4 pass.
 
+## Dependent type friends in class templates (#689)
+
+A class template can name a non-pack type parameter in a standalone `friend Authority;`
+declaration. Instantiation grants access to the class of that specialization's argument,
+including a cv-qualified or incomplete class, or ignores a non-class argument
+([class.friend], [temp.friend]). The existing access checks use each specialization's own friend
+list. The declaration introduces no name into lookup.
+A type inherited from a nondependent base takes precedence over the template parameter
+([temp.local]).
+[#689](https://github.com/yrashk/ycxx/issues/689)
+
 ## Templates, ζ step 7: static data members of class templates (#88, 2026-11-18)
 
 - A class template's static data members are declared with its other members. A specialization
@@ -2073,6 +2105,14 @@ Fable decided the representation (ast.md §6.6); the Opus session wrote the code
   continuation marker to that inclusion and lets glibc supply the locale bound and POSIX
   limits. Other libc providers keep their normal `<limits.h>`, and the resource can
   supply compiler limits when a sysroot has no provider ([climits.syn]).
+
+## glibc `<stdint.h>` (#657)
+
+- The integer-constant macros (`__INT64_C(c)` and the rest) are predefined as `c ## L`, GCC's and
+  glibc's spelling, so glibc's identical redefinitions in `<stdint.h>` are valid
+  ([cpp.replace.general]/2). The expansions are Clang's. `<inttypes.h>` still clashes with
+  libycxx's limit macros (#664). Tests: `own/pp/predefined-int-c-redefine` (both targets) and
+  `own/headers/glibc-stdint` (Linux).
 
 ## Templates, ζ step 8: template template parameters and `__make_integer_seq` (#88, #208, 2026-11-19)
 
@@ -2193,11 +2233,26 @@ request it serves.
   divider drag, sort, focus, wrap; frames against `browser.golden`); `daemon.trace_tui` (under a
   pty: modes on and off, a click, a resize, SIGTERM and SIGABRT restoring the terminal),
   mutation-checked.
+- Copy (#636): `y` copies the cell (the pane's text, unwrapped) and `Y` its subtree (stream lines
+  with times and memory). A drag over rows or pane text, or `V` with j/k, selects, and the copy
+  happens on release or `y`. `Action::copy` carries the text. `:browse` writes OSC 52 (plus
+  tmux's passthrough form) and, locally, runs `YCXX_CLIPBOARD` or the first of pbcopy, wl-copy,
+  xclip and xsel. Tests: `unit.trace` (the exact text of each way to copy, base64, OSC 52);
+  `daemon.trace_tui` (`y` and a row drag through OSC 52 and the command).
+- Histograms (#637): `Metric` (self time, the span less the union of the children's; time in
+  all; allocated; peak; retained; allocations; runs; cache hits; waits), `metrics_of`,
+  `self_times`, `Groups`, and `histogram(tree, Grouping, within, order)` (by kind, file or
+  children; the tree's filter applies). The browser's histogram view has metric switches,
+  grouping, scope, sort, and a bar that opens its cells in the tree (`kind:`/`at:` filters,
+  or selection). The JSON summary has `histogram.by_kind`/`by_file`. The browser shows a
+  cell's source in the pane, an `S` column, and `p` copies `path:line:col`. Tests:
+  `unit.trace` (aggregation values, JSON, the view's frames against `histogram.golden`, its
+  hits and keys, the source line, column and copy; self time mutation-checked).
 - Source spans (#638): `engine::SourceSpan` on each `TraceEvent`, from a kind's `trace_span(const
   Db&, const Key&)`, which runs only in `Db::trace`. `Db::peek` reads an input, or a value
   verified at this revision, without a dependency. A file's and a unit's cells are the file; a
   function's cells (FunctionSourceQ to Codegen) are its definition's first to last token
-  (`item_span`, lines as diagnostics count them). The JSON `span`, `at:file[:line]` in the
+  (`item_span`, lines as diagnostics count them). The JSON `span`, `at:file[:line[:col]]` in the
   filter, and `span_text`/`span_start` are in place. Tests: `unit.trace` (the spans of a real
   build, cells without spans, text, filter, JSON; mutation-checked) and `daemon.trace` (spans
   across the socket).
@@ -2331,6 +2386,10 @@ What the process allocates, attributed to the engine's cells, in the trace and t
   in order, and returns `*this`. Deleted copy assignments participate in overload resolution.
   [Design](docs/design/implicit-copy-assignment.md#first-declaration-defaulted-copy-assignment) ·
   [#244](https://github.com/yrashk/ycxx/issues/244)
+- Namespace-scope class templates accept a deleted copy assignment without a ref-qualifier
+  on the first in-class declaration. Specializations preserve deletion and diagnose a selected
+  deleted overload.
+  [#709](https://github.com/yrashk/ycxx/issues/709)
 
 ## Ordinary virtual declarations (#309, 2026-11-21)
 

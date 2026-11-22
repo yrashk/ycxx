@@ -4332,6 +4332,25 @@ private:
       friend_at = ps_.pos();
       ps_.bump();
     }
+    // [class.friend], [temp.friend]: look up and substitute the type of the friend.
+    // The designated class need not be complete here. The declaration introduces no name.
+    if (friend_at && ps_.is(Tk::identifier) && ps_.kind(1) == Tk::semi) {
+      const NameId name = ps_.name_of(ps_.tok());
+      const auto* param = s_.template_param(name);
+      if (param && param->kind == ast::TemplateArgKind::type && !param->pack) {
+        const auto type = s_.class_template_parameter_type(*param, name, ps_.pos());
+        if (!type) return bad();
+        auto& types = s_.types();
+        const EntityId entity = types.is_class(*type) ? types.class_of(*type) : EntityId::none;
+        auto sem = class_decl(entity, false);
+        sem.type = *type;
+        sem.flags = sema::decl_flag::friend_;
+        decls_.push_back(sem);
+        ps_.bump();
+        ps_.bump();
+        return;
+      }
+    }
     const bool definition = it_->kind == ItemKind::function;
     if (!definition && !annotations.empty()) {
       s_.diag(annotations.front().offset, Diag::attributes_not_allowed);
@@ -5357,9 +5376,10 @@ private:
       const auto parameter = p_->assignment_parameter({.name = d.name, .type = d.type, .is_function = true,
                                                        .is_static = spec.is_static, .is_template = member_template_,
                                                        .defaults = {}}, c.type);
-      const bool ordinary = s_.template_scopes.empty() && !inst_ &&
-                            p_->is_namespace(s_.world().entities.rec(c.entity).scope);
-      if (!ordinary || !parameter || types.rec(*parameter).rvalue_ref) {
+      const auto& owner = s_.world().entities.rec(c.entity);
+      const bool supported_class = p_->is_namespace(owner.scope) &&
+                                   ((s_.template_scopes.empty() && !inst_) || (deleted && owner.templ != EntityId::none));
+      if (!supported_class || !parameter || types.rec(*parameter).rvalue_ref) {
         s_.diag(d.name_at, Diag::not_supported, defaulted ? Tk::kw_default : Tk::kw_delete);
         return false;
       }
