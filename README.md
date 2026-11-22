@@ -37,8 +37,9 @@ The unary `noexcept` operator checks whether calls and constructions can throw.
 Member function template specializations preserve bare `noexcept` in their function types.
 [#729](https://github.com/yrashk/ycxx/issues/729)
 Ordinary constructor declarations and definitions check that their concrete exception specifications agree.
-Member function templates can substitute a dependent exception specification when it is needed.
-[#713](https://github.com/yrashk/ycxx/issues/713)
+Function templates, member function templates and members of class templates substitute a
+dependent exception specification when it is needed.
+[#713](https://github.com/yrashk/ycxx/issues/713) [#828](https://github.com/yrashk/ycxx/issues/828)
 
 A class template can grant private access to the class passed as a type argument using
 `friend Authority;`. Each specialization grants access to its own authority.

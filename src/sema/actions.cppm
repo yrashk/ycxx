@@ -117,7 +117,8 @@ public:
   virtual std::optional<NodeId> replay_function_default(Sema&, const ast::DefaultArg&, EntityId, QualType) {
     return std::nullopt;
   }
-  // A selected member-template specialization's exception specification ([except.spec]).
+  // A selected specialization's exception specification ([except.spec]/13): of a member template,
+  // of a member of a class template specialization, or of a function template.
   virtual std::optional<QualType> replay_member_exception(Sema&, const ast::DeclSema&, EntityId, QualType type) {
     return type;
   }
@@ -5616,7 +5617,13 @@ public:
     };
     auto function_throwing = [&](EntityId function) {
       const auto written = q_->written_member(function);
-      const QualType type = written ? written->type : w_->entities.rec(function).type;
+      QualType type = written ? written->type : w_->entities.rec(function).type;
+      // A specification that depends on the template's parameters, for this specialization.
+      std::optional<ast::DeclSema> pattern = written;
+      if (!pattern)
+        if (const EntityId t = w_->entities.rec(function).templ; t != EntityId::none) pattern = q_->template_decl(t);
+      if (pattern)
+        if (auto resolved = q_->replay_member_exception(*this, *pattern, function, type)) type = *resolved;
       return !types().rec(type).fn_noexcept;
     };
     auto operation_throwing = [&](const ast::Red& node) {
@@ -6488,11 +6495,25 @@ public:
         continue;
       }
       Templates t = templates();
+      // A pattern whose exception specification is decided per specialization is written
+      // potentially throwing: deduce from the target without its `noexcept`, and match the
+      // specialization's own type against the target below.
       auto deduced = t.deduce_declaration(d, fn, args, true);
+      if (!deduced && types().is_function(fn) && types().rec(fn).fn_noexcept) {
+        const TypeRec r = types().rec(fn);
+        deduced = t.deduce_declaration(d, types().function(r.inner, r.params, r.variadic, r.linkage, r.fn_cv, r.fn_ref), args, true);
+      }
       if (!deduced || !constraints_satisfied(d, *deduced)) continue;
       auto ft = t.specialization_type(d, *deduced);
       if (!ft) continue;
       EntityId f = specialization(d, *deduced, *ft);
+      // Its exception specification is part of its type ([except.spec]/13).
+      if (auto resolved = q_->replay_member_exception(*this, d, f, *ft); !resolved) {
+        continue;
+      } else if (*resolved != *ft) {
+        ft = resolved;
+        f = specialization(d, *deduced, *ft);
+      }
       if (types().has_placeholder(types().rec(*ft).inner)) ft = q_->deduced_type(f);
       if (ft && matches_target(*ft)) found.push_back({f, *ft, &d});
     }

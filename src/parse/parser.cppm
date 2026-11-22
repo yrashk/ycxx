@@ -953,7 +953,13 @@ public:
     d.begin = pos();
     const std::size_t first_local = s_->locals().size();
     const bool in_body = s_->current_function != ast::EntityId::none;
-    Level top = level(abstract, d.ok, conversion, named_exception == NamedExceptionSpec::member_template);
+    // In a template, a function's own noexcept-specifier is kept as tokens and evaluated for each
+    // specialization when it is needed ([except.spec]/13, [temp.inst]); a member template's always.
+    const bool defer_exception = named_exception == NamedExceptionSpec::member_template ||
+                                 (s_->templated() && !typedef_ &&
+                                  (named_exception == NamedExceptionSpec::class_member ||
+                                   named_exception == NamedExceptionSpec::ordinary));
+    Level top = level(abstract, d.ok, conversion, defer_exception);
     if (conversion && !top.conversion_target) {
       if (in_body) s_->discard_local_declarations(first_local);
       return d;
@@ -1836,8 +1842,15 @@ public:
                                            l.named && !s->noexcept_condition;
         if (s->has_noexcept && !s->noexcept_tokens &&
             (allocation || keep_named_exception || bare_member_exception || member_pointer_to_suffix(l) ||
-             (spells_type && !l.inner) || (d.ok && !s_->templated())))
+             (spells_type && !l.inner) || !s->noexcept_condition || (d.ok && !s_->templated()))) {
           nonthrowing = noexcept_value(s->noexcept_condition, d.ok);
+        } else if (s->has_noexcept && !s->noexcept_tokens && d.ok) {
+          // In a templated context, a condition that is not value-dependent is decided here; a
+          // dependent one, by the instantiation that replays this declarator ([temp.dep.constexpr]).
+          bool dependent = false;
+          const bool value = noexcept_value(s->noexcept_condition, d.ok, &dependent);
+          if (!dependent) nonthrowing = value;
+        }
         t = s_->types().function(t, ps, s->variadic, linkage_, s->cv, s->ref, nonthrowing);
         fn = &*s;
       } else if (!s->unknown_bound && !s->dependent_bound && s->bound == 0) {
@@ -1901,7 +1914,9 @@ public:
     suffix.noexcept_condition = e;
   }
 
-  bool noexcept_value(const std::optional<Ex>& condition, bool& ok) {
+  // The value of a noexcept-specifier's condition ([except.spec]/2). With `dependent`, a
+  // value-dependent condition sets it instead of being diagnosed.
+  bool noexcept_value(const std::optional<Ex>& condition, bool& ok, bool* dependent = nullptr) {
     if (!condition) return true;
     Ex operand = s_->rvalue(*condition);
     Ex e = s_->to_bool(operand, operand.begin);
@@ -1912,6 +1927,10 @@ public:
         ok = false;
       }
       return s_->world().values.as_signed(*result.value) != 0;
+    }
+    if (result.dependent && dependent) {
+      *dependent = true;
+      return false;
     }
     if (result.dependent) s_->diag(e.begin, Diag::not_supported, Tk::kw_noexcept);
     else if (e.ok()) s_->diag(e.begin, Diag::not_constant, result.reason);

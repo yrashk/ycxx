@@ -2737,6 +2737,18 @@ checked against Clang 23 and GCC 16 probes).
   inline functions (#124). A constant named by a lambda with a capture-default is captured, where
   Clang captures it only when it is odr-used (a layout difference for such closures, #355).
 
+## Dependent exception specifications of templates (#828, #819)
+
+A function template's noexcept-specifier, and that of an ordinary member function of a class
+template, is part of each specialization's type. Bare `noexcept` and a condition that does not
+depend on the template's parameters apply at once. A dependent condition is kept as tokens and
+replayed for a specialization when it is needed: by the unary `noexcept` operator, or when the
+specialization's address is taken ([except.spec]/13, [temp.inst]). This uses the replay that
+member templates already had (#713, `replay_member_exception`); an explicit specialization keeps
+its own specification. An invalid condition of a specialization that is never needed is no error.
+In a template, a non-dependent `noexcept` on a pointer's function type is part of the type.
+- Tests: `tests/own/template-noexcept/` (one run test, one reject test, one accept test).
+
 ## Namespace variable lambdas (#338)
 
 - A named internal-linkage namespace variable with a deduced type can be initialized by a
