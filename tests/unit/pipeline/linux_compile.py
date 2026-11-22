@@ -102,6 +102,7 @@ def main():
     source_dir = Path(__file__).resolve().parent
     libycxx = Path(libycxx_source)
     target = '--target=x86_64-pc-linux-gnu'
+    darwin = '--target=arm64-apple-darwin'
     with tempfile.TemporaryDirectory(prefix='ycxx-linux-') as temp, tempfile.TemporaryDirectory(prefix='yd-') as runtime:
         scope = Path(temp)
         (scope / '.ycxx').touch()
@@ -224,10 +225,10 @@ system_leaf:
             run(['./bool_abi'], scope, cold)
 
         external_data_addresses(compile, target, source_dir, scope, cold, cc, readelf, ar)
-        compile('-c', 'source.cpp', '-o', 'cold-darwin.o')
+        compile(darwin, '-c', 'source.cpp', '-o', 'cold-darwin.o')
         try:
             compile(target, '-c', 'source.cpp', '-o', 'warm-first-linux.o', env=daemon)
-            compile('-c', 'source.cpp', '-o', 'warm-darwin.o', env=daemon)
+            compile(darwin, '-c', 'source.cpp', '-o', 'warm-darwin.o', env=daemon)
             compile('--target', 'x86_64-linux-gnu', '-c', 'source.cpp', '-o', 'warm-linux.o', env=daemon)
             elf = (scope / 'source.o').read_bytes()
             macho = (scope / 'cold-darwin.o').read_bytes()
