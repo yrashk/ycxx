@@ -1277,8 +1277,16 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   scalar fields uses one machine body and ELF range for each pair. Named signature types
   must have known layout and linkage. Callback signatures and class parameters passed by
   value are outside this scope. GCC and Clang peers check the raw entry names, an adjusted
-  base pointer, and construction and destruction order. Caller-side base entry selection
-  and virtual deleting destructors are tracked in [#136](https://github.com/yrashk/ycxx/issues/136).
+  base pointer, and construction and destruction order.
+- Linux x86-64 can define the out-of-line virtual destructor of an ordinary fieldless,
+  baseless root when the first public virtual is a peer-defined non-inline `int()` key
+  function and the second is the public destructor. Both declarations and the destructor
+  definition use bare `noexcept`. The `D1` and `D2` entries share a body that restores
+  the peer's root table address point before calling a directly declared nonthrowing C++
+  observer with `this`. `D0` calls `D1`, then calls implicitly declared global sized
+  `operator delete` with the original pointer and the complete root size.
+  [Itanium ABI §2.5.2](https://itanium-cxx-abi.github.io/cxx-abi/abi.html#vtable-components) ·
+  [#136](https://github.com/yrashk/ycxx/issues/136) · [#659](https://github.com/yrashk/ycxx/issues/659)
 - A non-template constructor can delegate to another ordinary constructor of its class with
   a sole parenthesized or braced initializer ([class.base.init], #157). The target resolves in
   the complete class and constructs the same object. The delegating body starts after the
