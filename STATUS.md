@@ -2623,12 +2623,13 @@ What the process allocates, attributed to the engine's cells, in the trace and t
   existing receiver pointer, with ordinary access to the object's integral fields. The peer
   defines the key function and supplies the table, RTTI, and object lifetime.
   [Itanium ABI §5.2.3](https://itanium-cxx-abi.github.io/cxx-abi/abi.html#vague-vtable) · [#309](https://github.com/yrashk/ycxx/issues/309)
-- The staged Linux x86-64 producer admits one external, default-visible, non-template root with
+- The Linux x86-64 producer admits one external, default-visible, non-template root with
   one public integral field and two directly written fixed integer virtual signatures. A unit
   that defines the first virtual out of line and non-inline owns the table and RTTI. It emits
   default-visible `_ZTV` and `_ZTI` objects and a weak `_ZTS` object in a read-only ELF COMDAT
   keyed by the name. The peer defines the non-key member and constructs the complete object.
-  Compiler verification with mixed objects and daemon edits is pending.
+  Mixed GCC and Clang checks verify dispatch and RTTI. Daemon edits verify table ownership
+  and byte-for-byte agreement with a cold compile.
   [Itanium ABI §5.2.3–4](https://itanium-cxx-abi.github.io/cxx-abi/abi.html#vague-vtable) ·
   [#309](https://github.com/yrashk/ycxx/issues/309) · [#422](https://github.com/yrashk/ycxx/issues/422)
 - Local complete-object construction and vptr initialization are the next slice in #309.

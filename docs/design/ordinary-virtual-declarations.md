@@ -108,7 +108,7 @@ remain guarded. Packed or annotated layout and further inheritance forms are tra
 
 ## Linux x86-64 key-owned root tables
 
-The staged producer admits one ordinary, externally linked, default-visible non-template root
+The producer admits one ordinary, externally linked, default-visible non-template root
 at namespace scope. Its natural layout has one directly declared public integral
 field. It declares two virtuals with directly written fixed integer signatures. The first
 declaration is the Itanium key function. The unit defines it out of class and non-inline in a
@@ -120,10 +120,10 @@ preceding the key definition are outside this scope.
 The complete translation unit determines ownership independently of table use. An immutable
 unit value records the nominal class type and the two function entities
 in declaration order. Each function's source projection continues to determine its lowering
-independently. The resident verification gate will check that swapping the declarations moves
-ownership between units and changes dispatch slots. It will compare a body-only edit and a cold
-compile to verify that table bytes and unrelated call sites stay stable. Mixed-object and daemon
-compiler verification is pending.
+independently. The resident tests swap the declarations and verify that ownership moves
+between units and dispatch follows the new slot order. A body-only edit preserves the table
+metadata and unrelated object bytes. Cold and daemon builds produce identical objects, and
+mixed GCC and Clang objects verify dispatch and RTTI.
 
 The ELF `_ZTV` starts at section offset zero and occupies 32 bytes. It starts with a zero
 offset-to-top, then a pointer to `_ZTI` and the two function pointers in declaration order.

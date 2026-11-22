@@ -524,6 +524,11 @@ multidimensional arrays. They can also copy or alias ordinary non-template class
 bases and bind to their public, addressable data members, including array and reference
 members. [#285](https://github.com/yrashk/ycxx/issues/285)
 
+**Linux virtual tables.** A translation unit with the key definition emits the vtable and
+RTTI for an ordinary root with one public integral field and two fixed integer virtual
+signatures. A peer supplies the second virtual and constructs the object.
+[#309](https://github.com/yrashk/ycxx/issues/309)
+
 ### Not yet
 
 - The standard library and its headers. On macOS, C headers such as `<stdio.h>` compile without
@@ -556,10 +561,6 @@ members. [#285](https://github.com/yrashk/ycxx/issues/285)
 
 ### In progress
 
-- A staged Linux x86-64 producer emits the virtual table and RTTI for an ordinary root with one
-  public integral field and two fixed integer virtual signatures. The peer supplies the non-key
-  member and constructs the object. Mixed-object and daemon verification is pending.
-  [#309](https://github.com/yrashk/ycxx/issues/309)
 - Standard headers, starting with `<cstdio>` ([#133](https://github.com/yrashk/ycxx/issues/133)).
 - ι: statements and declarations, the C++98/11 core: default arguments, block-scope statics,
   casts and arrays ([#337](https://github.com/yrashk/ycxx/issues/337)).
