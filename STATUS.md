@@ -2748,7 +2748,8 @@ What the process allocates, attributed to the engine's cells, in the trace and t
 - Ordinary named namespace-scope classes and structs can use class-head `final`, with or
   without a base clause. A base specifier naming a final class through its name or an alias
   receives the same diagnostic after the definition, including after a later bare declaration.
-  `final` remains an identifier in class names and object declarators.
+  `final` remains an identifier in class names and object declarators. `__is_final` reads the
+  completed class definition, including for cv-qualified types.
   [[class.pre]](https://eel.is/c++draft/class.pre) · [#309](https://github.com/yrashk/ycxx/issues/309)
 - A derived constructor can name that base in an unqualified parenthesized or flat braced
   initializer. Syntax checking uses ordinary constructor overload resolution, defaults, access,

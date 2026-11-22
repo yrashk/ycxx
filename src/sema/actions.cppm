@@ -1764,7 +1764,14 @@ public:
         else v = t == is_polymorphic ? r->polymorphic : r->virtual_destructor;
       }
       break;
-    case is_final: v = false; break;
+    case is_final:
+      if (types().is_class(c) && is_union_type(c) != true &&
+          w_->entities.rec(types().class_of(c)).templ == EntityId::none) {
+        const ClassRec* r = cls();
+        if (!r) return {NodeId::none, begin, end};
+        v = r->is_final;
+      }
+      break;
     case is_lvalue_reference: v = types().is_reference(c) && !types().rec(c).rvalue_ref; break;
     case is_rvalue_reference: v = types().is_reference(c) && types().rec(c).rvalue_ref; break;
     case is_bounded_array: v = types().is_array(c) && types().rec(c).bound_value != ConstId::none; break;
