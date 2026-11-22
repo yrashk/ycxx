@@ -2167,7 +2167,9 @@ private:
       return bad();
     }
     s_.defer_type_access = true;
-    DeclSpec spec = ps_.decl_specifiers();
+    DeclSpec spec = ps_.decl_specifiers(false, nullptr, false, false,
+                                       /*allow_constrained_auto=*/!template_ && !explicit_ && !var_ &&
+                                           it_->kind != ItemKind::function);
     spec.hidden_visibility |= hidden_visibility;
     if (spec.ok && spec.elaborated && s_.types().is_enum(spec.type)) {
       EntityId e = s_.types().enum_of(spec.type);
@@ -2214,7 +2216,8 @@ private:
         return;
       }
       ++declarators;
-      bool declared = d.ok && spec.ok && d.named && declare(spec, d, lang, explicit_lang, is_function_def);
+      bool declared = d.ok && spec.ok && d.named && ps_.constrained_variable_ok(spec, d) &&
+                      declare(spec, d, lang, explicit_lang, is_function_def);
       s_.settle_type_access(EntityId::none);  // what `declare` did not settle
       if (!declared) {
         // Later declarators keep their skeleton ordinals with placeholder records.
@@ -5071,7 +5074,7 @@ private:
       std::optional<Ex> early;
       if (types.has_placeholder(d.type)) {
         std::unique_ptr<sema::Braced> list;
-        if (ps_.is(Tk::l_brace) || !deduce_variable(d, list, early) || list) {
+        if (ps_.is(Tk::l_brace) || !deduce_variable(spec, d, list, early) || list) {
           if (ps_.is(Tk::l_brace)) s_.diag(ps_.pos(), Diag::not_supported, Tk::l_brace);
           return false;
         }
@@ -5391,7 +5394,7 @@ private:
     q_.retain_type_trait_pattern = pattern;
     std::optional<Ex> early_expr;
     if (!fn && types.has_placeholder(d.type)) {
-      bool deduced = deduce_variable(d, early, early_expr, pattern);
+      bool deduced = deduce_variable(spec, d, early, early_expr, pattern);
       if (s_.namespace_lambda && deduced) {
         Ex e = early_expr ? *early_expr : early->clauses.front().expr;
         closure_init = e;
@@ -5941,7 +5944,8 @@ private:
   // deduce one type for the placeholder (/2). False after a diagnosed error.
   // A variable template's definition (`pattern`) keeps the placeholder while its initializer is
   // dependent: each specialization deduces its own type (`Program::specialization_type`).
-  bool deduce_variable(parse::Declarator& d, std::unique_ptr<sema::Braced>& list, std::optional<Ex>& expr, bool pattern = false) {
+  bool deduce_variable(const DeclSpec& spec, parse::Declarator& d, std::unique_ptr<sema::Braced>& list,
+                       std::optional<Ex>& expr, bool pattern = false) {
     Ex e;
     if (ps_.is(Tk::equal) && ps_.kind(1) != Tk::l_brace) {
       ps_.bump();
@@ -5966,6 +5970,8 @@ private:
     QualType r{};
     auto t = s_.deduce_placeholder(d.type, e, e.begin, &r);
     if (!t) return false;
+    if (spec.constrained_auto_at && !s_.check_placeholder_constraint(spec.type, r, *spec.constrained_auto_at))
+      return false;
     sema::Types& types = s_.types();
     if (auto_replaced_ && !types.is_dependent(r) && !types.is_dependent(*auto_replaced_) &&
         types.canonical(*auto_replaced_) != types.canonical(r)) {

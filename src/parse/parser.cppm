@@ -39,6 +39,7 @@ using ast::NodeId;
 struct DeclSpec {
   u32 begin = 0;
   QualType type{};
+  std::optional<u32> constrained_auto_at;  // the concept's name in a constrained placeholder
   bool has_type = false;
   bool is_static = false;
   bool is_extern = false;
@@ -259,9 +260,14 @@ public:
     return next == close && groups == 0;
   }
 
+  bool constrained_auto_ahead(u32 at = 0) const {
+    return kind(at) == Tk::identifier && kind(at + 1) == Tk::kw_auto;
+  }
+
   // A trailing return type can start with a keyword or a name denoting a type.
   bool trailing_return_type_ahead(u32 next) {
     return starts_decl_specifier(kind(next)) || qualified_ahead(next) || transform_trait_ahead(next) ||
+           constrained_auto_ahead(next) ||
            (kind(next) == Tk::identifier && s_->class_name(name_of(tok(next))).has_value());
   }
 
@@ -299,7 +305,7 @@ public:
   // class names a type only after `typename` ([temp.res.general]/4-5); a namespace-scope or member
   // declaration may imply it.
   bool starts_declaration(bool statement = false) {
-    if (transform_trait_ahead()) return true;
+    if (transform_trait_ahead() || constrained_auto_ahead()) return true;
     // [stmt.ambig]: `int(x) + 1;`, `int(3);` and `void();` are expressions; `int(x);`, `int(x) = 1;`
     // and `int(*f)(int);` declare.
     if (is(Tk::kw_auto) && kind(1) == Tk::l_brace) return false;
@@ -522,7 +528,8 @@ public:
   // decl-specifier-seq ([dcl.spec.general]) with the simple-type-specifiers of [dcl.type.simple],
   // class names and elaborated-type-specifiers ([dcl.type.elab]), and the cv-qualifiers.
   DeclSpec decl_specifiers(bool in_type_id = false, std::optional<u32>* friend_at = nullptr,
-                           bool allow_conversion_id = false, bool class_member = false) {
+                           bool allow_conversion_id = false, bool class_member = false,
+                           bool allow_constrained_auto = false) {
     DeclSpec d;
     d.begin = pos();
     int n_char = 0, n_short = 0, n_int = 0, n_long = 0, n_signed = 0, n_unsigned = 0, n_void = 0, n_bool = 0;
@@ -721,6 +728,25 @@ public:
       case Tk::coloncolon:
       case Tk::identifier:
         if (!any_type()) {
+          if (constrained_auto_ahead()) {
+            const u32 at = pos();
+            const NameId name = name_of(tok());
+            bump();
+            bump();
+            if (!allow_constrained_auto || s_->templated()) {
+              s_->diag(at, Diag::constrained_auto_context);
+              d.ok = false;
+              goto done;
+            }
+            auto concept_ = s_->placeholder_concept(name, at);
+            if (!concept_) {
+              d.ok = false;
+              goto done;
+            }
+            cls = s_->types().placeholder(false, *concept_);
+            d.constrained_auto_at = at;
+            continue;
+          }
           // A type-transforming built-in, `__remove_cv(T)` (docs/EXTENSIONS.md).
           if (const lex::TypeTraitInfo* tr = transform_trait_ahead()) {
             u32 at = pos();
@@ -1603,6 +1629,7 @@ public:
     };
     Tk k = kind(first);
     Tk next = kind(first + 1);
+    if (constrained_auto_ahead(first)) return can_start_parameter(first + 2);
     if (simple_type_keyword(k)) return can_start_parameter(first + 1);
     if (k == Tk::r_paren || k == Tk::ellipsis || starts_decl_specifier(k)) return true;
     if ((k == Tk::identifier && next == Tk::coloncolon) || k == Tk::coloncolon) {
@@ -1675,7 +1702,7 @@ public:
         // `auto f() -> T`: the return type is T, and the declared type `auto` alone ([dcl.fct]/2).
         if (s->trailing) {
           if (s_->types().kind(t) != sema::TypeKind::placeholder || s_->types().rec(t).decltype_auto ||
-              sema::Types::cv(t) != sema::Cv::none) {
+              s_->types().rec(t).entity != ast::EntityId::none || sema::Types::cv(t) != sema::Cv::none) {
             s_->diag(d.begin, Diag::trailing_return_needs_auto);
             d.ok = false;
           }
@@ -4784,7 +4811,7 @@ public:
     bool placeholder = s_->types().has_placeholder(d.type);
     if (placeholder && (is(Tk::equal) || is(Tk::l_brace))) {
       std::optional<QualType> replaced;
-      init = placeholder_variable(d, local, spec.is_constexpr, replaced);
+      init = placeholder_variable(spec, d, local, replaced);
       if (!init.ok() && s_->types().has_placeholder(d.type)) s_->set_local_type(local, s_->builtin(Builtin::dependent));
     } else if (is(Tk::l_brace) || (is(Tk::equal) && kind(1) == Tk::l_brace)) {
       const auto form = accept(Tk::equal) ? sema::Construction::copy_list : sema::Construction::direct_list;
@@ -5282,6 +5309,10 @@ public:
       return Ex{NodeId::none, begin, pos()};
     };
     if (!spec.ok) return fail();
+    if (spec.constrained_auto_at) {
+      s_->diag(*spec.constrained_auto_at, Diag::constrained_auto_context);
+      return fail();
+    }
     if (types.kind(declared) != sema::TypeKind::placeholder || types.rec(declared).decltype_auto) {
       s_->diag(at, Diag::binding_requires_auto);
       return fail();
@@ -5387,7 +5418,7 @@ public:
   // variable, in scope from the end of its declarator ([basic.scope.pdecl]).
   Ex declaration_statement() {
     u32 begin = pos();
-    DeclSpec spec = decl_specifiers();
+    DeclSpec spec = decl_specifiers(false, nullptr, false, false, /*allow_constrained_auto=*/true);
     if (is(Tk::l_square) || ((is(Tk::amp) || is(Tk::ampamp)) && kind(1) == Tk::l_square))
       return structured_binding(spec, begin);
     if (spec.is_extern || spec.is_inline) {
@@ -5430,7 +5461,7 @@ public:
     do {
       u32 dbegin = pos();
       Declarator d = declarator(spec.type, false);
-      if (!d.ok || !spec.ok) {
+      if (!d.ok || !spec.ok || !constrained_variable_ok(spec, d)) {
         skip_to_semi();
         return {NodeId::none, begin, pos()};
       }
@@ -5470,7 +5501,7 @@ public:
       // declared first, so that its initializer cannot use it ([dcl.spec.auto.general]/11).
       if (s_->types().has_placeholder(d.type)) {
         u32 local = s_->declare_local(d.name, d.type, 0, d.name_at);
-        Ex init = placeholder_variable(d, local, spec.is_constexpr, replaced);
+        Ex init = placeholder_variable(spec, d, local, replaced);
         if (!init.ok()) {
           // Its uses say nothing more ([temp.dep.expr]: as a dependent name would).
           if (s_->types().has_placeholder(s_->local(local).type)) s_->set_local_type(local, s_->builtin(Builtin::dependent));
@@ -5625,11 +5656,23 @@ public:
     return args.front();
   }
 
+  bool constrained_variable_ok(const DeclSpec& spec, const Declarator& d) {
+    if (!spec.constrained_auto_at) return true;
+    if (spec.is_typedef || s_->types().is_function(d.type) || d.scope.type || d.template_args ||
+        !s_->types().has_placeholder(d.type)) {
+      s_->diag(*spec.constrained_auto_at, Diag::constrained_auto_context);
+      return false;
+    }
+    if (is(Tk::equal) && kind(1) != Tk::l_brace) return true;
+    s_->diag(*spec.constrained_auto_at, Diag::constrained_auto_initializer);
+    return false;
+  }
+
   // The initializer of block-scope variable `d`, declared as `local` with a placeholder type:
   // `= e`, `(e)` or `{e}` ([dcl.type.auto.deduct]/2), from which its type is deduced, then the
   // variable initialized as one of that type. `replaced` holds what an earlier declarator's
   // placeholder deduced. An invalid `Ex` after a diagnosed error.
-  Ex placeholder_variable(Declarator& d, u32 local, bool constexpr_, std::optional<QualType>& replaced) {
+  Ex placeholder_variable(const DeclSpec& spec, Declarator& d, u32 local, std::optional<QualType>& replaced) {
     u32 at = pos();
     Ex e;
     if (accept(Tk::equal)) {
@@ -5648,6 +5691,8 @@ public:
     QualType r{};
     auto t = s_->deduce_placeholder(d.type, e, e.begin, &r);
     if (!t) return {NodeId::none, at, pos()};
+    if (spec.constrained_auto_at && !s_->check_placeholder_constraint(spec.type, r, *spec.constrained_auto_at))
+      return {NodeId::none, at, pos()};
     if (replaced && !s_->types().is_dependent(r) && !s_->types().is_dependent(*replaced) &&
         s_->types().canonical(*replaced) != s_->types().canonical(r)) {
       s_->diag(d.name_at, Diag::auto_inconsistent, d.type, r, *replaced);
@@ -5661,7 +5706,7 @@ public:
     d.type = *t;
     s_->set_local_type(local, d.type);
     Ex init = s_->types().is_reference(d.type) ? s_->bind_reference(e, d.type, e.begin, true) : s_->convert(e, d.type, e.begin);
-    constant_local(local, d.type, constexpr_, init);
+    constant_local(local, d.type, spec.is_constexpr, init);
     return init;
   }
 
