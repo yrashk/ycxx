@@ -3167,6 +3167,9 @@ and runtime integration with ycxx's own linker remain under [#89]. See the
 ([expr.unary.noexcept]). The compiler checks the selected function or constructor,
 argument operations, and temporary destruction ([except.spec]). A construction
 in a function template body can be checked after substitution.
+For one-dimensional scalar `new T[n]`, the operator accounts for the selected
+global array allocation function along with the bound and initialization.
+[#854](https://github.com/yrashk/ycxx/issues/854)
 
 ## Exception specifications on member function templates (#713, #804)
 
