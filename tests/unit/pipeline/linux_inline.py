@@ -172,22 +172,11 @@ def main():
             link(*objects)
             run('./program')
 
-        (Path(temp) / 'data-controls.cpp').write_text('''
-constexpr int ordinary_constant = 7;
-extern constexpr int external_constant = 9;
-static inline int local_inline = 11;
-struct Ordinary { static int value; };
-int Ordinary::value = 13;
-int backing = 13;
-inline int* relocated = &backing;
-template<class T> inline int specialized = 17;
-template<> int specialized<int> = 19;
-struct NamedType {};
-template<> inline int specialized<NamedType> = 23;
-''')
-        compile('data-controls.cpp', 'data-controls.o')
+        compile(data / 'bindings.cpp', 'data-controls.o')
         table = symbols('data-controls.o')
-        for name in ('ordinary_constant', 'local_inline'):
+        entry = table['_ZN6Public6scalarE']
+        assert entry[4] == 'WEAK' and entry[6] != 'UND', entry
+        for name in ('ordinary_constant', 'local_inline', '_ZN6Public1pE', '_ZN6Public1kE'):
             assert table[name][4] == 'LOCAL', table[name]
         for name in ('external_constant', 'backing', 'relocated', '_ZN8Ordinary5valueE',
                      '_Z11specializedIiE', '_Z11specializedI9NamedTypeE'):

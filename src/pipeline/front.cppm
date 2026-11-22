@@ -921,9 +921,9 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
       return internal_type(r.inner);
     return false;
   };
-  // An ordinary in-class static constexpr member is inline and takes its owner's linkage
-  // ([dcl.constexpr], [basic.link]). Its entity record alone says external in an unnamed namespace.
-  auto constexpr_member_linkage = [&](const ast::DeclSema& d) -> std::optional<ast::Linkage> {
+  // An ordinary in-class static constexpr member is inline ([dcl.constexpr]). An owner or
+  // a declared type in an unnamed namespace gives the member's symbol TU-local binding.
+  auto constexpr_member_symbol_linkage = [&](const ast::DeclSema& d) -> std::optional<ast::Linkage> {
     if (d.kind != ast::DeclKind::variable || d.storage != ast::Storage::static_ ||
         !(d.flags & sema::decl_flag::member) || !(d.flags & sema::decl_flag::constexpr_))
       return {};
@@ -931,7 +931,8 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
     const auto& owner = world.entities.rec(member.scope);
     if (owner.kind != sema::EntityKind::class_ || owner.templ != EntityId::none || !program.is_namespace(owner.scope))
       return {};
-    if (names_unnamed_namespace(program, member.scope)) return ast::Linkage::internal;
+    if (names_unnamed_namespace(program, member.scope) || names_unnamed_namespace(program, d.type))
+      return ast::Linkage::internal;
     return owner.linkage;
   };
   auto declare = [&](const ast::DeclSema& d, std::optional<ast::Loc> at) {
@@ -955,7 +956,7 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
     std::string id(ins.names.spelling(r.name));
     if (fn && id == "main" && r.scope == EntityId::none) tu.main = e;  // [basic.start.main]: the global one
     // A member of a class local to the unit is local too.
-    ast::Linkage linkage = constexpr_member_linkage(d).value_or(r.linkage);
+    ast::Linkage linkage = constexpr_member_symbol_linkage(d).value_or(r.linkage);
     for (EntityId sc = r.scope; linkage == ast::Linkage::external && sc != EntityId::none; sc = world.entities.rec(sc).scope)
       if (world.entities.rec(sc).kind == sema::EntityKind::class_ && internal_class(sc)) linkage = ast::Linkage::internal;
     tu.entities.push_back({e, std::move(id), d.type, fn, r.lang, linkage, false, at, r.scope,
@@ -1031,7 +1032,7 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
     if (entity.linkage != ast::Linkage::external || d.storage == ast::Storage::thread_local_ ||
         world.types.is_reference(d.type) || internal_type(d.type) || !program.asm_label(d.entity).empty())
       return false;
-    if (!program.is_namespace(entity.scope)) return constexpr_member_linkage(d) == ast::Linkage::external;
+    if (!program.is_namespace(entity.scope)) return constexpr_member_symbol_linkage(d) == ast::Linkage::external;
     // The inline declaration belongs to the specialization itself ([temp.expl.spec]).
     // Builtin type arguments identify the same specialization in every translation unit.
     return entity.templ == EntityId::none || ((d.flags & sema::decl_flag::specialization) &&

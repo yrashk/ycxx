@@ -191,22 +191,10 @@ int use() { return with_static() + with_lambda(1) + twice(2) + int(twice(2L)) + 
             (Path(temp) / f'{name}.cpp').write_text(text)
             compile(f'{name}.cpp', f'{name}.o')
         run(ycxx, 'cxx', 'strong1.o', 'strong2.o', '-o', 'program', status=1, error='duplicate symbol __Z8ordinaryi')
-        (Path(temp) / 'data-controls.cpp').write_text('''
-constexpr int ordinary_constant = 7;
-extern constexpr int external_constant = 9;
-static inline int local_inline = 11;
-struct Ordinary { static int value; };
-int Ordinary::value = 13;
-int backing = 13;
-inline int* relocated = &backing;
-template<class T> inline int specialized = 17;
-template<> int specialized<int> = 19;
-struct NamedType {};
-template<> inline int specialized<NamedType> = 23;
-''')
-        compile('data-controls.cpp', 'data-controls.o')
+        compile(data / 'bindings.cpp', 'data-controls.o')
         table = symbols('data-controls.o')
-        for name in ('_ordinary_constant', '_local_inline'):
+        assert table['__ZN6Public6scalarE'] == weak, table['__ZN6Public6scalarE']
+        for name in ('_ordinary_constant', '_local_inline', '__ZN6Public1pE', '__ZN6Public1kE'):
             assert table[name] == ('non-external', True), (name, table[name])
         for name in ('_external_constant', '_backing', '_relocated', '__ZN8Ordinary5valueE',
                      '__Z11specializedIiE', '__Z11specializedI9NamedTypeE'):
