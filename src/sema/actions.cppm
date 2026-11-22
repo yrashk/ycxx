@@ -117,6 +117,10 @@ public:
   virtual std::optional<NodeId> replay_function_default(Sema&, const ast::DefaultArg&, EntityId, QualType) {
     return std::nullopt;
   }
+  // A selected member-template specialization's exception specification ([except.spec]).
+  virtual std::optional<QualType> replay_member_exception(Sema&, const ast::DeclSema&, EntityId, QualType type) {
+    return type;
+  }
   // A concrete source query keeps its original position if its tokens are read again.
   virtual bool is_complete_at_source(EntityId c) { return is_complete(c); }
   // Whether a class's layout, or a base's or stored member's, depends on attributes or packing
@@ -4689,9 +4693,15 @@ public:
       fe = g->spec;
       dt = g->type;
     } else {
-      // A specialization called is one whose definition the program requires ([temp.inst]/8).
-      if (k.pattern) demands.push_back({k.entity, ast::Loc{item_, loc_base_ + begin}});
-      dt = deduced_function(k.entity, k.type, begin);
+      auto type = k.pattern ? q_->replay_member_exception(*this, *k.pattern, k.entity, k.type) : std::optional(k.type);
+      if (!type) return fail;
+      if (k.pattern) {
+        if (*type != k.type) fe = specialization(*k.pattern, w_->entities.rec(k.entity).args, *type);
+        // An unevaluated call needs the exception specification and return type ([temp.inst]).
+        if (!unevaluated || types().has_placeholder(types().rec(*type).inner))
+          demands.push_back({fe, ast::Loc{item_, loc_base_ + begin}});
+      }
+      dt = deduced_function(fe, *type, begin);
     }
     if (!dt) return fail;
     TypeRec fr = types().rec(*dt);

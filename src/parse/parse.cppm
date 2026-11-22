@@ -1424,6 +1424,19 @@ private:
   std::map<EntityId, std::pair<u32, u32>> constructor_exception_tokens_;
   std::map<EntityId, std::optional<QualType>> constructor_exception_types_;
   void bind_constructor_exceptions(EntityId cls, const sema::ClassRec& rec, Result<ast::ClassDef>& out);
+  struct MemberException {
+    u32 item;
+    std::pair<u32, u32> tokens;
+  };
+  struct MemberExceptionPattern {
+    std::vector<u32> calls;
+    std::vector<sema::Expansion> expansions;
+  };
+  std::map<EntityId, MemberException> member_exceptions_;
+  std::map<u32, std::optional<MemberExceptionPattern>> member_exception_patterns_;
+  std::set<EntityId> replaying_member_exceptions_;
+  std::map<EntityId, QualType> resolved_member_exceptions_;
+  void check_member_exception_patterns(EntityId cls, const sema::ClassRec& rec, Result<ast::ClassDef>& out);
   std::map<u32, std::vector<std::vector<ast::TemplateParamSema>>> outer_heads_;  // by item
   std::map<std::pair<u32, u32>, u32> static_init_ends_;  // by (member item, ordinal): its initializer's end
   std::map<u32, LazyMember> lazy_members_;                 // by member entity
@@ -1588,6 +1601,8 @@ public:
   std::optional<NodeId> replay_default_member(sema::Sema& caller, EntityId field, EntityId required_base) override;
   std::optional<NodeId> replay_function_default(sema::Sema& caller, const ast::DefaultArg& value,
                                                 EntityId function, QualType parameter) override;
+  std::optional<QualType> replay_member_exception(sema::Sema& caller, const ast::DeclSema& decl,
+                                                 EntityId function, QualType type) override;
   std::optional<u32> default_instantiation_point;
   bool is_complete_at_source(EntityId c) override {
     // The initializer is a complete-class context at its member declaration ([class.mem.general]).
@@ -1906,6 +1921,104 @@ QualType adjusted_parameter_type(sema::Types& types, QualType type) {
   return type;
 }
 
+std::optional<QualType> AtItem::replay_member_exception(sema::Sema& caller, const ast::DeclSema& decl,
+                                                        EntityId function, QualType type) {
+  const auto slot = p_->member_exceptions_.find(decl.entity);
+  if (slot == p_->member_exceptions_.end()) return type;
+  if (const auto cached = p_->resolved_member_exceptions_.find(function); cached != p_->resolved_member_exceptions_.end())
+    return cached->second;
+  const auto [item, tokens] = slot->second;
+  const auto written = p_->member_decl(decl.entity);
+  if (!written) return std::nullopt;
+  const auto& record = p_->world().entities.rec(function);
+  // An overload candidate may come from a declaration registered before its builder committed
+  // the parameter lists. Read the committed declaration in this class specialization.
+  const auto& cell = p_->member_patterns_.contains(std::to_underlying(decl.entity))
+      ? p_->class_member_sema(item, record.scope)
+      : p_->item_sema(item).value;
+  auto& ins = p_->world().ins;
+  const auto member = ins.seqs.at(cell.decls, ast::number_of(written->ord));
+  const u32 item_begin = p_->items().items[item].begin;
+  AtItem source(*p_, item, false);
+  source.at_point = default_instantiation_point.value_or(point());
+  source.completing_class = record.scope;
+  sema::Sema replay(p_->world(), caller.builder(), source, caller.diagnostics(), p_->id(item), 0);
+  if (const auto pattern = p_->member_exception_patterns_.find(item); pattern != p_->member_exception_patterns_.end()) {
+    if (!pattern->second) return std::nullopt;
+    source.instantiation_calls = pattern->second->calls;
+    replay.expansions_override = &pattern->second->expansions;
+  }
+  const auto before = replay.diag_count();
+  replay.current_class = record.scope;
+  replay.current_function = function;
+  replay.this_type = p_->this_type(decl);
+
+  auto& active = p_->replaying_member_exceptions_;
+  if (p_->too_deep(active.size(), item, tokens.first - item_begin)) return std::nullopt;
+  if (!active.insert(function).second) {
+    replay.diag(tokens.first - item_begin, Diag::recursive_noexcept);
+    return std::nullopt;
+  }
+  struct EndReplay {
+    std::set<EntityId>& active;
+    EntityId function;
+    ~EndReplay() { active.erase(function); }
+  } end_replay{active, function};
+
+  auto head = ins.seqs.elements(member.template_params);
+  const sema::u16 depth = head.empty() ? 0 : head.front().depth;
+  replay.template_scopes = p_->enclosing_heads(item);
+  replay.template_scopes.push_back(std::move(head));
+  if (auto outer = p_->class_args_.find(std::to_underlying(record.scope)); outer != p_->class_args_.end())
+    replay.template_args = outer->second;
+  auto member_arguments = sema::Bindings::of(depth, record.args);
+  replay.template_args.levels.resize(depth + 1);
+  replay.template_args.levels[depth] = std::move(member_arguments.levels[depth]);
+  replay.push_scope();
+  auto t = replay.templates();
+  for (const auto& param : ins.seqs.elements(member.params)) {
+    if (param.name == replay.no_name()) continue;
+    if (replay.types().kind(param.type) == sema::TypeKind::pack_expansion) {
+      replay.declare_param_pack(param.name);
+      auto expansion = t.substitute_expansion(t.type_arg(param.type), replay.template_args);
+      if (!expansion) {
+        replay.diag(tokens.first - item_begin, Diag::not_supported, Tk::kw_noexcept);
+        return std::nullopt;
+      }
+      for (const auto& element : *expansion)
+        replay.declare_pack_element(param.name, adjusted_parameter_type(replay.types(), element.type));
+      continue;
+    }
+    auto parameter = t.substitute(param.type, replay.template_args);
+    if (!parameter) {
+      replay.diag(tokens.first - item_begin, Diag::not_supported, Tk::kw_noexcept);
+      return std::nullopt;
+    }
+    replay.declare_local(param.name, adjusted_parameter_type(replay.types(), *parameter),
+                         sema::local_flag::parameter, 0, false);
+  }
+
+  Parser parser(p_->region(), item_begin, tokens.second, replay);
+  parser.set_questions(source);
+  parser.seek(tokens.first);
+  Parser::Suffix exception;
+  bool ok = true;
+  bool nonthrowing = false;
+  try {
+    parser.exception_specifier(exception, ok);
+    nonthrowing = ok && parser.noexcept_value(exception.noexcept_condition, ok);
+  } catch (const TooDeep&) {
+    return std::nullopt;
+  }
+  if (!ok || !parser.at_end() || replay.has_error_since(before)) return std::nullopt;
+  caller.demands.insert(caller.demands.end(), replay.demands.begin(), replay.demands.end());
+  const auto signature = replay.types().rec(type);
+  auto resolved = replay.types().function(signature.inner, signature.params, signature.variadic, signature.linkage,
+                                          signature.fn_cv, signature.fn_ref, nonthrowing);
+  p_->resolved_member_exceptions_.emplace(function, resolved);
+  return resolved;
+}
+
 std::optional<NodeId> AtItem::replay_function_default(sema::Sema& caller, const ast::DefaultArg& value,
                                                        EntityId function, QualType parameter) {
   const auto specialization = p_->world().entities.rec(function);
@@ -2001,6 +2114,10 @@ public:
   std::optional<NodeId> replay_function_default(sema::Sema& caller, const ast::DefaultArg& value,
                                                 EntityId function, QualType parameter) override {
     return at_.replay_function_default(caller, value, function, parameter);
+  }
+  std::optional<QualType> replay_member_exception(sema::Sema& caller, const ast::DeclSema& decl,
+                                                 EntityId function, QualType type) override {
+    return at_.replay_member_exception(caller, decl, function, type);
   }
   const sema::Classes& classes() override { return p_->classes(); }
   sema::CopyAssignment require_copy_assignment(EntityId f) override { return p_->require_copy_assignment(f); }
@@ -4147,7 +4264,9 @@ private:
         return bad();
       }
       using enum Parser::NamedExceptionSpec;
-      const auto exception = p_->defaulted_body(k_) ? defaulted_assignment : member_template_ ? ordinary : class_member;
+      auto exception = class_member;
+      if (p_->defaulted_body(k_)) exception = defaulted_assignment;
+      else if (member_template_) exception = member_template;
       parse::Declarator d = ps_.declarator(spec.type, /*abstract=*/false, /*typedef_=*/false, conversion, exception,
                                           /*defer_ref_check=*/true);
       if (!d.ok || !d.named) return bad();
@@ -5488,6 +5607,8 @@ private:
         sem.entity = s_.world().entities.entity(
             {sema::EntityKind::function, d.name, d.type, LangLinkage::cxx, ast::Linkage::external, {}, c.entity});
       }
+      if (d.noexcept_tokens)
+        p_->member_exceptions_.emplace(sem.entity, Program::MemberException{k_, *d.noexcept_tokens});
       if (overridden) p_->overridden_virtuals_.emplace(sem.entity, overridden->entity);
       remember_member_defaults(sem.entity, d.params);
     } else if (member_template_) {
@@ -6878,6 +6999,7 @@ const Result<ast::ClassDef>& Program::class_def(u32 item) {
     classes_.publish(*cls, std::move(rec), [&](sema::ClassRec& fresh) {
       bind_member_defaults(*cls, fresh, out);
       bind_constructor_exceptions(*cls, fresh, out);
+      check_member_exception_patterns(*cls, fresh, out);
     });
   }
   ast::Builder b(w_->ins, &arena_);
@@ -6938,6 +7060,53 @@ void Program::bind_constructor_exceptions(EntityId cls, const sema::ClassRec& re
     slot->second = w_->types.function(signature.inner, signature.params, signature.variadic,
                                       signature.linkage, signature.fn_cv, signature.fn_ref, nonthrowing);
     out.demands.insert(out.demands.end(), s.demands.begin(), s.demands.end());
+  }
+}
+
+// An exception specification is a complete-class context ([class.mem.general]). Check the written
+// expression with the template still unbound, before any specialization needs its value.
+void Program::check_member_exception_patterns(EntityId cls, const sema::ClassRec& rec, Result<ast::ClassDef>& out) {
+  ast::Builder b(w_->ins, &arena_);
+  for (const auto& member : rec.members) {
+    const auto specification = member_exceptions_.find(member.entity);
+    if (specification == member_exceptions_.end()) continue;
+    const auto [item, tokens] = specification->second;
+    if (member_exception_patterns_.contains(item)) continue;
+    const auto written = member_decl(member.entity);
+    const auto decl = written ? decl_sema(*written) : std::nullopt;
+    if (!decl) continue;
+    const u32 item_begin = items_->items[item].begin;
+    AtItem source(*this, item, false);
+    source.completing_class = cls;
+    sema::Sema replay(*w_, b, source, out.diags, id(item), 0);
+    replay.current_class = cls;
+    replay.current_function = member.entity;
+    replay.this_type = this_type(*decl);
+    replay.template_scopes = enclosing_heads(item);
+    replay.template_scopes.push_back(w_->ins.seqs.elements(decl->template_params));
+    replay.push_scope();
+    const auto before = replay.diag_count();
+    for (const auto& param : w_->ins.seqs.elements(decl->params))
+      if (param.name != replay.no_name())
+        replay.declare_local(param.name, param.type, sema::local_flag::parameter, 0, false);
+    Parser parser(*r_, item_begin, tokens.second, replay);
+    parser.set_questions(source);
+    parser.seek(tokens.first);
+    Parser::Suffix exception;
+    bool ok = true;
+    try {
+      parser.exception_specifier(exception, ok);
+      if (ok && exception.noexcept_condition && !replay.dependent(*exception.noexcept_condition))
+        parser.noexcept_value(exception.noexcept_condition, ok);
+    } catch (const TooDeep&) {
+      ok = false;
+    }
+    if (!ok || !parser.at_end() || replay.has_error_since(before)) {
+      member_exception_patterns_.emplace(item, std::nullopt);
+      continue;
+    }
+    member_exception_patterns_.emplace(item, MemberExceptionPattern{std::move(replay.dependent_calls), std::move(replay.expansions)});
+    out.demands.insert(out.demands.end(), replay.demands.begin(), replay.demands.end());
   }
 }
 
