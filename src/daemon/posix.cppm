@@ -116,7 +116,7 @@ bool fits_socket_path(const std::string& path) { return path.size() < sizeof(soc
 
 // The address of a socket at `path`, which `fits_socket_path`.
 // BOOTSTRAP: -Wstringop-overflow: at -O3 GCC 16.2 loses the callers' length check and reports a
-// write of 8 bytes past `sun_path` from the vectorized copy (#726), so the copy is bounded by
+// write of 8 bytes past `sun_path` from the vectorized copy (#748), so the copy is bounded by
 // the array as well. Without the bug: `std::ranges::copy(path, a.sun_path);`
 sockaddr_un socket_address(const std::string& path) {
   sockaddr_un a{};

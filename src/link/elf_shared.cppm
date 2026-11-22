@@ -168,7 +168,7 @@ std::expected<shared_object, std::string> read_shared_object(byte_view file, std
   std::vector<segment> loads;
   // BOOTSTRAP: -Wmaybe-uninitialized: a flag, not std::optional. At -O3 GCC 16.2 reports the
   // optional's payload as possibly uninitialized where it is read after the `!dynamic` check
-  // (#726; GCC's known class of std::optional false positives, as PR 114253). Without the bug:
+  // (#748; GCC's known class of std::optional false positives, as PR 114253). Without the bug:
   //   std::optional<segment> dynamic;   // `dynamic = s;`, `if (!dynamic || dynamic->...)`
   segment dynamic{};
   bool has_dynamic = false;
@@ -295,8 +295,10 @@ std::expected<shared_object, std::string> read_shared_object(byte_view file, std
     if (!parsed) return error(parsed.error());
     gnu = *parsed;
     // BOOTSTRAP: -Wmaybe-uninitialized: GCC 16.2 at -O3 reports `gnu`'s payload as possibly
-    // uninitialized after this assignment (#726), so the count is taken from `parsed` and kept
-    // in `symbol_count`. Without the bug, after both branches:
+    // uninitialized after this assignment (#748), so the count is taken from `parsed` and kept
+    // in `symbol_count`. Without the bug, here:
+    //   const auto symbol_bytes = known_symbol_count.value_or(gnu->symbol_end()) * symbol_size;
+    // and after both branches:
     //   const auto symbol_count = known_symbol_count ? *known_symbol_count : gnu->symbol_end();
     symbol_count = known_symbol_count ? *known_symbol_count : parsed->symbol_end();
     const auto symbol_bytes = symbol_count * symbol_size;

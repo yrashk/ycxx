@@ -56,8 +56,8 @@ build/bin/ycxx cxx hello.cpp -o hello && ./hello
 
 `tools/build` builds ycxx in Debug. A Release build (`YCXX_BUILD_TYPE=Release
 YCXX_BUILD_DIR=build-release tools/build`, [docs/BUILDING.md](docs/BUILDING.md#release-builds))
-builds and passes its tests on both hosts, and compiles a 40,000-statement function about ten
-times faster ([#726](https://github.com/yrashk/ycxx/issues/726)).
+builds and passes its tests on both hosts, and compiles a 40,000-statement function in 0.4 s
+instead of Debug's 5.3 s on an M-series Mac ([#726](https://github.com/yrashk/ycxx/issues/726)).
 
 Single-expression `auto(x)` and `auto{x}` perform scalar and pointer decay-copy, including
 array and function decay. Function-template bodies can defer supported dependent operands to

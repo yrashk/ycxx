@@ -490,24 +490,24 @@ public:
       }
     }
     // BOOTSTRAP: -Wmaybe-uninitialized: a value and a flag, not std::optional. At -O3 GCC 16.2
-    // reports the optional's payload as possibly uninitialized after the `!found` checks (#726).
+    // reports the optional's payload as possibly uninitialized after the `!found` checks (#748).
     // Without the bug: `std::optional<ast::DeclSema> found;`, `found = s;`, `found->kind`.
     ast::DeclSema found{};
     bool has_found = false;
-    const auto find = [&](const ast::DeclSema& s) { found = s, has_found = true; };
+    const auto take = [&](const ast::DeclSema& s) { found = s, has_found = true; };
     for (auto p = own.rbegin(); p != own.rend() && !has_found; ++p)
-      if (p->name == name) find(p->sema);
+      if (p->name == name) take(p->sema);
     if (!has_found)
       for (DeclId d : q_->visible_decls(name, directives())) {
         ast::DeclSema s = q_->decl_sema(d);
         if (s.entity == EntityId::none || is_special(s)) continue;
-        if (is_type(s.kind) || !elaborated) find(s);
+        if (is_type(s.kind) || !elaborated) take(s);
         if (!elaborated && !is_type(s.kind)) break;
       }
     if (member_introduction && member_introduction->name == name &&
         (!has_found || elaborated || w_->entities.rec(found.entity).scope !=
                                          w_->entities.rec(member_introduction->sema.entity).scope))
-      find(member_introduction->sema);
+      take(member_introduction->sema);
     if (!has_found && !elaborated && aliases) return builtin_type_name(name);
     if (!has_found || !is_type(found.kind)) return std::nullopt;
     if (found.kind == ast::DeclKind::type_alias && !aliases) return std::nullopt;
@@ -4626,7 +4626,7 @@ public:
     }
     if (virtual_slot) {
       // BOOTSTRAP: -Warray-bounds: reserved and appended. At -O3 GCC 16.2 reports libycxx's
-      // in-place insert after a one-element vector as writing past its allocation (#726).
+      // in-place insert after a one-element vector as writing past its allocation (#748).
       // Without the bug: `std::vector<QualType> parameters{o.type()};` and
       // `parameters.insert(parameters.end(), fr.params.begin(), fr.params.end());`
       std::vector<QualType> parameters;

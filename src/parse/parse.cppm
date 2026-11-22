@@ -3417,7 +3417,7 @@ private:
       }
     }
     // BOOTSTRAP: -Wmaybe-uninitialized: a pair and a flag, not std::optional. At -O3 GCC 16.2
-    // reports the optional's payload as possibly uninitialized at `named->first` (#726).
+    // reports the optional's payload as possibly uninitialized at `named->first` (#748).
     // Without the bug: `auto named = td ? typedef_name_after_braces() : std::nullopt;`,
     // `!named`, `named->first`, `named->second`.
     std::pair<NameId, u32> named{};
@@ -4528,7 +4528,7 @@ private:
     const std::string ns = p_->namespace_path(*d.scope.ns);
     const QualType type = s_.types().canonical(sem.type);
     // BOOTSTRAP: -Wmaybe-uninitialized: a value and a flag, not std::optional. At -O3 GCC 16.2
-    // reports the optional's payload as possibly uninitialized after `if (!mem)` (#726).
+    // reports the optional's payload as possibly uninitialized after `if (!mem)` (#748).
     // Without the bug: `std::optional<ast::DeclSema> mem;`, `mem = ds;`, `mem->entity`.
     ast::DeclSema mem{};
     bool has_mem = false;
@@ -4990,7 +4990,7 @@ private:
     const bool defaulted_default = ordinary_defaulting && ctor && fs.params.empty() && !fs.variadic;
     // BOOTSTRAP: -Wmaybe-uninitialized: a pair and a flag, not std::optional. At -O3 GCC 16.2
     // reports the optional's payload as possibly uninitialized at `*exception_tokens`, read
-    // under `if (exception_tokens)` (#726). Without the bug:
+    // under `if (exception_tokens)` (#748). Without the bug:
     //   std::optional<std::pair<u32, u32>> exception_tokens;
     std::pair<u32, u32> exception_tokens{};
     bool has_exception_tokens = false;
@@ -6243,7 +6243,7 @@ private:
           // An enum literal already carries the underlying integer constant.
           // BOOTSTRAP: -Wmaybe-uninitialized: the literal's value, not the std::optional<Literal>,
           // is kept. At -O3 GCC 16.2 reports the optional's payload as possibly uninitialized at
-          // `lit->value` (#726). Without the bug:
+          // `lit->value` (#748). Without the bug:
           //   auto lit = types.is_enum(d.type) ? s_.as<ast::Literal>(init) : std::nullopt;
           //   ... lit ? sema::Evaluated{lit->value, 0, true} : ...
           ConstId lit = ConstId::none;

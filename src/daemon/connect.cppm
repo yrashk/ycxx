@@ -70,7 +70,7 @@ std::expected<Connection, std::string> handshake(Fd fd, bool& closed) {
     auto r = decode<Refused>(*f);
     // BOOTSTRAP: -Warray-bounds: messages built from a temporary string use std::format. At -O3
     // GCC 16.2 reports `"literal" + std::string&&` (libycxx's in-place insert) as writing past
-    // the string (#726). Without the bug: `"the daemon refused: " + (r ? r->reason : "?")`.
+    // the string (#748). Without the bug: `"the daemon refused: " + (r ? r->reason : "?")`.
     return std::unexpected(std::format("the daemon refused: {}", r ? r->reason : "?"));
   }
   if (f->kind != Kind::welcome) return std::unexpected("handshake: unexpected message");

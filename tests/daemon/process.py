@@ -18,8 +18,8 @@ Not yet: the cache across a restart (`executed` below a cold run, `durable + val
 
 A slow translation unit opens the window in which an edit or a kill lands. Its size is calibrated
 against the binary under test (`calibrate_slow`): 40,000 statements take 1.5-3 s in the Debug
-build CI uses but about 0.4 s in Release, where an edit 0.3 s into the build raced its end
-(#726). Each variant changes its constant, so the daemon cannot answer it from cells it already
+build CI uses but about 0.4 s in Release, where an edit 0.3 s into the build raced its end and
+concurrent clients' requests did not overlap (#726). Each variant changes its constant, so the daemon cannot answer it from cells it already
 holds.
 """
 import os, platform, signal, subprocess, sys, tempfile, threading, time, shutil
@@ -27,6 +27,7 @@ from pathlib import Path
 
 failures = []
 SLOW_STATEMENTS = 40000  # at least; calibrate_slow raises it for a faster binary
+SLOW_SCALE = 1.0  # how many times faster than Debug this binary is (calibrate_slow)
 SLOW_SECONDS = 2.0  # what a slow unit should take, cold
 # ycxx builds AArch64 Mach-O only (DECISIONS §1.3), so its programs run only on Apple arm64, as
 # `run darwin-arm64` in tests/features/ycxx.txt; outputs are compared byte for byte everywhere.
@@ -153,18 +154,24 @@ def slow_source(name, value):
 def calibrate_slow(env):
     """Sizes the slow unit to take about SLOW_SECONDS cold with this binary (compile time grows
     linearly with the statements)."""
-    global SLOW_STATEMENTS
+    global SLOW_STATEMENTS, SLOW_SCALE
     d = Path(tempfile.mkdtemp(prefix='ycxx-calibrate-', dir=env.scope.parent))
     try:
         (d / 'calibrate.cpp').write_text(slow_source('calibrate', 0))
-        t0 = time.monotonic()
-        env.cxx(['-c', 'calibrate.cpp', '-o', 'calibrate.o'], d, env.cold)
-        took = time.monotonic() - t0
+        took = None
+        for _ in range(2):  # the faster of two: CTest runs other tests alongside
+            t0 = time.monotonic()
+            code = env.cxx(['-c', 'calibrate.cpp', '-o', 'calibrate.o'], d, env.cold)[0]
+            if code != 0:
+                fail(f'calibrating the slow unit: a cold compile exited {code}')
+                return
+            took = min(took or float('inf'), time.monotonic() - t0)
     finally:
         shutil.rmtree(d, ignore_errors=True)
     if took < SLOW_SECONDS:
-        SLOW_STATEMENTS = min(int(SLOW_STATEMENTS * SLOW_SECONDS / max(took, 0.05)), 1_000_000)
-    print(f'slow unit: {SLOW_STATEMENTS} statements ({took:.2f}s for 40000)')
+        SLOW_SCALE = min(SLOW_SECONDS / max(took, 0.05), 25.0)
+        SLOW_STATEMENTS = int(SLOW_STATEMENTS * SLOW_SCALE)
+    print(f'slow unit: {SLOW_STATEMENTS} statements (40000 took {took:.2f}s cold)')
 
 
 def cold_build(env, files, args, out_name):
@@ -354,8 +361,8 @@ def concurrent_clients(env):
     the requests ran in the engine at the same time (#139)."""
     d = env.scope / 'concurrent'
     d.mkdir()
-    # Long enough that six requests sent together overlap.
-    body = ''.join(f'int g{{i}}_{k}(int x) {{ return x * {k} + {k % 7}; }}\n' for k in range(400))
+    # Long enough that six requests sent together overlap (scaled like the slow unit).
+    body = ''.join(f'int g{{i}}_{k}(int x) {{ return x * {k} + {k % 7}; }}\n' for k in range(int(400 * SLOW_SCALE)))
     sources = {f'c{i}.cpp': body.replace('{i}', str(i)) + f'int f{i}() {{ return {i}; }}\nint main() {{ return f{i}() * 2; }}\n'
                for i in range(4)}
     for name, text in sources.items():

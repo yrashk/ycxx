@@ -99,6 +99,10 @@ constexpr Builtin unsigned_of(Builtin b) {
 // prints `__FLT_MAX__`: no leading zeros in the exponent.
 std::string floating(double v, int digits, std::string_view suffix) {
   std::string s = std::format("{:.{}e}", v, digits == 0 ? 40 : digits - 1);
+  // BOOTSTRAP: -Wstringop-overread: the position of 'e' is kept across the erase, not found
+  // again. At -O3 GCC 16.2 reports the second `s.find('e')` as reading SIZE_MAX bytes (#748).
+  // Without the bug: the `digits == 0` block finds its own `e`, and `auto e = s.find('e');`
+  // follows it.
   auto e = s.find('e');
   if (digits == 0) {  // the exact value: trailing zeros of the mantissa dropped
     auto last = s.find_last_not_of('0', e - 1);

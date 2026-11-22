@@ -101,9 +101,6 @@ jobs:
           path: build/test-logs/
           if-no-files-found: ignore
 
-  # ThreadSanitizer (#105): ycxx and libycxx instrumented, the unit tests once and the concurrent
-  # ones repeated (tools/tsan). On the bare runner with a GCC built with libtsan (the action's
-  # comment says why not the container); building that GCC takes about 17 minutes on a cache miss.
   # Release (-O3 -DNDEBUG) on both hosts (#726): the build, its unit tests, and tools/test's fast
   # stages against the Release binary. NDEBUG does not turn contracts off; asserts are gone.
   release:
@@ -147,6 +144,9 @@ jobs:
           path: build/test-logs/
           if-no-files-found: ignore
 
+  # ThreadSanitizer (#105): ycxx and libycxx instrumented, the unit tests once and the concurrent
+  # ones repeated (tools/tsan). On the bare runner with a GCC built with libtsan (the action's
+  # comment says why not the container); building that GCC takes about 17 minutes on a cache miss.
   tsan:
     needs: changed
     if: needs.changed.outputs.run == 'true' && !inputs.release-only

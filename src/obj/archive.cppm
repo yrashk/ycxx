@@ -75,7 +75,7 @@ std::expected<contents, std::string> read(std::string_view bytes, std::string_vi
   contents result;
   // BOOTSTRAP: -Wmaybe-uninitialized: `index` is a view and a flag, not std::optional. At -O3
   // GCC 16.2 reports the optional's payload as possibly uninitialized after `if (!index)`
-  // (#726; GCC's known class of std::optional false positives, as PR 114253). Without the bug:
+  // (#748; GCC's known class of std::optional false positives, as PR 114253). Without the bug:
   //   std::optional<std::string_view> index, long_names;   // `if (!index)`, `index->size()`
   std::optional<std::string_view> long_names;
   std::string_view index;

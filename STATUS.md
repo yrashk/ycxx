@@ -3026,9 +3026,9 @@ miscompiles it (DECISIONS §3.2). Each is removed once ycxx compiles itself.
   `make_qual_type`, `make_decl_ord` in `src/ast/handles.cppm`).
   - Cause: GCC 16.2 does not emit its TU-local contract-violation helper
     (`__tu_has_violation`) in an importer that inlines a non-template inline function with a
-    precondition. The importer fails to link unless it has a contract of its own. In-class member
-    functions are not affected; a class template's member is, when its specialization is
-    instantiated in the imported interface (GCC PR 124264; #46).
+    precondition. The importer fails to link unless it has a contract of its own. Members of
+    non-template classes are not affected; a class template's member is, when its specialization
+    is instantiated in the imported interface (GCC PR 124264; #46).
   - Fix: belongs in GCC.
 - **A contract predicate inside a lambda that names a member of the enclosing class goes through
   a local `bool`, or a member's precondition** (`src/ast` interner, builder, compaction;
@@ -3066,11 +3066,19 @@ miscompiles it (DECISIONS §3.2). Each is removed once ycxx compiles itself.
     without emitting the TU-local violation helper it calls, so programs linking the AST fail
     to link (the template case of GCC PR 124264, above). Repro on #46.
   - Fix: belongs in GCC. Drop the option when ycxx compiles itself.
-- **Release (-O3) false-positive warnings, restructured instead of disabled** (#726): a segment
-  and a flag instead of `std::optional` in `link::elf::read_shared_object`, a view and a flag in
-  `obj::archive::read` (`-Wmaybe-uninitialized` on the optional's payload after a check), and a
-  copy bounded by `sun_path` in the daemon's `socket_address` (`-Wstringop-overflow`). Each
-  comment shows the plain form to restore.
+- **Release (-O3) false-positive warnings, restructured instead of disabled** (#726; restoring
+  them is #748). Each comment shows the plain form to restore.
+  - `-Wmaybe-uninitialized` on a `std::optional`'s payload read after a check: a value and a flag
+    in `link::elf::read_shared_object` (`dynamic`, and `symbol_count` from `parsed`),
+    `obj::archive::read` (`index`), `parse.cppm` (`named`, `mem`, `exception_tokens`, `lit`)
+    and `Sema::class_name` (`found`).
+  - `-Warray-bounds` through libycxx's in-place `vector` insert: reserved appends in
+    `Sema::member_call` (`parameters`) and `Sema::call` (`all`).
+  - `-Warray-bounds`/`-Wstringop-overflow` through `"literal" + std::string&&`: `std::format` in
+    `daemon/connect.cppm` (four messages).
+  - `-Wstringop-overflow` on the `sun_path` copy: a copy also bounded by the array in the
+    daemon's `socket_address`.
+  - `-Wstringop-overread` on `string::find`: `pp::floating` keeps the position of `e`.
 
 ## Milestones
 
