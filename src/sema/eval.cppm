@@ -164,7 +164,9 @@ private:
     auto body = irgen::function_ir(in, input, facts);
     if (!body) return {};
     Host host{q_, this};
-    interp::Config config{.enum_layout = [&facts](EntityId e) { return facts.constant_enum_layout(e); }};
+    interp::Config config{
+        .enum_layout = [&facts](EntityId e) { return facts.constant_enum_layout(e); },
+        .temporary_record_layout = [this](QualType t) { return constant_record_layout(t); }};
     interp::Outcome out = interp::evaluate(host, in, s_->world().target, body->body, EntityId::none, {}, std::move(config)).run();
     if (out.status != interp::Outcome::Status::value && host.type_trait_failure)
       return {std::nullopt, reason_unsupported, false, false, true};
@@ -329,7 +331,7 @@ private:
   std::optional<interp::ConstantRecordLayout> constant_record_layout(QualType type) {
     Types& types = s_->types();
     type = types.canonical(type);
-    if (!types.is_class(type) || !Types::is_const(type) || Types::is_volatile(type) || !s_->is_aggregate(type))
+    if (!types.is_class(type) || Types::is_volatile(type) || !s_->is_aggregate(type))
       return std::nullopt;
     const EntityId entity = types.class_of(type);
     const ClassRec* record = s_->class_rec(entity);
@@ -373,7 +375,8 @@ private:
       if (value && value->usable && value->value && e->s_->ins().values.is<ast::VAggregate>(*value->value)) {
         // Block-scope statics also have stored initializers. Const qualification alone does
         // not make a class variable potentially constant ([expr.const]).
-        if (e->s_->world().entities.rec(v).linkage != ast::Linkage::none)
+        if (Types::is_const(e->s_->types().canonical(value->type)) &&
+            e->s_->world().entities.rec(v).linkage != ast::Linkage::none)
           value->record = e->constant_record_layout(value->type);
       }
       return {std::move(value)};

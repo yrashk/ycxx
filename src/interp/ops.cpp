@@ -253,11 +253,20 @@ struct Ops {
     auto storage = ir::Storage(imms(f, n)[1]);
     auto init = ir::Init(imms(f, n)[2]);
     if (storage != ir::Storage::automatic && storage != ir::Storage::temporary) return m.unsupported(n);
-    if (m.shape(t).leaves == 0) return m.unsupported(n);
-    u32 o = m.make_object(t, M::Origin::automatic);
+    const u64 type_leaves = m.shape(t).leaves;
+    const ConstantRecordLayout* record =
+        type_leaves == 0 && storage == ir::Storage::temporary ? m.temporary_record(t) : nullptr;
+    const u64 leaves = record ? record->fields.size() : type_leaves;
+    constexpr u64 max_cells = std::numeric_limits<u32>::max();
+    if (leaves == 0 || leaves > max_cells || m.cells_.size() > max_cells - leaves) return m.unsupported(n);
+    u32 o = m.make_object(t, M::Origin::automatic, record);
     const M::Object& ob = m.objects_[o];
     if (init == ir::Init::zero) {
-      m.fill_zero(t, ob.cell0);
+      if (record) {
+        for (u32 i = 0; i < ob.ncells; ++i) m.fill_zero(record->fields[i].type, ob.cell0 + i);
+      } else {
+        m.fill_zero(t, ob.cell0);
+      }
     } else {
       M::Fill fill = init == ir::Init::erroneous ? M::Fill::erroneous : M::Fill::indeterminate;
       for (u32 c = ob.cell0; c < ob.cell0 + ob.ncells; ++c) m.cells_[c].fill = fill;
