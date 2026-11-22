@@ -284,7 +284,8 @@ with tempfile.TemporaryDirectory() as directory:
     resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
     assert subprocess.run([executable], timeout=10).returncode == 0
     for args in (("early",), ("use", "moved"), ("consume", "again", "now")):
-        assert subprocess.run([executable, *args], timeout=10).returncode == -signal.SIGABRT
+        assert subprocess.run([executable, *args], timeout=10).returncode in (
+            -signal.SIGABRT, -signal.SIGILL, -signal.SIGTRAP)
 
     if sys.platform == "linux" and platform.machine() in ("x86_64", "amd64"):
         native = root / "native"
@@ -318,3 +319,48 @@ with tempfile.TemporaryDirectory() as directory:
         subprocess.run([*args, str(runtime), "-o", str(native)], check=True, timeout=30)
         assert subprocess.run([native], timeout=10).returncode == 0
         assert subprocess.run([native, "early"], timeout=10).returncode == -signal.SIGILL
+
+        # A hosted peer owns the guard and catches its exception after unwinding through YCXX.
+        cleanup = write("cleanup.cpp", """\
+            #include <ycxx/ownership/runtime.hpp>
+            extern "C" void maybe_throw();
+            struct Completion {
+              ycxx::ownership::linear_state* state;
+              ~Completion() noexcept { state->consume(); }
+            };
+            extern "C" void run_cleanup(ycxx::ownership::linear_state* state) {
+              Completion completion{state};
+              maybe_throw();
+            }
+        """)
+        peer = write("cleanup_peer.cpp", """\
+            #include <ycxx/ownership/runtime.hpp>
+            using ycxx::ownership::linear_state;
+            extern "C" void run_cleanup(linear_state*);
+            bool throwing;
+            extern "C" void maybe_throw() {
+              if (throwing) throw 19;
+            }
+            int main(int argc, char**) {
+              {
+                linear_state state;
+                run_cleanup(&state);
+              }
+              throwing = true;
+              try {
+                linear_state state;
+                if (argc > 1) state.consume();
+                run_cleanup(&state);
+              } catch (int value) {
+                return value == 19 ? 0 : 1;
+              }
+              return 2;
+            }
+        """)
+        cleanup_object = root / "cleanup.o"
+        subprocess.run([compiler, "cxx", "--no-daemon", "--target=x86_64-linux-gnu", "-I", include, "-c",
+                        str(cleanup), "-o", str(cleanup_object)], check=True, timeout=30)
+        subprocess.run([host, "-std=c++20", "-I", include, str(peer), str(cleanup_object), "-o", str(native)],
+                       check=True, timeout=30)
+        assert subprocess.run([native], timeout=10).returncode == 0
+        assert subprocess.run([native, "already-consumed"], timeout=10).returncode == -signal.SIGILL

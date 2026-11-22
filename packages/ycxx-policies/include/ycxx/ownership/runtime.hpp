@@ -1,6 +1,13 @@
 #pragma once
 
-#ifndef __ycxx__
+// Use the same definition when linking YCXX, GCC, and Clang objects together.
+#ifdef __has_builtin
+#if __has_builtin(__builtin_trap)
+#define YCXX_POLICIES_HAS_TRAP 1
+#endif
+#endif
+
+#ifndef YCXX_POLICIES_HAS_TRAP
 #include <cstdlib>
 #endif
 
@@ -8,7 +15,7 @@ namespace ycxx::ownership {
 
 namespace detail {
 [[noreturn]] inline void ownership_violation() noexcept {
-#ifdef __ycxx__
+#ifdef YCXX_POLICIES_HAS_TRAP
   __builtin_trap();
 #else
   std::abort();
@@ -45,3 +52,5 @@ using affine_state = runtime_state<false>;
 using linear_state = runtime_state<true>;
 
 }  // namespace ycxx::ownership
+
+#undef YCXX_POLICIES_HAS_TRAP

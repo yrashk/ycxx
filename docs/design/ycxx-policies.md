@@ -181,4 +181,8 @@ callee. Keep runtime observations and static verdicts in the same conformance su
 
 The policy fixtures cover composed fragments, alias and annotation parity, conflicts, and a registry
 with 1,280 resource types. The portable runtime fixture in `examples/affine/runtime_transaction.hpp`
-checks the native adapter with GCC or Clang and YCXX. [Compiler support #661](https://github.com/yrashk/ycxx/issues/661)
+checks the native adapter with GCC or Clang and YCXX. On hosted Linux x86-64, a mixed-compiler
+fixture verifies that a YCXX cleanup consumes a guard created by a GCC or Clang caller, on both
+normal return and exception propagation. The compiler currently supports a single aggregate
+automatic local with a nonthrowing destructor around a direct external call in this case.
+[Indirect results #661](https://github.com/yrashk/ycxx/issues/661) · [Exception cleanup #663](https://github.com/yrashk/ycxx/issues/663)

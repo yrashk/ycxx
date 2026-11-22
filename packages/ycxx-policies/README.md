@@ -34,7 +34,9 @@ add this directory's `include` path to the compiler's include search path.
 transfers the live state and invalidates the source. Call `observe()` before accessing a live
 resource and `consume()` when the adapter discharges it. Destruction of a live linear state or
 an operation on a spent state terminates execution. The adapter owns the actual resource and
-implements its cleanup.
+implements its cleanup. YCXX, GCC, and Clang use the same trap intrinsic for violations so
+their inline guard definitions agree when mixed in one executable. The guard uses
+`std::abort()` on compilers without that intrinsic.
 
 ```cpp
 #include <ycxx/ownership/runtime.hpp>
