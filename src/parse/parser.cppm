@@ -651,6 +651,26 @@ public:
       case Tk::kw_constinit: once(d.is_constinit, k); break;
       case Tk::kw_typedef: once(d.is_typedef, k); break;
       case Tk::kw_enum:
+        if (qualified_ahead(1)) {
+          const u32 at = pos();
+          const auto diags = s_->diag_count();
+          bump();
+          u32 next = 0;
+          auto scope = nested_name(0, next, /*member_pointer=*/false, /*checked=*/true,
+                                   QualifierLookup::elaborated_enum, /*check_injected_access=*/true);
+          if (scope && kind(next) == Tk::identifier && kind(next + 1) != Tk::less &&
+              !s_->has_error_since(diags) && !any_type()) {
+            if (auto t = s_->qualified_elaborated_enum(*scope, name_of(tok(next)), pos() + next)) {
+              cls = *t;
+              qualified_half_ = false;
+              take_qualified(next + 1);
+              continue;
+            }
+          }
+          if (!s_->has_error_since(diags)) s_->diag(at, Diag::expected_type_specifier);
+          d.ok = false;
+          goto done;
+        }
         if (kind(1) == Tk::identifier && kind(2) != Tk::l_brace && kind(2) != Tk::colon) {
           // An elaborated-type-specifier naming an enumeration ([dcl.type.elab]).
           bump();
@@ -1548,10 +1568,12 @@ public:
     u32 at;
   };
 
+  enum class QualifierLookup { ordinary, type, elaborated_enum };
+
   // A nested-name-specifier ([expr.prim.id.qual]) at token `start` ahead: `::`, `N::`, `N::C::`,
   // resolved as it is read, without consuming it. `next` is where the name after it is.
   std::optional<sema::Sema::Scope> nested_name(u32 start, u32& next, bool member_pointer = false,
-                                               bool checked = false, bool type_components = false,
+                                               bool checked = false, QualifierLookup lookup = QualifierLookup::ordinary,
                                                bool check_injected_access = false,
                                                std::vector<TypeQualifier>* type_qualifiers = nullptr,
                                                bool* failed_qualifier = nullptr,
@@ -1573,7 +1595,8 @@ public:
       s = sema::Sema::global_scope();
       ++j;
     } else if (kind(j) == Tk::identifier && kind(j + 1) == Tk::coloncolon) {
-      s = s_->scope_named(name_of(tok(j)));
+      const std::optional<u32> at = lookup == QualifierLookup::elaborated_enum ? std::optional{pos() + j} : std::nullopt;
+      s = s_->scope_named(name_of(tok(j)), at);
       if (!s) return std::nullopt;
       j += 2;
     } else if (auto t = template_id_scope(std::nullopt, j, /*scope=*/true, checked || check_injected_access,
@@ -1585,7 +1608,13 @@ public:
     for (;;) {
       if (kind(j) == Tk::identifier && kind(j + 1) == Tk::coloncolon) {
         NameId n = name_of(tok(j));
-        if (type_components) {
+        if (lookup == QualifierLookup::elaborated_enum) {
+          s = s_->qualified_enum_scope(*s, n, pos() + j);
+          if (!s) return std::nullopt;
+          j += 2;
+          continue;
+        }
+        if (lookup == QualifierLookup::type) {
           std::optional<u32> at = check_injected_access ? std::optional{pos() + j} : std::nullopt;
           auto injected = s_->qualified_injected_type(*s, n, at, /*type_only=*/true);
           if (injected.type) {
@@ -1684,7 +1713,7 @@ public:
     u32 next = 0;
     bool check_qualifier = checked && substituting_partial_arguments;
     const auto diags = s_->diag_count();
-    auto s = nested_name(start, next, /*member_pointer=*/false, check_qualifier, /*type_components=*/true, checked,
+    auto s = nested_name(start, next, /*member_pointer=*/false, check_qualifier, QualifierLookup::type, checked,
                          nullptr, failed_qualifier);
     if (checked && s_->has_error_since(diags)) return std::nullopt;
     if (!s || kind(next) != Tk::identifier || kind(next + 1) == Tk::coloncolon) return std::nullopt;
@@ -1706,7 +1735,7 @@ public:
       return injected.type ? std::optional{std::pair{*injected.type, next + 1 - start}} : std::nullopt;
     if (type_only) {
       if (!s->ns) return std::nullopt;
-      auto t = s_->namespace_elaborated_class(*s->ns, name, at);
+      auto t = s_->namespace_elaborated_type(*s->ns, name, at, ast::DeclKind::class_);
       return t ? std::optional{std::pair{*t, next + 1 - start}} : std::nullopt;
     }
     auto t = s_->scope_type(*s, name);
@@ -4209,7 +4238,7 @@ public:
     std::vector<TypeQualifier> type_qualifiers;
     std::optional<u32> committed_failure;
     auto s = nested_name(0, next, /*member_pointer=*/false, substituting_partial_arguments || address.has_value(),
-                         /*type_components=*/false, /*check_injected_access=*/false, &type_qualifiers,
+                         QualifierLookup::ordinary, /*check_injected_access=*/false, &type_qualifiers,
                          /*failed_qualifier=*/nullptr, &committed_failure);
     if (committed_failure) {
       for (u32 j = 0; j < *committed_failure; ++j) bump();

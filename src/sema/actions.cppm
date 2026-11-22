@@ -95,6 +95,8 @@ public:
   // `directives` are the namespaces block-scope using-directives nominate ([namespace.udir]): their
   // names join the lookup where [namespace.udir]/2 puts them.
   virtual std::vector<DeclId> visible_decls(NameId name, std::span<const EntityId> directives = {}) = 0;
+  virtual std::vector<ast::DeclSema> qualifier_decls(NameId, std::optional<EntityId>,
+                                                     std::span<const EntityId>) { return {}; }
   virtual ast::DeclSema decl_sema(DeclId d) = 0;
   // The written in-class declaration of a member from this unit's class record.
   virtual std::optional<ast::DeclSema> written_member(EntityId) { return std::nullopt; }
@@ -491,7 +493,8 @@ public:
   // `elaborated`, non-type declarations are ignored ([basic.lookup.elab]).
   // A typedef-name too, unless `aliases` is false (after a class-key, [dcl.type.elab]/2).
   std::optional<QualType> class_name(NameId name, bool elaborated = false, bool aliases = true,
-                                    std::optional<u32> type_at = std::nullopt, bool search_locals = true) {
+                                    std::optional<u32> type_at = std::nullopt, bool search_locals = true,
+                                    std::optional<EntityId>* qualifier_namespace = nullptr) {
     // Innermost block first: a block-scope typedef-name, or a local that hides the type.
     for (std::size_t d = search_locals ? scopes_.size() : 0; d-- > 0;) {
       for (auto t = block_types_.rbegin(); t != block_types_.rend(); ++t)
@@ -520,6 +523,12 @@ public:
     if (current_class != EntityId::none) {
       const EntityRec& c = w_->entities.rec(current_class);
       if (c.templ != EntityId::none && c.name == name) return types().class_type(current_class);
+      if (qualifier_namespace && type_at) {
+        const auto before = diag_count();
+        const Scope scope{std::nullopt, types().class_type(current_class)};
+        if (auto type = enum_path_member(scope, name, *type_at, ClassBodyLookup::enum_qualifier)) return type;
+        if (has_error_since(before)) return std::nullopt;
+      }
       // A type nested in the class whose scope this is ([basic.scope.class]).
       if (const ClassRec* cr = class_rec(current_class); cr && cr->defined) {
         if (!elaborated && current_function != EntityId::none && !scopes_.empty() && !templated() &&
@@ -550,6 +559,16 @@ public:
     const auto take = [&](const ast::DeclSema& s) { found = s, has_found = true; };
     for (auto p = own.rbegin(); p != own.rend() && !has_found; ++p)
       if (p->name == name) take(p->sema);
+    if (qualifier_namespace && type_at && !has_found) {
+      const auto before = diag_count();
+      if (auto scope = qualifier_scope(name, *type_at, q_->qualifier_decls(name, std::nullopt, directives()))) {
+        *qualifier_namespace = scope->ns;
+        return scope->type;
+      }
+      if (!has_error_since(before) && member_introduction && member_introduction->name == name)
+        return member_introduction->sema.type;
+      return std::nullopt;
+    }
     if (!has_found)
       for (DeclId d : q_->visible_decls(name, directives())) {
         ast::DeclSema s = q_->decl_sema(d);
@@ -583,13 +602,15 @@ public:
     std::optional<QualType> type;
   };
 
-  enum class ClassBodyLookup { unqualified, qualified, before_template_parameter };
+  enum class ClassBodyLookup { unqualified, qualified, enum_qualifier, qualified_enum, before_template_parameter };
 
   // [class.pre], [class.member.lookup]: a class's injected name stops the search on
   // that branch. In a nonvirtual graph, distinct base branches cannot dominate one another.
   ClassBodyType class_body_type(EntityId naming, const ClassRec& root, NameId name, std::optional<u32> type_at,
                                ClassBodyLookup lookup = ClassBodyLookup::unqualified, bool type_only = false) {
-    const bool qualified = lookup == ClassBodyLookup::qualified;
+    const bool qualified_enum = lookup == ClassBodyLookup::qualified_enum;
+    const bool enum_lookup = qualified_enum || lookup == ClassBodyLookup::enum_qualifier;
+    const bool qualified = lookup == ClassBodyLookup::qualified || enum_lookup;
     const bool before_parameter = lookup == ClassBodyLookup::before_template_parameter;
     struct Edge {
       EntityId derived;
@@ -598,6 +619,7 @@ public:
     struct Hit {
       std::optional<QualType> type;
       EntityId owner;
+      EntityId declaration;
       ast::Access access;
       bool injected;
       std::vector<Edge> path;
@@ -608,18 +630,18 @@ public:
       const EntityRec& c = w_->entities.rec(cls);
       if (c.kind == EntityKind::class_ && c.name == name &&
           (c.templ == EntityId::none || (before_parameter && cls != naming))) {
-        hits.push_back({types().class_type(cls), cls, ast::Access::public_, true, path});
+        hits.push_back({types().class_type(cls), cls, cls, ast::Access::public_, true, path});
         return;
       }
       if (auto member = direct_member(cls, cr, name)) {
         auto nested = std::ranges::find(cr.types, name, &NestedType::name);
         if (nested != cr.types.end() &&
             (type_only || (member->nested_type != EntityId::none && member->enumerator == EntityId::none))) {
-          hits.push_back({nested->type, cls, cr.access_of(nested->entity), false, path});
+          hits.push_back({nested->type, cls, nested->entity, cr.access_of(nested->entity), false, path});
           return;
         }
         if (!type_only) {
-          hits.push_back({std::nullopt, cls, ast::Access::public_, false, path});
+          hits.push_back({std::nullopt, cls, EntityId::none, ast::Access::public_, false, path});
           return;
         }
       }
@@ -638,7 +660,7 @@ public:
     };
     collect(naming, root);
     const bool injected = std::ranges::any_of(hits, &Hit::injected);
-    if (hits.empty() || (qualified && !injected)) return {};
+    if (hits.empty() || (lookup == ClassBodyLookup::qualified && !injected)) return {};
     // [class.qual]: in ordinary lookup the naming class's own injected name denotes its constructor.
     if (qualified && !type_only && hits.front().injected && hits.front().owner == naming)
       return {true, std::nullopt};
@@ -647,11 +669,22 @@ public:
     // Apply the lookup-set and access checks to names with an injected-class-name candidate.
     // The caller resolving a potentially hidden template parameter also needs these checks
     // for ordinary members of nondependent bases ([temp.local]).
-    if (type_at && (injected || before_parameter)) {
+    if (type_at && (injected || enum_lookup || before_parameter)) {
       QualType selected = types().canonical(*first->type);
       if (std::ranges::any_of(hits, [&](const Hit& h) { return !h.type || types().canonical(*h.type) != selected; })) {
         diag(*type_at, Diag::ambiguous_member, name, types().class_type(naming));
+        if (enum_lookup) return {true, std::nullopt};
       } else {
+        if (qualified_enum) {
+          std::erase_if(hits, [&](const Hit& hit) {
+            return w_->entities.rec(hit.declaration).kind == EntityKind::type_alias;
+          });
+          if (hits.empty()) {
+            diag(*type_at, Diag::elaborated_typedef, name);
+            return {true, std::nullopt};
+          }
+          first = hits.begin();
+        }
         auto allowed = [this, naming, before_parameter](const Hit& h) {
           return accessible(h.owner, h.access, naming) && std::ranges::all_of(h.path, [&](const Edge& edge) {
             return accessible(edge.derived, edge.access, before_parameter ? naming : EntityId::none);
@@ -1754,7 +1787,7 @@ public:
   static Scope global_scope() { return {EntityId::none, std::nullopt}; }
   // The first component of a nested-name-specifier, by unqualified lookup ([basic.lookup.qual]/1:
   // only namespaces, types and templates).
-  std::optional<Scope> scope_named(NameId n) {
+  std::optional<Scope> scope_named(NameId n, std::optional<u32> enum_qualifier_at = std::nullopt) {
     // A type template parameter as a nested-name-specifier names a dependent type
     // ([temp.dep.type]); in an instantiation, its argument.
     if (const ast::TemplateParamSema* p = template_param(n)) {
@@ -1768,6 +1801,12 @@ public:
     }
     for (auto a = block_aliases_.rbegin(); a != block_aliases_.rend(); ++a)
       if (a->name == n) return Scope{a->ns, std::nullopt};
+    if (enum_qualifier_at) {
+      std::optional<EntityId> ns;
+      if (auto t = class_name(n, true, true, enum_qualifier_at, true, &ns)) return Scope{std::nullopt, t};
+      if (ns) return Scope{ns, std::nullopt};
+      return std::nullopt;
+    }
     if (auto t = class_name(n, true)) return Scope{std::nullopt, t};
     if (auto ns = q_->namespace_named(n, directives())) return Scope{ns, std::nullopt};
     return std::nullopt;
@@ -1900,22 +1939,79 @@ public:
     return class_body_type(naming, cls ? *cls : incomplete, name, at, ClassBodyLookup::qualified, type_only);
   }
 
-  // Qualified namespace lookup for an elaborated class name skips non-types and aliases.
-  std::optional<QualType> namespace_elaborated_class(EntityId ns, NameId name, std::optional<u32> at) {
-    if (member_introduction && member_introduction->name == name &&
+  // Qualified namespace lookup for an elaborated type specifier skips non-types.
+  std::optional<QualType> namespace_elaborated_type(EntityId ns, NameId name, std::optional<u32> at,
+                                                  ast::DeclKind kind) {
+    if (kind == ast::DeclKind::class_ && member_introduction && member_introduction->name == name &&
         w_->entities.rec(member_introduction->sema.entity).scope == ns)
       return member_introduction->sema.type;
     std::optional<ast::DeclSema> result;
     for (const ast::DeclSema& d : q_->namespace_members(ns, name, /*type_only=*/true)) {
       if (result && result->entity != d.entity) {
+        if (kind == ast::DeclKind::enum_ && types().canonical(result->type) == types().canonical(d.type)) {
+          if (d.kind == kind) result = d;
+          continue;
+        }
         if (at) diag(*at, Diag::ambiguous_name, name);
         return std::nullopt;
       }
       result = d;
     }
-    if (!result || result->kind != ast::DeclKind::class_ || (result->flags & decl_flag::template_))
+    if (result && kind == ast::DeclKind::enum_ && result->kind == ast::DeclKind::type_alias && at)
+      diag(*at, Diag::elaborated_typedef, name);
+    if (!result || result->kind != kind || (result->flags & decl_flag::template_))
       return std::nullopt;
     return result->type;
+  }
+
+  // [basic.lookup.elab]: look past non-types, then require an enum declaration at the terminal name.
+  std::optional<QualType> qualified_elaborated_enum(const Scope& scope, NameId name, u32 at) {
+    if (scope.ns) return namespace_elaborated_type(*scope.ns, name, at, ast::DeclKind::enum_);
+    auto type = enum_path_member(scope, name, at, ClassBodyLookup::qualified_enum);
+    return type && types().is_enum(*type) ? type : std::nullopt;
+  }
+
+  std::optional<Scope> qualified_enum_scope(const Scope& scope, NameId name, u32 at) {
+    if (scope.ns) {
+      if (auto type = direct_member_introduction(*scope.ns, name)) return Scope{std::nullopt, *type};
+      return qualifier_scope(name, at, q_->qualifier_decls(name, scope.ns, {}));
+    }
+    auto type = enum_path_member(scope, name, at, ClassBodyLookup::enum_qualifier);
+    return type ? std::optional{Scope{std::nullopt, *type}} : std::nullopt;
+  }
+
+  std::optional<Scope> qualifier_scope(NameId name, u32 at, std::span<const ast::DeclSema> declarations) {
+    std::optional<Scope> result;
+    for (const auto& declaration : declarations) {
+      Scope found;
+      if (declaration.kind == ast::DeclKind::namespace_) found.ns = declaration.entity;
+      else if (is_type(declaration.kind) && !(declaration.flags & decl_flag::template_))
+        found.type = types().canonical(declaration.type);
+      else continue;
+      if (result && (result->ns != found.ns || result->type != found.type)) {
+        diag(at, Diag::ambiguous_name, name);
+        return std::nullopt;
+      }
+      result = found;
+    }
+    return result;
+  }
+
+  std::optional<QualType> enum_path_member(const Scope& scope, NameId name, u32 at, ClassBodyLookup lookup) {
+    if (!scope.type || !types().is_class(*scope.type) || types().is_dependent(*scope.type)) return std::nullopt;
+    const EntityId naming = types().class_of(*scope.type);
+    const ClassRec* cls = class_rec(naming);
+    if (!cls && naming != current_class) return std::nullopt;
+    if (naming == current_class && (!cls || !cls->defined))
+      if (auto member = q_->earlier_member(name, /*type_only=*/true)) {
+        if (lookup == ClassBodyLookup::qualified_enum && member->kind == ast::DeclKind::type_alias) {
+          diag(at, Diag::elaborated_typedef, name);
+          return std::nullopt;
+        }
+        return member->type;
+      }
+    const ClassRec incomplete;
+    return class_body_type(naming, cls ? *cls : incomplete, name, at, lookup, /*type_only=*/true).type;
   }
 
   // `S::n` naming a type.
