@@ -3983,6 +3983,7 @@ private:
   // can have declarators after the enumerator list. In a class (`cls`), it is a member.
   void enum_declaration(EntityId cls) {
     sema::Types& types = s_.types();
+    s_.current_class = cls;
     u32 at = ps_.pos();
     const bool definition = it_->kind == ItemKind::enum_def;
     const u32 after_attributes = definition ? after_definition_attributes() : it_->end;
@@ -4079,6 +4080,7 @@ private:
     if (unnamed) s_.defining_unnamed_enum_scope = scope;
     else p_->defining_enum_ = {e, &er};
     const std::size_t first_enumerator = s_.own.size();
+    if (cls != EntityId::none) s_.nested_enum_members_begin = first_enumerator;
     auto enumerator_entity = [&](NameId n) {
       return s_.world().entities.entity(
           {.kind = sema::EntityKind::enumerator, .name = n, .linkage = ast::Linkage::none, .scope = e});
@@ -4182,6 +4184,7 @@ private:
         break;
       }
     }
+    s_.nested_enum_members_begin.reset();
     // [dcl.enum]/7: without a fixed type, the type holds every value, and is no larger than int
     // unless a value fits neither int nor unsigned int; which one is the implementation's. As the
     // Itanium C++ ABI compilers choose (#220): with no negative value, `unsigned int` if every
@@ -4262,7 +4265,6 @@ private:
     spec.has_type = true;
     spec.is_typedef = td;
     if (cls != EntityId::none) {
-      s_.current_class = cls;
       return member_declarators(spec, class_decl(cls, true), /*fields_only=*/true);
     }
     do {
