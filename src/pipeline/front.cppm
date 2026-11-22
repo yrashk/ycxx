@@ -873,13 +873,13 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
           f.catch_all_callee = hosted_catch_all_callee(program, d, body);
           f.unwind = f.catch_all_callee == EntityId::none ? cleanup_free_definition(program, d, body)
                                                          : UnwindEligibility::hosted_catch_all;
-          if (f.unwind == UnwindEligibility::none) {
-            f.cleanup_call = hosted_cleanup_call(program, d, body);
-            if (f.cleanup_call != ast::NodeId::none) f.unwind = UnwindEligibility::hosted_cleanup;
-            else f.unwind_through_constructor = hosted_union_constructor_caller(program, d, body);
-          }
         } else if (cleanup_free_definition(program, d, body) == UnwindEligibility::cleanup_free) {
           f.unwind = UnwindEligibility::cleanup_free;
+        }
+        if (f.unwind == UnwindEligibility::none) {
+          f.cleanup_call = hosted_cleanup_call(program, d, body);
+          if (f.cleanup_call != ast::NodeId::none) f.unwind = UnwindEligibility::hosted_cleanup;
+          else if (linux) f.unwind_through_constructor = hosted_union_constructor_caller(program, d, body);
         }
       }
       closures_of(body.closures, program.id(k), it.body_begin - it.begin);
@@ -1128,6 +1128,7 @@ engine::query_task<FrontResult> TuFront::run(engine::Ctx& cx, TuId tu) {
     const auto& record = classes.rec(c);
     const auto& fields = record.fields;
     for (const sema::FieldRec& f : fields) {
+      if (f.no_unique_address) shape.overlapping_fields.push_back(std::uint32_t(shape.fields.size()));
       shape.fields.push_back(f.type);
       shape.has_mutable_field |= f.mutable_;
     }

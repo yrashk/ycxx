@@ -40,9 +40,19 @@ export struct FrameRow {
   FrameState state;
 };
 
+export struct CleanupSite {
+  std::uint32_t call;        // byte offset of the protected BL
+  std::uint32_t landing;     // byte offset of its exceptional successor
+};
+
+export struct Emission {
+  std::vector<FrameRow> frame_rows;
+  std::optional<CleanupSite> cleanup;
+};
+
 // Appends the function's code to `text` and describes the frame transitions for the Apple frame
 // record. `symbol(e)` gives the object's symbol index for an entity.
-export std::expected<std::vector<FrameRow>, std::string>
+export std::expected<Emission, std::string>
 emit(const MFunction& f, obj::section& text, std::function_ref<std::uint32_t(ir::EntityId)> symbol,
      const CallingConvention& cc = apple_arm64);
 
@@ -117,6 +127,7 @@ class Expander {
   std::vector<Real> code;
   std::vector<std::uint64_t> label_at;  // instruction index of each label
   std::vector<FrameRow> frame_rows;
+  std::optional<std::size_t> cleanup_call;
   std::string error;
 
   void run() {
@@ -127,7 +138,11 @@ class Expander {
       // An earlier return resets the rules for its last instruction only.
       if (!b.insts.empty() && !frame_rows.empty() && frame_rows.back().state == FrameState::entry)
         frame_row(FrameState::frame_pointer);
-      for (const MInst& in : b.insts) inst(in);
+      for (const MInst& in : b.insts) {
+        if (f_.cleanup && in.form == Form::BL && in.origin == raw(f_.cleanup->call))
+          cleanup_call = code.size();
+        inst(in);
+      }
     }
   }
 
@@ -308,7 +323,7 @@ class Expander {
 
 }  // namespace
 
-std::expected<std::vector<FrameRow>, std::string>
+std::expected<Emission, std::string>
 emit(const MFunction& f, obj::section& text, std::function_ref<std::uint32_t(ir::EntityId)> symbol,
      const CallingConvention& cc) {
   if (!f.allocated) return std::unexpected(std::string("emit needs an allocated function"));
@@ -322,6 +337,14 @@ emit(const MFunction& f, obj::section& text, std::function_ref<std::uint32_t(ir:
   if (!x.error.empty()) return std::unexpected(x.error);
   if (x.code.size() > std::numeric_limits<std::uint32_t>::max() / 4)
     return std::unexpected("the function exceeds the object offset limit");
+  Emission emission{std::move(x.frame_rows), std::nullopt};
+  if (f.cleanup) {
+    const auto label = raw(f.cleanup->landing);
+    if (!x.cleanup_call || label >= x.label_at.size() || x.label_at[label] >= x.code.size())
+      return std::unexpected("missing hosted cleanup call or landing pad");
+    emission.cleanup = CleanupSite{static_cast<std::uint32_t>(*x.cleanup_call * 4),
+                                   static_cast<std::uint32_t>(x.label_at[label] * 4)};
+  }
   text.align(2);
   for (std::size_t i = 0; i < x.code.size(); ++i) {
     Real r = x.code[i];
@@ -342,7 +365,7 @@ emit(const MFunction& f, obj::section& text, std::function_ref<std::uint32_t(ir:
       text.relocate(k, symbol(ir::EntityId(std::uint32_t(r.sym))));
     }
   }
-  return std::move(x.frame_rows);
+  return emission;
 }
 
 }  // namespace ycxx::aarch64

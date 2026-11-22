@@ -1776,7 +1776,7 @@ std = 'C++98'
 detect = '\bfriend\b'
 status = 'partial'
 issues = [259, 689]
-note = 'Includes type friends naming a class template parameter. Broader template friends, C linkage, hidden operators, and default arguments remain partial.'
+note = 'Ordinary binary hidden friends and unary minus participate in ADL. Type friends can name a class template parameter. Other hidden friend operators, C-linkage friend definitions, default arguments in friend declarations, and broader template friends remain open.'
 probe = '''
 class C { int p = 2; friend int peek(const C& c) { return c.p; } };
 int main() { C c; return peek(c) - 2; }
@@ -2240,8 +2240,8 @@ clauses = ['except', 'except.pre', 'except.throw', 'except.ctor', 'except.handle
 std = 'C++98'
 detect = '\bthrow\b|\btry\b|\bcatch\s*\('
 status = 'partial'
-issues = [89, 72, 572, 578, 583, 648, 737]
-note = 'Throw and block try/catch syntax. Hosted exceptions can cross eligible cleanup-free frames on Linux x86-64 and macOS arm64. Linux also supports int throws from eligible frames and one catch-all around an external call.'
+issues = [89, 72, 572, 578, 583, 648, 663, 737, 781]
+note = 'Throw and block try/catch syntax. Hosted exceptions can cross eligible cleanup-free frames and one automatic aggregate cleanup on Linux x86-64 and macOS arm64. Linux also supports int throws from eligible frames and one catch-all around an external call.'
 probe = '''
 int d = 0; struct G { ~G() { ++d; } };
 int f() { G g; throw 3; }

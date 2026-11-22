@@ -295,6 +295,7 @@ class Gen {
     ast::EntityId destructor = ast::EntityId::none;
     ir::Storage storage = ir::Storage::automatic;
     std::optional<uint32_t> vacuous_local = {};  // a declaration a jump can bypass
+    bool conditional = false;  // a null pointer denotes a temporary that was not created
   };
   void begin_lifetime(const Place& p) {
     ValueId ops[] = {p.ptr};
@@ -351,7 +352,10 @@ class Gen {
     auto r = f();
     std::vector<Ending> ts = std::move(temps_.back());
     temps_.pop_back();
-    for (auto t = ts.rbegin(); t != ts.rend(); ++t) end_lifetime(*t);
+    for (auto t = ts.rbegin(); t != ts.rend(); ++t) {
+      if (t->conditional) if_nonnull(t->place.ptr, [&] { end_lifetime(*t); });
+      else end_lifetime(*t);
+    }
     return r;
   }
   void push_scope() {
@@ -699,7 +703,7 @@ class Gen {
       return;
     }
     const At initializer = child(a, v.init);
-    const bool selection = has_init && cls(rec.type) == TypeClass::record && class_selection(initializer);
+    const bool selection = has_init && selects_class_initializer(initializer);
     bool zeroed = has_init && value_initializes(initializer);
     // Conversion of nullptr_t during initialization does not access its object ([conv.lval]).
     // Its storage starts with erroneous bytes ([basic.indet]).
@@ -715,8 +719,8 @@ class Gen {
     if (has_init) {
       selecting_initializer_ = selection;
       full_expression([&] {
-        if (selection) initialize_selection(initializing_place(p), initializer, zeroed);
-        else initialize(initializing_place(p), initializer, zeroed);
+        initialize(initializing_place(p), initializer, zeroed, selection);
+        if (selection) begin_lifetime(p);
         return 0;
       });
       selecting_initializer_ = false;
@@ -733,38 +737,72 @@ class Gen {
            class_prvalue(info(e));
   }
 
+  // A later aggregate initializer clause can run before earlier temporaries are destroyed.
+  // Check the whole initializer for throwing evaluation and cleanup when it contains a selection.
+  bool selects_class_initializer(At e) {
+    e = strip_parens(e);
+    if (class_selection(e)) return true;
+    if (is<ast::DefaultArg>(e)) return selects_class_initializer(child(e, get<ast::DefaultArg>(e).arg));
+    if (is<ast::DefaultMemberInit>(e))
+      return selects_class_initializer(child(e, get<ast::DefaultMemberInit>(e).init));
+    if (!is<ast::InitList>(e)) return false;
+    for (ast::Child c : ast_.children(get<ast::InitList>(e).elems))
+      if (selects_class_initializer(child(e, c))) return true;
+    return false;
+  }
+
   // A class prvalue initializes its result object directly ([dcl.init], [class.copy.elision]).
-  // At the end of a local initializer each selected arm can clean up its own temporaries before
-  // the join. There are no later siblings which could still observe those temporaries.
+  // Keep each selected arm's temporaries alive through the later clauses of the full-expression.
+  // The join takes their addresses; only the executed arm supplies live ones ([class.temporary]).
   void initialize_selection(const Place& p, At e, bool zeroed) {
-    Position here(*this, e.offset);
-    if (is<ast::Paren>(e)) return initialize_selection(p, child(e, get<ast::Paren>(e).operand), zeroed);
-    if (class_selection(e)) {
-      if (is<ast::OrderedBinary>(e)) {
-        const auto comma = get<ast::OrderedBinary>(e);
-        discard(child(e, comma.lhs));
-        return initialize_selection(p, child(e, comma.rhs), zeroed);
-      }
-      const auto choice = get<ast::Conditional>(e);
-      const auto then_value = child(e, choice.then_), else_value = child(e, choice.else_);
-      if (!class_prvalue(info(then_value)) || !class_prvalue(info(else_value)))
-        unsupported(e, "with a non-value arm in a class initializer");
-      const auto condition = rvalue(child(e, choice.condition));
-      const auto then_block = new_block(), else_block = new_block(), join = new_block();
-      cond_br(condition, edge(then_block), edge(else_block));
-      for (auto [block, value] : {std::pair{then_block, then_value}, std::pair{else_block, else_value}}) {
-        enter(block);
-        full_expression([&] {
-          initialize_selection(p, value, zeroed);
-          return 0;
-        });
-        br(join);
-      }
-      enter(join);
-      return;
+    if (is<ast::OrderedBinary>(e)) {
+      const auto comma = get<ast::OrderedBinary>(e);
+      discard(child(e, comma.lhs));
+      return initialize(p, child(e, comma.rhs), zeroed, true);
     }
-    initialize(p, e, zeroed);
-    begin_lifetime(p);
+    const auto choice = get<ast::Conditional>(e);
+    const auto then_value = child(e, choice.then_), else_value = child(e, choice.else_);
+    if (!class_prvalue(info(then_value)) || !class_prvalue(info(else_value)))
+      unsupported(e, "with a non-value arm in a class initializer");
+    const auto condition = rvalue(child(e, choice.condition));
+    struct Arm {
+      At value;
+      ir::BlockId entry;
+      ir::BlockId exit{};
+      ValueId state{};
+      std::vector<Ending> temporaries{};
+    };
+    Arm arms[] = {{then_value, new_block()}, {else_value, new_block()}};
+    cond_br(condition, edge(arms[0].entry), edge(arms[1].entry));
+    std::vector<ir::Ty> parameters{ir::Ty::state()};
+    for (Arm& arm : arms) {
+      enter(arm.entry);
+      temps_.emplace_back();
+      initialize(p, arm.value, zeroed, true);
+      arm.exit = block_;
+      arm.state = state_;
+      arm.temporaries = std::move(temps_.back());
+      temps_.pop_back();
+      for (const Ending& temporary : arm.temporaries)
+        parameters.push_back(vty(facts_.pointer_to(temporary.place.type)));
+    }
+    const auto join = b_.add_block(parameters);
+    for (const Arm& arm : arms) {
+      block_ = arm.exit;
+      ir::SuccRef next{join, {arm.state}};
+      for (const Arm& source : arms)
+        for (const Ending& temporary : source.temporaries)
+          next.args.push_back(&arm == &source ? temporary.place.ptr : zero(facts_.pointer_to(temporary.place.type)));
+      emit(ir::Op::br, {}, {}, {}, 0, std::span(&next, 1));
+    }
+    enter(join);
+    uint32_t index = 1;
+    for (Arm& arm : arms)
+      for (Ending& temporary : arm.temporaries) {
+        temporary.place.ptr = b_.param(join, index++);
+        temporary.conditional = true;
+        temps_.back().push_back(temporary);
+      }
   }
 
   // Whether initializer `e` value-initializes some element (`ValueInit`), so the object is
@@ -875,14 +913,16 @@ class Gen {
 
   // Initializes the object at `p` from the prvalue `e` ([dcl.init]). In a `zeroed` object, a
   // value-initialized element is already zero.
-  void initialize(const Place& p, At e, bool zeroed) {
+  void initialize(const Place& p, At e, bool zeroed, bool select_class = false) {
     Position here(*this, e.offset);
-    if (is<ast::Paren>(e)) return initialize(p, child(e, get<ast::Paren>(e).operand), zeroed);
-    if (is<ast::DefaultArg>(e)) return pinned([&] { initialize(p, child(e, get<ast::DefaultArg>(e).arg), zeroed); });
+    if (is<ast::Paren>(e)) return initialize(p, child(e, get<ast::Paren>(e).operand), zeroed, select_class);
+    if (is<ast::DefaultArg>(e))
+      return pinned([&] { initialize(p, child(e, get<ast::DefaultArg>(e).arg), zeroed, select_class); });
     if (facts_.is_reference(p.type)) {
       store(p, address(e));  // a reference member holds its object's address
       return;
     }
+    if (select_class && class_selection(e)) return initialize_selection(p, e, zeroed);
     if (is<ast::ImplicitConversion>(e)) {
       auto c = get<ast::ImplicitConversion>(e);
       if (c.conversion == ast::ConversionKind::array_copy)
@@ -915,6 +955,7 @@ class Gen {
           if (!array)
             if (auto field = facts_.field_type(owner, index); field && facts_.is_reference(*field)) type = *field;
           Place destination = subobject(p, array ? ir::Step::elem : ir::Step::field, index, type);
+          const bool select_element = select_class && (array || !facts_.potentially_overlapping_field(owner, index));
           if (is<ast::DefaultMemberInit>(x)) {
             Position member_location(*this, x.offset);
             // Only a replayed default uses the destination's `this`. An explicit clause can
@@ -930,10 +971,10 @@ class Gen {
               ~RestoreThis() { current = saved; }
             } restore{this_, std::exchange(this_, receiver)};
             pinned([&] {
-              initialize(initializing_place(destination), child(x, get<ast::DefaultMemberInit>(x).init), false);
+              initialize(initializing_place(destination), child(x, get<ast::DefaultMemberInit>(x).init), false, select_element);
             });
           } else {
-            initialize(destination, x, zeroed);
+            initialize(destination, x, zeroed, select_element);
           }
         }
         ++i;
@@ -1824,12 +1865,12 @@ class Gen {
     return pure(ir::Op::ptr_cast, n.info.type, {storage}, {word(ty(n.info.type))});
   }
 
-  void deallocate_if_nonnull(ValueId addr, auto&& deallocate) {
+  void if_nonnull(ValueId addr, auto&& body) {
     ValueId nonnull = pure(ir::Op::tobool, facts_.bool_type(), {addr});
     ir::BlockId release = new_block(), join = new_block();
     cond_br(nonnull, edge(release), edge(join));
     enter(release);
-    deallocate();
+    body();
     br(join);
     enter(join);
   }
@@ -1838,7 +1879,7 @@ class Gen {
     if (fn_.thunk) unsupported(a, "in constant evaluation");
     auto d = get<ast::DeleteObject>(a);
     ValueId addr = rvalue(child(a, d.address));
-    deallocate_if_nonnull(addr, [&] {
+    if_nonnull(addr, [&] {
       stateful(ir::Op::obj__end, {}, std::span(&addr, 1));
       ValueId args[] = {addr, rvalue(child(a, d.size))};
       call_fn(d.function, d.info.type, args, 0);
@@ -1849,7 +1890,7 @@ class Gen {
     if (!fn_.native_array_delete) throw Unsupported{"array deallocation"};
     auto d = get<ast::DeleteArray>(a);
     ValueId operand = rvalue(child(a, d.operand));
-    deallocate_if_nonnull(operand, [&] {
+    if_nonnull(operand, [&] {
       ast::QualType void_pointer = facts_.pointer_to(d.info.type);
       ValueId address = pure(ir::Op::ptr_cast, void_pointer, {operand}, {word(ty(void_pointer))});
       // The call releases the allocation root, including a zero-length array ([basic.life]).
@@ -2293,7 +2334,7 @@ class Gen {
   std::vector<At> epilogue_;                 // a destructor's DestroyMember statements
   std::optional<Place> initialized_member_;  // a constructor's exceptional cleanup only
   int branches_ = 0;                         // conditionally evaluated operands entered
-  bool selecting_initializer_ = false;      // direct local class initializer and its cleanup
+  bool selecting_initializer_ = false;      // local class initializer selection and its cleanup
   int pinned_ = 0;                           // depth inside trees from other items (`Position`)
 };
 

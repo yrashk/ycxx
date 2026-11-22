@@ -52,6 +52,11 @@ export struct FrameObject {
   std::uint32_t align = 1;
 };
 
+export struct CleanupInvoke {
+  ir::NodeId call;
+  ir::BlockId landing;
+};
+
 export struct MFunction {
   std::vector<MBlock> blocks;      // in layout order; L2 blocks first, then edge blocks
   std::vector<l2::Type> vregs;     // each virtual register's type
@@ -59,6 +64,7 @@ export struct MFunction {
   std::uint32_t labels = 0;
   std::uint32_t outgoing = 0;      // bytes of stack arguments the calls need, at sp
   bool allocated = false;          // no virtual registers remain
+  std::optional<CleanupInvoke> cleanup;
 };
 
 export std::string print(const MFunction& f) {

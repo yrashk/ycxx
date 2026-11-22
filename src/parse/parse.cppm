@@ -1544,8 +1544,9 @@ public:
   std::vector<DeclId> visible_decls(ast::NameId name, std::span<const EntityId> directives = {}) override {
     std::vector<std::string> paths;
     for (EntityId ns : directives) paths.push_back(p_->namespace_path(ns));
-    return p_->visible_decls(p_->world().ins.names.spelling(name), declaration_lookup_end.value_or(item_),
-                             self_ && !declaration_lookup_end, from, paths);
+    const auto& scope = initializer_source ? p_->ns_of(initializer_source->item) : from;
+    return p_->visible_decls(p_->world().ins.names.spelling(name), namespace_lookup_item(),
+                             namespace_lookup_includes_item(), scope, paths);
   }
   std::optional<EntityId> namespace_named(ast::NameId name, std::span<const EntityId> directives = {}) override {
     for (DeclId d : visible_decls(name, directives))
@@ -1556,22 +1557,26 @@ public:
                                                bool direct_only = false) override {
     std::vector<ast::DeclSema> r;
     for (DeclId d : p_->qualified_decls(p_->world().ins.names.spelling(name), p_->namespace_path(ns),
-                                       declaration_lookup_end.value_or(item_), self_ && !declaration_lookup_end,
+                                       namespace_lookup_item(), namespace_lookup_includes_item(),
                                        type_only, direct_only))
       if (auto s = p_->decl_sema(d); s && s->entity != EntityId::none) r.push_back(*s);
     return r;
   }
   std::vector<ast::DeclSema> adl_functions(EntityId ns, ast::NameId name, bool at_instantiation) override {
-    return at_instantiation ? p_->adl_functions(ns, name, point(), false) : p_->adl_functions(ns, name, item_, self_);
+    if (at_instantiation) return p_->adl_functions(ns, name, point(), false);
+    if (initializer_source) return p_->adl_functions(ns, name, initializer_source->item, false);
+    return p_->adl_functions(ns, name, item_, self_);
   }
   const sema::ClassRec* adl_class(EntityId c, bool at_instantiation) override {
-    bool complete = at_instantiation ? is_complete(c) : is_complete_at_item(c);
+    bool complete = at_instantiation ? is_complete(c) :
+        (completing_class != EntityId::none && completing_class == c) || is_complete_at_source(c);
     return complete ? p_->classes().find(c) : nullptr;
   }
   std::vector<DeclId> earlier_adl_friends(EntityId c, NameId name) override {
     const auto def = p_->class_items_.find(std::to_underlying(c));
-    if (def == p_->class_items_.end() || p_->items().items[item_].parent != def->second) return {};
-    return p_->hidden_friends_before(p_->world().ins.names.spelling(name), item_, def->second);
+    const u32 source = initializer_source ? initializer_source->item : item_;
+    if (def == p_->class_items_.end() || p_->items().items[source].parent != def->second) return {};
+    return p_->hidden_friends_before(p_->world().ins.names.spelling(name), source, def->second);
   }
   // The namespace unqualified lookup starts in: the item's, or the one a qualified declarator
   // names ([basic.lookup.unqual]/9).
@@ -1736,6 +1741,12 @@ private:
                                        const Program::Dmi& dmi, EntityId base);
   static bool inherited_default_arithmetic(sema::Sema& replay, NodeId root, EntityId base,
                                            const sema::ClassRec& record);
+
+  // A replay sees the original namespace prefix and a complete enclosing class ([class.mem.general]).
+  u32 namespace_lookup_item() const {
+    return initializer_source ? initializer_source->item : declaration_lookup_end.value_or(item_);
+  }
+  bool namespace_lookup_includes_item() const { return self_ && !declaration_lookup_end && !initializer_source; }
 
   bool is_complete_at_item(EntityId c) {
     return (completing_class != EntityId::none && completing_class == c) ||
@@ -4646,11 +4657,12 @@ private:
     const std::string_view name = s_.ins().names.spelling(d.name);
     const bool binary_operator = name_token == Tk::kw_operator && d.params.size() == 2 && name.starts_with("operator") &&
                                  std::ranges::contains(sema::Sema::binary_spellings, name.substr(8));
+    const bool unary_minus = name_token == Tk::kw_operator && d.params.size() == 1 && name == "operator-";
     const bool ordinary = (definition || !c_context) && !d.qualified && !d.template_args && p_->namespace_class_friend(k_) &&
-                          (name_token == Tk::identifier || binary_operator);
+                          (name_token == Tk::identifier || binary_operator || unary_minus);
     if (!types.is_function(d.type) ||
         (definition ? !ordinary || !d.function || !ps_.at_end() || !it_->has_body() ||
-                        p_->region().tokens[it_->body_begin].kind != Tk::l_brace
+                        (p_->region().tokens[it_->body_begin].kind != Tk::l_brace && !(unary_minus && deleted_body()))
                     : !ps_.is(Tk::semi))) {
       s_.diag(d.name_at, Diag::not_supported, Tk::kw_friend);
       return bad();
@@ -7808,8 +7820,9 @@ private:
       Ex init;
       if (auto it = inits.subobjects.find(i); it != inits.subobjects.end()) init = it->second;
       else if (rec.union_ && (!inits.subobjects.empty() || !f.dmi)) continue;
-      else if (f.init != ConstId::none) init = s_.literal(sema::Types::unqualified(f.type), f.init, ast::ValueCategory::prvalue, 0, 0);
+      // The early scalar value may have been folded before all class members were visible.
       else if (auto d = p_->dmi(f.entity)) init = member_initializer(f, *d);
+      else if (f.init != ConstId::none) init = s_.literal(sema::Types::unqualified(f.type), f.init, ast::ValueCategory::prvalue, 0, 0);
       else if (s_.types().is_reference(f.type)) s_.diag(0, Diag::reference_uninitialized);  // [class.base.init]/10
       else init = s_.default_init(f.type, 0, 0);
       if (!init.ok()) continue;

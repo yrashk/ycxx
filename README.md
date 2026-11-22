@@ -51,6 +51,8 @@ and Mach-O linker on arm64 macOS, where `arm64-apple-darwin` is the default targ
 object files from Clang or GCC. Variadic functions can be defined with `<cstdarg>` on both
 macOS and Linux ([#647](https://github.com/yrashk/ycxx/issues/647)). Errors are reported as
 `file:line:col: error: …`.
+Errors during replay of a written default member initializer point to the initializer.
+[#806](https://github.com/yrashk/ycxx/issues/806)
 
 The arm64 Mach-O linker preserves supported cleanup-free and cleanup-only DWARF frames from input objects.
 [Mach-O unwind support #72](https://github.com/yrashk/ycxx/issues/72)
@@ -68,7 +70,8 @@ builds and passes its tests on both hosts, and compiles a 40,000-statement funct
 instead of Debug's 5.3 s on an M-series Mac ([#726](https://github.com/yrashk/ycxx/issues/726)).
 
 Single-expression `auto(x)` and `auto{x}` perform scalar and pointer decay-copy, including
-array and function decay. Function-template bodies can defer supported dependent operands to
+array and function decay. Non-type template parameters can have enumeration types
+([#774](https://github.com/yrashk/ycxx/issues/774)). Function-template bodies can defer supported dependent operands to
 instantiation, and a function template whose signature holds a dependent variable-template-id
 or its negation compiles to an object ([#773](https://github.com/yrashk/ycxx/issues/773)). C++26
 pack-index-specifiers `T...[I]` select a type from a pack ([#297](https://github.com/yrashk/ycxx/issues/297);
@@ -199,13 +202,14 @@ peer code. [#572](https://github.com/yrashk/ycxx/issues/572) ·
 On x86-64 Linux, an eligible ycxx function can also throw an `int` to a hosted peer's handler.
 A host-linked ycxx function can use one `catch (...)` to return an integer literal when
 a direct call on its parameter to an externally defined `int(int)` function throws.
-A host-linked void function can also destroy one initialized aggregate local on both exits
-from an external `void()` call and let the original exception reach a peer handler.
 A supported union constructor can destroy its active member when its body call throws and
 propagate an exception from its initializer before the member's lifetime begins.
 [#578](https://github.com/yrashk/ycxx/issues/578)
-· [#583](https://github.com/yrashk/ycxx/issues/583) · [#663](https://github.com/yrashk/ycxx/issues/663)
-· [#738](https://github.com/yrashk/ycxx/issues/738)
+· [#583](https://github.com/yrashk/ycxx/issues/583) · [#738](https://github.com/yrashk/ycxx/issues/738)
+
+On both hosts, a system-linked void function can destroy one initialized aggregate local
+on both exits from an external `void()` call and let the original exception reach a peer handler.
+[#663](https://github.com/yrashk/ycxx/issues/663) · [#781](https://github.com/yrashk/ycxx/issues/781)
 
 Both targets support cooked integer user-defined literals through namespace-scope literal
 operators with an `unsigned long long` parameter, including constant evaluation.
@@ -227,9 +231,10 @@ An ordinary class object can be destroyed explicitly through a reference or poin
 `object.~Class()` or `pointer->~Class()`. Templates can use a dependent class name, and unary
 `noexcept` uses the destructor's exception specification. [#722](https://github.com/yrashk/ycxx/issues/722)
 
-Both targets construct a class prvalue directly into an automatic variable initialized with the
-built-in conditional or comma operator. The supported nonthrowing initializers sequence temporary
-destruction after the result is constructed. [#740](https://github.com/yrashk/ycxx/issues/740)
+Both targets construct a class prvalue selected by the built-in conditional or comma operator
+directly into an automatic variable, its ordinary aggregate field, or its fixed-array element.
+The supported nonthrowing initializers keep temporaries alive through later initializer clauses
+and destroy them in reverse order. [#740](https://github.com/yrashk/ycxx/issues/740)
 
 In-class conversion functions can name a class type alias as their conversion target,
 including a dependent alias in a class template. A named `static_cast` can call a
@@ -261,6 +266,12 @@ initializer takes precedence. The same rules apply to ordinary non-inline namesp
 whose dynamic initialization runs in definition order.
 [#118](https://github.com/yrashk/ycxx/issues/118)
 
+An out-of-line constructor evaluates a default member initializer with the namespace names
+visible where the initializer was written and lookup in the complete enclosing class.
+[#764](https://github.com/yrashk/ycxx/issues/764)
+Later class members can also hide namespace names in defaults that evaluate to scalar constants.
+[#763](https://github.com/yrashk/ycxx/issues/763)
+
 Automatic declarations such as `Point p(3, 4);` can initialize flat aggregates with public
 arithmetic fields. Supplied expressions initialize the fields in declaration order. Omitted
 fields use their default member initializer when available and otherwise get zero. A runtime
@@ -289,7 +300,8 @@ written default member initializer are value-initialized.
   Free function templates can instantiate omitted dependent scalar defaults after overload selection.
   Ordinary free binary operators use argument-dependent lookup, including associated base namespaces.
   Supported dependent binary operators on ordinary non-template classes also find associated
-  nonmember candidates at instantiation.
+  nonmember candidates at instantiation. Ordinary unary minus can find hidden friends by
+  argument-dependent lookup.
   Nonmember operators can be called explicitly by name, including with namespace qualification.
   [#219](https://github.com/yrashk/ycxx/issues/219)
   Overloaded free functions can take braced arguments for arithmetic parameters

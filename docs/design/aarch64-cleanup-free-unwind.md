@@ -20,6 +20,7 @@ keeps them under the [cleanup-free Mach-O profile](macho-cleanup-free-unwind.md)
 
 The first profile covers exception propagation through an ordinary YCXX-compiled frame in a
 program linked with the hosted system toolchain. A program linked by YCXX can use the Darwin
-system unwinder to walk the same records. Throw expressions, catch handlers, destructor
-personalities and AArch64 cleanup paths remain in [#648](https://github.com/yrashk/ycxx/issues/648).
+system unwinder to walk the same records. [Hosted cleanup](aarch64-hosted-cleanup.md) extends
+the object profile with a personality and a cleanup-only table. Throw expressions and catch
+handlers are tracked in [#648](https://github.com/yrashk/ycxx/issues/648).
 This slice is tracked in [#737](https://github.com/yrashk/ycxx/issues/737).

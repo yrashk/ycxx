@@ -400,7 +400,7 @@ public:
 
   template <class... A>
   void diag(u32 at, Diag d, const A&... args) {
-    diag_at({std::to_underlying(item_), loc_base_ + at}, d, args...);
+    diag_at(q_->source_loc({std::to_underlying(item_), loc_base_ + at}, at), d, args...);
   }
   template <class... A>
   void diag_at(engine::Loc loc, Diag d, const A&... args) {
@@ -5166,6 +5166,16 @@ public:
     return Ics{true, Ics::user_defined};
   }
 
+  static Ics implicit_object_rank(const TypeRec& function, Cv object_cv, bool object_rvalue) {
+    if (!cv_within(object_cv, function.fn_cv)) return {};
+    const bool rvalue_ref = function.fn_ref == ast::RefQual::rvalue;
+    if (rvalue_ref && !object_rvalue) return {};
+    if (function.fn_ref == ast::RefQual::lvalue && object_rvalue && function.fn_cv != Cv::const_) return {};
+    // An unqualified member can bind an rvalue without competing on reference kind.
+    return binding({true, 0, 0}, rvalue_ref, object_rvalue && function.fn_ref != ast::RefQual::none,
+                   cv_bits(function.fn_cv) - cv_bits(object_cv));
+  }
+
   enum class OverloadFailure { no_viable, diagnosed };
 
   // The best viable candidate for `args` ([over.match.best]). Only the absence of a viable
@@ -5187,14 +5197,9 @@ public:
       std::vector<Ics> seq;
       // The implicit object parameter, first: the object must not be more cv-qualified.
       if (!cands[i].no_object && object_cv) {
-        if (!cv_within(*object_cv, fr.fn_cv)) continue;
-        const bool rvalue_ref = fr.fn_ref == ast::RefQual::rvalue;
-        if (rvalue_ref && !object_rvalue) continue;
-        if (fr.fn_ref == ast::RefQual::lvalue && object_rvalue && fr.fn_cv != Cv::const_) continue;
-        // Unqualified members retain the special rvalue binding rule and
-        // do not participate in the reference-kind ranking tiebreaker.
-        seq.push_back(binding({true, 0, 0}, rvalue_ref, object_rvalue && fr.fn_ref != ast::RefQual::none,
-                              cv_bits(fr.fn_cv) - cv_bits(*object_cv)));
+        const Ics object = implicit_object_rank(fr, *object_cv, object_rvalue);
+        if (!object.viable) continue;
+        seq.push_back(object);
       } else {
         seq.push_back({true, 0, 0});
       }
@@ -7984,7 +7989,16 @@ public:
     std::size_t n = diag_count();
     std::optional<Ex> ref_qualified_member;
     QualType lt = types().referee(operands[0].type());
-    if (types().is_class(lt))
+    const bool unary_minus = operands.size() == 1 && op == "-" && types().is_class(lt);
+    std::vector<ast::DeclSema> unary_friends;
+    AdlAssociations unary_associations;
+    if (unary_minus) {
+      unary_associations = adl_associations(operands, /*at_instantiation=*/false, /*ordinary_call=*/true);
+      for_each_associated_friend(unary_associations, name, /*at_instantiation=*/false, [&](const ast::DeclSema& d) {
+        if (types().rec(d.type).params.size() == 1) unary_friends.push_back(d);
+      });
+    }
+    if (types().is_class(lt) && unary_friends.empty())
       if (const ClassRec* c = class_rec(types().class_of(lt));
           c && std::ranges::any_of(c->members, [&](const MemberDeclRec& m) { return m.name == name && m.is_function && !m.is_static; })) {
         Ex m = member(operands[0], false, name, operands[0].end, op_at, op_at);
@@ -8011,6 +8025,7 @@ public:
     for (const auto& o : own)
       if (o.name == name) add(o.sema);
     for (DeclId d : q_->visible_decls(name, directives())) add(q_->decl_sema(d));
+    for (const ast::DeclSema& d : unary_friends) add(d);
     if (binary) {
       auto associations = adl_associations(operands, /*at_instantiation=*/false, /*ordinary_call=*/true);
       for_each_associated_friend(associations, name, /*at_instantiation=*/false, add);
@@ -8028,6 +8043,9 @@ public:
         for (EntityId ns : instantiated.namespaces)
           for (const ast::DeclSema& d : q_->adl_functions(ns, name, /*at_instantiation=*/true)) add(d);
       }
+    } else if (!unary_friends.empty()) {
+      for (EntityId ns : unary_associations.namespaces)
+        for (const ast::DeclSema& d : q_->adl_functions(ns, name, /*at_instantiation=*/false)) add(d);
     } else {
       for (const Ex& o : operands)
         if (auto ns = associated_namespace(o.type())) {
@@ -8037,6 +8055,128 @@ public:
             for (const ast::DeclSema& d : q_->namespace_members(*ns, name)) add(d);
           }
         }
+    }
+    if (!unary_friends.empty()) {
+      auto found = find_member(types().class_of(lt), name);
+      if (found && found->ambiguous) {
+        diag(op_at, Diag::ambiguous_member, name, Types::unqualified(lt));
+        return Ex{NodeId::none, begin, end};
+      }
+      struct UnaryCandidate {
+        Ics rank;
+        QualType target;
+        const ast::DeclSema* nonmember;
+      };
+      std::vector<UnaryCandidate> viable;
+      Ex object = operands.front();
+      auto deduced_type = [&](const ast::DeclSema& pattern, std::span<const ArgShape> shapes,
+                              std::span<const NodeId> defaults) -> std::optional<QualType> {
+        Templates t = templates();
+        auto args = t.deduce_call(pattern, shapes, {}, defaults);
+        if (!args) return std::nullopt;
+        if (pattern.constraints != ConstId::none) {
+          auto params = ins().seqs.elements(pattern.template_params);
+          auto constraint = t.substitute_constraint(pattern.constraints,
+                                                     Bindings::of(params.empty() ? 0 : params[0].depth, *args));
+          auto satisfied = constraint ? q_->satisfied(*constraint) : std::optional<bool>(false);
+          if (satisfied && !*satisfied) return std::nullopt;
+        }
+        return t.specialization_type(pattern, *args);
+      };
+      bool unsupported = false;
+      bool ambiguous_base = false;
+      if (found && found->member && found->member->is_function) {
+        const bool rvalue = object.cat() != ValueCategory::lvalue;
+        const QualType target = types().class_type(found->owner);
+        const int depth = base_depth(lt, target);
+        for (const MemberDeclRec* candidate : member_functions(found->owner, name)) {
+          if (candidate->is_static) continue;
+          QualType function_type = candidate->type;
+          if (candidate->is_template) {
+            auto pattern = q_->template_decl(candidate->entity);
+            if (!pattern) continue;
+            auto specialized = deduced_type(*pattern, {}, candidate->defaults);
+            if (!specialized) continue;
+            function_type = *specialized;
+          }
+          auto fn = types().rec(function_type);
+          Ics rank = implicit_object_rank(fn, object_cv(lt), rvalue);
+          if (!rank.viable || !fn.params.empty()) continue;
+          unsupported |= candidate->is_template;
+          if (depth) {
+            rank.rank = 2;  // derived-to-base conversion
+            rank.base_depth = depth;
+          }
+          viable.push_back({rank, target, nullptr});
+        }
+      }
+      for (const auto& candidate : set) {
+        QualType function_type = candidate.type;
+        const bool is_template = (candidate.flags & decl_flag::template_) != 0;
+        if (is_template) {
+          const std::array shapes{argument_shape(object)};
+          auto specialized = deduced_type(candidate, shapes, found_defaults(candidate));
+          if (!specialized) continue;
+          function_type = *specialized;
+        }
+        auto fn = types().rec(function_type);
+        if (fn.params.size() != 1) continue;
+        const QualType parameter = fn.params.front();
+        const QualType target = types().referee(parameter);
+        // An exact match outranks a repeated-base conversion. Keep the diagnostic for
+        // the remaining cases until repeated-base conversions participate in ranking.
+        Ex binding_object = object;
+        if (binding_object.cat() == ValueCategory::prvalue)
+          binding_object.info.category = ValueCategory::xvalue;  // after temporary materialization
+        if (types().is_class(target) && types().class_of(target) != types().class_of(lt) &&
+            (!types().is_reference(parameter) ||
+             (direct_reference_category(binding_object, types().rec(parameter)) &&
+              cv_within(object_cv(lt), object_cv(target))))) {
+          int paths = 0;
+          base_path(types().class_of(lt), types().class_of(target), paths);
+          if (paths > 1) {
+            ambiguous_base = true;
+            continue;
+          }
+        }
+        const auto rank = ics(object, parameter);
+        if (!rank.viable) continue;
+        unsupported |= is_template || rank.rank >= Ics::user_defined;
+        viable.push_back({rank, target, &candidate});
+      }
+      if (unsupported || (ambiguous_base && std::ranges::none_of(viable, [](const UnaryCandidate& c) {
+            return c.rank.rank == 0;
+          }))) {
+        diag(op_at, Diag::ref_qualified_operator_candidates);
+        return Ex{NodeId::none, begin, end};
+      }
+      if (viable.empty()) return std::nullopt;
+      auto better = [&](const UnaryCandidate& left, const UnaryCandidate& right) {
+        if (left.rank.base_depth && right.rank.base_depth &&
+            types().class_of(left.target) != types().class_of(right.target)) {
+          if (base_depth(left.target, right.target)) return true;
+          if (base_depth(right.target, left.target)) return false;
+          return left.rank.ref && right.rank.ref && left.rank.to_rvalue && right.rank.to_rvalue &&
+                 left.rank.rvalue_ref && !right.rank.rvalue_ref;
+        }
+        return left.rank < right.rank;
+      };
+      auto winner = viable.begin();
+      for (auto candidate = std::next(winner); candidate != viable.end(); ++candidate)
+        if (better(*candidate, *winner)) winner = candidate;
+      if (std::ranges::any_of(viable, [&](const UnaryCandidate& candidate) {
+            return &candidate != &*winner && !better(*winner, candidate);
+          })) {
+        diag(op_at, Diag::ambiguous_call, name);
+        return Ex{NodeId::none, begin, end};
+      }
+      if (!winner->nonmember) {
+        Ex access = member(object, false, name, object.end, op_at, op_at);
+        Ex result = access.ok() ? call(access, {}, end, op_at) : access;
+        return Ex{result.id, begin, end, result.info};
+      }
+      const auto selected = *winner->nonmember;
+      set.assign(1, selected);
     }
     if (set.empty()) return ref_qualified_member;
     if (binary && ref_qualified_member && q_->dependent_call(op_at)) {

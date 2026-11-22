@@ -338,6 +338,11 @@ What is true of the code today. Work in progress and its owners are tracked in
     omitted frames, native YCXX linking and system-linked exception propagation on macOS.
     Native throw lowering and landing pads are tracked in [#648](https://github.com/yrashk/ycxx/issues/648).
     [#737](https://github.com/yrashk/ycxx/issues/737)
+  - A system-linked arm64 function can destroy one initialized aggregate local on both exits from
+    a direct external `void()` call. The landing pad saves the exception header, runs the same
+    destructor as the normal continuation, and resumes the original exception. The object's
+    cleanup-only LSDA and frame records are checked in `unit.darwin_local_unwind`.
+    [Design](docs/design/aarch64-hosted-cleanup.md) · [#781](https://github.com/yrashk/ycxx/issues/781)
   - Not yet: thread-local variables, dead stripping, literal merging, branch islands beyond
     ±128 MiB, other dylibs' re-exports, incremental relinking, and import addends outside
     0..255 (`DYLD_CHAINED_IMPORT_ADDEND`). `__LLVM` (embedded bitcode), `__LD` and debug sections
@@ -1112,6 +1117,15 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   other member types and exceptional cleanup remain in #118.
   The fixtures in `tests/own/classes/scalar-default-member-init/` cover both targets in syntax
   checks and native Linux x86-64 execution.
+  Diagnostics during replay use the written initializer's source position.
+  [#806](https://github.com/yrashk/ycxx/issues/806)
+- Default member initializer replay in written constructors uses the initializer's original
+  namespace for ordinary and qualified lookup, and its original lexical point for ADL.
+  Lookup still sees the enclosing class complete, including its hidden friends.
+  [#764](https://github.com/yrashk/ycxx/issues/764)
+- A written constructor replays the initializer before taking a stored scalar value, so later
+  class members can hide namespace declarations in defaults that evaluated during the member scan.
+  [#763](https://github.com/yrashk/ycxx/issues/763)
 
 - An automatic declaration such as `Point p(3, 4);` can initialize a flat aggregate with
   public arithmetic fields and implicit trivial destruction. The fallback applies when
@@ -1632,15 +1646,18 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
 
 ## Local class prvalue selection (#740)
 
-- The built-in `?:` or comma operator can initialize an automatic class object directly
-  ([expr.cond], [expr.comma], [dcl.init.general]). The conditional evaluates one arm and both
-  arms use the destination's storage. Comma evaluates its left operand before initializing that
-  storage from its right operand. Deleted copies and moves are permitted.
-- The result starts its lifetime before cleanup. The selected arm's temporaries are destroyed in
-  reverse order before the older condition temporaries ([class.temporary]). This slice supports
-  nonthrowing initializers and cleanup. More general cleanup during unwinding remains in #219.
-- Class selection in nested initializer contexts and other conditionally created temporaries
-  remain under #740 and #157. The direct automatic cases are in `tests/own/class-selection/`.
+- The built-in `?:` or comma operator can initialize an automatic class object, an ordinary
+  aggregate field, or a fixed-array element directly ([expr.cond], [expr.comma], [dcl.init.aggr],
+  [dcl.init.general]). The conditional evaluates one arm. Comma evaluates its left operand
+  before initializing from its right operand. The selected expression uses the destination's
+  storage, including for types with deleted copies and moves.
+- The result starts its lifetime before cleanup. Temporaries from the selected arm survive
+  later initializer clauses and are destroyed with the rest of the full-expression's
+  temporaries in reverse order ([class.temporary]). Tests in `tests/own/class-selection/`
+  check both arms, later sibling initialization, and temporary and object destruction.
+- This slice supports nonthrowing initializers and cleanup. More general cleanup during
+  unwinding remains in #219. Potentially overlapping subobjects remain under #301 and #304,
+  other class initializer contexts under #740, and other conditional temporaries under #157.
 
 ## Braced arguments in free function overload resolution (#231, 2026-11-20)
 
@@ -1747,6 +1764,19 @@ template's tokens again with the arguments bound.
 - Tests: `tests/own/abi/dependent-template-args.run.cpp`, linked with a Clang peer that calls the
   specializations. `&&` follows #671; type-trait operations (`__is_same(T, U)`) still have no
   symbol (#780).
+
+## Enumeration-typed template parameters (#774)
+
+- A non-type template parameter may have an enumeration type ([temp.param]/7), scoped or
+  unscoped, with a fixed underlying type, in a namespace. Its arguments are converted constant
+  expressions of that type ([temp.arg.nontype]), so an integer is rejected. For an integral
+  parameter, an unscoped enumeration converts through its underlying type, without narrowing, and a
+  scoped one does not convert. Explicit and partial specializations, defaults and deduction from a
+  specialization work.
+- Symbols write an argument as `L <enumeration type> <value> E`, with `n` before a negative value,
+  as Clang and GCC do (`tests/own/abi/enum-template-args.run.cpp`, with a Clang peer).
+- Tests: `tests/own/templates/enum-parameters/`. Not yet: a functional cast as a template argument,
+  `h<E(5)>()`, which the template-argument parser takes for a type-id (#810).
 
 ## Pack-index-specifiers (#297)
 
@@ -2140,6 +2170,8 @@ Fable decided the representation (ast.md §6.6); the Opus session wrote the code
 - Ordinary binary hidden friend operators participate in ADL and compete with nonmember
   overloads from the associated namespaces. Qualified ordinary lookup still requires a
   namespace declaration. The existing Linux inline gate checks both object orders.
+- Ordinary unary minus finds hidden friends by ADL and ranks their operand conversions with
+  ordinary nonmember and member candidates. Access and deletion are checked for the selected operator.
 - **Checks** (`Sema::accessible`, `check_access`): a private or protected member may be named in
   a member function or default member initializer of its class, in the class's scope (the
   initializer of a static data member defined outside it), or in a friend function or friend
