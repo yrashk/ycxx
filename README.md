@@ -437,11 +437,12 @@ macros, conditionals, `_Pragma` and the predefined macros. `ycxx cxx -E` matches
 `ycxx cxx -E --target=x86_64-linux-gnu` selects Linux macros and resource headers. On native
 x86-64 Linux it also searches glibc's multiarch include path and preprocesses glibc's `<stdio.h>`.
 Linux `<stdarg.h>` supplies the `va_list` declaration, and direct `<float.h>` and `<limits.h>`
-provide the target's numeric limits. glibc's `<stdint.h>` compiles on native Linux (#657), and
-`<inttypes.h>` support remains tracked in #664. A Darwin target can use the configured SDK or one
-selected by `SDKROOT`. Cross-target builds can also supply target headers with `-I` or `-isystem`.
-[#475](https://github.com/yrashk/ycxx/issues/475)
-[#690](https://github.com/yrashk/ycxx/issues/690)
+provide the target's numeric limits. On native Linux, glibc's `<stdint.h>` and the pinned libycxx's
+hosted `<cstdint>`, `<cinttypes>`, and `<inttypes.h>` compile. A Darwin target can use the configured
+SDK or one selected by `SDKROOT`. Cross-target builds can also supply target headers with `-I` or
+`-isystem`. When no target `<stdint.h>` is available, `<cstdint>` uses compiler predefines.
+[#475](https://github.com/yrashk/ycxx/issues/475) · [#657](https://github.com/yrashk/ycxx/issues/657) ·
+[#664](https://github.com/yrashk/ycxx/issues/664) · [#690](https://github.com/yrashk/ycxx/issues/690)
 
 **Incremental builds through a resident daemon.** `ycxx cxx` hands its work to a per-project
 `ycxx daemon` (`YCXX_NO_DAEMON=1` runs in-process), which watches the files it has read and keeps
