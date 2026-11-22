@@ -426,9 +426,36 @@ bool begins_declaration_only(Tk t) {
   }
 }
 
+// After a requires-clause's constraint-logical-or-expression ([temp.pre]): primaries joined by
+// `&&` and `||`.
+static u32 after_requires_clause(u32 j, auto kind, auto match, auto match_angle) {
+  for (;;) {
+    if (kind(j) == Tk::l_paren) {
+      j = match(j);
+    } else if (kind(j) == Tk::kw_requires) {
+      ++j;
+      if (kind(j) == Tk::l_paren) j = match(j);
+      if (kind(j) == Tk::l_brace) j = match(j);
+    } else if (kind(j) == Tk::kw_true || kind(j) == Tk::kw_false) {
+      ++j;
+    } else {
+      while (kind(j) == Tk::identifier || kind(j) == Tk::coloncolon) {
+        ++j;
+        if (kind(j) == Tk::less) j = match_angle(j);
+      }
+    }
+    if (kind(j) != Tk::ampamp && kind(j) != Tk::pipepipe) return j;
+    ++j;
+  }
+}
+
 // Any other item: a declaration, or a definition of a function, class or enum.
 void Splitter::general(u32 k, u32& unnamed_types) {
   u32 j = i_;
+  if (at(k).template_depth && kind(j) == Tk::kw_requires)
+    j = after_requires_clause(j + 1, [this](u32 n) { return kind(n); },
+                              [this](u32 n) { return match(n); },
+                              [this](u32 n) { return match_angle(n); });
   bool initializer = false;  // a depth-0 `=` was seen: braces are initializers
   bool params = false;       // a declarator's parameter list was seen
   u32 class_key = none;      // the class-key or `enum` of a class-head, if any
@@ -671,33 +698,13 @@ private:
       else if (t == Tk::kw_export) ++j;
       else if (t == Tk::kw_template && kind(j + 1) == Tk::less) j = match_angle(j + 1, it.end);
       else if (t == Tk::kw_extern && kind(j + 1) == Tk::string_lit) j += 2;
-      else if (t == Tk::kw_requires) j = after_requires_clause(j + 1, it.end);
+      else if (t == Tk::kw_requires)
+        j = after_requires_clause(j + 1, [this](u32 n) { return kind(n); },
+                                  [this](u32 n) { return match(n); },
+                                  [this, &it](u32 n) { return match_angle(n, it.end); });
       else break;
     }
     return j;
-  }
-
-  // After a requires-clause's constraint-logical-or-expression ([temp.pre]): primaries joined by
-  // `&&` and `||`.
-  u32 after_requires_clause(u32 j, u32 limit) const {
-    for (;;) {
-      if (kind(j) == Tk::l_paren) {
-        j = match(j);
-      } else if (kind(j) == Tk::kw_requires) {
-        ++j;
-        if (kind(j) == Tk::l_paren) j = match(j);
-        if (kind(j) == Tk::l_brace) j = match(j);
-      } else if (kind(j) == Tk::kw_true || kind(j) == Tk::kw_false) {
-        ++j;
-      } else {
-        while (kind(j) == Tk::identifier || kind(j) == Tk::coloncolon) {
-          ++j;
-          if (kind(j) == Tk::less) j = match_angle(j, limit);
-        }
-      }
-      if (kind(j) != Tk::ampamp && kind(j) != Tk::pipepipe) return j;
-      ++j;
-    }
   }
 
   // `namespace a::b::c` (C++17, [namespace.def]) declares each component in the one before it, the

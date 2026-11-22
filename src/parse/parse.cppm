@@ -1749,7 +1749,8 @@ public:
   void static_local(EntityId v, QualType t, std::optional<ConstId> value) override {
     p_->static_locals_[std::to_underlying(v)] = {t, value};
   }
-  std::optional<ast::DeclSema> earlier_member(ast::NameId name, bool type_only = false) override {
+  std::optional<ast::DeclSema> earlier_member(ast::NameId name, bool type_only = false,
+                                            std::vector<ast::DeclSema>* functions = nullptr) override {
     const items::Item& it = p_->items().items[item_];
     if (it.parent == items::none || p_->items().items[it.parent].kind != ItemKind::class_def) return std::nullopt;
     std::optional<ast::DeclSema> r;
@@ -1765,6 +1766,7 @@ public:
           continue;
         const bool type = sema::Sema::is_type(d.kind);
         if (type_only && !type) continue;
+        if (functions && d.kind == ast::DeclKind::function) functions->push_back(d);
         // [basic.lookup.general]: a non-type hides a same-scope class or enum name.
         if (!type || !r || sema::Sema::is_type(r->kind)) r = d;
       }
@@ -2345,7 +2347,9 @@ public:
   std::optional<ConstId> constant_call(sema::Sema& s, const sema::Ex& call) override {
     return sema::Evaluator(s, *this).evaluate(call).value;
   }
-  std::optional<ast::DeclSema> earlier_member(ast::NameId, bool) override { return std::nullopt; }
+  std::optional<ast::DeclSema> earlier_member(ast::NameId, bool, std::vector<ast::DeclSema>*) override {
+    return std::nullopt;
+  }
   bool instantiation_gave_up() override { return p_->instantiation_gave_up(); }
   std::optional<QualType> specialization_type(EntityId v) override { return p_->specialization_type(v, p_->end()); }
   const std::vector<sema::Expansion>* pattern_expansions() override { return p_->expansions(item_, 1); }
@@ -4050,7 +4054,10 @@ private:
     std::optional<QualType> fixed;
     if (ps_.accept(Tk::colon)) {
       // [dcl.enum]/2: a fixed underlying type, an integral type.
+      const auto saved = s_.nested_enum_members_begin;
+      if (cls != EntityId::none) s_.nested_enum_members_begin = s_.own.size();
       DeclSpec u = ps_.decl_specifiers();
+      s_.nested_enum_members_begin = saved;
       if (!u.ok) return bad();
       if (!types.is_integral(u.type) || u.is_static || u.is_extern || u.is_inline || u.is_typedef ||
           u.is_constexpr || u.is_consteval || u.is_constinit) {

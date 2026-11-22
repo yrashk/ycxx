@@ -753,8 +753,12 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
 - Explicit native static links keep the first input ELF COMDAT group for each signature. The reader
   validates group membership, including relocation sections, and selection precedes startup and
   layout. `unit.linux_elf_comdat` checks whole-group selection, retained references, startup and
-  same-path daemon changes to the signature. COMDAT emission, archive and dynamic linking stay in
+  same-path daemon changes to the signature. Broader group emission, archive and dynamic linking stay in
   [#422](https://github.com/yrashk/ycxx/issues/422). [Design](docs/design/linux-elf-comdat-input.md)
+- The ELF writer can group one `.data.rel.ro` section and its generated relocation section by a
+  weak data symbol. The relocation section holds named nonlocal `R_X86_64_64` references.
+  Relocation-free `.rodata` groups still supply RTTI names.
+  [#422](https://github.com/yrashk/ycxx/issues/422) · [Design](docs/design/linux-elf-comdat-input.md)
 - ELF function definitions carry `STT_FUNC` and their emitted code size. The reader retains
   both for supported system relocatables and accepts zero as an unknown size. A function must
   start inside executable code, and its declared extent must fit in its section. The object
@@ -1373,7 +1377,12 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   [#731](https://github.com/yrashk/ycxx/issues/731)
 - Nested enumeration initializers see the enclosing class prefix by unqualified lookup. An
   earlier enumerator in the same enumeration takes precedence over an enclosing class member
-  ([basic.scope.enum], [basic.scope.class]). [#760](https://github.com/yrashk/ycxx/issues/760)
+  ([basic.scope.enum], [basic.scope.class]). A preceding non-static data member can be named
+  without an object in unevaluated operands such as `sizeof(member)` in an initializer and
+  `decltype(member)` in an enum-base. When a call resolves a mixed static and non-static
+  overload set from the class prefix, the selected function must be static. Tests cover
+  declaration order, ref-qualified candidates, braced arguments, and cold and resident edits.
+  [#760](https://github.com/yrashk/ycxx/issues/760) · [#882](https://github.com/yrashk/ycxx/issues/882)
 - Tests: `tests/own/classes/s4-*enum*`, `s4-scoped-enum`, `s4-unscoped-enum` (spec-only, plus two
   from the review): 7 of 7.
 - Namespace-scope opaque enum declarations ([dcl.enum], #157) supply a complete enum type with a
@@ -2260,6 +2269,8 @@ Fable decided the representation (ast.md §6.6); the Opus session wrote the code
   constraints' token fingerprint too (Fable's decision on #234). Tests:
   `tests/own/concepts/constrained-partial*`. Its explicit self-reference, out-of-class members and
   member templates are #832, and head identity for all partials is #833.
+- Class template heads and class partial specializations accept parenthesized constraint
+  operands joined by `&&` or `||` ([temp.pre], #839).
 - Not yet: class and variable template constraints outside those cases, members, broader
   constrained packs, fold-expanded constraints, constrained placeholders
   outside ordinary block declarations (#234). Open follow-ups include re-verification of satisfaction at END
