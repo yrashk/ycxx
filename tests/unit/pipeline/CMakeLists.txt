@@ -69,6 +69,10 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_
   add_test(NAME unit.linux_virtual_consumer
     COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/linux_virtual_consumer.py
             $<TARGET_FILE:ycxxc> ${CMAKE_CXX_COMPILER} ${CMAKE_READELF})
+  # PARITY: by design: links maker objects with native x86-64 ELF peers.
+  add_test(NAME unit.linux_peer_root_default_construction
+    COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/linux_peer_root_default_construction.py
+            $<TARGET_FILE:ycxxc> ${CMAKE_CXX_COMPILER} ${CMAKE_READELF})
   add_test(NAME unit.linux_function_addresses
     COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/linux_function_addresses.py
             $<TARGET_FILE:ycxxc> ${CMAKE_C_COMPILER} ${CMAKE_READELF})
@@ -79,7 +83,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_
     COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/linux_executable.py
             $<TARGET_FILE:ycxxc> ${CMAKE_READELF})
   add_test(NAME unit.linux_cleanup_free_unwind
-    COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/linux_cleanup_free_unwind.py
+    COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/linux_cleanup_free_unwind.py
             $<TARGET_FILE:ycxxc> ${CMAKE_CXX_COMPILER} ${CMAKE_READELF} ${CMAKE_OBJDUMP})
   add_test(NAME unit.linux_native_int_throw
     COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/linux_native_int_throw.py

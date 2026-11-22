@@ -247,6 +247,7 @@ public:
   }
   // ABI attributes on declarations outside the entity's ordinary declaration records.
   bool has_unapplied_declaration_attributes(EntityId e) const { return unapplied_declaration_attributes_.contains(e); }
+  bool peer_root_vtable_visible(EntityId cls) const;
 
   // The parsed class-key of a defining item ([class.union]).
   bool class_rec_is_union(u32 item) const {
@@ -1210,6 +1211,7 @@ private:
   std::map<u32, ClassAlignment> class_alignments_;
   void validate_class_alignment(u32 item, EntityId cls, sema::ClassRec& record, std::vector<engine::Diagnostic>& diags);
   bool has_unapplied_class_layout(u32 item, const ClassContent& content) const;
+  bool in_attributed_namespace(u32 item) const;
   bool class_layout_uncertain(EntityId cls, const sema::ClassRec& record, u32 point) const;
   std::optional<QualType> copy_move_constructor_parameter(const sema::MemberDeclRec& member, QualType owner) const;
   std::optional<QualType> assignment_parameter(const sema::MemberDeclRec& member, QualType owner) const;
@@ -4610,21 +4612,9 @@ private:
     return u8(width);
   }
 
-  // A namespace attribute can set visibility on otherwise unannotated declarations.
-  bool in_attributed_namespace(u32 item) const {
-    const auto& items = p_->items().items;
-    const auto& region = p_->region();
-    for (u32 parent = items[item].parent; parent != items::none; parent = items[parent].parent) {
-      const auto& scope = items[parent];
-      if (scope.kind == ItemKind::namespace_def &&
-          layout_attribute(region, scope.begin, scope.brace_begin, LayoutAttributes::any)) return true;
-    }
-    return false;
-  }
-
   EntityId introduce_namespace_class(NameId name) {
     EntityId entity = class_entity(name);
-    if (in_attributed_namespace(k_)) p_->unapplied_declaration_attributes_.insert(entity);
+    if (p_->in_attributed_namespace(k_)) p_->unapplied_declaration_attributes_.insert(entity);
     return entity;
   }
 
@@ -5506,8 +5496,8 @@ private:
     if (key_function) {
       if (region.first_visibility_pragma && *region.first_visibility_pragma < it_->body_begin) return false;
       const auto& declarations = p_->decls_.at(std::to_underlying(cls));
-      if (in_attributed_namespace(k_) || std::ranges::any_of(declarations, [&](const auto& decl) {
-            return in_attributed_namespace(decl.first);
+      if (p_->in_attributed_namespace(k_) || std::ranges::any_of(declarations, [&](const auto& decl) {
+            return p_->in_attributed_namespace(decl.first);
           })) return false;
     }
 
@@ -7082,6 +7072,37 @@ bool Program::has_unapplied_class_layout(u32 item, const ClassContent& content) 
   const auto& source = items_->items[item];
   return content.unapplied_field_layout || layout_may_be_packed(*r_, source.begin, source.brace_end) ||
          record_layout_attribute(*r_, source, class_alignment_specifiers(item));
+}
+
+// A namespace attribute can set visibility on otherwise unannotated declarations.
+bool Program::in_attributed_namespace(u32 item) const {
+  const auto& source = items_->items;
+  for (u32 parent = source[item].parent; parent != items::none; parent = source[parent].parent) {
+    const auto& scope = source[parent];
+    if (scope.kind == ItemKind::namespace_def &&
+        layout_attribute(*r_, scope.begin, scope.brace_begin, LayoutAttributes::any)) return true;
+  }
+  return false;
+}
+
+// The class, including earlier declarations and later friends of its slots, must use the
+// ordinary default-visible ABI for an external table reference.
+bool Program::peer_root_vtable_visible(EntityId cls) const {
+  if (r_->first_visibility_pragma || has_unapplied_declaration_attributes(cls)) return false;
+  const auto declarations = decls_.find(std::to_underlying(cls));
+  if (declarations == decls_.end() || std::ranges::any_of(declarations->second, [&](const auto& d) {
+        const auto& item = items_->items[d.first];
+        const u32 end = item.kind == ItemKind::class_def ? item.brace_begin : item.end;
+        return in_attributed_namespace(d.first) || layout_attribute(*r_, item.begin, end, LayoutAttributes::any);
+      })) return false;
+  for (const auto& member : classes_.rec(cls).members) {
+    if (!member.is_virtual) continue;
+    const auto decl = member_decl(member.entity);
+    if (!decl || has_unapplied_declaration_attributes(member.entity)) return false;
+    const auto& item = items_->items[index(decl->item)];
+    if (layout_attribute(*r_, item.begin, item.end, LayoutAttributes::any)) return false;
+  }
+  return true;
 }
 
 bool Program::class_layout_uncertain(EntityId cls, const sema::ClassRec& record, u32 point) const {

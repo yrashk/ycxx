@@ -336,6 +336,8 @@ What is true of the code today. Work in progress and its owners are tracked in
     describe the actual saved frame-pointer and return-address locations at the entry, body,
     and return instructions. `unit.darwin_cleanup_free_unwind` checks the emitted object,
     omitted frames, native YCXX linking and system-linked exception propagation on macOS.
+    The shared proof includes selected defaults in aggregates with scalar fields and trivial
+    destruction. [#849](https://github.com/yrashk/ycxx/issues/849)
     Native throw lowering and landing pads are tracked in [#648](https://github.com/yrashk/ycxx/issues/648).
     [#737](https://github.com/yrashk/ycxx/issues/737)
   - A system-linked arm64 function can destroy one initialized aggregate local on both exits from
@@ -712,8 +714,10 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
   `ET_EXEC` image with load segments and a non-executable stack.
 - A hosted peer's exception can unwind through cleanup-free ycxx functions on x86-64 Linux.
   The compiler certifies ordinary strong definitions with fixed scalar signatures using all
-  resolved declarations and the typed body. It tracks written exception specifications across
-  redeclarations and records the AMD64 frame state at the actual prologue and epilogue offsets.
+  resolved declarations and the typed body. The proof visits selected default member initializers
+  in aggregates with scalar fields and trivial destruction. [#849](https://github.com/yrashk/ycxx/issues/849)
+  It tracks written exception specifications across redeclarations and records the AMD64 frame
+  state at the actual prologue and epilogue offsets.
   ELF `.eh_frame` records use PC-relative references to local code anchors. The native
   freestanding linker retains these records in the read-only segment. The hosted linker
   supplies unwind discovery for the peer who throws and catches the exception.
@@ -2666,21 +2670,24 @@ What the process allocates, attributed to the engine's cells, in the trace and t
 - On Linux x86-64, a unit can emit one ordinary out-of-line, non-inline virtual member of
   a supported root. The member follows the key function in declaration order and takes the
   existing receiver pointer, with ordinary access to the object's integral fields. The peer
-  defines the key function and supplies the table, RTTI, and object lifetime.
+  defines the key function and supplies the table and RTTI.
   [Itanium ABI §5.2.3](https://itanium-cxx-abi.github.io/cxx-abi/abi.html#vague-vtable) · [#309](https://github.com/yrashk/ycxx/issues/309)
 - The Linux x86-64 producer admits one external, default-visible, non-template root with
   one public integral field and two directly written fixed integer virtual signatures. A unit
   that defines the first virtual out of line and non-inline owns the table and RTTI. It emits
   default-visible `_ZTV` and `_ZTI` objects and a weak `_ZTS` object in a read-only ELF COMDAT
-  keyed by the name. The peer defines the non-key member and constructs the complete object.
+  keyed by the name. The peer defines the non-key member.
   Mixed GCC and Clang checks verify dispatch and RTTI. Daemon edits verify table ownership
   and byte-for-byte agreement with a cold compile.
   [Itanium ABI §5.2.3–4](https://itanium-cxx-abi.github.io/cxx-abi/abi.html#vague-vtable) ·
   [#309](https://github.com/yrashk/ycxx/issues/309) · [#422](https://github.com/yrashk/ycxx/issues/422)
-- Local complete-object construction and vptr initialization are the next slice in #309.
-  Broader table emission, pure virtual functions, `final` and covariant returns also remain
-  there. Virtual destructor entry points, RTTI expressions, virtual bases and native class ABI
-  have their own issues.
+- Linux x86-64 default-initializes a plain automatic variable of the
+  supported root type. The root has an implicit default constructor, a trivial destructor and
+  no default member initializer. Lowering stores `_ZTV + 16` in the vptr. The table can come
+  from the key definition in the same unit or from a peer. [#309](https://github.com/yrashk/ycxx/issues/309)
+- Broader construction and table emission, pure virtual functions, `final` and covariant
+  returns remain in #309. Virtual destructor entry points, RTTI expressions, virtual bases
+  and native class ABI have their own issues.
   [#309](https://github.com/yrashk/ycxx/issues/309) · [#136](https://github.com/yrashk/ycxx/issues/136) ·
   [#294](https://github.com/yrashk/ycxx/issues/294) · [#310](https://github.com/yrashk/ycxx/issues/310) ·
   [#489](https://github.com/yrashk/ycxx/issues/489)

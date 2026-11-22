@@ -211,9 +211,10 @@ struct Runtime {
 // constant if it has one, else zero; one initialized by code, or with a destructor, also gets a
 // guard variable, and the function the runtime entry points its initialization calls.
 template <class R>
-void static_locals(sema::World& world, TranslationUnit& tu, FunctionDef& f, R& runtime) {
+void static_locals(sema::World& world, TranslationUnit& tu, FunctionDef& f,
+                   std::span<const ast::LocalRec> locals, R& runtime) {
   ast::Interners& ins = world.ins;
-  for (const ast::LocalRec& l : ins.seqs.elements(f.body.locals)) {
+  for (const ast::LocalRec& l : locals) {
     if (l.entity == EntityId::none || l.decl == ast::NodeId::none || !ins.ast.is<ast::StaticVar>(l.decl)) continue;
     // The function and its statics need ELF group selection (#422), or weak Mach-O statics (#124).
     f.coalesced = false;
@@ -339,17 +340,36 @@ bool unwind_scalar_prototype(const sema::Types& types, QualType type) {
          std::ranges::all_of(f.params, [&](QualType t) { return unwind_scalar(types, t); });
 }
 
-// Prove a subset of the typed tree. Class and temporary lifetimes, static initialization, calls
-// with separately analysed default arguments, and any unfamiliar operation need their own proof.
+// Every subobject of this aggregate can start and end its lifetime without a cleanup.
+bool unwind_scalar_aggregate(parse::Program& program, QualType type) {
+  const auto& types = program.world().types;
+  if (!types.is_class(type)) return false;
+  const auto* record = program.classes().find(types.class_of(type));
+  return record && record->defined && !record->user_ctors && !record->closure && !record->union_ &&
+         !record->polymorphic && record->bases.empty() && record->destructor_usable &&
+         record->destructor == EntityId::none &&
+         std::ranges::all_of(record->fields, [&](const sema::FieldRec& field) {
+           return unwind_scalar(types, field.type);
+         });
+}
+
+// Prove a subset of the typed tree. Static initialization, calls with separately analysed
+// default arguments, and any unfamiliar operation need their own proof.
 using UnwindNodes = ast::closed_list<
     ast::Compound, ast::Return, ast::ExprStmt, ast::If, ast::While, ast::Do, ast::For, ast::Break,
     ast::Continue, ast::DeclStmt, ast::LocalVar, ast::CondDecl, ast::Switch, ast::Case, ast::Default,
     ast::Label, ast::Goto, ast::Literal, ast::DeclRef, ast::LocalRef, ast::Paren, ast::Unary,
-    ast::Binary, ast::OrderedBinary, ast::Assign, ast::Conditional, ast::Subscript, ast::Call,
-    ast::NewArray, ast::DeleteArray, ast::ImplicitConversion, ast::InitList, ast::ValueInit, ast::DefaultInit, ast::Throw>;
+    ast::Binary, ast::OrderedBinary, ast::Assign, ast::Conditional, ast::Subscript, ast::Call, ast::Member,
+    ast::NewArray, ast::DeleteArray, ast::ImplicitConversion, ast::InitList, ast::DefaultMemberInit,
+    ast::Materialize, ast::This, ast::ValueInit, ast::DefaultInit, ast::Throw>;
+using UnwindAggregateNodes = ast::closed_list<ast::InitList, ast::LocalRef, ast::Materialize, ast::Paren>;
 
-bool unwind_body_node(parse::Program& program, ast::NodeId node, bool& has_throw, bool initializer = false) {
+enum class UnwindContext { function, cleanup_initializer, default_member };
+
+bool unwind_body_node(parse::Program& program, ast::NodeId node, bool& has_throw,
+                      UnwindContext context = UnwindContext::function) {
   if (node == ast::NodeId::none) return true;
+  const bool initializer = context == UnwindContext::cleanup_initializer;
   auto& world = program.world();
   const auto& tree = world.ins.ast;
   return ast::dispatch<ast::Nodes>(ast::kind_of(node), [&]<class T>(std::type_identity<T>) {
@@ -364,10 +384,22 @@ bool unwind_body_node(parse::Program& program, ast::NodeId node, bool& has_throw
         if (n.reference || (!unwind_scalar(world.types, n.info.type) &&
                             !unwind_scalar_prototype(world.types, n.info.type))) return false;
       } else if constexpr (requires { n.info; }) {
-        if (!unwind_scalar(world.types, n.info.type, true)) return false;
+        if (!unwind_scalar(world.types, n.info.type, true)) {
+          if constexpr (!UnwindAggregateNodes::contains<T>) return false;
+          else if (initializer || !unwind_scalar_aggregate(program, n.info.type)) return false;
+        }
       }
       if constexpr (std::is_same_v<T, ast::LocalVar>) {
         if (n.destructor != EntityId::none) return false;
+      } else if constexpr (std::is_same_v<T, ast::Member>) {
+        // A selected default can read another field directly from its construction object.
+        if (initializer || n.reference || (n.arrow && !tree.is<ast::This>(n.object.id))) return false;
+      } else if constexpr (std::is_same_v<T, ast::DefaultMemberInit>) {
+        if (initializer) return false;
+      } else if constexpr (std::is_same_v<T, ast::This>) {
+        if (context != UnwindContext::default_member) return false;
+      } else if constexpr (std::is_same_v<T, ast::Materialize>) {
+        if (!world.types.is_class(n.info.type) || n.destructor != EntityId::none || n.extended) return false;
       } else if constexpr (std::is_same_v<T, ast::Call>) {
         if (n.function == EntityId::none || n.callee.id == ast::NodeId::none ||
             !tree.is<ast::DeclRef>(n.callee.id) || tree.get<ast::DeclRef>(n.callee.id).entity != n.function)
@@ -392,11 +424,12 @@ bool unwind_body_node(parse::Program& program, ast::NodeId node, bool& has_throw
         if (n.operand.id == ast::NodeId::none) return false;
         has_throw = true;  // the runtime-reachable operation checks the exact exception type
       }
+      const auto children = std::is_same_v<T, ast::DefaultMemberInit> ? UnwindContext::default_member : context;
       bool safe = true;
       ast::for_each_ref(n, [&]<class H>(const H& h) {
-        if constexpr (std::is_same_v<H, ast::NodeId>) safe = safe && unwind_body_node(program, h, has_throw, initializer);
+        if constexpr (std::is_same_v<H, ast::NodeId>) safe = safe && unwind_body_node(program, h, has_throw, children);
         else if constexpr (std::is_same_v<H, ast::ChildList>)
-          for (ast::Child c : tree.children(h)) safe = safe && unwind_body_node(program, c.id, has_throw, initializer);
+          for (ast::Child c : tree.children(h)) safe = safe && unwind_body_node(program, c.id, has_throw, children);
       });
       return safe;
     }
@@ -414,7 +447,8 @@ UnwindEligibility cleanup_free_definition(parse::Program& program, const ast::De
       (entity.linkage != ast::Linkage::external && entity.linkage != ast::Linkage::internal) ||
       sema::is_allocation_name(world.ins.names.spelling(entity.name))) return none;
   if (!std::ranges::all_of(world.ins.seqs.elements(body.locals), [&](const ast::LocalRec& local) {
-        return local.entity == EntityId::none && unwind_scalar(world.types, local.type) &&
+        return local.entity == EntityId::none &&
+               (unwind_scalar(world.types, local.type) || unwind_scalar_aggregate(program, local.type)) &&
                (local.decl == ast::NodeId::none || world.ins.ast.is<ast::LocalVar>(local.decl));
       })) return none;
   bool has_throw = false;
@@ -476,7 +510,7 @@ ast::NodeId hosted_cleanup_call(parse::Program& program, const ast::DeclSema& d,
   if (!record.destructor_noexcept.value_or(false) || record.virtual_destructor) return ast::NodeId::none;
   bool has_throw = false;
   for (auto element : tree.children(tree.get<ast::InitList>(local->init.id).elems))
-    if (!unwind_body_node(program, element.id, has_throw, true)) return ast::NodeId::none;
+    if (!unwind_body_node(program, element.id, has_throw, UnwindContext::cleanup_initializer)) return ast::NodeId::none;
   const auto call = tree.get<ast::ExprStmt>(statements[1].id).expr.id;
   return hosted_external_call(program, call, sema::Builtin::void_) != EntityId::none ? call : ast::NodeId::none;
 }
@@ -514,7 +548,7 @@ void hosted_union_constructor(parse::Program& program, FunctionDef& f) {
   EntityId initializer = EntityId::none;
   bool has_throw = false;
   for (const auto element : tree.children(tree.get<ast::InitList>(member.init.id).elems)) {
-    if (unwind_body_node(program, element.id, has_throw, true)) continue;
+    if (unwind_body_node(program, element.id, has_throw, UnwindContext::cleanup_initializer)) continue;
     if (initializer != EntityId::none) return;
     initializer = hosted_external_call(program, element.id, sema::Builtin::int_);
     if (initializer == EntityId::none) return;
@@ -697,7 +731,7 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
       if (!tu.owned_virtual_table && !program.function_defined_before(slots->back(), program.end()) &&
           !program.has_unapplied_declaration_attributes(c) &&
           std::ranges::none_of(*slots, [&](EntityId f) { return program.has_unapplied_declaration_attributes(f); })) {
-        tu.owned_virtual_table = OwnedVirtualTable{world.types.class_type(c), *slots};
+        tu.owned_virtual_table = OwnedVirtualTable{sema::virtual_table_entity(world, c), *slots};
         continue;
       }
     } else if (sema::native_virtual_consumer(record, classes, world.types, peer_member_declaration)) {
@@ -746,7 +780,8 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
         r.kind == sema::EntityKind::function_template || r.kind == sema::EntityKind::variable_template ||
         r.kind == sema::EntityKind::alias_template || r.kind == sema::EntityKind::concept_)
       return;  // no symbol: a template's specializations have them
-    bool fn = r.kind != sema::EntityKind::variable;
+    const bool table = r.kind == sema::EntityKind::virtual_table;
+    bool fn = r.kind != sema::EntityKind::variable && !table;
     std::string id(ins.names.spelling(r.name));
     if (fn && id == "main" && r.scope == EntityId::none) tu.main = e;  // [basic.start.main]: the global one
     // A member of a class local to the unit is local too.
@@ -754,7 +789,8 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
     for (EntityId sc = r.scope; linkage == ast::Linkage::external && sc != EntityId::none; sc = world.entities.rec(sc).scope)
       if (world.entities.rec(sc).kind == sema::EntityKind::class_ && internal_class(sc)) linkage = ast::Linkage::internal;
     tu.entities.push_back({e, std::move(id), d.type, fn, r.lang, linkage, false, at, r.scope,
-                           r.kind == sema::EntityKind::constructor  ? Special::constructor
+                           table ? Special::virtual_table
+                           : r.kind == sema::EntityKind::constructor  ? Special::constructor
                            : r.kind == sema::EntityKind::destructor ? Special::destructor
                                                                     : Special::none});
     Entity& emitted = tu.entities.back();
@@ -991,8 +1027,31 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
            program.asm_label(f.entity).empty() &&
            (!inline_declarations.contains(f.entity) || f.constructor_cleanup != EntityId::none);
   };
+  auto declare_virtual_table = [&](EntityId entity, std::optional<ast::Loc> at) {
+    ast::DeclSema table{};
+    table.kind = ast::DeclKind::variable;
+    table.entity = entity;
+    table.type = world.entities.rec(entity).type;
+    declare(table, at);
+  };
   for (FunctionDef& f : tu.functions) {
-    static_locals(world, tu, f, runtime);
+    const auto locals = ins.seqs.elements(f.body.locals);
+    if (classes.has_virtual_layouts()) {
+      for (const auto& local : locals) {
+        if (local.decl == ast::NodeId::none || !ins.ast.is<ast::LocalVar>(local.decl)) continue;
+        const auto init = ins.ast.get<ast::LocalVar>(local.decl).init.id;
+        if (init == ast::NodeId::none || !ins.ast.is<ast::PeerRootInit>(init)) continue;
+        const EntityId table = ins.ast.get<ast::PeerRootInit>(init).vtable;
+        if (seen.contains(std::to_underlying(table))) continue;
+        const EntityId cls = world.entities.rec(table).scope;
+        if (!program.peer_root_vtable_visible(cls)) {
+          block_virtual_emission(tu, program, classes.rec(cls));
+          return tu;
+        }
+        declare_virtual_table(table, ast::Loc{f.item, f.body_offset});
+      }
+    }
+    static_locals(world, tu, f, locals, runtime);
     // Check the complete unit by entity, including later redeclarations and qualified friends.
     if (f.unwind == UnwindEligibility::none) continue;
     if (!unwind_definition(f)) {
@@ -1013,6 +1072,12 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
         f.unwind = UnwindEligibility::none;
       else if (tu.cleanup_resume == EntityId::none) tu.cleanup_resume = runtime.resume();
     }
+  }
+  // Register the owner after checking the makers. An owned declaration cannot stand in for
+  // the visibility check required when a maker requests the address point.
+  if (const auto& owned = tu.owned_virtual_table) {
+    const auto key = program.member_decl(owned->slots.front());
+    declare_virtual_table(owned->entity, key ? std::optional(ast::Loc{key->item, 0}) : std::nullopt);
   }
   for (FunctionDef& f : tu.functions) {
     if (f.unwind_through_constructor == EntityId::none) continue;
