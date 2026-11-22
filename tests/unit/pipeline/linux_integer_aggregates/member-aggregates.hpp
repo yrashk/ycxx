@@ -8,9 +8,12 @@ struct Calc {
   Wide add(Wide w, long k);
   Three spill(long, long, long, long, long, Three t) const;
   static Small make(unsigned char a);
+  long rollback(long, long, long, long, Wide w, long last) const;
 };
 
 using Swapper = Pair (*)(Pair);
 using Shifter = int (*)(Three, Wide);
 Swapper swapper();
+using Widen = Wide (*)(Wide);
+Widen widener();
 int apply(Shifter f, Three t, Wide w);

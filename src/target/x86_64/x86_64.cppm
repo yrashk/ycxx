@@ -201,7 +201,7 @@ std::expected<Frame, std::string> layout(const l2::Function& body) {
           return at_node(n, nd.op, indirect ? "ellipsis arguments on a nonvariadic indirect call"
                                          : "ellipsis arguments on a nonvariadic direct call");
         if (ellipsis > args.size()) return at_node(n, nd.op, "more ellipsis arguments than arguments");
-        if (imms[indirect ? 2 : 3] || nd.nres > (indirect || variadic || uses_float_result ? 2u : 3u))
+        if (imms[indirect ? 2 : 3] || nd.nres > (variadic || uses_float_result ? 2u : 3u))
           return at_node(n, nd.op, "unsupported ABI result placement");
         if (indirect && (uses_float_result || std::ranges::any_of(args, is_float)))
           return at_node(n, nd.op, "floating-point indirect calls are unsupported");

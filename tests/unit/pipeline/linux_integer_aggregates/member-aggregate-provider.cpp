@@ -17,3 +17,11 @@ static Pair reverse(Pair p) { return Pair{p.b, p.a}; }
 Swapper swapper() { return reverse; }
 
 int apply(Shifter f, Three t, Wide w) { return f(t, w); }
+
+// `this` and four longs leave one register: `w` goes to the stack and `last` takes R9.
+long Calc::rollback(long a, long b, long c, long d, Wide w, long last) const {
+  return (w.a == high && w.b == low ? 0 : 1000) + a + b + c + d + last * 100 + base;
+}
+
+static Wide widen(Wide w) { return Wide{w.b + 1, w.a - 1}; }
+Widen widener() { return widen; }

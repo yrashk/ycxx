@@ -24,5 +24,8 @@ int main() {
   auto closure = [k = 3](Pair a) { return Three{a.a, a.b, k}; };
   Three r = closure(Pair{1, 2});
   if (r.a != 1 || r.b != 2 || r.c != 3) return 8;
+  if (c.rollback(1, 2, 3, 4, Wide{high, low}, 5) != 517) return 9;
+  Wide v = widener()(Wide{high, low});
+  if (v.a != low + 1 || v.b != high - 1) return 10;
   return 0;
 }
