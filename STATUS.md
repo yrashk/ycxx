@@ -3060,8 +3060,8 @@ substitution and broader annotation targets remain in [#324](https://github.com/
 
 ## Bootstrap workarounds
 
-Places where ycxx's sources avoid or work around a C++26 feature because GCC 16 lacks it or
-miscompiles it (DECISIONS §3.2). Each is removed once ycxx compiles itself.
+Workarounds for C++26 and module limitations in the bootstrap toolchain (DECISIONS §3.2).
+Each is removed once ycxx compiles itself.
 
 - **No `std::vector<bool>` in the back end's unit records** (`pipeline::Entity::template_same_heads`,
   `TemplateSpec::same_heads`, `std::vector<std::uint8_t>`).
@@ -3105,6 +3105,10 @@ miscompiles it (DECISIONS §3.2). Each is removed once ycxx compiles itself.
   - `CMakeLists.txt` adds the flags to libycxx's `ycxx_modules` target.
   - Without them, `std::meta` is empty. An importer whose `-freflection` does not match the
     BMI's segfaults GCC 16.2.
+- **The embedded libycxx compiles its implementation units as plain translation units.** The
+  scheduler's `import std` would otherwise make its runtime archive depend on the std module that
+  already links it. `CMakeLists.txt` scopes `YCXX_SOURCE_MODULES=OFF` to the embedded build and
+  keeps the public `std` and `std.compat` modules enabled. [#664](https://github.com/yrashk/ycxx/issues/664)
 
 ## Milestones
 
