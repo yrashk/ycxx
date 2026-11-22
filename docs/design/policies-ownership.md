@@ -38,9 +38,14 @@ recommended this conservative rule for the first milestone before modeling excep
 The prototype covers automatic locals, by-value parameters, `if`, `while`, `do`, `for`, and
 conditional, short-circuit, and comma expressions. Boolean literals select the reachable branch.
 Operations take named owners, with parentheses and qualification conversions such as
-`static_cast<Permit&&>(p)` allowed. Alias declarations, captures, indirect calls involving an owner,
-exception handlers, and jumps outside the supported loop control receive an error. The examples
-use trusted implementations of the declared operations.
+`static_cast<Permit&&>(p)` allowed. A local `const Resource&` can borrow a live named owner
+from its declaration to the end of its scope. It can be passed to a registered observation
+operation. A consume or transfer of the owner is an error while any of its borrows can still be
+live, including when the reference's last use was earlier. Ending the borrow leaves the
+ownership obligation with the owner. References bound to temporaries, mutable aliases,
+reborrowing, captures, and exposing an address are outside this checked protocol. Observation
+contracts are trusted to keep the reference within the call. Exception handlers and jumps
+outside the supported loop control also receive an error.
 
 ## Try it
 
@@ -65,6 +70,21 @@ build/bin/ycxx cxx -I packages/ycxx-policies/include -I examples/affine \
 The final call reports a possible second consumption and the earlier call's location. An
 `else` in front of the final call makes the two consumptions mutually exclusive.
 
+This example observes through a shared borrow and consumes the permit after that borrow ends.
+
+```cpp
+#include "permit.hpp"
+
+void inspect_then_redeem() {
+  auto permit = ycxx_affine::issue();
+  {
+    const auto& view = permit;
+    ycxx_affine::inspect(view);
+  }
+  ycxx_affine::redeem(static_cast<ycxx_affine::Permit&&>(permit));
+}
+```
+
 The same invocation checks this linear example when saved as `permit-demo.cpp`.
 
 ```cpp
@@ -84,4 +104,6 @@ scope exit. A transfer into another local moves the obligation to that local and
 `examples/affine/runtime_transaction.hpp` uses the portable runtime guard from
 `<ycxx/ownership/runtime.hpp>`. Ordinary C++ compilers can compile the adapter. Its guard
 reports unfinished linear ownership and repeated consumption on executed paths. With
-`-fcheck-policies`, YCXX also checks callers against the adapter's activated policy.
+`-fcheck-policies`, YCXX also checks callers against the adapter's activated policy. Borrow
+checking uses the source reference and its scope at compile time. Ordinary C++ builds use the
+same reference and object layout and retain the runtime guard on the adapter's operations.

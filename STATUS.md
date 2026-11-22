@@ -692,6 +692,9 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
   build's source inputs by canonical types and resolved operations. It reports conflicting contracts
   with both origins. A per-body control-flow query and worklist check named affine and linear
   resources, including concrete template instances. Transfers invalidate the old owner.
+  Local const references can borrow named owners until the end of the reference's scope.
+  The checker rejects consuming or transferring an owner during a shared borrow and rejects
+  exposing the borrow through an address, capture, or unregistered operation.
   Execution leaving the scope of a live transaction or reaching a possible unwind is diagnosed.
   See [the protocols and examples](docs/design/policies-ownership.md).
 - `tests/features/ycxx.txt` lists `syntax` and `run darwin-arm64`: a feature can be limited to

@@ -38,6 +38,7 @@ with tempfile.TemporaryDirectory() as directory:
         namespace own = ycxx::ownership;
         struct Ticket { int value; };
         Ticket acquire() noexcept;
+        void inspect(const Ticket&) noexcept;
         void submit(Ticket&&) noexcept;
         void submit(int) noexcept;
         using Resource = own::policy<own::linear<Ticket>>;
@@ -95,12 +96,17 @@ with tempfile.TemporaryDirectory() as directory:
         [[=own::operation::creates]] Ticket acquire() noexcept;
         using Submit = void (*)(Ticket&&) noexcept;
         using Terminal = own::use_policy<own::consumes<Submit, static_cast<Submit>(&submit)>>;
+        [[=own::operation::observes]] void inspect(const Ticket&) noexcept;
         }
     """)
     caller = write("caller.cpp", """\
         #include "resource.hpp"
         void run() {
           auto ticket = checkout::acquire();
+          {
+            const auto& view = ticket;
+            checkout::inspect(view);
+          }
           checkout::submit(static_cast<checkout::Ticket&&>(ticket));
         }
     """)
@@ -263,6 +269,10 @@ with tempfile.TemporaryDirectory() as directory:
         #include "runtime_transaction.hpp"
         void finish_work() {
           auto first = example::start();
+          {
+            const auto& view = first;
+            example::inspect(view);
+          }
           auto second = example::handoff(static_cast<example::Work&&>(first));
           example::finish(static_cast<example::Work&&>(second));
         }
@@ -294,6 +304,7 @@ with tempfile.TemporaryDirectory() as directory:
             #include "resource.hpp"
             namespace checkout {
             Ticket acquire() noexcept { return {0}; }
+            void inspect(const Ticket&) noexcept {}
             void submit(Ticket&&) noexcept {}
             }
         """)
@@ -310,10 +321,17 @@ with tempfile.TemporaryDirectory() as directory:
             #include "runtime_transaction.hpp"
             int main() {
               auto first = example::start();
+              {
+                const auto& view = first;
+                example::inspect(view);
+              }
               auto second = example::handoff(static_cast<example::Work&&>(first));
               example::finish(static_cast<example::Work&&>(second));
             }
         """)
+        subprocess.run([host, "-std=c++20", "-I", include, "-I", examples, str(native_good), "-o", str(executable)],
+                       check=True, timeout=30)
+        assert subprocess.run([executable], timeout=10).returncode == 0
         subprocess.run([*args, "-fcheck-policies", str(native_good), "-o", str(native)], check=True, timeout=30)
         assert subprocess.run([native], timeout=10).returncode == 0
         subprocess.run([*args, str(runtime), "-o", str(native)], check=True, timeout=30)

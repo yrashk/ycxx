@@ -30,23 +30,30 @@ struct OwnershipBody {
   bool operator==(const OwnershipBody&) const = default;
 };
 
+enum class OwnershipEvent { branch, initialize, borrow, observe, consume, transfer, leave, may_unwind, unsupported };
+
 struct OwnershipFinding {
   ast::u32 offset;
   std::string message;
   std::optional<ast::u32> previous{};
-  bool previous_was_transfer = false;
+  OwnershipEvent previous_event = OwnershipEvent::consume;
 };
-
-enum class OwnershipEvent { branch, initialize, observe, consume, transfer, leave, may_unwind, unsupported };
 
 struct OwnershipFlow {
   using Point = ast::u32;
   static constexpr Point exit = ~Point{};
 
+  struct Borrow {
+    ast::u32 owner;
+    ast::u32 offset;
+  };
+
   struct Local {
     ast::NameId name;
     Ownership ownership;
     bool parameter;
+    bool shared_reference;
+    std::optional<Borrow> borrow{};
   };
 
   struct Step {
@@ -78,7 +85,7 @@ class OwnershipFlowBuilder {
       : world_(world), policy_(policy), body_(body) {
     for (const auto& local : world_.ins.seqs.elements(body.locals)) {
       const auto kind = ownership(local.type);
-      flow_.locals.push_back({local.name, kind, (local.flags & sema::local_flag::parameter) != 0});
+      flow_.locals.push_back({local.name, kind, (local.flags & sema::local_flag::parameter) != 0, shared_reference(local.type)});
       has_linear_ = has_linear_ || kind == Ownership::linear;
       has_owner_ = has_owner_ || mentions_owner(local.type);
     }
@@ -127,6 +134,13 @@ class OwnershipFlowBuilder {
 
   Ownership ownership(QualType type) const {
     return policy_.ownership(world_.types.canonical(type));
+  }
+
+  bool shared_reference(QualType type) const {
+    const auto reference = world_.types.rec(type);
+    return reference.kind == sema::TypeKind::reference && !reference.rvalue_ref &&
+           ast::cv_of(world_.types.canonical(reference.inner)) == ast::Cv::const_ &&
+           ownership(reference.inner) != Ownership::ordinary;
   }
 
   Effect effect(EntityId function) const {
@@ -183,16 +197,17 @@ class OwnershipFlowBuilder {
     return node;
   }
 
-  std::optional<ast::u32> named_owner(ast::Red node) const {
+  std::optional<ast::u32> named_local(ast::Red node, bool allow_xvalue = true) const {
     for (node = unparenthesized(node); node.is<ast::ImplicitConversion>(); node = unparenthesized(node)) {
       const auto cast = node.get<ast::ImplicitConversion>();
-      if (ownership(cast.info.type) == Ownership::ordinary || cast.conversion != ast::ConversionKind::qualification)
+      if (ownership(cast.info.type) == Ownership::ordinary || cast.conversion != ast::ConversionKind::qualification ||
+          (!allow_xvalue && cast.info.category != ast::ValueCategory::lvalue))
         return std::nullopt;
       node = at(node, cast.operand);
     }
     if (node.is<ast::LocalRef>()) {
       const auto local = node.get<ast::LocalRef>().local;
-      if (flow_.locals[local].ownership != Ownership::ordinary) return local;
+      if (flow_.locals[local].ownership != Ownership::ordinary || flow_.locals[local].shared_reference) return local;
     }
     return std::nullopt;
   }
@@ -206,7 +221,7 @@ class OwnershipFlowBuilder {
 
   std::optional<ast::u32> operation_argument(const ast::Red& node, const ast::Call& call) const {
     const auto args = node.ast().children(call.args);
-    if (args.size() == 1) return named_owner(at(node, args.front()));
+    if (args.size() == 1) return named_local(at(node, args.front()));
     return std::nullopt;
   }
 
@@ -235,7 +250,8 @@ class OwnershipFlowBuilder {
     if (node.is<ast::LocalVar>()) {
       const auto var = node.get<ast::LocalVar>();
       const bool throws = throwing_destructor(var.destructor);
-      if (flow_.locals[var.local].ownership != Ownership::ordinary || throws) scope.locals.push_back({var.local, throws});
+      const auto& local = flow_.locals[var.local];
+      if (local.ownership != Ownership::ordinary || local.shared_reference || throws) scope.locals.push_back({var.local, throws});
     } else if (node.is<ast::DeclStmt>() || node.is<ast::CondDecl>()) {
       node.for_each_child([&](const ast::Red& child) { collect(scope, child); });
     }
@@ -341,7 +357,17 @@ class OwnershipFlowBuilder {
 
   Point lower_local(const ast::Red& node, Point next, Context context) {
     const auto var = node.get<ast::LocalVar>();
-    const auto owner = flow_.locals[var.local].ownership;
+    auto& local = flow_.locals[var.local];
+    if (local.shared_reference) {
+      if (var.init.id != ast::NodeId::none)
+        if (const auto owner = named_local(at(node, var.init), false); owner &&
+            flow_.locals[*owner].ownership != Ownership::ordinary) {
+          local.borrow = Flow::Borrow{*owner, node.offset()};
+          return add({Event::borrow, node.offset(), next, Flow::exit, var.local, *owner});
+        }
+      return unsupported(node.offset(), "a shared borrow must bind directly to a named owner");
+    }
+    const auto owner = local.ownership;
     if (owner != Ownership::ordinary && var.init.id != ast::NodeId::none) {
       const ast::Red initializer = unparenthesized(at(node, var.init));
       if (initializer.is<ast::Call>()) {
@@ -349,7 +375,7 @@ class OwnershipFlowBuilder {
         const Effect operation = direct_effect(initializer, call);
         if (operation == Effect::issue) return add({Event::initialize, node.offset(), next, Flow::exit, var.local});
         if (operation == Effect::transfer)
-          if (const auto source = operation_argument(initializer, call))
+          if (const auto source = operation_argument(initializer, call); source && !flow_.locals[*source].shared_reference)
             return add({Event::transfer, initializer.offset(), next, Flow::exit, var.local, *source});
       }
     }
@@ -416,12 +442,16 @@ class OwnershipFlowBuilder {
       const auto call = node.get<ast::Call>();
       const auto operation = direct_effect(node, call);
       if (operation == Effect::observe || operation == Effect::consume) {
-        if (const auto local = operation_argument(node, call))
+        if (const auto local = operation_argument(node, call)) {
+          if (operation == Effect::consume && flow_.locals[*local].shared_reference)
+            return unsupported(node.offset(), "a shared borrow cannot be consumed");
           return add({operation == Effect::consume ? Event::consume : Event::observe, node.offset(), next, Flow::exit, *local});
+        }
         return unsupported(node.offset(), "an ownership protocol operation requires a named owner");
       }
     }
-    if (const auto local = named_owner(node)) return add({Event::observe, node.offset(), next, Flow::exit, *local});
+    if (const auto local = named_local(node); local && !flow_.locals[*local].shared_reference)
+      return add({Event::observe, node.offset(), next, Flow::exit, *local});
     if (node.is<ast::Paren>()) return lower_child(node, node.get<ast::Paren>().operand, next, context);
     if (node.is<ast::Goto>() || node.is<ast::Label>() || node.is<ast::Switch>() || node.is<ast::TryBlock>() ||
         node.is<ast::IfConsteval>()) return unsupported(node.offset(), "this control flow is outside the ownership prototype");
@@ -475,7 +505,10 @@ class OwnershipFlowBuilder {
 
 class OwnershipAnalysis {
  public:
-  OwnershipAnalysis(const ast::Interners& in, const Flow& flow) : in_(in), flow_(flow) {}
+  OwnershipAnalysis(const ast::Interners& in, const Flow& flow) : in_(in), flow_(flow) {
+    for (ast::u32 i = 0; i < flow_.locals.size(); ++i)
+      if (const auto& borrow = flow_.locals[i].borrow) borrows_[borrow->owner].push_back(i);
+  }
 
   std::optional<OwnershipFinding> run() const {
     if (flow_.entry == Flow::exit) return std::nullopt;
@@ -532,15 +565,17 @@ class OwnershipAnalysis {
   std::string description(ast::u32 local) const {
     const auto& owner = flow_.locals[local];
     const auto name = in_.names.spelling(owner.name);
-    return std::format("{} '{}'", owner.ownership == Ownership::linear ? "linear resource" : "affine resource",
-                       name.empty() ? "<unnamed>" : name);
+    const auto kind = owner.shared_reference ? "shared borrow" :
+                      owner.ownership == Ownership::linear ? "linear resource" : "affine resource";
+    return std::format("{} '{}'", kind, name.empty() ? "<unnamed>" : name);
   }
 
   std::optional<OwnershipFinding> require_live(const Flow::Step& step, ast::u32 local, const Slot& slot) const {
     if (slot.possible == live) return std::nullopt;
     if (slot.spent_at) {
       const auto end = slot.transferred ? " may already have transferred its obligation" : " may already have been consumed";
-      return OwnershipFinding{step.offset, description(local) + end, slot.spent_at, slot.transferred};
+      return OwnershipFinding{step.offset, description(local) + end, slot.spent_at,
+                              slot.transferred ? Event::transfer : Event::consume};
     }
     return OwnershipFinding{step.offset, description(local) + " may be unavailable"};
   }
@@ -552,19 +587,35 @@ class OwnershipAnalysis {
     return std::nullopt;
   }
 
+  std::optional<OwnershipFinding> require_unborrowed(const Flow::Step& step, ast::u32 owner, const State& state) const {
+    const auto it = borrows_.find(owner);
+    if (it == borrows_.end()) return std::nullopt;
+    for (const auto local : it->second)
+      if (state[local].possible & live)
+        return OwnershipFinding{step.offset, description(owner) + " may still have a live " + description(local),
+                                flow_.locals[local].borrow->offset, Event::borrow};
+    return std::nullopt;
+  }
+
   std::optional<OwnershipFinding> apply(const Flow::Step& step, State& state) const {
     if (step.event == Event::unsupported) return OwnershipFinding{step.offset, step.problem};
     if (step.event == Event::branch) return std::nullopt;
     if (step.event == Event::may_unwind) return may_unwind(step.offset, state);
     auto& slot = state[step.local];
     switch (step.event) {
+    case Event::borrow:
+      if (auto problem = require_live(step, step.source, state[step.source])) return problem;
+      slot = {live};
+      break;
     case Event::observe: return require_live(step, step.local, slot);
     case Event::consume:
       if (auto problem = require_live(step, step.local, slot)) return problem;
+      if (auto problem = require_unborrowed(step, step.local, state)) return problem;
       slot = {spent, step.offset};
       break;
     case Event::transfer:
       if (auto problem = require_live(step, step.source, state[step.source])) return problem;
+      if (auto problem = require_unborrowed(step, step.source, state)) return problem;
       state[step.source] = {spent, step.offset, true};
       [[fallthrough]];
     case Event::initialize:
@@ -573,6 +624,7 @@ class OwnershipAnalysis {
       slot = {live};
       break;
     case Event::leave:
+      if (auto problem = require_unborrowed(step, step.local, state)) return problem;
       if (flow_.locals[step.local].ownership == Ownership::linear && (slot.possible & live))
         return OwnershipFinding{step.offset, description(step.local) + " may leave its scope without being consumed or transferred"};
       if (step.throwing_destructor && (slot.possible & live))
@@ -586,6 +638,7 @@ class OwnershipAnalysis {
 
   const ast::Interners& in_;
   const Flow& flow_;
+  std::map<ast::u32, std::vector<ast::u32>> borrows_;
 };
 
 }  // namespace
@@ -710,8 +763,12 @@ engine::query_task<CheckPolicies::Value> CheckPolicies::run(engine::Ctx& cx, Key
     const auto at = locations.at(in, {def.item, def.body_offset + finding.offset});
     std::string text = finding.message;
     if (finding.previous)
-      if (const auto previous = locations.at(in, {def.item, def.body_offset + *finding.previous}))
-        text += std::format(" (previous {} at {})", finding.previous_was_transfer ? "transfer" : "consumption", previous->where);
+      if (const auto previous = locations.at(in, {def.item, def.body_offset + *finding.previous})) {
+        std::string_view event = "consumption";
+        if (finding.previous_event == Event::transfer) event = "transfer";
+        if (finding.previous_event == Event::borrow) event = "borrow";
+        text += std::format(" (previous {} at {})", event, previous->where);
+      }
     messages.push_back({at ? std::optional(at->offset) : std::nullopt, true, std::move(text), at ? at->where : ""});
   }
   co_return messages;

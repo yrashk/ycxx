@@ -61,7 +61,30 @@ with tempfile.TemporaryDirectory() as directory:
     """)
     run(good, "-fcheck-policies", "-fsyntax-only")
     # Use the native backend for a local-only body on both supported hosts.
-    object_source = source("object", "void build() { auto p = issue(); inspect(p); }\n")
+    object_source = source("object", """\
+        void build(bool early) {
+          auto p = issue();
+          {
+            const Permit& first = p;
+            const auto& second = (p);
+            inspect(first);
+            if (early) return;
+            inspect(second);
+          }
+          redeem(static_cast<Permit&&>(p));
+        }
+        void borrow_in_loop(bool repeat, bool stop) {
+          auto p = issue();
+          while (repeat) {
+            const auto& view = p;
+            inspect(view);
+            if (stop) break;
+            repeat = false;
+            continue;
+          }
+          redeem(static_cast<Permit&&>(p));
+        }
+    """)
     obj = root / "permit.o"
     run(object_source, "-fcheck-policies", "-c", "-o", str(obj))
     assert obj.is_file()
@@ -101,9 +124,61 @@ with tempfile.TemporaryDirectory() as directory:
     run(short_circuit, "-fcheck-policies", "-fsyntax-only", error=spent)
 
     escaped = source("escape", """\
-        void evade() { auto p = issue(); const Permit& alias = p; }
+        void evade() { auto p = issue(); Permit& alias = p; }
     """)
     run(escaped, "-fcheck-policies", "-fsyntax-only", error="resource aliases are outside the checked protocol")
+
+    during_borrow = source("during_borrow", """\
+        void consume() {
+          auto p = issue();
+          const Permit& view = p;
+          inspect(view);
+          redeem(static_cast<Permit&&>(p));
+        }
+    """)
+    borrowed = "affine resource 'p' may still have a live shared borrow 'view'"
+    stderr = run(during_borrow, "-fcheck-policies", "-fsyntax-only", error=borrowed)
+    assert f"{during_borrow}:7:" in stderr and f"previous borrow at {during_borrow}:5:" in stderr, stderr
+
+    spent_borrow = source("spent_borrow", """\
+        void borrow_spent(bool early) {
+          auto p = issue();
+          if (early) redeem(static_cast<Permit&&>(p));
+          const Permit& view = p;
+          inspect(view);
+        }
+    """)
+    run(spent_borrow, "-fcheck-policies", "-fsyntax-only", error=spent)
+
+    borrow_move = source("borrow_move", """\
+        void move_while_borrowed() {
+          auto tx = begin();
+          const Transaction& view = tx;
+          auto next = transfer(static_cast<Transaction&&>(tx));
+          commit(static_cast<Transaction&&>(next));
+        }
+    """, header="transaction.hpp")
+    run(borrow_move, "-fcheck-policies", "-fsyntax-only",
+        error="linear resource 'tx' may still have a live shared borrow 'view'")
+
+    for case, body, diagnostic in (
+        ("temporary", "const Permit& view = issue();", "a shared borrow must bind directly to a named owner"),
+        ("reborrow", "const Permit& view = p; const Permit& second = view;",
+         "a shared borrow must bind directly to a named owner"),
+        ("pointer", "const auto& view = p; const void* address = &view;", "outside the checked protocol"),
+        ("capture", "const auto& view = p; auto closure = [&view] { inspect(view); };",
+         "outside the checked protocol"),
+        ("callback", "const auto& view = p; expose(view);", "outside the checked protocol"),
+    ):
+        borrow_case = source(f"borrow_{case}", f"""\
+            void expose(const Permit&) noexcept;
+            void outside_protocol() {{
+              auto p = issue();
+              {body}
+            }}
+        """)
+        run(borrow_case, "-fsyntax-only")
+        run(borrow_case, "-fcheck-policies", "-fsyntax-only", error=diagnostic)
 
     overload = source("overload", """\
         namespace ycxx_affine { void inspect(Permit&) noexcept; }
