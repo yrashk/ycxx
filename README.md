@@ -23,7 +23,8 @@ The final Linux x86-64 self-check uses the freestanding support in [#380](https:
 **Pre-0.1** (as of 2026-11-21). ycxx compiles a substantial subset of C++ (C-like code, classes,
 templates and constant evaluation) on macOS arm64, from source to a signed, running executable,
 with no external compiler, assembler or linker. It also builds static executables from a
-freestanding C++ subset for x86-64 Linux. The standard library is out of reach. The plan is in
+freestanding C++ subset for x86-64 Linux. The standard library is out of reach: the gaps on
+`<iostream>`'s path are mapped in [#776](https://github.com/yrashk/ycxx/issues/776). The plan is in
 [DECISIONS.md](DECISIONS.md), the details of the code in [STATUS.md](STATUS.md), and the work in
 [GitHub issues](https://github.com/yrashk/ycxx/issues) and the
 [roadmap](https://github.com/yrashk/ycxx/issues/12).
@@ -35,7 +36,8 @@ A nonthrowing function can be used where the corresponding potentially throwing 
 The unary `noexcept` operator checks whether calls and constructions can throw.
 [#729](https://github.com/yrashk/ycxx/issues/729)
 Ordinary constructor declarations and definitions check that their concrete exception specifications agree.
-Dependent exception specifications remain open. [#219](https://github.com/yrashk/ycxx/issues/219)
+Member function templates can substitute a dependent exception specification when it is needed.
+[#713](https://github.com/yrashk/ycxx/issues/713)
 
 A class template can grant private access to the class passed as a type argument using
 `friend Authority;`. Each specialization grants access to its own authority.
@@ -63,7 +65,8 @@ instead of Debug's 5.3 s on an M-series Mac ([#726](https://github.com/yrashk/yc
 
 Single-expression `auto(x)` and `auto{x}` perform scalar and pointer decay-copy, including
 array and function decay. Function-template bodies can defer supported dependent operands to
-instantiation. Concrete constant template arguments can use braced conversions such as
+instantiation, and a function template whose signature holds a dependent variable-template-id
+or its negation compiles to an object ([#773](https://github.com/yrashk/ycxx/issues/773)). Concrete constant template arguments can use braced conversions such as
 `Tag<auto{7}>` and integer-literal-led parenthesized conversions such as `Tag<auto(7)>`.
 [#286](https://github.com/yrashk/ycxx/issues/286)
 
@@ -144,6 +147,10 @@ support the six comparisons, conversion to `bool`, conversions to and from every
 [Linux scalar floating-point operations](docs/design/linux-scalar-floating-point.md#runtime-arithmetic) ·
 [Linux scalar variadic floating-point ABI](docs/design/linux-floating-variadic-calls.md) ·
 [#441](https://github.com/yrashk/ycxx/issues/441)
+
+On x86-64 Linux, the System V indirect result convention also covers an ownership wrapper
+whose by-value member makes its implicit destructor nontrivial. The returned object is
+constructed in the caller's storage. [#661](https://github.com/yrashk/ycxx/issues/661)
 
 ELF and Mach-O objects support static pointer initializers naming variables, array elements,
 or functions. The referenced symbol may be defined in a separate translation unit.

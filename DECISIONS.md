@@ -110,6 +110,16 @@ reasoning; do not leave decisions only in issue threads.
    - *Reason:* the oracles and the ABI document agree on the default, and the switch serves code
      that must link with the platform's own objects.
 
+7. **Dependent variable-template-ids in symbols** (decided on #777). Clang and GCC mangle them
+   differently in a function template's signature when the name is qualified or an argument is
+   defaulted or a pack: Clang as written (`sr …E`, `gs`, no defaults, no `J…E`), GCC the
+   `<source-name>` and the converted arguments. ycxx writes GCC's form.
+   - *Reason:* values hold no spelling (ast.md §5.5), and Clang's form would need it. GCC builds
+     the `libycxx.a` ycxx programs link against. Implicit instantiations are emitted in every
+     object that uses them, so a mismatch with a Clang object costs a duplicate, not a link error.
+   - *Rejected:* Clang's form (needs the qualifier and arguments as written in every value);
+     Clang's form for unqualified names only (two rules, still wrong for defaults and packs).
+
 ## 2. Provenance
 
 1. **Allowed sources:** the working draft and its LaTeX sources, the CWG and LWG issues lists,
