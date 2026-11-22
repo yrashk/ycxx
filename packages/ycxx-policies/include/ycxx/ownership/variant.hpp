@@ -22,7 +22,7 @@ union variant_storage {
 // A local choice owns exactly one active value until that value is taken.
 template<class First, class Second>
 class variant {
-  enum class active { first, second, empty };
+  enum class active { first_selected, second_selected, empty };
 
   active active_;
   detail::variant_storage<First, Second> storage_;
@@ -32,11 +32,11 @@ class variant {
   }
 
  public:
-  variant(first_t side, First&& value) noexcept : active_(active::first), storage_(side, static_cast<First&&>(value)) {
+  variant(first_t side, First&& value) noexcept : active_(active::first_selected), storage_(side, static_cast<First&&>(value)) {
     static_assert(noexcept(First(static_cast<First&&>(value))));
   }
 
-  variant(second_t side, Second&& value) noexcept : active_(active::second), storage_(side, static_cast<Second&&>(value)) {
+  variant(second_t side, Second&& value) noexcept : active_(active::second_selected), storage_(side, static_cast<Second&&>(value)) {
     static_assert(noexcept(Second(static_cast<Second&&>(value))));
   }
 
@@ -44,25 +44,25 @@ class variant {
   variant(variant&&) = delete;
 
   ~variant() noexcept {
-    if (active_ == active::first) storage_.first.~First();
-    if (active_ == active::second) storage_.second.~Second();
+    if (active_ == active::first_selected) storage_.first.~First();
+    if (active_ == active::second_selected) storage_.second.~Second();
   }
 
-  bool holds_first() const noexcept { return active_ == active::first; }
-  bool holds_second() const noexcept { return active_ == active::second; }
+  bool holds_first() const noexcept { return active_ == active::first_selected; }
+  bool holds_second() const noexcept { return active_ == active::second_selected; }
 
   const First& first() const noexcept {
-    require_active(active::first);
+    require_active(active::first_selected);
     return storage_.first;
   }
 
   const Second& second() const noexcept {
-    require_active(active::second);
+    require_active(active::second_selected);
     return storage_.second;
   }
 
   First take_first() noexcept {
-    require_active(active::first);
+    require_active(active::first_selected);
     First owner(static_cast<First&&>(storage_.first));
     active_ = active::empty;
     storage_.first.~First();
@@ -70,7 +70,7 @@ class variant {
   }
 
   Second take_second() noexcept {
-    require_active(active::second);
+    require_active(active::second_selected);
     Second owner(static_cast<Second&&>(storage_.second));
     active_ = active::empty;
     storage_.second.~Second();
