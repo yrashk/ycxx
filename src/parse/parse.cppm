@@ -2618,6 +2618,21 @@ private:
     return v >= 0 && (sh.bits >= 64 || v < (std::int64_t(1) << sh.bits));
   }
 
+  u32 after_definition_attributes() {
+    const u32 back = it_->begin + ps_.pos();
+    ps_.seek(it_->brace_end);
+    ps_.skip_attributes(nullptr, 0, Parser::attr_gnu);
+    const u32 after = it_->begin + ps_.pos();
+    ps_.seek(back);
+    return after;
+  }
+
+  bool supported_definition_attributes(u32 after) {
+    if (!layout_attribute(p_->region(), it_->brace_end, after)) return true;
+    s_.diag(it_->brace_end - it_->begin, Diag::post_definition_layout_attribute);
+    return false;
+  }
+
   // `typedef class-specifier X …;` with an unnamed class or enumeration: X names it for linkage
   // purposes ([dcl.typedef]/9), and so is its name here; the declarator after the braces.
   std::optional<std::pair<NameId, u32>> typedef_name_after_braces() {
@@ -3164,6 +3179,7 @@ private:
   // its declarators. The member-specification is the members' items (§4.2); `class_def` reads
   // them.
   void class_definition() {
+    if (!supported_definition_attributes(after_definition_attributes())) return bad();
     // A class template ([temp.class]): its head, then the class-head. `template<>` defines an
     // explicit specialization ([temp.expl.spec]).
     if (ps_.is(Tk::kw_template) && ps_.kind(1) == Tk::less && ps_.kind(2) == Tk::greater) {
@@ -3285,6 +3301,7 @@ private:
   // An unnamed union with a declarator in a class ([class.pre], [class.mem.general]). The head
   // occupies declaration slot 0, and the declarators that follow it belong to the enclosing class.
   void unnamed_union_member() {
+    if (!supported_definition_attributes(after_definition_attributes())) return bad();
     const items::Item& outer = p_->items().items[it_->parent];
     ps_.skip_attributes();
     u32 at = ps_.pos();
@@ -3423,6 +3440,8 @@ private:
     sema::Types& types = s_.types();
     u32 at = ps_.pos();
     const bool definition = it_->kind == ItemKind::enum_def;
+    const u32 after_attributes = definition ? after_definition_attributes() : it_->end;
+    if (definition && !supported_definition_attributes(after_attributes)) return bad();
     const bool td = cls == EntityId::none && ps_.accept(Tk::kw_typedef);  // `typedef enum … { … } E;`
     if (!ps_.is(Tk::kw_enum)) {
       s_.diag(ps_.pos(), Diag::not_supported, ps_.kind());
@@ -3446,8 +3465,8 @@ private:
         s_.diag(ps_.pos(), Diag::expected_unqualified_id);
         return bad();
       }
-      if (it_->brace_end < it_->end && p_->region().tokens[it_->brace_end].kind != Tk::semi) {
-        s_.diag(it_->brace_end - it_->begin, Diag::not_supported, p_->region().tokens[it_->brace_end].kind);
+      if (after_attributes < it_->end && p_->region().tokens[after_attributes].kind != Tk::semi) {
+        s_.diag(after_attributes - it_->begin, Diag::not_supported, p_->region().tokens[after_attributes].kind);
         return bad();
       }
     }
