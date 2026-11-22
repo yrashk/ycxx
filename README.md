@@ -274,6 +274,8 @@ while their current class is incomplete. [#857](https://github.com/yrashk/ycxx/i
 
 Both targets support named nested enum definitions followed by ordinary fields in the same
 member declaration, including scoped enum field initializers. [#500](https://github.com/yrashk/ycxx/issues/500)
+An enum with a fixed underlying type keeps that layout while its enumerators instantiate other
+enum definitions. [#897](https://github.com/yrashk/ycxx/issues/897)
 Scoped enumerators stay in their enumeration's scope, so class members and class template
 members may reuse their names. [#725](https://github.com/yrashk/ycxx/issues/725)
 Nested unscoped enumerators conflict with other non-type members regardless of declaration order.
