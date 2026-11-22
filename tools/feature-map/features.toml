@@ -1723,7 +1723,7 @@ std = 'C++98'
 detect = '\bunion\b'
 status = 'partial'
 issues = [203]
-note = 'Named data members can have an unnamed union type. Anonymous unions and further variants are tracked in #203'
+note = 'Named data members can have an unnamed union type. An ordinary named union with a written destructor can contain a nontrivially destructible member with a trivial or deleted copy constructor. Anonymous unions and further variants are tracked in #203'
 probe = '''
 union U { int i; char c; };
 struct S { union { int a; float f; }; };
