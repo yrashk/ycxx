@@ -719,6 +719,13 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
   continuation destroys it once as well. The cleanup-only landing pad resumes the original
   exception; the mixed-object test checks both paths and the peer's typed handler.
   [Design](docs/design/linux-hosted-catch-all.md#hosted-local-cleanup-663) · [#663](https://github.com/yrashk/ycxx/issues/663)
+- A hosted nondelegating no-argument union constructor can initialize one scalar aggregate
+  variant with a nonthrowing destructor, then run one external `void()` call. If that call
+  throws, the active member is destroyed and the original exception resumes. If an optional
+  external `int()` in the initializer throws first, neither destructor runs. A caller that
+  only constructs one such automatic union in the same unit supplies a cleanup-free frame.
+  [Design](docs/design/linux-hosted-catch-all.md#hosted-union-constructor-cleanup-738)
+  · [#738](https://github.com/yrashk/ycxx/issues/738) · [Darwin parity #648](https://github.com/yrashk/ycxx/issues/648)
 - Explicit native static links keep the first input ELF COMDAT group for each signature. The reader
   validates group membership, including relocation sections, and selection precedes startup and
   layout. `unit.linux_elf_comdat` checks whole-group selection, retained references, startup and
@@ -1268,6 +1275,10 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   class templates. A class member can reuse a scoped enumerator's name, including a declarator
   following the enum definition in the same item. Class-scope lookup still finds unscoped
   enumerators. [#725](https://github.com/yrashk/ycxx/issues/725)
+- Nested unscoped enumerators contend with earlier members in ordinary classes and class templates.
+  An enumerator can hide a same-scope enum tag in ordinary lookup. The tag remains available as
+  a nested-name-specifier or through an unqualified elaborated enum specifier.
+  [#731](https://github.com/yrashk/ycxx/issues/731)
 - Tests: `tests/own/classes/s4-*enum*`, `s4-scoped-enum`, `s4-unscoped-enum` (spec-only, plus two
   from the review): 7 of 7.
 - Namespace-scope opaque enum declarations ([dcl.enum], #157) supply a complete enum type with a
@@ -1284,6 +1295,17 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
 - Further work includes opaque declarations in classes or blocks, unnamed empty definitions,
   unnamed definitions in classes or followed by declarators, and `E{}` and `E(v)` expressions
   (#157). Enumerations in a block are tracked in #117.
+
+## Direct explicit destructor calls (#722)
+
+- `object.~Class()` and `pointer->~Class()` support the receiver's own complete class
+  with a nonvirtual destructor. A visible type alias for the class works too. The compiler
+  checks the destructor's access and deletion before lowering.
+- The receiver is evaluated once. The IR calls the selected destructor when it is
+  nontrivial and ends the object's lifetime without releasing storage. A trivial destructor
+  still ends the lifetime. The native peer test controls the lifetime of each variant member.
+- A dependent class name works in instantiated free functions and class template members.
+  Unary `noexcept` accounts for the effective exception specification of the selected destructor.
 
 ## Classes, δ step 4b: namespaces (#86, 2026-11-18)
 
@@ -1513,10 +1535,10 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   observe the union and member destructor effects independently.
 - An omitted aggregate member of union type is initialized from an empty braced list,
   so its first variant can run a constructor.
-- A union constructor that selects a nontrivially destructible member requires a
-  nonthrowing exception specification. A potentially throwing delegating constructor
-  with a nontrivial variant also receives a diagnostic. Exceptional cleanup for this
-  shape is tracked in #738.
+- A union constructor that selects a nontrivially destructible member can use the hosted
+  Linux cleanup subset above or a nonthrowing exception specification. A potentially
+  throwing delegating constructor with a nontrivial variant receives a diagnostic.
+  Broader exceptional cleanup remains tracked in #89 and #135.
 - Remaining implicit special-member rules and aggregate designator forms stay in #203.
   Direct explicit destructor calls are tracked in #722.
 

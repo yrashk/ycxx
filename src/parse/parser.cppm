@@ -3548,6 +3548,19 @@ public:
         u32 qualifier = 0;
         while (kind(qualifier) == Tk::identifier && kind(qualifier + 1) == Tk::coloncolon) qualifier += 2;
         if (kind(qualifier) == Tk::tilde) {
+          if (!qualifier && !keyword) {
+            bump();
+            const u32 name_at = pos();
+            if (!is(Tk::identifier)) {
+              s_->diag(name_at, Diag::expected_unqualified_id);
+              return {NodeId::none, e.begin, pos()};
+            }
+            const NameId name = name_of(tok());
+            bump();
+            if (!expect(Tk::l_paren) || !expect(Tk::r_paren)) return {NodeId::none, e.begin, pos()};
+            e = s_->explicit_destroy(e, arrow, name, pos(), at, name_at);
+            break;
+          }
           s_->diag(pos() + qualifier, Diag::not_supported, Tk::tilde);
           seek(index() + qualifier + 1);
           if (is(Tk::identifier)) bump();

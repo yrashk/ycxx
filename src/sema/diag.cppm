@@ -98,6 +98,7 @@ enum class Diag : std::uint32_t {
   binding_bit_field [[=message{Severity::error, "structured binding of bit-field '{0:n}' is not supported yet"}]],
   binding_tuple_unsupported [[=message{Severity::error, "tuple-like structured binding for type '{0:t}' is not supported yet"}]],
   object_unusable_destructor [[=message{Severity::error, "object of type '{0:t}' requires a usable destructor"}]],
+  destructor_type_mismatch [[=message{Severity::error, "destructor name '{0:n}' does not match object type '{1:t}'"}]],
   binding_unusable_destructor [[=message{Severity::error, "structured binding requires a usable destructor for '{0:t}'"}]],
   binding_temporary_lifetime [[=message{Severity::error, "this structured binding initializer needs unsupported temporary lifetime extension"}]],
   not_captured [[=message{Severity::error, "'{0:n}' is not captured: the lambda has no capture-default"}]],
