@@ -7501,51 +7501,77 @@ public:
         diag(op_at, Diag::ambiguous_member, name, Types::unqualified(lt));
         return Ex{NodeId::none, begin, end};
       }
+      struct UnaryCandidate {
+        Ics rank;
+        QualType target;
+        const ast::DeclSema* nonmember;
+      };
+      std::vector<UnaryCandidate> viable;
+      Ex object = operands.front();
+      bool unsupported = false;
       if (found && found->member && found->member->is_function) {
-        Ex object = operands.front();
         const bool rvalue = object.cat() != ValueCategory::lvalue;
-        const int depth = base_depth(lt, types().class_type(found->owner));
-        std::optional<Ics> best_member;
+        const QualType target = types().class_type(found->owner);
+        const int depth = base_depth(lt, target);
         for (const MemberDeclRec* candidate : member_functions(found->owner, name)) {
+          if (candidate->is_static) continue;
           auto fn = types().rec(candidate->type);
-          if (candidate->is_template || candidate->is_static || !fn.params.empty()) continue;
           Ics rank = implicit_object_rank(fn, object_cv(lt), rvalue);
+          if (!rank.viable || !fn.params.empty()) continue;
+          if (candidate->is_template) {
+            unsupported = true;
+            continue;
+          }
           if (depth) {
             rank.rank = 2;  // derived-to-base conversion
             rank.base_depth = depth;
           }
-          if (rank.viable && (!best_member || rank < *best_member)) best_member = rank;
-        }
-        struct UnaryConversion {
-          Ics rank;
-          QualType target;
-        };
-        auto better = [&](const UnaryConversion& left, const UnaryConversion& right) {
-          if (left.rank.base_depth && right.rank.base_depth &&
-              types().class_of(left.target) != types().class_of(right.target))
-            return base_depth(left.target, right.target) != 0;
-          return left.rank < right.rank;
-        };
-        std::optional<UnaryConversion> best_free;
-        for (const auto& candidate : set) {
-          auto fn = types().rec(candidate.type);
-          if (candidate.flags & decl_flag::template_ || fn.params.size() != 1) continue;
-          UnaryConversion conversion{ics(object, fn.params.front()), types().referee(fn.params.front())};
-          if (conversion.rank.viable && (!best_free || better(conversion, *best_free))) best_free = conversion;
-        }
-        if (best_member) {
-          const UnaryConversion member_conversion{*best_member, types().class_type(found->owner)};
-          if (!best_free || better(member_conversion, *best_free)) {
-            Ex access = member(object, false, name, object.end, op_at, op_at);
-            Ex result = access.ok() ? call(access, {}, end, op_at) : access;
-            return Ex{result.id, begin, end, result.info};
-          }
-          if (!better(*best_free, member_conversion)) {
-            diag(op_at, Diag::ambiguous_call, name);
-            return Ex{NodeId::none, begin, end};
-          }
+          viable.push_back({rank, target, nullptr});
         }
       }
+      for (const auto& candidate : set) {
+        auto fn = types().rec(candidate.type);
+        if (fn.params.size() != 1) continue;
+        if (candidate.flags & decl_flag::template_) {
+          unsupported = true;
+          continue;
+        }
+        const auto rank = ics(object, fn.params.front());
+        if (!rank.viable) continue;
+        unsupported |= rank.rank >= Ics::user_defined;
+        viable.push_back({rank, types().referee(fn.params.front()), &candidate});
+      }
+      if (unsupported) {
+        diag(op_at, Diag::ref_qualified_operator_candidates);
+        return Ex{NodeId::none, begin, end};
+      }
+      if (viable.empty()) return std::nullopt;
+      auto better = [&](const UnaryCandidate& left, const UnaryCandidate& right) {
+        if (left.rank.base_depth && right.rank.base_depth &&
+            types().class_of(left.target) != types().class_of(right.target)) {
+          if (left.rank.ref && right.rank.ref && left.rank.to_rvalue && right.rank.to_rvalue &&
+              left.rank.rvalue_ref != right.rank.rvalue_ref)
+            return left.rank.rvalue_ref;
+          return base_depth(left.target, right.target) != 0;
+        }
+        return left.rank < right.rank;
+      };
+      auto winner = viable.begin();
+      for (auto candidate = std::next(winner); candidate != viable.end(); ++candidate)
+        if (better(*candidate, *winner)) winner = candidate;
+      if (std::ranges::any_of(viable, [&](const UnaryCandidate& candidate) {
+            return &candidate != &*winner && !better(*winner, candidate);
+          })) {
+        diag(op_at, Diag::ambiguous_call, name);
+        return Ex{NodeId::none, begin, end};
+      }
+      if (!winner->nonmember) {
+        Ex access = member(object, false, name, object.end, op_at, op_at);
+        Ex result = access.ok() ? call(access, {}, end, op_at) : access;
+        return Ex{result.id, begin, end, result.info};
+      }
+      const auto selected = *winner->nonmember;
+      set.assign(1, selected);
     }
     if (set.empty()) return ref_qualified_member;
     if (binary && ref_qualified_member && q_->dependent_call(op_at)) {

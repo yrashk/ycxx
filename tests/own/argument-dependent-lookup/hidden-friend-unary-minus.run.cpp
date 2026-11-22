@@ -52,6 +52,19 @@ int same(SameTarget& value) { return -value; }
 int related(RelatedTarget& value) { return -value; }
 }
 
+namespace member_beats_ancestor {
+struct A {};
+struct B {};
+struct MemberBase : A { int operator-() { return 41; } };
+struct Value : MemberBase, B {
+    friend int operator-(A&) { return 42; }
+};
+int use() {
+    Value value;
+    return -value;
+}
+}
+
 int main() {
     numbers::Value value{42};
     member_competition::MemberWins member;
@@ -64,5 +77,6 @@ int main() {
     return -numbers::Value{42} == -42 && -value == 43 &&
            -member == 11 && -nonmember == 14 && -builtin == -7 &&
            -derived_value == 21 && -private_base == 24 && -derived::Rvalue{} == 25 &&
-           related_bases::same(same_target) == 31 && related_bases::related(related_target) == 31 ? 0 : 1;
+           related_bases::same(same_target) == 31 && related_bases::related(related_target) == 31 &&
+           member_beats_ancestor::use() == 41 ? 0 : 1;
 }
