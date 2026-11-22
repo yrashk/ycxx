@@ -20,7 +20,7 @@ def check(world, cwd, *args, error=None):
     if error is None:
         assert warm == (0, b'', b''), (cwd, args, warm)
     else:
-        assert warm[0] == 1 and error in warm[2], (cwd, args, warm)
+        assert warm[0] == 1 and any(line.endswith(error) for line in warm[2].splitlines()), (cwd, args, warm)
 
 
 def check_foreign_without_sdk(world):
@@ -70,7 +70,7 @@ static_assert(YCXX_TARGET_SDK_PROBE == 42);
     check(world, first, DARWIN, probe)
     pid = world.pid()
     check(world, first, LINUX, probe)
-    check(world, second, DARWIN, probe, error=b'ycxx_target_sdk_probe.h')
+    check(world, second, DARWIN, probe, error=b'provider.cpp:2:10: error: file not found')
     check(world, first, DARWIN, probe)
     assert world.number('last_executed') == 0, 'the repeated Darwin request missed its engine cache'
     install_sdk(second)
