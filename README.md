@@ -231,6 +231,9 @@ scope with no bases and an implicit trivial destructor can first declare `T() = 
 in class and use it to initialize an `inline constexpr` tag object.
 [#157](https://github.com/yrashk/ycxx/issues/157)
 
+An explicit class return can select a written move constructor for an eligible named local
+or parameter. [#749](https://github.com/yrashk/ycxx/issues/749)
+
 An ordinary class object can be destroyed explicitly through a reference or pointer with
 `object.~Class()` or `pointer->~Class()`. Templates can use a dependent class name, and unary
 `noexcept` uses the destructor's exception specification. [#722](https://github.com/yrashk/ycxx/issues/722)
