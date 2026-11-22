@@ -149,6 +149,9 @@ public:
   // The direct bases of class `c` while it is being defined (its base-clause), none otherwise.
   virtual std::vector<EntityId> defining_bases(EntityId) { return {}; }
   virtual std::span<const BaseRec> defining_base_records(EntityId) { return {}; }
+  // Whether class `c` is an explicit specialization, which has no template-head of its own
+  // ([temp.expl.spec]).
+  virtual bool explicit_specialization(EntityId) { return false; }
   // Namespaces ([basic.namespace]), the global one being `EntityId::none`: the namespace (or
   // alias) unqualified lookup finds for `name`, and qualified lookup of `name` in namespace `ns`
   // ([namespace.qual]).
@@ -468,6 +471,13 @@ public:
       if (auto a = bound_arg(*p)) return a->type;
       return p->type;
     }
+    // One the class's scope hides ([temp.local]/7): what it declares, a type or not.
+    if (declared_template_param(name)) {
+      const ClassRec* cr = class_rec(current_class);
+      return class_body_type(current_class, cr && cr->defined ? *cr : ClassRec{}, name, type_at,
+                             ClassBodyLookup::before_template_parameter, elaborated)
+          .type;
+    }
     // In a class template, its name without arguments is the injected-class-name: the current
     // instantiation, or in an instantiation the specialization ([temp.local]/1).
     if (current_class != EntityId::none) {
@@ -573,6 +583,9 @@ public:
       std::span<const BaseRec> bases = cr.bases;
       if ((qualified || before_parameter) && cls == naming && !cr.defined) bases = q_->defining_base_records(cls);
       for (const BaseRec& b : bases) {
+        // [temp.dep.general]: the naming class's dependent bases are not searched. A base of a
+        // nondependent base is nondependent, whatever it was in that base's own pattern.
+        if (before_parameter && cls == naming && b.dependent_in_pattern) continue;
         if (const ClassRec* base = class_rec(b.cls)) {
           if (type_at) path.push_back({cls, b.access});
           visit(b.cls, *base);
@@ -2725,7 +2738,7 @@ public:
   u32 declare_local(NameId name, QualType type, u16 flags, u32 at, bool check = true) {
     // [temp.local]/6: a template parameter's name is not redeclared in its scope.
     // (Parameters are checked where the declarator is.)
-    if (!(flags & local_flag::parameter) && name != no_name() && template_param(name)) diag(at, Diag::redeclared_local, name);
+    if (!(flags & local_flag::parameter) && name != no_name() && declared_template_param(name)) diag(at, Diag::redeclared_local, name);
     if (name != no_name() && check) {
       bool clash = std::ranges::any_of(scopes_.back(), [&](auto& p) { return p.first == name; }) ||
                    std::ranges::any_of(block_types_, [&](auto& t) { return t.depth == scopes_.size() - 1 && t.name == name; });
@@ -2803,11 +2816,49 @@ public:
   // an instantiation the arguments bound to their parameters ([temp.inst]).
   std::vector<std::vector<ast::TemplateParamSema>> template_scopes;
   Bindings template_args;
-  const ast::TemplateParamSema* template_param(NameId name) const {
+  // The template parameter `name` declares in the template parameter scopes enclosing this point,
+  // whether or not a class member hides it: what [temp.local]/6 forbids redeclaring.
+  const ast::TemplateParamSema* declared_template_param(NameId name) const {
     for (auto s = template_scopes.rbegin(); s != template_scopes.rend(); ++s)
       for (const ast::TemplateParamSema& p : *s)
         if (p.name == name) return &p;  // an unnamed parameter's name is never looked up
     return nullptr;
+  }
+  // The template parameter unqualified lookup finds for `name`. The template parameter scope of a
+  // class template, or of a definition of its member outside it, is searched after the class's
+  // scope with its nondependent bases ([temp.local]/7), so a member of either hides a parameter of
+  // a head enclosing the class. A member template's own head, inside the class, is searched first.
+  const ast::TemplateParamSema* template_param(NameId name) {
+    const ast::TemplateParamSema* p = declared_template_param(name);
+    return p && p->depth < enclosing_class_heads() && class_scope_declares(name) ? nullptr : p;
+  }
+  // How many template-heads enclose the class whose scope this is, its own included: the depths of
+  // the parameters its scope is inside. An explicit specialization has none of its own.
+  u16 enclosing_class_heads() {
+    u16 n = 0;
+    for (EntityId c = current_class; c != EntityId::none;) {
+      const EntityRec& r = w_->entities.rec(c);
+      if (r.kind != EntityKind::class_) break;
+      if (r.templ != EntityId::none && !q_->explicit_specialization(c)) ++n;
+      c = r.scope;
+    }
+    return n;
+  }
+  // Whether the class whose scope this is declares `name`, or one of its nondependent bases does,
+  // or names a base so ([class.member.lookup], [class.pre]/2: a base's injected-class-name).
+  bool class_scope_declares(NameId name) {
+    const ClassRec* cr = class_rec(current_class);
+    const bool defined = cr && cr->defined;
+    if (defined ? direct_member(current_class, *cr, name).has_value() : q_->earlier_member(name).has_value()) return true;
+    std::span<const BaseRec> bases = defined ? std::span<const BaseRec>(cr->bases) : q_->defining_base_records(current_class);
+    return std::ranges::any_of(bases, [&](const BaseRec& b) { return !b.dependent_in_pattern && base_declares(b.cls, name); });
+  }
+  bool base_declares(EntityId c, NameId name) {
+    if (w_->entities.rec(c).name == name) return true;
+    const ClassRec* cr = class_rec(c);
+    if (!cr) return false;
+    if (direct_member(c, *cr, name)) return true;
+    return std::ranges::any_of(cr->bases, [&](const BaseRec& b) { return base_declares(b.cls, name); });
   }
   // `TT<args>` of template template parameter `p` ([temp.names]): bound, the specialization of its
   // argument; otherwise a dependent type.
@@ -2836,7 +2887,7 @@ public:
     return types().dep_spec(p.depth, p.index, p.pack != 0, *full);
   }
   // The template template parameter `name` names here, if it does.
-  const ast::TemplateParamSema* template_template_param(NameId name) const {
+  const ast::TemplateParamSema* template_template_param(NameId name) {
     const ast::TemplateParamSema* p = template_param(name);
     return p && p->kind == ast::TemplateArgKind::template_ ? p : nullptr;
   }
@@ -3233,6 +3284,10 @@ public:
     std::vector<LambdaParam> params;
     bool variadic = false;
     bool mutable_ = false;
+    // Its noexcept-specifier ([expr.prim.lambda.closure]/4, [except.spec]): non-throwing, or in a
+    // template's definition, a condition that only the template's instantiations decide.
+    bool nonthrowing = false;
+    bool noexcept_dependent = false;
     std::optional<QualType> trailing;
     // A generic lambda's template-head, explicit and invented ([expr.prim.lambda.closure]/7): the
     // parser pushed it onto `template_scopes`, and pops it after the body.
@@ -3489,6 +3544,20 @@ public:
   // Begins a lambda's body: its closure type and function call operator, its explicit captures
   // (whose initializers were analysed in the enclosing context), and the scope of its parameters
   // and init-captures. False after a diagnosed error, with no frame.
+  // The type an init-capture declares, as `auto name = init;` or `auto& name = init;` would
+  // ([expr.prim.lambda.capture]/6), for the lambda-declarator, which is in its scope
+  // ([basic.scope.lambda]); none for any other capture, or where the deduction fails (the
+  // lambda's own analysis says why).
+  std::optional<QualType> init_capture_type(const CaptureSpec& c) {
+    using K = CaptureSpec::Kind;
+    if ((c.kind != K::init_copy && c.kind != K::init_ref) || !c.init.ok()) return std::nullopt;
+    QualType p = types().placeholder(false);
+    if (c.kind == K::init_ref) p = types().lvalue_ref(p);
+    const auto before = diag_count();
+    auto t = deduce_placeholder(p, c.init, c.init.begin);
+    truncate_diags(before);
+    return t;
+  }
   bool open_lambda(LambdaSpec spec) {
     // The enclosing entity: the function, or the enclosing lambda's operator().
     EntityId scope = lambdas_.empty() ? current_function : lambdas_.back().call;
@@ -3509,7 +3578,8 @@ public:
     std::vector<QualType> ps;
     for (const LambdaParam& p : spec.params) ps.push_back(p.type);
     QualType declared = spec.trailing ? *spec.trailing : types().placeholder(false);
-    QualType call_type = types().function(declared, ps, spec.variadic, LangLinkage::cxx, spec.mutable_ ? Cv::none : Cv::const_);
+    QualType call_type = types().function(declared, ps, spec.variadic, LangLinkage::cxx, spec.mutable_ ? Cv::none : Cv::const_,
+                                          ast::RefQual::none, spec.nonthrowing);
     // The closure's identity: its enclosing entity, signature and ordinal among the closures of
     // that entity and signature completed before it (docs/design/closures.md, decision 2).
     Fp128 sig = ast::seed("ycxx.sema.closure");
@@ -3534,6 +3604,7 @@ public:
     f.closure = w_->entities.entity(std::move(cr));
     f.call = w_->entities.entity({EntityKind::function, ins().names.intern("operator()"), call_type, LangLinkage::cxx, linkage, {}, f.closure});
     f.call_type = call_type;
+    if (spec.noexcept_dependent) dependent_noexcept_calls_.insert(std::to_underlying(f.call));
     f.sig = sig;
     f.scope = scope;
     f.begin = spec.begin;
@@ -3704,7 +3775,9 @@ public:
     NodeId invoker_body = NodeId::none;
     if (captureless) {
       TypeRec cr = types().rec(call_type);
-      QualType it = types().function(cr.inner, cr.params, cr.variadic, LangLinkage::cxx);
+      // A pointer to noexcept function when the operator is non-throwing (/8).
+      QualType it = types().function(cr.inner, cr.params, cr.variadic, LangLinkage::cxx, Cv::none, ast::RefQual::none,
+                                     cr.fn_noexcept);
       bool simple = std::ranges::none_of(cr.params, [&](QualType p) { return types().is_class(p); }) && !cr.variadic;
       if (simple) {
         invoker = w_->entities.entity({EntityKind::function, ins().names.intern("__invoke"), it, LangLinkage::cxx,
@@ -3931,14 +4004,16 @@ public:
   }
 
   // A captureless closure converts to a pointer to its function call operator's function type
-  // ([expr.prim.lambda.closure]/8): its static invoker, when `to` is that pointer type.
+  // ([expr.prim.lambda.closure]/8): its static invoker, when `to` is that pointer type, or the
+  // pointer to function a pointer to its noexcept function converts to ([conv.fctptr]).
   std::optional<EntityId> closure_invoker(QualType from, QualType to) {
     if (!types().is_class(from) || !types().is_pointer(to)) return std::nullopt;
     const ClassRec* r = class_rec(types().class_of(from));
     if (!r) return std::nullopt;
     for (const MemberDeclRec& m : r->members)
       if (m.is_static && m.name == ins().names.intern("__invoke") &&
-          types().canonical(types().pointer(m.type)) == types().canonical(Types::unqualified(to)))
+          (types().canonical(types().pointer(m.type)) == types().canonical(Types::unqualified(to)) ||
+           types().function_pointer_conversion(m.type, types().pointee(Types::unqualified(to)))))
         return m.entity;
     return std::nullopt;
   }
@@ -5049,8 +5124,13 @@ public:
     if (types().is_pointer(to) && is_null_pointer_constant(a)) return {true, 2, 0};
     if (is_data_member_pointer(to) && (types().is(a.type(), Builtin::nullptr_t) || is_null_pointer_constant(a)))
       return {true, 2, 0};
-    // A user-defined conversion: a closure's to a pointer to function ([over.best.ics]/2).
-    if (closure_invoker(a.type(), to)) return {true, Ics::user_defined, 0};
+    // A user-defined conversion: a closure's to a pointer to function ([over.best.ics]/2). Through
+    // the one conversion function, the second standard conversion ranks them: identity before a
+    // function pointer conversion ([over.ics.rank]/3.3).
+    if (auto inv = closure_invoker(a.type(), to)) {
+      const bool exact = types().canonical(types().pointer(w_->entities.rec(*inv).type)) == types().canonical(Types::unqualified(to));
+      return {true, Ics::user_defined, exact ? 0 : 1};
+    }
     QualType from = value_type(a);
     if (types().is_class(from) || types().is_void(from)) return {};
     if (types().canonical(from) == types().canonical(to)) return {true, 0, 0};
@@ -5619,7 +5699,11 @@ public:
       const auto info = expression_info(child.id);
       return info.category == ValueCategory::prvalue && destructor_throwing(info.type, offset + child.at);
     };
+    // A closure's function call operator whose noexcept-specifier its template's instantiations
+    // decide makes the result value-dependent ([temp.dep.constexpr]).
+    bool value_dependent = false;
     auto function_throwing = [&](EntityId function) {
+      if (dependent_noexcept_calls_.contains(std::to_underlying(function))) value_dependent = true;
       const auto written = q_->written_member(function);
       const QualType type = written ? written->type : w_->entities.rec(function).type;
       return !types().rec(type).fn_noexcept;
@@ -5662,6 +5746,7 @@ public:
     };
     visit(ast::Red(ins().ast, root.id, operand.begin));
     if (has_error_since(before)) return fail;
+    if (value_dependent) return dependent_node({operand}, begin, end, builtin(Builtin::bool_));
     return bool_literal(!result_throws, begin, end);
   }
 
@@ -6733,7 +6818,11 @@ public:
     e = overload_address(e, to, at_);
     if (!e.ok()) return e;
     QualType target = Types::unqualified(to);
-    if (auto inv = closure_invoker(e.type(), target)) return invoker_pointer(e, *inv);
+    if (auto inv = closure_invoker(e.type(), target)) {
+      Ex p = invoker_pointer(e, *inv);
+      if (!p.ok() || types().canonical(p.type()) == types().canonical(target)) return p;
+      return convert_node(p, ast::ConversionKind::qualification, target);  // [conv.fctptr]
+    }
     if (types().is_array(target)) {
       if (auto r = string_init(target, e)) return *r;
       diag(at_, Diag::array_initializer);  // [dcl.init.general]/16.5: a list or a string literal
@@ -9384,6 +9473,9 @@ private:
   std::vector<LambdaFrame> lambdas_;  // outermost first
   std::vector<std::pair<EntityId, Fp128>> completed_closures_;  // (enclosing entity, signature)
   std::map<u32, QualType> closure_calls_;  // by operator() entity: its type, the return type deduced
+  // The function call operators, in a template's definition, whose noexcept-specifier depends on
+  // the template's parameters.
+  std::set<u32> dependent_noexcept_calls_;
   std::map<u32, GenericClosure> generic_closures_;  // by operator() entity: this part's generic lambdas
   std::map<u32, ConstId> const_captures_;  // by draft Member naming a captured constant: its value
 };
