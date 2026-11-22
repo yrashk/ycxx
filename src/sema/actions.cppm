@@ -3123,7 +3123,7 @@ public:
   Ex captured(u32 ctx, u32 key, NameId name, u32 begin, u32 end) {
     const ast::LocalRec* local = nullptr;
     if (!(key & capture_bit)) local = ctx == lambdas_.size() ? &locals_[key] : &lambdas_[ctx].outer_locals[key];
-    if (local && (local->flags & ast::local_flag::structured_binding) && types().has_placeholder(local->type)) {
+    if (local && types().has_placeholder(local->type)) {
       diag(begin, Diag::auto_used_in_initializer, name);
       return {NodeId::none, begin, end};
     }
