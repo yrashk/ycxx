@@ -1799,7 +1799,15 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
   };
   const FunctionNames function_names = [&](EntityId id) -> std::optional<FunctionName> {
     auto found = by_id.find(ir::raw(id));
-    if (found == by_id.end()) return std::nullopt;
+    if (found == by_id.end()) {
+      // An immediate function can occur in a mangled expression without emitted code.
+      const sema::World* w = universe().world_for(target);
+      if (!w) return std::nullopt;
+      const sema::EntityRec& r = w->entities.rec(id);
+      if (r.kind != sema::EntityKind::function || r.templ != EntityId::none || r.linkage != ast::Linkage::external)
+        return std::nullopt;
+      return FunctionName{{std::string(w->ins.names.spelling(r.name)), r.type, r.scope, false, std::nullopt}, r.lang};
+    }
     const Entity& fn = *found->second;
     if (!fn.is_function || fn.linkage != ast::Linkage::external || fn.local_parameter_binding)
       return std::nullopt;
