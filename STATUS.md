@@ -701,6 +701,8 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
   Member functions (with `this` first), closure call operators, function template
   specializations and calls through pointers use the same placement as ordinary functions
   ([#640](https://github.com/yrashk/ycxx/issues/640)).
+  Indirect calls preserve the last by-value argument with or without a class result destination
+  ([#693](https://github.com/yrashk/ycxx/issues/693)).
   A class result in memory, of more than two eightbytes or not trivial for calls, goes
   through a hidden pointer that takes RDI ahead of `this` and comes back in RAX. A class
   argument not trivial for calls passes by the address of the caller's object. Trivially
