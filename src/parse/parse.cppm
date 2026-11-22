@@ -865,6 +865,7 @@ public:
     u32 begin = 0;
     u32 end = 0;
     bool braced = false;
+    bool invalid = false;
     sema::Construction form = sema::Construction::direct_list;
   };
   std::map<u32, std::pair<QualType, std::optional<ConstId>>> static_locals_;  // by entity (`global`)
@@ -1447,6 +1448,7 @@ private:
   std::set<EntityId> replaying_member_exceptions_;
   std::map<EntityId, QualType> resolved_member_exceptions_;
   void check_member_exception_patterns(EntityId cls, const sema::ClassRec& rec, Result<ast::ClassDef>& out);
+  void check_default_member_initializers(const sema::ClassRec& rec, Result<ast::ClassDef>& out);
   void prepare_move_constructor(u32 item, EntityId cls, sema::ClassRec& rec);
   std::map<u32, std::vector<std::vector<ast::TemplateParamSema>>> outer_heads_;  // by item
   std::map<std::pair<u32, u32>, u32> static_init_ends_;  // by (member item, ordinal): its initializer's end
@@ -1712,8 +1714,9 @@ public:
   std::optional<u32> declaration_lookup_end;
   EntityId completing_class = EntityId::none;
   bool constructor_exception = false;
-  // The original tokens when a constructor reads a default member initializer again.
+  // The original tokens when checking or replaying a default member initializer.
   std::optional<Program::Dmi> initializer_source;
+  bool checking_default_member = false;  // the declaration's semantic check
   bool retain_type_trait_pattern = false;
   bool observed_type_trait_failure = false;
   std::optional<u32> type_trait_demand;
@@ -1874,20 +1877,23 @@ bool AtItem::inherited_default_arithmetic(sema::Sema& replay, NodeId root, Entit
 std::optional<NodeId> AtItem::replay_default_member(sema::Sema& caller, EntityId field, EntityId required_base) {
   const auto dmi = p_->dmi(field);
   if (!dmi) return std::nullopt;
+  if (dmi->invalid) return NodeId::none;
   const auto& entity = p_->world().entities.rec(field);
   const u32 offset = dmi->begin - p_->items().items[dmi->item].begin;
   AtItem source(*p_, dmi->item, false);
   source.completing_class = entity.scope;
   source.initializer_source = *dmi;
+  source.checking_default_member = checking_default_member;
   sema::Sema replay(p_->world(), caller.builder(), source, caller.diagnostics(), p_->id(dmi->item), offset);
   replay.current_class = entity.scope;
   replay.this_type = replay.types().pointer(replay.types().class_type(entity.scope));
   replay.unevaluated = caller.unevaluated;
+  if (checking_default_member) replay.template_scopes = p_->enclosing_heads(dmi->item);
   replay.push_scope();
   const sema::Sema::DefaultMemberScope nested(replay, true);
 
   const sema::ClassRec* base = nullptr;
-  if (required_base != EntityId::none) {
+  if (!checking_default_member && required_base != EntityId::none) {
     base = replay.class_rec(required_base);
     if (!base || !inherited_default_tokens(replay, p_->region(), *dmi, required_base)) {
       replay.diag(0, Diag::not_supported, Tk::equal);
@@ -1918,7 +1924,7 @@ std::optional<NodeId> AtItem::replay_default_member(sema::Sema& caller, EntityId
     else replay.diag(parser.pos(), Diag::unexpected_token, parser.kind());
     return NodeId::none;
   }
-  if (replay.dependent(init) || !replay.closures.empty()) {
+  if (!checking_default_member && (replay.dependent(init) || !replay.closures.empty())) {
     replay.diag(0, Diag::not_supported, Tk::equal);
     return NodeId::none;
   }
@@ -1938,7 +1944,7 @@ std::optional<NodeId> AtItem::replay_default_member(sema::Sema& caller, EntityId
     }
     node.for_each_child(self);
   };
-  check(ast::Red(replay.ins().ast, root, init.begin));
+  if (!checking_default_member) check(ast::Red(replay.ins().ast, root, init.begin));
   if (replay.has_error_since(diag_begin)) return NodeId::none;
   caller.demands.insert(caller.demands.end(), replay.demands.begin(), replay.demands.end());
   return init.id;
@@ -4478,9 +4484,8 @@ private:
       sem.entity = s_.world().entities.entity(
           {sema::EntityKind::data_member, d.name, d.type, LangLinkage::cxx, ast::Linkage::none, {}, c.entity});
       // A default member initializer ([class.mem.general]) is a complete-class context: it is
-      // analysed again where it is used. Here it is kept as its value when it is
-      // a constant of scalar type, and its tokens are recorded for the rest; what it says is
-      // diagnosed where it is used.
+      // checked after the class is complete. Retain its tokens for that check and for replay.
+      // A scalar constant is also kept for initialization paths that use its value.
       Ex init;
       ConstId value = ConstId::none;
       if (ps_.is(Tk::equal) || ps_.is(Tk::l_brace)) {
@@ -4493,7 +4498,8 @@ private:
         s_.truncate_diags(n);
         if (v) value = *v;
         else init = {};
-        p_->set_dmi(sem.entity, {k_, it_->begin + from, it_->begin + ps_.pos(), braced, form});
+        p_->set_dmi(sem.entity, {.item = k_, .begin = it_->begin + from, .end = it_->begin + ps_.pos(),
+                                .braced = braced, .form = form});
       }
       s_.own.push_back({d.name, sem});
       declarators_.push_back(s_.node(ast::Declarator{u32(decls_.size()), sema::Sema::at(init, d.begin), value}, d.begin, ps_.pos()));
@@ -7068,12 +7074,13 @@ const Result<ast::ClassDef>& Program::class_def(u32 item) {
       rec.peer_virtual_layout = peer_virtual_layout(item, *cls, rec, members);
     validate_class_alignment(item, *cls, rec, out.diags);
     rec.defined = true;
-    // Default arguments are checked with the full member set, before function bodies are read.
+    // Complete-class checks see the full member set before any function bodies are read.
     classes_.publish(*cls, std::move(rec), [&](sema::ClassRec& fresh) {
       bind_member_defaults(*cls, fresh, out);
       bind_constructor_exceptions(*cls, fresh, out);
       check_member_exception_patterns(*cls, fresh, out);
       if (member_declarations_valid && implicit_move) prepare_move_constructor(item, *cls, fresh);
+      if (member_declarations_valid) check_default_member_initializers(fresh, out);
     });
   }
   ast::Builder b(w_->ins, &arena_);
@@ -7182,6 +7189,29 @@ void Program::check_member_exception_patterns(EntityId cls, const sema::ClassRec
     }
     member_exception_patterns_.emplace(item, MemberExceptionPattern{std::move(replay.dependent_calls), std::move(replay.expansions)});
     out.demands.insert(out.demands.end(), replay.demands.begin(), replay.demands.end());
+  }
+}
+
+// [class.mem.general]: validate the initializer with the full member set and its original
+// lexical prefix. For a class template, [temp.res] checks the unbound pattern. [temp.inst]
+// leaves dependent defaults for an initialization that selects them.
+void Program::check_default_member_initializers(const sema::ClassRec& rec, Result<ast::ClassDef>& out) {
+  ast::Builder builder(w_->ins, &arena_);
+  for (const auto& field : rec.fields) {
+    auto written = dmis_.find(std::to_underlying(field.entity));
+    if (written == dmis_.end()) continue;
+    Dmi& dmi = written->second;
+    AtItem source(*this, dmi.item, false);
+    source.checking_default_member = true;
+    sema::Sema caller(*w_, builder, source, out.diags, id(dmi.item), 0);
+    const std::size_t before = caller.diag_count();
+    try {
+      source.replay_default_member(caller, field.entity, EntityId::none);
+    } catch (const TooDeep&) {
+      // The parser already diagnosed excessive nesting.
+    }
+    dmi.invalid = caller.has_error_since(before);
+    if (!dmi.invalid) out.demands.insert(out.demands.end(), caller.demands.begin(), caller.demands.end());
   }
 }
 
@@ -7767,6 +7797,7 @@ private:
   // A default member initializer, analysed in this constructor (a complete-class context with
   // `this`, [class.mem.general]); the function's parameters are not in its scope.
   Ex member_initializer(const sema::FieldRec& f, const Program::Dmi& d) {
+    if (d.invalid) return {};
     auto saved = s_.take_scopes();
     auto evaluate = s_.constant_of;
     const auto source = std::exchange(at_->initializer_source, d);
