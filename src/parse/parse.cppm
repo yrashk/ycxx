@@ -341,27 +341,19 @@ public:
     };
     std::vector<DeclId> r = candidates(ns);
     if (!r.empty() || direct_only) return r;
-    if (type_only) {
-      std::vector<std::string> visited{ns};
-      auto follow = [&](auto&& self, const std::string& path) -> void {
-        for (const Directive& d : directives_) {
-          if (d.alias || d.item >= item || d.at != path) continue;
-          if (!d.target) item_sema(d.item);
-          if (!d.target || std::ranges::contains(visited, *d.target)) continue;
-          visited.push_back(*d.target);
-          auto more = candidates(*d.target);
-          if (more.empty()) self(self, *d.target);
-          else r.insert(r.end(), more.begin(), more.end());
-        }
-      };
-      follow(follow, ns);
-      return r;
-    }
-    for (const std::string& t : closure(ns, item))
-      if (t != ns) {
-        std::vector<DeclId> more = candidates(t);
-        r.insert(r.end(), more.begin(), more.end());
+    std::vector<std::string> visited{ns};
+    auto follow = [&](auto&& self, const std::string& path) -> void {
+      for (const Directive& d : directives_) {
+        if (d.alias || d.item >= item || d.at != path) continue;
+        if (!d.target) item_sema(d.item);
+        if (!d.target || std::ranges::contains(visited, *d.target)) continue;
+        visited.push_back(*d.target);
+        auto more = candidates(*d.target);
+        if (more.empty()) self(self, *d.target);
+        else r.insert(r.end(), more.begin(), more.end());
       }
+    };
+    follow(follow, ns);
     return r;
   }
   // What the using-declarations that inhabit namespace `path` before `item` introduce under
