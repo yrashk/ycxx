@@ -183,7 +183,9 @@ export enum class Op : std::uint16_t {
   ret [[=control({S, Vs}, 0)]],
   unreachable [[=control({}, 0)]],
 
-  // System V AMD64 variadic cursors. Start uses the enclosing function's entry state.
+  // Variadic cursors. Start sets the cursor at its operand to the enclosing function's first
+  // unnamed argument, as the target's ABI places them. `va_arg` is System V AMD64's; Apple
+  // arm64 reads its 8-byte stack slots with loads and stores.
   va_start [[=state({S, V}, {S})]],
   va_arg [[=state({S, V}, {S, V})]],
 
