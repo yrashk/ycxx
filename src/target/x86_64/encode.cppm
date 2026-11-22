@@ -97,6 +97,35 @@ class Encoder {
     memory({0x0f, 0x5a}, xmm, base, disp, false);
   }
 
+  // CVTSD2SS rounds a binary64 memory operand to binary32 under MXCSR (Intel SDM vol. 2).
+  void narrow_float(unsigned xmm, Reg base, std::int32_t disp) {
+    emit({0xf2});
+    memory({0x0f, 0x5a}, xmm, base, disp, false);
+  }
+
+  // CVTSI2SS or CVTSI2SD converts a signed 32- or 64-bit integer, rounding under MXCSR.
+  void integer_to_float(unsigned xmm, Reg base, std::int32_t disp, unsigned float_width, bool wide) {
+    emit({std::uint8_t(float_width == 4 ? 0xf3 : 0xf2)});
+    memory({0x0f, 0x2a}, xmm, base, disp, wide);
+  }
+
+  void integer_to_float(unsigned xmm, Reg src, unsigned float_width) {
+    emit({std::uint8_t(float_width == 4 ? 0xf3 : 0xf2)});
+    reg({0x0f, 0x2a}, xmm, src);
+  }
+
+  // CVTTSS2SI or CVTTSD2SI truncates toward zero into a signed 32- or 64-bit register.
+  void truncate_float(Reg dst, Reg base, std::int32_t disp, unsigned float_width, bool wide) {
+    emit({std::uint8_t(float_width == 4 ? 0xf3 : 0xf2)});
+    memory({0x0f, 0x2c}, dst, base, disp, wide);
+  }
+
+  // ADDSS or ADDSD of one XMM register to itself, which doubles it exactly unless it overflows.
+  void double_xmm(unsigned xmm, unsigned float_width) {
+    emit({std::uint8_t(float_width == 4 ? 0xf3 : 0xf2)});
+    reg({0x0f, 0x58}, xmm, Reg(xmm), false);
+  }
+
   // MOVAPS to a 16-byte-aligned variadic register-save slot.
   void store_xmm(Reg base, std::int32_t disp, unsigned xmm) { memory({0x0f, 0x29}, xmm, base, disp, false); }
 

@@ -243,8 +243,9 @@ What is true of the code today. Work in progress and its owners are tracked in
 - `#include <cstdio>` preprocesses until libycxx's `#error` for unknown compilers
   (yrashk/libycxx#17).
 - `ycxx cxx -E` prints what Clang's `-E` would, by Clang's line and spacing rules. `preprocess`
-  is in `tests/features/ycxx.txt`. Diagnostics in included files name their file. Darwin is the
-  default target. `-E --target=x86_64-linux-gnu` (also `x86_64-pc-linux-gnu`) selects Linux.
+  is in `tests/features/ycxx.txt`. Diagnostics in included files name their file. The default
+  target follows the configured compiler host. An explicit `--target` also selects the
+  preprocessing target.
 - Tests:
   - `tests/own/pp` (by spec-only authors): 103 tests (`-E`, reject and accept), the draft's
     [cpp.scope], [cpp.subst], [cpp.stringize] and [cpp.concat] examples among them;
@@ -305,6 +306,16 @@ What is true of the code today. Work in progress and its owners are tracked in
   - Writes the exports trie, symbol tables, `LC_MAIN`, `LC_BUILD_VERSION` (macOS 12.0), an
     `LC_UUID` fingerprinted from the image, and an ad-hoc, linker-signed SHA-256 code signature.
   - Output is byte-identical across runs.
+  - Weak definitions coalesce: the first in input order is kept, and a strong one beats them.
+    The functions and variables the ELF path makes weak (#422, #432) are weak Mach-O definitions
+    too, with `N_PEXT` when hidden (#602), and a zero-initialized one goes in `__DATA,__data`, not
+    zero-fill, as Clang emits it. An object with a weak definition sets
+    `MH_SUBSECTIONS_VIA_SYMBOLS`, so the system linker also keeps one. A name some object defines
+    with default visibility is exported even when the kept definition is hidden, as the system
+    linker does. `unit.darwin_inline` checks the `unit.linux_inline` fixtures and mixed content
+    (literals, initializers, guarded statics) with ycxx's and the system's linker, dead stripping
+    included, in both object orders, with a host-compiler peer and an archive member. Templates,
+    closures and static locals of inline functions remain strong (#124).
   - Not yet: unwind info (`__compact_unwind` and `__eh_frame` input sections are dropped, so C++
     exceptions cannot cross ycxx-linked frames), thread-local variables, dead stripping, literal
     merging, branch islands beyond ±128 MiB, other dylibs' re-exports, incremental relinking, and
@@ -574,8 +585,10 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
 ## x86-64 ELF objects and executables (2026-11-19)
 
 - `--target=x86_64-pc-linux-gnu` (also `x86_64-linux-gnu`) selects Linux preprocessing,
-  layout and code generation. The in-process driver and daemon keep the target in the unit
-  configuration. Darwin remains the default.
+  layout and code generation. The in-process driver and daemon use the same request parser.
+  It defaults to Linux on x86-64 Linux builds and to `arm64-apple-darwin` on arm64 Darwin builds.
+  An explicit `--target` overrides the default. Builds with other configurations require one.
+  A native Linux executable link requires `-nostdlib`. [#651](https://github.com/yrashk/ycxx/issues/651)
 - The scalar System V AMD64 backend in `src/target/x86_64/` supports `bool` and 8-, 16-, 32- and 64-bit
   integer and enum parameters and results, plus pointers, references and void results. It handles
   direct and indirect calls, stack arguments and RIP-relative data references within a unit.
@@ -617,9 +630,17 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
 - Binary32 and binary64 comparisons use the scalar SSE unordered comparison instructions.
   Equality and the four relational operators are false for unordered operands. Inequality and
   conversion of NaN to `bool` are true. Both signed zeros convert to false. Strict exception
-  status, other numeric conversions and x87 values remain [#201](https://github.com/yrashk/ycxx/issues/201).
+  status and x87 values remain [#201](https://github.com/yrashk/ycxx/issues/201), [#645](https://github.com/yrashk/ycxx/issues/645).
   [Design](docs/design/linux-scalar-floating-point.md#runtime-comparisons)
-- Direct fixed-prototype calls to ordinary free functions support nonempty naturally aligned
+- Conversions between binary32 or binary64 and 32- or 64-bit integers use the SSE2 conversion
+  instructions; narrower integers and `bool` widen to 32 bits first. Integer-to-floating
+  conversions round under the caller's MXCSR. An unsigned 64-bit value with its top bit set is
+  halved with the shifted-out bit kept as a sticky low bit, converted and doubled. A floating
+  value at or above 2^63 converts to unsigned 64 bits through the conversion of x − 2^63.
+  Binary64 to binary32 rounds under MXCSR, and `fabs` clears the sign bit. `unit.linux_scalar_sse`
+  compares exact bits with a host compiler's conversions at `-O0` and `-O2` under all four
+  rounding directions. [#643](https://github.com/yrashk/ycxx/issues/643)
+- Fixed-prototype calls support nonempty naturally aligned
   flat records with integral or ordinary object-pointer fields that are trivial for calls,
   up to 16 bytes and alignment eight. The AMD64 INTEGER eightbytes follow from the laid-out
   fields. If an entire argument cannot
@@ -627,6 +648,9 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
   the remaining registers. One- and two-eightbyte results use RAX and RDX. The mixed-object
   tests exercise both directions and check by-value object identity. Source packing and
   alignment directives with uncertain layout exclude the record from this by-value ABI.
+  Member functions (with `this` first), closure call operators, function template
+  specializations and calls through pointers use the same placement as ordinary functions
+  ([#640](https://github.com/yrashk/ycxx/issues/640)).
   [Design](docs/design/linux-integer-aggregates.md) · [#440](https://github.com/yrashk/ycxx/issues/440)
 - `-c` writes deterministic ELF64 relocatable objects through `src/obj/elf.cppm`. The reader
   accepts the supported x86-64 `ET_REL` subset emitted by ycxx. The native ELF linker consumes
@@ -1082,7 +1106,7 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   Itanium ABI passes it. Linkage names are `<nested-name>`s with the member's cv-qualifiers,
   checked against Clang's symbols.
 - Tests: `tests/own/classes/s2-*` (spec-only, plus three from the review): 12 of 13 pass; the constexpr one waits for records
-  in the interpreter (#25). Mach-O still needs weak definitions for in-class member functions (#124).
+  in the interpreter (#25). In-class member functions are weak definitions on both targets (#422, #124).
 - Not yet: ref-qualifiers, `= default`.
 
 ## Ordinary ref-qualified member functions (#311)
@@ -1612,6 +1636,9 @@ template's tokens again with the arguments bound.
   evaluation (`global`, `constant_value`) at that point, or at the END worklist for code. A
   specialization is emitted as a variable, mangled `_Z1vIiE`, with external linkage even when
   const ([basic.link]/3).
+- **Dependent variable-template arguments** (#209): an unqualified namespace variable template
+  used as a dependent `bool` template argument keeps the declaration found by ordinary lookup.
+  Substitution evaluates the selected specialization once its arguments are concrete.
 - **Dependent logical negation** (#209): a `bool` template argument or default can negate a
   qualified dependent `bool` variable template-id. Substitution retains the negation across
   aliases until the selected specialization has concrete arguments and supplies a usable
@@ -1702,7 +1729,9 @@ session's.*
   nested-name-specifiers and wherever a class template-id may be) is the type it stands for with
   the arguments substituted, so it has no identity or mangling of its own; packs group as for
   class templates. `Templates::complete_class` completes a class that substituting
-  `typename X<T>::type` needs, instantiating a specialization.
+  `typename X<T>::type` needs, instantiating a specialization. A terminal namespace-qualified
+  alias specialization such as `N::A<T>` stays a type argument when its expansion is a dependent
+  member type ([temp.arg.general], #630).
 - Tests: `tests/own/templates/a5-*`; 2 more draft examples pass. `<cstdio>`: 78 → 53 errors.
 - Also: `C::T` inside the class (being defined or instantiated) and in its out-of-class member
   definitions names its member type, as the current instantiation's ([temp.dep.type]/1).
@@ -1889,11 +1918,15 @@ Fable decided the representation (ast.md §6.6); the Opus session wrote the code
   constraint substitution. Empty packs, order, and reference types are retained (#234).
 - A directly named, non-dependent specialization of a primary class template with explicit type
   arguments checks its constraints even when the use does not need a complete class (#234).
-- Not yet: class-template constraints outside that case, constraints on variable templates, partial
-  specializations and members,
-  broader constrained packs, fold-expanded constraints, `C auto`, `noexcept` in compound requirements
-  (#234); re-verification of satisfaction at END (#235); Itanium constraint mangling (#236);
-  recorded discarded extents for `if constexpr` (#237); value-dependent mapping arguments (#209).
+- In non-template code outside requires-expression bodies, directly naming a primary namespace
+  variable-template specialization with explicit non-dependent type arguments checks its associated
+  constraints. This includes unevaluated uses such as `decltype`. A type-constraint or a leading
+  requires-clause contributes to that check. [#234](https://github.com/yrashk/ycxx/issues/234)
+- Not yet: class and variable template constraints outside those cases, partial specializations
+  and members, broader constrained packs, fold-expanded constraints, `C auto`, and `noexcept` in
+  compound requirements (#234). Open follow-ups include re-verification of satisfaction at END
+  (#235), Itanium constraint mangling (#236), recorded discarded extents for `if constexpr` (#237),
+  and value-dependent mapping arguments (#209).
 
 ## Access control and friends (#119, 2026-11-18)
 
@@ -1927,7 +1960,7 @@ Fable decided the representation (ast.md §6.6); the Opus session wrote the code
 - C-linkage friend definitions, other hidden friend operators, defaults on friend declarations,
   friends in templates, destructor access, private member operator wording, and elaborated types
   in member parameters remain under [#259](https://github.com/yrashk/ycxx/issues/259).
-  Darwin cross-object inline coalescing is tracked under [#124](https://github.com/yrashk/ycxx/issues/124).
+  Both targets coalesce these inline friend definitions across objects (#422, [#124](https://github.com/yrashk/ycxx/issues/124)).
 - A namespace-scope declaration's qualified types are checked once what it declares is known
   (`Sema::defer_type_access`, `settle_type_access`): a member's definition outside its class and
   a friend's declaration may name the class's private types ([class.access]/6–7). A friend
@@ -2150,6 +2183,14 @@ request it serves.
   tmux's passthrough form) and, locally, runs `YCXX_CLIPBOARD` or the first of pbcopy, wl-copy,
   xclip and xsel. Tests: `unit.trace` (the exact text of each way to copy, base64, OSC 52);
   `daemon.trace_tui` (`y` and a row drag through OSC 52 and the command).
+- Source spans (#638): `engine::SourceSpan` on each `TraceEvent`, from a kind's `trace_span(const
+  Db&, const Key&)`, which runs only in `Db::trace`. `Db::peek` reads an input, or a value
+  verified at this revision, without a dependency. A file's and a unit's cells are the file; a
+  function's cells (FunctionSourceQ to Codegen) are its definition's first to last token
+  (`item_span`, lines as diagnostics count them). The JSON `span`, `at:file[:line]` in the
+  filter, and `span_text`/`span_start` are in place. Tests: `unit.trace` (the spans of a real
+  build, cells without spans, text, filter, JSON; mutation-checked) and `daemon.trace` (spans
+  across the socket).
 - Not yet: the analysed tree as a value, and stages linked to source (#254); per-resumption
   spans, so a frame's waits are not drawn as work (#255).
 
@@ -2622,7 +2663,9 @@ and runtime integration with ycxx's own linker remain under [#89]. See the
   declarations in different scopes have their own. A copy or move constructor's other parameters
   may have defaults. Defaults are rejected where [dcl.fct.default]/3–4 and [over.oper.general]
   forbid them (`defaults_allowed`, `defaults_trail`).
-- Not yet: defaults that depend on template parameters (#356); defaults added by an out-of-class
+- Omitted scalar defaults on free function templates replay with the selected bindings at the
+  written declaration. Explicit arguments bypass replay.
+- Not yet: other dependent defaults (#356); defaults added by an out-of-class
   or qualified definition (#354); defaults added after a using-declaration (#362, the oracles disagree).
 - Tests: `tests/own/default-args/` (spec-only, with XFAILs for #354, #356, #357 and #102).
 
