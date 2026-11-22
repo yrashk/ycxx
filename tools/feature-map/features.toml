@@ -552,7 +552,7 @@ std = 'C++98'
 core = true
 status = 'partial'
 issues = [124, 193, 422]
-note = 'x86-64 ELF weak definitions for ordinary external inline functions and COMDAT input selection in explicit static links. COMDAT emission, grouped archive and dynamic links, Mach-O weak definitions and internal-linkage mangling remain'
+note = 'Weak definitions for ordinary external inline functions on x86-64 ELF and arm64 Mach-O, and COMDAT input selection in explicit static links. COMDAT emission, grouped archive and dynamic links, inline functions with statics or closures, template specializations and internal-linkage mangling remain'
 
 [[feature]]
 id = 'basic-inline-vars'
@@ -564,7 +564,7 @@ ftm = '__cpp_inline_variables'
 detect = '\binline\s+(?:static\s+)?(?:const(?:expr)?\s+)?[\w:<>,]+\s+\w+\s*(?:=|\{|;)|\bstatic\s+(?:constexpr\s+)?inline\s+(?!\w+\s*\()'
 status = 'partial'
 issues = [124, 368, 422, 432]
-note = 'x86-64 ELF shares constant-initialized external namespace variables with relocation-free initial values. Broader inline data and group selection remain'
+note = 'x86-64 ELF and arm64 Mach-O share constant-initialized external namespace variables with relocation-free initial values. Broader inline data and group selection remain'
 probe = '''
 inline int counter = 41;
 struct S { static inline int n = 1; };
@@ -2194,7 +2194,7 @@ ftm = '__cpp_concepts'
 detect = '\brequires\b'
 status = 'partial'
 issues = [234, 236]
-note = 'Ordinary function overloads support explicit trailing type packs in atomic constraints. Directly named non-dependent primary class specializations with explicit type arguments check constraints. Broader template and member constraints and constraint mangling remain.'
+note = 'Ordinary function overloads support explicit trailing type packs in atomic constraints. Directly named non-dependent primary class specializations with explicit type arguments check constraints. Non-template code outside requires-expression bodies also checks directly named primary namespace variable templates with explicit non-dependent type arguments. Broader template and member constraints and constraint mangling remain.'
 probe = '''
 template<class T> concept Int = sizeof(T) == 4;
 template<Int T> int f(T) { return 1; } template<class T> int f(T) { return 2; }

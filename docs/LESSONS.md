@@ -318,6 +318,12 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
   `-Werror=subobject-linkage` ("has a field whose type has no linkage") in every importer.
   - Do: define awaitables at namespace scope, as class templates if they need the query's types.
   - Learned on #15.
+- **The system linker on a dev Mac can be newer than CI's.** Weak Mach-O definitions in
+  `__DATA,__bss` coalesced under macOS 26's linker, but macOS 15's (the `macos-15` runner)
+  reported them as duplicate symbols. Clang emits weak zero-initialized data in `__DATA,__data`.
+  - Do: when ycxx's objects go through the system linker, emit what Clang emits for the same
+    construct (`clang++ -c`, then `nm -m` and `otool -lv`), not just what the local linker accepts.
+  - Learned on #124.
 - **An executable killed at exec with status 137 says nothing about why.** A linked Mach-O whose
   `ncmds` was one too high passed `codesign -v`, then the kernel killed it before `main`.
   - Do: run `otool -l` on the output first. It reports "malformed load command" and where.

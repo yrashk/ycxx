@@ -27,6 +27,7 @@ inline constexpr std::uint32_t mh_execute = 0x2;
 inline constexpr std::uint32_t mh_noundefs = 0x1;
 inline constexpr std::uint32_t mh_dyldlink = 0x4;
 inline constexpr std::uint32_t mh_twolevel = 0x80;
+inline constexpr std::uint32_t mh_subsections_via_symbols = 0x2000;
 inline constexpr std::uint32_t mh_weak_defines = 0x8000;
 inline constexpr std::uint32_t mh_pie = 0x200000;
 inline constexpr std::uint32_t lc_req_dyld = 0x80000000;
@@ -294,7 +295,10 @@ std::vector<std::uint8_t> write_object(const object& o) {
   w.u32(mh_object);
   w.u32(4);  // ncmds
   w.u32(sizeofcmds);
-  w.u32(0);  // flags
+  // A weak definition is coalesced per symbol only where the linker may split sections at
+  // symbols; every section's code and data is reached through its own symbols (#124).
+  const bool weak_definitions = std::ranges::any_of(o.symbols, [](const symbol& s) { return s.weak && s.defined(); });
+  w.u32(weak_definitions ? mh_subsections_via_symbols : 0);  // flags
   w.u32(0);  // reserved
 
   w.u32(lc_segment_64);
