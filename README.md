@@ -278,6 +278,9 @@ They can hide an enum name in ordinary lookup while leaving it available as a qu
 [#731](https://github.com/yrashk/ycxx/issues/731)
 Qualified elaborated specifiers such as `enum Box::State` find the enum despite a same-name
 enumerator. [#761](https://github.com/yrashk/ycxx/issues/761)
+Initializers in a nested enumeration can use preceding enclosing class members by unqualified
+name. Earlier enumerators take precedence over enclosing class names within their enumeration.
+[#760](https://github.com/yrashk/ycxx/issues/760)
 
 Automatic declarations of ordinary non-template classes with only scalar fields and no bases
 or unions can use default member initializers in `S s;` and `S s{…};`. A default runs in
@@ -559,7 +562,9 @@ peer-owned objects with an ordinary root, including a derived class with that si
 base, at most one integral field and at most one override. Consumers can upcast those derived
 views, access ordinary integral members, and query `sizeof` and `alignof` for the Itanium layout.
 A translation unit can also define one non-key virtual member of an eligible root out of class.
-For that case, the peer provides the key function, virtual table and RTTI.
+For that case, the peer provides the key function, virtual table and RTTI. On Linux x86-64,
+a caller can also dispatch through a peer-owned abstract interface with one or two
+public pure virtual slots using fixed integer signatures and bare `noexcept`.
 [#309](https://github.com/yrashk/ycxx/issues/309)
 
 **Structured bindings.** Local bindings can copy or alias scalar-element arrays, including
