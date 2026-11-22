@@ -2059,6 +2059,10 @@ session's.*
   `typename X<T>::type` needs, instantiating a specialization. A terminal namespace-qualified
   alias specialization such as `N::A<T>` stays a type argument when its expansion is a dependent
   member type ([temp.arg.general], #630).
+- Dependent static member calls through class and alias template qualifiers preserve argument
+  pack expansions when an ordinary template parameter precedes the pack. The supported cases
+  include forwarding empty and mixed lvalue/rvalue packs. A known member type of the current
+  instantiation still supports functional construction. [#890](https://github.com/yrashk/ycxx/issues/890)
 - Tests: `tests/own/templates/a5-*`; 2 more draft examples pass. `<cstdio>`: 78 → 53 errors.
 - Also: `C::T` inside the class (being defined or instantiated) and in its out-of-class member
   definitions names its member type, as the current instantiation's ([temp.dep.type]/1).
@@ -2765,9 +2769,10 @@ What the process allocates, attributed to the engine's cells, in the trace and t
   `extern` declarations, pointer and reference types, declarations of by-value functions,
   base subobjects and the result of direct `decltype(make())` follow their ordinary rules.
   [[class.abstract]](https://eel.is/c++draft/class.abstract) · [[dcl.type.decltype]](https://eel.is/c++draft/dcl.type.decltype) · [#309](https://github.com/yrashk/ycxx/issues/309)
-- On Linux x86-64, the pinned libycxx `<exception>` syntax check reaches unnamed unscoped
-  enumerations in `deps/libycxx/include/ycxx/pal.h`, starting at line 61.
-  [#157](https://github.com/yrashk/ycxx/issues/157)
+- On Linux x86-64, the `<exception>` syntax and object probes with libycxx `4183795d` now pass
+  the dependent pack call at `deps/libycxx/include/ycxx/core/invoke.hpp:112`. The first diagnostic
+  is an ambiguous `__invocable_` at line 178, column 37.
+  [#890](https://github.com/yrashk/ycxx/issues/890) · [#468](https://github.com/yrashk/ycxx/issues/468)
 - On Linux x86-64, an ordinary declaration-only root with fixed integer virtual signatures can
   consume a peer-owned object through a pointer or reference. Dispatch loads the selected slot in
   declaration order and passes the original receiver as `this`. Qualifying the call with the
