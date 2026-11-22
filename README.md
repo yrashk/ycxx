@@ -300,6 +300,12 @@ Later class members can also hide namespace names in defaults that evaluate to s
 YCXX checks the non-dependent parts of a written default member initializer once the class is
 complete, even if no initialization selects that default.
 [#732](https://github.com/yrashk/ycxx/issues/732)
+In non-template code, ordinary scalar aggregates evaluate written defaults in temporaries such
+as `S{4}`, empty value-initialization such as `S()`, return values, and by-value arguments.
+These runtime defaults can use built-in scalar operations and ordinary nonthrowing calls,
+including reads of earlier fields. Required constant aggregate initialization also uses the
+completed class to resolve scalar defaults.
+[#818](https://github.com/yrashk/ycxx/issues/818)
 
 Automatic declarations such as `Point p(3, 4);` can initialize flat aggregates with public
 arithmetic fields. Supplied expressions initialize the fields in declaration order. Omitted
