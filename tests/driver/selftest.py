@@ -199,6 +199,30 @@ class Parts(unittest.TestCase):
         self.assertEqual(state.affected(['src/parse.cpp'], tests)[0], [])
         self.assertEqual(state.affected(None, tests)[0], [])
 
+    def test_parity_requires_aarch64_load_patterns(self):
+        patterns = 'src/target/aarch64/aarch64.patterns'
+        inputs = (patterns, 'src/target/aarch64/select.cppm', 'src/target/x86_64/x86_64.cppm',
+                  'src/ir/l2.cppm', 'tools/parity/l2-gaps.tsv')
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            for name in inputs:
+                path = root / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes((REPO / name).read_bytes())
+            command = [sys.executable, str(REPO / 'tools/check-parity'), d]
+            baseline = subprocess.run(command, capture_output=True, text=True)
+            self.assertEqual(baseline.returncode, 0, baseline.stderr)
+
+            path = root / patterns
+            # Leave the disabled declarations in comments and the selector's load references intact.
+            load_rules = r'^([ \t]*pattern[ \t]+load[\w-]*[ \t]*:[^\n]*)'
+            disabled, count = re.subn(load_rules, r'# \1', path.read_text(), flags=re.M)
+            self.assertGreater(count, 0)
+            path.write_text(disabled)
+            result = subprocess.run(command, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 1, result.stderr)
+            self.assertIn('L2 `load`: the x86_64 back end handles it and aarch64 does not', result.stderr)
+
 
 if __name__ == '__main__':
     unittest.main()
