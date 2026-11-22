@@ -362,20 +362,47 @@ class OwnershipFlowBuilder {
     return CapabilityGuard::none;
   }
 
-  // The library guard sees its ordinary backing fields. Every other use of the
-  // token's receiver, including an escape or a call on the token itself, stays checked.
-  bool capability_guard_field(const ast::Red& node) const {
-    if (capability_guard_ == CapabilityGuard::none || !node.is<ast::Member>()) return false;
+  std::optional<QualType> capability_guard_field(const ast::Red& node, std::string_view name) const {
+    if (!node.is<ast::Member>()) return std::nullopt;
     const auto member = node.get<ast::Member>();
     if (!member.arrow || member.reference || !unparenthesized(at(node, member.object)).is<ast::This>() ||
         mentions_owner(member.info.type))
-      return false;
+      return std::nullopt;
     const auto* field = world_.entities.find(member.member);
-    if (!field || field->scope != world_.types.class_of(world_.types.rec(body_.this_type).inner)) return false;
-    const auto name = world_.ins.names.spelling(field->name);
-    if (name == "state_") return is_affine_runtime_state(world_, member.info.type);
-    return capability_guard_ == CapabilityGuard::require && name == "scope_" &&
-           world_.types.is(member.info.type, ast::Builtin::unsigned_long_long);
+    if (!field || field->scope != world_.types.class_of(world_.types.rec(body_.this_type).inner) ||
+        world_.ins.names.spelling(field->name) != name)
+      return std::nullopt;
+    return member.info.type;
+  }
+
+  // Skip the ordinary value read or the receiver of a specific runtime-state call.
+  // A raw field reference still exposes the token's receiver to the normal check.
+  bool capability_guard_access(const ast::Red& node) const {
+    if (capability_guard_ == CapabilityGuard::none) return false;
+    const bool require = capability_guard_ == CapabilityGuard::require;
+    if (require && node.is<ast::ImplicitConversion>()) {
+      const auto read = node.get<ast::ImplicitConversion>();
+      if (read.conversion != ast::ConversionKind::lvalue_to_rvalue) return false;
+      const auto field = capability_guard_field(unparenthesized(at(node, read.operand)), "scope_");
+      return field && !sema::Types::is_volatile(*field) && world_.types.is(*field, ast::Builtin::unsigned_long_long);
+    }
+    if (!node.is<ast::MemberCall>()) return false;
+    const auto call = node.get<ast::MemberCall>();
+    if (!node.ast().children(call.args).empty()) return false;
+    const auto receiver = unparenthesized(at(node, call.object));
+    if (!receiver.is<ast::Unary>()) return false;
+    const auto address = receiver.get<ast::Unary>();
+    if (address.op != ast::UnaryOp::address_of) return false;
+    const auto state = capability_guard_field(unparenthesized(at(receiver, address.operand)), "state_");
+    if (!state || !is_affine_runtime_state(world_, *state)) return false;
+    const auto* method = world_.entities.find(call.function);
+    if (!method || method->kind != sema::EntityKind::function || method->scope != world_.types.class_of(*state) ||
+        method->templ != EntityId::none || world_.ins.names.spelling(method->name) != (require ? "observe" : "consume"))
+      return false;
+    const auto signature = world_.types.rec(method->type);
+    return signature.fn_noexcept && !signature.variadic && signature.params.empty() &&
+           signature.fn_cv == (require ? ast::Cv::const_ : ast::Cv::none) &&
+           signature.fn_ref == ast::RefQual::none && world_.types.is_void(signature.inner);
   }
 
   bool mentions_owner(QualType type) const {
@@ -391,7 +418,7 @@ class OwnershipFlowBuilder {
 
   // The red cursor distinguishes the source occurrences of shared AST nodes.
   std::optional<ast::u32> owner_use(const ast::Red& node) const {
-    if (capability_guard_field(node)) return std::nullopt;
+    if (capability_guard_access(node)) return std::nullopt;
     if (node.is<ast::ImplicitConversion>()) {
       const auto cast = node.get<ast::ImplicitConversion>();
       if (cast.conversion == ast::ConversionKind::lvalue_to_rvalue) {

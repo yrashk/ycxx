@@ -297,6 +297,24 @@ with tempfile.TemporaryDirectory() as directory:
         using Extra = own::use_policy<own::affine<Unrelated>>;
     """), error="this resource use is outside the checked protocol")
 
+    capability_header = (pathlib.Path(include) / "ycxx" / "capabilities.hpp").read_text()
+
+    def reject_modified_token(name, header):
+        modified = write(f"{name}.hpp", header)
+        source = direct_token_source.replace("<ycxx/capabilities.hpp>", f'"{modified.name}"')
+        syntax(write(f"{name}.cpp", source), error="this resource use is outside the checked protocol")
+
+    reject_modified_token("scope_address_escape", capability_header.replace(
+        "using scope_id = unsigned long long;",
+        "using scope_id = unsigned long long;\ninline const scope_id* escaped_scope;").replace(
+        "state_.observe();", "escaped_scope = &this->scope_;\n    state_.observe();"))
+    reject_modified_token("guard_address_escape", capability_header.replace(
+        "using scope_id = unsigned long long;",
+        "using scope_id = unsigned long long;\ninline ownership::affine_state* escaped_guard;").replace(
+        "state_.consume();", "escaped_guard = &this->state_; state_.consume();"))
+    reject_modified_token("scope_write", capability_header.replace("scope_id scope_;", "mutable scope_id scope_;").replace(
+        "state_.observe();", "scope_ = scope;\n    state_.observe();"))
+
     handler_source = """\
         #include "effects.hpp"
         #include <ycxx/effects/handler.hpp>

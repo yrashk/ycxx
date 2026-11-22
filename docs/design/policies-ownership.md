@@ -71,8 +71,9 @@ A directly registered affine `ycxx::capabilities::token<Issuer, Rights>` can be 
 its issuer's static `noexcept` function with a single direct return from the scope constructor.
 The compiler checks the scope expression for ordinary resource use. Callers acquire the token
 through a namespace-scope adapter registered with `creates`, and observation and consumption use
-their registered adapters. The token's `require` and `release` definitions access their ordinary
-scope and runtime-state storage. Other uses of the token receiver still receive ownership checks.
+their registered adapters. The token's `require` reads its scope by value and calls the runtime
+state's `observe` on its own state field. Its `release` calls `consume` on that field. Other
+uses of the token receiver, including taking a backing field's address, receive ownership checks.
 [Direct token lifecycle #799](https://github.com/yrashk/ycxx/issues/799) ·
 [Member template exception specifications #804](https://github.com/yrashk/ycxx/issues/804)
 
