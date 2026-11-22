@@ -2533,7 +2533,7 @@ public:
   // [class.base.init], [dcl.init.aggr]: a destination with only ordinary scalar fields
   // needs no subobject destruction if an initializer exits by throwing.
   bool can_replay_default_members(QualType t) {
-    if (!types().is_class(t)) return false;
+    if (!types().is_class(t) || (templated() && current_function == EntityId::none)) return false;
     EntityId c = types().class_of(t);
     if (!ordinary_default_member_owner(c)) return false;
     const ClassRec* rec = class_rec(c);
@@ -2653,7 +2653,9 @@ public:
       if (auto init = q_->replay_default_member(*this, e.default_member, required_base)) {
         if (*init == NodeId::none) return {NodeId::none, begin, end};
         ExprInfo info{e.type, ValueCategory::prvalue, 0};
-        if (!replay_default_members_ && required_base == EntityId::none && !unevaluated && !constant_reference_context) {
+        // A named declaration in a template is also a newly supported replay.
+        if ((!replay_default_members_ || templated()) && required_base == EntityId::none &&
+            !unevaluated && !constant_reference_context) {
           const Ex operand{*init, begin, end, info};
           const Ex proof = runtime_default_noexcept(operand);
           if (!proof.ok()) return {NodeId::none, begin, end};
