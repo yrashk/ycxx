@@ -469,6 +469,7 @@ written default member initializer are value-initialized.
   value and a pointer. [#199](https://github.com/yrashk/ycxx/issues/199)
 - constant evaluation on ycxx's own interpreter: `constexpr`, `consteval`, `constinit`,
   `static_assert` and `if consteval`, with errors that explain why something is not constant.
+  A constant evaluation can bypass a block-scope static aggregate. [#872](https://github.com/yrashk/ycxx/issues/872)
   Scalar enumeration values work in constexpr variables, calls, casts and switch conditions.
   A flat static constexpr aggregate member initialized with `T{...}` has addressable storage
   and runtime field access. Direct-list braces also work for aggregates of public integral

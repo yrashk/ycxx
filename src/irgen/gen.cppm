@@ -424,12 +424,6 @@ class Gen {
       start_lifetime(p);
       slots_[i] = p;
     }
-    // Static locals: their objects are their entities', wherever control enters ([stmt.dcl]/3).
-    for (uint32_t i = params.size(); !fn_.thunk && i < slots_.size(); ++i) {
-      ast::LocalRec rec = in_.seqs.at(fn_.body.locals, i);
-      if (rec.entity != ast::EntityId::none && !facts_.is_reference(rec.type))
-        slots_[i] = Place{pure(ir::Op::global, facts_.pointer_to(rec.type), {}, {word(rec.entity)}), rec.type};
-    }
     // A thunk's locals: those with values are const objects; any other is an object whose
     // lifetime has ended, so reading or modifying it fails.
     for (uint32_t i = 0; fn_.thunk && i < slots_.size(); ++i) {
@@ -1169,23 +1163,42 @@ class Gen {
     enter(done);
   }
 
+  // The entity identifies a static local independently of the declaration's control flow
+  // ([stmt.dcl]/3). Form its address where it is needed so a skipped declaration and its reads
+  // do not require the interpreter to materialize the object.
+  Place static_place(const ast::LocalRec& local) {
+    return {pure(ir::Op::global, facts_.pointer_to(local.type), {}, {word(local.entity)}), local.type};
+  }
+
   // [stmt.dcl]/3: a static local's object is its entity's. Unless constant-initialized with
   // nothing to destroy, it is initialized the first time control passes here, once even with
   // several threads: `if (__cxa_guard_acquire(&guard)) { init; atexit(destructor); __cxa_guard_release(&guard); }`
   // (Itanium C++ ABI §3.3.3), the acquire called on every pass.
   void static_var(At a) {
     auto s = get<ast::StaticVar>(a);
-    ast::LocalRec rec = in_.seqs.at(fn_.body.locals, s.local);
-    if (s.destructor == ast::EntityId::none && (s.value != ast::ConstId::none || s.init.id == NodeId::none)) return;
-    auto g = std::ranges::find(fn_.guards, rec.entity, &FunctionInput::StaticGuard::variable);
-    if (g == fn_.guards.end() || fn_.guard_acquire == ast::EntityId::none) {
-      // For constant evaluation, which has no guards: passing here is not constant ([expr.const]).
+    const ast::LocalRec rec = in_.seqs.at(fn_.body.locals, s.local);
+    const bool needs_guard = s.destructor != ast::EntityId::none ||
+                             (s.value == ast::ConstId::none && s.init.id != NodeId::none);
+    const auto g = needs_guard ? std::ranges::find(fn_.guards, rec.entity, &FunctionInput::StaticGuard::variable)
+                               : fn_.guards.end();
+    if (needs_guard && (g == fn_.guards.end() || fn_.guard_acquire == ast::EntityId::none)) {
+      // Constant evaluation has no guard or exit registration. A usable object is already
+      // constant-initialized. Otherwise, passing the declaration is not constant ([expr.const]).
+      if (s.usable_in_constant_expressions) return;
       emit(ir::Op::unreachable, {}, {}, {}, ir::bit(ir::Flag::not_constexpr));
       live_ = false;
       return;
     }
-    // Keep the address defined at function entry so jumps may bypass this declaration.
-    const Place& p = *slots_[s.local];
+    if (!s.usable_in_constant_expressions) {
+      // The declaration is forbidden on an evaluated constant path even without a read.
+      ir::BlockId invalid = new_block(), runtime = new_block();
+      ir::SuccRef succs[] = {edge(invalid), edge(runtime)};
+      emit(ir::Op::consteval_br, {}, {}, {}, 0, succs);
+      enter(invalid);
+      emit(ir::Op::unreachable, {}, {}, {}, ir::bit(ir::Flag::not_constexpr));
+      enter(runtime);
+    }
+    if (!needs_guard) return;
     ast::QualType vp = facts_.pointer_to(facts_.int_type());
     ValueId guard[] = {pure(ir::Op::global, vp, {}, {word(g->guard)})};
     ValueId first = *call_fn(fn_.guard_acquire, facts_.int_type(), guard, 0);
@@ -1193,6 +1206,7 @@ class Gen {
     ir::BlockId init_b = new_block(), join = new_block();
     cond_br(taken, edge(init_b), edge(join));
     enter(init_b);
+    const Place p = static_place(rec);
     if (s.init.id != NodeId::none && s.value == ast::ConstId::none)
       full_expression([&] {
         initialize(p, child(a, s.init), false);
@@ -2161,7 +2175,13 @@ class Gen {
     ast::QualType t = ei.type;
     if (is<ast::LocalRef>(a)) {
       uint32_t i = get<ast::LocalRef>(a).local;
-      if (i >= slots_.size() || !slots_[i]) unsupported(a, "naming a local that is not declared yet");
+      if (i >= slots_.size()) unsupported(a, "naming a local that is not declared yet");
+      if (!slots_[i]) {
+        const ast::LocalRec rec = in_.seqs.at(fn_.body.locals, i);
+        if (!fn_.thunk && rec.entity != ast::EntityId::none && !facts_.is_reference(rec.type))
+          return static_place(rec);
+        unsupported(a, "naming a local that is not declared yet");
+      }
       Place p = *slots_[i];
       if (auto binding = jump_bindings_.find(i); binding != jump_bindings_.end()) p.ptr = load(binding->second);
       return p;

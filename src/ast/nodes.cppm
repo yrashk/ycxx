@@ -521,6 +521,7 @@ struct StaticVar {
   Child init;
   ConstId value;
   EntityId destructor;
+  bool usable_in_constant_expressions;  // control may pass the declaration ([expr.const])
 };
 
 struct Attribute {
