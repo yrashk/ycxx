@@ -7559,10 +7559,25 @@ public:
         }
         auto fn = types().rec(function_type);
         if (fn.params.size() != 1) continue;
-        const auto rank = ics(object, fn.params.front());
+        const QualType parameter = fn.params.front();
+        const QualType target = types().referee(parameter);
+        // Ranking an ambiguous base conversion requires retaining the candidate. Until that
+        // conversion is supported, diagnose this subset instead of selecting another overload.
+        if (types().is_class(target) && types().class_of(target) != types().class_of(lt) &&
+            (!types().is_reference(parameter) ||
+             (direct_reference_category(object, types().rec(parameter)) &&
+              cv_within(object_cv(lt), object_cv(target))))) {
+          int paths = 0;
+          base_path(types().class_of(lt), types().class_of(target), paths);
+          if (paths > 1) {
+            unsupported = true;
+            continue;
+          }
+        }
+        const auto rank = ics(object, parameter);
         if (!rank.viable) continue;
         unsupported |= is_template || rank.rank >= Ics::user_defined;
-        viable.push_back({rank, types().referee(fn.params.front()), &candidate});
+        viable.push_back({rank, target, &candidate});
       }
       if (unsupported) {
         diag(op_at, Diag::ref_qualified_operator_candidates);
