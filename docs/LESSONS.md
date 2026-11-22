@@ -454,6 +454,15 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
   - Do: read the committed member item for the relevant class specialization before using the
     global sequence interner. Check a parameter reference independently in the pattern and its
     replay when a name is found in the definition and lost after substitution.
+  - Hit again on #828: a new pattern check in `declare` read `sem.params`, a draft sequence, and
+    crashed. Pass the item's own `params` vector instead.
+- **A function template specialization's identity includes its type.** `Sema::specialization`
+  keys entities by template, arguments and type. On #828, the address path re-created a
+  specialization with its resolved `noexcept` type while the call path kept the written one: one
+  function became two (a split static local, or a duplicate symbol), with no diagnostic.
+  - Do: resolve a specialization's exception specification on every path that selects it (call,
+    member call, address), and only after selection ([over.over], [except.spec]/13); test a
+    specialization that is both called and has its address taken, with a static local.
 
 - **Unicode tables from Python, plus one UCD file.** Python's `unicodedata` (Unicode 17.0 in the
   pinned Python) gives categories, combining classes, decompositions, normalization and names;

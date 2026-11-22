@@ -2815,6 +2815,21 @@ checked against Clang 23 and GCC 16 probes).
   inline functions (#124). A constant named by a lambda with a capture-default is captured, where
   Clang captures it only when it is odr-used (a layout difference for such closures, #355).
 
+## Dependent exception specifications of templates (#828, #819)
+
+A function template's noexcept-specifier, and that of an ordinary member function of a class
+template, is part of each specialization's type. Bare `noexcept` and a condition that does not
+depend on the template's parameters apply at once. A dependent condition is kept as tokens and
+replayed for a specialization when it is needed: by the unary `noexcept` operator, or when the
+specialization's address is taken ([except.spec]/13, [temp.inst]). This uses the replay that
+member templates already had (#713, `replay_member_exception`); an explicit specialization keeps
+its own specification. An invalid condition of a specialization that is never needed is no error.
+In a template, a non-dependent `noexcept` on a pointer's function type is part of the type.
+In a template's definition, `noexcept` on a call of such a function is value-dependent.
+- Tests: `tests/own/template-noexcept/` (one run test, one reject test, one accept test).
+- Not yet: the resolved specification in `decltype` of a template-id, in deduction from one, and
+  in the address of a class template member (#838).
+
 ## A lambda's noexcept-specifier (#807)
 
 A lambda's `noexcept`, `noexcept(true)` or `noexcept(false)` is part of its function call
@@ -2827,9 +2842,7 @@ pointer to function ([expr.prim.lambda.closure]/8, [conv.fctptr]).
 - The init-captures are in scope in the lambda-declarator, as the parameters are
   ([basic.scope.lambda]): in the condition and in a trailing return type.
 - Tests: `tests/own/lambda-noexcept/` (one run test, two reject tests).
-- Not yet: a generic lambda's condition naming its own template parameters is rejected (#820);
-  a `noexcept` on a pointer-to-function declarator in a template is dropped (#819); a dependent
-  noexcept on a function template or class template member reads as false (#828).
+- Not yet: a generic lambda's condition naming its own template parameters is rejected (#820).
 
 ## Namespace variable lambdas (#338)
 

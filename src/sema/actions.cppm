@@ -117,10 +117,14 @@ public:
   virtual std::optional<NodeId> replay_function_default(Sema&, const ast::DefaultArg&, EntityId, QualType) {
     return std::nullopt;
   }
-  // A selected member-template specialization's exception specification ([except.spec]).
+  // A selected specialization's exception specification ([except.spec]/13): of a member template,
+  // of a member of a class template specialization, or of a function template.
   virtual std::optional<QualType> replay_member_exception(Sema&, const ast::DeclSema&, EntityId, QualType type) {
     return type;
   }
+  // Whether function (or function template) `f` has a noexcept condition kept for its
+  // specializations' replays.
+  virtual bool deferred_exception(EntityId) { return false; }
   // A concrete source query keeps its original position if its tokens are read again.
   virtual bool is_complete_at_source(EntityId c) { return is_complete(c); }
   // Whether a class's layout, or a base's or stored member's, depends on attributes or packing
@@ -4233,6 +4237,10 @@ public:
     diag(at_, Diag::auto_undeduced, w_->entities.rec(f).name);
     return std::nullopt;
   }
+  QualType with_noexcept(QualType fn) {
+    TypeRec r = types().rec(fn);
+    return types().function(r.inner, r.params, r.variadic, r.linkage, r.fn_cv, r.fn_ref, true);
+  }
   QualType with_return(QualType fn, QualType ret) {
     TypeRec r = types().rec(fn);
     return types().function(ret, r.params, r.variadic, r.linkage, r.fn_cv, r.fn_ref, r.fn_noexcept);
@@ -5765,13 +5773,23 @@ public:
       const auto info = expression_info(child.id);
       return info.category == ValueCategory::prvalue && destructor_throwing(info.type, offset + child.at);
     };
-    // A closure's function call operator whose noexcept-specifier its template's instantiations
-    // decide makes the result value-dependent ([temp.dep.constexpr]).
+    // A call of a function whose condition its specializations decide, or of a closure's function
+    // call operator whose condition its template's instantiations decide, in a template's
+    // definition, makes the result value-dependent ([temp.dep.constexpr]).
     bool value_dependent = false;
     auto function_throwing = [&](EntityId function) {
       if (dependent_noexcept_calls_.contains(std::to_underlying(function))) value_dependent = true;
       const auto written = q_->written_member(function);
-      const QualType type = written ? written->type : w_->entities.rec(function).type;
+      QualType type = written ? written->type : w_->entities.rec(function).type;
+      // A specification that depends on the template's parameters, for this specialization.
+      std::optional<ast::DeclSema> pattern = written;
+      if (!pattern)
+        if (const EntityId t = w_->entities.rec(function).templ; t != EntityId::none) pattern = q_->template_decl(t);
+      if (pattern && in_pattern() && q_->deferred_exception(pattern->entity)) {
+        value_dependent = true;
+      } else if (pattern) {
+        if (auto resolved = q_->replay_member_exception(*this, *pattern, function, type)) type = *resolved;
+      }
       return !types().rec(type).fn_noexcept;
     };
     auto operation_throwing = [&](const ast::Red& node) {
@@ -6644,13 +6662,23 @@ public:
         continue;
       }
       Templates t = templates();
+      // A pattern whose exception specification is decided per specialization is written
+      // potentially throwing: deduce from the target without its `noexcept`, and match the
+      // specialization's own type against the target below.
       auto deduced = t.deduce_declaration(d, fn, args, true);
+      if (!deduced && types().is_function(fn) && types().rec(fn).fn_noexcept) {
+        const TypeRec r = types().rec(fn);
+        deduced = t.deduce_declaration(d, types().function(r.inner, r.params, r.variadic, r.linkage, r.fn_cv, r.fn_ref), args, true);
+      }
       if (!deduced || !constraints_satisfied(d, *deduced)) continue;
       auto ft = t.specialization_type(d, *deduced);
       if (!ft) continue;
       EntityId f = specialization(d, *deduced, *ft);
       if (types().has_placeholder(types().rec(*ft).inner)) ft = q_->deduced_type(f);
-      if (ft && matches_target(*ft)) found.push_back({f, *ft, &d});
+      // Its exception specification is needed only once it is selected (`overload_address`), so
+      // its written, potentially-throwing form may stand for a non-throwing one here.
+      if (ft && (matches_target(*ft) || (types().rec(target).fn_noexcept && matches_target(with_noexcept(*ft)))))
+        found.push_back({f, *ft, &d});
     }
     auto better = [&](const AddressMatch& a, const AddressMatch& b) {
       const bool at = (a.decl->flags & decl_flag::template_) != 0;
@@ -6687,7 +6715,21 @@ public:
       diag(at_, Diag::overload_address_ambiguous, name);
       return fail;
     }
-    const AddressMatch& match = found.front();
+    AddressMatch match = found.front();
+    // The selected specialization's exception specification ([except.spec]/13): part of its type
+    // and identity, as when it is called, and the target must accept it ([conv.fctptr]).
+    if (match.decl->flags & decl_flag::template_) {
+      auto resolved = q_->replay_member_exception(*this, *match.decl, match.entity, match.type);
+      if (!resolved) return fail;
+      if (*resolved != match.type) {
+        match.type = *resolved;
+        match.entity = specialization(*match.decl, w_->entities.rec(match.entity).args, match.type);
+      }
+      if (types().canonical(match.type) != types().canonical(*fn) && !types().function_pointer_conversion(match.type, *fn)) {
+        diag(at_, Diag::overload_address_none, name, *fn);
+        return fail;
+      }
+    }
     if (auto it = bound_.find(std::to_underlying(set->name.id)); it != bound_.end()) {
       const Bound& member = it->second;
       if (!check_access(member.cls, match.decl->entity, name, member.name_at, member.naming)) return fail;
@@ -9013,17 +9055,29 @@ public:
       if (!chosen) return {NodeId::none, begin, end};
       const ast::DeclSema& d = *decls[*chosen];
       const Candidate& k = cands[*chosen];
-      if (d.flags & decl_flag::consteval_) consteval_.insert(std::to_underlying(k.entity));
+      // The selected specialization's exception specification is needed ([except.spec]/13): it is
+      // part of its type, and of its identity, as when its address is taken.
+      EntityId selected = k.entity;
+      QualType selected_type = k.type;
+      if (k.pattern) {
+        auto resolved = q_->replay_member_exception(*this, *k.pattern, k.entity, k.type);
+        if (!resolved) return {NodeId::none, begin, end};
+        if (*resolved != k.type) {
+          selected_type = *resolved;
+          selected = specialization(*k.pattern, w_->entities.rec(k.entity).args, selected_type);
+        }
+      }
+      if (d.flags & decl_flag::consteval_) consteval_.insert(std::to_underlying(selected));
       // [temp.inst]: a known return type suffices for unevaluated calls to ordinary templates.
       // Keep the existing body demand for constant-evaluation candidates and placeholder returns.
       if (k.pattern &&
           (!unevaluated || (d.flags & (decl_flag::member | decl_flag::constexpr_ | decl_flag::consteval_)) ||
-           types().has_placeholder(types().rec(k.type).inner)))
-        demands.push_back({k.entity, ast::Loc{item_, loc_base_ + callee.begin}});
-      auto kt = deduced_function(k.entity, k.type, callee.begin);
+           types().has_placeholder(types().rec(selected_type).inner)))
+        demands.push_back({selected, ast::Loc{item_, loc_base_ + callee.begin}});
+      auto kt = deduced_function(selected, selected_type, callee.begin);
       if (!kt) return {NodeId::none, begin, end};
       ExprInfo ci{*kt, ValueCategory::lvalue, 0};
-      callee = node(ast::DeclRef{ci, k.entity}, callee.begin, callee.end, ci);
+      callee = node(ast::DeclRef{ci, selected}, callee.begin, callee.end, ci);
       defaults = k.defaults;
       default_origin = k.default_origin;
     } else if (auto d = as<ast::DeclRef>(callee); d && deleted_.contains(std::to_underlying(d->entity))) {

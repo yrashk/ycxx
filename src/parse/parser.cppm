@@ -909,6 +909,9 @@ public:
     bool has_noexcept = false;
     std::optional<Ex> noexcept_condition;
     std::optional<std::pair<u32, u32>> noexcept_tokens;
+    // A named function's own specification in a template, which each specialization decides: its
+    // written type keeps the potentially-throwing form, as its redeclarations' do.
+    bool deferred_exception = false;
     u64 bound = 0;
     bool unknown_bound = false;  // an array suffix with an omitted bound ([dcl.array])
     // A value-dependent bound ([temp.dep.constexpr]): a template parameter's `VDepParam`.
@@ -953,7 +956,13 @@ public:
     d.begin = pos();
     const std::size_t first_local = s_->locals().size();
     const bool in_body = s_->current_function != ast::EntityId::none;
-    Level top = level(abstract, d.ok, conversion, named_exception == NamedExceptionSpec::member_template);
+    // In a template, a function's own noexcept-specifier is kept as tokens and evaluated for each
+    // specialization when it is needed ([except.spec]/13, [temp.inst]); a member template's always.
+    const bool defer_exception = named_exception == NamedExceptionSpec::member_template ||
+                                 (s_->templated() && !typedef_ &&
+                                  (named_exception == NamedExceptionSpec::class_member ||
+                                   named_exception == NamedExceptionSpec::ordinary));
+    Level top = level(abstract, d.ok, conversion, defer_exception);
     if (conversion && !top.conversion_target) {
       if (in_body) s_->discard_local_declarations(first_local);
       return d;
@@ -1464,7 +1473,10 @@ public:
           s_->push_scope();
           for (const Param& p : suffix.params)
             if (p.name != s_->no_name()) s_->declare_local(p.name, p.type, sema::local_flag::parameter, p.at, false);
-          exception_specifier(suffix, ok, defer_exception && l.named && l.suffixes.size() == 1);
+          // A qualified name redeclares a function whose own declaration has the specification
+          // replayed; its condition is compared with that declaration's (`define_member`).
+          suffix.deferred_exception = defer_exception && l.named && !l.qualified && l.suffixes.size() == 1;
+          exception_specifier(suffix, ok, suffix.deferred_exception);
           const bool has_trailing = accept(Tk::arrow);
           if (has_trailing)
             suffix.trailing = type_id(true);
@@ -1845,8 +1857,18 @@ public:
                                            l.named && !s->noexcept_condition;
         if (s->has_noexcept && !s->noexcept_tokens &&
             (allocation || keep_named_exception || bare_member_exception || member_pointer_to_suffix(l) ||
-             (spells_type && !l.inner) || (d.ok && !s_->templated())))
+             (spells_type && !l.inner) || (!s->noexcept_condition && !l.named) ||
+             (d.ok && !s_->templated()))) {
           nonthrowing = noexcept_value(s->noexcept_condition, d.ok);
+        } else if (s->has_noexcept && !s->noexcept_tokens && !l.named && d.ok) {
+          // In a templated context, the function type of a pointer, reference or other unnamed
+          // declarator with a condition that is not value-dependent is decided here; a dependent
+          // one, by the instantiation that replays this declarator ([temp.dep.constexpr]). A named
+          // function's keeps its written form for matching redeclarations.
+          bool dependent = false;
+          const bool value = noexcept_value(s->noexcept_condition, d.ok, &dependent);
+          if (!dependent) nonthrowing = value;
+        }
         t = s_->types().function(t, ps, s->variadic, linkage_, s->cv, s->ref, nonthrowing);
         fn = &*s;
       } else if (!s->unknown_bound && !s->dependent_bound && s->bound == 0) {
