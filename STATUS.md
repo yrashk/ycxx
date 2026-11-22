@@ -622,7 +622,7 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
   conversion of NaN to `bool` are true. Both signed zeros convert to false. Strict exception
   status, other numeric conversions and x87 values remain [#201](https://github.com/yrashk/ycxx/issues/201).
   [Design](docs/design/linux-scalar-floating-point.md#runtime-comparisons)
-- Direct fixed-prototype calls to ordinary free functions support nonempty naturally aligned
+- Fixed-prototype calls support nonempty naturally aligned
   flat records with integral or ordinary object-pointer fields that are trivial for calls,
   up to 16 bytes and alignment eight. The AMD64 INTEGER eightbytes follow from the laid-out
   fields. If an entire argument cannot
@@ -630,6 +630,9 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
   the remaining registers. One- and two-eightbyte results use RAX and RDX. The mixed-object
   tests exercise both directions and check by-value object identity. Source packing and
   alignment directives with uncertain layout exclude the record from this by-value ABI.
+  Member functions (with `this` first), closure call operators, function template
+  specializations and calls through pointers use the same placement as ordinary functions
+  ([#640](https://github.com/yrashk/ycxx/issues/640)).
   [Design](docs/design/linux-integer-aggregates.md) · [#440](https://github.com/yrashk/ycxx/issues/440)
 - `-c` writes deterministic ELF64 relocatable objects through `src/obj/elf.cppm`. The reader
   accepts the supported x86-64 `ET_REL` subset emitted by ycxx. The native ELF linker consumes

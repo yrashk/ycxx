@@ -1070,7 +1070,10 @@ std::string_view linux_signature_error(const ast::Interners& in, const QueryLayo
   auto f = in.types.get<ast::TFunction>(canonical);
   if (f.variadic && use == definition && !ordinary) return "only ordinary free variadic definitions are supported";
   const bool fixed_direct = !f.variadic && use != indirect_call;
-  const bool allow_aggregates = fixed_direct && ordinary;
+  // Member functions, closure call operators, template specializations and calls through
+  // pointers place INTEGER records as ordinary functions do; `this` is the first INTEGER
+  // argument (#640).
+  const bool allow_aggregates = !f.variadic;
   auto error_for = [&](QualType value, bool result) -> std::string_view {
     auto builtin = ast::builtin_of(in, value);
     if (builtin == ast::Builtin::long_double) return "x87 long double parameters and results are unsupported";
