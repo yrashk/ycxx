@@ -2343,7 +2343,7 @@ static_assert(p.x == 24);
 int main() { return 0; }
 '''
 status = 'partial'
-note = '`constexpr` constructor declarations, runtime calls, scalar enum constant evaluation, and constant initialization of flat static aggregate members work. Class-typed constant evaluation is partial.'
+note = '`constexpr` constructor declarations, runtime calls, scalar enum constant evaluation, and constant initialization of flat static aggregate members work. Direct-list initializers cover aggregates of public integral fields in non-template namespace-scope classes without bases. Class-typed constant evaluation is partial.'
 
 [[feature]]
 id = 'const-consteval'
