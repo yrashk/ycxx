@@ -1142,10 +1142,11 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   lexical point. An unbound class template pattern leaves dependent expressions for a selecting
   initialization ([class.mem.general], [temp.res], [temp.inst]).
   [#732](https://github.com/yrashk/ycxx/issues/732)
-- In non-template code, ordinary scalar aggregates replay nonthrowing written defaults in braced
-  expressions, `T()` value initialization, result objects, and aggregate arguments. IR binds
-  receiver reads to the initialized object. Required constant aggregate initialization evaluates
-  eligible scalar defaults in the completed class.
+- In non-template code, ordinary scalar aggregates replay written defaults in braced expressions,
+  `T()` value initialization, result objects, and aggregate arguments. The expanded runtime path
+  checks built-in scalar operations and ordinary calls for nonthrowing behavior. IR binds receiver
+  reads to the initialized object. Required constant aggregate initialization evaluates eligible
+  scalar defaults in the completed class.
   [#818](https://github.com/yrashk/ycxx/issues/818)
 
 - An automatic declaration such as `Point p(3, 4);` can initialize a flat aggregate with
