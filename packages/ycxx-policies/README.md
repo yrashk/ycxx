@@ -102,6 +102,39 @@ ycxx cxx -fcheck-policies -fsyntax-only -I/path/to/include receipt.cpp
 Remove `close_receipt()` from `main` to see the difference in enforcement. YCXX diagnoses the
 live receipt at compile time. A GCC or Clang build traps at scope exit.
 
+### Declare the receipt policy with reflection
+
+Keep the includes, namespace alias, and `main` from `receipt.cpp`. Replace the resource and
+operation declarations and the `Rules` alias with the declarations below. The attributes
+register the same contracts in YCXX. GCC and Clang compile the guarded declarations and use
+the same `linear_state` at runtime.
+
+```cpp
+struct
+#ifdef __ycxx__
+[[=own::resource_mode::linear, =own::move_constructor::transfers]]
+#endif
+Receipt {
+  own::linear_state state;
+};
+
+#ifdef __ycxx__
+[[=own::operation::creates]]
+#endif
+Receipt issue_receipt() noexcept { return Receipt{}; }
+
+#ifdef __ycxx__
+[[=own::operation::consumes]]
+#endif
+void close_receipt(Receipt&& receipt) noexcept { receipt.state.consume(); }
+```
+
+Use the same build commands for either form. In the typed form, the YCXX compiler discovers
+the namespace-scope `Rules` alias when `-fcheck-policies` is enabled. Application code never
+needs to refer to the alias.
+
+### Verify shared observations
+
 An observation marked `verified_observes<decltype(&inspect), &inspect>` asks YCXX to
 verify the observer's body. An observer may return `void`, an arithmetic value, or an enum
 value. A verified observer can return a field value or forward the original shared borrow
