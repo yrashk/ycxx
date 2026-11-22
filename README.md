@@ -32,11 +32,10 @@ freestanding C++ subset for x86-64 Linux. The standard library is out of reach. 
 
 Ordinary function pointers and references preserve concrete `noexcept` type identity.
 A nonthrowing function can be used where the corresponding potentially throwing type is expected.
-Ordinary constructor declarations and definitions check that their concrete exception specifications agree.
-Dependent exception specifications remain open. [#219](https://github.com/yrashk/ycxx/issues/219)
-
 The unary `noexcept` operator checks whether calls and constructions can throw.
 [#729](https://github.com/yrashk/ycxx/issues/729)
+Ordinary constructor declarations and definitions check that their concrete exception specifications agree.
+Dependent exception specifications remain open. [#219](https://github.com/yrashk/ycxx/issues/219)
 
 **Compile and run programs on macOS.** `ycxx cxx a.cpp -o a` (also `-c`, `-fsyntax-only`, `-E`, `-I`,
 `-D`, `-std=c++26`, and `-fclass-call-abi=apple` to pass classes as Apple Clang does) builds an executable with ycxx's own front end, IR, AArch64 code generator
