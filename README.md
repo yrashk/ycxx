@@ -56,6 +56,11 @@ tools/build
 build/bin/ycxx cxx hello.cpp -o hello && ./hello
 ```
 
+`tools/build` builds ycxx in Debug. A Release build (`YCXX_BUILD_TYPE=Release
+YCXX_BUILD_DIR=build-release tools/build`, [docs/BUILDING.md](docs/BUILDING.md#release-builds))
+builds and passes its tests on both hosts, and compiles a 40,000-statement function in 0.4 s
+instead of Debug's 5.3 s on an M-series Mac ([#726](https://github.com/yrashk/ycxx/issues/726)).
+
 Single-expression `auto(x)` and `auto{x}` perform scalar and pointer decay-copy, including
 array and function decay. Function-template bodies can defer supported dependent operands to
 instantiation. Concrete constant template arguments can use braced conversions such as
@@ -333,9 +338,11 @@ written default member initializer are value-initialized.
   Non-template code outside requires-expression bodies also checks constraints on directly named
   primary namespace variable templates with explicit non-dependent type arguments. Templates support
   `if constexpr`, deferred template static assertion failures, and two-phase lookup, with
-  Itanium names identical to Clang's; Clang's
-  `__make_integer_seq`. Template type arguments can use terminal namespace-qualified alias
-  specializations that expand to dependent member types. [#630](https://github.com/yrashk/ycxx/issues/630)
+  Itanium names identical to Clang's. Native function templates can call an unambiguous
+  externally linked target supplied as a function pointer argument, including a concrete
+  `noexcept` signature. The compiler supports Clang's `__make_integer_seq`. Template type
+  arguments can use terminal namespace-qualified alias specializations that expand to
+  dependent member types. [#406](https://github.com/yrashk/ycxx/issues/406) · [#630](https://github.com/yrashk/ycxx/issues/630)
 - dependent `__is_same`, `__is_reference`, `__is_const`, `__is_volatile`, `__is_array`,
   `__is_pointer`, `__is_function`, `__is_enum`, `__is_union`, `__is_class`, `__is_object`, and the
   three member-pointer predicates as `bool` template arguments or defaults, including through

@@ -228,6 +228,13 @@ public:
 
 private:
   struct alignas(64) Shard {
+    // BOOTSTRAP: constexpr: a user-provided constructor, so that `Shard` is not constexpr-
+    // constructible. At -O1 and above GCC 16.2 segfaults in an importer of a module whose class
+    // has an inline user-provided constructor and two `FpIndex` specializations (`Interners`),
+    // while constant-evaluating `shards_`'s initializer (#283, reduced to two files there;
+    // related to GCC PR 124973). Without the bug this is an aggregate with no constructor:
+    //   struct alignas(64) Shard { std::mutex m; std::unordered_map<Fp128, V, Fp128Hash> map; };
+    Shard() {}
     std::mutex m;
     std::unordered_map<Fp128, V, Fp128Hash> map;
   };
