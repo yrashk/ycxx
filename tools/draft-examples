@@ -437,13 +437,14 @@ TOPLEVEL = re.compile(
     r"a type specifier is required for all declarations|outside of a function|expected unqualified-id|"
     r"expected constructor, destructor, or type conversion|does not name a type|"
     r"C\+\+ requires a type specifier")
-# A simple built-in declaration with an absent initializer. An inline block comment may stand in for the
-# expression, but the same syntax diagnostics on `int i = ;` do not identify a draft placeholder.
+# A simple built-in declaration with an absent initializer. The same syntax diagnostics can occur
+# with or without an expository placeholder, so check the comment's wording as well.
 INITIALIZER_GAP = re.compile(
     r'\s*(?:(?:const|volatile|constexpr|mutable)\s+)*'
     r'(?:(?:auto|bool|char|char(?:8|16|32)_t|wchar_t|short|int|long|signed|unsigned|float|double)\s+)+'
     r'[A-Za-z_]\w*\s*=\s*'
     r'(?:/\*(?P<comment>(?:(?!\*/).)*)\*/\s*)?;\s*')
+INITIALIZER_PLACEHOLDER = re.compile(r'\s*some\s+(?:[\w-]+\s+)*expression\b', re.I)
 INITIALIZER_ERROR = re.compile(
     r"expected (?:expression|primary-expression (?:at end of input|before ';' token))")
 
@@ -482,7 +483,7 @@ def is_fragment(ex, results):
     gaps = {}
     for n, (code, _, _) in enumerate(ex.lines, len(ex.prelude()) + 1):
         if gap := INITIALIZER_GAP.fullmatch(code):
-            gaps[n] = bool((gap['comment'] or '').strip())
+            gaps[n] = bool(INITIALIZER_PLACEHOLDER.match(gap['comment'] or ''))
     first = []
     placeholder_errors = []
     for status, lines in results:

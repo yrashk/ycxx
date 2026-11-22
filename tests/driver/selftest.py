@@ -60,6 +60,7 @@ class Parts(unittest.TestCase):
         gcc = (1, [(2, gcc_message)])
         self.assertIn('line 2: expected expression', fragment(placeholder, (clang, gcc)) or '')
         self.assertIsNone(fragment(placeholder.replace('/* some integer expression */', ''), (clang, gcc)))
+        self.assertIsNone(fragment(placeholder.replace('some integer expression', 'misplaced annotation'), (clang, gcc)))
         self.assertIsNone(fragment(placeholder.replace('int i', 'return i'), (clang, gcc)))
         self.assertIsNone(fragment('int i = ;\n', ((1, [(1, 'expected expression')]),
                                                   (1, [(1, "expected primary-expression before ';' token")]))))
