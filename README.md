@@ -385,7 +385,9 @@ memory each cell allocated and retains, with sums per subtree, per query kind an
 shows everything reused. A compile error is marked red at the cell where it starts, and its
 message is shown up to the root. Diagnostic details include the file, line and column where
 available. `--trace-engine=interactive` opens a browser of the trace after the compile: a tree
-with each function's IR and assembly, a timeline of the pool's workers, and filters.
+with each function's IR and assembly, a timeline of the pool's workers, and filters. It follows
+the terminal's size and takes the mouse: click to select, fold and sort by a column, use the
+wheel to scroll, and drag to resize the pane ([docs/TRACE.md](docs/TRACE.md#the-interactive-browser)).
 `--trace-engine=json` writes the whole trace as JSON Lines, for tools and agents. Cells that
 come from source (a file, a unit, a function's IR and code) carry their file and lines.
 `ycxx cxx --watch` stays attached and builds again whenever a file the build read changes,
