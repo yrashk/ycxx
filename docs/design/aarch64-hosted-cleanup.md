@@ -6,6 +6,10 @@ with a known nonthrowing destructor and calls a direct external `void()` provide
 continuations destroy the owner. The exceptional continuation resumes the original exception
 through `_Unwind_Resume`. [except.ctor], [class.dtor] and the Itanium C++ exception ABI.
 
+An ordinary potentially throwing call in a selected aggregate default member initializer
+requires a certified cleanup edge when a nontrivial automatic local is live.
+[#850](https://github.com/yrashk/ycxx/issues/850)
+
 L2 carries the normal and exceptional successors of the protected call. At the AArch64 landing
 pad the unwinder supplies its exception header in X0 and selector in X1. The register allocator
 saves the header across destruction. The physical emitter records the protected BL and the

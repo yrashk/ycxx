@@ -337,7 +337,8 @@ What is true of the code today. Work in progress and its owners are tracked in
     and return instructions. `unit.darwin_cleanup_free_unwind` checks the emitted object,
     omitted frames, native YCXX linking and system-linked exception propagation on macOS.
     The shared proof includes selected defaults in aggregates with scalar fields and trivial
-    destruction. [#849](https://github.com/yrashk/ycxx/issues/849)
+    destruction and indirect calls with fixed scalar prototypes.
+    [#849](https://github.com/yrashk/ycxx/issues/849) · [#851](https://github.com/yrashk/ycxx/issues/851)
     Native throw lowering and landing pads are tracked in [#648](https://github.com/yrashk/ycxx/issues/648).
     [#737](https://github.com/yrashk/ycxx/issues/737)
   - A system-linked arm64 function can destroy one initialized aggregate local on both exits from
@@ -345,6 +346,9 @@ What is true of the code today. Work in progress and its owners are tracked in
     destructor as the normal continuation, and resumes the original exception. The object's
     cleanup-only LSDA and frame records are checked in `unit.darwin_local_unwind`.
     [Design](docs/design/aarch64-hosted-cleanup.md) · [#781](https://github.com/yrashk/ycxx/issues/781)
+  - An ordinary potentially throwing call in a selected aggregate member default requires a
+    supported exceptional cleanup path when a nontrivial local is live.
+    [#850](https://github.com/yrashk/ycxx/issues/850)
   - Not yet: thread-local variables, dead stripping, literal merging, branch islands beyond
     ±128 MiB, other dylibs' re-exports, incremental relinking, and import addends outside
     0..255 (`DYLD_CHAINED_IMPORT_ADDEND`). `__LLVM` (embedded bitcode), `__LD` and debug sections
@@ -715,7 +719,9 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
 - A hosted peer's exception can unwind through cleanup-free ycxx functions on x86-64 Linux.
   The compiler certifies ordinary strong definitions with fixed scalar parameters using all
   resolved declarations and the typed body. The proof visits selected default member initializers
-  in aggregates with scalar fields and trivial destruction. [#849](https://github.com/yrashk/ycxx/issues/849)
+  in aggregates with scalar fields and trivial destruction. It checks fixed scalar prototypes
+  and the typed operands of indirect calls.
+  [#849](https://github.com/yrashk/ycxx/issues/849) · [#851](https://github.com/yrashk/ycxx/issues/851)
   Returning a nonempty flat scalar aggregate with trivial destruction and call semantics uses the
   same proof for a braced result or an implicit trivial copy. The target's existing register or
   indirect result convention still applies. [#853](https://github.com/yrashk/ycxx/issues/853)
@@ -1073,10 +1079,12 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   outside a non-fixed enumeration's range. Class-valued allocation remains a separate slice.
   [Design](docs/design/constexpr-enum-values.md) · [#262](https://github.com/yrashk/ycxx/issues/262)
 - A static constexpr data member of flat aggregate class type can be initialized from a typed
-  braced expression such as `static constexpr Pt q = Pt{7, 8};`. Constant evaluation records
-  the field values and code generation emits addressable storage for runtime use
-  ([class.static.data], [dcl.init.aggr]). Direct-list member syntax remains tracked in
-  [#262](https://github.com/yrashk/ycxx/issues/262).
+  braced expression such as `static constexpr Pt q = Pt{7, 8};`. The direct-list spelling
+  `static constexpr Pt q{7, 8};` also works in a non-template namespace-scope class without
+  bases. The aggregate has trivial destruction and public non-volatile integral fields up to
+  64 bits. Constant evaluation records the field values and code generation emits addressable
+  storage for runtime use ([class.static.data], [dcl.init.list], [dcl.init.aggr]).
+  [#262](https://github.com/yrashk/ycxx/issues/262)
 - Constant evaluation can read namespace-scope `constexpr` pointers erased to `void`
   ([expr.const], [conv.ptr], #102). The interpreter reconstructs the original scalar or array
   subobject path, including one-past addresses, from the constant's path and byte offset.
@@ -1258,7 +1266,13 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   destructors on every scope exit from its own scope stack (block end, `return`, `break`,
   `continue`) and ends a full-expression's temporaries at its end. Statements carry no cleanup
   lists; the `Cleanup` record is gone.
-- Linkage names: `C1`/`D1` (#136 for `C2`/`D2`/`D0`), checked against Clang's symbols.
+- Linux x86-64 emits `C2`/`D2` alongside eligible written, out-of-line `C1`/`D1` definitions.
+  An ordinary, externally linked, nonpolymorphic class with no bases and only supported
+  scalar fields uses one machine body and ELF range for each pair. Named signature types
+  must have known layout and linkage. Callback signatures and class parameters passed by
+  value are outside this scope. GCC and Clang peers check the raw entry names, an adjusted
+  base pointer, and construction and destruction order. Caller-side base entry selection
+  and virtual deleting destructors are tracked in [#136](https://github.com/yrashk/ycxx/issues/136).
 - A non-template constructor can delegate to another ordinary constructor of its class with
   a sole parenthesized or braced initializer ([class.base.init], #157). The target resolves in
   the complete class and constructs the same object. The delegating body starts after the

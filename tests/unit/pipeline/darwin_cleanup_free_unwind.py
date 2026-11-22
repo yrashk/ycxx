@@ -187,10 +187,18 @@ def main():
 
         compile('-c', fixtures / 'bridge.cpp', '-o', 'bridge.o')
         frames = object_frames(Image(scope / 'bridge.o', kind=1), {'_bridge', '_scalar_helper', '_callback_helper'})
+        indirect = fixtures.with_name('scalar_indirect_unwind')
+        compile('-c', indirect / 'frames.cpp', '-o', 'indirect.o')
+        indirect_object = Image(scope / 'indirect.o', kind=1)
+        indirect_names = {name for name, _, section, _ in indirect_object.symbols
+                          if section == indirect_object.text().index}
+        assert {'_reference_callback', '_variadic_callback', '_guarded_callback'} <= indirect_names
+        object_frames(indirect_object, {'_pointer_variable', '_typed_callback', '_pointer_default'})
+
         compile('-c', fixtures / 'excluded.cpp', '-o', 'excluded.o')
         excluded = Image(scope / 'excluded.o', kind=1)
         names = {name for name, _, section, _ in excluded.symbols if section == excluded.text().index}
-        assert {'_excluded_noexcept', '_excluded_indirect', '_excluded_cleanup'} <= names
+        assert {'_excluded_noexcept', '_excluded_cleanup'} <= names
         assert any('excluded_inline' in name for name in names)
         assert any('excluded_specialization' in name for name in names)
         object_frames(excluded, {'_use_inline'})
@@ -213,11 +221,9 @@ def main():
 
         # PARITY: by design: the records are checked everywhere and only macOS runs the Mach-O peers.
         check_scalar_aggregate_unwind(compile, run, check_scalar_aggregate, host[0] if host else None)
-        compile('-c', scalar_aggregate_fixtures / 'unsupported_cleanup.cpp', '-o', 'unsupported_cleanup.o')
-        unsupported = Image(scope / 'unsupported_cleanup.o', kind=1)
-        assert any(name == '__Z15guarded_defaultv' and section == unsupported.text().index
-                   for name, _, section, _ in unsupported.symbols)
-        object_frames(unsupported, set())
+        compile('-c', scalar_aggregate_fixtures / 'unsupported_cleanup.cpp', '-o', 'unsupported_cleanup.o',
+                status=1, error='unsupported local unwind cleanup')
+        assert not (scope / 'unsupported_cleanup.o').exists()
 
         compile('-c', fixtures / 'native_peer.cpp', '-o', 'native.o')
         frames.update(object_frames(Image(scope / 'native.o', kind=1), {'_peer'}))
@@ -229,6 +235,9 @@ def main():
             run(host[0], '-std=c++20', '-pedantic-errors', '-O0', '-fexceptions', '-fno-lto',
                 fixtures / 'peer.cpp', 'bridge.o', '-o', 'hosted')
             run('./hosted')
+            run(host[0], '-std=c++20', '-pedantic-errors', '-O0', '-fexceptions', '-fno-lto',
+                indirect / 'peer.cpp', 'indirect.o', '-o', 'indirect')
+            run('./indirect')
 
 
 if __name__ == '__main__':

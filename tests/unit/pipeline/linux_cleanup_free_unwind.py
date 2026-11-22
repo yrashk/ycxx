@@ -178,6 +178,16 @@ def main():
         run('./hosted', 'normal')
         run('./hosted')
 
+        indirect = fixtures.with_name('scalar_indirect_unwind')
+        compile('-c', indirect / 'frames.cpp', '-o', 'indirect.o')
+        _, functions, covered, _ = object_frames(scope / 'indirect.o')
+        assert {'reference_callback', 'variadic_callback', 'guarded_callback'} <= functions.keys()
+        eligible = {'pointer_variable', 'typed_callback', 'pointer_default'}
+        assert set(covered) == {functions[name][1:] for name in eligible}
+        run(peer, '-std=c++20', '-pedantic-errors', '-O0', '-fexceptions', '-fno-lto',
+            indirect / 'peer.cpp', 'indirect.o', '-o', 'indirect')
+        run('./indirect')
+
         def check_scalar_aggregate(obj, expected, omitted):
             _, functions, covered, _ = object_frames(scope / obj)
             assert functions.keys() == set(expected) | set(omitted)

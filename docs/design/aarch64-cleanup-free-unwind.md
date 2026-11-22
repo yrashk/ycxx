@@ -5,6 +5,11 @@ It certifies ordinary namespace functions with fixed scalar parameters and no hi
 cleanup or native throw expression. Emission excludes the entry point, coalesced definitions,
 and functions with inline declarations, written `noexcept`, assembly labels, or static guards.
 
+For an indirect call, the callee expression has a pointer type whose function prototype is
+nonvariadic and uses supported scalar parameters and a scalar or void result. The same typed
+walk proves the callee expression and the arguments. [expr.call], [except.handle].
+[#851](https://github.com/yrashk/ycxx/issues/851)
+
 For a non-union aggregate with scalar fields, no bases, and trivial destruction, the proof
 visits the selected initializer for each field. The replayed default can read an earlier field
 through the construction receiver. An explicit initializer suppresses the corresponding default
