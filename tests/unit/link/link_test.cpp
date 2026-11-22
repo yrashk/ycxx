@@ -788,6 +788,79 @@ void run_and_check(const std::filesystem::path& dir, const std::string& name, st
   check(slurp(out) == output, std::format("{}: prints the expected output", name));
 }
 
+// The platform linker supplies the peer's typed catch metadata. The executable itself uses
+// only the normalized cleanup-only fixture and a tail-call into the peer.
+void test_hosted_cleanup(const std::filesystem::path& dir) {
+  const auto source = dir / "cleanup_peer.cpp";
+  const auto peer = std::filesystem::absolute(dir / "libcleanup_peer.dylib");
+  std::ofstream(source) << R"cpp(
+namespace {
+struct Failure { int payload; };
+bool throws = false;
+int calls = 0;
+}
+
+extern "C" void fixture_callback() {
+  ++calls;
+  if (throws) throw Failure{783};
+}
+
+extern "C" void fixture_destroy(int* count) noexcept { ++*count; }
+
+extern "C" int fixture_run(void (*bridge)(int*)) {
+  int count = 0;
+  bridge(&count);
+  if (calls != 1 || count != 1) return 1;
+  throws = true;
+  count = 0;
+  try {
+    bridge(&count);
+    return 2;
+  } catch (const Failure& failure) {
+    if (failure.payload != 783) return 3;
+    if (calls != 2 || count != 1) return 4;
+  } catch (...) {
+    return 5;
+  }
+  return 0;
+}
+)cpp";
+  const int compiled = shell(std::format("xcrun --sdk macosx clang++ -std=c++20 -stdlib=libc++ -arch arm64 -dynamiclib "
+                                         "-install_name '{}' '{}' -o '{}'",
+                                         peer.native_encoded_string(), source.native_encoded_string(), peer.native_encoded_string()));
+  check(compiled == 0, "the platform compiler builds the typed-handler dylib");
+  if (compiled != 0) return;
+
+  obj::object entry;
+  entry.name = "cleanup_entry.o";
+  const auto text = entry.add_section(obj::standard_section::text);
+  entry.define("_main", obj::binding::global, text);
+  const auto bridge = entry.reference("_cleanup_bridge");
+  const auto run = entry.reference("_fixture_run");
+  auto& code = entry.sections[text];
+  code.emit32(adrp(0));
+  code.relocate(reloc_kind::page21, bridge);
+  code.emit32(add_x_imm(0, 0));
+  code.relocate(reloc_kind::pageoff12, bridge);
+  code.emit32(0x14000000);  // b _fixture_run, which returns directly to the process entry caller
+  code.relocate(reloc_kind::branch26, run);
+
+  using exports = std::set<std::string, std::less<>>;
+  link::options opts;
+  opts.identifier = "hosted_cleanup";
+  opts.dylibs = {link::libsystem(exports{"__Unwind_Resume"}),
+                 {"/usr/lib/libc++.1.dylib", exports{"___gxx_personality_v0"}},
+                 {peer.native_encoded_string(), exports{"_fixture_callback", "_fixture_destroy", "_fixture_run"}}};
+  const std::array inputs{std::move(entry), cleanup_bridge_object()};
+  const auto image = link::link(inputs, opts);
+  check(image.has_value(), "the native cleanup bridge links with the platform peer");
+  if (!image) {
+    for (const auto& error : image.error()) std::println(std::cerr, "  {}", error.message);
+    return;
+  }
+  run_and_check(dir, "hosted_cleanup", *image, 0, "");
+}
+
 void test_run(const std::filesystem::path& dir) {
   std::filesystem::create_directories(dir);
   for (auto& p : programs()) {
@@ -940,6 +1013,7 @@ int main(int argc, char** argv) {
     if (cc) {
       test_mixed(*run_dir, *cc);
       test_hosted_unwind(*run_dir, *cc);
+      test_hosted_cleanup(*run_dir);
     }
   }
   return ycxx::unit::result("unit.link");
