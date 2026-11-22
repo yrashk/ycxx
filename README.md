@@ -214,6 +214,10 @@ scope with no bases and an implicit trivial destructor can first declare `T() = 
 in class and use it to initialize an `inline constexpr` tag object.
 [#157](https://github.com/yrashk/ycxx/issues/157)
 
+Both targets construct a class prvalue directly into an automatic variable initialized with the
+built-in conditional or comma operator. The supported nonthrowing initializers sequence temporary
+destruction after the result is constructed. [#740](https://github.com/yrashk/ycxx/issues/740)
+
 In-class conversion functions can name a class type alias as their conversion target,
 including a dependent alias in a class template. A named `static_cast` can call a
 conversion function for an exact non-class value type, including ordinary `&`- and

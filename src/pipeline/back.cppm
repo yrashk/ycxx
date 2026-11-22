@@ -106,6 +106,7 @@ struct Entity {
   // The mangled parameter types tie this ordinary C++ function to the unit (#582).
   bool local_parameter_binding = false;
   bool hidden = false;  // GNU hidden visibility: ELF STV_HIDDEN, Mach-O private extern (#602, #124)
+  bool nonthrowing = false;  // including implicit exception specifications on destructors
 
   bool has_local_binding() const { return linkage == ast::Linkage::internal || local_parameter_binding; }
 };
@@ -476,6 +477,7 @@ struct FunctionSource {
   bool is_main = false;
   std::vector<EntityId> constexpr_functions;        // the unit's, sorted by handle
   std::vector<VariadicFunction> variadic_functions;  // the unit's, sorted by handle
+  std::vector<EntityId> nonthrowing_functions;      // the unit's, sorted by handle
 };
 struct FunctionSourceQ {
   using Key = FnKey;
@@ -980,10 +982,12 @@ engine::query_task<FunctionSource> FunctionSourceQ::run(engine::Ctx& cx, FnKey k
   for (const Entity& e : tu.entities) {
     if (!e.is_function) continue;
     if (e.is_constexpr) out.constexpr_functions.push_back(e.id);
+    if (e.nonthrowing) out.nonthrowing_functions.push_back(e.id);
     if (auto n = types.parameters_before_ellipsis(e.type)) out.variadic_functions.push_back({e.id, *n});
   }
   std::ranges::sort(out.constexpr_functions);
   std::ranges::sort(out.variadic_functions, {}, &VariadicFunction::entity);
+  std::ranges::sort(out.nonthrowing_functions);
   co_return out;
 }
 
@@ -1035,6 +1039,7 @@ engine::query_task<Generated> FunctionGen::run(engine::Ctx& cx, FnKey k) {
   const FunctionDef& d = src.def;
   irgen::FunctionInput input{d.entity, d.decl, d.body, d.item, d.body_offset};
   input.this_type = d.this_type;
+  input.nonthrowing_functions = src.nonthrowing_functions;
   input.guards = d.guards;
   input.guard_acquire = d.guard_acquire;
   input.guard_release = d.guard_release;
