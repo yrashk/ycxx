@@ -149,6 +149,9 @@ public:
   // The direct bases of class `c` while it is being defined (its base-clause), none otherwise.
   virtual std::vector<EntityId> defining_bases(EntityId) { return {}; }
   virtual std::span<const BaseRec> defining_base_records(EntityId) { return {}; }
+  // Whether class `c` is an explicit specialization, which has no template-head of its own
+  // ([temp.expl.spec]).
+  virtual bool explicit_specialization(EntityId) { return false; }
   // Namespaces ([basic.namespace]), the global one being `EntityId::none`: the namespace (or
   // alias) unqualified lookup finds for `name`, and qualified lookup of `name` in namespace `ns`
   // ([namespace.qual]).
@@ -580,7 +583,9 @@ public:
       std::span<const BaseRec> bases = cr.bases;
       if ((qualified || before_parameter) && cls == naming && !cr.defined) bases = q_->defining_base_records(cls);
       for (const BaseRec& b : bases) {
-        if (before_parameter && b.dependent_in_pattern) continue;  // [temp.dep.general]: not searched
+        // [temp.dep.general]: the naming class's dependent bases are not searched. A base of a
+        // nondependent base is nondependent, whatever it was in that base's own pattern.
+        if (before_parameter && cls == naming && b.dependent_in_pattern) continue;
         if (const ClassRec* base = class_rec(b.cls)) {
           if (type_at) path.push_back({cls, b.access});
           visit(b.cls, *base);
@@ -2789,13 +2794,13 @@ public:
     return p && p->depth < enclosing_class_heads() && class_scope_declares(name) ? nullptr : p;
   }
   // How many template-heads enclose the class whose scope this is, its own included: the depths of
-  // the parameters its scope is inside.
-  u16 enclosing_class_heads() const {
+  // the parameters its scope is inside. An explicit specialization has none of its own.
+  u16 enclosing_class_heads() {
     u16 n = 0;
     for (EntityId c = current_class; c != EntityId::none;) {
       const EntityRec& r = w_->entities.rec(c);
       if (r.kind != EntityKind::class_) break;
-      if (r.templ != EntityId::none) ++n;
+      if (r.templ != EntityId::none && !q_->explicit_specialization(c)) ++n;
       c = r.scope;
     }
     return n;

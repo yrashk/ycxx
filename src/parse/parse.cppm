@@ -1654,6 +1654,7 @@ public:
       for (const sema::BaseRec& x : b->second) r.push_back(x.cls);
     return r;
   }
+  bool explicit_specialization(EntityId c) override { return p_->explicitly_specialized(c, item_); }
   std::span<const sema::BaseRec> defining_base_records(EntityId c) override {
     if (auto b = p_->class_bases_.find(std::to_underlying(c)); b != p_->class_bases_.end()) return b->second;
     return {};
@@ -2124,6 +2125,7 @@ public:
   sema::CopyAssignment require_copy_assignment(EntityId f) override { return p_->require_copy_assignment(f); }
   std::set<EntityId> uncertain_object_layouts() override { return at_.uncertain_object_layouts(); }
   bool class_layout_uncertain(EntityId c) override { return at_.class_layout_uncertain(c); }
+  bool explicit_specialization(EntityId c) override { return at_.explicit_specialization(c); }
   const sema::ClassRec& publish_class(EntityId c, sema::ClassRec r) override { return p_->publish_class(c, std::move(r), item_); }
   std::vector<DeclId> visible_decls(ast::NameId name, std::span<const EntityId> directives = {}) override {
     return at_.visible_decls(name, directives);
@@ -3222,7 +3224,7 @@ private:
       const lex::Tok& t = r.tokens[j];
       if (t.kind == Tk::identifier) {
         NameId n = s_.world().ins.names.intern(r.name(t));
-        if (const ast::TemplateParamSema* p = s_.declared_template_param(n)) {
+        if (const ast::TemplateParamSema* p = s_.template_param(n)) {
           f = ast::mix(ast::mix(ast::mix(f, u64(0xA11)), u64(p->depth)), u64(p->index));
           continue;
         }

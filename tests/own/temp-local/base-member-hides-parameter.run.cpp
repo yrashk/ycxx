@@ -34,10 +34,18 @@ template<class U> int Own<U>::f() { return sizeof(U); }
 template<bool I> struct Outside : Bs { static int get(); template<int J> static int g(); };
 template<bool I> int Outside<I>::get() { return I; }
 template<bool I> template<int J> int Outside<I>::g() { return I * 10 + J; }
+template<class T> struct Param : Bt { static int f(T); };
+template<class T> int Param<T>::f(T x) { return sizeof(x); }
+// A base reached through a nondependent specialization, whose own base was dependent in its pattern.
+template<class U> struct Through : U {};
+template<class T> struct Via : Through<Bt> { static int get() { return sizeof(T); } T x; };
 
 // Not hidden: a member template's own parameter, inside the class or a non-template class.
 template<class T> struct MemberTemplate : Bs { template<int I> static int get() { return I; } };
 struct Plain : Bs { template<int I> static int get() { return I; } };
+// An explicit specialization has no template-head: its member template's parameter is found first.
+template<class T> struct Explicit {};
+template<> struct Explicit<int> { static constexpr int I = 1; template<int I> static int get() { return I; } };
 // Not hidden: a dependent base is not searched ([temp.dep.general]).
 template<int> struct DepI { static constexpr int I = 9; };
 template<class T> struct DepT { static constexpr int I = 9; };
@@ -61,5 +69,8 @@ int main() {
   if (Plain::get<5>() != 5) return 14;
   if (Dependent<3>::get() != 3) return 15;
   if (DependentType<int, 3>::get() != 3) return 16;
+  if (Param<char>::f(0) != sizeof(int)) return 17;
+  if (Via<char>::get() != sizeof(int) || sizeof(Via<char>) != sizeof(int)) return 18;
+  if (Explicit<int>::get<5>() != 5) return 19;
   return 0;
 }
