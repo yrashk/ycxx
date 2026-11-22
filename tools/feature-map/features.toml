@@ -595,6 +595,7 @@ clauses = ['class.copy.elision', 'dcl.init.general', 'stmt.return']
 std = 'C++17'
 ftm = '__cpp_guaranteed_copy_elision'
 status = 'done'
+note = 'Direct automatic class initialization from a nonthrowing conditional or comma expression uses the destination object and cleans up the selected temporaries in order (#740).'
 probe = '''
 struct N { int v; N(int x) : v(x) {} N(const N&) = delete; N(N&&) = delete; };
 N make() { return N(7); }
