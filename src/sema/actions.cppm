@@ -1470,6 +1470,36 @@ public:
 
     return bool_literal(binds_directly(), begin, end);
   }
+  // `__reference_converts_from_temporary(T, U)` and `__reference_constructs_from_temporary(T, U)`
+  // ([meta.rel]): T is a reference and `T t = VAL<U>;` (or `T t(VAL<U>)`) binds t to a temporary,
+  // VAL<U> a prvalue for a non-reference U. For the operands convertibility supports, arithmetic
+  // and reference-related classes, copy- and direct-initialization agree: the temporary is a
+  // converted value or a materialized prvalue ([dcl.init.ref]/5). A dependent operand is decided
+  // when the enclosing template is instantiated.
+  Ex reference_temporary_expr(NameId name, QualType target, QualType source, u32 begin, u32 end) {
+    const Types& ts = types();
+    const QualType to = ts.canonical(target), from = ts.canonical(source);
+    if (ts.is_dependent(to) || ts.is_dependent(from)) return dependent_node({}, begin, end, builtin(Builtin::bool_));
+    if (!ts.is_reference(to) || ts.is_void(from)) return bool_literal(false, begin, end);
+    const QualType to_object = ts.canonical(ts.referee(to));
+    const bool prvalue = !ts.is_reference(from);
+    const QualType from_object = ts.canonical(prvalue ? from : ts.referee(from));
+    const bool binds_rvalue = ts.rec(to).rvalue_ref || Types::cv(to_object) == Cv::const_;
+    if (ts.is_arithmetic(from_object) && ts.is_arithmetic(to_object)) {
+      // A prvalue of the same type is materialized; another type is converted to a temporary.
+      const bool converted = Types::unqualified(from_object) != Types::unqualified(to_object);
+      return bool_literal(binds_rvalue && (converted || prvalue), begin, end);
+    }
+    if (ts.is_class(from_object) && ts.is_class(to_object)) {
+      const EntityId f = ts.class_of(from_object), t = ts.class_of(to_object);
+      const std::optional<bool> related = f == t ? std::optional(true) : reaches_base(f, t);
+      // Reference-related: a class prvalue is materialized and bound when the cv-qualifiers allow.
+      if (related == true)
+        return bool_literal(binds_rvalue && prvalue && cv_within(Types::cv(from_object), Types::cv(to_object)), begin, end);
+    }
+    diag_at(type_trait_loc(begin), Diag::convertibility_unsupported, name, target, source);
+    return {NodeId::none, begin, end};
+  }
   // [meta.rel] uses existence of a base, regardless of access or the number of paths.
   std::optional<bool> reaches_base(EntityId derived, EntityId base) {
     const Classes& records = classes();
@@ -1550,6 +1580,8 @@ public:
     case is_trivially_destructible:
       return destructibility_expr(ast::DepOp::is_trivially_destructible, name, args[0], begin, end);
     case is_base_of: return base_of_expr(args[0], args[1], begin, end);
+    case reference_converts_from_temporary:
+    case reference_constructs_from_temporary: return reference_temporary_expr(name, args[0], args[1], begin, end);
     case is_assignable: return assignability_expr(ast::DepOp::is_assignable, name, args[0], args[1], begin, end);
     case is_nothrow_assignable:
       return assignability_expr(ast::DepOp::is_nothrow_assignable, name, args[0], args[1], begin, end);

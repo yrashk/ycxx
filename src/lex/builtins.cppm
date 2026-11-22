@@ -25,6 +25,7 @@ enum class TypeTrait : std::uint8_t {
   is_destructible,
   is_nothrow_destructible,
   is_trivially_destructible,
+  reference_converts_from_temporary, reference_constructs_from_temporary,
 };
 
 struct TypeTraitInfo {
@@ -105,6 +106,10 @@ inline constexpr std::array type_traits{
                   .transforms = false, .advertised = false, .replay_dependent = true},
     TypeTraitInfo{.name = "__is_trivially_destructible", .trait = TypeTrait::is_trivially_destructible, .arity = 1,
                   .transforms = false, .advertised = false, .replay_dependent = true},
+    TypeTraitInfo{.name = "__reference_converts_from_temporary", .trait = TypeTrait::reference_converts_from_temporary,
+                  .arity = 2, .transforms = false, .advertised = false},
+    TypeTraitInfo{.name = "__reference_constructs_from_temporary", .trait = TypeTrait::reference_constructs_from_temporary,
+                  .arity = 2, .transforms = false, .advertised = false},
 };
 
 constexpr const TypeTraitInfo* type_trait(std::string_view name) {
