@@ -96,6 +96,27 @@ duplicate and conflict checks. Class and operation declaration annotations are c
 [#662](https://github.com/yrashk/ycxx/issues/662). The complete reflection surface is tracked by
 [#324](https://github.com/yrashk/ycxx/issues/324).
 
+## Verified contracts for separately compiled code
+
+A caller can be checked against a declared contract before its provider is available. A checked
+link must verify that the definition selected for each required call implements that contract.
+Start with leaf observation functions whose bodies preserve the resource and keep the reference
+within the call. Verify forwarding functions after the checker can carry their callees'
+requirements to the link.
+
+Astra proposed recording caller requirements and verified provider guarantees as versioned local
+symbols attached to the corresponding function definitions. Both YCXX object formats retain
+these symbols. Use the external ABI symbol, target, and a stable fingerprint of the canonical
+signature and policy to compare records between compiler sessions. Require designated checked
+objects to carry their coverage records. A missing, stripped, malformed, or incompatible record
+fails verification. The checked link trusts unmodified compiler outputs from the build.
+
+The first checked link can limit required calls to direct references with one strong,
+non-interposable definition in the input objects. Before enabling weak definitions or archives
+for required calls, verify the definition that survives coalescing and archive member selection.
+A matching guarantee in a losing definition or unselected member cannot satisfy a requirement.
+An ordinary link provides the portable runtime enforcement described below.
+
 ## Enforcement by ordinary C++, the runtime, and YCXX
 
 | Contract | Ordinary C++ types | Portable runtime guards | YCXX static analysis |
