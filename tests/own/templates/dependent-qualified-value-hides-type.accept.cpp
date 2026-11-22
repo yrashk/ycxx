@@ -18,3 +18,9 @@ struct Allocation {
 };
 
 static_assert(__is_same(Allocation<Config>::Selected, Budget<3>));
+
+struct Middle : Base { static constexpr int slots = 7; };
+struct Derived : Middle {};
+
+static_assert(__is_same(Budget<Derived::slots>, Budget<7>));
+static_assert(__is_same(Allocation<Derived>::Selected, Budget<7>));
