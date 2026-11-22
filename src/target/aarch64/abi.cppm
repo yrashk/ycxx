@@ -22,7 +22,8 @@
 //     in any call. (AAPCS64 places them as named ones.) Their default argument promotions
 //     ([expr.call]/12) happened before, so a floating one is a double; the caller extends an
 //     integer to its slot by its signedness.
-// Defining a variadic function (va_start) is not in the α subset.
+// A variadic definition reads them through a `char*` va_list: `va_start` points it at the first
+// slot after the named stack arguments, and each `va_arg` reads a slot and advances it by 8.
 export module ycxx.target.aarch64:abi;
 
 import std;
