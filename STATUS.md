@@ -2097,6 +2097,14 @@ A type inherited from a nondependent base takes precedence over the template par
   limits. Other libc providers keep their normal `<limits.h>`, and the resource can
   supply compiler limits when a sysroot has no provider ([climits.syn]).
 
+## glibc `<stdint.h>` (#657)
+
+- The integer-constant macros (`__INT64_C(c)` and the rest) are predefined as `c ## L`, GCC's and
+  glibc's spelling, so glibc's identical redefinitions in `<stdint.h>` are valid
+  ([cpp.replace.general]/2). The expansions are Clang's. `<inttypes.h>` still clashes with
+  libycxx's limit macros (#664). Tests: `own/pp/predefined-int-c-redefine` (both targets) and
+  `own/headers/glibc-stdint` (Linux).
+
 ## Templates, ζ step 8: template template parameters and `__make_integer_seq` (#88, #208, 2026-11-19)
 
 Fable decided the representation (ast.md §6.7); the Opus session wrote the code.
@@ -2216,6 +2224,12 @@ request it serves.
   divider drag, sort, focus, wrap; frames against `browser.golden`); `daemon.trace_tui` (under a
   pty: modes on and off, a click, a resize, SIGTERM and SIGABRT restoring the terminal),
   mutation-checked.
+- Copy (#636): `y` copies the cell (the pane's text, unwrapped) and `Y` its subtree (stream lines
+  with times and memory). A drag over rows or pane text, or `V` with j/k, selects, and the copy
+  happens on release or `y`. `Action::copy` carries the text. `:browse` writes OSC 52 (plus
+  tmux's passthrough form) and, locally, runs `YCXX_CLIPBOARD` or the first of pbcopy, wl-copy,
+  xclip and xsel. Tests: `unit.trace` (the exact text of each way to copy, base64, OSC 52);
+  `daemon.trace_tui` (`y` and a row drag through OSC 52 and the command).
 - Source spans (#638): `engine::SourceSpan` on each `TraceEvent`, from a kind's `trace_span(const
   Db&, const Key&)`, which runs only in `Db::trace`. `Db::peek` reads an input, or a value
   verified at this revision, without a dependency. A file's and a unit's cells are the file; a

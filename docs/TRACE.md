@@ -121,6 +121,30 @@ terminal (`src/trace/browse.cppm`, whose model is `src/trace/view.cppm`). `?` li
     Ghostty. Clicks on tabs, rows and headers, double clicks and the wheel all worked. The pty
     test (`daemon.trace_tui`) sends the SGR bytes a terminal sends, drags included, on every
     host CI runs.
+- **Copy** (#636). What the browser copies goes to the system clipboard. The status line says
+  what was copied, and how.
+  - `y` copies the selected cell as the pane shows it: its kind and key, outcome, times, memory,
+    errors and value (L1 or L2 IR, or instructions).
+  - `Y` copies its whole subtree, folded or filtered parts included, as `--trace-engine` prints
+    it: one line per cell, with time, worker and memory.
+  - Drag over tree rows to copy them as shown (folded rows stay folded), in the same format,
+    indented from the shallowest. Drag over the pane's text to copy exactly the characters
+    covered. The copy happens when the button comes up, as with a terminal's own selection.
+  - `V` selects from the keyboard: rows from the selected one in the tree, or whole lines from
+    the top one shown when the pane has the keys. `j`/`k` extend it, `y` copies it and Escape
+    drops it.
+  - **How it reaches the clipboard.**
+    - The browser always writes OSC 52 (`ESC ] 52 ; c ; <base64> BEL`), which works over SSH in
+      the terminals that support it (iTerm2 once clipboard access is allowed in its settings, Ghostty, kitty, WezTerm, foot, xterm with
+      `allowWindowOps`). Terminal.app ignores it.
+    - Inside tmux it also writes tmux's passthrough form. tmux itself takes an application's
+      OSC 52 only with `set -g set-clipboard on`, and passes the passthrough form on only with
+      `set -g allow-passthrough on`. Its defaults (`external`, `off`) let neither through.
+    - A local session (no `SSH_CONNECTION` or `SSH_TTY`) also runs the first of `pbcopy`,
+      `wl-copy` (Wayland), `xclip` and `xsel` (X) on the `PATH`. That covers Terminal.app and
+      tmux's defaults.
+    - `YCXX_CLIPBOARD` replaces that command (a shell command that reads the text on its
+      standard input). `YCXX_CLIPBOARD=osc52` turns the command off.
 - **Leaving.** `q` gives the terminal back as it was: the main screen, the cursor, autowrap on,
   mouse reports off, cooked mode. So do `SIGTERM`, `SIGHUP`, `SIGINT` and `SIGQUIT`, and a crash
   (`SIGABRT`, `SIGSEGV`, `SIGBUS`, `SIGFPE`, `SIGILL`); after restoring, the signal takes its
