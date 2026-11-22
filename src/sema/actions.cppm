@@ -145,7 +145,7 @@ public:
   virtual std::optional<ConstId> constant_value(EntityId v) = 0;
   // In a member declaration of a class being defined: the member named `name` declared before it
   // ([basic.scope.class]; the class's member list is not complete yet).
-  virtual std::optional<ast::DeclSema> earlier_member(NameId name) = 0;
+  virtual std::optional<ast::DeclSema> earlier_member(NameId name, bool type_only = false) = 0;
   // The direct bases of class `c` while it is being defined (its base-clause), none otherwise.
   virtual std::vector<EntityId> defining_bases(EntityId) { return {}; }
   virtual std::span<const BaseRec> defining_base_records(EntityId) { return {}; }
@@ -480,11 +480,13 @@ public:
           auto hit = class_body_type(current_class, *cr, name, type_at);
           if (hit.found) return hit.type;
         }
+        if (!elaborated && unscoped_member_enumerator(current_class, name, /*unqualified=*/true)) return std::nullopt;
         if (auto r = nested_member(current_class, name, true)) return r->first.type;
       } else {
-        if (auto m = q_->earlier_member(name)) {
+        if (auto m = q_->earlier_member(name, elaborated)) {
           if (m->kind == ast::DeclKind::enum_ || m->kind == ast::DeclKind::type_alias) return m->type;
           if (!elaborated && (m->kind == ast::DeclKind::data_member || m->kind == ast::DeclKind::variable ||
+                              m->kind == ast::DeclKind::enumerator ||
                               (m->kind == ast::DeclKind::function && c.name != name)))
             return std::nullopt;
         }
@@ -1633,8 +1635,7 @@ public:
       return std::nullopt;
     }
     if (c == current_class)
-      if (auto m = q_->earlier_member(n); m && (m->kind == ast::DeclKind::enum_ || m->kind == ast::DeclKind::type_alias))
-        return m->type;
+      if (auto m = q_->earlier_member(n, /*type_only=*/true)) return m->type;
     return std::nullopt;
   }
 
@@ -1733,8 +1734,7 @@ public:
     const ClassRec* cls = class_rec(naming);
     if (!cls && naming != current_class) return {};
     if (naming == current_class && (!cls || !cls->defined)) {
-      if (auto earlier = q_->earlier_member(name); earlier &&
-          (!type_only || is_type(earlier->kind))) return {};
+      if (q_->earlier_member(name, type_only)) return {};
     }
     const ClassRec incomplete;
     return class_body_type(naming, cls ? *cls : incomplete, name, at, ClassBodyLookup::qualified, type_only);
@@ -1762,6 +1762,8 @@ public:
   std::optional<QualType> scope_type(const Scope& s, NameId n) {
     auto m = scope_member(s, n);
     if (!m || !m->type) return std::nullopt;
+    if (s.type && types().is_class(*s.type) && unscoped_member_enumerator(types().class_of(*s.type), n))
+      return std::nullopt;
     return m->type;
   }
   // `S::n` as an expression ([expr.prim.id.qual]).
@@ -4330,8 +4332,6 @@ public:
           classes().layout_requires_virtual_support(types().rec(m.type).inner)) continue;
       return Found{nullptr, 0, &m, c};
     }
-    for (const NestedType& nested : cr.types)
-      if (nested.name == name) return Found{.owner = c, .nested_type = nested.entity};
     for (const NestedType& nested : cr.types) {
       // A type alias does not introduce the enumerators of the enumeration it names.
       if (!types().is_enum(nested.type) || types().enum_of(nested.type) != nested.entity) continue;
@@ -4340,6 +4340,8 @@ public:
       for (const EnumeratorRec& value : e->enumerators)
         if (value.name == name) return Found{.owner = c, .nested_type = nested.entity, .enumerator = value.entity};
     }
+    for (const NestedType& nested : cr.types)
+      if (nested.name == name) return Found{.owner = c, .nested_type = nested.entity};
     return std::nullopt;
   }
   std::optional<Found> find_member(EntityId c, NameId name, bool unqualified = false) {
@@ -4362,6 +4364,15 @@ public:
       }
     }
     return r;
+  }
+
+  // Ordinary type lookup is blocked by an unscoped enumerator. Qualifier and
+  // elaborated-type lookup still use the separate type lookup path.
+  bool unscoped_member_enumerator(EntityId c, NameId name, bool unqualified = false) {
+    if (auto member = find_member(c, name, unqualified)) return member->enumerator != EntityId::none;
+    if (c == current_class)
+      if (auto member = q_->earlier_member(name)) return member->kind == ast::DeclKind::enumerator;
+    return false;
   }
 
   // The member functions of `c` named `name`: an overload set ([over.match.funcs]).

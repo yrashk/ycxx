@@ -1265,6 +1265,10 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   class templates. A class member can reuse a scoped enumerator's name, including a declarator
   following the enum definition in the same item. Class-scope lookup still finds unscoped
   enumerators. [#725](https://github.com/yrashk/ycxx/issues/725)
+- Nested unscoped enumerators contend with earlier members in ordinary classes and class templates.
+  An enumerator can hide a same-scope enum tag in ordinary lookup. The tag remains available as
+  a nested-name-specifier or through an unqualified elaborated enum specifier.
+  [#731](https://github.com/yrashk/ycxx/issues/731)
 - Tests: `tests/own/classes/s4-*enum*`, `s4-scoped-enum`, `s4-unscoped-enum` (spec-only, plus two
   from the review): 7 of 7.
 - Namespace-scope opaque enum declarations ([dcl.enum], #157) supply a complete enum type with a
