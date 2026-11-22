@@ -2751,7 +2751,7 @@ pointer to function ([expr.prim.lambda.closure]/8, [conv.fctptr]).
 - Tests: `tests/own/lambda-noexcept/` (one run test, two reject tests).
 - Not yet: a generic lambda's condition naming its own template parameters is rejected (#820);
   a `noexcept` on a pointer-to-function declarator in a template is dropped (#819); a dependent
-  noexcept on a function template or class template member reads as false (#827).
+  noexcept on a function template or class template member reads as false (#828).
 
 ## Namespace variable lambdas (#338)
 
