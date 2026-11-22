@@ -1087,6 +1087,10 @@ std::string_view linux_signature_error(const ast::Interners& in, const QueryLayo
                     : "defaulted copy ABI classification is unavailable for a parameter";
     if ((result && l.kind == ir::TypeKind::void_) || linux_integer_scalar(l) ||
         (allow_aggregates && l.sysv_integer_eightbytes)) return {};
+    // A class not trivial for calls passes by address and returns through the hidden result
+    // pointer; so does any result of more than two eightbytes (MEMORY) (#641).
+    if (allow_aggregates && l.kind == ir::TypeKind::record && !l.empty &&
+        (!l.trivial_calls || (result && l.size > 16))) return {};
     if (allow_aggregates && l.kind == ir::TypeKind::record)
       return result ? "unsupported aggregate result layout" : "unsupported aggregate parameter layout";
     if (fixed_direct)
