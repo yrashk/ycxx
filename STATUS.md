@@ -2790,9 +2790,15 @@ What the process allocates, attributed to the engine's cells, in the trace and t
   nonvirtual abstract primary base. The base has one public pure `int f()` slot and no data
   members. The derived class has its public override and one public `int` field without an
   initializer. Both classes have implicit constructors and trivial nonvirtual destructors.
-  Lowering stores the peer's derived `_ZTV + 16` in the primary vptr. The caller can access the
-  local field and bind a reference to the offset-zero base subobject. The peer owns the key
-  definition, table and RTTI. [#309](https://github.com/yrashk/ycxx/issues/309)
+  Lowering stores the derived `_ZTV + 16` in the primary vptr. The caller can access the local
+  field and bind a reference to the offset-zero base subobject. The key can be defined in the
+  same unit or a peer. [#309](https://github.com/yrashk/ycxx/issues/309)
+- The Linux x86-64 derived producer emits the table and RTTI for that shape when the unit defines
+  the override out of class and non-inline. The global 24-byte `_ZTV` has one function slot.
+  The global 24-byte `_ZTI` points to the base descriptor, a weak 16-byte object grouped with its
+  relocations. Both NUL-terminated type names are weak objects with separate read-only COMDAT groups.
+  [Itanium ABI §2.9.5](https://itanium-cxx-abi.github.io/cxx-abi/abi.html#rtti-layout) ·
+  [#309](https://github.com/yrashk/ycxx/issues/309) · [#422](https://github.com/yrashk/ycxx/issues/422)
 - On Linux x86-64, a caller can dispatch through a pointer or lvalue reference to a
   peer-owned abstract root. The root is an ordinary, externally linked class with no
   bases or fields and one or two public, directly written pure virtuals. Each slot has
