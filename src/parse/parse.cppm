@@ -2284,6 +2284,9 @@ public:
                                            const sema::Bindings& args) override {
     return at_.replay_alias_calls(caller, alias, args);
   }
+  std::optional<NodeId> replay_default_member(sema::Sema& caller, EntityId field, EntityId required_base) override {
+    return at_.replay_default_member(caller, field, required_base);
+  }
   std::optional<NodeId> replay_function_default(sema::Sema& caller, const ast::DefaultArg& value,
                                                 EntityId function, QualType parameter) override {
     return at_.replay_function_default(caller, value, function, parameter);
