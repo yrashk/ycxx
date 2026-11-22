@@ -1,5 +1,4 @@
 // [basic.align], [expr.sizeof]
-// REQUIRES: linux
 // PEER: layout-provider.cpp
 struct alignas(16) Cell { char tag; };
 

@@ -1,5 +1,4 @@
 // [basic.stc.dynamic], [new.delete.array]
-// REQUIRES: linux
 // PEER: array-direct-provider.cpp
 using Count = decltype(sizeof(0));
 namespace std { enum class align_val_t : Count {}; }

@@ -433,16 +433,22 @@ struct FnKey {
 // (from the bound universe's sema records, else its handle).
 void trace_describe(std::string& out, TuId tu);
 void trace_describe(std::string& out, const FnKey& k);
+// Where in the source (#638): a unit's cells are its file; a function's are its definition (an
+// instantiation's, its pattern's), read from values the engine already holds.
+engine::SourceSpan function_span(const engine::Db& db, const FnKey& k);
+engine::SourceSpan tu_span(const engine::Db& db, TuId tu);
 
 // The unit's definitions.
 struct TuUnit {
   using Key = TuId;
+  static engine::SourceSpan trace_span(const engine::Db& db, const Key& k) { return tu_span(db, k); }
   using Value = TranslationUnit;
   static engine::query_task<Value> run(engine::Ctx& cx, TuId tu);
 };
 // The unit's classes and enumerations alone: an edit elsewhere in the unit stops here.
 struct UnitShapes {
   using Key = TuId;
+  static engine::SourceSpan trace_span(const engine::Db& db, const Key& k) { return tu_span(db, k); }
   using Value = Shapes;
   static engine::query_task<Value> run(engine::Ctx& cx, TuId tu);
 };
@@ -462,6 +468,7 @@ struct FunctionSource {
 };
 struct FunctionSourceQ {
   using Key = FnKey;
+  static engine::SourceSpan trace_span(const engine::Db& db, const Key& k) { return function_span(db, k); }
   using Value = FunctionSource;
   static engine::query_task<Value> run(engine::Ctx& cx, FnKey k);
 };
@@ -473,6 +480,7 @@ struct Generated {
 };
 struct FunctionGen {
   using Key = FnKey;
+  static engine::SourceSpan trace_span(const engine::Db& db, const Key& k) { return function_span(db, k); }
   using Value = Generated;
   static engine::query_task<Value> run(engine::Ctx& cx, FnKey k);
   static std::string errors(const Value& v) { return v.error ? v.error->detail() : std::string(); }  // for traces
@@ -485,6 +493,7 @@ struct FunctionIrValue {
 };
 struct FunctionIr {
   using Key = FnKey;
+  static engine::SourceSpan trace_span(const engine::Db& db, const Key& k) { return function_span(db, k); }
   using Value = FunctionIrValue;
   static engine::query_task<Value> run(engine::Ctx& cx, FnKey k);
   static std::string show(const Value& v);  // the L1 text, for traces (#245)
@@ -494,6 +503,7 @@ struct FunctionIr {
 // `function_debug(F)`: node id → `Loc`, and the variables.
 struct FunctionDebug {
   using Key = FnKey;
+  static engine::SourceSpan trace_span(const engine::Db& db, const Key& k) { return function_span(db, k); }
   using Value = ir::FunctionDebug;
   static engine::query_task<Value> run(engine::Ctx& cx, FnKey k);
 };
@@ -505,6 +515,7 @@ struct Lowered {
 };
 struct Lower {
   using Key = FnKey;
+  static engine::SourceSpan trace_span(const engine::Db& db, const Key& k) { return function_span(db, k); }
   using Value = Lowered;
   static engine::query_task<Value> run(engine::Ctx& cx, FnKey k);
   static std::string show(const Value& v);  // the L2 text, for traces (#245)
@@ -519,6 +530,7 @@ struct UnitRef {
 };
 struct UnitQ {
   using Key = FnKey;
+  static engine::SourceSpan trace_span(const engine::Db& db, const Key& k) { return function_span(db, k); }
   using Value = UnitRef;
   static engine::query_task<Value> run(engine::Ctx& cx, FnKey k);
   static std::string errors(const Value& v) { return v.error ? v.error->detail() : std::string(); }  // for traces
@@ -550,6 +562,7 @@ struct Optimized {
 // for B ≥ 1, so -O0 is level 0 exactly).
 struct Codegen {
   using Key = FnKey;
+  static engine::SourceSpan trace_span(const engine::Db& db, const Key& k) { return function_span(db, k); }
   using Value = Machine;
   static engine::query_task<Value> run(engine::Ctx& cx, FnKey k);
   static std::string show(const Value& v) { return Optimized::show(v); }
@@ -572,6 +585,7 @@ struct TuValue {
 };
 struct Tu {
   using Key = TuId;
+  static engine::SourceSpan trace_span(const engine::Db& db, const Key& k) { return tu_span(db, k); }
   using Value = TuValue;
   static engine::query_task<Value> run(engine::Ctx& cx, TuId tu);
   static std::string errors(const Value& v) {  // for traces (#245)
@@ -926,6 +940,20 @@ std::string entity_name(EntityId e) {
 
 void trace_describe(std::string& out, const FnKey& k) { out += entity_name(k.fn); }
 
+engine::SourceSpan tu_span(const engine::Db& db, TuId tu) {
+  const TuSource* src = db.peek<TuSourceIn>(tu);
+  return src && src->file ? pp::file_span(db, pp::FileId{*src->file}) : engine::SourceSpan{};
+}
+
+engine::SourceSpan function_span(const engine::Db& db, const FnKey& k) {
+  const TuSource* src = db.peek<TuSourceIn>(k.tu);
+  const TranslationUnit* tu = db.peek<TuUnit>(k.tu);
+  if (!src || !src->file || !tu) return {};
+  for (const FunctionDef& f : tu->functions)
+    if (f.entity == k.fn) return item_span(db, *universe().in, pp::FileId{*src->file}, f.item);
+  return {};
+}
+
 
 engine::query_task<FunctionSource> FunctionSourceQ::run(engine::Ctx& cx, FnKey k) {
   const TranslationUnit& tu = co_await cx.fetch<TuUnit>(k.tu);
@@ -1225,6 +1253,7 @@ struct SymbolAddresses {
 // Local definitions can use the symbol itself in a direct displacement.
 struct TuSymbolAddresses {
   using Key = TuId;
+  static engine::SourceSpan trace_span(const engine::Db& db, const Key& k) { return tu_span(db, k); }
   using Value = SymbolAddresses;
   static engine::query_task<Value> run(engine::Ctx& cx, TuId tu) {
     const TranslationUnit& u = co_await cx.fetch<TuUnit>(tu);
