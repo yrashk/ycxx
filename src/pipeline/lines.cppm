@@ -135,13 +135,14 @@ engine::SourceSpan item_span(const engine::Db& db, ast::Interners& in, pp::FileI
     if (!text) return {main ? name : region->file_names[a.file]};
     // One table per thread, for the last text it measured: a unit's functions share it.
     thread_local struct {
+      const engine::Db* db = nullptr;
       const std::string* text = nullptr;
       std::size_t size = 0;
       engine::Revision revision = 0;
       std::optional<LineTable> table;
     } cache;
-    if (cache.text != text || cache.size != text->size() || cache.revision != db.revision() || !cache.table)
-      cache.text = text, cache.size = text->size(), cache.revision = db.revision(), cache.table.emplace(*text);
+    if (cache.db != &db || cache.text != text || cache.size != text->size() || cache.revision != db.revision() || !cache.table)
+      cache.db = &db, cache.text = text, cache.size = text->size(), cache.revision = db.revision(), cache.table.emplace(*text);
     const LineColumn from = cache.table->line_column(a.offset), to = cache.table->line_column(b.offset);
     return {main ? name : region->file_names[a.file], from.line, from.column, to.line, to.column};
   }
