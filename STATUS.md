@@ -1913,6 +1913,9 @@ template's tokens again with the arguments bound.
   trailing pack expansions, and evaluates to an integer or enum once those arguments are concrete.
   Alias type-ids replay calls whose argument validity must be checked at substitution.
   Dependent uses of aliases that can erase the check require signature replay (#209).
+- An unqualified call to a single ordinary external C++ immediate function can also supply
+  a dependent non-type template argument. The call retains direct integral template parameters
+  and integral literals and evaluates the selected function after substitution.
 - **Dependent logical negation** (#209): a `bool` template argument or default can negate a
   qualified dependent `bool` variable template-id. Substitution retains the negation across
   aliases until the selected specialization has concrete arguments and supplies a usable
