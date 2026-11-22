@@ -1247,8 +1247,8 @@ clauses = ['enum', 'dcl.enum']
 std = 'C++98'
 detect = '\benum\b'
 status = 'done'
-issues = [157]
-note = 'Named nested enum definitions support trailing ordinary fields in the same member declaration.'
+issues = [157, 731]
+note = 'Named nested enum definitions support trailing fields. Unscoped enumerators enter class scope and hide tags in ordinary lookup.'
 probe = '''
 enum Color { red, green = 5, blue };
 extern "C" { enum { bias = 1, expected = bias + 5 }; }
