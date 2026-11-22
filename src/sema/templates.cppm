@@ -1783,6 +1783,20 @@ public:
       all12 = all12 && s12;
       all21 = all21 && s21;
     }
+    // [temp.deduct.partial]/12 permits an undeduced template parameter only
+    // when it is absent from the types compared for this call.
+    auto used_parameters_deduced = [&](const TypeRec& pattern, u16 depth,
+                                       const std::vector<std::optional<TemplateArg>>& deduced) {
+      std::vector<std::pair<u16, u16>> used;
+      for (std::size_t i = 0; i < std::min(nargs, pattern.params.size()); ++i)
+        params_in(pattern.params[i], used);
+      return std::ranges::all_of(used, [&](auto ref) {
+        auto [parameter_depth, index] = ref;
+        return parameter_depth != depth || (index < deduced.size() && deduced[index].has_value());
+      });
+    };
+    all12 = all12 && used_parameters_deduced(t2, p2[0].depth, out12);
+    all21 = all21 && used_parameters_deduced(t1, p1[0].depth, out21);
     // [temp.deduct.partial]/11: a trailing function parameter pack breaks a tie only if
     // the other template has no trailing pack and no declared parameter at that position.
     // A parameter with an omitted default argument still occupies its declared position.
