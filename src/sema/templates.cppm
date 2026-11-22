@@ -525,6 +525,11 @@ public:
     QualType t = a.type;
     if (types().is_dependent(t))
       if (auto st = substitute(t, b)) t = types().canonical(Types::unqualified(*st));
+    if (ins().values.is<ast::VDepMember>(a.value)) {
+      auto value = substitute_member_value(a.value, b);
+      if (!value) return std::nullopt;
+      return converted_value(*value, t);
+    }
     if (ins().values.is<ast::VDepCall>(a.value)) {
       auto value = substitute_call_value(a.value, b);
       if (!value) return std::nullopt;
@@ -560,6 +565,8 @@ public:
       if (a->kind != TemplateArgKind::pack) return std::nullopt;
       return w_->values.integer(types().builtin(Builtin::unsigned_long), ins().seqs.size(a->elems));
     }
+    if (ins().values.is<ast::VDepMember>(v))
+      return substitute_member_value(v, b).transform([](const TemplateArg& a) { return a.value; });
     if (ins().values.is<ast::VDepVariable>(v)) return substitute_variable_value(v, b, variable_constant);
     if (ins().values.is<ast::VDepCall>(v))
       return substitute_call_value(v, b).transform([](const TemplateArg& a) { return a.value; });
@@ -878,6 +885,8 @@ public:
     else if (nested && ins().values.is<ast::VDepExpansion>(v)) params_in(ins().values.get<ast::VDepExpansion>(v).pattern, out, nested);
     else if (ins().values.is<ast::VDepVariable>(v))
       for (const TemplateArg& a : ins().seqs.elements(ins().values.get<ast::VDepVariable>(v).args)) params_in(a, out, nested);
+    else if (ins().values.is<ast::VDepMember>(v))
+      params_in(ins().values.get<ast::VDepMember>(v).qualifier, out, nested);
     else if (ins().values.is<ast::VDepCall>(v))
       for (const TemplateArg& a : ins().seqs.elements(ins().values.get<ast::VDepCall>(v).args)) params_in(a, out, nested);
     else if (ins().values.is<ast::VDepOp>(v))
@@ -1806,6 +1815,17 @@ private:
 
   enum class BooleanSubstitution { evaluate, defer, discard };
 
+  std::optional<TemplateArg> substitute_member_value(ConstId v, const Bindings& b) {
+    auto member = ins().values.get<ast::VDepMember>(v);
+    auto qualifier = substitute(member.qualifier, b);
+    if (!qualifier) return std::nullopt;
+    if (types().is_dependent(*qualifier)) {
+      member.qualifier = types().canonical(*qualifier);
+      return value_arg(types().builtin(Builtin::dependent), ins().intern_value(member));
+    }
+    return member_constant ? member_constant(*qualifier, member.name) : std::nullopt;
+  }
+
   std::optional<TemplateArg> substitute_call_value(ConstId v, const Bindings& b) {
     auto call = ins().values.get<ast::VDepCall>(v);
     auto args = substitute_args(ins().seqs.elements(call.args), b);
@@ -1939,6 +1959,8 @@ private:
     if (ins().values.is<ast::VDepVariable>(v))
       return std::ranges::all_of(ins().seqs.elements(ins().values.get<ast::VDepVariable>(v).args),
                                  [&](const TemplateArg& a) { return structural_operand(a); });
+    if (ins().values.is<ast::VDepMember>(v))
+      return structural_operand(ins().values.get<ast::VDepMember>(v).qualifier);
     if (ins().values.is<ast::VDepCall>(v))
       return std::ranges::all_of(ins().seqs.elements(ins().values.get<ast::VDepCall>(v).args),
                                  [&](const TemplateArg& a) { return structural_operand(a); });
@@ -1993,6 +2015,7 @@ public:
   // The declaration of template `templ` with its head, as lookup at a point finds it.
   std::function<std::optional<ast::DeclSema>(EntityId)> template_decl;
   std::function<std::optional<ConstId>(EntityId)> variable_constant;
+  std::function<std::optional<TemplateArg>(QualType, NameId)> member_constant;
   std::function<std::optional<TemplateArg>(EntityId, std::span<const TemplateArg>)> call_constant;
   std::function<std::optional<QualType>(const ast::DeclSema&, std::span<const TemplateArg>, const Bindings&)> alias_type;
   std::function<std::optional<interp::GlobalVar>(EntityId)> variable_global;
