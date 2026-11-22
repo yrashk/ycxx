@@ -540,11 +540,10 @@ members. [#285](https://github.com/yrashk/ycxx/issues/285)
 
 **Linux virtual tables.** A translation unit with the key definition emits the vtable and
 RTTI for an ordinary root with one public integral field and two fixed integer virtual
-signatures. A peer supplies the second virtual. The combined candidate also supports ordinary
+signatures. A peer supplies the second virtual. Linux x86-64 also supports ordinary
 automatic default initialization (`Root root;`) for that shape with an implicit default
 constructor, a trivial destructor and no field initializer. The local object's vptr uses the
-same table whether the key definition is in this translation unit or a peer. Verification of
-the combined candidate is pending.
+same table whether the key definition is in this translation unit or a peer.
 [#309](https://github.com/yrashk/ycxx/issues/309)
 
 ### Not yet

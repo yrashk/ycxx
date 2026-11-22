@@ -139,7 +139,7 @@ weak default-visible object in a separate read-only COMDAT keyed by its own name
 
 ## Linux x86-64 automatic root initialization
 
-The combined candidate supports a plain declaration such as `Root root;` in an ordinary
+Linux x86-64 supports a plain declaration such as `Root root;` in an ordinary
 non-template free function. The supported root has an implicit default constructor, a trivial
 destructor and one public integral field without a default member initializer. The declaration
 names the root directly and uses its natural alignment. Lowering allocates the object, installs
@@ -152,7 +152,7 @@ of derived objects remain guarded.
 The maker loads `_ZTV` through the GOT. A split maker has an undefined table reference. In a
 translation unit that also owns the table, the GOT relocation names the same ELF symbol entry
 that defines the table. Ownership follows the key definition across the complete unit even if the
-maker appears first. Verification of the combined candidate is pending.
+maker appears first.
 [#309](https://github.com/yrashk/ycxx/issues/309)
 
 Broader table emission, covariant returns, pure virtual functions, `final`, explicit virtual

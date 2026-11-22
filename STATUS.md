@@ -2667,11 +2667,10 @@ What the process allocates, attributed to the engine's cells, in the trace and t
   and byte-for-byte agreement with a cold compile.
   [Itanium ABI §5.2.3–4](https://itanium-cxx-abi.github.io/cxx-abi/abi.html#vague-vtable) ·
   [#309](https://github.com/yrashk/ycxx/issues/309) · [#422](https://github.com/yrashk/ycxx/issues/422)
-- The combined Linux x86-64 candidate default-initializes a plain automatic variable of the
+- Linux x86-64 default-initializes a plain automatic variable of the
   supported root type. The root has an implicit default constructor, a trivial destructor and
   no default member initializer. Lowering stores `_ZTV + 16` in the vptr. The table can come
-  from the key definition in the same unit or from a peer. Verification of the combined
-  candidate is pending. [#309](https://github.com/yrashk/ycxx/issues/309)
+  from the key definition in the same unit or from a peer. [#309](https://github.com/yrashk/ycxx/issues/309)
 - Broader construction and table emission, pure virtual functions, `final` and covariant
   returns remain in #309. Virtual destructor entry points, RTTI expressions, virtual bases
   and native class ABI have their own issues.
