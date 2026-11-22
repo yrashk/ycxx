@@ -821,8 +821,22 @@ class Lowering {
       }
       case Op::va_start:
       case Op::va_arg: {
-        if (!config_.sysv_amd64) return fail("variadic cursors require System V AMD64");
         auto o = origin();
+        if (!config_.sysv_amd64 && nd.op == Op::va_arg) {
+          // Apple arm64: the cursor holds the address of the next argument, each in an 8-byte
+          // slot of its own, the value in its low bytes (little-endian).
+          auto fetch = type_of(cxx(f_.results_of(n)[1]));
+          if (!fetch) return fail(fetch.error());
+          ValueId state = in(n, 0), cursor = in(n, 1);
+          ValueId at = emit1(Op2::load, T::ptr, {state, cursor}, {0});
+          ValueId value = emit1(Op2::load, *fetch, {state, at}, {0});
+          T st[] = {T::state};
+          ValueId ops[] = {state, cursor, add_offset(at, 8)};
+          std::uint64_t im[] = {0};
+          out(n, 0, b_.peek().result(b_.emit(Op2::store, st, ops, im, 0, {}, o)));
+          out(n, 1, value);
+          return {};
+        }
         ValueId ops[] = {in(n, 0), in(n, 1)};
         if (nd.op == Op::va_start) {
           T result[] = {T::state};
@@ -838,13 +852,11 @@ class Lowering {
         return {};
       }
       case Op::va_copy: {
-        if (!config_.sysv_amd64) return fail("variadic cursors require System V AMD64");
         QualType cursor = layout(cxx(f_.operands_of(n)[1])).pointee;
         out(n, 0, copy_bytes(in(n, 0), in(n, 1), in(n, 2), layout(cursor), 0));
         return {};
       }
       case Op::va_end:
-        if (!config_.sysv_amd64) return fail("variadic cursors require System V AMD64");
         // The operand has been evaluated. The ABI requires no cleanup of the cursor.
         out(n, 0, in(n, 0));
         return {};

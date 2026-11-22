@@ -35,10 +35,15 @@ A nonthrowing function can be used where the corresponding potentially throwing 
 Ordinary constructor declarations and definitions check that their concrete exception specifications agree.
 Dependent exception specifications remain open. [#219](https://github.com/yrashk/ycxx/issues/219)
 
+A class template can grant private access to the class passed as a type argument using
+`friend Authority;`. Each specialization grants access to its own authority.
+[#689](https://github.com/yrashk/ycxx/issues/689)
+
 **Compile and run programs on macOS.** `ycxx cxx a.cpp -o a` (also `-c`, `-fsyntax-only`, `-E`, `-I`,
 `-D`, `-std=c++26`, and `-fclass-call-abi=apple` to pass classes as Apple Clang does) builds an executable with ycxx's own front end, IR, AArch64 code generator
 and Mach-O linker on arm64 macOS, where `arm64-apple-darwin` is the default target. It also links
-object files from Clang or GCC. Errors are reported as
+object files from Clang or GCC. Variadic functions can be defined with `<cstdarg>` on both
+macOS and Linux ([#647](https://github.com/yrashk/ycxx/issues/647)). Errors are reported as
 `file:line:col: error: …`.
 
 The arm64 Mach-O linker preserves supported cleanup-free DWARF frames from input objects.
@@ -351,7 +356,9 @@ written default member initializer are value-initialized.
   alias-selected dependent base and qualified lookup of its static members.
   [#308](https://github.com/yrashk/ycxx/issues/308)
 - placeholder types: `auto` and `decltype(auto)` variables (`const auto&`, `auto*`, `auto&&`),
-  deduced and trailing return types, in templates too;
+  deduced and trailing return types, in templates too. Ordinary block variables with an
+  `= expression` initializer can use `Concept auto` with a prior unqualified type concept.
+  [#286](https://github.com/yrashk/ycxx/issues/286)
 - lambdas in function bodies: captures by copy and by reference, capture-defaults, `this` and
   `*this`, init-captures, `mutable`, conversion to a pointer to function, generic lambdas (`auto`
   parameters) and template lambdas (`[]<class T>`), and closures passed to and called from
@@ -407,7 +414,9 @@ available. `--trace-engine=interactive` opens a browser of the trace after the c
 with each function's IR and assembly, a timeline of the pool's workers, and filters. It follows
 the terminal's size and takes the mouse: click to select, fold and sort by a column, use the
 wheel to scroll, and drag to resize the pane. It copies a cell, a subtree, selected rows or any
-selected text of the IR and instructions to the clipboard, over SSH too
+selected text of the IR and instructions to the clipboard, over SSH too. Its histogram view charts
+self and total time, memory, runs, cache hits and waits by query kind, source file or child, and a
+bar opens its cells; cells show and filter by their source position
 ([docs/TRACE.md](docs/TRACE.md#the-interactive-browser)).
 `--trace-engine=json` writes the whole trace as JSON Lines, for tools and agents. Cells that
 come from source (a file, a unit, a function's IR and code) carry their file and lines.

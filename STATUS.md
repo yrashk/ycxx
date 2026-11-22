@@ -383,9 +383,18 @@ stay open for the rest.
     stack arguments both ways, function pointers and the GOT. Mutating `sdiv` or the stack packing
     makes it fail. Two variadic C callees read what generated calls pass through their ellipsis
     with `va_arg`, after named stack arguments and with none.
+- Variadic definitions on Apple arm64 ([#647](https://github.com/yrashk/ycxx/issues/647)):
+  `__builtin_va_list` is `char*`. Each cursor operation takes the address of the variable that
+  holds it, so lowering sees a pointer to a `char*` cursor on both targets. `va_start` stores
+  the address of the first 8-byte slot after the named stack arguments, at `x29 + 16` plus
+  their size rounded to 8. `va_arg` loads the slot and advances the cursor by 8, `va_copy`
+  copies it and `va_end` does nothing. `own/variadic/definitions` calls ycxx's definitions
+  from ycxx and from a Clang peer, and lets the peer's `va_arg` read a cursor ycxx started.
+  It fails if the named stack size is ignored or the cursor advances by 4. `<stdarg.h>`
+  itself is missing on Darwin ([#676](https://github.com/yrashk/ycxx/issues/676)); `<cstdarg>` works.
 - Not yet: the allocation
   validator and dependence checker (#29), SSA linear scan, list scheduling, unwind info and DWARF,
-  a measured `cost_model` (#9), defining a variadic function (`va_start`), more than one result, frame objects aligned above 16 bytes.
+  a measured `cost_model` (#9), more than one result, frame objects aligned above 16 bytes.
 
 ## System V AMD64 frames
 
@@ -1955,8 +1964,8 @@ Fable decided the representation (ast.md §6.6); the Opus session wrote the code
   constraints. This includes unevaluated uses such as `decltype`. A type-constraint or a leading
   requires-clause contributes to that check. [#234](https://github.com/yrashk/ycxx/issues/234)
 - Not yet: class and variable template constraints outside those cases, partial specializations
-  and members, broader constrained packs, fold-expanded constraints, `C auto`, and `noexcept` in
-  compound requirements (#234). Open follow-ups include re-verification of satisfaction at END
+  and members, broader constrained packs, fold-expanded constraints, constrained placeholders
+  outside ordinary block declarations, and `noexcept` in compound requirements (#234). Open follow-ups include re-verification of satisfaction at END
   (#235), Itanium constraint mangling (#236), recorded discarded extents for `if constexpr` (#237),
   and value-dependent mapping arguments (#209).
 
@@ -1999,6 +2008,17 @@ Fable decided the representation (ast.md §6.6); the Opus session wrote the code
   qualified by a namespace names an earlier declaration ([namespace.memdef]/3).
 - Tests: `tests/own/classes/s6-access-*` (five reject tests, two run tests); draft examples
   class.friend-1 and class.name-4 pass.
+
+## Dependent type friends in class templates (#689)
+
+A class template can name a non-pack type parameter in a standalone `friend Authority;`
+declaration. Instantiation grants access to the class of that specialization's argument,
+including a cv-qualified or incomplete class, or ignores a non-class argument
+([class.friend], [temp.friend]). The existing access checks use each specialization's own friend
+list. The declaration introduces no name into lookup.
+A type inherited from a nondependent base takes precedence over the template parameter
+([temp.local]).
+[#689](https://github.com/yrashk/ycxx/issues/689)
 
 ## Templates, ζ step 7: static data members of class templates (#88, 2026-11-18)
 
@@ -2226,11 +2246,20 @@ request it serves.
   tmux's passthrough form) and, locally, runs `YCXX_CLIPBOARD` or the first of pbcopy, wl-copy,
   xclip and xsel. Tests: `unit.trace` (the exact text of each way to copy, base64, OSC 52);
   `daemon.trace_tui` (`y` and a row drag through OSC 52 and the command).
+- Histograms (#637): `Metric` (self time, the span less the union of the children's; time in
+  all; allocated; peak; retained; allocations; runs; cache hits; waits), `metrics_of`,
+  `self_times`, `Groups`, and `histogram(tree, Grouping, within, order)` (by kind, file or
+  children; the tree's filter applies). The browser's histogram view has metric switches,
+  grouping, scope, sort, and a bar that opens its cells in the tree (`kind:`/`at:` filters,
+  or selection). The JSON summary has `histogram.by_kind`/`by_file`. The browser shows a
+  cell's source in the pane, an `S` column, and `p` copies `path:line:col`. Tests:
+  `unit.trace` (aggregation values, JSON, the view's frames against `histogram.golden`, its
+  hits and keys, the source line, column and copy; self time mutation-checked).
 - Source spans (#638): `engine::SourceSpan` on each `TraceEvent`, from a kind's `trace_span(const
   Db&, const Key&)`, which runs only in `Db::trace`. `Db::peek` reads an input, or a value
   verified at this revision, without a dependency. A file's and a unit's cells are the file; a
   function's cells (FunctionSourceQ to Codegen) are its definition's first to last token
-  (`item_span`, lines as diagnostics count them). The JSON `span`, `at:file[:line]` in the
+  (`item_span`, lines as diagnostics count them). The JSON `span`, `at:file[:line[:col]]` in the
   filter, and `span_text`/`span_start` are in place. Tests: `unit.trace` (the spans of a real
   build, cells without spans, text, filter, JSON; mutation-checked) and `daemon.trace` (spans
   across the socket).
@@ -2459,8 +2488,9 @@ What the process allocates, attributed to the engine's cells, in the trace and t
 
 ## Placeholder types, θ step 1 (#279, 2026-11-19)
 
-- **Types:** `TAuto{decltype_auto}` in `types` (ast.md §5.1's `TAuto`, without a type-constraint
-  yet), `TypeKind::placeholder` in sema; `Types::has_placeholder` finds one under pointers,
+- **Types:** `TAuto` in `types` (ast.md §5.1) carries the placeholder kind, resolved concept entity
+  and canonical written argument list. `TypeKind::placeholder` in sema and
+  `Types::has_placeholder` find a placeholder under pointers,
   references, arrays and a function's return type. The parser reads `auto` and `decltype(auto)`
   as type specifiers, and trailing return types `auto f() -> T` ([dcl.fct]/2) with the
   parameters in scope.
@@ -2472,6 +2502,11 @@ What the process allocates, attributed to the engine's cells, in the trace and t
 - **Variables:** block scope (`= e`, `(e)`, `{e}`; the name is declared first, so its own
   initializer cannot use it), namespace scope and variable templates (`= e`, `{e}`), static data
   members; several declarators must deduce one type.
+- **Constrained block variables** (#286): `C auto x = expression;` uses a prior bare unqualified
+  type concept. Sema evaluates the constraint on the invented parameter before completing the
+  variable type, including for cv- and reference-qualified declarators. Namespace declarations,
+  other initializer forms, template contexts, qualified or argument-bearing concept names,
+  constrained `decltype(auto)`, and abbreviated function templates remain open.
 - **Array structured bindings** ([dcl.struct.bind], #285): a block-scope declaration evaluates
   its initializer once and binds the names to elements or whole rows of the hidden array.
   Value bindings copy scalar elements in order and take cv from the declaration (CWG 2506).
