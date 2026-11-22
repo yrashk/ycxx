@@ -59,6 +59,46 @@ constructor implements the transfer and the checker requires the source to be li
 unborrowed. Use `[[=ycxx::ownership::move_constructor::transfers]]` on the resource's class
 declaration for the equivalent C++26 annotation.
 
+Save this example as `receipt.cpp`. `issue_receipt()` creates a linear receipt, the move
+transfers its obligation, and `close_receipt()` discharges it.
+
+```cpp
+#include <ycxx/ownership.hpp>
+#include <ycxx/ownership/runtime.hpp>
+
+namespace own = ycxx::ownership;
+
+struct Receipt {
+  own::linear_state state;
+
+  Receipt() noexcept {}
+  Receipt(Receipt&& other) noexcept
+      : state(static_cast<own::linear_state&&>(other.state)) {}
+};
+
+Receipt issue_receipt() noexcept { return Receipt(); }
+void close_receipt(Receipt&& receipt) noexcept { receipt.state.consume(); }
+
+using Rules = own::use_policy<own::linear<Receipt>, own::move_transfers<Receipt>,
+    own::creates<decltype(&issue_receipt), &issue_receipt>,
+    own::consumes<decltype(&close_receipt), &close_receipt>>;
+
+int main() {
+  auto issued = issue_receipt();
+  Receipt current(static_cast<Receipt&&>(issued));
+  close_receipt(static_cast<Receipt&&>(current));
+}
+```
+
+```sh
+c++ -std=c++20 -I/path/to/include receipt.cpp -o receipt
+./receipt
+ycxx cxx -fcheck-policies -fsyntax-only -I/path/to/include receipt.cpp
+```
+
+Remove `close_receipt()` from `main` to see the difference in enforcement. YCXX diagnoses the
+live receipt at compile time. A GCC or Clang build traps at scope exit.
+
 An observation marked `verified_observes<decltype(&inspect), &inspect>` asks YCXX to
 verify the observer's body. Supported bodies can copy scalar fields and update independent
 scalar storage. For separate builds, include the contract in the caller and provider and pass
