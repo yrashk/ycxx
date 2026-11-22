@@ -4131,7 +4131,7 @@ private:
         return bad();
       }
       using enum Parser::NamedExceptionSpec;
-      auto exception = p_->defaulted_body(k_) ? defaulted_assignment : ordinary;
+      const auto exception = p_->defaulted_body(k_) ? defaulted_assignment : member_template_ ? ordinary : class_member;
       parse::Declarator d = ps_.declarator(spec.type, /*abstract=*/false, /*typedef_=*/false, conversion, exception,
                                           /*defer_ref_check=*/true);
       if (!d.ok || !d.named) return bad();
