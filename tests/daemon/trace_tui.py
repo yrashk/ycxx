@@ -28,6 +28,9 @@ def check(ok, what):
 
 
 SOURCE = 'int square(int x) { return x * x; }\nint main() { return square(3) - 9; }\n'
+# An object for the first target on any host: a host may have no default target (arm64 Linux) or
+# no linker for it, and the trace would then be empty.
+COMPILE = ['--target=arm64-apple-darwin', '-c']
 SGR = re.compile(r'\x1b\[[0-9;?]*[A-Za-z]')
 
 
@@ -55,7 +58,7 @@ class Tui:
             child = os.fork()
             if child == 0:
                 os.chdir(scope)
-                os.execve(ycxx, [ycxx, 'cxx', '--trace-engine=interactive', source, '-o', 'a'], env)
+                os.execve(ycxx, [ycxx, 'cxx', '--trace-engine=interactive', *COMPILE, source, '-o', 'a.o'], env)
             os.write(w, str(child).encode())
             os.close(w)
             _, status = os.waitpid(child, 0)
@@ -120,7 +123,7 @@ def main(ycxx):
     env.update(YCXX_NO_DAEMON='1', TERM='xterm-256color', YCXX_CLIPBOARD=f'cat > {clip}')
     # The browser opens after the compile, and `q` leaves with the compile's own status: whatever the
     # same command says untraced (a host without a linker for the target fails the link).
-    plain = subprocess.run([ycxx, 'cxx', 'a.cpp', '-o', 'a'], cwd=scope, env=env, capture_output=True, text=True, timeout=300)
+    plain = subprocess.run([ycxx, 'cxx', *COMPILE, 'a.cpp', '-o', 'a.o'], cwd=scope, env=env, capture_output=True, text=True, timeout=300)
 
     t = Tui(ycxx, scope, env)
     check(t.read_until(lambda o: b'ycxx engine trace' in o), 'the browser draws')
