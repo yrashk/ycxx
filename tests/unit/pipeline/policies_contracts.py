@@ -428,6 +428,11 @@ with tempfile.TemporaryDirectory() as directory:
     direct_move = write("direct_move.cpp", direct_move_source)
     syntax(direct_move)
     syntax(write("direct_move_affine.cpp", direct_move_source.replace("own::linear", "own::affine")))
+    tagged_move_source = direct_move_source.replace("struct Work {", "template<class Tag>\nstruct TaggedWork {")
+    tagged_move_source = tagged_move_source.replace("  Work(", "  TaggedWork(").replace("Work&& other", "TaggedWork&& other")
+    tagged_move_source = tagged_move_source.replace("\nWork start() noexcept;", "\nusing Work = TaggedWork<int>;\nWork start() noexcept;")
+    tagged_move = write("tagged_move.cpp", tagged_move_source)
+    syntax(tagged_move)
 
     needs_move_policy = "direct owner move construction requires a move-transfer contract"
     syntax(write("unmarked_move.cpp", legacy_move_source), error=needs_move_policy)
@@ -496,7 +501,8 @@ with tempfile.TemporaryDirectory() as directory:
     for args in (("early",), ("use", "moved"), ("consume", "again", "now")):
         assert subprocess.run([executable, *args], timeout=10).returncode in (
             -signal.SIGABRT, -signal.SIGILL, -signal.SIGTRAP)
-    for source, expected in ((direct_move, (0,)), (dishonest_move, (-signal.SIGABRT, -signal.SIGILL, -signal.SIGTRAP))):
+    for source, expected in ((direct_move, (0,)), (tagged_move, (0,)),
+                             (dishonest_move, (-signal.SIGABRT, -signal.SIGILL, -signal.SIGTRAP))):
         subprocess.run([host, "-std=c++20", "-I", include, str(source), "-o", str(executable)], check=True, timeout=30)
         assert subprocess.run([executable], timeout=10).returncode in expected
 
@@ -800,7 +806,7 @@ with tempfile.TemporaryDirectory() as directory:
         assert subprocess.run([native], timeout=10).returncode == 0
         subprocess.run([*args, str(array_skip), "-o", str(native)], check=True, timeout=30)
         assert subprocess.run([native, "skip"], timeout=10).returncode == -signal.SIGILL
-        for source in (composed, local_records, direct_move, annotated_move):
+        for source in (composed, local_records, direct_move, tagged_move, annotated_move):
             subprocess.run([*args, "-fcheck-policies", str(source), "-o", str(native)], check=True, timeout=30)
             assert subprocess.run([native], timeout=10).returncode == 0
         subprocess.run([*args, str(composed_skip), "-o", str(native)], check=True, timeout=30)
