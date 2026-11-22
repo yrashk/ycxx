@@ -1232,6 +1232,7 @@ private:
   std::map<std::pair<u32, u32>, std::vector<DeclId>> using_targets_;
   std::map<u32, std::string> asm_labels_;  // by entity: its GNU asm label (docs/EXTENSIONS.md)
   std::map<u32, ast::DeclSema> class_heads_;  // by class item: the class's record, for its members
+  std::map<u32, lex::Tk> class_definition_keys_;  // by defining item: the parsed class-key
   std::map<u32, u32> class_templates_;        // by class template entity: its defining item
   std::map<std::pair<u32, u32>, Result<ast::ItemSema>> class_member_cells_;  // by (member item, specialization)
   std::set<u32> classes_instantiating_;
@@ -3360,6 +3361,7 @@ private:
 
   bool class_declared(const ast::DeclSema& sem, Tk key, u32 at) {
     if (!record_class_key(sem.entity, key, at)) return false;
+    if (sem.flags & sema::decl_flag::definition) p_->class_definition_keys_.emplace(k_, key);
     decls_.push_back(sem);
     p_->declared(sem, k_);
     return true;
@@ -6706,20 +6708,11 @@ Program::ClassContent Program::class_content(u32 item, const std::function<const
   std::vector<sema::FieldRec>& fields = out.fields;
   std::vector<sema::MemberDeclRec>& statics = out.statics;
   std::vector<sema::NestedType>& nested = out.nested;
-  // [class.access.spec]: members of a class defined with `class` are private by default. The
-  // class-key follows any template heads: past each `template <…>`.
-  u32 key = it.begin;
-  while (key < it.brace_begin && r_->tokens[key].kind == lex::Tk::kw_template) {
-    int depth = 0;
-    for (++key; key < it.brace_begin; ++key) {
-      lex::Tk k = r_->tokens[key].kind;
-      if (k == lex::Tk::less) ++depth;
-      else if (k == lex::Tk::greater && --depth == 0) break;
-      else if (k == lex::Tk::greatergreater && (depth -= 2) <= 0) break;
-    }
-    ++key;
-  }
-  ast::Access access = r_->tokens[key].kind == lex::Tk::kw_class ? ast::Access::private_ : ast::Access::public_;
+  // [class.access.general]: the definition's class-key sets default access, including when
+  // these declarations are replayed for a specialization.
+  const auto key = class_definition_keys_.find(item);
+  ast::Access access = key != class_definition_keys_.end() && key->second == lex::Tk::kw_class
+                           ? ast::Access::private_ : ast::Access::public_;
   for (u32 m : it.members) {
     const items::Item& mi = items_->items[m];
     if (mi.kind == ItemKind::access_spec) {
