@@ -21,8 +21,10 @@ flags = [ycxx, "cxx", "--no-daemon", "-fcheck-policies", "-fsyntax-only", "-I", 
 native_body = """\
 int main(int argc, char**) {
   if (argc != 2) {
-    Choice selected(own::first_t{}, issue_receipt());
-    if (!selected.holds_first()) return 2;
+    auto issued = issue_receipt();
+    Choice initial(own::first_t{}, static_cast<Receipt&&>(issued));
+    Choice selected(own::first_t{}, initial.take_first());
+    if (initial.holds_first() || !selected.holds_first()) return 2;
     {
       const auto& view = selected.first();
       read(view);
@@ -75,8 +77,11 @@ class Receipt;
 class Permit;
 using Choice = own::variant<Receipt, Permit>;
 """
-    rules.write_text(declarations + activation + "\n")
-    check("composed_registry", base, other_sources=(rules,))
+    permit_mode = "using PermitMode = own::use_policy<own::affine<Permit>>;\n"
+    rules_source = declarations + permit_mode + activation + "\n"
+    caller_source = base.replace("own::linear<Receipt>, own::affine<Permit>,", "own::linear<Receipt>,")
+    rules.write_text(rules_source)
+    check("composed_registry", caller_source, other_sources=(rules,))
     with tempfile.TemporaryDirectory(prefix="ycv-", dir="/tmp") as sockets:
         env = {k: v for k, v in os.environ.items() if k not in ("YCXX_DAEMON", "YCXX_NO_DAEMON")}
         env.update(YCXX_RUNTIME_DIR=sockets, YCXX_ROOT=str(root), YCXX_THREADS="2")
@@ -90,11 +95,16 @@ using Choice = own::variant<Receipt, Permit>;
         try:
             initial = resident()
             assert initial.returncode == 0, initial.stderr
-            rules.write_text(declarations)
+            rules.write_text(declarations + permit_mode)
             removed = resident()
-            expected = check("composed_registry", base, "outside the checked protocol", other_sources=(rules,))
+            expected = check("composed_registry", caller_source, "outside the checked protocol", other_sources=(rules,))
             assert removed.returncode == 1 and removed.stderr == expected, (removed.stderr, expected)
-            rules.write_text(declarations + activation + "\n")
+            rules.write_text(rules_source.replace("own::affine<Permit>", "own::linear<Permit>"))
+            strict = resident()
+            expected = check("composed_registry", caller_source, "owner variant 'choice' may leave its scope",
+                             other_sources=(rules,))
+            assert strict.returncode == 1 and strict.stderr == expected, (strict.stderr, expected)
+            rules.write_text(rules_source)
             restored = resident()
             assert restored.returncode == 0, restored.stderr
         finally:
@@ -144,8 +154,11 @@ int main() {
 
     resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
     direct = root / "native.cpp"
-    direct.write_text(source.split("int handle(", 1)[0] + native_body)
-    leak_text = direct.read_text().replace("    auto receipt =", "    if (argc > 2) return 0;\n    auto receipt =")
+    native_text = source.split("int handle(", 1)[0] + native_body
+    direct.write_text(native_text)
+    check("moved_into_variant", native_text.replace("    Choice selected", "    read(issued);\n    Choice selected"),
+          "linear resource 'issued' may already have transferred its obligation")
+    leak_text = native_text.replace("    auto receipt =", "    if (argc > 2) return 0;\n    auto receipt =")
     leak = root / "native_leak.cpp"
     leak.write_text(leak_text)
     check("native_leak", leak_text, "owner variant 'selected' may leave its scope")
