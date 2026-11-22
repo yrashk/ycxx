@@ -298,8 +298,19 @@ public:
   // starting in namespace `from`: the first enclosing namespace that declares it before the
   // point, counting the namespaces using-directives nominate where [namespace.udir]/2 puts them.
   // `block` are the namespaces block-scope using-directives at the point nominate.
+  enum class LookupNames { all, types, qualifiers };
+
+  void filter_lookup(std::vector<DeclId>& declarations, LookupNames filter) {
+    if (filter == LookupNames::all) return;
+    std::erase_if(declarations, [&](DeclId id) {
+      auto d = decl_sema(id);
+      return !d || d->entity == EntityId::none ||
+             (!sema::Sema::is_type(d->kind) && !(filter == LookupNames::qualifiers && d->kind == ast::DeclKind::namespace_));
+    });
+  }
+
   std::vector<DeclId> visible_decls(std::string_view name, u32 item, bool self, const std::string& from,
-                                    std::span<const std::string> block = {}, bool type_only = false) {
+                                    std::span<const std::string> block = {}, LookupNames filter = LookupNames::all) {
     // Each nominated namespace, and those its own directives nominate ([namespace.udir]/4), with
     // the namespace that encloses both it and the directive: where its names appear.
     std::vector<std::pair<std::string, std::string>> nominated;  // (namespace, level)
@@ -318,11 +329,7 @@ public:
           std::vector<DeclId> more = declared_in(name, t, item, self);
           r.insert(r.end(), more.begin(), more.end());
         }
-      if (type_only)
-        std::erase_if(r, [&](DeclId id) {
-          auto d = decl_sema(id);
-          return !d || d->entity == EntityId::none || !sema::Sema::is_type(d->kind);
-        });
+      filter_lookup(r, filter);
       if (!r.empty() || level.empty()) return r;
     }
   }
@@ -343,14 +350,10 @@ public:
   // Qualified lookup in namespace `ns` ([namespace.qual]/2): its own declarations, or, when it has
   // none, those of the namespaces its using-directives nominate.
   std::vector<DeclId> qualified_decls(std::string_view name, const std::string& ns, u32 item, bool self,
-                                     bool type_only = false, bool direct_only = false) {
+                                     LookupNames filter = LookupNames::all, bool direct_only = false) {
     auto candidates = [&](const std::string& path) {
       auto declarations = declared_in(name, path, item, self);
-      if (type_only)
-        std::erase_if(declarations, [&](DeclId id) {
-          auto d = decl_sema(id);
-          return !d || d->entity == EntityId::none || !sema::Sema::is_type(d->kind);
-        });
+      filter_lookup(declarations, filter);
       return declarations;
     };
     std::vector<DeclId> r = candidates(ns);
@@ -1569,6 +1572,21 @@ public:
     return p_->visible_decls(p_->world().ins.names.spelling(name), namespace_lookup_item(),
                              namespace_lookup_includes_item(), scope, paths);
   }
+  std::vector<ast::DeclSema> qualifier_decls(ast::NameId name, std::optional<EntityId> ns,
+                                            std::span<const EntityId> directives) override {
+    const auto spelling = p_->world().ins.names.spelling(name);
+    const auto item = namespace_lookup_item();
+    const auto self = namespace_lookup_includes_item();
+    std::vector<std::string> paths;
+    for (EntityId directive : directives) paths.push_back(p_->namespace_path(directive));
+    const auto& scope = initializer_source ? p_->ns_of(initializer_source->item) : from;
+    const auto ids = ns ? p_->qualified_decls(spelling, p_->namespace_path(*ns), item, self, Program::LookupNames::qualifiers)
+                        : p_->visible_decls(spelling, item, self, scope, paths, Program::LookupNames::qualifiers);
+    std::vector<ast::DeclSema> declarations;
+    for (DeclId id : ids)
+      if (auto d = p_->decl_sema(id)) declarations.push_back(*d);
+    return declarations;
+  }
   std::optional<EntityId> namespace_named(ast::NameId name, std::span<const EntityId> directives = {}) override {
     for (DeclId d : visible_decls(name, directives))
       if (auto s = p_->decl_sema(d); s && s->kind == ast::DeclKind::namespace_) return s->entity;
@@ -1577,9 +1595,10 @@ public:
   std::vector<ast::DeclSema> namespace_members(EntityId ns, ast::NameId name, bool type_only = false,
                                                bool direct_only = false) override {
     std::vector<ast::DeclSema> r;
+    const auto filter = type_only ? Program::LookupNames::types : Program::LookupNames::all;
     for (DeclId d : p_->qualified_decls(p_->world().ins.names.spelling(name), p_->namespace_path(ns),
                                        namespace_lookup_item(), namespace_lookup_includes_item(),
-                                       type_only, direct_only))
+                                       filter, direct_only))
       if (auto s = p_->decl_sema(d); s && s->entity != EntityId::none) r.push_back(*s);
     return r;
   }
@@ -2271,6 +2290,10 @@ public:
   const sema::ClassRec& publish_class(EntityId c, sema::ClassRec r) override { return p_->publish_class(c, std::move(r), item_); }
   std::vector<DeclId> visible_decls(ast::NameId name, std::span<const EntityId> directives = {}) override {
     return at_.visible_decls(name, directives);
+  }
+  std::vector<ast::DeclSema> qualifier_decls(ast::NameId name, std::optional<EntityId> ns,
+                                            std::span<const EntityId> directives) override {
+    return at_.qualifier_decls(name, ns, directives);
   }
   std::optional<EntityId> namespace_named(ast::NameId name, std::span<const EntityId> directives = {}) override {
     return at_.namespace_named(name, directives);
@@ -4383,7 +4406,7 @@ private:
       ps_.declare_class = [&](NameId name, Tk key, u32 at) -> std::optional<QualType> {
         if (at != candidate->offset) return std::nullopt;
         std::optional<ast::DeclSema> visible_type;
-        for (DeclId id : p_->visible_decls(candidate->name, k_, false, p_->ns_of(k_), {}, /*type_only=*/true)) {
+        for (DeclId id : p_->visible_decls(candidate->name, k_, false, p_->ns_of(k_), {}, Program::LookupNames::types)) {
           auto d = p_->decl_sema(id);
           if (!d) continue;
           if (visible_type && visible_type->entity != d->entity) {
