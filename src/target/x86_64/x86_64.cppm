@@ -145,7 +145,10 @@ std::expected<Frame, std::string> layout(const l2::Function& body) {
   // matches the AArch64 back end's and keeps every RBP-relative displacement in 32 bits.
   constexpr std::uint64_t max_frame = std::uint64_t{16} << 20;
   const bool float_result = std::ranges::any_of(body.results, l2::is_float);
-  if (body.indirect_result || body.results.size() > (float_result ? 1u : 2u))
+  // A class result in memory: `lower` makes its address the first argument (RDI), and the
+  // function returns that address in RAX (AMD64 psABI §3.2.3).
+  if ((body.indirect_result && (body.indirect_result != 1 || !body.results.empty())) ||
+      body.results.size() > (float_result ? 1u : 2u))
     return std::unexpected("only a scalar SSE result or up to two INTEGER result registers are supported");
   if (std::ranges::contains(body.results, Type::state)) return std::unexpected("unsupported scalar ABI result type");
   auto is_float = [&](ValueId v) { return l2::is_float(body.type(v)); };
@@ -205,7 +208,10 @@ std::expected<Frame, std::string> layout(const l2::Function& body) {
           return at_node(n, nd.op, indirect ? "ellipsis arguments on a nonvariadic indirect call"
                                          : "ellipsis arguments on a nonvariadic direct call");
         if (ellipsis > args.size()) return at_node(n, nd.op, "more ellipsis arguments than arguments");
-        if (imms[indirect ? 2 : 3] || nd.nres > (variadic || uses_float_result ? 2u : 3u))
+        // A class result in memory is the first argument (`lower`) and leaves no result value.
+        const auto result_in_memory = imms[indirect ? 2 : 3];
+        if (result_in_memory > 1 || (result_in_memory && nd.nres > 1) ||
+            nd.nres > (variadic || uses_float_result ? 2u : 3u))
           return at_node(n, nd.op, "unsupported ABI result placement");
         if (indirect && (uses_float_result || std::ranges::any_of(args, is_float)))
           return at_node(n, nd.op, "floating-point indirect calls are unsupported");
@@ -793,6 +799,7 @@ std::expected<void, std::string> Emitter::node(NodeId n) {
       return {};
     }
     case Op::ret:
+      if (body_.indirect_result) read(body_.params_of(BlockId(0))[body_.indirect_result]);
       if (ops.size() > 2) read(ops[2], rdx);
       if (ops.size() > 1) {
         ValueId result = ops[1];

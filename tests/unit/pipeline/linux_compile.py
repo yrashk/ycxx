@@ -85,11 +85,11 @@ def external_data_addresses(compile, target, source_dir, scope, cold, cc, readel
     run(['./interposer'], scope, cold)
 
 
-def integer_aggregate_calls(compile, target, sources, scope, cold, cc, provider, client):
+def integer_aggregate_calls(compile, target, sources, scope, cold, cc, provider, client, host_flags=()):
     for part, name in (('provider', provider), ('client', client)):
         source = sources / f'{name}.cpp'
         compile(target, '-c', source, '-o', f'aggregate-{part}.o')
-        run([cc, '-std=c++26', '-O2', '-fno-pie', '-c', source, '-o', f'host-{part}.o'], scope, cold)
+        run([cc, '-std=c++26', '-O2', '-fno-pie', *host_flags, '-c', source, '-o', f'host-{part}.o'], scope, cold)
     compile(target, '-nostdlib', 'aggregate-provider.o', 'aggregate-client.o', '-o', 'aggregate-native')
     run(['./aggregate-native'], scope, cold)
     for inputs in (('aggregate-provider.o', 'host-client.o'), ('host-provider.o', 'aggregate-client.o')):
@@ -259,6 +259,9 @@ system_leaf:
                 aggregates / 'pointer-aggregate-empty-list.cpp', libycxx / 'src/runtime/linkage/static.cpp',
                 '-o', 'aggregate-empty-list')
         run(['./aggregate-empty-list'], scope, cold)
+        # Destructors would otherwise give the host objects unwind tables naming the C++ runtime.
+        integer_aggregate_calls(compile, target, source_dir / 'linux_memory_records', scope, cold, cc,
+                                'provider', 'client', ('-fno-exceptions', '-fno-asynchronous-unwind-tables'))
         initializer_lists = source_dir / 'linux_initializer_list'
         compile(target, '-isystem', libycxx / 'include', '-nostdlib',
                 initializer_lists / 'direct-reference.cpp', libycxx / 'src/runtime/linkage/static.cpp',
@@ -299,7 +302,6 @@ system_leaf:
             ('struct B { int a; }; struct X : B { int b; }; int f(X x) { return x.b; }', aggregate_parameter),
             ('struct X { int a : 3; }; int f(X x) { return x.a; }', aggregate_parameter),
             ('union X { int a; unsigned b; }; int f(X x) { return x.a; }', aggregate_parameter),
-            ('struct X { int a; ~X(); }; int f(X x) { return x.a; }', aggregate_parameter),
             ('struct __attribute__((packed)) X { char a; int b; }; int f(X x) { return x.b; }',
              aggregate_parameter),
             ('struct X [[gnu::packed]];\nstruct X { char a; int b; }; int f(X x) { return x.b; }',
@@ -330,7 +332,9 @@ system_leaf:
              'int f(X<int*> x) { return x.b; }', aggregate_parameter),
             ('struct X { double a; }; int g(X); int f() { return g(X{1.0}); }',
              f'call: {aggregate_parameter}'),
-            ('struct X { long a, b, c; }; X g(); long f() { X x = g(); return x.a; }',
+            ('struct X { long a, b, c; }; long f(X x) { return x.a; }', aggregate_parameter),
+            # Source packing that native layout does not apply stays out of memory passing (#641).
+            ('struct __attribute__((packed)) X { char tag; long a, b; }; X g(); long f() { return g().a; }',
              f'call: {aggregate_result}'),
             ('int f(long double, ...) { return 1; }', 'x87 long double parameters and results are unsupported'),
             ('struct X { int x; }; int f(X, ...) { return 1; }', parameters),
