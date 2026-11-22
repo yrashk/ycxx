@@ -4138,7 +4138,7 @@ private:
         return bad();
       }
       using enum Parser::NamedExceptionSpec;
-      auto exception = p_->defaulted_body(k_) ? defaulted_assignment : ordinary;
+      const auto exception = p_->defaulted_body(k_) ? defaulted_assignment : member_template_ ? ordinary : class_member;
       parse::Declarator d = ps_.declarator(spec.type, /*abstract=*/false, /*typedef_=*/false, conversion, exception,
                                           /*defer_ref_check=*/true);
       if (!d.ok || !d.named) return bad();
@@ -5261,14 +5261,36 @@ private:
       return std::nullopt;
     });
     if (s_.types().canonical(own) != s_.types().canonical(sem.type)) sem.type = own;
+    const bool deferred_class_exception = fn && !member_template_ && d.has_noexcept && s_.templated() &&
+                                          s_.world().entities.rec(cls).templ != EntityId::none;
     const sema::MemberDeclRec* m = nullptr;
+    QualType matched_type = sem.type;
     for (const sema::MemberDeclRec& r : cr->members) {
       if (r.name != d.name || r.is_function != fn || !same_template(r, member_template_)) continue;
-      const auto& types = s_.types();
-      if (types.canonical(r.type) == types.canonical(sem.type) ||
+      auto& types = s_.types();
+      QualType candidate_type = sem.type;
+      // A bare in-class specification already gives the member a nonthrowing type. A written
+      // specification on this templated definition still uses the deferred declarator path.
+      if (deferred_class_exception && !r.is_virtual && types.rec(r.type).fn_noexcept) {
+        const auto f = types.rec(candidate_type);
+        candidate_type = types.function(f.inner, f.params, f.variadic, f.linkage, f.fn_cv, f.fn_ref, true);
+      }
+      if (types.canonical(r.type) == types.canonical(candidate_type) ||
           (r.is_virtual && same_function_parameters(r.type, sem.type) &&
-           types.canonical(types.rec(r.type).inner) == types.canonical(types.rec(sem.type).inner)))
+           types.canonical(types.rec(r.type).inner) == types.canonical(types.rec(sem.type).inner))) {
+        if (candidate_type != sem.type && d.noexcept_condition) {
+          // [except.spec]: a condition must agree with the earlier bare specification.
+          bool ok = true;
+          const bool nonthrowing = !s_.dependent(*d.noexcept_condition) && ps_.noexcept_value(d.noexcept_condition, ok);
+          if (!ok) return false;
+          if (!nonthrowing) {
+            s_.diag(d.name_at, Diag::conflicting_declaration, d.name);
+            return false;
+          }
+        }
         m = &r;
+        matched_type = candidate_type;
+      }
     }
     if (!m || (!fn && !m->is_static)) {
       s_.diag(d.name_at, Diag::no_member_declared, d.name, *t);
@@ -5277,6 +5299,7 @@ private:
     auto md = p_->member_decl(m->entity);
     auto mem = md ? p_->decl_sema(*md) : std::nullopt;
     if (!mem) return false;
+    sem.type = matched_type;
     // [class.mfct]/1, [class.static.data]/3: outside its class a member is only defined, once. An
     // explicit specialization of a member of a class template specialization may be declared,
     // and replaces the member the class's instantiation declared or defined ([temp.expl.spec]).
@@ -5569,8 +5592,8 @@ private:
   // ([class.mem.general]: a member is declared once).
   // A member function `function` (its type) clashes only with a member that is not a function or
   // one of the same type ([class.mem.general]/5, [over.load]).
-  // A union cannot have a reference member ([class.union.general]). Completing an ordinary
-  // named union checks whether it has a written destructor for nontrivial variants.
+  // A union cannot have a reference member ([class.union.general]). Completing a named
+  // union checks whether it has a written destructor for nontrivial variants.
   bool variant_member(const parse::Declarator& d) {
     sema::Types& types = s_.types();
     if (types.is_reference(d.type)) {
@@ -5579,11 +5602,13 @@ private:
     }
     QualType et = d.type;
     while (types.is_array(et)) et = types.rec(et).inner;
-    const bool ordinary = !inst_ && s_.template_scopes.empty() &&
-                          p_->items().items[it_->parent].unnamed_type_ordinal == items::none;
+    const bool supported_scope = inst_
+        ? p_->is_namespace(s_.world().entities.rec(inst_->spec).scope)
+        : s_.template_scopes.empty();
+    const bool named = p_->items().items[it_->parent].unnamed_type_ordinal == items::none;
     const bool nontrivial_destruction = s_.destructor_of(et) != EntityId::none;
     if (q_.classes().copy_of(et).first ||
-        (!(ordinary && nontrivial_destruction) && (nontrivial_destruction || s_.has_member_inits(et)))) {
+        (!(supported_scope && named && nontrivial_destruction) && (nontrivial_destruction || s_.has_member_inits(et)))) {
       s_.diag(d.name_at, Diag::not_supported, Tk::kw_union);
       return false;
     }
@@ -8378,7 +8403,7 @@ const sema::ClassRec* Program::instantiate_class(EntityId spec, u32 point) {
   built.types = std::move(c.nested);
   for (const ast::MemberRec& m : c.members) built.access.push_back({m.entity, m.access});
   built.friends = std::move(c.friends);
-  special_members(k, spec, built);
+  special_members(k, spec, built, built.union_ ? &end_diags_ : nullptr);
   built.defined = true;
   return &classes_.publish(spec, std::move(built));
 }
