@@ -72,6 +72,14 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
   took one commit, and every slice test passed on the first run.
   - Learned on #43.
 
+- **Parallel sessions file the same gap within minutes.** The macOS ↔ Linux survey filed #652
+  ("default target is the host") one minute after a Codex session filed and claimed #651. A
+  search for "default target" missed #651, whose title said "host OS and architecture".
+  - Do: right before filing, list the newest issues (`gh issue list --state all --limit 30`)
+    and search two or three phrasings. If a duplicate slips through, close yours, remove your
+    claim, and put what you learned on the surviving issue.
+  - Learned on #659.
+
 - **A stacked PR merges into its base branch, not main.** #198 was stacked on #191's branch. The
   coordinator merged #191, then merged #198 without checking its base, so #198 landed in the
   already-merged branch and never reached main. The β epic was closed and the README described
@@ -115,6 +123,10 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
     template. Do: combine the new construct with each neighbouring one it can nest in or call
     (lambdas in templates and templates in lambdas) before the review.
   - Learned on #279; confirmed on #280 and #281.
+- **`tools/test <paths>` with no stage name runs every stage, `build` included.** Meant to
+  check a few tests in a fresh worktree, it started a full build there.
+  - Do: name the stages, as in `YCXX=<binary> tools/test core own/pp/x`, or `policy` alone.
+  - Learned on #659.
 - **A reviewer running your binary blocks your rebuilds.** On #337 the reviewer probed with the
   worktree's `build/bin/ycxx`, so the next step could not be built for 15 minutes.
   - Do: build the next step into a build directory in the scratchpad
@@ -295,6 +307,17 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
     window size, and keys written with pauses; the last frame is after the last `ESC [ H`.
   - Learned on #245.
 
+- **Test a terminal UI as a model fed events, and only the terminal around it under a pty.** The
+  trace browser's keys went untested while it read `/dev/tty` itself (#245). Moving its state and
+  drawing into a model that takes key and mouse events and returns frames of a given size (#635)
+  let every click, drag and selection be a unit test against plain-text goldens. A pty test then
+  covers only what the terminal does: modes, signals, resize, escape sequences.
+  - On macOS a pty's slave is revoked when its session leader exits, so the parent cannot read
+    the restored modes. Make the session leader a small process that runs the program as its
+    child and prints the modes once that child has died.
+  - Key a selection by the cells it covers, never by row numbers: a live feed, a sort or a
+    filter moves the rows under it (#636's one P1).
+  - Learned on #635 and #636.
 - **Reduce a compiler crash from the build system's exact command, with a script.** A GCC ICE
   under CMake seemed to vanish when re-run by hand. Two things cost about 20 minutes of
   bisecting:

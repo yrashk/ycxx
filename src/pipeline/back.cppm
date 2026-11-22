@@ -111,7 +111,7 @@ struct Entity {
 };
 
 // Certified on the typed definition, before IR drops lifetime information.
-enum class UnwindEligibility : std::uint8_t { none, cleanup_free, cleanup_free_with_throw, hosted_catch_all };
+enum class UnwindEligibility : std::uint8_t { none, cleanup_free, cleanup_free_with_throw, hosted_catch_all, hosted_cleanup };
 
 // A function definition: what `function_ir(F)` reads (irgen::FunctionInput, without a thunk's
 // locals).
@@ -131,6 +131,7 @@ struct FunctionDef {
   bool coalesced = false;
   UnwindEligibility unwind = UnwindEligibility::none;
   EntityId catch_all_callee = EntityId::none;  // for the complete-unit exception-specification check
+  ast::NodeId cleanup_call = ast::NodeId::none;
 };
 
 // A variable definition at namespace scope with its constant initializer, or `ConstId::none` for
@@ -194,6 +195,7 @@ struct TranslationUnit {
   std::optional<ast::Loc> virtual_declaration;
   std::optional<ir::IntThrowRuntime> int_throw;
   std::optional<ir::CatchAllRuntime> catch_all;
+  EntityId cleanup_resume = EntityId::none;
 };
 
 // What failed, at a location in an item when there is one. Every error here is something the α
@@ -1038,6 +1040,8 @@ engine::query_task<Generated> FunctionGen::run(engine::Ctx& cx, FnKey k) {
   input.dso = d.dso;
   input.hosted_catch_all = d.unwind == UnwindEligibility::hosted_catch_all;
   const bool linux = facts.target().triple == ast::x86_64_linux.triple;
+  input.check_unwind_cleanups = linux;
+  if (d.unwind == UnwindEligibility::hosted_cleanup) input.cleanup_call = d.cleanup_call;
   input.native_array_delete = linux;
   input.native_array_new = linux && (d.unwind == UnwindEligibility::cleanup_free ||
                                      d.unwind == UnwindEligibility::cleanup_free_with_throw);
@@ -1222,7 +1226,7 @@ engine::query_task<Lowered> Lower::run(engine::Ctx& cx, FnKey k) {
         if (definition != tu.functions.end() && definition->body.deduced)
           error = linux_signature_error(in, layout, definition->body.deduced_type, use, ordinary_callee);
       }
-      if (error.empty()) error = linux_ellipsis_error(in, layout, body, n);
+      if (error.empty() && op != ir::Op::invoke) error = linux_ellipsis_error(in, layout, body, n);
       if (error.empty()) continue;
       const ir::FunctionDebug& debug = co_await cx.fetch<FunctionDebug>(k);
       auto at = i < debug.loc.size() ? debug.loc[i] : ast::Loc{def.item, def.body_offset};
@@ -1232,6 +1236,7 @@ engine::query_task<Lowered> Lower::run(engine::Ctx& cx, FnKey k) {
     config.sysv_amd64 = true;
     if (def.unwind == UnwindEligibility::cleanup_free_with_throw) config.int_throw = tu.int_throw;
     if (def.unwind == UnwindEligibility::hosted_catch_all) config.catch_all = tu.catch_all;
+    if (def.unwind == UnwindEligibility::hosted_cleanup) config.cleanup_resume = tu.cleanup_resume;
     // Extend outgoing narrow results for interoperability. Lowering truncates incoming results
     // to the declared width, as the System V AMD64 psABI §3.2.3 leaves excess bits unspecified.
     config.min_result_bits = 32;
@@ -1258,7 +1263,7 @@ std::vector<SymbolReference> references(const l2::Function& body) {
   std::vector<SymbolReference> out;
   for (std::uint32_t n = 0; n < body.nodes.size(); ++n) {
     l2::Op op = body.nodes[n].op;
-    if (op == l2::Op::symbol || op == l2::Op::call || op == l2::Op::invoke)
+    if (op == l2::Op::symbol || op == l2::Op::call || op == l2::Op::invoke || op == l2::Op::invoke_cleanup)
       out.push_back({ir::EntityId(std::uint32_t(body.imms_of(ir::NodeId(n))[0])), op});
   }
   return out;
@@ -1458,7 +1463,7 @@ std::expected<obj::object, aarch64::CodegenError> assemble_linux(
     const std::uint32_t text = o.add_section(obj::standard_section::text);
     std::optional<std::uint32_t> frames, exception_tables, personality_cell;
     const bool has_handlers = std::ranges::any_of(functions, [](const LinuxFunction& f) {
-      return f.code->catch_all.has_value();
+      return f.code->unwind_sites.has_value();
     });
     if (has_handlers || std::ranges::any_of(functions, &LinuxFunction::cleanup_free_unwind))
       frames = o.add_section(obj::standard_section::eh_frame);
@@ -1491,11 +1496,11 @@ std::expected<obj::object, aarch64::CodegenError> assemble_linux(
           return std::unexpected(aarch64::CodegenError{f.entity, "a text relocation exceeds the object offset limit"});
         sec.relocate(linux_relocation(r.kind), target->second, r.addend, static_cast<std::uint32_t>(base + r.offset));
       }
-      if (f.cleanup_free_unwind || f.code->catch_all) {
+      if (f.cleanup_free_unwind || f.code->unwind_sites) {
         std::optional<std::uint32_t> lsda_anchor;
-        if (f.code->catch_all) {
-          if (f.weak) return std::unexpected(aarch64::CodegenError{f.entity, "catch-all frames require strong definitions"});
-          auto lsda = x86_64::catch_all_lsda(*f.code);
+        if (f.code->unwind_sites) {
+          if (f.weak) return std::unexpected(aarch64::CodegenError{f.entity, "hosted unwind frames require strong definitions"});
+          auto lsda = x86_64::exception_lsda(*f.code);
           if (!lsda) return std::unexpected(aarch64::CodegenError{f.entity, lsda.error()});
           auto& tables = o.sections[*exception_tables];
           if (lsda->size() + tables.size() > std::numeric_limits<std::uint32_t>::max())
