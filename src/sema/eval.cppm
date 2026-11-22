@@ -231,7 +231,7 @@ public:
       return std::nullopt;
     }
     while (auto paren = s_->as<ast::Paren>(expression)) {
-      expression = s_->extended({paren->operand.id, expression.begin + paren->operand.at, expression.end});
+      expression = {paren->operand.id, expression.begin + paren->operand.at, expression.end, paren->info};
     }
     const Evaluated result = evaluate_initializer(expression);
     if (!result.value) {
