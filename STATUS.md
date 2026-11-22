@@ -692,13 +692,18 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
   build's source inputs by canonical types and resolved operations. It reports conflicting contracts
   with both origins. A per-body control-flow query and worklist check named affine and linear
   resources, including concrete template instances. Transfers invalidate the old owner.
+  A `move_transfers<T>` entry or its class annotation authorizes a written nonthrowing move.
+  Conditional and comma initializers preserve the selected path and evaluate earlier operands
+  in order. The 1,280-resource fixture composes four source fragments and checks that an
+  equivalent reflection edit reuses the caller's proof while a conflicting edit reports both origins.
   Local const references can borrow named owners until the end of the reference's scope.
   The checker rejects consuming or transferring an owner during a shared borrow and rejects
   exposing the borrow through an address, capture, or unregistered operation.
   A `verified_observes` contract checks the observer's scalar reads and forwarding of the
   original shared borrow to other verified observers. Checked ELF and Mach-O objects carry
   observation requirements and guarantees through each forwarding function. The checked link
-  matches them to unique strong definitions in explicit input objects.
+  matches them to unique strong definitions in explicit input objects. One forwarded observation
+  can also require a verified effect bound from the selected provider.
   Local arrays and aggregates track registered owners by nested field and literal-index
   paths such as `queue.groups[1].tasks[0]`. Initializing, borrowing, transferring, and
   consuming a subobject follow the same checks as individual named resources.
@@ -714,8 +719,8 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
   through intervening providers and reports inconsistent trusted declarations it encounters.
   The checker rejects indirect calls and unmodeled implicit operations.
   An `at_most<Tag, N>` entry adds a static usage grade for one tag. The check adds
-  sequential costs, takes the maximum across alternatives, and carries graded contracts
-  through explicit object links. The C++20 package also offers scope-local runtime budgets
+  sequential costs, takes the maximum across alternatives, and counts terminating loop paths.
+  Explicit object links carry graded contracts. The C++20 package also offers scope-local runtime budgets
   and explicit scoped handlers. For a local handler bound to a named function, YCXX verifies
   the constructor and forwarding method, prevents the handler from escaping, and uses the
   selected function's outward effects and grade. The checked link verifies that function's
