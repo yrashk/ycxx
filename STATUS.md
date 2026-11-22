@@ -651,6 +651,8 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
   Member functions (with `this` first), closure call operators, function template
   specializations and calls through pointers use the same placement as ordinary functions
   ([#640](https://github.com/yrashk/ycxx/issues/640)).
+  Indirect calls preserve the last by-value argument with or without a class result destination
+  ([#693](https://github.com/yrashk/ycxx/issues/693)).
   [Design](docs/design/linux-integer-aggregates.md) · [#440](https://github.com/yrashk/ycxx/issues/440)
 - `-c` writes deterministic ELF64 relocatable objects through `src/obj/elf.cppm`. The reader
   accepts the supported x86-64 `ET_REL` subset emitted by ycxx. The native ELF linker consumes

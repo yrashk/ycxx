@@ -255,6 +255,8 @@ system_leaf:
                                 'pointer-aggregate-peer', 'pointer-aggregate-main')
         integer_aggregate_calls(compile, target, aggregates, scope, cold, cc,
                                 'member-aggregate-provider', 'member-aggregate-client')
+        integer_aggregate_calls(compile, target, aggregates, scope, cold, cc,
+                                'final-byval-calls', 'final-byval-main')
         compile(target, '-isystem', libycxx / 'include', '-nostdlib',
                 aggregates / 'pointer-aggregate-empty-list.cpp', libycxx / 'src/runtime/linkage/static.cpp',
                 '-o', 'aggregate-empty-list')

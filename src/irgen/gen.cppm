@@ -1805,18 +1805,23 @@ class Gen {
       args.push_back(rvalue(callee));
     }
     if (into) args.push_back(*into);
+    const std::size_t callee_slots = through ? 1 : 0;
     uint32_t byval = 0;
     for (ast::Child arg : ast_.children(c.args)) {
       At x = child(a, arg);
       // An argument object of class type: sema materialized it ([expr.call]/7).
-      if (argument_object(x)) byval |= 1u << args.size();
+      if (argument_object(x)) {
+        const std::size_t index = args.size() - callee_slots;
+        if (index >= 32) throw Unsupported{"a call with more than 32 arguments"};
+        byval |= 1u << index;
+      }
       args.push_back(argument(x));
     }
     if (through) return call_pointer(*through, result_type(c.info), args, byval, into ? 1 : 0);
     return call_fn(c.function, result_type(c.info), args, 0, false, byval, into ? 1 : 0);
   }
   // A call through a function pointer, `args[0]`, of function type `fn`: `call_fn`'s `call_ind`.
-  // The masks count the pointer as no argument.
+  // `byval` and `result_arg` already exclude the callee pointer from their indices.
   std::optional<ValueId> call_pointer(ast::QualType fn, ast::QualType result, std::span<const ValueId> args, uint32_t byval,
                                       uint32_t result_arg) {
     std::vector<ir::Ty> results;
@@ -1826,7 +1831,7 @@ class Gen {
     auto f = in_.types.get<ast::TFunction>(in_.types.canon(fn));
     std::size_t named = in_.seqs.size(f.params), passed = args.size() - 1 - (result_arg ? 1 : 0);
     std::size_t through_ellipsis = f.variadic && passed > named ? passed - named : 0;
-    std::uint64_t imms[] = {through_ellipsis, byval >> 1, result_arg};
+    std::uint64_t imms[] = {through_ellipsis, byval, result_arg};
     ir::Flags flags = f.variadic ? ir::bit(ir::Flag::variadic) : 0;
     ir::NodeId n = stateful(ir::Op::call_ind, results, args, imms, flags);
     if (has_value) return b_.result(n, 1);
