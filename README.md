@@ -374,7 +374,8 @@ written default member initializer are value-initialized.
 - named function-pointer declarations with qualified return types, qualified names in grouped
   declarators, and unnamed function-pointer parameters;
 - parenthesized direct initialization from functional conversions such as `S b(S(1));` and
-  `Holder h(Tag(n), 2);`. [#769](https://github.com/yrashk/ycxx/issues/769)
+  `Holder h(Tag(n), 2);`, including an additive expression inside a grouped operand as in
+  `Holder h(Tag(n), Tag(n + 1));`. [#769](https://github.com/yrashk/ycxx/issues/769) · [#813](https://github.com/yrashk/ycxx/issues/813)
 - `[[…]]` attributes, the GNU attributes and `asm` labels the macOS SDK's headers use, the
   GNU pointer qualifiers glibc uses, and the type-trait built-ins libycxx's headers use
   (`__is_same`, `__remove_cv`, …). `__is_destructible`, `__is_nothrow_destructible`, and
