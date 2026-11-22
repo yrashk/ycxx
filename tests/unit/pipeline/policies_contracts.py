@@ -683,14 +683,18 @@ with tempfile.TemporaryDirectory() as directory:
           auto source = example::start();
           auto selected = choose ? example::handoff(static_cast<Work&&>(source)) :
                                    (example::inspect(source), example::handoff(static_cast<Work&&>(source)));
+        #ifndef SELECTED_LOCAL_ONLY
           Fields fields{choose ? example::start() : example::start(),
                         {(example::inspect(selected), example::start())}};
           Work tasks[2]{choose ? example::start() : example::start(), example::start()};
+        #endif
           example::finish(static_cast<Work&&>(selected));
+        #ifndef SELECTED_LOCAL_ONLY
           example::finish(static_cast<Work&&>(fields.first));
           example::finish(static_cast<Work&&>(fields.inner.value));
           example::finish(static_cast<Work&&>(tasks[0]));
           example::finish(static_cast<Work&&>(tasks[1]));
+        #endif
         }
     """
     selected = write("selected.cpp", selected_source)
@@ -708,6 +712,17 @@ with tempfile.TemporaryDirectory() as directory:
                    check=True, timeout=30)
     for extra in ((), ("alternate",)):
         assert subprocess.run([executable, *extra], timeout=10).returncode == 0
+
+    # #740 tracks native lowering for the field and array initializers.
+    selection_flags = ["-fcheck-policies", "-DSELECTED_LOCAL_ONLY"]
+    selected_macho = root / "selected-macho"
+    subprocess.run([compiler, "cxx", "--no-daemon", "--target=arm64-apple-darwin", *selection_flags,
+                    "-I", include, "-I", examples, selected, "-o", selected_macho], check=True, timeout=30)
+    assert selected_macho.read_bytes()[:4] == bytes.fromhex("cffaedfe")
+    # PARITY: by design: run the linked Mach-O executable on its native host and ISA.
+    if sys.platform == "darwin" and platform.machine() in ("arm64", "aarch64"):
+        for extra in ((), ("alternate",)):
+            subprocess.run([selected_macho, *extra], check=True, timeout=10)
 
     for source, extra in ((nested, ()), (nested_skip, ("skip",)), (array, ()), (array_skip, ("skip",)),
                           (composed, ()), (composed_skip, ("skip",)), (local_records, ())):
@@ -869,6 +884,9 @@ with tempfile.TemporaryDirectory() as directory:
         assert subprocess.run([native], timeout=10).returncode == 0
         subprocess.run([*args, str(array_skip), "-o", str(native)], check=True, timeout=30)
         assert subprocess.run([native, "skip"], timeout=10).returncode == -signal.SIGILL
+        subprocess.run([*args, *selection_flags, selected, "-o", native], check=True, timeout=30)
+        for extra in ((), ("alternate",)):
+            subprocess.run([native, *extra], check=True, timeout=10)
         for source in (composed, local_records, direct_move, tagged_move, annotated_move, reflected_move):
             subprocess.run([*args, "-fcheck-policies", str(source), "-o", str(native)], check=True, timeout=30)
             assert subprocess.run([native], timeout=10).returncode == 0
