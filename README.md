@@ -34,6 +34,7 @@ freestanding C++ subset for x86-64 Linux. The standard library is out of reach: 
 Ordinary function pointers and references preserve concrete `noexcept` type identity.
 A nonthrowing function can be used where the corresponding potentially throwing type is expected.
 The unary `noexcept` operator checks whether calls and constructions can throw.
+Member function template specializations preserve bare `noexcept` in their function types.
 [#729](https://github.com/yrashk/ycxx/issues/729)
 Ordinary constructor declarations and definitions check that their concrete exception specifications agree.
 Member function templates can substitute a dependent exception specification when it is needed.
@@ -49,6 +50,8 @@ and Mach-O linker on arm64 macOS, where `arm64-apple-darwin` is the default targ
 object files from Clang or GCC. Variadic functions can be defined with `<cstdarg>` on both
 macOS and Linux ([#647](https://github.com/yrashk/ycxx/issues/647)). Errors are reported as
 `file:line:col: error: …`.
+Errors during replay of a written default member initializer point to the initializer.
+[#806](https://github.com/yrashk/ycxx/issues/806)
 
 The arm64 Mach-O linker preserves supported cleanup-free and cleanup-only DWARF frames from input objects.
 [Mach-O unwind support #72](https://github.com/yrashk/ycxx/issues/72)
@@ -66,7 +69,8 @@ builds and passes its tests on both hosts, and compiles a 40,000-statement funct
 instead of Debug's 5.3 s on an M-series Mac ([#726](https://github.com/yrashk/ycxx/issues/726)).
 
 Single-expression `auto(x)` and `auto{x}` perform scalar and pointer decay-copy, including
-array and function decay. Function-template bodies can defer supported dependent operands to
+array and function decay. Non-type template parameters can have enumeration types
+([#774](https://github.com/yrashk/ycxx/issues/774)). Function-template bodies can defer supported dependent operands to
 instantiation, and a function template whose signature holds a dependent variable-template-id
 or its negation compiles to an object ([#773](https://github.com/yrashk/ycxx/issues/773)). C++26
 pack-index-specifiers `T...[I]` select a type from a pack ([#297](https://github.com/yrashk/ycxx/issues/297);
@@ -197,13 +201,14 @@ peer code. [#572](https://github.com/yrashk/ycxx/issues/572) ·
 On x86-64 Linux, an eligible ycxx function can also throw an `int` to a hosted peer's handler.
 A host-linked ycxx function can use one `catch (...)` to return an integer literal when
 a direct call on its parameter to an externally defined `int(int)` function throws.
-A host-linked void function can also destroy one initialized aggregate local on both exits
-from an external `void()` call and let the original exception reach a peer handler.
 A supported union constructor can destroy its active member when its body call throws and
 propagate an exception from its initializer before the member's lifetime begins.
 [#578](https://github.com/yrashk/ycxx/issues/578)
-· [#583](https://github.com/yrashk/ycxx/issues/583) · [#663](https://github.com/yrashk/ycxx/issues/663)
-· [#738](https://github.com/yrashk/ycxx/issues/738)
+· [#583](https://github.com/yrashk/ycxx/issues/583) · [#738](https://github.com/yrashk/ycxx/issues/738)
+
+On both hosts, a system-linked void function can destroy one initialized aggregate local
+on both exits from an external `void()` call and let the original exception reach a peer handler.
+[#663](https://github.com/yrashk/ycxx/issues/663) · [#781](https://github.com/yrashk/ycxx/issues/781)
 
 Both targets support cooked integer user-defined literals through namespace-scope literal
 operators with an `unsigned long long` parameter, including constant evaluation.
@@ -260,6 +265,10 @@ initializer takes precedence. The same rules apply to ordinary non-inline namesp
 whose dynamic initialization runs in definition order.
 [#118](https://github.com/yrashk/ycxx/issues/118)
 
+An out-of-line constructor evaluates a default member initializer with the namespace names
+visible where the initializer was written and lookup in the complete enclosing class.
+[#764](https://github.com/yrashk/ycxx/issues/764)
+
 Automatic declarations such as `Point p(3, 4);` can initialize flat aggregates with public
 arithmetic fields. Supplied expressions initialize the fields in declaration order. Omitted
 fields use their default member initializer when available and otherwise get zero. A runtime
@@ -288,7 +297,8 @@ written default member initializer are value-initialized.
   Free function templates can instantiate omitted dependent scalar defaults after overload selection.
   Ordinary free binary operators use argument-dependent lookup, including associated base namespaces.
   Supported dependent binary operators on ordinary non-template classes also find associated
-  nonmember candidates at instantiation.
+  nonmember candidates at instantiation. Ordinary unary minus can find hidden friends by
+  argument-dependent lookup.
   Nonmember operators can be called explicitly by name, including with namespace qualification.
   [#219](https://github.com/yrashk/ycxx/issues/219)
   Overloaded free functions can take braced arguments for arithmetic parameters
@@ -356,7 +366,8 @@ written default member initializer are value-initialized.
   and directives;
 - named function-pointer declarations with qualified return types, qualified names in grouped
   declarators, and unnamed function-pointer parameters;
-- parenthesized direct initialization from functional conversions such as `S b(S(1));`;
+- parenthesized direct initialization from functional conversions such as `S b(S(1));` and
+  `Holder h(Tag(n), 2);`. [#769](https://github.com/yrashk/ycxx/issues/769)
 - `[[…]]` attributes, the GNU attributes and `asm` labels the macOS SDK's headers use, the
   GNU pointer qualifiers glibc uses, and the type-trait built-ins libycxx's headers use
   (`__is_same`, `__remove_cv`, …). `__is_destructible`, `__is_nothrow_destructible`, and

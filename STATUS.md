@@ -338,6 +338,11 @@ What is true of the code today. Work in progress and its owners are tracked in
     omitted frames, native YCXX linking and system-linked exception propagation on macOS.
     Native throw lowering and landing pads are tracked in [#648](https://github.com/yrashk/ycxx/issues/648).
     [#737](https://github.com/yrashk/ycxx/issues/737)
+  - A system-linked arm64 function can destroy one initialized aggregate local on both exits from
+    a direct external `void()` call. The landing pad saves the exception header, runs the same
+    destructor as the normal continuation, and resumes the original exception. The object's
+    cleanup-only LSDA and frame records are checked in `unit.darwin_local_unwind`.
+    [Design](docs/design/aarch64-hosted-cleanup.md) · [#781](https://github.com/yrashk/ycxx/issues/781)
   - Not yet: thread-local variables, dead stripping, literal merging, branch islands beyond
     ±128 MiB, other dylibs' re-exports, incremental relinking, and import addends outside
     0..255 (`DYLD_CHAINED_IMPORT_ADDEND`). `__LLVM` (embedded bitcode), `__LD` and debug sections
@@ -1112,6 +1117,12 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   other member types and exceptional cleanup remain in #118.
   The fixtures in `tests/own/classes/scalar-default-member-init/` cover both targets in syntax
   checks and native Linux x86-64 execution.
+  Diagnostics during replay use the written initializer's source position.
+  [#806](https://github.com/yrashk/ycxx/issues/806)
+- Default member initializer replay in written constructors uses the initializer's original
+  namespace for ordinary and qualified lookup, and its original lexical point for ADL.
+  Lookup still sees the enclosing class complete, including its hidden friends.
+  [#764](https://github.com/yrashk/ycxx/issues/764)
 
 - An automatic declaration such as `Point p(3, 4);` can initialize a flat aggregate with
   public arithmetic fields and implicit trivial destruction. The fallback applies when
@@ -1751,6 +1762,19 @@ template's tokens again with the arguments bound.
   specializations. `&&` follows #671; type-trait operations (`__is_same(T, U)`) still have no
   symbol (#780).
 
+## Enumeration-typed template parameters (#774)
+
+- A non-type template parameter may have an enumeration type ([temp.param]/7), scoped or
+  unscoped, with a fixed underlying type, in a namespace. Its arguments are converted constant
+  expressions of that type ([temp.arg.nontype]), so an integer is rejected. For an integral
+  parameter, an unscoped enumeration converts through its underlying type, without narrowing, and a
+  scoped one does not convert. Explicit and partial specializations, defaults and deduction from a
+  specialization work.
+- Symbols write an argument as `L <enumeration type> <value> E`, with `n` before a negative value,
+  as Clang and GCC do (`tests/own/abi/enum-template-args.run.cpp`, with a Clang peer).
+- Tests: `tests/own/templates/enum-parameters/`. Not yet: a functional cast as a template argument,
+  `h<E(5)>()`, which the template-argument parser takes for a type-id (#810).
+
 ## Pack-index-specifiers (#297)
 
 - `T...[I]` ([dcl.type.pack.index]) names the element of a template type parameter pack, with
@@ -1931,6 +1955,8 @@ session's.*
   and a block declaration can take an unnamed function-pointer parameter (#449).
 - Parenthesized direct initialization accepts functional conversions with a braced operand or an
   initial literal, including `S b(S(1));` and `S b(S{1});` ([dcl.ambig.res], #290).
+  A later expression can disambiguate a grouped functional conversion, as in
+  `Holder h(Tag(n), 2);` ([dcl.ambig.res], #769).
 - Qualified functional conversions check access to aliases and typedefs declared directly in an
   ordinary non-template record, for both `C::T(args)` and `C::T{args}`. They use the existing
   member and friend access rules ([expr.type.conv], [class.access.general], #216).
@@ -2141,6 +2167,8 @@ Fable decided the representation (ast.md §6.6); the Opus session wrote the code
 - Ordinary binary hidden friend operators participate in ADL and compete with nonmember
   overloads from the associated namespaces. Qualified ordinary lookup still requires a
   namespace declaration. The existing Linux inline gate checks both object orders.
+- Ordinary unary minus finds hidden friends by ADL and ranks their operand conversions with
+  ordinary nonmember and member candidates. Access and deletion are checked for the selected operator.
 - **Checks** (`Sema::accessible`, `check_access`): a private or protected member may be named in
   a member function or default member initializer of its class, in the class's scope (the
   initializer of a static data member defined outside it), or in a friend function or friend
@@ -3021,13 +3049,16 @@ and runtime integration with ycxx's own linker remain under [#89]. See the
 argument operations, and temporary destruction ([except.spec]). A construction
 in a function template body can be checked after substitution.
 
-## Dependent exception specifications on member templates (#713)
+## Exception specifications on member function templates (#713, #804)
 
 A selected ordinary member function template can instantiate its written
 `noexcept(expression)` with the class and function template arguments
 ([except.spec], [temp.inst]). Its parameter and class scopes are available
 during replay. Class instantiation leaves the specification of an unused
 member template deferred.
+
+Selected member function template specializations preserve bare `noexcept`
+for calls and for selection against a static function-pointer target.
 
 ## The address of an overload set, ι (#313, #337, 2026-11-19)
 

@@ -23,6 +23,9 @@ endif()
 add_test(NAME unit.darwin_cleanup_free_unwind
   COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/darwin_cleanup_free_unwind.py
           $<TARGET_FILE:ycxxc> ${darwin_unwind_host})
+add_test(NAME unit.darwin_local_unwind
+  COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/darwin_local_unwind.py
+          $<TARGET_FILE:ycxxc> ${darwin_unwind_host})
 # PARITY: by design: runs what it links with the host's linker; the Linux block registers its own
 if(APPLE AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(arm64|aarch64)$" AND NOT CMAKE_CROSSCOMPILING)
   # The Mach-O counterpart of unit.linux_inline (#124).

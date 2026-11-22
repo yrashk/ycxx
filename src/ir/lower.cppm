@@ -1006,7 +1006,7 @@ class Lowering {
         return {};
       }
       case Op::invoke: {
-        if (config_.sysv_amd64 && config_.cleanup_resume != EntityId::none && !catch_edges_ &&
+        if (config_.cleanup_resume != EntityId::none && !catch_edges_ &&
             nd.nopnd == 1 && nd.nres == 1 && imms[1] == 0) {
           const auto edges = f_.succs_of(n);
           if (edges.size() != 2 || edges[0].nargs || edges[1].nargs) return fail("unsupported hosted cleanup successor");

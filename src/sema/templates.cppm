@@ -86,7 +86,7 @@ public:
   // array of void, references, functions or unknown-bound arrays, a function returning an array
   // or a function, or a parameter of type void. A type parameter's cv-qualifiers are added to its argument
   // ([dcl.type.cv]: on a reference they are dropped).
-  std::optional<QualType> substitute(QualType t, const Bindings& b) {
+  std::optional<QualType> substitute(QualType t, const Bindings& b, bool trailing_return = false) {
     TypeRec r = types().rec(t);
     Cv cv = Types::cv(types().canonical(t));
     switch (r.kind) {
@@ -168,8 +168,13 @@ public:
       return types().array(*e, r.bound);
     }
     case TypeKind::function: {
-      auto ret = substitute(r.inner, b);
-      if (!ret || types().is_array(*ret) || types().is_function(*ret)) return std::nullopt;
+      auto return_type = [&]() -> std::optional<QualType> {
+        auto ret = substitute(r.inner, b);
+        if (!ret || types().is_array(*ret) || types().is_function(*ret)) return std::nullopt;
+        return ret;
+      };
+      auto ret = trailing_return ? std::optional<QualType>{} : return_type();
+      if (!trailing_return && !ret) return std::nullopt;
       std::vector<QualType> ps;
       auto append_parameter = [&](QualType p) {
         if (types().is_void(p) || types().is_cvref_function(p)) return false;
@@ -188,6 +193,8 @@ public:
         auto s = substitute(p, b);
         if (!s || !append_parameter(*s)) return std::nullopt;
       }
+      if (trailing_return) ret = return_type();
+      if (!ret) return std::nullopt;
       return types().function(*ret, ps, r.variadic, r.linkage, r.fn_cv, r.fn_ref, r.fn_noexcept);
     }
     case TypeKind::dep_spec: {
@@ -383,7 +390,7 @@ public:
   }
 
   std::optional<ConstId> unary_trait_value(ast::DepOp op, QualType type)
-    pre(op != ast::DepOp::is_same && op != ast::DepOp::logical_not &&
+    pre(op != ast::DepOp::is_same && op != ast::DepOp::logical_not && op != ast::DepOp::logical_and &&
         op != ast::DepOp::is_constructible && op != ast::DepOp::is_nothrow_constructible &&
         op != ast::DepOp::is_trivially_constructible && op != ast::DepOp::is_assignable &&
         op != ast::DepOp::is_nothrow_assignable && op != ast::DepOp::is_trivially_assignable &&
@@ -441,7 +448,8 @@ public:
     case ast::DepOp::is_convertible:
     case ast::DepOp::is_nothrow_convertible:
     case ast::DepOp::is_base_of:
-    case ast::DepOp::logical_not: std::unreachable();
+    case ast::DepOp::logical_not:
+    case ast::DepOp::logical_and: std::unreachable();
     }
     return w_->values.integer(types().builtin(Builtin::bool_), result);
   }
@@ -452,6 +460,13 @@ public:
     if (!ins().values.is<ast::VDepVariable>(v) || !structural_value(v)) return std::nullopt;
     for (std::size_t i = 0; i < negations; ++i) v = logical_not_value(v);
     return v;
+  }
+
+  std::optional<ConstId> conjunction_value(ConstId left, ConstId right) {
+    if (!structural_value(left) || !structural_value(right)) return std::nullopt;
+    QualType type = types().builtin(Builtin::bool_);
+    const std::array operands{value_arg(type, left), value_arg(type, right)};
+    return ins().intern_value(ast::VDepOp{ast::DepOp::logical_and, ins().intern_seq(std::span<const TemplateArg>(operands))});
   }
 
   // Template arguments `args` with the parameters `b` binds replaced by their arguments; a pack's
@@ -559,14 +574,9 @@ public:
         if (!rhs) return std::nullopt;
         return is_same_value(lhs->type, rhs->type);
       }
-      case ast::DepOp::logical_not: {
-        ConstId operand_value = ins().seqs.at(op.operands, 0).value;
-        auto operand = ins().values.is<ast::VDepVariable>(operand_value)
-            ? substitute_variable_value(operand_value, b, [this](EntityId spec) { return bool_variable_value(spec); })
-            : substitute_value(operand_value, b);
-        if (!operand || !structural_value(*operand)) return std::nullopt;
-        return logical_not_value(*operand);
-      }
+      case ast::DepOp::logical_not:
+      case ast::DepOp::logical_and:
+        return substitute_boolean_operand(v, b, BooleanSubstitution::evaluate);
       case ast::DepOp::is_reference:
       case ast::DepOp::is_const:
       case ast::DepOp::is_volatile:
@@ -1258,9 +1268,30 @@ public:
     Bindings given = bindings(depth, out);
     for (auto& a : given.levels[depth])
       if (a && a->kind == TemplateArgKind::pack) a = std::nullopt;
+    auto valid_return = [&] {
+      auto ret = substitute(f.inner, given);
+      return ret && !types().is_array(*ret) && !types().is_function(*ret);
+    };
+    std::vector<QualType> explicit_parameters;
+    std::optional<QualType> explicit_pack_pattern;
+    if (!explicit_args.empty()) {
+      // Substitute in written order before deduction can fail ([temp.deduct.general]).
+      if (!tmpl.has_trailing_return && !valid_return()) return std::nullopt;
+      for (std::size_t i = 0; i < fixed; ++i) {
+        auto p = substitute(f.params[i], given);
+        if (!p || types().is_void(*p) || types().is_cvref_function(*p)) return std::nullopt;
+        explicit_parameters.push_back(*p);
+      }
+      if (trailing) {
+        explicit_pack_pattern = substitute(types().rec(f.params[n - 1]).inner, given);
+        if (!explicit_pack_pattern) return std::nullopt;
+      }
+      if (tmpl.has_trailing_return && !valid_return()) return std::nullopt;
+    }
     for (std::size_t i = 0; i < fixed && i < args.size(); ++i) {
       if (!args[i].deducible && args[i].overloads.empty()) continue;
-      auto p0 = substitute(tmpl_param_type(tmpl, i), given);
+      auto p0 = explicit_args.empty() ? substitute(f.params[i], given)
+                                      : std::optional{explicit_parameters[i]};
       if (!p0) return std::nullopt;
       if (!mentions(*p0, depth)) continue;  // checked by overload resolution as a conversion
       if (!args[i].overloads.empty()) {
@@ -1271,7 +1302,8 @@ public:
       if (!deduce(p, a, depth, out, allow)) return std::nullopt;
     }
     if (trailing) {
-      auto p0 = substitute(types().rec(f.params[n - 1]).inner, given);
+      auto p0 = explicit_args.empty() ? substitute(types().rec(f.params[n - 1]).inner, given)
+                                      : explicit_pack_pattern;
       if (!p0) return std::nullopt;
       // The elements given explicitly take the first remaining arguments.
       std::size_t skip = 0;
@@ -1490,12 +1522,21 @@ public:
     if (ins().values.is<ast::VDepOp>(pattern) && !types().is(t, Builtin::bool_)) return std::nullopt;
     if (types().is_dependent(t) || ins().values.is_dependent(a.value)) return TemplateArg{TemplateArgKind::value, t, a.value};
     if (types().is_integral(t) && ins().values.is<ast::VInt>(a.value)) {
-      ConstId c = ast::convert_integral(ins(), w_->target, a.value, t);
-      ConstId back = ast::convert_integral(ins(), w_->target, c, a.type);
+      // An unscoped enumeration converts through its underlying type ([conv.prom]); a scoped one
+      // does not convert ([dcl.enum]).
+      QualType from = a.type;
+      if (types().is_enum(from)) {
+        const EnumRec* e = classes_->find_enum(types().enum_of(types().canonical(from)));
+        if (!e || e->scoped || !e->underlying) return std::nullopt;
+        from = *e->underlying;
+      }
+      ConstId value = ast::convert_integral(ins(), w_->target, a.value, from);
+      ConstId c = ast::convert_integral(ins(), w_->target, value, t);
+      ConstId back = ast::convert_integral(ins(), w_->target, c, from);
       auto neg = [&](ConstId v, QualType of) {
         return ast::is_signed(w_->target, *types().builtin_of(of)) && ast::is_negative(ast::int_bits(ins(), v));
       };
-      if (back != a.value || neg(c, t) != neg(a.value, a.type)) return std::nullopt;  // narrowing ([dcl.init.list]/7)
+      if (back != value || neg(c, t) != neg(value, from)) return std::nullopt;  // narrowing ([dcl.init.list]/7)
       return TemplateArg{TemplateArgKind::value, t, c};
     }
     if (types().is_pointer(t) && ins().values.is<ast::VNullptr>(a.value)) return TemplateArg{TemplateArgKind::value, t, a.value};
@@ -1569,7 +1610,7 @@ public:
   // The type of a specialization's declaration: the template's function type with `args`.
   std::optional<QualType> specialization_type(const ast::DeclSema& tmpl, std::span<const TemplateArg> args) {
     std::vector<ast::TemplateParamSema> params = w_->ins.seqs.elements(tmpl.template_params);
-    return substitute(tmpl.type, Bindings::of(params.empty() ? 0 : params[0].depth, args));
+    return substitute(tmpl.type, Bindings::of(params.empty() ? 0 : params[0].depth, args), tmpl.has_trailing_return);
   }
 
   // ------------------------------------------------------------ partial specializations ([temp.spec.partial])
@@ -1727,8 +1768,11 @@ public:
 private:
   static constexpr u16 unique_depth = 0x7fff;
 
+  enum class BooleanSubstitution { evaluate, defer, discard };
+
   std::optional<ConstId> substitute_variable_value(ConstId v, const Bindings& b,
-                                                  const std::function<std::optional<ConstId>(EntityId)>& read) {
+                                                  const std::function<std::optional<ConstId>(EntityId)>& read,
+                                                  BooleanSubstitution mode = BooleanSubstitution::evaluate) {
     auto ref = ins().values.get<ast::VDepVariable>(v);
     auto args = substitute_args(ins().seqs.elements(ref.args), b);
     if (!args) return std::nullopt;
@@ -1736,8 +1780,29 @@ private:
       ref.args = ins().intern_seq(std::span<const TemplateArg>(*args));
       return ins().intern_value(ref);
     }
-    if (!read) return std::nullopt;
-    return read(specialize_variable(ref.templ, *args));
+    const EntityId spec = specialize_variable(ref.templ, *args);
+    if (mode != BooleanSubstitution::evaluate) {
+      auto global = variable_global ? variable_global(spec) : std::nullopt;
+      auto type = global ? std::optional(global->type) : declared_variable_type(spec, ref.templ, *args);
+      if (!type || !types().is(types().referee(*type), Builtin::bool_)) return std::nullopt;
+      if (mode == BooleanSubstitution::discard) {
+        if (!global && demand_variable) demand_variable(spec, *type);
+        return w_->values.integer(types().builtin(Builtin::bool_), false);
+      }
+      ref.args = ins().intern_seq(std::span<const TemplateArg>(*args));
+      return ins().intern_value(ref);
+    }
+    return read ? read(spec) : std::nullopt;
+  }
+
+  std::optional<QualType> declared_variable_type(EntityId spec, EntityId templ, std::span<const TemplateArg> args) {
+    if (variable_specialization_type)
+      if (auto type = variable_specialization_type(spec)) return type;
+    if (!template_decl) return std::nullopt;
+    auto pattern = template_decl(templ);
+    if (!pattern) return std::nullopt;
+    auto params = ins().seqs.elements(pattern->template_params);
+    return substitute(pattern->type, Bindings::of(params.empty() ? 0 : params.front().depth, args));
   }
 
   // The selected specialization supplies its own type and constant initializer. Check those
@@ -1752,6 +1817,32 @@ private:
         !types().is(ins().values.get<ast::VInt>(*g->value).type, Builtin::bool_))
       return std::nullopt;
     return g->value;
+  }
+
+  // Preserve the right operand without reading its specialization while the left is dependent.
+  std::optional<ConstId> substitute_boolean_operand(ConstId v, const Bindings& b, BooleanSubstitution mode) {
+    if (ins().values.is<ast::VDepVariable>(v))
+      return substitute_variable_value(v, b, [this](EntityId spec) { return bool_variable_value(spec); }, mode);
+    if (!ins().values.is<ast::VDepOp>(v)) return substitute_value(v, b);
+    auto op = ins().values.get<ast::VDepOp>(v);
+    if (op.op != ast::DepOp::logical_not && op.op != ast::DepOp::logical_and)
+      return substitute_value(v, b);
+    auto left = substitute_boolean_operand(ins().seqs.at(op.operands, 0).value, b, mode);
+    if (!left || !structural_value(*left)) return std::nullopt;
+    if (op.op == ast::DepOp::logical_not) return logical_not_value(*left);
+    const bool left_dependent = ins().values.is_dependent(*left);
+    const bool short_circuited = !left_dependent && ast::int_bits(ins(), *left) == ast::Bits128{};
+    auto right_mode = mode;
+    if (mode == BooleanSubstitution::evaluate) {
+      if (left_dependent) right_mode = BooleanSubstitution::defer;
+      else if (short_circuited) right_mode = BooleanSubstitution::discard;
+    }
+    auto right = substitute_boolean_operand(ins().seqs.at(op.operands, 1).value, b, right_mode);
+    if (!right || !structural_value(*right)) return std::nullopt;
+    if (mode == BooleanSubstitution::defer || left_dependent || ins().values.is_dependent(*right))
+      return conjunction_value(*left, *right);
+    if (short_circuited) return *left;
+    return *right;
   }
 
   ConstId logical_not_value(ConstId v) {
@@ -1836,7 +1927,6 @@ private:
     return b;
   }
 
-  QualType tmpl_param_type(const ast::DeclSema& tmpl, std::size_t i) { return types().rec(tmpl.type).params[i]; }
 
   QualType strip(QualType t) {
     t = types().referee(t);
@@ -1854,6 +1944,8 @@ public:
   std::function<std::optional<ast::DeclSema>(EntityId)> template_decl;
   std::function<std::optional<ConstId>(EntityId)> variable_constant;
   std::function<std::optional<interp::GlobalVar>(EntityId)> variable_global;
+  std::function<std::optional<QualType>(EntityId)> variable_specialization_type;
+  std::function<void(EntityId, QualType)> demand_variable;
 
 private:
   // The template-head whose parameters a deduction deduces, and its packs whose leading elements

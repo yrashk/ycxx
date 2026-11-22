@@ -132,6 +132,92 @@ void rejects(std::string_view reason, const obj::object& o) {
   check(!result && result.error().contains(reason), reason);
 }
 
+void rtti_name_group() {
+  constexpr std::string_view signature = "_ZTS9RttiProbe";
+  constexpr std::string_view name_bytes("9RttiProbe\0", 11);
+  constexpr std::string_view ordinary_bytes("ORD!\0", 5);
+  obj::object input;
+  input.arch = obj::target::x86_64_linux;
+  const auto ordinary = input.add_section(obj::standard_section::rodata);
+  const auto member = input.add_section(obj::standard_section::rodata);
+  input.sections[ordinary].emit(ordinary_bytes);
+  input.sections[member].emit(name_bytes);
+  const auto name = input.define(std::string(signature), obj::binding::global, member, 0);
+  input.symbols[name].weak = true;
+  input.symbols[name].object_size = name_bytes.size();
+  // The local symbol sorts ahead of the signature in the emitted table.
+  input.define("local", obj::binding::local, ordinary, 0);
+  const auto data = input.define("ordinary_data", obj::binding::global, ordinary, 0);
+  input.symbols[data].object_size = ordinary_bytes.size();
+  input.comdat_groups.push_back({std::string(signature), {member}});
+
+  auto bad = input;
+  bad.symbols[name].object_size = 0;
+  rejects("invalid ELF COMDAT signature symbol", bad);
+  bad = input;
+  bad.comdat_groups.front().signature = "missing";
+  rejects("missing ELF COMDAT signature symbol", bad);
+  bad = input;
+  bad.symbols[name].object_size = name_bytes.size() + 1;
+  rejects("object symbol '_ZTS9RttiProbe' is outside its section", bad);
+
+  const auto file = obj::elf::write_object(input);
+  check(file.has_value(), file ? "write RTTI name COMDAT" : file.error());
+  if (!file) return;
+  const auto read = obj::elf::read_object(*file, "rtti-name.o");
+  check(read && read->comdat_groups == input.comdat_groups && read->sections == input.sections,
+        "read the RTTI name signature, member section and separate ordinary data");
+
+  if (file->size() < 64) return check(false, "RTTI name ELF header fits the file");
+  const auto shoff = field(*file, 40, 8);
+  const auto shnum = field(*file, 60, 2);
+  const auto contains = [&](std::uint64_t start, std::uint64_t size) {
+    return start <= file->size() && size <= file->size() - start;
+  };
+  if (field(*file, 58, 2) != 64 || !contains(shoff, shnum * 64))
+    return check(false, "RTTI name section header table fits the file");
+  const auto shdr = [&](std::uint64_t index, std::uint64_t offset, std::uint64_t width) {
+    return field(*file, shoff + index * 64 + offset, width);
+  };
+  std::uint64_t group = 0, symtab = 0;
+  for (std::uint64_t i = 1; i < shnum; ++i) {
+    if (shdr(i, 4, 4) == 17) {
+      check(group == 0, "one RTTI name SHT_GROUP");
+      group = i;
+    }
+    if (shdr(i, 4, 4) == 2) symtab = i;
+  }
+  if (group == 0 || symtab == 0) return check(false, "RTTI name group and symbol table present");
+  const auto group_offset = shdr(group, 24, 8);
+  const auto symbol_offset = shdr(symtab, 24, 8);
+  if (!contains(group_offset, 8) || !contains(symbol_offset, 4 * 24))
+    return check(false, "RTTI group and symbol records fit the file");
+  check(shdr(group, 8, 8) == 0 && shdr(group, 32, 8) == 8 && shdr(group, 56, 8) == 4 &&
+        shdr(group, 40, 4) == symtab && shdr(group, 44, 4) == 2 && shdr(symtab, 44, 4) == 2,
+        "group links to the symbol table and uses the signature index after the local symbol");
+  const auto member_index = field(*file, group_offset + 4, 4);
+  if (member_index <= group || member_index >= shnum)
+    return check(false, "RTTI name group header precedes its member");
+  check(field(*file, group_offset, 4) == 1, "RTTI name group starts with GRP_COMDAT");
+  check(shdr(member_index, 4, 4) == 1 && shdr(member_index, 8, 8) == 0x202,
+        "RTTI member is read-only SHT_PROGBITS with SHF_ALLOC and SHF_GROUP");
+  const auto name_record = symbol_offset + 2 * 24;
+  check(field(*file, name_record + 4, 1) == 0x21 && field(*file, name_record + 5, 1) == 0 &&
+        field(*file, name_record + 6, 2) == member_index && field(*file, name_record + 8, 8) == 0 &&
+        field(*file, name_record + 16, 8) == name_bytes.size(),
+        "RTTI name is a weak default-visible STT_OBJECT with its exact NUL-terminated extent");
+  const auto payload_is = [&](std::uint64_t index, std::string_view expected) {
+    const auto offset = shdr(index, 24, 8);
+    return shdr(index, 32, 8) == expected.size() && contains(offset, expected.size()) &&
+           std::string_view(reinterpret_cast<const char*>(file->data() + offset), expected.size()) == expected;
+  };
+  check(payload_is(member_index, name_bytes), "RTTI name member contains exactly the mangled name bytes and NUL");
+  const auto ordinary_index = field(*file, symbol_offset + 3 * 24 + 6, 2);
+  check(ordinary_index != 0 && ordinary_index < shnum && ordinary_index != member_index &&
+        (shdr(ordinary_index, 8, 8) & 0x200) == 0 && payload_is(ordinary_index, ordinary_bytes),
+        "unrelated object bytes are outside the RTTI name group");
+}
+
 void read_fixture(const obj::object& input, std::span<const std::uint8_t> file) {
   auto read = obj::elf::read_object(file, "read.o");
   check(read.has_value(), read ? "read ELF fixture" : read.error());
@@ -575,6 +661,7 @@ int main(int argc, char** argv) {
   read_large_offsets();
   read_shared_names();
   read_function_symbols();
+  rtti_name_group();
   read_init_array();
   read_gnu_marker();
 
