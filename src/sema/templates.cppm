@@ -519,7 +519,7 @@ public:
       }
       case ast::DepOp::logical_not:
       case ast::DepOp::logical_and:
-        return substitute_boolean_operand(v, b, /*defer=*/false);
+        return substitute_boolean_operand(v, b, BooleanSubstitution::evaluate);
       case ast::DepOp::is_reference:
       case ast::DepOp::is_const:
       case ast::DepOp::is_volatile:
@@ -1668,18 +1668,27 @@ public:
 private:
   static constexpr u16 unique_depth = 0x7fff;
 
+  enum class BooleanSubstitution { evaluate, defer, discard };
+
   std::optional<ConstId> substitute_variable_value(ConstId v, const Bindings& b,
                                                   const std::function<std::optional<ConstId>(EntityId)>& read,
-                                                  bool defer = false) {
+                                                  BooleanSubstitution mode = BooleanSubstitution::evaluate) {
     auto ref = ins().values.get<ast::VDepVariable>(v);
     auto args = substitute_args(ins().seqs.elements(ref.args), b);
     if (!args) return std::nullopt;
-    if (defer || std::ranges::any_of(*args, [&](const TemplateArg& a) { return w_->arg_dependent(a); })) {
+    if (std::ranges::any_of(*args, [&](const TemplateArg& a) { return w_->arg_dependent(a); })) {
       ref.args = ins().intern_seq(std::span<const TemplateArg>(*args));
       return ins().intern_value(ref);
     }
-    if (!read) return std::nullopt;
-    return read(specialize_variable(ref.templ, *args));
+    const EntityId spec = specialize_variable(ref.templ, *args);
+    if (mode != BooleanSubstitution::evaluate) {
+      auto g = variable_global ? variable_global(spec) : std::nullopt;
+      if (!g || !types().is(g->type, Builtin::bool_)) return std::nullopt;
+      if (mode == BooleanSubstitution::discard) return w_->values.integer(types().builtin(Builtin::bool_), false);
+      ref.args = ins().intern_seq(std::span<const TemplateArg>(*args));
+      return ins().intern_value(ref);
+    }
+    return read ? read(spec) : std::nullopt;
   }
 
   // The selected specialization supplies its own type and constant initializer. Check those
@@ -1697,21 +1706,28 @@ private:
   }
 
   // Preserve the right operand without reading its specialization while the left is dependent.
-  std::optional<ConstId> substitute_boolean_operand(ConstId v, const Bindings& b, bool defer) {
+  std::optional<ConstId> substitute_boolean_operand(ConstId v, const Bindings& b, BooleanSubstitution mode) {
     if (ins().values.is<ast::VDepVariable>(v))
-      return substitute_variable_value(v, b, [this](EntityId spec) { return bool_variable_value(spec); }, defer);
+      return substitute_variable_value(v, b, [this](EntityId spec) { return bool_variable_value(spec); }, mode);
     if (!ins().values.is<ast::VDepOp>(v)) return substitute_value(v, b);
     auto op = ins().values.get<ast::VDepOp>(v);
     if (op.op != ast::DepOp::logical_not && op.op != ast::DepOp::logical_and)
       return substitute_value(v, b);
-    auto left = substitute_boolean_operand(ins().seqs.at(op.operands, 0).value, b, defer);
+    auto left = substitute_boolean_operand(ins().seqs.at(op.operands, 0).value, b, mode);
     if (!left || !structural_value(*left)) return std::nullopt;
     if (op.op == ast::DepOp::logical_not) return logical_not_value(*left);
     const bool left_dependent = ins().values.is_dependent(*left);
-    if (!defer && !left_dependent && ast::int_bits(ins(), *left) == ast::Bits128{}) return *left;
-    auto right = substitute_boolean_operand(ins().seqs.at(op.operands, 1).value, b, defer || left_dependent);
+    const bool short_circuited = !left_dependent && ast::int_bits(ins(), *left) == ast::Bits128{};
+    auto right_mode = mode;
+    if (mode == BooleanSubstitution::evaluate) {
+      if (left_dependent) right_mode = BooleanSubstitution::defer;
+      else if (short_circuited) right_mode = BooleanSubstitution::discard;
+    }
+    auto right = substitute_boolean_operand(ins().seqs.at(op.operands, 1).value, b, right_mode);
     if (!right || !structural_value(*right)) return std::nullopt;
-    if (defer || left_dependent || ins().values.is_dependent(*right)) return conjunction_value(*left, *right);
+    if (mode == BooleanSubstitution::defer || left_dependent || ins().values.is_dependent(*right))
+      return conjunction_value(*left, *right);
+    if (short_circuited) return *left;
     return *right;
   }
 
