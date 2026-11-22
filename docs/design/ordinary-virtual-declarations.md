@@ -175,8 +175,7 @@ destructor and one public integral field without a default member initializer. T
 names the root directly and uses its natural alignment. Lowering allocates the object, installs
 the address point `_ZTV + 16` in its vptr at offset zero and preserves ordinary default
 initialization of the integral field. The local supports direct integral member access and
-passing its address. Value initialization, copying, arrays, by-value transfer and construction
-of derived objects remain guarded.
+passing its address. Value initialization, copying, arrays and by-value transfer remain guarded.
 [[dcl.init]](https://eel.is/c++draft/dcl.init) · [#309](https://github.com/yrashk/ycxx/issues/309)
 
 The maker loads `_ZTV` through the GOT. A split maker has an undefined table reference. In a
@@ -205,6 +204,30 @@ and native secondary-base adjustment. Resident edits swap declarations and chang
 slot eligibility, comparing the resulting objects or diagnostics with cold compilation.
 [Itanium call ABI](https://itanium-cxx-abi.github.io/cxx-abi/abi.html#vcall.caller) ·
 [#309](https://github.com/yrashk/ycxx/issues/309) · [macOS parity #659](https://github.com/yrashk/ycxx/issues/659)
+
+## Linux automatic construction with one abstract primary base
+
+A plain automatic declaration can construct an ordinary concrete class with one direct
+public nonvirtual base. The base declares one public pure virtual `int f() = 0` and has
+no fields. The derived class declares one public `int` field without an initializer and
+one matching public `int f() override`. Both classes have implicit default constructors and
+trivial nonvirtual destructors. The maker's complete declarations must leave the derived key
+function to a peer and establish ordinary external visibility and alignment for both classes.
+
+The certified primary base contains one vptr and occupies offset zero. The derived field
+is at offset eight on Linux x86-64, and the derived object has size 16 and alignment 8.
+The base constructor is nontrivial because the class is polymorphic. This shape has no
+base constructor body, field initialization or other action that observes the intermediate
+base address point. The existing automatic initializer stores the derived `_ZTV + 16`
+before any user statement. The scalar field follows ordinary default initialization.
+
+The class fact supplies the layout of this base edge and the storage for the marked
+automatic object. The maker can access that object's field and bind a base lvalue
+reference to it. Its vtable reference is undefined in the maker object. The peer owns the
+key function, table and RTTI. Borrowed dispatch continues to use its own declaration check.
+[[class.cdtor]](https://eel.is/c++draft/class.cdtor) ·
+[Itanium ABI §2.4](https://itanium-cxx-abi.github.io/cxx-abi/abi.html#class-types) ·
+[#309](https://github.com/yrashk/ycxx/issues/309)
 
 Broader table emission, covariant returns, further pure-slot signatures, out-of-class pure member
 definitions, class-head `final`, explicit virtual destructor calls and virtual member addresses

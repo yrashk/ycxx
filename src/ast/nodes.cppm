@@ -297,7 +297,7 @@ struct DefaultInit {
   ExprInfo info;
 };
 
-// Default-initialization of a complete automatic root with an external Itanium vtable.
+// Default-initialization of a complete automatic object with an Itanium vtable.
 struct PeerRootInit {
   ExprInfo info;
   EntityId vtable;
