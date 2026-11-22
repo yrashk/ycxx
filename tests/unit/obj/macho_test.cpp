@@ -70,9 +70,53 @@ void test_subtractor_pairs() {
   reject(header + 60, 1, "a trailing SUBTRACTOR is rejected");
 }
 
+void test_got_relative_addends() {
+  obj::object before;
+  before.name = "got-relative.o";
+  const auto data = before.add_section(obj::standard_section::data);
+  before.sections[data].emit64(0);
+  const auto constants = before.add_section(obj::standard_section::rodata);
+  const auto symbol = before.reference("_target");
+  auto& section = before.sections[constants];
+  section.emit32(0x11223344);
+
+  // The wire word includes minus the field offset, even when the section's base is nonzero.
+  const struct {
+    std::uint32_t offset;
+    std::int64_t addend;
+    std::int32_t wire;
+  } cases[] = {{4, 0, -4}, {8, 11, 3}, {19, -9, -28}};
+  for (const auto& c : cases) {
+    section.bytes.resize(c.offset);
+    section.emit32(0);
+    section.relocate(obj::reloc_kind::got_rel32, symbol, c.addend);
+  }
+
+  auto bytes = mo::write_object(before);
+  const auto header = mo::mach_header_64_size + mo::segment_command_64_size + constants * mo::section_64_size;
+  check(mo::load64(bytes, header + 32) != 0, "the constants have a nonzero object address");
+  const auto payload = mo::load32(bytes, header + 48);
+  for (const auto& c : cases) {
+    const auto wire = static_cast<std::uint32_t>(c.wire);
+    check(mo::load32(bytes, payload + c.offset) == wire, "POINTER_TO_GOT writes the signed addend minus the field offset");
+    mo::store32(bytes, payload + c.offset, wire);  // supply the expected wire independently of the writer
+  }
+
+  const auto read = mo::read_object(bytes, before.name);
+  check(read.has_value(), "valid POINTER_TO_GOT records read");
+  if (!read) return;
+  const auto& decoded = read->sections[constants];
+  check(decoded.bytes == section.bytes, "the reader clears the implicit addend words");
+  check(std::ranges::equal(cases, decoded.relocs, [&](const auto& c, const obj::reloc& r) {
+    return r.offset == c.offset && r.kind == obj::reloc_kind::got_rel32 && r.addend == c.addend &&
+           read->symbols[r.symbol].name_view() == "_target";
+  }), "POINTER_TO_GOT restores the canonical addends");
+}
+
 }  // namespace
 
 int main() {
   test_subtractor_pairs();
+  test_got_relative_addends();
   return ycxx::unit::result("unit.macho_obj");
 }
