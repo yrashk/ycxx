@@ -2622,9 +2622,8 @@ What the process allocates, attributed to the engine's cells, in the trace and t
   `constexpr`. Sema checks inline bodies in the complete-class context and records virtual
   functions, polymorphism and virtual destruction. The existing class traits use those facts.
 - Syntax checking accepts pointer and reference interfaces and by-value function declarations.
-  The layout guard covers the class and enclosing records, including array elements. Layout,
-  storage and key-function definitions receive diagnostics where they require virtual layout
-  or emission. The native unit check protects those class shapes before producing an object.
+  The layout guard covers the class and enclosing records, including array elements. Uses that
+  require unsupported virtual layout or emission receive diagnostics before object production.
 - A non-template derived class can have one complete ordinary polymorphic base. Override matching
   follows the base chain through private members and hidden names, with checks for matching
   parameter types, qualifiers, return types and exception specifications. The class traits also
@@ -2659,12 +2658,22 @@ What the process allocates, attributed to the engine's cells, in the trace and t
   existing receiver pointer, with ordinary access to the object's integral fields. The peer
   defines the key function and supplies the table, RTTI, and object lifetime.
   [Itanium ABI §5.2.3](https://itanium-cxx-abi.github.io/cxx-abi/abi.html#vague-vtable) · [#309](https://github.com/yrashk/ycxx/issues/309)
-- Pure virtual functions, `final`, covariant returns and table production remain in
-  [#309](https://github.com/yrashk/ycxx/issues/309). Virtual destructor entry points are in
-  [#136](https://github.com/yrashk/ycxx/issues/136). RTTI is tracked in
-  [#294](https://github.com/yrashk/ycxx/issues/294), ELF group emission in
-  [#422](https://github.com/yrashk/ycxx/issues/422), and native class ABI in
-  [#489](https://github.com/yrashk/ycxx/issues/489).
+- The Linux x86-64 producer admits one external, default-visible, non-template root with
+  one public integral field and two directly written fixed integer virtual signatures. A unit
+  that defines the first virtual out of line and non-inline owns the table and RTTI. It emits
+  default-visible `_ZTV` and `_ZTI` objects and a weak `_ZTS` object in a read-only ELF COMDAT
+  keyed by the name. The peer defines the non-key member and constructs the complete object.
+  Mixed GCC and Clang checks verify dispatch and RTTI. Daemon edits verify table ownership
+  and byte-for-byte agreement with a cold compile.
+  [Itanium ABI §5.2.3–4](https://itanium-cxx-abi.github.io/cxx-abi/abi.html#vague-vtable) ·
+  [#309](https://github.com/yrashk/ycxx/issues/309) · [#422](https://github.com/yrashk/ycxx/issues/422)
+- Local complete-object construction and vptr initialization are the next slice in #309.
+  Broader table emission, pure virtual functions, `final` and covariant returns also remain
+  there. Virtual destructor entry points, RTTI expressions, virtual bases and native class ABI
+  have their own issues.
+  [#309](https://github.com/yrashk/ycxx/issues/309) · [#136](https://github.com/yrashk/ycxx/issues/136) ·
+  [#294](https://github.com/yrashk/ycxx/issues/294) · [#310](https://github.com/yrashk/ycxx/issues/310) ·
+  [#489](https://github.com/yrashk/ycxx/issues/489)
   [Design](docs/design/ordinary-virtual-declarations.md)
 
 ## Deduced polymorphic lambda results (#569)

@@ -183,20 +183,22 @@ Flat flatten(Session& s, const Tree& t) {
 
 namespace detail {
 
-// Track only whether natural record layout is certain. This does not apply pragma packing
-// to layout or diagnose the directive. Unknown extensions can affect both the current
-// setting and the saved settings; an explicit reset establishes the default again.
-class PackPragmas {
+// Record pragmas that can affect ABI facts without applying them. For packing, unknown
+// extensions can affect both the current setting and the saved settings. An explicit reset
+// establishes the default again.
+class AbiPragmas {
  public:
-  PackPragmas(Session& s, const Flat& flat, Region& region) : s_(&s), flat_(&flat), region_(&region) {}
+  AbiPragmas(Session& s, const Flat& flat, Region& region) : s_(&s), flat_(&flat), region_(&region) {}
 
   void advance(std::size_t i) {
     while (next_ < flat_->passthrough.size() && flat_->passthrough[next_].first <= i) {
       const auto& line = flat_->passthrough[next_++].second;
+      auto at = u32(region_->tokens.size());
+      if (!region_->first_visibility_pragma && line.size() >= 4 && name(line[2], "GCC") && name(line[3], "visibility"))
+        region_->first_visibility_pragma = at;
       if (line.size() < 3 || !name(line[2], "pack")) continue;
       bool before = capped_;
       change(std::span(line).subspan(3));
-      auto at = u32(region_->tokens.size());
       if (!before && capped_) begin_ = at;
       if (before && !capped_) close(at);
     }
@@ -314,10 +316,10 @@ Preprocessed to_region(Session& s, const Flat& flat) {
     r.tokens.push_back(t);
     r.locs.push_back(p.loc);
   };
-  detail::PackPragmas pack(s, flat, r);
+  detail::AbiPragmas pragmas(s, flat, r);
   std::array<std::optional<u32>, 256> byte_literals;
   for (std::size_t i = 0; i < pp.size(); ++i) {
-    pack.advance(i);
+    pragmas.advance(i);
     const PTok& p = pp[i];
     Tok tok = p.tok;
     switch (tok.kind) {
@@ -368,7 +370,7 @@ Preprocessed to_region(Session& s, const Flat& flat) {
         report_at(i + k)(offset, d, a, b);
       });
       for (std::size_t k = i; k <= j; ++k) {
-        pack.advance(k);
+        pragmas.advance(k);
         Tok t = pp[k].tok;
         t.payload = ids[k - i];
         if (k > i) t.flags |= tok_flag::continued;
@@ -392,7 +394,7 @@ Preprocessed to_region(Session& s, const Flat& flat) {
     default: emit(tok, p); break;
     }
   }
-  pack.finish();
+  pragmas.finish();
   const Files::Content* main = s.files.content(flat.main);
   r.tokens.push_back(Tok{Tk::eof, tok_flag::line_start, 0});
   r.locs.push_back({0, 0, main ? static_cast<u32>(main->text.size()) : 0});

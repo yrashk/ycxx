@@ -245,6 +245,8 @@ public:
     auto it = member_decls_.find(std::to_underlying(e));
     return it == member_decls_.end() ? std::nullopt : std::optional(it->second);
   }
+  // ABI attributes on declarations outside the entity's ordinary declaration records.
+  bool has_unapplied_declaration_attributes(EntityId e) const { return unapplied_declaration_attributes_.contains(e); }
 
   // The parsed class-key of a defining item ([class.union]).
   bool class_rec_is_union(u32 item) const {
@@ -1413,6 +1415,7 @@ private:
   static constexpr u32 class_def_key(u32 item) { return item | 0x80000000u; }
   std::vector<u32> running_;
   std::set<u32> ordinary_friend_items_;  // the source item of each supported unqualified friend
+  std::set<EntityId> unapplied_declaration_attributes_;
   bool friend_body_ready(u32 definition) const {
     if (!ordinary_friend_items_.contains(definition)) return true;
     const u32 parent = items_->items[definition].parent;
@@ -2316,7 +2319,7 @@ public:
       if (p_->items().items[k_].parent != items::none &&
           p_->items().items[p_->items().items[k_].parent].kind == ItemKind::class_def)
         return std::nullopt;
-      EntityId e = class_entity(n);
+      EntityId e = introduce_namespace_class(n);
       record_class_key(e, key, at);  // an error leaves the earlier type available for recovery
       return s_.types().class_type(e);
     };
@@ -4541,6 +4544,24 @@ private:
     return u8(width);
   }
 
+  // A namespace attribute can set visibility on otherwise unannotated declarations.
+  bool in_attributed_namespace(u32 item) const {
+    const auto& items = p_->items().items;
+    const auto& region = p_->region();
+    for (u32 parent = items[item].parent; parent != items::none; parent = items[parent].parent) {
+      const auto& scope = items[parent];
+      if (scope.kind == ItemKind::namespace_def &&
+          layout_attribute(region, scope.begin, scope.brace_begin, LayoutAttributes::any)) return true;
+    }
+    return false;
+  }
+
+  EntityId introduce_namespace_class(NameId name) {
+    EntityId entity = class_entity(name);
+    if (in_attributed_namespace(k_)) p_->unapplied_declaration_attributes_.insert(entity);
+    return entity;
+  }
+
   // A friend declaration in class `c` ([class.friend]): `friend class X;` or `friend X;`, a class
   // (declared in the enclosing namespace when lookup finds none, [dcl.type.elab]/4), or a function
   // declaration, of a namespace-scope function or of another class's member. The friend is not a
@@ -4590,7 +4611,7 @@ private:
         ps_.kind(2) == Tk::semi) {
       NameId n = ps_.name_of(ps_.tok(1));
       auto t = s_.class_name(n, false);
-      sem.entity = t && types.is_class(*t) ? types.class_of(*t) : class_entity(n);
+      sem.entity = t && types.is_class(*t) ? types.class_of(*t) : introduce_namespace_class(n);
       decls_.push_back(sem);
       ps_.bump();
       ps_.bump();
@@ -4690,6 +4711,8 @@ private:
           return bad();
         }
       }
+      if (m->is_virtual && layout_attribute(p_->region(), it_->begin, it_->end, LayoutAttributes::any))
+        p_->unapplied_declaration_attributes_.insert(m->entity);
       sem.entity = m->entity;
     } else {
       // The function of the innermost enclosing namespace with this name and type
@@ -5394,12 +5417,15 @@ private:
            tokens[at + 3].kind == Tk::r_paren;
   }
 
-  bool native_nonkey_virtual_definition(EntityId cls, const sema::ClassRec& record, EntityId function,
-                                        const parse::Declarator& d, const ast::DeclSema& sem) {
-    if (!sema::native_virtual_nonkey_member(record, function) || template_ || explicit_ || inst_ ||
+  bool native_virtual_definition(EntityId cls, const sema::ClassRec& record, EntityId function,
+                                 const parse::Declarator& d, const ast::DeclSema& sem) {
+    const auto slot = sema::native_virtual_root_slot(record, function);
+    if (record.peer_virtual_layout != sema::PeerVirtualLayout::root || !slot || template_ || explicit_ || inst_ ||
         sem.storage != ast::Storage::none || (sem.flags & (sema::decl_flag::inline_ | sema::decl_flag::deleted |
                                                           sema::decl_flag::lang_c)) ||
         it_->kind != ItemKind::function || !it_->has_body() || !d.asm_label.empty()) return false;
+    const bool key_function = *slot == 0;
+    if (key_function && !sema::native_virtual_table_slots(record)) return false;
     const auto& region = p_->region();
     if (region.tokens[it_->body_begin].kind != Tk::l_brace ||
         !plain_virtual_signature(*it_, it_->begin + d.qualifier_at, it_->begin + d.name_at,
@@ -5411,6 +5437,13 @@ private:
     const auto& head = p_->items().items[defining->second];
     const auto key = region.tokens[head.begin].kind;
     if (key != Tk::kw_struct && key != Tk::kw_class) return false;
+    if (key_function) {
+      if (region.first_visibility_pragma && *region.first_visibility_pragma < it_->body_begin) return false;
+      const auto& declarations = p_->decls_.at(std::to_underlying(cls));
+      if (in_attributed_namespace(k_) || std::ranges::any_of(declarations, [&](const auto& decl) {
+            return in_attributed_namespace(decl.first);
+          })) return false;
+    }
 
     // Compare the written qualifier with the owning namespace and class to exclude aliases.
     const auto& owner = p_->ns_of(defining->second);
@@ -5432,7 +5465,7 @@ private:
           return region.tokens[p_->items().items[member].begin].kind == Tk::kw_using;
         })) return false;
     // A skipped attribute or an alias in an earlier virtual declaration can change the ABI
-    // evidence used to identify the peer's key function.
+    // evidence used to identify the key function and the table entries.
     for (const auto& member : record.members) {
       if (!member.is_virtual) continue;
       const auto decl = p_->member_decl(member.entity);
@@ -5440,7 +5473,7 @@ private:
       const auto& source = p_->items().items[p_->index(decl->item)];
       if (source.kind != ItemKind::declaration || source.names.size() != 1) return false;
       const u32 name_at = source.begin + source.names.front().offset;
-      if (!plain_virtual_signature(source, name_at, name_at, member.entity == function)) return false;
+      if (!plain_virtual_signature(source, name_at, name_at, key_function || member.entity == function)) return false;
     }
     return true;
   }
@@ -5555,7 +5588,7 @@ private:
       return false;
     }
     if (m->is_virtual) {
-      if (!native_nonkey_virtual_definition(cls, *cr, m->entity, d, sem)) {
+      if (!native_virtual_definition(cls, *cr, m->entity, d, sem)) {
         s_.diag(d.name_at, Diag::virtual_definition);
         return false;
       }

@@ -68,6 +68,9 @@ struct ClassName {
 };
 using ClassNames = std::function<ClassName(ast::EntityId)>;
 
+// A standalone <type> encoding, with an initially empty substitution table (§5.1.5).
+std::expected<std::string, std::string> mangled_type(const ast::Interners& in, ast::QualType type, const ClassNames& classes);
+
 // `scope` is the class or namespace a function is a member of, none for the global namespace.
 // Direct members of ::std use an <unscoped-name> with St (§5.1.5 and §5.1.10).
 std::expected<std::string, std::string> mangled_function(const ast::Interners& in, std::string_view name,
@@ -899,6 +902,10 @@ std::optional<std::string_view> operator_code(std::string_view op, std::size_t a
   for (auto [s, code] : binary)
     if (s == op) return code;
   return std::nullopt;
+}
+
+std::expected<std::string, std::string> mangled_type(const ast::Interners& in, ast::QualType type, const ClassNames& classes) {
+  return Mangler(in, classes, {}).type(type);
 }
 
 std::expected<std::string, std::string> mangled_function(const ast::Interners& in, std::string_view name,

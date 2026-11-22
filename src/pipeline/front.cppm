@@ -667,8 +667,7 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
   ast::Interners& ins = world.ins;
   TranslationUnit tu;
   tu.name = std::move(name);
-  // Native compilation may consume peer-owned Linux objects with supported virtual
-  // declarations, including one non-key definition. The key function and table stay in the peer.
+  // Native compilation may consume peer-owned Linux objects, including one non-key definition.
   const auto& classes = program.classes();
   EntityId defined_nonkey = EntityId::none;
   auto peer_member_declaration = [&](EntityId f) -> std::optional<ast::DeclSema> {
@@ -688,9 +687,22 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
   };
   for (EntityId c : classes.classes()) {
     const auto& record = classes.rec(c);
-    if (!record.layout_requires_virtual_support ||
-        sema::native_virtual_consumer(record, classes, world.types, peer_member_declaration))
+    if (!record.layout_requires_virtual_support) continue;
+    // The first slot is the key function of the admitted root. Classify its ownership using
+    // the complete unit, even when no function uses the class or constructs an object here.
+    if (const auto slots = sema::native_virtual_table_slots(record);
+        slots && program.function_defined_before(slots->front(), program.end())) {
+      // An elaborated declaration may introduce the class with namespace attributes. A friend
+      // may also redeclare either slot with its own attributes, including after the key.
+      if (!tu.owned_virtual_table && !program.function_defined_before(slots->back(), program.end()) &&
+          !program.has_unapplied_declaration_attributes(c) &&
+          std::ranges::none_of(*slots, [&](EntityId f) { return program.has_unapplied_declaration_attributes(f); })) {
+        tu.owned_virtual_table = OwnedVirtualTable{world.types.class_type(c), *slots};
+        continue;
+      }
+    } else if (sema::native_virtual_consumer(record, classes, world.types, peer_member_declaration)) {
       continue;
+    }
     block_virtual_emission(tu, program, record);
     return tu;
   }
