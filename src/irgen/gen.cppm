@@ -1661,10 +1661,17 @@ class Gen {
       operand = strip_parens(operand);
       // The conversion reads only the glvalue selected by the conditional. Join the
       // values from that read, so neither arm needs an address for any initialized field.
-      if (is<ast::Conditional>(operand)) {
-        const auto kind = cls(type);
-        if (kind == TypeClass::integer || kind == TypeClass::bool_)
+      const auto kind = cls(type);
+      if (kind == TypeClass::integer || kind == TypeClass::bool_) {
+        if (is<ast::Conditional>(operand))
           return *conditional(operand, false, type).value;
+        if (is<ast::OrderedBinary>(operand)) {
+          const auto binary = get<ast::OrderedBinary>(operand);
+          if (binary.op == ast::OrderedOp::comma) {
+            discard(child(operand, binary.lhs));
+            return load_glvalue(child(operand, binary.rhs), type);
+          }
+        }
       }
       if (auto field = read_default_field(operand, type)) return *field;
     }
