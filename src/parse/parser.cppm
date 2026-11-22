@@ -1710,7 +1710,7 @@ public:
   std::optional<std::pair<QualType, u32>> qualified_type(u32 start, bool checked = false, bool type_only = false,
                                                        bool* failed_qualifier = nullptr,
                                                        bool* terminal_template_id = nullptr,
-                                                       bool member_alias_argument = false) {
+                                                       bool template_argument = false) {
     u32 next = 0;
     bool check_qualifier = checked && substituting_partial_arguments;
     const auto diags = s_->diag_count();
@@ -1730,7 +1730,7 @@ public:
       if (checked && s_->has_error_since(diags)) return std::nullopt;
     }
     NameId name = name_of(tok(next));
-    if (member_alias_argument && next == 2 && s->type && s_->scope_names_object(*s, name))
+    if (template_argument && next == 2 && s_->scope_names_static_data_member(*s, name))
       return std::nullopt;
     std::optional<u32> at = checked ? std::optional{pos() + next} : std::nullopt;
     auto injected = s_->qualified_injected_type(*s, name, at, type_only);
@@ -2722,7 +2722,7 @@ public:
       auto q = qualified_type(0, /*checked=*/false, /*type_only=*/false,
                               template_argument ? &failed_qualifier : nullptr,
                               template_argument ? &terminal_template_id : nullptr,
-                              template_argument && member_alias_type);
+                              template_argument);
       if (failed_qualifier) return true;  // let the committed parse diagnose the qualifier
       // A terminal namespace type-template-id can expand to a dependent member type.
       return q && (terminal_template_id || s_->types().kind(q->first) != sema::TypeKind::dep_name);

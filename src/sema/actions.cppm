@@ -1920,6 +1920,12 @@ public:
         return std::ranges::any_of(c->members, [&](const MemberDeclRec& m) { return m.name == n; });
     return false;
   }
+  // The ordinary lookup result can hide an inherited type from a template argument.
+  bool scope_names_static_data_member(const Scope& s, NameId n) {
+    if (!s.type || !types().is_class(*s.type) || types().is_dependent(*s.type)) return false;
+    auto found = find_member(types().class_of(*s.type), n);
+    return found && found->member && found->member->is_static && !found->member->is_function;
+  }
   // Whether the type `S::n`, named at `at`, is accessible here: a nested type of a class
   // ([class.access]/4); diagnosed if not. Ordinary functional conversions check directly
   // declared aliases and typedefs of non-template records.
