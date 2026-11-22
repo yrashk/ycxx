@@ -101,8 +101,8 @@ condition. The first eligible declaration is the Itanium key function. The peer 
 the key and provides the virtual table and RTTI. The supported member uses the normal
 implicit receiver and direct field offsets. [Itanium ABI §5.2.3](https://itanium-cxx-abi.github.io/cxx-abi/abi.html#vague-vtable)
 
-The layout applies to field accesses on objects the provider has already
-constructed. Whole-object storage, construction, destruction, copying, and by-value transfer
+The layout applies to field accesses on objects the provider has already constructed.
+The separate automatic root case below also uses that layout. Copying and by-value transfer
 remain guarded. Packed or annotated layout and further inheritance forms are tracked in
 [#309](https://github.com/yrashk/ycxx/issues/309) and [#489](https://github.com/yrashk/ycxx/issues/489).
 
@@ -113,7 +113,7 @@ at namespace scope. Its natural layout has one directly declared public integral
 field. It declares two virtuals with directly written fixed integer signatures. The first
 declaration is the Itanium key function. The unit defines it out of class and non-inline in a
 compound body with a matching signature and exception specification. The peer defines the other
-member and constructs the object. ABI-affecting attributes and a GNU visibility pragma
+member. ABI-affecting attributes and a GNU visibility pragma
 preceding the key definition are outside this scope.
 [Astra's review](https://github.com/yrashk/ycxx/issues/309#issuecomment-7077374439)
 
@@ -137,9 +137,26 @@ weak default-visible object in a separate read-only COMDAT keyed by its own name
 [Itanium ABI §5.2.3–4](https://itanium-cxx-abi.github.io/cxx-abi/abi.html#vague-vtable) ·
 [ELF group output #422](https://github.com/yrashk/ycxx/issues/422)
 
-The next slice constructs a complete root in ycxx and installs its vptr from the existing
-table's address point. Broader table emission, covariant returns, pure virtual functions,
-`final`, explicit virtual destructor calls and virtual member addresses also remain in #309.
+## Linux x86-64 automatic root initialization
+
+Linux x86-64 supports a plain declaration such as `Root root;` in an ordinary
+non-template free function. The supported root has an implicit default constructor, a trivial
+destructor and one public integral field without a default member initializer. The declaration
+names the root directly and uses its natural alignment. Lowering allocates the object, installs
+the address point `_ZTV + 16` in its vptr at offset zero and preserves ordinary default
+initialization of the integral field. The local supports direct integral member access and
+passing its address. Value initialization, copying, arrays, by-value transfer and construction
+of derived objects remain guarded.
+[[dcl.init]](https://eel.is/c++draft/dcl.init) · [#309](https://github.com/yrashk/ycxx/issues/309)
+
+The maker loads `_ZTV` through the GOT. A split maker has an undefined table reference. In a
+translation unit that also owns the table, the GOT relocation names the same ELF symbol entry
+that defines the table. Ownership follows the key definition across the complete unit even if the
+maker appears first.
+[#309](https://github.com/yrashk/ycxx/issues/309)
+
+Broader table emission, covariant returns, pure virtual functions, `final`, explicit virtual
+destructor calls and virtual member addresses also remain in #309.
 Separate issues track virtual destructor entry points, RTTI operations, virtual bases and
 further exception specifications.
 [#309](https://github.com/yrashk/ycxx/issues/309) · [#136](https://github.com/yrashk/ycxx/issues/136) ·

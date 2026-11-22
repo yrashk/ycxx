@@ -230,6 +230,8 @@ def main():
         compile(linux, '-fsyntax-only', 'nonkey/measure.cpp')
         compile(linux, '-fsyntax-only', 'nonkey/controls/in-class.cpp')
         compile(linux, '-fsyntax-only', 'nonkey/prior-inline-friend.cpp')
+        compile(linux, '-c', 'nonkey/controls/lifetime.cpp', '-o', 'nonkey-lifetime.o')
+        assert (scope / 'nonkey-lifetime.o').is_file()
         for source in (nonthrowing, nonthrowing.replace(b'noexcept {', b'noexcept(true) {', 1),
                        mismatch.replace(b'noexcept {', b'noexcept(false) {', 1)):
             (scope / 'nonkey' / 'noexcept.cpp').write_bytes(source)
@@ -239,7 +241,7 @@ def main():
         for target, source, diagnostic in (
             (linux, 'nonkey/controls/inline.cpp', virtual_definition_error),
             (linux, 'nonkey/controls/in-class.cpp', native_virtual_error),
-            (linux, 'nonkey/controls/lifetime.cpp', layout_error),
+            (darwin, 'nonkey/controls/lifetime.cpp', layout_error),
             (linux, 'nonkey/late-key.cpp', native_virtual_error),
             (linux, 'nonkey/extra.cpp', native_virtual_error),
             (linux, 'nonkey/exception-mismatch.cpp', "conflicting declaration of 'measure'"),

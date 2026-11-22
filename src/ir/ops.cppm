@@ -288,6 +288,9 @@ export enum class Op : std::uint16_t {
 
   // Reuse the returned storage for a placement new-expression before initialization ([basic.life]).
   obj__reuse [[=state({S, V}, {S}).imms({type})]],
+
+  // Allocate and default-initialize an automatic root with an external Itanium vtable.
+  alloc_peer_root [[=state({S}, {S, V}).imms({type, entity}).with({nonconstant})]],
 };
 
 export constexpr std::size_t op_count = std::meta::enumerators_of(^^Op).size();

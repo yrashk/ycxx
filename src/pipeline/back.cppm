@@ -75,8 +75,8 @@ class Constants {
 };
 
 // An entity the translation unit declares (or defines): what its symbol is made of.
-// A constructor or destructor is named by its kind, not an identifier (Itanium §5.1.4.3).
-enum class Special : std::uint8_t { none, constructor, destructor };
+// These symbols use special Itanium encodings (§5.1.4.3, §5.1.4.5).
+enum class Special : std::uint8_t { none, constructor, destructor, virtual_table };
 struct Entity {
   EntityId id = EntityId::none;
   std::string name;  // its identifier
@@ -87,7 +87,7 @@ struct Entity {
   bool is_constexpr = false;
   std::optional<ast::Loc> at;  // its first declarator, for diagnostics
   EntityId scope = EntityId::none;  // the enclosing namespace or class
-  Special special = Special::none;  // a constructor or destructor
+  Special special = Special::none;
   // A function template specialization: its template's function type and its template arguments,
   // which its name encodes (Itanium §5.1.5.7–8).
   std::optional<QualType> template_type{};
@@ -187,7 +187,7 @@ struct Shapes {
 // The root table this unit owns, as established by its complete declaration set. This does
 // not depend on the functions' bodies or whether this unit ever uses the table.
 struct OwnedVirtualTable {
-  QualType type;
+  EntityId entity;
   std::array<EntityId, 2> slots;  // in declaration order, starting with the key function
 };
 
@@ -418,6 +418,7 @@ class QueryLayout {
     for (const EnumShape& e : shapes.enums) enums_.emplace(std::to_underlying(e.entity), e.underlying);
   }
   ir::TypeLayout type(QualType q) const;
+  std::optional<ir::TypeLayout> peer_root_allocation(QualType q) const;
   ir::SubObject step(QualType q, ir::PathStep s) const;
   bool is_class(EntityId e) const { return classes_.contains(std::to_underlying(e)); }
   bool contains_mutable_field(QualType type) const;
@@ -797,6 +798,21 @@ ir::TypeLayout QueryLayout::type(QualType q) const {
   if (in.types.is<ast::TEnum>(c))
     if (auto it = enums_.find(std::to_underlying(in.types.get<ast::TEnum>(c).entity)); it != enums_.end()) return type(it->second);
   return {};
+}
+
+// Only the certified automatic-object operation can request this complete root's storage.
+// Passing or returning the class by value still asks type(), which guards virtual layouts.
+std::optional<ir::TypeLayout> QueryLayout::peer_root_allocation(QualType q) const {
+  if (target_->triple != ast::x86_64_linux.triple) return std::nullopt;
+  auto& in = *universe().in;
+  const auto c = in.types.canon(q);
+  if (!in.types.is<ast::TClass>(c)) return std::nullopt;
+  const auto shape = classes_.find(std::to_underlying(in.types.get<ast::TClass>(c).entity));
+  if (shape == classes_.end() || shape->second->peer_virtual_layout != sema::PeerVirtualLayout::root ||
+      shape->second->layout_uncertain || shape->second->fields.size() != 1) return std::nullopt;
+  if (const auto layout = class_layout(c))
+    return ir::TypeLayout{.kind = ir::TypeKind::record, .size = layout->size, .align = layout->align};
+  return std::nullopt;
 }
 
 // A const object still permits writes to its mutable subobjects ([dcl.type.cv]).
@@ -1499,6 +1515,7 @@ struct LinuxFunction {
 };
 
 struct LinuxVirtualTable {
+  EntityId entity;
   std::string type_encoding;
   std::array<EntityId, 2> slots;
 };
@@ -1616,6 +1633,8 @@ std::expected<obj::object, aarch64::CodegenError> assemble_linux(
     }
   }
   if (table) {
+    const auto symbol = symbol_of.find(table->entity);
+    if (symbol == symbol_of.end()) return missing(table->entity);
     // Itanium C++ ABI §2.5.2 and §2.9.5: the root table has zero offset-to-top, a pointer
     // to its RTTI, then the function pointers. The root descriptor points to the runtime
     // __class_type_info table's address point and to the NUL-terminated type encoding.
@@ -1625,7 +1644,9 @@ std::expected<obj::object, aarch64::CodegenError> assemble_linux(
     constexpr auto address_point = 2 * pointer_size;
     const std::uint64_t table_size = address_point + pointer_size * table->slots.size();
     const std::string type_name = "_ZTS" + table->type_encoding;
-    o.add_symbol({.name = "_ZTV" + table->type_encoding, .section = pointers, .object_size = table_size});
+    // Code relocations already name this symbol by index. Define the existing entry.
+    o.symbols[symbol->second].section = pointers;
+    o.symbols[symbol->second].object_size = table_size;
     const auto typeinfo = o.add_symbol({.name = "_ZTI" + table->type_encoding, .section = pointers,
                                         .offset = table_size, .object_size = 2 * pointer_size});
     const auto name_object = o.add_symbol({.name = type_name, .section = names, .weak = true,
@@ -1768,8 +1789,10 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
     }
   }
   for (const FnKey& f : lowered) used.insert(ir::raw(f.fn));
-  if (tu.owned_virtual_table)
-    for (EntityId slot : tu.owned_virtual_table->slots) used.insert(ir::raw(slot));
+  if (const auto& table = tu.owned_virtual_table) {
+    used.insert(ir::raw(table->entity));
+    for (EntityId slot : table->slots) used.insert(ir::raw(slot));
+  }
   for (const aarch64::DataDef& d : data) {
     used.insert(ir::raw(d.entity));
     for (const aarch64::DataReloc& r : d.relocs) used.insert(ir::raw(r.target));
@@ -1818,23 +1841,23 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
     return n;
   };
   std::optional<LinuxVirtualTable> virtual_table;
-  if (linux && tu.owned_virtual_table) {
-    const auto& owned = *tu.owned_virtual_table;
-    auto encoding = mangled_type(in, owned.type, names);
-    if (!encoding) {
-      auto key = by_id.find(ir::raw(owned.slots.front()));
-      errors.push_back({key == by_id.end() ? std::nullopt : key->second->at,
-                        std::format("the virtual table's type name: {} is not supported yet", encoding.error())});
-    } else {
-      virtual_table = LinuxVirtualTable{std::move(*encoding), owned.slots};
-    }
-  }
   std::vector<const Entity*> locals;  // named after their functions, below
   std::map<std::uint32_t, std::string> mangled;  // by function entity
   for (const Entity& e : tu.entities) {
     if (!used.contains(ir::raw(e.id))) continue;
     if (e.local_function != EntityId::none) {
       locals.push_back(&e);
+      continue;
+    }
+    if (e.special == Special::virtual_table) {
+      auto encoding = mangled_type(in, in.intern_type(ast::TClass{e.scope}), names);
+      if (!encoding) {
+        errors.push_back({e.at, std::format("the virtual table's type name: {} is not supported yet", encoding.error())});
+        continue;
+      }
+      symbols.push_back({e.id, "_ZTV" + *encoding, obj::binding::global});
+      if (const auto& owned = tu.owned_virtual_table; owned && owned->entity == e.id)
+        virtual_table = LinuxVirtualTable{e.id, std::move(*encoding), owned->slots};
       continue;
     }
     // The complete-object constructor and destructor (C1, D1): with no virtual bases they are the
@@ -1878,6 +1901,8 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
                                          encoding, e->name.size(), e->name, disc),
                        obj::binding::local});
   }
+  if (tu.owned_virtual_table && !virtual_table && errors.empty())
+    errors.push_back({std::nullopt, "the owned virtual table has no symbol name"});
   if (!errors.empty()) co_return co_await locate_errors(cx, id, std::move(out));
 
   // Code: codegen(F) for every function, in definition order.

@@ -297,6 +297,12 @@ struct DefaultInit {
   ExprInfo info;
 };
 
+// Default-initialization of a complete automatic root with an external Itanium vtable.
+struct PeerRootInit {
+  ExprInfo info;
+  EntityId vtable;
+};
+
 // An omitted field initialized from its default member initializer ([class.mem.general]).
 // Its child was analysed at the declaration; `this` is the enclosing InitList's destination.
 struct DefaultMemberInit {
@@ -552,7 +558,7 @@ using Nodes = closed_list<Literal, DeclRef, Paren, Unary, Binary, OrderedBinary,
                           DepName, CondDecl, Switch, Case, Default, Label, Goto, BuiltinCall, Lambda, DefaultArg,
                           StaticInit, StaticVar, NewObject, DeleteObject, VariadicBuiltin, AssignmentCall,
                           NewArray, DeleteArray, DelegatingInit, VirtualMemberCall, Throw, TryBlock, Handler,
-                          DefaultMemberInit, ExplicitDestroy>;
+                          DefaultMemberInit, ExplicitDestroy, PeerRootInit>;
 
 static_assert(Nodes::size < max_node_kinds);
 
