@@ -129,6 +129,15 @@ class Parts(unittest.TestCase):
             self.assertEqual(toolchain.ycxx_features(d, 'linux-x86_64'), {'syntax'})
             self.assertRegex(toolchain.HOST, r'^\w+-\w+$')
 
+    def test_xfail_directive_hosts(self):
+        t = discover.Test('own/a.accept.cpp', Path('a.accept.cpp'), 'own', 'accept',
+                          {'XFAIL': ['gcc@darwin-arm64 only there', 'clang,ycxx@linux-x86_64 two']})
+        self.assertEqual(kinds.xfail_reason(t, 'gcc', 'darwin-arm64'), 'only there')
+        self.assertIsNone(kinds.xfail_reason(t, 'gcc', 'linux-x86_64'))
+        self.assertEqual(kinds.xfail_reason(t, 'clang', 'darwin-arm64'), 'two')
+        self.assertEqual(kinds.xfail_reason(t, 'ycxx', 'linux-x86_64'), 'two')
+        self.assertIsNone(kinds.xfail_reason(t, 'ycxx', 'darwin-arm64'))
+
     def test_xfails_limited_to_hosts(self):
         with tempfile.TemporaryDirectory() as d:
             d = Path(d)

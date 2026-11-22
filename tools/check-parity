@@ -1,0 +1,95 @@
+#!/usr/bin/env python3
+"""Keep the native back ends at parity (#639, DECISIONS §6.10). Fails when:
+
+  - an L2 operation (src/ir/l2.cppm) is handled by one back end and not the other, unless
+    tools/parity/l2-gaps.tsv lists it for that back end with its parity issue;
+  - an operation listed there is now handled, so the entry must go.
+
+Tests limited to one target carry a `PARITY:` line, which tools/check-os-gates checks (#659).
+
+Text checks only: no compiler needed, so it runs in the policy stage.
+"""
+
+import re
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+TARGETS = ('aarch64', 'x86_64')
+
+
+def l2_ops(root):
+    text = (root / 'src/ir/l2.cppm').read_text()
+    body = re.search(r'export enum class Op\b[^{]*\{(.*?)\n\};', text, re.S).group(1)
+    body = re.sub(r'//[^\n]*', '', body)
+    return [m.group(1) for m in re.finditer(r'^\s*([a-z_][a-z0-9_]*)\s*\[\[', body, re.M)]
+
+
+def function_body(text, signature):
+    """The text of the function definition that starts with `signature`, to its closing brace."""
+    start = text.index(signature)
+    depth, i = 0, text.index('{', start)
+    for j in range(i, len(text)):
+        depth += {'{': 1, '}': -1}.get(text[j], 0)
+        if depth == 0:
+            return text[i:j + 1]
+    raise ValueError(f'unterminated {signature}')
+
+
+def handled(root):
+    """{target: set of L2 operation names each back end selects or emits}."""
+    patterns = (root / 'src/target/aarch64/aarch64.patterns').read_text()
+    select = (root / 'src/target/aarch64/select.cppm').read_text()
+    a64 = {m.group(1) for m in re.finditer(r':\s*\(([a-z_][a-z0-9_]*)\b', patterns)}
+    a64 |= {m.group(1).rstrip('_') for m in re.finditer(r'\bOp::([a-z_][a-z0-9_]*)', select)}
+    x86 = (root / 'src/target/x86_64/x86_64.cppm').read_text()
+    emitted = function_body(x86, 'std::expected<void, std::string> Emitter::node(NodeId n)')
+    x64 = {m.group(1).rstrip('_') for m in re.finditer(r'case Op::([a-z_][a-z0-9_]*)', emitted)}
+    return {'aarch64': a64, 'x86_64': x64}
+
+
+def read_gaps(root, bad):
+    gaps = {}
+    path = root / 'tools/parity/l2-gaps.tsv'
+    for n, line in enumerate(path.read_text().splitlines(), 1):
+        if not line.strip() or line.startswith('#'):
+            continue
+        cols = line.split('\t')
+        if len(cols) < 3 or cols[1] not in TARGETS or not re.fullmatch(r'#\d+', cols[2].strip()):
+            bad.append(f'{path.relative_to(root)}:{n}: expected "<op>\\t<aarch64|x86_64>\\t#<issue>[\\t<note>]"')
+            continue
+        gaps[(cols[0], cols[1])] = cols[2].strip()
+    return gaps
+
+
+def check_ops(root, bad):
+    ops = [op.rstrip('_') for op in l2_ops(root)]
+    have = handled(root)
+    gaps = read_gaps(root, bad)
+    for op in ops:
+        for target in TARGETS:
+            other = TARGETS[1 - TARGETS.index(target)]
+            missing = op not in have[target]
+            listed = (op, target) in gaps
+            if missing and op in have[other] and not listed:
+                bad.append(f'L2 `{op}`: the {other} back end handles it and {target} does not. Implement it, '
+                           f'or list it in tools/parity/l2-gaps.tsv with its parity issue (#639)')
+            if listed and not missing:
+                bad.append(f'tools/parity/l2-gaps.tsv: `{op}` is now handled by {target}; remove the entry '
+                           f'and update {gaps[(op, target)]}')
+    for (op, target) in gaps:
+        if op not in ops:
+            bad.append(f'tools/parity/l2-gaps.tsv: `{op}` is not an L2 operation')
+
+
+def main():
+    root = Path(sys.argv[1]) if len(sys.argv) > 1 else ROOT
+    bad = []
+    check_ops(root, bad)
+    for b in bad:
+        print(f'check-parity: {b}', file=sys.stderr)
+    return 1 if bad else 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())
