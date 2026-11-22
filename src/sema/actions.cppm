@@ -2089,6 +2089,13 @@ public:
     return record && record->peer_virtual_layout != PeerVirtualLayout::none;
   }
 
+  bool has_peer_automatic_layout(QualType t) {
+    if (!classes().has_virtual_layouts() || !types().is_class(t)) return false;
+    const ClassRec* record = class_rec(types().class_of(t));
+    return record && (record->peer_virtual_layout == PeerVirtualLayout::root ||
+                      record->peer_automatic_primary_base != EntityId::none);
+  }
+
   bool require_supported_virtual_signature(const TypeRec& f, u32 at) {
     return require_concrete_object(f.inner, at) && require_concrete_parameters(f, at) &&
            require_supported_virtual_layout(f.inner, at) && require_supported_virtual_parameters(f, at);
@@ -2205,7 +2212,7 @@ public:
     return as<ast::Call>(object).has_value() || as<ast::MemberCall>(object).has_value();
   }
 
-  bool default_constructed_peer_root(Ex object) {
+  bool default_constructed_peer_object(Ex object) {
     while (const auto paren = as<ast::Paren>(object)) object.id = paren->operand.id;
     if (const auto local = as<ast::LocalRef>(object))
       if (const auto declaration = as<ast::LocalVar>({locals_[local->local].decl}))
@@ -2289,7 +2296,8 @@ public:
     u32 index = found->index;
     const FieldRec& f = *found->field;
     if (unevaluated == 0 && !(checking_virtual_body && c == current_class) &&
-        !(has_peer_virtual_layout(ct) && (arrow || peer_object_lvalue(object) || default_constructed_peer_root(object))) &&
+        !(has_peer_virtual_layout(ct) && (arrow || peer_object_lvalue(object))) &&
+        !(has_peer_automatic_layout(ct) && default_constructed_peer_object(object)) &&
         !require_supported_virtual_layout(ct, name_at)) return fail;
     // [expr.ref]/7.2: the member's type, with the object's cv-qualifiers added; the result is an
     // lvalue if the object is (or is reached through a pointer), else an xvalue.
@@ -2495,16 +2503,17 @@ public:
 
   // The sole constructor work in this profile is installing the external vtable address point.
   // The directly written field has no initializer and the implicit destructor is trivial.
-  Ex peer_root_default_init(QualType t, u32 begin, u32 end) {
-    if (!has_peer_virtual_layout(t) || Types::cv(types().canonical(t)) != Cv::none ||
+  Ex peer_default_init(QualType t, u32 begin, u32 end) {
+    if (!has_peer_automatic_layout(t) || Types::cv(types().canonical(t)) != Cv::none ||
         current_function == EntityId::none || current_class != EntityId::none || !lambdas_.empty() ||
         templated() || unevaluated || immediate_context || q_->is_constexpr(current_function))
       return {};
     const EntityId cls = types().class_of(t);
     const auto& entity = w_->entities.rec(cls);
     const auto* record = classes().find(cls);
-    if (!record || record->peer_virtual_layout != PeerVirtualLayout::root || entity.linkage != ast::Linkage::external ||
-        !record->destructor_usable || record->default_deleted || record->fields.size() != 1 ||
+    if (!record || entity.linkage != ast::Linkage::external || !record->destructor_usable || record->default_deleted ||
+        record->fields.size() != 1) return {};
+    if (record->peer_automatic_primary_base == EntityId::none &&
         std::ranges::count(record->members, true, &MemberDeclRec::is_virtual) != 2) return {};
     const auto& field = record->fields.front();
     if (record->access_of(field.entity) != ast::Access::public_ || field.dmi || field.init != ConstId::none ||
@@ -7918,12 +7927,17 @@ public:
   }
   // Also used on a class about to be published, before its own alignment has been applied.
   std::optional<ast::RecordLayout> record_layout(const ClassRec& c, EntityId ce) {
-    if (c.layout_requires_virtual_support && c.peer_virtual_layout == PeerVirtualLayout::none) return std::nullopt;
+    if (c.layout_requires_virtual_support && c.peer_virtual_layout == PeerVirtualLayout::none &&
+        c.peer_automatic_primary_base == EntityId::none) return std::nullopt;
     std::vector<ast::Placed> bases, places;
     for (const BaseRec& b : c.bases) {
-      auto m = place_of(types().class_type(b.cls));
-      if (!m) return std::nullopt;
-      bases.push_back(*m);
+      if (b.cls == c.peer_automatic_primary_base) {
+        bases.push_back(ast::scalar_placed(w_->target.pointer_size, w_->target.pointer_align));
+      } else {
+        auto m = place_of(types().class_type(b.cls));
+        if (!m) return std::nullopt;
+        bases.push_back(*m);
+      }
     }
     for (const FieldRec& f : c.fields) {
       auto m = place_of(f.type);
@@ -8241,8 +8255,10 @@ public:
     if (!check_base_path(ct, b, path, paths, at_)) return {NodeId::none, e.begin, e.end};
     if (unevaluated == 0) {
       const auto* from = class_rec(types().class_of(ct));
-      const bool peer_base = from && from->peer_virtual_layout == PeerVirtualLayout::primary_base &&
-                             path->size() == 1 && (pointer || peer_object_lvalue(e));
+      const bool peer_base = from && path->size() == 1 &&
+                             ((from->peer_virtual_layout == PeerVirtualLayout::primary_base &&
+                               (pointer || peer_object_lvalue(e))) ||
+                              (from->peer_automatic_primary_base == b && !pointer && default_constructed_peer_object(e)));
       if (!peer_base && !require_supported_virtual_layout(ct, at_)) return {NodeId::none, e.begin, e.end};
     }
     for (EntityId step : *path) {

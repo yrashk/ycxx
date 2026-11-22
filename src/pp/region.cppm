@@ -249,6 +249,8 @@ struct Region {
   std::vector<std::pair<u32, u32>> possibly_packed;
   // First GNU visibility pragma, if any. Ordinary parsing does not apply it.
   std::optional<u32> first_visibility_pragma;
+  // A Clang attribute pragma can attach ABI attributes without changing declaration tokens.
+  bool has_clang_attribute_pragma = false;
   bool operator==(const Region&) const = default;
 
   std::size_t size() const { return tokens.size(); }

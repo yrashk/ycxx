@@ -174,6 +174,7 @@ struct ClassShape {
   bool layout_requires_virtual_support = false;
   bool has_mutable_field = false;
   sema::PeerVirtualLayout peer_virtual_layout = sema::PeerVirtualLayout::none;
+  EntityId peer_automatic_primary_base = EntityId::none;
 };
 struct EnumShape {
   EntityId entity = EntityId::none;
@@ -802,7 +803,7 @@ ir::TypeLayout QueryLayout::type(QualType q) const {
   return {};
 }
 
-// Only the certified automatic-object operation can request this complete root's storage.
+// Only the certified automatic-object operation can request this virtual object's storage.
 // Passing or returning the class by value still asks type(), which guards virtual layouts.
 std::optional<ir::TypeLayout> QueryLayout::peer_root_allocation(QualType q) const {
   if (target_->triple != ast::x86_64_linux.triple) return std::nullopt;
@@ -810,8 +811,9 @@ std::optional<ir::TypeLayout> QueryLayout::peer_root_allocation(QualType q) cons
   const auto c = in.types.canon(q);
   if (!in.types.is<ast::TClass>(c)) return std::nullopt;
   const auto shape = classes_.find(std::to_underlying(in.types.get<ast::TClass>(c).entity));
-  if (shape == classes_.end() || shape->second->peer_virtual_layout != sema::PeerVirtualLayout::root ||
-      shape->second->layout_uncertain || shape->second->fields.size() != 1) return std::nullopt;
+  if (shape == classes_.end() || shape->second->layout_uncertain || shape->second->fields.size() != 1 ||
+      (shape->second->peer_virtual_layout != sema::PeerVirtualLayout::root &&
+       shape->second->peer_automatic_primary_base == EntityId::none)) return std::nullopt;
   if (const auto layout = class_layout(c))
     return ir::TypeLayout{.kind = ir::TypeKind::record, .size = layout->size, .align = layout->align};
   return std::nullopt;
@@ -868,10 +870,16 @@ std::optional<ClassLayout> QueryLayout::class_layout(QualType c) const {
   if (auto done = class_layouts_.find(key); done != class_layouts_.end()) return done->second;
   auto it = classes_.find(key);
   if (it == classes_.end() || (it->second->layout_requires_virtual_support &&
-                               it->second->peer_virtual_layout == sema::PeerVirtualLayout::none))
+                               it->second->peer_virtual_layout == sema::PeerVirtualLayout::none &&
+                               it->second->peer_automatic_primary_base == EntityId::none))
     return std::nullopt;
   std::vector<ast::Placed> bases, places;
-  for (EntityId b : it->second->bases) bases.push_back(placed(in.intern_type(ast::TClass{b})));
+  for (EntityId b : it->second->bases) {
+    if (b == it->second->peer_automatic_primary_base)
+      bases.push_back(ast::scalar_placed(target_->pointer_size, target_->pointer_align));
+    else
+      bases.push_back(placed(in.intern_type(ast::TClass{b})));
+  }
   for (std::size_t i = 0; i < it->second->fields.size(); ++i) {
     ast::Placed f = placed(in.canonical(it->second->fields[i]));
     if (!it->second->bit_widths.empty()) f.bit_width = it->second->bit_widths[i];

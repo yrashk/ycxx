@@ -249,6 +249,7 @@ public:
   // ABI attributes on declarations outside the entity's ordinary declaration records.
   bool has_unapplied_declaration_attributes(EntityId e) const { return unapplied_declaration_attributes_.contains(e); }
   bool peer_root_vtable_visible(EntityId cls) const;
+  bool peer_automatic_derived_tables(EntityId cls) const;
   bool peer_pure_dispatch(EntityId cls) const;
   // Whether an ordinary written definition can also supply its ELF base-object entry point (#136).
   bool supports_base_object_variant(EntityId function, const std::set<EntityId>& uncertain_layouts) const;
@@ -1051,6 +1052,8 @@ public:
   ClassContent class_content(u32 item, const std::function<const ast::ItemSema&(u32)>& sema_of);
   sema::PeerVirtualLayout peer_virtual_layout(u32 item, EntityId cls, const sema::ClassRec& rec,
                                              std::span<const ast::MemberRec> members);
+  EntityId peer_automatic_primary_base(u32 item, EntityId cls, const sema::ClassRec& rec,
+                                       std::span<const ast::MemberRec> members);
   // `instantiate_class(spec)` ([temp.inst]/2, §B6.2): the class record of a class template
   // specialization, its member items analysed with the arguments bound, built whole and then
   // published; none when the template has no definition before `item`, or for a dependent one.
@@ -7169,6 +7172,91 @@ sema::PeerVirtualLayout Program::peer_virtual_layout(u32 item, EntityId cls, con
   return derived ? primary_base : root;
 }
 
+// These implicit constructors have no observable work before installing the derived vptr.
+// Read the directly written declarations as canonical types can erase ABI-changing attributes.
+EntityId Program::peer_automatic_primary_base(u32 item, EntityId cls, const sema::ClassRec& rec,
+                                              std::span<const ast::MemberRec> members) {
+  using enum lex::Tk;
+  if (rec.bases.size() != 1 || rec.fields.size() != 1 || rec.is_abstract()) return EntityId::none;
+  const auto& edge = rec.bases.front();
+  if (edge.access != ast::Access::public_ || edge.dependent_in_pattern) return EntityId::none;
+  const auto* base = classes_.find(edge.cls);
+  const auto definition = class_items_.find(std::to_underlying(edge.cls));
+  if (!base || !base->defined || !base->is_abstract() || !base->bases.empty() || !base->fields.empty() ||
+      definition == class_items_.end()) return EntityId::none;
+
+  const auto tokens = [&](u32 begin, u32 end) { return std::span(r_->tokens).subspan(begin, end - begin); };
+  const auto names = [&](lex::Tok token, EntityId entity) {
+    return token.kind == identifier && r_->name(token) == w_->ins.names.spelling(w_->entities.rec(entity).name);
+  };
+  const auto ordinary_class = [&](u32 index, EntityId entity, const sema::ClassRec& record,
+                                  std::ptrdiff_t written_members) {
+    const auto& head = items_->items[index];
+    const auto& owner = w_->entities.rec(entity);
+    return sema::native_virtual_class(record, w_->types) && record.destructor_usable && !record.default_deleted &&
+           !record.union_ && !record.closure && !record.unapplied_layout && !record.explicit_alignment &&
+           record.types.empty() && record.friends.empty() && owner.linkage == ast::Linkage::external &&
+           owner.templ == EntityId::none && is_namespace(owner.scope) && !unnamed(namespace_path(owner.scope)) &&
+           !head.template_depth && !head.specialization && !in_class(index) &&
+           !layout_attribute(*r_, head.brace_end, head.end, LayoutAttributes::any) &&
+           std::ranges::count_if(head.members, [&](u32 member) {
+             return items_->items[member].kind != ItemKind::access_spec;
+           }) == written_members;
+  };
+  const u32 base_item = definition->second;
+  if (!ordinary_class(item, cls, rec, 2) || !ordinary_class(base_item, edge.cls, *base, 1)) return EntityId::none;
+
+  const auto class_key = [](lex::Tk k) { return k == kw_struct || k == kw_class; };
+  const auto& base_source = items_->items[base_item];
+  const auto base_head = tokens(base_source.begin, base_source.brace_begin);
+  if (base_head.size() != 2 || !class_key(base_head[0].kind) || !names(base_head[1], edge.cls)) return EntityId::none;
+  const auto& derived_source = items_->items[item];
+  const auto head = tokens(derived_source.begin, derived_source.brace_begin);
+  if ((head.size() != 4 && head.size() != 5) || !class_key(head[0].kind) || !names(head[1], cls) ||
+      head[2].kind != colon || (head.size() == 5 && head[3].kind != kw_public) || !names(head.back(), edge.cls))
+    return EntityId::none;
+  const auto visible = visible_decls(r_->name(head.back()), item, /*self=*/false);
+  if (visible.empty() || !std::ranges::all_of(visible, [&](DeclId id) {
+        const auto decl = decl_sema(id);
+        return decl && decl->kind == ast::DeclKind::class_ && decl->entity == edge.cls;
+      })) return EntityId::none;
+
+  const auto& field = rec.fields.front();
+  if (rec.access_of(field.entity) != ast::Access::public_ || field.dmi || field.init != ConstId::none ||
+      field.bit_width || field.no_unique_address || w_->types.builtin_of(field.type) != sema::Builtin::int_)
+    return EntityId::none;
+  const auto member = std::ranges::find(members, field.entity, &ast::MemberRec::entity);
+  if (member == members.end()) return EntityId::none;
+  const auto& field_source = items_->items[index(member->decl.item)];
+  const auto field_tokens = tokens(field_source.begin, field_source.end);
+  if (field_tokens.size() != 3 || field_tokens[0].kind != kw_int || !names(field_tokens[1], field.entity) ||
+      field_tokens[2].kind != semi) return EntityId::none;
+
+  const auto slot = [&](u32 owner, const sema::ClassRec& record, bool pure) -> const sema::MemberDeclRec* {
+    const auto m = std::ranges::find(record.members, true, &sema::MemberDeclRec::is_virtual);
+    if (m == record.members.end() || m->is_pure != pure || record.access_of(m->entity) != ast::Access::public_ ||
+        std::ranges::find(std::next(m), record.members.end(), true, &sema::MemberDeclRec::is_virtual) != record.members.end())
+      return nullptr;
+    const auto decl = member_decl(m->entity);
+    if (!decl) return nullptr;
+    const auto& source = items_->items[index(decl->item)];
+    if (source.parent != owner || source.kind != ItemKind::declaration) return nullptr;
+    auto written = tokens(source.begin, source.end);
+    if (pure) {
+      if (written.empty() || written.front().kind != kw_virtual) return nullptr;
+      written = written.subspan(1);
+    }
+    if (written.size() != (pure ? 7u : 6u) || written[0].kind != kw_int || !names(written[1], m->entity) ||
+        written[2].kind != l_paren || written[3].kind != r_paren || written.back().kind != semi) return nullptr;
+    if (pure ? written[4].kind != equal || written[5].kind != int_lit || r_->spelling(written[5]) != "0"
+             : written[4].kind != identifier || r_->name(written[4]) != "override") return nullptr;
+    return &*m;
+  };
+  const auto* pure = slot(base_item, *base, true);
+  const auto* override = slot(item, rec, false);
+  return pure && override && override->overridden_virtual == pure->entity ? edge.cls : EntityId::none;
+}
+
 bool Program::has_unapplied_class_layout(u32 item, const ClassContent& content) const {
   const auto& source = items_->items[item];
   return content.unapplied_field_layout || layout_may_be_packed(*r_, source.begin, source.brace_end) ||
@@ -7204,6 +7292,22 @@ bool Program::peer_root_vtable_visible(EntityId cls) const {
     if (layout_attribute(*r_, item.begin, item.end, LayoutAttributes::any)) return false;
   }
   return true;
+}
+
+bool Program::peer_automatic_derived_tables(EntityId cls) const {
+  if (r_->has_clang_attribute_pragma) return false;
+  const EntityId base = classes_.rec(cls).peer_automatic_primary_base;
+  if (base == EntityId::none) return false;
+  const auto only_declarations = [&](EntityId type) {
+    if (!peer_root_vtable_visible(type)) return false;
+    return std::ranges::all_of(classes_.rec(type).members, [&](const sema::MemberDeclRec& member) {
+      if (!member.is_virtual) return true;
+      const auto declarations = decls_.find(std::to_underlying(member.entity));
+      return declarations != decls_.end() && declarations->second.size() == 1 &&
+             !(declarations->second.front().second.flags & sema::decl_flag::definition);
+    });
+  };
+  return only_declarations(cls) && only_declarations(base);
 }
 
 bool Program::peer_pure_dispatch(EntityId cls) const {
@@ -7497,8 +7601,11 @@ const Result<ast::ClassDef>& Program::class_def(u32 item) {
       }
     }
     classify_defaulted_default_ctor(rec, out.diags);
-    if (rec.polymorphic && w_->target.triple == ast::x86_64_linux.triple)
+    if (rec.polymorphic && w_->target.triple == ast::x86_64_linux.triple) {
       rec.peer_virtual_layout = peer_virtual_layout(item, *cls, rec, members);
+      if (rec.peer_virtual_layout == sema::PeerVirtualLayout::none)
+        rec.peer_automatic_primary_base = peer_automatic_primary_base(item, *cls, rec, members);
+    }
     validate_class_alignment(item, *cls, rec, out.diags);
     rec.defined = true;
     // Complete-class checks see the full member set before any function bodies are read.
