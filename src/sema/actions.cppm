@@ -777,7 +777,8 @@ public:
   std::optional<std::vector<TemplateArg>> template_arguments(const ast::DeclSema& tmpl, std::span<const TemplateArg> args, u32 at) {
     std::vector<ast::TemplateParamSema> params = ins().seqs.elements(tmpl.template_params);
     NameId name = w_->entities.rec(tmpl.entity).name;
-    Templates t = tmpl.kind == ast::DeclKind::type_alias ? templates_for_use(at) : templates();
+    bool type_template = tmpl.kind == ast::DeclKind::type_alias || tmpl.kind == ast::DeclKind::class_;
+    Templates t = type_template ? templates_for_use(at) : templates();
     // An expansion only for a pack parameter: for others it is not supported yet (#88).
     std::size_t first_pack = std::ranges::find_if(params, [](const ast::TemplateParamSema& p) { return p.pack != 0; }) - params.begin();
     for (std::size_t i = 0; i < args.size() && i < first_pack; ++i)

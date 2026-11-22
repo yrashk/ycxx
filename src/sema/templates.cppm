@@ -1206,6 +1206,12 @@ public:
     Bindings given = bindings(depth, out);
     for (auto& a : given.levels[depth])
       if (a && a->kind == TemplateArgKind::pack) a = std::nullopt;
+    // With explicit template arguments, substitution reaches a written leading return
+    // before a function parameter can fail substitution ([temp.deduct.general]/7).
+    if (!explicit_args.empty() && !tmpl.has_trailing_return) {
+      auto ret = substitute(f.inner, given);
+      if (!ret || types().is_array(*ret) || types().is_function(*ret)) return std::nullopt;
+    }
     for (std::size_t i = 0; i < fixed && i < args.size(); ++i) {
       if (!args[i].deducible && args[i].overloads.empty()) continue;
       auto p0 = substitute(tmpl_param_type(tmpl, i), given);
