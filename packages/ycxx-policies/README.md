@@ -96,5 +96,6 @@ class Store {
 
 Tokens are move-only. Moving invalidates the source. Calling `release()` invalidates the
 held token before it goes out of scope. Operation guards terminate on a wrong scope, a
-moved-from token, or a released token. GCC and Clang support this API. Native YCXX instantiation
-depends on dependent type friendship. [Compiler prerequisite #689](https://github.com/yrashk/ycxx/issues/689)
+moved-from token, or a released token. GCC, Clang, and YCXX enforce the same rights constraints.
+On Linux x86-64, a YCXX-built issuer can also return a token to a hosted GCC or Clang caller.
+[Indirect results #661](https://github.com/yrashk/ycxx/issues/661) · [Type friendship #689](https://github.com/yrashk/ycxx/issues/689)

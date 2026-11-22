@@ -543,3 +543,55 @@ with tempfile.TemporaryDirectory() as directory:
                        check=True, timeout=30)
         assert subprocess.run([native], timeout=10).returncode == 0
         assert subprocess.run([native, "already-consumed"], timeout=10).returncode == -signal.SIGILL
+
+        capability = write("capability.cpp", """\
+            #include <ycxx/capabilities.hpp>
+            namespace caps = ycxx::capabilities;
+            inline constexpr caps::rights_mask read_right = 1;
+            inline constexpr caps::rights_mask write_right = 2;
+            struct Store;
+            using Grant = caps::token<Store, read_right>;
+            struct Store {
+              static Grant grant() noexcept;
+              static int read(const Grant& authority, caps::scope_id scope) noexcept;
+            };
+            Grant Store::grant() noexcept { return Grant(1); }
+            int Store::read(const Grant& authority, caps::scope_id scope) noexcept {
+              authority.require<read_right>(scope);
+              return scope == 1 ? 17 : 22;
+            }
+            int main(int argc, char**) {
+              auto initial = Store::grant();
+              if (argc == 2) return Store::read(initial, 2);
+              auto moved = static_cast<Grant&&>(initial);
+              if (argc == 3) return Store::read(initial, 1);
+              const int value = Store::read(moved, 1);
+              moved.release();
+              if (argc == 4) return Store::read(moved, 1);
+              return value != 17;
+            }
+        """)
+        subprocess.run([*args, "-fcheck-policies", str(capability), "-o", str(native)], check=True, timeout=30)
+        assert subprocess.run([native], timeout=10).returncode == 0
+        for denied in (("wrong-scope",), ("use", "moved"), ("use", "released", "token")):
+            assert subprocess.run([native, *denied], timeout=10).returncode == -signal.SIGILL
+        overreach = write("capability_overreach.cpp", capability.read_text().replace(
+            "authority.require<read_right>", "authority.require<write_right>"))
+        syntax(overreach, error="no matching function for call to 'require'")
+        forged = write("capability_forged.cpp", capability.read_text().replace(
+            "auto initial = Store::grant();", "Grant initial(1);"))
+        syntax(forged, error="private member")
+        copied = write("capability_copied.cpp", capability.read_text().replace(
+            "static_cast<Grant&&>(initial)", "initial"))
+        syntax(copied, error="deleted")
+
+        # The hosted caller receives the nontrivial capability from a YCXX-built issuer.
+        declarations, implementation = capability.read_text().split("Grant Store::grant()", 1)
+        methods, user_main = implementation.split("int main(", 1)
+        capability_provider = write("capability_provider.cpp", declarations + "Grant Store::grant()" + methods)
+        capability_peer = write("capability_peer.cpp", declarations + "int main(" + user_main)
+        capability_object = compile_object(capability_provider, checked=False)
+        subprocess.run([host, "-std=c++20", "-I", include, str(capability_peer), str(capability_object),
+                        "-o", str(native)], check=True, timeout=30)
+        assert subprocess.run([native], timeout=10).returncode == 0
+        assert subprocess.run([native, "wrong-scope"], timeout=10).returncode == -signal.SIGILL
