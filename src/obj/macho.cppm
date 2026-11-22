@@ -497,20 +497,27 @@ std::expected<object, std::string> read_object(std::span<const std::uint8_t> b, 
     return *section_symbol[sect];
   };
 
+  struct subtractor_fields {
+    std::uint32_t symbol, address, length;
+  };
   for (std::uint32_t si = 0; si < raw.size(); ++si) {
     auto& sec = o.sections[si];
     const auto& rs = raw[si];
     if (!in_bounds(rs.reloff, std::uint64_t{rs.nreloc} * 8)) return fail("relocations lie outside the file");
     std::optional<std::int64_t> pending_addend;
-    std::optional<std::uint32_t> pending_minus;
+    std::optional<subtractor_fields> pending_minus;
     for (std::uint32_t k = 0; k < rs.nreloc; ++k) {
       const std::size_t e = rs.reloff + 8 * std::size_t{k};
       const std::uint32_t address = load32(b, e), word = load32(b, e + 4);
       if (address & 0x80000000) return fail("scattered relocations are not supported");
       const std::uint32_t symnum = word & 0xffffff;
+      const bool pcrel = (word >> 24) & 1;
       const std::uint32_t length = (word >> 25) & 3;
       const bool external = (word >> 27) & 1;
       const auto type = static_cast<reloc_type>(word >> 28);
+      if (pending_minus && (type != reloc_type::unsigned_ || pcrel ||
+                            address != pending_minus->address || length != pending_minus->length))
+        return fail("SUBTRACTOR requires a consecutive non-PC-relative UNSIGNED at the same address and width");
       if (type == reloc_type::addend) {
         pending_addend = sign_extend(symnum, 24);
         continue;
@@ -538,16 +545,19 @@ std::expected<object, std::string> read_object(std::span<const std::uint8_t> b, 
       reloc r{address, reloc_kind::abs64, target, 0, std::nullopt};
       switch (type) {
         case reloc_type::subtractor:
-          if (!external) return fail("SUBTRACTOR must name a symbol");
-          pending_minus = target;
+          if (pcrel || (length != 2 && length != 3) || pending_addend)
+            return fail("SUBTRACTOR requires a non-PC-relative 32-bit or 64-bit field without ADDEND");
+          pending_minus = subtractor_fields{target, address, length};
           continue;
         case reloc_type::unsigned_: {
           if (length != 2 && length != 3) return fail("UNSIGNED relocation of an unsupported width");
           r.kind = length == 3 ? reloc_kind::abs64 : reloc_kind::abs32;
           const std::uint64_t stored = length == 3 ? load64(sec.bytes, address) : load32(sec.bytes, address);
           r.addend = (length == 3 ? static_cast<std::int64_t>(stored) : sign_extend(stored, 32)) + extra;
-          r.minus = pending_minus;
-          pending_minus.reset();
+          if (pending_minus) {
+            r.minus = pending_minus->symbol;
+            pending_minus.reset();
+          }
           std::ranges::fill(std::span(sec.bytes).subspan(address, width), 0);
           break;
         }
@@ -557,14 +567,13 @@ std::expected<object, std::string> read_object(std::span<const std::uint8_t> b, 
         case reloc_type::got_load_page21: r.kind = reloc_kind::got_page21; break;
         case reloc_type::got_load_pageoff12: r.kind = reloc_kind::got_pageoff12; break;
         case reloc_type::pointer_to_got:
-          if (length != 2 || !((word >> 24) & 1)) return fail("POINTER_TO_GOT other than 32-bit pc-relative is not supported");
+          if (length != 2 || !pcrel) return fail("POINTER_TO_GOT other than 32-bit pc-relative is not supported");
           r.kind = reloc_kind::got_rel32;
           r.addend = sign_extend(load32(sec.bytes, address), 32);
           std::ranges::fill(std::span(sec.bytes).subspan(address, 4), 0);
           break;
         default: return fail(std::format("relocation type {} is not supported", std::to_underlying(type)));
       }
-      if (pending_minus) return fail("SUBTRACTOR not followed by UNSIGNED");
       if (pending_addend) return fail("ADDEND not followed by BRANCH26, PAGE21 or PAGEOFF12");
       sec.relocs.push_back(r);
     }

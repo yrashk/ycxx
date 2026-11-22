@@ -55,6 +55,10 @@ instantiation. Concrete constant template arguments can use braced conversions s
 Functional conversions can construct namespace-qualified class-template specializations with
 parentheses or braces, including through namespace aliases. [#697](https://github.com/yrashk/ycxx/issues/697)
 
+C++26 reflection annotations on class heads and ordinary function declarations accept
+constant payloads and retain their types for compiler consumers.
+[#662](https://github.com/yrashk/ycxx/issues/662)
+
 **Preprocess binary resources.** Both targets support `#embed` and `__has_embed` with the standard
 parameters. [#125](https://github.com/yrashk/ycxx/issues/125)
 
@@ -346,10 +350,11 @@ written default member initializer are value-initialized.
   with addressable static storage and scalar calls ([#338](https://github.com/yrashk/ycxx/issues/338));
 - casts, including `static_cast<T&&>` from a compatible object lvalue and runtime `static_cast`
   downcasts of object pointers and lvalue references through accessible, unambiguous
-  nonvirtual base paths, `sizeof`/`alignof` (classes included), `decltype`, and calls
-  through pointers to functions. Qualified functional casts check access to aliases and typedefs
-  declared directly in an ordinary class. [#199](https://github.com/yrashk/ycxx/issues/199) ·
-  [#216](https://github.com/yrashk/ycxx/issues/216)
+  nonvirtual base paths, `sizeof`/`alignof` (classes included), direct-member `offsetof` for
+  ordinary standard-layout classes, `decltype`, and calls through pointers to functions.
+  Qualified functional casts check access to aliases and typedefs declared directly in an
+  ordinary class. [#199](https://github.com/yrashk/ycxx/issues/199) ·
+  [#216](https://github.com/yrashk/ycxx/issues/216) · [#248](https://github.com/yrashk/ycxx/issues/248)
 - equality and inequality between `std::nullptr_t` values and between a `std::nullptr_t`
   value and a pointer. [#199](https://github.com/yrashk/ycxx/issues/199)
 - constant evaluation on ycxx's own interpreter: `constexpr`, `consteval`, `constinit`,
