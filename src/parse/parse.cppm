@@ -5868,8 +5868,9 @@ private:
       }
       sem.type = d.type;
       if (spec.is_inline || spec.is_constexpr) {
-        if (!s_.require_concrete_object(d.type, d.name_at) || !s_.require_supported_virtual_layout(d.type, d.name_at))
-          return false;
+        // An inline static member defines an object ([class.static.data]).
+        if (!s_.require_complete(d.type, d.name_at) || !s_.require_concrete_object(d.type, d.name_at) ||
+            !s_.require_supported_virtual_layout(d.type, d.name_at)) return false;
         flags |= sema::decl_flag::definition;
       }
       sem.entity = s_.world().entities.entity(
