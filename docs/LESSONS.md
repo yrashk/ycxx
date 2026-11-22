@@ -301,8 +301,8 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
     not help.
   - Debug hides what -O3 shows: a null `Json*` dereferenced by a test returned null at -O0
     (`unit.lsp`), and a daemon test's edit window, sized for Debug's compile time, closed in
-    Release (`daemon.process`, now calibrated). A Release-only test failure is a test bug as
-    often as a compiler one.
+    Release. `daemon.process` now parks the pooled build at a checkpoint (#746). A Release-only
+    test failure is a test bug as often as a compiler one.
   - A GCC crash or link failure that a guessed repro misses: copy the intermediate modules
     verbatim and reduce them. #283's trigger was an inline constructor in an *intermediate*
     module, and #46's was a template specialization instantiated in the imported interface.

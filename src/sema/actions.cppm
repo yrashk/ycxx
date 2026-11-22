@@ -5909,6 +5909,10 @@ public:
       }
       if (node.is<ast::AssignmentCall>()) return function_throwing(node.get<ast::AssignmentCall>().function);
       if (node.is<ast::CtorCall>()) return function_throwing(node.get<ast::CtorCall>().ctor);
+      // [except.spec], [expr.new]: syntax-only array allocation selects the usual
+      // global operator new[] without a Call child. The visitor still checks the operands.
+      if (node.is<ast::NewArray>() && node.get<ast::NewArray>().allocation.id == NodeId::none)
+        return function_throwing(w_->allocation_function(AllocationFunction::allocate, /*array=*/true).entity);
       if (node.is<ast::DeleteObject>()) return function_throwing(node.get<ast::DeleteObject>().function);
       if (node.is<ast::DeleteArray>()) return function_throwing(node.get<ast::DeleteArray>().function);
       if (node.is<ast::ImplicitConversion>()) {
