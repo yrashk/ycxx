@@ -446,7 +446,6 @@ draft/temp/temp.variadic-4.accept.cpp 'auto' not supported yet
 draft/temp/temp.variadic-8.accept.cpp 'template' not supported yet
 own/classes/virtual-declarations/root-layout.accept.cpp@darwin-arm64 Darwin virtual layout of peer-owned roots (#650)
 own/function-pointers/iota-template-argument.run.cpp function pointers and references as constant template arguments (#406)
-own/smoke/exit-status.run.cpp <cstdio> preprocesses; libycxx does not know ycxx yet (yrashk/libycxx#17), then sema needs namespaces (#133)
 own/classes/s1-byvalue-constexpr.run.cpp classes in constant evaluation (#25)
 own/classes/s1-elaborated.run.cpp block-scope elaborated type specifier (#117)
 own/classes/s1-locals-scopes.run.cpp local classes (#117)
