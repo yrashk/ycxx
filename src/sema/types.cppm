@@ -542,7 +542,8 @@ enum class EntityKind : u8 {
   alias_template,     // [temp.alias]: `(scope, name, head)`; its uses are the types it stands for
   concept_,           // [temp.concept]: `(scope, name, head)`
   type_alias,  // a typedef-name or alias-declaration ([dcl.typedef]): `(scope, name)`
-  virtual_table  // an external Itanium vtable, with its class as `scope`
+  virtual_table,  // an external Itanium vtable, with its class as `scope`
+  deleting_destructor  // an Itanium D0 entry, with its class as `scope`
 };
 
 // The structure behind an entity id (§4.3): for a function `(scope, name, canonical type)`, with

@@ -76,7 +76,7 @@ class Constants {
 
 // An entity the translation unit declares (or defines): what its symbol is made of.
 // These symbols use special Itanium encodings (§5.1.4.3, §5.1.4.5).
-enum class Special : std::uint8_t { none, constructor, destructor, virtual_table };
+enum class Special : std::uint8_t { none, constructor, destructor, virtual_table, deleting_destructor };
 struct Entity {
   EntityId id = EntityId::none;
   std::string name;  // its identifier
@@ -136,6 +136,7 @@ struct FunctionDef {
   EntityId constructor_cleanup = EntityId::none;
   EntityId constructor_initializer_callee = EntityId::none;
   EntityId unwind_through_constructor = EntityId::none;
+  EntityId root_destructor_table = EntityId::none;  // a peer-owned table restored by D1 and D2
 };
 
 // A variable definition at namespace scope with its constant initializer, or `ConstId::none` for
@@ -1096,6 +1097,7 @@ engine::query_task<Generated> FunctionGen::run(engine::Ctx& cx, FnKey k) {
   const FunctionDef& d = src.def;
   irgen::FunctionInput input{d.entity, d.decl, d.body, d.item, d.body_offset};
   input.this_type = d.this_type;
+  input.root_destructor_table = d.root_destructor_table;
   const auto& seqs = universe().in->seqs;
   const auto locals = d.body.locals;
   for (std::uint32_t index = 0, count = seqs.size(locals); index < count; ++index) {
@@ -1874,7 +1876,8 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
     // Calls still name the complete-object entry. An eligible definition also emits C2 or D2
     // for a caller constructing or destroying a base subobject (Itanium ABI §5.1.4.3, §5.2.5).
     const std::string_view entry = e.special == Special::constructor ? "C1" :
-                                   e.special == Special::destructor ? "D1" : std::string_view(e.name);
+                                   e.special == Special::destructor ? "D1" :
+                                   e.special == Special::deleting_destructor ? "D0" : std::string_view(e.name);
     TemplateSpec spec{e.template_type.value_or(e.type), e.template_args, e.template_params, e.template_same_heads};
     const auto encode = [&](std::string_view name) {
       return symbol_name(in, name, e.type, e.is_function, e.lang, names, e.scope, e.special != Special::none,

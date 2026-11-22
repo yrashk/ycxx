@@ -324,6 +324,45 @@ void block_virtual_emission(TranslationUnit& unit, parse::Program& program, cons
     if (auto d = program.member_decl(member->entity)) unit.virtual_declaration = ast::Loc{d->item, 0};
 }
 
+bool root_destructor_body_supported(parse::Program& program, EntityId cls, const ast::BodySema& body) {
+  auto& world = program.world();
+  const auto& tree = world.ins.ast;
+  if (body.tree == ast::NodeId::none || !tree.is<ast::Destructor>(body.tree) ||
+      world.ins.seqs.size(body.locals) != 0 || world.ins.seqs.size(body.closures) != 0) return false;
+  const auto destructor = tree.get<ast::Destructor>(body.tree);
+  if (!tree.children(destructor.members).empty() || !tree.is<ast::Compound>(destructor.body.id)) return false;
+  const auto statements = tree.children(tree.get<ast::Compound>(destructor.body.id).stmts);
+  if (statements.size() != 1 || !tree.is<ast::ExprStmt>(statements.front().id)) return false;
+  const auto expr = tree.get<ast::ExprStmt>(statements.front().id).expr.id;
+  if (!tree.is<ast::Call>(expr)) return false;
+  const auto call = tree.get<ast::Call>(expr);
+  if (call.function == EntityId::none || !tree.is<ast::DeclRef>(call.callee.id)) return false;
+  const auto callee = tree.get<ast::DeclRef>(call.callee.id);
+  if (callee.entity != call.function || !program.peer_root_destructor_observer(call.function, cls)) return false;
+  const auto arguments = tree.children(call.args);
+  return arguments.size() == 1 && tree.is<ast::This>(arguments.front().id);
+}
+
+ast::BodySema deleting_root_destructor_body(sema::World& world, const FunctionDef& complete,
+                                           const ast::DeclSema& deallocator) {
+  ast::Builder b(world.ins);
+  const auto prvalue = [](QualType type) { return ast::ExprInfo{type, ast::ValueCategory::prvalue, 0}; };
+  const auto void_type = world.types.builtin(sema::Builtin::void_);
+  const auto size_type = world.types.builtin(world.target.size_type);
+  const ast::Child receiver{b.add(ast::This{prvalue(*complete.this_type)}, 0), 0};
+  const ast::Child destroy{b.add(ast::MemberCall{prvalue(void_type), complete.entity, receiver, b.list({})}, 0), 0};
+  const ast::Child address{b.add(ast::ImplicitConversion{prvalue(world.types.pointer(void_type)),
+      ast::ConversionKind::pointer, EntityId::none, receiver}, 0), 0};
+  // [Itanium ABI §2.4]: the certified fieldless root has only the primary vptr.
+  const ast::Child size{b.add(ast::Literal{prvalue(size_type), world.values.integer(size_type, world.target.pointer_size)}, 0), 0};
+  const ast::Child callee{b.add(ast::DeclRef{{deallocator.type, ast::ValueCategory::lvalue, 0}, deallocator.entity}, 0), 0};
+  const ast::Child release{b.add(ast::Call{prvalue(void_type), deallocator.entity, callee, b.list({address, size})}, 0), 0};
+  const ast::Child statements[] = {{b.add(ast::ExprStmt{destroy}, 0), 0}, {b.add(ast::ExprStmt{release}, 0), 0}};
+  ast::BodySema body = complete.body;  // the certified definition has no parameters, locals or closures
+  body.tree = b.commit(ast::Child{b.add(ast::Compound{b.list(statements)}, 0), 0}).id;
+  return body;
+}
+
 bool unwind_scalar(const sema::Types& types, QualType type, bool allow_void = false) {
   const auto t = types.rec(type);
   if (t.kind == sema::TypeKind::pointer || t.kind == sema::TypeKind::enum_) return true;
@@ -798,6 +837,7 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
     const auto& record = classes.rec(c);
     if (!record.layout_requires_virtual_support) continue;
     if (record.peer_automatic_primary_base != EntityId::none || automatic_primary_bases.contains(c)) continue;
+    if (!uncertain_layouts.contains(c) && program.peer_root_destructor_producer(c)) continue;
     // Check the full unit even if a pure call was admitted before a later redeclaration.
     if (!uncertain_layouts.contains(c) && program.peer_pure_dispatch(c)) continue;
     // The first slot is the key function of the admitted root. Classify its ownership using
@@ -870,10 +910,11 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
                            table ? Special::virtual_table
                            : r.kind == sema::EntityKind::constructor  ? Special::constructor
                            : r.kind == sema::EntityKind::destructor ? Special::destructor
+                           : r.kind == sema::EntityKind::deleting_destructor ? Special::deleting_destructor
                                                                     : Special::none});
     Entity& emitted = tu.entities.back();
     emitted.asm_label = program.asm_label(e);
-    if (emitted.special == Special::destructor) {
+    if (emitted.special == Special::destructor || emitted.special == Special::deleting_destructor) {
       if (const auto* owner = classes.find(r.scope))
         emitted.nonthrowing = owner->destructor_noexcept.value_or(false);
     } else if (fn) {
@@ -930,6 +971,7 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
     }
   };
   Runtime<decltype(declare)> runtime{world, declare};
+  std::optional<ast::DeclSema> root_deallocator;
   auto weak_inline_variable = [&](const ast::DeclSema& d) {
     if (!inline_declarations.contains(d.entity)) return false;
     const auto& entity = world.entities.rec(d.entity);
@@ -984,6 +1026,33 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
       if (body.deduced) d.type = body.deduced_type;
       tu.functions.push_back({d.entity, d, body, program.id(k), it.body_begin - it.begin, program.this_type(d)});
       const auto& entity = world.entities.rec(d.entity);
+      if (entity.kind == sema::EntityKind::destructor && d.is_virtual &&
+          program.peer_root_destructor_producer(entity.scope)) {
+        if (!root_destructor_body_supported(program, entity.scope, body)) {
+          block_virtual_emission(tu, program, classes.rec(entity.scope));
+          return tu;
+        }
+        root_deallocator = world.allocation_function(sema::AllocationFunction::deallocate_sized);
+        // The peer can replace this ordinary implicit declaration. A written declaration in
+        // the producer can instead carry ABI attributes erased by sema.
+        if (program.declaration(root_deallocator->entity, program.end()) ||
+            !program.asm_label(root_deallocator->entity).empty() ||
+            program.has_unapplied_declaration_attributes(root_deallocator->entity)) {
+          block_virtual_emission(tu, program, classes.rec(entity.scope));
+          return tu;
+        }
+        auto& complete = tu.functions.back();
+        complete.root_destructor_table = sema::virtual_table_entity(world, entity.scope);
+        tu.base_object_variants.insert(complete.entity);
+        ast::DeclSema deleting = d;
+        deleting.entity = world.entities.entity({.kind = sema::EntityKind::deleting_destructor,
+                                                .name = entity.name, .type = d.type, .scope = entity.scope});
+        const ast::Loc location{complete.item, complete.body_offset};
+        declare(deleting, location);
+        tu.functions.push_back({deleting.entity, deleting, deleting_root_destructor_body(world, complete, *root_deallocator),
+                                location.item, location.offset, complete.this_type});
+        continue;
+      }
       if (linux && !member && program.supports_base_object_variant(d.entity, uncertain_layouts))
         tu.base_object_variants.insert(d.entity);
       tu.functions.back().coalesced = inline_declarations.contains(d.entity) && entity.kind == sema::EntityKind::function &&
@@ -1115,6 +1184,8 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
     declare(table, at);
   };
   for (FunctionDef& f : tu.functions) {
+    if (f.root_destructor_table != EntityId::none)
+      declare_virtual_table(f.root_destructor_table, ast::Loc{f.item, f.body_offset});
     const auto locals = ins.seqs.elements(f.body.locals);
     if (classes.has_virtual_layouts()) {
       for (const auto& local : locals) {
@@ -1174,6 +1245,7 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
     d.type = world.entities.rec(e).type;
     declare(d, std::nullopt);
   }
+  if (root_deallocator) declare(*root_deallocator, std::nullopt);
   // A declaration anywhere in the unit can supply the visibility of the one object symbol.
   if (!hidden_declarations.empty())
     for (Entity& e : tu.entities) e.hidden = hidden_declarations.contains(e.id);
