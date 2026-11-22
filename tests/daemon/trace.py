@@ -46,13 +46,15 @@ def main(ycxx):
     base = {k: v for k, v in os.environ.items() if k not in ('YCXX_DAEMON', 'YCXX_NO_DAEMON', 'YCXX_ROOT', 'NO_COLOR')}
     base.update(YCXX_RUNTIME_DIR=runtime, YCXX_DAEMON_IDLE_EXIT='300', YCXX_THREADS='4')
     daemon = dict(base, YCXX_DAEMON='require')
+    target = '--target=arm64-apple-darwin'
     watchers = []
     try:
         src = scope / 'a.cpp'
         src.write_text(SOURCE)
 
         def cxx(*args, env=daemon):
-            return subprocess.run([ycxx, 'cxx', *args], cwd=scope, env=env, capture_output=True, text=True, timeout=300)
+            return subprocess.run([ycxx, 'cxx', target, *args], cwd=scope, env=env,
+                                  capture_output=True, text=True, timeout=300)
 
         def ctl(*args):
             return subprocess.run([ycxx, 'ctl', *args], cwd=scope, env=base, capture_output=True, text=True, timeout=60)
@@ -142,12 +144,13 @@ def main(ycxx):
         traced_error('diagnostic.cpp', './diagnostic.h:1:12', 'invalid preprocessing number',
                      ('Build', 'TuFront', 'Pp'), '-fsyntax-only')
         diagnostic.write_text('#include "diagnostic.h"\n')
-        definition = 'double f(double x) {\n  return x;\n}\n'
+        definition = 'long double f(long double x, ...) {\n  return x;\n}\n'
+        abi_error = 'x86-64 System V ABI: x87 long double parameters and results are unsupported'
         header.write_text('/*   */\n' + definition)
-        traced_error('diagnostic.cpp', './diagnostic.h:2:20', 'x86-64 System V ABI:',
+        traced_error('diagnostic.cpp', './diagnostic.h:2:35', abi_error,
                      ('Build', 'Tu', 'Lower'), '--target=x86_64-pc-linux-gnu', '-c')
         header.write_text('/*\n\n */\n' + definition)
-        traced_error('diagnostic.cpp', './diagnostic.h:4:20', 'x86-64 System V ABI:',
+        traced_error('diagnostic.cpp', './diagnostic.h:4:35', abi_error,
                      ('Build', 'Tu', 'Lower'), '--target=x86_64-pc-linux-gnu', '-c')
         absent = cxx('--trace-engine=json', '-fsyntax-only', 'absent.cpp')
         records = [json.loads(l) for l in absent.stderr.splitlines() if l.strip()]
@@ -192,7 +195,7 @@ def main(ycxx):
         # --watch: a build, then one per change of a file the build read.
         (scope / 'k.h').write_text('inline int k() { return 1; }\n')
         src.write_text('#include "k.h"\n' + SOURCE.replace('- 9', '- 8 - k()'))
-        wp = subprocess.Popen([ycxx, 'cxx', '--watch', '--trace-engine', 'a.cpp', '-o', 'w'], cwd=scope, env=daemon,
+        wp = subprocess.Popen([ycxx, 'cxx', target, '--watch', '--trace-engine', 'a.cpp', '-o', 'w'], cwd=scope, env=daemon,
                               stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
         watchers.append(wp)
         log = []
@@ -250,7 +253,11 @@ def main(ycxx):
         check(ctl('status').returncode != 0, 'a stalled watcher does not keep the daemon alive')
         drain.join(timeout=20)
         out = ''.join(seen)
-        check('── #' in out and 'cxx a.cpp -o a' in out, f'the watcher shows each request: {out[:400]}')
+        requests = [line for line in out.splitlines() if line.startswith('── #')]
+        for output in ('a', 'w'):
+            command = f'cxx {target} a.cpp -o {output}'
+            check(any(line.endswith(' ' + command) for line in requests),
+                  f'the watcher shows {command}: {requests[:5]}')
         check('Build(a.cpp → a)' in out and 'trace: ' in out, 'the watcher shows the events and each summary')
         check('the daemon has gone' in out, 'the watcher says the daemon went')
     finally:

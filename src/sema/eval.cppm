@@ -24,7 +24,7 @@ class EvalFacts : public irgen::TypeFacts {
 public:
   EvalFacts(World& w, Questions& q) : TypeFacts(w.ins, w.target), w_(&w), q_(&q) {
     enum_underlying = [&q](EntityId e) {
-      if (const EnumRec* r = q.defining_enum(e); r && r->underlying) return *r->underlying;
+      if (const EnumRec* r = enum_record(q, e); r && r->underlying) return *r->underlying;
       return q.classes().underlying(e);
     };
     bases_of = [&q](EntityId c) {
@@ -37,13 +37,44 @@ public:
       const ClassRec* r = q.classes().find(c);
       return r && field < r->fields.size() ? r->fields[field].bit_width : 0;
     };
+    field_type = [&q](EntityId c, std::uint32_t field) -> std::optional<QualType> {
+      const ClassRec* r = q.classes().find(c);
+      return r && field < r->fields.size() ? std::optional(r->fields[field].type) : std::nullopt;
+    };
   }
   ConstId string_address(ConstId s) { return w_->values.address({}, s, 0); }
   bool is_constexpr(EntityId f) { return Sema::closure_member(*w_, f) || q_->is_constexpr(f); }
   bool is_main(EntityId) { return false; }  // `main` is never evaluated ([basic.start.main])
   std::optional<std::uint32_t> ellipsis_after(EntityId f) { return parameters_before_ellipsis(w_->entities.rec(f).type); }
 
+  std::optional<interp::EnumLayout> constant_enum_layout(EntityId e) const {
+    const EnumRec* r = enum_record(*q_, e);
+    if (!r || !r->underlying) return std::nullopt;
+    if (r->fixed) return interp::EnumLayout{*r->underlying, std::nullopt};
+
+    // [dcl.enum]: the hypothetical integer type with the minimum width that holds the enumerators.
+    i64 low = 0;
+    u64 high = 0;
+    for (const EnumeratorRec& enumerator : r->enumerators) {
+      if (enumerator.value == ConstId::none) return std::nullopt;
+      auto bits = w_->ins.values.get<ast::VInt>(enumerator.value).bits;
+      if (ast::is_negative(bits)) low = std::min(low, i64(bits.lo));
+      else high = std::max(high, bits.lo);
+    }
+    const auto magnitude_bits = low < 0 ? std::max(std::bit_width(~u64(low)), std::bit_width(high))
+                                        : std::max(1, std::bit_width(high));
+    const u64 maximum = magnitude_bits == 64 ? ~u64{0} : (u64{1} << magnitude_bits) - 1;
+    if (low < 0 && !std::in_range<i64>(maximum)) return std::nullopt;
+    const i64 minimum = low < 0 ? -i64(maximum) - 1 : 0;
+    return interp::EnumLayout{*r->underlying, interp::EnumRange{minimum, maximum}};
+  }
+
 private:
+  static const EnumRec* enum_record(Questions& q, EntityId e) {
+    if (const EnumRec* r = q.defining_enum(e)) return r;
+    return q.classes().find_enum(e);
+  }
+
   World* w_;
   Questions* q_;
 };
@@ -57,6 +88,8 @@ struct Evaluated {
   // The expression is value-dependent ([temp.dep.constexpr]): it is evaluated when the template is
   // instantiated. Also set when instantiation gave up at its limit, which was diagnosed already.
   bool dependent = false;
+  // A demanded specialization already diagnosed a type trait at its original spelling.
+  bool type_trait_failure = false;
 };
 
 class Evaluator {
@@ -69,6 +102,7 @@ public:
     EntityId f = EntityId::none;
     if (auto call = s_->as<ast::Call>(e)) f = call->function;
     if (auto call = s_->as<ast::MemberCall>(e)) f = call->function;
+    if (auto call = s_->as<ast::AssignmentCall>(e)) f = call->function;
     if (f != EntityId::none && !Sema::closure_member(s_->world(), f) && !q_->is_constexpr(f))
       s_->diag(e.begin, Diag::not_constant, reason_arg({interp::Reason::not_constexpr, 0, {}}));
   }
@@ -82,6 +116,8 @@ private:
   Evaluated evaluate(Ex e, bool reference_initializer) {
     if (!e.ok()) return {};
     if (s_->dependent(e)) return {std::nullopt, reason_unsupported, false, true};
+    if (!reference_initializer)
+      if (auto value = tag_initializer_constant(e)) return {*value, 0, true};
     if (reference_initializer) {
       if (!e.glvalue()) return {};
       // The built-in address of the bound glvalue, without resolving operator& ([dcl.init.ref]).
@@ -90,6 +126,14 @@ private:
     } else if (e.glvalue()) e = s_->rvalue(e);
     if (!e.ok()) return {};
     ast::Interners& in = s_->ins();
+    if (s_->types().is_member_pointer(e.type())) {
+      // Read a direct member pointer constant from the expression. Its value retains the field
+      // identity or typed null for later constant evaluation.
+      while (auto p = s_->as<ast::Paren>(e)) e.id = p->operand.id;
+      if (auto lit = s_->as<ast::Literal>(e); lit && in.values.is<ast::VMemberPtr>(lit->value))
+        return {lit->value, 0, true};
+      return {};
+    }
     ast::Child root = s_->builder().commit(ast::Child{e.id, 0});
     if (reference_initializer && irgen::materializes_temporary(in.ast, root.id))
       return {std::nullopt, reason_arg({interp::Reason::local_address, 0, {}})};
@@ -116,7 +160,10 @@ private:
     auto body = irgen::function_ir(in, input, facts);
     if (!body) return {};
     Host host{q_, this};
-    interp::Outcome out = interp::evaluate(host, in, s_->world().target, body->body, EntityId::none, {}).run();
+    interp::Config config{.enum_layout = [&facts](EntityId e) { return facts.constant_enum_layout(e); }};
+    interp::Outcome out = interp::evaluate(host, in, s_->world().target, body->body, EntityId::none, {}, std::move(config)).run();
+    if (out.status != interp::Outcome::Status::value && host.type_trait_failure)
+      return {std::nullopt, reason_unsupported, false, false, true};
     if (out.status != interp::Outcome::Status::value && q_->instantiation_gave_up())
       return {std::nullopt, reason_unsupported, false, true};
     if (out.status != interp::Outcome::Status::value) {
@@ -143,17 +190,23 @@ private:
 
 public:
   // An aggregate initializer is constant when each of its elements is constant ([expr.const]).
-  Evaluated evaluate_initializer(Ex e) {
+  Evaluated evaluate_initializer(Ex e, bool zero_default = true) {
+    if (auto value = tag_initializer_constant(e)) return {*value, 0, true};
     if (s_->as<ast::InitList>(e)) {
       std::vector<ConstId> elements;
       for (const Ex& element : s_->list_elements(e)) {
-        Evaluated result = evaluate_initializer(element);
+        Evaluated result = evaluate_initializer(element, zero_default);
         if (!result.value) return result;
         elements.push_back(*result.value);
       }
       return {s_->world().values.aggregate(e.type(), elements), 0, true};
     }
-    if (s_->as<ast::ValueInit>(e) || s_->as<ast::DefaultInit>(e)) {
+    if (auto dmi = s_->as<ast::DefaultMemberInit>(e)) {
+      // The isolated evaluator cannot read this aggregate's field paths (#25). Evaluating the
+      // scalar here can succeed if its initializer does not need the destination object.
+      return evaluate_initializer({dmi->init.id, e.begin, e.end, e.info}, zero_default);
+    }
+    if (s_->as<ast::ValueInit>(e) || (zero_default && s_->as<ast::DefaultInit>(e))) {
       if (auto value = zero_constant(e.type())) return {*value, 0, true};
       return {};
     }
@@ -162,6 +215,13 @@ public:
   }
 
 private:
+  std::optional<ConstId> tag_initializer_constant(Ex e) {
+    if (!s_->is_defaulted_tag_initializer(e)) return std::nullopt;
+    // The empty record value describes storage for the non-aggregate tag. Sema has already
+    // selected its constructor, including the checks for access and explicitness.
+    return s_->world().values.aggregate(e.type(), {});
+  }
+
   // The value of a zero-initialized object of type `t` ([dcl.init.general]).
   std::optional<ConstId> zero_constant(QualType t) {
     Types& types = s_->types();
@@ -175,7 +235,10 @@ private:
       }
       return values.aggregate(t, elements);
     }
-    if (types.is_pointer(t)) return values.null_pointer(t);
+    if (types.is_pointer(t) || types.is(t, Builtin::nullptr_t)) return values.null_pointer(t);
+    if (types.is_member_pointer(t) && !types.is_function(types.rec(t).inner))
+      return s_->ins().intern_value(ast::VMemberPtr{Types::unqualified(types.canonical(t))});
+    if (types.is_enum(t)) return values.integer(s_->underlying_of(t), 0);
     if (types.is_integral(t)) return values.integer(Types::unqualified(t), 0);
     if (types.is_standard_floating(t) && ast::computes(ast::float_format(s_->ins(), s_->world().target, t)))
       return values.floating(Types::unqualified(t), 0.0);
@@ -185,11 +248,16 @@ private:
   struct Host {
     Questions* q;
     Evaluator* e;
+    bool type_trait_failure = false;
     interp::ready<interp::Callee> body(EntityId f) {
       if (auto c = e->closure_callee(f)) return {*c};
       return {q->function_ir(f)};
     }
-    interp::ready<std::optional<interp::GlobalVar>> global(EntityId v) { return {q->global(v)}; }
+    interp::ready<std::optional<interp::GlobalVar>> global(EntityId v) {
+      auto value = q->global(v);
+      type_trait_failure |= q->type_trait_instantiation_failed(v);
+      return {value};
+    }
     bool stop_requested() const { return false; }  // until the scheduler has stop tokens (#15)
   };
 
@@ -199,7 +267,10 @@ private:
     Values& vs = s_->world().values;
     using K = interp::Result::Kind;
     switch (r.kind) {
-    case K::integer: return {vs.integer(r.type, r.bits), 0, true};
+    case K::integer: {
+      QualType t = s_->types().is_enum(r.type) ? s_->underlying_of(r.type) : r.type;
+      return {vs.integer(t, r.bits), 0, true};
+    }
     case K::floating: return {ast::float_value(s_->ins(), s_->world().target, r.type, ast::Bits128{r.bits, 0}), 0, true};
     case K::null: return {vs.null_pointer(r.type), 0, true};
     case K::function: return {vs.address(r.type, vs.entity(r.entity), 0), 0, true};
@@ -230,6 +301,8 @@ private:
     for (std::size_t i = 0; i < s_->closures.size(); ++i) {
       const ast::ClosureDef& c = s_->closures[i];
       if (c.call != f && c.invoker != f) continue;
+      if (c.flags & closure_flag::polymorphic_result)
+        return interp::Callee{.is_constexpr = true, .unsupported = true};
       std::vector<ast::LocalRec> locals = s_->closure_locals[i];
       for (ast::LocalRec& l : locals) l.decl = NodeId::none;  // drafts
       ast::Child body = s_->builder().commit(ast::Child{c.call == f ? c.body : c.invoker_body, 0});

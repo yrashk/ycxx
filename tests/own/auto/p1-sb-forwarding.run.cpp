@@ -1,6 +1,5 @@
 // θ step 1 (#279), spec-only: `auto&& [a, b]` binds to an lvalue by lvalue reference and extends a prvalue's
 // lifetime; the names refer to the members ([dcl.struct.bind], [class.temporary]).
-// XFAIL: ycxx structured bindings, #285
 struct Q {
   int a;
   int b;

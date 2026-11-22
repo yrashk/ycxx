@@ -307,12 +307,13 @@ class Mangler {
   // A global-namespace class's <source-name>, or its substitution once it has been mangled.
   std::expected<std::string, std::string> class_name(ast::QualType cls) {
     ast::QualType c = in_.types.canon(cls);
-    return entity_name(in_.types.is<ast::TEnum>(c) ? in_.types.get<ast::TEnum>(c).entity : in_.types.get<ast::TClass>(c).entity);
+    if (in_.types.is<ast::TEnum>(c)) return entity_name(in_.types.get<ast::TEnum>(c).entity, true);
+    return entity_name(in_.types.get<ast::TClass>(c).entity, false);
   }
   // A class's or enumeration's <name> as a type: its <source-name>, or, inside a class or a
   // namespace, a <nested-name> whose prefixes are candidates first (§5.1.5.3, §5.1.10). Classes
   // and namespaces are keyed by entity.
-  std::expected<std::string, std::string> entity_name(ast::EntityId e) {
+  std::expected<std::string, std::string> entity_name(ast::EntityId e, bool enumeration) {
     std::uint64_t key = (std::uint64_t{1} << 32) | std::to_underlying(e);
     if (auto s = find(key)) return *s;
     ClassName n = classes_ ? classes_(e) : ClassName{};
@@ -329,7 +330,8 @@ class Mangler {
       candidates_.push_back(key);
       return r;
     }
-    if (n.name.empty() && !n.unnamed_type_ordinal) return std::unexpected("a class whose name is unknown");
+    if (n.name.empty() && !n.unnamed_type_ordinal)
+      return std::unexpected(enumeration ? "an unnamed enumeration in a mangled type" : "a class whose name is unknown");
     if (n.templ != ast::EntityId::none) {
       // The template's name and the specialization are candidates (§5.1.5.3, §5.1.10).
       auto r = specialization_prefix(e, n);
@@ -416,10 +418,11 @@ class Mangler {
     // `this` counted for a member.
     ClassName sc = scope != ast::EntityId::none && classes_ ? classes_(scope) : ClassName{};
     std::size_t arity = in_.seqs.size(f.params) + (sc.is_class ? 1 : 0);
+    bool conversion = name == lex::conversion_function_name;
     std::string unqualified = std::format("{}{}", name.size(), name);
     if (name.starts_with(lex::literal_operator_prefix)) {
       unqualified = "li" + source_name(name.substr(lex::literal_operator_prefix.size()));
-    } else if (name.starts_with("operator") && name.size() > 8) {
+    } else if (!conversion && name.starts_with("operator") && name.size() > 8) {
       auto code = operator_code(name.substr(8), arity);
       if (!code) return std::unexpected(std::format("the operator function '{}'", name));
       unqualified = *code;
@@ -437,7 +440,14 @@ class Mangler {
       // cv-qualifiers in the order r V K (§5.1.5.3).
       auto p = prefix(scope);
       if (!p) return p;
+      if (conversion) {
+        auto target = this->type(f.ret);
+        if (!target) return target;
+        unqualified = "cv" + *target;
+      }
       std::string cv = std::string(std::to_underlying(f.cv) & 2 ? "V" : "") + (std::to_underlying(f.cv) & 1 ? "K" : "");
+      // A ref-qualifier follows the cv-qualifiers in a nested function name.
+      if (f.ref != ast::RefQual::none) cv += f.ref == ast::RefQual::lvalue ? "R" : "O";
       // A <ctor-dtor-name> (`C1`, `D1`) stands as it is; other names are <source-name>s.
       out = local + delimit_name(cv + *p + (special ? std::string(name) : unqualified), scope);
     }
@@ -572,6 +582,8 @@ class Mangler {
         auto i = in_.values.get<ast::VDepParam>(a.value).index;
         return i == 0 ? std::string("XT_E") : std::format("XT{}_E", i - 1);
       }
+      if (in_.values.is<ast::VDepOp>(a.value) || in_.values.is<ast::VDepVariable>(a.value))
+        return std::unexpected("a dependent operation as a template argument");
       auto b = ast::builtin_of(in_, a.type);
       auto code = b ? builtin_code(*b) : std::nullopt;
       if (!code || !in_.values.is<ast::VInt>(a.value)) return std::unexpected("a template argument that is not a type or an integer");
@@ -745,7 +757,9 @@ class Mangler {
 // Itanium §5.1.5.1 <operator-name>: the code of `operator<op>` taking `arity` operands.
 std::optional<std::string_view> operator_code(std::string_view op, std::size_t arity) {
   if (op == " new") return "nw";
+  if (op == " new[]") return "na";
   if (op == " delete") return "dl";
+  if (op == " delete[]") return "da";
   static constexpr std::pair<std::string_view, std::string_view> binary[] = {
       {"+", "pl"},  {"-", "mi"},   {"*", "ml"},   {"&", "an"},  {"/", "dv"},  {"%", "rm"},  {"|", "or"},
       {"^", "eo"},  {"=", "aS"},   {"+=", "pL"},  {"-=", "mI"}, {"*=", "mL"}, {"/=", "dV"}, {"%=", "rM"},

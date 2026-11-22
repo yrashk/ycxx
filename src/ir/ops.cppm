@@ -67,7 +67,9 @@ export struct PathStep {
 
 // Per-node flags (§2.3: `nsw`/`nuw`/`exact` on arithmetic; `volatile` and non-constexpr callees
 // make an operation non-constant). The enumerator is the bit position.
-export enum class Flag : std::uint8_t { nsw, nuw, exact, volatile_, not_constexpr, variadic };
+// `call_body` marks reads of a lowered builtin body, which are indeterminately sequenced with
+// the caller's other evaluations ([intro.execution]).
+export enum class Flag : std::uint8_t { nsw, nuw, exact, volatile_, not_constexpr, variadic, call_body, explicit_trap };
 export using Flags = std::uint8_t;
 export constexpr Flags bit(Flag f) { return Flags(1u << std::to_underlying(f)); }
 
@@ -199,7 +201,7 @@ export enum class Op : std::uint16_t {
   obj__begin [[=state({S, V}, {S}).imms({type})]],
   obj__end [[=state({S, V}, {S})]],
   union__activate [[=state({S, V}, {S}).imms({path})]],
-  load [[=state({S, V}, {V}).imms({type, path}).accepts({volatile_})]],
+  load [[=state({S, V}, {V}).imms({type, path}).accepts({volatile_, call_body})]],
   store [[=state({S, V, V}, {S}).imms({type, path}).accepts({volatile_})]],
   bit_field_load [[=state({S, V}, {V}).imms({u32}).with({nonconstant})]],  // record pointer and field index
   bit_field_store [[=state({S, V, V}, {S}).imms({u32}).with({nonconstant})]],
@@ -222,8 +224,8 @@ export enum class Op : std::uint16_t {
   // of class type, which a parameter of class type is ([expr.call]/7); the third is 1 + the
   // index of the argument that is the address of the object a class result initializes
   // ([stmt.return]), 0 if none. `lower` passes both as the target's calling convention does.
-  call [[=state({S, Vs}, {S, Vs}).imms({entity, u32, u32, u32}).accepts({not_constexpr})]],
   // `variadic` records the callee type even when the ellipsis matches zero arguments.
+  call [[=state({S, Vs}, {S, Vs}).imms({entity, u32, u32, u32}).accepts({not_constexpr, variadic})]],
   call_ind [[=state({S, V, Vs}, {S, Vs}).imms({u32, u32, u32}).accepts({not_constexpr, variadic})]],
   builtin [[=state({S, Vs}, {S, Vs}).imms({u32})]],
   asm_ [[=state({S, Vs}, {S, Vs}).imms({constant}).with({nonconstant})]],
@@ -262,7 +264,8 @@ export enum class Op : std::uint16_t {
   cond_br [[=control({V}, {}, 2)]],                      // true, false
   switch_ [[=control({V}, {}, 1, true).imms({consts})]],  // default, then one per case value
   ret [[=control({S, Vs}, {}, 0)]],
-  unreachable [[=control({}, {}, 0).accepts({not_constexpr})]],  // not_constexpr: a static's definition ([expr.const])
+  // The flags distinguish an explicit trap and a static definition ([expr.const]) from falling off the end.
+  unreachable [[=control({}, {}, 0).accepts({not_constexpr, explicit_trap})]],
   consteval_br [[=control({}, {}, 2)]],                  // consteval, runtime ([stmt.if])
   // normal, unwind; the u32 as for `call`
   invoke [[=control({S, Vs}, {S, Vs}, 2).imms({entity, u32}).accepts({not_constexpr})]],
@@ -278,6 +281,13 @@ export enum class Op : std::uint16_t {
   va_arg [[=state({S, V}, {S, V}).with({nonconstant})]],
   va_copy [[=state({S, V, V}, {S}).with({nonconstant})]],
   va_end [[=state({S, V}, {S}).with({nonconstant})]],
+
+  // Lvalue-to-rvalue conversion of a std::nullptr_t glvalue evaluates its designator
+  // and yields null without loading the object ([conv.lval]).
+  nullptr_value [[=state({S, V}, {V})]],
+
+  // Reuse the returned storage for a placement new-expression before initialization ([basic.life]).
+  obj__reuse [[=state({S, V}, {S}).imms({type})]],
 };
 
 export constexpr std::size_t op_count = std::meta::enumerators_of(^^Op).size();

@@ -8,6 +8,7 @@ export module ycxx.sema:templates;
 
 import std;
 import ycxx.ast;
+import ycxx.interp;
 import ycxx.lex;
 import :types;
 
@@ -51,9 +52,11 @@ struct ArgShape {
 // How far a deduced A may differ from A at the top of a P/A pair ([temp.deduct.call]/4): with
 // `more_cv` it may be more cv-qualified (P was a reference, /4.1); with `qualification` A may be
 // a pointer that converts to the deduced A by a qualification conversion (/4.2).
+// Only call deduction permits dropping a nonthrowing function specification.
 struct Allowance {
   bool more_cv = false;
   bool qualification = false;
+  bool function_conversion = false;
 };
 
 class Templates {
@@ -66,6 +69,15 @@ public:
 
   TemplateArg type_arg(QualType t) { return {TemplateArgKind::type, types().canonical(t), ConstId::none}; }
   TemplateArg value_arg(QualType t, ConstId v) { return {TemplateArgKind::value, types().canonical(Types::unqualified(t)), v}; }
+
+  // The specialization of variable template `templ` for canonical arguments ([temp.spec.general]).
+  EntityId specialize_variable(EntityId templ, std::span<const TemplateArg> args) {
+    const EntityRec& t = w_->entities.rec(templ);
+    EntityRec spec{EntityKind::variable, t.name, {}, t.lang, t.linkage, t.first, t.scope};
+    spec.templ = templ;
+    spec.args.assign(args.begin(), args.end());
+    return w_->entities.entity(std::move(spec));
+  }
 
   // ------------------------------------------------------------ substitution ([temp.inst])
 
@@ -140,11 +152,12 @@ public:
       if (ins().values.is_dependent(r.bound_value)) {
         // A bound that is a non-type parameter; one that is any other dependent expression is
         // known only to an instantiation of the body (#88).
+        if (!ins().values.is<ast::VDepParam>(r.bound_value)) return std::nullopt;
         auto p = ins().values.get<ast::VDepParam>(r.bound_value);
         auto a = b.at(p.depth, p.index);
         if (!a) return p.depth == dependent_depth ? std::nullopt : std::optional(types().array_dependent(*e, r.bound_value));
         if (a->kind != TemplateArgKind::value) return std::nullopt;
-        if (ins().values.is_dependent(a->value)) return types().array_dependent(*e, a->value);  // a unique value
+        if (ins().values.is<ast::VDepParam>(a->value)) return types().array_dependent(*e, a->value);  // a unique value
         if (!ins().values.is<ast::VInt>(a->value)) return std::nullopt;
         // [dcl.array]/1: the bound's value is greater than zero.
         if (ast::is_signed(w_->target, *types().builtin_of(a->type)) && ast::is_negative(ast::int_bits(ins(), a->value)))
@@ -274,9 +287,7 @@ public:
     case add_lvalue_reference: return referenceable(c) ? types().lvalue_ref(c) : c;
     case add_rvalue_reference: return referenceable(c) ? types().rvalue_ref(c) : c;
     case remove_extent: return types().is_array(c) ? types().rec(c).inner : c;
-    case remove_all_extents:
-      while (types().is_array(c)) c = types().canonical(types().rec(c).inner);
-      return c;
+    case remove_all_extents: return types().innermost_array_element(c);
     case decay: {
       QualType x = types().canonical(types().referee(c));
       if (types().is_array(x)) return types().pointer(types().rec(x).inner);
@@ -291,6 +302,106 @@ public:
     }
     default: return std::nullopt;
     }
+  }
+
+  std::optional<ConstId> is_same_value(QualType lhs, QualType rhs) {
+    if (!types().is_dependent(lhs) && !types().is_dependent(rhs))
+      return w_->values.integer(types().builtin(Builtin::bool_), ins().same_type(lhs, rhs));
+    if (!structural_operand(lhs) || !structural_operand(rhs)) return std::nullopt;
+    const std::array operands{type_arg(lhs), type_arg(rhs)};
+    return ins().intern_value(ast::VDepOp{ast::DepOp::is_same, ins().intern_seq(std::span<const TemplateArg>(operands))});
+  }
+
+  // The owning token replay checks the concrete multi-operand query.
+  std::optional<ConstId> replayed_type_trait_pattern(ast::DepOp op, std::span<const TemplateArg> operands)
+    pre(op == ast::DepOp::is_constructible || op == ast::DepOp::is_nothrow_constructible ||
+        op == ast::DepOp::is_trivially_constructible ||
+        (operands.size() == 2 && (op == ast::DepOp::is_assignable || op == ast::DepOp::is_nothrow_assignable ||
+                                  op == ast::DepOp::is_trivially_assignable || op == ast::DepOp::is_convertible ||
+                                  op == ast::DepOp::is_nothrow_convertible || op == ast::DepOp::is_base_of)))
+  {
+    if (!std::ranges::any_of(operands, [&](const TemplateArg& a) { return types().is_dependent(a.type); }) ||
+        !std::ranges::all_of(operands, [&](const TemplateArg& a) { return structural_operand(a); })) return std::nullopt;
+    return ins().intern_value(ast::VDepOp{op, ins().intern_seq(operands)});
+  }
+
+  // A class specialization has the class kind of its primary ([temp.class.general]).
+  std::optional<bool> is_union_class(EntityId c) const {
+    if (EntityId primary = w_->entities.rec(c).templ; primary != EntityId::none)
+      if (auto key = classes_->is_union_class(primary)) return key;
+    return classes_->is_union_class(c);
+  }
+
+  std::optional<ConstId> unary_trait_value(ast::DepOp op, QualType type)
+    pre(op != ast::DepOp::is_same && op != ast::DepOp::logical_not &&
+        op != ast::DepOp::is_constructible && op != ast::DepOp::is_nothrow_constructible &&
+        op != ast::DepOp::is_trivially_constructible && op != ast::DepOp::is_assignable &&
+        op != ast::DepOp::is_nothrow_assignable && op != ast::DepOp::is_trivially_assignable &&
+        op != ast::DepOp::is_convertible && op != ast::DepOp::is_nothrow_convertible && op != ast::DepOp::is_base_of)
+  {
+    if (types().is_dependent(type)) {
+      if (!structural_operand(type)) return std::nullopt;
+      const std::array operands{type_arg(type)};
+      return ins().intern_value(ast::VDepOp{op, ins().intern_seq(std::span<const TemplateArg>(operands))});
+    }
+    bool result = false;
+    switch (op) {
+    case ast::DepOp::is_reference: result = types().is_reference(type); break;
+    case ast::DepOp::is_const:
+    case ast::DepOp::is_volatile: {
+      // An array has the cv-qualification of its element type ([basic.type.qualifier]).
+      QualType element = types().innermost_array_element(types().canonical(type));
+      result = op == ast::DepOp::is_const ? Types::is_const(element) : Types::is_volatile(element);
+      break;
+    }
+    case ast::DepOp::is_array: result = types().is_array(type); break;
+    case ast::DepOp::is_pointer: result = types().is_pointer(type); break;
+    case ast::DepOp::is_function: result = types().is_function(type); break;
+    case ast::DepOp::is_object: result = types().is_object(type); break;
+    case ast::DepOp::is_enum: result = types().is_enum(type); break;
+    case ast::DepOp::is_member_pointer: result = types().is_member_pointer(type); break;
+    case ast::DepOp::is_member_object_pointer:
+    case ast::DepOp::is_member_function_pointer:
+      if (types().is_member_pointer(type)) {
+        const bool member_is_function = types().is_function(types().rec(type).inner);
+        result = member_is_function == (op == ast::DepOp::is_member_function_pointer);
+      }
+      break;
+    case ast::DepOp::is_union:
+    case ast::DepOp::is_class:
+      if (types().is_class(type)) {
+        auto is_union = is_union_class(types().class_of(type));
+        if (!is_union) return std::nullopt;
+        result = *is_union == (op == ast::DepOp::is_union);
+      }
+      break;
+    // The token-owning replay checks completeness and diagnoses a concrete operand.
+    case ast::DepOp::is_trivially_copyable:
+    case ast::DepOp::is_destructible:
+    case ast::DepOp::is_nothrow_destructible:
+    case ast::DepOp::is_trivially_destructible:
+    case ast::DepOp::is_empty: return std::nullopt;
+    case ast::DepOp::is_same:
+    case ast::DepOp::is_constructible:
+    case ast::DepOp::is_nothrow_constructible:
+    case ast::DepOp::is_trivially_constructible:
+    case ast::DepOp::is_assignable:
+    case ast::DepOp::is_nothrow_assignable:
+    case ast::DepOp::is_trivially_assignable:
+    case ast::DepOp::is_convertible:
+    case ast::DepOp::is_nothrow_convertible:
+    case ast::DepOp::is_base_of:
+    case ast::DepOp::logical_not: std::unreachable();
+    }
+    return w_->values.integer(types().builtin(Builtin::bool_), result);
+  }
+
+  std::optional<ConstId> negated_variable_value(ConstId v, std::size_t negations)
+    pre(negations != 0)
+  {
+    if (!ins().values.is<ast::VDepVariable>(v) || !structural_value(v)) return std::nullopt;
+    for (std::size_t i = 0; i < negations; ++i) v = logical_not_value(v);
+    return v;
   }
 
   // Template arguments `args` with the parameters `b` binds replaced by their arguments; a pack's
@@ -348,10 +459,18 @@ public:
     QualType t = a.type;
     if (types().is_dependent(t))
       if (auto st = substitute(t, b)) t = types().canonical(Types::unqualified(*st));
+    if ((ins().values.is<ast::VDepOp>(a.value) || ins().values.is<ast::VDepOp>(*v)) && !types().is(t, Builtin::bool_))
+      return std::nullopt;
+    if (ins().values.is<ast::VDepVariable>(a.value) && !ins().values.is_dependent(*v)) {
+      QualType source = t;
+      if (ins().values.is<ast::VInt>(*v)) source = ins().values.get<ast::VInt>(*v).type;
+      if (ins().values.is<ast::VFloat>(*v)) source = ins().values.get<ast::VFloat>(*v).type;
+      return converted_value(value_arg(source, *v), t);
+    }
     return TemplateArg{TemplateArgKind::value, t, *v};
   }
-  // A value with the parameters `b` binds replaced: a non-type parameter by its argument,
-  // `sizeof...` of a bound pack by its length ([expr.sizeof]).
+  // A value with the parameters `b` binds replaced. Evaluate dependent operations when their
+  // operands are concrete.
   std::optional<ConstId> substitute_value(ConstId v, const Bindings& b) {
     if (ins().values.is<ast::VDepParam>(v)) {
       auto p = ins().values.get<ast::VDepParam>(v);
@@ -366,6 +485,61 @@ public:
       if (!a) return v;
       if (a->kind != TemplateArgKind::pack) return std::nullopt;
       return w_->values.integer(types().builtin(Builtin::unsigned_long), ins().seqs.size(a->elems));
+    }
+    if (ins().values.is<ast::VDepVariable>(v)) return substitute_variable_value(v, b, variable_constant);
+    if (ins().values.is<ast::VDepOp>(v)) {
+      auto op = ins().values.get<ast::VDepOp>(v);
+      switch (op.op) {
+      case ast::DepOp::is_constructible:
+      case ast::DepOp::is_nothrow_constructible:
+      case ast::DepOp::is_trivially_constructible:
+      case ast::DepOp::is_assignable:
+      case ast::DepOp::is_nothrow_assignable:
+      case ast::DepOp::is_trivially_assignable:
+      case ast::DepOp::is_convertible:
+      case ast::DepOp::is_nothrow_convertible:
+      case ast::DepOp::is_base_of: {
+        auto operands = substitute_args(ins().seqs.elements(op.operands), b);
+        return operands ? replayed_type_trait_pattern(op.op, *operands) : std::nullopt;
+      }
+      case ast::DepOp::is_same: {
+        auto lhs = substitute_arg(ins().seqs.at(op.operands, 0), b);
+        if (!lhs) return std::nullopt;
+        auto rhs = substitute_arg(ins().seqs.at(op.operands, 1), b);
+        if (!rhs) return std::nullopt;
+        return is_same_value(lhs->type, rhs->type);
+      }
+      case ast::DepOp::logical_not: {
+        ConstId operand_value = ins().seqs.at(op.operands, 0).value;
+        auto operand = ins().values.is<ast::VDepVariable>(operand_value)
+            ? substitute_variable_value(operand_value, b, [this](EntityId spec) { return bool_variable_value(spec); })
+            : substitute_value(operand_value, b);
+        if (!operand || !structural_value(*operand)) return std::nullopt;
+        return logical_not_value(*operand);
+      }
+      case ast::DepOp::is_reference:
+      case ast::DepOp::is_const:
+      case ast::DepOp::is_volatile:
+      case ast::DepOp::is_array:
+      case ast::DepOp::is_pointer:
+      case ast::DepOp::is_function:
+      case ast::DepOp::is_enum:
+      case ast::DepOp::is_union:
+      case ast::DepOp::is_class:
+      case ast::DepOp::is_member_pointer:
+      case ast::DepOp::is_member_object_pointer:
+      case ast::DepOp::is_member_function_pointer:
+      case ast::DepOp::is_trivially_copyable:
+      case ast::DepOp::is_destructible:
+      case ast::DepOp::is_nothrow_destructible:
+      case ast::DepOp::is_trivially_destructible:
+      case ast::DepOp::is_empty:
+      case ast::DepOp::is_object: {
+        auto operand = substitute_arg(ins().seqs.at(op.operands, 0), b);
+        if (!operand) return std::nullopt;
+        return unary_trait_value(op.op, operand->type);
+      }
+      }
     }
     return v;
   }
@@ -407,6 +581,12 @@ public:
   }
   // A mapping entry as a template argument, and back.
   TemplateArg mapping_arg(ConstId v) {
+    if (ins().values.is<ast::VConstraintPack>(v)) {
+      std::vector<TemplateArg> elements;
+      for (ConstId e : ins().seqs.elements(ins().values.get<ast::VConstraintPack>(v).elements))
+        elements.push_back(mapping_arg(e));
+      return pack(elements);
+    }
     if (ins().values.is<ast::VType>(v)) {
       auto t = ins().values.get<ast::VType>(v);
       return type_arg(types().add_cv(t.type, Cv(t.cv)));
@@ -415,6 +595,12 @@ public:
     return {TemplateArgKind::value, ins().values.is<ast::VInt>(v) ? ins().values.get<ast::VInt>(v).type : QualType{}, v};
   }
   ConstId mapping_value(const TemplateArg& a) {
+    if (a.kind == TemplateArgKind::pack) {
+      std::vector<ConstId> elements;
+      for (const TemplateArg& e : ins().seqs.elements(a.elems))
+        elements.push_back(mapping_value(e));
+      return ins().intern_value(ast::VConstraintPack{ins().intern_seq(std::span<const ConstId>(elements))});
+    }
     if (a.kind == TemplateArgKind::type) {
       QualType c = types().canonical(a.type);
       return ins().intern_value(ast::VType{Types::unqualified(c), u8(std::to_underlying(Types::cv(c)))});
@@ -443,11 +629,19 @@ public:
         m.push_back(e);
         continue;
       }
-      auto s = substitute_arg(mapping_arg(e), b);
+      auto s = [&]() -> std::optional<ConstId> {
+        if (ins().values.is<ast::VConstraintPack>(e)) {
+          const std::array args{mapping_arg(e)};
+          return substitute_args(args, b).transform([&](const auto& mapped) { return mapping_value(mapped.front()); });
+        }
+        if (ins().values.is<ast::VType>(e))
+          return substitute_arg(mapping_arg(e), b).transform([&](const TemplateArg& arg) { return mapping_value(arg); });
+        return substitute_value(e, b);
+      }();
       // An invalid mapping leaves the atom unsatisfied ([temp.constr.atomic]/3): an empty
       // disjunction, false.
       if (!s) return ins().intern_value(ast::VConstraint{1, ins().intern_seq(std::span<const ConstId>{})});
-      m.push_back(mapping_value(*s));
+      m.push_back(*s);
     }
     a.mapping = ins().intern_seq(std::span<const ConstId>(m));
     return ins().intern_value(a);
@@ -603,6 +797,10 @@ public:
   void params_in(ConstId v, std::vector<std::pair<u16, u16>>& out, bool nested = true) {
     if (ins().values.is<ast::VDepParam>(v)) out.push_back({ins().values.get<ast::VDepParam>(v).depth, ins().values.get<ast::VDepParam>(v).index});
     else if (nested && ins().values.is<ast::VDepExpansion>(v)) params_in(ins().values.get<ast::VDepExpansion>(v).pattern, out, nested);
+    else if (ins().values.is<ast::VDepVariable>(v))
+      for (const TemplateArg& a : ins().seqs.elements(ins().values.get<ast::VDepVariable>(v).args)) params_in(a, out, nested);
+    else if (ins().values.is<ast::VDepOp>(v))
+      for (const TemplateArg& a : ins().seqs.elements(ins().values.get<ast::VDepOp>(v).operands)) params_in(a, out, nested);
   }
   void params_in(const TemplateArg& a, std::vector<std::pair<u16, u16>>& out, bool nested = true) {
     if (a.kind == TemplateArgKind::type) params_in(a.type, out, nested);
@@ -776,7 +974,9 @@ public:
       // Under /4.2 the pointee may be less cv-qualified in A: a qualification conversion adds it,
       // at a deeper level only below a const one ([conv.qual]).
       return deduce(pr.inner, ar.inner, depth, out,
-                    {.more_cv = allow.qualification, .qualification = allow.qualification && Types::is_const(types().canonical(pr.inner))});
+                    {.more_cv = allow.qualification,
+                     .qualification = allow.qualification && Types::is_const(types().canonical(pr.inner)),
+                     .function_conversion = allow.function_conversion && types().is_function(pr.inner)});
     case TypeKind::member_pointer:
       return deduce(pr.member_owner, ar.member_owner, depth, out) && deduce(pr.inner, ar.inner, depth, out);
     case TypeKind::reference: return pr.rvalue_ref == ar.rvalue_ref && deduce(pr.inner, ar.inner, depth, out);
@@ -799,7 +999,8 @@ public:
       return pr.bound == ar.bound && pr.bound_value == ar.bound_value &&
              deduce(pr.inner, ar.inner, depth, out, {.more_cv = allow.more_cv});
     case TypeKind::function: {
-      if (pr.variadic != ar.variadic || pr.fn_cv != ar.fn_cv || pr.fn_ref != ar.fn_ref || pr.fn_noexcept != ar.fn_noexcept)
+      if (pr.variadic != ar.variadic || pr.fn_cv != ar.fn_cv || pr.fn_ref != ar.fn_ref ||
+          (pr.fn_noexcept != ar.fn_noexcept && !(allow.function_conversion && ar.fn_noexcept)))
         return false;
       if (!deduce(pr.inner, ar.inner, depth, out)) return false;
       std::vector<TemplateArg> ps, as;
@@ -871,6 +1072,9 @@ public:
     if (ins().values.is<ast::VDepParam>(x.value) && ins().values.get<ast::VDepParam>(x.value).depth == depth)
       return bind(out, ins().values.get<ast::VDepParam>(x.value).index, y);
     if (is_expansion(x) && is_expansion(y)) return deduce_arg(pattern_of(x), pattern_of(y), depth, out);
+    // An expression naming parameters is a non-deduced context ([temp.deduct.type]). The
+    // specialized type or substituted partial pattern is checked once the bindings are known.
+    if (ins().values.is<ast::VDepOp>(x.value) || ins().values.is<ast::VDepVariable>(x.value)) return true;
     return x.value == y.value;
   }
   // The packs an expansion's `pattern` names, each from the arguments `a` in turn: every
@@ -1052,12 +1256,14 @@ public:
         a = types().lvalue_ref(a);
       p = pr.inner;
       allow.more_cv = true;
+      allow.function_conversion = types().is_function(p);
     } else {
       if (types().is_array(a)) a = types().pointer(types().rec(a).inner);
       else if (types().is_function(a)) a = types().pointer(a);
       else a = Types::unqualified(types().canonical(a));
       p = Types::unqualified(types().canonical(p));
       allow.qualification = types().is_pointer(p);
+      allow.function_conversion = types().is_pointer(p) && types().is_function(types().pointee(p));
     }
     return {p, a, allow};
   }
@@ -1216,6 +1422,10 @@ public:
   // pointer. None when it does not convert.
   std::optional<TemplateArg> converted_value(const TemplateArg& a, QualType t) {
     t = types().canonical(Types::unqualified(t));
+    // The dependent operation's result type is bool. Other destinations need a dependent
+    // conversion in the canonical value (#209).
+    ConstId pattern = is_expansion(a) ? pattern_of(a).value : a.value;
+    if (ins().values.is<ast::VDepOp>(pattern) && !types().is(t, Builtin::bool_)) return std::nullopt;
     if (types().is_dependent(t) || ins().values.is_dependent(a.value)) return TemplateArg{TemplateArgKind::value, t, a.value};
     if (types().is_integral(t) && ins().values.is<ast::VInt>(a.value)) {
       ConstId c = ast::convert_integral(ins(), w_->target, a.value, t);
@@ -1250,6 +1460,10 @@ public:
         auto s = substitute(d.type, bindings(depth, out));
         if (!s) return std::nullopt;
         d.type = types().canonical(*s);
+      } else if (ins().values.is<ast::VDepOp>(d.value) || ins().values.is<ast::VDepVariable>(d.value)) {
+        auto s = substitute_arg(d, bindings(depth, out));
+        if (!s) return std::nullopt;
+        d = *s;
       } else if (ins().values.is<ast::VDepParam>(d.value)) {
         // `int N = M`: an earlier parameter's argument, converted ([temp.arg.nontype]).
         auto p = ins().values.get<ast::VDepParam>(d.value);
@@ -1430,14 +1644,16 @@ public:
       all12 = all12 && s12;
       all21 = all21 && s21;
     }
-    // [temp.deduct.partial]/11: otherwise equal, a template without a trailing function parameter
-    // pack is more specialized than one with.
+    // [temp.deduct.partial]/11: a trailing function parameter pack breaks a tie only if
+    // the other template has no trailing pack and no declared parameter at that position.
+    // A parameter with an omitted default argument still occupies its declared position.
     if (all12 && all21) {
       auto trailing = [&](const TypeRec& t) {
         return !t.params.empty() && types().kind(t.params.back()) == TypeKind::pack_expansion;
       };
-      if (trailing(t2) && !trailing(t1)) return {true, false};
-      if (trailing(t1) && !trailing(t2)) return {false, true};
+      const bool pack1 = trailing(t1), pack2 = trailing(t2);
+      if (pack2 && !pack1 && t1.params.size() < t2.params.size()) return {true, false};
+      if (pack1 && !pack2 && t2.params.size() < t1.params.size()) return {false, true};
     }
     return {all12, all21};
   }
@@ -1448,6 +1664,85 @@ public:
 
 private:
   static constexpr u16 unique_depth = 0x7fff;
+
+  std::optional<ConstId> substitute_variable_value(ConstId v, const Bindings& b,
+                                                  const std::function<std::optional<ConstId>(EntityId)>& read) {
+    auto ref = ins().values.get<ast::VDepVariable>(v);
+    auto args = substitute_args(ins().seqs.elements(ref.args), b);
+    if (!args) return std::nullopt;
+    if (std::ranges::any_of(*args, [&](const TemplateArg& a) { return w_->arg_dependent(a); })) {
+      ref.args = ins().intern_seq(std::span<const TemplateArg>(*args));
+      return ins().intern_value(ref);
+    }
+    if (!read) return std::nullopt;
+    return read(specialize_variable(ref.templ, *args));
+  }
+
+  // The selected specialization supplies its own type and constant initializer. Check those
+  // before the ordinary non-type argument conversion can change the value's type.
+  std::optional<ConstId> bool_variable_value(EntityId spec) {
+    if (!variable_global) return std::nullopt;
+    auto g = variable_global(spec);
+    if (!g || !g->usable || !g->value || !types().is(g->type, Builtin::bool_) ||
+        Types::is_volatile(types().canonical(g->type)))
+      return std::nullopt;
+    if (!ins().values.is<ast::VInt>(*g->value) ||
+        !types().is(ins().values.get<ast::VInt>(*g->value).type, Builtin::bool_))
+      return std::nullopt;
+    return g->value;
+  }
+
+  ConstId logical_not_value(ConstId v) {
+    QualType type = types().builtin(Builtin::bool_);
+    if (!ins().values.is_dependent(v)) return w_->values.integer(type, ast::int_bits(ins(), v) == ast::Bits128{});
+    const std::array operands{value_arg(type, v)};
+    return ins().intern_value(ast::VDepOp{ast::DepOp::logical_not, ins().intern_seq(std::span<const TemplateArg>(operands))});
+  }
+
+public:
+  // Unsupported dependent constructs can still be re-parsed in a template body. Their
+  // stand-ins carry no expression identity and must not become operands of an interned value.
+  bool structural_operand(QualType t) {
+    if (!types().is_dependent(t)) return true;
+    TypeRec r = types().rec(t);
+    auto all_args = [&](std::span<const TemplateArg> args) {
+      return std::ranges::all_of(args, [&](const TemplateArg& a) { return structural_operand(a); });
+    };
+    switch (r.kind) {
+    case TypeKind::builtin: return false;  // Builtin::dependent
+    case TypeKind::class_: return all_args(w_->entities.rec(r.entity).args);
+    case TypeKind::dep_spec:
+    case TypeKind::builtin_spec: return all_args(ins().seqs.elements(r.args));
+    case TypeKind::array: return structural_operand(r.inner) && structural_value(r.bound_value);
+    case TypeKind::pointer:
+    case TypeKind::reference:
+    case TypeKind::dep_name:
+    case TypeKind::transform:
+    case TypeKind::pack_expansion: return structural_operand(r.inner);
+    case TypeKind::member_pointer: return structural_operand(r.member_owner) && structural_operand(r.inner);
+    case TypeKind::function:
+      return structural_operand(r.inner) && std::ranges::all_of(r.params, [&](QualType p) { return structural_operand(p); });
+    default: return true;
+    }
+  }
+private:
+  bool structural_operand(const TemplateArg& a) {
+    if (a.kind == TemplateArgKind::pack)
+      return std::ranges::all_of(elements(a), [&](const TemplateArg& e) { return structural_operand(e); });
+    if (a.kind == TemplateArgKind::value) return structural_value(a.value) && structural_operand(a.type);
+    return a.templ != EntityId::none || structural_operand(a.type);
+  }
+  bool structural_value(ConstId v) {
+    if (ins().values.is<ast::VDepParam>(v)) return ins().values.get<ast::VDepParam>(v).depth != dependent_depth;
+    if (ins().values.is<ast::VDepExpansion>(v)) return structural_value(ins().values.get<ast::VDepExpansion>(v).pattern);
+    if (ins().values.is<ast::VDepVariable>(v))
+      return std::ranges::all_of(ins().seqs.elements(ins().values.get<ast::VDepVariable>(v).args),
+                                 [&](const TemplateArg& a) { return structural_operand(a); });
+    if (ins().values.is<ast::VDepOp>(v))
+      return std::ranges::all_of(ins().seqs.elements(ins().values.get<ast::VDepOp>(v).operands),
+                                 [&](const TemplateArg& a) { return structural_operand(a); });
+    return true;
+  }
 
   static bool within(Cv a, Cv b) { return (std::to_underlying(a) & ~std::to_underlying(b)) == 0; }
 
@@ -1494,6 +1789,8 @@ public:
   std::function<std::optional<QualType>(EntityId, NameId)> member_type;
   // The declaration of template `templ` with its head, as lookup at a point finds it.
   std::function<std::optional<ast::DeclSema>(EntityId)> template_decl;
+  std::function<std::optional<ConstId>(EntityId)> variable_constant;
+  std::function<std::optional<interp::GlobalVar>(EntityId)> variable_global;
 
 private:
   // The template-head whose parameters a deduction deduces, and its packs whose leading elements

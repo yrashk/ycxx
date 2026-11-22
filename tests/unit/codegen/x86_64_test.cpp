@@ -243,7 +243,7 @@ void direct_ellipsis() {
     const l2::Type results[] = {state, i32};
     const ir::ValueId call[] = {b.param(entry, 0), b.param(entry, 1)};
     const std::uint64_t imms[] = {7, 0, ellipsis, 0};
-    auto n = b.emit(Op::call, results, call, imms);
+    auto n = b.emit(Op::call, results, call, imms, ir::bit(ir::Flag::variadic));
     const ir::ValueId ret[] = {b.peek().result(n), b.peek().result(n, 1)};
     b.emit(Op::ret, {}, ret);
     auto machine = x64::compile_function(b.finish({i32}));
@@ -269,11 +269,11 @@ void rejection() {
 
   {
     l2::Builder b;
-    const l2::Type params[] = {state, f64};
+    const l2::Type params[] = {state, f64, i64};
     auto entry = b.begin_block(params);
-    ir::ValueId ret[] = {b.param(entry, 0), b.param(entry, 1)};
+    ir::ValueId ret[] = {b.param(entry, 0), b.param(entry, 1), b.param(entry, 2)};
     b.emit(Op::ret, {}, ret);
-    expect_error(b.finish({f64}), "unsupported scalar ABI result type");
+    expect_error(b.finish({f64, i64}), "a scalar SSE result or up to two INTEGER result registers");
   }
   {
     l2::Builder b;

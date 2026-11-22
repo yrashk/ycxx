@@ -74,7 +74,7 @@ struct OrderedBinary {
 
 // Simple and compound assignment: the right operand is sequenced before the left
 // ([expr.assign]).
-enum class AssignOp : u8 { assign, mul, div, rem, add, sub, shl, shr, bit_and, bit_xor, bit_or };
+enum class AssignOp : u8 { assign, mul, div, rem, add, sub, shl, shr, bit_and, bit_xor, bit_or, trivial_class_copy };
 
 // For a compound assignment `E1 op= E2` ([expr.assign]), `computation` is the type `E1 op E2`
 // is computed in: the common type of the usual arithmetic conversions, the promoted type of `E1`
@@ -82,6 +82,8 @@ enum class AssignOp : u8 { assign, mul, div, rem, add, sub, shl, shr, bit_and, b
 // it (or, for a shift, promoted; for a pointer, an integer), and the result is converted back to
 // `E1`'s type. A simple assignment's `rhs` is converted to `E1`'s type, and `computation` is
 // `E1`'s type too.
+// A `trivial_class_copy` is an assignment whose implicit operator and representation copy
+// were checked by sema. The right side can designate its source object directly.
 struct Assign {
   ExprInfo info;
   AssignOp op;
@@ -116,11 +118,12 @@ struct Call {
   [[=indeterminately_sequenced(1)]] ChildList args;
 };
 
-// An ordinary scalar new-expression ([expr.new]): allocation is sequenced before initialization.
+// A scalar new-expression ([expr.new]): allocation is sequenced before initialization.
 struct NewObject {
   ExprInfo info;
   [[=sequenced(0)]] Child allocation;
   [[=sequenced(1)]] Child init;
+  bool placement = false;
 };
 
 // Single-object delete of a complete scalar ([expr.delete]): the operand has been converted
@@ -132,11 +135,27 @@ struct DeleteObject {
   [[=sequenced(1)]] Child size;
 };
 
-// A call of a built-in function whose value is computed, not a constant (`lex::BuiltinFunction`:
-// `__builtin_fabs(x)`), its arguments converted to its parameters' types (docs/EXTENSIONS.md).
+// One-dimensional array new ([expr.new]). The bound is converted to size_t, and the
+// initializer describes each element. A validated cookie-free allocation has a call.
+struct NewArray {
+  ExprInfo info;
+  [[=sequenced(0)]] Child bound;
+  [[=sequenced(1)]] Child allocation;
+  [[=sequenced(2)]] Child element_init;
+};
+
+// Array delete ([expr.delete]) preserves the typed pointer operand and the usual unsized deallocator.
+struct DeleteArray {
+  ExprInfo info;
+  EntityId function;
+  [[=sequenced]] Child operand;
+};
+
+// Built-in functions handled during evaluation (docs/EXTENSIONS.md).
+enum class BuiltinOp : u8 { fabs, strlen, trap };
 struct BuiltinCall {
   ExprInfo info;
-  u8 function;  // a lex::BuiltinFunction
+  BuiltinOp op;
   [[=indeterminately_sequenced]] ChildList args;
 };
 
@@ -160,6 +179,7 @@ enum class ConversionKind : u8 {
   floating,
   array_copy,  // [dcl.struct.bind]: initialize the hidden array, element by element
   base_to_derived,  // [expr.static.cast]: undo a direct base adjustment
+  pointer_to_integral, integral_to_pointer,  // [expr.reinterpret.cast]
 };
 
 // A conversion node of width zero beyond its operand (§3.3). `function` names a user-defined
@@ -222,11 +242,28 @@ struct MemberCall {
   [[=indeterminately_sequenced(1)]] ChildList args;
 };
 
-// List-initialization of an aggregate ([dcl.init.aggr]), as analysed: one element per array
-// element or non-static data member, in order, with brace elision and designators resolved and the
-// elements without an initializer value-initialized. Each element is already converted to its
-// element type; a sub-aggregate's element is an `InitList` or a prvalue of its type. The
-// initializer-clauses are sequenced in order ([dcl.init.list]).
+// A virtual call on an opaque root. The slot is relative to the table's address point.
+struct VirtualMemberCall {
+  ExprInfo info;
+  QualType callee;  // pointer to the ABI function type, which includes the receiver parameter
+  u32 slot;
+  [[=sequenced(0)]] Child object;
+  [[=indeterminately_sequenced(1)]] ChildList args;
+};
+
+// Assignment notation calls a member function with the argument sequenced before its object
+// ([expr.assign], [over.match.oper]). `object` is the implicit pointer argument.
+struct AssignmentCall {
+  ExprInfo info;
+  EntityId function;
+  [[=sequenced(0)]] Child rhs;
+  [[=sequenced(1)]] Child object;
+};
+
+// Aggregate initialization after analysis ([dcl.init.aggr], [dcl.init.general]). The sequence
+// contains one converted initializer per aggregate element, with omissions filled in and any
+// brace elision and designators resolved. A sub-aggregate's initializer is an `InitList` or a
+// prvalue of its type. Element initializations are sequenced in order.
 struct InitList {
   ExprInfo info;
   [[=sequenced]] ChildList elems;
@@ -250,6 +287,13 @@ struct ValueInit {
 // initialization ([dcl.init.general]/7.3): its value is erroneous, or indeterminate.
 struct DefaultInit {
   ExprInfo info;
+};
+
+// An omitted field initialized from its default member initializer ([class.mem.general]).
+// Its child was analysed at the declaration; `this` is the enclosing InitList's destination.
+struct DefaultMemberInit {
+  ExprInfo info;
+  [[=sequenced]] Child init;
 };
 
 // A type- or value-dependent construct of a template's definition ([temp.dep]), analysed no
@@ -417,6 +461,11 @@ struct MemberInit {
   Child init;
 };
 
+// A delegating constructor initializes the same complete object before its body ([class.base.init]).
+struct DelegatingInit {
+  Child call;
+};
+
 // A destructor's body ([class.dtor]): `body`, then on every way out of it the destruction of the
 // members (`DestroyMember`s, in reverse declaration order).
 struct Destructor {
@@ -461,13 +510,36 @@ struct Attribute {
   ChildList args;
 };
 
+// [expr.throw]: a rethrow has no operand.
+struct Throw {
+  ExprInfo info;
+  [[=sequenced]] Child operand;
+};
+
+// [except.pre], [except.handle]: the protected block and its ordered handlers.
+struct TryBlock {
+  Child body;
+  ChildList handlers;
+};
+
+enum class HandlerKind : u8 { typed, catch_all, invalid };
+
+struct Handler {
+  HandlerKind kind;
+  QualType type;  // builtin void for a catch-all or invalid declaration
+  u32 local;  // no local for an abstract declaration or catch (...)
+  Child body;
+};
+
 using Nodes = closed_list<Literal, DeclRef, Paren, Unary, Binary, OrderedBinary, Assign, Subscript, Call,
                           ImplicitConversion, ExprStmt, Return, Compound, If, LocalVar, Attribute, LocalRef,
                           Conditional, While, Do, For, Break, Continue, DeclStmt, Declarator, DeclGroup,
                           IfConsteval, StaticAssert, Member, InitList, ValueInit, DefaultInit, This,
                           MemberCall, Materialize, CtorCall, MemberInit, Destructor, DestroyMember, Dependent,
                           DepName, CondDecl, Switch, Case, Default, Label, Goto, BuiltinCall, Lambda, DefaultArg,
-                          StaticInit, StaticVar, NewObject, DeleteObject, VariadicBuiltin>;
+                          StaticInit, StaticVar, NewObject, DeleteObject, VariadicBuiltin, AssignmentCall,
+                          NewArray, DeleteArray, DelegatingInit, VirtualMemberCall, Throw, TryBlock, Handler,
+                          DefaultMemberInit>;
 
 static_assert(Nodes::size < max_node_kinds);
 

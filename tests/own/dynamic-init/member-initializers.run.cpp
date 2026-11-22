@@ -2,7 +2,6 @@
 // default member initializer that calls an ordinary function is dynamically initialized, and so is
 // an object whose constructor reads an earlier namespace-scope variable; both happen before main,
 // in definition order ([basic.start.dynamic], [class.base.init], [dcl.init.general]).
-// XFAIL: ycxx a default member initializer that is not a constant, in an aggregate (#118)
 // STDOUT: 123M
 // EXIT: 0
 extern "C" int putchar(int);

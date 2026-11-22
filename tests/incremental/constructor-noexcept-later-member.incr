@@ -1,0 +1,27 @@
+// ACTION: syntax
+--- main.cpp
+#include "record.h"
+Record::Record() noexcept {}
+--- record.h
+struct Record {
+    Record() noexcept(promise);
+    static constexpr bool promise = true;
+};
+=== edit
+--- main.cpp
+#include "record.h"
+Record::Record() noexcept {} //! error
+--- record.h
+struct Record {
+    Record() noexcept(promise);
+    static constexpr bool promise = false;
+};
+=== edit
+--- main.cpp
+#include "record.h"
+Record::Record() noexcept {}
+--- record.h
+struct Record {
+    Record() noexcept(promise);
+    static constexpr bool promise = true;
+};

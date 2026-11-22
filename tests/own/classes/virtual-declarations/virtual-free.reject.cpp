@@ -1,0 +1,1 @@
+virtual int value(); //! error

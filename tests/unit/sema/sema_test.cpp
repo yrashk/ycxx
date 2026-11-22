@@ -43,6 +43,17 @@ struct Analysed {
   }
 };
 
+void prototype_parameters_are_not_body_locals() {
+  Analysed a("struct Token {}; int f(int value) { "
+             "using Plain = int (*)(Token prototype_only) noexcept; "
+             "using Checked = int (*)(Token prototype_only) noexcept(sizeof(prototype_only) == sizeof(Token)); "
+             "return value; }");
+  check(a.diags().empty(), "both local function-prototype aliases are valid");
+  const auto locals = a.body(1).locals;
+  check(a.ins.seqs.size(locals) == 1 && a.ins.names.spelling(a.ins.seqs.at(locals, 0).name) == "value",
+        "only the actual parameter belongs to the enclosing body");
+}
+
 void conversions_and_locals() {
   Analysed a("int f(int a, long b) { return a + b; }");
   check(a.diags().empty(), "no diagnostics");
@@ -306,9 +317,106 @@ void constant_evaluation() {
   check(kinds("bool b = nullptr == nullptr;\nstatic_assert(nullptr == nullptr);").empty(), "nullptr == nullptr");
 }
 
+void handler_kinds() {
+  Analysed a("void f() { try {} catch (int) {} catch (...) {} }");
+  check(a.diags().empty(), "typed and catch-all handlers are valid");
+  auto statements = a.children(a.get<ast::Compound>(a.body(0).tree).stmts);
+  const auto handlers = a.children(a.get<ast::TryBlock>(statements[0].id).handlers);
+  check(handlers.size() == 2 && handlers[0].id != handlers[1].id, "ordered handlers have distinct nodes");
+  auto typed = a.get<ast::Handler>(handlers[0].id);
+  auto catch_all = a.get<ast::Handler>(handlers[1].id);
+  check(typed.kind == ast::HandlerKind::typed && a.w.types.is(typed.type, Builtin::int_), "unnamed typed handler");
+  check(catch_all.kind == ast::HandlerKind::catch_all && a.w.types.is(catch_all.type, Builtin::void_),
+        "catch-all handler with a stable type placeholder");
+}
+
+void class_trivial_copyability() {
+  using enum sema::CopyOperation;
+  using Operations = std::array<sema::CopyOperation, 4>;
+  struct Witness {
+    std::string_view label;
+    std::string_view source;
+    ast::u32 top_level_class;
+    std::optional<bool> expected;
+    // Copy construction, move construction, copy assignment, move assignment.
+    std::optional<Operations> operations = std::nullopt;
+  };
+  const Witness witnesses[] = {
+      {"plain class", "struct Value { int payload; };", 0, true,
+       Operations{eligible_trivial, eligible_trivial, eligible_trivial, eligible_trivial}},
+      {"user-provided ordinary constructor", "struct Value { Value() {} int payload; };", 0, true},
+      {"default member initializer", "struct Value { int payload = 17; };", 0, true},
+      {"scalar union", "union Value { unsigned bits; int code; };", 0, true},
+      {"member pointer field", "struct Owner; struct Value { int Owner::*payload; };", 1, true},
+      {"lvalue-reference field", "struct Value { int& payload; };", 0, true,
+       Operations{eligible_trivial, eligible_trivial, ineligible, ineligible}},
+      {"rvalue-reference field", "struct Value { int&& payload; };", 0, true,
+       Operations{ineligible, eligible_trivial, ineligible, ineligible}},
+      {"only copy assignment is eligible", "struct Value { Value(const Value&) = delete; int payload; };", 0, true,
+       Operations{ineligible, ineligible, eligible_trivial, ineligible}},
+      {"first-declaration defaulted copy constructor",
+       "struct Value { Value(const Value&) = default; int payload; };",
+       0, true, Operations{eligible_trivial, ineligible, eligible_trivial, ineligible}},
+      {"first-declaration defaulted copy assignment is the sole eligible operation",
+       "struct Value { Value(const Value&) = delete; Value& operator=(const Value&) = default; int payload; };",
+       0, true, Operations{ineligible, ineligible, eligible_trivial, ineligible}},
+      {"const scalar array leaves no eligible operation",
+       "struct Value { Value(const Value&) = delete; const int payload[2]; };",
+       0, false, Operations{ineligible, ineligible, ineligible, ineligible}},
+      {"unrelated assignment", "struct Value { Value& operator=(int); };", 0, true,
+       Operations{eligible_trivial, eligible_trivial, eligible_trivial, eligible_trivial}},
+      // Deleted copies suppress implicit moves. [class.prop]/1 still requires one eligible operation.
+      {"no eligible operation",
+       "struct Value { Value(const Value&) = delete; Value& operator=(const Value&) = delete; };", 0, false,
+       Operations{ineligible, ineligible, ineligible, ineligible}},
+      {"user-provided copy constructor", "struct Value { Value(const Value&) {} };", 0, false,
+       Operations{eligible_nontrivial, ineligible, eligible_trivial, ineligible}},
+      {"user-provided move constructor", "struct Value { Value(Value&&) {} };", 0, false,
+       Operations{ineligible, eligible_nontrivial, ineligible, ineligible}},
+      {"user-provided destructor", "struct Value { ~Value() {} };", 0, false},
+      {"class-valued field", "struct Child { int payload; }; struct Value { Child child; };", 1, std::nullopt},
+      {"base class", "struct Base { int payload; }; struct Value : Base {};", 1, std::nullopt},
+  };
+  for (const Witness& witness : witnesses) {
+    Analysed a(witness.source);
+    const auto label = std::string(witness.label);
+    const bool clean = a.pre.diags.empty() && a.diags().empty();
+    check(clean, label + " has no diagnostics");
+    if (!clean) continue;
+    const auto entity = a.decl(a.its.top.at(witness.top_level_class)).entity;
+    const bool defined = a.p->classes().find(entity) != nullptr;
+    check(defined, label + " has a class record");
+    if (!defined) continue;
+    const auto& record = a.p->classes().rec(entity);
+    check(record.trivially_copyable() == witness.expected, label + " trivial copyability");
+    if (witness.operations) {
+      const auto& ops = record.trivial_copyability;
+      const Operations actual{ops.copy_constructor, ops.move_constructor, ops.copy_assignment, ops.move_assignment};
+      check(actual == *witness.operations, label + " copy and move operations");
+    }
+  }
+
+  Analysed forward("struct Forward;");
+  const bool clean = forward.pre.diags.empty() && forward.diags().empty();
+  check(clean, "forward class has no diagnostics");
+  if (clean) {
+    check(forward.p->classes().find(forward.decl(0).entity) == nullptr, "forward class has no definition record");
+  }
+
+  Analysed feature(R"cpp(
+#if __has_builtin(__is_trivially_copyable)
+#error __is_trivially_copyable advertised before the evaluator is available
+#endif
+int probe;
+)cpp");
+  check(feature.pre.diags.empty() && feature.diags().empty(), "__has_builtin(__is_trivially_copyable) remains zero");
+}
+
 int main() {
   constant_evaluation();
+  class_trivial_copyability();
   conversions_and_locals();
+  prototype_parameters_are_not_body_locals();
   redeclarations_and_linkage();
   unsupported_bit_fields();
   gnu_pointer_qualifiers();
@@ -316,5 +424,6 @@ int main() {
   assignments();
   diagnostics();
   control_flow();
+  handler_kinds();
   return unit::result("unit.sema");
 }

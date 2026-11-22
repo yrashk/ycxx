@@ -1,6 +1,5 @@
-// The type-trait built-ins ycxx implements (DECISIONS §1.2, docs/EXTENSIONS.md): the ones
-// libycxx's headers probe with `__has_builtin` and use, each answered from ycxx's own type system.
-// The preprocessor answers `__has_builtin` from this table; sema parses and evaluates them.
+// Type-trait built-ins recognized by the parser (DECISIONS §1.2, docs/EXTENSIONS.md).
+// The preprocessor uses each entry's advertisement flag for libycxx's `__has_builtin` probes.
 export module ycxx.lex:builtins;
 
 import std;
@@ -18,13 +17,24 @@ enum class TypeTrait : std::uint8_t {
   remove_cv, remove_const, remove_volatile, remove_cvref, remove_reference_t, remove_pointer,
   add_pointer, add_lvalue_reference, add_rvalue_reference, remove_extent, remove_all_extents, decay,
   underlying_type,
+  // Predicates with bounded support.
+  is_trivially_copyable, is_constructible, is_nothrow_constructible, is_trivially_constructible,
+  is_assignable, is_nothrow_assignable, is_trivially_assignable,
+  is_convertible, is_nothrow_convertible,
+  is_base_of,
+  is_destructible,
+  is_nothrow_destructible,
+  is_trivially_destructible,
 };
 
 struct TypeTraitInfo {
   std::string_view name;
   TypeTrait trait;
-  std::uint8_t arity;  // its type arguments
+  std::uint8_t arity;  // required type arguments
   bool transforms;     // a type, not a `bool`
+  bool advertised = true;
+  bool variadic = false;
+  bool replay_dependent = false;  // the fixed-arity parser retains the written argument
 };
 
 inline constexpr std::array type_traits{
@@ -51,7 +61,8 @@ inline constexpr std::array type_traits{
     TypeTraitInfo{"__is_object", TypeTrait::is_object, 1, false},
     TypeTraitInfo{"__is_const", TypeTrait::is_const, 1, false},
     TypeTraitInfo{"__is_volatile", TypeTrait::is_volatile, 1, false},
-    TypeTraitInfo{"__is_empty", TypeTrait::is_empty, 1, false},
+    TypeTraitInfo{.name = "__is_empty", .trait = TypeTrait::is_empty, .arity = 1,
+                  .transforms = false, .replay_dependent = true},
     TypeTraitInfo{"__is_aggregate", TypeTrait::is_aggregate, 1, false},
     TypeTraitInfo{"__is_polymorphic", TypeTrait::is_polymorphic, 1, false},
     TypeTraitInfo{"__is_abstract", TypeTrait::is_abstract, 1, false},
@@ -71,6 +82,29 @@ inline constexpr std::array type_traits{
     TypeTraitInfo{"__remove_all_extents", TypeTrait::remove_all_extents, 1, true},
     TypeTraitInfo{"__decay", TypeTrait::decay, 1, true},
     TypeTraitInfo{"__underlying_type", TypeTrait::underlying_type, 1, true},
+    TypeTraitInfo{.name = "__is_trivially_copyable", .trait = TypeTrait::is_trivially_copyable, .arity = 1,
+                  .transforms = false, .advertised = false, .replay_dependent = true},
+    TypeTraitInfo{"__is_constructible", TypeTrait::is_constructible, 1, false, false, true},
+    TypeTraitInfo{"__is_nothrow_constructible", TypeTrait::is_nothrow_constructible, 1, false, false, true},
+    TypeTraitInfo{"__is_trivially_constructible", TypeTrait::is_trivially_constructible, 1, false, false, true},
+    TypeTraitInfo{.name = "__is_assignable", .trait = TypeTrait::is_assignable, .arity = 2,
+                  .transforms = false, .advertised = false, .replay_dependent = true},
+    TypeTraitInfo{.name = "__is_nothrow_assignable", .trait = TypeTrait::is_nothrow_assignable, .arity = 2,
+                  .transforms = false, .advertised = false, .replay_dependent = true},
+    TypeTraitInfo{.name = "__is_trivially_assignable", .trait = TypeTrait::is_trivially_assignable, .arity = 2,
+                  .transforms = false, .advertised = false, .replay_dependent = true},
+    TypeTraitInfo{.name = "__is_convertible", .trait = TypeTrait::is_convertible, .arity = 2,
+                  .transforms = false, .advertised = false, .replay_dependent = true},
+    TypeTraitInfo{.name = "__is_nothrow_convertible", .trait = TypeTrait::is_nothrow_convertible, .arity = 2,
+                  .transforms = false, .advertised = false, .replay_dependent = true},
+    TypeTraitInfo{.name = "__is_base_of", .trait = TypeTrait::is_base_of, .arity = 2,
+                  .transforms = false, .advertised = false, .replay_dependent = true},
+    TypeTraitInfo{.name = "__is_destructible", .trait = TypeTrait::is_destructible, .arity = 1,
+                  .transforms = false, .advertised = false, .replay_dependent = true},
+    TypeTraitInfo{.name = "__is_nothrow_destructible", .trait = TypeTrait::is_nothrow_destructible, .arity = 1,
+                  .transforms = false, .advertised = false, .replay_dependent = true},
+    TypeTraitInfo{.name = "__is_trivially_destructible", .trait = TypeTrait::is_trivially_destructible, .arity = 1,
+                  .transforms = false, .advertised = false, .replay_dependent = true},
 };
 
 constexpr const TypeTraitInfo* type_trait(std::string_view name) {
@@ -78,17 +112,18 @@ constexpr const TypeTraitInfo* type_trait(std::string_view name) {
     if (t.name == name) return &t;
   return nullptr;
 }
-// The GNU built-in functions ycxx implements (docs/EXTENSIONS.md): the floating ones the SDK's
-// `<math.h>` calls. `type` is the floating type they take and give: 'f' float, 'd' double, 'l' long
+// The GNU built-in functions ycxx implements (docs/EXTENSIONS.md). For the floating builtins
+// from `<math.h>`, `type` is the type they take and give: 'f' float, 'd' double, 'l' long
 // double. `__builtin_inf*` and `__builtin_huge_val*` are +infinity, `__builtin_nan*(s)` the quiet
 // NaN whose payload `s` spells (as `strtoull` reads it), `__builtin_fabs*(x)` |x|.
-enum class BuiltinFunction : std::uint8_t { fabs, inf, huge_val, nan };
+enum class BuiltinFunction : std::uint8_t { fabs, inf, huge_val, nan, addressof, strlen, trap };
 struct BuiltinFunctionInfo {
   std::string_view name;
   BuiltinFunction function;
-  char type;
+  char type = 0;
 };
 inline constexpr std::array builtin_functions{
+    BuiltinFunctionInfo{"__builtin_addressof", BuiltinFunction::addressof},
     BuiltinFunctionInfo{"__builtin_fabsf", BuiltinFunction::fabs, 'f'},
     BuiltinFunctionInfo{"__builtin_fabs", BuiltinFunction::fabs, 'd'},
     BuiltinFunctionInfo{"__builtin_fabsl", BuiltinFunction::fabs, 'l'},
@@ -101,6 +136,8 @@ inline constexpr std::array builtin_functions{
     BuiltinFunctionInfo{"__builtin_nanf", BuiltinFunction::nan, 'f'},
     BuiltinFunctionInfo{"__builtin_nan", BuiltinFunction::nan, 'd'},
     BuiltinFunctionInfo{"__builtin_nanl", BuiltinFunction::nan, 'l'},
+    BuiltinFunctionInfo{"__builtin_strlen", BuiltinFunction::strlen},
+    BuiltinFunctionInfo{"__builtin_trap", BuiltinFunction::trap},
 };
 constexpr const BuiltinFunctionInfo* builtin_function(std::string_view name) {
   for (const BuiltinFunctionInfo& b : builtin_functions)

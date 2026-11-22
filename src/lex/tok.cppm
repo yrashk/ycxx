@@ -9,6 +9,9 @@ import std;
 
 export namespace ycxx::lex {
 
+// Conversion-function-ids use the target type for identity ([class.conv.fct]).
+inline constexpr std::string_view conversion_function_name = "operator<conversion>";
+
 using u8 = std::uint8_t;
 using u16 = std::uint16_t;
 using u32 = std::uint32_t;

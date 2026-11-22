@@ -84,7 +84,7 @@ public:
   const ast::Target& target() const { return *target_; }
 
   QualType builtin(Builtin b) { return ast::builtin(*ins_, b); }
-  QualType pointer(QualType pointee) { return ast::pointer_to(*ins_, ordinary_indirection_target(pointee)); }
+  QualType pointer(QualType pointee) { return ast::pointer_to(*ins_, pointee); }
   bool valid_member_owner(QualType owner) const { return is_class(owner) || is_dependent(owner); }
   bool valid_member_type(QualType member) const { return !is_void(member) && !is_reference(member); }
   // [dcl.mptr]: the nested-name-specifier names a possibly incomplete class; no member of that
@@ -116,8 +116,18 @@ public:
   }
   QualType class_type(EntityId c) { return ins_->intern_type(ast::TClass{c}); }
   QualType enum_type(EntityId e) { return ins_->intern_type(ast::TEnum{e}); }
-  QualType lvalue_ref(QualType t) { return ast::lvalue_ref_to(*ins_, ordinary_indirection_target(t)); }
-  QualType rvalue_ref(QualType t) { return ast::rvalue_ref_to(*ins_, ordinary_indirection_target(t)); }
+  QualType lvalue_ref(QualType t) { return ast::lvalue_ref_to(*ins_, t); }
+  QualType rvalue_ref(QualType t) { return ast::rvalue_ref_to(*ins_, t); }
+  // [conv.fctptr]: only a nonthrowing function can lose its exception specification.
+  bool function_pointer_conversion(QualType from, QualType to) {
+    from = canonical(from);
+    to = canonical(to);
+    if (!is_function(from) || !is_function(to) || !rec(from).fn_noexcept || rec(to).fn_noexcept) return false;
+    auto source = ins_->types.get<ast::TFunction>(from);
+    const auto target = ins_->types.get<ast::TFunction>(to);
+    source.noexcept_ = target.noexcept_;
+    return ins_->intern_type(source) == to;
+  }
   QualType template_param(u16 depth, u16 index, bool pack = false) {
     return ins_->intern_type(ast::TTemplateParam{depth, index, u8(pack)});
   }
@@ -294,6 +304,11 @@ public:
     return f.cv != Cv::none || f.ref != ast::RefQual::none;
   }
   bool is_array(QualType q) const { return ast::is_array(*ins_, q); }
+  // Peel every array extent. A non-array type is returned as given.
+  QualType innermost_array_element(QualType q) const {
+    while (is_array(q)) q = canonical(rec(q).inner);
+    return q;
+  }
   bool is_class(QualType q) const { return ins_->types.is<ast::TClass>(ins_->types.canon(q)); }
   bool is_reference(QualType q) const { return ast::is_reference(*ins_, q); }
   bool is_enum(QualType q) const { return ins_->types.is<ast::TEnum>(ins_->types.canon(q)); }
@@ -331,19 +346,6 @@ public:
   Fp128 fp(QualType q) const { return ins_->fp(q); }
 
 private:
-  // Keep the existing type of ordinary function pointers and references until #219 tracks
-  // exception specifications on the functions they can designate. Member pointers retain
-  // their member function's exception specification, including through a type alias.
-  QualType ordinary_indirection_target(QualType t) {
-    QualType c = ins_->types.canon(t);
-    if (!ins_->types.is<ast::TFunction>(c)) return t;
-    auto f = ins_->types.get<ast::TFunction>(c);
-    if (f.noexcept_ == ConstId::none || !ins_->values.is<ast::VInt>(f.noexcept_) ||
-        ins_->values.get<ast::VInt>(f.noexcept_).bits.lo == 0) return t;
-    f.noexcept_ = ast::bool_value(*ins_, false);
-    return ins_->intern_type(f);
-  }
-
   std::string spell(QualType q, std::string inner) const {
     TypeRec r = rec(q);
     Cv c = cv(ins_->canonical(q));
@@ -543,6 +545,9 @@ struct EntityRec {
   std::vector<ast::TemplateParamSema> closure_head{};
   // An unnamed type in a class has a lexical ordinal in that scope (Itanium ABI §5.1.5.5).
   std::optional<u32> unnamed_type_ordinal{};
+  // An unnamed enumeration's first enumerator and canonical underlying `type` denote it for
+  // linkage purposes ([dcl.enum]/12). Neither binds the type's name in source lookup.
+  std::optional<NameId> enum_linkage_name{};
 };
 
 class Entities {
@@ -586,6 +591,10 @@ public:
     if (r.kind == EntityKind::class_) f = ast::mix(f, r.head);
     if (r.unnamed_type_ordinal)
       f = ast::mix(ast::mix(f, ast::seed("ycxx.sema.unnamed-type-in-class")), *r.unnamed_type_ordinal);
+    if (r.enum_linkage_name) {
+      f = ast::mix(f, ins_->names.fp(*r.enum_linkage_name));
+      f = ast::mix(f, types_->fp(r.type));
+    }
     if (r.templ != EntityId::none) {
       f = ast::mix(f, ins_->entities.fp(r.templ));
       for (const ast::TemplateArg& a : r.args) f = mix_arg(f, a);
@@ -630,7 +639,13 @@ struct FieldRec {
   ConstId init = ConstId::none;
   bool dmi = false;  // it has a default member initializer, constant or not
   u8 bit_width = 0;
+  bool mutable_ = false;
+  bool no_unique_address = false;  // the member is potentially overlapping ([intro.object])
 };
+
+// Classification of a defaulted copy affected by an explicit in-class definition. Deletion
+// takes precedence over an unsupported or nontrivial subobject operation.
+enum class CopyState : u8 { ordinary, trivial, nontrivial, unsupported, deleted };
 
 // What `class_def(C)` (ast.md §3.6) says of a class that member lookup and the layout need, kept
 // by class entity. A class is complete once its definition has been analysed
@@ -638,6 +653,8 @@ struct FieldRec {
 // A member function ([class.mfct]) or static data member ([class.static.data]), which a
 // qualified definition outside the class redeclares. Its declaration is an item of each unit that
 // defines the class, so the unit keeps it (`Program::member_decl`), not the shared record (#156).
+enum class CopyAssignment : u8 { none, trivial, memberwise, deleted, const_member, unsupported };
+
 struct MemberDeclRec {
   NameId name{};
   EntityId entity = EntityId::none;
@@ -652,6 +669,11 @@ struct MemberDeclRec {
   // its definition is its lambda's, not an item's.
   std::vector<ast::TemplateParamSema> head{};
   std::vector<ast::NodeId> defaults;  // a function's default arguments by parameter, or empty
+  CopyAssignment copy_assignment = CopyAssignment::none;
+  bool explicit_defaulted_assignment = false;
+  bool is_virtual = false;
+  bool is_explicit = false;
+  EntityId overridden_virtual = EntityId::none;
 };
 
 struct NestedType {
@@ -664,16 +686,48 @@ struct NestedType {
 struct BaseRec {
   EntityId cls = EntityId::none;
   ast::Access access = ast::Access::public_;
+  bool dependent_in_pattern = false;
+};
+
+// Layout for access to a peer-owned object. A primary base already supplies the vptr at offset zero.
+enum class PeerVirtualLayout : u8 { none, root, primary_base };
+
+// Eligibility and triviality for [class.prop] and [special]. An absent or deleted operation is
+// ineligible. Unknown marks a record whose declarations or subobjects do not establish the fact.
+enum class CopyOperation : u8 { unknown, ineligible, eligible_trivial, eligible_nontrivial };
+
+struct TrivialCopyability {
+  CopyOperation copy_constructor = CopyOperation::unknown;
+  CopyOperation move_constructor = CopyOperation::unknown;
+  CopyOperation copy_assignment = CopyOperation::unknown;
+  CopyOperation move_assignment = CopyOperation::unknown;
+  CopyOperation destructor = CopyOperation::unknown;
+
+  std::optional<bool> result() const {
+    using enum CopyOperation;
+    const std::array operations{copy_constructor, move_constructor, copy_assignment, move_assignment};
+    if (destructor == unknown || std::ranges::contains(operations, unknown)) return std::nullopt;
+    return destructor == eligible_trivial && std::ranges::contains(operations, eligible_trivial) &&
+           !std::ranges::contains(operations, eligible_nontrivial);
+  }
 };
 
 struct ClassRec {
   bool defined = false;
+  u8 explicit_alignment = 0;  // a validated class-head requirement stricter than the natural alignment
+  bool unapplied_layout = false;  // unresolved layout attributes on this definition or its data members
   // Its direct base classes, in declaration order ([class.derived.general]).
   std::vector<BaseRec> bases;
   // POD for the purposes of layout, as Clang has it (`ast::record_layout`): trivial and
   // standard-layout ([class.prop]).
   bool pod = true;
   bool union_ = false;  // a union ([class.union]): its members share its storage
+  bool polymorphic = false;
+  bool virtual_destructor = false;
+  std::optional<bool> destructor_noexcept;  // the effective specification, when known
+  bool destructor_usable = false;          // its declaration and subobject destruction are known to be usable
+  bool layout_requires_virtual_support = false;
+  PeerVirtualLayout peer_virtual_layout = PeerVirtualLayout::none;
   std::vector<FieldRec> fields;        // in declaration order
   std::vector<MemberDeclRec> members;  // member functions and static data members
   // Special members ([special]): whether a constructor is user-declared; the destructor and the
@@ -684,13 +738,29 @@ struct ClassRec {
   // (/1); with a lambda-capture, its default constructor and copy assignment are deleted (/13).
   bool closure = false;
   bool default_deleted = false;
+  // Written zero-parameter defaulting, with the completed class's supported no-op proof.
+  EntityId defaulted_default_ctor = EntityId::none;
+  bool trivial_defaulted_default_ctor = false;
   EntityId destructor = EntityId::none;
   EntityId copy_ctor = EntityId::none;
   bool copy_deleted = false;
+  std::vector<EntityId> defaulted_copy_declarations;
+  CopyState defaulted_copy = CopyState::ordinary;
+  bool defaulted_copy_const = true;  // the implicit parameter when it depends on a defaulted copy
   // The move constructor ([class.copy.ctor]/8): whether one is declared and not deleted, and
   // whether it is then not trivial (user-provided, or implicit and a member's move is not).
   bool move_usable = false;
   bool move_nontrivial = false;
+  bool copy_nontrivial() const {
+    return (!copy_deleted && layout_requires_virtual_support) || copy_ctor != EntityId::none ||
+           defaulted_copy == CopyState::nontrivial || defaulted_copy == CopyState::unsupported;
+  }
+
+  TrivialCopyability trivial_copyability;
+  std::optional<bool> trivially_copyable() const {
+    return defined ? trivial_copyability.result() : std::nullopt;
+  }
+
   // Nested enumerations and type aliases ([class.mem]): their types by name, with their entities;
   // the unscoped enumerations' enumerators are members of the class.
   std::vector<NestedType> types;
@@ -699,6 +769,15 @@ struct ClassRec {
   std::vector<std::pair<EntityId, ast::Access>> access;
   // Its friends ([class.friend]): functions and classes, by entity.
   std::vector<EntityId> friends;
+  // The unqualified friend function declarations ADL can find through this class.
+  std::vector<ast::MemberRec> adl_friends;
+
+  const MemberDeclRec* implicit_copy_assignment() const {
+    const auto copy = std::ranges::find_if(members, [](const MemberDeclRec& m) {
+      return m.copy_assignment != CopyAssignment::none && !m.explicit_defaulted_assignment;
+    });
+    return copy == members.end() ? nullptr : &*copy;
+  }
 
   ast::Access access_of(EntityId e) const {
     for (const auto& [m, a] : access)
@@ -736,11 +815,22 @@ public:
   explicit Classes(ast::Interners& ins, Types& types) : ins_(&ins), types_(&types) {}
   Classes(const Classes&) = delete;
 
+  // A source declaration's class-key is available before a definition is complete.
+  void record_class_key(EntityId c, bool is_union) {
+    class_keys_.try_emplace(std::to_underlying(c), is_union);
+  }
+  std::optional<bool> is_union_class(EntityId c) const {
+    if (auto it = class_keys_.find(std::to_underlying(c)); it != class_keys_.end()) return it->second;
+    if (const ClassRec* r = find(c)) return r->union_;  // a synthesized class
+    return std::nullopt;
+  }
+
   // `r`, a definition's record, unless one is published already; the published one.
   const ClassRec& publish(EntityId c, ClassRec r, const std::function<void(ClassRec&)>& finish = {}) {
     auto [it, fresh] = recs_.try_emplace(std::to_underlying(c), std::move(r));
     if (fresh) {
       class_order_.push_back(c);
+      has_virtual_layouts_ |= it->second.layout_requires_virtual_support;
       if (finish) finish(it->second);
     }
     return it->second;
@@ -779,6 +869,15 @@ public:
     return r && r->defined;
   }
 
+  bool has_virtual_layouts() const { return has_virtual_layouts_; }
+  bool layout_requires_virtual_support(QualType t) const {
+    if (!has_virtual_layouts()) return false;
+    auto r = types_->rec(t);
+    while (r.kind == TypeKind::array) r = types_->rec(r.inner);
+    const ClassRec* c = r.kind == TypeKind::class_ ? find(r.entity) : nullptr;
+    return c && c->layout_requires_virtual_support;
+  }
+
   // The destructor that ends a `t`, none if trivial; for an array, its elements' ([class.dtor]).
   EntityId destructor_of(QualType t) const {
     TypeRec r = types_->rec(t);
@@ -793,7 +892,13 @@ public:
     if (r.kind == TypeKind::array) return copy_of(r.inner);
     const ClassRec* c = r.kind == TypeKind::class_ ? find(r.entity) : nullptr;
     if (!c) return {false, false};
-    return {c->copy_ctor != EntityId::none, c->copy_deleted};
+    return {c->copy_nontrivial(), c->copy_deleted};
+  }
+  CopyState defaulted_copy_of(QualType t) const {
+    const TypeRec r = types_->rec(t);
+    if (r.kind == TypeKind::array) return defaulted_copy_of(r.inner);
+    const ClassRec* c = r.kind == TypeKind::class_ ? find(r.entity) : nullptr;
+    return c ? c->defaulted_copy : CopyState::ordinary;
   }
   // Whether moving a `t` calls a constructor that is not trivial: its move constructor, or its
   // copy constructor when it has none ([over.match.ctor]).
@@ -802,7 +907,7 @@ public:
     if (r.kind == TypeKind::array) return move_nontrivial(r.inner);
     const ClassRec* c = r.kind == TypeKind::class_ ? find(r.entity) : nullptr;
     if (!c) return false;
-    return c->move_usable ? c->move_nontrivial : c->copy_ctor != EntityId::none;
+    return c->move_usable ? c->move_nontrivial : c->copy_nontrivial();
   }
   // Whether a `t` can be neither copied nor moved: its copy constructor deleted and no move
   // constructor usable; for an array, its elements'.
@@ -819,7 +924,7 @@ public:
   bool trivial_for_calls(EntityId cls, ast::CallTriviality rule) const {
     const ClassRec* c = find(cls);
     if (!c) return true;
-    if (c->destructor != EntityId::none || c->copy_ctor != EntityId::none) return false;
+    if (c->layout_requires_virtual_support || c->destructor != EntityId::none || c->copy_nontrivial()) return false;
     if (rule == ast::CallTriviality::apple) return true;
     if (c->move_usable && c->move_nontrivial) return false;
     return !c->copy_deleted || c->move_usable;
@@ -828,21 +933,47 @@ public:
 private:
   ast::Interners* ins_;
   Types* types_;
+  std::map<u32, bool> class_keys_;  // whether the parsed class-key names a union
   std::map<u32, ClassRec> recs_;  // node-based: a published record never moves
   std::map<u32, EnumRec> enums_;
   std::vector<EntityId> class_order_, enum_order_;
+  bool has_virtual_layouts_ = false;
 };
 
-// The ordinary single-object allocation functions implicitly declared at global scope
-// ([basic.stc.dynamic]). Their types use the target's size_t, like sizeof.
-enum class AllocationFunction : u8 { allocate, deallocate, deallocate_sized };
+// The ordinary implicit allocation signatures at global scope ([basic.stc.dynamic]).
+// The single-object and array operators share these shapes and the target's size_t.
+enum class AllocationFunction : u8 {
+  allocate, deallocate, deallocate_sized, allocate_aligned, deallocate_aligned, deallocate_sized_aligned
+};
 
-constexpr std::string_view allocation_name(AllocationFunction f) {
-  return f == AllocationFunction::allocate ? "operator new" : "operator delete";
+constexpr bool allocates(AllocationFunction f) {
+  return f == AllocationFunction::allocate || f == AllocationFunction::allocate_aligned;
+}
+
+constexpr std::string_view allocation_name(AllocationFunction f, bool array = false) {
+  if (allocates(f)) return array ? "operator new[]" : "operator new";
+  return array ? "operator delete[]" : "operator delete";
+}
+
+constexpr bool is_deallocation_name(std::string_view n) {
+  return n == allocation_name(AllocationFunction::deallocate) || n == allocation_name(AllocationFunction::deallocate, true);
+}
+
+constexpr bool is_allocating_name(std::string_view n) {
+  return n == allocation_name(AllocationFunction::allocate) || n == allocation_name(AllocationFunction::allocate, true);
 }
 
 constexpr bool is_allocation_name(std::string_view n) {
-  return n == allocation_name(AllocationFunction::allocate) || n == allocation_name(AllocationFunction::deallocate);
+  return is_allocating_name(n) || is_deallocation_name(n);
+}
+
+constexpr bool has_deallocation_size(AllocationFunction f) {
+  return f == AllocationFunction::deallocate_sized || f == AllocationFunction::deallocate_sized_aligned;
+}
+
+constexpr bool allocation_has_alignment(AllocationFunction f) {
+  return f == AllocationFunction::allocate_aligned || f == AllocationFunction::deallocate_aligned ||
+         f == AllocationFunction::deallocate_sized_aligned;
 }
 
 // What the front end shares process-wide (§9.1): the AST core's interners, and sema's views.
@@ -861,6 +992,7 @@ struct World {
     types.class_name = [this](EntityId e) {
       const EntityRec& r = entities.rec(e);
       if (r.unnamed_type_ordinal) return std::string("(unnamed union)");
+      if (r.enum_linkage_name) return std::string("(unnamed enum)");
       std::string n(ins.names.spelling(r.name));
       return n.empty() ? std::string("(lambda)") : n;  // a closure type ([expr.prim.lambda.closure])
     };
@@ -873,17 +1005,19 @@ struct World {
 
   // The interners give repeated requests and written declarations the same identity. Construct
   // the implicit declaration on demand, so a unit that never names it needs no shared state.
-  ast::DeclSema allocation_function(AllocationFunction f) {
+  ast::DeclSema allocation_function(AllocationFunction f, bool array = false) {
     QualType size = types.builtin(target.size_type);
     QualType void_type = types.builtin(Builtin::void_);
     QualType void_pointer = types.pointer(void_type);
-    const bool allocating = f == AllocationFunction::allocate;
-    QualType params[] = {allocating ? size : void_pointer, size};
-    auto count = f == AllocationFunction::deallocate_sized ? 2u : 1u;
+    const bool allocating = allocates(f);
+    QualType params[3] = {allocating ? size : void_pointer};
+    unsigned count = 1;
+    if (has_deallocation_size(f)) params[count++] = size;
+    if (allocation_has_alignment(f)) params[count++] = types.enum_type(alignment_enum());
     QualType type = types.function(allocating ? void_pointer : void_type, std::span(params).first(count),
                                    false, LangLinkage::cxx, Cv::none, ast::RefQual::none, !allocating);
     ast::DeclSema d{};
-    d.entity = entities.entity({.kind = EntityKind::function, .name = ins.names.intern(allocation_name(f)), .type = type});
+    d.entity = entities.entity({.kind = EntityKind::function, .name = ins.names.intern(allocation_name(f, array)), .type = type});
     d.type = type;
     d.kind = ast::DeclKind::function;
     d.linkage = ast::Linkage::external;
@@ -896,9 +1030,69 @@ struct World {
     return d;
   }
 
-  auto allocation_functions() {
-    using enum AllocationFunction;
-    return std::array{allocation_function(allocate), allocation_function(deallocate), allocation_function(deallocate_sized)};
+  static constexpr std::array allocation_functions{
+      AllocationFunction::allocate, AllocationFunction::deallocate, AllocationFunction::deallocate_sized,
+      AllocationFunction::allocate_aligned, AllocationFunction::deallocate_aligned, AllocationFunction::deallocate_sized_aligned,
+  };
+
+  bool matches_allocation_function(std::string_view name, QualType written) {
+    const bool array = name.ends_with("[]");
+    const auto arity = types.rec(written).params.size();
+    return std::ranges::any_of(allocation_functions, [&](AllocationFunction f) {
+      return allocation_name(f, array) == name && arity == 1u + has_deallocation_size(f) + allocation_has_alignment(f) &&
+             types.canonical(allocation_function(f, array).type) == types.canonical(written);
+    });
+  }
+
+  // Written overloads with a final tag are separate from the usual implicit signatures
+  // ([basic.stc.dynamic.allocation], [basic.stc.dynamic.deallocation]). A reference does not
+  // require a definition of the class or union it names.
+  bool matches_tagged_allocation_function(std::string_view name, QualType written, bool has_noexcept) {
+    const bool allocating = is_allocating_name(name);
+    if (!allocating && !is_deallocation_name(name)) return false;
+    const TypeRec fn = types.rec(written);
+    if (fn.kind != TypeKind::function || fn.variadic || fn.linkage != LangLinkage::cxx ||
+        fn.fn_cv != Cv::none || fn.fn_ref != ast::RefQual::none || !fn.fn_noexcept ||
+        (allocating && !has_noexcept) || (fn.params.size() != 2 && fn.params.size() != 3))
+      return false;
+
+    const QualType void_type = types.builtin(Builtin::void_);
+    const QualType void_pointer = types.pointer(void_type);
+    if (fn.inner != (allocating ? void_pointer : void_type) ||
+        fn.params.front() != (allocating ? types.builtin(target.size_type) : void_pointer))
+      return false;
+
+    const TypeRec ref = types.rec(fn.params.back());
+    if (ref.kind != TypeKind::reference || ref.rvalue_ref || Types::cv(ref.inner) != Cv::const_) return false;
+    const TypeRec tag = types.rec(ref.inner);
+    if (tag.kind != TypeKind::class_ || types.is_dependent(ref.inner) ||
+        ins.names.spelling(entities.rec(tag.entity).name).empty())
+      return false;
+    return fn.params.size() == 2 || fn.params[1] == types.enum_type(alignment_enum());
+  }
+
+  // [new.delete.placement]: the written non-allocating library signatures. They are separate
+  // from the implicit, replaceable allocation functions.
+  bool matches_reserved_placement_function(std::string_view name, QualType written) {
+    if (!is_allocation_name(name)) return false;
+    const TypeRec fn = types.rec(types.canonical(written));
+    if (fn.kind != TypeKind::function || fn.variadic || fn.linkage != LangLinkage::cxx ||
+        fn.fn_cv != Cv::none || fn.fn_ref != ast::RefQual::none || !fn.fn_noexcept || fn.params.size() != 2)
+      return false;
+
+    const bool allocating = !is_deallocation_name(name);
+    const QualType void_type = types.builtin(Builtin::void_);
+    const QualType void_pointer = types.pointer(void_type);
+    return fn.inner == (allocating ? void_pointer : void_type) &&
+           fn.params.front() == (allocating ? types.builtin(target.size_type) : void_pointer) &&
+           fn.params.back() == void_pointer;
+  }
+
+  void install_alignment_enum(Classes& classes) {
+    // This opaque shape supports implicit users of the type. Source lookup still needs a written
+    // declaration, and a written definition supplies its own record.
+    classes.publish_enum(alignment_enum(), {.scoped = true, .fixed = true, .underlying = types.builtin(target.size_type),
+                                           .promotion = std::nullopt, .enumerators = {}});
   }
 
   QualType builtin_va_list() {
@@ -940,6 +1134,12 @@ struct World {
   }
 
 private:
+  EntityId alignment_enum() {
+    // These are the ordinary named namespace and enum identities, shared with source declarations.
+    const auto ns = entities.entity({.kind = EntityKind::namespace_, .name = ins.names.intern("std")});
+    return entities.entity({.kind = EntityKind::enum_, .name = ins.names.intern("align_val_t"), .scope = ns});
+  }
+
   EntityId sysv_va_list_tag_ = EntityId::none;
 };
 

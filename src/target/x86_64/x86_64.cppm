@@ -6,6 +6,7 @@ import :encode;
 import std;
 import ycxx.ir;
 import ycxx.ir.l2;
+import ycxx.ir.lower;
 
 namespace ycxx::x86_64 {
 
@@ -19,14 +20,31 @@ export struct Reloc {
   bool operator==(const Reloc&) const = default;
 };
 
+export enum class FrameState : std::uint8_t { entry, saved_rbp, frame_pointer };
+
+export struct FrameRow {
+  std::uint32_t offset;  // state starting at this instruction offset
+  FrameState state;
+  bool operator==(const FrameRow&) const = default;
+};
+
+export struct UnwindCallSite {
+  std::uint32_t begin;        // first byte of the call
+  std::uint32_t end;          // first byte after the call
+  std::uint32_t landing_pad;  // function-relative, or zero for a call without a pad
+  bool operator==(const UnwindCallSite&) const = default;
+};
+
 export struct MachineCode {
   std::vector<std::uint8_t> bytes;
   std::vector<Reloc> relocs;
+  std::vector<FrameRow> frame_rows;
+  std::optional<std::vector<UnwindCallSite>> catch_all{};
   bool operator==(const MachineCode&) const = default;
 };
 
-// Compile well-formed L2 with INTEGER ABI operands and results. The producer checks the
-// original signatures and ellipsis types and places arguments in register/stack order.
+// Compile well-formed L2 with INTEGER ABI values and direct scalar SSE values.
+// The producer checks original signatures and ellipsis types and flattens INTEGER records.
 // L2 can erase the distinction between scalar and class arguments or results. Pass
 // the entities whose addresses may be resolved directly by a signed RIP-relative displacement
 // (e.g. local definitions in the small code model) in `direct_symbols`. Pass default-visible
@@ -35,26 +53,47 @@ export std::expected<MachineCode, std::string> compile_function(const l2::Functi
                                                                 std::span<const ir::EntityId> direct_symbols = {},
                                                                 std::span<const ir::EntityId> got_symbols = {});
 
+export struct EhFrameCies {
+  std::optional<std::uint32_t> ordinary, handler;
+};
+
+export struct EhFrameFields {
+  std::uint32_t initial_location;
+  std::optional<std::uint32_t> personality;  // only when this function emits the handler CIE
+  std::optional<std::uint32_t> lsda;
+};
+
+// Append one FDE and its CIE if absent. Offsets identify signed PC-relative relocation fields.
+export std::expected<EhFrameFields, std::string> append_eh_frame(std::vector<std::uint8_t>& section,
+                                                                EhFrameCies& cies, const MachineCode& code);
+
+// Encode the supported catch-all LSDA from the final instruction and landing-pad offsets.
+export std::expected<std::vector<std::uint8_t>, std::string> catch_all_lsda(const MachineCode& code);
+
 namespace {
 
 using l2::Op;
 using l2::Type;
+using ir::Amd64ArgumentKind;
+using ir::Amd64ArgumentPlan;
 using ir::BlockId;
 using ir::NodeId;
 using ir::ValueId;
 using ir::raw;
 using enum Reg;
 
-// AMD64 psABI §3.2.2–3.2.3: scalar INTEGER argument registers, then eightbyte stack slots.
+// AMD64 psABI §3.2.2–3.2.3: INTEGER and SSE register sequences, then eightbyte stack slots.
 constexpr Reg argument_regs[] = {rdi, rsi, rdx, rcx, r8, r9};
 constexpr std::size_t register_args = std::size(argument_regs);
+static_assert(register_args == Amd64ArgumentPlan::integer_registers);
 
 // AMD64 psABI §3.5.7: the va_list fields and the entry register save area.
 constexpr std::int32_t gp_offset_field = 0, fp_offset_field = 4;
 constexpr std::int32_t overflow_arg_area_field = 8, reg_save_area_field = 16;
-constexpr std::int32_t gp_slot = 8, xmm_slot = 16, xmm_register_args = 8;
+constexpr std::int32_t gp_slot = 8, xmm_slot = 16, xmm_register_args = Amd64ArgumentPlan::sse_registers;
 constexpr std::int32_t gp_save_size = register_args * gp_slot;
 constexpr std::int32_t reg_save_size = gp_save_size + xmm_register_args * xmm_slot;
+constexpr std::int32_t stack_args_base = 16, stack_arg_slot = 8;
 
 constexpr std::uint64_t align_up(std::uint64_t size, std::uint64_t align) {
   return (size + align - 1) & ~(align - 1);
@@ -88,14 +127,24 @@ struct Frame {
   std::int32_t variadic_save = 0;  // RBP-relative, present only for an executing va_start
 };
 
+bool supports_float(Op op) {
+  switch (op) {
+    case Op::const_: case Op::load: case Op::store: case Op::select: case Op::fpext:
+    case Op::fadd: case Op::fsub: case Op::fmul: case Op::fdiv: case Op::fneg: case Op::fcmp:
+    case Op::call: case Op::call_ind: case Op::ret: case Op::va_arg: return true;
+    default: return false;
+  }
+}
+
 std::expected<Frame, std::string> layout(const l2::Function& body) {
   // Keep the frame and the saved frame and return addresses within one page. Larger frames
   // need stack probing to avoid skipping a guard page.
   constexpr std::uint64_t max_frame = 4096 - 16;
-  if (body.indirect_result || body.results.size() > 2)
-    return std::unexpected("only up to two INTEGER result registers are supported");
-  for (Type t : body.results)
-    if (t == Type::state || l2::is_float(t)) return std::unexpected("unsupported scalar ABI result type");
+  const bool float_result = std::ranges::any_of(body.results, l2::is_float);
+  if (body.indirect_result || body.results.size() > (float_result ? 1u : 2u))
+    return std::unexpected("only a scalar SSE result or up to two INTEGER result registers are supported");
+  if (std::ranges::contains(body.results, Type::state)) return std::unexpected("unsupported scalar ABI result type");
+  auto is_float = [&](ValueId v) { return l2::is_float(body.type(v)); };
 
   Frame frame;
   frame.slots.resize(body.values.size());
@@ -103,7 +152,6 @@ std::expected<Frame, std::string> layout(const l2::Function& body) {
   for (std::size_t i = 0; i < body.values.size(); ++i) {
     Type t = body.values[i].type;
     if (t == Type::state) continue;
-    if (l2::is_float(t)) return std::unexpected("floating-point values are outside the scalar INTEGER subset");
     frame.size += 8;
     if (frame.size > max_frame) return std::unexpected("x86-64 frame exceeds the single-page limit");
     frame.slots[i] = -std::int32_t(frame.size);
@@ -123,6 +171,11 @@ std::expected<Frame, std::string> layout(const l2::Function& body) {
     for (NodeId n : body.nodes_of(b)) {
       const l2::Node& nd = body.node(n);
       auto imms = body.imms_of(n);
+      auto operands = body.operands_of(n);
+      const bool uses_float_result = std::ranges::any_of(std::views::iota(0u, nd.nres),
+          [&](std::uint32_t i) { return is_float(body.result(n, i)); });
+      if (!supports_float(nd.op) && (uses_float_result || std::ranges::any_of(operands, is_float)))
+        return at_node(n, nd.op, "floating-point operation is unsupported");
       if (nd.op == Op::alloca) {
         auto size = imms[0], align = imms[1];
         if (!std::has_single_bit(align) || align > 16)
@@ -137,16 +190,29 @@ std::expected<Frame, std::string> layout(const l2::Function& body) {
         if (frame.size > max_frame) return at_node(n, nd.op, "x86-64 frame exceeds the single-page limit");
         frame.variadic_save = -std::int32_t(frame.size);
       }
-      if (nd.op == Op::call || nd.op == Op::call_ind) {
-        bool indirect = nd.op == Op::call_ind;
-        if (indirect && body.type(body.operands_of(n)[1]) != Type::ptr)
+      if (nd.op == Op::call || nd.op == Op::call_ind || nd.op == Op::invoke) {
+        const bool indirect = nd.op == Op::call_ind;
+        const bool variadic = nd.flags & ir::bit(ir::Flag::variadic);
+        if (indirect && body.type(operands[1]) != Type::ptr)
           return at_node(n, nd.op, "an indirect callee must be a pointer");
-        if (indirect && imms[1] && !(nd.flags & ir::bit(ir::Flag::variadic)))
-          return at_node(n, nd.op, "ellipsis arguments on a nonvariadic indirect call");
-        if (imms[indirect ? 2 : 3] || nd.nres > (indirect ? 2u : 3u))
-          return at_node(n, nd.op, "unsupported INTEGER ABI result placement");
-        std::size_t args = nd.nopnd - (indirect ? 2 : 1);
-        if (args > register_args) scratch_words = std::max(scratch_words, std::uint64_t(args - register_args));
+        auto args = operands.subspan(indirect ? 2 : 1);
+        const auto ellipsis = imms[indirect ? 1 : 2];
+        if (ellipsis && !variadic)
+          return at_node(n, nd.op, indirect ? "ellipsis arguments on a nonvariadic indirect call"
+                                         : "ellipsis arguments on a nonvariadic direct call");
+        if (ellipsis > args.size()) return at_node(n, nd.op, "more ellipsis arguments than arguments");
+        if (imms[indirect ? 2 : 3] || nd.nres > (indirect || variadic || uses_float_result ? 2u : 3u))
+          return at_node(n, nd.op, "unsupported ABI result placement");
+        if (indirect && (uses_float_result || std::ranges::any_of(args, is_float)))
+          return at_node(n, nd.op, "floating-point indirect calls are unsupported");
+        for (ValueId arg : args.last(ellipsis)) {
+          Type type = body.type(arg);
+          if (type != Type::i32 && type != Type::i64 && type != Type::ptr && type != Type::f64)
+            return at_node(n, nd.op, "unsupported promoted ellipsis argument type");
+        }
+        Amd64ArgumentPlan plan;
+        for (ValueId arg : args) plan.place(body.type(arg));
+        scratch_words = std::max(scratch_words, std::uint64_t(plan.stack_slots()));
       }
     }
   }
@@ -165,8 +231,15 @@ class Emitter {
         block_offsets_(body.blocks.size()) {}
 
   std::expected<MachineCode, std::string> run() {
+    for (std::uint32_t n = 0; n < body_.nodes.size(); ++n)
+      if (body_.nodes[n].op == Op::invoke) {
+        landing_ = body_.succs_of(NodeId(n))[1].target;
+        out_.catch_all.emplace();
+      }
     e_.emit({0x55});  // push rbp
+    frame_row(FrameState::saved_rbp);
     e_.move(rbp, rsp);
+    frame_row(FrameState::frame_pointer);
     if (frame_.size) {
       e_.reg({0x81}, 5, rsp);  // sub rsp, imm32
       e_.immediate(frame_.size, 4);
@@ -175,7 +248,16 @@ class Emitter {
       return std::unexpected("x86-64 register-save branch displacement out of range");
     parameters();
     for (BlockId b : body_.block_ids()) {
+      // CFI follows byte order. Branches into a block after a return still have a live frame.
+      if (out_.frame_rows.back().state == FrameState::entry) frame_row(FrameState::frame_pointer);
       block_offsets_[raw(b)] = e_.offset();
+      if (landing_ == b) {
+        // The personality arrives at the recorded address with these original machine
+        // registers. Capture both before an instruction uses them as scratch.
+        const auto params = body_.params_of(b);
+        e_.store(rbp, frame_.slots[raw(params[1])], rax, 8);
+        e_.store(rbp, frame_.slots[raw(params[2])], rdx, 8);
+      }
       for (NodeId n : body_.nodes_of(b)) {
         if (auto result = node(n); !result) return std::unexpected(result.error());
       }
@@ -184,6 +266,11 @@ class Emitter {
       if (!e_.patch_relative(branch.at, block_offsets_[raw(branch.target)]))
         return std::unexpected("x86-64 branch displacement exceeds signed 32 bits");
     if (!std::in_range<std::uint32_t>(e_.offset())) return std::unexpected("x86-64 function exceeds 4 GiB");
+    if (landing_) {
+      if (!protected_call_) return std::unexpected("missing protected machine call");
+      (*out_.catch_all)[*protected_call_].landing_pad =
+          static_cast<std::uint32_t>(block_offsets_[raw(*landing_)]);
+    }
     return std::move(out_);
   }
 
@@ -195,6 +282,9 @@ class Emitter {
   MachineCode out_;
   Encoder e_{out_.bytes};
   std::vector<std::size_t> block_offsets_;
+  Amd64ArgumentPlan incoming_;
+  std::optional<BlockId> landing_;
+  std::optional<std::size_t> protected_call_;
 
   struct Branch {
     std::size_t at;
@@ -202,12 +292,27 @@ class Emitter {
   };
   std::vector<Branch> branches_;
 
-  void read(ValueId v, Reg dst = rax) { e_.load(dst, rbp, frame_.slots[raw(v)], 8); }
+  void frame_row(FrameState state) {
+    // `run` checks the final byte extent before returning any offsets.
+    out_.frame_rows.push_back({static_cast<std::uint32_t>(e_.offset()), state});
+  }
+
+  unsigned home_width(ValueId v) const {
+    Type type = body_.type(v);
+    return l2::is_float(type) ? l2::bytes(type) : 8;
+  }
+
+  void read(ValueId v, Reg dst = rax) { e_.load(dst, rbp, frame_.slots[raw(v)], home_width(v)); }
   void write(ValueId v) {
+    Type type = body_.type(v);
+    if (l2::is_float(type)) {
+      e_.store(rbp, frame_.slots[raw(v)], rax, l2::bytes(type));
+      return;
+    }
     // Keep high bits clear for later unsigned operations and narrow ABI values. The psABI
     // leaves bits outside an INTEGER value's memory representation unspecified at the boundary.
     // A valid bool has a low byte of 0 or 1 (§3.2.3), which fits in the internal i1.
-    unsigned bits = l2::bits(body_.type(v));
+    unsigned bits = l2::bits(type);
     if (bits < 32) {
       e_.emit({0x25});  // and eax, imm32
       e_.immediate((1u << bits) - 1, 4);
@@ -241,52 +346,57 @@ class Emitter {
 
   void va_start(ValueId cursor) {
     read(cursor, rcx);
-    // By this point each named parameter occupies exactly one INTEGER slot. RBP+16
-    // steps over the saved frame pointer and return address to the incoming stack slots.
-    const auto named = std::size_t(body_.params_of(BlockId(0)).size()) - 1;
-    const auto named_in_registers = std::min(named, register_args);
-    e_.store_immediate32(rcx, gp_offset_field, named_in_registers * gp_slot);
-    e_.store_immediate32(rcx, fp_offset_field, gp_save_size);
-    e_.address(rax, rbp, 16 + std::int32_t(named - named_in_registers) * gp_slot);
+    e_.store_immediate32(rcx, gp_offset_field, incoming_.used_integer_registers() * gp_slot);
+    e_.store_immediate32(rcx, fp_offset_field, gp_save_size + incoming_.used_sse_registers() * xmm_slot);
+    // Skip the saved frame pointer, the return address and every named stack slot.
+    e_.address(rax, rbp, stack_args_base + std::int32_t(incoming_.stack_slots()) * stack_arg_slot);
     e_.store(rcx, overflow_arg_area_field, rax, 8);
     e_.address(rax, rbp, frame_.variadic_save);
     e_.store(rcx, reg_save_area_field, rax, 8);
   }
 
   bool va_arg(ValueId cursor, ValueId result) {
+    const Type type = body_.type(result);
+    const bool sse = type == Type::f64;
+    const auto offset_field = sse ? fp_offset_field : gp_offset_field;
+    const auto save_end = sse ? reg_save_size : gp_save_size;
+    const auto reg_slot = sse ? xmm_slot : gp_slot;
     read(cursor, rdx);
-    e_.load(rax, rdx, gp_offset_field, 4);
-    e_.reg({0x83}, 7, rax, false);  // cmp eax, imm8
-    e_.immediate(gp_save_size, 1);
+    e_.load(rax, rdx, offset_field, 4);
+    e_.emit({0x3d});  // cmp eax, imm32. The FP limit of 176 does not fit a signed imm8.
+    e_.immediate(save_end, 4);
     e_.emit({0x0f, 0x83});  // jae rel32
     auto overflow = e_.displacement();
 
     e_.load(rcx, rdx, reg_save_area_field, 8);
     e_.reg({0x01}, rax, rcx);  // add rcx, rax
     e_.reg({0x83}, 0, rax, false);  // add eax, imm8
-    e_.immediate(gp_slot, 1);
-    e_.store(rdx, gp_offset_field, rax, 4);
+    e_.immediate(reg_slot, 1);
+    e_.store(rdx, offset_field, rax, 4);
     e_.emit({0xe9});  // jmp rel32
     auto fetched = e_.displacement();
 
     if (!e_.patch_relative(overflow, e_.offset())) return false;
     e_.load(rcx, rdx, overflow_arg_area_field, 8);
-    e_.address(rax, rcx, gp_slot);
+    e_.address(rax, rcx, stack_arg_slot);
     e_.store(rdx, overflow_arg_area_field, rax, 8);
     if (!e_.patch_relative(fetched, e_.offset())) return false;
 
-    e_.load(rax, rcx, 0, l2::bytes(body_.type(result)));
+    e_.load(rax, rcx, 0, l2::bytes(type));
     write(result);
     return true;
   }
 
   void parameters() {
-    std::size_t i = 0;
     for (ValueId v : body_.params_of(BlockId(0)) | std::views::drop(1)) {
-      if (i < register_args) e_.move(rax, argument_regs[i]);
-      else e_.load(rax, rbp, 16 + 8 * std::int32_t(i - register_args), 8);
-      write(v);
-      ++i;
+      auto [kind, index] = incoming_.place(body_.type(v));
+      if (kind == Amd64ArgumentKind::sse) {
+        e_.store_scalar_xmm(rbp, frame_.slots[raw(v)], index, home_width(v));
+      } else {
+        if (kind == Amd64ArgumentKind::integer) e_.move(rax, argument_regs[index]);
+        else e_.load(rax, rbp, stack_args_base + stack_arg_slot * std::int32_t(index), home_width(v));
+        write(v);
+      }
     }
   }
 
@@ -298,42 +408,72 @@ class Emitter {
 
   void call(NodeId n) {
     const auto& node = body_.node(n);
-    bool indirect = node.op == Op::call_ind;
+    const bool indirect = node.op == Op::call_ind;
+    const bool variadic = node.flags & ir::bit(ir::Flag::variadic);
     auto ops = body_.operands_of(n);
     auto imms = body_.imms_of(n);
     auto args = ops.subspan(indirect ? 2 : 1);
     auto signed_args = imms[indirect ? 0 : 1];
+    Amd64ArgumentPlan plan;
     for (std::size_t i = 0; i < args.size(); ++i) {
-      if (i < register_args) {
+      ValueId arg = args[i];
+      Type type = body_.type(arg);
+      auto [kind, index] = plan.place(type);
+      if (kind == Amd64ArgumentKind::integer) {
         // The psABI leaves excess bits unspecified, but optimized Clang callees can read
         // 32 bits for narrow register arguments. Extend to that width for interoperability.
-        const auto width = l2::bytes(body_.type(args[i]));
-        e_.load(argument_regs[i], rbp, frame_.slots[raw(args[i])], width, (signed_args >> i) & 1);
+        e_.load(argument_regs[index], rbp, frame_.slots[raw(arg)], l2::bytes(type), i < 64 && ((signed_args >> i) & 1));
+      } else if (kind == Amd64ArgumentKind::sse) {
+        e_.load_scalar_xmm(index, rbp, frame_.slots[raw(arg)], l2::bytes(type));
       } else {
-        read(args[i]);
-        e_.store(rsp, 8 * std::int32_t(i - register_args), rax, 8);
+        read(arg);
+        e_.store(rsp, 8 * std::int32_t(index), rax, home_width(arg));
       }
     }
+    std::size_t call_begin;
     if (indirect) {
-      const bool variadic = node.flags & ir::bit(ir::Flag::variadic);
       // R11 is caller-saved and holds no argument. Variadic calls reserve AL for the vector
       // register count (AMD64 psABI §3.2.3), so their callee address needs a separate register.
       Reg target = variadic ? r11 : rax;
       read(ops[1], target);
       if (variadic) e_.reg({0x31}, rax, rax, false);  // xor eax, eax
+      call_begin = e_.offset();
       e_.reg({0xff}, 2, target, false);  // call r/m64
     } else {
-      // AL gives the vector register count for variadic calls (AMD64 psABI §3.2.3).
-      // L2's ellipsis count can be zero for a variadic call, so set AL for every direct call.
-      e_.reg({0x31}, rax, rax, false);  // xor eax, eax
+      // AL counts named and unnamed vector register arguments (AMD64 psABI §3.2.3).
+      const auto vector_count = variadic ? plan.used_sse_registers() : 0u;
+      if (vector_count) e_.emit({0xb0, std::uint8_t(vector_count)});  // mov al, imm8
+      else e_.reg({0x31}, rax, rax, false);  // xor eax, eax
+      call_begin = e_.offset();
       e_.emit({0xe8});  // call rel32
       relocation(RelocKind::plt32, ir::EntityId(std::uint32_t(imms[0])));
     }
-    if (node.nres > 1) write(body_.result(n, 1));
+    const bool invoke = node.op == Op::invoke;
+    if (out_.catch_all) {
+      if (invoke) protected_call_ = out_.catch_all->size();
+      out_.catch_all->push_back({static_cast<std::uint32_t>(call_begin),
+                                static_cast<std::uint32_t>(e_.offset()), 0});
+    }
+    if (invoke) {
+      const auto normal = body_.succs_of(n)[0].target;
+      write(body_.params_of(normal)[1]);
+      jump(normal);
+      return;
+    }
+    if (node.nres > 1) {
+      ValueId result = body_.result(n, 1);
+      if (l2::is_float(body_.type(result))) e_.store_scalar_xmm(rbp, frame_.slots[raw(result)], 0, home_width(result));
+      else write(result);
+    }
     if (node.nres > 2) {
       e_.move(rax, rdx);
       write(body_.result(n, 2));
     }
+  }
+
+  void jump(BlockId target) {
+    e_.emit({0xe9});  // jmp rel32
+    branches_.push_back({e_.displacement(), target});
   }
 
   void edge(const ir::Succ& succ) {
@@ -342,14 +482,14 @@ class Emitter {
     // Stage all sources before overwriting any destination, including on loop backedges.
     for (std::size_t i = 1; i < args.size(); ++i) {
       read(args[i]);
-      e_.store(rsp, 8 * std::int32_t(i - 1), rax, 8);
+      e_.store(rsp, 8 * std::int32_t(i - 1), rax, home_width(args[i]));
     }
     for (std::size_t i = 1; i < args.size(); ++i) {
-      e_.load(rax, rsp, 8 * std::int32_t(i - 1), 8);
-      e_.store(rbp, frame_.slots[raw(params[i])], rax, 8);
+      const auto width = home_width(params[i]);
+      e_.load(rax, rsp, 8 * std::int32_t(i - 1), width);
+      e_.store(rbp, frame_.slots[raw(params[i])], rax, width);
     }
-    e_.emit({0xe9});  // jmp rel32
-    branches_.push_back({e_.displacement(), succ.target});
+    jump(succ.target);
   }
 
   std::expected<void, std::string> node(NodeId n);
@@ -364,10 +504,22 @@ std::expected<void, std::string> Emitter::node(NodeId n) {
     read(ops[1], rcx);
     e_.reg(opcode, rcx, rax);
   };
+  auto float_two = [&](std::uint8_t opcode) {
+    ValueId result = body_.result(n);
+    unsigned width = home_width(result);
+    e_.load_scalar_xmm(0, rbp, frame_.slots[raw(ops[0])], width);
+    e_.scalar_float_arithmetic(opcode, 0, rbp, frame_.slots[raw(ops[1])], width);
+    e_.store_scalar_xmm(rbp, frame_.slots[raw(result)], 0, width);
+  };
   switch (op) {
     case Op::const_:
-      e_.emit({0x48, 0xb8});  // mov rax, imm64
-      e_.immediate(imms[0], 8);
+      if (body_.type(body_.result(n)) == Type::f32) {
+        e_.emit({0xb8});  // mov eax, imm32
+        e_.immediate(imms[0], 4);
+      } else {
+        e_.emit({0x48, 0xb8});  // mov rax, imm64
+        e_.immediate(imms[0], 8);
+      }
       break;
     case Op::symbol: {
       auto target = ir::EntityId(std::uint32_t(imms[0]));
@@ -407,6 +559,22 @@ std::expected<void, std::string> Emitter::node(NodeId n) {
       read(ops[0]);
       e_.reg({0xf7}, 3, rax);
       break;
+    case Op::fadd: float_two(0x58); return {};
+    case Op::fsub: float_two(0x5c); return {};
+    case Op::fmul: float_two(0x59); return {};
+    case Op::fdiv: float_two(0x5e); return {};
+    case Op::fneg:
+      // Flip only the IEEE sign bit. Integer XOR preserves the payload and MXCSR status.
+      read(ops[0]);
+      if (body_.type(body_.result(n)) == Type::f32) {
+        e_.emit({0x35});  // xor eax, imm32
+        e_.immediate(std::uint32_t{1} << 31, 4);
+      } else {
+        e_.emit({0x48, 0xb9});  // mov rcx, imm64
+        e_.immediate(std::uint64_t{1} << 63, 8);
+        e_.reg({0x31}, rcx, rax);  // xor rax, rcx
+      }
+      break;
     case Op::shl: case Op::lshr: case Op::ashr:
       read(ops[0]);
       read(ops[1], rcx);
@@ -426,6 +594,36 @@ std::expected<void, std::string> Emitter::node(NodeId n) {
       e_.reg({0x0f, *condition(pred)}, 0, rax, false);
       break;
     }
+    case Op::fcmp: {
+      using enum ir::Pred;
+      if (imms[0] > std::to_underlying(ge)) return at_node(n, op, "unknown floating predicate");
+      auto pred = ir::Pred(imms[0]);
+      ValueId lhs = ops[0], rhs = ops[1];
+      switch (pred) {
+        case lt: case le:
+          // The operands already have home slots. Reversal lets SETA and SETAE reject unordered.
+          std::swap(lhs, rhs);
+          pred = pred == lt ? gt : ge;
+          break;
+        case eq: case ne: case gt: case ge:
+          break;
+        default:
+          return at_node(n, op, "unknown floating predicate");
+      }
+      unsigned width = home_width(lhs);
+      e_.load_scalar_xmm(0, rbp, frame_.slots[raw(lhs)], width);
+      e_.compare_scalar_xmm(0, rbp, frame_.slots[raw(rhs)], width);
+      e_.reg({0x0f, *condition(pred)}, 0, rax, false);  // setcc al
+      // Unordered sets both ZF and PF. Capture the parity test before changing flags.
+      if (pred == eq) {
+        e_.reg({0x0f, 0x9b}, 0, rdx, false);  // setnp dl
+        e_.reg({0x20}, rdx, rax, false);     // and al, dl
+      } else if (pred == ne) {
+        e_.reg({0x0f, 0x9a}, 0, rdx, false);  // setp dl
+        e_.reg({0x08}, rdx, rax, false);     // or al, dl
+      }
+      break;
+    }
     case Op::select:
       read(ops[0]);
       e_.reg({0x85}, rax, rax);  // test condition, then select without changing flags
@@ -433,6 +631,10 @@ std::expected<void, std::string> Emitter::node(NodeId n) {
       read(ops[1], rcx);
       e_.reg({0x0f, 0x45}, rax, rcx);  // cmovne
       break;
+    case Op::fpext:
+      e_.widen_float(0, rbp, frame_.slots[raw(ops[0])]);
+      e_.store_scalar_xmm(rbp, frame_.slots[raw(body_.result(n))], 0, 8);
+      return {};
     case Op::sext:
       read(ops[0]);
       sign_extend(rax, body_.type(ops[0]));
@@ -455,7 +657,7 @@ std::expected<void, std::string> Emitter::node(NodeId n) {
     case Op::va_arg:
       if (!va_arg(ops[1], body_.result(n, 1))) return at_node(n, op, "conditional branch displacement out of range");
       return {};
-    case Op::call: case Op::call_ind:
+    case Op::call: case Op::call_ind: case Op::invoke:
       call(n);
       return {};
     case Op::br:
@@ -474,8 +676,14 @@ std::expected<void, std::string> Emitter::node(NodeId n) {
     }
     case Op::ret:
       if (ops.size() > 2) read(ops[2], rdx);
-      if (ops.size() > 1) read(ops[1]);
-      e_.emit({0xc9, 0xc3});  // leave, ret
+      if (ops.size() > 1) {
+        ValueId result = ops[1];
+        if (l2::is_float(body_.type(result))) e_.load_scalar_xmm(0, rbp, frame_.slots[raw(result)], home_width(result));
+        else read(result);
+      }
+      e_.emit({0xc9});  // leave: restore RSP and the caller's RBP
+      frame_row(FrameState::entry);
+      e_.emit({0xc3});  // ret
       return {};
     case Op::unreachable:
       e_.emit({0x0f, 0x0b});  // ud2
@@ -495,6 +703,143 @@ std::expected<MachineCode, std::string> compile_function(const l2::Function& bod
   auto frame = layout(body);
   if (!frame) return std::unexpected(frame.error());
   return Emitter(body, *frame, direct_symbols, got_symbols).run();
+}
+
+std::expected<EhFrameFields, std::string> append_eh_frame(std::vector<std::uint8_t>& section,
+                                                         EhFrameCies& cies, const MachineCode& code) {
+  // AMD64 psABI §§3.6.2, 4.2.4 and DWARF §6.4. The return address is at CFA-8.
+  // RBP initially has the caller's value.
+  constexpr std::uint8_t dwarf_rbp = 6, dwarf_rsp = 7, dwarf_ra = 16;
+  constexpr std::uint8_t def_cfa = 0x0c, same_value = 0x08, offset = 0x80, restore = 0xc0;
+  constexpr std::uint8_t pcrel_sdata4 = 0x1b, indirect = 0x80;
+  constexpr std::uint8_t initial_cfi[]{
+      def_cfa, dwarf_rsp, 8, offset | dwarf_ra, 1, same_value, dwarf_rbp,
+  };
+  if (code.bytes.empty() || !std::in_range<std::int32_t>(code.bytes.size()))
+    return std::unexpected("the unwind range is outside signed 32 bits");
+
+  std::vector<std::uint8_t> instructions;
+  Encoder cfi(instructions);
+  std::uint32_t previous = 0;
+  for (const FrameRow row : code.frame_rows) {
+    if (row.offset <= previous || row.offset >= code.bytes.size())
+      return std::unexpected("an unwind row is outside the function's instruction range");
+    const auto advance = row.offset - previous;
+    if (advance <= 0x3f) {
+      cfi.emit({static_cast<std::uint8_t>(0x40 | advance)});  // DW_CFA_advance_loc
+    } else {
+      const unsigned width = advance <= 0xff ? 1 : advance <= 0xffff ? 2 : 4;
+      cfi.emit({static_cast<std::uint8_t>(0x02 + std::countr_zero(width))});  // advance_loc1/2/4
+      cfi.immediate(advance, width);
+    }
+    switch (row.state) {
+      case FrameState::entry:
+        cfi.emit({def_cfa, dwarf_rsp, 8, restore | dwarf_rbp});
+        break;
+      case FrameState::saved_rbp:
+        cfi.emit({def_cfa, dwarf_rsp, 16, offset | dwarf_rbp, 2});
+        break;
+      case FrameState::frame_pointer:
+        cfi.emit({def_cfa, dwarf_rbp, 16, offset | dwarf_rbp, 2});
+        break;
+    }
+    previous = row.offset;
+  }
+
+  const bool handler = code.catch_all.has_value();
+  auto& cie = handler ? cies.handler : cies.ordinary;
+  constexpr std::size_t word = sizeof(std::uint32_t);
+  const std::size_t cie_size = handler ? 32 : 24;  // length field included
+  const std::size_t fde_header = 4 * word + 1 + (handler ? word : 0);
+  if (section.size() % 8 != 0 || (cie && (*cie > section.size() || cie_size > section.size() - *cie)))
+    return std::unexpected("invalid unwind CIE position");
+  const auto fde_start = section.size() + (cie ? 0 : cie_size);
+  const auto fde_size = align_up(fde_header + instructions.size(), 8);
+  if (!std::in_range<std::uint32_t>(fde_start + fde_size))
+    return std::unexpected("the unwind section exceeds the object offset limit");
+
+  Encoder record(section);
+  EhFrameFields fields{};
+  if (!cie) {
+    cie = static_cast<std::uint32_t>(record.offset());
+    record.immediate(cie_size - word, word);
+    record.immediate(0, word);  // CIE ID
+    if (handler) {
+      record.emit({1, 'z', 'P', 'L', 'R', 0, 1, 0x78, dwarf_ra, 7, indirect | pcrel_sdata4});
+      fields.personality = static_cast<std::uint32_t>(record.offset());
+      record.immediate(0, word);
+      record.emit({pcrel_sdata4, pcrel_sdata4});  // LSDA and initial-location encodings
+    } else {
+      record.emit({1, 'z', 'R', 0, 1, 0x78, dwarf_ra, 1, pcrel_sdata4});
+    }
+    section.insert(section.end(), std::begin(initial_cfi), std::end(initial_cfi));
+  }
+  record.immediate(fde_size - word, word);
+  record.immediate(fde_start + word - *cie, word);  // backwards from the CIE pointer field
+  fields.initial_location = static_cast<std::uint32_t>(record.offset());
+  record.immediate(0, word);  // S - P at this field, with no instruction-length addend
+  record.immediate(code.bytes.size(), word);
+  record.emit({static_cast<std::uint8_t>(handler ? word : 0)});
+  if (handler) {
+    fields.lsda = static_cast<std::uint32_t>(record.offset());
+    record.immediate(0, word);
+  }
+  section.insert(section.end(), instructions.begin(), instructions.end());
+  section.resize(fde_start + fde_size, 0);  // DW_CFA_nop padding belongs to the FDE
+  return fields;
+}
+
+namespace {
+
+void uleb128(std::vector<std::uint8_t>& bytes, std::size_t value) {
+  do {
+    const auto part = static_cast<std::uint8_t>(value & 0x7f);
+    value >>= 7;
+    bytes.push_back(part | (value ? 0x80 : 0));
+  } while (value != 0);
+}
+
+}  // namespace
+
+std::expected<std::vector<std::uint8_t>, std::string> catch_all_lsda(const MachineCode& code) {
+  if (!code.catch_all || code.bytes.empty() || !std::in_range<std::int32_t>(code.bytes.size()))
+    return std::unexpected("missing or oversized catch-all machine code");
+
+  std::vector<std::uint8_t> sites;
+  std::uint32_t previous_end = 0;
+  bool protected_call = false;
+  for (const UnwindCallSite& site : *code.catch_all) {
+    if (site.begin < previous_end || site.begin >= site.end || site.end > code.bytes.size())
+      return std::unexpected("a catch-all call-site range is outside the function or out of order");
+    previous_end = site.end;
+    if (site.landing_pad != 0) {
+      if (protected_call || site.landing_pad >= code.bytes.size() ||
+          (site.landing_pad >= site.begin && site.landing_pad < site.end))
+        return std::unexpected("invalid catch-all landing pad");
+      if (site.end - site.begin != 5 || code.bytes[site.begin] != 0xe8 ||
+          !std::ranges::any_of(code.relocs, [&](const Reloc& r) {
+            return r.offset == site.begin + 1 && r.addend == -4 &&
+                   (r.kind == RelocKind::plt32 || r.kind == RelocKind::pc32);
+          }))
+        return std::unexpected("the catch-all protected range must be one relocated direct call");
+      protected_call = true;
+    }
+    uleb128(sites, site.begin);
+    uleb128(sites, site.end - site.begin);
+    uleb128(sites, site.landing_pad);
+    uleb128(sites, site.landing_pad != 0 ? 1 : 0);
+  }
+  if (!protected_call) return std::unexpected("missing catch-all protected call");
+
+  std::vector<std::uint8_t> tables{0x01};  // DW_EH_PE_uleb128 call-site encoding
+  uleb128(tables, sites.size());
+  tables.insert(tables.end(), sites.begin(), sites.end());
+  tables.insert(tables.end(), {1, 0});  // SLEB128 filter 1, no next action
+  tables.insert(tables.end(), {0, 0, 0, 0});  // null type, matches any exception
+  std::vector<std::uint8_t> lsda{0xff, 0x1b};  // omit LPStart, PC-relative sdata4 type entries
+  uleb128(lsda, tables.size());  // from the end of the offset to the end of the type table
+  lsda.insert(lsda.end(), tables.begin(), tables.end());
+  return lsda;
 }
 
 }  // namespace ycxx::x86_64

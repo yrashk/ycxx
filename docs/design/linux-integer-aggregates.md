@@ -4,10 +4,10 @@ The first slice covers fixed-prototype direct calls to ordinary free functions. 
 parameters and results can have a complete, nonempty, flat record layout of 1–16 bytes,
 with alignment up to eight. The record must be trivial for calls under DECISIONS §1.6.
 Its non-static data members have naturally aligned, non-overlapping integral scalar
-layouts. The signature check rejects records with bases, bit-fields, unions, nested
-classes or arrays, and fields requiring other ABI classes. Aggregate calls through a
-function pointer, calls with an ellipsis, and member or template functions stay outside
-this slice.
+or ordinary object-pointer layouts. The signature check rejects records with bases,
+bit-fields, unions, nested classes or arrays, and fields requiring other ABI classes.
+Aggregate calls through a function pointer, calls with an ellipsis, and member or
+template functions stay outside this slice.
 
 The front end records when a layout attribute or active packing directive makes the
 computed natural layout uncertain. The by-value ABI check rejects those shapes even
@@ -25,6 +25,12 @@ bytes occupy. Padding contributes NO_CLASS. Preserve the real little-endian byte
 offsets and bound each load or store by the object size. INTEGER results use RAX
 and RDX in eightbyte order.
 
+Astra checked the object-pointer extension against AMD64 psABI §§3.1.2 and 3.2.3.
+An immediate `TPointer` whose pointee is an object type or cv-qualified `void`
+contributes INTEGER using the target's pointer size and alignment. This includes
+pointers to incomplete classes and arrays. Fields of function-pointer, reference
+and pointer-to-member type remain [#440](https://github.com/yrashk/ycxx/issues/440) work.
+
 The signature check and lowering take the classification from the same unit-local
 class layout. The direct callee check keeps using the definition's deduced function
 type when the declaration still has a placeholder (#441). L1 keeps its by-value
@@ -36,11 +42,8 @@ the original object remain independent of the parameter.
 The entry and call lowering share AMD64 argument placement. Walk logical arguments
 left to right and reserve all of a record's INTEGER registers together. When a
 record cannot fit, pass the complete object in eightbyte stack slots and leave the
-register budget available for later arguments. List the selected register words
-first in L2 and the stack words consecutively in source order. When stack words
-exist and the register list is short, fill the intervening unused slots to match
-the scalar emitter's six-register boundary. All supported stack slots have
-eightbyte alignment. The existing frame keeps the call boundary 16-byte aligned.
+register budget available for later arguments. The [scalar floating-point ABI design](linux-scalar-floating-point.md)
+describes how L2 preserves the result of planning INTEGER and SSE locations together.
 AAPCS64 keeps its own placement and aggregate paths.
 
 Before the change, the native #231 reproducer `sum({20, 22})` reports an unsupported
@@ -51,6 +54,12 @@ field padding, mixed signed values in a 12-byte result, a fully occupied two-wor
 result, one- and two-word stack arguments, use of the remaining GPR after rollback,
 stack neighbors, and alias isolation. The existing tests cover the scalar,
 variadic and Darwin controls.
+
+The pointer-record fixtures check a one-eightbyte record, both orders of a two-eightbyte
+pointer/count record, full register exhaustion and rollback with one register available.
+They check pointer identity, pointee writes and by-value independence across the call.
+A separate native fixture passes a preformed empty list by value with the pinned libycxx
+header. Nonempty list formation continues under [#329](https://github.com/yrashk/ycxx/issues/329).
 
 Indirect and variadic ABI work continues in [#196](https://github.com/yrashk/ycxx/issues/196).
 Classes with floating-point members are tracked in

@@ -39,16 +39,27 @@ using i64 = std::int64_t;
 
 enum class Mode : u8 { constant, runtime };
 
+struct EnumRange {
+  i64 minimum;
+  u64 maximum;
+};
+
+struct EnumLayout {
+  QualType underlying;
+  std::optional<EnumRange> range;  // present for a non-fixed enumeration
+};
+
 struct Config {
   Mode mode = Mode::constant;
   u64 step_limit = u64{1} << 22;  // nodes executed
   u32 depth_limit = 512;          // nested calls ([implimits]: recursive constexpr calls)
   u32 poll_interval = 4096;       // steps between cancellation polls; 0: never
+  std::function<std::optional<EnumLayout>(EntityId)> enum_layout{};
 };
 
-// A value in a register or a cell. An integer (bool and the character types included) is held
-// normalized to its type: sign-extended from its width when signed, zero-extended otherwise. A
-// floating value is its encoding in its type's format, binary32 in the low 32 bits.
+// An integer or enumeration is held normalized to its representation type: sign-extended from
+// its width when signed, zero-extended otherwise. A floating value is its encoding in its
+// type's format, binary32 in the low 32 bits.
 enum class VKind : u8 { none, integer, null, object, function, floating };
 struct Value {
   VKind kind = VKind::none;
@@ -115,7 +126,7 @@ struct Ops;
 class Machine {
 public:
   Machine(const ast::Interners& in, const ast::Target& target, Config config)
-      : in_(&in), target_(&target), config_(config) {
+      : in_(&in), target_(&target), config_(std::move(config)) {
     paths_.push_back({0, {}});
   }
   Machine(const Machine&) = delete;
@@ -142,7 +153,7 @@ private:
   // `constant`: a global's initial value, the ConstId in `v.bits`, decoded when first read.
   enum class Fill : u8 { indeterminate, erroneous, value, constant };
   enum class Origin : u8 { automatic, global, literal };
-  enum class Use : u8 { read, write, lifetime };
+  enum class Use : u8 { read, callee_read, write, lifetime };
   enum class Kind : u8 { integer, pointer, array, function, floating, other };
 
   struct Cell {
@@ -169,6 +180,8 @@ private:
     Kind kind = Kind::other;
     u32 width = 0;  // integer; floating: 32 (binary32) or 64 (binary64)
     bool is_signed = false;
+    std::optional<ast::Builtin> integer_type;
+    std::optional<EnumRange> enum_range;
     QualType inner{};  // pointee or element; none for std::nullptr_t
     bool is_nullptr = false;
     u64 bound = 0;     // array
@@ -298,9 +311,17 @@ const Machine::Shape& Machine::shape(QualType q) {
   if (auto it = shapes_.find(key); it != shapes_.end()) return it->second;
   Shape s;
   s.is_const = (std::to_underlying(ast::cv_of(c)) & 1) != 0;
-  if (auto b = ast::builtin_of(*in_, c)) {
+  auto b = ast::builtin_of(*in_, c);
+  if (config_.enum_layout && in_->types.is<ast::TEnum>(c)) {
+    if (auto layout = config_.enum_layout(in_->types.get<ast::TEnum>(c).entity)) {
+      b = ast::builtin_of(*in_, layout->underlying);
+      s.enum_range = layout->range;
+    }
+  }
+  if (b) {
     if (ast::is_integral(*b) && ast::width_of(*target_, *b) <= 64) {
       s.kind = Kind::integer;
+      s.integer_type = b;
       s.width = ast::width_of(*target_, *b);
       s.is_signed = ast::is_signed(*target_, *b);
       s.leaves = 1;
@@ -429,7 +450,8 @@ bool Machine::fill_array_constant(QualType t, u32 cell, ConstId value) {
     return true;
   }
   case Kind::integer:
-    if (!vs.is<ast::VInt>(value) || !similar(t, vs.get<ast::VInt>(value).type)) return false;
+    if (!vs.is<ast::VInt>(value) || ast::builtin_of(*in_, vs.get<ast::VInt>(value).type) != s.integer_type)
+      return false;
     break;
   case Kind::floating:
     if (!vs.is<ast::VFloat>(value) || !similar(t, vs.get<ast::VFloat>(value).type)) return false;
@@ -490,7 +512,7 @@ Machine::Flow Machine::locate(const Value& p, std::span<const u64> extra, QualTy
   if (use == Use::lifetime) return Flow::next;
   for (u32 c = pl->cell0; c < pl->cell0 + pl->ncells; ++c) {
     Life life = cells_[c].life;
-    if (life == Life::after || (use == Use::read && life == Life::before)) return fail(Reason::outside_lifetime);
+    if (life == Life::after || (use != Use::write && life == Life::before)) return fail(Reason::outside_lifetime);
   }
   if (use == Use::write) {
     if (ob.read_only) return fail(Reason::modify_const);
@@ -501,7 +523,7 @@ Machine::Flow Machine::locate(const Value& p, std::span<const u64> extra, QualTy
   } else if (config_.mode == Mode::constant && !ob.usable) {
     return fail(Reason::not_usable);
   }
-  return note_access(*pl, use == Use::write);
+  return use == Use::callee_read ? Flow::next : note_access(*pl, use == Use::write);
 }
 
 // Records an access in the frame's open unsequenced groups, and reports a conflict with another

@@ -519,6 +519,40 @@ its `VDep*` form: non-dependent names bound, parentheses and sugar dropped. Equa
 equivalence of [temp.over.link], modulo parentheses; functional equivalence is not detected, which
 the clause makes ill-formed, no diagnostic required.
 
+**Dependent type predicates (#209, Astra).** A `VDepOp` represents `__is_same(T, U)`,
+`__is_reference(T)`, `__is_const(T)`, `__is_volatile(T)`, `__is_array(T)`, `__is_pointer(T)`,
+`__is_function(T)`, `__is_enum(T)`, `__is_union(T)`, `__is_class(T)`, `__is_member_pointer(T)`,
+`__is_member_object_pointer(T)`, `__is_member_function_pointer(T)`, or `__is_object(T)` in a `bool`
+template argument or default. Its ordered type arguments retain canonical qualification,
+reference kind and parameter positions. Substitution first forms each operand type and propagates
+failure if a type is invalid ([temp.deduct.general]). It rebuilds the operation while an operand
+remains dependent and interns the same `VInt` as an ordinary `bool` constant once all types are concrete
+([temp.alias], [temp.type]).
+The array, pointer, function and object predicates classify the substituted type
+([basic.types.general], [meta.unary.cat], [meta.unary.comp]).
+The member-pointer predicates can classify pointers with incomplete owners. The object and
+function predicates inspect the substituted member type ([dcl.mptr], [meta.unary.cat],
+[meta.unary.comp]).
+The class and union predicates use the class-key read from this unit's declaration, including
+an elaborated introduction. A class template specialization uses its primary's kind
+([temp.class.general]). The information is available before class completion. Each front-end
+analysis reconstructs it from its own token input.
+The cv predicates inspect the substituted type's top-level qualification. For an array it is
+the qualification of its innermost element, and a reference is always cv-unqualified
+([basic.type.qualifier], [dcl.ref]).
+An operand whose type uses a stand-in for an unsupported dependent construct cannot form an
+operation in a canonical position.
+Dependent array bounds using these operations, conversions to other template parameter types, and
+mangling the unresolved operations require further support under #209.
+
+A `VDepOp` for logical negation holds one canonical `bool` value operand. In a `bool` template
+argument or default, a chain of `!` over a qualified dependent `bool` variable template-id
+retains the variable template and its arguments. Substitution rebuilds the operation while
+the arguments depend on a template parameter. Once concrete, lookup supplies the selected
+specialization's declared type and initializer. A usable `bool` initializer for a nonvolatile
+`bool` specialization gives the ordinary inverted `VInt` ([expr.unary.op], [expr.const],
+[temp.arg.nontype], #209).
+
 *Reason:* `values` is interned eagerly and is fit for keys. A dependent value is a value with free
 parameters, substitution maps `ConstId` to `ConstId`, and no `NodeId` enters a type or a key.
 

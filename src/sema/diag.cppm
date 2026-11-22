@@ -41,6 +41,10 @@ enum class Diag : std::uint32_t {
   operator_arity [[=message{Severity::error, "'{0:n}' has the wrong number of parameters"}]],
   operator_needs_class [[=message{Severity::error, "'{0:n}' needs a parameter of class or enumeration type"}]],
   operator_static [[=message{Severity::error, "'{0:n}' cannot be a static member function"}]],
+  conversion_decl_type [[=message{Severity::error, "a conversion function cannot specify a separate return type"}]],
+  conversion_static [[=message{Severity::error, "a conversion function cannot be static"}]],
+  conversion_parameters [[=message{Severity::error, "a conversion function requires an empty parameter list"}]],
+  conversion_redeclared [[=message{Severity::error, "redeclaration of conversion function to '{0:t}'"}]],
   invalid_literal_operator_id [[=message{Severity::error, "a literal operator name needs an empty ordinary string and a suffix"}]],
   deprecated_literal_operator_id [[=message{Severity::warning, "a separated suffix in a literal operator name is deprecated"}]],
   literal_operator_scope [[=message{Severity::error, "a literal operator must declare a function belonging to a namespace"}]],
@@ -85,6 +89,13 @@ enum class Diag : std::uint32_t {
   binding_requires_initializer [[=message{Severity::error, "a structured binding declaration requires an initializer"}]],
   binding_unsupported_type [[=message{Severity::error, "structured bindings for initializer type '{0:t}' are not supported yet"}]],
   binding_arity [[=message{Severity::error, "structured binding declares {0} names for an array with {1} elements"}]],
+  binding_member_arity [[=message{Severity::error, "structured binding declares {0} names for class '{1:t}' with {2} non-static data members"}]],
+  binding_member_access [[=message{Severity::error, "structured binding of non-public member '{0:n}' is not supported"}]],
+  binding_bit_field [[=message{Severity::error, "structured binding of bit-field '{0:n}' is not supported yet"}]],
+  binding_tuple_unsupported [[=message{Severity::error, "tuple-like structured binding for type '{0:t}' is not supported yet"}]],
+  object_unusable_destructor [[=message{Severity::error, "object of type '{0:t}' requires a usable destructor"}]],
+  binding_unusable_destructor [[=message{Severity::error, "structured binding requires a usable destructor for '{0:t}'"}]],
+  binding_temporary_lifetime [[=message{Severity::error, "this structured binding initializer needs unsupported temporary lifetime extension"}]],
   not_captured [[=message{Severity::error, "'{0:n}' is not captured: the lambda has no capture-default"}]],
   cannot_capture [[=message{Severity::error, "'{0:n}' cannot be captured: it is not a local variable"}]],
   namespace_lambda_capture_default [[=message{Severity::error, "a namespace-scope lambda cannot have a capture-default"}]],
@@ -114,6 +125,11 @@ enum class Diag : std::uint32_t {
   member_pointer_owner [[=message{Severity::error, "a pointer-to-member declarator must name a class"}]],
   member_pointer_type [[=message{Severity::error, "cannot form a pointer to a member of type '{0:t}'"}]],
   member_pointer_values [[=message{Severity::error, "this use of a pointer-to-member value is not supported yet"}]],
+  member_pointer_operand [[=message{Severity::error, "right operand of '{0:k}' must be a pointer to member, but has type '{1:t}'"}]],
+  member_pointer_object [[=message{Severity::error, "left operand of '.*' must be a class object, but has type '{0:t}'"}]],
+  member_pointer_arrow_object [[=message{Severity::error, "left operand of '->*' must be a pointer to a class, but has type '{0:t}'"}]],
+  member_pointer_wrong_class [[=message{Severity::error, "pointer to member of '{0:t}' cannot be applied to an object of type '{1:t}'"}]],
+  member_pointer_protected [[=message{Severity::error, "forming a pointer to protected member '{0:n}' requires a qualifier naming the class granting access"}]],
   pointer_to_reference [[=message{Severity::error, "cannot form a pointer to a reference type '{0:t}'"}]],
   indirection_to_qualified_function [[=message{Severity::error, "cannot form a pointer or reference to qualified function type '{0:t}'"}]],
   noexcept_narrowing [[=message{Severity::error, "narrowing conversion from '{0:t}' to 'bool' in a noexcept-specifier"}]],
@@ -123,6 +139,8 @@ enum class Diag : std::uint32_t {
   new_const_uninitialized [[=message{Severity::error, "new of const type '{0:t}' requires an initializer"}]],
   delete_requires_pointer [[=message{Severity::error, "cannot delete an expression of type '{0:t}'; a pointer to object is required"}]],
   allocation_declaration [[=message{Severity::error, "unsupported declaration of '{0:n}'; expected an ordinary global allocation or deallocation function"}]],
+  negative_new_bound [[=message{Severity::error, "array new bound is negative"}]],
+  oversized_new_bound [[=message{Severity::error, "array new bound exceeds the maximum allocation size"}]],
   const_uninitialized [[=message{Severity::error, "const variable '{0:n}' must be initialized"}]],
   redefinition [[=message{Severity::error, "redefinition of '{0:n}'"}]],
   default_arg_redefined [[=message{Severity::error, "redefinition of a default argument"}]],
@@ -195,10 +213,15 @@ enum class Diag : std::uint32_t {
   condition_specifier [[=message{Severity::error, "'{0:k}' is not allowed in a condition"}]],
   condition_declarator [[=message{Severity::error, "a condition cannot declare a function or an array"}]],
   // [class], [class.mem], [expr.ref], [dcl.init.aggr], [dcl.init.list]
+  catch_all_not_last [[=message{Severity::error, "catch (...) must be the last handler"}]],
+  invalid_exception_declaration [[=message{Severity::error, "invalid exception declaration"}]],
+  invalid_handler_type [[=message{Severity::error, "invalid exception handler type '{0:t}'"}]],
+  throw_class_unsupported [[=message{Severity::error, "constructing a class exception object of type '{0:t}' is not supported yet"}]],
   incomplete_type [[=message{Severity::error, "'{0:t}' is an incomplete type"}]],
   no_member [[=message{Severity::error, "no member named '{0:n}' in '{1:t}'"}]],
   // [class.derived], [class.mi]
   base_not_class [[=message{Severity::error, "a base must be a class; '{0:t}' is not one"}]],
+  base_substitution [[=message{Severity::error, "substitution could not form the base type '{0:t}'"}]],
   duplicate_base [[=message{Severity::error, "base class '{0:t}' named more than once"}]],
   union_with_base [[=message{Severity::error, "a union cannot have base classes"}]],
   ambiguous_base [[=message{Severity::error, "'{0:t}' is an ambiguous base of '{1:t}'"}]],
@@ -216,6 +239,8 @@ enum class Diag : std::uint32_t {
   bad_designator [[=message{Severity::error, "designator '{0:n}' does not name a later member of '{1:t}'"}]],
   not_a_type [[=message{Severity::error, "'{0:n}' does not name a class"}]],
   const_member_assign [[=message{Severity::error, "'{0:t}' has a const member, so its copy assignment is deleted"}]],
+  unsupported_copy_assignment [[=message{Severity::error, "defaulted copy assignment of '{0:t}' is unsupported for this operation"}]],
+  defaulted_copy_assignment_declaration [[=message{Severity::error, "defaulted copy assignment does not match a supported copy assignment declaration"}]],
   mixed_designators [[=message{Severity::error, "either every initializer clause is designated or none is"}]],
   unknown_bound_member [[=message{Severity::error, "a non-static data member cannot be an array of unknown bound"}]],
   class_redefinition [[=message{Severity::error, "redefinition of class '{0:n}'"}]],
@@ -227,8 +252,18 @@ enum class Diag : std::uint32_t {
   ambiguous_call [[=message{Severity::error, "call to '{0:n}' is ambiguous"}]],
   deleted_function [[=message{Severity::error, "'{0:n}' is a deleted function"}]],
   no_viable_constructor [[=message{Severity::error, "no matching constructor for '{0:t}'"}]],
+  delegating_initializer_not_alone [[=message{Severity::error, "a delegating constructor must have a sole initializer"}]],
+  delegating_constructor_cycle [[=message{Severity::error, "a constructor cannot delegate to itself"}]],
+  delegating_copy_unsupported [[=message{Severity::error, "delegation to an implicit or defaulted copy constructor is not supported yet"}]],
   ambiguous_constructor [[=message{Severity::error, "constructing '{0:t}' is ambiguous"}]],
   deleted_constructor [[=message{Severity::error, "constructing '{0:t}' calls a deleted constructor"}]],
+  base_unusable_destructor [[=message{Severity::error, "initializing base class '{0:t}' requires a usable destructor"}]],
+  return_unusable_destructor [[=message{Severity::error, "returning '{0:t}' requires a usable destructor"}]],
+  base_initializer_list_constructor [[=message{Severity::error, "initializer-list constructor overloads for a polymorphic base are not supported yet"}]],
+  defaulted_copy_declaration [[=message{Severity::error, "only an ordinary in-class copy constructor taking C& or const C& can be explicitly defaulted here"}]],
+  defaulted_copy_unsupported [[=message{Severity::error, "defaulted copy construction of '{0:t}' is not supported for this class"}]],
+  defaulted_default_constructor [[=message{Severity::error, "an explicitly defaulted default constructor is not supported for this class"}]],
+  defaulted_default_delegation [[=message{Severity::error, "delegation to an explicitly defaulted default constructor is not supported yet"}]],
   reference_uninitialized [[=message{Severity::error, "a reference must be initialized"}]],
   bind_to_lvalue [[=message{Severity::error, "an rvalue reference to '{0:t}' cannot bind to an lvalue"}]],
   bind_to_rvalue [[=message{Severity::error, "a non-const lvalue reference to '{0:t}' cannot bind to a temporary"}]],
@@ -243,7 +278,27 @@ enum class Diag : std::uint32_t {
   not_a_namespace [[=message{Severity::error, "'{0:n}' is not a namespace or class"}]],
   static_outside_class [[=message{Severity::error, "'static' can only be specified inside the class definition"}]],
   static_constructor [[=message{Severity::error, "a constructor cannot be 'static'"}]],
+  virtual_placement [[=message{Severity::error, "'virtual' is only allowed on the first declaration of a non-static member function"}]],
+  virtual_constructor [[=message{Severity::error, "a constructor cannot be 'virtual'"}]],
+  virtual_member_template [[=message{Severity::error, "a member function template cannot be 'virtual'"}]],
+  virtual_union_member [[=message{Severity::error, "a union cannot have a virtual member function"}]],
+  virtual_placeholder_return [[=message{Severity::error, "a virtual function cannot have a deduced return type"}]],
+  virtual_constraints [[=message{Severity::error, "a virtual function cannot have a requires clause"}]],
+  override_without_base [[=message{Severity::error, "'override' requires a matching virtual function in a base class"}]],
+  duplicate_override [[=message{Severity::error, "duplicate 'override' specifier"}]],
+  virtual_override_return [[=message{Severity::error, "the return type differs from the overridden function (covariant returns are not supported yet)"}]],
+  virtual_override_noexcept [[=message{Severity::error, "the overriding function must have a non-throwing exception specification"}]],
+  virtual_destructor_noexcept [[=message{Severity::error, "the exception specification of the overriding destructor is not supported yet"}]],
+  virtual_unusable_destructor [[=message{Severity::error, "the overriding destructor or a subobject destructor is unusable or unsupported"}]],
+  ref_qualified_operator_candidates [[=message{Severity::error, "ranking a ref-qualified member operator against a nonmember operator is not supported yet"}]],
+  virtual_ref_call [[=message{Severity::error, "a call involving a ref-qualified virtual function is not supported yet"}]],
+  virtual_layout [[=message{Severity::error, "object layout requiring virtual function support is not supported yet: {0:t}"}]],
+  virtual_base_class [[=message{Severity::error, "a base class with virtual member functions is not supported yet: {0:t}"}]],
+  virtual_definition [[=message{Severity::error, "an out-of-class definition of a virtual member function is not supported yet"}]],
+  virtual_call [[=message{Severity::error, "a call to a virtual member function is not supported yet"}]],
   qualified_constructor [[=message{Severity::error, "a constructor cannot have a cv- or ref-qualifier"}]],
+  explicit_constructor_placement [[=message{Severity::error, "'explicit' is only allowed on a constructor declaration within its class"}]],
+  copy_list_explicit_constructor [[=message{Severity::error, "copy-list-initialization of '{0:t}' selects an explicit constructor"}]],
   constructor_namespace [[=message{Severity::error, "constructor definition is outside a namespace enclosing its class"}]],
   no_member_declared [[=message{Severity::error, "'{1:t}' declares no member '{0:n}' with this type"}]],
   cv_on_non_member [[=message{Severity::error, "only a non-static member function can have a cv-qualifier"}]],
@@ -256,6 +311,7 @@ enum class Diag : std::uint32_t {
   nested_too_deeply [[=message{Severity::error, "nested too deeply to analyse: half of the stack is in use"}]],
   default_not_last [[=message{Severity::error, "a template parameter after one with a default argument needs a default argument too"}]],
   default_redefined [[=message{Severity::error, "a template parameter's default argument is given again"}]],
+  mutable_placement [[=message{Severity::error, "'mutable' requires a non-static data member of non-const, non-reference type"}]],
   member_of_function_type [[=message{Severity::error, "a data member cannot have function type '{0:t}'"}]],
   no_template_matches [[=message{Severity::error, "no template named '{0:n}' has this specialization"}]],
   ambiguous_specialization [[=message{Severity::error, "the specialization of '{0:n}' is ambiguous"}]],
@@ -285,14 +341,47 @@ enum class Diag : std::uint32_t {
   offsetof_member [[=message{Severity::error, "offsetof requires a direct non-static data member named '{0:n}' in '{1:t}'"}]],
   offsetof_bit_field [[=message{Severity::error, "offsetof cannot be applied to a bit-field"}]],
   offsetof_layout [[=message{Severity::error, "offsetof requires an ordinary standard-layout class with supported layout; '{0:t}' is not one"}]],
-  nested_enum_declarator_unsupported [[=message{Severity::error, "member declarators after a nested enum definition are not supported yet"}]],
   // A GNU built-in function the SDK's or libycxx's headers use and ycxx does not have yet
   // (docs/EXTENSIONS.md), named where lookup finds nothing else.
   builtin_unsupported [[=message{Severity::error, "built-in function '{0:n}' is not supported yet"}]],
   builtin_nan_string [[=message{Severity::error, "the argument of __builtin_nan must be a string literal spelling an integer"}]],
   va_start_context [[=message{Severity::error, "va_start requires an enclosing variadic function"}]],
   va_list_operand [[=message{Severity::error, "expected a mutable va_list cursor, got '{0:t}'"}]],
-  va_arg_type [[=message{Severity::error, "va_arg type '{0:t}' is outside the supported x86-64 System V integer and pointer subset"}]],
+  va_arg_type [[=message{Severity::error, "va_arg type '{0:t}' is outside the supported x86-64 System V integer, pointer and double subset"}]],
+  friend_c_linkage [[=message{Severity::error, "C-linkage friend function definitions are not supported yet"}]],
+  trivial_copyability_dependent [[=message{Severity::error, "dependent operands of '__is_trivially_copyable' are not supported yet"}]],
+  trivial_copyability_incomplete [[=message{Severity::error, "incomplete class type '{0:t}' cannot be queried by '__is_trivially_copyable'"}]],
+  trivial_copyability_unsupported [[=message{Severity::error, "trivial copyability of '{0:t}' is not supported yet"}]],
+  constructibility_dependent [[=message{Severity::error, "dependent operands of '{0:n}' are not supported yet"}]],
+  constructibility_incomplete [[=message{Severity::error, "incomplete type '{0:t}' cannot be queried by '{1:n}'"}]],
+  constructibility_unsupported [[=message{Severity::error, "constructibility of '{0:t}' with these argument types is not supported yet"}]],
+  constructibility_pack [[=message{Severity::error, "pack expansions in '{0:n}' are not supported yet"}]],
+  class_alignment_not_constant [[=message{Severity::error, "a class alignment requires an integral constant expression or a type"}]],
+  class_alignment_invalid [[=message{Severity::error, "a class alignment must be zero or a positive power of two"}]],
+  class_alignment_unsupported [[=message{Severity::error, "class alignment greater than 16 bytes is not supported yet"}]],
+  class_alignment_weak [[=message{Severity::error, "the requested alignment is weaker than the class's natural alignment"}]],
+  class_alignment_mismatch [[=message{Severity::error, "the class is redeclared with a different alignment requirement"}]],
+  class_alignment_missing [[=message{Severity::error, "the class definition must specify alignment when a declaration specifies it"}]],
+  class_alignment_uncertain_layout [[=message{Severity::error, "class alignment depends on attributes or packing whose layout is not supported yet"}]],
+  constructibility_target_pack [[=message{Severity::error, "a pack expansion as the target of '{0:n}' is not supported yet"}]],
+  constructibility_substitution [[=message{Severity::error, "substitution of the operand type '{0:t}' in '{1:n}' failed"}]],
+  recursive_default_member_initializer [[=message{Severity::error, "default member initializer for '{0:n}' would use itself"}]],
+  default_member_initializer_cleanup [[=message{Severity::error, "default member initializer requiring cleanup is not supported yet"}]],
+  nothrow_constructibility_unsupported [[=message{Severity::error, "'__is_nothrow_constructible' for '{0:t}' with these argument types is not supported yet"}]],
+  trivial_constructibility_unsupported [[=message{Severity::error, "'__is_trivially_constructible' for '{0:t}' with these argument types is not supported yet"}]],
+  assignability_dependent [[=message{Severity::error, "dependent operands of '{0:n}' are not supported yet"}]],
+  assignability_unsupported [[=message{Severity::error, "'{0:n}' for '{1:t}' and '{2:t}' is not supported yet"}]],
+  convertibility_dependent [[=message{Severity::error, "dependent operands of '{0:n}' are not supported yet"}]],
+  convertibility_unsupported [[=message{Severity::error, "'{0:n}' for '{1:t}' and '{2:t}' is not supported yet"}]],
+  base_of_dependent [[=message{Severity::error, "dependent operands of '__is_base_of' are not supported yet"}]],
+  base_of_incomplete [[=message{Severity::error, "incomplete derived class type '{0:t}' cannot be queried by '__is_base_of'"}]],
+  base_of_unsupported [[=message{Severity::error, "'__is_base_of' for '{0:t}' and '{1:t}' is not supported yet"}]],
+  empty_incomplete [[=message{Severity::error, "incomplete class type '{0:t}' cannot be queried by '__is_empty'"}]],
+  empty_unsupported [[=message{Severity::error, "'__is_empty' for '{0:t}' is not supported yet"}]],
+  convertibility_incomplete [[=message{Severity::error, "incomplete type '{0:t}' cannot be queried by '{1:n}'"}]],
+  destructibility_dependent [[=message{Severity::error, "dependent operands of '{0:n}' are not supported yet"}]],
+  destructibility_incomplete [[=message{Severity::error, "incomplete class type '{0:t}' cannot be queried by '{1:n}'"}]],
+  destructibility_unsupported [[=message{Severity::error, "'{0:n}' for '{1:t}' is not supported yet"}]],
 };
 
 // A `{N:r}` argument: why an evaluation was not constant. 0 is an expression the front end
@@ -352,12 +441,26 @@ constexpr bool is_limit(engine::DiagId id) {
   message m = message_of(*d);
   return std::string_view(m.text).contains("not supported");
 }
+constexpr bool is_type_trait_failure(engine::DiagId id) {
+  return id == diag_id(Diag::trivial_copyability_incomplete) || id == diag_id(Diag::trivial_copyability_unsupported) ||
+         id == diag_id(Diag::constructibility_incomplete) || id == diag_id(Diag::constructibility_unsupported) ||
+         id == diag_id(Diag::nothrow_constructibility_unsupported) ||
+         id == diag_id(Diag::trivial_constructibility_unsupported) || id == diag_id(Diag::assignability_unsupported) ||
+         id == diag_id(Diag::convertibility_unsupported) || id == diag_id(Diag::base_of_incomplete) ||
+         id == diag_id(Diag::base_of_unsupported) || id == diag_id(Diag::empty_incomplete) ||
+         id == diag_id(Diag::empty_unsupported) || id == diag_id(Diag::convertibility_incomplete) ||
+         id == diag_id(Diag::destructibility_incomplete) || id == diag_id(Diag::destructibility_unsupported);
+}
 // Whether a diagnostic stays an error where a substitution failure means "not satisfied": a limit
 // of ycxx's, an atomic constraint that is not a `bool` constant ([temp.constr.atomic]/3), or a
-// return-type-requirement that names no concept, ill-formed whatever the arguments.
+// return-type-requirement that names no concept, ill-formed whatever the arguments. An incomplete
+// operand outside a type trait's domain also stays an error.
 constexpr bool survives_substitution(engine::DiagId id) {
   return is_limit(id) || id == diag_id(Diag::constraint_not_bool) || id == diag_id(Diag::constraint_not_constant) ||
-         id == diag_id(Diag::not_a_concept);
+         id == diag_id(Diag::not_a_concept) || id == diag_id(Diag::trivial_copyability_incomplete) ||
+         id == diag_id(Diag::constructibility_incomplete) || id == diag_id(Diag::base_of_incomplete) ||
+         id == diag_id(Diag::empty_incomplete) || id == diag_id(Diag::convertibility_incomplete) ||
+         id == diag_id(Diag::destructibility_incomplete);
 }
 
 constexpr std::string_view diag_name(Diag d) {

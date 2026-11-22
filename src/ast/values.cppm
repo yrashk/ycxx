@@ -11,6 +11,7 @@ export module ycxx.ast.values;
 
 import std;
 import ycxx.ast.handles;
+import ycxx.ast.records;
 import ycxx.ast.schema;
 
 export namespace ycxx::ast {
@@ -70,6 +71,14 @@ struct VFloat {
 
 struct VNullptr {};
 
+// A pointer to a data member ([expr.unary.op], [conv.mem]). The field uses declaration order in
+// the owning class. The absent field denotes the null member pointer value.
+struct VMemberPtr {
+  static constexpr u32 null_field = ~u32{0};
+  QualType type;
+  u32 field = null_field;
+};
+
 // A string literal object ([lex.string]): its array type and its code units, the terminating
 // null included. String literals are identified by content, not by an entity (§3.7.9).
 struct VString {
@@ -112,6 +121,36 @@ struct [[=dependent]] VDepFnParam {
   u16 index;
 };
 
+// A namespace variable template found at the point of definition, with dependent arguments.
+struct [[=dependent]] VDepVariable {
+  EntityId templ;
+  SeqId<TemplateArg> args;
+};
+
+enum class DepOp : u8 {
+  is_same, is_reference, is_const, is_volatile, is_array, is_pointer, is_function,
+  is_enum, is_union, is_class,
+  is_member_pointer, is_member_object_pointer, is_member_function_pointer,
+  is_object, logical_not, is_trivially_copyable,
+  is_constructible, is_nothrow_constructible, is_trivially_constructible,
+  is_assignable, is_nothrow_assignable, is_trivially_assignable,
+  is_convertible, is_nothrow_convertible,
+  is_base_of,
+  is_empty,
+  is_destructible,
+  is_nothrow_destructible,
+  is_trivially_destructible,
+};
+
+// A dependent operation (§5.5). The predicates take canonical qualified type operands.
+// The constructibility predicates take a target and an argument sequence,
+// `is_same`, `is_base_of`, assignability and convertibility take two operands. The other predicates take one.
+// `logical_not` takes one bool value operand.
+struct [[=dependent]] VDepOp {
+  DepOp op;
+  SeqId<TemplateArg> operands;
+};
+
 // A non-type pack expansion `pattern...` ([temp.variadic]), an element of a dependent pack argument.
 struct [[=dependent]] VDepExpansion {
   ConstId pattern;
@@ -133,9 +172,14 @@ struct VType {
   u8 cv;
 };
 
+// A pack occupies one parameter slot in an atomic constraint's mapping.
+struct VConstraintPack {
+  SeqId<ConstId> elements;
+};
+
 // An atomic constraint ([temp.constr.atomic]): the appearance of its expression (the item that
 // contains it, and its tokens [begin, end) in that item's declaration part), and its parameter
-// mapping: one entry per parameter of the head at `depth`, a `VType` or a value for a parameter the
+// mapping: one entry per parameter of the head at `depth`, a type, pack or value for a parameter the
 // expression names and none for the others ([temp.constr.atomic]/1). Two are identical when they
 // are one value ([temp.constr.atomic]/2). `calls` are the offsets, from `begin`, of its unqualified
 // calls that were dependent where it appears: checking it adds argument-dependent lookup at the
@@ -159,7 +203,7 @@ struct VConstraint {
 };
 
 using ValueKinds = closed_list<VInt, VFloat, VNullptr, VString, VLvalue, VEntity, VAggregate, VDepParam, VDepFnParam, VDepExpansion,
-                               VDepSizeofPack, VType, VAtom, VConstraint>;
+                               VDepSizeofPack, VType, VAtom, VConstraint, VDepOp, VMemberPtr, VDepVariable, VConstraintPack>;
 
 template <class T>
 constexpr bool is_value_kind = ValueKinds::contains<T>;

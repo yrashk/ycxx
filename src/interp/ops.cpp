@@ -111,8 +111,16 @@ struct Ops {
     const M::Shape* s;
     if (Flow fl = m.int_shape(f, m.result_type(f, n), s); fl != Flow::next) return fl;
     if (a.kind != VKind::integer) return m.fail(Reason::ill_formed);
+    // [expr.static.cast]/8 checks the original value when there is no fixed underlying type.
+    if (s->enum_range && constant(m)) {
+      const M::Shape* from;
+      if (Flow fl = m.int_shape(f, m.type_of(f, f.fn->operands_of(n)[0]), from); fl != Flow::next) return fl;
+      auto [minimum, maximum] = *s->enum_range;
+      if (from->is_signed && i64(a.bits) < 0 ? i64(a.bits) < minimum : a.bits > maximum)
+        return m.fail(Reason::enum_range);
+    }
     // To bool it is the boolean conversion ([conv.integral]/1 defers to [conv.bool]).
-    if (ast::builtin_of(*m.in_, m.result_type(f, n)) == ast::Builtin::bool_) return m.set(f, n, Value::integer(a.bits != 0));
+    if (s->integer_type == ast::Builtin::bool_) return m.set(f, n, Value::integer(a.bits != 0));
     return m.set(f, n, Value::integer(M::norm(a.bits, s->width, s->is_signed)));
   }
   static Flow fconv(M& m, Frame& f, N n) { return m.float_convert(f, n); }
@@ -296,12 +304,24 @@ struct Ops {
     return Flow::next;
   }
 
+  static Flow obj__reuse(M& m, Frame&, N n) { return m.unsupported(n); }
   static Flow union__activate(M& m, Frame&, N n) { return m.unsupported(n); }
+
+  static Flow nullptr_value(M& m, Frame& f, N n) {
+    QualType t = m.result_type(f, n);
+    M::Place pl;
+    if (!m.shape(t).is_nullptr) return m.fail(Reason::ill_formed);
+    if (Flow fl = m.locate(m.operand(f, n, 1), {}, t, M::Use::lifetime, false, pl); fl != Flow::next) return fl;
+    // [expr.const.core] excludes conversion of an indeterminate object even for nullptr_t.
+    if (constant(m) && m.cells_[pl.cell0].fill == M::Fill::indeterminate) return m.fail(Reason::read_indeterminate);
+    return m.set(f, n, Value::null());
+  }
 
   static Flow load(M& m, Frame& f, N n) {
     QualType t = imm_type(f, n);
     M::Place pl;
-    if (Flow fl = m.locate(m.operand(f, n, 1), imm_path(f, n, 1), t, M::Use::read, has(f, n, ir::Flag::volatile_), pl);
+    M::Use use = has(f, n, ir::Flag::call_body) ? M::Use::callee_read : M::Use::read;
+    if (Flow fl = m.locate(m.operand(f, n, 1), imm_path(f, n, 1), t, use, has(f, n, ir::Flag::volatile_), pl);
         fl != Flow::next)
       return fl;
     if (pl.ncells != 1 || m.shape(t).kind == M::Kind::array) return m.unsupported(n);
@@ -478,6 +498,7 @@ struct Ops {
   }
 
   static Flow unreachable(M& m, Frame& f, N n) {
+    if (has(f, n, ir::Flag::explicit_trap)) return m.fail(Reason::explicit_trap);
     return m.fail(has(f, n, ir::Flag::not_constexpr) ? Reason::static_definition : Reason::unreachable);
   }
   static Flow invoke(M& m, Frame&, N n) { return m.unsupported(n); }

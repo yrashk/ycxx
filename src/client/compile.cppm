@@ -11,6 +11,7 @@ import ycxx.pipeline;
 import ycxx.engine;
 import ycxx.pp;
 import ycxx.ast.target;
+import :host_target;
 
 export namespace ycxx::compile {
 
@@ -155,6 +156,7 @@ bool is_shared_object(std::string_view f) {
 // Parses the arguments, or says why it cannot.
 std::expected<Options, std::string> parse_options(std::span<const std::string_view> args) {
   Options o;
+  o.pp.target = default_target;
   std::vector<std::string_view> other_inputs;
   using Kind = pipeline::LinkOperand::Kind;
   const auto add_operand = [&](Kind kind, std::vector<std::string>& paths, std::string_view path) {
@@ -215,6 +217,8 @@ std::expected<Options, std::string> parse_options(std::span<const std::string_vi
     else if (is_source(a)) add_operand(Kind::source, o.sources, a);
     else other_inputs.push_back(a);
   }
+  if (!o.pp.target)
+    return std::unexpected("no default target for this build. Use '--target=x86_64-pc-linux-gnu' or '--target=arm64-apple-darwin'");
   const bool linux_link = o.pp.target == &ast::x86_64_linux && o.stop == Options::Stop::link;
   if (o.interpreter && !linux_link)
     return std::unexpected("'--dynamic-linker' requires an x86-64 Linux executable link");

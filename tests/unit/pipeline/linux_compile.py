@@ -85,10 +85,9 @@ def external_data_addresses(compile, target, source_dir, scope, cold, cc, readel
     run(['./interposer'], scope, cold)
 
 
-def integer_aggregate_calls(compile, target, source_dir, scope, cold, cc):
-    sources = source_dir / 'linux_integer_aggregates'
-    for part in ('provider', 'client'):
-        source = sources / f'{part}.cpp'
+def integer_aggregate_calls(compile, target, sources, scope, cold, cc, provider, client):
+    for part, name in (('provider', provider), ('client', client)):
+        source = sources / f'{name}.cpp'
         compile(target, '-c', source, '-o', f'aggregate-{part}.o')
         run([cc, '-std=c++26', '-O2', '-fno-pie', '-c', source, '-o', f'host-{part}.o'], scope, cold)
     compile(target, '-nostdlib', 'aggregate-provider.o', 'aggregate-client.o', '-o', 'aggregate-native')
@@ -99,9 +98,11 @@ def integer_aggregate_calls(compile, target, source_dir, scope, cold, cc):
 
 
 def main():
-    ycxx, cc, readelf, ar = sys.argv[1:]
+    ycxx, cc, readelf, ar, libycxx_source = sys.argv[1:]
     source_dir = Path(__file__).resolve().parent
+    libycxx = Path(libycxx_source)
     target = '--target=x86_64-pc-linux-gnu'
+    darwin = '--target=arm64-apple-darwin'
     with tempfile.TemporaryDirectory(prefix='ycxx-linux-') as temp, tempfile.TemporaryDirectory(prefix='yd-') as runtime:
         scope = Path(temp)
         (scope / '.ycxx').touch()
@@ -224,10 +225,10 @@ system_leaf:
             run(['./bool_abi'], scope, cold)
 
         external_data_addresses(compile, target, source_dir, scope, cold, cc, readelf, ar)
-        compile('-c', 'source.cpp', '-o', 'cold-darwin.o')
+        compile(darwin, '-c', 'source.cpp', '-o', 'cold-darwin.o')
         try:
             compile(target, '-c', 'source.cpp', '-o', 'warm-first-linux.o', env=daemon)
-            compile('-c', 'source.cpp', '-o', 'warm-darwin.o', env=daemon)
+            compile(darwin, '-c', 'source.cpp', '-o', 'warm-darwin.o', env=daemon)
             compile('--target', 'x86_64-linux-gnu', '-c', 'source.cpp', '-o', 'warm-linux.o', env=daemon)
             elf = (scope / 'source.o').read_bytes()
             macho = (scope / 'cold-darwin.o').read_bytes()
@@ -248,7 +249,21 @@ system_leaf:
             source = source_dir / 'deduced-results' / f'{name}.cpp'
             compile(target, '-nostdlib', source, '-o', name)
             run([f'./{name}'], scope, cold)
-        integer_aggregate_calls(compile, target, source_dir, scope, cold, cc)
+        aggregates = source_dir / 'linux_integer_aggregates'
+        integer_aggregate_calls(compile, target, aggregates, scope, cold, cc, 'provider', 'client')
+        integer_aggregate_calls(compile, target, aggregates, scope, cold, cc,
+                                'pointer-aggregate-peer', 'pointer-aggregate-main')
+        compile(target, '-isystem', libycxx / 'include', '-nostdlib',
+                aggregates / 'pointer-aggregate-empty-list.cpp', libycxx / 'src/runtime/linkage/static.cpp',
+                '-o', 'aggregate-empty-list')
+        run(['./aggregate-empty-list'], scope, cold)
+        initializer_lists = source_dir / 'linux_initializer_list'
+        compile(target, '-isystem', libycxx / 'include', '-nostdlib',
+                initializer_lists / 'direct-reference.cpp', libycxx / 'src/runtime/linkage/static.cpp',
+                '-o', 'initializer-list-reference')
+        run(['./initializer-list-reference'], scope, cold)
+        compile(target, '-isystem', libycxx / 'include', '-fsyntax-only', initializer_lists / 'narrowing.cpp',
+                error="narrowing conversion from 'double' to 'int'")
         (scope / 'packing.cpp').write_text(
             '#pragma pack(push, 1)\n'
             'struct Capped { char a; int b; };\n'
@@ -270,10 +285,9 @@ system_leaf:
         assert '#pragma pack' in compile(target, '-E', 'packing.cpp')
         aggregate_parameter = 'unsupported aggregate parameter layout'
         aggregate_result = 'unsupported aggregate result layout'
+        indirect_floating = 'floating-point parameters and results of indirect calls are unsupported'
         cases = (
-            ('double f(double x) { return x; }', results),
-            ('long double f(long double x) { return x; }', results),
-            ('auto f() { return 1.0; }', results),
+            ('long double f(long double x) { return x; }', 'x87 long double parameters and results are unsupported'),
             ('struct X { double x; }; auto f() { return X{1.0}; }', aggregate_result),
             ('struct X { long a, b, c; }; int f(X) { return 1; }', aggregate_parameter),
             ('struct X {}; int f(X) { return 1; }', aggregate_parameter),
@@ -319,25 +333,22 @@ system_leaf:
             ('struct X { int a; }; int f(int (*g)(X)) { return g(X{1}); }', f'call: {parameters}'),
             ('struct X { int a; }; int f(X (*g)()) { X x = g(); return x.a; }', f'call: {results}'),
             ('struct X { int a; }; struct B { static int g(X); }; int f() { return B::g(X{1}); }',
-             f'call: {parameters}'),
-            ('int f(double, ...) { return 1; }', parameters),
-            ('double f(int, ...) { return 1.0; }', results),
+             'call: unsupported fixed-prototype parameter type'),
+            ('int f(long double, ...) { return 1; }', 'x87 long double parameters and results are unsupported'),
             ('struct X { int x; }; int f(X, ...) { return 1; }', parameters),
-            ('int f(int (*g)(double, ...)) { return g(1.0); }', f'call: {parameters}'),
-            ('int f(double (*g)(int, ...)) { return g(1) > 0.0; }', f'call: {results}'),
+            ('int f(int (*g)(double, ...)) { return g(1.0); }', f'call: {indirect_floating}'),
+            ('int f(double (*g)(int, ...)) { return g(1) > 0.0; }', f'call: {indirect_floating}'),
             ('int f(int (*g)(int, ...)) { return g(1, 0.75); }',
-             'call: only 32- and 64-bit integer and pointer ellipsis arguments'),
+             'call: floating-point ellipsis arguments are unsupported'),
             ('struct X { int x; }; int f(int (*g)(X, ...)) { return g(X{1}); }', f'call: {parameters}'),
             ('struct X { int x; }; int f(int (*g)(int, ...), X x) { return g(2, x); }',
              'call: only 32- and 64-bit integer and pointer ellipsis arguments'),
-            ('int g(double, ...); int f() { return g(1.0); }', f'call: {parameters}'),
-            ('double g(int, ...); int f() { return g(1); }', f'call: {results}'),
-            ('int g(int, ...); int f() { return g(1, 1.0f); }',
-             'call: only 32- and 64-bit integer and pointer ellipsis arguments'),
+            ('int g(int, ...); int f(long double& x) { return g(1, x); }',
+             'call: x87 long double ellipsis arguments are unsupported'),
             ('struct X { int x; }; int g(X, ...); int f() { return g(X{1}); }',
-             f'call: {parameters}'),
+             'call: unsupported direct variadic parameter type'),
             ('struct X { int x; }; int g(int, ...); int f() { X x{1}; return g(1, x); }',
-             'call: only 32- and 64-bit integer and pointer ellipsis arguments'),
+             'call: only double, 32- and 64-bit integer, and pointer ellipsis arguments'),
         )
         for source, error in cases:
             (scope / 'unsupported.cpp').write_text(source + '\n')

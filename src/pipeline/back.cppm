@@ -103,7 +103,15 @@ struct Entity {
   EntityId local_function = EntityId::none;
   std::uint32_t discriminator = 0;
   bool guard = false;
+  // The mangled parameter types tie this ordinary C++ function to the unit (#582).
+  bool local_parameter_binding = false;
+  bool hidden_elf = false;
+
+  bool has_local_binding() const { return linkage == ast::Linkage::internal || local_parameter_binding; }
 };
+
+// Certified on the typed definition, before IR drops lifetime information.
+enum class UnwindEligibility : std::uint8_t { none, cleanup_free, cleanup_free_with_throw, hosted_catch_all };
 
 // A function definition: what `function_ir(F)` reads (irgen::FunctionInput, without a thunk's
 // locals).
@@ -119,6 +127,8 @@ struct FunctionDef {
   std::vector<irgen::FunctionInput::StaticGuard> guards{};
   EntityId guard_acquire = EntityId::none, guard_release = EntityId::none, atexit = EntityId::none, dso = EntityId::none;
   bool weak_elf = false;  // an ordinary external inline definition in the GNU ELF subset (#422)
+  UnwindEligibility unwind = UnwindEligibility::none;
+  EntityId catch_all_callee = EntityId::none;  // for the complete-unit exception-specification check
 };
 
 // A variable definition at namespace scope with its constant initializer, or `ConstId::none` for
@@ -142,11 +152,16 @@ struct ClassShape {
   std::vector<EntityId> bases;  // its direct base classes, in declaration order
   bool union_ = false;  // every member at offset 0 ([class.union]/2)
   bool pod = true;      // POD for layout (`ast::record_layout`)
+  std::uint8_t explicit_alignment = 0;
   // Trivially copyable for calls ([class.temporary]/3): no non-trivial copy constructor or
   // destructor, and the copy not deleted, so the calling convention may pass it in registers.
   bool trivial_calls = true;
   std::vector<std::uint8_t> bit_widths{};  // parallel to fields, empty for ordinary records
   bool layout_uncertain = false;  // source packing or alignment that native layout does not apply
+  bool copy_abi_unknown = false;   // no ABI classification for this defaulted copy
+  bool layout_requires_virtual_support = false;
+  bool has_mutable_field = false;
+  sema::PeerVirtualLayout peer_virtual_layout = sema::PeerVirtualLayout::none;
 };
 struct EnumShape {
   EntityId entity = EntityId::none;
@@ -169,6 +184,10 @@ struct TranslationUnit {
   std::vector<std::pair<EntityId, EntityId>> init_functions;
   std::optional<ast::Loc> namespace_destruction;  // first variable whose destructor runs at exit
   bool front_failed = false;           // the front end reported errors: nothing to compile
+  bool virtual_emission_blocked = false;
+  std::optional<ast::Loc> virtual_declaration;
+  std::optional<ir::IntThrowRuntime> int_throw;
+  std::optional<ir::CatchAllRuntime> catch_all;
 };
 
 // What failed, at a location in an item when there is one. Every error here is something the α
@@ -377,6 +396,7 @@ class QueryLayout {
   ir::TypeLayout type(QualType q) const;
   ir::SubObject step(QualType q, ir::PathStep s) const;
   bool is_class(EntityId e) const { return classes_.contains(std::to_underlying(e)); }
+  bool contains_mutable_field(QualType type) const;
   ir::ConstValue constant(ConstId c) const {
     ConstLayout v = cx_->fetch<LayoutConstant>(c);
     if (!v.base) return v.bits;
@@ -659,20 +679,28 @@ ir::TypeLayout QueryLayout::type(QualType q) const {
     auto a = in.types.get<ast::TArray>(c);
     ir::TypeLayout e = type(a.elem);
     std::uint64_t n = a.bound == ConstId::none ? 0 : in.values.get<ast::VInt>(a.bound).bits.lo;
-    return {.kind = array, .size = e.size * n, .align = e.align, .contains_member_pointer = e.contains_member_pointer};
+    return {.kind = array, .size = e.size * n, .align = e.align, .contains_member_pointer = e.contains_member_pointer,
+            .contains_explicit_alignment = e.contains_explicit_alignment};
   }
   if (in.types.is<ast::TFunction>(c)) return {function, 0, 1, false, {}};
   // A reference member is held as the address of its object ([dcl.ref]).
   if (in.types.is<ast::TLRef>(c) || in.types.is<ast::TRRef>(c))
     return {pointer, target.pointer_size, target.pointer_align, false,
             in.canonical(in.types.is<ast::TLRef>(c) ? in.types.get<ast::TLRef>(c).referee : in.types.get<ast::TRRef>(c).referee)};
-  if (in.types.is<ast::TClass>(c))
-    if (auto done = records_.find(std::to_underlying(in.types.get<ast::TClass>(c).entity)); done != records_.end()) return done->second;
+  if (in.types.is<ast::TClass>(c)) {
+    const auto key = std::to_underlying(in.types.get<ast::TClass>(c).entity);
+    // A peer object's field offsets are available through step(), with no native complete-object type.
+    if (auto shape = classes_.find(key); shape != classes_.end() && shape->second->layout_requires_virtual_support)
+      return {};
+    if (auto done = records_.find(key); done != records_.end()) return done->second;
+  }
   if (auto r = class_layout(c)) {
     auto it = classes_.find(std::to_underlying(in.types.get<ast::TClass>(c).entity));
     ir::TypeLayout l{record, r->size, r->align, false, {}, it->second->trivial_calls};
     l.empty = r->placed.empty;  // no data members, in it or its bases
     l.data = r->placed.nvsize;
+    l.copy_abi_unknown = it->second->copy_abi_unknown;
+    l.contains_explicit_alignment = it->second->explicit_alignment != 0;
     if (target.triple == ast::x86_64_linux.triple)
       l.sysv_integer_eightbytes = sysv_integer_eightbytes(*it->second, *r);
     // A homogeneous floating-point aggregate (AAPCS64 §5.9.5): every member, through arrays and
@@ -683,8 +711,11 @@ ir::TypeLayout QueryLayout::type(QualType q) const {
     std::uint8_t bytes = 0;
     // Its non-empty bases' members count as its own (AAPCS64 §5.9.5, as Clang has it).
     std::vector<ir::SubObject> parts;
-    for (const ir::SubObject& b : r->bases)
-      if (!type(b.type).empty) parts.push_back(b);
+    for (const ir::SubObject& b : r->bases) {
+      const auto base = type(b.type);
+      l.contains_explicit_alignment |= base.contains_explicit_alignment;
+      if (!base.empty) parts.push_back(b);
+    }
     parts.insert(parts.end(), r->fields.begin(), r->fields.end());
     bool hfa = !parts.empty();
     for (const ir::SubObject& f : parts) {
@@ -697,6 +728,7 @@ ir::TypeLayout QueryLayout::type(QualType q) const {
       }
       ir::TypeLayout m = type(ft);
       l.contains_member_pointer |= m.contains_member_pointer;
+      l.contains_explicit_alignment |= m.contains_explicit_alignment;
       std::uint8_t mb = m.kind == floating ? std::uint8_t(m.size) : m.hfa_bytes;
       std::uint64_t mn = (m.kind == floating ? 1 : m.hfa) * n;
       if (!mb || mn == 0 || (bytes && mb != bytes)) hfa = false;
@@ -717,17 +749,40 @@ ir::TypeLayout QueryLayout::type(QualType q) const {
   return {};
 }
 
-// System V AMD64 psABI §3.2.3. Only flat records of ordinary integral members participate.
+// A const object still permits writes to its mutable subobjects ([dcl.type.cv]).
+bool QueryLayout::contains_mutable_field(QualType type) const {
+  ast::Interners& in = *universe().in;
+  std::set<EntityId> visited;
+  auto contains = [&](this auto&& visit, QualType t) -> bool {
+    auto kind = in.types.canon(t);
+    while (in.types.is<ast::TArray>(kind)) kind = in.types.canon(in.types.get<ast::TArray>(kind).elem);
+    if (!in.types.is<ast::TClass>(kind)) return false;
+    EntityId entity = in.types.get<ast::TClass>(kind).entity;
+    if (!visited.insert(entity).second) return false;
+    auto found = classes_.find(std::to_underlying(entity));
+    if (found == classes_.end()) return false;
+    const ClassShape& shape = *found->second;
+    return shape.has_mutable_field || std::ranges::any_of(shape.fields, [&](QualType field) { return visit(field); }) ||
+           std::ranges::any_of(shape.bases, [&](EntityId base) { return visit(in.intern_type(ast::TClass{base})); });
+  };
+  return contains(type);
+}
+
+// System V AMD64 psABI §3.2.3. Flat records of integral or ordinary object-pointer members.
 // Padding leaves the corresponding eightbyte class unchanged (initially NO_CLASS).
 std::uint8_t QueryLayout::sysv_integer_eightbytes(const ClassShape& shape, const ClassLayout& l) const {
   if (!shape.trivial_calls || shape.layout_uncertain || shape.union_ || !shape.bases.empty() || !shape.bit_widths.empty() ||
       l.fields.empty() || l.size > 16 || l.align > 8) return 0;
+  const ast::Interners& in = *universe().in;
   std::uint64_t end = 0;
   std::uint8_t mask = 0;
   for (const ir::SubObject& f : l.fields) {
-    auto b = ast::builtin_of(*universe().in, f.type);
-    if (!b || !ast::is_integral(*b)) return 0;
-    const ast::BuiltinLayout field = (*target_)[*b];
+    ast::BuiltinLayout field;
+    if (auto b = ast::builtin_of(in, f.type); b && ast::is_integral(*b))
+      field = (*target_)[*b];
+    else if (ast::is_pointer(in, f.type) && !ast::is_function(in, ast::pointee_of(in, f.type)))
+      field = {target_->pointer_size, target_->pointer_align};
+    else return 0;
     if (!field.size || field.size > 8 || field.align > l.align || f.offset % field.align ||
         f.offset < end || f.offset + field.size > l.size) return 0;
     end = f.offset + field.size;
@@ -744,7 +799,9 @@ std::optional<ClassLayout> QueryLayout::class_layout(QualType c) const {
   auto key = std::to_underlying(in.types.get<ast::TClass>(c).entity);
   if (auto done = class_layouts_.find(key); done != class_layouts_.end()) return done->second;
   auto it = classes_.find(key);
-  if (it == classes_.end()) return std::nullopt;
+  if (it == classes_.end() || (it->second->layout_requires_virtual_support &&
+                               it->second->peer_virtual_layout == sema::PeerVirtualLayout::none))
+    return std::nullopt;
   std::vector<ast::Placed> bases, places;
   for (EntityId b : it->second->bases) bases.push_back(placed(in.intern_type(ast::TClass{b})));
   for (std::size_t i = 0; i < it->second->fields.size(); ++i) {
@@ -752,7 +809,9 @@ std::optional<ClassLayout> QueryLayout::class_layout(QualType c) const {
     if (!it->second->bit_widths.empty()) f.bit_width = it->second->bit_widths[i];
     places.push_back(std::move(f));
   }
-  ast::RecordLayout r = ast::record_layout(bases, places, it->second->union_, it->second->pod, key);
+  const ast::Target* root = it->second->peer_virtual_layout == sema::PeerVirtualLayout::root ? target_ : nullptr;
+  ast::RecordLayout r = ast::record_layout(bases, places, it->second->union_, it->second->pod, key, root,
+                                          it->second->explicit_alignment);
   ClassLayout out{r.size, std::uint32_t(r.align), {}, {}, r.placed};
   for (std::size_t i = 0; i < r.offsets.size(); ++i)
     out.fields.push_back({r.offsets[i], in.canonical(it->second->fields[i]), r.bit_fields[i]});
@@ -906,6 +965,11 @@ class UnitFacts : public irgen::TypeFacts {
         if (shape.entity == c && field < shape.bit_widths.size()) return shape.bit_widths[field];
       return 0;
     };
+    field_type = [&shapes](EntityId c, std::uint32_t field) -> std::optional<QualType> {
+      for (const ClassShape& shape : shapes.classes)
+        if (shape.entity == c && field < shape.fields.size()) return shape.fields[field];
+      return std::nullopt;
+    };
   }
   ConstId string_address(ConstId c) { return universe().consts->address_of(c); }
   bool is_constexpr(EntityId e) { return std::ranges::binary_search(src_->constexpr_functions, e); }
@@ -933,6 +997,11 @@ engine::query_task<Generated> FunctionGen::run(engine::Ctx& cx, FnKey k) {
   input.guard_release = d.guard_release;
   input.atexit = d.atexit;
   input.dso = d.dso;
+  input.hosted_catch_all = d.unwind == UnwindEligibility::hosted_catch_all;
+  const bool linux = facts.target().triple == ast::x86_64_linux.triple;
+  input.native_array_delete = linux;
+  input.native_array_new = linux && (d.unwind == UnwindEligibility::cleanup_free ||
+                                     d.unwind == UnwindEligibility::cleanup_free_with_throw);
   auto f = irgen::function_ir(*universe().in, input, facts);
   if (!f) {
     auto error = co_await located_error(cx, k.tu, ast::Loc{d.item, d.body_offset}, std::move(f.error()));
@@ -985,47 +1054,70 @@ bool linux_ellipsis_scalar(ir::TypeLayout l) {
   return l.kind == ir::TypeKind::pointer || (l.kind == ir::TypeKind::integer && (l.size == 4 || l.size == 8));
 }
 
-bool linux_fixed_scalar(ir::TypeLayout l) {
+bool linux_integer_scalar(ir::TypeLayout l) {
   return l.kind == ir::TypeKind::boolean || linux_ellipsis_scalar(l) ||
          (l.kind == ir::TypeKind::integer && (l.size == 1 || l.size == 2));
 }
 
+enum class LinuxSignatureUse { definition, direct_call, indirect_call };
+
 // Check the original signature of each function and call before lowering erases the types.
 std::string_view linux_signature_error(const ast::Interners& in, const QueryLayout& layout, QualType type,
-                                       bool allow_variadic, bool allow_aggregates) {
+                                       LinuxSignatureUse use, bool ordinary) {
+  using enum LinuxSignatureUse;
   QualType canonical = in.types.canon(type);
   if (!in.types.is<ast::TFunction>(canonical)) return "the function type is unavailable";
   auto f = in.types.get<ast::TFunction>(canonical);
-  if (f.variadic && !allow_variadic) return "only ordinary free variadic definitions are supported";
-  allow_aggregates = allow_aggregates && !f.variadic;
-  auto supported = [&](ir::TypeLayout l) {
-    return linux_fixed_scalar(l) || (allow_aggregates && l.sysv_integer_eightbytes);
-  };
-  ir::TypeLayout result = layout.type(f.ret);
-  if (result.kind != ir::TypeKind::void_ && !supported(result)) {
-    if (allow_aggregates && result.kind == ir::TypeKind::record) return "unsupported aggregate result layout";
-    return "only void, bool, 8-, 16-, 32- and 64-bit integer, pointer and reference results are supported";
-  }
-  for (QualType p : in.seqs.elements(f.params)) {
-    ir::TypeLayout parameter = layout.type(p);
-    if (!supported(parameter)) {
-      if (allow_aggregates && parameter.kind == ir::TypeKind::record) return "unsupported aggregate parameter layout";
-      return "only bool, 8-, 16-, 32- and 64-bit integer, pointer and reference parameters are supported";
+  if (f.variadic && use == definition && !ordinary) return "only ordinary free variadic definitions are supported";
+  const bool fixed_direct = !f.variadic && use != indirect_call;
+  const bool allow_aggregates = fixed_direct && ordinary;
+  auto error_for = [&](QualType value, bool result) -> std::string_view {
+    auto builtin = ast::builtin_of(in, value);
+    if (builtin == ast::Builtin::long_double) return "x87 long double parameters and results are unsupported";
+    if (builtin == ast::Builtin::float_ || builtin == ast::Builtin::double_) {
+      if (use == indirect_call) return "floating-point parameters and results of indirect calls are unsupported";
+      return {};
     }
-  }
+    auto l = layout.type(value);
+    if (l.copy_abi_unknown)
+      return result ? "defaulted copy ABI classification is unavailable for the result"
+                    : "defaulted copy ABI classification is unavailable for a parameter";
+    if ((result && l.kind == ir::TypeKind::void_) || linux_integer_scalar(l) ||
+        (allow_aggregates && l.sysv_integer_eightbytes)) return {};
+    if (allow_aggregates && l.kind == ir::TypeKind::record)
+      return result ? "unsupported aggregate result layout" : "unsupported aggregate parameter layout";
+    if (fixed_direct)
+      return result ? "unsupported fixed-prototype result type" : "unsupported fixed-prototype parameter type";
+    if (use == direct_call)
+      return result ? "unsupported direct variadic result type" : "unsupported direct variadic parameter type";
+    return result ? "only void, bool, 8-, 16-, 32- and 64-bit integer, pointer and reference results are supported"
+                  : "only bool, 8-, 16-, 32- and 64-bit integer, pointer and reference parameters are supported";
+  };
+  if (auto error = error_for(f.ret, true); !error.empty()) return error;
+  for (QualType p : in.seqs.elements(f.params))
+    if (auto error = error_for(p, false); !error.empty()) return error;
   return {};
 }
 
-std::string_view linux_ellipsis_error(const QueryLayout& layout, const ir::Function& body, ir::NodeId call) {
+std::string_view linux_ellipsis_error(const ast::Interners& in, const QueryLayout& layout,
+                                      const ir::Function& body, ir::NodeId call) {
   const bool indirect = body.node(call).op == ir::Op::call_ind;
   auto imms = body.imms_of(call);
   auto ellipsis = imms[indirect ? 0 : 1], byval = imms[indirect ? 1 : 2];
   // The tail values have already undergone the default argument promotions ([expr.call]).
   // The by-value bits distinguish class objects from genuine pointer arguments.
   auto args = body.operands_of(call).subspan(indirect ? 2 : 1);
-  for (std::size_t i = args.size() - ellipsis; i < args.size(); ++i)
-    if (((byval >> i) & 1) || !linux_ellipsis_scalar(layout.type(body.value(args[i]).type.type)))
-      return "only 32- and 64-bit integer and pointer ellipsis arguments are supported";
+  for (std::size_t i = args.size() - ellipsis; i < args.size(); ++i) {
+    QualType type = body.value(args[i]).type.type;
+    auto builtin = ast::builtin_of(in, type);
+    if (builtin == ast::Builtin::long_double) return "x87 long double ellipsis arguments are unsupported";
+    auto l = layout.type(type);
+    if (indirect && l.kind == ir::TypeKind::floating) return "floating-point ellipsis arguments are unsupported";
+    if (!((byval >> i) & 1) && (linux_ellipsis_scalar(l) || (!indirect && builtin == ast::Builtin::double_)))
+      continue;
+    return indirect ? "only 32- and 64-bit integer and pointer ellipsis arguments are supported"
+                    : "only double, 32- and 64-bit integer, and pointer ellipsis arguments are supported";
+  }
   return {};
 }
 
@@ -1048,7 +1140,7 @@ engine::query_task<Lowered> Lower::run(engine::Ctx& cx, FnKey k) {
     auto fn = std::ranges::find(tu.entities, k.fn, &Entity::id);
     bool ordinary = !def.this_type && fn != tu.entities.end() && ordinary_free_function(*fn);
     QualType type = def.body.deduced ? def.body.deduced_type : def.decl.type;
-    if (auto error = linux_signature_error(in, layout, type, ordinary, ordinary); !error.empty()) {
+    if (auto error = linux_signature_error(in, layout, type, LinuxSignatureUse::definition, ordinary); !error.empty()) {
       auto message = std::format("x86-64 System V ABI: {}", error);
       auto located = co_await located_error(cx, k.tu, ast::Loc{def.item, def.body_offset}, std::move(message));
       co_return Lowered{std::nullopt, {}, std::move(located)};
@@ -1058,31 +1150,32 @@ engine::query_task<Lowered> Lower::run(engine::Ctx& cx, FnKey k) {
     for (std::size_t i = 0; i < body.nodes.size(); ++i) {
       const auto n = ir::NodeId(static_cast<std::uint32_t>(i));
       const ir::Op op = body.node(n).op;
-      const bool direct = op == ir::Op::call;
+      const bool direct = op == ir::Op::call || op == ir::Op::invoke;
       std::optional<QualType> callee;
       EntityId callee_id = EntityId::none;
-      bool aggregate_callee = false;
+      bool ordinary_callee = false;
       if (direct) {
         callee_id = EntityId(static_cast<std::uint32_t>(body.imms_of(n)[0]));
         auto e = std::ranges::find(tu.entities, callee_id, &Entity::id);
         if (e != tu.entities.end()) {
           callee = e->type;
-          aggregate_callee = ordinary_free_function(*e);
+          ordinary_callee = ordinary_free_function(*e);
         }
       } else if (op == ir::Op::call_ind) {
         QualType ptr = body.value(body.operands_of(n)[1]).type.type;
         callee = ast::pointee_of(in, ptr);
       } else continue;
-      std::string_view error = callee ? linux_signature_error(in, layout, *callee, true, aggregate_callee)
+      const auto use = direct ? LinuxSignatureUse::direct_call : LinuxSignatureUse::indirect_call;
+      std::string_view error = callee ? linux_signature_error(in, layout, *callee, use, ordinary_callee)
                                       : "the function type is unavailable";
       if (direct && callee && !error.empty()) {
         // The declaration can still have a placeholder return type. Read the signature already
         // deduced in this unit without depending on the callee's lowering ([dcl.spec.auto]).
         const auto definition = std::ranges::find(tu.functions, callee_id, &FunctionDef::entity);
         if (definition != tu.functions.end() && definition->body.deduced)
-          error = linux_signature_error(in, layout, definition->body.deduced_type, true, aggregate_callee);
+          error = linux_signature_error(in, layout, definition->body.deduced_type, use, ordinary_callee);
       }
-      if (error.empty()) error = linux_ellipsis_error(layout, body, n);
+      if (error.empty()) error = linux_ellipsis_error(in, layout, body, n);
       if (error.empty()) continue;
       const ir::FunctionDebug& debug = co_await cx.fetch<FunctionDebug>(k);
       auto at = i < debug.loc.size() ? debug.loc[i] : ast::Loc{def.item, def.body_offset};
@@ -1090,7 +1183,8 @@ engine::query_task<Lowered> Lower::run(engine::Ctx& cx, FnKey k) {
       co_return Lowered{std::nullopt, {}, std::move(located)};
     }
     config.sysv_amd64 = true;
-    config.int_arg_registers = 6;
+    if (def.unwind == UnwindEligibility::cleanup_free_with_throw) config.int_throw = tu.int_throw;
+    if (def.unwind == UnwindEligibility::hosted_catch_all) config.catch_all = tu.catch_all;
     // Extend outgoing narrow results for interoperability. Lowering truncates incoming results
     // to the declared width, as the System V AMD64 psABI §3.2.3 leaves excess bits unspecified.
     config.min_result_bits = 32;
@@ -1107,7 +1201,7 @@ engine::query_task<Lowered> Lower::run(engine::Ctx& cx, FnKey k) {
   co_return Lowered{L2Body{std::move(*l2)}, {layout.strings().begin(), layout.strings().end()}, std::nullopt};
 }
 
-// The entities a function's code refers to (`symbol` and `call` operands).
+// The entities a function's code refers to (address and direct call operands).
 struct SymbolReference {
   ir::EntityId entity;
   l2::Op op;
@@ -1117,7 +1211,7 @@ std::vector<SymbolReference> references(const l2::Function& body) {
   std::vector<SymbolReference> out;
   for (std::uint32_t n = 0; n < body.nodes.size(); ++n) {
     l2::Op op = body.nodes[n].op;
-    if (op == l2::Op::symbol || op == l2::Op::call)
+    if (op == l2::Op::symbol || op == l2::Op::call || op == l2::Op::invoke)
       out.push_back({ir::EntityId(std::uint32_t(body.imms_of(ir::NodeId(n))[0])), op});
   }
   return out;
@@ -1128,7 +1222,7 @@ struct SymbolAddresses {
 };
 
 // ELF default-visible symbols can be preempted, so their addresses use the GOT.
-// Internal definitions can use the symbol itself in a direct displacement.
+// Local definitions can use the symbol itself in a direct displacement.
 struct TuSymbolAddresses {
   using Key = TuId;
   using Value = SymbolAddresses;
@@ -1139,7 +1233,7 @@ struct TuSymbolAddresses {
     auto add = [&](EntityId id) {
       if (linux) {
         auto e = std::ranges::find(u.entities, id, &Entity::id);
-        if (e == u.entities.end() || e->linkage != ast::Linkage::internal) return;
+        if (e == u.entities.end() || !e->has_local_binding()) return;
       }
       out.direct.push_back(id);
     };
@@ -1147,7 +1241,7 @@ struct TuSymbolAddresses {
     for (const Variable& v : u.variables) add(v.entity);
     if (linux) {
       for (const Entity& e : u.entities)
-        if (e.linkage == ast::Linkage::external || e.linkage == ast::Linkage::module)
+        if (!e.has_local_binding() && (e.linkage == ast::Linkage::external || e.linkage == ast::Linkage::module))
           out.got.push_back(e.id);
       std::ranges::sort(out.got);
     }
@@ -1272,6 +1366,7 @@ struct LinuxFunction {
   EntityId entity;
   const x86_64::MachineCode* code;
   bool weak;
+  bool cleanup_free_unwind;
 };
 
 obj::reloc_kind linux_relocation(x86_64::RelocKind kind) {
@@ -1295,8 +1390,25 @@ std::expected<obj::object, aarch64::CodegenError> assemble_linux(
   auto missing = [](EntityId e) {
     return std::unexpected(aarch64::CodegenError{e, std::format("@{} has no symbol name", ir::raw(e))});
   };
+  std::optional<std::uint32_t> data_const;
   if (!functions.empty()) {
     const std::uint32_t text = o.add_section(obj::standard_section::text);
+    std::optional<std::uint32_t> frames, exception_tables, personality_cell;
+    const bool has_handlers = std::ranges::any_of(functions, [](const LinuxFunction& f) {
+      return f.code->catch_all.has_value();
+    });
+    if (has_handlers || std::ranges::any_of(functions, &LinuxFunction::cleanup_free_unwind))
+      frames = o.add_section(obj::standard_section::eh_frame);
+    if (has_handlers) {
+      exception_tables = o.add_section(obj::standard_section::gcc_except_table);
+      data_const = o.add_section(obj::standard_section::data_const);
+      personality_cell = o.define({}, obj::binding::local, *data_const);
+      auto& pointers = o.sections[*data_const];
+      pointers.emit64(0);
+      pointers.relocate(obj::reloc_kind::abs64, o.reference("__gxx_personality_v0"));
+    }
+
+    x86_64::EhFrameCies cies;
     obj::section& sec = o.sections[text];
     for (const LinuxFunction& f : functions) {
       auto sym = symbol_of.find(f.entity);
@@ -1306,7 +1418,7 @@ std::expected<obj::object, aarch64::CodegenError> assemble_linux(
       auto& symbol = o.symbols[sym->second];
       symbol.section = text;
       symbol.offset = base;
-      symbol.weak = f.weak && symbol.bind == obj::binding::global;
+      symbol.weak = f.weak && symbol.bind != obj::binding::local;
       symbol.function_size = f.code->bytes.size();
       sec.emit(f.code->bytes);
       for (const auto& r : f.code->relocs) {
@@ -1316,6 +1428,29 @@ std::expected<obj::object, aarch64::CodegenError> assemble_linux(
           return std::unexpected(aarch64::CodegenError{f.entity, "a text relocation exceeds the object offset limit"});
         sec.relocate(linux_relocation(r.kind), target->second, r.addend, static_cast<std::uint32_t>(base + r.offset));
       }
+      if (f.cleanup_free_unwind || f.code->catch_all) {
+        std::optional<std::uint32_t> lsda_anchor;
+        if (f.code->catch_all) {
+          if (f.weak) return std::unexpected(aarch64::CodegenError{f.entity, "catch-all frames require strong definitions"});
+          auto lsda = x86_64::catch_all_lsda(*f.code);
+          if (!lsda) return std::unexpected(aarch64::CodegenError{f.entity, lsda.error()});
+          auto& tables = o.sections[*exception_tables];
+          if (lsda->size() + tables.size() > std::numeric_limits<std::uint32_t>::max())
+            return std::unexpected(aarch64::CodegenError{f.entity, "the exception tables exceed the object offset limit"});
+          lsda_anchor = o.define({}, obj::binding::local, *exception_tables);
+          tables.emit(*lsda);
+        }
+        obj::section& frame = o.sections[*frames];
+        auto fields = x86_64::append_eh_frame(frame.bytes, cies, *f.code);
+        if (!fields) return std::unexpected(aarch64::CodegenError{f.entity, fields.error()});
+        // The host linker may preempt the callable symbol, but this FDE describes these bytes.
+        const auto anchor = o.define({}, obj::binding::local, text, base);
+        if (fields->personality)
+          frame.relocate(obj::reloc_kind::x86_64_pc32, *personality_cell, 0, *fields->personality);
+        frame.relocate(obj::reloc_kind::x86_64_pc32, anchor, 0, fields->initial_location);
+        if (fields->lsda)
+          frame.relocate(obj::reloc_kind::x86_64_pc32, *lsda_anchor, 0, *fields->lsda);
+      }
     }
   }
   using K = aarch64::DataKind;
@@ -1323,7 +1458,7 @@ std::expected<obj::object, aarch64::CodegenError> assemble_linux(
   for (auto [kind, section] : {std::pair{K::cstring, S::cstring}, {K::rodata, S::rodata}, {K::data_const, S::data_const},
                                {K::data, S::data}, {K::bss, S::bss}, {K::init_func, S::init_array}}) {
     if (!std::ranges::contains(data, kind, &aarch64::DataDef::kind)) continue;
-    const std::uint32_t index = o.add_section(section);
+    const std::uint32_t index = kind == K::data_const && data_const ? *data_const : o.add_section(section);
     obj::section& sec = o.sections[index];
     for (const auto& d : data) {
       if (d.kind != kind) continue;
@@ -1366,6 +1501,10 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
     errors.push_back({std::nullopt, "the translation unit has errors"});
     co_return out;
   }
+  if (tu.virtual_emission_blocked) {
+    errors.push_back({tu.virtual_declaration, "native output for a translation unit with virtual member functions is not supported yet"});
+    co_return co_await locate_errors(cx, id, std::move(out));
+  }
   if (linux && tu.namespace_destruction) {
     errors.push_back({tu.namespace_destruction, "namespace-scope destruction is not supported on x86-64 Linux"});
     co_return co_await locate_errors(cx, id, std::move(out));
@@ -1407,7 +1546,8 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
     bool zero = b->relocs.empty() && std::ranges::all_of(b->bytes, [](std::uint8_t x) { return x == 0; });
     aarch64::DataDef d{v.entity, aarch64::DataKind::data, std::move(b->bytes), 0, layout.type(v.type).align, std::move(b->relocs)};
     if (v.weak_elf && !v.dynamic && d.relocs.empty()) weak_variables.insert(v.entity);
-    if (is_const && !v.dynamic) d.kind = d.relocs.empty() ? aarch64::DataKind::rodata : aarch64::DataKind::data_const;
+    if (is_const && !v.dynamic && !layout.contains_mutable_field(v.type))
+      d.kind = d.relocs.empty() ? aarch64::DataKind::rodata : aarch64::DataKind::data_const;
     else if (zero) {
       d.kind = aarch64::DataKind::bss;
       d.size = d.bytes.size();
@@ -1511,9 +1651,17 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
       errors.push_back({e.at, std::format("the name of '{}': {} is not supported yet", e.name, name.error())});
       continue;
     }
+    if (e.local_parameter_binding && !std::ranges::contains(tu.functions, e.id, &FunctionDef::entity)) {
+      errors.push_back({e.at, std::format("function '{}' names a translation-unit-local type in a parameter "
+                                         "and must be defined in this translation unit", e.name)});
+      continue;
+    }
     mangled.emplace(ir::raw(e.id), *name);  // before an asm label: what its statics' names begin with
     if (!e.asm_label.empty()) name = e.asm_label;
-    symbols.push_back({e.id, std::move(*name), e.linkage == ast::Linkage::internal ? obj::binding::local : obj::binding::global});
+    obj::binding binding = obj::binding::global;
+    if (e.has_local_binding()) binding = obj::binding::local;
+    else if (linux && e.hidden_elf) binding = obj::binding::hidden;
+    symbols.push_back({e.id, std::move(*name), binding});
   }
   // A static local and its guard: `_ZZ <encoding> E <name> [_<n>]` and `_ZGV` before it, the
   // function's own <encoding> taken from its symbol (Itanium C++ ABI §5.1.6, §5.1.4.6).
@@ -1546,8 +1694,10 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
   auto o = [&] {
     if (linux) {
       std::vector<LinuxFunction> code;
-      for (std::size_t i = 0; i < fns.size(); ++i)
-        code.push_back({fns[i].fn, &*ms[i].get().linux_code, tu.functions[i].weak_elf});
+      for (std::size_t i = 0; i < fns.size(); ++i) {
+        const auto& def = tu.functions[i];
+        code.push_back({fns[i].fn, &*ms[i].get().linux_code, def.weak_elf, def.unwind != UnwindEligibility::none});
+      }
       return assemble_linux(tu.name, code, data, symbols, weak_variables);
     }
     std::vector<aarch64::CompiledFunction> code;

@@ -60,6 +60,8 @@ enum class standard_section : std::uint8_t {
   bss,         // __DATA,__bss: zero-initialized data
   mod_init_func,  // __DATA,__mod_init_func: pointers to the functions dyld runs before main
   init_array,     // ELF .init_array: pointers to the functions startup runs before main
+  eh_frame,       // ELF .eh_frame: call frame information
+  gcc_except_table,  // ELF .gcc_except_table: language-specific exception data
 };
 
 // How a relocation patches its site. S is the target symbol's address, A the addend, P the
@@ -100,6 +102,8 @@ struct section {
   static section standard(standard_section kind);
 
   bool is_init_array() const noexcept { return segment == "__DATA" && name == "__init_array"; }
+  bool is_eh_frame() const noexcept { return segment == "__TEXT" && name == "__eh_frame"; }
+  bool is_gcc_except_table() const noexcept { return segment == "__TEXT" && name == "__gcc_except"; }
   bool is_zerofill() const noexcept { return section_flags::is_zerofill(flags); }
   std::uint64_t size() const noexcept { return is_zerofill() ? zerofill_size : bytes.size(); }
 
@@ -229,6 +233,8 @@ section section::standard(standard_section kind) {
     case standard_section::bss: return {"__DATA", "__bss", zerofill, 0, {}, 0, {}};
     case standard_section::mod_init_func: return {"__DATA", "__mod_init_func", mod_init_func_pointers, 3, {}, 0, {}};
     case standard_section::init_array: return {"__DATA", "__init_array", regular, 3, {}, 0, {}};
+    case standard_section::eh_frame: return {"__TEXT", "__eh_frame", regular, 3, {}, 0, {}};
+    case standard_section::gcc_except_table: return {"__TEXT", "__gcc_except", regular, 0, {}, 0, {}};
   }
   std::unreachable();
 }

@@ -245,7 +245,8 @@ def main():
         reject(target, '-nostdlib', '--dynamic-linker=relative', *inputs, error="absolute '--dynamic-linker' path")
         reject(target, '-nostdlib', 'main.cpp', '--dynamic-linker', error="argument to '--dynamic-linker' is missing")
         reject(target, f'--dynamic-linker={loader}', *inputs, error="requires '-nostdlib'")
-        reject(f'--dynamic-linker={loader}', *inputs, error="'--dynamic-linker' requires an x86-64 Linux executable link")
+        reject('--target=arm64-apple-darwin', f'--dynamic-linker={loader}', *inputs,
+               error="'--dynamic-linker' requires an x86-64 Linux executable link")
         reject(*options, '-c', *inputs, error="'--dynamic-linker' requires an x86-64 Linux executable link")
         reject(*options, 'main.cpp', 'absent.so', error="cannot read 'absent.so'")
         reject(*options, 'main.cpp', 'link/extra.so', error="undefined symbol 'step'")

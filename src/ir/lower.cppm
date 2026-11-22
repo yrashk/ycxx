@@ -18,7 +18,8 @@
 //
 // This is the α-slice subset (epic #39): what C-like functions need. Any other op is an error
 // naming the node, not a silent miscompile. Aggregates are memory only: `alloc`, access paths and
-// `copy` (δ, #86). Not yet: `switch`, EH, coroutines,
+// `copy` (δ, #86). Native Linux `int` throws use a certified cleanup-free frame (#578).
+// Not yet: `switch`, exception handlers and cleanups, coroutines,
 // vptr loads, poison for indeterminate reads beyond "no store".
 export module ycxx.ir.lower;
 
@@ -53,6 +54,8 @@ export struct TypeLayout {
   bool contains_member_pointer = false;  // a scalar member pointer or an aggregate containing one
   // Records: the bits of each INTEGER eightbyte in the supported AMD64 slice, zero otherwise.
   std::uint8_t sysv_integer_eightbytes = 0;
+  bool copy_abi_unknown = false;  // records whose defaulted copy has unresolved triviality
+  bool contains_explicit_alignment = false;  // a class-head requirement raises this object or a subobject's alignment
 };
 
 export struct SubObject {
@@ -78,7 +81,22 @@ concept layout_source = requires(const L& l, QualType t, PathStep s, ConstId c) 
   { l.constant(c) } -> std::convertible_to<ConstValue>;
 };
 
-// Target facts `lower` reads (the `config` query).
+// The Itanium runtime imports for a certified Linux int throw. The type is the normalized
+// exception object type, before L2 replaces C++ types with machine widths.
+export struct IntThrowRuntime {
+  QualType type;
+  EntityId allocate;
+  EntityId throw_;
+  EntityId type_info;
+};
+
+export struct CatchAllRuntime {
+  EntityId begin;
+  EntityId end;
+  EntityId resume;
+};
+
+// Target and function facts `lower` reads.
 export struct LowerConfig {
   std::uint32_t min_result_bits = 32;  // narrower integer results are returned extended to this
   // A class trivially copyable for calls of at most this many bytes passes and returns in that
@@ -94,6 +112,47 @@ export struct LowerConfig {
   std::uint32_t float_arg_registers = 8;
   // Use the System V AMD64 integer aggregate classification and argument placement.
   bool sysv_amd64 = false;
+  std::optional<IntThrowRuntime> int_throw;
+  std::optional<CatchAllRuntime> catch_all{};
+};
+
+export enum class Amd64ArgumentKind : std::uint8_t { integer, sse, stack };
+
+export struct Amd64ArgumentLocation {
+  Amd64ArgumentKind kind;
+  std::uint32_t index;
+};
+
+// AMD64 psABI §3.2.3. Register classes advance independently. A group of INTEGER
+// eightbytes that does not fit uses consecutive stack slots and leaves the GPRs available.
+export class Amd64ArgumentPlan {
+ public:
+  static constexpr std::uint32_t integer_registers = 6;
+  static constexpr std::uint32_t sse_registers = 8;
+
+  Amd64ArgumentLocation place(l2::Type type, std::uint32_t register_words = 1,
+                              std::uint32_t stack_words = 1) {
+    const bool sse = l2::is_float(type);
+    auto& used = sse ? sse_used_ : integer_used_;
+    const auto limit = sse ? sse_registers : integer_registers;
+    if (used + register_words <= limit) {
+      const auto first = used;
+      used += register_words;
+      return {sse ? Amd64ArgumentKind::sse : Amd64ArgumentKind::integer, first};
+    }
+    const auto first = stack_used_;
+    stack_used_ += stack_words;
+    return {Amd64ArgumentKind::stack, first};
+  }
+
+  std::uint32_t stack_slots() const { return stack_used_; }
+  std::uint32_t used_integer_registers() const { return integer_used_; }
+  std::uint32_t used_sse_registers() const { return sse_used_; }
+
+ private:
+  std::uint32_t integer_used_ = 0;
+  std::uint32_t sse_used_ = 0;
+  std::uint32_t stack_used_ = 0;
 };
 
 export struct LowerError {
@@ -109,31 +168,33 @@ std::expected<l2::Function, LowerError> lower(const Function& f, EntityId name, 
 
 namespace ycxx::ir {
 
-// System V AMD64 psABI §3.2.3: reserve all of an argument's INTEGER registers or put
-// the entire argument on the stack. The flat L2 list has a register prefix and a
-// stack suffix, each in argument order. A skipped register has no source index.
-class Amd64Arguments {
+// Encode grouped INTEGER arguments in the flat L2 list. Prefix the spills with the
+// register arguments of each class, filling unused GPR slots to keep spills on the stack.
+// An SSE spill implies all XMM argument registers are already used.
+class Amd64ArgumentOrder {
  public:
-  explicit Amd64Arguments(std::uint32_t limit) : limit_(limit) {}
-
-  bool fits(std::uint32_t words) const { return registers_.size() + words <= limit_; }
-
-  void add(std::uint32_t first, std::uint32_t words, bool in_registers) {
-    auto& locations = in_registers ? registers_ : stack_;
-    for (std::uint32_t w = 0; w < words; ++w) locations.push_back(first + w);
+  Amd64ArgumentLocation add(std::uint32_t first, l2::Type type, std::uint32_t register_words = 1,
+                            std::uint32_t stack_words = 1) {
+    const auto location = plan_.place(type, register_words, stack_words);
+    if (location.kind == Amd64ArgumentKind::stack) {
+      for (std::uint32_t w = 0; w < stack_words; ++w) stack_.push_back(first + w);
+    } else {
+      auto& registers = location.kind == Amd64ArgumentKind::sse ? sse_ : integer_;
+      for (std::uint32_t w = 0; w < register_words; ++w) registers.push_back(first + w);
+    }
+    return location;
   }
 
-  std::uint32_t next_register() const { return std::uint32_t(registers_.size()); }
-
   std::vector<std::uint32_t> order() && {
-    if (!stack_.empty()) registers_.resize(limit_, none);
-    registers_.insert(registers_.end(), stack_.begin(), stack_.end());
-    return std::move(registers_);
+    if (!stack_.empty()) integer_.resize(Amd64ArgumentPlan::integer_registers, none);
+    integer_.insert(integer_.end(), sse_.begin(), sse_.end());
+    integer_.insert(integer_.end(), stack_.begin(), stack_.end());
+    return std::move(integer_);
   }
 
  private:
-  std::uint32_t limit_;
-  std::vector<std::uint32_t> registers_, stack_;
+  Amd64ArgumentPlan plan_;
+  std::vector<std::uint32_t> integer_, sse_, stack_;
 };
 
 template <layout_source L>
@@ -148,6 +209,7 @@ class Lowering {
       if (block_map_[raw(b)] == none) continue;
       if (auto e = block(b); !e) return std::unexpected(e.error());
     }
+    if (catch_edges_) emit_catch_dispatch();
     l2::Function out = b_.finish(results_.value_or(std::vector<l2::Type>{}));
     out.indirect_result = indirect_result_;
     return out;
@@ -179,6 +241,12 @@ class Lowering {
   l2::Builder b_;
   std::vector<ValueId> map_;  // L1 value → L2 value
   std::vector<std::uint32_t> block_map_;
+  struct CatchEdges {
+    NodeId invoke;
+    BlockId normal, handler;  // L1 blocks
+    BlockId landing, resume;  // additional L2 blocks
+  };
+  std::optional<CatchEdges> catch_edges_;
   std::optional<std::vector<T>> results_;
   NodeId at_{};                   // the L1 node being lowered
   // The class result: returned in registers from this frame object, or passed indirectly.
@@ -349,7 +417,7 @@ class Lowering {
       ClassPieces pieces;
     };
     std::vector<ClassObject> objects;
-    Amd64Arguments amd64_args(config_.int_arg_registers);
+    Amd64ArgumentOrder amd64_args;
     std::vector<std::int64_t> l2_of;  // per L1 parameter: its L2 parameter, or -1
     std::uint32_t j = 0;              // the value parameter's index
     for (ValueId p : f_.params_of(b)) {
@@ -358,11 +426,20 @@ class Lowering {
         params.push_back(T::state);
         continue;
       }
+      if (catch_edges_ && b == catch_edges_->handler && f_.value(p).type.kind == TyKind::exn) {
+        l2_of.push_back(std::int64_t(params.size()));
+        params.push_back(T::ptr);
+        continue;
+      }
       if (f_.value(p).type.kind != TyKind::cxx) return fail("exception and coroutine values are not in the α subset");
       bool result = entry && f_.result_param == j + 1, byval = entry && j < 32 && ((f_.byval_params >> j) & 1);
       ++j;
       if (result || byval) {
         QualType pc = layout(cxx(p)).pointee;
+        const TypeLayout object = layout(pc);
+        if (object.copy_abi_unknown) return fail("defaulted copy ABI classification is unavailable");
+        if (!config_.sysv_amd64 && object.contains_explicit_alignment)
+          return fail("AArch64 Darwin ABI: explicitly aligned classes by value are not supported yet");
         if (ignored(pc)) {  // passed by nothing: an object of this frame stands for it
           objects.push_back({p, 0, result, {}});
           l2_of.push_back(-1);
@@ -390,8 +467,7 @@ class Lowering {
       }
       auto t = type_of(cxx(p));
       if (!t) return fail(t.error());
-      if (place_amd64)
-        amd64_args.add(std::uint32_t(params.size()), 1, amd64_args.fits(1));
+      if (place_amd64) amd64_args.add(std::uint32_t(params.size()), *t);
       l2_of.push_back(std::int64_t(params.size()));
       params.push_back(*t);
     }
@@ -405,8 +481,17 @@ class Lowering {
       }
       params = std::move(ordered);
     }
+    const bool normal_invoke = catch_edges_ && b == catch_edges_->normal;
+    if (normal_invoke) {
+      if (!params.empty()) return fail("hosted invoke normal block must be parameterless in L1");
+      params = {T::state, T::i32};
+    }
     BlockId nb = b_.begin_block(params);
     auto param = [&](std::uint32_t i) { return b_.param(nb, index.empty() ? i : index[i]); };
+    if (normal_invoke) {
+      out(catch_edges_->invoke, 0, param(0));
+      out(catch_edges_->invoke, 1, param(1));
+    }
     std::uint32_t i = 0;
     for (ValueId p : f_.params_of(b)) {
       if (l2_of[i] >= 0) map_[raw(p)] = param(std::uint32_t(l2_of[i]));
@@ -439,6 +524,30 @@ class Lowering {
   ValueId in(NodeId n, std::size_t i) const { return map_[raw(f_.operands_of(n)[i])]; }
   void out(NodeId n, std::size_t i, ValueId v) { map_[f_.node(n).res0 + i] = v; }
   ValueId l1_result(NodeId n, std::size_t i = 0) const { return ValueId(f_.node(n).res0 + i); }
+
+  // The selector belongs to the machine landing edge. L1 presents only a selected handler
+  // and its exception; neither ABI register becomes an ordinary L1 value.
+  void emit_catch_dispatch() {
+    const auto& edges = *catch_edges_;
+    at_ = edges.invoke;
+    const auto o = origin();
+    const T landing_params[] = {T::state, T::ptr, T::i64};
+    const auto landing = b_.begin_block(landing_params);
+    const auto state = b_.param(landing, 0), header = b_.param(landing, 1), selector = b_.param(landing, 2);
+    const auto matches = emit1(Op2::icmp, T::i1, {selector, constant(T::i64, 1)}, {std::to_underlying(Pred::eq)});
+    const l2::Builder::SuccArgs paths[] = {
+      {BlockId(block_map_[raw(edges.handler)]), {state, header}},
+      {edges.resume, {state, header}},
+    };
+    b_.emit(Op2::cond_br, {}, std::span(&matches, 1), {}, 0, paths, o);
+    const T resume_params[] = {T::state, T::ptr};
+    const auto resume = b_.begin_block(resume_params);
+    const ValueId args[] = {b_.param(resume, 0), b_.param(resume, 1)};
+    const std::uint64_t target[] = {raw(config_.catch_all->resume), 0, 0, 0};
+    const T result[] = {T::state};
+    b_.emit(Op2::call, result, args, target, 0, {}, o);
+    b_.emit(Op2::unreachable, {}, {}, {}, 0, {}, o);
+  }
 
   std::expected<void, LowerError> node(NodeId n) {
     const Node& nd = f_.node(n);
@@ -634,6 +743,7 @@ class Lowering {
       case Op::dealloc:
       case Op::obj__begin:
       case Op::obj__end:
+      case Op::obj__reuse:
       case Op::union__activate:
       case Op::useq__begin:
       case Op::useq__next:
@@ -650,13 +760,16 @@ class Lowering {
         out(n, 0, copy_bytes(in(n, 0), in(n, 1), in(n, 2), l, imms[0]));
         return {};
       }
+      case Op::nullptr_value:
+        out(n, 0, constant(T::ptr, 0));
+        return {};
       case Op::load: {
         QualType t = QualType(std::uint32_t(imms[0]));
         auto vt = type_of(t);
         if (!vt) return fail(vt.error());
         QualType base = layout(cxx(f_.operands_of(n)[1])).pointee;
         ValueId p = add_offset(in(n, 1), offset(base, path_at(imms, 1)));
-        ValueId v = emit1(Op2::load, memory_type(*vt), {in(n, 0), p}, {imms[0]}, nd.flags);
+        ValueId v = emit1(Op2::load, memory_type(*vt), {in(n, 0), p}, {imms[0]}, nd.flags & bit(Flag::volatile_));
         if (*vt == T::i1) v = emit1(Op2::trunc, T::i1, {v});
         out(n, 0, v);
         return {};
@@ -720,7 +833,7 @@ class Lowering {
         std::vector<ValueId> ops{in(n, 0)};
         auto l1ops = f_.operands_of(n);
         if (ind) ops.push_back(in(n, 1));
-        Amd64Arguments amd64_args(config_.int_arg_registers);
+        Amd64ArgumentOrder amd64_args;
         std::uint64_t sext = 0;
         std::uint64_t byval = imms[ind ? 1 : 2], result_arg = imms[ind ? 2 : 3];
         bool place_amd64 = config_.sysv_amd64 && byval;
@@ -732,10 +845,18 @@ class Lowering {
           ValueId v = map_[raw(l1ops[i])];
           if (k >= 32) return fail("more than 32 arguments are not in the α subset");
           std::size_t at = ops.size() - (ind ? 2 : 1);  // the argument's L2 index
-          // An empty class passes nothing, and returns nothing.
-          if ((((byval >> k) & 1) || k + 1 == result_arg) && ignored(layout(cxx(l1ops[i])).pointee)) continue;
-          if (k + 1 == result_arg) {
-            QualType c = layout(cxx(l1ops[i])).pointee;
+          const bool class_arg = (byval >> k) & 1, class_result = k + 1 == result_arg;
+          QualType c{};
+          if (class_arg || class_result) {
+            c = layout(cxx(l1ops[i])).pointee;
+            const TypeLayout object = layout(c);
+            if (object.copy_abi_unknown) return fail("defaulted copy ABI classification is unavailable");
+            if (!config_.sysv_amd64 && object.contains_explicit_alignment)
+              return fail("AArch64 Darwin ABI: explicitly aligned classes by value are not supported yet");
+            // An empty class passes nothing, and returns nothing.
+            if (ignored(c)) continue;
+          }
+          if (class_result) {
             result_pieces = class_pieces(c);
             if (result_pieces.words) {
               result_dst = v;
@@ -743,9 +864,9 @@ class Lowering {
             }
             if (config_.sysv_amd64) return fail("unsupported System V AMD64 aggregate result");
             indirect = std::uint32_t(at + 1);
-          } else if ((byval >> k) & 1) {
+          } else if (class_arg) {
             // A class argument represented by pieces of its caller-owned object.
-            ClassPieces pieces = class_pieces(layout(cxx(l1ops[i])).pointee, &amd64_args, std::uint32_t(ops.size()));
+            ClassPieces pieces = class_pieces(c, &amd64_args, std::uint32_t(ops.size()));
             if (pieces.words) {
               if (!config_.sysv_amd64) {
                 const T piece = pieces.type;
@@ -761,9 +882,9 @@ class Lowering {
           }
           bool signed_arg = b_.peek().type(v) != T::i1 && b_.peek().type(v) != T::ptr && is_signed(l1ops[i]);
           if (place_amd64) {
-            bool in_registers = amd64_args.fits(1);
-            if (in_registers && signed_arg) sext |= std::uint64_t{1} << amd64_args.next_register();
-            amd64_args.add(std::uint32_t(ops.size()), 1, in_registers);
+            auto location = amd64_args.add(std::uint32_t(ops.size()), b_.peek().type(v));
+            if (location.kind == Amd64ArgumentKind::integer && signed_arg)
+              sext |= std::uint64_t{1} << location.index;
           } else if (at < 32 && signed_arg) {
             sext |= std::uint64_t{1} << at;
           }
@@ -828,6 +949,39 @@ class Lowering {
         b_.emit(nd.op == Op::cond_br ? Op2::cond_br : Op2::br, {}, ops, {}, 0, succs, o);
         return {};
       }
+      case Op::invoke: {
+        if (!config_.sysv_amd64 || !config_.catch_all || catch_edges_ || nd.nopnd != 2 || nd.nres != 2 ||
+            imms[1] != 0 || b_.peek().type(in(n, 1)) != T::i32)
+          return fail("unsupported hosted invoke");
+        const auto edges = f_.succs_of(n);
+        // The invoke's first result is state. Its second must be the fixed int result.
+        const auto type = type_of(cxx(l1_result(n, 1)));
+        if (!type || *type != T::i32 || edges.size() != 2 || edges[0].nargs || edges[1].nargs)
+          return fail("unsupported hosted invoke result or successor");
+        const auto next = static_cast<std::uint32_t>(std::ranges::count_if(block_map_, [](auto b) { return b != none; }));
+        catch_edges_ = CatchEdges{n, edges[0].target, edges[1].target, BlockId(next), BlockId(next + 1)};
+        const l2::Builder::SuccArgs paths[] = {
+          {BlockId(block_map_[raw(edges[0].target)]), {}}, {catch_edges_->landing, {}},
+        };
+        const ValueId args[] = {in(n, 0), in(n, 1)};
+        const std::uint64_t target[] = {imms[0], 1, 0, 0};
+        b_.emit(Op2::invoke, {}, args, target, 0, paths, origin());
+        return {};
+      }
+      case Op::catch__begin:
+      case Op::catch__end: {
+        if (!catch_edges_ || nd.block != raw(catch_edges_->handler))
+          return fail("unsupported hosted catch operation");
+        const bool begin = nd.op == Op::catch__begin;
+        const T results[] = {T::state, T::ptr};
+        const ValueId args[] = {in(n, 0), in(n, 1)};
+        const std::uint64_t target[] = {raw(begin ? config_.catch_all->begin : config_.catch_all->end), 0, 0, 0};
+        const std::size_t count = begin ? 2 : 1;
+        const auto call = b_.emit(Op2::call, std::span(results).first(count), std::span(args).first(count),
+                                  target, 0, {}, origin());
+        for (std::uint32_t i = 0; i < count; ++i) out(n, i, b_.peek().result(call, i));
+        return {};
+      }
       case Op::ret: {
         std::vector<ValueId> ops{in(n, 0)};
         std::vector<T> types;
@@ -848,6 +1002,30 @@ class Lowering {
         results_ = types;
         auto o = origin();
         b_.emit(Op2::ret, {}, ops, {}, 0, {}, o);
+        return {};
+      }
+      case Op::throw_: {
+        if (!config_.sysv_amd64 || !config_.int_throw || nd.nsucc != 0 || imms[0] != raw(config_.int_throw->type) ||
+            b_.peek().type(in(n, 1)) != T::i32)
+          return fail("`throw` is not in the α subset");
+        const auto& abi = *config_.int_throw;
+        const auto o = origin();
+        // The L1 operand has already been evaluated. Its call, if any, can unwind without
+        // leaving an allocated exception object behind (Itanium EH ABI §2.4).
+        const T allocation_results[] = {T::state, T::ptr};
+        const ValueId allocation_args[] = {in(n, 0), constant(T::i64, l2::bytes(T::i32))};
+        const std::uint64_t allocation_call[] = {raw(abi.allocate), 0, 0, 0};
+        const NodeId allocation = b_.emit(Op2::call, allocation_results, allocation_args, allocation_call, 0, {}, o);
+        const ValueId payload = b_.peek().result(allocation, 1);
+        const T state_result[] = {T::state};
+        const ValueId store_args[] = {b_.peek().result(allocation), payload, in(n, 1)};
+        const std::uint64_t alias[] = {imms[0]};
+        const NodeId store = b_.emit(Op2::store, state_result, store_args, alias, 0, {}, o);
+        const ValueId type_info = emit1(Op2::symbol, T::ptr, {}, {raw(abi.type_info)});
+        const ValueId throw_args[] = {b_.peek().result(store), payload, type_info, constant(T::ptr, 0)};
+        const std::uint64_t throw_call[] = {raw(abi.throw_), 0, 0, 0};
+        b_.emit(Op2::call, state_result, throw_args, throw_call, 0, {}, o);
+        b_.emit(Op2::unreachable, {}, {}, {}, 0, {}, o);
         return {};
       }
       case Op::unreachable: {
@@ -883,7 +1061,7 @@ class Lowering {
   }
   // An AMD64 record's INTEGER eightbytes, or its full stack representation. On AAPCS64
   // a small record uses integer words or, for an HFA, one floating register per member.
-  ClassPieces class_pieces(QualType c, Amd64Arguments* args = nullptr, std::uint32_t first = 0) const {
+  ClassPieces class_pieces(QualType c, Amd64ArgumentOrder* args = nullptr, std::uint32_t first = 0) const {
     TypeLayout l = layout(c);
     if (l.kind != TypeKind::record || !l.trivial_calls) return {};
     auto words = std::uint32_t((l.size + 7) / 8);
@@ -892,10 +1070,9 @@ class Lowering {
       if (!chunks) return {};
       auto registers = std::uint32_t(std::popcount(chunks));
       if (!args) return {registers, T::i64, l.size, chunks};
-      bool in_registers = args->fits(registers);
+      bool in_registers = args->add(first, T::i64, registers, words).kind == Amd64ArgumentKind::integer;
       if (!in_registers) chunks = std::uint8_t((1u << words) - 1);
       std::uint32_t passed_words = in_registers ? registers : words;
-      args->add(first, passed_words, in_registers);
       return {passed_words, T::i64, l.size, chunks};
     }
     if (l.hfa) return {l.hfa, l.hfa_bytes == 4 ? T::f32 : T::f64, l.size};

@@ -22,41 +22,6 @@ export import ycxx.pp;
 
 export namespace ycxx::items {
 
-// The parser skips attributes whose layout semantics we do not implement. Find those
-// that could change a record or field even though its computed offsets look natural.
-bool layout_attribute(const pp::Region& region, std::uint32_t begin, std::uint32_t end, bool leading_only = false) {
-  using enum lex::Tk;
-  for (std::uint32_t i = begin; i < end; ++i) {
-    auto tok = region.tokens[i];
-    if (tok.kind == kw_alignas) return true;
-    if (i + 1 == end) break;
-    const auto next = region.tokens[i + 1].kind;
-    bool bracket = tok.kind == l_square && next == l_square;
-    bool gnu = tok.kind == identifier && next == l_paren && region.name(tok) == "__attribute__";
-    if (!bracket && !gnu) {
-      if (leading_only) return false;
-      continue;
-    }
-    if (gnu) ++i;
-    const auto open = bracket ? l_square : l_paren;
-    const auto close = bracket ? r_square : r_paren;
-    std::uint32_t depth = 1;
-    while (++i < end && depth) {
-      auto part = region.tokens[i];
-      if (part.kind == open) ++depth;
-      else if (part.kind == close && --depth == 0) break;
-      else if (part.kind == identifier) {
-        auto name = region.name(part);
-        if (name.size() > 4 && name.starts_with("__") && name.ends_with("__"))
-          name = name.substr(2, name.size() - 4);
-        if (name == "packed" || name == "aligned" || name == "mode" || name == "vector_size" ||
-            name == "no_unique_address" || name == "ms_struct" || name == "gcc_struct") return true;
-      }
-    }
-  }
-  return false;
-}
-
 using lex::Tk;
 using lex::Tok;
 using lex::u32;
@@ -112,6 +77,7 @@ struct DeclName {
   u32 offset = 0;    // of its token, relative to the item's first token
   u32 ordinal = 0;
   u8 flags = 0;
+  bool member_elaborated_candidate = false;  // a possible namespace binding, confirmed by sema
   bool operator==(const DeclName&) const = default;
 };
 
@@ -387,7 +353,9 @@ u32 Splitter::item(u32 parent, const std::string& scope, u32& unnamed_types) {
   }
   if ((kind(j) == Tk::kw_public || kind(j) == Tk::kw_protected || kind(j) == Tk::kw_private) &&
       kind(j + 1) == Tk::colon) {
-    at(k).kind = ItemKind::access_spec;
+    // Keep a prefixed label separate from the following member for declaration diagnostics.
+    bool prefixed_member = j != at(k).begin && parent != none && at(parent).kind == ItemKind::class_def;
+    at(k).kind = prefixed_member ? ItemKind::declaration : ItemKind::access_spec;
     at(k).end = i_ = j + 2;
     return k;
   }
@@ -430,13 +398,21 @@ u32 Splitter::ctor_initializer(u32 j) {
   return j;
 }
 
-// Whether a token can begin a declaration but not continue the declarators after a class or
-// enum body (`struct S { … } const s;` continues; `struct S { … } int main()` does not).
-bool begins_declaration_only(Tk t) {
+bool simple_type_keyword(Tk t) {
   switch (t) {
   case Tk::kw_void: case Tk::kw_bool: case Tk::kw_char: case Tk::kw_char8_t: case Tk::kw_char16_t:
   case Tk::kw_char32_t: case Tk::kw_wchar_t: case Tk::kw_short: case Tk::kw_int: case Tk::kw_long:
   case Tk::kw_signed: case Tk::kw_unsigned: case Tk::kw_float: case Tk::kw_double: case Tk::kw_auto:
+    return true;
+  default: return false;
+  }
+}
+
+// Whether a token can begin a declaration but not continue the declarators after a class or
+// enum body (`struct S { … } const s;` continues; `struct S { … } int main()` does not).
+bool begins_declaration_only(Tk t) {
+  if (simple_type_keyword(t)) return true;
+  switch (t) {
   case Tk::kw_struct: case Tk::kw_class: case Tk::kw_union: case Tk::kw_enum: case Tk::kw_namespace:
   case Tk::kw_template: case Tk::kw_using: case Tk::kw_static_assert: case Tk::kw_export:
     return true;
@@ -468,10 +444,12 @@ void Splitter::general(u32 k, u32& unnamed_types) {
     case Tk::semi:
       at(k).end = i_ = j + 1;
       return;
-    case Tk::l_paren:
+    case Tk::l_paren: {
+      // An integer-literal-led `auto(...)` is an expression, including inside a template-id.
+      const bool decay_copy = prev == Tk::kw_auto && kind(j + 1) == Tk::int_lit;
       if (!initializer && prev != Tk::kw_decltype && prev != Tk::kw_noexcept && prev != Tk::kw_alignas &&
           prev != Tk::kw_sizeof && prev != Tk::kw_alignof && prev != Tk::kw_explicit && prev != Tk::kw_typeid &&
-          prev != Tk::kw_static_assert && prev != Tk::kw_asm && prev != Tk::kw_requires &&
+          prev != Tk::kw_static_assert && prev != Tk::kw_asm && prev != Tk::kw_requires && !decay_copy &&
           !(prev == Tk::kw_operator) &&
           // a GNU attribute or asm label, or a type-transforming built-in (docs/EXTENSIONS.md)
           !(j > at(k).begin && (is_name(j - 1, "__attribute__") || is_name(j - 1, "__asm") || is_name(j - 1, "__asm__") ||
@@ -480,6 +458,7 @@ void Splitter::general(u32 k, u32& unnamed_types) {
       }
       j = match(j);
       continue;
+    }
     case Tk::l_square:
       j = match(j);
       continue;
@@ -548,8 +527,11 @@ void Splitter::general(u32 k, u32& unnamed_types) {
       typedef_ = true;
       ++j;
       continue;
-    case Tk::l_brace:
-      if (initializer) {
+    case Tk::l_brace: {
+      // A direct braced auto argument can appear in a trailing return type or a base clause.
+      const bool braced_auto_argument = prev == Tk::kw_auto && j >= at(k).begin + 2 &&
+                                        (kind(j - 2) == Tk::less || kind(j - 2) == Tk::comma);
+      if (initializer || braced_auto_argument) {
         j = match(j);
         continue;
       }
@@ -592,6 +574,7 @@ void Splitter::general(u32 k, u32& unnamed_types) {
       }
       j = match(j);  // a brace initializer, `int x{1}`
       continue;
+    }
     default:
       ++j;
       continue;
@@ -745,10 +728,11 @@ private:
     for (u32 n = key + 1; n < it.brace_begin; ++n) {
       Tk t = kind(n);
       if (t == Tk::l_square || t == Tk::l_paren) n = match(n) - 1;
+      else if (gnu_extension(n)) n = match(n + 1) - 1;
       else if (t == Tk::less) ++angle;
       else if (t == Tk::greater) --angle;
       else if (t == Tk::colon && angle <= 0) break;
-      else if (t == Tk::identifier && angle <= 0 && !is_name(n, "final")) {
+      else if (t == Tk::identifier && angle <= 0 && (is_enum || !is_name(n, "final"))) {
         if (kind(n + 1) == Tk::coloncolon) {
           if (qual == none) qual = n;
         } else {
@@ -765,7 +749,8 @@ private:
       }
       add(k, std::string(name(head)), head,
           name_flag::type | name_flag::definition | (friend_ ? name_flag::friend_ : 0));
-    } else if (!is_enum && it.unnamed_type_ordinal != none) {
+    } else if (is_enum || it.unnamed_type_ordinal != none) {
+      // The type has the first declaration ordinal even when it binds no name.
       add(k, {}, key, name_flag::type | name_flag::definition);
     }
     if (is_enum) {
@@ -872,10 +857,11 @@ private:
       u32 n = key + 1;
       if (kind(key) == Tk::kw_enum) {
         if (kind(n) == Tk::kw_class || kind(n) == Tk::kw_struct) ++n;
-        while ((kind(n) == Tk::l_square && kind(n + 1) == Tk::l_square) ||
-               (is_name(n, "__attribute__") && kind(n + 1) == Tk::l_paren))
-          n = match(kind(n) == Tk::l_square ? n : n + 1);
       }
+      while ((kind(n) == Tk::l_square && kind(n + 1) == Tk::l_square) ||
+             ((is_name(n, "__attribute__") || (is_class_key(kind(key)) && kind(n) == Tk::kw_alignas)) &&
+              kind(n + 1) == Tk::l_paren))
+        n = match(kind(n) == Tk::l_square ? n : n + 1);
       u32 head = none;
       for (; n < limit && (kind(n) == Tk::identifier || kind(n) == Tk::coloncolon); ++n) {
         if (kind(n) == Tk::identifier) head = n;
@@ -888,6 +874,22 @@ private:
     bool in_class = it.parent != none && out_.items[it.parent].kind == ItemKind::class_def;
     f.definition = it.has_body() || !(f.type || (is_extern && !has_init) || (in_class && is_static && !is_inline));
     declarators(k, s, limit, f);
+    // Keep the possible introduction after the declarator ordinals.
+    if (in_class && !f.friend_ && !it.names.empty() && !it.template_depth) {
+      for (u32 j = s; j + 2 < limit; ++j) {
+        Tk d = kind(j);
+        if (is_class_key(d) && kind(j + 1) == Tk::identifier &&
+            kind(j + 2) != Tk::coloncolon && kind(j + 2) != Tk::less) {
+          add(k, std::string(name(j + 1)), j + 1, name_flag::type);
+          it.names.back().member_elaborated_candidate = true;
+          break;
+        }
+        if (d != Tk::kw_const && d != Tk::kw_volatile && d != Tk::kw_typedef &&
+            d != Tk::kw_static && d != Tk::kw_inline && d != Tk::kw_extern &&
+            d != Tk::kw_constexpr && d != Tk::kw_mutable && d != Tk::kw_virtual)
+          break;
+      }
+    }
   }
 
   // The declarator-ids of the init-declarators in [s, limit): split at depth-0 commas; template
@@ -923,6 +925,7 @@ private:
     u32 qual_begin = none;
     u32 qual_end = none;
     bool function = false;
+    bool has_type = !first;  // later declarators share the first one's decl-specifiers
     u32 n = from;
     while (n < to) {
       Tk t = kind(n);
@@ -932,6 +935,7 @@ private:
                    t == Tk::kw_sizeof) &&
                   kind(n + 1) == Tk::l_paren) ||
                  gnu_extension(n) || (transform_trait(n) && kind(n + 1) == Tk::l_paren)) {
+        has_type = has_type || t == Tk::kw_decltype || transform_trait(n);
         n = match(n + 1);
       } else if (t == Tk::identifier || t == Tk::coloncolon) {
         if (t == Tk::coloncolon || kind(n + 1) == Tk::coloncolon || (kind(n + 1) == Tk::less && angle_then_scope(n + 1, to))) {
@@ -945,7 +949,16 @@ private:
         qual_end = n;
         qual = none;
         n = kind(n + 1) == Tk::less ? match_angle(n + 1, to) : n + 1;
+        // An earlier type spelling distinguishes `T f [[attr]] (int)` from `T [[attr]] (f)`.
+        if (has_type) {
+          while (n < to) {
+            if (kind(n) == Tk::l_square && kind(n + 1) == Tk::l_square) n = match(n);
+            else if (is_name(n, "__attribute__") && kind(n + 1) == Tk::l_paren) n = match(n + 1);
+            else break;
+          }
+        }
         cand_end = n;
+        has_type = true;
       } else if (t == Tk::tilde && kind(n + 1) == Tk::identifier) {
         cand = n;
         spelled = "~" + std::string(name(n + 1));
@@ -996,6 +1009,7 @@ private:
       } else if (t == Tk::l_square || t == Tk::equal || t == Tk::l_brace || t == Tk::colon || t == Tk::semi) {
         break;
       } else {
+        has_type = has_type || simple_type_keyword(t);
         // The qualifier belongs to `C::*`, not to the name this declarator introduces.
         if (t == Tk::star && n > from && kind(n - 1) == Tk::coloncolon) qual = none;
         if (t == Tk::less) {

@@ -83,6 +83,12 @@ struct DeclSema {
   // A template's template-head ([temp.pre]); empty for a declaration that is not a template.
   SeqId<TemplateParamSema> template_params;
   u8 bit_width = 0;  // a non-static data member declared as a bit-field ([class.bit])
+  bool is_virtual = false;  // a virtual member function ([class.virtual])
+  bool is_explicit = false;  // a constructor with a bare explicit specifier ([dcl.fct.spec])
+  bool is_mutable = false;  // a mutable non-static data member ([dcl.stc])
+  // A named function declarator spelled an exception specifier, even if its type does not retain it.
+  bool has_written_noexcept = false;
+  bool hidden_visibility = false;  // an explicit GNU visibility("hidden") attribute on this declaration
   constexpr bool operator==(const DeclSema&) const = default;
 };
 
@@ -132,7 +138,8 @@ struct ClassDef {
 
 namespace local_flag {
 inline constexpr u16 requires_parameter = 2;  // notation without storage ([expr.prim.req.general])
-inline constexpr u16 structured_binding = 4;  // a local reference slot that names an element ([dcl.struct.bind])
+inline constexpr u16 structured_binding = 4;  // a local reference slot for a structured binding ([dcl.struct.bind])
+inline constexpr u16 binding_reference_member = 32;  // the slot type is also the binding's referenced type
 }
 
 // A block-scope declaration: plain data of the body tree (§4.4). `entity` is set for those that
