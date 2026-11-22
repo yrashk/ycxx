@@ -1335,7 +1335,7 @@ class Gen {
   // any `useq` group.
   int effects(At a) {
     if (a.id == NodeId::none) return 0;
-    if (is<ast::Assign>(a)) return 2;
+    if (is<ast::Assign>(a) || is<ast::ExplicitDestroy>(a)) return 2;
     if (is<ast::VariadicBuiltin>(a) && get<ast::VariadicBuiltin>(a).op != ast::VaOp::end) return 2;
     if (is<ast::Unary>(a)) {
       auto op = get<ast::Unary>(a).op;
@@ -1391,6 +1391,14 @@ class Gen {
     if (is<ast::NewArray>(a)) return new_array(a);
     if (is<ast::DeleteArray>(a)) {
       delete_array(a);
+      return std::nullopt;
+    }
+    if (is<ast::ExplicitDestroy>(a)) {
+      const auto d = get<ast::ExplicitDestroy>(a);
+      const At object = child(a, d.object);
+      const ValueId address = rvalue(object);
+      if (d.function != ast::EntityId::none) destroy({address, facts_.pointee(info(object).type)}, d.function);
+      stateful(ir::Op::obj__end, {}, std::span(&address, 1));
       return std::nullopt;
     }
     if (is<ast::Call>(a)) return call(a);
