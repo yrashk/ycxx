@@ -1492,10 +1492,23 @@ public:
     }
     if (ts.is_class(from_object) && ts.is_class(to_object)) {
       const EntityId f = ts.class_of(from_object), t = ts.class_of(to_object);
+      const engine::Loc loc = type_trait_loc(begin);
+      // [meta.rel]: both operands are complete types, as for convertibility.
+      for (EntityId c : f == t ? std::vector{f} : std::vector{f, t}) {
+        const auto demand = q_->type_trait_at_demand(c, loc);
+        if (demand ? *demand : q_->is_complete_at_source(c)) continue;
+        if (!q_->type_trait_instantiation_failed(c))
+          diag_at(loc, Diag::convertibility_incomplete, c == f ? from_object : to_object, name);
+        return {NodeId::none, begin, end};
+      }
       const std::optional<bool> related = f == t ? std::optional(true) : reaches_base(f, t);
-      // Reference-related: a class prvalue is materialized and bound when the cv-qualifiers allow.
-      if (related == true)
+      // Reference-related: a class prvalue is materialized and bound when the cv-qualifiers allow
+      // and, for a base, the derived-to-base conversion is valid: an inaccessible or ambiguous
+      // base makes the binding ill-formed, with no fallback ([dcl.init.ref]/5).
+      if (related == true) {
+        if (f != t && !unique_public_base(f, t)) return bool_literal(false, begin, end);
         return bool_literal(binds_rvalue && prvalue && cv_within(Types::cv(from_object), Types::cv(to_object)), begin, end);
+      }
     }
     diag_at(type_trait_loc(begin), Diag::convertibility_unsupported, name, target, source);
     return {NodeId::none, begin, end};
