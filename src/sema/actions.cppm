@@ -4723,8 +4723,7 @@ public:
   struct OwnDecl {
     NameId name;
     ast::DeclSema sema;
-    // Within an unnamed enumeration's list, its earlier enumerators already have values, but
-    // their enclosing entity depends on the underlying type chosen at the closing brace.
+    // An earlier enumerator's value in the active list when publication waits for its type.
     ConstId enum_initializer = ConstId::none;
   };
   std::vector<OwnDecl> own;
@@ -5075,9 +5074,16 @@ public:
   }
   // An enumerator ([dcl.enum]): a prvalue of its enumeration with its value.
   Ex enumerator(EntityId e, QualType t, u32 begin, u32 end) {
+    if (q_->value_dependent_member(e))
+      return dependent_node({}, begin, end, Types::unqualified(t), ValueCategory::prvalue, expr_flag::unrepresented_value);
     auto v = q_->constant_value(e);
     if (!v) return {NodeId::none, begin, end};  // its enumeration was diagnosed
     return literal(Types::unqualified(t), *v, ValueCategory::prvalue, begin, end);
+  }
+  Ex enumerator_in_list(const OwnDecl& d, u32 begin, u32 end) {
+    if (d.enum_initializer != ConstId::none)
+      return literal(d.sema.type, d.enum_initializer, ValueCategory::prvalue, begin, end);
+    return enumerator(d.sema.entity, d.sema.type, begin, end);
   }
   // The enumerator `name` of enumeration `e`, if it has one.
   std::optional<Ex> find_enumerator(EntityId e, NameId name, u32 begin, u32 end) {
@@ -5086,7 +5092,7 @@ public:
       for (const OwnDecl& d : own)
         if (d.name == name && d.sema.kind == ast::DeclKind::enumerator && d.sema.entity != EntityId::none &&
             w_->entities.rec(d.sema.entity).scope == e)
-          return enumerator(d.sema.entity, d.sema.type, begin, end);
+          return enumerator_in_list(d, begin, end);
     }
     if (const EnumRec* r = enum_rec(e))
       for (const EnumeratorRec& x : r->enumerators)
@@ -6456,12 +6462,8 @@ public:
       ExprInfo info{Types::unqualified(p->type), ValueCategory::prvalue, expr_flag::dependent};
       return node(ast::Literal{info, v}, begin, end, info);
     }
-    if (const auto* declaration = earlier_nested_enumerator(name)) {
-      // An unnamed enum gets its entity after the underlying type is known.
-      if (declaration->enum_initializer != ConstId::none)
-        return literal(declaration->sema.type, declaration->enum_initializer, ValueCategory::prvalue, begin, end);
-      return enumerator(declaration->sema.entity, declaration->sema.type, begin, end);
-    }
+    if (const auto* declaration = earlier_nested_enumerator(name))
+      return enumerator_in_list(*declaration, begin, end);
     // The enclosing class's members ([basic.scope.class]).
     if (current_class != EntityId::none) {
       if (auto r = class_member(current_class, name, begin, end, begin, std::nullopt, /*unqualified=*/true)) return *r;
@@ -7305,6 +7307,12 @@ public:
     return !r || !r->scoped;
   }
   bool is_scoped_enum(QualType t) { return types().is_enum(t) && !is_unscoped_enum(t); }
+  // An unscoped member enum's inferred type waits for its dependent values to be replayed.
+  bool deferred_enum_layout(QualType t) {
+    if (!types().is_enum(t)) return false;
+    const EnumRec* r = enum_rec(types().enum_of(t));
+    return r && !r->underlying;
+  }
   QualType underlying_of(QualType t) {
     const EnumRec* r = enum_rec(types().enum_of(t));
     return r && r->underlying ? *r->underlying : builtin(Builtin::int_);
@@ -8009,6 +8017,7 @@ public:
     QualType st = builtin(w_->target.size_type);
     if (types().is_dependent(t)) return dependent_node({}, begin, end, st);
     t = types().referee(t);  // [expr.sizeof]/2, [expr.alignof]/3
+    if (deferred_enum_layout(types().innermost_array_element(t))) return dependent_node({}, begin, end, st);
     if (!has_peer_virtual_layout(t) && !require_supported_virtual_layout(t, begin)) return {NodeId::none, begin, end};
     std::optional<u64> n = layout_of(t, align);
     if (!n) {
@@ -8091,7 +8100,7 @@ public:
       ast::BuiltinLayout l = ast::member_pointer_layout(w_->target, types().is_function(r.inner));
       return ast::scalar_placed(l.size, l.align);
     }
-    case TypeKind::enum_: return is_complete(t) ? place_of(underlying_of(t)) : std::nullopt;
+    case TypeKind::enum_: return is_complete(t) && !deferred_enum_layout(t) ? place_of(underlying_of(t)) : std::nullopt;
     case TypeKind::array: {
       if (r.bound_value == ConstId::none) return std::nullopt;
       auto e = place_of(r.inner);
