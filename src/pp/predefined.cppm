@@ -275,7 +275,8 @@ std::string target_macros(const ast::Target& t) {
       def(std::format("__{}_C_SUFFIX__", c), suffix(x));
       std::string_view s = suffix(x);
       // `c ## L` as GCC and glibc spell it: glibc's <stdint.h> redefines __INT64_C and
-      // __UINT64_C, and a redefinition must match in white-space separation too (#657).
+      // __UINT64_C, and a redefinition must match in white-space separation too (#657). The
+      // others follow GCC's spelling for uniformity.
       if (s.empty()) out += std::format("#define __{}_C(c) c\n", c);
       else out += std::format("#define __{}_C(c) c ## {}\n", c, s);
     }
