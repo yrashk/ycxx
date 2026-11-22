@@ -6128,7 +6128,8 @@ public:
         }
         if (!e.glvalue())
           return to_base(materialize(e, types().add_cv(e.type(), object_cv(t)), extend), types().class_of(t), at_);
-        Ex b = to_base(e, types().class_of(t), at_);
+        const bool binding_lvalue_reference = !rr.rvalue_ref && e.cat() == ValueCategory::lvalue;
+        Ex b = to_base(e, types().class_of(t), at_, binding_lvalue_reference);
         return b.ok() && extend ? extended(b) : b;
       }
     }
@@ -8245,7 +8246,7 @@ public:
   // `e`, a glvalue of class type or a pointer to one, converted to its base class `b`
   // ([conv.ptr]/3, [dcl.init.ref]/5, [expr.static.cast]): one derived-to-base conversion per
   // direct base on the way, the cv-qualifiers kept.
-  Ex to_base(Ex e, EntityId b, u32 at_) {
+  Ex to_base(Ex e, EntityId b, u32 at_, bool binding_lvalue_reference = false) {
     if (!e.ok()) return e;
     bool pointer = types().is_pointer(e.type());
     QualType ct = pointer ? types().pointee(e.type()) : e.type();
@@ -8255,10 +8256,12 @@ public:
     if (!check_base_path(ct, b, path, paths, at_)) return {NodeId::none, e.begin, e.end};
     if (unevaluated == 0) {
       const auto* from = class_rec(types().class_of(ct));
+      // A marked automatic object's primary-base edge is available for direct reference binding.
       const bool peer_base = from && path->size() == 1 &&
                              ((from->peer_virtual_layout == PeerVirtualLayout::primary_base &&
                                (pointer || peer_object_lvalue(e))) ||
-                              (from->peer_automatic_primary_base == b && !pointer && default_constructed_peer_object(e)));
+                              (binding_lvalue_reference && from->peer_automatic_primary_base == b &&
+                               default_constructed_peer_object(e)));
       if (!peer_base && !require_supported_virtual_layout(ct, at_)) return {NodeId::none, e.begin, e.end};
     }
     for (EntityId step : *path) {
