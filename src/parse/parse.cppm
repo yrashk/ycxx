@@ -1941,7 +1941,7 @@ std::optional<QualType> AtItem::replay_member_exception(sema::Sema& caller, cons
   if (const auto pattern = p_->member_exception_patterns_.find(item); pattern != p_->member_exception_patterns_.end()) {
     if (!pattern->second) return std::nullopt;
     source.instantiation_calls = pattern->second->calls;
-    replay.expansions = pattern->second->expansions;
+    replay.expansions_override = &pattern->second->expansions;
   }
   const auto before = replay.diag_count();
   replay.current_class = record.scope;
