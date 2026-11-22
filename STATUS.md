@@ -1078,11 +1078,15 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   the base subobject.
   Omitted trailing arithmetic fields are value-initialized when they have no written default
   member initializer. With a sole base expression, the base must have no conversion functions.
+  For a named non-template class at namespace scope, an omitted field's written default can
+  use call-free arithmetic on literals and fields of the initialized base. The replay binds
+  implicit and explicit `this` to the destination object. Explicit clauses keep the enclosing
+  receiver and an explicit field initializer takes precedence over the default.
 - Parenthesized arrays, nested fields, unions, reference members, bit-fields, and nontrivial
   destruction remain in [#301](https://github.com/yrashk/ycxx/issues/301). The issue also tracks
-  multiple bases, other base prvalues, omitted default member initializers in derived aggregates,
-  constant evaluation of base copies, static storage and functional casts. Linux x86-64 runtime
-  conversions between floating-point and integer types remain in
+  multiple bases, other base prvalues, default member initializers with calls, mutation or reads
+  outside the base, constant evaluation of base copies, static storage and functional casts.
+  Linux x86-64 runtime conversions between floating-point and integer types remain in
   [#201](https://github.com/yrashk/ycxx/issues/201).
   Spec-only fixtures are in `tests/own/parenthesized-aggregate/`.
 

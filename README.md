@@ -208,7 +208,8 @@ arithmetic fields. Supplied expressions initialize the fields in declaration ord
 fields use their default member initializer when available and otherwise get zero. A runtime
 declaration can also initialize one flat public direct base from an exact-type lvalue or an
 unqualified braced prvalue such as `B{7}`. Omitted trailing arithmetic fields of that aggregate
-are value-initialized when they have no written default member initializer.
+can use call-free default member initializers that read the initialized base. Fields with no
+written default member initializer are value-initialized.
 [#301](https://github.com/yrashk/ycxx/issues/301)
 
 **Language on macOS.** Programs can use:
