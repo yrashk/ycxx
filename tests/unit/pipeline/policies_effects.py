@@ -310,6 +310,28 @@ with tempfile.TemporaryDirectory() as directory:
         finally:
             subprocess.run([compiler, "ctl", "shutdown"], cwd=root, env=handler_env, capture_output=True, timeout=10)
 
+    checked_provider_declaration = "[[=fx::contract<Empty>{}]] int pure(int n) noexcept"
+    checked_provider_definition = checked_provider_declaration + " { return n + 1; }"
+    handler_caller = write("handler_caller.cpp", checked_handler_source.replace(
+        checked_provider_definition, checked_provider_declaration + ";"))
+    handler_peer = write("handler_peer.cpp", '#include "effects.hpp"\n' + checked_provider_definition + "\n")
+    unchecked_handler_peer = write("unchecked_handler_peer.cpp", handler_peer.read_text().replace(
+        "[[=fx::contract<Empty>{}]] ", ""))
+
+    darwin = [*base, "--no-daemon", "--target=arm64-apple-darwin"]
+    darwin_objects = []
+    for source in (handler_caller, handler_peer, unchecked_handler_peer):
+        obj = source.with_suffix(".darwin.o")
+        invoke([*darwin, "-c", source, "-o", obj])
+        darwin_objects.append(obj)
+    darwin_caller, darwin_peer, darwin_unchecked = darwin_objects
+    darwin_program = root / "darwin-handler"
+    invoke([*darwin, darwin_caller, darwin_peer, "-o", darwin_program])
+    assert darwin_program.read_bytes().startswith(bytes.fromhex("cffaedfe"))
+    darwin_rejected = root / "darwin-handler-unverified"
+    invoke([*darwin, darwin_caller, darwin_unchecked, "-o", darwin_rejected], error="has no matching guarantee")
+    assert not darwin_rejected.exists()
+
     if sys.platform.startswith("linux") and platform.machine() == "x86_64":
         resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
         executable = root / "effects"
@@ -333,13 +355,6 @@ with tempfile.TemporaryDirectory() as directory:
         def link(*inputs, error=None):
             return invoke([*native, "-o", executable, *inputs], error)
 
-        checked_provider_declaration = "[[=fx::contract<Empty>{}]] int pure(int n) noexcept"
-        checked_provider_definition = checked_provider_declaration + " { return n + 1; }"
-        handler_caller = write("handler_caller.cpp", checked_handler_source.replace(
-            checked_provider_definition, checked_provider_declaration + ";"))
-        handler_peer = write("handler_peer.cpp", '#include "effects.hpp"\n' + checked_provider_definition + "\n")
-        unchecked_handler_peer = write("unchecked_handler_peer.cpp", handler_peer.read_text().replace(
-            "[[=fx::contract<Empty>{}]] ", ""))
         caller_object = compile_object(handler_caller, "handler_caller")
         peer_object = compile_object(handler_peer, "handler_peer")
         link(caller_object, peer_object)
