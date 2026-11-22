@@ -4139,8 +4139,11 @@ public:
     }
     if (!expect(Tk::l_paren)) return {NodeId::none, begin, pos()};
     std::vector<Ex> args;
+    // Each argument may be a pack expansion, `T(a...)` ([expr.type.conv], [temp.variadic]/5), as
+    // a call's are.
     if (!is(Tk::r_paren))
-      do args.push_back(assignment_expression());
+      do
+        for (const Ex& x : expandable([&] { return assignment_expression(); })) args.push_back(x);
       while (accept(Tk::comma));
     if (!expect(Tk::r_paren)) return {NodeId::none, begin, pos()};
     const bool lambda_result = lambda_result_operand_ == begin && is(Tk::semi);
