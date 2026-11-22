@@ -74,12 +74,25 @@ struct Value {
   constexpr bool operator==(const Value&) const = default;
 };
 
+// The addressed fields of a flat record whose aggregate value is already known.
+struct ConstantRecordField {
+  QualType type;
+  u64 offset;
+  bool mutable_;
+};
+
+struct ConstantRecordLayout {
+  u64 size;
+  std::vector<ConstantRecordField> fields;
+};
+
 // A namespace-scope variable, as the host answers for it (query-engine.md §B7: in the engine,
 // `constant_value(V, ctx)` for one usable in constant expressions).
 struct GlobalVar {
   QualType type{};                // as declared, cv included
   std::optional<ConstId> value;   // its value when constant-initialized; else zero
   bool usable = false;            // usable in constant expressions ([expr.const])
+  std::optional<ConstantRecordLayout> record{};
 };
 
 // A callee, as the host answers for it (in the engine, a fetch of `function_ir(F, ctx)`).
@@ -171,6 +184,7 @@ private:
     EntityId entity{};
     ConstId literal{};
     u32 cell0 = 0, ncells = 0;
+    const ConstantRecordLayout* record = nullptr;  // owned by global_info_
   };
   struct PathNode {
     u32 parent = 0;
@@ -200,6 +214,7 @@ private:
     u32 obj = 0;
     u32 cell0 = 0, ncells = 0;
     QualType type{};
+    bool mutable_field = false;
   };
   // An unsequenced group ([intro.execution]): the accesses its operands made so far.
   struct Access {
@@ -226,9 +241,10 @@ private:
 
   // ------------------------------------------------------------ objects
 
-  u32 make_object(QualType t, Origin o);
+  u32 make_object(QualType t, Origin o, const ConstantRecordLayout* record = nullptr);
   void fill_zero(QualType t, u32 cell);
-  bool fill_array_constant(QualType t, u32 cell, ConstId value);
+  bool fill_constant(QualType t, u32 cell, ConstId value);
+  bool fill_record_constant(const Object& object, ConstId value);
   std::optional<Place> resolve(const Value& p, std::span<const u64> extra, bool& past);
   Flow locate(const Value& p, std::span<const u64> extra, QualType t, Use use, bool volatile_, Place& out);
   Flow note_access(const Place& p, bool write);
@@ -237,6 +253,7 @@ private:
   Flow global_object(EntityId e, u32& out);
   Flow address(u32 obj, QualType pointee, i64 offset, Value& out);
   Flow address_from_path(u32 obj, QualType pointee, std::span<const u32> indices, i64 offset, Value& out);
+  u64 complete_size(const Object& object);
   i64 offset_of(const Value& p);
   bool may_overlap(const Value& a, const Value& b);
 
@@ -409,12 +426,13 @@ u32 Machine::extend(u32 path, std::span<const u64> words) {
 
 // ------------------------------------------------------------------ objects
 
-u32 Machine::make_object(QualType t, Origin o) {
+u32 Machine::make_object(QualType t, Origin o, const ConstantRecordLayout* record) {
   Object ob;
   ob.type = in_->canonical(t);
   ob.origin = o;
   ob.cell0 = u32(cells_.size());
-  ob.ncells = u32(shape(t).leaves);
+  ob.ncells = u32(record ? record->fields.size() : shape(t).leaves);
+  ob.record = record;
   cells_.resize(cells_.size() + ob.ncells);
   objects_.push_back(ob);
   return u32(objects_.size() - 1);
@@ -433,7 +451,7 @@ void Machine::fill_zero(QualType t, u32 cell) {
 
 // [dcl.init.aggr]: each nested array supplies a value for every element. Leave pointer and
 // other scalar constants to the usual lazy load, which can ask the host for another global.
-bool Machine::fill_array_constant(QualType t, u32 cell, ConstId value) {
+bool Machine::fill_constant(QualType t, u32 cell, ConstId value) {
   const ast::Values& vs = in_->values;
   const Shape& s = shape(t);
   switch (s.kind) {
@@ -444,7 +462,7 @@ bool Machine::fill_array_constant(QualType t, u32 cell, ConstId value) {
     if (!similar(t, aggregate.type) || elements.size() != s.bound) return false;
     u32 leaves = u32(shape(s.inner).leaves);
     for (ConstId element : elements) {
-      if (!fill_array_constant(s.inner, cell, element)) return false;
+      if (!fill_constant(s.inner, cell, element)) return false;
       cell += leaves;
     }
     return true;
@@ -466,6 +484,20 @@ bool Machine::fill_array_constant(QualType t, u32 cell, ConstId value) {
   return true;
 }
 
+bool Machine::fill_record_constant(const Object& object, ConstId value) {
+  const auto& values = in_->values;
+  if (!values.is<ast::VAggregate>(value)) return false;
+  const auto aggregate = values.get<ast::VAggregate>(value);
+  const auto elements = in_->seqs.elements(aggregate.elems);
+  const auto& fields = object.record->fields;
+  if (!similar(object.type, aggregate.type) || elements.size() != fields.size()) return false;
+  for (std::size_t i = 0; i < fields.size(); ++i)
+    if (shape(fields[i].type).leaves != 1 ||
+        !fill_constant(fields[i].type, object.cell0 + u32(i), elements[i]))
+      return false;
+  return true;
+}
+
 // The subobject `p` designates, followed by `extra`. `past` is set when it is one past the end
 // of an object; then the place is the object it is past. None when the path does not fit the
 // object's type.
@@ -477,6 +509,16 @@ std::optional<Machine::Place> Machine::resolve(const Value& p, std::span<const u
   for (u64 w : extra) path.push_back(ir::decode_step(w));
   for (std::size_t i = 0; i < path.size(); ++i) {
     if (past) return std::nullopt;  // a step below a past-the-end place
+    if (i == 0 && path[i].step == ir::Step::field && ob.record) {
+      const auto index = path[i].index;
+      if (index >= ob.record->fields.size()) return std::nullopt;
+      const auto& field = ob.record->fields[index];
+      pl.type = field.type;
+      pl.cell0 += index;
+      pl.ncells = 1;
+      pl.mutable_field = field.mutable_;
+      continue;
+    }
     const Shape& s = shape(pl.type);
     if (path[i].step != ir::Step::elem || s.kind != Kind::array) return std::nullopt;
     if (path[i].index > s.bound) return std::nullopt;
@@ -520,7 +562,7 @@ Machine::Flow Machine::locate(const Value& p, std::span<const u64> extra, QualTy
     if (shape(pl->type).is_const && pl->ncells && cells_[pl->cell0].life == Life::alive)
       return fail(Reason::modify_const);
     if (config_.mode == Mode::constant && ob.outside) return fail(Reason::modify_outside);
-  } else if (config_.mode == Mode::constant && !ob.usable) {
+  } else if (config_.mode == Mode::constant && (!ob.usable || (ob.outside && pl->mutable_field))) {
     return fail(Reason::not_usable);
   }
   return use == Use::callee_read ? Flow::next : note_access(*pl, use == Use::write);
@@ -620,7 +662,8 @@ Machine::Flow Machine::address_from_path(u32 obj, QualType pointee, std::span<co
     return fail(Reason::unsupported_constant);
   i64 start = offset_of(pointer);
   if (offset != start) {
-    if (past || offset < start || u64(offset - start) != shape(place->type).size)
+    const u64 size = indices.empty() ? complete_size(objects_[obj]) : shape(place->type).size;
+    if (past || offset < start || u64(offset - start) != size)
       return fail(Reason::unsupported_constant);
     pointer.past = true;
   }
@@ -642,7 +685,7 @@ Machine::Flow Machine::address(u32 obj, QualType pointee, i64 offset, Value& out
         out = Value{VKind::object, false, obj, path};
         return Flow::next;
       }
-      if (off == cs.size && path == 0) {
+      if (path == 0 && off == complete_size(objects_[obj])) {
         out = Value{VKind::object, true, obj, path};
         return Flow::next;
       }
@@ -676,19 +719,23 @@ Machine::Flow Machine::global_object(EntityId e, u32& out) {
     return Flow::suspend;
   }
   if (!info->second) return fail(Reason::ill_formed);
-  const GlobalVar g = *info->second;
+  const GlobalVar& g = *info->second;
   const Shape s = shape(g.type);
+  const u64 leaves = g.record ? g.record->fields.size() : s.leaves;
   constexpr u64 max_cells = std::numeric_limits<u32>::max();
-  if (s.leaves == 0 || s.leaves > max_cells || cells_.size() > max_cells - s.leaves ||
-      (g.value && s.kind != Kind::array && s.leaves != 1))
+  if (leaves == 0 || leaves > max_cells || cells_.size() > max_cells - leaves ||
+      (g.record && (!g.usable || !g.value)) ||
+      (!g.record && g.value && s.kind != Kind::array && leaves != 1))
     return fail(Reason::unsupported_constant);
-  u32 o = make_object(g.type, Origin::global);
+  u32 o = make_object(g.type, Origin::global, g.record ? &*g.record : nullptr);
   Object& ob = objects_[o];
   ob.entity = e;
   ob.outside = true;
   ob.usable = g.usable;
-  if (g.value && s.kind == Kind::array) {
-    if (!fill_array_constant(g.type, ob.cell0, *g.value)) return fail(Reason::unsupported_constant);
+  if (g.record) {
+    if (!fill_record_constant(ob, *g.value)) return fail(Reason::unsupported_constant);
+  } else if (g.value && s.kind == Kind::array) {
+    if (!fill_constant(g.type, ob.cell0, *g.value)) return fail(Reason::unsupported_constant);
   } else if (g.value) {
     cells_[ob.cell0] = {Life::alive, Fill::constant, {VKind::none, false, 0, std::to_underlying(*g.value)}};
   } else {
@@ -971,17 +1018,28 @@ Machine::Flow Machine::pointer_index(const Value& p, QualType elem, u32& base_pa
   return Flow::next;
 }
 
+u64 Machine::complete_size(const Object& object) {
+  return object.record ? object.record->size : shape(object.type).size;
+}
+
 // The byte offset of an object pointer from the start of its complete object: its address,
 // relative to the object.
 i64 Machine::offset_of(const Value& p) {
-  QualType cur = objects_[p.ref].type;
+  const Object& object = objects_[p.ref];
+  QualType cur = object.type;
   i64 off = 0;
   for (PathStep st : steps_of(u32(p.bits))) {
+    if (st.step == ir::Step::field) {
+      const auto& field = object.record->fields[st.index];
+      off += i64(field.offset);
+      cur = field.type;
+      continue;
+    }
     const Shape& s = shape(cur);
     off += i64(st.index * shape(s.inner).size);
     cur = s.inner;
   }
-  if (p.past) off += i64(shape(cur).size);
+  if (p.past) off += i64(p.bits == 0 ? complete_size(object) : shape(cur).size);
   return off;
 }
 
@@ -1031,7 +1089,7 @@ Machine::Flow Machine::compare_pointers(Frame& f, NodeId n, ir::Pred pred, const
   bool same = a.kind == b.kind && (a.kind == VKind::null || a.ref == b.ref);
   if (!same && a.kind == VKind::object && b.kind == VKind::object) {
     auto at_end = [&](const Value& p) {
-      i64 size = i64(shape(objects_[p.ref].type).size);
+      i64 size = i64(complete_size(objects_[p.ref]));
       return size != 0 && offset_of(p) == size;
     };
     if (at_end(a) || at_end(b)) return fail(Reason::unspecified_comparison);
