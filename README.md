@@ -560,7 +560,9 @@ peer-owned objects with an ordinary root, including a derived class with that si
 base, at most one integral field and at most one override. Consumers can upcast those derived
 views, access ordinary integral members, and query `sizeof` and `alignof` for the Itanium layout.
 A translation unit can also define one non-key virtual member of an eligible root out of class.
-For that case, the peer provides the key function, virtual table and RTTI.
+For that case, the peer provides the key function, virtual table and RTTI. On Linux x86-64,
+a caller can also dispatch through a peer-owned abstract interface with one or two
+public pure virtual slots using fixed integer signatures and bare `noexcept`.
 [#309](https://github.com/yrashk/ycxx/issues/309)
 
 **Structured bindings.** Local bindings can copy or alias scalar-element arrays, including
