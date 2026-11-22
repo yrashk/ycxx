@@ -2920,9 +2920,15 @@ and runtime integration with ycxx's own linker remain under [#89]. See the
 `noexcept(expression)` is a constant `bool` and leaves its operand unevaluated
 ([expr.unary.noexcept]). The compiler checks the selected function or constructor,
 argument operations, and temporary destruction ([except.spec]). A construction
-in a function template body can be checked after substitution. Dependent
-member-template exception specifications are tracked in
-[#713](https://github.com/yrashk/ycxx/issues/713).
+in a function template body can be checked after substitution.
+
+## Dependent exception specifications on member templates (#713)
+
+A selected ordinary member function template can instantiate its written
+`noexcept(expression)` with the class and function template arguments
+([except.spec], [temp.inst]). Its parameter and class scopes are available
+during replay. Class instantiation leaves the specification of an unused
+member template deferred.
 
 ## The address of an overload set, ι (#313, #337, 2026-11-19)
 

@@ -440,6 +440,13 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
 
 ## Data the front end needs
 
+- **Deferred analysis reads committed parameter lists.** On #713, the exception-specification
+  replay read a declaration copied by `Program::declared` before its item committed. A draft
+  `SeqId<ParamSema>` happened to name a different parameter list in the global interner.
+  - Do: read the committed member item for the relevant class specialization before using the
+    global sequence interner. Check a parameter reference independently in the pattern and its
+    replay when a name is found in the definition and lost after substitution.
+
 - **Unicode tables from Python, plus one UCD file.** Python's `unicodedata` (Unicode 17.0 in the
   pinned Python) gives categories, combining classes, decompositions, normalization and names;
   `str.isidentifier` implements XID_Start/XID_Continue. It cannot enumerate name aliases. The
