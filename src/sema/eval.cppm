@@ -325,6 +325,35 @@ private:
     return std::nullopt;
   }
 
+  // Use the same field order and layout as initialization and native member access.
+  std::optional<interp::ConstantRecordLayout> constant_record_layout(QualType type) {
+    Types& types = s_->types();
+    type = types.canonical(type);
+    if (!types.is_class(type) || !Types::is_const(type) || Types::is_volatile(type) || !s_->is_aggregate(type))
+      return std::nullopt;
+    const EntityId entity = types.class_of(type);
+    const ClassRec* record = s_->class_rec(entity);
+    if (!record || record->union_ || !record->bases.empty() || record->fields.empty() ||
+        record->unapplied_layout || q_->class_layout_uncertain(entity) ||
+        !record->destructor_usable || record->destructor != EntityId::none)
+      return std::nullopt;
+    const auto layout = s_->class_layout(entity);
+    if (!layout) return std::nullopt;
+
+    interp::ConstantRecordLayout result{layout->size, {}};
+    result.fields.reserve(record->fields.size());
+    for (std::size_t i = 0; i < record->fields.size(); ++i) {
+      const FieldRec& field = record->fields[i];
+      const QualType field_type = types.canonical(field.type);
+      if (record->access_of(field.entity) != ast::Access::public_ || field.bit_width || field.no_unique_address ||
+          Types::is_volatile(field_type) || !types.is_integral(field_type) ||
+          ast::width_of(s_->world().target, *types.builtin_of(field_type)) > 64)
+        return std::nullopt;
+      result.fields.push_back({s_->field_access_type(field, type), layout->offsets[i], field.mutable_});
+    }
+    return result;
+  }
+
   struct Host {
     Questions* q;
     Evaluator* e;
@@ -336,7 +365,13 @@ private:
     interp::ready<std::optional<interp::GlobalVar>> global(EntityId v) {
       auto value = q->global(v);
       type_trait_failure |= q->type_trait_instantiation_failed(v);
-      return {value};
+      if (value && value->usable && value->value && e->s_->ins().values.is<ast::VAggregate>(*value->value)) {
+        // Block-scope statics also have stored initializers. Const qualification alone does
+        // not make a class variable potentially constant ([expr.const]).
+        if (e->s_->world().entities.rec(v).linkage != ast::Linkage::none)
+          value->record = e->constant_record_layout(value->type);
+      }
+      return {std::move(value)};
     }
     bool stop_requested() const { return false; }  // until the scheduler has stop tokens (#15)
   };
