@@ -408,6 +408,13 @@ void input() {
   check(mouse("\x1b[<69;1;1M").shift && mouse("\x1b[<69;1;1M").act == Mouse::Act::wheel_down, "shift with the wheel");
   check(mouse("\x1b[<2;300;100M").button == 2 && mouse("\x1b[<2;300;100M").x == 299, "a right press past column 223");
   check(mouse("\x1b[<35;5;5M").act == Mouse::Act::move, "motion with no button");
+  // Legacy reports (no 1006): one input each, bytes 32 above their values.
+  check(std::get<Mouse>(trace::parse_input("\x1b[M !\"")) == click(0, 1), "a legacy left press at column 0, row 1");
+  check(std::get<Mouse>(trace::parse_input("\x1b[M#qq")).act == Mouse::Act::release, "a legacy release");
+  check(std::get<Mouse>(trace::parse_input("\x1b[Ma!!")).act == Mouse::Act::wheel_down, "a legacy wheel");
+  // Horizontal wheels and extra buttons do nothing (keys no binding has).
+  for (std::string_view k : {"\x1b[<66;5;5M", "\x1b[<67;5;5M", "\x1b[<128;5;5M", "\x1b[<129;5;5M"})
+    check(std::holds_alternative<trace::Key>(trace::parse_input(k)), std::format("not a click or a scroll: {:?}", k));
   for (std::string_view k : {"q", "\x1b[A", "\x1b", "\x1b[<0;0;5M", "\x1b[<0;5M", "\x1b[<a;1;1M"})
     check(std::get<trace::Key>(trace::parse_input(k)).seq == k, std::format("a key, or a malformed report as one: {:?}", k));
 }
@@ -563,6 +570,26 @@ void browser(const std::filesystem::path& golden_path, bool update) {
   check(t.node(t.rows()[b.cursor()].node).ev.kind == "FunctionGen", "at the cell w2 was in");
   press(2, 1);
   check(b.view() == trace::View::tree, "the tree's tab");
+
+  // Review fixes: a double click is twice on the same thing; a lost release ends no drag; the pane
+  // gives the keys back when it is hidden; a marker cut off by the columns is not a target.
+  (void)b.handle(trace::Key{"t"});
+  press(9 + 10, 6, milliseconds{7000});
+  press(9 + 50, 6, milliseconds{7100});
+  check(b.view() == trace::View::timeline && b.time() == 50, "two clicks on different slices of a lane are no double click");
+  (void)b.handle(trace::Key{"t"});
+  (void)b.handle(click(72, 10));  // a press on the divider whose release is lost
+  (void)b.handle(click(10, 5));   // the next press, on a row
+  (void)b.handle(click(30, 5, trace::Mouse::Act::drag));
+  check(b.left_width() == 72 && !b.dragging(), "a lost release: the next press ends the drag");
+  press(90, 8);
+  check(b.focus() == trace::Focus::detail, "the pane has the keys");
+  b.resize(24, 90);
+  const std::size_t at = b.cursor();
+  (void)b.handle(trace::Key{"j"});
+  check(b.focus() == trace::Focus::tree && b.cursor() == at + 1, "a hidden pane gives the keys back to the tree");
+  b.resize(24, 120);
+  press(5, 3);
 
   // Help closes on a click; a click closes the filter prompt and keeps what was typed.
   (void)b.handle(trace::Key{"?"});

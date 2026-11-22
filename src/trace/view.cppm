@@ -40,6 +40,15 @@ using Input = std::variant<Key, Mouse>;
 // What a terminal sent, as one input. `\x1b[<0;12;5M` is a left press at column 11, row 4, and
 // `\x1b[<0;12;5m` its release; anything else is a key.
 Input parse_input(std::string_view seq) {
+  // A legacy report (`ESC [ M` and three bytes, each 32 more than its value) from a terminal that
+  // ignores 1006: read as one, so its bytes never act as keys.
+  if (seq.size() == 6 && seq.starts_with("\x1b[M")) {
+    const auto at = [&](std::size_t i) { return static_cast<std::uint32_t>(static_cast<unsigned char>(seq[i])); };
+    if (at(3) < 32 || at(4) < 33 || at(5) < 33) return Key{std::string(seq)};
+    const std::uint32_t b = at(3) - 32;
+    const bool release = (b & 3) == 3 && !(b & 64);
+    return parse_input(std::format("\x1b[<{};{};{}{}", release ? 0 : b, at(4) - 32, at(5) - 32, release ? 'm' : 'M'));
+  }
   if (seq.starts_with("\x1b[<") && seq.size() > 4 && (seq.back() == 'M' || seq.back() == 'm')) {
     std::array<std::uint32_t, 3> n{};
     std::string_view rest = seq.substr(3, seq.size() - 4);
@@ -51,6 +60,10 @@ Input parse_input(std::string_view seq) {
     }
     if (i != n.size() || n[1] == 0 || n[2] == 0) return Key{std::string(seq)};
     const std::uint32_t b = n[0];
+    // Buttons 8–11 (back, forward) and the horizontal wheel mean nothing here: a key that does
+    // nothing, never a click or a vertical scroll.
+    if (b & 128) return Key{std::string(seq)};
+    if ((b & 64) && (b & 2)) return Key{std::string(seq)};
     Mouse m;
     m.x = n[1] - 1;
     m.y = n[2] - 1;
@@ -214,6 +227,7 @@ class Browser {
     const auto before = tree_.rows();
     const std::optional<std::int32_t> held = cursor_ > 0 && cursor_ < before.size() ? std::optional(before[cursor_].node) : std::nullopt;
     const bool more = f();
+    ++rows_version_;
     if (!more) live_.reset(), ended_ = true;
     if (held) keep_selected(*held);
     return more;
@@ -235,7 +249,7 @@ class Browser {
       return {};
     }
     if (k == "q" || k == "\x03") return {true};
-    if (view_ == View::tree && focus_ == Focus::detail && detail_key(k)) return {};
+    if (view_ == View::tree && pane_focused() && detail_key(k)) return {};
     if (view_ == View::tree) tree_key(k);
     else timeline_key(k);
     common_key(k);
@@ -289,13 +303,16 @@ class Browser {
     const std::size_t row = top_ + by - 1;
     if (row >= rows.size()) return {};
     const std::size_t indent = 2 * rows[row].depth;
-    if (x >= indent && x < indent + 2 && !tree_.node(rows[row].node).children.empty()) return {Hit::Area::marker, row};
+    // The marker, where it is drawn: a deep row's is cut off by the columns to its right.
+    if (x >= indent && x < indent + 2 && indent + 2 <= column_spans()[0].x1 && !tree_.node(rows[row].node).children.empty())
+      return {Hit::Area::marker, row};
     return {Hit::Area::row, row};
   }
 
   // For tests and the terminal.
   View view() const noexcept { return view_; }
-  Focus focus() const noexcept { return focus_; }
+  // The pane has the keys only while it is shown (a narrowed terminal hides it).
+  Focus focus() const noexcept { return pane_focused() ? Focus::detail : Focus::tree; }
   std::size_t cursor() const noexcept { return cursor_; }
   std::size_t top() const noexcept { return top_; }
   std::size_t detail_scroll() const noexcept { return detail_scroll_; }
@@ -340,8 +357,10 @@ class Browser {
       return;
     }
     if (m.button != 0) return;
-    const bool twice = last_press_ && now - last_press_->time <= double_click && last_press_->y == m.y && m.y > header_height();
-    last_press_ = twice ? std::nullopt : std::optional(Press{m.y, now});
+    // Twice on the same thing (row, slice), not merely the same line.
+    const bool twice = last_press_ && now - last_press_->time <= double_click && last_press_->hit == h && rows_version_ == last_press_->rows;
+    last_press_ = twice ? std::nullopt : std::optional(Press{h, now, rows_version_});
+    dragging_ = h.area == Hit::Area::divider;  // a release that never came ends here
     if (prompt_) prompt_ = false;  // a click elsewhere keeps what was typed
     switch (h.area) {
       case Hit::Area::tab:
@@ -711,7 +730,7 @@ class Browser {
     return out;
   }
   std::string footer() const {
-    if (view_ == View::tree && focus_ == Focus::detail)
+    if (view_ == View::tree && pane_focused())
       return paint("2", " pane: ↑↓/jk line  PgUp/PgDn page  g/G top/end  ←/h/Esc back to the tree  mouse: wheel scrolls, click the tree  ? help  q quit");
     if (view_ == View::tree)
       return paint("2", " ↑↓/jk move  ⏎/space fold  ←→ close/open  e/E all  n next run  x next error  r reused  s sort  shift+J/K ]/[ pane  </> resize  / filter  w/0-9/m/a worker  o order  v pane  t timeline  mouse: click, wheel, drag  ? help  q quit");
@@ -765,7 +784,7 @@ class Browser {
     const auto title = [&](Column c) {
       return std::string(column_title(c)) + (sorted == c || (!sorted && c == Column::cell) ? "↓" : "");
     };
-    const std::string_view sgr = focus_ == Focus::tree && split() ? "1;4" : "1";
+    const std::string_view sgr = !pane_focused() && split() ? "1;4" : "1";
     std::string out = paint(sgr, fit(" " + title(Column::cell), spans[0].x1));
     for (std::size_t i = 1; i < spans.size(); ++i) out += ' ' + paint(sorted == spans[i].column ? "1;4" : "1", pad_left(title(spans[i].column), spans[i].x1 - spans[i].x0));
     return out;
@@ -802,7 +821,7 @@ class Browser {
     const std::size_t shown = long_pane ? hgt - 1 : hgt;
     detail_scroll_ = right.size() > shown ? std::min(detail_scroll_, right.size() - shown) : 0;
     std::vector<std::string> out;
-    const std::string_view title_sgr = focus_ == Focus::detail ? "1;4" : "1";
+    const std::string_view title_sgr = pane_focused() ? "1;4" : "1";
     out.push_back(fit(left[0], lw) + paint(dragging_ ? "1;7" : "2", "⇔") + paint(title_sgr, fit(" cell", rw)));
     for (std::size_t i = 0; i < hgt; ++i) {
       std::string l = i + 1 < left.size() ? left[i + 1] : std::string();
@@ -948,9 +967,11 @@ class Browser {
   }
 
   struct Press {
-    std::size_t y;
+    Hit hit;
     std::chrono::milliseconds time;
+    std::uint64_t rows;  // `rows_version_` then: a live feed that moved the rows breaks a double click
   };
+  bool pane_focused() const { return focus_ == Focus::detail && split(); }
 
   Tree& tree_;
   std::size_t rows_ = 24, cols_ = 80;
@@ -966,6 +987,7 @@ class Browser {
   std::size_t split_ = 600;  // the divider's place, in thousandths of the width
   bool dragging_ = false;
   std::optional<Press> last_press_;
+  std::uint64_t rows_version_ = 0;
 };
 
 }  // namespace ycxx::trace

@@ -83,11 +83,13 @@ terminal (`src/trace/browse.cppm`, whose model is `src/trace/view.cppm`). `?` li
     from the keyboard. It keeps its share of the width when the terminal is resized.
   - In the timeline, click a slice to put the cursor there, or double-click it to open its cell
     in the tree.
-  - While the browser holds the mouse, the terminal's own selection needs a modifier: Shift-drag
-    in most Linux terminals and in tmux, Option-drag in iTerm2 and Terminal.app.
-  - **tmux:** mouse reports reach the browser whether or not tmux's `mouse` option is on.
-    tmux 3.3 and later passes them through unchanged.
-- **Leaving.** `q` gives the terminal back as it was: the main screen, the cursor, autowrap and
+  - While the browser holds the mouse, the terminal's own text selection needs the terminal's
+    bypass modifier (often Shift; see your terminal's settings).
+  - Checked by hand on macOS: Terminal.app; Terminal.app running tmux 3.8 with `mouse on`; and
+    Ghostty. Clicks on tabs, rows and headers, double clicks and the wheel all worked. The pty
+    test (`daemon.trace_tui`) sends the SGR bytes a terminal sends, drags included, on every
+    host CI runs.
+- **Leaving.** `q` gives the terminal back as it was: the main screen, the cursor, autowrap on,
   mouse reports off, cooked mode. So do `SIGTERM`, `SIGHUP`, `SIGINT` and `SIGQUIT`, and a crash
   (`SIGABRT`, `SIGSEGV`, `SIGBUS`, `SIGFPE`, `SIGILL`); after restoring, the signal takes its
   course.

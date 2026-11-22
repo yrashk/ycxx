@@ -59,6 +59,8 @@ Restore restore_state;
 constexpr std::array fatal_signals{SIGHUP, SIGINT, SIGQUIT, SIGTERM, SIGABRT, SIGSEGV, SIGBUS, SIGFPE, SIGILL};
 std::array<struct sigaction, fatal_signals.size()> previous{};
 struct sigaction previous_winch{};
+alignas(16) std::array<char, 64 * 1024> alt_stack{};
+stack_t previous_stack{};
 
 void give_back() noexcept {
   if (restore_state.fd < 0) return;
@@ -100,10 +102,20 @@ class Terminal {
     }
     restore_state.fd = fd_;
     restore_state.saved = saved_;
+    // A stack overflow's SIGSEGV runs on a stack of its own.
+    stack_t alt{};
+    alt.ss_sp = alt_stack.data();
+    alt.ss_size = alt_stack.size();
+    ::sigaltstack(&alt, &previous_stack);
     struct sigaction sa{};
     sa.sa_handler = on_fatal;
-    sigemptyset(&sa.sa_mask);
-    for (std::size_t i = 0; i < fatal_signals.size(); ++i) ::sigaction(fatal_signals[i], &sa, &previous[i]);
+    sa.sa_flags = SA_ONSTACK;
+    sigfillset(&sa.sa_mask);  // one restore, never nested
+    for (std::size_t i = 0; i < fatal_signals.size(); ++i) {
+      ::sigaction(fatal_signals[i], nullptr, &previous[i]);
+      // An ignored signal (nohup, a background job) stays ignored.
+      if (previous[i].sa_handler != SIG_IGN) ::sigaction(fatal_signals[i], &sa, nullptr);
+    }
     struct sigaction wa{};
     wa.sa_handler = on_winch;
     sigemptyset(&wa.sa_mask);
@@ -126,6 +138,7 @@ class Terminal {
     restore_state.fd = -1;
     for (std::size_t i = 0; i < fatal_signals.size(); ++i) ::sigaction(fatal_signals[i], &previous[i], nullptr);
     ::sigaction(SIGWINCH, &previous_winch, nullptr);
+    ::sigaltstack(&previous_stack, nullptr);
     for (int& p : restore_state.winch) {
       if (p >= 0) ::close(p);
       p = -1;
@@ -162,6 +175,7 @@ class Terminal {
   // Waits for the terminal, the feed or a resize. select, not poll: macOS's poll does not support
   // devices, and flags the terminal invalid.
   Wake wait(int feed) const {
+    if (pending_) return Wake::input;
     const int winch = restore_state.winch[0];
     while (true) {
       fd_set in;
@@ -181,34 +195,60 @@ class Terminal {
     }
   }
   // One input: a byte, or an escape sequence as one string; `q` when the terminal is gone.
-  std::string read_input() const {
+  std::string read_input() {
     char c = 0;
-    if (::read(fd_, &c, 1) != 1) return "q";
+    if (!next(c, -1)) return "q";
     if (c != '\x1b') return std::string(1, c);
     std::string seq(1, c);
-    // The rest of a sequence arrives at once; a lone Escape does not.
-    termios t{};
-    ::tcgetattr(fd_, &t);
-    termios quick = t;
-    quick.c_cc[VMIN] = 0;
-    quick.c_cc[VTIME] = 1;
-    ::tcsetattr(fd_, TCSANOW, &quick);
-    // ESC [ … final (0x40–0x7e), ESC O x, or ESC x (Alt+x). A mouse report is `ESC [ < b;x;y M`.
+    // The rest of a sequence arrives at once; a lone Escape does not. ESC [ … final (0x40–0x7e),
+    // ESC O x, ESC x (Alt+x); mouse reports `ESC [ < b;x;y M` and the legacy `ESC [ M` with three
+    // bytes. Within a mouse report the wait is longer, so one split by a slow link stays whole.
     while (seq.size() < 32) {
+      const bool report = seq.starts_with("\x1b[<") || seq.starts_with("\x1b[M");
       char n = 0;
-      if (::read(fd_, &n, 1) != 1) break;
+      if (!next(n, report ? 1000 : 100)) break;
+      if (n == '\x1b') {
+        pending_ = n;  // the next sequence starts: this one (a lone Escape) ends here
+        break;
+      }
       seq += n;
       if (seq.size() == 2 && n != '[' && n != 'O') break;
       if (seq.size() == 3 && seq[1] == 'O') break;
+      if (seq.starts_with("\x1b[M")) {
+        if (seq.size() == 6) break;
+        continue;
+      }
       if (seq.size() > 2 && seq[1] == '[' && n >= 0x40 && n <= 0x7e && !(seq.size() == 3 && n == '<')) break;
     }
-    ::tcsetattr(fd_, TCSANOW, &t);
     return seq;
   }
 
  private:
+  // The next byte: one pushed back, or one read within `ms` milliseconds (-1: however long).
+  bool next(char& c, int ms) {
+    if (pending_) {
+      c = *pending_;
+      pending_.reset();
+      return true;
+    }
+    if (ms >= 0) {
+      fd_set in;
+      FD_ZERO(&in);
+      FD_SET(fd_, &in);
+      timeval tv{ms / 1000, (ms % 1000) * 1000};
+      if (::select(fd_ + 1, &in, nullptr, nullptr, &tv) <= 0) return false;
+    }
+    while (true) {
+      const auto n = ::read(fd_, &c, 1);
+      if (n == 1) return true;
+      if (n < 0 && errno == EINTR) continue;
+      return false;
+    }
+  }
+
   int fd_ = -1;
   termios saved_{};
+  std::optional<char> pending_;
 };
 
 }  // namespace
