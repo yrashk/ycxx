@@ -2744,9 +2744,12 @@ condition that depends on the template's parameters makes the unary `noexcept` o
 of the lambda value-dependent; each instantiation evaluates it with its own arguments. A
 captureless non-throwing lambda converts to a pointer to noexcept function, and from it to a
 pointer to function ([expr.prim.lambda.closure]/8, [conv.fctptr]).
+- The init-captures are in scope in the lambda-declarator, as the parameters are
+  ([basic.scope.lambda]): in the condition and in a trailing return type.
 - Tests: `tests/own/lambda-noexcept/` (one run test, two reject tests).
 - Not yet: a generic lambda's condition naming its own template parameters is rejected (#820);
-  a `noexcept` on a pointer-to-function declarator in a template is dropped (#819).
+  a `noexcept` on a pointer-to-function declarator in a template is dropped (#819); a dependent
+  noexcept on a function template or class template member reads as false (#827).
 
 ## Namespace variable lambdas (#338)
 

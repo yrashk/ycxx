@@ -3493,6 +3493,20 @@ public:
   // Begins a lambda's body: its closure type and function call operator, its explicit captures
   // (whose initializers were analysed in the enclosing context), and the scope of its parameters
   // and init-captures. False after a diagnosed error, with no frame.
+  // The type an init-capture declares, as `auto name = init;` or `auto& name = init;` would
+  // ([expr.prim.lambda.capture]/6), for the lambda-declarator, which is in its scope
+  // ([basic.scope.lambda]); none for any other capture, or where the deduction fails (the
+  // lambda's own analysis says why).
+  std::optional<QualType> init_capture_type(const CaptureSpec& c) {
+    using K = CaptureSpec::Kind;
+    if ((c.kind != K::init_copy && c.kind != K::init_ref) || !c.init.ok()) return std::nullopt;
+    QualType p = types().placeholder(false);
+    if (c.kind == K::init_ref) p = types().lvalue_ref(p);
+    const auto before = diag_count();
+    auto t = deduce_placeholder(p, c.init, c.init.begin);
+    truncate_diags(before);
+    return t;
+  }
   bool open_lambda(LambdaSpec spec) {
     // The enclosing entity: the function, or the enclosing lambda's operator().
     EntityId scope = lambdas_.empty() ? current_function : lambdas_.back().call;
@@ -5059,8 +5073,13 @@ public:
     if (types().is_pointer(to) && is_null_pointer_constant(a)) return {true, 2, 0};
     if (is_data_member_pointer(to) && (types().is(a.type(), Builtin::nullptr_t) || is_null_pointer_constant(a)))
       return {true, 2, 0};
-    // A user-defined conversion: a closure's to a pointer to function ([over.best.ics]/2).
-    if (closure_invoker(a.type(), to)) return {true, Ics::user_defined, 0};
+    // A user-defined conversion: a closure's to a pointer to function ([over.best.ics]/2). Through
+    // the one conversion function, the second standard conversion ranks them: identity before a
+    // function pointer conversion ([over.ics.rank]/3.3).
+    if (auto inv = closure_invoker(a.type(), to)) {
+      const bool exact = types().canonical(types().pointer(w_->entities.rec(*inv).type)) == types().canonical(Types::unqualified(to));
+      return {true, Ics::user_defined, exact ? 0 : 1};
+    }
     QualType from = value_type(a);
     if (types().is_class(from) || types().is_void(from)) return {};
     if (types().canonical(from) == types().canonical(to)) return {true, 0, 0};
