@@ -580,7 +580,8 @@ to distinguish lvalue and rvalue receivers. [#311](https://github.com/yrashk/ycx
 **Virtual declarations.** Syntax checking accepts virtual members and inline definitions in
 ordinary root classes. Ordinary pure virtual declarations define abstract interfaces through a
 single nonvirtual base at each level. Ordinary virtual members can use `final` to prevent
-further overrides. Derived classes also support unqualified base initializers with parentheses
+further overrides. Ordinary named namespace-scope classes and structs can use class-head `final`
+to prevent derivation. Derived classes also support unqualified base initializers with parentheses
 or flat braces. On Linux x86-64 and arm64 macOS,
 pointer and reference consumers can call virtual functions with fixed integer signatures on
 peer-owned objects with an ordinary root, including a derived class with that single public
