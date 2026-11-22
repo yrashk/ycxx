@@ -58,6 +58,10 @@ with tempfile.TemporaryDirectory(prefix="ycxx-variant-flow-") as tmp:
                    check=True, timeout=90)
     for args in ((), ("affine",)):
         subprocess.run([portable, *args], check=True, timeout=10)
+    check("direct_operations", source.replace(
+        "      const auto& view = choice.first();\n      read(view);", "      read(choice.first());").replace(
+        "    auto receipt = choice.take_first();\n    close(static_cast<Receipt&&>(receipt));",
+        "    close(choice.take_first());"))
     check("reflected", source.replace(activation, """
 struct Selection { using Policy = own::use_policy<own::tracks_variant<Choice>>; };
 struct [[=Selection::Policy{}]] Reflected {};

@@ -1037,6 +1037,15 @@ class OwnershipFlowBuilder {
           return add({.event = operation == Effect::consume ? Event::consume : Event::observe,
                       .offset = node.offset(), .next = next, .local = *local, .observer = observer});
         }
+        const auto arguments = node.ast().children(call.args);
+        if (arguments.size() == 1) {
+          const auto argument = materialized_prvalue(at(node, arguments.front()));
+          const bool consumes = operation == Effect::consume;
+          const auto expected = consumes ? VariantOperation::take : VariantOperation::access;
+          if (const auto use = variant_member(argument); use && use->operation == expected)
+            return add({.event = consumes ? Event::consume : Event::observe, .offset = node.offset(),
+                        .next = next, .local = use->slot, .observer = observer, .alternative = use->side});
+        }
         return unsupported(node.offset(), "an ownership protocol operation requires a named owner");
       }
     }
@@ -1244,7 +1253,7 @@ class OwnershipAnalysis {
       break;
     case Event::observe: return require_live(step, step.local, slot, step.alternative);
     case Event::consume:
-      if (auto problem = require_live(step, step.local, slot)) return problem;
+      if (auto problem = require_live(step, step.local, slot, step.alternative)) return problem;
       if (auto problem = require_unborrowed(step, step.local, state)) return problem;
       slot = {spent, step.offset};
       break;

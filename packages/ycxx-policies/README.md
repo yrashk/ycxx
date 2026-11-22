@@ -147,8 +147,10 @@ and terminal operations they use. `tracks_variant` opts into the package's tagge
 storage protocol. Each move-transfer contract authorizes the corresponding resource
 move, including moves into and out of that storage. With `-fcheck-policies`, a
 `holds_first()` or `holds_second()` condition narrows the possible alternatives for
-its branches. A live shared borrow prevents extraction, and a live linear alternative
-must be discharged or transferred on every path out of scope.
+its branches. Pass an accessor result to a registered observer or bind it to a scoped
+shared reference. Use the result of a take operation to initialize an owner or pass it
+to a registered consumer. A live shared borrow prevents extraction, and a live linear
+alternative must be discharged or transferred on every path out of scope.
 
 ## Scoped capabilities
 
