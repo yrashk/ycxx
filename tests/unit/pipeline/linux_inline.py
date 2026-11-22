@@ -3,6 +3,7 @@
 import os
 from pathlib import Path
 import re
+import struct
 import subprocess
 import sys
 import tempfile
@@ -131,16 +132,25 @@ def main():
             obj = f'data-{name}.o'
             compile(data / f'{name}.cpp', obj)
             table = symbols(obj)
-            sections = dict(re.findall(r'\[\s*(\d+)\]\s+(\.[^\s]+)', run(readelf, '-WS', obj)))
+            headers = run(readelf, '-WS', obj)
+            sections = dict(re.findall(r'\[\s*(\d+)\]\s+(\.[^\s]+)', headers))
             relocations = run(readelf, '-Wr', obj).splitlines()
             for symbol, section in data_sections.items():
                 entry = table[symbol]
                 assert entry[4] == 'WEAK' and sections.get(entry[6]) == section, entry
                 assert any('R_X86_64_64' in line.split() and symbol in line.split() for line in relocations), symbol
 
-            for symbol in ('_ZN6Record4seedE', '_ZN6Record10descriptorE'):
+            rodata = re.search(r'\]\s+\.rodata\s+PROGBITS\s+\w+\s+([0-9a-fA-F]+)', headers)
+            assert rodata, headers
+            contents = (Path(temp) / obj).read_bytes()
+            for symbol, payload in {'_ZN6Record4seedE': struct.pack('<i', 42),
+                                    '_ZN6Record10descriptorE': struct.pack('<ii', 23, 47)}.items():
                 entry = table[symbol]
                 assert entry[4] == 'WEAK' and sections.get(entry[6]) == '.rodata', entry
+                # Ordinary data can omit ELF symbol size. Verify the stored bytes in either case.
+                assert int(entry[2]) == len(payload) or (entry[3] == 'NOTYPE' and entry[2] == '0'), entry
+                offset = int(rodata[1], 16) + int(entry[1], 16)
+                assert contents[offset:offset + len(payload)] == payload, (obj, symbol)
             local = table['_ZN12_GLOBAL__N_111LocalRecord4seedE']
             assert local[4] == 'LOCAL' and sections.get(local[6]) == '.rodata', local
 
