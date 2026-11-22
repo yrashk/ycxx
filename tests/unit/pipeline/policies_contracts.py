@@ -227,31 +227,56 @@ with tempfile.TemporaryDirectory() as directory:
         diagnostic = syntax(verified, caller, invalid, error="verified observation cannot expose or mutate")
         assert f"{invalid}:7:" in diagnostic, diagnostic
 
-    # More than a thousand distinct resources in separately reusable groups. The last one has a
-    # real obligation so the fixture fails if normalization silently drops the tail of the set.
-    groups = []
-    for group in range(16):
-        entries = [f"own::affine<Resource<{i}>>" for i in range(group * 80, (group + 1) * 80)]
-        groups.append(f"using Group{group} = own::policy<{', '.join(entries)}>;")
-    combined = ", ".join(f"Group{i}" for i in range(len(groups)))
-    large = write("large.cpp", f"""\
+    # The final resource is used by a separate caller. Its duplicate can change spelling or
+    # conflict with the original without recompiling the unchanged source fragments.
+    write("large.hpp", """\
+        #pragma once
         #include <ycxx/ownership.hpp>
-        namespace large {{
+        namespace large {
         namespace own = ycxx::ownership;
-        template<int Id> struct Resource {{ int value; }};
-        {chr(10).join(groups)}
+        template<int Id> struct Resource { int value; };
         Resource<1279> acquire() noexcept;
         void use(Resource<1279>&&) noexcept;
-        using Operations = own::policy<own::creates<decltype(&acquire), &acquire>, own::consumes<decltype(&use), &use>>;
-        using All = own::use_policy<{combined}, Group0, Group15, Operations>;
-        void repeated() {{
-          auto last = acquire();
-          use(static_cast<Resource<1279>&&>(last));
-          use(static_cast<Resource<1279>&&>(last));
-        }}
-        }}
+        }
     """)
-    syntax(large, error="affine resource 'last' may already have been consumed")
+    large_fragments = []
+    for fragment in range(4):
+        groups = []
+        for group in range(4):
+            start = fragment * 320 + group * 80
+            entries = [f"own::affine<Resource<{i}>>" for i in range(start, start + 80)]
+            groups.append(f"using Group{group} = own::policy<{', '.join(entries)}>;")
+        large_fragments.append(write(f"large_{fragment}.cpp", f"""\
+            #include "large.hpp"
+            namespace large::fragment{fragment} {{
+            {chr(10).join(groups)}
+            using All = own::use_policy<Group0, Group1, Group2, Group3, Group0, Group3>;
+            }}
+        """))
+    large_rules = "own::use_policy<Operations, own::affine<Resource<1279>>>"
+    typed_activation = f"using Active = {large_rules};"
+    large_tail_policy = f"""\
+        #include "large.hpp"
+        namespace large {{
+        using Operations = own::policy<own::creates<decltype(&acquire), &acquire>, own::consumes<decltype(&use), &use>>;
+        {typed_activation}
+        }}
+    """
+    large_tail = write("large_tail.cpp", large_tail_policy)
+    large_source = """\
+        #include "large.hpp"
+        namespace large {
+        void run() {
+          auto last = acquire();
+          SPEND
+        }
+        }
+    """
+    large_caller = write("large_caller.cpp", large_source.replace("SPEND", ""))
+    large_sources = (*large_fragments, large_tail, large_caller)
+    spend_twice = "use(static_cast<Resource<1279>&&>(last)); " * 2
+    large_repeated = write("large_repeated.cpp", large_source.replace("SPEND", spend_twice))
+    syntax(*large_fragments, large_tail, large_repeated, error="affine resource 'last' may already have been consumed")
 
     annotated_source = """\
         #include <ycxx/ownership.hpp>
@@ -331,6 +356,28 @@ with tempfile.TemporaryDirectory() as directory:
             assert changed.returncode == 1 and changed.stderr == cold, (changed.stderr, cold)
             single = resident(sources=(incremental,))
             assert single.returncode == 0, single.stderr
+
+            first_large = resident("--trace-engine=json", sources=large_sources)
+            assert first_large.returncode == 0, first_large.stderr
+            assert any(json.loads(line).get("kind") == "BuildOwnershipFlow"
+                       for line in first_large.stderr.splitlines()), first_large.stderr
+            reflected_activation = f"struct [[={large_rules}{{}}]] Activate {{}};"
+            write(large_tail.name, large_tail_policy.replace(typed_activation, reflected_activation))
+            repeated = resident("--trace-engine=json", sources=large_sources)
+            assert repeated.returncode == 0, repeated.stderr
+            processed = [record["kind"] for record in map(json.loads, repeated.stderr.splitlines())
+                         if record.get("outcome") in ("executed", "cutoff")]
+            assert "BuildOwnershipFlow" not in processed, processed
+            assert processed.count("PolicyDeclarationsFor") == 1, processed
+            write(large_tail.name, large_tail_policy.replace("own::affine", "own::linear"))
+            denied = resident(sources=large_sources)
+            expected = syntax(*large_sources, error="conflicting ownership policies")
+            assert denied.returncode == 1 and denied.stderr == expected, (denied.stderr, expected)
+            assert "large_tail.cpp:" in expected and "large_3.cpp:" in expected, expected
+            write(large_tail.name, large_tail_policy)
+            restored = resident(sources=large_sources)
+            assert restored.returncode == 0, restored.stderr
+
             verified_sources = (verified, caller, observer)
             accepted = resident(sources=verified_sources)
             assert accepted.returncode == 0, accepted.stderr
