@@ -712,6 +712,10 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
   inputs or in the objects at the final checked link. The link verifies all requirements
   through intervening providers and reports inconsistent trusted declarations it encounters.
   The checker rejects indirect calls and unmodeled implicit operations.
+  An `at_most<Tag, N>` entry adds a static usage grade for one tag. The check adds
+  sequential costs, takes the maximum across alternatives, and carries graded contracts
+  through explicit object links. The C++20 package also offers scope-local runtime budgets
+  and explicit scoped handlers. Verified effect callers use the bounds of trusted handler adapters.
   [YCXX Policies #660](https://github.com/yrashk/ycxx/issues/660)
   Execution leaving the scope of a live transaction or reaching a possible unwind is diagnosed.
   See [the protocols and examples](docs/design/policies-ownership.md).
