@@ -4,4 +4,4 @@
 #include <cstdint>
 
 static_assert(INT8_MIN == -128 && UINT64_C(42) == 42);
-static_assert(sizeof(std::int_fast16_t) == sizeof(long));
+static_assert(__is_same(std::int_fast16_t, ::int_fast16_t));
