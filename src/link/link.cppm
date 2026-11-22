@@ -27,6 +27,7 @@
 export module ycxx.link;
 
 export import ycxx.obj;
+export import ycxx.obj.archive;
 import ycxx.obj.macho;
 import ycxx.link.sha256;
 import ycxx.hash;
@@ -62,6 +63,19 @@ struct error {
 };
 
 std::expected<std::vector<std::uint8_t>, std::vector<error>> link(std::span<const obj::object> objects, const options& opts = {});
+
+// An ordinary object or an archive, in command-line order.
+using static_operand =
+    std::variant<std::reference_wrapper<const obj::object>, std::reference_wrapper<const obj::archive::input>>;
+
+// The objects of a link with Darwin archives (docs/design/darwin-static-archives.md): every
+// ordinary object in operand order, then the archive members that outstanding names select, in
+// the order they are selected. As the system linker does, an archive serves names referenced
+// anywhere on the command line. A name is outstanding while some object references it, weakly or
+// not, or defines it only tentatively, and no object defines it otherwise. Each outstanding name,
+// in the order it became outstanding, selects the first member defining it of the first archive
+// whose index lists it.
+std::expected<std::vector<obj::object>, std::string> select_archive_members(std::span<const static_operand> operands);
 
 // The names a text-based stub (.tbd, version 4) exports for arm64 macOS: the `symbols` and
 // `weak-symbols` lists under `exports:` and `reexports:` whose targets include arm64 or arm64e
@@ -415,6 +429,13 @@ std::optional<std::uint32_t> unwind_frame_size(const obj::object& o, std::uint32
   return at;
 }
 
+// A tentative definition, as the Mach-O reader represents one: a weak definition alone at the
+// start of a __DATA,__common zero-fill section.
+bool linker_is_common(const obj::object& o, const obj::symbol& s) {
+  const auto& sec = o.sections[*s.section];
+  return s.offset == 0 && sec.segment == "__DATA" && sec.name == "__common" && sec.is_zerofill();
+}
+
 class linker {
 public:
   linker(std::span<const obj::object> objects, const options& opts) : objs_(objects), opts_(opts) {}
@@ -471,12 +492,7 @@ private:
            (s.segment == "__TEXT" && s.name == "__eh_frame");
   }
 
-  // A tentative definition, as the Mach-O reader represents one: a weak definition alone at the
-  // start of a __DATA,__common zero-fill section.
-  static bool is_common(const obj::object& o, const obj::symbol& s) {
-    const auto& sec = o.sections[*s.section];
-    return s.offset == 0 && sec.segment == "__DATA" && sec.name == "__common" && sec.is_zerofill();
-  }
+  static bool is_common(const obj::object& o, const obj::symbol& s) { return linker_is_common(o, s); }
 
   // Symbols the linker defines when no object does: both name the Mach-O header.
   static bool synthetic(std::string_view name) { return name == "__mh_execute_header" || name == "___dso_handle"; }
@@ -1300,6 +1316,72 @@ private:
 };
 
 }  // namespace
+
+std::expected<std::vector<obj::object>, std::string> select_archive_members(std::span<const static_operand> operands) {
+  std::vector<obj::object> objects;
+  std::vector<std::pair<const obj::archive::input*, obj::archive::contents>> archives;
+  for (const auto& operand : operands) {
+    if (const auto* ordinary = std::get_if<0>(&operand)) {
+      if (ordinary->get().arch != obj::target::aarch64_macos)
+        return std::unexpected(std::format("{}: expected an arm64 Mach-O object", ordinary->get().name));
+      objects.push_back(ordinary->get());
+      continue;
+    }
+    const auto& input = std::get<1>(operand).get();
+    auto contents = obj::archive::read(input.bytes, input.name, obj::archive::flavor::darwin);
+    if (!contents) return std::unexpected(std::move(contents.error()));
+    archives.emplace_back(&input, std::move(*contents));
+  }
+
+  // Names some object defines other than tentatively, defines tentatively, and references.
+  std::set<std::string, std::less<>> defined, tentative, referenced;
+  std::deque<std::string> queue;  // names in the order they became outstanding
+  const auto outstanding = [&](std::string_view name) {
+    return !defined.contains(name) && (referenced.contains(name) || tentative.contains(name));
+  };
+  const auto include = [&](const obj::object& o) {
+    for (const auto& s : o.symbols) {
+      if (s.bind == obj::binding::local) continue;
+      const auto name = s.name_view();
+      if (!s.defined()) referenced.emplace(name);
+      else if (s.weak && *s.section < o.sections.size() && linker_is_common(o, s)) tentative.emplace(name);
+      else defined.emplace(name);
+      if (outstanding(name)) queue.emplace_back(name);
+    }
+  };
+  for (const auto& o : objects) include(o);
+
+  std::vector<std::vector<std::uint8_t>> selected;
+  for (const auto& [input, contents] : archives) selected.emplace_back(contents.members.size());
+  while (!queue.empty()) {
+    const auto name = std::move(queue.front());
+    queue.pop_front();
+    if (!outstanding(name)) continue;
+    for (std::size_t a = 0; a < archives.size(); ++a) {
+      const auto& [input, contents] = archives[a];
+      const auto [first, last] = contents.symbols.equal_range(name);
+      std::optional<std::size_t> pick;
+      for (auto it = first; it != last; ++it) {
+        if (!selected[a][it->second] && (!pick || it->second < *pick)) pick = it->second;
+      }
+      if (!pick) continue;
+      selected[a][*pick] = true;
+      const auto& member = contents.members[*pick];
+      const auto data = std::span(reinterpret_cast<const std::uint8_t*>(member.data.data()), member.data.size());
+      auto object = obj::macho::read_object(data, std::format("{}({})", input->name, member.name));
+      if (!object) return std::unexpected(std::move(object.error()));
+      if (!std::ranges::any_of(object->symbols, [&](const obj::symbol& s) {
+            return s.defined() && s.bind != obj::binding::local && s.name_view() == name;
+          }))
+        return std::unexpected(
+            std::format("{}: archive index symbol '{}' is not defined by the member", object->name, name));
+      objects.push_back(std::move(*object));
+      include(objects.back());
+      break;
+    }
+  }
+  return objects;
+}
 
 std::expected<std::vector<std::uint8_t>, std::vector<error>> link(std::span<const obj::object> objects, const options& opts) {
   for (const obj::object& o : objects) {

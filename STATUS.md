@@ -819,6 +819,15 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
   This path requires a source or ordinary object and supports regular, indexed GNU archives
   and empty archives. Other archive formats and combining archives with shared objects remain
   part of [#388](https://github.com/yrashk/ycxx/issues/388).
+- An arm64 macOS link can include explicit Darwin `.a` operands (BSD `#1/<n>` names and a
+  `__.SYMDEF`, `__.SYMDEF SORTED` or `_64` ranlib index first), with the system linker's
+  selection rules: every ordinary object comes first, an archive serves names referenced
+  anywhere on the command line, weak references and tentative definitions select members, and
+  the first archive in operand order that lists a name supplies it, before the dylibs do.
+  Members are decoded only when selected. `unit.darwin_archive` checks each rule against the
+  system linker, malformed and 64-bit indexes, and daemon equality and same-path replacement;
+  `unit.darwin_inline` links an archive member with both linkers.
+  [Design](docs/design/darwin-static-archives.md) · [#842](https://github.com/yrashk/ycxx/issues/842)
 - `ycxx archive -o lib.a [--] [object ...]` creates or replaces a regular GNU archive in process.
   It validates each member with the existing ELF object reader, copies its bytes, and indexes
   named nonlocal definitions, including weak and hidden definitions. Member basenames and
