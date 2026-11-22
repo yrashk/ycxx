@@ -1,5 +1,5 @@
-// Normalize typed C++ declarations into the ownership policy consumed by the body checker.
-module ycxx.pipeline:ownership_policy;
+// Normalize typed C++ declarations and annotations before checking function bodies.
+module ycxx.pipeline:policy_registry;
 
 import std;
 import ycxx.ast;
@@ -18,17 +18,17 @@ bool is_observation(OwnershipEffect effect) {
   return effect == OwnershipEffect::observe || effect == OwnershipEffect::verified_observe;
 }
 
-struct OwnershipPolicyAlias {
+struct PolicyAlias {
   EntityId entity;
   bool active;
 };
 
-struct OwnershipPolicySite {
-  OwnershipPolicyAlias declaration;
+struct PolicySite {
+  PolicyAlias declaration;
   ast::Loc at;
 };
 
-struct OwnershipAnnotationSite {
+struct PolicyAnnotationSite {
   EntityId declaration;
   QualType declaration_type;
   QualType annotation_type;
@@ -36,39 +36,46 @@ struct OwnershipAnnotationSite {
   ast::Loc at;
 };
 
-struct OwnershipOrigin {
+struct PolicyOrigin {
   ast::u32 unit;
   ast::Loc at;
 };
 
-struct OwnershipPolicyProblem {
-  OwnershipOrigin origin;
+struct PolicyProblem {
+  PolicyOrigin origin;
   std::string message;
-  std::optional<OwnershipOrigin> previous{};
+  std::optional<PolicyOrigin> previous{};
 };
 
 // An internal-linkage declaration in a shared header can have the same entity handle in
 // several inputs. Its policy applies to the function in the input that activated it.
-using OwnershipOperation = std::pair<EntityId, std::optional<ast::u32>>;
+using PolicyOperation = std::pair<EntityId, std::optional<ast::u32>>;
 
-OwnershipOperation ownership_operation(const sema::World& world, EntityId entity, ast::u32 unit) {
+PolicyOperation policy_operation(const sema::World& world, EntityId entity, ast::u32 unit) {
   const auto* declaration = world.entities.find(entity);
   return {entity, declaration && declaration->linkage == ast::Linkage::internal ? std::optional(unit) : std::nullopt};
 }
 
-struct OwnershipDeclarations {
-  std::vector<std::tuple<QualType, Ownership, OwnershipOrigin>> resources;
-  std::vector<std::tuple<OwnershipOperation, OwnershipEffect, OwnershipOrigin>> operations;
-  std::vector<OwnershipPolicyProblem> problems;
+struct EffectBound {
+  std::vector<QualType> tags;
+  bool trusted;
+  bool operator==(const EffectBound&) const = default;
+};
+
+struct PolicyDeclarations {
+  std::vector<std::tuple<QualType, Ownership, PolicyOrigin>> resources;
+  std::vector<std::tuple<PolicyOperation, OwnershipEffect, PolicyOrigin>> operations;
+  std::vector<std::tuple<PolicyOperation, EffectBound, PolicyOrigin>> effect_bounds;
+  std::vector<PolicyProblem> problems;
 };
 
 struct OwnershipPolicy {
   std::vector<std::pair<QualType, Ownership>> resources;
-  std::vector<std::pair<OwnershipOperation, OwnershipEffect>> operations;
-  std::vector<OwnershipOperation> observer_definitions;
-  std::vector<OwnershipOperation> labeled_observers;
+  std::vector<std::pair<PolicyOperation, OwnershipEffect>> operations;
+  std::vector<PolicyOperation> observer_definitions;
+  std::vector<PolicyOperation> labeled_observers;
 
-  bool has_observer_definition(OwnershipOperation operation) const {
+  bool has_observer_definition(PolicyOperation operation) const {
     return std::ranges::binary_search(observer_definitions, operation);
   }
 
@@ -78,29 +85,34 @@ struct OwnershipPolicy {
     return it != resources.end() && it->first == type ? it->second : Ownership::ordinary;
   }
 
-  OwnershipEffect effect(OwnershipOperation operation) const {
+  OwnershipEffect effect(PolicyOperation operation) const {
     const auto it = std::ranges::lower_bound(operations, operation, std::ranges::less{}, &decltype(operations)::value_type::first);
     return it != operations.end() && it->first == operation ? it->second : OwnershipEffect::unknown;
   }
 };
 
-struct OwnershipRegistry {
-  OwnershipPolicy policy;
-  std::map<ast::u32, std::vector<OwnershipPolicyProblem>> problems;
+struct PolicyRegistry {
+  OwnershipPolicy ownership;
+  std::map<PolicyOperation, EffectBound> effects;
+  std::map<PolicyOperation, PolicyOrigin> effect_origins;
+  std::map<ast::u32, std::vector<PolicyProblem>> problems;
 };
 
 namespace {
 
-enum class Marker { other, policy, use_policy, affine, linear, creates, observes, verified_observes, consumes, transfers };
+enum class Marker {
+  other, policy, use_policy, affine, linear, creates, observes, verified_observes, consumes, transfers,
+  effect_set, effect_bound, trusted_effect_bound, effect_contract, trusted_effect_contract,
+};
 
 struct Specialization {
   Marker marker = Marker::other;
   const sema::EntityRec* entity = nullptr;
 };
 
-bool in_ownership_namespace(const sema::World& world, EntityId scope) {
+bool in_policy_namespace(const sema::World& world, EntityId scope, std::string_view name) {
   const auto* inner = world.entities.find(scope);
-  if (!inner || inner->kind != sema::EntityKind::namespace_ || world.ins.names.spelling(inner->name) != "ownership") return false;
+  if (!inner || inner->kind != sema::EntityKind::namespace_ || world.ins.names.spelling(inner->name) != name) return false;
   const auto* outer = world.entities.find(inner->scope);
   return outer && outer->kind == sema::EntityKind::namespace_ && outer->scope == EntityId::none &&
          world.ins.names.spelling(outer->name) == "ycxx";
@@ -110,8 +122,17 @@ Specialization marker(const sema::World& world, EntityId id) {
   const auto* specialized = world.entities.find(id);
   if (!specialized || specialized->kind != sema::EntityKind::class_) return {};
   const auto* primary = world.entities.find(specialized->templ);
-  if (!primary || primary->kind != sema::EntityKind::class_template || !in_ownership_namespace(world, primary->scope)) return {};
+  if (!primary || primary->kind != sema::EntityKind::class_template) return {};
   const auto name = world.ins.names.spelling(primary->name);
+  if (in_policy_namespace(world, primary->scope, "effects")) {
+    if (name == "set") return {Marker::effect_set, specialized};
+    if (name == "bound") return {Marker::effect_bound, specialized};
+    if (name == "trusted") return {Marker::trusted_effect_bound, specialized};
+    if (name == "contract") return {Marker::effect_contract, specialized};
+    if (name == "trusted_contract") return {Marker::trusted_effect_contract, specialized};
+    return {};
+  }
+  if (!in_policy_namespace(world, primary->scope, "ownership")) return {};
   if (name == "policy") return {Marker::policy, specialized};
   if (name == "use_policy") return {Marker::use_policy, specialized};
   if (name == "affine") return {Marker::affine, specialized};
@@ -155,20 +176,57 @@ AnnotationKind annotation_kind(const sema::World& world, QualType type) {
   const auto t = world.types.rec(type);
   if (t.kind != sema::TypeKind::enum_) return AnnotationKind::other;
   const auto* entity = world.entities.find(t.entity);
-  if (!entity || !in_ownership_namespace(world, entity->scope)) return AnnotationKind::other;
+  if (!entity || !in_policy_namespace(world, entity->scope, "ownership")) return AnnotationKind::other;
   const auto name = world.ins.names.spelling(entity->name);
   if (name == "resource_mode") return AnnotationKind::resource;
   if (name == "operation") return AnnotationKind::operation;
   return AnnotationKind::other;
 }
 
+std::optional<std::vector<QualType>> effect_tags(const sema::World& world, const ast::TemplateArg& arg) {
+  if (arg.kind != ast::TemplateArgKind::type) return std::nullopt;
+  const auto [kind, declaration] = marker(world, class_entity(world, arg.type));
+  if (kind != Marker::effect_set || declaration->args.size() != 1 ||
+      declaration->args.front().kind != ast::TemplateArgKind::pack)
+    return std::nullopt;
+
+  std::vector<QualType> tags;
+  for (const auto& tag : world.ins.seqs.elements(declaration->args.front().elems)) {
+    if (tag.kind != ast::TemplateArgKind::type) return std::nullopt;
+    const auto type = world.types.canonical(tag.type);
+    const auto kind = world.types.rec(type).kind;
+    if (ast::cv_of(type) != ast::Cv::none || (kind != sema::TypeKind::class_ && kind != sema::TypeKind::enum_))
+      return std::nullopt;
+    tags.push_back(type);
+  }
+  std::ranges::sort(tags);
+  tags.erase(std::ranges::unique(tags).begin(), tags.end());
+  return tags;
+}
+
+bool namespace_function(const sema::World& world, const sema::EntityRec* entity) {
+  if (!entity || entity->kind != sema::EntityKind::function) return false;
+  if (entity->scope == EntityId::none) return true;
+  const auto* scope = world.entities.find(entity->scope);
+  return scope && scope->kind == sema::EntityKind::namespace_;
+}
+
+bool effect_signature(const sema::World& world, EntityId id) {
+  const auto* entity = world.entities.find(id);
+  if (!namespace_function(world, entity)) return false;
+  const auto fn = world.types.rec(entity->type);
+  const auto scalar_or_reference = [&](QualType type) {
+    const auto kind = world.types.rec(type).kind;
+    return kind == sema::TypeKind::reference || world.types.is_scalar(type);
+  };
+  return fn.kind == sema::TypeKind::function && !fn.variadic &&
+         (world.types.is_void(fn.inner) || scalar_or_reference(fn.inner)) &&
+         std::ranges::all_of(fn.params, scalar_or_reference);
+}
+
 bool compatible(const sema::World& world, const OwnershipPolicy& policy, EntityId id, OwnershipEffect effect) {
   const auto* entity = world.entities.find(id);
-  if (!entity || entity->kind != sema::EntityKind::function) return false;
-  if (entity->scope != EntityId::none) {
-    const auto* scope = world.entities.find(entity->scope);
-    if (!scope || scope->kind != sema::EntityKind::namespace_) return false;
-  }
+  if (!namespace_function(world, entity)) return false;
   const auto fn = world.types.rec(entity->type);
   if (fn.kind != sema::TypeKind::function || !fn.fn_noexcept || fn.variadic) return false;
   const auto result = world.types.canonical(fn.inner);
@@ -187,21 +245,23 @@ bool compatible(const sema::World& world, const OwnershipPolicy& policy, EntityI
 
 }  // namespace
 
-std::optional<OwnershipPolicyAlias> ownership_policy_alias(const sema::World& world, QualType type) {
+std::optional<PolicyAlias> policy_alias(const sema::World& world, QualType type) {
   const auto entity = class_entity(world, type);
   const auto kind = marker(world, entity).marker;
-  if (kind == Marker::policy || kind == Marker::use_policy) return OwnershipPolicyAlias{entity, kind == Marker::use_policy};
+  if (kind == Marker::policy || kind == Marker::use_policy) return PolicyAlias{entity, kind == Marker::use_policy};
   return std::nullopt;
 }
 
-bool is_ownership_annotation(const sema::World& world, QualType type) {
-  return annotation_kind(world, type) != AnnotationKind::other;
+bool is_policy_annotation(const sema::World& world, QualType type) {
+  const auto kind = marker(world, class_entity(world, type)).marker;
+  return kind == Marker::effect_contract || kind == Marker::trusted_effect_contract ||
+         annotation_kind(world, type) != AnnotationKind::other;
 }
 
-OwnershipDeclarations read_ownership_policies(const sema::World& world, ast::u32 unit,
-                                              std::span<const OwnershipPolicySite> sites,
-                                              std::span<const OwnershipAnnotationSite> annotations) {
-  OwnershipDeclarations out;
+PolicyDeclarations read_policy_declarations(const sema::World& world, ast::u32 unit,
+                                            std::span<const PolicySite> sites,
+                                            std::span<const PolicyAnnotationSite> annotations) {
+  PolicyDeclarations out;
   std::map<EntityId, ast::Loc> definitions;
   std::set<EntityId> seen;
   std::vector<std::pair<EntityId, ast::Loc>> pending;
@@ -212,12 +272,27 @@ OwnershipDeclarations read_ownership_policies(const sema::World& world, ast::u32
     out.problems.push_back({{unit, at}, std::move(message)});
   };
   auto resource = [&](QualType type, Ownership mode, ast::Loc at) {
-    out.resources.emplace_back(type, mode, OwnershipOrigin{unit, at});
+    out.resources.emplace_back(type, mode, PolicyOrigin{unit, at});
   };
   auto operation = [&](EntityId entity, OwnershipEffect effect, ast::Loc at) {
-    out.operations.emplace_back(ownership_operation(world, entity, unit), effect, OwnershipOrigin{unit, at});
+    out.operations.emplace_back(policy_operation(world, entity, unit), effect, PolicyOrigin{unit, at});
+  };
+  auto effect_bound = [&](EntityId entity, const ast::TemplateArg& arg, bool trusted, ast::Loc at) {
+    auto tags = effect_tags(world, arg);
+    if (tags)
+      out.effect_bounds.emplace_back(policy_operation(world, entity, unit), EffectBound{std::move(*tags), trusted},
+                                     PolicyOrigin{unit, at});
+    else report(at, "effect bound requires ycxx::effects::set of unqualified class or enum tags");
   };
   for (const auto& annotation : annotations) {
+    const auto [effect_marker, declaration] = marker(world, class_entity(world, annotation.annotation_type));
+    if (effect_marker == Marker::effect_contract || effect_marker == Marker::trusted_effect_contract) {
+      if (declaration->args.size() == 1)
+        effect_bound(annotation.declaration, declaration->args.front(),
+                     effect_marker == Marker::trusted_effect_contract, annotation.at);
+      else report(annotation.at, "invalid effect contract annotation");
+      continue;
+    }
     const auto kind = annotation_kind(world, annotation.annotation_type);
     if (!world.ins.values.is<ast::VInt>(annotation.value)) {
       report(annotation.at, "ownership annotation requires an enum constant");
@@ -268,6 +343,17 @@ OwnershipDeclarations read_ownership_policies(const sema::World& world, ast::u32
       resource(type, kind == Marker::linear ? Ownership::linear : Ownership::affine, at);
       continue;
     }
+    if (kind == Marker::effect_bound || kind == Marker::trusted_effect_bound) {
+      const auto function = args.size() == 3 && args[1].kind == ast::TemplateArgKind::value
+                                ? function_address(world.ins, args[1].value) : std::nullopt;
+      if (function) effect_bound(*function, args[2], kind == Marker::trusted_effect_bound, at);
+      else report(at, "an effect bound must name a function by address");
+      continue;
+    }
+    if (effect_of(kind) == OwnershipEffect::unknown) {
+      report(at, "unrecognized entry in policy");
+      continue;
+    }
     const auto function = args.size() == 2 && args[1].kind == ast::TemplateArgKind::value
                               ? function_address(world.ins, args[1].value) : std::nullopt;
     if (!function) {
@@ -279,15 +365,15 @@ OwnershipDeclarations read_ownership_policies(const sema::World& world, ast::u32
   return out;
 }
 
-OwnershipRegistry compose_ownership_policies(const sema::World& world,
-                                            std::span<const std::reference_wrapper<const OwnershipDeclarations>> fragments) {
-  OwnershipRegistry out;
-  std::map<QualType, std::pair<Ownership, OwnershipOrigin>> resources;
-  std::map<OwnershipOperation, std::pair<OwnershipEffect, OwnershipOrigin>> operations;
-  auto report = [&](OwnershipOrigin origin, std::string message, std::optional<OwnershipOrigin> previous = {}) {
+PolicyRegistry compose_policy_registry(const sema::World& world,
+                                       std::span<const std::reference_wrapper<const PolicyDeclarations>> fragments) {
+  PolicyRegistry out;
+  std::map<QualType, std::pair<Ownership, PolicyOrigin>> resources;
+  std::map<PolicyOperation, std::pair<OwnershipEffect, PolicyOrigin>> operations;
+  auto report = [&](PolicyOrigin origin, std::string message, std::optional<PolicyOrigin> previous = {}) {
     out.problems[origin.unit].push_back({origin, std::move(message), previous});
   };
-  for (const OwnershipDeclarations& fragment : fragments) {
+  for (const PolicyDeclarations& fragment : fragments) {
     for (const auto& problem : fragment.problems) out.problems[problem.origin.unit].push_back(problem);
     for (const auto& [type, mode, origin] : fragment.resources) {
       const auto [it, fresh] = resources.try_emplace(type, mode, origin);
@@ -301,12 +387,21 @@ OwnershipRegistry compose_ownership_policies(const sema::World& world,
         if (effect == OwnershipEffect::verified_observe) it->second = {effect, origin};
       } else report(origin, "conflicting contracts for an ownership operation", it->second.second);
     }
+    for (const auto& [operation, bound, origin] : fragment.effect_bounds) {
+      const auto [it, fresh] = out.effects.try_emplace(operation, bound);
+      if (fresh) out.effect_origins.emplace(operation, origin);
+      else if (it->second != bound)
+        report(origin, "conflicting effect bounds for a function", out.effect_origins.at(operation));
+    }
   }
-  for (const auto& [type, spec] : resources) out.policy.resources.emplace_back(type, spec.first);
+  for (const auto& [operation, origin] : out.effect_origins)
+    if (!effect_signature(world, operation.first))
+      report(origin, "effect bound requires a non-variadic namespace function with scalar or reference parameters and result");
+  for (const auto& [type, spec] : resources) out.ownership.resources.emplace_back(type, spec.first);
   for (const auto& [operation, spec] : operations) {
-    if (!compatible(world, out.policy, operation.first, spec.first))
+    if (!compatible(world, out.ownership, operation.first, spec.first))
       report(spec.second, "ownership operation signature does not match its contract and registered resource");
-    else out.policy.operations.emplace_back(operation, spec.first);
+    else out.ownership.operations.emplace_back(operation, spec.first);
   }
   return out;
 }

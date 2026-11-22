@@ -705,6 +705,13 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
   rights constraints and runtime scope checks. Native Linux x86-64 tests exercise a YCXX issuer
   and hosted GCC and Clang callers with the same token type.
   [ABI support #661](https://github.com/yrashk/ycxx/issues/661) · [Dependent type friends #689](https://github.com/yrashk/ycxx/issues/689)
+  Finite effect bounds from `<ycxx/effects.hpp>` check every direct callee of an annotated
+  function, including calls in default arguments and recursive calls. Typed declarations
+  and C++26 annotations share the registry. Bounds use canonical sets of nominal tags.
+  Each verified body must have a unique supported definition among the checked source
+  inputs. Trusted adapters can declare an explicit boundary. The first slice supports
+  syntax checking and source-only native links. The checker rejects indirect calls and
+  unmodeled implicit operations. [YCXX Policies #660](https://github.com/yrashk/ycxx/issues/660)
   Execution leaving the scope of a live transaction or reaching a possible unwind is diagnosed.
   See [the protocols and examples](docs/design/policies-ownership.md).
 - `tests/features/ycxx.txt` lists `syntax` and `run darwin-arm64`: a feature can be limited to

@@ -104,3 +104,47 @@ Register a token specialization as an affine resource and describe its adapter f
 the ownership policies when callers should also get YCXX's scoped-borrow and use-after-release
 checks. A registered release adapter consumes the token, so subsequent observations are rejected
 in a checked caller.
+
+## Transitive effect bounds
+
+Include `<ycxx/effects.hpp>` and give each effect an unqualified class or enum tag. An effect
+set lists everything a function may require. Use `bound` to have YCXX verify a function's
+body and `trusted` to describe the effects of a reviewed boundary adapter. A trusted
+adapter can call `require` on a capability before accessing its resource.
+
+```cpp
+#include <ycxx/effects.hpp>
+
+namespace fx = ycxx::effects;
+struct ReadSettings;
+using Reads = fx::set<ReadSettings>;
+
+int read_settings() noexcept;  // supply the mediated adapter as a source input
+int retry_read(bool retry) noexcept {
+  if (retry) read_settings();
+  return read_settings();
+}
+
+using Rules = fx::use_policy<
+    fx::trusted<decltype(&read_settings), &read_settings, Reads>,
+    fx::bound<decltype(&retry_read), &retry_read, Reads>>;
+```
+
+With `-fcheck-policies`, each call in a verified body requires a declared callee bound
+contained in the caller's bound. For example, changing `retry_read` to `fx::set<>` rejects
+the call to `read_settings`. GCC and Clang accept the same C++20 metadata, and the
+capability guard in the adapter still runs.
+
+For a C++26 declaration annotation, alias `fx::contract<Reads>` as `ReadsContract` and
+write `[[=ReadsContract{}]]` on the function. Use `fx::trusted_contract<Reads>` the same
+way for a trusted adapter. Tags are canonical types. Their order and repetition do not
+change the meaning. Ownership and effect entries can share one `use_policy` fragment
+across source inputs.
+
+Start with `ycxx cxx -fcheck-policies -fsyntax-only -I/path/to/include adapter.cpp caller.cpp`.
+To build a native executable, pass all sources in one checked link. The initial subset
+supports direct calls to namespace functions with scalar or reference parameters and a
+scalar, reference, or void result. It checks default argument calls and diagnoses indirect
+calls, volatile accesses, and unmodeled operations such as class initialization and cleanup.
+`fx::set<>` permits zero declared effects. Ordinary scalar computation and memory accesses
+are within this subset. [YCXX Policies tracking issue #660](https://github.com/yrashk/ycxx/issues/660)

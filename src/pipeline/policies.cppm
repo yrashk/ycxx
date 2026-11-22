@@ -1,4 +1,4 @@
-// The opt-in local ownership policies over typed body occurrences (docs/design/policies-ownership.md).
+// Opt-in ownership and effect checks over typed body occurrences.
 module ycxx.pipeline:policies;
 
 import std;
@@ -10,16 +10,16 @@ import ycxx.sema;
 import :back;
 import :front;
 import :lines;
-import :ownership_policy;
+import :policy_registry;
 
 namespace ycxx::pipeline {
 
 // One checked build's ordered input units, shared by all its body queries.
-using OwnershipSources = ast::SeqId<ast::u32>;
+using PolicySources = ast::SeqId<ast::u32>;
 
 // Body-relative offsets let the engine reuse the finding if the whole function moves.
 struct OwnershipBody {
-  OwnershipSources sources;
+  PolicySources sources;
   TuId tu;
   EntityId function;
   QualType type;
@@ -197,11 +197,11 @@ class OwnershipFlowBuilder {
   }
 
   Effect effect(EntityId function) const {
-    return policy_.effect(ownership_operation(world_, function, body_.tu.n));
+    return policy_.effect(policy_operation(world_, function, body_.tu.n));
   }
 
   bool has_observer_definition(EntityId function) const {
-    return policy_.has_observer_definition(ownership_operation(world_, function, body_.tu.n));
+    return policy_.has_observer_definition(policy_operation(world_, function, body_.tu.n));
   }
 
   // The registered resource's construction and cleanup implement the adapter's contract.
@@ -605,7 +605,7 @@ class OwnershipFlowBuilder {
       if (is_observation(operation) || operation == Effect::consume) {
         EntityId observer = EntityId::none;
         if (operation == Effect::verified_observe) {
-          const auto key = ownership_operation(world_, call.function, body_.tu.n);
+          const auto key = policy_operation(world_, call.function, body_.tu.n);
           const bool labeled = std::ranges::binary_search(policy_.labeled_observers, key);
           if (labeled || ((!body_.defer_observers || key.second) && !policy_.has_observer_definition(key)))
             return unsupported(node.offset(), "verified observation requires a unique supported definition in the checked sources");
@@ -818,71 +818,87 @@ class OwnershipAnalysis {
 
 }  // namespace
 
-struct OwnershipDeclarationsFor {
+struct PolicyDeclarationsFor {
   using Key = ast::u32;
-  using Value = OwnershipDeclarations;
+  using Value = PolicyDeclarations;
   static engine::query_task<Value> run(engine::Ctx& cx, Key unit) {
     const TuId tu{unit};
     const auto& front = co_await cx.fetch<TuFront>(tu);
-    if (front.ownership_policies.empty() && front.ownership_annotations.empty()) co_return Value{};
+    if (front.policy_aliases.empty() && front.policy_annotations.empty()) co_return Value{};
     const auto& source = cx.fetch<pp::SourceOf>(pp::FileId{unit});
-    co_return read_ownership_policies(*universe().world_for(*source.config.target), unit, front.ownership_policies,
-                                     front.ownership_annotations);
+    co_return read_policy_declarations(*universe().world_for(*source.config.target), unit, front.policy_aliases,
+                                     front.policy_annotations);
   }
 };
 
-struct OwnershipRegistryFor {
-  using Key = OwnershipSources;
-  using Value = OwnershipRegistry;
+struct PolicyRegistryFor {
+  using Key = PolicySources;
+  using Value = PolicyRegistry;
   static engine::query_task<Value> run(engine::Ctx& cx, Key sources) {
     const auto units = universe().in->seqs.elements(sources);
     if (units.empty()) co_return Value{};
-    const auto fragments = co_await cx.par_map<OwnershipDeclarationsFor>(units);
+    const auto fragments = co_await cx.par_map<PolicyDeclarationsFor>(units);
     const auto& source = cx.fetch<pp::SourceOf>(pp::FileId{units.front()});
     const auto& world = *universe().world_for(*source.config.target);
-    auto registry = compose_ownership_policies(world, fragments);
-    if (!registry.problems.empty() || std::ranges::none_of(registry.policy.operations, [](const auto& operation) {
-          return operation.second == Effect::verified_observe;
-        }))
-      co_return registry;
+    auto registry = compose_policy_registry(world, fragments);
+    const bool verified_observations = std::ranges::any_of(registry.ownership.operations, [](const auto& operation) {
+      return operation.second == Effect::verified_observe;
+    });
+    if (!registry.problems.empty() || (registry.effects.empty() && !verified_observations)) co_return registry;
 
     const auto fronts = co_await cx.par_map<TuFront>(units | std::views::transform([](ast::u32 unit) { return TuId{unit}; }));
-    std::map<OwnershipOperation, bool> definitions;
-    std::set<OwnershipOperation> labeled;
+    std::map<PolicyOperation, bool> observers, checked_effects;
+    std::set<PolicyOperation> labeled_observers, labeled_effects;
+    const auto add_definition = [](auto& definitions, PolicyOperation operation, bool supported) {
+      const auto [it, fresh] = definitions.try_emplace(operation, supported);
+      if (!fresh) it->second = false;
+    };
     for (std::size_t i = 0; i < fronts.size(); ++i) {
       const auto& unit = fronts[i].get().unit;
       for (const auto& entity : unit.entities) {
         if (entity.asm_label.empty()) continue;
-        const auto operation = ownership_operation(world, entity.id, units[i]);
-        if (registry.policy.effect(operation) == Effect::verified_observe) labeled.insert(operation);
+        const auto operation = policy_operation(world, entity.id, units[i]);
+        if (registry.ownership.effect(operation) == Effect::verified_observe) labeled_observers.insert(operation);
+        if (registry.effects.contains(operation)) labeled_effects.insert(operation);
       }
       for (const auto& def : unit.functions) {
-        const auto operation = ownership_operation(world, def.entity, units[i]);
-        if (registry.policy.effect(operation) != Effect::verified_observe) continue;
+        const auto operation = policy_operation(world, def.entity, units[i]);
         const bool strong = !def.coalesced && !(def.decl.flags & (sema::decl_flag::inline_ | sema::decl_flag::constexpr_));
         const bool supported = def.body.tree != ast::NodeId::none && def.decl.contracts == ast::NodeId::none &&
                                (operation.second || strong);
-        const auto [it, fresh] = definitions.try_emplace(operation, supported);
-        if (!fresh) it->second = false;
+        if (registry.ownership.effect(operation) == Effect::verified_observe)
+          add_definition(observers, operation, supported);
+        if (const auto effect = registry.effects.find(operation); effect != registry.effects.end() && !effect->second.trusted)
+          add_definition(checked_effects, operation, supported && !(def.decl.flags & sema::decl_flag::consteval_));
       }
     }
-    for (const auto& [operation, supported] : definitions)
-      if (supported && !labeled.contains(operation)) registry.policy.observer_definitions.push_back(operation);
-    registry.policy.labeled_observers.assign(labeled.begin(), labeled.end());
+    for (const auto& [operation, supported] : observers)
+      if (supported && !labeled_observers.contains(operation)) registry.ownership.observer_definitions.push_back(operation);
+    registry.ownership.labeled_observers.assign(labeled_observers.begin(), labeled_observers.end());
+    for (const auto& [operation, bound] : registry.effects) {
+      const auto origin = registry.effect_origins.at(operation);
+      if (labeled_effects.contains(operation)) {
+        registry.problems[origin.unit].push_back({origin, "effect bound does not support functions with an assembly label"});
+      } else if (!bound.trusted) {
+        const auto def = checked_effects.find(operation);
+        if (def == checked_effects.end() || !def->second)
+          registry.problems[origin.unit].push_back({origin, "verified effect bound requires a unique supported definition in the checked source inputs"});
+      }
+    }
     co_return registry;
   }
 };
 
 struct OwnershipRecordsFor {
   struct Key {
-    OwnershipSources sources;
+    PolicySources sources;
     TuId tu;
     bool operator==(const Key&) const = default;
   };
   using Value = std::vector<OwnershipRecord>;
   static engine::query_task<Value> run(engine::Ctx& cx, Key key) {
-    const auto& registry = co_await cx.fetch<OwnershipRegistryFor>(key.sources);
-    if (registry.policy.resources.empty()) co_return Value{};
+    const auto& registry = co_await cx.fetch<PolicyRegistryFor>(key.sources);
+    if (registry.ownership.resources.empty()) co_return Value{};
     const auto& shapes = co_await cx.fetch<UnitShapes>(key.tu);
     const auto& source = cx.fetch<pp::SourceOf>(pp::FileId{key.tu.n});
     const auto& types = universe().world_for(*source.config.target)->types;
@@ -914,7 +930,7 @@ struct OwnershipRecordsFor {
     }
     std::set<EntityId> affected;
     std::vector<EntityId> pending;
-    for (const auto& [type, mode] : registry.policy.resources) {
+    for (const auto& [type, mode] : registry.ownership.resources) {
       const auto id = types.class_of(type);
       if (affected.insert(id).second) pending.push_back(id);
     }
@@ -926,7 +942,7 @@ struct OwnershipRecordsFor {
         for (const auto parent : parents->second)
           if (affected.insert(parent).second) pending.push_back(parent);
     }
-    for (const auto& [type, mode] : registry.policy.resources) affected.erase(types.class_of(type));
+    for (const auto& [type, mode] : registry.ownership.resources) affected.erase(types.class_of(type));
 
     Value records;
     for (const auto id : affected) {
@@ -936,7 +952,7 @@ struct OwnershipRecordsFor {
       OwnershipRecord record{id, {}, shape.plain_ownership_record, shape.ownership_destructor};
       for (std::size_t i = 0; i < shape.fields.size(); ++i) {
         const auto type = types.canonical(shape.fields[i]);
-        const auto mode = registry.policy.ownership(type);
+        const auto mode = registry.ownership.ownership(type);
         if (mode == Ownership::ordinary)
           record.supported = record.supported && (types.is_arithmetic(type) || types.rec(type).kind == sema::TypeKind::enum_);
         else record.supported = record.supported && ast::cv_of(type) == ast::Cv::none;
@@ -956,10 +972,10 @@ struct BuildOwnershipFlow {
   using Key = OwnershipBody;
   using Value = OwnershipFlow;
   static engine::query_task<Value> run(engine::Ctx& cx, Key body) {
-    const auto& registry = co_await cx.fetch<OwnershipRegistryFor>(body.sources);
+    const auto& registry = co_await cx.fetch<PolicyRegistryFor>(body.sources);
     const auto& records = co_await cx.fetch<OwnershipRecordsFor>({body.sources, body.tu});
     const auto& target = body.linux_target ? ast::x86_64_linux : ast::aarch64_darwin;
-    co_return OwnershipFlowBuilder(*universe().world_for(target), registry.policy, records, body).build();
+    co_return OwnershipFlowBuilder(*universe().world_for(target), registry.ownership, records, body).build();
   }
 };
 
@@ -972,11 +988,136 @@ struct CheckOwnershipBody {
   }
 };
 
-struct OwnershipCheckUnit {
-  OwnershipSources sources;
+struct EffectBody {
+  ast::NodeId tree;
+  ast::SeqId<ast::LocalRec> locals;
+  bool linux_target;
+  bool operator==(const EffectBody&) const = default;
+};
+
+struct EffectFinding {
+  ast::u32 offset;
+  std::string message;
+};
+
+struct EffectCalls {
+  std::vector<std::pair<EntityId, ast::u32>> calls;
+  std::optional<EffectFinding> unsupported;
+};
+
+// A bound includes every possible call, regardless of control flow. Only AST nodes whose
+// evaluation needs no unmodeled calls are allowed. Constructors, class copies, destruction,
+// allocation, exceptions and virtual dispatch must be modeled before adding their nodes.
+struct EffectCallsFor {
+  using Key = EffectBody;
+  using Value = EffectCalls;
+  static engine::query_task<Value> run(engine::Ctx&, Key body) {
+    const auto& world = *universe().world_for(body.linux_target ? ast::x86_64_linux : ast::aarch64_darwin);
+    const auto locals = world.ins.seqs.elements(body.locals);
+    Value result;
+    std::set<EntityId> seen;
+    auto visit = [&](auto&& self, const ast::Red& node) -> void {
+      if (result.unsupported || node.is<ast::StaticAssert>()) return;
+      const auto problem = ast::dispatch<ast::Nodes>(node.kind(), [&]<class T>(std::type_identity<T>) -> std::string_view {
+        using namespace ast;
+        if constexpr (is_expression(^^T)) {
+          if (sema::Types::is_volatile(node.get<T>().info.type)) return "volatile access is outside the checked effect subset";
+        }
+        if constexpr (std::is_same_v<T, Call>) {
+          const auto target = node.get<T>().function;
+          if (target == EntityId::none) return "indirect call has no verified effect bound";
+          if (seen.insert(target).second) result.calls.emplace_back(target, node.offset());
+        } else if constexpr (std::is_same_v<T, LocalVar>) {
+          const auto local = node.get<T>();
+          const auto type = locals[local.local].type;
+          if (local.destructor != EntityId::none || !(world.types.is_scalar(type) || world.types.is_reference(type)))
+            return "local object initialization or cleanup is outside the checked effect subset";
+        } else if constexpr (std::is_same_v<T, ImplicitConversion>) {
+          const auto conversion = node.get<T>().conversion;
+          if (conversion == ConversionKind::user_defined || conversion == ConversionKind::array_copy)
+            return "implicit conversion is outside the checked effect subset";
+        } else if constexpr (std::is_same_v<T, Assign>) {
+          if (node.get<T>().op == AssignOp::trivial_class_copy)
+            return "class assignment is outside the checked effect subset";
+        } else if constexpr (!std::disjunction_v<
+                                 std::is_same<T, Literal>, std::is_same<T, DeclRef>, std::is_same<T, LocalRef>,
+                                 std::is_same<T, Paren>, std::is_same<T, Unary>, std::is_same<T, Binary>,
+                                 std::is_same<T, OrderedBinary>, std::is_same<T, Conditional>, std::is_same<T, Subscript>,
+                                 std::is_same<T, Member>, std::is_same<T, ValueInit>, std::is_same<T, DefaultInit>,
+                                 std::is_same<T, DefaultArg>, std::is_same<T, ExprStmt>, std::is_same<T, Return>,
+                                 std::is_same<T, Compound>, std::is_same<T, If>, std::is_same<T, While>,
+                                 std::is_same<T, Do>, std::is_same<T, For>, std::is_same<T, Break>, std::is_same<T, Continue>,
+                                 std::is_same<T, DeclStmt>, std::is_same<T, CondDecl>, std::is_same<T, Switch>,
+                                 std::is_same<T, Case>, std::is_same<T, Default>, std::is_same<T, Label>, std::is_same<T, Goto>>) {
+          return "operation is outside the checked effect subset";
+        }
+        return {};
+      });
+      if (!problem.empty()) {
+        result.unsupported = EffectFinding{node.offset(), std::string(problem)};
+        return;
+      }
+      node.for_each_child([&](const ast::Red& child) { self(self, child); });
+    };
+    visit(visit, ast::Red(world.ins.ast, body.tree));
+    co_return result;
+  }
+};
+
+struct EffectBoundFor {
+  struct Key {
+    PolicySources sources;
+    TuId tu;
+    EntityId function;
+    bool operator==(const Key&) const = default;
+  };
+  using Value = std::optional<EffectBound>;
+  static engine::query_task<Value> run(engine::Ctx& cx, Key key) {
+    const auto& registry = co_await cx.fetch<PolicyRegistryFor>(key.sources);
+    const auto& source = cx.fetch<pp::SourceOf>(pp::FileId{key.tu.n});
+    const auto& world = *universe().world_for(*source.config.target);
+    const auto bound = registry.effects.find(policy_operation(world, key.function, key.tu.n));
+    if (bound == registry.effects.end()) co_return std::nullopt;
+    co_return bound->second;
+  }
+};
+
+struct CheckEffectBody {
+  struct Key {
+    PolicySources sources;
+    TuId tu;
+    EntityId function;
+    EffectBody body;
+    bool operator==(const Key&) const = default;
+  };
+  using Value = std::optional<EffectFinding>;
+  static engine::query_task<Value> run(engine::Ctx& cx, Key key) {
+    const auto& calls = co_await cx.fetch<EffectCallsFor>(key.body);
+    if (calls.unsupported) co_return calls.unsupported;
+    const auto& world = *universe().world_for(key.body.linux_target ? ast::x86_64_linux : ast::aarch64_darwin);
+    const auto& caller = co_await cx.fetch<EffectBoundFor>({key.sources, key.tu, key.function});
+    if (!caller || caller->trusted) co_return std::nullopt;
+    for (const auto& [target, offset] : calls.calls) {
+      const auto& callee = co_await cx.fetch<EffectBoundFor>({key.sources, key.tu, target});
+      const auto name = world.ins.names.spelling(world.entities.rec(target).name);
+      if (!callee) co_return EffectFinding{offset, std::format("call to '{}' has no declared effect bound", name)};
+      const auto missing = std::ranges::find_if(callee->tags, [&](QualType tag) {
+        return !std::ranges::binary_search(caller->tags, tag);
+      });
+      if (missing != callee->tags.end())
+        co_return EffectFinding{offset, std::format("effect bound of '{}' exceeds the caller's declared bound (effect '{}')",
+                                                   name, world.types.spell(*missing))};
+    }
+    co_return std::nullopt;
+  }
+};
+
+struct PolicyCheckUnit {
+  PolicySources sources;
   TuId tu;
   bool defer_observers;
-  bool operator==(const OwnershipCheckUnit&) const = default;
+  bool allow_effect_bounds;
+  bool operator==(const PolicyCheckUnit&) const = default;
 };
 
 struct CheckedPolicies {
@@ -985,7 +1126,7 @@ struct CheckedPolicies {
 };
 
 struct CheckPolicies {
-  using Key = OwnershipCheckUnit;
+  using Key = PolicyCheckUnit;
   using Value = CheckedPolicies;
   static engine::query_task<Value> run(engine::Ctx&, Key);
 };
@@ -994,41 +1135,54 @@ engine::query_task<CheckPolicies::Value> CheckPolicies::run(engine::Ctx& cx, Key
   const TuId tu = key.tu;
   const FrontResult& front = co_await cx.fetch<TuFront>(tu);
   if (front.has_errors()) co_return Value{};
-  const auto& registry = co_await cx.fetch<OwnershipRegistryFor>(key.sources);
-  if (registry.policy.resources.empty() && registry.problems.empty()) co_return Value{};
-  if (front.unit.virtual_emission_blocked && registry.problems.empty())
+  const auto& registry = co_await cx.fetch<PolicyRegistryFor>(key.sources);
+  if (registry.ownership.resources.empty() && registry.effects.empty() && registry.problems.empty()) co_return Value{};
+  if (!key.allow_effect_bounds && !registry.effects.empty() && registry.problems.empty())
+    co_return Value{{{std::nullopt, true, "effect bounds currently require syntax checking or a source-only checked link", {}}}, {}};
+  if (front.unit.virtual_emission_blocked && !registry.ownership.resources.empty() && registry.problems.empty())
     co_return Value{{{std::nullopt, true, "ownership analysis is unavailable for this unit's virtual declarations", {}}}, {}};
-  std::span<const OwnershipPolicyProblem> problems;
+  std::span<const PolicyProblem> problems;
   if (const auto it = registry.problems.find(tu.n); it != registry.problems.end()) problems = it->second;
 
   const pp::FileId file{tu.n};
   const pp::Source& source = cx.fetch<pp::SourceOf>(file);
+  const auto& world = *universe().world_for(*source.config.target);
   const bool linux_target = source.config.target->triple == ast::x86_64_linux.triple;
   std::vector<const FunctionDef*> definitions;
   std::vector<OwnershipBody> bodies;
+  std::vector<const FunctionDef*> effect_definitions;
+  std::vector<CheckEffectBody::Key> effect_bodies;
   if (registry.problems.empty())
     for (const auto& def : front.unit.functions) {
       if (def.body.tree == ast::NodeId::none) continue;
-      definitions.push_back(&def);
-      bodies.push_back({key.sources, tu, def.entity, def.decl.type, def.body.tree, def.body.locals,
-                        def.this_type.value_or(QualType{}), linux_target, key.defer_observers});
+      if (!registry.ownership.resources.empty()) {
+        definitions.push_back(&def);
+        bodies.push_back({key.sources, tu, def.entity, def.decl.type, def.body.tree, def.body.locals,
+                          def.this_type.value_or(QualType{}), linux_target, key.defer_observers});
+      }
+      const auto effect = registry.effects.find(policy_operation(world, def.entity, tu.n));
+      if (effect != registry.effects.end() && !effect->second.trusted) {
+        effect_definitions.push_back(&def);
+        effect_bodies.push_back({key.sources, tu, def.entity, {def.body.tree, def.body.locals, linux_target}});
+      }
     }
   const auto findings = co_await cx.par_map<CheckOwnershipBody>(bodies);
+  const auto effect_findings = co_await cx.par_map<CheckEffectBody>(effect_bodies);
   Value result;
   if (problems.empty() &&
-      std::ranges::none_of(findings, [](const auto& finding) { return finding.get().finding.has_value(); })) {
+      std::ranges::none_of(findings, [](const auto& finding) { return finding.get().finding.has_value(); }) &&
+      std::ranges::none_of(effect_findings, [](const auto& finding) { return finding.get().has_value(); })) {
     if (key.defer_observers) {
-      const auto& world = *universe().world_for(*source.config.target);
       auto signature = [&](EntityId observer) {
         const auto type = world.types.canonical(world.entities.rec(observer).type);
         const auto reference = world.types.rec(world.types.rec(type).params.front());
-        const auto mode = registry.policy.ownership(world.types.canonical(reference.inner));
+        const auto mode = registry.ownership.ownership(world.types.canonical(reference.inner));
         return fingerprint(std::tuple{observer, type, mode});
       };
       for (std::size_t i = 0; i < findings.size(); ++i) {
         const auto function = definitions[i]->entity;
-        const auto operation = ownership_operation(world, function, tu.n);
-        if (!operation.second && registry.policy.effect(operation) == Effect::verified_observe)
+        const auto operation = policy_operation(world, function, tu.n);
+        if (!operation.second && registry.ownership.effect(operation) == Effect::verified_observe)
           result.contracts.push_back({function, function, signature(function), true});
         for (const auto observer : findings[i].get().observers)
           result.contracts.push_back({function, observer, signature(observer), false});
@@ -1080,6 +1234,13 @@ engine::query_task<CheckPolicies::Value> CheckPolicies::run(engine::Ctx& cx, Key
         text += std::format(" (previous {} at {})", event, previous->where);
       }
     messages.push_back({at ? std::optional(at->offset) : std::nullopt, true, std::move(text), at ? at->where : ""});
+  }
+  for (std::size_t i = 0; i < effect_findings.size(); ++i) {
+    const auto& finding = effect_findings[i].get();
+    if (!finding) continue;
+    const auto& def = *effect_definitions[i];
+    const auto at = locations.at(in, {def.item, def.body_offset + finding->offset});
+    messages.push_back({at ? std::optional(at->offset) : std::nullopt, true, finding->message, at ? at->where : ""});
   }
   co_return result;
 }

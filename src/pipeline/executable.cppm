@@ -71,6 +71,10 @@ struct ProgramInputs {
   std::optional<ArchiveLinkInputs> archive_link = std::nullopt;
   bool check_policies = false;
 };
+
+bool source_only_policy_link(const ProgramInputs& in) {
+  return in.objects.empty() && !in.dynamic && !in.archive_link;
+}
 struct [[=engine::input{engine::Durability::low}]] ProgramIn {
   using Key = ProgramId;
   using Value = ProgramInputs;
@@ -397,7 +401,10 @@ engine::query_task<Linked> Link::run(engine::Ctx& cx, ProgramId p) {
   if (in.check_policies) {
     const auto units = in.tus | std::views::transform(&TuId::n) | std::ranges::to<std::vector>();
     const auto sources = universe().in->intern_seq<ast::u32>(units);
-    const auto keys = in.tus | std::views::transform([sources](TuId unit) { return OwnershipCheckUnit{sources, unit, true}; });
+    const bool source_only = source_only_policy_link(in);
+    const auto keys = in.tus | std::views::transform([sources, source_only](TuId unit) {
+      return PolicyCheckUnit{sources, unit, true, source_only};
+    });
     const auto policies = co_await cx.par_map<CheckPolicies>(keys);
     for (std::size_t i = 0; i < policies.size(); ++i) {
       const auto& policy = policies[i].get();

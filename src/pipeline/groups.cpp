@@ -14,7 +14,7 @@ import ycxx.pp;
 import ycxx.sema;
 import :back;
 import :front;
-import :ownership_policy;
+import :policy_registry;
 
 namespace ycxx::pipeline {
 
@@ -32,8 +32,8 @@ struct GroupResult {
   std::vector<GroupMessage> messages;
   std::vector<std::pair<EntityId, ast::Loc>> declared;
   std::vector<BodyAt> bodies;
-  std::vector<OwnershipPolicySite> ownership_policies;
-  std::vector<OwnershipAnnotationSite> ownership_annotations;
+  std::vector<PolicySite> policy_aliases;
+  std::vector<PolicyAnnotationSite> policy_annotations;
   std::vector<ClassShape> classes;
   std::vector<EnumShape> enums;
   std::set<EntityId> uncertain_layouts;  // includes entities with no shape in this group
@@ -307,15 +307,15 @@ engine::query_task<SemaResult> TuSema::run(engine::Ctx& cx, TuId tu) {
         if (decls[i].entity != EntityId::none && declared_here.insert(decls[i].entity).second)
           r.declared.emplace_back(decls[i].entity, ast::Loc{program.id(k), at[i]});
         if (decls[i].kind == ast::DeclKind::type_alias && program.in_global_scope(k))
-          if (const auto policy = ownership_policy_alias(world, decls[i].type))
-            r.ownership_policies.push_back({*policy, {program.id(k), at[i]}});
+          if (const auto policy = policy_alias(world, decls[i].type))
+            r.policy_aliases.push_back({*policy, {program.id(k), at[i]}});
         if (decls[i].entity == EntityId::none) continue;
         for (const auto& annotation : world.ins.seqs.elements(decls[i].annotations)) {
           const ast::Loc location{program.id(k), annotation.offset};
-          if (const auto policy = ownership_policy_alias(world, annotation.type); policy && policy->active)
-            r.ownership_policies.push_back({*policy, location});
-          else if (is_ownership_annotation(world, annotation.type))
-            r.ownership_annotations.push_back({decls[i].entity, decls[i].type, annotation.type, annotation.value, location});
+          if (const auto policy = policy_alias(world, annotation.type); policy && policy->active)
+            r.policy_aliases.push_back({*policy, location});
+          else if (is_policy_annotation(world, annotation.type))
+            r.policy_annotations.push_back({decls[i].entity, decls[i].type, annotation.type, annotation.value, location});
         }
       }
       if (const ast::BodySema* body = program.analysed_body(k); body && body->tree != ast::NodeId::none && it.has_body())
@@ -435,8 +435,8 @@ engine::query_task<SemaResult> TuSema::run(engine::Ctx& cx, TuId tu) {
     for (const auto& [e, at] : r.declared)
       if (declared_seen.insert(std::to_underlying(e)).second) out.declared.emplace_back(e, at);
     out.bodies.insert(out.bodies.end(), r.bodies.begin(), r.bodies.end());
-    out.ownership_policies.append_range(r.ownership_policies);
-    out.ownership_annotations.append_range(r.ownership_annotations);
+    out.policy_aliases.append_range(r.policy_aliases);
+    out.policy_annotations.append_range(r.policy_annotations);
     for (const ClassShape& c : r.classes)
       if (shaped.insert(c.entity).second) out.shapes.classes.push_back(c);
     for (const EnumShape& e : r.enums)

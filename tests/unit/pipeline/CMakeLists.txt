@@ -19,6 +19,9 @@ add_test(NAME unit.policies_ownership
 add_test(NAME unit.policies_contracts
   COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/policies_contracts.py
           $<TARGET_FILE:ycxxc> ${CMAKE_CXX_COMPILER} ${ownership_include} ${PROJECT_SOURCE_DIR}/examples/affine)
+add_test(NAME unit.policies_effects
+  COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/policies_effects.py
+          $<TARGET_FILE:ycxxc> ${ownership_include})
 add_test(NAME unit.policies_package
   COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/policies_package.py
           ${CMAKE_COMMAND} ${CMAKE_CXX_COMPILER} ${PROJECT_SOURCE_DIR}/packages/ycxx-policies)

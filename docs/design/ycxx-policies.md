@@ -178,13 +178,19 @@ issuer's rights mask still governs which capability can authorize the operation.
 portable declarations and reflection annotations should normalize to the same bound. Trusted
 adapter declarations specify the effects at the mediation boundary.
 
-For the direct-call subset, verify that each callee's declared bound is a subset of the caller's
-bound. Check every verified body against its own declaration, which also covers recursive calls
-without effect inference. Unknown calls and unmodeled implicit operations fail finite-bound
-checks. Constructor calls, cleanup, and default arguments need coverage alongside ordinary calls.
+The first implementation uses `effects::set<Tag...>` with `bound` and `trusted` policy
+entries. The corresponding `contract` and `trusted_contract` annotations share the same
+canonical representation. Equivalent declarations deduplicate. Differing bounds or trust
+declarations conflict. A cached query records a body's call sites. Its verifier depends
+on the normalized bound for the function and each callee. Every verified body is checked
+against its own declaration, which also covers recursion without effect inference. The
+typed tree includes calls in default arguments and omits discarded `if constexpr` arms.
+Unknown calls and unmodeled implicit operations fail finite-bound checks. The first slice
+requires unique strong external definitions or local definitions among the checked inputs.
+
 For separately compiled code, carry verified bounds and their call requirements to the checked
 link. Match the bound to the selected provider and keep trusted declarations distinct from
-compiler-verified definitions.
+compiler-verified definitions. [YCXX Policies #660](https://github.com/yrashk/ycxx/issues/660)
 
 ## YCXX implementation milestones
 

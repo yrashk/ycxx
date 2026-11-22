@@ -462,8 +462,10 @@ engine::query_task<Built> Build::run(engine::Ctx& cx, RequestId r) {
     for (std::size_t i = 0; i < k.units.size(); ++i)
       if (out.units[i].readable && !out.units[i].front_failed) checked.push_back(k.units[i].n);
     const auto sources = universe().in->intern_seq<ast::u32>(checked);
-    const auto units = checked | std::views::transform([sources, defer = k.until != Until::syntax](ast::u32 unit) {
-      return OwnershipCheckUnit{sources, TuId{unit}, defer};
+    const bool allow_effect_bounds = k.until == Until::syntax ||
+                                     (k.until == Until::link && source_only_policy_link(cx.fetch<ProgramIn>(k.program)));
+    const auto units = checked | std::views::transform([sources, defer = k.until != Until::syntax, allow_effect_bounds](ast::u32 unit) {
+      return PolicyCheckUnit{sources, TuId{unit}, defer, allow_effect_bounds};
     });
     policies = co_await cx.par_map<CheckPolicies>(units);
     std::size_t j = 0;

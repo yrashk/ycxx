@@ -17,7 +17,7 @@ import ycxx.sema;
 import ycxx.parse;
 import :back;
 import :lines;
-import :ownership_policy;
+import :policy_registry;
 
 export namespace ycxx::pipeline {
 
@@ -87,8 +87,8 @@ struct SemaResult {
   Shapes shapes;                      // its classes and enumerations, for `layout` (#115)
   std::vector<std::pair<EntityId, ast::Loc>> declared;
   std::vector<BodyAt> bodies;
-  std::vector<OwnershipPolicySite> ownership_policies;
-  std::vector<OwnershipAnnotationSite> ownership_annotations;
+  std::vector<PolicySite> policy_aliases;
+  std::vector<PolicyAnnotationSite> policy_annotations;
   bool has_errors() const {
     return lex_errors || std::ranges::any_of(messages, [](const SemaMessage& m) { return m.error; });
   }
@@ -101,8 +101,8 @@ struct FrontResult {
   // declarator, else its item's start), in item order, and the analysed function bodies.
   std::vector<std::pair<EntityId, ast::Loc>> declared;
   std::vector<BodyAt> bodies;
-  std::vector<OwnershipPolicySite> ownership_policies;
-  std::vector<OwnershipAnnotationSite> ownership_annotations;
+  std::vector<PolicySite> policy_aliases;
+  std::vector<PolicyAnnotationSite> policy_annotations;
   bool has_errors() const {
     return std::ranges::any_of(messages, [](const Message& m) { return m.error; });
   }
@@ -1821,8 +1821,8 @@ engine::query_task<FrontResult> TuFront::run(engine::Ctx& cx, TuId tu) {
   out.shapes = sema.shapes;
   out.declared = sema.declared;
   out.bodies = sema.bodies;
-  out.ownership_policies = sema.ownership_policies;
-  out.ownership_annotations = sema.ownership_annotations;
+  out.policy_aliases = sema.policy_aliases;
+  out.policy_annotations = sema.policy_annotations;
   co_return out;
 }
 

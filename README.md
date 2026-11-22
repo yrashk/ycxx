@@ -74,10 +74,11 @@ builds and passes its tests on both hosts, and compiles a 40,000-statement funct
 instead of Debug's 5.3 s on an M-series Mac ([#726](https://github.com/yrashk/ycxx/issues/726)).
 
 **Check YCXX Policies.** Opt in with `-fcheck-policies` in a syntax check or a
-build. The [prototype](docs/design/policies-ownership.md) checks registered resource policies
-across branches and loops. Applications can combine reusable C++ policy fragments. The
-standalone [YCXX Policies package](packages/ycxx-policies/README.md) provides portable runtime
-ownership guards and scoped capability tokens for GCC and Clang builds.
+build. YCXX checks registered resource policies across branches and loops and verifies
+declared effect bounds across direct calls in a checked source build. Applications can
+combine reusable C++ policy fragments. The standalone YCXX Policies package provides portable
+runtime ownership guards and scoped capability tokens for GCC and Clang builds.
+[YCXX Policies package](packages/ycxx-policies/README.md)
 
 Single-expression `auto(x)` and `auto{x}` perform scalar and pointer decay-copy, including
 array and function decay. Non-type template parameters can have enumeration types
