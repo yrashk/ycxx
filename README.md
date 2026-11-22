@@ -145,6 +145,10 @@ support the six comparisons, conversion to `bool`, conversions to and from every
 [Linux scalar variadic floating-point ABI](docs/design/linux-floating-variadic-calls.md) ·
 [#441](https://github.com/yrashk/ycxx/issues/441)
 
+On x86-64 Linux, the System V indirect result convention also covers an ownership wrapper
+whose by-value member makes its implicit destructor nontrivial. The returned object is
+constructed in the caller's storage. [#661](https://github.com/yrashk/ycxx/issues/661)
+
 ELF and Mach-O objects support static pointer initializers naming variables, array elements,
 or functions. The referenced symbol may be defined in a separate translation unit.
 [#101](https://github.com/yrashk/ycxx/issues/101)

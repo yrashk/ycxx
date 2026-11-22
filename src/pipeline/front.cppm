@@ -992,9 +992,30 @@ engine::query_task<FrontResult> TuFront::run(engine::Ctx& cx, TuId tu) {
   if (!out.has_errors()) out.unit = unit_of(program, world, items, src.name);
   // The unit's own records of its classes and enumerations (#115).
   const sema::Classes& classes = program.classes();
-  const auto uncertain = unit_source.config.target->triple == ast::x86_64_linux.triple
-      ? program.uncertain_object_layouts()
-      : std::set<EntityId>{};
+  const bool linux = unit_source.config.target->triple == ast::x86_64_linux.triple;
+  const auto uncertain = linux ? program.uncertain_object_layouts() : std::set<EntityId>{};
+  auto nontrivial_destructor = [&](this auto&& recurse, EntityId cls) -> bool {
+    const auto* record = classes.find(cls);
+    if (!record || record->destructor == EntityId::none || record->layout_requires_virtual_support) return false;
+    using enum sema::CopyOperation;
+    if (record->trivial_copyability.destructor != unknown)
+      return record->trivial_copyability.destructor == eligible_nontrivial;
+    if (auto member = std::ranges::find(record->members, record->destructor, &sema::MemberDeclRec::entity);
+        member != record->members.end()) {
+      // Defaulting the first declaration can still yield a trivial destructor ([dcl.fct.def.default]).
+      auto first = program.member_decl(member->entity);
+      return !member->is_deleted && first && !program.defaulted_body(program.index(first->item));
+    }
+    // A variant member does not make the union's own destructor nontrivial ([class.dtor]).
+    if (record->union_) return false;
+    // An implicit destructor is nontrivial when a direct base or by-value member's is nontrivial.
+    return std::ranges::any_of(record->bases, [&](const auto& base) { return recurse(base.cls); }) ||
+           std::ranges::any_of(record->fields, [&](const auto& field) {
+             auto type = world.types.rec(field.type);
+             while (type.kind == sema::TypeKind::array) type = world.types.rec(type.inner);
+             return type.kind == sema::TypeKind::class_ && recurse(type.entity);
+           });
+  };
   for (EntityId c : classes.classes()) {
     ClassShape& shape = out.shapes.classes.emplace_back(ClassShape{c, {}, {}});
     const auto& record = classes.rec(c);
@@ -1021,7 +1042,9 @@ engine::query_task<FrontResult> TuFront::run(engine::Ctx& cx, TuId tu) {
       const bool nontrivial = t.destructor == eligible_nontrivial || t.copy_constructor == eligible_nontrivial ||
                               t.move_constructor == eligible_nontrivial ||
                               (t.copy_constructor == ineligible && t.move_constructor == ineligible);
-      shape.calls_abi_uncertain = !shape.trivial_calls && (!known || !nontrivial);
+      // A proven nontrivial destructor settles the ABI even when the copy/move traits are unknown.
+      shape.calls_abi_uncertain = !shape.trivial_calls && (!known || !nontrivial) &&
+                                  !(linux && nontrivial_destructor(c));
     }
     shape.layout_requires_virtual_support = record.layout_requires_virtual_support;
     if (record.peer_virtual_layout != sema::PeerVirtualLayout::none) {
