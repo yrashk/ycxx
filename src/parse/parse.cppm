@@ -245,8 +245,8 @@ public:
     auto it = member_decls_.find(std::to_underlying(e));
     return it == member_decls_.end() ? std::nullopt : std::optional(it->second);
   }
-  // Qualified friend declarations can affect the visibility of their target virtual function.
-  bool has_attributed_virtual_friend(EntityId e) const { return attributed_virtual_friends_.contains(e); }
+  // ABI attributes on declarations outside the entity's ordinary declaration records.
+  bool has_unapplied_declaration_attributes(EntityId e) const { return unapplied_declaration_attributes_.contains(e); }
 
   // The parsed class-key of a defining item ([class.union]).
   bool class_rec_is_union(u32 item) const {
@@ -1414,7 +1414,7 @@ private:
   static constexpr u32 class_def_key(u32 item) { return item | 0x80000000u; }
   std::vector<u32> running_;
   std::set<u32> ordinary_friend_items_;  // the source item of each supported unqualified friend
-  std::set<EntityId> attributed_virtual_friends_;  // virtual functions redeclared by an attributed friend
+  std::set<EntityId> unapplied_declaration_attributes_;
   bool friend_body_ready(u32 definition) const {
     if (!ordinary_friend_items_.contains(definition)) return true;
     const u32 parent = items_->items[definition].parent;
@@ -2311,7 +2311,7 @@ public:
       if (p_->items().items[k_].parent != items::none &&
           p_->items().items[p_->items().items[k_].parent].kind == ItemKind::class_def)
         return std::nullopt;
-      EntityId e = class_entity(n);
+      EntityId e = introduce_namespace_class(n);
       record_class_key(e, key, at);  // an error leaves the earlier type available for recovery
       return s_.types().class_type(e);
     };
@@ -4536,6 +4536,24 @@ private:
     return u8(width);
   }
 
+  // A namespace attribute can set visibility on otherwise unannotated declarations.
+  bool in_attributed_namespace(u32 item) const {
+    const auto& items = p_->items().items;
+    const auto& region = p_->region();
+    for (u32 parent = items[item].parent; parent != items::none; parent = items[parent].parent) {
+      const auto& scope = items[parent];
+      if (scope.kind == ItemKind::namespace_def &&
+          layout_attribute(region, scope.begin, scope.brace_begin, LayoutAttributes::any)) return true;
+    }
+    return false;
+  }
+
+  EntityId introduce_namespace_class(NameId name) {
+    EntityId entity = class_entity(name);
+    if (in_attributed_namespace(k_)) p_->unapplied_declaration_attributes_.insert(entity);
+    return entity;
+  }
+
   // A friend declaration in class `c` ([class.friend]): `friend class X;` or `friend X;`, a class
   // (declared in the enclosing namespace when lookup finds none, [dcl.type.elab]/4), or a function
   // declaration, of a namespace-scope function or of another class's member. The friend is not a
@@ -4585,7 +4603,7 @@ private:
         ps_.kind(2) == Tk::semi) {
       NameId n = ps_.name_of(ps_.tok(1));
       auto t = s_.class_name(n, false);
-      sem.entity = t && types.is_class(*t) ? types.class_of(*t) : class_entity(n);
+      sem.entity = t && types.is_class(*t) ? types.class_of(*t) : introduce_namespace_class(n);
       decls_.push_back(sem);
       ps_.bump();
       ps_.bump();
@@ -4686,7 +4704,7 @@ private:
         }
       }
       if (m->is_virtual && layout_attribute(p_->region(), it_->begin, it_->end, LayoutAttributes::any))
-        p_->attributed_virtual_friends_.insert(m->entity);
+        p_->unapplied_declaration_attributes_.insert(m->entity);
       sem.entity = m->entity;
     } else {
       // The function of the innermost enclosing namespace with this name and type
@@ -5413,19 +5431,9 @@ private:
     if (key != Tk::kw_struct && key != Tk::kw_class) return false;
     if (key_function) {
       if (region.first_visibility_pragma && *region.first_visibility_pragma < it_->body_begin) return false;
-      // A namespace attribute can set visibility on otherwise unannotated declarations.
-      auto attributed_namespace = [&](u32 item) {
-        const auto& items = p_->items().items;
-        for (u32 parent = items[item].parent; parent != items::none; parent = items[parent].parent) {
-          const auto& scope = items[parent];
-          if (scope.kind == ItemKind::namespace_def &&
-              layout_attribute(region, scope.begin, scope.brace_begin, LayoutAttributes::any)) return true;
-        }
-        return false;
-      };
       const auto& declarations = p_->decls_.at(std::to_underlying(cls));
-      if (attributed_namespace(k_) || std::ranges::any_of(declarations, [&](const auto& decl) {
-            return attributed_namespace(decl.first);
+      if (in_attributed_namespace(k_) || std::ranges::any_of(declarations, [&](const auto& decl) {
+            return in_attributed_namespace(decl.first);
           })) return false;
     }
 

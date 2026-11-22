@@ -692,9 +692,11 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
     // the complete unit, even when no function uses the class or constructs an object here.
     if (const auto slots = sema::native_virtual_table_slots(record);
         slots && program.function_defined_before(slots->front(), program.end())) {
-      // A later qualified friend may carry a visibility attribute for either table entry.
+      // An elaborated declaration may introduce the class with namespace attributes. A friend
+      // may also redeclare either slot with its own attributes, including after the key.
       if (!tu.owned_virtual_table && !program.function_defined_before(slots->back(), program.end()) &&
-          std::ranges::none_of(*slots, [&](EntityId f) { return program.has_attributed_virtual_friend(f); })) {
+          !program.has_unapplied_declaration_attributes(c) &&
+          std::ranges::none_of(*slots, [&](EntityId f) { return program.has_unapplied_declaration_attributes(f); })) {
         tu.owned_virtual_table = OwnedVirtualTable{world.types.class_type(c), *slots};
         continue;
       }
