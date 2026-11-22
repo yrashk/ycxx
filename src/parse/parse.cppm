@@ -34,7 +34,7 @@ using sema::ConstId;
 
 // The parser skips attributes whose layout semantics we do not implement. Find those
 // that could change a record or field even though its computed offsets look natural.
-enum class LayoutAttributes { affecting_layout, leading_affecting_layout, any };
+enum class LayoutAttributes { affecting_layout, leading_affecting_layout, trailing_definition, any };
 
 bool layout_attribute(const pp::Region& region, u32 begin, u32 end, LayoutAttributes mode = LayoutAttributes::affecting_layout,
                       std::span<const std::pair<u32, u32>> applied = {},
@@ -84,6 +84,9 @@ bool layout_attribute(const pp::Region& region, u32 begin, u32 end, LayoutAttrib
         }
         if (name.size() > 4 && name.starts_with("__") && name.ends_with("__"))
           name = name.substr(2, name.size() - 4);
+        if (mode == LayoutAttributes::trailing_definition && gnu && depth == 2 &&
+            (region.tokens[i - 1].kind == l_paren || region.tokens[i - 1].kind == comma) &&
+            (name == "copy" || name == "trivial_abi")) return true;
         if (name == "packed" || name == "aligned" || name == "mode" || name == "vector_size" ||
             name == "no_unique_address" || name == "ms_struct" || name == "gcc_struct") return true;
       }
@@ -2993,11 +2996,27 @@ private:
     return v >= 0 && (sh.bits >= 64 || v < (std::int64_t(1) << sh.bits));
   }
 
+  u32 after_definition_attributes() {
+    const u32 back = it_->begin + ps_.pos();
+    ps_.seek(it_->brace_end);
+    ps_.skip_attributes(nullptr, 0, nullptr, false, Parser::attr_gnu);
+    const u32 after = it_->begin + ps_.pos();
+    ps_.seek(back);
+    return after;
+  }
+
+  bool supported_definition_attributes(u32 after) {
+    if (!layout_attribute(p_->region(), it_->brace_end, after, LayoutAttributes::trailing_definition)) return true;
+    s_.diag(it_->brace_end - it_->begin, Diag::post_definition_layout_attribute);
+    return false;
+  }
+
   // `typedef class-specifier X …;` with an unnamed class or enumeration: X names it for linkage
   // purposes ([dcl.typedef]/9), and so is its name here; the declarator after the braces.
   std::optional<std::pair<NameId, u32>> typedef_name_after_braces() {
     u32 back = it_->begin + ps_.pos();  // `seek` takes a region index, `pos` is in the item
     ps_.seek(it_->brace_end);
+    ps_.skip_attributes(nullptr, 0, nullptr, false, Parser::attr_gnu);
     std::optional<std::pair<NameId, u32>> r;
     if (ps_.is(Tk::identifier)) r = std::pair(ps_.name_of(ps_.tok()), ps_.pos());
     ps_.seek(back);
@@ -3130,6 +3149,7 @@ private:
     if (!class_declared(sem, key, name_at)) return bad();
     p_->current_instantiation(pattern, k_, sem);
     ps_.seek(it_->brace_end);
+    ps_.skip_attributes(nullptr, 0, nullptr, false, Parser::attr_gnu);
     q_.own_class_complete = true;
     if (ps_.at_end()) {
       ps_.expect(Tk::semi);  // the `;` is missing ([class.pre]/1)
@@ -3197,6 +3217,7 @@ private:
     sem.flags |= sema::decl_flag::specialization;
     if (!class_declared(sem, key, name_at)) return bad();
     ps_.seek(it_->brace_end);
+    ps_.skip_attributes(nullptr, 0, nullptr, false, Parser::attr_gnu);
     q_.own_class_complete = true;
     if (!ps_.accept(Tk::semi)) {
       s_.diag(ps_.pos(), Diag::not_supported, ps_.kind());  // declarators after an explicit specialization
@@ -3539,6 +3560,7 @@ private:
   // its declarators. The member-specification is the members' items (§4.2); `class_def` reads
   // them.
   void class_definition() {
+    if (!supported_definition_attributes(after_definition_attributes())) return bad();
     // A class template ([temp.class]): its head, then the class-head. `template<>` defines an
     // explicit specialization ([temp.expl.spec]).
     if (ps_.is(Tk::kw_template) && ps_.kind(1) == Tk::less && ps_.kind(2) == Tk::greater) {
@@ -3639,6 +3661,7 @@ private:
     if (template_) p_->current_instantiation(s_.types().class_of(sem.type), k_, sem);
     // The declarators after the closing brace: `struct S { … } s, *p;`, where S is complete.
     ps_.seek(it_->brace_end);
+    ps_.skip_attributes(nullptr, 0, nullptr, false, Parser::attr_gnu);
     q_.own_class_complete = true;
     if (ps_.accept(Tk::semi)) {
       if (!leading_annotations.empty()) s_.diag(leading_annotations.front().offset, Diag::attributes_not_allowed);
@@ -3675,6 +3698,7 @@ private:
   // An unnamed union with a declarator in a class ([class.pre], [class.mem.general]). The head
   // occupies declaration slot 0, and the declarators that follow it belong to the enclosing class.
   void unnamed_union_member() {
+    if (!supported_definition_attributes(after_definition_attributes())) return bad();
     const items::Item& outer = p_->items().items[it_->parent];
     ps_.skip_attributes();
     u32 at = ps_.pos();
@@ -3697,6 +3721,7 @@ private:
     p_->class_def(k_);
 
     ps_.seek(it_->brace_end);
+    ps_.skip_attributes(nullptr, 0, nullptr, false, Parser::attr_gnu);
     s_.current_class = owner;
     q_.own_class_complete = true;
     DeclSpec spec;
@@ -3812,6 +3837,8 @@ private:
     sema::Types& types = s_.types();
     u32 at = ps_.pos();
     const bool definition = it_->kind == ItemKind::enum_def;
+    const u32 after_attributes = definition ? after_definition_attributes() : it_->end;
+    if (definition && !supported_definition_attributes(after_attributes)) return bad();
     const bool td = cls == EntityId::none && ps_.accept(Tk::kw_typedef);  // `typedef enum … { … } E;`
     if (!ps_.is(Tk::kw_enum)) {
       s_.diag(ps_.pos(), Diag::not_supported, ps_.kind());
@@ -3835,8 +3862,8 @@ private:
         s_.diag(ps_.pos(), Diag::expected_unqualified_id);
         return bad();
       }
-      if (it_->brace_end < it_->end && p_->region().tokens[it_->brace_end].kind != Tk::semi) {
-        s_.diag(it_->brace_end - it_->begin, Diag::not_supported, p_->region().tokens[it_->brace_end].kind);
+      if (after_attributes < it_->end && p_->region().tokens[after_attributes].kind != Tk::semi) {
+        s_.diag(after_attributes - it_->begin, Diag::not_supported, p_->region().tokens[after_attributes].kind);
         return bad();
       }
     }
@@ -4073,6 +4100,7 @@ private:
     // The scoped names were visible while parsing the enumerator list only.
     if (scoped) s_.own.resize(first_enumerator);
     ps_.seek(it_->brace_end);
+    ps_.skip_attributes(nullptr, 0, nullptr, false, Parser::attr_gnu);
     if (ps_.accept(Tk::semi)) return;
     // The item ended at the brace: the `;` is missing, and the definition stands
     // ([class.pre]/1, [dcl.enum]/1).
