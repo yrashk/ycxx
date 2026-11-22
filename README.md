@@ -319,7 +319,8 @@ are value-initialized when they have no written default member initializer.
 - `__is_empty` accounts for inherited data members and supports dependent operands in class-template
   bases and variable-template initializers.
   [Extension guide](docs/EXTENSIONS.md) · [#218](https://github.com/yrashk/ycxx/issues/218)
-- logical negation of a qualified dependent `bool` variable template-id in a `bool` template
+- unqualified dependent `bool` variable template-ids as `bool` template arguments, and
+  logical negation of a qualified dependent `bool` variable template-id in a `bool` template
   argument or default
   [#209](https://github.com/yrashk/ycxx/issues/209);
 - a single nonvirtual, nonpolymorphic base in a primary class template, including an

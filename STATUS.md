@@ -1615,6 +1615,9 @@ template's tokens again with the arguments bound.
   evaluation (`global`, `constant_value`) at that point, or at the END worklist for code. A
   specialization is emitted as a variable, mangled `_Z1vIiE`, with external linkage even when
   const ([basic.link]/3).
+- **Dependent variable-template arguments** (#209): an unqualified namespace variable template
+  used as a dependent `bool` template argument keeps the declaration found by ordinary lookup.
+  Substitution evaluates the selected specialization once its arguments are concrete.
 - **Dependent logical negation** (#209): a `bool` template argument or default can negate a
   qualified dependent `bool` variable template-id. Substitution retains the negation across
   aliases until the selected specialization has concrete arguments and supplies a usable
