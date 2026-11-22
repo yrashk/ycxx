@@ -1,9 +1,13 @@
 // The other side of p1-impl-mangle.run.cpp, compiled by Clang: the specializations ycxx defined,
 // called by the names Clang gives them.
-int twice_int(int) __asm__("__Z5twiceIiEDaT_");
-long twice_long(long) __asm__("__Z5twiceIlEDaT_");
-int& first_int(int&) __asm__("__Z5firstIiEDcRT_");
-const int& id_int(const int&) __asm__("__Z2idIiERKDaRKT_");
+// The object-file name of an Itanium symbol: Mach-O prefixes C names with `_`, ELF does not.
+#define LABEL_STR(p) #p
+#define LABEL_PREFIX(p) LABEL_STR(p)
+#define LABEL(name) __asm__(LABEL_PREFIX(__USER_LABEL_PREFIX__) name)
+int twice_int(int) LABEL("_Z5twiceIiEDaT_");
+long twice_long(long) LABEL("_Z5twiceIlEDaT_");
+int& first_int(int&) LABEL("_Z5firstIiEDcRT_");
+const int& id_int(const int&) LABEL("_Z2idIiERKDaRKT_");
 int peer_check() {
   int v = 7;
   first_int(v) = 8;
