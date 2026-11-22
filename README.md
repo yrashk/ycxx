@@ -41,6 +41,9 @@ and Mach-O linker on arm64 macOS, where `arm64-apple-darwin` is the default targ
 object files from Clang or GCC. Errors are reported as
 `file:line:col: error: …`.
 
+The arm64 Mach-O linker preserves supported cleanup-free DWARF frames from input objects.
+[Mach-O unwind support #72](https://github.com/yrashk/ycxx/issues/72)
+
 ```sh
 tools/build
 build/bin/ycxx cxx hello.cpp -o hello && ./hello
@@ -54,6 +57,10 @@ instantiation. Concrete constant template arguments can use braced conversions s
 
 Functional conversions can construct namespace-qualified class-template specializations with
 parentheses or braces, including through namespace aliases. [#697](https://github.com/yrashk/ycxx/issues/697)
+
+Class templates at namespace scope can delete their copy assignment on its first in-class
+declaration when the member has no ref-qualifier. Specializations retain the deleted overload.
+[#709](https://github.com/yrashk/ycxx/issues/709)
 
 C++26 reflection annotations on class heads and ordinary function declarations accept
 constant payloads and retain their types for compiler consumers.
@@ -378,7 +385,8 @@ written default member initializer are value-initialized.
 macros, conditionals, `_Pragma` and the predefined macros. `ycxx cxx -E` matches Clang's output.
 `ycxx cxx -E --target=x86_64-linux-gnu` selects Linux macros and glibc's multiarch include path
 and preprocesses glibc's `<stdio.h>`. Linux `<stdarg.h>` supplies the `va_list` declaration, and
-direct `<float.h>` and `<limits.h>` provide the target's numeric limits.
+direct `<float.h>` and `<limits.h>` provide the target's numeric limits. glibc's `<stdint.h>` compiles
+(#657); `<inttypes.h>` does not yet (#664).
 [#475](https://github.com/yrashk/ycxx/issues/475)
 
 **Incremental builds through a resident daemon.** `ycxx cxx` hands its work to a per-project
@@ -398,7 +406,9 @@ message is shown up to the root. Diagnostic details include the file, line and c
 available. `--trace-engine=interactive` opens a browser of the trace after the compile: a tree
 with each function's IR and assembly, a timeline of the pool's workers, and filters. It follows
 the terminal's size and takes the mouse: click to select, fold and sort by a column, use the
-wheel to scroll, and drag to resize the pane ([docs/TRACE.md](docs/TRACE.md#the-interactive-browser)).
+wheel to scroll, and drag to resize the pane. It copies a cell, a subtree, selected rows or any
+selected text of the IR and instructions to the clipboard, over SSH too
+([docs/TRACE.md](docs/TRACE.md#the-interactive-browser)).
 `--trace-engine=json` writes the whole trace as JSON Lines, for tools and agents. Cells that
 come from source (a file, a unit, a function's IR and code) carry their file and lines.
 `ycxx cxx --watch` stays attached and builds again whenever a file the build read changes,
