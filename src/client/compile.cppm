@@ -11,7 +11,6 @@ import ycxx.pipeline;
 import ycxx.engine;
 import ycxx.pp;
 import ycxx.ast.target;
-import :host_target;
 
 export namespace ycxx::compile {
 
@@ -156,7 +155,7 @@ bool is_shared_object(std::string_view f) {
 // Parses the arguments, or says why it cannot.
 std::expected<Options, std::string> parse_options(std::span<const std::string_view> args) {
   Options o;
-  o.pp.target = default_target;
+  o.pp.target = pp::native_target;
   std::vector<std::string_view> other_inputs;
   using Kind = pipeline::LinkOperand::Kind;
   const auto add_operand = [&](Kind kind, std::vector<std::string>& paths, std::string_view path) {
@@ -261,6 +260,13 @@ std::vector<std::string_view> views(std::span<const std::string> argv) {
 std::string in_cwd(const Request& r, const std::string& path) {
   if (path.starts_with('/') || r.cwd.empty()) return path;
   return (std::filesystem::path(r.cwd) / path).native_encoded_string();
+}
+
+pp::Config preprocessing_config(pp::Config config, const Request& r) {
+  auto sdk = std::ranges::find(r.env, "SDKROOT", &std::pair<std::string, std::string>::first);
+  std::string sdkroot;
+  if (sdk != r.env.end() && !sdk->second.empty()) sdkroot = in_cwd(r, sdk->second);
+  return pp::with_system_dirs(std::move(config), r.cwd, sdkroot);
 }
 
 std::optional<std::string> read_disk(const std::string& path) {
@@ -459,7 +465,7 @@ Done run(const Request& r, pp::Host& host, pipeline::Session& session, const Sto
     fail(d, opts.error());
     return d;
   }
-  pp::Config config = pp::with_system_dirs(opts->pp, r.cwd);
+  pp::Config config = preprocessing_config(std::move(opts->pp), r);
   config.view = units.view;
   pp::Session& ps = pp::configure(config, host);
   auto stats = [&] {
@@ -501,7 +507,7 @@ Done run(const Request& r, pp::Host& host, pipeline::Session& session, const Sto
   if (key.until == pipeline::Until::link) {
     std::vector<obj::object> objects;
     std::vector<link::elf::archive_input> archives;
-    const bool linux_target = opts->pp.target == &ast::x86_64_linux;
+    const bool linux_target = config.target == &ast::x86_64_linux;
     // Snapshot disk inputs at ingress, outside the file table (§5.2).
     using Kind = pipeline::LinkOperand::Kind;
     for (const auto [kind, index] : opts->operands) {
@@ -617,7 +623,7 @@ std::optional<pipeline::FileOffset> definition(const Request& r, pp::Host& host,
                                                const std::string& file, std::uint32_t offset, Units units) {
   auto opts = parse_options(views(r.argv));
   if (!opts || opts->sources.empty()) return std::nullopt;
-  pp::Config config = pp::with_system_dirs(opts->pp);
+  pp::Config config = preprocessing_config(std::move(opts->pp), r);
   config.view = units.view;
   pp::configure(config, host);
   const std::string& s = opts->sources.front();

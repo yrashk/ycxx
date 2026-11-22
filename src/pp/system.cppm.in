@@ -1,6 +1,6 @@
 // The system include directories of this build (configured by CMake): libycxx's headers, the
-// ones libycxx's build generated, ycxx's resource headers for Linux, and the C library's
-// headers in the SDK (`$SDKROOT` overrides the SDK the build used).
+// ones libycxx's build generated, ycxx's resource headers for Linux, and the target's C
+// library headers. Linux uses native system directories and Darwin uses a selected SDK.
 export module ycxx.pp:system;
 
 import std;
@@ -13,14 +13,33 @@ inline constexpr int version_major = @PROJECT_VERSION_MAJOR@;
 inline constexpr int version_minor = @PROJECT_VERSION_MINOR@;
 inline constexpr int version_patch = @PROJECT_VERSION_PATCH@;
 
-std::vector<std::string> system_dirs(const ast::Target& target = ast::aarch64_darwin) {
+inline constexpr const ast::Target* native_target = @YCXXC_NATIVE_TARGET@;
+
+// `sdkroot` is the request's absolute Darwin SDK override. An empty value uses the configured SDK.
+std::vector<std::string> system_dirs(const ast::Target& target, std::string_view sdkroot = {}) {
   std::vector<std::string> dirs{"@YCXX_LIBYCXX_INCLUDE@", "@YCXX_LIBYCXX_GENERATED_INCLUDE@"};
-  if (target.triple == ast::x86_64_linux.triple) dirs.push_back("@YCXX_LINUX_RESOURCE_INCLUDE@");
-  std::string sdk = target.triple == ast::aarch64_darwin.triple ? "@CMAKE_OSX_SYSROOT@" : "";
-  if (const char* env = std::getenv("SDKROOT"); env != nullptr && *env != '\0') sdk = env;
-  std::string include = sdk + "/usr/include";
-  if (!target.multiarch.empty()) dirs.push_back(std::format("{}/{}", include, target.multiarch));
-  dirs.push_back(std::move(include));
+  if (target.triple == ast::x86_64_linux.triple) {
+    dirs.push_back("@YCXX_LINUX_RESOURCE_INCLUDE@");
+    if (native_target == &ast::x86_64_linux) {
+      dirs.push_back(std::format("/usr/include/{}", target.multiarch));
+      dirs.push_back("/usr/include");
+    }
+  } else if (target.triple == ast::aarch64_darwin.triple) {
+    namespace fs = std::filesystem;
+    fs::path sdk(sdkroot.empty() ? std::string_view("@CMAKE_OSX_SYSROOT@") : sdkroot);
+    std::error_code ec;
+    // Keep missing include candidates so the daemon can observe headers created later.
+    if (sdk.is_absolute() && !fs::equivalent(sdk, sdk.root_path(), ec))
+      dirs.push_back((sdk / "usr/include").lexically_normal().generic_native_encoded_string());
+  }
+  return dirs;
+}
+
+// A daemon can serve either target. These roots get toolchain durability and initial watches.
+std::vector<std::string> all_system_dirs(std::string_view sdkroot) {
+  auto dirs = system_dirs(ast::aarch64_darwin, sdkroot);
+  for (std::string& dir : system_dirs(ast::x86_64_linux))
+    if (!std::ranges::contains(dirs, dir)) dirs.push_back(std::move(dir));
   return dirs;
 }
 
