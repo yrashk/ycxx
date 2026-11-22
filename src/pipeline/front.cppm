@@ -211,9 +211,10 @@ struct Runtime {
 // constant if it has one, else zero; one initialized by code, or with a destructor, also gets a
 // guard variable, and the function the runtime entry points its initialization calls.
 template <class R>
-void static_locals(sema::World& world, TranslationUnit& tu, FunctionDef& f, R& runtime) {
+void static_locals(sema::World& world, TranslationUnit& tu, FunctionDef& f,
+                   std::span<const ast::LocalRec> locals, R& runtime) {
   ast::Interners& ins = world.ins;
-  for (const ast::LocalRec& l : ins.seqs.elements(f.body.locals)) {
+  for (const ast::LocalRec& l : locals) {
     if (l.entity == EntityId::none || l.decl == ast::NodeId::none || !ins.ast.is<ast::StaticVar>(l.decl)) continue;
     // The function and its statics need ELF group selection (#422), or weak Mach-O statics (#124).
     f.coalesced = false;
@@ -730,7 +731,7 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
       if (!tu.owned_virtual_table && !program.function_defined_before(slots->back(), program.end()) &&
           !program.has_unapplied_declaration_attributes(c) &&
           std::ranges::none_of(*slots, [&](EntityId f) { return program.has_unapplied_declaration_attributes(f); })) {
-        tu.owned_virtual_table = OwnedVirtualTable{world.types.class_type(c), *slots};
+        tu.owned_virtual_table = OwnedVirtualTable{sema::virtual_table_entity(world, c), *slots};
         continue;
       }
     } else if (sema::native_virtual_consumer(record, classes, world.types, peer_member_declaration)) {
@@ -779,7 +780,8 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
         r.kind == sema::EntityKind::function_template || r.kind == sema::EntityKind::variable_template ||
         r.kind == sema::EntityKind::alias_template || r.kind == sema::EntityKind::concept_)
       return;  // no symbol: a template's specializations have them
-    bool fn = r.kind != sema::EntityKind::variable;
+    const bool table = r.kind == sema::EntityKind::virtual_table;
+    bool fn = r.kind != sema::EntityKind::variable && !table;
     std::string id(ins.names.spelling(r.name));
     if (fn && id == "main" && r.scope == EntityId::none) tu.main = e;  // [basic.start.main]: the global one
     // A member of a class local to the unit is local too.
@@ -787,7 +789,8 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
     for (EntityId sc = r.scope; linkage == ast::Linkage::external && sc != EntityId::none; sc = world.entities.rec(sc).scope)
       if (world.entities.rec(sc).kind == sema::EntityKind::class_ && internal_class(sc)) linkage = ast::Linkage::internal;
     tu.entities.push_back({e, std::move(id), d.type, fn, r.lang, linkage, false, at, r.scope,
-                           r.kind == sema::EntityKind::constructor  ? Special::constructor
+                           table ? Special::virtual_table
+                           : r.kind == sema::EntityKind::constructor  ? Special::constructor
                            : r.kind == sema::EntityKind::destructor ? Special::destructor
                                                                     : Special::none});
     Entity& emitted = tu.entities.back();
@@ -1024,8 +1027,31 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
            program.asm_label(f.entity).empty() &&
            (!inline_declarations.contains(f.entity) || f.constructor_cleanup != EntityId::none);
   };
+  auto declare_virtual_table = [&](EntityId entity, std::optional<ast::Loc> at) {
+    ast::DeclSema table{};
+    table.kind = ast::DeclKind::variable;
+    table.entity = entity;
+    table.type = world.entities.rec(entity).type;
+    declare(table, at);
+  };
   for (FunctionDef& f : tu.functions) {
-    static_locals(world, tu, f, runtime);
+    const auto locals = ins.seqs.elements(f.body.locals);
+    if (classes.has_virtual_layouts()) {
+      for (const auto& local : locals) {
+        if (local.decl == ast::NodeId::none || !ins.ast.is<ast::LocalVar>(local.decl)) continue;
+        const auto init = ins.ast.get<ast::LocalVar>(local.decl).init.id;
+        if (init == ast::NodeId::none || !ins.ast.is<ast::PeerRootInit>(init)) continue;
+        const EntityId table = ins.ast.get<ast::PeerRootInit>(init).vtable;
+        if (seen.contains(std::to_underlying(table))) continue;
+        const EntityId cls = world.entities.rec(table).scope;
+        if (!program.peer_root_vtable_visible(cls)) {
+          block_virtual_emission(tu, program, classes.rec(cls));
+          return tu;
+        }
+        declare_virtual_table(table, ast::Loc{f.item, f.body_offset});
+      }
+    }
+    static_locals(world, tu, f, locals, runtime);
     // Check the complete unit by entity, including later redeclarations and qualified friends.
     if (f.unwind == UnwindEligibility::none) continue;
     if (!unwind_definition(f)) {
@@ -1046,6 +1072,12 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
         f.unwind = UnwindEligibility::none;
       else if (tu.cleanup_resume == EntityId::none) tu.cleanup_resume = runtime.resume();
     }
+  }
+  // Register the owner after checking the makers. An owned declaration cannot stand in for
+  // the visibility check required when a maker requests the address point.
+  if (const auto& owned = tu.owned_virtual_table) {
+    const auto key = program.member_decl(owned->slots.front());
+    declare_virtual_table(owned->entity, key ? std::optional(ast::Loc{key->item, 0}) : std::nullopt);
   }
   for (FunctionDef& f : tu.functions) {
     if (f.unwind_through_constructor == EntityId::none) continue;

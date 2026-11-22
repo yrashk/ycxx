@@ -233,6 +233,9 @@ scope with no bases and an implicit trivial destructor can first declare `T() = 
 in class and use it to initialize an `inline constexpr` tag object.
 [#157](https://github.com/yrashk/ycxx/issues/157)
 
+An explicit class return can select a written move constructor for an eligible named local
+or parameter. [#749](https://github.com/yrashk/ycxx/issues/749)
+
 An ordinary class object can be destroyed explicitly through a reference or pointer with
 `object.~Class()` or `pointer->~Class()`. Templates can use a dependent class name, and unary
 `noexcept` uses the destructor's exception specification. [#722](https://github.com/yrashk/ycxx/issues/722)
@@ -533,7 +536,7 @@ peer-owned objects with an ordinary root, including a derived class with that si
 base, at most one integral field and at most one override. Consumers can upcast those derived
 views, access ordinary integral members, and query `sizeof` and `alignof` for the Itanium layout.
 A translation unit can also define one non-key virtual member of an eligible root out of class.
-For that case, the peer provides the key function, virtual table, RTTI and object construction.
+For that case, the peer provides the key function, virtual table and RTTI.
 [#309](https://github.com/yrashk/ycxx/issues/309)
 
 **Structured bindings.** Local bindings can copy or alias scalar-element arrays, including
@@ -543,7 +546,10 @@ members. [#285](https://github.com/yrashk/ycxx/issues/285)
 
 **Linux virtual tables.** A translation unit with the key definition emits the vtable and
 RTTI for an ordinary root with one public integral field and two fixed integer virtual
-signatures. A peer supplies the second virtual and constructs the object.
+signatures. A peer supplies the second virtual. Linux x86-64 also supports ordinary
+automatic default initialization (`Root root;`) for that shape with an implicit default
+constructor, a trivial destructor and no field initializer. The local object's vptr uses the
+same table whether the key definition is in this translation unit or a peer.
 [#309](https://github.com/yrashk/ycxx/issues/309)
 
 ### Not yet
@@ -557,7 +563,7 @@ signatures. A peer supplies the second virtual and constructs the object.
   contexts ([#338](https://github.com/yrashk/ycxx/issues/338)),
   tuple-like structured bindings and structured bindings to bit-fields or inherited members,
   inheriting constructors, and base packs or multiple bases in a class template.
-- Native construction and broader virtual dispatch and table emission, virtual base classes,
+- Broader native construction, virtual dispatch and table emission, virtual base classes,
   `typeid` and `dynamic_cast`, and virtual destructor entry points.
   [#309](https://github.com/yrashk/ycxx/issues/309) · [#310](https://github.com/yrashk/ycxx/issues/310) ·
   [#294](https://github.com/yrashk/ycxx/issues/294) · [#136](https://github.com/yrashk/ycxx/issues/136)

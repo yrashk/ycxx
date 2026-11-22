@@ -353,6 +353,12 @@ std::optional<std::array<EntityId, 2>> native_virtual_table_slots(const ClassRec
   return slots;
 }
 
+EntityId virtual_table_entity(World& world, EntityId cls) {
+  return world.entities.entity({EntityKind::virtual_table, world.ins.names.intern("vtable"),
+                                world.types.builtin(Builtin::unsigned_char), LangLinkage::cxx,
+                                ast::Linkage::external, {}, cls});
+}
+
 bool native_virtual_derived_declarations(const ClassRec& record, const Classes& classes, const Types& types,
                                         auto&& written_member) {
   if (!native_virtual_class(record, types) || record.bases.size() != 1 || record.fields.size() > 1) return false;
@@ -554,6 +560,12 @@ public:
   }
   static bool is_type(ast::DeclKind k) {
     return k == ast::DeclKind::class_ || k == ast::DeclKind::enum_ || k == ast::DeclKind::type_alias;
+  }
+
+  bool names_direct_class(NameId name, QualType type) {
+    if (std::ranges::contains(block_types_, name, &BlockType::name)) return false;
+    const auto directly_named = class_name(name, /*elaborated=*/false, /*aliases=*/false);
+    return directly_named && same_unqualified(*directly_named, type);
   }
 
   struct ClassBodyType {
@@ -2148,6 +2160,14 @@ public:
     return as<ast::Call>(object).has_value() || as<ast::MemberCall>(object).has_value();
   }
 
+  bool default_constructed_peer_root(Ex object) {
+    while (const auto paren = as<ast::Paren>(object)) object.id = paren->operand.id;
+    if (const auto local = as<ast::LocalRef>(object))
+      if (const auto declaration = as<ast::LocalVar>({locals_[local->local].decl}))
+        return as<ast::PeerRootInit>({declaration->init.id}).has_value();
+    return false;
+  }
+
   Ex member(Ex object, bool arrow, NameId name, u32 end, u32 op_at, u32 name_at,
             std::optional<NameId> qualifier = {}) {
     u32 begin = object.begin;
@@ -2223,7 +2243,7 @@ public:
     u32 index = found->index;
     const FieldRec& f = *found->field;
     if (unevaluated == 0 && !(checking_virtual_body && c == current_class) &&
-        !(has_peer_virtual_layout(ct) && (arrow || peer_object_lvalue(object))) &&
+        !(has_peer_virtual_layout(ct) && (arrow || peer_object_lvalue(object) || default_constructed_peer_root(object))) &&
         !require_supported_virtual_layout(ct, name_at)) return fail;
     // [expr.ref]/7.2: the member's type, with the object's cv-qualifiers added; the result is an
     // lvalue if the object is (or is reached through a pointer), else an xvalue.
@@ -2426,6 +2446,28 @@ public:
     ExprInfo info{Types::unqualified(t), ValueCategory::prvalue, 0};
     return node(ast::DefaultInit{info}, begin, end, info);
   }
+
+  // The sole constructor work in this profile is installing the external vtable address point.
+  // The directly written field has no initializer and the implicit destructor is trivial.
+  Ex peer_root_default_init(QualType t, u32 begin, u32 end) {
+    if (!has_peer_virtual_layout(t) || Types::cv(types().canonical(t)) != Cv::none ||
+        current_function == EntityId::none || current_class != EntityId::none || !lambdas_.empty() ||
+        templated() || unevaluated || immediate_context || q_->is_constexpr(current_function))
+      return {};
+    const EntityId cls = types().class_of(t);
+    const auto& entity = w_->entities.rec(cls);
+    const auto* record = classes().find(cls);
+    if (!record || record->peer_virtual_layout != PeerVirtualLayout::root || entity.linkage != ast::Linkage::external ||
+        !record->destructor_usable || record->default_deleted || record->fields.size() != 1 ||
+        std::ranges::count(record->members, true, &MemberDeclRec::is_virtual) != 2) return {};
+    const auto& field = record->fields.front();
+    if (record->access_of(field.entity) != ast::Access::public_ || field.dmi || field.init != ConstId::none ||
+        Types::is_const(types().canonical(field.type))) return {};
+
+    const ExprInfo info{t, ValueCategory::prvalue, 0};
+    return node(ast::PeerRootInit{info, virtual_table_entity(*w_, cls)}, begin, end, info);
+  }
+
   bool is_defaulted_tag_initializer(Ex init) {
     while (auto paren = as<ast::Paren>(init)) init.id = paren->operand.id;
     if (!(as<ast::ValueInit>(init) || as<ast::DefaultInit>(init)) || !types().is_class(init.type())) return false;
@@ -4179,6 +4221,25 @@ public:
     return !lambdas_.empty() && lambdas_.back().head.empty() &&
            w_->entities.rec(lambdas_.back().call).templ == EntityId::none &&
            types().kind(declared_return_) == TypeKind::placeholder && no_return_deduction == 0;
+  }
+
+  // [stmt.return], [expr.prim.id.unqual]: copy-initialize an explicit class result from an
+  // eligible local name as an xvalue. Parentheses preserve the category of the named operand.
+  Ex init_explicit_return(Ex e, QualType type) {
+    if (e.ok() && types().is_class(type) && e.cat() == ValueCategory::lvalue && !dependent(e)) {
+      Ex name = e;
+      while (auto paren = as<ast::Paren>(name)) name.id = paren->operand.id;
+      if (auto ref = as<ast::LocalRef>(name)) {
+        const auto& local = locals_[ref->local];
+        const bool eligible_type = types().is_reference(local.type)
+                                       ? types().rec(local.type).rvalue_ref && types().is_object(e.type())
+                                       : types().is_object(local.type);
+        if (local.entity == EntityId::none && !(local.flags & ast::local_flag::structured_binding) &&
+            eligible_type && cv_within(object_cv(e.type()), Cv::const_))
+          e = convert_node(e, ast::ConversionKind::qualification, e.type(), ValueCategory::xvalue);
+      }
+    }
+    return convert(e, type, e.begin);
   }
 
   Ex init_deduced_return(Ex e, QualType type) {

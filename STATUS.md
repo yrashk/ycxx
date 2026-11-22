@@ -1271,6 +1271,10 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   member subobject whose class has an implicit constructor, conditional
   `explicit`, explicit constructor templates, and other `= default` forms (#157, #244).
 
+- Ordinary explicit class returns copy-initialize from an eligible named local or
+  parameter as an xvalue, including parenthesized names. A written move constructor
+  can be selected even when the copy constructor is deleted. [#749](https://github.com/yrashk/ycxx/issues/749)
+
 ## Ordinary destructor access (#259)
 
 - Automatic class objects and evaluated expressions of the form `T(args)` or `T{args}`
@@ -2671,21 +2675,24 @@ What the process allocates, attributed to the engine's cells, in the trace and t
 - On Linux x86-64, a unit can emit one ordinary out-of-line, non-inline virtual member of
   a supported root. The member follows the key function in declaration order and takes the
   existing receiver pointer, with ordinary access to the object's integral fields. The peer
-  defines the key function and supplies the table, RTTI, and object lifetime.
+  defines the key function and supplies the table and RTTI.
   [Itanium ABI §5.2.3](https://itanium-cxx-abi.github.io/cxx-abi/abi.html#vague-vtable) · [#309](https://github.com/yrashk/ycxx/issues/309)
 - The Linux x86-64 producer admits one external, default-visible, non-template root with
   one public integral field and two directly written fixed integer virtual signatures. A unit
   that defines the first virtual out of line and non-inline owns the table and RTTI. It emits
   default-visible `_ZTV` and `_ZTI` objects and a weak `_ZTS` object in a read-only ELF COMDAT
-  keyed by the name. The peer defines the non-key member and constructs the complete object.
+  keyed by the name. The peer defines the non-key member.
   Mixed GCC and Clang checks verify dispatch and RTTI. Daemon edits verify table ownership
   and byte-for-byte agreement with a cold compile.
   [Itanium ABI §5.2.3–4](https://itanium-cxx-abi.github.io/cxx-abi/abi.html#vague-vtable) ·
   [#309](https://github.com/yrashk/ycxx/issues/309) · [#422](https://github.com/yrashk/ycxx/issues/422)
-- Local complete-object construction and vptr initialization are the next slice in #309.
-  Broader table emission, pure virtual functions, `final` and covariant returns also remain
-  there. Virtual destructor entry points, RTTI expressions, virtual bases and native class ABI
-  have their own issues.
+- Linux x86-64 default-initializes a plain automatic variable of the
+  supported root type. The root has an implicit default constructor, a trivial destructor and
+  no default member initializer. Lowering stores `_ZTV + 16` in the vptr. The table can come
+  from the key definition in the same unit or from a peer. [#309](https://github.com/yrashk/ycxx/issues/309)
+- Broader construction and table emission, pure virtual functions, `final` and covariant
+  returns remain in #309. Virtual destructor entry points, RTTI expressions, virtual bases
+  and native class ABI have their own issues.
   [#309](https://github.com/yrashk/ycxx/issues/309) · [#136](https://github.com/yrashk/ycxx/issues/136) ·
   [#294](https://github.com/yrashk/ycxx/issues/294) · [#310](https://github.com/yrashk/ycxx/issues/310) ·
   [#489](https://github.com/yrashk/ycxx/issues/489)
