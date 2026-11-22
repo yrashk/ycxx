@@ -21,6 +21,14 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
   - Do: run sessions on Opus and reach Fable through Agent subagents with `model: "fable"`.
   - Now a rule: DECISIONS §6.5.
   - Learned on #1, 2026-11-17.
+- **Squash onto the branch's own base, never onto a freshly fetched `origin/main`.** On #234 a
+  `git reset --soft origin/main` after a fetch moved HEAD to a newer main while the tree stayed on
+  the old base, so the squashed commit also reverted 548 lines of other people's work. Only
+  `git diff --stat` before pushing showed it.
+  - Do: squash with `git reset --soft $(git merge-base HEAD origin/main)` taken before any
+    fetch, or the base recorded at branch creation, then check `git diff --stat HEAD~1` lists
+    only your files. Recover from the reflog (`git reflog`) by re-parenting the tree.
+  - Learned on #234.
 - **Force-push may be blocked in a session**, so rebasing a pushed branch onto `main` fails.
   - Do: merge `main` into the branch instead. History stays readable, and nobody has to approve
     a force-push.
