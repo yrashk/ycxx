@@ -130,6 +130,26 @@ with the compiler support for nontrivial union members, explicit destruction, an
 `noexcept` expressions.
 [Unions #203](https://github.com/yrashk/ycxx/issues/203) · [Explicit destruction #722](https://github.com/yrashk/ycxx/issues/722) · [Noexcept expressions #729](https://github.com/yrashk/ycxx/issues/729)
 
+To check the active alternative with YCXX, compose the two resource policies, their
+move-transfer contracts, and the variant's storage contract.
+
+```cpp
+namespace own = ycxx::ownership;
+using Choice = own::variant<Receipt, Permit>;
+using CheckChoice = own::use_policy<
+    ReceiptPolicy, PermitPolicy,
+    own::move_transfers<Receipt>, own::move_transfers<Permit>,
+    own::tracks_variant<Choice>>;
+```
+
+`ReceiptPolicy` and `PermitPolicy` register the owner types and any factory, observation,
+and terminal operations they use. `tracks_variant` opts into the package's tagged
+storage protocol. Each move-transfer contract authorizes the corresponding resource
+move, including moves into and out of that storage. With `-fcheck-policies`, a
+`holds_first()` or `holds_second()` condition narrows the possible alternatives for
+its branches. A live shared borrow prevents extraction, and a live linear alternative
+must be discharged or transferred on every path out of scope.
+
 ## Scoped capabilities
 
 Include `<ycxx/capabilities.hpp>` and choose an issuer type, a bit for each right, and stable
