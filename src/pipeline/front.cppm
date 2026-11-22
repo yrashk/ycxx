@@ -820,7 +820,7 @@ bool names_unnamed_namespace(parse::Program& program, QualType type) {
   }
 }
 
-// Native compilation may consume peer-owned Linux objects, including one non-key definition.
+// Native compilation may consume peer-owned objects, including one non-key definition.
 bool native_virtual_layouts(TranslationUnit& tu, parse::Program& program, sema::World& world,
                             const std::set<EntityId>& uncertain_layouts) {
   const auto& classes = program.classes();
@@ -1093,7 +1093,7 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
                                 location.item, location.offset, complete.this_type});
         continue;
       }
-      if (linux && !member && program.supports_base_object_variant(d.entity, uncertain_layouts))
+      if (!member && program.supports_base_object_variant(d.entity, uncertain_layouts))
         tu.base_object_variants.insert(d.entity);
       tu.functions.back().coalesced = inline_declarations.contains(d.entity) && entity.kind == sema::EntityKind::function &&
                                      entity.linkage == ast::Linkage::external && entity.templ == EntityId::none &&
@@ -1402,8 +1402,9 @@ engine::query_task<FrontResult> TuFront::run(engine::Ctx& cx, TuId tu) {
   // The unit's own records of its classes and enumerations (#115).
   const sema::Classes& classes = program.classes();
   const bool linux = unit_source.config.target->triple == ast::x86_64_linux.triple;
-  const auto uncertain = linux ? program.uncertain_object_layouts(/*include_lifecycle_signatures=*/true)
-                               : std::set<EntityId>{};
+  // Both targets: the base-object entries and the virtual shapes rely on it, and the System V
+  // aggregate rules read it on x86-64 (#650).
+  const auto uncertain = program.uncertain_object_layouts(/*include_lifecycle_signatures=*/true);
   if (!out.has_errors()) out.unit = unit_of(program, world, items, src.name, uncertain);
   auto nontrivial_destructor = [&](this auto&& recurse, EntityId cls) -> bool {
     const auto* record = classes.find(cls);

@@ -1,5 +1,3 @@
-// REQUIRES: linux
-// PARITY: #309 Native opaque virtual dispatch is currently supported only on x86-64 Linux.
 // XFAIL: clang
 // XFAIL: gcc
 

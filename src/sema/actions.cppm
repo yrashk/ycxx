@@ -315,13 +315,13 @@ bool native_virtual_declaration(const MemberDeclRec& member, const Types& types,
          integer(type.inner) && std::ranges::all_of(type.params, integer);
 }
 
-bool native_virtual_class(const ClassRec& record, const Types& types) {
-  return types.target().triple == ast::x86_64_linux.triple && record.polymorphic && !record.virtual_destructor &&
+bool native_virtual_class(const ClassRec& record) {
+  return record.polymorphic && !record.virtual_destructor &&
          !record.user_ctors && record.destructor == EntityId::none;
 }
 
 bool native_virtual_root_declarations(const ClassRec& record, const Types& types, auto&& written_member) {
-  if (!native_virtual_class(record, types) || !record.bases.empty()) return false;
+  if (!native_virtual_class(record) || !record.bases.empty()) return false;
   return std::ranges::all_of(record.members, [&](const MemberDeclRec& member) {
     // Class completion also records an implicit copy assignment, even for opaque classes.
     if (!member.is_virtual)
@@ -405,7 +405,7 @@ EntityId dynamic_cast_runtime(World& world) {
 
 bool native_virtual_derived_declarations(const ClassRec& record, const Classes& classes, const Types& types,
                                         auto&& written_member) {
-  if (!native_virtual_class(record, types) || record.bases.size() != 1 || record.fields.size() > 1) return false;
+  if (!native_virtual_class(record) || record.bases.size() != 1 || record.fields.size() > 1) return false;
   const BaseRec& edge = record.bases.front();
   if (edge.access != ast::Access::public_ || edge.dependent_in_pattern) return false;
   const ClassRec* base = classes.find(edge.cls);

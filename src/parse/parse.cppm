@@ -7307,7 +7307,7 @@ EntityId Program::peer_automatic_primary_base(u32 item, EntityId cls, const sema
                                   std::ptrdiff_t written_members) {
     const auto& head = items_->items[index];
     const auto& owner = w_->entities.rec(entity);
-    return sema::native_virtual_class(record, w_->types) && record.destructor_usable && !record.default_deleted &&
+    return sema::native_virtual_class(record) && record.destructor_usable && !record.default_deleted &&
            !record.union_ && !record.closure && !record.unapplied_layout && !record.explicit_alignment &&
            record.types.empty() && record.friends.empty() && owner.linkage == ast::Linkage::external &&
            owner.templ == EntityId::none && is_namespace(owner.scope) && !unnamed(namespace_path(owner.scope)) &&
@@ -7477,7 +7477,7 @@ bool Program::peer_typed_dynamic_cast(EntityId source, EntityId target) const {
 bool Program::peer_pure_dispatch(EntityId cls) const {
   using enum lex::Tk;
   const auto* record = classes_.find(cls);
-  if (!record || !record->defined || !record->is_abstract() || !sema::native_virtual_class(*record, w_->types) ||
+  if (!record || !record->defined || !record->is_abstract() || !sema::native_virtual_class(*record) ||
       record->peer_virtual_layout != sema::PeerVirtualLayout::none ||
       record->union_ || record->closure || !record->bases.empty() || !record->fields.empty() ||
       !record->types.empty() || !record->friends.empty() || record->unapplied_layout || record->explicit_alignment)
@@ -7562,7 +7562,7 @@ std::optional<EntityId> Program::peer_root_destructor_key(EntityId cls) const {
   using enum lex::Tk;
   if (r_->has_clang_attribute_pragma) return std::nullopt;
   const auto* record = classes_.find(cls);
-  if (w_->target.triple != ast::x86_64_linux.triple || !record || !record->defined ||
+  if (!record || !record->defined ||
       !record->virtual_destructor || !record->destructor_noexcept.value_or(false) ||
       !record->destructor_usable || record->is_abstract() || record->union_ || record->closure ||
       !record->bases.empty() || !record->fields.empty() || !record->types.empty() || !record->friends.empty() ||
@@ -7873,7 +7873,7 @@ const Result<ast::ClassDef>& Program::class_def(u32 item) {
       }
     }
     classify_defaulted_default_ctor(rec, out.diags);
-    if (rec.polymorphic && w_->target.triple == ast::x86_64_linux.triple) {
+    if (rec.polymorphic) {
       rec.peer_virtual_layout = peer_virtual_layout(item, *cls, rec, members);
       if (rec.peer_virtual_layout == sema::PeerVirtualLayout::none)
         rec.peer_automatic_primary_base = peer_automatic_primary_base(item, *cls, rec, members);
