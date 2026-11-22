@@ -5962,6 +5962,7 @@ private:
       // usable in constant expressions ([expr.const]).
       sem.kind = ast::DeclKind::variable;
       sem.storage = ast::Storage::static_;
+      const sema::Sema::ImmediateReferenceScope references(s_, spec.is_constexpr);
       if (spec.is_constexpr) d.type = types.add_cv(d.type, sema::Cv::const_);
       // A placeholder type is deduced from the initializer in the class ([dcl.type.auto.deduct]),
       // read here, before the member is declared.

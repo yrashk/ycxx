@@ -2629,7 +2629,7 @@ public:
   // An aggregate's elements each from its default member initializer, else value- or
   // default-initialized.
   Ex member_inits(QualType t, bool value, u32 begin, u32 end) {
-    const bool replay = replay_default_members_ && can_replay_default_members(t);
+    const bool replay = (value || replay_default_members_) && can_replay_default_members(t);
     std::vector<Element> elems = elements(t);
     if (replay && std::ranges::any_of(class_rec(types().class_of(t))->fields, [&](const FieldRec& f) {
           return !f.dmi && (Types::is_const(types().canonical(f.type)) ||
@@ -2651,6 +2651,16 @@ public:
       if (auto init = q_->replay_default_member(*this, e.default_member, required_base)) {
         if (*init == NodeId::none) return {NodeId::none, begin, end};
         ExprInfo info{e.type, ValueCategory::prvalue, 0};
+        if (!replay_default_members_ && required_base == EntityId::none && !unevaluated && !constant_reference_context) {
+          const Ex operand{*init, begin, end, info};
+          const Ex proof = runtime_default_noexcept(operand);
+          if (!proof.ok()) return {NodeId::none, begin, end};
+          const auto result = as<ast::Literal>(proof);
+          if (!result || !w_->values.rec(result->value).bits) {
+            diag(begin, Diag::aggregate_default_unwind);
+            return {NodeId::none, begin, end};
+          }
+        }
         return node(ast::DefaultMemberInit{info, {*init, 0}}, begin, end, info);
       }
       if (required_base != EntityId::none) {
@@ -2752,7 +2762,7 @@ public:
     Ex fail{NodeId::none, begin, end};
     std::vector<Element> elems = elements(t);
     std::vector<Ex> out;
-    const bool replay = replay_default_members_ && can_replay_default_members(t);
+    const bool replay = can_replay_default_members(t);
     const bool union_ = is_union(t);
     const auto omitted = [&](const Element& element, u32 at) {
       // [dcl.init.aggr]: copy-list-initialize an omitted union element and the
@@ -6121,6 +6131,36 @@ public:
     Ex result = construct(t, std::move(args), begin, end, Construction::direct, ConstructorDestination::lambda_result);
     if (result.ok() && !dependent(result)) lambdas_.back().pending_result = result.id;
     return result;
+  }
+
+  // The new runtime default path admits only these scalar operations and ordinary calls.
+  // Allocation, opaque virtual dispatch and class-valued calls require separate proofs.
+  Ex runtime_default_noexcept(Ex operand) {
+    const auto ordinary_result = [&](ExprInfo info) {
+      return info.category != ValueCategory::prvalue || !types().is_class(info.type);
+    };
+    const auto supported_operation = [&](const ast::Red& node) {
+      if (node.is<ast::Call>()) return ordinary_result(node.get<ast::Call>().info);
+      if (node.is<ast::MemberCall>()) return ordinary_result(node.get<ast::MemberCall>().info);
+      if (node.is<ast::ImplicitConversion>()) {
+        const auto conversion = node.get<ast::ImplicitConversion>().conversion;
+        return conversion != ast::ConversionKind::user_defined && conversion != ast::ConversionKind::array_copy;
+      }
+      return node.is<ast::Literal>() || node.is<ast::DeclRef>() || node.is<ast::LocalRef>() || node.is<ast::This>() ||
+             node.is<ast::Paren>() || node.is<ast::Member>() || node.is<ast::Subscript>() ||
+             node.is<ast::Unary>() || node.is<ast::Binary>() || node.is<ast::OrderedBinary>() ||
+             node.is<ast::Assign>() || node.is<ast::Conditional>() || node.is<ast::DefaultArg>();
+    };
+    const auto root = b_->commit(ast::Child{operand.id, 0});
+    bool supported = true;
+    auto visit = [&](this const auto& self, const ast::Red& node) -> void {
+      if (!supported) return;
+      supported = supported_operation(node);
+      if (supported) node.for_each_child(self);
+    };
+    visit(ast::Red(ins().ast, root.id, operand.begin));
+    if (!supported) return bool_literal(false, operand.begin, operand.end);
+    return unary_noexcept(operand, operand.begin, operand.end);
   }
 
   // [expr.unary.noexcept], [except.spec]: inspect the selected operations and their operands
