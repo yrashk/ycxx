@@ -294,6 +294,8 @@ What is true of the code today. Work in progress and its owners are tracked in
   as black-box inputs. A common symbol becomes a weak definition in its own `__DATA,__common`
   zero-fill section. The reader rejects absolute and indirect symbols, alignments above 2^15,
   scattered and TLV relocations, and section-relative relocations other than UNSIGNED.
+  A SUBTRACTOR must be followed immediately by a non-PC-relative UNSIGNED at the same address
+  and width. Both records describe a 32-bit or 64-bit field. [#702](https://github.com/yrashk/ycxx/issues/702)
 - `ycxx.link` (`src/link/`): `link(objects, options) -> expected<bytes, errors>`.
   - Diagnoses duplicate and undefined symbols and a missing entry point. A strong definition beats
     a weak one; common symbols merge to the largest. `__mh_execute_header` and `___dso_handle` are
@@ -2936,6 +2938,17 @@ on each using-directive path. Conflicting declarations across paths are ambiguou
 function and variable template expressions use the ordinary expression path
 ([expr.type.conv], [temp.names], [basic.lookup.qual]).
 [#697](https://github.com/yrashk/ycxx/issues/697)
+
+## Typed declaration annotations (#662)
+
+Class heads and ordinary function declarations accept C++26 `[[= expression ]]` annotations
+and annotation lists ([dcl.attr.annotation]). The compiler retains each occurrence's canonical
+payload type, evaluated value and item-relative token offset. A translation-unit consumer can
+query all written occurrences by class or function entity, including repeated values and
+redeclarations, while overloads keep separate lists. Enum payloads retain their enumeration type.
+Supported aggregate payloads use structural fields and trivial destruction. Reference-member and
+union payload evaluation, the reflection operator, public `std::meta` APIs, template annotation
+substitution and broader annotation targets remain in [#324](https://github.com/yrashk/ycxx/issues/324).
 
 ## Bootstrap workarounds
 

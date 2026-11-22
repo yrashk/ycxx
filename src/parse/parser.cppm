@@ -46,6 +46,7 @@ struct DeclSpec {
   bool is_constexpr = false;
   bool is_consteval = false;
   bool is_constinit = false;
+  std::vector<ast::AnnotationSema> annotations;
   bool is_typedef = false;  // [dcl.typedef]: the declarators declare typedef-names
   bool hidden_visibility = false;
   std::optional<u32> virtual_at;
@@ -103,6 +104,7 @@ struct Declarator {
   // A GNU asm label, `__asm("_fopen")`: the symbol as written (docs/EXTENSIONS.md); empty if none.
   std::string asm_label;
   bool hidden_visibility = false;
+  std::vector<ast::AnnotationSema> annotations;
   bool pack = false;  // `T... x`: a declarator-id after an ellipsis ([dcl.fct]/23, [temp.param]/17)
   bool ok = true;
 };
@@ -539,7 +541,8 @@ public:
     };
     for (;;) {
       // A standard attribute after a decl-specifier-seq appertains to its type ([dcl.spec.general]).
-      if (skip_attributes(&d.hidden_visibility, attr_gnu)) continue;
+      const bool annotation_type_context = in_type_id || pos() != d.begin;
+      if (skip_attributes(&d.hidden_visibility, attr_gnu, nullptr, annotation_type_context)) continue;
       Tk k = kind();
       switch (k) {
       case Tk::kw_void: ++n_void; break;
@@ -686,12 +689,20 @@ public:
           continue;
         }
         // A class-specifier where a type is named (a local or unnamed class) is not supported yet.
-        if (kind(1) != Tk::identifier || kind(2) == Tk::l_brace || kind(2) == Tk::colon || kind(2) == Tk::coloncolon) {
+        const u32 after_attrs = past_attributes(1);
+        if (after_attrs != 1 && (in_type_id || kind(after_attrs + 1) != Tk::semi)) {
+          s_->diag(at + 1, Diag::attributes_not_allowed);
+          d.ok = false;
+          goto done;
+        }
+        if (kind(after_attrs) != Tk::identifier || kind(after_attrs + 1) == Tk::l_brace ||
+            kind(after_attrs + 1) == Tk::colon || kind(after_attrs + 1) == Tk::coloncolon) {
           s_->diag(at, Diag::not_supported, k);
           d.ok = false;
           goto done;
         }
         bump();
+        skip_attributes(nullptr, attr_std | attr_gnu, &d.annotations);
         NameId n = name_of(tok());
         u32 name_at = pos();
         bump();
@@ -890,6 +901,7 @@ public:
     std::optional<u32> replay_template_args_at;
     bool pack = false;
     bool hidden_visibility = false;
+    std::vector<ast::AnnotationSema> annotations;
     std::vector<Suffix> suffixes;
   };
 
@@ -971,7 +983,8 @@ public:
   // Attribute-specifiers ([dcl.attr.grammar]) and GNU `__attribute__((…))`. Keep an explicit
   // hidden visibility attribute when requested by the declaring context.
   static constexpr int attr_std = 1, attr_gnu = 2;
-  int skip_attributes(bool* hidden_visibility = nullptr, int visibility_forms = attr_std | attr_gnu) {
+  int skip_attributes(bool* hidden_visibility = nullptr, int visibility_forms = attr_std | attr_gnu,
+                      std::vector<ast::AnnotationSema>* annotations = nullptr, bool annotation_type_context = false) {
     int any = 0;
     for (;;) {
       bool std_attr = is(Tk::l_square) && kind(1) == Tk::l_square;
@@ -979,18 +992,77 @@ public:
       if (!std_attr && !gnu) return any;
       const int form = std_attr ? attr_std : attr_gnu;
       any |= form;
+      if (std_attr && kind(2) == Tk::equal) {
+        if (annotations) {
+          annotation_list(*annotations);
+          continue;
+        }
+        if (annotation_type_context) s_->diag(pos() + 2, Diag::attributes_not_allowed);
+      }
       if (gnu) bump();
       const u32 begin = index();
-      Tk open = kind(), close = open == Tk::l_square ? Tk::r_square : Tk::r_paren;
+      const Tk open = kind(), close = std_attr ? Tk::r_square : Tk::r_paren;
       u32 depth = 0;
       do {
         if (is(open)) ++depth;
         else if (is(close)) --depth;
         bump();
       } while (depth > 0 && !at_end());
-      if (hidden_visibility && !*hidden_visibility && (form & visibility_forms) && depth == 0)
+      const bool closed = depth == 0;
+      if ((annotations || annotation_type_context) && std_attr && closed) {
+        if (auto mixed = annotation_in_attribute_list(begin, index()))
+          s_->diag(*mixed - begin_, Diag::annotation_mixed_list);
+      }
+      if (hidden_visibility && !*hidden_visibility && (form & visibility_forms) && closed)
         *hidden_visibility = hidden_visibility_in_attributes(begin, index(), std_attr);
     }
+  }
+
+  // An ordinary attribute's balanced argument may contain a comma followed by '='.
+  std::optional<u32> annotation_in_attribute_list(u32 begin, u32 end) const {
+    u32 depth = 0;
+    for (u32 i = begin + 2; i < end - 2; ++i) {
+      switch (r_->tokens[i].kind) {
+      case Tk::l_paren: case Tk::l_square: case Tk::l_brace: case Tk::l_splice: ++depth; break;
+      case Tk::r_paren: case Tk::r_square: case Tk::r_brace: case Tk::r_splice:
+        if (depth == 0) return std::nullopt;
+        --depth;
+        break;
+      case Tk::comma:
+        if (depth == 0 && r_->tokens[i + 1].kind == Tk::equal) return i + 1;
+        break;
+      default: break;
+      }
+    }
+    return std::nullopt;
+  }
+
+  void annotation_list(std::vector<ast::AnnotationSema>& annotations) {
+    const u32 limit = index() + past_attribute_specifier(0);
+    bump();
+    bump();
+    do {
+      if (!is(Tk::equal)) {
+        s_->diag(pos(), Diag::annotation_mixed_list);
+        seek(limit);
+        return;
+      }
+      const u32 at = pos();
+      bump();
+      sema::Sema::ImmediateReferenceScope references(*s_, /*allowed=*/true);
+      Ex expression = constant_expression();
+      if (accept(Tk::ellipsis)) s_->diag(at, Diag::annotation_not_supported);
+      else if (expression.ok()) {
+        expression = s_->rvalue(expression);
+        if (expression.ok()) {
+          const QualType type = sema::Types::unqualified(s_->types().canonical(expression.type()));
+          if (auto value = sema::Evaluator(*s_, questions()).evaluate_annotation(expression, type)) {
+            annotations.push_back({type, *value, s_->loc_base() + at});
+          }
+        }
+      }
+    } while (accept(Tk::comma));
+    if (!expect(Tk::r_square) || !expect(Tk::r_square)) seek(limit);
   }
 
   bool hidden_visibility_in_attributes(u32 begin, u32 end, bool scoped) const {
@@ -1043,24 +1115,28 @@ public:
     return closing.empty() && matches(entry, limit);
   }
 
+  u32 past_attribute_specifier(u32 ahead) const {
+    Tk open = kind(ahead), close = open == Tk::l_square ? Tk::r_square : Tk::r_paren;
+    u32 depth = 0;
+    do {
+      if (kind(ahead) == open) ++depth;
+      else if (kind(ahead) == close) --depth;
+      ++ahead;
+    } while (depth > 0 && i_ + ahead < end_);
+    return ahead;
+  }
+
   // The token index `ahead` moves to past any attributes that start there.
   u32 past_attributes(u32 ahead) const {
     for (;;) {
       bool std_attr = kind(ahead) == Tk::l_square && kind(ahead + 1) == Tk::l_square;
       bool gnu = kind(ahead) == Tk::identifier && r_->name(tok(ahead)) == "__attribute__" && kind(ahead + 1) == Tk::l_paren;
       if (!std_attr && !gnu) return ahead;
-      if (gnu) ++ahead;
-      Tk open = kind(ahead), close = open == Tk::l_square ? Tk::r_square : Tk::r_paren;
-      u32 depth = 0;
-      do {
-        if (kind(ahead) == open) ++depth;
-        else if (kind(ahead) == close) --depth;
-        ++ahead;
-      } while (depth > 0 && i_ + ahead < end_);
+      ahead = past_attribute_specifier(ahead + (gnu ? 1 : 0));
     }
   }
   // [dcl.attr.grammar]: each attribute argument must have balanced tokens.
-  bool skip_balanced_attributes() {
+  bool balanced_attributes() {
     const u32 count = past_attributes(0);
     std::vector<Tk> closing;
     for (u32 offset = 0; offset < count; ++offset) {
@@ -1090,7 +1166,6 @@ public:
       s_->diag(pos() + count - 1, Diag::expected_token, closing.back());
       return false;
     }
-    seek(index() + count);
     return true;
   }
   // [over.oper.general]/1: the punctuators an operator function may be named by.
@@ -1165,7 +1240,8 @@ public:
         break;
       }
       bump();
-      if (op == Tk::star) skip_attributes();  // appertains to the pointer ([dcl.ptr], [dcl.mptr])
+      if (op == Tk::star)  // appertains to the pointer type ([dcl.ptr], [dcl.mptr])
+        skip_attributes(nullptr, attr_std | attr_gnu, nullptr, /*annotation_type_context=*/true);
       int cv = 0;
       std::optional<u32> restrict_at;
       while (op == Tk::star) {
@@ -1322,7 +1398,8 @@ public:
       s_->diag(pos(), Diag::expected_unqualified_id);
       ok = false;
     }
-    if (l.named) skip_attributes(&l.hidden_visibility);  // appertains to the declarator-id ([dcl.meaning.general]/1)
+    if (l.named)  // appertains to the declarator-id ([dcl.meaning.general]/1)
+      skip_attributes(&l.hidden_visibility, attr_std | attr_gnu, &l.annotations);
     for (;;) {
       if (is(Tk::l_paren) && !abstract && in_params_ == 0 && !params_ahead()) break;  // `T x(args)`: an initializer
       if (is(Tk::l_paren)) {
@@ -1638,7 +1715,7 @@ public:
   }
 
   // The type a declarator gives its name, built from the base type outwards ([dcl.meaning]).
-  QualType build(const Level& l, QualType t, const Suffix*& fn, Declarator& d, bool spells_type,
+  QualType build(Level& l, QualType t, const Suffix*& fn, Declarator& d, bool spells_type,
                  NamedExceptionSpec named_exception = NamedExceptionSpec::ordinary) {
     for (const Level::PtrOp& p : l.pointers) {
       if (p.owner) {
@@ -1738,6 +1815,7 @@ public:
     d.replay_template_args_at = l.replay_template_args_at;
     d.pack = l.pack;
     d.hidden_visibility = l.hidden_visibility;
+    d.annotations = std::move(l.annotations);
     return t;
   }
 
