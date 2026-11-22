@@ -1,8 +1,6 @@
 // [cmath.syn], [c.math]: <math.h> compiles, and its macros HUGE_VAL, HUGE_VALF and INFINITY are
 // constant expressions of type double, float and float; its functions have the C signatures.
 // XFAIL: ycxx <math.h> is libycxx's wrapper of <cmath>, which does not compile yet (#349)
-// REQUIRES: darwin
-// PARITY: #651, then #349
 #include <math.h>
 
 constexpr int kind(float) { return 1; }
