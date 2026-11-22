@@ -335,11 +335,16 @@ def run_diff(test, ctx, tr, flags, timeout, work):
 
 # --- one test ---------------------------------------------------------------------------------
 
-def xfail_reason(test, cut):
+def xfail_reason(test, cut, host=None):
+    """The reason test is expected to fail with compiler cut: `XFAIL: gcc,clang <why>`, `*` for any
+    compiler, and `gcc@darwin-arm64` to expect it only on that host (toolchain.HOST's names)."""
+    host = host or toolchain.HOST
     for v in test.directives.get('XFAIL', []):
         who, _, why = v.partition(' ')
-        if who == '*' or cut in who.split(','):
-            return why.strip() or '(no reason given)'
+        for item in who.split(','):
+            name, _, only = item.partition('@')
+            if name in ('*', cut) and (not only or only == host):
+                return why.strip() or '(no reason given)'
     return None
 
 
