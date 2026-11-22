@@ -7549,10 +7549,10 @@ public:
       auto better = [&](const UnaryCandidate& left, const UnaryCandidate& right) {
         if (left.rank.base_depth && right.rank.base_depth &&
             types().class_of(left.target) != types().class_of(right.target)) {
-          if (left.rank.ref && right.rank.ref && left.rank.to_rvalue && right.rank.to_rvalue &&
-              left.rank.rvalue_ref != right.rank.rvalue_ref)
-            return left.rank.rvalue_ref;
-          return base_depth(left.target, right.target) != 0;
+          if (base_depth(left.target, right.target)) return true;
+          if (base_depth(right.target, left.target)) return false;
+          return left.rank.ref && right.rank.ref && left.rank.to_rvalue && right.rank.to_rvalue &&
+                 left.rank.rvalue_ref && !right.rank.rvalue_ref;
         }
         return left.rank < right.rank;
       };

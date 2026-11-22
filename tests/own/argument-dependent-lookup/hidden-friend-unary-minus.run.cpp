@@ -65,6 +65,16 @@ int use() {
 }
 }
 
+namespace rvalue_base_order {
+struct A {};
+struct B : A { constexpr int operator-() const & { return 51; } };
+struct Related : B { friend constexpr int operator-(A&&) { return 52; } };
+struct Other {};
+struct Unrelated : B, Other { friend constexpr int operator-(Other&&) { return 53; } };
+static_assert(-Related{} == 51);
+static_assert(-Unrelated{} == 53);
+}
+
 int main() {
     numbers::Value value{42};
     member_competition::MemberWins member;
