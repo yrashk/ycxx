@@ -447,8 +447,8 @@ clauses = ['basic.fundamental', 'lex.fcon', 'conv.fpprom', 'conv.double', 'conv.
 std = 'C++98'
 detect = '\b(?:float|double)\b'
 status = 'done'
-issues = [336, 201]
-note = 'Linux x86-64 supports runtime `float` and `double` arithmetic, comparisons, conversion to `bool` and binary32-to-binary64 widening. Other numeric conversions and x87 values remain in #201.'
+issues = [336, 201, 643, 645]
+note = 'Linux x86-64 supports runtime `float` and `double` arithmetic, comparisons and conversions to and from `bool` and the integer types (#643). x87 `long double` remains in #645, strict exception status in #201.'
 probe = '''
 int main() { double d = 1.5; float f = 2.0f; d = d * f + 0.5; return (int)d == 3 ? 0 : 1; }
 '''
@@ -1078,7 +1078,7 @@ int main() { return f(1) == 3 ? 0 : 1; }
 '''
 status = 'partial'
 issues = [356, 354]
-note = 'Ordinary non-template member defaults use complete-class lookup. Dependent defaults, out-of-class additions and defaults on qualified namespace definitions remain'
+note = 'Ordinary non-template member defaults use complete-class lookup. Scalar defaults on free function templates replay when omitted. Other dependent defaults, out-of-class additions and defaults on qualified namespace definitions remain'
 
 [[feature]]
 id = 'dcl-variadic-fn'
@@ -2038,7 +2038,7 @@ template<class T> decltype(T().missing(), 1) h(int) { return 1; }
 template<class T> int h(long) { return 0; }
 int main() { return g(1) + h<int>(0); }
 '''
-note = 'Class and variable partial matches check substituted arguments in lexical order. Template static assertion failures are diagnosed at instantiation. Dependent __is_same, __is_reference, __is_const, __is_volatile, __is_array, __is_pointer, __is_function, __is_enum, __is_union, __is_class, __is_member_pointer, __is_member_object_pointer, __is_member_function_pointer, and __is_object work in bool template arguments and defaults. These arguments and defaults also support logical negation of a qualified dependent bool variable template-id. Other dependent expression identities and expression SFINAE remain open.'
+note = 'Class and variable partial matches check substituted arguments in lexical order. Template static assertion failures are diagnosed at instantiation. Dependent __is_same, __is_reference, __is_const, __is_volatile, __is_array, __is_pointer, __is_function, __is_enum, __is_union, __is_class, __is_member_pointer, __is_member_object_pointer, __is_member_function_pointer, and __is_object work in bool template arguments and defaults. Bool arguments support unqualified dependent bool variable template-ids. Arguments and defaults also support logical negation of a qualified dependent bool variable template-id. Other dependent expression identities and expression SFINAE remain open.'
 
 [[feature]]
 id = 'temp-ttp'
@@ -2194,7 +2194,7 @@ ftm = '__cpp_concepts'
 detect = '\brequires\b'
 status = 'partial'
 issues = [234, 236]
-note = 'Ordinary function overloads support explicit trailing type packs in atomic constraints. Directly named non-dependent primary class specializations with explicit type arguments check constraints. Broader template and member constraints and constraint mangling remain.'
+note = 'Ordinary function overloads support explicit trailing type packs in atomic constraints. Directly named non-dependent primary class specializations with explicit type arguments check constraints. Non-template code outside requires-expression bodies also checks directly named primary namespace variable templates with explicit non-dependent type arguments. Broader template and member constraints and constraint mangling remain.'
 probe = '''
 template<class T> concept Int = sizeof(T) == 4;
 template<Int T> int f(T) { return 1; } template<class T> int f(T) { return 2; }
