@@ -2477,7 +2477,7 @@ public:
   // An aggregate's elements each from its default member initializer, else value- or
   // default-initialized.
   Ex member_inits(QualType t, bool value, u32 begin, u32 end) {
-    const bool replay = replay_default_members_ && can_replay_default_members(t);
+    const bool replay = (value || replay_default_members_) && can_replay_default_members(t);
     std::vector<Element> elems = elements(t);
     if (replay && std::ranges::any_of(class_rec(types().class_of(t))->fields, [&](const FieldRec& f) {
           return !f.dmi && (Types::is_const(types().canonical(f.type)) ||
@@ -2599,7 +2599,7 @@ public:
     Ex fail{NodeId::none, begin, end};
     std::vector<Element> elems = elements(t);
     std::vector<Ex> out;
-    const bool replay = replay_default_members_ && can_replay_default_members(t);
+    const bool replay = can_replay_default_members(t);
     const bool union_ = is_union(t);
     const auto omitted = [&](const Element& element, u32 at) {
       // [dcl.init.aggr]: copy-list-initialize an omitted union element and the
