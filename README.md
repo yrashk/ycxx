@@ -211,10 +211,13 @@ aggregate results through the target's supported ABI.
 On x86-64 Linux, an eligible ycxx function can also throw an `int` to a hosted peer's handler.
 A host-linked ycxx function can use one `catch (...)` to return an integer literal when
 a direct call on its parameter to an externally defined `int(int)` function throws.
+It can also use one `catch (int value)` to return the caught integer and let exceptions of
+other types reach the hosted caller.
 A supported union constructor can destroy its active member when its body call throws and
 propagate an exception from its initializer before the member's lifetime begins.
 [#578](https://github.com/yrashk/ycxx/issues/578)
-· [#583](https://github.com/yrashk/ycxx/issues/583) · [#738](https://github.com/yrashk/ycxx/issues/738)
+· [#583](https://github.com/yrashk/ycxx/issues/583) · [#919](https://github.com/yrashk/ycxx/issues/919)
+· [#738](https://github.com/yrashk/ycxx/issues/738)
 
 On both hosts, a system-linked void function can destroy one initialized aggregate local
 on both exits from an external `void()` call and let the original exception reach a peer handler.
