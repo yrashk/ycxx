@@ -380,6 +380,14 @@ stay open for the rest.
   validator and dependence checker (#29), SSA linear scan, list scheduling, unwind info and DWARF,
   a measured `cost_model` (#9), defining a variadic function (`va_start`), more than one result, frame objects aligned above 16 bytes.
 
+## System V AMD64 frames
+
+- x86-64 frames can be up to 16 MiB, as on AArch64. A frame over a page is allocated one page
+  at a time, touching each page before RSP moves past it, so a guard page below the stack
+  faults instead of being skipped. `unit.linux_stack_probe` runs a large frame on a thread
+  stack with writable memory below its guard page and checks that the first fault is in the
+  guard page. [#644](https://github.com/yrashk/ycxx/issues/644)
+
 ## System V AMD64 scalar integer division
 
 - The x86-64 emitter supports L2 `sdiv`, `udiv`, `srem` and `urem` for `i32` and `i64`.
@@ -2902,6 +2910,16 @@ and runtime integration with ycxx's own linker remain under [#89]. See the
   [Cookie-free deletion](docs/design/cookie-free-array-delete.md)
   A file-scope scalar initializer still needs lowered code to qualify for dynamic initialization.
   Type checking covers function-local expressions and unevaluated operands.
+
+## Qualified template functional conversions (#697)
+
+A namespace-qualified class or alias template-id can name the target of a parenthesized
+or braced functional conversion. A namespace alias resolves to the same template, and defaults
+can come from its visible redeclarations. Qualified lookup stops at the first matching namespace
+on each using-directive path. Conflicting declarations across paths are ambiguous. Qualified
+function and variable template expressions use the ordinary expression path
+([expr.type.conv], [temp.names], [basic.lookup.qual]).
+[#697](https://github.com/yrashk/ycxx/issues/697)
 
 ## Bootstrap workarounds
 
