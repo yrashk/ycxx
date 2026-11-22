@@ -58,6 +58,10 @@ jobs:
       - name: Toolchain (GCC 16)
         uses: ./.github/actions/setup
 
+      - name: Test driver self-test
+        if: env.TIER == 'main'
+        run: python3 -m unittest -q tests.driver.selftest
+
       - name: Policy (tools/check-policy)
         run: tools/check-policy
 
@@ -105,7 +109,7 @@ jobs:
             base=$(git rev-parse --verify HEAD^1)
             tools/test -x policy failed affected core --base "$base" -j ${{ matrix.host.jobs }}
           else
-            tools/test --tier main -j ${{ matrix.host.jobs }}
+            tools/test -x failed affected core wider rest -j ${{ matrix.host.jobs }}
           fi
 
       - name: Save test state
