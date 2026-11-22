@@ -530,13 +530,18 @@ peer-owned objects with an ordinary root, including a derived class with that si
 base, at most one integral field and at most one override. Consumers can upcast those derived
 views, access ordinary integral members, and query `sizeof` and `alignof` for the Itanium layout.
 A translation unit can also define one non-key virtual member of an eligible root out of class.
-The peer provides the key function, virtual table, RTTI and object construction.
+For that case, the peer provides the key function, virtual table, RTTI and object construction.
 [#309](https://github.com/yrashk/ycxx/issues/309)
 
 **Structured bindings.** Local bindings can copy or alias scalar-element arrays, including
 multidimensional arrays. They can also copy or alias ordinary non-template classes without
 bases and bind to their public, addressable data members, including array and reference
 members. [#285](https://github.com/yrashk/ycxx/issues/285)
+
+**Linux virtual tables.** A translation unit with the key definition emits the vtable and
+RTTI for an ordinary root with one public integral field and two fixed integer virtual
+signatures. A peer supplies the second virtual and constructs the object.
+[#309](https://github.com/yrashk/ycxx/issues/309)
 
 ### Not yet
 
@@ -548,8 +553,11 @@ members. [#285](https://github.com/yrashk/ycxx/issues/285)
 - Constexpr lambdas (the interpreter has no class objects yet), further lambda declaration
   contexts ([#338](https://github.com/yrashk/ycxx/issues/338)),
   tuple-like structured bindings and structured bindings to bit-fields or inherited members,
-  virtual dispatch and table emission, virtual base classes,
   inheriting constructors, and base packs or multiple bases in a class template.
+- Native construction and broader virtual dispatch and table emission, virtual base classes,
+  `typeid` and `dynamic_cast`, and virtual destructor entry points.
+  [#309](https://github.com/yrashk/ycxx/issues/309) · [#310](https://github.com/yrashk/ycxx/issues/310) ·
+  [#294](https://github.com/yrashk/ycxx/issues/294) · [#136](https://github.com/yrashk/ycxx/issues/136)
 - Member class and alias templates, conversion function templates, and constraints on class
   templates outside the directly named primary case and constraints on members.
 - Native throwing beyond the Linux `int` slice, typed and multiple handlers, cleanup during

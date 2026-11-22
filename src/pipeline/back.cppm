@@ -184,6 +184,13 @@ struct Shapes {
   std::vector<EnumShape> enums;
 };
 
+// The root table this unit owns, as established by its complete declaration set. This does
+// not depend on the functions' bodies or whether this unit ever uses the table.
+struct OwnedVirtualTable {
+  QualType type;
+  std::array<EntityId, 2> slots;  // in declaration order, starting with the key function
+};
+
 // A translation unit's definitions and declarations, in the order of their items.
 struct TranslationUnit {
   std::string name;  // the object's name, for diagnostics
@@ -201,6 +208,7 @@ struct TranslationUnit {
   std::optional<ir::IntThrowRuntime> int_throw;
   std::optional<ir::CatchAllRuntime> catch_all;
   EntityId cleanup_resume = EntityId::none;
+  std::optional<OwnedVirtualTable> owned_virtual_table;
 };
 
 // What failed, at a location in an item when there is one. Every error here is something the α
@@ -1490,6 +1498,11 @@ struct LinuxFunction {
   bool cleanup_free_unwind;
 };
 
+struct LinuxVirtualTable {
+  std::string type_encoding;
+  std::array<EntityId, 2> slots;
+};
+
 obj::reloc_kind linux_relocation(x86_64::RelocKind kind) {
   switch (kind) {
     case x86_64::RelocKind::pc32: return obj::reloc_kind::x86_64_pc32;
@@ -1502,7 +1515,7 @@ obj::reloc_kind linux_relocation(x86_64::RelocKind kind) {
 std::expected<obj::object, aarch64::CodegenError> assemble_linux(
     const std::string& name, std::span<const LinuxFunction> functions,
     std::span<const aarch64::DataDef> data, std::span<const aarch64::Symbol> symbols,
-    const std::set<EntityId>& weak_variables) {
+    const std::set<EntityId>& weak_variables, const std::optional<LinuxVirtualTable>& table) {
   obj::object o;
   o.name = name;
   o.arch = obj::target::x86_64_linux;
@@ -1601,6 +1614,42 @@ std::expected<obj::object, aarch64::CodegenError> assemble_linux(
         sec.relocate(obj::reloc_kind::abs64, target->second, r.addend, static_cast<std::uint32_t>(base + r.offset));
       }
     }
+  }
+  if (table) {
+    // Itanium C++ ABI §2.5.2 and §2.9.5: the root table has zero offset-to-top, a pointer
+    // to its RTTI, then the function pointers. The root descriptor points to the runtime
+    // __class_type_info table's address point and to the NUL-terminated type encoding.
+    const auto pointers = o.add_section(S::data_const);
+    const auto names = o.add_section(S::rodata);
+    constexpr auto pointer_size = 8;
+    constexpr auto address_point = 2 * pointer_size;
+    const std::uint64_t table_size = address_point + pointer_size * table->slots.size();
+    const std::string type_name = "_ZTS" + table->type_encoding;
+    o.add_symbol({.name = "_ZTV" + table->type_encoding, .section = pointers, .object_size = table_size});
+    const auto typeinfo = o.add_symbol({.name = "_ZTI" + table->type_encoding, .section = pointers,
+                                        .offset = table_size, .object_size = 2 * pointer_size});
+    const auto name_object = o.add_symbol({.name = type_name, .section = names, .weak = true,
+                                           .object_size = table->type_encoding.size() + 1});
+    // The name keeps its own vague linkage even when the table and descriptor have a unique
+    // owner (Itanium C++ ABI §5.2.4).
+    o.comdat_groups.push_back({type_name, {names}});
+    o.sections[names].emit(table->type_encoding);
+    o.sections[names].bytes.push_back(0);
+
+    auto& section = o.sections[pointers];
+    auto pointer = [&](std::uint32_t symbol, std::int64_t addend = 0) {
+      section.emit64(0);
+      section.relocate(obj::reloc_kind::abs64, symbol, addend);
+    };
+    section.emit64(0);  // offset-to-top
+    pointer(typeinfo);
+    for (EntityId slot : table->slots) {
+      const auto target = symbol_of.find(slot);
+      if (target == symbol_of.end()) return missing(slot);
+      pointer(target->second);
+    }
+    pointer(o.reference("_ZTVN10__cxxabiv117__class_type_infoE"), address_point);
+    pointer(name_object);
   }
   return o;
 }
@@ -1719,6 +1768,8 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
     }
   }
   for (const FnKey& f : lowered) used.insert(ir::raw(f.fn));
+  if (tu.owned_virtual_table)
+    for (EntityId slot : tu.owned_virtual_table->slots) used.insert(ir::raw(slot));
   for (const aarch64::DataDef& d : data) {
     used.insert(ir::raw(d.entity));
     for (const aarch64::DataReloc& r : d.relocs) used.insert(ir::raw(r.target));
@@ -1766,6 +1817,18 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
     }
     return n;
   };
+  std::optional<LinuxVirtualTable> virtual_table;
+  if (linux && tu.owned_virtual_table) {
+    const auto& owned = *tu.owned_virtual_table;
+    auto encoding = mangled_type(in, owned.type, names);
+    if (!encoding) {
+      auto key = by_id.find(ir::raw(owned.slots.front()));
+      errors.push_back({key == by_id.end() ? std::nullopt : key->second->at,
+                        std::format("the virtual table's type name: {} is not supported yet", encoding.error())});
+    } else {
+      virtual_table = LinuxVirtualTable{std::move(*encoding), owned.slots};
+    }
+  }
   std::vector<const Entity*> locals;  // named after their functions, below
   std::map<std::uint32_t, std::string> mangled;  // by function entity
   for (const Entity& e : tu.entities) {
@@ -1831,7 +1894,7 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
         const auto& def = tu.functions[i];
         code.push_back({fns[i].fn, &*ms[i].get().linux_code, def.coalesced, def.unwind != UnwindEligibility::none});
       }
-      return assemble_linux(tu.name, code, data, symbols, weak_variables);
+      return assemble_linux(tu.name, code, data, symbols, weak_variables, virtual_table);
     }
     std::vector<aarch64::CompiledFunction> code;
     for (std::size_t i = 0; i < fns.size(); ++i)
