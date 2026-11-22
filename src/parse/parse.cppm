@@ -1232,6 +1232,7 @@ private:
   std::map<std::pair<u32, u32>, std::vector<DeclId>> using_targets_;
   std::map<u32, std::string> asm_labels_;  // by entity: its GNU asm label (docs/EXTENSIONS.md)
   std::map<u32, ast::DeclSema> class_heads_;  // by class item: the class's record, for its members
+  std::map<u32, lex::Tk> class_definition_keys_;  // by defining item: the parsed class-key
   std::map<u32, u32> class_templates_;        // by class template entity: its defining item
   std::map<std::pair<u32, u32>, Result<ast::ItemSema>> class_member_cells_;  // by (member item, specialization)
   std::set<u32> classes_instantiating_;
@@ -1660,7 +1661,7 @@ public:
   void static_local(EntityId v, QualType t, std::optional<ConstId> value) override {
     p_->static_locals_[std::to_underlying(v)] = {t, value};
   }
-  std::optional<ast::DeclSema> earlier_member(ast::NameId name) override {
+  std::optional<ast::DeclSema> earlier_member(ast::NameId name, bool type_only = false) override {
     const items::Item& it = p_->items().items[item_];
     if (it.parent == items::none || p_->items().items[it.parent].kind != ItemKind::class_def) return std::nullopt;
     std::optional<ast::DeclSema> r;
@@ -1670,10 +1671,15 @@ public:
       const ast::ItemSema& ms = instantiating != EntityId::none && p_->items().items[m].kind != ItemKind::access_spec
                                     ? p_->class_member_sema(m, instantiating)
                                     : p_->item_sema(m).value;
-      for (const ast::DeclSema& d : p_->world().ins.seqs.elements(ms.decls))
-        if (d.entity != EntityId::none && d.kind != ast::DeclKind::class_ && !(d.flags & sema::decl_flag::friend_) &&
-            p_->world().entities.rec(d.entity).name == name && !p_->scoped_enumerator(d))
-          r = d;
+      for (const ast::DeclSema& d : p_->world().ins.seqs.elements(ms.decls)) {
+        if (d.entity == EntityId::none || d.kind == ast::DeclKind::class_ || (d.flags & sema::decl_flag::friend_) ||
+            p_->world().entities.rec(d.entity).name != name || p_->scoped_enumerator(d))
+          continue;
+        const bool type = sema::Sema::is_type(d.kind);
+        if (type_only && !type) continue;
+        // [basic.lookup.general]: a non-type hides a same-scope class or enum name.
+        if (!type || !r || sema::Sema::is_type(r->kind)) r = d;
+      }
     }
     return r;
   }
@@ -2153,7 +2159,7 @@ public:
   engine::Loc source_loc(engine::Loc loc, u32 offset) override { return at_.source_loc(loc, offset); }
   bool type_trait_instantiation_failed(EntityId e) override { return at_.type_trait_instantiation_failed(e); }
   std::optional<ConstId> constant_value(EntityId v) override { return p_->constant_value(v, p_->end()); }
-  std::optional<ast::DeclSema> earlier_member(ast::NameId) override { return std::nullopt; }
+  std::optional<ast::DeclSema> earlier_member(ast::NameId, bool) override { return std::nullopt; }
   bool instantiation_gave_up() override { return p_->instantiation_gave_up(); }
   std::optional<QualType> specialization_type(EntityId v) override { return p_->specialization_type(v, p_->end()); }
   const std::vector<sema::Expansion>* pattern_expansions() override { return p_->expansions(item_, 1); }
@@ -3360,6 +3366,7 @@ private:
 
   bool class_declared(const ast::DeclSema& sem, Tk key, u32 at) {
     if (!record_class_key(sem.entity, key, at)) return false;
+    if (sem.flags & sema::decl_flag::definition) p_->class_definition_keys_.emplace(k_, key);
     decls_.push_back(sem);
     p_->declared(sem, k_);
     return true;
@@ -3935,7 +3942,11 @@ private:
       if (!enumerator_names.insert(en).second)
         s_.diag(en_at, Diag::conflicting_declaration, en);  // [dcl.enum]/2: unique within the list
       // [basic.scope.scope]: an unscoped enumerator is declared in the enclosing scope.
-      if (!scoped && cls == EntityId::none) {
+      if (!scoped && cls != EntityId::none) {
+        const auto previous = q_.earlier_member(en);
+        if (s_.world().entities.rec(cls).name == en || (previous && previous->kind != ast::DeclKind::enum_))
+          s_.diag(en_at, Diag::conflicting_declaration, en);
+      } else if (!scoped) {
         const std::string_view spelling = s_.world().ins.names.spelling(en);
         for (DeclId p : p_->declared_in(spelling, p_->ns_of(k_), k_, false, /*inhabit=*/true))
           if (auto ds = p_->decl_sema(p); ds && ds->entity != EntityId::none && ds->kind != ast::DeclKind::class_ &&
@@ -6706,20 +6717,11 @@ Program::ClassContent Program::class_content(u32 item, const std::function<const
   std::vector<sema::FieldRec>& fields = out.fields;
   std::vector<sema::MemberDeclRec>& statics = out.statics;
   std::vector<sema::NestedType>& nested = out.nested;
-  // [class.access.spec]: members of a class defined with `class` are private by default. The
-  // class-key follows any template heads: past each `template <…>`.
-  u32 key = it.begin;
-  while (key < it.brace_begin && r_->tokens[key].kind == lex::Tk::kw_template) {
-    int depth = 0;
-    for (++key; key < it.brace_begin; ++key) {
-      lex::Tk k = r_->tokens[key].kind;
-      if (k == lex::Tk::less) ++depth;
-      else if (k == lex::Tk::greater && --depth == 0) break;
-      else if (k == lex::Tk::greatergreater && (depth -= 2) <= 0) break;
-    }
-    ++key;
-  }
-  ast::Access access = r_->tokens[key].kind == lex::Tk::kw_class ? ast::Access::private_ : ast::Access::public_;
+  // [class.access.general]: the definition's class-key sets default access, including when
+  // these declarations are replayed for a specialization.
+  const auto key = class_definition_keys_.find(item);
+  ast::Access access = key != class_definition_keys_.end() && key->second == lex::Tk::kw_class
+                           ? ast::Access::private_ : ast::Access::public_;
   for (u32 m : it.members) {
     const items::Item& mi = items_->items[m];
     if (mi.kind == ItemKind::access_spec) {

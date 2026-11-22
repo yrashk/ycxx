@@ -396,17 +396,16 @@ Preprocessed to_region(Session& s, const Flat& flat) {
   const Files::Content* main = s.files.content(flat.main);
   r.tokens.push_back(Tok{Tk::eof, tok_flag::line_start, 0});
   r.locs.push_back({0, 0, main ? static_cast<u32>(main->text.size()) : 0});
-  r.names = std::move(tables.names);
   r.literals = std::move(tables.literals);
   for (FileId f : flat.files) r.files.push_back(s.files.path(f));
   for (u32 n : flat.file_names) r.file_names.emplace_back(s.spellings.name(n));
   r.expansions = flat.expansions;
+  // Intern macro names after token names and literal suffixes to preserve their IDs.
   for (std::size_t i = 1; i < r.expansions.size(); ++i) {
-    u32 name = r.expansions[i].macro;
-    auto it = std::ranges::find(r.names, s.spellings.name(name));
-    r.expansions[i].macro = static_cast<u32>(it - r.names.begin());
-    if (it == r.names.end()) r.names.emplace_back(s.spellings.name(name));
+    Expansion& e = r.expansions[i];
+    e.macro = tables.name(s.spellings.name(e.macro));
   }
+  r.names = std::move(tables.names);
   std::ranges::stable_sort(diags, {}, &std::pair<u64, Diag>::first);
   for (auto& [key, d] : diags) out.diags.push_back(d);
   return out;

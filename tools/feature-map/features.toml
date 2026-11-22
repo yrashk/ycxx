@@ -1248,8 +1248,8 @@ clauses = ['enum', 'dcl.enum']
 std = 'C++98'
 detect = '\benum\b'
 status = 'done'
-issues = [157]
-note = 'Named nested enum definitions support trailing ordinary fields in the same member declaration.'
+issues = [157, 731]
+note = 'Named nested enum definitions support trailing fields. Unscoped enumerators enter class scope and hide tags in ordinary lookup.'
 probe = '''
 enum Color { red, green = 5, blue };
 extern "C" { enum { bias = 1, expected = bias + 5 }; }
@@ -1600,8 +1600,8 @@ clauses = ['special', 'class.ctor', 'class.ctor.general', 'class.default.ctor', 
 std = 'C++98'
 core = true
 status = 'done'
-issues = [157, 219]
-note = 'Ordinary constructors accept concrete noexcept specifications and check agreement with out-of-class definitions.'
+issues = [157, 219, 722]
+note = 'Ordinary constructors accept concrete noexcept specifications and check agreement with out-of-class definitions. Direct explicit destructor calls support an ordinary complete class with a nonvirtual destructor.'
 probe = '''
 int d = 0;
 struct S { int a, b; S(int x) : a(x), b(x + 1) {} ~S() { ++d; } };

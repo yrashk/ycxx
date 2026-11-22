@@ -214,6 +214,10 @@ scope with no bases and an implicit trivial destructor can first declare `T() = 
 in class and use it to initialize an `inline constexpr` tag object.
 [#157](https://github.com/yrashk/ycxx/issues/157)
 
+An ordinary class object can be destroyed explicitly through a reference or pointer with
+`object.~Class()` or `pointer->~Class()`. Templates can use a dependent class name, and unary
+`noexcept` uses the destructor's exception specification. [#722](https://github.com/yrashk/ycxx/issues/722)
+
 Both targets construct a class prvalue directly into an automatic variable initialized with the
 built-in conditional or comma operator. The supported nonthrowing initializers sequence temporary
 destruction after the result is constructed. [#740](https://github.com/yrashk/ycxx/issues/740)
@@ -237,6 +241,9 @@ Both targets support named nested enum definitions followed by ordinary fields i
 member declaration, including scoped enum field initializers. [#500](https://github.com/yrashk/ycxx/issues/500)
 Scoped enumerators stay in their enumeration's scope, so class members and class template
 members may reuse their names. [#725](https://github.com/yrashk/ycxx/issues/725)
+Nested unscoped enumerators conflict with other non-type members regardless of declaration order.
+They can hide an enum name in ordinary lookup while leaving it available as a qualifier.
+[#731](https://github.com/yrashk/ycxx/issues/731)
 
 Automatic declarations of ordinary non-template classes with only scalar fields and no bases
 or unions can use default member initializers in `S s;` and `S s{…};`. A default runs in
