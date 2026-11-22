@@ -1644,7 +1644,7 @@ class Gen {
 
   // A scalar default's receiver is represented only by its initialized field values.
   // Recognize side-effect-free designators of that receiver's own non-reference fields.
-  std::optional<u32> default_field(At operand) {
+  std::optional<uint32_t> default_field(At operand) {
     const auto owner = fn_.initialized_fields.owner;
     if (owner == ast::EntityId::none || this_) return std::nullopt;
     operand = strip_parens(operand);
