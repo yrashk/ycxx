@@ -5658,8 +5658,7 @@ public:
 
   bool constrained_variable_ok(const DeclSpec& spec, const Declarator& d) {
     if (!spec.constrained_auto_at) return true;
-    if (spec.is_typedef || s_->types().is_function(d.type) || d.scope.type || d.template_args ||
-        !s_->types().has_placeholder(d.type)) {
+    if (d.qualified || s_->types().is_function(d.type) || !s_->types().has_placeholder(d.type)) {
       s_->diag(*spec.constrained_auto_at, Diag::constrained_auto_context);
       return false;
     }
