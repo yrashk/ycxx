@@ -327,8 +327,11 @@ What is true of the code today. Work in progress and its owners are tracked in
   - The linker preserves cleanup-free `__TEXT,__eh_frame` contributions with the supported
     PC-relative CIE and FDE format, including address differences and multiple input objects.
     `unit.link` checks the linked ranges and walks through a non-frame-pointer arm64 bridge
-    with the system unwinder on macOS. Compact unwind, personalities and LSDA are tracked in
-    [#72](https://github.com/yrashk/ycxx/issues/72).
+    with the system unwinder on macOS. It also checks the version 1 cleanup-only `zPLR` profile,
+    including its relocated personality GOT cell, owned `__gcc_except_tab` pointer, and cleanup
+    call-site ranges. The macOS cleanup fixture uses a platform-linked typed handler dylib.
+    [#783](https://github.com/yrashk/ycxx/issues/783) tracks this linker slice. Compact unwind and
+    other profiles are tracked in [#72](https://github.com/yrashk/ycxx/issues/72).
   - The arm64 compiler emits these DWARF records for proven cleanup-free functions. Their FDEs
     describe the actual saved frame-pointer and return-address locations at the entry, body,
     and return instructions. `unit.darwin_cleanup_free_unwind` checks the emitted object,
@@ -1745,6 +1748,32 @@ template's tokens again with the arguments bound.
   specializations. `&&` follows #671; type-trait operations (`__is_same(T, U)`) still have no
   symbol (#780).
 
+## Pack-index-specifiers (#297)
+
+- `T...[I]` ([dcl.type.pack.index]) names the element of a template type parameter pack, with
+  `I` converted to std::size_t. It works in alias templates, member aliases, function signatures
+  (leading and trailing return types, parameters), variable templates, bodies, type-trait
+  operands and functional conversions (`T...[I](x)`). The index is an integral constant or a
+  non-type parameter.
+- While it is dependent it is the type `TPackIndex` (ast.md §7.6): over the pack's parameter, or
+  over its elements once the pack is bound and the index is not (a member template indexing its
+  class's pack). Substitution selects the element, also past known elements into another pack's
+  expansion (`F<T...>` for `using F = U...[0]`). It is a non-deduced context
+  ([temp.deduct.type]/5), and partial ordering indexes a pack's unique stand-in.
+- An index out of range, a negative or non-integral index and a name that is not a pack are
+  diagnosed.
+- In symbols, `Dy <type> <expression>` is a substitution candidate, a bound pack `J <args> E`. A
+  written constant index is the converted std::size_t (`Lm0E`) and a substituted one keeps its
+  parameter's type (`Li1E`), as GCC writes them; Clang writes the index as spelled and a bound
+  pack as a placeholder (DECISIONS §1.7).
+- Tests: `tests/own/templates/pack-index/`, `tests/own/abi/pack-index-*`. A Clang peer links the
+  parameter-index form, and asm labels pin GCC's constant form.
+- Not yet: pack-index-expressions `t...[I]`, `T...[I]` as a nested-name-specifier
+  (`T...[0]::type`) (#297), and dependent index arithmetic such as `T...[sizeof...(T) - 1]` in a
+  signature (#209). In a body that arithmetic works. An index written as an enumerator or a
+  constant variable is mangled by its value, where Clang and GCC write its name (#796). With these,
+  libycxx's headers move from `invoke.hpp:35` to `invoke.hpp:37` (#776).
+
 ## Templates, ζ step 2: class templates (#88, 2026-11-18)
 
 - **Declarations:** class templates at namespace scope (`template<…> struct X {…};` and
@@ -2232,9 +2261,13 @@ A type inherited from a nondependent base takes precedence over the template par
 
 - The integer-constant macros (`__INT64_C(c)` and the rest) are predefined as `c ## L`, GCC's and
   glibc's spelling, so glibc's identical redefinitions in `<stdint.h>` are valid
-  ([cpp.replace.general]/2). The expansions are Clang's. `<inttypes.h>` still clashes with
-  libycxx's limit macros (#664). Tests: `own/pp/predefined-int-c-redefine` (both targets) and
-  `own/headers/glibc-stdint` (Linux).
+  ([cpp.replace.general]/2). The expansions are Clang's. Tests cover both targets in
+  `own/pp/predefined-int-c-redefine` and Linux in `own/headers/glibc-stdint`.
+- The pinned libycxx lets the target's `<stdint.h>` supply integer limits before libycxx supplies
+  fallback macros. `<cstdint>` uses compiler predefines when a target C header is unavailable or
+  the translation unit is freestanding. Linux integration tests cover `<cstdint>` before
+  `<cinttypes>` and `<inttypes.h>` before `<cstdint>`.
+  [#664](https://github.com/yrashk/ycxx/issues/664) · [libycxx#50](https://github.com/yrashk/libycxx/pull/50)
 
 ## Templates, ζ step 8: template template parameters and `__make_integer_seq` (#88, #208, 2026-11-19)
 
@@ -3155,8 +3188,8 @@ substitution and broader annotation targets remain in [#324](https://github.com/
 
 ## Bootstrap workarounds
 
-Places where ycxx's sources avoid or work around a C++26 feature because GCC 16 lacks it or
-miscompiles it (DECISIONS §3.2). Each is removed once ycxx compiles itself.
+Workarounds for C++26 and module limitations in the bootstrap toolchain (DECISIONS §3.2).
+Each is removed once ycxx compiles itself.
 
 - **No `std::vector<bool>` in the back end's unit records** (`pipeline::Entity::template_same_heads`,
   `TemplateSpec::same_heads`, `std::vector<std::uint8_t>`).
@@ -3201,6 +3234,10 @@ miscompiles it (DECISIONS §3.2). Each is removed once ycxx compiles itself.
   - `CMakeLists.txt` adds the flags to libycxx's `ycxx_modules` target.
   - Without them, `std::meta` is empty. An importer whose `-freflection` does not match the
     BMI's segfaults GCC 16.2.
+- **The embedded libycxx compiles its implementation units as plain translation units.** The
+  scheduler's `import std` would otherwise make its runtime archive depend on the std module that
+  already links it. `CMakeLists.txt` scopes `YCXX_SOURCE_MODULES=OFF` to the embedded build and
+  keeps the public `std` and `std.compat` modules enabled. [#664](https://github.com/yrashk/ycxx/issues/664)
 - **`FpIndex`'s `Shard` has a user-provided constructor** (`src/ast/store.cppm`, #283).
   - Cause: at -O1 and above GCC 16.2 segfaults in an importer of `ycxx.ast.interner`, whose
     `Interners` has an inline constructor and several `FpIndex` specializations, while
