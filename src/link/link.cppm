@@ -125,7 +125,7 @@ struct fixup {
   std::uint64_t addr;
   bool bind;
   std::uint64_t target;  // rebase: offset from the image base; bind: import index
-  std::uint8_t addend;   // bind only
+  std::uint8_t addend;   // bind: the addend; rebase: the pointer's top byte (high8)
 };
 
 struct segment_info {
@@ -802,9 +802,12 @@ private:
       return;
     }
     if (const auto* d = std::get_if<defined_at>(&target)) {
+      // A rebase keeps the pointer's top byte apart (`high8`), such as the bit Apple's arm64 C++
+      // ABI sets on a non-unique RTTI name pointer.
       const std::uint64_t off = d->addr + static_cast<std::uint64_t>(addend) - image_base;
-      if (off >> 36) fail(std::format("{}: pointer target out of range", where));
-      fixups_.push_back({addr, false, off, 0});
+      const std::uint64_t low = off & ((std::uint64_t{1} << 56) - 1);
+      if (low >> 36) fail(std::format("{}: pointer target out of range", where));
+      fixups_.push_back({addr, false, low, static_cast<std::uint8_t>(off >> 56)});
     } else {
       if (addend < 0 || addend > 255) fail(std::format("{}: pointer to an import with an addend outside 0..255", where));
       fixups_.push_back({addr, true, std::get<imported>(target).index, static_cast<std::uint8_t>(addend)});
@@ -1003,7 +1006,7 @@ private:
         next = (fixups_[k + 1].addr - f.addr) / 4;
       }
       std::uint64_t word = f.bind ? (f.target & 0xffffff) | std::uint64_t{f.addend} << 24 | std::uint64_t{1} << 63
-                                  : (f.target & 0xfffffffff);
+                                  : (f.target & 0xfffffffff) | std::uint64_t{f.addend} << 36;
       word |= next << 51;
       mo::store64(file, sg->fileoff + (f.addr - sg->vmaddr), word);
     }
