@@ -126,7 +126,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_
   # PARITY: by design: links and runs x86-64 ELF virtual calls with native peers.
   add_test(NAME unit.linux_pure_virtual_dispatch
     COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/linux_pure_virtual_dispatch.py
-            $<TARGET_FILE:ycxxc> ${CMAKE_CXX_COMPILER})
+            $<TARGET_FILE:ycxxc> ${CMAKE_CXX_COMPILER} ${CMAKE_READELF})
   add_test(NAME unit.linux_std_mangling
     COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/linux_std_mangling.py
             $<TARGET_FILE:ycxxc> ${CMAKE_CXX_COMPILER} ${CMAKE_READELF}

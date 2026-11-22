@@ -3,10 +3,39 @@
 import os
 from pathlib import Path
 import shutil
+import subprocess
 import sys
 import tempfile
 
 from linux_compile import run
+
+
+def check_consumer_symbols(readelf, scope, env, obj):
+    forbidden = {
+        '_ZNK10pure_probe4Root4zetaEi', '_ZNK10pure_probe4Root5alphaEi',
+        '_ZTVN10pure_probe4RootE', '_ZTIN10pure_probe4RootE', '_ZTSN10pure_probe4RootE',
+        '__cxa_pure_virtual',
+    }
+    metadata = run([readelf, '-Ws', obj], scope, env)
+    rows = (line.split() for line in metadata.splitlines())
+    names = {row[7].partition('@')[0] for row in rows
+             if len(row) >= 8 and row[0].endswith(':') and row[0][:-1].isdigit()}
+    assert not names & forbidden, metadata
+
+
+def check_noexcept_guard(target, scope, cold, resident):
+    guards = ('native output for a translation unit with virtual member functions is not supported yet',
+              'a call to a virtual member function is not supported yet')
+    diagnostics = []
+    for mode, env in (('cold', cold), ('resident', resident)):
+        obj = f'rejected-{mode}.o'
+        result = subprocess.run([*target, '-c', 'consumer.cpp', '-o', obj], cwd=scope, env=env,
+                                capture_output=True, text=True, timeout=30)
+        messages = [line for line in result.stderr.splitlines() if any(guard in line for guard in guards)]
+        assert result.returncode > 0 and messages, result.stdout + result.stderr
+        assert not (scope / obj).exists(), obj
+        diagnostics.append(messages)
+    assert diagnostics[0] == diagnostics[1], diagnostics
 
 
 def native_compilers(host, scope, env):
@@ -23,7 +52,7 @@ def native_compilers(host, scope, env):
 
 
 def main():
-    ycxx, host = sys.argv[1:]
+    ycxx, host, readelf = sys.argv[1:]
     fixture = Path(__file__).resolve().with_suffix('')
     target = [ycxx, 'cxx', '--target=x86_64-pc-linux-gnu']
     with tempfile.TemporaryDirectory(prefix='ycxx-pure-dispatch-') as temp, \
@@ -44,6 +73,7 @@ def main():
             run([*target, '-c', 'consumer.cpp', '-o', 'consumer.o'], scope, resident)
             payload = (scope / 'consumer.o').read_bytes()
             assert payload == (scope / 'cold.o').read_bytes()
+            check_consumer_symbols(readelf, scope, cold, 'consumer.o')
             for compiler in peers:
                 run([compiler, '-std=c++20', '-pedantic-errors', '-O0', '-fno-lto', '-fno-pie',
                      '-c', 'peer.cpp', '-o', 'peer.o'], scope, cold)
@@ -58,6 +88,10 @@ def main():
             zeta = b'    virtual int zeta(int value) const noexcept = 0;\n'
             alpha = b'    virtual int alpha(int value) const noexcept = 0;\n'
             assert source.count(zeta + alpha) == 1
+            header.write_bytes(source.replace(zeta, zeta.replace(b' noexcept', b'')))
+            check_noexcept_guard(target, scope, cold, resident)
+            header.write_bytes(source)
+            assert build_case() == original
             header.write_bytes(source.replace(zeta + alpha, alpha + zeta))
             assert build_case() != original
         finally:
