@@ -63,7 +63,7 @@ struct TypeRec {
   std::vector<QualType> params;
   bool variadic = false;
   LangLinkage linkage = LangLinkage::cxx;
-  EntityId entity = EntityId::none;  // a class's or an enumeration's
+  EntityId entity = EntityId::none;  // a class, enumeration or a placeholder's concept
   Cv fn_cv = Cv::none;               // a member function type's cv-qualifier-seq
   ast::RefQual fn_ref = ast::RefQual::none;
   bool fn_noexcept = false;
@@ -74,7 +74,7 @@ struct TypeRec {
   u16 index = 0;
   bool pack = false;
   u8 trait = 0;  // a transform's `lex::TypeTrait`; a built-in specialization's `ast::BuiltinTemplate`
-  ast::SeqId<ast::TemplateArg> args{};  // a dependent or built-in specialization's arguments
+  ast::SeqId<ast::TemplateArg> args{};  // a specialization's or a placeholder's written arguments
   bool decltype_auto = false;  // a placeholder's: `decltype(auto)`, not `auto`
 };
 
@@ -135,8 +135,10 @@ public:
   QualType pack_expansion(QualType pattern) { return ins_->intern_type(ast::TPackExpansion{pattern}); }
   // `__trait(arg)` of a dependent `arg` (docs/EXTENSIONS.md).
   QualType transform(u8 trait, QualType arg) { return ins_->intern_type(ast::TTransform{trait, arg}); }
-  // `auto` or `decltype(auto)` ([dcl.spec.auto]).
-  QualType placeholder(bool decltype_auto) { return ins_->intern_type(ast::TAuto{u8(decltype_auto)}); }
+  // A placeholder ([dcl.spec.auto.general]); a bare type-constraint has no written arguments.
+  QualType placeholder(bool decltype_auto, EntityId concept_ = EntityId::none) {
+    return ins_->intern_type(ast::TAuto{u8(decltype_auto), concept_});
+  }
   // Whether a declared type holds a placeholder still to be deduced ([dcl.type.auto.deduct]): as
   // the type, or as what it points or refers to, an array's element or a function's return type.
   bool has_placeholder(QualType q) const {
@@ -219,8 +221,11 @@ public:
       r.inner = t.get<ast::TTransform>(c).arg;
       r.trait = t.get<ast::TTransform>(c).trait;
     } else if (t.is<ast::TAuto>(c)) {
+      auto p = t.get<ast::TAuto>(c);
       r.kind = TypeKind::placeholder;
-      r.decltype_auto = t.get<ast::TAuto>(c).decltype_auto != 0;
+      r.decltype_auto = p.decltype_auto != 0;
+      r.entity = p.concept_;
+      r.args = p.args;
     } else if (t.is<ast::TDepSpec>(c)) {
       auto d = t.get<ast::TDepSpec>(c);
       r.kind = TypeKind::dep_spec;
