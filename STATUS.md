@@ -2882,10 +2882,24 @@ operand yields a null result, including in constant evaluation. On the non-null 
 vtable address point supplies the signed offset-to-top. Adding that byte offset to the
 incoming subobject address recovers the address of the most-derived object, including when
 the peer passes a secondary base. The cast introduces no RTTI symbols or calls.
-Typed runtime casts, `typeid`, non-null constant evaluation, and Darwin parity are tracked
-in [#294](https://github.com/yrashk/ycxx/issues/294) and [#659](https://github.com/yrashk/ycxx/issues/659).
 [[expr.dynamic.cast]](https://eel.is/c++draft/expr.dynamic.cast) ·
 [Itanium ABI §2.5.2](https://itanium-cxx-abi.github.io/cxx-abi/abi.html#vtable-components)
+
+## Borrowed typed downcasts (#294)
+
+Linux x86-64 can cast a borrowed root pointer to a pointer to its direct derived class.
+Both classes are ordinary, fieldless and default-visible. The derived class has one public
+nonvirtual primary base. Each class declares one public virtual `int` member with no
+arguments, with the derived declaration overriding the base member. A hosted C++ peer
+defines the two key functions. The consumer checks eligibility against the complete
+translation unit and uses the peer's two RTTI objects and `__dynamic_cast`.
+The result preserves or adds pointee cv. The cast evaluates its operand once and returns
+a typed null for a null operand or a failed check. A null operand can be used in constant
+evaluation. [Design](docs/design/linux-borrowed-typed-downcast.md) ·
+[#294](https://github.com/yrashk/ycxx/issues/294)
+
+Other cast forms, `typeid`, non-null constant evaluation, and Darwin parity are tracked
+in [#294](https://github.com/yrashk/ycxx/issues/294) and [#659](https://github.com/yrashk/ycxx/issues/659).
 
 ## Deduced polymorphic lambda results (#569)
 
@@ -3609,16 +3623,20 @@ checks reject entry into the protected block or a handler. A discarded
 
 On Linux x86-64, a host-linked ELF object can contain an eligible namespace
 function with a protected return that passes its parameter directly to an
-externally defined `int(int)` function. The function has one `catch (...)`
-that returns an integer literal. L1 and L2 carry distinct normal and unwind
-results. The AMD64 emitter records the call range
-and landing address, saves the unwind header and selector, and feeds the ELF
-writer's handler CIE and LSDA. GCC and Clang hosted tests cover the normal and
-caught returns and unwinding through an ordinary frame. The native final
-link diagnoses the hosted runtime requirement. Same-translation-unit callees,
-typed and multiple handlers, cleanup scopes, other target backends and
-freestanding runtime support remain
-in [#89](https://github.com/yrashk/ycxx/issues/89). [#583](https://github.com/yrashk/ycxx/issues/583)
+externally defined `int(int)` function. One `catch (...)` can return an integer
+literal, or one named by-value `int` handler can return its bound value.
+L1 and L2 carry distinct normal and unwind results. The AMD64 emitter records
+the call range and landing address, saves the unwind header and selector, and
+feeds the ELF writer's handler CIE and LSDA. The typed LSDA uses the hosted
+`_ZTIi` to match exceptions, and a different type continues unwinding. The
+native final link diagnoses the hosted runtime requirement.
+[Design](docs/design/linux-hosted-catch-all.md#hosted-by-value-int-handler-919)
+· [#583](https://github.com/yrashk/ycxx/issues/583) · [#919](https://github.com/yrashk/ycxx/issues/919)
+
+Same-translation-unit callees, other typed handlers, multiple or nested
+handlers, rethrow, combined handler cleanup and freestanding runtime discovery
+remain in [#89](https://github.com/yrashk/ycxx/issues/89).
+Darwin parity is tracked in [#648](https://github.com/yrashk/ycxx/issues/648).
 
 ## Unevaluated calls to known-return function templates (#565)
 

@@ -167,6 +167,19 @@ def main():
         system_link('puts-main.o', 'puts.a', result=11)
         link('puts-main.o', 'puts.a', result=11)
 
+        # A global in a section the linker drops (`__LLVM`) defines nothing, so it neither stops
+        # selection nor counts as the selected member's definition.
+        (scope / 'marker.c').write_text('__attribute__((section("__LLVM,__marker"))) char tail = 1;\n')
+        run([cc, '-c', 'marker.c'])
+        assert '(__LLVM,__marker) external _tail' in run(['nm', '-m', 'marker.o'])
+        source('tail-main.cpp', 'extern "C" int tail(); int main() { return tail(); }', 'tail-main.o')
+        link('tail-main.o', 'marker.o', 'tail.a', result=37)
+        reject('tail-main.o', 'marker.o', error='undefined symbol _tail')
+        (scope / 'marker-index.a').write_bytes(
+            bsd_archive([('marker.o', (scope / 'marker.o').read_bytes())], [('_tail', 0)]))
+        reject('tail-main.o', 'marker-index.a',
+               error="marker-index.a(marker.o): archive index symbol '_tail' is not defined by the member")
+
         # A member is read only when selected.
         (scope / 'garbage.o').write_bytes(b'not an object')
         tail_bytes = (scope / 'tail.o').read_bytes()

@@ -101,6 +101,7 @@ public:
   // The written in-class declaration of a member from this unit's class record.
   virtual std::optional<ast::DeclSema> written_member(EntityId) { return std::nullopt; }
   virtual bool peer_pure_dispatch(EntityId) { return false; }
+  virtual void use_typed_dynamic_cast() {}
   // A use of a global allocation function that may lack a written declaration in the unit.
   // An aligned signature also brings its parameter's enum shape into the unit.
   virtual void use_allocation_function(EntityId, bool = false) {}
@@ -370,6 +371,36 @@ EntityId virtual_table_entity(World& world, EntityId cls) {
   return world.entities.entity({EntityKind::virtual_table, world.ins.names.intern("vtable"),
                                 world.types.builtin(Builtin::unsigned_char), LangLinkage::cxx,
                                 ast::Linkage::external, {}, cls});
+}
+
+// This profile has only one directly declared virtual. An inherited slot alone
+// does not give a derived class its own key function (Itanium ABI §5.2.3).
+EntityId borrowed_dynamic_cast_key(const ClassRec& record, const Types& types) {
+  if (record.peer_virtual_layout == PeerVirtualLayout::none || !record.fields.empty() || !record.friends.empty())
+    return EntityId::none;
+  const auto key = std::ranges::find(record.members, true, &MemberDeclRec::is_virtual);
+  if (key == record.members.end() || key->is_pure || record.access_of(key->entity) != ast::Access::public_ ||
+      std::ranges::find(std::next(key), record.members.end(), true, &MemberDeclRec::is_virtual) != record.members.end())
+    return EntityId::none;
+  const auto type = types.rec(key->type);
+  if (!types.is(type.inner, Builtin::int_) || !type.params.empty() || type.fn_cv != Cv::none || type.fn_noexcept)
+    return EntityId::none;
+  return key->entity;
+}
+
+EntityId type_info_entity(World& world, EntityId cls) {
+  return world.entities.entity({EntityKind::type_info, world.ins.names.intern("typeinfo"),
+                                world.types.builtin(Builtin::unsigned_char), LangLinkage::cxx,
+                                ast::Linkage::external, {}, cls});
+}
+
+EntityId dynamic_cast_runtime(World& world) {
+  const QualType v = world.types.builtin(Builtin::void_);
+  const QualType p = world.types.pointer(world.types.add_cv(v, Cv::const_));
+  const QualType params[] = {p, p, p, world.types.builtin(world.target.ptrdiff_type)};
+  const auto lang = LangLinkage::c;
+  const auto type = world.types.function(world.types.pointer(v), params, false, lang);
+  return world.entities.entity({EntityKind::function, world.ins.names.intern("__dynamic_cast"), type, lang});
 }
 
 bool native_virtual_derived_declarations(const ClassRec& record, const Classes& classes, const Types& types,
@@ -1113,7 +1144,7 @@ public:
     for (u32 c : dependent_calls)
       if (c >= begin && c < end) calls.push_back(c - begin);
     return ins().intern_value(ast::VAtom{item_, loc_base_ + begin, loc_base_ + end, depth, ins().intern_seq(std::span<const ConstId>(mapping)),
-                                         ins().intern_seq(std::span<const u32>(calls)), fn_params});
+                                         ins().intern_seq(std::span<const u32>(calls)), fn_params, current_class});
   }
   // `C<args>` in normal form: C's with the arguments substituted into its atoms' mappings
   // ([temp.constr.normal]/1.4); none, diagnosed, when they do not fit or a mapping cannot be formed.
@@ -7696,6 +7727,84 @@ public:
     if (converted.ok() && converted.info.bit_width)
       return convert_node(converted, ast::ConversionKind::integral, converted.type());
     return converted;
+  }
+
+  // [expr.dynamic.cast]: the source pointer is converted to a prvalue. Same-type
+  // and derived-to-base casts do not require a polymorphic source.
+  Ex dynamic_cast_to(Ex e, QualType to, u32 begin, u32 end) {
+    const Ex fail{NodeId::none, begin, end};
+    if (!e.ok()) return fail;
+    const QualType target = Types::unqualified(types().canonical(to));
+    if (types().is_pointer(target) && types().is_void(types().pointee(target)))
+      return dynamic_cast_to_void(e, to, begin, end);
+    const bool pointer = types().is_pointer(target);
+    const bool reference = types().is_reference(target);
+    if (dependent(e) || types().is_dependent(to)) {
+      diag(begin, Diag::not_supported, lex::Tk::kw_dynamic_cast);
+      return fail;
+    }
+    const QualType destination = pointer ? types().pointee(target) : types().referee(target);
+    if ((!pointer && !reference) || !types().is_class(destination)) {
+      diag(begin, Diag::dynamic_cast_target, to);
+      return fail;
+    }
+    if (!require_complete(destination, begin)) return fail;
+    const auto from = e.type();
+    // Diagnose non-pointers before rvalue conversion can need a class layout.
+    const bool valid_operand = pointer ? types().is_pointer(from) || types().is_array(from)
+        : types().is_class(from) && e.glvalue() && (types().rec(target).rvalue_ref || e.cat() == ValueCategory::lvalue);
+    if (!valid_operand) {
+      diag(begin, Diag::dynamic_cast_operand, from);
+      return fail;
+    }
+    if (pointer) {
+      if (types().is_array(from) && !e.glvalue()) e = materialize(e, from, false);
+      // A direct, nonvolatile constexpr pointer can supply its constant value
+      // in either evaluation mode. Do not speculate on calls or indirect reads.
+      if (unevaluated == 0 && e.glvalue() && types().is_pointer(from) && object_cv(from) == Cv::const_) {
+        Ex name = e;
+        while (auto paren = as<ast::Paren>(name)) name.id = paren->operand.id;
+        std::optional<ConstId> value;
+        if (auto local = as<ast::LocalRef>(name)) value = local_values_[local->local];
+        if (auto decl = as<ast::DeclRef>(name); decl && !decl->reference) value = q_->constant_value(decl->entity);
+        if (value && ins().values.is<ast::VNullptr>(*value))
+          e = literal(Types::unqualified(types().canonical(from)), *value, ValueCategory::prvalue, e.begin, e.end);
+      }
+      e = rvalue(e);
+    }
+    if (!e.ok()) return fail;
+    const QualType source = pointer ? types().pointee(e.type()) : e.type();
+    if (!types().is_class(source)) {
+      diag(begin, Diag::dynamic_cast_operand, from);
+      return fail;
+    }
+    if (!require_complete(source, begin)) return fail;
+    if (!cv_within(object_cv(source), object_cv(destination))) {
+      diag(begin, Diag::no_conversion, from, target);
+      return fail;
+    }
+    const EntityId src = types().class_of(source);
+    const EntityId dst = types().class_of(destination);
+    int paths = 0;
+    const auto base = src != dst ? base_path(src, dst, paths) : std::nullopt;
+    if (base && !check_base_path(source, dst, base, paths, begin)) return fail;
+    if (src != dst && !base) {
+      const auto* record = class_rec(src);
+      if (!record || !record->polymorphic) {
+        diag(begin, Diag::dynamic_cast_polymorphic, source);
+        return fail;
+      }
+    }
+    if (!pointer || src == dst || base || w_->target.triple != ast::x86_64_linux.triple) {
+      diag(begin, Diag::not_supported, lex::Tk::kw_dynamic_cast);
+      return fail;
+    }
+    // The final unit checks the peer's ownership and layout before lowering a runtime cast.
+    // In a constant expression the null path can finish without consulting any RTTI.
+    if (unevaluated == 0) q_->use_typed_dynamic_cast();
+    const ExprInfo info{target, ValueCategory::prvalue, 0};
+    return node(ast::DynamicCastPointer{info, type_info_entity(*w_, src), type_info_entity(*w_, dst),
+                                        dynamic_cast_runtime(*w_), at(e, begin)}, begin, end, info);
   }
 
   // [expr.dynamic.cast]: the pointer must designate the source polymorphic subobject.

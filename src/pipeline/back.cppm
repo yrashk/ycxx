@@ -76,7 +76,7 @@ class Constants {
 
 // An entity the translation unit declares (or defines): what its symbol is made of.
 // These symbols use special Itanium encodings (§5.1.4.3, §5.1.4.5).
-enum class Special : std::uint8_t { none, constructor, destructor, virtual_table, deleting_destructor };
+enum class Special : std::uint8_t { none, constructor, destructor, virtual_table, deleting_destructor, type_info };
 struct Entity {
   EntityId id = EntityId::none;
   std::string name;  // its identifier
@@ -112,7 +112,12 @@ struct Entity {
 };
 
 // Certified on the typed definition, before IR drops lifetime information.
-enum class UnwindEligibility : std::uint8_t { none, cleanup_free, cleanup_free_with_throw, hosted_catch_all, hosted_cleanup };
+enum class UnwindEligibility : std::uint8_t { none, cleanup_free, cleanup_free_with_throw, hosted_catch, hosted_cleanup };
+
+struct HostedCatch {
+  EntityId callee;  // checked against the complete unit
+  std::optional<std::uint32_t> int_binding{};  // empty for a catch-all
+};
 
 // A function definition: what `function_ir(F)` reads (irgen::FunctionInput, without a thunk's
 // locals).
@@ -131,7 +136,7 @@ struct FunctionDef {
   // coalesced by the linker (ELF #422, Mach-O #124).
   bool coalesced = false;
   UnwindEligibility unwind = UnwindEligibility::none;
-  EntityId catch_all_callee = EntityId::none;  // for the complete-unit exception-specification check
+  std::optional<HostedCatch> hosted_catch{};
   ast::NodeId cleanup_call = ast::NodeId::none;
   EntityId constructor_cleanup = EntityId::none;
   EntityId constructor_initializer_callee = EntityId::none;
@@ -208,8 +213,9 @@ struct TranslationUnit {
   bool front_failed = false;           // the front end reported errors: nothing to compile
   bool virtual_emission_blocked = false;
   std::optional<ast::Loc> virtual_declaration;
+  std::optional<ast::Loc> unsupported_typed_dynamic_cast;
   std::optional<ir::IntThrowRuntime> int_throw;
-  std::optional<ir::CatchAllRuntime> catch_all;
+  std::optional<ir::CatchAllRuntime> catch_runtime;
   EntityId cleanup_resume = EntityId::none;
   std::optional<OwnedVirtualTable> owned_virtual_table;
   // The written complete-object definitions whose ELF base-object entries share their code.
@@ -1113,7 +1119,10 @@ engine::query_task<Generated> FunctionGen::run(engine::Ctx& cx, FnKey k) {
   input.guard_release = d.guard_release;
   input.atexit = d.atexit;
   input.dso = d.dso;
-  input.hosted_catch_all = d.unwind == UnwindEligibility::hosted_catch_all;
+  if (d.unwind == UnwindEligibility::hosted_catch) {
+    input.hosted_catch = true;
+    input.catch_int_binding = d.hosted_catch->int_binding;
+  }
   const bool linux = facts.target().triple == ast::x86_64_linux.triple;
   if (linux) input.unwind_cleanup_checks = irgen::UnwindCleanupChecks::all_calls;
   else if (facts.target().triple == ast::aarch64_darwin.triple)
@@ -1323,7 +1332,7 @@ engine::query_task<Lowered> Lower::run(engine::Ctx& cx, FnKey k) {
     }
     config.sysv_amd64 = true;
     if (def.unwind == UnwindEligibility::cleanup_free_with_throw) config.int_throw = tu.int_throw;
-    if (def.unwind == UnwindEligibility::hosted_catch_all) config.catch_all = tu.catch_all;
+    if (def.unwind == UnwindEligibility::hosted_catch) config.catch_all = tu.catch_runtime;
     if (def.unwind == UnwindEligibility::hosted_cleanup) config.cleanup_resume = tu.cleanup_resume;
     // Extend outgoing narrow results for interoperability. Lowering truncates incoming results
     // to the declared width, as the System V AMD64 psABI §3.2.3 leaves excess bits unspecified.
@@ -1513,6 +1522,7 @@ struct LinuxFunction {
   bool weak;
   bool cleanup_free_unwind;
   std::string_view base_object_name;
+  bool catch_int;
 };
 
 struct LinuxVirtualTable {
@@ -1546,7 +1556,7 @@ std::expected<obj::object, aarch64::CodegenError> assemble_linux(
   std::optional<std::uint32_t> data_const;
   if (!functions.empty()) {
     const std::uint32_t text = o.add_section(obj::standard_section::text);
-    std::optional<std::uint32_t> frames, exception_tables, personality_cell;
+    std::optional<std::uint32_t> frames, exception_tables, personality_cell, int_type_cell;
     const bool has_handlers = std::ranges::any_of(functions, [](const LinuxFunction& f) {
       return f.code->unwind_sites.has_value();
     });
@@ -1559,6 +1569,11 @@ std::expected<obj::object, aarch64::CodegenError> assemble_linux(
       auto& pointers = o.sections[*data_const];
       pointers.emit64(0);
       pointers.relocate(obj::reloc_kind::abs64, o.reference("__gxx_personality_v0"));
+      if (std::ranges::any_of(functions, &LinuxFunction::catch_int)) {
+        int_type_cell = o.define({}, obj::binding::local, *data_const);
+        pointers.emit64(0);
+        pointers.relocate(obj::reloc_kind::abs64, o.reference("_ZTIi"));
+      }
     }
 
     x86_64::EhFrameCies cies;
@@ -1590,13 +1605,14 @@ std::expected<obj::object, aarch64::CodegenError> assemble_linux(
         std::optional<std::uint32_t> lsda_anchor;
         if (f.code->unwind_sites) {
           if (f.weak) return std::unexpected(aarch64::CodegenError{f.entity, "hosted unwind frames require strong definitions"});
-          auto lsda = x86_64::exception_lsda(*f.code);
+          auto lsda = x86_64::exception_lsda(*f.code, f.catch_int);
           if (!lsda) return std::unexpected(aarch64::CodegenError{f.entity, lsda.error()});
           auto& tables = o.sections[*exception_tables];
           if (lsda->size() + tables.size() > std::numeric_limits<std::uint32_t>::max())
             return std::unexpected(aarch64::CodegenError{f.entity, "the exception tables exceed the object offset limit"});
           lsda_anchor = o.define({}, obj::binding::local, *exception_tables);
           tables.emit(*lsda);
+          if (f.catch_int) tables.relocate(obj::reloc_kind::x86_64_pc32, *int_type_cell);
         }
         obj::section& frame = o.sections[*frames];
         auto fields = x86_64::append_eh_frame(frame.bytes, cies, *f.code);
@@ -1718,6 +1734,11 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
     // Its diagnostics are the front end's (`TuFront`); this only keeps an object out of a link.
     errors.push_back({std::nullopt, "the translation unit has errors"});
     co_return out;
+  }
+  if (tu.unsupported_typed_dynamic_cast) {
+    errors.push_back({tu.unsupported_typed_dynamic_cast,
+                      "typed dynamic_cast requires a default-visible peer-owned root and its direct public derived class on Linux x86-64"});
+    co_return co_await locate_errors(cx, id, std::move(out));
   }
   if (tu.virtual_emission_blocked) {
     errors.push_back({tu.virtual_declaration, "native output for a translation unit with virtual member functions is not supported yet"});
@@ -1884,14 +1905,16 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
       locals.push_back(&e);
       continue;
     }
-    if (e.special == Special::virtual_table) {
+    if (e.special == Special::virtual_table || e.special == Special::type_info) {
       auto encoding = mangled_type(in, in.intern_type(ast::TClass{e.scope}), names);
+      const bool table = e.special == Special::virtual_table;
       if (!encoding) {
-        errors.push_back({e.at, std::format("the virtual table's type name: {} is not supported yet", encoding.error())});
+        errors.push_back({e.at, std::format("the {} type name: {} is not supported yet",
+                                            table ? "virtual table's" : "RTTI object's", encoding.error())});
         continue;
       }
-      symbols.push_back({e.id, "_ZTV" + *encoding, obj::binding::global});
-      if (const auto& owned = tu.owned_virtual_table; owned && owned->entity == e.id) {
+      symbols.push_back({e.id, (table ? "_ZTV" : "_ZTI") + *encoding, obj::binding::global});
+      if (const auto& owned = tu.owned_virtual_table; table && owned && owned->entity == e.id) {
         std::optional<std::string> base;
         if (owned->primary_base != EntityId::none) {
           auto base_encoding = mangled_type(in, in.intern_type(ast::TClass{owned->primary_base}), names);
@@ -1978,7 +2001,8 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
         const auto& def = tu.functions[i];
         const auto base_name = base_object_names.find(def.entity);
         const std::string_view name = base_name == base_object_names.end() ? std::string_view{} : base_name->second;
-        code.push_back({fns[i].fn, &*ms[i].get().linux_code, def.coalesced, def.unwind != UnwindEligibility::none, name});
+        const bool catch_int = def.unwind == UnwindEligibility::hosted_catch && def.hosted_catch->int_binding.has_value();
+        code.push_back({fns[i].fn, &*ms[i].get().linux_code, def.coalesced, def.unwind != UnwindEligibility::none, name, catch_int});
       }
       return assemble_linux(tu.name, code, data, symbols, virtual_table);
     }

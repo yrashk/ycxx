@@ -213,10 +213,13 @@ aggregate results through the target's supported ABI.
 On x86-64 Linux, an eligible ycxx function can also throw an `int` to a hosted peer's handler.
 A host-linked ycxx function can use one `catch (...)` to return an integer literal when
 a direct call on its parameter to an externally defined `int(int)` function throws.
+It can also use one `catch (int value)` to return the caught integer and let exceptions of
+other types reach the hosted caller.
 A supported union constructor can destroy its active member when its body call throws and
 propagate an exception from its initializer before the member's lifetime begins.
 [#578](https://github.com/yrashk/ycxx/issues/578)
-· [#583](https://github.com/yrashk/ycxx/issues/583) · [#738](https://github.com/yrashk/ycxx/issues/738)
+· [#583](https://github.com/yrashk/ycxx/issues/583) · [#919](https://github.com/yrashk/ycxx/issues/919)
+· [#738](https://github.com/yrashk/ycxx/issues/738)
 
 On both hosts, a system-linked void function can destroy one initialized aggregate local
 on both exits from an external `void()` call and let the original exception reach a peer handler.
@@ -595,9 +598,13 @@ a caller can also dispatch through a peer-owned abstract interface with one or t
 public pure virtual slots using fixed integer signatures and bare `noexcept`.
 [#309](https://github.com/yrashk/ycxx/issues/309)
 
-**Linux casts to the most-derived object.** `dynamic_cast<cv void*>(p)` accepts a pointer to
+**Linux borrowed runtime casts.** `dynamic_cast<cv void*>(p)` accepts a pointer to
 an admitted peer-owned polymorphic root. The cast preserves the pointee's qualifiers, returns
 null for a null operand, and recovers the most-derived address from a live subobject.
+On Linux x86-64, `dynamic_cast<D*>(p)` also supports a fieldless root `B` and its fieldless
+derived class `D` with one public nonvirtual base `B`. Each class declares one public virtual
+`int` member with no arguments, and `D` overrides that member. The hosted C++ peer defines
+both key functions and links the consumer with their RTTI and the cast runtime.
 [#294](https://github.com/yrashk/ycxx/issues/294)
 
 **Structured bindings.** Local bindings can copy or alias scalar-element arrays, including
@@ -634,7 +641,7 @@ vptr before calling the nonthrowing observer. The deleting entry then uses globa
   tuple-like structured bindings and structured bindings to bit-fields or inherited members,
   inheriting constructors, and base packs or multiple bases in a class template.
 - Broader native construction, virtual dispatch and table emission, virtual base classes,
-  `typeid`, `dynamic_cast` to a class type, and virtual destruction for other class shapes.
+  `typeid`, other `dynamic_cast` forms, and virtual destruction for other class shapes.
   [#309](https://github.com/yrashk/ycxx/issues/309) · [#310](https://github.com/yrashk/ycxx/issues/310) ·
   [#294](https://github.com/yrashk/ycxx/issues/294) · [#136](https://github.com/yrashk/ycxx/issues/136)
 - Member class and alias templates, conversion function templates, and constraints on class
