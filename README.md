@@ -276,6 +276,8 @@ members may reuse their names. [#725](https://github.com/yrashk/ycxx/issues/725)
 Nested unscoped enumerators conflict with other non-type members regardless of declaration order.
 They can hide an enum name in ordinary lookup while leaving it available as a qualifier.
 [#731](https://github.com/yrashk/ycxx/issues/731)
+Qualified elaborated specifiers such as `enum Box::State` find the enum despite a same-name
+enumerator. [#761](https://github.com/yrashk/ycxx/issues/761)
 Initializers in a nested enumeration can use preceding enclosing class members by unqualified
 name. Earlier enumerators take precedence over enclosing class names within their enumeration.
 [#760](https://github.com/yrashk/ycxx/issues/760)
