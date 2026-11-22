@@ -1682,13 +1682,24 @@ private:
     }
     const EntityId spec = specialize_variable(ref.templ, *args);
     if (mode != BooleanSubstitution::evaluate) {
-      auto g = variable_global ? variable_global(spec) : std::nullopt;
-      if (!g || !types().is(g->type, Builtin::bool_)) return std::nullopt;
+      auto global = variable_global ? variable_global(spec) : std::nullopt;
+      auto type = global ? std::optional(global->type) : declared_variable_type(spec, ref.templ, *args);
+      if (!type || !types().is(types().referee(*type), Builtin::bool_)) return std::nullopt;
       if (mode == BooleanSubstitution::discard) return w_->values.integer(types().builtin(Builtin::bool_), false);
       ref.args = ins().intern_seq(std::span<const TemplateArg>(*args));
       return ins().intern_value(ref);
     }
     return read ? read(spec) : std::nullopt;
+  }
+
+  std::optional<QualType> declared_variable_type(EntityId spec, EntityId templ, std::span<const TemplateArg> args) {
+    if (variable_specialization_type)
+      if (auto type = variable_specialization_type(spec)) return type;
+    if (!template_decl) return std::nullopt;
+    auto pattern = template_decl(templ);
+    if (!pattern) return std::nullopt;
+    auto params = ins().seqs.elements(pattern->template_params);
+    return substitute(pattern->type, Bindings::of(params.empty() ? 0 : params.front().depth, args));
   }
 
   // The selected specialization supplies its own type and constant initializer. Check those
@@ -1830,6 +1841,7 @@ public:
   std::function<std::optional<ast::DeclSema>(EntityId)> template_decl;
   std::function<std::optional<ConstId>(EntityId)> variable_constant;
   std::function<std::optional<interp::GlobalVar>(EntityId)> variable_global;
+  std::function<std::optional<QualType>(EntityId)> variable_specialization_type;
 
 private:
   // The template-head whose parameters a deduction deduces, and its packs whose leading elements

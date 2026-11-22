@@ -19,3 +19,9 @@ template<class T> constexpr bool Enabled = false;
 template<class T> bool Runtime = true;
 template<class T> using Skipped = Conditional<Enabled<T> && Runtime<T>, const T&, T&&>;
 static_assert(__is_same(Skipped<int>, int&&));
+
+template<class T> extern bool Later;
+template<class T> using Forward = Conditional<Enabled<T> && Later<T>, const T&, T&&>;
+static_assert(__is_same(Forward<int>, int&&));
+template<class T> bool Later = true;
+template<class T> using Reached = Conditional<!Enabled<T> && Later<T>, const T&, T&&>;

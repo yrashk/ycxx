@@ -2791,6 +2791,7 @@ public:
     t.template_decl = [this](EntityId tmpl) { return q_->template_decl(tmpl); };
     t.variable_constant = [this](EntityId spec) { return q_->constant_value(spec); };
     t.variable_global = [this](EntityId spec) { return q_->global(spec); };
+    t.variable_specialization_type = [this](EntityId spec) { return q_->specialization_type(spec); };
     return t;
   }
   bool dependent(const Ex& e) {
