@@ -799,8 +799,8 @@ public:
   // The specialization of class template `templ` for `args` ([temp.spec.general]): its entity is
   // the template and the canonical arguments (§B1.5). With dependent arguments it is a dependent
   // type ([temp.dep.type]).
-  EntityId class_specialization(EntityId templ, std::span<const TemplateArg> args) {
-    return templates().specialize_class(templ, args);
+  EntityId class_specialization(EntityId templ, std::span<const TemplateArg> args, Fp128 constraints = {}) {
+    return templates().specialize_class(templ, args, constraints);
   }
 
   // `X<args>` naming a class template specialization ([temp.names], [temp.arg]), or the type an
@@ -877,8 +877,8 @@ public:
     return literal(types().referee(tmpl.type), value, ValueCategory::lvalue, begin, end);
   }
   // The specialization of variable template `templ` for `args` ([temp.spec.general]).
-  EntityId variable_specialization(EntityId templ, std::span<const TemplateArg> args) {
-    return templates().specialize_variable(templ, args);
+  EntityId variable_specialization(EntityId templ, std::span<const TemplateArg> args, Fp128 constraints = {}) {
+    return templates().specialize_variable(templ, args, constraints);
   }
 
   // The arguments of a template-id for `tmpl` ([temp.arg]): each of its parameter's kind, values

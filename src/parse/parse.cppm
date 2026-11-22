@@ -633,22 +633,29 @@ public:
       const Partial* p;
       std::vector<ast::TemplateParamSema> params;
       std::vector<ast::TemplateArg> pattern, args;
+      ConstId constraints;
     };
     std::vector<Match> matches;
     for (const Partial& p : candidates) {
       if (p.item >= point) continue;
-      std::vector<ast::TemplateParamSema> params = w_->ins.seqs.elements(w_->ins.seqs.at(item_sema(p.item).value.decls, 0).template_params);
+      const ast::DeclSema decl = w_->ins.seqs.at(item_sema(p.item).value.decls, 0);
+      std::vector<ast::TemplateParamSema> params = w_->ins.seqs.elements(decl.template_params);
       std::vector<ast::TemplateArg> pattern = w_->entities.rec(p.entity).args;
       auto a = t.deduce_partial(params, pattern, rec.args);
       if (!a) continue;
       auto back = substitute_partial_args(p.item, point, params, pattern, sema::Bindings::of(params[0].depth, *a));
-      if (back && std::ranges::equal(*back, rec.args))
-        matches.push_back({&p, std::move(params), std::move(pattern), std::move(*a)});
+      if (!back || !std::ranges::equal(*back, rec.args)) continue;
+      // [temp.spec.partial.match]/2: the deduced arguments satisfy its associated constraints.
+      if (decl.constraints != ConstId::none) {
+        auto nf = t.substitute_constraint(decl.constraints, sema::Bindings::of(params[0].depth, *a));
+        if (!nf || satisfied(*nf, point) != true) continue;
+      }
+      matches.push_back({&p, std::move(params), std::move(pattern), std::move(*a), decl.constraints});
     }
     if (matches.empty()) return std::nullopt;
     auto best = std::ranges::find_if(matches, [&](const Match& m) {
       return std::ranges::all_of(matches, [&](const Match& o) {
-        return &m == &o || t.more_specialized_partial(m.params, m.pattern, o.params, o.pattern);
+        return &m == &o || t.more_specialized_partial(m.params, m.pattern, o.params, o.pattern, m.constraints, o.constraints);
       });
     });
     if (best == matches.end()) return Chosen{matches[0].p->item, {}, true, true};
@@ -2554,6 +2561,7 @@ private:
         ast::DeclSema sem = class_decl(*pattern, false);
         sem.flags |= sema::decl_flag::template_ | sema::decl_flag::partial;
         sem.template_params = b_.seq(std::span<const ast::TemplateParamSema>(s_.template_scopes.back()));
+        sem.constraints = partial_constraints_;
         if (!class_declared(sem, key, name_at)) return bad();
         return;
       }
@@ -3101,7 +3109,12 @@ private:
                       sema::Types::cv(s_.types().canonical(a.type)) == sema::Cv::none
                 : values.is<ast::VDepParam>(a.value) && values.get<ast::VDepParam>(a.value).index == i;
     }
-    if (own) {
+    // A partial specialization's associated constraints and their fingerprint, for its identity,
+    // its matching and its ordering (Fable's decision on #234).
+    partial_constraints_ = partial_constraints(partial_constraints_fp_);
+    // C++20: arguments that are the primary's own are allowed when the partial specialization is
+    // more constrained ([temp.spec.partial]/9.3, [temp.func.order]/6.2).
+    if (own && !t.more_specialized_partial(head, *full, params, t.own_args(params), partial_constraints_, tmpl.constraints)) {
       s_.diag(at, Diag::partial_same_as_primary, name);
       return std::nullopt;
     }
@@ -3127,7 +3140,7 @@ private:
       return std::nullopt;
     }
     std::vector<ast::TemplateArg> primary = t.own_args(params);
-    if (!t.more_specialized_partial(head, *full, params, primary)) {
+    if (!t.more_specialized_partial(head, *full, params, primary, partial_constraints_, tmpl.constraints)) {
       s_.diag(at, Diag::partial_not_more_specialized, name);
       return std::nullopt;
     }
@@ -3147,7 +3160,7 @@ private:
     auto full = partial_arguments(*tmpl, *args, name_at);
     if (!full) return std::nullopt;
     if (replay_at) p_->partial_replays_.emplace(k_, Program::PartialReplay{*replay_at, *tmpl, s_.dependent_calls});
-    return s_.class_specialization(tmpl->entity, *full);
+    return s_.class_specialization(tmpl->entity, *full, partial_constraints_ == ConstId::none ? sema::Fp128{} : partial_constraints_fp_);
   }
   // `template<…> class-key X<args> { … }`: a partial specialization of class template X
   // ([temp.spec.partial]). Its members are analysed as those of `X<args>`, the specialization of
@@ -3168,6 +3181,7 @@ private:
     ast::DeclSema sem = class_decl(pattern, true);
     sem.flags |= sema::decl_flag::template_ | sema::decl_flag::partial;
     sem.template_params = b_.seq(std::span<const ast::TemplateParamSema>(s_.template_scopes.back()));
+    sem.constraints = partial_constraints_;
     if (!class_declared(sem, key, name_at)) return bad();
     p_->current_instantiation(pattern, k_, sem);
     ps_.seek(it_->brace_end);
@@ -3190,10 +3204,12 @@ private:
     }
     auto full = partial_arguments(*tmpl, *d.template_args, d.template_args_at);
     if (!full) return false;
-    sem.entity = s_.variable_specialization(tmpl->entity, *full);
+    sem.entity = s_.variable_specialization(tmpl->entity, *full,
+                                            partial_constraints_ == ConstId::none ? sema::Fp128{} : partial_constraints_fp_);
     sem.flags = u16(flags | sema::decl_flag::template_ | sema::decl_flag::partial);
     sem.params = b_.seq(std::span<const ast::ParamSema>{});
     sem.template_params = b_.seq(std::span<const ast::TemplateParamSema>(s_.template_scopes.back()));
+    sem.constraints = partial_constraints_;
     if (auto prior = p_->declaration(sem.entity, k_); prior && (prior->flags & sema::decl_flag::definition)) {
       s_.diag(d.name_at, Diag::redefinition, d.name);
       return false;
@@ -3310,6 +3326,19 @@ private:
       f = ast::mix(f, s_.world().ins.names.fp(s_.world().ins.names.intern(sp)));
     }
     return f;
+  }
+  // A partial specialization's associated constraints ([temp.constr.decl]/3: its head's
+  // type-constraints, then its requires-clause) and, into `fp`, their tokens' fingerprint, as
+  // `associated_constraints` gives them, without mixing into `constraints_fp_`.
+  ConstId partial_constraints(sema::Fp128& fp) {
+    sema::Templates t = s_.templates();
+    ConstId c = ConstId::none;
+    fp = constraints_fp_;
+    for (ConstId tc : s_.head_constraints) {
+      c = t.constraint_op(0, c, tc);
+      fp = ast::mix(fp, s_.world().ins.values.fp(tc));
+    }
+    return t.constraint_op(0, c, head_requires_);
   }
   // The declaration's associated constraints ([temp.constr.decl]/3): its head's type-constraints
   // in order, its head's requires-clause, its trailing requires-clause; with their fingerprint.
@@ -6798,6 +6827,8 @@ private:
   ConstId head_requires_ = ConstId::none;      // the template-head's requires-clause, in normal form
   ConstId trailing_requires_ = ConstId::none;  // the declarator's
   sema::Fp128 constraints_fp_{};               // their tokens' fingerprint, for identity
+  ConstId partial_constraints_ = ConstId::none;  // a partial specialization's, from `partial_arguments`
+  sema::Fp128 partial_constraints_fp_{};
 };
 
 const Result<ast::ItemSema>& Program::item_sema(u32 item) {

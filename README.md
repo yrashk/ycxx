@@ -389,7 +389,8 @@ written default member initializer are value-initialized.
   partial specializations with substitution checks for dependent type arguments, static constexpr
   members of class templates, member function and
   constructor templates, parameter packs and fold expressions, alias templates, template
-  template parameters, concepts and requires-expressions (including `{ e } noexcept;`) in overload resolution, including
+  template parameters, concepts and requires-expressions (including `{ e } noexcept;`) in overload
+  resolution and in choosing partial specializations, including
   explicit trailing type packs in ordinary constrained function overloads. Directly named
   non-dependent primary class specializations with explicit type arguments check constraints.
   Non-template code outside requires-expression bodies also checks constraints on directly named

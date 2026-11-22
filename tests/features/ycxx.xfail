@@ -439,14 +439,11 @@ draft/temp/temp.res.general-4.reject.cpp errors elsewhere: 'struct' not supporte
 draft/temp/temp.res.general-6.reject.cpp errors elsewhere: 'template' not supported yet
 draft/temp/temp.spec.general-2.accept.cpp 'template' not supported yet
 draft/temp/temp.spec.general-3.reject.cpp errors elsewhere: 'template' not supported yet
-draft/temp/temp.spec.partial.general-2.accept.cpp 'template' not supported yet
 draft/temp/temp.spec.partial.general-3.accept.cpp 'template' not supported yet
-draft/temp/temp.spec.partial.match-2.accept.cpp 'template' not supported yet
 draft/temp/temp.spec.partial.match-3.reject.cpp errors elsewhere: 'template' not supported yet
 draft/temp/temp.spec.partial.member-1.reject.cpp errors elsewhere: 'template' not supported yet
 draft/temp/temp.spec.partial.member-2.accept.cpp 'template' not supported yet
 draft/temp/temp.spec.partial.order-1.accept.cpp 'template' not supported yet
-draft/temp/temp.spec.partial.order-2.accept.cpp 'template' not supported yet
 draft/temp/temp.static-1.accept.cpp 'template' not supported yet
 draft/temp/temp.static-2.accept.cpp 'template' not supported yet
 draft/temp/temp.variadic-4.accept.cpp 'auto' not supported yet
