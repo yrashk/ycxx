@@ -248,8 +248,13 @@ private:
       } else if (t == Tk::kw_class && kind(key) == Tk::kw_enum && n == key + 1) {
         // `enum class`
       } else if (t == Tk::kw_struct && kind(key) == Tk::kw_enum && n == key + 1) {
-      } else if (t == Tk::identifier && !(named && is_name(n, "final"))) {
-        if (named && kind(n - 1) != Tk::coloncolon) return false;
+      } else if (t == Tk::identifier) {
+        if (named && kind(n - 1) != Tk::coloncolon) {
+          if (kind(key) == Tk::kw_enum) return false;
+          // Keep a repeated property in the class-head for its semantic diagnostic.
+          while (n < open && is_name(n, "final")) ++n;
+          return n == open;
+        }
         named = true;
       } else if (t == Tk::less) {
         n = angle_end(n) - 1;
@@ -271,11 +276,15 @@ private:
     for (u32 n = key + 1; n < end; ++n) {
       Tk t = kind(n);
       if (t == Tk::l_square || t == Tk::l_paren) n = match(n) - 1;
+      else if (kind(key) != Tk::kw_enum && is_name(n, "__attribute__") && kind(n + 1) == Tk::l_paren)
+        n = match(n + 1) - 1;
       else if (t == Tk::less) ++angle;
       else if (t == Tk::greater) --angle;
       else if (t == Tk::greatergreater) angle -= 2;
       else if (t == Tk::colon && angle <= 0) break;
-      else if (t == Tk::identifier && angle <= 0 && !is_name(n, "final")) at = n;
+      else if (t == Tk::identifier && angle <= 0 &&
+               (!is_name(n, "final") || (kind(key) != Tk::kw_enum && (at == 0 || kind(n - 1) == Tk::coloncolon))))
+        at = n;
     }
     return at;
   }
@@ -745,10 +754,10 @@ private:
       else if (t == Tk::less) ++angle;
       else if (t == Tk::greater) --angle;
       else if (t == Tk::colon && angle <= 0) break;
-      else if (t == Tk::identifier && angle <= 0 && (is_enum || !is_name(n, "final"))) {
+      else if (t == Tk::identifier && angle <= 0) {
         if (kind(n + 1) == Tk::coloncolon) {
           if (qual == none) qual = n;
-        } else {
+        } else if (is_enum || head == none || !is_name(n, "final")) {
           head = n;
         }
       }

@@ -144,6 +144,35 @@ bool valid_unwind_section(std::uint64_t alignment, std::uint64_t size) {
   return (alignment == 4 || alignment == 8) && size % 4 == 0 && std::in_range<std::uint32_t>(size);
 }
 
+std::optional<std::uint32_t> take_uleb32(std::span<const std::uint8_t>& bytes) {
+  std::uint64_t value = 0;
+  for (unsigned shift = 0; shift < 32 && !bytes.empty(); shift += 7) {
+    const auto byte = bytes.front();
+    bytes = bytes.subspan(1);
+    value |= std::uint64_t(byte & 0x7f) << shift;
+    if ((byte & 0x80) == 0 && std::in_range<std::uint32_t>(value))
+      return static_cast<std::uint32_t>(value);
+  }
+  return std::nullopt;
+}
+
+// The hosted int LSDA has one action (filter 1, next 0) and one signed PC-relative
+// type entry immediately before TTBase. Return the position of that entry.
+std::optional<std::uint32_t> int_type_entry(std::span<const std::uint8_t> tables, std::uint32_t start) {
+  auto remaining = tables.subspan(start + 2);
+  const auto type_base = take_uleb32(remaining);
+  if (!type_base || *type_base > remaining.size() || *type_base < 6 || remaining.front() != 0x01)
+    return std::nullopt;
+  const auto end = tables.size() - remaining.size() + *type_base;
+  auto sites_and_actions = remaining.first(*type_base - 4).subspan(1);
+  const auto site_bytes = take_uleb32(sites_and_actions);
+  if (!site_bytes || *site_bytes == 0 || *site_bytes > sites_and_actions.size()) return std::nullopt;
+  const auto actions = sites_and_actions.subspan(*site_bytes);
+  if (actions.size() != 2 || actions[0] != 1 || actions[1] != 0 || !all_zero(tables.subspan(end - 4, 4)))
+    return std::nullopt;
+  return static_cast<std::uint32_t>(end - 4);
+}
+
 // The first handler profile uses one ungrouped table and one frame section. The ordinary
 // code-only input subset has no LSDA and retains its existing relocation rules.
 std::optional<std::string_view> handler_frame_error(const object& o) {
@@ -153,7 +182,7 @@ std::optional<std::string_view> handler_frame_error(const object& o) {
   if (frames == o.sections.end() || std::ranges::count_if(o.sections, &section::is_eh_frame) != 1 ||
       std::ranges::count_if(o.sections, &section::is_gcc_except_table) != 1 ||
       tables->flags != section_flags::regular || tables->zerofill_size != 0 || tables->size() == 0 ||
-      !std::in_range<std::uint32_t>(tables->size()) || !tables->relocs.empty() ||
+      !std::in_range<std::uint32_t>(tables->size()) ||
       frames->flags != section_flags::regular || frames->zerofill_size != 0 ||
       !valid_unwind_section(8, frames->size()) || frames->align_log2 != 3)
     return "invalid ELF handler table or frame section";
@@ -161,21 +190,24 @@ std::optional<std::string_view> handler_frame_error(const object& o) {
   constexpr std::uint8_t ordinary_cie[]{1, 'z', 'R', 0, 1, 0x78, 16, 1, 0x1b};
   constexpr std::uint8_t handler_cie[]{1, 'z', 'P', 'L', 'R', 0, 1, 0x78, 16, 7, 0x9b};
   std::map<std::uint32_t, bool> cies;
-  std::map<std::uint32_t, const reloc*> relocs;
-  for (const auto& r : frames->relocs) {
-    if (r.kind != reloc_kind::x86_64_pc32 || r.addend != 0 || r.minus || r.symbol >= o.symbols.size() ||
-        !relocs.emplace(r.offset, &r).second)
-      return "invalid ELF handler frame relocation";
-  }
-  auto local_anchor = [&](std::uint32_t at) -> const symbol* {
+  using Relocations = std::map<std::uint32_t, const reloc*>;
+  Relocations frame_relocs, table_relocs;
+  auto collect_relocs = [&](const section& sec, Relocations& relocs) {
+    return std::ranges::all_of(sec.relocs, [&](const reloc& r) {
+      return r.kind == reloc_kind::x86_64_pc32 && r.addend == 0 && !r.minus && r.symbol < o.symbols.size() &&
+             relocs.emplace(r.offset, &r).second;
+    });
+  };
+  if (!collect_relocs(*frames, frame_relocs)) return "invalid ELF handler frame relocation";
+  if (!collect_relocs(*tables, table_relocs)) return "invalid ELF handler type relocation";
+  auto local_anchor = [&](Relocations& relocs, std::uint32_t at) -> const symbol* {
     const auto r = relocs.find(at);
     if (r == relocs.end()) return nullptr;
     const auto& s = o.symbols[r->second->symbol];
     relocs.erase(r);
     return s.bind == binding::local && s.section && *s.section < o.sections.size() ? &s : nullptr;
   };
-  auto personality_cell = [&](std::uint32_t at) {
-    const auto* s = local_anchor(at);
+  auto indirect_cell = [&](const symbol* s, std::string_view target) {
     if (!s) return false;
     const auto& data = o.sections[*s->section];
     if (data.segment != "__DATA" || data.name != "__const" || data.align_log2 < 3 ||
@@ -185,7 +217,7 @@ std::optional<std::string_view> handler_frame_error(const object& o) {
     const auto ptr = std::ranges::find(data.relocs, s->offset, &reloc::offset);
     if (ptr == data.relocs.end() || ptr->kind != reloc_kind::abs64 || ptr->addend != 0 || ptr->minus ||
         ptr->symbol >= o.symbols.size() || o.symbols[ptr->symbol].bind != binding::global ||
-        o.symbols[ptr->symbol].name_view() != "__gxx_personality_v0")
+        o.symbols[ptr->symbol].name_view() != target)
       return false;
     return std::ranges::none_of(data.relocs, [&](const reloc& r) {
       const std::uint64_t width = r.kind == reloc_kind::abs64 ? 8 : 4;
@@ -210,7 +242,8 @@ std::optional<std::string_view> handler_frame_error(const object& o) {
       } else if (size == 32 && std::ranges::equal(record.subspan(8, sizeof(handler_cie)), handler_cie) &&
                  load<std::uint32_t>(record, 19) == 0 && record[23] == 0x1b && record[24] == 0x1b) {
         if (std::exchange(has_handler_cie, true)) return "duplicate ELF handler CIE";
-        if (!personality_cell(at + 19)) return "invalid ELF handler personality cell relocation";
+        if (!indirect_cell(local_anchor(frame_relocs, at + 19), "__gxx_personality_v0"))
+          return "invalid ELF handler personality cell relocation";
         cies.emplace(at, true);
       } else {
         return "unsupported ELF handler CIE";
@@ -220,7 +253,7 @@ std::optional<std::string_view> handler_frame_error(const object& o) {
       const auto common = cies.find(at + 4 - cie);
       if (common == cies.end() || record[16] != (common->second ? 4 : 0))
         return "invalid ELF handler FDE augmentation";
-      const auto* s = local_anchor(at + 8);
+      const auto* s = local_anchor(frame_relocs, at + 8);
       if (!s || load<std::uint32_t>(record, 8) != 0) return "missing ELF handler frame code relocation";
       const auto& code = o.sections[*s->section];
       const auto range = load<std::uint32_t>(record, 12);
@@ -228,16 +261,22 @@ std::optional<std::string_view> handler_frame_error(const object& o) {
           range == 0 || !std::in_range<std::int32_t>(range) || range > code.size() - s->offset)
         return "ELF handler frame range is outside its local code";
       if (common->second) {
-        const auto* lsda = local_anchor(at + 17);
+        const auto* lsda = local_anchor(frame_relocs, at + 17);
         if (!lsda || load<std::uint32_t>(record, 17) != 0 || &o.sections[*lsda->section] != &*tables ||
             lsda->offset >= tables->size() || tables->bytes[lsda->offset] != 0xff)
           return "invalid ELF handler LSDA relocation";
+        if (tables->size() - lsda->offset > 1 && tables->bytes[lsda->offset + 1] == 0x9b) {
+          const auto entry = int_type_entry(tables->bytes, static_cast<std::uint32_t>(lsda->offset));
+          if (!entry || !indirect_cell(local_anchor(table_relocs, *entry), "_ZTIi"))
+            return "invalid ELF int handler type cell relocation";
+        }
         has_handler = true;
       }
     }
     at += static_cast<std::uint32_t>(size);
   }
-  if (!has_handler || !relocs.empty()) return "missing or unexpected ELF handler frame relocation";
+  if (!has_handler || !frame_relocs.empty()) return "missing or unexpected ELF handler frame relocation";
+  if (!table_relocs.empty()) return "unexpected ELF handler type relocation";
   return std::nullopt;
 }
 
