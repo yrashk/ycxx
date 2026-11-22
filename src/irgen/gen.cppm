@@ -89,6 +89,11 @@ struct FunctionInput {
   bool native_array_new = false;  // the backend's Linux x86-64 allocation in a certified frame
   std::span<const ast::EntityId> nonthrowing_functions{};  // native declarations, sorted by entity
   ast::EntityId root_destructor_table = ast::EntityId::none;
+  // The initialized prefix of a flat aggregate while evaluating one selected default.
+  struct InitializedFields {
+    ast::EntityId owner = ast::EntityId::none;
+    std::span<const ast::ConstId> values{};
+  } initialized_fields{};
 };
 
 struct FunctionIr {
@@ -1630,12 +1635,36 @@ class Gen {
     std::unreachable();
   }
 
+  // A scalar default's receiver is represented only by its initialized field values. This
+  // supplies direct reads without introducing an address that can be used or stored elsewhere.
+  std::optional<ValueId> read_default_field(At operand, ast::QualType type) {
+    const auto& fields = fn_.initialized_fields;
+    if (fields.owner == ast::EntityId::none || this_) return std::nullopt;
+    operand = strip_parens(operand);
+    if (!is<ast::Member>(operand)) return std::nullopt;
+    const auto member = get<ast::Member>(operand);
+    if (member.reference) return std::nullopt;
+    At receiver = strip_parens(child(operand, member.object));
+    if (!member.arrow) {
+      if (!is<ast::Unary>(receiver)) return std::nullopt;
+      const auto dereference = get<ast::Unary>(receiver);
+      if (dereference.op != ast::UnaryOp::deref) return std::nullopt;
+      receiver = strip_parens(child(receiver, dereference.operand));
+    }
+    if (!is<ast::This>(receiver) || facts_.class_entity(facts_.pointee(info(receiver).type)) != fields.owner)
+      return std::nullopt;
+    if (member.field < fields.values.size()) return constant(type, fields.values[member.field]);
+    // This field's initialization has not completed. Let a read fail only if it executes.
+    return load(begin_object(type, ir::Init::indeterminate));
+  }
+
   std::optional<ValueId> conversion(At a) {
     auto c = get<ast::ImplicitConversion>(a);
     ast::QualType t = c.info.type;
     At from = child(a, c.operand);
     switch (c.conversion) {
       case ast::ConversionKind::lvalue_to_rvalue: {
+        if (auto field = read_default_field(from, t)) return field;
         Place p = lvalue(from);
         if (!is_nullptr(t)) return load(p);
         // [conv.lval]: a std::nullptr_t glvalue is evaluated without accessing its object.
