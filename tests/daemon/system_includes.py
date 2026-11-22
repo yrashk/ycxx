@@ -23,18 +23,22 @@ def check(world, cwd, *args, error=None):
         assert warm[0] == 1 and error in warm[2], (cwd, args, warm)
 
 
-def sources_without_sdk(world):
-    scope = world.scope
-    if NATIVE_LINUX:
-        (scope / 'glibc.cpp').write_text(GLIBC_SOURCE)
-        (scope / 'foreign.cpp').write_text('''\
+def check_foreign_without_sdk(world):
+    (world.scope / 'foreign.cpp').write_text('''\
 #if __has_include(<features.h>)
 #error host glibc leaked into the Darwin target
 #endif
 ''')
+    check(world, world.scope, DARWIN, 'foreign.cpp')
+
+
+def sources_without_sdk(world):
+    scope = world.scope
+    if NATIVE_LINUX:
+        (scope / 'glibc.cpp').write_text(GLIBC_SOURCE)
         check(world, scope, 'glibc.cpp')
         pid = world.pid()
-        check(world, scope, DARWIN, 'foreign.cpp')
+        check_foreign_without_sdk(world)
         check(world, scope, LINUX, 'glibc.cpp')
         world.same_daemon('native and foreign targets', pid)
     elif sys.platform == 'darwin':
@@ -79,13 +83,22 @@ static_assert(YCXX_TARGET_SDK_PROBE == 42);
     world.same_daemon('explicit SDK and include directories', pid)
 
 
+def run(ycxx, test, sdkroot):
+    world = Env(ycxx)
+    # The final case spells the filesystem root through an absent component unique to this test.
+    sdkroot = sdkroot.format(scope=world.scope.name)
+    for env in (world.base, world.cold, world.daemon):
+        env.update(SDKROOT=sdkroot, YCXX_THREADS='2')
+    try:
+        test(world)
+    finally:
+        world.close()
+
+
 if __name__ == '__main__':
-    for sdkroot, test in (('', sources_without_sdk), ('sdk', sources_with_sdk)):
-        world = Env(sys.argv[1])
-        for env in (world.base, world.cold, world.daemon):
-            env.update(SDKROOT=sdkroot, YCXX_THREADS='2')
-        try:
-            test(world)
-        finally:
-            world.close()
+    ycxx = sys.argv[1]
+    run(ycxx, sources_without_sdk, '')
+    run(ycxx, sources_with_sdk, 'sdk')
+    if NATIVE_LINUX:
+        run(ycxx, check_foreign_without_sdk, '/{scope}/..')
     sys.exit(bool(failures))

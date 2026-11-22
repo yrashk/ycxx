@@ -26,11 +26,11 @@ std::vector<std::string> system_dirs(const ast::Target& target, std::string_view
     }
   } else if (target.triple == ast::aarch64_darwin.triple) {
     namespace fs = std::filesystem;
-    fs::path sdk(sdkroot.empty() ? std::string_view("@CMAKE_OSX_SYSROOT@") : sdkroot);
+    auto sdk = fs::path(sdkroot.empty() ? std::string_view("@CMAKE_OSX_SYSROOT@") : sdkroot).lexically_normal();
     std::error_code ec;
     // Keep missing include candidates so the daemon can observe headers created later.
     if (sdk.is_absolute() && !fs::equivalent(sdk, sdk.root_path(), ec))
-      dirs.push_back((sdk / "usr/include").lexically_normal().generic_native_encoded_string());
+      dirs.push_back((sdk / "usr/include").generic_native_encoded_string());
   }
   return dirs;
 }
