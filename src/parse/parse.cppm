@@ -4611,6 +4611,7 @@ private:
     sem.kind = ast::DeclKind::function;
     sem.type = d.type;
     sem.has_written_noexcept = d.has_noexcept;
+    sem.has_trailing_return = d.trailing_return;
     if (d.qualified && d.scope.ns) {
       // `friend R ::f(…);`, `friend R N::f(…);`: a function the namespace declared earlier.
       auto f = s_.namespace_function(*d.scope.ns, d.name, d.type);
@@ -5596,6 +5597,7 @@ private:
                                      s_.template_scopes.empty())) return false;
     sem.type = d.type;
     sem.has_written_noexcept = fn && d.has_noexcept;
+    sem.has_trailing_return = fn && d.trailing_return;
     sem.linkage = ast::Linkage::external;
     sem.is_virtual = is_virtual;
     u16 flags = sema::decl_flag::member;
@@ -6007,6 +6009,7 @@ private:
     sem.kind = fn ? ast::DeclKind::function : ast::DeclKind::variable;
     sem.type = d.type;
     sem.has_written_noexcept = fn && d.has_noexcept;
+    sem.has_trailing_return = fn && d.trailing_return;
     sem.storage = spec.is_static ? ast::Storage::static_ : spec.is_extern ? ast::Storage::extern_ : ast::Storage::none;
     sem.linkage = has_internal_linkage() ? ast::Linkage::internal : ast::Linkage::external;
     sem.access = ast::Access::none;
@@ -8965,6 +8968,13 @@ void Program::instantiate_all() {
     };
     for (u32 j = 0; j < k && !used; ++j)
       used = demanded(item_cells_[j]) || demanded(class_cells_[j]) || demanded(body_cells_[j]);
+    if (!used) {
+      used = std::ranges::any_of(class_member_order_, [&](const auto& key) {
+        const auto& cell = class_member_cells_.at(key);
+        return class_points_.at(key.second) < k && cell.diags.empty() &&
+               std::ranges::any_of(cell.demands, [&](const sema::Demand& d) { return std::to_underlying(d.spec) == e; });
+      });
+    }
     if (!used) continue;
     ast::NameId name = w_->entities.rec(EntityId(e)).name;
     auto at = spec_names_.find(e);
@@ -9043,7 +9053,22 @@ void Program::instantiate_all() {
   std::vector<u32> depth(work.size(), 1);
   const u32 limit = instantiation_limit;
   std::set<u32> seen;
-  for (std::size_t i = 0; i < work.size(); ++i) {
+  std::size_t walked_members = 0;
+  for (std::size_t i = 0; ; ++i) {
+    // Class-specialization replay can add member cells while processing this worklist.
+    for (; walked_members < class_member_order_.size(); ++walked_members) {
+      const auto& key = class_member_order_[walked_members];
+      const auto& cell = class_member_cells_.at(key);
+      if (!cell.diags.empty()) continue;
+      for (sema::Demand demand : cell.demands) {
+        if (!demand.variable_type) continue;
+        const auto point = class_points_.at(key.second);
+        if (point < end()) demand.at = ast::Loc{id(point), 0};
+        work.push_back(demand);
+        depth.push_back(1);
+      }
+    }
+    if (i == work.size()) break;
     if (!seen.insert(std::to_underlying(work[i].spec)).second) continue;
     required_.push_back(work[i].spec);
     if (depth[i] > limit) {
