@@ -345,10 +345,15 @@ private:
     for (std::size_t i = 0; i < record->fields.size(); ++i) {
       const FieldRec& field = record->fields[i];
       const QualType field_type = types.canonical(field.type);
+      const EnumRec* enumeration = types.is_enum(field_type) ? s_->enum_rec(types.enum_of(field_type)) : nullptr;
+      const QualType representation_type =
+          enumeration && enumeration->underlying ? *enumeration->underlying : field_type;
+      const auto representation = types.builtin_of(representation_type);
       if (record->access_of(field.entity) != ast::Access::public_ || field.bit_width || field.no_unique_address ||
-          Types::is_volatile(field_type) || !types.is_integral(field_type) ||
-          ast::width_of(s_->world().target, *types.builtin_of(field_type)) > 64)
+          Types::is_volatile(field_type) || !representation || !ast::is_integral(*representation) ||
+          ast::width_of(s_->world().target, *representation) > 64)
         return std::nullopt;
+      // Preserve the enum type in the field path. The interpreter decodes its underlying value.
       result.fields.push_back({s_->field_access_type(field, type), layout->offsets[i], field.mutable_});
     }
     return result;
