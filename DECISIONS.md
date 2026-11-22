@@ -119,6 +119,10 @@ reasoning; do not leave decisions only in issue threads.
      object that uses them, so a mismatch with a Clang object costs a duplicate, not a link error.
    - *Rejected:* Clang's form (needs the qualifier and arguments as written in every value);
      Clang's form for unqualified names only (two rules, still wrong for defaults and packs).
+   - The same holds for pack-index-specifiers `T...[I]` (#297). GCC writes a constant index as
+     the converted `std::size_t` (`Lm0E`), a substituted parameter in that parameter's type
+     (`Li1E`), and a bound pack as `J <args> E`. Clang writes the literal as spelled (`Li0E`) and
+     a bound pack as a placeholder. ycxx writes GCC's form.
 
 ## 2. Provenance
 

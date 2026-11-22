@@ -938,6 +938,10 @@ private:
                  gnu_extension(n) || (transform_trait(n) && kind(n + 1) == Tk::l_paren)) {
         has_type = has_type || t == Tk::kw_decltype || transform_trait(n);
         n = match(n + 1);
+      } else if (t == Tk::identifier && kind(n + 1) == Tk::ellipsis && kind(n + 2) == Tk::l_square) {
+        // A pack-index-specifier `T...[I]` ([dcl.type.pack.index]) spells a type, not a name.
+        has_type = true;
+        n = match(n + 2);
       } else if (t == Tk::identifier || t == Tk::coloncolon) {
         if (t == Tk::coloncolon || kind(n + 1) == Tk::coloncolon || (kind(n + 1) == Tk::less && angle_then_scope(n + 1, to))) {
           if (qual == none) qual = n;
