@@ -1392,6 +1392,13 @@ public:
   }
 
 private:
+  // [dcl.enum]: a scoped enumerator belongs only to the enumeration's scope.
+  bool scoped_enumerator(const ast::DeclSema& declaration) const {
+    if (declaration.kind != ast::DeclKind::enumerator || declaration.entity == EntityId::none) return false;
+    const auto* enumeration = classes_.find_enum(w_->entities.rec(declaration.entity).scope);
+    return enumeration && enumeration->scoped;
+  }
+
   static constexpr u32 class_def_key(u32 item) { return item | 0x80000000u; }
   std::vector<u32> running_;
   std::set<u32> ordinary_friend_items_;  // the source item of each supported unqualified friend
@@ -1650,7 +1657,7 @@ public:
                                     : p_->item_sema(m).value;
       for (const ast::DeclSema& d : p_->world().ins.seqs.elements(ms.decls))
         if (d.entity != EntityId::none && d.kind != ast::DeclKind::class_ && !(d.flags & sema::decl_flag::friend_) &&
-            p_->world().entities.rec(d.entity).name == name)
+            p_->world().entities.rec(d.entity).name == name && !p_->scoped_enumerator(d))
           r = d;
     }
     return r;
@@ -3893,6 +3900,8 @@ private:
       decls_.push_back(own.sema);
     }
     p_->classes_.publish_enum(e, std::move(er));
+    // The scoped names were visible while parsing the enumerator list only.
+    if (scoped) s_.own.resize(first_enumerator);
     ps_.seek(it_->brace_end);
     if (ps_.accept(Tk::semi)) return;
     // The item ended at the brace: the `;` is missing, and the definition stands
@@ -4324,6 +4333,25 @@ private:
     if (ps_.is(Tk::kw_friend)) {
       friend_at = ps_.pos();
       ps_.bump();
+    }
+    // [class.friend], [temp.friend]: look up and substitute the type of the friend.
+    // The designated class need not be complete here. The declaration introduces no name.
+    if (friend_at && ps_.is(Tk::identifier) && ps_.kind(1) == Tk::semi) {
+      const NameId name = ps_.name_of(ps_.tok());
+      const auto* param = s_.template_param(name);
+      if (param && param->kind == ast::TemplateArgKind::type && !param->pack) {
+        const auto type = s_.class_template_parameter_type(*param, name, ps_.pos());
+        if (!type) return bad();
+        auto& types = s_.types();
+        const EntityId entity = types.is_class(*type) ? types.class_of(*type) : EntityId::none;
+        auto sem = class_decl(entity, false);
+        sem.type = *type;
+        sem.flags = sema::decl_flag::friend_;
+        decls_.push_back(sem);
+        ps_.bump();
+        ps_.bump();
+        return;
+      }
     }
     const bool definition = it_->kind == ItemKind::function;
     if (!definition && !annotations.empty()) {
@@ -5595,7 +5623,7 @@ private:
       const ast::ItemSema& ms = earlier(m);
       for (const ast::DeclSema& d : p_->world().ins.seqs.elements(ms.decls))
         if (d.entity != EntityId::none && d.kind != ast::DeclKind::class_ && p_->world().entities.rec(d.entity).name == n &&
-            clash(d))
+            !p_->scoped_enumerator(d) && clash(d))
           return true;
     }
     return false;
@@ -6541,7 +6569,7 @@ Program::ClassContent Program::class_content(u32 item, const std::function<const
       const auto& names = items_->items[m].names;
       if (i < names.size() && names[i].member_elaborated_candidate) continue;
       ast::DeclSema d = w_->ins.seqs.at(ms.decls, i);
-      if (d.entity == EntityId::none) continue;
+      if (d.entity == EntityId::none || scoped_enumerator(d)) continue;
       // A friend declaration names a function or class that is not a member ([class.friend]/1).
       if (d.flags & sema::decl_flag::friend_) {
         if (std::ranges::find(out.friends, d.entity) == out.friends.end()) out.friends.push_back(d.entity);

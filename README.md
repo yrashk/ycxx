@@ -32,13 +32,20 @@ freestanding C++ subset for x86-64 Linux. The standard library is out of reach. 
 
 Ordinary function pointers and references preserve concrete `noexcept` type identity.
 A nonthrowing function can be used where the corresponding potentially throwing type is expected.
+The unary `noexcept` operator checks whether calls and constructions can throw.
+[#729](https://github.com/yrashk/ycxx/issues/729)
 Ordinary constructor declarations and definitions check that their concrete exception specifications agree.
 Dependent exception specifications remain open. [#219](https://github.com/yrashk/ycxx/issues/219)
+
+A class template can grant private access to the class passed as a type argument using
+`friend Authority;`. Each specialization grants access to its own authority.
+[#689](https://github.com/yrashk/ycxx/issues/689)
 
 **Compile and run programs on macOS.** `ycxx cxx a.cpp -o a` (also `-c`, `-fsyntax-only`, `-E`, `-I`,
 `-D`, `-std=c++26`, and `-fclass-call-abi=apple` to pass classes as Apple Clang does) builds an executable with ycxx's own front end, IR, AArch64 code generator
 and Mach-O linker on arm64 macOS, where `arm64-apple-darwin` is the default target. It also links
-object files from Clang or GCC. Errors are reported as
+object files from Clang or GCC. Variadic functions can be defined with `<cstdarg>` on both
+macOS and Linux ([#647](https://github.com/yrashk/ycxx/issues/647)). Errors are reported as
 `file:line:col: error: …`.
 
 The arm64 Mach-O linker preserves supported cleanup-free DWARF frames from input objects.
@@ -88,7 +95,8 @@ build/bin/ycxx cxx -nostdlib example.o -o example
 Fixed-prototype calls (free and member functions, lambdas, function templates and calls
 through pointers) support passing and returning nonempty flat records with integral or
 ordinary object-pointer fields by value. The record can occupy up to
-16 bytes and must be trivial for calls. [Linux integer aggregate ABI](docs/design/linux-integer-aggregates.md)
+16 bytes and must be trivial for calls. Larger results and classes that are not trivial for
+calls (with a user-provided copy constructor or destructor) pass through memory, as on macOS. [Linux integer aggregate ABI](docs/design/linux-integer-aggregates.md)
 
 For mixed Linux objects, the pinned libycxx `<cstddef>` byte operator uses the same Itanium
 linkage name in ycxx, GCC and Clang. [#64](https://github.com/yrashk/ycxx/issues/64)
@@ -121,12 +129,12 @@ Use the host linker to link these objects with libc.
 [#399](https://github.com/yrashk/ycxx/issues/399), [#196](https://github.com/yrashk/ycxx/issues/196)
 
 Fixed-prototype definitions and direct calls on x86-64 Linux also move `float` and `double`
-arguments and results. Direct variadic calls support the same scalar floating values and
-promote an unnamed `float` to `double`. Direct call result types can be deduced from `auto` or
-`decltype(auto)`. Runtime addition, subtraction, multiplication, division and unary negation
-work for `float` and `double` at their evaluation width. Both types support the six comparisons,
-conversion to `bool`, conversions to and from every integer type, `double` to `float`, and
-`__builtin_fabs`. [#643](https://github.com/yrashk/ycxx/issues/643)
+arguments and results, directly and through function pointers. Variadic calls support the same
+scalar floating values and promote an unnamed `float` to `double`. Direct call result types can
+be deduced from `auto` or `decltype(auto)`. Runtime addition, subtraction, multiplication,
+division and unary negation work for `float` and `double` at their evaluation width. Both types
+support the six comparisons, conversion to `bool`, conversions to and from every integer type,
+`double` to `float`, and `__builtin_fabs`. [#643](https://github.com/yrashk/ycxx/issues/643)
 [Linux scalar floating-point ABI](docs/design/linux-scalar-floating-point.md) ·
 [Linux scalar floating-point operations](docs/design/linux-scalar-floating-point.md#runtime-arithmetic) ·
 [Linux scalar variadic floating-point ABI](docs/design/linux-floating-variadic-calls.md) ·
@@ -208,6 +216,8 @@ fixed underlying types and definitions inside `extern "C"` blocks.
 
 Both targets support named nested enum definitions followed by ordinary fields in the same
 member declaration, including scoped enum field initializers. [#500](https://github.com/yrashk/ycxx/issues/500)
+Scoped enumerators stay in their enumeration's scope, so class members and class template
+members may reuse their names. [#725](https://github.com/yrashk/ycxx/issues/725)
 
 Automatic declarations of ordinary non-template classes with only scalar fields and no bases
 or unions can use default member initializers in `S s;` and `S s{…};`. A default runs in
@@ -350,7 +360,9 @@ written default member initializer are value-initialized.
   alias-selected dependent base and qualified lookup of its static members.
   [#308](https://github.com/yrashk/ycxx/issues/308)
 - placeholder types: `auto` and `decltype(auto)` variables (`const auto&`, `auto*`, `auto&&`),
-  deduced and trailing return types, in templates too;
+  deduced and trailing return types, in templates too. Ordinary block variables with an
+  `= expression` initializer can use `Concept auto` with a prior unqualified type concept.
+  [#286](https://github.com/yrashk/ycxx/issues/286)
 - lambdas in function bodies: captures by copy and by reference, capture-defaults, `this` and
   `*this`, init-captures, `mutable`, conversion to a pointer to function, generic lambdas (`auto`
   parameters) and template lambdas (`[]<class T>`), and closures passed to and called from
@@ -409,7 +421,9 @@ available. `--trace-engine=interactive` opens a browser of the trace after the c
 with each function's IR and assembly, a timeline of the pool's workers, and filters. It follows
 the terminal's size and takes the mouse: click to select, fold and sort by a column, use the
 wheel to scroll, and drag to resize the pane. It copies a cell, a subtree, selected rows or any
-selected text of the IR and instructions to the clipboard, over SSH too
+selected text of the IR and instructions to the clipboard, over SSH too. Its histogram view charts
+self and total time, memory, runs, cache hits and waits by query kind, source file or child, and a
+bar opens its cells; cells show and filter by their source position
 ([docs/TRACE.md](docs/TRACE.md#the-interactive-browser)).
 `--trace-engine=json` writes the whole trace as JSON Lines, for tools and agents. Cells that
 come from source (a file, a unit, a function's IR and code) carry their file and lines.
@@ -472,6 +486,11 @@ members. [#285](https://github.com/yrashk/ycxx/issues/285)
 - Automatic Linux CRT and library selection and general-purpose ELF object interoperability.
   [#390](https://github.com/yrashk/ycxx/issues/390)
 - Namespace-scope destruction for x86-64 Linux. [#400](https://github.com/yrashk/ycxx/issues/400)
+- Parity between the two native back ends. x86-64 Linux does not yet pass classes with
+  floating members by value, trivially copyable classes over 16 bytes as arguments, or x87
+  `long double`. AArch64 macOS does not yet have native `int` throws, unwinding through ycxx
+  frames, native array `new`, or virtual calls on peer-owned classes, which x86-64 has. The
+  full table is [#639](https://github.com/yrashk/ycxx/issues/639).
 
 ### In progress
 
@@ -481,6 +500,9 @@ members. [#285](https://github.com/yrashk/ycxx/issues/285)
 - `auto` and lambdas ([#278](https://github.com/yrashk/ycxx/issues/278)): placeholder types,
   lambdas and generic lambdas are done; constexpr lambdas wait on class objects in the
   interpreter ([#262](https://github.com/yrashk/ycxx/issues/262)).
+
+- x86-64 ↔ AArch64 back-end parity ([#639](https://github.com/yrashk/ycxx/issues/639)), one
+  gap per PR in priority order.
 
 Next come exceptions ([#89](https://github.com/yrashk/ycxx/issues/89)).
 
