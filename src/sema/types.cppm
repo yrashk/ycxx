@@ -50,7 +50,7 @@ constexpr std::string_view spelling(Builtin b) {
 
 enum class TypeKind : u8 {
   builtin, pointer, array, function, class_, reference, enum_, template_param, dep_name, pack_expansion, transform,
-  placeholder, dep_spec, builtin_spec, member_pointer, other
+  placeholder, dep_spec, builtin_spec, member_pointer, pack_index, other
 };
 
 // The canonical form of a type, read out by value.
@@ -63,18 +63,18 @@ struct TypeRec {
   std::vector<QualType> params;
   bool variadic = false;
   LangLinkage linkage = LangLinkage::cxx;
-  EntityId entity = EntityId::none;  // a class's or an enumeration's
+  EntityId entity = EntityId::none;  // a class, enumeration or a placeholder's concept
   Cv fn_cv = Cv::none;               // a member function type's cv-qualifier-seq
   ast::RefQual fn_ref = ast::RefQual::none;
   bool fn_noexcept = false;
   bool rvalue_ref = false;           // a reference's kind; `inner` is what it refers to
-  ConstId bound_value = ConstId::none;  // an array's bound as a constant, possibly dependent
+  ConstId bound_value = ConstId::none;  // an array's bound or a pack index, possibly dependent
   NameId name{};                     // a dependent member type's name; `inner` is its qualifier
   u16 depth = 0;                     // a template parameter's position ([temp.param])
   u16 index = 0;
-  bool pack = false;
+  bool pack = false;  // a template parameter's; a pack index's: its pack is bound to `args`
   u8 trait = 0;  // a transform's `lex::TypeTrait`; a built-in specialization's `ast::BuiltinTemplate`
-  ast::SeqId<ast::TemplateArg> args{};  // a dependent or built-in specialization's arguments
+  ast::SeqId<ast::TemplateArg> args{};  // a specialization's or a placeholder's written arguments
   bool decltype_auto = false;  // a placeholder's: `decltype(auto)`, not `auto`
 };
 
@@ -135,8 +135,16 @@ public:
   QualType pack_expansion(QualType pattern) { return ins_->intern_type(ast::TPackExpansion{pattern}); }
   // `__trait(arg)` of a dependent `arg` (docs/EXTENSIONS.md).
   QualType transform(u8 trait, QualType arg) { return ins_->intern_type(ast::TTransform{trait, arg}); }
-  // `auto` or `decltype(auto)` ([dcl.spec.auto]).
-  QualType placeholder(bool decltype_auto) { return ins_->intern_type(ast::TAuto{u8(decltype_auto)}); }
+  // `T...[I]` while dependent ([dcl.type.pack.index]): `pack` is the pack's own parameter type;
+  // with `elems`, that pack is bound to them and `index` is the dependent part.
+  QualType pack_index(QualType pack, ConstId index) { return ins_->intern_type(ast::TPackIndex{pack, index, {}, 0}); }
+  QualType pack_index(QualType pack, ConstId index, ast::SeqId<ast::TemplateArg> elems) {
+    return ins_->intern_type(ast::TPackIndex{pack, index, elems, 1});
+  }
+  // A placeholder ([dcl.spec.auto.general]); a bare type-constraint has no written arguments.
+  QualType placeholder(bool decltype_auto, EntityId concept_ = EntityId::none) {
+    return ins_->intern_type(ast::TAuto{u8(decltype_auto), concept_});
+  }
   // Whether a declared type holds a placeholder still to be deduced ([dcl.type.auto.deduct]): as
   // the type, or as what it points or refers to, an array's element or a function's return type.
   bool has_placeholder(QualType q) const {
@@ -219,8 +227,11 @@ public:
       r.inner = t.get<ast::TTransform>(c).arg;
       r.trait = t.get<ast::TTransform>(c).trait;
     } else if (t.is<ast::TAuto>(c)) {
+      auto p = t.get<ast::TAuto>(c);
       r.kind = TypeKind::placeholder;
-      r.decltype_auto = t.get<ast::TAuto>(c).decltype_auto != 0;
+      r.decltype_auto = p.decltype_auto != 0;
+      r.entity = p.concept_;
+      r.args = p.args;
     } else if (t.is<ast::TDepSpec>(c)) {
       auto d = t.get<ast::TDepSpec>(c);
       r.kind = TypeKind::dep_spec;
@@ -235,6 +246,13 @@ public:
     } else if (t.is<ast::TPackExpansion>(c)) {
       r.kind = TypeKind::pack_expansion;
       r.inner = t.get<ast::TPackExpansion>(c).pattern;
+    } else if (t.is<ast::TPackIndex>(c)) {
+      auto x = t.get<ast::TPackIndex>(c);
+      r.kind = TypeKind::pack_index;
+      r.inner = x.pack;
+      r.bound_value = x.index;
+      r.pack = x.bound != 0;  // the pack is bound to `args`
+      r.args = x.elems;
     } else if (t.is<ast::TTemplateParam>(c)) {
       auto p = t.get<ast::TTemplateParam>(c);
       r.kind = TypeKind::template_param;
@@ -253,6 +271,7 @@ public:
     case TypeKind::template_param:
     case TypeKind::dep_name:
     case TypeKind::pack_expansion:
+    case TypeKind::pack_index:
     case TypeKind::transform:
     case TypeKind::dep_spec:
     case TypeKind::builtin_spec: return true;
@@ -391,6 +410,15 @@ private:
       // Parameters are positional in the type (ast.md §5.1).
       return cvs + std::format("type-parameter-{}-{}", r.depth, r.index) + (inner.empty() || inner[0] == '[' ? "" : " ") + inner;
     case TypeKind::pack_expansion: return spell(r.inner) + "..." + (inner.empty() ? "" : " " + inner);
+    case TypeKind::pack_index: {
+      std::string i = ins_->values.is<ast::VDepParam>(r.bound_value)
+                          ? std::format("value-parameter-{}-{}", ins_->values.get<ast::VDepParam>(r.bound_value).depth,
+                                        ins_->values.get<ast::VDepParam>(r.bound_value).index)
+                      : ins_->values.is<ast::VInt>(r.bound_value) ? std::to_string(ast::int_bits(*ins_, r.bound_value).lo)
+                                                                  : std::string("…");
+      std::string p = r.pack ? std::string("<…>") : spell(r.inner);
+      return cvs + p + "...[" + i + "]" + (inner.empty() || inner[0] == '[' ? "" : " ") + inner;
+    }
     case TypeKind::transform:
       return cvs + std::string(lex::type_trait_info(lex::TypeTrait(r.trait)).name) + "(" + spell(r.inner) + ")" +
              (inner.empty() ? "" : " " + inner);
@@ -513,7 +541,8 @@ enum class EntityKind : u8 {
   variable_template,  // [temp.pre]: `(scope, name, head)`, as a function template's
   alias_template,     // [temp.alias]: `(scope, name, head)`; its uses are the types it stands for
   concept_,           // [temp.concept]: `(scope, name, head)`
-  type_alias  // a typedef-name or alias-declaration ([dcl.typedef]): `(scope, name)`
+  type_alias,  // a typedef-name or alias-declaration ([dcl.typedef]): `(scope, name)`
+  virtual_table  // an external Itanium vtable, with its class as `scope`
 };
 
 // The structure behind an entity id (§4.3): for a function `(scope, name, canonical type)`, with
@@ -598,6 +627,11 @@ public:
     if (r.templ != EntityId::none) {
       f = ast::mix(f, ins_->entities.fp(r.templ));
       for (const ast::TemplateArg& a : r.args) f = mix_arg(f, a);
+      // A constrained partial specialization's pattern: its constraints' token fingerprint, so it
+      // differs from the specialization with its arguments and from partials constrained otherwise
+      // (Fable's decision on #234). Zero, and not mixed, for every other specialization.
+      if ((r.kind == EntityKind::class_ || r.kind == EntityKind::variable) && r.constraints != Fp128{})
+        f = ast::mix(ast::mix(f, ast::seed("ycxx.sema.constrained-partial")), r.constraints);
     }
     f = ast::mix(f, std::to_underlying(r.linkage));
     if (r.linkage == ast::Linkage::internal)
@@ -674,6 +708,7 @@ struct MemberDeclRec {
   bool is_virtual = false;
   bool is_explicit = false;
   EntityId overridden_virtual = EntityId::none;
+  bool is_final = false;
 };
 
 struct NestedType {

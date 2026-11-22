@@ -47,6 +47,9 @@ reasoning; do not leave decisions only in issue threads.
    - Linux x86-64 [native `int` throws](docs/design/linux-int-throw.md) use the Itanium runtime
      in functions certified to have cleanup-free unwind frames. A hosted peer provides the
      runtime and catches the exception. Astra reviewed the lowering boundary (#578).
+   - The arm64 Mach-O linker retains [cleanup-free DWARF frames](docs/design/macho-cleanup-free-unwind.md)
+     in `__TEXT,__eh_frame`. The frame PC uses the usual address-difference relocation so it
+     follows the backed code through layout and does not need a runtime text relocation (#72).
 4. **Optimization is designed in from the start, and delivered after correctness.** The first
    back end aims for correct, debuggable code of roughly `-O0`/`-O1` quality. The architecture
    (§4.8) is laid out from day one for optimization by search, solvers and measured cost models,
@@ -106,6 +109,20 @@ reasoning; do not leave decisions only in issue threads.
      the switch against Apple Clang objects (`PEER-WITH: apple-clang`).
    - *Reason:* the oracles and the ABI document agree on the default, and the switch serves code
      that must link with the platform's own objects.
+
+7. **Dependent variable-template-ids in symbols** (decided on #777). Clang and GCC mangle them
+   differently in a function template's signature when the name is qualified or an argument is
+   defaulted or a pack: Clang as written (`sr …E`, `gs`, no defaults, no `J…E`), GCC the
+   `<source-name>` and the converted arguments. ycxx writes GCC's form.
+   - *Reason:* values hold no spelling (ast.md §5.5), and Clang's form would need it. GCC builds
+     the `libycxx.a` ycxx programs link against. Implicit instantiations are emitted in every
+     object that uses them, so a mismatch with a Clang object costs a duplicate, not a link error.
+   - *Rejected:* Clang's form (needs the qualifier and arguments as written in every value);
+     Clang's form for unqualified names only (two rules, still wrong for defaults and packs).
+   - The same holds for pack-index-specifiers `T...[I]` (#297). GCC writes a constant index as
+     the converted `std::size_t` (`Lm0E`), a substituted parameter in that parameter's type
+     (`Li1E`), and a bound pack as `J <args> E`. Clang writes the literal as spelled (`Li0E`) and
+     a bound pack as a placeholder. ycxx writes GCC's form.
 
 ## 2. Provenance
 
@@ -544,6 +561,20 @@ project must survive any session ending.
      `auto` and lambdas until θ, and default arguments, nested classes, inheritance and virtual
      functions, `new`, range-based `for` and block-scope statics until the map. Generated files
      committed by each PR conflicted between every two parallel feature PRs (#366).
+
+10. **The native back ends stay at parity** (#639). AArch64 and x86-64 grew slice by slice, and
+    by 2026-11-21 about 100 run tests compiled for one and not the other, unnoticed, because the
+    run suite runs only on macOS.
+    - A construct one back end supports and the other does not is a gap with its own issue,
+      listed in the parity table #639.
+    - `tools/check-parity` (policy stage) fails when an L2 operation is handled by one back end
+      only and `tools/parity/l2-gaps.tsv` does not name its issue, or when a listed operation is
+      now handled.
+    - A test limited to one target carries `PARITY:` with the other target's gap or the
+      design reason, as `tools/check-os-gates` requires for OS gates (#659).
+    - A PR that adds a feature to one back end only files the other's gap and adds its row.
+    - *Reason:* a gap that is recorded where the change is made is cheap to keep; a gap found
+      later costs a survey.
 
 ## 7. Third-party libraries
 

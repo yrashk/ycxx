@@ -21,12 +21,10 @@ The type can also appear by value in a function declaration.
 
 The class record carries whether its layout needs virtual support. The property extends
 through value members, array elements and base subobjects and reaches the cached native
-shape. Syntax-only checks diagnose layout queries, materialization, object definitions,
-evaluated calls and by-value function definitions that need that layout. Virtual calls and
-external virtual definitions also receive an explicit diagnostic. A translation unit with
-a virtual declaration can be checked with `-fsyntax-only`. A native request reports the
-first such declaration before emitting the unit. The back end also declines a cached
-class shape requiring virtual layout.
+shape. The compiler diagnoses layout queries, materialization, object definitions, evaluated
+calls, by-value function definitions and external virtual definitions when they need support
+beyond the cases below. The native unit check reports the first unsupported virtual
+declaration before object emission. The back end also checks cached class shapes.
 
 ## One ordinary polymorphic base
 
@@ -43,6 +41,15 @@ ref-qualified overload resolution.
 [[class.member.lookup]](https://eel.is/c++draft/class.member.lookup) ·
 [[except.spec]](https://eel.is/c++draft/except.spec) ·
 [Astra's review](https://github.com/yrashk/ycxx/issues/309#issuecomment-7056328877)
+
+`final` belongs to the individual ordinary virtual member declaration. It can appear with
+`override` in either order. Both specifiers are contextual identifiers and may each appear
+once after the declarator. A later declaration that overrides a member marked `final` is
+ill-formed. The same base-chain match covers implicit overrides of private members and of
+declarations hidden by unrelated overloads.
+[[class.virtual]](https://eel.is/c++draft/class.virtual) ·
+[[class.mem.general]](https://eel.is/c++draft/class.mem.general) ·
+[Scope review](https://github.com/yrashk/ycxx/issues/309#issuecomment-7079653899)
 
 A derived destructor, including an implicit one, is virtual when the base destructor is
 virtual. At class completion an omitted exception specification depends on the effective
@@ -103,18 +110,66 @@ condition. The first eligible declaration is the Itanium key function. The peer 
 the key and provides the virtual table and RTTI. The supported member uses the normal
 implicit receiver and direct field offsets. [Itanium ABI §5.2.3](https://itanium-cxx-abi.github.io/cxx-abi/abi.html#vague-vtable)
 
-The layout applies to field accesses on objects the provider has already
-constructed. Whole-object storage, construction, destruction, copying, and by-value transfer
-remain guarded. Packed or annotated layout, further inheritance forms, and virtual table
-production are tracked in [#309](https://github.com/yrashk/ycxx/issues/309) and [#489](https://github.com/yrashk/ycxx/issues/489).
-Class descriptors and RTTI are tracked in [#294](https://github.com/yrashk/ycxx/issues/294),
-destructor entry points in [#136](https://github.com/yrashk/ycxx/issues/136), and group emission
-in [#422](https://github.com/yrashk/ycxx/issues/422).
+The layout applies to field accesses on objects the provider has already constructed.
+The separate automatic root case below also uses that layout. Copying and by-value transfer
+remain guarded. Packed or annotated layout and further inheritance forms are tracked in
+[#309](https://github.com/yrashk/ycxx/issues/309) and [#489](https://github.com/yrashk/ycxx/issues/489).
 
-Covariant return types, pure virtual functions, `final`, explicit virtual destructor calls,
-virtual member addresses, and native table emission are tracked in
-[#309](https://github.com/yrashk/ycxx/issues/309). Virtual destructor variants
-are tracked in [#136](https://github.com/yrashk/ycxx/issues/136), RTTI operations in
-[#294](https://github.com/yrashk/ycxx/issues/294), virtual bases in
-[#310](https://github.com/yrashk/ycxx/issues/310), and further exception specifications in
-[#219](https://github.com/yrashk/ycxx/issues/219).
+## Linux x86-64 key-owned root tables
+
+The producer admits one ordinary, externally linked, default-visible non-template root
+at namespace scope. Its natural layout has one directly declared public integral
+field. It declares two virtuals with directly written fixed integer signatures. The first
+declaration is the Itanium key function. The unit defines it out of class and non-inline in a
+compound body with a matching signature and exception specification. The peer defines the other
+member. ABI-affecting attributes and a GNU visibility pragma
+preceding the key definition are outside this scope.
+[Astra's review](https://github.com/yrashk/ycxx/issues/309#issuecomment-7077374439)
+
+The complete translation unit determines ownership independently of table use. An immutable
+unit value records the nominal class type and the two function entities
+in declaration order. Each function's source projection continues to determine its lowering
+independently. The resident tests swap the declarations and verify that ownership moves
+between units and dispatch follows the new slot order. A body-only edit preserves the table
+metadata and unrelated object bytes. Cold and daemon builds produce identical objects, and
+mixed GCC and Clang objects verify dispatch and RTTI.
+
+The ELF `_ZTV` starts at section offset zero and occupies 32 bytes. It starts with a zero
+offset-to-top, then a pointer to `_ZTI` and the two function pointers in declaration order.
+The 16-byte `_ZTI` is an Itanium root class descriptor. It points to the runtime
+`__class_type_info` virtual table address point at a byte offset of 16 and to the NUL-terminated `_ZTS`
+object. The type encoding shared by all three names is the mangler's standalone type encoding.
+`_ZTV` and `_ZTI` are global default-visible definitions in `.data.rel.ro`. `_ZTS` is a sized,
+weak default-visible object in a separate read-only COMDAT keyed by its own name.
+[Itanium ABI §2.5.2](https://itanium-cxx-abi.github.io/cxx-abi/abi.html#vtable-components) ·
+[Itanium ABI §2.9.5](https://itanium-cxx-abi.github.io/cxx-abi/abi.html#rtti-layout) ·
+[Itanium ABI §5.2.3–4](https://itanium-cxx-abi.github.io/cxx-abi/abi.html#vague-vtable) ·
+[ELF group output #422](https://github.com/yrashk/ycxx/issues/422)
+
+## Linux x86-64 automatic root initialization
+
+Linux x86-64 supports a plain declaration such as `Root root;` in an ordinary
+non-template free function. The supported root has an implicit default constructor, a trivial
+destructor and one public integral field without a default member initializer. The declaration
+names the root directly and uses its natural alignment. Lowering allocates the object, installs
+the address point `_ZTV + 16` in its vptr at offset zero and preserves ordinary default
+initialization of the integral field. The local supports direct integral member access and
+passing its address. Value initialization, copying, arrays, by-value transfer and construction
+of derived objects remain guarded.
+[[dcl.init]](https://eel.is/c++draft/dcl.init) · [#309](https://github.com/yrashk/ycxx/issues/309)
+
+The maker loads `_ZTV` through the GOT. A split maker has an undefined table reference. In a
+translation unit that also owns the table, the GOT relocation names the same ELF symbol entry
+that defines the table. Ownership follows the key definition across the complete unit even if the
+maker appears first.
+[#309](https://github.com/yrashk/ycxx/issues/309)
+
+Broader table emission, covariant returns, pure virtual functions,
+`final` on classes, virtual destructors and assignment operators, explicit virtual destructor
+calls and virtual member addresses also remain in #309. A virtual assignment operator can be
+overridden by an implicitly declared copy or move assignment in a derived class.
+Separate issues track virtual destructor entry points, RTTI operations, virtual bases and
+further exception specifications.
+[#309](https://github.com/yrashk/ycxx/issues/309) · [#136](https://github.com/yrashk/ycxx/issues/136) ·
+[#294](https://github.com/yrashk/ycxx/issues/294) · [#310](https://github.com/yrashk/ycxx/issues/310) ·
+[#219](https://github.com/yrashk/ycxx/issues/219)

@@ -1,6 +1,7 @@
 // #475: direct headers can be included under C linkage and coexist with their
 // C++ counterparts.
 // REQUIRES: linux
+// PARITY: by design: glibc's headers exist only on Linux hosts
 // FLAGS: --target=x86_64-pc-linux-gnu
 // XFAIL: gcc GCC selects its target without --target
 extern "C" {

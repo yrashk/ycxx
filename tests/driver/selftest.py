@@ -5,7 +5,7 @@ says which in its `// FIXTURE: <code>` line. They run with Clang (else GCC) as t
 under test, so a driver that passes everything, or fails everything, is caught. The rest checks
 the parts that need no compiler: markers, the incremental format, sharding, state and selection.
 """
-import json, os, re, subprocess, sys, tempfile, unittest
+import json, os, re, runpy, subprocess, sys, tempfile, unittest
 from pathlib import Path
 
 from . import discover, incremental, kinds, state, toolchain
@@ -45,6 +45,33 @@ class Fixtures(unittest.TestCase):
 
 
 class Parts(unittest.TestCase):
+    def test_draft_initializer_placeholder_fragments(self):
+        extractor = runpy.run_path(str(REPO / 'tools' / 'draft-examples'))
+
+        def fragment(source, reports):
+            example = extractor['Example']('class.base.init', 'class', 1, 1, 'fixture.tex', 1)
+            example.blocks.append(('codeblock', '', source.splitlines()))
+            example.build()
+            return extractor['is_fragment'](example, reports)
+
+        placeholder = 'struct A {\n  int i = /* some integer expression */ ;\n};\n'
+        clang = (1, [(2, 'expected expression')])
+        gcc_message = 'expected primary-expression at end of input'
+        gcc = (1, [(2, gcc_message)])
+        self.assertIn('line 2: expected expression', fragment(placeholder, (clang, gcc)) or '')
+        gcc_before = (1, [(2, 'expected primary-expression before ‘;’ token')])
+        self.assertIsNotNone(fragment(placeholder, (clang, gcc_before)))
+        self.assertIsNone(fragment(placeholder.replace('/* some integer expression */', ''), (clang, gcc)))
+        self.assertIsNone(fragment(placeholder.replace('some integer expression', 'misplaced annotation'), (clang, gcc)))
+        self.assertIsNone(fragment(placeholder.replace('int i', 'return i'), (clang, gcc)))
+        self.assertIsNone(fragment('int i = ;\n', ((1, [(1, 'expected expression')]),
+                                                  (1, [(1, "expected primary-expression before ';' token")]))))
+        self.assertIsNone(fragment(placeholder.replace(';\n', '; // OK\n', 1), (clang, gcc)))
+        self.assertIsNone(fragment(placeholder, (clang, (0, []))))
+        self.assertIsNone(fragment(placeholder, (clang, (1, [(3, gcc_message)]))))
+        self.assertIsNone(fragment(placeholder + 'int main(\n',
+                                   (clang, (1, [*gcc[1], (4, "expected ')' at end of input")]))))
+
     def test_markers(self):
         text = 'a //! error\n//! error@+1:5\nb\nc //! error@1 //! error@-1:2\n'
         self.assertEqual(discover.markers_in(text), [(1, None), (3, 5), (1, None), (3, 2)])
@@ -129,6 +156,55 @@ class Parts(unittest.TestCase):
             self.assertEqual(toolchain.ycxx_features(d, 'linux-x86_64'), {'syntax'})
             self.assertRegex(toolchain.HOST, r'^\w+-\w+$')
 
+    def test_os_gates(self):
+        """tools/check-os-gates (#659): every one-OS gate names its parity issue or design reason."""
+        def check(files):
+            with tempfile.TemporaryDirectory() as d:
+                for name, text in files.items():
+                    (Path(d) / name).parent.mkdir(parents=True, exist_ok=True)
+                    (Path(d) / name).write_text(text)
+                r = subprocess.run([sys.executable, '-I', str(REPO / 'tools' / 'check-os-gates'), '--root', d],
+                                   capture_output=True, text=True)
+                return r.returncode, r.stderr
+        gated = '// REQUIRES: syntax linux\nint x;\n'
+        self.assertEqual(check({'tests/own/a.accept.cpp': gated})[0], 1)
+        self.assertEqual(check({'tests/own/a.accept.cpp': gated.replace('linux', 'darwin')})[0], 1)
+        self.assertEqual(check({'tests/own/a.accept.cpp': gated + '// PARITY: later\n'})[0], 1)
+        self.assertEqual(check({'tests/own/a.accept.cpp': gated + '// PARITY: #12 run it on Darwin\n'})[0], 0)
+        self.assertEqual(check({'tests/own/a.accept.cpp': gated + '// PARITY: by design: glibc only\n'})[0], 0)
+        self.assertEqual(check({'tests/own/a.accept.cpp': '// REQUIRES: syntax\n'})[0], 0)
+        self.assertEqual(check({'tests/features/ycxx.xfail': 'own/a.accept.cpp@linux-x86_64 why\n'})[0], 1)
+        self.assertEqual(check({'tests/features/ycxx.xfail': 'own/a.accept.cpp@linux-x86_64 why (#3)\nown/b.accept.cpp no host\n'})[0], 0)
+        self.assertEqual(check({'tests/features/ycxx.txt': 'syntax\nrun darwin-arm64\n'})[0], 1)
+        self.assertEqual(check({'tests/features/ycxx.txt': '# hosted Linux is #9\nrun darwin-arm64\n'})[0], 0)
+        cmake = 'if(APPLE)\n  add_test(NAME t COMMAND t)\nendif()\n'
+        self.assertEqual(check({'tests/unit/x/CMakeLists.txt': cmake})[0], 1)
+        self.assertEqual(check({'tests/unit/x/CMakeLists.txt': '# PARITY: #5\n' + cmake})[0], 0)
+        self.assertEqual(check({'tests/unit/x/CMakeLists.txt': 'if(APPLE)\n  set(X 1)\nendif()\n'})[0], 0)
+        for gate in ('if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64)$" AND CMAKE_SYSTEM_NAME STREQUAL "Linux")\n  add_test(NAME t COMMAND t)\nendif()\n',
+                     'if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64"\n   AND APPLE)\n  add_test(NAME t COMMAND t)\nendif()\n',
+                     'if(APPLE)\n  set(X 1)\nelse()\n  add_test(NAME t COMMAND t)\nendif()\n',
+                     'if(WIN32)\n  add_subdirectory(sub)\nendif()\n'):
+            self.assertEqual(check({'tests/unit/x/CMakeLists.txt': gate})[0], 1, gate)
+        self.assertEqual(check({'tests/incremental/a.incr': '// ACTION: syntax\n--- a.cpp\n// REQUIRES: linux\n'})[0], 0)
+
+    def test_xfail_reasons_keep_issue_numbers(self):
+        with tempfile.TemporaryDirectory() as d:
+            d = Path(d)
+            (d / 'tests' / 'features').mkdir(parents=True)
+            (d / 'tests' / 'features' / 'ycxx.xfail').write_text(
+                '# a comment\nown/a.accept.cpp needs x (#12)\nown/b.accept.cpp needs y #34  # trailing comment\n')
+            self.assertEqual(toolchain.ycxx_xfails(d), {'own/a.accept.cpp': 'needs x (#12)', 'own/b.accept.cpp': 'needs y #34'})
+
+    def test_xfail_directive_hosts(self):
+        t = discover.Test('own/a.accept.cpp', Path('a.accept.cpp'), 'own', 'accept',
+                          {'XFAIL': ['gcc@darwin-arm64 only there', 'clang,ycxx@linux-x86_64 two']})
+        self.assertEqual(kinds.xfail_reason(t, 'gcc', 'darwin-arm64'), 'only there')
+        self.assertIsNone(kinds.xfail_reason(t, 'gcc', 'linux-x86_64'))
+        self.assertEqual(kinds.xfail_reason(t, 'clang', 'darwin-arm64'), 'two')
+        self.assertEqual(kinds.xfail_reason(t, 'ycxx', 'linux-x86_64'), 'two')
+        self.assertIsNone(kinds.xfail_reason(t, 'ycxx', 'darwin-arm64'))
+
     def test_xfails_limited_to_hosts(self):
         with tempfile.TemporaryDirectory() as d:
             d = Path(d)
@@ -198,6 +274,30 @@ class Parts(unittest.TestCase):
         self.assertEqual(len(state.affected(['tests/driver/kinds.py'], tests)[0]), 2)
         self.assertEqual(state.affected(['src/parse.cpp'], tests)[0], [])
         self.assertEqual(state.affected(None, tests)[0], [])
+
+    def test_parity_requires_aarch64_load_patterns(self):
+        patterns = 'src/target/aarch64/aarch64.patterns'
+        inputs = (patterns, 'src/target/aarch64/select.cppm', 'src/target/x86_64/x86_64.cppm',
+                  'src/ir/l2.cppm', 'tools/parity/l2-gaps.tsv')
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            for name in inputs:
+                path = root / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes((REPO / name).read_bytes())
+            command = [sys.executable, str(REPO / 'tools/check-parity'), d]
+            baseline = subprocess.run(command, capture_output=True, text=True)
+            self.assertEqual(baseline.returncode, 0, baseline.stderr)
+
+            path = root / patterns
+            # Leave the disabled declarations in comments and the selector's load references intact.
+            load_rules = r'^([ \t]*pattern[ \t]+[^:\n]+:[ \t]*\([ \t]*load\b[^\n]*)'
+            disabled, count = re.subn(load_rules, r'# \1', path.read_text(), flags=re.M)
+            self.assertGreater(count, 0)
+            path.write_text(disabled)
+            result = subprocess.run(command, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 1, result.stderr)
+            self.assertIn('L2 `load`: the x86_64 back end handles it and aarch64 does not', result.stderr)
 
 
 if __name__ == '__main__':

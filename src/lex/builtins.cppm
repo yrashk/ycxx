@@ -25,6 +25,7 @@ enum class TypeTrait : std::uint8_t {
   is_destructible,
   is_nothrow_destructible,
   is_trivially_destructible,
+  reference_converts_from_temporary, reference_constructs_from_temporary,
 };
 
 struct TypeTraitInfo {
@@ -105,6 +106,10 @@ inline constexpr std::array type_traits{
                   .transforms = false, .advertised = false, .replay_dependent = true},
     TypeTraitInfo{.name = "__is_trivially_destructible", .trait = TypeTrait::is_trivially_destructible, .arity = 1,
                   .transforms = false, .advertised = false, .replay_dependent = true},
+    TypeTraitInfo{.name = "__reference_converts_from_temporary", .trait = TypeTrait::reference_converts_from_temporary,
+                  .arity = 2, .transforms = false, .advertised = false},
+    TypeTraitInfo{.name = "__reference_constructs_from_temporary", .trait = TypeTrait::reference_constructs_from_temporary,
+                  .arity = 2, .transforms = false, .advertised = false},
 };
 
 constexpr const TypeTraitInfo* type_trait(std::string_view name) {
@@ -162,10 +167,13 @@ constexpr std::optional<VaBuiltin> va_builtin(std::string_view name) {
 // (docs/EXTENSIONS.md, #248): a call of one is diagnosed as not supported, its arguments skipped.
 // Any other `__builtin_` name is an ordinary name, undeclared unless declared, so a
 // requires-expression probing it is unsatisfied ([expr.prim.req]).
-inline constexpr std::array<std::string_view, 4> lacking_builtins{
-    "__builtin_alloca", "__builtin_constant_p", "__builtin_offsetof", "__builtin_expect",
+inline constexpr std::array<std::string_view, 3> lacking_builtins{
+    "__builtin_alloca", "__builtin_constant_p", "__builtin_expect",
 };
 constexpr bool lacking_builtin(std::string_view name) { return std::ranges::contains(lacking_builtins, name); }
+
+// A built-in with a type operand and a member designator rather than a call argument list.
+inline constexpr std::string_view builtin_offsetof_name = "__builtin_offsetof";
 
 // The built-in templates ycxx implements (docs/EXTENSIONS.md): Clang's
 // `__make_integer_seq<Seq, T, N>`, `Seq<T, 0, …, N-1>`, which libycxx's `make_integer_sequence`

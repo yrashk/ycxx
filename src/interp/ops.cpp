@@ -265,6 +265,8 @@ struct Ops {
     return m.set(f, n, Value{VKind::object, false, o, 0}, 1);
   }
 
+  static Flow alloc_peer_root(M& m, Frame&, N n) { return m.unsupported(n); }
+
   static Flow dealloc(M& m, Frame& f, N n) {
     Value p = m.operand(f, n, 1);
     if (p.kind != VKind::object || p.bits != 0 || p.past || !m.objects_[p.ref].storage ||

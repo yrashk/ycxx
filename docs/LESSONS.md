@@ -21,6 +21,14 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
   - Do: run sessions on Opus and reach Fable through Agent subagents with `model: "fable"`.
   - Now a rule: DECISIONS §6.5.
   - Learned on #1, 2026-11-17.
+- **Squash onto the branch's own base, never onto a freshly fetched `origin/main`.** On #234 a
+  `git reset --soft origin/main` after a fetch moved HEAD to a newer main while the tree stayed on
+  the old base, so the squashed commit also reverted 548 lines of other people's work. Only
+  `git diff --stat` before pushing showed it.
+  - Do: squash with `git reset --soft $(git merge-base HEAD origin/main)` taken before any
+    fetch, or the base recorded at branch creation, then check `git diff --stat HEAD~1` lists
+    only your files. Recover from the reflog (`git reflog`) by re-parenting the tree.
+  - Learned on #234.
 - **Force-push may be blocked in a session**, so rebasing a pushed branch onto `main` fails.
   - Do: merge `main` into the branch instead. History stays readable, and nobody has to approve
     a force-push.
@@ -72,6 +80,14 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
   took one commit, and every slice test passed on the first run.
   - Learned on #43.
 
+- **Parallel sessions file the same gap within minutes.** The macOS ↔ Linux survey filed #652
+  ("default target is the host") one minute after a Codex session filed and claimed #651. A
+  search for "default target" missed #651, whose title said "host OS and architecture".
+  - Do: right before filing, list the newest issues (`gh issue list --state all --limit 30`)
+    and search two or three phrasings. If a duplicate slips through, close yours, remove your
+    claim, and put what you learned on the surviving issue.
+  - Learned on #659.
+
 - **A stacked PR merges into its base branch, not main.** #198 was stacked on #191's branch. The
   coordinator merged #191, then merged #198 without checking its base, so #198 landed in the
   already-merged branch and never reached main. The β epic was closed and the README described
@@ -87,6 +103,9 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
   - Do: before pushing to a PR's branch, check that the PR is still open
     (`gh pr view N --json state`). Once it has merged, start a fresh branch from main for anything
     new, even a follow-up to the same issue.
+  - Make the check gate the push: `[ "$(gh pr view N --json state -q .state)" = OPEN ] && git push`.
+    `gh pr view … -q .state && git push` only prints the state and pushes anyway; that pushed to
+    #753's merged branch, and the commit had to move to #770.
   - The coordinator's sweep also checks every merged PR's branch for commits that aren't on main.
   - Rule: AGENTS.md, "PRs and branches".
   - Learned on #116 and #230, 2026-11-18.
@@ -115,6 +134,10 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
     template. Do: combine the new construct with each neighbouring one it can nest in or call
     (lambdas in templates and templates in lambdas) before the review.
   - Learned on #279; confirmed on #280 and #281.
+- **`tools/test <paths>` with no stage name runs every stage, `build` included.** Meant to
+  check a few tests in a fresh worktree, it started a full build there.
+  - Do: name the stages, as in `YCXX=<binary> tools/test core own/pp/x`, or `policy` alone.
+  - Learned on #659.
 - **A reviewer running your binary blocks your rebuilds.** On #337 the reviewer probed with the
   worktree's `build/bin/ycxx`, so the next step could not be built for 15 minutes.
   - Do: build the next step into a build directory in the scratchpad
@@ -248,6 +271,42 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
     is used. Compile a C++ peer's `main` in hosted mode to retain the ELF entry symbol.
   - Learned on #293. The wider object input work is tracked in #390.
 
+- **x86-64 Linux runs on an arm64 Mac go through Docker's amd64 emulation.** The `gcc:16`
+  image on this Mac is arm64, so CI's `linux-x86_64` job could not be reproduced locally, and
+  x86-64 back-end work waited for CI round trips.
+  - Do: build an image once, `FROM gcc:16` with `ninja-build cmake python3 git rsync`, with
+    `docker build --platform linux/amd64`. Run it with `--platform linux/amd64`, the worktree
+    mounted read-only and a named volume for the build. In the container, `rsync -rlD --checksum --delete
+    --exclude /build --exclude .git` the tree into the volume (not `-a`: kept modification
+    times older than the build's outputs make Ninja skip changed files when you switch
+    worktrees), then run `cmake -S . -B
+    /vol/build -G Ninja` and `cmake --build`, not `tools/build`, whose submodule sync cannot see a
+    worktree's `.git`. Run CTest fixtures (`ctest -R unit.linux_…`) there. The first build
+    took about 25 minutes under Rosetta, and incremental ones take a few.
+  - Do: the test driver calls ycxx without `--target`, and a Linux host still defaults to
+    Darwin. Until the driver passes the target, run the own run suite through a wrapper that adds
+    `--target=x86_64-pc-linux-gnu -nostdlib` (#646).
+  - Learned on #639.
+- **Survey a Release build's warnings in one pass, then fix them.** The first Release build
+  (#726) stopped at each `-Werror` failure, and every rebuild under load took 20-40 minutes to
+  find the next one.
+  - Do: build once into a separate directory with
+    `-DCMAKE_CXX_FLAGS="-Wno-error=maybe-uninitialized -Wno-error=array-bounds -Wno-error=stringop-overflow -Wno-error=stringop-overread"`
+    and `ninja -k 0`, then list every warning site with its `inlined from … at src/…` chain.
+    That build found 9 sites in all; fix them, then build with `-Werror` again.
+  - GCC 16.2's false positives at -O3 come in three kinds: `std::optional`'s payload read after
+    a check (`-Wmaybe-uninitialized`), and libycxx's in-place `vector`/`string` insert and
+    `memchr` paths (`-Warray-bounds`, `-Wstringop-*`; yrashk/libycxx#51). The fix that held was
+    a value and a flag instead of the optional. Copying `*opt` into a local after the check did
+    not help.
+  - Debug hides what -O3 shows: a null `Json*` dereferenced by a test returned null at -O0
+    (`unit.lsp`), and a daemon test's edit window, sized for Debug's compile time, closed in
+    Release (`daemon.process`, now calibrated). A Release-only test failure is a test bug as
+    often as a compiler one.
+  - A GCC crash or link failure that a guessed repro misses: copy the intermediate modules
+    verbatim and reduce them. #283's trigger was an inline constructor in an *intermediate*
+    module, and #46's was a template specialization instantiated in the imported interface.
+  - Learned on #726.
 - **A module import added during a build can miss the dependency scan.** CMake scanned a test's
   imports before an edit and GCC compiled it afterward, so its module mapper lacked the new import.
   - Do: rerun Ninja in the same build directory after changing imports during a build.
@@ -279,6 +338,17 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
     window size, and keys written with pauses; the last frame is after the last `ESC [ H`.
   - Learned on #245.
 
+- **Test a terminal UI as a model fed events, and only the terminal around it under a pty.** The
+  trace browser's keys went untested while it read `/dev/tty` itself (#245). Moving its state and
+  drawing into a model that takes key and mouse events and returns frames of a given size (#635)
+  let every click, drag and selection be a unit test against plain-text goldens. A pty test then
+  covers only what the terminal does: modes, signals, resize, escape sequences.
+  - On macOS a pty's slave is revoked when its session leader exits, so the parent cannot read
+    the restored modes. Make the session leader a small process that runs the program as its
+    child and prints the modes once that child has died.
+  - Key a selection by the cells it covers, never by row numbers: a live feed, a sort or a
+    filter moves the rows under it (#636's one P1).
+  - Learned on #635 and #636.
 - **Reduce a compiler crash from the build system's exact command, with a script.** A GCC ICE
   under CMake seemed to vanish when re-run by hand. Two things cost about 20 minutes of
   bisecting:
@@ -363,6 +433,12 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
   - Do: commit (or stash with a tag) before mutating, or undo with the same `sed` reversed, and
     check `git diff --stat` after.
   - Learned on #337.
+- **A mutation that does not build leaves the old binary under test.** On #647 a mutation
+  left a variable unused, `-Werror` stopped the build, and the test passed against the
+  previous, correct binary. The "surviving" mutation looked like a test gap.
+  - Do: check the build's exit status, not just the test's, after every mutation, and keep
+    the mutated code warning-free (`+ 0 * x` keeps a variable used).
+  - Learned on #647.
 - **A mutation that changes nothing proves nothing.** On #33 the first mutation of
   `usual_arithmetic` (`>=` to `>` on rank) was equivalent for the standard integer types, and the
   suite rightly stayed green.
@@ -371,6 +447,22 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
   - Learned on #33.
 
 ## Data the front end needs
+
+- **Deferred analysis reads committed parameter lists.** On #713, the exception-specification
+  replay read a declaration copied by `Program::declared` before its item committed. A draft
+  `SeqId<ParamSema>` happened to name a different parameter list in the global interner.
+  - Do: read the committed member item for the relevant class specialization before using the
+    global sequence interner. Check a parameter reference independently in the pattern and its
+    replay when a name is found in the definition and lost after substitution.
+  - Hit again on #828: a new pattern check in `declare` read `sem.params`, a draft sequence, and
+    crashed. Pass the item's own `params` vector instead.
+- **A function template specialization's identity includes its type.** `Sema::specialization`
+  keys entities by template, arguments and type. On #828, the address path re-created a
+  specialization with its resolved `noexcept` type while the call path kept the written one: one
+  function became two (a split static local, or a duplicate symbol), with no diagnostic.
+  - Do: resolve a specialization's exception specification on every path that selects it (call,
+    member call, address), and only after selection ([over.over], [except.spec]/13); test a
+    specialization that is both called and has its address taken, with a static local.
 
 - **Unicode tables from Python, plus one UCD file.** Python's `unicodedata` (Unicode 17.0 in the
   pinned Python) gives categories, combining classes, decompositions, normalization and names;
@@ -388,6 +480,17 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
   - Learned on the α slice (#39), 2026-11-18.
 
 ## Evidence and tests
+
+- **Map a header chain past its first wall with an overlay, and check both gates.** Every
+  header on `<iostream>`'s path stopped at one line of `move.hpp`, which showed nothing behind it.
+  - Do: copy only the blocking libycxx file into a scratch directory, stub the construct there,
+    and put that directory first with `-isystem`. A copy of the whole include tree breaks
+    `#include_next`.
+  - Do: run `-c` as well as `-fsyntax-only`. The mangler runs only for objects, so the first
+    `-c` error (#773) never showed in a syntax sweep.
+  - Do: reduce each wall to a header-free example and check it with Clang and GCC before filing.
+    Clang and GCC disagreed on the mangling there (#777), which made it a decision, not a fix.
+  - Learned on #776.
 
 - **A feature probe must use nothing but the feature.** On #282, 40 of the first 150 probes failed
   on something else: `auto` to hold a lambda, a nested `struct`, a default argument, `alignas`.

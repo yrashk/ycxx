@@ -34,11 +34,27 @@ namespace ycxx::aarch64 {
 // Rewrites `f` to physical registers and slots.
 export void allocate_slots(MFunction& f, const CallingConvention& cc = apple_arm64);
 
-// Lays out the frame and appends the function's code to `text`. `symbol(e)` gives the object's
-// symbol index for an entity. Fails on an operand that does not fit (a branch out of range).
-export std::expected<void, std::string> emit(const MFunction& f, obj::section& text,
-                                             std::function_ref<std::uint32_t(ir::EntityId)> symbol,
-                                             const CallingConvention& cc = apple_arm64);
+export enum class FrameState : std::uint8_t { entry, saved_pair, frame_pointer };
+export struct FrameRow {
+  std::uint32_t offset;
+  FrameState state;
+};
+
+export struct CleanupSite {
+  std::uint32_t call;        // byte offset of the protected BL
+  std::uint32_t landing;     // byte offset of its exceptional successor
+};
+
+export struct Emission {
+  std::vector<FrameRow> frame_rows;
+  std::optional<CleanupSite> cleanup;
+};
+
+// Appends the function's code to `text` and describes the frame transitions for the Apple frame
+// record. `symbol(e)` gives the object's symbol index for an entity.
+export std::expected<Emission, std::string>
+emit(const MFunction& f, obj::section& text, std::function_ref<std::uint32_t(ir::EntityId)> symbol,
+     const CallingConvention& cc = apple_arm64);
 
 }  // namespace ycxx::aarch64
 
@@ -110,6 +126,8 @@ class Expander {
   Expander(const MFunction& f, const Frame& fr, const CallingConvention& cc) : f_(f), fr_(fr), cc_(cc) {}
   std::vector<Real> code;
   std::vector<std::uint64_t> label_at;  // instruction index of each label
+  std::vector<FrameRow> frame_rows;
+  std::optional<std::size_t> cleanup_call;
   std::string error;
 
   void run() {
@@ -117,7 +135,14 @@ class Expander {
     prologue();
     for (const MBlock& b : f_.blocks) {
       label_at[b.label] = code.size();
-      for (const MInst& in : b.insts) inst(in);
+      // An earlier return resets the rules for its last instruction only.
+      if (!b.insts.empty() && !frame_rows.empty() && frame_rows.back().state == FrameState::entry)
+        frame_row(FrameState::frame_pointer);
+      for (const MInst& in : b.insts) {
+        if (f_.cleanup && in.form == Form::BL && in.origin == raw(f_.cleanup->call))
+          cleanup_call = code.size();
+        inst(in);
+      }
     }
   }
 
@@ -125,6 +150,10 @@ class Expander {
   const MFunction& f_;
   const Frame& fr_;
   const CallingConvention& cc_;
+
+  void frame_row(FrameState state) {
+    if (cc_.frame_record == 16) frame_rows.push_back({static_cast<std::uint32_t>(code.size() * 4), state});
+  }
 
   void put(Form form, bool wide, std::initializer_list<std::int64_t> ops, std::uint8_t access = 3) {
     Real r;
@@ -150,7 +179,9 @@ class Expander {
 
   void prologue() {
     put(Form::STPpre, true, {enc(R::fp), enc(R::lr), enc(R::sp), -std::int64_t(cc_.frame_record)});
+    frame_row(FrameState::saved_pair);
     put(Form::ADDri, true, {enc(R::fp), enc(R::sp), 0});
+    frame_row(FrameState::frame_pointer);
     std::uint64_t rest = fr_.size;
     if (rest >> 24) error = "a frame larger than 16 MiB is not supported";
     // A page at a time, touching each, so a large frame cannot step over the guard page.
@@ -257,6 +288,7 @@ class Expander {
       case Form::RETp:
         put(Form::ADDri, true, {enc(R::sp), enc(R::fp), 0});
         put(Form::LDPpost, true, {enc(R::fp), enc(R::lr), enc(R::sp), std::int64_t(cc_.frame_record)});
+        frame_row(FrameState::entry);
         put(Form::RET, true, {});
         return;
       default: break;
@@ -291,9 +323,9 @@ class Expander {
 
 }  // namespace
 
-std::expected<void, std::string> emit(const MFunction& f, obj::section& text,
-                                      std::function_ref<std::uint32_t(ir::EntityId)> symbol,
-                                      const CallingConvention& cc) {
+std::expected<Emission, std::string>
+emit(const MFunction& f, obj::section& text, std::function_ref<std::uint32_t(ir::EntityId)> symbol,
+     const CallingConvention& cc) {
   if (!f.allocated) return std::unexpected(std::string("emit needs an allocated function"));
   for (const FrameObject& o : f.objects)
     if (o.align > cc.stack_align)
@@ -303,6 +335,16 @@ std::expected<void, std::string> emit(const MFunction& f, obj::section& text,
   Expander x(f, fr, cc);
   x.run();
   if (!x.error.empty()) return std::unexpected(x.error);
+  if (x.code.size() > std::numeric_limits<std::uint32_t>::max() / 4)
+    return std::unexpected("the function exceeds the object offset limit");
+  Emission emission{std::move(x.frame_rows), std::nullopt};
+  if (f.cleanup) {
+    const auto label = raw(f.cleanup->landing);
+    if (!x.cleanup_call || label >= x.label_at.size() || x.label_at[label] >= x.code.size())
+      return std::unexpected("missing hosted cleanup call or landing pad");
+    emission.cleanup = CleanupSite{static_cast<std::uint32_t>(*x.cleanup_call * 4),
+                                   static_cast<std::uint32_t>(x.label_at[label] * 4)};
+  }
   text.align(2);
   for (std::size_t i = 0; i < x.code.size(); ++i) {
     Real r = x.code[i];
@@ -323,7 +365,7 @@ std::expected<void, std::string> emit(const MFunction& f, obj::section& text,
       text.relocate(k, symbol(ir::EntityId(std::uint32_t(r.sym))));
     }
   }
-  return {};
+  return emission;
 }
 
 }  // namespace ycxx::aarch64

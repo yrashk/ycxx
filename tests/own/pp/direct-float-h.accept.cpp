@@ -1,5 +1,6 @@
 // #475: <float.h> exposes the target floating-point properties ([cfloat.syn]).
 // REQUIRES: linux
+// PARITY: by design: glibc's headers exist only on Linux hosts
 // FLAGS: --target=x86_64-pc-linux-gnu
 // XFAIL: gcc GCC selects its target without --target
 #include <float.h>

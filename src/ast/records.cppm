@@ -65,6 +65,24 @@ struct ParamSema {
   constexpr bool operator==(const ParamSema&) const = default;
 };
 
+// [dcl.attr.annotation]: the type deduced by reflect_constant's by-value parameter, the
+// evaluated constant, and the item-relative position of the annotation's '='. Enum constants
+// use their underlying representation in the value interner, paired here with the enum type.
+struct AnnotationSema {
+  QualType type;
+  ConstId value;
+  u32 offset;
+  constexpr bool operator==(const AnnotationSema&) const = default;
+};
+
+// An annotation as returned to consumers, with the owning declaration's item.
+struct DeclarationAnnotation {
+  QualType type;
+  ConstId value;
+  ItemId item;
+  u32 offset;
+};
+
 struct DeclSema {
   EntityId entity;
   QualType type;
@@ -88,7 +106,10 @@ struct DeclSema {
   bool is_mutable = false;  // a mutable non-static data member ([dcl.stc])
   // A named function declarator spelled an exception specifier, even if its type does not retain it.
   bool has_written_noexcept = false;
+  bool has_trailing_return = false;
   bool hidden_visibility = false;  // an explicit GNU visibility("hidden") attribute on this declaration
+  SeqId<AnnotationSema> annotations{};  // the occurrences written on this declaration
+  bool is_final = false;  // a written virt-specifier ([class.virtual])
   constexpr bool operator==(const DeclSema&) const = default;
 };
 
@@ -211,7 +232,7 @@ struct BodySema {
 // The element types of the `seqs` interner: one pool each, indexed by position in this list.
 using SeqElements = closed_list<NodeId, EntityId, QualType, NameId, ParamSema, DeclSema, BaseSpec,
                                 MemberRec, LocalRec, u8, u32, ConstId, TemplateArg, TemplateParamSema, PackRefRec,
-                                ExpansionRec, ClosureDef>;
+                                ExpansionRec, ClosureDef, AnnotationSema>;
 
 static_assert(std::ranges::all_of(SeqElements::infos, [](std::meta::info t) {
   if (std::meta::is_class_type(t)) return check_record(t);
