@@ -284,6 +284,33 @@ std::optional<std::string> read_disk(const std::string& path) {
   return std::string{std::istreambuf_iterator<char>(in), {}};
 }
 
+// An archive operand, read once per process while its size and modification time stay the same:
+// every Darwin link names libycxx's runtime (#842), and each program's inputs share its bytes.
+std::optional<obj::archive::input> read_archive(const std::string& name, const std::string& path) {
+  struct entry {
+    std::uintmax_t size;
+    std::filesystem::file_time_type modified;
+    std::shared_ptr<const std::string> bytes;
+  };
+  static std::mutex mutex;
+  static std::map<std::string, entry, std::less<>> cache;
+  std::error_code ec;
+  const auto size = std::filesystem::file_size(path, ec);
+  const auto modified = ec ? std::filesystem::file_time_type{} : std::filesystem::last_write_time(path, ec);
+  if (ec) return std::nullopt;
+  {
+    std::lock_guard lock(mutex);
+    if (const auto it = cache.find(path); it != cache.end() && it->second.size == size && it->second.modified == modified)
+      return obj::archive::input(name, it->second.bytes);
+  }
+  auto text = read_disk(path);
+  if (!text) return std::nullopt;
+  auto bytes = std::make_shared<const std::string>(std::move(*text));
+  std::lock_guard lock(mutex);
+  cache.insert_or_assign(path, entry{size, modified, bytes});
+  return obj::archive::input(name, std::move(bytes));
+}
+
 // Renders diagnostics as `path:line:col: error: message` (DECISIONS §4.7; the form tools/test
 // reads).
 class Renderer {
@@ -522,14 +549,22 @@ Done run(const Request& r, pp::Host& host, pipeline::Session& session, const Sto
     for (const auto [kind, index] : opts->operands) {
       if (kind == Kind::source) continue;
       const auto& path = kind == Kind::archive ? opts->archives[index] : opts->objects[index];
+      if (kind == Kind::archive) {
+        auto archive = read_archive(path, in_cwd(r, path));
+        if (!archive) {
+          bad_input = std::ranges::contains(pipeline::darwin_runtime().archives, path)
+                          ? std::format("cannot read libycxx's runtime '{}': rebuild ycxx, or link without it "
+                                        "using '-nostdlib++'", path)
+                          : std::format("cannot read '{}'", path);
+          break;
+        }
+        archives.push_back(std::move(*archive));
+        continue;
+      }
       auto text = read_disk(in_cwd(r, path));
       if (!text) {
         bad_input = std::format("cannot read '{}'", path);
         break;
-      }
-      if (kind == Kind::archive) {
-        archives.push_back({path, std::move(*text)});
-        continue;
       }
       const auto bytes = std::span(reinterpret_cast<const std::uint8_t*>(text->data()), text->size());
       auto o = linux_target ? obj::elf::read_object(bytes, path) : obj::macho::read_object(bytes, path);

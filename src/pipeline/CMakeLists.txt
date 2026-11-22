@@ -5,7 +5,8 @@
 # undefined. Nothing when libycxx has no static archives or the host is not arm64 Darwin.
 set(YCXXC_DARWIN_RUNTIME_ARCHIVES "")
 set(YCXXC_DARWIN_RUNTIME_UNDEFINED "")
-if(APPLE AND TARGET ycxx AND TARGET ycxx_abi)
+if(APPLE AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(arm64|aarch64)$" AND NOT CMAKE_CROSSCOMPILING
+   AND TARGET ycxx AND TARGET ycxx_abi)
   get_target_property(_libycxx_dir ycxx BINARY_DIR)
   set(_runtime
     "${_libycxx_dir}/${CMAKE_STATIC_LIBRARY_PREFIX}ycxx${CMAKE_STATIC_LIBRARY_SUFFIX}"
@@ -17,10 +18,13 @@ if(APPLE AND TARGET ycxx AND TARGET ycxx_abi)
     if(NOT IS_ABSOLUTE "${_emutls}" OR NOT EXISTS "${_emutls}")
       message(FATAL_ERROR "ycxx: ${CMAKE_CXX_COMPILER} does not provide libemutls_w.a, which libycxx needs")
     endif()
-    cmake_path(NORMAL_PATH _emutls)
-    list(APPEND _runtime "${_emutls}")
+    # A copy in the build: an upgrade of the GCC install removes its versioned directory.
+    configure_file(${_emutls} ${CMAKE_CURRENT_BINARY_DIR}/libemutls_w.a COPYONLY)
+    list(APPEND _runtime "${CMAKE_CURRENT_BINARY_DIR}/libemutls_w.a")
   endif()
   foreach(_archive IN LISTS _runtime)
+    string(REPLACE "\\" "\\\\" _archive "${_archive}")
+    string(REPLACE "\"" "\\\"" _archive "${_archive}")
     string(APPEND YCXXC_DARWIN_RUNTIME_ARCHIVES "\"${_archive}\", ")
   endforeach()
   # libycxx writes its link options for programs one per line (cmake/ycxx-link.cmake).

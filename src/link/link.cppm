@@ -1336,7 +1336,7 @@ std::expected<std::vector<obj::object>, std::string> select_archive_members(std:
       continue;
     }
     const auto& input = std::get<1>(operand).get();
-    auto contents = obj::archive::read(input.bytes, input.name, obj::archive::flavor::darwin);
+    auto contents = obj::archive::read(input.bytes(), input.name, obj::archive::flavor::darwin);
     if (!contents) return std::unexpected(std::move(contents.error()));
     archives.emplace_back(&input, std::move(*contents));
   }
