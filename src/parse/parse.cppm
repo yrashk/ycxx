@@ -329,7 +329,7 @@ public:
   // Qualified lookup in namespace `ns` ([namespace.qual]/2): its own declarations, or, when it has
   // none, those of the namespaces its using-directives nominate.
   std::vector<DeclId> qualified_decls(std::string_view name, const std::string& ns, u32 item, bool self,
-                                     bool type_only = false, bool direct_only = false) {
+                                     bool type_only = false, bool direct_only = false, bool stop_at_direct = false) {
     auto candidates = [&](const std::string& path) {
       auto declarations = declared_in(name, path, item, self);
       if (type_only)
@@ -341,7 +341,7 @@ public:
     };
     std::vector<DeclId> r = candidates(ns);
     if (!r.empty() || direct_only) return r;
-    if (type_only) {
+    if (type_only || stop_at_direct) {
       std::vector<std::string> visited{ns};
       auto follow = [&](auto&& self, const std::string& path) -> void {
         for (const Directive& d : directives_) {
@@ -1449,9 +1449,9 @@ public:
   }
   bool namespace_lookup_contains(EntityId ns, NameId name, DeclId pending) override {
     // The record is still being analyzed. Its skeleton places the declarator in qualified
-    // lookup, including through inline namespaces and using-directives.
+    // lookup. A direct declaration on a using-directive path stops that path ([namespace.qual]).
     const auto ids = p_->qualified_decls(p_->world().ins.names.spelling(name), p_->namespace_path(ns), item_,
-                                        /*self=*/true);
+                                        /*self=*/true, /*type_only=*/false, /*direct_only=*/false, /*stop_at_direct=*/true);
     return std::ranges::contains(ids, pending);
   }
   std::vector<ast::DeclSema> adl_functions(EntityId ns, ast::NameId name, bool at_instantiation) override {
