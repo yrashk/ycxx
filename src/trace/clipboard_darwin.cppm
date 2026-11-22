@@ -89,10 +89,9 @@ bool pasteboard_write(std::string_view text, std::string_view name) {
   if (!runtime().ok) return false;
   Pool pool;
   const id b = board(name);
-  if (!b) return false;
-  (void)msg<long>(b, "clearContents");
   const id s = string(text), type = string(text_type);
-  const bool ok = s && type && msg<bool>(b, "setString:forType:", s, type);
+  // Only text the pasteboard can take clears what it holds: a refused copy leaves it as it was.
+  const bool ok = b && s && type && (msg<long>(b, "clearContents"), msg<bool>(b, "setString:forType:", s, type));
   msg<void>(s, "release");
   msg<void>(type, "release");
   return ok;

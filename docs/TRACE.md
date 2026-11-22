@@ -141,8 +141,8 @@ terminal (`src/trace/browse.cppm`, whose model is `src/trace/view.cppm`). `?` li
       OSC 52 only with `set -g set-clipboard on`, and passes the passthrough form on only with
       `set -g allow-passthrough on`. Its defaults (`external`, `off`) let neither through.
     - A local session (no `SSH_CONNECTION` or `SSH_TTY`) also writes the system's clipboard
-      itself. On macOS that is the pasteboard, written directly (NSPasteboard), with no other
-      program involved. On Linux it runs the first of `wl-copy` (Wayland), `xclip` and `xsel` (X)
+      itself. On macOS that is the pasteboard, written directly (NSPasteboard) with no other
+      program involved; if it refuses, `pbcopy` runs instead. On Linux it runs the first of `wl-copy` (Wayland), `xclip` and `xsel` (X)
       on the `PATH`; a native clipboard there awaits a decision (#730). This covers Terminal.app
       and tmux's defaults.
     - `YCXX_CLIPBOARD` replaces that with a command (a shell command that reads the text on its

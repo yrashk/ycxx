@@ -637,13 +637,19 @@ void copying() {
   // The native clipboard (macOS: NSPasteboard), on a pasteboard of the test's own: the user's
   // clipboard is never touched. Elsewhere there is none yet (#730).
   // PARITY: #730: Linux runs a clipboard command until it has a native clipboard.
-  if (!trace::native_clipboard.empty()) {
+  // Over SSH a Mac may have no logged-in session, hence no pasteboard to reach (the browser does
+  // not use it there either).
+  const bool session = !std::getenv("SSH_CONNECTION") && !std::getenv("SSH_TTY");
+  if (!trace::native_clipboard.empty() && !session) {
+    std::println("unit.trace: over SSH, the pasteboard's checks are skipped");
+  } else if (!trace::native_clipboard.empty()) {
     const std::string name = std::format("org.ycxx.unit-trace.{}", std::chrono::steady_clock::now().time_since_epoch().count());
     const std::string text = "Lower(square) cutoff 2.50ms\n  %0 = const.i32 0 — héllo ✓";
     check(trace::pasteboard_write(text, name), "the pasteboard takes the text");
     check(trace::pasteboard_read(name) == text, std::format("and gives it back, UTF-8 and all: {:?}", trace::pasteboard_read(name).value_or("(none)")));
     check(trace::pasteboard_write("second", name) && trace::pasteboard_read(name) == "second", "a second copy replaces the first");
-    check(!trace::pasteboard_write(std::string_view("\xff\xfe", 2), name), "bytes that are not UTF-8 are refused");
+    check(!trace::pasteboard_write(std::string_view("\xff\xfe", 2), name) && trace::pasteboard_read(name) == "second",
+          "bytes that are not UTF-8 are refused, and what it held stays");
     trace::pasteboard_drop(name);
   } else {
     check(!trace::pasteboard_write("x", "y") && !trace::pasteboard_read("y"), "no native clipboard here");
