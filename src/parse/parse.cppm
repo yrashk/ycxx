@@ -4293,6 +4293,25 @@ private:
       friend_at = ps_.pos();
       ps_.bump();
     }
+    // [class.friend], [temp.friend]: a type parameter names a friend only when the
+    // specialization's argument designates a class. No name is introduced, and the
+    // friend class need not be complete at the point of substitution.
+    if (friend_at && ps_.is(Tk::identifier) && ps_.kind(1) == Tk::semi) {
+      const auto* param = s_.template_param(ps_.name_of(ps_.tok()));
+      if (param && param->kind == ast::TemplateArgKind::type && !param->pack) {
+        const auto argument = s_.bound_arg(*param);
+        const QualType type = argument ? argument->type : param->type;
+        auto& types = s_.types();
+        const EntityId entity = types.is_class(type) ? types.class_of(type) : EntityId::none;
+        auto sem = class_decl(entity, false);
+        sem.type = type;
+        sem.flags = sema::decl_flag::friend_;
+        decls_.push_back(sem);
+        ps_.bump();
+        ps_.bump();
+        return;
+      }
+    }
     const bool definition = it_->kind == ItemKind::function;
     if (ps_.is(Tk::kw_template) || !p_->enclosing_heads(k_).empty() || inst_) {
       s_.diag(friend_at.value_or(ps_.pos()), Diag::not_supported, Tk::kw_friend);  // in or of a template (#259)

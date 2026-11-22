@@ -1981,6 +1981,15 @@ Fable decided the representation (ast.md §6.6); the Opus session wrote the code
 - Tests: `tests/own/classes/s6-access-*` (five reject tests, two run tests); draft examples
   class.friend-1 and class.name-4 pass.
 
+## Dependent type friends in class templates (#689)
+
+A class template can name a non-pack type parameter in a standalone `friend Authority;`
+declaration. Instantiation grants access to the class of that specialization's argument,
+including a cv-qualified or incomplete class, or ignores a non-class argument
+([class.friend], [temp.friend]). The existing access checks use each specialization's own friend
+list. The declaration introduces no name into lookup.
+[#689](https://github.com/yrashk/ycxx/issues/689)
+
 ## Templates, ζ step 7: static data members of class templates (#88, 2026-11-18)
 
 - A class template's static data members are declared with its other members. A specialization

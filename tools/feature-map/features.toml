@@ -1773,8 +1773,8 @@ clauses = ['class.friend', 'dcl.friend', 'temp.friend']
 std = 'C++98'
 detect = '\bfriend\b'
 status = 'partial'
-issues = [259]
-note = 'C-linkage friend definitions, hidden friend operators, default arguments in friend declarations, and friends in templates'
+issues = [259, 689]
+note = 'Includes type friends naming a class template parameter. Broader template friends, C linkage, hidden operators, and default arguments remain partial.'
 probe = '''
 class C { int p = 2; friend int peek(const C& c) { return c.p; } };
 int main() { C c; return peek(c) - 2; }
