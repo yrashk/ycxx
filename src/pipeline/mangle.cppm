@@ -619,12 +619,20 @@ class Mangler {
     const auto entity = in_.values.get<ast::VEntity>(address.base).entity;
     const auto target = functions_ ? functions_(entity) : std::nullopt;
     if (!target) return std::unexpected("a function pointer argument without an external name");
+    // [conv.fctptr]: Clang encodes a conversion to a potentially throwing pointer before the
+    // address expression. Its type participates in the substitution table before the name.
+    std::string expression = "X";
+    if (in_.canonical(ast::pointee_of(in_, arg.type)) != in_.canonical(target->declaration.type)) {
+      auto pointer = type(arg.type);
+      if (!pointer) return pointer;
+      expression += "cv" + *pointer;
+    }
     // Itanium §5.1.6.2: the address-of expression contains the entity literal. A nested
     // C++ encoding uses this mangler so the entity and its enclosing name share substitutions.
     auto name = target->lang == ast::LangLinkage::c ? source_name(target->declaration.name)
                                                   : local_encoding(target->declaration);
     if (!name) return name;
-    return "XadL_Z" + *name + "EE";
+    return expression + "adL_Z" + *name + "EE";
   }
 
   // A class or alias template as a template argument: its <source-name>, in a namespace or class a

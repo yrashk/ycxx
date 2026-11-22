@@ -1633,15 +1633,18 @@ template's tokens again with the arguments bound.
 ## Native function pointer template arguments (#406)
 
 - A function pointer template argument can name an unambiguous externally linked C++ or C
-  function. The bare function name and its address name the same specialization. The
-  converted pointer type can come from an earlier type argument, including a `noexcept`
-  signature. A null function pointer has its own specialization.
+  function. The bare function name and its address identify the same specialization.
+  A C++ pointer type can come from an earlier type argument, including a `noexcept`
+  signature. A null pointer to a C++ function type has its own specialization.
 - Linkage names use the symbolic entity from constant evaluation. The function encoding
   shares the enclosing name's Itanium substitutions. Native calls use the same entity
-  for the relocated address on x86-64 Linux and arm64 Darwin.
+  for the relocated address on x86-64 Linux and arm64 Darwin. A potentially throwing
+  pointer initialized from a `noexcept` function preserves its pointer conversion
+  in the specialization name.
 - Tests: `tests/own/templates/function-pointer-arguments/`. Function references and
   target-typed selection from overload sets stay in #406. Directly taking the address
   of a function template specialization as an expression stays in #335.
+  Mangling a C-linkage function type stays in #287.
 
 ## Templates, ζ step 2: class templates (#88, 2026-11-18)
 
