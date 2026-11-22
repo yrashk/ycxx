@@ -5210,10 +5210,20 @@ private:
           return true;
         }
       }
-      if (early || ps_.accept(Tk::equal)) {
-        Ex e = early ? *early : ps_.assignment_expression();
-        if (!inst_) p_->set_static_init_end(k_, ordinal, ps_.index());
-        init = s_.convert(e, d.type, e.begin);
+      const bool direct_list = spec.is_constexpr && ps_.is(Tk::l_brace) && s_.template_scopes.empty() && !inst_ &&
+                               types.is_class(d.type) && s_.is_aggregate(d.type);
+      if (direct_list || early || ps_.accept(Tk::equal)) {
+        u32 at;
+        if (direct_list) {
+          auto list = ps_.braced_init_list();
+          at = list->begin;
+          init = s_.list_init(d.type, *list, sema::Construction::direct_list);
+        } else {
+          Ex e = early ? *early : ps_.assignment_expression();
+          if (!inst_) p_->set_static_init_end(k_, ordinal, ps_.index());
+          at = e.begin;
+          init = s_.convert(e, d.type, at);
+        }
         if (!init.ok()) {
           declare_member(ConstId::none, {});
           return false;
@@ -5232,7 +5242,7 @@ private:
         // An inline one that is not usable in constant expressions is still constant-initialized
         // when it can be ([basic.start.static]); dynamic initialization is not supported yet.
         if (!usable && !spec.is_inline) {
-          s_.diag(e.begin, Diag::not_supported, Tk::equal);
+          s_.diag(at, Diag::not_supported, Tk::equal);
           declare_member(ConstId::none, {});
           return false;
         }
@@ -5242,7 +5252,7 @@ private:
         const bool aggregate = spec.is_constexpr && types.is_class(d.type) && s_.as<ast::InitList>(init);
         sema::Evaluated v = aggregate ? evaluator.evaluate_initializer(init) : evaluator.evaluate(init);
         if (!v.value) {
-          s_.diag(e.begin, usable ? Diag::not_constant : Diag::nonconstant_initializer, v.reason);
+          s_.diag(at, usable ? Diag::not_constant : Diag::nonconstant_initializer, v.reason);
           declare_member(ConstId::none, {});
           return false;
         }
