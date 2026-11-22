@@ -709,6 +709,7 @@ struct MemberDeclRec {
   bool is_explicit = false;
   EntityId overridden_virtual = EntityId::none;
   bool is_final = false;
+  bool is_pure = false;
 };
 
 struct NestedType {
@@ -765,6 +766,8 @@ struct ClassRec {
   PeerVirtualLayout peer_virtual_layout = PeerVirtualLayout::none;
   std::vector<FieldRec> fields;        // in declaration order
   std::vector<MemberDeclRec> members;  // member functions and static data members
+  std::vector<EntityId> pure_final_overriders;
+  bool is_abstract() const { return !pure_final_overriders.empty(); }
   // Special members ([special]): whether a constructor is user-declared; the destructor and the
   // copy constructor when they are not trivial (user-declared, or implicit and synthesized),
   // else none; whether the copy constructor is deleted.
