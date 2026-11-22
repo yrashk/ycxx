@@ -1447,13 +1447,6 @@ public:
       if (auto s = p_->decl_sema(d); s && s->entity != EntityId::none) r.push_back(*s);
     return r;
   }
-  bool namespace_lookup_contains(EntityId ns, NameId name, DeclId pending) override {
-    // The record is still being analyzed. Its skeleton places the declarator in qualified
-    // lookup, including through inline namespaces and using-directives.
-    const auto ids = p_->qualified_decls(p_->world().ins.names.spelling(name), p_->namespace_path(ns), item_,
-                                        /*self=*/true);
-    return std::ranges::contains(ids, pending);
-  }
   std::vector<ast::DeclSema> adl_functions(EntityId ns, ast::NameId name, bool at_instantiation) override {
     return at_instantiation ? p_->adl_functions(ns, name, point(), false) : p_->adl_functions(ns, name, item_, self_);
   }
@@ -5388,9 +5381,10 @@ private:
       u32 start = 1;
       while (ps_.kind(start) == Tk::l_paren) ++start;
       if (ps_.kind(start) == Tk::l_square && ps_.kind(start + 1) != Tk::l_square) {
+        const auto ns = ns_entity();
         const auto record = declaration_entity(sema::EntityKind::variable, d.type, ast::Linkage::internal, head_fp({}));
         closure_owner = s_.world().entities.identity(record);
-        s_.namespace_lambda = sema::Sema::NamespaceLambda{closure_owner, ps_.pos() + start};
+        s_.namespace_lambda = sema::Sema::NamespaceLambda{closure_owner, ns, d.name, ps_.pos() + start};
       }
     }
     // A variable template retains its initializer's pattern ([temp.res]). The placeholder path
@@ -5400,13 +5394,6 @@ private:
     q_.retain_type_trait_pattern = pattern;
     std::optional<Ex> early_expr;
     if (!fn && types.has_placeholder(d.type)) {
-      if (spec.constrained_auto_at || s_.namespace_lambda) {
-        std::optional<DeclId> lookup_decl;
-        if (spec.constrained_auto_at && !d.qualified)
-          lookup_decl = DeclId{p_->id(k_), ast::make_decl_ord(ast::DeclClass::syntactic, ord)};
-        s_.undeduced_namespace_variable =
-            sema::Sema::UndeducedNamespaceVariable{d.scope.ns.value_or(ns_entity()), d.name, lookup_decl};
-      }
       bool deduced = deduce_variable(spec, d, early, early_expr, pattern);
       if (s_.namespace_lambda && deduced) {
         Ex e = early_expr ? *early_expr : early->clauses.front().expr;
@@ -5418,7 +5405,6 @@ private:
           deduced = false;
         }
       }
-      s_.undeduced_namespace_variable.reset();
       s_.namespace_lambda.reset();
       if (!deduced) return false;
     }

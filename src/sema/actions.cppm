@@ -142,8 +142,6 @@ public:
   virtual std::optional<EntityId> namespace_named(NameId name, std::span<const EntityId> directives = {}) = 0;
   virtual std::vector<ast::DeclSema> namespace_members(EntityId ns, NameId name, bool type_only = false,
                                                       bool direct_only = false) = 0;
-  // Qualified lookup can find a declarator whose type the running item has not deduced yet.
-  virtual bool namespace_lookup_contains(EntityId, NameId, DeclId) { return false; }
   // [basic.lookup.argdep]: functions in one associated namespace's inline namespace set, and
   // a class's record if complete there. Ask at the lexical point, and for a dependent call
   // also at the point of instantiation ([temp.dep.candidate]).
@@ -482,7 +480,6 @@ public:
           if (auto r = nested_member(b, name)) return r->first.type;
       }
     }
-    if (!elaborated && names_undeduced_namespace_variable(name)) return std::nullopt;
     std::optional<ast::DeclSema> found;
     for (auto p = own.rbegin(); p != own.rend() && !found; ++p)
       if (p->name == name) found = p->sema;
@@ -659,7 +656,6 @@ public:
       if (u->name == name)
         for (const ast::DeclSema& d : u->decls)
           if (d.kind == kind && (d.flags & decl_flag::template_)) found = d;
-    if (!found && names_undeduced_namespace_variable(name)) return std::nullopt;
     for (auto p = own.rbegin(); p != own.rend() && !found; ++p)
       if (p->name == name) found = p->sema;
     std::vector<ast::DeclSema> decls;
@@ -703,7 +699,6 @@ public:
   }
   // The template of kind `kind` named `name` that is a member of namespace `ns`.
   std::optional<ast::DeclSema> namespace_template(EntityId ns, NameId name, ast::DeclKind kind) {
-    if (names_undeduced_namespace_variable(name, ns)) return std::nullopt;
     for (const ast::DeclSema& d : q_->namespace_members(ns, name))
       if (d.kind == kind && (d.flags & decl_flag::template_)) return d;
     return std::nullopt;
@@ -873,7 +868,7 @@ public:
         if (names_here(u)) from_usings.insert(from_usings.end(), u.decls.begin(), u.decls.end());
       if (!from_usings.empty()) return select(from_usings);
     }
-    if (template_param(name) || names_undeduced_namespace_variable(name)) return not_concept();
+    if (template_param(name) || (namespace_lambda && namespace_lambda->name == name)) return not_concept();
     for (EntityId c = current_class; c != EntityId::none;) {
       const EntityRec& record = w_->entities.rec(c);
       if (record.kind != EntityKind::class_ && record.kind != EntityKind::class_template) break;
@@ -1586,7 +1581,6 @@ public:
   // ([basic.scope.hiding]/2): `::stat(path, &buf)` calls the function.
   bool scope_names_object(const Scope& s, NameId n) {
     if (s.ns) {
-      if (names_undeduced_namespace_variable(n, *s.ns)) return true;
       if (direct_member_introduction(*s.ns, n)) return false;
       return std::ranges::any_of(q_->namespace_members(*s.ns, n), [](const ast::DeclSema& d) {
         return d.kind == ast::DeclKind::function || d.kind == ast::DeclKind::variable;
@@ -1700,7 +1694,8 @@ public:
       diag(name_at, Diag::no_member, n, *s.type);
       return {NodeId::none, begin, end};
     }
-    if (names_undeduced_namespace_variable(n, *s.ns)) return undeduced_namespace_use(n, name_at, end);
+    if (namespace_lambda && namespace_lambda->name == n && namespace_lambda->scope == *s.ns)
+      return undeduced_namespace_lambda(n, name_at, end);
     if (defining_unnamed_enum_scope == s.ns)
       for (const OwnDecl& d : own)
         if (d.name == n && d.enum_initializer != ConstId::none)
@@ -2969,7 +2964,6 @@ public:
     if (names_member(name)) return current_class != EntityId::none && class_has_member_template(current_class, name);
     for (const BlockUsing& u : block_usings_)
       if (u.name == name) return std::ranges::any_of(u.decls, [](const ast::DeclSema& d) { return (d.flags & decl_flag::template_) != 0; });
-    if (names_undeduced_namespace_variable(name)) return false;
     for (const OwnDecl& o : own)
       if (o.name == name) return (o.sema.flags & decl_flag::template_) != 0;
     for (DeclId d : q_->visible_decls(name, directives()))
@@ -4042,27 +4036,14 @@ public:
   // The function whose body is being analysed, none outside one: a friend of a class may name its
   // private members ([class.friend]/2).
   EntityId current_function = EntityId::none;
-  // A namespace variable is in scope during its initializer ([basic.scope.pdecl]), before a
-  // declaration with its deduced type can be published.
-  struct UndeducedNamespaceVariable {
-    EntityId scope;
-    NameId name;
-    std::optional<DeclId> lookup_decl;  // unqualified declarator indexed in this namespace
-  };
-  std::optional<UndeducedNamespaceVariable> undeduced_namespace_variable;
   struct NamespaceLambda {
-    EntityId owner;
+    EntityId owner, scope;
+    NameId name;
     u32 begin;
   };
   std::optional<NamespaceLambda> namespace_lambda;
 
-  bool names_undeduced_namespace_variable(NameId name, std::optional<EntityId> scope = std::nullopt) {
-    if (!undeduced_namespace_variable || undeduced_namespace_variable->name != name) return false;
-    const auto& pending = *undeduced_namespace_variable;
-    return !scope || *scope == pending.scope ||
-           (pending.lookup_decl && q_->namespace_lookup_contains(*scope, name, *pending.lookup_decl));
-  }
-  Ex undeduced_namespace_use(NameId name, u32 begin, u32 end) {
+  Ex undeduced_namespace_lambda(NameId name, u32 begin, u32 end) {
     diag(begin, Diag::auto_used_in_initializer, name);
     return {NodeId::none, begin, end};
   }
@@ -5564,7 +5545,8 @@ public:
             if (auto m = class_member(base, name, begin, end, begin)) return *m;
       }
     }
-    if (names_undeduced_namespace_variable(name)) return undeduced_namespace_use(name, begin, end);
+    if (namespace_lambda && namespace_lambda->name == name)
+      return undeduced_namespace_lambda(name, begin, end);
     std::vector<ast::DeclSema> found;
     for (auto p = own.rbegin(); p != own.rend(); ++p)
       if (p->name == name) {
