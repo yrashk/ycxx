@@ -236,6 +236,9 @@ in class and use it to initialize an `inline constexpr` tag object.
 An explicit class return can select a written move constructor for an eligible named local
 or parameter. [#749](https://github.com/yrashk/ycxx/issues/749)
 
+An ordinary call returning a class by value preserves the result's cv-qualification for
+`decltype` and overload resolution. [#679](https://github.com/yrashk/ycxx/issues/679)
+
 An ordinary class object can be destroyed explicitly through a reference or pointer with
 `object.~Class()` or `pointer->~Class()`. Templates can use a dependent class name, and unary
 `noexcept` uses the destructor's exception specification. [#722](https://github.com/yrashk/ycxx/issues/722)

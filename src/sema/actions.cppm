@@ -5508,7 +5508,11 @@ public:
   // A call returning a reference to a function is an lvalue. For object references the category
   // follows the reference kind ([expr.call]).
   ExprInfo result_info(QualType r) {
-    if (!types().is_reference(r)) return {Types::unqualified(r), ValueCategory::prvalue, 0};
+    if (!types().is_reference(r)) {
+      // [expr.type] removes top-level cv only from non-class, non-array prvalues.
+      QualType t = types().is_class(r) || types().is_array(r) ? r : Types::unqualified(r);
+      return {t, ValueCategory::prvalue, 0};
+    }
     QualType t = types().referee(r);
     return {t, types().rec(r).rvalue_ref && !types().is_function(t) ? ValueCategory::xvalue : ValueCategory::lvalue, 0};
   }
