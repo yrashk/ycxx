@@ -384,7 +384,8 @@ written default member initializer are value-initialized.
 macros, conditionals, `_Pragma` and the predefined macros. `ycxx cxx -E` matches Clang's output.
 `ycxx cxx -E --target=x86_64-linux-gnu` selects Linux macros and glibc's multiarch include path
 and preprocesses glibc's `<stdio.h>`. Linux `<stdarg.h>` supplies the `va_list` declaration, and
-direct `<float.h>` and `<limits.h>` provide the target's numeric limits.
+direct `<float.h>` and `<limits.h>` provide the target's numeric limits. glibc's `<stdint.h>` compiles
+(#657); `<inttypes.h>` does not yet (#664).
 [#475](https://github.com/yrashk/ycxx/issues/475)
 
 **Incremental builds through a resident daemon.** `ycxx cxx` hands its work to a per-project
