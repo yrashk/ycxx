@@ -41,6 +41,10 @@ public:
       const ClassRec* r = q.classes().find(c);
       return r && field < r->fields.size() ? std::optional(r->fields[field].type) : std::nullopt;
     };
+    potentially_overlapping_field = [&q](EntityId c, std::uint32_t field) {
+      const ClassRec* r = q.classes().find(c);
+      return r && field < r->fields.size() && r->fields[field].no_unique_address;
+    };
   }
   ConstId string_address(ConstId s) { return w_->values.address({}, s, 0); }
   bool is_constexpr(EntityId f) { return Sema::closure_member(*w_, f) || q_->is_constexpr(f); }
