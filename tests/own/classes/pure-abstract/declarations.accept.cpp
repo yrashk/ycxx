@@ -9,7 +9,9 @@ Abstract exchange(Abstract);
 
 // [dcl.type.decltype]/2 permits the top-level abstract prvalue.
 using Result = decltype(make());
+using CommaResult = decltype((0, make()));
 static_assert(__is_abstract(Result));
+static_assert(__is_abstract(CommaResult));
 static_assert(__is_abstract(const Abstract));
 static_assert(!__is_abstract(Abstract*));
 static_assert(!__is_abstract(Abstract&));
