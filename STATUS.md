@@ -2010,8 +2010,11 @@ session's.*
   The same nonunion class gives true, including when incomplete. For distinct nonunion classes,
   `Derived` must be complete. The trait follows the recorded base declarations, including private
   and ambiguous bases. A dependent occurrence in a supported class-template base or variable-template
-  initializer checks completeness at instantiation. A concrete occurrence checks it at its original
-  source point. Missing graph information gets a hard diagnostic when it prevents a result.
+  initializer checks completeness at instantiation. So does one in a function template body (also
+  a member's, a member template's or a generic lambda's, in a template or not): the body defers it
+  and its instantiation evaluates it, with completeness at the end of the unit
+  (`tests/own/builtins/base_of_dependent_*`).
+  A concrete occurrence checks it at its original source point. Missing graph information gets a hard diagnostic when it prevents a result.
   `__has_builtin` answers 0 while support is partial ([meta.rel], [class.derived], #218).
 - `__is_empty(T)` gives false for nonclass types and unions. For a complete nonunion class, it
   checks polymorphism, non-static data members, and emptiness of the recorded bases. Missing base
