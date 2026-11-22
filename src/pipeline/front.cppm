@@ -875,7 +875,8 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
     if (world.types.is_dependent(world.types.class_type(cls))) continue;
     declare(s.decl, std::nullopt);
     tu.functions.push_back({s.decl.entity, s.decl, program.synthesized_body(i), program.id(s.item), 0, program.this_type(s.decl)});
-    tu.functions.back().coalesced = s.kind == parse::Program::SpecialMember::copy_assignment && !internal_class(cls);
+    using enum parse::Program::SpecialMember;
+    tu.functions.back().coalesced = (s.kind == copy_assignment || s.kind == move_constructor) && !internal_class(cls);
   }
   for (FunctionDef& f : tu.functions) {
     static_locals(world, tu, f, runtime);

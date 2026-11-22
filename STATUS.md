@@ -1210,6 +1210,11 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   with a proven trivial selected copy. A selected nontrivial or unsupported defaulted copy
   is diagnosed at use. Native by-value boundaries require a known copy classification.
   [Design](docs/design/defaulted-copy-constructors.md) · [#157](https://github.com/yrashk/ycxx/issues/157)
+- An ordinary namespace-scope class without bases or a usable implicit copy can synthesize its
+  available implicit move constructor when it has scalar and class fields with proven nonthrowing
+  initialization. The fields initialize in declaration order from the source xvalue. The class
+  retains aggregate initialization, and the inline move definition is emitted only on use.
+  [Design](docs/design/implicit-move-constructors.md) · [#747](https://github.com/yrashk/ycxx/issues/747)
 - **Cleanups** (ast.md §3.7.3 as revised by #135): `LocalVar::destructor`; `function_ir` runs
   destructors on every scope exit from its own scope stack (block end, `return`, `break`,
   `continue`) and ends a full-expression's temporaries at its end. Statements carry no cleanup
