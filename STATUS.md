@@ -941,9 +941,12 @@ private daemons.
     pinned by a first request) must answer until it is killed, so a crash hidden by the
     client's retry fails it. `KNOWN` lists the divergences of the default run that have their
     own issue (none today).
-  - `daemon.process` (`tests/daemon/process.py`, #98): an edit landing mid-build (restarted,
-    answered as the final state, counted in `ctl status`), a killed client (cancelled), a killed
-    daemon mid-request (the client retries), a restart, and concurrent clients.
+  - `daemon.process` (`tests/daemon/process.py`, #98, #746): a fixture driver parks a pooled build
+    after it has read and analysed its sources. Edits restart the build and get the cold bytes
+    and diagnostics, with the restart counted in `ctl status`. A disconnected client stops,
+    a client whose daemon died retries, and a shutdown leaves a new daemon to answer the next
+    request. Concurrent clients include two requests of one file and a distinct build root
+    reaching the checkpoint while the first is parked.
   - All run on macOS and Linux.
 - Not yet:
   - `progress` messages and `build_time` (#140);
@@ -2661,6 +2664,11 @@ What the process allocates, attributed to the engine's cells, in the trace and t
   follows the base chain through private members and hidden names, with checks for matching
   parameter types, qualifiers, return types and exception specifications. The class traits also
   recognize inherited polymorphism and implicit virtual destructors.
+- Ordinary non-template virtual members can use `final`, including an override written without
+  `virtual`. `final` and `override` can appear in either order on the same declarator. Each can
+  appear once. A further override of a `final` declaration is ill-formed even when ordinary
+  lookup hides the declaration. [[class.virtual]](https://eel.is/c++draft/class.virtual) ·
+  [[class.mem.general]](https://eel.is/c++draft/class.mem.general) · [#309](https://github.com/yrashk/ycxx/issues/309)
 - A derived constructor can name that base in an unqualified parenthesized or flat braced
   initializer. Syntax checking uses ordinary constructor overload resolution, defaults, access,
   and list narrowing. The base destructor must be usable and accessible in the derived
@@ -2704,9 +2712,11 @@ What the process allocates, attributed to the engine's cells, in the trace and t
   supported root type. The root has an implicit default constructor, a trivial destructor and
   no default member initializer. Lowering stores `_ZTV + 16` in the vptr. The table can come
   from the key definition in the same unit or from a peer. [#309](https://github.com/yrashk/ycxx/issues/309)
-- Broader construction and table emission, pure virtual functions, `final` and covariant
-  returns remain in #309. Virtual destructor entry points, RTTI expressions, virtual bases
-  and native class ABI have their own issues.
+- Broader construction and table emission, pure virtual functions, covariant returns, and `final` on classes,
+  virtual destructors and assignment operators remain in #309. Checking `final` for
+  `operator=` includes matching implicitly declared copy and move assignments. Virtual
+  destructor entry points, RTTI expressions, virtual bases and native class ABI have their
+  own issues.
   [#309](https://github.com/yrashk/ycxx/issues/309) · [#136](https://github.com/yrashk/ycxx/issues/136) ·
   [#294](https://github.com/yrashk/ycxx/issues/294) · [#310](https://github.com/yrashk/ycxx/issues/310) ·
   [#489](https://github.com/yrashk/ycxx/issues/489)
