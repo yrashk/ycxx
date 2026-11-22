@@ -5180,14 +5180,18 @@ public:
   Ex member_call(Ex callee, std::vector<Ex> args, u32 end, u32 paren_at, bool assignment_notation = false) {
     u32 begin = callee.begin;
     Ex fail{NodeId::none, begin, end};
-    if (auto b = std::ranges::find_if(args, [&](const Ex& a) { return is_braced(a); }); b != args.end()) {
-      diag(b->begin, Diag::not_supported, lex::Tk::l_brace);  // a braced list for a member function's parameter
-      return fail;
-    }
     auto m = *as<ast::Member>(callee);
     const Bound& bound = bound_.at(std::to_underlying(callee.id));
     // An enum-prefix binding has no receiver. Only its selected static candidate can be called.
     const bool objectless_prefix = !bound.prefix_candidates.empty();
+    std::vector<const Braced*> lists;
+    if (auto b = std::ranges::find_if(args, [&](const Ex& a) { return is_braced(a); }); b != args.end()) {
+      if (!objectless_prefix) {
+        diag(b->begin, Diag::not_supported, lex::Tk::l_brace);  // a braced list for a member function's parameter
+        return fail;
+      }
+      for (const Ex& a : args) lists.push_back(braced_list(a));
+    }
     if (!objectless_prefix && std::ranges::any_of(bound.cands, [&](const MemberDeclRec* candidate) {
           return candidate->is_virtual && types().rec(candidate->type).fn_ref != ast::RefQual::none;
         })) {
@@ -5205,8 +5209,8 @@ public:
     std::span<const TemplateArg> explicit_args;
     if (ex != explicit_args_.end()) explicit_args = ex->second;
     std::vector<ArgShape> shapes;
-    for (const Ex& a : args)
-      shapes.push_back(argument_shape(a));
+    if (lists.empty())
+      for (const Ex& a : args) shapes.push_back(argument_shape(a));
     std::vector<Candidate> cands;
     std::vector<const MemberDeclRec*> recs;
     std::deque<ast::DeclSema> patterns;
@@ -5244,6 +5248,13 @@ public:
       auto tmpl = q_->template_decl(c->entity);
       if (!tmpl) continue;
       const ast::DeclSema& td = patterns.emplace_back(*tmpl);
+      if (!lists.empty()) {
+        // Keep the potential candidate until the other arguments are checked (#231).
+        cands.push_back({c->entity, c->type, c->is_static, c->is_deleted, &td, c->defaults});
+        recs.push_back(c);
+        deduced.emplace_back();
+        continue;
+      }
       Templates t = templates_for_use(callee.begin);
       auto targs = t.deduce_call(td, shapes, explicit_args, c->defaults);
       if (!targs) continue;
@@ -5288,7 +5299,8 @@ public:
       }
     }
     const bool object_rvalue = object && !m.arrow && object->cat() != ValueCategory::lvalue;
-    auto chosen = resolve(cands, args, begin, name, object_cv, std::nullopt, {}, object_rvalue);
+    auto chosen = resolve(cands, args, begin, name, object_cv, std::nullopt, lists, object_rvalue,
+                          /*defer_no_viable=*/false, /*scalar_list_arguments=*/objectless_prefix);
     if (!chosen) return fail;
     const MemberDeclRec* d = recs[*chosen];
     const Candidate& k = cands[*chosen];
@@ -5675,7 +5687,7 @@ public:
 
   // [over.ics.list]: rank a braced argument before initializing the selected parameter.
   // A disengaged result is a list conversion this slice does not classify.
-  std::optional<Ics> list_ics(const Braced& list, QualType parameter) {
+  std::optional<Ics> list_ics(const Braced& list, QualType parameter, bool scalar_list_arguments) {
     const bool flat = std::ranges::none_of(list.clauses, [](const Braced::Clause& c) { return c.list || c.designated; });
     const QualType object = types().referee(parameter);
     if (flat && types().is_class(object) && has_user_ctors(object) &&
@@ -5688,7 +5700,8 @@ public:
     }
     if (types().is_scalar(parameter)) {
       if (!flat || list.clauses.size() > 1) return Ics{};
-      if (!types().is_arithmetic(parameter)) return std::nullopt;
+      if (!types().is_arithmetic(parameter) && !(scalar_list_arguments && types().is_pointer(parameter)))
+        return std::nullopt;
       if (list.clauses.empty()) return Ics{true};
       const Ex& expr = list.clauses.front().expr;
       if (expr.ok() && types().is_class(expr.type())) return std::nullopt;
@@ -5706,7 +5719,8 @@ public:
     // A single class-valued clause can instead use the same-class or base conversion.
     for (const Braced::Clause& c : list.clauses) {
       if (!c.expr.ok()) return Ics{};
-      if (!types().is_arithmetic(c.expr.type())) return std::nullopt;
+      if (!types().is_arithmetic(c.expr.type()) && !(scalar_list_arguments && types().is_scalar(c.expr.type())))
+        return std::nullopt;
     }
     if (list.clauses.size() > record->fields.size()) return Ics{};
     for (std::size_t i = 0; i < list.clauses.size(); ++i)
@@ -5733,7 +5747,8 @@ public:
   std::expected<std::size_t, OverloadFailure> resolve(
       std::span<const Candidate> cands, std::span<const Ex> args, u32 at, NameId name,
       std::optional<Cv> object_cv, std::optional<QualType> ctor_of = std::nullopt,
-      std::span<const Braced* const> lists = {}, bool object_rvalue = false, bool defer_no_viable = false) {
+      std::span<const Braced* const> lists = {}, bool object_rvalue = false, bool defer_no_viable = false,
+      bool scalar_list_arguments = false) {
     std::vector<std::pair<std::size_t, std::vector<Ics>>> viable;
     const Braced* first_list = lists.empty() ? nullptr : *std::ranges::find_if(lists, [](const Braced* list) { return list; });
     const Braced* unsupported = nullptr;
@@ -5770,7 +5785,7 @@ public:
       if (first_list && !template_list) {
         for (std::size_t k = 0; k < args.size() && k < fixed && ok; ++k) {
           if (!lists[k]) continue;
-          auto c = list_ics(*lists[k], fr.params[k]);
+          auto c = list_ics(*lists[k], fr.params[k], scalar_list_arguments);
           if (c) {
             ok = c->viable;
             seq[k + 1] = *c;
