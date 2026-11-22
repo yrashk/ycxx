@@ -506,6 +506,28 @@ with tempfile.TemporaryDirectory() as directory:
     reflected_move = write("reflected_move.cpp", reflected_move_type + direct_move_definitions + direct_move_main)
     syntax(reflected_move)
 
+    implicit_move_source = textwrap.dedent("""\
+        #include <ycxx/ownership.hpp>
+        #include <ycxx/ownership/runtime.hpp>
+
+        namespace own = ycxx::ownership;
+        struct Work {
+          own::linear_state state;
+          int value = 0;
+        };
+        int observed;
+        Work start() noexcept { return Work{own::linear_state{}, 31}; }
+        void finish(Work&& work) noexcept {
+          observed = work.value;
+          work.state.consume();
+        }
+    """) + direct_move_rules + direct_move_main.replace(
+        "  finish(static_cast<Work&&>(second));",
+        "  finish(static_cast<Work&&>(second));\n  return observed != 31;")
+    implicit_move = write("implicit_move.cpp", implicit_move_source + direct_move_authorization)
+    syntax(implicit_move)
+    syntax(write("implicit_move_unmarked.cpp", implicit_move_source), error=needs_move_policy)
+
     move_include = '#include "move_type.hpp"\n'
     write("move_type.hpp", "#pragma once\n" + direct_move_type)
     move_rules = write("move_rules.cpp", move_include + direct_move_rules)
@@ -564,7 +586,7 @@ with tempfile.TemporaryDirectory() as directory:
     for args in (("early",), ("use", "moved"), ("consume", "again", "now")):
         assert subprocess.run([executable, *args], timeout=10).returncode in (
             -signal.SIGABRT, -signal.SIGILL, -signal.SIGTRAP)
-    for source, expected in ((direct_move, (0,)), (tagged_move, (0,)),
+    for source, expected in ((direct_move, (0,)), (tagged_move, (0,)), (implicit_move, (0,)),
                              (dishonest_move, (-signal.SIGABRT, -signal.SIGILL, -signal.SIGTRAP))):
         subprocess.run([host, "-std=c++20", "-I", include, str(source), "-o", str(executable)], check=True, timeout=30)
         assert subprocess.run([executable], timeout=10).returncode in expected
@@ -715,14 +737,18 @@ with tempfile.TemporaryDirectory() as directory:
 
     # #740 tracks native lowering for the field and array initializers.
     selection_flags = ["-fcheck-policies", "-DSELECTED_LOCAL_ONLY"]
+    darwin = [compiler, "cxx", "--no-daemon", "--target=arm64-apple-darwin", "-I", include, "-I", examples]
     selected_macho = root / "selected-macho"
-    subprocess.run([compiler, "cxx", "--no-daemon", "--target=arm64-apple-darwin", *selection_flags,
-                    "-I", include, "-I", examples, selected, "-o", selected_macho], check=True, timeout=30)
-    assert selected_macho.read_bytes()[:4] == bytes.fromhex("cffaedfe")
+    subprocess.run([*darwin, *selection_flags, selected, "-o", selected_macho], check=True, timeout=30)
+    implicit_macho = root / "implicit-move-macho"
+    subprocess.run([*darwin, "-fcheck-policies", implicit_move, "-o", implicit_macho], check=True, timeout=30)
+    for executable_macho in (selected_macho, implicit_macho):
+        assert executable_macho.read_bytes()[:4] == bytes.fromhex("cffaedfe")
     # PARITY: by design: run the linked Mach-O executable on its native host and ISA.
     if sys.platform == "darwin" and platform.machine() in ("arm64", "aarch64"):
         for extra in ((), ("alternate",)):
             subprocess.run([selected_macho, *extra], check=True, timeout=10)
+        subprocess.run([implicit_macho], check=True, timeout=10)
 
     for source, extra in ((nested, ()), (nested_skip, ("skip",)), (array, ()), (array_skip, ("skip",)),
                           (composed, ()), (composed_skip, ("skip",)), (local_records, ())):
@@ -887,7 +913,7 @@ with tempfile.TemporaryDirectory() as directory:
         subprocess.run([*args, *selection_flags, selected, "-o", native], check=True, timeout=30)
         for extra in ((), ("alternate",)):
             subprocess.run([native, *extra], check=True, timeout=10)
-        for source in (composed, local_records, direct_move, tagged_move, annotated_move, reflected_move):
+        for source in (composed, local_records, direct_move, tagged_move, annotated_move, reflected_move, implicit_move):
             subprocess.run([*args, "-fcheck-policies", str(source), "-o", str(native)], check=True, timeout=30)
             assert subprocess.run([native], timeout=10).returncode == 0
         subprocess.run([*args, str(composed_skip), "-o", str(native)], check=True, timeout=30)
