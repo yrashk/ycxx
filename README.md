@@ -200,12 +200,13 @@ object. Symbol names can share suffixes in an input string table.
 [#484](https://github.com/yrashk/ycxx/issues/484)
 
 On x86-64 Linux and arm64 macOS, an exception thrown by hosted peer code can unwind through
-eligible cleanup-free ycxx functions with fixed scalar signatures and reach a handler in
-peer code. This includes calls through function pointers with fixed scalar prototypes and calls
-in selected default member initializers of automatic aggregates with scalar fields and trivial
-destruction. [#572](https://github.com/yrashk/ycxx/issues/572) ·
-[#737](https://github.com/yrashk/ycxx/issues/737) · [#849](https://github.com/yrashk/ycxx/issues/849) ·
-[#851](https://github.com/yrashk/ycxx/issues/851)
+eligible cleanup-free ycxx functions with fixed scalar parameters and reach a handler in peer code.
+This includes calls through function pointers with fixed scalar prototypes, calls in selected default
+member initializers of automatic scalar aggregates, and calls while producing trivial scalar
+aggregate results through the target's supported ABI.
+[#572](https://github.com/yrashk/ycxx/issues/572) · [#737](https://github.com/yrashk/ycxx/issues/737) ·
+[#849](https://github.com/yrashk/ycxx/issues/849) · [#851](https://github.com/yrashk/ycxx/issues/851) ·
+[#853](https://github.com/yrashk/ycxx/issues/853)
 
 On x86-64 Linux, an eligible ycxx function can also throw an `int` to a hosted peer's handler.
 A host-linked ycxx function can use one `catch (...)` to return an integer literal when
