@@ -105,6 +105,7 @@ public:
   // current point ([expr.const]), and a namespace-scope variable as the interpreter sees it.
   virtual interp::Callee function_ir(EntityId f) = 0;
   virtual std::optional<interp::GlobalVar> global(EntityId v) = 0;
+  virtual bool is_immediate_function(EntityId) { return false; }
   virtual bool is_constexpr(EntityId f) = 0;  // a constexpr or consteval function
   // Whether class `c` is complete at the current point ([class.mem.general]): its definition
   // precedes the point and does not enclose it.
@@ -112,6 +113,9 @@ public:
   // An omitted field's initializer, analysed at its declaration into the requesting builder.
   // `NodeId::none` records a diagnosed error. No answer means this context cannot replay it.
   virtual std::optional<NodeId> replay_default_member(Sema&, EntityId) { return std::nullopt; }
+  virtual std::optional<NodeId> replay_function_default(Sema&, const ast::DefaultArg&, EntityId, QualType) {
+    return std::nullopt;
+  }
   // A concrete source query keeps its original position if its tokens are read again.
   virtual bool is_complete_at_source(EntityId c) { return is_complete(c); }
   virtual bool class_layout_uncertain(EntityId /*cls*/) { return false; }
@@ -3878,12 +3882,23 @@ public:
   // Manifestly constant-evaluated initializers and assertions permit these references.
   // The ordinary immediate-invocation evaluator still performs its existing folding.
   bool constant_reference_context = false;
+  // A namespace initializer can consume the pointer during trial constant evaluation.
+  bool trial_initializer = false;
+  EntityId folded_immediate_result = EntityId::none;
   struct ImmediateReferenceScope {
-    bool& context;
-    bool saved;
-    ImmediateReferenceScope(Sema& sema, bool allowed)
-        : context(sema.constant_reference_context), saved(std::exchange(context, allowed)) {}
-    ~ImmediateReferenceScope() { context = saved; }
+    Sema& sema;
+    bool saved_context;
+    bool saved_trial;
+    EntityId saved_result;
+    ImmediateReferenceScope(Sema& sema, bool allowed, bool trial = false)
+        : sema(sema), saved_context(std::exchange(sema.constant_reference_context, allowed)),
+          saved_trial(std::exchange(sema.trial_initializer, trial)),
+          saved_result(std::exchange(sema.folded_immediate_result, EntityId::none)) {}
+    ~ImmediateReferenceScope() {
+      sema.constant_reference_context = saved_context;
+      sema.trial_initializer = saved_trial;
+      sema.folded_immediate_result = saved_result;
+    }
   };
 
   u8 immediate_reference_flags(bool immediate) {
@@ -3899,18 +3914,29 @@ public:
   // ([expr.const.const]); a reference variable is not itself such an object.
   void permit_constant_initializer(u32 declaration, QualType target, ConstId value) {
     if (!has_immediate_addresses_ || value == ConstId::none) return;
-    auto immediate_value = [&](this auto&& self, ConstId id) -> bool {
-      if (ins().values.is<ast::VEntity>(id)) return is_consteval(ins().values.get<ast::VEntity>(id).entity);
-      if (ins().values.is<ast::VLvalue>(id)) return self(ins().values.get<ast::VLvalue>(id).base);
-      if (ins().values.is<ast::VAggregate>(id))
-        return std::ranges::any_of(ins().seqs.elements(ins().values.get<ast::VAggregate>(id).elems),
-                                   [&](ConstId element) { return self(element); });
-      return false;
-    };
-    if (types().is_reference(target) || !immediate_value(value)) constant_immediate_initializers_.insert(declaration);
+    if (types().is_reference(target) || !immediate_result_entity(value)) constant_immediate_initializers_.insert(declaration);
   }
 
   bool is_consteval(EntityId f) const { return consteval_.contains(std::to_underlying(f)); }
+
+  void retain_immediate_functions(const Sema& replay) {
+    consteval_.insert(replay.consteval_.begin(), replay.consteval_.end());
+    if (folded_immediate_result == EntityId::none) folded_immediate_result = replay.folded_immediate_result;
+  }
+
+  std::optional<EntityId> immediate_result_entity(ConstId value) {
+    if (ins().values.is<ast::VEntity>(value)) {
+      const auto entity = ins().values.get<ast::VEntity>(value).entity;
+      if (is_consteval(entity) || q_->is_immediate_function(entity)) return entity;
+    } else if (ins().values.is<ast::VLvalue>(value)) {
+      return immediate_result_entity(ins().values.get<ast::VLvalue>(value).base);
+    } else if (ins().values.is<ast::VAggregate>(value)) {
+      for (const auto element : ins().seqs.elements(ins().values.get<ast::VAggregate>(value).elems))
+        if (auto entity = immediate_result_entity(element)) return entity;
+    }
+    return std::nullopt;
+  }
+
   // An immediate function may be named within an immediate invocation ([expr.const]). Wait
   // until the completed tree, where a folded invocation no longer contains the address operand.
   void check_immediate_addresses(NodeId root, u32 offset = 0) {
@@ -8318,7 +8344,7 @@ public:
       return {NodeId::none, begin, end};
     }
     TypeRec fr = types().rec(ft);
-    auto children = call_args(fr, args, begin, paren_at, defaults, default_origin);
+    auto children = call_args(fr, args, begin, paren_at, defaults, default_origin, function);
     if (!children) return {NodeId::none, begin, end};
     ExprInfo info = result_info(fr.inner);
     return node(ast::Call{info, function, at(callee, begin), b_->list(*children)}, begin, end, info);
@@ -8499,14 +8525,22 @@ public:
   // A braced-init-list as a call's argument: a placeholder, list-initializing its parameter once
   // the callee is known (`call_args`).
   // The argument a parameter's default argument gives a call, positioned at the call's `)`: its
-  // tree, analysed at the declaration ([dcl.fct.default]/5). One of a template that depends on its
-  // parameters would be instantiated for the call ([temp.inst]/12), which is not supported yet.
-  std::optional<Ex> default_argument(NodeId d, u32 at_, DefaultArgumentOrigin origin = DefaultArgumentOrigin::interned) {
+  // tree, analysed at the declaration ([dcl.fct.default]/5). A supported dependent default
+  // is replayed only for the selected specialization and only when omitted ([temp.inst]/12).
+  std::optional<Ex> default_argument(NodeId d, u32 at_, DefaultArgumentOrigin origin = DefaultArgumentOrigin::interned,
+                                     EntityId function = EntityId::none, QualType parameter = {}) {
     const bool in_builder = origin == DefaultArgumentOrigin::current_item;
     // An earlier declarator's inherited defaults are already adopted by this builder.
     const NodeId interned = in_builder ? b_->adopted_node(d) : d;
     const auto value = interned == NodeId::none ? b_->get<ast::DefaultArg>(d) : ins().ast.get<ast::DefaultArg>(interned);
     if (ast::kind_of(value.arg.id) == ast::Nodes::index_of<ast::Dependent>()) {
+      if (function != EntityId::none && value.source_end > value.source_begin) {
+        if (auto replay = q_->replay_function_default(*this, value, function, parameter)) {
+          if (*replay == NodeId::none) return std::nullopt;
+          const auto concrete = b_->get<ast::DefaultArg>(*replay);
+          return Ex{*replay, at_, at_, concrete.info};
+        }
+      }
       diag(at_, Diag::default_arg_dependent);
       return std::nullopt;
     }
@@ -8607,12 +8641,13 @@ public:
   // A parameter without an argument takes its default argument ([dcl.fct.default], [expr.call]/5).
   std::optional<std::vector<Child>> call_args(const TypeRec& fr, std::span<const Ex> given, u32 begin, u32 paren_at,
                                               std::span<const NodeId> defaults = {},
-                                              DefaultArgumentOrigin origin = DefaultArgumentOrigin::interned) {
+                                              DefaultArgumentOrigin origin = DefaultArgumentOrigin::interned,
+                                              EntityId function = EntityId::none) {
     if (unevaluated == 0 && !require_supported_virtual_signature(fr, paren_at)) return std::nullopt;
     std::vector<QualType> params = fr.params;  // copied: converting may intern new types
     std::vector<Ex> args(given.begin(), given.end());
     for (std::size_t i = args.size(); i < params.size() && i < defaults.size() && defaults[i] != NodeId::none; ++i) {
-      auto a = default_argument(defaults[i], paren_at, origin);
+      auto a = default_argument(defaults[i], paren_at, origin, function, params[i]);
       if (!a) return std::nullopt;
       args.push_back(*a);
     }
