@@ -206,6 +206,39 @@ outward effects and usage grades. The local handler can only appear as the recei
 its own `perform` calls. A nested binding can select another function with the same
 signature and a different outward bound.
 
+Save this C++20 example as `handler.cpp`. The memory implementation has an empty
+outward effect bound, so `run` can keep the same bound.
+
+```cpp
+#include <ycxx/effects.hpp>
+#include <ycxx/effects/handler.hpp>
+
+namespace fx = ycxx::effects;
+struct ReadSettings;
+using Pure = fx::set<>;
+
+int read_from_memory(int offset) noexcept { return 40 + offset; }
+
+int run(int offset) {
+  fx::scoped_handler<ReadSettings, decltype(read_from_memory)> handler(read_from_memory);
+  return handler.perform(offset);
+}
+
+using Rules = fx::use_policy<
+    fx::bound<decltype(&read_from_memory), &read_from_memory, Pure>,
+    fx::bound<decltype(&run), &run, Pure>>;
+
+int main() { return run(2) != 42; }
+```
+
+Run it with a C++20 compiler or check the declared effects with YCXX.
+
+```sh
+c++ -std=c++20 -I/path/to/include handler.cpp -o handler
+./handler
+ycxx cxx -fcheck-policies -fsyntax-only -I/path/to/include handler.cpp
+```
+
 A trusted mediation adapter can declare which effects escape its handler. YCXX checks
 its callers against that declaration. The runtime scope and the optional budget use the
 same types with GCC, Clang, and YCXX.
