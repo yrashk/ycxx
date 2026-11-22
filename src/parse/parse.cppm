@@ -8286,7 +8286,8 @@ void Program::instantiate_all() {
       if (!cell.diags.empty()) continue;
       for (sema::Demand demand : cell.demands) {
         if (!demand.variable_type) continue;
-        demand.at = ast::Loc{id(class_points_.at(key.second)), 0};
+        const auto point = class_points_.at(key.second);
+        if (point < end()) demand.at = ast::Loc{id(point), 0};
         work.push_back(demand);
         depth.push_back(1);
       }

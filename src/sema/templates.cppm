@@ -1206,15 +1206,30 @@ public:
     Bindings given = bindings(depth, out);
     for (auto& a : given.levels[depth])
       if (a && a->kind == TemplateArgKind::pack) a = std::nullopt;
-    // With explicit template arguments, substitution reaches a written leading return
-    // before a function parameter can fail substitution ([temp.deduct.general]/7).
-    if (!explicit_args.empty() && !tmpl.has_trailing_return) {
+    auto valid_return = [&] {
       auto ret = substitute(f.inner, given);
-      if (!ret || types().is_array(*ret) || types().is_function(*ret)) return std::nullopt;
+      return ret && !types().is_array(*ret) && !types().is_function(*ret);
+    };
+    std::vector<QualType> explicit_parameters;
+    std::optional<QualType> explicit_pack_pattern;
+    if (!explicit_args.empty()) {
+      // Substitute in written order before deduction can fail ([temp.deduct.general]).
+      if (!tmpl.has_trailing_return && !valid_return()) return std::nullopt;
+      for (std::size_t i = 0; i < fixed; ++i) {
+        auto p = substitute(f.params[i], given);
+        if (!p || types().is_void(*p) || types().is_cvref_function(*p)) return std::nullopt;
+        explicit_parameters.push_back(*p);
+      }
+      if (trailing) {
+        explicit_pack_pattern = substitute(types().rec(f.params[n - 1]).inner, given);
+        if (!explicit_pack_pattern) return std::nullopt;
+      }
+      if (tmpl.has_trailing_return && !valid_return()) return std::nullopt;
     }
     for (std::size_t i = 0; i < fixed && i < args.size(); ++i) {
       if (!args[i].deducible && args[i].overloads.empty()) continue;
-      auto p0 = substitute(tmpl_param_type(tmpl, i), given);
+      auto p0 = explicit_args.empty() ? substitute(f.params[i], given)
+                                      : std::optional{explicit_parameters[i]};
       if (!p0) return std::nullopt;
       if (!mentions(*p0, depth)) continue;  // checked by overload resolution as a conversion
       if (!args[i].overloads.empty()) {
@@ -1225,7 +1240,8 @@ public:
       if (!deduce(p, a, depth, out, allow)) return std::nullopt;
     }
     if (trailing) {
-      auto p0 = substitute(types().rec(f.params[n - 1]).inner, given);
+      auto p0 = explicit_args.empty() ? substitute(types().rec(f.params[n - 1]).inner, given)
+                                      : explicit_pack_pattern;
       if (!p0) return std::nullopt;
       // The elements given explicitly take the first remaining arguments.
       std::size_t skip = 0;
@@ -1839,7 +1855,6 @@ private:
     return b;
   }
 
-  QualType tmpl_param_type(const ast::DeclSema& tmpl, std::size_t i) { return types().rec(tmpl.type).params[i]; }
 
   QualType strip(QualType t) {
     t = types().referee(t);
