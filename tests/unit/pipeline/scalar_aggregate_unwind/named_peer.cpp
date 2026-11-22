@@ -16,7 +16,7 @@ int main(int argc, char** argv) {
   try {
     if (mode == 'e') return overridden() != 123 || calls != 0;
     if (mode == 'o') return selected() != 14 || calls != 1;
-    if (mode == 'x') return selected() + 1;
+    if (mode == 'x') selected();
   } catch (int value) {
     return mode != 'x' || value != 7 || calls != 1;
   }

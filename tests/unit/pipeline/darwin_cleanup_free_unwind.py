@@ -208,7 +208,10 @@ def main():
         # PARITY: by design: the records are checked everywhere and only macOS runs the Mach-O peers.
         check_scalar_aggregate_unwind(compile, run, check_scalar_aggregate, host[0] if host else None)
         compile('-c', scalar_aggregate_fixtures / 'unsupported_cleanup.cpp', '-o', 'unsupported_cleanup.o')
-        object_frames(Image(scope / 'unsupported_cleanup.o', kind=1), set())
+        unsupported = Image(scope / 'unsupported_cleanup.o', kind=1)
+        assert any(name == '__Z15guarded_defaultv' and section == unsupported.text().index
+                   for name, _, section, _ in unsupported.symbols)
+        object_frames(unsupported, set())
 
         compile('-c', fixtures / 'native_peer.cpp', '-o', 'native.o')
         frames.update(object_frames(Image(scope / 'native.o', kind=1), {'_peer'}))

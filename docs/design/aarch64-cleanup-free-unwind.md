@@ -5,11 +5,11 @@ It certifies ordinary namespace functions over scalar signatures with no hidden 
 cleanup or native throw expression. Emission excludes the entry point, coalesced definitions,
 and functions with inline declarations, written `noexcept`, assembly labels, or static guards.
 
-For an aggregate with scalar fields and trivial destruction, the proof visits the already
-selected initializer for each field. The replayed default can read an earlier field through the
-construction receiver. An explicit initializer suppresses the corresponding default before this
-walk. A materialized temporary of the same aggregate shape is also eligible when its lifetime
-ends with the full-expression. [dcl.init.aggr], [class.mem.general], [class.temporary].
+For a non-union aggregate with scalar fields, no bases, and trivial destruction, the proof
+visits the selected initializer for each field. The replayed default can read an earlier field
+through the construction receiver. An explicit initializer suppresses the corresponding default
+before this walk. A materialized temporary of the same aggregate shape is also eligible when its
+lifetime ends with the full-expression. [dcl.init.aggr], [class.mem.general], [class.temporary].
 [#849](https://github.com/yrashk/ycxx/issues/849)
 
 The arm64 emitter records frame transitions as it emits the saves and restores. At entry,

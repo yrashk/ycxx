@@ -17,8 +17,8 @@ int main(int argc, char** argv) {
   try {
     if (mode == 'n') return via_explicit_temporary() != 14 || calls != 1;
     if (mode == 'l') return via_literal_temporary() != 19 || calls != 0;
-    if (mode == 'd') return via_direct() + 1;
-    if (mode == 't') return via_explicit_temporary() + 1;
+    if (mode == 'd') via_direct();
+    if (mode == 't') via_explicit_temporary();
   } catch (int value) {
     return (mode != 'd' && mode != 't') || value != 7 || calls != 1;
   }
