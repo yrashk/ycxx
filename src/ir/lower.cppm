@@ -770,6 +770,24 @@ class Lowering {
         out(n, 1, p);
         return {};
       }
+      case Op::alloc_peer_root: {
+        const QualType type{std::uint32_t(imms[0])};
+        if constexpr (requires { layout_.peer_root_allocation(type); }) {
+          if (config_.sysv_amd64) {
+            if (const auto storage = layout_.peer_root_allocation(type)) {
+              const ValueId p = emit1(Op2::alloca, T::ptr, {}, {storage->size, storage->align, raw(n)});
+              const ValueId state = zero(in(n, 0), p, *storage, imms[0]);
+              // Itanium ABI §2.5.2: offset-to-top and RTTI precede the root's address point.
+              const ValueId table = emit1(Op2::symbol, T::ptr, {}, {imms[1]});
+              const ValueId address_point = add_offset(table, 2 * ast::x86_64_linux.pointer_size);
+              out(n, 0, emit1(Op2::store, T::state, {state, p, address_point}, {0}));
+              out(n, 1, p);
+              return {};
+            }
+          }
+        }
+        return fail("a peer virtual root needs a supported automatic-object layout");
+      }
       case Op::dealloc:
       case Op::obj__begin:
       case Op::obj__end:

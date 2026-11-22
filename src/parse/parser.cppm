@@ -4598,7 +4598,7 @@ public:
     return s;
   }
 
-  Ex statement() {
+  Ex statement(bool prefix_attributes = false) {
     deep_enough();  // blocks and the statements they hold nest through here
     u32 begin = pos();
     switch (kind()) {
@@ -4711,7 +4711,7 @@ public:
       // An attribute-specifier-seq appertaining to the statement ([stmt.pre]/1), or GNU
       // attributes (docs/EXTENSIONS.md).
       skip_attributes();
-      return statement();
+      return statement(/*prefix_attributes=*/true);
     }
     if (is(Tk::identifier) && kind(1) == Tk::colon) {
       // [stmt.label]: an identifier label.
@@ -4722,7 +4722,7 @@ public:
       Ex st = labeled_statement();
       return s_->node(ast::Label{n, sema::Sema::at(st, begin)}, begin, pos());
     }
-    if (starts_declaration(true)) return declaration_statement();
+    if (starts_declaration(true)) return declaration_statement(!prefix_attributes);
     Ex e = expression();
     if (!expect(Tk::semi)) skip_to_semi();
     e = s_->discarded(e);
@@ -5269,8 +5269,8 @@ public:
       return {NodeId::none, begin, pos()};
     }
     if (is(Tk::kw_using)) return statement();
-    skip_attributes();  // of the simple-declaration ([dcl.pre]/5)
-    if (starts_declaration(true)) return declaration_statement();
+    const bool no_prefix_attributes = skip_attributes() == 0;  // of the simple-declaration ([dcl.pre]/5)
+    if (starts_declaration(true)) return declaration_statement(no_prefix_attributes);
     Ex e = is(Tk::semi) ? Ex{} : s_->discarded(expression());
     if (!expect(Tk::semi)) skip_to_semi();
     return s_->node(ast::ExprStmt{sema::Sema::at(e, begin)}, begin, pos());
@@ -5367,11 +5367,11 @@ public:
     s_->guard_scope();  // [basic.scope.block]/2: the for-init's names are not redeclared in the body
     if (auto r = range_for_ahead()) return range_for(begin, *r);
     Ex init;
-    skip_attributes();  // of a simple-declaration ([dcl.pre]/5)
+    const bool no_prefix_attributes = skip_attributes() == 0;  // of a simple-declaration ([dcl.pre]/5)
     if (is(Tk::kw_using)) {
       init = init_statement();  // an alias-declaration (C++23)
     } else if (starts_declaration(true)) {
-      init = declaration_statement();
+      init = declaration_statement(no_prefix_attributes);
     } else {
       u32 b = pos();
       Ex e = is(Tk::semi) ? Ex{} : s_->discarded(expression());
@@ -5770,9 +5770,27 @@ public:
     return s_->node(ast::DeclStmt{s_->builder().list(vars)}, begin, pos());
   }
 
+  // A directly named class whose spelling has no attributes, alias or computed type.
+  bool directly_named_peer_root(QualType type, u32 start, u32 end) {
+    if (end == start || !s_->has_peer_virtual_layout(type)) return false;
+    const auto spelling = std::span(r_->tokens).subspan(begin_ + start, end - start);
+    const auto cls = s_->types().class_of(type);
+    const auto& entity = s_->world().entities.rec(cls);
+    if (spelling.back().kind != Tk::identifier || name_of(spelling.back()) != entity.name) return false;
+    if (spelling.size() == 1) return s_->names_direct_class(entity.name, type);
+    if (!std::ranges::all_of(spelling, [](const Tok& token) {
+          return token.kind == Tk::identifier || token.kind == Tk::coloncolon;
+        })) return false;
+    const auto cursor = std::exchange(i_, begin_ + start);
+    u32 last = 0;
+    const auto scope = nested_name(0, last);
+    i_ = cursor;
+    return scope && scope->ns && *scope->ns == entity.scope && last + 1 == spelling.size();
+  }
+
   // A block-scope simple-declaration ([stmt.dcl], [dcl.pre]): each declarator is a local
   // variable, in scope from the end of its declarator ([basic.scope.pdecl]).
-  Ex declaration_statement() {
+  Ex declaration_statement(bool no_prefix_attributes) {
     u32 begin = pos();
     DeclSpec spec = decl_specifiers(false, nullptr, false, false, /*allow_constrained_auto=*/true);
     if (is(Tk::l_square) || ((is(Tk::amp) || is(Tk::ampamp)) && kind(1) == Tk::l_square))
@@ -5839,7 +5857,12 @@ public:
         skip_to_semi();
         return {NodeId::none, begin, pos()};
       }
-      if (!s_->require_supported_virtual_layout(d.type, d.name_at)) {
+      Ex peer_root;
+      if (no_prefix_attributes && !spec.is_static && !spec.is_constexpr && !spec.is_constinit &&
+          !d.qualified && is(Tk::semi) && d.name_at == dbegin && d.name_at + 1 == pos() &&
+          directly_named_peer_root(d.type, begin, dbegin))
+        peer_root = s_->peer_root_default_init(d.type, d.name_at, pos());
+      if (!peer_root.ok() && !s_->require_supported_virtual_layout(d.type, d.name_at)) {
         skip_to_semi();
         return {NodeId::none, begin, pos()};
       }
@@ -5950,6 +5973,8 @@ public:
           init = s_->convert(args[0], d.type, open);
         }
         if (memberwise) constant_local(local, d.type, spec.is_constexpr, init, memberwise);
+      } else if (peer_root.ok()) {
+        init = peer_root;
       } else if (s_->types().is_reference(d.type)) {
         s_->diag(d.name_at, Diag::reference_uninitialized);  // [dcl.ref]/5
       } else if (s_->types().is_dependent(d.type)) {
