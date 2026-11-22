@@ -306,6 +306,8 @@ written default member initializer are value-initialized.
   initializes its selected member. Construction of a nontrivially destructible variant
   uses a nonthrowing constructor. [#203](https://github.com/yrashk/ycxx/issues/203) ·
   [#738](https://github.com/yrashk/ycxx/issues/738)
+- namespace-scope union templates support the same rules for concrete nontrivially destructible
+  variants after instantiation. [#203](https://github.com/yrashk/ycxx/issues/203)
 - classes and unions: data and static members, named data members of unnamed union type,
   member functions, constructors including ordinary delegation, and destructors
   with RAII, aggregate and designated initialization, namespace-scope objects initialized by

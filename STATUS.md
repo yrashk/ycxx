@@ -1514,6 +1514,15 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
 - Remaining implicit special-member rules and aggregate designator forms stay in #203.
   Direct explicit destructor calls are tracked in #722.
 
+## Concrete nontrivial members of union templates (#203)
+
+- A namespace-scope union template with a written destructor can instantiate nontrivially
+  destructible variants with trivial or deleted copy constructors. Nonthrowing constructors
+  select the active member, and the union destructor leaves variant cleanup explicit.
+- The instantiation checks the concrete variant types and the completed destructor declaration.
+  Tests select both members of a union specialized on a noncopyable resource and diagnose
+  the unsupported implicit-destruction form.
+
 ## `<cstdio>`, step 4c: operator functions; `<stdio.h>` compiles (#133, 2026-11-18)
 
 - **Operator functions** ([over.oper]): `operator@` declarator-ids for the overloadable
