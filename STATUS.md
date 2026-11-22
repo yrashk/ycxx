@@ -1905,11 +1905,15 @@ Fable decided the representation (ast.md §6.6); the Opus session wrote the code
   constraint substitution. Empty packs, order, and reference types are retained (#234).
 - A directly named, non-dependent specialization of a primary class template with explicit type
   arguments checks its constraints even when the use does not need a complete class (#234).
-- Not yet: class-template constraints outside that case, constraints on variable templates, partial
-  specializations and members,
-  broader constrained packs, fold-expanded constraints, `C auto`, `noexcept` in compound requirements
-  (#234); re-verification of satisfaction at END (#235); Itanium constraint mangling (#236);
-  recorded discarded extents for `if constexpr` (#237); value-dependent mapping arguments (#209).
+- In non-template code outside requires-expression bodies, directly naming a primary namespace
+  variable-template specialization with explicit non-dependent type arguments checks its associated
+  constraints. This includes unevaluated uses such as `decltype`. A type-constraint or a leading
+  requires-clause contributes to that check. [#234](https://github.com/yrashk/ycxx/issues/234)
+- Not yet: class and variable template constraints outside those cases, partial specializations
+  and members, broader constrained packs, fold-expanded constraints, `C auto`, and `noexcept` in
+  compound requirements (#234). Open follow-ups include re-verification of satisfaction at END
+  (#235), Itanium constraint mangling (#236), recorded discarded extents for `if constexpr` (#237),
+  and value-dependent mapping arguments (#209).
 
 ## Access control and friends (#119, 2026-11-18)
 

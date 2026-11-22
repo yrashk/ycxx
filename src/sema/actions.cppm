@@ -753,10 +753,27 @@ public:
     auto full = template_arguments(tmpl, args, begin);
     if (!full) return {NodeId::none, begin, end};
     std::vector<ast::TemplateParamSema> params = ins().seqs.elements(tmpl.template_params);
-    auto t = templates().substitute(tmpl.type, Bindings::of(params.empty() ? 0 : params[0].depth, *full));
-    const EntityRec& r = w_->entities.rec(tmpl.entity);
+    const Bindings bindings = Bindings::of(params.empty() ? 0 : params[0].depth, *full);
+    const EntityRec& entity = w_->entities.rec(tmpl.entity);
+    const NameId name = entity.name;
+    // [temp.names]/9: the name itself requires satisfaction, including in decltype. Limit this
+    // check to direct concrete uses in ordinary code until constraint replay handles this path.
+    if (tmpl.constraints != ConstId::none && entity.kind == EntityKind::variable_template &&
+        !in_requires_body_ && !templated() && args.size() == full->size() &&
+        std::ranges::all_of(*full, [&](const TemplateArg& arg) {
+          return arg.kind == ast::TemplateArgKind::type && !dependent(arg);
+        })) {
+      auto normal = templates().substitute_constraint(tmpl.constraints, bindings);
+      auto sat = normal ? q_->satisfied(*normal) : std::optional<bool>(false);
+      if (normal && q_->satisfaction_failed(*normal)) return {NodeId::none, begin, end};
+      if (!sat.value_or(true)) {
+        diag(begin, Diag::constraints_not_satisfied, name);
+        return {NodeId::none, begin, end};
+      }
+    }
+    auto t = templates().substitute(tmpl.type, bindings);
     if (!t) {
-      diag(begin, Diag::template_args_mismatch, r.name);
+      diag(begin, Diag::template_args_mismatch, name);
       return {NodeId::none, begin, end};
     }
     EntityId spec = variable_specialization(tmpl.entity, *full);
@@ -834,6 +851,12 @@ public:
       return !template_args.at(p.depth, p.index);
     });
   }
+  struct RequiresBodyScope {
+    bool& context;
+    bool saved;
+    explicit RequiresBodyScope(Sema& sema) : context(sema.in_requires_body_), saved(std::exchange(context, true)) {}
+    ~RequiresBodyScope() { context = saved; }
+  };
   // The concept unqualified lookup finds for `name`.
   std::optional<ast::DeclSema> concept_named(NameId name) { return named_template(name, ast::DeclKind::concept_); }
   // The type-constraints of the template-head being read, in normal form ([temp.constr.decl]/3).
@@ -8716,6 +8739,7 @@ private:
   std::vector<engine::Diagnostic>* diags_;
   ast::ItemId item_;
   u32 loc_base_;
+  bool in_requires_body_ = false;
   std::vector<ast::LocalRec> locals_;
   std::vector<std::pair<EntityId, NameId>> statics_;  // the static locals so far: (function, name)
   // Packs ([temp.variadic]): the expansions being instantiated, innermost last, each with the
