@@ -441,6 +441,8 @@ written default member initializer are value-initialized.
   `noexcept` signature. The compiler supports Clang's `__make_integer_seq`. Template type
   arguments can use terminal namespace-qualified alias specializations that expand to
   dependent member types. [#406](https://github.com/yrashk/ycxx/issues/406) · [#630](https://github.com/yrashk/ycxx/issues/630)
+  Dependent calls through class and alias template qualifiers expand argument packs, including
+  packs preceded by an ordinary template parameter. [#890](https://github.com/yrashk/ycxx/issues/890)
 - dependent `__is_same`, `__is_reference`, `__is_const`, `__is_volatile`, `__is_array`,
   `__is_pointer`, `__is_function`, `__is_enum`, `__is_union`, `__is_class`, `__is_object`, and the
   three member-pointer predicates as `bool` template arguments or defaults, including through
@@ -588,6 +590,11 @@ a caller can also dispatch through a peer-owned abstract interface with one or t
 public pure virtual slots using fixed integer signatures and bare `noexcept`.
 [#309](https://github.com/yrashk/ycxx/issues/309)
 
+**Linux casts to the most-derived object.** `dynamic_cast<cv void*>(p)` accepts a pointer to
+an admitted peer-owned polymorphic root. The cast preserves the pointee's qualifiers, returns
+null for a null operand, and recovers the most-derived address from a live subobject.
+[#294](https://github.com/yrashk/ycxx/issues/294)
+
 **Structured bindings.** Local bindings can copy or alias scalar-element arrays, including
 multidimensional arrays. They can also copy or alias ordinary non-template classes without
 bases and bind to their public, addressable data members, including array and reference
@@ -622,7 +629,7 @@ vptr before calling the nonthrowing observer. The deleting entry then uses globa
   tuple-like structured bindings and structured bindings to bit-fields or inherited members,
   inheriting constructors, and base packs or multiple bases in a class template.
 - Broader native construction, virtual dispatch and table emission, virtual base classes,
-  `typeid` and `dynamic_cast`, and virtual destruction for other class shapes.
+  `typeid`, `dynamic_cast` to a class type, and virtual destruction for other class shapes.
   [#309](https://github.com/yrashk/ycxx/issues/309) · [#310](https://github.com/yrashk/ycxx/issues/310) ·
   [#294](https://github.com/yrashk/ycxx/issues/294) · [#136](https://github.com/yrashk/ycxx/issues/136)
 - Member class and alias templates, conversion function templates, and constraints on class

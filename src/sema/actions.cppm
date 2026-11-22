@@ -1848,13 +1848,14 @@ public:
     return std::nullopt;
   }
 
-  std::optional<Scope> scope_member(const Scope& s, NameId n) {
-    // A member of the class whose member-specification this is (the current instantiation in a
-    // template) is found where it is declared ([temp.dep.type]/1); a member of another dependent
-    // type is looked up when the template is instantiated ([temp.dep.type]/7): a dependent type.
+  std::optional<Scope> scope_member(const Scope& s, NameId n, bool assume_dependent_type = true) {
+    // A member type of the current instantiation is found where it is declared ([temp.dep.type]).
+    // A type-only context can assume a dependent name denotes a type until instantiation
+    // ([temp.res.general]).
     if (s.type && types().is_class(*s.type) && (!types().is_dependent(*s.type) || types().class_of(*s.type) == current_class))
       if (auto t = member_type(types().class_of(*s.type), n)) return Scope{std::nullopt, *t};
-    if (s.type && types().is_dependent(*s.type)) return Scope{std::nullopt, types().dep_name(*s.type, n)};
+    if (assume_dependent_type && s.type && types().is_dependent(*s.type))
+      return Scope{std::nullopt, types().dep_name(*s.type, n)};
     if (s.ns) {
       if (auto t = direct_member_introduction(*s.ns, n)) return Scope{std::nullopt, t};
       auto members = q_->namespace_members(*s.ns, n);
@@ -2017,8 +2018,8 @@ public:
   }
 
   // `S::n` naming a type.
-  std::optional<QualType> scope_type(const Scope& s, NameId n) {
-    auto m = scope_member(s, n);
+  std::optional<QualType> scope_type(const Scope& s, NameId n, bool assume_dependent_type = true) {
+    auto m = scope_member(s, n, assume_dependent_type);
     if (!m || !m->type) return std::nullopt;
     if (s.type && types().is_class(*s.type) && unscoped_member_enumerator(types().class_of(*s.type), n))
       return std::nullopt;
@@ -7710,6 +7711,48 @@ public:
     if (converted.ok() && converted.info.bit_width)
       return convert_node(converted, ast::ConversionKind::integral, converted.type());
     return converted;
+  }
+
+  // [expr.dynamic.cast]: the pointer must designate the source polymorphic subobject.
+  Ex dynamic_cast_to_void(Ex e, QualType to, u32 begin, u32 end) {
+    const Ex fail{NodeId::none, begin, end};
+    if (!e.ok()) return fail;
+    const QualType target = Types::unqualified(types().canonical(to));
+    if (dependent(e) || types().is_dependent(to) || !types().is_pointer(target) ||
+        !types().is_void(types().pointee(target))) {
+      diag(begin, Diag::not_supported, lex::Tk::kw_dynamic_cast);
+      return fail;
+    }
+    const QualType from = e.type();
+    if (!types().is_pointer(from) || !types().is_class(types().pointee(from))) {
+      diag(begin, Diag::dynamic_cast_void_operand);
+      return fail;
+    }
+    const QualType source = types().pointee(from);
+    if (!require_complete(source, begin)) return fail;
+    const EntityId cls = types().class_of(source);
+    const ClassRec* record = classes().find(cls);
+    if (!record || !record->polymorphic) {
+      diag(begin, Diag::dynamic_cast_void_operand);
+      return fail;
+    }
+    if (!cv_within(object_cv(source), object_cv(types().pointee(target)))) {
+      diag(begin, Diag::no_conversion, from, target);
+      return fail;
+    }
+    // Reuse the root classifications for the Linux peer ABI. Accessing the address point
+    // establishes no other object layout or virtual emission support.
+    const auto& entity = w_->entities.rec(cls);
+    if (w_->target.triple != ast::x86_64_linux.triple || entity.linkage != ast::Linkage::external ||
+        record->explicit_alignment || q_->class_layout_uncertain(cls) ||
+        (record->peer_virtual_layout != PeerVirtualLayout::root && !q_->peer_pure_dispatch(cls))) {
+      diag(begin, Diag::not_supported, lex::Tk::kw_dynamic_cast);
+      return fail;
+    }
+    e = rvalue(e);
+    if (!e.ok()) return fail;
+    const ExprInfo info{target, ValueCategory::prvalue, 0};
+    return node(ast::DynamicCastVoid{info, at(e, begin)}, begin, end, info);
   }
 
   // [except.handle]: no void, rvalue reference, or incomplete object, with the cv void* exception.
