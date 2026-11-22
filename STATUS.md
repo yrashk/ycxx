@@ -2305,7 +2305,8 @@ Fable decided the representation (ast.md §6.6); the Opus session wrote the code
 - Ordinary function overloads with explicit trailing type packs preserve the pack in atomic
   constraint substitution. Empty packs, order, and reference types are retained (#234).
 - A directly named, non-dependent specialization of a primary class template with explicit type
-  arguments checks its constraints even when the use does not need a complete class (#234).
+  or value arguments checks its constraints even when the use does not need a complete class
+  (#234, [#908](https://github.com/yrashk/ycxx/issues/908)).
 - In non-template code outside requires-expression bodies, directly naming a primary namespace
   variable-template specialization with explicit non-dependent type arguments checks its associated
   constraints. This includes unevaluated uses such as `decltype`. A type-constraint or a leading
