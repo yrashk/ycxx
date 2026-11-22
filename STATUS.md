@@ -312,7 +312,8 @@ What is true of the code today. Work in progress and its owners are tracked in
     with stubs and a GOT. All imports are bound and all pointers rebased through chained fixups
     (`DYLD_CHAINED_PTR_64_OFFSET`). No lazy binding. A segment's chained starts cover only its
     pages with file contents: page-in linking maps every listed page from the file, so a listed
-    zero-fill page would hold `__LINKEDIT` bytes (#842).
+    zero-fill page would hold the bytes that follow it in the file (for `__DATA`, `__LINKEDIT`)
+    (#842).
   - Writes the exports trie, symbol tables, `LC_MAIN`, `LC_BUILD_VERSION` (macOS 12.0), an
     `LC_UUID` fingerprinted from the image, and an ad-hoc, linker-signed SHA-256 code signature.
   - Output is byte-identical across runs.

@@ -958,7 +958,8 @@ private:
       mo::store32(w.bytes, table + 4 * s, static_cast<std::uint32_t>(w.size() - starts_offset));
       // Only the pages with file contents. Page-in linking maps every listed page from the file,
       // so listing the zero-fill pages past them would fill those with what follows in the file
-      // (#842). Fixups never lie there: relocations in zero-fill sections are rejected.
+      // (#842). Fixups never lie there: relocations in zero-fill sections are rejected, and
+      // zero-fill sections are laid out last in each segment.
       const auto page_count = static_cast<std::uint16_t>(sg.filesize / page);
       w.u32(22 + 2u * page_count);  // size of dyld_chained_starts_in_segment with its page_start array
       w.u16(static_cast<std::uint16_t>(page));
