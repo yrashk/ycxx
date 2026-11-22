@@ -262,6 +262,9 @@ Both targets accept nonempty standalone unnamed enum definitions at namespace sc
 fixed underlying types and definitions inside `extern "C"` blocks.
 [#157](https://github.com/yrashk/ycxx/issues/157)
 
+Qualified value lookup can read earlier static data members and injected unscoped enumerators
+while their current class is incomplete. [#857](https://github.com/yrashk/ycxx/issues/857)
+
 Both targets support named nested enum definitions followed by ordinary fields in the same
 member declaration, including scoped enum field initializers. [#500](https://github.com/yrashk/ycxx/issues/500)
 Scoped enumerators stay in their enumeration's scope, so class members and class template
