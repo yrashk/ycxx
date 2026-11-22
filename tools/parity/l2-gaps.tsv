@@ -1,11 +1,5 @@
 # L2 operations one native back end handles and the other does not yet (tools/check-parity).
 # <operation>	<back end missing it>	<parity issue>	<note>
-fabs	x86_64	#643
-fptrunc	x86_64	#643
-fptosi	x86_64	#643
-fptoui	x86_64	#643
-sitofp	x86_64	#643
-uitofp	x86_64	#643
 va_start	aarch64	#647	Apple arm64 va_list is a pointer into the caller's stack slots
 va_arg	aarch64	#647
 invoke	aarch64	#648	the hosted catch-all call; Darwin has no unwind tables yet
