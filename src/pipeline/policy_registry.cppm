@@ -59,6 +59,7 @@ PolicyOperation policy_operation(const sema::World& world, EntityId entity, ast:
 struct EffectBound {
   std::vector<QualType> tags;
   bool trusted;
+  std::vector<std::pair<QualType, ast::u64>> grades;
   bool operator==(const EffectBound&) const = default;
 };
 
@@ -103,7 +104,7 @@ namespace {
 
 enum class Marker {
   other, policy, use_policy, affine, linear, creates, observes, verified_observes, consumes, transfers,
-  effect_set, effect_bound, trusted_effect_bound, effect_contract, trusted_effect_contract,
+  effect_set, effect_grade, effect_bound, trusted_effect_bound, effect_contract, trusted_effect_contract,
 };
 
 struct Specialization {
@@ -127,6 +128,7 @@ Specialization marker(const sema::World& world, EntityId id) {
   const auto name = world.ins.names.spelling(primary->name);
   if (in_policy_namespace(world, primary->scope, "effects")) {
     if (name == "set") return {Marker::effect_set, specialized};
+    if (name == "at_most") return {Marker::effect_grade, specialized};
     if (name == "bound") return {Marker::effect_bound, specialized};
     if (name == "trusted") return {Marker::trusted_effect_bound, specialized};
     if (name == "contract") return {Marker::effect_contract, specialized};
@@ -184,25 +186,52 @@ AnnotationKind annotation_kind(const sema::World& world, QualType type) {
   return AnnotationKind::other;
 }
 
-std::optional<std::vector<QualType>> effect_tags(const sema::World& world, const ast::TemplateArg& arg) {
-  if (arg.kind != ast::TemplateArgKind::type) return std::nullopt;
+std::expected<EffectBound, std::string_view> read_effect_bound(const sema::World& world, const ast::TemplateArg& arg,
+                                                               bool trusted) {
+  constexpr std::string_view bad_set = "effect bound requires ycxx::effects::set of unqualified class or enum tags or at_most grades";
+  if (arg.kind != ast::TemplateArgKind::type) return std::unexpected(bad_set);
   const auto [kind, declaration] = marker(world, class_entity(world, arg.type));
   if (kind != Marker::effect_set || declaration->args.size() != 1 ||
       declaration->args.front().kind != ast::TemplateArgKind::pack)
-    return std::nullopt;
+    return std::unexpected(bad_set);
 
-  std::vector<QualType> tags;
+  std::vector<std::pair<QualType, std::optional<ast::u64>>> entries;
   for (const auto& tag : world.ins.seqs.elements(declaration->args.front().elems)) {
-    if (tag.kind != ast::TemplateArgKind::type) return std::nullopt;
-    const auto type = world.types.canonical(tag.type);
+    if (tag.kind != ast::TemplateArgKind::type) return std::unexpected(bad_set);
+    auto type = world.types.canonical(tag.type);
+    std::optional<ast::u64> maximum;
+    const auto [entry, grade] = marker(world, class_entity(world, type));
+    if (entry == Marker::effect_grade) {
+      if (ast::cv_of(type) != ast::Cv::none || grade->args.size() != 2 ||
+          grade->args[0].kind != ast::TemplateArgKind::type || grade->args[1].kind != ast::TemplateArgKind::value ||
+          !world.ins.values.is<ast::VInt>(grade->args[1].value))
+        return std::unexpected(bad_set);
+      const auto bits = ast::int_bits(world.ins, grade->args[1].value);
+      if (bits.hi != 0 || bits.lo == 0) return std::unexpected(bad_set);
+      maximum = bits.lo;
+      type = world.types.canonical(grade->args[0].type);
+      if (marker(world, class_entity(world, type)).marker == Marker::effect_grade)
+        return std::unexpected(bad_set);
+    }
     const auto kind = world.types.rec(type).kind;
     if (ast::cv_of(type) != ast::Cv::none || (kind != sema::TypeKind::class_ && kind != sema::TypeKind::enum_))
-      return std::nullopt;
-    tags.push_back(type);
+      return std::unexpected(bad_set);
+    entries.emplace_back(type, maximum);
   }
-  std::ranges::sort(tags);
-  tags.erase(std::ranges::unique(tags).begin(), tags.end());
-  return tags;
+  std::ranges::sort(entries, {}, &decltype(entries)::value_type::first);
+  EffectBound out{{}, trusted, {}};
+  out.tags.reserve(entries.size());
+  std::optional<ast::u64> previous;
+  for (const auto& [tag, maximum] : entries) {
+    if (!out.tags.empty() && out.tags.back() == tag) {
+      if (maximum != previous) return std::unexpected("conflicting usage grades for the same effect tag in a set");
+      continue;
+    }
+    previous = maximum;
+    out.tags.push_back(tag);
+    if (maximum) out.grades.emplace_back(tag, *maximum);
+  }
+  return out;
 }
 
 bool namespace_function(const sema::World& world, const sema::EntityRec* entity) {
@@ -279,11 +308,11 @@ PolicyDeclarations read_policy_declarations(const sema::World& world, ast::u32 u
     out.operations.emplace_back(policy_operation(world, entity, unit), effect, PolicyOrigin{unit, at});
   };
   auto effect_bound = [&](EntityId entity, const ast::TemplateArg& arg, bool trusted, ast::Loc at) {
-    auto tags = effect_tags(world, arg);
-    if (tags)
-      out.effect_bounds.emplace_back(policy_operation(world, entity, unit), EffectBound{std::move(*tags), trusted},
+    auto bound = read_effect_bound(world, arg, trusted);
+    if (bound)
+      out.effect_bounds.emplace_back(policy_operation(world, entity, unit), std::move(*bound),
                                      PolicyOrigin{unit, at});
-    else report(at, "effect bound requires ycxx::effects::set of unqualified class or enum tags");
+    else report(at, std::string(bound.error()));
   };
   for (const auto& annotation : annotations) {
     const auto [effect_marker, declaration] = marker(world, class_entity(world, annotation.annotation_type));

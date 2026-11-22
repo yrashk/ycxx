@@ -22,6 +22,9 @@ add_test(NAME unit.policies_contracts
 add_test(NAME unit.policies_effects
   COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/policies_effects.py
           $<TARGET_FILE:ycxxc> ${ownership_include})
+add_test(NAME unit.policies_grades
+  COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/policies_grades.py
+          $<TARGET_FILE:ycxxc> ${ownership_include})
 add_test(NAME unit.policies_package
   COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/policies_package.py
           ${CMAKE_COMMAND} ${CMAKE_CXX_COMPILER} ${PROJECT_SOURCE_DIR}/packages/ycxx-policies)

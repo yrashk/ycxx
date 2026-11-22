@@ -1009,6 +1009,7 @@ struct EffectFinding {
 struct EffectCalls {
   std::vector<std::pair<EntityId, ast::u32>> calls;
   std::optional<EffectFinding> unsupported;
+  std::optional<ast::u32> grade_jump;
 };
 
 struct EffectBodyCheck {
@@ -1029,6 +1030,8 @@ struct EffectCallsFor {
     std::set<EntityId> seen;
     auto visit = [&](auto&& self, const ast::Red& node) -> void {
       if (result.unsupported || node.is<ast::StaticAssert>()) return;
+      if (!result.grade_jump && (node.is<ast::Goto>() || node.is<ast::Switch>()))
+        result.grade_jump = node.offset();
       const auto problem = ast::dispatch<ast::Nodes>(node.kind(), [&]<class T>(std::type_identity<T>) -> std::string_view {
         using namespace ast;
         if constexpr (is_expression(^^T)) {
@@ -1093,6 +1096,98 @@ struct EffectBoundFor {
   }
 };
 
+struct EffectCost {
+  bool unbounded = false;
+  ast::u64 uses = 0;
+  auto operator<=>(const EffectCost&) const = default;
+};
+
+struct EffectPaths {
+  std::optional<EffectCost> continues = EffectCost{};
+  std::optional<EffectCost> returns;
+};
+
+static EffectPaths sequence(EffectPaths first, EffectPaths second) {
+  const auto add = [](std::optional<EffectCost> a, std::optional<EffectCost> b) -> std::optional<EffectCost> {
+    if (!a || !b) return std::nullopt;
+    if (a->unbounded || b->unbounded || a->uses > std::numeric_limits<ast::u64>::max() - b->uses)
+      return EffectCost{true};
+    return EffectCost{false, a->uses + b->uses};
+  };
+  return {add(first.continues, second.continues),
+          std::max(first.returns, add(first.continues, second.returns))};
+}
+
+static EffectPaths choice(EffectPaths first, EffectPaths second) {
+  return {std::max(first.continues, second.continues), std::max(first.returns, second.returns)};
+}
+
+static EffectCost maximum(EffectPaths paths) {
+  return std::max(paths.continues, paths.returns).value_or(EffectCost{});
+}
+
+// Count one tag over the structured AST. A return closes its path. A loop with positive
+// cost in its repeating region widens to unbounded. An initializer in a for loop runs once.
+static EffectPaths effect_usage(const ast::Red& node, const std::map<EntityId, ast::u64>& costs) {
+  const auto child = [&](ast::Child edge) -> EffectPaths {
+    if (edge.id == ast::NodeId::none) return {};
+    return effect_usage(ast::Red(node.ast(), edge.id, node.offset() + edge.at), costs);
+  };
+  if (node.is<ast::StaticAssert>()) return {};
+  if (node.is<ast::If>()) {
+    const auto branch = node.get<ast::If>();
+    return sequence(sequence(child(branch.init), child(branch.condition)),
+                    choice(child(branch.then_), child(branch.else_)));
+  }
+  if (node.is<ast::Conditional>()) {
+    const auto branch = node.get<ast::Conditional>();
+    return sequence(child(branch.condition), choice(child(branch.then_), child(branch.else_)));
+  }
+  if (node.is<ast::For>()) {
+    const auto loop = node.get<ast::For>();
+    const auto iteration = sequence(child(loop.condition), sequence(child(loop.body), child(loop.increment)));
+    return sequence(child(loop.init), {EffectCost{maximum(iteration) > EffectCost{}}, {}});
+  }
+
+  EffectPaths paths;
+  node.for_each_child([&](const ast::Red& edge) { paths = sequence(paths, effect_usage(edge, costs)); });
+  if (node.is<ast::While>() || node.is<ast::Do>())
+    return {EffectCost{maximum(paths) > EffectCost{}}, {}};
+  if (node.is<ast::Return>()) return {std::nullopt, std::max(paths.continues, paths.returns)};
+  if (node.is<ast::Call>())
+    if (const auto found = costs.find(node.get<ast::Call>().function); found != costs.end())
+      return sequence(paths, {EffectCost{false, found->second}, {}});
+  return paths;
+}
+
+static std::optional<EffectFinding> check_usage_grades(const sema::World& world, const ast::Red& body,
+                                                       const EffectCalls& calls, const EffectBound& caller,
+                                                       const std::map<EntityId, const EffectBound*>& bounds) {
+  for (const auto& [tag, limit] : caller.grades) {
+    std::map<EntityId, ast::u64> costs;
+    for (const auto& [target, offset] : calls.calls) {
+      const auto& callee = *bounds.at(target);
+      if (!std::ranges::binary_search(callee.tags, tag)) continue;
+      const auto grade = std::ranges::lower_bound(callee.grades, tag, {}, &decltype(callee.grades)::value_type::first);
+      if (grade == callee.grades.end() || grade->first != tag) {
+        const auto name = world.ins.names.spelling(world.entities.rec(target).name);
+        return EffectFinding{offset, std::format("call to '{}' has no finite usage grade for effect '{}'",
+                                                 name, world.types.spell(tag))};
+      }
+      costs.emplace(target, grade->second);
+    }
+    if (costs.empty()) continue;
+    if (calls.grade_jump)
+      return EffectFinding{*calls.grade_jump, "a finite usage grade with effectful calls requires control flow without goto or switch"};
+    const auto use = maximum(effect_usage(body, costs));
+    if (use.unbounded || use.uses > limit)
+      return EffectFinding{body.offset(), std::format("effect '{}' exceeds its usage grade of {}{}",
+                                                     world.types.spell(tag), limit,
+                                                     use.unbounded ? " (unbounded usage)" : "")};
+  }
+  return std::nullopt;
+}
+
 struct CheckEffectBody {
   struct Key {
     PolicySources sources;
@@ -1109,6 +1204,7 @@ struct CheckEffectBody {
     const auto& caller = co_await cx.fetch<EffectBoundFor>({key.sources, key.tu, key.function});
     if (!caller || caller->trusted) co_return Value{};
     Value out;
+    std::map<EntityId, const EffectBound*> bounds;
     for (const auto& [target, offset] : calls.calls) {
       const auto& callee = co_await cx.fetch<EffectBoundFor>({key.sources, key.tu, target});
       const auto name = world.ins.names.spelling(world.entities.rec(target).name);
@@ -1120,8 +1216,11 @@ struct CheckEffectBody {
       if (missing != callee->tags.end())
         co_return Value{EffectFinding{offset, std::format("effect bound of '{}' exceeds the caller's declared bound (effect '{}')",
                                                          name, world.types.spell(*missing))}, {}};
+      if (!caller->grades.empty()) bounds.emplace(target, &*callee);
       if (!policy_operation(world, target, key.tu.n).second) out.callees.push_back(target);
     }
+    if (!caller->grades.empty())
+      out.finding = check_usage_grades(world, ast::Red(world.ins.ast, key.body.tree), calls, *caller, bounds);
     co_return out;
   }
 };
@@ -1217,7 +1316,13 @@ engine::query_task<CheckPolicies::Value> CheckPolicies::run(engine::Ctx& cx, Key
                     | std::ranges::to<std::vector>();
         std::ranges::sort(tags);
         const auto type = world.types.canonical(world.entities.rec(function).type);
-        return fingerprint(std::tuple{function, type, std::move(tags)});
+        const auto base = fingerprint(std::tuple{function, type, std::move(tags)});
+        if (bound.grades.empty()) return base;
+        auto grades = bound.grades | std::views::transform([&](const auto& grade) {
+          return std::pair{world.types.fp(grade.first), grade.second};
+        }) | std::ranges::to<std::vector>();
+        std::ranges::sort(grades);
+        return fingerprint(std::tuple{base, std::move(grades)});
       };
       for (std::size_t i = 0; i < effect_findings.size(); ++i) {
         const auto function = effect_definitions[i]->entity;
