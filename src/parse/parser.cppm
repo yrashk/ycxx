@@ -4032,7 +4032,7 @@ public:
       angle_ = saved;
       if (!expect(Tk::r_paren)) return {NodeId::none, begin, pos()};
       Ex r;
-      if (cast == Tk::kw_dynamic_cast) r = s_->dynamic_cast_to_void(e, *t, begin, pos());
+      if (cast == Tk::kw_dynamic_cast) r = s_->dynamic_cast_to(e, *t, begin, pos());
       else if (cast == Tk::kw_reinterpret_cast) r = s_->reinterpret_cast_to(e, *t, begin);
       else r = s_->static_cast_to(e, *t, begin, /*named_static_cast=*/true);
       return {r.id, begin, pos(), r.info};

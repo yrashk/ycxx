@@ -265,6 +265,15 @@ struct DynamicCastVoid {
   [[=sequenced]] Child operand;
 };
 
+// A typed runtime pointer cast ([expr.dynamic.cast]), with opaque Itanium RTTI imports.
+struct DynamicCastPointer {
+  ExprInfo info;
+  EntityId source_rtti;
+  EntityId target_rtti;
+  EntityId runtime;
+  [[=sequenced]] Child operand;
+};
+
 // Assignment notation calls a member function with the argument sequenced before its object
 // ([expr.assign], [over.match.oper]). `object` is the implicit pointer argument.
 struct AssignmentCall {
@@ -565,7 +574,7 @@ using Nodes = closed_list<Literal, DeclRef, Paren, Unary, Binary, OrderedBinary,
                           DepName, CondDecl, Switch, Case, Default, Label, Goto, BuiltinCall, Lambda, DefaultArg,
                           StaticInit, StaticVar, NewObject, DeleteObject, VariadicBuiltin, AssignmentCall,
                           NewArray, DeleteArray, DelegatingInit, VirtualMemberCall, Throw, TryBlock, Handler,
-                          DefaultMemberInit, ExplicitDestroy, PeerRootInit, DynamicCastVoid>;
+                          DefaultMemberInit, ExplicitDestroy, PeerRootInit, DynamicCastVoid, DynamicCastPointer>;
 
 static_assert(Nodes::size < max_node_kinds);
 

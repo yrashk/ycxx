@@ -76,7 +76,7 @@ class Constants {
 
 // An entity the translation unit declares (or defines): what its symbol is made of.
 // These symbols use special Itanium encodings (§5.1.4.3, §5.1.4.5).
-enum class Special : std::uint8_t { none, constructor, destructor, virtual_table, deleting_destructor };
+enum class Special : std::uint8_t { none, constructor, destructor, virtual_table, deleting_destructor, type_info };
 struct Entity {
   EntityId id = EntityId::none;
   std::string name;  // its identifier
@@ -208,6 +208,7 @@ struct TranslationUnit {
   bool front_failed = false;           // the front end reported errors: nothing to compile
   bool virtual_emission_blocked = false;
   std::optional<ast::Loc> virtual_declaration;
+  std::optional<ast::Loc> unsupported_typed_dynamic_cast;
   std::optional<ir::IntThrowRuntime> int_throw;
   std::optional<ir::CatchAllRuntime> catch_all;
   EntityId cleanup_resume = EntityId::none;
@@ -1719,6 +1720,11 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
     errors.push_back({std::nullopt, "the translation unit has errors"});
     co_return out;
   }
+  if (tu.unsupported_typed_dynamic_cast) {
+    errors.push_back({tu.unsupported_typed_dynamic_cast,
+                      "typed dynamic_cast requires a default-visible peer-owned root and its direct public derived class on Linux x86-64"});
+    co_return co_await locate_errors(cx, id, std::move(out));
+  }
   if (tu.virtual_emission_blocked) {
     errors.push_back({tu.virtual_declaration, "native output for a translation unit with virtual member functions is not supported yet"});
     co_return co_await locate_errors(cx, id, std::move(out));
@@ -1884,14 +1890,16 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
       locals.push_back(&e);
       continue;
     }
-    if (e.special == Special::virtual_table) {
+    if (e.special == Special::virtual_table || e.special == Special::type_info) {
       auto encoding = mangled_type(in, in.intern_type(ast::TClass{e.scope}), names);
+      const bool table = e.special == Special::virtual_table;
       if (!encoding) {
-        errors.push_back({e.at, std::format("the virtual table's type name: {} is not supported yet", encoding.error())});
+        errors.push_back({e.at, std::format("the {} type name: {} is not supported yet",
+                                            table ? "virtual table's" : "RTTI object's", encoding.error())});
         continue;
       }
-      symbols.push_back({e.id, "_ZTV" + *encoding, obj::binding::global});
-      if (const auto& owned = tu.owned_virtual_table; owned && owned->entity == e.id) {
+      symbols.push_back({e.id, (table ? "_ZTV" : "_ZTI") + *encoding, obj::binding::global});
+      if (const auto& owned = tu.owned_virtual_table; table && owned && owned->entity == e.id) {
         std::optional<std::string> base;
         if (owned->primary_base != EntityId::none) {
           auto base_encoding = mangled_type(in, in.intern_type(ast::TClass{owned->primary_base}), names);

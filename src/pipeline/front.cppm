@@ -430,7 +430,8 @@ using UnwindNodes = ast::closed_list<
     ast::Label, ast::Goto, ast::Literal, ast::DeclRef, ast::LocalRef, ast::Paren, ast::Unary,
     ast::Binary, ast::OrderedBinary, ast::Assign, ast::Conditional, ast::Subscript, ast::Call, ast::Member,
     ast::NewArray, ast::DeleteArray, ast::ImplicitConversion, ast::InitList, ast::DefaultMemberInit,
-    ast::Materialize, ast::This, ast::ValueInit, ast::DefaultInit, ast::Throw, ast::DynamicCastVoid>;
+    ast::Materialize, ast::This, ast::ValueInit, ast::DefaultInit, ast::Throw, ast::DynamicCastVoid,
+    ast::DynamicCastPointer>;
 using UnwindAggregateNodes = ast::closed_list<ast::InitList, ast::LocalRef, ast::Materialize, ast::Paren>;
 
 enum class UnwindContext { function, cleanup_initializer, default_member };
@@ -794,13 +795,9 @@ bool names_unnamed_namespace(parse::Program& program, QualType type) {
   }
 }
 
-// The definitions and declarations of the global namespace, in item order.
-TranslationUnit unit_of(parse::Program& program, sema::World& world, const items::Items& items, std::string name,
-                        const std::set<EntityId>& uncertain_layouts) {
-  ast::Interners& ins = world.ins;
-  TranslationUnit tu;
-  tu.name = std::move(name);
-  // Native compilation may consume peer-owned Linux objects, including one non-key definition.
+// Native compilation may consume peer-owned Linux objects, including one non-key definition.
+bool native_virtual_layouts(TranslationUnit& tu, parse::Program& program, sema::World& world,
+                            const std::set<EntityId>& uncertain_layouts) {
   const auto& classes = program.classes();
   std::set<EntityId> automatic_primary_bases;
   if (classes.has_virtual_layouts()) {
@@ -812,7 +809,7 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
         if (uncertain_layouts.contains(c) || uncertain_layouts.contains(base) || !key ||
             (*key != EntityId::none && tu.owned_virtual_table)) {
           block_virtual_emission(tu, program, record);
-          return tu;
+          return false;
         }
         if (*key != EntityId::none)
           tu.owned_virtual_table = OwnedVirtualTable{sema::virtual_table_entity(world, c), {*key}, base};
@@ -860,8 +857,20 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
       continue;
     }
     block_virtual_emission(tu, program, record);
-    return tu;
+    return false;
   }
+  return true;
+}
+
+// The definitions and declarations of the global namespace, in item order.
+TranslationUnit unit_of(parse::Program& program, sema::World& world, const items::Items& items, std::string name,
+                        const std::set<EntityId>& uncertain_layouts) {
+  ast::Interners& ins = world.ins;
+  TranslationUnit tu;
+  tu.name = std::move(name);
+  const auto& classes = program.classes();
+  const bool has_typed_cast = program.has_typed_dynamic_cast();
+  if (!has_typed_cast && !native_virtual_layouts(tu, program, world, uncertain_layouts)) return tu;
   const bool linux = world.target.triple == ast::x86_64_linux.triple;
   std::set<std::uint32_t> seen;
   std::set<EntityId> inline_declarations;
@@ -903,7 +912,8 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
         r.kind == sema::EntityKind::alias_template || r.kind == sema::EntityKind::concept_)
       return;  // no symbol: a template's specializations have them
     const bool table = r.kind == sema::EntityKind::virtual_table;
-    bool fn = r.kind != sema::EntityKind::variable && !table;
+    const bool rtti = r.kind == sema::EntityKind::type_info;
+    bool fn = r.kind != sema::EntityKind::variable && !table && !rtti;
     std::string id(ins.names.spelling(r.name));
     if (fn && id == "main" && r.scope == EntityId::none) tu.main = e;  // [basic.start.main]: the global one
     // A member of a class local to the unit is local too.
@@ -912,6 +922,7 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
       if (world.entities.rec(sc).kind == sema::EntityKind::class_ && internal_class(sc)) linkage = ast::Linkage::internal;
     tu.entities.push_back({e, std::move(id), d.type, fn, r.lang, linkage, false, at, r.scope,
                            table ? Special::virtual_table
+                           : rtti ? Special::type_info
                            : r.kind == sema::EntityKind::constructor  ? Special::constructor
                            : r.kind == sema::EntityKind::destructor ? Special::destructor
                            : r.kind == sema::EntityKind::deleting_destructor ? Special::deleting_destructor
@@ -1227,6 +1238,42 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
         f.unwind = UnwindEligibility::none;
       else if (tu.cleanup_resume == EntityId::none) tu.cleanup_resume = runtime.resume();
     }
+  }
+  if (has_typed_cast) {
+    // Only emitted trees need native RTTI. In particular, syntax-only expressions and
+    // constant initializers do not introduce references to the host runtime.
+    std::set<std::pair<EntityId, EntityId>> checked;
+    for (const FunctionDef& f : tu.functions) {
+      if (f.body.tree == ast::NodeId::none) continue;
+      auto collect = [&](this auto&& visit, const ast::Red& node) -> void {
+        if (node.is<ast::DynamicCastPointer>()) {
+          const auto cast = node.get<ast::DynamicCastPointer>();
+          const EntityId source = world.entities.rec(cast.source_rtti).scope;
+          const EntityId target = world.entities.rec(cast.target_rtti).scope;
+          if (checked.emplace(source, target).second) {
+            const ast::Loc at{f.item, node.offset()};
+            if (uncertain_layouts.contains(source) || uncertain_layouts.contains(target) ||
+                !program.peer_typed_dynamic_cast(source, target)) {
+              tu.unsupported_typed_dynamic_cast = at;
+              return;
+            }
+            for (EntityId id : {cast.source_rtti, cast.target_rtti, cast.runtime}) {
+              ast::DeclSema d{};
+              d.kind = id == cast.runtime ? ast::DeclKind::function : ast::DeclKind::variable;
+              d.entity = id;
+              d.type = world.entities.rec(id).type;
+              declare(d, at);
+            }
+          }
+        }
+        node.for_each_child([&](const ast::Red& child) {
+          if (!tu.unsupported_typed_dynamic_cast) visit(child);
+        });
+      };
+      collect(ast::Red(ins.ast, f.body.tree, f.body_offset));
+      if (tu.unsupported_typed_dynamic_cast) return tu;
+    }
+    if (!native_virtual_layouts(tu, program, world, uncertain_layouts)) return tu;
   }
   // Register the owner after checking the makers. An owned declaration cannot stand in for
   // the visibility check required when a maker requests the address point.
