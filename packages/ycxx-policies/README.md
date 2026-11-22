@@ -51,6 +51,8 @@ An API can publish metadata in `<ycxx/ownership.hpp>` as reusable `policy<...>` 
 activate several fragments with a namespace-scope alias of `use_policy<...>`. The metadata has
 no runtime work. YCXX interprets it when ownership checking is enabled. Use typed template
 arguments for portability and C++26 declaration annotations with compiler support.
+Guard the reflection attributes with `#ifdef __ycxx__` to build the same source as C++20
+with GCC and Clang while retaining the runtime guards.
 
 Add `move_transfers<Resource>` as a separate policy entry when the resource's
 `Resource(Resource&&) noexcept` constructor moves a live obligation and invalidates its source.
