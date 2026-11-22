@@ -1947,13 +1947,14 @@ std::optional<QualType> AtItem::replay_member_exception(sema::Sema& caller, cons
 
   auto& ins = p_->world().ins;
   auto head = ins.seqs.elements(decl.template_params);
-  const u32 depth = head.empty() ? 0 : head.front().depth;
+  const sema::u16 depth = head.empty() ? 0 : head.front().depth;
   replay.template_scopes = p_->enclosing_heads(item);
   replay.template_scopes.push_back(std::move(head));
   if (auto outer = p_->class_args_.find(std::to_underlying(record.scope)); outer != p_->class_args_.end())
     replay.template_args = outer->second;
+  auto member_arguments = sema::Bindings::of(depth, record.args);
   replay.template_args.levels.resize(depth + 1);
-  replay.template_args.levels[depth] = record.args;
+  replay.template_args.levels[depth] = std::move(member_arguments.levels[depth]);
   replay.push_scope();
   auto t = replay.templates();
   for (const auto& param : ins.seqs.elements(decl.params)) {
