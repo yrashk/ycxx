@@ -17,3 +17,22 @@ int peek(Counted c, long tag) { return c.v + int(tag); }
 
 static Big indirect(long x) { return Big{-x, x, -x, x}; }
 BigMaker big_maker() { return indirect; }
+
+Counted Maker::tally(Pair p) const { return Counted(int(k + p.a + p.b)); }
+
+// The hidden pointer and the record share the INTEGER registers.
+Big mix(Pair p, long x) { return Big{p.a, p.b, x, p.a + x}; }
+
+// The hidden pointer and four longs leave one register: `p` goes to the stack, `e` takes R9.
+Big late(long a, long b, long c, long d, Pair p, long e) { return Big{a + b + c + d, p.a, p.b, e}; }
+
+long both(Pair p, Counted c, long t) { return p.a * 100 + p.b * 10 + c.v + t; }
+
+// The callee owns the object it was given the address of; the caller's original is a copy.
+int poke(Counted c) {
+  c.v = 1;
+  return c.v;
+}
+
+static Counted counted(int x) { return Counted(x * 2); }
+CountedMaker counted_maker() { return counted; }

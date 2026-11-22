@@ -1005,6 +1005,17 @@ engine::query_task<FrontResult> TuFront::run(engine::Ctx& cx, TuId tu) {
     shape.trivial_calls = classes.trivial_for_calls(c, unit_source.config.calls());
     shape.layout_uncertain = uncertain.contains(c);
     shape.copy_abi_unknown = record.defaulted_copy == sema::CopyState::unsupported;
+    {
+      // Itanium C++ ABI §3.1.2.3 from the special members one by one ([class.prop]): a
+      // non-trivial destructor or copy or move constructor, or neither constructor usable.
+      using enum sema::CopyOperation;
+      const sema::TrivialCopyability& t = record.trivial_copyability;
+      const bool known = t.destructor != unknown && t.copy_constructor != unknown && t.move_constructor != unknown;
+      const bool nontrivial = t.destructor == eligible_nontrivial || t.copy_constructor == eligible_nontrivial ||
+                              t.move_constructor == eligible_nontrivial ||
+                              (t.copy_constructor == ineligible && t.move_constructor == ineligible);
+      shape.calls_abi_uncertain = !shape.trivial_calls && (!known || !nontrivial);
+    }
     shape.layout_requires_virtual_support = record.layout_requires_virtual_support;
     if (record.peer_virtual_layout != sema::PeerVirtualLayout::none) {
       const bool uncertain_base = record.peer_virtual_layout == sema::PeerVirtualLayout::primary_base &&

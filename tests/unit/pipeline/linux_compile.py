@@ -333,6 +333,9 @@ system_leaf:
             ('struct X { double a; }; int g(X); int f() { return g(X{1.0}); }',
              f'call: {aggregate_parameter}'),
             ('struct X { long a, b, c; }; long f(X x) { return x.a; }', aggregate_parameter),
+            # Source packing that native layout does not apply stays out of memory passing (#641).
+            ('struct __attribute__((packed)) X { char tag; long a, b; }; X g(); long f() { return g().a; }',
+             f'call: {aggregate_result}'),
             ('int f(long double, ...) { return 1; }', 'x87 long double parameters and results are unsupported'),
             ('struct X { int x; }; int f(X, ...) { return 1; }', parameters),
             ('int f(int (*g)(double, ...)) { return g(1.0); }', f'call: {indirect_floating}'),

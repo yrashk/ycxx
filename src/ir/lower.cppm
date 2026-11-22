@@ -55,6 +55,8 @@ export struct TypeLayout {
   // Records: the bits of each INTEGER eightbyte in the supported AMD64 slice, zero otherwise.
   std::uint8_t sysv_integer_eightbytes = 0;
   bool copy_abi_unknown = false;  // records whose defaulted copy has unresolved triviality
+  bool calls_abi_uncertain = false;  // records whose non-triviality for calls is not established
+  bool layout_uncertain = false;     // records whose source layout directives are not applied
   bool contains_explicit_alignment = false;  // a class-head requirement raises this object or a subobject's alignment
 };
 
@@ -1122,7 +1124,8 @@ class Lowering {
   // (Itanium C++ ABI §3.1.3.1), or one of more than two eightbytes (psABI §3.2.3, MEMORY).
   bool sysv_memory_result(QualType c) const {
     TypeLayout l = layout(c);
-    return l.kind == TypeKind::record && !l.empty && (!l.trivial_calls || l.size > 16);
+    return l.kind == TypeKind::record && !l.empty && !l.copy_abi_unknown && !l.layout_uncertain &&
+           ((!l.trivial_calls && !l.calls_abi_uncertain) || l.size > 16);
   }
   // An empty class trivially copyable for calls is not passed at all, as Clang does on arm64
   // macOS (#116).

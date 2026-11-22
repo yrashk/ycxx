@@ -644,8 +644,10 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
   A class result in memory, of more than two eightbytes or not trivial for calls, goes
   through a hidden pointer that takes RDI ahead of `this` and comes back in RAX. A class
   argument not trivial for calls passes by the address of the caller's object. Trivially
-  copyable arguments of more than two eightbytes, SSE records and empty classes remain
-  [#641](https://github.com/yrashk/ycxx/issues/641), [#642](https://github.com/yrashk/ycxx/issues/642).
+  copyable arguments of more than two eightbytes and empty classes remain unsupported
+  ([#641](https://github.com/yrashk/ycxx/issues/641)), as do SSE records
+  ([#642](https://github.com/yrashk/ycxx/issues/642)). Records with source layout directives
+  native layout does not apply stay out of memory passing too.
   [Design](docs/design/linux-integer-aggregates.md) · [#440](https://github.com/yrashk/ycxx/issues/440)
 - `-c` writes deterministic ELF64 relocatable objects through `src/obj/elf.cppm`. The reader
   accepts the supported x86-64 `ET_REL` subset emitted by ycxx. The native ELF linker consumes

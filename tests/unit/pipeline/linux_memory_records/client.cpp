@@ -16,5 +16,15 @@ int main() {
   if (peek(kept, 3) != 1010) return 6;
   Big i = big_maker()(9);
   if (i.a != -9 || i.b != 9 || i.c != -9 || i.d != 9) return 7;
+  Counted u = m.tally(Pair{1, 2});
+  if (u.v != 43) return 8;
+  Big x = mix(Pair{3, 4}, 5);
+  if (x.a != 3 || x.b != 4 || x.c != 5 || x.d != 8) return 9;
+  Big l = late(1, 2, 3, 4, Pair{5, 6}, 7);
+  if (l.a != 10 || l.b != 5 || l.c != 6 || l.d != 7) return 10;
+  if (both(Pair{1, 2}, Counted(3), 4) != 127) return 11;
+  if (poke(kept) != 1 || kept.v != 7) return 12;
+  Counted w = counted_maker()(21);
+  if (w.v != 42) return 13;
   return 0;
 }
