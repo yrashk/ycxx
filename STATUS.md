@@ -1630,6 +1630,19 @@ template's tokens again with the arguments bound.
   overload set argument ([temp.deduct.call]/6), "required from here" notes. Coalesced (weak)
   definitions of specializations are #124.
 
+## Native function pointer template arguments (#406)
+
+- A function pointer template argument can name an unambiguous externally linked C++ or C
+  function. The bare function name and its address name the same specialization. The
+  converted pointer type can come from an earlier type argument, including a `noexcept`
+  signature. A null function pointer has its own specialization.
+- Linkage names use the symbolic entity from constant evaluation. The function encoding
+  shares the enclosing name's Itanium substitutions. Native calls use the same entity
+  for the relocated address on x86-64 Linux and arm64 Darwin.
+- Tests: `tests/own/templates/function-pointer-arguments/`. Function references and
+  target-typed selection from overload sets stay in #406. Directly taking the address
+  of a function template specialization as an expression stays in #335.
+
 ## Templates, ζ step 2: class templates (#88, 2026-11-18)
 
 - **Declarations:** class templates at namespace scope (`template<…> struct X {…};` and

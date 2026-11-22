@@ -324,9 +324,11 @@ written default member initializer are value-initialized.
   Non-template code outside requires-expression bodies also checks constraints on directly named
   primary namespace variable templates with explicit non-dependent type arguments. Templates support
   `if constexpr`, deferred template static assertion failures, and two-phase lookup, with
-  Itanium names identical to Clang's; Clang's
-  `__make_integer_seq`. Template type arguments can use terminal namespace-qualified alias
-  specializations that expand to dependent member types. [#630](https://github.com/yrashk/ycxx/issues/630)
+  Itanium names identical to Clang's. Native function templates can call an unambiguous
+  externally linked target supplied as a function pointer argument, including a concrete
+  `noexcept` signature. The compiler supports Clang's `__make_integer_seq`. Template type
+  arguments can use terminal namespace-qualified alias specializations that expand to
+  dependent member types. [#406](https://github.com/yrashk/ycxx/issues/406) · [#630](https://github.com/yrashk/ycxx/issues/630)
 - dependent `__is_same`, `__is_reference`, `__is_const`, `__is_volatile`, `__is_array`,
   `__is_pointer`, `__is_function`, `__is_enum`, `__is_union`, `__is_class`, `__is_object`, and the
   three member-pointer predicates as `bool` template arguments or defaults, including through

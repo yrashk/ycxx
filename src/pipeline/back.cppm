@@ -1676,6 +1676,16 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
   auto spec_of = [](const Entity& e) {
     return TemplateSpec{e.template_type.value_or(e.type), e.template_args, e.template_params, e.template_same_heads};
   };
+  const FunctionNames function_names = [&](EntityId id) -> std::optional<FunctionName> {
+    auto found = by_id.find(ir::raw(id));
+    if (found == by_id.end()) return std::nullopt;
+    const Entity& fn = *found->second;
+    if (!fn.is_function || fn.linkage != ast::Linkage::external || fn.local_parameter_binding)
+      return std::nullopt;
+    return FunctionName{
+        {fn.name, fn.type, fn.scope, false, fn.template_type ? std::optional(spec_of(fn)) : std::nullopt},
+        fn.lang};
+  };
   ClassNames names = [&](EntityId c) {
     const sema::World* w = universe().world_for(target);
     if (!w) return ClassName{};
@@ -1716,7 +1726,7 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
     std::string name_ = e.special == Special::constructor ? "C1" : e.special == Special::destructor ? "D1" : e.name;
     TemplateSpec spec{e.template_type.value_or(e.type), e.template_args, e.template_params, e.template_same_heads};
     auto name = symbol_name(in, name_, e.type, e.is_function, e.lang, names, e.scope, e.special != Special::none,
-                            e.template_type ? &spec : nullptr, !linux);
+                            e.template_type ? &spec : nullptr, !linux, function_names);
     if (!name) {
       errors.push_back({e.at, std::format("the name of '{}': {} is not supported yet", e.name, name.error())});
       continue;
