@@ -289,6 +289,7 @@ inline constexpr u16 friend_ = 32768;  // a friend declaration ([class.friend]):
 
 // Only this fixed set of declarations can consume a peer-owned virtual table.
 bool native_virtual_declaration(const MemberDeclRec& member, const Types& types, auto&& written_member) {
+  if (member.is_pure) return false;
   auto integer = [&](QualType type) {
     const auto builtin = types.builtin_of(type);
     return builtin && ast::is_integral(*builtin) && types.target()[*builtin].size <= 8;
@@ -1694,15 +1695,16 @@ public:
       if (types().is_enum(c))
         if (const EnumRec* e = enum_rec(types().enum_of(c))) v = e->scoped;
       break;
+    case is_abstract:
     case is_polymorphic:
     case has_virtual_destructor:
       if (types().is_class(c) && is_union_type(c) != true) {
         const ClassRec* r = cls();
         if (!r) return {NodeId::none, begin, end};
-        v = t == is_polymorphic ? r->polymorphic : r->virtual_destructor;
+        if (t == is_abstract) v = r->is_abstract();
+        else v = t == is_polymorphic ? r->polymorphic : r->virtual_destructor;
       }
       break;
-    case is_abstract:
     case is_final: v = false; break;
     case is_lvalue_reference: v = types().is_reference(c) && !types().rec(c).rvalue_ref; break;
     case is_rvalue_reference: v = types().is_reference(c) && types().rec(c).rvalue_ref; break;
