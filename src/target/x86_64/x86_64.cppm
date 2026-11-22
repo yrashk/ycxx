@@ -129,8 +129,9 @@ struct Frame {
 
 bool supports_float(Op op) {
   switch (op) {
-    case Op::const_: case Op::load: case Op::store: case Op::select: case Op::fpext:
-    case Op::fadd: case Op::fsub: case Op::fmul: case Op::fdiv: case Op::fneg: case Op::fcmp:
+    case Op::const_: case Op::load: case Op::store: case Op::select: case Op::fpext: case Op::fptrunc:
+    case Op::fadd: case Op::fsub: case Op::fmul: case Op::fdiv: case Op::fneg: case Op::fabs: case Op::fcmp:
+    case Op::fptosi: case Op::fptoui: case Op::sitofp: case Op::uitofp:
     case Op::call: case Op::call_ind: case Op::ret: case Op::va_arg: return true;
     default: return false;
   }
@@ -387,6 +388,38 @@ class Emitter {
     return true;
   }
 
+  // Convert an i32 or i64 to binary32 or binary64, rounding under MXCSR.
+  bool int_to_float(bool is_signed, ValueId source, ValueId result) {
+    const Type from = body_.type(source);
+    const unsigned width = home_width(result);
+    const std::int32_t slot = frame_.slots[raw(source)];
+    if (is_signed || from == Type::i32) {
+      // `write` zero-extends an i32 home slot, so its unsigned value is the signed i64.
+      e_.integer_to_float(0, rbp, slot, width, !is_signed || from == Type::i64);
+      e_.store_scalar_xmm(rbp, frame_.slots[raw(result)], 0, width);
+      return true;
+    }
+    // An i64 with the top bit set: halve it, keeping the bit shifted out as a sticky low bit
+    // so the signed conversion rounds the same way, then double the result exactly.
+    read(source);
+    e_.reg({0x85}, rax, rax);  // test rax, rax
+    e_.emit({0x0f, 0x89});     // jns rel32
+    auto non_negative = e_.displacement();
+    e_.move(rcx, rax);
+    e_.reg({0xd1}, 5, rcx);              // shr rcx, 1
+    e_.emit({0x83, 0xe0, 0x01});         // and eax, 1
+    e_.reg({0x09}, rax, rcx);            // or rcx, rax
+    e_.integer_to_float(0, rcx, width);
+    e_.double_xmm(0, width);
+    e_.emit({0xe9});  // jmp rel32
+    auto converted = e_.displacement();
+    if (!e_.patch_relative(non_negative, e_.offset())) return false;
+    e_.integer_to_float(0, rax, width);
+    if (!e_.patch_relative(converted, e_.offset())) return false;
+    e_.store_scalar_xmm(rbp, frame_.slots[raw(result)], 0, width);
+    return true;
+  }
+
   void parameters() {
     for (ValueId v : body_.params_of(BlockId(0)) | std::views::drop(1)) {
       auto [kind, index] = incoming_.place(body_.type(v));
@@ -575,6 +608,66 @@ std::expected<void, std::string> Emitter::node(NodeId n) {
         e_.reg({0x31}, rcx, rax);  // xor rax, rcx
       }
       break;
+    case Op::fabs:
+      // Clear only the IEEE sign bit, as for negation.
+      read(ops[0]);
+      if (body_.type(body_.result(n)) == Type::f32) {
+        e_.emit({0x25});  // and eax, imm32
+        e_.immediate(~(std::uint32_t{1} << 31), 4);
+      } else {
+        e_.emit({0x48, 0xb9});  // mov rcx, imm64
+        e_.immediate(~(std::uint64_t{1} << 63), 8);
+        e_.reg({0x21}, rcx, rax);  // and rax, rcx
+      }
+      break;
+    case Op::fptrunc:
+      e_.narrow_float(0, rbp, frame_.slots[raw(ops[0])]);
+      e_.store_scalar_xmm(rbp, frame_.slots[raw(body_.result(n))], 0, 4);
+      return {};
+    case Op::sitofp: case Op::uitofp:
+      if (!int_to_float(op == Op::sitofp, ops[0], body_.result(n)))
+        return at_node(n, op, "conditional branch displacement out of range");
+      return {};
+    case Op::fptosi: case Op::fptoui: {
+      // Values outside the result type are poison (L2), so a truncation that is exact for
+      // every value in range suffices.
+      const Type type = body_.type(body_.result(n));
+      const unsigned width = home_width(ops[0]);
+      const std::int32_t source = frame_.slots[raw(ops[0])];
+      if (op == Op::fptosi || type == Type::i32) {
+        // A uint32 value fits the signed 64-bit conversion; `write` keeps its low 32 bits.
+        e_.truncate_float(rax, rbp, source, width, op == Op::fptoui || type == Type::i64);
+        break;
+      }
+      // Below 2^63 the signed conversion is exact. At or above it, convert x - 2^63, which is
+      // exact there, and set the top bit. Comparing first keeps a valid conversion from raising
+      // the invalid-operation flag (Intel SDM vol. 2, CVTTSD2SI).
+      const std::int32_t scratch = frame_.slots[raw(body_.result(n))];
+      if (width == 4) {
+        e_.emit({0xb8});  // mov eax, imm32: 2^63 as binary32
+        e_.immediate(0x5f000000, 4);
+      } else {
+        e_.emit({0x48, 0xb8});  // mov rax, imm64: 2^63 as binary64
+        e_.immediate(0x43e0000000000000, 8);
+      }
+      e_.store(rbp, scratch, rax, width);
+      e_.load_scalar_xmm(0, rbp, source, width);
+      e_.compare_scalar_xmm(0, rbp, scratch, width);
+      e_.emit({0x0f, 0x83});  // jae rel32: x >= 2^63 (unordered is poison and falls through)
+      auto high = e_.displacement();
+      e_.truncate_float(rax, rbp, source, width, true);
+      e_.emit({0xe9});  // jmp rel32
+      auto converted = e_.displacement();
+      if (!e_.patch_relative(high, e_.offset())) return at_node(n, op, "conditional branch displacement out of range");
+      e_.scalar_float_arithmetic(0x5c, 0, rbp, scratch, width);  // subtract 2^63
+      e_.store_scalar_xmm(rbp, scratch, 0, width);
+      e_.truncate_float(rax, rbp, scratch, width, true);
+      e_.emit({0x48, 0xb9});  // mov rcx, imm64
+      e_.immediate(std::uint64_t{1} << 63, 8);
+      e_.reg({0x31}, rcx, rax);  // xor rax, rcx
+      if (!e_.patch_relative(converted, e_.offset())) return at_node(n, op, "conditional branch displacement out of range");
+      break;
+    }
     case Op::shl: case Op::lshr: case Op::ashr:
       read(ops[0]);
       read(ops[1], rcx);
