@@ -132,12 +132,14 @@ struct Options {
   enum class Stop { link, object, syntax, preprocess } stop = Stop::link;
   pp::Config pp;  // include paths, macros and target
   bool nostdlib = false;
+  bool nostdlibxx = false;  // `-nostdlib++`: no libycxx runtime in a Darwin link
   std::optional<std::string> output, interpreter;
   std::vector<std::string> sources;  // translation units
   std::vector<std::string> objects;  // objects named on the command line
   std::vector<std::string> archives;
   std::vector<pipeline::LinkOperand> operands;
   std::vector<std::string> libraries;  // shared objects in command-line order
+  std::vector<std::string> undefined;  // names an archive link starts with as referenced
 };
 
 bool is_source(std::string_view f) {
@@ -171,6 +173,7 @@ std::expected<Options, std::string> parse_options(std::span<const std::string_vi
     else if (a == "-fsyntax-only") o.stop = Options::Stop::syntax;
     else if (a == "-E") o.stop = Options::Stop::preprocess;
     else if (a == "-nostdlib") o.nostdlib = true;
+    else if (a == "-nostdlib++") o.nostdlibxx = true;
     else if (a == "--dynamic-linker" || a.starts_with("--dynamic-linker=")) {
       if (a == "--dynamic-linker" && (i + 1 == args.size() || args[i + 1].starts_with('-')))
         return std::unexpected("argument to '--dynamic-linker' is missing");
@@ -246,6 +249,11 @@ std::expected<Options, std::string> parse_options(std::span<const std::string_vi
   if (o.pp.call_triviality == ast::CallTriviality::apple && !o.pp.target->apple_calls)
     return std::unexpected("invalid value in '-fclass-call-abi=apple'");
   if (o.sources.empty() && o.objects.empty()) return std::unexpected("no input files");
+  // An executable for arm64 macOS links libycxx's runtime after the operands (#842).
+  if (darwin_link && !o.nostdlibxx) {
+    for (const auto& archive : pipeline::darwin_runtime().archives) add_operand(Kind::archive, o.archives, archive);
+    o.undefined = pipeline::darwin_runtime().undefined;
+  }
   if (linux_link && !o.nostdlib)
     return std::unexpected("hosted Linux linking is not supported. Use '-nostdlib' for a freestanding executable");
   if (o.output && o.stop == Options::Stop::object && o.sources.size() > 1)
@@ -553,7 +561,7 @@ Done run(const Request& r, pp::Host& host, pipeline::Session& session, const Sto
     if (!archives.empty())
       archive_link.emplace(pipeline::ArchiveLinkInputs{
           linux_target ? obj::target::x86_64_linux : obj::target::aarch64_macos, std::move(opts->operands),
-          std::move(archives)});
+          std::move(archives), std::move(opts->undefined)});
     if (bad_input) key.until = pipeline::Until::object;
     else key.program = session.program(
         {key.units, std::move(objects), out.filename().native_encoded_string(), std::move(dynamic), std::move(archive_link)});

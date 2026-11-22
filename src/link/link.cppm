@@ -74,8 +74,10 @@ using static_operand =
 // anywhere on the command line. A name is outstanding while some object references it, weakly or
 // not, or defines it only tentatively, and no object defines it otherwise. Each outstanding name,
 // in the order it became outstanding, selects the first member defining it of the first archive
-// whose index lists it.
-std::expected<std::vector<obj::object>, std::string> select_archive_members(std::span<const static_operand> operands);
+// whose index lists it. Each name in `undefined` is referenced from the start, as the system
+// linker's `-u` makes it.
+std::expected<std::vector<obj::object>, std::string> select_archive_members(std::span<const static_operand> operands,
+                                                                           std::span<const std::string> undefined = {});
 
 // The names a text-based stub (.tbd, version 4) exports for arm64 macOS: the `symbols` and
 // `weak-symbols` lists under `exports:` and `reexports:` whose targets include arm64 or arm64e
@@ -974,7 +976,8 @@ private:
       mo::store32(w.bytes, table + 4 * s, static_cast<std::uint32_t>(w.size() - starts_offset));
       // Only the pages with file contents. Page-in linking maps every listed page from the file,
       // so listing the zero-fill pages past them would fill those with what follows in the file
-      // (#842). Fixups never lie there: relocations in zero-fill sections are rejected.
+      // (#842). Fixups never lie there: relocations in zero-fill sections are rejected, and
+      // zero-fill sections are laid out last in each segment.
       const auto page_count = static_cast<std::uint16_t>(sg.filesize / page);
       w.u32(22 + 2u * page_count);  // size of dyld_chained_starts_in_segment with its page_start array
       w.u16(static_cast<std::uint16_t>(page));
@@ -1321,7 +1324,8 @@ private:
 
 }  // namespace
 
-std::expected<std::vector<obj::object>, std::string> select_archive_members(std::span<const static_operand> operands) {
+std::expected<std::vector<obj::object>, std::string> select_archive_members(std::span<const static_operand> operands,
+                                                                           std::span<const std::string> undefined) {
   std::vector<obj::object> objects;
   std::vector<std::pair<const obj::archive::input*, obj::archive::contents>> archives;
   for (const auto& operand : operands) {
@@ -1353,6 +1357,10 @@ std::expected<std::vector<obj::object>, std::string> select_archive_members(std:
       if (outstanding(name)) queue.emplace_back(name);
     }
   };
+  for (const auto& name : undefined) {
+    referenced.emplace(name);
+    queue.push_back(name);
+  }
   for (const auto& o : objects) include(o);
 
   std::vector<std::vector<std::uint8_t>> selected;
