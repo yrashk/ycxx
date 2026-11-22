@@ -6416,8 +6416,12 @@ public:
       ExprInfo info{Types::unqualified(p->type), ValueCategory::prvalue, expr_flag::dependent};
       return node(ast::Literal{info, v}, begin, end, info);
     }
-    if (const auto* declaration = earlier_nested_enumerator(name))
+    if (const auto* declaration = earlier_nested_enumerator(name)) {
+      // An unnamed enum gets its entity after the underlying type is known.
+      if (declaration->enum_initializer != ConstId::none)
+        return literal(declaration->sema.type, declaration->enum_initializer, ValueCategory::prvalue, begin, end);
       return enumerator(declaration->sema.entity, declaration->sema.type, begin, end);
+    }
     // The enclosing class's members ([basic.scope.class]).
     if (current_class != EntityId::none) {
       if (auto r = class_member(current_class, name, begin, end, begin, std::nullopt, /*unqualified=*/true)) return *r;
