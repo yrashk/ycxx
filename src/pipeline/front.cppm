@@ -763,6 +763,21 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
   tu.name = std::move(name);
   // Native compilation may consume peer-owned Linux objects, including one non-key definition.
   const auto& classes = program.classes();
+  std::set<EntityId> automatic_primary_bases;
+  if (classes.has_virtual_layouts()) {
+    for (EntityId c : classes.classes()) {
+      const auto& record = classes.rec(c);
+      if (const EntityId base = record.peer_automatic_primary_base; base != EntityId::none) {
+        // Check both classes after the last declaration. The maker never owns either table.
+        if (uncertain_layouts.contains(c) || uncertain_layouts.contains(base) ||
+            !program.peer_automatic_derived_tables(c)) {
+          block_virtual_emission(tu, program, record);
+          return tu;
+        }
+        automatic_primary_bases.insert(base);
+      }
+    }
+  }
   EntityId defined_nonkey = EntityId::none;
   auto peer_member_declaration = [&](EntityId f) -> std::optional<ast::DeclSema> {
     // Inspect all definitions at the end of the unit, including a key written after the
@@ -782,6 +797,7 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
   for (EntityId c : classes.classes()) {
     const auto& record = classes.rec(c);
     if (!record.layout_requires_virtual_support) continue;
+    if (record.peer_automatic_primary_base != EntityId::none || automatic_primary_bases.contains(c)) continue;
     // Check the full unit even if a pure call was admitted before a later redeclaration.
     if (!uncertain_layouts.contains(c) && program.peer_pure_dispatch(c)) continue;
     // The first slot is the key function of the admitted root. Classify its ownership using
@@ -1297,13 +1313,16 @@ engine::query_task<FrontResult> TuFront::run(engine::Ctx& cx, TuId tu) {
                                   !(linux && nontrivial_destructor(c));
     }
     shape.layout_requires_virtual_support = record.layout_requires_virtual_support;
-    if (record.peer_virtual_layout != sema::PeerVirtualLayout::none) {
-      const bool uncertain_base = record.peer_virtual_layout == sema::PeerVirtualLayout::primary_base &&
-                                  uncertain.contains(record.bases.front().cls);
+    if (record.peer_virtual_layout != sema::PeerVirtualLayout::none ||
+        record.peer_automatic_primary_base != EntityId::none) {
+      const EntityId primary = record.peer_virtual_layout == sema::PeerVirtualLayout::primary_base
+                                   ? record.bases.front().cls : record.peer_automatic_primary_base;
+      const bool uncertain_base = primary != EntityId::none && uncertain.contains(primary);
       if (shape.layout_uncertain || uncertain_base) {
         if (!out.unit.virtual_emission_blocked) block_virtual_emission(out.unit, program, record);
       } else {
         shape.peer_virtual_layout = record.peer_virtual_layout;
+        shape.peer_automatic_primary_base = record.peer_automatic_primary_base;
       }
     }
   }

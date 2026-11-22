@@ -5834,13 +5834,14 @@ public:
   }
 
   // A directly named class whose spelling has no attributes, alias or computed type.
-  bool directly_named_peer_root(QualType type, u32 start, u32 end) {
-    if (end == start || !s_->has_peer_virtual_layout(type)) return false;
+  bool directly_named_peer_object(QualType type, u32 start, u32 end) {
+    if (end == start || !s_->has_peer_automatic_layout(type)) return false;
     const auto spelling = std::span(r_->tokens).subspan(begin_ + start, end - start);
     const auto cls = s_->types().class_of(type);
     const auto& entity = s_->world().entities.rec(cls);
     if (spelling.back().kind != Tk::identifier || name_of(spelling.back()) != entity.name) return false;
     if (spelling.size() == 1) return s_->names_direct_class(entity.name, type);
+    if (!s_->has_peer_virtual_layout(type)) return false;
     if (!std::ranges::all_of(spelling, [](const Tok& token) {
           return token.kind == Tk::identifier || token.kind == Tk::coloncolon;
         })) return false;
@@ -5924,12 +5925,12 @@ public:
         skip_to_semi();
         return {NodeId::none, begin, pos()};
       }
-      Ex peer_root;
+      Ex peer_init;
       if (no_prefix_attributes && !spec.is_static && !spec.is_constexpr && !spec.is_constinit &&
           !d.qualified && is(Tk::semi) && d.name_at == dbegin && d.name_at + 1 == pos() &&
-          directly_named_peer_root(d.type, begin, dbegin))
-        peer_root = s_->peer_root_default_init(d.type, d.name_at, pos());
-      if (!peer_root.ok() && !s_->require_supported_virtual_layout(d.type, d.name_at)) {
+          directly_named_peer_object(d.type, begin, dbegin))
+        peer_init = s_->peer_default_init(d.type, d.name_at, pos());
+      if (!peer_init.ok() && !s_->require_supported_virtual_layout(d.type, d.name_at)) {
         skip_to_semi();
         return {NodeId::none, begin, pos()};
       }
@@ -6040,8 +6041,8 @@ public:
           init = s_->convert(args[0], d.type, open);
         }
         if (memberwise) constant_local(local, d.type, spec.is_constexpr, init, memberwise);
-      } else if (peer_root.ok()) {
-        init = peer_root;
+      } else if (peer_init.ok()) {
+        init = peer_init;
       } else if (s_->types().is_reference(d.type)) {
         s_->diag(d.name_at, Diag::reference_uninitialized);  // [dcl.ref]/5
       } else if (s_->types().is_dependent(d.type)) {

@@ -2749,6 +2749,13 @@ What the process allocates, attributed to the engine's cells, in the trace and t
   supported root type. The root has an implicit default constructor, a trivial destructor and
   no default member initializer. Lowering stores `_ZTV + 16` in the vptr. The table can come
   from the key definition in the same unit or from a peer. [#309](https://github.com/yrashk/ycxx/issues/309)
+- Linux x86-64 can also default-initialize a plain automatic derived object with one public
+  nonvirtual abstract primary base. The base has one public pure `int f()` slot and no data
+  members. The derived class has its public override and one public `int` field without an
+  initializer. Both classes have implicit constructors and trivial nonvirtual destructors.
+  Lowering stores the peer's derived `_ZTV + 16` in the primary vptr. The caller can access the
+  local field and bind a reference to the offset-zero base subobject. The peer owns the key
+  definition, table and RTTI. [#309](https://github.com/yrashk/ycxx/issues/309)
 - On Linux x86-64, a caller can dispatch through a pointer or lvalue reference to a
   peer-owned abstract root. The root is an ordinary, externally linked class with no
   bases or fields and one or two public, directly written pure virtuals. Each slot has
