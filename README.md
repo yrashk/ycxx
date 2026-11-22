@@ -364,9 +364,10 @@ are value-initialized when they have no written default member initializer.
 macros, conditionals, `_Pragma` and the predefined macros. `ycxx cxx -E` matches Clang's output.
 `ycxx cxx -E --target=x86_64-linux-gnu` selects Linux macros and glibc's multiarch include path
 and preprocesses glibc's `<stdio.h>`. Linux `<stdarg.h>` supplies the `va_list` declaration, and
-direct `<float.h>` and `<limits.h>` provide the target's numeric limits. glibc's `<stdint.h>` compiles
-(#657); `<inttypes.h>` does not yet (#664).
-[#475](https://github.com/yrashk/ycxx/issues/475)
+direct `<float.h>` and `<limits.h>` provide the target's numeric limits. glibc's `<stdint.h>`
+compiles, as do hosted `<cstdint>`, `<cinttypes>`, and `<inttypes.h>` from the pinned libycxx.
+[#475](https://github.com/yrashk/ycxx/issues/475) · [#657](https://github.com/yrashk/ycxx/issues/657) ·
+[#664](https://github.com/yrashk/ycxx/issues/664)
 
 **Incremental builds through a resident daemon.** `ycxx cxx` hands its work to a per-project
 `ycxx daemon` (`YCXX_NO_DAEMON=1` runs in-process), which watches the files it has read and keeps
