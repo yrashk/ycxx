@@ -78,6 +78,7 @@ export struct MachineCode {
   std::vector<obj::reloc> relocs;
   std::vector<ir::EntityId> targets;
   std::vector<FrameRow> frame_rows;
+  std::optional<CleanupSite> cleanup;
 };
 
 // Assembly text of a function's code, for reading (the engine trace, #245): one line per word,
@@ -125,35 +126,90 @@ std::expected<MachineCode, std::string> compile_function(const l2::Function& bod
   if (!e) return std::unexpected(e.error());
   out.bytes = std::move(text.bytes);
   out.relocs = std::move(text.relocs);
-  out.frame_rows = std::move(*e);
+  out.frame_rows = std::move(e->frame_rows);
+  out.cleanup = e->cleanup;
   return out;
 }
 
 namespace {
 
-std::expected<std::uint32_t, std::string> append_eh_frame(obj::section& section, const MachineCode& code) {
-  // DWARF §6.4 and the AArch64 DWARF register mapping. The CIE starts at section offset zero.
-  constexpr std::uint8_t fp = 29, lr = 30, sp = 31;
-  constexpr std::uint8_t def_cfa = 0x0c, same_value = 0x08, offset = 0x80, restore = 0xc0;
-  constexpr std::uint8_t pcrel_absptr = 0x10;
-  constexpr std::uint8_t cie_body[]{
-      1, 'z', 'R', 0, 1, 0x78, lr, 1, pcrel_absptr,  // code alignment 1, data alignment -8
-      def_cfa, sp, 0, same_value, fp, same_value, lr,
-  };
+struct EhFrameCies {
+  std::optional<std::uint32_t> ordinary, cleanup;
+};
+
+struct EhFrameFields {
+  std::uint32_t pc;
+  std::optional<std::uint32_t> lsda;
+};
+
+// DWARF §6.4 and the AArch64 DWARF register mapping.
+constexpr std::uint8_t dwarf_fp = 29, dwarf_lr = 30, dwarf_sp = 31;
+constexpr std::uint8_t def_cfa = 0x0c, same_value = 0x08, offset = 0x80, restore = 0xc0;
+constexpr std::uint8_t pcrel_absptr = 0x10;
+
+std::expected<std::uint32_t, std::string> append_cie(obj::section& section, bool cleanup,
+                                                      std::optional<std::uint32_t> personality) {
+  obj::macho::byte_writer record;
+  record.u32(0);  // length
+  record.u32(0);  // CIE ID
+  record.u8(1);   // version
+  record.raw(cleanup ? "zPLR" : "zR");
+  record.u8(0);
+  record.u8(1);     // code alignment
+  record.u8(0x78);  // data alignment -8
+  record.u8(dwarf_lr);
+  record.u8(cleanup ? 7 : 1);  // augmentation length
+  std::optional<std::size_t> field;
+  if (cleanup) {
+    if (!personality) return std::unexpected("a hosted cleanup needs a personality symbol");
+    record.u8(0x9b);  // indirect PC-relative sdata4
+    field = section.bytes.size() + record.size();
+    record.u32(0);
+    record.u8(pcrel_absptr);  // LSDA encoding
+  }
+  record.u8(pcrel_absptr);  // FDE initial-location encoding
+  constexpr std::uint8_t entry[]{def_cfa, dwarf_sp, 0, same_value, dwarf_fp, same_value, dwarf_lr};
+  record.raw(entry);
+  record.align(8);
+  const auto start = section.bytes.size();
+  if (!std::in_range<std::int32_t>(start + record.size()))
+    return std::unexpected("the unwind section exceeds the Mach-O relocation offset limit");
+  obj::macho::store32(record.bytes, 0, static_cast<std::uint32_t>(record.size() - 4));
+  section.emit(record.bytes);
+  if (field) section.relocate(obj::reloc_kind::got_rel32, *personality, 0, static_cast<std::uint32_t>(*field));
+  return static_cast<std::uint32_t>(start);
+}
+
+std::expected<EhFrameFields, std::string> append_eh_frame(obj::section& section, EhFrameCies& cies,
+                                                          const MachineCode& code,
+                                                          std::optional<std::uint32_t> personality) {
   if (code.bytes.size() % 4 != 0 || code.frame_rows.size() < 2 ||
       code.frame_rows[0].offset != 4 || code.frame_rows[0].state != FrameState::saved_pair ||
       code.frame_rows[1].offset != 8 || code.frame_rows[1].state != FrameState::frame_pointer)
-    return std::unexpected("cleanup-free unwind requires an Apple frame record");
+    return std::unexpected("hosted unwind requires an Apple frame record");
 
+  const bool cleanup = code.cleanup.has_value();
+  auto& cie = cleanup ? cies.cleanup : cies.ordinary;
+  if (!cie) {
+    auto appended = append_cie(section, cleanup, personality);
+    if (!appended) return std::unexpected(appended.error());
+    cie = *appended;
+  }
   obj::macho::byte_writer fde;
-  const auto start = section.bytes.empty() ? 8 + sizeof(cie_body) : section.bytes.size();
-  if (!std::in_range<std::int32_t>(start + 8))
+  const auto start = section.bytes.size();
+  constexpr std::size_t fde_header = 4 + 4 + 8 + 8 + 1;  // through the augmentation length
+  if (!std::in_range<std::int32_t>(start + fde_header + (cleanup ? 8 : 0)))
     return std::unexpected("the unwind section exceeds the Mach-O relocation offset limit");
+  EhFrameFields fields{static_cast<std::uint32_t>(start + 8), std::nullopt};
   fde.u32(0);  // record length, filled after emission
-  fde.u32(static_cast<std::uint32_t>(start + 4));  // backward distance to the CIE
+  fde.u32(static_cast<std::uint32_t>(start + 4 - *cie));
   fde.u64(0);  // PC-relative initial location, relocated by the caller
   fde.u64(code.bytes.size());
-  fde.u8(0);   // FDE augmentation length
+  fde.u8(cleanup ? 8 : 0);
+  if (cleanup) {
+    fields.lsda = static_cast<std::uint32_t>(start + fde.size());
+    fde.u64(0);  // PC-relative LSDA pointer, relocated by the caller
+  }
   std::uint32_t previous = 0;
   for (const auto& row : code.frame_rows) {
     if (row.offset <= previous || row.offset >= code.bytes.size() || row.offset % 4 != 0)
@@ -172,16 +228,16 @@ std::expected<std::uint32_t, std::string> append_eh_frame(obj::section& section,
       fde.u32(advance);
     }
     fde.u8(def_cfa);
-    fde.u8(row.state == FrameState::frame_pointer ? fp : sp);
+    fde.u8(row.state == FrameState::frame_pointer ? dwarf_fp : dwarf_sp);
     if (row.state == FrameState::entry) {
       fde.u8(0);
-      fde.u8(restore | fp);
-      fde.u8(restore | lr);
+      fde.u8(restore | dwarf_fp);
+      fde.u8(restore | dwarf_lr);
     } else {
       fde.u8(16);
-      fde.u8(offset | fp);
+      fde.u8(offset | dwarf_fp);
       fde.u8(2);  // FP is at CFA - 16
-      fde.u8(offset | lr);
+      fde.u8(offset | dwarf_lr);
       fde.u8(1);  // LR is at CFA - 8
     }
     previous = row.offset;
@@ -190,13 +246,39 @@ std::expected<std::uint32_t, std::string> append_eh_frame(obj::section& section,
   if (!std::in_range<std::int32_t>(start + fde.size()))
     return std::unexpected("the unwind section exceeds the Mach-O relocation offset limit");
   obj::macho::store32(fde.bytes, 0, static_cast<std::uint32_t>(fde.size() - 4));
-  if (section.bytes.empty()) {
-    section.emit32(4 + sizeof(cie_body));
-    section.emit32(0);  // CIE ID
-    section.emit(cie_body);
-  }
   section.emit(fde.bytes);
-  return static_cast<std::uint32_t>(start + 8);
+  return fields;
+}
+
+std::expected<std::vector<std::uint8_t>, std::string> cleanup_lsda(const MachineCode& code) {
+  const auto [call, landing] = *code.cleanup;
+  const auto size = code.bytes.size();
+  if (size < 4 || call > size - 4 || call % 4 || landing % 4 || landing == 0 || landing >= size || landing == call ||
+      (obj::macho::load32(code.bytes, call) & 0xfc000000) != 0x94000000 ||
+      !std::ranges::any_of(code.relocs, [&](const obj::reloc& r) {
+        return r.kind == obj::reloc_kind::branch26 && r.offset == call;
+      }))
+    return std::unexpected("a hosted cleanup needs a relocated direct call and a distinct landing pad");
+
+  obj::macho::byte_writer sites;
+  auto row = [&](std::size_t begin, std::size_t end, std::uint32_t pad) {
+    if (begin == end) return;
+    sites.uleb(begin);
+    sites.uleb(end - begin);
+    sites.uleb(pad);
+    sites.uleb(0);  // action zero with a landing pad is a cleanup
+  };
+  row(0, call, 0);
+  row(call, call + 4, landing);
+  row(call + 4, size, 0);
+
+  obj::macho::byte_writer table;
+  table.u8(0xff);  // omit LPStart, use the FDE's initial PC
+  table.u8(0xff);  // omit the type table
+  table.u8(0x01);  // call-site fields use ULEB128
+  table.uleb(sites.size());
+  table.raw(sites.bytes);
+  return std::move(table.bytes);
 }
 
 }  // namespace
@@ -230,12 +312,17 @@ std::expected<obj::object, CodegenError> assemble(std::string name, std::span<co
                                                       : obj::standard_section::mod_init_func;
     sections[k] = o.add_section(s);
   }
-  std::optional<std::uint32_t> frames;
-  if (std::ranges::any_of(functions, &CompiledFunction::cleanup_free_unwind)) {
+  const bool has_cleanup = std::ranges::any_of(functions, [](const CompiledFunction& f) {
+    return f.code.cleanup.has_value();
+  });
+  std::optional<std::uint32_t> frames, tables;
+  if (has_cleanup || std::ranges::any_of(functions, &CompiledFunction::cleanup_free_unwind)) {
     frames = o.add_section(obj::standard_section::eh_frame);
     o.sections[*frames].flags = obj::section_flags::coalesced | obj::section_flags::no_toc |
                                 obj::section_flags::strip_static_syms | obj::section_flags::live_support;
   }
+  if (has_cleanup)
+    tables = o.add_section(obj::section{"__TEXT", "__gcc_except_tab", obj::section_flags::regular, 2, {}, 0, {}});
 
   // Defined symbols first, functions then variables, at offsets filled in as they are emitted.
   for (const CompiledFunction& f : functions) {
@@ -249,6 +336,9 @@ std::expected<obj::object, CodegenError> assemble(std::string name, std::span<co
     symbol_of[ir::raw(d.entity)] = o.add_symbol({(*s)->name, (*s)->bind, sections[d.kind], 0, false});
   }
   const auto frame_base = frames ? o.define("ltmp_eh_frame", obj::binding::local, *frames) : 0;
+  std::optional<std::uint32_t> personality;
+  if (has_cleanup) personality = o.reference("___gxx_personality_v0");
+  EhFrameCies cies;
   std::optional<CodegenError> missing;
   auto symbol = [&](ir::EntityId e) -> std::uint32_t {
     if (auto it = symbol_of.find(ir::raw(e)); it != symbol_of.end()) return it->second;
@@ -290,11 +380,23 @@ std::expected<obj::object, CodegenError> assemble(std::string name, std::span<co
       r.symbol = symbol(f.code.targets[r.symbol]);
       sec.relocs.push_back(r);
     }
-    if (f.cleanup_free_unwind) {
+    if (frames && (f.cleanup_free_unwind || f.code.cleanup)) {
       auto& unwind = o.sections[*frames];
-      auto location = append_eh_frame(unwind, f.code);
-      if (!location) return std::unexpected(CodegenError{f.entity, location.error()});
-      unwind.relocate(obj::reloc_kind::abs64, fn_symbol, -static_cast<std::int64_t>(*location), *location, frame_base);
+      auto fields = append_eh_frame(unwind, cies, f.code, personality);
+      if (!fields) return std::unexpected(CodegenError{f.entity, fields.error()});
+      unwind.relocate(obj::reloc_kind::abs64, fn_symbol, -static_cast<std::int64_t>(fields->pc), fields->pc, frame_base);
+      if (fields->lsda && tables) {
+        auto table = cleanup_lsda(f.code);
+        if (!table) return std::unexpected(CodegenError{f.entity, table.error()});
+        auto& section = o.sections[*tables];
+        section.align(2);
+        const auto offset = section.size();
+        if (!std::in_range<std::int32_t>(offset + table->size()))
+          return std::unexpected(CodegenError{f.entity, "the exception tables exceed the Mach-O object offset limit"});
+        const auto anchor = o.define(std::format("ltmp_lsda_{}", offset), obj::binding::local, *tables);
+        section.emit(*table);
+        unwind.relocate(obj::reloc_kind::abs64, anchor, -static_cast<std::int64_t>(*fields->lsda), *fields->lsda, frame_base);
+      }
     }
   }
   if (missing) return std::unexpected(*missing);

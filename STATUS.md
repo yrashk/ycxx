@@ -338,6 +338,11 @@ What is true of the code today. Work in progress and its owners are tracked in
     omitted frames, native YCXX linking and system-linked exception propagation on macOS.
     Native throw lowering and landing pads are tracked in [#648](https://github.com/yrashk/ycxx/issues/648).
     [#737](https://github.com/yrashk/ycxx/issues/737)
+  - A system-linked arm64 function can destroy one initialized aggregate local on both exits from
+    a direct external `void()` call. The landing pad saves the exception header, runs the same
+    destructor as the normal continuation, and resumes the original exception. The object's
+    cleanup-only LSDA and frame records are checked in `unit.darwin_local_unwind`.
+    [Design](docs/design/aarch64-hosted-cleanup.md) · [#781](https://github.com/yrashk/ycxx/issues/781)
   - Not yet: thread-local variables, dead stripping, literal merging, branch islands beyond
     ±128 MiB, other dylibs' re-exports, incremental relinking, and import addends outside
     0..255 (`DYLD_CHAINED_IMPORT_ADDEND`). `__LLVM` (embedded bitcode), `__LD` and debug sections
