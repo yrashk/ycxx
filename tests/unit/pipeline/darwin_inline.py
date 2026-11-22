@@ -28,16 +28,16 @@ def main():
         def compile(source, obj):
             run(ycxx, 'cxx', '-c', source, '-o', obj)
 
-        def symbols(obj):
-            """{name: (binding, defined)} from `nm -m`: binding is 'weak external', 'weak private
-            external', 'private external', 'external' or 'non-external'."""
-            table = {}
+        def symbol_entries(obj):
+            """Yield (name, (binding, defined)) for each symbol reported by `nm -m`."""
             for line in run(nm, '-m', obj).splitlines():
                 m = re.match(r'^(?:[0-9a-f]+)?\s*\(([^)]*)\)\s+((?:weak )?(?:private )?(?:non-)?external)'
                              r'(?: \[[^]]*\])?\s+(\S+)', line)
                 if m:
-                    table[m[3]] = (m[2], m[1] != 'undefined')
-            return table
+                    yield m[3], (m[2], m[1] != 'undefined')
+
+        def symbols(obj):
+            return dict(symbol_entries(obj))
 
         def links(*objects, args=()):
             """Links with ycxx's linker and with the system's (also dead-stripping), in both
@@ -50,6 +50,20 @@ def main():
                     run('./host-program', *args)
 
         weak, strong = ('weak external', True), ('external', True)
+        # The assembly label gives g the linker spelling of f. The inline definition is weak,
+        # and the linker must resolve the call to the strong definition of g (#694).
+        (Path(temp) / 'same-spelling.cpp').write_text('''\
+inline int f() { return 1; }
+int g() __asm("__Z1fv");
+int g() { return 2; }
+int main() { return g() - 2; }
+''')
+        compile('same-spelling.cpp', 'same-spelling.o')
+        bindings = [binding for name, binding in symbol_entries('same-spelling.o') if name == '__Z1fv']
+        assert sorted(bindings) == sorted([weak, strong]), bindings
+        run(ycxx, 'cxx', 'same-spelling.o', '-o', 'program')
+        run('./program')
+
         hidden = fixtures / 'inline-hidden'
         weak_hidden = ('weak private external', True)
         for part, expected in {
