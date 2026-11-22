@@ -1848,13 +1848,14 @@ public:
     return std::nullopt;
   }
 
-  std::optional<Scope> scope_member(const Scope& s, NameId n) {
-    // A member of the class whose member-specification this is (the current instantiation in a
-    // template) is found where it is declared ([temp.dep.type]/1); a member of another dependent
-    // type is looked up when the template is instantiated ([temp.dep.type]/7): a dependent type.
+  std::optional<Scope> scope_member(const Scope& s, NameId n, bool assume_dependent_type = true) {
+    // A member type of the current instantiation is found where it is declared ([temp.dep.type]).
+    // A type-only context can assume a dependent name denotes a type until instantiation
+    // ([temp.res.general]).
     if (s.type && types().is_class(*s.type) && (!types().is_dependent(*s.type) || types().class_of(*s.type) == current_class))
       if (auto t = member_type(types().class_of(*s.type), n)) return Scope{std::nullopt, *t};
-    if (s.type && types().is_dependent(*s.type)) return Scope{std::nullopt, types().dep_name(*s.type, n)};
+    if (assume_dependent_type && s.type && types().is_dependent(*s.type))
+      return Scope{std::nullopt, types().dep_name(*s.type, n)};
     if (s.ns) {
       if (auto t = direct_member_introduction(*s.ns, n)) return Scope{std::nullopt, t};
       auto members = q_->namespace_members(*s.ns, n);
@@ -2017,8 +2018,8 @@ public:
   }
 
   // `S::n` naming a type.
-  std::optional<QualType> scope_type(const Scope& s, NameId n) {
-    auto m = scope_member(s, n);
+  std::optional<QualType> scope_type(const Scope& s, NameId n, bool assume_dependent_type = true) {
+    auto m = scope_member(s, n, assume_dependent_type);
     if (!m || !m->type) return std::nullopt;
     if (s.type && types().is_class(*s.type) && unscoped_member_enumerator(types().class_of(*s.type), n))
       return std::nullopt;

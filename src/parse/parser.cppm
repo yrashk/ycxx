@@ -4288,9 +4288,10 @@ public:
       if (s_->has_error_since(diags)) return {NodeId::none, begin, pos()};
     }
     // `N::T(args)` or `N::T{…}` ([expr.type.conv]): a qualified type name, unless a function or
-    // variable of the name hides it.
+    // variable of the name hides it. Here an unresolved dependent name does not denote a type
+    // ([temp.res.general]), so `Q<T>::f(args...)` goes through postfix call parsing.
     if ((is(Tk::l_paren) || is(Tk::l_brace)) && !s_->scope_names_object(*s, n))
-      if (auto t = s_->scope_type(*s, n)) {
+      if (auto t = s_->scope_type(*s, n, /*assume_dependent_type=*/false)) {
         for (const auto& qualifier : type_qualifiers)
           s_->type_member_access(qualifier.scope, qualifier.name, qualifier.at, /*direct_alias_only=*/true);
         s_->type_member_access(*s, n, name_at, /*direct_alias_only=*/!substituting_partial_arguments);
