@@ -32,6 +32,8 @@ freestanding C++ subset for x86-64 Linux. The standard library is out of reach. 
 
 Ordinary function pointers and references preserve concrete `noexcept` type identity.
 A nonthrowing function can be used where the corresponding potentially throwing type is expected.
+The unary `noexcept` operator checks whether calls and constructions can throw.
+[#729](https://github.com/yrashk/ycxx/issues/729)
 Ordinary constructor declarations and definitions check that their concrete exception specifications agree.
 Dependent exception specifications remain open. [#219](https://github.com/yrashk/ycxx/issues/219)
 
@@ -214,6 +216,8 @@ fixed underlying types and definitions inside `extern "C"` blocks.
 
 Both targets support named nested enum definitions followed by ordinary fields in the same
 member declaration, including scoped enum field initializers. [#500](https://github.com/yrashk/ycxx/issues/500)
+Scoped enumerators stay in their enumeration's scope, so class members and class template
+members may reuse their names. [#725](https://github.com/yrashk/ycxx/issues/725)
 
 Automatic declarations of ordinary non-template classes with only scalar fields and no bases
 or unions can use default member initializers in `S s;` and `S s{…};`. A default runs in

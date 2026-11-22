@@ -3430,8 +3430,18 @@ public:
       return is(Tk::kw_new) ? new_expression(begin) : delete_expression(begin);
     case Tk::kw_new: return new_expression(begin);
     case Tk::kw_delete: return delete_expression(begin);
+    case Tk::kw_noexcept: {
+      bump();
+      if (!expect(Tk::l_paren)) return {NodeId::none, begin, pos()};
+      const int saved = std::exchange(angle_, 0);
+      ++s_->unevaluated;
+      Ex operand = expression();
+      --s_->unevaluated;
+      angle_ = saved;
+      if (!expect(Tk::r_paren)) return {NodeId::none, begin, pos()};
+      return s_->unary_noexcept(operand, begin, pos());
+    }
     case Tk::kw_co_await:
-    case Tk::kw_noexcept:
     case Tk::caretcaret: {
       s_->diag(begin, Diag::not_supported, kind());
       bump();

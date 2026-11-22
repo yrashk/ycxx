@@ -1250,6 +1250,10 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   offsets. Nested class definitions are tracked separately.
   [#500](https://github.com/yrashk/ycxx/issues/500) · [#306](https://github.com/yrashk/ycxx/issues/306) ·
   [#248](https://github.com/yrashk/ycxx/issues/248)
+- Nested scoped enumerators are looked up in their enumeration's scope in ordinary classes and
+  class templates. A class member can reuse a scoped enumerator's name, including a declarator
+  following the enum definition in the same item. Class-scope lookup still finds unscoped
+  enumerators. [#725](https://github.com/yrashk/ycxx/issues/725)
 - Tests: `tests/own/classes/s4-*enum*`, `s4-scoped-enum`, `s4-unscoped-enum` (spec-only, plus two
   from the review): 7 of 7.
 - Namespace-scope opaque enum declarations ([dcl.enum], #157) supply a complete enum type with a
@@ -2874,6 +2878,15 @@ and runtime integration with ycxx's own linker remain under [#89]. See the
   expressions. Function reference overload ranking follows [over.ics.ref].
 - The mixed Linux object checks distinguish callback overloads with the Itanium `Do` type
   encoding. Dependent exception specifications remain tracked in [#219](https://github.com/yrashk/ycxx/issues/219).
+
+## Unary noexcept on calls and constructions (#729)
+
+`noexcept(expression)` is a constant `bool` and leaves its operand unevaluated
+([expr.unary.noexcept]). The compiler checks the selected function or constructor,
+argument operations, and temporary destruction ([except.spec]). A construction
+in a function template body can be checked after substitution. Dependent
+member-template exception specifications are tracked in
+[#713](https://github.com/yrashk/ycxx/issues/713).
 
 ## The address of an overload set, ι (#313, #337, 2026-11-19)
 
