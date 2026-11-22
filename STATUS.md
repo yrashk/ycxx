@@ -695,12 +695,13 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
   Local const references can borrow named owners until the end of the reference's scope.
   The checker rejects consuming or transferring an owner during a shared borrow and rejects
   exposing the borrow through an address, capture, or unregistered operation.
-  A `verified_observes` contract checks the observer's scalar-only body, including when its
-  definition and caller are in separate source inputs. Checked ELF and Mach-O objects carry
-  observation requirements and guarantees. The checked link matches them to unique strong
-  definitions in explicit input objects.
-  Flat local aggregates track registered owners in distinct fields. Field initialization,
-  borrowing, transfer, and consumption use the same checks as individual named resources.
+  A `verified_observes` contract checks the observer's scalar reads and forwarding of the
+  original shared borrow to other verified observers. Checked ELF and Mach-O objects carry
+  observation requirements and guarantees through each forwarding function. The checked link
+  matches them to unique strong definitions in explicit input objects.
+  Local aggregates track registered owners by nested field path. Fixed local arrays track
+  them by literal index. Initializing, borrowing, transferring, and consuming a subobject
+  follow the same checks as individual named resources.
   The standalone C++20 package also provides move-only issuer-scoped capability tokens with
   rights constraints and runtime scope checks. Native Linux x86-64 tests exercise a YCXX issuer
   and hosted GCC and Clang callers with the same token type.
