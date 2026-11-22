@@ -49,11 +49,13 @@ call. Use `verified_observes<decltype(&inspect), &inspect>` in a policy or
 `[[=ycxx::ownership::operation::verified_observes]]` on the function to check its definition.
 When composed with a trusted observation contract for the same function, verification is required.
 For example, a verified observer can copy an arithmetic field to an independent scalar variable.
-It cannot take an address, mutate the resource, capture the reference, or call another function.
+It can also forward the original shared reference directly to another verified observer. The
+checker rejects address escape, mutation, capture, and calls outside this verification chain.
 A syntax-only check needs the unique supported observer definition in the same invocation. For
 separate builds, include the observer contract in the caller and provider, compile both with
 `-fcheck-policies -c`, and pass the flag again at the final YCXX link. The checked link supports
-direct calls to unique strong definitions in explicit objects. Exception handlers and jumps
+direct calls to unique strong definitions in explicit objects. A forwarding observer carries
+its own guarantee and a requirement for the observer it calls. Exception handlers and jumps
 outside the supported loop control also receive an error.
 
 ## Owning fields

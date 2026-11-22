@@ -187,6 +187,23 @@ with tempfile.TemporaryDirectory() as directory:
     labeled_caller = write("labeled_caller.cpp", caller.read_text().replace(
         "void run()", 'namespace checkout { void inspect(const Ticket&) noexcept asm("other_observer"); }\nvoid run()'))
     syntax(verified, labeled_caller, observer, error="verified observation requires a unique supported definition")
+    forwarding_source = """\
+        #include "resource.hpp"
+        namespace checkout {
+        [[=own::operation::verified_observes]] void leaf(const Ticket&) noexcept;
+        [[=own::operation::verified_observes]] void inspect(const Ticket& ticket) noexcept {
+          leaf(ticket);
+        }
+        }
+    """
+    forwarding = write("forwarding.cpp", forwarding_source)
+    leaf_source = observer_source.replace("void inspect(", "void leaf(")
+    verified_leaf = write("leaf.cpp", leaf_source)
+    syntax(verified, caller, forwarding, verified_leaf)
+    syntax(verified, caller, forwarding, error="verified observation requires a unique supported definition")
+    trusted_forwarding = write("trusted_forwarding.cpp", forwarding_source.replace(
+        "verified_observes]] void leaf", "observes]] void leaf"))
+    syntax(verified, caller, trusted_forwarding, error="verified observation cannot expose or mutate")
 
     escaping_observer = """\
         #include "resource.hpp"
@@ -467,6 +484,10 @@ with tempfile.TemporaryDirectory() as directory:
         caller_object = compile_object(checked_caller)
         observer_object = compile_object(checked_observer)
         other_objects = tuple(map(compile_object, (providers, observed_main)))
+        forwarding_object = compile_object(write("checked_forwarding.cpp", mode.read_text() + forwarding_source))
+        leaf_object = compile_object(write("checked_leaf.cpp", mode.read_text() + leaf_source))
+        unchecked_leaf_object = compile_object(write("unverified_leaf.cpp", mode.read_text() +
+            leaf_source.replace("[[=own::operation::verified_observes]] ", "")))
 
         def checked_link(inputs, output, daemon="--no-daemon", env=None):
             command = [option for option in args if option != "--no-daemon"]
@@ -495,7 +516,11 @@ with tempfile.TemporaryDirectory() as directory:
         assert b"__ycxx_policy.1.need." in contents
         incomplete.write_bytes(contents.replace(b"__ycxx_policy.1.need.", b"__ycxx_otherx.1.need.", 1))
 
+        forward_run = checked_link((caller_object, forwarding_object, leaf_object, *other_objects), native)
+        assert forward_run.returncode == 0, forward_run.stderr
+        assert subprocess.run([native], timeout=10).returncode == 0
         for inputs, error in (
+            ((caller_object, forwarding_object, unchecked_leaf_object, *other_objects), "no matching guarantee"),
             ((caller_object, *other_objects), "requires one strong definition"),
             ((caller_object, covered_without_proof, *other_objects), "no matching guarantee"),
             ((caller_object, stale_object, *other_objects), "no matching guarantee"),

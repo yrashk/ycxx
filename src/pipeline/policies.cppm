@@ -105,6 +105,7 @@ struct OwnershipFlow {
 
   std::vector<Local> locals;
   std::vector<Step> steps;
+  std::vector<EntityId> forwarded_observers;
   Point entry = exit;
 };
 
@@ -144,8 +145,11 @@ class OwnershipFlowBuilder {
     if (operation == Effect::verified_observe) {
       if (!has_observer_definition(body_.function))
         flow_.entry = unsupported(0, "verified observation requires a unique supported definition in the checked sources");
-      else if (const auto at = unsupported_observation(ast::Red(world_.ins.ast, body_.tree)))
-        flow_.entry = unsupported(*at, "verified observation cannot expose or mutate the borrowed resource or call another function");
+      else if (auto problem = verify_observation(ast::Red(world_.ins.ast, body_.tree)))
+        flow_.entry = unsupported(problem->offset, std::move(problem->message));
+      std::ranges::sort(flow_.forwarded_observers);
+      flow_.forwarded_observers.erase(std::ranges::unique(flow_.forwarded_observers).begin(),
+                                      flow_.forwarded_observers.end());
       return std::move(flow_);
     }
     if (operation != Effect::unknown || resource_lifetime_body()) return {};
@@ -276,6 +280,11 @@ class OwnershipFlowBuilder {
     return policy_.has_observer_definition(policy_operation(world_, function, body_.tu.n));
   }
 
+  bool observer_is_available(PolicyOperation observer) const {
+    return !std::ranges::binary_search(policy_.labeled_observers, observer) &&
+           ((body_.defer_observers && !observer.second) || policy_.has_observer_definition(observer));
+  }
+
   // The registered resource's construction and cleanup implement the adapter's contract.
   bool resource_lifetime_body() const {
     if (body_.this_type == QualType{}) return false;
@@ -391,9 +400,27 @@ class OwnershipFlowBuilder {
     return false;
   }
 
-  // The only allowed occurrence of the resource parameter is the base of a plain scalar
-  // member access. Only non-reference locals and variables may be assignment destinations.
-  std::optional<ast::u32> unsupported_observation(const ast::Red& node) const {
+  // The original shared borrow can be read through a scalar member or forwarded to
+  // another verified observer. No other operations can see an alias of the parameter.
+  std::optional<OwnershipFinding> verify_observation(const ast::Red& node) {
+    const auto unsupported_use = [&] {
+      return OwnershipFinding{node.offset(),
+        "verified observation cannot expose or mutate the borrowed resource or call an unverified function"};
+    };
+    if (node.is<ast::Call>()) {
+      const auto call = node.get<ast::Call>();
+      const auto args = node.ast().children(call.args);
+      if (direct_effect(node, call) != Effect::verified_observe || args.size() != 1)
+        return unsupported_use();
+      const auto argument = named_local(at(node, args.front()), false);
+      if (!argument || !flow_.locals[*argument].parameter || !flow_.locals[*argument].shared_reference)
+        return unsupported_use();
+      const auto observer = policy_operation(world_, call.function, body_.tu.n);
+      if (!observer_is_available(observer))
+        return OwnershipFinding{node.offset(), "verified observation requires a unique supported definition in the checked sources"};
+      if (!observer.second) flow_.forwarded_observers.push_back(call.function);
+      return std::nullopt;
+    }
     if (node.is<ast::Member>()) {
       const auto member = node.get<ast::Member>();
       const auto object = unparenthesized(at(node, member.object));
@@ -401,7 +428,7 @@ class OwnershipFlowBuilder {
         const auto slot = object.get<ast::LocalRef>().local;
         if (flow_.locals[slot].parameter && flow_.locals[slot].shared_reference) return std::nullopt;
       }
-      return node.offset();
+      return unsupported_use();
     }
     const bool supported = ast::dispatch<ast::Nodes>(node.kind(), [&]<class T>(std::type_identity<T>) {
       const auto n = node.get<T>();
@@ -428,9 +455,9 @@ class OwnershipFlowBuilder {
         return observation_scalar(n.info.type);
       else return false;
     });
-    if (!supported) return node.offset();
-    std::optional<ast::u32> problem;
-    node.for_each_child([&](const ast::Red& child) { if (!problem) problem = unsupported_observation(child); });
+    if (!supported) return unsupported_use();
+    std::optional<OwnershipFinding> problem;
+    node.for_each_child([&](const ast::Red& child) { if (!problem) problem = verify_observation(child); });
     return problem;
   }
 
@@ -717,8 +744,7 @@ class OwnershipFlowBuilder {
         EntityId observer = EntityId::none;
         if (operation == Effect::verified_observe) {
           const auto key = policy_operation(world_, call.function, body_.tu.n);
-          const bool labeled = std::ranges::binary_search(policy_.labeled_observers, key);
-          if (labeled || ((!body_.defer_observers || key.second) && !policy_.has_observer_definition(key)))
+          if (!observer_is_available(key))
             return unsupported(node.offset(), "verified observation requires a unique supported definition in the checked sources");
           if (!key.second) observer = call.function;
         }
@@ -795,7 +821,7 @@ class OwnershipAnalysis {
   }
 
   OwnershipBodyCheck run() const {
-    if (flow_.entry == Flow::exit) return {};
+    if (flow_.entry == Flow::exit) return {std::nullopt, flow_.forwarded_observers};
     std::vector<std::optional<State>> paths(flow_.steps.size());
     std::deque<Point> work;
     State entry;
