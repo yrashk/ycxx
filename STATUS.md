@@ -1184,9 +1184,10 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
 - A class member declaration can define a named nested enum and declare ordinary fields in
   the same declaration. The fields participate in lookup, initialization, and class layout.
   Tests in `tests/own/nested-enum-fields/` compare combined and separate declarations and
-  cover scoped enum field initializers. Nested class definitions and `__builtin_offsetof`
-  layout support are tracked separately. [#500](https://github.com/yrashk/ycxx/issues/500) ·
-  [#306](https://github.com/yrashk/ycxx/issues/306) · [#496](https://github.com/yrashk/ycxx/pull/496)
+  cover scoped enum field initializers, and `tests/own/builtins/offsetof-after-nested-enum` their
+  offsets. Nested class definitions are tracked separately.
+  [#500](https://github.com/yrashk/ycxx/issues/500) · [#306](https://github.com/yrashk/ycxx/issues/306) ·
+  [#248](https://github.com/yrashk/ycxx/issues/248)
 - Tests: `tests/own/classes/s4-*enum*`, `s4-scoped-enum`, `s4-unscoped-enum` (spec-only, plus two
   from the review): 7 of 7.
 - Namespace-scope opaque enum declarations ([dcl.enum], #157) supply a complete enum type with a
