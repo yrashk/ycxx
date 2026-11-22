@@ -334,6 +334,34 @@ void memory_result() {
   check(!x64::compile_function(body), "rejects a result address that is not the first argument");
 }
 
+// A frame of a page or more touches each page before RSP passes it (#644); a smaller one
+// lowers RSP once. The frame here is the alloca's result slot plus the object, 16-aligned.
+void frame_probes() {
+  using enum l2::Type;
+  using l2::Op;
+  auto frame = [](std::uint64_t object) {
+    l2::Builder b;
+    const l2::Type params[] = {state};
+    auto entry = b.begin_block(params);
+    b.value(Op::alloca, ptr, {}, {object, 16, 0});
+    ir::ValueId ret[] = {b.param(entry, 0)};
+    b.emit(Op::ret, {}, ret);
+    return x64::compile_function(b.finish({}));
+  };
+  constexpr std::uint8_t probe[] = {0x48, 0x83, 0x0c, 0x24, 0x00};  // or qword [rsp], 0
+  auto probes = [&](const x64::MachineCode& code) {
+    return std::ranges::contains_subrange(code.bytes, probe);
+  };
+  auto below = frame(4064);   // a frame of 4080 bytes
+  auto at = frame(4080);      // 4096
+  auto above = frame(20000);  // four pages and a remainder
+  check(below && !probes(*below), "a frame under a page is not probed");
+  check(at && probes(*at), "a frame of exactly one page is probed");
+  check(above && probes(*above), "a frame of several pages is probed");
+  auto huge = frame(std::uint64_t{16} << 20);
+  check(!huge && huge.error().contains("a frame larger than 16 MiB is not supported"), "diagnoses a frame over 16 MiB");
+}
+
 }  // namespace
 
 int main() {
@@ -343,5 +371,6 @@ int main() {
   direct_ellipsis();
   rejection();
   memory_result();
+  frame_probes();
   return ycxx::unit::result("x86_64");
 }

@@ -6,6 +6,8 @@
 // XFAIL: clang the option is ycxx's
 // FLAGS: -fclass-call-abi=apple
 // PEER-WITH: apple-clang
+// REQUIRES: darwin
+// PARITY: by design: -fclass-call-abi=apple matches Apple Clang on arm64 Darwin (DECISIONS §1.6)
 // PEER: call-triviality-peer.cpp
 // EXIT: 0
 struct TC { int v; TC(int x) : v(x) {} };

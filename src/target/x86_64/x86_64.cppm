@@ -138,9 +138,9 @@ bool supports_float(Op op) {
 }
 
 std::expected<Frame, std::string> layout(const l2::Function& body) {
-  // Keep the frame and the saved frame and return addresses within one page. Larger frames
-  // need stack probing to avoid skipping a guard page.
-  constexpr std::uint64_t max_frame = 4096 - 16;
+  // A frame over a page is probed page by page in the prologue (`allocate_frame`). The limit
+  // matches the AArch64 back end's and keeps every RBP-relative displacement in 32 bits.
+  constexpr std::uint64_t max_frame = std::uint64_t{16} << 20;
   const bool float_result = std::ranges::any_of(body.results, l2::is_float);
   // A class result in memory: `lower` makes its address the first argument (RDI), and the
   // function returns that address in RAX (AMD64 psABI §3.2.3).
@@ -157,7 +157,7 @@ std::expected<Frame, std::string> layout(const l2::Function& body) {
     Type t = body.values[i].type;
     if (t == Type::state) continue;
     frame.size += 8;
-    if (frame.size > max_frame) return std::unexpected("x86-64 frame exceeds the single-page limit");
+    if (frame.size > max_frame) return std::unexpected("a frame larger than 16 MiB is not supported");
     frame.slots[i] = -std::int32_t(frame.size);
   }
 
@@ -186,12 +186,12 @@ std::expected<Frame, std::string> layout(const l2::Function& body) {
           return at_node(n, nd.op, "frame object alignment must be a power of two up to 16");
         if (size == 0 || size > max_frame) return at_node(n, nd.op, "unsupported frame object size");
         frame.size = align_up(frame.size + size, align);
-        if (frame.size > max_frame) return at_node(n, nd.op, "x86-64 frame exceeds the single-page limit");
+        if (frame.size > max_frame) return at_node(n, nd.op, "a frame larger than 16 MiB is not supported");
         frame.objects[raw(n)] = -std::int32_t(frame.size);
       }
       if (nd.op == Op::va_start && !frame.variadic_save) {
         frame.size = align_up(frame.size + reg_save_size, xmm_slot);
-        if (frame.size > max_frame) return at_node(n, nd.op, "x86-64 frame exceeds the single-page limit");
+        if (frame.size > max_frame) return at_node(n, nd.op, "a frame larger than 16 MiB is not supported");
         frame.variadic_save = -std::int32_t(frame.size);
       }
       if (nd.op == Op::call || nd.op == Op::call_ind || nd.op == Op::invoke) {
@@ -226,7 +226,7 @@ std::expected<Frame, std::string> layout(const l2::Function& body) {
 
   // Share the bottom of the frame between the outgoing stack arguments and parallel edge copies.
   frame.size = align_up(frame.size + 8 * scratch_words, 16);
-  if (frame.size > max_frame) return std::unexpected("x86-64 frame exceeds the single-page limit");
+  if (frame.size > max_frame) return std::unexpected("a frame larger than 16 MiB is not supported");
   return frame;
 }
 
@@ -247,10 +247,7 @@ class Emitter {
     frame_row(FrameState::saved_rbp);
     e_.move(rbp, rsp);
     frame_row(FrameState::frame_pointer);
-    if (frame_.size) {
-      e_.reg({0x81}, 5, rsp);  // sub rsp, imm32
-      e_.immediate(frame_.size, 4);
-    }
+    allocate_frame();
     if (frame_.variadic_save && !save_variadic_registers())
       return std::unexpected("x86-64 register-save branch displacement out of range");
     parameters();
@@ -298,6 +295,31 @@ class Emitter {
     BlockId target;
   };
   std::vector<Branch> branches_;
+
+  // Lower RSP by the frame size without moving it more than a page past memory already
+  // touched, so a guard page below the stack faults instead of being skipped. The pushed RBP
+  // touched the word below the incoming RSP. R11 is caller-saved and carries no argument, and
+  // RAX still holds a variadic callee's vector count here.
+  void allocate_frame() {
+    constexpr std::uint32_t page = 4096;
+    auto lower = [&](std::uint32_t bytes) {
+      e_.reg({0x81}, 5, rsp);  // sub rsp, imm32
+      e_.immediate(bytes, 4);
+    };
+    // A frame of a whole page or more is probed: after an unprobed `sub` of a full page, the
+    // first call would push its return address more than a page below the saved RBP.
+    const auto size = static_cast<std::uint32_t>(frame_.size);
+    if (size >= page) {
+      e_.emit({0x41, 0xbb});  // mov r11d, imm32: the number of whole pages
+      e_.immediate(size / page, 4);
+      const auto loop = e_.offset();
+      lower(page);
+      e_.emit({0x48, 0x83, 0x0c, 0x24, 0x00});  // or qword [rsp], 0
+      e_.emit({0x49, 0xff, 0xcb});              // dec r11
+      e_.emit({0x75, std::uint8_t(std::int8_t(loop - (e_.offset() + 2)))});  // jnz loop
+    }
+    if (const auto rest = size >= page ? size % page : size) lower(rest);
+  }
 
   void frame_row(FrameState state) {
     // `run` checks the final byte extent before returning any offsets.
