@@ -264,6 +264,10 @@ initializer takes precedence. The same rules apply to ordinary non-inline namesp
 whose dynamic initialization runs in definition order.
 [#118](https://github.com/yrashk/ycxx/issues/118)
 
+An out-of-line constructor evaluates a default member initializer with the namespace names
+visible where the initializer was written and lookup in the complete enclosing class.
+[#764](https://github.com/yrashk/ycxx/issues/764)
+
 Automatic declarations such as `Point p(3, 4);` can initialize flat aggregates with public
 arithmetic fields. Supplied expressions initialize the fields in declaration order. Omitted
 fields use their default member initializer when available and otherwise get zero. A runtime
