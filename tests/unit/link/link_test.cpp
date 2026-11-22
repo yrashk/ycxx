@@ -880,7 +880,7 @@ extern "C" int fixture_run(void (*bridge)(int*)) {
 }
 )cpp";
   const int compiled = shell(std::format("xcrun --sdk macosx clang++ -std=c++20 -stdlib=libc++ -arch arm64 -dynamiclib "
-                                         "-install_name '{}' '{}' -o '{}'",
+                                         "-compatibility_version 1.0 -current_version 1.0 -install_name '{}' '{}' -o '{}'",
                                          peer.native_encoded_string(), source.native_encoded_string(), peer.native_encoded_string()));
   check(compiled == 0, "the platform compiler builds the typed-handler dylib");
   if (compiled != 0) return;
