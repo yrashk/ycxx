@@ -380,6 +380,104 @@ with tempfile.TemporaryDirectory() as directory:
             restored = resident(sources=large_sources)
             assert restored.returncode == 0, restored.stderr
 
+            write("mixed_incremental.hpp", """\
+                #include <ycxx/ownership.hpp>
+                #include <ycxx/effects.hpp>
+                namespace mixed {
+                namespace own = ycxx::ownership;
+                namespace fx = ycxx::effects;
+                struct Handle { int value; };
+                struct Audit;
+                Handle acquire() noexcept;
+                int observe(const Handle&) noexcept;
+                int leaf(int) noexcept;
+                int effectful(int) noexcept;
+                }
+            """)
+            mixed_policy = """\
+                #include "mixed_incremental.hpp"
+                namespace mixed {
+                using Owner = own::policy<own::affine<Handle>, own::creates<decltype(&acquire), &acquire>,
+                    own::verified_observes<decltype(&observe), &observe>>;
+                using Leaf = fx::set<fx::at_most<Audit, 1>>;
+                using Active = own::use_policy<Owner, fx::trusted<decltype(&leaf), &leaf, Leaf>,
+                    fx::bound<decltype(&effectful), &effectful, fx::set<fx::at_most<Audit, 1>>>>;
+                }
+            """
+            mixed_rules = write("mixed_incremental_rules.cpp", mixed_policy)
+            mixed_caller = write("mixed_incremental.cpp", """\
+                #include "mixed_incremental.hpp"
+                namespace mixed {
+                void run() { auto pending = acquire(); observe(pending); }
+                int leaf(int n) noexcept { return n; }
+                }
+            """)
+            observe_definition = "int observe(const Handle& owner) noexcept { return owner.value; }"
+            effect_definition = "int effectful(int n) noexcept { return leaf(n); }"
+            mixed_provider_code = textwrap.dedent(f"""\
+                #include "mixed_incremental.hpp"
+                namespace mixed {{
+                {observe_definition}
+                {effect_definition}
+                }}
+            """)
+            mixed_provider = write("mixed_incremental_provider.cpp", mixed_provider_code)
+            mixed_sources = (mixed_rules, mixed_caller, mixed_provider)
+
+            def mixed_queries():
+                traced = resident("--trace-engine=json", sources=mixed_sources)
+                assert traced.returncode == 0, traced.stderr
+                return [record["kind"] for record in map(json.loads, traced.stderr.splitlines())
+                        if record.get("outcome") in ("executed", "cutoff")]
+
+            def mixed_rejection(error):
+                denied = resident(sources=mixed_sources)
+                expected = syntax(*mixed_sources, error=error)
+                assert denied.returncode == 1 and denied.stderr == expected, (denied.stderr, expected)
+                return expected
+
+            initial_mixed = mixed_queries()
+            body_queries = {"OwnershipRecordsFor", "BuildOwnershipFlow", "CheckEffectBody"}
+            assert body_queries.issubset(initial_mixed), initial_mixed
+            reflected = mixed_policy.replace("using Active = ", "\n                struct [[=").replace(
+                "fx::at_most<Audit, 1>>>>;", "fx::at_most<Audit, 1>>>>{}]] Active {};")
+            write(mixed_rules.name, reflected)
+            equivalent_mixed = mixed_queries()
+            assert equivalent_mixed.count("PolicyDeclarationsFor") == 1, equivalent_mixed
+            assert body_queries.isdisjoint(equivalent_mixed), equivalent_mixed
+
+            write(mixed_rules.name, reflected.replace("using Leaf = fx::set<fx::at_most<Audit, 1>>;",
+                                                       "using Leaf = fx::set<fx::at_most<Audit, 2>>;"))
+            mixed_rejection("exceeds its usage grade of 1")
+            write(mixed_rules.name, reflected.replace("own::affine<Handle>", "own::linear<Handle>"))
+            mixed_rejection("linear resource 'pending' may leave its scope")
+            write(mixed_rules.name, reflected)
+            write(mixed_provider.name, mixed_provider_code.replace(observe_definition, ""))
+            mixed_rejection("verified observation requires a unique supported definition")
+            write(mixed_provider.name, mixed_provider_code.replace(effect_definition, ""))
+            mixed_rejection("verified effect bound requires a unique supported definition")
+
+            competing = """\
+                namespace mixed {
+                using Competing = fx::use_policy<
+                    fx::bound<decltype(&effectful), &effectful, fx::set<fx::at_most<Audit, 2>>>>;
+                }
+            """
+            write(mixed_provider.name, mixed_provider_code + textwrap.dedent(competing))
+            conflict = "conflicting effect bounds for a function"
+            effects_line = next(i for i, line in enumerate(textwrap.dedent(reflected).splitlines(), 1)
+                                if line.startswith("struct [[="))
+            before_move = mixed_rejection(conflict)
+            assert f"previous declaration at {mixed_rules}:{effects_line}:" in before_move, before_move
+            write(mixed_rules.name, reflected.replace("struct [[=", "\n                struct [[="))
+            after_move = mixed_rejection(conflict)
+            assert f"previous declaration at {mixed_rules}:{effects_line + 1}:" in after_move, after_move
+
+            write(mixed_rules.name, reflected)
+            write(mixed_provider.name, mixed_provider_code)
+            restored = resident(sources=mixed_sources)
+            assert restored.returncode == 0, restored.stderr
+
             verified_sources = (verified, caller, observer)
             accepted = resident(sources=verified_sources)
             assert accepted.returncode == 0, accepted.stderr

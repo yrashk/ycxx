@@ -1361,6 +1361,17 @@ struct PolicyRegistryFor {
   }
 };
 
+// Keep declaration origins and effect bounds out of the ownership body's dependencies.
+// Observer availability is part of the ownership policy and still invalidates its uses.
+struct OwnershipPolicyFor {
+  using Key = PolicySources;
+  using Value = OwnershipPolicy;
+  static engine::query_task<Value> run(engine::Ctx& cx, Key sources) {
+    const auto& registry = co_await cx.fetch<PolicyRegistryFor>(sources);
+    co_return registry.ownership;
+  }
+};
+
 struct OwnershipRecordsFor {
   struct Key {
     PolicySources sources;
@@ -1369,8 +1380,8 @@ struct OwnershipRecordsFor {
   };
   using Value = OwnershipRecords;
   static engine::query_task<Value> run(engine::Ctx& cx, Key key) {
-    const auto& registry = co_await cx.fetch<PolicyRegistryFor>(key.sources);
-    if (registry.ownership.resources.empty()) co_return Value{};
+    const auto& policy = co_await cx.fetch<OwnershipPolicyFor>(key.sources);
+    if (policy.resources.empty()) co_return Value{};
     const auto& shapes = co_await cx.fetch<UnitShapes>(key.tu);
     const auto& source = cx.fetch<pp::SourceOf>(pp::FileId{key.tu.n});
     const auto& types = universe().world_for(*source.config.target)->types;
@@ -1405,11 +1416,11 @@ struct OwnershipRecordsFor {
     }
     std::set<EntityId> affected;
     std::vector<EntityId> pending;
-    for (const auto& [type, mode] : registry.ownership.resources) {
+    for (const auto& [type, mode] : policy.resources) {
       const auto id = types.class_of(type);
       if (affected.insert(id).second) pending.push_back(id);
     }
-    for (const auto& variant : registry.ownership.variants) {
+    for (const auto& variant : policy.variants) {
       const auto id = types.class_of(variant.type);
       if (affected.insert(id).second) pending.push_back(id);
     }
@@ -1421,8 +1432,8 @@ struct OwnershipRecordsFor {
         for (const auto parent : parents->second)
           if (affected.insert(parent).second) pending.push_back(parent);
     }
-    for (const auto& [type, mode] : registry.ownership.resources) affected.erase(types.class_of(type));
-    for (const auto& variant : registry.ownership.variants) affected.erase(types.class_of(variant.type));
+    for (const auto& [type, mode] : policy.resources) affected.erase(types.class_of(type));
+    for (const auto& variant : policy.variants) affected.erase(types.class_of(variant.type));
 
     std::ranges::sort(result.nonthrowing_destructors);
     auto& records = result.records;
@@ -1448,7 +1459,7 @@ struct OwnershipRecordsFor {
           type = types.canonical(base.inner);
           base = types.rec(type);
         }
-        if (registry.ownership.ownership(type) != Ownership::ordinary || registry.ownership.variant(type)) {
+        if (policy.ownership(type) != Ownership::ordinary || policy.variant(type)) {
           if (ast::cv_of(type) != ast::Cv::none) return false;
           continue;
         }
@@ -1474,10 +1485,10 @@ struct BuildOwnershipFlow {
   using Key = OwnershipBody;
   using Value = OwnershipFlow;
   static engine::query_task<Value> run(engine::Ctx& cx, Key body) {
-    const auto& registry = co_await cx.fetch<PolicyRegistryFor>(body.sources);
+    const auto& policy = co_await cx.fetch<OwnershipPolicyFor>(body.sources);
     const auto& records = co_await cx.fetch<OwnershipRecordsFor>({body.sources, body.tu});
     const auto& target = body.linux_target ? ast::x86_64_linux : ast::aarch64_darwin;
-    co_return OwnershipFlowBuilder(*universe().world_for(target), registry.ownership, records, body).build();
+    co_return OwnershipFlowBuilder(*universe().world_for(target), policy, records, body).build();
   }
 };
 
