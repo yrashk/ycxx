@@ -106,6 +106,7 @@ struct DeclSema {
   bool is_mutable = false;  // a mutable non-static data member ([dcl.stc])
   // A named function declarator spelled an exception specifier, even if its type does not retain it.
   bool has_written_noexcept = false;
+  bool has_trailing_return = false;
   bool hidden_visibility = false;  // an explicit GNU visibility("hidden") attribute on this declaration
   SeqId<AnnotationSema> annotations{};  // the occurrences written on this declaration
   constexpr bool operator==(const DeclSema&) const = default;

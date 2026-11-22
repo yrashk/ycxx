@@ -782,7 +782,7 @@ public:
     if (!full) return std::nullopt;
     if (tmpl.kind == ast::DeclKind::type_alias) {
       std::vector<ast::TemplateParamSema> params = ins().seqs.elements(tmpl.template_params);
-      auto t = templates().substitute(tmpl.type, Bindings::of(params.empty() ? 0 : params[0].depth, *full));
+      auto t = templates_for_use(at).substitute(tmpl.type, Bindings::of(params.empty() ? 0 : params[0].depth, *full));
       // Past the nesting limit, which was diagnosed, it says nothing more ([temp.inst]/16).
       if (!t && !q_->instantiation_gave_up()) diag(at, Diag::template_args_mismatch, w_->entities.rec(tmpl.entity).name);
       return t;
@@ -856,7 +856,8 @@ public:
   std::optional<std::vector<TemplateArg>> template_arguments(const ast::DeclSema& tmpl, std::span<const TemplateArg> args, u32 at) {
     std::vector<ast::TemplateParamSema> params = ins().seqs.elements(tmpl.template_params);
     NameId name = w_->entities.rec(tmpl.entity).name;
-    Templates t = templates();
+    bool type_template = tmpl.kind == ast::DeclKind::type_alias || tmpl.kind == ast::DeclKind::class_;
+    Templates t = type_template ? templates_for_use(at) : templates();
     // An expansion only for a pack parameter: for others it is not supported yet (#88).
     std::size_t first_pack = std::ranges::find_if(params, [](const ast::TemplateParamSema& p) { return p.pack != 0; }) - params.begin();
     for (std::size_t i = 0; i < args.size() && i < first_pack; ++i)
@@ -3075,6 +3076,14 @@ public:
     t.template_decl = [this](EntityId tmpl) { return q_->template_decl(tmpl); };
     t.variable_constant = [this](EntityId spec) { return q_->constant_value(spec); };
     t.variable_global = [this](EntityId spec) { return q_->global(spec); };
+    t.variable_specialization_type = [this](EntityId spec) { return q_->specialization_type(spec); };
+    return t;
+  }
+  Templates templates_for_use(u32 at) {
+    auto t = templates();
+    t.demand_variable = [this, at](EntityId spec, QualType type) {
+      demands.push_back({spec, ast::Loc{item_, loc_base_ + at}, type});
+    };
     return t;
   }
   bool dependent(const Ex& e) {
@@ -4694,7 +4703,7 @@ public:
       auto tmpl = q_->template_decl(c->entity);
       if (!tmpl) continue;
       const ast::DeclSema& td = patterns.emplace_back(*tmpl);
-      Templates t = templates();
+      Templates t = templates_for_use(callee.begin);
       auto targs = t.deduce_call(td, shapes, explicit_args, c->defaults);
       if (!targs) continue;
       if (td.constraints != ConstId::none) {
@@ -8687,7 +8696,7 @@ public:
         }
         // A function template contributes the specialization deduction gives ([temp.over]/1),
         // or nothing when deduction fails ([temp.deduct.general]).
-        Templates t = templates();
+        Templates t = templates_for_use(callee.begin);
         auto targs = t.deduce_call(d, shapes, explicit_args, found_defaults(d));
         if (!targs) continue;
         // Its associated constraints are satisfied, or it is not viable ([temp.deduct.general]/5,
