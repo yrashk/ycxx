@@ -211,8 +211,8 @@ A plain automatic declaration can construct an ordinary concrete class with one 
 public nonvirtual base. The base declares one public pure virtual `int f() = 0` and has
 no fields. The derived class declares one public `int` field without an initializer and
 one matching public `int f() override`. Both classes have implicit default constructors and
-trivial nonvirtual destructors. The maker's complete declarations must leave the derived key
-function to a peer and establish ordinary external visibility and alignment for both classes.
+trivial nonvirtual destructors. Complete declarations establish ordinary external visibility
+and alignment for both classes.
 
 The certified primary base contains one vptr and occupies offset zero. The derived field
 is at offset eight on Linux x86-64, and the derived object has size 16 and alignment 8.
@@ -223,11 +223,33 @@ before any user statement. The scalar field follows ordinary default initializat
 
 The class fact supplies the layout of this base edge and the storage for the marked
 automatic object. The maker can access that object's field and bind a base lvalue
-reference to it. Its vtable reference is undefined in the maker object. The peer owns the
-key function, table and RTTI. Borrowed dispatch continues to use its own declaration check.
+reference to it. A maker-only unit has an undefined `_ZTV` reference. When the key definition
+is in the same unit, the GOT relocation names the defined symbol at the same index. Borrowed
+dispatch continues to use its own declaration check.
 [[class.cdtor]](https://eel.is/c++draft/class.cdtor) ·
 [Itanium ABI §2.4](https://itanium-cxx-abi.github.io/cxx-abi/abi.html#class-types) ·
 [#309](https://github.com/yrashk/ycxx/issues/309)
+
+## Linux x86-64 key-owned derived table
+
+The unit with the directly written out-of-line, non-inline `int D::f()` definition owns the
+table for the automatic derived shape. The complete unit establishes ownership independently
+of construction or source order. Both classes, the pure declaration and the key must use the
+default-visible ABI. The producer checks later declarations, attributes and pragmas before
+emitting an object. A definition of the pure base slot is outside the profile.
+
+The global default-visible 24-byte `_ZTV` contains offset-to-top zero, the derived `_ZTI`
+pointer and one function pointer to `D::f`. The 24-byte derived `_ZTI` contains the runtime
+`__si_class_type_info` address point, its `_ZTS` pointer and the base `_ZTI` pointer. The base
+has no key function. Its weak 16-byte descriptor contains the runtime `__class_type_info`
+address point and its `_ZTS` pointer, with `.data.rel.ro` and its ABS64 RELA section in an ELF
+COMDAT keyed by the base `_ZTI`. Each `_ZTS` is a separate weak read-only COMDAT holding the
+Itanium type encoding followed by NUL. The table needs neither a base vtable nor a pure-virtual
+handler.
+[Itanium ABI §2.5.2](https://itanium-cxx-abi.github.io/cxx-abi/abi.html#vtable-components) ·
+[Itanium ABI §2.9.5](https://itanium-cxx-abi.github.io/cxx-abi/abi.html#rtti-layout) ·
+[#309](https://github.com/yrashk/ycxx/issues/309) · [#422](https://github.com/yrashk/ycxx/issues/422) ·
+[macOS parity #659](https://github.com/yrashk/ycxx/issues/659)
 
 Broader table emission, covariant returns, further pure-slot signatures, out-of-class pure member
 definitions, class-head `final`, explicit virtual destructor calls and virtual member addresses
