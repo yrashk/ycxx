@@ -359,15 +359,26 @@ bool browse(Tree& tree, Feed* feed) {
   Browser b(tree);
   if (feed) b.set_live(feed->source);
   const auto start = std::chrono::steady_clock::now();
+  auto next_tick = start;  // while a drag is held past an edge: ticks on time, whatever else wakes us
   while (true) {
     const auto [rows, cols] = term.size();
     b.resize(rows, cols);
     term.draw(b.frame());
-    switch (term.wait(feed ? feed->fd : -1, b.ticking() ? std::optional(Browser::tick_every) : std::nullopt)) {
-      case Terminal::Wake::resize: continue;
-      case Terminal::Wake::tick:
+    std::optional<std::chrono::milliseconds> wait;
+    if (b.ticking()) {
+      const auto now = std::chrono::steady_clock::now();
+      if (now >= next_tick) {
         b.tick();
+        next_tick = now + Browser::tick_every;
         continue;
+      }
+      wait = std::chrono::duration_cast<std::chrono::milliseconds>(next_tick - now) + std::chrono::milliseconds(1);
+    } else {
+      next_tick = std::chrono::steady_clock::now() + Browser::tick_every;
+    }
+    switch (term.wait(feed ? feed->fd : -1, wait)) {
+      case Terminal::Wake::resize: continue;
+      case Terminal::Wake::tick: continue;
       case Terminal::Wake::feed:
         if (!b.pump(feed->pump)) feed = nullptr;
         continue;

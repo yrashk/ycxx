@@ -793,6 +793,7 @@ void copying() {
   (void)act(10, y0 + 6, M::drag);  // the footer: past the edge
   check(b.ticking(), "a drag past the edge ticks");
   for (int i = 0; i < 8; ++i) b.tick();
+  check(!b.ticking(), "at the end of the rows ticking stops (a release never reported stops there too)");
   a = act(10, y0 + 6, M::release);
   check(a.copy && std::ranges::count(*a.copy, '\n') >= 10, std::format("ticks scrolled the selection to the end: {}", status()));
   check(!b.ticking(), "and stop with the release");
@@ -803,7 +804,19 @@ void copying() {
   (void)act(10, y0 + 1, M::wheel_down);
   a = act(10, y0 + 1, M::release);
   check(status().contains("copied 4 rows"), std::format("the wheel during a drag moves its end: {}", status()));
+  // V at the top of a live view: a request arriving keeps the selection's end where it was.
   b.resize(24, 120);
+  (void)key("g");
+  (void)key("V");
+  const std::string top_cell = t.node(t.rows()[0].node).ev.key;
+  (void)b.pump([&] {
+    t.add(std::vector<Event>{ev(101, 0, "Tu", "c.cpp", Outcome::executed, 995'000, 999'000)});
+    return true;
+  });
+  (void)key("j");
+  a = key("y");
+  check(a.copy && std::ranges::count(*a.copy, '\n') == 2 && a.copy->contains(top_cell) && !a.copy->contains("c.cpp"),
+        std::format("V holds its cells while requests arrive above: {:?}", a.copy.value_or("(nothing)")));
 }
 
 }  // namespace

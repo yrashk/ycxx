@@ -287,7 +287,9 @@ class Browser {
   // is at the top, where it follows what comes; false once the source has ended.
   bool pump(const std::function<bool()>& f) {
     const auto before = tree_.rows();
-    const std::optional<std::int32_t> held = cursor_ > 0 && cursor_ < before.size() ? std::optional(before[cursor_].node) : std::nullopt;
+    std::optional<std::int32_t> held = cursor_ > 0 && cursor_ < before.size() ? std::optional(before[cursor_].node) : std::nullopt;
+    // A selection being made holds its end where it is, even at the top.
+    if (rows_sel_ && (visual_ || drag_ == Drag::rows)) held = rows_sel_->end;
     const bool more = f();
     if (!more) live_.reset(), ended_ = true;
     if (held) keep_selected(*held);
@@ -332,7 +334,11 @@ class Browser {
   // calls `tick` this often, as terminals report the pointer only when it moves.
   bool ticking() const noexcept { return (drag_ == Drag::rows || drag_ == Drag::text) && past_edge_ && last_drag_; }
   void tick() {
-    if (ticking()) drag_to(*last_drag_);
+    if (!ticking()) return;
+    const auto before = std::tuple(cursor_, top_, detail_scroll_, rows_sel_ ? rows_sel_->end : -1, text_sel_ ? text_sel_->end : PanePoint{});
+    drag_to(*last_drag_);
+    // At the end of what it scrolls, ticking stops (a release the terminal never reported, too).
+    if (before == std::tuple(cursor_, top_, detail_scroll_, rows_sel_ ? rows_sel_->end : -1, text_sel_ ? text_sel_->end : PanePoint{})) past_edge_ = false;
   }
   static constexpr std::chrono::milliseconds tick_every{60};
 

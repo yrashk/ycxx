@@ -40,7 +40,7 @@ class Tui:
     writes how it ended and the terminal's modes then (`DONE status=… icanon=… echo=…`): a slave
     read by anyone else after the leader exits is revoked on macOS."""
 
-    def __init__(self, ycxx, scope, env):
+    def __init__(self, ycxx, scope, env, source='a.cpp'):
         self.fd, slave = os.openpty()
         set_size(self.fd, 30, 120)
         r, w = os.pipe()
@@ -55,7 +55,7 @@ class Tui:
             child = os.fork()
             if child == 0:
                 os.chdir(scope)
-                os.execve(ycxx, [ycxx, 'cxx', '--trace-engine=interactive', 'a.cpp', '-o', 'a'], env)
+                os.execve(ycxx, [ycxx, 'cxx', '--trace-engine=interactive', source, '-o', 'a'], env)
             os.write(w, str(child).encode())
             os.close(w)
             _, status = os.waitpid(child, 0)
@@ -199,16 +199,21 @@ def main(ycxx):
     # started.
     marker = scope / 'stuck.txt'
     # A subshell outlives a kill of `sh` alone: only killing the process group stops its `touch`.
-    t = Tui(ycxx, scope, dict(env, YCXX_CLIPBOARD=f'(sleep 3; touch {marker}) & wait'))
+    # The trace of 300 functions copies as far more than a pipe holds (64 KiB), so the write itself
+    # must give up in time too.
+    (scope / 'big.cpp').write_text(''.join(f'int f{i}(int x) {{ return x + {i}; }}\n' for i in range(300)) + 'int main() { return f0(0); }\n')
+    t = Tui(ycxx, scope, dict(env, YCXX_CLIPBOARD=f'(sleep 6; touch {marker}) & wait'), 'big.cpp')
     check(t.read_until(lambda o: b'ycxx engine trace' in o), 'the browser draws (a stuck clipboard command)')
     began = time.time()
     t.send(b'Y')
     check(t.read_until(lambda o: any('copied the subtree' in l and '(OSC 52)' in l for l in plain_lines(Tui.frame_of(o))), timeout=10),
           'a command that never reads: the copy goes through OSC 52 alone')
+    sent = re.findall(rb'\x1b\]52;c;([A-Za-z0-9+/=]*)\x07', t.out)
+    check(sent and len(base64.b64decode(sent[-1])) > 128 * 1024, f'more than a pipe holds was copied ({len(base64.b64decode(sent[-1])) if sent else 0} bytes)')
     check(time.time() - began < 5, f'and the browser waited at most about 2 s ({time.time() - began:.1f} s)')
     t.send(b'q')
     t.wait()
-    time.sleep(3)
+    time.sleep(6)
     check(not marker.exists(), 'the command was killed, with what it started')
 
     for sig in (signal.SIGTERM, signal.SIGABRT):
