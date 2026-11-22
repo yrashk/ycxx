@@ -107,7 +107,7 @@ Use the host linker to link these objects with libc.
 [#399](https://github.com/yrashk/ycxx/issues/399), [#196](https://github.com/yrashk/ycxx/issues/196)
 
 Fixed-prototype definitions and direct calls on x86-64 Linux also move `float` and `double`
-arguments and results. Direct variadic calls support the same scalar floating values and
+arguments and results, directly and through function pointers. Variadic calls support the same scalar floating values and
 promote an unnamed `float` to `double`. Direct call result types can be deduced from `auto` or
 `decltype(auto)`. Runtime addition, subtraction, multiplication, division and unary negation
 work for `float` and `double` at their evaluation width. Both types support the six comparisons,

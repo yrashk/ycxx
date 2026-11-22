@@ -287,7 +287,6 @@ system_leaf:
         assert '#pragma pack' in compile(target, '-E', 'packing.cpp')
         aggregate_parameter = 'unsupported aggregate parameter layout'
         aggregate_result = 'unsupported aggregate result layout'
-        indirect_floating = 'floating-point parameters and results of indirect calls are unsupported'
         cases = (
             ('long double f(long double x) { return x; }', 'x87 long double parameters and results are unsupported'),
             ('struct X { double x; }; auto f() { return X{1.0}; }', aggregate_result),
@@ -334,13 +333,9 @@ system_leaf:
              f'call: {aggregate_result}'),
             ('int f(long double, ...) { return 1; }', 'x87 long double parameters and results are unsupported'),
             ('struct X { int x; }; int f(X, ...) { return 1; }', parameters),
-            ('int f(int (*g)(double, ...)) { return g(1.0); }', f'call: {indirect_floating}'),
-            ('int f(double (*g)(int, ...)) { return g(1) > 0.0; }', f'call: {indirect_floating}'),
-            ('int f(int (*g)(int, ...)) { return g(1, 0.75); }',
-             'call: floating-point ellipsis arguments are unsupported'),
             ('struct X { int x; }; int f(int (*g)(X, ...)) { return g(X{1}); }', f'call: {parameters}'),
             ('struct X { int x; }; int f(int (*g)(int, ...), X x) { return g(2, x); }',
-             'call: only 32- and 64-bit integer and pointer ellipsis arguments'),
+             'call: only double, 32- and 64-bit integer, and pointer ellipsis arguments'),
             ('int g(int, ...); int f(long double& x) { return g(1, x); }',
              'call: x87 long double ellipsis arguments are unsupported'),
             ('struct X { int x; }; int g(X, ...); int f() { return g(X{1}); }',
