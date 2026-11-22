@@ -8,7 +8,7 @@ import sys
 import tempfile
 
 from linux_compile import run
-from linux_owned_derived_vtable import BASE, BASE_NAME, DERIVED, DERIVED_NAME, Elf, check_base
+from linux_owned_derived_vtable import BASE, BASE_NAME, DERIVED, DERIVED_NAME, SI_RUNTIME, Elf, check_base
 from linux_peer_derived_default_construction import native_compilers
 
 
@@ -24,6 +24,24 @@ def check_consumer(path):
         symbol = elf.symbol(name)
         assert (symbol.info >> 4, symbol.other, symbol.section) == (1, 0, 0), (path, name, symbol)
     references = [row.symbol for rows in elf.relocations.values() for row in rows]
+    for name in (BASE, DERIVED, HELPER):
+        assert references.count(name) == 1, (path, name, references)
+
+
+def check_coalesced(path):
+    elf = Elf(path)
+    check_base(elf)
+    # Itanium ABI §2.9.5. The keyed owner has a single public nonvirtual base at zero.
+    descriptor = elf.object('_ZTI1E', 24, (0x11, 0x21))
+    elf.check_words(descriptor, {0: (1, SI_RUNTIME, 16), 8: (1, '_ZTS1E', 0), 16: (1, BASE, 0)})
+    table = elf.object('_ZTV1E', 24, (0x11, 0x21))
+    elf.check_words(table, {8: (1, '_ZTI1E', 0), 16: (1, '_ZN1E1fEv', 0)})
+
+    cast = elf.symbol('coalesced_downcast')
+    assert cast.info == 0x12 and cast.section != 0 and cast.size > 0, (path, cast)
+    references = [row.symbol for row in elf.relocations.get(cast.section, ())
+                  if cast.value <= row.offset < cast.value + cast.size]
+    # check_base requires one symbol-table entry for BASE, shared by the descriptor and this code.
     for name in (BASE, DERIVED, HELPER):
         assert references.count(name) == 1, (path, name, references)
 
@@ -105,6 +123,10 @@ def main():
         run([ycxx, 'cxx', '--target=x86_64-pc-linux-gnu', '-std=c++26', '-c', 'qualified.cpp',
              '-o', 'qualified.o'], scope, cold)
         check_consumer(scope / 'qualified.o')
+
+        run([ycxx, 'cxx', '--target=x86_64-pc-linux-gnu', '-std=c++26', '-c',
+             fixtures / 'coalesced.cpp', '-o', 'coalesced.o'], scope, cold)
+        check_coalesced(scope / 'coalesced.o')
 
         for compiler in native_compilers(host, scope, cold):
             run([compiler, '-std=c++20', '-pedantic-errors', '-O0', '-fPIE', '-fno-lto',
