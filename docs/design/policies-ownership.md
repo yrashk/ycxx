@@ -131,7 +131,7 @@ and `holds_second()`. A scoped reference may observe the active alternative. Ext
 ends that alternative's ownership in the variant and transfers it to the destination.
 An active linear alternative must be discharged before scope exit or unwinding.
 
-The variant protocol works in syntax-only checks and checked arm64 Darwin links.
+The variant protocol works in syntax-only checks and checked arm64 macOS executables.
 Native x86-64 Linux lowering of the selection tags is tracked in
 [#641](https://github.com/yrashk/ycxx/issues/641).
 

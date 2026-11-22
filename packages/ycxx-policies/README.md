@@ -47,6 +47,11 @@ int main() {
 }
 ```
 
+On native x86-64 Linux and arm64 macOS, a hosted C++ caller can pass a guard to a YCXX-built
+helper. A single nonthrowing local destructor in the helper can consume the guard after a direct
+external call returns or throws. When the call throws, its original exception reaches the hosted
+caller. [Mixed-compiler fixture](../../tests/unit/pipeline/policies_contracts.py)
+
 An API can publish metadata in `<ycxx/ownership.hpp>` as reusable `policy<...>` types. Consumers
 activate several fragments with a namespace-scope alias of `use_policy<...>`. The metadata has
 no runtime work. YCXX interprets it when ownership checking is enabled. Use typed template
@@ -122,8 +127,8 @@ Scope exit destroys the active alternative, so a guarded linear owner still has 
 be discharged. The variant itself stays in its original scope.
 
 GCC and Clang run the portable C++20 variant. YCXX checks ownership of the active alternative
-in syntax-only builds and can emit checked arm64 Darwin executables. Native x86-64 Linux builds
-depend on support for the by-value selection tags. [ABI support #641](https://github.com/yrashk/ycxx/issues/641)
+in syntax-only builds and runs checked executables natively on arm64 macOS. Native x86-64 Linux
+builds depend on support for the by-value selection tags. [ABI support #641](https://github.com/yrashk/ycxx/issues/641)
 
 To check the active alternative with YCXX, compose the two resource policies, their
 move-transfer contracts, and the variant's storage contract.
