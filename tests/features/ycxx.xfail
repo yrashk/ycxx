@@ -82,7 +82,6 @@ draft/class/class.free-2.accept.cpp preprocessing directives are not supported y
 draft/class/class.free-3.accept.cpp preprocessing directives are not supported yet
 draft/class/class.free-4.accept.cpp preprocessing directives are not supported yet
 draft/class/class.friend-2.accept.cpp 'class' not supported yet
-draft/class/class.friend-3.reject.cpp errors elsewhere: 'class' not supported yet
 draft/class/class.friend-4.reject.cpp errors elsewhere: 'class' not supported yet
 draft/class/class.friend-8.reject.cpp errors elsewhere: 'template' not supported yet
 draft/class/class.friend-9.reject.cpp errors elsewhere: 'class' not supported yet
