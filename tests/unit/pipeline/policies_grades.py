@@ -120,27 +120,43 @@ with tempfile.TemporaryDirectory() as directory:
         finally:
             subprocess.run([compiler, "ctl", "shutdown"], cwd=root, env=env, capture_output=True, timeout=10)
 
-    if sys.platform.startswith("linux") and platform.machine() == "x86_64":
-        native = [*base, "--no-daemon", "--target=x86_64-linux-gnu", "-nostdlib"]
-        provider_source = """\
-            #include "grades.hpp"
-            [[=fx::contract<One>{}]] int send(int n) noexcept { return n + 1; }
-        """
-        provider = write("provider.cpp", provider_source)
-        changed = write("changed.cpp", provider_source.replace("contract<One>", "contract<Two>"))
-        native_caller = write("native.cpp", """\
-            #include "grades.hpp"
-            [[=fx::contract<One>{}]] int send(int) noexcept;
-            [[=fx::contract<One>{}]] int run(int n) noexcept { return send(n); }
-            int main() { return run(41) != 42; }
-        """)
-        for name, source in (("provider", provider), ("changed", changed), ("native", native_caller)):
-            invoke([*native, "-c", source, "-o", root / f"{name}.o"])
+    provider_source = """\
+        #include "grades.hpp"
+        [[=fx::contract<One>{}]] int send(int n) noexcept { return n + 1; }
+    """
+    provider = write("provider.cpp", provider_source)
+    changed = write("changed.cpp", provider_source.replace("contract<One>", "contract<Two>"))
+    linked_caller = write("native.cpp", """\
+        #include "grades.hpp"
+        [[=fx::contract<One>{}]] int send(int) noexcept;
+        [[=fx::contract<One>{}]] int run(int n) noexcept {
+          do { n = send(n); } while (false);
+          return n;
+        }
+        int main() { return run(41) != 42; }
+    """)
+    # PARITY: by design: cross-link Mach-O everywhere and run it on arm64 macOS.
+    # Execute the ELF contract and budget tests on the Linux x86-64 target.
+    darwin = [*base, "--no-daemon", "--target=arm64-apple-darwin"]
+    linux = [*base, "--no-daemon", "--target=x86_64-linux-gnu", "-nostdlib"]
+    mac_host = sys.platform == "darwin" and platform.machine() == "arm64"
+    linux_host = sys.platform.startswith("linux") and platform.machine() == "x86_64"
+    targets = [(darwin, mac_host)]
+    if linux_host:
+        targets.append((linux, True))
+    for target, can_run in targets:
+        for name, source in (("provider", provider), ("changed", changed), ("caller", linked_caller)):
+            invoke([*target, "-c", source, "-o", root / f"{name}.o"])
         program = root / "graded"
-        invoke([*native, "-o", program, root / "native.o", root / "provider.o"])
-        subprocess.run([program], check=True, timeout=10)
-        invoke([*native, "-o", program, root / "native.o", root / "changed.o"], "no matching guarantee")
+        invoke([*target, "-o", program, root / "caller.o", root / "provider.o"])
+        if can_run:
+            subprocess.run([program], check=True, timeout=10)
+        rejected = root / "mismatch"
+        invoke([*target, "-o", rejected, root / "caller.o", root / "changed.o"], "no matching guarantee")
+        assert not rejected.exists()
 
+    if linux_host:
+        program = root / "budget"
         mediated = write("mediated.cpp", """\
             #include "grades.hpp"
             #include <ycxx/effects/runtime.hpp>
@@ -160,7 +176,7 @@ with tempfile.TemporaryDirectory() as directory:
               return 0;
             }
         """)
-        invoke([*native, "-o", program, mediated])
+        invoke([*linux, "-o", program, mediated])
         subprocess.run([program], check=True, timeout=10)
         resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
         exhausted = subprocess.run([program, "exhausted"], timeout=10)
