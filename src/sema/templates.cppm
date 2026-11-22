@@ -86,7 +86,7 @@ public:
   // array of void, references, functions or unknown-bound arrays, a function returning an array
   // or a function, or a parameter of type void. A type parameter's cv-qualifiers are added to its argument
   // ([dcl.type.cv]: on a reference they are dropped).
-  std::optional<QualType> substitute(QualType t, const Bindings& b) {
+  std::optional<QualType> substitute(QualType t, const Bindings& b, bool trailing_return = false) {
     TypeRec r = types().rec(t);
     Cv cv = Types::cv(types().canonical(t));
     switch (r.kind) {
@@ -168,8 +168,13 @@ public:
       return types().array(*e, r.bound);
     }
     case TypeKind::function: {
-      auto ret = substitute(r.inner, b);
-      if (!ret || types().is_array(*ret) || types().is_function(*ret)) return std::nullopt;
+      auto return_type = [&]() -> std::optional<QualType> {
+        auto ret = substitute(r.inner, b);
+        if (!ret || types().is_array(*ret) || types().is_function(*ret)) return std::nullopt;
+        return ret;
+      };
+      auto ret = trailing_return ? std::optional<QualType>{} : return_type();
+      if (!trailing_return && !ret) return std::nullopt;
       std::vector<QualType> ps;
       auto append_parameter = [&](QualType p) {
         if (types().is_void(p) || types().is_cvref_function(p)) return false;
@@ -188,6 +193,8 @@ public:
         auto s = substitute(p, b);
         if (!s || !append_parameter(*s)) return std::nullopt;
       }
+      if (trailing_return) ret = return_type();
+      if (!ret) return std::nullopt;
       return types().function(*ret, ps, r.variadic, r.linkage, r.fn_cv, r.fn_ref, r.fn_noexcept);
     }
     case TypeKind::dep_spec: {
@@ -1510,7 +1517,7 @@ public:
   // The type of a specialization's declaration: the template's function type with `args`.
   std::optional<QualType> specialization_type(const ast::DeclSema& tmpl, std::span<const TemplateArg> args) {
     std::vector<ast::TemplateParamSema> params = w_->ins.seqs.elements(tmpl.template_params);
-    return substitute(tmpl.type, Bindings::of(params.empty() ? 0 : params[0].depth, args));
+    return substitute(tmpl.type, Bindings::of(params.empty() ? 0 : params[0].depth, args), tmpl.has_trailing_return);
   }
 
   // ------------------------------------------------------------ partial specializations ([temp.spec.partial])

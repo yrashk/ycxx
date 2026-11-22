@@ -94,6 +94,7 @@ struct Declarator {
   // `T x[] = {…}`: the outermost array bound is left to the initializer ([dcl.array]/8); `type`
   // is then the element type.
   bool unknown_bound = false;
+  bool trailing_return = false;
   bool function = false;  // it has a parameter list of its own, not a function type from a name
   // `f<args>`: a declarator-id that is a template-id, which an explicit specialization declares
   // ([temp.expl.spec]/1); `f<>` has none.
@@ -935,6 +936,7 @@ public:
       d.function = function_type;
       // The declaring context also checks defaults in a nested function type.
       d.params = fn->params;
+      d.trailing_return = fn->trailing.has_value();
       d.variadic = fn->variadic;
       d.ref_at = fn->ref_at;
       d.has_noexcept = fn->has_noexcept;

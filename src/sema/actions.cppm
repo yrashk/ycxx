@@ -777,7 +777,7 @@ public:
   std::optional<std::vector<TemplateArg>> template_arguments(const ast::DeclSema& tmpl, std::span<const TemplateArg> args, u32 at) {
     std::vector<ast::TemplateParamSema> params = ins().seqs.elements(tmpl.template_params);
     NameId name = w_->entities.rec(tmpl.entity).name;
-    Templates t = templates();
+    Templates t = tmpl.kind == ast::DeclKind::type_alias ? templates_for_use(at) : templates();
     // An expansion only for a pack parameter: for others it is not supported yet (#88).
     std::size_t first_pack = std::ranges::find_if(params, [](const ast::TemplateParamSema& p) { return p.pack != 0; }) - params.begin();
     for (std::size_t i = 0; i < args.size() && i < first_pack; ++i)
@@ -4385,7 +4385,7 @@ public:
       auto tmpl = q_->template_decl(c->entity);
       if (!tmpl) continue;
       const ast::DeclSema& td = patterns.emplace_back(*tmpl);
-      Templates t = templates();
+      Templates t = templates_for_use(callee.begin);
       auto targs = t.deduce_call(td, shapes, explicit_args, c->defaults);
       if (!targs) continue;
       if (td.constraints != ConstId::none) {
