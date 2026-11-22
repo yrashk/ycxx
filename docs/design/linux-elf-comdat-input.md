@@ -23,11 +23,19 @@ only in discarded sections does not need a final relocation. The reader retains 
 original undefined table entries. They can create archive demand even when every use was
 discarded, so archive admission needs its own rules and tests.
 
+The ELF writer emits a group with one content section and a named, defined weak object as
+its signature. A relocation-free `.rodata` section holds an RTTI name. A `.data.rel.ro`
+section with named nonlocal `R_X86_64_64` relocations holds an RTTI descriptor. The writer
+groups the descriptor's generated `.rela.data.rel.ro` with the payload. Its `sh_info`
+identifies the payload and its `sh_link` identifies the symbol table.
+[ELF gABI §3.9](https://gabi.xinuos.com/elf/03-sheader.html#section-groups) ·
+[#422](https://github.com/yrashk/ycxx/issues/422)
+
 Diagnose grouped inputs with dynamic providers or archives, including a grouped archive
 member when it is selected. Unselected archive members stay unread. Native archive
-production and ELF object emission diagnose grouped objects. Group emission and remaining
-COMDAT link modes stay in [#422](https://github.com/yrashk/ycxx/issues/422). Mach-O remains
-in [#124](https://github.com/yrashk/ycxx/issues/124).
+production diagnoses grouped objects. Broader group emission and remaining COMDAT link
+modes stay in [#422](https://github.com/yrashk/ycxx/issues/422). Mach-O remains in
+[#124](https://github.com/yrashk/ycxx/issues/124).
 
 Astra independently reviewed the ABI and verified GNU ld and LLD outcomes for group order,
 whole-group removal, undefined symbols, archive demand and plain strong definitions.
