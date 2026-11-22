@@ -127,12 +127,12 @@ Use the host linker to link these objects with libc.
 [#399](https://github.com/yrashk/ycxx/issues/399), [#196](https://github.com/yrashk/ycxx/issues/196)
 
 Fixed-prototype definitions and direct calls on x86-64 Linux also move `float` and `double`
-arguments and results. Direct variadic calls support the same scalar floating values and
-promote an unnamed `float` to `double`. Direct call result types can be deduced from `auto` or
-`decltype(auto)`. Runtime addition, subtraction, multiplication, division and unary negation
-work for `float` and `double` at their evaluation width. Both types support the six comparisons,
-conversion to `bool`, conversions to and from every integer type, `double` to `float`, and
-`__builtin_fabs`. [#643](https://github.com/yrashk/ycxx/issues/643)
+arguments and results, directly and through function pointers. Variadic calls support the same
+scalar floating values and promote an unnamed `float` to `double`. Direct call result types can
+be deduced from `auto` or `decltype(auto)`. Runtime addition, subtraction, multiplication,
+division and unary negation work for `float` and `double` at their evaluation width. Both types
+support the six comparisons, conversion to `bool`, conversions to and from every integer type,
+`double` to `float`, and `__builtin_fabs`. [#643](https://github.com/yrashk/ycxx/issues/643)
 [Linux scalar floating-point ABI](docs/design/linux-scalar-floating-point.md) ·
 [Linux scalar floating-point operations](docs/design/linux-scalar-floating-point.md#runtime-arithmetic) ·
 [Linux scalar variadic floating-point ABI](docs/design/linux-floating-variadic-calls.md) ·
@@ -479,6 +479,11 @@ members. [#285](https://github.com/yrashk/ycxx/issues/285)
 - Automatic Linux CRT and library selection and general-purpose ELF object interoperability.
   [#390](https://github.com/yrashk/ycxx/issues/390)
 - Namespace-scope destruction for x86-64 Linux. [#400](https://github.com/yrashk/ycxx/issues/400)
+- Parity between the two native back ends. x86-64 Linux does not yet pass classes with
+  floating members by value, trivially copyable classes over 16 bytes as arguments, or x87
+  `long double`. AArch64 macOS does not yet have native `int` throws, unwinding through ycxx
+  frames, native array `new`, or virtual calls on peer-owned classes, which x86-64 has. The
+  full table is [#639](https://github.com/yrashk/ycxx/issues/639).
 
 ### In progress
 
@@ -488,6 +493,9 @@ members. [#285](https://github.com/yrashk/ycxx/issues/285)
 - `auto` and lambdas ([#278](https://github.com/yrashk/ycxx/issues/278)): placeholder types,
   lambdas and generic lambdas are done; constexpr lambdas wait on class objects in the
   interpreter ([#262](https://github.com/yrashk/ycxx/issues/262)).
+
+- x86-64 ↔ AArch64 back-end parity ([#639](https://github.com/yrashk/ycxx/issues/639)), one
+  gap per PR in priority order.
 
 Next come exceptions ([#89](https://github.com/yrashk/ycxx/issues/89)).
 

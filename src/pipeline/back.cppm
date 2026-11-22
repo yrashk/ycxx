@@ -1120,10 +1120,7 @@ std::string_view linux_signature_error(const ast::Interners& in, const QueryLayo
   auto error_for = [&](QualType value, bool result) -> std::string_view {
     auto builtin = ast::builtin_of(in, value);
     if (builtin == ast::Builtin::long_double) return "x87 long double parameters and results are unsupported";
-    if (builtin == ast::Builtin::float_ || builtin == ast::Builtin::double_) {
-      if (use == indirect_call) return "floating-point parameters and results of indirect calls are unsupported";
-      return {};
-    }
+    if (builtin == ast::Builtin::float_ || builtin == ast::Builtin::double_) return {};
     auto l = layout.type(value);
     if (l.copy_abi_unknown)
       return result ? "defaulted copy ABI classification is unavailable for the result"
@@ -1163,11 +1160,9 @@ std::string_view linux_ellipsis_error(const ast::Interners& in, const QueryLayou
     auto builtin = ast::builtin_of(in, type);
     if (builtin == ast::Builtin::long_double) return "x87 long double ellipsis arguments are unsupported";
     auto l = layout.type(type);
-    if (indirect && l.kind == ir::TypeKind::floating) return "floating-point ellipsis arguments are unsupported";
-    if (!((byval >> i) & 1) && (linux_ellipsis_scalar(l) || (!indirect && builtin == ast::Builtin::double_)))
+    if (!((byval >> i) & 1) && (linux_ellipsis_scalar(l) || builtin == ast::Builtin::double_))
       continue;
-    return indirect ? "only 32- and 64-bit integer and pointer ellipsis arguments are supported"
-                    : "only double, 32- and 64-bit integer, and pointer ellipsis arguments are supported";
+    return "only double, 32- and 64-bit integer, and pointer ellipsis arguments are supported";
   }
   return {};
 }

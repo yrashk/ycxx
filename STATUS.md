@@ -631,8 +631,9 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
   cursors advance independently in the register save area and share the overflow stack cursor.
   `va_copy` gives each cursor independent positions and `va_end` evaluates its operand.
   `unit.linux_variadic_definitions` exercises native execution, host peers, and standalone and
-  daemon compilation. Indirect floating calls and aggregate variadic signatures and retrieval
-  remain in #196.
+  daemon compilation. Calls through pointers pass `float` and `double` arguments and results
+  as direct calls do; through a variadic pointer, AL counts the vector registers used
+  (`unit.linux_scalar_sse`, #196). Aggregate variadic signatures and retrieval remain in #196.
   [#417](https://github.com/yrashk/ycxx/issues/417), [#412](https://github.com/yrashk/ycxx/issues/412),
   [#399](https://github.com/yrashk/ycxx/issues/399),
   [#196](https://github.com/yrashk/ycxx/issues/196)
