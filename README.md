@@ -195,8 +195,11 @@ A host-linked ycxx function can use one `catch (...)` to return an integer liter
 a direct call on its parameter to an externally defined `int(int)` function throws.
 A host-linked void function can also destroy one initialized aggregate local on both exits
 from an external `void()` call and let the original exception reach a peer handler.
+A supported union constructor can destroy its active member when its body call throws and
+propagate an exception from its initializer before the member's lifetime begins.
 [#578](https://github.com/yrashk/ycxx/issues/578)
 · [#583](https://github.com/yrashk/ycxx/issues/583) · [#663](https://github.com/yrashk/ycxx/issues/663)
+· [#738](https://github.com/yrashk/ycxx/issues/738)
 
 Both targets support cooked integer user-defined literals through namespace-scope literal
 operators with an `unsigned long long` parameter, including constant evaluation.
@@ -321,8 +324,8 @@ written default member initializer are value-initialized.
   [#244](https://github.com/yrashk/ycxx/issues/244)
 - ordinary named unions with a written destructor can hold nontrivially destructible members.
   The member's copy constructor can be trivial or deleted. An explicit union constructor
-  initializes its selected member. Construction of a nontrivially destructible variant
-  uses a nonthrowing constructor. [#203](https://github.com/yrashk/ycxx/issues/203) ·
+  initializes its selected member. A nonthrowing constructor works on both targets, and the
+  hosted Linux subset above can unwind the construction. [#203](https://github.com/yrashk/ycxx/issues/203) ·
   [#738](https://github.com/yrashk/ycxx/issues/738)
 - namespace-scope union templates support the same rules for concrete nontrivially destructible
   variants after instantiation. [#203](https://github.com/yrashk/ycxx/issues/203)
