@@ -720,7 +720,11 @@ public:
     if (!full) return std::nullopt;
     if (tmpl.kind == ast::DeclKind::type_alias) {
       std::vector<ast::TemplateParamSema> params = ins().seqs.elements(tmpl.template_params);
-      auto t = templates().substitute(tmpl.type, Bindings::of(params.empty() ? 0 : params[0].depth, *full));
+      auto substitution = templates();
+      substitution.demand_variable = [this, at](EntityId spec, QualType type) {
+        demands.push_back({spec, ast::Loc{item_, loc_base_ + at}, type});
+      };
+      auto t = substitution.substitute(tmpl.type, Bindings::of(params.empty() ? 0 : params[0].depth, *full));
       // Past the nesting limit, which was diagnosed, it says nothing more ([temp.inst]/16).
       if (!t && !q_->instantiation_gave_up()) diag(at, Diag::template_args_mismatch, w_->entities.rec(tmpl.entity).name);
       return t;

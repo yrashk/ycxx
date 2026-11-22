@@ -1685,7 +1685,10 @@ private:
       auto global = variable_global ? variable_global(spec) : std::nullopt;
       auto type = global ? std::optional(global->type) : declared_variable_type(spec, ref.templ, *args);
       if (!type || !types().is(types().referee(*type), Builtin::bool_)) return std::nullopt;
-      if (mode == BooleanSubstitution::discard) return w_->values.integer(types().builtin(Builtin::bool_), false);
+      if (mode == BooleanSubstitution::discard) {
+        if (!global && demand_variable) demand_variable(spec, *type);
+        return w_->values.integer(types().builtin(Builtin::bool_), false);
+      }
       ref.args = ins().intern_seq(std::span<const TemplateArg>(*args));
       return ins().intern_value(ref);
     }
@@ -1842,6 +1845,7 @@ public:
   std::function<std::optional<ConstId>(EntityId)> variable_constant;
   std::function<std::optional<interp::GlobalVar>(EntityId)> variable_global;
   std::function<std::optional<QualType>(EntityId)> variable_specialization_type;
+  std::function<void(EntityId, QualType)> demand_variable;
 
 private:
   // The template-head whose parameters a deduction deduces, and its packs whose leading elements
