@@ -1119,6 +1119,10 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   checks and native Linux x86-64 execution.
   Diagnostics during replay use the written initializer's source position.
   [#806](https://github.com/yrashk/ycxx/issues/806)
+- Default member initializer replay in written constructors uses the initializer's original
+  namespace for ordinary and qualified lookup, and its original lexical point for ADL.
+  Lookup still sees the enclosing class complete, including its hidden friends.
+  [#764](https://github.com/yrashk/ycxx/issues/764)
 
 - An automatic declaration such as `Point p(3, 4);` can initialize a flat aggregate with
   public arithmetic fields and implicit trivial destruction. The fallback applies when
