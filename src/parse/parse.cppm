@@ -8022,6 +8022,7 @@ public:
   // Satisfied or not. An empty result means the initializer already reported a hard error.
   std::optional<bool> run(std::vector<engine::Diagnostic>& hard) {
     auto& ins = p_->world().ins;
+    s_.current_class = atom_.lookup_class;
     for (auto& head : p_->enclosing_heads(k_)) s_.template_scopes.push_back(std::move(head));
     const ast::ItemSema& is = p_->item_sema(k_).value;
     if (ins.seqs.size(is.decls) > 0) {
