@@ -735,8 +735,8 @@ clauses = ['expr.static.cast', 'expr.reinterpret.cast', 'expr.const.cast', 'expr
 std = 'C++98'
 detect = '\b(?:static|const|reinterpret)_cast\s*<'
 status = 'partial'
-issues = [199, 59, 216]
-note = 'rvalue-reference, C-style and functional downcasts, `const_cast`, `reinterpret_cast`, and some `void*` and `std::nullptr_t` conversions. Qualified functional casts check access to aliases and typedefs declared directly in ordinary classes.'
+issues = [199, 59, 216, 697]
+note = 'rvalue-reference, C-style and functional downcasts, `const_cast`, `reinterpret_cast`, and some `void*` and `std::nullptr_t` conversions. Qualified functional casts check access to aliases and typedefs declared directly in ordinary classes and accept namespace-qualified class and alias template-ids.'
 probe = '''
 int main() { long l = 5; int i = static_cast<int>(l); const int* c = &i; int* m = const_cast<int*>(c); char* b = reinterpret_cast<char*>(m); return (i == 5 && (int)l == int(l) && b) ? 0 : 1; }
 '''
@@ -1119,7 +1119,7 @@ clauses = ['dcl.init.aggr', 'dcl.init.general']
 std = 'C++17'
 ftm = '__cpp_aggregate_bases'
 status = 'partial'
-note = 'Automatic flat arithmetic records support parenthesized initialization. Runtime declarations can copy one flat public direct base from an exact-type lvalue or a fully written unqualified braced prvalue. An omitted trailing arithmetic field is value-initialized when it has no written default member initializer. Other base forms, arrays, nested and reference fields, and other initialization contexts remain open.'
+note = 'Automatic flat arithmetic records support parenthesized initialization. Runtime declarations can copy one flat public direct base from an exact-type lvalue or a fully written unqualified braced prvalue. Omitted trailing arithmetic fields can replay call-free defaults that read the initialized base, or are value-initialized when they have no default. Other base forms, arrays, nested and reference fields, and other initialization contexts remain open.'
 probe = '''
 struct B { int b; }; struct D : B { int d; }; struct P { int x, y; };
 int main() { D d{{1}, 2}; P p(3, 4); return (d.b + d.d + p.x + p.y == 10) ? 0 : 1; }

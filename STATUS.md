@@ -1083,11 +1083,15 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   the base subobject.
   Omitted trailing arithmetic fields are value-initialized when they have no written default
   member initializer. With a sole base expression, the base must have no conversion functions.
+  For a named non-template class at namespace scope, an omitted field's written default can
+  use call-free arithmetic on literals and fields of the initialized base. The replay binds
+  implicit and explicit `this` to the destination object. Explicit clauses keep the enclosing
+  receiver and an explicit field initializer takes precedence over the default.
 - Parenthesized arrays, nested fields, unions, reference members, bit-fields, and nontrivial
   destruction remain in [#301](https://github.com/yrashk/ycxx/issues/301). The issue also tracks
-  multiple bases, other base prvalues, omitted default member initializers in derived aggregates,
-  constant evaluation of base copies, static storage and functional casts. Linux x86-64 runtime
-  conversions between floating-point and integer types remain in
+  multiple bases, other base prvalues, default member initializers with calls, mutation or reads
+  outside the base, constant evaluation of base copies, static storage and functional casts.
+  Linux x86-64 runtime conversions between floating-point and integer types remain in
   [#201](https://github.com/yrashk/ycxx/issues/201).
   Spec-only fixtures are in `tests/own/parenthesized-aggregate/`.
 
@@ -2179,8 +2183,17 @@ request it serves.
   one. The wait first lists the files it watches (`watching`: the file table's existing entries).
 - Tests: `unit.trace` (a golden stream of a unit built cold, again and after a whitespace edit;
   the collector under 8 threads; the tree, filters, summary and timeline); `daemon.trace` (traced
-  builds through the daemon, a watcher, a stalled watcher beside 40 builds, shutdown). The
-  browser's key handling is untested.
+  builds through the daemon, a watcher, a stalled watcher beside 40 builds, shutdown).
+- The browser (#635): `:view` is its model, with no terminal: state, keys, mouse, and frames for a
+  given size. `:browse` runs it on `/dev/tty`. It uses SGR mouse modes 1000, 1002 and 1006 with
+  autowrap off, and draws each line at its row. A `SIGWINCH` self-pipe redraws on resize. Fatal
+  signals restore the terminal, then re-raise. The tree has columns (time, worker, alloc and
+  retains, summed over the subtree) whose headers sort it (`Tree::Order::time` added). The
+  summary wraps on narrow screens. The divider drags (or `<`/`>`) and keeps its share of the
+  width. Tests: `unit.trace` (SGR parsing, hit-testing, click, double click, marker, wheel,
+  divider drag, sort, focus, wrap; frames against `browser.golden`); `daemon.trace_tui` (under a
+  pty: modes on and off, a click, a resize, SIGTERM and SIGABRT restoring the terminal),
+  mutation-checked.
 - Source spans (#638): `engine::SourceSpan` on each `TraceEvent`, from a kind's `trace_span(const
   Db&, const Key&)`, which runs only in `Db::trace`. `Db::peek` reads an input, or a value
   verified at this revision, without a dependency. A file's and a unit's cells are the file; a
@@ -2914,6 +2927,16 @@ and runtime integration with ycxx's own linker remain under [#89]. See the
   [Cookie-free deletion](docs/design/cookie-free-array-delete.md)
   A file-scope scalar initializer still needs lowered code to qualify for dynamic initialization.
   Type checking covers function-local expressions and unevaluated operands.
+
+## Qualified template functional conversions (#697)
+
+A namespace-qualified class or alias template-id can name the target of a parenthesized
+or braced functional conversion. A namespace alias resolves to the same template, and defaults
+can come from its visible redeclarations. Qualified lookup stops at the first matching namespace
+on each using-directive path. Conflicting declarations across paths are ambiguous. Qualified
+function and variable template expressions use the ordinary expression path
+([expr.type.conv], [temp.names], [basic.lookup.qual]).
+[#697](https://github.com/yrashk/ycxx/issues/697)
 
 ## Bootstrap workarounds
 

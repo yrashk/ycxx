@@ -112,7 +112,8 @@ public:
   virtual bool is_complete(EntityId c) = 0;
   // An omitted field's initializer, analysed at its declaration into the requesting builder.
   // `NodeId::none` records a diagnosed error. No answer means this context cannot replay it.
-  virtual std::optional<NodeId> replay_default_member(Sema&, EntityId) { return std::nullopt; }
+  // A required base selects the call-free parenthesized aggregate form.
+  virtual std::optional<NodeId> replay_default_member(Sema&, EntityId, EntityId = EntityId::none) { return std::nullopt; }
   virtual std::optional<NodeId> replay_function_default(Sema&, const ast::DefaultArg&, EntityId, QualType) {
     return std::nullopt;
   }
@@ -641,6 +642,21 @@ public:
     if (auto c = namespace_class_template(ns, name)) return c;
     return namespace_template(ns, name, ast::DeclKind::type_alias);
   }
+  // [basic.lookup.qual], [namespace.qual] apply ordinary lookup before a functional
+  // conversion is known to name a type. Distinct declarations can be introduced by
+  // different using-directives even when one of them is a type template.
+  std::optional<ast::DeclSema> namespace_expression_type_template(EntityId ns, NameId name, u32 at) {
+    const auto found = q_->namespace_members(ns, name);
+    const auto type = std::ranges::find_if(found, [](const ast::DeclSema& d) {
+      return (d.flags & decl_flag::template_) && (d.kind == ast::DeclKind::class_ || d.kind == ast::DeclKind::type_alias);
+    });
+    if (type == found.end()) return std::nullopt;
+    if (std::ranges::any_of(found, [&](const ast::DeclSema& d) { return d.entity != type->entity; })) {
+      diag(at, Diag::ambiguous_name, name);
+      return std::nullopt;
+    }
+    return with_template_defaults(*type, found);
+  }
   // The variable template unqualified lookup finds for `name` ([temp.pre]/1), likewise.
   std::optional<ast::DeclSema> variable_template(NameId name, std::optional<u32> at = std::nullopt) {
     return named_template(name, ast::DeclKind::variable, at);
@@ -681,10 +697,15 @@ public:
     }
     if (!found && !decls.empty()) found = decls.back();
     if (!found || found->kind != kind || !(found->flags & decl_flag::template_)) return std::nullopt;
-    std::vector<ast::TemplateParamSema> params = ins().seqs.elements(found->template_params);
+    return with_template_defaults(*found, decls);
+  }
+
+  // [temp.param] combines default arguments from prior declarations of the same template.
+  ast::DeclSema with_template_defaults(ast::DeclSema found, std::span<const ast::DeclSema> decls) {
+    std::vector<ast::TemplateParamSema> params = ins().seqs.elements(found.template_params);
     bool merged = false;
     for (const ast::DeclSema& d : decls) {
-      if (d.entity != found->entity) continue;
+      if (d.entity != found.entity) continue;
       std::vector<ast::TemplateParamSema> other = ins().seqs.elements(d.template_params);
       for (std::size_t i = 0; i < params.size() && i < other.size(); ++i)
         if (!params[i].has_default && other[i].has_default) {
@@ -693,7 +714,7 @@ public:
           merged = true;
         }
     }
-    if (merged) found->template_params = ins().intern_seq(std::span<const ast::TemplateParamSema>(params));
+    if (merged) found.template_params = ins().intern_seq(std::span<const ast::TemplateParamSema>(params));
     return found;
   }
 
@@ -1962,14 +1983,14 @@ public:
     if (!allow_base_copy || c->bases.size() != 1 || c->unapplied_layout || c->layout_requires_virtual_support ||
         c->fields.empty() || args.empty() || args.size() - 1 > c->fields.size()) return false;
 
-    // Copy the one direct nonvirtual base from its exact type. Omitted fields in this
-    // runtime slice are value-initialized, so their suffix must have no written defaults.
+    // Copy the one direct nonvirtual base from its exact type.
     const BaseRec& edge = c->bases.front();
     if (edge.access != ast::Access::public_ || edge.dependent_in_pattern) return false;
     const QualType base_type = types().class_type(edge.cls);
     const Ex& first = args.front();
     if (!first.ok() || types().is_dependent(base_type) || !same_unqualified(first.type(), base_type)) return false;
-    if (std::ranges::any_of(std::span(c->fields).subspan(args.size() - 1), &FieldRec::dmi)) return false;
+    if (std::ranges::any_of(std::span(c->fields).subspan(args.size() - 1), &FieldRec::dmi) &&
+        (unevaluated || templated() || !ordinary_default_member_owner(types().class_of(t)))) return false;
     const QualType source = types().canonical(first.type());
     if (Types::is_volatile(source)) return false;
     const ClassRec* base = class_rec(edge.cls);
@@ -2033,14 +2054,18 @@ public:
     return c && c->union_;
   }
 
+  bool ordinary_default_member_owner(EntityId c) {
+    const EntityRec& entity = w_->entities.rec(c);
+    return entity.kind == EntityKind::class_ && entity.templ == EntityId::none && entity.name != no_name() &&
+           (entity.scope == EntityId::none || w_->entities.rec(entity.scope).kind == EntityKind::namespace_);
+  }
+
   // [class.base.init], [dcl.init.aggr]: a destination with only ordinary scalar fields
   // needs no subobject destruction if an initializer exits by throwing.
   bool can_replay_default_members(QualType t) {
     if (templated() || !types().is_class(t)) return false;
     EntityId c = types().class_of(t);
-    const EntityRec& entity = w_->entities.rec(c);
-    if (entity.kind != EntityKind::class_ || entity.templ != EntityId::none || entity.name == no_name() ||
-        (entity.scope != EntityId::none && w_->entities.rec(entity.scope).kind != EntityKind::namespace_)) return false;
+    if (!ordinary_default_member_owner(c)) return false;
     const ClassRec* rec = class_rec(c);
     return rec && !rec->union_ && !rec->closure && !rec->polymorphic && rec->bases.empty() &&
            rec->destructor_usable && rec->destructor == EntityId::none &&
@@ -2129,12 +2154,17 @@ public:
     }
     return list_of(t, std::move(out), begin, end);
   }
-  Ex element_default(const Element& e, bool value, bool replay, u32 begin, u32 end) {
-    if (replay && e.default_member != EntityId::none) {
-      if (auto init = q_->replay_default_member(*this, e.default_member)) {
+  Ex element_default(const Element& e, bool value, bool replay, u32 begin, u32 end,
+                     EntityId required_base = EntityId::none) {
+    if ((replay || required_base != EntityId::none) && e.default_member != EntityId::none) {
+      if (auto init = q_->replay_default_member(*this, e.default_member, required_base)) {
         if (*init == NodeId::none) return {NodeId::none, begin, end};
         ExprInfo info{e.type, ValueCategory::prvalue, 0};
         return node(ast::DefaultMemberInit{info, {*init, 0}}, begin, end, info);
+      }
+      if (required_base != EntityId::none) {
+        diag(begin, Diag::not_supported, lex::Tk::equal);
+        return {NodeId::none, begin, end};
       }
     }
     if (e.init != ConstId::none) return literal(Types::unqualified(e.type), e.init, ValueCategory::prvalue, begin, end);
@@ -2290,6 +2320,9 @@ public:
     std::vector<Ex> out;
     out.reserve(elems.size());
     const bool replay = replay_default_members_ && can_replay_default_members(t);
+    // The derived fallback has proved that its first element is the supplied exact base.
+    const EntityId required_base = !elems.empty() && types().is_class(elems.front().type)
+        ? types().class_of(elems.front().type) : EntityId::none;
     for (std::size_t i = 0; i < elems.size(); ++i) {
       Ex init;
       if (i < args.size()) {
@@ -2307,7 +2340,7 @@ public:
         }
         init = convert(source, elems[i].type, args[i].begin);
       } else {
-        init = element_default(elems[i], true, replay, end, end);
+        init = element_default(elems[i], true, replay, end, end, required_base);
       }
       if (!init.ok()) return {NodeId::none, begin, end};
       out.push_back(init);
