@@ -4089,14 +4089,7 @@ private:
     const items::Item& record = p_->items().items[it_->parent];
     // The first slice covers a non-template record without bases or layout attributes.
     auto attributed = [&](u32 begin, u32 end) {
-      const pp::Region& region = p_->region();
-      for (u32 i = begin; i < end; ++i) {
-        const auto token = region.tokens[i];
-        if (token.kind == Tk::kw_alignas ||
-            (token.kind == Tk::l_square && i + 1 < end && region.tokens[i + 1].kind == Tk::l_square) ||
-            (token.kind == Tk::identifier && region.name(token) == "__attribute__")) return true;
-      }
-      return false;
+      return layout_attribute(p_->region(), begin, end, LayoutAttributes::any);
     };
     if (d.name_at != d.begin || d.template_args || member_template_ || spec.is_static || !q_.defining_bases(owner).empty() ||
         p_->class_rec_is_union(it_->parent) || record.template_depth != 0 || record.specialization ||

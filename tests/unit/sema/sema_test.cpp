@@ -186,6 +186,35 @@ int invoke() { return finish(Owner{}); }
   }
 }
 
+void qualified_template_annotation() {
+  Analysed a(R"cpp(
+namespace effects {
+template<class...> struct Set {};
+template<class> struct Contract {};
+}
+namespace fx = effects;
+struct [[=1]] Read { unsigned flags : 3; };
+[[=fx::Contract<fx::Set<Read>>{}]] int read();
+)cpp");
+  const bool clean = a.pre.diags.empty() && a.diags().empty();
+  check(clean, "a namespace-qualified template annotation and an annotated bit-field class are valid");
+  if (!clean) return;
+
+  const auto fn = a.decl(a.its.top.back());
+  const auto annotations = a.p->declaration_annotations(fn.entity);
+  check(annotations.size() == 1, "one annotation is attached to the function");
+  if (annotations.size() != 1) return;
+
+  const auto& annotation = annotations.front();
+  const bool aggregate = a.ins.values.is<ast::VAggregate>(annotation.value);
+  check(aggregate && a.w.types.is_class(annotation.type), "the payload is a typed class constant");
+  if (!aggregate || !a.w.types.is_class(annotation.type)) return;
+  const auto klass = a.w.entities.rec(a.w.types.class_of(annotation.type));
+  check(klass.templ != ast::EntityId::none && a.ins.names.spelling(klass.name) == "Contract" &&
+            a.ins.values.get<ast::VAggregate>(annotation.value).type == annotation.type,
+        "the annotated payload retains the concrete namespace class specialization");
+}
+
 void invalid_declaration_annotations() {
   using sema::Diag;
   struct Witness {
@@ -512,6 +541,7 @@ int main() {
   prototype_parameters_are_not_body_locals();
   redeclarations_and_linkage();
   declaration_annotations();
+  qualified_template_annotation();
   invalid_declaration_annotations();
   unsupported_bit_fields();
   gnu_pointer_qualifiers();
