@@ -1126,6 +1126,10 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
 - A written constructor replays the initializer before taking a stored scalar value, so later
   class members can hide namespace declarations in defaults that evaluated during the member scan.
   [#763](https://github.com/yrashk/ycxx/issues/763)
+- Class completion checks non-dependent default member initializer expressions at their original
+  lexical point. An unbound class template pattern leaves dependent expressions for a selecting
+  initialization ([class.mem.general], [temp.res], [temp.inst]).
+  [#732](https://github.com/yrashk/ycxx/issues/732)
 
 - An automatic declaration such as `Point p(3, 4);` can initialize a flat aggregate with
   public arithmetic fields and implicit trivial destruction. The fallback applies when
@@ -1960,6 +1964,9 @@ session's.*
   initial literal, including `S b(S(1));` and `S b(S{1});` ([dcl.ambig.res], #290).
   A later expression can disambiguate a grouped functional conversion, as in
   `Holder h(Tag(n), 2);` ([dcl.ambig.res], #769).
+  An additive operator after an identifier inside the operand also selects the initializer,
+  as in `Holder h(Tag(n), Tag(n + 1));`. The grouped named and adjusted pointer parameter
+  declarations keep their declaration reading ([dcl.ambig.res], #813).
 - Qualified functional conversions check access to aliases and typedefs declared directly in an
   ordinary non-template record, for both `C::T(args)` and `C::T{args}`. They use the existing
   member and friend access rules ([expr.type.conv], [class.access.general], #216).
@@ -2038,6 +2045,11 @@ session's.*
   variable-template initializers replay dependent operands and check class completeness at the
   demand. Other combinations, including class `__is_nothrow_convertible`, get hard diagnostics.
   `__has_builtin` answers 0 while support is partial ([meta.rel], [dcl.init.ref], #218).
+- `__reference_converts_from_temporary(T, U)` and `__reference_constructs_from_temporary(T, U)`
+  tell whether a reference T initialized from VAL<U> binds to a temporary: a converted arithmetic
+  value or a materialized prvalue, for arithmetic operands, void and reference-related classes
+  (`tests/own/builtins/reference_temporary.run.cpp`). Unrelated classes, which need user-defined
+  conversions, are diagnosed as not supported yet (#218).
 - `__is_base_of(Base, Derived)` ignores top-level cv. Nonclass and union operands give false.
   The same nonunion class gives true, including when incomplete. For distinct nonunion classes,
   `Derived` must be complete. The trait follows the recorded base declarations, including private
@@ -2142,9 +2154,12 @@ Fable decided the representation (ast.md §6.6); the Opus session wrote the code
   variable-template specialization with explicit non-dependent type arguments checks its associated
   constraints. This includes unevaluated uses such as `decltype`. A type-constraint or a leading
   requires-clause contributes to that check. [#234](https://github.com/yrashk/ycxx/issues/234)
+- A compound requirement `{ e } noexcept;` holds when the operator `noexcept(e)` gives true: a
+  call to a potentially-throwing function or a temporary with a throwing destructor fails it
+  ([expr.prim.req.compound]/2, #775, `tests/own/concepts/compound-noexcept.run.cpp`).
 - Not yet: class and variable template constraints outside those cases, partial specializations
   and members, broader constrained packs, fold-expanded constraints, constrained placeholders
-  outside ordinary block declarations, and `noexcept` in compound requirements (#234). Open follow-ups include re-verification of satisfaction at END
+  outside ordinary block declarations (#234). Open follow-ups include re-verification of satisfaction at END
   (#235), Itanium constraint mangling (#236), recorded discarded extents for `if constexpr` (#237),
   and value-dependent mapping arguments (#209).
 
