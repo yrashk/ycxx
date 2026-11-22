@@ -667,8 +667,7 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
   ast::Interners& ins = world.ins;
   TranslationUnit tu;
   tu.name = std::move(name);
-  // Native compilation may consume peer-owned Linux objects with supported virtual
-  // declarations, including one non-key definition. The key function and table stay in the peer.
+  // Native compilation may consume peer-owned Linux objects, including one non-key definition.
   const auto& classes = program.classes();
   EntityId defined_nonkey = EntityId::none;
   auto peer_member_declaration = [&](EntityId f) -> std::optional<ast::DeclSema> {
@@ -688,9 +687,22 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
   };
   for (EntityId c : classes.classes()) {
     const auto& record = classes.rec(c);
-    if (!record.layout_requires_virtual_support ||
-        sema::native_virtual_consumer(record, classes, world.types, peer_member_declaration))
+    if (!record.layout_requires_virtual_support) continue;
+    // The first slot is the key function of the admitted root. Classify its ownership using
+    // the complete unit, even when no function uses the class or constructs an object here.
+    if (const auto slots = sema::native_virtual_table_slots(record);
+        slots && program.function_defined_before(slots->front(), program.end())) {
+      // An elaborated declaration may introduce the class with namespace attributes. A friend
+      // may also redeclare either slot with its own attributes, including after the key.
+      if (!tu.owned_virtual_table && !program.function_defined_before(slots->back(), program.end()) &&
+          !program.has_unapplied_declaration_attributes(c) &&
+          std::ranges::none_of(*slots, [&](EntityId f) { return program.has_unapplied_declaration_attributes(f); })) {
+        tu.owned_virtual_table = OwnedVirtualTable{world.types.class_type(c), *slots};
+        continue;
+      }
+    } else if (sema::native_virtual_consumer(record, classes, world.types, peer_member_declaration)) {
       continue;
+    }
     block_virtual_emission(tu, program, record);
     return tu;
   }
@@ -873,13 +885,13 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
           f.catch_all_callee = hosted_catch_all_callee(program, d, body);
           f.unwind = f.catch_all_callee == EntityId::none ? cleanup_free_definition(program, d, body)
                                                          : UnwindEligibility::hosted_catch_all;
-          if (f.unwind == UnwindEligibility::none) {
-            f.cleanup_call = hosted_cleanup_call(program, d, body);
-            if (f.cleanup_call != ast::NodeId::none) f.unwind = UnwindEligibility::hosted_cleanup;
-            else f.unwind_through_constructor = hosted_union_constructor_caller(program, d, body);
-          }
         } else if (cleanup_free_definition(program, d, body) == UnwindEligibility::cleanup_free) {
           f.unwind = UnwindEligibility::cleanup_free;
+        }
+        if (f.unwind == UnwindEligibility::none) {
+          f.cleanup_call = hosted_cleanup_call(program, d, body);
+          if (f.cleanup_call != ast::NodeId::none) f.unwind = UnwindEligibility::hosted_cleanup;
+          else if (linux) f.unwind_through_constructor = hosted_union_constructor_caller(program, d, body);
         }
       }
       closures_of(body.closures, program.id(k), it.body_begin - it.begin);
@@ -967,7 +979,8 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
     if (world.types.is_dependent(world.types.class_type(cls))) continue;
     declare(s.decl, std::nullopt);
     tu.functions.push_back({s.decl.entity, s.decl, program.synthesized_body(i), program.id(s.item), 0, program.this_type(s.decl)});
-    tu.functions.back().coalesced = s.kind == parse::Program::SpecialMember::copy_assignment && !internal_class(cls);
+    using enum parse::Program::SpecialMember;
+    tu.functions.back().coalesced = (s.kind == copy_assignment || s.kind == move_constructor) && !internal_class(cls);
   }
   auto unwind_provider = [&](EntityId callee) {
     return !program.function_defined_before(callee, program.end()) && !noexcept_declarations.contains(callee) &&
@@ -1127,6 +1140,7 @@ engine::query_task<FrontResult> TuFront::run(engine::Ctx& cx, TuId tu) {
     const auto& record = classes.rec(c);
     const auto& fields = record.fields;
     for (const sema::FieldRec& f : fields) {
+      if (f.no_unique_address) shape.overlapping_fields.push_back(std::uint32_t(shape.fields.size()));
       shape.fields.push_back(f.type);
       shape.has_mutable_field |= f.mutable_;
     }

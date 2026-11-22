@@ -7,6 +7,7 @@ import std;
 export namespace ycxx::obj::elf {
 
 // The standard code and data sections, symbols and explicit-addend relocations for x86-64.
+// Supports a COMDAT group with one relocation-free read-only section and a named weak object.
 // Returns a diagnostic if the in-memory object uses a feature outside this subset.
 std::expected<std::vector<std::uint8_t>, std::string> write_object(const object& o);
 
@@ -273,17 +274,16 @@ std::expected<bytes, std::string> write_object(const object& o) {
     return std::unexpected(std::format("{}: {}", o.name.empty() ? "ELF object" : o.name, reason));
   };
   if (o.arch != target::x86_64_linux) return fail("expected an x86-64 Linux object");
-  if (!o.comdat_groups.empty()) return fail("ELF COMDAT group emission is unsupported");
   if (auto error = handler_frame_error(o)) return fail(std::string(*error));
 
   // The null section, .note.GNU-stack, .symtab, .strtab and .shstrtab are always present.
-  const std::size_t count = 5 + o.sections.size() + std::ranges::count_if(o.sections, [](const section& s) {
-    return !s.relocs.empty();
-  });
+  const std::size_t count = 5 + o.comdat_groups.size() + o.sections.size() +
+      std::ranges::count_if(o.sections, [](const section& s) { return !s.relocs.empty(); });
   if (count >= shn_loreserve) return fail("extended ELF section numbering is unsupported");
   if (o.symbols.size() >= std::numeric_limits<std::uint32_t>::max()) return fail("too many ELF symbols");
   const auto symtab_index = static_cast<std::uint32_t>(count - 3);
   const auto strtab_index = symtab_index + 1;
+  const auto first_content_index = static_cast<std::uint32_t>(1 + o.comdat_groups.size());
 
   bytes file(header_size);
   bytes shstrtab{0};
@@ -299,6 +299,25 @@ std::expected<bytes, std::string> write_object(const object& o) {
     sections.push_back(header);
   };
 
+  // The gABI requires each descriptor to precede its members in the section header table.
+  std::vector<std::uint32_t> group_of(o.sections.size());
+  std::set<std::string_view> signatures;
+  for (const auto& group : o.comdat_groups) {
+    const auto name = group.signature.view();
+    if (name.empty() || !signatures.insert(name).second) return fail("empty or duplicate ELF COMDAT signature");
+    if (group.members.size() != 1 || group.members.front() >= o.sections.size())
+      return fail("ELF COMDAT output requires one valid member section");
+    const auto member = group.members.front();
+    if (group_of[member] != 0) return fail("ELF section belongs to multiple COMDAT groups");
+    group_of[member] = static_cast<std::uint32_t>(sections.size());
+    bytes words;
+    append(words, grp_comdat);
+    append(words, first_content_index + member);
+    // Fill sh_info once the signature has an output symbol index.
+    add_section(".group", {.type = sht_group, .size = words.size(), .link = symtab_index,
+                           .align = 4, .entsize = 4}, words);
+  }
+
   std::vector<std::string_view> section_names;
   section_names.reserve(o.sections.size());
   for (const section& s : o.sections) {
@@ -306,6 +325,10 @@ std::expected<bytes, std::string> write_object(const object& o) {
       return s.segment == m.segment && s.name == m.section;
     });
     if (mapping == standard_sections.end()) return fail(std::format("unsupported ELF section {},{}", s.segment, s.name));
+    const bool grouped = group_of[section_names.size()] != 0;
+    if (grouped && (mapping->kind != standard_section::rodata || s.flags != section_flags::regular ||
+                    s.zerofill_size != 0 || !s.relocs.empty()))
+      return fail("ELF COMDAT output requires a relocation-free read-only section");
     if ((mapping->type == sht_nobits) != s.is_zerofill() ||
         (s.is_zerofill() && (!s.bytes.empty() || !s.relocs.empty()))) {
       return fail(std::format("invalid zero-fill section {}", mapping->name));
@@ -319,7 +342,7 @@ std::expected<bytes, std::string> write_object(const object& o) {
                            !valid_unwind_section(std::uint64_t{1} << s.align_log2, s.size())))
       return fail("invalid ELF .eh_frame flags, alignment or size");
     section_names.push_back(mapping->name);
-    add_section(mapping->name, {.type = mapping->type, .flags = mapping->flags, .size = s.size(),
+    add_section(mapping->name, {.type = mapping->type, .flags = mapping->flags | (grouped ? shf_group : 0), .size = s.size(),
                                 .align = std::uint64_t{1} << s.align_log2, .entsize = init_array ? 8u : 0u}, s.bytes);
   }
 
@@ -341,24 +364,43 @@ std::expected<bytes, std::string> write_object(const object& o) {
       if (local && (s.weak || !s.defined())) return fail(std::format("invalid local symbol '{}'", name));
       if (s.defined() && (*s.section >= o.sections.size() || s.offset > o.sections[*s.section].size()))
         return fail(std::format("symbol '{}' is outside its section", name));
+      const auto section_index = s.defined() ? first_content_index + *s.section : 0;
       if (s.function_size) {
-        if (!s.defined() || !sections[*s.section + 1].contains_code_at(s.offset))
+        if (!s.defined() || !sections[section_index].contains_code_at(s.offset))
           return fail(std::format("function symbol '{}' is not in executable code", name));
-        if (*s.function_size > sections[*s.section + 1].size - s.offset)
+        if (*s.function_size > sections[section_index].size - s.offset)
           return fail(std::format("function symbol '{}' is outside its section", name));
+      }
+      if (s.object_size) {
+        if (!s.defined() || s.function_size)
+          return fail(std::format("invalid ELF object symbol '{}'", name));
+        if (*s.object_size > sections[section_index].size - s.offset)
+          return fail(std::format("object symbol '{}' is outside its section", name));
+      }
+
+      const auto group_index = s.defined() ? group_of[*s.section] : 0;
+      if (group_index != 0 && name == o.comdat_groups[group_index - 1].signature.view()) {
+        auto& group = sections[group_index];
+        if (group.info != 0 || s.bind != binding::global || !s.weak || s.object_size.value_or(0) == 0)
+          return fail(std::format("invalid ELF COMDAT signature symbol '{}'", name));
+        group.info = next_symbol;
       }
 
       symbol_indices[i] = next_symbol++;
       append(symtab, append_name(strtab, name));
       const auto bind = local ? stb_local : s.weak ? stb_weak : stb_global;
-      append(symtab, static_cast<std::uint8_t>(bind << 4 | (s.function_size ? stt_func : stt_notype)));
+      const auto type = s.function_size ? stt_func : s.object_size ? stt_object : stt_notype;
+      append(symtab, static_cast<std::uint8_t>(bind << 4 | type));
       append(symtab, s.bind == binding::hidden ? stv_hidden : stv_default);
-      append(symtab, static_cast<std::uint16_t>(s.defined() ? *s.section + 1 : 0));   // SHN_UNDEF is 0
+      append(symtab, static_cast<std::uint16_t>(section_index));  // SHN_UNDEF is 0
       append(symtab, s.defined() ? s.offset : std::uint64_t{0});
-      append(symtab, s.function_size.value_or(0));
+      append(symtab, s.function_size.value_or(s.object_size.value_or(0)));
     }
     if (local) first_nonlocal = next_symbol;
   }
+  for (std::uint32_t i = 1; i < first_content_index; ++i)
+    if (sections[i].info == 0)
+      return fail(std::format("missing ELF COMDAT signature symbol '{}'", o.comdat_groups[i - 1].signature.view()));
 
   for (std::size_t i = 0; i < o.sections.size(); ++i) {
     const section& s = o.sections[i];
@@ -371,13 +413,16 @@ std::expected<bytes, std::string> write_object(const object& o) {
       if (r.offset > s.size() || mapping->width > s.size() - r.offset)
         return fail(std::format("relocation outside section {}", section_names[i]));
       if (r.symbol >= symbol_indices.size()) return fail(std::format("invalid relocation symbol in section {}", section_names[i]));
+      const auto& target = o.symbols[r.symbol];
+      if (target.bind == binding::local && target.section && group_of[*target.section] != 0)
+        return fail(std::format("relocation in section {} references a local ELF COMDAT symbol", section_names[i]));
       append(rela, std::uint64_t{r.offset});
       append(rela, std::uint64_t{symbol_indices[r.symbol]} << 32 | mapping->type);
       append(rela, static_cast<std::uint64_t>(r.addend));
     }
     add_section(std::format(".rela{}", section_names[i]),
                 {.type = sht_rela, .flags = shf_info_link, .size = rela.size(), .link = symtab_index,
-                 .info = static_cast<std::uint32_t>(i + 1), .align = 8, .entsize = rela_size}, rela);
+                 .info = first_content_index + static_cast<std::uint32_t>(i), .align = 8, .entsize = rela_size}, rela);
   }
 
   // An empty, non-executable stack marker for Linux linkers.

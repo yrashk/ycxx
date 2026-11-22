@@ -68,6 +68,9 @@ struct ClassName {
 };
 using ClassNames = std::function<ClassName(ast::EntityId)>;
 
+// A standalone <type> encoding, with an initially empty substitution table (§5.1.5).
+std::expected<std::string, std::string> mangled_type(const ast::Interners& in, ast::QualType type, const ClassNames& classes);
+
 // `scope` is the class or namespace a function is a member of, none for the global namespace.
 // Direct members of ::std use an <unscoped-name> with St (§5.1.5 and §5.1.10).
 std::expected<std::string, std::string> mangled_function(const ast::Interners& in, std::string_view name,
@@ -262,6 +265,41 @@ class Mangler {
         auto a = template_args(in_.seqs.elements(d.args));
         if (!a) return a;
         inner = n + *a;
+        candidates_.push_back(full_key(bare));
+      } else if (in_.types.is<ast::TPackIndex>(in_.types.canon(bare))) {
+        // `T...[I]`: `Dy <type> <expression>`, a substitution candidate (§5.1.5); a pack bound to
+        // its elements is the argument pack `J <template-arg>* E`, as GCC writes it. A constant
+        // index is a literal of its own type: std::size_t when written, a parameter's type when
+        // substituted (`Lm0E`, `Li1E`; DECISIONS §1.7).
+        if (auto s = find(full_key(bare))) return qualify(qualifiers, *s, q);
+        auto x = in_.types.get<ast::TPackIndex>(in_.types.canon(bare));
+        std::string pack;
+        if (x.bound) {
+          pack = "J";
+          for (const ast::TemplateArg& e : in_.seqs.elements(x.elems)) {
+            auto m = template_arg(e);
+            if (!m) return m;
+            pack += *m;
+          }
+          pack += "E";
+        } else {
+          auto p = type(x.pack);
+          if (!p) return p;
+          pack = *p;
+        }
+        std::string index;
+        if (in_.values.is<ast::VDepParam>(x.index) && in_.values.get<ast::VDepParam>(x.index).depth == own_depth) {
+          auto i = in_.values.get<ast::VDepParam>(x.index).index;
+          index = i == 0 ? "T_" : std::format("T{}_", i - 1);
+        } else if (in_.values.is<ast::VInt>(x.index)) {
+          auto b = ast::builtin_of(in_, in_.values.get<ast::VInt>(x.index).type);
+          auto code = b ? builtin_code(*b) : std::nullopt;
+          if (!code) return std::unexpected("a pack index of a type other than a fundamental integer");
+          index = std::format("L{}{}E", *code, in_.values.get<ast::VInt>(x.index).bits.lo);
+        } else {
+          return std::unexpected("a pack index that is not a constant or a template parameter");
+        }
+        inner = "Dy" + pack + index;
         candidates_.push_back(full_key(bare));
       } else if (in_.types.is<ast::TPackExpansion>(in_.types.canon(bare))) {
         // A pack expansion `Dp <type>`, a substitution candidate (§5.1.5).
@@ -598,6 +636,15 @@ class Mangler {
       }
       if (ast::is_pointer(in_, a.type) && ast::is_function(in_, ast::pointee_of(in_, a.type)))
         return function_pointer_argument(a);
+      // A value of an enumeration type: `L <type> <value> E`, the type as any <type> is, the value
+      // its integer, `n` before a negative one (§5.1.5.7).
+      if (in_.types.is<ast::TEnum>(in_.types.canon(ast::without_cv(in_.canonical(a.type)))) && in_.values.is<ast::VInt>(a.value)) {
+        auto t = type(a.type);
+        if (!t) return t;
+        ast::Bits128 v = in_.values.get<ast::VInt>(a.value).bits;
+        bool neg = ast::is_negative(v);
+        return std::format("L{}{}{}E", *t, neg ? "n" : "", neg ? ~v.lo + 1 : v.lo);
+      }
       auto b = ast::builtin_of(in_, a.type);
       auto code = b ? builtin_code(*b) : std::nullopt;
       if (!code || !in_.values.is<ast::VInt>(a.value)) return std::unexpected("a template argument that is not a type or an integer");
@@ -695,7 +742,8 @@ class Mangler {
   bool dependent(ast::QualType q) {
     ast::QualType c = in_.types.canon(ast::without_cv(in_.canonical(q)));
     if (in_.types.is<ast::TTemplateParam>(c) || in_.types.is<ast::TDepName>(c) || in_.types.is<ast::TPackExpansion>(c) ||
-        in_.types.is<ast::TTransform>(c) || in_.types.is<ast::TDepSpec>(c) || in_.types.is<ast::TBuiltinSpec>(c))
+        in_.types.is<ast::TTransform>(c) || in_.types.is<ast::TDepSpec>(c) || in_.types.is<ast::TBuiltinSpec>(c) ||
+        in_.types.is<ast::TPackIndex>(c))
       return true;
     if (in_.types.is<ast::TPointer>(c)) return dependent(in_.types.get<ast::TPointer>(c).pointee);
     if (in_.types.is<ast::TMemberPtr>(c)) {
@@ -854,6 +902,10 @@ std::optional<std::string_view> operator_code(std::string_view op, std::size_t a
   for (auto [s, code] : binary)
     if (s == op) return code;
   return std::nullopt;
+}
+
+std::expected<std::string, std::string> mangled_type(const ast::Interners& in, ast::QualType type, const ClassNames& classes) {
+  return Mangler(in, classes, {}).type(type);
 }
 
 std::expected<std::string, std::string> mangled_function(const ast::Interners& in, std::string_view name,
