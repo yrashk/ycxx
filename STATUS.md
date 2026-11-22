@@ -2228,6 +2228,8 @@ Fable decided the representation (ast.md §6.6); the Opus session wrote the code
   constraints' token fingerprint too (Fable's decision on #234). Tests:
   `tests/own/concepts/constrained-partial*`. Its explicit self-reference, out-of-class members and
   member templates are #832, and head identity for all partials is #833.
+- Class template heads and class partial specializations accept parenthesized constraint
+  operands joined by `&&` or `||` ([temp.pre], #839).
 - Not yet: class and variable template constraints outside those cases, members, broader
   constrained packs, fold-expanded constraints, constrained placeholders
   outside ordinary block declarations (#234). Open follow-ups include re-verification of satisfaction at END

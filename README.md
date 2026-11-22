@@ -417,6 +417,8 @@ written default member initializer are value-initialized.
   resolution and in choosing partial specializations, including
   explicit trailing type packs in ordinary constrained function overloads. Directly named
   non-dependent primary class specializations with explicit type arguments check constraints.
+  Class templates and class partial specializations accept parenthesized requires-clause
+  operands joined by `&&` or `||`.
   Non-template code outside requires-expression bodies also checks constraints on directly named
   primary namespace variable templates with explicit non-dependent type arguments. Templates support
   `if constexpr`, deferred template static assertion failures, and two-phase lookup, with
