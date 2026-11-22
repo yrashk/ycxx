@@ -717,11 +717,14 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
   the same in-memory objects, resolves absolute and PC-relative relocations, and writes a static
   `ET_EXEC` image with load segments and a non-executable stack.
 - A hosted peer's exception can unwind through cleanup-free ycxx functions on x86-64 Linux.
-  The compiler certifies ordinary strong definitions with fixed scalar signatures using all
+  The compiler certifies ordinary strong definitions with fixed scalar parameters using all
   resolved declarations and the typed body. The proof visits selected default member initializers
   in aggregates with scalar fields and trivial destruction. It checks fixed scalar prototypes
   and the typed operands of indirect calls.
   [#849](https://github.com/yrashk/ycxx/issues/849) · [#851](https://github.com/yrashk/ycxx/issues/851)
+  Returning a nonempty flat scalar aggregate with trivial destruction and call semantics uses the
+  same proof for a braced result or an implicit trivial copy. The target's existing register or
+  indirect result convention still applies. [#853](https://github.com/yrashk/ycxx/issues/853)
   It tracks written exception specifications across redeclarations and records the AMD64 frame
   state at the actual prologue and epilogue offsets.
   ELF `.eh_frame` records use PC-relative references to local code anchors. The native

@@ -1,4 +1,4 @@
-"""Shared mixed-object witnesses for cleanup-free scalar aggregate initialization."""
+"""Shared mixed-object witnesses for cleanup-free scalar aggregate initialization and results."""
 
 from pathlib import Path
 
@@ -8,13 +8,14 @@ fixtures = Path(__file__).with_suffix('').resolve()
 
 def check_scalar_aggregate_unwind(compile, run, check_object, host=None):
     witnesses = (
-        ('named', ('_Z8selectedv', '_Z10overriddenv'), 'eox'),
-        ('temporary', ('_Z10via_directv', '_Z22via_explicit_temporaryv', '_Z21via_literal_temporaryv'), 'nldt'),
+        ('named', ('_Z8selectedv', '_Z10overriddenv'), (), 'eox'),
+        ('temporary', ('_Z10via_directv', '_Z22via_explicit_temporaryv', '_Z21via_literal_temporaryv'), (), 'nldt'),
+        ('result', ('_Z12small_resulti', '_Z12named_resulti', '_Z11wide_resulti'), ('_Z17nontrivial_resulti',), 'sSpPwW'),
     )
-    for name, functions, modes in witnesses:
+    for name, functions, omitted, modes in witnesses:
         obj = f'{name}.o'
         compile('-c', fixtures / f'{name}.cpp', '-o', obj)
-        check_object(obj, functions)
+        check_object(obj, functions, omitted)
         if host:
             run(host, '-std=c++20', '-pedantic-errors', '-O0', '-fexceptions', '-fno-lto',
                 fixtures / f'{name}_peer.cpp', obj, '-o', 'scalar_aggregate_hosted')
