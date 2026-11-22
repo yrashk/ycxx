@@ -247,6 +247,8 @@ struct Region {
   // Token ranges where a pack pragma can change a record's layout. Layout still uses its
   // ordinary rules. ABI features that require known natural layout can reject these ranges.
   std::vector<std::pair<u32, u32>> possibly_packed;
+  // First GNU visibility pragma, if any. Ordinary parsing does not apply it.
+  std::optional<u32> first_visibility_pragma;
   bool operator==(const Region&) const = default;
 
   std::size_t size() const { return tokens.size(); }

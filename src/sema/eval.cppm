@@ -41,6 +41,10 @@ public:
       const ClassRec* r = q.classes().find(c);
       return r && field < r->fields.size() ? std::optional(r->fields[field].type) : std::nullopt;
     };
+    potentially_overlapping_field = [&q](EntityId c, std::uint32_t field) {
+      const ClassRec* r = q.classes().find(c);
+      return r && field < r->fields.size() && r->fields[field].no_unique_address;
+    };
   }
   ConstId string_address(ConstId s) { return w_->values.address({}, s, 0); }
   bool is_constexpr(EntityId f) { return Sema::closure_member(*w_, f) || q_->is_constexpr(f); }
@@ -231,7 +235,7 @@ public:
       return std::nullopt;
     }
     while (auto paren = s_->as<ast::Paren>(expression)) {
-      expression = s_->extended({paren->operand.id, expression.begin + paren->operand.at, expression.end});
+      expression = {paren->operand.id, expression.begin + paren->operand.at, expression.end, paren->info};
     }
     const Evaluated result = evaluate_initializer(expression);
     if (!result.value) {

@@ -437,6 +437,16 @@ TOPLEVEL = re.compile(
     r"a type specifier is required for all declarations|outside of a function|expected unqualified-id|"
     r"expected constructor, destructor, or type conversion|does not name a type|"
     r"C\+\+ requires a type specifier")
+# A simple built-in declaration with an absent initializer. The same syntax diagnostics can occur
+# with or without an expository placeholder, so check the comment's wording as well.
+INITIALIZER_GAP = re.compile(
+    r'\s*(?:(?:const|volatile|constexpr|mutable)\s+)*'
+    r'(?:(?:auto|bool|char|char(?:8|16|32)_t|wchar_t|short|int|long|signed|unsigned|float|double)\s+)+'
+    r'[A-Za-z_]\w*\s*=\s*'
+    r'(?:/\*(?P<comment>(?:(?!\*/).)*)\*/\s*)?;\s*')
+INITIALIZER_PLACEHOLDER = re.compile(r'\s*some\s+(?:[\w-]+\s+)*expression\b', re.I)
+INITIALIZER_ERROR = re.compile(
+    r"expected (?:expression|primary-expression (?:at end of input|before (?:';'|‘;’) token))")
 
 
 def verdict(ex, status, lines):
@@ -470,14 +480,28 @@ def is_fragment(ex, results):
     namespace scope count; any other error there is a disagreement."""
     errors = ex.marked('error')
     marked = errors | ex.marked('ok')
+    gaps = {}
+    for n, (code, _, _) in enumerate(ex.lines, len(ex.prelude()) + 1):
+        if gap := INITIALIZER_GAP.fullmatch(code):
+            gaps[n] = bool(INITIALIZER_PLACEHOLDER.match(gap['comment'] or ''))
     first = []
+    placeholder_errors = []
     for status, lines in results:
         hits = [(n, m) for n, m in lines
-                if (n not in marked and FRAGMENT.search(m)) or (n not in errors and TOPLEVEL.search(m))]
-        if not hits:
-            return None
-        first.append(hits[0])
-    n, m = first[0]
+                if not (n in gaps and INITIALIZER_ERROR.fullmatch(m))
+                and ((n not in marked and FRAGMENT.search(m)) or (n not in errors and TOPLEVEL.search(m)))]
+        if hits:
+            first.append(hits[0])
+        if status == 1 and len(lines) == 1:
+            n, m = lines[0]
+            if n not in marked and gaps.get(n) and INITIALIZER_ERROR.fullmatch(m):
+                placeholder_errors.append((n, m))
+    if len(first) == 2:
+        n, m = first[0]
+    elif len(placeholder_errors) == 2 and placeholder_errors[0][0] == placeholder_errors[1][0]:
+        n, m = placeholder_errors[0]
+    else:
+        return None
     return f'fragment: both oracles report errors an incomplete example produces (line {n}: {m})'
 
 

@@ -21,6 +21,14 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
   - Do: run sessions on Opus and reach Fable through Agent subagents with `model: "fable"`.
   - Now a rule: DECISIONS §6.5.
   - Learned on #1, 2026-11-17.
+- **Squash onto the branch's own base, never onto a freshly fetched `origin/main`.** On #234 a
+  `git reset --soft origin/main` after a fetch moved HEAD to a newer main while the tree stayed on
+  the old base, so the squashed commit also reverted 548 lines of other people's work. Only
+  `git diff --stat` before pushing showed it.
+  - Do: squash with `git reset --soft $(git merge-base HEAD origin/main)` taken before any
+    fetch, or the base recorded at branch creation, then check `git diff --stat HEAD~1` lists
+    only your files. Recover from the reflog (`git reflog`) by re-parenting the tree.
+  - Learned on #234.
 - **Force-push may be blocked in a session**, so rebasing a pushed branch onto `main` fails.
   - Do: merge `main` into the branch instead. History stays readable, and nobody has to approve
     a force-push.
@@ -446,6 +454,15 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
   - Do: read the committed member item for the relevant class specialization before using the
     global sequence interner. Check a parameter reference independently in the pattern and its
     replay when a name is found in the definition and lost after substitution.
+  - Hit again on #828: a new pattern check in `declare` read `sem.params`, a draft sequence, and
+    crashed. Pass the item's own `params` vector instead.
+- **A function template specialization's identity includes its type.** `Sema::specialization`
+  keys entities by template, arguments and type. On #828, the address path re-created a
+  specialization with its resolved `noexcept` type while the call path kept the written one: one
+  function became two (a split static local, or a duplicate symbol), with no diagnostic.
+  - Do: resolve a specialization's exception specification on every path that selects it (call,
+    member call, address), and only after selection ([over.over], [except.spec]/13); test a
+    specialization that is both called and has its address taken, with a static local.
 
 - **Unicode tables from Python, plus one UCD file.** Python's `unicodedata` (Unicode 17.0 in the
   pinned Python) gives categories, combining classes, decompositions, normalization and names;

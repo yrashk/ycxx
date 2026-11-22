@@ -552,7 +552,7 @@ class.base.init-3	class.base.init	6	source/classes.tex:5527	reject
 class.base.init-4	class.base.init	7	source/classes.tex:5549	accept	
 class.base.init-5	class.base.init	8	source/classes.tex:5579	reject	
 class.base.init-6	class.base.init	9	source/classes.tex:5637	reject	
-class.base.init-7	class.base.init	12	source/classes.tex:5674	accept	
+class.base.init-7	class.base.init	12	source/classes.tex:5674	skip	fragment: both oracles report errors an incomplete example produces (line 2: expected expression)
 class.base.init-8	class.base.init	13	source/classes.tex:5696	reject	
 class.base.init-9	class.base.init	16	source/classes.tex:5753	accept	
 class.base.init-10	class.base.init	17	source/classes.tex:5794	accept	

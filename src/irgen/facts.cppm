@@ -30,6 +30,7 @@ concept Facts = requires(F& f, ast::QualType q, ast::ConstId c, ast::EntityId e,
   { f.promoted(q, std::uint8_t{}) } -> std::same_as<ast::QualType>;  // [conv.prom]; optional bit-field width
   { f.bit_field_width(e, std::uint32_t{}) } -> std::same_as<std::uint8_t>;
   { f.field_type(e, std::uint32_t{}) } -> std::same_as<std::optional<ast::QualType>>;
+  { f.potentially_overlapping_field(e, std::uint32_t{}) } -> std::same_as<bool>;
   { f.pointee(q) } -> std::same_as<ast::QualType>;   // pre: pointer
   { f.element(q) } -> std::same_as<ast::QualType>;   // pre: array
   { f.pointer_to(q) } -> std::same_as<ast::QualType>;

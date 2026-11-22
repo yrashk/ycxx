@@ -41,6 +41,8 @@ class TypeFacts {
       [](ast::EntityId, std::uint32_t) -> std::uint8_t { return 0; };
   std::function<std::optional<ast::QualType>(ast::EntityId, std::uint32_t)> field_type =
       [](ast::EntityId, std::uint32_t) { return std::nullopt; };
+  std::function<bool(ast::EntityId, std::uint32_t)> potentially_overlapping_field =
+      [](ast::EntityId, std::uint32_t) { return false; };
 
   TypeClass classify(ast::QualType q) const {
     if (is_reference(q)) return TypeClass::pointer;

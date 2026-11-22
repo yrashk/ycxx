@@ -737,7 +737,7 @@ std = 'C++98'
 detect = '\b(?:static|const|reinterpret)_cast\s*<'
 status = 'partial'
 issues = [199, 59, 216, 697]
-note = 'rvalue-reference, C-style and functional downcasts, `const_cast`, `reinterpret_cast`, and some `void*` and `std::nullptr_t` conversions. Qualified functional casts check access to aliases and typedefs declared directly in ordinary classes and accept namespace-qualified class and alias template-ids.'
+note = 'rvalue-reference downcasts from lvalues, C-style and functional downcasts, `const_cast`, `reinterpret_cast`, and some `void*` and `std::nullptr_t` conversions. Qualified functional casts check access to aliases and typedefs declared directly in ordinary classes and accept namespace-qualified class and alias template-ids.'
 probe = '''
 int main() { long l = 5; int i = static_cast<int>(l); const int* c = &i; int* m = const_cast<int*>(c); char* b = reinterpret_cast<char*>(m); return (i == 5 && (int)l == int(l) && b) ? 0 : 1; }
 '''
@@ -842,7 +842,8 @@ clauses = ['expr.prim.pack.index', 'dcl.type.pack.index']
 std = 'C++26'
 ftm = '__cpp_pack_indexing'
 detect = '\.\.\.\s*\['
-status = 'missing'
+status = 'partial'
+note = 'Pack-index-specifiers `T...[I]` work in aliases, signatures (mangled `Dy`), bodies and type-trait operands, with a constant or non-type-parameter index. Pack-index-expressions `t...[I]` and other dependent index expressions remain.'
 probe = '''
 template<class... T> int second(T... t) { return t...[1]; }
 int main() { return second(1, 0, 2); }
@@ -1616,8 +1617,8 @@ clauses = ['class.copy.ctor', 'class.copy.assign', 'special']
 std = 'C++98'
 detect = '\boperator\s*=\s*\('
 status = 'partial'
-issues = [244, 360, 309, 157]
-note = 'memberwise implicit and first-declaration defaulted copy assignment for ordinary classes without bases, with user-declared assignment effects on implicit constructors. Remaining defaulted special members, move assignment, virtual members, and base, array and union operations'
+issues = [244, 360, 309, 157, 747]
+note = 'Memberwise implicit and first-declaration defaulted copy assignment for ordinary classes without bases. Ordinary wrappers with a deleted implicit copy can synthesize a nonthrowing implicit move for scalar fields and class fields with nonthrowing initialization and destruction. User-declared assignments affect implicit constructor availability. Remaining defaulted special members, move assignment, virtual members, and base, array and union operations remain open.'
 probe = '''
 struct S { int v; S(int x) : v(x) {} S(const S& o) : v(o.v + 1) {} S& operator=(const S&) = default; };
 int main() { S a(1); S b(a); S c(5); c = b; return c.v == 2 ? 0 : 1; }
@@ -1775,7 +1776,7 @@ std = 'C++98'
 detect = '\bfriend\b'
 status = 'partial'
 issues = [259, 689]
-note = 'Includes type friends naming a class template parameter. Broader template friends, C linkage, hidden operators, and default arguments remain partial.'
+note = 'Ordinary binary hidden friends and unary minus participate in ADL. Type friends can name a class template parameter. Other hidden friend operators, C-linkage friend definitions, default arguments in friend declarations, and broader template friends remain open.'
 probe = '''
 class C { int p = 2; friend int peek(const C& c) { return c.p; } };
 int main() { C c; return peek(c) - 2; }
@@ -1822,7 +1823,7 @@ struct D final : B { int f() override { return 0; } };
 int main() { D d; B& b = d; return b.f(); }
 '''
 issues = [309]
-note = 'Ordinary virtual declarations, single-base overrides, and unqualified parenthesized or flat braced initializers of a direct polymorphic base in syntax checking. Linux x86-64 supports virtual calls, size and alignment queries, and ordinary integral member access on peer-owned roots and on derived classes with one public nonvirtual root, at most one integral field, and at most one declaration-only override. A unit can emit one out-of-line non-key virtual member of a supported root. Abstract classes, final, covariance, further inheritance forms and table emission remain open.'
+note = 'Ordinary virtual declarations, single-base overrides, and unqualified parenthesized or flat braced initializers of a direct polymorphic base in syntax checking. Linux x86-64 supports virtual calls, size and alignment queries, and ordinary integral member access on peer-owned roots and on derived classes with one public nonvirtual root, at most one integral field, and at most one declaration-only override. A unit can emit one out-of-line non-key virtual member of a supported root. Linux key-owned table and RTTI emission covers one ordinary external default-visible root with one public integral field and two directly written fixed integer virtual signatures. Complete-object construction, abstract classes, final, covariance, further inheritance forms and broader table emission remain open.'
 
 [[feature]]
 id = 'class-virtual-base'
@@ -2196,7 +2197,7 @@ ftm = '__cpp_concepts'
 detect = '\brequires\b'
 status = 'partial'
 issues = [234, 236]
-note = 'Ordinary function overloads support explicit trailing type packs in atomic constraints. Directly named non-dependent primary class specializations with explicit type arguments check constraints. Non-template code outside requires-expression bodies also checks directly named primary namespace variable templates with explicit non-dependent type arguments. Broader template and member constraints and constraint mangling remain.'
+note = 'Ordinary function overloads support explicit trailing type packs in atomic constraints. Directly named non-dependent primary class specializations with explicit type arguments check constraints. Non-template code outside requires-expression bodies also checks directly named primary namespace variable templates with explicit non-dependent type arguments. Class and variable template partial specializations are matched and ordered by their constraints, including ones whose arguments are those of the primary template. Broader template and member constraints and constraint mangling remain.'
 probe = '''
 template<class T> concept Int = sizeof(T) == 4;
 template<Int T> int f(T) { return 1; } template<class T> int f(T) { return 2; }
@@ -2239,8 +2240,8 @@ clauses = ['except', 'except.pre', 'except.throw', 'except.ctor', 'except.handle
 std = 'C++98'
 detect = '\bthrow\b|\btry\b|\bcatch\s*\('
 status = 'partial'
-issues = [89, 72, 572, 578, 583, 648, 737]
-note = 'Throw and block try/catch syntax. Hosted exceptions can cross eligible cleanup-free frames on Linux x86-64 and macOS arm64. Linux also supports int throws from eligible frames and one catch-all around an external call.'
+issues = [89, 72, 572, 578, 583, 648, 663, 737, 781]
+note = 'Throw and block try/catch syntax. Hosted exceptions can cross eligible cleanup-free frames and one automatic aggregate cleanup on Linux x86-64 and macOS arm64. Linux also supports int throws from eligible frames and one catch-all around an external call.'
 probe = '''
 int d = 0; struct G { ~G() { ++d; } };
 int f() { G g; throw 3; }
