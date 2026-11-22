@@ -618,8 +618,8 @@ class Mangler {
   // Clang and GCC agree on these for a variable template of the global namespace, or one named
   // unqualified inside ::std (also through std::__y1), when every argument is written and none is
   // a pack. Otherwise they differ: Clang mangles the name and the arguments as written (`sr …E`,
-  // `gs`, no defaults, no `J…E`), GCC the <source-name> and the converted arguments. Until #777
-  // decides, ycxx writes GCC's form, which is also what the GCC-built libycxx.a has.
+  // `gs`, no defaults, no `J…E`), GCC the <source-name> and the converted arguments. ycxx writes
+  // GCC's form, which is also what the GCC-built libycxx.a has (DECISIONS §1.7, #777).
   std::expected<std::string, std::string> expression(ast::ConstId v) {
     if (in_.values.is<ast::VDepVariable>(v)) {
       const ast::VDepVariable& d = in_.values.get<ast::VDepVariable>(v);

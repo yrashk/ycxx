@@ -1684,7 +1684,8 @@ template's tokens again with the arguments bound.
   return type needs it for any libycxx header in an object.
 - The arguments are the converted ones and the name is unqualified, as GCC writes them. Clang
   writes them as spelled: qualified outside the global namespace and `std`, without defaulted
-  arguments, without `J…E` around a pack. The two agree on the tested forms; the choice is #777.
+  arguments, without `J…E` around a pack. The two agree on the tested forms; DECISIONS §1.7 (#777)
+  chose GCC's.
 - Tests: `tests/own/abi/dependent-template-args.run.cpp`, linked with a Clang peer that calls the
   specializations. `&&` follows #671; type-trait operations (`__is_same(T, U)`) still have no
   symbol (#780).
