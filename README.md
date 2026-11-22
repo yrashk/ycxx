@@ -442,8 +442,8 @@ written default member initializer are value-initialized.
 - noncapturing, non-generic lambdas as initializers of internal-linkage namespace variables,
   with addressable static storage and scalar calls ([#338](https://github.com/yrashk/ycxx/issues/338));
 - casts, including `static_cast<T&&>` from a compatible object lvalue and runtime `static_cast`
-  downcasts of object pointers and lvalue references through accessible, unambiguous
-  nonvirtual base paths, `sizeof`/`alignof` (classes included), direct-member `offsetof` for
+  downcasts of object pointers, lvalue references and base xvalues through accessible,
+  unambiguous nonvirtual base paths, `sizeof`/`alignof` (classes included), direct-member `offsetof` for
   ordinary standard-layout classes, `decltype`, and calls through pointers to functions.
   Qualified functional casts check access to aliases and typedefs declared directly in an
   ordinary class. [#199](https://github.com/yrashk/ycxx/issues/199) ·

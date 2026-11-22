@@ -7077,7 +7077,9 @@ public:
       const TypeRec ref = types().rec(to);
       if (ref.rvalue_ref && e.cat() == ValueCategory::lvalue && types().is_object(ref.inner)) {
         if (auto cast = cast_lvalue_to_xvalue(e, to, ref.inner, at_)) return *cast;
-      } else if (named_static_cast && !ref.rvalue_ref && e.cat() == ValueCategory::lvalue) {
+      }
+      const auto downcast_category = ref.rvalue_ref ? ValueCategory::xvalue : ValueCategory::lvalue;
+      if (named_static_cast && e.cat() == downcast_category) {
         if (auto cast = cast_base_to_derived(e, ref.inner, /*pointer=*/false, at_)) return *cast;
       }
       return convert(e, to, at_);
