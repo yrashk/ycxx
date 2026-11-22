@@ -126,7 +126,7 @@ void declaration_annotations() {
 enum class Role { linear = 2, consumes = 5 };
 enum class Other { consumes = 5 };
 struct Tag { int value; };
-constexpr int code(int x) { return x + 1; }
+consteval int code(int x) { return x + 1; }
 struct [[= Role::linear]] Owner;
 struct [[deprecated]][[= Role::linear, = Tag{code(6)}]] Owner { int packed; };
 [[deprecated]][[= Role::consumes, = Role::consumes]] int finish(Owner&&);
@@ -197,6 +197,11 @@ void invalid_declaration_annotations() {
            Witness{"[[=void()]] void f();", Diag::annotation_invalid_type},
            Witness{R"cpp([[="literal"]] void f();)cpp", Diag::annotation_invalid_type},
            Witness{"struct Tag { mutable int value; }; [[=Tag{3}]] void f();", Diag::annotation_invalid_type},
+           Witness{"int [[=1]] f();", Diag::attributes_not_allowed},
+           Witness{"static [[=1]] int f();", Diag::attributes_not_allowed},
+           Witness{"int * [[=1]] f();", Diag::attributes_not_allowed},
+           Witness{"consteval int f() { return 1; } [[=&f]] void g();", Diag::annotation_invalid_type},
+           Witness{"constexpr int n=1; struct R { const int& r; }; [[=R{n}]] void f();", Diag::annotation_not_supported},
            Witness{"[[nodiscard, =3]] int f();", Diag::annotation_mixed_list},
            Witness{"[[=3, nodiscard]] int f();", Diag::annotation_mixed_list},
            Witness{"struct C { friend void f [[=1]] (); };", Diag::attributes_not_allowed},

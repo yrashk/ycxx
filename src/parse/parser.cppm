@@ -541,7 +541,8 @@ public:
     };
     for (;;) {
       // A standard attribute after a decl-specifier-seq appertains to its type ([dcl.spec.general]).
-      if (skip_attributes(&d.hidden_visibility, attr_gnu)) continue;
+      const bool annotation_type_context = in_type_id || pos() != d.begin;
+      if (skip_attributes(&d.hidden_visibility, attr_gnu, nullptr, annotation_type_context)) continue;
       Tk k = kind();
       switch (k) {
       case Tk::kw_void: ++n_void; break;
@@ -983,7 +984,7 @@ public:
   // hidden visibility attribute when requested by the declaring context.
   static constexpr int attr_std = 1, attr_gnu = 2;
   int skip_attributes(bool* hidden_visibility = nullptr, int visibility_forms = attr_std | attr_gnu,
-                      std::vector<ast::AnnotationSema>* annotations = nullptr) {
+                      std::vector<ast::AnnotationSema>* annotations = nullptr, bool annotation_type_context = false) {
     int any = 0;
     for (;;) {
       bool std_attr = is(Tk::l_square) && kind(1) == Tk::l_square;
@@ -991,9 +992,12 @@ public:
       if (!std_attr && !gnu) return any;
       const int form = std_attr ? attr_std : attr_gnu;
       any |= form;
-      if (annotations && std_attr && kind(2) == Tk::equal) {
-        annotation_list(*annotations);
-        continue;
+      if (std_attr && kind(2) == Tk::equal) {
+        if (annotations) {
+          annotation_list(*annotations);
+          continue;
+        }
+        if (annotation_type_context) s_->diag(pos() + 2, Diag::attributes_not_allowed);
       }
       if (gnu) bump();
       const u32 begin = index();
@@ -1005,7 +1009,7 @@ public:
         bump();
       } while (depth > 0 && !at_end());
       const bool closed = depth == 0;
-      if (annotations && std_attr && closed) {
+      if ((annotations || annotation_type_context) && std_attr && closed) {
         if (auto mixed = annotation_in_attribute_list(begin, index()))
           s_->diag(*mixed - begin_, Diag::annotation_mixed_list);
       }
@@ -1236,7 +1240,8 @@ public:
         break;
       }
       bump();
-      if (op == Tk::star) skip_attributes();  // appertains to the pointer ([dcl.ptr], [dcl.mptr])
+      if (op == Tk::star)  // appertains to the pointer type ([dcl.ptr], [dcl.mptr])
+        skip_attributes(nullptr, attr_std | attr_gnu, nullptr, /*annotation_type_context=*/true);
       int cv = 0;
       std::optional<u32> restrict_at;
       while (op == Tk::star) {

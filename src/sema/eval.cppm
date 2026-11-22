@@ -221,11 +221,12 @@ public:
       s_->diag(expression.begin, Diag::annotation_not_supported);
       return std::nullopt;
     }
-    if (!structural_annotation_type(type)) {
+    bool supported = true;
+    if (!structural_annotation_type(type, supported)) {
       s_->diag(expression.begin, Diag::annotation_invalid_type);
       return std::nullopt;
     }
-    if (s_->types().is_class(type) && !s_->is_aggregate(type)) {
+    if (!supported || (s_->types().is_class(type) && !s_->is_aggregate(type))) {
       s_->diag(expression.begin, Diag::annotation_not_supported);
       return std::nullopt;
     }
@@ -245,21 +246,29 @@ public:
   }
 
 private:
-  // Check the class properties [temp.param] requires before evaluating supported aggregate
-  // operands. The class expression evaluator supplies the remaining constant-expression checks.
-  bool structural_annotation_type(QualType type) {
+  // [temp.param] requires structural members of a literal class. The aggregate evaluator
+  // stores element values. It has no active-union-member or reference identity and does not
+  // evaluate a written destructor.
+  bool structural_annotation_type(QualType type, bool& supported) {
     auto& types = s_->types();
-    if (types.is_scalar(type) || types.is_reference(type)) return true;
-    if (types.is_array(type)) return structural_annotation_type(types.rec(type).inner);
+    if (Types::is_volatile(types.canonical(type))) return false;
+    if (types.is_scalar(type)) return true;
+    if (types.is_reference(type)) {
+      supported = false;
+      return !types.rec(type).rvalue_ref;
+    }
+    if (types.is_array(type)) return structural_annotation_type(types.rec(type).inner, supported);
     if (!types.is_class(type)) return false;
     const ClassRec* record = s_->class_rec(types.class_of(type));
     if (!record || record->polymorphic || !record->destructor_usable || record->copy_deleted) return false;
+    if (record->destructor != EntityId::none && !q_->is_constexpr(record->destructor)) return false;
+    supported &= !record->union_ && record->destructor == EntityId::none;
     return std::ranges::all_of(record->bases, [&](const BaseRec& base) {
       return base.access == ast::Access::public_ &&
-             structural_annotation_type(types.class_type(base.cls));
+             structural_annotation_type(types.class_type(base.cls), supported);
     }) && std::ranges::all_of(record->fields, [&](const FieldRec& field) {
       return record->access_of(field.entity) == ast::Access::public_ && !field.mutable_ &&
-             structural_annotation_type(field.type);
+             structural_annotation_type(field.type, supported);
     });
   }
 
@@ -267,8 +276,12 @@ private:
     const auto& values = s_->ins().values;
     if (values.is<ast::VLvalue>(value)) {
       const auto address = values.get<ast::VLvalue>(value);
-      // [temp.arg.nontype]: a string literal cannot be the source of a constituent pointer.
-      return !values.is<ast::VString>(address.base);
+      // A constituent pointer cannot refer to a string literal or to an immediate function
+      // ([temp.arg.nontype], [expr.const]).
+      if (values.is<ast::VString>(address.base)) return false;
+      if (values.is<ast::VEntity>(address.base))
+        return !q_->is_immediate_function(values.get<ast::VEntity>(address.base).entity);
+      return true;
     }
     if (values.is<ast::VAggregate>(value)) {
       const auto aggregate = values.get<ast::VAggregate>(value);

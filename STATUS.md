@@ -2927,8 +2927,9 @@ and annotation lists ([dcl.attr.annotation]). The compiler retains each occurren
 payload type, evaluated value and item-relative token offset. A translation-unit consumer can
 query all written occurrences by class or function entity, including repeated values and
 redeclarations, while overloads keep separate lists. Enum payloads retain their enumeration type.
-The reflection operator, public `std::meta` APIs, template annotation substitution and broader
-annotation targets remain in [#324](https://github.com/yrashk/ycxx/issues/324).
+Supported aggregate payloads use structural fields and trivial destruction. Reference-member and
+union payload evaluation, the reflection operator, public `std::meta` APIs, template annotation
+substitution and broader annotation targets remain in [#324](https://github.com/yrashk/ycxx/issues/324).
 
 ## Bootstrap workarounds
 
