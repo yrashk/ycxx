@@ -212,8 +212,11 @@ What is true of the code today. Work in progress and its owners are tracked in
 - Directives:
   - `#include` in both forms and the macro-replaced form, and `#include_next`;
   - search directories from `-I`, `-isystem` and `-iquote`, then libycxx's headers and the
-    target's system headers (`:system`, configured by CMake). For x86-64 Linux, ycxx's resource
-    headers (#133) precede the SDK's `usr/include/x86_64-linux-gnu` and `usr/include` (#252);
+    target's system headers (`:system`, configured by CMake). For x86-64 Linux, ycxx searches its
+    resource headers (#133). A native Linux build also searches `/usr/include/x86_64-linux-gnu`
+    and `/usr/include` (#252). Darwin searches the configured SDK's `usr/include`, with a request's
+    `SDKROOT` as an override. Cross-target requests without a target SDK can use explicit include
+    directories (#690);
   - `#define` and `#undef` with the redefinition check, rescanning and painting
     ([cpp.rescan]);
   - function-like macros (`:unit`'s `invocation`, `substitute`, `paste`): arguments across
