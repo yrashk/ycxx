@@ -2143,6 +2143,14 @@ request it serves.
   the collector under 8 threads; the tree, filters, summary and timeline); `daemon.trace` (traced
   builds through the daemon, a watcher, a stalled watcher beside 40 builds, shutdown). The
   browser's key handling is untested.
+- Source spans (#638): `engine::SourceSpan` on each `TraceEvent`, from a kind's `trace_span(const
+  Db&, const Key&)`, which runs only in `Db::trace`. `Db::peek` reads an input, or a value
+  verified at this revision, without a dependency. A file's and a unit's cells are the file; a
+  function's cells (FunctionSourceQ to Codegen) are its definition's first to last token
+  (`item_span`, lines as diagnostics count them). The JSON `span`, `at:file[:line]` in the
+  filter, and `span_text`/`span_start` are in place. Tests: `unit.trace` (the spans of a real
+  build, cells without spans, text, filter, JSON; mutation-checked) and `daemon.trace` (spans
+  across the socket).
 - Not yet: the analysed tree as a value, and stages linked to source (#254); per-resumption
   spans, so a frame's waits are not drawn as work (#255).
 

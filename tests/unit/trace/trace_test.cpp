@@ -348,6 +348,58 @@ void memory() {
         std::format("the JSON summary: {}", js.str().substr(js.str().rfind("{\"summary"))));
 }
 
+// Source spans (#638): which cells say where they are in the source, read from values a traced
+// build already holds; and the model's text, filter and JSON for them.
+void spans() {
+  using engine::SourceSpan;
+  std::map<std::string, SourceSpan> got;  // `Kind(key)` -> span, the last event of each
+  std::vector<Event> all;
+  pl::Session s;
+  trace::Collector c([&](std::span<const Event> batch) {
+    for (const Event& e : batch) got[trace::cell_name(e)] = e.span, all.push_back(e);
+  });
+  s.set_source(tu, "spans.cpp", "int square(int x) {\n  return x * x;\n}\nint main() { return square(3) - 9; }\n", "spans.o");
+  (void)s.get<pl::Tu>(tu, &c);
+  c.finish();
+  const auto at = [&](std::string_view cell) { return got.contains(std::string(cell)) ? got[std::string(cell)] : SourceSpan{"(no event)"}; };
+  check(at("FunctionIr(square)") == SourceSpan{"spans.cpp", 1, 1, 3, 1}, std::format("a function's IR is its definition: {}", trace::span_text(at("FunctionIr(square)"))));
+  check(at("Lower(main)") == SourceSpan{"spans.cpp", 4, 1, 4, 36}, std::format("and its L2: {}", trace::span_text(at("Lower(main)"))));
+  check(at("Codegen(square)") == SourceSpan{"spans.cpp", 1, 1, 3, 1}, "and its code");
+  check(at("Tu(spans.cpp)") == SourceSpan{"spans.cpp"} && at("Pp(spans.cpp)") == SourceSpan{"spans.cpp"}, "a unit's cells are its file");
+  for (const Event& e : all) {
+    if (e.kind == "Optimized" || e.kind == "LayoutConstant" || e.kind == "CostModelIn" || e.kind == "OptLevel")
+      check(e.span.file.empty(), std::format("{} has no span", trace::cell_name(e)));
+  }
+  // An untraced build reads no span: `trace_span` runs only from `Db::trace`. (Its cost when off is
+  // none by construction; this checks a traced build's spans are there, and nothing else needs one.)
+  check(std::ranges::count_if(all, [](const Event& e) { return !e.span.file.empty(); }) > 10, "most cells of a unit have spans");
+
+  check(trace::span_start(SourceSpan{"a.cpp", 3, 5, 7, 1}) == "a.cpp:3:5" && trace::span_text(SourceSpan{"a.cpp", 3, 5, 7, 1}) == "a.cpp:3:5–7:1" &&
+            trace::span_text(SourceSpan{"a.cpp", 3, 5, 3, 12}) == "a.cpp:3:5–12" && trace::span_text(SourceSpan{"a.cpp"}) == "a.cpp" &&
+            trace::span_text(SourceSpan{}).empty(),
+        "span texts");
+  const SourceSpan f{"/src/dir/foo.cpp", 120, 1, 140, 1};
+  check(trace::span_touches(f, "foo.cpp:120") && trace::span_touches(f, "dir/foo.cpp:130") && trace::span_touches(f, "/src/dir/foo.cpp") &&
+            !trace::span_touches(f, "foo.cpp:141") && !trace::span_touches(f, "oo.cpp:120") && !trace::span_touches(f, "bar.cpp"),
+        "a span touches a line of its file, by a path's tail");
+  check(trace::span_touches(SourceSpan{"foo.cpp"}, "foo.cpp:9") && !trace::span_touches(SourceSpan{}, "foo.cpp"), "a whole file touches every line");
+
+  trace::Tree t;
+  t.add(all);
+  t.set_filter("at:spans.cpp:2");
+  std::set<std::string> kinds;
+  for (const auto& n : t.nodes())
+    if (t.matches(n.ev)) kinds.insert(trace::cell_name(n.ev));
+  check(kinds.contains("FunctionIr(square)") && !kinds.contains("FunctionIr(main)") && kinds.contains("Tu(spans.cpp)"),
+        "at:spans.cpp:2 keeps square's cells and the unit's, not main's");
+  t.set_filter("at:Spans.cpp");
+  check(t.rows().empty(), "paths keep their case");
+  Event e = ev(1, 0, "Lower", "square", Outcome::executed);
+  e.span = SourceSpan{"a.cpp", 1, 2, 3, 4};
+  check(trace::json_line(e).ends_with(R"(,"span":{"file":"a.cpp","line":1,"column":2,"end_line":3,"end_column":4}})"), "the JSON line's span");
+  check(!trace::json_line(ev(1, 0, "Link", "0", Outcome::executed)).contains("span"), "none without one");
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -360,5 +412,6 @@ int main(int argc, char** argv) {
   tree();
   lines();
   memory();
+  spans();
   return ycxx::unit::result("unit.trace");
 }

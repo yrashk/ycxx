@@ -44,6 +44,12 @@ class LineTable {
 // The file and byte offset of an item location (ast.md §8.3, steps 1–3).
 std::optional<pp::TokLoc> source_site(ast::Interners& in, const pp::Region& region, const items::Items& items, ast::Loc at);
 
+// For traces (#638): where an item of `file`'s region is, from its first token to its last, as
+// diagnostics count lines and columns; from values the engine already holds (`Db::peek`), and none
+// when one of them is not there. An item ending in another file than it starts (a macro) is its
+// first token.
+engine::SourceSpan item_span(const engine::Db& db, ast::Interners& in, pp::FileId file, ast::ItemId item);
+
 // File contents as this revision sees them. An open buffer takes precedence in the editor view.
 const std::optional<std::string>& source_content(engine::Ctx& cx, const pp::Source& source, std::string_view name);
 
@@ -94,6 +100,37 @@ const std::optional<std::string>& source_content(engine::Ctx& cx, const pp::Sour
   if (source.config.view == pp::View::editor)
     if (const auto& open = cx.fetch<pp::Buffer>(id)) return open;
   return cx.fetch<pp::FileContent>(id);
+}
+
+engine::SourceSpan item_span(const engine::Db& db, ast::Interners& in, pp::FileId file, ast::ItemId item) {
+  const pp::Source* source = db.peek<pp::SourceOf>(file);
+  const pp::Region* region = db.peek<pp::Pp>(file);
+  const items::Items* items = db.peek<items::RegionItems>(file);
+  if (!source || !region || !items || region->locs.empty()) return {};
+  for (const items::Item& it : items->items) {
+    if (in.items.add<ast::ItemId>(it.id) != item || it.end <= it.begin) continue;
+    const auto last = static_cast<std::uint32_t>(region->locs.size() - 1);
+    const pp::TokLoc a = region->site(std::min(it.begin, last));
+    pp::TokLoc b = region->site(std::min(it.end - 1, last));
+    if (b.file != a.file || b.offset < a.offset) b = a;
+    if (a.file >= region->files.size()) return {};
+    const bool main = a.file == 0;
+    const std::string& name = main ? source->path : region->files[a.file];
+    const std::string* text = nullptr;
+    if (main && source->config.view == pp::View::disk) {
+      text = db.peek<pp::FileText>(file);
+    } else if (name != "<built-in>") {
+      std::filesystem::path p(name);
+      if (p.is_relative() && !source->cwd.empty()) p = std::filesystem::path(source->cwd) / p;
+      const pp::PathId id = pp::path_id(p.lexically_normal().generic_native_encoded_string());
+      if (const auto* content = db.peek<pp::FileContent>(id); content && *content) text = &**content;
+    }
+    if (!text) return {main ? name : region->file_names[a.file]};
+    const LineTable lines(*text);
+    const LineColumn from = lines.line_column(a.offset), to = lines.line_column(b.offset);
+    return {main ? name : region->file_names[a.file], from.line, from.column, to.line, to.column};
+  }
+  return {};
 }
 
 std::string SourceLocations::at(pp::TokLoc loc) {
