@@ -1814,7 +1814,7 @@ private:
       call.args = ins().intern_seq(std::span<const TemplateArg>(*args));
       return value_arg(types().builtin(Builtin::dependent), ins().intern_value(call));
     }
-    return call_constant ? call_constant(call.templ, *args) : std::nullopt;
+    return call_constant ? call_constant(call.callee, *args) : std::nullopt;
   }
 
   std::optional<ConstId> substitute_variable_value(ConstId v, const Bindings& b,
