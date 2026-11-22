@@ -443,6 +443,11 @@ members. [#285](https://github.com/yrashk/ycxx/issues/285)
 - Automatic Linux CRT and library selection and general-purpose ELF object interoperability.
   [#390](https://github.com/yrashk/ycxx/issues/390)
 - Namespace-scope destruction for x86-64 Linux. [#400](https://github.com/yrashk/ycxx/issues/400)
+- Parity between the two native back ends. x86-64 Linux does not yet pass classes with
+  floating members by value, trivially copyable classes over 16 bytes as arguments, or x87
+  `long double`. AArch64 macOS does not yet have native `int` throws, unwinding through ycxx
+  frames, native array `new`, or virtual calls on peer-owned classes, which x86-64 has. The
+  full table is [#639](https://github.com/yrashk/ycxx/issues/639).
 
 ### In progress
 
@@ -452,6 +457,9 @@ members. [#285](https://github.com/yrashk/ycxx/issues/285)
 - `auto` and lambdas ([#278](https://github.com/yrashk/ycxx/issues/278)): placeholder types,
   lambdas and generic lambdas are done; constexpr lambdas wait on class objects in the
   interpreter ([#262](https://github.com/yrashk/ycxx/issues/262)).
+
+- x86-64 ↔ AArch64 back-end parity ([#639](https://github.com/yrashk/ycxx/issues/639)), one
+  gap per PR in priority order.
 
 Next come exceptions ([#89](https://github.com/yrashk/ycxx/issues/89)).
 
