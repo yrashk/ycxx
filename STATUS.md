@@ -1123,6 +1123,9 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   namespace for ordinary and qualified lookup, and its original lexical point for ADL.
   Lookup still sees the enclosing class complete, including its hidden friends.
   [#764](https://github.com/yrashk/ycxx/issues/764)
+- A written constructor replays the initializer before taking a stored scalar value, so later
+  class members can hide namespace declarations in defaults that evaluated during the member scan.
+  [#763](https://github.com/yrashk/ycxx/issues/763)
 
 - An automatic declaration such as `Point p(3, 4);` can initialize a flat aggregate with
   public arithmetic fields and implicit trivial destruction. The fallback applies when

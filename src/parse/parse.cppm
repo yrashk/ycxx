@@ -7736,8 +7736,9 @@ private:
       Ex init;
       if (auto it = inits.subobjects.find(i); it != inits.subobjects.end()) init = it->second;
       else if (rec.union_ && (!inits.subobjects.empty() || !f.dmi)) continue;
-      else if (f.init != ConstId::none) init = s_.literal(sema::Types::unqualified(f.type), f.init, ast::ValueCategory::prvalue, 0, 0);
+      // The early scalar value may have been folded before all class members were visible.
       else if (auto d = p_->dmi(f.entity)) init = member_initializer(f, *d);
+      else if (f.init != ConstId::none) init = s_.literal(sema::Types::unqualified(f.type), f.init, ast::ValueCategory::prvalue, 0, 0);
       else if (s_.types().is_reference(f.type)) s_.diag(0, Diag::reference_uninitialized);  // [class.base.init]/10
       else init = s_.default_init(f.type, 0, 0);
       if (!init.ok()) continue;
