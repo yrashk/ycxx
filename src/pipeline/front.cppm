@@ -340,6 +340,19 @@ bool unwind_scalar_prototype(const sema::Types& types, QualType type) {
          std::ranges::all_of(f.params, [&](QualType t) { return unwind_scalar(types, t); });
 }
 
+bool unwind_indirect_callee(const sema::Types& types, const ast::Ast& tree, ast::NodeId callee) {
+  return ast::dispatch<ast::Nodes>(ast::kind_of(callee), [&]<class T>(std::type_identity<T>) {
+    if constexpr (requires(T n) { n.info; }) {
+      const auto info = tree.get<T>(callee).info;
+      const auto type = types.rec(info.type);
+      return info.category == ast::ValueCategory::prvalue && type.kind == sema::TypeKind::pointer &&
+             unwind_scalar_prototype(types, type.inner);
+    } else {
+      return false;
+    }
+  });
+}
+
 // Every subobject of this aggregate can start and end its lifetime without a cleanup.
 bool unwind_scalar_aggregate(parse::Program& program, QualType type) {
   const auto& types = program.world().types;
@@ -401,12 +414,18 @@ bool unwind_body_node(parse::Program& program, ast::NodeId node, bool& has_throw
       } else if constexpr (std::is_same_v<T, ast::Materialize>) {
         if (!world.types.is_class(n.info.type) || n.destructor != EntityId::none || n.extended) return false;
       } else if constexpr (std::is_same_v<T, ast::Call>) {
-        if (n.function == EntityId::none || n.callee.id == ast::NodeId::none ||
-            !tree.is<ast::DeclRef>(n.callee.id) || tree.get<ast::DeclRef>(n.callee.id).entity != n.function)
-          return false;
-        const auto& f = world.entities.rec(n.function);
-        if (f.kind != sema::EntityKind::function || f.templ != EntityId::none || !program.is_namespace(f.scope) ||
-            !unwind_scalar_prototype(world.types, tree.get<ast::DeclRef>(n.callee.id).info.type)) return false;
+        if (n.callee.id == ast::NodeId::none) return false;
+        if (n.function == EntityId::none) {
+          // The pointer type supplies the prototype. Its expression and the arguments still
+          // need the same recursive lifetime proof below.
+          if (!unwind_indirect_callee(world.types, tree, n.callee.id)) return false;
+        } else {
+          if (!tree.is<ast::DeclRef>(n.callee.id)) return false;
+          const auto callee = tree.get<ast::DeclRef>(n.callee.id);
+          const auto& f = world.entities.rec(n.function);
+          if (callee.entity != n.function || f.kind != sema::EntityKind::function || f.templ != EntityId::none ||
+              !program.is_namespace(f.scope) || !unwind_scalar_prototype(world.types, callee.info.type)) return false;
+        }
       } else if constexpr (std::is_same_v<T, ast::NewArray>) {
         // The fixed-size allocation may throw before any element lifetime starts.
         if (n.allocation.id == ast::NodeId::none || n.element_init.id == ast::NodeId::none ||
