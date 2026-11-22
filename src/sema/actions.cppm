@@ -476,10 +476,8 @@ public:
           auto hit = class_body_type(current_class, *cr, name, type_at);
           if (hit.found) return hit.type;
         }
-        if (auto r = nested_member(current_class, name, true)) {
-          if (!elaborated && unscoped_member_enumerator(current_class, name, /*unqualified=*/true)) return std::nullopt;
-          return r->first.type;
-        }
+        if (!elaborated && unscoped_member_enumerator(current_class, name, /*unqualified=*/true)) return std::nullopt;
+        if (auto r = nested_member(current_class, name, true)) return r->first.type;
       } else {
         if (auto m = q_->earlier_member(name, elaborated)) {
           if (m->kind == ast::DeclKind::enum_ || m->kind == ast::DeclKind::type_alias) return m->type;

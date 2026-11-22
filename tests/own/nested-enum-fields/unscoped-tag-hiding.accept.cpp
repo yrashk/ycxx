@@ -32,4 +32,10 @@ struct FriendFirst {
 
 static_assert(FriendFirst::active == 17);
 
+struct Entry {};
+struct ElaboratedOuterTag {
+  enum Mode { Entry };
+  void use() { struct Entry value; }
+};
+
 int main() { return Box{Box::State}.local() != 7; }
