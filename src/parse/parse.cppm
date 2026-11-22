@@ -1427,7 +1427,7 @@ private:
   void bind_constructor_exceptions(EntityId cls, const sema::ClassRec& rec, Result<ast::ClassDef>& out);
   struct MemberException {
     u32 item;
-    std::pair<u32, u32> tokens;
+    std::optional<std::pair<u32, u32>> condition_tokens;
   };
   struct MemberExceptionPattern {
     std::vector<u32> calls;
@@ -1643,7 +1643,7 @@ public:
   std::optional<bool> satisfied(ConstId c) override { return p_->satisfied(c, point()); }
   bool satisfaction_failed(ConstId c) override { return p_->satisfaction_failed(c); }
   bool value_dependent_member(EntityId v) override { return p_->is_value_dependent_member(v); }
-  std::optional<ast::DeclSema> template_decl(EntityId t) override { return p_->declaration(t, p_->end()); }
+  std::optional<ast::DeclSema> template_decl(EntityId t) override;
   bool use_static_member(EntityId v) override {
     p_->use_member(v);
     return !p_->member_failed(v);
@@ -1922,13 +1922,27 @@ QualType adjusted_parameter_type(sema::Types& types, QualType type) {
   return type;
 }
 
+std::optional<ast::DeclSema> AtItem::template_decl(EntityId t) {
+  auto decl = p_->declaration(t, p_->end());
+  const auto spec = p_->member_exceptions_.find(t);
+  if (decl && spec != p_->member_exceptions_.end() && !spec->second.condition_tokens) {
+    // Specialization uses the written bare noexcept. The declaration type used for
+    // matching the member's out-of-class definition keeps its existing form.
+    auto& types = p_->world().types;
+    const auto f = types.rec(decl->type);
+    decl->type = types.function(f.inner, f.params, f.variadic, f.linkage, f.fn_cv, f.fn_ref, true);
+  }
+  return decl;
+}
+
 std::optional<QualType> AtItem::replay_member_exception(sema::Sema& caller, const ast::DeclSema& decl,
                                                         EntityId function, QualType type) {
   const auto slot = p_->member_exceptions_.find(decl.entity);
-  if (slot == p_->member_exceptions_.end()) return type;
+  if (slot == p_->member_exceptions_.end() || !slot->second.condition_tokens) return type;
   if (const auto cached = p_->resolved_member_exceptions_.find(function); cached != p_->resolved_member_exceptions_.end())
     return cached->second;
-  const auto [item, tokens] = slot->second;
+  const auto item = slot->second.item;
+  const auto tokens = *slot->second.condition_tokens;
   const auto written = p_->member_decl(decl.entity);
   if (!written) return std::nullopt;
   const auto& record = p_->world().entities.rec(function);
@@ -2166,7 +2180,7 @@ public:
   std::optional<bool> satisfied(ConstId c) override { return p_->satisfied(c, p_->end()); }
   bool satisfaction_failed(ConstId c) override { return p_->satisfaction_failed(c); }
   bool value_dependent_member(EntityId v) override { return p_->is_value_dependent_member(v); }
-  std::optional<ast::DeclSema> template_decl(EntityId t) override { return p_->declaration(t, p_->end()); }
+  std::optional<ast::DeclSema> template_decl(EntityId t) override { return at_.template_decl(t); }
   bool use_static_member(EntityId v) override {
     p_->use_member(v);
     return !p_->member_failed(v);
@@ -5609,8 +5623,8 @@ private:
         sem.entity = s_.world().entities.entity(
             {sema::EntityKind::function, d.name, d.type, LangLinkage::cxx, ast::Linkage::external, {}, c.entity});
       }
-      if (d.noexcept_tokens)
-        p_->member_exceptions_.emplace(sem.entity, Program::MemberException{k_, *d.noexcept_tokens});
+      if (d.noexcept_tokens || (member_template_ && d.has_noexcept && !d.noexcept_condition))
+        p_->member_exceptions_.emplace(sem.entity, Program::MemberException{k_, d.noexcept_tokens});
       if (overridden) p_->overridden_virtuals_.emplace(sem.entity, overridden->entity);
       remember_member_defaults(sem.entity, d.params);
     } else if (member_template_) {
@@ -7062,8 +7076,9 @@ void Program::check_member_exception_patterns(EntityId cls, const sema::ClassRec
   ast::Builder b(w_->ins, &arena_);
   for (const auto& member : rec.members) {
     const auto specification = member_exceptions_.find(member.entity);
-    if (specification == member_exceptions_.end()) continue;
-    const auto [item, tokens] = specification->second;
+    if (specification == member_exceptions_.end() || !specification->second.condition_tokens) continue;
+    const auto item = specification->second.item;
+    const auto tokens = *specification->second.condition_tokens;
     if (member_exception_patterns_.contains(item)) continue;
     const auto written = member_decl(member.entity);
     const auto decl = written ? decl_sema(*written) : std::nullopt;
