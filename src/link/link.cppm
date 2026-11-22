@@ -258,6 +258,9 @@ private:
   std::vector<error> errors_;
 
   std::map<std::string, symref, std::less<>> globals_;
+  // Names some object defines with default visibility: exported even when the definition kept is
+  // a private-extern (hidden) weak one from another object, as the system linker does.
+  std::set<std::string, std::less<>> exported_;
   std::map<std::string, std::uint8_t, std::less<>> common_align_;  // name -> largest alignment of its tentative definitions
   struct import_info {
     std::string name;
@@ -314,6 +317,7 @@ private:
           continue;
         }
         if (s.bind == obj::binding::local || dropped(o.sections[*s.section])) continue;
+        if (s.bind == obj::binding::global) exported_.emplace(name);
         if (is_common(o, s)) {
           auto& al = common_align_[name];
           al = std::max(al, o.sections[*s.section].align_log2);
@@ -840,7 +844,8 @@ private:
         // A merged tentative definition is an ordinary definition in the executable.
         const bool weak = s.weak && !is_common(objs_[i], s);
         const sym_entry e{std::string(name), mo::n_sect, sect, static_cast<std::uint16_t>(weak ? mo::n_weak_def : 0), a};
-        if (s.bind == obj::binding::global) extdefs.push_back({e.name, static_cast<std::uint8_t>(mo::n_sect | mo::n_ext), e.sect, e.desc, e.value});
+        if (s.bind != obj::binding::local && exported_.contains(name))
+          extdefs.push_back({e.name, static_cast<std::uint8_t>(mo::n_sect | mo::n_ext), e.sect, e.desc, e.value});
         else locals.push_back(e);
       }
     }
