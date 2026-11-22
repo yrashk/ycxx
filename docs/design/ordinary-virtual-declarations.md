@@ -51,6 +51,26 @@ declarations hidden by unrelated overloads.
 [[class.mem.general]](https://eel.is/c++draft/class.mem.general) ·
 [Scope review](https://github.com/yrashk/ycxx/issues/309#issuecomment-7079653899)
 
+An ordinary non-template virtual member may have a pure-specifier with the exact token `0`
+after `=` and preprocessing. The pure-specifier follows any virt-specifiers. At class
+completion the derived class starts with its base's
+pure final overriders. An override removes the inherited member from that sequence and adds
+its own declaration when it is pure. A declaration alone can make an inherited slot concrete.
+`__is_abstract` tests whether the completed class still has any pure final overrider.
+[[class.abstract]](https://eel.is/c++draft/class.abstract) ·
+[[class.mem.general]](https://eel.is/c++draft/class.mem.general) ·
+[Scope review](https://github.com/yrashk/ycxx/issues/309#issuecomment-7080764178)
+
+Abstract types can name base subobjects, pointer and reference targets, nondefining
+namespace-scope extern declarations and by-value function declarations. Object and field
+definitions, allocation and by-value calls and function definitions check the abstract
+type. A direct `decltype(make())` can name an abstract result without materializing it.
+`sizeof(make())` and member access on `make()` require materialization. The Linux virtual
+layout admission checks each declaration in the root and derived class. A pure member in
+either keeps the hierarchy outside native emission even when a concrete override exists.
+[[basic.def]](https://eel.is/c++draft/basic.def) · [[dcl.type.decltype]](https://eel.is/c++draft/dcl.type.decltype) ·
+[[conv.rval]](https://eel.is/c++draft/conv.rval) · [#309](https://github.com/yrashk/ycxx/issues/309)
+
 A derived destructor, including an implicit one, is virtual when the base destructor is
 virtual. At class completion an omitted exception specification depends on the effective
 specifications of base and field destructors. An override requires a specification the
@@ -164,10 +184,11 @@ that defines the table. Ownership follows the key definition across the complete
 maker appears first.
 [#309](https://github.com/yrashk/ycxx/issues/309)
 
-Broader table emission, covariant returns, pure virtual functions,
-`final` on classes, virtual destructors and assignment operators, explicit virtual destructor
-calls and virtual member addresses also remain in #309. A virtual assignment operator can be
-overridden by an implicitly declared copy or move assignment in a derived class.
+Broader table emission, covariant returns, pure-slot dispatch, out-of-class pure member
+definitions, class-head `final`, explicit virtual destructor calls and virtual member addresses
+remain in #309. Pure declarations and `final` for virtual destructors and assignment operators
+also remain there. A virtual assignment operator can be overridden by an implicitly declared
+copy or move assignment in a derived class.
 Separate issues track virtual destructor entry points, RTTI operations, virtual bases and
 further exception specifications.
 [#309](https://github.com/yrashk/ycxx/issues/309) · [#136](https://github.com/yrashk/ycxx/issues/136) ·

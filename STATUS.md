@@ -2679,6 +2679,14 @@ What the process allocates, attributed to the engine's cells, in the trace and t
   expression checks. Evaluated construction, constant evaluation of the objects, and native
   emission of their constructors still require virtual layout support.
   [[class.base.init]](https://eel.is/c++draft/class.base.init) · [#309](https://github.com/yrashk/ycxx/issues/309)
+- An ordinary non-template virtual member can use `= 0` in its class declaration. The token
+  after `=` must be exactly `0` after preprocessing. Class completion tracks which final
+  overriders are pure through the single nonvirtual base chain. `__is_abstract` reads that fact.
+  The front end diagnoses definitions of abstract objects and members, allocation,
+  materialization and by-value function definitions or calls. Nondefining namespace-scope
+  `extern` declarations, pointer and reference types, declarations of by-value functions,
+  base subobjects and the result of direct `decltype(make())` follow their ordinary rules.
+  [[class.abstract]](https://eel.is/c++draft/class.abstract) · [[dcl.type.decltype]](https://eel.is/c++draft/dcl.type.decltype) · [#309](https://github.com/yrashk/ycxx/issues/309)
 - On Linux x86-64, the pinned libycxx `<exception>` syntax check reaches unnamed unscoped
   enumerations in `deps/libycxx/include/ycxx/pal.h`, starting at line 61.
   [#157](https://github.com/yrashk/ycxx/issues/157)
@@ -2715,11 +2723,11 @@ What the process allocates, attributed to the engine's cells, in the trace and t
   supported root type. The root has an implicit default constructor, a trivial destructor and
   no default member initializer. Lowering stores `_ZTV + 16` in the vptr. The table can come
   from the key definition in the same unit or from a peer. [#309](https://github.com/yrashk/ycxx/issues/309)
-- Broader construction and table emission, pure virtual functions, covariant returns, and `final` on classes,
-  virtual destructors and assignment operators remain in #309. Checking `final` for
-  `operator=` includes matching implicitly declared copy and move assignments. Virtual
-  destructor entry points, RTTI expressions, virtual bases and native class ABI have their
-  own issues.
+- Broader construction and table emission, pure-slot dispatch, covariant returns and class-head
+  `final` remain in #309. Pure declarations and `final` for virtual destructors and assignment
+  operators also remain there. Checking `operator=` includes matching implicitly declared copy
+  and move assignments. Virtual destructor entry points, RTTI expressions, virtual bases and
+  native class ABI have their own issues.
   [#309](https://github.com/yrashk/ycxx/issues/309) · [#136](https://github.com/yrashk/ycxx/issues/136) ·
   [#294](https://github.com/yrashk/ycxx/issues/294) · [#310](https://github.com/yrashk/ycxx/issues/310) ·
   [#489](https://github.com/yrashk/ycxx/issues/489)
