@@ -699,6 +699,8 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
   definition and caller are in separate source inputs. Checked ELF and Mach-O objects carry
   observation requirements and guarantees. The checked link matches them to unique strong
   definitions in explicit input objects.
+  Flat local aggregates track registered owners in distinct fields. Field initialization,
+  borrowing, transfer, and consumption use the same checks as individual named resources.
   Execution leaving the scope of a live transaction or reaching a possible unwind is diagnosed.
   See [the protocols and examples](docs/design/policies-ownership.md).
 - `tests/features/ycxx.txt` lists `syntax` and `run darwin-arm64`: a feature can be limited to

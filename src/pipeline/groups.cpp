@@ -354,6 +354,10 @@ engine::query_task<SemaResult> TuSema::run(engine::Ctx& cx, TuId tu) {
                return type.kind == sema::TypeKind::class_ && recurse(type.entity);
              });
     };
+    std::set<EntityId> implicit_destructors;
+    for (const auto& member : program.synthesized())
+      if (member.kind == parse::Program::SpecialMember::destructor)
+        implicit_destructors.insert(member.decl.entity);
     for (EntityId c : classes.classes()) {
       ClassShape& shape = r.classes.emplace_back(ClassShape{c, {}, {}});
       const auto& record = classes.rec(c);
@@ -361,11 +365,18 @@ engine::query_task<SemaResult> TuSema::run(engine::Ctx& cx, TuId tu) {
       for (const sema::FieldRec& f : fields) {
         if (f.no_unique_address) shape.overlapping_fields.push_back(std::uint32_t(shape.fields.size()));
         shape.fields.push_back(f.type);
+        shape.field_names.push_back(f.name);
         shape.has_mutable_field |= f.mutable_;
       }
       if (std::ranges::any_of(fields, [](const sema::FieldRec& f) { return f.bit_width != 0; }))
         for (const sema::FieldRec& f : fields) shape.bit_widths.push_back(f.bit_width);
       shape.union_ = record.union_;
+      const bool plain_destruction = record.destructor == EntityId::none ||
+          (record.destructor_noexcept.value_or(false) && implicit_destructors.contains(record.destructor));
+      shape.plain_ownership_record = plain_destruction && record.bases.empty() && !record.union_ &&
+          !record.user_ctors && !record.closure && !record.polymorphic &&
+          std::ranges::none_of(fields, &sema::FieldRec::no_unique_address);
+      if (shape.plain_ownership_record) shape.ownership_destructor = record.destructor;
       shape.pod = record.pod;
       shape.explicit_alignment = record.explicit_alignment;
       for (const sema::BaseRec& b : record.bases) shape.bases.push_back(b.cls);

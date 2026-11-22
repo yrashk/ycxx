@@ -161,6 +161,59 @@ with tempfile.TemporaryDirectory() as directory:
     run(borrow_move, "-fcheck-policies", "-fsyntax-only",
         error="linear resource 'tx' may still have a live shared borrow 'view'")
 
+    field_scope = source("owned_fields", """\
+        struct Group { Transaction first; int label; Transaction second; };
+        void dispatch(bool transfer_first) {
+          Group group{begin(), 19, begin()};
+          {
+            const auto& view = group.first;
+            commit(static_cast<Transaction&&>(group.second));
+          }
+          if (transfer_first && group.label == 19) {
+            auto moved = transfer(static_cast<Transaction&&>(group.first));
+            commit(static_cast<Transaction&&>(moved));
+          } else {
+            rollback(static_cast<Transaction&&>(group.first));
+          }
+        }
+    """, header="transaction.hpp")
+    run(field_scope, "-fcheck-policies", "-c", "-o", str(root / "owned_fields.o"))
+
+    for case, body, expected in (
+        ("live", "commit(static_cast<Transaction&&>(group.first));", "linear resource 'group.second' may leave"),
+        ("borrow", "const auto& view = group.first; commit(static_cast<Transaction&&>(group.first));",
+         "linear resource 'group.first' may still have a live shared borrow 'view'"),
+        ("escape", "expose(group);", "outside the checked protocol"),
+        ("field_address", "const int* pointer = &group.label;", "outside the checked protocol"),
+    ):
+        field_case = source(f"owned_field_{case}", f"""\
+            struct Group {{ Transaction first; Transaction second; int label; }};
+            void expose(Group&) noexcept;
+            void run() {{
+              Group group{{begin(), begin(), 19}};
+              {body}
+            }}
+        """, header="transaction.hpp")
+        run(field_case, "-fcheck-policies", "-fsyntax-only", error=expected)
+
+    unwind_fields = source("owned_fields_unwind", """\
+        int may_throw();
+        struct Group { Transaction first; int label; };
+        void run() {
+          Group group{begin(), may_throw()};
+          commit(static_cast<Transaction&&>(group.first));
+        }
+    """, header="transaction.hpp")
+    run(unwind_fields, "-fcheck-policies", "-fsyntax-only", error="may unwind while linear resource 'group.first' is live")
+
+    nested_parameter = source("nested_owner_parameter", """\
+        struct Inner { Transaction owned; };
+        struct Outer { Inner inner; };
+        void receive(Outer value) {}
+    """, header="transaction.hpp")
+    run(nested_parameter, "-fsyntax-only")
+    run(nested_parameter, "-fcheck-policies", "-fsyntax-only", error="ownership checking requires by-value resource parameters")
+
     for case, body, diagnostic in (
         ("temporary", "const Permit& view = issue();", "a shared borrow must bind directly to a named owner"),
         ("reborrow", "const Permit& view = p; const Permit& second = view;",

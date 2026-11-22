@@ -56,6 +56,31 @@ separate builds, include the observer contract in the caller and provider, compi
 direct calls to unique strong definitions in explicit objects. Exception handlers and jumps
 outside the supported loop control also receive an error.
 
+## Owning fields
+
+A flat local aggregate can hold multiple registered owners alongside arithmetic or enum fields.
+Initialize each owning field with a registered factory or transfer. YCXX tracks each field
+independently through observation, borrowing, transfer, consumption, and scope exit. It checks
+the initializers in field order, so a later initializer that can unwind is diagnosed if a linear
+field is already live. Scalar fields can be read by value.
+
+```cpp
+struct Pair {
+  ycxx_affine::Transaction first;
+  ycxx_affine::Transaction second;
+};
+
+void finish_pair() {
+  Pair pair{ycxx_affine::begin(), ycxx_affine::begin()};
+  ycxx_affine::commit(static_cast<ycxx_affine::Transaction&&>(pair.first));
+  ycxx_affine::rollback(static_cast<ycxx_affine::Transaction&&>(pair.second));
+}
+```
+
+The first field protocol covers non-overlapping direct fields and trivial or implicit nonthrowing
+destruction. Whole-record copying and transfer, nested records, unions, and bases that contain
+owners require additional checking.
+
 ## Try it
 
 From the repository root, save the following as `permit-demo.cpp`.

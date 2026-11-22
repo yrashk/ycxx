@@ -188,6 +188,9 @@ struct ClassShape {
   bool has_mutable_field = false;
   sema::PeerVirtualLayout peer_virtual_layout = sema::PeerVirtualLayout::none;
   EntityId peer_automatic_primary_base = EntityId::none;
+  std::vector<ast::NameId> field_names{};
+  bool plain_ownership_record = false;
+  EntityId ownership_destructor = EntityId::none;
 };
 struct EnumShape {
   EntityId entity = EntityId::none;

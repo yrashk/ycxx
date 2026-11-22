@@ -468,13 +468,15 @@ with tempfile.TemporaryDirectory() as directory:
         # Own and discharge the same object through native YCXX, keeping the guard in the ABI.
         native_good = write("native_good.cpp", """\
             #include "runtime_transaction.hpp"
+            struct Bundle { example::Work left; example::Work right; };
             int main() {
-              auto first = example::start();
+              Bundle bundle{example::start(), example::start()};
               {
-                const auto& view = first;
+                const auto& view = bundle.left;
                 example::inspect(view);
+                example::finish(static_cast<example::Work&&>(bundle.right));
               }
-              auto second = example::handoff(static_cast<example::Work&&>(first));
+              auto second = example::handoff(static_cast<example::Work&&>(bundle.left));
               example::finish(static_cast<example::Work&&>(second));
             }
         """)
@@ -483,6 +485,16 @@ with tempfile.TemporaryDirectory() as directory:
         assert subprocess.run([executable], timeout=10).returncode == 0
         subprocess.run([*args, "-fcheck-policies", str(native_good), "-o", str(native)], check=True, timeout=30)
         assert subprocess.run([native], timeout=10).returncode == 0
+        unfinished_field = write("unfinished_field.cpp", native_good.read_text()
+                                 .replace("int main()", "int main(int argc, char**)")
+                                 .replace("  auto second =", "  if (argc > 1) return 0;\n  auto second ="))
+        syntax(unfinished_field, error="linear resource 'bundle.left' may leave its scope")
+        subprocess.run([host, "-std=c++20", "-I", include, "-I", examples, str(unfinished_field),
+                        "-o", str(executable)], check=True, timeout=30)
+        assert subprocess.run([executable, "skip"], timeout=10).returncode == -signal.SIGILL
+        subprocess.run([*args, str(unfinished_field), "-o", str(native)], check=True, timeout=30)
+        assert subprocess.run([native, "skip"], timeout=10).returncode == -signal.SIGILL
+
         subprocess.run([*args, str(runtime), "-o", str(native)], check=True, timeout=30)
         assert subprocess.run([native], timeout=10).returncode == 0
         assert subprocess.run([native, "early"], timeout=10).returncode == -signal.SIGILL

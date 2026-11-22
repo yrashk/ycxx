@@ -52,6 +52,13 @@ struct ObservationContract {
   bool provides;
 };
 
+struct OwnershipRecord {
+  EntityId entity;
+  std::vector<std::pair<ast::NameId, Ownership>> fields;
+  bool supported;
+  EntityId destructor;
+};
+
 struct OwnershipFlow {
   using Point = ast::u32;
   static constexpr Point exit = ~Point{};
@@ -67,6 +74,7 @@ struct OwnershipFlow {
     bool parameter;
     bool shared_reference;
     std::optional<Borrow> borrow{};
+    std::string field{};
   };
 
   struct Step {
@@ -95,13 +103,29 @@ using Effect = OwnershipEffect;
 
 class OwnershipFlowBuilder {
  public:
-  OwnershipFlowBuilder(const sema::World& world, const OwnershipPolicy& policy, OwnershipBody body)
-      : world_(world), policy_(policy), body_(body) {
+  OwnershipFlowBuilder(const sema::World& world, const OwnershipPolicy& policy,
+                       std::span<const OwnershipRecord> records, OwnershipBody body)
+      : world_(world), policy_(policy), records_(records), body_(body) {
     for (const auto& local : world_.ins.seqs.elements(body.locals)) {
       const auto kind = ownership(local.type);
       flow_.locals.push_back({local.name, kind, (local.flags & sema::local_flag::parameter) != 0, shared_reference(local.type)});
       has_linear_ = has_linear_ || kind == Ownership::linear;
       has_owner_ = has_owner_ || mentions_owner(local.type);
+    }
+    for (ast::u32 index = 0; index < world_.ins.seqs.size(body.locals); ++index) {
+      const auto local = world_.ins.seqs.at(body.locals, index);
+      if (flow_.locals[index].parameter || ast::cv_of(world_.types.canonical(local.type)) != ast::Cv::none) continue;
+      const auto* record = ownership_record(local.type);
+      if (!record || !record->supported) continue;
+      auto& fields = field_slots_[index];
+      for (const auto& [name, kind] : record->fields) {
+        if (kind == Ownership::ordinary) fields.push_back(std::nullopt);
+        else {
+          fields.push_back(static_cast<ast::u32>(flow_.locals.size()));
+          flow_.locals.push_back({local.name, kind, false, false, {}, std::string(world_.ins.names.spelling(name))});
+          has_linear_ = has_linear_ || kind == Ownership::linear;
+        }
+      }
     }
   }
 
@@ -158,6 +182,13 @@ class OwnershipFlowBuilder {
     return policy_.ownership(world_.types.canonical(type));
   }
 
+  const OwnershipRecord* ownership_record(QualType type) const {
+    const auto record = world_.types.rec(type);
+    if (record.kind != sema::TypeKind::class_) return nullptr;
+    const auto it = std::ranges::lower_bound(records_, record.entity, std::ranges::less{}, &OwnershipRecord::entity);
+    return it != records_.end() && it->entity == record.entity ? &*it : nullptr;
+  }
+
   bool shared_reference(QualType type) const {
     const auto reference = world_.types.rec(type);
     return reference.kind == sema::TypeKind::reference && !reference.rvalue_ref &&
@@ -176,17 +207,19 @@ class OwnershipFlowBuilder {
   // The registered resource's construction and cleanup implement the adapter's contract.
   bool resource_lifetime_body() const {
     if (body_.this_type == QualType{}) return false;
+    const auto type = world_.types.rec(body_.this_type).inner;
+    if (const auto* record = ownership_record(type); record && record->destructor == body_.function) return true;
     const auto* function = world_.entities.find(body_.function);
     return function && (function->kind == sema::EntityKind::constructor || function->kind == sema::EntityKind::destructor) &&
-           ownership(world_.types.rec(body_.this_type).inner) != Ownership::ordinary;
+           ownership(type) != Ownership::ordinary;
   }
 
   bool mentions_owner(QualType type) const {
-    if (ownership(type) != Ownership::ordinary) return true;
+    if (ownership(type) != Ownership::ordinary || ownership_record(type)) return true;
     const auto t = world_.types.rec(type);
     using enum sema::TypeKind;
     if (t.kind == pointer || t.kind == reference || t.kind == array || t.kind == member_pointer)
-      return mentions_owner(t.inner) || (t.kind == member_pointer && ownership(t.member_owner) != Ownership::ordinary);
+      return mentions_owner(t.inner) || (t.kind == member_pointer && mentions_owner(t.member_owner));
     if (t.kind == function)
       return mentions_owner(t.inner) || std::ranges::any_of(t.params, [&](QualType p) { return mentions_owner(p); });
     return false;
@@ -194,6 +227,17 @@ class OwnershipFlowBuilder {
 
   // The red cursor distinguishes the source occurrences of shared AST nodes.
   std::optional<ast::u32> owner_use(const ast::Red& node) const {
+    if (node.is<ast::ImplicitConversion>()) {
+      const auto cast = node.get<ast::ImplicitConversion>();
+      if (cast.conversion == ast::ConversionKind::lvalue_to_rvalue) {
+        const auto operand = unparenthesized(at(node, cast.operand));
+        if (operand.is<ast::Member>()) {
+          const auto member = operand.get<ast::Member>();
+          if (const auto* slot = field_slot(operand, member); slot && !*slot)
+            return std::nullopt;  // copy the scalar without exposing its containing record
+        }
+      }
+    }
     const bool here = ast::dispatch<ast::Nodes>(node.kind(), [&]<class T>(std::type_identity<T>) {
       const auto n = node.get<T>();
       if constexpr (requires { n.info; } || std::is_same_v<T, ast::StaticInit> ||
@@ -221,6 +265,15 @@ class OwnershipFlowBuilder {
   ast::Red unparenthesized(ast::Red node) const {
     while (node.is<ast::Paren>()) node = at(node, node.get<ast::Paren>().operand);
     return node;
+  }
+
+  const std::optional<ast::u32>* field_slot(const ast::Red& node, const ast::Member& member) const {
+    if (member.arrow || member.reference) return nullptr;
+    const auto object = unparenthesized(at(node, member.object));
+    if (!object.is<ast::LocalRef>()) return nullptr;
+    const auto it = field_slots_.find(object.get<ast::LocalRef>().local);
+    if (it == field_slots_.end() || member.field >= it->second.size()) return nullptr;
+    return &it->second[member.field];
   }
 
   bool observation_scalar(QualType type) const {
@@ -296,6 +349,8 @@ class OwnershipFlowBuilder {
       const auto local = node.get<ast::LocalRef>().local;
       if (flow_.locals[local].ownership != Ownership::ordinary || flow_.locals[local].shared_reference) return local;
     }
+    if (node.is<ast::Member>())
+      if (const auto* field = field_slot(node, node.get<ast::Member>())) return *field;
     return std::nullopt;
   }
 
@@ -339,6 +394,9 @@ class OwnershipFlowBuilder {
       const bool throws = throwing_destructor(var.destructor);
       const auto& local = flow_.locals[var.local];
       if (local.ownership != Ownership::ordinary || local.shared_reference || throws) scope.locals.push_back({var.local, throws});
+      if (const auto it = field_slots_.find(var.local); it != field_slots_.end())
+        for (auto field : it->second)
+          if (field) scope.locals.push_back({*field, false});
     } else if (node.is<ast::DeclStmt>() || node.is<ast::CondDecl>()) {
       node.for_each_child([&](const ast::Red& child) { collect(scope, child); });
     }
@@ -442,6 +500,19 @@ class OwnershipFlowBuilder {
     return head;
   }
 
+  Point initialize_owner(ast::u32 slot, const ast::Red& initializer, Point next) {
+    if (initializer.is<ast::Call>()) {
+      const auto call = initializer.get<ast::Call>();
+      const auto operation = direct_effect(initializer, call);
+      if (operation == Effect::issue)
+        return add({Event::initialize, initializer.offset(), next, Flow::exit, slot});
+      if (operation == Effect::transfer)
+        if (const auto source = operation_argument(initializer, call); source && !flow_.locals[*source].shared_reference)
+          return add({Event::transfer, initializer.offset(), next, Flow::exit, slot, *source});
+    }
+    return unsupported(initializer.offset(), "an owner must be initialized by a registered factory or transfer from a named owner");
+  }
+
   Point lower_local(const ast::Red& node, Point next, Context context) {
     const auto var = node.get<ast::LocalVar>();
     auto& local = flow_.locals[var.local];
@@ -454,20 +525,23 @@ class OwnershipFlowBuilder {
         }
       return unsupported(node.offset(), "a shared borrow must bind directly to a named owner");
     }
-    const auto owner = local.ownership;
-    if (owner != Ownership::ordinary && var.init.id != ast::NodeId::none) {
-      const ast::Red initializer = unparenthesized(at(node, var.init));
-      if (initializer.is<ast::Call>()) {
-        const auto call = initializer.get<ast::Call>();
-        const Effect operation = direct_effect(initializer, call);
-        if (operation == Effect::issue) return add({Event::initialize, node.offset(), next, Flow::exit, var.local});
-        if (operation == Effect::transfer)
-          if (const auto source = operation_argument(initializer, call); source && !flow_.locals[*source].shared_reference)
-            return add({Event::transfer, initializer.offset(), next, Flow::exit, var.local, *source});
+    if (const auto it = field_slots_.find(var.local); it != field_slots_.end()) {
+      if (var.init.id == ast::NodeId::none || !node.ast().is<ast::InitList>(var.init.id))
+        return unsupported(node.offset(), "a record with owners requires aggregate initialization");
+      const auto init = at(node, var.init);
+      const auto elements = init.ast().children(init.get<ast::InitList>().elems);
+      const auto& slots = it->second;
+      if (elements.size() != slots.size()) return unsupported(node.offset(), "cannot match aggregate initializers to owned fields");
+      for (std::size_t i = elements.size(); i-- > 0;) {
+        if (slots[i]) next = initialize_owner(*slots[i], unparenthesized(at(init, elements[i])), next);
+        else next = lower_child(init, elements[i], next, context);
       }
+      return next;
     }
-    if (owner != Ownership::ordinary)
+    if (local.ownership != Ownership::ordinary) {
+      if (var.init.id != ast::NodeId::none) return initialize_owner(var.local, unparenthesized(at(node, var.init)), next);
       return unsupported(node.offset(), "an owner must be initialized by a registered factory or transfer from a named owner");
+    }
     const auto& locals = world_.ins.seqs;
     if (mentions_owner(locals.at(body_.locals, var.local).type))
       return unsupported(node.offset(), "resource aliases are outside the checked protocol");
@@ -593,8 +667,10 @@ class OwnershipFlowBuilder {
 
   const sema::World& world_;
   const OwnershipPolicy& policy_;
+  std::span<const OwnershipRecord> records_;
   OwnershipBody body_;
   Flow flow_;
+  std::map<ast::u32, std::vector<std::optional<ast::u32>>> field_slots_;
   bool has_owner_ = false;
   bool has_linear_ = false;
 };
@@ -665,6 +741,7 @@ class OwnershipAnalysis {
     const auto name = in_.names.spelling(owner.name);
     const auto kind = owner.shared_reference ? "shared borrow" :
                       owner.ownership == Ownership::linear ? "linear resource" : "affine resource";
+    if (!owner.field.empty()) return std::format("{} '{}.{}'", kind, name, owner.field);
     return std::format("{} '{}'", kind, name.empty() ? "<unnamed>" : name);
   }
 
@@ -796,13 +873,93 @@ struct OwnershipRegistryFor {
   }
 };
 
+struct OwnershipRecordsFor {
+  struct Key {
+    OwnershipSources sources;
+    TuId tu;
+    bool operator==(const Key&) const = default;
+  };
+  using Value = std::vector<OwnershipRecord>;
+  static engine::query_task<Value> run(engine::Ctx& cx, Key key) {
+    const auto& registry = co_await cx.fetch<OwnershipRegistryFor>(key.sources);
+    if (registry.policy.resources.empty()) co_return Value{};
+    const auto& shapes = co_await cx.fetch<UnitShapes>(key.tu);
+    const auto& source = cx.fetch<pp::SourceOf>(pp::FileId{key.tu.n});
+    const auto& types = universe().world_for(*source.config.target)->types;
+
+    // Trace containment in reverse from the registered owners. This detects nested records
+    // and aliases as well as the flat aggregates that can have independently checked fields.
+    std::map<EntityId, std::vector<EntityId>> enclosing;
+    std::map<EntityId, const ClassShape*> by_entity;
+    for (const auto& shape : shapes.classes) {
+      by_entity.emplace(shape.entity, &shape);
+      for (const auto base : shape.bases) enclosing[base].push_back(shape.entity);
+      std::set<QualType> seen;
+      auto collect = [&](auto&& self, QualType type) -> void {
+        if (!seen.insert(type).second) return;
+        const auto t = types.rec(type);
+        using enum sema::TypeKind;
+        switch (t.kind) {
+          case class_: enclosing[t.entity].push_back(shape.entity); break;
+          case member_pointer: self(self, t.member_owner); [[fallthrough]];
+          case pointer: case reference: case array: self(self, t.inner); break;
+          case function:
+            self(self, t.inner);
+            for (const auto param : t.params) self(self, param);
+            break;
+          default: break;
+        }
+      };
+      for (const auto field : shape.fields) collect(collect, field);
+    }
+    std::set<EntityId> affected;
+    std::vector<EntityId> pending;
+    for (const auto& [type, mode] : registry.policy.resources) {
+      const auto id = types.class_of(type);
+      if (affected.insert(id).second) pending.push_back(id);
+    }
+    while (!pending.empty()) {
+      const auto owner = pending.back();
+      pending.pop_back();
+      const auto parents = enclosing.find(owner);
+      if (parents != enclosing.end())
+        for (const auto parent : parents->second)
+          if (affected.insert(parent).second) pending.push_back(parent);
+    }
+    for (const auto& [type, mode] : registry.policy.resources) affected.erase(types.class_of(type));
+
+    Value records;
+    for (const auto id : affected) {
+      const auto it = by_entity.find(id);
+      if (it == by_entity.end()) continue;
+      const auto& shape = *it->second;
+      OwnershipRecord record{id, {}, shape.plain_ownership_record, shape.ownership_destructor};
+      for (std::size_t i = 0; i < shape.fields.size(); ++i) {
+        const auto type = types.canonical(shape.fields[i]);
+        const auto mode = registry.policy.ownership(type);
+        if (mode == Ownership::ordinary)
+          record.supported = record.supported && (types.is_arithmetic(type) || types.rec(type).kind == sema::TypeKind::enum_);
+        else record.supported = record.supported && ast::cv_of(type) == ast::Cv::none;
+        record.fields.emplace_back(shape.field_names[i], mode);
+      }
+      if (!record.supported) {
+        record.fields.clear();
+        record.destructor = EntityId::none;
+      }
+      records.push_back(std::move(record));
+    }
+    co_return records;
+  }
+};
+
 struct BuildOwnershipFlow {
   using Key = OwnershipBody;
   using Value = OwnershipFlow;
   static engine::query_task<Value> run(engine::Ctx& cx, Key body) {
     const auto& registry = co_await cx.fetch<OwnershipRegistryFor>(body.sources);
+    const auto& records = co_await cx.fetch<OwnershipRecordsFor>({body.sources, body.tu});
     const auto& target = body.linux_target ? ast::x86_64_linux : ast::aarch64_darwin;
-    co_return OwnershipFlowBuilder(*universe().world_for(target), registry.policy, body).build();
+    co_return OwnershipFlowBuilder(*universe().world_for(target), registry.policy, records, body).build();
   }
 };
 
