@@ -6,6 +6,9 @@ static int* volatile redeclared_pointer = &data::redeclared;
 static int* volatile specialized_pointer = &data::specialized<int>;
 static const int* volatile immutable_pointer = &data::immutable;
 
+const int* peer_seed_address() { return &Record::seed; }
+const Descriptor* peer_descriptor_address() { return &Record::descriptor; }
+const int* peer_local_seed_address() { return &LocalRecord::seed; }
 int* peer_initialized_address() { return initialized_pointer; }
 int* peer_zero_address() { return zero_pointer; }
 int* peer_redeclared_address() { return redeclared_pointer; }

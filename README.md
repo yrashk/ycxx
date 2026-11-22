@@ -191,9 +191,11 @@ functions can use GNU hidden visibility, including coalesced inline and `constex
 [#422](https://github.com/yrashk/ycxx/issues/422) · [#602](https://github.com/yrashk/ycxx/issues/602)
 · [#124](https://github.com/yrashk/ycxx/issues/124)
 
-External inline namespace variables with relocation-free static initializers share one object
-across translation units on both targets. On Linux this lets two freestanding units using libycxx
-`<cstddef>` link with the pinned static library. [#432](https://github.com/yrashk/ycxx/issues/432)
+External inline namespace variables and in-class static constexpr members of ordinary namespace-scope
+classes share one object across translation units on both targets when their initial values need
+no relocations or runtime work. On Linux this lets two freestanding units using libycxx `<cstddef>`
+link with the pinned static library. [#432](https://github.com/yrashk/ycxx/issues/432)
+· [#903](https://github.com/yrashk/ycxx/issues/903)
 
 ycxx ELF objects record function types and code sizes. The ELF linker accepts supported
 system-assembled objects with function symbols and the GNU-built libycxx static linkage-marker

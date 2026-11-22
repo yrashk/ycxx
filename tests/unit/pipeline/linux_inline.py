@@ -138,6 +138,12 @@ def main():
                 assert entry[4] == 'WEAK' and sections.get(entry[6]) == section, entry
                 assert any('R_X86_64_64' in line.split() and symbol in line.split() for line in relocations), symbol
 
+            for symbol in ('_ZN6Record4seedE', '_ZN6Record10descriptorE'):
+                entry = table[symbol]
+                assert entry[4] == 'WEAK' and sections.get(entry[6]) == '.rodata', entry
+            local = table['_ZN12_GLOBAL__N_111LocalRecord4seedE']
+            assert local[4] == 'LOCAL' and sections.get(local[6]) == '.rodata', local
+
         for objects in (('data-main.o', 'data-peer.o'), ('data-peer.o', 'data-main.o')):
             link(*objects)
             run('./program')
@@ -160,6 +166,8 @@ def main():
 constexpr int ordinary_constant = 7;
 extern constexpr int external_constant = 9;
 static inline int local_inline = 11;
+struct Ordinary { static int value; };
+int Ordinary::value = 13;
 int backing = 13;
 inline int* relocated = &backing;
 template<class T> inline int specialized = 17;
@@ -171,7 +179,7 @@ template<> inline int specialized<NamedType> = 23;
         table = symbols('data-controls.o')
         for name in ('ordinary_constant', 'local_inline'):
             assert table[name][4] == 'LOCAL', table[name]
-        for name in ('external_constant', 'backing', 'relocated',
+        for name in ('external_constant', 'backing', 'relocated', '_ZN8Ordinary5valueE',
                      '_Z11specializedIiE', '_Z11specializedI9NamedTypeE'):
             assert table[name][4] == 'GLOBAL' and table[name][6] != 'UND', table[name]
 

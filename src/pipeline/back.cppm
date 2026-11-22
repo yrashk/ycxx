@@ -152,7 +152,7 @@ struct Variable {
   ConstId init = ConstId::none;
   std::optional<ast::Loc> at;  // its declarator, for diagnostics
   bool dynamic = false;  // also initialized by code ([basic.start.dynamic]): writable, if const
-  bool coalesced = false;  // an eligible external inline namespace definition, weak (#432, #124)
+  bool coalesced = false;  // an eligible external inline data definition, weak (#432, #903)
 };
 
 // The classes and enumerations a unit defines, as `layout` reads them: a class's non-static data
