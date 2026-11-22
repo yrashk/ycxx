@@ -10,6 +10,7 @@ struct Root {
 int call_zeta(const Root* object, int value) noexcept;
 int call_alpha(const Root& object, int value) noexcept;
 int call_with_effects() noexcept;
+int call_conditional(bool take_call) noexcept;
 }
 
 extern "C" const pure_probe::Root* peer_receiver() noexcept;

@@ -52,6 +52,16 @@ int verify(const Root& object, const void* complete, int zeta_bias, int alpha_bi
         return 3;
     if (receiver_calls != 1 || argument_calls != 1)
         return 4;
+
+    slot_calls = 0;
+    receiver_calls = 0;
+    argument_calls = 0;
+    if (pure_probe::call_conditional(false) != 73 || slot_calls != 0 ||
+        receiver_calls != 0 || argument_calls != 0)
+        return 5;
+    if (pure_probe::call_conditional(true) != alpha_bias + 7 || seen_receiver != complete ||
+        seen_argument != 7 || slot_calls != 1 || receiver_calls != 1 || argument_calls != 1)
+        return 6;
     return 0;
 }
 }
