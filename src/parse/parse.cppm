@@ -233,8 +233,9 @@ public:
   const Result<ast::ClassDef>& class_def(u32 item);
   // The records of the classes and enumerations this unit has analysed.
   const sema::Classes& classes() const { return classes_; }
-  // Class and enumeration layouts affected by annotations erased from their types.
-  std::set<EntityId> uncertain_object_layouts() const;
+  // Class and enumeration layouts, and optionally constructor and destructor signatures,
+  // affected by annotations erased from their types.
+  std::set<EntityId> uncertain_object_layouts(bool include_lifecycle_signatures = false) const;
   // The defining pattern selected for an instantiated class, including a partial specialization.
   std::optional<u32> class_pattern_item(EntityId c) const {
     auto it = class_patterns_.find(std::to_underlying(c));
@@ -248,6 +249,8 @@ public:
   // ABI attributes on declarations outside the entity's ordinary declaration records.
   bool has_unapplied_declaration_attributes(EntityId e) const { return unapplied_declaration_attributes_.contains(e); }
   bool peer_root_vtable_visible(EntityId cls) const;
+  // Whether an ordinary written definition can also supply its ELF base-object entry point (#136).
+  bool supports_base_object_variant(EntityId function, const std::set<EntityId>& uncertain_layouts) const;
 
   // The parsed class-key of a defining item ([class.union]).
   bool class_rec_is_union(u32 item) const {
@@ -1483,7 +1486,7 @@ private:
   friend class BodyAnalysis;
 };
 
-std::set<EntityId> Program::uncertain_object_layouts() const {
+std::set<EntityId> Program::uncertain_object_layouts(bool include_lifecycle_signatures) const {
   const auto& region = this->region();
   const auto& items = this->items().items;
   std::set<EntityId> uncertain;
@@ -1524,6 +1527,8 @@ std::set<EntityId> Program::uncertain_object_layouts() const {
         if (!definition) annotated_tags.insert(d.entity);
       }
       if (type_annotated && d.kind == ast::DeclKind::enum_) uncertain.insert(d.entity);
+      if (include_lifecycle_signatures && type_annotated && d.kind == ast::DeclKind::function &&
+          (d.flags & (sema::decl_flag::constructor | sema::decl_flag::destructor))) uncertain.insert(d.entity);
       if (annotated && d.kind == ast::DeclKind::data_member) {
         uncertain.insert(w_->entities.rec(d.entity).scope);
         if (item.parent != items::none) uncertain_definitions.insert(item.parent);
@@ -7103,6 +7108,74 @@ bool Program::peer_root_vtable_visible(EntityId cls) const {
     if (layout_attribute(*r_, item.begin, item.end, LayoutAttributes::any)) return false;
   }
   return true;
+}
+
+bool Program::supports_base_object_variant(EntityId function, const std::set<EntityId>& uncertain_layouts) const {
+  using sema::EntityKind;
+  const auto& fn = w_->entities.rec(function);
+  if ((fn.kind != EntityKind::constructor && fn.kind != EntityKind::destructor) ||
+      fn.linkage != ast::Linkage::external || fn.lang != ast::LangLinkage::cxx || fn.templ != EntityId::none ||
+      r_->first_visibility_pragma || uncertain_layouts.contains(function) || !asm_label(function).empty()) return false;
+  const auto* record = classes_.find(fn.scope);
+  if (!record || !record->defined || record->union_ || !record->bases.empty() || record->polymorphic ||
+      record->layout_requires_virtual_support || record->unapplied_layout ||
+      !std::ranges::all_of(record->fields, [&](const sema::FieldRec& field) {
+        const auto type = w_->types.rec(field.type);
+        return field.bit_width == 0 && !field.no_unique_address && w_->types.is_scalar(field.type) &&
+               (type.kind != sema::TypeKind::enum_ || !uncertain_layouts.contains(type.entity));
+      })) return false;
+
+  // Check every declaration, including class introductions and unannotated definitions reached
+  // through a differently annotated namespace reopening.
+  const auto plain_declarations = [&](EntityId entity, u16 excluded_flags) {
+    if (has_unapplied_declaration_attributes(entity)) return false;
+    const auto found = decls_.find(std::to_underlying(entity));
+    return found != decls_.end() && std::ranges::all_of(found->second, [&](const auto& declared) {
+      const auto& [item, decl] = declared;
+      const auto& source = items_->items[item];
+      const bool type_definition = source.kind == ItemKind::class_def || source.kind == ItemKind::enum_def;
+      const u32 head_end = type_definition ? source.brace_begin : source.has_body() ? source.body_begin : source.end;
+      return !(decl.flags & excluded_flags) && !decl.hidden_visibility && !source.specialization &&
+             source.template_depth == 0 && !in_attributed_namespace(item) &&
+             !layout_attribute(*r_, source.begin, head_end, LayoutAttributes::any) &&
+             !(type_definition && layout_attribute(*r_, source.brace_end, source.end, LayoutAttributes::any));
+    });
+  };
+  constexpr u16 excluded = sema::decl_flag::inline_ | sema::decl_flag::deleted | sema::decl_flag::template_;
+  if (!plain_declarations(function, excluded)) return false;
+  const auto plain_named_type = [&](EntityId scope) {
+    while (!is_namespace(scope)) {
+      const auto& owner = w_->entities.rec(scope);
+      if ((owner.kind != EntityKind::class_ && owner.kind != EntityKind::enum_) ||
+          owner.linkage != ast::Linkage::external || owner.templ != EntityId::none ||
+          uncertain_layouts.contains(scope) ||
+          w_->ins.names.spelling(owner.name).empty() || !plain_declarations(scope, sema::decl_flag::template_)) return false;
+      scope = owner.scope;
+    }
+    return !unnamed(namespace_path(scope));
+  };
+  if (!plain_named_type(fn.scope)) return false;
+
+  // Types named by the encoding can restrict linkage or visibility, or change the call ABI.
+  // Classes passed by value and callback signatures require a broader call ABI check.
+  const auto plain_type = [&](this auto&& check, QualType type) -> bool {
+    const auto rec = w_->types.rec(type);
+    switch (rec.kind) {
+      using enum sema::TypeKind;
+      case builtin: return true;
+      case class_:
+      case enum_: return plain_named_type(rec.entity);
+      case pointer:
+      case reference:
+      case array: return check(rec.inner);
+      case member_pointer: return check(rec.member_owner) && check(rec.inner);
+      default: return false;
+    }
+  };
+  const auto signature = w_->types.rec(fn.type);
+  return signature.kind == sema::TypeKind::function && std::ranges::all_of(signature.params, [&](QualType param) {
+    return !w_->types.is_class(param) && plain_type(param);
+  });
 }
 
 bool Program::class_layout_uncertain(EntityId cls, const sema::ClassRec& record, u32 point) const {

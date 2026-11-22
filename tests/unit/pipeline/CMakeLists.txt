@@ -94,6 +94,10 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_
   add_test(NAME unit.linux_union_constructor_unwind
     COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/linux_union_constructor_unwind.py
             $<TARGET_FILE:ycxxc> ${CMAKE_CXX_COMPILER} ${CMAKE_READELF})
+  # PARITY: by design: links the ELF base and complete object entries with native peers.
+  add_test(NAME unit.linux_base_object_variants
+    COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/linux_base_object_variants.py
+            $<TARGET_FILE:ycxxc> ${CMAKE_CXX_COMPILER} ${CMAKE_READELF})
   add_executable(unit_linux_hosted_catch_all_object linux_hosted_catch_all_object.cpp)
   target_link_libraries(unit_linux_hosted_catch_all_object PRIVATE ycxxc_x86_64 ycxxc_obj)
   add_test(NAME unit.linux_hosted_catch_all_object
