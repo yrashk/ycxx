@@ -71,8 +71,9 @@ build/bin/ycxx cxx -nostdlib example.o -o example
 ./example
 ```
 
-Fixed-prototype direct calls to free functions support passing and returning nonempty flat
-records with integral or ordinary object-pointer fields by value. The record can occupy up to
+Fixed-prototype calls (free and member functions, lambdas, function templates and calls
+through pointers) support passing and returning nonempty flat records with integral or
+ordinary object-pointer fields by value. The record can occupy up to
 16 bytes and must be trivial for calls. [Linux integer aggregate ABI](docs/design/linux-integer-aggregates.md)
 
 For mixed Linux objects, the pinned libycxx `<cstddef>` byte operator uses the same Itanium
