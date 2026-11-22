@@ -201,6 +201,21 @@ def main():
         for complete, base in (('__ZN1p4BaseC1Ei', '__ZN1p4BaseC2Ei'), ('__ZN1p4BaseD1Ev', '__ZN1p4BaseD2Ev')):
             assert table[complete][:2] == table[base][:2] == ('__TEXT,__text', 'external'), table
             assert table[complete][2] == table[base][2], (complete, base, table)
+        # Controls: a layout the whole unit leaves uncertain (an aligned or mode-attributed alias
+        # type) or a callback signature keeps the complete-object entry only.
+        (variants / 'aligned_alias.cpp').write_text(
+            'typedef int Wide __attribute__((aligned(32)));\n'
+            'struct B { char head; Wide value; B(int); ~B(); };\n'
+            'B::B(int n) : head(0), value(n) {}\nB::~B() {}\n')
+        for source, complete, base in (
+            ('aligned_alias.cpp', '__ZN1BC1Ei', '__ZN1BC2Ei'),
+            ('aligned_alias.cpp', '__ZN1BD1Ev', '__ZN1BD2Ev'),
+            ('wide_enum.cpp', '__ZN4BaseC1E5Value', '__ZN4BaseC2E5Value'),
+            ('callback.cpp', '__ZN8CallbackC1EPFivE', '__ZN8CallbackC2EPFivE'),
+        ):
+            compile(variants, source, 'control.o')
+            table = symbols(variants, 'control.o')
+            assert table.get(complete, (None,))[0] == '__TEXT,__text' and base not in table, (source, table)
         for part in ('derived', 'direct', 'trace'):
             peer(variants, f'{part}.cpp', f'{part}.o', '-fno-exceptions', '-fno-rtti')
         links(variants, 'provider.o', 'derived.o', 'direct.o', 'trace.o')
