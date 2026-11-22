@@ -214,6 +214,11 @@ public:
       return types().add_cv(*t2, cv);
     }
     case TypeKind::pack_expansion: return std::nullopt;  // only in a list, by `substitute_expansion`
+    case TypeKind::pack_index: {
+      auto x = pack_element(r, b);
+      if (!x) return std::nullopt;
+      return types().add_cv(*x, cv);
+    }
     case TypeKind::transform: {
       auto a = substitute(r.inner, b);
       if (!a) return std::nullopt;
@@ -248,6 +253,51 @@ public:
     std::vector<TemplateArg> xs{type_arg(t)};
     for (u64 i = 0; i < n.lo; ++i) xs.push_back(value_arg(t, w_->values.integer(t, i)));
     return apply_template(args[0].templ, xs);
+  }
+
+  // `T...[I]` with the parameters `b` binds ([dcl.type.pack.index]): the selected element once the
+  // pack and the index are known; while the pack is unbound the specifier, and while only the
+  // index is dependent the specifier over the pack's elements. In partial ordering a pack's
+  // unique stand-in is a pack parameter of its own. An index past the elements, or one at or after
+  // an expansion in the pack, fails.
+  std::optional<QualType> pack_element(const TypeRec& r, const Bindings& b) {
+    auto i = substitute_value(r.bound_value, b);
+    if (!i) return std::nullopt;
+    if (r.pack) {
+      auto es = substitute_args(ins().seqs.elements(r.args), b);
+      if (!es) return std::nullopt;
+      if (ins().values.is_dependent(*i))
+        return types().pack_index(r.inner, *i, ins().intern_seq(std::span<const TemplateArg>(*es)));
+      return select_element(*es, *i);
+    }
+    TypeRec p = types().rec(r.inner);
+    auto a = b.at(p.depth, p.index);
+    if (!a) return types().pack_index(r.inner, *i);
+    if (a->kind == TemplateArgKind::type && types().kind(a->type) == TypeKind::template_param && types().rec(a->type).pack)
+      return types().pack_index(types().canonical(a->type), *i);
+    if (a->kind != TemplateArgKind::pack) return std::nullopt;
+    if (ins().values.is_dependent(*i)) return types().pack_index(r.inner, *i, a->elems);
+    return select_element(elements(*a), *i);
+  }
+  // The element of a pack's arguments at the constant `index`, a type ([dcl.type.pack.index]/2:
+  // the index is less than the number of elements). Past `k` known elements, an expansion
+  // `U...` of a pack parameter gives `U...[index - k]`, still dependent; another expansion there
+  // has no form yet.
+  std::optional<QualType> select_element(std::span<const TemplateArg> es, ConstId index) {
+    ast::Bits128 v = ast::int_bits(ins(), index);
+    auto b = types().builtin_of(ins().values.get<ast::VInt>(index).type);
+    if ((b && ast::is_signed(w_->target, *b) && ast::is_negative(v)) || v.hi != 0) return std::nullopt;
+    for (std::size_t k = 0; k < es.size(); ++k) {
+      if (es[k].kind != TemplateArgKind::type) return std::nullopt;
+      TypeRec e = types().rec(es[k].type);
+      if (e.kind == TypeKind::pack_expansion) {
+        if (k + 1 != es.size() || types().kind(e.inner) != TypeKind::template_param) return std::nullopt;
+        ConstId rest = w_->values.integer(types().builtin(Builtin::unsigned_long), v.lo - k);
+        return types().pack_index(types().canonical(e.inner), rest);
+      }
+      if (k == v.lo) return es[k].type;
+    }
+    return std::nullopt;
   }
 
   // ------------------------------------------------------------ type-trait built-ins (docs/EXTENSIONS.md)
@@ -773,6 +823,14 @@ public:
     case TypeKind::pack_expansion:
       if (nested) params_in(r.inner, out, nested);
       return;
+    case TypeKind::pack_index:
+      // `T...[I]` uses up its pack: it is not an unexpanded pack of an enclosing pattern.
+      if (r.pack)
+        for (const TemplateArg& a : ins().seqs.elements(r.args)) params_in(a, out, nested);
+      else if (nested)
+        params_in(r.inner, out, nested);
+      params_in(r.bound_value, out, nested);
+      return;
     case TypeKind::pointer:
     case TypeKind::reference:
     case TypeKind::dep_name:
@@ -891,6 +949,7 @@ public:
       return std::ranges::any_of(refs, [&](auto ref) { return ref.first == depth; });
     }
     case TypeKind::pack_expansion: return mentions(r.inner, depth);
+    case TypeKind::pack_index: return false;  // a non-deduced context ([temp.deduct.type]/5)
     case TypeKind::dep_spec: {
       if (r.depth == depth) return true;
       std::vector<std::pair<u16, u16>> refs;
@@ -921,7 +980,8 @@ public:
     TypeRec pr = types().rec(pc);
     // `typename Q::n` and dependent decltype operands are non-deduced contexts
     // ([temp.deduct.type]/5), as is a built-in's result.
-    if (pr.kind == TypeKind::dep_name || pr.kind == TypeKind::transform) return true;
+    // A pack-index-specifier is one too ([temp.deduct.type]/5).
+    if (pr.kind == TypeKind::dep_name || pr.kind == TypeKind::transform || pr.kind == TypeKind::pack_index) return true;
     if (partial_deduction_ && pr.kind == TypeKind::builtin && pr.builtin == Builtin::dependent) return true;
     if (pr.kind == TypeKind::template_param && pr.depth == depth) {
       // `cv T` from `cv' A`: T is A without cv, or with the cv `cv'` has beyond `cv`.
@@ -964,6 +1024,8 @@ public:
     case TypeKind::template_param: return pr.depth == ar.depth && pr.index == ar.index && pr.pack == ar.pack;
     case TypeKind::dep_name: return types().canonical(pr.inner) == types().canonical(ar.inner) && pr.name == ar.name;
     case TypeKind::transform: return pr.trait == ar.trait && types().canonical(pr.inner) == types().canonical(ar.inner);
+    case TypeKind::pack_index:  // non-deduced, above
+      return pr.inner == ar.inner && pr.bound_value == ar.bound_value && pr.pack == ar.pack && pr.args == ar.args;
     case TypeKind::placeholder: return pr.decltype_auto == ar.decltype_auto;
     case TypeKind::builtin: return pr.builtin == ar.builtin;
     case TypeKind::class_:
@@ -1714,6 +1776,7 @@ public:
     case TypeKind::dep_spec:
     case TypeKind::builtin_spec: return all_args(ins().seqs.elements(r.args));
     case TypeKind::array: return structural_operand(r.inner) && structural_value(r.bound_value);
+    case TypeKind::pack_index: return (!r.pack || all_args(ins().seqs.elements(r.args))) && structural_value(r.bound_value);
     case TypeKind::pointer:
     case TypeKind::reference:
     case TypeKind::dep_name:

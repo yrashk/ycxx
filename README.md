@@ -69,7 +69,9 @@ Single-expression `auto(x)` and `auto{x}` perform scalar and pointer decay-copy,
 array and function decay. Non-type template parameters can have enumeration types
 ([#774](https://github.com/yrashk/ycxx/issues/774)). Function-template bodies can defer supported dependent operands to
 instantiation, and a function template whose signature holds a dependent variable-template-id
-or its negation compiles to an object ([#773](https://github.com/yrashk/ycxx/issues/773)). Concrete constant template arguments can use braced conversions such as
+or its negation compiles to an object ([#773](https://github.com/yrashk/ycxx/issues/773)). C++26
+pack-index-specifiers `T...[I]` select a type from a pack ([#297](https://github.com/yrashk/ycxx/issues/297);
+the expression form `t...[I]` is not done yet). Concrete constant template arguments can use braced conversions such as
 `Tag<auto{7}>` and integer-literal-led parenthesized conversions such as `Tag<auto(7)>`.
 [#286](https://github.com/yrashk/ycxx/issues/286)
 
