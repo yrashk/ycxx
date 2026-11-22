@@ -590,8 +590,12 @@ class Mangler {
         auto i = in_.values.get<ast::VDepParam>(a.value).index;
         return i == 0 ? std::string("XT_E") : std::format("XT{}_E", i - 1);
       }
-      if (in_.values.is<ast::VDepOp>(a.value) || in_.values.is<ast::VDepVariable>(a.value))
-        return std::unexpected("a dependent operation as a template argument");
+      // Any other value-dependent argument: `X <expression> E` (§5.1.5.7, §5.1.6).
+      if (in_.values.is<ast::VDepOp>(a.value) || in_.values.is<ast::VDepVariable>(a.value)) {
+        auto e = expression(a.value);
+        if (!e) return e;
+        return "X" + *e + "E";
+      }
       if (ast::is_pointer(in_, a.type) && ast::is_function(in_, ast::pointee_of(in_, a.type)))
         return function_pointer_argument(a);
       auto b = ast::builtin_of(in_, a.type);
@@ -604,6 +608,40 @@ class Mangler {
       out += std::format("L{}{}{}E", *code, neg ? "n" : "", mag);
     }
     return out;
+  }
+
+  // The <expression> of a value-dependent template argument (§5.1.6), #773.
+  // - A namespace variable template with dependent arguments is an <unresolved-name>: its
+  //   <source-name> and <template-args>, `3a_vIT_E`. Neither is a substitution candidate; the
+  //   arguments' own types are.
+  // - `!e` is `nt <expression>`.
+  // Clang and GCC agree on these for a variable template of the global namespace, or one named
+  // unqualified inside ::std (also through std::__y1), when every argument is written and none is
+  // a pack. Otherwise they differ: Clang mangles the name and the arguments as written (`sr …E`,
+  // `gs`, no defaults, no `J…E`), GCC the <source-name> and the converted arguments. ycxx writes
+  // GCC's form, which is also what the GCC-built libycxx.a has (DECISIONS §1.7, #777).
+  std::expected<std::string, std::string> expression(ast::ConstId v) {
+    if (in_.values.is<ast::VDepVariable>(v)) {
+      const ast::VDepVariable& d = in_.values.get<ast::VDepVariable>(v);
+      ClassName n = classes_ ? classes_(d.templ) : ClassName{};
+      if (n.name.empty()) return std::unexpected("a dependent variable template whose name is unknown");
+      if (n.is_class) return std::unexpected("a dependent member variable template as a template argument");
+      auto args = template_args(in_.seqs.elements(d.args));
+      if (!args) return args;
+      return source_name(n.name) + *args;
+    }
+    if (in_.values.is<ast::VDepOp>(v)) {
+      const ast::VDepOp& op = in_.values.get<ast::VDepOp>(v);
+      auto operands = in_.seqs.elements(op.operands);
+      if (op.op == ast::DepOp::logical_not && operands.size() == 1) {
+        if (operands[0].kind != ast::TemplateArgKind::value) return std::unexpected("a type operand of '!'");
+        auto e = expression(operands[0].value);
+        if (!e) return e;
+        return "nt" + *e;
+      }
+      return std::unexpected("a dependent type-trait operation as a template argument");
+    }
+    return std::unexpected("a dependent operation as a template argument");
   }
 
   std::expected<std::string, std::string> function_pointer_argument(const ast::TemplateArg& arg) {
