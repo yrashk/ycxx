@@ -383,9 +383,18 @@ stay open for the rest.
     stack arguments both ways, function pointers and the GOT. Mutating `sdiv` or the stack packing
     makes it fail. Two variadic C callees read what generated calls pass through their ellipsis
     with `va_arg`, after named stack arguments and with none.
+- Variadic definitions on Apple arm64 ([#647](https://github.com/yrashk/ycxx/issues/647)):
+  `__builtin_va_list` is `char*`. Each cursor operation takes the address of the variable that
+  holds it, so lowering sees a pointer to a `char*` cursor on both targets. `va_start` stores
+  the address of the first 8-byte slot after the named stack arguments, at `x29 + 16` plus
+  their size rounded to 8. `va_arg` loads the slot and advances the cursor by 8, `va_copy`
+  copies it and `va_end` does nothing. `own/variadic/definitions` calls ycxx's definitions
+  from ycxx and from a Clang peer, and lets the peer's `va_arg` read a cursor ycxx started.
+  It fails if the named stack size is ignored or the cursor advances by 4. `<stdarg.h>`
+  itself is missing on Darwin ([#676](https://github.com/yrashk/ycxx/issues/676)); `<cstdarg>` works.
 - Not yet: the allocation
   validator and dependence checker (#29), SSA linear scan, list scheduling, unwind info and DWARF,
-  a measured `cost_model` (#9), defining a variadic function (`va_start`), more than one result, frame objects aligned above 16 bytes.
+  a measured `cost_model` (#9), more than one result, frame objects aligned above 16 bytes.
 
 ## System V AMD64 frames
 
