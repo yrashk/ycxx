@@ -1466,8 +1466,7 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   (`ClassRec::union_`, `ClassShape::union_`, `QueryLayout::class_layout`); a braced initializer
   initializes the first member ([dcl.init.aggr]/16), with its default member initializer if it has
   one; class template unions. A reference member is rejected. A designator naming another member,
-  a default member initializer on another member, anonymous unions and variant members with
-  non-trivial special members are diagnosed as not supported (#203).
+  a default member initializer on another member and anonymous unions are tracked in #203.
 - **Floating types as types:** `float`, `double` and `long double` in decl-specifiers, so the
   SDK's `typedef long double max_align_t;` declares; `sizeof`/`alignof` give their sizes. Their
   values (literals, conversions, arithmetic) are #201 and are diagnosed, not miscompiled.
@@ -1491,6 +1490,24 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   checks layout, member lookup, mangling, and cold and warm builds after swapping identical
   sibling unions.
 - Anonymous union member injection and the other union extensions remain tracked in #203.
+
+## Nontrivial union members with a written destructor (#203)
+
+- An ordinary named union can contain a nontrivially destructible member with a trivial or
+  deleted copy constructor if the union declares a destructor. Braced aggregate initialization
+  can initialize the first member. A written constructor initializes its chosen member or
+  leaves the union without an active member. Initializing two members is ill-formed.
+- A union destructor runs its own body and leaves variant members to explicit lifetime
+  management ([class.dtor]). Tests in `tests/own/unions/` check constructor selection and
+  observe the union and member destructor effects independently.
+- An omitted aggregate member of union type is initialized from an empty braced list,
+  so its first variant can run a constructor.
+- A union constructor that selects a nontrivially destructible member requires a
+  nonthrowing exception specification. A potentially throwing delegating constructor
+  with a nontrivial variant also receives a diagnostic. Exceptional cleanup for this
+  shape is tracked in #738.
+- Remaining implicit special-member rules and aggregate designator forms stay in #203.
+  Direct explicit destructor calls are tracked in #722.
 
 ## `<cstdio>`, step 4c: operator functions; `<stdio.h>` compiles (#133, 2026-11-18)
 
