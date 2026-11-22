@@ -9,6 +9,8 @@ import sys
 import tempfile
 from typing import NamedTuple
 
+from scalar_aggregate_unwind import check_scalar_aggregate_unwind, fixtures as scalar_aggregate_fixtures
+
 
 class Section(NamedTuple):
     index: int
@@ -199,6 +201,14 @@ def main():
 
         compile('-c', fixtures / 'native_throw.cpp', '-o', 'throw.o', status=1, error='`throw` is not in the')
         assert not (scope / 'throw.o').exists()
+
+        def check_scalar_aggregate(obj, functions):
+            object_frames(Image(scope / obj, kind=1), {'_' + name for name in functions})
+
+        # PARITY: by design: the records are checked everywhere and only macOS runs the Mach-O peers.
+        check_scalar_aggregate_unwind(compile, run, check_scalar_aggregate, host[0] if host else None)
+        compile('-c', scalar_aggregate_fixtures / 'unsupported_cleanup.cpp', '-o', 'unsupported_cleanup.o')
+        object_frames(Image(scope / 'unsupported_cleanup.o', kind=1), set())
 
         compile('-c', fixtures / 'native_peer.cpp', '-o', 'native.o')
         frames.update(object_frames(Image(scope / 'native.o', kind=1), {'_peer'}))
