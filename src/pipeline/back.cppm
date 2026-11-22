@@ -1565,7 +1565,9 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
     if (v.coalesced && !v.dynamic && d.relocs.empty()) weak_variables.insert(v.entity);
     if (is_const && !v.dynamic && !layout.contains_mutable_field(v.type))
       d.kind = d.relocs.empty() ? aarch64::DataKind::rodata : aarch64::DataKind::data_const;
-    else if (zero) {
+    // A weak Mach-O definition stays out of zero-fill: Apple's linkers coalesce weak definitions
+    // in content sections, as Clang emits them, but older ones not in __bss (#124).
+    else if (zero && (linux || !weak_variables.contains(v.entity))) {
       d.kind = aarch64::DataKind::bss;
       d.size = d.bytes.size();
       d.bytes.clear();

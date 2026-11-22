@@ -308,7 +308,8 @@ What is true of the code today. Work in progress and its owners are tracked in
   - Output is byte-identical across runs.
   - Weak definitions coalesce: the first in input order is kept, and a strong one beats them.
     The functions and variables the ELF path makes weak (#422, #432) are weak Mach-O definitions
-    too, with `N_PEXT` when hidden (#602). An object with a weak definition sets
+    too, with `N_PEXT` when hidden (#602), and a zero-initialized one goes in `__DATA,__data`, not
+    zero-fill, as Clang emits it. An object with a weak definition sets
     `MH_SUBSECTIONS_VIA_SYMBOLS`, so the system linker also keeps one. A name some object defines
     with default visibility is exported even when the kept definition is hidden, as the system
     linker does. `unit.darwin_inline` checks the `unit.linux_inline` fixtures and mixed content

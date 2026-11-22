@@ -103,7 +103,7 @@ def main():
         links('friend-main.o', 'friend-peer.o')
 
         data = fixtures / 'inline-data'
-        data_sections = {'__ZN4data11initializedE': '__DATA,__data', '__ZN4data16zero_initializedE': '__DATA,__bss',
+        data_sections = {'__ZN4data11initializedE': '__DATA,__data', '__ZN4data16zero_initializedE': '__DATA,__data',
                          '__ZN4data9immutableE': '__TEXT,__const', '__ZN4data10redeclaredE': '__DATA,__data',
                          '__ZN4data11specializedIiEE': '__DATA,__data'}
         for name in ('main', 'peer'):
