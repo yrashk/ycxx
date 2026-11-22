@@ -16,4 +16,10 @@ double fp196_variadic(double (*f)(int, ...), double a, float b) { return f(3, a,
 
 int fp196_variadic_ints(int (*f)(int, ...)) { return f(2, 40, 2); }
 
+// A float on the stack, and AL at its limit of 8 with doubles spilling.
+float fp196_floats(float (*f)(float, float, float, float, float, float, float, float, float)) {
+  return f(1, 2, 3, 4, 5, 6, 7, 8, 9.5f);
+}
+double fp196_ten(double (*f)(int, ...)) { return f(10, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 1.5); }
+
 }
