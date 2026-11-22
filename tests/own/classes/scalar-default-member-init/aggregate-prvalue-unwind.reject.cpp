@@ -8,6 +8,9 @@ static_assert(!noexcept(Throws{}));
 int named() { Throws object{}; return object.value; }
 Throws braced_return() { return {}; } //! error
 int temporary() { return Throws{}.value; } //! error
+struct RuntimeStatic {
+  inline static Throws object = Throws{}; //! error
+};
 
 constexpr int source() { return 5; }
 struct CachedBeforeCompletion {
