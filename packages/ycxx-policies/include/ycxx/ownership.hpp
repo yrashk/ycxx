@@ -12,6 +12,9 @@ template<class Resource> struct affine {};
 template<class Resource> struct linear {};
 template<class Resource> struct move_transfers {};
 
+// Use the package variant adapter to track the active alternative.
+template<class Variant> struct tracks_variant {};
+
 template<class Signature, Signature Function> struct creates {};
 template<class Signature, Signature Function> struct observes {};
 template<class Signature, Signature Function> struct verified_observes {};

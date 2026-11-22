@@ -11,6 +11,7 @@ using ast::EntityId;
 using ast::QualType;
 
 enum class Ownership { ordinary, affine, linear };
+enum class VariantSide { none, first, second };
 // Values match the public C++26 `ycxx::ownership::operation` enumerators.
 enum class OwnershipEffect { unknown = 0, issue = 1, observe = 2, consume = 3, transfer = 4, verified_observe = 5 };
 
@@ -74,7 +75,16 @@ struct PolicyDeclarations {
   std::vector<std::pair<QualType, PolicyOrigin>> move_transfers;
   std::vector<std::tuple<PolicyOperation, OwnershipEffect, PolicyOrigin>> operations;
   std::vector<std::tuple<PolicyOperation, EffectBound, PolicyOrigin>> effect_bounds;
+  std::vector<std::pair<QualType, PolicyOrigin>> variants;
   std::vector<PolicyProblem> problems;
+};
+
+struct TrackedVariant {
+  QualType type;
+  QualType first;
+  QualType second;
+  Ownership first_ownership;
+  Ownership second_ownership;
 };
 
 struct OwnershipPolicy {
@@ -83,6 +93,7 @@ struct OwnershipPolicy {
   std::vector<std::pair<PolicyOperation, OwnershipEffect>> operations;
   std::vector<PolicyOperation> observer_definitions;
   std::vector<PolicyOperation> labeled_observers;
+  std::vector<TrackedVariant> variants;
 
   bool has_observer_definition(PolicyOperation operation) const {
     return std::ranges::binary_search(observer_definitions, operation);
@@ -102,6 +113,12 @@ struct OwnershipPolicy {
     const auto it = std::ranges::lower_bound(operations, operation, std::ranges::less{}, &decltype(operations)::value_type::first);
     return it != operations.end() && it->first == operation ? it->second : OwnershipEffect::unknown;
   }
+
+  const TrackedVariant* variant(QualType canonical) const {
+    const auto type = ast::without_cv(canonical);
+    const auto it = std::ranges::lower_bound(variants, type, std::ranges::less{}, &TrackedVariant::type);
+    return it != variants.end() && it->type == type ? &*it : nullptr;
+  }
 };
 
 struct PolicyRegistry {
@@ -116,6 +133,7 @@ namespace {
 
 enum class Marker {
   other, policy, use_policy, affine, linear, move_transfers, creates, observes, verified_observes, consumes, transfers,
+  variant, tracks_variant,
   effect_set, effect_grade, effect_bound, trusted_effect_bound, effect_contract, trusted_effect_contract,
   scoped_handler, capability_token, runtime_state,
 };
@@ -157,6 +175,8 @@ Specialization marker(const sema::World& world, EntityId id) {
   if (name == "affine") return {Marker::affine, specialized};
   if (name == "linear") return {Marker::linear, specialized};
   if (name == "move_transfers") return {Marker::move_transfers, specialized};
+  if (name == "variant") return {Marker::variant, specialized};
+  if (name == "tracks_variant") return {Marker::tracks_variant, specialized};
   if (name == "creates") return {Marker::creates, specialized};
   if (name == "observes") return {Marker::observes, specialized};
   if (name == "verified_observes") return {Marker::verified_observes, specialized};
@@ -315,6 +335,23 @@ bool is_affine_runtime_state(const sema::World& world, QualType type) {
   return value.lo == 0 && value.hi == 0;
 }
 
+std::optional<std::pair<QualType, QualType>> variant_alternatives(const sema::World& world, QualType type) {
+  const auto [kind, variant] = marker(world, class_entity(world, type));
+  if (kind != Marker::variant || variant->args.size() != 2 ||
+      variant->args[0].kind != ast::TemplateArgKind::type || variant->args[1].kind != ast::TemplateArgKind::type)
+    return std::nullopt;
+  return std::pair{world.types.canonical(variant->args[0].type), world.types.canonical(variant->args[1].type)};
+}
+
+VariantSide variant_tag(const sema::World& world, QualType type) {
+  const auto* tag = world.entities.find(class_entity(world, type));
+  if (!tag || !in_policy_namespace(world, tag->scope, "ownership")) return VariantSide::none;
+  const auto name = world.ins.names.spelling(tag->name);
+  if (name == "first_t") return VariantSide::first;
+  if (name == "second_t") return VariantSide::second;
+  return VariantSide::none;
+}
+
 const sema::EntityRec* scoped_effect_handler(const sema::World& world, QualType type) {
   const auto specialization = marker(world, class_entity(world, type));
   return specialization.marker == Marker::scoped_handler ? specialization.entity : nullptr;
@@ -425,6 +462,19 @@ PolicyDeclarations read_policy_declarations(const sema::World& world, ast::u32 u
       else resource(type, kind == Marker::linear ? Ownership::linear : Ownership::affine, at);
       continue;
     }
+    if (kind == Marker::tracks_variant) {
+      if (args.size() != 1 || args.front().kind != ast::TemplateArgKind::type) {
+        report(at, "a tracked variant must name an unqualified ycxx::ownership::variant specialization");
+        continue;
+      }
+      const auto type = world.types.canonical(args.front().type);
+      if (ast::cv_of(type) != ast::Cv::none || !variant_alternatives(world, type)) {
+        report(at, "a tracked variant must name an unqualified ycxx::ownership::variant specialization");
+        continue;
+      }
+      out.variants.emplace_back(type, PolicyOrigin{unit, at});
+      continue;
+    }
     if (kind == Marker::effect_bound || kind == Marker::trusted_effect_bound) {
       const auto function = args.size() == 3 && args[1].kind == ast::TemplateArgKind::value
                                 ? function_address(world.ins, args[1].value) : std::nullopt;
@@ -453,6 +503,7 @@ PolicyRegistry compose_policy_registry(const sema::World& world,
   std::map<QualType, std::pair<Ownership, PolicyOrigin>> resources;
   std::map<QualType, PolicyOrigin> move_transfers;
   std::map<PolicyOperation, std::pair<OwnershipEffect, PolicyOrigin>> operations;
+  std::map<QualType, PolicyOrigin> variants;
   auto report = [&](PolicyOrigin origin, std::string message, std::optional<PolicyOrigin> previous = {}) {
     out.problems[origin.unit].push_back({origin, std::move(message), previous});
   };
@@ -471,6 +522,8 @@ PolicyRegistry compose_policy_registry(const sema::World& world,
         if (effect == OwnershipEffect::verified_observe) it->second = {effect, origin};
       } else report(origin, "conflicting contracts for an ownership operation", it->second.second);
     }
+    for (const auto& [type, origin] : fragment.variants)
+      variants.try_emplace(type, origin);
     for (const auto& [operation, bound, origin] : fragment.effect_bounds) {
       const auto [it, fresh] = out.effects.try_emplace(operation, bound);
       if (fresh) out.effect_origins.emplace(operation, origin);
@@ -486,6 +539,20 @@ PolicyRegistry compose_policy_registry(const sema::World& world,
     if (resources.contains(type)) out.ownership.move_transfers.push_back(type);
     else report(origin, std::format("a move-transfer contract for '{}' requires an affine or linear resource declaration",
                                     world.types.spell(type)));
+  }
+  for (const auto& [type, origin] : variants) {
+    const auto [first, second] = *variant_alternatives(world, type);
+    const auto first_mode = out.ownership.ownership(first);
+    const auto second_mode = out.ownership.ownership(second);
+    if (const auto resource = resources.find(type); resource != resources.end())
+      report(origin, "a tracked variant cannot also have a direct ownership mode", resource->second.second);
+    else if (first_mode == Ownership::ordinary || second_mode == Ownership::ordinary ||
+             ast::cv_of(first) != ast::Cv::none || ast::cv_of(second) != ast::Cv::none)
+      report(origin, "a tracked variant requires two unqualified registered owners");
+    else if (!out.ownership.transfers_on_move(first) || !out.ownership.transfers_on_move(second))
+      report(origin, "a tracked variant requires move-transfer contracts for both alternatives");
+    else
+      out.ownership.variants.push_back({type, first, second, first_mode, second_mode});
   }
   for (const auto& [operation, spec] : operations) {
     if (!compatible(world, out.ownership, operation.first, spec.first))

@@ -31,7 +31,7 @@ struct OwnershipBody {
   bool operator==(const OwnershipBody&) const = default;
 };
 
-enum class OwnershipEvent { branch, initialize, borrow, observe, consume, transfer, leave, may_unwind, unsupported };
+enum class OwnershipEvent { branch, initialize, borrow, observe, consume, transfer, leave, may_unwind, variant_test, unsupported };
 
 struct OwnershipFinding {
   ast::u32 offset;
@@ -88,6 +88,7 @@ struct OwnershipFlow {
     bool shared_reference;
     std::optional<Borrow> borrow{};
     std::string field{};
+    std::optional<TrackedVariant> variant{};
   };
 
   struct Step {
@@ -100,6 +101,8 @@ struct OwnershipFlow {
     bool throwing_destructor = false;
     std::string problem{};
     EntityId observer = EntityId::none;
+    VariantSide alternative = VariantSide::none;
+    VariantSide source_alternative = VariantSide::none;
   };
 
   std::vector<Local> locals;
@@ -125,6 +128,7 @@ class OwnershipFlowBuilder {
     for (const auto& local : world_.ins.seqs.elements(body.locals)) {
       const auto kind = ownership(local.type);
       flow_.locals.push_back({local.name, kind, (local.flags & sema::local_flag::parameter) != 0, shared_reference(local.type)});
+      if (const auto* variant = tracked_variant(local.type)) add_variant(flow_.locals.back(), *variant);
       has_linear_ = has_linear_ || kind == Ownership::linear;
       has_owner_ = has_owner_ || mentions_owner(local.type);
       has_subobjects = has_subobjects || ownership_record(local.type) || owner_array(local.type);
@@ -194,9 +198,25 @@ class OwnershipFlowBuilder {
     const Scope* scope;
     const Loop* loop;
   };
+  enum class VariantOperation { test, access, take };
+  struct VariantUse {
+    ast::u32 slot;
+    VariantSide side;
+    VariantOperation operation;
+  };
 
   Ownership ownership(QualType type) const {
     return policy_.ownership(world_.types.canonical(type));
+  }
+
+  const TrackedVariant* tracked_variant(QualType type) const {
+    return policy_.variant(world_.types.canonical(type));
+  }
+
+  void add_variant(Flow::Local& local, const TrackedVariant& variant) {
+    local.variant = variant;
+    has_linear_ = has_linear_ || variant.first_ownership == Ownership::linear ||
+                  variant.second_ownership == Ownership::linear;
   }
 
   bool owner_array(QualType type) const {
@@ -207,7 +227,7 @@ class OwnershipFlowBuilder {
       array = world_.types.rec(type);
     } while (array.kind == sema::TypeKind::array);
     return ast::cv_of(world_.types.canonical(type)) == ast::Cv::none &&
-           (ownership(type) != Ownership::ordinary || ownership_record(type));
+           (ownership(type) != Ownership::ordinary || ownership_record(type) || tracked_variant(type));
   }
 
   void collect_subobject_slots(const ast::Red& node) {
@@ -245,10 +265,11 @@ class OwnershipFlowBuilder {
   std::optional<FieldSlot> subobject_slots(QualType type, ast::NameId local, const std::string& path,
                                            const ast::Red& initializer) {
     const auto mode = ownership(type);
-    if (mode != Ownership::ordinary) {
+    if (const auto* variant = tracked_variant(type); mode != Ownership::ordinary || variant) {
       const auto slot = static_cast<ast::u32>(flow_.locals.size());
       flow_.locals.push_back({local, mode, false, false, {}, path});
       has_linear_ = has_linear_ || mode == Ownership::linear;
+      if (variant) add_variant(flow_.locals.back(), *variant);
       return FieldSlot{slot, {}};
     }
     const auto shape = world_.types.rec(type);
@@ -304,6 +325,8 @@ class OwnershipFlowBuilder {
     const auto type = world_.types.rec(body_.this_type).inner;
     if (const auto* record = ownership_record(type); record && record->destructor == body_.function) return true;
     const auto* function = world_.entities.find(body_.function);
+    if (function && tracked_variant(type) && function->scope == world_.types.class_of(type))
+      return true;  // `tracks_variant` authorizes the package adapter's own operations.
     return function && (function->kind == sema::EntityKind::constructor || function->kind == sema::EntityKind::destructor) &&
            ownership(type) != Ownership::ordinary;
   }
@@ -406,9 +429,12 @@ class OwnershipFlowBuilder {
   }
 
   bool mentions_owner(QualType type) const {
-    if (ownership(type) != Ownership::ordinary || ownership_record(type)) return true;
+    if (ownership(type) != Ownership::ordinary || ownership_record(type) || tracked_variant(type)) return true;
     const auto t = world_.types.rec(type);
     using enum sema::TypeKind;
+    if (t.kind == class_)
+      if (const auto alternatives = variant_alternatives(world_, type))
+        return ownership(alternatives->first) != Ownership::ordinary || ownership(alternatives->second) != Ownership::ordinary;
     if (t.kind == pointer || t.kind == reference || t.kind == array || t.kind == member_pointer)
       return mentions_owner(t.inner) || (t.kind == member_pointer && mentions_owner(t.member_owner));
     if (t.kind == function)
@@ -574,7 +600,61 @@ class OwnershipFlowBuilder {
       const auto local = node.get<ast::LocalRef>().local;
       if (flow_.locals[local].ownership != Ownership::ordinary || flow_.locals[local].shared_reference) return local;
     }
-    if (const auto* slot = projection_slot(node)) return slot->owner;
+    if (const auto* slot = projection_slot(node); slot && slot->owner && !flow_.locals[*slot->owner].variant)
+      return slot->owner;
+    return std::nullopt;
+  }
+
+  std::optional<VariantUse> variant_member(const ast::Red& node) const {
+    if (!node.is<ast::MemberCall>()) return std::nullopt;
+    const auto call = node.get<ast::MemberCall>();
+    auto address = unparenthesized(at(node, call.object));
+    if (address.is<ast::ImplicitConversion>()) {
+      const auto qualification = address.get<ast::ImplicitConversion>();
+      if (qualification.conversion == ast::ConversionKind::qualification)
+        address = unparenthesized(at(address, qualification.operand));
+    }
+    if (!address.is<ast::Unary>() || address.get<ast::Unary>().op != ast::UnaryOp::address_of)
+      return std::nullopt;
+    const auto object = unparenthesized(at(address, address.get<ast::Unary>().operand));
+    std::optional<ast::u32> slot;
+    if (object.is<ast::LocalRef>()) slot = object.get<ast::LocalRef>().local;
+    else if (const auto* projection = projection_slot(object)) slot = projection->owner;
+    if (!slot || !flow_.locals[*slot].variant || node.ast().children(call.args).size() != 0)
+      return std::nullopt;
+    const auto& variant = *flow_.locals[*slot].variant;
+    const auto* member = world_.entities.find(call.function);
+    if (!member || member->scope != world_.types.class_of(variant.type)) return std::nullopt;
+    const auto method = world_.types.rec(member->type);
+    if (method.kind != sema::TypeKind::function || !method.fn_noexcept || method.variadic ||
+        !method.params.empty()) return std::nullopt;
+    const auto name = world_.ins.names.spelling(member->name);
+    const auto side = name == "holds_first" || name == "first" || name == "take_first" ?
+                      VariantSide::first : VariantSide::second;
+    const auto type = side == VariantSide::first ? variant.first : variant.second;
+    if ((name == "holds_first" || name == "holds_second") && world_.types.is(method.inner, ast::Builtin::bool_))
+      return VariantUse{*slot, side, VariantOperation::test};
+    if ((name == "take_first" || name == "take_second") && world_.types.canonical(method.inner) == type)
+      return VariantUse{*slot, side, VariantOperation::take};
+    const auto result = world_.types.rec(method.inner);
+    if ((name == "first" || name == "second") && result.kind == sema::TypeKind::reference && !result.rvalue_ref) {
+      const auto target = world_.types.canonical(result.inner);
+      if (ast::cv_of(target) == ast::Cv::const_ && ast::without_cv(target) == type)
+        return VariantUse{*slot, side, VariantOperation::access};
+    }
+    return std::nullopt;
+  }
+
+  std::optional<VariantUse> variant_test(ast::Red node) const {
+    while (node.is<ast::ImplicitConversion>()) {
+      const auto cast = node.get<ast::ImplicitConversion>();
+      using enum ast::ConversionKind;
+      if (cast.conversion != integral && cast.conversion != floating_integral &&
+          cast.conversion != boolean && cast.conversion != to_void)
+        return std::nullopt;
+      node = unparenthesized(at(node, cast.operand));
+    }
+    if (const auto use = variant_member(node); use && use->operation == VariantOperation::test) return use;
     return std::nullopt;
   }
 
@@ -622,7 +702,8 @@ class OwnershipFlowBuilder {
       const auto var = node.get<ast::LocalVar>();
       const bool throws = throwing_destructor(var.destructor);
       const auto& local = flow_.locals[var.local];
-      if (local.ownership != Ownership::ordinary || local.shared_reference || throws) scope.locals.push_back({var.local, throws});
+      if (local.ownership != Ownership::ordinary || local.variant || local.shared_reference || throws)
+        scope.locals.push_back({var.local, throws});
       if (const auto it = field_slots_.find(var.local); it != field_slots_.end())
         collect_fields(scope, it->second);
     } else if (node.is<ast::DeclStmt>() || node.is<ast::CondDecl>()) {
@@ -683,6 +764,9 @@ class OwnershipFlowBuilder {
       const Point else_ = condition(expr, ternary.else_, on_true, on_false, context);
       return condition(expr, ternary.condition, then_, else_, context);
     }
+    if (const auto use = variant_test(expr))
+      return add({.event = Event::branch, .offset = expr.offset(), .next = on_true, .other = on_false,
+                  .local = use->slot, .alternative = use->side});
     const Point next = on_true == on_false ? on_true : add({Event::branch, expr.offset(), on_true, on_false});
     return lower(expr, next, context);
   }
@@ -749,38 +833,85 @@ class OwnershipFlowBuilder {
     return source;
   }
 
-  Point initialize_owner(ast::u32 slot, ast::Red initializer, Point next, Context context) {
+  ast::Red materialized_prvalue(ast::Red node) const {
+    node = unparenthesized(node);
+    if (!node.is<ast::Materialize>()) return node;
+    const auto temporary = node.get<ast::Materialize>();
+    if (throwing_destructor(temporary.destructor)) return node;
+    return unparenthesized(at(node, temporary.operand));
+  }
+
+  Point initialize_variant(ast::u32 slot, const ast::Red& initializer, Point next, Context context) {
+    constexpr std::string_view problem = "an owner variant must be constructed with a selection tag and a registered owner";
+    if (!initializer.is<ast::CtorCall>()) return unsupported(initializer.offset(), std::string(problem));
+    const auto call = initializer.get<ast::CtorCall>();
+    const auto& variant = *flow_.locals[slot].variant;
+    const auto* constructor = world_.entities.find(call.ctor);
+    if (!constructor || constructor->scope != world_.types.class_of(variant.type))
+      return unsupported(initializer.offset(), std::string(problem));
+    const auto method = world_.types.rec(constructor->type);
+    const auto args = initializer.ast().children(call.args);
+    if (method.kind != sema::TypeKind::function || !method.fn_noexcept || method.variadic ||
+        method.params.size() != 2 || args.size() != 2)
+      return unsupported(initializer.offset(), std::string(problem));
+    const auto side = variant_tag(world_, method.params[0]);
+    const auto selected = side == VariantSide::first ? variant.first : variant.second;
+    const auto parameter = world_.types.rec(method.params[1]);
+    if (side == VariantSide::none || parameter.kind != sema::TypeKind::reference || !parameter.rvalue_ref ||
+        world_.types.canonical(parameter.inner) != selected)
+      return unsupported(initializer.offset(), std::string(problem));
+    const auto tag = materialized_prvalue(at(initializer, args[0]));
+    if (!tag.is<ast::ValueInit>() &&
+        (!tag.is<ast::InitList>() || !tag.ast().children(tag.get<ast::InitList>().elems).empty()))
+      return unsupported(tag.offset(), "an owner variant selection tag must be an empty initializer");
+    return initialize_owner(slot, materialized_prvalue(at(initializer, args[1])), next, context, side);
+  }
+
+  Point initialize_owner(ast::u32 slot, ast::Red initializer, Point next, Context context,
+                         VariantSide alternative = VariantSide::none) {
     initializer = unparenthesized(initializer);
     if (initializer.is<ast::Conditional>()) {
       const auto expression = initializer.get<ast::Conditional>();
-      const auto then_ = initialize_owner(slot, at(initializer, expression.then_), next, context);
-      const auto else_ = initialize_owner(slot, at(initializer, expression.else_), next, context);
+      const auto then_ = initialize_owner(slot, at(initializer, expression.then_), next, context, alternative);
+      const auto else_ = initialize_owner(slot, at(initializer, expression.else_), next, context, alternative);
       return condition(initializer, expression.condition, then_, else_, context);
     }
     if (initializer.is<ast::OrderedBinary>()) {
       const auto expression = initializer.get<ast::OrderedBinary>();
       if (expression.op == ast::OrderedOp::comma) {
-        const auto value = initialize_owner(slot, at(initializer, expression.rhs), next, context);
+        const auto value = initialize_owner(slot, at(initializer, expression.rhs), next, context, alternative);
         return lower_child(initializer, expression.lhs, value, context);
       }
     }
+    if (alternative == VariantSide::none && flow_.locals[slot].variant)
+      return initialize_variant(slot, initializer, next, context);
+    const auto transfer = [&](ast::u32 source, VariantSide source_alternative = VariantSide::none) {
+      return add({.event = Event::transfer, .offset = initializer.offset(), .next = next, .local = slot,
+                  .source = source, .alternative = alternative, .source_alternative = source_alternative});
+    };
     if (initializer.is<ast::CtorCall>()) {
       if (const auto source = move_construction_source(initializer)) {
         const auto type = world_.types.canonical(initializer.get<ast::CtorCall>().info.type);
         if (!policy_.transfers_on_move(type))
           return unsupported(initializer.offset(), "direct owner move construction requires a move-transfer contract");
-        return add({Event::transfer, initializer.offset(), next, Flow::exit, slot, *source});
+        return transfer(*source);
       }
     }
+    if (const auto use = variant_member(initializer); use && use->operation == VariantOperation::take)
+      return transfer(use->slot, use->side);
     if (initializer.is<ast::Call>()) {
       const auto call = initializer.get<ast::Call>();
       const auto operation = direct_effect(initializer, call);
       if (operation == Effect::issue)
-        return add({Event::initialize, initializer.offset(), next, Flow::exit, slot});
+        return add({.event = Event::initialize, .offset = initializer.offset(), .next = next, .local = slot,
+                    .alternative = alternative});
       if (operation == Effect::transfer)
         if (const auto source = operation_argument(initializer, call); source && !flow_.locals[*source].shared_reference)
-          return add({Event::transfer, initializer.offset(), next, Flow::exit, slot, *source});
+          return transfer(*source);
     }
+    if (alternative != VariantSide::none)
+      if (const auto source = named_local(initializer); source && !flow_.locals[*source].shared_reference)
+        return transfer(*source);
     return unsupported(initializer.offset(), "an owner must be initialized by a registered factory or transfer from a named owner");
   }
 
@@ -806,17 +937,24 @@ class OwnershipFlowBuilder {
     const auto var = node.get<ast::LocalVar>();
     auto& local = flow_.locals[var.local];
     if (local.shared_reference) {
-      if (var.init.id != ast::NodeId::none)
-        if (const auto owner = named_local(at(node, var.init), false); owner &&
+      if (var.init.id != ast::NodeId::none) {
+        const auto init = unparenthesized(at(node, var.init));
+        if (const auto use = variant_member(init); use && use->operation == VariantOperation::access) {
+          local.borrow = Flow::Borrow{use->slot, node.offset()};
+          return add({.event = Event::borrow, .offset = node.offset(), .next = next, .local = var.local,
+                      .source = use->slot, .source_alternative = use->side});
+        }
+        if (const auto owner = named_local(init, false); owner &&
             flow_.locals[*owner].ownership != Ownership::ordinary) {
           local.borrow = Flow::Borrow{*owner, node.offset()};
           return add({Event::borrow, node.offset(), next, Flow::exit, var.local, *owner});
         }
+      }
       return unsupported(node.offset(), "a shared borrow must bind directly to a named owner");
     }
     if (const auto it = field_slots_.find(var.local); it != field_slots_.end())
       return initialize_fields(node, var.init, it->second, next, context);
-    if (local.ownership != Ownership::ordinary) {
+    if (local.ownership != Ownership::ordinary || local.variant) {
       if (var.init.id != ast::NodeId::none) return initialize_owner(var.local, at(node, var.init), next, context);
       return unsupported(node.offset(), "an owner must be initialized by a registered factory or transfer from a named owner");
     }
@@ -903,6 +1041,8 @@ class OwnershipFlowBuilder {
     }
     if (const auto local = named_local(node); local && !flow_.locals[*local].shared_reference)
       return add({Event::observe, node.offset(), next, Flow::exit, *local});
+    if (const auto use = variant_test(node))
+      return add({.event = Event::variant_test, .offset = node.offset(), .next = next, .local = use->slot});
     if (node.is<ast::Paren>()) return lower_child(node, node.get<ast::Paren>().operand, next, context);
     if (node.is<ast::Goto>() || node.is<ast::Label>() || node.is<ast::Switch>() || node.is<ast::TryBlock>() ||
         node.is<ast::IfConsteval>()) return unsupported(node.offset(), "this control flow is outside the ownership prototype");
@@ -1003,15 +1143,25 @@ class OwnershipAnalysis {
       State state = *paths[point];
       if (auto problem = apply(step, state)) return {std::move(problem), {}};
       if (step.observer != EntityId::none) observers.insert(step.observer);
-      propagate(step.next, state);
-      if (step.event == Event::branch) propagate(step.other, state);
+      if (step.event == Event::branch && step.alternative != VariantSide::none) {
+        auto& selected = state[step.local];
+        const auto previous = selected.possible;
+        const auto active = live_state(step.alternative);
+        selected.possible &= active;
+        if (selected.possible != 0) propagate(step.next, state);
+        selected.possible = static_cast<Bits>(previous & ~active);
+        if (selected.possible != 0) propagate(step.other, state);
+      } else {
+        propagate(step.next, state);
+        if (step.event == Event::branch) propagate(step.other, state);
+      }
     }
     return {std::nullopt, {observers.begin(), observers.end()}};
   }
 
  private:
   using Bits = std::uint8_t;
-  static constexpr Bits absent = 1, live = 2, spent = 4;
+  static constexpr Bits absent = 1, live = 2, spent = 4, first = 8, second = 16;
   struct Slot {
     Bits possible;
     std::optional<ast::u32> spent_at{};
@@ -1019,18 +1169,38 @@ class OwnershipAnalysis {
   };
   using State = std::vector<Slot>;
 
+  static Bits live_state(VariantSide side) {
+    switch (side) {
+    case VariantSide::first: return first;
+    case VariantSide::second: return second;
+    case VariantSide::none: return live;
+    }
+    return live;
+  }
+
+  static bool live_linear(const Flow::Local& local, const Slot& slot) {
+    if (const auto& variant = local.variant)
+      return (variant->first_ownership == Ownership::linear && (slot.possible & first)) ||
+             (variant->second_ownership == Ownership::linear && (slot.possible & second));
+    return local.ownership == Ownership::linear && (slot.possible & live);
+  }
+
   std::string description(ast::u32 local) const {
     const auto& owner = flow_.locals[local];
     const auto name = in_.names.spelling(owner.name);
-    const auto kind = owner.shared_reference ? "shared borrow" :
+    const auto kind = owner.variant ? "owner variant" : owner.shared_reference ? "shared borrow" :
                       owner.ownership == Ownership::linear ? "linear resource" : "affine resource";
     if (!owner.field.empty())
       return std::format("{} '{}{}{}'", kind, name, owner.field.starts_with('[') ? "" : ".", owner.field);
     return std::format("{} '{}'", kind, name.empty() ? "<unnamed>" : name);
   }
 
-  std::optional<OwnershipFinding> require_live(const Flow::Step& step, ast::u32 local, const Slot& slot) const {
-    if (slot.possible == live) return std::nullopt;
+  std::optional<OwnershipFinding> require_live(const Flow::Step& step, ast::u32 local, const Slot& slot,
+                                               VariantSide side = VariantSide::none) const {
+    if (slot.possible == live_state(side)) return std::nullopt;
+    if (side != VariantSide::none)
+      return OwnershipFinding{step.offset, std::format("{} may not hold its {} alternative",
+                              description(local), side == VariantSide::first ? "first" : "second")};
     if (slot.spent_at) {
       const auto end = slot.transferred ? " may already have transferred its obligation" : " may already have been consumed";
       return OwnershipFinding{step.offset, description(local) + end, slot.spent_at,
@@ -1041,7 +1211,7 @@ class OwnershipAnalysis {
 
   std::optional<OwnershipFinding> may_unwind(ast::u32 offset, const State& state) const {
     for (ast::u32 i = 0; i < state.size(); ++i)
-      if (flow_.locals[i].ownership == Ownership::linear && (state[i].possible & live))
+      if (live_linear(flow_.locals[i], state[i]))
         return OwnershipFinding{offset, "operation may unwind while " + description(i) + " is live"};
     return std::nullopt;
   }
@@ -1058,33 +1228,38 @@ class OwnershipAnalysis {
 
   std::optional<OwnershipFinding> apply(const Flow::Step& step, State& state) const {
     if (step.event == Event::unsupported) return OwnershipFinding{step.offset, step.problem};
+    if (step.event == Event::variant_test || (step.event == Event::branch && step.alternative != VariantSide::none)) {
+      if (state[step.local].possible & absent)
+        return OwnershipFinding{step.offset, description(step.local) + " may be unavailable"};
+      return std::nullopt;
+    }
     if (step.event == Event::branch) return std::nullopt;
     if (step.event == Event::may_unwind) return may_unwind(step.offset, state);
     auto& slot = state[step.local];
     switch (step.event) {
     case Event::borrow:
-      if (auto problem = require_live(step, step.source, state[step.source])) return problem;
+      if (auto problem = require_live(step, step.source, state[step.source], step.source_alternative)) return problem;
       slot = {live};
       break;
-    case Event::observe: return require_live(step, step.local, slot);
+    case Event::observe: return require_live(step, step.local, slot, step.alternative);
     case Event::consume:
       if (auto problem = require_live(step, step.local, slot)) return problem;
       if (auto problem = require_unborrowed(step, step.local, state)) return problem;
       slot = {spent, step.offset};
       break;
     case Event::transfer:
-      if (auto problem = require_live(step, step.source, state[step.source])) return problem;
+      if (auto problem = require_live(step, step.source, state[step.source], step.source_alternative)) return problem;
       if (auto problem = require_unborrowed(step, step.source, state)) return problem;
       state[step.source] = {spent, step.offset, true};
       [[fallthrough]];
     case Event::initialize:
-      if (flow_.locals[step.local].ownership == Ownership::linear && (slot.possible & live))
+      if (live_linear(flow_.locals[step.local], slot))
         return OwnershipFinding{step.offset, "initialization would overwrite live " + description(step.local)};
-      slot = {live};
+      slot = {live_state(step.alternative)};
       break;
     case Event::leave:
       if (auto problem = require_unborrowed(step, step.local, state)) return problem;
-      if (flow_.locals[step.local].ownership == Ownership::linear && (slot.possible & live))
+      if (live_linear(flow_.locals[step.local], slot))
         return OwnershipFinding{step.offset, description(step.local) + " may leave its scope without being consumed or transferred"};
       if (step.throwing_destructor && (slot.possible & live))
         if (auto problem = may_unwind(step.offset, state)) return problem;
@@ -1224,6 +1399,10 @@ struct OwnershipRecordsFor {
       const auto id = types.class_of(type);
       if (affected.insert(id).second) pending.push_back(id);
     }
+    for (const auto& variant : registry.ownership.variants) {
+      const auto id = types.class_of(variant.type);
+      if (affected.insert(id).second) pending.push_back(id);
+    }
     while (!pending.empty()) {
       const auto owner = pending.back();
       pending.pop_back();
@@ -1233,6 +1412,7 @@ struct OwnershipRecordsFor {
           if (affected.insert(parent).second) pending.push_back(parent);
     }
     for (const auto& [type, mode] : registry.ownership.resources) affected.erase(types.class_of(type));
+    for (const auto& variant : registry.ownership.variants) affected.erase(types.class_of(variant.type));
 
     std::ranges::sort(result.nonthrowing_destructors);
     auto& records = result.records;
@@ -1258,7 +1438,7 @@ struct OwnershipRecordsFor {
           type = types.canonical(base.inner);
           base = types.rec(type);
         }
-        if (registry.ownership.ownership(type) != Ownership::ordinary) {
+        if (registry.ownership.ownership(type) != Ownership::ordinary || registry.ownership.variant(type)) {
           if (ast::cv_of(type) != ast::Cv::none) return false;
           continue;
         }
