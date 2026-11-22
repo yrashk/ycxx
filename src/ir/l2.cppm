@@ -190,6 +190,8 @@ export enum class Op : std::uint16_t {
   // The fixed AMD64 hosted call. It feeds the successor parameters directly, with the
   // normal result on edge 0 and the original unwind header and selector on edge 1.
   invoke [[=control({S, V}, 2).imms({entity, u32, u32, u32})]],
+  // A void direct call, with one cleanup destination and no handler action.
+  invoke_cleanup [[=control({S}, 2).imms({entity, u32, u32, u32})]],
 };
 
 export constexpr std::size_t op_count = std::meta::enumerators_of(^^Op).size();
@@ -504,9 +506,11 @@ std::expected<void, std::string> verify(const Function& f) {
           if (t(0) != Type::i1) return at("the condition must be i1");
           break;
         case Op::invoke:
-          if (invoke || t(1) != Type::i32 || f.imms_of(n)[1] > 1 || f.imms_of(n)[2] || f.imms_of(n)[3] ||
+        case Op::invoke_cleanup:
+          if (invoke || (nd.op == Op::invoke && t(1) != Type::i32) ||
+              f.imms_of(n)[1] > (nd.op == Op::invoke ? 1u : 0u) || f.imms_of(n)[2] || f.imms_of(n)[3] ||
               f.succs_of(n)[0].target == f.succs_of(n)[1].target)
-            return at("expected one fixed i32 invoke with distinct destinations");
+            return at("expected one supported hosted invoke with distinct destinations");
           invoke = n;
           break;
         case Op::ret: {
@@ -521,10 +525,11 @@ std::expected<void, std::string> verify(const Function& f) {
         const ir::Succ& e = f.succs_of(n)[i];
         if (raw(e.target) == 0 || raw(e.target) >= f.blocks.size()) return at("bad successor");
         auto params = f.params_of(e.target);
-        if (nd.op == Op::invoke) {
+        if (nd.op == Op::invoke || nd.op == Op::invoke_cleanup) {
           const Type normal[]{Type::state, Type::i32};
           const Type landing[]{Type::state, Type::ptr, Type::i64};
-          const auto expected = i == 0 ? std::span<const Type>(normal) : std::span<const Type>(landing);
+          const auto expected = i == 0 ? std::span<const Type>(normal).first(nd.op == Op::invoke ? 2 : 1)
+                                       : std::span<const Type>(landing);
           if (e.nargs != 0 || !std::ranges::equal(params, expected, {}, [&](ValueId p) { return f.type(p); }))
             return at("invoke destination has the wrong implicit parameters");
           continue;

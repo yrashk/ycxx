@@ -672,10 +672,15 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
   freestanding linker retains these records in the read-only segment. The hosted linker
   supplies unwind discovery for the peer who throws and catches the exception.
   `unit.linux_cleanup_free_unwind` checks mixed hosted execution, omitted frames, and native
-  source, staged, and daemon link parity. Standalone unwind discovery, native handlers, and
-  exceptional cleanups remain under #89.
+  source, staged, and daemon link parity. Standalone unwind discovery and broader handler and
+  exceptional-cleanup support remain under #89.
   [#572](https://github.com/yrashk/ycxx/issues/572) · [#89](https://github.com/yrashk/ycxx/issues/89)
   · [#558](https://github.com/yrashk/ycxx/issues/558)
+- A host-linked ordinary void function can destroy one initialized aggregate local with a
+  nonthrowing destructor when its subsequent direct external `void()` call throws. The normal
+  continuation destroys it once as well. The cleanup-only landing pad resumes the original
+  exception; the mixed-object test checks both paths and the peer's typed handler.
+  [Design](docs/design/linux-hosted-catch-all.md#hosted-local-cleanup-663) · [#663](https://github.com/yrashk/ycxx/issues/663)
 - Explicit native static links keep the first input ELF COMDAT group for each signature. The reader
   validates group membership, including relocation sections, and selection precedes startup and
   layout. `unit.linux_elf_comdat` checks whole-group selection, retained references, startup and

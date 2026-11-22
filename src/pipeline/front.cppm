@@ -199,7 +199,11 @@ struct Runtime {
     const QualType p = vp(), v = world.types.builtin(sema::Builtin::void_);
     return {declared("__cxa_begin_catch", world.types.function(p, std::span(&p, 1), false, lang), true),
             declared("__cxa_end_catch", world.types.function(v, {}, false, lang), true),
-            declared("_Unwind_Resume", world.types.function(v, std::span(&p, 1), false, lang), true)};
+            resume()};
+  }
+  EntityId resume() {
+    const QualType p = vp(), v = world.types.builtin(sema::Builtin::void_);
+    return declared("_Unwind_Resume", world.types.function(v, std::span(&p, 1), false, ast::LangLinkage::c), true);
   }
 };
 
@@ -344,7 +348,7 @@ using UnwindNodes = ast::closed_list<
     ast::Binary, ast::OrderedBinary, ast::Assign, ast::Conditional, ast::Subscript, ast::Call,
     ast::NewArray, ast::DeleteArray, ast::ImplicitConversion, ast::InitList, ast::ValueInit, ast::DefaultInit, ast::Throw>;
 
-bool unwind_body_node(parse::Program& program, ast::NodeId node, bool& has_throw) {
+bool unwind_body_node(parse::Program& program, ast::NodeId node, bool& has_throw, bool initializer = false) {
   if (node == ast::NodeId::none) return true;
   auto& world = program.world();
   const auto& tree = world.ins.ast;
@@ -352,6 +356,9 @@ bool unwind_body_node(parse::Program& program, ast::NodeId node, bool& has_throw
     if constexpr (!UnwindNodes::contains<T>) {
       return false;
     } else {
+      if constexpr (std::is_same_v<T, ast::Call> || std::is_same_v<T, ast::NewArray> ||
+                    std::is_same_v<T, ast::DeleteArray> || std::is_same_v<T, ast::Throw>)
+        if (initializer) return false;
       const T n = tree.get<T>(node);
       if constexpr (std::is_same_v<T, ast::DeclRef>) {
         if (n.reference || (!unwind_scalar(world.types, n.info.type) &&
@@ -387,9 +394,9 @@ bool unwind_body_node(parse::Program& program, ast::NodeId node, bool& has_throw
       }
       bool safe = true;
       ast::for_each_ref(n, [&]<class H>(const H& h) {
-        if constexpr (std::is_same_v<H, ast::NodeId>) safe = safe && unwind_body_node(program, h, has_throw);
+        if constexpr (std::is_same_v<H, ast::NodeId>) safe = safe && unwind_body_node(program, h, has_throw, initializer);
         else if constexpr (std::is_same_v<H, ast::ChildList>)
-          for (ast::Child c : tree.children(h)) safe = safe && unwind_body_node(program, c.id, has_throw);
+          for (ast::Child c : tree.children(h)) safe = safe && unwind_body_node(program, c.id, has_throw, initializer);
       });
       return safe;
     }
@@ -413,6 +420,49 @@ UnwindEligibility cleanup_free_definition(parse::Program& program, const ast::De
   bool has_throw = false;
   if (!unwind_body_node(program, body.tree, has_throw)) return none;
   return has_throw ? cleanup_free_with_throw : cleanup_free;
+}
+
+// One aggregate local followed by an external void call. The initializer has no calls,
+// throwing operations, class temporaries, or partially constructed class subobjects.
+ast::NodeId hosted_cleanup_call(parse::Program& program, const ast::DeclSema& d, const ast::BodySema& body) {
+  auto& world = program.world();
+  const auto& tree = world.ins.ast;
+  const auto& definition = world.entities.rec(d.entity);
+  const auto fn = world.types.rec(d.type);
+  if (definition.kind != sema::EntityKind::function || definition.templ != EntityId::none ||
+      !program.is_namespace(definition.scope) || definition.linkage != ast::Linkage::external ||
+      !unwind_scalar_prototype(world.types, d.type) || fn.fn_noexcept ||
+      !world.types.is(fn.inner, sema::Builtin::void_) || d.contracts != ast::NodeId::none ||
+      (d.flags & (sema::decl_flag::constexpr_ | sema::decl_flag::consteval_)) ||
+      world.ins.seqs.size(body.closures) != 0 || body.tree == ast::NodeId::none ||
+      !tree.is<ast::Compound>(body.tree)) return ast::NodeId::none;
+  const auto statements = tree.children(tree.get<ast::Compound>(body.tree).stmts);
+  if (statements.size() != 2 || !tree.is<ast::DeclStmt>(statements[0].id) || !tree.is<ast::ExprStmt>(statements[1].id))
+    return ast::NodeId::none;
+  const auto declarations = tree.children(tree.get<ast::DeclStmt>(statements[0].id).decls);
+  if (declarations.size() != 1 || !tree.is<ast::LocalVar>(declarations.front().id)) return ast::NodeId::none;
+  const auto local = tree.get<ast::LocalVar>(declarations.front().id);
+  const auto type = world.ins.seqs.at(body.locals, local.local).type;
+  if (local.destructor == EntityId::none || !world.types.is_class(type) || local.init.id == ast::NodeId::none ||
+      !tree.is<ast::InitList>(local.init.id)) return ast::NodeId::none;
+  const auto& record = program.classes().rec(world.types.class_of(type));
+  if (!record.destructor_noexcept.value_or(false) || record.virtual_destructor) return ast::NodeId::none;
+  bool has_throw = false;
+  for (auto element : tree.children(tree.get<ast::InitList>(local.init.id).elems))
+    if (!unwind_body_node(program, element.id, has_throw, true)) return ast::NodeId::none;
+  const auto call_at = tree.get<ast::ExprStmt>(statements[1].id).expr.id;
+  if (call_at == ast::NodeId::none || !tree.is<ast::Call>(call_at)) return ast::NodeId::none;
+  const auto call = tree.get<ast::Call>(call_at);
+  if (call.function == EntityId::none || call.callee.id == ast::NodeId::none ||
+      !tree.is<ast::DeclRef>(call.callee.id) || !tree.children(call.args).empty()) return ast::NodeId::none;
+  const auto& entity = world.entities.rec(call.function);
+  const auto callee = tree.get<ast::DeclRef>(call.callee.id);
+  const auto prototype = world.types.rec(callee.info.type);
+  if (callee.reference || callee.entity != call.function || entity.kind != sema::EntityKind::function ||
+      entity.templ != EntityId::none || !program.is_namespace(entity.scope) || entity.linkage != ast::Linkage::external ||
+      !unwind_scalar_prototype(world.types, callee.info.type) || prototype.fn_noexcept ||
+      !world.types.is(prototype.inner, sema::Builtin::void_) || !prototype.params.empty()) return ast::NodeId::none;
+  return call_at;
 }
 
 // Prove the whole handler occurrence while it still has C++ types and lifetime information.
@@ -731,6 +781,10 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
         f.catch_all_callee = hosted_catch_all_callee(program, d, body);
         f.unwind = f.catch_all_callee == EntityId::none ? cleanup_free_definition(program, d, body)
                                                        : UnwindEligibility::hosted_catch_all;
+        if (f.unwind == UnwindEligibility::none) {
+          f.cleanup_call = hosted_cleanup_call(program, d, body);
+          if (f.cleanup_call != ast::NodeId::none) f.unwind = UnwindEligibility::hosted_cleanup;
+        }
       }
       closures_of(body.closures, program.id(k), it.body_begin - it.begin);
       continue;
@@ -836,6 +890,12 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
           noexcept_declarations.contains(callee) || !program.asm_label(callee).empty())
         f.unwind = UnwindEligibility::none;
       else if (!tu.catch_all) tu.catch_all = runtime.catch_all();
+    } else if (f.unwind == UnwindEligibility::hosted_cleanup) {
+      const EntityId callee = ins.ast.get<ast::Call>(f.cleanup_call).function;
+      if (program.function_defined_before(callee, program.end()) ||
+          noexcept_declarations.contains(callee) || !program.asm_label(callee).empty())
+        f.unwind = UnwindEligibility::none;
+      else if (tu.cleanup_resume == EntityId::none) tu.cleanup_resume = runtime.resume();
     }
   }
   // Written declarations have already supplied their locations and definitions. For the
