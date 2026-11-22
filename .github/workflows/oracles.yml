@@ -1,13 +1,15 @@
 name: oracles
 
 # The oracle check of the draft suite (tests/draft/README.md, #6): Clang 23 and GCC 16 as the
-# compilers under test. Runs only when the suite, its extractor or the driver changes. macOS only:
-# the recorded verdicts (tests/draft/oracles.tsv) come from Clang with libc++, and Clang on Linux
-# uses libstdc++, so its header-dependent verdicts differ.
+# compilers under test. Runs only when the suite, its extractor or the driver changes.
 #   1. tools/draft-examples --oracles must reproduce tests/draft exactly: a diff is a changed
-#      compiler or a nondeterministic extractor.
-#   2. tools/test --cxx clang|gcc on the core stage (the draft and own suites; no ycxx build):
-#      an XPASS is a compiler that changed its mind; a FAIL is a test that is wrong.
+#      compiler or a nondeterministic extractor. macOS only: the recorded verdicts
+#      (tests/draft/oracles.tsv) come from Clang with libc++, and Clang on Linux uses libstdc++,
+#      so its header-dependent verdicts differ.
+#   2. tools/test --cxx clang|gcc on the core stage (no ycxx build): an XPASS is a compiler that
+#      changed its mind; a FAIL is a test that is wrong. The draft and own suites on macOS; the own
+#      suite on Linux too, where ycxx's default target is Linux's (#656). A test whose oracle
+#      answer differs by host says so with `XFAIL: gcc@darwin-arm64` or a `REQUIRES:` gate.
 
 on:
   pull_request:
@@ -69,5 +71,41 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: oracle-test-logs
+          path: build/test-logs/
+          if-no-files-found: ignore
+
+  oracles-linux:
+    name: linux-x86_64 oracles
+    runs-on: ubuntu-24.04
+    container: 'gcc:16'
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Trust the checkout in the Linux container
+        # actions/checkout sets safe.directory in its temporary HOME only.
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          git config --global --add safe.directory "$GITHUB_WORKSPACE/deps/libycxx"
+
+      - name: Toolchain (GCC 16, and Clang 23 as the oracle)
+        uses: ./.github/actions/setup
+        with:
+          oracle: 'true'
+
+      - name: Own suite with Clang 23 (tools/test --cxx clang core own)
+        run: tools/test --cxx clang --require-oracles -q core own
+
+      - name: Own suite with GCC 16 (tools/test --cxx gcc core own)
+        if: always()
+        run: tools/test --cxx gcc --require-oracles -q core own
+
+      - name: Test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: oracle-test-logs-linux
           path: build/test-logs/
           if-no-files-found: ignore

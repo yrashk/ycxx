@@ -122,6 +122,8 @@ or reject test with any warning marker must get warnings exactly at its warning 
 - `REQUIRES: syntax run darwin` — features of the compiler under test, or a platform.
 - `XFAIL: ycxx,gcc <reason>` (or `*`) — expected to fail with that compiler: reported XFAIL; a
   pass is XPASS, which fails the run, so the mark goes when the cause does.
+  `gcc@darwin-arm64` limits one compiler's expectation to a host (`darwin-arm64`,
+  `linux-x86_64`), for an oracle whose answer differs between them.
 - `FLAGS: -O2`, `TIMEOUT: 120` (seconds per command), `TIER: nightly`.
 - Run tests: `EXIT: 3` (default 0); `STDOUT: line` (repeatable), or a `<test>.stdout` file.
   `PEER: name.cpp` (repeatable): the oracle Clang compiles `name.cpp`, next to the test and not a
