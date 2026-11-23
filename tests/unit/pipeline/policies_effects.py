@@ -529,6 +529,36 @@ with tempfile.TemporaryDirectory() as directory:
             assert f"cannot export a {description}" in text and "effect tag" in text, text
             assert not obj.exists()
 
+        # Change the tag's linkage while preserving the header's size and timestamp.
+        named_tag = "namespace site { struct Tag {}; }\nusing Audit = site::Tag;\n"
+        local_tag = "namespace      { struct Tag {}; }\nusing Audit =       Tag;\n"
+        tag_header = write("edited_tag.hpp", named_tag)
+        editable = write("edited_tag.cpp", '#include "edited_tag.hpp"\n' + effect_header + grade + effect_roles)
+        obj = root / f"edited-tag-{suffix}.o"
+        command = ["-c", editable, "-o", obj]
+        resident = ["--daemon=require" if option == "--no-daemon" else option for option in target]
+        with tempfile.TemporaryDirectory(prefix="yef-tag-", dir="/tmp") as sockets:
+            cache_env = dict(env, YCXX_RUNTIME_DIR=sockets)
+            try:
+                invoke([*resident, *command], env=cache_env)
+                original = obj.read_bytes()
+                assert b"__ycxx_policy.3.effect.have." in original
+                stamp = tag_header.stat()
+                write(tag_header.name, local_tag)
+                os.utime(tag_header, ns=(stamp.st_atime_ns, stamp.st_mtime_ns))
+                edited = tag_header.stat()
+                assert (edited.st_size, edited.st_mtime_ns) == (stamp.st_size, stamp.st_mtime_ns)
+                obj.unlink()
+                error = "has no stable cross-object identity"
+                assert invoke([*resident, *command], error, cache_env) == invoke([*target, *command], error)
+                assert not obj.exists()
+                write(tag_header.name, named_tag)
+                os.utime(tag_header, ns=(stamp.st_atime_ns, stamp.st_mtime_ns))
+                invoke([*resident, *command], env=cache_env)
+                assert obj.read_bytes() == original
+            finally:
+                subprocess.run([compiler, "ctl", "shutdown"], cwd=root, env=cache_env, capture_output=True, timeout=10)
+
     darwin = [*base, "--no-daemon", "--target=arm64-apple-darwin"]
     verify_effect_tag_exports(darwin, "darwin", sys.platform == "darwin" and platform.machine() in ("arm64", "aarch64"))
     verify_effect_tag_exports([*base, "--no-daemon", "--target=x86_64-linux-gnu", "-nostdlib"], "linux",
