@@ -770,6 +770,30 @@ class Mangler {
     return expression + "adL_Z" + *name + "EE";
   }
 
+  bool object_pointer_type_matches(ast::QualType pointee, ast::QualType object) const {
+    pointee = in_.canonical(pointee);
+    object = in_.canonical(object);
+    if (ast::without_cv(pointee) == ast::without_cv(object)) return true;
+
+    // [conv.ptr]: erasing an object pointer to cv void preserves the address and can add cv.
+    if (ast::is_void(in_, pointee)) {
+      if (ast::is_reference(in_, object) || ast::is_function(in_, object)) return false;
+      // The canonical array type represents its cv-qualifiers on the elements.
+      while (in_.types.is<ast::TArray>(object))
+        object = in_.types.get<ast::TArray>(object).elem;
+      const auto object_cv = std::to_underlying(ast::cv_of(object));
+      const auto pointee_cv = std::to_underlying(ast::cv_of(pointee));
+      return (pointee_cv & object_cv) == object_cv;
+    }
+
+    // [basic.link]: the named object's first declaration can lack the bound seen by the argument.
+    if (!in_.types.is<ast::TArray>(object) || !in_.types.is<ast::TArray>(pointee)) return false;
+    const auto declared = in_.types.get<ast::TArray>(object);
+    const auto addressed = in_.types.get<ast::TArray>(pointee);
+    return declared.bound == ast::ConstId::none && in_.values.is<ast::VInt>(addressed.bound) &&
+           declared.elem == addressed.elem;
+  }
+
   std::expected<std::string, std::string> object_pointer_argument(const ast::TemplateArg& arg) {
     const auto address = in_.values.get<ast::VLvalue>(arg.value);
     if (address.offset || in_.seqs.size(address.path) || !in_.values.is<ast::VEntity>(address.base))
@@ -777,7 +801,7 @@ class Mangler {
     const auto entity = in_.values.get<ast::VEntity>(address.base).entity;
     const auto target = objects_ ? objects_(entity) : std::nullopt;
     if (!target) return std::unexpected("an object pointer argument without a supported object name");
-    if (ast::without_cv(in_.canonical(ast::pointee_of(in_, arg.type))) != ast::without_cv(in_.canonical(target->type)))
+    if (!object_pointer_type_matches(ast::pointee_of(in_, arg.type), target->type))
       return std::unexpected("an object pointer argument with a different pointee type");
     // Itanium §5.1.6.2: the address-of an entity literal. The name's prefix participates in the
     // enclosing symbol's substitution table, and qualification conversions keep the same value.
