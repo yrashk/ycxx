@@ -629,6 +629,9 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
       other items only as the group asks. `unit_of` makes each group's `UnitPart`, and
       `finish_unit` the decisions that need every group (init functions, `inline`, noexcept and
       hidden declarations anywhere, unwind checks). A unit that says `virtual` keeps one Program.
+    - The unit combines layout uncertainty from all groups before the native ABI checks class
+      shapes and chooses base-object constructor and destructor variants.
+      [#992](https://github.com/yrashk/ycxx/issues/992)
     - A Program answers the same whichever items ran first (§A1): `ensure_declared` analyses the
       earlier items that can declare an entity before a side table is read, `settle` completes a
       class reached lazily, and `may_have_virtual_layouts` is a fact of the tokens.

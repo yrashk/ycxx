@@ -429,7 +429,8 @@ public:
   };
   std::optional<DerivedVirtualDestructor> derived_virtual_destructor_ownership(EntityId cls) const;
   // Whether an ordinary written definition can also supply its ELF base-object entry point (#136).
-  bool supports_base_object_variant(EntityId function, const std::set<EntityId>& uncertain_layouts) const;
+  bool supports_base_object_variant(EntityId function, const std::set<EntityId>& uncertain_layouts,
+                                    std::vector<EntityId>* layout_inputs = nullptr) const;
 
   // The parsed class-key of a defining item ([class.union]).
   bool class_rec_is_union(u32 item) const {
@@ -8079,19 +8080,25 @@ bool Program::peer_root_destructor_observer(EntityId function, EntityId cls) con
   });
 }
 
-bool Program::supports_base_object_variant(EntityId function, const std::set<EntityId>& uncertain_layouts) const {
+bool Program::supports_base_object_variant(EntityId function, const std::set<EntityId>& uncertain_layouts,
+                                            std::vector<EntityId>* layout_inputs) const {
   using sema::EntityKind;
+  const auto layout_known = [&](EntityId e) {
+    if (uncertain_layouts.contains(e)) return false;
+    if (layout_inputs) layout_inputs->push_back(e);
+    return true;
+  };
   const auto& fn = w_->entities.rec(function);
   if ((fn.kind != EntityKind::constructor && fn.kind != EntityKind::destructor) ||
       fn.linkage != ast::Linkage::external || fn.lang != ast::LangLinkage::cxx || fn.templ != EntityId::none ||
-      r_->first_visibility_pragma || uncertain_layouts.contains(function) || !asm_label(function).empty()) return false;
+      r_->first_visibility_pragma || !layout_known(function) || !asm_label(function).empty()) return false;
   const auto* record = classes_.find(fn.scope);
   if (!record || !record->defined || record->union_ || !record->bases.empty() || record->polymorphic ||
       record->layout_requires_virtual_support || record->unapplied_layout ||
       !std::ranges::all_of(record->fields, [&](const sema::FieldRec& field) {
         const auto type = w_->types.rec(field.type);
         return field.bit_width == 0 && !field.no_unique_address && w_->types.is_scalar(field.type) &&
-               (type.kind != sema::TypeKind::enum_ || !uncertain_layouts.contains(type.entity));
+               (type.kind != sema::TypeKind::enum_ || layout_known(type.entity));
       })) return false;
 
   // Check every declaration, including class introductions and unannotated definitions reached
@@ -8117,7 +8124,7 @@ bool Program::supports_base_object_variant(EntityId function, const std::set<Ent
       const auto& owner = w_->entities.rec(scope);
       if ((owner.kind != EntityKind::class_ && owner.kind != EntityKind::enum_) ||
           owner.linkage != ast::Linkage::external || owner.templ != EntityId::none ||
-          uncertain_layouts.contains(scope) ||
+          !layout_known(scope) ||
           w_->ins.names.spelling(owner.name).empty() || !plain_declarations(scope, sema::decl_flag::template_)) return false;
       scope = owner.scope;
     }
