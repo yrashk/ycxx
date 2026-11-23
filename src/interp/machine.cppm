@@ -49,7 +49,7 @@ struct EnumLayout {
   std::optional<EnumRange> range;  // present for a non-fixed enumeration
 };
 
-// The addressed fields of a flat record whose fields each occupy one scalar cell.
+// The addressed fields of a flat record, in declaration order.
 struct ConstantRecordField {
   QualType type;
   u64 offset;
@@ -67,7 +67,7 @@ struct Config {
   u32 depth_limit = 512;          // nested calls ([implimits]: recursive constexpr calls)
   u32 poll_interval = 4096;       // steps between cancellation polls; 0: never
   std::function<std::optional<EnumLayout>(EntityId)> enum_layout{};
-  std::function<std::optional<ConstantRecordLayout>(QualType)> temporary_record_layout{};
+  std::function<std::optional<ConstantRecordLayout>(QualType)> record_layout{};
 };
 
 // An integer or enumeration is held normalized to its representation type: sign-extended from
@@ -120,7 +120,7 @@ struct Failure {
 // A result, described without the machine's object numbers.
 enum class Base : u8 { global, literal, local };
 struct Result {
-  enum class Kind : u8 { integer, null, address, function, floating };
+  enum class Kind : u8 { integer, null, address, function, floating, aggregate };
   Kind kind = Kind::integer;
   QualType type{};
   u64 bits = 0;              // integer, normalized to `type`; floating, its encoding
@@ -130,6 +130,7 @@ struct Result {
   std::vector<PathStep> path;
   bool past = false;
   i64 offset = 0;            // address: in bytes from the start of the object
+  std::vector<Result> elements;  // aggregate: record fields or array elements in order
   bool operator==(const Result&) const = default;
 };
 
@@ -146,6 +147,7 @@ public:
   Machine(const Machine&) = delete;
 
   // Starts the evaluation of `entry`, named `name` in sites, with its parameters' values.
+  // If the class result address is omitted, the machine supplies storage and describes its value.
   void start(const ir::Function& entry, EntityId name, std::span<const Value> args);
   // Runs until the evaluation ends or needs something; `need_*` names it in `wanted()`.
   Event run();
@@ -175,6 +177,16 @@ private:
     Fill fill = Fill::indeterminate;
     Value v{};
   };
+  struct RecordStorage {
+    struct Field {
+      ConstantRecordField layout;
+      u32 cell;
+      u32 ncells;
+    };
+    u64 size;
+    u32 ncells;
+    std::vector<Field> fields;
+  };
   struct Object {
     QualType type{};
     Origin origin = Origin::automatic;
@@ -185,7 +197,8 @@ private:
     EntityId entity{};
     ConstId literal{};
     u32 cell0 = 0, ncells = 0;
-    const ConstantRecordLayout* record = nullptr;  // owned by a global or temporary layout entry
+    const RecordStorage* record = nullptr;  // owned by records_
+    Life empty_life = Life::before;         // a record with no scalar cells still has a lifetime
   };
   struct PathNode {
     u32 parent = 0;
@@ -242,13 +255,18 @@ private:
 
   // ------------------------------------------------------------ objects
 
-  const ConstantRecordLayout* temporary_record(QualType t);
-  u32 make_object(QualType t, Origin o, const ConstantRecordLayout* record = nullptr);
+  const RecordStorage* record_storage(QualType t, const ConstantRecordLayout* known = nullptr);
+  bool can_allocate(u64 ncells) const;
+  u32 make_object(QualType t, Origin o, const RecordStorage* record = nullptr);
+  void fill_zero(const Object& object);
   void fill_zero(QualType t, u32 cell);
   bool fill_constant(QualType t, u32 cell, ConstId value);
-  bool fill_record_constant(const Object& object, ConstId value);
+  bool fill_record_constant(Object& object, ConstId value);
   std::optional<Place> resolve(const Value& p, std::span<const u64> extra, bool& past);
   Flow locate(const Value& p, std::span<const u64> extra, QualType t, Use use, bool volatile_, Place& out);
+  void set_lifetime(const Place& p, Life life);
+  Flow read_cell(QualType type, u32 cell, Value& out);
+  Flow copy_record(const Place& dst, const Place& src);
   Flow note_access(const Place& p, bool write);
   Flow constant(ConstId c, QualType type, Value& out);
   std::optional<u32> literal_object(ConstId s);
@@ -258,6 +276,9 @@ private:
   u64 complete_size(const Object& object);
   i64 offset_of(const Value& p);
   bool may_overlap(const Value& a, const Value& b);
+  Result describe(const Value& v, QualType t);
+  Flow capture_element(QualType t, u32 cell, Result& result);
+  Flow capture_result(u32 object);
 
   // ------------------------------------------------------------ execution
 
@@ -304,7 +325,7 @@ private:
   std::map<u32, Callee> bodies_;
   std::map<u32, std::optional<GlobalVar>> global_info_;
   std::map<u32, u32> globals_;
-  std::map<u32, ConstantRecordLayout> temporary_records_;
+  std::map<u32, std::optional<RecordStorage>> records_;
   std::vector<Group> groups_;
 
   EntityId wanted_{};
@@ -315,6 +336,8 @@ private:
   u32 since_poll_ = 0;
   std::vector<Value> results_;
   std::vector<QualType> result_types_;
+  std::optional<u32> entry_result_;
+  std::optional<Result> record_result_;
 };
 
 }  // namespace ycxx::interp
@@ -429,28 +452,54 @@ u32 Machine::extend(u32 path, std::span<const u64> words) {
 
 // ------------------------------------------------------------------ objects
 
-const ConstantRecordLayout* Machine::temporary_record(QualType t) {
-  if (config_.mode != Mode::constant || !config_.temporary_record_layout) return nullptr;
+const Machine::RecordStorage* Machine::record_storage(QualType t, const ConstantRecordLayout* known) {
   const QualType type = in_->canonical(t);
+  if (!in_->types.is<ast::TClass>(type)) return nullptr;
   const u32 key = std::to_underlying(type);
-  if (auto it = temporary_records_.find(key); it != temporary_records_.end()) return &it->second;
-  auto layout = config_.temporary_record_layout(type);
-  if (!layout || layout->fields.empty() ||
-      !std::ranges::all_of(layout->fields, [&](const auto& field) { return shape(field.type).leaves == 1; }))
-    return nullptr;
-  return &temporary_records_.emplace(key, std::move(*layout)).first->second;
+  auto [it, inserted] = records_.try_emplace(key);
+  auto& storage = it->second;
+  if (storage) return &*storage;
+  std::optional<ConstantRecordLayout> layout;
+  if (!known && inserted && config_.record_layout) {
+    layout = config_.record_layout(type);
+    if (layout) known = &*layout;
+  }
+  if (!known) return nullptr;
+  RecordStorage record{known->size, 0, {}};
+  record.fields.reserve(known->fields.size());
+  for (const auto& field : known->fields) {
+    const u64 leaves = shape(field.type).leaves;
+    if (leaves == 0 || leaves > std::numeric_limits<u32>::max() - record.ncells) return nullptr;
+    record.fields.push_back({field, record.ncells, u32(leaves)});
+    record.ncells += u32(leaves);
+  }
+  storage = std::move(record);
+  return &*storage;
 }
 
-u32 Machine::make_object(QualType t, Origin o, const ConstantRecordLayout* record) {
+bool Machine::can_allocate(u64 ncells) const {
+  constexpr u64 max_cells = std::numeric_limits<u32>::max();
+  return ncells <= max_cells && cells_.size() <= max_cells - ncells;
+}
+
+u32 Machine::make_object(QualType t, Origin o, const RecordStorage* record) {
   Object ob;
   ob.type = in_->canonical(t);
   ob.origin = o;
   ob.cell0 = u32(cells_.size());
-  ob.ncells = u32(record ? record->fields.size() : shape(t).leaves);
+  ob.ncells = record ? record->ncells : u32(shape(t).leaves);
   ob.record = record;
   cells_.resize(cells_.size() + ob.ncells);
   objects_.push_back(ob);
   return u32(objects_.size() - 1);
+}
+
+void Machine::fill_zero(const Object& object) {
+  if (!object.record) {
+    fill_zero(object.type, object.cell0);
+    return;
+  }
+  for (const auto& field : object.record->fields) fill_zero(field.layout.type, object.cell0 + field.cell);
 }
 
 void Machine::fill_zero(QualType t, u32 cell) {
@@ -499,7 +548,7 @@ bool Machine::fill_constant(QualType t, u32 cell, ConstId value) {
   return true;
 }
 
-bool Machine::fill_record_constant(const Object& object, ConstId value) {
+bool Machine::fill_record_constant(Object& object, ConstId value) {
   const auto& values = in_->values;
   if (!values.is<ast::VAggregate>(value)) return false;
   const auto aggregate = values.get<ast::VAggregate>(value);
@@ -507,9 +556,8 @@ bool Machine::fill_record_constant(const Object& object, ConstId value) {
   const auto& fields = object.record->fields;
   if (!similar(object.type, aggregate.type) || elements.size() != fields.size()) return false;
   for (std::size_t i = 0; i < fields.size(); ++i)
-    if (shape(fields[i].type).leaves != 1 ||
-        !fill_constant(fields[i].type, object.cell0 + u32(i), elements[i]))
-      return false;
+    if (!fill_constant(fields[i].layout.type, object.cell0 + fields[i].cell, elements[i])) return false;
+  object.empty_life = Life::alive;
   return true;
 }
 
@@ -528,10 +576,10 @@ std::optional<Machine::Place> Machine::resolve(const Value& p, std::span<const u
       const auto index = path[i].index;
       if (index >= ob.record->fields.size()) return std::nullopt;
       const auto& field = ob.record->fields[index];
-      pl.type = field.type;
-      pl.cell0 += index;
-      pl.ncells = 1;
-      pl.mutable_field = field.mutable_;
+      pl.type = field.layout.type;
+      pl.cell0 += field.cell;
+      pl.ncells = field.ncells;
+      pl.mutable_field = field.layout.mutable_;
       continue;
     }
     const Shape& s = shape(pl.type);
@@ -567,6 +615,8 @@ Machine::Flow Machine::locate(const Value& p, std::span<const u64> extra, QualTy
   if (!accessible_as(pl->type, t)) return fail(Reason::access_type);
   out = *pl;
   if (use == Use::lifetime) return Flow::next;
+  if (pl->ncells == 0 && (ob.empty_life == Life::after || (use != Use::write && ob.empty_life == Life::before)))
+    return fail(Reason::outside_lifetime);
   for (u32 c = pl->cell0; c < pl->cell0 + pl->ncells; ++c) {
     Life life = cells_[c].life;
     if (life == Life::after || (use != Use::write && life == Life::before)) return fail(Reason::outside_lifetime);
@@ -574,13 +624,62 @@ Machine::Flow Machine::locate(const Value& p, std::span<const u64> extra, QualTy
   if (use == Use::write) {
     if (ob.read_only) return fail(Reason::modify_const);
     // The initializing store comes before `obj.begin`; a const object is not modified after it.
-    if (shape(pl->type).is_const && pl->ncells && cells_[pl->cell0].life == Life::alive)
+    const Life life = pl->ncells == 0 ? ob.empty_life : cells_[pl->cell0].life;
+    if (shape(pl->type).is_const && life == Life::alive)
       return fail(Reason::modify_const);
     if (config_.mode == Mode::constant && ob.outside) return fail(Reason::modify_outside);
   } else if (config_.mode == Mode::constant && (!ob.usable || (ob.outside && pl->mutable_field))) {
     return fail(Reason::not_usable);
   }
   return use == Use::callee_read ? Flow::next : note_access(*pl, use == Use::write);
+}
+
+void Machine::set_lifetime(const Place& p, Life life) {
+  if (p.ncells == 0) objects_[p.obj].empty_life = life;
+  for (u32 c = p.cell0; c < p.cell0 + p.ncells; ++c) cells_[c].life = life;
+}
+
+Machine::Flow Machine::read_cell(QualType type, u32 cell, Value& out) {
+  Cell& c = cells_[cell];
+  switch (c.fill) {
+  case Fill::constant:
+    // Decoding an address can allocate another object's cells or request its declaration.
+    if (Flow fl = constant(ConstId(u32(c.v.bits)), type, out); fl != Flow::next) return fl;
+    cells_[cell].fill = Fill::value;
+    cells_[cell].v = out;
+    break;
+  case Fill::indeterminate:
+    return fail(Reason::read_indeterminate);
+  case Fill::erroneous:
+    // P2795: the erroneous value, zero on every target ycxx has ([basic.indet]).
+    if (config_.mode == Mode::constant) return fail(Reason::read_erroneous);
+    out = shape(type).kind == Kind::pointer    ? Value::null()
+          : shape(type).kind == Kind::floating ? Value::floating(0)
+                                               : Value::integer(0);
+    break;
+  case Fill::value:
+    out = c.v;
+    break;
+  }
+  return Flow::next;
+}
+
+Machine::Flow Machine::copy_record(const Place& dst, const Place& src) {
+  const Object& source = objects_[src.obj];
+  if (config_.mode == Mode::constant && source.outside &&
+      std::ranges::any_of(source.record->fields, [](const auto& field) { return field.layout.mutable_; }))
+    return fail(Reason::not_usable);
+  // The source and destination identify complete records. Copy the scalar values and their
+  // pointer provenance. The destination's lifetime is controlled by its caller's obj.begin.
+  for (u32 i = 0; i < src.ncells; ++i) {
+    const Cell& from = cells_[src.cell0 + i];
+    if (from.fill == Fill::indeterminate) return fail(Reason::read_indeterminate);
+    if (from.fill == Fill::erroneous && config_.mode == Mode::constant) return fail(Reason::read_erroneous);
+    Cell& to = cells_[dst.cell0 + i];
+    to.fill = from.fill;
+    to.v = from.v;
+  }
+  return Flow::next;
 }
 
 // Records an access in the frame's open unsequenced groups, and reports a conflict with another
@@ -736,13 +835,13 @@ Machine::Flow Machine::global_object(EntityId e, u32& out) {
   if (!info->second) return fail(Reason::ill_formed);
   const GlobalVar& g = *info->second;
   const Shape s = shape(g.type);
-  const u64 leaves = g.record ? g.record->fields.size() : s.leaves;
-  constexpr u64 max_cells = std::numeric_limits<u32>::max();
-  if (leaves == 0 || leaves > max_cells || cells_.size() > max_cells - leaves ||
-      (g.record && (!g.usable || !g.value)) ||
+  const RecordStorage* record = g.record ? record_storage(g.type, &*g.record) : nullptr;
+  const u64 leaves = record ? record->ncells : s.leaves;
+  if (!can_allocate(leaves) || (leaves == 0 && !record) ||
+      (g.record && (!record || !g.usable || !g.value)) ||
       (!g.record && g.value && s.kind != Kind::array && leaves != 1))
     return fail(Reason::unsupported_constant);
-  u32 o = make_object(g.type, Origin::global, g.record ? &*g.record : nullptr);
+  u32 o = make_object(g.type, Origin::global, record);
   Object& ob = objects_[o];
   ob.entity = e;
   ob.outside = true;
@@ -756,7 +855,7 @@ Machine::Flow Machine::global_object(EntityId e, u32& out) {
   } else {
     for (u32 c = ob.cell0; c < ob.cell0 + ob.ncells; ++c) cells_[c].life = Life::alive;
     if (config_.mode == Mode::runtime || !g.usable)
-      fill_zero(g.type, ob.cell0);  // static storage is zero-initialized ([basic.start.static])
+      fill_zero(ob);  // static storage is zero-initialized ([basic.start.static])
   }
   globals_.emplace(std::to_underlying(e), o);
   out = o;
@@ -1046,8 +1145,8 @@ i64 Machine::offset_of(const Value& p) {
   for (PathStep st : steps_of(u32(p.bits))) {
     if (st.step == ir::Step::field) {
       const auto& field = object.record->fields[st.index];
-      off += i64(field.offset);
-      cur = field.type;
+      off += i64(field.layout.offset);
+      cur = field.layout.type;
       continue;
     }
     const Shape& s = shape(cur);
@@ -1154,48 +1253,106 @@ Machine::Flow Machine::enter(Frame& f, NodeId, const ir::Function* body, EntityI
 }
 
 void Machine::start(const ir::Function& entry, EntityId name, std::span<const Value> args) {
-  Frame fr{&entry, name, std::vector<Value>(entry.values.size()), 0};
-  if (entry.blocks.empty() || entry.block(ir::BlockId(0)).nparams != args.size() + 1) {
-    frames_.push_back(std::move(fr));
+  frames_.push_back({&entry, name, std::vector<Value>(entry.values.size()), 0});
+  if (entry.blocks.empty()) {
     fail(Reason::ill_formed);
     return;
   }
-  u32 i = 0;
-  for (ir::ValueId p : entry.params_of(ir::BlockId(0)))
-    if (i++ > 0) fr.regs[ir::raw(p)] = args[i - 2];
+  Frame& fr = frames_.back();
   fr.node = entry.block(ir::BlockId(0)).node0;
-  frames_.push_back(std::move(fr));
+  const auto params = entry.params_of(ir::BlockId(0));
+  const bool capture = entry.result_param && params.size() == args.size() + 2;
+  if ((!capture && params.size() != args.size() + 1) || entry.result_param >= params.size()) {
+    fail(Reason::ill_formed);
+    return;
+  }
+  if (capture) {
+    const Shape& result_address = shape(type_of(fr, params[entry.result_param]));
+    if (result_address.kind != Kind::pointer || result_address.is_nullptr) {
+      fail(Reason::ill_formed);
+      return;
+    }
+    const auto* record = record_storage(result_address.inner);
+    if (!record || !can_allocate(record->ncells)) {
+      fail(Reason::unsupported_constant);
+      return;
+    }
+    entry_result_ = make_object(result_address.inner, Origin::automatic, record);
+  }
+  for (u32 i = 1, arg = 0; i < params.size(); ++i) {
+    if (capture && i == entry.result_param) fr.regs[ir::raw(params[i])] = {VKind::object, false, *entry_result_, 0};
+    else fr.regs[ir::raw(params[i])] = args[arg++];
+  }
+}
+
+Result Machine::describe(const Value& v, QualType t) {
+  Result r;
+  r.type = t;
+  switch (v.kind) {
+  case VKind::none:
+  case VKind::integer: r.kind = Result::Kind::integer; r.bits = v.bits; break;
+  case VKind::floating: r.kind = Result::Kind::floating; r.bits = v.bits; break;
+  case VKind::null: r.kind = Result::Kind::null; break;
+  case VKind::function: r.kind = Result::Kind::function; r.entity = EntityId(v.ref); break;
+  case VKind::object: {
+    const Object& ob = objects_[v.ref];
+    r.kind = Result::Kind::address;
+    r.base = ob.origin == Origin::global ? Base::global : ob.origin == Origin::literal ? Base::literal : Base::local;
+    r.entity = ob.entity;
+    r.literal = ob.literal;
+    r.path = steps_of(u32(v.bits));
+    r.past = v.past;
+    r.offset = offset_of(v);
+    bool past = false;
+    if (!r.path.empty() && resolve(v, {}, past)) r.past = past;
+    break;
+  }
+  }
+  return r;
+}
+
+Machine::Flow Machine::capture_element(QualType t, u32 cell, Result& result) {
+  const Shape& s = shape(t);
+  if (s.kind != Kind::array) {
+    Value value;
+    if (Flow fl = read_cell(t, cell, value); fl != Flow::next) return fl;
+    result = describe(value, t);
+    return Flow::next;
+  }
+  result.kind = Result::Kind::aggregate;
+  result.type = t;
+  result.elements.resize(s.bound);
+  const u32 stride = u32(shape(s.inner).leaves);
+  for (Result& element : result.elements) {
+    if (Flow fl = capture_element(s.inner, cell, element); fl != Flow::next) return fl;
+    cell += stride;
+  }
+  return Flow::next;
+}
+
+Machine::Flow Machine::capture_result(u32 object) {
+  const Object& ob = objects_[object];
+  if (!ob.storage) return fail(Reason::storage_ended);
+  Result result;
+  result.kind = Result::Kind::aggregate;
+  result.type = ob.type;
+  const u32 cell = ob.cell0;
+  const auto& fields = ob.record->fields;
+  result.elements.resize(fields.size());
+  // The implicit caller's result lifetime begins after the entry initializes its storage.
+  set_lifetime({object, cell, ob.ncells, ob.type}, Life::alive);
+  for (std::size_t i = 0; i < fields.size(); ++i)
+    if (Flow fl = capture_element(fields[i].layout.type, cell + fields[i].cell, result.elements[i]); fl != Flow::next)
+      return fl;
+  record_result_ = std::move(result);
+  return Flow::next;
 }
 
 std::vector<Result> Machine::results() const {
+  if (record_result_) return {*record_result_};
+  Machine& m = *const_cast<Machine*>(this);
   std::vector<Result> out;
-  for (std::size_t i = 0; i < results_.size(); ++i) {
-    const Value& v = results_[i];
-    Result r;
-    r.type = result_types_[i];
-    switch (v.kind) {
-    case VKind::none:
-    case VKind::integer: r.kind = Result::Kind::integer; r.bits = v.bits; break;
-    case VKind::floating: r.kind = Result::Kind::floating; r.bits = v.bits; break;
-    case VKind::null: r.kind = Result::Kind::null; break;
-    case VKind::function: r.kind = Result::Kind::function; r.entity = EntityId(v.ref); break;
-    case VKind::object: {
-      Machine& m = *const_cast<Machine*>(this);
-      const Object& ob = objects_[v.ref];
-      r.kind = Result::Kind::address;
-      r.base = ob.origin == Origin::global ? Base::global : ob.origin == Origin::literal ? Base::literal : Base::local;
-      r.entity = ob.entity;
-      r.literal = ob.literal;
-      r.path = steps_of(u32(v.bits));
-      r.past = v.past;
-      r.offset = m.offset_of(v);
-      bool past = false;
-      if (!r.path.empty() && m.resolve(v, {}, past)) r.past = past;
-      break;
-    }
-    }
-    out.push_back(std::move(r));
-  }
+  for (std::size_t i = 0; i < results_.size(); ++i) out.push_back(m.describe(results_[i], result_types_[i]));
   return out;
 }
 

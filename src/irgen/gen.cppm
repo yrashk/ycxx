@@ -980,6 +980,35 @@ class Gen {
     call_fn(c.ctor, facts_.int_type(), args, 1, true, byval, 0, call_flags);
   }
 
+  // A folded immediate invocation has a structural value. Initialize its result place
+  // by field and element, so a later materialization obtains its own typed storage.
+  void initialize_constant(const Place& p, ast::ConstId value) {
+    const TypeClass kind = cls(p.type);
+    if (kind != TypeClass::array && kind != TypeClass::record) {
+      store(p, constant(p.type, value));
+      return;
+    }
+    if (!in_.values.is<ast::VAggregate>(value)) throw Unsupported{"an aggregate constant of the wrong kind"};
+    const auto aggregate = in_.values.get<ast::VAggregate>(value);
+    const auto elements = in_.seqs.elements(aggregate.elems);
+    if (kind == TypeClass::array) {
+      if (elements.size() != facts_.bound(p.type)) throw Unsupported{"an array constant with the wrong bound"};
+      const ast::QualType type = facts_.element(p.type);
+      for (uint32_t i = 0; i < elements.size(); ++i)
+        initialize_constant(subobject(p, ir::Step::elem, i, type), elements[i]);
+      return;
+    }
+    const ast::EntityId owner = facts_.class_entity(p.type);
+    if (!same_type(p.type, aggregate.type) || !facts_.bases_of(owner).empty() ||
+        facts_.field_type(owner, uint32_t(elements.size())))
+      throw Unsupported{"a record constant with a different layout"};
+    for (uint32_t i = 0; i < elements.size(); ++i) {
+      const auto type = facts_.field_type(owner, i);
+      if (!type) throw Unsupported{"a record constant with a different layout"};
+      initialize_constant(subobject(p, ir::Step::field, i, *type), elements[i]);
+    }
+  }
+
   // Initializes the object at `p` from the prvalue `e` ([dcl.init]). In a `zeroed` object, a
   // value-initialized element is already zero.
   void initialize(const Place& p, At e, bool zeroed, bool select_class = false, bool materialized = false) {
@@ -990,6 +1019,10 @@ class Gen {
     if (facts_.is_reference(p.type)) {
       store(p, address(e));  // a reference member holds its object's address
       return;
+    }
+    if (is<ast::Literal>(e)) {
+      const auto literal = get<ast::Literal>(e);
+      if (in_.values.is<ast::VAggregate>(literal.value)) return initialize_constant(p, literal.value);
     }
     if (select_class && class_selection(e)) return initialize_selection(p, e, zeroed);
     if (is<ast::ImplicitConversion>(e)) {
