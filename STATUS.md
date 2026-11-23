@@ -1584,6 +1584,11 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   ordinary member collision checks. The enum identity uses the declaring class, canonical
   underlying type, and first enumerator.
   [#859](https://github.com/yrashk/ycxx/issues/859)
+- A standalone unnamed unscoped member enum can use dependent values. Class completion
+  evaluates its list, including earlier enumerators and implicit successors, and checks
+  fixed-base ranges or infers the underlying type. The class specialization, first
+  enumerator and completed underlying type determine its identity ([temp.inst], [dcl.enum]).
+  [#894](https://github.com/yrashk/ycxx/issues/894)
 - Named unscoped member enum definitions in class templates defer value-dependent initializers
   and their implicit successors. Specialization replay evaluates each list, including earlier
   enumerator references, fixed-base range checks, and underlying-type inference. Size and
@@ -1598,8 +1603,7 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
 - Further work includes opaque declarations in classes or blocks, unnamed empty definitions,
   unnamed definitions followed by declarators, and `E{}` and `E(v)` expressions
   (#157). Enumerations in a block are tracked in #117. Qualified lookup of earlier enumerators
-  while the unnamed definition is open is tracked in #879. Dependent unnamed definitions
-  remain in #894.
+  while the unnamed definition is open is tracked in #879.
 
 ## Direct explicit destructor calls (#722)
 
