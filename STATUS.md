@@ -419,8 +419,8 @@ stay open for the rest.
   their size rounded to 8. `va_arg` loads the slot and advances the cursor by 8, `va_copy`
   copies it and `va_end` does nothing. `own/variadic/definitions` calls ycxx's definitions
   from ycxx and from a Clang peer, and lets the peer's `va_arg` read a cursor ycxx started.
-  It fails if the named stack size is ignored or the cursor advances by 4. `<stdarg.h>`
-  itself is missing on Darwin ([#676](https://github.com/yrashk/ycxx/issues/676)); `<cstdarg>` works.
+  It fails if the named stack size is ignored or the cursor advances by 4. `<stdarg.h>` works
+  as well as `<cstdarg>` ([#676](https://github.com/yrashk/ycxx/issues/676), see the compiler resource `<stdarg.h>` section).
 - Not yet: the allocation
   validator and dependence checker (#29), SSA linear scan, list scheduling, unwind info and DWARF,
   a measured `cost_model` (#9), more than one result, frame objects aligned above 16 bytes.
@@ -2463,14 +2463,20 @@ first; a dependent base is not searched. Redeclaring a hidden parameter's name i
   The full resource header supplies `max_align_t` with 16-byte alignment (AMD64 psABI §3.1.2).
   `unit.pp` exercises both paths through the configured header search.
 
-## Linux compiler resource `<stdarg.h>` (#383)
+## Compiler resource `<stdarg.h>` (#383, #676)
 
 - Linux `__builtin_va_list` is an array of one compiler-owned record with the two unsigned
   offsets and two pointers of the AMD64 psABI §3.5.7. Ordinary array and record semantics give it
   size 24 and alignment 8 and adjust it to a pointer as a function parameter ([dcl.array],
   [dcl.fct]). The builtin name also works with explicit global qualification.
+- `resources/common/include` holds the resource headers every target shares. It is searched
+  after libycxx and Linux's own resource headers, and before glibc or the macOS SDK, neither of
+  which ships `<stdarg.h>`. The SDK's `<stdio.h>` and `<wchar.h>` include it.
 - The resource `<stdarg.h>` consumes each `__need___va_list` request and supplies the guarded
-  `__gnuc_va_list` typedef. A full include also supplies `va_list` ([cstdarg.syn]). glibc's
+  `__gnuc_va_list` typedef. A full include also supplies `va_list` and the `va_start`,
+  `va_arg`, `va_copy`, `va_end` and `__va_copy` macros ([cstdarg.syn]). Their replacement
+  lists match libycxx's `<cstdarg>`, so the two headers combine in either order.
+  `own/variadic/stdarg-header` runs a variadic definition through them on both targets. glibc's
   `<stdio.h>` preprocesses, and `unit.linux_stdarg` checks that path, both inclusion orders,
   and type semantics. The pinned libycxx `<cstdarg>` exposes the Linux variadic operations
   described in the x86-64 backend status (#196).
@@ -2911,8 +2917,8 @@ the peer passes a secondary base. The cast introduces no RTTI symbols or calls.
 ## Borrowed typed downcasts (#294)
 
 Linux x86-64 can cast a borrowed root pointer to a pointer to its direct derived class.
-Both classes are ordinary, fieldless and default-visible. The derived class has one public
-nonvirtual primary base. Each class declares one public virtual `int` member with no
+The first profile uses two ordinary, fieldless, default-visible classes. The derived class has
+one public nonvirtual primary base. Each class declares one public virtual `int` member with no
 arguments, with the derived declaration overriding the base member. A hosted C++ peer
 defines the two key functions. The consumer checks eligibility against the complete
 translation unit and uses the peer's two RTTI objects and `__dynamic_cast`.
@@ -2921,8 +2927,18 @@ a typed null for a null operand or a failed check. A null operand can be used in
 evaluation. [Design](docs/design/linux-borrowed-typed-downcast.md) ·
 [#294](https://github.com/yrashk/ycxx/issues/294)
 
-Other cast forms, `typeid`, non-null constant evaluation, and Darwin parity are tracked
-in [#294](https://github.com/yrashk/ycxx/issues/294) and [#659](https://github.com/yrashk/ycxx/issues/659).
+The keyless-base profile uses a fieldless `B` with one public pure virtual `int f()` and a
+`D` with the public override and one public `int` field without an initializer. Both classes use
+the default-visible ABI. The consumer defines canonical weak `_ZTI` and `_ZTS` objects for `B`
+in separate ELF COMDAT groups. An independently owned table in the same unit uses the same
+base descriptor.
+The complete translation unit must leave the derived key to the peer. Hosted linking supplies
+the derived RTTI and `__dynamic_cast`.
+[Design](docs/design/linux-keyless-base-rtti.md) · [#930](https://github.com/yrashk/ycxx/issues/930)
+
+Keyless destinations, reference casts, `typeid`, non-null constant evaluation, and Darwin
+parity are tracked in [#294](https://github.com/yrashk/ycxx/issues/294) and
+[#659](https://github.com/yrashk/ycxx/issues/659).
 
 ## Deduced polymorphic lambda results (#569)
 
