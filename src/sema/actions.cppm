@@ -90,6 +90,7 @@ enum class AliasCallPattern { none, retained, may_erase };
 // at item)` and fetches of `decl_sema`.
 class Questions {
 public:
+  virtual bool exceptions_enabled() const { return true; }
   // The declarations of `name` in the global namespace visible at the current point: those that
   // precede the current item, and, inside a function body, the item's own (§B2, [basic.scope.pdecl]).
   // `directives` are the namespaces block-scope using-directives nominate ([namespace.udir]): their
@@ -1083,6 +1084,12 @@ public:
     return std::ranges::any_of(template_scopes | std::views::join, [&](const ast::TemplateParamSema& p) {
       return !template_args.at(p.depth, p.index);
     });
+  }
+  bool check_exception_construct(u32 at, lex::Tk keyword) {
+    if (q_->exceptions_enabled() || ((in_function_body || !lambdas_.empty()) && in_template_definition()))
+      return true;
+    diag(at, Diag::exceptions_disabled, keyword);
+    return false;
   }
   struct RequiresBodyScope {
     bool& context;
@@ -2782,7 +2789,7 @@ public:
         if ((!replay_default_members_ || templated()) && required_base == EntityId::none &&
             !unevaluated && !constant_reference_context) {
           const Ex operand{*init, begin, end, info};
-          const Ex proof = runtime_default_noexcept(operand);
+          const Ex proof = runtime_default_supported(operand);
           if (!proof.ok()) return {NodeId::none, begin, end};
           const auto result = as<ast::Literal>(proof);
           if (!result || !w_->values.rec(result->value).bits) {
@@ -6371,7 +6378,7 @@ public:
 
   // The new runtime default path admits only these scalar operations and ordinary calls.
   // Allocation, opaque virtual dispatch and class-valued calls require separate proofs.
-  Ex runtime_default_noexcept(Ex operand) {
+  Ex runtime_default_supported(Ex operand) {
     const auto ordinary_result = [&](ExprInfo info) {
       return info.category != ValueCategory::prvalue || !types().is_class(info.type);
     };
@@ -6395,7 +6402,7 @@ public:
       if (supported) node.for_each_child(self);
     };
     visit(ast::Red(ins().ast, root.id, operand.begin));
-    if (!supported) return bool_literal(false, operand.begin, operand.end);
+    if (!supported || !q_->exceptions_enabled()) return bool_literal(supported, operand.begin, operand.end);
     return unary_noexcept(operand, operand.begin, operand.end);
   }
 
@@ -9658,9 +9665,10 @@ public:
 
   // [expr.throw], [except.throw]: retain the operand, with array and function decay.
   Ex throw_expression(std::optional<Ex> operand, u32 begin, u32 end) {
+    Ex fail{NodeId::none, begin, end};
+    if (!check_exception_construct(begin, lex::Tk::kw_throw)) return fail;
     ExprInfo info{builtin(Builtin::void_), ValueCategory::prvalue, 0};
     if (!operand) return node(ast::Throw{info, {}}, begin, end, info);
-    Ex fail{NodeId::none, begin, end};
     Ex value = *operand;
     if (!value.ok()) return fail;
     if (dependent(value)) {

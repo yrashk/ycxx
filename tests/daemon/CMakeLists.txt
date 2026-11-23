@@ -14,3 +14,6 @@ add_test(NAME daemon.system_includes
 add_test(NAME daemon.nostdinc
   COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/nostdinc.py
           $<TARGET_FILE:ycxxc> ${PROJECT_SOURCE_DIR}/resources/linux/include)
+add_test(NAME daemon.no_exceptions
+  COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/no_exceptions.py
+          $<TARGET_FILE:ycxxc> ${PROJECT_SOURCE_DIR}/deps/libycxx "${CMAKE_READELF}")

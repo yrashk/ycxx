@@ -406,6 +406,7 @@ enum class Diag : std::uint32_t {
   annotation_invalid_type [[=message{Severity::error, "an annotation requires a structural constant value"}]],
   annotation_not_supported [[=message{Severity::error, "this declaration annotation is not supported yet"}]],
   annotation_mixed_list [[=message{Severity::error, "annotations and ordinary attributes require separate attribute-specifiers"}]],
+  exceptions_disabled [[=message{Severity::error, "cannot use '{0:k}' with exceptions disabled by '-fno-exceptions'"}]],
 };
 
 // A `{N:r}` argument: why an evaluation was not constant. 0 is an expression the front end
@@ -478,10 +479,11 @@ constexpr bool is_type_trait_failure(engine::DiagId id) {
 // Whether a diagnostic stays an error where a substitution failure means "not satisfied": a limit
 // of ycxx's, an atomic constraint that is not a `bool` constant ([temp.constr.atomic]/3), or a
 // return-type-requirement that names no concept, ill-formed whatever the arguments. An incomplete
-// operand outside a type trait's domain also stays an error.
+// operand outside a type trait's domain or a disabled language construct stays an error.
 constexpr bool survives_substitution(engine::DiagId id) {
   return is_limit(id) || id == diag_id(Diag::constraint_not_bool) || id == diag_id(Diag::constraint_not_constant) ||
          id == diag_id(Diag::not_a_concept) || id == diag_id(Diag::not_a_type_concept) ||
+         id == diag_id(Diag::exceptions_disabled) ||
          id == diag_id(Diag::trivial_copyability_incomplete) ||
          id == diag_id(Diag::constructibility_incomplete) || id == diag_id(Diag::base_of_incomplete) ||
          id == diag_id(Diag::empty_incomplete) || id == diag_id(Diag::convertibility_incomplete) ||
