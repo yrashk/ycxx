@@ -178,7 +178,7 @@ public:
   // ([namespace.qual]).
   virtual std::optional<EntityId> namespace_named(NameId name, std::span<const EntityId> directives = {}) = 0;
   virtual std::vector<ast::DeclSema> namespace_members(EntityId ns, NameId name, bool type_only = false,
-                                                      bool direct_only = false) = 0;
+                                                      bool direct_only = false, bool immediate_call = false) = 0;
   // [basic.lookup.argdep]: functions in one associated namespace's inline namespace set, and
   // a class's record if complete there. Ask at the lexical point, and for a dependent call
   // also at the point of instantiation ([temp.dep.candidate]).
@@ -2141,7 +2141,7 @@ public:
   }
   // `S::n` as an expression ([expr.prim.id.qual]).
   Ex scope_expr(const Scope& s, NameId n, u32 begin, u32 name_at, u32 end, std::optional<u32> address_at = {},
-                bool check_all_bases = false) {
+                bool check_all_bases = false, bool immediate_call = false) {
     if (s.type && types().is_dependent(*s.type)) return dependent_node({}, begin, end, std::nullopt, ValueCategory::lvalue);
     if (s.type) {
       if (types().is_enum(*s.type)) {
@@ -2169,7 +2169,15 @@ public:
       for (const OwnDecl& d : own)
         if (d.name == n && d.enum_initializer != ConstId::none)
           return literal(d.sema.type, d.enum_initializer, ValueCategory::prvalue, begin, end);
-    std::vector<ast::DeclSema> found = q_->namespace_members(*s.ns, n);
+    auto found = q_->namespace_members(*s.ns, n, /*type_only=*/false, /*direct_only=*/false, immediate_call);
+    if (immediate_call && std::ranges::any_of(found, [](const ast::DeclSema& d) {
+          return d.kind == ast::DeclKind::function;
+        }) && std::ranges::any_of(found, [](const ast::DeclSema& d) {
+          return d.kind != ast::DeclKind::function;
+        })) {
+      diag(name_at, Diag::ambiguous_name, n);
+      return {NodeId::none, begin, end};
+    }
     if (found.empty()) {
       diag(name_at, Diag::no_namespace_member, n);
       return {NodeId::none, begin, end};

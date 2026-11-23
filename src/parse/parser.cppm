@@ -1748,6 +1748,12 @@ public:
       if (checked && s_->has_error_since(diags)) return std::nullopt;
     }
     NameId name = name_of(tok(next));
+    // An ordinary tag lookup cannot classify a qualified function-template call as a type-id.
+    if (template_argument && s->ns && kind(next + 1) == Tk::less &&
+        s_->scope_names_template(*s, name)) {
+      u32 open = past_template_args(next + 1);
+      if (kind(open) == Tk::l_paren && kind(open + 1) == Tk::r_paren) return std::nullopt;
+    }
     if (template_argument && next == 2 && s_->scope_names_static_data_member(*s, name))
       return std::nullopt;
     std::optional<u32> at = checked ? std::optional{pos() + next} : std::nullopt;
@@ -4297,7 +4303,7 @@ public:
     auto name = expression_id(suffix);
     if (!name) return {NodeId::none, begin, pos()};
     NameId n = *name;
-    auto scope_expr = [&] {
+    auto scope_expr = [&](bool immediate_call = false) {
       // [expr.unary.op]: `&C::m` can form a pointer to member. Parentheses or postfix
       // operations make the operand something other than the qualified-id itself.
       bool postfix = is(Tk::l_paren) || is(Tk::l_square) || is(Tk::period) || is(Tk::arrow) ||
@@ -4311,7 +4317,7 @@ public:
       }
       const bool check_all_bases = in_template_value_argument_ && next == 2 &&
           (member_alias_type || s_->scope_names_static_data_member(*s, n));
-      return s_->scope_expr(*s, n, begin, name_at, pos(), postfix ? std::nullopt : address, check_all_bases);
+      return s_->scope_expr(*s, n, begin, name_at, pos(), postfix ? std::nullopt : address, check_all_bases, immediate_call);
     };
     if (operator_name) {
       if (is(Tk::less) && s_->scope_names_template(*s, n)) {
@@ -4371,9 +4377,12 @@ public:
       if (keyword || s_->scope_names_template(*s, n)) {
         auto args = template_argument_list();
         if (!args) return {NodeId::none, begin, pos()};
-        Ex r = scope_expr();
-        if (r.ok() && !s_->dependent(r) && std::ranges::any_of(*args, [&](const ast::TemplateArg& a) { return s_->dependent(a); })) {
-          if (s->ns && in_template_value_argument_ && is(Tk::l_paren) && kind(1) == Tk::r_paren) {
+        const bool dependent_args = std::ranges::any_of(*args, [&](const ast::TemplateArg& a) { return s_->dependent(a); });
+        const bool immediate_call = s->ns && dependent_args && in_template_value_argument_ &&
+                                    is(Tk::l_paren) && kind(1) == Tk::r_paren;
+        Ex r = scope_expr(immediate_call);
+        if (r.ok() && !s_->dependent(r) && dependent_args) {
+          if (immediate_call) {
             if (ambiguous_namespace) {
               s_->diag(begin + *ambiguous_namespace, Diag::ambiguous_name, ambiguous_name);
               return {NodeId::none, begin, pos()};

@@ -469,10 +469,10 @@ public:
   // starting in namespace `from`: the first enclosing namespace that declares it before the
   // point, counting the namespaces using-directives nominate where [namespace.udir]/2 puts them.
   // `block` are the namespaces block-scope using-directives at the point nominate.
-  enum class LookupNames { all, types, qualifiers };
+  enum class LookupNames { all, types, qualifiers, immediate_call };
 
   void filter_lookup(std::vector<DeclId>& declarations, LookupNames filter) {
-    if (filter == LookupNames::all) return;
+    if (filter == LookupNames::all || filter == LookupNames::immediate_call) return;
     std::erase_if(declarations, [&](DeclId id) {
       auto d = decl_sema(id);
       return !d || d->entity == EntityId::none ||
@@ -593,7 +593,8 @@ public:
   std::vector<DeclId> qualified_decls(std::string_view name, const std::string& ns, u32 item, bool self,
                                      LookupNames filter = LookupNames::all, bool direct_only = false) {
     auto candidates = [&](const std::string& path) {
-      auto declarations = declared_in(name, path, item, self);
+      auto declarations = declared_in(name, path, item, self, /*inhabit=*/false, /*bound_functions=*/false,
+                                      filter == LookupNames::immediate_call);
       filter_lookup(declarations, filter);
       return declarations;
     };
@@ -665,8 +666,14 @@ public:
   // A using-declaration's name stands for what it introduces (query-engine.md, "Using-declarations").
   // The ADL search uses `bound_functions` to check where direct declarations bind their names.
   std::vector<DeclId> declared_in(std::string_view name, const std::string& path, u32 item, bool self,
-                                  bool inhabit = false, bool bound_functions = false) {
+                                  bool inhabit = false, bool bound_functions = false,
+                                  bool hide_function_tags = false) {
     std::vector<DeclId> r;
+    std::vector<std::string> binding_scopes;
+    auto add = [&](DeclId declaration, const std::string& ns) {
+      r.push_back(declaration);
+      if (hide_function_tags) binding_scopes.push_back(ns);
+    };
     ask(inhabit ? Probe::declared_in_inhabit : Probe::declared_in, name, path);
     for (auto [j, k] : named(name)) {
       if (j >= item + (self ? 1 : 0)) break;
@@ -681,7 +688,7 @@ public:
         if (std::ranges::find(running_, j) != running_.end()) continue;
         item_sema(j);  // resolves its targets
         if (auto t = using_targets_.find({j, n.ordinal}); t != using_targets_.end())
-          r.insert(r.end(), t->second.begin(), t->second.end());
+          for (DeclId target : t->second) add(target, ns);
         continue;
       }
       // A scoped enumeration's enumerators are in its own scope ([dcl.enum]/11); the declarators
@@ -709,12 +716,29 @@ public:
         if (!(d->flags & sema::decl_flag::lang_c) && namespace_path(w_->entities.rec(d->entity).scope) != path)
           continue;
       }
-      r.push_back(id);
+      add(id, ns);
     }
     for (const Directive& d : directives_)
       if (d.alias && d.item < item + (self ? 1 : 0) && d.at == path && w_->ins.names.spelling(*d.alias) == name)
-        r.push_back({ids_[d.item], ast::make_decl_ord(ast::DeclClass::syntactic, 0)});
-    return r;
+        add({ids_[d.item], ast::make_decl_ord(ast::DeclClass::syntactic, 0)}, path);
+    if (!hide_function_tags) return r;
+
+    // Inline namespace members can appear in the same lookup set without sharing a binding scope.
+    std::set<std::string_view> function_scopes;
+    for (std::size_t i = 0; i < r.size(); ++i)
+      if (auto d = decl_sema(r[i]); d && d->kind == ast::DeclKind::function)
+        function_scopes.insert(binding_scopes[i]);
+    if (function_scopes.empty()) return r;
+
+    std::vector<DeclId> visible;
+    for (std::size_t i = 0; i < r.size(); ++i) {
+      const auto d = decl_sema(r[i]);
+      if (d && (d->kind == ast::DeclKind::class_ || d->kind == ast::DeclKind::enum_) &&
+          function_scopes.contains(binding_scopes[i]))
+        continue;
+      visible.push_back(r[i]);
+    }
+    return visible;
   }
   // [basic.lookup.argdep]/4: search the innermost non-inline namespace and its inline namespace
   // set. In each namespace search only its own declarations, including using-declarator targets
@@ -1872,9 +1896,10 @@ public:
     return std::nullopt;
   }
   std::vector<ast::DeclSema> namespace_members(EntityId ns, ast::NameId name, bool type_only = false,
-                                               bool direct_only = false) override {
+                                               bool direct_only = false, bool immediate_call = false) override {
     std::vector<ast::DeclSema> r;
-    const auto filter = type_only ? Program::LookupNames::types : Program::LookupNames::all;
+    auto filter = type_only ? Program::LookupNames::types : Program::LookupNames::all;
+    if (immediate_call) filter = Program::LookupNames::immediate_call;
     for (DeclId d : p_->qualified_decls(p_->world().ins.names.spelling(name), p_->namespace_path(ns),
                                        namespace_lookup_item(), namespace_lookup_includes_item(),
                                        filter, direct_only))
@@ -2586,8 +2611,8 @@ public:
     return at_.namespace_named(name, directives);
   }
   std::vector<ast::DeclSema> namespace_members(EntityId ns, ast::NameId name, bool type_only = false,
-                                               bool direct_only = false) override {
-    return at_.namespace_members(ns, name, type_only, direct_only);
+                                               bool direct_only = false, bool immediate_call = false) override {
+    return at_.namespace_members(ns, name, type_only, direct_only, immediate_call);
   }
   std::vector<ast::DeclSema> adl_functions(EntityId ns, ast::NameId name, bool at_instantiation) override {
     return at_instantiation ? p_->adl_functions(ns, name, p_->end(), false) : at_.adl_functions(ns, name, false);
