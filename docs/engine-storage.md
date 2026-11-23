@@ -74,7 +74,24 @@ The benchmark uses one syntax-only build per fresh process. It measures heap-onl
 cold snapshot creation, warm import of a copied artifact under a different directory, an edit
 after restoring the original snapshot, and paging alone. The compiler, restored artifacts and
 sources may all be warm in the OS page cache. The benchmark reports process peak RSS and elapsed
-time. It does not drop the OS page cache or force disk reads. See the PR on [#17] for measured
-results. Leave both features disabled if the measured costs exceed the workload's benefit.
+time. It does not drop the OS page cache or force disk reads.
+
+Seven repetitions on Linux x86-64 with an overlay filesystem and ycxx bootstrapped with GCC 16.2
+at `-O1` gave the following medians. The single-file workload wrote a 3,766,486-byte artifact
+from 1,824,018 source bytes. The 128-file workload wrote 3,780,319 bytes from 1,819,696 source
+bytes.
+
+| Mode | One file, ms | One file, peak RSS KiB | 128 files, ms | 128 files, peak RSS KiB |
+| --- | ---: | ---: | ---: | ---: |
+| Disabled | 24.67 | 14,280 | 19.77 | 10,896 |
+| Cold snapshot write | 50.99 | 21,524 | 96.34 | 11,220 |
+| Warm snapshot import | 24.29 | 14,640 | 23.02 | 11,028 |
+| Changed input after restore | 37.91 | 21,392 | 24.87 | 11,112 |
+| Paging only | 27.06 | 13,996 | 21.84 | 10,984 |
+
+Neither option showed a clear improvement in latency or peak RSS on these workloads. Warm import
+and disabled timings overlapped. Cold snapshot creation had the highest overhead, especially
+across many files. Leave both features disabled for similar workloads unless measurements show a
+benefit on your builders.
 
 [#17]: https://github.com/yrashk/ycxx/issues/17

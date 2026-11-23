@@ -9,22 +9,36 @@ import statistics
 import subprocess
 import sys
 import tempfile
+
+
+# A fresh, minimal launcher keeps the benchmark controller's Python high-water mark out of
+# child RSS. The measured interval starts before its fork and ends when the compiler exits.
+MEASURE = """
+import os
+import sys
 import time
+
+start = time.perf_counter_ns()
+pid = os.fork()
+if pid == 0:
+    sink = os.open(os.devnull, os.O_WRONLY)
+    os.dup2(sink, 1)
+    os.close(sink)
+    os.execv(sys.argv[1], sys.argv[1:])
+_, status, usage = os.wait4(pid, 0)
+if (code := os.waitstatus_to_exitcode(status)):
+    sys.exit(code if code > 0 else 128 - code)
+print(time.perf_counter_ns() - start, usage.ru_maxrss)
+"""
 
 
 def compile_one(exe, work, env):
-    start = time.perf_counter()
-    with subprocess.Popen(
-        [exe, "cxx", "--no-daemon", "-fsyntax-only", "main.cpp"],
-        cwd=work, env=env, stdout=subprocess.DEVNULL,
-    ) as process:
-        _, status, usage = os.wait4(process.pid, 0)
-        process.returncode = os.waitstatus_to_exitcode(status)
-        if process.returncode:
-            raise subprocess.CalledProcessError(process.returncode, process.args)
-    elapsed = (time.perf_counter() - start) * 1000
-    peak = usage.ru_maxrss / (1024 if sys.platform == "darwin" else 1)
-    return elapsed, int(peak)
+    result = subprocess.run(
+        [sys.executable, "-S", "-c", MEASURE, exe, "cxx", "--no-daemon", "-fsyntax-only", "main.cpp"],
+        cwd=work, env=env, text=True, stdout=subprocess.PIPE, check=True,
+    )
+    elapsed, rss = map(int, result.stdout.split())
+    return elapsed / 1_000_000, int(rss / (1024 if sys.platform == "darwin" else 1))
 
 
 def bytes_in(directory):
