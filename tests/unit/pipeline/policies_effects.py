@@ -450,6 +450,13 @@ with tempfile.TemporaryDirectory() as directory:
         namespace own = ycxx::ownership;
         namespace fx = ycxx::effects;
         struct Ticket { int value; };
+        struct Audit;
+        using AuditOnce = fx::set<fx::at_most<Audit, 1>>;
+        #ifdef WIDE_GRADE
+        using InspectBound = fx::set<fx::at_most<Audit, 2>>;
+        #else
+        using InspectBound = AuditOnce;
+        #endif
         #ifdef WIDE_RESULT
         using Observation = long;
         #else
@@ -467,8 +474,8 @@ with tempfile.TemporaryDirectory() as directory:
         #endif
         #ifndef OWNERSHIP_ONLY
         using Bounds = fx::use_policy<
-            fx::bound<decltype(&inspect), &inspect, fx::set<>>,
-            fx::bound<decltype(&forward_ticket), &forward_ticket, fx::set<>>>;
+            fx::bound<decltype(&inspect), &inspect, InspectBound>,
+            fx::bound<decltype(&forward_ticket), &forward_ticket, AuditOnce>>;
         #endif
     """)
     joint_leaf = write("joint_leaf.cpp", """\
@@ -485,21 +492,22 @@ with tempfile.TemporaryDirectory() as directory:
         void finish(Ticket&& ticket) noexcept { if (ticket.value != 42) __builtin_trap(); }
         int main() {
           auto ticket = issue();
-          int observed = 0;
-          {
-            const auto& view = ticket;
-            int value = forward_ticket(view);
-            observed = value;
-          }
+          const auto& view = ticket;
+          const auto& alias = view;
+          int observed = forward_ticket(alias);
           finish(static_cast<Ticket&&>(ticket));
           return observed != 42;
         }
     """)
     joint_annotation = write("joint_annotation.cpp", """\
         #include "joint.hpp"
-        [[=own::operation::verified_observes]] Observation inspect(const Ticket&) noexcept;
+        [[=own::operation::verified_observes]] [[=fx::contract<AuditOnce>{}]]
+        Observation inspect(const Ticket&) noexcept;
     """)
     syntax(joint_entry, joint_forward, joint_leaf, joint_annotation)
+    late_observation = write("joint_late.cpp", joint_entry.read_text().replace(
+        "return observed != 42;", "int later = forward_ticket(alias);\n  return later != observed;"))
+    syntax(late_observation, joint_forward, joint_leaf, error="may still have a live shared borrow 'alias'")
     syntax(write("observer_enum_result.cpp", """\
         #include <ycxx/ownership.hpp>
         namespace own = ycxx::ownership;
@@ -529,6 +537,10 @@ with tempfile.TemporaryDirectory() as directory:
             invoke([*target, f"-D{retained}", "-c", joint_leaf, "-o", incomplete])
             outcome = invoke([*target, *objects[:2], incomplete, "-o", denied], error=missing)
             assert "has no matching guarantee" in outcome and not denied.exists(), outcome
+        invoke([*target, "-DWIDE_GRADE", "-c", joint_leaf, "-o", incomplete])
+        outcome = invoke([*target, *objects[:2], incomplete, "-o", denied], error="verified effect bound")
+        assert "has no matching guarantee" in outcome and "verified observation" not in outcome, outcome
+        assert not denied.exists()
         invoke([*target, "-DWIDE_RESULT", "-c", joint_leaf, "-o", incomplete])
         outcome = invoke([*target, *objects[:2], incomplete, "-o", denied], error="has no matching guarantee")
         assert any("verified observation" in line and "has no matching guarantee" in line
