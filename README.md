@@ -553,6 +553,9 @@ written default member initializer are value-initialized.
   such as `Limits{42}.quota`. [#900](https://github.com/yrashk/ycxx/issues/900)
   Class-template static constexpr members can use these reads in their initializers.
   [#991](https://github.com/yrashk/ycxx/issues/991)
+  A constant expression can return a named empty or flat aggregate and use the result,
+  including an initialized fixed-size `char` member array.
+  [#975](https://github.com/yrashk/ycxx/issues/975)
   Namespace-scope `constexpr` pointers to `void` can retain scalar and array element addresses.
   `__builtin_addressof`, used by libycxx's `std::addressof`, bypasses overloaded `operator&`.
   It supports runtime addresses and constant expressions such as a scalar global's address.
