@@ -423,3 +423,24 @@ ycxx cxx -fcheck-policies -fsyntax-only -I/path/to/include reflected_handler.cpp
 Add `handler.perform(audit, offset);` before the return in `run`. YCXX reports that
 the second call exceeds the `Audit` grade. In a GCC or Clang build, both calls share
 the same budget and the second call traps.
+
+To configure the whole handler, replace the `AuditBudget` alias with these declarations.
+The class configuration supplies the same limit to the runtime budget and the checked bound.
+
+```cpp
+template<class Effect, class Config>
+  requires (Config::slots > 0) && (Config::slots <= 4)
+struct HandlerPolicy {
+  using Budget = fx::budget<Effect, Config::slots>;
+  using Bound = fx::set<fx::at_most<Effect, Config::slots>>;
+};
+
+struct SiteConfig { static constexpr unsigned slots = 2; };
+using AuditPolicy = HandlerPolicy<Audit, SiteConfig>;
+using AuditBudget = AuditPolicy::Budget;
+using AuditBound = AuditPolicy::Bound;
+```
+
+Use `[[=fx::contract<AuditBound>{}]]` on `run` and keep the `OneAudit` annotations
+on the individual operations. With `slots = 2`, two calls to `perform` succeed. A
+third call exceeds the declared grade in YCXX and traps in GCC or Clang builds.
