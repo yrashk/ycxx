@@ -6743,8 +6743,9 @@ private:
       return false;
     }
     if (fn && p_->world().ins.names.spelling(d.name) == "main") check_main(spec, sem, d, lang);
-    if ((spec.hidden_visibility || d.hidden_visibility) && fn && !template_ && !explicit_ && !ordinary_friend &&
-        sem.linkage == ast::Linkage::external && (!d.qualified || d.scope.ns))
+    if ((spec.hidden_visibility || d.hidden_visibility) && !template_ && !explicit_ && !ordinary_friend &&
+        sem.linkage == ast::Linkage::external && (!d.qualified || d.scope.ns) &&
+        (fn || (!var_ && !(sem.flags & sema::decl_flag::inline_))))
       sem.hidden_visibility = true;
 
     // The initializer ([dcl.init]); the name is in scope from the end of its declarator.

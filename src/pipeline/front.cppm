@@ -1321,8 +1321,10 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
   }
   if (root_deallocator) declare(*root_deallocator, std::nullopt);
   // A declaration anywhere in the unit can supply the visibility of the one object symbol.
+  // A later inline declaration of a variable puts it outside this visibility profile.
   if (!hidden_declarations.empty())
-    for (Entity& e : tu.entities) e.hidden = hidden_declarations.contains(e.id);
+    for (Entity& e : tu.entities)
+      e.hidden = hidden_declarations.contains(e.id) && (e.is_function || !inline_declarations.contains(e.id));
   return tu;
 }
 
