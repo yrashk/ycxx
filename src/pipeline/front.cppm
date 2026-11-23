@@ -59,6 +59,15 @@ struct PpTokens {
   static engine::SourceSpan trace_span(const engine::Db& db, Key file) { return pp::file_span(db, file); }
 };
 
+// Whether the lexer or preprocessor reported an error in a unit's file: a cell of its own, so a
+// diagnostic that only moved (its byte offset is part of it) leaves the analysis green.
+struct LexErrors {
+  using Key = pp::FileId;
+  using Value = bool;
+  static engine::query_task<Value> run(engine::Ctx& cx, Key file);
+  static engine::SourceSpan trace_span(const engine::Db& db, Key file) { return pp::file_span(db, file); }
+};
+
 // A sema diagnostic before it is placed: its region token, which `TuFront` turns into a file
 // position.
 struct SemaMessage {
@@ -1382,6 +1391,14 @@ engine::query_task<pp::Region> PpTokens::run(engine::Ctx& cx, pp::FileId file) {
   co_return out;
 }
 
+engine::query_task<bool> LexErrors::run(engine::Ctx& cx, pp::FileId file) {
+  const std::vector<engine::Diagnostic>& lexed = co_await cx.fetch<engine::DiagsOf>(cx.cell_of<items::RegionItems>(file));
+  co_return std::ranges::any_of(lexed, [](const engine::Diagnostic& d) {
+    auto kind = lex::lex_diag_of(d.id);
+    return kind && lex::message_of(*kind).severity == lex::Severity::error;
+  });
+}
+
 engine::query_task<SemaResult> TuSema::run(engine::Ctx& cx, TuId tu) {
   const TuSource& src = cx.fetch<TuSourceIn>(tu);
   contract_assert(src.file.has_value());  // a unit given as definitions has no front end
@@ -1390,13 +1407,9 @@ engine::query_task<SemaResult> TuSema::run(engine::Ctx& cx, TuId tu) {
   sema::World& world = *universe().world_for(*unit_source.config.target);
   const pp::Region& region = co_await cx.fetch<PpTokens>(file);
   const items::Items& items = co_await cx.fetch<items::RegionItems>(file);
-  // Whether the lexer or preprocessor reported an error, not where: `TuFront` places them.
-  const std::vector<engine::Diagnostic>& lexed = co_await cx.fetch<engine::DiagsOf>(cx.cell_of<items::RegionItems>(file));
   SemaResult out;
-  out.lex_errors = std::ranges::any_of(lexed, [](const engine::Diagnostic& d) {
-    auto kind = lex::lex_diag_of(d.id);
-    return kind && lex::message_of(*kind).severity == lex::Severity::error;
-  });
+  // Whether the lexer or preprocessor reported an error, not where: `TuFront` places them.
+  out.lex_errors = co_await cx.fetch<LexErrors>(file);
   // The unit's language options: the instantiation limit (`-ftemplate-depth`).
   parse::Program program(world, region, items, unit_source.config.template_depth);
   program.analyze_all();

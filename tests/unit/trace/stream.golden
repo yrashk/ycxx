@@ -14,7 +14,8 @@
 *     PpTokens(golden.cpp) executed
 =       Pp(golden.cpp) reused
 =     RegionItems(golden.cpp) reused
-=     DiagsOf(RegionItems(golden.cpp)) reused
+*     LexErrors(golden.cpp) executed
+=       DiagsOf(RegionItems(golden.cpp)) reused
 * Tu(golden.cpp) executed
 *   TuUnit(golden.cpp) executed
 =     TuSourceIn(golden.cpp) reused
@@ -100,9 +101,10 @@
 =             FileText(golden.cpp) reused
 +         RegionItems(golden.cpp) verified
 =           Pp(golden.cpp) reused
-+         DiagsOf(RegionItems(golden.cpp)) verified
-=           RegionItems(golden.cpp) reused
-=           Pp(golden.cpp) reused
++         LexErrors(golden.cpp) verified
++           DiagsOf(RegionItems(golden.cpp)) verified
+=             RegionItems(golden.cpp) reused
+=             Pp(golden.cpp) reused
 =     TuSourceIn(golden.cpp) reused
 =     SourceOf(golden.cpp) reused
 +     Lower(square) verified
@@ -166,7 +168,7 @@
 =             SourceOf(golden.cpp) reused
 =       OptLevel(aarch64_macos) reused
 #       Optimized({<fp>, aarch64_macos, 0}) durable
-trace: 31 executed, 25 verified, 107 reused, 4 durable
+trace: 32 executed, 26 verified, 107 reused, 4 durable
 ## again: the request's own cells are reused
 + TuFront(golden.cpp) verified
 =   TuSourceIn(golden.cpp) reused
@@ -204,7 +206,8 @@ trace: 1 verified, 8 reused
 =     SourceOf(golden.cpp) reused
 =     PpTokens(golden.cpp) reused
 =     RegionItems(golden.cpp) reused
-=     DiagsOf(RegionItems(golden.cpp)) reused
++     LexErrors(golden.cpp) verified
+=       DiagsOf(RegionItems(golden.cpp)) reused
 + Tu(golden.cpp) verified
 +   TuUnit(golden.cpp) verified
 =     TuSourceIn(golden.cpp) reused
@@ -275,4 +278,4 @@ trace: 1 verified, 8 reused
 + Link(0) verified
 =   ProgramIn(0) reused
 =   Tu(golden.cpp) reused
-trace: 2 executed, 4 cutoff, 21 verified, 65 reused, 4 durable
+trace: 2 executed, 4 cutoff, 22 verified, 65 reused, 4 durable

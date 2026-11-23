@@ -1196,7 +1196,11 @@ public:
   // The file and byte offset of a diagnostic's location (ast.md §8.3, steps 1–3); a macro's
   // token is where it was expanded. Only for a region with its locations: the pipeline analyses
   // `PpTokens`, which has none, and places messages in `TuFront` (#947).
-  pp::TokLoc site(engine::Loc at) const { return r_->site(token(at)); }
+  pp::TokLoc site(engine::Loc at) const
+    pre(!r_->locs.empty())
+  {
+    return r_->site(token(at));
+  }
   // The region token of a diagnostic's location.
   u32 token(engine::Loc at) const {
     const items::Item& it = items_->items[index(ItemId(at.item))];

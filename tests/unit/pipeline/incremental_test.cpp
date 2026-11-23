@@ -220,6 +220,22 @@ void one_module_edit() {
         std::format("a comment re-runs no analysis:{}", described(commented)));
 }
 
+// A warning the preprocessor reports holds its byte offset: a comment before it moves it, and
+// only whether there is an error reaches the analysis (#947).
+void moved_warning() {
+  pl::Session s;
+  const std::string text = "#warning \"kept\"\nint f() { return 1; }\nint main() { return f() - 1; }\n";
+  build(s, text);
+  check(s.get<pl::Link>(program).errors.empty(), "a unit with a warning links");
+  const std::uint32_t sema0 = s.db().runs<pl::TuSema>(tu);
+  build(s, "// moved\n" + text);
+  check(s.get<pl::Link>(program).image == cold("// moved\n" + text), "incremental equals cold");
+  check(s.db().runs<pl::TuSema>(tu) == sema0, "a moved warning leaves the analysis green");
+  check(pl::TuFront::errors(s.get<pl::TuFront>(tu)).empty() && !s.get<pl::TuFront>(tu).messages.empty() &&
+            s.get<pl::TuFront>(tu).messages.front().where.find(":2:") != std::string::npos,
+        "the warning is placed on its new line");
+}
+
 // Two units in one session; then one with an error, which keeps the program from linking, and
 // fixed again.
 void two_units() {
@@ -696,6 +712,7 @@ void too_deep() {
 int main() {
   incremental();
   one_module_edit();
+  moved_warning();
   two_units();
   headers();
   editor_view();
