@@ -539,6 +539,8 @@ written default member initializer are value-initialized.
   [#862](https://github.com/yrashk/ycxx/issues/862) · [#876](https://github.com/yrashk/ycxx/issues/876)
   A default member initializer in a flat constexpr aggregate can directly read an earlier
   integral or enumeration field. [#895](https://github.com/yrashk/ycxx/issues/895)
+  Constant expressions can read integral and enumeration fields of a flat aggregate temporary,
+  such as `Limits{42}.quota`. [#900](https://github.com/yrashk/ycxx/issues/900)
   Namespace-scope `constexpr` pointers to `void` can retain scalar and array element addresses.
   `__builtin_addressof`, used by libycxx's `std::addressof`, bypasses overloaded `operator&`.
   It supports runtime addresses and constant expressions such as a scalar global's address.

@@ -49,12 +49,25 @@ struct EnumLayout {
   std::optional<EnumRange> range;  // present for a non-fixed enumeration
 };
 
+// The addressed fields of a flat record whose fields each occupy one scalar cell.
+struct ConstantRecordField {
+  QualType type;
+  u64 offset;
+  bool mutable_;
+};
+
+struct ConstantRecordLayout {
+  u64 size;
+  std::vector<ConstantRecordField> fields;
+};
+
 struct Config {
   Mode mode = Mode::constant;
   u64 step_limit = u64{1} << 22;  // nodes executed
   u32 depth_limit = 512;          // nested calls ([implimits]: recursive constexpr calls)
   u32 poll_interval = 4096;       // steps between cancellation polls; 0: never
   std::function<std::optional<EnumLayout>(EntityId)> enum_layout{};
+  std::function<std::optional<ConstantRecordLayout>(QualType)> temporary_record_layout{};
 };
 
 // An integer or enumeration is held normalized to its representation type: sign-extended from
@@ -72,18 +85,6 @@ struct Value {
   static constexpr Value null() { return {VKind::null}; }
   static constexpr Value function(EntityId e) { return {VKind::function, false, std::to_underlying(e), 0}; }
   constexpr bool operator==(const Value&) const = default;
-};
-
-// The addressed fields of a flat record whose aggregate value is already known.
-struct ConstantRecordField {
-  QualType type;
-  u64 offset;
-  bool mutable_;
-};
-
-struct ConstantRecordLayout {
-  u64 size;
-  std::vector<ConstantRecordField> fields;
 };
 
 // A namespace-scope variable, as the host answers for it (query-engine.md §B7: in the engine,
@@ -184,7 +185,7 @@ private:
     EntityId entity{};
     ConstId literal{};
     u32 cell0 = 0, ncells = 0;
-    const ConstantRecordLayout* record = nullptr;  // owned by global_info_
+    const ConstantRecordLayout* record = nullptr;  // owned by a global or temporary layout entry
   };
   struct PathNode {
     u32 parent = 0;
@@ -241,6 +242,7 @@ private:
 
   // ------------------------------------------------------------ objects
 
+  const ConstantRecordLayout* temporary_record(QualType t);
   u32 make_object(QualType t, Origin o, const ConstantRecordLayout* record = nullptr);
   void fill_zero(QualType t, u32 cell);
   bool fill_constant(QualType t, u32 cell, ConstId value);
@@ -302,6 +304,7 @@ private:
   std::map<u32, Callee> bodies_;
   std::map<u32, std::optional<GlobalVar>> global_info_;
   std::map<u32, u32> globals_;
+  std::map<u32, ConstantRecordLayout> temporary_records_;
   std::vector<Group> groups_;
 
   EntityId wanted_{};
@@ -425,6 +428,18 @@ u32 Machine::extend(u32 path, std::span<const u64> words) {
 }
 
 // ------------------------------------------------------------------ objects
+
+const ConstantRecordLayout* Machine::temporary_record(QualType t) {
+  if (config_.mode != Mode::constant || !config_.temporary_record_layout) return nullptr;
+  const QualType type = in_->canonical(t);
+  const u32 key = std::to_underlying(type);
+  if (auto it = temporary_records_.find(key); it != temporary_records_.end()) return &it->second;
+  auto layout = config_.temporary_record_layout(type);
+  if (!layout || layout->fields.empty() ||
+      !std::ranges::all_of(layout->fields, [&](const auto& field) { return shape(field.type).leaves == 1; }))
+    return nullptr;
+  return &temporary_records_.emplace(key, std::move(*layout)).first->second;
+}
 
 u32 Machine::make_object(QualType t, Origin o, const ConstantRecordLayout* record) {
   Object ob;

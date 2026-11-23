@@ -1109,11 +1109,11 @@ in `lsp` frames (`LspOut`), the last of which carries LSP's exit status (1 after
   writes to objects from outside the evaluation, volatile accesses, non-constexpr and undefined
   callees, `reinterpret_cast`-like ops and `asm`.
 - The dispatch table is `ir::eval_table<Ops, …>()` with `complete`: every op has a handler. Ops
-  outside the α slice (aggregates and `copy`, unions, dynamic storage, virtual calls, atomics,
+  outside the supported subset (`copy`, unions, dynamic storage, virtual calls, atomics,
   EH, coroutines, reflection) fail with `Reason::unsupported`, naming the op. (Floating point
   is evaluated since #336.)
-- Not yet: whole-program runs with a host I/O interface, records and the under-construction state
-  of [class.cdtor] (#25).
+- Remaining in #25: whole-program runs with host I/O, general record storage, and the
+  under-construction state of [class.cdtor].
 
 ## Constant evaluation in the front end (ε slice, #87, 2026-11-18)
 
@@ -1175,6 +1175,11 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   initializer's object, including through a conditional glvalue. Reading a later field on
   the executed path fails its lifetime check ([dcl.init.aggr], [expr.const]).
   [#895](https://github.com/yrashk/ycxx/issues/895)
+- A constant expression can read public integral and enumeration fields of an ordinary
+  flat aggregate temporary with no bases and implicit trivial destruction. Each eligible field
+  has its own typed cell. Evaluation rejects a read before initialization
+  ([class.temporary], [dcl.init.aggr], [basic.life], [expr.const.core]).
+  [#900](https://github.com/yrashk/ycxx/issues/900)
 - Constant evaluation can read namespace-scope `constexpr` pointers erased to `void`
   ([expr.const], [conv.ptr], #102). The interpreter reconstructs the original scalar or array
   subobject path, including one-past addresses, from the constant's path and byte offset.
