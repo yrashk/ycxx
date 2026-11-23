@@ -595,6 +595,10 @@ written default member initializer are value-initialized.
 - ordinary namespace-scope `consteval` definitions with neither static locals nor closures
   can supply compile-time results without requiring a native function body.
   [#1006](https://github.com/yrashk/ycxx/issues/1006)
+  `consteval` constructors work, including the implicit conversion libycxx's comparison
+  categories use for their literal `0` operand, and `constexpr` and `consteval` constructors of
+  classes without bases or class-typed fields evaluate at compile time.
+  [#102](https://github.com/yrashk/ycxx/issues/102)
   A constant evaluation can bypass a block-scope static aggregate. [#872](https://github.com/yrashk/ycxx/issues/872)
   Scalar enumeration values work in constexpr variables, calls, casts and switch conditions.
   A flat static constexpr aggregate member initialized with `T{...}` has addressable storage

@@ -542,6 +542,14 @@ public:
   // What constant evaluation answers for list-initialization's narrowing check ([dcl.init.list]);
   // set by the parser, which owns the evaluator.
   std::function<std::optional<ConstId>(Ex)> constant_of;
+  // What constant evaluation answers for an immediate invocation ([expr.const]): its value, none
+  // for a void call, or why it is not a constant expression. Set by the parser too.
+  struct Evaluation {
+    std::optional<ConstId> value;
+    u64 reason = reason_unsupported;
+    bool constant = false;
+  };
+  std::function<Evaluation(Ex)> evaluate_immediate;
 
   // ------------------------------------------------------------ classes ([class], [expr.ref])
 
@@ -5187,6 +5195,35 @@ public:
 
   bool is_consteval(EntityId f) const { return consteval_.contains(std::to_underlying(f)); }
 
+  // A call of an immediate function outside an immediate function context is an immediate
+  // invocation: it must be a constant expression, and it is replaced by its value ([expr.const]).
+  // `call` calls a consteval function or constructor.
+  Ex immediate_invocation(Ex call) {
+    if (!call.ok() || immediate_context || unevaluated || !evaluate_immediate) return call;
+    const Evaluation v = evaluate_immediate(call);
+    if (!v.constant) {
+      diag(call.begin, Diag::not_constant, v.reason);
+      return {NodeId::none, call.begin, call.end};
+    }
+    if (!v.value) {
+      // A void function: the invocation is replaced by its (empty) result, `(void)0`, so the
+      // consteval function's body never runs at run time.
+      QualType i = builtin(Builtin::int_);
+      Ex zero = literal(i, w_->values.integer(i, 0), ValueCategory::prvalue, call.begin, call.end);
+      return convert_node(zero, ast::ConversionKind::to_void, builtin(Builtin::void_));
+    }
+    // A manifestly constant-evaluated expression may consume an immediate pointer.
+    // Its initializer checks the final value for an escape.
+    if (auto entity = immediate_result_entity(*v.value)) {
+      if (!constant_reference_context && !trial_initializer) {
+        diag(call.begin, Diag::immediate_address, w_->entities.rec(*entity).name);
+        return {NodeId::none, call.begin, call.end};
+      }
+      folded_immediate_result = *entity;
+    }
+    return literal(call.type(), *v.value, ValueCategory::prvalue, call.begin, call.end);
+  }
+
   void retain_immediate_functions(const Sema& replay) {
     consteval_.insert(replay.consteval_.begin(), replay.consteval_.end());
     if (folded_immediate_result == EntityId::none) folded_immediate_result = replay.folded_immediate_result;
@@ -5999,6 +6036,7 @@ public:
     std::vector<NodeId> defaults{};
     bool is_explicit = false;
     DefaultArgumentOrigin default_origin = DefaultArgumentOrigin::interned;
+    bool is_consteval = false;  // an immediate function ([dcl.constexpr])
     // How many arguments a call must give ([over.match.viable]/2.3).
     std::size_t required(std::size_t params) const {
       std::size_t k = params;
@@ -6497,6 +6535,7 @@ public:
         auto st = t.specialization_type(td, *targs);
         if (!st) continue;
         Candidate k{EntityId::none, *st, true, m.is_deleted, &td, m.defaults};
+        k.is_consteval = (td.flags & decl_flag::consteval_) != 0;
         if (copy_init && (types().rec(*st).params.empty() || k.required(types().rec(*st).params.size()) > 1)) continue;
         // [class.copy.ctor]/5: never `S(S)`, a constructor taking its own class by value.
         if (TypeRec sr = types().rec(*st); sr.params.size() == 1 && Types::unqualified(types().canonical(sr.params[0])) == ut) continue;
@@ -6505,6 +6544,7 @@ public:
       } else if (m.is_ctor) {
         TypeRec fr = types().rec(m.type);
         Candidate k{m.entity, m.type, true, m.is_deleted, nullptr, m.defaults, m.is_explicit};
+        k.is_consteval = m.is_consteval;
         user_copy = user_copy || is_copy_ctor(fr, ut, k.required(fr.params.size()));
         // Copy-initialization converts with a constructor that takes one argument ([class.conv.ctor]).
         if (copy_init && (m.is_explicit || fr.params.empty() || k.required(fr.params.size()) > 1)) continue;
@@ -6654,7 +6694,10 @@ public:
       cs.push_back({a.id, a.begin >= begin ? a.begin - begin : 0});
     }
     ExprInfo info{ut, ValueCategory::prvalue, 0};
-    return node(ast::CtorCall{info, k.entity, 0, b_->list(cs)}, begin, end, info);
+    Ex construction = node(ast::CtorCall{info, k.entity, 0, b_->list(cs)}, begin, end, info);
+    if (!k.is_consteval) return construction;
+    consteval_.insert(std::to_underlying(k.entity));
+    return immediate_invocation(construction);
   }
   // In a syntax-only constructor definition, check the implicit default initialization of
   // its direct polymorphic base. There is no complete object or native initializer to build.
@@ -9714,9 +9757,12 @@ public:
     }
     if (!r.ok()) {
       // A deleted or ambiguous choice makes the expression ill-formed ([over.match.oper]/3,
-      // [over.match.best]); only when no candidate is viable does the built-in operator apply.
+      // [over.match.best]), and so does a selected candidate whose argument conversion is an
+      // immediate invocation that is not constant ([expr.const]); only when no candidate is
+      // viable does the built-in operator apply.
       for (std::size_t i = n; i < diags_->size(); ++i)
-        if ((*diags_)[i].id == diag_id(Diag::deleted_function) || (*diags_)[i].id == diag_id(Diag::ambiguous_call))
+        if ((*diags_)[i].id == diag_id(Diag::deleted_function) || (*diags_)[i].id == diag_id(Diag::ambiguous_call) ||
+            (*diags_)[i].id == diag_id(Diag::not_constant))
           return Ex{NodeId::none, begin, end};
       truncate_diags(n);
       return std::nullopt;

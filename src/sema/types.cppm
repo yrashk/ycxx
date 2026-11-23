@@ -713,6 +713,7 @@ struct MemberDeclRec {
   EntityId overridden_virtual = EntityId::none;
   bool is_final = false;
   bool is_pure = false;
+  bool is_consteval = false;  // an immediate function ([dcl.constexpr])
 };
 
 struct NestedType {
