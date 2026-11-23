@@ -1,5 +1,7 @@
 #include "transport.hpp"
 
+Tag::Tag(int id) noexcept { record(id); }
+
 Word transport(Word a, Tag first, Word b, Word c, Tag second, Word d,
                Word e, Word f, Word g, Word h) noexcept {
   if (same_tag(&first, &second)) return 0;

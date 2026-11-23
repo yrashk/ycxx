@@ -4,7 +4,7 @@ using Word = unsigned long long;
 void record(int id) noexcept;
 
 struct Tag {
-  Tag(int id) noexcept { record(id); }
+  Tag(int id) noexcept;
 };
 
 bool same_tag(const Tag *, const Tag *) noexcept;
