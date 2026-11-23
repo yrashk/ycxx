@@ -300,7 +300,12 @@ with tempfile.TemporaryDirectory() as directory:
               static constexpr int uses = request_limit(load_deployment().requested(Wide)).capped;
             };
             template<class Payload> struct NativeConfig : Profile<site::Wide<Payload>> {};
-            struct Active : NativeConfig<int> { static constexpr int limit = uses; };
+            template<int Requested> struct CountProfile {
+              enum Counts : int { previous = Requested - 1, count };
+            };
+            struct Active : NativeConfig<int> {
+              static constexpr int limit = CountProfile<uses>::count;
+            };
             static_assert(Active::limit == 2);
             static_assert(NativeConfig<char>::uses == 1);
             using Scope = fx::budget<Send, Active::limit>;
