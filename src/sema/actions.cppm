@@ -124,8 +124,11 @@ public:
   virtual bool may_have_virtual_layouts() { return true; }
   // An omitted field's initializer, analysed at its declaration into the requesting builder.
   // `NodeId::none` records a diagnosed error. No answer means this context cannot replay it.
-  // A required base selects the call-free parenthesized aggregate form.
-  virtual std::optional<NodeId> replay_default_member(Sema&, EntityId, EntityId = EntityId::none) { return std::nullopt; }
+  // A required base selects the call-free parenthesized aggregate form. The fallback returns
+  // the literal from folding a template specialization's scalar initializer.
+  virtual std::optional<NodeId> replay_default_member(Sema&, EntityId, EntityId = EntityId::none, bool = false) {
+    return std::nullopt;
+  }
   virtual std::optional<NodeId> replay_function_default(Sema&, const ast::DefaultArg&, EntityId, QualType, u32) {
     return std::nullopt;
   }
@@ -157,6 +160,9 @@ public:
   // Inside the enumerator list of an enumeration this unit is defining: its record so far, which
   // is published only after the list (#156).
   virtual const EnumRec* defining_enum(EntityId) { return nullptr; }
+  // A scoped member enum's declaration supplies its fixed type. Looking up its enumerators
+  // requires the definition ([temp.inst]). False means its instantiation was diagnosed.
+  virtual bool require_enum_definition(EntityId) { return true; }
   // Scopedness is fixed even when the enum's enumerator list is still open.
   virtual std::optional<bool> defining_enum_is_scoped(EntityId e) {
     if (const EnumRec* record = defining_enum(e)) return record->scoped;
@@ -1091,7 +1097,8 @@ public:
       diag(at_, Diag::not_a_type, no_name());
       return;
     }
-    using_enums_.push_back({scopes_.size() - 1, types().enum_of(t)});
+    const EntityId enumeration = types().enum_of(t);
+    if (q_->require_enum_definition(enumeration)) using_enums_.push_back({scopes_.size() - 1, enumeration});
   }
 
   // ------------------------------------------------------------ concepts ([temp.concept], [temp.constr])
@@ -3104,9 +3111,11 @@ public:
   }
   Ex element_default(const Element& e, bool value, bool replay, u32 begin, u32 end,
                      EntityId required_base = EntityId::none) {
-    if ((replay || required_base != EntityId::none) && e.default_member != EntityId::none) {
-      if (auto init = q_->replay_default_member(*this, e.default_member, required_base)) {
+    const bool fallback = !replay && required_base == EntityId::none;
+    if (e.default_member != EntityId::none && (!fallback || e.init == ConstId::none)) {
+      if (auto init = q_->replay_default_member(*this, e.default_member, required_base, fallback)) {
         if (*init == NodeId::none) return {NodeId::none, begin, end};
+        if (fallback) return {*init, begin, end, {Types::unqualified(e.type), ValueCategory::prvalue, 0}};
         ExprInfo info{e.type, ValueCategory::prvalue, 0};
         // A named declaration in a template is also a newly supported replay.
         if ((!replay_default_members_ || templated()) && required_base == EntityId::none &&
@@ -5655,6 +5664,8 @@ public:
         if (d.name == name && d.sema.kind == ast::DeclKind::enumerator && d.sema.entity != EntityId::none &&
             w_->entities.rec(d.sema.entity).scope == e)
           return enumerator_in_list(d, begin, end);
+    } else if (!q_->require_enum_definition(e)) {
+      return Ex{NodeId::none, begin, end};
     }
     if (const EnumRec* r = enum_rec(e))
       for (const EnumeratorRec& x : r->enumerators)
