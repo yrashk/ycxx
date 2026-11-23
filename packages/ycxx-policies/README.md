@@ -366,7 +366,8 @@ and their declaration annotations. In a checked body, sequential calls add their
 declared costs. A conditional counts its condition and the more expensive branch.
 A counted loop such as `for (int i = 3; i > 0; --i)` can spend up to three
 iterations' worth of effects. YCXX recognizes `int` and `unsigned` counters with
-same-type literals or `static constexpr` data members as endpoints. The counter
+integer literals or supported `static constexpr` data members as endpoints. It applies
+integral conversions before counting, so an unsigned counter can start at `0` or `0u`. The counter
 increments toward `<` or decrements toward `>`. The body can read `i` by value.
 Writes and references to the counter prevent YCXX from proving that bound. For other loops,
 a positive cost on a path to another iteration exceeds a finite grade. A cost on a path that

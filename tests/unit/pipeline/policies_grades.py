@@ -60,15 +60,22 @@ with tempfile.TemporaryDirectory() as directory:
         ("condition_spends", "One", "if (send(n)) return send(0); return 0;", "exceeds its usage grade of 1"),
         ("effect_free_loop", "One", "while (n > 0) --n; return send(n);", None),
         ("loop_initializer", "One", "for (int i = send(n); i > 0; --i) {} return 0;", None),
-        ("counted_loop", "Two", "for (unsigned i = 0u; i < 2u; ++i) send(i); return n;", None),
+        ("counted_loop", "Two", "for (unsigned i = 0; i < 2u; ++i) send(i); return n;", None),
+        ("counted_converted_limit", "Two", "for (unsigned i = 0u; i < 2; ++i) send(i); return n;", None),
         ("counted_signed", "Two", "for (int i = 2; i < 4; ++i) send(i); return n;", None),
         ("counted_unsigned_offset", "Two", "for (unsigned i = 2u; i < 4u; i++) send(i); return n;", None),
         ("counted_negative", "Two", "for (int i = -1; i < 1; ++i) send(i); return n;", None),
         ("counted_descending", "Two", "for (int i = 1; i > -1; i--) send(i); return n;", None),
         ("counted_unsigned_descending", "Two", "for (unsigned i = 2u; i > 0u; --i) send(i); return n;", None),
+        ("counted_converted_descending", "Two",
+         "for (unsigned i = -1; i > 4294967293u; --i) send(n); return n;", None),
         ("counted_offset_overuse", "Two", "for (int i = 7; i < 10; ++i) send(i); return n;",
          "exceeds its usage grade of 2"),
-        ("counted_wrong_direction", "Two", "for (unsigned i = 0u; i < 2u; --i) send(i); return n;",
+        ("counted_wrong_direction", "Two", "for (unsigned i = 0; i < 2u; --i) send(i); return n;",
+         "unbounded usage"),
+        ("counted_wrapping_step", "Two", "for (unsigned i = 0; i < 4294967295u; i += 2u) send(n); return n;",
+         "unbounded usage"),
+        ("counted_unproven_init", "Two", "for (unsigned i = n; i < 2u; ++i) send(i); return n;",
          "unbounded usage"),
         ("counted_nested", "Four", "for (unsigned i = 0u; i < 2u; ++i) "
          "for (unsigned j = 0u; j < 2u; ++j) send(i + j); return n;", None),
@@ -81,9 +88,9 @@ with tempfile.TemporaryDirectory() as directory:
         ("counted_break", "One", "for (unsigned i = 0u; i < 8u; ++i) { send(n); break; } return n;", None),
         ("counted_overuse", "One", "for (unsigned i = 0u; i < 2u; ++i) send(n); return n;",
          "exceeds its usage grade of 1"),
-        ("counted_counter_mutation", "Two", "for (unsigned i = 0u; i < 2u; ++i) { --i; send(n); } return n;",
+        ("counted_counter_mutation", "Two", "for (unsigned i = 0; i < 2u; ++i) { --i; send(n); } return n;",
          "unbounded usage"),
-        ("counted_counter_alias", "Two", "for (unsigned i = 0u; i < 2u; ++i) "
+        ("counted_counter_alias", "Two", "for (unsigned i = 0; i < 2u; ++i) "
          "{ unsigned& alias = i; --alias; send(n); } return n;", "unbounded usage"),
         ("single_iteration", "One", "do { n = send(n); } while (false); return n;", None),
         ("skipped_loop", "One", "while (false) send(n); return send(0);", None),
@@ -101,6 +108,11 @@ with tempfile.TemporaryDirectory() as directory:
         ("recursive_spend", "One", "if (n > 0) { send(n); return run(n - 1); } return 0;", "exceeds its usage grade of 1"),
     ):
         syntax(write(f"{name}.cpp", declaration.replace("BOUND", bound).replace("BODY", body)), error=error)
+
+    converted_overuse = declaration.replace("BOUND", "Two").replace(
+        "BODY", "for (int i = 4294967295u; i < 2; ++i) send(i); return n;")
+    message = syntax(write("counted_converted_overuse.cpp", converted_overuse), error="exceeds its usage grade of 2")
+    assert "unbounded usage" not in message, message
 
     inherited_profile = """\
         #include "grades.hpp"

@@ -1590,23 +1590,44 @@ static bool effect_counter_exposed(const ast::Red& node, ast::u32 counter) {
   return exposed;
 }
 
-static std::optional<std::int64_t> effect_counter_literal(const sema::World& world, ast::Red expression,
-                                                          ast::Builtin type) {
+static std::optional<ast::ConstId> effect_counter_constant(const sema::World& world, ast::Red expression) {
   expression = effect_unparen(expression);
+  if (expression.is<ast::ImplicitConversion>()) {
+    // Apply the typed conversion before using its value as an endpoint ([conv.integral]).
+    const auto conversion = expression.get<ast::ImplicitConversion>();
+    const auto type = world.types.builtin_of(conversion.info.type);
+    if (conversion.conversion != ast::ConversionKind::integral || conversion.function != EntityId::none ||
+        !type || !ast::is_integral(*type))
+      return std::nullopt;
+    if (const auto operand = effect_counter_constant(world, effect_child(expression, conversion.operand)))
+      return ast::convert_integral(world.ins, world.target, *operand, conversion.info.type);
+    return std::nullopt;
+  }
   bool negate = false;
-  if (type == ast::Builtin::int_ && expression.is<ast::Unary>()) {
+  if (expression.is<ast::Unary>()) {
     const auto unary = expression.get<ast::Unary>();
-    if (unary.op != ast::UnaryOp::minus) return std::nullopt;
+    if (unary.op != ast::UnaryOp::minus || !world.types.is(unary.info.type, ast::Builtin::int_))
+      return std::nullopt;
     negate = true;
     expression = effect_unparen(effect_child(expression, unary.operand));
   }
   if (!expression.is<ast::Literal>()) return std::nullopt;
   const auto literal = expression.get<ast::Literal>();
-  if (!world.types.is(literal.info.type, type) || !world.ins.values.is<ast::VInt>(literal.value))
+  const auto type = world.types.builtin_of(literal.info.type);
+  if (!type || !ast::is_integral(*type) || !world.ins.values.is<ast::VInt>(literal.value))
     return std::nullopt;
+  if (!negate) return literal.value;
+  if (*type != ast::Builtin::int_) return std::nullopt;
   const auto value = static_cast<std::int64_t>(ast::int_bits(world.ins, literal.value).lo);
-  if (negate && value < 0) return std::nullopt;
-  return negate ? -value : value;
+  if (value < 0) return std::nullopt;
+  return ast::int_value(world.ins, world.target, literal.info.type, -value);
+}
+
+static std::optional<std::int64_t> effect_counter_endpoint(const sema::World& world, ast::Red expression,
+                                                           ast::Builtin type) {
+  const auto constant = effect_counter_constant(world, expression);
+  if (!constant || !world.types.is(world.ins.values.get<ast::VInt>(*constant).type, type)) return std::nullopt;
+  return static_cast<std::int64_t>(ast::int_bits(world.ins, *constant).lo);
 }
 
 // A private counter steps toward a strict bound of its own type without wrapping.
@@ -1637,8 +1658,8 @@ static std::optional<ast::u64> effect_loop_limit(const sema::World& world, const
       !effect_counter_read(effect_child(condition, comparison.lhs), local.local) ||
       !effect_counter_ref(effect_child(increment, step.operand), local.local))
     return std::nullopt;
-  const auto first = effect_counter_literal(world, effect_child(declaration, local.init), *type);
-  const auto bound = effect_counter_literal(world, effect_child(condition, comparison.rhs), *type);
+  const auto first = effect_counter_endpoint(world, effect_child(declaration, local.init), *type);
+  const auto bound = effect_counter_endpoint(world, effect_child(condition, comparison.rhs), *type);
   if (!first || !bound || effect_counter_exposed(effect_child(node, loop.body), local.local)) return std::nullopt;
   const auto distance = ascending ? *bound - *first : *first - *bound;
   return distance > 0 ? static_cast<ast::u64>(distance) : ast::u64{0};

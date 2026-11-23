@@ -727,6 +727,7 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
   The checker rejects indirect calls and unmodeled implicit operations.
   An `at_most<Tag, N>` entry adds a static usage grade for one tag. The check adds
   sequential costs, takes the maximum across alternatives, and counts terminating loop paths.
+  Counted `int` and `unsigned` loops use the converted integer values of their endpoints.
   Explicit object links carry graded contracts. The C++20 package also offers scope-local runtime budgets
   and explicit scoped handlers. For a local handler bound to a named function, YCXX verifies
   the constructor and forwarding method, prevents the handler from escaping, and uses the
