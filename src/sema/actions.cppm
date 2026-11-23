@@ -91,6 +91,7 @@ enum class AliasCallPattern { none, retained, may_erase };
 class Questions {
 public:
   virtual bool exceptions_enabled() const { return true; }
+  virtual bool rtti_enabled() const { return true; }
   // The declarations of `name` in the global namespace visible at the current point: those that
   // precede the current item, and, inside a function body, the item's own (§B2, [basic.scope.pdecl]).
   // `directives` are the namespaces block-scope using-directives nominate ([namespace.udir]): their
@@ -7879,15 +7880,22 @@ public:
     const EntityId dst = types().class_of(destination);
     int paths = 0;
     const auto base = src != dst ? base_path(src, dst, paths) : std::nullopt;
-    if (base && !check_base_path(source, dst, base, paths, begin)) return fail;
-    if (src != dst && !base) {
-      const auto* record = class_rec(src);
-      if (!record || !record->polymorphic) {
-        diag(begin, Diag::dynamic_cast_polymorphic, source);
-        return fail;
-      }
+    if (src == dst || base) {
+      if (pointer) return convert(e, target, begin);
+      if (base && !check_base_path(source, dst, base, paths, begin)) return fail;
+      diag(begin, Diag::not_supported, lex::Tk::kw_dynamic_cast);
+      return fail;
     }
-    if (!pointer || src == dst || base || w_->target.triple != ast::x86_64_linux.triple) {
+    const auto* record = class_rec(src);
+    if (!record || !record->polymorphic) {
+      diag(begin, Diag::dynamic_cast_polymorphic, source);
+      return fail;
+    }
+    if (!q_->rtti_enabled()) {
+      diag(begin, Diag::rtti_disabled, lex::Tk::kw_dynamic_cast);
+      return fail;
+    }
+    if (!pointer || w_->target.triple != ast::x86_64_linux.triple) {
       diag(begin, Diag::not_supported, lex::Tk::kw_dynamic_cast);
       return fail;
     }
