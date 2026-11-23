@@ -164,6 +164,7 @@ enum class DepOp : u8 {
   is_scoped_enum,
   is_polymorphic,
   is_abstract,
+  is_standard_layout,
 };
 
 // A dependent operation (§5.5). The predicates take canonical qualified type operands.

@@ -2636,6 +2636,7 @@ public:
   bool may_have_virtual_layouts() override { return p_->may_have_virtual_layouts(); }
   bool is_complete_at_source(EntityId c) override { return at_.is_complete_at_source(c); }
   std::optional<bool> defining_enum_is_scoped(EntityId e) override { return at_.defining_enum_is_scoped(e); }
+  std::optional<bool> defining_enum_is_fixed(EntityId e) override { return at_.defining_enum_is_fixed(e); }
   // A type trait whose operands were dependent where the template defines it is answered at the
   // point of instantiation, the end ([temp.point]); a concrete one keeps its definition's answer.
   std::optional<bool> type_trait_at_demand(EntityId c, engine::Loc loc) override {
@@ -7452,6 +7453,13 @@ std::optional<ast::DeclSema> Program::decl_sema(DeclId d) {
 
 // ---------------------------------------------------------------- class_def
 
+bool valid_member_declarations(std::span<const engine::Diagnostic> diagnostics) {
+  return std::ranges::none_of(diagnostics, [](const engine::Diagnostic& d) {
+    const auto kind = sema::sema_diag_of(d.id);
+    return !kind || sema::message_of(*kind).severity == lex::Severity::error;
+  });
+}
+
 // The members of the class item `item` from its member items' records, read by `sema_of`: the
 // class's own, or a class template specialization's (#88).
 Program::ClassContent Program::class_content(u32 item, const std::function<const ast::ItemSema&(u32)>& sema_of) {
@@ -8267,10 +8275,7 @@ const Result<ast::ClassDef>& Program::class_def(u32 item) {
   bool member_declarations_valid = true;
   ClassContent c = class_content(item, [&](u32 m) -> const ast::ItemSema& {
     const auto& member = item_sema(m);
-    member_declarations_valid = member_declarations_valid && std::ranges::none_of(member.diags, [](const auto& d) {
-      const auto kind = sema::sema_diag_of(d.id);
-      return !kind || sema::message_of(*kind).severity == lex::Severity::error;
-    });
+    member_declarations_valid &= valid_member_declarations(member.diags);
     return member.value;
   });
   std::vector<ast::MemberRec>& members = c.members;
@@ -8281,6 +8286,7 @@ const Result<ast::ClassDef>& Program::class_def(u32 item) {
     // Every unit that defines the class builds its own record (#115), and synthesizes the special
     // members its own object needs.
     sema::ClassRec rec;
+    rec.member_declarations_valid = member_declarations_valid;
     if (const auto head = class_heads_.find(item); head != class_heads_.end()) rec.is_final = head->second.is_final;
     rec.union_ = class_rec_is_union(item);
     rec.unapplied_layout = has_unapplied_class_layout(item, c);
@@ -10039,16 +10045,22 @@ const sema::ClassRec* Program::instantiate_class(EntityId spec, u32 point) {
   class_points_.emplace(key, point);
   // Each member item's declaration part, again, with the arguments bound: the members of `spec`,
   // asked at the point of instantiation ([temp.point]).
+  bool member_declarations_valid = true;
   ClassContent c = class_content(k, [&](u32 m) -> const ast::ItemSema& {
     auto cell_key = std::pair(m, key);
+    const auto& written = item_sema(m);
+    member_declarations_valid &= valid_member_declarations(written.diags);
     if (!class_member_cells_.contains(cell_key)) {
       Result<ast::ItemSema> cell = ItemAnalysis(*this, m, ClassInstantiation{spec, args, point}).run();
+      member_declarations_valid &= valid_member_declarations(cell.diags);
       // What the definition diagnosed it says once, there.
-      if (!item_sema(m).diags.empty()) cell.diags.clear();
+      if (!written.diags.empty()) cell.diags.clear();
       class_member_cells_.emplace(cell_key, std::move(cell));
       class_member_order_.push_back(cell_key);
     }
-    return class_member_cells_.at(cell_key).value;
+    const auto& member = class_member_cells_.at(cell_key);
+    member_declarations_valid &= valid_member_declarations(member.diags);
+    return member.value;
   });
   classes_instantiating_.erase(key);
   classes_instantiated_.insert(key);
@@ -10057,6 +10069,7 @@ const sema::ClassRec* Program::instantiate_class(EntityId spec, u32 point) {
       member_patterns_.emplace(std::to_underlying(m.entity), MemberOf{index(m.decl.item), spec});
   // Built whole, then published once (#156); the first publication wins.
   sema::ClassRec built;
+  built.member_declarations_valid = member_declarations_valid;
   built.union_ = class_rec_is_union(k);
   built.unapplied_layout = has_unapplied_class_layout(k, c);
   built.bases = std::move(bases);
