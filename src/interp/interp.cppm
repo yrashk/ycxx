@@ -51,8 +51,8 @@ struct Outcome {
 template <Host H>
 engine::query_task<Outcome> evaluate(H& host, const ast::Interners& in, const ast::Target& target,
                                      const ir::Function& entry, EntityId name, std::vector<Value> args,
-                                     Config config = {}) {
-  Machine m(in, target, std::move(config));
+                                     Config config = {}, ByteCapture* byte_capture = nullptr) {
+  Machine m(in, target, std::move(config), byte_capture);
   m.start(entry, name, args);
   Outcome out;
   for (;;) {
@@ -77,6 +77,7 @@ engine::query_task<Outcome> evaluate(H& host, const ast::Interners& in, const as
       break;
     }
   }
+  if (byte_capture && out.status != Outcome::Status::value) byte_capture->bytes.reset();
   out.steps = m.steps();
   co_return out;
 }

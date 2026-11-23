@@ -1292,6 +1292,9 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
         it.kind != items::ItemKind::class_def && it.kind != items::ItemKind::enum_def)  // its declarators: `struct S { … } s;`
       continue;
     const ast::ItemSema& is = program.item_sema(k).value;
+    if (!ast::is_none(is.asm_hidden_symbol))
+      tu.asm_hidden_symbols.push_back({std::string(ins.names.spelling(is.asm_hidden_symbol)),
+                                       {program.id(k), is.asm_directive_at}});
     std::vector<ast::DeclSema> decls = ins.seqs.elements(is.decls);
     for (ast::DeclSema& decl : decls) decl = program.completed_declaration(decl);
     // The declarators, by declaration ordinal: their constants and item-relative locations (the
@@ -1634,6 +1637,7 @@ TranslationUnit finish_unit(std::vector<UnitPart>& parts, sema::World& world, st
       if (uncertain_layouts.empty() || std::ranges::none_of(layouts, [&](EntityId e) { return uncertain_layouts.contains(e); }))
         tu.base_object_variants.insert(function);
     tu.init_functions.insert(tu.init_functions.end(), p.tu.init_functions.begin(), p.tu.init_functions.end());
+    for (AsmHiddenSymbol& directive : p.tu.asm_hidden_symbols) tu.asm_hidden_symbols.push_back(std::move(directive));
     dynamic.insert(dynamic.end(), p.dynamic.begin(), p.dynamic.end());
     for (auto [into, from] : {std::pair{&inline_declarations, &p.inline_declarations}, {&noexcept_declarations, &p.noexcept_declarations},
                              {&hidden_declarations, &p.hidden_declarations}, {&defined, &p.defined},
