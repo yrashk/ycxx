@@ -6,13 +6,14 @@
 export module ycxx.engine:arena;
 
 import std;
+import :storage;
 
 export namespace ycxx::engine {
 
 template <class T>
 class Arena {
 public:
-  Arena() = default;
+  explicit Arena(const ArenaBacking* backing = nullptr) : backing_(backing) {}
   Arena(const Arena&) = delete;
   Arena& operator=(const Arena&) = delete;
   ~Arena() {
@@ -20,7 +21,7 @@ public:
     for (std::uint32_t i = 0; i < n; ++i) std::destroy_at(&(*this)[i]);
     for (std::size_t b = 0; b < blocks_.size(); ++b) {
       if (T* p = blocks_[b].load(std::memory_order_relaxed)) {
-        ::operator delete(static_cast<void*>(p), block_size(b) * sizeof(T), std::align_val_t{alignof(T)});
+        release(p, block_size(b) * sizeof(T), mapped_[b]);
       }
     }
   }
@@ -59,17 +60,31 @@ private:
     const std::size_t b = static_cast<std::size_t>(std::bit_width(biased)) - 1 - first_bits;
     return {b, static_cast<std::size_t>(biased - (std::uint64_t{1} << (first_bits + b)))};
   }
+  static void release(T* p, std::size_t bytes, bool mapped) noexcept {
+    if (mapped) ArenaBacking::release(p, bytes);
+    else ::operator delete(static_cast<void*>(p), bytes, std::align_val_t{alignof(T)});
+  }
+
   // The block, allocated by whichever thread needs it first.
   T* block(std::size_t b) {
     T* p = blocks_[b].load(std::memory_order_acquire);
     if (p) return p;
-    T* fresh = static_cast<T*>(::operator new(block_size(b) * sizeof(T), std::align_val_t{alignof(T)}));
-    if (blocks_[b].compare_exchange_strong(p, fresh, std::memory_order_acq_rel, std::memory_order_acquire)) return fresh;
-    ::operator delete(static_cast<void*>(fresh), block_size(b) * sizeof(T), std::align_val_t{alignof(T)});
+    const auto bytes = block_size(b) * sizeof(T);
+    void* mapped = backing_ ? backing_->allocate(bytes, alignof(T)) : nullptr;
+    auto* fresh = static_cast<T*>(mapped ? mapped : ::operator new(bytes, std::align_val_t{alignof(T)}));
+    if (blocks_[b].compare_exchange_strong(p, fresh, std::memory_order_acq_rel, std::memory_order_acquire)) {
+      // Only the winner writes this flag. It is read solely when the arena is destroyed at
+      // quiescence, so the array indexing path does not load it.
+      mapped_[b] = mapped != nullptr;
+      return fresh;
+    }
+    release(fresh, bytes, mapped != nullptr);
     return p;
   }
 
+  const ArenaBacking* backing_;
   std::array<std::atomic<T*>, 22> blocks_{};
+  std::array<bool, 22> mapped_{};
   std::atomic<std::uint32_t> size_{0};
 };
 

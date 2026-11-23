@@ -28,7 +28,10 @@ private:
 
 class Source {
 public:
-  explicit Source(std::span<const std::byte> b) noexcept : bytes_(b) {}
+  explicit Source(std::span<const std::byte> b, std::shared_ptr<const void> storage = {}) noexcept
+      : bytes_(b), storage_(std::move(storage)) {}
+  // A codec may borrow the bytes while retaining this owner. With no owner, values must copy.
+  const std::shared_ptr<const void>& storage() const noexcept { return storage_; }
 
   template <std::unsigned_integral U>
   U uint() noexcept {
@@ -66,6 +69,7 @@ private:
   }
 
   std::span<const std::byte> bytes_;
+  std::shared_ptr<const void> storage_;
   std::size_t at_ = 0;
   bool failed_ = false;
 };

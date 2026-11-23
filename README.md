@@ -656,6 +656,10 @@ lines in 0.20 s. Only that module is analysed again, and only the two functions 
 constant are compiled again ([#938](https://github.com/yrashk/ycxx/issues/938),
 [#947](https://github.com/yrashk/ycxx/issues/947)).
 
+**Share source preparation across builders.** Compatible compiler processes can share immutable
+source snapshots and opt in separately to file-backed query arenas. See
+[Engine storage](docs/engine-storage.md) for configuration, benchmark commands and scope.
+
 **See what the engine does.** `ycxx cxx --trace-engine a.cpp` (or `YCXX_TRACE_ENGINE=stream`)
 prints every query the build went through as a colored tree on stderr: what ran, what was
 reused, verified green or cut off early, how long it took and on which worker, and how much
