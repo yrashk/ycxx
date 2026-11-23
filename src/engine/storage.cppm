@@ -42,7 +42,7 @@ private:
 // Atomically publish a complete segment. Existing mappings keep their old inode across a rename.
 bool write_snapshot(const std::string& path, std::span<const std::byte> bytes) noexcept;
 
-// The executing compiler's contents, independent of its inode or installation path.
+// The running executable's identity, independent of its installation path.
 std::optional<Fp128> snapshot_build_id() noexcept;
 
 }  // namespace ycxx::engine
@@ -90,20 +90,7 @@ SnapshotMapping::~SnapshotMapping() {
 }
 
 std::optional<Fp128> snapshot_build_id() noexcept {
-  static const auto build = [] -> std::optional<Fp128> {
-    const int fd = storage_os::open_executable();
-    if (fd < 0) return std::nullopt;
-    Hasher hash;
-    std::array<std::byte, 64 * 1024> buffer;
-    ssize_t n;
-    do {
-      n = read(fd, buffer.data(), buffer.size());
-      if (n > 0) hash.bytes(std::span<const std::byte>(buffer.data(), static_cast<std::size_t>(n)));
-    } while (n > 0 || (n < 0 && errno == EINTR));
-    close(fd);
-    if (n != 0) return std::nullopt;
-    return hash.finish();
-  }();
+  static const auto build = storage_os::running_build_id();
   return build;
 }
 

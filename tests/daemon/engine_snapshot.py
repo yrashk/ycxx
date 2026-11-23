@@ -1,15 +1,38 @@
 """Reuse a copied phase 1/2 snapshot in fresh compiler processes."""
 from pathlib import Path
 import os
+import select
 import shutil
 import subprocess
 import sys
 import tempfile
 
 
-def main(ycxx):
+def check_running_identity(probe, replacement_binary, root):
+    installed = root / "snapshot-probe"
+    replacement = root / "replacement"
+    shutil.copy2(probe, installed)
+    shutil.copy2(replacement_binary, replacement)
+    command = [installed, "--build-id-after-input"]
+    baseline = subprocess.run(command, input=b"go\n", capture_output=True, check=True, timeout=20)
+    ready, build_id = baseline.stdout.splitlines()
+    assert ready == b"ready" and len(build_id) == 32
+    with subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE) as running:
+        try:
+            assert select.select([running.stdout], [], [], 20)[0], "probe did not reach the barrier"
+            assert running.stdout.readline() == b"ready\n"
+            replacement.replace(installed)
+            actual, _ = running.communicate(input=b"go\n", timeout=20)
+            assert running.returncode == 0 and actual.strip() == build_id, (running.returncode, actual)
+        finally:
+            if running.poll() is None:
+                running.kill()
+
+
+def main(ycxx, probe):
     with tempfile.TemporaryDirectory(prefix="ycxx-snapshot-") as temp:
         root = Path(temp)
+        check_running_identity(probe, ycxx, root)
         producer, consumer, original, restored, paging = (
             root / name for name in ("producer", "consumer", "original", "restored", "paging")
         )
@@ -61,4 +84,4 @@ def main(ycxx):
 
 
 if __name__ == "__main__":
-    main(str(Path(sys.argv[1]).resolve()))
+    main(*(Path(arg).resolve() for arg in sys.argv[1:]))

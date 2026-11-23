@@ -109,7 +109,15 @@ void run() {
 
 }  // namespace ycxx::engine::snapshot_test
 
-int main() {
+int main(int argc, char** argv) {
+  if (argc == 2 && std::string_view(argv[1]) == "--build-id-after-input") {
+    std::cout << "ready" << std::endl;
+    if (std::cin.get() == std::char_traits<char>::eof()) return 1;
+    const auto id = ycxx::engine::snapshot_build_id();
+    if (!id) return 2;
+    std::cout << std::format("{:016x}{:016x}\n", id->hi, id->lo);
+    return 0;
+  }
   ycxx::engine::snapshot_test::run();
   return ycxx::unit::result("engine_snapshot");
 }

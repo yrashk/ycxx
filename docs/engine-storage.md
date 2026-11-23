@@ -20,8 +20,10 @@ with access to those sources. Accept artifacts only from trusted build jobs. The
 detect accidental corruption and the compiler fingerprints detect incompatible inputs. Neither
 authenticates the producer.
 
-A record is keyed by the running binary's content fingerprint and the original source
-fingerprint. It also carries the query schema, format version and host layout signature. Use
+A record is keyed by the running build's identity and the original source fingerprint.
+Linux fingerprints the executable through `/proc/self/exe`. macOS uses the loaded main Mach-O
+image's linker UUID. If the running build's identity is unavailable, the compiler computes
+normally. Each record also carries the query schema, format version and host layout signature. Use
 identical compiler binaries on the same host architecture and ABI. The compiler looks up records
 independently of working directory and source path. It rechecks the input fingerprint through
 normal query validation before exposing the stored result. Unavailable, stale, incompatible or

@@ -54,4 +54,5 @@ add_test(NAME daemon.warning_options
   COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/warning_options.py $<TARGET_FILE:ycxxc>)
 
 add_test(NAME daemon.engine_snapshot
-  COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/engine_snapshot.py $<TARGET_FILE:ycxxc>)
+  COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/engine_snapshot.py
+          $<TARGET_FILE:ycxxc> $<TARGET_FILE:unit_engine_snapshot>)
