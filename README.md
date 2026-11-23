@@ -439,7 +439,8 @@ written default member initializer are value-initialized.
   non-template classes without bases;
 - single and multiple inheritance (not virtual): base classes laid out as Clang does, member
   lookup through bases, derived-to-base conversions and base initializers. Unqualified
-  injected class names in ordinary member bodies respect base access.
+  injected class names respect base access in ordinary member bodies. Those bodies and ordinary
+  in-class alias declarations also check access to inherited aliases. [#1001](https://github.com/yrashk/ycxx/issues/1001)
 - namespaces, nested (`namespace a::b`) and inline ones, typedefs and aliases, including
   function type and function pointer aliases with qualified return types, `using` declarations
   and directives;

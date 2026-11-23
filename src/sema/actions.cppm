@@ -592,6 +592,9 @@ public:
           // A base declaration hides a namespace type. Merge base types by the types they name.
           auto hit = class_body_type(current_class, ClassRec{}, name, type_at, ClassBodyLookup::static_initializer);
           if (hit.found) return hit.type;
+        } else if (!elaborated && !templated() && c.kind == EntityKind::class_ && c.templ == EntityId::none) {
+          auto hit = class_body_type(current_class, ClassRec{}, name, type_at);
+          if (hit.found) return hit.type;
         }
         // In the class being defined, a type of its (complete) bases.
         for (EntityId b : q_->defining_bases(current_class))
@@ -660,6 +663,7 @@ public:
     const bool qualified_enum = lookup == ClassBodyLookup::qualified_enum;
     const bool enum_lookup = qualified_enum || lookup == ClassBodyLookup::enum_qualifier;
     const bool qualified = lookup == ClassBodyLookup::qualified || enum_lookup;
+    const bool unqualified = lookup == ClassBodyLookup::unqualified;
     const bool before_parameter = lookup == ClassBodyLookup::before_template_parameter;
     const bool static_initializer = lookup == ClassBodyLookup::static_initializer;
     struct Edge {
@@ -698,7 +702,7 @@ public:
       std::span<const BaseRec> bases = cr.bases;
       if (cls == naming && !cr.defined) {
         if (static_initializer) bases = static_initializer_bases(naming);
-        else if (qualified || before_parameter) bases = q_->defining_base_records(cls);
+        else bases = q_->defining_base_records(cls);
       }
       for (const BaseRec& b : bases) {
         // [temp.dep.general]: the naming class's dependent bases are not searched. A base of a
@@ -713,16 +717,21 @@ public:
     };
     collect(naming, root);
     const bool injected = std::ranges::any_of(hits, &Hit::injected);
-    if (hits.empty() || (lookup == ClassBodyLookup::qualified && !injected)) return {};
+    const bool inherited_alias = (unqualified || static_initializer) && std::ranges::any_of(hits, [&](const Hit& h) {
+      return h.type && h.owner != naming && w_->entities.rec(h.declaration).kind == EntityKind::type_alias;
+    });
+    // For an ordinary incomplete class, handle inherited aliases and keep the legacy lookup
+    // for other types. The caller already considered its own preceding declarations.
+    if (hits.empty() || (lookup == ClassBodyLookup::qualified && !injected) ||
+        (unqualified && !root.defined && !inherited_alias)) return {};
     // [class.qual]: in ordinary lookup the naming class's own injected name denotes its constructor.
     if (qualified && !type_only && hits.front().injected && hits.front().owner == naming)
       return {true, std::nullopt};
     auto first = std::ranges::find_if(hits, [](const Hit& h) { return h.type.has_value(); });
     if (first == hits.end()) return {true, std::nullopt};
-    // Apply the lookup-set and access checks to names with an injected-class-name candidate.
-    // The callers resolving a hidden template parameter or a static initializer's type-id
-    // also need these checks for ordinary members of nondependent bases.
-    if (static_initializer || (type_at && (injected || enum_lookup || before_parameter))) {
+    // Merge equivalent designated types before checking the declarations and base paths that
+    // can supply the selected type ([class.member.lookup], [class.access]).
+    if (static_initializer || (type_at && (injected || inherited_alias || enum_lookup || before_parameter))) {
       QualType selected = types().canonical(*first->type);
       if (std::ranges::any_of(hits, [&](const Hit& h) { return !h.type || types().canonical(*h.type) != selected; })) {
         if (type_at) diag(*type_at, Diag::ambiguous_member, name, types().class_type(naming));
@@ -752,11 +761,12 @@ public:
             });
             return {true, type};
           }
-          if (before_parameter && !accessible(first->owner, first->access, naming))
+          if ((before_parameter || inherited_alias) && !accessible(first->owner, first->access, naming))
             diag(*type_at, first->access == ast::Access::protected_ ? Diag::protected_member : Diag::private_member,
                  name, types().class_type(first->owner));
           else
-            diag(*type_at, Diag::inaccessible_base, type, types().class_type(naming));
+            diag(*type_at, Diag::inaccessible_base, inherited_alias ? types().class_type(first->owner) : type,
+                 types().class_type(naming));
         }
       }
     }
