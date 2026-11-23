@@ -798,10 +798,16 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
   [Design](docs/design/linux-inline-functions.md) · [#422](https://github.com/yrashk/ycxx/issues/422)
 - Explicit GNU `visibility("hidden")` follows ordinary external namespace-scope functions across
   redeclarations. On x86-64 ELF, inline definitions combine `STB_WEAK` with `STV_HIDDEN`.
-  Ordinary non-inline definitions and referenced declarations combine `STB_GLOBAL` with
-  `STV_HIDDEN`. `unit.linux_inline` checks both scoped attribute spellings, symbol metadata,
+  Ordinary non-inline definitions and referenced declarations combine their symbol binding
+  with `STV_HIDDEN`. `unit.linux_inline` checks both scoped attribute spellings, symbol metadata,
   and cross-unit address identity with the native and host linkers in both object orders.
   [#602](https://github.com/yrashk/ycxx/issues/602)
+- On Linux x86-64, GNU `weak` on an ordinary external namespace-scope function declaration
+  gives its non-inline definition `STB_WEAK`. This includes qualified definitions such as
+  libycxx's `std::is_debugger_present`. The ELF linker selects a strong definition in either
+  input order and diagnoses duplicate strong definitions. Explicit GNU visibility can
+  independently give the symbol `STV_HIDDEN`.
+  [Design](docs/design/linux-weak-functions.md) · [#937](https://github.com/yrashk/ycxx/issues/937)
 - On Linux x86-64, explicit GNU hidden visibility on any declaration of an ordinary external
   non-inline namespace-scope variable gives its ELF symbol `STB_GLOBAL` and `STV_HIDDEN`.
   This includes the C-linkage marker `__ycxx_linkage_static_v1` from the pinned libycxx runtime.
