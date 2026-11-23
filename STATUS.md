@@ -244,6 +244,10 @@ What is true of the code today. Work in progress and its owners are tracked in
     embed is one byte-carrying phase-4 token with an expansion that names the resource. It yields
     integer and comma tokens in the parser's input. Unsupported scoped parameters are diagnosed
     on the directive and cause a probe to return `__STDC_EMBED_NOT_FOUND__` (#473).
+- The driver and editor honor `-fno-exceptions`. Semantic analysis rejects active `throw`,
+  rethrow and block `try`, with checks in template bodies deferred to instantiation. Native
+  lowering keeps ordinary destruction and eligible cleanup-free frame information.
+  [#980](https://github.com/yrashk/ycxx/issues/980) · [Design](docs/design/freestanding-no-exceptions.md)
 - Predefined macros (`:predefined`, DECISIONS §1.5):
   - `__ycxx__` and its version, `__GNUC__` 4.2.1 (#229), and the draft's macros;
   - `__STDC_HOSTED__` is `1` by default and `0` with `-ffreestanding`. The compiler and

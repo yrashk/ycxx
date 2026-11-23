@@ -120,6 +120,9 @@ build/bin/ycxx cxx -nostdlib example.o -o example
 an entry point. On x86-64 Linux, `-nostdlib` selects the existing executable startup convention
 described above. [#973](https://github.com/yrashk/ycxx/issues/973)
 
+`-fno-exceptions` diagnoses active `throw` and block `try` constructs. Native objects retain
+ordinary destruction and eligible plain unwind frames. [#980](https://github.com/yrashk/ycxx/issues/980)
+
 Fixed-prototype calls (free and member functions, lambdas, function templates and calls
 through pointers) support passing and returning nonempty flat records with integral or
 ordinary object-pointer fields by value. The record can occupy up to
