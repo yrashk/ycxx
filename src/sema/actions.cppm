@@ -2792,9 +2792,8 @@ public:
       diag(c.begin, Diag::braces_for_scalar, Types::unqualified(t));
       return fail;
     }
-    // [dcl.init.list]/3.8: an enumeration with a fixed underlying type from one integer, without
-    // narrowing.
-    if (types().is_enum(t) && c.expr.ok() && !types().is_enum(c.expr.type())) {
+    // [dcl.init.list]/3.8: direct-list-initialize a fixed enum from one integer, without narrowing.
+    if (form == Construction::direct_list && types().is_enum(t) && c.expr.ok() && !types().is_enum(c.expr.type())) {
       const EnumRec* er = enum_rec(types().enum_of(t));
       if (er && er->fixed) {
         Ex v = list_element(*er->underlying, c.expr);
