@@ -511,7 +511,9 @@ Constant values live in the `values` interner as `ConstId`s:
   atomic constraint: its tokens, its parameter mapping, its dependent calls, and whether it names
   a function parameter), `VConstraint{u8 op; SeqId<ConstId> operands}` (a conjunction or disjunction
   in normal form), and `VType{QualType unqualified; u8 cv}` (a type argument in a mapping; a value
-  holds only unqualified canonical types, so the cv-qualifiers ride beside it).
+  holds only unqualified canonical types, so the cv-qualifiers ride beside it), and
+  `VConstraintEnum{QualType type; ConstId value}` (an enum argument in a mapping, with its
+  nominal type alongside the underlying integer value).
 
 A function's own type never contains its own `EntityId`; parameters it mentions are
 `VDepFnParam`, so `decltype(x + y)` and `decltype(a + b)` in two declarations of one template are
