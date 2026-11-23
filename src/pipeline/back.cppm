@@ -904,7 +904,7 @@ bool QueryLayout::contains_mutable_field(QualType type) const {
   return contains(type);
 }
 
-// System V AMD64 psABI §3.2.3. Flat records of integral or ordinary object-pointer members.
+// System V AMD64 psABI §3.2.3. Flat records of integral, object-pointer or object lvalue-reference members.
 // Padding leaves the corresponding eightbyte class unchanged (initially NO_CLASS).
 std::uint8_t QueryLayout::sysv_integer_eightbytes(const ClassShape& shape, const ClassLayout& l) const {
   if (!shape.trivial_calls || shape.layout_uncertain || shape.union_ || !shape.bases.empty() || !shape.bit_widths.empty() ||
@@ -916,7 +916,8 @@ std::uint8_t QueryLayout::sysv_integer_eightbytes(const ClassShape& shape, const
     ast::BuiltinLayout field;
     if (auto b = ast::builtin_of(in, f.type); b && ast::is_integral(*b))
       field = (*target_)[*b];
-    else if (ast::is_pointer(in, f.type) && !ast::is_function(in, ast::pointee_of(in, f.type)))
+    else if ((ast::is_pointer(in, f.type) && !ast::is_function(in, ast::pointee_of(in, f.type))) ||
+             (in.types.is<ast::TLRef>(f.type) && !ast::is_function(in, in.types.get<ast::TLRef>(f.type).referee)))
       field = {target_->pointer_size, target_->pointer_align};
     else return 0;
     if (!field.size || field.size > 8 || field.align > l.align || f.offset % field.align ||
