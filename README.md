@@ -332,7 +332,10 @@ name. Earlier enumerators take precedence over enclosing class names within thei
 Unevaluated operands can name a preceding non-static data member without an object, including
 `sizeof(member)` in an initializer and `decltype(member)` as an underlying type. A call in an
 unevaluated operand can select a preceding static member from an overload set.
-[#760](https://github.com/yrashk/ycxx/issues/760) · [#882](https://github.com/yrashk/ycxx/issues/882)
+[#760](https://github.com/yrashk/ycxx/issues/760)
+Named unscoped member enums in class templates can use value-dependent initializers. Each
+specialization evaluates its enumerators and determines an inferred underlying type.
+[#861](https://github.com/yrashk/ycxx/issues/861) · [#882](https://github.com/yrashk/ycxx/issues/882)
 
 Automatic declarations of ordinary non-template classes with only scalar fields and no bases
 or unions can use default member initializers in `S s;` and `S s{…};`. A default runs in

@@ -159,6 +159,8 @@ enum class DepOp : u8 {
   is_destructible,
   is_nothrow_destructible,
   is_trivially_destructible,
+  is_bounded_array,
+  is_unbounded_array,
 };
 
 // A dependent operation (§5.5). The predicates take canonical qualified type operands.
