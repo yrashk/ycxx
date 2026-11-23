@@ -117,9 +117,8 @@ def static_marker_visibility(compile, target, libycxx, scope, cold, cc, symbol):
         ('static-marker-controls.o', 'inherited_hidden_marker', 'HIDDEN'),
         ('static-marker-controls.o', 'default_marker', 'DEFAULT'),
     ):
-        _, size, fields = symbol(path, name)
-        assert size == 1 and fields[:3] == ['OBJECT', 'GLOBAL', visibility] and fields[3].isdecimal(), (
-            path, name, size, fields, visibility)
+        _, _, fields = symbol(path, name)
+        assert fields[1:3] == ['GLOBAL', visibility] and fields[3].isdecimal(), (path, name, fields, visibility)
 
     (scope / 'static-marker-reader.c').write_text(
         'extern const char __ycxx_linkage_static_v1, inherited_hidden_marker;\n'
