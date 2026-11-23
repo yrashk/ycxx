@@ -9545,6 +9545,12 @@ public:
           if (!selected || types().rec(w_->entities.rec(selected->function).type).fn_ref == ast::RefQual::none)
             return Ex{r.id, begin, end, r.info};
           ref_qualified_member = Ex{r.id, begin, end, r.info};
+        } else if (std::ranges::any_of(std::span(*diags_).subspan(n), [](const auto& d) {
+                     return d.id == diag_id(Diag::not_constant);
+                   })) {
+          // The member was selected, and its operand conversion is an immediate invocation that is
+          // not constant ([expr.const]): as when it is constant, the member is the operator.
+          return Ex{NodeId::none, begin, end};
         } else {
           truncate_diags(n);
         }
@@ -9753,7 +9759,7 @@ public:
       bool competing = r.ok();
       for (std::size_t i = n; !competing && i < diags_->size(); ++i)
         competing = (*diags_)[i].id == diag_id(Diag::deleted_function) ||
-                    (*diags_)[i].id == diag_id(Diag::ambiguous_call);
+                    (*diags_)[i].id == diag_id(Diag::ambiguous_call) || (*diags_)[i].id == diag_id(Diag::not_constant);
       truncate_diags(n);
       if (!competing) return ref_qualified_member;
       diag(op_at, Diag::ref_qualified_operator_candidates);

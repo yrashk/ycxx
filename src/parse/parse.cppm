@@ -9671,13 +9671,16 @@ private:
   Ex member_initializer(const sema::FieldRec& f, const Program::Dmi& d) {
     if (d.invalid) return {};
     auto saved = s_.take_scopes();
+    // `sub` rebinds the evaluator callbacks to itself; restore them before it goes away.
     auto evaluate = s_.constant_of;
+    auto evaluate_immediate = s_.evaluate_immediate;
     const auto source = std::exchange(at_->initializer_source, d);
     Parser sub(p_->region(), d.begin, d.end, s_);
     sub.set_questions(*q_);
     Ex init = sub.member_initializer(f.type, d.braced, d.form);
     at_->initializer_source = source;
-    s_.constant_of = evaluate;
+    s_.constant_of = std::move(evaluate);
+    s_.evaluate_immediate = std::move(evaluate_immediate);
     s_.put_scopes(std::move(saved));
     return init;
   }
