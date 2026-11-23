@@ -130,11 +130,86 @@ void incremental() {
   // A function inserted first, which this session numbers after every other entity.
   build(s, v3);
   check(s.get<pl::Link>(program).image == cold(v3), "after an insertion, incremental equals cold");
-  // Its unit re-reads which entities the object defines, which changed, and comes out the same.
-  Runs twice1 = runs(s, twice);
-  check(twice1.unit == twice0.unit + 1, "a new definition re-checks the other functions' units");
-  twice1.unit = twice0.unit;
-  check(twice1 == twice0, "an insertion leaves the other functions' code green");
+  // The unit's symbol list changed, but only the per-entity answers read it (#938).
+  check(runs(s, twice) == twice0, "an insertion leaves the other functions' cells green");
+}
+
+// A file of many independent modules, as `playground/genbig.py` writes them (#938): an edit to
+// one module's constant re-executes the cells of the functions that use it and of no other
+// function, and a comment re-executes none. Only the unit-wide cells and the cheap per-function
+// and per-entity projections of the unit (`FunctionSourceQ`, `SymbolAccessQ`) run again.
+std::string modules(int edited_k, bool comment) {
+  constexpr int count = 12;
+  std::string s;
+  for (int i = 0; i < count; ++i) {
+    s += std::format(R"(namespace m{0} {{
+constexpr int K = {1};
+struct Box {{
+  int v;
+  Box(int x) : v(x) {{}}
+  int get() const {{ return v * K; }}
+}};
+template <class T> T twice(T t) {{ return t + t; }}
+int plain(int x) {{ return x + 1; }}
+const char* name() {{ return "m{0}"; }}
+int run() {{ Box b(plain(2)); return b.get() + twice(K) + name()[0]; }}
+}}
+)", i, i == 3 ? edited_k : i + 2);
+    if (comment && i == 3) s += "// a comment\n";
+  }
+  s += "int main() {\n  int sum = 0;\n";
+  for (int i = 0; i < count; ++i) s += std::format("  sum += m{}::run();\n", i);
+  s += "  return sum == 0;\n}\n";
+  return s;
+}
+
+void one_module_edit() {
+  pl::Session s;
+  build(s, modules(5, false));
+  check(s.get<pl::Link>(program).errors.empty(), "the modules link");
+  auto executed = [&](const std::string& text) {
+    s.db().reset_stats();
+    s.db().count_per_kind(true);
+    build(s, text);
+    check(s.get<pl::Link>(program).image == cold(text), "incremental equals cold");
+    std::map<std::string, std::uint64_t, std::less<>> out;
+    for (const auto& [kind, stats] : s.db().stats_per_kind()) {
+      // `ycxx::pipeline::Lower@ycxx.pipeline` → `Lower`
+      std::string_view name = kind.substr(0, kind.find('@'));
+      name.remove_prefix(name.rfind("::") == std::string_view::npos ? 0 : name.rfind("::") + 2);
+      if (stats.executed) out.emplace(std::string(name), stats.executed);
+    }
+    s.db().count_per_kind(false);
+    return out;
+  };
+  auto described = [](const auto& m) {
+    std::string out;
+    for (const auto& [kind, n] : m) out += std::format(" {}={}", kind, n);
+    return out;
+  };
+  // `m3::Box::get` and `m3::run` read `m3::K`; no other function does.
+  auto per_function = [&](const auto& m, std::uint64_t want, std::string_view what) {
+    for (std::string_view kind : {"FunctionGen", "FunctionIr", "Lower", "UnitQ", "Codegen", "Optimized"}) {
+      auto found = m.find(kind);
+      check((found == m.end() ? 0 : found->second) == want,
+            std::format("{}: {} runs for {} function(s):{}", what, kind, want, described(m)));
+    }
+  };
+  // Each kind that is neither per function nor a projection runs at most once per unit.
+  auto per_unit = [&](const auto& m, std::string_view what) {
+    for (const auto& [kind, n] : m) {
+      if (kind == "FunctionSourceQ" || kind == "SymbolAccessQ" || kind == "LayoutConstant" || kind == "FunctionGen" ||
+          kind == "FunctionIr" || kind == "Lower" || kind == "UnitQ" || kind == "Codegen" || kind == "Optimized")
+        continue;
+      check(n <= 1, std::format("{}: {} runs once at most:{}", what, kind, described(m)));
+    }
+  };
+  const auto edit = executed(modules(6, false));
+  per_function(edit, 2, "one module's constant");
+  per_unit(edit, "one module's constant");
+  const auto commented = executed(modules(6, true));
+  per_function(commented, 0, "a comment");
+  per_unit(commented, "a comment");
 }
 
 // Two units in one session; then one with an error, which keeps the program from linking, and
@@ -612,6 +687,7 @@ void too_deep() {
 
 int main() {
   incremental();
+  one_module_edit();
   two_units();
   headers();
   editor_view();

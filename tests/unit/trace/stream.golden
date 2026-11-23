@@ -19,6 +19,10 @@
 *       FunctionGen(square) executed
 *         FunctionSourceQ(square) executed
 =           TuUnit(golden.cpp) reused
+*           UnitIndexQ(golden.cpp) executed
+=             TuUnit(golden.cpp) reused
+*         UnitFunctionFactsQ(golden.cpp) executed
+=           TuUnit(golden.cpp) reused
 =           TuSourceIn(golden.cpp) reused
 =           SourceOf(golden.cpp) reused
 *         UnitShapes(golden.cpp) executed
@@ -29,22 +33,26 @@
 =     TuSourceIn(golden.cpp) reused
 =     SourceOf(golden.cpp) reused
 =     UnitShapes(golden.cpp) reused
+*     UnitShapeIndex(golden.cpp) executed
+=       UnitShapes(golden.cpp) reused
 *   Lower(main) executed
 *     FunctionIr(main) executed
 *       FunctionGen(main) executed
+=         UnitFunctionFactsQ(golden.cpp) reused
+=         UnitShapes(golden.cpp) reused
 *         FunctionSourceQ(main) executed
 =           TuUnit(golden.cpp) reused
-=           TuSourceIn(golden.cpp) reused
-=           SourceOf(golden.cpp) reused
-=         UnitShapes(golden.cpp) reused
+=           UnitIndexQ(golden.cpp) reused
 =         TuSourceIn(golden.cpp) reused
 =         SourceOf(golden.cpp) reused
 =     TuSourceIn(golden.cpp) reused
 =     SourceOf(golden.cpp) reused
 =     UnitShapes(golden.cpp) reused
+=     UnitShapeIndex(golden.cpp) reused
 *     LayoutConstant(1) executed
 *     LayoutConstant(2) executed
 =   UnitShapes(golden.cpp) reused
+=   UnitShapeIndex(golden.cpp) reused
 =   Lower(square) reused
 =   Lower(main) reused
 *   Codegen(square) executed
@@ -52,10 +60,6 @@
 =     SourceOf(golden.cpp) reused
 *     UnitQ(square) executed
 =       Lower(square) reused
-*       TuSymbolAddresses(golden.cpp) executed
-=         TuUnit(golden.cpp) reused
-=         TuSourceIn(golden.cpp) reused
-=         SourceOf(golden.cpp) reused
 =     OptLevel(aarch64_macos) reused
 *     Optimized({<fp>, aarch64_macos, 0}) executed
 =       CostModelIn(aarch64_macos) reused
@@ -64,7 +68,12 @@
 =     SourceOf(golden.cpp) reused
 *     UnitQ(main) executed
 =       Lower(main) reused
-=       TuSymbolAddresses(golden.cpp) reused
+*       SymbolAccessQ(golden.cpp, square) executed
+*         TuSymbolAddresses(golden.cpp) executed
+=           TuUnit(golden.cpp) reused
+=           UnitIndexQ(golden.cpp) reused
+=           TuSourceIn(golden.cpp) reused
+=           SourceOf(golden.cpp) reused
 =     OptLevel(aarch64_macos) reused
 *     Optimized({<fp>, aarch64_macos, 0}) executed
 =       CostModelIn(aarch64_macos) reused
@@ -91,6 +100,10 @@
 +         FunctionGen(square) verified
 +           FunctionSourceQ(square) verified
 =             TuUnit(golden.cpp) reused
++             UnitIndexQ(golden.cpp) verified
+=               TuUnit(golden.cpp) reused
++           UnitFunctionFactsQ(golden.cpp) verified
+=             TuUnit(golden.cpp) reused
 =             TuSourceIn(golden.cpp) reused
 =             SourceOf(golden.cpp) reused
 +           UnitShapes(golden.cpp) verified
@@ -101,31 +114,31 @@
 =       TuSourceIn(golden.cpp) reused
 =       SourceOf(golden.cpp) reused
 =       UnitShapes(golden.cpp) reused
++       UnitShapeIndex(golden.cpp) verified
+=         UnitShapes(golden.cpp) reused
 +     Lower(main) verified
 +       FunctionIr(main) verified
 +         FunctionGen(main) verified
+=           UnitFunctionFactsQ(golden.cpp) reused
+=           UnitShapes(golden.cpp) reused
 +           FunctionSourceQ(main) verified
 =             TuUnit(golden.cpp) reused
-=             TuSourceIn(golden.cpp) reused
-=             SourceOf(golden.cpp) reused
-=           UnitShapes(golden.cpp) reused
+=             UnitIndexQ(golden.cpp) reused
 =           TuSourceIn(golden.cpp) reused
 =           SourceOf(golden.cpp) reused
 =       TuSourceIn(golden.cpp) reused
 =       SourceOf(golden.cpp) reused
 =       UnitShapes(golden.cpp) reused
+=       UnitShapeIndex(golden.cpp) reused
 #       LayoutConstant(1) durable
 #       LayoutConstant(2) durable
 =     UnitShapes(golden.cpp) reused
+=     UnitShapeIndex(golden.cpp) reused
 +     Codegen(square) verified
 =       TuSourceIn(golden.cpp) reused
 =       SourceOf(golden.cpp) reused
 +       UnitQ(square) verified
 =         Lower(square) reused
-+         TuSymbolAddresses(golden.cpp) verified
-=           TuUnit(golden.cpp) reused
-=           TuSourceIn(golden.cpp) reused
-=           SourceOf(golden.cpp) reused
 =       OptLevel(aarch64_macos) reused
 #       Optimized({<fp>, aarch64_macos, 0}) durable
 +     Codegen(main) verified
@@ -133,10 +146,15 @@
 =       SourceOf(golden.cpp) reused
 +       UnitQ(main) verified
 =         Lower(main) reused
-=         TuSymbolAddresses(golden.cpp) reused
++         SymbolAccessQ(golden.cpp, square) verified
++           TuSymbolAddresses(golden.cpp) verified
+=             TuUnit(golden.cpp) reused
+=             UnitIndexQ(golden.cpp) reused
+=             TuSourceIn(golden.cpp) reused
+=             SourceOf(golden.cpp) reused
 =       OptLevel(aarch64_macos) reused
 #       Optimized({<fp>, aarch64_macos, 0}) durable
-trace: 25 executed, 20 verified, 88 reused, 4 durable
+trace: 29 executed, 24 verified, 98 reused, 4 durable
 ## again: the request's own cells are reused
 = TuFront(golden.cpp) reused
 = Tu(golden.cpp) reused
@@ -170,6 +188,10 @@ trace: 3 reused
 +       FunctionGen(square) verified
 +         FunctionSourceQ(square) verified
 =           TuUnit(golden.cpp) reused
++           UnitIndexQ(golden.cpp) verified
+=             TuUnit(golden.cpp) reused
++         UnitFunctionFactsQ(golden.cpp) verified
+=           TuUnit(golden.cpp) reused
 =           TuSourceIn(golden.cpp) reused
 =           SourceOf(golden.cpp) reused
 +         UnitShapes(golden.cpp) verified
@@ -180,31 +202,31 @@ trace: 3 reused
 =     TuSourceIn(golden.cpp) reused
 =     SourceOf(golden.cpp) reused
 =     UnitShapes(golden.cpp) reused
++     UnitShapeIndex(golden.cpp) verified
+=       UnitShapes(golden.cpp) reused
 +   Lower(main) verified
 +     FunctionIr(main) verified
 +       FunctionGen(main) verified
+=         UnitFunctionFactsQ(golden.cpp) reused
+=         UnitShapes(golden.cpp) reused
 +         FunctionSourceQ(main) verified
 =           TuUnit(golden.cpp) reused
-=           TuSourceIn(golden.cpp) reused
-=           SourceOf(golden.cpp) reused
-=         UnitShapes(golden.cpp) reused
+=           UnitIndexQ(golden.cpp) reused
 =         TuSourceIn(golden.cpp) reused
 =         SourceOf(golden.cpp) reused
 =     TuSourceIn(golden.cpp) reused
 =     SourceOf(golden.cpp) reused
 =     UnitShapes(golden.cpp) reused
+=     UnitShapeIndex(golden.cpp) reused
 #     LayoutConstant(1) durable
 #     LayoutConstant(2) durable
 =   UnitShapes(golden.cpp) reused
+=   UnitShapeIndex(golden.cpp) reused
 +   Codegen(square) verified
 =     TuSourceIn(golden.cpp) reused
 =     SourceOf(golden.cpp) reused
 +     UnitQ(square) verified
 =       Lower(square) reused
-+       TuSymbolAddresses(golden.cpp) verified
-=         TuUnit(golden.cpp) reused
-=         TuSourceIn(golden.cpp) reused
-=         SourceOf(golden.cpp) reused
 =     OptLevel(aarch64_macos) reused
 #     Optimized({<fp>, aarch64_macos, 0}) durable
 +   Codegen(main) verified
@@ -212,10 +234,15 @@ trace: 3 reused
 =     SourceOf(golden.cpp) reused
 +     UnitQ(main) verified
 =       Lower(main) reused
-=       TuSymbolAddresses(golden.cpp) reused
++       SymbolAccessQ(golden.cpp, square) verified
++         TuSymbolAddresses(golden.cpp) verified
+=           TuUnit(golden.cpp) reused
+=           UnitIndexQ(golden.cpp) reused
+=           TuSourceIn(golden.cpp) reused
+=           SourceOf(golden.cpp) reused
 =     OptLevel(aarch64_macos) reused
 #     Optimized({<fp>, aarch64_macos, 0}) durable
 + Link(0) verified
 =   ProgramIn(0) reused
 =   Tu(golden.cpp) reused
-trace: 1 executed, 3 cutoff, 17 verified, 50 reused, 4 durable
+trace: 1 executed, 3 cutoff, 21 verified, 55 reused, 4 durable
