@@ -1,4 +1,4 @@
-"""Check -fno-rtti through the driver, compile database and Linux ELF output (#982)."""
+"""Check RTTI mode through the driver, compile database and Linux ELF output (#982)."""
 
 import json
 from pathlib import Path
@@ -11,8 +11,16 @@ from process import Env, failures
 from system_includes import LINUX, NATIVE_LINUX
 
 
+ENABLED = ('-frtti',)
 DISABLED = ('-fno-rtti',)
-MODES = ((), DISABLED, ())
+MODES = (
+    ((), True),
+    (DISABLED, False),
+    (ENABLED, True),
+    ((*ENABLED, *DISABLED), False),
+    ((*DISABLED, *ENABLED), True),
+    ((), True),
+)
 DOWNCAST = '''\
 struct Base { virtual int step(); };
 struct Derived : Base { int step() override; };
@@ -49,11 +57,13 @@ def command_line(world, scope):
     (scope / 'downcast.cpp').write_text(DOWNCAST)
     syntax(world, scope, 'downcast.cpp', ())
     pid = world.pid()
-    for flags in MODES[1:]:
-        syntax(world, scope, 'downcast.cpp', flags, 4 if flags else None)
+    for flags, enabled in MODES[1:]:
+        syntax(world, scope, 'downcast.cpp', flags, None if enabled else 4)
 
     (scope / 'typeid.cpp').write_text(TYPEID)
-    syntax(world, scope, 'typeid.cpp', DISABLED, 2)
+    for flags, enabled in MODES:
+        if not enabled:
+            syntax(world, scope, 'typeid.cpp', flags, 2)
     (scope / 'features.cpp').write_text('''\
 #if defined(__cpp_rtti) || defined(__GXX_RTTI)
 #error advertised RTTI is unavailable under -fno-rtti
@@ -69,7 +79,7 @@ def compile_database(world, scope):
     unit.write_text(DOWNCAST)
     database = scope / 'compile_commands.json'
     editor = Editor(world, scope)
-    for version, flags in enumerate(MODES, 1):
+    for version, (flags, enabled) in enumerate(MODES, 1):
         database.write_text(json.dumps([{
             'directory': str(scope), 'file': unit.name,
             'arguments': ['c++', LINUX, '-std=c++26', *flags, '-c', unit.name, '-o', 'editor.o'],
@@ -80,7 +90,7 @@ def compile_database(world, scope):
             editor.change(unit, DOWNCAST, version)
         context = f'no-rtti compile database version {version}'
         found = editor.diagnostics(unit, version, context)
-        if flags:
+        if not enabled:
             assert found and any(line == 3 and severity == 1 and disabled_diagnostic(message)
                                  for line, _, severity, message in found), (context, found)
         else:
@@ -137,15 +147,15 @@ def linux_objects(world, scope, libycxx, host):
     fixtures = Path(__file__).resolve().with_suffix('')
     for name in ('types.hpp', 'owner.cpp', 'peer.cpp'):
         (scope / name).write_bytes((fixtures / name).read_bytes())
-    snapshots = []
+    snapshots = {}
     ownership = []
-    for flags in MODES:
+    for flags, enabled in MODES:
         elf = object_file('owner.cpp', 'owner.o', *flags, resident=True)
-        ownership.append(check_table(elf, enabled=not flags))
-        snapshots.append(elf.data)
-    assert snapshots[0] == snapshots[2] and snapshots[0] != snapshots[1]
-    assert ownership[0] == ownership[1] == ownership[2]
-    (scope / 'disabled.o').write_bytes(snapshots[1])
+        ownership.append(check_table(elf, enabled=enabled))
+        assert elf.data == snapshots.setdefault(enabled, elf.data), flags
+    assert snapshots[True] != snapshots[False]
+    assert all(entry == ownership[0] for entry in ownership), ownership
+    (scope / 'disabled.o').write_bytes(snapshots[False])
 
     (scope / 'throw.cpp').write_text(THROW)
     check_throw(object_file('throw.cpp', 'throw.o', *DISABLED))
