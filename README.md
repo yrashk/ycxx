@@ -482,9 +482,10 @@ written default member initializer are value-initialized.
   three member-pointer predicates as `bool` template arguments or defaults, including through
   alias templates
   [#209](https://github.com/yrashk/ycxx/issues/209);
-- dependent non-type template arguments from unqualified parameterless `consteval` function
-  templates with explicit type arguments, and unqualified calls to a single ordinary external
-  `consteval` function with direct integral template-parameter operands.
+- dependent non-type template arguments from parameterless namespace `consteval` function
+  templates with explicit type arguments, including fixed namespace-qualified calls. An
+  unqualified call to a single ordinary external `consteval` function can also use direct
+  integral template-parameter operands.
   [#209](https://github.com/yrashk/ycxx/issues/209)
 - `__is_constructible`, `__is_nothrow_constructible` and `__is_trivially_constructible` for
   supported scalar, reference, function and `void` queries, including argument packs in
