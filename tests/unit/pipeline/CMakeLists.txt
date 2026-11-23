@@ -36,10 +36,20 @@ if(APPLE AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(arm64|aarch64)$" AND NOT CMAKE_CR
   add_test(NAME unit.tu_local_parameter_symbols
     COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/tu_local_parameter_symbols.py
             $<TARGET_FILE:ycxxc> ${CMAKE_CXX_COMPILER} darwin)
+  # The Darwin counterpart of unit.linux_archive (#842), checked against the system linker.
+  add_test(NAME unit.darwin_archive
+    COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/darwin_archive.py
+            $<TARGET_FILE:ycxxc> ${CMAKE_AR} ${CMAKE_C_COMPILER})
+  # The Mach-O counterpart of the linux_* virtual tests, over their fixtures (#650). Its peers
+  # are Clang's, whose libc++ and RTTI conventions are the platform's C++ ABI.
+  find_program(YCXXC_CLANGXX NAMES clang++ REQUIRED)
+  add_test(NAME unit.darwin_virtual
+    COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/darwin_virtual.py
+            $<TARGET_FILE:ycxxc> ${YCXXC_CLANGXX} ${YCXXC_NM})
 endif()
-# PARITY: #647, #649, #650 for the Darwin counterparts of unit.linux_variadic_definitions,
-# unit.linux_array_delete and unit.linux_virtual_consumer; the rest by design: they run x86-64
-# ELF executables, which only Linux can
+# PARITY: #647, #649 for the Darwin counterparts of unit.linux_variadic_definitions and
+# unit.linux_array_delete; the rest by design: they run x86-64 ELF executables, which only Linux
+# can. unit.darwin_virtual runs the virtual tests' fixtures on Mach-O (#650).
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$"
    AND NOT CMAKE_CROSSCOMPILING)
   add_test(NAME unit.linux_compile
@@ -66,6 +76,10 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_
   add_test(NAME unit.linux_scalar_sse
     COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/linux_scalar_sse.py
             $<TARGET_FILE:ycxxc> ${CMAKE_CXX_COMPILER} ${PROJECT_SOURCE_DIR}/deps/libycxx)
+  # PARITY: by design: links x86-64 ELF objects against the host Itanium C++ ABI runtime.
+  add_test(NAME unit.linux_borrowed_typed_downcast
+    COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/linux_borrowed_typed_downcast.py
+            $<TARGET_FILE:ycxxc> ${CMAKE_CXX_COMPILER} ${CMAKE_READELF})
   add_test(NAME unit.linux_virtual_consumer
     COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/linux_virtual_consumer.py
             $<TARGET_FILE:ycxxc> ${CMAKE_CXX_COMPILER} ${CMAKE_READELF})
@@ -81,7 +95,6 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_
   add_test(NAME unit.linux_peer_derived_default_construction
     COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/linux_peer_derived_default_construction.py
             $<TARGET_FILE:ycxxc> ${CMAKE_CXX_COMPILER} ${CMAKE_READELF})
-  # PARITY: #650 for the Darwin owned derived virtual table and RTTI counterpart.
   add_test(NAME unit.linux_owned_derived_vtable
     COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/linux_owned_derived_vtable.py
             $<TARGET_FILE:ycxxc> ${CMAKE_CXX_COMPILER} ${CMAKE_LINKER})
@@ -124,6 +137,10 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_
     COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/linux_hosted_catch_all.py
             $<TARGET_FILE:unit_linux_hosted_catch_all_object> $<TARGET_FILE:ycxxc>
             ${CMAKE_CXX_COMPILER} ${CMAKE_READELF})
+  # PARITY: #648 for the Darwin typed-handler counterpart.
+  add_test(NAME unit.linux_hosted_int_catch
+    COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/linux_hosted_int_catch.py
+            $<TARGET_FILE:ycxxc> ${CMAKE_CXX_COMPILER})
   add_test(NAME unit.linux_namespace_lambda
     COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/linux_namespace_lambda.py
             $<TARGET_FILE:ycxxc> ${CMAKE_READELF})

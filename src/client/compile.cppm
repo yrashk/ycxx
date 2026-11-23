@@ -219,6 +219,7 @@ std::expected<Options, std::string> parse_options(std::span<const std::string_vi
   if (!o.pp.target)
     return std::unexpected("no default target for this build. Use '--target=x86_64-pc-linux-gnu' or '--target=arm64-apple-darwin'");
   const bool linux_link = o.pp.target == &ast::x86_64_linux && o.stop == Options::Stop::link;
+  const bool darwin_link = o.pp.target == &ast::aarch64_darwin && o.stop == Options::Stop::link;
   if (o.interpreter && !linux_link)
     return std::unexpected("'--dynamic-linker' requires an x86-64 Linux executable link");
   for (std::string_view path : other_inputs) {
@@ -226,7 +227,7 @@ std::expected<Options, std::string> parse_options(std::span<const std::string_vi
     else return std::unexpected(std::format("'{}': unknown kind of input file", path));
   }
   if (!o.archives.empty()) {
-    if (!linux_link) return std::unexpected("archive inputs require an x86-64 Linux executable link");
+    if (!linux_link && !darwin_link) return std::unexpected("archive inputs require an executable link");
     if (o.interpreter || !o.libraries.empty())
       return std::unexpected("archive inputs cannot be combined with explicit Linux dynamic linking");
     if (o.sources.empty() && o.objects.empty())
@@ -506,7 +507,7 @@ Done run(const Request& r, pp::Host& host, pipeline::Session& session, const Sto
   std::optional<std::string> bad_input;
   if (key.until == pipeline::Until::link) {
     std::vector<obj::object> objects;
-    std::vector<link::elf::archive_input> archives;
+    std::vector<obj::archive::input> archives;
     const bool linux_target = config.target == &ast::x86_64_linux;
     // Snapshot disk inputs at ingress, outside the file table (§5.2).
     using Kind = pipeline::LinkOperand::Kind;
@@ -551,7 +552,8 @@ Done run(const Request& r, pp::Host& host, pipeline::Session& session, const Sto
     std::optional<pipeline::ArchiveLinkInputs> archive_link;
     if (!archives.empty())
       archive_link.emplace(pipeline::ArchiveLinkInputs{
-          obj::target::x86_64_linux, std::move(opts->operands), std::move(archives)});
+          linux_target ? obj::target::x86_64_linux : obj::target::aarch64_macos, std::move(opts->operands),
+          std::move(archives)});
     if (bad_input) key.until = pipeline::Until::object;
     else key.program = session.program(
         {key.units, std::move(objects), out.filename().native_encoded_string(), std::move(dynamic), std::move(archive_link)});

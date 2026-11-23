@@ -252,6 +252,8 @@ public:
   // Empty on unsupported declarations, or EntityId::none when a peer owns the derived table.
   std::optional<EntityId> automatic_derived_vtable_key(EntityId cls) const;
   bool peer_pure_dispatch(EntityId cls) const;
+  bool has_typed_dynamic_cast() const { return has_typed_dynamic_cast_; }
+  bool peer_typed_dynamic_cast(EntityId source, EntityId target) const;
   // A fieldless virtual root whose destructor may be emitted against a peer's table (#136).
   bool peer_root_destructor_producer(EntityId cls) const;
   bool peer_root_destructor_observer(EntityId function, EntityId cls) const;
@@ -1255,8 +1257,19 @@ private:
   sema::Classes classes_{w_->ins, w_->types};  // this unit's class and enumeration records (#115)
   void classify_defaulted_default_ctor(sema::ClassRec& rec, std::vector<engine::Diagnostic>& diags);
   void defaulted_copy(EntityId cls, sema::ClassRec& rec, std::span<const QualType> subobjects, bool implicit);
-  // The enumeration whose enumerator list is being analysed, and its record so far.
-  std::pair<EntityId, const sema::EnumRec*> defining_enum_{EntityId::none, nullptr};
+  // An enumerator initializer can synchronously instantiate another enum definition.
+  struct DefiningEnum {
+    const DefiningEnum*& active;
+    EntityId entity;
+    const sema::EnumRec& record;
+    const DefiningEnum* previous;
+
+    DefiningEnum(const DefiningEnum*& active, EntityId entity, const sema::EnumRec& record)
+        : active(active), entity(entity), record(record), previous(std::exchange(active, this)) {}
+    DefiningEnum(const DefiningEnum&) = delete;
+    ~DefiningEnum() { active = previous; }
+  };
+  const DefiningEnum* defining_enum_ = nullptr;
   // What each namespace-scope using-declaration introduces, by (item, name ordinal): the
   // declarations qualified lookup found at it ([namespace.udecl]/1).
   std::map<std::pair<u32, u32>, std::vector<DeclId>> using_targets_;
@@ -1418,6 +1431,7 @@ private:
   std::vector<engine::Diagnostic> end_diags_;    // the END phase's own
   std::vector<EntityId> required_;
   std::vector<EntityId> implicit_allocation_functions_;  // in order of first use
+  bool has_typed_dynamic_cast_ = false;
   std::map<u32, std::optional<irgen::FunctionIr>> instance_irs_;  // instantiated and implicit bodies, by entity
   std::map<u32, std::optional<irgen::FunctionIr>> closure_irs_;  // by closure member
 
@@ -1571,10 +1585,13 @@ public:
   sema::CopyAssignment require_copy_assignment(EntityId f) override { return p_->require_copy_assignment(f); }
   const sema::ClassRec& publish_class(EntityId c, sema::ClassRec r) override { return p_->publish_class(c, std::move(r), item_); }
   const sema::EnumRec* defining_enum(EntityId e) override {
-    return p_->defining_enum_.first == e ? p_->defining_enum_.second : nullptr;
+    for (const auto* active = p_->defining_enum_; active; active = active->previous)
+      if (active->entity == e) return &active->record;
+    return nullptr;
   }
   std::set<EntityId> uncertain_object_layouts() override { return p_->uncertain_object_layouts(); }
   bool peer_pure_dispatch(EntityId cls) override { return p_->peer_pure_dispatch(cls); }
+  void use_typed_dynamic_cast() override { p_->has_typed_dynamic_cast_ = true; }
   std::vector<DeclId> visible_decls(ast::NameId name, std::span<const EntityId> directives = {}) override {
     std::vector<std::string> paths;
     for (EntityId ns : directives) paths.push_back(p_->namespace_path(ns));
@@ -2301,6 +2318,7 @@ public:
   sema::CopyAssignment require_copy_assignment(EntityId f) override { return p_->require_copy_assignment(f); }
   std::set<EntityId> uncertain_object_layouts() override { return at_.uncertain_object_layouts(); }
   bool peer_pure_dispatch(EntityId cls) override { return at_.peer_pure_dispatch(cls); }
+  void use_typed_dynamic_cast() override { at_.use_typed_dynamic_cast(); }
   bool class_layout_uncertain(EntityId c) override { return at_.class_layout_uncertain(c); }
   bool explicit_specialization(EntityId c) override { return at_.explicit_specialization(c); }
   const sema::ClassRec& publish_class(EntityId c, sema::ClassRec r) override { return p_->publish_class(c, std::move(r), item_); }
@@ -2412,6 +2430,10 @@ std::optional<EntityId> complete_base_class(sema::Sema& s, QualType type, u32 at
   if (const sema::ClassRec* r = s.classes().find(base)) {
     if (r->union_) {
       s.diag(at, Diag::base_not_class, type);
+      return std::nullopt;
+    }
+    if (r->is_final) {
+      s.diag(at, Diag::final_base, s.types().class_type(base));
       return std::nullopt;
     }
     if (r->polymorphic && !allow_polymorphic) {
@@ -3807,6 +3829,19 @@ private:
     if (ps_.is(Tk::identifier)) ps_.bump();
     if (explicit_) return explicit_class_definition(key, name, name_at);
     if (template_ && ps_.is(Tk::less)) return partial_class_definition(key, name, name_at);
+    const auto final_here = [&] { return ps_.is(Tk::identifier) && p_->region().name(ps_.tok()) == "final"; };
+    const bool is_final = final_here();
+    if (is_final) {
+      if (key == Tk::kw_union || template_) {
+        s_.diag(ps_.pos(), Diag::not_supported, Tk::identifier);
+        return bad();
+      }
+      ps_.bump();
+      if (final_here()) {
+        s_.diag(ps_.pos(), Diag::duplicate_final);
+        return bad();
+      }
+    }
     std::vector<sema::BaseRec> bases;
     std::optional<Program::ClassBasePattern> base_pattern;
     if (ps_.is(Tk::colon)) {
@@ -3817,7 +3852,7 @@ private:
       if (!base_clause(key, name, bases, base_pattern)) return bad();
     }
     if (!ps_.is(Tk::l_brace)) {
-      s_.diag(ps_.pos(), Diag::not_supported, ps_.kind());  // `final` (#309)
+      s_.diag(ps_.pos(), Diag::not_supported, ps_.kind());
       return bad();
     }
     for (DeclId p : q_.visible_decls(name))
@@ -3838,6 +3873,7 @@ private:
     if (!template_ && clashes_with_using(name, name_at, ast::DeclKind::class_, s_.types().class_type(class_entity(name))))
       return bad();
     ast::DeclSema sem = template_ ? class_template_decl(name) : class_decl(class_entity(name), true);
+    sem.is_final = is_final;
     if (!template_) sem.annotations = b_.seq(std::span<const ast::AnnotationSema>(annotations));
     if (!class_declared(sem, key, name_at)) return bad();
     if (alignment) p_->class_alignments_.emplace(k_, std::move(*alignment));
@@ -3963,7 +3999,7 @@ private:
         pattern = Program::ClassBasePattern{{spec.type, access, 0, 0}, at, ps_.pos(), deferred != ps_.deferred_argument_checks()};
         if (types.is_dependent(spec.type)) return true;
       }
-      if (!types.is_class(spec.type) || sema::Types::cv(spec.type) != sema::Cv::none) {
+      if (!types.is_class(spec.type)) {
         s_.diag(at, Diag::base_not_class, spec.type);
         return false;
       }
@@ -3974,6 +4010,10 @@ private:
       }
       const bool single_ordinary_base = !template_ && bases.empty() && !ps_.is(Tk::comma);
       if (!complete_base_class(s_, spec.type, at, single_ordinary_base)) return false;
+      if (sema::Types::cv(spec.type) != sema::Cv::none) {
+        s_.diag(at, Diag::base_not_class, spec.type);
+        return false;
+      }
       if (std::ranges::any_of(bases, [&](const sema::BaseRec& r) { return r.cls == b; })) {
         s_.diag(at, Diag::duplicate_base, spec.type);
         return false;
@@ -4119,8 +4159,9 @@ private:
       return;
     }
     // The enumerator list sees the definition's record as the list grows (#156).
+    std::optional<Program::DefiningEnum> defining;
     if (unnamed) s_.defining_unnamed_enum_scope = scope;
-    else p_->defining_enum_ = {e, &er};
+    else defining.emplace(p_->defining_enum_, e, er);
     const std::size_t first_enumerator = s_.own.size();
     if (cls != EntityId::none) s_.nested_enum_members_begin = first_enumerator;
     auto enumerator_entity = [&](NameId n) {
@@ -4273,7 +4314,7 @@ private:
                                        .enum_linkage_name = er.enumerators.front().name});
       publish_head();
     } else {
-      p_->defining_enum_ = {EntityId::none, nullptr};
+      defining.reset();
     }
     // Past the closing brace an enumerator has the enumeration's type ([dcl.enum]/5), in the
     // declarators that follow too.
@@ -5625,12 +5666,15 @@ private:
                                  const parse::Declarator& d, const ast::DeclSema& sem) {
     const auto slot = sema::native_virtual_root_slot(record, function);
     const bool derived = record.peer_automatic_primary_base != EntityId::none;
-    if ((!derived && record.peer_virtual_layout != sema::PeerVirtualLayout::root) || !slot || template_ || explicit_ || inst_ ||
+    // Check these key definitions as declarations. Native ownership of their RTTI remains unsupported.
+    const bool borrowed_key = sema::borrowed_dynamic_cast_key(record, s_.types()) == function;
+    if ((!derived && !borrowed_key && record.peer_virtual_layout != sema::PeerVirtualLayout::root) ||
+        !slot || template_ || explicit_ || inst_ ||
         sem.storage != ast::Storage::none || (sem.flags & (sema::decl_flag::inline_ | sema::decl_flag::deleted |
                                                           sema::decl_flag::lang_c)) ||
         it_->kind != ItemKind::function || !it_->has_body() || !d.asm_label.empty()) return false;
     const bool key_function = *slot == 0;
-    if (key_function && !derived && !sema::native_virtual_table_slots(record)) return false;
+    if (key_function && !derived && !borrowed_key && !sema::native_virtual_table_slots(record)) return false;
     const auto& region = p_->region();
     if (region.tokens[it_->body_begin].kind != Tk::l_brace ||
         !plain_virtual_signature(*it_, it_->begin + d.qualifier_at, it_->begin + d.name_at,
@@ -7260,7 +7304,7 @@ EntityId Program::peer_automatic_primary_base(u32 item, EntityId cls, const sema
                                   std::ptrdiff_t written_members) {
     const auto& head = items_->items[index];
     const auto& owner = w_->entities.rec(entity);
-    return sema::native_virtual_class(record, w_->types) && record.destructor_usable && !record.default_deleted &&
+    return sema::native_virtual_class(record) && record.destructor_usable && !record.default_deleted &&
            !record.union_ && !record.closure && !record.unapplied_layout && !record.explicit_alignment &&
            record.types.empty() && record.friends.empty() && owner.linkage == ast::Linkage::external &&
            owner.templ == EntityId::none && is_namespace(owner.scope) && !unnamed(namespace_path(owner.scope)) &&
@@ -7392,10 +7436,45 @@ std::optional<EntityId> Program::automatic_derived_vtable_key(EntityId cls) cons
   return key;
 }
 
+bool Program::peer_typed_dynamic_cast(EntityId source, EntityId target) const {
+  using sema::PeerVirtualLayout;
+  const auto* base = classes_.find(source);
+  const auto* derived = classes_.find(target);
+  // The primary-base profile establishes public nonvirtual inheritance at offset zero.
+  if (!base || !derived || base->peer_virtual_layout != PeerVirtualLayout::root ||
+      derived->peer_virtual_layout != PeerVirtualLayout::primary_base || derived->bases.size() != 1 ||
+      derived->bases.front().cls != source || r_->has_clang_attribute_pragma)
+    return false;
+  const auto base_key = sema::borrowed_dynamic_cast_key(*base, w_->types);
+  const auto derived_key = sema::borrowed_dynamic_cast_key(*derived, w_->types);
+  if (base_key == EntityId::none || derived_key == EntityId::none) return false;
+  const auto override = std::ranges::find(derived->members, derived_key, &sema::MemberDeclRec::entity);
+  if (override->overridden_virtual != base_key) return false;
+
+  const auto peer_owned = [&](EntityId cls, const sema::ClassRec& record, EntityId key) {
+    const auto& owner = w_->entities.rec(cls);
+    if (!record.defined || record.explicit_alignment || class_layout_uncertain(cls, record, end()) ||
+        owner.linkage != ast::Linkage::external || owner.templ != EntityId::none ||
+        !is_namespace(owner.scope) || unnamed(namespace_path(owner.scope)) ||
+        w_->ins.names.spelling(owner.name).empty() || !peer_root_vtable_visible(cls) || !asm_label(key).empty())
+      return false;
+    // The only declaration of each key must be its declaration in the class.
+    // This reads the final declaration set, including later definitions and qualified friends.
+    const auto found = decls_.find(std::to_underlying(key));
+    if (found == decls_.end() || found->second.size() != 1) return false;
+    const auto& [item, decl] = found->second.front();
+    constexpr u16 excluded = sema::decl_flag::definition | sema::decl_flag::inline_ |
+                             sema::decl_flag::deleted | sema::decl_flag::template_;
+    return !(decl.flags & excluded) && !decl.hidden_visibility &&
+           items_->items[item].kind == ItemKind::declaration && !in_attributed_namespace(item);
+  };
+  return peer_owned(source, *base, base_key) && peer_owned(target, *derived, derived_key);
+}
+
 bool Program::peer_pure_dispatch(EntityId cls) const {
   using enum lex::Tk;
   const auto* record = classes_.find(cls);
-  if (!record || !record->defined || !record->is_abstract() || !sema::native_virtual_class(*record, w_->types) ||
+  if (!record || !record->defined || !record->is_abstract() || !sema::native_virtual_class(*record) ||
       record->peer_virtual_layout != sema::PeerVirtualLayout::none ||
       record->union_ || record->closure || !record->bases.empty() || !record->fields.empty() ||
       !record->types.empty() || !record->friends.empty() || record->unapplied_layout || record->explicit_alignment)
@@ -7480,7 +7559,7 @@ std::optional<EntityId> Program::peer_root_destructor_key(EntityId cls) const {
   using enum lex::Tk;
   if (r_->has_clang_attribute_pragma) return std::nullopt;
   const auto* record = classes_.find(cls);
-  if (w_->target.triple != ast::x86_64_linux.triple || !record || !record->defined ||
+  if (!record || !record->defined ||
       !record->virtual_destructor || !record->destructor_noexcept.value_or(false) ||
       !record->destructor_usable || record->is_abstract() || record->union_ || record->closure ||
       !record->bases.empty() || !record->fields.empty() || !record->types.empty() || !record->friends.empty() ||
@@ -7766,6 +7845,7 @@ const Result<ast::ClassDef>& Program::class_def(u32 item) {
     // Every unit that defines the class builds its own record (#115), and synthesizes the special
     // members its own object needs.
     sema::ClassRec rec;
+    if (const auto head = class_heads_.find(item); head != class_heads_.end()) rec.is_final = head->second.is_final;
     rec.union_ = class_rec_is_union(item);
     rec.unapplied_layout = has_unapplied_class_layout(item, c);
     rec.fields = std::move(fields);
@@ -7790,7 +7870,7 @@ const Result<ast::ClassDef>& Program::class_def(u32 item) {
       }
     }
     classify_defaulted_default_ctor(rec, out.diags);
-    if (rec.polymorphic && w_->target.triple == ast::x86_64_linux.triple) {
+    if (rec.polymorphic) {
       rec.peer_virtual_layout = peer_virtual_layout(item, *cls, rec, members);
       if (rec.peer_virtual_layout == sema::PeerVirtualLayout::none)
         rec.peer_automatic_primary_base = peer_automatic_primary_base(item, *cls, rec, members);
@@ -8052,6 +8132,7 @@ public:
   // Satisfied or not. An empty result means the initializer already reported a hard error.
   std::optional<bool> run(std::vector<engine::Diagnostic>& hard) {
     auto& ins = p_->world().ins;
+    s_.current_class = atom_.lookup_class;
     for (auto& head : p_->enclosing_heads(k_)) s_.template_scopes.push_back(std::move(head));
     const ast::ItemSema& is = p_->item_sema(k_).value;
     if (ins.seqs.size(is.decls) > 0) {

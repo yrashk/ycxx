@@ -193,7 +193,7 @@ struct Runtime {
             declared("__cxa_throw", world.types.function(v, params, false, lang), true),
             declared("_ZTIi", world.types.builtin(sema::Builtin::char_), false)};
   }
-  ir::CatchAllRuntime catch_all() {
+  ir::CatchAllRuntime catch_runtime() {
     // Itanium EH ABI §2.5. The unwind header crosses the runtime boundary as a pointer.
     const auto lang = ast::LangLinkage::c;
     const QualType p = vp(), v = world.types.builtin(sema::Builtin::void_);
@@ -430,7 +430,8 @@ using UnwindNodes = ast::closed_list<
     ast::Label, ast::Goto, ast::Literal, ast::DeclRef, ast::LocalRef, ast::Paren, ast::Unary,
     ast::Binary, ast::OrderedBinary, ast::Assign, ast::Conditional, ast::Subscript, ast::Call, ast::Member,
     ast::NewArray, ast::DeleteArray, ast::ImplicitConversion, ast::InitList, ast::DefaultMemberInit,
-    ast::Materialize, ast::This, ast::ValueInit, ast::DefaultInit, ast::Throw, ast::DynamicCastVoid>;
+    ast::Materialize, ast::This, ast::ValueInit, ast::DefaultInit, ast::Throw, ast::DynamicCastVoid,
+    ast::DynamicCastPointer>;
 using UnwindAggregateNodes = ast::closed_list<ast::InitList, ast::LocalRef, ast::Materialize, ast::Paren>;
 
 enum class UnwindContext { function, cleanup_initializer, default_member };
@@ -682,7 +683,7 @@ EntityId hosted_union_constructor_caller(parse::Program& program, const ast::Dec
 
 // Prove the whole handler occurrence while it still has C++ types and lifetime information.
 // Neither a call-name spelling nor an untyped shape certifies the callee.
-EntityId hosted_catch_all_callee(parse::Program& program, const ast::DeclSema& d, const ast::BodySema& body) {
+std::optional<HostedCatch> hosted_catch(parse::Program& program, const ast::DeclSema& d, const ast::BodySema& body) {
   const auto& world = program.world();
   const auto& tree = world.ins.ast;
   auto sole_statement = [&](ast::NodeId id) {
@@ -691,7 +692,7 @@ EntityId hosted_catch_all_callee(parse::Program& program, const ast::DeclSema& d
     return stmts.size() == 1 ? stmts.front().id : ast::NodeId::none;
   };
   const auto trial = sole_statement(body.tree);
-  if (trial == ast::NodeId::none || !tree.is<ast::TryBlock>(trial)) return EntityId::none;
+  if (trial == ast::NodeId::none || !tree.is<ast::TryBlock>(trial)) return std::nullopt;
   auto prototype = [&](QualType q) {
     const auto f = world.types.rec(q);
     return f.kind == sema::TypeKind::function && !f.variadic && !f.fn_noexcept &&
@@ -706,44 +707,69 @@ EntityId hosted_catch_all_callee(parse::Program& program, const ast::DeclSema& d
   };
   if (!namespace_function(d.entity) || !prototype(d.type) ||
       (d.flags & (sema::decl_flag::constexpr_ | sema::decl_flag::consteval_)) ||
-      d.contracts != ast::NodeId::none || world.ins.seqs.size(body.closures) != 0 ||
-      world.ins.seqs.size(body.locals) != 1)
-    return EntityId::none;
+      d.contracts != ast::NodeId::none || world.ins.seqs.size(body.closures) != 0)
+    return std::nullopt;
+  const auto local_count = world.ins.seqs.size(body.locals);
+  if (local_count < 1 || local_count > 2) return std::nullopt;
   const auto local = world.ins.seqs.at(body.locals, 0);
   if (local.entity != EntityId::none || local.decl != ast::NodeId::none ||
       sema::Types::is_volatile(world.types.canonical(local.type)))
-    return EntityId::none;
+    return std::nullopt;
 
   auto return_value = [&](ast::NodeId id) {
     const auto statement = sole_statement(id);
     return statement != ast::NodeId::none && tree.is<ast::Return>(statement)
         ? tree.get<ast::Return>(statement).value.id : ast::NodeId::none;
   };
+  auto reads_local = [&](ast::NodeId value, std::uint32_t index) {
+    if (value == ast::NodeId::none || !tree.is<ast::ImplicitConversion>(value)) return false;
+    const auto read = tree.get<ast::ImplicitConversion>(value);
+    return read.conversion == ast::ConversionKind::lvalue_to_rvalue && read.operand.id != ast::NodeId::none &&
+           tree.is<ast::LocalRef>(read.operand.id) && tree.get<ast::LocalRef>(read.operand.id).local == index;
+  };
   const auto block = tree.get<ast::TryBlock>(trial);
   const auto handlers = tree.children(block.handlers);
-  if (handlers.size() != 1 || !tree.is<ast::Handler>(handlers.front().id)) return EntityId::none;
+  if (handlers.size() != 1 || !tree.is<ast::Handler>(handlers.front().id)) return std::nullopt;
   const auto handler = tree.get<ast::Handler>(handlers.front().id);
   const auto caught_result = return_value(handler.body.id);
-  if (handler.kind != ast::HandlerKind::catch_all || caught_result == ast::NodeId::none ||
-      !tree.is<ast::Literal>(caught_result) || !world.types.is(tree.get<ast::Literal>(caught_result).info.type, sema::Builtin::int_))
-    return EntityId::none;
+  std::optional<std::uint32_t> int_binding;
+  if (handler.kind == ast::HandlerKind::catch_all) {
+    if (local_count != 1 || caught_result == ast::NodeId::none || !tree.is<ast::Literal>(caught_result) ||
+        !world.types.is(tree.get<ast::Literal>(caught_result).info.type, sema::Builtin::int_))
+      return std::nullopt;
+  } else if (handler.kind == ast::HandlerKind::typed) {
+    const auto type = world.types.canonical(handler.type);
+    if (local_count != 2 || handler.local != 1 || !world.types.is(type, sema::Builtin::int_) ||
+        sema::Types::is_volatile(type) || caught_result == ast::NodeId::none)
+      return std::nullopt;
+    auto value = caught_result;
+    if (tree.is<ast::ImplicitConversion>(value)) {
+      // A sugared int alias can add an identity integral conversion to the lvalue read.
+      const auto conversion = tree.get<ast::ImplicitConversion>(value);
+      const auto operand = conversion.operand.id;
+      if (conversion.conversion == ast::ConversionKind::integral && world.types.is(conversion.info.type, sema::Builtin::int_) &&
+          operand != ast::NodeId::none && tree.is<ast::ImplicitConversion>(operand) &&
+          world.types.is(tree.get<ast::ImplicitConversion>(operand).info.type, sema::Builtin::int_))
+        value = operand;
+    }
+    if (!reads_local(value, handler.local)) return std::nullopt;
+    int_binding = handler.local;
+  } else {
+    return std::nullopt;
+  }
 
   const auto value = return_value(block.body.id);
-  if (value == ast::NodeId::none || !tree.is<ast::Call>(value)) return EntityId::none;
+  if (value == ast::NodeId::none || !tree.is<ast::Call>(value)) return std::nullopt;
   const auto call = tree.get<ast::Call>(value);
   if (call.function == EntityId::none || call.callee.id == ast::NodeId::none ||
       !tree.is<ast::DeclRef>(call.callee.id) || !namespace_function(call.function) ||
       world.entities.rec(call.function).linkage != ast::Linkage::external)
-    return EntityId::none;
+    return std::nullopt;
   const auto callee = tree.get<ast::DeclRef>(call.callee.id);
-  if (callee.reference || callee.entity != call.function || !prototype(callee.info.type)) return EntityId::none;
+  if (callee.reference || callee.entity != call.function || !prototype(callee.info.type)) return std::nullopt;
   const auto args = tree.children(call.args);
-  if (args.size() != 1 || !tree.is<ast::ImplicitConversion>(args.front().id)) return EntityId::none;
-  const auto arg = tree.get<ast::ImplicitConversion>(args.front().id);
-  if (arg.conversion != ast::ConversionKind::lvalue_to_rvalue || arg.operand.id == ast::NodeId::none ||
-      !tree.is<ast::LocalRef>(arg.operand.id) || tree.get<ast::LocalRef>(arg.operand.id).local != 0)
-    return EntityId::none;
-  return call.function;
+  if (args.size() != 1 || !reads_local(args.front().id, 0)) return std::nullopt;
+  return HostedCatch{call.function, int_binding};
 }
 
 bool names_unnamed_namespace(parse::Program& program, QualType type);
@@ -794,13 +820,9 @@ bool names_unnamed_namespace(parse::Program& program, QualType type) {
   }
 }
 
-// The definitions and declarations of the global namespace, in item order.
-TranslationUnit unit_of(parse::Program& program, sema::World& world, const items::Items& items, std::string name,
-                        const std::set<EntityId>& uncertain_layouts) {
-  ast::Interners& ins = world.ins;
-  TranslationUnit tu;
-  tu.name = std::move(name);
-  // Native compilation may consume peer-owned Linux objects, including one non-key definition.
+// Native compilation may consume peer-owned objects, including one non-key definition.
+bool native_virtual_layouts(TranslationUnit& tu, parse::Program& program, sema::World& world,
+                            const std::set<EntityId>& uncertain_layouts) {
   const auto& classes = program.classes();
   std::set<EntityId> automatic_primary_bases;
   if (classes.has_virtual_layouts()) {
@@ -812,7 +834,7 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
         if (uncertain_layouts.contains(c) || uncertain_layouts.contains(base) || !key ||
             (*key != EntityId::none && tu.owned_virtual_table)) {
           block_virtual_emission(tu, program, record);
-          return tu;
+          return false;
         }
         if (*key != EntityId::none)
           tu.owned_virtual_table = OwnedVirtualTable{sema::virtual_table_entity(world, c), {*key}, base};
@@ -860,8 +882,20 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
       continue;
     }
     block_virtual_emission(tu, program, record);
-    return tu;
+    return false;
   }
+  return true;
+}
+
+// The definitions and declarations of the global namespace, in item order.
+TranslationUnit unit_of(parse::Program& program, sema::World& world, const items::Items& items, std::string name,
+                        const std::set<EntityId>& uncertain_layouts) {
+  ast::Interners& ins = world.ins;
+  TranslationUnit tu;
+  tu.name = std::move(name);
+  const auto& classes = program.classes();
+  const bool has_typed_cast = program.has_typed_dynamic_cast();
+  if (!has_typed_cast && !native_virtual_layouts(tu, program, world, uncertain_layouts)) return tu;
   const bool linux = world.target.triple == ast::x86_64_linux.triple;
   std::set<std::uint32_t> seen;
   std::set<EntityId> inline_declarations;
@@ -903,7 +937,8 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
         r.kind == sema::EntityKind::alias_template || r.kind == sema::EntityKind::concept_)
       return;  // no symbol: a template's specializations have them
     const bool table = r.kind == sema::EntityKind::virtual_table;
-    bool fn = r.kind != sema::EntityKind::variable && !table;
+    const bool rtti = r.kind == sema::EntityKind::type_info;
+    bool fn = r.kind != sema::EntityKind::variable && !table && !rtti;
     std::string id(ins.names.spelling(r.name));
     if (fn && id == "main" && r.scope == EntityId::none) tu.main = e;  // [basic.start.main]: the global one
     // A member of a class local to the unit is local too.
@@ -912,6 +947,7 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
       if (world.entities.rec(sc).kind == sema::EntityKind::class_ && internal_class(sc)) linkage = ast::Linkage::internal;
     tu.entities.push_back({e, std::move(id), d.type, fn, r.lang, linkage, false, at, r.scope,
                            table ? Special::virtual_table
+                           : rtti ? Special::type_info
                            : r.kind == sema::EntityKind::constructor  ? Special::constructor
                            : r.kind == sema::EntityKind::destructor ? Special::destructor
                            : r.kind == sema::EntityKind::deleting_destructor ? Special::deleting_destructor
@@ -1057,7 +1093,7 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
                                 location.item, location.offset, complete.this_type});
         continue;
       }
-      if (linux && !member && program.supports_base_object_variant(d.entity, uncertain_layouts))
+      if (!member && program.supports_base_object_variant(d.entity, uncertain_layouts))
         tu.base_object_variants.insert(d.entity);
       tu.functions.back().coalesced = inline_declarations.contains(d.entity) && entity.kind == sema::EntityKind::function &&
                                      entity.linkage == ast::Linkage::external && entity.templ == EntityId::none &&
@@ -1071,9 +1107,8 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
                  program.region().tokens[it.body_begin].kind == lex::Tk::l_brace) {
         auto& f = tu.functions.back();
         if (linux) {
-          f.catch_all_callee = hosted_catch_all_callee(program, d, body);
-          f.unwind = f.catch_all_callee == EntityId::none ? cleanup_free_definition(program, d, body)
-                                                         : UnwindEligibility::hosted_catch_all;
+          f.hosted_catch = hosted_catch(program, d, body);
+          f.unwind = f.hosted_catch ? UnwindEligibility::hosted_catch : cleanup_free_definition(program, d, body);
         } else if (cleanup_free_definition(program, d, body) == UnwindEligibility::cleanup_free) {
           f.unwind = UnwindEligibility::cleanup_free;
         }
@@ -1213,13 +1248,12 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
       f.unwind = UnwindEligibility::none;
     } else if (f.unwind == UnwindEligibility::cleanup_free_with_throw && !tu.int_throw) {
       tu.int_throw = runtime.int_throw();
-    } else if (f.unwind == UnwindEligibility::hosted_catch_all) {
+    } else if (f.unwind == UnwindEligibility::hosted_catch) {
       // An external provider supplies its own unwind coverage. A definition in this unit can
       // introduce intervening frames without it. The ordinary function type erases written noexcept.
-      const EntityId callee = f.catch_all_callee;
-      if (!unwind_provider(callee))
+      if (!unwind_provider(f.hosted_catch->callee))
         f.unwind = UnwindEligibility::none;
-      else if (!tu.catch_all) tu.catch_all = runtime.catch_all();
+      else if (!tu.catch_runtime) tu.catch_runtime = runtime.catch_runtime();
     } else if (f.unwind == UnwindEligibility::hosted_cleanup) {
       const EntityId callee = ins.ast.get<ast::Call>(f.cleanup_call).function;
       if (!unwind_provider(callee) || (f.constructor_initializer_callee != EntityId::none &&
@@ -1227,6 +1261,42 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
         f.unwind = UnwindEligibility::none;
       else if (tu.cleanup_resume == EntityId::none) tu.cleanup_resume = runtime.resume();
     }
+  }
+  if (has_typed_cast) {
+    // Only emitted trees need native RTTI. In particular, syntax-only expressions and
+    // constant initializers do not introduce references to the host runtime.
+    std::set<std::pair<EntityId, EntityId>> checked;
+    for (const FunctionDef& f : tu.functions) {
+      if (f.body.tree == ast::NodeId::none) continue;
+      auto collect = [&](this auto&& visit, const ast::Red& node) -> void {
+        if (node.is<ast::DynamicCastPointer>()) {
+          const auto cast = node.get<ast::DynamicCastPointer>();
+          const EntityId source = world.entities.rec(cast.source_rtti).scope;
+          const EntityId target = world.entities.rec(cast.target_rtti).scope;
+          if (checked.emplace(source, target).second) {
+            const ast::Loc at{f.item, node.offset()};
+            if (uncertain_layouts.contains(source) || uncertain_layouts.contains(target) ||
+                !program.peer_typed_dynamic_cast(source, target)) {
+              tu.unsupported_typed_dynamic_cast = at;
+              return;
+            }
+            for (EntityId id : {cast.source_rtti, cast.target_rtti, cast.runtime}) {
+              ast::DeclSema d{};
+              d.kind = id == cast.runtime ? ast::DeclKind::function : ast::DeclKind::variable;
+              d.entity = id;
+              d.type = world.entities.rec(id).type;
+              declare(d, at);
+            }
+          }
+        }
+        node.for_each_child([&](const ast::Red& child) {
+          if (!tu.unsupported_typed_dynamic_cast) visit(child);
+        });
+      };
+      collect(ast::Red(ins.ast, f.body.tree, f.body_offset));
+      if (tu.unsupported_typed_dynamic_cast) return tu;
+    }
+    if (!native_virtual_layouts(tu, program, world, uncertain_layouts)) return tu;
   }
   // Register the owner after checking the makers. An owned declaration cannot stand in for
   // the visibility check required when a maker requests the address point.
@@ -1332,8 +1402,9 @@ engine::query_task<FrontResult> TuFront::run(engine::Ctx& cx, TuId tu) {
   // The unit's own records of its classes and enumerations (#115).
   const sema::Classes& classes = program.classes();
   const bool linux = unit_source.config.target->triple == ast::x86_64_linux.triple;
-  const auto uncertain = linux ? program.uncertain_object_layouts(/*include_lifecycle_signatures=*/true)
-                               : std::set<EntityId>{};
+  // Both targets: the base-object entries and the virtual shapes rely on it, and the System V
+  // aggregate rules read it on x86-64 (#650).
+  const auto uncertain = program.uncertain_object_layouts(/*include_lifecycle_signatures=*/true);
   if (!out.has_errors()) out.unit = unit_of(program, world, items, src.name, uncertain);
   auto nontrivial_destructor = [&](this auto&& recurse, EntityId cls) -> bool {
     const auto* record = classes.find(cls);

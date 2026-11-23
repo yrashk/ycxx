@@ -7,7 +7,10 @@
 #define EXPECT_FIRST 71
 #endif
 
-extern const unsigned char root_vtable[32] asm("_ZTVN6abi3094RootE");
+// The symbol carries the C prefix (`_` on Darwin, none on ELF).
+#define LABEL_STR(p) #p
+#define LABEL_PREFIX(p) LABEL_STR(p)
+extern const unsigned char root_vtable[32] asm(LABEL_PREFIX(__USER_LABEL_PREFIX__) "_ZTVN6abi3094RootE");
 
 namespace abi309 {
 static_assert(sizeof(Root) == 16);
