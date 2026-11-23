@@ -155,7 +155,7 @@ const char* name() {{ return "m{0}"; }}
 int run() {{ Box b(plain(2)); return b.get() + twice(K) + name()[0]; }}
 }}
 )", i, i == 3 ? edited_k : i + 2);
-    if (comment && i == 3) s += "// a comment\n";
+    if (comment && i == 3) s += "// a comment\n\n\n";
   }
   s += "int main() {\n  int sum = 0;\n";
   for (int i = 0; i < count; ++i) s += std::format("  sum += m{}::run();\n", i);
@@ -210,9 +210,14 @@ void one_module_edit() {
     check(edit.contains(kind), std::format("{} is counted:{}", kind, described(edit)));
   per_function(edit, 2, "one module's constant");
   per_unit(edit, "one module's constant");
+  check(edit.contains("TuSema"), "a changed token re-runs the analysis");
+  // A comment and blank lines move every later token but change none (#947): the analysis does
+  // not run again (the link reads no placed message).
   const auto commented = executed(modules(6, true));
   per_function(commented, 0, "a comment");
   per_unit(commented, "a comment");
+  check(!commented.contains("TuSema") && commented.contains("PpTokens"),
+        std::format("a comment re-runs no analysis:{}", described(commented)));
 }
 
 // Two units in one session; then one with an error, which keeps the program from linking, and

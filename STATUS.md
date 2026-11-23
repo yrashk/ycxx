@@ -599,9 +599,11 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
 - `ycxx.pipeline` (`src/pipeline/`): every stage is an engine query (#63), run by `client::cxx`
   through a `Session` (the engine, the interners and sema's world, alive together; in-process
   until the daemon, #96):
-  - `:front`: `TuFront(TU)`: the file's text as the engine's `FileText`, `pp` and `RegionItems`,
-    then `parse::Program` (item_sema, analyze_body) inside the one cell until contextual queries
-    (#16). Its diagnostics by byte offset, and the `TranslationUnit`: entities, function
+  - `:front`: `TuSema(TU)`: `PpTokens` (the region without token locations, expansion sites,
+    `space_before` flags or error details) and `RegionItems`, then `parse::Program` (item_sema,
+    analyze_body) inside the one cell until contextual queries (#16, #947). `TuFront(TU)` places
+    its messages in files from `pp`'s full region, so an edit that changes no token (a comment,
+    blank lines) stops at `PpTokens` and analysis does not run again (#947, slice 0). Its diagnostics by byte offset, and the `TranslationUnit`: entities, function
     definitions with their analysed bodies, variable definitions with their constants.
     `tu_unit(TU)` projects the unit, so a whitespace edit stops there.
   - `:back`, per function `F`: `function_source(TU, F)` (a projection that backdates),

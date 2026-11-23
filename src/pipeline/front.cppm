@@ -48,9 +48,40 @@ struct BodyAt {
   ast::NodeId tree = ast::NodeId::none;
 };
 
+// The region as sema reads it (#947, slice 0): its tokens without where they were written. The
+// tokens' locations, expansion sites, `space_before` flags (sema reads none of them) and error
+// details are dropped, so an edit that moves tokens without changing them (a comment, blank
+// lines, spacing) stops here and analysis does not run again.
+struct PpTokens {
+  using Key = pp::FileId;
+  using Value = pp::Region;
+  static engine::query_task<Value> run(engine::Ctx& cx, Key file);
+  static engine::SourceSpan trace_span(const engine::Db& db, Key file) { return pp::file_span(db, file); }
+};
+
+// A sema diagnostic before it is placed: its region token, which `TuFront` turns into a file
+// position.
+struct SemaMessage {
+  bool error = true;
+  std::string text;
+  std::uint32_t token = 0;
+};
+
+// The analysis of a unit (#947, slice 0): what `TuFront` was, less placing messages in files.
+struct SemaResult {
+  std::vector<SemaMessage> messages;  // in order of position in the unit
+  bool lex_errors = false;            // the preprocessor or lexer reported an error
+  TranslationUnit unit;               // meaningful when there are no errors
+  Shapes shapes;                      // its classes and enumerations, for `layout` (#115)
+  std::vector<std::pair<EntityId, ast::Loc>> declared;
+  std::vector<BodyAt> bodies;
+  bool has_errors() const {
+    return lex_errors || std::ranges::any_of(messages, [](const SemaMessage& m) { return m.error; });
+  }
+};
+
 struct FrontResult {
   std::vector<Message> messages;  // in order of position in the unit
-  TranslationUnit unit;           // meaningful when there are no errors
   Shapes shapes;                  // its classes and enumerations, for `layout` (#115)
   // For an editor (#170), with errors or not: each entity's first declaration in the unit (its
   // declarator, else its item's start), in item order, and the analysed function bodies.
@@ -61,9 +92,19 @@ struct FrontResult {
   }
 };
 
-// One translation unit from its source file (`TuSource::file`), analysed.
 // Where in the source (#638): a unit's cells are its file (defined with the back end's cells).
 engine::SourceSpan tu_span(const engine::Db& db, TuId tu);
+
+// One translation unit from its source file (`TuSource::file`), analysed, from `PpTokens` and the
+// items: it holds no file position, so an edit that only moves tokens leaves it green.
+struct TuSema {
+  using Key = TuId;
+  using Value = SemaResult;
+  static engine::query_task<Value> run(engine::Ctx& cx, TuId tu);
+  static engine::SourceSpan trace_span(const engine::Db& db, TuId tu) { return tu_span(db, tu); }
+};
+
+// The unit's diagnostics placed in its files, with what an editor reads of its analysis.
 
 struct TuFront {
   using Key = TuId;
@@ -1326,41 +1367,36 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
   return tu;
 }
 
-engine::query_task<FrontResult> TuFront::run(engine::Ctx& cx, TuId tu) {
+engine::query_task<pp::Region> PpTokens::run(engine::Ctx& cx, pp::FileId file) {
+  const pp::Region& full = co_await cx.fetch<pp::Pp>(file);
+  pp::Region out;
+  out.tokens = full.tokens;
+  for (lex::Tok& tok : out.tokens) tok.flags &= static_cast<std::uint8_t>(~lex::tok_flag::space_before);
+  out.names = full.names;
+  out.literals = full.literals;
+  out.files = full.files;
+  out.file_names = full.file_names;
+  out.possibly_packed = full.possibly_packed;
+  out.first_visibility_pragma = full.first_visibility_pragma;
+  out.has_clang_attribute_pragma = full.has_clang_attribute_pragma;
+  co_return out;
+}
+
+engine::query_task<SemaResult> TuSema::run(engine::Ctx& cx, TuId tu) {
   const TuSource& src = cx.fetch<TuSourceIn>(tu);
   contract_assert(src.file.has_value());  // a unit given as definitions has no front end
   const pp::FileId file{*src.file};
   const pp::Source& unit_source = cx.fetch<pp::SourceOf>(file);
   sema::World& world = *universe().world_for(*unit_source.config.target);
-  const pp::Region& region = co_await cx.fetch<pp::Pp>(file);
+  const pp::Region& region = co_await cx.fetch<PpTokens>(file);
   const items::Items& items = co_await cx.fetch<items::RegionItems>(file);
+  // Whether the lexer or preprocessor reported an error, not where: `TuFront` places them.
   const std::vector<engine::Diagnostic>& lexed = co_await cx.fetch<engine::DiagsOf>(cx.cell_of<items::RegionItems>(file));
-  FrontResult out;
-  SourceLocations locations(cx, unit_source, file, region, items);
-  // `pp` reports at byte offsets in the file (`lex::file_level`).
-  for (const engine::Diagnostic& d : lexed) {
+  SemaResult out;
+  out.lex_errors = std::ranges::any_of(lexed, [](const engine::Diagnostic& d) {
     auto kind = lex::lex_diag_of(d.id);
-    if (!kind) continue;
-    std::vector<std::uint64_t> args;
-    for (const engine::DiagArg& a : d.args) args.push_back(a.raw);
-    const auto f = static_cast<std::uint16_t>(lex::file_level - d.at.item);
-    Message m{d.at.offset, lex::message_of(*kind).severity == lex::Severity::error, lex::render(*kind, args),
-              locations.at({f, 0, d.at.offset})};
-    // The first token at or after the position in its file, else (a header of only directives)
-    // the first token of a file included after it (files are numbered as they are first met).
-    m.token = static_cast<std::uint32_t>(region.locs.size() - 1);
-    std::uint32_t later = m.token;
-    for (std::uint32_t t = 0; t + 1 < region.locs.size(); ++t) {
-      pp::TokLoc l = region.site(t);
-      if (l.file == f && l.offset >= d.at.offset) {
-        m.token = t;
-        break;
-      }
-      if (l.file > f && later == region.locs.size() - 1) later = t;
-    }
-    m.token = std::min(m.token, later);
-    out.messages.push_back(std::move(m));
-  }
+    return kind && lex::message_of(*kind).severity == lex::Severity::error;
+  });
   // The unit's language options: the instantiation limit (`-ftemplate-depth`).
   parse::Program program(world, region, items, unit_source.config.template_depth);
   program.analyze_all();
@@ -1393,12 +1429,11 @@ engine::query_task<FrontResult> TuFront::run(engine::Ctx& cx, TuId tu) {
     if (!kind) continue;
     std::vector<std::uint64_t> args;
     for (const engine::DiagArg& a : d.args) args.push_back(a.raw);
-    const pp::TokLoc at = program.site(d.at);
-    out.messages.push_back({at.offset, sema::message_of(*kind).severity == lex::Severity::error,
+    out.messages.push_back({sema::message_of(*kind).severity == lex::Severity::error,
                             sema::render(*kind, args, [&](char how, std::uint64_t raw) { return program.spell(how, raw); }),
-                            locations.at(at), program.token(d.at)});
+                            program.token(d.at)});
   }
-  std::ranges::stable_sort(out.messages, {}, &Message::token);
+  std::ranges::stable_sort(out.messages, {}, &SemaMessage::token);
   // The unit's own records of its classes and enumerations (#115).
   const sema::Classes& classes = program.classes();
   const bool linux = unit_source.config.target->triple == ast::x86_64_linux.triple;
@@ -1477,24 +1512,72 @@ engine::query_task<FrontResult> TuFront::run(engine::Ctx& cx, TuId tu) {
   co_return out;
 }
 
+engine::query_task<FrontResult> TuFront::run(engine::Ctx& cx, TuId tu) {
+  const TuSource& src = cx.fetch<TuSourceIn>(tu);
+  contract_assert(src.file.has_value());  // a unit given as definitions has no front end
+  const pp::FileId file{*src.file};
+  const pp::Source& unit_source = cx.fetch<pp::SourceOf>(file);
+  const pp::Region& region = co_await cx.fetch<pp::Pp>(file);
+  const items::Items& items = co_await cx.fetch<items::RegionItems>(file);
+  const std::vector<engine::Diagnostic>& lexed = co_await cx.fetch<engine::DiagsOf>(cx.cell_of<items::RegionItems>(file));
+  FrontResult out;
+  SourceLocations locations(cx, unit_source, file, region, items);
+  // `pp` reports at byte offsets in the file (`lex::file_level`).
+  for (const engine::Diagnostic& d : lexed) {
+    auto kind = lex::lex_diag_of(d.id);
+    if (!kind) continue;
+    std::vector<std::uint64_t> args;
+    for (const engine::DiagArg& a : d.args) args.push_back(a.raw);
+    const auto f = static_cast<std::uint16_t>(lex::file_level - d.at.item);
+    Message m{d.at.offset, lex::message_of(*kind).severity == lex::Severity::error, lex::render(*kind, args),
+              locations.at({f, 0, d.at.offset})};
+    // The first token at or after the position in its file, else (a header of only directives)
+    // the first token of a file included after it (files are numbered as they are first met).
+    m.token = static_cast<std::uint32_t>(region.locs.size() - 1);
+    std::uint32_t later = m.token;
+    for (std::uint32_t t = 0; t + 1 < region.locs.size(); ++t) {
+      pp::TokLoc l = region.site(t);
+      if (l.file == f && l.offset >= d.at.offset) {
+        m.token = t;
+        break;
+      }
+      if (l.file > f && later == region.locs.size() - 1) later = t;
+    }
+    m.token = std::min(m.token, later);
+    out.messages.push_back(std::move(m));
+  }
+  // Sema's messages, placed: a macro's token is where it was expanded (ast.md §8.3).
+  const SemaResult& sema = co_await cx.fetch<TuSema>(tu);
+  for (const SemaMessage& m : sema.messages) {
+    const pp::TokLoc at = region.site(std::min<std::size_t>(m.token, region.locs.size() - 1));
+    out.messages.push_back({at.offset, m.error, m.text, locations.at(at), m.token});
+  }
+  std::ranges::stable_sort(out.messages, {}, &Message::token);
+  out.shapes = sema.shapes;
+  out.declared = sema.declared;
+  out.bodies = sema.bodies;
+  co_return out;
+}
+
 // A unit given as definitions has no classes of its own.
 engine::query_task<Shapes> UnitShapes::run(engine::Ctx& cx, TuId tu) {
   if (!cx.fetch<TuSourceIn>(tu).file) co_return Shapes{};
-  const FrontResult& u = co_await cx.fetch<TuFront>(tu);
+  const SemaResult& u = co_await cx.fetch<TuSema>(tu);
   co_return u.shapes;
 }
 
 engine::query_task<TranslationUnit> TuUnit::run(engine::Ctx& cx, TuId tu) {
   const TuSource& src = cx.fetch<TuSourceIn>(tu);
   if (!src.file) co_return src.given;
-  const FrontResult& front = co_await cx.fetch<TuFront>(tu);
-  if (front.has_errors()) {
+  // The analysis, not its placed messages: an edit that only moves tokens stops before this.
+  const SemaResult& sema = co_await cx.fetch<TuSema>(tu);
+  if (sema.has_errors()) {
     TranslationUnit failed;
     failed.name = src.name;
     failed.front_failed = true;
     co_return failed;
   }
-  co_return front.unit;
+  co_return sema.unit;
 }
 
 engine::query_task<std::optional<FileOffset>> DefinitionAt::run(engine::Ctx& cx, DefinitionKey k) {

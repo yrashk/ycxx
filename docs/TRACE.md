@@ -44,8 +44,8 @@ for a tracer, so an untraced build pays nothing.
 
 | cells | span |
 | --- | --- |
-| a file's: `SourceOf`, `FileText`, `Pp`, `RegionItems` | the whole file |
-| a unit's: `TuFront`, `TuUnit`, `UnitShapes`, `UnitShapeIndex`, `UnitIndexQ`, `UnitFunctionFactsQ`, `Tu`, `TuSymbolAddresses`, and `SymbolAccessQ` (an entity's answer in a unit) | the unit's main file |
+| a file's: `SourceOf`, `FileText`, `Pp`, `PpTokens`, `RegionItems` | the whole file |
+| a unit's: `TuFront`, `TuSema`, `TuUnit`, `UnitShapes`, `UnitShapeIndex`, `UnitIndexQ`, `UnitFunctionFactsQ`, `Tu`, `TuSymbolAddresses`, and `SymbolAccessQ` (an entity's answer in a unit) | the unit's main file |
 | a function's: `FunctionSourceQ`, `FunctionGen`, `FunctionIr`, `FunctionDebug`, `Lower`, `UnitQ`, `Codegen` | its definition, from its first token to where its last starts (a token from a macro is where the macro is used); an instantiation's is its pattern's, since its body is the pattern's tokens analysed again |
 
 These cells have none, and why:
