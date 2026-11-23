@@ -298,9 +298,11 @@ The issue records the exact branch revisions and native hosts that passed.
 | Composition and incremental reuse | Combine typed and reflected declarations across headers and translation units. Verify equivalent normalization, both conflict origins, and reuse for 1,280 resources and 144 effect tags. Change a policy header or provider while preserving size and timestamp. Toggle runtime guards in one daemon. Compare the resulting diagnostics and binaries with cold builds. | [Contracts](../../tests/unit/pipeline/policies_contracts.py) · [Effects](../../tests/unit/pipeline/policies_effects.py) · [Grades](../../tests/unit/pipeline/policies_grades.py) · [Daemon](../../tests/daemon/process.py) |
 
 The native owner-variant gate runs both valid alternatives, a capability scope violation, and a
-linear leak through a variant. It runs on arm64 macOS. The Linux fixture currently asserts the
-compiler's empty-selection-tag ABI diagnostic. Once the lowering lands, it must run those same
-native cases on x86-64 Linux. [Empty selection tags #641](https://github.com/yrashk/ycxx/issues/641)
+linear leak through a variant on arm64 macOS in both runtime guard modes. The runtime violations
+trap with guards enabled, and the checked linear leak fails compilation in either mode. The Linux
+fixture currently asserts the compiler's empty-selection-tag ABI diagnostic in both modes. Once the
+lowering lands, it must run those same native cases on x86-64 Linux.
+[Empty selection tags #641](https://github.com/yrashk/ycxx/issues/641)
 
 The mixed-compiler unwind gate uses an automatic aggregate with a nonthrowing destructor around
 a direct external call. A GCC or Clang caller creates the guard, and the YCXX helper consumes it
