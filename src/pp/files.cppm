@@ -113,6 +113,10 @@ struct Config {
   std::vector<std::pair<std::string, std::optional<std::string>>> macros;
   // The target selects predefined macros (:predefined) and system include directories (:system).
   const ast::Target* target = &ast::aarch64_darwin;
+  // `-ffreestanding` selects the hostedness predefined macro independently of the target.
+  bool freestanding = false;
+  // `-fno-exceptions` disables exception handling in semantic analysis and native lowering.
+  bool exceptions_enabled = true;
   // The root of every prefix (§6.1): an editor-view region is never a disk-view one's.
   View view = View::disk;
   // A language option the unit's front end reads: `-ftemplate-depth=N`, the limit on nested
@@ -122,8 +126,9 @@ struct Config {
   // An ABI option the unit's front end reads: `-fclass-call-abi=itanium|apple`, which classes pass
   // in registers (DECISIONS §1.6). None: the target's default.
   std::optional<ast::CallTriviality> call_triviality;
-  // Setup option consumed by with_system_dirs. Queries use the effective directory lists.
+  // Setup options consumed by with_system_dirs. Queries use the effective directory lists.
   bool nostdinc = false;
+  bool nostdincxx = false;
   ast::CallTriviality calls() const { return call_triviality.value_or(target->call_triviality); }
 
   // Whether a file found in directory `found` (an index into quote then angle directories, as
@@ -145,6 +150,8 @@ struct Config {
     }
     if (template_depth != default_template_depth) h.uint(u8(2)).uint(template_depth);
     if (call_triviality) h.uint(u8(3)).uint(std::to_underlying(*call_triviality));
+    if (freestanding) h.uint(u8(4));
+    if (!exceptions_enabled) h.uint(u8(5));
     return h.finish();
   }
 };

@@ -134,6 +134,12 @@ struct [[=dependent]] VDepCall {
   SeqId<TemplateArg> args;
 };
 
+// A concept-id whose written template arguments still depend on a template parameter.
+struct [[=dependent]] VDepConcept {
+  EntityId concept_;
+  SeqId<TemplateArg> args;
+};
+
 // A value named through a dependent nested-name-specifier.
 struct [[=dependent]] VDepMember {
   QualType qualifier;
@@ -218,7 +224,7 @@ struct VConstraint {
 
 using ValueKinds = closed_list<VInt, VFloat, VNullptr, VString, VLvalue, VEntity, VAggregate, VDepParam, VDepFnParam, VDepExpansion,
                                VDepSizeofPack, VType, VAtom, VConstraint, VDepOp, VMemberPtr, VDepVariable, VConstraintPack,
-                               VDepCall, VDepMember>;
+                               VDepCall, VDepMember, VDepConcept>;
 
 template <class T>
 constexpr bool is_value_kind = ValueKinds::contains<T>;

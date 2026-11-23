@@ -82,7 +82,7 @@ class Constants {
 
 // An entity the translation unit declares (or defines): what its symbol is made of.
 // These symbols use special Itanium encodings (§5.1.4.3, §5.1.4.5).
-enum class Special : std::uint8_t { none, constructor, destructor, virtual_table, deleting_destructor, type_info };
+enum class Special : std::uint8_t { none, constructor, destructor, virtual_table, deleting_destructor, type_info, base_object_destructor };
 struct Entity {
   EntityId id = EntityId::none;
   std::string name;  // its identifier
@@ -148,7 +148,7 @@ struct FunctionDef {
   EntityId constructor_cleanup = EntityId::none;
   EntityId constructor_initializer_callee = EntityId::none;
   EntityId unwind_through_constructor = EntityId::none;
-  EntityId root_destructor_table = EntityId::none;  // a peer-owned table restored by D1 and D2
+  EntityId destructor_table = EntityId::none;  // the primary table installed by D1 and D2
 };
 
 // A variable definition at namespace scope with its constant initializer, or `ConstId::none` for
@@ -204,6 +204,7 @@ struct OwnedVirtualTable {
   EntityId entity;
   std::vector<EntityId> slots;  // in slot order, starting with the key function in the admitted profiles
   EntityId primary_base = EntityId::none;
+  bool peer_base_rtti = false;  // a peer's key owns the primary base descriptor
 };
 
 // A translation unit's definitions and declarations, in the order of their items.
@@ -729,11 +730,15 @@ Bind::~Bind() { bound() = old_; }
 
 namespace {
 
+const pp::Config* unit_config(engine::SyncCtx& cx, TuId tu) {
+  const TuSource& src = cx.fetch<TuSourceIn>(tu);
+  return src.file ? &cx.fetch<pp::SourceOf>(pp::FileId{*src.file}).config : nullptr;
+}
+
 // A source unit uses the target in its configuration; a given unit uses its owner's target.
 const ast::Target& unit_target(engine::SyncCtx& cx, TuId tu) {
-  const TuSource& src = cx.fetch<TuSourceIn>(tu);
-  if (src.file) return *cx.fetch<pp::SourceOf>(pp::FileId{*src.file}).config.target;
-  return *universe().target;
+  const auto* config = unit_config(cx, tu);
+  return config ? *config->target : *universe().target;
 }
 
 obj::target object_target(const ast::Target& target) {
@@ -904,7 +909,7 @@ bool QueryLayout::contains_mutable_field(QualType type) const {
   return contains(type);
 }
 
-// System V AMD64 psABI §3.2.3. Flat records of integral or ordinary object-pointer members.
+// System V AMD64 psABI §3.2.3. Flat records of integral, object-pointer or object lvalue-reference members.
 // Padding leaves the corresponding eightbyte class unchanged (initially NO_CLASS).
 std::uint8_t QueryLayout::sysv_integer_eightbytes(const ClassShape& shape, const ClassLayout& l) const {
   if (!shape.trivial_calls || shape.layout_uncertain || shape.union_ || !shape.bases.empty() || !shape.bit_widths.empty() ||
@@ -916,7 +921,8 @@ std::uint8_t QueryLayout::sysv_integer_eightbytes(const ClassShape& shape, const
     ast::BuiltinLayout field;
     if (auto b = ast::builtin_of(in, f.type); b && ast::is_integral(*b))
       field = (*target_)[*b];
-    else if (ast::is_pointer(in, f.type) && !ast::is_function(in, ast::pointee_of(in, f.type)))
+    else if ((ast::is_pointer(in, f.type) && !ast::is_function(in, ast::pointee_of(in, f.type))) ||
+             (in.types.is<ast::TLRef>(f.type) && !ast::is_function(in, in.types.get<ast::TLRef>(f.type).referee)))
       field = {target_->pointer_size, target_->pointer_align};
     else return 0;
     if (!field.size || field.size > 8 || field.align > l.align || f.offset % field.align ||
@@ -1202,11 +1208,13 @@ engine::query_task<Generated> FunctionGen::run(engine::Ctx& cx, FnKey k) {
   auto [src, unit, shapes, shape_index] =
       co_await cx.par_fetch(engine::q<FunctionSourceQ>{k}, engine::q<UnitFunctionFactsQ>{k.tu}, engine::q<UnitShapes>{k.tu},
                             engine::q<UnitShapeIndex>{k.tu});
-  UnitFacts facts(src, unit, shapes, shape_index, unit_target(cx, k.tu));
+  const auto* config = unit_config(cx, k.tu);
+  UnitFacts facts(src, unit, shapes, shape_index, config ? *config->target : *universe().target);
   const FunctionDef& d = src.def;
   irgen::FunctionInput input{d.entity, d.decl, d.body, d.item, d.body_offset};
+  input.exceptions_enabled = !config || config->exceptions_enabled;
   input.this_type = d.this_type;
-  input.root_destructor_table = d.root_destructor_table;
+  input.destructor_table = d.destructor_table;
   const auto& seqs = universe().in->seqs;
   const auto locals = d.body.locals;
   for (std::uint32_t index = 0, count = seqs.size(locals); index < count; ++index) {
@@ -1226,9 +1234,11 @@ engine::query_task<Generated> FunctionGen::run(engine::Ctx& cx, FnKey k) {
     input.catch_int_binding = d.hosted_catch->int_binding;
   }
   const bool linux = facts.target().triple == ast::x86_64_linux.triple;
-  if (linux) input.unwind_cleanup_checks = irgen::UnwindCleanupChecks::all_calls;
-  else if (facts.target().triple == ast::aarch64_darwin.triple)
-    input.unwind_cleanup_checks = irgen::UnwindCleanupChecks::aggregate_defaults;
+  if (input.exceptions_enabled) {
+    if (linux) input.unwind_cleanup_checks = irgen::UnwindCleanupChecks::all_calls;
+    else if (facts.target().triple == ast::aarch64_darwin.triple)
+      input.unwind_cleanup_checks = irgen::UnwindCleanupChecks::aggregate_defaults;
+  }
   if (d.constructor_cleanup != EntityId::none && d.unwind == UnwindEligibility::none) {
     auto error = co_await located_error(cx, k.tu, ast::Loc{d.item, d.body_offset},
                                        "unsupported unwind from a union constructor with a nontrivial active member");
@@ -1669,6 +1679,7 @@ struct VirtualTable {
   std::string type_encoding;
   std::span<const EntityId> slots;
   std::optional<std::string> base_encoding;
+  bool peer_base_rtti = false;
 };
 
 struct KeylessTypeInfo {
@@ -1768,6 +1779,10 @@ void emit_virtual_table(obj::object& o, const VirtualTable& table, std::uint32_t
   emit_rtti_pointer(o, pointers, o.reference(prefix + std::string(runtime_type)), rtti_address_point);
   emit_rtti_pointer(o, pointers, name_object);
   if (const auto& base = table.base_encoding) {
+    if (table.peer_base_rtti) {
+      emit_rtti_pointer(o, pointers, o.reference(prefix + "_ZTI" + *base));
+      return;
+    }
     if (emitted_base) {
       emit_rtti_pointer(o, pointers, *emitted_base);
       return;
@@ -2129,7 +2144,7 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
           }
           base = std::move(*base_encoding);
         }
-        virtual_table = VirtualTable{e.id, std::move(*encoding), owned->slots, std::move(base)};
+        virtual_table = VirtualTable{e.id, std::move(*encoding), owned->slots, std::move(base), owned->peer_base_rtti};
       }
       if (!table && tu.keyless_type_info.contains(e.id)) keyless_type_info.push_back({e.id, std::move(*encoding)});
       continue;
@@ -2138,6 +2153,7 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
     // for a caller constructing or destroying a base subobject (Itanium ABI §5.1.4.3, §5.2.5).
     const std::string_view entry = e.special == Special::constructor ? "C1" :
                                    e.special == Special::destructor ? "D1" :
+                                   e.special == Special::base_object_destructor ? "D2" :
                                    e.special == Special::deleting_destructor ? "D0" : std::string_view(e.name);
     TemplateSpec spec{e.template_type.value_or(e.type), e.template_args, e.template_params, e.template_same_heads};
     const auto encode = [&](std::string_view name) {

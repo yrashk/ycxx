@@ -1589,7 +1589,8 @@ public:
                                                bool check_injected_access = false,
                                                std::vector<TypeQualifier>* type_qualifiers = nullptr,
                                                bool* failed_qualifier = nullptr,
-                                               std::optional<u32>* committed_failure = nullptr) {
+                                               std::optional<u32>* committed_failure = nullptr,
+                                               std::optional<u32>* ambiguous_namespace = nullptr) {
     u32 j = start;
     std::optional<sema::Sema::Scope> s;
     if (kind(j) == Tk::kw_decltype && kind(j + 1) == Tk::l_paren) {
@@ -1608,7 +1609,9 @@ public:
       ++j;
     } else if (kind(j) == Tk::identifier && kind(j + 1) == Tk::coloncolon) {
       const std::optional<u32> at = lookup == QualifierLookup::elaborated_enum ? std::optional{pos() + j} : std::nullopt;
-      s = s_->scope_named(name_of(tok(j)), at);
+      bool ambiguous = false;
+      s = s_->scope_named(name_of(tok(j)), at, ambiguous_namespace ? &ambiguous : nullptr);
+      if (ambiguous) *ambiguous_namespace = j;
       if (!s) return std::nullopt;
       j += 2;
     } else if (auto t = template_id_scope(std::nullopt, j, /*scope=*/true, checked || check_injected_access,
@@ -1635,7 +1638,10 @@ public:
             continue;
           }
         }
-        auto m = s_->scope_member(*s, n);
+        bool ambiguous = false;
+        auto m = s_->scope_member(*s, n, /*assume_dependent_type=*/true,
+                                  ambiguous_namespace && !*ambiguous_namespace ? &ambiguous : nullptr);
+        if (ambiguous) *ambiguous_namespace = j;
         if (!m) return std::nullopt;
         if (member_pointer || checked) check_type_access(*s, n, pos() + j);
         else if (type_qualifiers && s->type) type_qualifiers->push_back({*s, n, pos() + j});
@@ -2220,6 +2226,7 @@ public:
                     (scope->type && s_->types().is_class(*scope->type) &&
                      s_->types().class_of(*scope->type) == s_->current_class && member_template_name(n).value_or(false)) ||
                     (scope->ns && (s_->namespace_template(*scope->ns, n, ast::DeclKind::variable) ||
+                                   s_->namespace_template(*scope->ns, n, ast::DeclKind::concept_) ||
                                    s_->namespace_type_template(*scope->ns, n)))))
         return name + 1;
       return std::nullopt;
@@ -2639,7 +2646,7 @@ public:
   // A template-argument-list ([temp.arg.general]) after a template-name, from its `<`. An argument
   // that can be a type-id is one ([temp.arg.general]/2).
   std::optional<std::vector<ast::TemplateArg>> template_argument_list(std::optional<u32>* replay_at = nullptr,
-                                                                     bool* took_closer = nullptr) {
+                                                                     bool* took_closer = nullptr, bool expand_empty = false) {
     if (took_closer) *took_closer = false;
     u32 begin = pos();
     u32 deferred = deferred_argument_checks_;
@@ -2713,7 +2720,7 @@ public:
       } while (accept(Tk::comma));
     }
     if (ok)
-      if (auto xs = s_->expand_bound(args)) args = *xs;
+      if (auto xs = s_->expand_bound(args, expand_empty)) args = *xs;
     --angle_;
     // [temp.names]/4: `>>` closes this list and the enclosing one.
     if (is(Tk::greatergreater) && !half_) half_ = true;
@@ -4259,9 +4266,10 @@ public:
     auto address = address_op_ && *address_op_ + 1 == begin ? address_op_ : std::nullopt;
     std::vector<TypeQualifier> type_qualifiers;
     std::optional<u32> committed_failure;
+    std::optional<u32> ambiguous_namespace;
     auto s = nested_name(0, next, /*member_pointer=*/false, substituting_partial_arguments || address.has_value(),
                          QualifierLookup::ordinary, /*check_injected_access=*/false, &type_qualifiers,
-                         /*failed_qualifier=*/nullptr, &committed_failure);
+                         /*failed_qualifier=*/nullptr, &committed_failure, &ambiguous_namespace);
     if (committed_failure) {
       for (u32 j = 0; j < *committed_failure; ++j) bump();
       while (is(Tk::identifier) || is(Tk::coloncolon)) bump();
@@ -4277,6 +4285,7 @@ public:
       while (is(Tk::identifier) || is(Tk::coloncolon)) bump();
       return {NodeId::none, begin, pos()};
     }
+    const NameId ambiguous_name = ambiguous_namespace ? name_of(tok(*ambiguous_namespace)) : s_->no_name();
     for (u32 j = 0; j < next; ++j) bump();
     u32 name_at = pos();
     bool operator_name = !suffix.empty() || literal_operator_ahead();
@@ -4330,6 +4339,19 @@ public:
         return type_conversion(*t, begin);
       }
     if (is(Tk::less)) {
+      if (s->ns) {
+        auto diags = s_->diag_count();
+        auto c = s_->namespace_concept_for_expression(*s->ns, n, name_at);
+        if (c || s_->has_error_since(diags)) {
+          if (ambiguous_namespace)
+            s_->diag(begin + *ambiguous_namespace, Diag::ambiguous_name,
+                     ambiguous_name);
+          auto args = template_argument_list(nullptr, nullptr, /*expand_empty=*/true);
+          if (!c || !args || ambiguous_namespace) return {NodeId::none, begin, pos()};
+          return s_->concept_id_expr(*c, *args, begin, pos(),
+                                     class_template_base && in_template_value_argument_ && !s_->unevaluated);
+        }
+      }
       // `N::v<args>`: a variable template of the namespace ([temp.names]/3).
       if (s->ns)
         if (auto v = s_->namespace_template(*s->ns, n, ast::DeclKind::variable)) {
@@ -4384,6 +4406,10 @@ public:
   // [except.pre], [except.handle]: each handler declaration shares its compound's scope.
   Ex try_statement() {
     u32 begin = pos();
+    if (!s_->check_exception_construct(begin, Tk::kw_try)) {
+      skip_substatement();
+      return {NodeId::none, begin, pos()};
+    }
     bump();
     Ex body = compound_statement(/*barrier=*/true);
     if (!expect(Tk::kw_catch)) return {NodeId::none, begin, pos()};
@@ -6245,6 +6271,7 @@ public:
   bool body = false;  // the part is a function body, not a declaration part
   bool dependent_decay_copy_body = false;  // a function template's compound statement, before replay
   bool substituting_partial_arguments = false;
+  bool class_template_base = false;  // class instantiation substitutes or reparses this base type
   bool member_alias_type = false;  // the class instantiation reparses this type-id
 private:
   // In a delimited operand, a `>` is an operator again ([temp.names]/4).

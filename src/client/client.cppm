@@ -620,6 +620,8 @@ int cxx(std::span<const std::string_view> args) {
   // allocation from here on pays only a load and a branch.
   if (trace_mode == TraceMode::off) memory::disable();
 
+  if (auto query = compile::driver_query(argv)) return compile::finish(*query);
+
   compile::Request r{std::move(argv), cwd_now(), compile::environment_now(), now_seconds()};
   if (watch) {
     if (use == Use::off) {

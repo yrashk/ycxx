@@ -220,6 +220,14 @@ What is true of the code today. Work in progress and its owners are tracked in
     bundled library and resource headers, while keeping explicit `-I`, `-isystem`,
     and `-iquote` paths, source-relative quoted includes, and macros.
     [#251](https://github.com/yrashk/ycxx/issues/251)
+  - `-nostdinc++` omits the implicit libycxx source and generated include directories. The
+    compiler keeps its resource directories, target C library or SDK directories, and explicit
+    includes. With both flags, `-nostdinc` applies in either order.
+    [#997](https://github.com/yrashk/ycxx/issues/997)
+  - `-print-file-name=include` prints the primary configured resource include directory, and
+    `-dumpmachine` prints the canonical target triple. The driver accepts `--target` for both
+    queries and answers without opening a translation unit or starting a daemon. Linux reports
+    `resources/linux/include` and Darwin reports `resources/common/include`. [#970](https://github.com/yrashk/ycxx/issues/970)
   - `#define` and `#undef` with the redefinition check, rescanning and painting
     ([cpp.rescan]);
   - function-like macros (`:unit`'s `invocation`, `substitute`, `paste`): arguments across
@@ -240,8 +248,15 @@ What is true of the code today. Work in progress and its owners are tracked in
     embed is one byte-carrying phase-4 token with an expansion that names the resource. It yields
     integer and comma tokens in the parser's input. Unsupported scoped parameters are diagnosed
     on the directive and cause a probe to return `__STDC_EMBED_NOT_FOUND__` (#473).
+- The driver and editor honor `-fno-exceptions`. Semantic analysis rejects active `throw`,
+  rethrow and block `try`, with checks in template bodies deferred to instantiation. Native
+  lowering keeps ordinary destruction and eligible cleanup-free frame information.
+  [#980](https://github.com/yrashk/ycxx/issues/980) · [Design](docs/design/freestanding-no-exceptions.md)
 - Predefined macros (`:predefined`, DECISIONS §1.5):
   - `__ycxx__` and its version, `__GNUC__` 4.2.1 (#229), and the draft's macros;
+  - `__STDC_HOSTED__` is `1` by default and `0` with `-ffreestanding`. The compiler and
+    editor honor the flag, and the mode is part of the source configuration.
+    [#973](https://github.com/yrashk/ycxx/issues/973) · [Design](docs/design/freestanding-mode.md)
   - a feature-test table, including `__cpp_pp_embed`;
   - the target's macros, generated from `ast::Target` and checked against Clang on AArch64
     Darwin and x86-64 Linux (`tests/own/pp/predefined-target*.pp.cpp`, #132);
@@ -603,10 +618,27 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
   through a `Session` (the engine, the interners and sema's world, alive together; in-process
   until the daemon, #96):
   - `:front`: `TuSema(TU)`: `PpTokens` (the region without token locations, expansion sites,
-    `space_before` flags or error details) and `RegionItems`, then `parse::Program` (item_sema,
-    analyze_body) inside the one cell until contextual queries (#16, #947). `TuFront(TU)` places
-    its messages in files from `pp`'s full region, so an edit that changes no token (a comment,
-    blank lines) stops at `PpTokens` and analysis does not run again (#947, slice 0). Its diagnostics by byte offset, and the `TranslationUnit`: entities, function
+    `space_before` flags or error details; each token's file kept) and `RegionItems`, then
+    `parse::Program` (item_sema, analyze_body) inside the one cell until contextual queries (#16).
+    `TuFront(TU)` places its messages in files from `pp`'s full region, so an edit that changes
+    no token (a comment, blank lines) stops at `PpTokens` and analysis does not run again (#947,
+    slice 0).
+    - A unit whose tokens never say `virtual` is analysed a group at a time (#947, slice 1;
+      `src/pipeline/groups.cpp`): each top-level item of the main file, and each run of the
+      headers' top-level items, by a Program of its own (`Program::analyze_group`) that analyses
+      other items only as the group asks. `unit_of` makes each group's `UnitPart`, and
+      `finish_unit` the decisions that need every group (init functions, `inline`, noexcept and
+      hidden declarations anywhere, unwind checks). A unit that says `virtual` keeps one Program.
+    - A Program answers the same whichever items ran first (§A1): `ensure_declared` analyses the
+      earlier items that can declare an entity before a side table is read, `settle` completes a
+      class reached lazily, and `may_have_virtual_layouts` is a fact of the tokens.
+    - A group's analysis is reused between revisions while what it read gives the same answers
+      (`GroupTrace`, kept per session): the items it read (`ItemsView`) and their position-free
+      content, its by-name questions (`Program::NameProbe`, filtered by the shared
+      `Program::Index` before an item is read) and their answers, the order of those items, and
+      the unit's namespaces, using-directives and specialization items. The stand-in for #16's
+      selection cells, as `pp::Session::cache` is for regions. Token ranges a pragma holds are
+      positions: a unit with them analyses every group. Its diagnostics by byte offset, and the `TranslationUnit`: entities, function
     definitions with their analysed bodies, variable definitions with their constants.
     `tu_unit(TU)` projects the unit, so a whitespace edit stops there.
   - `:back`, per function `F`: `function_source(TU, F)` (a projection that backdates),
@@ -716,9 +748,9 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
   Binary64 to binary32 rounds under MXCSR, and `fabs` clears the sign bit. `unit.linux_scalar_sse`
   compares exact bits with a host compiler's conversions at `-O0` and `-O2` under all four
   rounding directions. [#643](https://github.com/yrashk/ycxx/issues/643)
-- Fixed-prototype calls support nonempty naturally aligned
-  flat records with integral or ordinary object-pointer fields that are trivial for calls,
-  up to 16 bytes and alignment eight. The AMD64 INTEGER eightbytes follow from the laid-out
+- Fixed-prototype calls support nonempty naturally aligned flat records with integral, ordinary
+  object-pointer or object lvalue-reference fields. A record must be trivial for calls and occupy
+  up to 16 bytes with alignment up to eight. The AMD64 INTEGER eightbytes follow from the laid-out
   fields. If an entire argument cannot
   fit in the remaining registers, it goes by value on the stack and later arguments can use
   the remaining registers. One- and two-eightbyte results use RAX and RDX. The mixed-object
@@ -739,7 +771,7 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
   those layouts as fields, array elements, or bases. A wrapper whose member makes its implicit
   destructor nontrivial uses the indirect result convention even when its copy and move traits
   are unknown. [#661](https://github.com/yrashk/ycxx/issues/661)
-  [Design](docs/design/linux-integer-aggregates.md) · [#440](https://github.com/yrashk/ycxx/issues/440)
+  [Design](docs/design/linux-integer-aggregates.md) · [#440](https://github.com/yrashk/ycxx/issues/440) · [#988](https://github.com/yrashk/ycxx/issues/988)
 - `-c` writes deterministic ELF64 relocatable objects through `src/obj/elf.cppm`. The reader
   accepts the supported x86-64 `ET_REL` subset emitted by ycxx. The native ELF linker consumes
   the same in-memory objects, resolves absolute and PC-relative relocations, and writes a static
@@ -1065,8 +1097,8 @@ in `lsp` frames (`LspOut`), the last of which carries LSP's exit status (1 after
   header or C entry is no unit), else the file alone in its directory. `daemon.lsp`'s
   `compile_commands` covers both forms, a response file, a header and a C file, a directory
   spelled through a symbolic link, and a change (mutation-checked). The check also keeps
-  `-nostdinc`. Options `pp` does not take yet (`-include`, `--sysroot`, …) are dropped.
-  [#251](https://github.com/yrashk/ycxx/issues/251)
+  `-nostdinc` and `-nostdinc++`. Options `pp` does not take yet (`-include`, `--sysroot`, …) are dropped.
+  [#251](https://github.com/yrashk/ycxx/issues/251) · [#997](https://github.com/yrashk/ycxx/issues/997)
 - Not yet: stopping a diagnosis on a newer edit,
   `$/cancelRequest`, debouncing and interactive priority (#168); `buffers_in`, the disk-view
   assertion and one view per session (#169); go-to-definition from a declaration part (a
@@ -1180,6 +1212,12 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   has its own typed cell. Evaluation rejects a read before initialization
   ([class.temporary], [dcl.init.aggr], [basic.life], [expr.const.core]).
   [#900](https://github.com/yrashk/ycxx/issues/900)
+- Constant evaluation can copy a named empty or flat non-union aggregate without bases and
+  with implicit trivial destruction into the caller's result storage. A constexpr member can
+  use the live result, including a checked pointer into an initialized fixed-size `char` member
+  array. L1 diagnoses access through an expired local pointer and an ordinary constexpr member
+  call on an expired receiver ([stmt.return], [basic.life], [expr.const]).
+  [#975](https://github.com/yrashk/ycxx/issues/975)
 - Constant evaluation can read namespace-scope `constexpr` pointers erased to `void`
   ([expr.const], [conv.ptr], #102). The interpreter reconstructs the original scalar or array
   subobject path, including one-past addresses, from the constant's path and byte offset.
@@ -1390,6 +1428,15 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   `operator delete` with the original pointer and the complete root size.
   [Itanium ABI §2.5.2](https://itanium-cxx-abi.github.io/cxx-abi/abi.html#vtable-components) ·
   [#136](https://github.com/yrashk/ycxx/issues/136) · [#659](https://github.com/yrashk/ycxx/issues/659)
+- On Linux x86-64, a derived class with an empty out-of-line virtual destructor can own its
+  32-byte table and single-inheritance RTTI. It has one public nonvirtual primary base with
+  one directly written pointer field with a builtin pointee type and a peer-owned public
+  virtual destructor. `D1` and `D2` share a body
+  that restores the derived address point and calls the base's `D2` at offset zero. `D0` then
+  deallocates the original pointer with the complete 16-byte object size. The derived descriptor
+  imports the peer's base descriptor. The destructor specifications can be implicit. A unit
+  containing only the declarations leaves ownership with the units defining the keys.
+  [Design](docs/design/linux-derived-virtual-destructor.md) · [#999](https://github.com/yrashk/ycxx/issues/999)
 - A non-template constructor can delegate to another ordinary constructor of its class with
   a sole parenthesized or braced initializer ([class.base.init], #157). The target resolves in
   the complete class and constructs the same object. The delegating body starts after the
@@ -1474,6 +1521,9 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
 - A qualified value expression in an incomplete current class can see earlier static data
   members and injected unscoped enumerators. Within a named enum's own list, qualifying an
   earlier enumerator uses its in-list type. [#857](https://github.com/yrashk/ycxx/issues/857)
+- An ordinary class's in-class static data initializer searches its own declarations and
+  bases before the enclosing namespace. The base lookup retains ambiguity and access checks,
+  including while the derived class is incomplete. [#967](https://github.com/yrashk/ycxx/issues/967)
 - Nonempty standalone unnamed unscoped enumeration definitions at namespace scope support fixed
   and inferred underlying types. An `extern "C"` block leaves the enumerators in the enclosing
   namespace. The enum's linkage identity uses its namespace, canonical underlying type and first
@@ -2458,6 +2508,10 @@ first; a dependent base is not searched. Redeclaring a hidden parameter's name i
 - In the template, a static member whose initializer is value-dependent is value-dependent
   ([temp.dep.constexpr]/2.3); one whose initializer is not is a constant there. `static const T k
   = 5;` is checked again in each specialization.
+- A static constexpr member initializer can read fields of a flat aggregate temporary with
+  scalar default member initializers. Concrete specialization replay uses the same ordered field
+  reads as an ordinary required constant initializer ([dcl.init.aggr], [temp.inst], [expr.const]).
+  [#991](https://github.com/yrashk/ycxx/issues/991)
 - `X<args>::m` with a dependent qualifier names a value, not a type, in a statement, a condition, a
   cast's parentheses or a template argument, unless `typename` says otherwise
   ([temp.res.general]/4).
