@@ -1188,7 +1188,10 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   available for constant evaluation. [#1006](https://github.com/yrashk/ycxx/issues/1006)
 - `static_assert(e)` and `static_assert(e, "message")` at namespace and block scope (the
   `StaticAssert` node); `if consteval` and `if !consteval` (`IfConsteval`, lowered to
-  `consteval_br`).
+  `consteval_br`). Class member assertions check the class prefix and available bases.
+  A class template defers dependent assertions until required completion. A failed assertion
+  propagates through required field and base completion without exposing a valid layout.
+  [#257](https://github.com/yrashk/ycxx/issues/257)
 - Typed addresses of elements and rows of named namespace-scope constexpr arrays
   ([conv.array], [expr.const], #111). The interpreter initializes scalar cells from the nested
   aggregate value on first use. Stored pointers retain the subarray path and element index,
@@ -2650,8 +2653,7 @@ first; a dependent base is not searched. Redeclaring a hidden parameter's name i
   `<cstdio>`: 18 → 16 errors.
 - Not yet: a definition outside the class, `template<class T> int X<T>::n = 5;`, reported as not
   supported (#256); an array bound or template argument that is a dependent expression other than
-  a parameter (`int a[sizeof(T)]`, `F<N - 1>`, #209); `static_assert` in a member-specification
-  (#257); dynamic initialization of an inline static member. Found on the way: #262, #263, #264.
+  a parameter (`int a[sizeof(T)]`, `F<N - 1>`, #209); dynamic initialization of an inline static member. Found on the way: #262, #263, #264.
 
 ## `__GNUC__` and system-header warnings (#229, 2026-11-19)
 
