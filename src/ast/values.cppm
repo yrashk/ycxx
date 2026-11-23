@@ -169,6 +169,7 @@ enum class DepOp : u8 {
   is_aggregate,
   is_implicit_lifetime,
   has_virtual_destructor,
+  has_unique_object_representations,
 };
 
 // A dependent operation (§5.5). The predicates take canonical qualified type operands.
