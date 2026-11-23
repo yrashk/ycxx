@@ -3982,7 +3982,9 @@ private:
       {
         AtItem::RestoreTypeTraitPattern restore{q_};
         q_.retain_type_trait_pattern = template_;
+        ps_.class_template_base = template_;
         spec = ps_.decl_specifiers();
+        ps_.class_template_base = false;
       }
       if (!spec.ok) return false;
       if (template_) {

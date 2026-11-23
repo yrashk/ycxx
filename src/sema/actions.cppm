@@ -1185,15 +1185,33 @@ public:
   }
   // A concept-id as an expression ([temp.names]/8): whether it is satisfied, a `bool` prvalue;
   // value-dependent while its arguments are.
-  Ex concept_id_expr(const ast::DeclSema& c, std::span<const TemplateArg> args, u32 begin, u32 end) {
+  Ex concept_id_expr(const ast::DeclSema& c, std::span<const TemplateArg> args, u32 begin, u32 end,
+                     bool preserve_value = false) {
     QualType b = builtin(Builtin::bool_);
-    if (std::ranges::any_of(args, [&](const TemplateArg& a) { return dependent(a); })) return dependent_node({}, begin, end, b);
+    if (std::ranges::any_of(args, [&](const TemplateArg& a) { return dependent(a); })) {
+      if (!preserve_value || !std::ranges::all_of(args, [&](const TemplateArg& a) {
+            return templates().structural_operand(a);
+          })) return dependent_node({}, begin, end, b);
+      if (!template_arguments(c, args, begin)) return {NodeId::none, begin, end};
+      auto value = ins().intern_value(ast::VDepConcept{c.entity, ins().intern_seq(args)});
+      return literal(b, value, ValueCategory::prvalue, begin, end);
+    }
     auto nf = concept_constraint(c, args, begin);
     if (!nf) return {NodeId::none, begin, end};
     auto sat = q_->satisfied(*nf);
     if (!sat) return dependent_node({}, begin, end, b);
     if (q_->satisfaction_failed(*nf)) return {NodeId::none, begin, end};
     return bool_literal(*sat, begin, end);
+  }
+
+  std::optional<ConstId> evaluate_dependent_concept(EntityId entity, std::span<const TemplateArg> args, u32 at) {
+    auto c = q_->template_decl(entity);
+    if (!c) return std::nullopt;
+    auto nf = concept_constraint(*c, args, at);
+    if (!nf) return std::nullopt;
+    auto sat = q_->satisfied(*nf);
+    if (!sat || q_->satisfaction_failed(*nf)) return std::nullopt;
+    return w_->values.integer(builtin(Builtin::bool_), *sat);
   }
 
   // ------------------------------------------------------------ type-trait built-ins (docs/EXTENSIONS.md)
@@ -3425,13 +3443,13 @@ public:
   }
   // `args` with the expansions whose packs are bound here expanded ([temp.variadic]/8); none when
   // there is none such.
-  std::optional<std::vector<TemplateArg>> expand_bound(std::span<const TemplateArg> args) {
+  std::optional<std::vector<TemplateArg>> expand_bound(std::span<const TemplateArg> args, bool expand_empty = false) {
     Templates t = templates();
     bool any = false;
     std::vector<TemplateArg> out;
     for (const TemplateArg& a : args) {
       auto n = t.is_expansion(a) ? t.expansion_length(t.pattern_of(a), template_args) : std::nullopt;
-      if (!n || !*n) {
+      if (!n || (!*n && !expand_empty)) {
         out.push_back(a);
         continue;
       }
@@ -3454,6 +3472,9 @@ public:
     };
     t.template_decl = [this](EntityId tmpl) { return q_->template_decl(tmpl); };
     t.variable_constant = [this](EntityId spec) { return q_->constant_value(spec); };
+    t.concept_constant = [this](EntityId entity, std::span<const TemplateArg> args) {
+      return evaluate_dependent_concept(entity, args, 0);
+    };
     t.call_constant = [this](EntityId templ, std::span<const TemplateArg> args) {
       return evaluate_dependent_call(templ, args, 0);
     };
@@ -3468,6 +3489,9 @@ public:
     auto t = templates();
     t.member_constant = [this, at](QualType qualifier, NameId name) {
       return qualified_member_constant(qualifier, name, at);
+    };
+    t.concept_constant = [this, at](EntityId entity, std::span<const TemplateArg> args) {
+      return evaluate_dependent_concept(entity, args, at);
     };
     t.call_constant = [this, at](EntityId templ, std::span<const TemplateArg> args) {
       return evaluate_dependent_call(templ, args, at);

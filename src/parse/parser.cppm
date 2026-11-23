@@ -2208,6 +2208,7 @@ public:
                     (scope->type && s_->types().is_class(*scope->type) &&
                      s_->types().class_of(*scope->type) == s_->current_class && member_template_name(n).value_or(false)) ||
                     (scope->ns && (s_->namespace_template(*scope->ns, n, ast::DeclKind::variable) ||
+                                   s_->namespace_template(*scope->ns, n, ast::DeclKind::concept_) ||
                                    s_->namespace_type_template(*scope->ns, n)))))
         return name + 1;
       return std::nullopt;
@@ -2627,7 +2628,7 @@ public:
   // A template-argument-list ([temp.arg.general]) after a template-name, from its `<`. An argument
   // that can be a type-id is one ([temp.arg.general]/2).
   std::optional<std::vector<ast::TemplateArg>> template_argument_list(std::optional<u32>* replay_at = nullptr,
-                                                                     bool* took_closer = nullptr) {
+                                                                     bool* took_closer = nullptr, bool expand_empty = false) {
     if (took_closer) *took_closer = false;
     u32 begin = pos();
     u32 deferred = deferred_argument_checks_;
@@ -2701,7 +2702,7 @@ public:
       } while (accept(Tk::comma));
     }
     if (ok)
-      if (auto xs = s_->expand_bound(args)) args = *xs;
+      if (auto xs = s_->expand_bound(args, expand_empty)) args = *xs;
     --angle_;
     // [temp.names]/4: `>>` closes this list and the enclosing one.
     if (is(Tk::greatergreater) && !half_) half_ = true;
@@ -4317,6 +4318,13 @@ public:
         return type_conversion(*t, begin);
       }
     if (is(Tk::less)) {
+      if (s->ns)
+        if (auto c = s_->namespace_template(*s->ns, n, ast::DeclKind::concept_)) {
+          auto args = template_argument_list(nullptr, nullptr, /*expand_empty=*/true);
+          if (!args) return {NodeId::none, begin, pos()};
+          return s_->concept_id_expr(*c, *args, begin, pos(),
+                                     class_template_base && in_template_value_argument_ && !s_->unevaluated);
+        }
       // `N::v<args>`: a variable template of the namespace ([temp.names]/3).
       if (s->ns)
         if (auto v = s_->namespace_template(*s->ns, n, ast::DeclKind::variable)) {
@@ -6232,6 +6240,7 @@ public:
   bool body = false;  // the part is a function body, not a declaration part
   bool dependent_decay_copy_body = false;  // a function template's compound statement, before replay
   bool substituting_partial_arguments = false;
+  bool class_template_base = false;  // class instantiation substitutes or reparses this base type
   bool member_alias_type = false;  // the class instantiation reparses this type-id
 private:
   // In a delimited operand, a `>` is an operator again ([temp.names]/4).
