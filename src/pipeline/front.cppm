@@ -1133,6 +1133,12 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
       return internal_type(r.inner);
     return false;
   };
+  auto ordinary_class_template_member = [&](const sema::EntityRec& member) {
+    if (member.kind != sema::EntityKind::function || member.templ != EntityId::none || member.scope == EntityId::none)
+      return false;
+    const auto& owner = world.entities.rec(member.scope);
+    return owner.kind == sema::EntityKind::class_ && owner.templ != EntityId::none && program.is_namespace(owner.scope);
+  };
   // An in-class static constexpr member is inline ([dcl.constexpr]). An owner or a declared
   // type in an unnamed namespace gives the member's symbol TU-local binding.
   auto constexpr_member_symbol_linkage = [&](const ast::DeclSema& d) -> std::optional<ast::Linkage> {
@@ -1192,9 +1198,10 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
     if (linkage == ast::Linkage::external && std::ranges::any_of(r.args, [&](const ast::TemplateArg& arg) {
           return names_tu_local(program, arg, /*include_value_types=*/false);
         })) linkage = ast::Linkage::internal;
-    // A destructor of a TU-local class binds locally, including a specialization with a
-    // TU-local type argument ([basic.link]).
-    if (r.kind == sema::EntityKind::destructor && linkage == ast::Linkage::external &&
+    // A member of a TU-local specialization binds locally, including one with a value of a
+    // TU-local enum type as its argument ([basic.link]).
+    if ((r.kind == sema::EntityKind::destructor || ordinary_class_template_member(r)) &&
+        linkage == ast::Linkage::external &&
         names_tu_local(program, r.scope, /*include_value_types=*/true)) linkage = ast::Linkage::internal;
     tu.entities.push_back({e, std::move(id), d.type, fn, r.lang, linkage, false, at, r.scope,
                            table ? Special::virtual_table
@@ -1452,9 +1459,14 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
     declare(in->decl, ast::Loc{program.id(in->item), 0});  // errors in its name point at the template
     tu.functions.push_back({in->spec, in->decl, in->body.value, program.id(in->item), it.body_begin - it.begin,
                             program.this_type(in->decl)});
-    if (world.entities.rec(in->spec).kind == sema::EntityKind::destructor && it.parent != items::none &&
-        items.items[it.parent].kind == items::ItemKind::class_def)
-      coalesce_inline_function(tu.functions.back(), true);
+    if (it.parent != items::none && items.items[it.parent].kind == items::ItemKind::class_def) {
+      const auto& entity = world.entities.rec(in->spec);
+      const bool ordinary_member = ordinary_class_template_member(entity) && !in->decl.is_virtual &&
+                                   !internal_class(entity.scope) &&
+                                   !names_tu_local(program, entity.scope, /*include_value_types=*/true);
+      if (entity.kind == sema::EntityKind::destructor || ordinary_member)
+        coalesce_inline_function(tu.functions.back(), true);
+    }
     closures_of(in->body.value.closures, program.id(in->item), it.body_begin - it.begin);
   }
   // The variable template specializations instantiated ([temp.inst]/7), with their constants.
