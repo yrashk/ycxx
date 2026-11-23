@@ -2320,6 +2320,13 @@ session's.*
   [#218](https://github.com/yrashk/ycxx/issues/218).
   [Replay design](docs/design/dependent-trivial-copyability-replay.md)
   `__has_builtin(__is_trivially_copyable)` answers 0 while support is partial ([meta.unary.prop]).
+- `__has_unique_object_representations(T)` peels array extents, including an unknown outer
+  bound. It returns true for narrow character types, and false for modeled standard floats,
+  references, functions and cv `void`. Incomplete class and enum operands have a dedicated
+  diagnostic. Complete types with unproved representations have an unsupported-operand
+  diagnostic. Supported class-template bases and variable-template initializers replay
+  dependent operands and check completeness at demand. `__has_builtin` answers 0 while
+  support is partial ([meta.unary.prop], [basic.fundamental], #1062, #218).
 - `__is_constructible(T, Args...)`, `__is_nothrow_constructible(T, Args...)` and
   `__is_trivially_constructible(T, Args...)` check concrete operand types at the original source
   point. Their domain includes complete types, cv `void`, and arrays of unknown bound. They fold
