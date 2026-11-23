@@ -229,6 +229,8 @@ struct UnitPart {
   // Definitions that coalesce when any declaration in the unit says `inline`: functions (unless
   // `main`) and variables.
   std::set<EntityId> coalesce_if_inline, weak_if_inline;
+  // A candidate C2/D2 alias and the layouts its eligibility depends on.
+  std::vector<std::pair<EntityId, std::vector<EntityId>>> base_object_variant_layouts;
 };
 
 // The C++ runtime symbols the unit references, declared on first use.
@@ -1263,8 +1265,13 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
                                 location.item, location.offset, complete.this_type});
         continue;
       }
-      if (!member && program.supports_base_object_variant(d.entity, uncertain_layouts))
-        tu.base_object_variants.insert(d.entity);
+      if (!member) {
+        std::vector<EntityId> layout_inputs;
+        if (program.supports_base_object_variant(d.entity, uncertain_layouts, part ? &layout_inputs : nullptr)) {
+          if (part) part->base_object_variant_layouts.emplace_back(d.entity, std::move(layout_inputs));
+          else tu.base_object_variants.insert(d.entity);
+        }
+      }
       const bool may_coalesce = entity.kind == sema::EntityKind::function && entity.linkage == ast::Linkage::external &&
                                 entity.templ == EntityId::none && ins.seqs.size(body.closures) == 0 &&
                                 program.asm_label(d.entity).empty();
@@ -1492,7 +1499,8 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
 
 // The unit's definitions from its groups' parts, in order (#947): each entity, function and
 // variable as the first part has it, and the decisions `unit_of` leaves to the whole unit.
-TranslationUnit finish_unit(std::vector<UnitPart>& parts, sema::World& world, std::string name, std::string_view source) {
+TranslationUnit finish_unit(std::vector<UnitPart>& parts, sema::World& world, std::string name, std::string_view source,
+                            const std::set<EntityId>& uncertain_layouts) {
   ast::Interners& ins = world.ins;
   TranslationUnit tu;
   tu.name = std::move(name);
@@ -1518,6 +1526,9 @@ TranslationUnit finish_unit(std::vector<UnitPart>& parts, sema::World& world, st
     if (tu.main == EntityId::none) tu.main = p.tu.main;
     if (!tu.namespace_destruction) tu.namespace_destruction = p.tu.namespace_destruction;
     tu.base_object_variants.insert(p.tu.base_object_variants.begin(), p.tu.base_object_variants.end());
+    for (const auto& [function, layouts] : p.base_object_variant_layouts)
+      if (uncertain_layouts.empty() || std::ranges::none_of(layouts, [&](EntityId e) { return uncertain_layouts.contains(e); }))
+        tu.base_object_variants.insert(function);
     tu.init_functions.insert(tu.init_functions.end(), p.tu.init_functions.begin(), p.tu.init_functions.end());
     dynamic.insert(dynamic.end(), p.dynamic.begin(), p.dynamic.end());
     for (auto [into, from] : {std::pair{&inline_declarations, &p.inline_declarations}, {&noexcept_declarations, &p.noexcept_declarations},

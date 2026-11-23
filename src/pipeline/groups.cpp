@@ -32,6 +32,7 @@ struct GroupResult {
   std::vector<BodyAt> bodies;
   std::vector<ClassShape> classes;
   std::vector<EnumShape> enums;
+  std::set<EntityId> uncertain_layouts;  // includes entities with no shape in this group
   std::optional<UnitPart> part;
 };
 // What a group's analysis read of its unit, checked before the analysis is reused (#947): its
@@ -470,12 +471,13 @@ engine::query_task<SemaResult> TuSema::run(engine::Ctx& cx, TuId tu) {
     program.record_reads(&reads);
     program.record_probes(&probes);
     program.analyze_group(first, end);
-    const auto uncertain = program.uncertain_object_layouts(/*include_lifecycle_signatures=*/true);
+    auto uncertain = program.uncertain_object_layouts(/*include_lifecycle_signatures=*/true);
     GroupResult r = collect(program, first, end, uncertain);
     if (std::ranges::none_of(r.messages, &GroupMessage::error)) {
       r.part.emplace();
       r.part->tu = unit_of(program, world, program.items(), src.name, uncertain, first, end, &*r.part);
     }
+    r.uncertain_layouts = std::move(uncertain);
     if (traceable) {
       GroupTrace trace = facts.trace(first, end, reads, probes);
       std::lock_guard lock(cache->mutex);
@@ -492,12 +494,19 @@ engine::query_task<SemaResult> TuSema::run(engine::Ctx& cx, TuId tu) {
     for (auto e = cache->entries.lower_bound({unit_key, Fp128{}}); e != cache->entries.end() && e->first.first == unit_key;)
       e = present.contains(e->first.second) ? std::next(e) : cache->entries.erase(e);
   }
-  for (const GroupResult& r : results) merge(r);
+  std::set<EntityId> uncertain_layouts;
+  for (GroupResult& r : results) {
+    merge(r);
+    uncertain_layouts.merge(r.uncertain_layouts);
+  }
+  if (!uncertain_layouts.empty())
+    for (ClassShape& shape : out.shapes.classes)
+      shape.layout_uncertain |= uncertain_layouts.contains(shape.entity);
   std::ranges::stable_sort(out.messages, {}, &SemaMessage::token);
   if (!out.has_errors()) {
     std::vector<UnitPart> parts;
     for (GroupResult& r : results) parts.push_back(std::move(*r.part));
-    out.unit = finish_unit(parts, world, src.name, region.files.at(0));
+    out.unit = finish_unit(parts, world, src.name, region.files.at(0), uncertain_layouts);
   }
   co_return out;
 }
