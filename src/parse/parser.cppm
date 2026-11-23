@@ -4378,17 +4378,16 @@ public:
         auto args = template_argument_list();
         if (!args) return {NodeId::none, begin, pos()};
         const bool dependent_args = std::ranges::any_of(*args, [&](const ast::TemplateArg& a) { return s_->dependent(a); });
-        const bool immediate_call = s->ns && dependent_args && in_template_value_argument_ &&
+        const bool immediate_call = s->ns && in_template_value_argument_ &&
                                     is(Tk::l_paren) && kind(1) == Tk::r_paren;
+        if (immediate_call && ambiguous_namespace) {
+          s_->diag(begin + *ambiguous_namespace, Diag::ambiguous_name, ambiguous_name);
+          return {NodeId::none, begin, pos()};
+        }
         Ex r = scope_expr(immediate_call);
         if (r.ok() && !s_->dependent(r) && dependent_args) {
-          if (immediate_call) {
-            if (ambiguous_namespace) {
-              s_->diag(begin + *ambiguous_namespace, Diag::ambiguous_name, ambiguous_name);
-              return {NodeId::none, begin, pos()};
-            }
+          if (immediate_call)
             if (auto call = deferred_immediate_template_call(r, *args)) return *call;
-          }
           return s_->dependent_node({}, begin, pos());
         }
         s_->explicit_template_args(r, std::move(*args));
