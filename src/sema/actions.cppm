@@ -157,6 +157,11 @@ public:
   // Inside the enumerator list of an enumeration this unit is defining: its record so far, which
   // is published only after the list (#156).
   virtual const EnumRec* defining_enum(EntityId) { return nullptr; }
+  // Scopedness is fixed even when the enum's enumerator list is still open.
+  virtual std::optional<bool> defining_enum_is_scoped(EntityId e) {
+    if (const EnumRec* record = defining_enum(e)) return record->scoped;
+    return std::nullopt;
+  }
   // This unit's class and enumeration records (#115).
   virtual const Classes& classes() = 0;
   // The constant a variable usable in constant expressions holds ([expr.const]), if it is known.
@@ -1802,6 +1807,36 @@ public:
     if (auto result = reaches_base(d, b)) return bool_literal(*result, begin, end);
     return fail(Diag::base_of_unsupported, base_type, derived_type);
   }
+  // These properties require a complete nonunion class at the point that queries it
+  // ([meta.unary.prop]). The owning replay supplies that point for a dependent operand.
+  Ex virtual_class_trait_expr(ast::DepOp op, QualType type, u32 begin, u32 end)
+    pre(op == ast::DepOp::is_polymorphic || op == ast::DepOp::is_abstract)
+  {
+    type = types().canonical(type);
+    const engine::Loc loc = type_trait_loc(begin);
+    if (types().is_dependent(type)) {
+      if (q_->in_type_trait_pattern())
+        if (auto value = templates().unary_trait_value(op, type)) {
+          q_->record_dependent_type_trait_operand(loc);
+          return literal(builtin(Builtin::bool_), *value, ValueCategory::prvalue, begin, end);
+        }
+      return dependent_node({}, begin, end, builtin(Builtin::bool_));
+    }
+    if (!types().is_class(type) || is_union_type(type) == true) return bool_literal(false, begin, end);
+    const EntityId cls = types().class_of(type);
+    if (auto demand = q_->type_trait_at_demand(cls, loc)) {
+      if (!*demand) {
+        if (!q_->type_trait_instantiation_failed(cls)) diag_at(loc, Diag::virtual_class_trait_incomplete, type);
+        return {NodeId::none, begin, end};
+      }
+    } else if (!require_complete(type, begin)) {
+      return {NodeId::none, begin, end};
+    }
+    const ClassRec* record = classes().find(cls);
+    if (!record) return {NodeId::none, begin, end};
+    return bool_literal(op == ast::DepOp::is_abstract ? record->is_abstract() : record->polymorphic, begin, end);
+  }
+
   // `__trait(T…)` that tests types ([meta.unary], [meta.rel]): a `bool` prvalue, value-dependent
   // while a type is dependent for the traits that support it.
   Ex trait_expr(lex::TypeTrait t, NameId name, std::span<const QualType> args, u32 begin, u32 end) {
@@ -1842,6 +1877,9 @@ public:
     case is_pointer: unary_op = ast::DepOp::is_pointer; break;
     case is_function: unary_op = ast::DepOp::is_function; break;
     case is_enum: unary_op = ast::DepOp::is_enum; break;
+    case is_scoped_enum: unary_op = ast::DepOp::is_scoped_enum; break;
+    case is_polymorphic: return virtual_class_trait_expr(ast::DepOp::is_polymorphic, args[0], begin, end);
+    case is_abstract: return virtual_class_trait_expr(ast::DepOp::is_abstract, args[0], begin, end);
     case is_union: unary_op = ast::DepOp::is_union; break;
     case is_class: unary_op = ast::DepOp::is_class; break;
     case is_member_pointer: unary_op = ast::DepOp::is_member_pointer; break;
@@ -1872,18 +1910,11 @@ public:
     case is_integral: v = types().is_integral(c); break;
     case is_floating_point: v = types().is_floating(c); break;
     case is_arithmetic: v = types().is_integral(c) || types().is_floating(c); break;
-    case is_scoped_enum:
-      if (types().is_enum(c))
-        if (const EnumRec* e = enum_rec(types().enum_of(c))) v = e->scoped;
-      break;
-    case is_abstract:
-    case is_polymorphic:
     case has_virtual_destructor:
       if (types().is_class(c) && is_union_type(c) != true) {
         const ClassRec* r = cls();
         if (!r) return {NodeId::none, begin, end};
-        if (t == is_abstract) v = r->is_abstract();
-        else v = t == is_polymorphic ? r->polymorphic : r->virtual_destructor;
+        v = r->virtual_destructor;
       }
       break;
     case is_final:
@@ -3667,6 +3698,7 @@ public:
 
   Templates templates() {
     Templates t(*w_, classes());
+    t.defining_enum_is_scoped = [this](EntityId e) { return q_->defining_enum_is_scoped(e); };
     t.member_type = [this](EntityId c, NameId n) { return member_type(c, n); };
     t.member_constant = [this](QualType qualifier, NameId name) {
       return qualified_member_constant(qualifier, name, 0);

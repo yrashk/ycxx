@@ -186,6 +186,39 @@ int invoke() { return finish(Owner{}); }
   }
 }
 
+void destructor_specialization_declarations() {
+  Analysed a(R"cpp(
+template<class T> struct Cell { ~Cell() {} };
+template<> Cell<int>::~Cell() {}
+template<> inline Cell<char>::~Cell() {}
+template<> Cell<long>::~Cell();
+template<> Cell<long>::~Cell() {}
+)cpp");
+  const bool clean = a.pre.diags.empty() && a.diags().empty();
+  check(clean, "explicit destructor declarations and definitions select their class member");
+  if (!clean) return;
+
+  using namespace sema::decl_flag;
+  constexpr auto special_definition = specialization | definition | member | destructor;
+  const auto noninline = a.decl(a.its.top.at(1));
+  const auto inlined = a.decl(a.its.top.at(2));
+  const auto declaration = a.decl(a.its.top.at(3));
+  const auto defined = a.decl(a.its.top.at(4));
+  const auto owner_argument = [&](const ast::DeclSema& d) -> std::optional<Builtin> {
+    const auto& owner = a.w.entities.rec(a.w.entities.rec(d.entity).scope);
+    if (owner.args.size() != 1 || owner.args.front().kind != ast::TemplateArgKind::type) return std::nullopt;
+    return a.w.types.builtin_of(owner.args.front().type);
+  };
+  check(owner_argument(noninline) == Builtin::int_ && owner_argument(inlined) == Builtin::char_ &&
+            owner_argument(defined) == Builtin::long_,
+        "each destructor specialization belongs to the selected class instance");
+  check(noninline.flags == special_definition, "the non-inline specialization keeps its written flags");
+  check(inlined.flags == (special_definition | inline_), "a written inline specialization is inline");
+  check(declaration.flags == (specialization | member | destructor) && defined.flags == special_definition &&
+            declaration.entity == defined.entity,
+        "a written specialization declaration and definition share an entity");
+}
+
 void qualified_template_annotation() {
   Analysed a(R"cpp(
 namespace effects {
@@ -574,6 +607,7 @@ int main() {
   conversions_and_locals();
   prototype_parameters_are_not_body_locals();
   redeclarations_and_linkage();
+  destructor_specialization_declarations();
   declaration_annotations();
   qualified_template_annotation();
   parenthesized_annotation_payloads();

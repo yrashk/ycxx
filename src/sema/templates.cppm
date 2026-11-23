@@ -426,6 +426,14 @@ public:
     case ast::DepOp::is_function: result = types().is_function(type); break;
     case ast::DepOp::is_object: result = types().is_object(type); break;
     case ast::DepOp::is_enum: result = types().is_enum(type); break;
+    case ast::DepOp::is_scoped_enum:
+      if (types().is_enum(type)) {
+        const EntityId e = types().enum_of(type);
+        const auto scoped = defining_enum_is_scoped ? defining_enum_is_scoped(e) : std::nullopt;
+        if (scoped) result = *scoped;
+        else if (const EnumRec* record = classes_->find_enum(e)) result = record->scoped;
+      }
+      break;
     case ast::DepOp::is_member_pointer: result = types().is_member_pointer(type); break;
     case ast::DepOp::is_member_object_pointer:
     case ast::DepOp::is_member_function_pointer:
@@ -447,6 +455,8 @@ public:
     case ast::DepOp::is_destructible:
     case ast::DepOp::is_nothrow_destructible:
     case ast::DepOp::is_trivially_destructible:
+    case ast::DepOp::is_polymorphic:
+    case ast::DepOp::is_abstract:
     case ast::DepOp::is_empty: return std::nullopt;
     case ast::DepOp::is_same:
     case ast::DepOp::is_constructible:
@@ -618,6 +628,7 @@ public:
       case ast::DepOp::is_pointer:
       case ast::DepOp::is_function:
       case ast::DepOp::is_enum:
+      case ast::DepOp::is_scoped_enum:
       case ast::DepOp::is_union:
       case ast::DepOp::is_class:
       case ast::DepOp::is_member_pointer:
@@ -627,6 +638,8 @@ public:
       case ast::DepOp::is_destructible:
       case ast::DepOp::is_nothrow_destructible:
       case ast::DepOp::is_trivially_destructible:
+      case ast::DepOp::is_polymorphic:
+      case ast::DepOp::is_abstract:
       case ast::DepOp::is_empty:
       case ast::DepOp::is_object: {
         auto operand = substitute_arg(ins().seqs.at(op.operands, 0), b);
@@ -2097,6 +2110,8 @@ public:
   // The type member of a class with a name, as lookup at a point finds it; set by whoever asks at
   // a point, which `classes_` alone does not know.
   std::function<std::optional<QualType>(EntityId, NameId)> member_type;
+  // The scopedness of an enumeration whose record has yet to be published.
+  std::function<std::optional<bool>(EntityId)> defining_enum_is_scoped;
   // The declaration of template `templ` with its head, as lookup at a point finds it.
   std::function<std::optional<ast::DeclSema>(EntityId)> template_decl;
   std::function<std::optional<ConstId>(EntityId)> variable_constant;
