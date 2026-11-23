@@ -2839,7 +2839,7 @@ public:
     }
     std::vector<sema::Expansion> none;
     ast::ItemSema v{root, b_.seq(std::span<const ast::DeclSema>(decls_)), expansion_list(b_, inst_ || var_ ? none : s_.expansions),
-                    b_.seq(std::span<const ast::ClosureDef>(s_.closures))};
+                    b_.seq(std::span<const ast::ClosureDef>(s_.closures)), asm_hidden_symbol_, asm_directive_at_};
     out_.value = b_.commit(v);
     s_.check_immediate_addresses(out_.value.tree);
     if (!s_.closures.empty()) s_.check_labels();
@@ -2850,6 +2850,40 @@ public:
   }
 
 private:
+  // [dcl.asm]: this form takes a parenthesized constant-evaluated operand. Leave immediate
+  // calls in the typed expression so evaluation can construct their result in the receiver.
+  Ex namespace_asm_expression() {
+    const u32 at = ps_.pos();
+    ps_.bump();
+    if (!ps_.expect(Tk::l_paren) || !ps_.expect(Tk::l_paren)) return {NodeId::none, at, ps_.pos()};
+    ++s_.immediate_context;
+    Ex operand = ps_.expression();
+    --s_.immediate_context;
+    if (!ps_.expect(Tk::r_paren) || !ps_.expect(Tk::r_paren) || !ps_.expect(Tk::semi))
+      return {NodeId::none, at, ps_.pos()};
+    if (!ps_.at_end()) {
+      s_.diag(ps_.pos(), Diag::unexpected_token, ps_.kind());
+      return {NodeId::none, at, ps_.pos()};
+    }
+    return operand;
+  }
+
+  static std::optional<std::string_view> hidden_asm_symbol(std::string_view bytes) {
+    if (!bytes.starts_with(".hidden")) return std::nullopt;
+    bytes.remove_prefix(std::string_view(".hidden").size());
+    const auto first = bytes.find_first_not_of(" \t");
+    if (first == 0 || first == std::string_view::npos) return std::nullopt;
+    bytes.remove_prefix(first);
+    if (bytes.ends_with('\n')) bytes.remove_suffix(1);
+    auto start = [](char ch) {
+      return (ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z') || ch == '_' || ch == '.' || ch == '$';
+    };
+    if (bytes.empty() || !start(bytes.front())) return std::nullopt;
+    if (!std::ranges::all_of(bytes.substr(1), [&](char ch) { return start(ch) || (ch >= '0' && ch <= '9'); }))
+      return std::nullopt;
+    return bytes;
+  }
+
   // The language linkage of the enclosing linkage-specifications ([dcl.link]): the innermost.
   std::optional<LangLinkage> enclosing_linkage() {
     for (u32 j = it_->parent; j != items::none; j = p_->items().items[j].parent) {
@@ -3012,6 +3046,28 @@ private:
       Ex sa = ps_.static_assert_declaration();
       tree_ = sa.id;
       if (!ps_.at_end()) s_.diag(ps_.pos(), Diag::unexpected_token, ps_.kind());
+      return;
+    }
+    if (!template_ && !explicit_ && ps_.is(Tk::kw_asm)) {
+      const u32 at = ps_.pos();
+      if (p_->world().target.triple != ast::x86_64_linux.triple ||
+          ps_.kind(1) != Tk::l_paren || ps_.kind(2) != Tk::l_paren) {
+        s_.diag(at, Diag::not_supported, Tk::kw_asm);
+        return bad();
+      }
+      if (attributes || !annotations.empty()) {
+        s_.diag(attrs_at, Diag::attributes_not_allowed);
+        return bad();
+      }
+      const auto bytes = sema::Evaluator(s_, q_).evaluate_bytes(namespace_asm_expression());
+      if (!bytes) return;
+      const auto symbol = hidden_asm_symbol(*bytes);
+      if (!symbol) {
+        s_.diag(at, Diag::namespace_asm_directive);
+        return;
+      }
+      asm_hidden_symbol_ = s_.ins().names.intern(*symbol);
+      asm_directive_at_ = at;
       return;
     }
     if (!template_ && !explicit_ && ps_.is(Tk::kw_enum)) {
@@ -7399,6 +7455,8 @@ private:
   std::vector<ast::DeclSema> decls_;
   std::vector<Ex> declarators_;
   NodeId tree_ = NodeId::none;  // the root when it is not a DeclGroup (a static_assert)
+  NameId asm_hidden_symbol_{~u32{0}};
+  u32 asm_directive_at_ = 0;
   std::optional<Program::ClassInstantiation> inst_;
   std::optional<Program::VarInstantiation> var_;
   // Analysing a member item again for one static data member's value (`Program::member_value`):
