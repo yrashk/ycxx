@@ -802,6 +802,10 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
   `STV_HIDDEN`. `unit.linux_inline` checks both scoped attribute spellings, symbol metadata,
   and cross-unit address identity with the native and host linkers in both object orders.
   [#602](https://github.com/yrashk/ycxx/issues/602)
+- On Linux x86-64, explicit GNU hidden visibility on any declaration of an ordinary external
+  non-inline namespace-scope variable gives its ELF symbol `STB_GLOBAL` and `STV_HIDDEN`.
+  This includes the C-linkage marker `__ycxx_linkage_static_v1` from the pinned libycxx runtime.
+  [#936](https://github.com/yrashk/ycxx/issues/936)
 - Constant-initialized and zero-initialized external inline namespace variables use weak ELF
   definitions when their initial values need no relocations. This includes explicitly inline
   full variable-template specializations with builtin type arguments. Static addresses and
@@ -1478,8 +1482,11 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   libycxx `<cstddef>` byte operator with matching GCC and Clang symbols (#64).
 - Tests: `tests/own/classes/s4-namespace*`, `s4-using` (spec-only, plus one from the review): 5
   of 5. Seven more draft examples pass.
-- A linkage-specification with one declaration (`extern "C" int v;`) declares as if `extern`
-  were given ([dcl.link]/7); a variable with C language linkage is one in every namespace.
+- A C or C++ linkage specification with one declaration treats `extern` as present for name
+  linkage and for distinguishing declarations from definitions ([dcl.link]). This includes a
+  first ordinary namespace `const` variable. A braced linkage block applies the ordinary
+  namespace rules. A variable with C language linkage is one in every namespace.
+  [#942](https://github.com/yrashk/ycxx/issues/942)
 - A qualified namespace function definition inherits C language linkage from a matching prior
   member declaration and uses its target namespace for body lookup. Ordinary and argument-dependent
   calls find the prior declaration and use the same unmangled symbol as C callers (#426).
@@ -1567,7 +1574,8 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   GNU `__attribute__((…))` before and after declarators, are parsed. The parser skips
   unrecognized attributes ([dcl.attr.grammar]/6) and diagnoses a standard attribute before a
   linkage-specification with a single declaration ([dcl.link]). GNU hidden visibility on ordinary
-  namespace-scope functions is implemented for x86-64 ELF. [#602](https://github.com/yrashk/ycxx/issues/602)
+  external namespace-scope functions and non-inline variables is implemented for x86-64 ELF.
+  [#602](https://github.com/yrashk/ycxx/issues/602) · [#936](https://github.com/yrashk/ycxx/issues/936)
 - **Asm labels:** `__asm("…")` after a declarator gives the entity's symbol exactly as written
   (`Program::asm_label`, `pipeline::Entity::asm_label`), as the SDK's `__DARWIN_ALIAS` needs.
   Both extensions are listed in `docs/EXTENSIONS.md` (DECISIONS §1.2).
