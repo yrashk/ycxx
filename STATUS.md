@@ -1588,6 +1588,9 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   directives and aliases; directives are transitive ([namespace.udir]/4) and qualified lookup
   follows them ([namespace.qual]/2). Two using-directives that bring in different entities make a name
   ambiguous. Constructors and destructors are not found by name ([class.ctor]/1).
+- Block-scope using-declarations make imported enumeration, class and alias names available as
+  qualifiers. Lookup considers them alongside local type and namespace aliases, starting with the
+  innermost block ([namespace.udecl], [basic.lookup.qual]). [#953](https://github.com/yrashk/ycxx/issues/953)
 - **Definitions outside:** `int N::f(…) {…}`, `int N::C::count = 0;`, `N::C::C(…) : … {}` and
   `N::C::~C()`: what follows the declarator-id, the body included, is looked up in that scope
   ([basic.lookup.unqual]/9).

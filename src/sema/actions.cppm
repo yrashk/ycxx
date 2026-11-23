@@ -644,6 +644,10 @@ public:
   static bool is_type(ast::DeclKind k) {
     return k == ast::DeclKind::class_ || k == ast::DeclKind::enum_ || k == ast::DeclKind::type_alias;
   }
+  static bool is_non_template_tag(const ast::DeclSema& decl) {
+    return (decl.kind == ast::DeclKind::class_ || decl.kind == ast::DeclKind::enum_) &&
+           !(decl.flags & decl_flag::template_);
+  }
 
   bool names_direct_class(NameId name, QualType type) {
     if (std::ranges::contains(block_types_, name, &BlockType::name)) return false;
@@ -794,6 +798,12 @@ public:
     if (ins().names.spelling(name) != "__builtin_va_list") return std::nullopt;
     return w_->builtin_va_list();
   }
+  bool conflicts_with_imported_alias(std::span<const ast::DeclSema> imported, QualType type) {
+    return std::ranges::any_of(imported, [&](const ast::DeclSema& decl) {
+      return decl.kind == ast::DeclKind::type_alias &&
+             ((decl.flags & decl_flag::template_) || types().canonical(decl.type) != types().canonical(type));
+    });
+  }
   // A block-scope typedef-name or alias-declaration ([dcl.typedef]); it may redeclare one of the
   // same block to the same type.
   void local_type_alias(NameId name, QualType type, u32 at_) {
@@ -805,6 +815,8 @@ public:
     if (guarded || std::ranges::any_of(scopes_.back(), [&](const auto& p) { return p.first == name; }) ||
         std::ranges::any_of(block_types_, [&](const BlockType& t) {
           return t.depth == depth && t.name == name && types().canonical(t.type) != types().canonical(type);
+        }) || std::ranges::any_of(block_usings_, [&](const BlockUsing& used) {
+          return used.depth == depth && used.name == name && conflicts_with_imported_alias(used.decls, type);
         })) {
       diag(at_, Diag::redeclared_local, name);
       return;
@@ -1910,7 +1922,7 @@ public:
   // The first component of a nested-name-specifier, by unqualified lookup ([basic.lookup.qual]/1:
   // only namespaces, types and templates).
   std::optional<Scope> scope_named(NameId n, std::optional<u32> enum_qualifier_at = std::nullopt,
-                                   bool* ambiguous_namespace = nullptr) {
+                                   bool* ambiguous_namespace = nullptr, bool search_block_import_types = true) {
     // A type template parameter as a nested-name-specifier names a dependent type
     // ([temp.dep.type]); in an instantiation, its argument.
     if (const ast::TemplateParamSema* p = template_param(n)) {
@@ -1922,15 +1934,37 @@ public:
       }
       return Scope{std::nullopt, p->type};
     }
-    for (auto a = block_aliases_.rbegin(); a != block_aliases_.rend(); ++a)
-      if (a->name == n) return Scope{a->ns, std::nullopt};
+    if (search_block_import_types) {
+      // A qualifier sees aliases and types introduced by using-declarations in the nearest block.
+      // [basic.lookup.qual] ignores local values when looking up a qualifier.
+      for (std::size_t depth = scopes_.size(); depth-- > 0;) {
+        for (const BlockAlias& alias : block_aliases_ | std::views::reverse)
+          if (alias.depth == depth && alias.name == n) return Scope{alias.ns, std::nullopt};
+        for (const BlockType& alias : block_types_ | std::views::reverse)
+          if (alias.depth == depth && alias.name == n) return Scope{std::nullopt, alias.type};
+        for (const BlockUsing& used : block_usings_)
+          if (used.depth == depth && used.name == n && used.type_index) {
+            const ast::DeclSema& decl = used.decls[*used.type_index];
+            // A bare template name hides an outer type but needs arguments to qualify a name.
+            if (decl.flags & decl_flag::template_) return std::nullopt;
+            return Scope{std::nullopt, decl.type};
+          }
+      }
+    } else {
+      // A using-directive or namespace alias keeps its namespace lookup path ([basic.lookup.udir]).
+      for (const BlockAlias& alias : block_aliases_ | std::views::reverse)
+        if (alias.name == n) return Scope{alias.ns, std::nullopt};
+    }
+    const bool search_local_aliases = !search_block_import_types;
     if (enum_qualifier_at) {
       std::optional<EntityId> ns;
-      if (auto t = class_name(n, true, true, enum_qualifier_at, true, &ns)) return Scope{std::nullopt, t};
+      if (auto t = class_name(n, true, true, enum_qualifier_at, search_local_aliases, &ns))
+        return Scope{std::nullopt, t};
       if (ns) return Scope{ns, std::nullopt};
       return std::nullopt;
     }
-    if (auto t = class_name(n, true)) return Scope{std::nullopt, t};
+    if (auto t = class_name(n, /*elaborated=*/true, /*aliases=*/true, std::nullopt, search_local_aliases))
+      return Scope{std::nullopt, t};
     if (auto ns = q_->namespace_named(n, directives())) {
       if (ambiguous_namespace)
         *ambiguous_namespace = competing_qualifier(*ns, q_->qualifier_decls(n, std::nullopt, directives()));
@@ -2242,17 +2276,47 @@ public:
     return r;
   }
   void using_declaration(const Scope& s, NameId n, u32 at_) {
-    // [basic.scope.scope]/4: it may not clash with a local declared in the same block before it.
-    if (!scopes_.empty() && std::ranges::any_of(scopes_.back(), [&](const auto& p) { return p.first == n; })) {
+    std::vector<ast::DeclSema> found = s.ns ? q_->namespace_members(*s.ns, n) : std::vector<ast::DeclSema>{};
+    // [namespace.udecl], [basic.scope.scope]: a local value can hide a class or enumeration
+    // name. Type aliases and type templates conflict with the value.
+    if (!scopes_.empty() && std::ranges::any_of(scopes_.back(), [&](const auto& p) { return p.first == n; }) &&
+        (found.empty() || !std::ranges::all_of(found, is_non_template_tag))) {
       diag(at_, Diag::redeclared_local, n);
       return;
     }
-    std::vector<ast::DeclSema> found = s.ns ? q_->namespace_members(*s.ns, n) : std::vector<ast::DeclSema>{};
     if (found.empty()) {
       diag(at_, Diag::no_namespace_member, n);
       return;
     }
-    block_usings_.push_back({scopes_.size() - 1, n, std::move(found)});
+    // [namespace.udecl]: redeclarations of one template and non-template declarations of
+    // the same canonical type each agree. A template and an ordinary type conflict.
+    const auto same_type = [&](const ast::DeclSema& a, const ast::DeclSema& b) {
+      return a.entity == b.entity ||
+             (!((a.flags | b.flags) & decl_flag::template_) &&
+              types().canonical(a.type) == types().canonical(b.type));
+    };
+    std::optional<std::size_t> type_index;
+    for (std::size_t i = 0; i < found.size(); ++i) {
+      const ast::DeclSema& decl = found[i];
+      if (!is_type(decl.kind)) continue;
+      if (!type_index) type_index = i;
+      else if (!same_type(found[*type_index], decl)) {
+        diag(at_, Diag::ambiguous_name, n);
+        return;
+      }
+    }
+    const std::size_t depth = scopes_.size() - 1;
+    if (type_index &&
+        (std::ranges::any_of(block_usings_, [&](const BlockUsing& earlier) {
+           return earlier.depth == depth && earlier.name == n && earlier.type_index &&
+                  !same_type(found[*type_index], earlier.decls[*earlier.type_index]);
+         }) || std::ranges::any_of(block_types_, [&](const BlockType& alias) {
+           return alias.depth == depth && alias.name == n && conflicts_with_imported_alias(found, alias.type);
+         }))) {
+      diag(at_, Diag::conflicting_declaration, n);
+      return;
+    }
+    block_usings_.push_back({depth, n, std::move(found), type_index});
   }
   void namespace_alias(NameId n, EntityId ns) { block_aliases_.push_back({scopes_.size() - 1, n, ns}); }
 
@@ -3213,8 +3277,15 @@ public:
     // (Parameters are checked where the declarator is.)
     if (!(flags & local_flag::parameter) && name != no_name() && declared_template_param(name)) diag(at, Diag::redeclared_local, name);
     if (name != no_name() && check) {
+      const std::size_t depth = scopes_.size() - 1;
       bool clash = std::ranges::any_of(scopes_.back(), [&](auto& p) { return p.first == name; }) ||
-                   std::ranges::any_of(block_types_, [&](auto& t) { return t.depth == scopes_.size() - 1 && t.name == name; });
+                   std::ranges::any_of(block_types_, [&](auto& t) { return t.depth == depth && t.name == name; }) ||
+                   std::ranges::any_of(block_usings_, [&](const BlockUsing& used) {
+                     return used.depth == depth && used.name == name &&
+                            std::ranges::any_of(used.decls, [](const ast::DeclSema& decl) {
+                              return is_type(decl.kind) && !is_non_template_tag(decl);
+                            });
+                   });
       if (scopes_.size() >= 2 && !guarded_.empty() && guarded_.back() == scopes_.size() - 2)
         clash = clash || std::ranges::any_of(scopes_[guarded_.back()], [&](auto& p) { return p.first == name; });
       if (clash) diag(at, Diag::redeclared_local, name);
@@ -10533,6 +10604,7 @@ private:
     std::size_t depth;
     NameId name;
     std::vector<ast::DeclSema> decls;
+    std::optional<std::size_t> type_index;  // representative type or type template in decls
   };
   struct BlockAlias {
     std::size_t depth;

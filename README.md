@@ -459,7 +459,8 @@ written default member initializer are value-initialized.
   in-class alias declarations also check access to inherited aliases. [#1001](https://github.com/yrashk/ycxx/issues/1001)
 - namespaces, nested (`namespace a::b`) and inline ones, typedefs and aliases, including
   function type and function pointer aliases with qualified return types, `using` declarations
-  and directives;
+  and directives. A block-scope `using N::E;` makes `E` available as a qualifier in `E::member`.
+  [#953](https://github.com/yrashk/ycxx/issues/953)
 - named function-pointer declarations with qualified return types, qualified names in grouped
   declarators, and unnamed function-pointer parameters;
 - parenthesized direct initialization from functional conversions such as `S b(S(1));` and
