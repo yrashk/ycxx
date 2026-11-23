@@ -415,6 +415,13 @@ public:
       break;
     }
     case ast::DepOp::is_array: result = types().is_array(type); break;
+    case ast::DepOp::is_bounded_array:
+    case ast::DepOp::is_unbounded_array:
+      if (types().is_array(type)) {
+        const bool has_bound = types().rec(type).bound_value != ConstId::none;
+        result = has_bound == (op == ast::DepOp::is_bounded_array);
+      }
+      break;
     case ast::DepOp::is_pointer: result = types().is_pointer(type); break;
     case ast::DepOp::is_function: result = types().is_function(type); break;
     case ast::DepOp::is_object: result = types().is_object(type); break;
@@ -606,6 +613,8 @@ public:
       case ast::DepOp::is_const:
       case ast::DepOp::is_volatile:
       case ast::DepOp::is_array:
+      case ast::DepOp::is_bounded_array:
+      case ast::DepOp::is_unbounded_array:
       case ast::DepOp::is_pointer:
       case ast::DepOp::is_function:
       case ast::DepOp::is_enum:
