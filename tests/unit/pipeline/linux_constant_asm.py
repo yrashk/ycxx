@@ -24,7 +24,14 @@ int accessor_neighbor = 23;
 }
 '''
 ACCESSOR_HEADER = 'constexpr const char* accessor_text() {{ return ".hidden {target}\\n"; }}\n'
-WHOLE_UNIT = 'struct Whole { virtual void f(); };\n'
+WHOLE_UNIT_HEADER = '''\
+class Whole { public: virtual int key() noexcept; virtual ~Whole() noexcept; };
+void observe(Whole*) noexcept;
+'''
+WHOLE_UNIT = '''\
+#include "whole.hpp"
+Whole::~Whole() noexcept { observe(this); }
+'''
 
 
 def symbols(readelf, scope, env, neighbor_hidden):
@@ -93,6 +100,7 @@ def replay(options, readelf, scope, env, cold, resident):
 
     # Only the header helper's body changes while each asm item stays byte-identical.
     source = scope / 'directive.cpp'
+    (scope / 'whole.hpp').write_text(WHOLE_UNIT_HEADER)
     first = 'accessor_first'
     attributes = []
     for trailer in ('', WHOLE_UNIT):
