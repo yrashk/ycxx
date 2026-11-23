@@ -1858,10 +1858,10 @@ public:
     if (auto result = reaches_base(d, b)) return bool_literal(*result, begin, end);
     return fail(Diag::base_of_unsupported, base_type, derived_type);
   }
-  // These properties require a complete nonunion class at the point that queries it
-  // ([meta.unary.prop]). The owning replay supplies that point for a dependent operand.
-  Ex virtual_class_trait_expr(ast::DepOp op, QualType type, u32 begin, u32 end)
-    pre(op == ast::DepOp::is_polymorphic || op == ast::DepOp::is_abstract)
+  // The owning replay supplies the point of instantiation for class completeness
+  // ([meta.unary.prop]). Finality requires a complete class, including a union.
+  Ex class_property_trait_expr(ast::DepOp op, QualType type, u32 begin, u32 end)
+    pre(op == ast::DepOp::is_polymorphic || op == ast::DepOp::is_abstract || op == ast::DepOp::is_final)
   {
     type = types().canonical(type);
     const engine::Loc loc = type_trait_loc(begin);
@@ -1873,18 +1873,24 @@ public:
         }
       return dependent_node({}, begin, end, builtin(Builtin::bool_));
     }
-    if (!types().is_class(type) || is_union_type(type) == true) return bool_literal(false, begin, end);
+    if (!types().is_class(type)) return bool_literal(false, begin, end);
     const EntityId cls = types().class_of(type);
+    const bool final_trait = op == ast::DepOp::is_final;
+    if (!final_trait && is_union_type(type) == true) return bool_literal(false, begin, end);
     if (auto demand = q_->type_trait_at_demand(cls, loc)) {
       if (!*demand) {
         if (!q_->type_trait_instantiation_failed(cls)) diag_at(loc, Diag::virtual_class_trait_incomplete, type);
         return {NodeId::none, begin, end};
       }
-    } else if (!require_complete(type, begin)) {
-      return {NodeId::none, begin, end};
+    } else {
+      // Direct finality queries keep the class domain supported by #309.
+      if (final_trait && (is_union_type(type) == true || w_->entities.rec(cls).templ != EntityId::none))
+        return bool_literal(false, begin, end);
+      if (!require_complete(type, begin)) return {NodeId::none, begin, end};
     }
     const ClassRec* record = classes().find(cls);
     if (!record) return {NodeId::none, begin, end};
+    if (final_trait) return bool_literal(record->is_final, begin, end);
     return bool_literal(op == ast::DepOp::is_abstract ? record->is_abstract() : record->polymorphic, begin, end);
   }
 
@@ -1930,8 +1936,9 @@ public:
     case is_function: unary_op = ast::DepOp::is_function; break;
     case is_enum: unary_op = ast::DepOp::is_enum; break;
     case is_scoped_enum: unary_op = ast::DepOp::is_scoped_enum; break;
-    case is_polymorphic: return virtual_class_trait_expr(ast::DepOp::is_polymorphic, args[0], begin, end);
-    case is_abstract: return virtual_class_trait_expr(ast::DepOp::is_abstract, args[0], begin, end);
+    case is_polymorphic: return class_property_trait_expr(ast::DepOp::is_polymorphic, args[0], begin, end);
+    case is_abstract: return class_property_trait_expr(ast::DepOp::is_abstract, args[0], begin, end);
+    case is_final: return class_property_trait_expr(ast::DepOp::is_final, args[0], begin, end);
     case is_union: unary_op = ast::DepOp::is_union; break;
     case is_class: unary_op = ast::DepOp::is_class; break;
     case is_member_pointer: unary_op = ast::DepOp::is_member_pointer; break;
@@ -1967,14 +1974,6 @@ public:
         const ClassRec* r = cls();
         if (!r) return {NodeId::none, begin, end};
         v = r->virtual_destructor;
-      }
-      break;
-    case is_final:
-      if (types().is_class(c) && is_union_type(c) != true &&
-          w_->entities.rec(types().class_of(c)).templ == EntityId::none) {
-        const ClassRec* r = cls();
-        if (!r) return {NodeId::none, begin, end};
-        v = r->is_final;
       }
       break;
     case is_lvalue_reference: v = types().is_reference(c) && !types().rec(c).rvalue_ref; break;

@@ -221,9 +221,10 @@ specializations across objects. Members of a specialization with a translation-u
 argument keep their code local. [#1051](https://github.com/yrashk/ycxx/issues/1051)
 
 Both targets link eligible nonthrowing, nonvirtual in-class and implicit destructors across
-separate objects, including destructors of class-template specializations. Specializations naming
-translation-unit-local types retain local destructor symbols.
-[#1025](https://github.com/yrashk/ycxx/issues/1025)
+separate objects. A class-template destructor's explicit specialization can coalesce when its
+own declaration is inline. Specializations naming translation-unit-local types retain local
+destructor symbols.
+[#1025](https://github.com/yrashk/ycxx/issues/1025) · [#1040](https://github.com/yrashk/ycxx/issues/1040)
 
 On Linux x86-64, an ordinary external namespace-scope function can use GNU `weak` so a
 strong definition in another object takes precedence. This covers the pinned libycxx
