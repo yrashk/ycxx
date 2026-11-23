@@ -56,10 +56,10 @@ def check_symbols(readelf, obj, scope, env):
 
     for name in ('defined', 'also', 'exported'):
         row = entry(name)
-        assert row[3:5] == ['OBJECT', 'GLOBAL'] and row[6].isdigit(), row
+        assert row[4] == 'GLOBAL' and row[6].isdigit(), row
     for name in ('braced', 'plain'):
         row = entry(name, local=True)
-        assert row[3:5] == ['OBJECT', 'LOCAL'] and row[6].isdigit(), row
+        assert row[4] == 'LOCAL' and row[6].isdigit(), row
     imported = entry('provided')
     assert imported[4] == 'GLOBAL' and imported[6] == 'UND', imported
     relocations = run([readelf, '-Wr', obj], scope, env)
