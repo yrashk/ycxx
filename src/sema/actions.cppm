@@ -2029,8 +2029,7 @@ public:
     }
   }
 
-  // `__trait(T…)` that tests types ([meta.unary], [meta.rel]): a `bool` prvalue, value-dependent
-  // while a type is dependent for the traits that support it.
+  // Type-operand builtins ([meta.unary], [meta.rel]), value-dependent where supported.
   Ex trait_expr(lex::TypeTrait t, NameId name, std::span<const QualType> args, u32 begin, u32 end) {
     using enum lex::TypeTrait;
     if (t == is_trivially_copyable) return trivial_copyability_expr(args[0], begin, end);
@@ -2045,6 +2044,13 @@ public:
     };
     std::optional<ast::DepOp> unary_op;
     switch (t) {
+    case array_rank: {
+      const QualType size = builtin(w_->target.size_type);
+      if (auto value = templates().array_rank_value(args[0]))
+        return literal(size, *value, ValueCategory::prvalue, begin, end);
+      ExprInfo info{size, ValueCategory::prvalue, expr_flag::dependent | expr_flag::unrepresented_value};
+      return node(ast::Dependent{info, b_->list({})}, begin, end, info);
+    }
     case is_same: return structural_trait(templates().is_same_value(args[0], args[1]));
     case is_implicit_lifetime: return implicit_lifetime_expr(args[0], begin, end);
     case has_unique_object_representations: return unique_object_representations_expr(args[0], begin, end);

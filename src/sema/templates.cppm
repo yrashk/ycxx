@@ -372,6 +372,22 @@ public:
     return ins().intern_value(ast::VDepOp{ast::DepOp::is_same, ins().intern_seq(std::span<const TemplateArg>(operands))});
   }
 
+  std::optional<ConstId> array_rank_value(QualType type) {
+    type = types().canonical(type);
+    if (types().is_dependent(type)) {
+      if (!structural_operand(type)) return std::nullopt;
+      const std::array operands{type_arg(type)};
+      return ins().intern_value(ast::VDepOp{ast::DepOp::array_rank,
+                                           ins().intern_seq(std::span<const TemplateArg>(operands))});
+    }
+    u64 rank = 0;
+    while (types().is_array(type)) {
+      ++rank;
+      type = types().canonical(types().rec(type).inner);
+    }
+    return w_->values.integer(types().builtin(w_->target.size_type), rank);
+  }
+
   // The owning token replay checks the concrete multi-operand query.
   std::optional<ConstId> replayed_type_trait_pattern(ast::DepOp op, std::span<const TemplateArg> operands)
     pre(op == ast::DepOp::is_constructible || op == ast::DepOp::is_nothrow_constructible ||
@@ -467,6 +483,7 @@ public:
     case ast::DepOp::has_virtual_destructor:
     case ast::DepOp::is_standard_layout:
     case ast::DepOp::alignof_type:
+    case ast::DepOp::array_rank:
     case ast::DepOp::is_empty: return std::nullopt;
     case ast::DepOp::is_same:
     case ast::DepOp::is_constructible:
@@ -575,10 +592,14 @@ public:
     if (!v) return std::nullopt;
     auto is_predicate = [&](ConstId value) {
       return ins().values.is<ast::VDepOp>(value) &&
-             ins().values.get<ast::VDepOp>(value).op != ast::DepOp::alignof_type;
+             !ast::returns_size_type(ins().values.get<ast::VDepOp>(value).op);
     };
     if ((is_predicate(a.value) || is_predicate(*v)) && !types().is(t, Builtin::bool_))
       return std::nullopt;
+    if (ins().values.is<ast::VDepOp>(a.value) &&
+        ins().values.get<ast::VDepOp>(a.value).op == ast::DepOp::array_rank &&
+        !ins().values.is_dependent(*v))
+      return converted_value(value_arg(types().builtin(w_->target.size_type), *v), t);
     if (ins().values.is<ast::VDepVariable>(a.value) && !ins().values.is_dependent(*v)) {
       QualType source = t;
       if (ins().values.is<ast::VInt>(*v)) source = ins().values.get<ast::VInt>(*v).type;
@@ -613,6 +634,11 @@ public:
     if (ins().values.is<ast::VDepOp>(v)) {
       auto op = ins().values.get<ast::VDepOp>(v);
       switch (op.op) {
+      case ast::DepOp::array_rank: {
+        auto operand = substitute_arg(ins().seqs.at(op.operands, 0), b);
+        if (!operand) return std::nullopt;
+        return array_rank_value(operand->type);
+      }
       case ast::DepOp::alignof_type: {
         auto operand = substitute_arg(ins().seqs.at(op.operands, 0), b);
         if (!operand || !types().is_dependent(operand->type)) return std::nullopt;
@@ -1633,10 +1659,10 @@ public:
   std::optional<TemplateArg> converted_value(const TemplateArg& a, QualType t) {
     t = types().canonical(Types::unqualified(t));
     // Predicate conversions to non-bool destinations need a dependent conversion (#209).
-    // A dependent base alignment is checked again when the written argument is replayed.
+    // Dependent size queries convert once the concrete value is known.
     ConstId pattern = is_expansion(a) ? pattern_of(a).value : a.value;
     if (ins().values.is<ast::VDepOp>(pattern)) {
-      if (ins().values.get<ast::VDepOp>(pattern).op == ast::DepOp::alignof_type) {
+      if (ast::returns_size_type(ins().values.get<ast::VDepOp>(pattern).op)) {
         if (!types().is_dependent(t) && !types().is_integral(t)) return std::nullopt;
       } else if (!types().is(t, Builtin::bool_)) {
         return std::nullopt;

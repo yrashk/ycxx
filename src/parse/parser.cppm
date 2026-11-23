@@ -2690,7 +2690,7 @@ public:
     while (auto p = s_->as<ast::Paren>(operand)) operand.id = p->operand.id;
     if (auto lit = s_->as<ast::Literal>(operand); lit && s_->ins().values.is_dependent(lit->value)) {
       if (s_->ins().values.is<ast::VDepOp>(lit->value) && !s_->types().is(t, Builtin::bool_) &&
-          s_->ins().values.get<ast::VDepOp>(lit->value).op != ast::DepOp::alignof_type) {
+          !ast::returns_size_type(s_->ins().values.get<ast::VDepOp>(lit->value).op)) {
         s_->diag(e.begin, Diag::not_supported, Tk::kw_template);
         return std::nullopt;
       }

@@ -2613,8 +2613,8 @@ clauses = ['meta.unary', 'meta.rel', 'meta.trans']
 std = 'C++11'
 detect = '\bstd::(?:is_\w+|enable_if|conditional|decay|remove_\w+|add_\w+|underlying_type|common_type|invoke_result)\w*\b'
 status = 'partial'
-note = 'assignment traits cover arithmetic operands, conversion traits cover arithmetic operands and cv void, is_convertible also covers bounded values and references through a unique public nonvirtual base, and is_base_of and is_empty query recorded base declarations. Other object-model traits remain partial'
-issues = [218, 211]
+note = 'assignment traits cover arithmetic operands, conversion traits cover arithmetic operands and cv void, is_convertible also covers bounded values and references through a unique public nonvirtual base, is_base_of and is_empty query recorded base declarations, and __array_rank counts array dimensions with dependent type operands. Other object-model traits remain partial'
+issues = [218, 211, 1082]
 probe = '''
 enum E { e };
 int main() { return (__is_same(int, int) && __is_enum(E) && !__is_same(int, long)) ? 0 : 1; }

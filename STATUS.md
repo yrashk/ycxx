@@ -2390,6 +2390,10 @@ session's.*
   argument. The result uses the target size type. An array of unknown bound is supported when
   its element type is complete. Pointer-only uses of the specialization leave evaluation deferred
   ([expr.alignof], [temp.inst], #1067).
+- `__array_rank(T)` returns the number of array dimensions as the target size type. Unknown bounds
+  count, incomplete element types need no layout, and nonarrays have rank zero. Dependent type
+  operands resolve through template argument substitution and variable-template initializer replay
+  ([meta.unary.prop.query], #1082).
 - `__is_base_of(Base, Derived)` ignores top-level cv. Nonclass and union operands give false.
   The same nonunion class gives true, including when incomplete. For distinct nonunion classes,
   `Derived` must be complete. The trait follows the recorded base declarations, including private
