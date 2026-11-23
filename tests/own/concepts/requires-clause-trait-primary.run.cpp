@@ -1,6 +1,7 @@
 // #218: a type-trait built-in is a primary-expression, so it can be a requires-clause's operand
 // without parentheses ([temp.pre]/9). Its parenthesized operands are not the declarator's
 // parameters: the template that follows is still declared.
+// XFAIL: gcc GCC 16 rejects a type-trait built-in in a function template's signature (a vendor extension it does not mangle; Clang accepts).
 template<class T> requires __is_same(T, int) int f(T*) { return 1; }
 int f(const void*) { return 2; }
 

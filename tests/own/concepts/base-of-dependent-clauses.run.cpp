@@ -1,6 +1,7 @@
 // #218: a dependent `__is_base_of` in a requires-clause, a trailing requires-clause and a
 // nested-requirement is evaluated where satisfaction is checked ([temp.constr.atomic],
 // [expr.prim.req.nested]), after the classes it names are complete.
+// XFAIL: gcc GCC 16 rejects a type-trait built-in in a function template's signature (a vendor extension it does not mangle; Clang accepts).
 struct Base {};
 
 template<class T> requires __is_base_of(Base, T) int pick(T*) { return 1; }
