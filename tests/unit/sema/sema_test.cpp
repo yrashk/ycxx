@@ -204,6 +204,14 @@ template<> Cell<long>::~Cell() {}
   const auto inlined = a.decl(a.its.top.at(2));
   const auto declaration = a.decl(a.its.top.at(3));
   const auto defined = a.decl(a.its.top.at(4));
+  const auto owner_argument = [&](const ast::DeclSema& d) -> std::optional<Builtin> {
+    const auto& owner = a.w.entities.rec(a.w.entities.rec(d.entity).scope);
+    if (owner.args.size() != 1 || owner.args.front().kind != ast::TemplateArgKind::type) return std::nullopt;
+    return a.w.types.builtin_of(owner.args.front().type);
+  };
+  check(owner_argument(noninline) == Builtin::int_ && owner_argument(inlined) == Builtin::char_ &&
+            owner_argument(defined) == Builtin::long_,
+        "each destructor specialization belongs to the selected class instance");
   check(noninline.flags == special_definition, "the non-inline specialization keeps its written flags");
   check(inlined.flags == (special_definition | inline_), "a written inline specialization is inline");
   check(declaration.flags == (specialization | member | destructor) && defined.flags == special_definition &&

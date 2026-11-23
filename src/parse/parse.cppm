@@ -5451,8 +5451,10 @@ private:
     if (ctor || m->is_virtual || specialized_destructor) sem.has_written_noexcept = fs.has_noexcept;
     if (specialized_destructor) {
       using namespace sema::decl_flag;
-      // [temp.expl.spec]: the selected member supplies the entity, and this declaration supplies
-      // the specialization's inline and definition flags.
+      // The written in-class declaration supplies the pattern. This definition names the member
+      // of the selected class specialization and supplies its own inline flag ([temp.expl.spec]).
+      sem.entity = m->entity;
+      sem.type = m->type;
       sem.flags = u16(flags | member | destructor | specialization | (definition ? sema::decl_flag::definition : 0));
       p_->specialization_named_at(sem.entity, name_at);
     } else {
