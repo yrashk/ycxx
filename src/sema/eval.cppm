@@ -168,7 +168,7 @@ private:
     Host host{q_, this};
     interp::Config config{
         .enum_layout = [&facts](EntityId e) { return facts.constant_enum_layout(e); },
-        .temporary_record_layout = [this](QualType t) { return constant_record_layout(t); }};
+        .record_layout = [this](QualType t) { return constant_record_layout(t); }};
     interp::Outcome out = interp::evaluate(host, in, s_->world().target, body->body, EntityId::none, {}, std::move(config)).run();
     if (out.status != interp::Outcome::Status::value && host.type_trait_failure)
       return {std::nullopt, reason_unsupported, false, false, true};
@@ -228,7 +228,7 @@ private:
       if (auto value = zero_constant(e.type())) return {*value, 0, true};
       return {};
     }
-    if (s_->types().is_class(e.type())) return {};  // the interpreter cannot return class objects yet (#25)
+    if (s_->types().is_class(e.type()) && !constant_record_layout(e.type())) return {};
     return evaluate(e, false, initialized_fields);
   }
 
@@ -348,8 +348,7 @@ private:
       return std::nullopt;
     const EntityId entity = types.class_of(type);
     const ClassRec* record = s_->class_rec(entity);
-    if (!record || record->union_ || !record->bases.empty() || record->fields.empty() ||
-        record->unapplied_layout || q_->class_layout_uncertain(entity) ||
+    if (!record || record->union_ || !record->bases.empty() || record->unapplied_layout || q_->class_layout_uncertain(entity) ||
         !record->destructor_usable || record->destructor != EntityId::none)
       return std::nullopt;
     const auto layout = s_->class_layout(entity);
@@ -359,19 +358,35 @@ private:
     result.fields.reserve(record->fields.size());
     for (std::size_t i = 0; i < record->fields.size(); ++i) {
       const FieldRec& field = record->fields[i];
-      const QualType field_type = types.canonical(field.type);
-      const EnumRec* enumeration = types.is_enum(field_type) ? s_->enum_rec(types.enum_of(field_type)) : nullptr;
-      const QualType representation_type =
-          enumeration && enumeration->underlying ? *enumeration->underlying : field_type;
-      const auto representation = types.builtin_of(representation_type);
       if (record->access_of(field.entity) != ast::Access::public_ || field.bit_width || field.no_unique_address ||
-          Types::is_volatile(field_type) || !representation || !ast::is_integral(*representation) ||
-          ast::width_of(s_->world().target, *representation) > 64)
+          !constant_record_field(field.type))
         return std::nullopt;
       // Preserve the enum type in the field path. The interpreter decodes its underlying value.
       result.fields.push_back({s_->field_access_type(field, type), layout->offsets[i], field.mutable_});
     }
     return result;
+  }
+
+  bool constant_record_field(QualType type) {
+    Types& types = s_->types();
+    type = types.canonical(type);
+    if (Types::is_volatile(type)) return false;
+    if (types.is_array(type)) {
+      const TypeRec array = types.rec(type);
+      const QualType element = types.canonical(array.inner);
+      return array.bound_value != ConstId::none && !Types::is_volatile(element) && types.is(element, Builtin::char_);
+    }
+    if (types.is_pointer(type)) return true;
+    if (types.is_enum(type)) {
+      const EnumRec* enumeration = s_->enum_rec(types.enum_of(type));
+      if (!enumeration || !enumeration->underlying) return false;
+      type = *enumeration->underlying;
+    }
+    const auto b = types.builtin_of(type);
+    if (!b) return false;
+    const auto& target = s_->world().target;
+    return *b == Builtin::nullptr_t || (ast::is_integral(*b) && ast::width_of(target, *b) <= 64) ||
+           (ast::is_floating(*b) && ast::computes(target[*b].format));
   }
 
   struct Host {
@@ -410,6 +425,16 @@ private:
     case K::floating: return {ast::float_value(s_->ins(), s_->world().target, r.type, ast::Bits128{r.bits, 0}), 0, true};
     case K::null: return {vs.null_pointer(r.type), 0, true};
     case K::function: return {vs.address(r.type, vs.entity(r.entity), 0), 0, true};
+    case K::aggregate: {
+      std::vector<ConstId> elements;
+      elements.reserve(r.elements.size());
+      for (const auto& element : r.elements) {
+        const Evaluated value = constant(element);
+        if (!value.value) return value;
+        elements.push_back(*value.value);
+      }
+      return {vs.aggregate(r.type, elements), 0, true};
+    }
     case K::address: {
       if (r.base == interp::Base::local)
         return {std::nullopt, reason_arg({interp::Reason::local_address, 0, {}})};
