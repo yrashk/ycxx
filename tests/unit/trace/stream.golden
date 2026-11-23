@@ -28,18 +28,20 @@
 *         UnitShapes(golden.cpp) executed
 =           TuSourceIn(golden.cpp) reused
 =           TuFront(golden.cpp) reused
+*         UnitShapeIndex(golden.cpp) executed
+=           UnitShapes(golden.cpp) reused
 =         TuSourceIn(golden.cpp) reused
 =         SourceOf(golden.cpp) reused
 =     TuSourceIn(golden.cpp) reused
 =     SourceOf(golden.cpp) reused
 =     UnitShapes(golden.cpp) reused
-*     UnitShapeIndex(golden.cpp) executed
-=       UnitShapes(golden.cpp) reused
+=     UnitShapeIndex(golden.cpp) reused
 *   Lower(main) executed
 *     FunctionIr(main) executed
 *       FunctionGen(main) executed
 =         UnitFunctionFactsQ(golden.cpp) reused
 =         UnitShapes(golden.cpp) reused
+=         UnitShapeIndex(golden.cpp) reused
 *         FunctionSourceQ(main) executed
 =           TuUnit(golden.cpp) reused
 =           UnitIndexQ(golden.cpp) reused
@@ -109,18 +111,20 @@
 +           UnitShapes(golden.cpp) verified
 =             TuSourceIn(golden.cpp) reused
 =             TuFront(golden.cpp) reused
++           UnitShapeIndex(golden.cpp) verified
+=             UnitShapes(golden.cpp) reused
 =           TuSourceIn(golden.cpp) reused
 =           SourceOf(golden.cpp) reused
 =       TuSourceIn(golden.cpp) reused
 =       SourceOf(golden.cpp) reused
 =       UnitShapes(golden.cpp) reused
-+       UnitShapeIndex(golden.cpp) verified
-=         UnitShapes(golden.cpp) reused
+=       UnitShapeIndex(golden.cpp) reused
 +     Lower(main) verified
 +       FunctionIr(main) verified
 +         FunctionGen(main) verified
 =           UnitFunctionFactsQ(golden.cpp) reused
 =           UnitShapes(golden.cpp) reused
+=           UnitShapeIndex(golden.cpp) reused
 +           FunctionSourceQ(main) verified
 =             TuUnit(golden.cpp) reused
 =             UnitIndexQ(golden.cpp) reused
@@ -154,7 +158,7 @@
 =             SourceOf(golden.cpp) reused
 =       OptLevel(aarch64_macos) reused
 #       Optimized({<fp>, aarch64_macos, 0}) durable
-trace: 29 executed, 24 verified, 98 reused, 4 durable
+trace: 29 executed, 24 verified, 102 reused, 4 durable
 ## again: the request's own cells are reused
 = TuFront(golden.cpp) reused
 = Tu(golden.cpp) reused
@@ -197,18 +201,20 @@ trace: 3 reused
 +         UnitShapes(golden.cpp) verified
 =           TuSourceIn(golden.cpp) reused
 =           TuFront(golden.cpp) reused
++         UnitShapeIndex(golden.cpp) verified
+=           UnitShapes(golden.cpp) reused
 =         TuSourceIn(golden.cpp) reused
 =         SourceOf(golden.cpp) reused
 =     TuSourceIn(golden.cpp) reused
 =     SourceOf(golden.cpp) reused
 =     UnitShapes(golden.cpp) reused
-+     UnitShapeIndex(golden.cpp) verified
-=       UnitShapes(golden.cpp) reused
+=     UnitShapeIndex(golden.cpp) reused
 +   Lower(main) verified
 +     FunctionIr(main) verified
 +       FunctionGen(main) verified
 =         UnitFunctionFactsQ(golden.cpp) reused
 =         UnitShapes(golden.cpp) reused
+=         UnitShapeIndex(golden.cpp) reused
 +         FunctionSourceQ(main) verified
 =           TuUnit(golden.cpp) reused
 =           UnitIndexQ(golden.cpp) reused
@@ -245,4 +251,4 @@ trace: 3 reused
 + Link(0) verified
 =   ProgramIn(0) reused
 =   Tu(golden.cpp) reused
-trace: 1 executed, 3 cutoff, 21 verified, 55 reused, 4 durable
+trace: 1 executed, 3 cutoff, 21 verified, 57 reused, 4 durable

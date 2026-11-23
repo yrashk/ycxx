@@ -177,7 +177,7 @@ void one_module_edit() {
       // `ycxx::pipeline::Lower@ycxx.pipeline` → `Lower`
       std::string_view name = kind.substr(0, kind.find('@'));
       name.remove_prefix(name.rfind("::") == std::string_view::npos ? 0 : name.rfind("::") + 2);
-      if (stats.executed) out.emplace(std::string(name), stats.executed);
+      if (stats.executed) out[std::string(name)] += stats.executed;
     }
     s.db().count_per_kind(false);
     return out;
@@ -205,6 +205,9 @@ void one_module_edit() {
     }
   };
   const auto edit = executed(modules(6, false));
+  // Every kind named above ran, so a renamed kind cannot pass the comment's zero counts unseen.
+  for (std::string_view kind : {"FunctionGen", "FunctionIr", "Lower", "UnitQ", "Codegen", "Optimized"})
+    check(edit.contains(kind), std::format("{} is counted:{}", kind, described(edit)));
   per_function(edit, 2, "one module's constant");
   per_unit(edit, "one module's constant");
   const auto commented = executed(modules(6, true));

@@ -20,6 +20,12 @@
 //   tu(TU)                   the object, in definition order (§A5.3), and the first-demand table
 //   layout                   `layout_type(T)`, `layout_step(T, s)`, `layout_constant(c)` (cheap)
 //
+// Per-unit cells give the per-function ones what they read of the whole unit, so that an edit
+// re-runs them cheaply or not at all (#938): `UnitIndexQ` (where each definition and entity is),
+// `UnitFunctionFactsQ` (the constexpr and variadic functions irgen asks about), `UnitShapeIndex`
+// (`layout`'s lookup of classes and enumerations) and `SymbolAccessQ(TU, E)` (how the unit's
+// code addresses one entity, read by `unit`).
+//
 // What a query reads besides its key and fetches: the process's interners, sema's constants and
 // the default target for pre-built units, bound by whoever owns them (`Universe`); handles in values are
 // numbers in those interners, so a cell's value is meaningful only with them (#17 persists them).
@@ -425,11 +431,22 @@ struct ShapeIndex {
   std::vector<std::pair<EntityId, std::uint32_t>> classes;  // into `Shapes::classes`
   std::vector<std::pair<EntityId, std::uint32_t>> enums;    // into `Shapes::enums`
 };
+engine::SourceSpan tu_span(const engine::Db& db, TuId tu);  // defined with the function cells' spans
 struct UnitShapeIndex {
   using Key = TuId;
+  static engine::SourceSpan trace_span(const engine::Db& db, const Key& k) { return tu_span(db, k); }
   using Value = ShapeIndex;
   static engine::query_task<Value> run(engine::Ctx& cx, TuId tu);
 };
+// An entity's first class or enumeration record in the unit's shapes, or null.
+inline const ClassShape* class_shape(const Shapes& shapes, const ShapeIndex& index, EntityId e) {
+  auto it = std::ranges::lower_bound(index.classes, e, {}, &std::pair<EntityId, std::uint32_t>::first);
+  return it != index.classes.end() && it->first == e ? &shapes.classes[it->second] : nullptr;
+}
+inline const EnumShape* enum_shape(const Shapes& shapes, const ShapeIndex& index, EntityId e) {
+  auto it = std::ranges::lower_bound(index.enums, e, {}, &std::pair<EntityId, std::uint32_t>::first);
+  return it != index.enums.end() && it->first == e ? &shapes.enums[it->second] : nullptr;
+}
 
 // `layout` as `lower` reads it (ir::layout_source): types from the interners and the unit's
 // shapes (its classes' members and enumerations' underlying types, #115), constants through the
@@ -456,14 +473,8 @@ class QueryLayout {
   std::uint8_t sysv_integer_eightbytes(const ClassShape& shape, const ClassLayout& layout) const;
   ast::Placed placed(QualType t) const;
 
-  const ClassShape* shape_of(EntityId e) const {
-    auto it = std::ranges::lower_bound(index_->classes, e, {}, &std::pair<EntityId, std::uint32_t>::first);
-    return it != index_->classes.end() && it->first == e ? &shapes_->classes[it->second] : nullptr;
-  }
-  const EnumShape* enum_of(EntityId e) const {
-    auto it = std::ranges::lower_bound(index_->enums, e, {}, &std::pair<EntityId, std::uint32_t>::first);
-    return it != index_->enums.end() && it->first == e ? &shapes_->enums[it->second] : nullptr;
-  }
+  const ClassShape* shape_of(EntityId e) const { return class_shape(*shapes_, *index_, e); }
+  const EnumShape* enum_of(EntityId e) const { return enum_shape(*shapes_, *index_, e); }
 
   engine::SyncCtx* cx_;
   const ast::Target* target_;
@@ -1144,32 +1155,30 @@ engine::query_task<FunctionSource> FunctionSourceQ::run(engine::Ctx& cx, FnKey k
 // `Constants`, declarations from the function's source.
 class UnitFacts : public irgen::TypeFacts {
  public:
-  UnitFacts(const FunctionSource& src, const UnitFunctionFacts& unit, const Shapes& shapes, const ast::Target& target)
+  UnitFacts(const FunctionSource& src, const UnitFunctionFacts& unit, const Shapes& shapes, const ShapeIndex& index,
+            const ast::Target& target)
       : TypeFacts(*universe().in, target), src_(&src), unit_(&unit) {
-    enum_underlying = [&shapes](EntityId e) {
-      for (const EnumShape& s : shapes.enums)
-        if (s.entity == e) return s.underlying;
+    // Looked up through the unit's index, not by a scan of its classes per question (#938).
+    enum_underlying = [&shapes, &index](EntityId e) {
+      if (const EnumShape* s = enum_shape(shapes, index, e)) return s->underlying;
       return ast::builtin(*universe().in, ast::Builtin::int_);
     };
-    bases_of = [&shapes](EntityId c) {
-      for (const ClassShape& s : shapes.classes)
-        if (s.entity == c) return s.bases;
+    bases_of = [&shapes, &index](EntityId c) {
+      if (const ClassShape* s = class_shape(shapes, index, c)) return s->bases;
       return std::vector<EntityId>{};
     };
-    bit_field_width = [&shapes](EntityId c, std::uint32_t field) -> std::uint8_t {
-      for (const ClassShape& shape : shapes.classes)
-        if (shape.entity == c && field < shape.bit_widths.size()) return shape.bit_widths[field];
-      return 0;
+    bit_field_width = [&shapes, &index](EntityId c, std::uint32_t field) -> std::uint8_t {
+      const ClassShape* s = class_shape(shapes, index, c);
+      return s && field < s->bit_widths.size() ? s->bit_widths[field] : 0;
     };
-    field_type = [&shapes](EntityId c, std::uint32_t field) -> std::optional<QualType> {
-      for (const ClassShape& shape : shapes.classes)
-        if (shape.entity == c && field < shape.fields.size()) return shape.fields[field];
+    field_type = [&shapes, &index](EntityId c, std::uint32_t field) -> std::optional<QualType> {
+      const ClassShape* s = class_shape(shapes, index, c);
+      if (s && field < s->fields.size()) return s->fields[field];
       return std::nullopt;
     };
-    potentially_overlapping_field = [&shapes](EntityId c, std::uint32_t field) {
-      for (const ClassShape& shape : shapes.classes)
-        if (shape.entity == c) return std::ranges::binary_search(shape.overlapping_fields, field);
-      return false;
+    potentially_overlapping_field = [&shapes, &index](EntityId c, std::uint32_t field) {
+      const ClassShape* s = class_shape(shapes, index, c);
+      return s && std::ranges::binary_search(s->overlapping_fields, field);
     };
   }
   ConstId string_address(ConstId c) { return universe().consts->address_of(c); }
@@ -1188,9 +1197,10 @@ class UnitFacts : public irgen::TypeFacts {
 static_assert(irgen::Facts<UnitFacts>);
 
 engine::query_task<Generated> FunctionGen::run(engine::Ctx& cx, FnKey k) {
-  auto [src, unit, shapes] =
-      co_await cx.par_fetch(engine::q<FunctionSourceQ>{k}, engine::q<UnitFunctionFactsQ>{k.tu}, engine::q<UnitShapes>{k.tu});
-  UnitFacts facts(src, unit, shapes, unit_target(cx, k.tu));
+  auto [src, unit, shapes, shape_index] =
+      co_await cx.par_fetch(engine::q<FunctionSourceQ>{k}, engine::q<UnitFunctionFactsQ>{k.tu}, engine::q<UnitShapes>{k.tu},
+                            engine::q<UnitShapeIndex>{k.tu});
+  UnitFacts facts(src, unit, shapes, shape_index, unit_target(cx, k.tu));
   const FunctionDef& d = src.def;
   irgen::FunctionInput input{d.entity, d.decl, d.body, d.item, d.body_offset};
   input.this_type = d.this_type;
@@ -1511,6 +1521,7 @@ void trace_describe(std::string& out, const SymbolKey& k) {  // for traces (#245
 }
 struct SymbolAccessQ {
   using Key = SymbolKey;
+  static engine::SourceSpan trace_span(const engine::Db& db, const Key& k) { return tu_span(db, k.tu); }
   using Value = SymbolAccess;
   static engine::query_task<Value> run(engine::Ctx& cx, SymbolKey k) {
     const SymbolAddresses& symbols = co_await cx.fetch<TuSymbolAddresses>(k.tu);
