@@ -455,6 +455,11 @@ with tempfile.TemporaryDirectory() as directory:
             template<void (*)() noexcept> struct TagFor {};
             using Audit = TagFor<&key>;
         """ + grade + effect_roles),
+        write("external_object_effect_identity.cpp", effect_header + """\
+            inline int key = 1;
+            template<int*> struct TagFor {};
+            using Audit = TagFor<&key>;
+        """ + grade + effect_roles),
     ]
     unstable_providers = [
         write("local_tag_provider.cpp", effect_header + local_tag + grade + effect_roles),
@@ -466,6 +471,11 @@ with tempfile.TemporaryDirectory() as directory:
         write("static_function_tag_provider.cpp", effect_header + """\
             static void key() noexcept {}
             template<void (*)() noexcept> struct TagFor {};
+            using Audit = TagFor<&key>;
+        """ + grade + effect_roles),
+        write("static_object_tag_provider.cpp", effect_header + """\
+            static int key = 1;
+            template<int*> struct TagFor {};
             using Audit = TagFor<&key>;
         """ + grade + effect_roles),
     ]
