@@ -149,16 +149,24 @@ with tempfile.TemporaryDirectory() as directory:
             error = "exceeds its usage grade of 1"
             assert invoke(args, error, env) == syntax(rules, caller, error=error)
 
-            counted = root / "counted_loop.cpp"
+            initial_limit = "struct LoopConfig { static constexpr unsigned limit = 2u; };\n"
+            header = write("loop_config.hpp", initial_limit)
+            counted = write("counted_config.cpp", '#include "loop_config.hpp"\n' +
+                (root / "counted_loop.cpp").read_text().replace("i < 2u", "i < LoopConfig::limit"))
             counted_args = [*base, "--daemon=require", "-fsyntax-only", counted]
             invoke(counted_args, env=env)
-            stamp = counted.stat()
-            write(counted.name, counted.read_text().replace("i < 2u", "i < 3u"))
-            os.utime(counted, ns=(stamp.st_atime_ns, stamp.st_mtime_ns))
-            updated = counted.stat()
+            stamp = header.stat()
+            write(header.name, initial_limit.replace("2u", "3u"))
+            os.utime(header, ns=(stamp.st_atime_ns, stamp.st_mtime_ns))
+            updated = header.stat()
             assert (updated.st_size, updated.st_mtime_ns) == (stamp.st_size, stamp.st_mtime_ns)
             error = "exceeds its usage grade of 2"
             assert invoke(counted_args, error, env) == syntax(counted, error=error)
+            write(header.name, initial_limit)
+            os.utime(header, ns=(stamp.st_atime_ns, stamp.st_mtime_ns))
+            invoke(counted_args, env=env)
+            write(header.name, initial_limit.replace("static constexpr", "inline static"))
+            syntax(counted, error="unbounded usage")
         finally:
             subprocess.run([compiler, "ctl", "shutdown"], cwd=root, env=env, capture_output=True, timeout=10)
 
@@ -235,13 +243,19 @@ with tempfile.TemporaryDirectory() as directory:
         mediated = write("mediated.cpp", """\
             #include "grades.hpp"
             #include <ycxx/effects/runtime.hpp>
-            using Scope = fx::budget<Send, SiteConfig::slots[1]>;
+            struct RequestedLimit {
+              int requested;
+              int capped = requested < 4 ? requested : 4;
+            };
+            struct NativeConfig { static constexpr int uses = RequestedLimit{2}.capped; };
+            using Scope = fx::budget<Send, NativeConfig::uses>;
+            using Bound = fx::set<fx::at_most<Send, NativeConfig::uses>>;
             [[=fx::trusted_contract<One>{}]] int transmit(Scope& scope, int value) noexcept {
               scope.spend();
               return value;
             }
-            [[=fx::contract<Two>{}]] int dispatch(Scope& scope) noexcept {
-              for (int i = 2; i > 0; --i) transmit(scope, i);
+            [[=fx::contract<Bound>{}]] int dispatch(Scope& scope) noexcept {
+              for (int i = NativeConfig::uses; i > 0; --i) transmit(scope, i);
               return 2;
             }
             int main(int argc, char**) {
@@ -260,7 +274,7 @@ with tempfile.TemporaryDirectory() as directory:
         unguarded = "-DYCXX_POLICIES_RUNTIME_CHECKS=0"
         invoke([*native, unguarded, "-o", program, mediated])
         subprocess.run([program, "exhausted"], check=True, timeout=10)
-        too_many = write("mediated_overuse.cpp", mediated.read_text().replace("int i = 2;", "int i = 3;"))
+        too_many = write("mediated_overuse.cpp", mediated.read_text().replace("i = NativeConfig::uses;", "i = 3;"))
         invoke([*native, unguarded, "-fsyntax-only", too_many], "exceeds its usage grade of 2")
         assignment = write("budget_assignment.cpp", """\
             #include "grades.hpp"

@@ -215,10 +215,10 @@ budget counts uses of an effect. The capability still supplies authority over th
 YCXX uses declared callee costs. Sequential operations add their upper bounds, and
 alternative branches take the maximum after the condition. A `for` with an `int` or `unsigned`
 counter can count up to a strict upper limit or down to a strict lower limit. YCXX recognizes
-literal endpoints of the counter's type and requires the body to use the counter only by value.
-YCXX multiplies repeating costs by the maximum iteration count, including paths that break or
-return after earlier iterations. For other loops, a path
-that reaches another iteration with positive cost is unbounded. Costs on a path that breaks or
+literal and constexpr static data member endpoints of the counter's type and requires the body to
+use the counter only by value. YCXX multiplies repeating costs by the maximum iteration count,
+including paths that break or return after earlier iterations. For other loops, a path that
+reaches another iteration with positive cost is unbounded. Costs on a path that breaks or
 returns are counted once when every path to another iteration has zero cost. The initializer in a
 `for` runs once, and the increment runs only after ordinary completion of the body or `continue`.
 An explicit `while (false)` condition ends a `do` after one iteration. An unbounded callee cannot satisfy a
