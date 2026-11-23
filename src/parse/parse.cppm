@@ -367,8 +367,8 @@ public:
   const Result<ast::ItemSema>& item_sema(u32 item);
   std::optional<ast::DeclSema> decl_sema(DeclId d);
   ast::DeclSema completed_declaration(ast::DeclSema decl) const {
-    if (auto found = constructor_exception_types_.find(decl.entity);
-        found != constructor_exception_types_.end() && found->second)
+    if (auto found = special_member_exception_types_.find(decl.entity);
+        found != special_member_exception_types_.end() && found->second)
       decl.type = *found->second;
     return decl;
   }
@@ -387,8 +387,7 @@ public:
     if (d.entity == EntityId::none || !(d.flags & sema::decl_flag::member) ||
         it.parent == items::none || items_->items[it.parent].kind != ItemKind::class_def || !defaulted_body(item))
       return false;
-    return (d.flags & sema::decl_flag::constructor) ||
-           (d.is_virtual && (d.flags & sema::decl_flag::destructor)) ||
+    return (d.flags & (sema::decl_flag::constructor | sema::decl_flag::destructor)) ||
            (d.kind == ast::DeclKind::function && w_->ins.names.spelling(w_->entities.rec(d.entity).name) == "operator=");
   }
   // `class_def(C)` (ast.md §3.6) of the class item `item`: the records of its members, each its
@@ -449,6 +448,12 @@ public:
   // A function body inside the class is a complete-class context ([class.mem.general]); past
   // the closing brace of the class an item defines (`own`), that class is complete too.
   bool is_complete(EntityId c, u32 item, bool body = false, bool own = false) {
+    // A closure is complete once its class record is published. It has no source declaration
+    // to look up, and the variable owning a namespace lambda is still being deduced here.
+    if (const auto* entity = w_->entities.find(c);
+        entity && entity->kind == sema::EntityKind::class_ && !entity->unnamed_type_ordinal &&
+        w_->ins.names.spelling(entity->name).empty())
+      return classes_.is_defined(c);
     ensure_declared(c, item);  // its definition, if an earlier item has it
     EntityId templ = w_->entities.rec(c).templ;
     if (templ != EntityId::none) specializations_before(item);
@@ -456,8 +461,7 @@ public:
     // A class template specialization is instantiated where it must be complete ([temp.inst]/2),
     // after its template's definition, unless it is explicitly specialized ([temp.expl.spec]).
     if (it == class_items_.end()) {
-      // Built-in classes are complete from the start. A closure type is complete once its lambda's
-      // body ends, where its record is published.
+      // Built-in classes are complete from the start.
       if (templ == EntityId::none && classes_.is_defined(c)) return true;
       if (templ == EntityId::none || explicitly_specialized(c, item)) return false;
       const sema::ClassRec* r = instantiate_class(c, item);
@@ -1736,14 +1740,42 @@ private:
   struct DestructorDeclaration {
     u32 at;
     std::optional<bool> nonthrowing;  // a written exception specification, if present
+    bool defaulted;
   };
   std::map<EntityId, DestructorDeclaration> destructor_declarations_;
   std::map<EntityId, std::vector<std::optional<std::pair<u32, u32>>>> member_default_tokens_;
   std::map<EntityId, EntityId> overridden_virtuals_;  // by overriding member's entity
-  void bind_member_defaults(EntityId cls, sema::ClassRec& rec, Result<ast::ClassDef>& out);
-  std::map<EntityId, std::pair<u32, u32>> constructor_exception_tokens_;
-  std::map<EntityId, std::optional<QualType>> constructor_exception_types_;
-  void bind_constructor_exceptions(EntityId cls, const sema::ClassRec& rec, Result<ast::ClassDef>& out);
+  enum class ReplayState { pending, active, finished };
+  struct PendingMemberDefault {
+    NodeId* slot;  // the published default remains a replay handle until completion finishes
+    std::size_t parameter;
+    std::pair<u32, u32> tokens;
+    ReplayState state = ReplayState::pending;
+    NodeId result = NodeId::none;
+  };
+  // During completion of a class with a parenthesized defaulted destructor specification, a
+  // member default can need the specification, and the specification can need an omitted default.
+  struct ClassCompletion {
+    EntityId cls;
+    sema::ClassRec& record;
+    Result<ast::ClassDef>& out;
+    ClassCompletion* outer;
+    std::map<std::pair<EntityId, u32>, PendingMemberDefault> defaults{};
+    ReplayState destructor = ReplayState::pending;
+  };
+  ClassCompletion* class_completion_ = nullptr;
+  ClassCompletion* class_completion(EntityId cls) const;
+  void bind_destructor_and_defaults(EntityId cls, sema::ClassRec& rec, Result<ast::ClassDef>& out);
+  std::optional<bool> resolve_destructor_exception(ClassCompletion& completion, sema::Sema* caller, u32 at);
+  NodeId resolve_member_default(ClassCompletion& completion, EntityId function, PendingMemberDefault& pending,
+                                sema::Sema* caller, u32 at);
+  void bind_member_defaults(EntityId cls, sema::ClassRec& rec, Result<ast::ClassDef>& out,
+                            ClassCompletion* completion = nullptr);
+  NodeId bind_member_default(EntityId cls, EntityId function, std::size_t parameter, std::pair<u32, u32> tokens,
+                            Result<ast::ClassDef>& out);
+  std::map<EntityId, std::pair<u32, u32>> special_member_exception_tokens_;
+  std::map<EntityId, std::optional<QualType>> special_member_exception_types_;
+  void bind_special_member_exception(EntityId cls, sema::ClassRec& rec, Result<ast::ClassDef>& out, EntityId entity);
   struct MemberException {
     u32 item;
     std::optional<std::pair<u32, u32>> condition_tokens;
@@ -1937,7 +1969,7 @@ public:
     functions.push_back(f);
   }
   interp::Callee function_ir(EntityId f) override {
-    if (constructor_exception && p_->world().entities.rec(f).scope == completing_class)
+    if (special_member_exception && p_->world().entities.rec(f).scope == completing_class)
       return {.is_constexpr = p_->is_constexpr(f, point())};
     return p_->function_ir(f, point());
   }
@@ -1955,7 +1987,8 @@ public:
   bool may_have_virtual_layouts() override { return p_->may_have_virtual_layouts(); }
   std::optional<NodeId> replay_default_member(sema::Sema& caller, EntityId field, EntityId required_base) override;
   std::optional<NodeId> replay_function_default(sema::Sema& caller, const ast::DefaultArg& value,
-                                                EntityId function, QualType parameter) override;
+                                                EntityId function, QualType parameter, u32 at) override;
+  std::optional<bool> replay_destructor_exception(sema::Sema& caller, EntityId cls, u32 at) override;
   std::optional<QualType> replay_member_exception(sema::Sema& caller, const ast::DeclSema& decl,
                                                  EntityId function, QualType type) override;
   bool deferred_exception(EntityId f) override {
@@ -2065,7 +2098,9 @@ public:
   bool own_class_complete = false;
   std::optional<u32> declaration_lookup_end;
   EntityId completing_class = EntityId::none;
-  bool constructor_exception = false;
+  bool special_member_exception = false;
+  std::optional<u32> class_default_argument_start;
+  bool failed_class_completion_dependency = false;
   // The original tokens when checking or replaying a default member initializer.
   std::optional<Program::Dmi> initializer_source;
   bool checking_default_member = false;  // the declaration's semantic check
@@ -2475,9 +2510,30 @@ std::optional<QualType> AtItem::replay_member_exception(sema::Sema& caller, cons
   return resolved;
 }
 
+std::optional<bool> AtItem::replay_destructor_exception(sema::Sema& caller, EntityId cls, u32 at) {
+  auto* completion = p_->class_completion(cls);
+  auto result = completion ? p_->resolve_destructor_exception(*completion, &caller, at) : std::nullopt;
+  failed_class_completion_dependency |= !result;
+  return result;
+}
+
 std::optional<NodeId> AtItem::replay_function_default(sema::Sema& caller, const ast::DefaultArg& value,
-                                                       EntityId function, QualType parameter) {
+                                                       EntityId function, QualType parameter, u32 at) {
   const auto specialization = p_->world().entities.rec(function);
+  if (auto* completion = p_->class_completion(specialization.scope)) {
+    const u32 begin = p_->items().items[p_->index(value.source)].begin + value.source_begin;
+    if (auto pending = completion->defaults.find({function, begin}); pending != completion->defaults.end()) {
+      if (completing_class == completion->cls && class_default_argument_start && begin >= *class_default_argument_start) {
+        caller.diag(at, Diag::default_arg_not_yet_defined);
+        failed_class_completion_dependency = true;
+        return NodeId::none;
+      }
+      const NodeId result = p_->resolve_member_default(*completion, function, pending->second, &caller, at);
+      if (result != NodeId::none) return caller.builder().adopt(result);
+      failed_class_completion_dependency = true;
+      return NodeId::none;
+    }
+  }
   if (specialization.templ == EntityId::none || !p_->is_namespace(specialization.scope) ||
       !caller.types().is_scalar(parameter)) return std::nullopt;
   const u32 item = p_->index(value.source);
@@ -2578,8 +2634,11 @@ public:
     return at_.replay_default_member(caller, field, required_base);
   }
   std::optional<NodeId> replay_function_default(sema::Sema& caller, const ast::DefaultArg& value,
-                                                EntityId function, QualType parameter) override {
-    return at_.replay_function_default(caller, value, function, parameter);
+                                                EntityId function, QualType parameter, u32 at) override {
+    return at_.replay_function_default(caller, value, function, parameter, at);
+  }
+  std::optional<bool> replay_destructor_exception(sema::Sema& caller, EntityId cls, u32 at) override {
+    return at_.replay_destructor_exception(caller, cls, at);
   }
   std::optional<QualType> replay_member_exception(sema::Sema& caller, const ast::DeclSema& decl,
                                                  EntityId function, QualType type) override {
@@ -5342,6 +5401,10 @@ private:
     for (u32 j = 0; j < next; ++j) ps_.bump();
     bool ctor = !ps_.is(Tk::tilde);
     u32 name_at = ps_.pos();
+    if (!ctor && p_->defaulted_body(k_)) {
+      s_.diag(name_at, Diag::defaulted_destructor_out_of_class);
+      return bad();
+    }
     if (!ctor) ps_.bump();
     ps_.bump();
     EntityId owner = s_.world().entities.rec(c).scope;
@@ -5370,9 +5433,7 @@ private:
     const sema::MemberDeclRec* m = nullptr;
     if (cr)
       for (const sema::MemberDeclRec& r : cr->members)
-        if ((ctor ? r.is_ctor : r.is_dtor) &&
-            (ctor ? same_function_parameters(r.type, type)
-                  : s_.types().canonical(r.type) == s_.types().canonical(type) || r.is_virtual) &&
+        if ((ctor ? r.is_ctor : r.is_dtor) && (r.is_virtual || same_function_parameters(r.type, type)) &&
             same_template(r, member_template))
           m = &r;
     if (!m) {
@@ -5386,9 +5447,9 @@ private:
       s_.diag(name_at, Diag::constexpr_redeclared, m->name);
       return bad();
     }
-    const auto resolved = p_->constructor_exception_types_.find(m->entity);
-    if (ctor && ((resolved != p_->constructor_exception_types_.end() && !resolved->second) ||
-                 p_->constructor_exception_tokens_.contains(m->entity)))
+    const auto resolved = p_->special_member_exception_types_.find(m->entity);
+    if (ctor && ((resolved != p_->special_member_exception_types_.end() && !resolved->second) ||
+                 p_->special_member_exception_tokens_.contains(m->entity)))
       return bad();  // class completion reports an invalid specification
     const QualType declared_type = mem->type;
     if (ctor && s_.types().rec(declared_type).fn_noexcept != nonthrowing) {
@@ -5761,6 +5822,7 @@ private:
     const bool defaulted = p_->defaulted_body(k_);
     const bool ordinary_defaulting = defaulted && !is_virtual;
     const bool defaulted_default = ordinary_defaulting && ctor && fs.params.empty() && !fs.variadic;
+    const bool defaulted_dtor = ordinary_defaulting && !ctor;
     // BOOTSTRAP: -Wmaybe-uninitialized: a pair and a flag, not std::optional. At -O3 GCC 16.2
     // reports the optional's payload as possibly uninitialized at `*exception_tokens`, read
     // under `if (exception_tokens)` (#748). Without the bug:
@@ -5768,7 +5830,7 @@ private:
     std::pair<u32, u32> exception_tokens{};
     bool has_exception_tokens = false;
     bool written_noexcept = false;
-    if (ctor && !member_template_ && s_.template_scopes.empty() && !inst_ &&
+    if ((ctor || defaulted_dtor) && !member_template_ && s_.template_scopes.empty() && !inst_ &&
         ps_.is(Tk::kw_noexcept) && ps_.kind(1) == Tk::l_paren) {
       const u32 begin = ps_.index();
       ps_.bump();
@@ -5797,10 +5859,13 @@ private:
         s_.diag(name_at, Diag::not_supported, Tk::tilde);
         return bad();
       }
-      ps_.exception_specifier(fs, ok);
-      if (fs.has_noexcept) {
-        destructor_noexcept = ps_.noexcept_value(fs.noexcept_condition, ok);
+      if (!has_exception_tokens) {
+        ps_.exception_specifier(fs, ok);
         if (!ok) return bad();
+        if (fs.has_noexcept) {
+          destructor_noexcept = ps_.noexcept_value(fs.noexcept_condition, ok);
+          if (!ok) return bad();
+        }
       }
       ps_.skip_attributes();
       if (!member_virt_specifiers(overrides)) return bad();
@@ -5809,10 +5874,10 @@ private:
         return bad();
       }
       if (is_virtual && defaulted) flags |= sema::decl_flag::constexpr_ | sema::decl_flag::inline_;
-      written_noexcept = is_virtual && destructor_noexcept.value_or(false);
+      written_noexcept = (is_virtual || defaulted_dtor) && destructor_noexcept.value_or(false);
     }
     if (ordinary_defaulting) {
-      // [dcl.fct.def.default]: a first in-class defaulted copy or zero-parameter constructor.
+      // [dcl.fct.def.default]: a first in-class defaulted special member.
       if (!finish_constructor_declarator()) return bad();
       auto copy_reference = [&] {
         if (fs.params.size() != 1 || fs.variadic) return false;
@@ -5824,9 +5889,12 @@ private:
                sema::Types::unqualified(types.canonical(ref.inner)) == types.canonical(c.type);
       };
       const auto& owner = p_->world().entities.rec(c.entity);
-      if (!ctor || member_template_ || !s_.template_scopes.empty() || inst_ || !p_->is_namespace(owner.scope) ||
-          (defaulted_default ? owner.templ != EntityId::none : !copy_reference())) {
-        s_.diag(name_at, defaulted_default ? Diag::defaulted_default_constructor : Diag::defaulted_copy_declaration);
+      const bool supported_scope = !member_template_ && s_.template_scopes.empty() && !inst_ && p_->is_namespace(owner.scope);
+      const bool supported = defaulted_dtor ? owner.templ == EntityId::none && !p_->items().items[it_->parent].specialization
+                             : defaulted_default ? owner.templ == EntityId::none : copy_reference();
+      if (!supported_scope || !supported) {
+        s_.diag(name_at, defaulted_dtor ? Diag::defaulted_destructor
+                      : defaulted_default ? Diag::defaulted_default_constructor : Diag::defaulted_copy_declaration);
         return bad();
       }
       // A first-declaration defaulted special member is inline and, when constexpr-suitable,
@@ -5838,9 +5906,9 @@ private:
     if (ctor && !member_virt_specifiers(false)) return bad();
     std::vector<QualType> ps;
     for (const parse::Param& p : fs.params) ps.push_back(p.type);
-    // [except.spec]: completing the supported tag class proves there are no potentially throwing
-    // subobject initializations. The written specification stays separate from that inference.
-    const bool nonthrowing = fs.has_noexcept ? written_noexcept : defaulted_default;
+    // [except.spec]: the supported defaulted default constructor and destructor have no
+    // potentially throwing subobject operations. A written specification takes precedence.
+    const bool nonthrowing = fs.has_noexcept ? written_noexcept : defaulted_default || defaulted_dtor;
     QualType type = types.function(s_.builtin(sema::Builtin::void_), ps, fs.variadic, LangLinkage::cxx, fs.cv,
                                    ast::RefQual::none, nonthrowing);
     flags |= sema::decl_flag::member | (ctor ? sema::decl_flag::constructor : sema::decl_flag::destructor);
@@ -5882,7 +5950,7 @@ private:
                                               LangLinkage::cxx, ast::Linkage::external, {}, c.entity});
     }
     // One declaration of each ([class.mem.general]/5). An exception specification cannot
-    // distinguish overloads of a constructor ([over.load]).
+    // distinguish otherwise identical special members ([over.load]).
     for (u32 m : p_->items().items[it_->parent].members) {
       if (m == k_) break;
       for (const ast::DeclSema& o : p_->world().ins.seqs.elements(earlier(m).decls)) {
@@ -5890,16 +5958,15 @@ private:
             ctor && !member_template_ && (o.flags & sema::decl_flag::constructor) &&
             !(o.flags & sema::decl_flag::template_) &&
             same_function_parameters(o.type, sem.type);
-        const bool redeclared_virtual_destructor = !ctor && (sem.is_virtual || o.is_virtual) &&
-                                                  (o.flags & sema::decl_flag::destructor);
-        if (o.entity == sem.entity || redeclared_constructor || redeclared_virtual_destructor) {
+        const bool redeclared_destructor = !ctor && (o.flags & sema::decl_flag::destructor);
+        if (o.entity == sem.entity || redeclared_constructor || redeclared_destructor) {
           s_.diag(name_at, Diag::redeclared_member, name);
           return bad();
         }
       }
     }
-    if (has_exception_tokens) p_->constructor_exception_tokens_.emplace(sem.entity, exception_tokens);
-    if (!ctor) p_->destructor_declarations_.emplace(sem.entity, Program::DestructorDeclaration{name_at, destructor_noexcept});
+    if (has_exception_tokens) p_->special_member_exception_tokens_.emplace(sem.entity, exception_tokens);
+    if (!ctor) p_->destructor_declarations_.emplace(sem.entity, Program::DestructorDeclaration{name_at, destructor_noexcept, defaulted});
     remember_member_defaults(sem.entity, fs.params);
     p_->declared(sem, k_);
     declarators_.push_back(s_.node(ast::Declarator{u32(decls_.size()), {}, ConstId::none}, name_at, ps_.pos()));
@@ -6324,7 +6391,8 @@ private:
       if (spec.is_inline || spec.is_constexpr) {
         // An inline static member defines an object ([class.static.data]).
         if (!s_.require_complete(d.type, d.name_at) || !s_.require_concrete_object(d.type, d.name_at) ||
-            !s_.require_supported_virtual_layout(d.type, d.name_at)) return false;
+            !s_.require_supported_virtual_layout(d.type, d.name_at) ||
+            !s_.check_destructor_access(d.type, d.name_at)) return false;
         flags |= sema::decl_flag::definition;
       }
       sem.entity = s_.world().entities.entity(
@@ -7232,6 +7300,7 @@ private:
     } else if (!fn && sema::Types::is_const(d.type) && !effective_extern) {
       s_.diag(d.name_at, Diag::const_uninitialized, d.name);
     }
+    if (!fn && definition && !pattern) s_.check_destructor_access(d.type, d.name_at);
     if (value != ConstId::none && (requires_constinit || s_.folded_immediate_result != EntityId::none))
       if (auto entity = s_.immediate_result_entity(value))
         s_.diag(init.begin, Diag::immediate_address, s_.world().entities.rec(*entity).name);
@@ -8309,8 +8378,12 @@ const Result<ast::ClassDef>& Program::class_def(u32 item) {
     rec.defined = true;
     // Complete-class checks see the full member set before any function bodies are read.
     classes_.publish(*cls, std::move(rec), [&](sema::ClassRec& fresh) {
-      bind_member_defaults(*cls, fresh, out);
-      bind_constructor_exceptions(*cls, fresh, out);
+      if (special_member_exception_tokens_.contains(fresh.declared_destructor))
+        bind_destructor_and_defaults(*cls, fresh, out);
+      else
+        bind_member_defaults(*cls, fresh, out);
+      for (const auto& member : fresh.members)
+        if (member.is_ctor) bind_special_member_exception(*cls, fresh, out, member.entity);
       check_member_exception_patterns(*cls, fresh, out);
       if (member_declarations_valid && implicit_move) prepare_move_constructor(item, *cls, fresh);
       if (member_declarations_valid) check_default_member_initializers(fresh, out);
@@ -8335,46 +8408,102 @@ const Result<ast::ClassDef>& Program::class_def(u32 item) {
   return *class_cells_[item];
 }
 
-void Program::bind_constructor_exceptions(EntityId cls, const sema::ClassRec& rec, Result<ast::ClassDef>& out) {
-  ast::Builder b(w_->ins, &arena_);
-  for (const sema::MemberDeclRec& member : rec.members) {
-    auto tokens = constructor_exception_tokens_.extract(member.entity);
-    if (tokens.empty()) continue;
-    auto slot = constructor_exception_types_.try_emplace(member.entity, std::nullopt).first;
-    const DeclId decl = member_decls_.at(std::to_underlying(member.entity));
-    const u32 item = index(decl.item);
-    const auto& it = items_->items[item];
-    const auto& cell = item_cells_[item]->value;
-    const auto d = w_->ins.seqs.at(cell.decls, ast::number_of(decl.ord));
-    AtItem q(*this, item, false);
-    q.completing_class = cls;
-    q.constructor_exception = true;
-    sema::Sema s(*w_, b, q, out.diags, decl.item, 0);
-    s.current_class = cls;
-    s.this_type = w_->types.pointer(w_->types.class_type(cls));
-    s.push_scope();
-    for (const auto& param : w_->ins.seqs.elements(d.params))
-      if (param.name != s.no_name())
-        s.declare_local(param.name, param.type, sema::local_flag::parameter, 0, false);
-    const auto [begin, end] = tokens.mapped();
-    Parser p(*r_, it.begin, end, s);
-    p.set_questions(q);
-    p.seek(begin);
-    Parser::Suffix spec;
-    bool ok = true;
-    bool nonthrowing = false;
-    try {
-      p.exception_specifier(spec, ok);
-      nonthrowing = ok && p.noexcept_value(spec.noexcept_condition, ok);
-    } catch (const TooDeep&) {
-      continue;
+Program::ClassCompletion* Program::class_completion(EntityId cls) const {
+  for (auto* completion = class_completion_; completion; completion = completion->outer)
+    if (completion->cls == cls) return completion;
+  return nullptr;
+}
+
+void Program::bind_destructor_and_defaults(EntityId cls, sema::ClassRec& rec, Result<ast::ClassDef>& out) {
+  ClassCompletion completion{cls, rec, out, class_completion_};
+  struct RestoreCompletion {
+    ClassCompletion*& current;
+    ClassCompletion* outer;
+    ~RestoreCompletion() { current = outer; }
+  } restore{class_completion_, std::exchange(class_completion_, &completion)};
+
+  // Preserve the presence of each written default during overload resolution. A selected call
+  // replays an omitted argument using its declaration's scope. Keep the handles until both the
+  // defaults and the destructor specification are bound, so a cached default still obeys scope.
+  const ast::ExprInfo info{w_->types.builtin(sema::Builtin::dependent), ast::ValueCategory::prvalue,
+                           sema::expr_flag::dependent};
+  const NodeId expression = w_->ins.intern(ast::Dependent{info, {}}, 0);
+  const auto calls = w_->ins.intern_seq(std::span<const u32>{});
+  for (auto& member : rec.members) {
+    auto written = member_default_tokens_.find(member.entity);
+    if (member.is_template || written == member_default_tokens_.end()) continue;
+    const auto decl = member_decls_.at(std::to_underlying(member.entity));
+    const u32 item_begin = items_->items[index(decl.item)].begin;
+    member.defaults.resize(written->second.size(), NodeId::none);
+    for (std::size_t i = 0; i < written->second.size(); ++i) {
+      if (!written->second[i]) continue;
+      const auto [begin, end] = *written->second[i];
+      member.defaults[i] = w_->ins.intern(ast::DefaultArg{info, {expression, 0}, decl.item,
+                                                         begin - item_begin, end - item_begin, calls}, 0);
+      completion.defaults.emplace(std::pair{member.entity, begin}, PendingMemberDefault{&member.defaults[i], i, {begin, end}});
     }
-    if (!ok) continue;
-    const auto signature = w_->types.rec(member.type);
-    slot->second = w_->types.function(signature.inner, signature.params, signature.variadic,
-                                      signature.linkage, signature.fn_cv, signature.fn_ref, nonthrowing);
-    out.demands.insert(out.demands.end(), s.demands.begin(), s.demands.end());
   }
+  bind_member_defaults(cls, rec, out, &completion);
+  resolve_destructor_exception(completion, nullptr, 0);
+  for (auto& [key, pending] : completion.defaults) *pending.slot = pending.result;
+}
+
+std::optional<bool> Program::resolve_destructor_exception(ClassCompletion& completion, sema::Sema* caller, u32 at) {
+  if (completion.destructor == ReplayState::active) {
+    if (caller) caller->diag(at, Diag::recursive_noexcept);
+    completion.destructor = ReplayState::finished;
+    return std::nullopt;
+  }
+  if (completion.destructor == ReplayState::pending) {
+    completion.destructor = ReplayState::active;
+    bind_special_member_exception(completion.cls, completion.record, completion.out, completion.record.declared_destructor);
+    completion.destructor = ReplayState::finished;
+  }
+  return completion.record.destructor_noexcept;
+}
+
+void Program::bind_special_member_exception(EntityId cls, sema::ClassRec& rec, Result<ast::ClassDef>& out, EntityId entity) {
+  auto tokens = special_member_exception_tokens_.extract(entity);
+  if (tokens.empty()) return;
+  ast::Builder b(w_->ins, &arena_);
+  auto slot = special_member_exception_types_.try_emplace(entity, std::nullopt).first;
+  const DeclId decl = member_decls_.at(std::to_underlying(entity));
+  const u32 item = index(decl.item);
+  const auto& it = items_->items[item];
+  const auto& cell = item_cells_[item]->value;
+  const auto d = w_->ins.seqs.at(cell.decls, ast::number_of(decl.ord));
+  AtItem q(*this, item, false);
+  q.completing_class = cls;
+  q.special_member_exception = true;
+  sema::Sema s(*w_, b, q, out.diags, decl.item, 0);
+  s.current_class = cls;
+  const bool destructor = (d.flags & sema::decl_flag::destructor) != 0;
+  if (destructor) s.current_function = entity;
+  s.this_type = w_->types.pointer(w_->types.class_type(cls));
+  s.push_scope();
+  for (const auto& param : w_->ins.seqs.elements(d.params))
+    if (param.name != s.no_name())
+      s.declare_local(param.name, param.type, sema::local_flag::parameter, 0, false);
+  const auto [begin, end] = tokens.mapped();
+  Parser p(*r_, it.begin, end, s);
+  p.set_questions(q);
+  p.seek(begin);
+  Parser::Suffix spec;
+  bool ok = true;
+  bool nonthrowing = false;
+  const auto before = s.diag_count();
+  try {
+    p.exception_specifier(spec, ok);
+    nonthrowing = ok && p.noexcept_value(spec.noexcept_condition, ok);
+  } catch (const TooDeep&) {
+    return;
+  }
+  if (!ok || q.failed_class_completion_dependency || (destructor && s.has_error_since(before))) return;
+  const auto signature = w_->types.rec(d.type);
+  slot->second = w_->types.function(signature.inner, signature.params, signature.variadic,
+                                    signature.linkage, signature.fn_cv, signature.fn_ref, nonthrowing);
+  if (destructor) rec.destructor_noexcept = nonthrowing;
+  out.demands.insert(out.demands.end(), s.demands.begin(), s.demands.end());
 }
 
 // An exception specification is a complete-class context ([class.mem.general]). Check the written
@@ -8495,50 +8624,77 @@ void Program::check_default_member_initializers(const sema::ClassRec& rec, Resul
   }
 }
 
-void Program::bind_member_defaults(EntityId cls, sema::ClassRec& rec, Result<ast::ClassDef>& out) {
-  ast::Builder b(w_->ins, &arena_);
+NodeId Program::resolve_member_default(ClassCompletion& completion, EntityId function, PendingMemberDefault& pending,
+                                      sema::Sema* caller, u32 at) {
+  if (pending.state == ReplayState::active) {
+    if (caller) caller->diag(at, Diag::recursive_noexcept);
+    pending.state = ReplayState::finished;
+    return NodeId::none;
+  }
+  if (pending.state == ReplayState::pending) {
+    pending.state = ReplayState::active;
+    const NodeId result = bind_member_default(completion.cls, function, pending.parameter, pending.tokens, completion.out);
+    if (pending.state == ReplayState::active) pending.result = result;
+    pending.state = ReplayState::finished;
+  }
+  return pending.result;
+}
+
+void Program::bind_member_defaults(EntityId cls, sema::ClassRec& rec, Result<ast::ClassDef>& out,
+                                  ClassCompletion* completion) {
   for (sema::MemberDeclRec& member : rec.members) {
     auto tokens = member_default_tokens_.extract(member.entity);
     if (tokens.empty()) continue;
-    DeclId decl = member_decls_.at(std::to_underlying(member.entity));
-    u32 item = index(decl.item);
-    u32 ordinal = ast::number_of(decl.ord);
-    const auto& it = items_->items[item];
-    const ast::ItemSema& cell = item_cells_[item]->value;
-    auto params = w_->ins.seqs.elements(w_->ins.seqs.at(cell.decls, ordinal).params);
-    AtItem q(*this, item, false);
-    q.completing_class = cls;
-    member.defaults.resize(params.size(), NodeId::none);
-    for (std::size_t i = 0; i < params.size(); ++i) {
-      if (!tokens.mapped()[i]) continue;
-      auto [begin, end] = *tokens.mapped()[i];
-      sema::Sema s(*w_, b, q, out.diags, decl.item, 0);
-      s.current_class = cls;
-      s.push_scope();
-      for (std::size_t j = 0; j <= i; ++j)
-        s.declare_local(params[j].name, params[j].type,
-                        sema::local_flag::parameter | sema::local_flag::default_argument_parameter, 0, false);
-      Parser p(*r_, it.begin, end, s);
-      p.set_questions(q);
-      p.seek(begin);
-      auto previous_diags = out.diags.size();
-      NodeId arg;
-      try {
-        arg = p.default_argument(params[i].type);
-      } catch (const TooDeep&) {
-        continue;  // The parser already diagnosed excessive nesting.
-      }
-      if (arg == NodeId::none || !p.at_end()) {
-        if (out.diags.size() == previous_diags) {
-          if (p.at_end()) s.diag(p.pos(), Diag::expected_expression);
-          else s.diag(p.pos(), Diag::unexpected_token, p.kind());
+    member.defaults.resize(tokens.mapped().size(), NodeId::none);
+    for (std::size_t i = 0; i < tokens.mapped().size(); ++i) {
+      if (const auto& written = tokens.mapped()[i]) {
+        if (completion && !member.is_template) {
+          auto& pending = completion->defaults.at({member.entity, written->first});
+          resolve_member_default(*completion, member.entity, pending, nullptr, 0);
+        } else {
+          member.defaults[i] = bind_member_default(cls, member.entity, i, *written, out);
         }
-        continue;
       }
-      member.defaults[i] = b.commit(ast::Child{arg, 0}).id;
-      out.demands.insert(out.demands.end(), s.demands.begin(), s.demands.end());
     }
   }
+}
+
+NodeId Program::bind_member_default(EntityId cls, EntityId function, std::size_t parameter, std::pair<u32, u32> tokens,
+                                  Result<ast::ClassDef>& out) {
+  const auto decl = member_decls_.at(std::to_underlying(function));
+  const u32 item = index(decl.item);
+  const auto& it = items_->items[item];
+  const auto& cell = item_cells_[item]->value;
+  const auto params = w_->ins.seqs.elements(w_->ins.seqs.at(cell.decls, ast::number_of(decl.ord)).params);
+  const auto [begin, end] = tokens;
+  AtItem q(*this, item, false);
+  q.completing_class = cls;
+  q.class_default_argument_start = begin;
+  ast::Builder b(w_->ins, &arena_);
+  sema::Sema s(*w_, b, q, out.diags, decl.item, 0);
+  s.current_class = cls;
+  s.push_scope();
+  for (const auto& param : std::span(params).first(parameter + 1))
+    s.declare_local(param.name, param.type, sema::local_flag::parameter | sema::local_flag::default_argument_parameter, 0, false);
+  Parser p(*r_, it.begin, end, s);
+  p.set_questions(q);
+  p.seek(begin);
+  const auto before = s.diag_count();
+  NodeId arg;
+  try {
+    arg = p.default_argument(params[parameter].type);
+  } catch (const TooDeep&) {
+    return NodeId::none;
+  }
+  if (q.failed_class_completion_dependency || arg == NodeId::none || !p.at_end()) {
+    if (!q.failed_class_completion_dependency && s.diag_count() == before) {
+      if (p.at_end()) s.diag(p.pos(), Diag::expected_expression);
+      else s.diag(p.pos(), Diag::unexpected_token, p.kind());
+    }
+    return NodeId::none;
+  }
+  out.demands.insert(out.demands.end(), s.demands.begin(), s.demands.end());
+  return b.commit(ast::Child{arg, 0}).id;
 }
 
 // ---------------------------------------------------------------- constraint satisfaction
@@ -8798,8 +8954,10 @@ public:
           if (!s_.deduce_return(nullptr, ps_.pos() > 0 ? ps_.pos() - 1 : 0)) root = {};
       }
       s_.pop_scope();
+      const bool dtor = f->flags & sema::decl_flag::destructor;
+      if (root.ok() && (dtor || (ctor && !inits.delegation)) && !check_subobject_destructors(root.begin)) root = {};
       if (root.ok() && ctor) root = constructor_body(std::move(inits), root, signature.fn_noexcept);
-      if (root.ok() && (f->flags & sema::decl_flag::destructor)) root = destructor_body(s_, s_.current_class, root);
+      if (root.ok() && dtor) root = destructor_body(s_, s_.current_class, root);
     }
     std::vector<ast::LocalRec> locals(s_.locals().begin(), s_.locals().end());
     // A template's definition demands nothing; its instantiations do. What it keeps for them is
@@ -8884,6 +9042,19 @@ public:
   }
 
 private:
+  // [class.base.init], [class.dtor]: these bodies potentially invoke the non-variant subobject
+  // destructors, including those requiring no runtime cleanup.
+  bool check_subobject_destructors(u32 at) {
+    const auto& record = s_.classes().rec(s_.current_class);
+    if (record.union_) return true;  // the constructor checks its selected variant separately
+    return std::ranges::all_of(record.bases, [&](const sema::BaseRec& base) {
+      return s_.check_destructor_access(s_.types().class_type(base.cls), at, Diag::base_unusable_destructor,
+                                        /*base_subobject=*/true);
+    }) && std::ranges::all_of(record.fields, [&](const sema::FieldRec& field) {
+      return s_.check_destructor_access(field.type, at);
+    });
+  }
+
   struct ConstructorInitializers {
     std::map<u32, Ex> subobjects;
     std::optional<Ex> delegation;  // engaged even when a delegating initializer failed
@@ -9399,6 +9570,7 @@ bool Program::special_members(u32 item, EntityId cls, sema::ClassRec& rec,
     if (m.is_virtual) rec.polymorphic = true;
     if (m.is_dtor) {
       user_dtor = &m;
+      rec.declared_destructor = m.entity;
       rec.virtual_destructor |= m.is_virtual;
     }
     if (!m.is_ctor) continue;
@@ -9467,8 +9639,22 @@ bool Program::special_members(u32 item, EntityId cls, sema::ClassRec& rec,
   // [except.spec]: the absence of an explicit destructor specification takes the
   // specification of the destructor that would be implicitly declared.
   const auto declaration = user_dtor ? destructor_declarations_.find(user_dtor->entity) : destructor_declarations_.end();
+  const bool defaulted_destructor = !rec.virtual_destructor && declaration != destructor_declarations_.end() &&
+                                    declaration->second.defaulted;
   std::optional<bool> implicit_noexcept = true;
   rec.destructor_usable = !user_dtor || !user_dtor->is_deleted;
+  // Prove trivial destruction from the completed class before using the no-cleanup path.
+  if (defaulted_destructor && (rec.union_ || rec.polymorphic || !rec.bases.empty() ||
+      std::ranges::any_of(rec.fields, [&](const sema::FieldRec& field) {
+        return types.is_dependent(field.type) || (!types.is_scalar(field.type) && !types.is_reference(field.type));
+      }))) {
+    rec.destructor_usable = false;
+    if (class_diags) {
+      const auto member = member_decl(user_dtor->entity);
+      const engine::Loc at{std::to_underlying(member ? member->item : id(item)), declaration->second.at};
+      class_diags->push_back({at, sema::diag_id(Diag::defaulted_destructor), {}});
+    }
+  }
   for (std::size_t i = 0; i < subobjects.size(); ++i) {
     sema::TypeRec type = types.rec(subobjects[i]);
     while (type.kind == sema::TypeKind::array) type = types.rec(type.inner);
@@ -9488,16 +9674,19 @@ bool Program::special_members(u32 item, EntityId cls, sema::ClassRec& rec,
       rec.destructor_usable = false;
       continue;
     }
-    if (record->destructor == EntityId::none) continue;
-    const auto access = record->access_of(record->destructor);
+    const EntityId destructor = record->destructor_declaration();
+    if (destructor == EntityId::none) continue;
+    const auto access = record->access_of(destructor);
     const bool accessible = access == ast::Access::public_ ||
                             (i < rec.bases.size() && access == ast::Access::protected_) ||
                             std::ranges::contains(record->friends, cls) ||
                             (user_dtor && std::ranges::contains(record->friends, user_dtor->entity));
     rec.destructor_usable &= accessible;
   }
-  rec.destructor_noexcept = declaration != destructor_declarations_.end() && declaration->second.nonthrowing
-                              ? declaration->second.nonthrowing : implicit_noexcept;
+  // [class.mem.general]: the parenthesized specification is evaluated in the complete class.
+  if (!defaulted_destructor || !special_member_exception_tokens_.contains(user_dtor->entity))
+    rec.destructor_noexcept = declaration != destructor_declarations_.end() && declaration->second.nonthrowing
+                                ? declaration->second.nonthrowing : implicit_noexcept;
   if (overrides_destructor && class_diags) {
     const bool unusable = !rec.destructor_usable || !base->destructor_usable;
     const bool unknown = !base->destructor_noexcept || !rec.destructor_noexcept;
@@ -9515,9 +9704,12 @@ bool Program::special_members(u32 item, EntityId cls, sema::ClassRec& rec,
   const bool deletes_implicit_copy = user_move || user_move_assignment;
   const bool implicit_copy = !user_copy && !deletes_implicit_copy;
   defaulted_copy(cls, rec, subobjects, implicit_copy);
-  // [class.dtor]/8: the implicit destructor is not trivial when a base's or member's is not.
-  if (user_dtor) rec.destructor = user_dtor->entity;
-  else if (!rec.union_ && std::ranges::any_of(subobjects, [&](QualType t) { return classes_.destructor_of(t) != EntityId::none; }))
+  // [class.dtor]: the first in-class defaulted destructor is trivial in the supported class.
+  // Its declaration does not require a cleanup. The implicit destructor needs one when a
+  // base or member needs one.
+  if (user_dtor) {
+    if (!defaulted_destructor) rec.destructor = user_dtor->entity;
+  } else if (!rec.union_ && std::ranges::any_of(subobjects, [&](QualType t) { return classes_.destructor_of(t) != EntityId::none; }))
     rec.destructor = synthesize(false);
   // [class.copy.ctor]/10–11: the implicit copy constructor is deleted with a member's, and not
   // trivial when a member's is not.
@@ -9568,7 +9760,7 @@ bool Program::special_members(u32 item, EntityId cls, sema::ClassRec& rec,
     const sema::ClassRec* r = classes_.find(b.cls);
     return r && (!r->fields.empty() || !r->pod);
   });
-  rec.pod = !rec.layout_requires_virtual_support && !rec.user_ctors && !user_dtor &&
+  rec.pod = !rec.layout_requires_virtual_support && !rec.user_ctors && rec.destructor_usable &&
             rec.destructor == EntityId::none &&
             !rec.copy_nontrivial() && !rec.copy_deleted && !user_move && !user_provided_assignment &&
             std::ranges::none_of(rec.fields, &sema::FieldRec::dmi) && one_access &&
