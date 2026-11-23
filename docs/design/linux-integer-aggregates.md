@@ -3,8 +3,8 @@
 The first slice covers fixed-prototype direct calls to ordinary free functions. By-value
 parameters and results can have a complete, nonempty, flat record layout of 1–16 bytes,
 with alignment up to eight. The record must be trivial for calls under DECISIONS §1.6.
-Its non-static data members have naturally aligned, non-overlapping integral scalar
-or ordinary object-pointer layouts. The signature check rejects records with bases,
+Its non-static data members have naturally aligned, non-overlapping integral scalar,
+ordinary object-pointer or object lvalue-reference layouts. The signature check rejects records with bases,
 bit-fields, unions, nested classes or arrays, and fields requiring other ABI classes.
 Member functions, closure call operators, function template specializations and calls
 through a pointer to a fixed-prototype function use the same placement, with `this` as the
@@ -37,8 +37,12 @@ and RDX in eightbyte order.
 Astra checked the object-pointer extension against AMD64 psABI §§3.1.2 and 3.2.3.
 An immediate `TPointer` whose pointee is an object type or cv-qualified `void`
 contributes INTEGER using the target's pointer size and alignment. This includes
-pointers to incomplete classes and arrays. Fields of function-pointer, reference
-and pointer-to-member type remain [#440](https://github.com/yrashk/ycxx/issues/440) work.
+pointers to incomplete classes and arrays. Astra also checked the object lvalue-reference
+extension in [#988](https://github.com/yrashk/ycxx/issues/988). Each such field, including a
+reference capture, contributes INTEGER using the size and alignment of its stored address.
+Copying the parameter's storage preserves the field's binding to the original referent.
+Fields of function-pointer, function-reference, rvalue-reference and pointer-to-member type
+remain [#440](https://github.com/yrashk/ycxx/issues/440) work.
 
 The signature check and lowering take the classification from the same unit-local
 class layout. The direct callee check keeps using the definition's deduced function

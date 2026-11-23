@@ -121,8 +121,8 @@ an entry point. On x86-64 Linux, `-nostdlib` selects the existing executable sta
 described above. [#973](https://github.com/yrashk/ycxx/issues/973)
 
 Fixed-prototype calls (free and member functions, lambdas, function templates and calls
-through pointers) support passing and returning nonempty flat records with integral or
-ordinary object-pointer fields by value. The record can occupy up to
+through pointers) support passing and returning nonempty flat records with integral,
+ordinary object-pointer or object lvalue-reference fields by value. The record can occupy up to
 16 bytes and must be trivial for calls. Larger results and classes that are not trivial for
 calls (with a user-provided copy constructor or destructor) pass through memory, as on macOS. [Linux integer aggregate ABI](docs/design/linux-integer-aggregates.md)
 
@@ -548,6 +548,8 @@ written default member initializer are value-initialized.
   integral or enumeration field. [#895](https://github.com/yrashk/ycxx/issues/895)
   Constant expressions can read integral and enumeration fields of a flat aggregate temporary,
   such as `Limits{42}.quota`. [#900](https://github.com/yrashk/ycxx/issues/900)
+  Class-template static constexpr members can use these reads in their initializers.
+  [#991](https://github.com/yrashk/ycxx/issues/991)
   Namespace-scope `constexpr` pointers to `void` can retain scalar and array element addresses.
   `__builtin_addressof`, used by libycxx's `std::addressof`, bypasses overloaded `operator&`.
   It supports runtime addresses and constant expressions such as a scalar global's address.

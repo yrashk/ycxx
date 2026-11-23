@@ -740,9 +740,9 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
   Binary64 to binary32 rounds under MXCSR, and `fabs` clears the sign bit. `unit.linux_scalar_sse`
   compares exact bits with a host compiler's conversions at `-O0` and `-O2` under all four
   rounding directions. [#643](https://github.com/yrashk/ycxx/issues/643)
-- Fixed-prototype calls support nonempty naturally aligned
-  flat records with integral or ordinary object-pointer fields that are trivial for calls,
-  up to 16 bytes and alignment eight. The AMD64 INTEGER eightbytes follow from the laid-out
+- Fixed-prototype calls support nonempty naturally aligned flat records with integral, ordinary
+  object-pointer or object lvalue-reference fields. A record must be trivial for calls and occupy
+  up to 16 bytes with alignment up to eight. The AMD64 INTEGER eightbytes follow from the laid-out
   fields. If an entire argument cannot
   fit in the remaining registers, it goes by value on the stack and later arguments can use
   the remaining registers. One- and two-eightbyte results use RAX and RDX. The mixed-object
@@ -763,7 +763,7 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
   those layouts as fields, array elements, or bases. A wrapper whose member makes its implicit
   destructor nontrivial uses the indirect result convention even when its copy and move traits
   are unknown. [#661](https://github.com/yrashk/ycxx/issues/661)
-  [Design](docs/design/linux-integer-aggregates.md) · [#440](https://github.com/yrashk/ycxx/issues/440)
+  [Design](docs/design/linux-integer-aggregates.md) · [#440](https://github.com/yrashk/ycxx/issues/440) · [#988](https://github.com/yrashk/ycxx/issues/988)
 - `-c` writes deterministic ELF64 relocatable objects through `src/obj/elf.cppm`. The reader
   accepts the supported x86-64 `ET_REL` subset emitted by ycxx. The native ELF linker consumes
   the same in-memory objects, resolves absolute and PC-relative relocations, and writes a static
@@ -2483,6 +2483,10 @@ first; a dependent base is not searched. Redeclaring a hidden parameter's name i
 - In the template, a static member whose initializer is value-dependent is value-dependent
   ([temp.dep.constexpr]/2.3); one whose initializer is not is a constant there. `static const T k
   = 5;` is checked again in each specialization.
+- A static constexpr member initializer can read fields of a flat aggregate temporary with
+  scalar default member initializers. Concrete specialization replay uses the same ordered field
+  reads as an ordinary required constant initializer ([dcl.init.aggr], [temp.inst], [expr.const]).
+  [#991](https://github.com/yrashk/ycxx/issues/991)
 - `X<args>::m` with a dependent qualifier names a value, not a type, in a statement, a condition, a
   cast's parentheses or a template argument, unless `typename` says otherwise
   ([temp.res.general]/4).

@@ -6288,6 +6288,7 @@ private:
       const sema::Sema::StaticInitializerScope initializer(s_,
           !s_.templated() && owner.templ == EntityId::none ? c.entity : EntityId::none, d.name);
       if (spec.is_constexpr) d.type = types.add_cv(d.type, sema::Cv::const_);
+      const sema::Sema::StaticConstexprInitializerScope constexpr_initializer(s_, spec.is_constexpr);
       // A placeholder type is deduced from the initializer in the class ([dcl.type.auto.deduct]),
       // read here, before the member is declared.
       std::optional<Ex> early;

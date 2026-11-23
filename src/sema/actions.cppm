@@ -2649,7 +2649,8 @@ public:
   // [class.base.init], [dcl.init.aggr]: a destination with only ordinary scalar fields
   // needs no subobject destruction if an initializer exits by throwing.
   bool can_replay_default_members(QualType t) {
-    if (!types().is_class(t) || (templated() && !in_function_body)) return false;
+    const bool required_member_initializer = static_constexpr_initializer_ && constant_reference_context && lambdas_.empty();
+    if (!types().is_class(t) || (templated() && !in_function_body && !required_member_initializer)) return false;
     EntityId c = types().class_of(t);
     if (!ordinary_default_member_owner(c)) return false;
     const ClassRec* rec = class_rec(c);
@@ -2659,6 +2660,14 @@ public:
              return types().is_scalar(f.type) && !types().is_member_pointer(f.type) && f.bit_width == 0;
            }) && std::ranges::any_of(rec->fields, &FieldRec::dmi);
   }
+
+  struct StaticConstexprInitializerScope {
+    Sema& sema;
+    bool saved;
+    StaticConstexprInitializerScope(Sema& s, bool enabled)
+        : sema(s), saved(std::exchange(s.static_constexpr_initializer_, enabled)) {}
+    ~StaticConstexprInitializerScope() { sema.static_constexpr_initializer_ = saved; }
+  };
 
   struct DefaultMemberScope {
     Sema& sema;
@@ -10382,6 +10391,7 @@ private:
   };
   std::vector<LabelPoint> labels_, gotos_;
   bool has_immediate_addresses_ = false;
+  bool static_constexpr_initializer_ = false;
   bool replay_default_members_ = false;
   std::set<u32> constant_immediate_initializers_;
   std::set<u32> consteval_;                           // consteval functions named so far
