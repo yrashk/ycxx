@@ -876,6 +876,66 @@ with tempfile.TemporaryDirectory() as directory:
         expected = (-signal.SIGABRT, -signal.SIGILL, -signal.SIGTRAP) if extra else (0,)
         assert subprocess.run([executable, *extra], timeout=10).returncode in expected
 
+    write("guarded_receipt.hpp", """\
+        #pragma once
+        #include <ycxx/ownership.hpp>
+        #include <ycxx/ownership/runtime.hpp>
+        namespace own = ycxx::ownership;
+        struct [[=own::resource_mode::linear]] Receipt {
+          own::linear_state state;
+          int number;
+        };
+        [[=own::operation::creates]] Receipt issue_receipt() noexcept;
+        [[=own::operation::verified_observes]] int read_receipt(const Receipt&) noexcept;
+        [[=own::operation::consumes]] void close_receipt(Receipt&&) noexcept;
+    """)
+    receipt_caller = write("guarded_receipt_caller.cpp", """\
+        #include "guarded_receipt.hpp"
+        Receipt issue_receipt() noexcept { return Receipt{own::linear_state{}, 7}; }
+        void close_receipt(Receipt&& receipt) noexcept { receipt.state.consume(); }
+        int main() {
+          auto receipt = issue_receipt();
+          const auto& view = receipt;
+          const auto& alias = view;
+          const int number = read_receipt(alias);
+          close_receipt(static_cast<Receipt&&>(receipt));
+          return number != 7;
+        }
+    """)
+    receipt_provider = write("guarded_receipt_provider.cpp", """\
+        #include "guarded_receipt.hpp"
+        int read_receipt(const Receipt& receipt) noexcept { return receipt.number; }
+    """)
+    receipt_targets = [(darwin, native_darwin)]
+    # PARITY: by design: use the native ELF runtime on the Linux host and cross-link Mach-O.
+    if native_linux:
+        receipt_targets.append(([compiler, "cxx", "--no-daemon", "--target=x86_64-linux-gnu",
+                                 "-nostdlib", "-I", include], True))
+    for driver, can_run in receipt_targets:
+        for guards in (0, 1):
+            args = [*driver, f"-DYCXX_POLICIES_RUNTIME_CHECKS={guards}"]
+            checked = [*args, "-fcheck-policies"]
+            caller_object = receipt_caller.with_suffix(".o")
+            provider_object = receipt_provider.with_suffix(".o")
+            for receipt_source, receipt_object in ((receipt_caller, caller_object),
+                                                    (receipt_provider, provider_object)):
+                subprocess.run([*checked, "-c", receipt_source, "-o", receipt_object],
+                               check=True, timeout=30)
+            receipt_executable = root / "guarded-receipt"
+            subprocess.run([*checked, caller_object, provider_object, "-o", receipt_executable],
+                           check=True, timeout=30)
+            if can_run:
+                subprocess.run([receipt_executable], check=True, timeout=10)
+
+            unchecked_provider = root / "unchecked-guarded-receipt.o"
+            subprocess.run([*args, "-c", receipt_provider, "-o", unchecked_provider],
+                           check=True, timeout=30)
+            missing_guarantee = subprocess.run([*checked, caller_object, unchecked_provider,
+                                                "-o", root / "guarded-receipt-missing-guarantee"],
+                                               text=True, capture_output=True, timeout=30)
+            assert missing_guarantee.returncode == 1 and "no matching guarantee" in missing_guarantee.stderr, (
+                args, missing_guarantee.stderr)
+
     # A hosted peer owns the guard and catches its exception after unwinding through YCXX.
     cleanup = write("cleanup.cpp", """\
         #include <ycxx/ownership/runtime.hpp>
