@@ -74,6 +74,7 @@ struct ClassName {
   std::shared_ptr<const LocalFunction> local{};
   std::optional<std::uint32_t> unnamed_type_ordinal{};
   ast::EntityId closure_variable = ast::EntityId::none;
+  std::optional<ast::SeqId<ast::TemplateParamSema>> template_params{};
 };
 using ClassNames = std::function<ClassName(ast::EntityId)>;
 
@@ -604,17 +605,29 @@ class Mangler {
   }
 
   // <template-args> ::= I <template-arg>+ E (§5.1.5.7).
-  std::expected<std::string, std::string> template_args(std::span<const ast::TemplateArg> args) {
+  std::expected<std::string, std::string> template_args(
+      std::span<const ast::TemplateArg> args, std::optional<ast::SeqId<ast::TemplateParamSema>> class_params = {}) {
     std::string out = "I";
-    for (const ast::TemplateArg& a : args) {
-      auto m = template_arg(a);
+    if (class_params && in_.seqs.size(*class_params) != args.size()) class_params.reset();
+    for (std::size_t i = 0; i < args.size(); ++i) {
+      const auto& a = args[i];
+      std::optional<ast::QualType> class_parameter_type;
+      if (class_params) {
+        const auto parameter = in_.seqs.at(*class_params, i);
+        // Only a direct argument-to-parameter match can certify the declared type.
+        if (parameter.pack || a.kind == ast::TemplateArgKind::pack) class_params.reset();
+        else if (parameter.kind == ast::TemplateArgKind::value && a.kind == ast::TemplateArgKind::value)
+          class_parameter_type = parameter.type;
+      }
+      auto m = template_arg(a, class_parameter_type);
       if (!m) return m;
       out += *m;
     }
     return out + "E";
   }
   // One <template-arg>: a type, an argument pack `J … E`, or a value (§5.1.5.7).
-  std::expected<std::string, std::string> template_arg(const ast::TemplateArg& a) {
+  std::expected<std::string, std::string> template_arg(
+      const ast::TemplateArg& a, std::optional<ast::QualType> class_parameter_type = {}) {
     std::string out;
     {
       if (a.kind == ast::TemplateArgKind::pack) {
@@ -657,7 +670,7 @@ class Mangler {
       if (ast::is_pointer(in_, a.type) && ast::is_function(in_, ast::pointee_of(in_, a.type)))
         return function_pointer_argument(a);
       if (ast::is_pointer(in_, a.type) && in_.values.is<ast::VLvalue>(a.value))
-        return object_pointer_argument(a);
+        return object_pointer_argument(a, class_parameter_type && in_.same_type(a.type, *class_parameter_type));
       // A value of an enumeration type: `L <type> <value> E`, the type as any <type> is, the value
       // its integer, `n` before a negative one (§5.1.5.7).
       if (in_.types.is<ast::TEnum>(in_.types.canon(ast::without_cv(in_.canonical(a.type)))) && in_.values.is<ast::VInt>(a.value)) {
@@ -770,14 +783,41 @@ class Mangler {
     return expression + "adL_Z" + *name + "EE";
   }
 
-  std::expected<std::string, std::string> object_pointer_argument(const ast::TemplateArg& arg) {
+  bool object_pointer_type_matches(ast::QualType pointee, ast::QualType object, bool fixed_class_parameter) const {
+    pointee = in_.canonical(pointee);
+    object = in_.canonical(object);
+    if (ast::without_cv(pointee) == ast::without_cv(object)) return true;
+    // The bare entity literal is shared by both peers for fixed class parameters. In other
+    // template contexts the argument's pointer type can distinguish specializations (#1073).
+    if (!fixed_class_parameter) return false;
+
+    // [conv.ptr]: erasing an object pointer to cv void preserves the address and can add cv.
+    if (ast::is_void(in_, pointee)) {
+      if (ast::is_reference(in_, object) || ast::is_function(in_, object)) return false;
+      // The canonical array type represents its cv-qualifiers on the elements.
+      while (in_.types.is<ast::TArray>(object))
+        object = in_.types.get<ast::TArray>(object).elem;
+      const auto object_cv = std::to_underlying(ast::cv_of(object));
+      const auto pointee_cv = std::to_underlying(ast::cv_of(pointee));
+      return (pointee_cv & object_cv) == object_cv;
+    }
+
+    // [basic.link]: the named object's first declaration can lack the bound seen by the argument.
+    if (!in_.types.is<ast::TArray>(object) || !in_.types.is<ast::TArray>(pointee)) return false;
+    const auto declared = in_.types.get<ast::TArray>(object);
+    const auto addressed = in_.types.get<ast::TArray>(pointee);
+    return declared.bound == ast::ConstId::none && in_.values.is<ast::VInt>(addressed.bound) &&
+           declared.elem == addressed.elem;
+  }
+
+  std::expected<std::string, std::string> object_pointer_argument(const ast::TemplateArg& arg, bool fixed_class_parameter) {
     const auto address = in_.values.get<ast::VLvalue>(arg.value);
     if (address.offset || in_.seqs.size(address.path) || !in_.values.is<ast::VEntity>(address.base))
       return std::unexpected("an object pointer argument without a whole named object");
     const auto entity = in_.values.get<ast::VEntity>(address.base).entity;
     const auto target = objects_ ? objects_(entity) : std::nullopt;
     if (!target) return std::unexpected("an object pointer argument without a supported object name");
-    if (ast::without_cv(in_.canonical(ast::pointee_of(in_, arg.type))) != ast::without_cv(in_.canonical(target->type)))
+    if (!object_pointer_type_matches(ast::pointee_of(in_, arg.type), target->type, fixed_class_parameter))
       return std::unexpected("an object pointer argument with a different pointee type");
     // Itanium §5.1.6.2: the address-of an entity literal. The name's prefix participates in the
     // enclosing symbol's substitution table, and qualification conversions keep the same value.
@@ -904,7 +944,7 @@ class Mangler {
       r += source_name(n.name);
       candidates_.push_back(tkey);
     }
-    auto a = template_args(n.args);
+    auto a = template_args(n.args, n.template_params);
     if (!a) return a;
     r += *a;
     candidates_.push_back((std::uint64_t{1} << 32) | std::to_underlying(e));

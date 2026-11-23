@@ -1576,11 +1576,17 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   enumerator references, fixed-base range checks, and underlying-type inference. Size and
   alignment of an inferred enum with dependent values wait for that replay.
   [#861](https://github.com/yrashk/ycxx/issues/861)
+- Named scoped member enums with a supported fixed underlying type publish their declaration
+  and layout when the enclosing class is instantiated. Looking up an enumerator instantiates
+  the full definition with the owning specialization's template arguments and lexical scope.
+  Failed nested demands publish no enumerator values. Class layout and type-only use leave
+  the definition and unused default member initializers pending ([temp.inst], [dcl.enum]).
+  [#893](https://github.com/yrashk/ycxx/issues/893)
 - Further work includes opaque declarations in classes or blocks, unnamed empty definitions,
   unnamed definitions followed by declarators, and `E{}` and `E(v)` expressions
   (#157). Enumerations in a block are tracked in #117. Qualified lookup of earlier enumerators
-  while the unnamed definition is open is tracked in #879. Dependent scoped enum definitions
-  wait for #893, and dependent unnamed definitions for #894.
+  while the unnamed definition is open is tracked in #879. Dependent unnamed definitions
+  remain in #894.
 
 ## Direct explicit destructor calls (#722)
 
@@ -2041,6 +2047,11 @@ template's tokens again with the arguments bound.
 - A native symbol can encode a pointer template argument naming a whole namespace-scope
   object or a static data member of an ordinary namespace-scope class. Mangling uses the
   symbolic object from constant evaluation, with the enclosing name's Itanium substitutions.
+- Fixed, directly matched pointer parameters of class templates can also take a whole object
+  converted to cv `void*`, and a completed array whose first declaration had unknown bound.
+  The two native targets use the same entity-literal spelling as both peer compilers in
+  these cases. Other template argument contexts remain in #1073.
+  [#1070](https://github.com/yrashk/ycxx/issues/1070)
 - On both native targets, members specialized for pointers to distinct TU-local objects
   keep their symbols and storage separate across translation units. Externally linked object
   arguments preserve their identity when separate objects refer to the same specialization.
