@@ -121,8 +121,8 @@ an entry point. On x86-64 Linux, `-nostdlib` selects the existing executable sta
 described above. [#973](https://github.com/yrashk/ycxx/issues/973)
 
 Fixed-prototype calls (free and member functions, lambdas, function templates and calls
-through pointers) support passing and returning nonempty flat records with integral or
-ordinary object-pointer fields by value. The record can occupy up to
+through pointers) support passing and returning nonempty flat records with integral,
+ordinary object-pointer or object lvalue-reference fields by value. The record can occupy up to
 16 bytes and must be trivial for calls. Larger results and classes that are not trivial for
 calls (with a user-provided copy constructor or destructor) pass through memory, as on macOS. [Linux integer aggregate ABI](docs/design/linux-integer-aggregates.md)
 
@@ -545,6 +545,8 @@ written default member initializer are value-initialized.
   integral or enumeration field. [#895](https://github.com/yrashk/ycxx/issues/895)
   Constant expressions can read integral and enumeration fields of a flat aggregate temporary,
   such as `Limits{42}.quota`. [#900](https://github.com/yrashk/ycxx/issues/900)
+  Class-template static constexpr members can use these reads in their initializers.
+  [#991](https://github.com/yrashk/ycxx/issues/991)
   A constant expression can return a named empty or flat aggregate and use the result,
   including an initialized fixed-size `char` member array.
   [#975](https://github.com/yrashk/ycxx/issues/975)
