@@ -4157,7 +4157,6 @@ private:
           value.reset();
           if (!fixed) prev_type = initializer_type(x.type());
         } else {
-          value = value.value_or(EnumValue{});
           auto c = v.ok() ? sema::Evaluator(s_, q_).evaluate(v).value : std::nullopt;
           if (!c || s_.world().values.rec(*c).kind != sema::ValueKind::integer || !types.is_integral(v.type())) {
             if (x.ok()) s_.diag(x.begin, Diag::bound_not_constant);
@@ -4165,8 +4164,8 @@ private:
             sema::IntShape sh = sema::shape(s_.world().target, *types.builtin_of(v.type()));
             sema::u64 bits = s_.world().values.rec(*c).bits;
             const bool extend = sh.is_signed && sh.bits < 64 && ((bits >> (sh.bits - 1)) & 1);
-            value->bits = std::int64_t(extend ? bits | ~((sema::u64{1} << sh.bits) - 1) : bits);
-            value->big = !sh.is_signed && (bits >> 63) != 0;
+            value = EnumValue{std::int64_t(extend ? bits | ~((sema::u64{1} << sh.bits) - 1) : bits),
+                              !sh.is_signed && (bits >> 63) != 0};
             if (fixed) {
               Ex lit = s_.literal(v.type(), *c, ast::ValueCategory::prvalue, x.begin, x.end);
               if (s_.narrows(lit, *fixed)) s_.diag(x.begin, Diag::narrowing, v.type(), *fixed);
