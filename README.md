@@ -199,6 +199,10 @@ On Linux x86-64, an ordinary external namespace-scope function can use GNU `weak
 strong definition in another object takes precedence. This covers the pinned libycxx
 debugger provider. [#937](https://github.com/yrashk/ycxx/issues/937)
 
+On Linux x86-64, an ordinary external non-inline function can inherit GNU visibility
+from its enclosing namespace declaration and use it at an out-of-line definition.
+[#940](https://github.com/yrashk/ycxx/issues/940)
+
 External inline namespace variables and in-class static constexpr members of ordinary namespace-scope
 classes share one object across translation units on both targets when their initial values need
 no relocations or runtime work. On Linux this lets two freestanding units using libycxx `<cstddef>`
