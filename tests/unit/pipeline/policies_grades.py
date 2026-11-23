@@ -40,6 +40,7 @@ with tempfile.TemporaryDirectory() as directory:
         struct SiteConfig { inline static constexpr unsigned slots[2]{1u, 2u}; };
         using One = fx::set<fx::at_most<Send, 1>>;
         using Two = fx::set<fx::at_most<Send, SiteConfig::slots[1]>>;
+        using Four = fx::set<fx::at_most<Send, 4>>;
         using Unbounded = fx::set<Send>;
         int send(int) noexcept;
         int run(int) noexcept;
@@ -59,6 +60,22 @@ with tempfile.TemporaryDirectory() as directory:
         ("condition_spends", "One", "if (send(n)) return send(0); return 0;", "exceeds its usage grade of 1"),
         ("effect_free_loop", "One", "while (n > 0) --n; return send(n);", None),
         ("loop_initializer", "One", "for (int i = send(n); i > 0; --i) {} return 0;", None),
+        ("counted_loop", "Two", "for (unsigned i = 0u; i < 2u; ++i) send(i); return n;", None),
+        ("counted_nested", "Four", "for (unsigned i = 0u; i < 2u; ++i) "
+         "for (unsigned j = 0u; j < 2u; ++j) send(i + j); return n;", None),
+        ("counted_zero", "One", "for (unsigned i = 0u; i < 0u; i++) send(n); return send(n);", None),
+        ("counted_continue", "Two", "for (unsigned i = 0u; i < 2u; ++i) { send(i); continue; } return n;", None),
+        ("counted_return", "Two", "for (unsigned i = 0u; i < 2u; ++i) { if (n) return send(n); send(n); } return n;",
+         None),
+        ("counted_return_prefix", "Two", "for (unsigned i = 0u; i < 2u; ++i) "
+         "{ if (n--) { send(n); return send(n); } send(n); } return n;", "exceeds its usage grade of 2"),
+        ("counted_break", "One", "for (unsigned i = 0u; i < 8u; ++i) { send(n); break; } return n;", None),
+        ("counted_overuse", "One", "for (unsigned i = 0u; i < 2u; ++i) send(n); return n;",
+         "exceeds its usage grade of 1"),
+        ("counted_counter_mutation", "Two", "for (unsigned i = 0u; i < 2u; ++i) { --i; send(n); } return n;",
+         "unbounded usage"),
+        ("counted_counter_alias", "Two", "for (unsigned i = 0u; i < 2u; ++i) "
+         "{ unsigned& alias = i; --alias; send(n); } return n;", "unbounded usage"),
         ("single_iteration", "One", "do { n = send(n); } while (false); return n;", None),
         ("skipped_loop", "One", "while (false) send(n); return send(0);", None),
         ("loop_condition_spends", "One", "while (send(n)) break; return 0;", None),
@@ -84,6 +101,9 @@ with tempfile.TemporaryDirectory() as directory:
         [[=fx::trusted_contract<Maximum>{}]] int send(int) noexcept;
         [[=fx::contract<Maximum>{}]] int run(int n) noexcept { send(n); return send(n); }
     """), error="unbounded usage")
+    syntax(write("loop_overflow.cpp", (root / "overflow.cpp").read_text().replace(
+        "send(n); return send(n);", "for (unsigned i = 0u; i < 2u; ++i) send(n); return n;")),
+           error="unbounded usage")
     syntax(write("bad_set.cpp", declaration.replace("BOUND", "fx::set<Send, fx::at_most<Send, 1>>")
                  .replace("BODY", "return send(n);")), error="conflicting usage grades for the same effect tag")
 
@@ -119,6 +139,17 @@ with tempfile.TemporaryDirectory() as directory:
             write(rules.name, rules_source.replace("&send, One", "&send, Two"))
             error = "exceeds its usage grade of 1"
             assert invoke(args, error, env) == syntax(rules, caller, error=error)
+
+            counted = root / "counted_loop.cpp"
+            counted_args = [*base, "--daemon=require", "-fsyntax-only", counted]
+            invoke(counted_args, env=env)
+            stamp = counted.stat()
+            write(counted.name, counted.read_text().replace("i < 2u", "i < 3u"))
+            os.utime(counted, ns=(stamp.st_atime_ns, stamp.st_mtime_ns))
+            updated = counted.stat()
+            assert (updated.st_size, updated.st_mtime_ns) == (stamp.st_size, stamp.st_mtime_ns)
+            error = "exceeds its usage grade of 2"
+            assert invoke(counted_args, error, env) == syntax(counted, error=error)
         finally:
             subprocess.run([compiler, "ctl", "shutdown"], cwd=root, env=env, capture_output=True, timeout=10)
 
@@ -201,8 +232,8 @@ with tempfile.TemporaryDirectory() as directory:
               return value;
             }
             [[=fx::contract<Two>{}]] int dispatch(Scope& scope) noexcept {
-              do { transmit(scope, 1); } while (false);
-              return transmit(scope, 2);
+              for (unsigned i = 0u; i < 2u; ++i) transmit(scope, i + 1u);
+              return 2;
             }
             int main(int argc, char**) {
               Scope scope;

@@ -1528,6 +1528,68 @@ static ast::Red effect_unparen(ast::Red node) {
   return node;
 }
 
+static bool effect_counter_ref(ast::Red expression, ast::u32 counter) {
+  expression = effect_unparen(expression);
+  return expression.is<ast::LocalRef>() && expression.get<ast::LocalRef>().local == counter;
+}
+
+static bool effect_counter_read(ast::Red expression, ast::u32 counter) {
+  expression = effect_unparen(expression);
+  if (!expression.is<ast::ImplicitConversion>()) return false;
+  const auto read = expression.get<ast::ImplicitConversion>();
+  return read.conversion == ast::ConversionKind::lvalue_to_rvalue &&
+         effect_counter_ref(effect_child(expression, read.operand), counter);
+}
+
+// A scalar value read cannot mutate the counter or let its address escape.
+static bool effect_counter_exposed(const ast::Red& node, ast::u32 counter) {
+  if (effect_counter_read(node, counter)) return false;
+  if (effect_counter_ref(node, counter)) return true;
+  bool exposed = false;
+  node.for_each_child([&](const ast::Red& child) {
+    if (!exposed) exposed = effect_counter_exposed(child, counter);
+  });
+  return exposed;
+}
+
+static std::optional<ast::u64> effect_unsigned_literal(const sema::World& world, ast::Red expression) {
+  expression = effect_unparen(expression);
+  if (!expression.is<ast::Literal>()) return std::nullopt;
+  const auto literal = expression.get<ast::Literal>();
+  if (!world.types.is(literal.info.type, ast::Builtin::unsigned_int) || !world.ins.values.is<ast::VInt>(literal.value))
+    return std::nullopt;
+  return ast::int_bits(world.ins, literal.value).lo;
+}
+
+// A private unsigned counter advances from zero to the strict upper bound without wrapping.
+static std::optional<ast::u64> effect_loop_limit(const sema::World& world, const ast::Red& node) {
+  const auto loop = node.get<ast::For>();
+  if (loop.init.id == ast::NodeId::none || loop.condition.id == ast::NodeId::none ||
+      loop.increment.id == ast::NodeId::none || loop.body.id == ast::NodeId::none)
+    return std::nullopt;
+  const auto init = effect_child(node, loop.init);
+  const auto condition = effect_unparen(effect_child(node, loop.condition));
+  const auto increment = effect_unparen(effect_child(node, loop.increment));
+  if (!init.is<ast::DeclStmt>() || !condition.is<ast::Binary>() || !increment.is<ast::Unary>()) return std::nullopt;
+  const auto declarations = node.ast().children(init.get<ast::DeclStmt>().decls);
+  if (declarations.size() != 1) return std::nullopt;
+  const auto declaration = effect_child(init, declarations.front());
+  if (!declaration.is<ast::LocalVar>()) return std::nullopt;
+  const auto local = declaration.get<ast::LocalVar>();
+  const auto comparison = condition.get<ast::Binary>();
+  const auto step = increment.get<ast::Unary>();
+  if (local.init.id == ast::NodeId::none || comparison.op != ast::BinaryOp::lt ||
+      (step.op != ast::UnaryOp::pre_inc && step.op != ast::UnaryOp::post_inc) ||
+      !effect_counter_read(effect_child(condition, comparison.lhs), local.local) ||
+      !effect_counter_ref(effect_child(increment, step.operand), local.local) ||
+      !world.types.is(step.info.type, ast::Builtin::unsigned_int) ||
+      effect_unsigned_literal(world, effect_child(declaration, local.init)) != ast::u64{0})
+    return std::nullopt;
+  const auto limit = effect_unsigned_literal(world, effect_child(condition, comparison.rhs));
+  if (!limit || effect_counter_exposed(effect_child(node, loop.body), local.local)) return std::nullopt;
+  return limit;
+}
+
 static std::optional<EffectHandlerBinding> effect_handler_binding(const sema::World& world,
                                                                  const sema::EntityRec& handler,
                                                                  const ast::Red& declaration) {
@@ -1563,6 +1625,7 @@ struct EffectCalls {
   std::vector<std::pair<EntityId, ast::u32>> calls;
   std::vector<std::pair<EntityId, ast::u32>> handler_operations;
   std::map<ast::NodeId, EntityId> handler_calls;
+  std::map<ast::NodeId, ast::u64> loop_limits;
   std::optional<EffectFinding> unsupported;
   std::optional<ast::u32> grade_jump;
 };
@@ -1622,6 +1685,9 @@ struct EffectCallsFor {
       }
       if (!result.grade_jump && (node.is<ast::Goto>() || node.is<ast::Switch>()))
         result.grade_jump = node.offset();
+      if (node.is<ast::For>()) {
+        if (const auto limit = effect_loop_limit(world, node)) result.loop_limits.emplace(node.id(), *limit);
+      }
       const auto problem = ast::dispatch<ast::Nodes>(node.kind(), [&]<class T>(std::type_identity<T>) -> std::string_view {
         using namespace ast;
         if constexpr (is_expression(^^T)) {
@@ -1733,6 +1799,22 @@ static EffectPaths effect_loop(EffectPaths iteration, EffectPaths tail,
   return {std::max({entry_exit, iteration.breaks, again}), iteration.returns};
 }
 
+static std::optional<EffectCost> repeat_effect_cost(std::optional<EffectCost> cost, ast::u64 count) {
+  if (count == 0) return EffectCost{};
+  if (!cost) return std::nullopt;
+  if (cost->unbounded || cost->uses > std::numeric_limits<ast::u64>::max() / count) return EffectCost{true};
+  return EffectCost{false, cost->uses * count};
+}
+
+static EffectPaths counted_effect_loop(EffectPaths iteration, ast::u64 limit) {
+  if (limit == 0) return {};
+  const auto again = std::max(iteration.next, iteration.continues);
+  const auto prefix = repeat_effect_cost(again, limit - 1).value_or(EffectCost{});
+  auto exits = sequence({prefix}, {iteration.breaks, iteration.returns});
+  exits.next = std::max(exits.next, repeat_effect_cost(again, limit));
+  return exits;
+}
+
 static bool false_effect_condition(const sema::World& world, const ast::Red& expr) {
   const auto node = effect_unparen(expr);
   if (!node.is<ast::Literal>()) return false;
@@ -1744,10 +1826,10 @@ static bool false_effect_condition(const sema::World& world, const ast::Red& exp
 // Count one tag over the structured AST. A positive repeating cost widens to unbounded.
 // A loop consumes the break and continue paths of its own body.
 static EffectPaths effect_usage(const sema::World& world, const ast::Red& node, const std::map<EntityId, ast::u64>& costs,
-                                const std::map<ast::NodeId, EntityId>& handler_calls) {
+                                const EffectCalls& calls) {
   const auto child = [&](ast::Child edge) -> EffectPaths {
     if (edge.id == ast::NodeId::none) return {};
-    return effect_usage(world, effect_child(node, edge), costs, handler_calls);
+    return effect_usage(world, effect_child(node, edge), costs, calls);
   };
   const auto never = [&](ast::Child condition) {
     return condition.id != ast::NodeId::none && false_effect_condition(world, effect_child(node, condition));
@@ -1764,6 +1846,8 @@ static EffectPaths effect_usage(const sema::World& world, const ast::Red& node, 
   }
   if (node.is<ast::For>()) {
     const auto loop = node.get<ast::For>();
+    if (const auto limit = calls.loop_limits.find(node.id()); limit != calls.loop_limits.end())
+      return counted_effect_loop(child(loop.body), limit->second);
     const auto test = child(loop.condition);
     const auto repeated = never(loop.condition) ? test :
         effect_loop(sequence(test, child(loop.body)), child(loop.increment), test.next, true);
@@ -1782,11 +1866,11 @@ static EffectPaths effect_usage(const sema::World& world, const ast::Red& node, 
   if (node.is<ast::Continue>()) return {.next = std::nullopt, .continues = EffectCost{}};
 
   EffectPaths paths;
-  node.for_each_child([&](const ast::Red& edge) { paths = sequence(paths, effect_usage(world, edge, costs, handler_calls)); });
+  node.for_each_child([&](const ast::Red& edge) { paths = sequence(paths, effect_usage(world, edge, costs, calls)); });
   if (node.is<ast::Return>()) return {std::nullopt, std::max(paths.next, paths.returns)};
   EntityId target = EntityId::none;
   if (node.is<ast::Call>()) target = node.get<ast::Call>().function;
-  if (node.is<ast::MemberCall>()) target = handler_calls.at(node.id());
+  if (node.is<ast::MemberCall>()) target = calls.handler_calls.at(node.id());
   if (const auto found = costs.find(target); found != costs.end())
     return sequence(paths, {EffectCost{false, found->second}, {}});
   return paths;
@@ -1811,7 +1895,7 @@ static std::optional<EffectFinding> check_usage_grades(const sema::World& world,
     if (costs.empty()) continue;
     if (calls.grade_jump)
       return EffectFinding{*calls.grade_jump, "a finite usage grade with effectful calls requires control flow without goto or switch"};
-    const auto use = maximum(effect_usage(world, body, costs, calls.handler_calls));
+    const auto use = maximum(effect_usage(world, body, costs, calls));
     if (use.unbounded || use.uses > limit)
       return EffectFinding{body.offset(), std::format("effect '{}' exceeds its usage grade of {}{}",
                                                      world.types.spell(tag), limit,
