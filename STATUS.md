@@ -1423,6 +1423,11 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   constructors. Direct initialization includes them. Copy-list-initialization ranks them and
   diagnoses an explicit winner, including a default constructor or a temporary for a reference
   argument ([dcl.fct.spec], [over.match.ctor], [over.match.copy], [over.match.list], #157).
+- Both native targets coalesce eligible inline complete-object constructors across translation
+  units. This covers in-class bodies and out-of-class bodies marked inline by a declaration
+  ([dcl.inline], [basic.def.odr]). Translation-unit-local classes retain local constructor
+  symbols, and non-inline out-of-class definitions retain strong symbols.
+  [#1096](https://github.com/yrashk/ycxx/issues/1096)
 - A first-declaration in-class `C() = default` is supported for non-template, nonunion tag
   classes at namespace scope without fields, bases, virtual functions, or a nontrivial or deleted destructor.
   The constructor participates in overload selection and access checks, including bare `explicit`.

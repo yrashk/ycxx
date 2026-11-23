@@ -156,6 +156,23 @@ int main() { return g() - 2; }
             assert symbols(f'assignment-{name}.o')['__ZN1HaSERKS_'] == weak, name
         links('assignment-main.o', 'assignment-peer.o')
 
+        constructors = fixtures / 'inline-constructors'
+        for name in ('main', 'peer'):
+            compile(constructors / f'{name}.cpp', f'ctor-{name}.o')
+        links('ctor-main.o', 'ctor-peer.o')
+        strong_ctor = '__ZN9OutOfLineC1Ei'
+        for name in ('main', 'peer'):
+            table = symbols(f'ctor-{name}.o')
+            for ctor, binding in (
+                ('__ZN7InClassC1Ei', weak), ('__ZN12OnDefinitionC1Ei', weak),
+                ('__ZN13OnDeclarationC1Ei', weak), ('__ZN12_GLOBAL__N_19LocalCtorC1Ei', ('non-external', True)),
+            ):
+                assert table.get(ctor) == binding, (name, ctor, table.get(ctor))
+            assert table.get(strong_ctor) == ('external', name == 'main'), (name, table.get(strong_ctor))
+        compile(constructors / 'peer.cpp', 'duplicate-ctor.o', '-DDUPLICATE_CONSTRUCTOR')
+        for objects in (('ctor-main.o', 'duplicate-ctor.o'), ('duplicate-ctor.o', 'ctor-main.o')):
+            run(ycxx, 'cxx', *objects, '-o', 'program', status=1, error=f'duplicate symbol {strong_ctor}')
+
         destructors = fixtures / 'inline-destructors'
         for fixture, binding, names in (
             ('shared', weak, ('__ZN6MemberIiED1Ev', '__ZN6MemberIbED1Ev', '__ZN5OwnerD1Ev')),
