@@ -2457,6 +2457,18 @@ and diagnoses reads past the end of an unterminated array in a required constant
 ([expr.const]). Native lowering requires no runtime `strlen` symbol. Fixtures in
 `tests/own/builtins/` cover detection, result type, argument checks, and constant and runtime scans.
 
+## Byte search and comparison builtins (#248)
+
+`__builtin_memchr(s, c, n)` and `__builtin_memcmp(s1, s2, n)` are direct calls of the C
+library's `memchr` and `memcmp`, as libycxx's `<cstring>` and its run-time string helpers
+(`include/ycxx/core/mem_builtins.hpp`) use them. Sema converts the arguments to the C signatures
+(`void*` and `int` results) and calls an implicit `extern "C"` declaration with the target's
+`<string.h>` exception specification (`World::string_function`), so a written declaration or
+definition of the function is the same entity and symbol (`unit.string_builtin_symbols`). The unit then references `memchr` or `memcmp` as an undefined symbol,
+which libSystem or the C library provides at link time. A dependent argument defers the call to
+instantiation. They are not constant expressions yet (#1092). Fixtures in `tests/own/builtins/`
+cover detection, signatures, argument checks and run-time results.
+
 ## GNU constantness probe (#1065)
 
 `__builtin_constant_p(e)` returns an `int` prvalue. It gives 1 when a supported scalar or

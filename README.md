@@ -623,6 +623,9 @@ written default member initializer are value-initialized.
   without executing it. [#1065](https://github.com/yrashk/ycxx/issues/1065)
   `__builtin_strlen`, used by libycxx's exception headers, scans character storage in constant
   expressions and native code. [#531](https://github.com/yrashk/ycxx/issues/531)
+  `__builtin_memchr` and `__builtin_memcmp`, used by libycxx's `<cstring>` and its string
+  searches, call the C library's `memchr` and `memcmp` at run time.
+  [#248](https://github.com/yrashk/ycxx/issues/248)
 - `extern "C"` functions from libSystem, including `printf` with integers, characters,
   floating values, pointers and strings as arguments, and the SDK `<math.h>`'s built-ins
   (`__builtin_fabs`, `__builtin_inf`, `__builtin_huge_val`, `__builtin_nan`).
