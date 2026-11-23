@@ -81,8 +81,8 @@ Session& session_for(const Config& cfg);
 // `-E`: the text Clang's `-E` would print, and the diagnostics.
 std::pair<std::string, std::vector<Message>> preprocess_to_text(Session& s, std::string_view text, std::string_view path);
 
-// Takes a preprocessing option at `args[i]` (`-I`, `-isystem`, `-iquote`, `-D`, `-U`,
-// `-nostdinc`, `-nostdinc++`). Advances `i` for a separate argument. Returns an error for a missing argument.
+// Takes a preprocessing or language-mode option at `args[i]`. Advances `i` for a separate
+// argument. Returns an error for a missing argument.
 std::expected<bool, std::string> take_option(std::span<const std::string_view> args, std::size_t& i, Config& cfg);
 // Consumes the include suppression options before appending automatic search paths.
 // A command-line directory that names an automatic one (relative to `cwd`) is searched only
