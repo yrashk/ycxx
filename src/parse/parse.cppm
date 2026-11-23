@@ -5357,7 +5357,7 @@ private:
         s_.diag(name_at, Diag::member_of_explicit_specialization, entity.name);
         return bad();
       }
-      if (!Program::encloses(p_->ns_of(k_), p_->namespace_path(owner))) {
+      if (!Program::encloses(p_->ns_of(k_), p_->enclosing_namespace_path(owner))) {
         s_.diag(name_at, Diag::conflicting_declaration, entity.name);
         return bad();
       }
@@ -10404,30 +10404,6 @@ void Program::instantiate_all() {
   // [temp.expl.spec]/7: a specialization is explicitly specialized before its first use that
   // would instantiate it: before any earlier cell demanded it, or instantiated the class.
   specializations_before(end());
-  for (const auto& [e, k] : explicit_specs_) {
-    // Instantiated in a constant evaluation before it: an instance exists, since none is made
-    // once the explicit specialization precedes the point.
-    auto c = class_points_.find(e);
-    bool used = (c != class_points_.end() && c->second < k) || instance_index_.contains(e) || var_index_.contains(e);
-    auto demanded = [&](const auto& cell) {
-      return cell && std::ranges::any_of(cell->demands, [&](const sema::Demand& d) { return std::to_underlying(d.spec) == e; });
-    };
-    for (u32 j = 0; j < k && !used; ++j)
-      used = demanded(item_cells_[j]) || demanded(class_cells_[j]) || demanded(body_cells_[j]);
-    if (!used) {
-      used = std::ranges::any_of(class_member_order_, [&](const auto& key) {
-        const auto& cell = class_member_cells_.at(key);
-        return class_points_.at(key.second) < k && cell.diags.empty() &&
-               std::ranges::any_of(cell.demands, [&](const sema::Demand& d) { return std::to_underlying(d.spec) == e; });
-      });
-    }
-    if (!used) continue;
-    ast::NameId name = w_->entities.rec(EntityId(e)).name;
-    auto at = spec_names_.find(e);
-    end_diags_.push_back({engine::Loc{std::to_underlying(id(k)), at == spec_names_.end() ? 0 : at->second},
-                          sema::diag_id(sema::Diag::specialized_after_use),
-                          {{std::to_underlying(name), w_->ins.names.fp(name)}}});
-  }
   // The demands of every cell, in item order, then those of each instance as it is made: the END
   // worklist of §B6.2, deterministic.
   std::vector<sema::Demand> work;
@@ -10489,6 +10465,36 @@ void Program::instantiate_all() {
       const auto& part = body_cells_[k]->value;
       if (!templated_body(k)) required_part(part.tree, part.closures, id(k));
     }
+  }
+  for (const auto& [e, k] : explicit_specs_) {
+    // Instantiated in a constant evaluation before it: an instance exists, since none is made
+    // once the explicit specialization precedes the point.
+    auto c = class_points_.find(e);
+    bool used = (c != class_points_.end() && c->second < k) || instance_index_.contains(e) || var_index_.contains(e);
+    auto demanded = [&](const auto& cell) {
+      return cell && std::ranges::any_of(cell->demands, [&](const sema::Demand& d) { return std::to_underlying(d.spec) == e; });
+    };
+    for (u32 j = 0; j < k && !used; ++j)
+      used = demanded(item_cells_[j]) || demanded(class_cells_[j]) || demanded(body_cells_[j]);
+    if (!used) {
+      used = std::ranges::any_of(class_member_order_, [&](const auto& key) {
+        const auto& cell = class_member_cells_.at(key);
+        return class_points_.at(key.second) < k && cell.diags.empty() &&
+               std::ranges::any_of(cell.demands, [&](const sema::Demand& d) { return std::to_underlying(d.spec) == e; });
+      });
+    }
+    // Cleanup references in ordinary bodies and variable definitions are first collected above.
+    // A template body added later to the worklist can be instantiated after its source item.
+    if (!used && w_->entities.rec(EntityId(e)).kind == sema::EntityKind::destructor)
+      used = std::ranges::any_of(work, [&](const sema::Demand& demand) {
+        return std::to_underlying(demand.spec) == e && index(demand.at.item) < k;
+      });
+    if (!used) continue;
+    ast::NameId name = w_->entities.rec(EntityId(e)).name;
+    auto at = spec_names_.find(e);
+    end_diags_.push_back({engine::Loc{std::to_underlying(id(k)), at == spec_names_.end() ? 0 : at->second},
+                          sema::diag_id(sema::Diag::specialized_after_use),
+                          {{std::to_underlying(name), w_->ins.names.fp(name)}}});
   }
   // The synthesized special members' bodies, those of classes instantiated as the worklist runs
   // included.
