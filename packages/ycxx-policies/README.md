@@ -474,7 +474,8 @@ struct SiteConfig {
 };
 ```
 
-The configuration can also compute a limit from a temporary aggregate.
+You can reuse one configuration template for several limits. Here an aggregate's default
+member initializer caps each requested limit before the policy uses it.
 
 ```cpp
 struct Limits {
@@ -482,9 +483,12 @@ struct Limits {
   unsigned approved = requested < 4u ? requested : 4u;
 };
 
-struct SiteConfig {
-  static constexpr unsigned slots = Limits{2u}.approved;
+template<unsigned Requested>
+struct SiteProfile {
+  static constexpr unsigned slots = Limits{Requested}.approved;
 };
+
+using SiteConfig = SiteProfile<2u>;
 ```
 
 The same `SiteConfig::slots` can supply the upper limit in a counted unsigned loop.

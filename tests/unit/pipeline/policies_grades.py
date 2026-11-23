@@ -249,8 +249,9 @@ with tempfile.TemporaryDirectory() as directory:
               int requested;
               int capped = requested < 4 ? requested : 4;
             };
-            template<bool Wide> struct Profile { static constexpr int uses = 1; };
-            template<> struct Profile<true> { static constexpr int uses = RequestedLimit{2}.capped; };
+            template<bool Wide> struct Profile {
+              static constexpr int uses = RequestedLimit{Wide ? 2 : 1}.capped;
+            };
             template<class Payload> struct NativeConfig : Profile<site::Wide<Payload>> {};
             using Active = NativeConfig<int>;
             static_assert(Active::uses == 2);
