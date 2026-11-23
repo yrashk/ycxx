@@ -766,6 +766,7 @@ struct ClassRec {
   bool virtual_destructor = false;
   std::optional<bool> destructor_noexcept;  // the effective specification, when known
   bool destructor_usable = false;          // its declaration and subobject destruction are known to be usable
+  bool destructor_dependent = false;       // a closure pattern's captures leave usability unresolved
   bool layout_requires_virtual_support = false;
   PeerVirtualLayout peer_virtual_layout = PeerVirtualLayout::none;
   // The sole abstract primary base of a class admitted for plain automatic default initialization.
@@ -785,7 +786,11 @@ struct ClassRec {
   // Written zero-parameter defaulting, with the completed class's supported no-op proof.
   EntityId defaulted_default_ctor = EntityId::none;
   bool trivial_defaulted_default_ctor = false;
+  EntityId declared_destructor = EntityId::none;  // retains the access of a written trivial destructor
   EntityId destructor = EntityId::none;
+  EntityId destructor_declaration() const {
+    return declared_destructor == EntityId::none ? destructor : declared_destructor;
+  }
   EntityId copy_ctor = EntityId::none;
   bool copy_deleted = false;
   std::vector<EntityId> defaulted_copy_declarations;
@@ -1154,6 +1159,8 @@ struct World {
     ClassRec rec;
     rec.defined = true;
     rec.move_usable = true;
+    rec.destructor_noexcept = true;
+    rec.destructor_usable = true;
     QualType offset = types.builtin(Builtin::unsigned_int);
     QualType area = types.pointer(types.builtin(Builtin::void_));
     auto field = [&](std::string_view spelling, QualType type) {
