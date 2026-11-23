@@ -215,7 +215,6 @@ draft/except/except.pre-3.accept.cpp 'class' not supported yet
 draft/except/except.spec-2.reject.cpp errors elsewhere: 'struct' not supported yet
 draft/except/except.throw-2.accept.cpp preprocessing directives are not supported yet
 draft/expr/basic.lval-1.accept.cpp 'struct' not supported yet
-draft/expr/conv.lval-1.accept.cpp 'struct' not supported yet
 draft/expr/expr.add-1.accept.cpp '{' not supported yet
 draft/expr/expr.await-1.reject.cpp errors elsewhere: preprocessing directives are not supported yet
 draft/expr/expr.call-4.accept.cpp preprocessing directives are not supported yet
@@ -447,7 +446,6 @@ own/function-pointers/iota-template-argument.run.cpp function pointers and refer
 own/classes/s1-byvalue-constexpr.run.cpp classes in constant evaluation (#25)
 own/classes/s1-elaborated.run.cpp block-scope elaborated type specifier (#117)
 own/classes/s1-locals-scopes.run.cpp local classes (#117)
-own/classes/s2-constexpr-members.run.cpp classes in constant evaluation (#25)
 own/floating/const-compare.accept.cpp@linux-x86_64 x87 long double literals are unsupported #645
 own/floating/conv-arith-types.accept.cpp@linux-x86_64 x87 long double literals are unsupported #645
 own/floating/conv-double-float.accept.cpp@linux-x86_64 x87 long double literals are unsupported #645

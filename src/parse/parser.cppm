@@ -4405,6 +4405,10 @@ public:
   // [except.pre], [except.handle]: each handler declaration shares its compound's scope.
   Ex try_statement() {
     u32 begin = pos();
+    if (!s_->check_exception_construct(begin, Tk::kw_try)) {
+      skip_substatement();
+      return {NodeId::none, begin, pos()};
+    }
     bump();
     Ex body = compound_statement(/*barrier=*/true);
     if (!expect(Tk::kw_catch)) return {NodeId::none, begin, pos()};

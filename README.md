@@ -120,6 +120,9 @@ build/bin/ycxx cxx -nostdlib example.o -o example
 an entry point. On x86-64 Linux, `-nostdlib` selects the existing executable startup convention
 described above. [#973](https://github.com/yrashk/ycxx/issues/973)
 
+`-fno-exceptions` diagnoses active `throw` and block `try` constructs. Native objects retain
+ordinary destruction and eligible plain unwind frames. [#980](https://github.com/yrashk/ycxx/issues/980)
+
 Fixed-prototype calls (free and member functions, lambdas, function templates and calls
 through pointers) support passing and returning nonempty flat records with integral,
 ordinary object-pointer or object lvalue-reference fields by value. The record can occupy up to
@@ -551,6 +554,9 @@ written default member initializer are value-initialized.
   such as `Limits{42}.quota`. [#900](https://github.com/yrashk/ycxx/issues/900)
   Class-template static constexpr members can use these reads in their initializers.
   [#991](https://github.com/yrashk/ycxx/issues/991)
+  A constant expression can return a named empty or flat aggregate and use the result,
+  including an initialized fixed-size `char` member array.
+  [#975](https://github.com/yrashk/ycxx/issues/975)
   Namespace-scope `constexpr` pointers to `void` can retain scalar and array element addresses.
   `__builtin_addressof`, used by libycxx's `std::addressof`, bypasses overloaded `operator&`.
   It supports runtime addresses and constant expressions such as a scalar global's address.
