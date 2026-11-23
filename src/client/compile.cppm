@@ -23,7 +23,9 @@ inline constexpr std::array<std::string_view, 5> environment = {"SDKROOT", "DEVE
 // relative paths in it are relative to `cwd`.
 // Whether a request's engine events go back to its client (#245): none, events, or events with
 // the values of the kinds that can show theirs.
-enum class Trace : std::uint8_t { off, events, values };
+// What a request's trace is for (#245): none, the stream (events), the browser (values too), or a
+// browser that shows the build while it runs (`live`, values too; #939).
+enum class Trace : std::uint8_t { off, events, values, live };
 
 struct Request {
   std::vector<std::string> argv;
