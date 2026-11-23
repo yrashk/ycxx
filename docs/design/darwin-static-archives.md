@@ -5,6 +5,15 @@ executable links, the counterpart of the [Linux archive inputs](linux-static-arc
 libycxx's runtime (`libycxx.a`, `libycxx-abi.a`) and GCC's `libemutls_w.a` are Darwin archives,
 and a ycxx program has to link them.
 
+## Driver snapshots
+
+The driver reads explicit GNU and Darwin archive operands for each link request. The link
+input includes the fingerprint of the bytes read. The configured runtime archives appended
+by the driver on Darwin may reuse their process-local snapshots when their path, size and
+modification time match. An explicit operand gets a fresh snapshot even when the driver
+also appends that path. The `-nostdlib++` option omits the appended runtime entries.
+[#951](https://github.com/yrashk/ycxx/issues/951)
+
 ## Selection
 
 The rules are the system linker's, observed as a black box (DECISIONS §2.3) where they differ
