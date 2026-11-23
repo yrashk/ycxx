@@ -1,6 +1,7 @@
 // The engine trace (#245): the stream of a small unit built cold, again, and after a whitespace
 // edit, against a golden file (colors and times off); and the model behind the browser: the
-// collector's batches, the tree's rows, filters and summary, and the timeline.
+// collector's batches, the tree's rows, filters and summary, and the timeline; and a live trace
+// (#939), built as events come in any order, against the batches' tree.
 //
 //   unit_trace <golden>            checks
 //   unit_trace <golden> --update   rewrites the golden file
@@ -1179,6 +1180,466 @@ void histograms(const std::filesystem::path& golden_path, bool update) {
   if (got != want) std::println(std::cerr, "--- got:\n{}", got);
 }
 
+// ---- A live trace (#939): the tree built as events come, in any order, against the one the
+// collector's batches build.
+
+// A simulated request: frames, which report their start and their end, and instants under them,
+// some of them reads of one cell in a row (which fold), and some frames that take no time. Ids
+// are given as each starts; times grow with them.
+struct Sim {
+  struct Item {
+    std::uint64_t id = 0, parent = 0;
+    bool frame = false;
+    std::vector<std::size_t> kids;  // items
+    engine::TraceEvent end;
+  };
+  std::vector<Item> items;  // [0] the request's own frame
+  std::chrono::steady_clock::time_point origin;
+
+  static constexpr std::array<std::string_view, 5> kinds{"ycxx::pipeline::Tu", "Pp", "FileText", "Lower", "Codegen"};
+
+  Sim(std::mt19937& rng, std::chrono::steady_clock::time_point at, std::uint64_t first_id = 1) : origin(at) {
+    next_ = first_id;
+    make(rng, 0, 0, 0);
+    finish_times(0);
+  }
+
+  // Every engine event, starts (`started`) and ends, in an order the engine could report them in:
+  // a frame's start before anything under it, everything under it ended before it ends.
+  std::vector<std::pair<bool, engine::TraceEvent>> valid_order(std::mt19937& rng) const {
+    std::vector<std::pair<bool, engine::TraceEvent>> out;
+    std::vector<std::pair<std::size_t, bool>> ready{{0, true}};  // (item, its start)
+    std::vector<std::size_t> left(items.size());
+    for (std::size_t i = 0; i < items.size(); ++i) left[i] = items[i].kids.size();
+    while (!ready.empty()) {
+      const std::size_t k = std::uniform_int_distribution<std::size_t>(0, ready.size() - 1)(rng);
+      const auto [i, start] = ready[k];
+      ready.erase(ready.begin() + static_cast<std::ptrdiff_t>(k));
+      const Item& it = items[i];
+      if (start) {
+        engine::TraceEvent s = it.end;
+        s.end = s.start;
+        s.alloc_bytes = s.allocs = 0;
+        s.peak_bytes = s.retained_bytes = 0;
+        s.errors.clear();
+        out.emplace_back(true, std::move(s));
+        for (std::size_t c : it.kids) ready.emplace_back(c, items[c].frame);
+        if (it.kids.empty()) ready.emplace_back(i, false);
+        continue;
+      }
+      out.emplace_back(false, it.end);
+      if (i == 0) continue;
+      const std::size_t p = parent_of_[i];
+      if (--left[p] == 0) ready.emplace_back(p, false);
+    }
+    return out;
+  }
+
+ private:
+  void make(std::mt19937& rng, std::size_t at, std::uint64_t parent, int depth) {
+    if (items.size() <= at) items.resize(at + 1), parent_of_.resize(at + 1);
+    Item& me = items[at];
+    me.id = next_++;
+    me.parent = parent;
+    me.frame = true;
+    engine::TraceEvent& e = me.end;
+    e.id = me.id;
+    e.parent = parent;
+    e.kind = kinds[std::uniform_int_distribution<std::size_t>(0, kinds.size() - 1)(rng)];
+    e.key = std::format("f{}", me.id);
+    e.cell = 1000 + me.id;
+    e.worker = std::uniform_int_distribution<std::int32_t>(-1, 3)(rng);
+    e.end_worker = std::uniform_int_distribution<int>(0, 3)(rng) == 0 ? std::uniform_int_distribution<std::int32_t>(-1, 3)(rng) : e.worker;
+    const int pick = std::uniform_int_distribution<int>(0, 9)(rng);
+    e.outcome = pick < 6 ? Outcome::executed : pick < 8 ? Outcome::cutoff : Outcome::verified;
+    e.start = origin + std::chrono::nanoseconds(me.id * 100);
+    e.alloc_bytes = std::uniform_int_distribution<std::uint64_t>(0, 4096)(rng);
+    e.allocs = e.alloc_bytes / 32;
+    e.peak_bytes = static_cast<std::int64_t>(e.alloc_bytes);
+    e.retained_bytes = std::uniform_int_distribution<std::int64_t>(-64, 1024)(rng);
+    e.span.file = std::uniform_int_distribution<int>(0, 2)(rng) == 0 ? "" : std::format("f{}.cpp", me.id % 3);
+    if (std::uniform_int_distribution<int>(0, 19)(rng) == 0) e.errors = "a.cpp:1:1: error: no";
+    const int kids = depth >= 4 ? 0 : std::uniform_int_distribution<int>(0, depth == 0 ? 8 : 5)(rng);
+    std::optional<engine::TraceEvent> last_instant;
+    for (int k = 0; k < kids; ++k) {
+      const std::size_t c = items.size();
+      items.resize(c + 1);
+      parent_of_.resize(c + 1);
+      parent_of_[c] = at;
+      items[at].kids.push_back(c);
+      if (std::uniform_int_distribution<int>(0, 9)(rng) < 4 && depth < 4) {
+        make(rng, c, items[at].id, depth + 1);
+        last_instant.reset();
+        continue;
+      }
+      // An instant: the same cell read again, often, so that reads in a row fold.
+      Item& in = items[c];
+      in.id = next_++;
+      in.parent = items[at].id;
+      engine::TraceEvent i;
+      if (last_instant && std::uniform_int_distribution<int>(0, 2)(rng) > 0) {
+        i = *last_instant;
+      } else {
+        i.kind = kinds[std::uniform_int_distribution<std::size_t>(0, kinds.size() - 1)(rng)];
+        i.cell = std::uniform_int_distribution<std::uint64_t>(1, 6)(rng);
+        i.key = std::format("c{}", i.cell);
+        const int o = std::uniform_int_distribution<int>(0, 3)(rng);
+        i.outcome = o == 0 ? Outcome::reused : o == 1 ? Outcome::input : o == 2 ? Outcome::durable : Outcome::waited;
+        i.retained_bytes = i.outcome == Outcome::input ? 100 : 0;
+        i.span.file = "a.cpp";
+      }
+      i.id = in.id;
+      i.parent = in.parent;
+      i.start = i.end = origin + std::chrono::nanoseconds(in.id * 100);
+      i.worker = i.end_worker = items[at].end.worker;
+      in.end = i;
+      last_instant = i;
+    }
+  }
+  // A frame ends after what is under it; a frame with nothing under it may take no time at all.
+  std::chrono::steady_clock::time_point finish_times(std::size_t at) {
+    Item& me = items[at];
+    if (!me.frame) return me.end.end;
+    auto end = me.end.start;
+    for (std::size_t c : me.kids) end = std::max(end, finish_times(c));
+    const bool none = me.kids.empty() && me.id % 4 == 0;
+    items[at].end.end = none ? end : end + std::chrono::nanoseconds(50);
+    return items[at].end.end;
+  }
+
+  std::uint64_t next_ = 1;
+  std::vector<std::size_t> parent_of_;
+};
+
+// Whatever order events came in, a tree's sums, depths, order, folding and summary agree with its
+// nodes: what each step of a live trace must keep. Empty: they do.
+std::string inconsistent(const trace::Tree& t) {
+  const auto nodes = t.nodes();
+  const auto at = [&](std::int32_t i) -> const trace::Tree::Node& { return nodes[static_cast<std::size_t>(i)]; };
+  const auto instant_leaf = [&](std::int32_t i) {
+    return !at(i).ev.running && at(i).ev.start_ns == at(i).ev.end_ns && at(i).children.empty();
+  };
+  trace::Summary want;
+  std::int32_t top = -1;
+  for (std::size_t k = 0; k < nodes.size(); ++k) {
+    const auto i = static_cast<std::int32_t>(k);
+    const trace::Tree::Node& n = at(i);
+    if (n.folded_into >= 0) {
+      const auto& head = at(n.folded_into).members;
+      if (std::ranges::find(head, i) == head.end()) return std::format("node {} is folded into {}, which does not list it", n.ev.id, at(n.folded_into).ev.id);
+      continue;
+    }
+    std::uint64_t subtree = 1, exec = trace::ran(n.ev) && !n.group ? 1 : 0, alloc = n.group ? 0 : n.ev.alloc_bytes;
+    std::int64_t retained = n.group ? 0 : trace::counted_retained(n.ev);
+    std::uint32_t repeat = n.own_repeat;
+    for (std::int32_t m : n.members) repeat += at(m).own_repeat;
+    if (!n.group && repeat != n.ev.repeat) return std::format("node {}: repeat {}, its members say {}", n.ev.id, n.ev.repeat, repeat);
+    std::uint64_t prev_id = 0;
+    for (std::size_t c = 0; c < n.children.size(); ++c) {
+      const trace::Tree::Node& k2 = at(n.children[c]);
+      if (k2.parent != i) return std::format("node {}'s child {} names another parent", n.ev.id, k2.ev.id);
+      if (k2.folded_into >= 0) return std::format("node {} shows folded {}", n.ev.id, k2.ev.id);
+      if (c > 0 && k2.ev.id <= prev_id) return std::format("node {}'s children out of id order", n.ev.id);
+      prev_id = k2.ev.id;
+      if (n.attached && k2.ev.depth != (n.group ? 0 : n.ev.depth + 1)) return std::format("node {} at depth {} under {}", k2.ev.id, k2.ev.depth, n.ev.id);
+      if (!n.group && n.attached && c > 0 && instant_leaf(n.children[c - 1]) && instant_leaf(n.children[c])) {
+        const Event &a = at(n.children[c - 1]).ev, &b = k2.ev;
+        if (a.cell == b.cell && a.kind == b.kind && a.outcome == b.outcome && a.errors == b.errors)
+          return std::format("node {}: alike instants {} and {} not folded", n.ev.id, a.id, b.id);
+      }
+      subtree += k2.subtree;
+      exec += k2.executions;
+      alloc += k2.incl.alloc;
+      retained += k2.incl.retained;
+    }
+    if (n.subtree != subtree || n.executions != exec || n.incl.alloc != alloc || n.incl.retained != retained)
+      return std::format("node {}: sums {} {} {} {}, its children's {} {} {} {}", n.ev.id, n.subtree, n.executions, n.incl.alloc, n.incl.retained,
+                         subtree, exec, alloc, retained);
+    if (n.group) continue;
+    if (n.ev.running) ++want.running;
+    else ++want.counts[std::to_underlying(n.ev.outcome)], ++want.events, want.add_memory(n.ev);
+    want.span_ns = std::max(want.span_ns, n.ev.end_ns);
+    top = std::max({top, n.ev.worker, n.ev.end_worker});
+  }
+  want.workers = top + 1;
+  const trace::Summary s = t.summary();
+  if (s.counts != want.counts || s.events != want.events || s.running != want.running || s.span_ns != want.span_ns || s.workers != want.workers ||
+      s.alloc_bytes != want.alloc_bytes || s.allocs != want.allocs || s.retained_bytes != want.retained_bytes)
+    return std::format("the summary ({} events, {} running, span {}, {} workers) is not its nodes' ({}, {}, {}, {})", s.events, s.running, s.span_ns,
+                       s.workers, want.events, want.running, want.span_ns, want.workers);
+  for (const auto& r : t.rows())
+    if (!at(r.node).attached || at(r.node).folded_into >= 0) return std::format("row of node {}, which is not shown", at(r.node).ev.id);
+  return {};
+}
+
+// Everything a tree shows, by event id (node indices differ with arrival order): each node in
+// pre-order, the summary, the rows, the timeline, the histograms, and the browser's frames.
+std::string shown(const trace::Tree& given) {
+  trace::Tree t = given;
+  std::string out;
+  const auto id = [&](std::int32_t i) { return i < 0 ? 0 : t.node(i).ev.id; };
+  for (std::int32_t i : t.preorder()) {
+    const trace::Tree::Node& n = t.node(i);
+    const Event& e = n.ev;
+    out += std::format("{} {} p{} {} {} {} {} {}-{} w{}→{} ×{} sub{} ran{} {}/{} {} {} {} {}\n", std::string(e.depth, ' '), e.id, id(n.parent), e.kind, e.key,
+                       trace::state_name(e), e.cell, e.start_ns, e.end_ns, e.worker, e.end_worker, e.repeat, n.subtree, n.executions, n.incl.alloc,
+                       n.incl.retained, n.expanded, e.errors, e.span.file, e.alloc_bytes);
+  }
+  const trace::Summary s = t.summary();
+  out += std::format("summary {} {} {} {} {} {} {} {}\n", s.counts, s.events, s.running, s.span_ns, s.workers, s.alloc_bytes, s.allocs, s.retained_bytes);
+  for (const auto& r : t.rows()) out += std::format("row {} {} {}\n", id(r.node), r.depth, r.match);
+  for (const auto& lane : trace::timeline(t, 37).lanes) {
+    out += "lane";
+    for (std::int32_t n : lane) out += std::format(" {}", id(n));
+    out += '\n';
+  }
+  for (auto by : {trace::Grouping::kind, trace::Grouping::file, trace::Grouping::children}) {
+    for (const trace::Group& g : trace::histogram(t, by, std::nullopt, trace::Metric::self_time))
+      out += std::format("group {} {} {} {}\n", g.name, g.cells, g.v, id(g.node));
+  }
+  trace::Browser b(t);
+  b.resize(30, 120);
+  out += plain(b.frame());
+  for (const char* k : {"e", "t", "b", "c", "b", "j", "j", "\r"}) {
+    (void)b.handle(trace::Key{k});
+    out += plain(b.frame());
+  }
+  return out;
+}
+
+void live() {
+  // A start, then its end; an instant; a running node's elapsed time; the summary while it runs.
+  {
+    trace::Tree t;
+    Event s = ev(1, 0, "Build", "a.cpp", Outcome::executed, 100, 100, 2);
+    s.running = true;
+    t.apply(std::span(&s, 1));
+    check(t.nodes().size() == 1 && t.node(0).ev.running && t.running() == 1 && t.summary().events == 0, "a start makes a running node, not yet an event");
+    t.advance(5'000);
+    check(t.node(0).ev.end_ns == 5'000 && t.summary().span_ns == 5'000, "a running node's time reaches now");
+    Event c = ev(3, 2, "Pp", "a.cpp", Outcome::executed, 200, 900, 1);
+    t.apply(std::span(&c, 1));
+    check(t.rows().size() == 1 && !t.node(1).attached && t.summary().events == 1, "an end whose parent has not come waits, unseen, but counts");
+    Event p = ev(2, 1, "Tu", "a.cpp", Outcome::executed, 150, 1000, 0);
+    t.apply(std::span(&p, 1));
+    check(t.rows().size() == 3 && t.node(1).attached && t.node(1).ev.depth == 2 && t.node(0).subtree == 3, "its parent comes: it joins under it");
+    Event end = ev(1, 0, "Build", "a.cpp", Outcome::executed, 100, 2'000, 2);
+    end.alloc_bytes = 64;
+    t.apply(std::span(&end, 1));
+    check(!t.node(0).ev.running && t.node(0).ev.end_ns == 2'000 && t.running() == 0 && t.node(0).incl.alloc == 64 && t.node(0).executions == 3,
+          "its end settles it: its outcome, end and memory");
+    check(inconsistent(t).empty(), inconsistent(t));
+  }
+  // A node that ended as an instant, folded into the one before it, gets a child (its end came
+  // first): it is no instant, and what was folded around it folds again as the collector folds
+  // it. In either order the same tree.
+  for (bool backwards : {false, true}) {
+    trace::Tree t;
+    const auto r = [](std::uint64_t id, std::uint64_t parent, std::uint64_t at, std::uint64_t cell) {
+      Event e = ev(id, parent, "K", std::format("k{}", cell), Outcome::reused, at, at, 0);
+      e.cell = cell;
+      return e;
+    };
+    Event top = ev(1, 0, "Build", "a", Outcome::executed, 0, 0, 0);
+    top.running = true;
+    std::vector<Event> es{top, r(2, 1, 10, 7), r(3, 1, 11, 7), r(4, 1, 12, 7), r(6, 1, 13, 7), r(5, 3, 11, 8)};
+    if (backwards) std::ranges::reverse(es);
+    t.apply(es);
+    check(inconsistent(t).empty(), inconsistent(t));
+    check(t.roots().size() == 1, "one top");
+    const auto kids = t.node(t.roots()[0]).children;
+    std::vector<std::pair<std::uint64_t, std::uint32_t>> got;
+    for (std::int32_t c : kids) got.emplace_back(t.node(c).ev.id, t.node(c).ev.repeat);
+    using P = std::pair<std::uint64_t, std::uint32_t>;
+    check(got == std::vector<P>{{2, 1}, {3, 1}, {4, 2}}, std::format("an instant with a child is no instant: 2, 3 (with 5 under it), 4 ×2 ({}): {}", backwards ? "backwards" : "in order", got));
+  }
+  // A request that ends with cells still running (an abandoned run): they failed.
+  {
+    trace::Tree t;
+    const std::uint64_t g = (std::uint64_t{1} << 63) | 1;
+    t.open_group(g, "#1", 0);
+    Event a = ev(1, 0, "Build", "a", Outcome::executed, 5, 5, 0);
+    a.running = true;
+    t.apply(std::span(&a, 1), g);
+    t.advance(900);
+    t.close_group(g, 1000);
+    check(t.running() == 0 && t.node(1).ev.outcome == Outcome::failed && t.node(1).ev.end_ns == 900 && !t.summary().running,
+          "a request's end fails what still runs, where its time reached");
+    check(inconsistent(t).empty(), inconsistent(t));
+  }
+  // A new run of the request under a view holding a node of the old tree (#939's review).
+  {
+    trace::Tree t;
+    std::vector<Event> many;
+    for (std::uint64_t k = 1; k <= 300; ++k) many.push_back(ev(k, k == 1 ? 0 : 1, "Pp", std::format("h{}", k), Outcome::executed, k, k + 1, 0));
+    t.apply(many);
+    trace::Browser b(t);
+    b.resize(30, 120);
+    b.set_live("building a.cpp", false);
+    (void)b.handle(trace::Key{"G"});
+    check(!b.following() && b.cursor() > 100, "the user went to the end");
+    (void)b.pump([&] {
+      t.reset();
+      t.apply(std::span(many).first(3));
+      return true;
+    });
+    check(b.cursor() == 0 && t.resets() == 1 && t.nodes().size() == 3, "a new tree: the view starts at its top");
+    check(plain(b.frame()).contains("Pp(h1)"), "and draws it");
+  }
+  // The filter's is:running.
+  {
+    trace::Tree t;
+    Event a = ev(1, 0, "Build", "a", Outcome::executed, 0, 0, 0), b = ev(2, 1, "Tu", "a", Outcome::reused, 5, 5, 0);
+    a.running = true;
+    t.apply(std::array{a, b});
+    t.set_filter("is:running");
+    check(t.rows().size() == 2 && t.node(t.rows()[0].node).ev.running, "is:running keeps the running cells (with what is under them)");
+    t.set_filter("Tu is:running");
+    check(t.rows().empty(), "and only them");
+    t.set_filter("is:ex");
+    check(t.rows().empty(), "a running cell has no outcome yet");
+    t.set_filter("is:r");
+    check(t.rows().size() == 2, "is:r is still reused (under its running parent)");
+  }
+
+  // Simulated requests, reported in orders the engine could report them in, and then in any order
+  // at all: every step consistent, and the tree each ends with is the batches' tree.
+  std::mt19937 rng(939);
+  const auto origin = std::chrono::steady_clock::now();
+  int compared = 0;
+  for (int round = 0; round < 60; ++round) {
+    const Sim sim(rng, origin);
+    const auto order = sim.valid_order(rng);
+    // The batches, as `--trace-engine` builds them after a build.
+    trace::Tree batch;
+    {
+      trace::Collector c([&](std::span<const Event> b) { batch.add(b); }, false, origin);
+      for (const auto& [start, e] : order)
+        if (!start) c.event(e);
+      c.finish();
+    }
+    // Live, in the engine's order, through `trace::Live`.
+    trace::Live live(false, origin);
+    for (const auto& [start, e] : order) start ? live.started(e) : live.event(e);
+    std::vector<Event> events = live.take();
+    check(live.take().empty(), "take empties the buffer");
+    const auto run = [&](std::vector<Event> stream, std::string_view how) {
+      trace::Tree t;
+      std::size_t i = 0;
+      while (i < stream.size()) {
+        const std::size_t n = std::min(stream.size() - i, std::uniform_int_distribution<std::size_t>(1, 9)(rng));
+        t.apply(std::span(stream).subspan(i, n));
+        i += n;
+        t.advance(i * 100);
+        if (const std::string why = inconsistent(t); !why.empty()) {
+          check(false, std::format("round {}, {}, after {} events: {}", round, how, i, why));
+          return;
+        }
+        (void)trace::Browser(t).frame();  // draws at any step
+      }
+      t.settle();
+      check(t.running() == 0, std::format("round {}, {}: nothing runs at the end", round, how));
+      const std::string want = shown(batch), got = shown(t);
+      check(got == want, std::format("round {}, {}: the live tree is the batches' tree", round, how));
+      if (got != want) std::println(std::cerr, "--- batches:\n{}\n--- live:\n{}", want, got);
+      ++compared;
+    };
+    run(events, "in the engine's order");
+    std::vector<Event> shuffled = events;
+    std::ranges::shuffle(shuffled, rng);
+    run(shuffled, "in any order");
+    run(std::vector(events.rbegin(), events.rend()), "backwards");
+  }
+  check(compared == 180, "every stream was compared");
+
+  // Two requests at once, interleaved, each under its node (`--watch`, `ctl trace`).
+  {
+    const Sim a(rng, origin, 1), b(rng, origin, 100'000);
+    trace::Tree batch, t;
+    const std::uint64_t ga = (std::uint64_t{1} << 63) | 1, gb = (std::uint64_t{1} << 63) | 2;
+    batch.open_group(ga, "#1", 0), batch.open_group(gb, "#2", 0);
+    t.open_group(ga, "#1", 0), t.open_group(gb, "#2", 0);
+    for (const auto& [sim, g] : {std::pair{&a, ga}, std::pair{&b, gb}}) {
+      trace::Collector c([&, g](std::span<const Event> evs) { batch.add(evs, g); }, false, origin);
+      for (const auto& [start, e] : sim->valid_order(rng))
+        if (!start) c.event(e);
+      c.finish();
+    }
+    trace::Live la(false, origin), lb(false, origin);
+    for (const auto& [start, e] : a.valid_order(rng)) start ? la.started(e) : la.event(e);
+    for (const auto& [start, e] : b.valid_order(rng)) start ? lb.started(e) : lb.event(e);
+    std::vector<Event> ea = la.take(), eb = lb.take();
+    std::ranges::shuffle(ea, rng);
+    std::size_t i = 0, j = 0;
+    while (i < ea.size() || j < eb.size()) {
+      if (i < ea.size() && (j == eb.size() || rng() % 2)) t.apply(std::span(ea).subspan(i++, 1), ga);
+      else t.apply(std::span(eb).subspan(j++, 1), gb);
+      if (const std::string why = inconsistent(t); !why.empty()) {
+        check(false, "two requests: " + why);
+        break;
+      }
+    }
+    batch.close_group(ga, 10), batch.close_group(gb, 10);
+    t.close_group(ga, 10), t.close_group(gb, 10);
+    check(shown(t) == shown(batch), "two requests interleaved: each request's tree is its batches'");
+  }
+
+  // Following (#939): the newest activity selected while it comes; a move of the user's stops it,
+  // `f` brings it back, and the end of the build goes back to the top.
+  {
+    trace::Tree t;
+    trace::Browser b(t);
+    b.resize(30, 120);
+    b.set_live("building a.cpp", false);
+    std::vector<Event> pending;
+    const auto feed = [&](Event e) {
+      pending.push_back(std::move(e));
+      return b.pump([&] {
+        t.apply(pending);
+        pending.clear();
+        t.advance(1000);  // the running cells reach the timeline's end
+        return true;
+      });
+    };
+    Event build = ev(1, 0, "Build", "a.cpp", Outcome::executed, 0, 0, -1);
+    build.running = true;
+    feed(build);
+    Event tu = ev(2, 1, "Tu", "a.cpp", Outcome::executed, 10, 10, 0);
+    tu.running = true;
+    feed(tu);
+    for (std::uint64_t k = 0; k < 40; ++k) feed(ev(3 + k, 2, "Pp", std::format("h{}.h", k), Outcome::executed, 20 + k, 30 + k, 1));
+    Event last = ev(50, 2, "Lower", "main", Outcome::executed, 100, 100, 2);
+    last.running = true;
+    feed(last);
+    check(b.following(), "a live view follows");
+    const auto rows = t.rows();
+    check(t.node(rows[b.cursor()].node).ev.id == 50, std::format("the newest running cell is selected (row {})", b.cursor()));
+    check(plain(b.frame()).contains("Lower(main) running"), "and in view, running");
+    check(plain(b.frame()).contains("▶ 2 running") || plain(b.frame()).contains("▶ 3 running"), "the header counts the running cells");
+    check(plain(b.frame()).contains("following"), "the status line says it follows");
+    (void)b.handle(trace::Key{"k"});
+    check(!b.following(), "a move of the user's stops following");
+    const std::size_t held = b.cursor();
+    Event more = ev(60, 2, "Lower", "f", Outcome::executed, 200, 200, 3);
+    more.running = true;
+    feed(more);
+    check(b.cursor() == held, "not following: the selection stays");
+    (void)b.handle(trace::Key{"f"});
+    check(b.following() && t.node(t.rows()[b.cursor()].node).ev.id == 60, "f follows again, at once");
+    (void)b.handle(trace::Mouse{trace::Mouse::Act::wheel_down, 0, 10, 10});
+    check(!b.following(), "the wheel stops following");
+    (void)b.handle(trace::Key{"f"});
+    (void)b.handle(trace::Key{"s"});
+    check(b.following(), "sorting keeps following: it keeps the node, not the row");
+    (void)b.handle(trace::Key{"t"});
+    (void)b.handle(trace::Key{"\r"});
+    check(!b.following(), "a slice opened from the timeline is the user's choice: following stops");
+    (void)b.handle(trace::Key{"f"});
+    b.end_live("the build has ended");
+    check(b.cursor() == 0 && !b.following() && plain(b.frame()).contains("(the build has ended)"), "the end goes back to the top, and says so");
+  }
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -1197,5 +1658,6 @@ int main(int argc, char** argv) {
   memory();
   spans();
   histograms(std::filesystem::path(argv[1]).parent_path() / "histogram.golden", update);
+  live();
   return ycxx::unit::result("unit.trace");
 }

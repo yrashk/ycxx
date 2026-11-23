@@ -351,6 +351,24 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
     window size, and keys written with pauses; the last frame is after the last `ESC [ H`.
   - Learned on #245.
 
+- **Test a live, incremental model against its batch twin on simulated streams, in every order.**
+  #939's live trace tree must end equal to the tree the collector's batches build, whatever order
+  events come in.
+  - Do: generate engine-like event streams (frames with starts and ends, runs of alike instants).
+    Feed each to the real batch path and to the live path, in the engine's order, shuffled and
+    backwards, in random chunks. After every chunk, check the incremental bookkeeping (sums,
+    depths, folding, the summary) against a recount. At the end, compare everything the view
+    shows. Unit tests written by hand missed every bug this found: sums stopping at a subtree
+    waiting for its parent, and two folding cases.
+  - Do: make the out-of-order path as cheap as the in-order one. Workers' events reach a shared
+    buffer slightly out of id order all the time. A whole-parent refold per such event was
+    quadratic under a parent of 80k children, and the browser fell 2 s behind a 2 s build. Keep the
+    repair local, around the change.
+  - Do: guard an index into a container that can be replaced with a contract. A stale index read
+    zeroed memory, landed on row 0 by chance, and the mutation test stayed green until
+    `contract_assert` made it abort.
+  - Learned on #939.
+
 - **Test a terminal UI as a model fed events, and only the terminal around it under a pty.** The
   trace browser's keys went untested while it read `/dev/tty` itself (#245). Moving its state and
   drawing into a model that takes key and mouse events and returns frames of a given size (#635)

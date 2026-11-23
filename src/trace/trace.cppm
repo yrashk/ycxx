@@ -1,6 +1,6 @@
 // What went through the query engine, for `ycxx cxx --trace-engine` (#245): the engine's events
 // as values that cross the daemon socket, a collector that turns a request's concurrent events
-// into complete subtrees in dependency order, the line renderer of the stream mode, and the model
+// into complete subtrees in dependency order or hands them on as they come (`Live`, #939), the line renderer of the stream mode, and the model
 // behind the interactive browser (`:browse`): the tree, its filters, the summary and the timeline
 // of the pool's workers.
 export module ycxx.trace;
@@ -13,6 +13,120 @@ export import :clipboard;
 export import :browse;
 
 export namespace ycxx::trace {
+
+// An engine event as a trace's `Event`: times in nanoseconds since `origin`.
+Event to_event(const engine::TraceEvent& e, std::chrono::steady_clock::time_point origin) {
+  Event ev;
+  ev.id = e.id;
+  ev.parent = e.parent;
+  ev.kind = short_kind(e.kind);
+  ev.key = e.key;
+  ev.outcome = e.outcome;
+  const auto since = [&](std::chrono::steady_clock::time_point t) {
+    return t < origin ? 0 : static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(t - origin).count());
+  };
+  ev.start_ns = since(e.start);
+  ev.end_ns = std::max(ev.start_ns, since(e.end));
+  ev.worker = e.worker;
+  ev.end_worker = e.end_worker;
+  ev.value = e.value;
+  ev.errors = e.errors;
+  ev.cell = e.cell;
+  ev.alloc_bytes = e.alloc_bytes;
+  ev.allocs = e.allocs;
+  ev.peak_bytes = e.peak_bytes;
+  ev.retained_bytes = e.retained_bytes;
+  ev.span = e.span;
+  return ev;
+}
+
+// A live trace (#939): every frame's start and end, and every instant, as the engine reports
+// them, for a view that shows the build while it runs (`Tree::apply`). The workers only append
+// to a buffer under a lock held for that alone; whoever shows the trace takes what has come
+// (`take`), on a timer. Nothing is dropped, so the view ends with the whole trace, and no worker
+// ever waits for the view: the buffer holds what came since the last `take`.
+class Live final : public engine::Tracer {
+ public:
+  explicit Live(bool values = true, std::chrono::steady_clock::time_point origin = std::chrono::steady_clock::now())
+      : values_(values), origin_(origin) {}
+
+  void event(engine::TraceEvent e) noexcept override { push(to_event(e, origin_)); }
+  void started(engine::TraceEvent e) noexcept override {
+    Event ev;
+    try {
+      ev = to_event(e, origin_);
+    } catch (...) {
+      return;
+    }
+    ev.running = true;
+    push(std::move(ev));
+  }
+  bool values() const noexcept override { return values_; }
+  bool starts() const noexcept override { return true; }
+
+  // What came since the last take, in the order it came.
+  std::vector<Event> take() {
+    std::vector<Event> out;
+    std::lock_guard lock(m_);
+    out.swap(events_);
+    return out;
+  }
+  // Nanoseconds from the trace's start to now, on the events' clock.
+  std::uint64_t now_ns() const {
+    return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - origin_).count());
+  }
+  std::chrono::steady_clock::time_point origin() const noexcept { return origin_; }
+
+ private:
+  void push(Event ev) noexcept {
+    try {
+      std::lock_guard lock(m_);
+      events_.push_back(std::move(ev));
+    } catch (...) {
+      // Out of memory loses the event, never the compile.
+    }
+  }
+
+  bool values_;
+  std::chrono::steady_clock::time_point origin_;
+  std::mutex m_;
+  std::vector<Event> events_;
+};
+
+// Hands every event to two tracers: a request watched both whole (`Collector`) and live.
+class Tee final : public engine::Tracer {
+ public:
+  Tee(engine::Tracer& a, engine::Tracer& b) : a_(&a), b_(&b) {}
+  void event(engine::TraceEvent e) noexcept override {
+    engine::TraceEvent copy;
+    try {
+      copy = e;
+    } catch (...) {
+      a_->event(std::move(e));
+      return;
+    }
+    a_->event(std::move(copy));
+    b_->event(std::move(e));
+  }
+  void started(engine::TraceEvent e) noexcept override {
+    if (!a_->starts()) return b_->started(std::move(e));
+    if (!b_->starts()) return a_->started(std::move(e));
+    engine::TraceEvent copy;
+    try {
+      copy = e;
+    } catch (...) {
+      return;
+    }
+    a_->started(std::move(copy));
+    b_->started(std::move(e));
+  }
+  bool values() const noexcept override { return a_->values() || b_->values(); }
+  bool starts() const noexcept override { return a_->starts() || b_->starts(); }
+
+ private:
+  engine::Tracer* a_;
+  engine::Tracer* b_;
+};
 
 // Turns a request's engine events into `Event`s and hands them to `sink` a complete subtree at a
 // time, in pre-order with depths: when a top-level event (a request's own cell) arrives, every
@@ -61,30 +175,7 @@ class Collector final : public engine::Tracer {
   std::chrono::steady_clock::time_point origin() const noexcept { return origin_; }
 
  private:
-  Event convert(const engine::TraceEvent& e) const {
-    Event ev;
-    ev.id = e.id;
-    ev.parent = e.parent;
-    ev.kind = short_kind(e.kind);
-    ev.key = e.key;
-    ev.outcome = e.outcome;
-    const auto since = [&](std::chrono::steady_clock::time_point t) {
-      return t < origin_ ? 0 : static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(t - origin_).count());
-    };
-    ev.start_ns = since(e.start);
-    ev.end_ns = std::max(ev.start_ns, since(e.end));
-    ev.worker = e.worker;
-    ev.end_worker = e.end_worker;
-    ev.value = e.value;
-    ev.errors = e.errors;
-    ev.cell = e.cell;
-    ev.alloc_bytes = e.alloc_bytes;
-    ev.allocs = e.allocs;
-    ev.peak_bytes = e.peak_bytes;
-    ev.retained_bytes = e.retained_bytes;
-    ev.span = e.span;
-    return ev;
-  }
+  Event convert(const engine::TraceEvent& e) const { return to_event(e, origin_); }
 
   // `ev` and everything pending under it, in pre-order.
   void flush(Event ev, std::uint32_t depth) {

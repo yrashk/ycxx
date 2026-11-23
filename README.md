@@ -568,7 +568,9 @@ reused, verified green or cut off early, how long it took and on which worker, a
 memory each cell allocated and retains, with sums per subtree, per query kind and per build. A second build
 shows everything reused. A compile error is marked red at the cell where it starts, and its
 message is shown up to the root. Diagnostic details include the file, line and column where
-available. `--trace-engine=interactive` opens a browser of the trace after the compile: a tree
+available. `--trace-engine=interactive` opens a browser of the trace that fills in while the
+compile runs, through the daemon or in-process: cells appear as they start, with their time so far,
+and settle as they end, while the view follows the newest activity. It has a tree
 with each function's IR and assembly, a timeline of the pool's workers, and filters. It follows
 the terminal's size and takes the mouse: click to select, fold and sort by a column, use the
 wheel to scroll, and drag to resize the pane. It copies a cell, a subtree, selected rows or any
