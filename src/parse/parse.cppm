@@ -7970,20 +7970,35 @@ std::optional<Program::DerivedVirtualDestructor> Program::derived_virtual_destru
     accept(kw_noexcept);
     if (!primary && !tokens.empty() && tokens.front().kind == identifier && r_->name(tokens.front()) == "override")
       tokens = tokens.subspan(1);
-    return accept(semi) && tokens.empty() ? &head : nullptr;
+    return accept(semi) && tokens.empty() ? &written : nullptr;
   };
 
-  const auto* base_head = plain_destructor(edge.cls, *base, true);
-  if (!base_head || !plain_destructor(cls, *derived, false)) return std::nullopt;
+  const auto* base_destructor = plain_destructor(edge.cls, *base, true);
+  if (!base_destructor || !plain_destructor(cls, *derived, false)) return std::nullopt;
   const auto& field = base->fields.front();
   const auto pointer = w_->types.rec(field.type);
   if (field.dmi || field.bit_width || field.no_unique_address ||
       base->access_of(field.entity) != ast::Access::public_ || pointer.kind != sema::TypeKind::pointer ||
       w_->types.is_function(pointer.inner)) return std::nullopt;
-  if (std::ranges::any_of(base_head->members, [&](u32 k) {
-        const auto& source = items_->items[k];
-        return layout_attribute(*r_, source.begin, source.end, LayoutAttributes::any);
-      })) return std::nullopt;
+  // A canonical pointer can hide alignment carried through an alias or decltype. The
+  // only other member is a directly written, unadorned pointer to a builtin type.
+  const auto& members = items_->items[base_destructor->parent].members;
+  const auto field_item = std::ranges::find_if(members, [&](u32 k) {
+    const auto& source = items_->items[k];
+    return &source != base_destructor && source.kind != ItemKind::access_spec;
+  });
+  if (field_item == members.end()) return std::nullopt;
+  const auto& source = items_->items[*field_item];
+  const auto tokens = std::span(r_->tokens).subspan(source.begin, source.end - source.begin);
+  if (source.kind != ItemKind::declaration || tokens.size() < 4 || tokens.back().kind != semi) return std::nullopt;
+  const auto name = tokens[tokens.size() - 2];
+  if (name.kind != identifier || r_->name(name) != w_->ins.names.spelling(field.name)) return std::nullopt;
+  const auto prefix = tokens.first(tokens.size() - 2);
+  const auto star_token = std::ranges::find(prefix, star, &lex::Tok::kind);
+  const auto cv = [](lex::Tok token) { return token.kind == kw_const || token.kind == kw_volatile; };
+  if (star_token == prefix.begin() || star_token == prefix.end() ||
+      !std::all_of(prefix.begin(), star_token, [&](lex::Tok token) { return cv(token) || Parser::simple_type_keyword(token.kind); }) ||
+      !std::all_of(std::next(star_token), prefix.end(), cv)) return std::nullopt;
 
   // A dynamic root gets the vptr before its field. The derived record reuses that base at zero.
   const std::array fields{ast::scalar_placed(target.pointer_size, target.pointer_align)};
