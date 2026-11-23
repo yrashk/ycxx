@@ -542,6 +542,24 @@ struct SiteConfig : SiteProfile<2u> {
 
 The same `SiteConfig::slots` can supply the upper limit in a counted unsigned loop.
 
+If a deployment resolves its limit through a compile-time function, replace
+`HandlerPolicy` with this version. The qualified `consteval` call supplies the
+same limit to the runtime budget and the static effect bound.
+
+```cpp
+namespace deployment {
+template<class Config>
+consteval unsigned slots_for() { return Config::slots; }
+}
+
+template<class Effect, class Config>
+  requires (Config::slots > 0) && (Config::slots <= 4)
+struct HandlerPolicy {
+  using Budget = fx::budget<Effect, deployment::slots_for<Config>()>;
+  using Bound = fx::set<fx::at_most<Effect, deployment::slots_for<Config>()>>;
+};
+```
+
 ### Inspect a checked build
 
 Open YCXX's trace browser while it compiles the reflected handler.
