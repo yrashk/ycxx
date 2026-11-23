@@ -575,7 +575,8 @@ hosted `<cstdint>`, `<cinttypes>`, and `<inttypes.h>` compile. A Darwin target c
 SDK or one selected by `SDKROOT`. Cross-target builds can also supply target headers with `-I` or
 `-isystem`. When no target `<stdint.h>` is available, `<cstdint>` uses compiler predefines.
 `-nostdinc` omits the automatic include directories and keeps the explicit ones.
-[#251](https://github.com/yrashk/ycxx/issues/251) ·
+`-nostdinc++` omits only the automatic libycxx source and generated include directories.
+[#251](https://github.com/yrashk/ycxx/issues/251) · [#997](https://github.com/yrashk/ycxx/issues/997) ·
 [#475](https://github.com/yrashk/ycxx/issues/475) · [#657](https://github.com/yrashk/ycxx/issues/657) ·
 [#664](https://github.com/yrashk/ycxx/issues/664) · [#690](https://github.com/yrashk/ycxx/issues/690)
 
