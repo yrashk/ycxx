@@ -65,13 +65,11 @@ def command_line(world, scope):
         reports.append(diagnostic)
     assert reports[0] == reports[-1]
 
-    for flags, enabled in (((), True), (('-Wno-all',), False),
-                           (('-Wmultichar', '-Wno-all'), True), (('-Wno-multichar',), False)):
+    # Preprocess-only compilation does not publish the phase-4 literal warning.
+    for flags in ((), ('-Wno-all',), ('-Wmultichar', '-Wno-all'), ('-Wno-multichar',)):
         tokens, diagnostic = invoke('pp.cpp', *flags, phase='-E')
         assert b'preprocessor_probe' in tokens, tokens
-        emitted = warnings(diagnostic)
-        assert len(emitted) == int(enabled), (flags, diagnostic)
-        assert all(b'pp.cpp:1:' in line for line in emitted), diagnostic
+        assert not warnings(diagnostic), (flags, diagnostic)
 
     # The pinned switches and their positive counterparts must accept a quiet input.
     for flags in (PIN_FLAGS, ('-Wno-extra', '-Wsized-deallocation', '-Wattributes')):
@@ -91,7 +89,7 @@ def command_line(world, scope):
         _, diagnostic = invoke('system.cpp', '-Wno-all', '-Wmultichar', include, 'inc')
         emitted = warnings(diagnostic)
         assert len(emitted) == expected, (include, diagnostic)
-        assert any(b'retained_system_warning' in line for line in emitted), diagnostic
+        assert any(b'warning.hpp:1:' in line and b'#warning' in line for line in emitted), diagnostic
         assert any(b'warning.hpp:2:' in line for line in emitted) == (include == '-I'), diagnostic
     return pid
 
