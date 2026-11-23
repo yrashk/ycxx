@@ -556,8 +556,9 @@ written default member initializer are value-initialized.
   and reference-related class operands. [#218](https://github.com/yrashk/ycxx/issues/218)
 - `__is_base_of` for known class hierarchies, including private and ambiguous bases and dependent
   operands in supported class-template bases, variable-template initializers, function template
-  bodies and constraints (concepts, requires-clauses, nested-requirements), as libycxx's
-  `std::derived_from` needs.
+  bodies and atomic constraints (concepts and requires-clauses, nested-requirements inside them
+  included), as libycxx's `std::derived_from` needs. The other convertibility, assignability,
+  constructibility and destructibility traits defer dependent operands in constraints too.
   [Extension guide](docs/EXTENSIONS.md) · [#218](https://github.com/yrashk/ycxx/issues/218)
 - `__is_empty`, `__is_standard_layout`, and `__is_final` accept dependent operands in supported
   class-template bases and variable-template initializers. The emptiness query accounts for

@@ -2380,9 +2380,10 @@ session's.*
   constructor, and an eligible implicit trivial destructor. Both traits also answer object
   pointer and `std::nullptr_t` sources converted to a non-reference target: same-type and
   `cv void*` targets with added pointee qualifiers, Derived* to Base* through an accessible,
-  unambiguous base of a complete Derived (an incomplete one gives false), the null pointer value,
-  and `bool` targets ([conv.ptr], [conv.qual], [conv.bool]); function, member and multi-level
-  pointers are diagnosed. Supported class-template bases and variable-template initializers
+  unambiguous base of a complete Derived (an incomplete one gives false; virtual functions do not
+  matter), the null pointer value, and `bool` targets ([conv.ptr], [conv.qual], [conv.bool]). An
+  array pointee's qualifiers are its elements'. Function, member and multi-level pointers and
+  conversions to an array of unknown bound are diagnosed. Supported class-template bases and variable-template initializers
   replay dependent operands and check class completeness at the demand. Other combinations,
   including class `__is_nothrow_convertible`, get hard diagnostics.
   `__has_builtin` answers 0 while support is partial ([meta.rel], [dcl.init.ref], #218).

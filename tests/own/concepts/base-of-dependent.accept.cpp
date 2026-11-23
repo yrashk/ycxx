@@ -25,6 +25,9 @@ struct Both : Left, Right {};
 static_assert(BaseOf<Private, A> && !DerivedFrom<Private, A>);
 static_assert(BaseOf<Both, A> && !DerivedFrom<Both, A>);
 static_assert(DerivedFrom<Both, Left>);
+struct Abstract { virtual void f() = 0; };
+struct Concrete : Abstract { void f() override {} };
+static_assert(DerivedFrom<Concrete, Abstract> && !DerivedFrom<Abstract, Concrete>);
 
 // The same class need not be complete ([meta.rel]); nor does a non-class operand.
 struct Incomplete;

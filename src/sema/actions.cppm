@@ -1809,17 +1809,21 @@ public:
     }
     return bool_literal(ts.is_reference(lhs) && !ts.rec(lhs).rvalue_ref && !Types::is_const(destination), begin, end);
   }
-  // The base-clause parser admits only nonvirtual bases. Count paths regardless of access:
-  // a private path can still make a public one ambiguous. Two arrivals at a class suffice
-  // to prove ambiguity for any base reached through it.
-  const ClassRec* unique_public_base(EntityId derived, EntityId base) {
+  // Whether `base` is a base of `derived` along exactly one path, and that path public: an
+  // unambiguous, accessible base from outside both classes ([class.derived], [class.access.base]).
+  // `unknown` when a class on the way is not defined or, with `ordinary_layouts`, is a union or
+  // needs virtual support. The base-clause parser admits only nonvirtual bases. Count paths
+  // regardless of access: a private path can still make a public one ambiguous. Two arrivals at
+  // a class suffice to prove ambiguity for any base reached through it.
+  enum class BasePath : u8 { none, unique_public, unknown };
+  BasePath base_path(EntityId derived, EntityId base, bool ordinary_layouts) {
     struct Path {
       EntityId cls;
       bool public_;
     };
     std::vector<Path> pending{{derived, true}};
     std::map<EntityId, unsigned> arrivals;
-    const ClassRec* found = nullptr;
+    bool found = false, unique_public = true;
     while (!pending.empty()) {
       const auto [cls, public_] = pending.back();
       pending.pop_back();
@@ -1827,16 +1831,22 @@ public:
       if (count == 2) continue;
       ++count;
       const ClassRec* record = classes().find(cls);
-      if (!record || !record->defined || record->union_ || record->polymorphic || record->layout_requires_virtual_support)
-        return nullptr;
+      if (!record || !record->defined ||
+          (ordinary_layouts && (record->union_ || record->polymorphic || record->layout_requires_virtual_support)))
+        return BasePath::unknown;
       if (cls == base) {
-        if (found || !public_) return nullptr;
-        found = record;
+        unique_public = unique_public && !found && public_;
+        found = true;
       }
       for (const BaseRec& edge : record->bases)
         pending.push_back({edge.cls, public_ && edge.access == ast::Access::public_});
     }
-    return found;
+    return found && unique_public ? BasePath::unique_public : BasePath::none;
+  }
+  // The base's record when it is a unique public base and every class on the way has an
+  // ordinary layout; the by-value and reference conversions model only those.
+  const ClassRec* unique_public_base(EntityId derived, EntityId base) {
+    return base_path(derived, base, true) == BasePath::unique_public ? classes().find(base) : nullptr;
   }
 
   // The source of the copy or move is the base subobject, not a newly constructed Derived
@@ -1860,7 +1870,6 @@ public:
   enum class PointerConversion : u8 { no, yes, unmodelled, failed };
   PointerConversion object_pointer_conversion(QualType from, QualType to, engine::Loc loc) {
     using enum PointerConversion;
-    const auto answer = [](bool b) { return b ? yes : no; };
     const Types& ts = types();
     // A null pointer value converts to any pointer type; to `bool` only by direct-initialization
     // ([conv.ptr]/1, [conv.bool]).
@@ -1877,9 +1886,12 @@ public:
         ts.is_member_pointer(source) || ts.is_member_pointer(target))
       return unmodelled;
     // Every conversion here adds cv-qualifiers to the pointee, never removes them ([conv.qual]).
-    if (!cv_within(Types::cv(source), Types::cv(target))) return no;
-    const QualType s = Types::unqualified(source), t = Types::unqualified(target);
+    // An array's are its elements' ([basic.type.qualifier]/3).
+    if (!cv_within(object_cv(source), object_cv(target))) return no;
+    const QualType s = object_unqualified(source), t = object_unqualified(target);
     if (s == t || ts.is_void(t)) return yes;  // the same type, or an object type to `cv void*`
+    // A known bound converts to an unknown one, also nested ([conv.qual]).
+    if (ts.is_array(s) || ts.is_array(t)) return unmodelled;
     if (!ts.is_class(s) || !ts.is_class(t)) return no;
     // Derived* to Base* needs a complete Derived whose Base is accessible and unambiguous
     // ([conv.ptr]/3); without one, the pointer types are unrelated.
@@ -1887,10 +1899,13 @@ public:
     const auto demand = q_->type_trait_at_demand(derived, loc);
     if (!(demand ? *demand : q_->is_complete_at_source(derived)))
       return q_->type_trait_instantiation_failed(derived) ? failed : no;
-    // A union has no bases and is no base ([class.union]).
-    const auto reaches = reaches_base(derived, base);
-    if (!reaches) return unmodelled;
-    return answer(*reaches && unique_public_base(derived, base) != nullptr);
+    // Virtual functions do not change which bases a class has or the access to them.
+    switch (base_path(derived, base, false)) {
+      case BasePath::unique_public: return yes;
+      case BasePath::none: return no;
+      case BasePath::unknown: return unmodelled;
+    }
+    std::unreachable();
   }
   // Reference binding follows the category of declval<From>() ([meta.rel], [dcl.init.ref]).
   Ex convertibility_expr(ast::DepOp op, NameId name, QualType source, QualType target, u32 begin, u32 end) {

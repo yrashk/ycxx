@@ -2121,6 +2121,8 @@ public:
     return {std::to_underlying(p_->id(dmi.item)), dmi.begin - p_->items().items[dmi.item].begin + offset};
   }
   bool in_type_trait_pattern() const override { return retain_type_trait_pattern; }
+  // A replay owning the trait's tokens, where a concrete operand is judged at its written source.
+  // An atom's satisfaction is not one: its concrete operands keep the check's own point.
   bool in_type_trait_replay() const override { return type_trait_demand.has_value(); }
   void record_dependent_type_trait_operand(engine::Loc loc) override {
     p_->dependent_type_trait_operands_.emplace(loc.item, loc.offset);
