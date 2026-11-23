@@ -1576,11 +1576,17 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   enumerator references, fixed-base range checks, and underlying-type inference. Size and
   alignment of an inferred enum with dependent values wait for that replay.
   [#861](https://github.com/yrashk/ycxx/issues/861)
+- Named scoped member enums with a supported fixed underlying type publish their declaration
+  and layout when the enclosing class is instantiated. Looking up an enumerator instantiates
+  the full definition with the owning specialization's template arguments and lexical scope.
+  Failed nested demands publish no enumerator values. Class layout and type-only use leave
+  the definition and unused default member initializers pending ([temp.inst], [dcl.enum]).
+  [#893](https://github.com/yrashk/ycxx/issues/893)
 - Further work includes opaque declarations in classes or blocks, unnamed empty definitions,
   unnamed definitions followed by declarators, and `E{}` and `E(v)` expressions
   (#157). Enumerations in a block are tracked in #117. Qualified lookup of earlier enumerators
-  while the unnamed definition is open is tracked in #879. Dependent scoped enum definitions
-  wait for #893, and dependent unnamed definitions for #894.
+  while the unnamed definition is open is tracked in #879. Dependent unnamed definitions
+  remain in #894.
 
 ## Direct explicit destructor calls (#722)
 
