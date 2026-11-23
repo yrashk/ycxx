@@ -1852,7 +1852,7 @@ public:
       Tk following = kind(after_type);
       if (following == Tk::l_brace) return false;  // `T{args}` is a functional conversion.
       if (following != Tk::l_paren) return true;
-      if (statement)
+      if (statement && k != Tk::kw_typename)
         // An unnamed grouped pointer such as `int (*)(int)` cannot be a cast operand.
         return function_pointer_declarator_ahead(after_type, PointerLookahead::abstract);
 
