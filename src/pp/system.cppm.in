@@ -28,8 +28,12 @@ std::string_view resource_include_dir(const ast::Target& target) {
 }
 
 // `sdkroot` is the request's absolute Darwin SDK override. An empty value uses the configured SDK.
-std::vector<std::string> system_dirs(const ast::Target& target, std::string_view sdkroot = {}) {
-  std::vector<std::string> dirs{"@YCXX_LIBYCXX_INCLUDE@", "@YCXX_LIBYCXX_GENERATED_INCLUDE@"};
+std::vector<std::string> system_dirs(const ast::Target& target, std::string_view sdkroot = {}, bool include_libycxx = true) {
+  std::vector<std::string> dirs;
+  if (include_libycxx) {
+    dirs.emplace_back("@YCXX_LIBYCXX_INCLUDE@");
+    dirs.emplace_back("@YCXX_LIBYCXX_GENERATED_INCLUDE@");
+  }
   if (target.triple == ast::x86_64_linux.triple) {
     dirs.emplace_back(resource_include_dir(target));
     dirs.emplace_back(common_resource_include);
