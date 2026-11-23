@@ -888,6 +888,21 @@ public:
     return std::nullopt;
   }
 
+  std::optional<ast::DeclSema> namespace_concept_for_expression(EntityId ns, NameId name, u32 at) {
+    auto decls = q_->namespace_members(ns, name);
+    auto concept_decl = std::ranges::find(decls, ast::DeclKind::concept_, &ast::DeclSema::kind);
+    if (concept_decl == decls.end()) return std::nullopt;
+    // A concept hides class and enumeration names ([basic.lookup.general]/4).
+    if (std::ranges::any_of(decls, [&](const ast::DeclSema& d) {
+          return d.entity != concept_decl->entity && d.kind != ast::DeclKind::class_ &&
+                 d.kind != ast::DeclKind::enum_ && d.kind != ast::DeclKind::namespace_;
+        })) {
+      diag(at, Diag::ambiguous_name, name);
+      return std::nullopt;
+    }
+    return *concept_decl;
+  }
+
   // The specialization of class template `templ` for `args` ([temp.spec.general]): its entity is
   // the template and the canonical arguments (§B1.5). With dependent arguments it is a dependent
   // type ([temp.dep.type]).

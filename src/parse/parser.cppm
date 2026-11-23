@@ -4328,13 +4328,16 @@ public:
         return type_conversion(*t, begin);
       }
     if (is(Tk::less)) {
-      if (s->ns)
-        if (auto c = s_->namespace_template(*s->ns, n, ast::DeclKind::concept_)) {
+      if (s->ns) {
+        auto diags = s_->diag_count();
+        auto c = s_->namespace_concept_for_expression(*s->ns, n, name_at);
+        if (c || s_->has_error_since(diags)) {
           auto args = template_argument_list(nullptr, nullptr, /*expand_empty=*/true);
-          if (!args) return {NodeId::none, begin, pos()};
+          if (!c || !args) return {NodeId::none, begin, pos()};
           return s_->concept_id_expr(*c, *args, begin, pos(),
                                      class_template_base && in_template_value_argument_ && !s_->unevaluated);
         }
+      }
       // `N::v<args>`: a variable template of the namespace ([temp.names]/3).
       if (s->ns)
         if (auto v = s_->namespace_template(*s->ns, n, ast::DeclKind::variable)) {
