@@ -3194,7 +3194,9 @@ public:
                    std::ranges::any_of(block_types_, [&](auto& t) { return t.depth == depth && t.name == name; }) ||
                    std::ranges::any_of(block_usings_, [&](const BlockUsing& used) {
                      return used.depth == depth && used.name == name &&
-                            std::ranges::contains(used.decls, ast::DeclKind::type_alias, &ast::DeclSema::kind);
+                            std::ranges::any_of(used.decls, [](const ast::DeclSema& decl) {
+                              return is_type(decl.kind) && !is_non_template_tag(decl);
+                            });
                    });
       if (scopes_.size() >= 2 && !guarded_.empty() && guarded_.back() == scopes_.size() - 2)
         clash = clash || std::ranges::any_of(scopes_[guarded_.back()], [&](auto& p) { return p.first == name; });
