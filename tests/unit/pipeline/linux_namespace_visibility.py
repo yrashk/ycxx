@@ -2,6 +2,7 @@
 
 import os
 from pathlib import Path
+import subprocess
 import sys
 import tempfile
 
@@ -98,6 +99,76 @@ int outer::g() noexcept { return 29; }
     })
 
 
+def check_header_variants(scope, readelf, env, compile):
+    header = scope / 'namespace.hpp'
+    (scope / 'definition.cpp').write_text('''\
+#include "namespace.hpp"
+int api::probe() noexcept { return 17; }
+int outside::neighbor() noexcept { return 23; }
+''')
+    (scope / 'reference.cpp').write_text('''\
+#include "namespace.hpp"
+int use() noexcept { return api::probe() + outside::neighbor(); }
+''')
+    snapshots = []
+    for visibility in ('hidden', 'default', None, 'hidden'):
+        annotation = f'[[__gnu__::__visibility__("{visibility}")]] ' if visibility else ''
+        header.write_text(f'namespace {annotation}api {{\n'
+                          'inline namespace v1 { int probe() noexcept; }\n'
+                          '}\nnamespace outside { int neighbor() noexcept; }\n')
+        objects = []
+        for source, defined in (('definition', True), ('reference', False)):
+            obj = f'{source}.o'
+            compile(f'{source}.cpp', obj)
+            table = run([readelf, '-Ws', obj], scope, env)
+            for name, expected in (('_ZN3api2v15probeEv', (visibility or 'default').upper()),
+                                   ('_ZN7outside8neighborEv', 'DEFAULT')):
+                entry, = (line.split() for line in table.splitlines() if line.split()[-1:] == [name])
+                assert entry[4:6] == ['GLOBAL', expected], (obj, entry)
+                if defined:
+                    assert entry[3] == 'FUNC' and entry[6].isdecimal(), (obj, entry)
+                else:
+                    assert entry[6] == 'UND', (obj, entry)
+            objects.append((scope / obj).read_bytes())
+        snapshots.append(objects)
+    assert snapshots[0] == snapshots[-1]
+
+
+def check_resident_header(options, readelf, scope, env):
+    (scope / '.ycxx').touch()
+    env = {key: value for key, value in env.items()
+           if key not in ('YCXX_NO_DAEMON', 'YCXX_DAEMON', 'YCXX_ROOT', 'YCXX_NO_WATCH')}
+    ycxx = options[0]
+    with tempfile.TemporaryDirectory(prefix='yd-', dir='/tmp') as runtime:
+        env.update(YCXX_RUNTIME_DIR=runtime, XDG_CACHE_HOME=str(scope / 'cache'))
+        cold, resident = dict(env, YCXX_NO_DAEMON='1'), dict(env, YCXX_DAEMON='require')
+        initial_pid = None
+
+        def pid():
+            status = run([ycxx, 'ctl', 'status'], scope, env)
+            found, = (line for line in status.splitlines() if line.startswith('pid: '))
+            return found
+
+        def compile(source, obj):
+            nonlocal initial_pid
+            args = [*options, '-c', source, '-o', obj]
+            output = scope / obj
+            output.unlink(missing_ok=True)
+            run(args, scope, cold)
+            expected = output.read_bytes()
+            output.unlink()
+            run(args, scope, resident)
+            assert output.read_bytes() == expected, obj
+            if initial_pid is None:
+                initial_pid = pid()
+
+        try:
+            check_header_variants(scope, readelf, env, compile)
+            assert pid() == initial_pid
+        finally:
+            subprocess.run([ycxx, 'ctl', 'shutdown'], cwd=scope, env=env, capture_output=True, timeout=30)
+
+
 def main():
     ycxx, readelf, libycxx = sys.argv[1:]
     options = (ycxx, 'cxx', '--target=x86_64-pc-linux-gnu', '-std=c++26')
@@ -113,6 +184,7 @@ def main():
 
         check_namespace_visibility(scope, Path(libycxx), readelf, env, compile, link)
         check_namespace_blocks(scope, readelf, env, compile)
+        check_resident_header(options, readelf, scope, env)
 
 
 if __name__ == '__main__':
