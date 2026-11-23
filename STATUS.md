@@ -220,6 +220,10 @@ What is true of the code today. Work in progress and its owners are tracked in
     bundled library and resource headers, while keeping explicit `-I`, `-isystem`,
     and `-iquote` paths, source-relative quoted includes, and macros.
     [#251](https://github.com/yrashk/ycxx/issues/251)
+  - `-nostdinc++` omits the implicit libycxx source and generated include directories. The
+    compiler keeps its resource directories, target C library or SDK directories, and explicit
+    includes. With both flags, `-nostdinc` applies in either order.
+    [#997](https://github.com/yrashk/ycxx/issues/997)
   - `-print-file-name=include` prints the primary configured resource include directory, and
     `-dumpmachine` prints the canonical target triple. The driver accepts `--target` for both
     queries and answers without opening a translation unit or starting a daemon. Linux reports
@@ -1093,8 +1097,8 @@ in `lsp` frames (`LspOut`), the last of which carries LSP's exit status (1 after
   header or C entry is no unit), else the file alone in its directory. `daemon.lsp`'s
   `compile_commands` covers both forms, a response file, a header and a C file, a directory
   spelled through a symbolic link, and a change (mutation-checked). The check also keeps
-  `-nostdinc`. Options `pp` does not take yet (`-include`, `--sysroot`, …) are dropped.
-  [#251](https://github.com/yrashk/ycxx/issues/251)
+  `-nostdinc` and `-nostdinc++`. Options `pp` does not take yet (`-include`, `--sysroot`, …) are dropped.
+  [#251](https://github.com/yrashk/ycxx/issues/251) · [#997](https://github.com/yrashk/ycxx/issues/997)
 - Not yet: stopping a diagnosis on a newer edit,
   `$/cancelRequest`, debouncing and interactive priority (#168); `buffers_in`, the disk-view
   assertion and one view per session (#169); go-to-definition from a declaration part (a

@@ -89,7 +89,7 @@ std::pair<std::string, std::vector<Message>> preprocess_to_text(Session& s, std:
 // Takes a preprocessing or language-mode option at `args[i]`. Advances `i` for a separate
 // argument. Returns an error for a missing argument.
 std::expected<bool, std::string> take_option(std::span<const std::string_view> args, std::size_t& i, Config& cfg);
-// Finalizes the search paths, consuming `-nostdinc` before appending automatic directories.
+// Consumes the include suppression options before appending automatic search paths.
 // A command-line directory that names an automatic one (relative to `cwd`) is searched only
 // at its automatic place when present, so `#include_next` goes past it.
 Config with_system_dirs(Config cfg, std::string_view cwd = {}, std::string_view sdkroot = {});
@@ -447,6 +447,10 @@ std::expected<bool, std::string> take_option(std::span<const std::string_view> a
     cfg.nostdinc = true;
     return true;
   }
+  if (a == "-nostdinc++") {
+    cfg.nostdincxx = true;
+    return true;
+  }
   for (std::string_view opt : {"-isystem", "-iquote", "-I", "-D", "-U"}) {
     if (!a.starts_with(opt)) continue;
     std::string value(a.substr(opt.size()));
@@ -484,7 +488,8 @@ Config with_system_dirs(Config cfg, std::string_view cwd, std::string_view sdkro
     return s;
   };
   std::vector<std::string> dirs;
-  if (!std::exchange(cfg.nostdinc, false)) dirs = system_dirs(*cfg.target, sdkroot);
+  const bool include_libycxx = !std::exchange(cfg.nostdincxx, false);
+  if (!std::exchange(cfg.nostdinc, false)) dirs = system_dirs(*cfg.target, sdkroot, include_libycxx);
   auto system = dirs | std::views::transform(normal) | std::ranges::to<std::vector>();
   // A `-I` or `-isystem` directory that is a system directory is searched at the system
   // directory's place only. -isystem directories are system directories too: a `-I` directory
