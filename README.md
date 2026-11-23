@@ -216,6 +216,10 @@ visibility across declarations.
 [#422](https://github.com/yrashk/ycxx/issues/422) · [#602](https://github.com/yrashk/ycxx/issues/602)
 · [#124](https://github.com/yrashk/ycxx/issues/124) · [#936](https://github.com/yrashk/ycxx/issues/936)
 
+Both targets also link eligible in-class nonvirtual functions of namespace-scope class-template
+specializations across objects. Members of a specialization with a translation-unit-local type
+argument keep their code local. [#1051](https://github.com/yrashk/ycxx/issues/1051)
+
 Both targets link eligible nonthrowing, nonvirtual in-class and implicit destructors across
 separate objects. A class-template destructor's explicit specialization can coalesce when its
 own declaration is inline. Specializations naming translation-unit-local types retain local
