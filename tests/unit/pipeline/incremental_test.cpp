@@ -138,7 +138,7 @@ void incremental() {
 // one module's constant re-executes the cells of the functions that use it and of no other
 // function, and a comment re-executes none. Only the unit-wide cells and the cheap per-function
 // and per-entity projections of the unit (`FunctionSourceQ`, `SymbolAccessQ`) run again.
-std::string modules(int edited_k, bool comment) {
+std::string modules(int edited_k, bool comment, std::string_view run_type = "int") {
   constexpr int count = 12;
   std::string s;
   for (int i = 0; i < count; ++i) {
@@ -152,9 +152,9 @@ struct Box {{
 template <class T> T twice(T t) {{ return t + t; }}
 int plain(int x) {{ return x + 1; }}
 const char* name() {{ return "m{0}"; }}
-int run() {{ Box b(plain(2)); return b.get() + twice(K) + name()[0]; }}
+{2} run() {{ Box b(plain(2)); return b.get() + twice(K) + name()[0]; }}
 }}
-)", i, i == 3 ? edited_k : i + 2);
+)", i, i == 3 ? edited_k : i + 2, i == 3 ? run_type : "int");
     if (comment && i == 3) s += "// a comment\n\n\n";
   }
   s += "int main() {\n  int sum = 0;\n";
@@ -204,7 +204,15 @@ void one_module_edit() {
       check(n <= 1, std::format("{}: {} runs once at most:{}", what, kind, described(m)));
     }
   };
+  auto groups = [&] { return s.group_counts(); };
+  const auto before = groups();
   const auto edit = executed(modules(6, false));
+  // A group is a top-level item (#947): the twelve modules and `main`. Only the edited module's is
+  // analysed again; `main`'s read `m3::run`'s item, which did not change.
+  const auto after = groups();
+  check(after.first - before.first == 1 && after.second - before.second == 12,
+        std::format("one module's constant analyses its group alone ({} analysed, {} reused)", after.first - before.first,
+                    after.second - before.second));
   // Every kind named above ran, so a renamed kind cannot pass the comment's zero counts unseen.
   for (std::string_view kind : {"FunctionGen", "FunctionIr", "Lower", "UnitQ", "Codegen", "Optimized"})
     check(edit.contains(kind), std::format("{} is counted:{}", kind, described(edit)));
@@ -218,6 +226,12 @@ void one_module_edit() {
   per_unit(commented, "a comment");
   check(!commented.contains("TuSema") && commented.contains("PpTokens"),
         std::format("a comment re-runs no analysis:{}", described(commented)));
+  // A signature `main` reads: its group is analysed again too.
+  const auto before_signature = groups();
+  executed(modules(6, true, "long"));
+  const auto after_signature = groups();
+  check(after_signature.first - before_signature.first == 2,
+        std::format("a changed signature analyses its callers' groups ({} analysed)", after_signature.first - before_signature.first));
 }
 
 // A warning the preprocessor reports holds its byte offset: a comment before it moves it, and
