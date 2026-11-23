@@ -2,7 +2,7 @@
 // arguments skipped (docs/EXTENSIONS.md); a declared `__builtin_` name (a
 // function, a member, one a using-declaration brings in) is an ordinary name.
 // XFAIL: clang,gcc they have these built-ins
-int big() { return __builtin_constant_p(1) ? 1 : 0; } //! error
+int big() { return __builtin_expect(1, 1) ? 1 : 0; } //! error
 int unknown() { return __builtin_no_such_thing(1); } //! error
 int __builtin_ours(int x) { return x; }
 int ours() { return __builtin_ours(2); }
