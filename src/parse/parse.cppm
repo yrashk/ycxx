@@ -1559,8 +1559,13 @@ public:
         if (ordinary && body.diags.empty()) instantiate_variable_demands(body.demands, k);
       }
     }
+    const bool reported = depth_reported_;
     instantiate_all();
+    depth_reported_at_end_ = !reported && depth_reported_;
   }
+  // Whether the instantiation-depth limit was first reached by the END worklist (instantiate_all)
+  // rather than while the items were analysed (#993).
+  bool depth_reported_at_end() const { return depth_reported_at_end_; }
   // Whether a class of the unit can need virtual support (sema::Questions).
   bool may_have_virtual_layouts() const { return may_have_virtual_layouts_; }
   // An item at namespace scope: in no class, whichever namespaces enclose it.
@@ -1798,6 +1803,7 @@ private:
   std::set<u32> var_instantiating_;
 
   bool depth_reported_ = false;
+  bool depth_reported_at_end_ = false;
   u32 members_running_ = 0;  // static data member initializers being instantiated, nested
   std::vector<engine::Diagnostic> end_diags_;    // the END phase's own
   std::vector<EntityId> required_;

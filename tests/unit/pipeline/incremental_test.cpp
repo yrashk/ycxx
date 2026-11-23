@@ -721,9 +721,9 @@ void too_deep() {
   check(s.get<pl::Link>(program).image == cold(v0), "the session goes on after a too-deep unit");
 }
 
-// [temp.inst]/16's limit is reported once per unit, by the first instantiation to reach it, whether
-// the unit is analysed a group at a time or whole (a `virtual` makes it whole, #947), cold or after
-// edits; the other messages are the same both ways (#993).
+// [temp.inst]/16's limit is reported once per unit, where the whole unit's analysis first reaches
+// it, whether the unit is analysed a group at a time or whole (a `virtual` makes it whole, #947),
+// cold or after edits; here the other messages are the same both ways (#993).
 void depth_limit_once() {
   pp::Config config;
   config.template_depth = 7;
@@ -756,10 +756,25 @@ void depth_limit_once() {
   check(messages(s, first + second + "int third = 3;\n") == cold_messages(first + second + "int third = 3;\n") &&
             depth(messages(s, first + second + "int third = 3;\n")) == 1,
         "an unrelated edit: still once, as cold");
+  const auto before = s.group_counts();
   const auto only_second = messages(s, fixed + second);
+  check(s.group_counts().second - before.second == 2, "the first family fixed: the second's groups are reused");
   check(depth(only_second) == 1 && only_second == cold_messages(fixed + second),
         "the first family fixed: the second's reused group reports it, as cold");
   check(depth(messages(s, first + second)) == 1, "the first family back: once again");
+  // A function template's body reaches the limit only in the END worklist, which the whole unit
+  // runs after every item: a later class template's, reached while its item is analysed, is the
+  // one reported.
+  const std::string late = "template<int N> int f() { return f<N+1>(); }\nint g() { return f<1>(); }\n";
+  auto at = [](pl::Session& s) {
+    for (const pl::Message& m : s.get<pl::TuFront>(tu).messages)
+      if (m.text.contains("nest more than")) return m.where.substr(m.where.find(':'));
+    return std::string{};
+  };
+  pl::Session grouped_late, whole_late;
+  const auto g = messages(grouped_late, late + second), w = messages(whole_late, whole + late + second);
+  check(depth(g) == 1 && depth(w) == 1, "a limit reached at the end and one in an item: once");
+  check(at(grouped_late) == ":3:33" && at(whole_late) == ":4:33", "the item's is reported, both ways");
 }
 
 }  // namespace
