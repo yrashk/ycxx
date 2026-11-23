@@ -2364,6 +2364,17 @@ session's.*
   later demand. A variable-template partial specialization with a declared type such as
   `Tag<empty<T>>` remains unsupported.
   `__has_builtin(__is_empty)` continues to answer 1 ([meta.unary.prop], #218).
+- `__is_standard_layout(T)` checks completeness after removing array extents and accepts cv
+  `void` as a false case. Supported class operands use the translation unit's member and base
+  declarations to establish the property. It diagnoses unproved facts that affect the result.
+  Dependent operands replay in supported class-template bases and variable-template initializers.
+  `__has_builtin(__is_standard_layout)` answers 0 ([meta.unary.prop], [class.prop]).
+  [#1030](https://github.com/yrashk/ycxx/issues/1030)
+- `__is_final(T)` reads the completed definition for class types, including cv-qualified
+  operands, unions, and class template specializations. Nonclass types give false. Direct
+  class queries require completeness. Dependent class operands in supported class-template bases
+  and variable-template initializers check completeness at instantiation ([meta.unary.prop]).
+  [#1042](https://github.com/yrashk/ycxx/issues/1042) · [#1046](https://github.com/yrashk/ycxx/issues/1046)
 - `__is_destructible(T)`, `__is_nothrow_destructible(T)`, and `__is_trivially_destructible(T)`
   give true for references, including references to incomplete types, supported non-enum scalars,
   and bounded arrays of those scalars. They give false for cv `void`, function types, and arrays
@@ -2375,10 +2386,9 @@ session's.*
 - Listed in docs/EXTENSIONS.md. Tests: `tests/own/builtins/`. `<cstdio>`: 53 → 33 errors.
 - Not yet (#211 follow-up): the built-ins that need the object model, such as
   class constructibility, assignability and general convertibility, remaining `__is_trivially_*` and
-  `__is_nothrow_*` predicates, `__is_standard_layout` and
-  `__reference_binds_to_temporary`. Other dependent predicates, conversions of a dependent
-  predicate to a non-`bool` parameter and dependent array bounds remain in #209; mangling
-  dependent expressions is #773 and #780.
+  `__is_nothrow_*` predicates, and `__reference_binds_to_temporary`. Other dependent predicates,
+  conversions of a dependent predicate to a non-`bool` parameter, and dependent array bounds
+  remain in #209. Mangling dependent expressions is tracked in #773 and #780.
 
 ## Address-of builtin (#330)
 
@@ -3002,8 +3012,7 @@ What the process allocates, attributed to the engine's cells, in the trace and t
 - Ordinary named namespace-scope classes and structs can use class-head `final`, with or
   without a base clause. A base specifier naming a final class through its name or an alias
   receives the same diagnostic after the definition, including after a later bare declaration.
-  `final` remains an identifier in class names and object declarators. `__is_final` reads the
-  completed class definition, including for cv-qualified types.
+  `final` remains an identifier in class names and object declarators.
   [[class.pre]](https://eel.is/c++draft/class.pre) · [#309](https://github.com/yrashk/ycxx/issues/309)
 - A derived constructor can name that base in an unqualified parenthesized or flat braced
   initializer. Syntax checking uses ordinary constructor overload resolution, defaults, access,

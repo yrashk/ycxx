@@ -20,7 +20,7 @@ The final Linux x86-64 self-check uses the freestanding support in [#380](https:
 
 ## Status
 
-**Pre-0.1** (as of 2026-11-22). ycxx compiles a substantial subset of C++ (C-like code, classes,
+**Pre-0.1** (as of 2026-11-23). ycxx compiles a substantial subset of C++ (C-like code, classes,
 templates and constant evaluation) on macOS arm64, from source to a signed, running executable,
 with no external compiler, assembler or linker. It also builds static executables from a
 freestanding C++ subset for x86-64 Linux. The standard library is out of reach: the gaps on
@@ -540,8 +540,10 @@ written default member initializer are value-initialized.
   operands in supported class-template bases, variable-template initializers and function template
   bodies.
   [Extension guide](docs/EXTENSIONS.md) · [#218](https://github.com/yrashk/ycxx/issues/218)
-- `__is_empty` accounts for inherited data members and supports dependent operands in class-template
-  bases and variable-template initializers.
+- `__is_empty`, `__is_standard_layout`, and `__is_final` accept dependent operands in supported
+  class-template bases and variable-template initializers. The emptiness query accounts for
+  inherited data members. Finality queries require complete class operands, including unions and
+  class template specializations.
   [Extension guide](docs/EXTENSIONS.md) · [#218](https://github.com/yrashk/ycxx/issues/218)
 - unqualified dependent `bool` variable template-ids as `bool` template arguments, and
   logical negation of a qualified dependent `bool` variable template-id in a `bool` template
