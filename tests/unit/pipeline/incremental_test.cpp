@@ -155,7 +155,7 @@ const char* name() {{ return "m{0}"; }}
 int run() {{ Box b(plain(2)); return b.get() + twice(K) + name()[0]; }}
 }}
 )", i, i == 3 ? edited_k : i + 2);
-    if (comment && i == 3) s += "// a comment\n";
+    if (comment && i == 3) s += "// a comment\n\n\n";
   }
   s += "int main() {\n  int sum = 0;\n";
   for (int i = 0; i < count; ++i) s += std::format("  sum += m{}::run();\n", i);
@@ -210,9 +210,30 @@ void one_module_edit() {
     check(edit.contains(kind), std::format("{} is counted:{}", kind, described(edit)));
   per_function(edit, 2, "one module's constant");
   per_unit(edit, "one module's constant");
+  check(edit.contains("TuSema"), "a changed token re-runs the analysis");
+  // A comment and blank lines move every later token but change none (#947): the analysis does
+  // not run again (the link reads no placed message).
   const auto commented = executed(modules(6, true));
   per_function(commented, 0, "a comment");
   per_unit(commented, "a comment");
+  check(!commented.contains("TuSema") && commented.contains("PpTokens"),
+        std::format("a comment re-runs no analysis:{}", described(commented)));
+}
+
+// A warning the preprocessor reports holds its byte offset: a comment before it moves it, and
+// only whether there is an error reaches the analysis (#947).
+void moved_warning() {
+  pl::Session s;
+  const std::string text = "#warning \"kept\"\nint f() { return 1; }\nint main() { return f() - 1; }\n";
+  build(s, text);
+  check(s.get<pl::Link>(program).errors.empty(), "a unit with a warning links");
+  const std::uint32_t sema0 = s.db().runs<pl::TuSema>(tu);
+  build(s, "// moved\n" + text);
+  check(s.get<pl::Link>(program).image == cold("// moved\n" + text), "incremental equals cold");
+  check(s.db().runs<pl::TuSema>(tu) == sema0, "a moved warning leaves the analysis green");
+  check(pl::TuFront::errors(s.get<pl::TuFront>(tu)).empty() && !s.get<pl::TuFront>(tu).messages.empty() &&
+            s.get<pl::TuFront>(tu).messages.front().where.find(":2:") != std::string::npos,
+        "the warning is placed on its new line");
 }
 
 // Two units in one session; then one with an error, which keeps the program from linking, and
@@ -691,6 +712,7 @@ void too_deep() {
 int main() {
   incremental();
   one_module_edit();
+  moved_warning();
   two_units();
   headers();
   editor_view();
