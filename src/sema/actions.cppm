@@ -1524,6 +1524,34 @@ public:
     return {NodeId::none, begin, end};
   }
 
+  // Arrays are aggregate types even when incomplete ([meta.unary.prop], [dcl.init.aggr]).
+  // An owning replay completes a substituted class at the instantiation demand.
+  Ex aggregate_trait_expr(QualType type, u32 begin, u32 end) {
+    type = types().canonical(type);
+    const engine::Loc loc = type_trait_loc(begin);
+    if (types().is_dependent(type)) {
+      if (q_->in_type_trait_pattern())
+        if (auto value = templates().unary_trait_value(ast::DepOp::is_aggregate, type)) {
+          q_->record_dependent_type_trait_operand(loc);
+          return literal(builtin(Builtin::bool_), *value, ValueCategory::prvalue, begin, end);
+        }
+      return dependent_node({}, begin, end, builtin(Builtin::bool_));
+    }
+    if (!types().is_class(type)) return bool_literal(types().is_array(type), begin, end);
+    const EntityId cls = types().class_of(type);
+    if (auto demand = q_->type_trait_at_demand(cls, loc)) {
+      if (!*demand) {
+        if (!q_->type_trait_instantiation_failed(cls)) diag_at(loc, Diag::virtual_class_trait_incomplete, type);
+        return {NodeId::none, begin, end};
+      }
+    } else if (!require_complete(type, begin)) {
+      return {NodeId::none, begin, end};
+    }
+    const ClassRec* record = classes().find(cls);
+    if (!record) return {NodeId::none, begin, end};
+    return bool_literal(is_aggregate_class(*record), begin, end);
+  }
+
   struct ConstructibilityOperand {
     QualType type;
     u32 at;
@@ -1901,6 +1929,7 @@ public:
     if (t == is_trivially_copyable) return trivial_copyability_expr(args[0], begin, end);
     if (t == is_standard_layout) return standard_layout_expr(args[0], begin, end);
     if (t == is_empty) return empty_expr(args[0], begin, end);
+    if (t == is_aggregate) return aggregate_trait_expr(args[0], begin, end);
     QualType b = builtin(Builtin::bool_);
     auto structural_trait = [&](std::optional<ConstId> v) {
       if (v) return literal(b, *v, ValueCategory::prvalue, begin, end);
@@ -1978,10 +2007,6 @@ public:
       break;
     case is_lvalue_reference: v = types().is_reference(c) && !types().rec(c).rvalue_ref; break;
     case is_rvalue_reference: v = types().is_reference(c) && types().rec(c).rvalue_ref; break;
-    case is_aggregate:
-      if (types().is_class(c) && !cls()) return {NodeId::none, begin, end};
-      v = this->is_aggregate(c);
-      break;
     default: break;
     }
     return bool_literal(v, begin, end);
@@ -2744,14 +2769,18 @@ public:
 
   // ------------------------------------------------------------ initialization ([dcl.init])
 
+  static bool is_aggregate_class(const ClassRec& c) {
+    // [dcl.init.aggr]/1: no user-declared constructors or virtual functions; a closure type is none
+    // ([expr.prim.lambda.closure]/1).
+    return !c.user_ctors && !c.closure && !c.polymorphic;
+  }
+
   // An aggregate ([dcl.init.aggr]): an array or a class with the required properties.
   bool is_aggregate(QualType t) {
     if (types().is_array(t)) return true;
     if (!types().is_class(t)) return false;
     const ClassRec* c = class_rec(types().class_of(t));
-    // [dcl.init.aggr]/1: no user-declared constructors or virtual functions; a closure type is none
-    // ([expr.prim.lambda.closure]/1).
-    return !c || (!c->user_ctors && !c->closure && !c->polymorphic);
+    return !c || is_aggregate_class(*c);
   }
   bool has_user_ctors(QualType t) {
     const ClassRec* c = types().is_class(t) ? class_rec(types().class_of(t)) : nullptr;
