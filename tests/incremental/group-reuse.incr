@@ -1,6 +1,8 @@
 // A unit is analysed a top-level item at a time, and an item's analysis is reused while what it
 // read is unchanged (#947). Each edit below changes what another item's analysis read, or reads
-// nothing new for it; each state's program must run as a cold build of it does.
+// nothing new for it; each state's program must run as a cold build of it does. The last edits
+// move a using-directive and an inline namespace across `main`, whose text stays: a lookup sees
+// only those before it.
 // ACTION: run
 --- main.cpp
 namespace a {
@@ -58,3 +60,27 @@ int g() { return a::f(1) + a::K + h(); }
 int h() { return 1; }
 }
 int main() { return b::g() - 15; }
+=== edit
+--- main.cpp
+namespace N { int g(int) { return 1; } }
+int g(long) { return 2; }
+int main() { return g(0); }
+using namespace N;
+=== edit
+--- main.cpp
+namespace N { int g(int) { return 1; } }
+int g(long) { return 2; }
+using namespace N;
+int main() { return g(0); }
+=== edit
+--- main.cpp
+namespace N { struct S {}; }
+template <class T> int f(T) { return 2; }
+int main() { return f(N::S{}); }
+namespace N { inline namespace V { int f(S) { return 1; } } }
+=== edit
+--- main.cpp
+namespace N { struct S {}; }
+template <class T> int f(T) { return 2; }
+namespace N { inline namespace V { int f(S) { return 1; } } }
+int main() { return f(N::S{}); }

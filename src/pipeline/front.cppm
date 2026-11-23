@@ -1535,11 +1535,17 @@ TranslationUnit finish_unit(std::vector<UnitPart>& parts, sema::World& world, st
   }
   for (FunctionDef& f : tu.functions)
     f.explicit_weak = weak_declarations.contains(f.entity) && !inline_declarations.contains(f.entity);
-  // An `inline` declaration in any group reaches the definition (`unit_of`'s `coalesced`).
+  auto asm_label = [&](EntityId e) {
+    auto found = std::ranges::find(tu.entities, e, &Entity::id);
+    return found == tu.entities.end() ? std::string_view() : std::string_view(found->asm_label);
+  };
+  // An `inline` declaration in any group reaches the definition (`unit_of`'s `coalesced`), and an
+  // asm label in any group keeps it from coalescing.
   for (FunctionDef& f : tu.functions)
-    if (coalesce_if_inline.contains(f.entity)) f.coalesced = inline_declarations.contains(f.entity) && tu.main != f.entity;
+    if (coalesce_if_inline.contains(f.entity))
+      f.coalesced = inline_declarations.contains(f.entity) && tu.main != f.entity && asm_label(f.entity).empty();
   for (Variable& v : tu.variables)
-    if (weak_if_inline.contains(v.entity)) v.coalesced = inline_declarations.contains(v.entity);
+    if (weak_if_inline.contains(v.entity)) v.coalesced = inline_declarations.contains(v.entity) && asm_label(v.entity).empty();
   // What is declared here has no template, scope or label: the runtime's entry points and the
   // initialization functions.
   auto declare = [&](const ast::DeclSema& d, std::optional<ast::Loc> at) {
@@ -1552,10 +1558,6 @@ TranslationUnit finish_unit(std::vector<UnitPart>& parts, sema::World& world, st
   };
   Runtime<decltype(declare)> runtime{world, declare};
   init_function(world, tu, dynamic, declare, runtime, source);
-  auto asm_label = [&](EntityId e) {
-    auto found = std::ranges::find(tu.entities, e, &Entity::id);
-    return found == tu.entities.end() ? std::string_view() : std::string_view(found->asm_label);
-  };
   auto unwind_provider = [&](EntityId callee) {
     return !defined.contains(callee) && !noexcept_declarations.contains(callee) && asm_label(callee).empty();
   };

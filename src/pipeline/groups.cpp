@@ -52,7 +52,8 @@ struct GroupCache {
     GroupResult result;
   };
   std::mutex mutex;
-  std::map<std::pair<Fp128, Fp128>, Entry> entries;
+  // Shared: a group's entry is verified and copied outside the lock.
+  std::map<std::pair<Fp128, Fp128>, std::shared_ptr<const Entry>> entries;
   std::uint64_t analysed = 0, reused = 0;
 };
 struct GroupCaches {
@@ -106,6 +107,13 @@ class GroupFacts {
       }
       t.probes.push_back({q, std::move(answer)});
     }
+    // A lookup sees the using-directives and aliases, the inline namespaces and the explicit
+    // specializations before its point, which no question names: where they are relative to what
+    // the group read is part of what it read.
+    for (const auto& d : x_->directives) order.insert(d.item);
+    for (const auto& [path, children] : x_->inline_namespaces)
+      for (const auto& child : children) order.insert(child.item);
+    for (std::uint32_t k : x_->specializations) order.insert(k);
     for (std::uint32_t k : order) t.order.push_back(id(k));
     return t;
   }
@@ -265,6 +273,8 @@ engine::query_task<SemaResult> TuSema::run(engine::Ctx& cx, TuId tu) {
   // bodies, for an editor's position requests (#170), whether or not the unit has errors; only what
   // the analysis reached, which analysing more would change (its diagnostics). Then its messages,
   // each once, and its classes' and enumerations' shapes, each once.
+  // A unit that says `virtual` is analysed whole (below).
+  const bool grouped = !std::ranges::contains(region.tokens, lex::Tk::kw_virtual, &lex::Tok::kind);
   std::set<std::uint32_t> declared_seen;
   std::set<EntityId> shaped, enumerated;
   const auto index = parse::Program::make_index(world, region, items);
@@ -363,6 +373,8 @@ engine::query_task<SemaResult> TuSema::run(engine::Ctx& cx, TuId tu) {
                                      ? record.bases.front().cls : record.peer_automatic_primary_base;
         const bool uncertain_base = primary != EntityId::none && uncertain.contains(primary);
         if (shape.layout_uncertain || uncertain_base) {
+          const bool whole = !grouped;  // a unit with virtual layouts has one Program
+          contract_assert(whole);
           blocked.push_back({&program, &record});
         } else {
           shape.peer_virtual_layout = record.peer_virtual_layout;
@@ -373,16 +385,21 @@ engine::query_task<SemaResult> TuSema::run(engine::Ctx& cx, TuId tu) {
     for (EntityId e : classes.enums()) r.enums.push_back({e, classes.underlying(e)});
     return r;
   };
-  // Puts a group's result into the unit's: each message, entity and shape once, in group order.
+  // Puts a group's result into the unit's, in group order: each entity and shape once, and each
+  // message an earlier group did not say (an instance two groups made); a group's own repeated
+  // messages stay, as the whole unit's Program says them.
   std::set<std::tuple<std::uint32_t, std::uint32_t, bool, std::string>> said;
-  auto merge = [&](const GroupResult& r, bool first_group) {
+  auto merge = [&](const GroupResult& r) {
+    std::set<std::tuple<std::uint32_t, std::uint32_t, bool, std::string>> here;
     for (const GroupMessage& m : r.messages) {
-      if (!first_group && !said.insert({m.at.item, m.at.offset, m.error, m.text}).second) continue;
-      if (first_group) said.insert({m.at.item, m.at.offset, m.error, m.text});
+      std::tuple key{m.at.item, m.at.offset, m.error, m.text};
+      if (said.contains(key)) continue;
+      here.insert(std::move(key));
       const items::Item& it = items.items[index->index.at(m.at.item)];
       const auto token = std::min<std::size_t>(it.begin + m.at.offset, region.tokens.size() - 1);
       out.messages.push_back({m.error, m.text, static_cast<std::uint32_t>(token)});
     }
+    said.merge(here);
     for (const auto& [e, at] : r.declared)
       if (declared_seen.insert(std::to_underlying(e)).second) out.declared.emplace_back(e, at);
     out.bodies.insert(out.bodies.end(), r.bodies.begin(), r.bodies.end());
@@ -395,7 +412,6 @@ engine::query_task<SemaResult> TuSema::run(engine::Ctx& cx, TuId tu) {
   // the main file, and each run of the headers' top-level items, by a Program of its own that
   // analyses other items only as the group asks. A virtual-table decision reads the whole unit's.
   std::vector<std::pair<std::uint32_t, std::uint32_t>> groups;
-  const bool grouped = !std::ranges::contains(region.tokens, lex::Tk::kw_virtual, &lex::Tok::kind);
   if (grouped) {
     for (std::uint32_t g : items.top) {
       std::uint32_t last = g;
@@ -414,7 +430,7 @@ engine::query_task<SemaResult> TuSema::run(engine::Ctx& cx, TuId tu) {
     // Both targets: the base-object entries and the virtual shapes rely on it, and the System V
     // aggregate rules read it on x86-64 (#650).
     const auto uncertain = program.uncertain_object_layouts(/*include_lifecycle_signatures=*/true);
-    merge(collect(program, 0, static_cast<std::uint32_t>(items.items.size()), uncertain), true);
+    merge(collect(program, 0, static_cast<std::uint32_t>(items.items.size()), uncertain));
     std::ranges::stable_sort(out.messages, {}, &SemaMessage::token);
     if (!out.has_errors()) out.unit = unit_of(program, world, program.items(), src.name, uncertain);
     for (auto [p, record] : blocked)
@@ -433,9 +449,14 @@ engine::query_task<SemaResult> TuSema::run(engine::Ctx& cx, TuId tu) {
   for (auto [first, end] : groups) {
     const std::pair key{unit_key, items.items[first].id};
     if (traceable) {
-      std::lock_guard lock(cache->mutex);
-      if (auto e = cache->entries.find(key); e != cache->entries.end() && facts.verify(e->second.trace, first, end)) {
-        results.push_back(e->second.result);
+      std::shared_ptr<const GroupCache::Entry> kept;
+      {
+        std::lock_guard lock(cache->mutex);
+        if (auto e = cache->entries.find(key); e != cache->entries.end()) kept = e->second;
+      }
+      if (kept && facts.verify(kept->trace, first, end)) {
+        results.push_back(kept->result);
+        std::lock_guard lock(cache->mutex);
         ++cache->reused;
         continue;
       }
@@ -455,12 +476,20 @@ engine::query_task<SemaResult> TuSema::run(engine::Ctx& cx, TuId tu) {
     if (traceable) {
       GroupTrace trace = facts.trace(first, end, reads, probes);
       std::lock_guard lock(cache->mutex);
-      cache->entries.insert_or_assign(key, GroupCache::Entry{std::move(trace), r});
+      cache->entries.insert_or_assign(key, std::make_shared<const GroupCache::Entry>(GroupCache::Entry{std::move(trace), r}));
       ++cache->analysed;
     }
     results.push_back(std::move(r));
   }
-  for (std::size_t g = 0; g < results.size(); ++g) merge(results[g], g == 0);
+  // A group gone from the unit (its first item edited, moved or removed) is forgotten.
+  if (traceable) {
+    std::set<Fp128> present;
+    for (auto [first, end] : groups) present.insert(items.items[first].id);
+    std::lock_guard lock(cache->mutex);
+    for (auto e = cache->entries.lower_bound({unit_key, Fp128{}}); e != cache->entries.end() && e->first.first == unit_key;)
+      e = present.contains(e->first.second) ? std::next(e) : cache->entries.erase(e);
+  }
+  for (const GroupResult& r : results) merge(r);
   std::ranges::stable_sort(out.messages, {}, &SemaMessage::token);
   if (!out.has_errors()) {
     std::vector<UnitPart> parts;
