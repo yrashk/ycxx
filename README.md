@@ -527,6 +527,9 @@ written default member initializer are value-initialized.
   and runtime field access. Direct-list braces also work for aggregates of public integral
   fields in namespace-scope classes without bases.
   [#262](https://github.com/yrashk/ycxx/issues/262)
+  Inline static integral, pointer, and supported floating-point members can use constant
+  direct and copy lists in those classes, including fixed arrays of those types.
+  [#964](https://github.com/yrashk/ycxx/issues/964)
   Constant expressions can read non-mutable integral and enumeration fields of flat
   namespace-scope constexpr aggregates.
   [#862](https://github.com/yrashk/ycxx/issues/862) · [#876](https://github.com/yrashk/ycxx/issues/876)

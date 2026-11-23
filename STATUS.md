@@ -1145,6 +1145,12 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   no relocations or runtime work. A member whose owner or declared type names an unnamed namespace
   has local symbol binding.
   [#903](https://github.com/yrashk/ycxx/issues/903)
+- Inline static integral, pointer, and supported floating-point members in ordinary
+  namespace-scope classes without bases use constant direct-list and copy-list initialization.
+  This also covers one-dimensional arrays of those types with a written bound. Omitted array
+  elements are value-initialized and the members have addressable static storage
+  ([class.static.data], [dcl.init.list], [dcl.init.aggr]).
+  [#964](https://github.com/yrashk/ycxx/issues/964)
 - Constant expressions can read fields of an already initialized namespace-scope constexpr
   aggregate with a trivial destructor, no bases, and ordinary public integral and enumeration
   fields whose scalar representations fit in 64 bits. The interpreter uses the ordinary record
