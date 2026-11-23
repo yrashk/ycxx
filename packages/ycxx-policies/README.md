@@ -149,6 +149,20 @@ needs to refer to the alias.
 
 ### Verify shared observations
 
+A shared borrow through a local `const&` ends when no later observation of that binding is
+reachable. You can consume or move its owner after the last use in the same block.
+
+```cpp
+auto receipt = issue_receipt();
+const auto& view = receipt;
+inspect(view);  // a registered observer
+close_receipt(static_cast<Receipt&&>(receipt));
+```
+
+YCXX rejects moving or consuming the owner if a later branch or loop iteration can still
+observe that binding. A trusted `observes` declaration promises that the function keeps the
+reference within the call.
+
 An observation marked `verified_observes<decltype(&inspect), &inspect>` asks YCXX to
 verify the observer's body. An observer may return `void`, an arithmetic value, or an enum
 value. A verified observer can return a field value or forward the original shared borrow

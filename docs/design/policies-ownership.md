@@ -43,12 +43,14 @@ direct initialization from a named owner through the resource's ordinary nonthro
 constructor. The equivalent class annotation is `[[=ycxx::ownership::move_constructor::transfers]]`.
 These declarations trust the constructor to move the live obligation and invalidate the
 source. YCXX checks that the named source is live and unborrowed before the call.
-A local `const Resource&` can borrow a live named owner
-from its declaration to the end of its scope. It can be passed to a registered observation
-operation. A consume or transfer of the owner is an error while any of its borrows can still be
-live, including when the reference's last use was earlier. Ending the borrow leaves the
-ownership obligation with the owner. References bound to temporaries, mutable aliases,
-reborrowing, captures, and exposing an address are outside this checked protocol. Observation
+A local `const Resource&` can borrow a live named owner and be passed to a registered
+observation operation. YCXX propagates observation uses backward through the ownership graph,
+stopping at the binding's declaration and scope exits. A consume or transfer conflicts when
+the reference may be bound and an observation of that binding is reachable afterward. This
+allows consumption after the last use in the same scope, including on a branch that can no
+longer reach a use. A loop backedge can carry a future use of an outer binding. Ending the
+borrow leaves the ownership obligation with the owner. References bound to temporaries, mutable
+aliases, reborrowing, captures, and exposing an address are outside this checked protocol. Observation
 contracts declared with `observes` trust the implementation to keep the reference within the
 call. Use `verified_observes<decltype(&inspect), &inspect>` in a policy or
 `[[=ycxx::ownership::operation::verified_observes]]` on the function to check its definition.

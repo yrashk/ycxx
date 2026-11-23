@@ -25,10 +25,8 @@ int main(int argc, char**) {
     Choice initial(own::first_t{}, static_cast<Receipt&&>(issued));
     Choice selected(own::first_t{}, initial.take_first());
     if (initial.holds_first() || !selected.holds_first()) return 2;
-    {
-      const auto& view = selected.first();
-      read(view);
-    }
+    const auto& view = selected.first();
+    read(view);
     auto receipt = selected.take_first();
     close(static_cast<Receipt&&>(receipt));
     return selected.holds_first();
@@ -74,7 +72,7 @@ with tempfile.TemporaryDirectory(prefix="ycxx-variant-flow-") as tmp:
     result = subprocess.run([root / "capability-portable", "affine", "wrong-scope"], timeout=10)
     assert result.returncode in trap_signals
     check("direct_operations", source.replace(
-        "      const auto& view = choice.first();\n      read(view);", "      read(choice.first());").replace(
+        "    const auto& view = choice.first();\n    read(view);", "    read(choice.first());").replace(
         "    auto receipt = choice.take_first();\n    close(static_cast<Receipt&&>(receipt));",
         "    close(choice.take_first());"))
     check("reflected", source.replace(activation, """
@@ -126,19 +124,19 @@ using Choice = own::variant<Receipt, Permit>;
     check("missing_move_authorization", source.replace("own::move_transfers<Receipt>, ", ""),
           "a tracked variant requires move-transfer contracts for both alternatives")
     check("wrong_side", source.replace("choice.first()", "choice.second()").replace(
-        "      read(view);", "      read_permit(view);"),
+        "    read(view);", "    read_permit(view);"),
           "owner variant 'choice' may not hold its second alternative")
     check("taken", source.replace("    close(static_cast<Receipt&&>(receipt));",
           "    close(static_cast<Receipt&&>(receipt));\n    auto again = choice.take_first();"),
           "owner variant 'choice' may not hold its first alternative")
-    check("borrowed", source.replace("      read(view);\n    }", "      read(view);").replace(
-        "    close(static_cast<Receipt&&>(receipt));", "    close(static_cast<Receipt&&>(receipt));\n    }"),
+    check("borrowed", source.replace("    read(view);\n", "").replace(
+        "    auto receipt = choice.take_first();", "    auto receipt = choice.take_first();\n    read(view);"),
           "owner variant 'choice' may still have a live shared borrow 'view'")
     check("linear_alternative", source.replace("    auto receipt = choice.take_first();\n"
           "    close(static_cast<Receipt&&>(receipt));", "    return 0;"),
           "owner variant 'choice' may leave its scope")
-    check("throwing", "void potentially_throwing();\n" + source.replace("      read(view);",
-          "      read(view);\n      potentially_throwing();"),
+    check("throwing", "void potentially_throwing();\n" + source.replace("    read(view);",
+          "    read(view);\n    potentially_throwing();"),
           "operation may unwind while owner variant 'choice' is live")
     check("escaped", source.replace("  if (choice.holds_first())", "  auto* escaped = &choice;\n"
           "  if (choice.holds_first())"),

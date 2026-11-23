@@ -64,25 +64,48 @@ with tempfile.TemporaryDirectory() as directory:
     object_source = source("object", """\
         void build(bool early) {
           auto p = issue();
-          {
-            const Permit& first = p;
-            const auto& second = (p);
-            inspect(first);
-            if (early) return;
-            inspect(second);
-          }
+          const Permit& first = p;
+          const auto& second = (p);
+          inspect(first);
+          if (early) return;
+          inspect(second);
           redeem(static_cast<Permit&&>(p));
         }
-        void borrow_in_loop(bool repeat, bool stop) {
+        void consume_on_disjoint_branch(bool consume) {
           auto p = issue();
+          const auto& view = p;
+          if (consume) {
+            redeem(static_cast<Permit&&>(p));
+            return;
+          }
+          inspect(view);
+        }
+        void borrow_in_loop(bool repeat, bool stop) {
           while (repeat) {
+            auto p = issue();
             const auto& view = p;
             inspect(view);
+            redeem(static_cast<Permit&&>(p));
             if (stop) break;
             repeat = false;
             continue;
           }
+        }
+        void borrow_through_loop(bool repeat, bool stop) {
+          auto p = issue();
+          const auto& view = p;
+          while (repeat) {
+            inspect(view);
+            if (stop) break;
+            repeat = false;
+          }
           redeem(static_cast<Permit&&>(p));
+        }
+        void consume_without_reachable_use() {
+          auto p = issue();
+          const auto& view = p;
+          redeem(static_cast<Permit&&>(p));
+          if (false) inspect(view);
         }
     """)
     obj = root / "permit.o"
@@ -132,13 +155,37 @@ with tempfile.TemporaryDirectory() as directory:
         void consume() {
           auto p = issue();
           const Permit& view = p;
-          inspect(view);
           redeem(static_cast<Permit&&>(p));
+          inspect(view);
         }
     """)
     borrowed = "affine resource 'p' may still have a live shared borrow 'view'"
     stderr = run(during_borrow, "-fcheck-policies", "-fsyntax-only", error=borrowed)
-    assert f"{during_borrow}:7:" in stderr and f"previous borrow at {during_borrow}:5:" in stderr, stderr
+    assert f"{during_borrow}:6:" in stderr and f"previous borrow at {during_borrow}:5:" in stderr, stderr
+
+    loop_conflict = source("loop_conflict", """\
+        void consume_with_backedge(bool repeat) {
+          auto p = issue();
+          const auto& view = p;
+          while (repeat) {
+            inspect(view);
+            redeem(static_cast<Permit&&>(p));
+          }
+        }
+    """)
+    run(loop_conflict, "-fcheck-policies", "-fsyntax-only", error=borrowed)
+
+    branch_conflict = source("branch_conflict", """\
+        void consume_before_branch(bool use_again) {
+          auto p = issue();
+          const auto& earlier = p;
+          const auto& view = p;
+          inspect(earlier);
+          redeem(static_cast<Permit&&>(p));
+          if (use_again) inspect(view);
+        }
+    """)
+    run(branch_conflict, "-fcheck-policies", "-fsyntax-only", error=borrowed)
 
     spent_borrow = source("spent_borrow", """\
         void borrow_spent(bool early) {
@@ -150,11 +197,16 @@ with tempfile.TemporaryDirectory() as directory:
     """)
     run(spent_borrow, "-fcheck-policies", "-fsyntax-only", error=spent)
 
-    borrow_move = source("borrow_move", """\
+    watch_transaction = """\
+        void inspect(const Transaction&) noexcept;
+        using Watch = ycxx::ownership::use_policy<ycxx::ownership::observes<decltype(&inspect), &inspect>>;
+    """
+    borrow_move = source("borrow_move", watch_transaction + """\
         void move_while_borrowed() {
           auto tx = begin();
           const Transaction& view = tx;
           auto next = transfer(static_cast<Transaction&&>(tx));
+          inspect(view);
           commit(static_cast<Transaction&&>(next));
         }
     """, header="transaction.hpp")
@@ -181,12 +233,12 @@ with tempfile.TemporaryDirectory() as directory:
 
     for case, body, expected in (
         ("live", "commit(static_cast<Transaction&&>(group.first));", "linear resource 'group.second' may leave"),
-        ("borrow", "const auto& view = group.first; commit(static_cast<Transaction&&>(group.first));",
+        ("borrow", "const auto& view = group.first; commit(static_cast<Transaction&&>(group.first)); inspect(view);",
          "linear resource 'group.first' may still have a live shared borrow 'view'"),
         ("escape", "expose(group);", "outside the checked protocol"),
         ("field_address", "const int* pointer = &group.label;", "outside the checked protocol"),
     ):
-        field_case = source(f"owned_field_{case}", f"""\
+        field_case = source(f"owned_field_{case}", watch_transaction + f"""\
             struct Group {{ Transaction first; Transaction second; int label; }};
             void expose(Group&) noexcept;
             void run() {{

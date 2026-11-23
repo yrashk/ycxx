@@ -1110,10 +1110,8 @@ class OwnershipFlowBuilder {
 
 class OwnershipAnalysis {
  public:
-  OwnershipAnalysis(const ast::Interners& in, const Flow& flow) : in_(in), flow_(flow) {
-    for (ast::u32 i = 0; i < flow_.locals.size(); ++i)
-      if (const auto& borrow = flow_.locals[i].borrow) borrows_[borrow->owner].push_back(i);
-  }
+  OwnershipAnalysis(const ast::Interners& in, const Flow& flow)
+      : in_(in), flow_(flow), borrow_conflicts_(find_borrow_conflicts()) {}
 
   OwnershipBodyCheck run() const {
     if (flow_.entry == Flow::exit) return {std::nullopt, flow_.forwarded_observers};
@@ -1151,7 +1149,7 @@ class OwnershipAnalysis {
       work.pop_front();
       const auto& step = flow_.steps[point];
       State state = *paths[point];
-      if (auto problem = apply(step, state)) return {std::move(problem), {}};
+      if (auto problem = apply(point, state)) return {std::move(problem), {}};
       if (step.observer != EntityId::none) observers.insert(step.observer);
       if (step.event == Event::branch && step.alternative != VariantSide::none) {
         auto& selected = state[step.local];
@@ -1178,6 +1176,46 @@ class OwnershipAnalysis {
     bool transferred = false;
   };
   using State = std::vector<Slot>;
+
+  std::vector<std::vector<ast::u32>> find_borrow_conflicts() const {
+    std::map<ast::u32, std::vector<Point>> uses;
+    for (Point point = 0; point < flow_.steps.size(); ++point) {
+      const auto& step = flow_.steps[point];
+      if (step.event == Event::observe && flow_.locals[step.local].borrow)
+        uses[step.local].push_back(point);
+    }
+    if (uses.empty()) return {};
+
+    std::vector<std::vector<Point>> predecessors(flow_.steps.size());
+    for (Point point = 0; point < flow_.steps.size(); ++point) {
+      const auto& step = flow_.steps[point];
+      if (step.next != Flow::exit) predecessors[step.next].push_back(point);
+      if (step.event == Event::branch && step.other != Flow::exit)
+        predecessors[step.other].push_back(point);
+    }
+
+    // A use keeps this binding live backward through branches and loop backedges. Stop
+    // at cleanup and rebinding so a future iteration does not extend the old loan.
+    // Store the resulting facts only at operations that can invalidate the owner.
+    std::vector<Point> visited(flow_.steps.size(), Flow::exit);
+    std::vector<std::vector<ast::u32>> conflicts(flow_.steps.size());
+    for (auto& [local, work] : uses) {
+      const auto owner = flow_.locals[local].borrow->owner;
+      while (!work.empty()) {
+        const auto point = work.back();
+        work.pop_back();
+        if (visited[point] == local) continue;
+        visited[point] = local;
+        const auto& step = flow_.steps[point];
+        if (step.local == local && (step.event == Event::borrow || step.event == Event::leave)) continue;
+        if ((step.event == Event::transfer && step.source == owner) ||
+            ((step.event == Event::consume || step.event == Event::leave) && step.local == owner))
+          conflicts[point].push_back(local);
+        work.insert(work.end(), predecessors[point].begin(), predecessors[point].end());
+      }
+    }
+    return conflicts;
+  }
 
   static Bits live_state(VariantSide side) {
     switch (side) {
@@ -1226,17 +1264,17 @@ class OwnershipAnalysis {
     return std::nullopt;
   }
 
-  std::optional<OwnershipFinding> require_unborrowed(const Flow::Step& step, ast::u32 owner, const State& state) const {
-    const auto it = borrows_.find(owner);
-    if (it == borrows_.end()) return std::nullopt;
-    for (const auto local : it->second)
+  std::optional<OwnershipFinding> require_unborrowed(Point point, ast::u32 owner, const State& state) const {
+    if (borrow_conflicts_.empty()) return std::nullopt;
+    for (const auto local : borrow_conflicts_[point])
       if (state[local].possible & live)
-        return OwnershipFinding{step.offset, description(owner) + " may still have a live " + description(local),
+        return OwnershipFinding{flow_.steps[point].offset, description(owner) + " may still have a live " + description(local),
                                 flow_.locals[local].borrow->offset, Event::borrow};
     return std::nullopt;
   }
 
-  std::optional<OwnershipFinding> apply(const Flow::Step& step, State& state) const {
+  std::optional<OwnershipFinding> apply(Point point, State& state) const {
+    const auto& step = flow_.steps[point];
     if (step.event == Event::unsupported) return OwnershipFinding{step.offset, step.problem};
     if (step.event == Event::variant_test || (step.event == Event::branch && step.alternative != VariantSide::none)) {
       if (state[step.local].possible & absent)
@@ -1254,12 +1292,12 @@ class OwnershipAnalysis {
     case Event::observe: return require_live(step, step.local, slot, step.alternative);
     case Event::consume:
       if (auto problem = require_live(step, step.local, slot, step.alternative)) return problem;
-      if (auto problem = require_unborrowed(step, step.local, state)) return problem;
+      if (auto problem = require_unborrowed(point, step.local, state)) return problem;
       slot = {spent, step.offset};
       break;
     case Event::transfer:
       if (auto problem = require_live(step, step.source, state[step.source], step.source_alternative)) return problem;
-      if (auto problem = require_unborrowed(step, step.source, state)) return problem;
+      if (auto problem = require_unborrowed(point, step.source, state)) return problem;
       state[step.source] = {spent, step.offset, true};
       [[fallthrough]];
     case Event::initialize:
@@ -1268,7 +1306,7 @@ class OwnershipAnalysis {
       slot = {live_state(step.alternative)};
       break;
     case Event::leave:
-      if (auto problem = require_unborrowed(step, step.local, state)) return problem;
+      if (auto problem = require_unborrowed(point, step.local, state)) return problem;
       if (live_linear(flow_.locals[step.local], slot))
         return OwnershipFinding{step.offset, description(step.local) + " may leave its scope without being consumed or transferred"};
       if (step.throwing_destructor && (slot.possible & live))
@@ -1282,7 +1320,7 @@ class OwnershipAnalysis {
 
   const ast::Interners& in_;
   const Flow& flow_;
-  std::map<ast::u32, std::vector<ast::u32>> borrows_;
+  std::vector<std::vector<ast::u32>> borrow_conflicts_;
 };
 
 }  // namespace

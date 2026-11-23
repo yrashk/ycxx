@@ -47,10 +47,8 @@ int handle(bool must_close) {
   auto choice = must_close ? Choice(own::first_t{}, issue_receipt())
                            : Choice(own::second_t{}, issue_permit());
   if (choice.holds_first()) {
-    {
-      const auto& view = choice.first();
-      read(view);
-    }
+    const auto& view = choice.first();
+    read(view);
     auto receipt = choice.take_first();
     close(static_cast<Receipt&&>(receipt));
   } else {

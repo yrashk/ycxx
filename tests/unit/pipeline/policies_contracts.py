@@ -105,10 +105,8 @@ with tempfile.TemporaryDirectory() as directory:
         #include "resource.hpp"
         void run() {
           auto ticket = checkout::acquire();
-          {
-            const auto& view = ticket;
-            checkout::inspect(view);
-          }
+          const auto& view = ticket;
+          checkout::inspect(view);
           checkout::submit(static_cast<checkout::Ticket&&>(ticket));
         }
     """)
@@ -684,8 +682,15 @@ with tempfile.TemporaryDirectory() as directory:
         "  finish(static_cast<Work&&>(second));",
         "  finish(static_cast<Work&&>(first));\n  finish(static_cast<Work&&>(second));"))
     syntax(moved_source, error="linear resource 'first' may already have transferred its obligation")
-    move_during_borrow = write("direct_move_borrowed.cpp", direct_move_source.replace(
-        "  Work second(", "  const auto& view = first;\n  Work second("))
+    observe_work = """\
+        void inspect(const Work&) noexcept {}
+        using Observe = own::use_policy<own::observes<decltype(&inspect), &inspect>>;
+    """
+    direct_move_after_use = direct_move_source.replace("int main()", observe_work + "int main()").replace(
+        "  Work second(", "  const auto& view = first;\n  inspect(view);\n  Work second(")
+    syntax(write("direct_move_after_use.cpp", direct_move_after_use))
+    move_during_borrow = write("direct_move_borrowed.cpp", direct_move_after_use.replace(
+        "  inspect(view);\n", "").replace("  finish(", "  inspect(view);\n  finish("))
     syntax(move_during_borrow, error="linear resource 'first' may still have a live shared borrow")
     syntax(write("direct_move_self.cpp", direct_move_source.replace(
         "Work second(static_cast<Work&&>(first))", "Work second(static_cast<Work&&>(second))")),
@@ -716,11 +721,9 @@ with tempfile.TemporaryDirectory() as directory:
         struct Tree { Branch left; Branch right; };
         int main() {
           Tree tree{{example::start(), 11}, {example::start(), 31}};
-          {
-            const auto& view = tree.left.work;
-            example::inspect(view);
-            example::finish(static_cast<Work&&>(tree.right.work));
-          }
+          const auto& view = tree.left.work;
+          example::finish(static_cast<Work&&>(tree.right.work));
+          example::inspect(view);
           auto other = example::handoff(static_cast<Work&&>(tree.left.work));
           example::finish(static_cast<Work&&>(other));
           return tree.left.score + tree.right.score != 42;
@@ -776,8 +779,8 @@ with tempfile.TemporaryDirectory() as directory:
               {{example::start(), example::start()}, 2}}};
           {
             const auto& view = queue.groups[0].tasks[0];
-            example::inspect(view);
             example::finish(static_cast<Work&&>(queue.groups[0].tasks[1]));
+            example::inspect(view);
           }
           example::finish(static_cast<Work&&>(queue.groups[0].tasks[0]));
           example::finish(static_cast<Work&&>(queue.groups[1].tasks[0]));
