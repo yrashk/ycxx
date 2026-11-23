@@ -108,9 +108,10 @@ with tempfile.TemporaryDirectory() as directory:
     message = syntax(rules, conflicting, caller, error="conflicting effect bounds for a function")
     assert f"{conflicting}:4:" in message and f"previous declaration at {rules}:2:" in message, message
 
+    daemon_env = {key: value for key, value in os.environ.items() if key not in ("YCXX_DAEMON", "YCXX_NO_DAEMON")}
+    daemon_env.update(YCXX_ROOT=str(root), YCXX_THREADS="2")
     with tempfile.TemporaryDirectory(prefix="yg-", dir="/tmp") as sockets:
-        env = {key: value for key, value in os.environ.items() if key not in ("YCXX_DAEMON", "YCXX_NO_DAEMON")}
-        env.update(YCXX_RUNTIME_DIR=sockets, YCXX_ROOT=str(root), YCXX_THREADS="2")
+        env = dict(daemon_env, YCXX_RUNTIME_DIR=sockets)
         args = [*base, "--daemon=require", "-fsyntax-only", rules, caller]
         try:
             invoke(args, env=env)
@@ -154,6 +155,28 @@ with tempfile.TemporaryDirectory() as directory:
         rejected = root / "mismatch"
         invoke([*target, "-o", rejected, root / "caller.o", root / "changed.o"], "no matching guarantee")
         assert not rejected.exists()
+
+        # A resident link must recheck the proof when a provider is rebuilt in place.
+        with tempfile.TemporaryDirectory(prefix="yg-link-", dir="/tmp") as sockets:
+            link_env = dict(daemon_env, YCXX_RUNTIME_DIR=sockets)
+            resident = ["--daemon=require" if flag == "--no-daemon" else flag for flag in target]
+            provider_object = root / "provider.o"
+            replacement = root / "changed.o"
+            link = ["-o", program, root / "caller.o", provider_object]
+            try:
+                invoke([*resident, *link], env=link_env)
+                stamp = provider_object.stat()
+                assert provider_object.read_bytes() != replacement.read_bytes()
+                os.utime(replacement, ns=(stamp.st_atime_ns, stamp.st_mtime_ns))
+                replacement.replace(provider_object)
+                updated = provider_object.stat()
+                assert (updated.st_size, updated.st_mtime_ns) == (stamp.st_size, stamp.st_mtime_ns)
+                program.unlink()
+                error = "no matching guarantee"
+                assert invoke([*resident, *link], error, link_env) == invoke([*target, *link], error)
+                assert not program.exists()
+            finally:
+                subprocess.run([compiler, "ctl", "shutdown"], cwd=root, env=link_env, capture_output=True, timeout=10)
 
     if linux_host:
         program = root / "budget"
