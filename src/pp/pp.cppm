@@ -143,6 +143,7 @@ void serialize_into(engine::Sink& out, const Source& s) {
   engine::serialize(out, static_cast<std::uint64_t>(s.config.view));
   engine::serialize(out, static_cast<std::uint64_t>(s.config.template_depth));
   engine::serialize(out, static_cast<std::uint64_t>(s.config.call_triviality ? 1 + std::to_underlying(*s.config.call_triviality) : 0));
+  engine::serialize(out, s.config.freestanding);
 }
 Source deserialize_from(engine::Source& in, std::type_identity<Source>) {
   Source s;
@@ -161,6 +162,7 @@ Source deserialize_from(engine::Source& in, std::type_identity<Source>) {
   const auto calls = engine::deserialize<std::uint64_t>(in);
   if (calls > 1 + std::to_underlying(ast::CallTriviality::apple)) in.fail();
   if (calls != 0) s.config.call_triviality = static_cast<ast::CallTriviality>(calls - 1);
+  s.config.freestanding = engine::deserialize<bool>(in);
   return s;
 }
 
@@ -449,6 +451,10 @@ std::expected<bool, std::string> take_option(std::span<const std::string_view> a
       if (eq == value.npos) cfg.macros.emplace_back(value, "1");
       else cfg.macros.emplace_back(value.substr(0, eq), value.substr(eq + 1));
     } else cfg.macros.emplace_back(value, std::nullopt);
+    return true;
+  }
+  if (a == "-ffreestanding") {
+    cfg.freestanding = true;
     return true;
   }
   return false;
