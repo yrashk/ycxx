@@ -130,8 +130,10 @@ effect. [#982](https://github.com/yrashk/ycxx/issues/982)
 Fixed-prototype calls (free and member functions, lambdas, function templates and calls
 through pointers) support passing and returning nonempty flat records with integral,
 ordinary object-pointer or object lvalue-reference fields by value. The record can occupy up to
-16 bytes and must be trivial for calls. Larger results and classes that are not trivial for
-calls (with a user-provided copy constructor or destructor) pass through memory, as on macOS. [Linux integer aggregate ABI](docs/design/linux-integer-aggregates.md)
+16 bytes and must be trivial for calls. Fixed direct calls also support ordinary one-byte empty
+classes as parameters. Larger results and classes that are not trivial for calls (with a
+user-provided copy constructor or destructor) pass through memory, as on macOS.
+[Linux integer aggregate ABI](docs/design/linux-integer-aggregates.md)
 
 Static x86-64 Linux executables resolve `R_X86_64_GOTPCREL` through GOT slots. A slot for an
 unresolved weak symbol contains zero. [#979](https://github.com/yrashk/ycxx/issues/979)
