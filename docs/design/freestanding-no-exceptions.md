@@ -16,6 +16,9 @@ queries of `noexcept` keep their language rules.
 Native code in disabled mode uses ordinary scope exit and destruction. The
 compiler retains cleanup-free frame information for eligible functions. It
 omits exceptional cleanup, handler lowering and the associated runtime calls.
+Supported scalar aggregate defaults and conditional or comma class initializers
+can call a potentially throwing function in this mode. Their expression and
+normal lifetime checks still apply.
 The pinned libycxx allocator helper uses the direct factory branch in this mode.
 
 [#980](https://github.com/yrashk/ycxx/issues/980) · [Exception support #89](https://github.com/yrashk/ycxx/issues/89)

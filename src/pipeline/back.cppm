@@ -1207,10 +1207,10 @@ engine::query_task<Generated> FunctionGen::run(engine::Ctx& cx, FnKey k) {
       co_await cx.par_fetch(engine::q<FunctionSourceQ>{k}, engine::q<UnitFunctionFactsQ>{k.tu}, engine::q<UnitShapes>{k.tu},
                             engine::q<UnitShapeIndex>{k.tu});
   const auto* config = unit_config(cx, k.tu);
-  const bool exceptions_enabled = !config || config->exceptions_enabled;
   UnitFacts facts(src, unit, shapes, shape_index, config ? *config->target : *universe().target);
   const FunctionDef& d = src.def;
   irgen::FunctionInput input{d.entity, d.decl, d.body, d.item, d.body_offset};
+  input.exceptions_enabled = !config || config->exceptions_enabled;
   input.this_type = d.this_type;
   input.root_destructor_table = d.root_destructor_table;
   const auto& seqs = universe().in->seqs;
@@ -1232,7 +1232,7 @@ engine::query_task<Generated> FunctionGen::run(engine::Ctx& cx, FnKey k) {
     input.catch_int_binding = d.hosted_catch->int_binding;
   }
   const bool linux = facts.target().triple == ast::x86_64_linux.triple;
-  if (exceptions_enabled) {
+  if (input.exceptions_enabled) {
     if (linux) input.unwind_cleanup_checks = irgen::UnwindCleanupChecks::all_calls;
     else if (facts.target().triple == ast::aarch64_darwin.triple)
       input.unwind_cleanup_checks = irgen::UnwindCleanupChecks::aggregate_defaults;
