@@ -97,6 +97,12 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
   - Rule: AGENTS.md, "PRs and branches".
   - Learned on #139, 2026-11-18.
 
+- **`gh pr merge --auto` merges at once in this repository.** Auto-merge is disabled for
+  yrashk/ycxx, so `--auto` does not wait for checks: #721 merged before its macOS job had run.
+  - Do: wait for the checks yourself (`gh pr checks N`), then merge without `--auto`, with
+    `--match-head-commit <sha>` so a later push cannot slip in.
+  - Learned on #721, 2026-11-22.
+
 - **Commits pushed to a PR's branch after it merges never reach main.** #233's Apple-ABI change
   was pushed to `claude/byvalue-116` after the coordinator had merged #233, so it never reached
   main (the same trap as #198, from the other side).
@@ -636,9 +642,15 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
   interned (often `int`). The interpreter used it as "no pointee" for `std::nullptr_t`, and so
   skipped its `void*` cast check for every `int*`. The unit tests' world happened to intern `int`
   first, which is how it showed.
+  The same happened three times on #88: `EntityId{}` in a new `TemplateArg::templ` field made every
+  dependent template argument name entity 0 (the first class template declared), `ConstId{}` did
+  the same in step 6, and an empty `SeqId<TemplateParamSema>` crashed until list 0 was interned as
+  the empty one.
   - Do: say "none" with a flag or `std::optional`, or with the kind's `none` enumerator where the
-    handle has one (`ConstId::none`, `NodeId::none`), never with `T{}`.
-  - Learned on #25.
+    handle has one (`ConstId::none`, `NodeId::none`), never with `T{}`. Give a new handle field
+    `= X::none` (or intern the empty list as index 0), and test with the argument declared first.
+  - Rule: AGENTS.md, "While working".
+  - Learned on #25 and #88 steps 6 and 8.
 - **Test blocked storage past its first block.** #107's chunked pools passed a concurrency test
   that never left block 0; the review found that any list longer than the next block aborted,
   which one 3,000-statement function triggers.
@@ -853,14 +865,6 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
     sema needs them, and collect the declarations used by each unit for code generation.
   - Learned on #293.
 
-- **A handle's `{}` is index 0, a real entity or list, not `none`.** `EntityId{}` in a new
-  `TemplateArg::templ` field made every dependent template argument name entity 0, which was the
-  first class template declared, so `W<Box>` became `W`'s own current instantiation and was never
-  instantiated. `ConstId{}` did the same in step 6, and an empty `SeqId<TemplateParamSema>` crashed
-  until list 0 was interned as the empty one.
-  - Do: give a new handle field `= X::none` (or intern the empty list as index 0 in `Interners()`),
-    and test with the argument declared first in the file.
-  - Learned on #88 steps 6 and 8.
 - **An issue body rewritten through a pipe can come out empty, and `gh issue edit` takes it.**
   `gh issue view … | sed … > body.md && gh issue edit --body-file body.md` blanked #88's body once:
   the view returned nothing that time, and the `&&` only checked the redirection.
