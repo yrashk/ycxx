@@ -325,6 +325,26 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
   - Look for O(n) scans of unit-wide values in per-function cells: each looks cheap in a small
     test and is quadratic over a large unit.
   - Learned on #938.
+- **Find analysis-order dependence with an oracle before splitting analysis.** On #947 a debug
+  check analysed each top-level item in a `parse::Program` of its own and compared its results
+  with the whole unit's, over the core suite. It found 32 differences in 23 files: side tables
+  filled as items run, read on the assumption that every earlier item had run. Fixing their
+  causes took an afternoon; finding them by debugging failing groups would have taken days.
+  - Do: before running part of an analysis alone, compare part-alone with whole over the suite,
+    and fix each cause where the table is read (analyse what can fill it first).
+  - Learned on #947.
+- **Record a recorded question before its loop.** #947's by-name questions were recorded per
+  entry they visited. When no item declared the name yet, nothing was recorded, and a group
+  missed the declaration added later. The `.incr` suite caught it.
+  - Do: record the question, then walk its answer; check a reuse test by disabling one part of
+    the verification and seeing the test fail.
+  - Learned on #947.
+- **GCC 16.2's "Bad file data" can come from a partition's non-exported code too.** On #947, new
+  types and code in `src/pipeline/front.cppm` made every importer of `ycxx.pipeline` fail, exported
+  or not. Moving them into a module implementation unit (`src/pipeline/groups.cpp`, `module
+  ycxx.pipeline; import :front;`, as `src/interp/ops.cpp` does) fixed it.
+  - Do: put implementation that importers need not see in an implementation unit.
+  - Learned on #947.
 - **Template code added to the engine can slow its hit paths without touching them.** #245's
   trace hooks were one branch each, yet `engine_bench` lost 6 ns a fetch hit and 6 ns a root get
   hit. The per-kind `describe` templates instantiated `std::format` in every engine user's unit,

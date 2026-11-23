@@ -614,10 +614,27 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
   through a `Session` (the engine, the interners and sema's world, alive together; in-process
   until the daemon, #96):
   - `:front`: `TuSema(TU)`: `PpTokens` (the region without token locations, expansion sites,
-    `space_before` flags or error details) and `RegionItems`, then `parse::Program` (item_sema,
-    analyze_body) inside the one cell until contextual queries (#16, #947). `TuFront(TU)` places
-    its messages in files from `pp`'s full region, so an edit that changes no token (a comment,
-    blank lines) stops at `PpTokens` and analysis does not run again (#947, slice 0). Its diagnostics by byte offset, and the `TranslationUnit`: entities, function
+    `space_before` flags or error details; each token's file kept) and `RegionItems`, then
+    `parse::Program` (item_sema, analyze_body) inside the one cell until contextual queries (#16).
+    `TuFront(TU)` places its messages in files from `pp`'s full region, so an edit that changes
+    no token (a comment, blank lines) stops at `PpTokens` and analysis does not run again (#947,
+    slice 0).
+    - A unit whose tokens never say `virtual` is analysed a group at a time (#947, slice 1;
+      `src/pipeline/groups.cpp`): each top-level item of the main file, and each run of the
+      headers' top-level items, by a Program of its own (`Program::analyze_group`) that analyses
+      other items only as the group asks. `unit_of` makes each group's `UnitPart`, and
+      `finish_unit` the decisions that need every group (init functions, `inline`, noexcept and
+      hidden declarations anywhere, unwind checks). A unit that says `virtual` keeps one Program.
+    - A Program answers the same whichever items ran first (§A1): `ensure_declared` analyses the
+      earlier items that can declare an entity before a side table is read, `settle` completes a
+      class reached lazily, and `may_have_virtual_layouts` is a fact of the tokens.
+    - A group's analysis is reused between revisions while what it read gives the same answers
+      (`GroupTrace`, kept per session): the items it read (`ItemsView`) and their position-free
+      content, its by-name questions (`Program::NameProbe`, filtered by the shared
+      `Program::Index` before an item is read) and their answers, the order of those items, and
+      the unit's namespaces, using-directives and specialization items. The stand-in for #16's
+      selection cells, as `pp::Session::cache` is for regions. Token ranges a pragma holds are
+      positions: a unit with them analyses every group. Its diagnostics by byte offset, and the `TranslationUnit`: entities, function
     definitions with their analysed bodies, variable definitions with their constants.
     `tu_unit(TU)` projects the unit, so a whitespace edit stops there.
   - `:back`, per function `F`: `function_source(TU, F)` (a projection that backdates),
