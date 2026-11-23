@@ -11,12 +11,12 @@
 # define PIC_LEVEL 0
 #endif
 
-using Operation = int(int);
 static int local_data = 17;
 
 extern "C" {
 extern int pic_external_data;
 int pic_external_call(int value);
+using Operation = decltype(pic_external_call);
 [[gnu::visibility("hidden")]] int pic_hidden_data = 13;
 
 int* pic_data_cell = &pic_external_data;

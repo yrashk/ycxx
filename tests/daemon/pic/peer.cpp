@@ -1,5 +1,3 @@
-using Operation = int(int);
-
 extern "C" {
 #ifdef PIC_PROVIDER
 int pic_external_data = 7;
@@ -7,6 +5,7 @@ int pic_external_call(int value) { return value + 9; }
 #else
 extern int pic_external_data;
 int pic_external_call(int value);
+using Operation = decltype(pic_external_call);
 # ifdef PREEMPT
 int pic_external_data = 41;
 int pic_external_call(int value) { return value + 53; }
