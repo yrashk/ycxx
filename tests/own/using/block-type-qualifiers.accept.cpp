@@ -16,6 +16,20 @@ void direct_imports() {
   static_assert(static_cast<int>(E::one) == 11);
 }
 
+int tag_and_local_value() {
+  using Imported::Box;
+  int Box = 3;
+  return Box::value + Box;
+}
+
+int alias_and_nested_value() {
+  using Imported::Alias;
+  {
+    int Alias = 5;
+    return Alias::value + Alias;
+  }
+}
+
 namespace Inner { enum class E { one = 29 }; }
 
 namespace Enclosing {
