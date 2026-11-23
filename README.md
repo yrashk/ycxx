@@ -199,9 +199,11 @@ On Linux x86-64, an ordinary external namespace-scope function can use GNU `weak
 strong definition in another object takes precedence. This covers the pinned libycxx
 debugger provider. [#937](https://github.com/yrashk/ycxx/issues/937)
 
-External inline namespace variables with relocation-free static initializers share one object
-across translation units on both targets. On Linux this lets two freestanding units using libycxx
-`<cstddef>` link with the pinned static library. [#432](https://github.com/yrashk/ycxx/issues/432)
+External inline namespace variables and in-class static constexpr members of ordinary namespace-scope
+classes share one object across translation units on both targets when their initial values need
+no relocations or runtime work. On Linux this lets two freestanding units using libycxx `<cstddef>`
+link with the pinned static library. [#432](https://github.com/yrashk/ycxx/issues/432)
+· [#903](https://github.com/yrashk/ycxx/issues/903)
 
 ycxx ELF objects record function types and code sizes. The ELF linker accepts supported
 system-assembled objects with function symbols and the GNU-built libycxx static linkage-marker
@@ -525,9 +527,14 @@ written default member initializer are value-initialized.
   and runtime field access. Direct-list braces also work for aggregates of public integral
   fields in namespace-scope classes without bases.
   [#262](https://github.com/yrashk/ycxx/issues/262)
+  Inline static integral, pointer, and supported floating-point members can use constant
+  direct and copy lists in those classes, including fixed arrays of those types.
+  [#964](https://github.com/yrashk/ycxx/issues/964)
   Constant expressions can read non-mutable integral and enumeration fields of flat
   namespace-scope constexpr aggregates.
   [#862](https://github.com/yrashk/ycxx/issues/862) · [#876](https://github.com/yrashk/ycxx/issues/876)
+  A default member initializer in a flat constexpr aggregate can directly read an earlier
+  integral or enumeration field. [#895](https://github.com/yrashk/ycxx/issues/895)
   Constant expressions can read integral and enumeration fields of a flat aggregate temporary,
   such as `Limits{42}.quota`. [#900](https://github.com/yrashk/ycxx/issues/900)
   Namespace-scope `constexpr` pointers to `void` can retain scalar and array element addresses.

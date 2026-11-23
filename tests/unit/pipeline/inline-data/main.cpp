@@ -16,6 +16,12 @@ int* main_specialized_address() { return specialized_pointer; }
 const int* main_immutable_address() { return immutable_pointer; }
 
 int main() {
+    const int* seed = peer_seed_address();
+    if (seed != &Record::seed || *seed != 42) return 12;
+    if (peer_local_seed_address() == &LocalRecord::seed) return 13;
+    const Descriptor* descriptor = peer_descriptor_address();
+    if (descriptor != &Record::descriptor || descriptor->first != 23 || descriptor->second != 47) return 14;
+
     const int* local_immutable = main_immutable_address();
     const int* peer_immutable = peer_immutable_address();
     if (local_immutable != named_immutable || peer_immutable != local_immutable ||
