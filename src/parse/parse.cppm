@@ -9657,11 +9657,11 @@ bool Program::special_members(u32 item, EntityId cls, sema::ClassRec& rec,
     }
   }
   for (std::size_t i = 0; i < subobjects.size(); ++i) {
-    sema::TypeRec type = types.rec(subobjects[i]);
-    while (type.kind == sema::TypeKind::array) type = types.rec(type.inner);
+    const QualType element = types.innermost_array_element(subobjects[i]);
+    const sema::TypeRec type = types.rec(element);
     if ((type.kind != sema::TypeKind::class_ || rec.closure) &&
         type.kind != sema::TypeKind::pointer && type.kind != sema::TypeKind::reference &&
-        type.kind != sema::TypeKind::member_pointer && types.is_dependent(subobjects[i])) {
+        type.kind != sema::TypeKind::member_pointer && types.is_dependent(rec.closure ? element : subobjects[i])) {
       if (implicit_noexcept != false) implicit_noexcept.reset();
       if (rec.closure) dependent_destructor = true;
       else if (!manual_union_destruction) rec.destructor_usable = false;
