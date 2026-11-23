@@ -116,6 +116,10 @@ build/bin/ycxx cxx -nostdlib example.o -o example
 ./example
 ```
 
+`-ffreestanding` defines `__STDC_HOSTED__` as `0` for runtime and library builds. Objects may omit
+an entry point. On x86-64 Linux, `-nostdlib` selects the existing executable startup convention
+described above. [#973](https://github.com/yrashk/ycxx/issues/973)
+
 Fixed-prototype calls (free and member functions, lambdas, function templates and calls
 through pointers) support passing and returning nonempty flat records with integral or
 ordinary object-pointer fields by value. The record can occupy up to
@@ -542,6 +546,8 @@ written default member initializer are value-initialized.
   [#862](https://github.com/yrashk/ycxx/issues/862) · [#876](https://github.com/yrashk/ycxx/issues/876)
   A default member initializer in a flat constexpr aggregate can directly read an earlier
   integral or enumeration field. [#895](https://github.com/yrashk/ycxx/issues/895)
+  Constant expressions can read integral and enumeration fields of a flat aggregate temporary,
+  such as `Limits{42}.quota`. [#900](https://github.com/yrashk/ycxx/issues/900)
   Namespace-scope `constexpr` pointers to `void` can retain scalar and array element addresses.
   `__builtin_addressof`, used by libycxx's `std::addressof`, bypasses overloaded `operator&`.
   It supports runtime addresses and constant expressions such as a scalar global's address.
@@ -564,6 +570,10 @@ SDK or one selected by `SDKROOT`. Cross-target builds can also supply target hea
 [#251](https://github.com/yrashk/ycxx/issues/251) ·
 [#475](https://github.com/yrashk/ycxx/issues/475) · [#657](https://github.com/yrashk/ycxx/issues/657) ·
 [#664](https://github.com/yrashk/ycxx/issues/664) · [#690](https://github.com/yrashk/ycxx/issues/690)
+
+`ycxx -dumpmachine` prints the selected target triple and `ycxx -print-file-name=include` prints
+its compiler resource include directory. Both accept `--target` and run without a project.
+[#970](https://github.com/yrashk/ycxx/issues/970)
 
 **Incremental builds through a resident daemon.** `ycxx cxx` hands its work to a per-project
 `ycxx daemon` (`YCXX_NO_DAEMON=1` runs in-process), which watches the files it has read and keeps
