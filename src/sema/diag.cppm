@@ -412,6 +412,8 @@ enum class Diag : std::uint32_t {
   exceptions_disabled [[=message{Severity::error, "cannot use '{0:k}' with exceptions disabled by '-fno-exceptions'"}]],
   rtti_disabled [[=message{Severity::error, "cannot use '{0:k}' with RTTI disabled by '-fno-rtti'"}]],
   namespace_asm_directive [[=message{Severity::error, "namespace-scope constant asm requires one '.hidden SYMBOL' directive"}]],
+  // A trait operand uses the ordinary incomplete-type message and stays an error in substitution.
+  virtual_class_trait_incomplete [[=message{Severity::error, "'{0:t}' is an incomplete type"}]],
 };
 
 // A `{N:r}` argument: why an evaluation was not constant. 0 is an expression the front end
@@ -479,7 +481,8 @@ constexpr bool is_type_trait_failure(engine::DiagId id) {
          id == diag_id(Diag::convertibility_unsupported) || id == diag_id(Diag::base_of_incomplete) ||
          id == diag_id(Diag::base_of_unsupported) || id == diag_id(Diag::empty_incomplete) ||
          id == diag_id(Diag::empty_unsupported) || id == diag_id(Diag::convertibility_incomplete) ||
-         id == diag_id(Diag::destructibility_incomplete) || id == diag_id(Diag::destructibility_unsupported);
+         id == diag_id(Diag::destructibility_incomplete) || id == diag_id(Diag::destructibility_unsupported) ||
+         id == diag_id(Diag::virtual_class_trait_incomplete);
 }
 // Whether a diagnostic stays an error where a substitution failure means "not satisfied": a limit
 // of ycxx's, an atomic constraint that is not a `bool` constant ([temp.constr.atomic]/3), or a
@@ -492,7 +495,7 @@ constexpr bool survives_substitution(engine::DiagId id) {
          id == diag_id(Diag::trivial_copyability_incomplete) ||
          id == diag_id(Diag::constructibility_incomplete) || id == diag_id(Diag::base_of_incomplete) ||
          id == diag_id(Diag::empty_incomplete) || id == diag_id(Diag::convertibility_incomplete) ||
-         id == diag_id(Diag::destructibility_incomplete);
+         id == diag_id(Diag::destructibility_incomplete) || id == diag_id(Diag::virtual_class_trait_incomplete);
 }
 
 constexpr std::string_view diag_name(Diag d) {
