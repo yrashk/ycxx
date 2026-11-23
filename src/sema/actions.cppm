@@ -1877,17 +1877,19 @@ public:
     return bool_literal(binds_directly(), begin, end);
   }
   // `__reference_converts_from_temporary(T, U)` and `__reference_constructs_from_temporary(T, U)`
-  // ([meta.rel]): T is a reference and `T t = VAL<U>;` (or `T t(VAL<U>)`) binds t to a temporary,
+  // ([meta.unary.prop]): T is a reference and `T t = VAL<U>;` (or `T t(VAL<U>)`) binds t to a temporary,
   // VAL<U> a prvalue for a non-reference U. For the operands convertibility supports, arithmetic
   // and reference-related classes, copy- and direct-initialization agree: the temporary is a
   // converted value or a materialized prvalue ([dcl.init.ref]/5). A dependent operand is decided
   // when the enclosing template is instantiated.
-  Ex reference_temporary_expr(NameId name, QualType target, QualType source, u32 begin, u32 end) {
+  Ex reference_temporary_expr(ast::DepOp op, NameId name, QualType target, QualType source, u32 begin, u32 end) {
     const Types& ts = types();
     const QualType to = ts.canonical(target), from = ts.canonical(source);
+    const engine::Loc loc = type_trait_loc(begin);
     if (ts.is_dependent(to) || ts.is_dependent(from)) {
       // Completeness is then judged at the point of instantiation, as for `__is_base_of`.
-      q_->record_dependent_type_trait_operand(type_trait_loc(begin));
+      q_->record_dependent_type_trait_operand(loc);
+      if (auto pattern = replayed_binary_type_trait(op, to, from, begin, end)) return *pattern;
       return dependent_node({}, begin, end, builtin(Builtin::bool_));
     }
     if (!ts.is_reference(to) || ts.is_void(from)) return bool_literal(false, begin, end);
@@ -1902,8 +1904,7 @@ public:
     }
     if (ts.is_class(from_object) && ts.is_class(to_object)) {
       const EntityId f = ts.class_of(from_object), t = ts.class_of(to_object);
-      const engine::Loc loc = type_trait_loc(begin);
-      // [meta.rel]: both operands are complete types, as for convertibility.
+      // The reference-related query needs both class definitions ([dcl.init.ref]).
       for (EntityId c : f == t ? std::vector{f} : std::vector{f, t}) {
         const auto demand = q_->type_trait_at_demand(c, loc);
         if (demand ? *demand : q_->is_complete_at_source(c)) continue;
@@ -1920,7 +1921,7 @@ public:
         return bool_literal(binds_rvalue && prvalue && cv_within(Types::cv(from_object), Types::cv(to_object)), begin, end);
       }
     }
-    diag_at(type_trait_loc(begin), Diag::convertibility_unsupported, name, target, source);
+    diag_at(loc, Diag::convertibility_unsupported, name, target, source);
     return {NodeId::none, begin, end};
   }
   // [meta.rel] uses existence of a base, regardless of access or the number of paths.
@@ -2047,7 +2048,9 @@ public:
       return destructibility_expr(ast::DepOp::is_trivially_destructible, name, args[0], begin, end);
     case is_base_of: return base_of_expr(args[0], args[1], begin, end);
     case reference_converts_from_temporary:
-    case reference_constructs_from_temporary: return reference_temporary_expr(name, args[0], args[1], begin, end);
+      return reference_temporary_expr(ast::DepOp::reference_converts_from_temporary, name, args[0], args[1], begin, end);
+    case reference_constructs_from_temporary:
+      return reference_temporary_expr(ast::DepOp::reference_constructs_from_temporary, name, args[0], args[1], begin, end);
     case is_assignable: return assignability_expr(ast::DepOp::is_assignable, name, args[0], args[1], begin, end);
     case is_nothrow_assignable:
       return assignability_expr(ast::DepOp::is_nothrow_assignable, name, args[0], args[1], begin, end);
