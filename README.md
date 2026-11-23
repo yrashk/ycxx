@@ -193,6 +193,10 @@ visibility across declarations.
 [#422](https://github.com/yrashk/ycxx/issues/422) · [#602](https://github.com/yrashk/ycxx/issues/602)
 · [#124](https://github.com/yrashk/ycxx/issues/124) · [#936](https://github.com/yrashk/ycxx/issues/936)
 
+On Linux x86-64, an ordinary external namespace-scope function can use GNU `weak` so a
+strong definition in another object takes precedence. This covers the pinned libycxx
+debugger provider. [#937](https://github.com/yrashk/ycxx/issues/937)
+
 External inline namespace variables with relocation-free static initializers share one object
 across translation units on both targets. On Linux this lets two freestanding units using libycxx
 `<cstddef>` link with the pinned static library. [#432](https://github.com/yrashk/ycxx/issues/432)

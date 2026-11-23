@@ -2595,11 +2595,11 @@ private:
     LangLinkage lang = enclosing.value_or(LangLinkage::cxx);
     bool explicit_lang = enclosing.has_value();
     u32 attrs_at = ps_.pos();
-    bool hidden_visibility = false;
+    DeclAttributes leading_attributes;
     // [dcl.link]: a linkage-specification has no attribute-specifier-seq.
     // (GNU attributes there are accepted, as GCC and Clang do.)
     std::vector<ast::AnnotationSema> annotations;
-    const int attributes = ps_.skip_attributes(&hidden_visibility, Parser::attr_std | Parser::attr_gnu, &annotations);
+    const int attributes = ps_.skip_attributes(&leading_attributes, Parser::attr_std | Parser::attr_gnu, &annotations);
     if ((attributes & Parser::attr_std) && ps_.is(Tk::kw_extern) && ps_.kind(1) == Tk::string_lit) {
       s_.diag(attrs_at, Diag::attributes_not_allowed);
       return bad();
@@ -2614,7 +2614,7 @@ private:
       ps_.bump();
       ps_.bump();
       while (ps_.is(Tk::string_lit) && ps_.tok().has(lex::tok_flag::continued)) ps_.bump();
-      ps_.skip_attributes(&hidden_visibility, Parser::attr_std | Parser::attr_gnu, &annotations);
+      ps_.skip_attributes(&leading_attributes, Parser::attr_std | Parser::attr_gnu, &annotations);
     }
     ps_.set_linkage(lang);
     // `template<>`: an explicit specialization ([temp.expl.spec]) of a class, function or variable
@@ -2836,7 +2836,8 @@ private:
     }
     s_.defer_type_access = true;
     DeclSpec spec = ps_.decl_specifiers();
-    spec.hidden_visibility |= hidden_visibility;
+    spec.attributes.hidden_visibility |= leading_attributes.hidden_visibility;
+    spec.attributes.weak |= leading_attributes.weak;
     if (spec.ok && spec.elaborated && s_.types().is_enum(spec.type)) {
       EntityId e = s_.types().enum_of(spec.type);
       if (!ps_.is(Tk::semi) || s_.world().entities.rec(e).scope == ns_entity()) {
@@ -6748,10 +6749,14 @@ private:
       return false;
     }
     if (fn && p_->world().ins.names.spelling(d.name) == "main") check_main(spec, sem, d, lang);
-    if ((spec.hidden_visibility || d.hidden_visibility) && !template_ && !explicit_ && !ordinary_friend &&
-        sem.linkage == ast::Linkage::external && (!d.qualified || d.scope.ns) &&
+    const bool ordinary_external = !template_ && !explicit_ && !ordinary_friend &&
+                                   sem.linkage == ast::Linkage::external && (!d.qualified || d.scope.ns);
+    if (ordinary_external && (spec.attributes.hidden_visibility || d.attributes.hidden_visibility) &&
         (fn || (!var_ && !(sem.flags & sema::decl_flag::inline_))))
       sem.hidden_visibility = true;
+    if (ordinary_external && fn && !(sem.flags & (sema::decl_flag::inline_ | sema::decl_flag::member)) &&
+        (spec.attributes.weak || d.attributes.weak))
+      sem.explicit_weak = true;
 
     // The initializer ([dcl.init]); the name is in scope from the end of its declarator.
     // An explicit or partial specialization, or an instantiation, declares no name: the
