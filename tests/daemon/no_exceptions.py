@@ -162,13 +162,13 @@ def linux_object(world, scope, libycxx, readelf):
     assert '.eh_frame' in symbols and '.gcc_except_table' not in symbols, symbols
     assert not re.search(r'__gxx_personality|_Unwind_|__cxa_(?:throw|rethrow|allocate_exception|begin_catch|end_catch)',
                          symbols), symbols
-    cleanup, = (row.split() for row in symbols.splitlines() if row.split()[-1:] == ['ordinary_cleanup'])
-    start, size = int(cleanup[1], 16), int(cleanup[2])
+    plain, = (row.split() for row in symbols.splitlines() if row.split()[-1:] == ['plain_frame'])
+    start, size = int(plain[1], 16), int(plain[2])
     frames = metadata('--debug-dump=frames')
     assert set(re.findall(r'Augmentation:\s+"([^"]*)"', frames)) == {'zR'}, frames
     ranges = {(int(low, 16), int(high, 16))
               for low, high in re.findall(r'\bFDE\b[^\n]*\bpc=([0-9a-f]+)\.\.([0-9a-f]+)', frames)}
-    assert size > 0 and (start, start + size) in ranges, (cleanup, frames)
+    assert size > 0 and (start, start + size) in ranges, (plain, frames)
 
     # The header's static linkage guard refers to the marker provided by this pinned source.
     args = [*flags, '-c', libycxx / 'src/runtime/linkage/static.cpp', '-o', 'marker.o']
