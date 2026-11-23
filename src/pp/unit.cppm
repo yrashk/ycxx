@@ -77,7 +77,7 @@ public:
 
   // The predefined macros and the command line's, as the text of `<built-in>` ([cpp.predefined]).
   std::string builtin_text() const {
-    std::string s = predefined_text(*config.target, config.freestanding);
+    std::string s = predefined_text(*config.target, config.freestanding, config.pic);
     for (const auto& [name, value] : config.macros) {
       if (value) s += std::format("#define {} {}\n", name, *value);
       else s += std::format("#undef {}\n", name);

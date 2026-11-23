@@ -260,6 +260,9 @@ What is true of the code today. Work in progress and its owners are tracked in
   - a feature-test table, including `__cpp_pp_embed`;
   - the target's macros, generated from `ast::Target` and checked against Clang on AArch64
     Darwin and x86-64 Linux (`tests/own/pp/predefined-target*.pp.cpp`, #132);
+  - x86-64 Linux `-fPIC` defines `__PIC__` and `__pic__` as `2`. The compiler and editor
+    include the mode in the source configuration.
+    [#983](https://github.com/yrashk/ycxx/issues/983) · [Design](docs/design/freestanding-pic.md)
   - `__LINE__`, `__FILE__`, `__COUNTER__`, `__DATE__` and `__TIME__`.
 - `#include <cstdio>` preprocesses until libycxx's `#error` for unknown compilers
   (yrashk/libycxx#17).
@@ -1165,6 +1168,9 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   and must be constant-initialized), `consteval` functions with immediate invocations replaced by
   their value outside an immediate function context, `constinit`, and the redeclaration rules of
   [dcl.constexpr]/1.
+- Native collection omits ordinary named namespace-scope immediate functions whose bodies
+  have neither static locals nor closures. Their declarations and analysed bodies remain
+  available for constant evaluation. [#1006](https://github.com/yrashk/ycxx/issues/1006)
 - `static_assert(e)` and `static_assert(e, "message")` at namespace and block scope (the
   `StaticAssert` node); `if consteval` and `if !consteval` (`IfConsteval`, lowered to
   `consteval_br`).

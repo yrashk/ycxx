@@ -149,6 +149,9 @@ Resident links reread explicit archives on each request.
 [#389](https://github.com/yrashk/ycxx/issues/389), [#388](https://github.com/yrashk/ycxx/issues/388),
 [#951](https://github.com/yrashk/ycxx/issues/951)
 
+For x86-64 Linux, `-fPIC` selects explicit position-independent object mode and defines
+`__PIC__` and `__pic__` as `2`. [#983](https://github.com/yrashk/ycxx/issues/983)
+
 An explicit dynamic link uses ycxx's startup and the target loader. Supply the absolute target
 interpreter path and explicit, self-contained shared objects with GNU or SysV hash tables and
 slash-free SONAMEs. The executable can directly call their exported, unversioned functions. The
@@ -544,6 +547,9 @@ written default member initializer are value-initialized.
   `static_assert` and `if consteval`, with errors that explain why something is not constant.
   Scalar `&&`, `||` and `?:` expressions keep scalar reference-argument temporaries alive
   until the end of the full-expression on each executed path. [#902](https://github.com/yrashk/ycxx/issues/902)
+- ordinary namespace-scope `consteval` definitions with neither static locals nor closures
+  can supply compile-time results without requiring a native function body.
+  [#1006](https://github.com/yrashk/ycxx/issues/1006)
   A constant evaluation can bypass a block-scope static aggregate. [#872](https://github.com/yrashk/ycxx/issues/872)
   Scalar enumeration values work in constexpr variables, calls, casts and switch conditions.
   A flat static constexpr aggregate member initialized with `T{...}` has addressable storage
