@@ -102,6 +102,22 @@ with tempfile.TemporaryDirectory() as directory:
     ):
         syntax(write(f"{name}.cpp", declaration.replace("BOUND", bound).replace("BODY", body)), error=error)
 
+    inherited_profile = """\
+        #include "grades.hpp"
+        struct Defaults {
+         protected:
+          using Limits = Two;
+        };
+        struct Profile : Defaults { using Effects = Limits; };
+        [[=fx::trusted_contract<One>{}]] int send(int) noexcept;
+        [[=fx::contract<Profile::Effects>{}]] int run(int n) noexcept { send(n); return send(n); }
+    """
+    syntax(write("inherited_profile.cpp", inherited_profile))
+    syntax(write("inherited_profile_overuse.cpp", inherited_profile.replace("return send(n);", "send(n); return send(n);")),
+           error="exceeds its usage grade of 2")
+    syntax(write("private_profile.cpp", inherited_profile.replace("protected:", "private:")),
+           error="'Limits' is a private member of 'Defaults'")
+
     syntax(write("unbounded.cpp", declaration.replace("BOUND", "One").replace("trusted_contract<One>", "trusted_contract<Unbounded>")
                  .replace("BODY", "return send(n);")), error="has no finite usage grade for effect 'Send'")
     syntax(write("overflow.cpp", """\
