@@ -108,9 +108,9 @@ as it was read.
 - `{"build":n,"label":…}`, `{"watching":[…]}`: with `--watch`, a build starts; the files it waits on.
 - `{"watching":…,"pid":…}`, `{"request":n,"label":…}`, `{"ended":…}`: with `ctl trace`, the
   attached daemon, each request's start, and the end of the watch.
+- `{"note":…}`: a line of text.
 
 The JSON is written as subtrees complete, as ever: a live trace (#939) is the browser's only.
-- `{"note":…}`: a line of text.
 
 ## The interactive browser
 
@@ -133,7 +133,13 @@ terminal (`src/trace/browse.cppm`, whose model is `src/trace/view.cppm`). `?` li
     a view still following goes back to the top.
   - When the build ends the status line says so, and the tree is the one a browser opened after
     the build would show. Closing the browser earlier waits for the build; either way the outputs
-    are written and the diagnostics printed after the browser closes.
+    are written and the diagnostics printed after the browser closes. One difference: a failed
+    frame's child that ends after it (it was still running) is placed among its siblings by its
+    start, and may fold with them, where after the build it comes last.
+  - A run of the request that is abandoned (a lost daemon, the in-process fallback) starts the
+    tree afresh; with `--watch`, its cells still running when the build ends are shown `failed`,
+    and so are those running when `ctl trace`'s daemon goes away.
+  - A language server's requests have no tick: `ctl trace` gets each one's events when it ends.
   - Without a terminal (`/dev/tty`), `--trace-engine=interactive` prints the stream after the
     build, as before.
   - How it works. A live trace (`trace::Live`) asks the engine for every frame's start

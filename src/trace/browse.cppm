@@ -396,8 +396,10 @@ bool browse(Tree& tree, Feed* feed) {
   // than a third of a core from the build.
   constexpr std::chrono::milliseconds frame{33};
   std::chrono::nanoseconds gap = frame;
-  auto next_frame = start;
-  bool dirty = true;
+  auto next_frame = start;  // the next look at a ticking source
+  auto next_draw = start;   // the earliest a live change is drawn
+  bool dirty = true;        // to draw at once: input, a resize, the source's end
+  bool pending = false;     // to draw at `next_draw`: what the source brought
   std::pair<std::size_t, std::size_t> size{0, 0};
   const auto live_step = [&](const std::function<bool()>& f) {
     const std::uint64_t before = tree.version();
@@ -407,7 +409,8 @@ bool browse(Tree& tree, Feed* feed) {
       feed = nullptr;
     }
     // Running cells' times move on every frame.
-    if (tree.version() != before || tree.running() > 0 || !more) dirty = true;
+    if (!more) dirty = true;
+    else if (tree.version() != before || tree.running() > 0) pending = true;
   };
   while (true) {
     if (const auto now_size = term.size(); now_size != size) size = now_size, dirty = true;
@@ -416,12 +419,14 @@ bool browse(Tree& tree, Feed* feed) {
       live_step(feed->tick);
       next_frame = now + gap;
     }
-    if (dirty) {
+    if (dirty || (pending && clock::now() >= next_draw)) {
       const auto t0 = clock::now();
       b.resize(size.first, size.second);
       term.draw(b.frame());
-      dirty = false;
-      gap = std::max<std::chrono::nanoseconds>(frame, 2 * (clock::now() - t0));
+      dirty = pending = false;
+      const auto t1 = clock::now();
+      gap = std::max<std::chrono::nanoseconds>(frame, 2 * (t1 - t0));
+      next_draw = t0 + gap;
     }
     std::optional<std::chrono::milliseconds> wait;
     if (b.ticking()) {
@@ -436,10 +441,12 @@ bool browse(Tree& tree, Feed* feed) {
     } else {
       next_tick = clock::now() + Browser::tick_every;
     }
-    if (feed && feed->tick) {
-      const auto until = std::chrono::duration_cast<std::chrono::milliseconds>(next_frame - clock::now()) + std::chrono::milliseconds(1);
-      wait = std::max(std::chrono::milliseconds(1), wait ? std::min(*wait, until) : until);
-    }
+    const auto until = [&](clock::time_point t) {
+      const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(t - clock::now()) + std::chrono::milliseconds(1);
+      wait = std::max(std::chrono::milliseconds(1), wait ? std::min(*wait, ms) : ms);
+    };
+    if (feed && feed->tick) until(next_frame);
+    if (pending) until(next_draw);
     switch (term.wait(feed && feed->pump ? feed->fd : -1, wait)) {
       case Terminal::Wake::resize: dirty = true; continue;
       case Terminal::Wake::tick: continue;

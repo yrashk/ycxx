@@ -306,7 +306,17 @@ class Browser {
     std::optional<std::int32_t> held = cursor_ > 0 && cursor_ < before.size() ? std::optional(before[cursor_].node) : std::nullopt;
     // A selection being made holds its end where it is, even at the top.
     if (rows_sel_ && (visual_ || drag_ == Drag::rows)) held = rows_sel_->end;
+    const std::uint64_t resets = tree_.resets();
     const bool more = f();
+    if (tree_.resets() != resets) {
+      // A new tree (a new run of the request): nothing held refers to it.
+      clear_selection();
+      drag_ = Drag::none;
+      cursor_ = top_ = detail_scroll_ = 0;
+      bar_ = bars_top_ = 0;
+      held.reset();
+    }
+    if (held && static_cast<std::size_t>(*held) >= tree_.nodes().size()) held.reset();
     if (follow_ && !(rows_sel_ && (visual_ || drag_ == Drag::rows))) follow();
     else if (held) keep_selected(tree_.shown(*held));
     return more;
@@ -1059,7 +1069,9 @@ class Browser {
       }
     }
   }
+  // The user's choice of a node (n, x, a slice or a bar): following stops.
   void select(std::int32_t node) {
+    follow_ = false;
     tree_.reveal(node);
     keep_selected(node);
   }

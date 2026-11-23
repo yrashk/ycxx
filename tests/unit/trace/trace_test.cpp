@@ -1430,6 +1430,62 @@ void live() {
           "its end settles it: its outcome, end and memory");
     check(inconsistent(t).empty(), inconsistent(t));
   }
+  // A node that ended as an instant, folded into the one before it, gets a child (its end came
+  // first): it is no instant, and what was folded around it folds again as the collector folds
+  // it. In either order the same tree.
+  for (bool backwards : {false, true}) {
+    trace::Tree t;
+    const auto r = [](std::uint64_t id, std::uint64_t parent, std::uint64_t at, std::uint64_t cell) {
+      Event e = ev(id, parent, "K", std::format("k{}", cell), Outcome::reused, at, at, 0);
+      e.cell = cell;
+      return e;
+    };
+    Event top = ev(1, 0, "Build", "a", Outcome::executed, 0, 0, 0);
+    top.running = true;
+    std::vector<Event> es{top, r(2, 1, 10, 7), r(3, 1, 11, 7), r(4, 1, 12, 7), r(6, 1, 13, 7), r(5, 3, 11, 8)};
+    if (backwards) std::ranges::reverse(es);
+    t.apply(es);
+    check(inconsistent(t).empty(), inconsistent(t));
+    check(t.roots().size() == 1, "one top");
+    const auto kids = t.node(t.roots()[0]).children;
+    std::vector<std::pair<std::uint64_t, std::uint32_t>> got;
+    for (std::int32_t c : kids) got.emplace_back(t.node(c).ev.id, t.node(c).ev.repeat);
+    using P = std::pair<std::uint64_t, std::uint32_t>;
+    check(got == std::vector<P>{{2, 1}, {3, 1}, {4, 2}}, std::format("an instant with a child is no instant: 2, 3 (with 5 under it), 4 ×2 ({}): {}", backwards ? "backwards" : "in order", got));
+  }
+  // A request that ends with cells still running (an abandoned run): they failed.
+  {
+    trace::Tree t;
+    const std::uint64_t g = (std::uint64_t{1} << 63) | 1;
+    t.open_group(g, "#1", 0);
+    Event a = ev(1, 0, "Build", "a", Outcome::executed, 5, 5, 0);
+    a.running = true;
+    t.apply(std::span(&a, 1), g);
+    t.advance(900);
+    t.close_group(g, 1000);
+    check(t.running() == 0 && t.node(1).ev.outcome == Outcome::failed && t.node(1).ev.end_ns == 900 && !t.summary().running,
+          "a request's end fails what still runs, where its time reached");
+    check(inconsistent(t).empty(), inconsistent(t));
+  }
+  // A new run of the request under a view holding a node of the old tree (#939's review).
+  {
+    trace::Tree t;
+    std::vector<Event> many;
+    for (std::uint64_t k = 1; k <= 300; ++k) many.push_back(ev(k, k == 1 ? 0 : 1, "Pp", std::format("h{}", k), Outcome::executed, k, k + 1, 0));
+    t.apply(many);
+    trace::Browser b(t);
+    b.resize(30, 120);
+    b.set_live("building a.cpp", false);
+    (void)b.handle(trace::Key{"G"});
+    check(!b.following() && b.cursor() > 100, "the user went to the end");
+    (void)b.pump([&] {
+      t.reset();
+      t.apply(std::span(many).first(3));
+      return true;
+    });
+    check(b.cursor() == 0 && t.resets() == 1 && t.nodes().size() == 3, "a new tree: the view starts at its top");
+    check(plain(b.frame()).contains("Pp(h1)"), "and draws it");
+  }
   // The filter's is:running.
   {
     trace::Tree t;
@@ -1541,6 +1597,7 @@ void live() {
       return b.pump([&] {
         t.apply(pending);
         pending.clear();
+        t.advance(1000);  // the running cells reach the timeline's end
         return true;
       });
     };
@@ -1571,6 +1628,12 @@ void live() {
     check(b.following() && t.node(t.rows()[b.cursor()].node).ev.id == 60, "f follows again, at once");
     (void)b.handle(trace::Mouse{trace::Mouse::Act::wheel_down, 0, 10, 10});
     check(!b.following(), "the wheel stops following");
+    (void)b.handle(trace::Key{"f"});
+    (void)b.handle(trace::Key{"s"});
+    check(b.following(), "sorting keeps following: it keeps the node, not the row");
+    (void)b.handle(trace::Key{"t"});
+    (void)b.handle(trace::Key{"\r"});
+    check(!b.following(), "a slice opened from the timeline is the user's choice: following stops");
     (void)b.handle(trace::Key{"f"});
     b.end_live("the build has ended");
     check(b.cursor() == 0 && !b.following() && plain(b.frame()).contains("(the build has ended)"), "the end goes back to the top, and says so");

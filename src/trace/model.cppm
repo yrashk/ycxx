@@ -745,15 +745,42 @@ class Tree {
         attach(i, group_node(group));
       }
     }
+    // What still runs never ends (a run abandoned for another: a lost daemon): it failed, where
+    // its time reached.
+    const std::int32_t g = group_node(group);
+    for (std::int32_t i : std::vector(running_)) {
+      if (!nodes_[i].ev.running) continue;
+      std::int32_t top = i;
+      while (nodes_[top].parent >= 0 && nodes_[top].parent != g) top = nodes_[top].parent;
+      if (group != 0 && nodes_[top].parent != g) continue;  // another request's
+      Event e = nodes_[i].ev;
+      e.running = false;
+      e.outcome = Outcome::failed;
+      settle_node(i, std::move(e));
+    }
     changed();
   }
+  // Everything shown goes (a new run of the request: a retry, the fallback in-process), the way it
+  // is shown stays; `resets` counts them, so a view holding nodes knows they are gone.
+  void reset() {
+    Tree fresh;
+    fresh.newest_first_ = newest_first_;
+    fresh.hide_reused_ = hide_reused_;
+    fresh.order_ = order_;
+    fresh.words_ = words_;
+    fresh.raw_words_ = raw_words_;
+    fresh.worker_ = worker_;
+    fresh.resets_ = resets_ + 1;
+    fresh.version_ = version_ + 1;
+    *this = std::move(fresh);
+  }
+  std::uint64_t resets() const noexcept { return resets_; }
   // Moves running nodes' ends to `now_ns` (since the trace began), so their times, the timeline
   // and the span grow while they run (#939).
   void advance(std::uint64_t now_ns) {
     std::erase_if(running_, [&](std::int32_t i) { return !nodes_[i].ev.running; });
     if (running_.empty()) return;
     for (std::int32_t i : running_) nodes_[i].ev.end_ns = std::max(nodes_[i].ev.start_ns, now_ns);
-    summary_.span_ns = std::max(summary_.span_ns, now_ns);
     if (order_ == Order::time) changed();
   }
   // Cells started and not ended yet.
@@ -769,7 +796,10 @@ class Tree {
     return best;
   }
   // The node to show for `i`: itself, or the one it is folded into.
-  std::int32_t shown(std::int32_t i) const noexcept { return nodes_[i].folded_into >= 0 ? nodes_[i].folded_into : i; }
+  std::int32_t shown(std::int32_t i) const {
+    contract_assert(i >= 0 && static_cast<std::size_t>(i) < nodes_.size());  // a node of this tree, not of one reset since
+    return nodes_[i].folded_into >= 0 ? nodes_[i].folded_into : i;
+  }
 
   std::span<const Node> nodes() const noexcept { return nodes_; }
   const Node& node(std::int32_t i) const { return nodes_[i]; }
@@ -888,9 +918,14 @@ class Tree {
   }
 
   // Counts per outcome, the span, the workers and the memory, kept as events come.
+  // A running cell counts its start in the span kept as nodes come, and its time so far here, so
+  // that moving it on (`advance`) or ending it never makes the summary count again.
   Summary summary() const {
     if (summary_dirty_) recount();
-    return summary_;
+    Summary s = summary_;
+    for (std::int32_t i : running_)
+      if (nodes_[i].ev.running) s.span_ns = std::max(s.span_ns, nodes_[i].ev.end_ns);
+    return s;
   }
 
   static constexpr std::uint32_t open_depth = 2;
@@ -995,8 +1030,8 @@ class Tree {
   // Puts node `i` (and what came under it before it) under `p` (-1: the top).
   void attach(std::int32_t i, std::int32_t p) {
     // A parent that was an instant leaf is one no more: its siblings fold again around it.
+    // While `p` is folded, the sums stop at it (below), and its unfolding counts it whole.
     const bool was_instant = p >= 0 && nodes_[p].attached && instant_leaf(p) && foldable(nodes_[p].parent);
-    if (was_instant) unfold_head(nodes_[p].parent, shown(p));
     Node& n = nodes_[i];
     n.parent = p;
     n.attached = p < 0 || nodes_[p].attached;
@@ -1158,10 +1193,11 @@ class Tree {
       s.retained_bytes += sign * counted_retained(e);
     }
     const std::int32_t top = std::max(e.worker, e.end_worker);
+    const std::uint64_t reach = e.running ? e.start_ns : e.end_ns;
     if (sign > 0) {
-      s.span_ns = std::max(s.span_ns, e.end_ns);
+      s.span_ns = std::max(s.span_ns, reach);
       s.workers = std::max(s.workers, top + 1);
-    } else if (e.end_ns >= s.span_ns || top + 1 >= s.workers) {
+    } else if (reach >= s.span_ns || top + 1 >= s.workers) {
       summary_dirty_ = true;
     }
   }
@@ -1172,7 +1208,7 @@ class Tree {
       if (n.group || n.folded_into >= 0) continue;
       if (n.ev.running) ++s.running;
       else ++s.counts[std::to_underlying(n.ev.outcome)], ++s.events, s.add_memory(n.ev);
-      s.span_ns = std::max(s.span_ns, n.ev.end_ns);
+      s.span_ns = std::max(s.span_ns, n.ev.running ? n.ev.start_ns : n.ev.end_ns);
       top = std::max({top, n.ev.worker, n.ev.end_worker});
     }
     s.workers = top + 1;
@@ -1227,6 +1263,7 @@ class Tree {
   std::unordered_map<std::uint64_t, std::vector<Waiting>> waiting_;  // by the parent's id they wait for
   std::vector<std::int32_t> running_;                               // nodes that may still run
   std::int32_t last_ = -1;                                          // the node that came last
+  std::uint64_t resets_ = 0;
   bool folding_ = true;                                             // false while a batch is added
   mutable Summary summary_;
   mutable bool summary_dirty_ = false;

@@ -172,10 +172,11 @@ struct Interrupt {
 
 // `on_trace` gets the request's trace batches; `on_retry` is called before asking a new daemon.
 // `instance`, when given, is set to the daemon that answered (`Welcome::instance`); `cut`, when given, can interrupt it.
+// `said`, when given, takes the line `verbose` prints instead (a browser has the screen).
 using OnTrace = std::function<void(daemon::TraceBatch&&)>;
 std::expected<compile::Done, std::string> through_daemon(const compile::Request& r, bool verbose, const OnTrace& on_trace = {},
                                                          const std::function<void()>& on_retry = {}, std::uint64_t* instance = nullptr,
-                                                         Interrupt* cut = nullptr) {
+                                                         Interrupt* cut = nullptr, std::vector<std::string>* said = nullptr) {
   std::string root = daemon::root_for(compile::first_input(r.argv), r.cwd);
   std::string why;
   for (int attempt = 0; attempt < 2; ++attempt) {
@@ -188,9 +189,12 @@ std::expected<compile::Done, std::string> through_daemon(const compile::Request&
     if (cut) cut->leave();
     if (d) {
       if (instance) *instance = c->welcome.instance;
-      if (verbose)
-        std::println(std::cerr, "ycxx: answered by daemon {} for {} at revision {} ({} restarts, {} pp regions reused)",
-                     c->welcome.daemon_pid, c->welcome.root, d->report.revision, d->report.restarts, d->report.regions_reused);
+      if (verbose) {
+        std::string line = std::format("ycxx: answered by daemon {} for {} at revision {} ({} restarts, {} pp regions reused)",
+                                       c->welcome.daemon_pid, c->welcome.root, d->report.revision, d->report.restarts, d->report.regions_reused);
+        if (said) said->push_back(std::move(line));
+        else std::println(std::cerr, "{}", line);
+      }
       return std::move(*d);
     }
     why = d.error().why;
@@ -457,6 +461,7 @@ int browse_compile(compile::Request r, Use use, bool verbose) {
     int status = -1;  // when the build could not happen: what `cxx` returns
     std::vector<std::string> notes;  // for stderr, once the browser is closed
   } shared;
+  std::vector<std::string> said;  // the builder's own: `-v`'s line
   const auto restart = [&](std::string why) {
     std::lock_guard g(shared.m);
     shared.events.clear();
@@ -466,7 +471,8 @@ int browse_compile(compile::Request r, Use use, bool verbose) {
     ++shared.generation;
     shared.notes.push_back(std::format("ycxx: {}: traced again", why));
   };
-  std::jthread builder([&] {
+  // The stack the daemon gives a request's thread: the compile's own recursion runs on it (#178).
+  std::jthread builder(std::jthread::stack_size_hint(std::size_t{256} << 20), [&] {
     if (use != Use::off) {
       auto d = through_daemon(r, verbose, [&](daemon::TraceBatch&& b) {
         std::lock_guard g(shared.m);
@@ -479,7 +485,7 @@ int browse_compile(compile::Request r, Use use, bool verbose) {
         shared.memory = b.memory;
         shared.now_ns = b.sent_ns - std::min(b.sent_ns, b.started_ns);
         shared.at = std::chrono::steady_clock::now();
-      }, [&] { restart("the daemon was lost; asking a new one"); });
+      }, [&] { restart("the daemon was lost; asking a new one"); }, nullptr, nullptr, &said);
       if (d || use == Use::require) {
         std::lock_guard g(shared.m);
         if (!d) {
@@ -530,7 +536,7 @@ int browse_compile(compile::Request r, Use use, bool verbose) {
       std::lock_guard g(shared.m);
       if (shared.generation != generation) {
         generation = shared.generation;
-        tree = {};
+        tree.reset();  // the browser sees it, and lets go of what it held
       }
       events.swap(shared.events);
       if (shared.live) {
@@ -553,15 +559,27 @@ int browse_compile(compile::Request r, Use use, bool verbose) {
     tree.advance(now);
     return true;
   };
-  trace::browse(tree, &feed);
+  const bool browsed = trace::browse(tree, &feed);
   bool ended = false;
   {
     std::lock_guard g(shared.m);
     ended = shared.ended;
   }
-  if (!ended) std::println(std::cerr, "ycxx: the trace browser closed; waiting for the build to end");
+  if (browsed && !ended) std::println(std::cerr, "ycxx: the trace browser closed; waiting for the build to end");
   builder.join();
   for (const std::string& n : shared.notes) std::println(std::cerr, "{}", n);
+  for (const std::string& n : said) std::println(std::cerr, "{}", n);
+  if (!browsed) {
+    // The terminal went away after all: the trace as the stream, after the build, as without one.
+    std::println(std::cerr, "ycxx: no terminal for --trace-engine=interactive; printing the trace");
+    while (feed.tick()) {
+    }
+    trace::Stream stream(std::cerr, {trace::colors_for(2), true, false});
+    std::vector<trace::Event> all;
+    for (std::int32_t i : tree.preorder()) all.push_back(tree.node(i).ev);
+    stream.batch(all);
+    stream.summary(std::nullopt, tree.memory());
+  }
   if (shared.status >= 0) return shared.status;
   if (!shared.done) {
     std::println(std::cerr, "ycxx: error: {}", shared.done.error());
@@ -716,7 +734,10 @@ int watch(daemon::Connection& c, bool interactive, bool json) {
     auto sent_at = std::chrono::steady_clock::now();
     trace::Feed feed{.fd = c.fd.get(), .pump = [&] {
                        auto b = daemon::next_trace(c);
-                       if (!b) return false;
+                       if (!b) {
+                         tree.settle();  // what was running when the daemon went never ends
+                         return false;
+                       }
                        const std::uint64_t sent = b->sent_ns;
                        rebase(*b);
                        if (seen.insert(b->request).second) tree.open_group(group_of(b->request), std::format("#{} {}", b->request, b->label), b->started_ns);
