@@ -38,7 +38,7 @@ jobs:
       contents: read
       actions: read
       issues: write
-    timeout-minutes: 30
+    timeout-minutes: ${{ matrix.host.name == 'macos-arm64' && 40 || 30 }}
     env:
       TIER: ${{ github.event_name == 'pull_request' && 'pr' || 'main' }}
     steps:
