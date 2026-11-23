@@ -1275,11 +1275,14 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
           const EntityId target = world.entities.rec(cast.target_rtti).scope;
           if (checked.emplace(source, target).second) {
             const ast::Loc at{f.item, node.offset()};
+            const auto rtti = program.peer_typed_dynamic_cast(source, target);
             if (uncertain_layouts.contains(source) || uncertain_layouts.contains(target) ||
-                !program.peer_typed_dynamic_cast(source, target)) {
+                rtti == parse::Program::TypedCastRtti::unsupported) {
               tu.unsupported_typed_dynamic_cast = at;
               return;
             }
+            if (rtti == parse::Program::TypedCastRtti::keyless_base)
+              tu.keyless_type_info.insert(cast.source_rtti);
             for (EntityId id : {cast.source_rtti, cast.target_rtti, cast.runtime}) {
               ast::DeclSema d{};
               d.kind = id == cast.runtime ? ast::DeclKind::function : ast::DeclKind::variable;
