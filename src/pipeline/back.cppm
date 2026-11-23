@@ -152,6 +152,8 @@ struct FunctionDef {
   // The primary table a dynamic class's constructor installs after its base subobject (#309).
   EntityId constructor_table = EntityId::none;
   bool emit_if_referenced = false;  // an eligible immediate definition (#1097)
+  // A named namespace-scope immediate function template instance without local statics or closures.
+  bool plain_immediate_template = false;
 };
 
 // A variable definition at namespace scope with its constant initializer, or `ConstId::none` for
@@ -1431,6 +1433,18 @@ engine::query_task<Lowered> Lower::run(engine::Ctx& cx, FnKey k) {
   auto [shapes, shape_index] = co_await cx.par_fetch(engine::q<UnitShapes>{k.tu}, engine::q<UnitShapeIndex>{k.tu});
   QueryLayout layout(cx, shapes, shape_index, target);
   ir::LowerConfig config;
+  if (f.body) {
+    const auto checked = std::ranges::find_if(f.body->nodes, [](ir::Op op) {
+      return op == ir::Op::sadd_overflow || op == ir::Op::smul_overflow;
+    }, &ir::Node::op);
+    if (checked != f.body->nodes.end()) {
+      const FunctionSource& src = co_await cx.fetch<FunctionSourceQ>(k);
+      // A retained immediate caller can reference this definition. Keep its ABI and symbol
+      // while constant evaluation continues to execute the original L1.
+      if (src.def.plain_immediate_template)
+        config.unreachable_body = ir::NodeId(std::uint32_t(checked - f.body->nodes.begin()));
+    }
+  }
   if (linux) {
     const ast::Interners& in = *universe().in;
     const FunctionSource& src = co_await cx.fetch<FunctionSourceQ>(k);
@@ -1449,7 +1463,8 @@ engine::query_task<Lowered> Lower::run(engine::Ctx& cx, FnKey k) {
     }
     if (!f.body) co_return Lowered{std::nullopt, {}, f.error};
     const ir::Function& body = *f.body;
-    for (std::size_t i = 0; i < body.nodes.size(); ++i) {
+    const std::size_t node_count = config.unreachable_body ? 0 : body.nodes.size();
+    for (std::size_t i = 0; i < node_count; ++i) {
       const auto n = ir::NodeId(static_cast<std::uint32_t>(i));
       const ir::Op op = body.node(n).op;
       const bool direct = op == ir::Op::call || op == ir::Op::invoke;
@@ -1499,7 +1514,7 @@ engine::query_task<Lowered> Lower::run(engine::Ctx& cx, FnKey k) {
     // Extend outgoing narrow results for interoperability. Lowering truncates incoming results
     // to the declared width, as the System V AMD64 psABI §3.2.3 leaves excess bits unspecified.
     config.min_result_bits = 32;
-  } else if (std::ranges::contains(f.body->nodes, ir::Op::invoke, &ir::Node::op)) {
+  } else if (!config.unreachable_body && std::ranges::contains(f.body->nodes, ir::Op::invoke, &ir::Node::op)) {
     const FunctionSource& src = co_await cx.fetch<FunctionSourceQ>(k);
     if (src.def.unwind == UnwindEligibility::hosted_cleanup) config.cleanup_resume = src.cleanup_resume;
   }

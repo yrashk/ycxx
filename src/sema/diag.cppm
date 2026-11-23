@@ -371,6 +371,7 @@ enum class Diag : std::uint32_t {
   // (docs/EXTENSIONS.md), named where lookup finds nothing else.
   builtin_unsupported [[=message{Severity::error, "built-in function '{0:n}' is not supported yet"}]],
   builtin_nan_string [[=message{Severity::error, "the argument of __builtin_nan must be a string literal spelling an integer"}]],
+  builtin_overflow_operand [[=message{Severity::error, "checked integer builtin requires an argument of type '{0:t}', got '{1:t}'"}]],
   va_start_context [[=message{Severity::error, "va_start requires an enclosing variadic function"}]],
   va_list_operand [[=message{Severity::error, "expected a mutable va_list cursor, got '{0:t}'"}]],
   va_arg_type [[=message{Severity::error, "va_arg type '{0:t}' is outside the supported x86-64 System V integer, pointer and double subset"}]],

@@ -1591,7 +1591,10 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
       continue;
     tu.functions.push_back({in->spec, in->decl, in->body.value, program.id(in->item), it.body_begin - it.begin,
                             program.this_type(in->decl)});
-    tu.functions.back().emit_if_referenced = immediate_if_referenced(in->decl, entity, in->body.value);
+    auto& definition = tu.functions.back();
+    definition.emit_if_referenced = immediate_if_referenced(in->decl, entity, in->body.value);
+    definition.plain_immediate_template = definition.emit_if_referenced && program.is_namespace(entity.scope) &&
+                                          !ins.names.spelling(entity.name).empty();
     if (it.parent != items::none && items.items[it.parent].kind == items::ItemKind::class_def) {
       const bool ordinary_member = ordinary_class_template_member(entity) && !in->decl.is_virtual &&
                                    !internal_class(entity.scope) &&

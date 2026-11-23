@@ -118,6 +118,9 @@ export struct LowerConfig {
   std::optional<IntThrowRuntime> int_throw;
   std::optional<CatchAllRuntime> catch_all{};
   EntityId cleanup_resume = EntityId::none;
+  // For an immediate function whose native body cannot execute, use this L1 origin
+  // for a single unreachable terminator after classifying its entry ABI.
+  std::optional<NodeId> unreachable_body{};
 };
 
 export enum class Amd64ArgumentKind : std::uint8_t { integer, sse, stack };
@@ -262,6 +265,11 @@ class Lowering {
 
   // Blocks reachable from the entry, `consteval_br` taking only its runtime edge.
   void reachable() {
+    block_map_.assign(f_.blocks.size(), none);
+    if (config_.unreachable_body) {
+      block_map_[0] = 0;
+      return;
+    }
     std::vector<std::uint8_t> seen(f_.blocks.size());
     std::vector<std::uint32_t> work{0};
     seen[0] = 1;
@@ -279,7 +287,6 @@ class Lowering {
         }
       }
     }
-    block_map_.assign(f_.blocks.size(), none);
     std::uint32_t next = 0;
     for (std::uint32_t b = 0; b < f_.blocks.size(); ++b)
       if (seen[b]) block_map_[b] = next++;
@@ -518,6 +525,11 @@ class Lowering {
     }
     if (catch_edges_ && catch_edges_->cleanup && b == catch_edges_->handler) params.push_back(T::i64);
     BlockId nb = b_.begin_block(params);
+    if (config_.unreachable_body) {
+      at_ = *config_.unreachable_body;
+      emit_unreachable();
+      return {};
+    }
     auto param = [&](std::uint32_t i) { return b_.param(nb, index.empty() ? i : index[i]); };
     if (normal_invoke) {
       out(catch_edges_->invoke, 0, param(0));
@@ -555,6 +567,11 @@ class Lowering {
   ValueId in(NodeId n, std::size_t i) const { return map_[raw(f_.operands_of(n)[i])]; }
   void out(NodeId n, std::size_t i, ValueId v) { map_[f_.node(n).res0 + i] = v; }
   ValueId l1_result(NodeId n, std::size_t i = 0) const { return ValueId(f_.node(n).res0 + i); }
+
+  void emit_unreachable() {
+    auto o = origin();
+    b_.emit(Op2::unreachable, {}, {}, {}, 0, {}, o);
+  }
 
   // The selector belongs to the machine landing edge. L1 presents only a selected handler
   // and its exception; neither ABI register becomes an ordinary L1 value.
@@ -1150,8 +1167,7 @@ class Lowering {
         return fail("unsupported asm instruction");
       }
       case Op::unreachable: {
-        auto o = origin();
-        b_.emit(Op2::unreachable, {}, {}, {}, 0, {}, o);
+        emit_unreachable();
         return {};
       }
       default: return fail(std::format("`{}` is not in the α subset", info(nd.op).name));

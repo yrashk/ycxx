@@ -176,7 +176,7 @@ private:
   // `constant`: a global's initial value, the ConstId in `v.bits`, decoded when first read.
   enum class Fill : u8 { indeterminate, erroneous, value, constant };
   enum class Origin : u8 { automatic, global, literal };
-  enum class Use : u8 { read, callee_read, write, lifetime };
+  enum class Use : u8 { read, callee_read, write, callee_write, lifetime };
   enum class Kind : u8 { integer, pointer, array, function, floating, other };
 
   struct Cell {
@@ -639,13 +639,16 @@ Machine::Flow Machine::locate(const Value& p, std::span<const u64> extra, QualTy
   if (!accessible_as(pl->type, t)) return fail(Reason::access_type);
   out = *pl;
   if (use == Use::lifetime) return Flow::next;
-  if (pl->ncells == 0 && (ob.record_life == Life::after || (use != Use::write && ob.record_life == Life::before)))
+  // Only an ordinary store can initialize storage before the lifetime begins.
+  const bool requires_live = use != Use::write;
+  if (pl->ncells == 0 && (ob.record_life == Life::after || (requires_live && ob.record_life == Life::before)))
     return fail(Reason::outside_lifetime);
   for (u32 c = pl->cell0; c < pl->cell0 + pl->ncells; ++c) {
     Life life = cells_[c].life;
-    if (life == Life::after || (use != Use::write && life == Life::before)) return fail(Reason::outside_lifetime);
+    if (life == Life::after || (requires_live && life == Life::before)) return fail(Reason::outside_lifetime);
   }
-  if (use == Use::write) {
+  const bool writing = use == Use::write || use == Use::callee_write;
+  if (writing) {
     if (ob.read_only) return fail(Reason::modify_const);
     // The initializing store comes before `obj.begin`; a const object is not modified after it.
     const Life life = pl->ncells == 0 ? ob.record_life : cells_[pl->cell0].life;
@@ -656,7 +659,7 @@ Machine::Flow Machine::locate(const Value& p, std::span<const u64> extra, QualTy
     const EntityId global = !ob.usable && ob.origin == Origin::global ? ob.entity : EntityId::none;
     return fail(Reason::not_usable, 0, global);
   }
-  return use == Use::callee_read ? Flow::next : note_access(*pl, use == Use::write);
+  return use == Use::callee_read || use == Use::callee_write ? Flow::next : note_access(*pl, writing);
 }
 
 void Machine::set_lifetime(const Place& p, bool complete, Life life) {
@@ -910,8 +913,11 @@ Machine::Flow Machine::int_shape(Frame&, QualType t, const Shape*& s) {
 
 // add, sub, mul, neg, and, or, xor: computed modulo 2^64, then checked against the result type
 // under `nsw`/`nuw` ([expr.pre]/4: a signed result outside its type's range is undefined).
+// Checked addition and multiplication report signed overflow alongside the converted result.
 Machine::Flow Machine::arith(Frame& f, NodeId n) {
   const ir::Node& nd = f.fn->node(n);
+  const bool checked = nd.op == Op::sadd_overflow || nd.op == Op::smul_overflow;
+  if (checked && config_.mode != Mode::constant) return unsupported(n);
   const Shape* s;
   if (Flow fl = int_shape(f, result_type(f, n), s); fl != Flow::next) return fl;
   Value a = operand(f, n, 0), b = nd.op == Op::neg ? Value::integer(0) : operand(f, n, 1);
@@ -923,6 +929,7 @@ Machine::Flow Machine::arith(Frame& f, NodeId n) {
   constexpr i64 max = std::numeric_limits<i64>::max(), min = std::numeric_limits<i64>::min();
   switch (nd.op) {
   case Op::add:
+  case Op::sadd_overflow:
     r = x + y;
     sov = (sy > 0 && sx > max - sy) || (sy < 0 && sx < min - sy) || !fits(i64(r), s->width);
     uov = r < x || !fits_unsigned(r, s->width);
@@ -934,7 +941,9 @@ Machine::Flow Machine::arith(Frame& f, NodeId n) {
     uov = y > x;
     break;
   case Op::mul:
+  case Op::smul_overflow:
     r = x * y;
+    // The quotient test uses the wrapped product. Avoid dividing the signed minimum by -1.
     sov = (sx != 0 && ((sx == -1 && sy == min) || i64(r) / sx != sy)) || !fits(i64(r), s->width);
     uov = (x != 0 && r / x != y) || !fits_unsigned(r, s->width);
     break;
@@ -945,6 +954,7 @@ Machine::Flow Machine::arith(Frame& f, NodeId n) {
   }
   if ((nd.flags & ir::bit(ir::Flag::nsw)) && sov) return fail(Reason::signed_overflow);
   if ((nd.flags & ir::bit(ir::Flag::nuw)) && uov) return fail(Reason::unsigned_overflow);
+  if (checked) set(f, n, Value::integer(sov), 1);
   return set(f, n, Value::integer(norm(r, s->width, s->is_signed)));
 }
 
