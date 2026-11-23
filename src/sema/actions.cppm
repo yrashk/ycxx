@@ -116,6 +116,10 @@ public:
   // Whether class `c` is complete at the current point ([class.mem.general]): its definition
   // precedes the point and does not enclose it.
   virtual bool is_complete(EntityId c) = 0;
+  // Whether a class of the unit can need virtual support: the unit says `virtual` somewhere. A
+  // fact of its tokens, so a check that skips classes without it does not depend on which classes
+  // were analysed first (#947).
+  virtual bool may_have_virtual_layouts() { return true; }
   // An omitted field's initializer, analysed at its declaration into the requesting builder.
   // `NodeId::none` records a diagnosed error. No answer means this context cannot replay it.
   // A required base selects the call-free parenthesized aggregate form.
@@ -2253,7 +2257,7 @@ public:
 
   // [basic.def], [basic.lval]: objects other than base subobjects cannot have abstract class type.
   bool require_concrete_object(QualType t, u32 at) {
-    if (!classes().has_virtual_layouts()) return true;
+    if (!q_->may_have_virtual_layouts()) return true;
     const QualType element = types().innermost_array_element(t);
     const ClassRec* record = types().is_class(element) ? class_rec(types().class_of(element)) : nullptr;
     if (!record || !record->is_abstract()) return true;
@@ -2266,7 +2270,7 @@ public:
   }
 
   bool require_supported_virtual_layout(QualType t, u32 at) {
-    if (!classes().has_virtual_layouts()) return true;
+    if (!q_->may_have_virtual_layouts()) return true;
     const QualType element = types().innermost_array_element(t);
     // Layout can be the first use that requires a class specialization to be complete.
     const ClassRec* record = types().is_class(element) ? class_rec(types().class_of(element)) : nullptr;
@@ -2276,13 +2280,13 @@ public:
   }
 
   bool has_peer_virtual_layout(QualType t) {
-    if (!classes().has_virtual_layouts() || !types().is_class(t)) return false;
+    if (!q_->may_have_virtual_layouts() || !types().is_class(t)) return false;
     const ClassRec* record = class_rec(types().class_of(t));
     return record && record->peer_virtual_layout != PeerVirtualLayout::none;
   }
 
   bool has_peer_automatic_layout(QualType t) {
-    if (!classes().has_virtual_layouts() || !types().is_class(t)) return false;
+    if (!q_->may_have_virtual_layouts() || !types().is_class(t)) return false;
     const ClassRec* record = class_rec(types().class_of(t));
     return record && (record->peer_virtual_layout == PeerVirtualLayout::root ||
                       record->peer_automatic_primary_base != EntityId::none);
