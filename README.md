@@ -579,12 +579,13 @@ it affects, through code generation and the link. The daemon serves concurrent r
 thread pool, and its output is byte for byte that of a cold, in-process build. The daemon, its file
 watcher (FSEvents on macOS, inotify on Linux), the engine trace and the LSP server below work the
 same on both hosts. [#659](https://github.com/yrashk/ycxx/issues/659)
-Measured on 2026-11-22 (Release ycxx, arm64 macOS, 18 cores) with a generated 1 MB file of 290
-modules and 11,311 functions (`playground/genbig.py`): a cold build takes 0.91 s, and changing
-one module's constant rebuilds in 0.80 s, and a comment or blank lines in 0.21 s, because an edit
-that changes no token stops before analysis. The back end re-runs only the two functions that read
-the constant; a changed token still re-analyses the whole file, about 0.5 s of the 0.80 s
-([#938](https://github.com/yrashk/ycxx/issues/938), [#947](https://github.com/yrashk/ycxx/issues/947)).
+A unit without virtual functions is analysed a top-level item at a time, and an item's analysis
+is reused while what it read is unchanged. Measured on 2026-11-22 (Release ycxx, arm64 macOS, 18
+cores) with a generated 1 MB file of 290 modules and 11,311 functions (`playground/genbig.py`): a
+cold build takes 1.00 s, changing one module's constant rebuilds in 0.32 s, and a comment or blank
+lines in 0.20 s. Only that module is analysed again, and only the two functions that read the
+constant are compiled again ([#938](https://github.com/yrashk/ycxx/issues/938),
+[#947](https://github.com/yrashk/ycxx/issues/947)).
 
 **See what the engine does.** `ycxx cxx --trace-engine a.cpp` (or `YCXX_TRACE_ENGINE=stream`)
 prints every query the build went through as a colored tree on stderr: what ran, what was
