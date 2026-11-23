@@ -690,6 +690,11 @@ a peer defines its earlier key function. Complete and base destruction restore t
 vptr before calling the nonthrowing observer. The deleting entry then uses global sized
 `operator delete`. [#136](https://github.com/yrashk/ycxx/issues/136)
 
+On Linux x86-64, an empty out-of-line virtual destructor can own the derived table and RTTI
+for a class with one public nonvirtual base and no added fields. The base has one pointer field
+and a peer-owned virtual destructor and RTTI. This is the shape of libycxx's fundamental
+`type_info` configure probe. [#999](https://github.com/yrashk/ycxx/issues/999)
+
 ### Not yet
 
 - The standard library and its headers. On macOS, C headers such as `<stdio.h>` compile without
