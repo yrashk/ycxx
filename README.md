@@ -124,7 +124,8 @@ described above. [#973](https://github.com/yrashk/ycxx/issues/973)
 ordinary destruction and eligible plain unwind frames. [#980](https://github.com/yrashk/ycxx/issues/980)
 
 `-fno-rtti` disables `typeid` and RTTI-dependent casts. Owned Itanium vtables keep virtual dispatch
-and use a zero typeinfo word. [#982](https://github.com/yrashk/ycxx/issues/982)
+and use a zero typeinfo word. `-frtti` restores the default mode, and the last RTTI flag takes
+effect. [#982](https://github.com/yrashk/ycxx/issues/982)
 
 Fixed-prototype calls (free and member functions, lambdas, function templates and calls
 through pointers) support passing and returning nonempty flat records with integral or
