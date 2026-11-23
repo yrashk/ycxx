@@ -47,7 +47,7 @@ A local `const Resource&` can borrow a live named owner or bind to another local
 reference to that owner. Either reference can be passed to a registered observation operation.
 YCXX propagates reference uses backward through the ownership graph,
 stopping at the binding's declaration and scope exits. A consume or transfer conflicts when
-the reference may be bound and an observation of that binding is reachable afterward. This
+the reference may be bound and a use of that binding is reachable afterward. This
 allows consumption after the last use in the same scope, including on a branch that can no
 longer reach a use. A loop backedge can carry a future use of an outer binding. Ending the
 borrow leaves the ownership obligation with the owner. References bound to temporaries, mutable
@@ -89,7 +89,7 @@ operations. Astra independently reviewed the reverse walk and its interaction wi
 binding state.
 
 The forward analysis records whether the reference may be bound at each such operation. If a
-concrete execution still has the binding and will observe it after the operation, the forward
+concrete execution still has the binding and will use it after the operation, the forward
 state includes that binding and the intervening control-flow path contains neither its cleanup nor
 its declaration. The reverse walk reaches the operation, so the checker diagnoses it before the
 owner can be invalidated. This argument assumes that registered operations honor their contracts
