@@ -2113,6 +2113,25 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
         {fn.name, fn.type, fn.scope, false, fn.template_type ? std::optional(spec_of(fn)) : std::nullopt},
         fn.lang};
   };
+  const ObjectNames object_names = [&](EntityId id) -> std::optional<ObjectName> {
+    auto found = by_id.find(ir::raw(id));
+    if (found == by_id.end()) return std::nullopt;
+    const Entity& object = *found->second;
+    const sema::World* w = universe().world_for(target);
+    if (!w || object.local_function != EntityId::none || !object.asm_label.empty()) return std::nullopt;
+    const auto& r = w->entities.rec(id);
+    if (r.kind != sema::EntityKind::variable || r.templ != EntityId::none) return std::nullopt;
+    auto is_namespace = [&](EntityId scope) {
+      return scope == EntityId::none || w->entities.rec(scope).kind == sema::EntityKind::namespace_;
+    };
+    const bool namespace_object = is_namespace(r.scope);
+    if (!namespace_object) {
+      const auto& owner = w->entities.rec(r.scope);
+      if (owner.kind != sema::EntityKind::class_ || owner.templ != EntityId::none || !is_namespace(owner.scope))
+        return std::nullopt;
+    }
+    return ObjectName{object.name, object.type, r.scope, namespace_object && object.linkage == ast::Linkage::internal};
+  };
   ClassNames names = [&](EntityId c) {
     const sema::World* w = universe().world_for(target);
     if (!w) return ClassName{};
@@ -2190,7 +2209,7 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
     TemplateSpec spec{e.template_type.value_or(e.type), e.template_args, e.template_params, e.template_same_heads};
     const auto encode = [&](std::string_view name) {
       return symbol_name(in, name, e.type, e.is_function, e.lang, names, e.scope, e.special != Special::none,
-                         e.template_type ? &spec : nullptr, !linux, function_names);
+                         e.template_type ? &spec : nullptr, !linux, function_names, object_names);
     };
     auto name = encode(entry);
     if (!name) {

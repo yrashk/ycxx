@@ -222,6 +222,10 @@ own declaration is inline. Specializations naming translation-unit-local types r
 destructor symbols.
 [#1025](https://github.com/yrashk/ycxx/issues/1025) · [#1040](https://github.com/yrashk/ycxx/issues/1040)
 
+On both native targets, class-template members can use the address of a named namespace object
+or an ordinary static data member as a template argument. Pointers to translation-unit-local
+objects give each translation unit its own specialization. [#1055](https://github.com/yrashk/ycxx/issues/1055)
+
 On Linux x86-64, an ordinary external namespace-scope function can use GNU `weak` so a
 strong definition in another object takes precedence. This covers the pinned libycxx
 debugger provider. [#937](https://github.com/yrashk/ycxx/issues/937)
