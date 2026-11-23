@@ -2433,6 +2433,11 @@ public:
     if (sc.ns) return namespace_template(*sc.ns, name, ast::DeclKind::function).has_value();
     return sc.type && types().is_class(*sc.type) && class_has_member_template(types().class_of(*sc.type), name);
   }
+  bool namespace_names_call_template(EntityId ns, NameId name) {
+    return std::ranges::any_of(q_->namespace_members(ns, name, false, false, true), [](const ast::DeclSema& d) {
+      return d.kind == ast::DeclKind::function && (d.flags & decl_flag::template_);
+    });
+  }
   // A class lvalue reached through an existing pointer or reference. Prvalues and direct
   // references to class storage still use the ordinary layout guard.
   bool peer_object_lvalue(Ex object) {

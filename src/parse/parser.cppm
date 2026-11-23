@@ -1723,6 +1723,12 @@ public:
     if (half) half_ = true;
   }
 
+  bool empty_template_call_ahead(u32 less) {
+    if (kind(less) != Tk::less) return false;
+    const u32 open = past_template_args(less);
+    return kind(open) == Tk::l_paren && kind(open + 1) == Tk::r_paren;
+  }
+
   // A qualified type name at token `start`: its type and the tokens it takes.
   // `checked`: the name is taken here, so its access is checked ([class.access]/4).
   std::optional<std::pair<QualType, u32>> qualified_type(u32 start, bool checked = false, bool type_only = false,
@@ -1738,6 +1744,10 @@ public:
     if (!s || kind(next) != Tk::identifier || kind(next + 1) == Tk::coloncolon) return std::nullopt;
     // `N::X<args>`: a class template specialization named in a namespace ([temp.names]).
     qualified_half_ = false;
+    NameId name = name_of(tok(next));
+    if (template_argument && s->ns && empty_template_call_ahead(next + 1) &&
+        s_->namespace_names_call_template(*s->ns, name))
+      return std::nullopt;
     if (kind(next + 1) == Tk::less && s->ns) {
       u32 j = next;
       const auto diags = s_->diag_count();
@@ -1746,13 +1756,6 @@ public:
         return std::pair{*t->type, j - start};
       }
       if (checked && s_->has_error_since(diags)) return std::nullopt;
-    }
-    NameId name = name_of(tok(next));
-    // An ordinary tag lookup cannot classify a qualified function-template call as a type-id.
-    if (template_argument && s->ns && kind(next + 1) == Tk::less &&
-        s_->scope_names_template(*s, name)) {
-      u32 open = past_template_args(next + 1);
-      if (kind(open) == Tk::l_paren && kind(open + 1) == Tk::r_paren) return std::nullopt;
     }
     if (template_argument && next == 2 && s_->scope_names_static_data_member(*s, name))
       return std::nullopt;
@@ -4327,7 +4330,9 @@ public:
       }
       return scope_expr();
     }
-    if (s->ns && is(Tk::less)) {
+    const bool immediate_call_ahead = s->ns && in_template_value_argument_ && empty_template_call_ahead(0);
+    const bool immediate_template = immediate_call_ahead && s_->namespace_names_call_template(*s->ns, n);
+    if (s->ns && is(Tk::less) && !immediate_template) {
       // [expr.type.conv] permits a namespace-qualified simple-template-id as the
       // target type of a functional conversion.
       const auto diags = s_->diag_count();
@@ -4351,7 +4356,7 @@ public:
         return type_conversion(*t, begin);
       }
     if (is(Tk::less)) {
-      if (s->ns) {
+      if (s->ns && !immediate_template) {
         auto diags = s_->diag_count();
         auto c = s_->namespace_concept_for_expression(*s->ns, n, name_at);
         if (c || s_->has_error_since(diags)) {
@@ -4365,7 +4370,7 @@ public:
         }
       }
       // `N::v<args>`: a variable template of the namespace ([temp.names]/3).
-      if (s->ns)
+      if (s->ns && !immediate_template)
         if (auto v = s_->namespace_template(*s->ns, n, ast::DeclKind::variable)) {
           auto args = template_argument_list();
           if (!args) return {NodeId::none, begin, pos()};
@@ -4375,7 +4380,7 @@ public:
         }
       // `S::f<args>`: a member template of class S or a function template of namespace S, with
       // explicit arguments ([temp.arg.explicit]).
-      if (keyword || s_->scope_names_template(*s, n)) {
+      if (keyword || (immediate_call_ahead ? immediate_template : s_->scope_names_template(*s, n))) {
         auto args = template_argument_list();
         if (!args) return {NodeId::none, begin, pos()};
         const bool dependent_args = std::ranges::any_of(*args, [&](const ast::TemplateArg& a) { return s_->dependent(a); });

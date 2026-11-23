@@ -223,6 +223,7 @@ public:
     std::vector<std::string> inner_of;  // by namespace definition item: the namespace
     std::vector<bool> in_class;         // by item
     std::map<std::string, std::vector<InlineNamespace>> inline_namespaces;  // by enclosing namespace
+    std::map<std::string, std::vector<InlineNamespace>> unnamed_namespaces;  // implicit using-directives
     std::vector<Directive> directives;  // their targets unresolved
     bool says_virtual = false;          // the unit's tokens hold `virtual`
     std::vector<bool> qualified;        // by item: its first declarator's name is qualified
@@ -314,6 +315,10 @@ public:
         // Only explicitly inline namespaces form the set used by ADL.
         if (anonymous ? is_inline : inl) {
           auto& children = x.inline_namespaces[parent];
+          if (!std::ranges::contains(children, x.inner_of[k], &InlineNamespace::path))
+            children.push_back({x.inner_of[k], k});
+        } else if (anonymous) {
+          auto& children = x.unnamed_namespaces[parent];
           if (!std::ranges::contains(children, x.inner_of[k], &InlineNamespace::path))
             children.push_back({x.inner_of[k], k});
         }
@@ -604,24 +609,55 @@ public:
   // none, those of the namespaces its using-directives nominate.
   std::vector<DeclId> qualified_decls(std::string_view name, const std::string& ns, u32 item, bool self,
                                      LookupNames filter = LookupNames::all, bool direct_only = false) {
+    const bool immediate_call = filter == LookupNames::immediate_call;
+    const u32 limit = item + (self ? 1 : 0);
+    auto append_inline_children = [&](std::vector<std::string>& scopes, const std::string& scope) {
+      if (auto children = inline_namespaces_.find(scope); children != inline_namespaces_.end())
+        for (const InlineNamespace& child : children->second)
+          if (child.item < limit) scopes.push_back(child.path);
+    };
     auto candidates = [&](const std::string& path) {
-      auto declarations = declared_in(name, path, item, self, /*inhabit=*/false, /*bound_functions=*/false,
-                                      filter == LookupNames::immediate_call);
-      filter_lookup(declarations, filter);
+      if (!immediate_call) {
+        auto declarations = declared_in(name, path, item, self);
+        filter_lookup(declarations, filter);
+        return declarations;
+      }
+      std::vector<std::string> scopes{path};
+      std::vector<DeclId> declarations;
+      // [namespace.qual]: only direct members and the inline namespace set precede using-directives.
+      for (std::size_t i = 0; i < scopes.size(); ++i) {
+        const std::string scope = scopes[i];
+        auto own = declared_in(name, scope, item, self, /*inhabit=*/true, /*bound_functions=*/false,
+                               /*hide_function_tags=*/true);
+        declarations.insert(declarations.end(), own.begin(), own.end());
+        append_inline_children(scopes, scope);
+      }
       return declarations;
     };
     std::vector<DeclId> r = candidates(ns);
     if (!r.empty() || direct_only) return r;
     std::vector<std::string> visited{ns};
-    auto follow = [&](auto&& self, const std::string& path) -> void {
-      for (const Directive& d : directives_) {
-        if (d.alias || d.item >= item || d.at != path) continue;
-        if (!d.target) item_sema(d.item);
-        if (!d.target || std::ranges::contains(visited, *d.target)) continue;
-        visited.push_back(*d.target);
-        auto more = candidates(*d.target);
-        if (more.empty()) self(self, *d.target);
+    auto follow = [&](auto&& recurse, const std::string& path) -> void {
+      auto nominate = [&](const std::string& target) {
+        if (std::ranges::contains(visited, target)) return;
+        visited.push_back(target);
+        auto more = candidates(target);
+        if (more.empty()) recurse(recurse, target);
         else r.insert(r.end(), more.begin(), more.end());
+      };
+      std::vector<std::string> scopes{path};
+      for (std::size_t i = 0; i < scopes.size(); ++i) {
+        const std::string scope = scopes[i];
+        for (const Directive& d : directives_) {
+          if (d.alias || d.item >= item || d.at != scope) continue;
+          if (!d.target) item_sema(d.item);
+          if (d.target) nominate(*d.target);
+        }
+        if (!immediate_call) continue;
+        if (auto children = ix_->unnamed_namespaces.find(scope); children != ix_->unnamed_namespaces.end())
+          for (const InlineNamespace& child : children->second)
+            if (child.item < limit) nominate(child.path);
+        append_inline_children(scopes, scope);
       }
     };
     follow(follow, ns);
