@@ -131,8 +131,10 @@ struct Result {
 class Program {
 public:
   // `template_depth` is the limit on nested instantiations ([temp.inst]/16), `-ftemplate-depth`.
-  Program(sema::World& w, const pp::Region& r, const items::Items& its, u32 template_depth = pp::Config::default_template_depth)
-      : instantiation_limit(template_depth), w_(&w), r_(&r), items_(&its), item_cells_(its.items.size()), body_cells_(its.items.size()),
+  Program(sema::World& w, const pp::Region& r, const items::Items& its,
+          u32 template_depth = pp::Config::default_template_depth, bool exceptions_enabled = true)
+      : instantiation_limit(template_depth), exceptions_enabled_(exceptions_enabled), w_(&w), r_(&r), items_(&its),
+        item_cells_(its.items.size()), body_cells_(its.items.size()),
         class_cells_(its.items.size()) {
     w.install_builtin_classes(classes_);
     for (const items::Item& it : its.items) {
@@ -196,6 +198,7 @@ public:
 
   sema::World& world() { return *w_; }
   const pp::Region& region() const { return *r_; }
+  bool exceptions_enabled() const { return exceptions_enabled_; }
   const items::Items& items() const { return *items_; }
   ItemId id(u32 item) const { return ids_[item]; }
   u32 index(ItemId id) const { return index_.at(std::to_underlying(id)); }
@@ -1247,6 +1250,7 @@ private:
     Result<V> result;
   };
 
+  const bool exceptions_enabled_;
   sema::World* w_;
   const pp::Region* r_;
   const items::Items* items_;
@@ -1601,6 +1605,7 @@ std::set<EntityId> Program::uncertain_object_layouts(bool include_lifecycle_sign
 class AtItem final : public sema::Questions {
 public:
   AtItem(Program& p, u32 item, bool self) : from(p.ns_of(item)), p_(&p), item_(item), self_(self) {}
+  bool exceptions_enabled() const override { return p_->exceptions_enabled(); }
   const sema::Classes& classes() override { return p_->classes(); }
   sema::CopyAssignment require_copy_assignment(EntityId f) override { return p_->require_copy_assignment(f); }
   const sema::ClassRec& publish_class(EntityId c, sema::ClassRec r) override { return p_->publish_class(c, std::move(r), item_); }
@@ -2317,6 +2322,7 @@ public:
   AtInstantiation(Program& p, u32 item) : p_(&p), item_(item), at_(p, item, true) {
     at_.default_instantiation_point = p.end();
   }
+  bool exceptions_enabled() const override { return p_->exceptions_enabled(); }
   sema::AliasCallPattern alias_call_pattern(EntityId e) override { return at_.alias_call_pattern(e); }
   std::optional<QualType> replay_alias_calls(sema::Sema& caller, const ast::DeclSema& alias,
                                            const sema::Bindings& args) override {

@@ -947,6 +947,7 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
   const bool has_typed_cast = program.has_typed_dynamic_cast();
   if (!has_typed_cast && !native_virtual_layouts(tu, program, world, uncertain_layouts)) return tu;
   const bool linux = world.target.triple == ast::x86_64_linux.triple;
+  const bool exceptions_enabled = program.exceptions_enabled();
   std::set<std::uint32_t> seen;
   std::set<EntityId> inline_declarations;
   std::set<EntityId> noexcept_declarations;
@@ -1185,17 +1186,17 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
       // A written ordinary body starts at '{'. Other starts include a function-try-block and a
       // constructor initializer. Synthetic bodies and instantiations never enter this path.
       if (linux && entity.kind == sema::EntityKind::constructor) {
-        hosted_union_constructor(program, tu.functions.back());
+        if (exceptions_enabled) hosted_union_constructor(program, tu.functions.back());
       } else if (!member && tu.main != d.entity && !it.specialization &&
                  program.region().tokens[it.body_begin].kind == lex::Tk::l_brace) {
         auto& f = tu.functions.back();
-        if (linux) {
+        if (linux && exceptions_enabled) {
           f.hosted_catch = hosted_catch(program, d, body);
           f.unwind = f.hosted_catch ? UnwindEligibility::hosted_catch : cleanup_free_definition(program, d, body);
         } else if (cleanup_free_definition(program, d, body) == UnwindEligibility::cleanup_free) {
           f.unwind = UnwindEligibility::cleanup_free;
         }
-        if (f.unwind == UnwindEligibility::none) {
+        if (exceptions_enabled && f.unwind == UnwindEligibility::none) {
           f.cleanup_call = hosted_cleanup_call(program, d, body);
           if (f.cleanup_call != ast::NodeId::none) f.unwind = UnwindEligibility::hosted_cleanup;
           else if (linux) f.unwind_through_constructor = hosted_union_constructor_caller(program, d, body);
@@ -1459,8 +1460,7 @@ engine::query_task<SemaResult> TuSema::run(engine::Ctx& cx, TuId tu) {
   SemaResult out;
   // Whether the lexer or preprocessor reported an error, not where: `TuFront` places them.
   out.lex_errors = co_await cx.fetch<LexErrors>(file);
-  // The unit's language options: the instantiation limit (`-ftemplate-depth`).
-  parse::Program program(world, region, items, unit_source.config.template_depth);
+  parse::Program program(world, region, items, unit_source.config.template_depth, unit_source.config.exceptions_enabled);
   program.analyze_all();
   // What an editor's position requests read (#170): where each entity is first declared, and the
   // bodies, whether or not the unit has errors; only what the analysis reached, which analysing
