@@ -306,9 +306,8 @@ std::string target_macros(const ast::Target& t) {
 
 export namespace ycxx::pp {
 
-// The text of `<built-in>` for a target: identity, the draft's predefined macros, the
-// implemented features, and the target's.
-std::string predefined_text(const ast::Target& t) {
+// The text of `<built-in>` for a language mode and target.
+std::string predefined_text(const ast::Target& t, bool freestanding = false) {
   std::string s;
   auto def = [&](std::string_view name, auto value) { s += std::format("#define {} {}\n", name, value); };
   def("__ycxx__", 1);
@@ -326,7 +325,7 @@ std::string predefined_text(const ast::Target& t) {
   def("__STDC_EMBED_NOT_FOUND__", 0);
   def("__STDC_EMBED_FOUND__", 1);
   def("__STDC_EMBED_EMPTY__", 2);
-  def("__STDC_HOSTED__", 1);
+  def("__STDC_HOSTED__", freestanding ? 0 : 1);
   def("__STDCPP_DEFAULT_NEW_ALIGNMENT__", std::format("{}UL", 2 * t.pointer_size));
   def("__STDCPP_THREADS__", 1);
   // [cpp.predefined]/2: the extended floating-point types the target has, once ycxx supports

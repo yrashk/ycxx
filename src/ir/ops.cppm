@@ -292,6 +292,9 @@ export enum class Op : std::uint16_t {
 
   // Allocate and default-initialize an automatic root with an external Itanium vtable.
   alloc_peer_root [[=state({S}, {S, V}).imms({type, entity}).with({nonconstant})]],
+
+  // The implicit object of an ordinary member call must designate valid storage ([basic.life]).
+  obj__check_receiver [[=state({S, V}, {S})]],
 };
 
 export constexpr std::size_t op_count = std::meta::enumerators_of(^^Op).size();

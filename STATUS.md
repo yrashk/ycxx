@@ -216,7 +216,18 @@ What is true of the code today. Work in progress and its owners are tracked in
     resource headers (#133). A native Linux build also searches `/usr/include/x86_64-linux-gnu`
     and `/usr/include` (#252). Darwin searches the configured SDK's `usr/include`, with a request's
     `SDKROOT` as an override. Cross-target requests without a target SDK can use explicit include
-    directories (#690);
+    directories (#690). `-nostdinc` omits those automatic include roots, including the
+    bundled library and resource headers, while keeping explicit `-I`, `-isystem`,
+    and `-iquote` paths, source-relative quoted includes, and macros.
+    [#251](https://github.com/yrashk/ycxx/issues/251)
+  - `-nostdinc++` omits the implicit libycxx source and generated include directories. The
+    compiler keeps its resource directories, target C library or SDK directories, and explicit
+    includes. With both flags, `-nostdinc` applies in either order.
+    [#997](https://github.com/yrashk/ycxx/issues/997)
+  - `-print-file-name=include` prints the primary configured resource include directory, and
+    `-dumpmachine` prints the canonical target triple. The driver accepts `--target` for both
+    queries and answers without opening a translation unit or starting a daemon. Linux reports
+    `resources/linux/include` and Darwin reports `resources/common/include`. [#970](https://github.com/yrashk/ycxx/issues/970)
   - `#define` and `#undef` with the redefinition check, rescanning and painting
     ([cpp.rescan]);
   - function-like macros (`:unit`'s `invocation`, `substitute`, `paste`): arguments across
@@ -237,8 +248,15 @@ What is true of the code today. Work in progress and its owners are tracked in
     embed is one byte-carrying phase-4 token with an expansion that names the resource. It yields
     integer and comma tokens in the parser's input. Unsupported scoped parameters are diagnosed
     on the directive and cause a probe to return `__STDC_EMBED_NOT_FOUND__` (#473).
+- The driver and editor honor `-fno-exceptions`. Semantic analysis rejects active `throw`,
+  rethrow and block `try`, with checks in template bodies deferred to instantiation. Native
+  lowering keeps ordinary destruction and eligible cleanup-free frame information.
+  [#980](https://github.com/yrashk/ycxx/issues/980) · [Design](docs/design/freestanding-no-exceptions.md)
 - Predefined macros (`:predefined`, DECISIONS §1.5):
   - `__ycxx__` and its version, `__GNUC__` 4.2.1 (#229), and the draft's macros;
+  - `__STDC_HOSTED__` is `1` by default and `0` with `-ffreestanding`. The compiler and
+    editor honor the flag, and the mode is part of the source configuration.
+    [#973](https://github.com/yrashk/ycxx/issues/973) · [Design](docs/design/freestanding-mode.md)
   - a feature-test table, including `__cpp_pp_embed`;
   - the target's macros, generated from `ast::Target` and checked against Clang on AArch64
     Darwin and x86-64 Linux (`tests/own/pp/predefined-target*.pp.cpp`, #132);
@@ -599,9 +617,31 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
 - `ycxx.pipeline` (`src/pipeline/`): every stage is an engine query (#63), run by `client::cxx`
   through a `Session` (the engine, the interners and sema's world, alive together; in-process
   until the daemon, #96):
-  - `:front`: `TuFront(TU)`: the file's text as the engine's `FileText`, `pp` and `RegionItems`,
-    then `parse::Program` (item_sema, analyze_body) inside the one cell until contextual queries
-    (#16). Its diagnostics by byte offset, and the `TranslationUnit`: entities, function
+  - `:front`: `TuSema(TU)`: `PpTokens` (the region without token locations, expansion sites,
+    `space_before` flags or error details; each token's file kept) and `RegionItems`, then
+    `parse::Program` (item_sema, analyze_body) inside the one cell until contextual queries (#16).
+    `TuFront(TU)` places its messages in files from `pp`'s full region, so an edit that changes
+    no token (a comment, blank lines) stops at `PpTokens` and analysis does not run again (#947,
+    slice 0).
+    - A unit whose tokens never say `virtual` is analysed a group at a time (#947, slice 1;
+      `src/pipeline/groups.cpp`): each top-level item of the main file, and each run of the
+      headers' top-level items, by a Program of its own (`Program::analyze_group`) that analyses
+      other items only as the group asks. `unit_of` makes each group's `UnitPart`, and
+      `finish_unit` the decisions that need every group (init functions, `inline`, noexcept and
+      hidden declarations anywhere, unwind checks). A unit that says `virtual` keeps one Program.
+    - The unit combines layout uncertainty from all groups before the native ABI checks class
+      shapes and chooses base-object constructor and destructor variants.
+      [#992](https://github.com/yrashk/ycxx/issues/992)
+    - A Program answers the same whichever items ran first (§A1): `ensure_declared` analyses the
+      earlier items that can declare an entity before a side table is read, `settle` completes a
+      class reached lazily, and `may_have_virtual_layouts` is a fact of the tokens.
+    - A group's analysis is reused between revisions while what it read gives the same answers
+      (`GroupTrace`, kept per session): the items it read (`ItemsView`) and their position-free
+      content, its by-name questions (`Program::NameProbe`, filtered by the shared
+      `Program::Index` before an item is read) and their answers, the order of those items, and
+      the unit's namespaces, using-directives and specialization items. The stand-in for #16's
+      selection cells, as `pp::Session::cache` is for regions. Token ranges a pragma holds are
+      positions: a unit with them analyses every group. Its diagnostics by byte offset, and the `TranslationUnit`: entities, function
     definitions with their analysed bodies, variable definitions with their constants.
     `tu_unit(TU)` projects the unit, so a whitespace edit stops there.
   - `:back`, per function `F`: `function_source(TU, F)` (a projection that backdates),
@@ -611,7 +651,12 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
     `opt_cache_snapshot` input (consulted for B ≥ 1 only); `cost_model` is a stub input. `layout`
     is three cheap queries (`layout_type`, `layout_step`, `layout_constant`). `tu(TU)` assembles
     the object in definition order (§A5.3), with string literal objects as local `l_.str.N`
-    entities by first use; its value also holds the first-demand table (empty until #16). Errors
+    entities by first use; its value also holds the first-demand table (empty until #16). Per-unit
+    cells give the per-function ones what they read of the whole unit, so an edit re-runs them
+    cheaply or not at all (#938): `UnitIndexQ` (each definition's and entity's place),
+    `UnitFunctionFactsQ` (its constexpr and variadic functions), `UnitShapeIndex` (`layout`'s
+    class and enumeration lookup) and `SymbolAccessQ(TU, E)` (how a unit's code addresses `E`).
+    On x86-64, `Lower` still reads the whole unit (#943). Errors
     (what the α subset does not support yet) are values, pointing into the item when there is a
     node.
   - `:mangle`: Itanium names for global-namespace functions over fundamental, pointer and cv types
@@ -625,7 +670,7 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
     libycxx's link options force undefined (`___ycxx_allocation_table_anchor`, read from its
     `ycxx-link-options`). Members are selected as for any Darwin archive, so `<cstdio>` programs
     link against libycxx's linkage marker, and libycxx-abi's `__cxa_*` come before libc++abi's.
-    A trivial program grows from 17 KB to 118 KB with the allocation table. Archive operands are
+    A trivial program grows from 17 KB to 118 KB with the allocation table. Configured runtime archives are
     read once per process while their size and modification time hold, and every program's
     inputs share the bytes (`obj::archive::input`, fingerprinted once). `-nostdlib++` links
     without the runtime. `unit.darwin_runtime`, `own/headers/cstdio.run.cpp` and
@@ -706,9 +751,9 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
   Binary64 to binary32 rounds under MXCSR, and `fabs` clears the sign bit. `unit.linux_scalar_sse`
   compares exact bits with a host compiler's conversions at `-O0` and `-O2` under all four
   rounding directions. [#643](https://github.com/yrashk/ycxx/issues/643)
-- Fixed-prototype calls support nonempty naturally aligned
-  flat records with integral or ordinary object-pointer fields that are trivial for calls,
-  up to 16 bytes and alignment eight. The AMD64 INTEGER eightbytes follow from the laid-out
+- Fixed-prototype calls support nonempty naturally aligned flat records with integral, ordinary
+  object-pointer or object lvalue-reference fields. A record must be trivial for calls and occupy
+  up to 16 bytes with alignment up to eight. The AMD64 INTEGER eightbytes follow from the laid-out
   fields. If an entire argument cannot
   fit in the remaining registers, it goes by value on the stack and later arguments can use
   the remaining registers. One- and two-eightbyte results use RAX and RDX. The mixed-object
@@ -729,7 +774,7 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
   those layouts as fields, array elements, or bases. A wrapper whose member makes its implicit
   destructor nontrivial uses the indirect result convention even when its copy and move traits
   are unknown. [#661](https://github.com/yrashk/ycxx/issues/661)
-  [Design](docs/design/linux-integer-aggregates.md) · [#440](https://github.com/yrashk/ycxx/issues/440)
+  [Design](docs/design/linux-integer-aggregates.md) · [#440](https://github.com/yrashk/ycxx/issues/440) · [#988](https://github.com/yrashk/ycxx/issues/988)
 - `-c` writes deterministic ELF64 relocatable objects through `src/obj/elf.cppm`. The reader
   accepts the supported x86-64 `ET_REL` subset emitted by ycxx. The native ELF linker consumes
   the same in-memory objects, resolves absolute and PC-relative relocations, and writes a static
@@ -798,14 +843,27 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
   [Design](docs/design/linux-inline-functions.md) · [#422](https://github.com/yrashk/ycxx/issues/422)
 - Explicit GNU `visibility("hidden")` follows ordinary external namespace-scope functions across
   redeclarations. On x86-64 ELF, inline definitions combine `STB_WEAK` with `STV_HIDDEN`.
-  Ordinary non-inline definitions and referenced declarations combine `STB_GLOBAL` with
-  `STV_HIDDEN`. `unit.linux_inline` checks both scoped attribute spellings, symbol metadata,
+  Ordinary non-inline definitions and referenced declarations combine their symbol binding
+  with `STV_HIDDEN`. `unit.linux_inline` checks both scoped attribute spellings, symbol metadata,
   and cross-unit address identity with the native and host linkers in both object orders.
   [#602](https://github.com/yrashk/ycxx/issues/602)
+- On Linux x86-64, GNU `weak` on an ordinary external namespace-scope function declaration
+  gives its non-inline definition `STB_WEAK`. This includes qualified definitions such as
+  libycxx's `std::is_debugger_present`. The ELF linker selects a strong definition in either
+  input order and diagnoses duplicate strong definitions. Explicit GNU visibility can
+  independently give the symbol `STV_HIDDEN`.
+  [Design](docs/design/linux-weak-functions.md) · [#937](https://github.com/yrashk/ycxx/issues/937)
 - On Linux x86-64, explicit GNU hidden visibility on any declaration of an ordinary external
   non-inline namespace-scope variable gives its ELF symbol `STB_GLOBAL` and `STV_HIDDEN`.
   This includes the C-linkage marker `__ycxx_linkage_static_v1` from the pinned libycxx runtime.
   [#936](https://github.com/yrashk/ycxx/issues/936)
+- On Linux x86-64, ordinary external non-inline function declarations can inherit the
+  nearest explicit GNU `hidden` or `default` visibility from a namespace definition.
+  The canonical declaration carries consistent visibility to its unannotated qualified
+  definition and to reference-only objects. An explicit function attribute takes
+  precedence. Mixed inherited defaults retain the direct attribute rules.
+  [Design](docs/design/linux-namespace-visibility.md) ·
+  [#940](https://github.com/yrashk/ycxx/issues/940)
 - Constant-initialized and zero-initialized external inline namespace variables use weak ELF
   definitions when their initial values need no relocations. This includes explicitly inline
   full variable-template specializations with builtin type arguments. Static addresses and
@@ -847,6 +905,10 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
   system linker, malformed and 64-bit indexes, and daemon equality and same-path replacement;
   `unit.darwin_inline` links an archive member with both linkers.
   [Design](docs/design/darwin-static-archives.md) · [#842](https://github.com/yrashk/ycxx/issues/842)
+- On both targets, the driver rereads explicit archive operands at request ingress and
+  fingerprints their bytes. This covers replacements with unchanged size and mtime.
+  Driver-appended Darwin runtime archives can reuse their process-local snapshots.
+  [#951](https://github.com/yrashk/ycxx/issues/951)
 - `ycxx archive -o lib.a [--] [object ...]` creates or replaces a regular GNU archive in process.
   It validates each member with the existing ELF object reader, copies its bytes, and indexes
   named nonlocal definitions, including weak and hidden definitions. Member basenames and
@@ -1037,8 +1099,9 @@ in `lsp` frames (`LspOut`), the last of which carries LSP's exit status (1 after
   its identity changes; `@file` response files expanded relative to the entry's directory; a
   header or C entry is no unit), else the file alone in its directory. `daemon.lsp`'s
   `compile_commands` covers both forms, a response file, a header and a C file, a directory
-  spelled through a symbolic link, and a change (mutation-checked). Options `pp` does not take
-  yet (`-include`, `--sysroot`, …) are dropped (#251).
+  spelled through a symbolic link, and a change (mutation-checked). The check also keeps
+  `-nostdinc` and `-nostdinc++`. Options `pp` does not take yet (`-include`, `--sysroot`, …) are dropped.
+  [#251](https://github.com/yrashk/ycxx/issues/251) · [#997](https://github.com/yrashk/ycxx/issues/997)
 - Not yet: stopping a diagnosis on a newer edit,
   `$/cancelRequest`, debouncing and interactive priority (#168); `buffers_in`, the disk-view
   assertion and one view per session (#169); go-to-definition from a declaration part (a
@@ -1081,11 +1144,11 @@ in `lsp` frames (`LspOut`), the last of which carries LSP's exit status (1 after
   writes to objects from outside the evaluation, volatile accesses, non-constexpr and undefined
   callees, `reinterpret_cast`-like ops and `asm`.
 - The dispatch table is `ir::eval_table<Ops, …>()` with `complete`: every op has a handler. Ops
-  outside the α slice (aggregates and `copy`, unions, dynamic storage, virtual calls, atomics,
+  outside the supported subset (`copy`, unions, dynamic storage, virtual calls, atomics,
   EH, coroutines, reflection) fail with `Reason::unsupported`, naming the op. (Floating point
   is evaluated since #336.)
-- Not yet: whole-program runs with a host I/O interface, records and the under-construction state
-  of [class.cdtor] (#25).
+- Remaining in #25: whole-program runs with host I/O, general record storage, and the
+  under-construction state of [class.cdtor].
 
 ## Constant evaluation in the front end (ε slice, #87, 2026-11-18)
 
@@ -1123,6 +1186,18 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   64 bits. Constant evaluation records the field values and code generation emits addressable
   storage for runtime use ([class.static.data], [dcl.init.list], [dcl.init.aggr]).
   [#262](https://github.com/yrashk/ycxx/issues/262)
+- Both native targets give an externally linked in-class static constexpr data member of an
+  ordinary namespace-scope class one address across translation units when its stored value needs
+  no relocations or runtime work. A member whose owner or declared type names an unnamed namespace
+  has local symbol binding.
+  [#903](https://github.com/yrashk/ycxx/issues/903)
+- Inline static integral, pointer, and supported floating-point members in ordinary
+  namespace-scope classes without bases use constant direct-list and copy-list initialization.
+  This also covers one-dimensional arrays of those types with a written bound. Omitted array
+  elements are value-initialized and the members have addressable static storage
+  ([class.static.data], [dcl.init.list], [dcl.init.aggr]).
+  [#964](https://github.com/yrashk/ycxx/issues/964) ·
+  [Inherited initializer lookup #967](https://github.com/yrashk/ycxx/issues/967)
 - Constant expressions can read fields of an already initialized namespace-scope constexpr
   aggregate with a trivial destructor, no bases, and ordinary public integral and enumeration
   fields whose scalar representations fit in 64 bits. The interpreter uses the ordinary record
@@ -1130,6 +1205,22 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   nominal enumeration types for comparisons and template arguments and rejects reads of mutable
   fields of the stored object ([expr.ref], [expr.const], [dcl.init.aggr]).
   [#862](https://github.com/yrashk/ycxx/issues/862) · [#876](https://github.com/yrashk/ycxx/issues/876)
+- Constant evaluation of a flat scalar aggregate supplies its initialized field values to
+  the selected default member initializer. L1 uses them for direct field reads of the
+  initializer's object, including through a conditional glvalue. Reading a later field on
+  the executed path fails its lifetime check ([dcl.init.aggr], [expr.const]).
+  [#895](https://github.com/yrashk/ycxx/issues/895)
+- A constant expression can read public integral and enumeration fields of an ordinary
+  flat aggregate temporary with no bases and implicit trivial destruction. Each eligible field
+  has its own typed cell. Evaluation rejects a read before initialization
+  ([class.temporary], [dcl.init.aggr], [basic.life], [expr.const.core]).
+  [#900](https://github.com/yrashk/ycxx/issues/900)
+- Constant evaluation can copy a named empty or flat non-union aggregate without bases and
+  with implicit trivial destruction into the caller's result storage. A constexpr member can
+  use the live result, including a checked pointer into an initialized fixed-size `char` member
+  array. L1 diagnoses access through an expired local pointer and an ordinary constexpr member
+  call on an expired receiver ([stmt.return], [basic.life], [expr.const]).
+  [#975](https://github.com/yrashk/ycxx/issues/975)
 - Constant evaluation can read namespace-scope `constexpr` pointers erased to `void`
   ([expr.const], [conv.ptr], #102). The interpreter reconstructs the original scalar or array
   subobject path, including one-past addresses, from the constant's path and byte offset.
@@ -1340,6 +1431,15 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   `operator delete` with the original pointer and the complete root size.
   [Itanium ABI §2.5.2](https://itanium-cxx-abi.github.io/cxx-abi/abi.html#vtable-components) ·
   [#136](https://github.com/yrashk/ycxx/issues/136) · [#659](https://github.com/yrashk/ycxx/issues/659)
+- On Linux x86-64, a derived class with an empty out-of-line virtual destructor can own its
+  32-byte table and single-inheritance RTTI. It has one public nonvirtual primary base with
+  one directly written pointer field with a builtin pointee type and a peer-owned public
+  virtual destructor. `D1` and `D2` share a body
+  that restores the derived address point and calls the base's `D2` at offset zero. `D0` then
+  deallocates the original pointer with the complete 16-byte object size. The derived descriptor
+  imports the peer's base descriptor. The destructor specifications can be implicit. A unit
+  containing only the declarations leaves ownership with the units defining the keys.
+  [Design](docs/design/linux-derived-virtual-destructor.md) · [#999](https://github.com/yrashk/ycxx/issues/999)
 - A non-template constructor can delegate to another ordinary constructor of its class with
   a sole parenthesized or braced initializer ([class.base.init], #157). The target resolves in
   the complete class and constructs the same object. The delegating body starts after the
@@ -1422,6 +1522,9 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
 - A qualified value expression in an incomplete current class can see earlier static data
   members and injected unscoped enumerators. Within a named enum's own list, qualifying an
   earlier enumerator uses its in-list type. [#857](https://github.com/yrashk/ycxx/issues/857)
+- An ordinary class's in-class static data initializer searches its own declarations and
+  bases before the enclosing namespace. The base lookup retains ambiguity and access checks,
+  including while the derived class is incomplete. [#967](https://github.com/yrashk/ycxx/issues/967)
 - Nonempty standalone unnamed unscoped enumeration definitions at namespace scope support fixed
   and inferred underlying types. An `extern "C"` block leaves the enumerators in the enclosing
   namespace. The enum's linkage identity uses its namespace, canonical underlying type and first
@@ -2407,6 +2510,10 @@ first; a dependent base is not searched. Redeclaring a hidden parameter's name i
 - In the template, a static member whose initializer is value-dependent is value-dependent
   ([temp.dep.constexpr]/2.3); one whose initializer is not is a constant there. `static const T k
   = 5;` is checked again in each specialization.
+- A static constexpr member initializer can read fields of a flat aggregate temporary with
+  scalar default member initializers. Concrete specialization replay uses the same ordered field
+  reads as an ordinary required constant initializer ([dcl.init.aggr], [temp.inst], [expr.const]).
+  [#991](https://github.com/yrashk/ycxx/issues/991)
 - `X<args>::m` with a dependent qualifier names a value, not a type, in a statement, a condition, a
   cast's parentheses or a template argument, unless `typename` says otherwise
   ([temp.res.general]/4).
@@ -2652,6 +2759,22 @@ request it serves.
   filter, and `span_text`/`span_start` are in place. Tests: `unit.trace` (the spans of a real
   build, cells without spans, text, filter, JSON; mutation-checked) and `daemon.trace` (spans
   across the socket).
+- Live (#939): `Tracer::starts`/`started` report a frame's start where it opens its span (the
+  three span sites, cold, for tracers that ask: JSON and untraced builds pay nothing).
+  `trace::Live` buffers starts and ends under a lock held for the append alone; `trace::Tee`
+  feeds a batch collector and a live one. `Tree::apply` places events in any order (a child
+  before its parent waits, unseen, until it comes or `settle`; children in id order; identical
+  instants folded and refolded locally around a change), keeps the summary incrementally, and
+  caches its rows per `version`; `Tree::add` places batches as they come. The daemon sends live
+  `trace` frames (`TraceBatch::live`, `sent_ns`, the memory so far) on the request's tick to a
+  client asking `compile::Trace::live` and to watchers asking `WatchRequest::live`. The client
+  runs a browsed compile on a thread of its own (`browse_compile`), and the browser draws on a
+  timer, only when something changed, with following (`f`). Tests: `unit.trace` (starts, ends,
+  orphans, `is:running`; 180 simulated streams in the engine's order, shuffled and backwards,
+  every step's sums, depths, folding and summary checked, each ending equal to the batches'
+  tree, view and frames; two requests interleaved; following), `daemon.process` (`live_trace`:
+  a build parked at its checkpoint is already in the browser through the daemon; mutation-checked),
+  `daemon.trace_tui` (the first frame is live).
 - Not yet: the analysed tree as a value, and stages linked to source (#254); per-resumption
   spans, so a frame's waits are not drawn as work (#255).
 

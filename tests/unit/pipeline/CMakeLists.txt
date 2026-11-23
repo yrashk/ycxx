@@ -83,6 +83,10 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_
   add_test(NAME unit.linux_scalar_sse
     COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/linux_scalar_sse.py
             $<TARGET_FILE:ycxxc> ${CMAKE_CXX_COMPILER} ${PROJECT_SOURCE_DIR}/deps/libycxx)
+  # PARITY: by design: exercises the System V AMD64 argument convention with native Linux peers.
+  add_test(NAME unit.linux_sysv_reference_fields
+    COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/linux_sysv_reference_fields.py
+            $<TARGET_FILE:ycxxc> ${CMAKE_CXX_COMPILER} ${PROJECT_SOURCE_DIR}/deps/libycxx)
   # PARITY: by design: links x86-64 ELF objects against the host Itanium C++ ABI runtime.
   add_test(NAME unit.linux_borrowed_typed_downcast
     COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/linux_borrowed_typed_downcast.py
@@ -118,6 +122,10 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_
   add_test(NAME unit.linux_executable
     COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/linux_executable.py
             $<TARGET_FILE:ycxxc> ${CMAKE_READELF})
+  # PARITY: by design: checks ELF visibility and runs the Linux x86-64 link.
+  add_test(NAME unit.linux_namespace_visibility
+    COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/linux_namespace_visibility.py
+            $<TARGET_FILE:ycxxc> ${CMAKE_READELF} ${PROJECT_SOURCE_DIR}/deps/libycxx)
   add_test(NAME unit.linux_cleanup_free_unwind
     COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/linux_cleanup_free_unwind.py
             $<TARGET_FILE:ycxxc> ${CMAKE_CXX_COMPILER} ${CMAKE_READELF} ${CMAKE_OBJDUMP})
@@ -159,7 +167,8 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_
             $<TARGET_FILE:ycxxc> ${CMAKE_AR} ${CMAKE_NM} ${CMAKE_LINKER} ${CMAKE_C_COMPILER})
   add_test(NAME unit.linux_inline
     COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/linux_inline.py
-            $<TARGET_FILE:ycxxc> ${CMAKE_CXX_COMPILER} ${CMAKE_READELF} ${CMAKE_AR})
+            $<TARGET_FILE:ycxxc> ${CMAKE_CXX_COMPILER} ${CMAKE_READELF} ${CMAKE_AR}
+            ${PROJECT_SOURCE_DIR}/deps/libycxx)
   add_test(NAME unit.linux_elf_comdat
     COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/linux_elf_comdat.py
             $<TARGET_FILE:ycxxc> ${CMAKE_C_COMPILER} ${CMAKE_AR})

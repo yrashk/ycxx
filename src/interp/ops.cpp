@@ -253,11 +253,13 @@ struct Ops {
     auto storage = ir::Storage(imms(f, n)[1]);
     auto init = ir::Init(imms(f, n)[2]);
     if (storage != ir::Storage::automatic && storage != ir::Storage::temporary) return m.unsupported(n);
-    if (m.shape(t).leaves == 0) return m.unsupported(n);
-    u32 o = m.make_object(t, M::Origin::automatic);
+    const auto* record = constant(m) ? m.record_storage(t) : nullptr;
+    const u64 leaves = record ? record->ncells : m.shape(t).leaves;
+    if (!m.can_allocate(leaves) || (leaves == 0 && !record)) return m.unsupported(n);
+    u32 o = m.make_object(t, M::Origin::automatic, record);
     const M::Object& ob = m.objects_[o];
     if (init == ir::Init::zero) {
-      m.fill_zero(t, ob.cell0);
+      m.fill_zero(ob);
     } else {
       M::Fill fill = init == ir::Init::erroneous ? M::Fill::erroneous : M::Fill::indeterminate;
       for (u32 c = ob.cell0; c < ob.cell0 + ob.ncells; ++c) m.cells_[c].fill = fill;
@@ -287,10 +289,11 @@ struct Ops {
   }
 
   static Flow obj__begin(M& m, Frame& f, N n) {
+    const Value p = m.operand(f, n, 1);
     M::Place pl;
-    if (Flow fl = m.locate(m.operand(f, n, 1), {}, imm_type(f, n), M::Use::lifetime, false, pl); fl != Flow::next) return fl;
-    if (Flow fl = lifetime_change(m, m.operand(f, n, 1)); fl != Flow::next) return fl;
-    for (u32 c = pl.cell0; c < pl.cell0 + pl.ncells; ++c) m.cells_[c].life = M::Life::alive;
+    if (Flow fl = m.locate(p, {}, imm_type(f, n), M::Use::lifetime, false, pl); fl != Flow::next) return fl;
+    if (Flow fl = lifetime_change(m, p); fl != Flow::next) return fl;
+    m.set_lifetime(pl, p.bits == 0, M::Life::alive);
     return Flow::next;
   }
 
@@ -302,12 +305,28 @@ struct Ops {
     auto pl = m.resolve(p, {}, past);
     if (!pl || past) return m.fail(Reason::past_end_access);
     if (Flow fl = lifetime_change(m, p); fl != Flow::next) return fl;
-    for (u32 c = pl->cell0; c < pl->cell0 + pl->ncells; ++c) m.cells_[c].life = M::Life::after;
+    m.set_lifetime(*pl, p.bits == 0, M::Life::after);
     return Flow::next;
   }
 
   static Flow obj__reuse(M& m, Frame&, N n) { return m.unsupported(n); }
   static Flow union__activate(M& m, Frame&, N n) { return m.unsupported(n); }
+
+  static Flow obj__check_receiver(M& m, Frame& f, N n) {
+    if (!constant(m)) return Flow::next;
+    const auto& pointer = m.shape(m.type_of(f, f.fn->operands_of(n)[1]));
+    if (pointer.kind != M::Kind::pointer || pointer.is_nullptr ||
+        !m.in_->types.is<ast::TClass>(m.in_->canonical(pointer.inner)))
+      return m.fail(Reason::ill_formed);
+    const Value receiver = m.operand(f, n, 1);
+    M::Place place;
+    if (Flow fl = m.locate(receiver, {}, pointer.inner, M::Use::lifetime, false, place); fl != Flow::next) return fl;
+    // [class.cdtor] permits calls during construction and destruction. Check a completed
+    // lifetime independently of the fields, which the call need not read.
+    const auto& object = m.objects_[place.obj];
+    if (receiver.bits == 0 && object.record_life == M::Life::after) return m.fail(Reason::outside_lifetime);
+    return Flow::next;
+  }
 
   static Flow nullptr_value(M& m, Frame& f, N n) {
     QualType t = m.result_type(f, n);
@@ -328,29 +347,9 @@ struct Ops {
       return fl;
     const auto kind = m.shape(t).kind;
     if (pl.ncells != 1 || kind == M::Kind::array || kind == M::Kind::other) return m.unsupported(n);
-    M::Cell& c = m.cells_[pl.cell0];
-    if (c.fill == M::Fill::constant) {
-      // A global's initial value, decoded on its first read; the node runs again if that needs
-      // another global from the host.
-      Value v;
-      if (Flow fl = m.constant(ConstId(u32(c.v.bits)), t, v); fl != Flow::next) return fl;
-      M::Cell& again = m.cells_[pl.cell0];
-      again.fill = M::Fill::value;
-      again.v = v;
-      return m.set(f, n, v);
-    }
-    switch (c.fill) {
-    case M::Fill::indeterminate: return m.fail(Reason::read_indeterminate);
-    case M::Fill::erroneous:
-      // P2795: the erroneous value, zero on every target ycxx has; not constant ([expr.const]).
-      if (constant(m)) return m.fail(Reason::read_erroneous);
-      return m.set(f, n, m.shape(t).kind == M::Kind::pointer    ? Value::null()
-                         : m.shape(t).kind == M::Kind::floating ? Value::floating(0)
-                                                                 : Value::integer(0));
-    case M::Fill::value:
-    case M::Fill::constant: break;
-    }
-    return m.set(f, n, c.v);
+    Value value;
+    if (Flow fl = m.read_cell(t, pl.cell0, value); fl != Flow::next) return fl;
+    return m.set(f, n, value);
   }
 
   static Flow store(M& m, Frame& f, N n) {
@@ -361,14 +360,28 @@ struct Ops {
     if (Flow fl = m.locate(m.operand(f, n, 1), imm_path(f, n, 1), t, M::Use::write, has(f, n, ir::Flag::volatile_), pl);
         fl != Flow::next)
       return fl;
-    if (pl.ncells != 1 || m.shape(t).kind == M::Kind::array) return m.unsupported(n);
+    const auto kind = m.shape(t).kind;
+    if (pl.ncells != 1 || kind == M::Kind::array || kind == M::Kind::other) return m.unsupported(n);
     M::Cell& c = m.cells_[pl.cell0];
     c.fill = M::Fill::value;
     c.v = v;
     return Flow::next;
   }
 
-  static Flow copy(M& m, Frame&, N n) { return m.unsupported(n); }
+  static Flow copy(M& m, Frame& f, N n) {
+    // IR generation only emits this operation for a trivial copy. This profile
+    // evaluates complete records with matching scalar-cell intervals.
+    const QualType t = imm_type(f, n);
+    if (!constant(m) || !m.in_->types.is<ast::TClass>(m.in_->canonical(t))) return m.unsupported(n);
+    const Value dst = m.operand(f, n, 1), src = m.operand(f, n, 2);
+    M::Place from, to;
+    if (Flow fl = m.locate(src, {}, t, M::Use::read, false, from); fl != Flow::next) return fl;
+    if (Flow fl = m.locate(dst, {}, t, M::Use::write, false, to); fl != Flow::next) return fl;
+    if (src.bits != 0 || dst.bits != 0 || !m.objects_[from.obj].record || !m.objects_[to.obj].record ||
+        from.ncells != to.ncells)
+      return m.unsupported(n);
+    return m.copy_record(to, from);
+  }
   static Flow bit_field_load(M& m, Frame&, N n) { return m.unsupported(n); }
   static Flow bit_field_store(M& m, Frame&, N n) { return m.unsupported(n); }
   static Flow atomic__load(M& m, Frame&, N n) { return m.unsupported(n); }
@@ -477,6 +490,10 @@ struct Ops {
   // Returns to the caller, whose call node receives the state, then the values.
   static Flow ret(M& m, Frame& f, N n) {
     auto ops = f.fn->operands_of(n);
+    if (m.frames_.size() == 1 && m.entry_result_) {
+      if (ops.size() != 1) return m.fail(Reason::ill_formed);
+      if (Flow fl = m.capture_result(*m.entry_result_); fl != Flow::next) return fl;
+    }
     std::vector<Value> vals;
     std::vector<QualType> types;
     for (ir::ValueId v : ops.subspan(1)) {

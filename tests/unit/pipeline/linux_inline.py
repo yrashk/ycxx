@@ -3,13 +3,65 @@
 import os
 from pathlib import Path
 import re
+import struct
 import subprocess
 import sys
 import tempfile
 
 
+def weak_runtime_providers(scope, libycxx, host_cxx, readelf, compile, link, symbols, run):
+    def defined_function(obj, name, binding, visibility=None):
+        entry = symbols(obj)[name]
+        assert int(entry[2]) > 0 and entry[3:5] == ['FUNC', binding] and entry[6].isdecimal(), (obj, entry)
+        if visibility is not None:
+            assert entry[5] == visibility, (obj, entry, visibility)
+
+    debugger = '_ZNSt4__y119is_debugger_presentEv'
+    provider = libycxx / 'src/runtime/debugging/is_debugger_present.cpp'
+    headers = ('-isystem', libycxx / 'include')
+    compile(provider, 'debugger-static.o', *headers, '-DYCXX_SHARED=0')
+    defined_function('debugger-static.o', debugger, 'WEAK')
+    compile(provider, 'debugger-shared.o', *headers, '-DYCXX_SHARED=1')
+    defined_function('debugger-shared.o', debugger, 'WEAK', 'DEFAULT')
+
+    # Use the pinned freestanding PAL fallback and static linkage marker for the real default.
+    compile(libycxx / 'src/freestanding/pal/debugger_present.cpp', 'debugger-pal.o', *headers, '-DYCXX_SHARED=0')
+    compile(libycxx / 'src/runtime/linkage/static.cpp', 'debugger-marker.o', *headers, '-DYCXX_SHARED=0')
+    (scope / 'debugger-main.cpp').write_text(
+        '#include <debugging>\nint main() { return std::is_debugger_present() ? 1 : 0; }\n')
+    compile('debugger-main.cpp', 'debugger-main.o', *headers, '-DYCXX_SHARED=0')
+    link('debugger-main.o', 'debugger-static.o', 'debugger-pal.o', 'debugger-marker.o')
+    run('./program')
+
+    units = {
+        'weak-main': 'int selected() noexcept;\nint main() { return selected(); }\n',
+        'weak-provider': '[[__gnu__::__weak__]] int selected() noexcept { return 17; }\n',
+        'weak-redecl': ('extern "C" __attribute__((weak, visibility("hidden"))) int hook() noexcept;\n'
+                        'int hook() noexcept { return 17; }\n'),
+        'strong-provider': 'int selected() noexcept { return 31; }\n',
+        'duplicate-provider': 'int selected() noexcept { return 41; }\n',
+    }
+    for name, contents in units.items():
+        source = f'{name}.cpp'
+        (scope / source).write_text(contents)
+        compile(source, f'{name}.o')
+    defined_function('weak-provider.o', '_Z8selectedv', 'WEAK', 'DEFAULT')
+    defined_function('weak-redecl.o', 'hook', 'WEAK', 'HIDDEN')
+    defined_function('strong-provider.o', '_Z8selectedv', 'GLOBAL', 'DEFAULT')
+    assert '_Z8selectedv' not in run(readelf, '-Wg', 'weak-provider.o')
+
+    link('weak-main.o', 'weak-provider.o')
+    run('./program', status=17)
+    for order in (('weak-provider.o', 'strong-provider.o'), ('strong-provider.o', 'weak-provider.o')):
+        link('weak-main.o', *order)
+        run('./program', status=31)
+        run(host_cxx, '-no-pie', 'weak-main.o', *order, '-o', 'host-program')
+        run('./host-program', status=31)
+    link('weak-main.o', 'strong-provider.o', 'duplicate-provider.o', status=1, error="duplicate symbol '_Z8selectedv'")
+
+
 def main():
-    ycxx, host_cxx, readelf, ar = sys.argv[1:]
+    ycxx, host_cxx, readelf, ar, libycxx_source = sys.argv[1:]
     fixtures = Path(__file__).resolve().parent
     fixture = fixtures / 'inline-odr'
     target = '--target=x86_64-pc-linux-gnu'
@@ -22,8 +74,8 @@ def main():
                                      f' and stderr containing {error!r}\n{result.stdout}{result.stderr}')
             return result.stdout
 
-        def compile(source, obj):
-            run(ycxx, 'cxx', target, '-c', source, '-o', obj)
+        def compile(source, obj, *flags):
+            run(ycxx, 'cxx', target, *flags, '-c', source, '-o', obj)
 
         def link(*inputs, status=0, error=''):
             run(ycxx, 'cxx', target, '-nostdlib', *inputs, '-o', 'program', status=status, error=error)
@@ -31,6 +83,8 @@ def main():
         def symbols(obj, *options):
             return {row[-1]: row for line in run(readelf, '-Ws', *options, obj).splitlines()
                     if len(row := line.split(maxsplit=7)) == 8 and row[0].endswith(':')}
+
+        weak_runtime_providers(Path(temp), Path(libycxx_source), host_cxx, readelf, compile, link, symbols, run)
 
         hidden = fixtures / 'inline-hidden'
         inline_hidden = {'hidden_step(int)': ('WEAK', 'HIDDEN', True),
@@ -131,12 +185,27 @@ def main():
             obj = f'data-{name}.o'
             compile(data / f'{name}.cpp', obj)
             table = symbols(obj)
-            sections = dict(re.findall(r'\[\s*(\d+)\]\s+(\.[^\s]+)', run(readelf, '-WS', obj)))
+            headers = run(readelf, '-WS', obj)
+            sections = dict(re.findall(r'\[\s*(\d+)\]\s+(\.[^\s]+)', headers))
             relocations = run(readelf, '-Wr', obj).splitlines()
             for symbol, section in data_sections.items():
                 entry = table[symbol]
                 assert entry[4] == 'WEAK' and sections.get(entry[6]) == section, entry
                 assert any('R_X86_64_64' in line.split() and symbol in line.split() for line in relocations), symbol
+
+            rodata = re.search(r'\]\s+\.rodata\s+PROGBITS\s+\w+\s+([0-9a-fA-F]+)', headers)
+            assert rodata, headers
+            contents = (Path(temp) / obj).read_bytes()
+            for symbol, payload in {'_ZN6Record4seedE': struct.pack('<i', 42),
+                                    '_ZN6Record10descriptorE': struct.pack('<ii', 23, 47)}.items():
+                entry = table[symbol]
+                assert entry[4] == 'WEAK' and sections.get(entry[6]) == '.rodata', entry
+                # Ordinary data can omit ELF symbol size. Verify the stored bytes in either case.
+                assert int(entry[2]) == len(payload) or (entry[3] == 'NOTYPE' and entry[2] == '0'), entry
+                offset = int(rodata[1], 16) + int(entry[1], 16)
+                assert contents[offset:offset + len(payload)] == payload, (obj, symbol)
+            local = table['_ZN12_GLOBAL__N_111LocalRecord4seedE']
+            assert local[4] == 'LOCAL' and sections.get(local[6]) == '.rodata', local
 
         for objects in (('data-main.o', 'data-peer.o'), ('data-peer.o', 'data-main.o')):
             link(*objects)
@@ -156,22 +225,13 @@ def main():
             link(*objects)
             run('./program')
 
-        (Path(temp) / 'data-controls.cpp').write_text('''
-constexpr int ordinary_constant = 7;
-extern constexpr int external_constant = 9;
-static inline int local_inline = 11;
-int backing = 13;
-inline int* relocated = &backing;
-template<class T> inline int specialized = 17;
-template<> int specialized<int> = 19;
-struct NamedType {};
-template<> inline int specialized<NamedType> = 23;
-''')
-        compile('data-controls.cpp', 'data-controls.o')
+        compile(data / 'bindings.cpp', 'data-controls.o')
         table = symbols('data-controls.o')
-        for name in ('ordinary_constant', 'local_inline'):
+        entry = table['_ZN6Public6scalarE']
+        assert entry[4] == 'WEAK' and entry[6] != 'UND', entry
+        for name in ('ordinary_constant', 'local_inline', '_ZN6Public1pE', '_ZN6Public1kE'):
             assert table[name][4] == 'LOCAL', table[name]
-        for name in ('external_constant', 'backing', 'relocated',
+        for name in ('external_constant', 'backing', 'relocated', '_ZN8Ordinary5valueE',
                      '_Z11specializedIiE', '_Z11specializedI9NamedTypeE'):
             assert table[name][4] == 'GLOBAL' and table[name][6] != 'UND', table[name]
 

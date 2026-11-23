@@ -33,8 +33,8 @@ struct Failure {
 std::expected<compile::Done, Failure> request_compile(Connection& c, const compile::Request& r,
                                                       const std::function<void(TraceBatch&&)>& on_trace = {});
 // Attaches to the daemon's traces (#245); then `next_trace` reads them, one batch at a time,
-// nothing once the daemon has gone.
-std::expected<void, std::string> watch_traces(Connection& c, bool values);
+// nothing once the daemon has gone. `live`: batches as the requests run (#939).
+std::expected<void, std::string> watch_traces(Connection& c, bool values, bool live = false);
 std::optional<TraceBatch> next_trace(Connection& c);
 // Waits until a file some build read changes after revision `since` of daemon `pid` (#245); how
 // many batches changed something, or why there is no answer (the daemon stopped).
@@ -153,8 +153,8 @@ std::expected<compile::Done, Failure> request_compile(Connection& c, const compi
   return std::move(*d);
 }
 
-std::expected<void, std::string> watch_traces(Connection& c, bool values) {
-  if (!send(c.fd.get(), Kind::watch, WatchRequest{values})) return std::unexpected("cannot send the request");
+std::expected<void, std::string> watch_traces(Connection& c, bool values, bool live) {
+  if (!send(c.fd.get(), Kind::watch, WatchRequest{values, live})) return std::unexpected("cannot send the request");
   auto f = receive(c.fd.get());
   if (!f || f->kind != Kind::watch) return std::unexpected("the daemon did not attach the watch");
   return {};

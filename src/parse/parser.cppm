@@ -35,6 +35,11 @@ using sema::u8;
 using ast::NameId;
 using ast::NodeId;
 
+struct DeclAttributes {
+  ast::GnuVisibility visibility = ast::GnuVisibility::none;
+  bool weak = false;
+};
+
 // [dcl.spec]: what a decl-specifier-seq says.
 struct DeclSpec {
   u32 begin = 0;
@@ -49,7 +54,7 @@ struct DeclSpec {
   bool is_constinit = false;
   std::vector<ast::AnnotationSema> annotations;
   bool is_typedef = false;  // [dcl.typedef]: the declarators declare typedef-names
-  bool hidden_visibility = false;
+  DeclAttributes attributes;
   std::optional<u32> virtual_at;
   std::optional<u32> mutable_at;
   // An elaborated-type-specifier ([dcl.type.elab]): the class it names, and where its name is.
@@ -106,7 +111,7 @@ struct Declarator {
   std::optional<u32> replay_template_args_at;  // written arguments with deferred substitution checks
   // A GNU asm label, `__asm("_fopen")`: the symbol as written (docs/EXTENSIONS.md); empty if none.
   std::string asm_label;
-  bool hidden_visibility = false;
+  DeclAttributes attributes;
   std::vector<ast::AnnotationSema> annotations;
   bool pack = false;  // `T... x`: a declarator-id after an ellipsis ([dcl.fct]/23, [temp.param]/17)
   bool ok = true;
@@ -556,7 +561,7 @@ public:
     for (;;) {
       // A standard attribute after a decl-specifier-seq appertains to its type ([dcl.spec.general]).
       const bool annotation_type_context = in_type_id || pos() != d.begin;
-      if (skip_attributes(&d.hidden_visibility, attr_gnu, nullptr, annotation_type_context)) continue;
+      if (skip_attributes(&d.attributes, attr_gnu, nullptr, annotation_type_context)) continue;
       Tk k = kind();
       switch (k) {
       case Tk::kw_void: ++n_void; break;
@@ -966,7 +971,7 @@ public:
     u32 template_args_at = 0;
     std::optional<u32> replay_template_args_at;
     bool pack = false;
-    bool hidden_visibility = false;
+    DeclAttributes attributes;
     std::vector<ast::AnnotationSema> annotations;
     std::vector<Suffix> suffixes;
   };
@@ -1032,10 +1037,10 @@ public:
         !(d.qualified && d.scope.type && s_->types().is_class(*d.scope.type)))
       d.ok = check_named_ref_qualifier(d) && d.ok;
     if (d.ok) {
-      skip_attributes(&d.hidden_visibility, attr_gnu);
+      skip_attributes(&d.attributes, attr_gnu);
       if (!abstract) {
         d.asm_label = asm_label(d.ok);
-        skip_attributes(&d.hidden_visibility, attr_gnu);
+        skip_attributes(&d.attributes, attr_gnu);
       }
     }
     // Prototype names support type and constant-expression checking inside this
@@ -1054,10 +1059,10 @@ public:
     return false;
   }
 
-  // Attribute-specifiers ([dcl.attr.grammar]) and GNU `__attribute__((…))`. Keep an explicit
-  // hidden visibility attribute when requested by the declaring context.
+  // Attribute-specifiers ([dcl.attr.grammar]) and GNU `__attribute__((…))`. Keep ABI
+  // attributes when requested by the declaring context.
   static constexpr int attr_std = 1, attr_gnu = 2;
-  int skip_attributes(bool* hidden_visibility = nullptr, int visibility_forms = attr_std | attr_gnu,
+  int skip_attributes(DeclAttributes* declaration = nullptr, int declaration_forms = attr_std | attr_gnu,
                       std::vector<ast::AnnotationSema>* annotations = nullptr, bool annotation_type_context = false,
                       int forms = attr_std | attr_gnu) {
     int any = 0;
@@ -1089,8 +1094,8 @@ public:
         if (auto mixed = annotation_in_attribute_list(begin, index()))
           s_->diag(*mixed - begin_, Diag::annotation_mixed_list);
       }
-      if (hidden_visibility && !*hidden_visibility && (form & visibility_forms) && closed)
-        *hidden_visibility = hidden_visibility_in_attributes(begin, index(), std_attr);
+      if (declaration && (form & declaration_forms) && closed)
+        read_decl_attributes(*declaration, *r_, begin, index(), std_attr);
     }
   }
 
@@ -1141,31 +1146,38 @@ public:
     if (!expect(Tk::r_square) || !expect(Tk::r_square)) seek(limit);
   }
 
-  bool hidden_visibility_in_attributes(u32 begin, u32 end, bool scoped) const {
-    auto token = [&](u32 at) { return r_->tokens[at].kind; };
+  static void read_decl_attributes(DeclAttributes& attributes, const pp::Region& region,
+                                   u32 begin, u32 end, bool scoped) {
+    using enum ast::GnuVisibility;
+    auto token = [&](u32 at) { return region.tokens[at].kind; };
     auto named = [&](u32 at, std::string_view plain, std::string_view reserved) {
       if (token(at) != Tk::identifier) return false;
-      const auto spelling = r_->name(r_->tokens[at]);
+      const auto spelling = region.name(region.tokens[at]);
       return spelling == plain || spelling == reserved;
     };
-    if (end - begin < 4 || token(begin + 1) != token(begin) || token(end - 2) != token(end - 1)) return false;
-    auto matches = [&](u32 first, u32 limit) {
+    if (end - begin < 4 || token(begin + 1) != token(begin) || token(end - 2) != token(end - 1)) return;
+    auto read = [&](u32 first, u32 limit) {
       if (scoped) {
         if (limit - first < 2 || !named(first, "gnu", "__gnu__") || token(first + 1) != Tk::coloncolon)
-          return false;
+          return;
         first += 2;
       }
-      if (limit - first < 4 || !named(first, "visibility", "__visibility__") ||
+      if (limit - first == 1 && named(first, "weak", "__weak__")) {
+        attributes.weak = true;
+        return;
+      }
+      if (attributes.visibility == hidden || limit - first < 4 || !named(first, "visibility", "__visibility__") ||
           token(first + 1) != Tk::l_paren || token(first + 2) != Tk::string_lit || token(limit - 1) != Tk::r_paren)
-        return false;
-      const auto& value = r_->literal(r_->tokens[first + 2]);
+        return;
+      const auto& value = region.literal(region.tokens[first + 2]);
       for (u32 at = first + 3; at < limit - 1; ++at)
-        if (token(at) != Tk::string_lit || !r_->tokens[at].has(lex::tok_flag::continued)) return false;
-      return value.encoding == lex::Encoding::ordinary && value.ud_suffix == lex::no_name && !value.bad &&
-             std::ranges::equal(value.units, std::string_view("hidden"));
+        if (token(at) != Tk::string_lit || !region.tokens[at].has(lex::tok_flag::continued)) return;
+      if (value.encoding != lex::Encoding::ordinary || value.ud_suffix != lex::no_name || value.bad) return;
+      if (std::ranges::equal(value.units, std::string_view("hidden"))) attributes.visibility = hidden;
+      else if (std::ranges::equal(value.units, std::string_view("default"))) attributes.visibility = default_;
     };
 
-    // Only complete attributes at the list's top level can give the declaration visibility.
+    // Only complete attributes at the list's top level affect the declaration.
     u32 entry = begin + 2;
     const u32 limit = end - 2;
     std::vector<Tk> closing;
@@ -1176,19 +1188,19 @@ public:
       case Tk::l_brace: closing.push_back(Tk::r_brace); break;
       case Tk::l_splice: closing.push_back(Tk::r_splice); break;
       case Tk::r_square: case Tk::r_paren: case Tk::r_brace: case Tk::r_splice:
-        if (closing.empty() || closing.back() != kind) return false;
+        if (closing.empty() || closing.back() != kind) return;
         closing.pop_back();
         break;
       case Tk::comma:
         if (closing.empty()) {
-          if (matches(entry, at)) return true;
+          read(entry, at);
           entry = at + 1;
         }
         break;
       default: break;
       }
     }
-    return closing.empty() && matches(entry, limit);
+    if (closing.empty()) read(entry, limit);
   }
 
   u32 past_attribute_specifier(u32 ahead) const {
@@ -1475,7 +1487,7 @@ public:
       ok = false;
     }
     if (l.named)  // appertains to the declarator-id ([dcl.meaning.general]/1)
-      skip_attributes(&l.hidden_visibility, attr_std | attr_gnu, &l.annotations);
+      skip_attributes(&l.attributes, attr_std | attr_gnu, &l.annotations);
     for (;;) {
       if (is(Tk::l_paren) && !abstract && in_params_ == 0 && !params_ahead()) break;  // `T x(args)`: an initializer
       if (is(Tk::l_paren)) {
@@ -1577,7 +1589,8 @@ public:
                                                bool check_injected_access = false,
                                                std::vector<TypeQualifier>* type_qualifiers = nullptr,
                                                bool* failed_qualifier = nullptr,
-                                               std::optional<u32>* committed_failure = nullptr) {
+                                               std::optional<u32>* committed_failure = nullptr,
+                                               std::optional<u32>* ambiguous_namespace = nullptr) {
     u32 j = start;
     std::optional<sema::Sema::Scope> s;
     if (kind(j) == Tk::kw_decltype && kind(j + 1) == Tk::l_paren) {
@@ -1596,7 +1609,9 @@ public:
       ++j;
     } else if (kind(j) == Tk::identifier && kind(j + 1) == Tk::coloncolon) {
       const std::optional<u32> at = lookup == QualifierLookup::elaborated_enum ? std::optional{pos() + j} : std::nullopt;
-      s = s_->scope_named(name_of(tok(j)), at);
+      bool ambiguous = false;
+      s = s_->scope_named(name_of(tok(j)), at, ambiguous_namespace ? &ambiguous : nullptr);
+      if (ambiguous) *ambiguous_namespace = j;
       if (!s) return std::nullopt;
       j += 2;
     } else if (auto t = template_id_scope(std::nullopt, j, /*scope=*/true, checked || check_injected_access,
@@ -1623,7 +1638,10 @@ public:
             continue;
           }
         }
-        auto m = s_->scope_member(*s, n);
+        bool ambiguous = false;
+        auto m = s_->scope_member(*s, n, /*assume_dependent_type=*/true,
+                                  ambiguous_namespace && !*ambiguous_namespace ? &ambiguous : nullptr);
+        if (ambiguous) *ambiguous_namespace = j;
         if (!m) return std::nullopt;
         if (member_pointer || checked) check_type_access(*s, n, pos() + j);
         else if (type_qualifiers && s->type) type_qualifiers->push_back({*s, n, pos() + j});
@@ -1936,7 +1954,7 @@ public:
     d.template_args_at = l.template_args_at;
     d.replay_template_args_at = l.replay_template_args_at;
     d.pack = l.pack;
-    d.hidden_visibility = l.hidden_visibility;
+    d.attributes = l.attributes;
     d.annotations = std::move(l.annotations);
     return t;
   }
@@ -2208,6 +2226,7 @@ public:
                     (scope->type && s_->types().is_class(*scope->type) &&
                      s_->types().class_of(*scope->type) == s_->current_class && member_template_name(n).value_or(false)) ||
                     (scope->ns && (s_->namespace_template(*scope->ns, n, ast::DeclKind::variable) ||
+                                   s_->namespace_template(*scope->ns, n, ast::DeclKind::concept_) ||
                                    s_->namespace_type_template(*scope->ns, n)))))
         return name + 1;
       return std::nullopt;
@@ -2627,7 +2646,7 @@ public:
   // A template-argument-list ([temp.arg.general]) after a template-name, from its `<`. An argument
   // that can be a type-id is one ([temp.arg.general]/2).
   std::optional<std::vector<ast::TemplateArg>> template_argument_list(std::optional<u32>* replay_at = nullptr,
-                                                                     bool* took_closer = nullptr) {
+                                                                     bool* took_closer = nullptr, bool expand_empty = false) {
     if (took_closer) *took_closer = false;
     u32 begin = pos();
     u32 deferred = deferred_argument_checks_;
@@ -2701,7 +2720,7 @@ public:
       } while (accept(Tk::comma));
     }
     if (ok)
-      if (auto xs = s_->expand_bound(args)) args = *xs;
+      if (auto xs = s_->expand_bound(args, expand_empty)) args = *xs;
     --angle_;
     // [temp.names]/4: `>>` closes this list and the enclosing one.
     if (is(Tk::greatergreater) && !half_) half_ = true;
@@ -4246,9 +4265,10 @@ public:
     auto address = address_op_ && *address_op_ + 1 == begin ? address_op_ : std::nullopt;
     std::vector<TypeQualifier> type_qualifiers;
     std::optional<u32> committed_failure;
+    std::optional<u32> ambiguous_namespace;
     auto s = nested_name(0, next, /*member_pointer=*/false, substituting_partial_arguments || address.has_value(),
                          QualifierLookup::ordinary, /*check_injected_access=*/false, &type_qualifiers,
-                         /*failed_qualifier=*/nullptr, &committed_failure);
+                         /*failed_qualifier=*/nullptr, &committed_failure, &ambiguous_namespace);
     if (committed_failure) {
       for (u32 j = 0; j < *committed_failure; ++j) bump();
       while (is(Tk::identifier) || is(Tk::coloncolon)) bump();
@@ -4264,6 +4284,7 @@ public:
       while (is(Tk::identifier) || is(Tk::coloncolon)) bump();
       return {NodeId::none, begin, pos()};
     }
+    const NameId ambiguous_name = ambiguous_namespace ? name_of(tok(*ambiguous_namespace)) : s_->no_name();
     for (u32 j = 0; j < next; ++j) bump();
     u32 name_at = pos();
     bool operator_name = !suffix.empty() || literal_operator_ahead();
@@ -4317,6 +4338,19 @@ public:
         return type_conversion(*t, begin);
       }
     if (is(Tk::less)) {
+      if (s->ns) {
+        auto diags = s_->diag_count();
+        auto c = s_->namespace_concept_for_expression(*s->ns, n, name_at);
+        if (c || s_->has_error_since(diags)) {
+          if (ambiguous_namespace)
+            s_->diag(begin + *ambiguous_namespace, Diag::ambiguous_name,
+                     ambiguous_name);
+          auto args = template_argument_list(nullptr, nullptr, /*expand_empty=*/true);
+          if (!c || !args || ambiguous_namespace) return {NodeId::none, begin, pos()};
+          return s_->concept_id_expr(*c, *args, begin, pos(),
+                                     class_template_base && in_template_value_argument_ && !s_->unevaluated);
+        }
+      }
       // `N::v<args>`: a variable template of the namespace ([temp.names]/3).
       if (s->ns)
         if (auto v = s_->namespace_template(*s->ns, n, ast::DeclKind::variable)) {
@@ -4371,6 +4405,10 @@ public:
   // [except.pre], [except.handle]: each handler declaration shares its compound's scope.
   Ex try_statement() {
     u32 begin = pos();
+    if (!s_->check_exception_construct(begin, Tk::kw_try)) {
+      skip_substatement();
+      return {NodeId::none, begin, pos()};
+    }
     bump();
     Ex body = compound_statement(/*barrier=*/true);
     if (!expect(Tk::kw_catch)) return {NodeId::none, begin, pos()};
@@ -6232,6 +6270,7 @@ public:
   bool body = false;  // the part is a function body, not a declaration part
   bool dependent_decay_copy_body = false;  // a function template's compound statement, before replay
   bool substituting_partial_arguments = false;
+  bool class_template_base = false;  // class instantiation substitutes or reparses this base type
   bool member_alias_type = false;  // the class instantiation reparses this type-id
 private:
   // In a delimited operand, a `>` is an operator again ([temp.names]/4).

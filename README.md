@@ -116,9 +116,16 @@ build/bin/ycxx cxx -nostdlib example.o -o example
 ./example
 ```
 
+`-ffreestanding` defines `__STDC_HOSTED__` as `0` for runtime and library builds. Objects may omit
+an entry point. On x86-64 Linux, `-nostdlib` selects the existing executable startup convention
+described above. [#973](https://github.com/yrashk/ycxx/issues/973)
+
+`-fno-exceptions` diagnoses active `throw` and block `try` constructs. Native objects retain
+ordinary destruction and eligible plain unwind frames. [#980](https://github.com/yrashk/ycxx/issues/980)
+
 Fixed-prototype calls (free and member functions, lambdas, function templates and calls
-through pointers) support passing and returning nonempty flat records with integral or
-ordinary object-pointer fields by value. The record can occupy up to
+through pointers) support passing and returning nonempty flat records with integral,
+ordinary object-pointer or object lvalue-reference fields by value. The record can occupy up to
 16 bytes and must be trivial for calls. Larger results and classes that are not trivial for
 calls (with a user-provided copy constructor or destructor) pass through memory, as on macOS. [Linux integer aggregate ABI](docs/design/linux-integer-aggregates.md)
 
@@ -131,7 +138,9 @@ its code, data and relocations. [#422](https://github.com/yrashk/ycxx/issues/422
 creates or replaces a deterministic indexed GNU archive from supported x86-64 ELF objects.
 Static links accept these archives and compatible archives from system `ar`. Place an archive
 after the inputs that reference its members, and include at least one source or ordinary object.
-[#389](https://github.com/yrashk/ycxx/issues/389), [#388](https://github.com/yrashk/ycxx/issues/388)
+Resident links reread explicit archives on each request.
+[#389](https://github.com/yrashk/ycxx/issues/389), [#388](https://github.com/yrashk/ycxx/issues/388),
+[#951](https://github.com/yrashk/ycxx/issues/951)
 
 An explicit dynamic link uses ycxx's startup and the target loader. Supply the absolute target
 interpreter path and explicit, self-contained shared objects with GNU or SysV hash tables and
@@ -193,9 +202,19 @@ visibility across declarations.
 [#422](https://github.com/yrashk/ycxx/issues/422) · [#602](https://github.com/yrashk/ycxx/issues/602)
 · [#124](https://github.com/yrashk/ycxx/issues/124) · [#936](https://github.com/yrashk/ycxx/issues/936)
 
-External inline namespace variables with relocation-free static initializers share one object
-across translation units on both targets. On Linux this lets two freestanding units using libycxx
-`<cstddef>` link with the pinned static library. [#432](https://github.com/yrashk/ycxx/issues/432)
+On Linux x86-64, an ordinary external namespace-scope function can use GNU `weak` so a
+strong definition in another object takes precedence. This covers the pinned libycxx
+debugger provider. [#937](https://github.com/yrashk/ycxx/issues/937)
+
+On Linux x86-64, an ordinary external non-inline function can inherit GNU visibility
+from its enclosing namespace declaration and use it at an out-of-line definition.
+[#940](https://github.com/yrashk/ycxx/issues/940)
+
+External inline namespace variables and in-class static constexpr members of ordinary namespace-scope
+classes share one object across translation units on both targets when their initial values need
+no relocations or runtime work. On Linux this lets two freestanding units using libycxx `<cstddef>`
+link with the pinned static library. [#432](https://github.com/yrashk/ycxx/issues/432)
+· [#903](https://github.com/yrashk/ycxx/issues/903)
 
 ycxx ELF objects record function types and code sizes. The ELF linker accepts supported
 system-assembled objects with function symbols and the GNU-built libycxx static linkage-marker
@@ -278,6 +297,9 @@ values. [#859](https://github.com/yrashk/ycxx/issues/859)
 
 Qualified value lookup can read earlier static data members and injected unscoped enumerators
 while their current class is incomplete. [#857](https://github.com/yrashk/ycxx/issues/857)
+An ordinary class's in-class static data initializer can use an unqualified inherited static
+member. Class and base declarations take precedence over names in an enclosing namespace.
+[#967](https://github.com/yrashk/ycxx/issues/967)
 
 Both targets support named nested enum definitions followed by ordinary fields in the same
 member declaration, including scoped enum field initializers. [#500](https://github.com/yrashk/ycxx/issues/500)
@@ -520,9 +542,21 @@ written default member initializer are value-initialized.
   and runtime field access. Direct-list braces also work for aggregates of public integral
   fields in namespace-scope classes without bases.
   [#262](https://github.com/yrashk/ycxx/issues/262)
+  Inline static integral, pointer, and supported floating-point members can use constant
+  direct and copy lists in those classes, including fixed arrays of those types.
+  [#964](https://github.com/yrashk/ycxx/issues/964)
   Constant expressions can read non-mutable integral and enumeration fields of flat
   namespace-scope constexpr aggregates.
   [#862](https://github.com/yrashk/ycxx/issues/862) · [#876](https://github.com/yrashk/ycxx/issues/876)
+  A default member initializer in a flat constexpr aggregate can directly read an earlier
+  integral or enumeration field. [#895](https://github.com/yrashk/ycxx/issues/895)
+  Constant expressions can read integral and enumeration fields of a flat aggregate temporary,
+  such as `Limits{42}.quota`. [#900](https://github.com/yrashk/ycxx/issues/900)
+  Class-template static constexpr members can use these reads in their initializers.
+  [#991](https://github.com/yrashk/ycxx/issues/991)
+  A constant expression can return a named empty or flat aggregate and use the result,
+  including an initialized fixed-size `char` member array.
+  [#975](https://github.com/yrashk/ycxx/issues/975)
   Namespace-scope `constexpr` pointers to `void` can retain scalar and array element addresses.
   `__builtin_addressof`, used by libycxx's `std::addressof`, bypasses overloaded `operator&`.
   It supports runtime addresses and constant expressions such as a scalar global's address.
@@ -541,8 +575,15 @@ x86-64 Linux it also searches glibc's multiarch include path and preprocesses gl
 hosted `<cstdint>`, `<cinttypes>`, and `<inttypes.h>` compile. A Darwin target can use the configured
 SDK or one selected by `SDKROOT`. Cross-target builds can also supply target headers with `-I` or
 `-isystem`. When no target `<stdint.h>` is available, `<cstdint>` uses compiler predefines.
+`-nostdinc` omits the automatic include directories and keeps the explicit ones.
+`-nostdinc++` omits only the automatic libycxx source and generated include directories.
+[#251](https://github.com/yrashk/ycxx/issues/251) · [#997](https://github.com/yrashk/ycxx/issues/997) ·
 [#475](https://github.com/yrashk/ycxx/issues/475) · [#657](https://github.com/yrashk/ycxx/issues/657) ·
 [#664](https://github.com/yrashk/ycxx/issues/664) · [#690](https://github.com/yrashk/ycxx/issues/690)
+
+`ycxx -dumpmachine` prints the selected target triple and `ycxx -print-file-name=include` prints
+its compiler resource include directory. Both accept `--target` and run without a project.
+[#970](https://github.com/yrashk/ycxx/issues/970)
 
 **Incremental builds through a resident daemon.** `ycxx cxx` hands its work to a per-project
 `ycxx daemon` (`YCXX_NO_DAEMON=1` runs in-process), which watches the files it has read and keeps
@@ -551,6 +592,13 @@ it affects, through code generation and the link. The daemon serves concurrent r
 thread pool, and its output is byte for byte that of a cold, in-process build. The daemon, its file
 watcher (FSEvents on macOS, inotify on Linux), the engine trace and the LSP server below work the
 same on both hosts. [#659](https://github.com/yrashk/ycxx/issues/659)
+A unit without virtual functions is analysed a top-level item at a time, and an item's analysis
+is reused while what it read is unchanged. Measured on 2026-11-22 (Release ycxx, arm64 macOS, 18
+cores) with a generated 1 MB file of 290 modules and 11,311 functions (`playground/genbig.py`): a
+cold build takes 1.00 s, changing one module's constant rebuilds in 0.32 s, and a comment or blank
+lines in 0.20 s. Only that module is analysed again, and only the two functions that read the
+constant are compiled again ([#938](https://github.com/yrashk/ycxx/issues/938),
+[#947](https://github.com/yrashk/ycxx/issues/947)).
 
 **See what the engine does.** `ycxx cxx --trace-engine a.cpp` (or `YCXX_TRACE_ENGINE=stream`)
 prints every query the build went through as a colored tree on stderr: what ran, what was
@@ -558,7 +606,9 @@ reused, verified green or cut off early, how long it took and on which worker, a
 memory each cell allocated and retains, with sums per subtree, per query kind and per build. A second build
 shows everything reused. A compile error is marked red at the cell where it starts, and its
 message is shown up to the root. Diagnostic details include the file, line and column where
-available. `--trace-engine=interactive` opens a browser of the trace after the compile: a tree
+available. `--trace-engine=interactive` opens a browser of the trace that fills in while the
+compile runs, through the daemon or in-process: cells appear as they start, with their time so far,
+and settle as they end, while the view follows the newest activity. It has a tree
 with each function's IR and assembly, a timeline of the pool's workers, and filters. It follows
 the terminal's size and takes the mouse: click to select, fold and sort by a column, use the
 wheel to scroll, and drag to resize the pane. It copies a cell, a subtree, selected rows or any
@@ -640,6 +690,11 @@ Both targets emit all three virtual destructor entries for a fieldless, baseless
 a peer defines its earlier key function. Complete and base destruction restore the root's
 vptr before calling the nonthrowing observer. The deleting entry then uses global sized
 `operator delete`. [#136](https://github.com/yrashk/ycxx/issues/136)
+
+On Linux x86-64, an empty out-of-line virtual destructor can own the derived table and RTTI
+for a class with one public nonvirtual base and no added fields. The base has one pointer field
+and a peer-owned virtual destructor and RTTI. This is the shape of libycxx's fundamental
+`type_info` configure probe. [#999](https://github.com/yrashk/ycxx/issues/999)
 
 ### Not yet
 
