@@ -1488,6 +1488,8 @@ public:
   // Every specialization whose definition the unit requires, in order of first demand.
   std::span<const EntityId> required() const { return required_; }
   std::span<const EntityId> implicit_allocation_functions() const { return implicit_allocation_functions_; }
+  // The C library functions the unit's builtins call (`World::string_function`), in order of first use.
+  std::span<const EntityId> library_functions() const { return library_functions_; }
   // The calls of a template's body that were dependent at its definition, by the template's item
   // ([temp.dep.candidate]); its instantiations add argument-dependent lookup to them.
   // Whether a call of the templated body of `item` at `offset` was dependent, read from the
@@ -1807,6 +1809,7 @@ private:
   std::vector<engine::Diagnostic> end_diags_;    // the END phase's own
   std::vector<EntityId> required_;
   std::vector<EntityId> implicit_allocation_functions_;  // in order of first use
+  std::vector<EntityId> library_functions_;              // in order of first use
   bool has_typed_dynamic_cast_ = false;
   std::map<u32, std::optional<irgen::FunctionIr>> instance_irs_;  // instantiated and implicit bodies, by entity
   std::map<u32, std::optional<irgen::FunctionIr>> closure_irs_;  // by closure member
@@ -2078,6 +2081,9 @@ public:
       p_->world().install_alignment_enum(p_->classes_);
     }
     functions.push_back(f);
+  }
+  void use_library_function(EntityId f) override {
+    if (!std::ranges::contains(p_->library_functions_, f)) p_->library_functions_.push_back(f);
   }
   interp::Callee function_ir(EntityId f) override {
     if (special_member_exception && p_->world().entities.rec(f).scope == completing_class)
@@ -2825,6 +2831,7 @@ public:
   ast::DeclSema decl_sema(DeclId d) override { return at_.decl_sema(d); }
   std::optional<ast::DeclSema> written_member(EntityId f) override { return at_.written_member(f); }
   void use_allocation_function(EntityId f, bool aligned) override { at_.use_allocation_function(f, aligned); }
+  void use_library_function(EntityId f) override { at_.use_library_function(f); }
   interp::Callee function_ir(EntityId f) override { return p_->function_ir(f, p_->end()); }
   std::optional<QualType> deduced_type(EntityId f) override { return p_->deduced_type(f, p_->end()); }
   sema::GenericResult generic_instance(EntityId spec, const sema::GenericClosure* known, const sema::GenericBinding&) override {

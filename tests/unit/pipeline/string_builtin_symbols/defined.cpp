@@ -1,0 +1,16 @@
+// A program's own definition of the C function is the function the builtin calls.
+#ifdef __linux__
+#define C_THROW noexcept(true)
+#else
+#define C_THROW
+#endif
+using Size = decltype(sizeof 0);
+extern "C" int memcmp(const void* a, const void* b, Size n) C_THROW {
+  const auto* x = static_cast<const unsigned char*>(a);
+  const auto* y = static_cast<const unsigned char*>(b);
+  for (Size i = 0; i < n; ++i)
+    if (x[i] != y[i]) return x[i] < y[i] ? -1 : 1;
+  return 0;
+}
+
+int builtin(const char* a, const char* b, Size n) { return __builtin_memcmp(a, b, n); }
