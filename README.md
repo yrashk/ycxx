@@ -87,8 +87,8 @@ Functional conversions can construct namespace-qualified class-template speciali
 parentheses or braces, including through namespace aliases. [#697](https://github.com/yrashk/ycxx/issues/697)
 
 Class templates at namespace scope can delete their copy assignment on its first in-class
-declaration when the member has no ref-qualifier. Specializations retain the deleted overload.
-[#709](https://github.com/yrashk/ycxx/issues/709)
+declaration, including with an lvalue or rvalue ref-qualifier. Specializations retain the deleted
+overload. [#709](https://github.com/yrashk/ycxx/issues/709) · [#311](https://github.com/yrashk/ycxx/issues/311)
 
 In a class template, and in a member defined outside it, a member of a nondependent base hides a
 template parameter of the same name. [#800](https://github.com/yrashk/ycxx/issues/800)

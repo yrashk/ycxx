@@ -5243,9 +5243,16 @@ private:
             return bad();
           }
         }
+        const auto& owner = s_.world().entities.rec(c.entity);
         const bool ordinary_member = !spec.is_static && s_.template_scopes.empty() && !inst_ &&
-                                     p_->is_namespace(s_.world().entities.rec(c.entity).scope);
-        if (!is_virtual && !conversion && !ordinary_member && !ps_.check_named_ref_qualifier(d)) return bad();
+                                     p_->is_namespace(owner.scope);
+        // Replay the written object ref-qualifier for the supported deleted copy-assignment form.
+        // member_function_or_static checks the copy-assignment parameter and declaration context.
+        const bool deleted_template_assignment = !spec.is_static && !member_template_ &&
+            owner.templ != EntityId::none && p_->is_namespace(owner.scope) &&
+            s_.ins().names.spelling(d.name) == "operator=" && plain_deleted_body();
+        if (!is_virtual && !conversion && !ordinary_member && !deleted_template_assignment &&
+            !ps_.check_named_ref_qualifier(d)) return bad();
       }
       // A member whose type became a function type through substitution is a data member of
       // function type, which cannot exist ([temp.inst], [class.mem.general]).
@@ -5595,6 +5602,11 @@ private:
     const pp::Region& r = p_->region();
     return it_->has_body() && r.tokens[it_->body_begin].kind == Tk::equal && it_->body_begin + 1 < it_->body_end &&
            r.tokens[it_->body_begin + 1].kind == Tk::kw_delete;
+  }
+
+  bool plain_deleted_body() const {
+    return deleted_body() && it_->body_end - it_->body_begin == 3 &&
+           p_->region().tokens[it_->body_end - 1].kind == Tk::semi;
   }
 
   // A qualified definition of a namespace member redeclares an earlier declaration in its
@@ -6603,8 +6615,7 @@ private:
     bool is_def = it_->kind == ItemKind::function;
     const bool assignment = fn && s_.ins().names.spelling(d.name) == "operator=";
     const bool defaulted = assignment && p_->defaulted_body(k_);
-    const bool deleted = assignment && deleted_body() && it_->body_end - it_->body_begin == 3 &&
-                         p_->region().tokens[it_->body_end - 1].kind == Tk::semi;
+    const bool deleted = assignment && plain_deleted_body();
     if (defaulted || deleted) {
       using sema::TypeKind;
       const auto parameter = p_->assignment_parameter({.name = d.name, .type = d.type, .is_function = true,
