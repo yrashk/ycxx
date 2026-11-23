@@ -1112,6 +1112,9 @@ private:
   bool has_virtual_layouts_ = false;
 };
 
+// The C library functions builtins call (`World::string_function`).
+enum class StringFunction : u8 { memchr, memcmp };
+
 // The ordinary implicit allocation signatures at global scope ([basic.stc.dynamic]).
 // The single-object and array operators share these shapes and the target's size_t.
 enum class AllocationFunction : u8 {
@@ -1188,8 +1191,33 @@ struct World {
     if (allocation_has_alignment(f)) params[count++] = types.enum_type(alignment_enum());
     QualType type = types.function(allocating ? void_pointer : void_type, std::span(params).first(count),
                                    false, LangLinkage::cxx, Cv::none, ast::RefQual::none, !allocating);
+    return implicit_function(entities.entity({.kind = EntityKind::function, .name = ins.names.intern(allocation_name(f, array)),
+                                              .type = type}),
+                             type);
+  }
+
+  // The C library function a builtin calls (docs/EXTENSIONS.md), declared at global scope with
+  // C language linkage, as `<string.h>` declares it, and not throwing, as Clang's builtin is:
+  // `void* memchr(const void*, int, size_t)`, `int memcmp(const void*, const void*, size_t)`.
+  ast::DeclSema string_function(StringFunction f) {
+    const QualType size = types.builtin(target.size_type);
+    const QualType void_type = types.builtin(Builtin::void_);
+    const QualType bytes = types.pointer(types.add_cv(void_type, Cv::const_));
+    const bool memchr = f == StringFunction::memchr;
+    const QualType params[] = {bytes, memchr ? types.builtin(Builtin::int_) : bytes, size};
+    const QualType type = types.function(memchr ? types.pointer(void_type) : types.builtin(Builtin::int_), params, false,
+                                         LangLinkage::c, Cv::none, ast::RefQual::none, true);
+    ast::DeclSema d = implicit_function(
+        entities.entity({.kind = EntityKind::function, .name = ins.names.intern(memchr ? "memchr" : "memcmp"), .type = type,
+                         .lang = LangLinkage::c}),
+        type);
+    d.has_written_noexcept = true;
+    return d;
+  }
+
+  ast::DeclSema implicit_function(EntityId entity, QualType type) {
     ast::DeclSema d{};
-    d.entity = entities.entity({.kind = EntityKind::function, .name = ins.names.intern(allocation_name(f, array)), .type = type});
+    d.entity = entity;
     d.type = type;
     d.kind = ast::DeclKind::function;
     d.linkage = ast::Linkage::external;
