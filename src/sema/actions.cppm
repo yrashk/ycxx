@@ -1821,6 +1821,8 @@ public:
     case is_const: unary_op = ast::DepOp::is_const; break;
     case is_volatile: unary_op = ast::DepOp::is_volatile; break;
     case is_array: unary_op = ast::DepOp::is_array; break;
+    case is_bounded_array: unary_op = ast::DepOp::is_bounded_array; break;
+    case is_unbounded_array: unary_op = ast::DepOp::is_unbounded_array; break;
     case is_pointer: unary_op = ast::DepOp::is_pointer; break;
     case is_function: unary_op = ast::DepOp::is_function; break;
     case is_enum: unary_op = ast::DepOp::is_enum; break;
@@ -1878,8 +1880,6 @@ public:
       break;
     case is_lvalue_reference: v = types().is_reference(c) && !types().rec(c).rvalue_ref; break;
     case is_rvalue_reference: v = types().is_reference(c) && types().rec(c).rvalue_ref; break;
-    case is_bounded_array: v = types().is_array(c) && types().rec(c).bound_value != ConstId::none; break;
-    case is_unbounded_array: v = types().is_array(c) && types().rec(c).bound_value == ConstId::none; break;
     case is_aggregate:
       if (types().is_class(c) && !cls()) return {NodeId::none, begin, end};
       v = this->is_aggregate(c);
