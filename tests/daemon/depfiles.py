@@ -103,6 +103,12 @@ def direct(world, scope):
         reports.append(report)
     assert reports[0] == reports[1] == reports[2]
 
+    dashed = Path('build/dashed-target.d')
+    for env in (world.cold, world.daemon):
+        image, report = build(env, dashed, '-MF', str(dashed), '-MT', '-v')
+        assert image == snapshots[0][0]
+        check_depfile(scope, report, LEAF, target='-v')
+
     previous = (scope / updated).stat().st_mtime_ns
     (scope / SOURCE).write_text(MAIN + '#error depfile_failure_control\n')
     command = [*args, '-MF', str(updated), '-MT', LITERAL_TARGET]
