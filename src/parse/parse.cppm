@@ -6046,6 +6046,9 @@ private:
       sem.kind = ast::DeclKind::variable;
       sem.storage = ast::Storage::static_;
       const sema::Sema::ImmediateReferenceScope references(s_, spec.is_constexpr);
+      const auto& owner = s_.world().entities.rec(c.entity);
+      const sema::Sema::StaticInitializerScope initializer(s_,
+          !s_.templated() && owner.templ == EntityId::none ? c.entity : EntityId::none, d.name);
       if (spec.is_constexpr) d.type = types.add_cv(d.type, sema::Cv::const_);
       // A placeholder type is deduced from the initializer in the class ([dcl.type.auto.deduct]),
       // read here, before the member is declared.
@@ -6067,8 +6070,7 @@ private:
       sem.entity = s_.world().entities.entity(
           {sema::EntityKind::variable, d.name, d.type, LangLinkage::cxx, ast::Linkage::external, {}, c.entity});
       sem.flags = flags;
-      // Lookup while an ordinary class is incomplete handles earlier direct members. Inherited
-      // names also need the incomplete-class base lookup in #967 before this path can use them.
+      // The written list forms here apply to base-free namespace-scope owners.
       const bool braced = ps_.is(Tk::l_brace) || (ps_.is(Tk::equal) && ps_.kind(1) == Tk::l_brace);
       bool list_initialization = false;
       if (braced && (spec.is_inline || spec.is_constexpr) && s_.template_scopes.empty() && !inst_ &&
@@ -6085,11 +6087,12 @@ private:
         if (!member_value_) p_->declared(sem, k_);
       };
       // [basic.scope.pdecl]: the member's name and type are visible in its initializer.
-      if (list_initialization) declare_member_name();
+      const bool visible_in_initializer = list_initialization || !s_.static_initializer_bases(c.entity).empty();
+      if (visible_in_initializer) declare_member_name();
       // A member whose initializer is in error is still declared, so its uses say nothing more.
       const u32 ordinal = u32(decls_.size());
       auto declare_member = [&](ConstId v, const Ex& e) {
-        if (!list_initialization) declare_member_name();
+        if (!visible_in_initializer) declare_member_name();
         declarators_.push_back(s_.node(ast::Declarator{ordinal, sema::Sema::at(e, d.begin), v}, d.begin, ps_.pos()));
         decls_.push_back(sem);
       };

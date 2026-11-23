@@ -4813,6 +4813,23 @@ public:
   // The function whose body is being analysed, none outside one: a friend of a class may name its
   // private members ([class.friend]/2).
   EntityId current_function = EntityId::none;
+  struct StaticInitializerScope {
+    Sema& sema;
+    EntityId saved;
+    NameId saved_name;
+    StaticInitializerScope(Sema& s, EntityId owner, NameId name)
+        : sema(s), saved(std::exchange(s.static_initializer_owner_, owner)),
+          saved_name(std::exchange(s.static_initializer_name_, name)) {}
+    ~StaticInitializerScope() {
+      sema.static_initializer_owner_ = saved;
+      sema.static_initializer_name_ = saved_name;
+    }
+  };
+
+  std::span<const BaseRec> static_initializer_bases(EntityId owner) {
+    if (owner == static_initializer_owner_) return q_->defining_base_records(owner);
+    return {};
+  }
   struct NamespaceLambda {
     EntityId owner, scope;
     NameId name;
@@ -4845,7 +4862,11 @@ public:
       if (r.kind != EntityKind::class_ && r.kind != EntityKind::class_template) break;
       if (k == c || befriended(k)) return true;
       int paths = 0;
-      if (a == ast::Access::protected_ && base_path(k, c, paths)) return true;
+      if (a == ast::Access::protected_) {
+        if (base_path(k, c, paths)) return true;
+        for (const BaseRec& base : static_initializer_bases(k))
+          if (base.cls == c || base_path(base.cls, c, paths)) return true;
+      }
     }
     return false;
   }
@@ -4867,15 +4888,18 @@ public:
     return true;
   }
 
-  // Member access through a class template's instantiated base graph ([class.access.base]). A
-  // static member can be shared through several subobjects, unlike a base conversion.
+  // Member access through a class's base graph ([class.access.base]). The static initializer
+  // can use the defining bases before the class is complete. A static member can be shared
+  // through several subobjects, unlike a base conversion.
   bool accessible_naming_base(EntityId naming, EntityId owner, bool check_all_bases = false) {
     if (naming == owner || naming == EntityId::none ||
-        (!check_all_bases && w_->entities.rec(naming).templ == EntityId::none)) return true;
+        (!check_all_bases && w_->entities.rec(naming).templ == EntityId::none &&
+         static_initializer_bases(naming).empty())) return true;
     auto path = [&](this auto&& next, EntityId from) -> bool {
       if (from == owner) return true;
       const ClassRec* rec = class_rec(from);
-      return rec && std::ranges::any_of(rec->bases, [&](const BaseRec& base) {
+      const auto bases = rec ? std::span<const BaseRec>(rec->bases) : static_initializer_bases(from);
+      return std::ranges::any_of(bases, [&](const BaseRec& base) {
         return accessible(from, base.access) && next(base.cls);
       });
     };
@@ -4935,8 +4959,11 @@ public:
     const ClassRec* cr = class_rec(c);
     if (!cr) return std::nullopt;
     if (auto member = direct_member(c, *cr, name)) return member;
+    return find_base_member(cr->bases, name, unqualified);
+  }
+  std::optional<Found> find_base_member(std::span<const BaseRec> bases, NameId name, bool unqualified) {
     std::optional<Found> r;
-    for (const BaseRec& b : cr->bases) {
+    for (const BaseRec& b : bases) {
       // A dependent direct base is outside unqualified lookup in the template, including
       // during member analysis with concrete bindings ([temp.dep]).
       if (unqualified && b.dependent_in_pattern) continue;
@@ -5034,8 +5061,8 @@ public:
   // or a qualified name `C::name`: none if `c` has no such member.
   std::optional<Ex> class_member(EntityId c, NameId name, u32 begin, u32 end, u32 name_at,
                                  std::optional<u32> address_at = {}, bool unqualified = false,
-                                 bool check_all_bases = false) {
-    auto f = find_member(c, name, unqualified);
+                                 bool check_all_bases = false, std::span<const BaseRec> defining_bases = {}) {
+    auto f = defining_bases.empty() ? find_member(c, name, unqualified) : find_base_member(defining_bases, name, unqualified);
     if (!f) return std::nullopt;
     Ex fail{NodeId::none, begin, end};
     if (f->ambiguous) {
@@ -6573,6 +6600,18 @@ public:
     if (current_class != EntityId::none) {
       if (auto r = class_member(current_class, name, begin, end, begin, std::nullopt, /*unqualified=*/true)) return *r;
       if (!class_rec(current_class)) {
+        const auto bases = static_initializer_bases(current_class);
+        if (!bases.empty()) {
+          // This declaration's earlier declarators, and the current one once typed, precede bases.
+          for (const OwnDecl& d : own | std::views::reverse)
+            if (d.name == name && d.sema.kind == ast::DeclKind::variable && d.sema.storage == ast::Storage::static_ &&
+                w_->entities.rec(d.sema.entity).scope == current_class)
+              return static_member(current_class, d.sema.entity, d.sema.type, begin, end);
+          if (name == static_initializer_name_) {
+            diag(begin, Diag::auto_used_in_initializer, name);
+            return {NodeId::none, begin, end};
+          }
+        }
         std::vector<ast::DeclSema> functions;
         if (auto m = q_->earlier_member(name, /*type_only=*/false, nested_enum_members_begin ? &functions : nullptr)) {
           if (m->kind == ast::DeclKind::enumerator) return enumerator(m->entity, m->type, begin, end);
@@ -6591,6 +6630,10 @@ public:
             return {NodeId::none, begin, end};
           }
           return static_member(current_class, m->entity, m->type, begin, end);
+        }
+        if (!bases.empty()) {
+          if (auto m = class_member(current_class, name, begin, end, begin, {}, /*unqualified=*/true,
+                                    /*check_all_bases=*/true, bases)) return *m;
         }
         // A nondependent base participates in lookup while a class template is being defined.
         if (w_->entities.rec(current_class).templ != EntityId::none)
@@ -10214,6 +10257,8 @@ private:
   ast::ItemId item_;
   u32 loc_base_;
   bool in_requires_body_ = false;
+  EntityId static_initializer_owner_ = EntityId::none;
+  NameId static_initializer_name_{};
   std::vector<ast::LocalRec> locals_;
   std::vector<std::pair<EntityId, NameId>> statics_;  // the static locals so far: (function, name)
   // Packs ([temp.variadic]): the expansions being instantiated, innermost last, each with the

@@ -1467,6 +1467,9 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
 - A qualified value expression in an incomplete current class can see earlier static data
   members and injected unscoped enumerators. Within a named enum's own list, qualifying an
   earlier enumerator uses its in-list type. [#857](https://github.com/yrashk/ycxx/issues/857)
+- An ordinary class's in-class static data initializer searches its own declarations and
+  bases before the enclosing namespace. The base lookup retains ambiguity and access checks,
+  including while the derived class is incomplete. [#967](https://github.com/yrashk/ycxx/issues/967)
 - Nonempty standalone unnamed unscoped enumeration definitions at namespace scope support fixed
   and inferred underlying types. An `extern "C"` block leaves the enumerators in the enclosing
   namespace. The enum's linkage identity uses its namespace, canonical underlying type and first

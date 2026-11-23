@@ -290,6 +290,9 @@ values. [#859](https://github.com/yrashk/ycxx/issues/859)
 
 Qualified value lookup can read earlier static data members and injected unscoped enumerators
 while their current class is incomplete. [#857](https://github.com/yrashk/ycxx/issues/857)
+An ordinary class's in-class static data initializer can use an unqualified inherited static
+member. Class and base declarations take precedence over names in an enclosing namespace.
+[#967](https://github.com/yrashk/ycxx/issues/967)
 
 Both targets support named nested enum definitions followed by ordinary fields in the same
 member declaration, including scoped enum field initializers. [#500](https://github.com/yrashk/ycxx/issues/500)
