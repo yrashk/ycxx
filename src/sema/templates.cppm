@@ -429,9 +429,9 @@ public:
     case ast::DepOp::is_scoped_enum:
       if (types().is_enum(type)) {
         const EntityId e = types().enum_of(type);
-        const EnumRec* record = defining_enum ? defining_enum(e) : nullptr;
-        if (!record) record = classes_->find_enum(e);
-        result = record && record->scoped;
+        const auto scoped = defining_enum_is_scoped ? defining_enum_is_scoped(e) : std::nullopt;
+        if (scoped) result = *scoped;
+        else if (const EnumRec* record = classes_->find_enum(e)) result = record->scoped;
       }
       break;
     case ast::DepOp::is_member_pointer: result = types().is_member_pointer(type); break;
@@ -2089,8 +2089,8 @@ public:
   // The type member of a class with a name, as lookup at a point finds it; set by whoever asks at
   // a point, which `classes_` alone does not know.
   std::function<std::optional<QualType>(EntityId, NameId)> member_type;
-  // An enumeration whose enumerator list is still being read, before its record is published.
-  std::function<const EnumRec*(EntityId)> defining_enum;
+  // The scopedness of an enumeration whose record has yet to be published.
+  std::function<std::optional<bool>(EntityId)> defining_enum_is_scoped;
   // The declaration of template `templ` with its head, as lookup at a point finds it.
   std::function<std::optional<ast::DeclSema>(EntityId)> template_decl;
   std::function<std::optional<ConstId>(EntityId)> variable_constant;

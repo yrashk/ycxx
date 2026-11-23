@@ -817,7 +817,10 @@ public:
   // Template operations at the end of the unit, whose templates' declarations it knows.
   sema::Templates templates() {
     sema::Templates t(*w_, classes_);
-    t.defining_enum = [this](EntityId e) { return defining_enum(e); };
+    t.defining_enum_is_scoped = [this](EntityId e) -> std::optional<bool> {
+      if (const auto* record = defining_enum(e)) return record->scoped;
+      return std::nullopt;
+    };
     t.template_decl = [this](EntityId e) { return declaration(e, end()); };
     t.variable_constant = [this](EntityId spec) { return constant_value(spec, end()); };
     t.variable_global = [this](EntityId spec) { return global(spec, end()); };
@@ -2632,6 +2635,7 @@ public:
   bool is_complete(EntityId c) override { return p_->is_complete(c, p_->end(), true, true); }
   bool may_have_virtual_layouts() override { return p_->may_have_virtual_layouts(); }
   bool is_complete_at_source(EntityId c) override { return at_.is_complete_at_source(c); }
+  std::optional<bool> defining_enum_is_scoped(EntityId e) override { return at_.defining_enum_is_scoped(e); }
   // A type trait whose operands were dependent where the template defines it is answered at the
   // point of instantiation, the end ([temp.point]); a concrete one keeps its definition's answer.
   std::optional<bool> type_trait_at_demand(EntityId c, engine::Loc loc) override {

@@ -155,6 +155,11 @@ public:
   // Inside the enumerator list of an enumeration this unit is defining: its record so far, which
   // is published only after the list (#156).
   virtual const EnumRec* defining_enum(EntityId) { return nullptr; }
+  // Scopedness is fixed even when the enum's enumerator list is still open.
+  virtual std::optional<bool> defining_enum_is_scoped(EntityId e) {
+    if (const EnumRec* record = defining_enum(e)) return record->scoped;
+    return std::nullopt;
+  }
   // This unit's class and enumeration records (#115).
   virtual const Classes& classes() = 0;
   // The constant a variable usable in constant expressions holds ([expr.const]), if it is known.
@@ -3597,7 +3602,7 @@ public:
 
   Templates templates() {
     Templates t(*w_, classes());
-    t.defining_enum = [this](EntityId e) { return q_->defining_enum(e); };
+    t.defining_enum_is_scoped = [this](EntityId e) { return q_->defining_enum_is_scoped(e); };
     t.member_type = [this](EntityId c, NameId n) { return member_type(c, n); };
     t.member_constant = [this](QualType qualifier, NameId name) {
       return qualified_member_constant(qualifier, name, 0);
