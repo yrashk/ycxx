@@ -753,14 +753,17 @@ void depth_limit_once() {
   check(grouped == whole_unit, "grouped and whole analysis say the same messages");
   pl::Session s;
   check(messages(s, first + second) == grouped, "a session's first build equals cold");
-  check(messages(s, first + second + "int third = 3;\n") == cold_messages(first + second + "int third = 3;\n") &&
-            depth(messages(s, first + second + "int third = 3;\n")) == 1,
+  // Both families' groups reused: the first reports it, as cold.
+  auto before = s.group_counts();
+  const auto third = messages(s, first + second + "int third = 3;\n");
+  auto after = s.group_counts();
+  check(after.first - before.first == 1 && after.second - before.second == 4,
+        std::format("an unrelated edit analyses its group alone ({} analysed, {} reused)", after.first - before.first,
+                    after.second - before.second));
+  check(depth(third) == 1 && third == cold_messages(first + second + "int third = 3;\n"),
         "an unrelated edit: still once, as cold");
-  const auto before = s.group_counts();
   const auto only_second = messages(s, fixed + second);
-  check(s.group_counts().second - before.second == 2, "the first family fixed: the second's groups are reused");
-  check(depth(only_second) == 1 && only_second == cold_messages(fixed + second),
-        "the first family fixed: the second's reused group reports it, as cold");
+  check(depth(only_second) == 1 && only_second == cold_messages(fixed + second), "the first family fixed: the second's, as cold");
   check(depth(messages(s, first + second)) == 1, "the first family back: once again");
   // A function template's body reaches the limit only in the END worklist, which the whole unit
   // runs after every item: a later class template's, reached while its item is analysed, is the
