@@ -4839,8 +4839,8 @@ public:
       skip_statement();
       return {NodeId::none, begin, pos()};
     case Tk::kw_try: return try_statement();
+    case Tk::kw_asm: return asm_declaration();
     case Tk::kw_co_return:
-    case Tk::kw_asm:
     case Tk::kw_contract_assert:
     case Tk::kw_template:
       s_->diag(begin, Diag::not_supported, kind());
@@ -5158,6 +5158,35 @@ public:
   void skip_rest() {
     skip_to_semi();
     if (accept(Tk::r_paren)) skip_to_semi();
+  }
+
+  // [dcl.asm]: an ordinary string and a terminating semicolon. Accept the GNU
+  // volatile qualifier at statement position. Native lowering checks the instruction.
+  Ex asm_declaration() {
+    const u32 begin = pos();
+    bump();  // asm
+    accept(Tk::kw_volatile);
+    if (!expect(Tk::l_paren)) {
+      skip_to_semi();
+      return {NodeId::none, begin, pos()};
+    }
+    if (!is(Tk::string_lit)) {
+      s_->diag(pos(), Diag::expected_string_literal);
+      skip_rest();
+      return {NodeId::none, begin, pos()};
+    }
+    if (literal().encoding != lex::Encoding::ordinary || literal().ud_suffix != lex::no_name) {
+      s_->diag(pos(), Diag::unevaluated_string);
+      skip_rest();
+      return {NodeId::none, begin, pos()};
+    }
+    const auto text = s_->as<ast::Literal>(primary_expression());
+    if (!expect(Tk::r_paren) || !expect(Tk::semi)) {
+      skip_rest();
+      return {NodeId::none, begin, pos()};
+    }
+    if (!text) return {NodeId::none, begin, pos()};
+    return s_->node(ast::Asm{text->value}, begin, pos());
   }
 
   // `static_assert ( constant-expression , string-literal opt ) ;` ([dcl.pre]). The condition,

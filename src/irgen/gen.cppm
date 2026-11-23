@@ -683,6 +683,9 @@ class Gen {
       if_(a);
     } else if (is<ast::IfConsteval>(a)) {
       if_consteval(a);
+    } else if (is<ast::Asm>(a)) {
+      const std::uint64_t text[] = {word(get<ast::Asm>(a).text)};
+      stateful(ir::Op::asm_, {}, {}, text);
     } else if (is<ast::StaticAssert>(a)) {
       // Checked when it was analysed; it has no effect ([dcl.pre]).
     } else if (is<ast::While>(a)) {

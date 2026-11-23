@@ -468,6 +468,16 @@ class QueryLayout {
     if (v.string && !std::ranges::contains(strings_, *v.string, &StringUse::object)) strings_.push_back({*v.string, *v.base});
     return {*v.base, v.bits};
   }
+  // An asm template is literal data, without a native string object's address.
+  bool ordinary_string_is(ConstId c, std::span<const std::uint32_t> units) const {
+    const ast::Interners& in = *universe().in;
+    if (!in.values.is<ast::VString>(c)) return false;
+    const auto text = in.values.get<ast::VString>(c);
+    const auto type = in.types.canon(text.type);
+    if (!in.types.is<ast::TArray>(type) ||
+        ast::builtin_of(in, in.types.get<ast::TArray>(type).elem) != ast::Builtin::char_) return false;
+    return std::ranges::equal(in.seqs.elements(text.units), units);
+  }
   std::span<const StringUse> strings() const { return strings_; }
 
  private:

@@ -131,6 +131,10 @@ linkage name in ycxx, GCC and Clang. [#64](https://github.com/yrashk/ycxx/issues
 Static links of explicit x86-64 ELF objects keep the first COMDAT group for each signature, including
 its code, data and relocations. [#422](https://github.com/yrashk/ycxx/issues/422)
 
+On Linux x86-64, statement-position `asm("int3");` and `asm volatile("int3");` emit
+a breakpoint that can resume at the next instruction.
+[#950](https://github.com/yrashk/ycxx/issues/950)
+
 **Package Linux objects into a static library.** `ycxx archive -o libexample.a example.o`
 creates or replaces a deterministic indexed GNU archive from supported x86-64 ELF objects.
 Static links accept these archives and compatible archives from system `ar`. Place an archive

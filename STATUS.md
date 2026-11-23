@@ -2344,6 +2344,17 @@ executing IR block and requires no external runtime symbol. Linux x86-64 emits U
 and Darwin arm64 emits BRK. The builtin registry also exposes it through
 `__has_builtin`.
 
+## Basic Linux asm statements (#950)
+
+Statement-position `asm("int3");` and GNU `asm volatile("int3");` emit one INT3
+instruction on Linux x86-64. Execution may continue after the trap is handled.
+The parser accepts ordinary decoded strings in discarded `if constexpr` arms.
+Native lowering diagnoses a selected instruction outside the profile at its asm
+statement. Constant evaluation rejects an asm it executes. Other instructions,
+operands, and targets are tracked in [#190](https://github.com/yrashk/ycxx/issues/190)
+and [#659](https://github.com/yrashk/ycxx/issues/659).
+[Design](docs/design/linux-basic-asm.md) · [#950](https://github.com/yrashk/ycxx/issues/950)
+
 ## Templates, ζ step 6: concepts and `if constexpr` (#88, 2026-11-18)
 
 Fable decided the representation (ast.md §6.6); the Opus session wrote the code.
