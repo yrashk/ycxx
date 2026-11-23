@@ -156,6 +156,17 @@ with tempfile.TemporaryDirectory() as directory:
         invoke([*target, "-o", rejected, root / "caller.o", root / "changed.o"], "no matching guarantee")
         assert not rejected.exists()
 
+        # PARITY: #659 for explicit weak function definitions on Darwin.
+        if target == linux:
+            weak_provider = write("weak_provider.cpp", provider_source.replace(
+                "[[=fx::contract<One>{}]]", "[[gnu::weak]] [[=fx::contract<One>{}]]"))
+            weak_object = root / "weak_provider.o"
+            invoke([*target, "-c", weak_provider, "-o", weak_object])
+            wrong_grade = root / "changed.o"
+            for providers in ((weak_object,), (weak_object, wrong_grade), (wrong_grade, weak_object)):
+                invoke([*target, "-o", rejected, root / "caller.o", *providers], "requires one strong definition")
+                assert not rejected.exists()
+
         # A resident link must recheck the proof when a provider is rebuilt in place.
         with tempfile.TemporaryDirectory(prefix="yg-link-", dir="/tmp") as sockets:
             link_env = dict(daemon_env, YCXX_RUNTIME_DIR=sockets)
