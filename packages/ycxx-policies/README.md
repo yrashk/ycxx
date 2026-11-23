@@ -344,6 +344,10 @@ sources alongside objects.
 An effect contract emitted for an externally bound function needs a stable tag identity.
 Declare shared tags as named types in a common header. A specialization used as a tag
 also needs stable template arguments, including the entities named by address arguments.
+For example, `Audit<&shared_quota>` can identify the same effect in the caller and provider.
+A native adapter can call a member such as `Profile<&shared_quota>::read()`.
+[Object-address template members #1066](https://github.com/yrashk/ycxx/pull/1066)
+
 Translation-unit-local tags are usable in local contracts and syntax-only checks. Rebuild
 older checked effect objects with `-fcheck-policies` so each carries the tag identity
 validation required by the current checked linker. [#1043](https://github.com/yrashk/ycxx/issues/1043)

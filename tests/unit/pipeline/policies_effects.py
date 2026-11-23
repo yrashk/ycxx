@@ -448,6 +448,19 @@ with tempfile.TemporaryDirectory() as directory:
         #endif
     """
     named_effect = write("named_effect_identity.cpp", effect_header + 'struct Audit {};\n' + grade + effect_roles)
+    object_effect = write("external_object_effect_identity.cpp", effect_header + """\
+        inline int key = 1;
+        inline int other_key = 2;
+        template<int*> struct TagFor {};
+        template<int* Key> struct Profile {
+          static int read(int n) noexcept { return *Key + n; }
+        };
+        #ifdef CHANGE_KEY
+        using Audit = TagFor<&other_key>;
+        #else
+        using Audit = TagFor<&key>;
+        #endif
+    """ + grade + effect_roles.replace("return n + 1;", "return Profile<&key>::read(n);"))
     named_effects = [
         named_effect,
         write("external_function_effect_identity.cpp", effect_header + """\
@@ -455,11 +468,7 @@ with tempfile.TemporaryDirectory() as directory:
             template<void (*)() noexcept> struct TagFor {};
             using Audit = TagFor<&key>;
         """ + grade + effect_roles),
-        write("external_object_effect_identity.cpp", effect_header + """\
-            inline int key = 1;
-            template<int*> struct TagFor {};
-            using Audit = TagFor<&key>;
-        """ + grade + effect_roles),
+        object_effect,
     ]
     unstable_providers = [
         write("local_tag_provider.cpp", effect_header + local_tag + grade + effect_roles),
@@ -518,6 +527,12 @@ with tempfile.TemporaryDirectory() as directory:
                 denied_exe = root / f"denied-effect-{suffix}"
                 invoke([*target, caller_obj, legacy, "-o", denied_exe],
                        error="legacy checked effect metadata requires rebuilding")
+                assert not denied_exe.exists()
+            elif source == object_effect:
+                changed_obj = root / f"changed-effect-key-{suffix}.o"
+                denied_exe = root / f"denied-effect-key-{suffix}"
+                invoke([*target, "-DCHANGE_KEY", "-c", source, "-o", changed_obj])
+                invoke([*target, caller_obj, changed_obj, "-o", denied_exe], error="no matching guarantee")
                 assert not denied_exe.exists()
 
         for source in unstable_providers:
