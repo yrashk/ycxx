@@ -26,14 +26,14 @@ template <bool Enabled> int choose() {
 TEMPLATE_TRY = TEMPLATE.replace('throw 17;', 'try { return 2; } catch (...) { return 3; }')
 LAMBDA = '''\
 int probe() {
-  auto choose = []<bool Enabled>() -> int {
-    if constexpr (Enabled) {
+  auto choose = [](auto) -> int {
+    if constexpr (@SELECT@) {
       throw 17;
     } else {
       return 17;
     }
   };
-  return choose.template operator()<@SELECT@>();
+  return choose(0);
 }
 '''
 REJECTED = {
