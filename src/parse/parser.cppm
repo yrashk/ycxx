@@ -1887,7 +1887,12 @@ public:
       const u32 after_group = past_parentheses(after_type);
       if (k == Tk::kw_typename) {
         if (kind(after_group) == Tk::period || kind(after_group) == Tk::arrow) return false;
-        if (first_operand == Tk::identifier && !params_ahead(after_type) &&
+        // Parentheses around an abstract function declarator can enclose its whole parameter list.
+        u32 parameter_open = after_type;
+        if (const u32 wrappers = operand - after_type - 1; wrappers != 0 &&
+            past_parentheses(operand - 1) + wrappers == after_group)
+          parameter_open = operand - 1;
+        if (first_operand == Tk::identifier && !params_ahead(parameter_open) &&
             !grouped_declarator_ahead(after_type, after_group - 1, statement))
           return false;
       }
