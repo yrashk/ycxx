@@ -20,13 +20,21 @@ import :clipboard;
 
 export namespace ycxx::trace {
 
-// A live source of events (`ycxx ctl trace`): when `fd` is readable, `pump` reads from it into the
-// tree; false once the source has ended.
+// A live source of events (`ycxx ctl trace`, `--watch`, a build being traced, #939): when `fd` is
+// readable, `pump` reads from it into the tree; `tick`, on every frame while the source runs,
+// takes what came without a descriptor to wake for and moves running cells' times to now. Either
+// is false once the source has ended.
 struct Feed {
   int fd = -1;
   std::function<bool()> pump;
   std::string source;  // what it watches, for the status line (`daemon of /path/to/project`)
+  std::function<bool()> tick = {};
+  std::string ended = "the daemon has gone";  // the status line's words once it has ended
+  bool newest_first = true;                   // the latest request on top
 };
+
+// Whether there is a terminal to browse on (the controlling one).
+bool has_terminal();
 
 // Whether `fd` is a terminal that may get colors: a TTY, and `NO_COLOR` not set (no-color.org).
 bool colors_for(int fd) {
@@ -366,39 +374,83 @@ bool run_clipboard(const std::string& command, std::string_view text) {
 
 }  // namespace
 
+bool has_terminal() {
+  const int fd = ::open("/dev/tty", O_RDWR | O_CLOEXEC);
+  if (fd < 0) return false;
+  termios t{};
+  const bool ok = ::tcgetattr(fd, &t) == 0;
+  ::close(fd);
+  return ok;
+}
+
 bool browse(Tree& tree, Feed* feed) {
   Terminal term;
   if (!term) return false;
   Browser b(tree);
-  if (feed) b.set_live(feed->source);
-  const auto start = std::chrono::steady_clock::now();
+  if (feed) b.set_live(feed->source, feed->newest_first);
+  using clock = std::chrono::steady_clock;
+  const auto start = clock::now();
   auto next_tick = start;  // while a drag is held past an edge: ticks on time, whatever else wakes us
+  // A live source (#939) is looked at, and the screen drawn, at most every `gap`: 30 times a second,
+  // or less often when drawing takes long (a frame of a large tree), so drawing never takes more
+  // than a third of a core from the build.
+  constexpr std::chrono::milliseconds frame{33};
+  std::chrono::nanoseconds gap = frame;
+  auto next_frame = start;
+  bool dirty = true;
+  std::pair<std::size_t, std::size_t> size{0, 0};
+  const auto live_step = [&](const std::function<bool()>& f) {
+    const std::uint64_t before = tree.version();
+    const bool more = b.pump(f);
+    if (!more) {
+      b.end_live(feed->ended);
+      feed = nullptr;
+    }
+    // Running cells' times move on every frame.
+    if (tree.version() != before || tree.running() > 0 || !more) dirty = true;
+  };
   while (true) {
-    const auto [rows, cols] = term.size();
-    b.resize(rows, cols);
-    term.draw(b.frame());
+    if (const auto now_size = term.size(); now_size != size) size = now_size, dirty = true;
+    const auto now = clock::now();
+    if (feed && feed->tick && now >= next_frame) {
+      live_step(feed->tick);
+      next_frame = now + gap;
+    }
+    if (dirty) {
+      const auto t0 = clock::now();
+      b.resize(size.first, size.second);
+      term.draw(b.frame());
+      dirty = false;
+      gap = std::max<std::chrono::nanoseconds>(frame, 2 * (clock::now() - t0));
+    }
     std::optional<std::chrono::milliseconds> wait;
     if (b.ticking()) {
-      const auto now = std::chrono::steady_clock::now();
-      if (now >= next_tick) {
+      const auto t = clock::now();
+      if (t >= next_tick) {
         b.tick();
-        next_tick = now + Browser::tick_every;
+        next_tick = t + Browser::tick_every;
+        dirty = true;
         continue;
       }
-      wait = std::chrono::duration_cast<std::chrono::milliseconds>(next_tick - now) + std::chrono::milliseconds(1);
+      wait = std::chrono::duration_cast<std::chrono::milliseconds>(next_tick - t) + std::chrono::milliseconds(1);
     } else {
-      next_tick = std::chrono::steady_clock::now() + Browser::tick_every;
+      next_tick = clock::now() + Browser::tick_every;
     }
-    switch (term.wait(feed ? feed->fd : -1, wait)) {
-      case Terminal::Wake::resize: continue;
+    if (feed && feed->tick) {
+      const auto until = std::chrono::duration_cast<std::chrono::milliseconds>(next_frame - clock::now()) + std::chrono::milliseconds(1);
+      wait = std::max(std::chrono::milliseconds(1), wait ? std::min(*wait, until) : until);
+    }
+    switch (term.wait(feed && feed->pump ? feed->fd : -1, wait)) {
+      case Terminal::Wake::resize: dirty = true; continue;
       case Terminal::Wake::tick: continue;
       case Terminal::Wake::feed:
-        if (!b.pump(feed->pump)) feed = nullptr;
+        live_step(feed->pump);
         continue;
       case Terminal::Wake::input: break;
     }
-    const auto now = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start);
-    const Action a = b.handle(parse_input(term.read_input()), now);
+    dirty = true;
+    const auto at = std::chrono::duration_cast<std::chrono::milliseconds>(clock::now() - start);
+    const Action a = b.handle(parse_input(term.read_input()), at);
     if (a.quit) return true;
     if (a.copy) {
       term.write(osc52(*a.copy, std::getenv("TMUX") != nullptr));
