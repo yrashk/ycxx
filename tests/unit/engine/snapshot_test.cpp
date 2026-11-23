@@ -94,8 +94,10 @@ void paging(const std::string& dir) {
 }
 
 void run() {
-  std::string dir = (std::filesystem::temp_directory_path() / "ycxx-snapshot.XXXXXX").native_encoded_string();
-  if (!mkdtemp(dir.data())) throw std::runtime_error("cannot create snapshot test directory");
+  const auto directory = std::filesystem::temp_directory_path() /
+                         std::format("ycxx-snapshot-{}", std::random_device{}());
+  if (!std::filesystem::create_directory(directory)) throw std::runtime_error("snapshot test directory already exists");
+  const auto dir = directory.native_encoded_string();
   const std::string path = dir + "/cache";
   round_trip<Length>(path, false);
   round_trip<Length>(path, true);
