@@ -256,6 +256,8 @@ public:
         ++next;
       } else if (kind(next) == Tk::l_paren && params_ahead(next, statement)) {
         next = past_parentheses(next);
+        while (kind(next) == Tk::kw_const || kind(next) == Tk::kw_volatile) ++next;
+        if (kind(next) == Tk::amp || kind(next) == Tk::ampamp) ++next;
         if (kind(next) == Tk::kw_noexcept) {
           ++next;
           if (kind(next) == Tk::l_paren) next = past_parentheses(next);
@@ -287,7 +289,7 @@ public:
 
   // In a statement a second parenthesized group can be a direct initializer.
   // Otherwise it must be a parameter clause followed by declarator syntax.
-  bool grouped_auto_statement_suffix(u32 open) {
+  bool grouped_statement_suffix(u32 open) {
     const u32 after = past_parentheses(open);
     switch (kind(after)) {
     case Tk::semi: case Tk::comma:
@@ -335,7 +337,7 @@ public:
       if (is(Tk::kw_auto)) {
         if (!grouped_declarator_ahead(1, j, statement)) return false;
         if (statement && after == Tk::l_paren && kind(past_parentheses(j + 1)) != Tk::r_paren)
-          return grouped_auto_statement_suffix(j + 1);
+          return grouped_statement_suffix(j + 1);
       }
       return after == Tk::semi || after == Tk::equal || after == Tk::comma || after == Tk::l_square ||
              after == Tk::l_paren || after == Tk::l_brace;
@@ -352,8 +354,10 @@ public:
           if (!grouped_declarator_ahead(open, after - 1, statement)) return false;
           switch (kind(after)) {
           case Tk::semi: case Tk::equal: case Tk::comma: case Tk::l_square:
-          case Tk::l_paren: case Tk::l_brace: case Tk::colon:
+          case Tk::l_brace: case Tk::colon:
             return true;
+          case Tk::l_paren:
+            return grouped_statement_suffix(after);
           default:
             return false;
           }
@@ -1764,8 +1768,13 @@ public:
     u32 next = 0;
     bool check_qualifier = checked && substituting_partial_arguments;
     const auto diags = s_->diag_count();
+    std::optional<u32> ambiguous_namespace;
     auto s = nested_name(start, next, /*member_pointer=*/false, check_qualifier, QualifierLookup::type, checked,
-                         nullptr, failed_qualifier);
+                         nullptr, failed_qualifier, nullptr, conversion ? &ambiguous_namespace : nullptr);
+    if (ambiguous_namespace) {
+      s_->diag(pos() + *ambiguous_namespace, Diag::ambiguous_name, name_of(tok(*ambiguous_namespace)));
+      return std::nullopt;
+    }
     if (checked && s_->has_error_since(diags)) return std::nullopt;
     if (!s || kind(next) != Tk::identifier || kind(next + 1) == Tk::coloncolon) return std::nullopt;
     // `N::X<args>`: a class template specialization named in a namespace ([temp.names]).

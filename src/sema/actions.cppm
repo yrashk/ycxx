@@ -2131,7 +2131,11 @@ public:
     });
     if (found.empty()) return std::nullopt;
     const auto& decl = found.front();
-    if (std::ranges::any_of(found, [&](const ast::DeclSema& d) { return d.entity != decl.entity; })) {
+    if (std::ranges::any_of(found, [&](const ast::DeclSema& d) {
+          if (d.entity == decl.entity) return false;
+          return !is_type(d.kind) || !is_type(decl.kind) ||
+                 types().canonical(d.type) != types().canonical(decl.type);
+        })) {
       diag(at, Diag::ambiguous_name, name);
       return std::nullopt;
     }
