@@ -121,9 +121,9 @@ inline constexpr std::array type_traits{
     TypeTraitInfo{.name = "__is_trivially_destructible", .trait = TypeTrait::is_trivially_destructible, .arity = 1,
                   .transforms = false, .advertised = false, .replay_dependent = true},
     TypeTraitInfo{.name = "__reference_converts_from_temporary", .trait = TypeTrait::reference_converts_from_temporary,
-                  .arity = 2, .transforms = false, .advertised = false},
+                  .arity = 2, .transforms = false, .advertised = false, .replay_dependent = true},
     TypeTraitInfo{.name = "__reference_constructs_from_temporary", .trait = TypeTrait::reference_constructs_from_temporary,
-                  .arity = 2, .transforms = false, .advertised = false},
+                  .arity = 2, .transforms = false, .advertised = false, .replay_dependent = true},
 };
 
 constexpr const TypeTraitInfo* type_trait(std::string_view name) {

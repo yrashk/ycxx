@@ -378,7 +378,9 @@ public:
         op == ast::DepOp::is_trivially_constructible ||
         (operands.size() == 2 && (op == ast::DepOp::is_assignable || op == ast::DepOp::is_nothrow_assignable ||
                                   op == ast::DepOp::is_trivially_assignable || op == ast::DepOp::is_convertible ||
-                                  op == ast::DepOp::is_nothrow_convertible || op == ast::DepOp::is_base_of)))
+                                  op == ast::DepOp::is_nothrow_convertible || op == ast::DepOp::is_base_of ||
+                                  op == ast::DepOp::reference_constructs_from_temporary ||
+                                  op == ast::DepOp::reference_converts_from_temporary)))
   {
     if (!std::ranges::any_of(operands, [&](const TemplateArg& a) { return types().is_dependent(a.type); }) ||
         !std::ranges::all_of(operands, [&](const TemplateArg& a) { return structural_operand(a); })) return std::nullopt;
@@ -397,7 +399,8 @@ public:
         op != ast::DepOp::is_constructible && op != ast::DepOp::is_nothrow_constructible &&
         op != ast::DepOp::is_trivially_constructible && op != ast::DepOp::is_assignable &&
         op != ast::DepOp::is_nothrow_assignable && op != ast::DepOp::is_trivially_assignable &&
-        op != ast::DepOp::is_convertible && op != ast::DepOp::is_nothrow_convertible && op != ast::DepOp::is_base_of)
+        op != ast::DepOp::is_convertible && op != ast::DepOp::is_nothrow_convertible && op != ast::DepOp::is_base_of &&
+        op != ast::DepOp::reference_constructs_from_temporary && op != ast::DepOp::reference_converts_from_temporary)
   {
     if (types().is_dependent(type)) {
       if (!structural_operand(type)) return std::nullopt;
@@ -474,6 +477,8 @@ public:
     case ast::DepOp::is_convertible:
     case ast::DepOp::is_nothrow_convertible:
     case ast::DepOp::is_base_of:
+    case ast::DepOp::reference_constructs_from_temporary:
+    case ast::DepOp::reference_converts_from_temporary:
     case ast::DepOp::logical_not:
     case ast::DepOp::logical_and: std::unreachable();
     }
@@ -611,6 +616,8 @@ public:
       case ast::DepOp::is_trivially_assignable:
       case ast::DepOp::is_convertible:
       case ast::DepOp::is_nothrow_convertible:
+      case ast::DepOp::reference_constructs_from_temporary:
+      case ast::DepOp::reference_converts_from_temporary:
       case ast::DepOp::is_base_of: {
         auto operands = substitute_args(ins().seqs.elements(op.operands), b);
         return operands ? replayed_type_trait_pattern(op.op, *operands) : std::nullopt;
