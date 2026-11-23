@@ -1250,10 +1250,11 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
     if (entity.linkage != ast::Linkage::external || entity.templ != EntityId::none ||
         ins.seqs.size(f.body.closures) != 0 || !program.asm_label(f.entity).empty()) return;
     if (entity.kind == sema::EntityKind::destructor) {
-      // The written in-class and implicit definitions are inline ([dcl.inline], [class.dtor]).
-      // This binding requires a nonvirtual entry and the class's nonthrowing destructor spec.
+      // A specialization gets its inline status from its own declarations ([temp.expl.spec]).
+      // All eligible destructor entries are nonvirtual with a nonthrowing specification.
+      const bool specialized = (f.decl.flags & sema::decl_flag::specialization) != 0;
       const auto* owner = classes.find(entity.scope);
-      if (!in_class || f.decl.is_virtual || !owner || !owner->destructor_noexcept.value_or(false) ||
+      if ((!in_class && !specialized) || f.decl.is_virtual || !owner || !owner->destructor_noexcept.value_or(false) ||
           internal_class(entity.scope) ||
           names_unnamed_namespace(program, entity.scope, /*include_value_types=*/true)) return;
     } else if (entity.kind != sema::EntityKind::function) {

@@ -217,9 +217,10 @@ visibility across declarations.
 · [#124](https://github.com/yrashk/ycxx/issues/124) · [#936](https://github.com/yrashk/ycxx/issues/936)
 
 Both targets link eligible nonthrowing, nonvirtual in-class and implicit destructors across
-separate objects, including destructors of class-template specializations. Specializations naming
-translation-unit-local types retain local destructor symbols.
-[#1025](https://github.com/yrashk/ycxx/issues/1025)
+separate objects. A class-template destructor's explicit specialization can coalesce when its
+own declaration is inline. Specializations naming translation-unit-local types retain local
+destructor symbols.
+[#1025](https://github.com/yrashk/ycxx/issues/1025) · [#1040](https://github.com/yrashk/ycxx/issues/1040)
 
 On Linux x86-64, an ordinary external namespace-scope function can use GNU `weak` so a
 strong definition in another object takes precedence. This covers the pinned libycxx
