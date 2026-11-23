@@ -149,6 +149,10 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_
   add_test(NAME unit.linux_function_addresses
     COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/linux_function_addresses.py
             $<TARGET_FILE:ycxxc> ${CMAKE_C_COMPILER} ${CMAKE_READELF})
+  # PARITY: by design: runs the freestanding ELF counterpart of builtin-line.run.cpp.
+  add_test(NAME unit.linux_builtin_line
+    COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/linux_builtin_line.py
+            $<TARGET_FILE:ycxxc> ${PROJECT_SOURCE_DIR}/tests/own/builtins/builtin-line.run.cpp)
   # PARITY: by design: links and runs x86-64 ELF objects with native peers.
   add_test(NAME unit.linux_virtual_member_final
     COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/linux_virtual_member_final.py

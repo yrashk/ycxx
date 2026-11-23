@@ -2328,6 +2328,7 @@ public:
   NodeId default_argument(QualType t) {
     const u32 source_begin = pos();
     const auto calls_before = s_->dependent_calls.size();
+    sema::Sema::DefaultLineScope line(*s_);
     // Not in the parameters of a parameter's own function type ([dcl.fct.default]/3).
     if (in_params_ > 1) s_->diag(pos(), Diag::default_arg_not_allowed);
     Ex e;
@@ -2356,6 +2357,8 @@ public:
       value.source_begin = source_begin;
       value.source_end = pos();
       value.dependent_calls = s_->builder().seq(std::span<const u32>(s_->dependent_calls).subspan(calls_before));
+    } else if (line.observed) {
+      e = s_->node(ast::SourceLineContext{e.info, sema::Sema::at(e, e.begin), 0}, e.begin, e.end, e.info);
     }
     value.info = e.info;
     value.arg = sema::Sema::at(e, e.begin);
@@ -4870,6 +4873,7 @@ public:
       // A non-generic lambda's body is a separate evaluation context from its captures.
       const u32 enclosing_unevaluated = s_->unevaluated;
       const u32 enclosing_decltype = std::exchange(s_->decltype_unevaluated, 0);
+      sema::Sema::DefaultLineScope line(*s_, false);
       if (!head) s_->unevaluated = 0;
       body = compound_statement();
       s_->unevaluated = enclosing_unevaluated;

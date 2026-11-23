@@ -1661,6 +1661,7 @@ public:
     const items::Item& it = items_->items[index(ItemId(at.item))];
     return std::min<u32>(it.begin + at.offset, static_cast<u32>(r_->tokens.size() - 1));
   }
+  u32 presumed_line(engine::Loc at) const { return r_->presumed_lines.at(token(at)); }
   // The byte offset in its file of a diagnostic's location.
   u32 byte_offset(engine::Loc at) const { return site(at).offset; }
 
@@ -2064,6 +2065,7 @@ public:
   std::set<EntityId> uncertain_object_layouts() override { return p_->uncertain_object_layouts(); }
   bool peer_pure_dispatch(EntityId cls) override { return p_->peer_pure_dispatch(cls); }
   void use_typed_dynamic_cast() override { p_->has_typed_dynamic_cast_ = true; }
+  u32 presumed_line(engine::Loc at) override { return p_->presumed_line(at); }
   std::vector<DeclId> visible_decls(ast::NameId name, std::span<const EntityId> directives = {}) override {
     std::vector<std::string> paths;
     for (EntityId ns : directives) paths.push_back(p_->namespace_path(ns));
@@ -2914,6 +2916,7 @@ public:
   std::set<EntityId> uncertain_object_layouts() override { return at_.uncertain_object_layouts(); }
   bool peer_pure_dispatch(EntityId cls) override { return at_.peer_pure_dispatch(cls); }
   void use_typed_dynamic_cast() override { at_.use_typed_dynamic_cast(); }
+  u32 presumed_line(engine::Loc at) override { return at_.presumed_line(at); }
   bool class_layout_uncertain(EntityId c) override { return at_.class_layout_uncertain(c); }
   bool explicit_specialization(EntityId c) override { return at_.explicit_specialization(c); }
   const sema::ClassRec& publish_class(EntityId c, sema::ClassRec r, sema::Sema& context) override {

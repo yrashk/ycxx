@@ -106,6 +106,7 @@ public:
   virtual std::optional<ast::DeclSema> class_friend(EntityId) { return std::nullopt; }
   virtual bool peer_pure_dispatch(EntityId) { return false; }
   virtual void use_typed_dynamic_cast() {}
+  virtual u32 presumed_line(engine::Loc) { return 0; }
   // A use of a global allocation function that may lack a written declaration in the unit.
   // An aligned signature also brings its parameter's enum shape into the unit.
   virtual void use_allocation_function(EntityId, bool = false) {}
@@ -1180,6 +1181,65 @@ public:
 
   Questions& questions() { return *q_; }
   u32 loc_base() const { return loc_base_; }
+  struct DefaultLineScope {
+    Sema& sema;
+    bool observed = false;
+    bool* saved;
+    explicit DefaultLineScope(Sema& sema, bool capture = true)
+        : sema(sema), saved(std::exchange(sema.default_line_observer_, capture ? &observed : nullptr)) {}
+    ~DefaultLineScope() { sema.default_line_observer_ = saved; }
+  };
+  u32 source_line_at(u32 at) {
+    return q_->presumed_line(q_->source_loc({std::to_underlying(item_), loc_base_ + at}, at));
+  }
+  bool observes_default_line(const Ex& expression) {
+    if (!default_line_observer_ || !*default_line_observer_) return false;
+    const auto root = b_->commit(ast::Child{expression.id, 0});
+    const auto& nodes = ins().ast;
+    // A literal through parentheses or contextual conversion to bool cannot observe the line.
+    auto literal_truth = [&](NodeId id) -> std::optional<bool> {
+      while (true) {
+        if (nodes.is<ast::Paren>(id)) {
+          id = nodes.get<ast::Paren>(id).operand.id;
+        } else if (nodes.is<ast::ImplicitConversion>(id)) {
+          const auto conversion = nodes.get<ast::ImplicitConversion>(id);
+          if (conversion.conversion != ast::ConversionKind::boolean) return std::nullopt;
+          id = conversion.operand.id;
+        } else {
+          break;
+        }
+      }
+      if (!nodes.is<ast::Literal>(id)) return std::nullopt;
+      const auto value = nodes.get<ast::Literal>(id).value;
+      if (!ins().values.is<ast::VInt>(value)) return std::nullopt;
+      return ast::int_bits(ins(), value) != ast::Bits128{};
+    };
+    bool observed = false;
+    auto visit = [&](this const auto& self, const ast::Red& n) -> void {
+      if (observed || n.is<ast::ConstantProbe>()) return;
+      if (n.is<ast::SourceLine>()) {
+        observed = true;
+        return;
+      }
+      if (n.is<ast::Conditional>()) {
+        const auto conditional = n.get<ast::Conditional>();
+        if (const auto truth = literal_truth(conditional.condition.id)) {
+          const auto arm = *truth ? conditional.then_ : conditional.else_;
+          self(ast::Red(nodes, arm.id));
+          return;
+        }
+      }
+      if (n.is<ast::OrderedBinary>()) {
+        const auto binary = n.get<ast::OrderedBinary>();
+        if ((binary.op == ast::OrderedOp::logical_and && literal_truth(binary.lhs.id) == false) ||
+            (binary.op == ast::OrderedOp::logical_or && literal_truth(binary.lhs.id) == true))
+          return;
+      }
+      n.for_each_child(self);
+    };
+    visit(ast::Red(nodes, root.id));
+    return observed;
+  }
   // Whether this is a templated context: a template's definition or one of its instantiations.
   bool templated() const { return !template_scopes.empty() || instantiating(); }
   // A generic lambda can still be in its definition while its enclosing function is instantiated.
@@ -5561,6 +5621,10 @@ public:
   // `call` calls a consteval function or constructor.
   Ex immediate_invocation(Ex call) {
     if (!call.ok() || immediate_context || unevaluated || !evaluate_immediate) return call;
+    if (observes_default_line(call)) {
+      diag(call.begin, Diag::default_arg_source_line_immediate);
+      return {NodeId::none, call.begin, call.end};
+    }
     const Evaluation v = evaluate_immediate(call);
     if (!v.constant) {
       diag(call.begin, Diag::not_constant, v.reason);
@@ -6371,7 +6435,8 @@ public:
     if (unevaluated == 0 && d->head.empty() && closure_member(*w_, fe) &&
         !require_supported_virtual_layout(fr.inner, paren_at))
       return fail;
-    auto children = call_args(fr, args, begin, paren_at, cands[*chosen].defaults,
+    const u32 invocation_at = bound.explicit_receiver ? bound.name_at : begin;
+    auto children = call_args(fr, args, begin, paren_at, invocation_at, cands[*chosen].defaults,
                               DefaultArgumentOrigin::interned, fe);
     if (!children) return fail;
     ExprInfo info = result_info(fr.inner);
@@ -7081,7 +7146,7 @@ public:
     }
     const auto supplied = args.size();
     for (std::size_t i = supplied; i < fr.params.size() && i < k.defaults.size(); ++i) {
-      auto a = default_argument(k.defaults[i], end, DefaultArgumentOrigin::interned, k.entity, fr.params[i]);
+      auto a = default_argument(k.defaults[i], end, DefaultArgumentOrigin::interned, k.entity, fr.params[i], begin);
       if (!a) return fail;
       args.push_back(*a);
     }
@@ -7210,7 +7275,8 @@ public:
         const auto conversion = node.get<ast::ImplicitConversion>().conversion;
         return conversion != ast::ConversionKind::user_defined && conversion != ast::ConversionKind::array_copy;
       }
-      return node.is<ast::Literal>() || node.is<ast::DeclRef>() || node.is<ast::LocalRef>() || node.is<ast::This>() ||
+      return node.is<ast::Literal>() || node.is<ast::SourceLine>() || node.is<ast::SourceLineContext>() ||
+             node.is<ast::DeclRef>() || node.is<ast::LocalRef>() || node.is<ast::This>() ||
              node.is<ast::Paren>() || node.is<ast::Member>() || node.is<ast::Subscript>() ||
              node.is<ast::Unary>() || node.is<ast::Binary>() || node.is<ast::OrderedBinary>() ||
              node.is<ast::Assign>() || node.is<ast::Conditional>() || node.is<ast::DefaultArg>();
@@ -7781,6 +7847,19 @@ public:
   // Builtins with ordinary expression arguments (docs/EXTENSIONS.md).
   Ex builtin_call(const lex::BuiltinFunctionInfo& b, std::vector<Ex> args, u32 begin, u32 end) {
     using enum lex::BuiltinFunction;
+    if (b.function == source_line) {
+      if (!builtin_arity(0, args.size(), begin)) return {NodeId::none, begin, end};
+      const QualType type = builtin(Builtin::unsigned_int);
+      const u32 line = source_line_at(begin);
+      if (default_line_observer_) {
+        // Constant probes retain unevaluated operands for proof, but the default's invocation
+        // line is still unknown. Only an evaluated use binds the enclosing default to a line.
+        if (!unevaluated) *default_line_observer_ = true;
+        const ExprInfo info{type, ValueCategory::prvalue, 0};
+        return node(ast::SourceLine{info, line}, begin, end, info);
+      }
+      return literal(type, w_->values.integer(type, line), ValueCategory::prvalue, begin, end);
+    }
     if (b.function == trap || b.function == unreachable) {
       // [utility.unreachable]: both are `void` and end the path they are on.
       if (!builtin_arity(0, args.size(), begin)) return {NodeId::none, begin, end};
@@ -7827,6 +7906,7 @@ public:
     }
     switch (b.function) {
       case addressof:
+      case source_line:
       case trap:
       case unreachable:
       case strlen:
@@ -11155,7 +11235,7 @@ public:
       return {NodeId::none, begin, end};
     }
     TypeRec fr = types().rec(ft);
-    auto children = call_args(fr, args, begin, paren_at, defaults, default_origin, default_source);
+    auto children = call_args(fr, args, begin, paren_at, begin, defaults, default_origin, default_source);
     if (!children) return {NodeId::none, begin, end};
     ExprInfo info = result_info(fr.inner);
     return node(ast::Call{info, function, at(callee, begin), b_->list(*children)}, begin, end, info);
@@ -11339,11 +11419,24 @@ public:
   // tree, analysed at the declaration ([dcl.fct.default]/5). A supported dependent default
   // is replayed only for the selected specialization and only when omitted ([temp.inst]/12).
   std::optional<Ex> default_argument(NodeId d, u32 at_, DefaultArgumentOrigin origin = DefaultArgumentOrigin::interned,
-                                     EntityId function = EntityId::none, QualType parameter = {}) {
+                                     EntityId function = EntityId::none, QualType parameter = {},
+                                     std::optional<u32> invocation = std::nullopt) {
     const bool in_builder = origin == DefaultArgumentOrigin::current_item;
     // An earlier declarator's inherited defaults are already adopted by this builder.
     const NodeId interned = in_builder ? b_->adopted_node(d) : d;
     const auto value = interned == NodeId::none ? b_->get<ast::DefaultArg>(d) : ins().ast.get<ast::DefaultArg>(interned);
+    auto use = [&](NodeId id, NodeId global, ast::DefaultArg arg) {
+      if (!unevaluated && ast::kind_of(arg.arg.id) == ast::Nodes::index_of<ast::SourceLineContext>()) {
+        auto context = global == NodeId::none ? b_->get<ast::SourceLineContext>(arg.arg.id)
+                                              : ins().ast.get<ast::SourceLineContext>(arg.arg.id);
+        if (global != NodeId::none) context.arg.id = b_->adopt(context.arg.id);
+        context.line = source_line_at(invocation.value_or(at_));
+        if (default_line_observer_) *default_line_observer_ = true;
+        arg.arg.id = b_->add(context, 0);
+        return node(arg, at_, at_, arg.info);
+      }
+      return Ex{id == NodeId::none ? b_->adopt(global) : id, at_, at_, arg.info};
+    };
     if (ast::kind_of(value.arg.id) == ast::Nodes::index_of<ast::Dependent>()) {
       if (function != EntityId::none && value.source_end > value.source_begin) {
         if (auto replay = q_->replay_function_default(*this, value, function, parameter, at_)) {
@@ -11351,13 +11444,13 @@ public:
           const NodeId committed = b_->adopted_node(*replay);
           const auto concrete = committed == NodeId::none ? b_->get<ast::DefaultArg>(*replay)
                                                            : ins().ast.get<ast::DefaultArg>(committed);
-          return Ex{*replay, at_, at_, concrete.info};
+          return use(*replay, committed, concrete);
         }
       }
       diag(at_, Diag::default_arg_dependent);
       return std::nullopt;
     }
-    return Ex{in_builder ? d : b_->adopt(d), at_, at_, value.info};
+    return use(in_builder ? d : NodeId::none, interned, value);
   }
 
   Ex braced_argument(std::unique_ptr<Braced> b) {
@@ -11456,6 +11549,7 @@ public:
   // The arguments of a call to a function of type `fr`, each copy-initializing its parameter.
   // A parameter without an argument takes its default argument ([dcl.fct.default], [expr.call]/5).
   std::optional<std::vector<Child>> call_args(const TypeRec& fr, std::span<const Ex> given, u32 begin, u32 paren_at,
+                                              u32 invocation_at,
                                               std::span<const NodeId> defaults = {},
                                               DefaultArgumentOrigin origin = DefaultArgumentOrigin::interned,
                                               EntityId default_source = EntityId::none) {
@@ -11472,7 +11566,7 @@ public:
     std::vector<QualType> params = fr.params;  // copied: converting may intern new types
     std::vector<Ex> args(given.begin(), given.end());
     for (std::size_t i = args.size(); i < params.size() && i < defaults.size() && defaults[i] != NodeId::none; ++i) {
-      auto a = default_argument(defaults[i], paren_at, origin, default_source, params[i]);
+      auto a = default_argument(defaults[i], paren_at, origin, default_source, params[i], invocation_at);
       if (!a) return std::nullopt;
       args.push_back(*a);
     }
@@ -11604,6 +11698,7 @@ private:
   std::vector<engine::Diagnostic>* diags_;
   ast::ItemId item_;
   u32 loc_base_;
+  bool* default_line_observer_ = nullptr;
   bool in_requires_body_ = false;
   bool in_constraint_atom_ = false;
   EntityId class_prefix_owner_ = EntityId::none;

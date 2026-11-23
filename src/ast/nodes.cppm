@@ -480,6 +480,21 @@ struct DefaultArg {
   SeqId<u32> dependent_calls{};
 };
 
+// A source-line expression in a default argument. An early constant evaluation uses its
+// lexical line. Evaluation at an actual call uses the enclosing source-line context.
+struct SourceLine {
+  ExprInfo info;
+  u32 lexical_line;
+};
+
+// A default expression that observes the invocation line, including through nested defaults.
+// The declaration leaves the line unset. Use of the argument supplies a presumed line.
+struct SourceLineContext {
+  ExprInfo info;
+  [[=sequenced]] Child arg;
+  u32 line;
+};
+
 // ---------------------------------------------------------------- declarations (item trees)
 
 // One declarator of an item ([dcl.decl]): the ordinal of its record in `ItemSema::decls`, its
@@ -595,7 +610,7 @@ using Nodes = closed_list<Literal, DeclRef, Paren, Unary, Binary, OrderedBinary,
                           StaticInit, StaticVar, NewObject, DeleteObject, VariadicBuiltin, AssignmentCall,
                           NewArray, DeleteArray, DelegatingInit, VirtualMemberCall, Throw, TryBlock, Handler,
                           DefaultMemberInit, ExplicitDestroy, PeerRootInit, DynamicCastVoid, DynamicCastPointer, Asm,
-                          ConstantProbe>;
+                          ConstantProbe, SourceLine, SourceLineContext>;
 
 static_assert(Nodes::size < max_node_kinds);
 

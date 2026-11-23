@@ -145,7 +145,9 @@ constexpr const TypeTraitInfo* type_trait(std::string_view name) {
 // sema's (`sema::string_functions`).
 enum class BuiltinFunction : std::uint8_t {
   fabs, inf, huge_val, nan, addressof, strlen, library, trap, unreachable, constant_p, add_overflow, mul_overflow,
+  source_line,
 };
+inline constexpr std::string_view builtin_line_name = "__builtin_LINE";
 struct BuiltinFunctionInfo {
   std::string_view name;
   BuiltinFunction function;
@@ -182,6 +184,7 @@ inline constexpr std::array builtin_functions{
     BuiltinFunctionInfo{.name = "__builtin_constant_p", .function = BuiltinFunction::constant_p, .advertised = false},
     BuiltinFunctionInfo{.name = "__builtin_add_overflow", .function = BuiltinFunction::add_overflow, .advertised = false},
     BuiltinFunctionInfo{.name = "__builtin_mul_overflow", .function = BuiltinFunction::mul_overflow, .advertised = false},
+    BuiltinFunctionInfo{builtin_line_name, BuiltinFunction::source_line},
 };
 inline constexpr std::string_view builtin_prefix = "__builtin_";
 // The C library function a `library` builtin calls.
