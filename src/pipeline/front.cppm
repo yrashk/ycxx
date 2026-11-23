@@ -952,6 +952,13 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
   std::set<EntityId> noexcept_declarations;
   std::set<EntityId> hidden_declarations;
   std::set<EntityId> weak_declarations;
+  using Visibility = ast::GnuVisibility;
+  struct FunctionVisibility {
+    Visibility written = Visibility::none;
+    bool namespace_hidden = false;
+    bool namespace_default = false;
+  };
+  std::map<EntityId, FunctionVisibility> function_visibility;
   std::vector<Dynamic> dynamic;
   // The type from the declaration, not the entity's record: a variable's type is not part of its
   // identity, so a record made before an edit may hold the old one (#115).
@@ -995,6 +1002,16 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
     if (d.kind == ast::DeclKind::function && d.has_written_noexcept) noexcept_declarations.insert(e);
     if (d.hidden_visibility) hidden_declarations.insert(e);
     if (linux && d.explicit_weak) weak_declarations.insert(e);
+    if (linux && d.kind == ast::DeclKind::function &&
+        (d.hidden_visibility || d.explicit_default_visibility || d.namespace_visibility != Visibility::none)) {
+      auto& visibility = function_visibility[e];
+      if (visibility.written == Visibility::none) {
+        if (d.hidden_visibility) visibility.written = Visibility::hidden;
+        else if (d.explicit_default_visibility) visibility.written = Visibility::default_;
+      }
+      visibility.namespace_hidden |= d.namespace_visibility == Visibility::hidden;
+      visibility.namespace_default |= d.namespace_visibility == Visibility::default_;
+    }
     if (!seen.insert(std::to_underlying(e)).second) return;
     const sema::EntityRec& r = world.entities.rec(e);
     if (r.kind == sema::EntityKind::class_ || r.kind == sema::EntityKind::data_member || r.kind == sema::EntityKind::type_alias ||
@@ -1391,10 +1408,20 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
   }
   if (root_deallocator) declare(*root_deallocator, std::nullopt);
   // A declaration anywhere in the unit can supply the visibility of the one object symbol.
-  // A later inline declaration of a variable puts it outside this visibility profile.
-  if (!hidden_declarations.empty())
-    for (Entity& e : tu.entities)
+  if (!hidden_declarations.empty() || !function_visibility.empty()) {
+    for (Entity& e : tu.entities) {
+      // An inline variable falls outside the ordinary data visibility profile.
       e.hidden = hidden_declarations.contains(e.id) && (e.is_function || (linux && !inline_declarations.contains(e.id)));
+      if (!e.is_function || inline_declarations.contains(e.id)) continue;
+      const auto found = function_visibility.find(e.id);
+      if (found == function_visibility.end()) continue;
+      const auto& visibility = found->second;
+      // With no namespace setting or conflicting settings, use the direct-attribute behavior.
+      if (visibility.namespace_hidden != visibility.namespace_default)
+        e.hidden = visibility.written == Visibility::none
+                       ? visibility.namespace_hidden : visibility.written == Visibility::hidden;
+    }
+  }
   return tu;
 }
 
