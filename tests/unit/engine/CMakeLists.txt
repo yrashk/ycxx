@@ -1,4 +1,5 @@
 ycxxc_unit_test(engine engine_test.cpp ycxxc_engine)
+ycxxc_unit_test(engine_snapshot snapshot_test.cpp ycxxc_engine)
 ycxxc_unit_test(engine_contract contract_test.cpp ycxxc_engine)
 set_tests_properties(unit.engine_contract PROPERTIES PASS_REGULAR_EXPRESSION "^violated: live_frames\\(\\) == 0\n$")
 ycxxc_unit_test(engine_contract_concurrent contract_concurrent_test.cpp ycxxc_engine)

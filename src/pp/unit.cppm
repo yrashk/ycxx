@@ -243,7 +243,8 @@ private:
     f->presumed = presumed;
     f->text = c.text;
     f->counter_entry = counter_;
-    f->src = std::make_unique<lex::Source>(c.text, f->lex_diags);
+    // Editor-view buffers may contain unsaved source. Do not write them to a CI artifact.
+    f->src = std::make_unique<lex::Source>(c.text, f->lex_diags, s_->config.view == View::disk);
     f->lexer = std::make_unique<lex::Lexer>(*f->src, f->tables, f->lex_diags);
     f->out.file = file;
     f->out.presumed = key.presumed;

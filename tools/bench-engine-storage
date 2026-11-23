@@ -1,0 +1,120 @@
+#!/usr/bin/env python3
+"""Measure opt-in source snapshots and arena paging with fresh ycxx processes."""
+import argparse
+import os
+from pathlib import Path
+import random
+import shutil
+import statistics
+import subprocess
+import sys
+import tempfile
+import time
+
+
+def compile_one(exe, work, env):
+    start = time.perf_counter()
+    with subprocess.Popen(
+        [exe, "cxx", "--no-daemon", "-fsyntax-only", "main.cpp"],
+        cwd=work, env=env, stdout=subprocess.DEVNULL,
+    ) as process:
+        _, status, usage = os.wait4(process.pid, 0)
+        process.returncode = os.waitstatus_to_exitcode(status)
+        if process.returncode:
+            raise subprocess.CalledProcessError(process.returncode, process.args)
+    elapsed = (time.perf_counter() - start) * 1000
+    peak = usage.ru_maxrss / (1024 if sys.platform == "darwin" else 1)
+    return elapsed, int(peak)
+
+
+def bytes_in(directory):
+    return sum(entry.stat().st_size for entry in directory.glob("*.source"))
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("ycxx", type=Path)
+    parser.add_argument("--repetitions", type=int, default=7)
+    parser.add_argument("--lines", type=int, default=16000)
+    parser.add_argument("--files", type=int, default=1,
+                        help="spread the comment workload across this many input files")
+    parser.add_argument("--directory", type=Path, default=Path.cwd(),
+                        help="place input, cache and paging directories on this filesystem")
+    args = parser.parse_args()
+    if args.repetitions < 1 or not 1 <= args.files <= args.lines <= 50000:
+        parser.error("use positive repetitions and 1 to 50000 lines")
+
+    exe = args.ycxx.resolve()
+    env = os.environ.copy()
+    for variable in ("YCXX_ENGINE_SNAPSHOT_DIR", "YCXX_ENGINE_PAGING_DIR"):
+        env.pop(variable, None)
+
+    with tempfile.TemporaryDirectory(prefix="ycxx-storage-", dir=args.directory.resolve()) as tmp:
+        root = Path(tmp)
+        producer, consumer, changed, seed, paging = (
+            root / name for name in ("producer", "consumer", "changed", "seed", "paging")
+        )
+        for directory in (producer, consumer, changed, seed, paging):
+            directory.mkdir()
+        # Real preprocessing, dominated by physical-to-logical conversion and scanning comments.
+        source = b"// " + b"a" * 109 + b"\r\n"
+        # Keep the main file eligible when comparing workloads with many headers.
+        main_prefix = source * (args.lines if args.files == 1 else 40)
+        header_lines = args.lines // max(1, args.files - 1)
+        total_bytes = len(main_prefix) + len(b"int answer = 42;\r\n")
+        for number in range(args.files - 1):
+            name = f"fixture-{number}.hpp"
+            main_prefix += f'#include "{name}"\r\n'.encode()
+            header = f"// fixture {number}\r\n".encode() + source * header_lines
+            total_bytes += len(header) + len(f'#include "{name}"\r\n'.encode())
+            for directory in (producer, consumer, changed):
+                (directory / name).write_bytes(header)
+        (producer / "main.cpp").write_bytes(main_prefix + b"int answer = 42;\r\n")
+        (consumer / "main.cpp").write_bytes(main_prefix + b"int answer = 42;\r\n")
+        (changed / "main.cpp").write_bytes(main_prefix + b"int answer = 43;\r\n")
+
+        def snapshot(directory):
+            return env | {"YCXX_ENGINE_SNAPSHOT_DIR": str(directory)}
+
+        compile_one(exe, producer, snapshot(seed))
+        size = bytes_in(seed)
+        if not size:
+            raise RuntimeError("compiler did not publish any snapshots")
+        imported = root / "restored"
+        shutil.copytree(seed, imported)
+
+        cases = ("disabled", "cold-write", "warm-import", "changed-input", "paging-only")
+        runs = {case: [] for case in cases}
+        random_order = random.Random(17)
+        for trial in range(args.repetitions):
+            cold = root / f"cold-{trial}"
+            cold.mkdir()
+            edited = root / f"edited-{trial}"
+            shutil.copytree(seed, edited)
+            modes = {
+                "disabled": (producer, env),
+                "cold-write": (producer, snapshot(cold)),
+                "warm-import": (consumer, snapshot(imported)),
+                "changed-input": (changed, snapshot(edited)),
+                "paging-only": (producer, env | {"YCXX_ENGINE_PAGING_DIR": str(paging)}),
+            }
+            ordered = list(cases)
+            random_order.shuffle(ordered)
+            for case in ordered:
+                runs[case].append(compile_one(exe, *modes[case]))
+            if bytes_in(cold) != size or bytes_in(edited) <= size:
+                raise RuntimeError("cold snapshot and edited workload did not publish the expected files")
+            shutil.rmtree(cold)
+            shutil.rmtree(edited)
+
+        print(f"source_bytes={total_bytes} source_files={args.files} artifact_bytes={size} trials={args.repetitions}")
+        print(f"platform={os.uname().sysname} {os.uname().machine} temp={args.directory.resolve()}")
+        print("mode             median_ms   min_ms   max_ms   median_peak_rss_KiB")
+        for case, measurements in runs.items():
+            timings, rss = zip(*measurements)
+            print(f"{case:15} {statistics.median(timings):9.2f} {min(timings):8.2f} "
+                  f"{max(timings):8.2f} {statistics.median(rss):20.0f}")
+
+
+if __name__ == "__main__":
+    main()

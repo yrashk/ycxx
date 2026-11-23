@@ -1063,6 +1063,12 @@ private daemons.
     request. Concurrent clients include two requests of one file and a distinct build root
     reaching the checkpoint while the first is parked.
   - All run on macOS and Linux.
+- The first persistence slice (#17) shares phase-1 and phase-2 source preparation in immutable
+  mapped snapshot files. A selected query cell can be loaded at quiescence with its direct input
+  dependency fingerprints and then verified by the usual engine path. The lexer borrows mapped
+  normalized text bytes. The storage switches, scope and benchmark are in
+  [Engine storage](docs/engine-storage.md). Cell and slot arena blocks can use process-private
+  files with heap fallback.
 - Not yet:
   - `progress` messages and `build_time` (#140);
   - the persistent cache handoff and the file table in it (#17), and the β test that needs it:

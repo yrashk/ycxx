@@ -21,8 +21,9 @@ export namespace ycxx::compile {
 
 // The environment variables the driver reads, in one table both paths read (§3.2). All of them
 // are configuration variables today; none only renders.
-inline constexpr std::array<std::string_view, 5> environment = {"SDKROOT", "DEVELOPER_DIR", "CPATH", "CPLUS_INCLUDE_PATH",
-                                                                  "SOURCE_DATE_EPOCH"};
+inline constexpr std::array<std::string_view, 7> environment = {"SDKROOT", "DEVELOPER_DIR", "CPATH", "CPLUS_INCLUDE_PATH",
+                                                                  "SOURCE_DATE_EPOCH",
+    "YCXX_ENGINE_SNAPSHOT_DIR", "YCXX_ENGINE_PAGING_DIR"};
 
 // One request. `argv` follows the front's name, with response files expanded by the client;
 // relative paths in it are relative to `cwd`.

@@ -15,6 +15,7 @@ export import ycxx.hash;
 export import :serial;
 export import :pool;
 export import :arena;
+export import :storage;
 import ycxx.memory;
 import std;
 
@@ -534,6 +535,7 @@ struct Cell {
   Fp128 key_fp;             // kind seed and key
   Fp128 fp;                 // value, diagnostics, demand list and has_diags (§A1.5)
   std::vector<std::uint32_t> deps;
+  std::unique_ptr<std::vector<Fp128>> imported_inputs;  // only until an imported cell verifies
   std::vector<Diagnostic> diags;
   std::vector<Demand> demands;
 
@@ -860,6 +862,8 @@ struct KindTable final : KindTableBase {
   std::array<Shard, shard_count> shards;
   Arena<Slot> slots;
 
+  explicit KindTable(const ArenaBacking* backing) : slots(backing) {}
+
   Shard& shard_of(const Key& k) noexcept { return shards[local_hash(k).hi % shard_count]; }
   std::coroutine_handle<> make_frame(Db& db, CellId c, std::uint32_t id, Root& root, bool validate, std::uint64_t old,
                                      std::uint64_t parent) override;
@@ -1047,6 +1051,17 @@ public:
   template <MemoQuery Q>
   std::vector<Demand> demands(const typename Q::Key& k) const;
 
+  // Save/load an explicitly selected, portable query record at quiescence. The caller supplies
+  // the query's complete list of input keys in first-fetch order. Inputs must already have been
+  // set by the consumer; the first request validates the recorded fingerprints.
+  // Keys and values must serialize without referring to this process's interners or registries.
+  template <MemoQuery Q, InputKind... Inputs>
+    requires (!InputKind<Q> && !DemandedQuery<Q>)
+  bool export_cell(const std::string& path, Fp128 build, const typename Q::Key& key, q<Inputs>... inputs);
+  template <MemoQuery Q, InputKind... Inputs>
+    requires (!InputKind<Q> && !DemandedQuery<Q>)
+  bool import_cell(const std::string& path, Fp128 build, const typename Q::Key& key, q<Inputs>... inputs);
+
   // The memo-table comparison of incremental == cold (§A9): every cell `cold` executed and still
   // holds valid at its last revision, found here by its key's fingerprint and brought up to date,
   // has the same fingerprint and dependency list, and none of it executes; an input has the same
@@ -1106,7 +1121,9 @@ private:
   }
   Durability durability_now(const Cell& e) const noexcept { return e.durability.load(std::memory_order_relaxed); }
   bool durable(const Cell& e, std::uint64_t w) const noexcept {
-    return verified_of(w) >= last_changed_[std::to_underlying(durability_now(e))].load(std::memory_order_relaxed);
+    const auto verified = verified_of(w);
+    return verified != 0 &&
+           verified >= last_changed_[std::to_underlying(durability_now(e))].load(std::memory_order_relaxed);
   }
 
   // One step of `ensure_green` for a frame (§A1.5): ready, or busy because it is now claimed for a
@@ -1181,6 +1198,8 @@ private:
   // `first`: its first value.
   void retain(Cell& e, std::int64_t bytes, bool first) noexcept;
 
+  // Configured through YCXX_ENGINE_PAGING_DIR; frames and their registry remain on the heap.
+  const std::optional<ArenaBacking> arena_backing_;
   Arena<Cell> cells_;
   mutable std::array<std::atomic<KindTableBase*>, max_kinds> tables_{};
   std::array<std::atomic<Revision>, durability_levels> last_changed_{};
@@ -2154,7 +2173,8 @@ void Db::validate_sync(CellId c, std::uint64_t old, const Frame* chain) {
       do {
         const CellId dep = e.deps[k] & ~group_start;
         while (!ensure_sync(dep, &vf)) std::this_thread::yield();
-        changed = changed || cells_[dep].changed_at > since;
+        changed = changed || (e.imported_inputs ? cells_[dep].fp != (*e.imported_inputs)[k]
+                                                : cells_[dep].changed_at > since);
         d = std::min(d, durability_now(cells_[dep]));
         ++k;
       } while (k < e.deps.size() && !(e.deps[k] & group_start));
@@ -2165,6 +2185,7 @@ void Db::validate_sync(CellId c, std::uint64_t old, const Frame* chain) {
     throw;
   }
   if (!changed) {
+    e.imported_inputs.reset();
     e.durability.store(d, std::memory_order_relaxed);
     note(Outcome::verified, &vf, c, &vf.span);
     publish(c);
@@ -2326,8 +2347,11 @@ frame_task Db::run_frame(Db& db, CellId c, std::uint32_t id, Root& root, bool va
         db.finish(f);
         co_return;
       }
+      auto dep_index = k - group.size();
       for (CellId m : group) {
-        changed = changed || db.cells_[m].changed_at > since;
+        changed = changed || (e.imported_inputs ? db.cells_[m].fp != (*e.imported_inputs)[dep_index]
+                                                : db.cells_[m].changed_at > since);
+        ++dep_index;
         d = std::min(d, db.durability_now(db.cells_[m]));
       }
     }
@@ -2337,6 +2361,7 @@ frame_task Db::run_frame(Db& db, CellId c, std::uint32_t id, Root& root, bool va
       // dependency was visited, so the minimum is exact; a cell green by the shortcut needs no
       // update, since lowering a dependency's durability takes a re-execution somewhere below it,
       // caused by an input change that also moved `last_changed_` at this cell's level.
+      e.imported_inputs.reset();
       e.durability.store(d, std::memory_order_relaxed);
       db.note(Outcome::verified, &f, c, &f.span);
       db.publish(c);
@@ -2433,6 +2458,7 @@ void Db::store(CellId c, typename Q::Value v, Frame& f) {
   } else {
     (void)typename Q::Value(std::move(v));  // early cutoff keeps the old value: the new one goes now
   }
+  e.imported_inputs.reset();
   e.deps = std::move(f.deps);
   e.diags = std::move(f.diags);
   e.demands = std::move(f.demands);
@@ -2679,7 +2705,15 @@ std::string Db::describe(CellId c) const {
   return tables_[e.kind].load(std::memory_order_acquire)->describe(e.slot);
 }
 
-Db::Db() { (void)registry_.emplace(); }  // id 0 is never an owner that waits
+std::optional<ArenaBacking> paging_from_environment() {
+  const char* path = std::getenv("YCXX_ENGINE_PAGING_DIR");
+  if (!path || path[0] != '/') return std::nullopt;
+  return ArenaBacking(std::string(path));
+}
+
+Db::Db() : arena_backing_(paging_from_environment()), cells_(arena_backing_ ? &*arena_backing_ : nullptr) {
+  (void)registry_.emplace();  // id 0 is never an owner that waits
+}
 
 Db::Db(Pool& pool) : Db() { pool_ = &pool; }
 
@@ -2720,7 +2754,7 @@ KindTable<Q>& Db::table() const {
   KindTableBase* t = tables_[s].load(std::memory_order_acquire);
   if (!t) {
     memory::Target none(nullptr);  // the engine's own tables count for no cell (#274)
-    auto fresh = std::make_unique<KindTable<Q>>();
+    auto fresh = std::make_unique<KindTable<Q>>(arena_backing_ ? &*arena_backing_ : nullptr);
     fresh->name = kind_name<Q>();
     fresh->seed = kind_seed<Q>();
     if (tables_[s].compare_exchange_strong(t, fresh.get(), std::memory_order_acq_rel, std::memory_order_acquire)) t = fresh.release();
@@ -2760,6 +2794,94 @@ CellId Db::cell_for(const typename Q::Key& k) {
   cell.key_fp = h.finish();
   shard.index.emplace(k, c);
   return c;
+}
+
+// Single-cell segments use the structural codec and an explicit compatibility envelope. The
+// storage layer maps bytes without interpreting or assuming the layout of a process object.
+inline constexpr std::uint64_t cell_snapshot_version = 0x3150414e53584359;  // YCXSNAP1
+inline constexpr std::size_t max_cell_snapshot = 64u * 1024u * 1024u;
+inline constexpr std::uint64_t cell_snapshot_layout =
+    (std::numeric_limits<unsigned char>::digits << 24) | (sizeof(void*) << 16) | (sizeof(std::size_t) << 8) |
+    (std::endian::native == std::endian::little ? 1 : 2);
+
+template <MemoQuery Q, InputKind... Inputs>
+  requires (!InputKind<Q> && !DemandedQuery<Q>)
+bool Db::export_cell(const std::string& path, Fp128 build, const typename Q::Key& key, q<Inputs>... inputs) {
+  contract_assert(live_frames() == 0);
+  const auto c = find_cell<Q>(key);
+  if (!c || !is_current(*c)) return false;
+  const Cell& e = cells_[*c];
+  if (e.has_diags || !e.demands.empty() || e.deps.size() != sizeof...(Inputs)) return false;
+  const std::array<CellId, sizeof...(Inputs)> ids{cell_for<Inputs>(inputs.key)...};
+  Sink out;
+  out.uint(cell_snapshot_version);
+  out.uint(cell_snapshot_layout);
+  serialize(out, build);
+  serialize(out, kinds<Q, Inputs...>::schema_hash);
+  serialize(out, e.key_fp);
+  serialize(out, e.fp);
+  const auto& value = value_of<Q>(*c);
+  if (heap_footprint(value) > max_cell_snapshot) return false;
+  serialize(out, value);
+  for (std::size_t i = 0; i < ids.size(); ++i) {
+    if ((e.deps[i] & ~group_start) != ids[i]) return false;
+    const Cell& input = cells_[ids[i]];
+    serialize(out, input.key_fp);
+    serialize(out, input.fp);
+    serialize(out, (e.deps[i] & group_start) != 0);
+  }
+  serialize(out, fingerprint128(out.bytes()));
+  return out.bytes().size() <= max_cell_snapshot && write_snapshot(path, out.bytes());
+}
+
+template <MemoQuery Q, InputKind... Inputs>
+  requires (!InputKind<Q> && !DemandedQuery<Q>)
+bool Db::import_cell(const std::string& path, Fp128 build, const typename Q::Key& key, q<Inputs>... inputs) {
+  contract_assert(live_frames() == 0);
+  constexpr std::size_t fingerprint_bytes = 16;
+  const auto mapping = std::make_shared<const SnapshotMapping>(path);
+  const auto bytes = mapping->bytes();
+  if (bytes.size() < fingerprint_bytes || bytes.size() > max_cell_snapshot) return false;
+  const auto record = bytes.first(bytes.size() - fingerprint_bytes);
+  Source checksum(bytes.last(fingerprint_bytes));
+  if (deserialize<Fp128>(checksum) != fingerprint128(record)) return false;
+
+  Source in(record, mapping);
+  if (in.uint<std::uint64_t>() != cell_snapshot_version || in.uint<std::uint64_t>() != cell_snapshot_layout ||
+      deserialize<Fp128>(in) != build || deserialize<Fp128>(in) != kinds<Q, Inputs...>::schema_hash) return false;
+  const auto c = cell_for<Q>(key);
+  Cell& e = cells_[c];
+  if (e.state() != State::empty || deserialize<Fp128>(in) != e.key_fp) return false;
+  const auto expected_value = deserialize<Fp128>(in);
+  auto value = deserialize<typename Q::Value>(in);
+  Hasher value_hash;
+  hash_append(value_hash, value);
+  hash_append(value_hash, e.diags);
+  hash_append(value_hash, e.demands);
+  hash_append(value_hash, false);
+  if (in.failed() || value_hash.finish() != expected_value) return false;
+
+  const std::array<CellId, sizeof...(Inputs)> ids{cell_for<Inputs>(inputs.key)...};
+  std::vector<std::uint32_t> deps;
+  auto expected = std::make_unique<std::vector<Fp128>>();
+  for (const CellId id : ids) {
+    if (!is_current(id) || deserialize<Fp128>(in) != cells_[id].key_fp) return false;
+    expected->push_back(deserialize<Fp128>(in));
+    const bool first_of_group = deserialize<bool>(in);
+    if (deps.empty() && !first_of_group) return false;
+    deps.push_back(id | (first_of_group ? group_start : 0));
+  }
+  if (in.failed() || !in.done()) return false;
+
+  const auto retained = static_cast<std::int64_t>(heap_footprint(value));
+  table<Q>().slots[e.slot].value = std::move(value);
+  retain(e, retained, true);
+  e.fp = expected_value;
+  e.deps = std::move(deps);
+  e.imported_inputs = std::move(expected);
+  e.has_value = true;
+  e.word.store(make_word(State::done, 0, 0), std::memory_order_release);
+  return true;
 }
 
 template <MemoQuery Q>
