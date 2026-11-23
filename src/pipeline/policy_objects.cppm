@@ -13,6 +13,7 @@ namespace {
 
 constexpr std::string_view prefix = "__ycxx_policy.";
 constexpr std::string_view coverage = "1.checked.";
+constexpr std::string_view legacy_effect = "2.effect.";
 constexpr std::size_t digest_size = 32;
 
 struct RecordKind {
@@ -24,9 +25,9 @@ struct RecordKind {
 constexpr RecordKind record_kinds[]{
     {"1.need.", PolicyContractKind::observation, false},
     {"1.have.", PolicyContractKind::observation, true},
-    {"2.effect.need.", PolicyContractKind::effect, false},
-    {"2.effect.have.", PolicyContractKind::effect, true},
-    {"2.effect.trust.", PolicyContractKind::trusted_effect, false},
+    {"3.effect.need.", PolicyContractKind::effect, false},
+    {"3.effect.have.", PolicyContractKind::effect, true},
+    {"3.effect.trust.", PolicyContractKind::trusted_effect, false},
 };
 
 std::string_view description(PolicyContractKind kind) {
@@ -73,6 +74,9 @@ std::optional<std::string> embed_policy_contracts(obj::object& object, const TuV
       if (functions.contains(target->second->name)) continue;
       return std::format("a local function with a {} must be defined in its object", kind);
     }
+    if (contract.unstable_effect_tag)
+      return std::format("cannot export a {} for '{}': effect tag '{}' has no stable cross-object identity",
+                         kind, target->second->name, *contract.unstable_effect_tag);
     const auto record = std::ranges::find_if(record_kinds, [&](const RecordKind& record) {
       return record.contract == contract.kind && record.provides == contract.provides;
     });
@@ -106,6 +110,7 @@ std::vector<std::string> check_object_policies(std::span<const obj::object> obje
     const bool ordinary = i < ordinary_objects;
     std::optional<std::size_t> expected_records;
     std::size_t records = 0;
+    bool has_legacy_effect = false;
     std::set<Location> functions;
     for (const auto& symbol : object.symbols) {
       if (symbol.name_view().starts_with(prefix) || !text_symbol(object, symbol)) continue;
@@ -131,6 +136,12 @@ std::vector<std::string> check_object_policies(std::span<const obj::object> obje
         if (expected_records || symbol.offset != 0 || parsed.ec != std::errc{} ||
             parsed.ptr != name.data() + name.size()) malformed();
         else expected_records = count;
+        continue;
+      }
+      // Earlier effect digests carry no evidence that their type identities are exportable.
+      if (name.starts_with(legacy_effect)) {
+        has_legacy_effect = true;
+        ++records;
         continue;
       }
       const auto kind = std::ranges::find_if(record_kinds, [&](const RecordKind& kind) {
@@ -161,6 +172,9 @@ std::vector<std::string> check_object_policies(std::span<const obj::object> obje
         if (!guarantees.try_emplace(std::tuple{record.kind, i, record.name}, record).second) malformed();
       } else requirements.push_back(record);
     }
+    if (has_legacy_effect)
+      errors.push_back(std::format("{}: legacy checked effect metadata requires rebuilding this object with -fcheck-policies",
+                                   object.name));
     if (!expected_records) errors.push_back(std::format("{}: missing checked policy coverage", object.name));
     else if (*expected_records != records)
       errors.push_back(std::format("{}: incomplete checked policy metadata", object.name));

@@ -323,6 +323,89 @@ bool compatible(const sema::World& world, const OwnershipPolicy& policy, EntityI
 
 }  // namespace
 
+// Interned nominal names may identify two declarations from separate compilations of the same
+// source path. Only identities independent of a translation unit can enter an object contract.
+class EffectTagIdentity {
+public:
+  explicit EffectTagIdentity(const sema::World& world) : world_(world) {}
+
+  bool stable(QualType type) {
+    const auto record = world_.types.rec(type);
+    switch (record.kind) {
+    case sema::TypeKind::builtin: return record.builtin != ast::Builtin::dependent;
+    case sema::TypeKind::class_:
+    case sema::TypeKind::enum_: return entity(record.entity);
+    case sema::TypeKind::pointer:
+    case sema::TypeKind::reference: return stable(record.inner);
+    case sema::TypeKind::array:
+      return (record.bound_value == ast::ConstId::none || world_.ins.values.is<ast::VInt>(record.bound_value)) &&
+             stable(record.inner);
+    case sema::TypeKind::member_pointer: return stable(record.member_owner) && stable(record.inner);
+    case sema::TypeKind::function:
+      return stable(record.inner) && std::ranges::all_of(record.params, [&](QualType parameter) {
+        return stable(parameter);
+      });
+    default: return false;
+    }
+  }
+
+private:
+  bool entity(EntityId id) {
+    if (id == EntityId::none) return false;
+    auto [known, fresh] = entities_.try_emplace(id, false);
+    if (!fresh) return known->second;
+    const auto* record = world_.entities.find(id);
+    if (!record || record->linkage != ast::Linkage::external) return false;
+    const auto name = world_.ins.names.spelling(record->name);
+    // An unnamed namespace is spelled `(anonymous)` in the entity table, even though its
+    // identity includes the current primary source's name.
+    if (record->kind == sema::EntityKind::namespace_ && name == "(anonymous)") return false;
+    if (name.empty() && !record->enum_linkage_name) return false;
+    if (record->scope != EntityId::none) {
+      const auto* scope = world_.entities.find(record->scope);
+      if (!scope || (scope->kind != sema::EntityKind::namespace_ && scope->kind != sema::EntityKind::class_ &&
+                     scope->kind != sema::EntityKind::class_template) || !entity(record->scope)) return false;
+    }
+    if (record->templ != EntityId::none && !entity(record->templ)) return false;
+    known->second = std::ranges::all_of(record->args, [&](const ast::TemplateArg& arg) { return argument(arg); });
+    return known->second;
+  }
+
+  bool argument(const ast::TemplateArg& arg) {
+    switch (arg.kind) {
+    case ast::TemplateArgKind::type: return stable(arg.type);
+    case ast::TemplateArgKind::value: return stable(arg.type) && value(arg.value);
+    case ast::TemplateArgKind::template_: return entity(arg.templ);
+    case ast::TemplateArgKind::pack:
+      return std::ranges::all_of(world_.ins.seqs.elements(arg.elems), [&](const ast::TemplateArg& element) {
+        return argument(element);
+      });
+    }
+    return false;
+  }
+
+  bool value(ast::ConstId id) {
+    const auto& values = world_.ins.values;
+    if (values.is<ast::VInt>(id)) return stable(values.get<ast::VInt>(id).type);
+    if (values.is<ast::VFloat>(id)) return stable(values.get<ast::VFloat>(id).type);
+    if (values.is<ast::VNullptr>(id)) return true;
+    if (values.is<ast::VMemberPtr>(id)) return stable(values.get<ast::VMemberPtr>(id).type);
+    if (values.is<ast::VAggregate>(id)) {
+      const auto aggregate = values.get<ast::VAggregate>(id);
+      return stable(aggregate.type) && std::ranges::all_of(world_.ins.seqs.elements(aggregate.elems),
+                                                          [&](ast::ConstId element) { return value(element); });
+    }
+    const auto address = function_address(world_.ins, id);
+    if (!address || !entity(*address)) return false;
+    const auto& referent = world_.entities.rec(*address);
+    return referent.kind == sema::EntityKind::variable ||
+           (referent.kind == sema::EntityKind::function && stable(referent.type));
+  }
+
+  const sema::World& world_;
+  std::map<EntityId, bool> entities_;
+};
+
 EntityId capability_token_issuer(const sema::World& world, QualType type) {
   const auto [kind, token] = marker(world, class_entity(world, type));
   if (kind != Marker::capability_token || token->args.size() != 2 ||

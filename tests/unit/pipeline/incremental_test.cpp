@@ -870,7 +870,7 @@ void implicit_runtime_policies() {
       return symbol.name_view().starts_with("__ycxx_policy.1.checked.");
     });
     object.symbols.push_back({"__ycxx_policy.1.checked.1", obj::binding::local, 0, 0});
-    object.symbols.push_back({std::format("__ycxx_policy.2.effect.{}.{}._runtime_helper", kind, std::string(32, '0')),
+    object.symbols.push_back({std::format("__ycxx_policy.3.effect.{}.{}._runtime_helper", kind, std::string(32, '0')),
                               obj::binding::local, section, offset});
   };
   attach(caller, "_peer", "need");

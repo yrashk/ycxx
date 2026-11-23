@@ -341,6 +341,13 @@ the checked link compares the declarations used by callers. You are responsible 
 ensuring the adapter implementation stays within that bound. The link also accepts
 sources alongside objects.
 
+An effect contract emitted for an externally bound function needs a stable tag identity.
+Declare shared tags as named types in a common header. A specialization used as a tag
+also needs stable template arguments, including the entities named by address arguments.
+Translation-unit-local tags are usable in local contracts and syntax-only checks. Rebuild
+older checked effect objects with `-fcheck-policies` so each carries the tag identity
+validation required by the current checked linker. [#1043](https://github.com/yrashk/ycxx/issues/1043)
+
 A shared observer can carry both `ownership::verified_observes` and `effects::bound`.
 When it forwards the borrow to another verified observer, the checked call carries both
 the ownership and effect requirements to the final link. The selected provider must

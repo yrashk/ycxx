@@ -424,7 +424,105 @@ with tempfile.TemporaryDirectory() as directory:
     unchecked_handler_peer = write("unchecked_handler_peer.cpp", handler_peer.read_text().replace(
         "[[=fx::contract<Empty>{}]] ", ""))
 
+    effect_header = '#include <ycxx/effects.hpp>\nnamespace fx = ycxx::effects;\n'
+    local_tag = 'namespace { struct Audit {}; }\n'
+    grade = 'using OneAudit = fx::set<fx::at_most<Audit, 1>>;\n'
+    local_effect = write("local_effect_identity.cpp", effect_header + local_tag + grade + """\
+        namespace {
+        [[=fx::trusted_contract<OneAudit>{}]] int record(int n) noexcept { return n + 1; }
+        [[=fx::contract<OneAudit>{}]] int local_leaf(int n) noexcept { return record(n); }
+        }
+        [[=fx::contract<OneAudit>{}]] int local_signature(const Audit*, int n) noexcept { return local_leaf(n); }
+        int main() { return local_signature(nullptr, 6) != 7; }
+    """)
+    effect_roles = """\
+        #ifdef CALLER
+        [[=fx::contract<OneAudit>{}]] int leaf(int) noexcept;
+        [[=fx::contract<OneAudit>{}]] int caller(int n) noexcept { return leaf(n); }
+        int main() { return caller(6) != 7; }
+        #else
+        namespace {
+        [[=fx::trusted_contract<OneAudit>{}]] int record(int n) noexcept { return n + 1; }
+        }
+        [[=fx::contract<OneAudit>{}]] int leaf(int n) noexcept { return record(n); }
+        #endif
+    """
+    named_effect = write("named_effect_identity.cpp", effect_header + 'struct Audit {};\n' + grade + effect_roles)
+    named_effects = [
+        named_effect,
+        write("external_function_effect_identity.cpp", effect_header + """\
+            inline void key() noexcept {}
+            template<void (*)() noexcept> struct TagFor {};
+            using Audit = TagFor<&key>;
+        """ + grade + effect_roles),
+    ]
+    unstable_providers = [
+        write("local_tag_provider.cpp", effect_header + local_tag + grade + effect_roles),
+        write("nested_tag_provider.cpp", effect_header + """\
+            namespace { struct LocalAudit {}; }
+            template<class Tag> struct Wrapper {};
+            using Audit = Wrapper<Wrapper<LocalAudit>>;
+        """ + grade + effect_roles),
+        write("static_function_tag_provider.cpp", effect_header + """\
+            static void key() noexcept {}
+            template<void (*)() noexcept> struct TagFor {};
+            using Audit = TagFor<&key>;
+        """ + grade + effect_roles),
+    ]
+    # The calling body has native local binding. Only its verified or trusted need is exported.
+    unstable_requirements = []
+    for contract, description in (("contract", "verified effect bound"), ("trusted_contract", "trusted effect bound")):
+        source = write(f"local_tag_{contract}_requirement.cpp", effect_header + local_tag + grade + f"""\
+            [[=fx::{contract}<OneAudit>{{}}]] int record(int) noexcept;
+            namespace {{
+            [[=fx::contract<OneAudit>{{}}]] int local_leaf(int n) noexcept {{ return record(n); }}
+            }}
+            int main() {{ return local_leaf(6) != 7; }}
+        """)
+        unstable_requirements.append((source, description))
+
+    def verify_effect_tag_exports(target, suffix, can_run):
+        local_obj = root / f"local-effect-{suffix}.o"
+        local_exe = root / f"local-effect-{suffix}"
+        invoke([*target, "-fsyntax-only", local_effect])
+        invoke([*target, "-c", local_effect, "-o", local_obj])
+        invoke([*target, local_obj, "-o", local_exe])
+        if can_run:
+            subprocess.run([local_exe], check=True, timeout=10)
+
+        for source in named_effects:
+            caller_obj = root / f"{source.stem}-{suffix}-caller.o"
+            provider_obj = root / f"{source.stem}-{suffix}-provider.o"
+            exe = root / f"{source.stem}-{suffix}"
+            invoke([*target, "-DCALLER", "-c", source, "-o", caller_obj])
+            invoke([*target, "-c", source, "-o", provider_obj])
+            invoke([*target, caller_obj, provider_obj, "-o", exe])
+            if can_run:
+                subprocess.run([exe], check=True, timeout=10)
+            if source == named_effect:
+                # An earlier record carries no evidence of stable tag identity.
+                payload = provider_obj.read_bytes()
+                assert payload.count(b"__ycxx_policy.3.effect.have.") == 1
+                legacy = root / f"legacy-effect-{suffix}.o"
+                legacy.write_bytes(payload.replace(b"__ycxx_policy.3.effect.have.", b"__ycxx_policy.2.effect.have."))
+                denied_exe = root / f"denied-effect-{suffix}"
+                invoke([*target, caller_obj, legacy, "-o", denied_exe],
+                       error="legacy checked effect metadata requires rebuilding")
+                assert not denied_exe.exists()
+
+        for source in unstable_providers:
+            invoke([*target, "-fsyntax-only", source])
+        unstable_guarantees = [(source, "verified effect bound") for source in unstable_providers]
+        for source, description in unstable_guarantees + unstable_requirements:
+            obj = root / f"{source.stem}-{suffix}.o"
+            text = invoke([*target, "-c", source, "-o", obj], error="has no stable cross-object identity")
+            assert f"cannot export a {description}" in text and "effect tag" in text, text
+            assert not obj.exists()
+
     darwin = [*base, "--no-daemon", "--target=arm64-apple-darwin"]
+    verify_effect_tag_exports(darwin, "darwin", sys.platform == "darwin" and platform.machine() in ("arm64", "aarch64"))
+    verify_effect_tag_exports([*base, "--no-daemon", "--target=x86_64-linux-gnu", "-nostdlib"], "linux",
+                              sys.platform.startswith("linux") and platform.machine() == "x86_64")
     darwin_capability = root / "darwin-capability"
     invoke([*darwin, capability, "-o", darwin_capability])
     assert darwin_capability.read_bytes().startswith(bytes.fromhex("cffaedfe"))
@@ -653,7 +751,7 @@ with tempfile.TemporaryDirectory() as directory:
 
         stripped = root / "stripped.o"
         payload = obj_leaf.read_bytes()
-        stripped.write_bytes(payload.replace(b"__ycxx_policy.2.effect.have.", b"__xxxx_policy.2.effect.have."))
+        stripped.write_bytes(payload.replace(b"__ycxx_policy.3.effect.have.", b"__xxxx_policy.3.effect.have."))
         assert stripped.read_bytes() != payload
         link(obj_entry, obj_stage, stripped, error="incomplete checked policy metadata")
 

@@ -53,6 +53,7 @@ struct PolicyContract {
   ast::Fp128 signature;
   PolicyContractKind kind;
   bool provides;
+  std::optional<std::string> unstable_effect_tag{};
 };
 
 struct OwnershipRecord {
@@ -2255,16 +2256,25 @@ engine::query_task<CheckPolicies::Value> CheckPolicies::run(engine::Ctx& cx, Key
         std::ranges::sort(grades);
         return fingerprint(std::tuple{base, std::move(grades)});
       };
+      EffectTagIdentity tag_identity{world};
+      auto add_effect_contract = [&](EntityId function, EntityId target, const EffectBound& bound,
+                                     PolicyContractKind kind, bool provides) {
+        PolicyContract contract{function, target, {}, kind, provides};
+        const auto unstable = std::ranges::find_if(bound.tags, [&](QualType tag) { return !tag_identity.stable(tag); });
+        if (unstable == bound.tags.end()) contract.signature = effect_signature(target, bound);
+        else contract.unstable_effect_tag = world.types.spell(*unstable);
+        result.contracts.push_back(std::move(contract));
+      };
       for (std::size_t i = 0; i < effect_findings.size(); ++i) {
         const auto function = effect_definitions[i]->entity;
         const auto operation = policy_operation(world, function, tu.n);
         const auto& bound = registry.effects.at(operation);
         if (!operation.second)
-          result.contracts.push_back({function, function, effect_signature(function, bound), PolicyContractKind::effect, true});
+          add_effect_contract(function, function, bound, PolicyContractKind::effect, true);
         for (const auto callee : effect_findings[i].get().callees) {
           const auto& declared = registry.effects.at(policy_operation(world, callee, tu.n));
           const auto kind = declared.trusted ? PolicyContractKind::trusted_effect : PolicyContractKind::effect;
-          result.contracts.push_back({function, callee, effect_signature(callee, declared), kind, false});
+          add_effect_contract(function, callee, declared, kind, false);
         }
       }
     }
