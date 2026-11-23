@@ -114,7 +114,7 @@ def direct(world, scope):
     command = [*args, '-MF', str(updated), '-MT', LITERAL_TARGET]
     for env in (world.cold, world.daemon):
         result = world.cxx(command, scope, env, timeout=30)
-        assert result[0] == 1 and b'depfile_failure_control' in result[2], result
+        assert result[0] == 1 and f'{SOURCE}:10:2: error: #error'.encode() in result[2], result
         assert (scope / updated).read_bytes() == reports[-1]
         assert (scope / updated).stat().st_mtime_ns == previous
     return pid
