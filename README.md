@@ -557,6 +557,9 @@ written default member initializer are value-initialized.
   such as `Limits{42}.quota`. [#900](https://github.com/yrashk/ycxx/issues/900)
   Class-template static constexpr members can use these reads in their initializers.
   [#991](https://github.com/yrashk/ycxx/issues/991)
+  A constant expression can return a named empty or flat aggregate and use the result,
+  including an initialized fixed-size `char` member array.
+  [#975](https://github.com/yrashk/ycxx/issues/975)
   Namespace-scope `constexpr` pointers to `void` can retain scalar and array element addresses.
   `__builtin_addressof`, used by libycxx's `std::addressof`, bypasses overloaded `operator&`.
   It supports runtime addresses and constant expressions such as a scalar global's address.
@@ -576,7 +579,8 @@ hosted `<cstdint>`, `<cinttypes>`, and `<inttypes.h>` compile. A Darwin target c
 SDK or one selected by `SDKROOT`. Cross-target builds can also supply target headers with `-I` or
 `-isystem`. When no target `<stdint.h>` is available, `<cstdint>` uses compiler predefines.
 `-nostdinc` omits the automatic include directories and keeps the explicit ones.
-[#251](https://github.com/yrashk/ycxx/issues/251) ·
+`-nostdinc++` omits only the automatic libycxx source and generated include directories.
+[#251](https://github.com/yrashk/ycxx/issues/251) · [#997](https://github.com/yrashk/ycxx/issues/997) ·
 [#475](https://github.com/yrashk/ycxx/issues/475) · [#657](https://github.com/yrashk/ycxx/issues/657) ·
 [#664](https://github.com/yrashk/ycxx/issues/664) · [#690](https://github.com/yrashk/ycxx/issues/690)
 
@@ -689,6 +693,11 @@ Both targets emit all three virtual destructor entries for a fieldless, baseless
 a peer defines its earlier key function. Complete and base destruction restore the root's
 vptr before calling the nonthrowing observer. The deleting entry then uses global sized
 `operator delete`. [#136](https://github.com/yrashk/ycxx/issues/136)
+
+On Linux x86-64, an empty out-of-line virtual destructor can own the derived table and RTTI
+for a class with one public nonvirtual base and no added fields. The base has one pointer field
+and a peer-owned virtual destructor and RTTI. This is the shape of libycxx's fundamental
+`type_info` configure probe. [#999](https://github.com/yrashk/ycxx/issues/999)
 
 ### Not yet
 

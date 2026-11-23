@@ -128,8 +128,9 @@ struct Config {
   // An ABI option the unit's front end reads: `-fclass-call-abi=itanium|apple`, which classes pass
   // in registers (DECISIONS §1.6). None: the target's default.
   std::optional<ast::CallTriviality> call_triviality;
-  // Setup option consumed by with_system_dirs. Queries use the effective directory lists.
+  // Setup options consumed by with_system_dirs. Queries use the effective directory lists.
   bool nostdinc = false;
+  bool nostdincxx = false;
   ast::CallTriviality calls() const { return call_triviality.value_or(target->call_triviality); }
 
   // Whether a file found in directory `found` (an index into quote then angle directories, as

@@ -220,6 +220,10 @@ What is true of the code today. Work in progress and its owners are tracked in
     bundled library and resource headers, while keeping explicit `-I`, `-isystem`,
     and `-iquote` paths, source-relative quoted includes, and macros.
     [#251](https://github.com/yrashk/ycxx/issues/251)
+  - `-nostdinc++` omits the implicit libycxx source and generated include directories. The
+    compiler keeps its resource directories, target C library or SDK directories, and explicit
+    includes. With both flags, `-nostdinc` applies in either order.
+    [#997](https://github.com/yrashk/ycxx/issues/997)
   - `-print-file-name=include` prints the primary configured resource include directory, and
     `-dumpmachine` prints the canonical target triple. The driver accepts `--target` for both
     queries and answers without opening a translation unit or starting a daemon. Linux reports
@@ -1093,8 +1097,8 @@ in `lsp` frames (`LspOut`), the last of which carries LSP's exit status (1 after
   header or C entry is no unit), else the file alone in its directory. `daemon.lsp`'s
   `compile_commands` covers both forms, a response file, a header and a C file, a directory
   spelled through a symbolic link, and a change (mutation-checked). The check also keeps
-  `-nostdinc`. Options `pp` does not take yet (`-include`, `--sysroot`, …) are dropped.
-  [#251](https://github.com/yrashk/ycxx/issues/251)
+  `-nostdinc` and `-nostdinc++`. Options `pp` does not take yet (`-include`, `--sysroot`, …) are dropped.
+  [#251](https://github.com/yrashk/ycxx/issues/251) · [#997](https://github.com/yrashk/ycxx/issues/997)
 - Not yet: stopping a diagnosis on a newer edit,
   `$/cancelRequest`, debouncing and interactive priority (#168); `buffers_in`, the disk-view
   assertion and one view per session (#169); go-to-definition from a declaration part (a
@@ -1208,6 +1212,12 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   has its own typed cell. Evaluation rejects a read before initialization
   ([class.temporary], [dcl.init.aggr], [basic.life], [expr.const.core]).
   [#900](https://github.com/yrashk/ycxx/issues/900)
+- Constant evaluation can copy a named empty or flat non-union aggregate without bases and
+  with implicit trivial destruction into the caller's result storage. A constexpr member can
+  use the live result, including a checked pointer into an initialized fixed-size `char` member
+  array. L1 diagnoses access through an expired local pointer and an ordinary constexpr member
+  call on an expired receiver ([stmt.return], [basic.life], [expr.const]).
+  [#975](https://github.com/yrashk/ycxx/issues/975)
 - Constant evaluation can read namespace-scope `constexpr` pointers erased to `void`
   ([expr.const], [conv.ptr], #102). The interpreter reconstructs the original scalar or array
   subobject path, including one-past addresses, from the constant's path and byte offset.
@@ -1418,6 +1428,15 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   `operator delete` with the original pointer and the complete root size.
   [Itanium ABI §2.5.2](https://itanium-cxx-abi.github.io/cxx-abi/abi.html#vtable-components) ·
   [#136](https://github.com/yrashk/ycxx/issues/136) · [#659](https://github.com/yrashk/ycxx/issues/659)
+- On Linux x86-64, a derived class with an empty out-of-line virtual destructor can own its
+  32-byte table and single-inheritance RTTI. It has one public nonvirtual primary base with
+  one directly written pointer field with a builtin pointee type and a peer-owned public
+  virtual destructor. `D1` and `D2` share a body
+  that restores the derived address point and calls the base's `D2` at offset zero. `D0` then
+  deallocates the original pointer with the complete 16-byte object size. The derived descriptor
+  imports the peer's base descriptor. The destructor specifications can be implicit. A unit
+  containing only the declarations leaves ownership with the units defining the keys.
+  [Design](docs/design/linux-derived-virtual-destructor.md) · [#999](https://github.com/yrashk/ycxx/issues/999)
 - A non-template constructor can delegate to another ordinary constructor of its class with
   a sole parenthesized or braced initializer ([class.base.init], #157). The target resolves in
   the complete class and constructs the same object. The delegating body starts after the
