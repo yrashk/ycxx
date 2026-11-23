@@ -536,6 +536,12 @@ public:
       if (ins().values.is_dependent(value->value)) return value_arg(t, value->value);
       return converted_value(*value, t);
     }
+    if (ins().values.is<ast::VDepConcept>(a.value)) {
+      auto value = substitute_concept_value(a.value, b);
+      if (!value) return std::nullopt;
+      if (ins().values.is_dependent(*value)) return value_arg(t, *value);
+      return converted_value(value_arg(types().builtin(Builtin::bool_), *value), t);
+    }
     auto v = substitute_value(a.value, b);
     if (!v) return std::nullopt;
     if ((ins().values.is<ast::VDepOp>(a.value) || ins().values.is<ast::VDepOp>(*v)) && !types().is(t, Builtin::bool_))
@@ -567,6 +573,7 @@ public:
     }
     if (ins().values.is<ast::VDepMember>(v))
       return substitute_member_value(v, b).transform([](const TemplateArg& a) { return a.value; });
+    if (ins().values.is<ast::VDepConcept>(v)) return substitute_concept_value(v, b);
     if (ins().values.is<ast::VDepVariable>(v)) return substitute_variable_value(v, b, variable_constant);
     if (ins().values.is<ast::VDepCall>(v))
       return substitute_call_value(v, b).transform([](const TemplateArg& a) { return a.value; });
@@ -887,6 +894,8 @@ public:
       for (const TemplateArg& a : ins().seqs.elements(ins().values.get<ast::VDepVariable>(v).args)) params_in(a, out, nested);
     else if (ins().values.is<ast::VDepMember>(v))
       params_in(ins().values.get<ast::VDepMember>(v).qualifier, out, nested);
+    else if (ins().values.is<ast::VDepConcept>(v))
+      for (const TemplateArg& a : ins().seqs.elements(ins().values.get<ast::VDepConcept>(v).args)) params_in(a, out, nested);
     else if (ins().values.is<ast::VDepCall>(v))
       for (const TemplateArg& a : ins().seqs.elements(ins().values.get<ast::VDepCall>(v).args)) params_in(a, out, nested);
     else if (ins().values.is<ast::VDepOp>(v))
@@ -1858,6 +1867,17 @@ private:
     return member_constant ? member_constant(*qualifier, member.name) : std::nullopt;
   }
 
+  std::optional<ConstId> substitute_concept_value(ConstId v, const Bindings& b) {
+    auto ref = ins().values.get<ast::VDepConcept>(v);
+    auto args = substitute_args(ins().seqs.elements(ref.args), b);
+    if (!args) return std::nullopt;
+    if (std::ranges::any_of(*args, [&](const TemplateArg& a) { return w_->arg_dependent(a); })) {
+      ref.args = ins().intern_seq(std::span<const TemplateArg>(*args));
+      return ins().intern_value(ref);
+    }
+    return concept_constant ? concept_constant(ref.concept_, *args) : std::nullopt;
+  }
+
   std::optional<TemplateArg> substitute_call_value(ConstId v, const Bindings& b) {
     auto call = ins().values.get<ast::VDepCall>(v);
     auto args = substitute_args(ins().seqs.elements(call.args), b);
@@ -1978,13 +1998,13 @@ public:
     default: return true;
     }
   }
-private:
   bool structural_operand(const TemplateArg& a) {
     if (a.kind == TemplateArgKind::pack)
       return std::ranges::all_of(elements(a), [&](const TemplateArg& e) { return structural_operand(e); });
     if (a.kind == TemplateArgKind::value) return structural_value(a.value) && structural_operand(a.type);
     return a.templ != EntityId::none || structural_operand(a.type);
   }
+private:
   bool structural_value(ConstId v) {
     if (ins().values.is<ast::VDepParam>(v)) return ins().values.get<ast::VDepParam>(v).depth != dependent_depth;
     if (ins().values.is<ast::VDepExpansion>(v)) return structural_value(ins().values.get<ast::VDepExpansion>(v).pattern);
@@ -1993,6 +2013,9 @@ private:
                                  [&](const TemplateArg& a) { return structural_operand(a); });
     if (ins().values.is<ast::VDepMember>(v))
       return structural_operand(ins().values.get<ast::VDepMember>(v).qualifier);
+    if (ins().values.is<ast::VDepConcept>(v))
+      return std::ranges::all_of(ins().seqs.elements(ins().values.get<ast::VDepConcept>(v).args),
+                                 [&](const TemplateArg& a) { return structural_operand(a); });
     if (ins().values.is<ast::VDepCall>(v))
       return std::ranges::all_of(ins().seqs.elements(ins().values.get<ast::VDepCall>(v).args),
                                  [&](const TemplateArg& a) { return structural_operand(a); });
@@ -2048,6 +2071,7 @@ public:
   std::function<std::optional<ast::DeclSema>(EntityId)> template_decl;
   std::function<std::optional<ConstId>(EntityId)> variable_constant;
   std::function<std::optional<TemplateArg>(QualType, NameId)> member_constant;
+  std::function<std::optional<ConstId>(EntityId, std::span<const TemplateArg>)> concept_constant;
   std::function<std::optional<TemplateArg>(EntityId, std::span<const TemplateArg>)> call_constant;
   std::function<std::optional<QualType>(const ast::DeclSema&, std::span<const TemplateArg>, const Bindings&)> alias_type;
   std::function<std::optional<interp::GlobalVar>(EntityId)> variable_global;
