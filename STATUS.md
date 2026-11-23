@@ -1419,7 +1419,8 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   one pointer field and a peer-owned public virtual destructor. `D1` and `D2` share a body
   that restores the derived address point and calls the base's `D2` at offset zero. `D0` then
   deallocates the original pointer with the complete 16-byte object size. The derived descriptor
-  imports the peer's base descriptor. The destructor specifications can be implicit.
+  imports the peer's base descriptor. The destructor specifications can be implicit. A unit
+  containing only the declarations leaves ownership with the units defining the keys.
   [Design](docs/design/linux-derived-virtual-destructor.md) · [#999](https://github.com/yrashk/ycxx/issues/999)
 - A non-template constructor can delegate to another ordinary constructor of its class with
   a sole parenthesized or braced initializer ([class.base.init], #157). The target resolves in

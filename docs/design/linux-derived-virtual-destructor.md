@@ -21,5 +21,7 @@ the named descriptor for `B`. Only `D` owns a table or RTTI in this translation 
 The producer checks the complete unit for redeclarations, visibility and layout
 directives. These facts certify this destructor's lowering and table only. The existing
 automatic-object, virtual-call and typed-cast layout profiles keep their own rules.
+When both destructors are only declared, their definitions, tables and RTTI belong
+to the peer units that define the keys.
 
 [#999](https://github.com/yrashk/ycxx/issues/999) · [Destructor variants #136](https://github.com/yrashk/ycxx/issues/136) · [Virtual classes #309](https://github.com/yrashk/ycxx/issues/309) · [RTTI #294](https://github.com/yrashk/ycxx/issues/294) · [Itanium ABI §2.5.2](https://itanium-cxx-abi.github.io/cxx-abi/abi.html#vtable-components)
