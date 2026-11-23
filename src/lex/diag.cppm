@@ -17,9 +17,13 @@ export namespace ycxx::lex {
 
 enum class Severity : u8 { error, warning };
 
+// Diagnostic categories the driver can select. A diagnostic without a category is always shown.
+enum class Warning : u8 { uncontrolled, multichar, attributes, sized_deallocation };
+
 struct message {
   Severity severity;
   char text[112];
+  Warning warning = Warning::uncontrolled;
 };
 
 enum class LexDiag : u32 {
@@ -56,7 +60,7 @@ enum class LexDiag : u32 {
   escape_out_of_range [[=message{Severity::error, "escape sequence value 0x{0:x} is out of range for its character type"}]],
   char_not_single_unit [[=message{Severity::error, "character literal needs more than one code unit in its encoding"}]],
   multichar_with_prefix [[=message{Severity::error, "a multicharacter literal cannot have an encoding prefix"}]],
-  multichar [[=message{Severity::warning, "multicharacter literal has an implementation-defined value"}]],
+  multichar [[=message{Severity::warning, "multicharacter literal has an implementation-defined value", Warning::multichar}]],
   multichar_not_single_unit [[=message{Severity::error, "multicharacter literal contains a character that needs more than one code unit"}]],
   // [lex.string] phase 5
   concat_encoding_mismatch [[=message{Severity::error, "adjacent string literals have different encoding prefixes"}]],

@@ -235,7 +235,6 @@ draft/expr/expr.const.init-1.accept.cpp 'struct' not supported yet
 draft/expr/expr.const.init-2.accept.cpp 'thread_local' not supported yet
 draft/expr/expr.const.init-3.reject.cpp errors elsewhere: 'struct' not supported yet
 draft/expr/expr.const.reflect-2.accept.cpp preprocessing directives are not supported yet
-draft/expr/expr.dynamic.cast-1.accept.cpp 'struct' not supported yet
 draft/expr/expr.dynamic.cast-2.reject.cpp errors elsewhere: 'class' not supported yet
 draft/expr/expr.eq-1.accept.cpp 'struct' not supported yet
 draft/expr/expr.eq-2.accept.cpp 'struct' not supported yet

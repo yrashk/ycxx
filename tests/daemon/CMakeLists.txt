@@ -1,5 +1,8 @@
 # Process-level daemon tests (docs/design/daemon.md §8.2). #98 grows this suite.
 add_test(NAME daemon.compare COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/compare.py $<TARGET_FILE:ycxxc> ${PROJECT_SOURCE_DIR}/tests/own)
+add_test(NAME daemon.no_rtti
+  COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/no_rtti.py
+          $<TARGET_FILE:ycxxc> ${PROJECT_SOURCE_DIR}/deps/libycxx "${CMAKE_CXX_COMPILER}")
 add_executable(ycxxc_daemon_process process_driver.cpp)
 target_link_libraries(ycxxc_daemon_process PRIVATE ycxxc_lib ycxxc_new)
 add_test(NAME daemon.process COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/process.py $<TARGET_FILE:ycxxc> $<TARGET_FILE:ycxxc_daemon_process>)
@@ -33,3 +36,6 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_
     COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/derived_virtual_destructor_alignment.py
             $<TARGET_FILE:ycxxc> ${CMAKE_CXX_COMPILER})
 endif()
+
+add_test(NAME daemon.warning_options
+  COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/warning_options.py $<TARGET_FILE:ycxxc>)

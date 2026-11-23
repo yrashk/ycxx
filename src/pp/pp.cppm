@@ -32,8 +32,8 @@ export import :predefined;
 export import :cond;
 
 namespace {
-// Keep the original freestanding boolean's encoding when exceptions are enabled.
-constexpr std::uint8_t freestanding_bit = 1, no_exceptions_bit = 2;
+// Preserve the bit values of earlier source configurations.
+constexpr std::uint8_t freestanding_bit = 1, no_exceptions_bit = 2, no_rtti_bit = 4;
 }
 
 export namespace ycxx::pp {
@@ -67,13 +67,14 @@ void trace_describe(std::string& out, FileId f);
 Preprocessed preprocess(Session& s, std::string_view text, std::string_view path);
 Preprocessed preprocess(std::string_view text, std::string_view path = "<stdin>");
 // A diagnostic ready to print: the presumed file name, line and column (1-based, columns in
-// bytes), severity and message.
+// bytes), severity, message and warning category.
 struct Message {
   std::string file;
   u32 line = 0;
   u32 column = 0;
   bool error = true;
   std::string text;
+  lex::Warning warning = lex::Warning::uncontrolled;
 };
 Message message(Session& s, FileId file, std::string_view presumed, const Diag& d);
 // The same, from the text of the file the diagnostic is in and the spellings of the session that
@@ -151,6 +152,7 @@ void serialize_into(engine::Sink& out, const Source& s) {
   std::uint8_t modes = 0;
   if (s.config.freestanding) modes |= freestanding_bit;
   if (!s.config.exceptions_enabled) modes |= no_exceptions_bit;
+  if (!s.config.rtti_enabled) modes |= no_rtti_bit;
   engine::serialize(out, modes);
 }
 Source deserialize_from(engine::Source& in, std::type_identity<Source>) {
@@ -171,9 +173,10 @@ Source deserialize_from(engine::Source& in, std::type_identity<Source>) {
   if (calls > 1 + std::to_underlying(ast::CallTriviality::apple)) in.fail();
   if (calls != 0) s.config.call_triviality = static_cast<ast::CallTriviality>(calls - 1);
   const auto modes = engine::deserialize<std::uint8_t>(in);
-  if ((modes & ~(freestanding_bit | no_exceptions_bit)) != 0) in.fail();
+  if ((modes & ~(freestanding_bit | no_exceptions_bit | no_rtti_bit)) != 0) in.fail();
   s.config.freestanding = (modes & freestanding_bit) != 0;
   s.config.exceptions_enabled = (modes & no_exceptions_bit) == 0;
+  s.config.rtti_enabled = (modes & no_rtti_bit) == 0;
   return s;
 }
 
@@ -425,8 +428,9 @@ Message message(const Spellings& s, std::string_view file_text, std::string_view
   // [cpp.line]: the presumed line and name its region resolved.
   if (d.presumed_line != 0) line = d.presumed_line;
   if (d.presumed_name) name = s.name(*d.presumed_name);
-  return Message{std::move(name), line, d.offset - *(at - 1) + 1, lex::message_of(d.kind).severity == lex::Severity::error,
-                 std::move(text)};
+  const auto spec = lex::message_of(d.kind);
+  return Message{std::move(name), line, d.offset - *(at - 1) + 1, spec.severity == lex::Severity::error,
+                 std::move(text), spec.warning};
 }
 
 std::pair<std::string, std::vector<Message>> preprocess_to_text(Session& s, std::string_view text, std::string_view path) {
@@ -474,6 +478,10 @@ std::expected<bool, std::string> take_option(std::span<const std::string_view> a
   }
   if (a == "-fno-exceptions") {
     cfg.exceptions_enabled = false;
+    return true;
+  }
+  if (a == "-frtti" || a == "-fno-rtti") {
+    cfg.rtti_enabled = a == "-frtti";
     return true;
   }
   return false;

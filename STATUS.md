@@ -2562,6 +2562,21 @@ first; a dependent base is not searched. Redeclaring a hidden parameter's name i
   (was 1). `<cmath>` and `<cstdlib>` gain errors in the SDK's `__GNUC__` inline functions (local
   unions, floating-point operations, `__builtin_fabs*`), which already had thousands.
 
+## Warning controls for freestanding builds
+
+- The driver and editor checks accept `-Wall`, `-Wextra` and their negative forms. The
+  multicharacter-literal warning remains on by default and responds to `-Wno-all` and `-Wall`,
+  as in Clang 23. GCC 16 leaves this warning outside `-Wall`. The individual `-Wmultichar`
+  and `-Wno-multichar` controls take precedence over the group. The last equally specific
+  occurrence wins.
+- `-Wextra` selects sized-deallocation warnings as in GCC 16, subject to
+  `-Wsized-deallocation` and `-Wno-sized-deallocation`. `-Wattributes` and `-Wno-attributes`
+  select attribute warnings separately. Neither category has a diagnostic producer yet.
+- The selection happens when a request renders its diagnostics, including editor requests
+  configured from `compile_commands.json`. Required `#warning` diagnostics, the system-header
+  warning rules and errors are unaffected. Direct invocations still reject unsupported
+  warning controls. [#1014](https://github.com/yrashk/ycxx/issues/1014)
+
 ## GNU pointer qualifiers in glibc declarations (#384)
 
 - The parser accepts `__restrict` and `__restrict__` after `*` in pointer declarators
@@ -3035,6 +3050,13 @@ What the process allocates, attributed to the engine's cells, in the trace and t
   [#294](https://github.com/yrashk/ycxx/issues/294) · [#310](https://github.com/yrashk/ycxx/issues/310) ·
   [#489](https://github.com/yrashk/ycxx/issues/489)
   [Design](docs/design/ordinary-virtual-declarations.md)
+
+The driver and editor honor `-fno-rtti` and `-frtti` in argument order. `-frtti` restores the
+default mode. With RTTI disabled, owned ELF and Mach-O vtables retain the same address point
+and function slots and have a zero typeinfo word. The parser diagnoses
+`typeid` and typed casts that require RTTI. Pointer identity and accessible unambiguous base
+casts use ordinary conversions in either mode.
+[#982](https://github.com/yrashk/ycxx/issues/982) · [Design](docs/design/freestanding-no-rtti.md)
 
 ## Borrowed `dynamic_cast` to `cv void*` (#294)
 
