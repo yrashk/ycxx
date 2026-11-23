@@ -245,6 +245,8 @@ std::expected<Options, std::string> parse_options(std::span<const std::string_vi
     auto pp_option = pp::take_option(args, i, o.pp);
     if (!pp_option) return std::unexpected(pp_option.error());
     if (*pp_option) continue;
+    // This spelling explicitly selects the existing automatic-variable initialization behavior.
+    if (a == "-ftrivial-auto-var-init=uninitialized") continue;
     if (auto query = query_option(a); query != Options::Query::none) {
       if (o.query != Options::Query::machine) o.query = query;
     } else if (a == "-c") o.stop = Options::Stop::object;

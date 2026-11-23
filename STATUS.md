@@ -228,6 +228,10 @@ What is true of the code today. Work in progress and its owners are tracked in
     `-dumpmachine` prints the canonical target triple. The driver accepts `--target` for both
     queries and answers without opening a translation unit or starting a daemon. Linux reports
     `resources/linux/include` and Darwin reports `resources/common/include`. [#970](https://github.com/yrashk/ycxx/issues/970)
+  - `-ftrivial-auto-var-init=uninitialized` selects the default automatic-variable
+    initialization behavior. The option adds no source configuration state, so editor checks
+    use the same behavior when they omit it from imported compile commands.
+    [#1015](https://github.com/yrashk/ycxx/issues/1015)
   - `#define` and `#undef` with the redefinition check, rescanning and painting
     ([cpp.rescan]);
   - function-like macros (`:unit`'s `invocation`, `substitute`, `paste`): arguments across

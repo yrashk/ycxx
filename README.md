@@ -602,6 +602,9 @@ multicharacter-literal warning. [#1014](https://github.com/yrashk/ycxx/issues/10
 its compiler resource include directory. Both accept `--target` and run without a project.
 [#970](https://github.com/yrashk/ycxx/issues/970)
 
+`-ftrivial-auto-var-init=uninitialized` explicitly selects the default automatic-variable
+initialization behavior. [#1015](https://github.com/yrashk/ycxx/issues/1015)
+
 **Incremental builds through a resident daemon.** `ycxx cxx` hands its work to a per-project
 `ycxx daemon` (`YCXX_NO_DAEMON=1` runs in-process), which watches the files it has read and keeps
 its analysis between commands. A repeated build re-runs nothing, and an edit re-runs only what
