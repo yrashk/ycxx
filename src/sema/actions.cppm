@@ -589,10 +589,9 @@ public:
         // The injected-class-name is declared in the class's own scope ([class.pre]).
         if (!initializer_bases.empty() && c.name == name) return types().class_type(current_class);
         if (!elaborated && !initializer_bases.empty()) {
-          // An inherited value hides a namespace type even in a tentative type-id.
-          if (auto member = find_base_member(initializer_bases, name, /*unqualified=*/true);
-              member && (member->ambiguous || member->nested_type == EntityId::none ||
-                         member->enumerator != EntityId::none)) return std::nullopt;
+          // A base declaration hides a namespace type. Merge base types by the types they name.
+          auto hit = class_body_type(current_class, ClassRec{}, name, type_at, ClassBodyLookup::static_initializer);
+          if (hit.found) return hit.type;
         }
         // In the class being defined, a type of its (complete) bases.
         for (EntityId b : q_->defining_bases(current_class))
@@ -650,7 +649,9 @@ public:
     std::optional<QualType> type;
   };
 
-  enum class ClassBodyLookup { unqualified, qualified, enum_qualifier, qualified_enum, before_template_parameter };
+  enum class ClassBodyLookup {
+    unqualified, qualified, enum_qualifier, qualified_enum, before_template_parameter, static_initializer
+  };
 
   // [class.pre], [class.member.lookup]: a class's injected name stops the search on
   // that branch. In a nonvirtual graph, distinct base branches cannot dominate one another.
@@ -660,6 +661,7 @@ public:
     const bool enum_lookup = qualified_enum || lookup == ClassBodyLookup::enum_qualifier;
     const bool qualified = lookup == ClassBodyLookup::qualified || enum_lookup;
     const bool before_parameter = lookup == ClassBodyLookup::before_template_parameter;
+    const bool static_initializer = lookup == ClassBodyLookup::static_initializer;
     struct Edge {
       EntityId derived;
       ast::Access access;
@@ -694,7 +696,10 @@ public:
         }
       }
       std::span<const BaseRec> bases = cr.bases;
-      if ((qualified || before_parameter) && cls == naming && !cr.defined) bases = q_->defining_base_records(cls);
+      if (cls == naming && !cr.defined) {
+        if (static_initializer) bases = static_initializer_bases(naming);
+        else if (qualified || before_parameter) bases = q_->defining_base_records(cls);
+      }
       for (const BaseRec& b : bases) {
         // [temp.dep.general]: the naming class's dependent bases are not searched. A base of a
         // nondependent base is nondependent, whatever it was in that base's own pattern.
@@ -715,14 +720,14 @@ public:
     auto first = std::ranges::find_if(hits, [](const Hit& h) { return h.type.has_value(); });
     if (first == hits.end()) return {true, std::nullopt};
     // Apply the lookup-set and access checks to names with an injected-class-name candidate.
-    // The caller resolving a potentially hidden template parameter also needs these checks
-    // for ordinary members of nondependent bases ([temp.local]).
-    if (type_at && (injected || enum_lookup || before_parameter)) {
+    // The callers resolving a hidden template parameter or a static initializer's type-id
+    // also need these checks for ordinary members of nondependent bases.
+    if (static_initializer || (type_at && (injected || enum_lookup || before_parameter))) {
       QualType selected = types().canonical(*first->type);
       if (std::ranges::any_of(hits, [&](const Hit& h) { return !h.type || types().canonical(*h.type) != selected; })) {
-        diag(*type_at, Diag::ambiguous_member, name, types().class_type(naming));
-        if (enum_lookup) return {true, std::nullopt};
-      } else {
+        if (type_at) diag(*type_at, Diag::ambiguous_member, name, types().class_type(naming));
+        if (enum_lookup || static_initializer) return {true, std::nullopt};
+      } else if (type_at) {
         if (qualified_enum) {
           std::erase_if(hits, [&](const Hit& hit) {
             return w_->entities.rec(hit.declaration).kind == EntityKind::type_alias;
