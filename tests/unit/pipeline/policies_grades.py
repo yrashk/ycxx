@@ -205,16 +205,25 @@ with tempfile.TemporaryDirectory() as directory:
         finally:
             subprocess.run([compiler, "ctl", "shutdown"], cwd=root, env=env, capture_output=True, timeout=10)
 
-    provider_source = """\
+    write("linked_grade.hpp", """\
+        #pragma once
         #include "grades.hpp"
-        [[=fx::contract<One>{}]] int send(int n) noexcept { return n + 1; }
+        template<int Requested> struct LinkProfile {
+          enum Counts : int { previous = Requested - 1, count };
+          static constexpr int limit = static_cast<int>(Counts::count);
+        };
+        using LinkedOne = fx::set<fx::at_most<Send, LinkProfile<1>::limit>>;
+    """)
+    provider_source = """\
+        #include "linked_grade.hpp"
+        [[=fx::contract<LinkedOne>{}]] int send(int n) noexcept { return n + LinkProfile<1>::limit; }
     """
     provider = write("provider.cpp", provider_source)
-    changed = write("changed.cpp", provider_source.replace("contract<One>", "contract<Two>"))
+    changed = write("changed.cpp", provider_source.replace("contract<LinkedOne>", "contract<Two>"))
     linked_caller = write("native.cpp", """\
-        #include "grades.hpp"
-        [[=fx::contract<One>{}]] int send(int) noexcept;
-        [[=fx::contract<One>{}]] int run(int n) noexcept {
+        #include "linked_grade.hpp"
+        [[=fx::contract<LinkedOne>{}]] int send(int) noexcept;
+        [[=fx::contract<LinkedOne>{}]] int run(int n) noexcept {
           do { n = send(n); } while (false);
           return n;
         }
@@ -242,7 +251,7 @@ with tempfile.TemporaryDirectory() as directory:
         # PARITY: #659 for explicit weak function definitions on Darwin.
         if target == linux:
             weak_provider = write("weak_provider.cpp", provider_source.replace(
-                "[[=fx::contract<One>{}]]", "[[gnu::weak]] [[=fx::contract<One>{}]]"))
+                "[[=fx::contract<LinkedOne>{}]]", "[[gnu::weak]] [[=fx::contract<LinkedOne>{}]]"))
             weak_object = root / "weak_provider.o"
             invoke([*target, "-c", weak_provider, "-o", weak_object])
             wrong_grade = root / "changed.o"
