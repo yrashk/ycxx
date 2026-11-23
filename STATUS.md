@@ -228,6 +228,10 @@ What is true of the code today. Work in progress and its owners are tracked in
     `-dumpmachine` prints the canonical target triple. The driver accepts `--target` for both
     queries and answers without opening a translation unit or starting a daemon. Linux reports
     `resources/linux/include` and Darwin reports `resources/common/include`. [#970](https://github.com/yrashk/ycxx/issues/970)
+  - `-ftrivial-auto-var-init=uninitialized` selects the default automatic-variable
+    initialization behavior. The option adds no source configuration state, so editor checks
+    use the same behavior when they omit it from imported compile commands.
+    [#1015](https://github.com/yrashk/ycxx/issues/1015)
   - `#define` and `#undef` with the redefinition check, rescanning and painting
     ([cpp.rescan]);
   - function-like macros (`:unit`'s `invocation`, `substitute`, `paste`): arguments across
@@ -1547,11 +1551,16 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   ordinary member collision checks. The enum identity uses the declaring class, canonical
   underlying type, and first enumerator.
   [#859](https://github.com/yrashk/ycxx/issues/859)
+- Named unscoped member enum definitions in class templates defer value-dependent initializers
+  and their implicit successors. Specialization replay evaluates each list, including earlier
+  enumerator references, fixed-base range checks, and underlying-type inference. Size and
+  alignment of an inferred enum with dependent values wait for that replay.
+  [#861](https://github.com/yrashk/ycxx/issues/861)
 - Further work includes opaque declarations in classes or blocks, unnamed empty definitions,
   unnamed definitions followed by declarators, and `E{}` and `E(v)` expressions
   (#157). Enumerations in a block are tracked in #117. Qualified lookup of earlier enumerators
-  while the unnamed definition is open is tracked in #879, and dependent enumerator values
-  in class templates in #861.
+  while the unnamed definition is open is tracked in #879. Dependent scoped enum definitions
+  wait for #893, and dependent unnamed definitions for #894.
 
 ## Direct explicit destructor calls (#722)
 
@@ -1579,6 +1588,9 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   directives and aliases; directives are transitive ([namespace.udir]/4) and qualified lookup
   follows them ([namespace.qual]/2). Two using-directives that bring in different entities make a name
   ambiguous. Constructors and destructors are not found by name ([class.ctor]/1).
+- Block-scope using-declarations make imported enumeration, class and alias names available as
+  qualifiers. Lookup considers them alongside local type and namespace aliases, starting with the
+  innermost block ([namespace.udecl], [basic.lookup.qual]). [#953](https://github.com/yrashk/ycxx/issues/953)
 - **Definitions outside:** `int N::f(…) {…}`, `int N::C::count = 0;`, `N::C::C(…) : … {}` and
   `N::C::~C()`: what follows the declarator-id, the body included, is looked up in that scope
   ([basic.lookup.unqual]/9).
@@ -2113,10 +2125,11 @@ template's tokens again with the arguments bound.
 - **Dependent variable-template arguments** (#209): an unqualified namespace variable template
   used as a dependent `bool` template argument keeps the declaration found by ordinary lookup.
   Substitution evaluates the selected specialization once its arguments are concrete.
-- **Dependent immediate calls** (#209, [temp.dep.constexpr], [temp.arg.nontype]): a call to an
-  unqualified, unambiguous namespace `consteval` function template with no function parameters
-  can supply a non-type template argument. The call retains its explicit type arguments, including
-  trailing pack expansions, and evaluates to an integer or enum once those arguments are concrete.
+- **Dependent immediate calls** (#209, [temp.dep.constexpr], [temp.arg.nontype]): an unqualified
+  or fixed namespace-qualified call to a uniquely resolved `consteval` function template with
+  no function parameters can supply a non-type template argument. The call retains its explicit
+  type arguments, including trailing pack expansions, and evaluates to an integer or enum once
+  those arguments are concrete.
   Alias type-ids replay calls whose argument validity must be checked at substitution.
   Dependent uses of aliases that can erase the check require signature replay (#209).
 - An unqualified call to a single ordinary external C++ immediate function can also supply
@@ -2417,7 +2430,8 @@ Fable decided the representation (ast.md §6.6); the Opus session wrote the code
 - Ordinary function overloads with explicit trailing type packs preserve the pack in atomic
   constraint substitution. Empty packs, order, and reference types are retained (#234).
 - A directly named, non-dependent specialization of a primary class template with explicit type
-  arguments checks its constraints even when the use does not need a complete class (#234).
+  or value arguments checks its constraints even when the use does not need a complete class
+  (#234, [#908](https://github.com/yrashk/ycxx/issues/908)).
 - In non-template code outside requires-expression bodies, directly naming a primary namespace
   variable-template specialization with explicit non-dependent type arguments checks its associated
   constraints. This includes unevaluated uses such as `decltype`. A type-constraint or a leading

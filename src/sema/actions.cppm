@@ -126,9 +126,11 @@ public:
   // `NodeId::none` records a diagnosed error. No answer means this context cannot replay it.
   // A required base selects the call-free parenthesized aggregate form.
   virtual std::optional<NodeId> replay_default_member(Sema&, EntityId, EntityId = EntityId::none) { return std::nullopt; }
-  virtual std::optional<NodeId> replay_function_default(Sema&, const ast::DefaultArg&, EntityId, QualType) {
+  virtual std::optional<NodeId> replay_function_default(Sema&, const ast::DefaultArg&, EntityId, QualType, u32) {
     return std::nullopt;
   }
+  // The effective specification of a written trivial destructor whose class is being completed.
+  virtual std::optional<bool> replay_destructor_exception(Sema&, EntityId, u32) { return std::nullopt; }
   // A selected specialization's exception specification ([except.spec]/13): of a member template,
   // of a member of a class template specialization, or of a function template.
   virtual std::optional<QualType> replay_member_exception(Sema&, const ast::DeclSema&, EntityId, QualType type) {
@@ -185,7 +187,7 @@ public:
   // ([namespace.qual]).
   virtual std::optional<EntityId> namespace_named(NameId name, std::span<const EntityId> directives = {}) = 0;
   virtual std::vector<ast::DeclSema> namespace_members(EntityId ns, NameId name, bool type_only = false,
-                                                      bool direct_only = false) = 0;
+                                                      bool direct_only = false, bool immediate_call = false) = 0;
   // [basic.lookup.argdep]: functions in one associated namespace's inline namespace set, and
   // a class's record if complete there. Ask at the lexical point, and for a dependent call
   // also at the point of instantiation ([temp.dep.candidate]).
@@ -211,6 +213,7 @@ public:
   // specialization's static data member, which instantiates its initializer ([temp.inst]/3).
   // The declaration of template `t` here: its head and, for an alias template, its type.
   virtual std::optional<ast::DeclSema> template_decl(EntityId /*t*/) { return std::nullopt; }
+  virtual std::optional<ast::DeclSema> replay_function_decl(EntityId function) { return template_decl(function); }
   virtual bool value_dependent_member(EntityId /*v*/) { return false; }
   // False when its initializer was in error, which was reported: what uses it says nothing more.
   virtual bool use_static_member(EntityId /*v*/) { return true; }
@@ -230,9 +233,8 @@ public:
   // A generic lambda's definition, as its body ends: the part it is in may instantiate it from
   // elsewhere (an instantiation of another lambda's operator) before the part is committed.
   virtual void generic_defined(const GenericClosure&) {}
-  // Publishes a closure type's record, made by the analysis of the part its lambda is in
-  // (docs/design/closures.md); the published record.
-  virtual const ClassRec& publish_class(EntityId c, ClassRec r) = 0;
+  // Publishes a closure type's record, checking its captures in the lambda's lexical context.
+  virtual const ClassRec& publish_class(EntityId c, ClassRec r, Sema& context) = 0;
   // In an instantiation: the pack expansions the definition of what it re-analyses recorded.
   virtual const std::vector<Expansion>* pattern_expansions() { return nullptr; }
   virtual ~Questions() = default;
@@ -647,6 +649,10 @@ public:
   static bool is_type(ast::DeclKind k) {
     return k == ast::DeclKind::class_ || k == ast::DeclKind::enum_ || k == ast::DeclKind::type_alias;
   }
+  static bool is_non_template_tag(const ast::DeclSema& decl) {
+    return (decl.kind == ast::DeclKind::class_ || decl.kind == ast::DeclKind::enum_) &&
+           !(decl.flags & decl_flag::template_);
+  }
 
   bool names_direct_class(NameId name, QualType type) {
     if (std::ranges::contains(block_types_, name, &BlockType::name)) return false;
@@ -797,6 +803,12 @@ public:
     if (ins().names.spelling(name) != "__builtin_va_list") return std::nullopt;
     return w_->builtin_va_list();
   }
+  bool conflicts_with_imported_alias(std::span<const ast::DeclSema> imported, QualType type) {
+    return std::ranges::any_of(imported, [&](const ast::DeclSema& decl) {
+      return decl.kind == ast::DeclKind::type_alias &&
+             ((decl.flags & decl_flag::template_) || types().canonical(decl.type) != types().canonical(type));
+    });
+  }
   // A block-scope typedef-name or alias-declaration ([dcl.typedef]); it may redeclare one of the
   // same block to the same type.
   void local_type_alias(NameId name, QualType type, u32 at_) {
@@ -808,6 +820,8 @@ public:
     if (guarded || std::ranges::any_of(scopes_.back(), [&](const auto& p) { return p.first == name; }) ||
         std::ranges::any_of(block_types_, [&](const BlockType& t) {
           return t.depth == depth && t.name == name && types().canonical(t.type) != types().canonical(type);
+        }) || std::ranges::any_of(block_usings_, [&](const BlockUsing& used) {
+          return used.depth == depth && used.name == name && conflicts_with_imported_alias(used.decls, type);
         })) {
       diag(at_, Diag::redeclared_local, name);
       return;
@@ -972,7 +986,7 @@ public:
         w_->entities.rec(tmpl.entity).kind == EntityKind::class_template &&
         args.size() == full->size() &&
         std::ranges::all_of(*full, [&](const TemplateArg& arg) {
-          return arg.kind == ast::TemplateArgKind::type && !dependent(arg);
+          return (arg.kind == ast::TemplateArgKind::type || arg.kind == ast::TemplateArgKind::value) && !dependent(arg);
         })) {
       const auto before = diag_count();
       if (!constraints_satisfied(tmpl, *full)) {
@@ -1318,6 +1332,8 @@ public:
     return r;
   }
   std::optional<QualType> trait_type(lex::TypeTrait t, QualType arg, u32 at) {
+    if (t == lex::TypeTrait::underlying_type && deferred_enum_layout(arg))
+      return types().transform(u8(t), arg);
     auto r = templates().transform(t, arg);
     if (!r) diag(at, Diag::trait_not_applicable, arg);
     return r;
@@ -1937,7 +1953,7 @@ public:
   // The first component of a nested-name-specifier, by unqualified lookup ([basic.lookup.qual]/1:
   // only namespaces, types and templates).
   std::optional<Scope> scope_named(NameId n, std::optional<u32> enum_qualifier_at = std::nullopt,
-                                   bool* ambiguous_namespace = nullptr) {
+                                   bool* ambiguous_namespace = nullptr, bool search_block_import_types = true) {
     // A type template parameter as a nested-name-specifier names a dependent type
     // ([temp.dep.type]); in an instantiation, its argument.
     if (const ast::TemplateParamSema* p = template_param(n)) {
@@ -1949,15 +1965,37 @@ public:
       }
       return Scope{std::nullopt, p->type};
     }
-    for (auto a = block_aliases_.rbegin(); a != block_aliases_.rend(); ++a)
-      if (a->name == n) return Scope{a->ns, std::nullopt};
+    if (search_block_import_types) {
+      // A qualifier sees aliases and types introduced by using-declarations in the nearest block.
+      // [basic.lookup.qual] ignores local values when looking up a qualifier.
+      for (std::size_t depth = scopes_.size(); depth-- > 0;) {
+        for (const BlockAlias& alias : block_aliases_ | std::views::reverse)
+          if (alias.depth == depth && alias.name == n) return Scope{alias.ns, std::nullopt};
+        for (const BlockType& alias : block_types_ | std::views::reverse)
+          if (alias.depth == depth && alias.name == n) return Scope{std::nullopt, alias.type};
+        for (const BlockUsing& used : block_usings_)
+          if (used.depth == depth && used.name == n && used.type_index) {
+            const ast::DeclSema& decl = used.decls[*used.type_index];
+            // A bare template name hides an outer type but needs arguments to qualify a name.
+            if (decl.flags & decl_flag::template_) return std::nullopt;
+            return Scope{std::nullopt, decl.type};
+          }
+      }
+    } else {
+      // A using-directive or namespace alias keeps its namespace lookup path ([basic.lookup.udir]).
+      for (const BlockAlias& alias : block_aliases_ | std::views::reverse)
+        if (alias.name == n) return Scope{alias.ns, std::nullopt};
+    }
+    const bool search_local_aliases = !search_block_import_types;
     if (enum_qualifier_at) {
       std::optional<EntityId> ns;
-      if (auto t = class_name(n, true, true, enum_qualifier_at, true, &ns)) return Scope{std::nullopt, t};
+      if (auto t = class_name(n, true, true, enum_qualifier_at, search_local_aliases, &ns))
+        return Scope{std::nullopt, t};
       if (ns) return Scope{ns, std::nullopt};
       return std::nullopt;
     }
-    if (auto t = class_name(n, true)) return Scope{std::nullopt, t};
+    if (auto t = class_name(n, /*elaborated=*/true, /*aliases=*/true, std::nullopt, search_local_aliases))
+      return Scope{std::nullopt, t};
     if (auto ns = q_->namespace_named(n, directives())) {
       if (ambiguous_namespace)
         *ambiguous_namespace = competing_qualifier(*ns, q_->qualifier_decls(n, std::nullopt, directives()));
@@ -2011,7 +2049,7 @@ public:
       return Scope{std::nullopt, types().dep_name(*s.type, n)};
     if (s.ns) {
       if (auto t = direct_member_introduction(*s.ns, n)) return Scope{std::nullopt, t};
-      auto members = q_->namespace_members(*s.ns, n);
+      auto members = q_->qualifier_decls(n, s.ns, {});
       for (const ast::DeclSema& d : members) {
         if (d.kind == ast::DeclKind::namespace_) {
           if (ambiguous_namespace)
@@ -2216,7 +2254,7 @@ public:
   }
   // `S::n` as an expression ([expr.prim.id.qual]).
   Ex scope_expr(const Scope& s, NameId n, u32 begin, u32 name_at, u32 end, std::optional<u32> address_at = {},
-                bool check_all_bases = false) {
+                bool check_all_bases = false, bool immediate_call = false) {
     if (s.type && types().is_dependent(*s.type)) return dependent_node({}, begin, end, std::nullopt, ValueCategory::lvalue);
     if (s.type) {
       if (types().is_enum(*s.type)) {
@@ -2244,7 +2282,15 @@ public:
       for (const OwnDecl& d : own)
         if (d.name == n && d.enum_initializer != ConstId::none)
           return literal(d.sema.type, d.enum_initializer, ValueCategory::prvalue, begin, end);
-    std::vector<ast::DeclSema> found = q_->namespace_members(*s.ns, n);
+    auto found = q_->namespace_members(*s.ns, n, /*type_only=*/false, /*direct_only=*/false, immediate_call);
+    if (immediate_call && std::ranges::any_of(found, [](const ast::DeclSema& d) {
+          return d.kind == ast::DeclKind::function;
+        }) && std::ranges::any_of(found, [](const ast::DeclSema& d) {
+          return d.kind != ast::DeclKind::function;
+        })) {
+      diag(name_at, Diag::ambiguous_name, n);
+      return {NodeId::none, begin, end};
+    }
     if (found.empty()) {
       diag(name_at, Diag::no_namespace_member, n);
       return {NodeId::none, begin, end};
@@ -2261,17 +2307,47 @@ public:
     return r;
   }
   void using_declaration(const Scope& s, NameId n, u32 at_) {
-    // [basic.scope.scope]/4: it may not clash with a local declared in the same block before it.
-    if (!scopes_.empty() && std::ranges::any_of(scopes_.back(), [&](const auto& p) { return p.first == n; })) {
+    std::vector<ast::DeclSema> found = s.ns ? q_->namespace_members(*s.ns, n) : std::vector<ast::DeclSema>{};
+    // [namespace.udecl], [basic.scope.scope]: a local value can hide a class or enumeration
+    // name. Type aliases and type templates conflict with the value.
+    if (!scopes_.empty() && std::ranges::any_of(scopes_.back(), [&](const auto& p) { return p.first == n; }) &&
+        (found.empty() || !std::ranges::all_of(found, is_non_template_tag))) {
       diag(at_, Diag::redeclared_local, n);
       return;
     }
-    std::vector<ast::DeclSema> found = s.ns ? q_->namespace_members(*s.ns, n) : std::vector<ast::DeclSema>{};
     if (found.empty()) {
       diag(at_, Diag::no_namespace_member, n);
       return;
     }
-    block_usings_.push_back({scopes_.size() - 1, n, std::move(found)});
+    // [namespace.udecl]: redeclarations of one template and non-template declarations of
+    // the same canonical type each agree. A template and an ordinary type conflict.
+    const auto same_type = [&](const ast::DeclSema& a, const ast::DeclSema& b) {
+      return a.entity == b.entity ||
+             (!((a.flags | b.flags) & decl_flag::template_) &&
+              types().canonical(a.type) == types().canonical(b.type));
+    };
+    std::optional<std::size_t> type_index;
+    for (std::size_t i = 0; i < found.size(); ++i) {
+      const ast::DeclSema& decl = found[i];
+      if (!is_type(decl.kind)) continue;
+      if (!type_index) type_index = i;
+      else if (!same_type(found[*type_index], decl)) {
+        diag(at_, Diag::ambiguous_name, n);
+        return;
+      }
+    }
+    const std::size_t depth = scopes_.size() - 1;
+    if (type_index &&
+        (std::ranges::any_of(block_usings_, [&](const BlockUsing& earlier) {
+           return earlier.depth == depth && earlier.name == n && earlier.type_index &&
+                  !same_type(found[*type_index], earlier.decls[*earlier.type_index]);
+         }) || std::ranges::any_of(block_types_, [&](const BlockType& alias) {
+           return alias.depth == depth && alias.name == n && conflicts_with_imported_alias(found, alias.type);
+         }))) {
+      diag(at_, Diag::conflicting_declaration, n);
+      return;
+    }
+    block_usings_.push_back({depth, n, std::move(found), type_index});
   }
   void namespace_alias(NameId n, EntityId ns) { block_aliases_.push_back({scopes_.size() - 1, n, ns}); }
 
@@ -2481,6 +2557,11 @@ public:
   bool scope_names_template(const Scope& sc, NameId name) {
     if (sc.ns) return namespace_template(*sc.ns, name, ast::DeclKind::function).has_value();
     return sc.type && types().is_class(*sc.type) && class_has_member_template(types().class_of(*sc.type), name);
+  }
+  bool namespace_names_call_template(EntityId ns, NameId name) {
+    return std::ranges::any_of(q_->namespace_members(ns, name, false, false, true), [](const ast::DeclSema& d) {
+      return d.kind == ast::DeclKind::function && (d.flags & decl_flag::template_);
+    });
   }
   // A class lvalue reached through an existing pointer or reference. Prvalues and direct
   // references to class storage still use the ordinary layout guard.
@@ -2968,6 +3049,16 @@ public:
     std::vector<Ex> out;
     const bool replay = can_replay_default_members(t);
     const bool union_ = is_union(t);
+    // [dcl.init.aggr]: the caller can potentially destroy each initialized class element.
+    // The existing union check applies to the selected variant. Other aggregates also check
+    // a written trivial destructor, whose access is independent of its runtime cleanup.
+    for (const Element& element : elems) {
+      const QualType type = types().innermost_array_element(element.type);
+      const ClassRec* record = types().is_class(type) && !types().is_dependent(type)
+                                 ? class_rec(types().class_of(type)) : nullptr;
+      if ((union_ || (record && record->declared_destructor != EntityId::none && record->destructor == EntityId::none)) &&
+          !check_destructor_access(type, begin)) return fail;
+    }
     const auto omitted = [&](const Element& element, u32 at) {
       // [dcl.init.aggr]: copy-list-initialize an omitted union element and the
       // first variant of an empty union list in the absence of a default member initializer.
@@ -2978,8 +3069,6 @@ public:
     };
     bool elided = begin != b.begin || end != b.end;
     for (std::size_t i = 0; i < elems.size(); ++i) {
-      if (union_ && !check_destructor_access(types().innermost_array_element(elems[i].type), begin))
-        return fail;
       if (next == b.clauses.size()) {
         out.push_back(omitted(elems[i], end));
         if (!out.back().ok()) return fail;
@@ -3219,8 +3308,15 @@ public:
     // (Parameters are checked where the declarator is.)
     if (!(flags & local_flag::parameter) && name != no_name() && declared_template_param(name)) diag(at, Diag::redeclared_local, name);
     if (name != no_name() && check) {
+      const std::size_t depth = scopes_.size() - 1;
       bool clash = std::ranges::any_of(scopes_.back(), [&](auto& p) { return p.first == name; }) ||
-                   std::ranges::any_of(block_types_, [&](auto& t) { return t.depth == scopes_.size() - 1 && t.name == name; });
+                   std::ranges::any_of(block_types_, [&](auto& t) { return t.depth == depth && t.name == name; }) ||
+                   std::ranges::any_of(block_usings_, [&](const BlockUsing& used) {
+                     return used.depth == depth && used.name == name &&
+                            std::ranges::any_of(used.decls, [](const ast::DeclSema& decl) {
+                              return is_type(decl.kind) && !is_non_template_tag(decl);
+                            });
+                   });
       if (scopes_.size() >= 2 && !guarded_.empty() && guarded_.back() == scopes_.size() - 2)
         clash = clash || std::ranges::any_of(scopes_[guarded_.back()], [&](auto& p) { return p.first == name; });
       if (clash) diag(at, Diag::redeclared_local, name);
@@ -3827,7 +3923,7 @@ public:
   }
 
   std::optional<TemplateArg> evaluate_dependent_call(EntityId function, std::span<const TemplateArg> args, u32 at) {
-    auto decl = q_->template_decl(function);
+    auto decl = q_->replay_function_decl(function);
     if (!decl || !(decl->flags & decl_flag::consteval_)) return std::nullopt;
     Ex callee = decls_expr({*decl}, false, w_->entities.rec(function).name, at, at);
     std::vector<Ex> operands;
@@ -4385,7 +4481,7 @@ public:
         invoker_body = invoker_tree(fr, call_type, nparams, body_begin);
       }
     }
-    q_->publish_class(fr.closure, std::move(rec));
+    q_->publish_class(fr.closure, std::move(rec), *this);
     u16 flags = u16((fr.mutable_ ? closure_flag::mutable_ : 0) | (captureless ? closure_flag::captureless : 0) |
                     (generic || in_pattern() ? closure_flag::pattern : 0) |
                     (fr.polymorphic_result ? closure_flag::polymorphic_result : 0));
@@ -4949,8 +5045,7 @@ public:
   struct OwnDecl {
     NameId name;
     ast::DeclSema sema;
-    // Within an unnamed enumeration's list, its earlier enumerators already have values, but
-    // their enclosing entity depends on the underlying type chosen at the closing brace.
+    // An earlier enumerator's value in the active list when publication waits for its type.
     ConstId enum_initializer = ConstId::none;
   };
   std::vector<OwnDecl> own;
@@ -5366,9 +5461,16 @@ public:
   }
   // An enumerator ([dcl.enum]): a prvalue of its enumeration with its value.
   Ex enumerator(EntityId e, QualType t, u32 begin, u32 end) {
+    if (q_->value_dependent_member(e))
+      return dependent_node({}, begin, end, Types::unqualified(t), ValueCategory::prvalue, expr_flag::unrepresented_value);
     auto v = q_->constant_value(e);
     if (!v) return {NodeId::none, begin, end};  // its enumeration was diagnosed
     return literal(Types::unqualified(t), *v, ValueCategory::prvalue, begin, end);
+  }
+  Ex enumerator_in_list(const OwnDecl& d, u32 begin, u32 end) {
+    if (d.enum_initializer != ConstId::none)
+      return literal(d.sema.type, d.enum_initializer, ValueCategory::prvalue, begin, end);
+    return enumerator(d.sema.entity, d.sema.type, begin, end);
   }
   // The enumerator `name` of enumeration `e`, if it has one.
   std::optional<Ex> find_enumerator(EntityId e, NameId name, u32 begin, u32 end) {
@@ -5377,7 +5479,7 @@ public:
       for (const OwnDecl& d : own)
         if (d.name == name && d.sema.kind == ast::DeclKind::enumerator && d.sema.entity != EntityId::none &&
             w_->entities.rec(d.sema.entity).scope == e)
-          return enumerator(d.sema.entity, d.sema.type, begin, end);
+          return enumerator_in_list(d, begin, end);
     }
     if (const EnumRec* r = enum_rec(e))
       for (const EnumeratorRec& x : r->enumerators)
@@ -5643,7 +5745,8 @@ public:
     if (unevaluated == 0 && d->head.empty() && closure_member(*w_, fe) &&
         !require_supported_virtual_layout(fr.inner, paren_at))
       return fail;
-    auto children = call_args(fr, args, begin, paren_at, cands[*chosen].defaults);
+    auto children = call_args(fr, args, begin, paren_at, cands[*chosen].defaults,
+                              DefaultArgumentOrigin::interned, fe);
     if (!children) return fail;
     ExprInfo info = result_info(fr.inner);
     if (d->is_static) {
@@ -6283,8 +6386,8 @@ public:
         diag(begin, polymorphic_base ? Diag::base_unusable_destructor : Diag::return_unusable_destructor, ut);
         return fail;
       }
-      if (cr->destructor != EntityId::none &&
-          !check_access(c, cr->destructor, w_->entities.rec(cr->destructor).name, begin)) return fail;
+      const EntityId destructor = cr->destructor_declaration();
+      if (destructor != EntityId::none && !check_access(c, destructor, w_->entities.rec(destructor).name, begin)) return fail;
     }
     if (k.entity != EntityId::none && k.entity == cr->defaulted_default_ctor) {
       if (!cr->trivial_defaulted_default_ctor) return fail;  // diagnosed at its declaration
@@ -6338,7 +6441,7 @@ public:
     }
     const auto supplied = args.size();
     for (std::size_t i = supplied; i < fr.params.size() && i < k.defaults.size(); ++i) {
-      auto a = default_argument(k.defaults[i], end);
+      auto a = default_argument(k.defaults[i], end, DefaultArgumentOrigin::interned, k.entity, fr.params[i]);
       if (!a) return fail;
       args.push_back(*a);
     }
@@ -6387,25 +6490,28 @@ public:
   }
 
   // [class.dtor]: a potentially invoked destructor must be accessible.
-  bool check_destructor_access(QualType type, u32 at) {
+  bool check_destructor_access(QualType type, u32 at, Diag unusable = Diag::object_unusable_destructor,
+                               bool base_subobject = false) {
+    type = types().innermost_array_element(type);
     if (!types().is_class(type) || types().is_dependent(type)) return true;
     const EntityId owner = types().class_of(type);
     const ClassRec* record = class_rec(owner);
-    if (!record || record->destructor == EntityId::none) return true;
-    const auto declaration = std::ranges::find(record->members, record->destructor, &MemberDeclRec::entity);
-    if (declaration != record->members.end() && declaration->is_deleted) {
-      diag(at, Diag::object_unusable_destructor, type);
+    if (!record) return true;
+    if (record->destructor_dependent && in_template_definition()) return true;
+    if (!record->destructor_usable) {
+      diag(at, unusable, type);
       return false;
     }
-    const EntityId destructor = record->destructor;
+    const EntityId destructor = record->destructor_declaration();
+    if (destructor == EntityId::none) return true;
     const NameId name = w_->entities.rec(destructor).name;
     if (defer_type_access && !accessible(owner, record->access_of(destructor))) {
       deferred_access_.push_back({owner, destructor, name, at, true});
       return true;
     }
-    // [class.protected]: these uses destroy a complete object of the
-    // declaring class. Access through a derived context needs a derived object.
-    if (record->access_of(destructor) == ast::Access::protected_ && !accessible(owner, ast::Access::private_)) {
+    // [class.protected]: access through a derived context needs a derived object.
+    if (!base_subobject && record->access_of(destructor) == ast::Access::protected_ &&
+        !accessible(owner, ast::Access::private_)) {
       diag(at, Diag::protected_member, name, types().class_type(owner));
       return false;
     }
@@ -6482,9 +6588,18 @@ public:
     if (!operand.ok()) return fail;
     if (dependent(operand)) return dependent_node({operand}, begin, end, builtin(Builtin::bool_));
     const auto before = diag_count();
+    bool missing_destructor_exception = false;
     auto destructor_throwing = [&](QualType type, u32 at) {
       if (!types().is_class(type) || !require_complete(type, at) || !check_destructor_access(type, at)) return false;
-      const ClassRec* record = class_rec(types().class_of(type));
+      const EntityId owner = types().class_of(type);
+      const ClassRec* record = class_rec(owner);
+      if (record && !record->destructor_noexcept && record->declared_destructor != EntityId::none &&
+          record->destructor == EntityId::none) {
+        if (missing_destructor_exception) return false;
+        const auto nonthrowing = q_->replay_destructor_exception(*this, owner, at);
+        missing_destructor_exception = !nonthrowing;
+        return nonthrowing && !*nonthrowing;
+      }
       return record && !record->destructor_noexcept.value_or(record->destructor == EntityId::none);
     };
     bool result_throws = !operand.glvalue() && destructor_throwing(operand.type(), operand.begin);
@@ -6560,7 +6675,7 @@ public:
       node.for_each_child(self);
     };
     visit(ast::Red(ins().ast, root.id, operand.begin));
-    if (has_error_since(before)) return fail;
+    if (missing_destructor_exception || has_error_since(before)) return fail;
     if (value_dependent) return dependent_node({operand}, begin, end, builtin(Builtin::bool_));
     return bool_literal(!result_throws, begin, end);
   }
@@ -6575,7 +6690,8 @@ public:
   // Temporary materialization ([conv.rval]) of the prvalue `v` as an object of type `t`.
   Ex materialize(Ex v, QualType t, bool extended, bool argument = false) {
     if (!v.ok()) return v;
-    if (!require_concrete_object(t, v.begin) || !require_supported_virtual_layout(t, v.begin))
+    if (!require_concrete_object(t, v.begin) || !require_supported_virtual_layout(t, v.begin) ||
+        !check_destructor_access(t, v.begin))
       return {NodeId::none, v.begin, v.end};
     ExprInfo info{t, ValueCategory::xvalue, 0};
     return node(ast::Materialize{info, destructor_of(t), extended ? 1u : argument ? 2u : 0u, at(v, v.begin)}, v.begin, v.end, info);
@@ -6768,12 +6884,8 @@ public:
       ExprInfo info{Types::unqualified(p->type), ValueCategory::prvalue, expr_flag::dependent};
       return node(ast::Literal{info, v}, begin, end, info);
     }
-    if (const auto* declaration = earlier_nested_enumerator(name)) {
-      // An unnamed enum gets its entity after the underlying type is known.
-      if (declaration->enum_initializer != ConstId::none)
-        return literal(declaration->sema.type, declaration->enum_initializer, ValueCategory::prvalue, begin, end);
-      return enumerator(declaration->sema.entity, declaration->sema.type, begin, end);
-    }
+    if (const auto* declaration = earlier_nested_enumerator(name))
+      return enumerator_in_list(*declaration, begin, end);
     // The enclosing class's members ([basic.scope.class]).
     if (current_class != EntityId::none) {
       if (auto r = class_member(current_class, name, begin, end, begin, std::nullopt, /*unqualified=*/true)) return *r;
@@ -7655,6 +7767,12 @@ public:
     return !r || !r->scoped;
   }
   bool is_scoped_enum(QualType t) { return types().is_enum(t) && !is_unscoped_enum(t); }
+  // An unscoped member enum's inferred type waits for its dependent values to be replayed.
+  bool deferred_enum_layout(QualType t) {
+    if (!types().is_enum(t)) return false;
+    const EnumRec* r = enum_rec(types().enum_of(t));
+    return r && !r->underlying;
+  }
   QualType underlying_of(QualType t) {
     const EnumRec* r = enum_rec(types().enum_of(t));
     return r && r->underlying ? *r->underlying : builtin(Builtin::int_);
@@ -7912,7 +8030,8 @@ public:
     if (address_set(e)) return convert(e, to, at_);  // [over.over]: a cast supplies a target type
     QualType target = Types::unqualified(to);
     if (types().is_void(target)) {
-      if (!e.glvalue() && !require_concrete_object(e.type(), e.begin)) return {NodeId::none, e.begin, e.end};
+      if (!e.glvalue() && (!require_concrete_object(e.type(), e.begin) || !check_destructor_access(e.type(), e.begin)))
+        return {NodeId::none, e.begin, e.end};
       // A discarded tag prvalue still denotes a temporary object ([expr.context]/2).
       if (is_defaulted_tag_initializer(e)) e = discarded(e);
       return convert_node(e, ast::ConversionKind::to_void, target);  // /6
@@ -8486,6 +8605,13 @@ public:
     QualType st = builtin(w_->target.size_type);
     if (types().is_dependent(t)) return dependent_node({}, begin, end, st);
     t = types().referee(t);  // [expr.sizeof]/2, [expr.alignof]/3
+    const QualType element = types().innermost_array_element(t);
+    if (const EnumRec* e = types().is_enum(element) ? q_->defining_enum(types().enum_of(element)) : nullptr;
+        e && !e->fixed) {
+      diag(begin, Diag::sizeof_incomplete, t);  // [dcl.enum]/6: incomplete until the closing brace
+      return {NodeId::none, begin, end};
+    }
+    if (deferred_enum_layout(element)) return dependent_node({}, begin, end, st);
     if (!has_peer_virtual_layout(t) && !require_supported_virtual_layout(t, begin)) return {NodeId::none, begin, end};
     std::optional<u64> n = layout_of(t, align);
     if (!n) {
@@ -8494,12 +8620,9 @@ public:
       else diag(begin, Diag::not_supported, align ? lex::Tk::kw_alignof : lex::Tk::kw_sizeof);
       return {NodeId::none, begin, end};
     }
-    if (checking_class_alignment) {
-      const QualType element = types().innermost_array_element(t);
-      if (types().is_class(element) && q_->class_layout_uncertain(types().class_of(element))) {
-        diag(begin, Diag::class_alignment_uncertain_layout);
-        return {NodeId::none, begin, end};
-      }
+    if (checking_class_alignment && types().is_class(element) && q_->class_layout_uncertain(types().class_of(element))) {
+      diag(begin, Diag::class_alignment_uncertain_layout);
+      return {NodeId::none, begin, end};
     }
     return literal(st, w_->values.integer(st, *n), ValueCategory::prvalue, begin, end);
   }
@@ -8568,7 +8691,7 @@ public:
       ast::BuiltinLayout l = ast::member_pointer_layout(w_->target, types().is_function(r.inner));
       return ast::scalar_placed(l.size, l.align);
     }
-    case TypeKind::enum_: return is_complete(t) ? place_of(underlying_of(t)) : std::nullopt;
+    case TypeKind::enum_: return is_complete(t) && !deferred_enum_layout(t) ? place_of(underlying_of(t)) : std::nullopt;
     case TypeKind::array: {
       if (r.bound_value == ConstId::none) return std::nullopt;
       auto e = place_of(r.inner);
@@ -8743,14 +8866,7 @@ public:
   // [class.dtor]: the destructor of the hidden object or materialized temporary is potentially
   // invoked. A reference to an existing object does not itself invoke a destructor.
   bool check_binding_destructor(QualType type, u32 at_) {
-    EntityId entity = types().class_of(type);
-    const ClassRec* record = class_rec(entity);
-    if (!record || record->destructor == EntityId::none) return true;
-    if (!record->destructor_usable) {
-      diag(at_, Diag::binding_unusable_destructor, type);
-      return false;
-    }
-    return check_access(entity, record->destructor, w_->entities.rec(record->destructor).name, at_);
+    return check_destructor_access(type, at_, Diag::binding_unusable_destructor);
   }
 
   // Follow the glvalue designator through the operations in [class.temporary]. A temporary
@@ -9503,7 +9619,8 @@ public:
     }
     case comma:
       // [expr.comma]: the left operand is discarded. Only the right produces the result.
-      if (!l.glvalue() && !require_concrete_object(l.type(), l.begin)) return {NodeId::none, begin, end};
+      if (!l.glvalue() && (!require_concrete_object(l.type(), l.begin) || !check_destructor_access(l.type(), l.begin)))
+        return {NodeId::none, begin, end};
       return ordered(ast::OrderedOp::comma, l, r, r.info);
     case shl:
     case shr: {
@@ -9730,6 +9847,9 @@ public:
         state = copy->copy_assignment == CopyAssignment::memberwise ? CopyAssignment::unsupported
                                                                     : copy->copy_assignment;
       if (!usable_copy_assignment(state, Types::unqualified(l.type()), op_at)) return {NodeId::none, begin, end};
+      const auto* source = class_reference_list_operand(l.type(), b);
+      if ((!source || !source->glvalue()) && !check_destructor_access(l.type(), b.begin))
+        return {NodeId::none, begin, end};
     }
     Ex c = list_init(Types::unqualified(l.type()), b, Construction::copy_list);
     if (!c.ok()) return {NodeId::none, begin, end};
@@ -10040,13 +10160,14 @@ public:
       return expression;
     };
     Ex named = unparenthesized(callee);  // `(f)()` takes f's default arguments too ([expr.call]/1)
-    if (auto d = as<ast::DeclRef>(named); d && types().is_function(ft) && defaults.empty()) {
-      defaults = defaults_of(named, d->entity);
+    const auto declaration = types().is_function(ft) ? as<ast::DeclRef>(named) : std::nullopt;
+    const EntityId default_source = declaration ? declaration->entity : EntityId::none;
+    if (declaration && defaults.empty()) {
+      defaults = defaults_of(named, default_source);
       default_origin = DefaultArgumentOrigin::interned;
     }
-    if (auto d = as<ast::DeclRef>(named); d && types().is_function(ft) &&
-        (named.id == callee.id || is_consteval(d->entity))) {
-      function = d->entity;
+    if (declaration && (named.id == callee.id || is_consteval(default_source))) {
+      function = default_source;
     } else {
       // The address of a named immediate function is itself a known callee. It does not
       // supply default arguments because the call is through a pointer ([expr.call]).
@@ -10063,7 +10184,7 @@ public:
       return {NodeId::none, begin, end};
     }
     TypeRec fr = types().rec(ft);
-    auto children = call_args(fr, args, begin, paren_at, defaults, default_origin, function);
+    auto children = call_args(fr, args, begin, paren_at, defaults, default_origin, default_source);
     if (!children) return {NodeId::none, begin, end};
     ExprInfo info = result_info(fr.inner);
     return node(ast::Call{info, function, at(callee, begin), b_->list(*children)}, begin, end, info);
@@ -10254,9 +10375,11 @@ public:
     const auto value = interned == NodeId::none ? b_->get<ast::DefaultArg>(d) : ins().ast.get<ast::DefaultArg>(interned);
     if (ast::kind_of(value.arg.id) == ast::Nodes::index_of<ast::Dependent>()) {
       if (function != EntityId::none && value.source_end > value.source_begin) {
-        if (auto replay = q_->replay_function_default(*this, value, function, parameter)) {
+        if (auto replay = q_->replay_function_default(*this, value, function, parameter, at_)) {
           if (*replay == NodeId::none) return std::nullopt;
-          const auto concrete = b_->get<ast::DefaultArg>(*replay);
+          const NodeId committed = b_->adopted_node(*replay);
+          const auto concrete = committed == NodeId::none ? b_->get<ast::DefaultArg>(*replay)
+                                                           : ins().ast.get<ast::DefaultArg>(committed);
           return Ex{*replay, at_, at_, concrete.info};
         }
       }
@@ -10328,20 +10451,23 @@ public:
     return std::nullopt;
   }
 
-  // A class reference binds directly to a single reference-related expression.
+  // A class reference can bind directly to a single reference-related expression.
+  const Ex* class_reference_list_operand(QualType type, const Braced& list) {
+    if (list.clauses.size() != 1) return nullptr;
+    const Braced::Clause& clause = list.clauses.front();
+    if (clause.list || clause.designated || !clause.expr.ok() || !types().is_class(clause.expr.type())) return nullptr;
+    int paths = 0;
+    return same_unqualified(clause.expr.type(), type) ||
+           base_path(types().class_of(clause.expr.type()), types().class_of(type), paths) ? &clause.expr : nullptr;
+  }
+
   // Otherwise the list initializes a prvalue of the referenced class ([dcl.init.list]); the
   // materialized object lives until the end of the call's full-expression ([class.temporary]).
   Ex class_reference_list_init(QualType parameter, const Braced& list, bool extend,
                                bool call_argument = false) {
     QualType t = types().referee(parameter);
-    if (list.clauses.size() == 1) {
-      const Braced::Clause& c = list.clauses.front();
-      if (!c.list && !c.designated && c.expr.ok() && types().is_class(c.expr.type())) {
-        int paths = 0;
-        if (same_unqualified(c.expr.type(), t) || base_path(types().class_of(c.expr.type()), types().class_of(t), paths))
-          return bind_reference(c.expr, parameter, c.begin, extend);
-      }
-    }
+    if (const auto* source = class_reference_list_operand(t, list))
+      return bind_reference(*source, parameter, list.clauses.front().begin, extend);
     if (call_argument && !list.clauses.empty() && !types().rec(parameter).rvalue_ref && object_cv(t) == Cv::const_) {
       if (auto init = initializer_list_argument(t, list)) return bind_reference(*init, parameter, list.begin);
     }
@@ -10361,19 +10487,21 @@ public:
   std::optional<std::vector<Child>> call_args(const TypeRec& fr, std::span<const Ex> given, u32 begin, u32 paren_at,
                                               std::span<const NodeId> defaults = {},
                                               DefaultArgumentOrigin origin = DefaultArgumentOrigin::interned,
-                                              EntityId function = EntityId::none) {
+                                              EntityId default_source = EntityId::none) {
     // Unevaluated calls still check parameter initialization. Only a decltype operand may
     // dispense with the result object. Subexpressions requiring materialization check it separately.
+    const bool decltype_operand = decltype_unevaluated != 0 && unevaluated == decltype_unevaluated;
     if (unevaluated == 0) {
       if (!require_supported_virtual_signature(fr, paren_at)) return std::nullopt;
     } else if (!require_concrete_parameters(fr, paren_at) ||
-               (unevaluated != decltype_unevaluated && !require_concrete_object(fr.inner, paren_at))) {
+               (!decltype_operand && !require_concrete_object(fr.inner, paren_at))) {
       return std::nullopt;
     }
+    if (!decltype_operand && !check_destructor_access(fr.inner, paren_at)) return std::nullopt;
     std::vector<QualType> params = fr.params;  // copied: converting may intern new types
     std::vector<Ex> args(given.begin(), given.end());
     for (std::size_t i = args.size(); i < params.size() && i < defaults.size() && defaults[i] != NodeId::none; ++i) {
-      auto a = default_argument(defaults[i], paren_at, origin, function, params[i]);
+      auto a = default_argument(defaults[i], paren_at, origin, default_source, params[i]);
       if (!a) return std::nullopt;
       args.push_back(*a);
     }
@@ -10400,6 +10528,7 @@ public:
       // ([expr.call]/7): a temporary, which the caller destroys (Itanium C++ ABI §3.1.2).
       if (i < params.size() && types().is_class(params[i]) && !dependent(a) && !a.glvalue())
         a = materialize(a, Types::unqualified(params[i]), false, true);
+      if (!a.ok()) return std::nullopt;
       children.push_back(at(a, begin));
     }
     return children;
@@ -10507,6 +10636,7 @@ private:
     std::size_t depth;
     NameId name;
     std::vector<ast::DeclSema> decls;
+    std::optional<std::size_t> type_index;  // representative type or type template in decls
   };
   struct BlockAlias {
     std::size_t depth;

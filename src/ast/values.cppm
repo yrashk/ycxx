@@ -201,6 +201,12 @@ struct VConstraintPack {
   SeqId<ConstId> elements;
 };
 
+// A mapped enum argument retains its nominal type alongside the underlying integer value.
+struct VConstraintEnum {
+  QualType type;
+  ConstId value;
+};
+
 // An atomic constraint ([temp.constr.atomic]): the appearance of its expression (the item that
 // contains it, and its tokens [begin, end) in that item's declaration part), and its parameter
 // mapping: one entry per parameter of the head at `depth`, a type, pack or value for a parameter the
@@ -229,7 +235,7 @@ struct VConstraint {
 
 using ValueKinds = closed_list<VInt, VFloat, VNullptr, VString, VLvalue, VEntity, VAggregate, VDepParam, VDepFnParam, VDepExpansion,
                                VDepSizeofPack, VType, VAtom, VConstraint, VDepOp, VMemberPtr, VDepVariable, VConstraintPack,
-                               VDepCall, VDepMember, VDepConcept>;
+                               VDepCall, VDepMember, VDepConcept, VConstraintEnum>;
 
 template <class T>
 constexpr bool is_value_kind = ValueKinds::contains<T>;
