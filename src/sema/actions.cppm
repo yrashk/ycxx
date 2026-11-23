@@ -227,9 +227,8 @@ public:
   // A generic lambda's definition, as its body ends: the part it is in may instantiate it from
   // elsewhere (an instantiation of another lambda's operator) before the part is committed.
   virtual void generic_defined(const GenericClosure&) {}
-  // Publishes a closure type's record, made by the analysis of the part its lambda is in
-  // (docs/design/closures.md); the published record.
-  virtual const ClassRec& publish_class(EntityId c, ClassRec r) = 0;
+  // Publishes a closure type's record, checking its captures in the lambda's lexical context.
+  virtual const ClassRec& publish_class(EntityId c, ClassRec r, Sema& context) = 0;
   // In an instantiation: the pack expansions the definition of what it re-analyses recorded.
   virtual const std::vector<Expansion>* pattern_expansions() { return nullptr; }
   virtual ~Questions() = default;
@@ -4337,7 +4336,7 @@ public:
         invoker_body = invoker_tree(fr, call_type, nparams, body_begin);
       }
     }
-    q_->publish_class(fr.closure, std::move(rec));
+    q_->publish_class(fr.closure, std::move(rec), *this);
     u16 flags = u16((fr.mutable_ ? closure_flag::mutable_ : 0) | (captureless ? closure_flag::captureless : 0) |
                     (generic || in_pattern() ? closure_flag::pattern : 0) |
                     (fr.polymorphic_result ? closure_flag::polymorphic_result : 0));

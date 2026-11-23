@@ -1131,9 +1131,9 @@ public:
   interp::Callee function_ir(EntityId f, u32 item);
   // A closure type's record, published by the analysis of `item`, its lambda's
   // (docs/design/closures.md), with its implicit special members ([expr.prim.lambda.closure]/14).
-  const sema::ClassRec& publish_class(EntityId c, sema::ClassRec r, u32 item) {
+  const sema::ClassRec& publish_class(EntityId c, sema::ClassRec r, u32 item, sema::Sema& context) {
     if (const sema::ClassRec* done = classes_.find(c)) return *done;
-    special_members(item, c, r);
+    special_members(item, c, r, nullptr, &context);
     return classes_.publish(c, std::move(r));
   }
   interp::Callee closure_ir(EntityId f, u32 item);
@@ -1222,7 +1222,7 @@ public:
   // Its body, analysed on first use.
   const ast::BodySema& synthesized_body(std::size_t i);
   bool special_members(u32 item, EntityId cls, sema::ClassRec& rec,
-                       std::vector<engine::Diagnostic>* class_diags = nullptr);
+                       std::vector<engine::Diagnostic>* class_diags = nullptr, sema::Sema* closure_context = nullptr);
   void declare_copy_assignment(u32 item, EntityId cls, sema::ClassRec& rec, bool implicit, bool user_move);
   sema::CopyAssignment require_copy_assignment(EntityId f);
   Ex copy_from(sema::Sema& sm, Ex src, QualType t);
@@ -1884,7 +1884,9 @@ public:
   bool rtti_enabled() const override { return p_->rtti_enabled(); }
   const sema::Classes& classes() override { return p_->classes(); }
   sema::CopyAssignment require_copy_assignment(EntityId f) override { return p_->require_copy_assignment(f); }
-  const sema::ClassRec& publish_class(EntityId c, sema::ClassRec r) override { return p_->publish_class(c, std::move(r), item_); }
+  const sema::ClassRec& publish_class(EntityId c, sema::ClassRec r, sema::Sema& context) override {
+    return p_->publish_class(c, std::move(r), item_, context);
+  }
   const sema::EnumRec* defining_enum(EntityId e) override {
     for (const auto* active = p_->defining_enum_; active; active = active->previous)
       if (active->entity == e) return &active->record;
@@ -2652,7 +2654,9 @@ public:
   void use_typed_dynamic_cast() override { at_.use_typed_dynamic_cast(); }
   bool class_layout_uncertain(EntityId c) override { return at_.class_layout_uncertain(c); }
   bool explicit_specialization(EntityId c) override { return at_.explicit_specialization(c); }
-  const sema::ClassRec& publish_class(EntityId c, sema::ClassRec r) override { return p_->publish_class(c, std::move(r), item_); }
+  const sema::ClassRec& publish_class(EntityId c, sema::ClassRec r, sema::Sema& context) override {
+    return p_->publish_class(c, std::move(r), item_, context);
+  }
   std::vector<DeclId> visible_decls(ast::NameId name, std::span<const EntityId> directives = {}) override {
     return at_.visible_decls(name, directives);
   }
@@ -9548,7 +9552,7 @@ sema::TrivialCopyability Program::class_trivial_copyability(u32 item, EntityId c
 }
 
 bool Program::special_members(u32 item, EntityId cls, sema::ClassRec& rec,
-                              std::vector<engine::Diagnostic>* class_diags) {
+                              std::vector<engine::Diagnostic>* class_diags, sema::Sema* closure_context) {
   sema::Types& types = w_->types;
   QualType ct = types.class_type(cls);
   bool user_copy = false;
@@ -9683,10 +9687,14 @@ bool Program::special_members(u32 item, EntityId cls, sema::ClassRec& rec,
     const EntityId destructor = record->destructor_declaration();
     if (destructor == EntityId::none) continue;
     const auto access = record->access_of(destructor);
+    // [class.access.general]: the closure has its enclosing context's access. A capture of
+    // this class type does not meet [class.protected]'s derived-object rule.
     const bool accessible = access == ast::Access::public_ ||
                             (i < rec.bases.size() && access == ast::Access::protected_) ||
                             std::ranges::contains(record->friends, cls) ||
-                            (user_dtor && std::ranges::contains(record->friends, user_dtor->entity));
+                            (user_dtor && std::ranges::contains(record->friends, user_dtor->entity)) ||
+                            (closure_context && closure_context->class_rec(type.entity) &&
+                             closure_context->accessible(type.entity, ast::Access::private_));
     rec.destructor_usable &= accessible;
   }
   // A concrete capture can make destruction unusable even with other captures still dependent.
