@@ -572,12 +572,21 @@ public:
         if (!elaborated && unscoped_member_enumerator(current_class, name, /*unqualified=*/true)) return std::nullopt;
         if (auto r = nested_member(current_class, name, true)) return r->first.type;
       } else {
+        const auto initializer_bases = static_initializer_bases(current_class);
+        if (!elaborated && !initializer_bases.empty() &&
+            (name == static_initializer_name_ || own_initializer_static(name))) return std::nullopt;
         if (auto m = q_->earlier_member(name, elaborated)) {
           if (m->kind == ast::DeclKind::enum_ || m->kind == ast::DeclKind::type_alias) return m->type;
           if (!elaborated && (m->kind == ast::DeclKind::data_member || m->kind == ast::DeclKind::variable ||
                               m->kind == ast::DeclKind::enumerator ||
                               (m->kind == ast::DeclKind::function && c.name != name)))
             return std::nullopt;
+        }
+        if (!elaborated && !initializer_bases.empty()) {
+          // An inherited value hides a namespace type even in a tentative type-id.
+          if (auto member = find_base_member(initializer_bases, name, /*unqualified=*/true);
+              member && (member->ambiguous || member->nested_type == EntityId::none ||
+                         member->enumerator != EntityId::none)) return std::nullopt;
         }
         // In the class being defined, a type of its (complete) bases.
         for (EntityId b : q_->defining_bases(current_class))
@@ -4830,6 +4839,12 @@ public:
     if (owner == static_initializer_owner_) return q_->defining_base_records(owner);
     return {};
   }
+  const ast::DeclSema* own_initializer_static(NameId name) {
+    for (const OwnDecl& d : own | std::views::reverse)
+      if (d.name == name && d.sema.kind == ast::DeclKind::variable && d.sema.storage == ast::Storage::static_ &&
+          w_->entities.rec(d.sema.entity).scope == current_class) return &d.sema;
+    return nullptr;
+  }
   struct NamespaceLambda {
     EntityId owner, scope;
     NameId name;
@@ -6603,10 +6618,8 @@ public:
         const auto bases = static_initializer_bases(current_class);
         if (!bases.empty()) {
           // This declaration's earlier declarators, and the current one once typed, precede bases.
-          for (const OwnDecl& d : own | std::views::reverse)
-            if (d.name == name && d.sema.kind == ast::DeclKind::variable && d.sema.storage == ast::Storage::static_ &&
-                w_->entities.rec(d.sema.entity).scope == current_class)
-              return static_member(current_class, d.sema.entity, d.sema.type, begin, end);
+          if (const auto* d = own_initializer_static(name))
+            return static_member(current_class, d->entity, d->type, begin, end);
           if (name == static_initializer_name_) {
             diag(begin, Diag::auto_used_in_initializer, name);
             return {NodeId::none, begin, end};
