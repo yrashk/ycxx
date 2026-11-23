@@ -333,6 +333,15 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
   - Do: before running part of an analysis alone, compare part-alone with whole over the suite,
     and fix each cause where the table is read (analyse what can fill it first).
   - Learned on #947.
+- **The oracle finds only what the suite exercises; list per-unit state by hand too.** After #987
+  merged, source review found two regressions the oracle and 440 fuzz rounds had not. A typedef's
+  `aligned` attribute marked its class's layout uncertain only in the group that saw the typedef,
+  and the merge kept the defining group's shape (#992). The once-per-unit template-depth message
+  guard reset per group, so two families reported twice (#993). No suite file had either case.
+  - Do: when splitting an analysis, list every member that is once per unit (flags, counters) or
+    that a later item can change for an earlier entity, and write each one's merge rule down
+    (union, first-wins, once), with a test for each that is not first-wins.
+  - Learned on #947.
 - **Record a recorded question before its loop.** #947's by-name questions were recorded per
   entry they visited. When no item declared the name yet, nothing was recorded, and a group
   missed the declaration added later. The `.incr` suite caught it.
