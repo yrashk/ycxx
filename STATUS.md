@@ -1482,8 +1482,11 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   libycxx `<cstddef>` byte operator with matching GCC and Clang symbols (#64).
 - Tests: `tests/own/classes/s4-namespace*`, `s4-using` (spec-only, plus one from the review): 5
   of 5. Seven more draft examples pass.
-- A linkage-specification with one declaration (`extern "C" int v;`) declares as if `extern`
-  were given ([dcl.link]/7); a variable with C language linkage is one in every namespace.
+- A C or C++ linkage specification with one declaration treats `extern` as present for name
+  linkage and for distinguishing declarations from definitions ([dcl.link]). This includes a
+  first ordinary namespace `const` variable. A braced linkage block applies the ordinary
+  namespace rules. A variable with C language linkage is one in every namespace.
+  [#942](https://github.com/yrashk/ycxx/issues/942)
 - A qualified namespace function definition inherits C language linkage from a matching prior
   member declaration and uses its target namespace for body lookup. Ordinary and argument-dependent
   calls find the prior declaration and use the same unmangled symbol as C callers (#426).

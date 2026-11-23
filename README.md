@@ -362,6 +362,9 @@ written default member initializer are value-initialized.
   declaration, including definitions written inside their namespace and qualified definitions
   outside it. [#426](https://github.com/yrashk/ycxx/issues/426),
   [#455](https://github.com/yrashk/ycxx/issues/455)
+  A single `extern "C"` or `extern "C++"` declaration gives an ordinary namespace `const`
+  variable the linkage and definition rules of a written `extern` storage specifier.
+  [#942](https://github.com/yrashk/ycxx/issues/942)
 - ordinary scalar `new` and single-object `delete` for integral and pointer objects, including
   cv-qualified objects. Scalar allocation uses the global Itanium allocation functions.
   Syntax checking also covers one-dimensional scalar `new T[n]` and `delete[] p`.
