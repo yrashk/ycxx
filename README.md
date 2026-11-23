@@ -460,6 +460,9 @@ written default member initializer are value-initialized.
   (`public`, `protected`, `private`) and friend functions and classes. Ordinary unqualified
   friend definitions in non-template namespace-scope classes are found by argument-dependent
   lookup or through a matching namespace declaration. [#259](https://github.com/yrashk/ycxx/issues/259)
+- explicit specialization of a class template's written nonvirtual destructor selects the specialized
+  destructor for that class instance. The specialization's declaration determines its inline status.
+  [#1027](https://github.com/yrashk/ycxx/issues/1027)
 - Linux x86-64 can emit the base constructor and destructor entries for an ordinary class
   with scalar fields, no bases, and written out-of-line definitions. A separately compiled
   GCC or Clang caller can construct and destroy the ycxx-defined base as a subobject.

@@ -2152,6 +2152,9 @@ template's tokens again with the arguments bound.
   instantiated; calls, constant evaluation, completeness and the END worklist use the explicit
   one. A use before the explicit specialization that instantiated it is diagnosed at the end
   ([temp.expl.spec]/7).
+  A written nonvirtual destructor can also be explicitly declared and defined on a class template
+  specialization. It retains the selected member's identity and gets its inline status from the
+  explicit declaration. [#1027](https://github.com/yrashk/ycxx/issues/1027)
 - **Partial specializations** ([temp.spec.partial]) of class and variable templates, declared or
   defined. `Program::choose_partial` matches a specialization against those declared before its
   point by deducing their parameters from its arguments ([temp.spec.partial.match]), picks the
