@@ -2441,6 +2441,17 @@ and diagnoses reads past the end of an unterminated array in a required constant
 ([expr.const]). Native lowering requires no runtime `strlen` symbol. Fixtures in
 `tests/own/builtins/` cover detection, result type, argument checks, and constant and runtime scans.
 
+## GNU constantness probe (#1065)
+
+`__builtin_constant_p(e)` returns an `int` prvalue. It gives 1 when a supported scalar or
+string operand folds safely to a known value, including a known false expression. It gives
+0 when the proof is unavailable. Operand formation and exception checks use the written
+expression. Native execution and constant evaluation of the result leave the operand
+unevaluated. A dependent probe is resolved when its template body is instantiated.
+Calls to user functions and values from the active constexpr frame remain outside the
+proof domain. `__has_builtin` answers 0 while support is partial.
+[Issue #1065](https://github.com/yrashk/ycxx/issues/1065)
+
 ## Trap builtin (#548)
 
 `__builtin_trap()` is a zero-argument direct call of type `void`. It ends the
