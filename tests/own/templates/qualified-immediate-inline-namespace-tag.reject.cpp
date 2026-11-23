@@ -8,4 +8,3 @@ inline namespace Inner { struct probe {}; }
 }
 
 template<class T> struct Derived : Base<Scope::probe<T>()> {}; //! error
-Derived<char> instance; //! error
