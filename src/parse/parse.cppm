@@ -2125,8 +2125,13 @@ public:
   void record_dependent_type_trait_operand(engine::Loc loc) override {
     p_->dependent_type_trait_operands_.emplace(loc.item, loc.offset);
   }
+  // Where a type trait whose operands were dependent where it is written is answered: the
+  // replay's demand, or where an atomic constraint's satisfaction is checked ([temp.constr.atomic]).
+  std::optional<u32> type_trait_demand_point() const {
+    return satisfying_atom ? std::optional(point()) : type_trait_demand;
+  }
   bool replaying_type_trait_operand(engine::Loc loc) override {
-    return type_trait_demand && dependent_type_trait_operand(loc);
+    return type_trait_demand_point() && dependent_type_trait_operand(loc);
   }
   // Whether the type trait at `loc` had dependent operands where its template defines it.
   bool dependent_type_trait_operand(engine::Loc loc) const {
@@ -2136,11 +2141,8 @@ public:
     // A generic lambda's specialization outside any template: a trait whose operands were
     // dependent in its body is answered at the end, as a function template's instantiation is.
     if (generic_at_end && dependent_type_trait_operand(loc)) return p_->is_complete(c, p_->end(), true, true);
-    // An atomic constraint whose operands were dependent where it is written: where its
-    // satisfaction is checked ([temp.constr.atomic]).
-    if (satisfying_atom && dependent_type_trait_operand(loc)) return p_->is_complete(c, point(), true, true);
     if (!replaying_type_trait_operand(loc)) return std::nullopt;
-    return p_->is_complete(c, *type_trait_demand, true, true);
+    return p_->is_complete(c, *type_trait_demand_point(), true, true);
   }
   bool generic_at_end = false;
   bool satisfying_atom = false;

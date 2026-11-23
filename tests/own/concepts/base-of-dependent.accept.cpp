@@ -44,11 +44,12 @@ static_assert(empty_derived<Late> == 1);
 
 // The other traits that need a complete class wait for satisfaction too.
 template<class T, class U> concept Assignable = __is_assignable(T, U);
-template<class T, class U> concept Constructible = __is_constructible(T, U);
+template<class T, class... Args> concept Constructible = __is_constructible(T, Args...);
 template<class T> concept Destructible = __is_nothrow_destructible(T);
 template<class T> concept TriviallyCopyable = __is_trivially_copyable(T);
 static_assert(Assignable<int&, long> && !Assignable<const int&, int>);
-static_assert(Constructible<int, long> && Constructible<double, int>);
+static_assert(Constructible<int, long> && Constructible<double, int> && Constructible<int>);
+static_assert(!Constructible<int, long, long>);
 static_assert(Destructible<int> && TriviallyCopyable<A>);
 
 int main() {}
