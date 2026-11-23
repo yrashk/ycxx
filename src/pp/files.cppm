@@ -113,6 +113,8 @@ struct Config {
   std::vector<std::pair<std::string, std::optional<std::string>>> macros;
   // The target selects predefined macros (:predefined) and system include directories (:system).
   const ast::Target* target = &ast::aarch64_darwin;
+  // `-ffreestanding` selects the hostedness predefined macro independently of the target.
+  bool freestanding = false;
   // The root of every prefix (§6.1): an editor-view region is never a disk-view one's.
   View view = View::disk;
   // A language option the unit's front end reads: `-ftemplate-depth=N`, the limit on nested
@@ -145,6 +147,7 @@ struct Config {
     }
     if (template_depth != default_template_depth) h.uint(u8(2)).uint(template_depth);
     if (call_triviality) h.uint(u8(3)).uint(std::to_underlying(*call_triviality));
+    if (freestanding) h.uint(u8(4));
     return h.finish();
   }
 };
