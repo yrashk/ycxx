@@ -906,23 +906,24 @@ std::optional<HostedCatch> hosted_catch(parse::Program& program, const ast::Decl
   return HostedCatch{call.function, int_binding};
 }
 
-bool names_unnamed_namespace(parse::Program& program, QualType type);
-bool names_unnamed_namespace(parse::Program& program, EntityId entity);
+bool names_unnamed_namespace(parse::Program& program, QualType type, bool include_value_types = false);
+bool names_unnamed_namespace(parse::Program& program, EntityId entity, bool include_value_types = false);
 
-bool names_unnamed_namespace(parse::Program& program, const ast::TemplateArg& arg) {
+bool names_unnamed_namespace(parse::Program& program, const ast::TemplateArg& arg, bool include_value_types) {
   switch (arg.kind) {
-  case ast::TemplateArgKind::type: return names_unnamed_namespace(program, arg.type);
-  case ast::TemplateArgKind::template_: return names_unnamed_namespace(program, arg.templ);
+  case ast::TemplateArgKind::type: return names_unnamed_namespace(program, arg.type, include_value_types);
+  case ast::TemplateArgKind::value: return include_value_types && names_unnamed_namespace(program, arg.type, true);
+  case ast::TemplateArgKind::template_: return names_unnamed_namespace(program, arg.templ, include_value_types);
   case ast::TemplateArgKind::pack:
     return std::ranges::any_of(program.world().ins.seqs.elements(arg.elems), [&](const ast::TemplateArg& element) {
-      return names_unnamed_namespace(program, element);
+      return names_unnamed_namespace(program, element, include_value_types);
     });
-  default: return false;
   }
+  return false;
 }
 
 // Look through nominal owners and encoded template arguments, without inspecting class definitions.
-bool names_unnamed_namespace(parse::Program& program, EntityId entity) {
+bool names_unnamed_namespace(parse::Program& program, EntityId entity, bool include_value_types) {
   auto& entities = program.world().entities;
   while (entity != EntityId::none) {
     if (program.is_namespace(entity)) return parse::Program::unnamed(program.namespace_path(entity));
@@ -930,26 +931,31 @@ bool names_unnamed_namespace(parse::Program& program, EntityId entity) {
     if (r.kind != sema::EntityKind::class_ && r.kind != sema::EntityKind::enum_ &&
         r.kind != sema::EntityKind::class_template && r.kind != sema::EntityKind::alias_template)
       return false;
-    if (std::ranges::any_of(r.args, [&](const ast::TemplateArg& arg) { return names_unnamed_namespace(program, arg); }))
+    if (std::ranges::any_of(r.args, [&](const ast::TemplateArg& arg) {
+          return names_unnamed_namespace(program, arg, include_value_types);
+        }))
       return true;
     entity = r.scope;
   }
   return false;
 }
 
-bool names_unnamed_namespace(parse::Program& program, QualType type) {
+bool names_unnamed_namespace(parse::Program& program, QualType type, bool include_value_types) {
   const auto r = program.world().types.rec(type);
   switch (r.kind) {
   case sema::TypeKind::class_:
-  case sema::TypeKind::enum_: return names_unnamed_namespace(program, r.entity);
+  case sema::TypeKind::enum_: return names_unnamed_namespace(program, r.entity, include_value_types);
   case sema::TypeKind::pointer:
   case sema::TypeKind::reference:
-  case sema::TypeKind::array: return names_unnamed_namespace(program, r.inner);
+  case sema::TypeKind::array: return names_unnamed_namespace(program, r.inner, include_value_types);
   case sema::TypeKind::member_pointer:
-    return names_unnamed_namespace(program, r.member_owner) || names_unnamed_namespace(program, r.inner);
+    return names_unnamed_namespace(program, r.member_owner, include_value_types) ||
+           names_unnamed_namespace(program, r.inner, include_value_types);
   case sema::TypeKind::function:
-    return names_unnamed_namespace(program, r.inner) ||
-           std::ranges::any_of(r.params, [&](QualType param) { return names_unnamed_namespace(program, param); });
+    return names_unnamed_namespace(program, r.inner, include_value_types) ||
+           std::ranges::any_of(r.params, [&](QualType param) {
+             return names_unnamed_namespace(program, param, include_value_types);
+           });
   default: return false;
   }
 }
@@ -1166,6 +1172,10 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
     ast::Linkage linkage = constexpr_member_symbol_linkage(d).value_or(r.linkage);
     for (EntityId sc = r.scope; linkage == ast::Linkage::external && sc != EntityId::none; sc = world.entities.rec(sc).scope)
       if (world.entities.rec(sc).kind == sema::EntityKind::class_ && internal_class(sc)) linkage = ast::Linkage::internal;
+    // A destructor of a TU-local class binds locally, including a specialization with a
+    // TU-local type argument ([basic.link]).
+    if (r.kind == sema::EntityKind::destructor && linkage == ast::Linkage::external &&
+        names_unnamed_namespace(program, r.scope, /*include_value_types=*/true)) linkage = ast::Linkage::internal;
     tu.entities.push_back({e, std::move(id), d.type, fn, r.lang, linkage, false, at, r.scope,
                            table ? Special::virtual_table
                            : rtti ? Special::type_info
@@ -1235,6 +1245,23 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
   };
   Runtime<decltype(declare)> runtime{world, declare};
   std::optional<ast::DeclSema> root_deallocator;
+  auto coalesce_inline_function = [&](FunctionDef& f, bool in_class) {
+    const auto& entity = world.entities.rec(f.entity);
+    if (entity.linkage != ast::Linkage::external || entity.templ != EntityId::none ||
+        ins.seqs.size(f.body.closures) != 0 || !program.asm_label(f.entity).empty()) return;
+    if (entity.kind == sema::EntityKind::destructor) {
+      // The written in-class and implicit definitions are inline ([dcl.inline], [class.dtor]).
+      // This binding requires a nonvirtual entry and the class's nonthrowing destructor spec.
+      const auto* owner = classes.find(entity.scope);
+      if (!in_class || f.decl.is_virtual || !owner || !owner->destructor_noexcept.value_or(false) ||
+          internal_class(entity.scope) ||
+          names_unnamed_namespace(program, entity.scope, /*include_value_types=*/true)) return;
+    } else if (entity.kind != sema::EntityKind::function) {
+      return;
+    }
+    if (part) part->coalesce_if_inline.insert(f.entity);
+    f.coalesced = inline_declarations.contains(f.entity) && tu.main != f.entity;
+  };
   // Whether a variable's definition is weak once a declaration says `inline`.
   auto weak_if_inline = [&](const ast::DeclSema& d) {
     const auto& entity = world.entities.rec(d.entity);
@@ -1352,11 +1379,7 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
           else tu.base_object_variants.insert(d.entity);
         }
       }
-      const bool may_coalesce = entity.kind == sema::EntityKind::function && entity.linkage == ast::Linkage::external &&
-                                entity.templ == EntityId::none && ins.seqs.size(body.closures) == 0 &&
-                                program.asm_label(d.entity).empty();
-      if (part && may_coalesce) part->coalesce_if_inline.insert(d.entity);
-      tu.functions.back().coalesced = may_coalesce && inline_declarations.contains(d.entity) && tu.main != d.entity;
+      coalesce_inline_function(tu.functions.back(), member);
       // A written ordinary body starts at '{'. Other starts include a function-try-block and a
       // constructor initializer. Synthetic bodies and instantiations never enter this path.
       if (linux && entity.kind == sema::EntityKind::constructor) {
@@ -1408,6 +1431,9 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
     declare(in->decl, ast::Loc{program.id(in->item), 0});  // errors in its name point at the template
     tu.functions.push_back({in->spec, in->decl, in->body.value, program.id(in->item), it.body_begin - it.begin,
                             program.this_type(in->decl)});
+    if (world.entities.rec(in->spec).kind == sema::EntityKind::destructor && it.parent != items::none &&
+        items.items[it.parent].kind == items::ItemKind::class_def)
+      coalesce_inline_function(tu.functions.back(), true);
     closures_of(in->body.value.closures, program.id(in->item), it.body_begin - it.begin);
   }
   // The variable template specializations instantiated ([temp.inst]/7), with their constants.
@@ -1463,7 +1489,8 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
     declare(s.decl, std::nullopt);
     tu.functions.push_back({s.decl.entity, s.decl, program.synthesized_body(i), program.id(s.item), 0, program.this_type(s.decl)});
     using enum parse::Program::SpecialMember;
-    tu.functions.back().coalesced = (s.kind == copy_assignment || s.kind == move_constructor) && !internal_class(cls);
+    if (s.kind == destructor) coalesce_inline_function(tu.functions.back(), true);
+    else tu.functions.back().coalesced = (s.kind == copy_assignment || s.kind == move_constructor) && !internal_class(cls);
   }
   auto unwind_provider = [&](EntityId callee) {
     return !program.function_defined_before(callee, program.end()) && !noexcept_declarations.contains(callee) &&

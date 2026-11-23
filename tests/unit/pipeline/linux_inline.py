@@ -225,6 +225,40 @@ def main():
             link(*objects)
             run('./program')
 
+        destructors = fixtures / 'inline-destructors'
+        for fixture, binding, names in (
+            ('shared', 'WEAK', ('_ZN6MemberIiED1Ev', '_ZN6MemberIbED1Ev', '_ZN5OwnerD1Ev')),
+            ('local', 'LOCAL', ('_ZN6MemberIN12_GLOBAL__N_13TagEED1Ev', '_ZN5OwnerIN12_GLOBAL__N_13TagEED1Ev')),
+        ):
+            first, second = f'{fixture}-dtor-first.o', f'{fixture}-dtor-second.o'
+            compile(destructors / fixture / 'first.cpp', first)
+            compile(destructors / fixture / 'second.cpp', second)
+            for obj in (first, second):
+                table = symbols(obj)
+                for name in names:
+                    assert table[name][4] == binding and table[name][6] != 'UND', (obj, table[name])
+            for objects in ((first, second), (second, first)):
+                link(*objects)
+                run('./program')
+
+        compile(destructors / 'enum-value.cpp', 'enum-dtor.o')
+        table = symbols('enum-dtor.o')
+        for name, binding in (('_ZN6MemberILN12_GLOBAL__N_13TagE7EED1Ev', 'LOCAL'),
+                              ('_ZN12PublicMemberIL9PublicTag7EED1Ev', 'WEAK')):
+            assert table[name][4] == binding and table[name][6] != 'UND', table[name]
+        link('enum-dtor.o')
+        run('./program')
+
+        ordinary = destructors / 'out-of-line'
+        compile(ordinary / 'first.cpp', 'strong-dtor-first.o')
+        compile(ordinary / 'second.cpp', 'strong-dtor-second.o')
+        entry = symbols('strong-dtor-first.o')['_ZN5OwnerD1Ev']
+        assert entry[4] == 'GLOBAL' and entry[6] != 'UND', entry
+        link('strong-dtor-first.o', 'strong-dtor-second.o')
+        run('./program')
+        compile(ordinary / 'second.cpp', 'duplicate-dtor.o', '-DDUPLICATE_DESTRUCTOR')
+        link('strong-dtor-first.o', 'duplicate-dtor.o', status=1, error="duplicate symbol '_ZN5OwnerD1Ev'")
+
         compile(data / 'bindings.cpp', 'data-controls.o')
         table = symbols('data-controls.o')
         entry = table['_ZN6Public6scalarE']
