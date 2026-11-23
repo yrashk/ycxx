@@ -206,6 +206,11 @@ struct OwnedVirtualTable {
   EntityId primary_base = EntityId::none;
 };
 
+struct AsmHiddenSymbol {
+  std::string name;
+  ast::Loc at;
+};
+
 // A translation unit's definitions and declarations, in the order of their items.
 struct TranslationUnit {
   std::string name;  // the object's name, for diagnostics
@@ -228,6 +233,7 @@ struct TranslationUnit {
   std::set<EntityId> keyless_type_info;  // definitions selected by the typed-cast ownership check
   // The written complete-object definitions whose ELF base-object entries share their code.
   std::set<EntityId> base_object_variants;
+  std::vector<AsmHiddenSymbol> asm_hidden_symbols;
 };
 
 // What failed, at a location in an item when there is one. Every error here is something the α
@@ -1791,7 +1797,8 @@ void emit_virtual_table(obj::object& o, const VirtualTable& table, std::uint32_t
 std::expected<obj::object, aarch64::CodegenError> assemble_linux(
     const std::string& name, std::span<const LinuxFunction> functions,
     std::span<const aarch64::DataDef> data, std::span<const aarch64::Symbol> symbols,
-    const std::optional<VirtualTable>& table, std::span<const KeylessTypeInfo> keyless_type_info) {
+    const std::optional<VirtualTable>& table, std::span<const KeylessTypeInfo> keyless_type_info,
+    std::span<const EntityId> asm_hidden) {
   obj::object o;
   o.name = name;
   o.arch = obj::target::x86_64_linux;
@@ -1923,6 +1930,9 @@ std::expected<obj::object, aarch64::CodegenError> assemble_linux(
     }
     emit_virtual_table(o, *table, symbol->second, slots, emitted_base);
   }
+  // The directive changes only visibility. Keep the symbol indices that relocations use and
+  // the binding, type, size and section determined by ordinary emission.
+  for (EntityId e : asm_hidden) o.symbols[symbol_of.at(e)].bind = obj::binding::hidden;
   return o;
 }
 
@@ -2111,6 +2121,9 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
   std::vector<const Entity*> locals;  // named after their functions, below
   std::map<std::uint32_t, std::string> mangled;  // by function entity
   std::map<EntityId, std::string> base_object_names;
+  std::map<std::string_view, bool> asm_names;
+  for (const AsmHiddenSymbol& directive : tu.asm_hidden_symbols) asm_names.try_emplace(directive.name, false);
+  std::vector<EntityId> asm_hidden;
   for (const Entity& e : tu.entities) {
     if (!used.contains(ir::raw(e.id))) continue;
     if (e.local_function != EntityId::none) {
@@ -2168,6 +2181,12 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
     obj::binding binding = obj::binding::global;
     if (e.has_local_binding()) binding = obj::binding::local;
     else if (e.hidden) binding = obj::binding::hidden;
+    if (linux && e.special == Special::none && binding != obj::binding::local) {
+      if (auto directive = asm_names.find(*name); directive != asm_names.end()) {
+        directive->second = true;
+        asm_hidden.push_back(e.id);
+      }
+    }
     if (tu.base_object_variants.contains(e.id)) {
       auto base_name = encode(e.special == Special::constructor ? "C2" : "D2");
       if (!base_name) {
@@ -2178,6 +2197,10 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
     }
     symbols.push_back({e.id, std::move(*name), binding});
   }
+  for (const AsmHiddenSymbol& directive : tu.asm_hidden_symbols)
+    if (!asm_names.at(directive.name))
+      errors.push_back({directive.at, std::format("the .hidden directive requires an emitted or referenced "
+                                                  "ordinary ELF symbol named '{}'", directive.name)});
   // A static local and its guard: `_ZZ <encoding> E <name> [_<n>]` and `_ZGV` before it, the
   // function's own <encoding> taken from its symbol (Itanium C++ ABI §5.1.6, §5.1.4.6).
   const std::string_view object_prefix = linux ? "" : "_";
@@ -2219,7 +2242,7 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
         const bool weak = def.coalesced || def.explicit_weak;
         code.push_back({fns[i].fn, &*ms[i].get().linux_code, weak, def.unwind != UnwindEligibility::none, name, catch_int});
       }
-      return assemble_linux(tu.name, code, data, symbols, virtual_table, keyless_type_info);
+      return assemble_linux(tu.name, code, data, symbols, virtual_table, keyless_type_info, asm_hidden);
     }
     std::vector<aarch64::CompiledFunction> code;
     for (std::size_t i = 0; i < fns.size(); ++i) {

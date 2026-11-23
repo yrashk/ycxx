@@ -215,6 +215,8 @@ struct ItemSema {
   SeqId<DeclSema> decls;
   SeqId<ExpansionRec> expansions;
   SeqId<ClosureDef> closures{};
+  NameId asm_hidden_symbol{~u32{0}};
+  u32 asm_directive_at = 0;
   constexpr bool operator==(const ItemSema&) const = default;
 };
 
