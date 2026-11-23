@@ -237,6 +237,8 @@ std::expected<Options, std::string> parse_options(std::span<const std::string_vi
   if (!o.pp.target)
     return std::unexpected("no default target for this build. Use '--target=x86_64-pc-linux-gnu' or '--target=arm64-apple-darwin'");
   if (o.query != Options::Query::none) return o;
+  if (o.pp.pic && o.pp.target != &ast::x86_64_linux)
+    return std::unexpected("'-fPIC' requires the x86-64 Linux target");
   const bool linux_link = o.pp.target == &ast::x86_64_linux && o.stop == Options::Stop::link;
   const bool darwin_link = o.pp.target == &ast::aarch64_darwin && o.stop == Options::Stop::link;
   if (o.interpreter && !linux_link)
