@@ -57,9 +57,11 @@ def replay(ycxx, objdump, scope, env, original):
     try:
         baseline = compare(original, 2)
         initial_pid = pid()
-        compare(original.replace(b'if constexpr (true)', b'if constexpr (false)'), None)
+        _, diagnostic = compare(original.replace(b'if constexpr (true)', b'if constexpr (false)'), None)
+        assert f'{source.name}:11:7: error:' in diagnostic, diagnostic
         # The entire decoded instruction must match, even with a valid INT3 prefix.
         compare(original.replace(b'"int3"', b'"int3; nop"', 1), None)
+        compare(original.replace(b'"int3"', b'"int3\\0junk"', 1), None)
         compare(original.replace(b'"int3"', b'"in\\1643"', 1), 2)
         compare(original.replace(b'asm("int3");', b'(void)0;'), 1)
         source.write_bytes(original.replace(b'asm("int3");', b'asm("int3")'))
