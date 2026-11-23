@@ -20,3 +20,14 @@ add_test(NAME daemon.nostdinc
 add_test(NAME daemon.no_exceptions
   COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/no_exceptions.py
           $<TARGET_FILE:ycxxc> ${PROJECT_SOURCE_DIR}/deps/libycxx "${CMAKE_READELF}")
+
+# PARITY: by design: checks x86-64 ELF relocation metadata and runs native mixed objects.
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$"
+   AND NOT CMAKE_CROSSCOMPILING)
+  add_test(NAME daemon.derived_virtual_destructor
+    COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/derived_virtual_destructor.py
+            $<TARGET_FILE:ycxxc> ${CMAKE_CXX_COMPILER} ${CMAKE_READELF})
+  add_test(NAME daemon.derived_virtual_destructor_alignment
+    COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/derived_virtual_destructor_alignment.py
+            $<TARGET_FILE:ycxxc> ${CMAKE_CXX_COMPILER})
+endif()
