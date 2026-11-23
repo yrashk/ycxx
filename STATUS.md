@@ -2122,10 +2122,11 @@ template's tokens again with the arguments bound.
 - **Dependent variable-template arguments** (#209): an unqualified namespace variable template
   used as a dependent `bool` template argument keeps the declaration found by ordinary lookup.
   Substitution evaluates the selected specialization once its arguments are concrete.
-- **Dependent immediate calls** (#209, [temp.dep.constexpr], [temp.arg.nontype]): a call to an
-  unqualified, unambiguous namespace `consteval` function template with no function parameters
-  can supply a non-type template argument. The call retains its explicit type arguments, including
-  trailing pack expansions, and evaluates to an integer or enum once those arguments are concrete.
+- **Dependent immediate calls** (#209, [temp.dep.constexpr], [temp.arg.nontype]): an unqualified
+  or fixed namespace-qualified call to a uniquely resolved `consteval` function template with
+  no function parameters can supply a non-type template argument. The call retains its explicit
+  type arguments, including trailing pack expansions, and evaluates to an integer or enum once
+  those arguments are concrete.
   Alias type-ids replay calls whose argument validity must be checked at substitution.
   Dependent uses of aliases that can erase the check require signature replay (#209).
 - An unqualified call to a single ordinary external C++ immediate function can also supply

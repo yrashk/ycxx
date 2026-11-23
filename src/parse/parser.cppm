@@ -1787,6 +1787,10 @@ public:
     if (!s || kind(next) != Tk::identifier || kind(next + 1) == Tk::coloncolon) return std::nullopt;
     // `N::X<args>`: a class template specialization named in a namespace ([temp.names]).
     qualified_half_ = false;
+    NameId name = name_of(tok(next));
+    if (template_argument && s->ns && kind(next + 1) == Tk::less &&
+        s_->namespace_names_call_template(*s->ns, name))
+      return std::nullopt;
     if (kind(next + 1) == Tk::less && s->ns) {
       u32 j = next;
       const auto diags = s_->diag_count();
@@ -1796,7 +1800,6 @@ public:
       }
       if (checked && s_->has_error_since(diags)) return std::nullopt;
     }
-    NameId name = name_of(tok(next));
     if (template_argument && next == 2 && s_->scope_names_static_data_member(*s, name))
       return std::nullopt;
     std::optional<u32> at = checked ? std::optional{pos() + next} : std::nullopt;
@@ -4086,12 +4089,7 @@ public:
             if (is(Tk::l_paren) && kind(1) == Tk::r_paren) {
               Ex callee = s_->name_expr(n, begin, pos(), true);
               if (!callee.ok()) return callee;
-              if (auto call = s_->dependent_immediate_template_call(callee, *args, pos() + 2)) {
-                ++deferred_immediate_calls_;
-                bump();
-                bump();
-                return *call;
-              }
+              if (auto call = deferred_immediate_template_call(callee, *args)) return *call;
             }
           }
           // A call of it is a dependent call ([temp.dep.candidate]): its instantiation adds
@@ -4341,6 +4339,17 @@ public:
     }
   }
 
+  // The caller has recognized the empty operand list of a dependent immediate call.
+  std::optional<Ex> deferred_immediate_template_call(Ex callee, std::span<const ast::TemplateArg> args) {
+    auto call = s_->dependent_immediate_template_call(callee, args, pos() + 2);
+    if (call) {
+      ++deferred_immediate_calls_;
+      bump();
+      bump();
+    }
+    return call;
+  }
+
   // A qualified-id ([expr.prim.id.qual]): `N::x`, `::x`, `C::m`, `E::e`, `N::C::f`.
   Ex qualified_id(u32 begin) {
     u32 next = 0;
@@ -4373,7 +4382,7 @@ public:
     auto name = expression_id(suffix);
     if (!name) return {NodeId::none, begin, pos()};
     NameId n = *name;
-    auto scope_expr = [&] {
+    auto scope_expr = [&](bool immediate_call = false) {
       // [expr.unary.op]: `&C::m` can form a pointer to member. Parentheses or postfix
       // operations make the operand something other than the qualified-id itself.
       bool postfix = is(Tk::l_paren) || is(Tk::l_square) || is(Tk::period) || is(Tk::arrow) ||
@@ -4387,7 +4396,7 @@ public:
       }
       const bool check_all_bases = in_template_value_argument_ && next == 2 &&
           (member_alias_type || s_->scope_names_static_data_member(*s, n));
-      return s_->scope_expr(*s, n, begin, name_at, pos(), postfix ? std::nullopt : address, check_all_bases);
+      return s_->scope_expr(*s, n, begin, name_at, pos(), postfix ? std::nullopt : address, check_all_bases, immediate_call);
     };
     if (operator_name) {
       if (is(Tk::less) && s_->scope_names_template(*s, n)) {
@@ -4396,7 +4405,9 @@ public:
       }
       return scope_expr();
     }
-    if (s->ns && is(Tk::less)) {
+    const bool qualified_value_template = s->ns && in_template_value_argument_ && is(Tk::less);
+    const bool immediate_template = qualified_value_template && s_->namespace_names_call_template(*s->ns, n);
+    if (s->ns && is(Tk::less) && !immediate_template) {
       // [expr.type.conv] permits a namespace-qualified simple-template-id as the
       // target type of a functional conversion.
       const auto diags = s_->diag_count();
@@ -4420,7 +4431,7 @@ public:
         return type_conversion(*t, begin);
       }
     if (is(Tk::less)) {
-      if (s->ns) {
+      if (s->ns && !immediate_template) {
         auto diags = s_->diag_count();
         auto c = s_->namespace_concept_for_expression(*s->ns, n, name_at);
         if (c || s_->has_error_since(diags)) {
@@ -4434,7 +4445,7 @@ public:
         }
       }
       // `N::v<args>`: a variable template of the namespace ([temp.names]/3).
-      if (s->ns)
+      if (s->ns && !immediate_template)
         if (auto v = s_->namespace_template(*s->ns, n, ast::DeclKind::variable)) {
           auto args = template_argument_list();
           if (!args) return {NodeId::none, begin, pos()};
@@ -4444,12 +4455,22 @@ public:
         }
       // `S::f<args>`: a member template of class S or a function template of namespace S, with
       // explicit arguments ([temp.arg.explicit]).
-      if (keyword || s_->scope_names_template(*s, n)) {
+      if (keyword || (qualified_value_template ? immediate_template : s_->scope_names_template(*s, n))) {
         auto args = template_argument_list();
         if (!args) return {NodeId::none, begin, pos()};
-        Ex r = scope_expr();
-        if (r.ok() && !s_->dependent(r) && std::ranges::any_of(*args, [&](const ast::TemplateArg& a) { return s_->dependent(a); }))
+        const bool dependent_args = std::ranges::any_of(*args, [&](const ast::TemplateArg& a) { return s_->dependent(a); });
+        const bool immediate_call = s->ns && in_template_value_argument_ &&
+                                    is(Tk::l_paren) && kind(1) == Tk::r_paren;
+        if ((immediate_call || immediate_template) && ambiguous_namespace) {
+          s_->diag(begin + *ambiguous_namespace, Diag::ambiguous_name, ambiguous_name);
+          return {NodeId::none, begin, pos()};
+        }
+        Ex r = scope_expr(immediate_call || immediate_template);
+        if (r.ok() && !s_->dependent(r) && dependent_args) {
+          if (immediate_call)
+            if (auto call = deferred_immediate_template_call(r, *args)) return *call;
           return s_->dependent_node({}, begin, pos());
+        }
         s_->explicit_template_args(r, std::move(*args));
         return r;
       }

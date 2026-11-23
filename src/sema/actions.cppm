@@ -180,7 +180,7 @@ public:
   // ([namespace.qual]).
   virtual std::optional<EntityId> namespace_named(NameId name, std::span<const EntityId> directives = {}) = 0;
   virtual std::vector<ast::DeclSema> namespace_members(EntityId ns, NameId name, bool type_only = false,
-                                                      bool direct_only = false) = 0;
+                                                      bool direct_only = false, bool immediate_call = false) = 0;
   // [basic.lookup.argdep]: functions in one associated namespace's inline namespace set, and
   // a class's record if complete there. Ask at the lexical point, and for a dependent call
   // also at the point of instantiation ([temp.dep.candidate]).
@@ -206,6 +206,7 @@ public:
   // specialization's static data member, which instantiates its initializer ([temp.inst]/3).
   // The declaration of template `t` here: its head and, for an alias template, its type.
   virtual std::optional<ast::DeclSema> template_decl(EntityId /*t*/) { return std::nullopt; }
+  virtual std::optional<ast::DeclSema> replay_function_decl(EntityId function) { return template_decl(function); }
   virtual bool value_dependent_member(EntityId /*v*/) { return false; }
   // False when its initializer was in error, which was reported: what uses it says nothing more.
   virtual bool use_static_member(EntityId /*v*/) { return true; }
@@ -1982,7 +1983,7 @@ public:
       return Scope{std::nullopt, types().dep_name(*s.type, n)};
     if (s.ns) {
       if (auto t = direct_member_introduction(*s.ns, n)) return Scope{std::nullopt, t};
-      auto members = q_->namespace_members(*s.ns, n);
+      auto members = q_->qualifier_decls(n, s.ns, {});
       for (const ast::DeclSema& d : members) {
         if (d.kind == ast::DeclKind::namespace_) {
           if (ambiguous_namespace)
@@ -2187,7 +2188,7 @@ public:
   }
   // `S::n` as an expression ([expr.prim.id.qual]).
   Ex scope_expr(const Scope& s, NameId n, u32 begin, u32 name_at, u32 end, std::optional<u32> address_at = {},
-                bool check_all_bases = false) {
+                bool check_all_bases = false, bool immediate_call = false) {
     if (s.type && types().is_dependent(*s.type)) return dependent_node({}, begin, end, std::nullopt, ValueCategory::lvalue);
     if (s.type) {
       if (types().is_enum(*s.type)) {
@@ -2215,7 +2216,15 @@ public:
       for (const OwnDecl& d : own)
         if (d.name == n && d.enum_initializer != ConstId::none)
           return literal(d.sema.type, d.enum_initializer, ValueCategory::prvalue, begin, end);
-    std::vector<ast::DeclSema> found = q_->namespace_members(*s.ns, n);
+    auto found = q_->namespace_members(*s.ns, n, /*type_only=*/false, /*direct_only=*/false, immediate_call);
+    if (immediate_call && std::ranges::any_of(found, [](const ast::DeclSema& d) {
+          return d.kind == ast::DeclKind::function;
+        }) && std::ranges::any_of(found, [](const ast::DeclSema& d) {
+          return d.kind != ast::DeclKind::function;
+        })) {
+      diag(name_at, Diag::ambiguous_name, n);
+      return {NodeId::none, begin, end};
+    }
     if (found.empty()) {
       diag(name_at, Diag::no_namespace_member, n);
       return {NodeId::none, begin, end};
@@ -2452,6 +2461,11 @@ public:
   bool scope_names_template(const Scope& sc, NameId name) {
     if (sc.ns) return namespace_template(*sc.ns, name, ast::DeclKind::function).has_value();
     return sc.type && types().is_class(*sc.type) && class_has_member_template(types().class_of(*sc.type), name);
+  }
+  bool namespace_names_call_template(EntityId ns, NameId name) {
+    return std::ranges::any_of(q_->namespace_members(ns, name, false, false, true), [](const ast::DeclSema& d) {
+      return d.kind == ast::DeclKind::function && (d.flags & decl_flag::template_);
+    });
   }
   // A class lvalue reached through an existing pointer or reference. Prvalues and direct
   // references to class storage still use the ordinary layout guard.
@@ -3797,7 +3811,7 @@ public:
   }
 
   std::optional<TemplateArg> evaluate_dependent_call(EntityId function, std::span<const TemplateArg> args, u32 at) {
-    auto decl = q_->template_decl(function);
+    auto decl = q_->replay_function_decl(function);
     if (!decl || !(decl->flags & decl_flag::consteval_)) return std::nullopt;
     Ex callee = decls_expr({*decl}, false, w_->entities.rec(function).name, at, at);
     std::vector<Ex> operands;
