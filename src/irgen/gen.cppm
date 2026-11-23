@@ -132,6 +132,10 @@ bool materializes_temporary(const ast::Ast& ast, ast::NodeId n) {
 template <Facts F>
 std::expected<FunctionIr, std::string> function_ir(const ast::Interners& in, const FunctionInput& fn, F& facts);
 
+template <Facts F>
+std::expected<FunctionIr, std::string> constant_byte_capture_ir(const ast::Interners& in, const FunctionInput& fn,
+                                                               F& facts, ConstantByteCapture& capture);
+
 }  // namespace ycxx::irgen
 
 namespace ycxx::irgen {
