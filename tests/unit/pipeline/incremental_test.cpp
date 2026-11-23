@@ -812,17 +812,27 @@ obj::archive::input runtime_archive(const obj::object& object) {
 void implicit_runtime_policies() {
   pl::Session s;
   const pl::TuId entry{0}, second{1}, peer{2}, runtime{3};
+  const std::string peer_source = "extern \"C\" int peer() { return 2; }";
   s.set_source(entry, "main.cpp", "int second(); int main() { return second() != 42; }", "main.o");
   s.set_source(second, "second.cpp", "extern \"C\" int runtime_helper(); extern \"C\" int peer(); int second() { "
                "return runtime_helper() + peer(); }", "second.o");
-  s.set_source(peer, "peer.cpp", "extern \"C\" int peer() { return 2; }", "peer.o");
+  s.set_source(peer, "peer.cpp", peer_source, "peer.o");
   s.set_source(runtime, "runtime.cpp", "extern \"C\" int runtime_helper() { return 40; }", "runtime.o");
+  // Build checks path-keyed readability before consuming the translation unit's FileText.
+  s.db().set<pp::FileContent>(pp::path_id("peer.cpp"), peer_source);
   const auto& checked = s.get<pl::Build>(s.request({{peer}, pl::Until::object, {}, true}));
-  const auto& member = s.get<pl::Tu>(runtime).object;
-  const auto& unchecked = s.get<pl::Tu>(peer).object;
-  check(checked.units.size() == 1 && checked.units[0].object && member && unchecked,
-        "ordinary and runtime fixtures build as Mach-O objects");
-  if (checked.units.size() != 1 || !checked.units[0].object || !member || !unchecked) return;
+  const auto& compiled_runtime = s.get<pl::Tu>(runtime);
+  const auto& compiled_peer = s.get<pl::Tu>(peer);
+  const auto& member = compiled_runtime.object;
+  const auto& unchecked = compiled_peer.object;
+  const bool built = checked.units.size() == 1 && checked.units[0].object && member && unchecked;
+  check(built, "ordinary and runtime fixtures build: " + pl::Build::errors(checked) +
+               pl::Tu::errors(compiled_runtime) + pl::Tu::errors(compiled_peer));
+  if (!built) return;
+  const auto darwin = obj::target::aarch64_macos;
+  const bool mach = checked.units[0].object->arch == darwin && member->arch == darwin && unchecked->arch == darwin;
+  check(mach, "ordinary and runtime fixtures target arm64 Mach-O");
+  if (!mach) return;
 
   using Kind = pl::LinkOperand::Kind;
   pl::ProgramInputs automatic{{entry, second}, {*checked.units[0].object}, "checked-runtime",
