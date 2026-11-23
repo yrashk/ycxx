@@ -2,6 +2,7 @@
 
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import tempfile
@@ -128,14 +129,27 @@ def rejected(options, scope, cold):
         cases[name] = data.replace('.hidden probe_value', literal) + ' ' + size.replace('.hidden probe_value', literal)
 
     output = scope / 'rejected.o'
+
+    def reject(source, diagnostic_line=None):
+        output.unlink(missing_ok=True)
+        result = subprocess.run([*options, '-c', source.name, '-o', output.name], cwd=scope, env=cold,
+                                capture_output=True, text=True, timeout=30)
+        assert result.returncode == 1 and ': error:' in result.stderr and not output.exists(), (source.name, result)
+        if diagnostic_line is not None:
+            anchor = rf'(?m)(?:^|/){re.escape(source.name)}:{diagnostic_line}:\d+: error:'
+            assert re.search(anchor, result.stderr), result
+
     for name, accessors in cases.items():
         source = scope / f'{name}.cpp'
         source.write_text(f'struct directive {{ {accessors} }};\n'
                           'asm((directive{}));\nextern "C" { int probe_value = 23; }\n')
-        output.unlink(missing_ok=True)
-        result = subprocess.run([*options, '-c', source.name, '-o', output.name], cwd=scope, env=cold,
-                                capture_output=True, text=True, timeout=30)
-        assert result.returncode == 1 and ': error:' in result.stderr and not output.exists(), (name, result)
+        reject(source)
+
+    source = scope / 'borrowed-size.cpp'
+    source.write_text('struct Layout { virtual int peer(); int size; };\n'
+                      'extern Layout* source;\n'
+                      'asm((*source));\n')
+    reject(source, diagnostic_line=3)
 
 
 def main():
