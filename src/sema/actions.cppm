@@ -162,6 +162,11 @@ public:
     if (const EnumRec* record = defining_enum(e)) return record->scoped;
     return std::nullopt;
   }
+  // A fixed enumeration is complete even before its enumerator list ends ([dcl.enum]).
+  virtual std::optional<bool> defining_enum_is_fixed(EntityId e) {
+    if (const EnumRec* record = defining_enum(e)) return record->fixed;
+    return std::nullopt;
+  }
   // This unit's class and enumeration records (#115).
   virtual const Classes& classes() = 0;
   // The constant a variable usable in constant expressions holds ([expr.const]), if it is known.
@@ -1376,6 +1381,52 @@ public:
     return fail(Diag::trivial_copyability_unsupported, operand);
   }
 
+  // The trait's domain requires the innermost array element to be complete or cv void
+  // ([meta.unary.prop]). Its class facts are read only after completing the operand at that point.
+  Ex standard_layout_expr(QualType operand, u32 begin, u32 end) {
+    const Types& ts = types();
+    const QualType type = ts.canonical(operand);
+    const engine::Loc loc = type_trait_loc(begin);
+    const auto fail = [&](Diag d, QualType reported) -> Ex {
+      diag_at(loc, d, reported);
+      return {NodeId::none, begin, end};
+    };
+    if (ts.is_dependent(type)) {
+      if (q_->in_type_trait_pattern())
+        if (auto value = templates().unary_trait_value(ast::DepOp::is_standard_layout, type)) {
+          q_->record_dependent_type_trait_operand(loc);
+          return literal(builtin(Builtin::bool_), *value, ValueCategory::prvalue, begin, end);
+        }
+      return fail(Diag::standard_layout_unsupported, operand);
+    }
+    const QualType element = ts.innermost_array_element(type);
+    if (ts.is_reference(element) || ts.is_function(element) || ts.is_void(element))
+      return bool_literal(false, begin, end);
+    if (ts.is_enum(element)) {
+      const EntityId e = ts.enum_of(element);
+      if (auto fixed = q_->defining_enum_is_fixed(e)) {
+        if (!*fixed) return fail(Diag::standard_layout_incomplete, element);
+      } else if (const EnumRec* record = classes().find_enum(e)) {
+        if (!record->fixed && !record->defined) return fail(Diag::standard_layout_incomplete, element);
+      } else {
+        return fail(Diag::standard_layout_unsupported, operand);
+      }
+      return bool_literal(true, begin, end);
+    }
+    if (ts.is_class(element)) {
+      const EntityId cls = ts.class_of(element);
+      const auto demand = q_->type_trait_at_demand(cls, loc);
+      if (!(demand ? *demand : q_->is_complete_at_source(cls))) {
+        if (q_->type_trait_instantiation_failed(cls)) return {NodeId::none, begin, end};
+        return fail(Diag::standard_layout_incomplete, element);
+      }
+      if (auto result = classes().standard_layout(cls)) return bool_literal(*result, begin, end);
+    } else if (ts.is_scalar(element) || ts.is_floating(element)) {
+      return bool_literal(true, begin, end);
+    }
+    return fail(Diag::standard_layout_unsupported, operand);
+  }
+
   // In this domain every destructible type has trivial, nonthrowing destruction ([meta.unary.prop]).
   Ex destructibility_expr(ast::DepOp op, NameId name, QualType operand, u32 begin, u32 end) {
     const Types& ts = types();
@@ -1842,6 +1893,7 @@ public:
   Ex trait_expr(lex::TypeTrait t, NameId name, std::span<const QualType> args, u32 begin, u32 end) {
     using enum lex::TypeTrait;
     if (t == is_trivially_copyable) return trivial_copyability_expr(args[0], begin, end);
+    if (t == is_standard_layout) return standard_layout_expr(args[0], begin, end);
     if (t == is_empty) return empty_expr(args[0], begin, end);
     QualType b = builtin(Builtin::bool_);
     auto structural_trait = [&](std::optional<ConstId> v) {

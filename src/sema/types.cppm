@@ -753,6 +753,7 @@ struct TrivialCopyability {
 
 struct ClassRec {
   bool defined = false;
+  bool member_declarations_valid = false;  // no member declaration was lost to an error
   bool is_final = false;  // the class property's value from the definition ([class.pre])
   u8 explicit_alignment = 0;  // a validated class-head requirement stricter than the natural alignment
   bool unapplied_layout = false;  // unresolved layout attributes on this definition or its data members
@@ -916,6 +917,108 @@ public:
   bool is_defined(EntityId c) const {
     const ClassRec* r = find(c);
     return r && r->defined;
+  }
+
+  // [class.prop]: compute the source type property from complete declarations in this unit.
+  // Stored members and bases need complete types; a missing record cannot supply a layout fact.
+  std::optional<bool> standard_layout(EntityId root) const {
+    struct Facts {
+      std::optional<bool> standard_layout;
+      std::set<EntityId> bases;
+      EntityId declaring_class = EntityId::none;
+      // The class types in M(X), with true for a certain member. A non-first potentially
+      // overlapping member of unproved size might also contribute.
+      std::map<EntityId, bool> initial_member_types;
+      bool has_nonzero_subobject = false;
+
+      bool accept_declaring_class(EntityId owner) {
+        if (owner == EntityId::none) return true;
+        if (declaring_class == EntityId::none) declaring_class = owner;
+        return declaring_class == owner;
+      }
+
+      void include_initial_members(const Facts& from, bool certain) {
+        for (const auto& [type, present] : from.initial_member_types)
+          initial_member_types[type] |= certain && present;
+      }
+    };
+
+    // In-progress entries have no proof. A re-entrant or malformed subobject graph cannot
+    // turn a partly assembled record into a positive classification.
+    std::map<EntityId, Facts> memo;
+    const auto facts_of = [&](this auto&& visit, EntityId cls) -> const Facts& {
+      const auto [entry, inserted] = memo.try_emplace(cls);
+      if (!inserted) return entry->second;
+      const ClassRec* record = find(cls);
+      if (!record || !record->defined || !record->member_declarations_valid) return entry->second;
+      const auto reject = [&]() -> const Facts& {
+        entry->second.standard_layout = false;
+        return entry->second;
+      };
+      // BaseRec contains only nonvirtual edges. The base-clause parser rejects virtual bases.
+      if (record->polymorphic) return reject();
+
+      Facts facts;
+      bool proved = true;
+      if (!record->fields.empty()) facts.declaring_class = cls;
+      for (const BaseRec& base : record->bases) {
+        const Facts& subobject = visit(base.cls);
+        if (subobject.standard_layout == false || !facts.accept_declaring_class(subobject.declaring_class))
+          return reject();
+        if (!facts.bases.insert(base.cls).second) return reject();
+        for (EntityId indirect : subobject.bases)
+          if (!facts.bases.insert(indirect).second) return reject();
+        proved &= subobject.standard_layout.has_value();
+        facts.has_nonzero_subobject |= subobject.has_nonzero_subobject;
+        // The first data member can be inherited. The base type itself is not in M(X).
+        facts.include_initial_members(subobject, true);
+      }
+
+      const auto& fields = record->fields;
+      if (!fields.empty()) {
+        const ast::Access access = record->access_of(fields.front().entity);
+        for (const FieldRec& field : fields) {
+          if (record->access_of(field.entity) != access) return reject();
+          const QualType element = types_->innermost_array_element(field.type);
+          if (types_->is_reference(element)) return reject();
+          if (types_->is_dependent(element)) {
+            proved = false;
+            continue;
+          }
+          if (!types_->is_class(element)) {
+            const bool scalar = types_->is_scalar(element) || types_->is_floating(element);
+            proved &= scalar;
+            facts.has_nonzero_subobject |= scalar;
+            continue;
+          }
+          const EntityId type = types_->class_of(element);
+          const Facts& member = visit(type);
+          if (member.standard_layout == false) return reject();
+          proved &= member.standard_layout.has_value();
+          // Arrays and non-overlapping members have nonzero size. A class member can also
+          // prove nonzero size through its subobjects ([intro.object]).
+          const bool nonzero = !field.no_unique_address || types_->is_array(field.type) || member.has_nonzero_subobject;
+          facts.has_nonzero_subobject |= nonzero;
+          const bool certain = record->union_ || &field == &fields.front();
+          if (certain || !nonzero) {
+            // Only class types can collide with a base. Skip the array types along the path
+            // to their element. Extend M with the member's M, which excludes its base types.
+            facts.initial_member_types[type] |= certain;
+            facts.include_initial_members(member, certain);
+          }
+        }
+      }
+
+      for (const auto& [type, certain] : facts.initial_member_types) {
+        if (!facts.bases.contains(type)) continue;
+        if (certain) return reject();
+        proved = false;
+      }
+      if (proved) facts.standard_layout = true;
+      entry->second = std::move(facts);
+      return entry->second;
+    };
+    return facts_of(root).standard_layout;
   }
 
   bool has_virtual_layouts() const { return has_virtual_layouts_; }
@@ -1173,6 +1276,7 @@ struct World {
     field("fp_offset", offset);
     field("overflow_arg_area", area);
     field("reg_save_area", area);
+    rec.member_declarations_valid = true;
     classes.publish(sysv_va_list_tag_, std::move(rec));
   }
 

@@ -457,6 +457,7 @@ public:
     case ast::DepOp::is_trivially_destructible:
     case ast::DepOp::is_polymorphic:
     case ast::DepOp::is_abstract:
+    case ast::DepOp::is_standard_layout:
     case ast::DepOp::is_empty: return std::nullopt;
     case ast::DepOp::is_same:
     case ast::DepOp::is_constructible:
@@ -640,6 +641,7 @@ public:
       case ast::DepOp::is_trivially_destructible:
       case ast::DepOp::is_polymorphic:
       case ast::DepOp::is_abstract:
+      case ast::DepOp::is_standard_layout:
       case ast::DepOp::is_empty:
       case ast::DepOp::is_object: {
         auto operand = substitute_arg(ins().seqs.at(op.operands, 0), b);
