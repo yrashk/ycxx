@@ -562,6 +562,10 @@ SDK or one selected by `SDKROOT`. Cross-target builds can also supply target hea
 [#475](https://github.com/yrashk/ycxx/issues/475) · [#657](https://github.com/yrashk/ycxx/issues/657) ·
 [#664](https://github.com/yrashk/ycxx/issues/664) · [#690](https://github.com/yrashk/ycxx/issues/690)
 
+`ycxx -dumpmachine` prints the selected target triple and `ycxx -print-file-name=include` prints
+its compiler resource include directory. Both accept `--target` and run without a project.
+[#970](https://github.com/yrashk/ycxx/issues/970)
+
 **Incremental builds through a resident daemon.** `ycxx cxx` hands its work to a per-project
 `ycxx daemon` (`YCXX_NO_DAEMON=1` runs in-process), which watches the files it has read and keeps
 its analysis between commands. A repeated build re-runs nothing, and an edit re-runs only what

@@ -220,6 +220,10 @@ What is true of the code today. Work in progress and its owners are tracked in
     bundled library and resource headers, while keeping explicit `-I`, `-isystem`,
     and `-iquote` paths, source-relative quoted includes, and macros.
     [#251](https://github.com/yrashk/ycxx/issues/251)
+  - `-print-file-name=include` prints the primary configured resource include directory, and
+    `-dumpmachine` prints the canonical target triple. The driver accepts `--target` for both
+    queries and answers without opening a translation unit or starting a daemon. Linux reports
+    `resources/linux/include` and Darwin reports `resources/common/include`. [#970](https://github.com/yrashk/ycxx/issues/970)
   - `#define` and `#undef` with the redefinition check, rescanning and painting
     ([cpp.rescan]);
   - function-like macros (`:unit`'s `invocation`, `substitute`, `paste`): arguments across
