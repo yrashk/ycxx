@@ -235,8 +235,8 @@ no relocations or runtime work. On Linux this lets two freestanding units using 
 link with the pinned static library. [#432](https://github.com/yrashk/ycxx/issues/432)
 · [#903](https://github.com/yrashk/ycxx/issues/903)
 
-Constant-initialized arithmetic `static constexpr` data members of class templates have one
-address per externally linked specialization across translation units. Members of a
+Constant-initialized arithmetic `static constexpr` data members of namespace-scope class
+templates have one address per externally linked specialization across translation units. Members of a
 specialization with an unnamed-namespace template argument keep their storage local.
 [#1038](https://github.com/yrashk/ycxx/issues/1038)
 
