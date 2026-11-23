@@ -1087,9 +1087,7 @@ public:
           QualType size = types().canonical(types().builtin(Builtin::unsigned_long));
           // Keep the array-bound type deduction as a fallback until all
           // compared parameters have supplied their ordinary deductions.
-          if (array_bound_types_ && ins().values.is<ast::VDepParam>(ar.bound_value) &&
-              ins().values.get<ast::VDepParam>(ar.bound_value).depth == unique_depth &&
-              !head_.empty() && head_.front().depth == depth && p.index < head_.size()) {
+          if (array_bound_types_ && !head_.empty() && head_.front().depth == depth && p.index < head_.size()) {
             TypeRec bound_type = types().rec(types().canonical(head_[p.index].type));
             if (bound_type.kind == TypeKind::template_param && bound_type.depth == depth)
               array_bound_types_->insert(bound_type.index);

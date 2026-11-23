@@ -12,3 +12,7 @@ int values[2];
 long* metadata;
 int* element;
 static_assert(__is_same(decltype(choose<Extent, 2>(values, metadata, element)), long));
+
+template<class E, E N> int fixed(int (&)[N], typename Identity<E>::type*);
+template<class E, E N> long fixed(int (&)[2], typename Identity<E>::type*);
+static_assert(__is_same(decltype(fixed<Extent, 2>(values, metadata)), long));
