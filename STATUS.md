@@ -863,12 +863,16 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
   gives its non-inline definition `STB_WEAK`. This includes qualified definitions such as
   libycxx's `std::is_debugger_present`. The ELF linker selects a strong definition in either
   input order and diagnoses duplicate strong definitions. Explicit GNU visibility can
-  independently give the symbol `STV_HIDDEN`.
+  independently give the symbol `STV_HIDDEN`. On arm64 Mach-O the same definitions are weak
+  external, or weak private external when hidden, and both ycxx's linker and the system linker
+  keep a strong definition over them (`unit.darwin_weak_visibility`).
   [Design](docs/design/linux-weak-functions.md) · [#937](https://github.com/yrashk/ycxx/issues/937)
+  · [#1085](https://github.com/yrashk/ycxx/issues/1085)
 - On Linux x86-64, explicit GNU hidden visibility on any declaration of an ordinary external
   non-inline namespace-scope variable gives its ELF symbol `STB_GLOBAL` and `STV_HIDDEN`.
   This includes the C-linkage marker `__ycxx_linkage_static_v1` from the pinned libycxx runtime.
-  [#936](https://github.com/yrashk/ycxx/issues/936)
+  On arm64 Mach-O the symbol is private external.
+  [#936](https://github.com/yrashk/ycxx/issues/936) · [#1085](https://github.com/yrashk/ycxx/issues/1085)
 - On Linux x86-64, a namespace-scope `asm((expression));` checks `size()` and `data()` in one
   constant evaluation and accepts a single `.hidden SYMBOL` directive with an optional final
   newline. The assembler sets `STV_HIDDEN` on the matching ordinary ELF symbol while preserving
@@ -878,9 +882,10 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
   nearest explicit GNU `hidden` or `default` visibility from a namespace definition.
   The canonical declaration carries consistent visibility to its unannotated qualified
   definition and to reference-only objects. An explicit function attribute takes
-  precedence. Mixed inherited defaults retain the direct attribute rules.
+  precedence. Mixed inherited defaults retain the direct attribute rules. arm64 Mach-O
+  follows the same rules, with hidden as private external.
   [Design](docs/design/linux-namespace-visibility.md) ·
-  [#940](https://github.com/yrashk/ycxx/issues/940)
+  [#940](https://github.com/yrashk/ycxx/issues/940) · [#1085](https://github.com/yrashk/ycxx/issues/1085)
 - Constant-initialized and zero-initialized external inline namespace variables use weak ELF
   definitions when their initial values need no relocations. This includes explicitly inline
   full variable-template specializations with builtin type arguments. Static addresses and

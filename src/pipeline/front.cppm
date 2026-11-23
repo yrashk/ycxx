@@ -201,12 +201,12 @@ struct FunctionVisibility {
 };
 // The visibility of the unit's symbols, from every declaration in it.
 void apply_visibility(TranslationUnit& tu, const std::set<EntityId>& hidden_declarations, const std::set<EntityId>& inline_declarations,
-                      const std::map<EntityId, FunctionVisibility>& function_visibility, bool linux) {
+                      const std::map<EntityId, FunctionVisibility>& function_visibility) {
   if (hidden_declarations.empty() && function_visibility.empty()) return;
   using Visibility = ast::GnuVisibility;
   for (Entity& e : tu.entities) {
     // An inline variable falls outside the ordinary data visibility profile.
-    e.hidden = hidden_declarations.contains(e.id) && (e.is_function || (linux && !inline_declarations.contains(e.id)));
+    e.hidden = hidden_declarations.contains(e.id) && (e.is_function || !inline_declarations.contains(e.id));
     if (!e.is_function || inline_declarations.contains(e.id)) continue;
     const auto found = function_visibility.find(e.id);
     if (found == function_visibility.end()) continue;
@@ -225,7 +225,7 @@ struct UnitPart {
   std::vector<Dynamic> dynamic;  // in definition order
   std::set<EntityId> inline_declarations, noexcept_declarations, hidden_declarations;
   std::set<EntityId> defined;  // functions a declaration here defines
-  std::set<EntityId> weak_declarations;  // explicitly weak (x86-64)
+  std::set<EntityId> weak_declarations;  // explicitly weak
   std::map<EntityId, FunctionVisibility> function_visibility;
   // Definitions that coalesce when any declaration in the unit says `inline`: functions (unless
   // `main`) and variables.
@@ -1164,8 +1164,8 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
       inline_declarations.insert(e);
     if (d.kind == ast::DeclKind::function && d.has_written_noexcept) noexcept_declarations.insert(e);
     if (d.hidden_visibility) hidden_declarations.insert(e);
-    if (linux && d.explicit_weak) weak_declarations.insert(e);
-    if (linux && d.kind == ast::DeclKind::function &&
+    if (d.explicit_weak) weak_declarations.insert(e);
+    if (d.kind == ast::DeclKind::function &&
         (d.hidden_visibility || d.explicit_default_visibility || d.namespace_visibility != Visibility::none)) {
       auto& visibility = function_visibility[e];
       if (visibility.written == Visibility::none) {
@@ -1636,7 +1636,7 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
   }
   if (root_deallocator) declare(*root_deallocator, std::nullopt);
   // A declaration anywhere in the unit can supply the visibility of the one object symbol.
-  apply_visibility(tu, hidden_declarations, inline_declarations, function_visibility, linux);
+  apply_visibility(tu, hidden_declarations, inline_declarations, function_visibility);
   if (part) {
     part->inline_declarations = std::move(inline_declarations);
     part->noexcept_declarations = std::move(noexcept_declarations);
@@ -1730,8 +1730,7 @@ TranslationUnit finish_unit(std::vector<UnitPart>& parts, sema::World& world, st
   };
   for (FunctionDef& f : tu.functions) validate_unwind(ins, tu, f, runtime, unwind_provider, unwind_definition);
   unwind_through_constructors(tu, unwind_definition);
-  apply_visibility(tu, hidden_declarations, inline_declarations, function_visibility,
-                   world.target.triple == ast::x86_64_linux.triple);
+  apply_visibility(tu, hidden_declarations, inline_declarations, function_visibility);
   return tu;
 }
 
