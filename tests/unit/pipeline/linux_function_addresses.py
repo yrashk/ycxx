@@ -2,10 +2,53 @@
 
 import os
 from pathlib import Path
+import struct
+import subprocess
 import sys
 import tempfile
 
 from linux_compile import run
+
+
+def check_static_got(image, defined):
+    entry, phoff = struct.unpack_from('<QQ', image, 24)
+    phsize, phnum = struct.unpack_from('<HH', image, 54)
+    headers = (struct.unpack_from('<II6Q', image, phoff + i * phsize) for i in range(phnum))
+    loads = [header for header in headers if header[0] == 1]  # PT_LOAD
+
+    def mapped(address, size):
+        flags, off, begin = next((flags, off, begin) for _, flags, off, begin, _, filesz, _, _ in loads
+                                 if begin <= address and address + size <= begin + filesz)
+        start = off + address - begin
+        return flags, image[start:start + size]
+
+    def slot(address):
+        assert address % 8 == 0, address
+        flags, contents = mapped(address, 8)
+        assert flags == 4, (address, flags)  # PF_R
+        return struct.unpack('<Q', contents)[0]
+
+    _, code = mapped(entry, 32)
+
+    def rip_target(displacement, next_instruction):
+        return entry + next_instruction + struct.unpack_from('<i', code, displacement)[0]
+
+    # The offsets are from the four RIP-relative operands in static_got.S.
+    weak_mov = rip_target(3, 7)
+    weak_cmp_slot = rip_target(10, 15)
+    local_address = rip_target(21, 25)
+    local_cmp_slot = rip_target(28, 32)
+    assert weak_cmp_slot != local_cmp_slot
+    assert slot(local_cmp_slot) == local_address
+    assert mapped(local_address, 1)[1] == b'\x07'
+    if defined:
+        assert code[:3] == b'\x48\x8d\x05', code[:3]  # Relaxed LEA.
+        assert slot(weak_cmp_slot) == weak_mov
+        assert mapped(weak_mov, 1)[1] == b'\x29'
+    else:
+        assert code[:3] == b'\x48\x8b\x05', code[:3]  # MOV from the shared zero slot.
+        assert weak_mov == weak_cmp_slot
+        assert slot(weak_cmp_slot) == 0
 
 
 def main():
@@ -26,12 +69,14 @@ def main():
         def compile(source, obj, *flags):
             cxx('-c', *flags, fixtures / source, '-o', obj)
 
-        def native(*inputs, error=None):
+        def native(*inputs, error=None, status=0):
             output = scope / 'native'
             output.unlink(missing_ok=True)
             cxx('-nostdlib', *inputs, '-o', output, error=error)
             if error is None:
-                invoke(output)
+                result = subprocess.run([output], cwd=scope, env=env, capture_output=True, text=True, timeout=30)
+                assert result.returncode == status, (inputs, status, result)
+                return output
             else:
                 assert not output.exists()
 
@@ -86,9 +131,22 @@ def main():
 
         invoke(cc, '-c', fixtures / 'undefined_weak.s', '-o', 'undefined-weak.o')
         check_relocations('undefined-weak.o', 'missing_weak', got)
-        native('undefined-weak.o', error="R_X86_64_REX_GOTPCRELX for undefined weak symbol 'missing_weak' is unsupported")
+        native('undefined-weak.o')
         invoke(cc, '-pie', 'undefined-weak.o', '-o', 'system')
         invoke('./system')
+
+        invoke(cc, '-c', fixtures / 'static_got.S', '-o', 'static-got.o')
+        invoke(cc, '-c', fixtures / 'static_got_marker.s', '-o', 'static-got-marker.o')
+        check_relocations('static-got.o', 'weak_marker', got, ('R_X86_64_GOTPCREL', 9, ('-', '5')))
+        check_relocations('static-got.o', 'local_marker', ('R_X86_64_GOTPCREL', 9, ('-', '4')))
+        invoke(ycxx, 'archive', '-o', 'static-got-marker.a', 'static-got-marker.o')
+        for inputs in ((), ('static-got-marker.a',)):
+            image = native('static-got.o', *inputs)
+            check_static_got(image.read_bytes(), defined=False)
+        image = native('static-got.o', 'static-got-marker.o', status=41)
+        check_static_got(image.read_bytes(), defined=True)
+        invoke(cc, '-DREQUIRE_MARKER', '-c', fixtures / 'static_got.S', '-o', 'static-got-required.o')
+        native('static-got-required.o', error="undefined symbol 'weak_marker'")
 
         invoke(cc, '-shared', '-Wl,-z,defs', 'provider.o', '-o', 'libprovider.so')
         for mode, flags in (('-pie', '-fPIE'), ('-no-pie', '-fno-pie')):

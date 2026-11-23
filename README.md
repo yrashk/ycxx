@@ -129,6 +129,9 @@ ordinary object-pointer or object lvalue-reference fields by value. The record c
 16 bytes and must be trivial for calls. Larger results and classes that are not trivial for
 calls (with a user-provided copy constructor or destructor) pass through memory, as on macOS. [Linux integer aggregate ABI](docs/design/linux-integer-aggregates.md)
 
+Static x86-64 Linux executables resolve `R_X86_64_GOTPCREL` through GOT slots. A slot for an
+unresolved weak symbol contains zero. [#979](https://github.com/yrashk/ycxx/issues/979)
+
 For mixed Linux objects, the pinned libycxx `<cstddef>` byte operator uses the same Itanium
 linkage name in ycxx, GCC and Clang. [#64](https://github.com/yrashk/ycxx/issues/64)
 Static links of explicit x86-64 ELF objects keep the first COMDAT group for each signature, including

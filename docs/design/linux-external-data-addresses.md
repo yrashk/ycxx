@@ -12,9 +12,11 @@ use the absolute relocation with the initializer's byte addend.
 
 The native static executable linker resolves the symbol using existing definition precedence.
 It checks the canonical seven-byte REX.W MOV encoding, the relocation field and its addend,
-and reserves the entire instruction against overlapping fixups. It then rewrites the opcode to
-LEA and applies the checked signed displacement `S − 4 − P`. A missing weak definition needs
-a GOT entry with value zero. Native dynamic data addresses need the executable export and
+and reserves the entire instruction against overlapping fixups. A defined target relaxes to LEA
+with the checked signed displacement `S − 4 − P`. A missing weak definition keeps the MOV and
+reads a zero-valued slot. [Static GOT design](linux-static-got.md)
+
+Native dynamic data addresses need the executable export and
 interposition rules of [#390](https://github.com/yrashk/ycxx/issues/390). Native shared PIC
 remains under [#391](https://github.com/yrashk/ycxx/issues/391). Reference storage and ELF
 function symbol metadata follow [#367](https://github.com/yrashk/ycxx/issues/367) and
@@ -35,8 +37,8 @@ rules. Two aliases for one body may bind independently. Direct calls keep `R_X86
 
 The optimization unit fingerprint includes the GOT symbol IDs used by address expressions.
 The native static linker applies the same checked relaxation after choosing the definition from
-objects and archives. It diagnoses a GOT load for an unresolved weak symbol. Native dynamic
-imports and special bindings such as IFUNC remain with [#390](https://github.com/yrashk/ycxx/issues/390).
+objects and archives. An unresolved weak function address uses a zero-valued static GOT slot.
+Native dynamic imports and special bindings such as IFUNC remain with [#390](https://github.com/yrashk/ycxx/issues/390).
 [#407](https://github.com/yrashk/ycxx/issues/407)
 
 Astra reviewed producer GOT semantics and native static relaxation for both data and ordinary
