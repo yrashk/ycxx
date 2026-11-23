@@ -52,13 +52,14 @@ int pinned_hosted_mode = 0;
 extern "C" int hosted_mode();
 int main() { return ycxx_pal_thread_self() == 1 ? hosted_mode() : 2; }
 ''')
-    object_bytes(world, scope, libycxx / 'src/freestanding/pal/thread_self.cpp', 'thread.o',
-                 '-ffreestanding', *include)
-    pid = world.pid()
     snapshots = []
     for flags, expected in (((), b'1'), (('-ffreestanding',), b'0'), ((), b'1')):
         tokens = preprocess(world, scope, *flags, 'mode.cpp')
         assert re.search(rb'\breturn\s+' + expected + rb'\s*;', tokens), tokens
+        if not snapshots:
+            pid = world.pid()
+            object_bytes(world, scope, libycxx / 'src/freestanding/pal/thread_self.cpp', 'thread.o',
+                         '-ffreestanding', *include)
         config = preprocess(world, scope, *flags, *include, 'config.cpp')
         assert re.search(rb'\bpinned_hosted_mode\s*=\s*' + expected + rb'\s*;', config), config
         snapshots.append((tokens, config, object_bytes(world, scope, 'mode.cpp', 'mode.o', *flags)))
