@@ -49,9 +49,10 @@ struct BodyAt {
 };
 
 // The region as sema reads it (#947, slice 0): its tokens without where they were written. The
-// tokens' locations, expansion sites, `space_before` flags (sema reads none of them) and error
+// tokens' offsets, expansion sites, `space_before` flags (sema reads none of them) and error
 // details are dropped, so an edit that moves tokens without changing them (a comment, blank
-// lines, spacing) stops here and analysis does not run again.
+// lines, spacing) stops here and analysis does not run again. Each token keeps its file alone
+// (`TokLoc::file`), which groups a header's items (slice 1).
 struct PpTokens {
   using Key = pp::FileId;
   using Value = pp::Region;
@@ -112,6 +113,12 @@ struct TuSema {
   static engine::query_task<Value> run(engine::Ctx& cx, TuId tu);
   static engine::SourceSpan trace_span(const engine::Db& db, TuId tu) { return tu_span(db, tu); }
 };
+
+// Groups' analyses kept between a unit's revisions (#947), the stand-in for #16's selection cells
+// that `pp::Session::cache` is for regions: one cache per universe, which its owner forgets when
+// the universe ends. How many groups a universe's units have analysed and reused, for tests.
+void forget_group_cache(const Universe* u);
+std::pair<std::uint64_t, std::uint64_t> group_cache_counts(const Universe* u);
 
 // The unit's diagnostics placed in its files, with what an editor reads of its analysis.
 
@@ -989,7 +996,7 @@ void unwind_through_constructors(TranslationUnit& tu, Definition& unwind_definit
 // and the instances their Program made, leaving to `finish_unit` what needs every group (#947).
 // A part is made only for a unit without virtual functions: the virtual-table decisions read the
 // whole unit's Program.
-TranslationUnit unit_of(parse::Program& program, sema::World& world, const items::Items& items, std::string name,
+TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse::ItemsView& items, std::string name,
                         const std::set<EntityId>& uncertain_layouts, std::uint32_t first = 0,
                         std::uint32_t end = std::numeric_limits<std::uint32_t>::max(), UnitPart* part = nullptr) {
   ast::Interners& ins = world.ins;
@@ -1514,213 +1521,6 @@ engine::query_task<bool> LexErrors::run(engine::Ctx& cx, pp::FileId file) {
     auto kind = lex::lex_diag_of(d.id);
     return kind && lex::message_of(*kind).severity == lex::Severity::error;
   });
-}
-
-engine::query_task<SemaResult> TuSema::run(engine::Ctx& cx, TuId tu) {
-  const TuSource& src = cx.fetch<TuSourceIn>(tu);
-  contract_assert(src.file.has_value());  // a unit given as definitions has no front end
-  const pp::FileId file{*src.file};
-  const pp::Source& unit_source = cx.fetch<pp::SourceOf>(file);
-  sema::World& world = *universe().world_for(*unit_source.config.target);
-  const pp::Region& region = co_await cx.fetch<PpTokens>(file);
-  const items::Items& items = co_await cx.fetch<items::RegionItems>(file);
-  SemaResult out;
-  // Whether the lexer or preprocessor reported an error, not where: `TuFront` places them.
-  out.lex_errors = co_await cx.fetch<LexErrors>(file);
-  // The unit's language options: the instantiation limit (`-ftemplate-depth`).
-  const std::uint32_t depth = unit_source.config.template_depth;
-  const bool linux = unit_source.config.target->triple == ast::x86_64_linux.triple;
-  // What one Program says of the items [first, end): where each entity is first declared and the
-  // bodies, for an editor's position requests (#170), whether or not the unit has errors; only what
-  // the analysis reached, which analysing more would change (its diagnostics). Then its messages,
-  // each once, and its classes' and enumerations' shapes, each once.
-  std::set<std::uint32_t> declared_seen;
-  std::vector<engine::Diagnostic> reported;
-  std::set<EntityId> shaped, enumerated;
-  // Classes whose layout keeps the unit's virtual tables from being emitted, applied to the unit
-  // once it is made.
-  std::vector<std::pair<parse::Program*, const sema::ClassRec*>> blocked;
-  auto collect = [&](parse::Program& program, std::uint32_t first, std::uint32_t end, const std::set<EntityId>& uncertain) {
-    for (std::uint32_t k = first; k < end; ++k) {
-      const items::Item& it = items.items[k];
-      const ast::ItemSema* analysed = program.analysed_item(k);
-      if (!analysed) continue;
-      const ast::ItemSema& is = *analysed;
-      const std::vector<ast::DeclSema> decls = world.ins.seqs.elements(is.decls);
-      std::vector<std::uint32_t> at(decls.size(), 0);
-      if (is.tree != ast::NodeId::none && world.ins.ast.is<ast::DeclGroup>(is.tree))
-        for (ast::Child c : world.ins.ast.children(world.ins.ast.get<ast::DeclGroup>(is.tree).declarators)) {
-          auto dr = world.ins.ast.get<ast::Declarator>(c.id);
-          if (dr.decl < decls.size()) at[dr.decl] = c.at;
-        }
-      for (std::size_t i = 0; i < decls.size(); ++i)
-        if (decls[i].entity != EntityId::none && declared_seen.insert(std::to_underlying(decls[i].entity)).second)
-          out.declared.emplace_back(decls[i].entity, ast::Loc{program.id(k), at[i]});
-      if (const ast::BodySema* body = program.analysed_body(k); body && body->tree != ast::NodeId::none && it.has_body())
-        out.bodies.push_back({program.id(k), it.decl_length(), body->tree});
-    }
-    for (const engine::Diagnostic& d : program.diagnostics(first, end)) {
-      auto kind = sema::sema_diag_of(d.id);
-      if (!kind || std::ranges::contains(reported, d)) continue;
-      reported.push_back(d);
-      std::vector<std::uint64_t> args;
-      for (const engine::DiagArg& a : d.args) args.push_back(a.raw);
-      out.messages.push_back({sema::message_of(*kind).severity == lex::Severity::error,
-                              sema::render(*kind, args, [&](char how, std::uint64_t raw) { return program.spell(how, raw); }),
-                              program.token(d.at)});
-    }
-    // The unit's own records of its classes and enumerations (#115).
-    const sema::Classes& classes = program.classes();
-    auto nontrivial_destructor = [&](this auto&& recurse, EntityId cls) -> bool {
-      const auto* record = classes.find(cls);
-      if (!record || record->destructor == EntityId::none || record->layout_requires_virtual_support) return false;
-      using enum sema::CopyOperation;
-      if (record->trivial_copyability.destructor != unknown)
-        return record->trivial_copyability.destructor == eligible_nontrivial;
-      if (auto member = std::ranges::find(record->members, record->destructor, &sema::MemberDeclRec::entity);
-          member != record->members.end()) {
-        // Defaulting the first declaration can still yield a trivial destructor ([dcl.fct.def.default]).
-        auto first = program.member_decl(member->entity);
-        return !member->is_deleted && first && !program.defaulted_body(program.index(first->item));
-      }
-      // A variant member does not make the union's own destructor nontrivial ([class.dtor]).
-      if (record->union_) return false;
-      // An implicit destructor is nontrivial when a direct base or by-value member's is nontrivial.
-      return std::ranges::any_of(record->bases, [&](const auto& base) { return recurse(base.cls); }) ||
-             std::ranges::any_of(record->fields, [&](const auto& field) {
-               auto type = world.types.rec(field.type);
-               while (type.kind == sema::TypeKind::array) type = world.types.rec(type.inner);
-               return type.kind == sema::TypeKind::class_ && recurse(type.entity);
-             });
-    };
-    for (EntityId c : classes.classes()) {
-      if (!shaped.insert(c).second) continue;
-      ClassShape& shape = out.shapes.classes.emplace_back(ClassShape{c, {}, {}});
-      const auto& record = classes.rec(c);
-      const auto& fields = record.fields;
-      for (const sema::FieldRec& f : fields) {
-        if (f.no_unique_address) shape.overlapping_fields.push_back(std::uint32_t(shape.fields.size()));
-        shape.fields.push_back(f.type);
-        shape.has_mutable_field |= f.mutable_;
-      }
-      if (std::ranges::any_of(fields, [](const sema::FieldRec& f) { return f.bit_width != 0; }))
-        for (const sema::FieldRec& f : fields) shape.bit_widths.push_back(f.bit_width);
-      shape.union_ = record.union_;
-      shape.pod = record.pod;
-      shape.explicit_alignment = record.explicit_alignment;
-      for (const sema::BaseRec& b : record.bases) shape.bases.push_back(b.cls);
-      shape.trivial_calls = classes.trivial_for_calls(c, unit_source.config.calls());
-      shape.layout_uncertain = uncertain.contains(c);
-      shape.copy_abi_unknown = record.defaulted_copy == sema::CopyState::unsupported;
-      {
-        // Itanium C++ ABI §3.1.2.3 from the special members one by one ([class.prop]): a
-        // non-trivial destructor or copy or move constructor, or neither constructor usable.
-        using enum sema::CopyOperation;
-        const sema::TrivialCopyability& t = record.trivial_copyability;
-        const bool known = t.destructor != unknown && t.copy_constructor != unknown && t.move_constructor != unknown;
-        const bool nontrivial = t.destructor == eligible_nontrivial || t.copy_constructor == eligible_nontrivial ||
-                                t.move_constructor == eligible_nontrivial ||
-                                (t.copy_constructor == ineligible && t.move_constructor == ineligible);
-        // A proven nontrivial destructor settles the ABI even when the copy/move traits are unknown.
-        shape.calls_abi_uncertain = !shape.trivial_calls && (!known || !nontrivial) &&
-                                    !(linux && nontrivial_destructor(c));
-      }
-      shape.layout_requires_virtual_support = record.layout_requires_virtual_support;
-      if (record.peer_virtual_layout != sema::PeerVirtualLayout::none ||
-          record.peer_automatic_primary_base != EntityId::none) {
-        const EntityId primary = record.peer_virtual_layout == sema::PeerVirtualLayout::primary_base
-                                     ? record.bases.front().cls : record.peer_automatic_primary_base;
-        const bool uncertain_base = primary != EntityId::none && uncertain.contains(primary);
-        if (shape.layout_uncertain || uncertain_base) {
-          blocked.push_back({&program, &record});
-        } else {
-          shape.peer_virtual_layout = record.peer_virtual_layout;
-          shape.peer_automatic_primary_base = record.peer_automatic_primary_base;
-        }
-      }
-    }
-    for (EntityId e : classes.enums())
-      if (enumerated.insert(e).second) out.shapes.enums.push_back({e, classes.underlying(e)});
-  };
-  // A unit without virtual functions is analysed a group at a time (#947): each top-level item of
-  // the main file, and each run of the headers' top-level items, by a Program of its own that
-  // analyses other items only as the group asks. A virtual-table decision reads the whole unit's.
-  std::vector<std::pair<std::uint32_t, std::uint32_t>> groups;
-  const bool grouped = !std::getenv("YCXX_WHOLE_UNIT") && !std::ranges::contains(region.tokens, lex::Tk::kw_virtual, &lex::Tok::kind);
-  if (grouped) {
-    for (std::uint32_t g : items.top) {
-      std::uint32_t last = g;
-      while (!items.items[last].members.empty()) last = items.items[last].members.back();
-      const bool header = region.locs[items.items[g].begin].file != 0;
-      if (header && !groups.empty() && region.locs[items.items[groups.back().first].begin].file != 0)
-        groups.back().second = last + 1;
-      else groups.push_back({g, last + 1});
-    }
-  } else {
-    groups.push_back({0, static_cast<std::uint32_t>(items.items.size())});
-  }
-  std::vector<std::unique_ptr<parse::Program>> programs;
-  std::vector<std::set<EntityId>> uncertain;
-  const auto index = parse::Program::make_index(world, region, items);
-  for (auto [first, end] : groups) {
-    parse::Program& program = *programs.emplace_back(std::make_unique<parse::Program>(world, region, items, depth, index));
-    if (grouped) program.analyze_group(first, end);
-    else program.analyze_all();
-    // Both targets: the base-object entries and the virtual shapes rely on it, and the System V
-    // aggregate rules read it on x86-64 (#650).
-    uncertain.push_back(program.uncertain_object_layouts(/*include_lifecycle_signatures=*/true));
-    collect(program, first, end, uncertain.back());
-  }
-  std::ranges::stable_sort(out.messages, {}, &SemaMessage::token);
-  if (!out.has_errors()) {
-    if (!grouped) {
-      out.unit = unit_of(*programs.front(), world, items, src.name, uncertain.front());
-    } else {
-      std::vector<UnitPart> parts(groups.size());
-      for (std::size_t g = 0; g < groups.size(); ++g)
-        parts[g].tu = unit_of(*programs[g], world, items, src.name, uncertain[g], groups[g].first, groups[g].second, &parts[g]);
-      out.unit = finish_unit(parts, world, src.name, region.files.at(0));
-    }
-  }
-  for (auto [program, record] : blocked)
-    if (!out.unit.virtual_emission_blocked) block_virtual_emission(out.unit, *program, *record);
-  // EXPERIMENT (#947): does a top-level item analysed in a Program of its own give what the
-  // whole unit's Program gives?
-  if (std::getenv("YCXX_GROUP_CHECK") && !grouped) {
-    for (std::uint32_t g : items.top) {
-      std::uint32_t last = g;
-      while (!items.items[last].members.empty()) last = items.items[last].members.back();
-      parse::Program alone(world, region, items, depth);
-      alone.analyze_group(g, last + 1);
-      for (std::uint32_t k = g; k <= last; ++k) {
-        const items::Item& it = items.items[k];
-        std::string what;
-        auto a = programs.front()->analysed_item(k), b = alone.analysed_item(k);
-        if ((a == nullptr) != (b == nullptr) || (a && *a != *b)) what += " item_sema";
-        auto c = programs.front()->analysed_body(k), d = alone.analysed_body(k);
-        if ((c == nullptr) != (d == nullptr) || (c && *c != *d)) what += " body";
-        if (programs.front()->analysed_diags(k) != alone.analysed_diags(k)) what += " diags";
-        if (what.empty()) continue;
-        std::string text;
-        for (std::uint32_t t = it.begin; t < it.end && t < it.begin + 12; ++t) (text += region.spelling(region.tokens[t])) += ' ';
-        auto show = [](parse::Program& p, const std::vector<engine::Diagnostic>& ds) {
-          std::string s;
-          for (const engine::Diagnostic& d : ds) {
-            auto kind = sema::sema_diag_of(d.id);
-            if (!kind) continue;
-            std::vector<std::uint64_t> args;
-            for (const engine::DiagArg& a : d.args) args.push_back(a.raw);
-            s += std::format(" [{}@{}]", sema::render(*kind, args, [&](char how, std::uint64_t raw) { return p.spell(how, raw); }), d.at.offset);
-          }
-          return s;
-        };
-        std::ofstream(std::getenv("YCXX_GROUP_CHECK"), std::ios::app)
-            << std::format("{} differs{}: {}\n   whole:{}\n   alone:{}\n", unit_source.path, what, text,
-                           show(*programs.front(), programs.front()->analysed_diags(k)), show(alone, alone.analysed_diags(k)));
-      }
-    }
-  }
-  co_return out;
 }
 
 engine::query_task<FrontResult> TuFront::run(engine::Ctx& cx, TuId tu) {

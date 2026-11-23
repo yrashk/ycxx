@@ -135,7 +135,10 @@ class Session {
   ~Session() {
     epochs_.reset();  // stops and joins every request before the scope goes
     if (pool_) pool_->release_scope(&scope_);
+    forget_group_cache(&universe_);  // its analyses hold this session's handles (#947)
   }
+  // How many groups this session's units analysed, and how many they reused (#947).
+  std::pair<std::uint64_t, std::uint64_t> group_counts() const { return group_cache_counts(&universe_); }
 
  private:
   void init() {

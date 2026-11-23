@@ -1,0 +1,60 @@
+// A unit is analysed a top-level item at a time, and an item's analysis is reused while what it
+// read is unchanged (#947). Each edit below changes what another item's analysis read, or reads
+// nothing new for it; each state's program must run as a cold build of it does.
+// ACTION: run
+--- main.cpp
+namespace a {
+constexpr int K = 3;
+int f(long) { return 10; }
+}
+namespace b {
+int g() { return a::f(1) + a::K; }
+}
+int main() { return b::g() - 13; }
+=== edit
+--- main.cpp
+namespace a {
+constexpr int K = 4;
+int f(long) { return 10; }
+}
+namespace b {
+int g() { return a::f(1) + a::K; }
+}
+int main() { return b::g() - 14; }
+=== edit
+--- main.cpp
+namespace a {
+constexpr int K = 4;
+int f(long) { return 10; }
+int f(int) { return 20; }
+}
+namespace b {
+int g() { return a::f(1) + a::K; }
+}
+int main() { return b::g() - 24; }
+=== edit
+--- main.cpp
+namespace a {
+constexpr int K = 4;
+int f(long) { return 10; }
+}
+namespace c {
+int f(int) { return 30; }
+}
+namespace b {
+using namespace c;
+int g() { return a::f(1) + a::K; }
+}
+int main() { return b::g() - 14; }
+=== edit
+--- main.cpp
+namespace a {
+constexpr int K = 4;
+int f(long) { return 10; }
+}
+namespace b {
+int h();
+int g() { return a::f(1) + a::K + h(); }
+int h() { return 1; }
+}
+int main() { return b::g() - 15; }

@@ -137,14 +137,14 @@ class ItemsView {
   struct List {
     const ItemsView* view;
     const items::Item& operator[](std::size_t k) const {
-      if (view->reads) view->reads->insert(static_cast<u32>(k));
+      if (view->reads) (*view->reads)[k] = 1;
       return view->its_->items[k];
     }
     std::size_t size() const { return view->its_->items.size(); }
   };
   const List items{this};
   const items::Items& unlogged() const { return *its_; }
-  std::set<u32>* reads = nullptr;
+  std::vector<std::uint8_t>* reads = nullptr;  // by item: read
 
  private:
   const items::Items* its_;
@@ -224,7 +224,13 @@ public:
     std::vector<Directive> directives;  // their targets unresolved
     bool says_virtual = false;          // the unit's tokens hold `virtual`
     std::vector<bool> qualified;        // by item: its first declarator's name is qualified
+    std::vector<bool> name_scoped;      // by item: it has `name_scopes`
     std::vector<u32> specializations;   // the items outside classes that declare specializations
+    // `by_name` by (name, namespace): as declared (`name_ns`), for lookup (`name_eff_ns`), and the
+    // item's (`ns_of`); and the qualified declarations, by name. For answering questions (`answer`).
+    using Scoped = std::map<std::pair<std::string_view, std::string_view>, std::vector<std::pair<u32, u32>>>;
+    Scoped by_scope, by_lookup_scope, by_item_scope;
+    std::map<std::string_view, std::vector<std::pair<u32, u32>>> qualified_by_name;
   };
   // Each item's namespace, from the namespace definitions that enclose it; and the using-
   // directives and aliases at namespace scope, whose targets are resolved when their items are
@@ -307,6 +313,15 @@ public:
       if (a == lex::Tk::kw_namespace && b == lex::Tk::identifier)
         x.directives.push_back({k, x.ns_of[k], w.ins.names.intern(r.name(r.tokens[its[k].begin + 1])), std::nullopt});
     }
+    x.name_scoped.assign(items.items.size(), false);
+    for (const auto& [k, scopes] : x.name_scopes) x.name_scoped[k] = true;
+    for (const auto& [name, entries] : x.by_name)
+      for (auto [j, k] : entries) {
+        x.by_scope[{name, name_ns(x, j, k)}].push_back({j, k});
+        x.by_lookup_scope[{name, name_eff_ns(x, j, k)}].push_back({j, k});
+        x.by_item_scope[{name, x.ns_of[j]}].push_back({j, k});
+        if (x.qualified[j]) x.qualified_by_name[name].push_back({j, k});
+      }
     for (u32 k = 0; k < items.items.size(); ++k) {
       const items::Item& it = items.items[k];
       if (!x.in_class[k] && (it.specialization || std::ranges::any_of(it.names, [](const items::DeclName& n) {
@@ -325,7 +340,10 @@ public:
   const pp::Region& region() const { return *r_; }
   const ItemsView& items() const { return *items_; }
   // Records the items this Program reads into `reads` (#947).
-  void record_reads(std::set<u32>* reads) { view_.reads = reads; }
+  void record_reads(std::vector<std::uint8_t>* reads) {
+    if (reads) reads->assign(items_->items.size(), 0);
+    view_.reads = reads;
+  }
   ItemId id(u32 item) const { return ids_[item]; }
   u32 index(ItemId id) const { return index_.at(std::to_underlying(id)); }
 
@@ -496,10 +514,12 @@ public:
     auto operator<=>(const NameProbe&) const = default;
   };
   static const std::string& name_ns(const Index& x, u32 item, u32 name) {
+    if (!x.name_scoped[item]) return x.ns_of[item];
     auto it = x.name_scopes.find(item);
     return it != x.name_scopes.end() && name < it->second.size() ? it->second[name].first : x.ns_of[item];
   }
   static const std::string& name_eff_ns(const Index& x, u32 item, u32 name) {
+    if (!x.name_scoped[item]) return x.eff_ns[item];
     auto it = x.name_scopes.find(item);
     return it != x.name_scopes.end() && name < it->second.size() ? it->second[name].second : x.eff_ns[item];
   }
@@ -517,20 +537,41 @@ public:
     return true;
   }
   // The answer to a question: the items that pass, as (item, index in its names), in item order.
+  // From the index's scoped lists, the entries `passes` keeps, without visiting the others.
   static std::vector<std::pair<u32, u32>> answer(const Index& x, const NameProbe& q) {
     std::vector<std::pair<u32, u32>> out;
-    if (auto f = x.by_name.find(q.name); f != x.by_name.end())
-      for (auto [j, k] : f->second)
-        if (passes(x, q.kind, q.path, j, k)) out.push_back({j, k});
+    auto add = [&](const Index::Scoped& scoped) {
+      if (auto f = scoped.find({q.name, q.path}); f != scoped.end()) out.insert(out.end(), f->second.begin(), f->second.end());
+    };
+    auto add_qualified = [&] {
+      if (auto f = x.qualified_by_name.find(q.name); f != x.qualified_by_name.end()) out.insert(out.end(), f->second.begin(), f->second.end());
+    };
+    if (q.kind == Probe::declares && q.path == "*") {
+      if (auto f = x.by_name.find(q.name); f != x.by_name.end()) out = f->second;
+      return out;
+    }
+    switch (q.kind) {
+      case Probe::declared_in: add(x.by_scope); add(x.by_lookup_scope); break;
+      case Probe::declared_in_inhabit: add(x.by_scope); break;
+      case Probe::namespace_members: case Probe::class_members: case Probe::same_namespace: add(x.by_item_scope); break;
+      case Probe::declares: add(x.by_scope); add(x.by_lookup_scope); add_qualified(); break;
+    }
+    // In item order, once each, as `passes` keeps them.
+    std::ranges::sort(out);
+    out.erase(std::ranges::unique(out).begin(), out.end());
+    std::erase_if(out, [&](std::pair<u32, u32> e) { return !passes(x, q.kind, q.path, e.first, e.second); });
     return out;
   }
   // Records the questions this Program asks into `probes` (#947).
   void record_probes(std::set<NameProbe>* probes) { probes_ = probes; }
-  // A filtered question about `named(name)`'s entry (j, k): recorded, and an entry that fails the
-  // filter is skipped by the caller before it reads the item.
-  bool asks(Probe kind, std::string_view name, const std::string& path, u32 j, u32 k) {
-    if (probes_) probes_->insert({kind, std::string(name), path});
-    return passes(*ix_, kind, path, j, k);
+  // Records a question before the caller walks `named(name)`, skipping each entry that fails
+  // `passes` before it reads the item. Recorded whether or not any item declares the name: an
+  // item that declares it later changes the answer.
+  void ask(Probe kind, std::string_view name, const std::string& path) {
+    if (probes_ && !(last_probe_.kind == kind && last_probe_.name == name && last_probe_.path == path)) {
+      last_probe_ = {kind, std::string(name), path};
+      probes_->insert(last_probe_);
+    }
   }
   // Qualified lookup in namespace `ns` ([namespace.qual]/2): its own declarations, or, when it has
   // none, those of the namespaces its using-directives nominate.
@@ -562,9 +603,10 @@ public:
   // `name`; an inline or unnamed member namespace's are not among them ([basic.scope.scope]/4).
   std::vector<DeclId> used_in(std::string_view name, const std::string& path, u32 item) {
     std::vector<DeclId> r;
+    ask(Probe::namespace_members, name, path);
     for (auto [j, k] : named(name)) {
       if (j >= item) break;
-      if (!asks(Probe::namespace_members, name, path, j, k)) continue;
+      if (!Program::passes(*ix_, Probe::namespace_members, path, j, k)) continue;
       const items::DeclName& n = items_->items[j].names[k];
       if ((n.flags & items::name_flag::unknown) && std::ranges::find(running_, j) == running_.end()) {
         item_sema(j);
@@ -585,9 +627,10 @@ public:
   std::vector<DeclId> hidden_friends_before(std::string_view name, u32 item,
                                            std::optional<u32> enclosing_class = std::nullopt) {
     std::vector<DeclId> result;
+    ask(Probe::same_namespace, name, ns_of_[item]);
     for (auto [j, k] : named(name)) {
       if (j >= item) break;
-      if (!asks(Probe::same_namespace, name, ns_of_[item], j, k)) continue;
+      if (!Program::passes(*ix_, Probe::same_namespace, ns_of_[item], j, k)) continue;
       const items::Item& candidate = items_->items[j];
       if (enclosing_class && candidate.parent != *enclosing_class) continue;
       const items::DeclName& n = candidate.names[k];
@@ -609,9 +652,10 @@ public:
   std::vector<DeclId> declared_in(std::string_view name, const std::string& path, u32 item, bool self,
                                   bool inhabit = false, bool bound_functions = false) {
     std::vector<DeclId> r;
+    ask(inhabit ? Probe::declared_in_inhabit : Probe::declared_in, name, path);
     for (auto [j, k] : named(name)) {
       if (j >= item + (self ? 1 : 0)) break;
-      if (!asks(inhabit ? Probe::declared_in_inhabit : Probe::declared_in, name, path, j, k)) continue;
+      if (!Program::passes(*ix_, inhabit ? Probe::declared_in_inhabit : Probe::declared_in, path, j, k)) continue;
       const items::Item& it = items_->items[j];
       const items::DeclName& n = it.names[k];
       const bool nested = it.kind == ItemKind::namespace_def;  // only these have per-name scopes
@@ -971,10 +1015,11 @@ public:
     // The namespace it or its class belongs to: an item there declares it, or a qualified one in a
     // namespace enclosing it; a C function may be declared in any ([dcl.link]).
     const std::string path = r.lang == LangLinkage::c ? "*" : enclosing_namespace_path(r.scope);
+    ask(Probe::declares, name, path);
     for (auto [j, k] : named(name)) {
       if (j > point) break;
       if (j < scanned || std::ranges::contains(running_, j)) continue;
-      if (asks(Probe::declares, name, path, j, k)) settle(j);
+      if (Program::passes(*ix_, Probe::declares, path, j, k)) settle(j);
     }
     scanned = std::max(scanned, point + 1);
   }
@@ -1030,9 +1075,10 @@ public:
     const sema::EntityRec& r = w_->entities.rec(e);
     const std::string_view name = w_->ins.names.spelling(r.name);
     const std::string path = r.lang == LangLinkage::c ? "*" : enclosing_namespace_path(r.scope);
+    ask(Probe::declares, name, path);
     for (auto [j, k] : named(name)) {
       if (j >= item) break;
-      if (!asks(Probe::declares, name, path, j, k)) continue;
+      if (!Program::passes(*ix_, Probe::declares, path, j, k)) continue;
       const items::Item& it = items_->items[j];
       if (!in_global_scope(j) || it.kind != ItemKind::function) continue;
       DeclId id{ids_[j], ast::make_decl_ord(ast::DeclClass::syntactic, it.names[k].ordinal)};
@@ -1402,13 +1448,6 @@ public:
     return found->second.specifiers;
   }
   const ast::BodySema* analysed_body(u32 k) const { return body_cells_[k] ? &body_cells_[k]->value : nullptr; }
-  // The diagnostics of an analysed item's declaration part and body (#947's group check).
-  std::vector<engine::Diagnostic> analysed_diags(u32 k) const {
-    std::vector<engine::Diagnostic> r;
-    if (item_cells_[k]) r.insert(r.end(), item_cells_[k]->diags.begin(), item_cells_[k]->diags.end());
-    if (body_cells_[k]) r.insert(r.end(), body_cells_[k]->diags.begin(), body_cells_[k]->diags.end());
-    return r;
-  }
   std::vector<engine::Diagnostic> diagnostics() const { return diagnostics(0, static_cast<u32>(items_->items.size())); }
   // Those of a group (#947): its items' cells, and every instance and END check its Program made
   // (another group making the same one reports the same diagnostics).
@@ -1492,6 +1531,7 @@ private:
   ItemsView view_;
   const ItemsView* items_;
   std::set<NameProbe>* probes_ = nullptr;
+  NameProbe last_probe_{Probe::declares, {}, "\n"};
   bool may_have_virtual_layouts_ = true;
   std::map<u32, u32> declared_scan_;  // by entity: the items `ensure_declared` has gone through
   std::shared_ptr<const Index> ix_;
@@ -4617,8 +4657,9 @@ private:
       ps_.member_template_name = [this](NameId name) -> std::optional<bool> {
         std::string_view spelling = p_->world().ins.names.spelling(name);
         bool found = false;
+        p_->ask(Program::Probe::class_members, spelling, p_->ns_of(k_));
         for (auto [item, ordinal] : p_->named(spelling)) {
-          if (!p_->asks(Program::Probe::class_members, spelling, p_->ns_of(k_), item, ordinal)) continue;
+          if (!Program::passes(*p_->ix_, Program::Probe::class_members, p_->ns_of(k_), item, ordinal)) continue;
           const auto& member = p_->items().items[item];
           if (member.parent != it_->parent) continue;
           const auto& n = member.names[ordinal];
