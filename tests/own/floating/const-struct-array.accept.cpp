@@ -1,6 +1,5 @@
 // [expr.const], [dcl.constexpr], [dcl.init.aggr]: constexpr aggregates and arrays with floating
 // members, read and combined in constant expressions.
-// XFAIL: ycxx classes in constant evaluation (#25) and range-based for (#298)
 struct Point { double x, y; };
 constexpr Point mid(Point a, Point b) { return {(a.x + b.x) / 2, (a.y + b.y) / 2}; }
 constexpr double dot(Point a, Point b) { return a.x * b.x + a.y * b.y; }
