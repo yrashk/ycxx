@@ -25,6 +25,14 @@ add_test(NAME daemon.nostdincxx
 add_test(NAME daemon.nostdinc
   COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/nostdinc.py
           $<TARGET_FILE:ycxxc> ${PROJECT_SOURCE_DIR}/resources/linux/include)
+if(CMAKE_GENERATOR MATCHES "^Ninja")
+  set(YCXX_DEPFILE_TEST_NINJA "${CMAKE_MAKE_PROGRAM}")
+else()
+  find_program(YCXX_DEPFILE_TEST_NINJA NAMES ninja ninja-build)
+endif()
+add_test(NAME daemon.depfiles
+  COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/depfiles.py
+          $<TARGET_FILE:ycxxc> "${YCXX_DEPFILE_TEST_NINJA}")
 add_test(NAME daemon.no_exceptions
   COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/no_exceptions.py
           $<TARGET_FILE:ycxxc> ${PROJECT_SOURCE_DIR}/deps/libycxx "${CMAKE_READELF}")
