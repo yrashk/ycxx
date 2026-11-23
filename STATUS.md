@@ -3006,6 +3006,13 @@ What the process allocates, attributed to the engine's cells, in the trace and t
   [#489](https://github.com/yrashk/ycxx/issues/489)
   [Design](docs/design/ordinary-virtual-declarations.md)
 
+The driver and editor honor `-fno-rtti` and `-frtti` in argument order. `-frtti` restores the
+default mode. With RTTI disabled, owned ELF and Mach-O vtables retain the same address point
+and function slots and have a zero typeinfo word. The parser diagnoses
+`typeid` and typed casts that require RTTI. Pointer identity and accessible unambiguous base
+casts use ordinary conversions in either mode.
+[#982](https://github.com/yrashk/ycxx/issues/982) · [Design](docs/design/freestanding-no-rtti.md)
+
 ## Borrowed `dynamic_cast` to `cv void*` (#294)
 
 On Linux x86-64, `dynamic_cast<cv void*>(p)` accepts an ordinary complete polymorphic root

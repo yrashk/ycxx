@@ -117,6 +117,8 @@ struct Config {
   bool freestanding = false;
   // `-fno-exceptions` disables exception handling in semantic analysis and native lowering.
   bool exceptions_enabled = true;
+  // `-fno-rtti` disables runtime type operations and the typeinfo word's relocation in vtables.
+  bool rtti_enabled = true;
   // The root of every prefix (§6.1): an editor-view region is never a disk-view one's.
   View view = View::disk;
   // A language option the unit's front end reads: `-ftemplate-depth=N`, the limit on nested
@@ -151,6 +153,7 @@ struct Config {
     if (call_triviality) h.uint(u8(3)).uint(std::to_underlying(*call_triviality));
     if (freestanding) h.uint(u8(4));
     if (!exceptions_enabled) h.uint(u8(5));
+    if (!rtti_enabled) h.uint(u8(6));
     return h.finish();
   }
 };

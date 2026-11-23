@@ -32,8 +32,8 @@ export import :predefined;
 export import :cond;
 
 namespace {
-// Keep the original freestanding boolean's encoding when exceptions are enabled.
-constexpr std::uint8_t freestanding_bit = 1, no_exceptions_bit = 2;
+// Preserve the bit values of earlier source configurations.
+constexpr std::uint8_t freestanding_bit = 1, no_exceptions_bit = 2, no_rtti_bit = 4;
 }
 
 export namespace ycxx::pp {
@@ -151,6 +151,7 @@ void serialize_into(engine::Sink& out, const Source& s) {
   std::uint8_t modes = 0;
   if (s.config.freestanding) modes |= freestanding_bit;
   if (!s.config.exceptions_enabled) modes |= no_exceptions_bit;
+  if (!s.config.rtti_enabled) modes |= no_rtti_bit;
   engine::serialize(out, modes);
 }
 Source deserialize_from(engine::Source& in, std::type_identity<Source>) {
@@ -171,9 +172,10 @@ Source deserialize_from(engine::Source& in, std::type_identity<Source>) {
   if (calls > 1 + std::to_underlying(ast::CallTriviality::apple)) in.fail();
   if (calls != 0) s.config.call_triviality = static_cast<ast::CallTriviality>(calls - 1);
   const auto modes = engine::deserialize<std::uint8_t>(in);
-  if ((modes & ~(freestanding_bit | no_exceptions_bit)) != 0) in.fail();
+  if ((modes & ~(freestanding_bit | no_exceptions_bit | no_rtti_bit)) != 0) in.fail();
   s.config.freestanding = (modes & freestanding_bit) != 0;
   s.config.exceptions_enabled = (modes & no_exceptions_bit) == 0;
+  s.config.rtti_enabled = (modes & no_rtti_bit) == 0;
   return s;
 }
 
@@ -470,6 +472,10 @@ std::expected<bool, std::string> take_option(std::span<const std::string_view> a
   }
   if (a == "-fno-exceptions") {
     cfg.exceptions_enabled = false;
+    return true;
+  }
+  if (a == "-frtti" || a == "-fno-rtti") {
+    cfg.rtti_enabled = a == "-frtti";
     return true;
   }
   return false;
