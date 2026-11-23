@@ -4716,13 +4716,10 @@ private:
       er.defined = false;
       p_->classes_.publish_enum(e, std::move(er));
       p_->scoped_enum_definitions_.try_emplace(e, Program::ScopedEnumDefinition{k_});
-      // Keep declaration ordinals for any fields written after the closing brace.
-      for (auto declaration : s_.ins().seqs.elements(p_->item_sema(k_).value.decls)) {
-        if (declaration.kind != ast::DeclKind::enumerator) continue;
-        declaration.entity = EntityId::none;
-        declaration.type = types.enum_type(e);
-        decls_.push_back(declaration);
-      }
+      // Keep declaration ordinals for any fields written after the closing brace. The empty
+      // records need draft sequences from this builder, like the other declarations in the item.
+      for (const auto& declaration : s_.ins().seqs.elements(p_->item_sema(k_).value.decls))
+        if (declaration.kind == ast::DeclKind::enumerator) decls_.push_back(empty_declaration());
       return enum_declarators(cls, types.enum_type(e), at, td);
     }
     // The enumerator list sees the definition's record as the list grows (#156).
@@ -6947,16 +6944,18 @@ private:
     return p_->item_sema(m).value;
   }
 
+  ast::DeclSema empty_declaration() {
+    ast::DeclSema d = invalid_decl();
+    d.type = s_.builtin(sema::Builtin::void_);  // an interned type, for the record's fingerprint
+    d.attributes = b_.seq(std::span<const NodeId>{});
+    d.params = b_.seq(std::span<const ast::ParamSema>{});
+    d.template_params = b_.seq(std::span<const ast::TemplateParamSema>{});
+    return d;
+  }
+
   // The rest of the skeleton's names get empty records, so ordinals stay aligned.
   void bad() {
-    while (decls_.size() < it_->names.size()) {
-      ast::DeclSema d = invalid_decl();
-      d.type = s_.builtin(sema::Builtin::void_);  // an interned type, for the record's fingerprint
-      d.attributes = b_.seq(std::span<const NodeId>{});
-      d.params = b_.seq(std::span<const ast::ParamSema>{});
-      d.template_params = b_.seq(std::span<const ast::TemplateParamSema>{});
-      decls_.push_back(d);
-    }
+    while (decls_.size() < it_->names.size()) decls_.push_back(empty_declaration());
   }
 
   bool allocation_declaration_ok(const DeclSpec& spec, const parse::Declarator& d, LangLinkage lang,
