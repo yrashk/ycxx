@@ -6847,7 +6847,7 @@ private:
             value = *v.value;
             if (spec.is_constexpr) p_->set_constant(sem.entity, *v.value, k_);
           } else if (!v.type_trait_failure) {
-            dynamic_ok(b->begin, sema::Evaluator(s_, q_).evaluate(init).reason);
+            dynamic_ok(b->begin, v.reason);
           }
         }
       }
@@ -6871,11 +6871,10 @@ private:
           ConstId lit = ConstId::none;
           if (types.is_enum(d.type))
             if (auto l = s_.as<ast::Literal>(init)) lit = l->value;
-          // A character array from a string literal is its elements' list ([dcl.init.string]).
+          // Evaluate an aggregate or character array by its elements ([dcl.init.aggr], [dcl.init.string]).
           sema::Evaluator evaluator(s_, q_);
-          sema::Evaluated list = s_.as<ast::InitList>(init) ? evaluator.evaluate_initializer(init) : sema::Evaluated{};
           sema::Evaluated v = lit != ConstId::none ? sema::Evaluated{lit, 0, true}
-                                  : list.value || list.type_trait_failure ? list : evaluator.evaluate(init);
+                                  : s_.as<ast::InitList>(init) ? evaluator.evaluate_initializer(init) : evaluator.evaluate(init);
           if (v.value) {
             value = *v.value;
             if (spec.is_constexpr || (sema::Types::is_const(d.type) && !sema::Types::is_volatile(d.type) &&
