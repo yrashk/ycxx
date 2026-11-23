@@ -275,10 +275,9 @@ bodies. See [the ownership checker](policies-ownership.md) and the [query engine
 
 `tools/test --fast` builds YCXX and runs the policy fixtures through CTest. Once YCXX is built,
 run `ctest --test-dir build -R '^unit\.policies_' --output-on-failure` for just the Policies tests.
-CI runs these fixtures on x86-64 Linux and arm64 macOS on code-changing PRs and pushes to `main`
-or `codex/ycxx-policies`. Standalone CI jobs use GCC and Clang to exercise the exported target in
-both installation and vendor layouts. To run those same jobs locally, use a C++20 compiler, CMake,
-Ninja, and Python.
+CI runs these fixtures on x86-64 Linux and arm64 macOS on code-changing PRs and pushes to `main`.
+Standalone CI jobs use GCC and Clang to exercise the exported target in both installation and
+vendor layouts. To run those same jobs locally, use a C++20 compiler, CMake, Ninja, and Python.
 
 ```sh
 for cxx in g++ clang++; do
