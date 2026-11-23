@@ -2610,7 +2610,7 @@ private:
       if (!l) s_.diag(at, Diag::unknown_linkage);
       lang = l.value_or(LangLinkage::cxx);
       explicit_lang = true;
-      single_linkage_spec_ = true;  // [dcl.link]/7: it declares as if `extern` were given
+      single_linkage_spec_ = true;  // [dcl.link]: it declares as if `extern` were given
       ps_.bump();
       ps_.bump();
       while (ps_.is(Tk::string_lit) && ps_.tok().has(lex::tok_flag::continued)) ps_.bump();
@@ -6317,6 +6317,8 @@ private:
         s_, (spec.is_constexpr || spec.is_constinit) && !types.is_function(d.type),
         /*trial=*/!types.is_function(d.type));
     u32 ord = static_cast<u32>(decls_.size());
+    // [dcl.link]: a single declaration is treated as `extern` for name linkage and definition.
+    const bool effective_extern = spec.is_extern || single_linkage_spec_;
     // `T a[] = {…}`: the bound from the list ([dcl.array]/8), parsed here and used below.
     std::unique_ptr<sema::Braced> early;
     if (d.unknown_bound && ps_.is(Tk::equal) && ps_.kind(1) == Tk::string_lit) {
@@ -6326,7 +6328,7 @@ private:
     } else if (d.unknown_bound && !(ps_.is(Tk::l_brace) || (ps_.is(Tk::equal) && ps_.kind(1) == Tk::l_brace))) {
       // `extern T a[];`: an incomplete type ([dcl.array]/6); a definition needs a bound.
       d.type = types.array_unknown(d.type);
-      if (!spec.is_extern && !single_linkage_spec_) {
+      if (!effective_extern) {
         s_.diag(d.name_at, Diag::incomplete_type, d.type);
         return false;
       }
@@ -6345,7 +6347,7 @@ private:
     // [basic.link]/3–4: static, certain const declarations, and names in unnamed namespaces.
     const auto has_internal_linkage = [&] {
       return spec.is_static || Program::unnamed(p_->ns_of(k_)) ||
-             (!fn && sema::Types::is_const(d.type) && !spec.is_extern && !spec.is_inline && !template_ && !explicit_);
+             (!fn && sema::Types::is_const(d.type) && !effective_extern && !spec.is_inline && !template_ && !explicit_);
     };
     const auto declaration_entity = [&](sema::EntityKind kind, QualType type, ast::Linkage linkage, sema::Fp128 head) {
       sema::EntityRec record{kind, d.name, type, lang, linkage,
@@ -6426,7 +6428,7 @@ private:
     if (deleted) is_function_def = true;
     if (deleted) flags |= sema::decl_flag::deleted;
     bool has_init = !deleted && (early || early_expr || ps_.is(Tk::equal) || ps_.is(Tk::l_brace) || (!fn && ps_.is(Tk::l_paren)));
-    bool definition = fn ? is_function_def || deleted : !((spec.is_extern || single_linkage_spec_) && !has_init);
+    bool definition = fn ? is_function_def || deleted : !(effective_extern && !has_init);
     if (!fn && definition &&
         (!s_.require_concrete_object(d.type, d.name_at) || !s_.require_supported_virtual_layout(d.type, d.name_at)))
       return false;
@@ -6746,8 +6748,9 @@ private:
       return false;
     }
     if (fn && p_->world().ins.names.spelling(d.name) == "main") check_main(spec, sem, d, lang);
-    if ((spec.hidden_visibility || d.hidden_visibility) && fn && !template_ && !explicit_ && !ordinary_friend &&
-        sem.linkage == ast::Linkage::external && (!d.qualified || d.scope.ns))
+    if ((spec.hidden_visibility || d.hidden_visibility) && !template_ && !explicit_ && !ordinary_friend &&
+        sem.linkage == ast::Linkage::external && (!d.qualified || d.scope.ns) &&
+        (fn || (!var_ && !(sem.flags & sema::decl_flag::inline_))))
       sem.hidden_visibility = true;
 
     // The initializer ([dcl.init]); the name is in scope from the end of its declarator.
@@ -6925,7 +6928,7 @@ private:
       else if (sema::Types::is_const(d.type)) s_.diag(d.name_at, Diag::const_uninitialized, d.name);
     } else if (!fn && spec.is_constexpr) {
       s_.diag(d.name_at, Diag::constexpr_uninitialized, d.name);
-    } else if (!fn && sema::Types::is_const(d.type) && !spec.is_extern) {
+    } else if (!fn && sema::Types::is_const(d.type) && !effective_extern) {
       s_.diag(d.name_at, Diag::const_uninitialized, d.name);
     }
     if (value != ConstId::none && (requires_constinit || s_.folded_immediate_result != EntityId::none))

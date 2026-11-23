@@ -188,8 +188,10 @@ support those addresses. [#414](https://github.com/yrashk/ycxx/issues/414)
 On both targets, direct calls and saved pointers across translation units share one address for
 simple external inline functions, with ycxx's linker or the system's. Ordinary namespace-scope
 functions can use GNU hidden visibility, including coalesced inline and `constexpr` definitions.
+On Linux x86-64, ordinary external non-inline namespace variables also preserve GNU hidden
+visibility across declarations.
 [#422](https://github.com/yrashk/ycxx/issues/422) · [#602](https://github.com/yrashk/ycxx/issues/602)
-· [#124](https://github.com/yrashk/ycxx/issues/124)
+· [#124](https://github.com/yrashk/ycxx/issues/124) · [#936](https://github.com/yrashk/ycxx/issues/936)
 
 External inline namespace variables with relocation-free static initializers share one object
 across translation units on both targets. On Linux this lets two freestanding units using libycxx
@@ -360,6 +362,9 @@ written default member initializer are value-initialized.
   declaration, including definitions written inside their namespace and qualified definitions
   outside it. [#426](https://github.com/yrashk/ycxx/issues/426),
   [#455](https://github.com/yrashk/ycxx/issues/455)
+  A single `extern "C"` or `extern "C++"` declaration gives an ordinary namespace `const`
+  variable the linkage and definition rules of a written `extern` storage specifier.
+  [#942](https://github.com/yrashk/ycxx/issues/942)
 - ordinary scalar `new` and single-object `delete` for integral and pointer objects, including
   cv-qualified objects. Scalar allocation uses the global Itanium allocation functions.
   Syntax checking also covers one-dimensional scalar `new T[n]` and `delete[] p`.
@@ -547,6 +552,11 @@ it affects, through code generation and the link. The daemon serves concurrent r
 thread pool, and its output is byte for byte that of a cold, in-process build. The daemon, its file
 watcher (FSEvents on macOS, inotify on Linux), the engine trace and the LSP server below work the
 same on both hosts. [#659](https://github.com/yrashk/ycxx/issues/659)
+Measured on 2026-11-22 (Release ycxx, arm64 macOS, 18 cores) with a generated 1 MB file of 290
+modules and 11,311 functions (`playground/genbig.py`): a cold build takes 0.91 s, and changing
+one module's constant rebuilds in 0.80 s. The back end re-runs only the two functions that read
+the constant; the front end still re-analyses the whole file on any edit, about 0.5 s of that
+([#938](https://github.com/yrashk/ycxx/issues/938), [#947](https://github.com/yrashk/ycxx/issues/947)).
 
 **See what the engine does.** `ycxx cxx --trace-engine a.cpp` (or `YCXX_TRACE_ENGINE=stream`)
 prints every query the build went through as a colored tree on stderr: what ran, what was
