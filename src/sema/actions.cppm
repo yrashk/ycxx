@@ -1882,11 +1882,8 @@ public:
         if (!q_->type_trait_instantiation_failed(cls)) diag_at(loc, Diag::virtual_class_trait_incomplete, type);
         return {NodeId::none, begin, end};
       }
-    } else {
-      // Direct finality queries keep the class domain supported by #309.
-      if (final_trait && (is_union_type(type) == true || w_->entities.rec(cls).templ != EntityId::none))
-        return bool_literal(false, begin, end);
-      if (!require_complete(type, begin)) return {NodeId::none, begin, end};
+    } else if (!require_complete(type, begin)) {
+      return {NodeId::none, begin, end};
     }
     const ClassRec* record = classes().find(cls);
     if (!record) return {NodeId::none, begin, end};
