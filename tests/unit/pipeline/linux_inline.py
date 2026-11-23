@@ -35,6 +35,8 @@ def weak_runtime_providers(scope, libycxx, host_cxx, readelf, compile, link, sym
     units = {
         'weak-main': 'int selected() noexcept;\nint main() { return selected(); }\n',
         'weak-provider': '[[__gnu__::__weak__]] int selected() noexcept { return 17; }\n',
+        'weak-redecl': ('extern "C" __attribute__((weak, visibility("hidden"))) int hook() noexcept;\n'
+                        'int hook() noexcept { return 17; }\n'),
         'strong-provider': 'int selected() noexcept { return 31; }\n',
         'duplicate-provider': 'int selected() noexcept { return 41; }\n',
     }
@@ -43,6 +45,7 @@ def weak_runtime_providers(scope, libycxx, host_cxx, readelf, compile, link, sym
         (scope / source).write_text(contents)
         compile(source, f'{name}.o')
     defined_function('weak-provider.o', '_Z8selectedv', 'WEAK', 'DEFAULT')
+    defined_function('weak-redecl.o', 'hook', 'WEAK', 'HIDDEN')
     defined_function('strong-provider.o', '_Z8selectedv', 'GLOBAL', 'DEFAULT')
     assert '_Z8selectedv' not in run(readelf, '-Wg', 'weak-provider.o')
 
