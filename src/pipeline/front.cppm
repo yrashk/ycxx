@@ -1177,6 +1177,10 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
     }
     if (!seen.insert(std::to_underlying(e)).second) return;
     const sema::EntityRec& r = world.entities.rec(e);
+    if (r.kind == sema::EntityKind::class_template) {
+      if (d.flags & sema::decl_flag::template_) tu.class_template_parameters.try_emplace(e, d.template_params);
+      return;
+    }
     if (r.kind == sema::EntityKind::class_ || r.kind == sema::EntityKind::data_member || r.kind == sema::EntityKind::type_alias ||
         r.kind == sema::EntityKind::enum_ || r.kind == sema::EntityKind::enumerator ||
         r.kind == sema::EntityKind::function_template || r.kind == sema::EntityKind::variable_template ||
@@ -1651,6 +1655,7 @@ TranslationUnit finish_unit(std::vector<UnitPart>& parts, sema::World& world, st
   std::map<EntityId, FunctionVisibility> function_visibility;
   std::vector<Dynamic> dynamic;
   for (UnitPart& p : parts) {
+    tu.class_template_parameters.insert(p.tu.class_template_parameters.begin(), p.tu.class_template_parameters.end());
     for (Entity& e : p.tu.entities) {
       if (entities.insert(e.id).second) {
         tu.entities.push_back(std::move(e));

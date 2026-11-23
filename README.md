@@ -229,6 +229,9 @@ destructor symbols.
 On both native targets, class-template members can use the address of a named namespace object
 or an ordinary static data member as a template argument. Pointers to translation-unit-local
 objects give each translation unit its own specialization. [#1055](https://github.com/yrashk/ycxx/issues/1055)
+A fixed pointer parameter can also take a whole-object address converted to cv `void*` or
+the address of an array completed after its first declaration.
+[#1070](https://github.com/yrashk/ycxx/issues/1070)
 
 On Linux x86-64, an ordinary external namespace-scope function can use GNU `weak` so a
 strong definition in another object takes precedence. This covers the pinned libycxx

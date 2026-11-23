@@ -2047,6 +2047,11 @@ template's tokens again with the arguments bound.
 - A native symbol can encode a pointer template argument naming a whole namespace-scope
   object or a static data member of an ordinary namespace-scope class. Mangling uses the
   symbolic object from constant evaluation, with the enclosing name's Itanium substitutions.
+- Fixed, directly matched pointer parameters of class templates can also take a whole object
+  converted to cv `void*`, and a completed array whose first declaration had unknown bound.
+  The two native targets use the same entity-literal spelling as both peer compilers in
+  these cases. Other template argument contexts remain in #1073.
+  [#1070](https://github.com/yrashk/ycxx/issues/1070)
 - On both native targets, members specialized for pointers to distinct TU-local objects
   keep their symbols and storage separate across translation units. Externally linked object
   arguments preserve their identity when separate objects refer to the same specialization.
