@@ -211,10 +211,11 @@ support those addresses. [#414](https://github.com/yrashk/ycxx/issues/414)
 On both targets, direct calls and saved pointers across translation units share one address for
 simple external inline functions, with ycxx's linker or the system's. Ordinary namespace-scope
 functions can use GNU hidden visibility, including coalesced inline and `constexpr` definitions.
-On Linux x86-64, ordinary external non-inline namespace variables also preserve GNU hidden
-visibility across declarations.
+Ordinary external non-inline namespace variables also preserve GNU hidden visibility across
+declarations.
 [#422](https://github.com/yrashk/ycxx/issues/422) · [#602](https://github.com/yrashk/ycxx/issues/602)
 · [#124](https://github.com/yrashk/ycxx/issues/124) · [#936](https://github.com/yrashk/ycxx/issues/936)
+· [#1085](https://github.com/yrashk/ycxx/issues/1085)
 
 Both targets also link eligible in-class nonvirtual functions of namespace-scope class-template
 specializations across objects. Members of a specialization with a translation-unit-local type
@@ -233,13 +234,14 @@ A fixed pointer parameter can also take a whole-object address converted to cv `
 the address of an array completed after its first declaration.
 [#1070](https://github.com/yrashk/ycxx/issues/1070)
 
-On Linux x86-64, an ordinary external namespace-scope function can use GNU `weak` so a
+On both targets, an ordinary external namespace-scope function can use GNU `weak` so a
 strong definition in another object takes precedence. This covers the pinned libycxx
 debugger provider. [#937](https://github.com/yrashk/ycxx/issues/937)
+· [#1085](https://github.com/yrashk/ycxx/issues/1085)
 
-On Linux x86-64, an ordinary external non-inline function can inherit GNU visibility
+On both targets, an ordinary external non-inline function can inherit GNU visibility
 from its enclosing namespace declaration and use it at an out-of-line definition.
-[#940](https://github.com/yrashk/ycxx/issues/940)
+[#940](https://github.com/yrashk/ycxx/issues/940) · [#1085](https://github.com/yrashk/ycxx/issues/1085)
 
 On Linux x86-64, namespace-scope `asm((expression));` can apply one `.hidden` directive to
 an ordinary ELF symbol. The expression supplies constant-evaluated `size()` and `data()`

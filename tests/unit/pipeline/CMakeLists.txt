@@ -49,6 +49,11 @@ if(APPLE AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(arm64|aarch64)$" AND NOT CMAKE_CR
   add_test(NAME unit.darwin_virtual
     COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/darwin_virtual.py
             $<TARGET_FILE:ycxxc> ${YCXXC_CLANGXX} ${YCXXC_NM})
+  # The Mach-O counterpart of unit.linux_namespace_visibility and linux_inline's weak providers,
+  # checked against Clang's symbol tables.
+  add_test(NAME unit.darwin_weak_visibility
+    COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/darwin_weak_visibility.py
+            $<TARGET_FILE:ycxxc> ${YCXXC_CLANGXX} ${YCXXC_NM})
 endif()
 # PARITY: #647, #649 for the Darwin counterparts of unit.linux_variadic_definitions and
 # unit.linux_array_delete; the rest by design: they run x86-64 ELF executables, which only Linux
@@ -122,7 +127,8 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_
   add_test(NAME unit.linux_executable
     COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/linux_executable.py
             $<TARGET_FILE:ycxxc> ${CMAKE_READELF})
-  # PARITY: by design: checks ELF visibility and runs the Linux x86-64 link.
+  # PARITY: by design: checks ELF visibility and runs the Linux x86-64 link. Its Mach-O counterpart
+  # is unit.darwin_weak_visibility.
   add_test(NAME unit.linux_namespace_visibility
     COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/linux_namespace_visibility.py
             $<TARGET_FILE:ycxxc> ${CMAKE_READELF} ${PROJECT_SOURCE_DIR}/deps/libycxx)

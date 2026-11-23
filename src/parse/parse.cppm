@@ -257,7 +257,6 @@ public:
     x.in_class.assign(its.size(), false);
     x.inner_of.assign(its.size(), "");
     x.namespace_visibility.assign(its.size(), ast::GnuVisibility::none);
-    const bool linux = w.target.triple == ast::x86_64_linux.triple;
     std::vector<std::string> inner_eff(its.size());
     for (u32 k = 0; k < its.size(); ++k) {  // preorder: a parent comes first
       u32 p = its[k].parent;
@@ -287,7 +286,7 @@ public:
             depth += (x == lex::Tk::l_square || x == lex::Tk::l_paren) - (x == lex::Tk::r_square || x == lex::Tk::r_paren);
             if (depth == 0) break;
           }
-          if (linux && after_namespace && depth == 0 &&
+          if (after_namespace && depth == 0 &&
               (scoped || (begin > its[k].begin && r.tokens[begin - 1].kind == lex::Tk::identifier &&
                           r.name(r.tokens[begin - 1]) == "__attribute__")))
             Parser::read_decl_attributes(attributes, r, begin, t + 1, scoped);
@@ -7453,11 +7452,9 @@ private:
       sem.hidden_visibility = true;
     if (ordinary_external && fn && !(sem.flags & (sema::decl_flag::inline_ | sema::decl_flag::member))) {
       if (spec.attributes.weak || d.attributes.weak) sem.explicit_weak = true;
-      if (p_->world().target.triple == ast::x86_64_linux.triple) {
-        sem.explicit_default_visibility = visibility == ast::GnuVisibility::default_;
-        // A qualified definition uses the namespace facts from its resolved declaration.
-        if (!d.qualified) sem.namespace_visibility = p_->namespace_visibility_[k_];
-      }
+      sem.explicit_default_visibility = visibility == ast::GnuVisibility::default_;
+      // A qualified definition uses the namespace facts from its resolved declaration.
+      if (!d.qualified) sem.namespace_visibility = p_->namespace_visibility_[k_];
     }
 
     // The initializer ([dcl.init]); the name is in scope from the end of its declarator.
