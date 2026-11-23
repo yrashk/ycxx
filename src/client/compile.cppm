@@ -137,6 +137,7 @@ struct Options {
   std::vector<std::string> sources;  // translation units
   std::vector<std::string> objects;  // objects named on the command line
   std::vector<std::string> archives;
+  std::size_t explicit_archive_count = 0;  // subsequent archives are appended by the driver
   std::vector<pipeline::LinkOperand> operands;
   std::vector<std::string> libraries;  // shared objects in command-line order
   std::vector<std::string> undefined;  // names an archive link starts with as referenced
@@ -249,6 +250,7 @@ std::expected<Options, std::string> parse_options(std::span<const std::string_vi
   if (o.pp.call_triviality == ast::CallTriviality::apple && !o.pp.target->apple_calls)
     return std::unexpected("invalid value in '-fclass-call-abi=apple'");
   if (o.sources.empty() && o.objects.empty()) return std::unexpected("no input files");
+  o.explicit_archive_count = o.archives.size();
   // An executable for arm64 macOS links libycxx's runtime after the operands (#842).
   if (darwin_link && !o.nostdlibxx) {
     for (const auto& archive : pipeline::darwin_runtime().archives) add_operand(Kind::archive, o.archives, archive);
@@ -284,9 +286,10 @@ std::optional<std::string> read_disk(const std::string& path) {
   return std::string{std::istreambuf_iterator<char>(in), {}};
 }
 
-// An archive operand, read once per process while its size and modification time stay the same:
-// every Darwin link names libycxx's runtime (#842), and each program's inputs share its bytes.
-std::optional<obj::archive::input> read_archive(const std::string& name, const std::string& path) {
+// Configured Darwin runtime inputs share snapshots while their size and mtime match.
+// Explicit archive operands take a fresh snapshot per request (#951).
+std::optional<obj::archive::input> read_archive(const std::string& name, const std::string& path,
+                                               bool configured_runtime) {
   struct entry {
     std::uintmax_t size;
     std::filesystem::file_time_type modified;
@@ -296,15 +299,18 @@ std::optional<obj::archive::input> read_archive(const std::string& name, const s
   static std::map<std::string, entry, std::less<>> cache;
   std::error_code ec;
   const auto size = std::filesystem::file_size(path, ec);
-  const auto modified = ec ? std::filesystem::file_time_type{} : std::filesystem::last_write_time(path, ec);
   if (ec) return std::nullopt;
-  {
+  std::filesystem::file_time_type modified{};
+  if (configured_runtime) {
+    modified = std::filesystem::last_write_time(path, ec);
+    if (ec) return std::nullopt;
     std::lock_guard lock(mutex);
     if (const auto it = cache.find(path); it != cache.end() && it->second.size == size && it->second.modified == modified)
       return obj::archive::input(name, it->second.bytes);
   }
   auto text = read_disk(path);
   if (!text) return std::nullopt;
+  if (!configured_runtime) return obj::archive::input(name, std::move(*text));
   auto bytes = std::make_shared<const std::string>(std::move(*text));
   std::lock_guard lock(mutex);
   cache.insert_or_assign(path, entry{size, modified, bytes});
@@ -550,9 +556,10 @@ Done run(const Request& r, pp::Host& host, pipeline::Session& session, const Sto
       if (kind == Kind::source) continue;
       const auto& path = kind == Kind::archive ? opts->archives[index] : opts->objects[index];
       if (kind == Kind::archive) {
-        auto archive = read_archive(path, in_cwd(r, path));
+        const bool configured_runtime = index >= opts->explicit_archive_count;
+        auto archive = read_archive(path, in_cwd(r, path), configured_runtime);
         if (!archive) {
-          bad_input = std::ranges::contains(pipeline::darwin_runtime().archives, path)
+          bad_input = configured_runtime
                           ? std::format("cannot read libycxx's runtime '{}': rebuild ycxx, or link without it "
                                         "using '-nostdlib++'", path)
                           : std::format("cannot read '{}'", path);
