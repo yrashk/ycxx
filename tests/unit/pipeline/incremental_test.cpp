@@ -820,7 +820,8 @@ void implicit_runtime_policies() {
   s.set_source(runtime, "runtime.cpp", "extern \"C\" int runtime_helper() { return 40; }", "runtime.o");
   // Build checks path-keyed readability before consuming the translation unit's FileText.
   s.db().set<pp::FileContent>(pp::path_id("peer.cpp"), peer_source);
-  const auto& checked = s.get<pl::Build>(s.request({{peer}, pl::Until::object, {}, true}));
+  const auto& checked = s.get<pl::Build>(s.request({
+      .units = {peer}, .until = pl::Until::object, .check_policies = true}));
   const auto& compiled_runtime = s.get<pl::Tu>(runtime);
   const auto& compiled_peer = s.get<pl::Tu>(peer);
   const auto& member = compiled_runtime.object;
