@@ -279,6 +279,9 @@ with tempfile.TemporaryDirectory() as directory:
             #include <ycxx/effects/runtime.hpp>
             namespace site {
               template<class T> concept Wide = sizeof(T) > 1;
+              template<class Configuration> consteval unsigned limit_for() {
+                return static_cast<unsigned>(Configuration::limit);
+              }
             }
             struct Deployment {
               constexpr int requested(bool wide) const { return wide ? 2 : 1; }
@@ -308,8 +311,12 @@ with tempfile.TemporaryDirectory() as directory:
             };
             static_assert(Active::limit == 2);
             static_assert(NativeConfig<char>::uses == 1);
-            using Scope = fx::budget<Send, Active::limit>;
-            using Bound = fx::set<fx::at_most<Send, Active::limit>>;
+            template<class Configuration> struct GradeProfile {
+              using Scope = fx::budget<Send, site::limit_for<Configuration>()>;
+              using Bound = fx::set<fx::at_most<Send, site::limit_for<Configuration>()>>;
+            };
+            using Scope = GradeProfile<Active>::Scope;
+            using Bound = GradeProfile<Active>::Bound;
             [[=fx::trusted_contract<One>{}]] int transmit(Scope& scope, int value) noexcept {
               scope.spend();
               return value;
