@@ -80,8 +80,11 @@ void framing() {
 void roots() {
   fs::path t = temp_dir("roots");
   std::string home = s(t / "home");
-  fs::create_directories(t / "home" / "loose");
-  check(find_root(s(t / "home" / "loose"), home) == home, "no marker: the home scope");
+  fs::create_directories(t / "home");
+  // A real start under TMPDIR can have project markers above it.
+  fs::create_directories(t / ".git");
+  check(find_root({}, home) == home, "no path to walk: the home scope");
+  check(find_root(home, home) == s(t), "an enclosing repository takes precedence over home");
 
   // A repository, a worktree of it (a `.git` file into .git/worktrees) and a submodule (a `.git`
   // file into .git/modules).
