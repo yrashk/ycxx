@@ -207,6 +207,10 @@ On Linux x86-64, an ordinary external non-inline function can inherit GNU visibi
 from its enclosing namespace declaration and use it at an out-of-line definition.
 [#940](https://github.com/yrashk/ycxx/issues/940)
 
+On Linux x86-64, namespace-scope `asm((expression));` can apply one `.hidden` directive to
+an ordinary ELF symbol. The expression supplies constant-evaluated `size()` and `data()`
+accessors. [#974](https://github.com/yrashk/ycxx/issues/974)
+
 External inline namespace variables and in-class static constexpr members of ordinary namespace-scope
 classes share one object across translation units on both targets when their initial values need
 no relocations or runtime work. On Linux this lets two freestanding units using libycxx `<cstddef>`

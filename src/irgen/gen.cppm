@@ -102,6 +102,14 @@ struct FunctionIr {
   ir::FunctionDebug debug;  // keyed by `body`'s node ids
 };
 
+// A constant-evaluation thunk binds one receiver while computing the byte range.
+// The site is valid only in the thunk returned by constant_byte_capture_ir.
+struct ConstantByteCapture {
+  ast::Child receiver, size, data;
+  std::uint32_t local;
+  ir::NodeId site{ir::none};
+};
+
 // Namespace-scope reference initialization cannot extend the lifetime of a temporary in the
 // startup function's frame (#367).
 bool materializes_temporary(const ast::Ast& ast, ast::NodeId n) {
@@ -152,8 +160,8 @@ template <Facts F>
 class Gen {
  public:
   Gen(const ast::Interners& in, const FunctionInput& fn, F& facts,
-      const std::set<uint32_t>* planned_bypasses = nullptr)
-      : in_(in), ast_(in.ast), fn_(fn), facts_(facts), planned_bypasses_(planned_bypasses) {}
+      const std::set<uint32_t>* planned_bypasses = nullptr, ConstantByteCapture* capture = nullptr)
+      : in_(in), ast_(in.ast), fn_(fn), facts_(facts), planned_bypasses_(planned_bypasses), capture_(capture) {}
 
   std::expected<FunctionIr, std::string> run() {
     try {
@@ -163,9 +171,10 @@ class Gen {
     }
     // Only functions with actual bypasses need a second emission, with their bindings available
     // from the entry block. Discover them from the same scope transitions used by final emission.
-    if (!bypassed_locals_.empty()) return Gen(in_, fn_, facts_, &bypassed_locals_).run();
+    if (!bypassed_locals_.empty()) return Gen(in_, fn_, facts_, &bypassed_locals_, capture_).run();
     auto built = b_.finish();
     if (!built) return std::unexpected("function_ir: " + built.error());
+    if (capture_) capture_->site = built->node_of[ir::raw(capture_->site)];
     FunctionIr out;
     out.debug = debug_.remap(built->node_of, uint32_t(built->function.nodes.size()));
     out.body = std::move(built->function);
@@ -467,7 +476,17 @@ class Gen {
         start_lifetime(binding);
         jump_bindings_.emplace(local, binding);
       }
-    stmt({fn_.body.tree, fn_.body_offset});
+    if (capture_) {
+      full_expression([&] {
+        const At thunk{fn_.body.tree, fn_.body_offset};
+        slots_[capture_->local] = lvalue(child(thunk, capture_->receiver));
+        const ValueId range[] = {rvalue(child(thunk, capture_->size)), rvalue(child(thunk, capture_->data))};
+        // This generated call is observed by the interpreter before the receiver is destroyed.
+        const std::uint64_t imms[] = {word(ast::EntityId::none), 0, 0, 0};
+        capture_->site = stateful(ir::Op::call, {}, range, imms);
+        return 0;
+      });
+    } else stmt({fn_.body.tree, fn_.body_offset});
     if (!gotos_.empty()) throw Unsupported{"a goto to a label that is not defined"};  // sema rejects it
     if (live_) {
       // Flowing off the end ([stmt.return]): `main` returns 0 ([basic.start.main]); any other
@@ -2588,6 +2607,7 @@ class Gen {
   std::vector<PendingGoto> gotos_;                 // before their labels
   std::vector<std::optional<Place>> slots_;  // by local index
   const std::set<uint32_t>* planned_bypasses_;
+  ConstantByteCapture* capture_;
   std::set<uint32_t> bypassed_locals_;       // discovered from scope transitions during first emission
   std::map<uint32_t, Place> jump_bindings_;  // local index to the address of its current instance
   std::optional<ValueId> this_;              // a non-static member function's `this`
@@ -2609,6 +2629,13 @@ std::expected<FunctionIr, std::string> function_ir(const ast::Interners& in, con
   // generation (ast.md §3.7); the check joins this one once #33 has dependent kinds.
   contract_assert(in.ast.contains(fn.body.tree));
   return Gen<F>(in, fn, facts).run();
+}
+
+template <Facts F>
+std::expected<FunctionIr, std::string> constant_byte_capture_ir(const ast::Interners& in, const FunctionInput& fn,
+                                                               F& facts, ConstantByteCapture& capture) {
+  contract_assert(fn.thunk && fn.entity == ast::EntityId::none);
+  return Gen<F>(in, fn, facts, nullptr, &capture).run();
 }
 
 }  // namespace ycxx::irgen

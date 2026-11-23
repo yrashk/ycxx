@@ -406,6 +406,7 @@ enum class Diag : std::uint32_t {
   annotation_invalid_type [[=message{Severity::error, "an annotation requires a structural constant value"}]],
   annotation_not_supported [[=message{Severity::error, "this declaration annotation is not supported yet"}]],
   annotation_mixed_list [[=message{Severity::error, "annotations and ordinary attributes require separate attribute-specifiers"}]],
+  namespace_asm_directive [[=message{Severity::error, "namespace-scope constant asm requires one '.hidden SYMBOL' directive"}]],
 };
 
 // A `{N:r}` argument: why an evaluation was not constant. 0 is an expression the front end
