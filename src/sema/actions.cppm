@@ -1931,10 +1931,11 @@ public:
     if (auto result = reaches_base(d, b)) return bool_literal(*result, begin, end);
     return fail(Diag::base_of_unsupported, base_type, derived_type);
   }
-  // The owning replay supplies the point of instantiation for class completeness
-  // ([meta.unary.prop]). Finality requires a complete class, including a union.
+  // The owning replay checks class completeness at the point of instantiation
+  // ([meta.unary.prop]). Among these traits, only finality requires a complete union.
   Ex class_property_trait_expr(ast::DepOp op, QualType type, u32 begin, u32 end)
-    pre(op == ast::DepOp::is_polymorphic || op == ast::DepOp::is_abstract || op == ast::DepOp::is_final)
+    pre(op == ast::DepOp::is_polymorphic || op == ast::DepOp::is_abstract || op == ast::DepOp::is_final ||
+        op == ast::DepOp::has_virtual_destructor)
   {
     type = types().canonical(type);
     const engine::Loc loc = type_trait_loc(begin);
@@ -1963,8 +1964,13 @@ public:
     }
     const ClassRec* record = classes().find(cls);
     if (!record) return {NodeId::none, begin, end};
-    if (final_trait) return bool_literal(record->is_final, begin, end);
-    return bool_literal(op == ast::DepOp::is_abstract ? record->is_abstract() : record->polymorphic, begin, end);
+    switch (op) {
+    case ast::DepOp::is_polymorphic: return bool_literal(record->polymorphic, begin, end);
+    case ast::DepOp::is_abstract: return bool_literal(record->is_abstract(), begin, end);
+    case ast::DepOp::is_final: return bool_literal(record->is_final, begin, end);
+    case ast::DepOp::has_virtual_destructor: return bool_literal(record->virtual_destructor, begin, end);
+    default: std::unreachable();
+    }
   }
 
   // `__trait(T…)` that tests types ([meta.unary], [meta.rel]): a `bool` prvalue, value-dependent
@@ -2014,6 +2020,8 @@ public:
     case is_polymorphic: return class_property_trait_expr(ast::DepOp::is_polymorphic, args[0], begin, end);
     case is_abstract: return class_property_trait_expr(ast::DepOp::is_abstract, args[0], begin, end);
     case is_final: return class_property_trait_expr(ast::DepOp::is_final, args[0], begin, end);
+    case has_virtual_destructor:
+      return class_property_trait_expr(ast::DepOp::has_virtual_destructor, args[0], begin, end);
     case is_union: unary_op = ast::DepOp::is_union; break;
     case is_class: unary_op = ast::DepOp::is_class; break;
     case is_member_pointer: unary_op = ast::DepOp::is_member_pointer; break;
@@ -2032,25 +2040,13 @@ public:
     }
     // The generic dependent node lets a template body re-parse the operand.
     if (std::ranges::any_of(args, [&](QualType a) { return types().is_dependent(a); })) return dependent_node({}, begin, end, b);
-    QualType x = args[0], c = types().canonical(x);
-    auto cls = [&]() -> const ClassRec* {
-      if (!types().is_class(c)) return nullptr;
-      if (!require_complete(c, begin)) return nullptr;
-      return class_rec(types().class_of(c));
-    };
+    const QualType c = types().canonical(args[0]);
     bool v = false;
     switch (t) {
     case is_void: v = types().is_void(c); break;
     case is_integral: v = types().is_integral(c); break;
     case is_floating_point: v = types().is_floating(c); break;
     case is_arithmetic: v = types().is_integral(c) || types().is_floating(c); break;
-    case has_virtual_destructor:
-      if (types().is_class(c) && is_union_type(c) != true) {
-        const ClassRec* r = cls();
-        if (!r) return {NodeId::none, begin, end};
-        v = r->virtual_destructor;
-      }
-      break;
     case is_lvalue_reference: v = types().is_reference(c) && !types().rec(c).rvalue_ref; break;
     case is_rvalue_reference: v = types().is_reference(c) && types().rec(c).rvalue_ref; break;
     default: break;
