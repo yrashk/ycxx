@@ -75,10 +75,10 @@ instead of Debug's 5.3 s on an M-series Mac ([#726](https://github.com/yrashk/yc
 
 **Check YCXX Policies.** Opt in with `-fcheck-policies` in a syntax check or a
 build. YCXX checks registered resource policies across branches and loops, ends shared borrows
-after their last reachable use, and verifies declared effect bounds across direct calls in
-checked sources and explicit objects. Applications can
-combine reusable C++ policy fragments. The standalone YCXX Policies package provides portable
-runtime ownership guards and scoped capability tokens for GCC and Clang builds.
+after their last reachable use, and verifies declared effect bounds and usage grades across direct
+calls in checked sources and explicit objects. Applications can compose typed C++ declarations
+and reflection annotations. The standalone C++20 package provides runtime ownership guards, scoped
+capability tokens, effect budgets, and scoped handlers for GCC and Clang builds.
 [YCXX Policies package](packages/ycxx-policies/README.md)
 
 Single-expression `auto(x)` and `auto{x}` perform scalar and pointer decay-copy, including

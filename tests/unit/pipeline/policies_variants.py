@@ -178,37 +178,31 @@ int main() {
     leak = root / "native_leak.cpp"
     leak.write_text(leak_text)
     variants = [ycxx, "cxx", "--no-daemon", "-I", include]
-    programs = (direct, chosen, guarded)
-    # PARITY: by design: run the linked Mach-O executable on its native host and ISA.
+    darwin = [*variants, "--target=arm64-apple-darwin"]
+    programs = (direct, chosen, guarded, root / "reflected.cpp")
+    # PARITY: by design: execute each binary only on its native host and ISA.
     mac_host = sys.platform == "darwin" and platform.machine() in ("arm64", "aarch64")
-    # PARITY: #641 tracks passing the by-value empty selection tags on Linux x86-64.
-    linux_host = sys.platform == "linux" and platform.machine() in ("x86_64", "amd64")
+    targets = [(darwin, bytes.fromhex("cffaedfe"), mac_host)]
+    if sys.platform == "linux" and platform.machine() in ("x86_64", "amd64"):
+        linux = [*variants, "--target=x86_64-linux-gnu", "-nostdlib"]
+        targets.append((linux, b"\x7fELF", True))
     for checks in (1, 0):
         mode = f"-DYCXX_POLICIES_RUNTIME_CHECKS={checks}"
         check("native_leak", leak_text, "owner variant 'selected' may leave its scope", options=(mode,))
-        darwin = [*variants, "--target=arm64-apple-darwin", mode]
-        for program in programs:
-            mach = root / f"{program.stem}-macho"
-            subprocess.run([*darwin, "-fcheck-policies", program, "-o", mach], check=True, timeout=90)
-            assert mach.read_bytes()[:4] == bytes.fromhex("cffaedfe")
-            if mac_host:
-                for args in choices:
-                    subprocess.run([mach, *args], check=True, timeout=10)
-        if mac_host:
-            expected = trap_signals if checks else (0,)
-            bad_scope = subprocess.run([root / "capability-macho", "affine", "wrong-scope"], timeout=10)
-            assert bad_scope.returncode in expected, bad_scope
-            unchecked = root / "unchecked-leak"
-            subprocess.run([*darwin, leak, "-o", unchecked], check=True, timeout=90)
-            result = subprocess.run([unchecked, "strict", "leak"], timeout=10)
-            assert result.returncode in expected, result
-        if linux_host:
-            linux = [*variants, "--target=x86_64-linux-gnu", "-nostdlib", mode]
+        expected_violation = trap_signals if checks else (0,)
+        for target, magic, native_host in targets:
             for program in programs:
-                native = root / f"{program.stem}-elf"
-                rejected = subprocess.run([*linux, "-fcheck-policies", program, "-o", native],
-                                          capture_output=True, text=True, timeout=90)
-                errors = [line for line in rejected.stderr.splitlines() if ": error:" in line]
-                assert rejected.returncode == 1 and errors and not native.exists(), rejected.stderr
-                assert all("x86-64 System V ABI:" in line and "unsupported aggregate parameter layout" in line
-                           for line in errors), rejected.stderr
+                executable = root / program.stem
+                subprocess.run([*target, mode, "-fcheck-policies", program, "-o", executable],
+                               check=True, timeout=90)
+                assert executable.read_bytes()[:4] == magic
+                if native_host:
+                    for args in choices:
+                        subprocess.run([executable, *args], check=True, timeout=10)
+            if native_host:
+                bad_scope = subprocess.run([root / guarded.stem, "affine", "wrong-scope"], timeout=10)
+                assert bad_scope.returncode in expected_violation, bad_scope
+                unchecked = root / "unchecked-leak"
+                subprocess.run([*target, mode, leak, "-o", unchecked], check=True, timeout=90)
+                result = subprocess.run([unchecked, "strict", "leak"], timeout=10)
+                assert result.returncode in expected_violation, result
