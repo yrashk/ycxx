@@ -1551,11 +1551,16 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   ordinary member collision checks. The enum identity uses the declaring class, canonical
   underlying type, and first enumerator.
   [#859](https://github.com/yrashk/ycxx/issues/859)
+- Named unscoped member enum definitions in class templates defer value-dependent initializers
+  and their implicit successors. Specialization replay evaluates each list, including earlier
+  enumerator references, fixed-base range checks, and underlying-type inference. Size and
+  alignment of an inferred enum with dependent values wait for that replay.
+  [#861](https://github.com/yrashk/ycxx/issues/861)
 - Further work includes opaque declarations in classes or blocks, unnamed empty definitions,
   unnamed definitions followed by declarators, and `E{}` and `E(v)` expressions
   (#157). Enumerations in a block are tracked in #117. Qualified lookup of earlier enumerators
-  while the unnamed definition is open is tracked in #879, and dependent enumerator values
-  in class templates in #861.
+  while the unnamed definition is open is tracked in #879. Dependent scoped enum definitions
+  wait for #893, and dependent unnamed definitions for #894.
 
 ## Direct explicit destructor calls (#722)
 

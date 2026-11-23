@@ -4449,14 +4449,24 @@ private:
     };
     // The enumerators: each the previous one's value plus one, or its initializer's, a converted
     // constant expression of the underlying type when it is fixed ([dcl.enum]/5).
-    std::int64_t next = 0;
-    bool next_big = false;  // `next` is an unsigned value of 2^63 or more, its bits in `next`
+    // A named unscoped member enum's definition is replayed when its class is instantiated.
+    // A scoped member enum's definition would instead need to wait for its own use ([temp.inst]).
+    const bool pattern = !unnamed && !scoped && cls != EntityId::none && !inst_ &&
+                         types.is_dependent(types.class_type(cls));
+    struct EnumValue {
+      std::int64_t bits = 0;
+      bool big = false;  // an unsigned value of 2^63 or more
+    };
+    std::optional<EnumValue> next = EnumValue{};
     // Before the closing brace an enumerator has its initializer's type, or the previous one's,
     // or the fixed underlying type ([dcl.enum]/5); its value is kept until the type is chosen.
     QualType prev_type = fixed.value_or(s_.builtin(sema::Builtin::int_));
+    const auto initializer_type = [&](QualType t) {
+      if (!types.is_enum(t)) return sema::Types::unqualified(t);
+      return s_.deferred_enum_layout(t) ? s_.builtin(sema::Builtin::dependent) : s_.underlying_of(t);
+    };
     std::set<NameId> enumerator_names;
-    std::vector<std::int64_t> values;
-    std::vector<bool> big;  // per value: unsigned, 2^63 or more (its bits are in `values`)
+    std::vector<std::optional<EnumValue>> values;
     while (!ps_.is(Tk::r_brace) && !ps_.at_end()) {
       if (!ps_.is(Tk::identifier)) {
         s_.diag(ps_.pos(), Diag::expected_unqualified_id);
@@ -4466,50 +4476,58 @@ private:
       u32 en_at = ps_.pos();
       ps_.bump();
       ps_.skip_attributes();  // an enumerator's attribute-specifier-seq ([dcl.enum]/1)
-      std::int64_t value = next;
-      bool value_big = next_big;
-      if (!ps_.is(Tk::equal) && !values.empty() && big.back() && values.back() == -1) {
-        no_enum_type(en_at);  // [dcl.enum]/5: no type holds the incremented value
-        value_big = false;
-      }
-      // [dcl.enum]/5: an incremented value the previous enumerator's type cannot represent has a
-      // type that can: the first of int, unsigned int, long, unsigned long that holds it.
-      if (!ps_.is(Tk::equal) && !fixed && !values.empty() && !holds(prev_type, value, value_big)) {
-        for (sema::Builtin b : {sema::Builtin::int_, sema::Builtin::unsigned_int, sema::Builtin::long_, sema::Builtin::unsigned_long})
-          if (holds(s_.builtin(b), value, value_big)) {
-            prev_type = s_.builtin(b);
-            break;
-          }
-      }
-      if (!ps_.is(Tk::equal) && fixed && !values.empty()) {
-        // An implicit value must fit the fixed type too.
-        QualType ll = s_.builtin(value_big ? sema::Builtin::unsigned_long_long : sema::Builtin::long_long);
-        Ex lit = s_.literal(ll, s_.world().values.integer(ll, sema::u64(value)), ast::ValueCategory::prvalue, en_at, en_at);
-        if (s_.narrows(lit, *fixed)) s_.diag(en_at, Diag::narrowing, ll, *fixed);
-      }
+      auto value = next;
       if (ps_.accept(Tk::equal)) {
         Ex x = ps_.constant_expression();
         Ex v = s_.promote(x);
-        auto c = v.ok() ? sema::Evaluator(s_, q_).evaluate(v).value : std::nullopt;
-        if (!c || s_.world().values.rec(*c).kind != sema::ValueKind::integer || !types.is_integral(v.type())) {
-          if (x.ok()) s_.diag(x.begin, Diag::bound_not_constant);
+        if (pattern && s_.dependent(v) &&
+            (types.is_dependent(v.type()) || types.is_integral(v.type()) || s_.is_unscoped_enum(v.type()))) {
+          value.reset();
+          if (!fixed) prev_type = initializer_type(x.type());
         } else {
-          sema::IntShape sh = sema::shape(s_.world().target, *types.builtin_of(v.type()));
-          sema::u64 bits = s_.world().values.rec(*c).bits;
-          value = sh.is_signed && sh.bits < 64 && ((bits >> (sh.bits - 1)) & 1) ? std::int64_t(bits | ~((sema::u64{1} << sh.bits) - 1))
-                                                                               : std::int64_t(bits);
-          value_big = !sh.is_signed && (bits >> 63) != 0;
-          if (fixed) {
-            Ex lit = s_.literal(v.type(), *c, ast::ValueCategory::prvalue, x.begin, x.end);
-            if (s_.narrows(lit, *fixed)) s_.diag(x.begin, Diag::narrowing, v.type(), *fixed);
+          auto c = v.ok() ? sema::Evaluator(s_, q_).evaluate(v).value : std::nullopt;
+          if (!c || s_.world().values.rec(*c).kind != sema::ValueKind::integer || !types.is_integral(v.type())) {
+            if (x.ok()) s_.diag(x.begin, Diag::bound_not_constant);
           } else {
-            prev_type = sema::Types::unqualified(v.type());
+            sema::IntShape sh = sema::shape(s_.world().target, *types.builtin_of(v.type()));
+            sema::u64 bits = s_.world().values.rec(*c).bits;
+            const bool extend = sh.is_signed && sh.bits < 64 && ((bits >> (sh.bits - 1)) & 1);
+            value = EnumValue{std::int64_t(extend ? bits | ~((sema::u64{1} << sh.bits) - 1) : bits),
+                              !sh.is_signed && (bits >> 63) != 0};
+            if (fixed) {
+              Ex lit = s_.literal(v.type(), *c, ast::ValueCategory::prvalue, x.begin, x.end);
+              if (s_.narrows(lit, *fixed)) s_.diag(x.begin, Diag::narrowing, v.type(), *fixed);
+            } else {
+              prev_type = initializer_type(x.type());
+            }
           }
+        }
+      } else if (!value) {
+        if (!fixed) prev_type = s_.builtin(sema::Builtin::dependent);
+      } else if (!values.empty()) {
+        if (const auto& previous = values.back(); previous && previous->big && previous->bits == -1) {
+          no_enum_type(en_at);  // [dcl.enum]/5: no type holds the incremented value
+          value->big = false;
+        }
+        // An incremented value outside the previous type widens to an integral type that holds it.
+        if (!fixed && !holds(prev_type, value->bits, value->big)) {
+          for (sema::Builtin b : {sema::Builtin::int_, sema::Builtin::unsigned_int, sema::Builtin::long_, sema::Builtin::unsigned_long})
+            if (holds(s_.builtin(b), value->bits, value->big)) {
+              prev_type = s_.builtin(b);
+              break;
+            }
+        }
+        if (fixed) {
+          QualType ll = s_.builtin(value->big ? sema::Builtin::unsigned_long_long : sema::Builtin::long_long);
+          Ex lit = s_.literal(ll, s_.world().values.integer(ll, sema::u64(value->bits)), ast::ValueCategory::prvalue, en_at, en_at);
+          if (s_.narrows(lit, *fixed)) s_.diag(en_at, Diag::narrowing, ll, *fixed);
         }
       }
       // The next implicit value, past INT64_MAX into the unsigned values.
-      next_big = value_big || value == std::numeric_limits<std::int64_t>::max();
-      next = std::int64_t(sema::u64(value) + 1);
+      next.reset();
+      if (value)
+        next = EnumValue{std::int64_t(sema::u64(value->bits) + 1),
+                         value->big || value->bits == std::numeric_limits<std::int64_t>::max()};
       if (!enumerator_names.insert(en).second)
         s_.diag(en_at, Diag::conflicting_declaration, en);  // [dcl.enum]/2: unique within the list
       // [basic.scope.scope]: an unscoped enumerator is declared in the enclosing scope.
@@ -4527,16 +4545,16 @@ private:
           }
       }
       const EntityId x = unnamed ? EntityId::none : enumerator_entity(en);
-      const ConstId c = s_.world().values.integer(prev_type, sema::u64(value));
-      if (!unnamed) p_->set_constant(x, c, k_);
+      const ConstId c = value ? s_.world().values.integer(prev_type, sema::u64(value->bits)) : ConstId::none;
+      if (!value) p_->value_dependent_member(x);
+      else if (!unnamed && !pattern) p_->set_constant(x, c, k_);
       er.enumerators.push_back({en, x, ConstId::none});
       values.push_back(value);
-      big.push_back(value_big);
       ast::DeclSema xs = class_decl(e, true);
       xs.kind = ast::DeclKind::enumerator;
       xs.entity = x;
       xs.type = prev_type;  // inside the list
-      s_.own.push_back({en, xs, unnamed ? c : ConstId::none});
+      s_.own.push_back({en, xs, unnamed || pattern ? c : ConstId::none});
       if (!ps_.accept(Tk::comma)) {
         // [dcl.enum]/1: the enumerator-list is comma-separated.
         if (!ps_.is(Tk::r_brace) && !ps_.at_end()) s_.diag(ps_.pos(), Diag::expected_token, Tk::comma);
@@ -4549,20 +4567,22 @@ private:
     // Itanium C++ ABI compilers choose (#220): with no negative value, `unsigned int` if every
     // value fits, else `unsigned long`; else `int` if every value fits, else `long`. An empty
     // enumeration has the values of `unsigned int`.
-    if (!fixed) {
+    const bool has_dependent_value = std::ranges::any_of(values, [](const auto& value) { return !value; });
+    if (!fixed && has_dependent_value) {
+      er.underlying.reset();
+    } else if (!fixed) {
       using sema::Builtin;
-      bool negative = false;
-      for (std::size_t i = 0; i < values.size(); ++i) negative = negative || (values[i] < 0 && !big[i]);
+      const bool negative = std::ranges::any_of(values, [](const auto& v) { return v->bits < 0 && !v->big; });
       Builtin u = Builtin::unsigned_int;
       if (!negative) {
         sema::u64 hi = 0;
-        for (std::int64_t v : values) hi = std::max(hi, sema::u64(v));
+        for (const auto& v : values) hi = std::max(hi, sema::u64(v->bits));
         if (hi > std::numeric_limits<std::uint32_t>::max()) u = Builtin::unsigned_long;
-      } else if (std::ranges::contains(big, true)) {
+      } else if (std::ranges::any_of(values, [](const auto& v) { return v->big; })) {
         no_enum_type(name_at);  // [dcl.enum]/7: no integral type holds them all
         u = Builtin::long_;
       } else {
-        auto [lo, hi] = std::ranges::minmax(values);
+        auto [lo, hi] = std::ranges::minmax(values | std::views::transform([](const auto& v) { return v->bits; }));
         u = lo >= std::numeric_limits<std::int32_t>::min() && hi <= std::numeric_limits<std::int32_t>::max() ? Builtin::int_
                                                                                                              : Builtin::long_;
       }
@@ -4572,8 +4592,7 @@ private:
       // enumerators).
       Builtin p = Builtin::unsigned_long;
       for (Builtin c : {Builtin::int_, Builtin::unsigned_int, Builtin::long_, Builtin::unsigned_long}) {
-        bool all = true;
-        for (std::size_t i = 0; i < values.size(); ++i) all = all && holds(s_.builtin(c), values[i], big[i]);
+        const bool all = std::ranges::all_of(values, [&](const auto& v) { return holds(s_.builtin(c), v->bits, v->big); });
         if (all) {
           p = c;
           break;
@@ -4598,8 +4617,12 @@ private:
     for (std::size_t i = 0; i < er.enumerators.size(); ++i) {
       sema::EnumeratorRec& xr = er.enumerators[i];
       if (unnamed) xr.entity = enumerator_entity(xr.name);
-      xr.value = s_.world().values.integer(*er.underlying, sema::u64(values[i]));
-      p_->set_constant(xr.entity, xr.value, k_);
+      if (values[i] && er.underlying) {
+        xr.value = s_.world().values.integer(*er.underlying, sema::u64(values[i]->bits));
+        p_->set_constant(xr.entity, xr.value, k_);
+      } else {
+        p_->value_dependent_member(xr.entity);
+      }
       sema::Sema::OwnDecl& own = s_.own[first_enumerator + i];
       own.sema.entity = xr.entity;
       own.sema.type = t;
