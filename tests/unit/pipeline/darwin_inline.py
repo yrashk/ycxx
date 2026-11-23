@@ -172,6 +172,25 @@ int main() { return g() - 2; }
         run(ycxx, 'cxx', 'strong-dtor-first.o', 'duplicate-dtor.o', '-o', 'program', status=1,
             error='duplicate symbol __ZN5OwnerD1Ev')
 
+        specialized = destructors / 'specialized'
+        symbol = '__ZN4CellIiED1Ev'
+        for name, flags, binding in (
+            ('written', ('-DWRITTEN_INLINE',), weak),
+            ('declared', ('-DDECLARED_INLINE',), weak),
+            ('strong', (), strong),
+        ):
+            main_obj, peer_obj = f'{name}-specialized-main.o', f'{name}-specialized-peer.o'
+            compile(specialized / 'main.cpp', main_obj, *flags)
+            compile(specialized / 'peer.cpp', peer_obj, *flags)
+            for obj in (main_obj, peer_obj):
+                entry = symbols(obj).get(symbol)
+                assert entry == binding, (obj, symbol, entry)
+            if binding == strong:
+                run(ycxx, 'cxx', main_obj, peer_obj, '-o', 'program', status=1,
+                    error=f'duplicate symbol {symbol}')
+            else:
+                links(main_obj, peer_obj)
+
         # Shared inline definitions beside every other kind of content: the split sections and
         # dead stripping keep string literals, initializers, guarded statics and pointers intact.
         mixed = fixtures / 'inline-mixed'

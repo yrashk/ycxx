@@ -259,6 +259,26 @@ def main():
         compile(ordinary / 'second.cpp', 'duplicate-dtor.o', '-DDUPLICATE_DESTRUCTOR')
         link('strong-dtor-first.o', 'duplicate-dtor.o', status=1, error="duplicate symbol '_ZN5OwnerD1Ev'")
 
+        specialized = destructors / 'specialized'
+        symbol = '_ZN4CellIiED1Ev'
+        for name, flags, binding in (
+            ('written', ('-DWRITTEN_INLINE',), 'WEAK'),
+            ('declared', ('-DDECLARED_INLINE',), 'WEAK'),
+            ('strong', (), 'GLOBAL'),
+        ):
+            main_obj, peer_obj = f'{name}-specialized-main.o', f'{name}-specialized-peer.o'
+            compile(specialized / 'main.cpp', main_obj, *flags)
+            compile(specialized / 'peer.cpp', peer_obj, *flags)
+            for obj in (main_obj, peer_obj):
+                entry = symbols(obj)[symbol]
+                assert entry[4] == binding and entry[6] != 'UND', (obj, entry)
+            if binding == 'GLOBAL':
+                link(main_obj, peer_obj, status=1, error=f"duplicate symbol '{symbol}'")
+            else:
+                for objects in ((main_obj, peer_obj), (peer_obj, main_obj)):
+                    link(*objects)
+                    run('./program')
+
         compile(data / 'bindings.cpp', 'data-controls.o')
         table = symbols('data-controls.o')
         entry = table['_ZN6Public6scalarE']
