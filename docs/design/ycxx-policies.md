@@ -110,15 +110,17 @@ symbols attached to the corresponding function definitions. Both YCXX object for
 these symbols. The external ABI symbol, the object target, and a stable fingerprint of the
 canonical signature and ownership policy identify a contract between compiler sessions.
 Compile each explicit object with `-fcheck-policies` and use that flag at the final YCXX link.
-Each input must have a coverage record that counts the associated requirements and guarantees.
+Each ordinary input must have a coverage record that counts the associated requirements and guarantees.
 Missing, incomplete, malformed, and incompatible records fail verification. The checked link
 trusts unmodified compiler outputs and the usual C++ declaration and definition consistency.
 
 The checked link supports explicit objects and source inputs. Each required direct reference
 must have one strong definition, with matching evidence at that definition's text address.
-Archive, weak-definition, and dynamic-provider support need verification against the linker's
-coalescing, member selection, and import rules. An ordinary link provides the portable runtime
-enforcement described below.
+The default Darwin link can also select members from the driver's libycxx runtime archives.
+Their definitions participate in resolution and supply no policy promises.
+Explicit archives, weak providers, and dynamic providers still need verification against the
+linker's coalescing, member selection, and import rules. An ordinary link provides the portable
+runtime enforcement described below. [#946](https://github.com/yrashk/ycxx/issues/946)
 
 ## Enforcement by ordinary C++, the runtime, and YCXX
 

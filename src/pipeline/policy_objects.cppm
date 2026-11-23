@@ -86,7 +86,7 @@ std::optional<std::string> embed_policy_contracts(obj::object& object, const TuV
   return std::nullopt;
 }
 
-std::vector<std::string> check_object_policies(std::span<const obj::object> objects, bool allow_effects) {
+std::vector<std::string> check_object_policies(std::span<const obj::object> objects, std::size_t ordinary_objects) {
   using Location = std::pair<std::uint32_t, std::uint64_t>;
   struct Record {
     std::size_t object;
@@ -103,14 +103,17 @@ std::vector<std::string> check_object_policies(std::span<const obj::object> obje
   std::vector<std::string> errors;
   for (std::size_t i = 0; i < objects.size(); ++i) {
     const auto& object = objects[i];
+    const bool ordinary = i < ordinary_objects;
     std::optional<std::size_t> expected_records;
     std::size_t records = 0;
     std::set<Location> functions;
     for (const auto& symbol : object.symbols) {
       if (symbol.name_view().starts_with(prefix) || !text_symbol(object, symbol)) continue;
-      functions.emplace(*symbol.section, symbol.offset);
+      if (ordinary) functions.emplace(*symbol.section, symbol.offset);
       if (symbol.bind != obj::binding::local) definitions[symbol.name_view()].emplace_back(i, &symbol);
     }
+    // Implicit runtime members participate in definition resolution without policy coverage.
+    if (!ordinary) continue;
     for (const auto& symbol : object.symbols) {
       auto name = symbol.name_view();
       if (!name.starts_with(prefix)) continue;
@@ -146,10 +149,6 @@ std::vector<std::string> check_object_policies(std::span<const obj::object> obje
       }
       const Record record{i, name.substr(digest_size + 1), digest, {*symbol.section, symbol.offset}, kind->contract};
       ++records;
-      if (!allow_effects && record.kind != PolicyContractKind::observation) {
-        errors.push_back(std::format("{}: checked effect bounds currently require explicit objects or sources at link", object.name));
-        continue;
-      }
       if (record.kind == PolicyContractKind::trusted_effect) {
         const auto [prior, fresh] = trusted_effects.try_emplace(record.name, record);
         if (!fresh && prior->second.digest != record.digest)

@@ -208,7 +208,6 @@ struct Options {
   std::vector<std::string> sources;  // translation units
   std::vector<std::string> objects;  // objects named on the command line
   std::vector<std::string> archives;
-  std::size_t explicit_archive_count = 0;  // subsequent archives are appended by the driver
   std::vector<pipeline::LinkOperand> operands;
   std::vector<std::string> libraries;  // shared objects in command-line order
   std::vector<std::string> undefined;  // names an archive link starts with as referenced
@@ -344,10 +343,10 @@ std::expected<Options, std::string> parse_options(std::span<const std::string_vi
   if (o.pp.call_triviality == ast::CallTriviality::apple && !o.pp.target->apple_calls)
     return std::unexpected("invalid value in '-fclass-call-abi=apple'");
   if (o.sources.empty() && o.objects.empty()) return std::unexpected("no input files");
-  o.explicit_archive_count = o.archives.size();
   // An executable for arm64 macOS links libycxx's runtime after the operands (#842).
   if (darwin_link && !o.nostdlibxx) {
-    for (const auto& archive : pipeline::darwin_runtime().archives) add_operand(Kind::archive, o.archives, archive);
+    for (const auto& archive : pipeline::darwin_runtime().archives)
+      add_operand(Kind::darwin_runtime_archive, o.archives, archive);
     o.undefined = pipeline::darwin_runtime().undefined;
   }
   if (linux_link && !o.nostdlib)
@@ -863,9 +862,10 @@ Done run(const Request& r, pp::Host& host, pipeline::Session& session, const Sto
     using Kind = pipeline::LinkOperand::Kind;
     for (const auto [kind, index] : opts->operands) {
       if (kind == Kind::source) continue;
-      const auto& path = kind == Kind::archive ? opts->archives[index] : opts->objects[index];
-      if (kind == Kind::archive) {
-        const bool configured_runtime = index >= opts->explicit_archive_count;
+      const bool configured_runtime = kind == Kind::darwin_runtime_archive;
+      const bool archive_input = kind == Kind::archive || configured_runtime;
+      const auto& path = archive_input ? opts->archives[index] : opts->objects[index];
+      if (archive_input) {
         auto archive = read_archive(path, in_cwd(r, path), configured_runtime);
         if (!archive) {
           bad_input = configured_runtime
