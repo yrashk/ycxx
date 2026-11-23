@@ -279,6 +279,41 @@ with tempfile.TemporaryDirectory() as directory:
     large_repeated = write("large_repeated.cpp", large_source.replace("SPEND", spend_twice))
     syntax(*large_fragments, large_tail, large_repeated, error="affine resource 'last' may already have been consumed")
 
+    # Exercise direct class annotations at the same scale as grouped typed policies.
+    direct_fragments = []
+    for fragment in range(4):
+        indices = range(320 * fragment, 320 * (fragment + 1))
+        resources = "\n".join(
+            f"struct [[=own::resource_mode::affine]] Resource{i} {{ int value; }};" for i in indices
+        )
+        header = write(f"direct_{fragment}.hpp", "#pragma once\n#include <ycxx/ownership.hpp>\n"
+                       "namespace direct_large {\nnamespace own = ycxx::ownership;\n"
+                       + resources + "\n}\n")
+        direct_fragments.append(write(f"direct_{fragment}.cpp", f'#include "{header.name}"\n'))
+    direct_caller = write("direct_caller.cpp", """\
+        #include "direct_3.hpp"
+        namespace direct_large {
+        [[=own::operation::creates]] Resource1279 acquire() noexcept;
+        [[=own::operation::consumes]] void finish(Resource1279&&) noexcept;
+        void run() {
+          auto last = acquire();
+          finish(static_cast<Resource1279&&>(last));
+        }
+        }
+    """)
+    syntax(*direct_fragments, direct_caller)
+    direct_conflict = write("direct_conflict.cpp", """\
+        #include <ycxx/ownership.hpp>
+        namespace direct_large {
+        namespace own = ycxx::ownership;
+        struct Resource0;
+        struct Resource1279;
+        using Conflict = own::use_policy<own::linear<Resource0>, own::linear<Resource1279>>;
+        }
+    """)
+    diagnostic = syntax(*direct_fragments, direct_caller, direct_conflict, error="conflicting ownership policies")
+    assert all(origin in diagnostic for origin in ("direct_0.hpp:", "direct_3.hpp:", "direct_conflict.cpp:")), diagnostic
+
     annotated_source = """\
         #include <ycxx/ownership.hpp>
         namespace own = ycxx::ownership;
