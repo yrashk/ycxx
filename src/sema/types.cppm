@@ -741,6 +741,7 @@ struct TrivialCopyability {
   CopyOperation copy_assignment = CopyOperation::unknown;
   CopyOperation move_assignment = CopyOperation::unknown;
   CopyOperation destructor = CopyOperation::unknown;
+  std::optional<bool> destructor_user_provided;  // the selected destructor's first declaration
 
   std::optional<bool> result() const {
     using enum CopyOperation;
@@ -809,6 +810,25 @@ struct ClassRec {
   TrivialCopyability trivial_copyability;
   std::optional<bool> trivially_copyable() const {
     return defined ? trivial_copyability.result() : std::nullopt;
+  }
+
+  // [class.prop]. The recorded special-member facts cover the supported classes.
+  std::optional<bool> implicit_lifetime() const {
+    if (!defined || !member_declarations_valid) return std::nullopt;
+    const auto& facts = trivial_copyability;
+    if (facts.destructor_user_provided == true) return false;
+    using enum CopyOperation;
+    if (facts.destructor == eligible_trivial &&
+        (facts.copy_constructor == eligible_trivial || facts.move_constructor == eligible_trivial ||
+         trivial_defaulted_default_ctor)) return true;
+
+    if (facts.destructor_user_provided == false && bases.empty()) {
+      const bool aggregate = !user_ctors && !closure && !polymorphic &&
+          std::ranges::all_of(fields, [&](const FieldRec& field) { return access_of(field.entity) == ast::Access::public_; });
+      if (aggregate) return true;
+      if (facts.destructor == ineligible) return false;
+    }
+    return std::nullopt;
   }
 
   // Nested enumerations and type aliases ([class.mem]): their types by name, with their entities;

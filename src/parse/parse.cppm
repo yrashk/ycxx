@@ -9784,6 +9784,9 @@ sema::TrivialCopyability Program::class_trivial_copyability(u32 item, EntityId c
     if (member.is_virtual) return {};
     if (member.is_dtor) {
       if (!written(facts.destructor, member, union_dmi)) return {};
+      // In this domain a user-provided destructor is the nontrivial case of the
+      // first-declaration check ([dcl.fct.def.default]).
+      facts.destructor_user_provided = facts.destructor == eligible_nontrivial;
     } else if (const auto constructor_parameter = copy_move_constructor_parameter(member, owner)) {
       const bool move = types.rec(*constructor_parameter).rvalue_ref;
       if (!written(move ? facts.move_constructor : facts.copy_constructor, member, !move && deletes_defaulted_copy_ctor))
@@ -9803,7 +9806,10 @@ sema::TrivialCopyability Program::class_trivial_copyability(u32 item, EntityId c
   if (facts.move_constructor == unknown) facts.move_constructor = defaulted(!implicit_move);
   if (facts.copy_assignment == unknown) facts.copy_assignment = defaulted(declares_move || deletes_defaulted_assignment);
   if (facts.move_assignment == unknown) facts.move_assignment = defaulted(!implicit_move || deletes_defaulted_assignment);
-  if (facts.destructor == unknown) facts.destructor = defaulted(union_dmi);
+  if (facts.destructor == unknown) {
+    facts.destructor = defaulted(union_dmi);
+    facts.destructor_user_provided = false;  // implicitly declared
+  }
   // [class.dtor]/7.2: for a union the defaulted destructor also needs a nondeleted trivial
   // constructor selected by default-initialization. Defer selection among written constructors.
   if (rec.union_ && facts.destructor == eligible_trivial &&
