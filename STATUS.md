@@ -2369,8 +2369,11 @@ session's.*
 - `__reference_converts_from_temporary(T, U)` and `__reference_constructs_from_temporary(T, U)`
   tell whether a reference T initialized from VAL<U> binds to a temporary: a converted arithmetic
   value or a materialized prvalue, for arithmetic operands, void and reference-related classes
-  (`tests/own/builtins/reference_temporary.run.cpp`). Unrelated classes, which need user-defined
-  conversions, are diagnosed as not supported yet (#218).
+  (`tests/own/builtins/reference_temporary.run.cpp`). A supported class-template base or
+  variable-template initializer replays either dependent operand. Class definitions are
+  checked at the written expression for concrete queries and at demand for dependent
+  queries. Unrelated classes that need user-defined conversions get a diagnostic.
+  `__has_builtin` answers 0 while support is partial ([meta.unary.prop], [dcl.init.ref], #1064, #218).
 - `__is_base_of(Base, Derived)` ignores top-level cv. Nonclass and union operands give false.
   The same nonunion class gives true, including when incomplete. For distinct nonunion classes,
   `Derived` must be complete. The trait follows the recorded base declarations, including private
