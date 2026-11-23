@@ -163,6 +163,31 @@ YCXX rejects moving or consuming the owner if a later branch or loop iteration c
 observe that binding. A trusted `observes` declaration promises that the function keeps the
 reference within the call.
 
+From the YCXX repository root, try the [reflected receipt examples](../../examples/policies/last_use.cpp).
+They cover consumption in the same block, consumption on either branch with the read on only
+one branch, and observation across loop iterations.
+
+```sh
+include=packages/ycxx-policies/include
+example=examples/policies/last_use.cpp
+ycxx cxx -fcheck-policies -fsyntax-only -I "$include" "$example"
+ycxx cxx -fcheck-policies -fsyntax-only -DYCXX_DEMO_USE_AFTER_CLOSE -I "$include" "$example"
+ycxx cxx -fcheck-policies -fsyntax-only -DYCXX_DEMO_LOOP_USE_AFTER_CLOSE -I "$include" "$example"
+```
+
+The first command succeeds. The other two diagnose consumption before a reachable observation.
+The loop failure has its observation *before* consumption in the source text, and the loop
+backedge can reach it again. Build the same example with `g++` or `clang++` as C++20.
+
+```sh
+c++ -std=c++20 -I "$include" "$example" -o last-use
+./last-use
+```
+
+With `-DYCXX_DEMO_USE_AFTER_CLOSE`, the portable build compiles and traps when the observer calls
+`state.observe()` on the spent receipt. Add `-DYCXX_POLICIES_RUNTIME_CHECKS=0` to omit that guard.
+YCXX's static diagnostics apply in both guard modes.
+
 An observation marked `verified_observes<decltype(&inspect), &inspect>` asks YCXX to
 verify the observer's body. An observer may return `void`, an arithmetic value, or an enum
 value. A verified observer can return a field value or forward the original shared borrow

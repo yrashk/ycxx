@@ -67,6 +67,37 @@ direct calls to unique strong definitions in explicit objects. A forwarding obse
 its own guarantee and a requirement for the observer it calls. Exception handlers and jumps
 outside the supported loop control also receive an error.
 
+### Last-use analysis for shared borrows
+
+The unit of analysis is one dynamic binding of a local `const Resource&` to an owner place.
+The place can be a resource local, a tracked field or fixed-index array element, or the selected
+alternative of a tracked variant. Binding always requires a live owner. Reading the owner directly
+does not use any reference bound to it. The reference itself can only be used by an observation
+registered under the active policy.
+
+For each reference slot, the checker walks backward from its observation nodes. At a branch,
+the existence of a use on either successor keeps the borrow live on entry. At a loop backedge,
+a use on a future iteration counts if the current binding survives the iteration. A scope exit
+or another execution of that reference's declaration bounds the walk. Uses of a fresh binding
+in the next iteration therefore do not keep the previous binding live. The analysis uses the
+existing graph and records reachability facts at owner-consuming, transferring, and leaving
+operations. Astra independently reviewed the reverse walk and its interaction with the forward
+binding state.
+
+The forward analysis records whether the reference may be bound at each such operation. If a
+concrete execution still has the binding and will observe it after the operation, the forward
+state includes that binding and the intervening control-flow path contains neither its cleanup nor
+its declaration. The reverse walk reaches the operation, so the checker diagnoses it before the
+owner can be invalidated. This argument assumes that registered operations honor their contracts
+and that a borrowed reference cannot escape. Verified observers check the latter condition across
+the supported observation call chain. A trusted `observes` contract places the same responsibility
+on its provider. A use remains subject to those checks even when it is the final one.
+
+At a control-flow join the analysis can combine possibilities from different paths. It does not
+prove that repeated tests of a value are correlated. An infeasible path in the graph can therefore
+keep a borrow live. Ending a loan changes which operations the checker permits. The ordinary C++
+lifetime of the reference and the owner's affine or linear discharge rules still apply.
+
 ## Capability token ownership
 
 A directly registered affine `ycxx::capabilities::token<Issuer, Rights>` can be constructed by
@@ -168,13 +199,16 @@ This example observes through a shared borrow and consumes the permit after that
 
 void inspect_then_redeem() {
   auto permit = ycxx_affine::issue();
-  {
-    const auto& view = permit;
-    ycxx_affine::inspect(view);
-  }
+  const auto& view = permit;
+  ycxx_affine::inspect(view);
   ycxx_affine::redeem(static_cast<ycxx_affine::Permit&&>(permit));
 }
 ```
+
+The [reflected receipt program](../../examples/policies/last_use.cpp) also shows a branch that
+consumes without a future use and a loop that observes an outer borrow on multiple iterations.
+Its two failure modes move consumption ahead of a same-block or next-iteration observation.
+[Build and run the examples](../../packages/ycxx-policies/README.md#verify-shared-observations).
 
 The same invocation checks this linear example when saved as `permit-demo.cpp`.
 
@@ -196,5 +230,5 @@ scope exit. A transfer into another local moves the obligation to that local and
 `<ycxx/ownership/runtime.hpp>`. Ordinary C++ compilers can compile the adapter. Its guard
 reports unfinished linear ownership and repeated consumption on executed paths. With
 `-fcheck-policies`, YCXX also checks callers against the adapter's activated policy. Borrow
-checking uses the source reference and its scope at compile time. Ordinary C++ builds use the
+checking uses the source reference, its scope, and its reachable observations. Ordinary C++ builds use the
 same reference and object layout and retain the runtime guard on the adapter's operations.
