@@ -1709,7 +1709,8 @@ public:
   // `checked`: the name is taken here, so its access is checked ([class.access]/4).
   std::optional<std::pair<QualType, u32>> qualified_type(u32 start, bool checked = false, bool type_only = false,
                                                        bool* failed_qualifier = nullptr,
-                                                       bool* terminal_template_id = nullptr) {
+                                                       bool* terminal_template_id = nullptr,
+                                                       bool template_argument = false) {
     u32 next = 0;
     bool check_qualifier = checked && substituting_partial_arguments;
     const auto diags = s_->diag_count();
@@ -1729,6 +1730,8 @@ public:
       if (checked && s_->has_error_since(diags)) return std::nullopt;
     }
     NameId name = name_of(tok(next));
+    if (template_argument && next == 2 && s_->scope_names_static_data_member(*s, name))
+      return std::nullopt;
     std::optional<u32> at = checked ? std::optional{pos() + next} : std::nullopt;
     auto injected = s_->qualified_injected_type(*s, name, at, type_only);
     if (injected.found)
@@ -2718,7 +2721,8 @@ public:
       bool terminal_template_id = false;
       auto q = qualified_type(0, /*checked=*/false, /*type_only=*/false,
                               template_argument ? &failed_qualifier : nullptr,
-                              template_argument ? &terminal_template_id : nullptr);
+                              template_argument ? &terminal_template_id : nullptr,
+                              template_argument);
       if (failed_qualifier) return true;  // let the committed parse diagnose the qualifier
       // A terminal namespace type-template-id can expand to a dependent member type.
       return q && (terminal_template_id || s_->types().kind(q->first) != sema::TypeKind::dep_name);
@@ -4271,7 +4275,16 @@ public:
       // operations make the operand something other than the qualified-id itself.
       bool postfix = is(Tk::l_paren) || is(Tk::l_square) || is(Tk::period) || is(Tk::arrow) ||
                      is(Tk::plusplus) || is(Tk::minusminus);
-      return s_->scope_expr(*s, n, begin, name_at, pos(), postfix ? std::nullopt : address);
+      if (member_alias_type && in_template_value_argument_ && !s_->unevaluated && next == 2 &&
+          !postfix && !address && !keyword && s->type &&
+          s_->types().is_dependent(*s->type) &&
+          (is(Tk::greater) || is(Tk::greatergreater) || is(Tk::comma) || is(Tk::r_paren))) {
+        auto value = s_->ins().intern_value(ast::VDepMember{s_->types().canonical(*s->type), n});
+        return s_->literal(s_->builtin(Builtin::dependent), value, ast::ValueCategory::lvalue, begin, pos());
+      }
+      const bool check_all_bases = in_template_value_argument_ && next == 2 &&
+          (member_alias_type || s_->scope_names_static_data_member(*s, n));
+      return s_->scope_expr(*s, n, begin, name_at, pos(), postfix ? std::nullopt : address, check_all_bases);
     };
     if (operator_name) {
       if (is(Tk::less) && s_->scope_names_template(*s, n)) {
@@ -6219,6 +6232,7 @@ public:
   bool body = false;  // the part is a function body, not a declaration part
   bool dependent_decay_copy_body = false;  // a function template's compound statement, before replay
   bool substituting_partial_arguments = false;
+  bool member_alias_type = false;  // the class instantiation reparses this type-id
 private:
   // In a delimited operand, a `>` is an operator again ([temp.names]/4).
   struct Unangle {

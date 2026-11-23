@@ -55,6 +55,7 @@ struct ArchiveLinkInputs {
   obj::target target;
   std::vector<LinkOperand> operands;
   std::vector<obj::archive::input> archives;
+  std::vector<std::string> undefined = {};  // names referenced from the start (Darwin only)
 };
 
 // Ordinarily, translation units precede disk objects. Archive links carry a positional manifest
@@ -375,7 +376,7 @@ engine::query_task<Linked> Link::run(engine::Ctx& cx, ProgramId p) {
       }
     }
     auto selected = archive_link->target == obj::target::x86_64_linux ? link::elf::select_archive_members(operands)
-                                                                       : link::select_archive_members(operands);
+                                                                       : link::select_archive_members(operands, archive_link->undefined);
     if (!selected) {
       out.errors.push_back(std::move(selected.error()));
       co_return out;
