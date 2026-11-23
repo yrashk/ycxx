@@ -9,7 +9,7 @@ on:
   pull_request:
     paths-ignore: ['**.md', 'docs/**', 'LICENSE']
   push:
-    branches: [main]
+    branches: [main, codex/ycxx-policies]
     paths-ignore: ['**.md', 'docs/**', 'LICENSE']
   workflow_dispatch:
 
@@ -95,7 +95,7 @@ jobs:
           tools/feature-map/feature-map check --probes
 
       - name: Feature map tracking issue (#282, main only)
-        if: matrix.host.name == 'macos-arm64' && github.event_name == 'push'
+        if: matrix.host.name == 'macos-arm64' && github.event_name == 'push' && github.ref == 'refs/heads/main'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -161,8 +161,24 @@ jobs:
           YCXX_BUILD_TYPE: Release
         run: tools/build -j 4 --no-smoke
 
+  policies-package:
+    name: policies-package (${{ matrix.compiler }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        compiler: [g++, clang++]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Standalone C++20 package conformance
+        env:
+          CXX: ${{ matrix.compiler }}
+        run: python3 tests/unit/pipeline/policies_package.py cmake "$CXX" packages/ycxx-policies
+
   wall-time:
-    needs: [test, release-build]
+    needs: [test, release-build, policies-package]
     if: always()
     runs-on: ubuntu-24.04
     steps:
