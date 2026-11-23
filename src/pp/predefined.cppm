@@ -163,9 +163,7 @@ std::string target_macros(const ast::Target& t) {
     std::uint64_t m = n == 64 ? (uns ? ~0ull : ~0ull >> 1) : (uns ? (1ull << n) - 1 : (1ull << (n - 1)) - 1);
     return std::format("{}{}", m, suffix(b));
   };
-  const bool darwin = t.triple == ast::aarch64_darwin.triple;
-  const bool linux_target = t.triple == ast::x86_64_linux.triple;
-  const bool aarch64 = t.triple.starts_with("arm64") || t.triple.starts_with("aarch64");
+  const bool darwin = t.operating_system == ast::OperatingSystem::darwin;
   if (darwin) {
     def("__APPLE__", 1);
     def("__MACH__", 1);
@@ -174,21 +172,20 @@ std::string target_macros(const ast::Target& t) {
       def(std::format("TARGET_OS_{}", os), 0);
     def("TARGET_OS_MAC", 1);
     def("TARGET_OS_OSX", 1);
-    def("__USER_LABEL_PREFIX__", "_");
   }
-  if (linux_target) {
-    for (std::string_view macro : {"__ELF__", "__gnu_linux__", "__linux", "__linux__", "__unix", "__unix__"})
+  if (t.object_format == ast::ObjectFormat::elf) def("__ELF__", 1);
+  if (t.operating_system == ast::OperatingSystem::linux_)
+    for (std::string_view macro : {"__gnu_linux__", "__linux", "__linux__", "__unix", "__unix__"})
       def(macro, 1);
-    def("__USER_LABEL_PREFIX__", "");
-  }
-  if (aarch64) {
+  def("__USER_LABEL_PREFIX__", t.object_format == ast::ObjectFormat::macho ? "_" : "");
+  if (t.architecture == ast::Architecture::aarch64) {
     def("__aarch64__", 1);
     if (darwin) {
       def("__arm64", 1);
       def("__arm64__", 1);
     }
   }
-  if (t.triple.starts_with("x86_64")) {
+  if (t.architecture == ast::Architecture::x86_64) {
     for (std::string_view macro : {"__amd64", "__amd64__", "__x86_64", "__x86_64__"}) def(macro, 1);
   }
   if (t.pointer_size == 8 && t[Builtin::long_].size == 8) {

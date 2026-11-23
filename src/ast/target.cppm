@@ -52,6 +52,10 @@ enum class VaList : u8 { char_pointer, sysv_x86_64 };
 // by `-fclass-call-abi=apple` on a target that offers it.
 enum class CallTriviality : u8 { itanium, apple };
 
+enum class Architecture : u8 { aarch64, x86_64 };
+enum class OperatingSystem : u8 { darwin, linux_ };
+enum class ObjectFormat : u8 { macho, elf };
+
 // Native operations the compiler implements for a target. Their source and ABI
 // preconditions are checked by each operation's own analysis.
 enum class NativeOperation : std::uint64_t {
@@ -60,6 +64,9 @@ enum class NativeOperation : std::uint64_t {
 
 struct Target {
   std::string_view triple;
+  Architecture architecture;
+  OperatingSystem operating_system;
+  ObjectFormat object_format;
   std::array<BuiltinLayout, builtin_count> layout;
   u8 pointer_size;
   u8 pointer_align;
@@ -258,6 +265,9 @@ consteval std::array<BuiltinLayout, builtin_count> lp64(std::initializer_list<La
 // binary128.
 inline constexpr Target aarch64_darwin{
     .triple = "arm64-apple-darwin",
+    .architecture = Architecture::aarch64,
+    .operating_system = OperatingSystem::darwin,
+    .object_format = ObjectFormat::macho,
     .layout = detail::lp64({{Builtin::long_double, {8, 8, FloatFormat::binary64}}}),
     .pointer_size = 8,
     .pointer_align = 8,
@@ -281,6 +291,9 @@ inline constexpr Target aarch64_darwin{
 // x86_64-linux-gnu (System V): `long double` is the x87 80-bit format in 16 bytes.
 inline constexpr Target x86_64_linux{
     .triple = "x86_64-pc-linux-gnu",
+    .architecture = Architecture::x86_64,
+    .operating_system = OperatingSystem::linux_,
+    .object_format = ObjectFormat::elf,
     .layout = detail::lp64({{Builtin::long_double, {16, 16, FloatFormat::x87_extended}},
                             {Builtin::float128, {16, 16, FloatFormat::binary128}}}),
     .pointer_size = 8,
