@@ -295,6 +295,10 @@ FileNames& file_names() {
   return n;
 }
 
+bool has_directive_text(lex::LexDiag kind) {
+  return kind == lex::LexDiag::error_directive || kind == lex::LexDiag::warning_directive;
+}
+
 }  // namespace ycxx::pp
 
 export namespace ycxx::pp {
@@ -423,14 +427,6 @@ Preprocessed preprocess(std::string_view text, std::string_view path) {
   std::lock_guard g(s.mutex);
   return preprocess(s, text, path);
 }
-
-namespace {
-
-bool has_directive_text(lex::LexDiag kind) {
-  return kind == lex::LexDiag::error_directive || kind == lex::LexDiag::warning_directive;
-}
-
-}  // namespace
 
 std::string render_diagnostic(const Region& region, lex::LexDiag kind, std::span<const u64> args) {
   if (has_directive_text(kind)) {
