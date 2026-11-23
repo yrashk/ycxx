@@ -13,6 +13,21 @@ struct Derived : Base {
 static_assert(sizeof(Derived::Published) == 1);
 }
 
+namespace own_names {
+// [class.member.lookup]: a preceding own declaration hides a private inherited alias.
+struct Base { private: using T = char; };
+struct WithAlias : Base {
+  using T = short;
+  using Published = T;
+};
+struct WithEnum : Base {
+  enum class T : short {};
+  using Published = T;
+};
+static_assert(sizeof(WithAlias::Published) == sizeof(short));
+static_assert(sizeof(WithEnum::Published) == sizeof(short));
+}
+
 namespace one_accessible_path {
 // [class.member.lookup], [class.access.base]: a usable base path suffices.
 struct Origin { using T = char; };
