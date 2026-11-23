@@ -1630,13 +1630,14 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
     declare(d, std::nullopt);
   }
   if (root_deallocator) declare(*root_deallocator, std::nullopt);
-  // The C library functions builtins call, which do not throw (`World::string_function`).
+  // The C library functions builtins call, declared as the target's C library declares them
+  // (`World::string_function`).
   for (EntityId e : program.library_functions()) {
     ast::DeclSema d{};
     d.entity = e;
     d.type = world.entities.rec(e).type;
     d.kind = ast::DeclKind::function;
-    d.has_written_noexcept = true;
+    d.has_written_noexcept = world.types.rec(d.type).fn_noexcept;
     declare(d, std::nullopt);
   }
   // A declaration anywhere in the unit can supply the visibility of the one object symbol.

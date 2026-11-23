@@ -1197,21 +1197,24 @@ struct World {
   }
 
   // The C library function a builtin calls (docs/EXTENSIONS.md), declared at global scope with
-  // C language linkage, as `<string.h>` declares it, and not throwing, as Clang's builtin is:
-  // `void* memchr(const void*, int, size_t)`, `int memcmp(const void*, const void*, size_t)`.
+  // C language linkage: `void* memchr(const void*, int, size_t)`, `int memcmp(const void*, const
+  // void*, size_t)`. Its exception specification is the target's `<string.h>`'s, so a written
+  // declaration or definition of the function is the same entity, with one symbol ([dcl.link]):
+  // glibc's `__THROW` is `noexcept(true)` in C++, the macOS SDK's declarations have none.
   ast::DeclSema string_function(StringFunction f) {
     const QualType size = types.builtin(target.size_type);
     const QualType void_type = types.builtin(Builtin::void_);
     const QualType bytes = types.pointer(types.add_cv(void_type, Cv::const_));
     const bool memchr = f == StringFunction::memchr;
     const QualType params[] = {bytes, memchr ? types.builtin(Builtin::int_) : bytes, size};
+    const bool nonthrowing = target.operating_system == ast::OperatingSystem::linux_;
     const QualType type = types.function(memchr ? types.pointer(void_type) : types.builtin(Builtin::int_), params, false,
-                                         LangLinkage::c, Cv::none, ast::RefQual::none, true);
+                                         LangLinkage::c, Cv::none, ast::RefQual::none, nonthrowing);
     ast::DeclSema d = implicit_function(
         entities.entity({.kind = EntityKind::function, .name = ins.names.intern(memchr ? "memchr" : "memcmp"), .type = type,
                          .lang = LangLinkage::c}),
         type);
-    d.has_written_noexcept = true;
+    d.has_written_noexcept = nonthrowing;
     return d;
   }
 

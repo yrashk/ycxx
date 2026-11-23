@@ -42,7 +42,7 @@ int main(int argc, char**) {
   if (compare("a", s + 8, 1 * one) >= 0) return 26;
   if (compare(s, "abcabc\0y", 8 * one) >= 0) return 27;  // past a NUL
 
-  // Each argument is evaluated once, left to right.
+  // Each argument is evaluated once.
   Size calls = 0;
   const char* p = s;
   if (__builtin_memchr(p++, (++calls, 'a'), (calls += 10, 1 * one)) != s || p != s + 1 || calls != 11) return 30;
