@@ -121,8 +121,8 @@ def main():
         reject('chain.a', error='at least one source or ordinary object')
         reject('main.cpp', 'chain.a', flags=(target,), error='hosted Linux linking is not supported')
         reject('main.cpp', 'chain.a', flags=('--target=arm64-apple-darwin',),
-               error='archive inputs require an x86-64 Linux executable link')
-        reject('-c', 'main.cpp', 'chain.a', error='archive inputs require an x86-64 Linux executable link')
+               error="chain.a: GNU archive indexes and long names are unsupported in Darwin links")
+        reject('-c', 'main.cpp', 'chain.a', error='archive inputs require an executable link')
         reject('main.cpp', 'chain.a', '--dynamic-linker=/some/loader', error='archive inputs cannot be combined')
         reject('main.cpp', 'chain.a', 'provider.so', error='archive inputs cannot be combined')
         reject('main.cpp', 'absent.a', error="cannot read 'absent.a'")

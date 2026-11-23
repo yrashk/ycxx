@@ -20,7 +20,7 @@ The final Linux x86-64 self-check uses the freestanding support in [#380](https:
 
 ## Status
 
-**Pre-0.1** (as of 2026-11-21). ycxx compiles a substantial subset of C++ (C-like code, classes,
+**Pre-0.1** (as of 2026-11-22). ycxx compiles a substantial subset of C++ (C-like code, classes,
 templates and constant evaluation) on macOS arm64, from source to a signed, running executable,
 with no external compiler, assembler or linker. It also builds static executables from a
 freestanding C++ subset for x86-64 Linux. The standard library is out of reach: the gaps on
@@ -50,7 +50,8 @@ A class template can grant private access to the class passed as a type argument
 **Compile and run programs on macOS.** `ycxx cxx a.cpp -o a` (also `-c`, `-fsyntax-only`, `-E`, `-I`,
 `-D`, `-std=c++26`, and `-fclass-call-abi=apple` to pass classes as Apple Clang does) builds an executable with ycxx's own front end, IR, AArch64 code generator
 and Mach-O linker on arm64 macOS, where `arm64-apple-darwin` is the default target. It also links
-object files from Clang or GCC. Variadic functions can be defined with `<cstdarg>` on both
+object files from Clang or GCC, and static archives (`.a`) made by the system `ar`
+([#842](https://github.com/yrashk/ycxx/issues/842)). Variadic functions can be defined with `<cstdarg>` on both
 macOS and Linux ([#647](https://github.com/yrashk/ycxx/issues/647)). Errors are reported as
 `file:line:col: error: …`.
 Errors during replay of a written default member initializer point to the initializer.
@@ -211,10 +212,13 @@ aggregate results through the target's supported ABI.
 On x86-64 Linux, an eligible ycxx function can also throw an `int` to a hosted peer's handler.
 A host-linked ycxx function can use one `catch (...)` to return an integer literal when
 a direct call on its parameter to an externally defined `int(int)` function throws.
+It can also use one `catch (int value)` to return the caught integer and let exceptions of
+other types reach the hosted caller.
 A supported union constructor can destroy its active member when its body call throws and
 propagate an exception from its initializer before the member's lifetime begins.
 [#578](https://github.com/yrashk/ycxx/issues/578)
-· [#583](https://github.com/yrashk/ycxx/issues/583) · [#738](https://github.com/yrashk/ycxx/issues/738)
+· [#583](https://github.com/yrashk/ycxx/issues/583) · [#919](https://github.com/yrashk/ycxx/issues/919)
+· [#738](https://github.com/yrashk/ycxx/issues/738)
 
 On both hosts, a system-linked void function can destroy one initialized aggregate local
 on both exits from an external `void()` call and let the original exception reach a peer handler.
@@ -274,6 +278,8 @@ while their current class is incomplete. [#857](https://github.com/yrashk/ycxx/i
 
 Both targets support named nested enum definitions followed by ordinary fields in the same
 member declaration, including scoped enum field initializers. [#500](https://github.com/yrashk/ycxx/issues/500)
+An enum with a fixed underlying type keeps that layout while its enumerators instantiate other
+enum definitions. [#897](https://github.com/yrashk/ycxx/issues/897)
 Scoped enumerators stay in their enumeration's scope, so class members and class template
 members may reuse their names. [#725](https://github.com/yrashk/ycxx/issues/725)
 Nested unscoped enumerators conflict with other non-type members regardless of declaration order.
@@ -441,6 +447,8 @@ written default member initializer are value-initialized.
   `noexcept` signature. The compiler supports Clang's `__make_integer_seq`. Template type
   arguments can use terminal namespace-qualified alias specializations that expand to
   dependent member types. [#406](https://github.com/yrashk/ycxx/issues/406) · [#630](https://github.com/yrashk/ycxx/issues/630)
+  Dependent calls through class and alias template qualifiers expand argument packs, including
+  packs preceded by an ordinary template parameter. [#890](https://github.com/yrashk/ycxx/issues/890)
 - dependent `__is_same`, `__is_reference`, `__is_const`, `__is_volatile`, `__is_array`,
   `__is_pointer`, `__is_function`, `__is_enum`, `__is_union`, `__is_class`, `__is_object`, and the
   three member-pointer predicates as `bool` template arguments or defaults, including through
@@ -497,6 +505,8 @@ written default member initializer are value-initialized.
   value and a pointer. [#199](https://github.com/yrashk/ycxx/issues/199)
 - constant evaluation on ycxx's own interpreter: `constexpr`, `consteval`, `constinit`,
   `static_assert` and `if consteval`, with errors that explain why something is not constant.
+  Scalar `&&`, `||` and `?:` expressions keep scalar reference-argument temporaries alive
+  until the end of the full-expression on each executed path. [#902](https://github.com/yrashk/ycxx/issues/902)
   A constant evaluation can bypass a block-scope static aggregate. [#872](https://github.com/yrashk/ycxx/issues/872)
   Scalar enumeration values work in constexpr variables, calls, casts and switch conditions.
   A flat static constexpr aggregate member initialized with `T{...}` has addressable storage
@@ -578,36 +588,47 @@ to distinguish lvalue and rvalue receivers. [#311](https://github.com/yrashk/ycx
 **Virtual declarations.** Syntax checking accepts virtual members and inline definitions in
 ordinary root classes. Ordinary pure virtual declarations define abstract interfaces through a
 single nonvirtual base at each level. Ordinary virtual members can use `final` to prevent
-further overrides. Derived classes also support unqualified base initializers with parentheses
-or flat braces. On Linux x86-64,
+further overrides. Ordinary named namespace-scope classes and structs can use class-head `final`
+to prevent derivation. Derived classes also support unqualified base initializers with parentheses
+or flat braces. On Linux x86-64 and arm64 macOS,
 pointer and reference consumers can call virtual functions with fixed integer signatures on
 peer-owned objects with an ordinary root, including a derived class with that single public
 base, at most one integral field and at most one override. Consumers can upcast those derived
 views, access ordinary integral members, and query `sizeof` and `alignof` for the Itanium layout.
 A translation unit can also define one non-key virtual member of an eligible root out of class.
-For that case, the peer provides the key function, virtual table and RTTI. On Linux x86-64,
-a caller can also dispatch through a peer-owned abstract interface with one or two
+For that case, the peer provides the key function, virtual table and RTTI. A caller can
+also dispatch through a peer-owned abstract interface with one or two
 public pure virtual slots using fixed integer signatures and bare `noexcept`.
 [#309](https://github.com/yrashk/ycxx/issues/309)
+
+**Linux borrowed runtime casts.** `dynamic_cast<cv void*>(p)` accepts a pointer to
+an admitted peer-owned polymorphic root. The cast preserves the pointee's qualifiers, returns
+null for a null operand, and recovers the most-derived address from a live subobject.
+On Linux x86-64, `dynamic_cast<D*>(p)` also supports a fieldless root `B` and its fieldless
+derived class `D` with one public nonvirtual base `B`. Each class declares one public virtual
+`int` member with no arguments, and `D` overrides that member. The hosted C++ peer defines
+both key functions and links the consumer with their RTTI and the cast runtime.
+[#294](https://github.com/yrashk/ycxx/issues/294)
 
 **Structured bindings.** Local bindings can copy or alias scalar-element arrays, including
 multidimensional arrays. They can also copy or alias ordinary non-template classes without
 bases and bind to their public, addressable data members, including array and reference
 members. [#285](https://github.com/yrashk/ycxx/issues/285)
 
-**Linux virtual tables.** A translation unit with the key definition emits the vtable and
+**Virtual tables.** On Linux x86-64 and arm64 macOS, a translation unit with the key definition emits the vtable and
 RTTI for an ordinary root with one public integral field and two fixed integer virtual
-signatures. A peer supplies the second virtual. Linux x86-64 also supports ordinary
+signatures. A peer supplies the second virtual. Both targets also support ordinary
 automatic default initialization (`Root root;`) for that shape with an implicit default
 constructor, a trivial destructor and no field initializer. The local object's vptr uses the
 same table whether the key definition is in this translation unit or a peer. A plain automatic
 derived object can also use a table from the same unit or a peer when its public abstract base
 has one pure `int f()` and the derived class has one public `int` field and one override. The
 unit defining the override out of class emits the derived table and both RTTI descriptors. The
-caller can bind the base reference and expose it to the peer.
-[#309](https://github.com/yrashk/ycxx/issues/309)
+caller can bind the base reference and expose it to the peer. On macOS the base class's RTTI
+follows Apple's arm64 convention for non-unique type names.
+[#309](https://github.com/yrashk/ycxx/issues/309) · [#650](https://github.com/yrashk/ycxx/issues/650)
 
-Linux x86-64 emits all three virtual destructor entries for a fieldless, baseless root when
+Both targets emit all three virtual destructor entries for a fieldless, baseless root when
 a peer defines its earlier key function. Complete and base destruction restore the root's
 vptr before calling the nonthrowing observer. The deleting entry then uses global sized
 `operator delete`. [#136](https://github.com/yrashk/ycxx/issues/136)
@@ -624,7 +645,7 @@ vptr before calling the nonthrowing observer. The deleting entry then uses globa
   tuple-like structured bindings and structured bindings to bit-fields or inherited members,
   inheriting constructors, and base packs or multiple bases in a class template.
 - Broader native construction, virtual dispatch and table emission, virtual base classes,
-  `typeid` and `dynamic_cast`, and virtual destruction for other class shapes.
+  `typeid`, other `dynamic_cast` forms, and virtual destruction for other class shapes.
   [#309](https://github.com/yrashk/ycxx/issues/309) · [#310](https://github.com/yrashk/ycxx/issues/310) ·
   [#294](https://github.com/yrashk/ycxx/issues/294) · [#136](https://github.com/yrashk/ycxx/issues/136)
 - Member class and alias templates, conversion function templates, and constraints on class
@@ -639,7 +660,7 @@ vptr before calling the nonthrowing observer. The deleting entry then uses globa
 - Parity between the two native back ends. x86-64 Linux does not yet pass classes with
   floating members by value, trivially copyable classes over 16 bytes as arguments, or x87
   `long double`. AArch64 macOS does not yet have native `int` throws, unwinding through ycxx
-  frames, native array `new`, or virtual calls on peer-owned classes, which x86-64 has. The
+  frames or native array `new`, which x86-64 has. The
   full table is [#639](https://github.com/yrashk/ycxx/issues/639).
 
 ### In progress

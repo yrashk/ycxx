@@ -2166,7 +2166,8 @@ public:
   }
 
   std::optional<u32> member_default_template_args(std::span<const Param> params, std::map<u32, bool>& template_probes) {
-    if ((is(Tk::kw_static_cast) || is(Tk::kw_reinterpret_cast)) && kind(1) == Tk::less) return 1;
+    if ((is(Tk::kw_static_cast) || is(Tk::kw_reinterpret_cast) || is(Tk::kw_dynamic_cast)) && kind(1) == Tk::less)
+      return 1;
     if (is(Tk::kw_template) && kind(1) == Tk::identifier && kind(2) == Tk::less) return 2;
     if ((is(Tk::period) || is(Tk::arrow)) && kind(1) == Tk::identifier && kind(2) == Tk::less) {
       // Lookup of a template through an object needs the type of the expression. A balanced
@@ -3712,9 +3713,8 @@ public:
           return {NodeId::none, e.begin, pos()};
         }
         std::optional<NameId> member_class;
-        // This stage recognizes only a direct qualified invocation on the Linux consumer path.
-        if (qualifier == 2 && !keyword && kind(2) == Tk::identifier && kind(3) == Tk::l_paren &&
-            s_->types().target().triple == ast::x86_64_linux.triple) {
+        // This stage recognizes only a direct qualified invocation on the native consumer path.
+        if (qualifier == 2 && !keyword && kind(2) == Tk::identifier && kind(3) == Tk::l_paren) {
           member_class = name_of(tok());
           bump();
           bump();
@@ -4018,9 +4018,10 @@ public:
       }
       s_->diag(begin, Diag::expected_expression);
       return {NodeId::none, begin, pos()};
+    case Tk::kw_dynamic_cast:
     case Tk::kw_static_cast:
     case Tk::kw_reinterpret_cast: {
-      const bool reinterpret = is(Tk::kw_reinterpret_cast);
+      const Tk cast = kind();
       bump();
       if (!expect(Tk::less)) return {NodeId::none, begin, pos()};
       auto t = type_id();
@@ -4029,8 +4030,10 @@ public:
       Ex e = expression();
       angle_ = saved;
       if (!expect(Tk::r_paren)) return {NodeId::none, begin, pos()};
-      Ex r = reinterpret ? s_->reinterpret_cast_to(e, *t, begin)
-                         : s_->static_cast_to(e, *t, begin, /*named_static_cast=*/true);
+      Ex r;
+      if (cast == Tk::kw_dynamic_cast) r = s_->dynamic_cast_to(e, *t, begin, pos());
+      else if (cast == Tk::kw_reinterpret_cast) r = s_->reinterpret_cast_to(e, *t, begin);
+      else r = s_->static_cast_to(e, *t, begin, /*named_static_cast=*/true);
       return {r.id, begin, pos(), r.info};
     }
     case Tk::float_lit: {
@@ -4065,7 +4068,6 @@ public:
       [[fallthrough]];
     case Tk::tilde:
     case Tk::kw_typeid:
-    case Tk::kw_dynamic_cast:
     case Tk::kw_const_cast:
       s_->diag(begin, Diag::not_supported, kind());
       bump();
@@ -4137,8 +4139,11 @@ public:
     }
     if (!expect(Tk::l_paren)) return {NodeId::none, begin, pos()};
     std::vector<Ex> args;
+    // Each argument may be a pack expansion, `T(a...)` ([expr.type.conv], [temp.variadic]/5), as
+    // a call's are.
     if (!is(Tk::r_paren))
-      do args.push_back(assignment_expression());
+      do
+        for (const Ex& x : expandable([&] { return assignment_expression(); })) args.push_back(x);
       while (accept(Tk::comma));
     if (!expect(Tk::r_paren)) return {NodeId::none, begin, pos()};
     const bool lambda_result = lambda_result_operand_ == begin && is(Tk::semi);
@@ -4289,9 +4294,10 @@ public:
       if (s_->has_error_since(diags)) return {NodeId::none, begin, pos()};
     }
     // `N::T(args)` or `N::T{…}` ([expr.type.conv]): a qualified type name, unless a function or
-    // variable of the name hides it.
+    // variable of the name hides it. Here an unresolved dependent name does not denote a type
+    // ([temp.res.general]), so `Q<T>::f(args...)` goes through postfix call parsing.
     if ((is(Tk::l_paren) || is(Tk::l_brace)) && !s_->scope_names_object(*s, n))
-      if (auto t = s_->scope_type(*s, n)) {
+      if (auto t = s_->scope_type(*s, n, /*assume_dependent_type=*/false)) {
         for (const auto& qualifier : type_qualifiers)
           s_->type_member_access(qualifier.scope, qualifier.name, qualifier.at, /*direct_alias_only=*/true);
         s_->type_member_access(*s, n, name_at, /*direct_alias_only=*/!substituting_partial_arguments);

@@ -69,7 +69,9 @@ export std::expected<EhFrameFields, std::string> append_eh_frame(std::vector<std
                                                                 EhFrameCies& cies, const MachineCode& code);
 
 // Encode one hosted handler or cleanup LSDA from the final instruction and landing-pad offsets.
-export std::expected<std::vector<std::uint8_t>, std::string> exception_lsda(const MachineCode& code);
+// For an int handler the last four bytes are the relocation field for its type entry.
+export std::expected<std::vector<std::uint8_t>, std::string> exception_lsda(const MachineCode& code,
+                                                                         bool catch_int = false);
 
 namespace {
 
@@ -928,7 +930,7 @@ void uleb128(std::vector<std::uint8_t>& bytes, std::size_t value) {
 
 }  // namespace
 
-std::expected<std::vector<std::uint8_t>, std::string> exception_lsda(const MachineCode& code) {
+std::expected<std::vector<std::uint8_t>, std::string> exception_lsda(const MachineCode& code, bool catch_int) {
   if (!code.unwind_sites || code.bytes.empty() || !std::in_range<std::int32_t>(code.bytes.size()))
     return std::unexpected("missing or oversized hosted unwind machine code");
 
@@ -963,6 +965,7 @@ std::expected<std::vector<std::uint8_t>, std::string> exception_lsda(const Machi
   if (!protected_call) return std::unexpected("missing unwind protected call");
 
   if (cleanup_only) {
+    if (catch_int) return std::unexpected("a cleanup-only LSDA cannot have a handler type");
     // The cleanup entry needs neither a type table nor an action table.
     std::vector<std::uint8_t> lsda{0xff, 0xff, 0x01};  // omit LPStart and types, ULEB128 sites
     uleb128(lsda, sites.size());
@@ -974,8 +977,9 @@ std::expected<std::vector<std::uint8_t>, std::string> exception_lsda(const Machi
   uleb128(tables, sites.size());
   tables.insert(tables.end(), sites.begin(), sites.end());
   tables.insert(tables.end(), {1, 0});  // SLEB128 filter 1, no next action
-  tables.insert(tables.end(), {0, 0, 0, 0});  // null type, matches any exception
-  std::vector<std::uint8_t> lsda{0xff, 0x1b};  // omit LPStart, PC-relative sdata4 type entries
+  tables.insert(tables.end(), {0, 0, 0, 0});  // type relocation field, or null type for catch (...)
+  // Omit LPStart. The signed PC-relative int entry points to an indirect cell.
+  std::vector<std::uint8_t> lsda{0xff, std::uint8_t(catch_int ? 0x9b : 0x1b)};
   uleb128(lsda, tables.size());  // from the end of the offset to the end of the type table
   lsda.insert(lsda.end(), tables.begin(), tables.end());
   return lsda;

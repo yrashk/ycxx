@@ -4,7 +4,7 @@ export module ycxx.link.elf;
 export import ycxx.obj;
 export import ycxx.link.elf.shared;
 import std;
-import ycxx.obj.archive;
+export import ycxx.obj.archive;
 import ycxx.obj.elf;
 
 export namespace ycxx::link::elf {
@@ -14,10 +14,7 @@ struct dynamic_options {
   std::vector<shared_object> libraries;
 };
 
-struct archive_input {
-  std::string name;
-  std::string bytes;
-};
+using archive_input = obj::archive::input;
 
 using static_operand = std::variant<std::reference_wrapper<const obj::object>, std::reference_wrapper<const archive_input>>;
 

@@ -310,7 +310,9 @@ What is true of the code today. Work in progress and its owners are tracked in
     lists read from `.tbd` files (`tbd_exports`). A dylib without a list accepts any name.
   - Lays out `__PAGEZERO`, `__TEXT`, `__DATA_CONST`, `__DATA` and `__LINKEDIT` on 16 KiB pages,
     with stubs and a GOT. All imports are bound and all pointers rebased through chained fixups
-    (`DYLD_CHAINED_PTR_64_OFFSET`). No lazy binding.
+    (`DYLD_CHAINED_PTR_64_OFFSET`). No lazy binding. A segment's chained starts cover only its
+    pages with file contents: page-in linking maps every listed page from the file, so a listed
+    zero-fill page would hold `__LINKEDIT` bytes (#842).
   - Writes the exports trie, symbol tables, `LC_MAIN`, `LC_BUILD_VERSION` (macOS 12.0), an
     `LC_UUID` fingerprinted from the image, and an ad-hoc, linker-signed SHA-256 code signature.
   - Output is byte-identical across runs.
@@ -819,6 +821,15 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
   This path requires a source or ordinary object and supports regular, indexed GNU archives
   and empty archives. Other archive formats and combining archives with shared objects remain
   part of [#388](https://github.com/yrashk/ycxx/issues/388).
+- An arm64 macOS link can include explicit Darwin `.a` operands (BSD `#1/<n>` names and a
+  `__.SYMDEF`, `__.SYMDEF SORTED` or `_64` ranlib index first), with the system linker's
+  selection rules: every ordinary object comes first, an archive serves names referenced
+  anywhere on the command line, weak references and tentative definitions select members, and
+  the first archive in operand order that lists a name supplies it, before the dylibs do.
+  Members are decoded only when selected. `unit.darwin_archive` checks each rule against the
+  system linker, malformed and 64-bit indexes, and daemon equality and same-path replacement;
+  `unit.darwin_inline` links an archive member with both linkers.
+  [Design](docs/design/darwin-static-archives.md) · [#842](https://github.com/yrashk/ycxx/issues/842)
 - `ycxx archive -o lib.a [--] [object ...]` creates or replaces a regular GNU archive in process.
   It validates each member with the existing ELF object reader, copies its bytes, and indexes
   named nonlocal definitions, including weak and hidden definitions. Member basenames and
@@ -1301,13 +1312,14 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   destructors on every scope exit from its own scope stack (block end, `return`, `break`,
   `continue`) and ends a full-expression's temporaries at its end. Statements carry no cleanup
   lists; the `Cleanup` record is gone.
-- Linux x86-64 emits `C2`/`D2` alongside eligible written, out-of-line `C1`/`D1` definitions.
+- Both native targets emit `C2`/`D2` alongside eligible written, out-of-line `C1`/`D1` definitions
+  (on Mach-O, a second symbol at the same address).
   An ordinary, externally linked, nonpolymorphic class with no bases and only supported
   scalar fields uses one machine body and ELF range for each pair. Named signature types
   must have known layout and linkage. Callback signatures and class parameters passed by
   value are outside this scope. GCC and Clang peers check the raw entry names, an adjusted
   base pointer, and construction and destruction order.
-- Linux x86-64 can define the out-of-line virtual destructor of an ordinary fieldless,
+- Both native targets can define the out-of-line virtual destructor of an ordinary fieldless,
   baseless root when the first public virtual is a peer-defined non-inline `int()` key
   function and the second is the public destructor. Both declarations and the destructor
   definition use bare `noexcept`. The `D1` and `D2` entries share a body that restores
@@ -1392,6 +1404,9 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   fixed underlying type before the enumerator list. Omitted scoped bases default to `int`. Unscoped opaque
   declarations spell their base. Compatible redeclarations and a later definition in the same
   namespace share the nominal type, and the enumerators become visible at the definition.
+- A named enum retains its in-list record across synchronous class-template instantiations that
+  define other enums. Queries can still use the enclosing enum's fixed underlying type
+  ([dcl.enum], [expr.sizeof]). [#897](https://github.com/yrashk/ycxx/issues/897)
 - A qualified value expression in an incomplete current class can see earlier static data
   members and injected unscoped enumerators. Within a named enum's own list, qualifying an
   earlier enumerator uses its in-list type. [#857](https://github.com/yrashk/ycxx/issues/857)
@@ -1747,6 +1762,13 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   `decltype`, overload selection, and the existing adjustments for scalar and reference
   results.
 
+## Scalar branch temporaries (#902)
+
+- Scalar logical and conditional expressions carry each selected reference-argument temporary
+  to the end of its full-expression ([class.temporary], [expr.log.and], [expr.log.or], [expr.cond]).
+  Both the interpreter and native code use the L1 join with nullable temporary addresses. Conditional
+  nontrivial destruction and reference lifetime extension remain under [#157](https://github.com/yrashk/ycxx/issues/157).
+
 ## Local class prvalue selection (#740)
 
 - The built-in `?:` or comma operator can initialize an automatic class object, an ordinary
@@ -1907,6 +1929,12 @@ template's tokens again with the arguments bound.
   constant variable is mangled by its value, where Clang and GCC write its name (#796). With these,
   libycxx's headers move from `invoke.hpp:35` to `invoke.hpp:37` (#776).
 
+## Functional conversions with pack expansions (#915)
+
+- `T(a...)` expands its arguments as a call does ([expr.type.conv], [temp.variadic]/5). This is
+  also the path a call through a still-dependent alias's member takes at the definition, as in
+  libycxx's `invoke`. Test: `tests/own/templates/functional-cast-pack.run.cpp`.
+
 ## Templates, ζ step 2: class templates (#88, 2026-11-18)
 
 - **Declarations:** class templates at namespace scope (`template<…> struct X {…};` and
@@ -2059,6 +2087,10 @@ session's.*
   `typename X<T>::type` needs, instantiating a specialization. A terminal namespace-qualified
   alias specialization such as `N::A<T>` stays a type argument when its expansion is a dependent
   member type ([temp.arg.general], #630).
+- Dependent static member calls through class and alias template qualifiers preserve argument
+  pack expansions when an ordinary template parameter precedes the pack. The supported cases
+  include forwarding empty and mixed lvalue/rvalue packs. A known member type of the current
+  instantiation still supports functional construction. [#890](https://github.com/yrashk/ycxx/issues/890)
 - Tests: `tests/own/templates/a5-*`; 2 more draft examples pass. `<cstdio>`: 78 → 53 errors.
 - Also: `C::T` inside the class (being defined or instantiated) and in its out-of-class member
   definitions names its member type, as the current instantiation's ([temp.dep.type]/1).
@@ -2750,6 +2782,12 @@ What the process allocates, attributed to the engine's cells, in the trace and t
   appear once. A further override of a `final` declaration is ill-formed even when ordinary
   lookup hides the declaration. [[class.virtual]](https://eel.is/c++draft/class.virtual) ·
   [[class.mem.general]](https://eel.is/c++draft/class.mem.general) · [#309](https://github.com/yrashk/ycxx/issues/309)
+- Ordinary named namespace-scope classes and structs can use class-head `final`, with or
+  without a base clause. A base specifier naming a final class through its name or an alias
+  receives the same diagnostic after the definition, including after a later bare declaration.
+  `final` remains an identifier in class names and object declarators. `__is_final` reads the
+  completed class definition, including for cv-qualified types.
+  [[class.pre]](https://eel.is/c++draft/class.pre) · [#309](https://github.com/yrashk/ycxx/issues/309)
 - A derived constructor can name that base in an unqualified parenthesized or flat braced
   initializer. Syntax checking uses ordinary constructor overload resolution, defaults, access,
   and list narrowing. The base destructor must be usable and accessible in the derived
@@ -2765,9 +2803,10 @@ What the process allocates, attributed to the engine's cells, in the trace and t
   `extern` declarations, pointer and reference types, declarations of by-value functions,
   base subobjects and the result of direct `decltype(make())` follow their ordinary rules.
   [[class.abstract]](https://eel.is/c++draft/class.abstract) · [[dcl.type.decltype]](https://eel.is/c++draft/dcl.type.decltype) · [#309](https://github.com/yrashk/ycxx/issues/309)
-- On Linux x86-64, the pinned libycxx `<exception>` syntax check reaches unnamed unscoped
-  enumerations in `deps/libycxx/include/ycxx/pal.h`, starting at line 61.
-  [#157](https://github.com/yrashk/ycxx/issues/157)
+- On Linux x86-64, the `<exception>` syntax and object probes with libycxx `4183795d` now pass
+  the dependent pack call at `deps/libycxx/include/ycxx/core/invoke.hpp:112`. The first diagnostic
+  is an ambiguous `__invocable_` at line 178, column 37.
+  [#890](https://github.com/yrashk/ycxx/issues/890) · [#468](https://github.com/yrashk/ycxx/issues/468)
 - On Linux x86-64, an ordinary declaration-only root with fixed integer virtual signatures can
   consume a peer-owned object through a pointer or reference. Dispatch loads the selected slot in
   declaration order and passes the original receiver as `this`. Qualifying the call with the
@@ -2824,8 +2863,18 @@ What the process allocates, attributed to the engine's cells, in the trace and t
   conditional evaluation, the consumer ELF symbols and cold/resident output across edits.
   [Itanium call ABI](https://itanium-cxx-abi.github.io/cxx-abi/abi.html#vcall.caller) ·
   [#309](https://github.com/yrashk/ycxx/issues/309) · [#659](https://github.com/yrashk/ycxx/issues/659)
-- Broader construction and table emission, pure-slot signatures, covariant returns and class-head
-  `final` remain in #309. Pure declarations and `final` for virtual destructors and assignment
+- arm64 macOS has each of the virtual shapes above that Linux x86-64 has, with the same
+  front end checks and the same lowering: calls on peer-owned roots, primary bases and pure
+  interfaces, the non-key member, automatic roots and derived objects, and the key-owned root
+  and derived tables with their RTTI. The Mach-O producer writes `__ZTV` and `__ZTI` to
+  `__DATA,__const` and the weak `__ZTS` to `__TEXT,__const`. The base class's descriptor and name,
+  which every user emits, follow Apple's arm64 convention for non-unique RTTI: weak private
+  external, with bit 63 set in the descriptor's name pointer so `type_info` compares them by
+  content across images. ycxx's Mach-O linker carries such a pointer's top byte in the chained
+  rebase's `high8`. `unit.darwin_virtual` links the linux_* virtual fixtures with Clang peers,
+  by ycxx's linker and the system linker. [#650](https://github.com/yrashk/ycxx/issues/650)
+- Broader construction and table emission, pure-slot signatures and covariant returns remain in
+  #309. Pure declarations and `final` for virtual destructors and assignment
   operators also remain there. Checking `operator=` includes matching implicitly declared copy
   and move assignments. Virtual destructor entry points, RTTI expressions, virtual bases and
   native class ABI have their own issues.
@@ -2833,6 +2882,34 @@ What the process allocates, attributed to the engine's cells, in the trace and t
   [#294](https://github.com/yrashk/ycxx/issues/294) · [#310](https://github.com/yrashk/ycxx/issues/310) ·
   [#489](https://github.com/yrashk/ycxx/issues/489)
   [Design](docs/design/ordinary-virtual-declarations.md)
+
+## Borrowed `dynamic_cast` to `cv void*` (#294)
+
+On Linux x86-64, `dynamic_cast<cv void*>(p)` accepts an ordinary complete polymorphic root
+from the existing peer consumer profiles. The result is a pointer prvalue and retains every
+cv-qualifier of the source pointee. The cast evaluates the pointer once and a typed null
+operand yields a null result, including in constant evaluation. On the non-null path, the
+vtable address point supplies the signed offset-to-top. Adding that byte offset to the
+incoming subobject address recovers the address of the most-derived object, including when
+the peer passes a secondary base. The cast introduces no RTTI symbols or calls.
+[[expr.dynamic.cast]](https://eel.is/c++draft/expr.dynamic.cast) ·
+[Itanium ABI §2.5.2](https://itanium-cxx-abi.github.io/cxx-abi/abi.html#vtable-components)
+
+## Borrowed typed downcasts (#294)
+
+Linux x86-64 can cast a borrowed root pointer to a pointer to its direct derived class.
+Both classes are ordinary, fieldless and default-visible. The derived class has one public
+nonvirtual primary base. Each class declares one public virtual `int` member with no
+arguments, with the derived declaration overriding the base member. A hosted C++ peer
+defines the two key functions. The consumer checks eligibility against the complete
+translation unit and uses the peer's two RTTI objects and `__dynamic_cast`.
+The result preserves or adds pointee cv. The cast evaluates its operand once and returns
+a typed null for a null operand or a failed check. A null operand can be used in constant
+evaluation. [Design](docs/design/linux-borrowed-typed-downcast.md) ·
+[#294](https://github.com/yrashk/ycxx/issues/294)
+
+Other cast forms, `typeid`, non-null constant evaluation, and Darwin parity are tracked
+in [#294](https://github.com/yrashk/ycxx/issues/294) and [#659](https://github.com/yrashk/ycxx/issues/659).
 
 ## Deduced polymorphic lambda results (#569)
 
@@ -3555,16 +3632,20 @@ checks reject entry into the protected block or a handler. A discarded
 
 On Linux x86-64, a host-linked ELF object can contain an eligible namespace
 function with a protected return that passes its parameter directly to an
-externally defined `int(int)` function. The function has one `catch (...)`
-that returns an integer literal. L1 and L2 carry distinct normal and unwind
-results. The AMD64 emitter records the call range
-and landing address, saves the unwind header and selector, and feeds the ELF
-writer's handler CIE and LSDA. GCC and Clang hosted tests cover the normal and
-caught returns and unwinding through an ordinary frame. The native final
-link diagnoses the hosted runtime requirement. Same-translation-unit callees,
-typed and multiple handlers, cleanup scopes, other target backends and
-freestanding runtime support remain
-in [#89](https://github.com/yrashk/ycxx/issues/89). [#583](https://github.com/yrashk/ycxx/issues/583)
+externally defined `int(int)` function. One `catch (...)` can return an integer
+literal, or one named by-value `int` handler can return its bound value.
+L1 and L2 carry distinct normal and unwind results. The AMD64 emitter records
+the call range and landing address, saves the unwind header and selector, and
+feeds the ELF writer's handler CIE and LSDA. The typed LSDA uses the hosted
+`_ZTIi` to match exceptions, and a different type continues unwinding. The
+native final link diagnoses the hosted runtime requirement.
+[Design](docs/design/linux-hosted-catch-all.md#hosted-by-value-int-handler-919)
+· [#583](https://github.com/yrashk/ycxx/issues/583) · [#919](https://github.com/yrashk/ycxx/issues/919)
+
+Same-translation-unit callees, other typed handlers, multiple or nested
+handlers, rethrow, combined handler cleanup and freestanding runtime discovery
+remain in [#89](https://github.com/yrashk/ycxx/issues/89).
+Darwin parity is tracked in [#648](https://github.com/yrashk/ycxx/issues/648).
 
 ## Unevaluated calls to known-return function templates (#565)
 

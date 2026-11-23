@@ -1,4 +1,4 @@
-# Hosted Linux x86-64 catch-all object records
+# Hosted Linux x86-64 exception handling object records
 
 Astra reviewed the handler ABI, machine layout, and hosted linking boundary on [#583].
 This first stage develops the object records for one protected direct call in a
@@ -22,8 +22,9 @@ The machine emitter supplies function-relative byte ranges in instruction
 order. A call-site entry covers the emitted call instruction through the byte
 before its return address. A landing entry points to the first pad instruction
 in the same function. The LSDA uses the FDE's region start and a table of ULEB128
-call-site entries. Exactly one protected call has action index 1. Its action is
-a positive filter with one null type-table entry and no next action. Calls in
+call-site entries. Exactly one protected call has action index 1. For a
+catch-all, its action is a positive filter with one null type-table entry and
+no next action. Calls in
 the same function that may unwind outside the protected range have separate
 no-pad entries. Validate ranges, order, and the presence of the single pad
 before emitting object records.
@@ -47,8 +48,7 @@ The hosted final link supplies the personality, catch helpers, and discovery of
 the registered frames. The native ycxx ELF executable linker must reject handler
 tables until it can supply unwind discovery. Object validation distinguishes the
 ordinary code anchor from the personality cell and LSDA targets, including the
-unaligned relocation fields inside augmentation data. Typed and nested handlers,
-local lifetime cleanup, rethrow, and other targets remain under [#89].
+unaligned relocation fields inside augmentation data.
 
 [Itanium Exception Handling ABI](https://itanium-cxx-abi.github.io/cxx-abi/abi-eh.html) ·
 [System V AMD64 psABI](https://gitlab.com/x86-psABIs/x86-64-ABI) ·
@@ -58,6 +58,35 @@ local lifetime cleanup, rethrow, and other targets remain under [#89].
 [#583]: https://github.com/yrashk/ycxx/issues/583
 [#572]: https://github.com/yrashk/ycxx/issues/572
 [#89]: https://github.com/yrashk/ycxx/issues/89
+
+## Hosted by-value int handler (#919)
+
+The same external direct call can be protected by one `catch (int value)` whose
+sole statement returns that declaration. The typed proof checks the
+local index of the binding and the final declarations of the protected
+callee and enclosing function. Type aliases that resolve to builtin `int` and
+top-level `const` on the binding use the same filter. [#919]
+
+Astra reviewed the type table and landing path on [#919]. The protected call
+uses action index 1 and the sole action records the SLEB128 values `+1, 0`.
+Type encoding `0x9b` is indirect PC-relative signed four-byte data. The only
+type entry sits four bytes before the type table base and has an
+`R_X86_64_PC32` relocation with addend zero to an aligned local cell in
+`.data.rel.ro`. Its `R_X86_64_64` relocation with addend zero resolves to
+the hosted `_ZTIi`. The personality keeps its own cell.
+[Itanium Exception Handling ABI §2.5](https://itanium-cxx-abi.github.io/cxx-abi/abi-eh.html#cxx-handler)
+
+Selector 1 calls `__cxa_begin_catch` with the saved unwind header and copies
+the four-byte value from the adjusted pointer. The copy survives one
+`__cxa_end_catch` before the function returns it ([except.handle]). An
+exception of a different type continues through the frame. A cleanup
+selector at the pad resumes with the original unwind header.
+
+Volatile bindings, reference and class handlers, multiple or nested handlers,
+combined handler cleanup, rethrow and native runtime discovery remain in [#89].
+Darwin parity is tracked in [#648].
+
+[#919]: https://github.com/yrashk/ycxx/issues/919
 
 ## Hosted local cleanup (#663)
 
