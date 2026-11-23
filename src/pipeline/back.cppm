@@ -235,6 +235,8 @@ struct TranslationUnit {
   // The written complete-object definitions whose ELF base-object entries share their code.
   std::set<EntityId> base_object_variants;
   std::vector<AsmHiddenSymbol> asm_hidden_symbols;
+  // The declared heads of class templates whose own arguments may appear in symbols.
+  std::map<EntityId, ast::SeqId<ast::TemplateParamSema>> class_template_parameters{};
 };
 
 // What failed, at a location in an item when there is one. Every error here is something the α
@@ -2139,6 +2141,10 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
     ClassName n{std::string(w->ins.names.spelling(r.name)), r.scope, r.templ, r.args,
                 r.kind == sema::EntityKind::class_ || r.kind == sema::EntityKind::class_template};
     n.unnamed_type_ordinal = r.unnamed_type_ordinal;
+    if (n.is_class && r.templ != EntityId::none) {
+      auto params = tu.class_template_parameters.find(r.templ);
+      if (params != tu.class_template_parameters.end()) n.template_params = params->second;
+    }
     if (r.kind == sema::EntityKind::class_ && n.name.empty() && r.scope != EntityId::none && !n.unnamed_type_ordinal) {
       auto f = by_id.find(ir::raw(r.scope));
       n.closure = true;
