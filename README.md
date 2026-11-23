@@ -50,7 +50,8 @@ A class template can grant private access to the class passed as a type argument
 **Compile and run programs on macOS.** `ycxx cxx a.cpp -o a` (also `-c`, `-fsyntax-only`, `-E`, `-I`,
 `-D`, `-std=c++26`, and `-fclass-call-abi=apple` to pass classes as Apple Clang does) builds an executable with ycxx's own front end, IR, AArch64 code generator
 and Mach-O linker on arm64 macOS, where `arm64-apple-darwin` is the default target. It also links
-object files from Clang or GCC, and static archives (`.a`) made by the system `ar`
+object files from Clang or GCC, and static archives (`.a`) made by the system `ar`. Programs
+link libycxx's runtime by default, so `<cstdio>` works (`-nostdlib++` leaves it out)
 ([#842](https://github.com/yrashk/ycxx/issues/842)). Variadic functions can be defined with `<cstdarg>` on both
 macOS and Linux ([#647](https://github.com/yrashk/ycxx/issues/647)). Errors are reported as
 `file:line:col: error: …`.

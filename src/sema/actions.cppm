@@ -1920,6 +1920,12 @@ public:
         return std::ranges::any_of(c->members, [&](const MemberDeclRec& m) { return m.name == n; });
     return false;
   }
+  // The ordinary lookup result can hide an inherited type from a template argument.
+  bool scope_names_static_data_member(const Scope& s, NameId n) {
+    if (!s.type || !types().is_class(*s.type) || types().is_dependent(*s.type)) return false;
+    auto found = find_member(types().class_of(*s.type), n);
+    return found && found->member && found->member->is_static && !found->member->is_function;
+  }
   // Whether the type `S::n`, named at `at`, is accessible here: a nested type of a class
   // ([class.access]/4); diagnosed if not. Ordinary functional conversions check directly
   // declared aliases and typedefs of non-template records.
@@ -2064,7 +2070,8 @@ public:
     return m->type;
   }
   // `S::n` as an expression ([expr.prim.id.qual]).
-  Ex scope_expr(const Scope& s, NameId n, u32 begin, u32 name_at, u32 end, std::optional<u32> address_at = {}) {
+  Ex scope_expr(const Scope& s, NameId n, u32 begin, u32 name_at, u32 end, std::optional<u32> address_at = {},
+                bool check_all_bases = false) {
     if (s.type && types().is_dependent(*s.type)) return dependent_node({}, begin, end, std::nullopt, ValueCategory::lvalue);
     if (s.type) {
       if (types().is_enum(*s.type)) {
@@ -2082,7 +2089,7 @@ public:
         if (!type_trait_failed(*s.type)) diag(begin, Diag::incomplete_type, *s.type);
         return {NodeId::none, begin, end};
       }
-      if (auto r = class_member(cls, n, begin, end, name_at, address_at)) return *r;
+      if (auto r = class_member(cls, n, begin, end, name_at, address_at, false, check_all_bases)) return *r;
       diag(name_at, Diag::no_member, n, *s.type);
       return {NodeId::none, begin, end};
     }
@@ -3442,6 +3449,9 @@ public:
   Templates templates() {
     Templates t(*w_, classes());
     t.member_type = [this](EntityId c, NameId n) { return member_type(c, n); };
+    t.member_constant = [this](QualType qualifier, NameId name) {
+      return qualified_member_constant(qualifier, name, 0);
+    };
     t.template_decl = [this](EntityId tmpl) { return q_->template_decl(tmpl); };
     t.variable_constant = [this](EntityId spec) { return q_->constant_value(spec); };
     t.call_constant = [this](EntityId templ, std::span<const TemplateArg> args) {
@@ -3456,6 +3466,9 @@ public:
   }
   Templates templates_for_use(u32 at) {
     auto t = templates();
+    t.member_constant = [this, at](QualType qualifier, NameId name) {
+      return qualified_member_constant(qualifier, name, at);
+    };
     t.call_constant = [this, at](EntityId templ, std::span<const TemplateArg> args) {
       return evaluate_dependent_call(templ, args, at);
     };
@@ -4838,7 +4851,8 @@ public:
   }
   // Whether member `m` of class `c`, named `name` at `at` in class `naming`, is accessible here;
   // diagnosed if not.
-  bool check_access(EntityId c, EntityId m, NameId name, u32 at, EntityId naming = EntityId::none) {
+  bool check_access(EntityId c, EntityId m, NameId name, u32 at, EntityId naming = EntityId::none,
+                    bool check_all_bases = false) {
     const ClassRec* cr = class_rec(c);
     if (!cr) return true;
     ast::Access a = cr->access_of(m);
@@ -4846,7 +4860,7 @@ public:
       diag(at, a == ast::Access::protected_ ? Diag::protected_member : Diag::private_member, name, types().class_type(c));
       return false;
     }
-    if (!accessible_naming_base(naming, c)) {
+    if (!accessible_naming_base(naming, c, check_all_bases)) {
       diag(at, Diag::inaccessible_base, types().class_type(c), types().class_type(naming));
       return false;
     }
@@ -4855,8 +4869,9 @@ public:
 
   // Member access through a class template's instantiated base graph ([class.access.base]). A
   // static member can be shared through several subobjects, unlike a base conversion.
-  bool accessible_naming_base(EntityId naming, EntityId owner) {
-    if (naming == owner || naming == EntityId::none || w_->entities.rec(naming).templ == EntityId::none) return true;
+  bool accessible_naming_base(EntityId naming, EntityId owner, bool check_all_bases = false) {
+    if (naming == owner || naming == EntityId::none ||
+        (!check_all_bases && w_->entities.rec(naming).templ == EntityId::none)) return true;
     auto path = [&](this auto&& next, EntityId from) -> bool {
       if (from == owner) return true;
       const ClassRec* rec = class_rec(from);
@@ -5018,7 +5033,8 @@ public:
   // The implicit member access `name` inside a member function of `c` ([class.mfct.non.static]),
   // or a qualified name `C::name`: none if `c` has no such member.
   std::optional<Ex> class_member(EntityId c, NameId name, u32 begin, u32 end, u32 name_at,
-                                 std::optional<u32> address_at = {}, bool unqualified = false) {
+                                 std::optional<u32> address_at = {}, bool unqualified = false,
+                                 bool check_all_bases = false) {
     auto f = find_member(c, name, unqualified);
     if (!f) return std::nullopt;
     Ex fail{NodeId::none, begin, end};
@@ -5031,7 +5047,7 @@ public:
         diag(name_at, Diag::type_as_expression, name);
         return fail;
       }
-      if (!check_access(f->owner, f->nested_type, name, name_at, c)) return fail;
+      if (!check_access(f->owner, f->nested_type, name, name_at, c, check_all_bases)) return fail;
       return enumerator(f->enumerator, types().enum_type(f->nested_type), begin, end);
     }
     // `this` names the member when the class is the current class or one of its bases.
@@ -5044,7 +5060,7 @@ public:
     };
     EntityId naming = c;
     c = f->owner;
-    if (!(f->member && f->member->is_function) && !check_access(c, f->field ? f->field->entity : f->member->entity, name, name_at, naming))
+    if (!(f->member && f->member->is_function) && !check_access(c, f->field ? f->field->entity : f->member->entity, name, name_at, naming, check_all_bases))
       return fail;
     if (f->field) {
       const FieldRec& field = *f->field;
@@ -7064,6 +7080,18 @@ public:
   Ex null_member_pointer(QualType t, u32 begin, u32 end) {
     t = object_unqualified(t);
     return literal(t, ins().intern_value(ast::VMemberPtr{t}), ValueCategory::prvalue, begin, end);
+  }
+
+  std::optional<TemplateArg> qualified_member_constant(QualType qualifier, NameId name, u32 at) {
+    const auto before = diag_count();
+    Ex value = rvalue(scope_expr(Scope{std::nullopt, qualifier}, name, at, at, at, std::nullopt, true));
+    if (has_error_since(before)) {
+      drop_failures(before);
+      return std::nullopt;
+    }
+    if (auto literal = as<ast::Literal>(value))
+      return TemplateArg{TemplateArgKind::value, types().canonical(Types::unqualified(value.type())), literal->value};
+    return std::nullopt;
   }
 
   // The value of a static data member of integral type usable in constant expressions.

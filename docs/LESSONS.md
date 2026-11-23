@@ -105,7 +105,8 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
     new, even a follow-up to the same issue.
   - Make the check gate the push: `[ "$(gh pr view N --json state -q .state)" = OPEN ] && git push`.
     `gh pr view … -q .state && git push` only prints the state and pushes anyway; that pushed to
-    #753's merged branch, and the commit had to move to #770.
+    #753's merged branch, and the commit had to move to #770. It happened again on #921 (#842),
+    whose review nits had to move to the next PR.
   - The coordinator's sweep also checks every merged PR's branch for commits that aren't on main.
   - Rule: AGENTS.md, "PRs and branches".
   - Learned on #116 and #230, 2026-11-18.
@@ -406,6 +407,15 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
   - Do: when ycxx's objects go through the system linker, emit what Clang emits for the same
     construct (`clang++ -c`, then `nm -m` and `otool -lv`), not just what the local linker accepts.
   - Learned on #124.
+- **A zero-fill word that changes with no store: compare it with the file.** On #842 a `__bss`
+  word of a ycxx-linked program held garbage by `main`, and lldb write watchpoints never fired.
+  The value was the file's bytes at the segment's `fileoff` plus the word's offset (an `nlist`
+  entry of `__LINKEDIT`): the chained fixups listed the zero-fill pages, and dyld's page-in
+  linking maps every listed page from the file, in the kernel. It also depended on member order,
+  since a set-ordered member list moved the word.
+  - Do: when a value appears without a store, `xxd -s <fileoff + offset>` the file there first,
+    and diff `dyld_info -fixup_chains` against the system linker's output for the same objects.
+  - Learned on #842.
 - **An executable killed at exec with status 137 says nothing about why.** A linked Mach-O whose
   `ncmds` was one too high passed `codesign -v`, then the kernel killed it before `main`.
   - Do: run `otool -l` on the output first. It reports "malformed load command" and where.
