@@ -2137,13 +2137,13 @@ public:
     const auto& decl = found.front();
     if (std::ranges::any_of(found, [&](const ast::DeclSema& d) {
           if (d.entity == decl.entity) return false;
-          return !is_type(d.kind) || !is_type(decl.kind) ||
+          return ((d.flags | decl.flags) & decl_flag::template_) || !is_type(d.kind) || !is_type(decl.kind) ||
                  types().canonical(d.type) != types().canonical(decl.type);
         })) {
       diag(at, Diag::ambiguous_name, name);
       return std::nullopt;
     }
-    if (!is_type(decl.kind)) return std::nullopt;
+    if (!is_type(decl.kind) || (decl.flags & decl_flag::template_)) return std::nullopt;
     return decl.type;
   }
   // `S::n` as an expression ([expr.prim.id.qual]).

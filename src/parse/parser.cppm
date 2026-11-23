@@ -350,10 +350,18 @@ public:
         const u32 open = 1 + q->second;
         if (kind(open) == Tk::l_brace) return false;
         if (kind(open) == Tk::l_paren) {
-          const u32 after = past_parentheses(open);
+          u32 after = past_parentheses(open);
           if (!grouped_declarator_ahead(open, after - 1, statement)) return false;
+          while (kind(after) == Tk::l_square) {
+            u32 depth = 1;
+            for (++after; depth != 0 && i_ + after < end_; ++after) {
+              if (kind(after) == Tk::l_square) ++depth;
+              else if (kind(after) == Tk::r_square) --depth;
+            }
+            if (depth != 0) return false;
+          }
           switch (kind(after)) {
-          case Tk::semi: case Tk::equal: case Tk::comma: case Tk::l_square:
+          case Tk::semi: case Tk::equal: case Tk::comma:
           case Tk::l_brace: case Tk::colon:
             return true;
           case Tk::l_paren:
@@ -1877,6 +1885,12 @@ public:
       // A grouped argument such as `T(name)` leaves both readings open. A later argument
       // can settle the entire list, as in `Holder value(T(name), 2)`.
       const u32 after_group = past_parentheses(after_type);
+      if (k == Tk::kw_typename) {
+        if (kind(after_group) == Tk::period || kind(after_group) == Tk::arrow) return false;
+        if (first_operand == Tk::identifier && !params_ahead(after_type) &&
+            !grouped_declarator_ahead(after_type, after_group - 1, statement))
+          return false;
+      }
       if (kind(after_group) != Tk::comma) return true;
       first = after_group + 1;
     }
