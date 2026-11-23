@@ -1269,6 +1269,7 @@ struct World {
     field("fp_offset", offset);
     field("overflow_arg_area", area);
     field("reg_save_area", area);
+    rec.member_declarations_valid = true;
     classes.publish(sysv_va_list_tag_, std::move(rec));
   }
 
