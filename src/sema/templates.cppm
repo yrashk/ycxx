@@ -466,6 +466,7 @@ public:
     case ast::DepOp::is_abstract:
     case ast::DepOp::has_virtual_destructor:
     case ast::DepOp::is_standard_layout:
+    case ast::DepOp::alignof_type:
     case ast::DepOp::is_empty: return std::nullopt;
     case ast::DepOp::is_same:
     case ast::DepOp::is_constructible:
@@ -572,7 +573,11 @@ public:
     }
     auto v = substitute_value(a.value, b);
     if (!v) return std::nullopt;
-    if ((ins().values.is<ast::VDepOp>(a.value) || ins().values.is<ast::VDepOp>(*v)) && !types().is(t, Builtin::bool_))
+    auto is_predicate = [&](ConstId value) {
+      return ins().values.is<ast::VDepOp>(value) &&
+             ins().values.get<ast::VDepOp>(value).op != ast::DepOp::alignof_type;
+    };
+    if ((is_predicate(a.value) || is_predicate(*v)) && !types().is(t, Builtin::bool_))
       return std::nullopt;
     if (ins().values.is<ast::VDepVariable>(a.value) && !ins().values.is_dependent(*v)) {
       QualType source = t;
@@ -608,6 +613,12 @@ public:
     if (ins().values.is<ast::VDepOp>(v)) {
       auto op = ins().values.get<ast::VDepOp>(v);
       switch (op.op) {
+      case ast::DepOp::alignof_type: {
+        auto operand = substitute_arg(ins().seqs.at(op.operands, 0), b);
+        if (!operand || !types().is_dependent(operand->type)) return std::nullopt;
+        const std::array operands{*operand};
+        return ins().intern_value(ast::VDepOp{op.op, ins().intern_seq(std::span<const TemplateArg>(operands))});
+      }
       case ast::DepOp::is_constructible:
       case ast::DepOp::is_nothrow_constructible:
       case ast::DepOp::is_trivially_constructible:
@@ -1621,10 +1632,16 @@ public:
   // pointer. None when it does not convert.
   std::optional<TemplateArg> converted_value(const TemplateArg& a, QualType t) {
     t = types().canonical(Types::unqualified(t));
-    // The dependent operation's result type is bool. Other destinations need a dependent
-    // conversion in the canonical value (#209).
+    // Predicate conversions to non-bool destinations need a dependent conversion (#209).
+    // A dependent base alignment is checked again when the written argument is replayed.
     ConstId pattern = is_expansion(a) ? pattern_of(a).value : a.value;
-    if (ins().values.is<ast::VDepOp>(pattern) && !types().is(t, Builtin::bool_)) return std::nullopt;
+    if (ins().values.is<ast::VDepOp>(pattern)) {
+      if (ins().values.get<ast::VDepOp>(pattern).op == ast::DepOp::alignof_type) {
+        if (!types().is_dependent(t) && !types().is_integral(t)) return std::nullopt;
+      } else if (!types().is(t, Builtin::bool_)) {
+        return std::nullopt;
+      }
+    }
     if (types().is_dependent(t) || ins().values.is_dependent(a.value)) return TemplateArg{TemplateArgKind::value, t, a.value};
     if (types().is_integral(t) && ins().values.is<ast::VInt>(a.value)) {
       // An unscoped enumeration converts through its underlying type ([conv.prom]); a scoped one
