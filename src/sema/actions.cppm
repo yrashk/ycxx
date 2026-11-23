@@ -1866,6 +1866,13 @@ public:
       return declaration.entity != ns && (declaration.kind == ast::DeclKind::namespace_ || is_type(declaration.kind));
     });
   }
+  // Namespace-only lookup for using-directives and namespace aliases ([basic.lookup.udir]).
+  std::optional<Scope> namespace_scope_named(NameId n) {
+    for (const BlockAlias& alias : block_aliases_ | std::views::reverse)
+      if (alias.name == n) return Scope{alias.ns, std::nullopt};
+    if (auto ns = q_->namespace_named(n, directives())) return Scope{ns, std::nullopt};
+    return std::nullopt;
+  }
   // The first component of a nested-name-specifier, by unqualified lookup ([basic.lookup.qual]/1:
   // only namespaces, types and templates).
   std::optional<Scope> scope_named(NameId n, std::optional<u32> enum_qualifier_at = std::nullopt,
@@ -1881,15 +1888,29 @@ public:
       }
       return Scope{std::nullopt, p->type};
     }
-    for (auto a = block_aliases_.rbegin(); a != block_aliases_.rend(); ++a)
-      if (a->name == n) return Scope{a->ns, std::nullopt};
+    // A qualifier sees aliases and types introduced by using-declarations in the nearest block.
+    // [basic.lookup.qual] ignores local values when looking up a qualifier.
+    for (std::size_t depth = scopes_.size(); depth-- > 0;) {
+      for (const BlockAlias& alias : block_aliases_ | std::views::reverse)
+        if (alias.depth == depth && alias.name == n) return Scope{alias.ns, std::nullopt};
+      for (const BlockType& alias : block_types_ | std::views::reverse)
+        if (alias.depth == depth && alias.name == n) return Scope{std::nullopt, alias.type};
+      for (const BlockUsing& used : block_usings_) {
+        if (used.depth != depth || used.name != n) continue;
+        for (const ast::DeclSema& decl : used.decls)
+          if (is_type(decl.kind) && !(decl.flags & decl_flag::template_))
+            return Scope{std::nullopt, decl.type};
+      }
+    }
     if (enum_qualifier_at) {
       std::optional<EntityId> ns;
-      if (auto t = class_name(n, true, true, enum_qualifier_at, true, &ns)) return Scope{std::nullopt, t};
+      if (auto t = class_name(n, true, true, enum_qualifier_at, /*search_locals=*/false, &ns))
+        return Scope{std::nullopt, t};
       if (ns) return Scope{ns, std::nullopt};
       return std::nullopt;
     }
-    if (auto t = class_name(n, true)) return Scope{std::nullopt, t};
+    if (auto t = class_name(n, /*elaborated=*/true, /*aliases=*/true, std::nullopt, /*search_locals=*/false))
+      return Scope{std::nullopt, t};
     if (auto ns = q_->namespace_named(n, directives())) {
       if (ambiguous_namespace)
         *ambiguous_namespace = competing_qualifier(*ns, q_->qualifier_decls(n, std::nullopt, directives()));

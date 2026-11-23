@@ -1580,7 +1580,7 @@ public:
     u32 at;
   };
 
-  enum class QualifierLookup { ordinary, type, elaborated_enum };
+  enum class QualifierLookup { ordinary, type, elaborated_enum, namespace_only };
 
   // A nested-name-specifier ([expr.prim.id.qual]) at token `start` ahead: `::`, `N::`, `N::C::`,
   // resolved as it is read, without consuming it. `next` is where the name after it is.
@@ -1609,8 +1609,10 @@ public:
       ++j;
     } else if (kind(j) == Tk::identifier && kind(j + 1) == Tk::coloncolon) {
       const std::optional<u32> at = lookup == QualifierLookup::elaborated_enum ? std::optional{pos() + j} : std::nullopt;
+      NameId name = name_of(tok(j));
       bool ambiguous = false;
-      s = s_->scope_named(name_of(tok(j)), at, ambiguous_namespace ? &ambiguous : nullptr);
+      s = lookup == QualifierLookup::namespace_only ? s_->namespace_scope_named(name)
+                                                   : s_->scope_named(name, at, ambiguous_namespace ? &ambiguous : nullptr);
       if (ambiguous) *ambiguous_namespace = j;
       if (!s) return std::nullopt;
       j += 2;
@@ -4181,13 +4183,12 @@ public:
     std::optional<sema::Sema::Scope> s;
     u32 next = 0;
     if (is(Tk::identifier) && kind(1) != Tk::coloncolon) {
-      s = s_->scope_named(name_of(tok()));
-      next = 0;
-      if (s) {
+      if (auto named = s_->namespace_scope_named(name_of(tok()))) {
         bump();
-        if (s->ns) return s->ns;
+        return named->ns;
       }
-    } else if ((s = nested_name(0, next)) && kind(next) == Tk::identifier) {
+    } else if ((s = nested_name(0, next, /*member_pointer=*/false, /*checked=*/false, QualifierLookup::namespace_only)) &&
+               kind(next) == Tk::identifier) {
       for (u32 j = 0; j < next; ++j) bump();
       auto m = s_->scope_member(*s, name_of(tok()));
       bump();
