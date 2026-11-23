@@ -103,14 +103,14 @@ std::optional<std::string> first_input(std::span<const std::string> argv);
 // names for them); none when its command line is malformed.
 std::vector<std::string> sources_of(const Request& r);
 
-// The request that checks one of `r`'s units: `-fsyntax-only` with `r`'s preprocessing and
-// language options, `source` (absolute, lexically normal) spelled as `r` spells it. Nothing when
-// `r` does not compile `source`.
+// The `-fsyntax-only` request for one of `r`'s units keeps preprocessing and language options
+// and warning controls. It spells `source` (absolute and lexically normal) as `r` spells it.
+// Returns nothing when `r` does not compile `source`.
 std::optional<Request> check_one(const Request& r, std::string_view source);
 
 // The check of `source` (absolute) with another compiler's command line (`compile_commands.json`'s,
-// daemon design §6.4; `args` without the compiler's name), relative to `cwd`: its preprocessing
-// options and template depth, as for `check_one`; its other options are that compiler's.
+// daemon design §6.4; `args` without the compiler's name), relative to `cwd`. It keeps supported
+// preprocessing options, language modes and warning controls, as for `check_one`.
 Request check_command(std::span<const std::string> args, std::string cwd, std::string_view source,
                       std::vector<std::pair<std::string, std::string>> env);
 
@@ -132,11 +132,57 @@ std::optional<pipeline::FileOffset> definition(const Request& r, pp::Host& host,
 namespace ycxx::compile {
 namespace {
 
+enum class WarningFlag : std::uint8_t { all, extra, multichar, attributes, sized_deallocation, count };
+
+struct WarningSelection {
+  WarningFlag flag;
+  bool enabled;
+};
+
+std::optional<WarningSelection> warning_option(std::string_view arg) {
+  if (!arg.starts_with("-W")) return std::nullopt;
+  arg.remove_prefix(2);
+  const bool enabled = !arg.starts_with("no-");
+  if (!enabled) arg.remove_prefix(3);
+  constexpr std::pair<std::string_view, WarningFlag> names[] = {
+      {"all", WarningFlag::all}, {"extra", WarningFlag::extra}, {"multichar", WarningFlag::multichar},
+      {"attributes", WarningFlag::attributes}, {"sized-deallocation", WarningFlag::sized_deallocation}};
+  for (const auto& [name, flag] : names)
+    if (arg == name) return WarningSelection{flag, enabled};
+  return std::nullopt;
+}
+
+// Warning flags affect presentation only. Requests with different selections can reuse the
+// same preprocessing and semantic results.
+class WarningOptions {
+ public:
+  void select(WarningSelection selection) { flags_[std::to_underlying(selection.flag)] = selection.enabled; }
+
+  bool emits(bool error, lex::Warning warning) const {
+    if (error) return true;
+    const auto selected = [this](WarningFlag flag) { return flags_[std::to_underlying(flag)]; };
+    // The last selection of a flag wins. A specific warning overrides its group in either order.
+    switch (warning) {
+      case lex::Warning::uncontrolled: return true;
+      case lex::Warning::multichar:
+        return selected(WarningFlag::multichar).value_or(selected(WarningFlag::all).value_or(true));
+      case lex::Warning::attributes: return selected(WarningFlag::attributes).value_or(true);
+      case lex::Warning::sized_deallocation:
+        return selected(WarningFlag::sized_deallocation).value_or(selected(WarningFlag::extra).value_or(false));
+    }
+    std::unreachable();
+  }
+
+ private:
+  std::array<std::optional<bool>, std::to_underlying(WarningFlag::count)> flags_{};
+};
+
 // What the c++-compatible command line asks for.
 struct Options {
   enum class Stop { link, object, syntax, preprocess } stop = Stop::link;
   enum class Query { none, include, machine } query = Query::none;
   pp::Config pp;  // include paths, macros and target
+  WarningOptions warnings;
   bool nostdlib = false;
   bool nostdlibxx = false;  // `-nostdlib++`: no libycxx runtime in a Darwin link
   std::optional<std::string> output, interpreter;
@@ -228,6 +274,7 @@ std::expected<Options, std::string> parse_options(std::span<const std::string_vi
     else if (a == "-pedantic-errors" || a == "-freflection" || a == "-fcontracts" || a == "-fdiagnostics-plain-output" ||
              a == "-fno-color-diagnostics")
       continue;
+    else if (auto warning = warning_option(a)) o.warnings.select(*warning);
     else if (a.starts_with("-") && a != "-") return std::unexpected(std::format("unsupported option '{}'", a));
     else if (a.ends_with(".o")) add_operand(Kind::object, o.objects, a);
     else if (a.ends_with(".a")) add_operand(Kind::archive, o.archives, a);
@@ -336,8 +383,10 @@ std::optional<obj::archive::input> read_archive(const std::string& name, const s
 // reads).
 class Renderer {
  public:
-  Renderer(std::string& err, std::string_view path) : err_(&err), path_(path) {}
+  Renderer(std::string& err, std::string_view path, const WarningOptions& warnings)
+      : err_(&err), path_(path), warnings_(warnings) {}
   void diagnostic(const pipeline::Message& m) {
+    if (!warnings_.emits(m.error, m.warning)) return;
     std::format_to(std::back_inserter(*err_), "{}: {}: {}\n", m.where.empty() ? path_ : std::string_view(m.where),
                    m.error ? "error" : "warning", m.text);
   }
@@ -346,6 +395,7 @@ class Renderer {
  private:
   std::string* err_;
   std::string_view path_;
+  const WarningOptions& warnings_;
 };
 
 // The object a `-c` without `-o` writes: the source's file name with `.o`.
@@ -354,7 +404,8 @@ std::filesystem::path object_name(const std::string& source) {
 }
 
 // Preprocesses one source to `d.out` (`-E`), with no engine work; false after reporting errors.
-bool preprocess_unit(Done& d, const pp::Config& config, const std::string& path, const std::string& text) {
+bool preprocess_unit(Done& d, const pp::Config& config, const WarningOptions& warnings, const std::string& path,
+                     const std::string& text) {
   pp::Session& ps = pp::session_for(config);
   std::unique_lock lock(ps.mutex);
   auto [out, messages] = pp::preprocess_to_text(ps, text, path);
@@ -362,6 +413,7 @@ bool preprocess_unit(Done& d, const pp::Config& config, const std::string& path,
   d.out += out;
   bool errors = false;
   for (const pp::Message& m : messages) {
+    if (!warnings.emits(m.error, m.warning)) continue;
     std::format_to(std::back_inserter(d.err), "{}:{}:{}: {}: {}\n", m.file, m.line, m.column, m.error ? "error" : "warning",
                    m.text);
     errors = errors || m.error;
@@ -488,9 +540,8 @@ std::vector<std::string> split_words(std::string_view text) {
 
 namespace {
 
-// The arguments of `args` a check keeps: the preprocessing options, the template depth and the
-// class call ABI, and with `std` the language standard (ycxx's own command lines; another
-// compiler's may name one ycxx does not take).
+// A check keeps the preprocessing options, template depth, class call ABI and warning controls.
+// With `std` it also keeps the language standard. Another compiler may name one ycxx does not take.
 void checking_options(std::span<const std::string_view> args, bool std, std::vector<std::string>& out) {
   pp::Config scratch;
   for (std::size_t i = 0; i < args.size(); ++i) {
@@ -508,7 +559,7 @@ void checking_options(std::span<const std::string_view> args, bool std, std::vec
     } else if (args[i] == "-o" || args[i] == "--dynamic-linker") {
       ++i;
     } else if ((std && args[i].starts_with("-std=")) || args[i].starts_with("-ftemplate-depth=") ||
-               args[i].starts_with("-fclass-call-abi=")) {
+               args[i].starts_with("-fclass-call-abi=") || warning_option(args[i])) {
       out.emplace_back(args[i]);
     }
   }
@@ -573,7 +624,7 @@ Done run(const Request& r, pp::Host& host, pipeline::Session& session, const Sto
         failed = true;
         continue;
       }
-      failed = !preprocess_unit(d, config, s, *text) || failed;
+      failed = !preprocess_unit(d, config, opts->warnings, s, *text) || failed;
     }
     count_regions();
     if (failed) d.exit_status = 1;
@@ -672,7 +723,7 @@ Done run(const Request& r, pp::Host& host, pipeline::Session& session, const Sto
       failed = true;
       continue;
     }
-    Renderer render(d.err, path);
+    Renderer render(d.err, path, opts->warnings);
     for (const pipeline::Message& m : u.messages) render.diagnostic(m);
     if (u.front_failed) {
       failed = true;

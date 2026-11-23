@@ -67,13 +67,14 @@ void trace_describe(std::string& out, FileId f);
 Preprocessed preprocess(Session& s, std::string_view text, std::string_view path);
 Preprocessed preprocess(std::string_view text, std::string_view path = "<stdin>");
 // A diagnostic ready to print: the presumed file name, line and column (1-based, columns in
-// bytes), severity and message.
+// bytes), severity, message and warning category.
 struct Message {
   std::string file;
   u32 line = 0;
   u32 column = 0;
   bool error = true;
   std::string text;
+  lex::Warning warning = lex::Warning::uncontrolled;
 };
 Message message(Session& s, FileId file, std::string_view presumed, const Diag& d);
 // The same, from the text of the file the diagnostic is in and the spellings of the session that
@@ -425,8 +426,9 @@ Message message(const Spellings& s, std::string_view file_text, std::string_view
   // [cpp.line]: the presumed line and name its region resolved.
   if (d.presumed_line != 0) line = d.presumed_line;
   if (d.presumed_name) name = s.name(*d.presumed_name);
-  return Message{std::move(name), line, d.offset - *(at - 1) + 1, lex::message_of(d.kind).severity == lex::Severity::error,
-                 std::move(text)};
+  const auto spec = lex::message_of(d.kind);
+  return Message{std::move(name), line, d.offset - *(at - 1) + 1, spec.severity == lex::Severity::error,
+                 std::move(text), spec.warning};
 }
 
 std::pair<std::string, std::vector<Message>> preprocess_to_text(Session& s, std::string_view text, std::string_view path) {

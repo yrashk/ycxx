@@ -28,6 +28,7 @@ struct Message {
   std::string where;  // file:line:column
   // The region token it is at or before: messages are in this order, across files.
   std::uint32_t token = 0;
+  lex::Warning warning = lex::Warning::uncontrolled;
 
   void append_trace_error(std::string& out) const {
     if (!error) return;
@@ -1695,8 +1696,9 @@ engine::query_task<FrontResult> TuFront::run(engine::Ctx& cx, TuId tu) {
     std::vector<std::uint64_t> args;
     for (const engine::DiagArg& a : d.args) args.push_back(a.raw);
     const auto f = static_cast<std::uint16_t>(lex::file_level - d.at.item);
-    Message m{d.at.offset, lex::message_of(*kind).severity == lex::Severity::error, lex::render(*kind, args),
-              locations.at({f, 0, d.at.offset})};
+    const auto spec = lex::message_of(*kind);
+    Message m{d.at.offset, spec.severity == lex::Severity::error, lex::render(*kind, args),
+              locations.at({f, 0, d.at.offset}), 0, spec.warning};
     // The first token at or after the position in its file, else (a header of only directives)
     // the first token of a file included after it (files are numbered as they are first met).
     m.token = static_cast<std::uint32_t>(region.locs.size() - 1);
