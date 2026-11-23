@@ -1857,9 +1857,15 @@ public:
     std::optional<QualType> type;
   };
   static Scope global_scope() { return {EntityId::none, std::nullopt}; }
+  static bool competing_qualifier(EntityId ns, std::span<const ast::DeclSema> declarations) {
+    return std::ranges::any_of(declarations, [&](const ast::DeclSema& declaration) {
+      return declaration.entity != ns && (declaration.kind == ast::DeclKind::namespace_ || is_type(declaration.kind));
+    });
+  }
   // The first component of a nested-name-specifier, by unqualified lookup ([basic.lookup.qual]/1:
   // only namespaces, types and templates).
-  std::optional<Scope> scope_named(NameId n, std::optional<u32> enum_qualifier_at = std::nullopt) {
+  std::optional<Scope> scope_named(NameId n, std::optional<u32> enum_qualifier_at = std::nullopt,
+                                   bool* ambiguous_namespace = nullptr) {
     // A type template parameter as a nested-name-specifier names a dependent type
     // ([temp.dep.type]); in an instantiation, its argument.
     if (const ast::TemplateParamSema* p = template_param(n)) {
@@ -1880,7 +1886,11 @@ public:
       return std::nullopt;
     }
     if (auto t = class_name(n, true)) return Scope{std::nullopt, t};
-    if (auto ns = q_->namespace_named(n, directives())) return Scope{ns, std::nullopt};
+    if (auto ns = q_->namespace_named(n, directives())) {
+      if (ambiguous_namespace)
+        *ambiguous_namespace = competing_qualifier(*ns, q_->qualifier_decls(n, std::nullopt, directives()));
+      return Scope{ns, std::nullopt};
+    }
     return std::nullopt;
   }
   // A later component: a namespace or type member of a namespace, or a type nested in a class.
@@ -1918,7 +1928,8 @@ public:
     return std::nullopt;
   }
 
-  std::optional<Scope> scope_member(const Scope& s, NameId n, bool assume_dependent_type = true) {
+  std::optional<Scope> scope_member(const Scope& s, NameId n, bool assume_dependent_type = true,
+                                    bool* ambiguous_namespace = nullptr) {
     // A member type of the current instantiation is found where it is declared ([temp.dep.type]).
     // A type-only context can assume a dependent name denotes a type until instantiation
     // ([temp.res.general]).
@@ -1930,7 +1941,11 @@ public:
       if (auto t = direct_member_introduction(*s.ns, n)) return Scope{std::nullopt, t};
       auto members = q_->namespace_members(*s.ns, n);
       for (const ast::DeclSema& d : members) {
-        if (d.kind == ast::DeclKind::namespace_) return Scope{d.entity, std::nullopt};
+        if (d.kind == ast::DeclKind::namespace_) {
+          if (ambiguous_namespace)
+            *ambiguous_namespace = competing_qualifier(d.entity, members);
+          return Scope{d.entity, std::nullopt};
+        }
         if (is_type(d.kind)) return Scope{std::nullopt, d.type};
       }
       if (*s.ns == EntityId::none && members.empty())

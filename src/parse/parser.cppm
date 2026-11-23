@@ -1587,7 +1587,8 @@ public:
                                                bool check_injected_access = false,
                                                std::vector<TypeQualifier>* type_qualifiers = nullptr,
                                                bool* failed_qualifier = nullptr,
-                                               std::optional<u32>* committed_failure = nullptr) {
+                                               std::optional<u32>* committed_failure = nullptr,
+                                               std::optional<u32>* ambiguous_namespace = nullptr) {
     u32 j = start;
     std::optional<sema::Sema::Scope> s;
     if (kind(j) == Tk::kw_decltype && kind(j + 1) == Tk::l_paren) {
@@ -1606,7 +1607,9 @@ public:
       ++j;
     } else if (kind(j) == Tk::identifier && kind(j + 1) == Tk::coloncolon) {
       const std::optional<u32> at = lookup == QualifierLookup::elaborated_enum ? std::optional{pos() + j} : std::nullopt;
-      s = s_->scope_named(name_of(tok(j)), at);
+      bool ambiguous = false;
+      s = s_->scope_named(name_of(tok(j)), at, ambiguous_namespace ? &ambiguous : nullptr);
+      if (ambiguous) *ambiguous_namespace = j;
       if (!s) return std::nullopt;
       j += 2;
     } else if (auto t = template_id_scope(std::nullopt, j, /*scope=*/true, checked || check_injected_access,
@@ -1633,7 +1636,10 @@ public:
             continue;
           }
         }
-        auto m = s_->scope_member(*s, n);
+        bool ambiguous = false;
+        auto m = s_->scope_member(*s, n, /*assume_dependent_type=*/true,
+                                  ambiguous_namespace && !*ambiguous_namespace ? &ambiguous : nullptr);
+        if (ambiguous) *ambiguous_namespace = j;
         if (!m) return std::nullopt;
         if (member_pointer || checked) check_type_access(*s, n, pos() + j);
         else if (type_qualifiers && s->type) type_qualifiers->push_back({*s, n, pos() + j});
@@ -4257,9 +4263,10 @@ public:
     auto address = address_op_ && *address_op_ + 1 == begin ? address_op_ : std::nullopt;
     std::vector<TypeQualifier> type_qualifiers;
     std::optional<u32> committed_failure;
+    std::optional<u32> ambiguous_namespace;
     auto s = nested_name(0, next, /*member_pointer=*/false, substituting_partial_arguments || address.has_value(),
                          QualifierLookup::ordinary, /*check_injected_access=*/false, &type_qualifiers,
-                         /*failed_qualifier=*/nullptr, &committed_failure);
+                         /*failed_qualifier=*/nullptr, &committed_failure, &ambiguous_namespace);
     if (committed_failure) {
       for (u32 j = 0; j < *committed_failure; ++j) bump();
       while (is(Tk::identifier) || is(Tk::coloncolon)) bump();
@@ -4275,6 +4282,7 @@ public:
       while (is(Tk::identifier) || is(Tk::coloncolon)) bump();
       return {NodeId::none, begin, pos()};
     }
+    const NameId ambiguous_name = ambiguous_namespace ? name_of(tok(*ambiguous_namespace)) : s_->no_name();
     for (u32 j = 0; j < next; ++j) bump();
     u32 name_at = pos();
     bool operator_name = !suffix.empty() || literal_operator_ahead();
@@ -4332,8 +4340,11 @@ public:
         auto diags = s_->diag_count();
         auto c = s_->namespace_concept_for_expression(*s->ns, n, name_at);
         if (c || s_->has_error_since(diags)) {
+          if (ambiguous_namespace)
+            s_->diag(begin + *ambiguous_namespace, Diag::ambiguous_name,
+                     ambiguous_name);
           auto args = template_argument_list(nullptr, nullptr, /*expand_empty=*/true);
-          if (!c || !args) return {NodeId::none, begin, pos()};
+          if (!c || !args || ambiguous_namespace) return {NodeId::none, begin, pos()};
           return s_->concept_id_expr(*c, *args, begin, pos(),
                                      class_template_base && in_template_value_argument_ && !s_->unevaluated);
         }
