@@ -1,16 +1,6 @@
 #pragma once
 
-struct Root {
-  virtual int step() = 0;
-};
+#include "base.hpp"
 
-struct Owner : Root {
-  int payload;
-  int step() override;
-};
-
-extern "C" int dispatch(Root* source);
-extern "C" const Root* borrow();
-extern "C" const void* complete_address();
-extern "C" const Owner* identity(Owner* source);
-extern "C" const Root* upcast(Owner* source);
+extern "C" const D* identity(D* source);
+extern "C" const B* upcast(D* source);

@@ -30,9 +30,9 @@ Derived* downcast(Base* source) {
 '''
 TYPEID = 'namespace std { class type_info; }\nvoid inspect() { (void)typeid(int); }\n'
 THROW = 'extern "C" void throw_int() { throw 17; }\n'
-TABLE = '_ZTV5Owner'
-KEY = '_ZN5Owner4stepEv'
-DESCRIPTORS = {'_ZTI4Root', '_ZTI5Owner', '_ZTS4Root', '_ZTS5Owner'}
+TABLE = '_ZTV1D'
+KEY = '_ZN1D1fEv'
+DESCRIPTORS = ('_ZTI1B', '_ZTI1D', '_ZTS1B', '_ZTS1D')
 
 
 def disabled_diagnostic(message):
@@ -98,21 +98,26 @@ def compile_database(world, scope):
     expect(editor.finish(), 0, 'no-rtti LSP shutdown')
 
 
+def check_no_class_rtti(elf):
+    unwanted = [name for name in elf.names
+                if name.startswith(('_ZTI', '_ZTS')) or 'type_info' in name or name == '__dynamic_cast']
+    assert not unwanted, (elf.path, unwanted)
+
+
 def check_table(elf, enabled, bindings=(0x11,)):
     # Itanium ABI §2.5.2. The primary table's address point follows two 64-bit header words.
     table = elf.object(TABLE, 24, bindings)
-    assert '_ZTV4Root' not in elf.names, elf.path
+    assert '_ZTV1B' not in elf.names, elf.path
     assert elf.symbol(KEY).section != 0, elf.path
     data = elf.contents(table.section)[table.value:table.value + table.size]
     slots = {16: (1, KEY, 0)}  # R_X86_64_64
     if enabled:
-        assert data[:8] == b'\0' * 8 and DESCRIPTORS <= set(elf.names), elf.path
-        slots[8] = (1, '_ZTI5Owner', 0)
+        assert data[:8] == b'\0' * 8, elf.path
+        assert all(elf.symbol(name).section != 0 for name in DESCRIPTORS), elf.path
+        slots[8] = (1, '_ZTI1D', 0)
     else:
         assert data[:16] == b'\0' * 16, elf.path
-        unwanted = [name for name in elf.names
-                    if name.startswith(('_ZTI', '_ZTS')) or 'type_info' in name or name == '__dynamic_cast']
-        assert not unwanted, (elf.path, unwanted)
+        check_no_class_rtti(elf)
     elf.check_words(table, slots)
     return table.info, table.other
 
@@ -145,17 +150,19 @@ def linux_objects(world, scope, libycxx, host):
         assert result.returncode == 0, (args, result)
 
     fixtures = Path(__file__).resolve().with_suffix('')
-    for name in ('types.hpp', 'owner.cpp', 'peer.cpp'):
+    owned = pipeline / 'linux_owned_derived_vtable'
+    for name in ('base.hpp', 'key.cpp'):
+        (scope / name).write_bytes((owned / name).read_bytes())
+    for name in ('types.hpp', 'casts.cpp', 'peer.cpp'):
         (scope / name).write_bytes((fixtures / name).read_bytes())
     snapshots = {}
     ownership = []
     for flags, enabled in MODES:
-        elf = object_file('owner.cpp', 'owner.o', *flags, resident=True)
+        elf = object_file('key.cpp', 'owner.o', *flags, resident=True)
         ownership.append(check_table(elf, enabled=enabled))
         assert elf.data == snapshots.setdefault(enabled, elf.data), flags
     assert snapshots[True] != snapshots[False]
     assert all(entry == ownership[0] for entry in ownership), ownership
-    (scope / 'disabled.o').write_bytes(snapshots[False])
 
     (scope / 'throw.cpp').write_text(THROW)
     check_throw(object_file('throw.cpp', 'throw.o', *DISABLED))
@@ -166,10 +173,24 @@ def linux_objects(world, scope, libycxx, host):
     pal = object_file(libycxx / 'src/freestanding/pal/debugger_present.cpp', 'debugger.o', *pinned_flags)
     assert pal.symbol('ycxx_pal_debugger_present').section != 0, pal.path
 
-    native(host, '-std=c++26', '-pedantic-errors', '-fno-exceptions', *DISABLED,
-           '-fno-lto', '-fno-pie', '-c', 'peer.cpp', '-o', 'peer.o')
-    native(host, '-fno-lto', '-no-pie', 'peer.o', 'disabled.o', 'marker.o', 'debugger.o', '-o', 'program')
-    native('./program')
+    native_flags = (host, '-std=c++26', '-pedantic-errors', '-fno-exceptions', *DISABLED, '-fno-lto', '-fno-pie')
+    native(*native_flags, '-c', 'peer.cpp', '-o', 'peer.o')
+    native(*native_flags, '-c', owned / 'dispatch.cpp', '-o', 'dispatch.o')
+    for flags, enabled in (((), True), (DISABLED, False)):
+        (scope / 'owner.o').write_bytes(snapshots[enabled])
+        check_no_class_rtti(object_file('casts.cpp', 'casts.o', *flags))
+        native(host, '-fno-lto', '-no-pie', 'peer.o', 'dispatch.o', 'owner.o', 'casts.o',
+               'marker.o', 'debugger.o', '-o', 'program')
+        native('./program')
+
+    borrowed = pipeline / 'linux_dynamic_cast_void'
+    (scope / 'borrowed').mkdir()
+    for name in ('base.hpp', 'consumer.cpp'):
+        (scope / 'borrowed' / name).write_bytes((borrowed / name).read_bytes())
+    check_no_class_rtti(object_file('borrowed/consumer.cpp', 'borrowed.o', *DISABLED))
+    native(*native_flags, '-c', borrowed / 'peer.cpp', '-o', 'borrowed-peer.o')
+    native(host, '-fno-lto', '-no-pie', 'borrowed.o', 'borrowed-peer.o', '-o', 'borrowed-program')
+    native('./borrowed-program')
 
 
 def main():
