@@ -60,6 +60,7 @@ enum class ObjectFormat : u8 { macho, elf };
 // preconditions are checked by each operation's own analysis.
 enum class NativeOperation : std::uint64_t {
   derived_virtual_destructor = std::uint64_t{1} << 0,
+  explicit_pic = std::uint64_t{1} << 1,  // permits the source mode that defines __PIC__ and __pic__
 };
 
 struct Target {
@@ -313,7 +314,8 @@ inline constexpr Target x86_64_linux{
     .va_list = VaList::sysv_x86_64,
     .call_triviality = CallTriviality::itanium,
     .apple_calls = false,
-    .native_operations = std::to_underlying(NativeOperation::derived_virtual_destructor),
+    .native_operations = std::to_underlying(NativeOperation::derived_virtual_destructor) |
+                         std::to_underlying(NativeOperation::explicit_pic),
 };
 
 constexpr const Target* target_for_triple(std::string_view triple) {
