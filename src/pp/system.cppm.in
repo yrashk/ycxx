@@ -1,7 +1,7 @@
 // The system include directories of this build (configured by CMake): libycxx's headers, the
-// ones libycxx's build generated, ycxx's resource headers (Linux's own, then those every target
-// shares), and the target's C library headers. Linux uses native system directories and Darwin
-// uses a selected SDK.
+// ones libycxx's build generated, the compiler resource headers, and the target's C library
+// headers. Native Linux builds can use the host include directories, and Darwin targets use a
+// selected SDK.
 export module ycxx.pp:system;
 
 import std;
@@ -24,7 +24,10 @@ inline constexpr const ast::Target* native_target = @YCXXC_NATIVE_TARGET@;
 
 // The primary compiler resource directory for a supported target.
 std::string_view resource_include_dir(const ast::Target& target) {
-  return target.triple == ast::x86_64_linux.triple ? "@YCXX_LINUX_RESOURCE_INCLUDE@" : common_resource_include;
+  // The Linux resource directory includes the AMD64 definition of max_align_t.
+  if (target.operating_system == ast::OperatingSystem::linux_ && target.architecture == ast::Architecture::x86_64)
+    return "@YCXX_LINUX_RESOURCE_INCLUDE@";
+  return common_resource_include;
 }
 
 // `sdkroot` is the request's absolute Darwin SDK override. An empty value uses the configured SDK.
@@ -34,15 +37,17 @@ std::vector<std::string> system_dirs(const ast::Target& target, std::string_view
     dirs.emplace_back("@YCXX_LIBYCXX_INCLUDE@");
     dirs.emplace_back("@YCXX_LIBYCXX_GENERATED_INCLUDE@");
   }
-  if (target.triple == ast::x86_64_linux.triple) {
-    dirs.emplace_back(resource_include_dir(target));
-    dirs.emplace_back(common_resource_include);
-    if (native_target == &ast::x86_64_linux) {
-      dirs.push_back(std::format("/usr/include/{}", target.multiarch));
+  const auto resource = resource_include_dir(target);
+  dirs.emplace_back(resource);
+  if (resource != common_resource_include) dirs.emplace_back(common_resource_include);
+  if (target.operating_system == ast::OperatingSystem::linux_) {
+    // Use the host C library only for the configured native target.
+    if (native_target && native_target->triple == target.triple) {
+      if (!target.multiarch.empty())
+        dirs.push_back(std::format("/usr/include/{}", target.multiarch));
       dirs.push_back("/usr/include");
     }
-  } else if (target.triple == ast::aarch64_darwin.triple) {
-    dirs.emplace_back(resource_include_dir(target));
+  } else if (target.operating_system == ast::OperatingSystem::darwin) {
     namespace fs = std::filesystem;
     auto sdk = fs::path(sdkroot.empty() ? std::string_view("@CMAKE_OSX_SYSROOT@") : sdkroot).lexically_normal();
     std::error_code ec;
