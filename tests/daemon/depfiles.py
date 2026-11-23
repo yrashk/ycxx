@@ -127,20 +127,50 @@ def output_integrity(world, scope):
     source = scope / 'integrity.cpp'
     source.write_text('int staged_value() { return 41; }\n')
     obj = scope / 'real/t.o'
-    args = [*TARGET, '-c', source.name, '-o', 'real/t.o']
+    prior_dep = scope / 'real/t.d'
+    args = [*TARGET, '-c', source.name, '-o', 'real/t.o', '-MD']
     result = world.cxx(args, scope, world.daemon, timeout=30)
     assert result == (0, b'', b''), result
     original = obj.read_bytes()
     assert original.startswith(b'\x7fELF')
+    prior_report = prior_dep.read_bytes()
+    assert b'integrity.cpp' in prior_report
+    prior_stamp = prior_dep.stat().st_mtime_ns
 
     source.write_text('int staged_value() { return 43; }\n')
-    # The first path aliases the object. The second cannot be staged at all.
-    for depfile in ('alias/t.o', 'absent-dir/t.d'):
-        command = [*args, '-MD', '-MF', depfile]
+
+    def reject_output(depfile, env):
+        result = world.cxx([*args, '-MF', depfile], scope, env, timeout=30)
+        assert result[0] == 1 and b'error:' in result[2], (depfile, result)
+        assert prior_dep.read_bytes() == prior_report and prior_dep.stat().st_mtime_ns == prior_stamp
+
+    # Path aliases and a missing staging directory must preserve the prior pair.
+    depfiles = ['alias/t.o', 'absent-dir/t.d']
+    case_alias = scope / 'real/T.o'
+    # PARITY: by design: this alias exists only on a case-insensitive scratch filesystem.
+    if case_alias.is_file() and case_alias.samefile(obj):
+        depfiles.append('real/T.o')
+    for depfile in depfiles:
         for env in (world.cold, world.daemon):
-            result = world.cxx(command, scope, env, timeout=30)
-            assert result[0] == 1 and b'error:' in result[2], (depfile, result)
+            reject_output(depfile, env)
             assert obj.read_bytes() == original, depfile
+
+    # A regular staged depfile cannot replace this directory, even with both parents present.
+    blocked = scope / 'deps/blocked.d'
+    blocked.mkdir(parents=True)
+    guard = blocked / 'guard'
+    guard.write_text('existing depfile entry\n')
+    link = blocked / 'prior-depfile'
+    link.symlink_to(os.path.relpath(prior_dep, blocked))
+    entry = blocked.stat()
+    for env in (world.cold, world.daemon):
+        if not obj.exists():
+            obj.write_bytes(original)
+        reject_output('deps/blocked.d', env)
+        assert blocked.is_dir() and not blocked.is_symlink() and os.path.samestat(entry, blocked.stat())
+        assert guard.read_text() == 'existing depfile entry\n'
+        assert link.is_symlink() and link.samefile(prior_dep)
+        assert (not obj.exists() and not obj.is_symlink()) or obj.read_bytes() == original
 
 
 def ninja_rebuild(ninja, compiler, scope, env):
