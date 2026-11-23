@@ -809,9 +809,15 @@ public:
       class_heads_.emplace(item, d);
     }
   }
+  const sema::EnumRec* defining_enum(EntityId e) const {
+    for (const auto* active = defining_enum_; active; active = active->previous)
+      if (active->entity == e) return &active->record;
+    return nullptr;
+  }
   // Template operations at the end of the unit, whose templates' declarations it knows.
   sema::Templates templates() {
     sema::Templates t(*w_, classes_);
+    t.defining_enum = [this](EntityId e) { return defining_enum(e); };
     t.template_decl = [this](EntityId e) { return declaration(e, end()); };
     t.variable_constant = [this](EntityId spec) { return constant_value(spec, end()); };
     t.variable_global = [this](EntityId spec) { return global(spec, end()); };
@@ -1853,11 +1859,7 @@ public:
   const sema::Classes& classes() override { return p_->classes(); }
   sema::CopyAssignment require_copy_assignment(EntityId f) override { return p_->require_copy_assignment(f); }
   const sema::ClassRec& publish_class(EntityId c, sema::ClassRec r) override { return p_->publish_class(c, std::move(r), item_); }
-  const sema::EnumRec* defining_enum(EntityId e) override {
-    for (const auto* active = p_->defining_enum_; active; active = active->previous)
-      if (active->entity == e) return &active->record;
-    return nullptr;
-  }
+  const sema::EnumRec* defining_enum(EntityId e) override { return p_->defining_enum(e); }
   std::set<EntityId> uncertain_object_layouts() override { return p_->uncertain_object_layouts(); }
   bool peer_pure_dispatch(EntityId cls) override { return p_->peer_pure_dispatch(cls); }
   void use_typed_dynamic_cast() override { p_->has_typed_dynamic_cast_ = true; }
