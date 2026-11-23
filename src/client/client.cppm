@@ -206,12 +206,7 @@ std::expected<compile::Done, std::string> through_daemon(const compile::Request&
 // `compile::finish` for `--trace-engine=json`, where every stderr line is JSON: outputs written,
 // stdout as it is, the diagnostics and exit status as one line.
 int finish_json(compile::Done& d) {
-  for (const compile::Output& o : d.outputs) {
-    if (auto err = pipeline::write_file(o.path, o.bytes, o.executable)) {
-      d.err += std::format("ycxx: error: {}\n", *err);
-      d.exit_status = 1;
-    }
-  }
+  compile::write_outputs(d);
   std::cout << d.out << std::flush;
   std::println(std::cerr, R"({{"exit_status":{},"diagnostics":{}}})", d.exit_status, trace::json_string(d.err));
   return d.exit_status;
@@ -352,10 +347,8 @@ int watch_builds(compile::Request r, bool verbose, TraceMode mode) {
       std::uint64_t revision = 0;
       if (d) {
         revision = d->report.started_at;
-        for (const compile::Output& o : d->outputs) {
-          if (auto err = pipeline::write_file(o.path, o.bytes, o.executable)) done.text += std::format("ycxx: error: {}\n", *err);
-        }
-        done.text = d->out + d->err + done.text;
+        compile::write_outputs(*d);
+        done.text = d->out + d->err;
         if (done.text.empty()) done.text = d->exit_status == 0 ? "built, no diagnostics" : "failed";
       } else {
         done.text = "the daemon could not build it: " + d.error();
