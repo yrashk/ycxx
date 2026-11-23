@@ -246,6 +246,9 @@ What is true of the code today. Work in progress and its owners are tracked in
     on the directive and cause a probe to return `__STDC_EMBED_NOT_FOUND__` (#473).
 - Predefined macros (`:predefined`, DECISIONS §1.5):
   - `__ycxx__` and its version, `__GNUC__` 4.2.1 (#229), and the draft's macros;
+  - `__STDC_HOSTED__` is `1` by default and `0` with `-ffreestanding`. The compiler and
+    editor honor the flag, and the mode is part of the source configuration.
+    [#973](https://github.com/yrashk/ycxx/issues/973) · [Design](docs/design/freestanding-mode.md)
   - a feature-test table, including `__cpp_pp_embed`;
   - the target's macros, generated from `ast::Target` and checked against Clang on AArch64
     Darwin and x86-64 Linux (`tests/own/pp/predefined-target*.pp.cpp`, #132);
