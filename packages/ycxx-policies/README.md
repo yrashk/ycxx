@@ -336,9 +336,10 @@ fragment across source inputs.
 Start with `ycxx cxx -fcheck-policies -fsyntax-only -I/path/to/include adapter.cpp caller.cpp`.
 For separate builds, compile the caller and provider with `-fcheck-policies -c`, then pass
 the explicit objects to `ycxx cxx -fcheck-policies` at the final link. The provider's
-verified bound must match the declared bound used by the caller. A trusted adapter must
-use the same declared bound at every checked call site. The link also accepts sources
-alongside objects.
+verified bound must match the declared bound used by the caller. For a trusted adapter,
+the checked link compares the declarations used by callers. You are responsible for
+ensuring the adapter implementation stays within that bound. The link also accepts
+sources alongside objects.
 
 A shared observer can carry both `ownership::verified_observes` and `effects::bound`.
 When it forwards the borrow to another verified observer, the checked call carries both
