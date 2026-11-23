@@ -1,5 +1,4 @@
 // #917 [expr.type.conv], [temp.res.general], [stmt.ambig].
-// EXIT: 0
 struct Reading {
   int value;
   Reading() : value(4) {}

@@ -1,5 +1,4 @@
 // #917 [expr.type.conv], [temp.variadic].
-// EXIT: 0
 struct Packet {
   int value;
   Packet() : value(5) {}
