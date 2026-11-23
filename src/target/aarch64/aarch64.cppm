@@ -388,7 +388,11 @@ std::expected<obj::object, CodegenError> assemble(std::string name, std::span<co
       auto& unwind = o.sections[*frames];
       auto fields = append_eh_frame(unwind, cies, f.code, personality);
       if (!fields) return std::unexpected(CodegenError{f.entity, fields.error()});
-      unwind.relocate(obj::reloc_kind::abs64, fn_symbol, -static_cast<std::int64_t>(fields->pc), fields->pc, frame_base);
+      // A weak definition's name may resolve to another object's code, but this FDE describes
+      // these bytes: name them with a local label (as the ELF path does).
+      const auto code = o.symbols[fn_symbol].weak ? o.define(std::format("ltmp_code_{}", base), obj::binding::local, *text, base)
+                                                  : fn_symbol;
+      unwind.relocate(obj::reloc_kind::abs64, code, -static_cast<std::int64_t>(fields->pc), fields->pc, frame_base);
       if (fields->lsda && tables) {
         auto table = cleanup_lsda(f.code);
         if (!table) return std::unexpected(CodegenError{f.entity, table.error()});

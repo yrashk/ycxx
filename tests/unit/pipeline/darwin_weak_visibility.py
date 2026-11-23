@@ -87,6 +87,56 @@ extern int plain_value;
 int main() { return read_values() + plain_value; }
 '''
 
+# Weak definitions that unwind: one with a cleanup, one cleanup-free. Their frames must describe
+# their own code, whichever definition the name resolves to.
+WEAK_UNWIND = '''\
+extern "C" void may_throw();
+struct Guard {
+  int* count;
+  ~Guard() noexcept { ++*count; }
+};
+[[__gnu__::__weak__]] void guarded(int* count) {
+  Guard guard{count};
+  may_throw();
+}
+[[__gnu__::__weak__]] void forward() { may_throw(); }
+'''
+
+STRONG_UNWIND = '''\
+extern "C" void may_throw();
+extern int pending;
+void forward() {
+  if (pending) ++pending;
+  may_throw();
+}
+'''
+
+# Clang's: the throw and the handlers, which ycxx does not compile on arm64 Darwin yet (#648).
+# With an argument, only the paths that do not throw: ycxx's linker does not keep Clang's
+# compact unwind entries for the handlers yet (#72).
+UNWIND_HOST = '''\
+int pending;
+extern "C" void may_throw() { if (pending) throw pending; }
+void guarded(int*);
+void forward();
+int main(int argc, char**) {
+  int count = 0;
+  if (argc > 1) {
+    guarded(&count);
+    forward();
+    return count == 1 ? 0 : 6;
+  }
+  pending = 7;
+  try { guarded(&count); return 1; } catch (int v) { if (v != 7 || count != 1) return 2; }
+  pending = 9;
+  try { forward(); return 3; } catch (int v) { if (v != 9 + DELTA) return 4; }
+  pending = 0;
+  guarded(&count);
+  if (DELTA == 0) forward();
+  return count == 2 ? 0 : 5;
+}
+'''
+
 WEAK, STRONG = 'weak external', 'external'
 WEAK_HIDDEN, HIDDEN = 'weak private external', 'private external'
 
@@ -138,6 +188,35 @@ def main():
             run('./host-program', status=31)
         run(*options, 'weak-main.o', 'strong-provider.o', 'duplicate-provider.o', '-o', 'program', status=1,
             error='duplicate')
+
+        # Unwinding through weak definitions into Clang's handlers, alone and with a strong
+        # definition that wins, under both linkers.
+        (scope / 'weak-unwind.cpp').write_text(WEAK_UNWIND)
+        (scope / 'strong-unwind.cpp').write_text(STRONG_UNWIND)
+        (scope / 'unwind-host.cpp').write_text(UNWIND_HOST)
+        compile('weak-unwind.cpp', 'weak-unwind.o')
+        compile('strong-unwind.cpp', 'strong-unwind.o')
+        expect('weak-unwind.o', {'__Z7guardedPi': WEAK, '__Z7forwardv': WEAK})
+        (scope / 'plain-unwind.cpp').write_text(WEAK_UNWIND.replace('[[__gnu__::__weak__]] ', ''))
+        compile('plain-unwind.cpp', 'plain-unwind.o')
+
+        def frame_bytes(program):
+            """The size of the program's __TEXT,__eh_frame."""
+            lines = run('otool', '-l', program).splitlines()
+            at = next(k for k, line in enumerate(lines) if line.split() == ['sectname', '__eh_frame'])
+            return next(int(line.split()[1], 16) for line in lines[at:] if line.split()[0] == 'size')
+
+        run(host_cxx, '-std=c++26', '-DDELTA=0', '-c', 'unwind-host.cpp', '-o', 'unwind-host.o')
+        run(*options, 'unwind-host.o', 'plain-unwind.o', '-o', 'plain-program')
+        run(*options, 'unwind-host.o', 'weak-unwind.o', '-o', 'program')
+        assert frame_bytes('program') == frame_bytes('plain-program'), 'a weak definition lost its frame'
+        for delta, objects in ((0, ('weak-unwind.o',)), (1, ('weak-unwind.o', 'strong-unwind.o')),
+                               (1, ('strong-unwind.o', 'weak-unwind.o'))):
+            run(host_cxx, '-std=c++26', f'-DDELTA={delta}', '-c', 'unwind-host.cpp', '-o', 'unwind-host.o')
+            run(*options, 'unwind-host.o', *objects, '-o', 'program')
+            run('./program', 'quiet')
+            run(host_cxx, 'unwind-host.o', *objects, '-o', 'host-program')
+            run('./host-program')
 
         # A qualified definition takes its namespace's visibility; a caller in another object
         # still reaches it, and the default one stays exported.
