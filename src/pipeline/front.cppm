@@ -956,6 +956,7 @@ bool native_virtual_layouts(TranslationUnit& tu, parse::Program& program, sema::
                             const std::set<EntityId>& uncertain_layouts) {
   const auto& classes = program.classes();
   std::set<EntityId> automatic_primary_bases;
+  std::set<EntityId> derived_destructor_classes;
   if (classes.has_virtual_layouts()) {
     for (EntityId c : classes.classes()) {
       const auto& record = classes.rec(c);
@@ -971,15 +972,20 @@ bool native_virtual_layouts(TranslationUnit& tu, parse::Program& program, sema::
           tu.owned_virtual_table = OwnedVirtualTable{sema::virtual_table_entity(world, c), {*key}, base};
         automatic_primary_bases.insert(base);
       }
-      if (const auto destructor = program.derived_virtual_destructor_producer(c)) {
-        if (tu.owned_virtual_table || uncertain_layouts.contains(c) || uncertain_layouts.contains(destructor->base) ||
+      if (const auto destructor = program.derived_virtual_destructor_ownership(c)) {
+        if ((destructor->owns_derived_key && tu.owned_virtual_table) ||
+            uncertain_layouts.contains(c) || uncertain_layouts.contains(destructor->base) ||
             uncertain_layouts.contains(destructor->destructor) || uncertain_layouts.contains(destructor->base_destructor)) {
           block_virtual_emission(tu, program, record);
           return false;
         }
-        const auto deleting = destructor_variant(world, destructor->destructor, sema::EntityKind::deleting_destructor);
-        tu.owned_virtual_table = OwnedVirtualTable{sema::virtual_table_entity(world, c),
-                                                   {destructor->destructor, deleting}, destructor->base, true};
+        derived_destructor_classes.insert(c);
+        derived_destructor_classes.insert(destructor->base);
+        if (destructor->owns_derived_key) {
+          const auto deleting = destructor_variant(world, destructor->destructor, sema::EntityKind::deleting_destructor);
+          tu.owned_virtual_table = OwnedVirtualTable{sema::virtual_table_entity(world, c),
+                                                     {destructor->destructor, deleting}, destructor->base, true};
+        }
       }
     }
   }
@@ -1003,8 +1009,7 @@ bool native_virtual_layouts(TranslationUnit& tu, parse::Program& program, sema::
     const auto& record = classes.rec(c);
     if (!record.layout_requires_virtual_support) continue;
     if (record.peer_automatic_primary_base != EntityId::none || automatic_primary_bases.contains(c)) continue;
-    if (const auto& owned = tu.owned_virtual_table; owned && owned->peer_base_rtti &&
-        (c == owned->primary_base || c == world.entities.rec(owned->entity).scope)) continue;
+    if (derived_destructor_classes.contains(c)) continue;
     if (!uncertain_layouts.contains(c) && program.peer_root_destructor_producer(c)) continue;
     // Check the full unit even if a pure call was admitted before a later redeclaration.
     if (!uncertain_layouts.contains(c) && program.peer_pure_dispatch(c)) continue;
@@ -1285,12 +1290,13 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
       tu.functions.push_back({d.entity, d, body, program.id(k), it.body_begin - it.begin, program.this_type(d)});
       const auto& entity = world.entities.rec(d.entity);
       const bool virtual_destructor = entity.kind == sema::EntityKind::destructor && d.is_virtual;
-      const auto derived = virtual_destructor ? program.derived_virtual_destructor_producer(entity.scope) : std::nullopt;
-      if (virtual_destructor && (derived || program.peer_root_destructor_producer(entity.scope))) {
+      const auto derived = virtual_destructor ? program.derived_virtual_destructor_ownership(entity.scope) : std::nullopt;
+      const bool derived_producer = derived && derived->owns_derived_key;
+      if (virtual_destructor && (derived_producer || program.peer_root_destructor_producer(entity.scope))) {
         auto& complete = tu.functions.back();
         const ast::Loc location{complete.item, complete.body_offset};
         std::uint64_t object_size = world.target.pointer_size;
-        if (derived) {
+        if (derived_producer) {
           const auto base_entry = destructor_variant(world, derived->base_destructor, sema::EntityKind::base_object_destructor);
           if (!lower_derived_destructor_body(world, complete, *derived, base_entry)) {
             block_virtual_emission(tu, program, classes.rec(entity.scope));

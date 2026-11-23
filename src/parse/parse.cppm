@@ -424,8 +424,9 @@ public:
     EntityId destructor;
     EntityId base_destructor;
     u64 size;
+    bool owns_derived_key = false;
   };
-  std::optional<DerivedVirtualDestructor> derived_virtual_destructor_producer(EntityId cls) const;
+  std::optional<DerivedVirtualDestructor> derived_virtual_destructor_ownership(EntityId cls) const;
   // Whether an ordinary written definition can also supply its ELF base-object entry point (#136).
   bool supports_base_object_variant(EntityId function, const std::set<EntityId>& uncertain_layouts) const;
 
@@ -7994,15 +7995,20 @@ std::optional<Program::DerivedVirtualDestructor> Program::derived_virtual_destru
   return DerivedVirtualDestructor{edge.cls, derived->destructor, base->destructor, layout.size};
 }
 
-std::optional<Program::DerivedVirtualDestructor> Program::derived_virtual_destructor_producer(EntityId cls) const {
-  const auto layout = derived_virtual_destructor_layout(cls);
+std::optional<Program::DerivedVirtualDestructor> Program::derived_virtual_destructor_ownership(EntityId cls) const {
+  auto layout = derived_virtual_destructor_layout(cls);
   if (!layout) return std::nullopt;
   const auto derived = decls_.find(std::to_underlying(layout->destructor));
   const auto base = decls_.find(std::to_underlying(layout->base_destructor));
   const auto definition = definitions_.find(std::to_underlying(layout->destructor));
   if (base == decls_.end() || base->second.size() != 1 || definitions_.contains(std::to_underlying(layout->base_destructor)) ||
-      derived == decls_.end() || derived->second.size() != 2 || definition == definitions_.end() ||
-      !in_global_scope(definition->second)) return std::nullopt;
+      derived == decls_.end()) return std::nullopt;
+  if (definition == definitions_.end()) {
+    if (derived->second.size() != 1) return std::nullopt;
+  } else {
+    if (derived->second.size() != 2 || !in_global_scope(definition->second)) return std::nullopt;
+    layout->owns_derived_key = true;
+  }
   return layout;
 }
 
