@@ -1085,6 +1085,13 @@ public:
             return false;
           if (!ins().values.is<ast::VInt>(ar.bound_value) && !ins().values.is<ast::VDepParam>(ar.bound_value)) return false;
           QualType size = types().canonical(types().builtin(Builtin::unsigned_long));
+          // Keep the array-bound type deduction as a fallback until all
+          // compared parameters have supplied their ordinary deductions.
+          if (array_bound_types_ && !head_.empty() && head_.front().depth == depth && p.index < head_.size()) {
+            TypeRec bound_type = types().rec(types().canonical(head_[p.index].type));
+            if (bound_type.kind == TypeKind::template_param && bound_type.depth == depth)
+              array_bound_types_->insert(bound_type.index);
+          }
           if (!bind(out, p.index, {TemplateArgKind::value, size, ar.bound_value})) return false;
           return deduce(pr.inner, ar.inner, depth, out, {.more_cv = allow.more_cv});
         }
@@ -1742,11 +1749,12 @@ public:
       return std::nullopt;
     };
     std::vector<std::optional<TemplateArg>> out12(p2.size()), out21(p1.size());
+    std::set<u16> bound_types12, bound_types21;
     // From position `i` on, where one of them has a function parameter pack: P's pack's pattern
     // deduced from every remaining A at once; an A from a pack deduces no P that is not one
     // ([temp.deduct.partial]/8).
     auto rest = [&](const TypeRec& ta, const Bindings& ba, const TypeRec& tp, std::span<const ast::TemplateParamSema> pp,
-                    std::vector<std::optional<TemplateArg>>& out, std::size_t i) {
+                    std::vector<std::optional<TemplateArg>>& out, std::set<u16>& bound_types, std::size_t i) {
       auto xp = param_at(tp, i);
       if (!xp || !xp->pack) return false;
       std::vector<TemplateArg> as;
@@ -1758,7 +1766,7 @@ public:
         as.push_back(y->pack ? type_arg(types().pack_expansion(strip(*a))) : type_arg(strip(*a)));
         if (y->pack) break;
       }
-      Deducing deducing(this, pp);
+      Deducing deducing(this, pp, false, &bound_types);
       return deduce_expansion(type_arg(strip(xp->type)), as, pp[0].depth, out);
     };
     bool all12 = true, all21 = true;
@@ -1766,15 +1774,21 @@ public:
       auto x1 = param_at(t1, i), x2 = param_at(t2, i);
       if (!x1 || !x2) break;
       if (x1->pack || x2->pack) {
-        all12 = all12 && rest(t1, b1, t2, p2, out12, i);
-        all21 = all21 && rest(t2, b2, t1, p1, out21, i);
+        all12 = all12 && rest(t1, b1, t2, p2, out12, bound_types12, i);
+        all21 = all21 && rest(t2, b2, t1, p1, out21, bound_types21, i);
         break;
       }
       auto a1 = substitute(x1->type, b1);
       auto a2 = substitute(x2->type, b2);
       // [temp.deduct.partial]/8: an A from a function parameter pack deduces no P that is not one.
-      bool s12 = a1 && !(x1->pack && !x2->pack) && deduce(strip(x2->type), strip(*a1), p2[0].depth, out12);
-      bool s21 = a2 && !(x2->pack && !x1->pack) && deduce(strip(x1->type), strip(*a2), p1[0].depth, out21);
+      auto compare = [&](const At& p, const std::optional<QualType>& a,
+                         std::span<const ast::TemplateParamSema> params,
+                         std::vector<std::optional<TemplateArg>>& out, std::set<u16>& bound_types) {
+        Deducing deducing(this, params, false, &bound_types);
+        return a && deduce(strip(p.type), strip(*a), params.front().depth, out);
+      };
+      bool s12 = compare(*x2, a1, p2, out12, bound_types12);
+      bool s21 = compare(*x1, a2, p1, out21, bound_types21);
       // /9: when both types were references and deduction succeeds both ways, an lvalue
       // reference beats an rvalue one, then the more cv-qualified referred-to type wins.
       if (s12 && s21 && types().is_reference(x1->type) && types().is_reference(x2->type)) {
@@ -1792,6 +1806,24 @@ public:
       all12 = all12 && s12;
       all21 = all21 && s21;
     }
+    // [temp.deduct.partial]/12 permits an undeduced template parameter only
+    // when it is absent from the types compared for this call.
+    auto used_parameters_deduced = [&](const TypeRec& pattern, u16 depth,
+                                       const std::vector<std::optional<TemplateArg>>& deduced,
+                                       const std::set<u16>& bound_types) {
+      std::vector<std::pair<u16, u16>> used;
+      for (std::size_t i = 0; i < std::min(nargs, pattern.params.size()); ++i)
+        params_in(pattern.params[i], used);
+      return std::ranges::all_of(used, [&](auto ref) {
+        auto [parameter_depth, index] = ref;
+        // [temp.deduct.type]/2 uses an array bound to deduce a type only
+        // when the type was not deduced elsewhere.
+        return parameter_depth != depth ||
+               (index < deduced.size() && (deduced[index].has_value() || bound_types.contains(index)));
+      });
+    };
+    all12 = all12 && used_parameters_deduced(t2, p2[0].depth, out12, bound_types12);
+    all21 = all21 && used_parameters_deduced(t1, p1[0].depth, out21, bound_types21);
     // [temp.deduct.partial]/11: a trailing function parameter pack breaks a tie only if
     // the other template has no trailing pack and no declared parameter at that position.
     // A parameter with an omitted default argument still occupies its declared position.
@@ -2028,15 +2060,19 @@ private:
   std::vector<ast::TemplateParamSema> head_;
   std::set<u16> explicit_packs_;
   bool partial_deduction_ = false;
+  std::set<u16>* array_bound_types_ = nullptr;
   // Sets `head_` (and clears the explicit packs) for one deduction.
   struct Deducing {
     Templates* t;
     std::vector<ast::TemplateParamSema> saved;
     std::set<u16> saved_explicit;
     bool saved_partial;
-    Deducing(Templates* t, std::span<const ast::TemplateParamSema> head, bool partial = false)
+    std::set<u16>* saved_bound_types;
+    Deducing(Templates* t, std::span<const ast::TemplateParamSema> head, bool partial = false,
+             std::set<u16>* bound_types = nullptr)
         : t(t), saved(std::move(t->head_)), saved_explicit(std::move(t->explicit_packs_)),
-          saved_partial(std::exchange(t->partial_deduction_, partial)) {
+          saved_partial(std::exchange(t->partial_deduction_, partial)),
+          saved_bound_types(std::exchange(t->array_bound_types_, bound_types)) {
       t->head_.assign(head.begin(), head.end());
       t->explicit_packs_.clear();
     }
@@ -2044,6 +2080,7 @@ private:
       t->head_ = std::move(saved);
       t->explicit_packs_ = std::move(saved_explicit);
       t->partial_deduction_ = saved_partial;
+      t->array_bound_types_ = saved_bound_types;
     }
   };
 };
