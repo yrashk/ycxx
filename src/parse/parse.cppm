@@ -135,6 +135,8 @@ public:
       : instantiation_limit(template_depth), w_(&w), r_(&r), items_(&its), item_cells_(its.items.size()), body_cells_(its.items.size()),
         class_cells_(its.items.size()) {
     w.install_builtin_classes(classes_);
+    may_have_virtual_layouts_ = classes_.has_virtual_layouts() ||
+                                std::ranges::contains(r.tokens, lex::Tk::kw_virtual, &lex::Tok::kind);
     for (const items::Item& it : its.items) {
       ItemId id = w.ins.items.add<ItemId>(it.id);
       ids_.push_back(id);
@@ -275,6 +277,7 @@ public:
   // A function body inside the class is a complete-class context ([class.mem.general]); past
   // the closing brace of the class an item defines (`own`), that class is complete too.
   bool is_complete(EntityId c, u32 item, bool body = false, bool own = false) {
+    ensure_declared(c, item);  // its definition, if an earlier item has it
     EntityId templ = w_->entities.rec(c).templ;
     if (templ != EntityId::none) specializations_before(item);
     auto it = class_items_.find(std::to_underlying(c));
@@ -731,6 +734,7 @@ public:
       return std::nullopt;
     };
     if (!c) {
+      ensure_declared(w_->entities.rec(v).templ, point);
       auto t = var_templates_.find(std::to_underlying(w_->entities.rec(v).templ));
       if (t != var_templates_.end() && t->second < point && w_->ins.seqs.size(item_sema(t->second).value.decls) > 0 &&
           w_->types.has_placeholder(w_->ins.seqs.at(item_sema(t->second).value.decls, 0).type))
@@ -771,7 +775,23 @@ public:
     return r;
   }
 
-  std::optional<ast::DeclSema> declaration(EntityId e, u32 item) const {
+  // Analyses the items up to `point` that may declare `e`, those that declare its name, so that
+  // what `declared` recorded of it there does not depend on which items other cells analysed
+  // first (§A1, #947). With every earlier item analysed (`analyze_all`) it analyses nothing.
+  void ensure_declared(EntityId e, u32 point) {
+    if (e == EntityId::none) return;
+    u32& scanned = declared_scan_[std::to_underlying(e)];  // items before it are done
+    if (scanned > point) return;
+    const std::string_view name = w_->ins.names.spelling(w_->entities.rec(e).name);
+    for (auto [j, k] : named(name)) {
+      if (j > point) break;
+      if (j < scanned || std::ranges::contains(running_, j)) continue;
+      settle(j);
+    }
+    scanned = std::max(scanned, point + 1);
+  }
+  std::optional<ast::DeclSema> declaration(EntityId e, u32 item) {
+    ensure_declared(e, item);
     auto it = decls_.find(std::to_underlying(e));
     if (it == decls_.end()) return std::nullopt;
     std::optional<ast::DeclSema> r;
@@ -779,7 +799,8 @@ public:
       if (k <= item) r = completed_declaration(d);
     return r;
   }
-  bool inline_declared(EntityId entity, u32 item) const {
+  bool inline_declared(EntityId entity, u32 item) {
+    ensure_declared(entity, item);
     const auto declarations = decls_.find(std::to_underlying(entity));
     return declarations != decls_.end() && std::ranges::any_of(declarations->second, [&](const auto& entry) {
       const auto& [point, declaration] = entry;
@@ -801,6 +822,18 @@ public:
     });
     return result;
   }
+  // What `analyze_all` has done with item `k` before it goes on to later items: its declaration
+  // part and, for a class at namespace scope, its definition (`class_def`). A later item that asks
+  // for it lazily (#947) sees what it would have seen after `analyze_all` reached it.
+  // The class is completed only when it and its members precede every item being analysed, as
+  // `analyze_all` would have completed it before going on.
+  const Result<ast::ItemSema>& settle(u32 k) {
+    const Result<ast::ItemSema>& r = item_sema(k);
+    if (items_->items[k].kind != ItemKind::class_def || !in_global_scope(k) || class_cells_[k]) return r;
+    const u32 last = last_member(k);
+    if (std::ranges::all_of(running_, [&](u32 running) { return (running & ~class_def_key(0)) > last; })) class_def(k);
+    return r;
+  }
   // A previous definition of this entity in this TU ([basic.def.odr]). C language linkage
   // can make a definition in another namespace correspond without ordinary lookup finding it.
   bool function_defined_before(EntityId e, u32 item) {
@@ -816,6 +849,7 @@ public:
     return false;
   }
   std::optional<ConstId> constant_value(EntityId e, u32 item) {
+    ensure_declared(e, item);
     variable_instance(e, item);
     member_value(e);
     auto it = constants_.find(std::to_underlying(e));
@@ -1140,8 +1174,11 @@ public:
   bool instantiation_gave_up() const { return depth_reported_; }
 
   // Every item and body analysed, in item order; the diagnostics of each cell in order.
-  void analyze_all() {
-    for (u32 k = 0; k < items_->items.size(); ++k) {
+  void analyze_all() { analyze_group(0, static_cast<u32>(items_->items.size())); }
+  // `analyze_all` for the items [first, end) alone, a top-level item and its members: the others
+  // are analysed only as these ask (#947).
+  void analyze_group(u32 first, u32 end) {
+    for (u32 k = first; k < end; ++k) {
       // Members of a class or namespace wait for those (M2); the enclosing item was diagnosed.
       if (!in_global_scope(k)) continue;
       const auto& item = item_sema(k);
@@ -1160,6 +1197,8 @@ public:
     }
     instantiate_all();
   }
+  // Whether a class of the unit can need virtual support (sema::Questions).
+  bool may_have_virtual_layouts() const { return may_have_virtual_layouts_; }
   // An item at namespace scope: in no class, whichever namespaces enclose it.
   bool in_global_scope(u32 k) const { return !in_class_[k]; }
   // What analysis reached, without analysing more (#170): an item's semantics and its body, if
@@ -1171,6 +1210,13 @@ public:
     return found->second.specifiers;
   }
   const ast::BodySema* analysed_body(u32 k) const { return body_cells_[k] ? &body_cells_[k]->value : nullptr; }
+  // The diagnostics of an analysed item's declaration part and body (#947's group check).
+  std::vector<engine::Diagnostic> analysed_diags(u32 k) const {
+    std::vector<engine::Diagnostic> r;
+    if (item_cells_[k]) r.insert(r.end(), item_cells_[k]->diags.begin(), item_cells_[k]->diags.end());
+    if (body_cells_[k]) r.insert(r.end(), body_cells_[k]->diags.begin(), body_cells_[k]->diags.end());
+    return r;
+  }
   std::vector<engine::Diagnostic> diagnostics() const {
     std::vector<engine::Diagnostic> r;
     for (u32 k = 0; k < items_->items.size(); ++k) {
@@ -1249,6 +1295,8 @@ private:
   sema::World* w_;
   const pp::Region* r_;
   const items::Items* items_;
+  bool may_have_virtual_layouts_ = true;
+  std::map<u32, u32> declared_scan_;  // by entity: the items `ensure_declared` has gone through
   std::vector<ItemId> ids_;
   std::unordered_map<u32, u32> index_;
   std::vector<std::optional<Result<ast::ItemSema>>> item_cells_;
@@ -1688,6 +1736,7 @@ public:
   bool is_complete(EntityId c) override {
     return at_point ? p_->is_complete(c, *at_point, true, true) : is_complete_at_item(c);
   }
+  bool may_have_virtual_layouts() override { return p_->may_have_virtual_layouts(); }
   std::optional<NodeId> replay_default_member(sema::Sema& caller, EntityId field, EntityId required_base) override;
   std::optional<NodeId> replay_function_default(sema::Sema& caller, const ast::DefaultArg& value,
                                                 EntityId function, QualType parameter) override;
@@ -2361,6 +2410,7 @@ public:
   bool is_constexpr(EntityId f) override { return p_->is_constexpr(f, p_->end()); }
   bool is_immediate_function(EntityId f) override { return p_->is_immediate_function(f, p_->end()); }
   bool is_complete(EntityId c) override { return p_->is_complete(c, p_->end(), true, true); }
+  bool may_have_virtual_layouts() override { return p_->may_have_virtual_layouts(); }
   bool is_complete_at_source(EntityId c) override { return at_.is_complete_at_source(c); }
   // A type trait whose operands were dependent where the template defines it is answered at the
   // point of instantiation, the end ([temp.point]); a concrete one keeps its definition's answer.
@@ -7139,7 +7189,7 @@ std::optional<ast::DeclSema> Program::decl_sema(DeclId d) {
     if (ast::number_of(d.ord) == 0 && class_heads_.contains(k)) return class_heads_.at(k);
     return std::nullopt;
   }
-  const ast::ItemSema& s = item_sema(index(d.item)).value;
+  const ast::ItemSema& s = settle(index(d.item)).value;
   u32 n = ast::number_of(d.ord);
   if (n >= w_->ins.seqs.size(s.decls)) return std::nullopt;
   return completed_declaration(w_->ins.seqs.at(s.decls, n));
@@ -9580,6 +9630,7 @@ const sema::ClassRec* Program::instantiate_class(EntityId spec, u32 point) {
     if (partial->ambiguous) ambiguous_partial(spec, point);
     return nullptr;
   }
+  ensure_declared(rec.templ, point);
   auto t = class_templates_.find(std::to_underlying(rec.templ));
   if (!partial && t == class_templates_.end()) return nullptr;
   const u32 k = partial ? partial->item : t->second;
@@ -9649,6 +9700,7 @@ std::optional<u32> Program::out_of_class_definition(EntityId spec, MemberOf of) 
   std::vector<ast::DeclSema> pattern = w_->ins.seqs.elements(item_sema(of.item).value.decls);
   for (std::size_t i = 0; i < inst.size() && i < pattern.size(); ++i) {
     if (inst[i].entity != spec) continue;
+    ensure_declared(pattern[i].entity, end());
     auto def = definitions_.find(std::to_underlying(pattern[i].entity));
     if (def != definitions_.end()) return def->second;
   }
@@ -9686,6 +9738,7 @@ const Program::VarInstance* Program::variable_instance(EntityId v, u32 point,
     ambiguous_partial(v, point);
     return nullptr;
   }
+  ensure_declared(rec.templ, point);
   auto t = var_templates_.find(std::to_underlying(rec.templ));
   if (!partial && (t == var_templates_.end() || t->second >= point)) return nullptr;
   if (potential_constant_type && partial && !partial->defined) return nullptr;
@@ -9722,6 +9775,7 @@ const Program::Instance* Program::instance(EntityId spec, u32 point) {
   // member item, defined in the class.
   auto member = member_patterns_.find(key);
   if (member == member_patterns_.end() && rec.templ == EntityId::none) return nullptr;
+  if (member == member_patterns_.end()) ensure_declared(rec.templ, point);
   auto def = member != member_patterns_.end() ? definitions_.end() : definitions_.find(std::to_underlying(rec.templ));
   // A member template of a class template specialization defined outside the class: the
   // definition of the current instantiation's member template at the same place ([temp.mem]/1).
@@ -10077,6 +10131,7 @@ interp::Callee Program::function_ir(EntityId f, u32 item) {
   const bool class_member = member_patterns_.contains(key);
   if (class_member || (templ != EntityId::none && !explicitly_specialized(f, item))) {
     if (!class_member) {
+      ensure_declared(templ, item);
       auto def = definitions_.find(std::to_underlying(templ));
       if (def == definitions_.end() || def->second >= item) return c;
     }
@@ -10101,6 +10156,7 @@ interp::Callee Program::function_ir(EntityId f, u32 item) {
     else c.body = &ir->body;
     return c;
   }
+  ensure_declared(f, item);
   auto def = definitions_.find(std::to_underlying(f));
   if (def == definitions_.end() || def->second >= item || !friend_body_ready(def->second)) return c;
   u32 k = def->second;
@@ -10168,6 +10224,7 @@ interp::Callee Program::closure_ir(EntityId f, u32 item) {
     body = &in->body.value;
     k = in->item;
   } else {
+    ensure_declared(fn, item);
     auto def = definitions_.find(std::to_underlying(fn));
     if (def == definitions_.end() || def->second >= item) return r;
     k = def->second;
@@ -10258,6 +10315,7 @@ sema::GenericResult Program::generic_instance(EntityId spec, const sema::Generic
         enclosing = Instantiation{in->decl, class_args_.at(std::to_underlying(member_patterns_.at(std::to_underlying(fn)).spec))};
       }
     } else {
+      ensure_declared(fn, point);
       auto def = definitions_.find(std::to_underlying(fn));
       if (def == definitions_.end() || def->second >= point) return {};
       k = def->second;
@@ -10325,6 +10383,7 @@ std::optional<QualType> Program::deduced_type(EntityId f, u32 item) {
   // A function template specialization's is its instantiation's, instantiated where it is needed
   // ([temp.inst]/8); its template must be defined before the point.
   if (EntityId templ = w_->entities.rec(f).templ; templ != EntityId::none && !explicitly_specialized(f, item)) {
+    ensure_declared(templ, item);
     auto def = definitions_.find(std::to_underlying(templ));
     if (def == definitions_.end() || def->second >= item) return std::nullopt;
     const Instance* in = instance(f, item);
@@ -10337,6 +10396,7 @@ std::optional<QualType> Program::deduced_type(EntityId f, u32 item) {
     if (!in || in->failed || !in->body.value.deduced) return std::nullopt;
     return in->body.value.deduced_type;
   }
+  ensure_declared(f, item);
   auto def = definitions_.find(std::to_underlying(f));
   if (def == definitions_.end() || def->second >= item || !friend_body_ready(def->second)) return std::nullopt;
   const Result<ast::BodySema>& body = analyze_body(def->second);

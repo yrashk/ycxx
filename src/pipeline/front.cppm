@@ -1413,6 +1413,42 @@ engine::query_task<SemaResult> TuSema::run(engine::Ctx& cx, TuId tu) {
   // The unit's language options: the instantiation limit (`-ftemplate-depth`).
   parse::Program program(world, region, items, unit_source.config.template_depth);
   program.analyze_all();
+  // EXPERIMENT (#947): does a top-level item analysed in a Program of its own give what the
+  // whole unit's Program gives?
+  if (std::getenv("YCXX_GROUP_CHECK")) {
+    for (std::uint32_t g : items.top) {
+      std::uint32_t last = g;
+      while (!items.items[last].members.empty()) last = items.items[last].members.back();
+      parse::Program alone(world, region, items, unit_source.config.template_depth);
+      alone.analyze_group(g, last + 1);
+      for (std::uint32_t k = g; k <= last; ++k) {
+        const items::Item& it = items.items[k];
+        std::string what;
+        auto a = program.analysed_item(k), b = alone.analysed_item(k);
+        if ((a == nullptr) != (b == nullptr) || (a && *a != *b)) what += " item_sema";
+        auto c = program.analysed_body(k), d = alone.analysed_body(k);
+        if ((c == nullptr) != (d == nullptr) || (c && *c != *d)) what += " body";
+        if (program.analysed_diags(k) != alone.analysed_diags(k)) what += " diags";
+        if (what.empty()) continue;
+        std::string text;
+        for (std::uint32_t t = it.begin; t < it.end && t < it.begin + 12; ++t) (text += region.spelling(region.tokens[t])) += ' ';
+        auto show = [](parse::Program& p, const std::vector<engine::Diagnostic>& ds) {
+          std::string s;
+          for (const engine::Diagnostic& d : ds) {
+            auto kind = sema::sema_diag_of(d.id);
+            if (!kind) continue;
+            std::vector<std::uint64_t> args;
+            for (const engine::DiagArg& a : d.args) args.push_back(a.raw);
+            s += std::format(" [{}@{}]", sema::render(*kind, args, [&](char how, std::uint64_t raw) { return p.spell(how, raw); }), d.at.offset);
+          }
+          return s;
+        };
+        std::ofstream(std::getenv("YCXX_GROUP_CHECK"), std::ios::app)
+            << std::format("{} differs{}: {}\n   whole:{}\n   alone:{}\n", unit_source.path, what, text,
+                           show(program, program.analysed_diags(k)), show(alone, alone.analysed_diags(k)));
+      }
+    }
+  }
   // What an editor's position requests read (#170): where each entity is first declared, and the
   // bodies, whether or not the unit has errors; only what the analysis reached, which analysing
   // more would change (its diagnostics).
