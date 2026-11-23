@@ -63,6 +63,9 @@ Work that never reaches `main` is lost. Twice, finished and reviewed work landed
   unblocked work it produces. If the answer is none, skip it and say so in one line.
 - Keep the issue body current: done, next, blocked. Comment on decisions and surprises.
 - Small commits, reviewed P0–P2 (DECISIONS §5). Cite draft clauses by stable name (`[temp.deduct]`).
+- A handle's `{}` is index 0, a real type, entity or list, never "none". Say "none" with the
+  kind's `none` value (`EntityId::none`, `NodeId::none`), a flag or `std::optional`, and give
+  a new handle field `= X::none`. Four bugs came from `T{}` (LESSONS, #25 and #88).
 - A design question beyond your issue goes to a new issue labelled `status:needs-decision`,
   and `model:fable` if it is hard. Don't decide it silently in code.
 - **Escalate design sparingly** (DECISIONS §6.5). Use Opus or Sol at medium effort for
