@@ -313,6 +313,18 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
   - Do: rerun Ninja in the same build directory after changing imports during a build.
   - Learned on #101.
 
+- **Find where an incremental build's time goes with the trace's counts and a sampler's times.**
+  On #938 the JSON trace of a 1 MB file had 280k events and doubled the build. Its per-kind self
+  times blamed `FunctionSourceQ` for 2 s of CPU after its scan was already gone, because each
+  traced cell pays the tracer's own cost. The development machine also runs other sessions'
+  builds (load 11–17 on 18 cores), so single timings varied by 50%.
+  - Do: take outcome counts per kind from `--trace-engine=json` (what re-executes, and why). Take
+    times from `sample <daemon pid> 3` started just before an untraced rebuild, and from wall
+    times: min of 5 runs, alternating the base and changed binaries (copy each to a path of its
+    own; a daemon is per binary). Check `ycxx ctl status` for memory without the trace's events.
+  - Look for O(n) scans of unit-wide values in per-function cells: each looks cheap in a small
+    test and is quadratic over a large unit.
+  - Learned on #938.
 - **Template code added to the engine can slow its hit paths without touching them.** #245's
   trace hooks were one branch each, yet `engine_bench` lost 6 ns a fetch hit and 6 ns a root get
   hit. The per-kind `describe` templates instantiated `std::format` in every engine user's unit,
@@ -338,6 +350,24 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
   - Do: wait on a terminal with `select`. Drive a TUI in tests with Python's `pty.fork`, a set
     window size, and keys written with pauses; the last frame is after the last `ESC [ H`.
   - Learned on #245.
+
+- **Test a live, incremental model against its batch twin on simulated streams, in every order.**
+  #939's live trace tree must end equal to the tree the collector's batches build, whatever order
+  events come in.
+  - Do: generate engine-like event streams (frames with starts and ends, runs of alike instants).
+    Feed each to the real batch path and to the live path, in the engine's order, shuffled and
+    backwards, in random chunks. After every chunk, check the incremental bookkeeping (sums,
+    depths, folding, the summary) against a recount. At the end, compare everything the view
+    shows. Unit tests written by hand missed every bug this found: sums stopping at a subtree
+    waiting for its parent, and two folding cases.
+  - Do: make the out-of-order path as cheap as the in-order one. Workers' events reach a shared
+    buffer slightly out of id order all the time. A whole-parent refold per such event was
+    quadratic under a parent of 80k children, and the browser fell 2 s behind a 2 s build. Keep the
+    repair local, around the change.
+  - Do: guard an index into a container that can be replaced with a contract. A stale index read
+    zeroed memory, landed on row 0 by chance, and the mutation test stayed green until
+    `contract_assert` made it abort.
+  - Learned on #939.
 
 - **Test a terminal UI as a model fed events, and only the terminal around it under a pty.** The
   trace browser's keys went untested while it read `/dev/tty` itself (#245). Moving its state and

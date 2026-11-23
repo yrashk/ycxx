@@ -11,7 +11,9 @@ Covered, each answer compared with a cold (in-process) compile of the same files
 - the daemon killed mid-request: the client starts a new one and asks again (§7.2);
 - shutdown, then a new daemon on the next request (§7.4);
 - several clients at once, on different files and on the same one, checking that distinct
-  build roots actually overlap (#139).
+  build roots actually overlap (#139);
+- the trace browser through the daemon (#939): while a build is parked, it already shows the cells
+  that ran and the build still running.
 
 Not yet: the cache across a restart (`executed` below a cold run, `durable + validated > 0`,
 #17), and every answer at 1 and P threads (#139).
@@ -33,6 +35,7 @@ GATES = {
     'c0.cpp': 'release',
     'c1.cpp': 'observe',
     'kill.cpp': 'stop',
+    'live.cpp': 'release',
 }
 # ycxx builds AArch64 Mach-O only (DECISIONS §1.3), so its programs run only on Apple arm64, as
 # `run darwin-arm64` in tests/features/ycxx.txt; outputs are compared byte for byte everywhere.
@@ -397,6 +400,53 @@ def concurrent_clients(env):
         fail(f'concurrent clients: {len(jobs)} requests sent, {env.number("requests") - requests} answered')
 
 
+def live_trace(env):
+    """`--trace-engine=interactive` through the daemon, under a pty (#939): parked at its checkpoint,
+    after it has read and analysed its sources, the build has not ended, and the browser already
+    shows what ran and Build running; released, it ends, the browser says so, and `q` leaves with
+    the compile's status and output."""
+    import trace_tui
+    d = env.scope / 'live'
+    d.mkdir()
+    source = 'int square(int x) { return x * x; }\nint main() { return square(3) - 9; }\n'
+    (d / 'live.cpp').write_text(source)
+    tui_env = {k: v for k, v in env.daemon.items() if k != 'NO_COLOR'}
+    tui_env.update(TERM='xterm-256color', YCXX_CLIPBOARD='osc52')
+    t = trace_tui.Tui(env.driver, d, tui_env, 'live.cpp')
+    released = False
+    try:
+        env.expect_gate('live.cpp', b'P')
+
+        def text(o):
+            return '\n'.join(trace_tui.plain_lines(trace_tui.Tui.frame_of(o)))
+
+        def parked(o):
+            f = text(o)
+            return '● live' in f and 'Build(' in f and 'running' in f and 'TuFront(' in f and 'executed' in f
+        if not t.read_until(parked, timeout=20):
+            fail(f'live trace: while the build is parked, the browser shows no cells: {text(t.out)[:600]!r}')
+        env.gates['live.cpp'].sendall(b'R')
+        env.expect_gate('live.cpp', b'R')
+        released = True
+        if not t.read_until(lambda o: 'the build has ended' in text(o), timeout=60):
+            fail(f'live trace: the browser never says the build has ended: {text(t.out)[:600]!r}')
+        elif ' running' in text(t.out).split('\n', 1)[0]:
+            fail('live trace: cells still running after the build ended')
+        t.send(b'q')
+        status, cooked = t.wait(timeout=60)
+        want_code, want_bytes = cold_build(env, {'live.cpp': source}, trace_tui.COMPILE + ['live.cpp', '-o', 'a.o'], 'a.o')
+        if not os.WIFEXITED(status) or os.WEXITSTATUS(status) != want_code or bytes_of(d / 'a.o') != want_bytes or not cooked:
+            fail(f'live trace: the browsed build differs from a cold compile (status {status}, cold {want_code})')
+    finally:
+        if not released:
+            env.gates['live.cpp'].sendall(b'R')
+        if t.leader:
+            try:
+                os.kill(t.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
+
 def main():
     ycxx, driver = map(os.path.abspath, sys.argv[1:])
     env = Env(ycxx, driver)
@@ -409,7 +459,7 @@ def main():
                 env.pid() != env.fixture_daemon.pid):
             fail('the first request through the daemon failed: no test can run')
             return 1
-        for test in (edit_during_build, edit_error_during_build, killed_client, concurrent_clients, killed_daemon, restart):
+        for test in (edit_during_build, edit_error_during_build, killed_client, concurrent_clients, live_trace, killed_daemon, restart):
             t0 = time.monotonic()
             pid = env.pid()
             if pid is None:

@@ -1195,12 +1195,17 @@ public:
   }
 
   // The file and byte offset of a diagnostic's location (ast.md §8.3, steps 1–3); a macro's
-  // token is where it was expanded.
-  pp::TokLoc site(engine::Loc at) const { return r_->site(token(at)); }
+  // token is where it was expanded. Only for a region with its locations: the pipeline analyses
+  // `PpTokens`, which has none, and places messages in `TuFront` (#947).
+  pp::TokLoc site(engine::Loc at) const
+    pre(!r_->locs.empty())
+  {
+    return r_->site(token(at));
+  }
   // The region token of a diagnostic's location.
   u32 token(engine::Loc at) const {
     const items::Item& it = items_->items[index(ItemId(at.item))];
-    return std::min<u32>(it.begin + at.offset, static_cast<u32>(r_->locs.size() - 1));
+    return std::min<u32>(it.begin + at.offset, static_cast<u32>(r_->tokens.size() - 1));
   }
   // The byte offset in its file of a diagnostic's location.
   u32 byte_offset(engine::Loc at) const { return site(at).offset; }
@@ -2595,11 +2600,11 @@ private:
     LangLinkage lang = enclosing.value_or(LangLinkage::cxx);
     bool explicit_lang = enclosing.has_value();
     u32 attrs_at = ps_.pos();
-    bool hidden_visibility = false;
+    DeclAttributes leading_attributes;
     // [dcl.link]: a linkage-specification has no attribute-specifier-seq.
     // (GNU attributes there are accepted, as GCC and Clang do.)
     std::vector<ast::AnnotationSema> annotations;
-    const int attributes = ps_.skip_attributes(&hidden_visibility, Parser::attr_std | Parser::attr_gnu, &annotations);
+    const int attributes = ps_.skip_attributes(&leading_attributes, Parser::attr_std | Parser::attr_gnu, &annotations);
     if ((attributes & Parser::attr_std) && ps_.is(Tk::kw_extern) && ps_.kind(1) == Tk::string_lit) {
       s_.diag(attrs_at, Diag::attributes_not_allowed);
       return bad();
@@ -2610,11 +2615,11 @@ private:
       if (!l) s_.diag(at, Diag::unknown_linkage);
       lang = l.value_or(LangLinkage::cxx);
       explicit_lang = true;
-      single_linkage_spec_ = true;  // [dcl.link]/7: it declares as if `extern` were given
+      single_linkage_spec_ = true;  // [dcl.link]: it declares as if `extern` were given
       ps_.bump();
       ps_.bump();
       while (ps_.is(Tk::string_lit) && ps_.tok().has(lex::tok_flag::continued)) ps_.bump();
-      ps_.skip_attributes(&hidden_visibility, Parser::attr_std | Parser::attr_gnu, &annotations);
+      ps_.skip_attributes(&leading_attributes, Parser::attr_std | Parser::attr_gnu, &annotations);
     }
     ps_.set_linkage(lang);
     // `template<>`: an explicit specialization ([temp.expl.spec]) of a class, function or variable
@@ -2836,7 +2841,8 @@ private:
     }
     s_.defer_type_access = true;
     DeclSpec spec = ps_.decl_specifiers();
-    spec.hidden_visibility |= hidden_visibility;
+    spec.attributes.hidden_visibility |= leading_attributes.hidden_visibility;
+    spec.attributes.weak |= leading_attributes.weak;
     if (spec.ok && spec.elaborated && s_.types().is_enum(spec.type)) {
       EntityId e = s_.types().enum_of(spec.type);
       if (!ps_.is(Tk::semi) || s_.world().entities.rec(e).scope == ns_entity()) {
@@ -6319,6 +6325,8 @@ private:
         s_, (spec.is_constexpr || spec.is_constinit) && !types.is_function(d.type),
         /*trial=*/!types.is_function(d.type));
     u32 ord = static_cast<u32>(decls_.size());
+    // [dcl.link]: a single declaration is treated as `extern` for name linkage and definition.
+    const bool effective_extern = spec.is_extern || single_linkage_spec_;
     // `T a[] = {…}`: the bound from the list ([dcl.array]/8), parsed here and used below.
     std::unique_ptr<sema::Braced> early;
     if (d.unknown_bound && ps_.is(Tk::equal) && ps_.kind(1) == Tk::string_lit) {
@@ -6328,7 +6336,7 @@ private:
     } else if (d.unknown_bound && !(ps_.is(Tk::l_brace) || (ps_.is(Tk::equal) && ps_.kind(1) == Tk::l_brace))) {
       // `extern T a[];`: an incomplete type ([dcl.array]/6); a definition needs a bound.
       d.type = types.array_unknown(d.type);
-      if (!spec.is_extern && !single_linkage_spec_) {
+      if (!effective_extern) {
         s_.diag(d.name_at, Diag::incomplete_type, d.type);
         return false;
       }
@@ -6347,7 +6355,7 @@ private:
     // [basic.link]/3–4: static, certain const declarations, and names in unnamed namespaces.
     const auto has_internal_linkage = [&] {
       return spec.is_static || Program::unnamed(p_->ns_of(k_)) ||
-             (!fn && sema::Types::is_const(d.type) && !spec.is_extern && !spec.is_inline && !template_ && !explicit_);
+             (!fn && sema::Types::is_const(d.type) && !effective_extern && !spec.is_inline && !template_ && !explicit_);
     };
     const auto declaration_entity = [&](sema::EntityKind kind, QualType type, ast::Linkage linkage, sema::Fp128 head) {
       sema::EntityRec record{kind, d.name, type, lang, linkage,
@@ -6428,7 +6436,7 @@ private:
     if (deleted) is_function_def = true;
     if (deleted) flags |= sema::decl_flag::deleted;
     bool has_init = !deleted && (early || early_expr || ps_.is(Tk::equal) || ps_.is(Tk::l_brace) || (!fn && ps_.is(Tk::l_paren)));
-    bool definition = fn ? is_function_def || deleted : !((spec.is_extern || single_linkage_spec_) && !has_init);
+    bool definition = fn ? is_function_def || deleted : !(effective_extern && !has_init);
     if (!fn && definition &&
         (!s_.require_concrete_object(d.type, d.name_at) || !s_.require_supported_virtual_layout(d.type, d.name_at)))
       return false;
@@ -6748,9 +6756,14 @@ private:
       return false;
     }
     if (fn && p_->world().ins.names.spelling(d.name) == "main") check_main(spec, sem, d, lang);
-    if ((spec.hidden_visibility || d.hidden_visibility) && fn && !template_ && !explicit_ && !ordinary_friend &&
-        sem.linkage == ast::Linkage::external && (!d.qualified || d.scope.ns))
+    const bool ordinary_external = !template_ && !explicit_ && !ordinary_friend &&
+                                   sem.linkage == ast::Linkage::external && (!d.qualified || d.scope.ns);
+    if (ordinary_external && (spec.attributes.hidden_visibility || d.attributes.hidden_visibility) &&
+        (fn || (!var_ && !(sem.flags & sema::decl_flag::inline_))))
       sem.hidden_visibility = true;
+    if (ordinary_external && fn && !(sem.flags & (sema::decl_flag::inline_ | sema::decl_flag::member)) &&
+        (spec.attributes.weak || d.attributes.weak))
+      sem.explicit_weak = true;
 
     // The initializer ([dcl.init]); the name is in scope from the end of its declarator.
     // An explicit or partial specialization, or an instantiation, declares no name: the
@@ -6928,7 +6941,7 @@ private:
       else if (sema::Types::is_const(d.type)) s_.diag(d.name_at, Diag::const_uninitialized, d.name);
     } else if (!fn && spec.is_constexpr) {
       s_.diag(d.name_at, Diag::constexpr_uninitialized, d.name);
-    } else if (!fn && sema::Types::is_const(d.type) && !spec.is_extern) {
+    } else if (!fn && sema::Types::is_const(d.type) && !effective_extern) {
       s_.diag(d.name_at, Diag::const_uninitialized, d.name);
     }
     if (value != ConstId::none && (requires_constinit || s_.folded_immediate_result != EntityId::none))

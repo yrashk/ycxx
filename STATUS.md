@@ -419,8 +419,8 @@ stay open for the rest.
   their size rounded to 8. `va_arg` loads the slot and advances the cursor by 8, `va_copy`
   copies it and `va_end` does nothing. `own/variadic/definitions` calls ycxx's definitions
   from ycxx and from a Clang peer, and lets the peer's `va_arg` read a cursor ycxx started.
-  It fails if the named stack size is ignored or the cursor advances by 4. `<stdarg.h>`
-  itself is missing on Darwin ([#676](https://github.com/yrashk/ycxx/issues/676)); `<cstdarg>` works.
+  It fails if the named stack size is ignored or the cursor advances by 4. `<stdarg.h>` works
+  as well as `<cstdarg>` ([#676](https://github.com/yrashk/ycxx/issues/676), see the compiler resource `<stdarg.h>` section).
 - Not yet: the allocation
   validator and dependence checker (#29), SSA linear scan, list scheduling, unwind info and DWARF,
   a measured `cost_model` (#9), more than one result, frame objects aligned above 16 bytes.
@@ -599,9 +599,11 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
 - `ycxx.pipeline` (`src/pipeline/`): every stage is an engine query (#63), run by `client::cxx`
   through a `Session` (the engine, the interners and sema's world, alive together; in-process
   until the daemon, #96):
-  - `:front`: `TuFront(TU)`: the file's text as the engine's `FileText`, `pp` and `RegionItems`,
-    then `parse::Program` (item_sema, analyze_body) inside the one cell until contextual queries
-    (#16). Its diagnostics by byte offset, and the `TranslationUnit`: entities, function
+  - `:front`: `TuSema(TU)`: `PpTokens` (the region without token locations, expansion sites,
+    `space_before` flags or error details) and `RegionItems`, then `parse::Program` (item_sema,
+    analyze_body) inside the one cell until contextual queries (#16, #947). `TuFront(TU)` places
+    its messages in files from `pp`'s full region, so an edit that changes no token (a comment,
+    blank lines) stops at `PpTokens` and analysis does not run again (#947, slice 0). Its diagnostics by byte offset, and the `TranslationUnit`: entities, function
     definitions with their analysed bodies, variable definitions with their constants.
     `tu_unit(TU)` projects the unit, so a whitespace edit stops there.
   - `:back`, per function `F`: `function_source(TU, F)` (a projection that backdates),
@@ -611,7 +613,12 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
     `opt_cache_snapshot` input (consulted for B ≥ 1 only); `cost_model` is a stub input. `layout`
     is three cheap queries (`layout_type`, `layout_step`, `layout_constant`). `tu(TU)` assembles
     the object in definition order (§A5.3), with string literal objects as local `l_.str.N`
-    entities by first use; its value also holds the first-demand table (empty until #16). Errors
+    entities by first use; its value also holds the first-demand table (empty until #16). Per-unit
+    cells give the per-function ones what they read of the whole unit, so an edit re-runs them
+    cheaply or not at all (#938): `UnitIndexQ` (each definition's and entity's place),
+    `UnitFunctionFactsQ` (its constexpr and variadic functions), `UnitShapeIndex` (`layout`'s
+    class and enumeration lookup) and `SymbolAccessQ(TU, E)` (how a unit's code addresses `E`).
+    On x86-64, `Lower` still reads the whole unit (#943). Errors
     (what the α subset does not support yet) are values, pointing into the item when there is a
     node.
   - `:mangle`: Itanium names for global-namespace functions over fundamental, pointer and cv types
@@ -625,7 +632,7 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
     libycxx's link options force undefined (`___ycxx_allocation_table_anchor`, read from its
     `ycxx-link-options`). Members are selected as for any Darwin archive, so `<cstdio>` programs
     link against libycxx's linkage marker, and libycxx-abi's `__cxa_*` come before libc++abi's.
-    A trivial program grows from 17 KB to 118 KB with the allocation table. Archive operands are
+    A trivial program grows from 17 KB to 118 KB with the allocation table. Configured runtime archives are
     read once per process while their size and modification time hold, and every program's
     inputs share the bytes (`obj::archive::input`, fingerprinted once). `-nostdlib++` links
     without the runtime. `unit.darwin_runtime`, `own/headers/cstdio.run.cpp` and
@@ -798,10 +805,20 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
   [Design](docs/design/linux-inline-functions.md) · [#422](https://github.com/yrashk/ycxx/issues/422)
 - Explicit GNU `visibility("hidden")` follows ordinary external namespace-scope functions across
   redeclarations. On x86-64 ELF, inline definitions combine `STB_WEAK` with `STV_HIDDEN`.
-  Ordinary non-inline definitions and referenced declarations combine `STB_GLOBAL` with
-  `STV_HIDDEN`. `unit.linux_inline` checks both scoped attribute spellings, symbol metadata,
+  Ordinary non-inline definitions and referenced declarations combine their symbol binding
+  with `STV_HIDDEN`. `unit.linux_inline` checks both scoped attribute spellings, symbol metadata,
   and cross-unit address identity with the native and host linkers in both object orders.
   [#602](https://github.com/yrashk/ycxx/issues/602)
+- On Linux x86-64, GNU `weak` on an ordinary external namespace-scope function declaration
+  gives its non-inline definition `STB_WEAK`. This includes qualified definitions such as
+  libycxx's `std::is_debugger_present`. The ELF linker selects a strong definition in either
+  input order and diagnoses duplicate strong definitions. Explicit GNU visibility can
+  independently give the symbol `STV_HIDDEN`.
+  [Design](docs/design/linux-weak-functions.md) · [#937](https://github.com/yrashk/ycxx/issues/937)
+- On Linux x86-64, explicit GNU hidden visibility on any declaration of an ordinary external
+  non-inline namespace-scope variable gives its ELF symbol `STB_GLOBAL` and `STV_HIDDEN`.
+  This includes the C-linkage marker `__ycxx_linkage_static_v1` from the pinned libycxx runtime.
+  [#936](https://github.com/yrashk/ycxx/issues/936)
 - Constant-initialized and zero-initialized external inline namespace variables use weak ELF
   definitions when their initial values need no relocations. This includes explicitly inline
   full variable-template specializations with builtin type arguments. Static addresses and
@@ -843,6 +860,10 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
   system linker, malformed and 64-bit indexes, and daemon equality and same-path replacement;
   `unit.darwin_inline` links an archive member with both linkers.
   [Design](docs/design/darwin-static-archives.md) · [#842](https://github.com/yrashk/ycxx/issues/842)
+- On both targets, the driver rereads explicit archive operands at request ingress and
+  fingerprints their bytes. This covers replacements with unchanged size and mtime.
+  Driver-appended Darwin runtime archives can reuse their process-local snapshots.
+  [#951](https://github.com/yrashk/ycxx/issues/951)
 - `ycxx archive -o lib.a [--] [object ...]` creates or replaces a regular GNU archive in process.
   It validates each member with the existing ELF object reader, copies its bytes, and indexes
   named nonlocal definitions, including weak and hidden definitions. Member basenames and
@@ -1478,8 +1499,11 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   libycxx `<cstddef>` byte operator with matching GCC and Clang symbols (#64).
 - Tests: `tests/own/classes/s4-namespace*`, `s4-using` (spec-only, plus one from the review): 5
   of 5. Seven more draft examples pass.
-- A linkage-specification with one declaration (`extern "C" int v;`) declares as if `extern`
-  were given ([dcl.link]/7); a variable with C language linkage is one in every namespace.
+- A C or C++ linkage specification with one declaration treats `extern` as present for name
+  linkage and for distinguishing declarations from definitions ([dcl.link]). This includes a
+  first ordinary namespace `const` variable. A braced linkage block applies the ordinary
+  namespace rules. A variable with C language linkage is one in every namespace.
+  [#942](https://github.com/yrashk/ycxx/issues/942)
 - A qualified namespace function definition inherits C language linkage from a matching prior
   member declaration and uses its target namespace for body lookup. Ordinary and argument-dependent
   calls find the prior declaration and use the same unmangled symbol as C callers (#426).
@@ -1567,7 +1591,8 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   GNU `__attribute__((…))` before and after declarators, are parsed. The parser skips
   unrecognized attributes ([dcl.attr.grammar]/6) and diagnoses a standard attribute before a
   linkage-specification with a single declaration ([dcl.link]). GNU hidden visibility on ordinary
-  namespace-scope functions is implemented for x86-64 ELF. [#602](https://github.com/yrashk/ycxx/issues/602)
+  external namespace-scope functions and non-inline variables is implemented for x86-64 ELF.
+  [#602](https://github.com/yrashk/ycxx/issues/602) · [#936](https://github.com/yrashk/ycxx/issues/936)
 - **Asm labels:** `__asm("…")` after a declarator gives the entity's symbol exactly as written
   (`Program::asm_label`, `pipeline::Entity::asm_label`), as the SDK's `__DARWIN_ALIAS` needs.
   Both extensions are listed in `docs/EXTENSIONS.md` (DECISIONS §1.2).
@@ -2458,14 +2483,20 @@ first; a dependent base is not searched. Redeclaring a hidden parameter's name i
   The full resource header supplies `max_align_t` with 16-byte alignment (AMD64 psABI §3.1.2).
   `unit.pp` exercises both paths through the configured header search.
 
-## Linux compiler resource `<stdarg.h>` (#383)
+## Compiler resource `<stdarg.h>` (#383, #676)
 
 - Linux `__builtin_va_list` is an array of one compiler-owned record with the two unsigned
   offsets and two pointers of the AMD64 psABI §3.5.7. Ordinary array and record semantics give it
   size 24 and alignment 8 and adjust it to a pointer as a function parameter ([dcl.array],
   [dcl.fct]). The builtin name also works with explicit global qualification.
+- `resources/common/include` holds the resource headers every target shares. It is searched
+  after libycxx and Linux's own resource headers, and before glibc or the macOS SDK, neither of
+  which ships `<stdarg.h>`. The SDK's `<stdio.h>` and `<wchar.h>` include it.
 - The resource `<stdarg.h>` consumes each `__need___va_list` request and supplies the guarded
-  `__gnuc_va_list` typedef. A full include also supplies `va_list` ([cstdarg.syn]). glibc's
+  `__gnuc_va_list` typedef. A full include also supplies `va_list` and the `va_start`,
+  `va_arg`, `va_copy`, `va_end` and `__va_copy` macros ([cstdarg.syn]). Their replacement
+  lists match libycxx's `<cstdarg>`, so the two headers combine in either order.
+  `own/variadic/stdarg-header` runs a variadic definition through them on both targets. glibc's
   `<stdio.h>` preprocesses, and `unit.linux_stdarg` checks that path, both inclusion orders,
   and type semantics. The pinned libycxx `<cstdarg>` exposes the Linux variadic operations
   described in the x86-64 backend status (#196).
@@ -2637,6 +2668,22 @@ request it serves.
   filter, and `span_text`/`span_start` are in place. Tests: `unit.trace` (the spans of a real
   build, cells without spans, text, filter, JSON; mutation-checked) and `daemon.trace` (spans
   across the socket).
+- Live (#939): `Tracer::starts`/`started` report a frame's start where it opens its span (the
+  three span sites, cold, for tracers that ask: JSON and untraced builds pay nothing).
+  `trace::Live` buffers starts and ends under a lock held for the append alone; `trace::Tee`
+  feeds a batch collector and a live one. `Tree::apply` places events in any order (a child
+  before its parent waits, unseen, until it comes or `settle`; children in id order; identical
+  instants folded and refolded locally around a change), keeps the summary incrementally, and
+  caches its rows per `version`; `Tree::add` places batches as they come. The daemon sends live
+  `trace` frames (`TraceBatch::live`, `sent_ns`, the memory so far) on the request's tick to a
+  client asking `compile::Trace::live` and to watchers asking `WatchRequest::live`. The client
+  runs a browsed compile on a thread of its own (`browse_compile`), and the browser draws on a
+  timer, only when something changed, with following (`f`). Tests: `unit.trace` (starts, ends,
+  orphans, `is:running`; 180 simulated streams in the engine's order, shuffled and backwards,
+  every step's sums, depths, folding and summary checked, each ending equal to the batches'
+  tree, view and frames; two requests interleaved; following), `daemon.process` (`live_trace`:
+  a build parked at its checkpoint is already in the browser through the daemon; mutation-checked),
+  `daemon.trace_tui` (the first frame is live).
 - Not yet: the analysed tree as a value, and stages linked to source (#254); per-resumption
   spans, so a frame's waits are not drawn as work (#255).
 

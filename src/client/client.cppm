@@ -172,10 +172,11 @@ struct Interrupt {
 
 // `on_trace` gets the request's trace batches; `on_retry` is called before asking a new daemon.
 // `instance`, when given, is set to the daemon that answered (`Welcome::instance`); `cut`, when given, can interrupt it.
+// `said`, when given, takes the line `verbose` prints instead (a browser has the screen).
 using OnTrace = std::function<void(daemon::TraceBatch&&)>;
 std::expected<compile::Done, std::string> through_daemon(const compile::Request& r, bool verbose, const OnTrace& on_trace = {},
                                                          const std::function<void()>& on_retry = {}, std::uint64_t* instance = nullptr,
-                                                         Interrupt* cut = nullptr) {
+                                                         Interrupt* cut = nullptr, std::vector<std::string>* said = nullptr) {
   std::string root = daemon::root_for(compile::first_input(r.argv), r.cwd);
   std::string why;
   for (int attempt = 0; attempt < 2; ++attempt) {
@@ -188,9 +189,12 @@ std::expected<compile::Done, std::string> through_daemon(const compile::Request&
     if (cut) cut->leave();
     if (d) {
       if (instance) *instance = c->welcome.instance;
-      if (verbose)
-        std::println(std::cerr, "ycxx: answered by daemon {} for {} at revision {} ({} restarts, {} pp regions reused)",
-                     c->welcome.daemon_pid, c->welcome.root, d->report.revision, d->report.restarts, d->report.regions_reused);
+      if (verbose) {
+        std::string line = std::format("ycxx: answered by daemon {} for {} at revision {} ({} restarts, {} pp regions reused)",
+                                       c->welcome.daemon_pid, c->welcome.root, d->report.revision, d->report.restarts, d->report.regions_reused);
+        if (said) said->push_back(std::move(line));
+        else std::println(std::cerr, "{}", line);
+      }
       return std::move(*d);
     }
     why = d.error().why;
@@ -310,6 +314,7 @@ int watch_builds(compile::Request r, bool verbose, TraceMode mode) {
     daemon::TraceBatch batch;
     std::string label;
     std::string text;  // with `done`: the build's diagnostics and outputs' errors
+    std::chrono::steady_clock::time_point received = std::chrono::steady_clock::now();
   };
   struct Shared {
     std::mutex m;
@@ -370,10 +375,14 @@ int watch_builds(compile::Request r, bool verbose, TraceMode mode) {
   trace::Tree tree;
   const auto group_of = [](std::uint64_t build) { return (std::uint64_t{1} << 63) | build; };
   std::set<std::uint64_t> opened;
+  // Where running cells' times reach (#939): the live batch's `sent_ns` on the tree's clock, when it
+  // came on this one.
+  std::uint64_t sent_ns = 0;
+  auto sent_at = std::chrono::steady_clock::now();
   const auto open = [&](const Item& i, std::uint64_t start_ns) {
     if (opened.insert(i.build).second) tree.open_group(group_of(i.build), i.label, start_ns);
   };
-  trace::Feed feed{wake->first.get(), [&] {
+  trace::Feed feed{.fd = wake->first.get(), .pump = [&] {
                      daemon::drain(wake->first.get());
                      std::deque<Item> items;
                      bool ended = false;
@@ -409,17 +418,174 @@ int watch_builds(compile::Request r, bool verbose, TraceMode mode) {
                        if (b.end) {
                          tree.close_group(id, i.offset_ns + (b.ended_ns - std::min(b.ended_ns, start)));
                          tree.set_memory(b.memory);
+                       } else if (b.live) {
+                         tree.apply(b.events, id);
+                         tree.set_memory(b.memory);
+                         sent_ns = i.offset_ns + (b.sent_ns - std::min(b.sent_ns, start));
+                         sent_at = i.received;
                        } else {
                          tree.add(b.events, id);
                        }
                      }
                      return !ended;
                    },
-                   std::format("rebuilding on every change of the files it reads ({})", root)};
+                   .source = std::format("rebuilding on every change of the files it reads ({})", root)};
+  feed.tick = [&] {
+    tree.advance(sent_ns + static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - sent_at).count()));
+    return true;
+  };
   trace::browse(tree, &feed);
   // Stops the builder: a build in flight or its wait is cut, and the daemon cancels the build.
   cut.stop();
   return 0;
+}
+
+// `--trace-engine=interactive` on a terminal (#939): the browser opens at once and the build runs
+// on a thread of its own, through the daemon (its live batches) or in-process (a `trace::Live`),
+// so the tree fills in while it runs. The outputs are written and the diagnostics printed once the
+// browser is closed; closing it before the build ends waits for the build.
+int browse_compile(compile::Request r, Use use, bool verbose) {
+  r.trace = compile::Trace::live;
+  struct Shared {
+    std::mutex m;
+    std::vector<trace::Event> events;  // came and not yet in the tree
+    std::uint64_t generation = 0;      // a new run of the request (a retry, the fallback): a new tree
+    std::optional<trace::BuildMemory> memory;
+    // The clock of running cells: the trace's `now_ns` at `at` on this process's clock.
+    std::uint64_t now_ns = 0;
+    std::chrono::steady_clock::time_point at{};
+    trace::Live* live = nullptr;           // in-process: the engine's events are taken here
+    const memory::Window* window = nullptr;  // in-process: the build's peak so far
+    bool ended = false;
+    std::expected<compile::Done, std::string> done = std::unexpected(std::string("not built"));
+    int status = -1;  // when the build could not happen: what `cxx` returns
+    std::vector<std::string> notes;  // for stderr, once the browser is closed
+  } shared;
+  std::vector<std::string> said;  // the builder's own: `-v`'s line
+  const auto restart = [&](std::string why) {
+    std::lock_guard g(shared.m);
+    shared.events.clear();
+    shared.memory.reset();
+    shared.now_ns = 0;
+    shared.at = std::chrono::steady_clock::now();
+    ++shared.generation;
+    shared.notes.push_back(std::format("ycxx: {}: traced again", why));
+  };
+  // The stack the daemon gives a request's thread: the compile's own recursion runs on it (#178).
+  std::jthread builder(std::jthread::stack_size_hint(std::size_t{256} << 20), [&] {
+    if (use != Use::off) {
+      auto d = through_daemon(r, verbose, [&](daemon::TraceBatch&& b) {
+        std::lock_guard g(shared.m);
+        if (b.end) {
+          shared.memory = b.memory;
+          return;
+        }
+        trace::rebase(b.events, b.started_ns);
+        shared.events.append_range(std::move(b.events));
+        shared.memory = b.memory;
+        shared.now_ns = b.sent_ns - std::min(b.sent_ns, b.started_ns);
+        shared.at = std::chrono::steady_clock::now();
+      }, [&] { restart("the daemon was lost; asking a new one"); }, nullptr, nullptr, &said);
+      if (d || use == Use::require) {
+        std::lock_guard g(shared.m);
+        if (!d) {
+          shared.notes.push_back(std::format("ycxx: error: the daemon is required (YCXX_DAEMON=require) but failed: {}", d.error()));
+          shared.status = 2;
+        }
+        shared.done = std::move(d);
+        shared.ended = true;
+        return;
+      }
+      if (verbose) restart(std::format("running in-process: {}", d.error()));
+      else restart("running in-process");
+    }
+    pp::DiskHost disk;
+    const compile::Threads t = compile::threads();
+    engine::Pool pool(t.count, t.chaos_seed);
+    pipeline::Session session(pool);
+    bool stopped = false;
+    const memory::Window window;  // the process's peak while it builds (#274)
+    trace::Live live(true);
+    {
+      std::lock_guard g(shared.m);
+      shared.live = &live;
+      shared.window = &window;
+    }
+    compile::Done d = compile::run(r, disk, session, {}, stopped, {}, &live);
+    std::lock_guard g(shared.m);
+    shared.events.append_range(live.take());
+    shared.memory = trace::BuildMemory{memory::process().current, window.peak()};
+    shared.live = nullptr;
+    shared.window = nullptr;
+    shared.done = std::move(d);
+    shared.ended = true;
+  });
+
+  trace::Tree tree;
+  std::uint64_t generation = 0;
+  trace::Feed feed;
+  feed.source = std::format("building {}", compile::first_input(r.argv).value_or("…"));
+  feed.ended = "the build has ended";
+  feed.newest_first = false;  // one request: its cells in the order they started, as after a build
+  feed.tick = [&] {
+    std::vector<trace::Event> events;
+    std::optional<trace::BuildMemory> mem;
+    std::uint64_t now = 0;
+    bool ended = false;
+    {
+      std::lock_guard g(shared.m);
+      if (shared.generation != generation) {
+        generation = shared.generation;
+        tree.reset();  // the browser sees it, and lets go of what it held
+      }
+      events.swap(shared.events);
+      if (shared.live) {
+        events.append_range(shared.live->take());
+        now = shared.live->now_ns();
+        shared.memory = trace::BuildMemory{memory::process().current, shared.window->peak()};
+      } else {
+        now = shared.now_ns + static_cast<std::uint64_t>(
+                                  std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - shared.at).count());
+      }
+      mem = shared.memory;
+      ended = shared.ended;
+    }
+    tree.apply(events);
+    if (mem) tree.set_memory(*mem);
+    if (ended) {
+      tree.settle();
+      return false;
+    }
+    tree.advance(now);
+    return true;
+  };
+  const bool browsed = trace::browse(tree, &feed);
+  bool ended = false;
+  {
+    std::lock_guard g(shared.m);
+    ended = shared.ended;
+  }
+  if (browsed && !ended) std::println(std::cerr, "ycxx: the trace browser closed; waiting for the build to end");
+  builder.join();
+  for (const std::string& n : shared.notes) std::println(std::cerr, "{}", n);
+  for (const std::string& n : said) std::println(std::cerr, "{}", n);
+  if (!browsed) {
+    // The terminal went away after all: the trace as the stream, after the build, as without one.
+    std::println(std::cerr, "ycxx: no terminal for --trace-engine=interactive; printing the trace");
+    while (feed.tick()) {
+    }
+    trace::Stream stream(std::cerr, {trace::colors_for(2), true, false});
+    std::vector<trace::Event> all;
+    for (std::int32_t i : tree.preorder()) all.push_back(tree.node(i).ev);
+    stream.batch(all);
+    stream.summary(std::nullopt, tree.memory());
+  }
+  if (shared.status >= 0) return shared.status;
+  if (!shared.done) {
+    std::println(std::cerr, "ycxx: error: {}", shared.done.error());
+    return 1;
+  }
+  return compile::finish(*shared.done);
 }
 
 }  // namespace
@@ -462,8 +628,13 @@ int cxx(std::span<const std::string_view> args) {
     }
     if (trace_mode != TraceMode::off)
       r.trace = trace_mode == TraceMode::stream ? compile::Trace::events : compile::Trace::values;
+    // The browser shows each build while it runs (#939).
+    if (trace_mode == TraceMode::interactive && trace::is_terminal(0)) r.trace = compile::Trace::live;
     return watch_builds(std::move(r), verbose, trace_mode);
   }
+  // The browser while the build runs (#939), when there is a terminal for it; without one, the
+  // trace is gathered and printed as the stream after the build, as before.
+  if (trace_mode == TraceMode::interactive && trace::has_terminal()) return browse_compile(std::move(r), use, verbose);
   std::optional<TraceOut> traced;
   if (trace_mode != TraceMode::off) {
     traced.emplace(trace_mode);
@@ -541,7 +712,9 @@ namespace {
 // `ycxx ctl trace` (#245): every request the daemon serves from now on, as a stream on stdout or,
 // with `--interactive` on a terminal, a browser that grows as requests come, one node each.
 int watch(daemon::Connection& c, bool interactive, bool json) {
-  if (auto ok = daemon::watch_traces(c, interactive || json); !ok) {
+  // The browser gets live batches: each request fills in while it runs (#939).
+  const bool browsing = interactive && trace::is_terminal(0);
+  if (auto ok = daemon::watch_traces(c, interactive || json, browsing); !ok) {
     std::println(std::cerr, "ycxx: {}", ok.error());
     return 1;
   }
@@ -554,23 +727,38 @@ int watch(daemon::Connection& c, bool interactive, bool json) {
     trace::rebase(b.events, *base);
   };
   const auto group_of = [](std::uint64_t request) { return (std::uint64_t{1} << 63) | request; };
-  if (interactive && trace::is_terminal(0)) {
+  if (browsing) {
     trace::Tree tree;
     std::set<std::uint64_t> seen;
-    trace::Feed feed{c.fd.get(), [&] {
+    std::uint64_t sent_ns = 0;  // where running cells' times reach (#939), when it came
+    auto sent_at = std::chrono::steady_clock::now();
+    trace::Feed feed{.fd = c.fd.get(), .pump = [&] {
                        auto b = daemon::next_trace(c);
-                       if (!b) return false;
+                       if (!b) {
+                         tree.settle();  // what was running when the daemon went never ends
+                         return false;
+                       }
+                       const std::uint64_t sent = b->sent_ns;
                        rebase(*b);
                        if (seen.insert(b->request).second) tree.open_group(group_of(b->request), std::format("#{} {}", b->request, b->label), b->started_ns);
                        if (b->end) {
                          tree.close_group(group_of(b->request), b->ended_ns);
                          tree.set_memory(b->memory);
+                       } else if (b->live) {
+                         tree.apply(b->events, group_of(b->request));
+                         tree.set_memory(b->memory);
+                         sent_ns = sent - std::min(sent, *base);
+                         sent_at = std::chrono::steady_clock::now();
                        } else {
                          tree.add(b->events, group_of(b->request));
                        }
                        return true;
                      },
-                     std::format("daemon of {} (builds of files under it; --root picks another)", c.welcome.root)};
+                     .source = std::format("daemon of {} (builds of files under it; --root picks another)", c.welcome.root)};
+    feed.tick = [&] {
+      tree.advance(sent_ns + static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - sent_at).count()));
+      return true;
+    };
     trace::browse(tree, &feed);
     return 0;
   }

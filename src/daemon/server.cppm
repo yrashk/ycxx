@@ -335,6 +335,7 @@ class Server {
     static constexpr std::size_t max_queued = std::size_t{64} << 20;
     int fd = -1;
     bool values = false;
+    bool live = false;  // live batches (#939)
     std::size_t cap = max_queued;  // the requesting client's has none: its own thread drains it
     std::mutex m;
     std::condition_variable cv;
@@ -371,34 +372,75 @@ class Server {
   };
 
   // One request's trace: a collector whose batches go to the request's client, when it asked,
-  // and to each watcher attached when it started. `finish` adds the `end` batch; the client's
-  // frames are written by its connection thread (`flush_client`), before the answer.
+  // and to each watcher attached when it started. Those that asked for a live trace (#939) get
+  // instead what came since the last batch, every frame's start included, on each of the
+  // request's ticks (`pump`). `finish` adds the `end` batch; the client's frames are written by
+  // its connection thread (`flush_client`), before the answer.
   class RequestTrace {
    public:
-    RequestTrace(Server& s, int client, bool values, std::string label, std::vector<std::shared_ptr<Watching>> watchers)
-        : server_(&s), watchers_(std::move(watchers)) {
+    RequestTrace(Server& s, int client, compile::Trace asked, std::string label, std::vector<std::shared_ptr<Watching>> watchers)
+        : server_(&s) {
+      bool values = asked == compile::Trace::values || asked == compile::Trace::live;
       if (client >= 0) {
-        client_ = std::make_shared<Watching>();
-        client_->fd = client;
-        client_->cap = std::numeric_limits<std::size_t>::max();  // bounded by the request itself
+        auto c = std::make_shared<Watching>();
+        c->fd = client;
+        c->cap = std::numeric_limits<std::size_t>::max();  // bounded by the request itself
+        c->live = asked == compile::Trace::live;
+        client_ = c;
+        (c->live ? live_to_ : whole_to_).push_back(c);
+      }
+      for (auto& w : watchers) {
+        values = values || w->values;
+        (w->live ? live_to_ : whole_to_).push_back(std::move(w));
       }
       batch_.request = s.trace_requests_.fetch_add(1, std::memory_order_relaxed) + 1;
       batch_.label = std::move(label);
       batch_.started_ns = s.trace_clock();
-      for (const auto& w : watchers_) values = values || w->values;
-      collector_.emplace([this](std::span<const trace::Event> events) { deliver(events); }, values, s.trace_origin_);
+      live_batch_.request = batch_.request;
+      live_batch_.label = batch_.label;
+      live_batch_.started_ns = batch_.started_ns;
+      live_batch_.live = true;
+      const auto origin = s.trace_origin_;
+      if (!whole_to_.empty()) collector_.emplace([this](std::span<const trace::Event> events) { deliver(events); }, values, origin);
+      if (!live_to_.empty()) live_.emplace(values, origin);
+      if (collector_ && live_) tee_.emplace(*collector_, *live_);
     }
     RequestTrace(const RequestTrace&) = delete;
-    engine::Tracer* tracer() { return &*collector_; }
+    engine::Tracer* tracer() {
+      if (tee_) return &*tee_;
+      if (live_) return &*live_;
+      return &*collector_;
+    }
+
+    // On the request's thread, as it runs: what came since the last live batch, to the live.
+    void pump() {
+      if (!live_) return;
+      std::vector<trace::Event> events = live_->take();
+      if (events.empty() && live_sent_) return;  // the first batch goes even empty: the request has started
+      live_sent_ = true;
+      live_batch_.events = std::move(events);
+      live_batch_.sent_ns = server_->trace_clock();
+      live_batch_.memory = {memory::process().current, window_.peak()};
+      engine::Sink body;
+      engine::serialize(body, live_batch_);
+      const std::vector<std::byte> frame = encode_frame(Kind::trace, body.bytes());
+      for (const auto& w : live_to_) w->push(frame);
+    }
 
     // Once the request's frames have all finished (it completed, or `Session::run` waited for
     // its cancelled runs): orphans, then the `end` batch.
     void finish() {
-      collector_->finish();
+      if (collector_) collector_->finish();
+      pump();
       batch_.end = true;
       batch_.ended_ns = server_->trace_clock();
       batch_.memory = {memory::process().current, window_.peak()};
-      deliver({});
+      batch_.events.clear();
+      engine::Sink body;
+      engine::serialize(body, batch_);
+      const std::vector<std::byte> frame = encode_frame(Kind::trace, body.bytes());
+      for (const auto& w : whole_to_) w->push(frame);
+      for (const auto& w : live_to_) w->push(frame);
     }
     // On the client's connection thread.
     void flush_client() {
@@ -406,21 +448,23 @@ class Server {
     }
 
    private:
-    // Under the collector's lock, or from `finish`.
+    // Under the collector's lock.
     void deliver(std::span<const trace::Event> events) {
       batch_.events.assign(events.begin(), events.end());
       engine::Sink body;
       engine::serialize(body, batch_);
       const std::vector<std::byte> frame = encode_frame(Kind::trace, body.bytes());
-      if (client_) client_->push(frame);
-      for (const auto& w : watchers_) w->push(frame);
+      for (const auto& w : whole_to_) w->push(frame);
     }
 
     Server* server_;
     std::shared_ptr<Watching> client_;
-    std::vector<std::shared_ptr<Watching>> watchers_;
-    TraceBatch batch_;
+    std::vector<std::shared_ptr<Watching>> whole_to_, live_to_;  // the client among them, when it asked
+    TraceBatch batch_, live_batch_;
     std::optional<trace::Collector> collector_;
+    std::optional<trace::Live> live_;
+    std::optional<trace::Tee> tee_;
+    bool live_sent_ = false;
     memory::Window window_;  // the process's peak while the request runs (#274)
   };
 
@@ -437,8 +481,7 @@ class Server {
       }
     }
     if (asked == compile::Trace::off && watchers.empty()) return nullptr;
-    return std::make_unique<RequestTrace>(*this, asked == compile::Trace::off ? -1 : client, asked == compile::Trace::values,
-                                          std::move(label), std::move(watchers));
+    return std::make_unique<RequestTrace>(*this, asked == compile::Trace::off ? -1 : client, asked, std::move(label), std::move(watchers));
   }
   std::uint64_t trace_clock() const {
     return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() - trace_origin_).count());
@@ -454,6 +497,7 @@ class Server {
     auto w = std::make_shared<Watching>();
     w->fd = fd;
     w->values = r.values;
+    w->live = r.live;
     {
       // Registered under the stop's own lock, so the stop either refuses it or shuts it down.
       std::lock_guard g(conn_mu_);
@@ -849,7 +893,7 @@ class Server {
     bool cancelled = false;
     compile::Stop tick = [&] {
       if (hung_up(fd)) return cancelled = true;
-      if (traced) traced->flush_client();  // the trace so far, from this thread (never a worker's)
+      if (traced) traced->pump(), traced->flush_client();  // the trace so far, from this thread (never a worker's)
       if (watcher_) {
         std::unique_lock strand(strand_mu_, std::try_to_lock);
         if (strand && admission_.may_apply(Clock::now())) {
