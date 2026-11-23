@@ -156,9 +156,9 @@ public:
   // `template_depth` is the limit on nested instantiations ([temp.inst]/16), `-ftemplate-depth`.
   // `index`, when given, is `make_index` of the same world, region and items, shared (#947).
   Program(sema::World& w, const pp::Region& r, const items::Items& its, u32 template_depth = pp::Config::default_template_depth,
-          std::shared_ptr<const Index> index = nullptr)
-      : instantiation_limit(template_depth), w_(&w), r_(&r), view_(its), items_(&view_),
-        ix_(index ? std::move(index) : make_index(w, r, its)) {
+          std::shared_ptr<const Index> index = nullptr, bool exceptions_enabled = true)
+      : instantiation_limit(template_depth), exceptions_enabled_(exceptions_enabled), w_(&w), r_(&r),
+        view_(its), items_(&view_), ix_(index ? std::move(index) : make_index(w, r, its)) {
     w.install_builtin_classes(classes_);
     may_have_virtual_layouts_ = classes_.has_virtual_layouts() || ix_->says_virtual;
   }
@@ -352,6 +352,7 @@ public:
 
   sema::World& world() { return *w_; }
   const pp::Region& region() const { return *r_; }
+  bool exceptions_enabled() const { return exceptions_enabled_; }
   const ItemsView& items() const { return *items_; }
   // Records the items this Program reads into `reads` (#947).
   void record_reads(std::vector<std::uint8_t>* reads) {
@@ -1541,6 +1542,7 @@ private:
     Result<V> result;
   };
 
+  const bool exceptions_enabled_;
   sema::World* w_;
   const pp::Region* r_;
   ItemsView view_;
@@ -1833,6 +1835,7 @@ std::set<EntityId> Program::uncertain_object_layouts(bool include_lifecycle_sign
 class AtItem final : public sema::Questions {
 public:
   AtItem(Program& p, u32 item, bool self) : from(p.ns_of(item)), p_(&p), item_(item), self_(self) {}
+  bool exceptions_enabled() const override { return p_->exceptions_enabled(); }
   const sema::Classes& classes() override { return p_->classes(); }
   sema::CopyAssignment require_copy_assignment(EntityId f) override { return p_->require_copy_assignment(f); }
   const sema::ClassRec& publish_class(EntityId c, sema::ClassRec r) override { return p_->publish_class(c, std::move(r), item_); }
@@ -2550,6 +2553,7 @@ public:
   AtInstantiation(Program& p, u32 item) : p_(&p), item_(item), at_(p, item, true) {
     at_.default_instantiation_point = p.end();
   }
+  bool exceptions_enabled() const override { return p_->exceptions_enabled(); }
   sema::AliasCallPattern alias_call_pattern(EntityId e) override { return at_.alias_call_pattern(e); }
   std::optional<QualType> replay_alias_calls(sema::Sema& caller, const ast::DeclSema& alias,
                                            const sema::Bindings& args) override {
@@ -6284,6 +6288,9 @@ private:
       sem.kind = ast::DeclKind::variable;
       sem.storage = ast::Storage::static_;
       const sema::Sema::ImmediateReferenceScope references(s_, spec.is_constexpr);
+      const auto& owner = s_.world().entities.rec(c.entity);
+      const sema::Sema::StaticInitializerScope initializer(s_,
+          !s_.templated() && owner.templ == EntityId::none ? c.entity : EntityId::none, d.name);
       if (spec.is_constexpr) d.type = types.add_cv(d.type, sema::Cv::const_);
       const sema::Sema::StaticConstexprInitializerScope constexpr_initializer(s_, spec.is_constexpr);
       // A placeholder type is deduced from the initializer in the class ([dcl.type.auto.deduct]),
@@ -6306,8 +6313,7 @@ private:
       sem.entity = s_.world().entities.entity(
           {sema::EntityKind::variable, d.name, d.type, LangLinkage::cxx, ast::Linkage::external, {}, c.entity});
       sem.flags = flags;
-      // Lookup while an ordinary class is incomplete handles earlier direct members. Inherited
-      // names also need the incomplete-class base lookup in #967 before this path can use them.
+      // The written list forms here apply to base-free namespace-scope owners.
       const bool braced = ps_.is(Tk::l_brace) || (ps_.is(Tk::equal) && ps_.kind(1) == Tk::l_brace);
       bool list_initialization = false;
       if (braced && (spec.is_inline || spec.is_constexpr) && s_.template_scopes.empty() && !inst_ &&
@@ -6324,11 +6330,12 @@ private:
         if (!member_value_) p_->declared(sem, k_);
       };
       // [basic.scope.pdecl]: the member's name and type are visible in its initializer.
-      if (list_initialization) declare_member_name();
+      const bool visible_in_initializer = list_initialization || !s_.static_initializer_bases(c.entity).empty();
+      if (visible_in_initializer) declare_member_name();
       // A member whose initializer is in error is still declared, so its uses say nothing more.
       const u32 ordinal = u32(decls_.size());
       auto declare_member = [&](ConstId v, const Ex& e) {
-        if (!list_initialization) declare_member_name();
+        if (!visible_in_initializer) declare_member_name();
         declarators_.push_back(s_.node(ast::Declarator{ordinal, sema::Sema::at(e, d.begin), v}, d.begin, ps_.pos()));
         decls_.push_back(sem);
       };

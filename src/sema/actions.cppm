@@ -90,6 +90,7 @@ enum class AliasCallPattern { none, retained, may_erase };
 // at item)` and fetches of `decl_sema`.
 class Questions {
 public:
+  virtual bool exceptions_enabled() const { return true; }
   // The declarations of `name` in the global namespace visible at the current point: those that
   // precede the current item, and, inside a function body, the item's own (§B2, [basic.scope.pdecl]).
   // `directives` are the namespaces block-scope using-directives nominate ([namespace.udir]): their
@@ -576,12 +577,22 @@ public:
         if (!elaborated && unscoped_member_enumerator(current_class, name, /*unqualified=*/true)) return std::nullopt;
         if (auto r = nested_member(current_class, name, true)) return r->first.type;
       } else {
+        const auto initializer_bases = static_initializer_bases(current_class);
+        if (!elaborated && !initializer_bases.empty() &&
+            (name == static_initializer_name_ || own_initializer_static(name))) return std::nullopt;
         if (auto m = q_->earlier_member(name, elaborated)) {
           if (m->kind == ast::DeclKind::enum_ || m->kind == ast::DeclKind::type_alias) return m->type;
           if (!elaborated && (m->kind == ast::DeclKind::data_member || m->kind == ast::DeclKind::variable ||
                               m->kind == ast::DeclKind::enumerator ||
                               (m->kind == ast::DeclKind::function && c.name != name)))
             return std::nullopt;
+        }
+        // The injected-class-name is declared in the class's own scope ([class.pre]).
+        if (!initializer_bases.empty() && c.name == name) return types().class_type(current_class);
+        if (!elaborated && !initializer_bases.empty()) {
+          // A base declaration hides a namespace type. Merge base types by the types they name.
+          auto hit = class_body_type(current_class, ClassRec{}, name, type_at, ClassBodyLookup::static_initializer);
+          if (hit.found) return hit.type;
         }
         // In the class being defined, a type of its (complete) bases.
         for (EntityId b : q_->defining_bases(current_class))
@@ -639,7 +650,9 @@ public:
     std::optional<QualType> type;
   };
 
-  enum class ClassBodyLookup { unqualified, qualified, enum_qualifier, qualified_enum, before_template_parameter };
+  enum class ClassBodyLookup {
+    unqualified, qualified, enum_qualifier, qualified_enum, before_template_parameter, static_initializer
+  };
 
   // [class.pre], [class.member.lookup]: a class's injected name stops the search on
   // that branch. In a nonvirtual graph, distinct base branches cannot dominate one another.
@@ -649,6 +662,7 @@ public:
     const bool enum_lookup = qualified_enum || lookup == ClassBodyLookup::enum_qualifier;
     const bool qualified = lookup == ClassBodyLookup::qualified || enum_lookup;
     const bool before_parameter = lookup == ClassBodyLookup::before_template_parameter;
+    const bool static_initializer = lookup == ClassBodyLookup::static_initializer;
     struct Edge {
       EntityId derived;
       ast::Access access;
@@ -683,7 +697,10 @@ public:
         }
       }
       std::span<const BaseRec> bases = cr.bases;
-      if ((qualified || before_parameter) && cls == naming && !cr.defined) bases = q_->defining_base_records(cls);
+      if (cls == naming && !cr.defined) {
+        if (static_initializer) bases = static_initializer_bases(naming);
+        else if (qualified || before_parameter) bases = q_->defining_base_records(cls);
+      }
       for (const BaseRec& b : bases) {
         // [temp.dep.general]: the naming class's dependent bases are not searched. A base of a
         // nondependent base is nondependent, whatever it was in that base's own pattern.
@@ -704,14 +721,14 @@ public:
     auto first = std::ranges::find_if(hits, [](const Hit& h) { return h.type.has_value(); });
     if (first == hits.end()) return {true, std::nullopt};
     // Apply the lookup-set and access checks to names with an injected-class-name candidate.
-    // The caller resolving a potentially hidden template parameter also needs these checks
-    // for ordinary members of nondependent bases ([temp.local]).
-    if (type_at && (injected || enum_lookup || before_parameter)) {
+    // The callers resolving a hidden template parameter or a static initializer's type-id
+    // also need these checks for ordinary members of nondependent bases.
+    if (static_initializer || (type_at && (injected || enum_lookup || before_parameter))) {
       QualType selected = types().canonical(*first->type);
       if (std::ranges::any_of(hits, [&](const Hit& h) { return !h.type || types().canonical(*h.type) != selected; })) {
-        diag(*type_at, Diag::ambiguous_member, name, types().class_type(naming));
-        if (enum_lookup) return {true, std::nullopt};
-      } else {
+        if (type_at) diag(*type_at, Diag::ambiguous_member, name, types().class_type(naming));
+        if (enum_lookup || static_initializer) return {true, std::nullopt};
+      } else if (type_at) {
         if (qualified_enum) {
           std::erase_if(hits, [&](const Hit& hit) {
             return w_->entities.rec(hit.declaration).kind == EntityKind::type_alias;
@@ -789,7 +806,10 @@ public:
     if (const ClassRec* r = class_rec(current_class))
       return std::ranges::any_of(r->fields, [&](const FieldRec& f) { return f.name == name; }) ||
              std::ranges::any_of(r->members, [&](const MemberDeclRec& m) { return m.name == name; });
-    return q_->earlier_member(name).has_value();
+    if (q_->earlier_member(name)) return true;
+    const auto bases = static_initializer_bases(current_class);
+    return !bases.empty() &&
+           (static_initializer_has_own_name(name) || find_base_member(bases, name, /*unqualified=*/true));
   }
 
   // The class template unqualified lookup finds for `name`, which a `<` after it begins the
@@ -1064,6 +1084,12 @@ public:
     return std::ranges::any_of(template_scopes | std::views::join, [&](const ast::TemplateParamSema& p) {
       return !template_args.at(p.depth, p.index);
     });
+  }
+  bool check_exception_construct(u32 at, lex::Tk keyword) {
+    if (q_->exceptions_enabled() || ((in_function_body || !lambdas_.empty()) && in_template_definition()))
+      return true;
+    diag(at, Diag::exceptions_disabled, keyword);
+    return false;
   }
   struct RequiresBodyScope {
     bool& context;
@@ -2789,7 +2815,7 @@ public:
         if ((!replay_default_members_ || templated()) && required_base == EntityId::none &&
             !unevaluated && !constant_reference_context) {
           const Ex operand{*init, begin, end, info};
-          const Ex proof = runtime_default_noexcept(operand);
+          const Ex proof = runtime_default_supported(operand);
           if (!proof.ok()) return {NodeId::none, begin, end};
           const auto result = as<ast::Literal>(proof);
           if (!result || !w_->values.rec(result->value).bits) {
@@ -3662,7 +3688,15 @@ public:
         if (p->first == name) return false;
     if (template_param(name)) return false;
     // A member template of the class whose member is being analysed ([temp.mem]).
-    if (names_member(name)) return current_class != EntityId::none && class_has_member_template(current_class, name);
+    if (names_member(name)) {
+      if (class_has_member_template(current_class, name)) return true;
+      const auto bases = static_initializer_bases(current_class);
+      if (!bases.empty() && !static_initializer_has_own_name(name) && !q_->earlier_member(name))
+        if (auto member = find_base_member(bases, name, /*unqualified=*/true);
+            member && !member->ambiguous && member->member && member->member->is_function)
+          return class_has_member_template(member->owner, name);
+      return false;
+    }
     for (const BlockUsing& u : block_usings_)
       if (u.name == name) return std::ranges::any_of(u.decls, [](const ast::DeclSema& d) { return (d.flags & decl_flag::template_) != 0; });
     for (const OwnDecl& o : own)
@@ -4905,6 +4939,32 @@ public:
   // The function whose body is being analysed, none outside one: a friend of a class may name its
   // private members ([class.friend]/2).
   EntityId current_function = EntityId::none;
+  struct StaticInitializerScope {
+    Sema& sema;
+    EntityId saved;
+    NameId saved_name;
+    StaticInitializerScope(Sema& s, EntityId owner, NameId name)
+        : sema(s), saved(std::exchange(s.static_initializer_owner_, owner)),
+          saved_name(std::exchange(s.static_initializer_name_, name)) {}
+    ~StaticInitializerScope() {
+      sema.static_initializer_owner_ = saved;
+      sema.static_initializer_name_ = saved_name;
+    }
+  };
+
+  std::span<const BaseRec> static_initializer_bases(EntityId owner) {
+    if (owner == static_initializer_owner_) return q_->defining_base_records(owner);
+    return {};
+  }
+  const ast::DeclSema* own_initializer_static(NameId name) {
+    for (const OwnDecl& d : own | std::views::reverse)
+      if (d.name == name && d.sema.kind == ast::DeclKind::variable && d.sema.storage == ast::Storage::static_ &&
+          w_->entities.rec(d.sema.entity).scope == current_class) return &d.sema;
+    return nullptr;
+  }
+  bool static_initializer_has_own_name(NameId name) {
+    return w_->entities.rec(current_class).name == name || name == static_initializer_name_ || own_initializer_static(name);
+  }
   struct NamespaceLambda {
     EntityId owner, scope;
     NameId name;
@@ -4937,7 +4997,11 @@ public:
       if (r.kind != EntityKind::class_ && r.kind != EntityKind::class_template) break;
       if (k == c || befriended(k)) return true;
       int paths = 0;
-      if (a == ast::Access::protected_ && base_path(k, c, paths)) return true;
+      if (a == ast::Access::protected_) {
+        if (base_path(k, c, paths)) return true;
+        for (const BaseRec& base : static_initializer_bases(k))
+          if (base.cls == c || base_path(base.cls, c, paths)) return true;
+      }
     }
     return false;
   }
@@ -4959,15 +5023,18 @@ public:
     return true;
   }
 
-  // Member access through a class template's instantiated base graph ([class.access.base]). A
-  // static member can be shared through several subobjects, unlike a base conversion.
+  // Member access through a class's base graph ([class.access.base]). The static initializer
+  // can use the defining bases before the class is complete. A static member can be shared
+  // through several subobjects, unlike a base conversion.
   bool accessible_naming_base(EntityId naming, EntityId owner, bool check_all_bases = false) {
     if (naming == owner || naming == EntityId::none ||
-        (!check_all_bases && w_->entities.rec(naming).templ == EntityId::none)) return true;
+        (!check_all_bases && w_->entities.rec(naming).templ == EntityId::none &&
+         static_initializer_bases(naming).empty())) return true;
     auto path = [&](this auto&& next, EntityId from) -> bool {
       if (from == owner) return true;
       const ClassRec* rec = class_rec(from);
-      return rec && std::ranges::any_of(rec->bases, [&](const BaseRec& base) {
+      const auto bases = rec ? std::span<const BaseRec>(rec->bases) : static_initializer_bases(from);
+      return std::ranges::any_of(bases, [&](const BaseRec& base) {
         return accessible(from, base.access) && next(base.cls);
       });
     };
@@ -5027,8 +5094,11 @@ public:
     const ClassRec* cr = class_rec(c);
     if (!cr) return std::nullopt;
     if (auto member = direct_member(c, *cr, name)) return member;
+    return find_base_member(cr->bases, name, unqualified);
+  }
+  std::optional<Found> find_base_member(std::span<const BaseRec> bases, NameId name, bool unqualified) {
     std::optional<Found> r;
-    for (const BaseRec& b : cr->bases) {
+    for (const BaseRec& b : bases) {
       // A dependent direct base is outside unqualified lookup in the template, including
       // during member analysis with concrete bindings ([temp.dep]).
       if (unqualified && b.dependent_in_pattern) continue;
@@ -5126,8 +5196,8 @@ public:
   // or a qualified name `C::name`: none if `c` has no such member.
   std::optional<Ex> class_member(EntityId c, NameId name, u32 begin, u32 end, u32 name_at,
                                  std::optional<u32> address_at = {}, bool unqualified = false,
-                                 bool check_all_bases = false) {
-    auto f = find_member(c, name, unqualified);
+                                 bool check_all_bases = false, std::span<const BaseRec> defining_bases = {}) {
+    auto f = defining_bases.empty() ? find_member(c, name, unqualified) : find_base_member(defining_bases, name, unqualified);
     if (!f) return std::nullopt;
     Ex fail{NodeId::none, begin, end};
     if (f->ambiguous) {
@@ -6334,7 +6404,7 @@ public:
 
   // The new runtime default path admits only these scalar operations and ordinary calls.
   // Allocation, opaque virtual dispatch and class-valued calls require separate proofs.
-  Ex runtime_default_noexcept(Ex operand) {
+  Ex runtime_default_supported(Ex operand) {
     const auto ordinary_result = [&](ExprInfo info) {
       return info.category != ValueCategory::prvalue || !types().is_class(info.type);
     };
@@ -6358,7 +6428,7 @@ public:
       if (supported) node.for_each_child(self);
     };
     visit(ast::Red(ins().ast, root.id, operand.begin));
-    if (!supported) return bool_literal(false, operand.begin, operand.end);
+    if (!supported || !q_->exceptions_enabled()) return bool_literal(supported, operand.begin, operand.end);
     return unary_noexcept(operand, operand.begin, operand.end);
   }
 
@@ -6665,6 +6735,16 @@ public:
     if (current_class != EntityId::none) {
       if (auto r = class_member(current_class, name, begin, end, begin, std::nullopt, /*unqualified=*/true)) return *r;
       if (!class_rec(current_class)) {
+        const auto bases = static_initializer_bases(current_class);
+        if (!bases.empty()) {
+          // This declaration's earlier declarators, and the current one once typed, precede bases.
+          if (const auto* d = own_initializer_static(name))
+            return static_member(current_class, d->entity, d->type, begin, end);
+          if (name == static_initializer_name_) {
+            diag(begin, Diag::auto_used_in_initializer, name);
+            return {NodeId::none, begin, end};
+          }
+        }
         std::vector<ast::DeclSema> functions;
         if (auto m = q_->earlier_member(name, /*type_only=*/false, nested_enum_members_begin ? &functions : nullptr)) {
           if (m->kind == ast::DeclKind::enumerator) return enumerator(m->entity, m->type, begin, end);
@@ -6683,6 +6763,14 @@ public:
             return {NodeId::none, begin, end};
           }
           return static_member(current_class, m->entity, m->type, begin, end);
+        }
+        if (!bases.empty()) {
+          if (w_->entities.rec(current_class).name == name) {
+            diag(begin, Diag::type_as_expression, name);
+            return {NodeId::none, begin, end};
+          }
+          if (auto m = class_member(current_class, name, begin, end, begin, {}, /*unqualified=*/true,
+                                    /*check_all_bases=*/true, bases)) return *m;
         }
         // A nondependent base participates in lookup while a class template is being defined.
         if (w_->entities.rec(current_class).templ != EntityId::none)
@@ -9603,9 +9691,10 @@ public:
 
   // [expr.throw], [except.throw]: retain the operand, with array and function decay.
   Ex throw_expression(std::optional<Ex> operand, u32 begin, u32 end) {
+    Ex fail{NodeId::none, begin, end};
+    if (!check_exception_construct(begin, lex::Tk::kw_throw)) return fail;
     ExprInfo info{builtin(Builtin::void_), ValueCategory::prvalue, 0};
     if (!operand) return node(ast::Throw{info, {}}, begin, end, info);
-    Ex fail{NodeId::none, begin, end};
     Ex value = *operand;
     if (!value.ok()) return fail;
     if (dependent(value)) {
@@ -10306,6 +10395,8 @@ private:
   ast::ItemId item_;
   u32 loc_base_;
   bool in_requires_body_ = false;
+  EntityId static_initializer_owner_ = EntityId::none;
+  NameId static_initializer_name_{};
   std::vector<ast::LocalRec> locals_;
   std::vector<std::pair<EntityId, NameId>> statics_;  // the static locals so far: (function, name)
   // Packs ([temp.variadic]): the expansions being instantiated, innermost last, each with the
