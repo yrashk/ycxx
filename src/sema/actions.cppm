@@ -1980,7 +1980,7 @@ public:
       return Scope{std::nullopt, types().dep_name(*s.type, n)};
     if (s.ns) {
       if (auto t = direct_member_introduction(*s.ns, n)) return Scope{std::nullopt, t};
-      auto members = q_->namespace_members(*s.ns, n);
+      auto members = q_->qualifier_decls(n, s.ns, {});
       for (const ast::DeclSema& d : members) {
         if (d.kind == ast::DeclKind::namespace_) {
           if (ambiguous_namespace)

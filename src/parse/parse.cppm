@@ -486,10 +486,11 @@ public:
   // starting in namespace `from`: the first enclosing namespace that declares it before the
   // point, counting the namespaces using-directives nominate where [namespace.udir]/2 puts them.
   // `block` are the namespaces block-scope using-directives at the point nominate.
-  enum class LookupNames { all, types, qualifiers, immediate_call };
+  enum class LookupNames { all, types, qualifiers, using_declaration, immediate_call };
 
   void filter_lookup(std::vector<DeclId>& declarations, LookupNames filter) {
-    if (filter == LookupNames::all || filter == LookupNames::immediate_call) return;
+    if (filter == LookupNames::all || filter == LookupNames::using_declaration ||
+        filter == LookupNames::immediate_call) return;
     std::erase_if(declarations, [&](DeclId id) {
       auto d = decl_sema(id);
       return !d || d->entity == EntityId::none ||
@@ -609,7 +610,8 @@ public:
   // none, those of the namespaces its using-directives nominate.
   std::vector<DeclId> qualified_decls(std::string_view name, const std::string& ns, u32 item, bool self,
                                      LookupNames filter = LookupNames::all, bool direct_only = false) {
-    const bool immediate_call = filter == LookupNames::immediate_call;
+    const bool direct_first = filter == LookupNames::immediate_call || filter == LookupNames::qualifiers ||
+                              filter == LookupNames::using_declaration;
     const u32 limit = item + (self ? 1 : 0);
     auto append_inline_children = [&](std::vector<std::string>& scopes, const std::string& scope) {
       if (auto children = inline_namespaces_.find(scope); children != inline_namespaces_.end())
@@ -617,7 +619,7 @@ public:
           if (child.item < limit) scopes.push_back(child.path);
     };
     auto candidates = [&](const std::string& path) {
-      if (!immediate_call) {
+      if (!direct_first) {
         auto declarations = declared_in(name, path, item, self);
         filter_lookup(declarations, filter);
         return declarations;
@@ -628,7 +630,8 @@ public:
       for (std::size_t i = 0; i < scopes.size(); ++i) {
         const std::string scope = scopes[i];
         auto own = declared_in(name, scope, item, self, /*inhabit=*/true, /*bound_functions=*/false,
-                               /*hide_function_tags=*/true);
+                               /*hide_function_tags=*/filter == LookupNames::immediate_call);
+        filter_lookup(own, filter);
         declarations.insert(declarations.end(), own.begin(), own.end());
         append_inline_children(scopes, scope);
       }
@@ -653,7 +656,7 @@ public:
           if (!d.target) item_sema(d.item);
           if (d.target) nominate(*d.target);
         }
-        if (!immediate_call) continue;
+        if (!direct_first) continue;
         if (auto children = ix_->unnamed_namespaces.find(scope); children != ix_->unnamed_namespaces.end())
           for (const InlineNamespace& child : children->second)
             if (child.item < limit) nominate(child.path);
@@ -3275,7 +3278,8 @@ private:
     }
     std::vector<DeclId> found;
     ast::DeclSema first{};
-    for (DeclId d : p_->qualified_decls(p_->world().ins.names.spelling(n), p_->namespace_path(*sc->ns), k_, false))
+    for (DeclId d : p_->qualified_decls(p_->world().ins.names.spelling(n), p_->namespace_path(*sc->ns), k_, false,
+                                       Program::LookupNames::using_declaration))
       if (auto ds = p_->decl_sema(d); ds && ds->entity != EntityId::none) {
         if (ds->kind == ast::DeclKind::namespace_) {  // [namespace.udecl]/3: it names no namespace
           s_.diag(at, Diag::using_namespace_name, n);

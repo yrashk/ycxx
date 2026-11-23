@@ -1766,12 +1766,6 @@ public:
     if (half) half_ = true;
   }
 
-  bool empty_template_call_ahead(u32 less) {
-    if (kind(less) != Tk::less) return false;
-    const u32 open = past_template_args(less);
-    return kind(open) == Tk::l_paren && kind(open + 1) == Tk::r_paren;
-  }
-
   // A qualified type name at token `start`: its type and the tokens it takes.
   // `checked`: the name is taken here, so its access is checked ([class.access]/4).
   std::optional<std::pair<QualType, u32>> qualified_type(u32 start, bool checked = false, bool type_only = false,
@@ -1794,7 +1788,7 @@ public:
     // `N::X<args>`: a class template specialization named in a namespace ([temp.names]).
     qualified_half_ = false;
     NameId name = name_of(tok(next));
-    if (template_argument && s->ns && empty_template_call_ahead(next + 1) &&
+    if (template_argument && s->ns && kind(next + 1) == Tk::less &&
         s_->namespace_names_call_template(*s->ns, name))
       return std::nullopt;
     if (kind(next + 1) == Tk::less && s->ns) {
@@ -4411,8 +4405,8 @@ public:
       }
       return scope_expr();
     }
-    const bool immediate_call_ahead = s->ns && in_template_value_argument_ && empty_template_call_ahead(0);
-    const bool immediate_template = immediate_call_ahead && s_->namespace_names_call_template(*s->ns, n);
+    const bool qualified_value_template = s->ns && in_template_value_argument_ && is(Tk::less);
+    const bool immediate_template = qualified_value_template && s_->namespace_names_call_template(*s->ns, n);
     if (s->ns && is(Tk::less) && !immediate_template) {
       // [expr.type.conv] permits a namespace-qualified simple-template-id as the
       // target type of a functional conversion.
@@ -4461,17 +4455,17 @@ public:
         }
       // `S::f<args>`: a member template of class S or a function template of namespace S, with
       // explicit arguments ([temp.arg.explicit]).
-      if (keyword || (immediate_call_ahead ? immediate_template : s_->scope_names_template(*s, n))) {
+      if (keyword || (qualified_value_template ? immediate_template : s_->scope_names_template(*s, n))) {
         auto args = template_argument_list();
         if (!args) return {NodeId::none, begin, pos()};
         const bool dependent_args = std::ranges::any_of(*args, [&](const ast::TemplateArg& a) { return s_->dependent(a); });
         const bool immediate_call = s->ns && in_template_value_argument_ &&
                                     is(Tk::l_paren) && kind(1) == Tk::r_paren;
-        if (immediate_call && ambiguous_namespace) {
+        if ((immediate_call || immediate_template) && ambiguous_namespace) {
           s_->diag(begin + *ambiguous_namespace, Diag::ambiguous_name, ambiguous_name);
           return {NodeId::none, begin, pos()};
         }
-        Ex r = scope_expr(immediate_call);
+        Ex r = scope_expr(immediate_call || immediate_template);
         if (r.ok() && !s_->dependent(r) && dependent_args) {
           if (immediate_call)
             if (auto call = deferred_immediate_template_call(r, *args)) return *call;
