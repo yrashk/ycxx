@@ -325,8 +325,14 @@ void relax_data_addresses() {
   auto adjacent = input;
   adjacent[0].sections[0].relocate(reloc_kind::x86_64_pc32, value, -4, 4);
   check(elf::link(adjacent).has_value(), "a fixup ending at the MOV prefix is adjacent");
-  change([=](auto& o, auto& p) { o.symbols[value].section.reset(); p.symbols.clear(); },
-         "R_X86_64_REX_GOTPCRELX for undefined weak symbol 'value' is unsupported");
+  auto undefined_weak = input;
+  undefined_weak[0].symbols[value].section.reset();
+  undefined_weak[1].symbols.clear();
+  const auto weak_image = elf::link(undefined_weak);
+  check(weak_image.has_value(),
+        weak_image ? "link a canonical GOT load of an undefined weak symbol" : weak_image.error());
+  undefined_weak[0].sections[text].bytes[9] = 0x8d;
+  rejects(undefined_weak, shape);
   change([=](auto& o, auto& p) {
     o.symbols[value].section.reset();
     o.symbols[value].weak = false;

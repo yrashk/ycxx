@@ -741,7 +741,7 @@ void reject_bad_files(std::span<const std::uint8_t> file) {
   change(symtab + 24 + 8, 8, 9, "out-of-section value");
   change(rela, 8, std::uint64_t{1} << 32, "relocation offset exceeds 32 bits");
   change(rela, 8, 17, "relocation lies outside its section");
-  change(rela + 8, 4, 9, "unsupported x86-64 relocation type");
+  change(rela + 8, 4, 10, "unsupported x86-64 relocation type");
   change(rela + 12, 4, 0, "invalid ELF relocation symbol");
   change(rela + 12, 4, 8, "invalid ELF relocation symbol");
   change(rela + 24, 8, 5, "composed ELF relocations");

@@ -129,6 +129,9 @@ ordinary object-pointer or object lvalue-reference fields by value. The record c
 16 bytes and must be trivial for calls. Larger results and classes that are not trivial for
 calls (with a user-provided copy constructor or destructor) pass through memory, as on macOS. [Linux integer aggregate ABI](docs/design/linux-integer-aggregates.md)
 
+Static x86-64 Linux executables resolve `R_X86_64_GOTPCREL` through GOT slots. A slot for an
+unresolved weak symbol contains zero. [#979](https://github.com/yrashk/ycxx/issues/979)
+
 For mixed Linux objects, the pinned libycxx `<cstddef>` byte operator uses the same Itanium
 linkage name in ycxx, GCC and Clang. [#64](https://github.com/yrashk/ycxx/issues/64)
 Static links of explicit x86-64 ELF objects keep the first COMDAT group for each signature, including
@@ -442,7 +445,8 @@ written default member initializer are value-initialized.
   non-template classes without bases;
 - single and multiple inheritance (not virtual): base classes laid out as Clang does, member
   lookup through bases, derived-to-base conversions and base initializers. Unqualified
-  injected class names in ordinary member bodies respect base access.
+  injected class names respect base access in ordinary member bodies. Those bodies and ordinary
+  in-class alias declarations also check access to inherited aliases. [#1001](https://github.com/yrashk/ycxx/issues/1001)
 - namespaces, nested (`namespace a::b`) and inline ones, typedefs and aliases, including
   function type and function pointer aliases with qualified return types, `using` declarations
   and directives;

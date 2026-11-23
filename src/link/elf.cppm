@@ -27,7 +27,7 @@ std::expected<void, std::string> select_comdat_groups(std::span<obj::object> obj
 
 // Link in-memory x86-64 Linux objects. The caller supplies the entry definition in code and
 // handles process startup and exit, after selecting any COMDAT groups. Standard sections support ABS64, PC32 and PLT32
-// relocations. Static links also relax canonical REX_GOTPCRELX address loads.
+// relocations. Static links support GOTPCREL and canonical REX_GOTPCRELX address loads.
 // The ET_EXEC image has load segments and a non-executable stack.
 // It has no section table. `entry` names a nonlocal symbol. Dynamic links support direct calls
 // to functions provided by the supplied libraries.
@@ -82,12 +82,28 @@ struct section_ref { std::size_t object, section; };
 struct definition { std::size_t object; const obj::symbol* symbol; };
 using definitions = std::map<std::string_view, definition, std::less<>>;
 
+using got_key = std::variant<std::string_view, std::pair<std::size_t, std::uint32_t>>;
+
+struct got_slot {
+  std::size_t index;
+  std::optional<definition> target;
+};
+
+got_key slot_key(std::size_t object, std::uint32_t index, const obj::symbol& symbol) {
+  if (symbol.bind == binding::local) return std::pair{object, index};
+  return symbol.name_view();
+}
+
+bool is_got_address(reloc_kind kind) {
+  return kind == reloc_kind::got_rel32 || kind == reloc_kind::x86_64_rex_gotpcrelx;
+}
+
 struct load_segment {
   std::uint32_t flags;
   std::uint64_t offset, file_size, memory_size;
 };
 
-enum class patch_kind { ordinary, import_call, relax_got };
+enum class patch_kind { ordinary, import_call, got_load, relax_got };
 
 struct patch {
   std::uint64_t offset, value;
@@ -96,10 +112,13 @@ struct patch {
   patch_kind kind;
   std::string_view symbol;
 
+  bool is_got_load() const { return kind == patch_kind::got_load || kind == patch_kind::relax_got; }
+
   std::size_t prefix_size() const {
     switch (kind) {
       case patch_kind::ordinary: return 0;
       case patch_kind::import_call: return 1;
+      case patch_kind::got_load:
       case patch_kind::relax_got: return 3;
     }
     std::unreachable();
@@ -506,7 +525,7 @@ std::expected<bytes, std::string> link(std::span<const obj::object> objects, std
       }
       if (dynamic) {
         for (const auto& r : s.relocs) {
-          if (r.kind != reloc_kind::x86_64_rex_gotpcrelx) continue;
+          if (!is_got_address(r.kind)) continue;
           if (r.symbol >= o.symbols.size()) return section_error(o, s, "invalid ELF relocation symbol index");
           return section_error(o, s, std::format("native dynamic ELF GOT address for '{}' is unsupported",
                                                   o.symbols[r.symbol].name_view()));
@@ -541,14 +560,42 @@ std::expected<bytes, std::string> link(std::span<const obj::object> objects, std
     return std::unexpected(std::format("ELF entry symbol '{}' is not inside executable code", entry));
   }
 
+  auto resolve = [&](std::size_t oi, const obj::symbol& s) -> std::optional<definition> {
+    if (s.bind == binding::local) return definition{oi, &s};
+    const auto global = globals.find(s.name_view());
+    if (global == globals.end()) return std::nullopt;
+    return global->second;
+  };
+
+  std::map<got_key, got_slot> got_slots;
+  if (!dynamic) {
+    for (std::size_t oi = 0; oi < objects.size(); ++oi) {
+      const auto& o = objects[oi];
+      for (const auto& s : o.sections) {
+        for (const auto& r : s.relocs) {
+          if (!is_got_address(r.kind)) continue;
+          if (r.symbol >= o.symbols.size()) return section_error(o, s, "invalid ELF relocation symbol index");
+          const auto& symbol = o.symbols[r.symbol];
+          // The undefined-symbol scan has already rejected missing strong definitions.
+          if (r.kind != reloc_kind::got_rel32 && (symbol.defined() || !symbol.weak)) continue;
+          const auto def = resolve(oi, symbol);
+          if (r.kind == reloc_kind::got_rel32 || !def)
+            got_slots.try_emplace(slot_key(oi, r.symbol, symbol), got_slot{got_slots.size(), def});
+        }
+      }
+    }
+  }
+
   const auto& bss = sections[std::to_underlying(group::bss)];
   const auto& init_array = sections[std::to_underlying(group::init_array)];
-  const bool has_read_only = !sections[std::to_underlying(group::read_only)].empty() || !init_array.empty();
+  const bool has_read_only = !sections[std::to_underlying(group::read_only)].empty() ||
+                             !init_array.empty() || !got_slots.empty();
   const bool has_data = !sections[std::to_underlying(group::data)].empty() || !bss.empty();
   // Both layouts have RX and GNU_STACK. Dynamic links always have R, RW, PHDR, INTERP and DYNAMIC.
   const auto program_count = static_cast<std::uint16_t>(dynamic ? 7 : 2 + has_read_only + has_data);
   const std::uint64_t headers_end = header_size + program_count * program_header_size;
   std::uint64_t file_end = headers_end;
+  std::uint64_t got_start = 0;
   std::optional<dynamic_layout> layout;
   if (dynamic) {
     auto metadata = layout_dynamic(*dynamic, imports, headers_end);
@@ -589,6 +636,12 @@ std::expected<bytes, std::string> link(std::span<const obj::object> objects, std
       layout->slots = begin + layout->table_size();
       input_begin = layout->slots + imports.size() * slot_size;
     }
+    if (kind == group::read_only && !got_slots.empty()) {
+      got_start = align_up(input_begin, slot_size);
+      if (got_start > image_size_limit || got_slots.size() > (image_size_limit - got_start) / slot_size)
+        return std::unexpected("ELF static GOT exceeds the image address limit");
+      input_begin = got_start + got_slots.size() * slot_size;
+    }
     auto initialized = place(sections[std::to_underlying(kind)], input_begin);
     if (!initialized) return std::unexpected(initialized.error());
     if (layout && kind == group::text) {
@@ -609,12 +662,6 @@ std::expected<bytes, std::string> link(std::span<const obj::object> objects, std
   auto address = [&](definition d) {
     return image_base + offsets[d.object][*d.symbol->section] + d.symbol->offset;
   };
-  auto resolve = [&](std::size_t oi, const obj::symbol& s) -> std::optional<definition> {
-    if (s.bind == binding::local) return definition{oi, &s};
-    const auto global = globals.find(s.name_view());
-    if (global == globals.end()) return std::nullopt;
-    return global->second;
-  };
 
   std::vector<patch> patches;
   std::vector<std::uint8_t> import_has_call(imports.size());
@@ -625,9 +672,11 @@ std::expected<bytes, std::string> link(std::span<const obj::object> objects, std
       const bool is_init_array = s.is_init_array();
       for (const auto& r : s.relocs) {
         const bool absolute = r.kind == reloc_kind::abs64;
-        const bool got = r.kind == reloc_kind::x86_64_rex_gotpcrelx;
+        const bool got_load = r.kind == reloc_kind::x86_64_rex_gotpcrelx;
+        const bool plain_got = r.kind == reloc_kind::got_rel32;
         if (r.minus) return section_error(o, s, "ELF symbol-difference relocations are unsupported");
-        if (!absolute && !got && r.kind != reloc_kind::x86_64_pc32 && r.kind != reloc_kind::x86_64_plt32) {
+        if (!absolute && !got_load && !plain_got &&
+            r.kind != reloc_kind::x86_64_pc32 && r.kind != reloc_kind::x86_64_plt32) {
           return section_error(o, s, "unsupported x86-64 ELF relocation kind");
         }
         if (is_init_array && (!absolute || r.offset % 8 != 0))
@@ -641,15 +690,9 @@ std::expected<bytes, std::string> link(std::span<const obj::object> objects, std
         const auto& symbol = o.symbols[r.symbol];
         const auto name = symbol.name_view();
         const auto def = resolve(oi, symbol);
-        if (got) {
-          // The undefined-symbol scan above has already rejected missing strong definitions.
-          if (!def)
-            return section_error(o, s, std::format("R_X86_64_REX_GOTPCRELX for undefined weak symbol '{}' is unsupported",
-                                                    name));
-          if (!canonical_got_load(s, r))
-            return section_error(o, s, std::format("R_X86_64_REX_GOTPCRELX for '{}' requires a canonical "
-                                                    "64-bit RIP-relative MOV with addend -4", name));
-        }
+        if (got_load && !canonical_got_load(s, r))
+          return section_error(o, s, std::format("R_X86_64_REX_GOTPCRELX for '{}' requires a canonical "
+                                                  "64-bit RIP-relative MOV with addend -4", name));
         const auto imported = def ? imports.end() : imports.find(name);
         if (!def && imported == imports.end() && dynamic && symbol.weak && symbol.bind == binding::global &&
             provided_symbol(*dynamic, name))
@@ -669,6 +712,10 @@ std::expected<bytes, std::string> link(std::span<const obj::object> objects, std
         }
         // An undefined weak symbol without a definition has value zero (ELF gABI, Symbol Binding).
         auto target = def ? address(*def) : 0;
+        if (plain_got || (got_load && !def)) {
+          const auto& slot = got_slots.at(slot_key(oi, r.symbol, symbol));
+          target = image_base + got_start + slot.index * slot_size;
+        }
         if (imported != imports.end()) {
           const auto index = imported->second;
           import_has_call[index] = 1;
@@ -676,17 +723,17 @@ std::expected<bytes, std::string> link(std::span<const obj::object> objects, std
         }
         auto value = target + static_cast<std::uint64_t>(r.addend);  // R_X86_64_64: S + A modulo 2^64
         if (!absolute) {
-          // Static GOT loads relax to the symbol. An imported call targets its thunk instead.
           const auto delta = displacement(target, image_base + offset, r.addend);
           if (!delta) {
-            const auto kind = got ? "R_X86_64_REX_GOTPCRELX"
-                                 : r.kind == reloc_kind::x86_64_pc32 ? "R_X86_64_PC32" : "R_X86_64_PLT32";
+            const auto kind = got_load ? "R_X86_64_REX_GOTPCRELX"
+                            : plain_got ? "R_X86_64_GOTPCREL"
+                            : r.kind == reloc_kind::x86_64_pc32 ? "R_X86_64_PC32" : "R_X86_64_PLT32";
             return section_error(o, s, std::format("{} displacement overflows for '{}'", kind, name));
           }
           value = *delta;
         }
-        const auto kind = got ? patch_kind::relax_got
-                              : imported != imports.end() ? patch_kind::import_call : patch_kind::ordinary;
+        const auto kind = got_load ? (def ? patch_kind::relax_got : patch_kind::got_load)
+                        : imported != imports.end() ? patch_kind::import_call : patch_kind::ordinary;
         patches.push_back({offset, value, width, {oi, si}, kind, name});
       }
     }
@@ -698,10 +745,9 @@ std::expected<bytes, std::string> link(std::span<const obj::object> objects, std
   std::ranges::stable_sort(patches, {}, &patch::offset);
   const patch* previous = nullptr;
   for (const auto& p : patches) {
-    // Protect the opcode of an imported call and the full MOV being relaxed.
+    // Protect the opcode of an imported call and the full canonical GOT load.
     if (previous && p.offset - p.prefix_size() < previous->offset + previous->width) {
-      const auto* got = p.kind == patch_kind::relax_got ? &p
-                      : previous->kind == patch_kind::relax_got ? previous : nullptr;
+      const auto* got = p.is_got_load() ? &p : previous->is_got_load() ? previous : nullptr;
       if (got) {
         const auto& o = objects[got->source.object];
         return section_error(o, o.sections[got->source.section],
@@ -728,6 +774,10 @@ std::expected<bytes, std::string> link(std::span<const obj::object> objects, std
   for (const auto& p : patches) {
     if (p.kind == patch_kind::relax_got) image[p.offset - 2] = 0x8d;  // MOV -> LEA
     write_word(std::span(image).subspan(p.offset, p.width), p.value);
+  }
+  for (const auto& [key, slot] : got_slots) {
+    const auto offset = got_start + slot.index * slot_size;
+    write_word(std::span(image).subspan(offset, slot_size), slot.target ? address(*slot.target) : 0);
   }
   if (layout) {
     auto written = write_dynamic(image, *layout, *dynamic);

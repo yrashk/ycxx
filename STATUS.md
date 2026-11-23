@@ -835,6 +835,9 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
   follow [#390](https://github.com/yrashk/ycxx/issues/390).
   [Design](docs/design/linux-external-data-addresses.md) · [#414](https://github.com/yrashk/ycxx/issues/414)
   · [#407](https://github.com/yrashk/ycxx/issues/407)
+- Static x86-64 ELF links resolve `R_X86_64_GOTPCREL` through read-only GOT slots. Canonical
+  `R_X86_64_REX_GOTPCRELX` loads for unresolved weak symbols use the same slots with value zero.
+  [#979](https://github.com/yrashk/ycxx/issues/979) · [Design](docs/design/linux-static-got.md)
 - Simple external inline function definitions use weak ELF symbols. The unit combines inline
   flags from reachable declarations, including `constexpr` functions and ordinary members
   defined in their class. Calls and statically initialized pointers in different units resolve
@@ -2884,6 +2887,10 @@ What the process allocates, attributed to the engine's cells, in the trace and t
     inherited injected names, including with a class-key or within a type's qualifier.
     Ordinary terminal `B::B` names the constructor. See
     [the lookup design](docs/design/injected-class-names.md) (#361).
+  - Unqualified inherited aliases in ordinary non-template member bodies and in-class alias
+    declarations check access to the named declaration. Equal designated types merge and an
+    accessible base path suffices. Competing types are ambiguous. Static initializer access errors
+    name the alias and its declaring class. [#1001](https://github.com/yrashk/ycxx/issues/1001)
   - Nontrivial copy assignment of base subobjects remains tracked in #360.
 
 ## Implicit copy assignment of class members (#360, 2026-11-20)
