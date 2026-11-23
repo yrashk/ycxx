@@ -1374,6 +1374,11 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
 - IR: `this` is the entry block's first value parameter (`FunctionInput::this_type`), as the
   Itanium ABI passes it. Linkage names are `<nested-name>`s with the member's cv-qualifiers,
   checked against Clang's symbols.
+- In-class nonvirtual definitions of ordinary functions in namespace-scope class templates use
+  inline linkage when instantiated on ELF and Mach-O. This covers static and nonstatic members
+  with bodies eligible for the existing coalescer. Specializations naming unnamed-namespace
+  types retain local binding, including a value argument of such an enum type. Explicit
+  non-inline specializations retain strong definitions. [#1051](https://github.com/yrashk/ycxx/issues/1051)
 - Tests: `tests/own/classes/s2-*` (spec-only, plus three from the review): 12 of 13 pass; the constexpr one waits for records
   in the interpreter (#25). In-class member functions are weak definitions on both targets (#422, #124).
 - Not yet: ref-qualifiers, `= default`.
