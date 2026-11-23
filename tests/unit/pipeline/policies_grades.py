@@ -257,6 +257,11 @@ with tempfile.TemporaryDirectory() as directory:
         exhausted = subprocess.run([program, "exhausted"], timeout=10)
         trap_signals = (-signal.SIGILL, -signal.SIGTRAP) if mac_host else (-signal.SIGILL,)
         assert exhausted.returncode in trap_signals, exhausted
+        unguarded = "-DYCXX_POLICIES_RUNTIME_CHECKS=0"
+        invoke([*native, unguarded, "-o", program, mediated])
+        subprocess.run([program, "exhausted"], check=True, timeout=10)
+        too_many = write("mediated_overuse.cpp", mediated.read_text().replace("int i = 2;", "int i = 3;"))
+        invoke([*native, unguarded, "-fsyntax-only", too_many], "exceeds its usage grade of 2")
         assignment = write("budget_assignment.cpp", """\
             #include "grades.hpp"
             #include <ycxx/effects/runtime.hpp>

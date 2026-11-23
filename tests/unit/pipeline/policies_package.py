@@ -19,13 +19,6 @@ with tempfile.TemporaryDirectory() as tmp:
         subprocess.run([cmake, "-S", str(source), "-B", str(build), "-G", "Ninja",
                         f"-DCMAKE_CXX_COMPILER={compiler}", *options], check=True, timeout=30)
 
-    prefix = root / "install"
-    package_build = root / "package-build"
-    configure(vendor, package_build, f"-DCMAKE_INSTALL_PREFIX={prefix}")
-    subprocess.run([cmake, "--install", str(package_build)], check=True, timeout=30)
-    relocated = root / "relocated"
-    prefix.rename(relocated)
-
     consumer = root / "consumer"
     consumer.mkdir()
     (consumer / "main.cpp").write_text("""\
@@ -36,6 +29,7 @@ with tempfile.TemporaryDirectory() as tmp:
 #include <ycxx/effects.hpp>
 #include <ycxx/effects/handler.hpp>
 #include <ycxx/effects/runtime.hpp>
+#include <cstdio>
 #include <type_traits>
 
 void inspect(const ycxx::ownership::linear_state& owner) noexcept { owner.observe(); }
@@ -160,6 +154,13 @@ int unwind_choice(bool choose_receipt) {
 }
 
 int main(int argc, char**) {
+  if (argc == 10) {
+    std::printf("%zu/%zu %zu/%zu %zu/%zu %zu/%zu\\n",
+                sizeof(ycxx::ownership::linear_state), alignof(ycxx::ownership::linear_state),
+                sizeof(Reader), alignof(Reader), sizeof(ReadBudget), alignof(ReadBudget),
+                sizeof(Choice), alignof(Choice));
+    return 0;
+  }
   ycxx::ownership::linear_state owner;
   auto moved = static_cast<ycxx::ownership::linear_state&&>(owner);
   inspect(moved);
@@ -216,16 +217,44 @@ endif()
 add_executable(consumer main.cpp)
 target_link_libraries(consumer PRIVATE YCXXPolicies::policies)
 """)
-    for name, setting in (("installed", f"-DCMAKE_PREFIX_PATH={relocated}"), ("vendored", "-DVENDORED=ON")):
-        build = root / name
-        configure(consumer, build, setting)
-        subprocess.run([cmake, "--build", str(build)], check=True, timeout=30)
-        executable = str(build / "consumer")
-        subprocess.run([executable], check=True, timeout=10)
-        for args in (("wrong-scope",), ("use", "moved"), ("use", "released", "token"),
-                     ("read", "with", "used", "budget"), ("drop", "a", "live", "linear", "owner"),
-                     ("read", "from", "the", "inactive", "variant", "arm"),
-                     ("read", "a", "variant", "after", "taking", "its", "owner"),
-                     ("unwind", "with", "a", "live", "linear", "variant", "arm", "open")):
-            result = subprocess.run([executable, *args], timeout=10)
-            assert result.returncode in (-signal.SIGABRT, -signal.SIGILL, -signal.SIGTRAP), result
+    cases = (
+        (("wrong-scope",), 22),
+        (("use", "moved"), 17),
+        (("use", "released", "token"), 17),
+        (("read", "with", "used", "budget"), 17),
+        (("drop", "a", "live", "linear", "owner"), 0),
+        (("read", "from", "the", "inactive", "variant", "arm"), None),
+        (("read", "a", "variant", "after", "taking", "its", "owner"), None),
+        (("unwind", "with", "a", "live", "linear", "variant", "arm", "open"), 0),
+    )
+    layout = None
+    for checks in (True, False):
+        mode = root / ("guarded" if checks else "unguarded")
+        settings = () if checks else ("-DYCXX_POLICIES_RUNTIME_CHECKS=OFF",)
+        prefix = mode / "install"
+        package_build = mode / "package-build"
+        configure(vendor, package_build, f"-DCMAKE_INSTALL_PREFIX={prefix}", *settings)
+        subprocess.run([cmake, "--install", str(package_build)], check=True, timeout=30)
+        relocated = mode / "relocated"
+        prefix.rename(relocated)
+
+        consumers = (
+            ("installed", (f"-DCMAKE_PREFIX_PATH={relocated}",)),
+            ("vendored", ("-DVENDORED=ON", *settings)),
+        )
+        for name, options in consumers:
+            build = mode / name
+            configure(consumer, build, *options)
+            subprocess.run([cmake, "--build", str(build)], check=True, timeout=30)
+            executable = str(build / "consumer")
+            subprocess.run([executable], check=True, timeout=10)
+            current_layout = subprocess.check_output([executable, *(["abi"] * 9)], timeout=10)
+            if layout is None:
+                layout = current_layout
+            assert current_layout == layout, (name, mode, current_layout, layout)
+            for args, unguarded_result in cases:
+                if not checks and unguarded_result is None:
+                    continue  # The guarded variant tests would access inactive storage.
+                expected = (-signal.SIGABRT, -signal.SIGILL, -signal.SIGTRAP) if checks else (unguarded_result,)
+                result = subprocess.run([executable, *args], timeout=10)
+                assert result.returncode in expected, result

@@ -639,9 +639,12 @@ with tempfile.TemporaryDirectory() as directory:
         "void finish(Work&& work) noexcept", "[[=own::operation::consumes]] void finish(Work&& work) noexcept")
     implicit_reflected = write("implicit_move_reflected.cpp", implicit_reflected_source)
     syntax(implicit_reflected)
-    syntax(write("implicit_move_reflected_leak.cpp", implicit_reflected_source.replace(
-        "  finish(static_cast<Work&&>(second));\n", "")),
-        error="linear resource 'second' may leave its scope")
+    implicit_leak = write("implicit_move_reflected_leak.cpp", implicit_reflected_source.replace(
+        "  finish(static_cast<Work&&>(second));\n", ""))
+    leak_error = "linear resource 'second' may leave its scope"
+    syntax(implicit_leak, error=leak_error)
+    syntax("-DYCXX_POLICIES_RUNTIME_CHECKS=0", implicit_reflected)
+    syntax("-DYCXX_POLICIES_RUNTIME_CHECKS=0", implicit_leak, error=leak_error)
 
     move_include = '#include "move_type.hpp"\n'
     write("move_type.hpp", "#pragma once\n" + direct_move_type)

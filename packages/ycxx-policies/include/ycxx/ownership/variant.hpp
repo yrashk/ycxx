@@ -34,8 +34,10 @@ class variant {
   active active_;
   detail::variant_storage<First, Second> storage_;
 
-  void require_active(active expected) const noexcept {
+  void require_active([[maybe_unused]] active expected) const noexcept {
+#if YCXX_POLICIES_RUNTIME_CHECKS
     if (active_ != expected) detail::ownership_violation();
+#endif
   }
 
  public:

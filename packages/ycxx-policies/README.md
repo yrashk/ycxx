@@ -26,6 +26,20 @@ To vendor the source, copy this directory into your project and use
 `add_subdirectory(vendor/ycxx-policies)`. Link the same interface target. A non-CMake build can
 add this directory's `include` path to the compiler's include search path.
 
+## Compile out runtime guards
+
+Runtime guards are enabled by default. Configure an installed or vendored CMake
+package with `-DYCXX_POLICIES_RUNTIME_CHECKS=OFF` to propagate the opt-out through
+`YCXXPolicies::policies`. With direct compiler invocation, add
+`-DYCXX_POLICIES_RUNTIME_CHECKS=0`. Use one setting across all translation units
+and dependencies that use the guarded headers in an executable.
+
+The opt-out removes ownership tracking, token validation, effect budget counting,
+and active-variant assertions. It preserves type layouts, ordinary C++ constraints,
+and the checks requested by YCXX's `-fcheck-policies`. Variant selection and destruction,
+adapter cleanup, and handler calls still execute. Dynamic scope and budget violations
+can proceed in this mode, so an application that relies on those guards needs them enabled.
+
 ## Ownership adapters
 
 `<ycxx/ownership/runtime.hpp>` provides `ycxx::ownership::affine_state` and

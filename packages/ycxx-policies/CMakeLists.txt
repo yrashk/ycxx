@@ -4,10 +4,15 @@ project(YCXXPolicies VERSION 0.1.0 LANGUAGES CXX)
 include(GNUInstallDirs)
 include(CMakePackageConfigHelpers)
 
+option(YCXX_POLICIES_RUNTIME_CHECKS "Enable YCXX Policies runtime guards" ON)
+
 add_library(ycxx_policies INTERFACE)
 add_library(YCXXPolicies::policies ALIAS ycxx_policies)
 set_target_properties(ycxx_policies PROPERTIES EXPORT_NAME policies)
 target_compile_features(ycxx_policies INTERFACE cxx_std_20)
+if(NOT YCXX_POLICIES_RUNTIME_CHECKS)
+  target_compile_definitions(ycxx_policies INTERFACE YCXX_POLICIES_RUNTIME_CHECKS=0)
+endif()
 target_include_directories(ycxx_policies INTERFACE
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
