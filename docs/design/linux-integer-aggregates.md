@@ -25,6 +25,13 @@ uses the pragma state at the definition, including simple push/pop and explicit 
 For an instantiated record it reads the source of the selected template pattern.
 Actual packed layout remains tracked in [#307](https://github.com/yrashk/ycxx/issues/307).
 
+When analysis runs in groups, Astra recommends carrying layout uncertainty by entity ID
+from each group, including declarations that do not contribute a class shape. The unit
+combines the uncertainty from current groups before checking the retained shapes. A
+nonvirtual constructor or destructor's base-object variant also records the entities whose
+layouts its existing eligibility check relies on. The final unit keeps the variant when none
+of those layouts are uncertain. [#992](https://github.com/yrashk/ycxx/issues/992)
+
 Astra checked the scope and calling convention against the public
 [System V AMD64 psABI](https://gitlab.com/x86-psABIs/x86-64-ABI) §§3.2.2–3.2.3,
 the [Itanium C++ ABI](https://itanium-cxx-abi.github.io/cxx-abi/abi.html)
