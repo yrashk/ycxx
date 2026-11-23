@@ -117,7 +117,8 @@ public:
 private:
   // Evaluates `e` as a core constant expression, then checks the result is a permitted result
   // ([expr.const]). The result for a reference initializer is a pointer to the bound object.
-  Evaluated evaluate(Ex e, bool reference_initializer) {
+  Evaluated evaluate(Ex e, bool reference_initializer,
+                     irgen::FunctionInput::InitializedFields initialized_fields = {}) {
     if (!e.ok()) return {};
     if (s_->dependent(e)) return {std::nullopt, reason_unsupported, false, true};
     if (!reference_initializer)
@@ -160,6 +161,7 @@ private:
                                              in.intern_seq(std::span<const ast::ExpansionRec>{}), in.intern_seq(std::span<const u32>{}),
                                              ast::QualType{}, 0, in.intern_seq(std::span<const ast::ClosureDef>{})},
                                s_->item(), 0, true, s_->local_values()};
+    input.initialized_fields = initialized_fields;
     EvalFacts facts(s_->world(), *q_);
     auto body = irgen::function_ir(in, input, facts);
     if (!body) return {};
@@ -171,14 +173,14 @@ private:
     if (out.status != interp::Outcome::Status::value && q_->instantiation_gave_up())
       return {std::nullopt, reason_unsupported, false, true};
     if (out.status != interp::Outcome::Status::value) {
-      // In the thunk's own frame, the only objects outside their lifetime are the enclosing
-      // function's locals that are not usable in constant expressions.
       interp::Failure f = out.failure;
       // A missing interpreter operation may hide a binding that requires static initialization.
       if (reference_initializer && (f.reason == interp::Reason::unsupported || f.reason == interp::Reason::unsupported_constant ||
                                     f.reason == interp::Reason::callee_unsupported))
         return {};
-      if (f.reason == interp::Reason::outside_lifetime && !f.stack.empty() && f.stack[0].function == EntityId::none)
+      // A selected default can also read a field before its lifetime has begun.
+      if (f.reason == interp::Reason::outside_lifetime && initialized_fields.owner == EntityId::none &&
+          !f.stack.empty() && f.stack[0].function == EntityId::none)
         f.reason = interp::Reason::not_usable;
       return {std::nullopt, reason_arg(f)};
     }
@@ -195,29 +197,40 @@ private:
 public:
   // An aggregate initializer is constant when each of its elements is constant ([expr.const]).
   Evaluated evaluate_initializer(Ex e, bool zero_default = true) {
+    return evaluate_initializer(e, zero_default, {});
+  }
+
+private:
+  Evaluated evaluate_initializer(Ex e, bool zero_default, irgen::FunctionInput::InitializedFields initialized_fields) {
     if (auto value = tag_initializer_constant(e)) return {*value, 0, true};
     if (s_->as<ast::InitList>(e)) {
+      const auto clauses = s_->list_elements(e);
+      EntityId owner = EntityId::none;
+      if (std::ranges::any_of(clauses, [&](Ex clause) { return s_->as<ast::DefaultMemberInit>(clause).has_value(); }) &&
+          constant_record_layout(s_->types().add_cv(e.type(), Cv::const_)))
+        owner = s_->types().class_of(e.type());
       std::vector<ConstId> elements;
-      for (const Ex& element : s_->list_elements(e)) {
-        Evaluated result = evaluate_initializer(element, zero_default);
+      elements.reserve(clauses.size());
+      for (const Ex& element : clauses) {
+        irgen::FunctionInput::InitializedFields fields;
+        if (owner != EntityId::none && s_->as<ast::DefaultMemberInit>(element)) fields = {owner, elements};
+        Evaluated result = evaluate_initializer(element, zero_default, fields);
         if (!result.value) return result;
         elements.push_back(*result.value);
       }
       return {s_->world().values.aggregate(e.type(), elements), 0, true};
     }
-    if (auto dmi = s_->as<ast::DefaultMemberInit>(e)) {
-      // The isolated evaluator cannot read this aggregate's field paths (#25). Evaluating the
-      // scalar here can succeed if its initializer does not need the destination object.
-      return evaluate_initializer({dmi->init.id, e.begin, e.end, e.info}, zero_default);
-    }
+    if (auto dmi = s_->as<ast::DefaultMemberInit>(e))
+      return evaluate_initializer({dmi->init.id, e.begin, e.end, e.info}, zero_default, initialized_fields);
     if (s_->as<ast::ValueInit>(e) || (zero_default && s_->as<ast::DefaultInit>(e))) {
       if (auto value = zero_constant(e.type())) return {*value, 0, true};
       return {};
     }
     if (s_->types().is_class(e.type())) return {};  // the interpreter cannot return class objects yet (#25)
-    return evaluate(e);
+    return evaluate(e, false, initialized_fields);
   }
 
+public:
   // [dcl.attr.annotation], [meta.reflection.result]: reflect_constant takes its operand by value
   // and requires a valid constant template argument of the deduced structural type.
   std::optional<ConstId> evaluate_annotation(Ex expression, QualType type) {

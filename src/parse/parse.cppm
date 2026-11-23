@@ -6055,21 +6055,29 @@ private:
       sem.entity = s_.world().entities.entity(
           {sema::EntityKind::variable, d.name, d.type, LangLinkage::cxx, ast::Linkage::external, {}, c.entity});
       sem.flags = flags;
-      // Member lookup in the class being defined handles earlier direct members. The supported
-      // owning class has no enclosing class or bases to search while it is incomplete.
-      const bool direct_list = spec.is_constexpr && ps_.is(Tk::l_brace) && s_.template_scopes.empty() && !inst_ &&
-                               p_->is_namespace(s_.world().entities.rec(c.entity).scope) &&
-                               q_.defining_base_records(c.entity).empty() && supports_static_constexpr_aggregate(d.type);
+      // Lookup while an ordinary class is incomplete handles earlier direct members. Inherited
+      // names also need the incomplete-class base lookup in #967 before this path can use them.
+      const bool braced = ps_.is(Tk::l_brace) || (ps_.is(Tk::equal) && ps_.kind(1) == Tk::l_brace);
+      bool list_initialization = false;
+      if (braced && (spec.is_inline || spec.is_constexpr) && s_.template_scopes.empty() && !inst_ &&
+          p_->is_namespace(s_.world().entities.rec(c.entity).scope) && q_.defining_base_records(c.entity).empty()) {
+        const QualType element = types.is_array(d.type) ? types.rec(d.type).inner : d.type;
+        const bool scalar = types.is_integral(element) || types.is_pointer(element) ||
+                            (types.is_standard_floating(element) &&
+                             ast::computes(ast::float_format(s_.ins(), s_.world().target, element)));
+        list_initialization = scalar ||
+                              (spec.is_constexpr && ps_.is(Tk::l_brace) && supports_static_constexpr_aggregate(d.type));
+      }
       auto declare_member_name = [&] {
         s_.own.push_back({d.name, sem});
         if (!member_value_) p_->declared(sem, k_);
       };
       // [basic.scope.pdecl]: the member's name and type are visible in its initializer.
-      if (direct_list) declare_member_name();
+      if (list_initialization) declare_member_name();
       // A member whose initializer is in error is still declared, so its uses say nothing more.
       const u32 ordinal = u32(decls_.size());
       auto declare_member = [&](ConstId v, const Ex& e) {
-        if (!direct_list) declare_member_name();
+        if (!list_initialization) declare_member_name();
         declarators_.push_back(s_.node(ast::Declarator{ordinal, sema::Sema::at(e, d.begin), v}, d.begin, ps_.pos()));
         decls_.push_back(sem);
       };
@@ -6084,12 +6092,12 @@ private:
           return true;
         }
       }
-      if (direct_list || early || ps_.accept(Tk::equal)) {
+      if (list_initialization || early || ps_.accept(Tk::equal)) {
         u32 at;
-        if (direct_list) {
-          auto list = ps_.braced_init_list();
-          at = list->begin;
-          init = s_.list_init(d.type, *list, sema::Construction::direct_list);
+        if (list_initialization) {
+          const auto form = ps_.accept(Tk::equal) ? sema::Construction::copy_list : sema::Construction::direct_list;
+          at = ps_.pos();
+          init = ps_.member_initializer(d.type, true, form);
         } else {
           Ex e = early ? *early : ps_.assignment_expression();
           if (!inst_) p_->set_static_init_end(k_, ordinal, ps_.index());
@@ -6118,11 +6126,11 @@ private:
           declare_member(ConstId::none, {});
           return false;
         }
-        // An aggregate list can be evaluated element by element ([dcl.init.aggr]).
+        // Scalar lists and aggregate elements use the same constant initializer path ([dcl.init.list]).
         // The general evaluator needs class result storage to return a class value (#25).
         sema::Evaluator evaluator(s_, q_);
         const bool aggregate = spec.is_constexpr && types.is_class(d.type) && s_.as<ast::InitList>(init);
-        sema::Evaluated v = aggregate ? evaluator.evaluate_initializer(init) : evaluator.evaluate(init);
+        sema::Evaluated v = list_initialization || aggregate ? evaluator.evaluate_initializer(init) : evaluator.evaluate(init);
         if (!v.value) {
           s_.diag(at, usable ? Diag::not_constant : Diag::nonconstant_initializer, v.reason);
           declare_member(ConstId::none, {});
@@ -6841,7 +6849,7 @@ private:
             value = *v.value;
             if (spec.is_constexpr) p_->set_constant(sem.entity, *v.value, k_);
           } else if (!v.type_trait_failure) {
-            dynamic_ok(b->begin, sema::Evaluator(s_, q_).evaluate(init).reason);
+            dynamic_ok(b->begin, v.reason);
           }
         }
       }
@@ -6865,11 +6873,10 @@ private:
           ConstId lit = ConstId::none;
           if (types.is_enum(d.type))
             if (auto l = s_.as<ast::Literal>(init)) lit = l->value;
-          // A character array from a string literal is its elements' list ([dcl.init.string]).
+          // Evaluate an aggregate or character array by its elements ([dcl.init.aggr], [dcl.init.string]).
           sema::Evaluator evaluator(s_, q_);
-          sema::Evaluated list = s_.as<ast::InitList>(init) ? evaluator.evaluate_initializer(init) : sema::Evaluated{};
           sema::Evaluated v = lit != ConstId::none ? sema::Evaluated{lit, 0, true}
-                                  : list.value || list.type_trait_failure ? list : evaluator.evaluate(init);
+                                  : s_.as<ast::InitList>(init) ? evaluator.evaluate_initializer(init) : evaluator.evaluate(init);
           if (v.value) {
             value = *v.value;
             if (spec.is_constexpr || (sema::Types::is_const(d.type) && !sema::Types::is_volatile(d.type) &&

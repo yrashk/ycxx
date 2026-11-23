@@ -1145,6 +1145,13 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   no relocations or runtime work. A member whose owner or declared type names an unnamed namespace
   has local symbol binding.
   [#903](https://github.com/yrashk/ycxx/issues/903)
+- Inline static integral, pointer, and supported floating-point members in ordinary
+  namespace-scope classes without bases use constant direct-list and copy-list initialization.
+  This also covers one-dimensional arrays of those types with a written bound. Omitted array
+  elements are value-initialized and the members have addressable static storage
+  ([class.static.data], [dcl.init.list], [dcl.init.aggr]).
+  [#964](https://github.com/yrashk/ycxx/issues/964) ·
+  [Inherited initializer lookup #967](https://github.com/yrashk/ycxx/issues/967)
 - Constant expressions can read fields of an already initialized namespace-scope constexpr
   aggregate with a trivial destructor, no bases, and ordinary public integral and enumeration
   fields whose scalar representations fit in 64 bits. The interpreter uses the ordinary record
@@ -1152,6 +1159,11 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   nominal enumeration types for comparisons and template arguments and rejects reads of mutable
   fields of the stored object ([expr.ref], [expr.const], [dcl.init.aggr]).
   [#862](https://github.com/yrashk/ycxx/issues/862) · [#876](https://github.com/yrashk/ycxx/issues/876)
+- Constant evaluation of a flat scalar aggregate supplies its initialized field values to
+  the selected default member initializer. L1 uses them for direct field reads of the
+  initializer's object, including through a conditional glvalue. Reading a later field on
+  the executed path fails its lifetime check ([dcl.init.aggr], [expr.const]).
+  [#895](https://github.com/yrashk/ycxx/issues/895)
 - Constant evaluation can read namespace-scope `constexpr` pointers erased to `void`
   ([expr.const], [conv.ptr], #102). The interpreter reconstructs the original scalar or array
   subobject path, including one-past addresses, from the constant's path and byte offset.
