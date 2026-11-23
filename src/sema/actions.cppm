@@ -892,10 +892,9 @@ public:
     auto decls = q_->namespace_members(ns, name);
     auto concept_decl = std::ranges::find(decls, ast::DeclKind::concept_, &ast::DeclSema::kind);
     if (concept_decl == decls.end()) return std::nullopt;
-    // A concept hides class and enumeration names ([basic.lookup.general]/4).
+    // Qualified lookup through using-directives can find distinct declarations ([namespace.qual]/4).
     if (std::ranges::any_of(decls, [&](const ast::DeclSema& d) {
-          return d.entity != concept_decl->entity && d.kind != ast::DeclKind::class_ &&
-                 d.kind != ast::DeclKind::enum_ && d.kind != ast::DeclKind::namespace_;
+          return d.entity != concept_decl->entity;
         })) {
       diag(at, Diag::ambiguous_name, name);
       return std::nullopt;

@@ -29,3 +29,13 @@ constexpr int pick() { return 2; }
 
 static_assert(pick<char>() == 2);
 static_assert(pick<char[2]>() == 1);
+
+// [namespace.qual]: both using-directive paths lead to the same concept.
+namespace first_path { using namespace Check; }
+namespace second_path { using namespace Check; }
+namespace combined {
+using namespace first_path;
+using namespace second_path;
+}
+
+static_assert(__is_same(Bool<combined::Fits<int>>, Bool<true>));
