@@ -520,6 +520,8 @@ with tempfile.TemporaryDirectory() as directory:
         for source, obj in zip((joint_entry, joint_forward, joint_leaf), objects):
             invoke([*target, "-c", source, "-o", obj])
         invoke([*target, *objects, "-o", output])
+        # An explicit object can precede a source even when the driver adds runtime archives.
+        invoke([*target, objects[1], joint_entry, objects[2], "-o", output])
         incomplete = root / "joint_incomplete.o"
         denied = root / "joint_denied"
         for retained, missing in (("OWNERSHIP_ONLY", "verified effect bound"),
@@ -536,6 +538,10 @@ with tempfile.TemporaryDirectory() as directory:
     joint_darwin = root / "joint-darwin"
     verify_joint_proofs(darwin, joint_darwin)
     assert joint_darwin.read_bytes().startswith(bytes.fromhex("cffaedfe"))
+    # PARITY: by design: only native arm64 Darwin can execute the Mach-O output.
+    if sys.platform == "darwin" and platform.machine() in ("arm64", "aarch64"):
+        for executable in (darwin_capability, darwin_direct_token, joint_darwin):
+            subprocess.run([executable], check=True, timeout=10)
 
     if sys.platform.startswith("linux") and platform.machine() == "x86_64":
         resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
