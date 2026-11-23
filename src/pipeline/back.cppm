@@ -1680,6 +1680,7 @@ struct VirtualTable {
   std::span<const EntityId> slots;
   std::optional<std::string> base_encoding;
   bool peer_base_rtti = false;
+  bool emit_type_info;
 };
 
 struct KeylessTypeInfo {
@@ -1768,13 +1769,18 @@ void emit_virtual_table(obj::object& o, const VirtualTable& table, std::uint32_t
   o.symbols[table_symbol].section = pointers;
   o.symbols[table_symbol].offset = table_offset;
   o.symbols[table_symbol].object_size = table_size;
-  const auto typeinfo = o.add_symbol({.name = prefix + "_ZTI" + table.type_encoding, .section = pointers,
-                                      .offset = table_offset + table_size,
-                                      .object_size = table.base_encoding ? 3 * rtti_pointer_size : 2 * rtti_pointer_size});
-  const auto name_object = emit_type_info_name(o, section(S::rodata), table.type_encoding, obj::binding::global);
+  std::optional<std::uint32_t> typeinfo;
+  if (table.emit_type_info) {
+    typeinfo = o.add_symbol({.name = prefix + "_ZTI" + table.type_encoding, .section = pointers,
+                             .offset = table_offset + table_size,
+                             .object_size = table.base_encoding ? 3 * rtti_pointer_size : 2 * rtti_pointer_size});
+  }
   o.sections[pointers].emit64(0);  // offset-to-top
-  emit_rtti_pointer(o, pointers, typeinfo);
+  if (typeinfo) emit_rtti_pointer(o, pointers, *typeinfo);
+  else o.sections[pointers].emit64(0);
   for (std::uint32_t slot : slots) emit_rtti_pointer(o, pointers, slot);
+  if (!typeinfo) return;
+  const auto name_object = emit_type_info_name(o, section(S::rodata), table.type_encoding, obj::binding::global);
   const auto runtime_type = table.base_encoding ? si_class_type_info : class_type_info;
   emit_rtti_pointer(o, pointers, o.reference(prefix + std::string(runtime_type)), rtti_address_point);
   emit_rtti_pointer(o, pointers, name_object);
@@ -1940,7 +1946,9 @@ std::expected<obj::object, aarch64::CodegenError> assemble_linux(
 engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
   const TranslationUnit& tu = co_await cx.fetch<TuUnit>(id);
   ast::Interners& in = *universe().in;
-  const ast::Target& target = unit_target(cx, id);
+  const auto* config = unit_config(cx, id);
+  const ast::Target& target = config ? *config->target : *universe().target;
+  const bool emit_table_type_info = !config || config->rtti_enabled;
   const bool linux = object_target(target) == obj::target::x86_64_linux;
   TuValue out;
   std::vector<BackError>& errors = out.errors;
@@ -2135,7 +2143,7 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
                          obj::binding::global});
       if (const auto& owned = tu.owned_virtual_table; table && owned && owned->entity == e.id) {
         std::optional<std::string> base;
-        if (owned->primary_base != EntityId::none) {
+        if (emit_table_type_info && owned->primary_base != EntityId::none) {
           auto base_encoding = mangled_type(in, in.intern_type(ast::TClass{owned->primary_base}), names);
           if (!base_encoding) {
             errors.push_back({e.at, std::format("the virtual table's base type name: {} is not supported yet",
@@ -2144,7 +2152,8 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
           }
           base = std::move(*base_encoding);
         }
-        virtual_table = VirtualTable{e.id, std::move(*encoding), owned->slots, std::move(base), owned->peer_base_rtti};
+        virtual_table = VirtualTable{e.id, std::move(*encoding), owned->slots, std::move(base),
+                                     owned->peer_base_rtti, emit_table_type_info};
       }
       if (!table && tu.keyless_type_info.contains(e.id)) keyless_type_info.push_back({e.id, std::move(*encoding)});
       continue;

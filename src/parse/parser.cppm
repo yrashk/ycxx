@@ -4092,7 +4092,8 @@ public:
     case Tk::tilde:
     case Tk::kw_typeid:
     case Tk::kw_const_cast:
-      s_->diag(begin, Diag::not_supported, kind());
+      s_->diag(begin, is(Tk::kw_typeid) && !s_->questions().rtti_enabled() ? Diag::rtti_disabled : Diag::not_supported,
+               kind());
       bump();
       return {NodeId::none, begin, pos()};
     default:

@@ -270,9 +270,6 @@ engine::query_task<SemaResult> TuSema::run(engine::Ctx& cx, TuId tu) {
   SemaResult out;
   // Whether the lexer or preprocessor reported an error, not where: `TuFront` places them.
   out.lex_errors = co_await cx.fetch<LexErrors>(file);
-  // The unit's language options.
-  const std::uint32_t depth = unit_source.config.template_depth;
-  const bool exceptions_enabled = unit_source.config.exceptions_enabled;
   const bool linux = unit_source.config.target->triple == ast::x86_64_linux.triple;
   // What one Program says of the items [first, end): where each entity is first declared and the
   // bodies, for an editor's position requests (#170), whether or not the unit has errors; only what
@@ -430,7 +427,7 @@ engine::query_task<SemaResult> TuSema::run(engine::Ctx& cx, TuId tu) {
     groups.push_back({0, static_cast<std::uint32_t>(items.items.size())});
   }
   if (!grouped) {
-    parse::Program program(world, region, items, depth, index, exceptions_enabled);
+    parse::Program program(world, region, items, unit_source.config, index);
     program.analyze_all();
     // Both targets: the base-object entries and the virtual shapes rely on it, and the System V
     // aggregate rules read it on x86-64 (#650).
@@ -466,7 +463,7 @@ engine::query_task<SemaResult> TuSema::run(engine::Ctx& cx, TuId tu) {
         continue;
       }
     }
-    parse::Program program(world, region, items, depth, index, exceptions_enabled);
+    parse::Program program(world, region, items, unit_source.config, index);
     std::vector<std::uint8_t> reads;
     std::set<parse::Program::NameProbe> probes;
     program.record_reads(&reads);

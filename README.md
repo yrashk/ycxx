@@ -123,6 +123,10 @@ described above. [#973](https://github.com/yrashk/ycxx/issues/973)
 `-fno-exceptions` diagnoses active `throw` and block `try` constructs. Native objects retain
 ordinary destruction and eligible plain unwind frames. [#980](https://github.com/yrashk/ycxx/issues/980)
 
+`-fno-rtti` disables `typeid` and RTTI-dependent casts. Owned Itanium vtables keep virtual dispatch
+and use a zero typeinfo word. `-frtti` restores the default mode, and the last RTTI flag takes
+effect. [#982](https://github.com/yrashk/ycxx/issues/982)
+
 Fixed-prototype calls (free and member functions, lambdas, function templates and calls
 through pointers) support passing and returning nonempty flat records with integral,
 ordinary object-pointer or object lvalue-reference fields by value. The record can occupy up to
