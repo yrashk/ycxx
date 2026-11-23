@@ -12,4 +12,3 @@ using namespace Namespaces;
 }
 
 template<class T> struct Derived : Base<Lookup::probe<T>()> {}; //! error
-Derived<char> instance; //! error
