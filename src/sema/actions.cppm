@@ -582,6 +582,8 @@ public:
                               (m->kind == ast::DeclKind::function && c.name != name)))
             return std::nullopt;
         }
+        // The injected-class-name is declared in the class's own scope ([class.pre]).
+        if (!initializer_bases.empty() && c.name == name) return types().class_type(current_class);
         if (!elaborated && !initializer_bases.empty()) {
           // An inherited value hides a namespace type even in a tentative type-id.
           if (auto member = find_base_member(initializer_bases, name, /*unqualified=*/true);
@@ -794,7 +796,10 @@ public:
     if (const ClassRec* r = class_rec(current_class))
       return std::ranges::any_of(r->fields, [&](const FieldRec& f) { return f.name == name; }) ||
              std::ranges::any_of(r->members, [&](const MemberDeclRec& m) { return m.name == name; });
-    return q_->earlier_member(name).has_value();
+    if (q_->earlier_member(name)) return true;
+    const auto bases = static_initializer_bases(current_class);
+    return !bases.empty() &&
+           (static_initializer_has_own_name(name) || find_base_member(bases, name, /*unqualified=*/true));
   }
 
   // The class template unqualified lookup finds for `name`, which a `<` after it begins the
@@ -3632,7 +3637,15 @@ public:
         if (p->first == name) return false;
     if (template_param(name)) return false;
     // A member template of the class whose member is being analysed ([temp.mem]).
-    if (names_member(name)) return current_class != EntityId::none && class_has_member_template(current_class, name);
+    if (names_member(name)) {
+      if (class_has_member_template(current_class, name)) return true;
+      const auto bases = static_initializer_bases(current_class);
+      if (!bases.empty() && !static_initializer_has_own_name(name) && !q_->earlier_member(name))
+        if (auto member = find_base_member(bases, name, /*unqualified=*/true);
+            member && !member->ambiguous && member->member && member->member->is_function)
+          return class_has_member_template(member->owner, name);
+      return false;
+    }
     for (const BlockUsing& u : block_usings_)
       if (u.name == name) return std::ranges::any_of(u.decls, [](const ast::DeclSema& d) { return (d.flags & decl_flag::template_) != 0; });
     for (const OwnDecl& o : own)
@@ -4897,6 +4910,9 @@ public:
       if (d.name == name && d.sema.kind == ast::DeclKind::variable && d.sema.storage == ast::Storage::static_ &&
           w_->entities.rec(d.sema.entity).scope == current_class) return &d.sema;
     return nullptr;
+  }
+  bool static_initializer_has_own_name(NameId name) {
+    return w_->entities.rec(current_class).name == name || name == static_initializer_name_ || own_initializer_static(name);
   }
   struct NamespaceLambda {
     EntityId owner, scope;
@@ -6698,6 +6714,10 @@ public:
           return static_member(current_class, m->entity, m->type, begin, end);
         }
         if (!bases.empty()) {
+          if (w_->entities.rec(current_class).name == name) {
+            diag(begin, Diag::type_as_expression, name);
+            return {NodeId::none, begin, end};
+          }
           if (auto m = class_member(current_class, name, begin, end, begin, {}, /*unqualified=*/true,
                                     /*check_all_bases=*/true, bases)) return *m;
         }
