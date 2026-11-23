@@ -212,6 +212,11 @@ visibility across declarations.
 [#422](https://github.com/yrashk/ycxx/issues/422) · [#602](https://github.com/yrashk/ycxx/issues/602)
 · [#124](https://github.com/yrashk/ycxx/issues/124) · [#936](https://github.com/yrashk/ycxx/issues/936)
 
+Both targets link eligible nonthrowing, nonvirtual in-class and implicit destructors across
+separate objects, including destructors of class-template specializations. Specializations naming
+translation-unit-local types retain local destructor symbols.
+[#1025](https://github.com/yrashk/ycxx/issues/1025)
+
 On Linux x86-64, an ordinary external namespace-scope function can use GNU `weak` so a
 strong definition in another object takes precedence. This covers the pinned libycxx
 debugger provider. [#937](https://github.com/yrashk/ycxx/issues/937)
@@ -219,6 +224,10 @@ debugger provider. [#937](https://github.com/yrashk/ycxx/issues/937)
 On Linux x86-64, an ordinary external non-inline function can inherit GNU visibility
 from its enclosing namespace declaration and use it at an out-of-line definition.
 [#940](https://github.com/yrashk/ycxx/issues/940)
+
+On Linux x86-64, namespace-scope `asm((expression));` can apply one `.hidden` directive to
+an ordinary ELF symbol. The expression supplies constant-evaluated `size()` and `data()`
+accessors. [#974](https://github.com/yrashk/ycxx/issues/974)
 
 External inline namespace variables and in-class static constexpr members of ordinary namespace-scope
 classes share one object across translation units on both targets when their initial values need

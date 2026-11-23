@@ -867,6 +867,11 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
   non-inline namespace-scope variable gives its ELF symbol `STB_GLOBAL` and `STV_HIDDEN`.
   This includes the C-linkage marker `__ycxx_linkage_static_v1` from the pinned libycxx runtime.
   [#936](https://github.com/yrashk/ycxx/issues/936)
+- On Linux x86-64, a namespace-scope `asm((expression));` checks `size()` and `data()` in one
+  constant evaluation and accepts a single `.hidden SYMBOL` directive with an optional final
+  newline. The assembler sets `STV_HIDDEN` on the matching ordinary ELF symbol while preserving
+  its binding and relocations.
+  [Design](docs/design/linux-namespace-constant-asm.md) · [#974](https://github.com/yrashk/ycxx/issues/974)
 - On Linux x86-64, ordinary external non-inline function declarations can inherit the
   nearest explicit GNU `hidden` or `default` visibility from a namespace definition.
   The canonical declaration carries consistent visibility to its unannotated qualified
@@ -2492,6 +2497,13 @@ Fable decided the representation (ast.md §6.6); the Opus session wrote the code
   friends in templates, destructor access, private member operator wording, and elaborated types
   in member parameters remain under [#259](https://github.com/yrashk/ycxx/issues/259).
   Both targets coalesce these inline friend definitions across objects (#422, [#124](https://github.com/yrashk/ycxx/issues/124)).
+- Both ELF and Mach-O coalesce eligible nonthrowing, nonvirtual in-class destructor definitions
+  and implicitly defined destructors, including those of class-template specializations. A
+  specialization naming a translation-unit-local type retains local destructor binding, including
+  when an enum value of that type is the template argument. The separate-object tests check both
+  orders, distinct specializations, and the duplicate diagnostic for two ordinary out-of-line
+  definitions.
+  [#1025](https://github.com/yrashk/ycxx/issues/1025)
 - A namespace-scope declaration's qualified types are checked once what it declares is known
   (`Sema::defer_type_access`, `settle_type_access`): a member's definition outside its class and
   a friend's declaration may name the class's private types ([class.access]/6–7). A friend

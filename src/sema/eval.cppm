@@ -97,6 +97,11 @@ struct Evaluated {
 };
 
 class Evaluator {
+  struct ByteEvaluation {
+    irgen::ConstantByteCapture capture;
+    interp::ByteCapture result{ir::NodeId{ir::none}};
+  };
+
 public:
   Evaluator(Sema& s, Questions& q) : s_(&s), q_(&q) {}
 
@@ -114,11 +119,46 @@ public:
   Evaluated evaluate(Ex e) { return evaluate(e, false); }
   Evaluated evaluate_reference_initializer(Ex e) { return evaluate(e, true); }
 
+  // The two accessors see the same receiver, including its original cv and value category.
+  std::optional<std::string> evaluate_bytes(Ex receiver) {
+    if (!receiver.ok()) return std::nullopt;
+    if (!receiver.glvalue()) receiver = s_->materialize(receiver, receiver.type(), false);
+    if (!receiver.ok()) return std::nullopt;
+    struct RestoreLocals {
+      Sema& sema;
+      std::size_t first;
+      ~RestoreLocals() { sema.discard_local_declarations(first); }
+    } restore{*s_, s_->locals().size()};
+    const u32 at = receiver.begin;
+    const u32 local = s_->declare_local(s_->no_name(), receiver.type(), 0, at);
+    Ex object = s_->node(ast::LocalRef{receiver.info, local}, at, receiver.end, receiver.info);
+    auto accessor = [&](std::string_view name, QualType type) {
+      Ex callee = s_->member(object, false, s_->ins().names.intern(name), receiver.end, at, at);
+      if (!callee.ok()) return callee;
+      return s_->convert(s_->call(callee, {}, receiver.end, at), type, at);
+    };
+    Ex size = accessor("size", s_->builtin(s_->world().target.size_type));
+    if (!size.ok()) return std::nullopt;
+    const auto character = s_->types().add_cv(s_->builtin(Builtin::char_), Cv::const_);
+    Ex data = accessor("data", s_->types().pointer(character));
+    if (!data.ok()) return std::nullopt;
+
+    auto commit = [&](Ex e) { return s_->builder().commit(Sema::at(e, 0)); };
+    ByteEvaluation bytes{{commit(receiver), commit(size), commit(data), local}};
+    const Evaluated value = evaluate(s_->void_prvalue(at, receiver.end), false, {}, &bytes);
+    if (!value.constant || !bytes.result.bytes) {
+      if (!value.type_trait_failure && !(value.dependent && q_->instantiation_gave_up()))
+        s_->diag(at, Diag::not_constant, value.reason);
+      return std::nullopt;
+    }
+    return std::move(bytes.result.bytes);
+  }
+
 private:
   // Evaluates `e` as a core constant expression, then checks the result is a permitted result
   // ([expr.const]). The result for a reference initializer is a pointer to the bound object.
   Evaluated evaluate(Ex e, bool reference_initializer,
-                     irgen::FunctionInput::InitializedFields initialized_fields = {}) {
+                     irgen::FunctionInput::InitializedFields initialized_fields = {}, ByteEvaluation* bytes = nullptr) {
     if (!e.ok()) return {};
     if (s_->dependent(e)) return {std::nullopt, reason_unsupported, false, true};
     if (!reference_initializer)
@@ -163,13 +203,15 @@ private:
                                s_->item(), 0, true, s_->local_values()};
     input.initialized_fields = initialized_fields;
     EvalFacts facts(s_->world(), *q_);
-    auto body = irgen::function_ir(in, input, facts);
+    auto body = bytes ? irgen::constant_byte_capture_ir(in, input, facts, bytes->capture) : irgen::function_ir(in, input, facts);
     if (!body) return {};
+    if (bytes) bytes->result.site = bytes->capture.site;
     Host host{q_, this};
     interp::Config config{
         .enum_layout = [&facts](EntityId e) { return facts.constant_enum_layout(e); },
         .record_layout = [this](QualType t) { return constant_record_layout(t); }};
-    interp::Outcome out = interp::evaluate(host, in, s_->world().target, body->body, EntityId::none, {}, std::move(config)).run();
+    interp::Outcome out = interp::evaluate(host, in, s_->world().target, body->body, EntityId::none, {}, std::move(config),
+                                            bytes ? &bytes->result : nullptr).run();
     if (out.status != interp::Outcome::Status::value && host.type_trait_failure)
       return {std::nullopt, reason_unsupported, false, false, true};
     if (out.status != interp::Outcome::Status::value && q_->instantiation_gave_up())
