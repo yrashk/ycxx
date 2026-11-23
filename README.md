@@ -130,8 +130,10 @@ effect. [#982](https://github.com/yrashk/ycxx/issues/982)
 Fixed-prototype calls (free and member functions, lambdas, function templates and calls
 through pointers) support passing and returning nonempty flat records with integral,
 ordinary object-pointer or object lvalue-reference fields by value. The record can occupy up to
-16 bytes and must be trivial for calls. Larger results and classes that are not trivial for
-calls (with a user-provided copy constructor or destructor) pass through memory, as on macOS. [Linux integer aggregate ABI](docs/design/linux-integer-aggregates.md)
+16 bytes and must be trivial for calls. Fixed direct calls also support ordinary one-byte empty
+classes as parameters. Larger results and classes that are not trivial for calls (with a
+user-provided copy constructor or destructor) pass through memory, as on macOS.
+[Linux integer aggregate ABI](docs/design/linux-integer-aggregates.md)
 
 Static x86-64 Linux executables resolve `R_X86_64_GOTPCREL` through GOT slots. A slot for an
 unresolved weak symbol contains zero. [#979](https://github.com/yrashk/ycxx/issues/979)
@@ -296,11 +298,12 @@ arrays of supported scalar types, including arithmetic on saved pointers just pa
 
 Both targets support `constexpr` constructors in class definitions and plain out-of-class
 definitions for runtime construction. Ordinary in-class constructor declarations support
-bare `explicit`. An ordinary class can explicitly default its copy constructor as its first
+bare `explicit`. Eligible inline constructors link across separate objects on both targets.
+An ordinary class can explicitly default its copy constructor as its first
 declaration and use it for trivial member copies. A non-template empty tag class at namespace
 scope with no bases and an implicit trivial destructor can first declare `T() = default`
 in class and use it to initialize an `inline constexpr` tag object.
-[#157](https://github.com/yrashk/ycxx/issues/157)
+[#157](https://github.com/yrashk/ycxx/issues/157) · [#1096](https://github.com/yrashk/ycxx/issues/1096)
 
 An explicit class return can select a written move constructor for an eligible named local
 or parameter. [#749](https://github.com/yrashk/ycxx/issues/749)

@@ -293,6 +293,12 @@ system_leaf:
                                 'member-aggregate-provider', 'member-aggregate-client')
         integer_aggregate_calls(compile, target, aggregates, scope, cold, cc,
                                 'final-byval-calls', 'final-byval-main')
+        empty_parameters = source_dir / 'linux_empty_parameters'
+        for case, client in (('constructor', 'consumer'), ('addressed', 'caller'), ('mixed-records', 'caller')):
+            integer_aggregate_calls(compile, target, empty_parameters / case, scope, cold, cc, 'provider', client)
+        compile(target, '-c', empty_parameters / 'nontrivial/provider.cpp', '-o', 'nontrivial-empty.o',
+                error='unsupported aggregate parameter layout')
+        assert not (scope / 'nontrivial-empty.o').exists()
         compile(target, '-isystem', libycxx / 'include', '-nostdlib',
                 aggregates / 'pointer-aggregate-empty-list.cpp', libycxx / 'src/runtime/linkage/static.cpp',
                 '-o', 'aggregate-empty-list')
@@ -336,7 +342,8 @@ system_leaf:
             ('long double f(long double x) { return x; }', 'x87 long double parameters and results are unsupported'),
             ('struct X { double x; }; auto f() { return X{1.0}; }', aggregate_result),
             ('struct X { long a, b, c; }; int f(X) { return 1; }', aggregate_parameter),
-            ('struct X {}; int f(X) { return 1; }', aggregate_parameter),
+            ('struct X {}; int f(int (*g)(X)) { return g(X{}); }', f'call: {aggregate_parameter}'),
+            ('struct X {}; X f() { return X{}; }', aggregate_result),
             ('struct X { double a; int b; }; int f(X x) { return x.b; }', aggregate_parameter),
             ('struct X { int a[2]; }; int f(X x) { return x.a[0]; }', aggregate_parameter),
             ('struct M { int a; }; struct X { M m; }; int f(X x) { return x.m.a; }', aggregate_parameter),

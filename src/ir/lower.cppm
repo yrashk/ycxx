@@ -54,6 +54,7 @@ export struct TypeLayout {
   bool contains_member_pointer = false;  // a scalar member pointer or an aggregate containing one
   // Records: the bits of each INTEGER eightbyte in the supported AMD64 slice, zero otherwise.
   std::uint8_t sysv_integer_eightbytes = 0;
+  bool sysv_empty_argument = false;  // a call-trivial empty record classified as NO_CLASS
   bool copy_abi_unknown = false;  // records whose defaulted copy has unresolved triviality
   bool calls_abi_uncertain = false;  // records whose non-triviality for calls is not established
   bool layout_uncertain = false;     // records whose source layout directives are not applied
@@ -465,7 +466,7 @@ class Lowering {
         if (object.copy_abi_unknown) return fail("defaulted copy ABI classification is unavailable");
         if (!config_.sysv_amd64 && object.contains_explicit_alignment)
           return fail("AArch64 Darwin ABI: explicitly aligned classes by value are not supported yet");
-        if (ignored(pc)) {  // passed by nothing: an object of this frame stands for it
+        if (ignored(object, byval && !result)) {  // the parameter still has an object in this frame
           objects.push_back({p, 0, result, {}});
           l2_of.push_back(-1);
           continue;
@@ -936,8 +937,9 @@ class Lowering {
             if (object.copy_abi_unknown) return fail("defaulted copy ABI classification is unavailable");
             if (!config_.sysv_amd64 && object.contains_explicit_alignment)
               return fail("AArch64 Darwin ABI: explicitly aligned classes by value are not supported yet");
-            // An empty class passes nothing, and returns nothing.
-            if (ignored(c)) continue;
+            const bool fixed_direct_argument = class_arg && !class_result && !ind && !(nd.flags & bit(Flag::variadic));
+            // The argument expression has already produced its object. Omit only its transport.
+            if (ignored(object, fixed_direct_argument)) continue;
           }
           if (class_result) {
             result_pieces = class_pieces(c);
@@ -1206,11 +1208,11 @@ class Lowering {
     return l.kind == TypeKind::record && !l.empty && !l.copy_abi_unknown && !l.layout_uncertain &&
            ((!l.trivial_calls && !l.calls_abi_uncertain) || l.size > 16);
   }
-  // An empty class trivially copyable for calls is not passed at all, as Clang does on arm64
-  // macOS (#116).
-  bool ignored(QualType c) const {
-    TypeLayout l = layout(c);
-    return !config_.sysv_amd64 && l.kind == TypeKind::record && l.trivial_calls && l.empty;
+  // Darwin omits empty call-trivial arguments and results (#116). System V classifies this
+  // empty argument as NO_CLASS; its result convention is separate (#641).
+  bool ignored(const TypeLayout& l, bool sysv_argument) const {
+    if (config_.sysv_amd64) return sysv_argument && l.sysv_empty_argument;
+    return l.kind == TypeKind::record && l.trivial_calls && l.empty;
   }
   // An ABI-local class object. AAPCS64 rounds it up to permit full-word accesses.
   ValueId frame_object(const TypeLayout& l) {
