@@ -36,3 +36,6 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_
     COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/derived_virtual_destructor_alignment.py
             $<TARGET_FILE:ycxxc> ${CMAKE_CXX_COMPILER})
 endif()
+
+add_test(NAME daemon.warning_options
+  COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/warning_options.py $<TARGET_FILE:ycxxc>)
