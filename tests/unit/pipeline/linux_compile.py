@@ -99,6 +99,40 @@ def integer_aggregate_calls(compile, target, sources, scope, cold, cc, provider,
         run(['./aggregate-mixed'], scope, cold)
 
 
+def static_marker_visibility(compile, target, libycxx, scope, cold, cc, symbol):
+    marker = libycxx / 'src/runtime/linkage/static.cpp'
+    compile(target, '-isystem', libycxx / 'include', '-c', marker, '-o', 'static-linkage-marker.o')
+
+    (scope / 'static-marker-controls.cpp').write_text(
+        'extern "C" {\n'
+        '[[__gnu__::__visibility__("hidden")]] extern const char inherited_hidden_marker;\n'
+        '}\n'
+        'extern "C" constinit const char inherited_hidden_marker = 17;\n'
+        'extern "C" [[__gnu__::__visibility__("hidden")]] constinit const char direct_hidden_marker = 23;\n'
+        'extern "C" constinit const char default_marker = 41;\n')
+    compile(target, '-c', 'static-marker-controls.cpp')
+    for path, name, visibility in (
+        ('static-linkage-marker.o', '__ycxx_linkage_static_v1', 'HIDDEN'),
+        ('static-marker-controls.o', 'direct_hidden_marker', 'HIDDEN'),
+        ('static-marker-controls.o', 'inherited_hidden_marker', 'HIDDEN'),
+        ('static-marker-controls.o', 'default_marker', 'DEFAULT'),
+    ):
+        _, size, fields = symbol(path, name)
+        assert size == 1 and fields[:3] == ['OBJECT', 'GLOBAL', visibility] and fields[3].isdecimal(), (
+            path, name, size, fields, visibility)
+
+    (scope / 'static-marker-reader.c').write_text(
+        'extern const char __ycxx_linkage_static_v1, inherited_hidden_marker;\n'
+        'extern const char direct_hidden_marker, default_marker;\n'
+        'int main(void) {\n'
+        '  return __ycxx_linkage_static_v1 != 0 || inherited_hidden_marker != 17\n'
+        '      || direct_hidden_marker != 23 || default_marker != 41;\n'
+        '}\n')
+    run([cc, '-no-pie', 'static-marker-reader.c', 'static-linkage-marker.o', 'static-marker-controls.o',
+         '-o', 'read-static-markers'], scope, cold)
+    run(['./read-static-markers'], scope, cold)
+
+
 def main():
     ycxx, cc, readelf, ar, libycxx_source = sys.argv[1:]
     source_dir = Path(__file__).resolve().parent
@@ -251,6 +285,7 @@ system_leaf:
             source = source_dir / 'deduced-results' / f'{name}.cpp'
             compile(target, '-nostdlib', source, '-o', name)
             run([f'./{name}'], scope, cold)
+        static_marker_visibility(compile, target, libycxx, scope, cold, cc, symbol)
         aggregates = source_dir / 'linux_integer_aggregates'
         integer_aggregate_calls(compile, target, aggregates, scope, cold, cc, 'provider', 'client')
         integer_aggregate_calls(compile, target, aggregates, scope, cold, cc,
