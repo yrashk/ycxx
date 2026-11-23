@@ -966,10 +966,10 @@ with tempfile.TemporaryDirectory() as directory:
                         "-o", str(native)], check=True, timeout=30)
         assert subprocess.run([native], timeout=10).returncode == 0
 
-        def compile_object(source, checked=True):
+        def compile_object(source, checked=True, flags=()):
             path = source.with_suffix(".o")
             mode_flag = ["-fcheck-policies"] if checked else []
-            subprocess.run([*args, *mode_flag, "-c", str(source), "-o", str(path)], check=True, timeout=30)
+            subprocess.run([*args, *mode_flag, *flags, "-c", str(source), "-o", str(path)], check=True, timeout=30)
             return path
 
         checked_caller = write("checked_caller.cpp", verified.read_text() + caller.read_text())
@@ -1208,17 +1208,19 @@ with tempfile.TemporaryDirectory() as directory:
         dangling_use = write("capability_after_release.cpp", capability_peer.read_text().replace(
             "  release(static_cast<Grant&&>(authority));",
             "  release(static_cast<Grant&&>(authority));\n  access(authority);"))
-        syntax(dangling_use, error="affine resource 'authority' may already have been consumed")
-
-        ycxx_provider, ycxx_caller = map(compile_object, (capability_provider, capability_peer))
-        host_objects = []
-        for source in (capability_provider, capability_peer):
-            output = source.with_suffix(".host.o")
-            subprocess.run([host, "-std=c++20", "-I", include, "-c", source, "-o", output],
-                           check=True, timeout=30)
-            host_objects.append(output)
-        host_provider, host_caller = host_objects
-        for provider_object, caller_object in ((ycxx_provider, host_caller), (host_provider, ycxx_caller)):
-            subprocess.run([host, provider_object, caller_object, "-o", native], check=True, timeout=30)
-            subprocess.run([native], check=True, timeout=10)
-            assert subprocess.run([native, "wrong-scope"], timeout=10).returncode == -signal.SIGILL
+        guard_modes = (((), -signal.SIGILL), (("-DYCXX_POLICIES_RUNTIME_CHECKS=0",), 0))
+        for flags, wrong_scope_result in guard_modes:
+            syntax(*flags, dangling_use, error="affine resource 'authority' may already have been consumed")
+            ycxx_objects, host_objects = [], []
+            for source in (capability_provider, capability_peer):
+                ycxx_objects.append(compile_object(source, flags=flags))
+                output = source.with_suffix(".host.o")
+                subprocess.run([host, "-std=c++20", *flags, "-I", include, "-c", source, "-o", output],
+                               check=True, timeout=30)
+                host_objects.append(output)
+            ycxx_provider, ycxx_caller = ycxx_objects
+            host_provider, host_caller = host_objects
+            for provider_object, caller_object in ((ycxx_provider, host_caller), (host_provider, ycxx_caller)):
+                subprocess.run([host, provider_object, caller_object, "-o", native], check=True, timeout=30)
+                subprocess.run([native], check=True, timeout=10)
+                assert subprocess.run([native, "wrong-scope"], timeout=10).returncode == wrong_scope_result

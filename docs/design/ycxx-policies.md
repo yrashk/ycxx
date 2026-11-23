@@ -270,20 +270,26 @@ identities and include contract dependencies in the query keys. Editing a contra
 dependent proofs. An unrelated edit should reuse the ownership and effect results of unchanged
 bodies. See [the ownership checker](policies-ownership.md) and the [query engine design](query-engine.md).
 
-## First conformance gate
+## Conformance gates
 
-Use the same resource definition, adapter operations, and caller source on GCC, Clang, and YCXX.
-The decisive fixture creates a transaction, returns early based on a runtime argument, and commits
-on the other path. GCC and Clang should accept the C++ source. The commit path should succeed and
-the early path should reach the violation handler. YCXX should reject the checked caller and point
-to the early return. Add fixtures for transfer followed by source reuse, an unclaimed result,
-exception exit, a direct copy rejected by ordinary C++, and a capability check through an indirect
-callee. Keep runtime observations and static verdicts in the same conformance suite.
+`tools/test --fast` builds YCXX and runs the policy fixtures through CTest. Run the standalone
+package fixture separately with GCC and Clang. It configures a consumer using the exported target
+in both installation and vendor layouts. The issue records the exact branch revisions and native
+hosts that passed. [Project record #660](https://github.com/yrashk/ycxx/issues/660)
 
-The policy fixtures cover composed fragments, alias and annotation parity, conflicts, and a registry
-with 1,280 resource types. The portable runtime fixture in `examples/affine/runtime_transaction.hpp`
-checks the native adapter with GCC or Clang and YCXX. On hosted Linux x86-64, a mixed-compiler
-fixture verifies that a YCXX cleanup consumes a guard created by a GCC or Clang caller, on both
-normal return and exception propagation. The compiler currently supports a single aggregate
-automatic local with a nonthrowing destructor around a direct external call in this case.
-[Indirect results #661](https://github.com/yrashk/ycxx/issues/661) · [Exception cleanup #663](https://github.com/yrashk/ycxx/issues/663)
+| Gate | Required coverage | Fixtures |
+| --- | --- | --- |
+| Portable package | C++20 installation, relocation, vendoring, ordinary type constraints, guarded and unguarded runtime behavior, and identical sizes and alignments across guard settings. | [Package](../../tests/unit/pipeline/policies_package.py) |
+| Ownership and borrows | Affine drops, linear discharge at scope exit, authorized transfers, owned fields and arrays, lexical shared borrows, rejected escapes, and tracked alternatives. Exercise the same resource definitions and adapters in runtime and static tests. | [Ownership](../../tests/unit/pipeline/policies_ownership.py) · [Variants](../../tests/unit/pipeline/policies_variants.py) · [Contracts](../../tests/unit/pipeline/policies_contracts.py) |
+| Separate translation units | Publish, require, and match verified contracts across objects. Reject missing or changed guarantees. Exercise mixed-compiler calls in both guard settings and cleanup with the package ABI. | [Contracts](../../tests/unit/pipeline/policies_contracts.py) · [Effects](../../tests/unit/pipeline/policies_effects.py) · [Grades](../../tests/unit/pipeline/policies_grades.py) |
+| Capabilities, effects, and grades | Check mediated authority, transitive effect bounds, scoped handlers for supported callables, and finite usage counts. Compare runtime traps and static rejections, including static enforcement with runtime guards disabled. | [Effects](../../tests/unit/pipeline/policies_effects.py) · [Grades](../../tests/unit/pipeline/policies_grades.py) |
+| Composition and incremental reuse | Combine typed and reflected declarations across headers and translation units. Verify equivalent normalization, both conflict origins, and reuse for 1,280 resources and 144 effect tags. Change a policy header or provider while preserving size and timestamp and compare the resident daemon with a cold build. | [Contracts](../../tests/unit/pipeline/policies_contracts.py) · [Effects](../../tests/unit/pipeline/policies_effects.py) · [Grades](../../tests/unit/pipeline/policies_grades.py) · [Daemon](../../tests/daemon/process.py) |
+
+The native owner-variant gate runs both valid alternatives, a capability scope violation, and a
+linear leak through a variant. It runs on arm64 macOS. The Linux fixture currently asserts the
+compiler's empty-selection-tag ABI diagnostic. Once the lowering lands, it must run those same
+native cases on x86-64 Linux. [Empty selection tags #641](https://github.com/yrashk/ycxx/issues/641)
+
+The mixed-compiler unwind gate uses an automatic aggregate with a nonthrowing destructor around
+a direct external call. A GCC or Clang caller creates the guard, and the YCXX helper consumes it
+on normal return and exception propagation. [Indirect results #661](https://github.com/yrashk/ycxx/issues/661) · [Exception cleanup #663](https://github.com/yrashk/ycxx/issues/663)
