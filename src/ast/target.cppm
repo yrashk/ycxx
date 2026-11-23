@@ -52,8 +52,21 @@ enum class VaList : u8 { char_pointer, sysv_x86_64 };
 // by `-fclass-call-abi=apple` on a target that offers it.
 enum class CallTriviality : u8 { itanium, apple };
 
+enum class Architecture : u8 { aarch64, x86_64 };
+enum class OperatingSystem : u8 { darwin, linux_ };
+enum class ObjectFormat : u8 { macho, elf };
+
+// Native operations the compiler implements for a target. Their source and ABI
+// preconditions are checked by each operation's own analysis.
+enum class NativeOperation : std::uint64_t {
+  derived_virtual_destructor = std::uint64_t{1} << 0,
+};
+
 struct Target {
   std::string_view triple;
+  Architecture architecture;
+  OperatingSystem operating_system;
+  ObjectFormat object_format;
   std::array<BuiltinLayout, builtin_count> layout;
   u8 pointer_size;
   u8 pointer_align;
@@ -72,9 +85,13 @@ struct Target {
   VaList va_list;
   CallTriviality call_triviality;  // the default
   bool apple_calls;                 // whether `-fclass-call-abi=apple` is offered
+  std::uint64_t native_operations = 0;
 
   constexpr BuiltinLayout operator[](Builtin b) const { return layout[std::to_underlying(b)]; }
   constexpr bool has(Builtin b) const { return (*this)[b].size != 0; }
+  constexpr bool supports(NativeOperation operation) const {
+    return (native_operations & std::to_underlying(operation)) != 0;
+  }
 };
 
 // Itanium C++ ABI §2.3: a data member pointer is a ptrdiff_t; on both supported
@@ -248,6 +265,9 @@ consteval std::array<BuiltinLayout, builtin_count> lp64(std::initializer_list<La
 // binary128.
 inline constexpr Target aarch64_darwin{
     .triple = "arm64-apple-darwin",
+    .architecture = Architecture::aarch64,
+    .operating_system = OperatingSystem::darwin,
+    .object_format = ObjectFormat::macho,
     .layout = detail::lp64({{Builtin::long_double, {8, 8, FloatFormat::binary64}}}),
     .pointer_size = 8,
     .pointer_align = 8,
@@ -271,6 +291,9 @@ inline constexpr Target aarch64_darwin{
 // x86_64-linux-gnu (System V): `long double` is the x87 80-bit format in 16 bytes.
 inline constexpr Target x86_64_linux{
     .triple = "x86_64-pc-linux-gnu",
+    .architecture = Architecture::x86_64,
+    .operating_system = OperatingSystem::linux_,
+    .object_format = ObjectFormat::elf,
     .layout = detail::lp64({{Builtin::long_double, {16, 16, FloatFormat::x87_extended}},
                             {Builtin::float128, {16, 16, FloatFormat::binary128}}}),
     .pointer_size = 8,
@@ -290,6 +313,7 @@ inline constexpr Target x86_64_linux{
     .va_list = VaList::sysv_x86_64,
     .call_triviality = CallTriviality::itanium,
     .apple_calls = false,
+    .native_operations = std::to_underlying(NativeOperation::derived_virtual_destructor),
 };
 
 constexpr const Target* target_for_triple(std::string_view triple) {
