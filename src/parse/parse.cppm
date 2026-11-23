@@ -8069,7 +8069,8 @@ Program::TypedCastRtti Program::peer_typed_dynamic_cast(EntityId source, EntityI
   using sema::PeerVirtualLayout;
   const auto* base = classes_.find(source);
   const auto* derived = classes_.find(target);
-  if (w_->target.triple != ast::x86_64_linux.triple || !base || !derived || r_->has_clang_attribute_pragma)
+  if (!w_->target.supports(ast::NativeOperation::peer_typed_dynamic_cast) || !base || !derived ||
+      r_->has_clang_attribute_pragma)
     return TypedCastRtti::unsupported;
   // The automatic-primary-base certificate covers the pure base, the public edge and the
   // directly declared override. A complete-unit check must still leave the key to a peer.

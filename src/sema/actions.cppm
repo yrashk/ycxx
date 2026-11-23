@@ -8224,7 +8224,7 @@ public:
       diag(begin, Diag::rtti_disabled, lex::Tk::kw_dynamic_cast);
       return fail;
     }
-    if (!pointer || w_->target.triple != ast::x86_64_linux.triple) {
+    if (!pointer || !w_->target.supports(ast::NativeOperation::peer_typed_dynamic_cast)) {
       diag(begin, Diag::not_supported, lex::Tk::kw_dynamic_cast);
       return fail;
     }
