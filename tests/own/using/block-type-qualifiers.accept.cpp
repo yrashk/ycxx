@@ -12,6 +12,8 @@ void direct_imports() {
   static_assert(static_cast<int>(E::one) == 11);
   static_assert(Box::value == 17);
   static_assert(Alias::value == 17);
+  using Imported::E;
+  static_assert(static_cast<int>(E::one) == 11);
 }
 
 namespace Inner { enum class E { one = 29 }; }
