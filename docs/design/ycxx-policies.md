@@ -2,10 +2,11 @@
 
 YCXX Policies is a standalone C++20 package for ownership, capabilities, and effects. Applications
 declare one set of contracts for resource APIs. Any conforming C++20 compiler enforces the constraints
-expressed by the public types and templates. Library adapters check the remaining obligations on executed paths. With checking
-enabled, YCXX verifies those contracts against the control flow and calls of the program before
-emitting code. Checked and unchecked translation units use the same declarations, layouts, and
-runtime behavior. The first implementation keeps the runtime checks enabled in both builds.
+expressed by the public types and templates. Library adapters use runtime guards on executed paths.
+With `-fcheck-policies`, YCXX also verifies contracts against the control flow and calls before
+emitting code. Runtime guards default to enabled. Applications can compile them out with
+`YCXX_POLICIES_RUNTIME_CHECKS=0` while keeping the same types and layouts and any YCXX static
+checks they requested. Use the same runtime setting throughout an executable.
 
 ## Ownership, authority, and effects
 
@@ -128,7 +129,7 @@ runtime enforcement described below. [#946](https://github.com/yrashk/ycxx/issue
 | --- | --- | --- | --- |
 | Affine ownership | Reject copying a move-only handle | Reject use after transfer or consumption | Reject a use when any incoming path has already transferred or consumed it |
 | Strict linear ownership | Expose the legal terminal operations | Report a live obligation when the owner is destroyed | Verify discharge or transfer on every modeled exit |
-| Capabilities | Require a capability of the right type at the API boundary | Validate instance rights, resource scope, revocation, and optional budgets | Verify capability passage and delegation through checked code and contracts |
+| Capabilities | Require a token from the declared issuer with the required rights | Validate the token's scope and live state at a mediated operation | Verify the token's ownership through checked code and contracts |
 | Effects | Constrain declared effect sets for typed callables | Deny ungranted effects at mediated operations on the executed path | Verify declared effect bounds against the body and transitive callees |
 
 A portable owner stores a live state. A move checks and clears the source and arms the destination.
@@ -283,7 +284,7 @@ hosts that passed. [Project record #660](https://github.com/yrashk/ycxx/issues/6
 | Ownership and borrows | Affine drops, linear discharge at scope exit, authorized transfers, owned fields and arrays, lexical shared borrows, rejected escapes, and tracked alternatives. Exercise the same resource definitions and adapters in runtime and static tests. | [Ownership](../../tests/unit/pipeline/policies_ownership.py) · [Variants](../../tests/unit/pipeline/policies_variants.py) · [Contracts](../../tests/unit/pipeline/policies_contracts.py) |
 | Separate translation units | Publish, require, and match verified contracts across objects. Reject missing or changed guarantees. Exercise mixed-compiler calls in both guard settings and cleanup with the package ABI. | [Contracts](../../tests/unit/pipeline/policies_contracts.py) · [Effects](../../tests/unit/pipeline/policies_effects.py) · [Grades](../../tests/unit/pipeline/policies_grades.py) |
 | Capabilities, effects, and grades | Check mediated authority, transitive effect bounds, scoped handlers for supported callables, and finite usage counts. Compare runtime traps and static rejections, including static enforcement with runtime guards disabled. | [Effects](../../tests/unit/pipeline/policies_effects.py) · [Grades](../../tests/unit/pipeline/policies_grades.py) |
-| Composition and incremental reuse | Combine typed and reflected declarations across headers and translation units. Verify equivalent normalization, both conflict origins, and reuse for 1,280 resources and 144 effect tags. Change a policy header or provider while preserving size and timestamp and compare the resident daemon with a cold build. | [Contracts](../../tests/unit/pipeline/policies_contracts.py) · [Effects](../../tests/unit/pipeline/policies_effects.py) · [Grades](../../tests/unit/pipeline/policies_grades.py) · [Daemon](../../tests/daemon/process.py) |
+| Composition and incremental reuse | Combine typed and reflected declarations across headers and translation units. Verify equivalent normalization, both conflict origins, and reuse for 1,280 resources and 144 effect tags. Change a policy header or provider while preserving size and timestamp. Toggle runtime guards in one daemon. Compare the resulting diagnostics and binaries with cold builds. | [Contracts](../../tests/unit/pipeline/policies_contracts.py) · [Effects](../../tests/unit/pipeline/policies_effects.py) · [Grades](../../tests/unit/pipeline/policies_grades.py) · [Daemon](../../tests/daemon/process.py) |
 
 The native owner-variant gate runs both valid alternatives, a capability scope violation, and a
 linear leak through a variant. It runs on arm64 macOS. The Linux fixture currently asserts the

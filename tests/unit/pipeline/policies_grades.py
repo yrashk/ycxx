@@ -238,24 +238,31 @@ with tempfile.TemporaryDirectory() as directory:
                 subprocess.run([compiler, "ctl", "shutdown"], cwd=root, env=link_env, capture_output=True, timeout=10)
 
     if linux_host or mac_host:
-        native = darwin if mac_host else linux
         program = root / "budget"
         mediated = write("mediated.cpp", """\
             #include "grades.hpp"
             #include <ycxx/effects/runtime.hpp>
+            namespace site {
+              template<class T> concept Wide = sizeof(T) > 1;
+            }
             struct RequestedLimit {
               int requested;
               int capped = requested < 4 ? requested : 4;
             };
-            struct NativeConfig { static constexpr int uses = RequestedLimit{2}.capped; };
-            using Scope = fx::budget<Send, NativeConfig::uses>;
-            using Bound = fx::set<fx::at_most<Send, NativeConfig::uses>>;
+            template<bool Wide> struct Profile { static constexpr int uses = 1; };
+            template<> struct Profile<true> { static constexpr int uses = RequestedLimit{2}.capped; };
+            template<class Payload> struct NativeConfig : Profile<site::Wide<Payload>> {};
+            using Active = NativeConfig<int>;
+            static_assert(Active::uses == 2);
+            static_assert(NativeConfig<char>::uses == 1);
+            using Scope = fx::budget<Send, Active::uses>;
+            using Bound = fx::set<fx::at_most<Send, Active::uses>>;
             [[=fx::trusted_contract<One>{}]] int transmit(Scope& scope, int value) noexcept {
               scope.spend();
               return value;
             }
             [[=fx::contract<Bound>{}]] int dispatch(Scope& scope) noexcept {
-              for (int i = NativeConfig::uses; i > 0; --i) transmit(scope, i);
+              for (int i = Active::uses; i > 0; --i) transmit(scope, i);
               return 2;
             }
             int main(int argc, char**) {
@@ -265,17 +272,34 @@ with tempfile.TemporaryDirectory() as directory:
               return 0;
             }
         """)
-        invoke([*native, "-o", program, mediated])
-        subprocess.run([program], check=True, timeout=10)
+        too_many = write("mediated_overuse.cpp", mediated.read_text().replace("i = Active::uses;", "i = 3;"))
+        error = "exceeds its usage grade of 2"
         resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
-        exhausted = subprocess.run([program, "exhausted"], timeout=10)
         trap_signals = (-signal.SIGILL, -signal.SIGTRAP) if mac_host else (-signal.SIGILL,)
-        assert exhausted.returncode in trap_signals, exhausted
-        unguarded = "-DYCXX_POLICIES_RUNTIME_CHECKS=0"
-        invoke([*native, unguarded, "-o", program, mediated])
-        subprocess.run([program, "exhausted"], check=True, timeout=10)
-        too_many = write("mediated_overuse.cpp", mediated.read_text().replace("i = NativeConfig::uses;", "i = 3;"))
-        invoke([*native, unguarded, "-fsyntax-only", too_many], "exceeds its usage grade of 2")
+        for target, can_run in targets:
+            resident = ["--daemon=require" if flag == "--no-daemon" else flag for flag in target]
+            with tempfile.TemporaryDirectory(prefix="yg-guard-", dir="/tmp") as sockets:
+                env = dict(daemon_env, YCXX_RUNTIME_DIR=sockets)
+                try:
+                    previous = None
+                    for checks in (1, 0, 1):
+                        mode = f"-DYCXX_POLICIES_RUNTIME_CHECKS={checks}"
+                        link = [mode, "-o", program, mediated]
+                        invoke([*resident, *link], env=env)
+                        warm = program.read_bytes()
+                        program.unlink()
+                        invoke([*target, *link], env=env)
+                        assert program.read_bytes() == warm, (target, checks)
+                        assert warm != previous, (target, checks)
+                        previous = warm
+                        if can_run:
+                            subprocess.run([program], check=True, timeout=10)
+                            exhausted = subprocess.run([program, "exhausted"], timeout=10)
+                            assert exhausted.returncode in (trap_signals if checks else (0,)), exhausted
+                        analysis = [mode, "-fsyntax-only", too_many]
+                        assert invoke([*resident, *analysis], error, env) == invoke([*target, *analysis], error, env)
+                finally:
+                    subprocess.run([compiler, "ctl", "shutdown"], cwd=root, env=env, capture_output=True, timeout=10)
         assignment = write("budget_assignment.cpp", """\
             #include "grades.hpp"
             #include <ycxx/effects/runtime.hpp>
