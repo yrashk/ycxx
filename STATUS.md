@@ -1165,6 +1165,9 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   and must be constant-initialized), `consteval` functions with immediate invocations replaced by
   their value outside an immediate function context, `constinit`, and the redeclaration rules of
   [dcl.constexpr]/1.
+- Native collection omits ordinary named namespace-scope immediate functions whose bodies
+  have neither static locals nor closures. Their declarations and analysed bodies remain
+  available for constant evaluation. [#1006](https://github.com/yrashk/ycxx/issues/1006)
 - `static_assert(e)` and `static_assert(e, "message")` at namespace and block scope (the
   `StaticAssert` node); `if consteval` and `if !consteval` (`IfConsteval`, lowered to
   `consteval_br`).

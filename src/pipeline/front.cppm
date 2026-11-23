@@ -1291,8 +1291,16 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
       const ast::BodySema& body = program.analyze_body(k).value;
       ast::DeclSema d = decls[0];
       if (body.deduced) d.type = body.deduced_type;
-      tu.functions.push_back({d.entity, d, body, program.id(k), it.body_begin - it.begin, program.this_type(d)});
       const auto& entity = world.entities.rec(d.entity);
+      // Sema has checked the body and keeps it for constant evaluation. Leave collection of
+      // body-local statics and closures to the existing native path when they are present.
+      if ((d.flags & sema::decl_flag::consteval_) && !member && !it.template_depth && !it.specialization &&
+          entity.kind == sema::EntityKind::function && entity.templ == EntityId::none && program.is_namespace(entity.scope) &&
+          !ins.names.spelling(entity.name).empty() && ins.seqs.size(body.closures) == 0 &&
+          std::ranges::none_of(ins.seqs.elements(body.locals), [&](const ast::LocalRec& local) {
+            return local.entity != EntityId::none && local.decl != ast::NodeId::none && ins.ast.is<ast::StaticVar>(local.decl);
+          })) continue;
+      tu.functions.push_back({d.entity, d, body, program.id(k), it.body_begin - it.begin, program.this_type(d)});
       const bool virtual_destructor = entity.kind == sema::EntityKind::destructor && d.is_virtual;
       const auto derived = virtual_destructor ? program.derived_virtual_destructor_ownership(entity.scope) : std::nullopt;
       const bool derived_producer = derived && derived->owns_derived_key;
