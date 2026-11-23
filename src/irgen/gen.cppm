@@ -345,7 +345,7 @@ class Gen {
       return;
     }
     ValueId self[] = {p.ptr};
-    call_fn(destructor, facts_.int_type(), self, 1, true);
+    call_fn(destructor, facts_.int_type(), self, ImplicitObject::constructor_or_destructor, true);
   }
   // Ends the objects of the scopes above `depth`, innermost first; the scopes stay open.
   void exit_scopes(std::size_t depth) {
@@ -977,7 +977,7 @@ class Gen {
       if (argument_object(x)) byval |= 1u << args.size();
       args.push_back(argument(x));
     }
-    call_fn(c.ctor, facts_.int_type(), args, 1, true, byval, 0, call_flags);
+    call_fn(c.ctor, facts_.int_type(), args, ImplicitObject::constructor_or_destructor, true, byval, 0, call_flags);
   }
 
   // A folded immediate invocation has a structural value. Initialize its result place
@@ -1237,7 +1237,7 @@ class Gen {
     ast::QualType vp = facts_.pointer_to(facts_.int_type());  // any object pointer: the callee takes void*
     auto atexit = [&](ValueId object) {
       ValueId args[] = {pure(ir::Op::func_addr, vp, {}, {word(destructor)}), object, pure(ir::Op::global, vp, {}, {word(dso)})};
-      call_fn(atexit_fn, facts_.int_type(), args, 0);
+      call_fn(atexit_fn, facts_.int_type(), args);
     };
     if (cls(p.type) != TypeClass::array) return atexit(p.ptr);
     // An array's elements are each registered, the first first, so that the last is destroyed
@@ -1299,7 +1299,7 @@ class Gen {
     if (!needs_guard) return;
     ast::QualType vp = facts_.pointer_to(facts_.int_type());
     ValueId guard[] = {pure(ir::Op::global, vp, {}, {word(g->guard)})};
-    ValueId first = *call_fn(fn_.guard_acquire, facts_.int_type(), guard, 0);
+    ValueId first = *call_fn(fn_.guard_acquire, facts_.int_type(), guard);
     ValueId taken = pure(ir::Op::icmp, facts_.bool_type(), {first, int_constant(facts_.int_type(), 0)}, {std::to_underlying(ir::Pred::ne)});
     ir::BlockId init_b = new_block(), join = new_block();
     cond_br(taken, edge(init_b), edge(join));
@@ -1311,7 +1311,7 @@ class Gen {
         return 0;
       });
     if (s.destructor != ast::EntityId::none) at_exit(p, s.destructor, fn_.atexit, fn_.dso);
-    call_fn(fn_.guard_release, facts_.int_type(), guard, 0, true);
+    call_fn(fn_.guard_release, facts_.int_type(), guard, ImplicitObject::none, true);
     br(join);
     enter(join);
   }
@@ -1740,7 +1740,7 @@ class Gen {
     // The runtime takes the original subobject address, including secondary subobjects.
     const ValueId args[] = {erase_type(b_.param(runtime, 1)), rtti(cast.source_rtti), rtti(cast.target_rtti),
                             int_constant(facts_.ptrdiff_type(), 0)};
-    const ValueId address = *call_fn(cast.runtime, result_pointer, args, 0);
+    const ValueId address = *call_fn(cast.runtime, result_pointer, args);
     const ValueId adjusted = pure(ir::Op::ptr_cast, result, {address}, {word(ty(result))});
     br(join, {adjusted});
     enter(join);
@@ -2129,7 +2129,7 @@ class Gen {
     if_nonnull(addr, [&] {
       stateful(ir::Op::obj__end, {}, std::span(&addr, 1));
       ValueId args[] = {addr, rvalue(child(a, d.size))};
-      call_fn(d.function, d.info.type, args, 0);
+      call_fn(d.function, d.info.type, args);
     });
   }
 
@@ -2141,7 +2141,7 @@ class Gen {
       ast::QualType void_pointer = facts_.pointer_to(d.info.type);
       ValueId address = pure(ir::Op::ptr_cast, void_pointer, {operand}, {word(ty(void_pointer))});
       // The call releases the allocation root, including a zero-length array ([basic.life]).
-      call_fn(d.function, d.info.type, std::span(&address, 1), 0);
+      call_fn(d.function, d.info.type, std::span(&address, 1));
     });
   }
 
@@ -2210,7 +2210,7 @@ class Gen {
       args.push_back(argument(x));
     }
     if (through) return call_pointer(*through, result_type(c.info), args, byval, into ? 1 : 0);
-    return call_fn(c.function, result_type(c.info), args, 0, false, byval, into ? 1 : 0);
+    return call_fn(c.function, result_type(c.info), args, ImplicitObject::none, false, byval, into ? 1 : 0);
   }
   // A call through a function pointer, `args[0]`, of function type `fn`: `call_fn`'s `call_ind`.
   // `byval` and `result_arg` already exclude the callee pointer from their indices.
@@ -2272,8 +2272,7 @@ class Gen {
       if (into) args.push_back(*into);
       const uint32_t byval = argument_object(rhs) ? 1u << args.size() : 0;
       args.push_back(value);
-      stateful(ir::Op::obj__check_receiver, {}, std::span(args).first(1));
-      return call_fn(c.function, result_type(c.info), args, 1, false, byval, into ? 2 : 0);
+      return call_fn(c.function, result_type(c.info), args, ImplicitObject::member, false, byval, into ? 2 : 0);
     }
     auto c = get<ast::MemberCall>(a);
     if (class_prvalue(c.info) && !into) unsupported(a, "of class type outside an initialization");
@@ -2285,8 +2284,7 @@ class Gen {
       if (argument_object(x)) byval |= 1u << args.size();
       args.push_back(argument(x));
     }
-    stateful(ir::Op::obj__check_receiver, {}, std::span(args).first(1));
-    return call_fn(c.function, result_type(c.info), args, 1, false, byval, into ? 2 : 0);
+    return call_fn(c.function, result_type(c.info), args, ImplicitObject::member, false, byval, into ? 2 : 0);
   }
   // A call whose result is a class object of its own, which a hidden argument names
   // ([stmt.return]); a call returning a reference to a class is a glvalue.
@@ -2306,13 +2304,15 @@ class Gen {
   ast::QualType result_type(const ast::ExprInfo& i) {
     return i.category == ast::ValueCategory::prvalue ? i.type : facts_.pointer_to(i.type);
   }
-  // A call to `f`. The first `implicit` arguments are not its parameters' (the object); the
-  // arguments after its parameters are the ones its ellipsis matches ([expr.call]/12), which
-  // sema already promoted.
+  enum class ImplicitObject { none, member, constructor_or_destructor };
+
+  // A call to `f`. An implicit object argument precedes the parameters. The arguments following
+  // the parameters match the ellipsis ([expr.call]/12), and sema has already promoted them.
   // `byval` and `result_arg` are the call op's masks (ir/ops.cppm); a class result is written
   // through the argument `result_arg` names and gives no value.
   std::optional<ValueId> call_fn(ast::EntityId f, ast::QualType result, std::span<const ValueId> args,
-                                 std::size_t implicit, bool void_ = false, uint32_t byval = 0, uint32_t result_arg = 0,
+                                 ImplicitObject object = ImplicitObject::none, bool void_ = false,
+                                 uint32_t byval = 0, uint32_t result_arg = 0,
                                  ir::Flags flags = 0) {
     // The selected arm has a normal cleanup edge. An exception would also need to destroy
     // any completed argument, older condition temporaries and, during cleanup, the result.
@@ -2323,12 +2323,16 @@ class Gen {
     bool has_value = !void_ && !result_arg && cls(result) != TypeClass::void_;
     if (has_value) results.push_back(vty(result));
     std::size_t through_ellipsis = 0;
-    std::size_t hidden = implicit + (result_arg ? 1 : 0);
+    std::size_t hidden = (object != ImplicitObject::none ? 1 : 0) + (result_arg ? 1 : 0);
     const auto named = facts_.ellipsis_after(f);
     if (named && args.size() > hidden + *named)
       through_ellipsis = args.size() - hidden - *named;
     std::uint64_t imms[] = {word(f), through_ellipsis, byval, result_arg};
     if (!facts_.is_constexpr(f)) flags |= ir::bit(ir::Flag::not_constexpr);
+    // Constant evaluation rejects a non-constexpr call itself ([expr.const]). Check the
+    // receiver only when the interpreter could enter an ordinary member's body.
+    if (object == ImplicitObject::member && !(flags & ir::bit(ir::Flag::not_constexpr)))
+      stateful(ir::Op::obj__check_receiver, {}, args.first(1));
     if (named) flags |= ir::bit(ir::Flag::variadic);
     ir::NodeId n = stateful(ir::Op::call, results, args, imms, flags);
     if (has_value) return b_.result(n, 1);
