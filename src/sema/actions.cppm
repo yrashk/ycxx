@@ -126,9 +126,11 @@ public:
   // `NodeId::none` records a diagnosed error. No answer means this context cannot replay it.
   // A required base selects the call-free parenthesized aggregate form.
   virtual std::optional<NodeId> replay_default_member(Sema&, EntityId, EntityId = EntityId::none) { return std::nullopt; }
-  virtual std::optional<NodeId> replay_function_default(Sema&, const ast::DefaultArg&, EntityId, QualType) {
+  virtual std::optional<NodeId> replay_function_default(Sema&, const ast::DefaultArg&, EntityId, QualType, u32) {
     return std::nullopt;
   }
+  // The effective specification of a written trivial destructor whose class is being completed.
+  virtual std::optional<bool> replay_destructor_exception(Sema&, EntityId, u32) { return std::nullopt; }
   // A selected specialization's exception specification ([except.spec]/13): of a member template,
   // of a member of a class template specialization, or of a function template.
   virtual std::optional<QualType> replay_member_exception(Sema&, const ast::DeclSema&, EntityId, QualType type) {
@@ -5593,7 +5595,8 @@ public:
     if (unevaluated == 0 && d->head.empty() && closure_member(*w_, fe) &&
         !require_supported_virtual_layout(fr.inner, paren_at))
       return fail;
-    auto children = call_args(fr, args, begin, paren_at, cands[*chosen].defaults);
+    auto children = call_args(fr, args, begin, paren_at, cands[*chosen].defaults,
+                              DefaultArgumentOrigin::interned, fe);
     if (!children) return fail;
     ExprInfo info = result_info(fr.inner);
     if (d->is_static) {
@@ -6288,7 +6291,7 @@ public:
     }
     const auto supplied = args.size();
     for (std::size_t i = supplied; i < fr.params.size() && i < k.defaults.size(); ++i) {
-      auto a = default_argument(k.defaults[i], end);
+      auto a = default_argument(k.defaults[i], end, DefaultArgumentOrigin::interned, k.entity, fr.params[i]);
       if (!a) return fail;
       args.push_back(*a);
     }
@@ -6434,14 +6437,17 @@ public:
     if (!operand.ok()) return fail;
     if (dependent(operand)) return dependent_node({operand}, begin, end, builtin(Builtin::bool_));
     const auto before = diag_count();
+    bool missing_destructor_exception = false;
     auto destructor_throwing = [&](QualType type, u32 at) {
       if (!types().is_class(type) || !require_complete(type, at) || !check_destructor_access(type, at)) return false;
-      const ClassRec* record = class_rec(types().class_of(type));
+      const EntityId owner = types().class_of(type);
+      const ClassRec* record = class_rec(owner);
       if (record && !record->destructor_noexcept && record->declared_destructor != EntityId::none &&
           record->destructor == EntityId::none) {
-        if (current_function == record->declared_destructor) diag(at, Diag::recursive_noexcept);
-        else diag(at, Diag::not_supported, lex::Tk::kw_noexcept);
-        return false;
+        if (missing_destructor_exception) return false;
+        const auto nonthrowing = q_->replay_destructor_exception(*this, owner, at);
+        missing_destructor_exception = !nonthrowing;
+        return nonthrowing && !*nonthrowing;
       }
       return record && !record->destructor_noexcept.value_or(record->destructor == EntityId::none);
     };
@@ -6518,7 +6524,7 @@ public:
       node.for_each_child(self);
     };
     visit(ast::Red(ins().ast, root.id, operand.begin));
-    if (has_error_since(before)) return fail;
+    if (missing_destructor_exception || has_error_since(before)) return fail;
     if (value_dependent) return dependent_node({operand}, begin, end, builtin(Builtin::bool_));
     return bool_literal(!result_throws, begin, end);
   }
@@ -10211,9 +10217,11 @@ public:
     const auto value = interned == NodeId::none ? b_->get<ast::DefaultArg>(d) : ins().ast.get<ast::DefaultArg>(interned);
     if (ast::kind_of(value.arg.id) == ast::Nodes::index_of<ast::Dependent>()) {
       if (function != EntityId::none && value.source_end > value.source_begin) {
-        if (auto replay = q_->replay_function_default(*this, value, function, parameter)) {
+        if (auto replay = q_->replay_function_default(*this, value, function, parameter, at_)) {
           if (*replay == NodeId::none) return std::nullopt;
-          const auto concrete = b_->get<ast::DefaultArg>(*replay);
+          const NodeId committed = b_->adopted_node(*replay);
+          const auto concrete = committed == NodeId::none ? b_->get<ast::DefaultArg>(*replay)
+                                                           : ins().ast.get<ast::DefaultArg>(committed);
           return Ex{*replay, at_, at_, concrete.info};
         }
       }

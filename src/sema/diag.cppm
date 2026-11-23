@@ -155,6 +155,7 @@ enum class Diag : std::uint32_t {
   default_arg_dependent [[=message{Severity::error, "default arguments of templates are not supported yet"}]],
   default_arg_template_redeclared [[=message{Severity::error, "a redeclaration of a function template cannot add default arguments"}]],
   default_arg_not_allowed [[=message{Severity::error, "a default argument is not allowed here"}]],
+  default_arg_not_yet_defined [[=message{Severity::error, "the selected default argument has not yet been defined"}]],
   conflicting_declaration [[=message{Severity::error, "conflicting declaration of '{0:n}'"}]],
   expected_namespace_name [[=message{Severity::error, "expected a namespace name"}]],
   nested_namespace_inline [[=message{Severity::error, "a nested namespace definition cannot be 'inline'"}]],
