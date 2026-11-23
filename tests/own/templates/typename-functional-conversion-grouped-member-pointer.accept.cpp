@@ -2,6 +2,6 @@
 struct C {};
 using R = int;
 void check() {
-  typename ::R ((C::*ptr)(int) const &) = nullptr;
-  typename ::R ((C::*named)(typename ::R (arg)) const &) = nullptr;
+  typename ::R ((C::*ptr)(int) const &);
+  typename ::R ((C::*named)(typename ::R (arg)) const &);
 }
