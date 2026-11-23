@@ -130,22 +130,14 @@ struct Result {
 
 class Program {
 public:
+  struct Index;
   // `template_depth` is the limit on nested instantiations ([temp.inst]/16), `-ftemplate-depth`.
-  Program(sema::World& w, const pp::Region& r, const items::Items& its, u32 template_depth = pp::Config::default_template_depth)
-      : instantiation_limit(template_depth), w_(&w), r_(&r), items_(&its), item_cells_(its.items.size()), body_cells_(its.items.size()),
-        class_cells_(its.items.size()) {
+  // `index`, when given, is `make_index` of the same world, region and items, shared (#947).
+  Program(sema::World& w, const pp::Region& r, const items::Items& its, u32 template_depth = pp::Config::default_template_depth,
+          std::shared_ptr<const Index> index = nullptr)
+      : instantiation_limit(template_depth), w_(&w), r_(&r), items_(&its), ix_(index ? std::move(index) : make_index(w, r, its)) {
     w.install_builtin_classes(classes_);
-    may_have_virtual_layouts_ = classes_.has_virtual_layouts() ||
-                                std::ranges::contains(r.tokens, lex::Tk::kw_virtual, &lex::Tok::kind);
-    for (const items::Item& it : its.items) {
-      ItemId id = w.ins.items.add<ItemId>(it.id);
-      ids_.push_back(id);
-      index_.emplace(std::to_underlying(id), static_cast<u32>(ids_.size() - 1));
-    }
-    for (u32 j = 0; j < its.items.size(); ++j)
-      for (u32 k = 0; k < its.items[j].names.size(); ++k)
-        if (!its.items[j].names[k].name.empty()) by_name_[its.items[j].names[k].name].push_back({j, k});
-    namespaces();
+    may_have_virtual_layouts_ = classes_.has_virtual_layouts() || ix_->says_virtual;
   }
 
   // ------------------------------------------------------------ namespaces ([basic.namespace])
@@ -191,6 +183,106 @@ public:
     std::optional<NameId> alias;  // an alias's name; none for a using-directive
     std::optional<std::string> target;
   };
+  struct InlineNamespace { std::string path; u32 item; };
+  // What every Program over one unit's items shares (#947): facts of the items and tokens alone,
+  // made once, so a Program that analyses one group of items costs what the group does.
+  struct Index {
+    std::vector<ItemId> ids;
+    std::unordered_map<u32, u32> index;  // by ItemId: its item
+    // By declared name: (item, index in its names), in order; a lookup visits only its own name's.
+    std::unordered_map<std::string_view, std::vector<std::pair<u32, u32>>> by_name;
+    std::vector<std::string> ns_of, eff_ns;  // by item
+    // A namespace definition's components' namespaces, as declared and for lookup, by name
+    // (`namespace a::b` declares `a` in the enclosing namespace and `b` in `a`).
+    std::map<u32, std::vector<std::pair<std::string, std::string>>> name_scopes;
+    std::vector<std::string> inner_of;  // by namespace definition item: the namespace
+    std::vector<bool> in_class;         // by item
+    std::map<std::string, std::vector<InlineNamespace>> inline_namespaces;  // by enclosing namespace
+    std::vector<Directive> directives;  // their targets unresolved
+    bool says_virtual = false;          // the unit's tokens hold `virtual`
+  };
+  // Each item's namespace, from the namespace definitions that enclose it; and the using-
+  // directives and aliases at namespace scope, whose targets are resolved when their items are
+  // analysed.
+  static std::shared_ptr<const Index> make_index(sema::World& w, const pp::Region& r, const items::Items& items) {
+    auto out = std::make_shared<Index>();
+    Index& x = *out;
+    for (const items::Item& it : items.items) {
+      ItemId id = w.ins.items.add<ItemId>(it.id);
+      x.ids.push_back(id);
+      x.index.emplace(std::to_underlying(id), static_cast<u32>(x.ids.size() - 1));
+    }
+    for (u32 j = 0; j < items.items.size(); ++j)
+      for (u32 k = 0; k < items.items[j].names.size(); ++k)
+        if (!items.items[j].names[k].name.empty()) x.by_name[items.items[j].names[k].name].push_back({j, k});
+    x.says_virtual = std::ranges::contains(r.tokens, lex::Tk::kw_virtual, &lex::Tok::kind);
+    const auto& its = items.items;
+    x.ns_of.assign(its.size(), "");
+    x.eff_ns.assign(its.size(), "");
+    x.in_class.assign(its.size(), false);
+    x.inner_of.assign(its.size(), "");
+    std::vector<std::string> inner_eff(its.size());
+    for (u32 k = 0; k < its.size(); ++k) {  // preorder: a parent comes first
+      u32 p = its[k].parent;
+      if (p != items::none) {
+        x.in_class[k] = x.in_class[p] || its[p].kind == ItemKind::class_def || its[p].kind == ItemKind::enum_def;
+        bool ns = its[p].kind == ItemKind::namespace_def;
+        x.ns_of[k] = ns ? x.inner_of[p] : x.ns_of[p];
+        x.eff_ns[k] = ns ? inner_eff[p] : x.eff_ns[p];
+      }
+      if (its[k].kind != ItemKind::namespace_def) continue;
+      // The identifiers of `namespace a::inline b`, or none for an unnamed one; `inline` before
+      // a component makes it transparent to lookup ([namespace.def]/7). Component i is declared
+      // in the namespace the ones before it name.
+      std::vector<std::pair<std::string, bool>> names;
+      bool is_inline = false;
+      for (u32 t = its[k].begin; t < its[k].brace_begin; ++t) {
+        // Past attributes, `[[…]]` and `__attribute__((…))`.
+        if (r.tokens[t].kind == lex::Tk::l_square || r.tokens[t].kind == lex::Tk::l_paren) {
+          int depth = 0;
+          for (; t < its[k].brace_begin; ++t) {
+            lex::Tk x = r.tokens[t].kind;
+            depth += (x == lex::Tk::l_square || x == lex::Tk::l_paren) - (x == lex::Tk::r_square || x == lex::Tk::r_paren);
+            if (depth == 0) break;
+          }
+          continue;
+        }
+        if (r.tokens[t].kind == lex::Tk::identifier && t + 1 < its[k].brace_begin && r.tokens[t + 1].kind == lex::Tk::l_paren)
+          continue;  // `__attribute__`, whose parentheses come next
+        if (r.tokens[t].kind == lex::Tk::kw_inline) is_inline = true;
+        if (r.tokens[t].kind == lex::Tk::identifier) {
+          names.push_back({std::string(r.name(r.tokens[t])), is_inline});
+          is_inline = false;
+        }
+      }
+      bool anonymous = names.empty();
+      if (anonymous) names.push_back({"(anonymous)", true});
+      x.inner_of[k] = x.ns_of[k];
+      inner_eff[k] = x.eff_ns[k];
+      for (const auto& [n, inl] : names) {
+        const std::string parent = x.inner_of[k];
+        if (!anonymous) x.name_scopes[k].push_back({parent, inner_eff[k]});
+        x.inner_of[k] += (x.inner_of[k].empty() ? "" : "::") + n;
+        // An unnamed namespace is transparent to ordinary lookup even without `inline`.
+        // Only explicitly inline namespaces form the set used by ADL.
+        if (anonymous ? is_inline : inl) {
+          auto& children = x.inline_namespaces[parent];
+          if (!std::ranges::contains(children, x.inner_of[k], &InlineNamespace::path))
+            children.push_back({x.inner_of[k], k});
+        }
+        if (!inl) inner_eff[k] += (inner_eff[k].empty() ? "" : "::") + n;
+      }
+    }
+    for (u32 k = 0; k < its.size(); ++k) {
+      if (x.in_class[k] || its[k].kind != ItemKind::declaration) continue;
+      lex::Tk a = r.tokens[its[k].begin].kind;
+      lex::Tk b = its[k].begin + 1 < its[k].end ? r.tokens[its[k].begin + 1].kind : lex::Tk::eof;
+      if (a == lex::Tk::kw_using && b == lex::Tk::kw_namespace) x.directives.push_back({k, x.ns_of[k], std::nullopt, std::nullopt});
+      if (a == lex::Tk::kw_namespace && b == lex::Tk::identifier)
+        x.directives.push_back({k, x.ns_of[k], w.ins.names.intern(r.name(r.tokens[its[k].begin + 1])), std::nullopt});
+    }
+      return out;
+  }
   void set_directive_target(u32 item, std::string target) {
     for (Directive& d : directives_)
       if (d.item == item) d.target = std::move(target);
@@ -775,6 +867,18 @@ public:
     return r;
   }
 
+  // The path of the namespace that is `scope` or encloses it, from the entities' records: a
+  // namespace this Program has not met yet has no entry in `ns_paths_`.
+  std::string enclosing_namespace_path(EntityId scope) const {
+    while (scope != EntityId::none && w_->entities.rec(scope).kind != sema::EntityKind::namespace_)
+      scope = w_->entities.rec(scope).scope;
+    std::string path;
+    for (; scope != EntityId::none; scope = w_->entities.rec(scope).scope) {
+      std::string name(w_->ins.names.spelling(w_->entities.rec(scope).name));
+      path = path.empty() ? name : name + "::" + path;
+    }
+    return path;
+  }
   // Analyses the items up to `point` that may declare `e`, those that declare its name, so that
   // what `declared` recorded of it there does not depend on which items other cells analysed
   // first (§A1, #947). With every earlier item analysed (`analyze_all`) it analyses nothing.
@@ -782,10 +886,21 @@ public:
     if (e == EntityId::none) return;
     u32& scanned = declared_scan_[std::to_underlying(e)];  // items before it are done
     if (scanned > point) return;
-    const std::string_view name = w_->ins.names.spelling(w_->entities.rec(e).name);
+    const sema::EntityRec& r = w_->entities.rec(e);
+    const std::string_view name = w_->ins.names.spelling(r.name);
+    // The namespace it or its class belongs to: an item there declares it, or a qualified one in a
+    // namespace enclosing it; a C function may be declared in any ([dcl.link]).
+    const std::string path = enclosing_namespace_path(r.scope);
+    const bool anywhere = r.lang == LangLinkage::c;
     for (auto [j, k] : named(name)) {
       if (j > point) break;
       if (j < scanned || std::ranges::contains(running_, j)) continue;
+      const items::Item& it = items_->items[j];
+      const bool nested = it.kind == ItemKind::namespace_def;
+      const std::string& ns = nested ? name_ns(j, k) : ns_of_[j];
+      const std::string& eff = nested ? name_eff_ns(j, k) : eff_ns_[j];
+      const bool qualified = it.qualifier_begin < it.qualifier_end;
+      if (!anywhere && ns != path && eff != path && !(qualified && encloses(ns, path))) continue;
       settle(j);
     }
     scanned = std::max(scanned, point + 1);
@@ -1217,9 +1332,12 @@ public:
     if (body_cells_[k]) r.insert(r.end(), body_cells_[k]->diags.begin(), body_cells_[k]->diags.end());
     return r;
   }
-  std::vector<engine::Diagnostic> diagnostics() const {
+  std::vector<engine::Diagnostic> diagnostics() const { return diagnostics(0, static_cast<u32>(items_->items.size())); }
+  // Those of a group (#947): its items' cells, and every instance and END check its Program made
+  // (another group making the same one reports the same diagnostics).
+  std::vector<engine::Diagnostic> diagnostics(u32 first, u32 end) const {
     std::vector<engine::Diagnostic> r;
-    for (u32 k = 0; k < items_->items.size(); ++k) {
+    for (u32 k = first; k < end; ++k) {
       if (item_cells_[k]) r.insert(r.end(), item_cells_[k]->diags.begin(), item_cells_[k]->diags.end());
       if (class_cells_[k]) r.insert(r.end(), class_cells_[k]->diags.begin(), class_cells_[k]->diags.end());
       if (body_cells_[k]) r.insert(r.end(), body_cells_[k]->diags.begin(), body_cells_[k]->diags.end());
@@ -1297,11 +1415,29 @@ private:
   const items::Items* items_;
   bool may_have_virtual_layouts_ = true;
   std::map<u32, u32> declared_scan_;  // by entity: the items `ensure_declared` has gone through
-  std::vector<ItemId> ids_;
-  std::unordered_map<u32, u32> index_;
-  std::vector<std::optional<Result<ast::ItemSema>>> item_cells_;
-  std::vector<std::optional<Result<ast::BodySema>>> body_cells_;
-  std::vector<std::optional<Result<ast::ClassDef>>> class_cells_;
+  std::shared_ptr<const Index> ix_;
+  const std::vector<ItemId>& ids_ = ix_->ids;
+  const std::unordered_map<u32, u32>& index_ = ix_->index;
+  // An item's cells, made as the analysis reaches it: a group's Program reaches few (#947).
+  template <class V>
+  class Cells {
+   public:
+    const std::optional<Result<V>>& operator[](u32 k) const {
+      auto it = cells_.find(k);
+      return it == cells_.end() ? none_ : it->second;
+    }
+    std::optional<Result<V>>& at(u32 k) { return cells_[k]; }
+    void add_items(std::set<u32>& out) const {
+      for (const auto& [k, cell] : cells_)
+        if (cell) out.insert(k);
+    }
+   private:
+    std::map<u32, std::optional<Result<V>>> cells_;
+    static inline const std::optional<Result<V>> none_{};
+  };
+  Cells<ast::ItemSema> item_cells_;
+  Cells<ast::BodySema> body_cells_;
+  Cells<ast::ClassDef> class_cells_;
   std::map<u32, u32> class_items_;     // by class entity: its defining item
   std::map<u32, EntityId> class_entities_;  // by class item: the class it defines
   // By member function or static data member entity: its declaration in this unit's class, an
@@ -1343,10 +1479,9 @@ private:
   std::map<EntityId, AliasCallPattern> alias_call_patterns_;
   std::set<std::pair<u32, u32>> dependent_type_trait_operands_;  // source item and token offset
   std::set<EntityId> failed_type_trait_instantiations_;
-  std::vector<std::string> ns_of_, eff_ns_;       // by item
-  // A namespace definition's components' namespaces, as declared and for lookup, by name
-  // (`namespace a::b` declares `a` in the enclosing namespace and `b` in `a`).
-  std::map<u32, std::vector<std::pair<std::string, std::string>>> name_scopes_;
+  const std::vector<std::string>& ns_of_ = ix_->ns_of;
+  const std::vector<std::string>& eff_ns_ = ix_->eff_ns;
+  const std::map<u32, std::vector<std::pair<std::string, std::string>>>& name_scopes_ = ix_->name_scopes;
   const std::string& name_ns(u32 item, u32 name) const {
     auto it = name_scopes_.find(item);
     return it != name_scopes_.end() && name < it->second.size() ? it->second[name].first : ns_of_[item];
@@ -1355,88 +1490,16 @@ private:
     auto it = name_scopes_.find(item);
     return it != name_scopes_.end() && name < it->second.size() ? it->second[name].second : eff_ns_[item];
   }
-  std::vector<std::string> inner_of_;             // by namespace definition item: the namespace
-  std::vector<bool> in_class_;                    // by item
-  // By declared name: (item, index in its names), in order; a lookup visits only its own name's.
-  std::unordered_map<std::string_view, std::vector<std::pair<u32, u32>>> by_name_;
+  const std::vector<std::string>& inner_of_ = ix_->inner_of;
+  const std::vector<bool>& in_class_ = ix_->in_class;
+  const std::unordered_map<std::string_view, std::vector<std::pair<u32, u32>>>& by_name_ = ix_->by_name;
   std::map<std::string, EntityId> ns_entities_;
   std::map<u32, std::string> ns_paths_;           // by namespace entity
-  struct InlineNamespace { std::string path; u32 item; };
-  std::map<std::string, std::vector<InlineNamespace>> inline_namespaces_;  // by enclosing namespace
+  const std::map<std::string, std::vector<InlineNamespace>>& inline_namespaces_ = ix_->inline_namespaces;
   // The target namespace of a qualified C-linkage function, by (item, declarator ordinal).
   std::map<std::pair<u32, u32>, std::string> qualified_c_functions_;
-  std::vector<Directive> directives_;
+  std::vector<Directive> directives_ = ix_->directives;  // this Program resolves their targets
 
-  // Each item's namespace, from the namespace definitions that enclose it; and the using-
-  // directives and aliases at namespace scope, whose targets are resolved when their items are
-  // analysed.
-  void namespaces() {
-    const auto& its = items_->items;
-    ns_of_.assign(its.size(), "");
-    eff_ns_.assign(its.size(), "");
-    in_class_.assign(its.size(), false);
-    inner_of_.assign(its.size(), "");
-    std::vector<std::string> inner_eff(its.size());
-    for (u32 k = 0; k < its.size(); ++k) {  // preorder: a parent comes first
-      u32 p = its[k].parent;
-      if (p != items::none) {
-        in_class_[k] = in_class_[p] || its[p].kind == ItemKind::class_def || its[p].kind == ItemKind::enum_def;
-        bool ns = its[p].kind == ItemKind::namespace_def;
-        ns_of_[k] = ns ? inner_of_[p] : ns_of_[p];
-        eff_ns_[k] = ns ? inner_eff[p] : eff_ns_[p];
-      }
-      if (its[k].kind != ItemKind::namespace_def) continue;
-      // The identifiers of `namespace a::inline b`, or none for an unnamed one; `inline` before
-      // a component makes it transparent to lookup ([namespace.def]/7). Component i is declared
-      // in the namespace the ones before it name.
-      std::vector<std::pair<std::string, bool>> names;
-      bool is_inline = false;
-      for (u32 t = its[k].begin; t < its[k].brace_begin; ++t) {
-        // Past attributes, `[[…]]` and `__attribute__((…))`.
-        if (r_->tokens[t].kind == lex::Tk::l_square || r_->tokens[t].kind == lex::Tk::l_paren) {
-          int depth = 0;
-          for (; t < its[k].brace_begin; ++t) {
-            lex::Tk x = r_->tokens[t].kind;
-            depth += (x == lex::Tk::l_square || x == lex::Tk::l_paren) - (x == lex::Tk::r_square || x == lex::Tk::r_paren);
-            if (depth == 0) break;
-          }
-          continue;
-        }
-        if (r_->tokens[t].kind == lex::Tk::identifier && t + 1 < its[k].brace_begin && r_->tokens[t + 1].kind == lex::Tk::l_paren)
-          continue;  // `__attribute__`, whose parentheses come next
-        if (r_->tokens[t].kind == lex::Tk::kw_inline) is_inline = true;
-        if (r_->tokens[t].kind == lex::Tk::identifier) {
-          names.push_back({std::string(r_->name(r_->tokens[t])), is_inline});
-          is_inline = false;
-        }
-      }
-      bool anonymous = names.empty();
-      if (anonymous) names.push_back({"(anonymous)", true});
-      inner_of_[k] = ns_of_[k];
-      inner_eff[k] = eff_ns_[k];
-      for (const auto& [n, inl] : names) {
-        const std::string parent = inner_of_[k];
-        if (!anonymous) name_scopes_[k].push_back({parent, inner_eff[k]});
-        inner_of_[k] += (inner_of_[k].empty() ? "" : "::") + n;
-        // An unnamed namespace is transparent to ordinary lookup even without `inline`.
-        // Only explicitly inline namespaces form the set used by ADL.
-        if (anonymous ? is_inline : inl) {
-          auto& children = inline_namespaces_[parent];
-          if (!std::ranges::contains(children, inner_of_[k], &InlineNamespace::path))
-            children.push_back({inner_of_[k], k});
-        }
-        if (!inl) inner_eff[k] += (inner_eff[k].empty() ? "" : "::") + n;
-      }
-    }
-    for (u32 k = 0; k < its.size(); ++k) {
-      if (in_class_[k] || its[k].kind != ItemKind::declaration) continue;
-      lex::Tk a = r_->tokens[its[k].begin].kind;
-      lex::Tk b = its[k].begin + 1 < its[k].end ? r_->tokens[its[k].begin + 1].kind : lex::Tk::eof;
-      if (a == lex::Tk::kw_using && b == lex::Tk::kw_namespace) directives_.push_back({k, ns_of_[k], std::nullopt, std::nullopt});
-      if (a == lex::Tk::kw_namespace && b == lex::Tk::identifier)
-        directives_.push_back({k, ns_of_[k], w_->ins.names.intern(r_->name(r_->tokens[its[k].begin + 1])), std::nullopt});
-    }
-  }
   // A deque: analysing a synthesized body can instantiate a class, which synthesizes more members
   // while the body's record is referred to.
   std::deque<Synthesized> synth_;
@@ -7175,7 +7238,7 @@ const Result<ast::ItemSema>& Program::item_sema(u32 item) {
     // A cycle is an internal error (§A2).
     contract_assert(std::ranges::find(running_, item) == running_.end());
     running_.push_back(item);
-    item_cells_[item] = ItemAnalysis(*this, item).run();
+    item_cells_.at(item) = ItemAnalysis(*this, item).run();
     running_.pop_back();
   }
   return *item_cells_[item];
@@ -7959,7 +8022,7 @@ const Result<ast::ClassDef>& Program::class_def(u32 item) {
   def.nested = b.seq(std::span<const EntityId>{});
   out.value = b.commit(def);
   running_.pop_back();
-  class_cells_[item] = std::move(out);
+  class_cells_.at(item) = std::move(out);
   return *class_cells_[item];
 }
 
@@ -9522,7 +9585,7 @@ const ast::BodySema& Program::synthesized_body(std::size_t i) {
 }
 
 const Result<ast::BodySema>& Program::analyze_body(u32 item) {
-  if (!body_cells_[item]) body_cells_[item] = BodyAnalysis(*this, item).run();
+  if (!body_cells_[item]) body_cells_.at(item) = BodyAnalysis(*this, item).run();
   return *body_cells_[item];
 }
 
@@ -10015,7 +10078,12 @@ void Program::instantiate_all() {
       required_members(closure.invoker_body, at);
     }
   };
-  for (u32 k = 0; k < items_->items.size(); ++k) {
+  // The items with cells, in item order: a group's Program has few (#947).
+  std::set<u32> analysed;
+  item_cells_.add_items(analysed);
+  class_cells_.add_items(analysed);
+  body_cells_.add_items(analysed);
+  for (u32 k : analysed) {
     if (item_cells_[k]) {
       work.insert(work.end(), item_cells_[k]->demands.begin(), item_cells_[k]->demands.end());
       // A namespace-scope variable's initializer, and its destructor ([basic.start.term]), are code
