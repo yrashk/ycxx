@@ -137,8 +137,7 @@ with tempfile.TemporaryDirectory() as directory:
         }
         int main() { return run(41) != 42; }
     """)
-    # PARITY: by design: cross-link Mach-O everywhere and run it on arm64 macOS.
-    # Execute the ELF contract and budget tests on the Linux x86-64 target.
+    # PARITY: by design: cross-link Mach-O everywhere and run each binary on its host ISA.
     darwin = [*base, "--no-daemon", "--target=arm64-apple-darwin"]
     linux = [*base, "--no-daemon", "--target=x86_64-linux-gnu", "-nostdlib"]
     mac_host = sys.platform == "darwin" and platform.machine() == "arm64"
@@ -190,7 +189,8 @@ with tempfile.TemporaryDirectory() as directory:
             finally:
                 subprocess.run([compiler, "ctl", "shutdown"], cwd=root, env=link_env, capture_output=True, timeout=10)
 
-    if linux_host:
+    if linux_host or mac_host:
+        native = darwin if mac_host else linux
         program = root / "budget"
         mediated = write("mediated.cpp", """\
             #include "grades.hpp"
@@ -211,11 +211,12 @@ with tempfile.TemporaryDirectory() as directory:
               return 0;
             }
         """)
-        invoke([*linux, "-o", program, mediated])
+        invoke([*native, "-o", program, mediated])
         subprocess.run([program], check=True, timeout=10)
         resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
         exhausted = subprocess.run([program, "exhausted"], timeout=10)
-        assert exhausted.returncode == -signal.SIGILL, exhausted
+        trap_signals = (-signal.SIGILL, -signal.SIGTRAP) if mac_host else (-signal.SIGILL,)
+        assert exhausted.returncode in trap_signals, exhausted
         assignment = write("budget_assignment.cpp", """\
             #include "grades.hpp"
             #include <ycxx/effects/runtime.hpp>
