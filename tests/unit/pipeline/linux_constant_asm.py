@@ -9,6 +9,23 @@ import tempfile
 from linux_compile import run
 
 
+ACCESSOR_SOURCE = '''\
+#include "symbol.hpp"
+struct accessor_directive {
+  constexpr const char* data() const { return accessor_text(); }
+  constexpr unsigned long size() const { return sizeof(".hidden accessor_first\\n") - 1; }
+};
+asm((accessor_directive{}));
+extern "C" {
+int accessor_first = 17;
+int accessor_other = 19;
+int accessor_neighbor = 23;
+}
+'''
+ACCESSOR_HEADER = 'constexpr const char* accessor_text() {{ return ".hidden {target}\\n"; }}\n'
+WHOLE_UNIT = 'struct Whole { virtual void f(); };\n'
+
+
 def symbols(readelf, scope, env, neighbor_hidden):
     table = run([readelf, '-Ws', 'directive.o'], scope, env)
     expected = {
@@ -31,6 +48,19 @@ def symbols(readelf, scope, env, neighbor_hidden):
     references = [row for line in relocations.splitlines()
                   if len(row := line.split()) >= 5 and row[2].startswith('R_X86_64_') and row[4] == 'imported_value']
     assert len(references) == 1 and int(references[0][1], 16) >> 32 == int(entries['imported_value'][0][:-1]), relocations
+
+
+def accessor_symbols(readelf, scope, env, target):
+    table = run([readelf, '-Ws', 'directive.o'], scope, env)
+    rows = [row for line in table.splitlines() if len(row := line.split()) >= 8]
+    assert {row[7] for row in rows if row[5] == 'HIDDEN'} == {target}, table
+    attributes = {}
+    for name in ('accessor_first', 'accessor_other', 'accessor_neighbor'):
+        row, = (row for row in rows if row[7] == name)
+        assert row[4] == 'GLOBAL' and row[6].isdecimal(), row
+        assert row[5] == ('HIDDEN' if name == target else 'DEFAULT'), row
+        attributes[name] = row[2:5]
+    return attributes
 
 
 def replay(options, readelf, scope, env, cold, resident):
@@ -58,6 +88,29 @@ def replay(options, readelf, scope, env, cold, resident):
             initial_pid = pid()
         snapshots.append(fresh)
     assert snapshots[0] == snapshots[2] and snapshots[0] != snapshots[1]
+    assert pid() == initial_pid
+
+    # Only the header helper's body changes while each asm item stays byte-identical.
+    source = scope / 'directive.cpp'
+    first = 'accessor_first'
+    attributes = []
+    for trailer in ('', WHOLE_UNIT):
+        source.write_text(ACCESSOR_SOURCE + trailer)
+        snapshots = []
+        for target in (first, 'accessor_other', first):
+            header.write_text(ACCESSOR_HEADER.format(target=target))
+            fresh = build(cold)
+            assert build(resident) == fresh, (trailer, target)
+            snapshots.append(fresh)
+            attributes.append(accessor_symbols(readelf, scope, env, target))
+        assert snapshots[0] == snapshots[2] and snapshots[0] != snapshots[1], trailer
+        if not trailer:
+            grouped_object = snapshots[0]
+    assert all(entry == attributes[0] for entry in attributes), attributes
+
+    source.write_text(ACCESSOR_SOURCE)
+    assert build(cold) == build(resident) == grouped_object
+    assert accessor_symbols(readelf, scope, env, first) == attributes[0]
     assert pid() == initial_pid
 
 
