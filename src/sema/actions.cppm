@@ -157,6 +157,9 @@ public:
   // Inside the enumerator list of an enumeration this unit is defining: its record so far, which
   // is published only after the list (#156).
   virtual const EnumRec* defining_enum(EntityId) { return nullptr; }
+  // A scoped member enum's declaration supplies its fixed type. Looking up its enumerators
+  // requires the definition ([temp.inst]). False means its instantiation was diagnosed.
+  virtual bool require_enum_definition(EntityId) { return true; }
   // Scopedness is fixed even when the enum's enumerator list is still open.
   virtual std::optional<bool> defining_enum_is_scoped(EntityId e) {
     if (const EnumRec* record = defining_enum(e)) return record->scoped;
@@ -1091,7 +1094,8 @@ public:
       diag(at_, Diag::not_a_type, no_name());
       return;
     }
-    using_enums_.push_back({scopes_.size() - 1, types().enum_of(t)});
+    const EntityId enumeration = types().enum_of(t);
+    if (q_->require_enum_definition(enumeration)) using_enums_.push_back({scopes_.size() - 1, enumeration});
   }
 
   // ------------------------------------------------------------ concepts ([temp.concept], [temp.constr])
@@ -5651,6 +5655,8 @@ public:
         if (d.name == name && d.sema.kind == ast::DeclKind::enumerator && d.sema.entity != EntityId::none &&
             w_->entities.rec(d.sema.entity).scope == e)
           return enumerator_in_list(d, begin, end);
+    } else if (!q_->require_enum_definition(e)) {
+      return Ex{NodeId::none, begin, end};
     }
     if (const EnumRec* r = enum_rec(e))
       for (const EnumeratorRec& x : r->enumerators)

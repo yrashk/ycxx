@@ -1478,6 +1478,7 @@ public:
   const ast::ItemSema& class_member_sema(u32 m, EntityId spec) {
     return class_member_cells_.at(std::pair(m, std::to_underlying(spec))).value;
   }
+  bool require_enum_definition(EntityId e, u32 point);
 
   // The end of the translation unit (§B6.2): every specialization whose definition a cell
   // requires is instantiated, in order of first demand, and so are those its instance requires.
@@ -1717,6 +1718,12 @@ private:
   std::set<u32> classes_instantiating_;
   std::set<u32> classes_instantiated_;  // by specialization: instantiated in this unit
   std::vector<std::pair<u32, u32>> class_member_order_;  // the cells above, in order of analysis
+  struct ScopedEnumDefinition {
+    u32 item;
+    enum class State : u8 { pending, running, complete, failed } state = State::pending;
+  };
+  std::map<EntityId, ScopedEnumDefinition> scoped_enum_definitions_;
+  u32 scoped_enum_depth_ = 0;
   std::map<u32, Dmi> dmis_;                       // by field entity
   std::set<EntityId> replaying_default_members_;
   std::set<std::tuple<EntityId, ItemId, u32>> replaying_function_defaults_;
@@ -1983,6 +1990,7 @@ public:
     return p_->publish_class(c, std::move(r), item_, context);
   }
   const sema::EnumRec* defining_enum(EntityId e) override { return p_->defining_enum(e); }
+  bool require_enum_definition(EntityId e) override { return p_->require_enum_definition(e, point()); }
   std::set<EntityId> uncertain_object_layouts() override { return p_->uncertain_object_layouts(); }
   bool peer_pure_dispatch(EntityId cls) override { return p_->peer_pure_dispatch(cls); }
   void use_typed_dynamic_cast() override { p_->has_typed_dynamic_cast_ = true; }
@@ -2076,6 +2084,9 @@ public:
   bool is_constexpr(EntityId f) override { return p_->is_constexpr(f, point()); }
   bool is_immediate_function(EntityId f) override { return p_->is_immediate_function(f, point()); }
   bool is_complete(EntityId c) override {
+    // An enumerator initializer is read at its original class-member declaration, where the
+    // enclosing class is incomplete ([class.mem.general]).
+    if (replaying_scoped_enum != EntityId::none && c == instantiating) return false;
     return at_point ? p_->is_complete(c, *at_point, true, true) : is_complete_at_item(c);
   }
   bool may_have_virtual_layouts() override { return p_->may_have_virtual_layouts(); }
@@ -2213,6 +2224,7 @@ public:
   // at its point of instantiation ([temp.point]); lookup stays at the item.
   std::optional<u32> at_point;
   EntityId instantiating = EntityId::none;  // the class specialization whose member this is
+  EntityId replaying_scoped_enum = EntityId::none;
   // In a re-analysed operand: the offsets of calls that were dependent where it appears,
   // which argument-dependent lookup at the point of use completes ([temp.dep.candidate]).
   std::vector<u32> instantiation_calls;
@@ -2790,6 +2802,7 @@ public:
   bool is_complete_at_source(EntityId c) override { return at_.is_complete_at_source(c); }
   std::optional<bool> defining_enum_is_scoped(EntityId e) override { return at_.defining_enum_is_scoped(e); }
   std::optional<bool> defining_enum_is_fixed(EntityId e) override { return at_.defining_enum_is_fixed(e); }
+  bool require_enum_definition(EntityId e) override { return p_->require_enum_definition(e, p_->end()); }
   // A type trait whose operands were dependent where the template defines it is answered at the
   // point of instantiation, the end ([temp.point]); a concrete one keeps its definition's answer.
   std::optional<bool> type_trait_at_demand(EntityId c, engine::Loc loc) override {
@@ -2932,6 +2945,11 @@ public:
     s_.template_args = var_->args;
   }
   bool type_trait_failure() const { return q_.observed_type_trait_failure; }
+
+  Result<ast::ItemSema> replay_scoped_enum(EntityId e) {
+    q_.replaying_scoped_enum = e;
+    return run();
+  }
 
   Result<ast::ItemSema> run() {
     try {
@@ -4559,6 +4577,7 @@ private:
     s_.current_class = cls;
     u32 at = ps_.pos();
     const bool definition = it_->kind == ItemKind::enum_def;
+    const EntityId replay = q_.replaying_scoped_enum;
     const u32 after_attributes = definition ? after_definition_attributes() : it_->end;
     if (definition && !supported_definition_attributes(after_attributes)) return bad();
     const bool td = cls == EntityId::none && ps_.accept(Tk::kw_typedef);  // `typedef enum … { … } E;`
@@ -4591,7 +4610,11 @@ private:
       }
     }
     std::optional<QualType> fixed;
-    if (ps_.accept(Tk::colon)) {
+    if (replay != EntityId::none) {
+      // The class declaration already supplied the fixed underlying type.
+      fixed = p_->classes_.find_enum(replay)->underlying;
+      ps_.seek(it_->brace_begin);
+    } else if (ps_.accept(Tk::colon)) {
       // [dcl.enum]/2: a fixed underlying type, an integral type.
       const auto saved = s_.nested_enum_members_begin;
       if (cls != EntityId::none) s_.nested_enum_members_begin = s_.own.size();
@@ -4618,8 +4641,10 @@ private:
       ast::DeclSema sem = class_decl(e, definition);
       sem.kind = ast::DeclKind::enum_;
       sem.type = types.enum_type(e);
-      decls_.push_back(sem);
-      p_->declared(sem, k_);
+      if (replay == EntityId::none) {
+        decls_.push_back(sem);
+        p_->declared(sem, k_);
+      }
       if (!unnamed) s_.own.push_back({name, sem});
     };
     if (!unnamed) {
@@ -4636,7 +4661,8 @@ private:
           return bad();
         }
       }
-      e = s_.world().entities.entity({.kind = sema::EntityKind::enum_, .name = name, .scope = scope});
+      e = replay == EntityId::none
+              ? s_.world().entities.entity({.kind = sema::EntityKind::enum_, .name = name, .scope = scope}) : replay;
       QualType t = types.enum_type(e);
       if (cls == EntityId::none && alias_clash(name, t)) {
         s_.diag(name_at, Diag::conflicting_declaration, name);
@@ -4653,6 +4679,21 @@ private:
       p_->classes_.publish_enum(e, std::move(er));
       return;
     }
+    if (scoped && inst_ && replay == EntityId::none) {
+      // [temp.inst]/3–4: class instantiation needs the declaration and fixed type. The list is
+      // instantiated when referenced in a context that requires the enumeration's definition.
+      er.defined = false;
+      p_->classes_.publish_enum(e, std::move(er));
+      p_->scoped_enum_definitions_.try_emplace(e, Program::ScopedEnumDefinition{k_});
+      // Keep declaration ordinals for any fields written after the closing brace.
+      for (auto declaration : s_.ins().seqs.elements(p_->item_sema(k_).value.decls)) {
+        if (declaration.kind != ast::DeclKind::enumerator) continue;
+        declaration.entity = EntityId::none;
+        declaration.type = types.enum_type(e);
+        decls_.push_back(declaration);
+      }
+      return enum_declarators(cls, types.enum_type(e), at, td);
+    }
     // The enumerator list sees the definition's record as the list grows (#156).
     std::optional<Program::DefiningEnum> defining;
     if (unnamed) s_.defining_unnamed_enum_scope = scope;
@@ -4668,9 +4709,8 @@ private:
     };
     // The enumerators: each the previous one's value plus one, or its initializer's, a converted
     // constant expression of the underlying type when it is fixed ([dcl.enum]/5).
-    // A named unscoped member enum's definition is replayed when its class is instantiated.
-    // A scoped member enum's definition would instead need to wait for its own use ([temp.inst]).
-    const bool pattern = !unnamed && !scoped && cls != EntityId::none && !inst_ &&
+    // The template checks the list with dependent values; replay evaluates them ([temp.inst]).
+    const bool pattern = !unnamed && cls != EntityId::none && !inst_ &&
                          types.is_dependent(types.class_type(cls));
     struct EnumValue {
       std::int64_t bits = 0;
@@ -4830,6 +4870,7 @@ private:
     } else {
       defining.reset();
     }
+    if (replay != EntityId::none && s_.has_error_since(0)) return;
     // Past the closing brace an enumerator has the enumeration's type ([dcl.enum]/5), in the
     // declarators that follow too.
     const QualType t = types.enum_type(e);
@@ -4846,11 +4887,16 @@ private:
       own.sema.entity = xr.entity;
       own.sema.type = t;
       own.enum_initializer = ConstId::none;
-      decls_.push_back(own.sema);
+      if (replay == EntityId::none) decls_.push_back(own.sema);
     }
     p_->classes_.publish_enum(e, std::move(er));
+    if (replay != EntityId::none) return;
     // The scoped names were visible while parsing the enumerator list only.
     if (scoped) s_.own.resize(first_enumerator);
+    enum_declarators(cls, t, at, td);
+  }
+
+  void enum_declarators(EntityId cls, QualType t, u32 at, bool td) {
     ps_.seek(it_->brace_end);
     ps_.skip_attributes(nullptr, 0, nullptr, false, Parser::attr_gnu);
     if (ps_.accept(Tk::semi)) return;
@@ -9097,6 +9143,30 @@ void Program::member_value(EntityId e) {
     for (engine::Diagnostic& d : r.diags)
       if (!std::ranges::contains(end_diags_, d)) end_diags_.push_back(std::move(d));
   lazy_members_.at(std::to_underlying(e)).state = LazyMember::State::done;
+}
+
+bool Program::require_enum_definition(EntityId e, u32 point) {
+  const auto found = scoped_enum_definitions_.find(e);
+  if (found == scoped_enum_definitions_.end()) return true;
+  auto& [item, state] = found->second;
+  using State = ScopedEnumDefinition::State;
+  if (state != State::pending) return state != State::failed;
+  const auto& pattern = item_sema(item);
+  if (!valid_member_declarations(pattern.diags) || too_deep(scoped_enum_depth_, item)) {
+    state = State::failed;
+    return false;
+  }
+  const EntityId owner = w_->entities.rec(e).scope;
+  state = State::running;
+  ++scoped_enum_depth_;
+  const auto& args = class_args_.at(std::to_underlying(owner));
+  auto result = ItemAnalysis(*this, item, ClassInstantiation{owner, args, point}).replay_scoped_enum(e);
+  --scoped_enum_depth_;
+  state = classes_.find_enum(e)->defined ? State::complete : State::failed;
+  for (auto& diag : result.diags)
+    if (!std::ranges::contains(pattern.diags, diag) && !std::ranges::contains(end_diags_, diag))
+      end_diags_.push_back(std::move(diag));
+  return state == State::complete;
 }
 
 // ---------------------------------------------------------------- analyze_body
