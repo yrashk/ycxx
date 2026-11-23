@@ -25,6 +25,7 @@ struct GroupMessage {
   bool error = true;
   std::string text;
   engine::Loc at;
+  bool depth_limit = false;  // [temp.inst]/16's limit, which a unit reports once
 };
 struct GroupResult {
   std::vector<GroupMessage> messages;
@@ -33,6 +34,7 @@ struct GroupResult {
   std::vector<ClassShape> classes;
   std::vector<EnumShape> enums;
   std::set<EntityId> uncertain_layouts;  // includes entities with no shape in this group
+  bool depth_at_end = false;  // its depth-limit message, if any, came from its END worklist
   std::optional<UnitPart> part;
 };
 // What a group's analysis read of its unit, checked before the analysis is reused (#947): its
@@ -311,7 +313,7 @@ engine::query_task<SemaResult> TuSema::run(engine::Ctx& cx, TuId tu) {
       for (const engine::DiagArg& a : d.args) args.push_back(a.raw);
       r.messages.push_back({sema::message_of(*kind).severity == lex::Severity::error,
                             sema::render(*kind, args, [&](char how, std::uint64_t raw) { return program.spell(how, raw); }),
-                            d.at});
+                            d.at, *kind == sema::Diag::instantiation_depth});
     }
     // The unit's own records of its classes and enumerations (#115).
     const sema::Classes& classes = program.classes();
@@ -389,11 +391,13 @@ engine::query_task<SemaResult> TuSema::run(engine::Ctx& cx, TuId tu) {
   };
   // Puts a group's result into the unit's, in group order: each entity and shape once, and each
   // message an earlier group did not say (an instance two groups made); a group's own repeated
-  // messages stay, as the whole unit's Program says them.
+  // messages stay, as the whole unit's Program says them. The instantiation-depth limit is said
+  // only by the group `keep_depth` names (#993).
   std::set<std::tuple<std::uint32_t, std::uint32_t, bool, std::string>> said;
-  auto merge = [&](const GroupResult& r) {
+  auto merge = [&](const GroupResult& r, bool keep_depth = true) {
     std::set<std::tuple<std::uint32_t, std::uint32_t, bool, std::string>> here;
     for (const GroupMessage& m : r.messages) {
+      if (m.depth_limit && !keep_depth) continue;
       std::tuple key{m.at.item, m.at.offset, m.error, m.text};
       if (said.contains(key)) continue;
       here.insert(std::move(key));
@@ -471,6 +475,7 @@ engine::query_task<SemaResult> TuSema::run(engine::Ctx& cx, TuId tu) {
     program.analyze_group(first, end);
     auto uncertain = program.uncertain_object_layouts(/*include_lifecycle_signatures=*/true);
     GroupResult r = collect(program, first, end, uncertain);
+    r.depth_at_end = program.depth_reported_at_end();
     if (std::ranges::none_of(r.messages, &GroupMessage::error)) {
       r.part.emplace();
       r.part->tu = unit_of(program, world, program.items(), src.name, uncertain, first, end, &*r.part);
@@ -492,10 +497,16 @@ engine::query_task<SemaResult> TuSema::run(engine::Ctx& cx, TuId tu) {
     for (auto e = cache->entries.lower_bound({unit_key, Fp128{}}); e != cache->entries.end() && e->first.first == unit_key;)
       e = present.contains(e->first.second) ? std::next(e) : cache->entries.erase(e);
   }
+  // The whole unit's Program reports the depth limit once: where it is first reached, analysing
+  // the items of every group before any END worklist. So the first group that reached it while
+  // analysing its items reports it, else the first that reached it in its END worklist (#993).
+  auto reports_depth = [](const GroupResult& r) { return std::ranges::any_of(r.messages, &GroupMessage::depth_limit); };
+  auto depth_group = std::ranges::find_if(results, [&](const GroupResult& r) { return reports_depth(r) && !r.depth_at_end; });
+  if (depth_group == results.end()) depth_group = std::ranges::find_if(results, reports_depth);
   std::set<EntityId> uncertain_layouts;
-  for (GroupResult& r : results) {
-    merge(r);
-    uncertain_layouts.merge(r.uncertain_layouts);
+  for (auto r = results.begin(); r != results.end(); ++r) {
+    merge(*r, r == depth_group);
+    uncertain_layouts.merge(r->uncertain_layouts);
   }
   if (!uncertain_layouts.empty())
     for (ClassShape& shape : out.shapes.classes)
