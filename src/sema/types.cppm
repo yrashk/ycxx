@@ -766,6 +766,7 @@ struct ClassRec {
   bool virtual_destructor = false;
   std::optional<bool> destructor_noexcept;  // the effective specification, when known
   bool destructor_usable = false;          // its declaration and subobject destruction are known to be usable
+  bool destructor_dependent = false;       // a closure pattern's captures leave usability unresolved
   bool layout_requires_virtual_support = false;
   PeerVirtualLayout peer_virtual_layout = PeerVirtualLayout::none;
   // The sole abstract primary base of a class admitted for plain automatic default initialization.

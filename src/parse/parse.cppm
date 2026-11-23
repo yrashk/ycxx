@@ -9642,6 +9642,7 @@ bool Program::special_members(u32 item, EntityId cls, sema::ClassRec& rec,
   const bool defaulted_destructor = !rec.virtual_destructor && declaration != destructor_declarations_.end() &&
                                     declaration->second.defaulted;
   std::optional<bool> implicit_noexcept = true;
+  bool dependent_destructor = false;
   rec.destructor_usable = !user_dtor || !user_dtor->is_deleted;
   // Prove trivial destruction from the completed class before using the no-cleanup path.
   if (defaulted_destructor && (rec.union_ || rec.polymorphic || !rec.bases.empty() ||
@@ -9658,18 +9659,23 @@ bool Program::special_members(u32 item, EntityId cls, sema::ClassRec& rec,
   for (std::size_t i = 0; i < subobjects.size(); ++i) {
     sema::TypeRec type = types.rec(subobjects[i]);
     while (type.kind == sema::TypeKind::array) type = types.rec(type.inner);
-    if (type.kind != sema::TypeKind::class_) {
-      if (type.kind != sema::TypeKind::pointer && type.kind != sema::TypeKind::reference &&
-          type.kind != sema::TypeKind::member_pointer && types.is_dependent(subobjects[i])) {
-        if (implicit_noexcept != false) implicit_noexcept.reset();
-        if (!manual_union_destruction) rec.destructor_usable = false;
-      }
+    if ((type.kind != sema::TypeKind::class_ || rec.closure) &&
+        type.kind != sema::TypeKind::pointer && type.kind != sema::TypeKind::reference &&
+        type.kind != sema::TypeKind::member_pointer && types.is_dependent(subobjects[i])) {
+      if (implicit_noexcept != false) implicit_noexcept.reset();
+      if (rec.closure) dependent_destructor = true;
+      else if (!manual_union_destruction) rec.destructor_usable = false;
       continue;
     }
+    if (type.kind != sema::TypeKind::class_) continue;
     const auto* record = classes_.find(type.entity);
     if (record && record->destructor_noexcept == false) implicit_noexcept = false;
     else if ((!record || !record->destructor_noexcept) && implicit_noexcept != false) implicit_noexcept.reset();
     if (manual_union_destruction) continue;  // no implicit variant destructor calls
+    if (rec.closure && record && record->destructor_dependent) {
+      dependent_destructor = true;
+      continue;
+    }
     if (!record || !record->destructor_usable) {
       rec.destructor_usable = false;
       continue;
@@ -9683,6 +9689,9 @@ bool Program::special_members(u32 item, EntityId cls, sema::ClassRec& rec,
                             (user_dtor && std::ranges::contains(record->friends, user_dtor->entity));
     rec.destructor_usable &= accessible;
   }
+  // A concrete capture can make destruction unusable even with other captures still dependent.
+  rec.destructor_dependent = dependent_destructor && rec.destructor_usable;
+  rec.destructor_usable &= !dependent_destructor;
   // [class.mem.general]: the parenthesized specification is evaluated in the complete class.
   if (!defaulted_destructor || !special_member_exception_tokens_.contains(user_dtor->entity))
     rec.destructor_noexcept = declaration != destructor_declarations_.end() && declaration->second.nonthrowing

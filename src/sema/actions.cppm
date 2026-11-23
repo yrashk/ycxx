@@ -6347,6 +6347,7 @@ public:
     const EntityId owner = types().class_of(type);
     const ClassRec* record = class_rec(owner);
     if (!record) return true;
+    if (record->destructor_dependent && in_template_definition()) return true;
     if (!record->destructor_usable) {
       diag(at, unusable, type);
       return false;
