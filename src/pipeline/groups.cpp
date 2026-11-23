@@ -169,8 +169,8 @@ class GroupFacts {
       if (e > b) h.uint(b - it.begin).uint(e - it.begin);
       else h.uint(~0u);
     };
-    // A namespace, linkage or export block is its head, `namespace N {`: its members are items of
-    // their own, and one added or removed changes no other's reading of the block.
+    // A namespace, linkage or export block is its head, `namespace N {`, and how it ends: its
+    // members are items of their own, and one added or removed changes no other's reading of it.
     const bool block = it.kind == items::ItemKind::namespace_def || it.kind == items::ItemKind::linkage_block ||
                        it.kind == items::ItemKind::export_block;
     h.uint(std::to_underlying(it.kind)).uint(block ? it.brace_begin - it.begin : it.end - it.begin);
@@ -206,6 +206,9 @@ class GroupFacts {
     std::uint32_t i = it.begin;
     if (block) {
       for (; i < it.brace_begin; ++i) token(h, i);
+      // Whether it is closed, which its analysis reports.
+      if (it.brace_end > it.brace_begin) h.uint(std::to_underlying(r_->tokens[it.brace_end - 1].kind));
+      if (it.end > it.begin) h.uint(std::to_underlying(r_->tokens[it.end - 1].kind));
     } else {
       for (std::uint32_t m : it.members) {
         for (; i < items_->items[m].begin; ++i) token(h, i);
