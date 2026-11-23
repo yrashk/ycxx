@@ -118,6 +118,10 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_
   add_test(NAME unit.linux_executable
     COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/linux_executable.py
             $<TARGET_FILE:ycxxc> ${CMAKE_READELF})
+  # PARITY: by design: checks ELF visibility and runs the Linux x86-64 link.
+  add_test(NAME unit.linux_namespace_visibility
+    COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/linux_namespace_visibility.py
+            $<TARGET_FILE:ycxxc> ${CMAKE_READELF} ${PROJECT_SOURCE_DIR}/deps/libycxx)
   add_test(NAME unit.linux_cleanup_free_unwind
     COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/linux_cleanup_free_unwind.py
             $<TARGET_FILE:ycxxc> ${CMAKE_CXX_COMPILER} ${CMAKE_READELF} ${CMAKE_OBJDUMP})

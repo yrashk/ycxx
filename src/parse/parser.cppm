@@ -36,7 +36,7 @@ using ast::NameId;
 using ast::NodeId;
 
 struct DeclAttributes {
-  bool hidden_visibility = false;
+  ast::GnuVisibility visibility = ast::GnuVisibility::none;
   bool weak = false;
 };
 
@@ -1095,7 +1095,7 @@ public:
           s_->diag(*mixed - begin_, Diag::annotation_mixed_list);
       }
       if (declaration && (form & declaration_forms) && closed)
-        read_decl_attributes(*declaration, begin, index(), std_attr);
+        read_decl_attributes(*declaration, *r_, begin, index(), std_attr);
     }
   }
 
@@ -1146,11 +1146,13 @@ public:
     if (!expect(Tk::r_square) || !expect(Tk::r_square)) seek(limit);
   }
 
-  void read_decl_attributes(DeclAttributes& attributes, u32 begin, u32 end, bool scoped) const {
-    auto token = [&](u32 at) { return r_->tokens[at].kind; };
+  static void read_decl_attributes(DeclAttributes& attributes, const pp::Region& region,
+                                   u32 begin, u32 end, bool scoped) {
+    using enum ast::GnuVisibility;
+    auto token = [&](u32 at) { return region.tokens[at].kind; };
     auto named = [&](u32 at, std::string_view plain, std::string_view reserved) {
       if (token(at) != Tk::identifier) return false;
-      const auto spelling = r_->name(r_->tokens[at]);
+      const auto spelling = region.name(region.tokens[at]);
       return spelling == plain || spelling == reserved;
     };
     if (end - begin < 4 || token(begin + 1) != token(begin) || token(end - 2) != token(end - 1)) return;
@@ -1164,15 +1166,15 @@ public:
         attributes.weak = true;
         return;
       }
-      if (attributes.hidden_visibility || limit - first < 4 || !named(first, "visibility", "__visibility__") ||
+      if (attributes.visibility == hidden || limit - first < 4 || !named(first, "visibility", "__visibility__") ||
           token(first + 1) != Tk::l_paren || token(first + 2) != Tk::string_lit || token(limit - 1) != Tk::r_paren)
         return;
-      const auto& value = r_->literal(r_->tokens[first + 2]);
+      const auto& value = region.literal(region.tokens[first + 2]);
       for (u32 at = first + 3; at < limit - 1; ++at)
-        if (token(at) != Tk::string_lit || !r_->tokens[at].has(lex::tok_flag::continued)) return;
-      attributes.hidden_visibility =
-          value.encoding == lex::Encoding::ordinary && value.ud_suffix == lex::no_name && !value.bad &&
-          std::ranges::equal(value.units, std::string_view("hidden"));
+        if (token(at) != Tk::string_lit || !region.tokens[at].has(lex::tok_flag::continued)) return;
+      if (value.encoding != lex::Encoding::ordinary || value.ud_suffix != lex::no_name || value.bad) return;
+      if (std::ranges::equal(value.units, std::string_view("hidden"))) attributes.visibility = hidden;
+      else if (std::ranges::equal(value.units, std::string_view("default"))) attributes.visibility = default_;
     };
 
     // Only complete attributes at the list's top level affect the declaration.

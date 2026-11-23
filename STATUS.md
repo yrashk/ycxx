@@ -216,7 +216,10 @@ What is true of the code today. Work in progress and its owners are tracked in
     resource headers (#133). A native Linux build also searches `/usr/include/x86_64-linux-gnu`
     and `/usr/include` (#252). Darwin searches the configured SDK's `usr/include`, with a request's
     `SDKROOT` as an override. Cross-target requests without a target SDK can use explicit include
-    directories (#690);
+    directories (#690). `-nostdinc` omits those automatic include roots, including the
+    bundled library and resource headers, while keeping explicit `-I`, `-isystem`,
+    and `-iquote` paths, source-relative quoted includes, and macros.
+    [#251](https://github.com/yrashk/ycxx/issues/251)
   - `#define` and `#undef` with the redefinition check, rescanning and painting
     ([cpp.rescan]);
   - function-like macros (`:unit`'s `invocation`, `substitute`, `paste`): arguments across
@@ -819,6 +822,13 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
   non-inline namespace-scope variable gives its ELF symbol `STB_GLOBAL` and `STV_HIDDEN`.
   This includes the C-linkage marker `__ycxx_linkage_static_v1` from the pinned libycxx runtime.
   [#936](https://github.com/yrashk/ycxx/issues/936)
+- On Linux x86-64, ordinary external non-inline function declarations can inherit the
+  nearest explicit GNU `hidden` or `default` visibility from a namespace definition.
+  The canonical declaration carries consistent visibility to its unannotated qualified
+  definition and to reference-only objects. An explicit function attribute takes
+  precedence. Mixed inherited defaults retain the direct attribute rules.
+  [Design](docs/design/linux-namespace-visibility.md) ·
+  [#940](https://github.com/yrashk/ycxx/issues/940)
 - Constant-initialized and zero-initialized external inline namespace variables use weak ELF
   definitions when their initial values need no relocations. This includes explicitly inline
   full variable-template specializations with builtin type arguments. Static addresses and
@@ -1054,8 +1064,9 @@ in `lsp` frames (`LspOut`), the last of which carries LSP's exit status (1 after
   its identity changes; `@file` response files expanded relative to the entry's directory; a
   header or C entry is no unit), else the file alone in its directory. `daemon.lsp`'s
   `compile_commands` covers both forms, a response file, a header and a C file, a directory
-  spelled through a symbolic link, and a change (mutation-checked). Options `pp` does not take
-  yet (`-include`, `--sysroot`, …) are dropped (#251).
+  spelled through a symbolic link, and a change (mutation-checked). The check also keeps
+  `-nostdinc`. Options `pp` does not take yet (`-include`, `--sysroot`, …) are dropped.
+  [#251](https://github.com/yrashk/ycxx/issues/251)
 - Not yet: stopping a diagnosis on a newer edit,
   `$/cancelRequest`, debouncing and interactive priority (#168); `buffers_in`, the disk-view
   assertion and one view per session (#169); go-to-definition from a declaration part (a

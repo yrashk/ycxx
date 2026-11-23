@@ -1297,6 +1297,7 @@ private:
   std::set<std::pair<u32, u32>> dependent_type_trait_operands_;  // source item and token offset
   std::set<EntityId> failed_type_trait_instantiations_;
   std::vector<std::string> ns_of_, eff_ns_;       // by item
+  std::vector<ast::GnuVisibility> namespace_visibility_;  // by lexical occurrence
   // A namespace definition's components' namespaces, as declared and for lookup, by name
   // (`namespace a::b` declares `a` in the enclosing namespace and `b` in `a`).
   std::map<u32, std::vector<std::pair<std::string, std::string>>> name_scopes_;
@@ -1329,6 +1330,8 @@ private:
     eff_ns_.assign(its.size(), "");
     in_class_.assign(its.size(), false);
     inner_of_.assign(its.size(), "");
+    namespace_visibility_.assign(its.size(), ast::GnuVisibility::none);
+    const bool linux = w_->target.triple == ast::x86_64_linux.triple;
     std::vector<std::string> inner_eff(its.size());
     for (u32 k = 0; k < its.size(); ++k) {  // preorder: a parent comes first
       u32 p = its[k].parent;
@@ -1337,6 +1340,7 @@ private:
         bool ns = its[p].kind == ItemKind::namespace_def;
         ns_of_[k] = ns ? inner_of_[p] : ns_of_[p];
         eff_ns_[k] = ns ? inner_eff[p] : eff_ns_[p];
+        namespace_visibility_[k] = namespace_visibility_[p];
       }
       if (its[k].kind != ItemKind::namespace_def) continue;
       // The identifiers of `namespace a::inline b`, or none for an unnamed one; `inline` before
@@ -1344,25 +1348,35 @@ private:
       // in the namespace the ones before it name.
       std::vector<std::pair<std::string, bool>> names;
       bool is_inline = false;
+      bool after_namespace = false;
+      DeclAttributes attributes;
       for (u32 t = its[k].begin; t < its[k].brace_begin; ++t) {
         // Past attributes, `[[…]]` and `__attribute__((…))`.
         if (r_->tokens[t].kind == lex::Tk::l_square || r_->tokens[t].kind == lex::Tk::l_paren) {
+          const u32 begin = t;
+          const bool scoped = r_->tokens[t].kind == lex::Tk::l_square;
           int depth = 0;
           for (; t < its[k].brace_begin; ++t) {
             lex::Tk x = r_->tokens[t].kind;
             depth += (x == lex::Tk::l_square || x == lex::Tk::l_paren) - (x == lex::Tk::r_square || x == lex::Tk::r_paren);
             if (depth == 0) break;
           }
+          if (linux && after_namespace && depth == 0 &&
+              (scoped || (begin > its[k].begin && r_->tokens[begin - 1].kind == lex::Tk::identifier &&
+                          r_->name(r_->tokens[begin - 1]) == "__attribute__")))
+            Parser::read_decl_attributes(attributes, *r_, begin, t + 1, scoped);
           continue;
         }
         if (r_->tokens[t].kind == lex::Tk::identifier && t + 1 < its[k].brace_begin && r_->tokens[t + 1].kind == lex::Tk::l_paren)
           continue;  // `__attribute__`, whose parentheses come next
+        if (r_->tokens[t].kind == lex::Tk::kw_namespace) after_namespace = true;
         if (r_->tokens[t].kind == lex::Tk::kw_inline) is_inline = true;
         if (r_->tokens[t].kind == lex::Tk::identifier) {
           names.push_back({std::string(r_->name(r_->tokens[t])), is_inline});
           is_inline = false;
         }
       }
+      if (attributes.visibility != ast::GnuVisibility::none) namespace_visibility_[k] = attributes.visibility;
       bool anonymous = names.empty();
       if (anonymous) names.push_back({"(anonymous)", true});
       inner_of_[k] = ns_of_[k];
@@ -2841,7 +2855,7 @@ private:
     }
     s_.defer_type_access = true;
     DeclSpec spec = ps_.decl_specifiers();
-    spec.attributes.hidden_visibility |= leading_attributes.hidden_visibility;
+    spec.attributes.visibility = std::max(spec.attributes.visibility, leading_attributes.visibility);
     spec.attributes.weak |= leading_attributes.weak;
     if (spec.ok && spec.elaborated && s_.types().is_enum(spec.type)) {
       EntityId e = s_.types().enum_of(spec.type);
@@ -6764,14 +6778,20 @@ private:
       return false;
     }
     if (fn && p_->world().ins.names.spelling(d.name) == "main") check_main(spec, sem, d, lang);
+    const auto visibility = std::max(spec.attributes.visibility, d.attributes.visibility);
     const bool ordinary_external = !template_ && !explicit_ && !ordinary_friend &&
                                    sem.linkage == ast::Linkage::external && (!d.qualified || d.scope.ns);
-    if (ordinary_external && (spec.attributes.hidden_visibility || d.attributes.hidden_visibility) &&
+    if (ordinary_external && visibility == ast::GnuVisibility::hidden &&
         (fn || (!var_ && !(sem.flags & sema::decl_flag::inline_))))
       sem.hidden_visibility = true;
-    if (ordinary_external && fn && !(sem.flags & (sema::decl_flag::inline_ | sema::decl_flag::member)) &&
-        (spec.attributes.weak || d.attributes.weak))
-      sem.explicit_weak = true;
+    if (ordinary_external && fn && !(sem.flags & (sema::decl_flag::inline_ | sema::decl_flag::member))) {
+      if (spec.attributes.weak || d.attributes.weak) sem.explicit_weak = true;
+      if (p_->world().target.triple == ast::x86_64_linux.triple) {
+        sem.explicit_default_visibility = visibility == ast::GnuVisibility::default_;
+        // A qualified definition uses the namespace facts from its resolved declaration.
+        if (!d.qualified) sem.namespace_visibility = p_->namespace_visibility_[k_];
+      }
+    }
 
     // The initializer ([dcl.init]); the name is in scope from the end of its declarator.
     // An explicit or partial specialization, or an instantiation, declares no name: the

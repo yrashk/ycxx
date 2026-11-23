@@ -199,6 +199,10 @@ On Linux x86-64, an ordinary external namespace-scope function can use GNU `weak
 strong definition in another object takes precedence. This covers the pinned libycxx
 debugger provider. [#937](https://github.com/yrashk/ycxx/issues/937)
 
+On Linux x86-64, an ordinary external non-inline function can inherit GNU visibility
+from its enclosing namespace declaration and use it at an out-of-line definition.
+[#940](https://github.com/yrashk/ycxx/issues/940)
+
 External inline namespace variables and in-class static constexpr members of ordinary namespace-scope
 classes share one object across translation units on both targets when their initial values need
 no relocations or runtime work. On Linux this lets two freestanding units using libycxx `<cstddef>`
@@ -553,6 +557,8 @@ x86-64 Linux it also searches glibc's multiarch include path and preprocesses gl
 hosted `<cstdint>`, `<cinttypes>`, and `<inttypes.h>` compile. A Darwin target can use the configured
 SDK or one selected by `SDKROOT`. Cross-target builds can also supply target headers with `-I` or
 `-isystem`. When no target `<stdint.h>` is available, `<cstdint>` uses compiler predefines.
+`-nostdinc` omits the automatic include directories and keeps the explicit ones.
+[#251](https://github.com/yrashk/ycxx/issues/251) ·
 [#475](https://github.com/yrashk/ycxx/issues/475) · [#657](https://github.com/yrashk/ycxx/issues/657) ·
 [#664](https://github.com/yrashk/ycxx/issues/664) · [#690](https://github.com/yrashk/ycxx/issues/690)
 

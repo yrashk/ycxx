@@ -81,12 +81,12 @@ Session& session_for(const Config& cfg);
 // `-E`: the text Clang's `-E` would print, and the diagnostics.
 std::pair<std::string, std::vector<Message>> preprocess_to_text(Session& s, std::string_view text, std::string_view path);
 
-// Takes a preprocessor option at `args[i]` (`-I dir`, `-Idir`, `-isystem`, `-iquote`, `-D`,
-// `-U`), advancing `i` past its argument: true if it was one, an error if its argument is missing.
+// Takes a preprocessing option at `args[i]` (`-I`, `-isystem`, `-iquote`, `-D`, `-U`,
+// `-nostdinc`). Advances `i` for a separate argument. Returns an error for a missing argument.
 std::expected<bool, std::string> take_option(std::span<const std::string_view> args, std::size_t& i, Config& cfg);
-// The system directories after the command line's. A `-I` or `-isystem` directory that names one
-// of them (relative to `cwd`) is dropped, as GCC and Clang do, so it is searched once, at its
-// system place, and `#include_next` from it goes on past it.
+// Finalizes the search paths, consuming `-nostdinc` before appending automatic directories.
+// A command-line directory that names an automatic one (relative to `cwd`) is searched only
+// at its automatic place when present, so `#include_next` goes past it.
 Config with_system_dirs(Config cfg, std::string_view cwd = {}, std::string_view sdkroot = {});
 
 // The item of a file-level diagnostic location in the region's file `file` (lex::file_level for
@@ -430,6 +430,10 @@ std::pair<std::string, std::vector<Message>> preprocess_to_text(Session& s, std:
 
 std::expected<bool, std::string> take_option(std::span<const std::string_view> args, std::size_t& i, Config& cfg) {
   std::string_view a = args[i];
+  if (a == "-nostdinc") {
+    cfg.nostdinc = true;
+    return true;
+  }
   for (std::string_view opt : {"-isystem", "-iquote", "-I", "-D", "-U"}) {
     if (!a.starts_with(opt)) continue;
     std::string value(a.substr(opt.size()));
@@ -458,7 +462,8 @@ Config with_system_dirs(Config cfg, std::string_view cwd, std::string_view sdkro
     while (s.size() > 1 && s.ends_with('/')) s.pop_back();
     return s;
   };
-  auto dirs = system_dirs(*cfg.target, sdkroot);
+  std::vector<std::string> dirs;
+  if (!std::exchange(cfg.nostdinc, false)) dirs = system_dirs(*cfg.target, sdkroot);
   auto system = dirs | std::views::transform(normal) | std::ranges::to<std::vector>();
   // A `-I` or `-isystem` directory that is a system directory is searched at the system
   // directory's place only. -isystem directories are system directories too: a `-I` directory
