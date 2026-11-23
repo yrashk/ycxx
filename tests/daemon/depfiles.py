@@ -114,6 +114,29 @@ def direct(world, scope):
     return pid
 
 
+def output_integrity(world, scope):
+    scope.mkdir()
+    (scope / 'real').mkdir()
+    (scope / 'alias').symlink_to('real', target_is_directory=True)
+    source = scope / 'integrity.cpp'
+    source.write_text('int staged_value() { return 41; }\n')
+    obj = scope / 'real/t.o'
+    args = [*TARGET, '-c', source.name, '-o', 'real/t.o']
+    result = world.cxx(args, scope, world.daemon, timeout=30)
+    assert result == (0, b'', b''), result
+    original = obj.read_bytes()
+    assert original.startswith(b'\x7fELF')
+
+    source.write_text('int staged_value() { return 43; }\n')
+    # The first path aliases the object. The second cannot be staged at all.
+    for depfile in ('alias/t.o', 'absent-dir/t.d'):
+        command = [*args, '-MD', '-MF', depfile]
+        for env in (world.cold, world.daemon):
+            result = world.cxx(command, scope, env, timeout=30)
+            assert result[0] == 1 and b'error:' in result[2], (depfile, result)
+            assert obj.read_bytes() == original, depfile
+
+
 def ninja_rebuild(ninja, compiler, scope, env):
     scope.mkdir()
     (scope / 'ninja.cpp').write_text(f'#include "{TOP}"\nint dep_value() {{ return LEAF; }}\n')
@@ -161,6 +184,7 @@ def main():
         env.update(LC_ALL='C', YCXX_THREADS='2')
     try:
         pid = direct(world, scope)
+        output_integrity(world, scope / "integrity")
         if Path(ninja).is_file():
             ninja_rebuild(ninja, (world.ycxx, 'cxx', *TARGET), scope / 'ninja', world.daemon)
         world.same_daemon('depfile edits and Ninja replay', pid)
