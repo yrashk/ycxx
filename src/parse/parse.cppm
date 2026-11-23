@@ -7931,7 +7931,8 @@ bool Program::peer_root_destructor_producer(EntityId cls) const {
 std::optional<Program::DerivedVirtualDestructor> Program::derived_virtual_destructor_layout(EntityId cls) const {
   using enum lex::Tk;
   const auto& target = w_->target;
-  if (target.triple != ast::x86_64_linux.triple || r_->has_clang_attribute_pragma) return std::nullopt;
+  if (!target.supports(ast::NativeOperation::derived_virtual_destructor) || r_->has_clang_attribute_pragma)
+    return std::nullopt;
   const auto* derived = classes_.find(cls);
   if (!derived || derived->bases.size() != 1 || !derived->fields.empty()) return std::nullopt;
   const auto& edge = derived->bases.front();

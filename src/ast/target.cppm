@@ -52,6 +52,12 @@ enum class VaList : u8 { char_pointer, sysv_x86_64 };
 // by `-fclass-call-abi=apple` on a target that offers it.
 enum class CallTriviality : u8 { itanium, apple };
 
+// Native operations the compiler implements for a target. Their source and ABI
+// preconditions are checked by each operation's own analysis.
+enum class NativeOperation : std::uint64_t {
+  derived_virtual_destructor = std::uint64_t{1} << 0,
+};
+
 struct Target {
   std::string_view triple;
   std::array<BuiltinLayout, builtin_count> layout;
@@ -72,9 +78,13 @@ struct Target {
   VaList va_list;
   CallTriviality call_triviality;  // the default
   bool apple_calls;                 // whether `-fclass-call-abi=apple` is offered
+  std::uint64_t native_operations = 0;
 
   constexpr BuiltinLayout operator[](Builtin b) const { return layout[std::to_underlying(b)]; }
   constexpr bool has(Builtin b) const { return (*this)[b].size != 0; }
+  constexpr bool supports(NativeOperation operation) const {
+    return (native_operations & std::to_underlying(operation)) != 0;
+  }
 };
 
 // Itanium C++ ABI §2.3: a data member pointer is a ptrdiff_t; on both supported
@@ -290,6 +300,7 @@ inline constexpr Target x86_64_linux{
     .va_list = VaList::sysv_x86_64,
     .call_triviality = CallTriviality::itanium,
     .apple_calls = false,
+    .native_operations = std::to_underlying(NativeOperation::derived_virtual_destructor),
 };
 
 constexpr const Target* target_for_triple(std::string_view triple) {
