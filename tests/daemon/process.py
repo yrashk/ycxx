@@ -300,7 +300,7 @@ def edit_error_during_build(env):
 
 
 def edit_policy_during_build(env):
-    """Restart a checked build when its included policy changes after the frontend."""
+    """Restart a checked build when its included policy changes without changing size or mtime."""
     d = env.scope / 'edit-policy'
     d.mkdir()
     include = Path(__file__).resolve().parents[2] / 'packages/ycxx-policies/include'
@@ -314,12 +314,16 @@ using Rules = own::use_policy<own::affine<Receipt>, own::creates<decltype(&issue
 '''
     rules = d / 'rules.hpp'
     rules.write_text(affine)
+    stamp = rules.stat()
     (d / 'policy.cpp').write_text('#include "rules.hpp"\nvoid check() { auto pending = issue(); }\n')
     replacement = d / 'replacement'
     replacement.write_text(affine.replace('own::affine', 'own::linear'))
+    os.utime(replacement, ns=(stamp.st_atime_ns, stamp.st_mtime_ns))
     client = env.start(args, d)
     env.expect_gate('policy.cpp', b'P')
     replacement.replace(rules)
+    updated = rules.stat()
+    assert (updated.st_size, updated.st_mtime_ns) == (stamp.st_size, stamp.st_mtime_ns)
     env.expect_gate('policy.cpp', b'S')
     out, err = client.communicate(timeout=60)
     want_code, want_out, want_err = env.cxx(args, d, env.cold)
@@ -331,6 +335,7 @@ using Rules = own::use_policy<own::affine<Receipt>, own::creates<decltype(&issue
         fail('policy edit during a build: the client reported no restart')
 
     replacement.write_text(affine)
+    os.utime(replacement, ns=(stamp.st_atime_ns, stamp.st_mtime_ns))
     replacement.replace(rules)
     result = env.cxx(args, d, env.daemon)
     if result != (0, b'', b''):
