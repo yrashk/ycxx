@@ -8,7 +8,7 @@ import sys
 
 from lsp import Editor, expect
 from process import Env, failures
-from system_includes import LINUX, NATIVE_LINUX
+from system_includes import DARWIN, LINUX, NATIVE_LINUX
 
 
 PIC = ('-fPIC',)
@@ -20,29 +20,64 @@ THREAD_SELF = 'ycxx_pal_thread_self'
 
 
 def compile_database(world, scope):
-    # Keep this translation unit out of the CLI replay so the database supplies its flags.
+    # Exercise the database before this unit receives explicit driver flags.
     unit = scope / 'editor.cpp'
     text = '''\
 #if __PIC__ == 2 && __pic__ == 2 && !defined(__PIE__) && !defined(__pie__)
 int probe() { return pic_database_sentinel(); }
+#elif defined(MARK)
+#include <pic_database_probe.h>
+#if !defined(__APPLE__) || !defined(__aarch64__) || PIC_DATABASE_HEADER != 7
+#error imported target or include directory was lost
+#endif
+#if defined(__PIC__) || defined(__pic__) || defined(__PIE__) || defined(__pie__)
+#error unsupported PIC changed the Darwin predefines
+#endif
+#if MARK == 1
+int probe() { return pic_darwin_first(); }
+#elif MARK == 2
+int probe() { return pic_darwin_second(); }
+#endif
 #endif
 '''
     unit.write_text(text)
+    include = scope / 'pic-database-include'
+    include.mkdir()
+    (include / 'pic_database_probe.h').write_text('#define PIC_DATABASE_HEADER 7\n')
+    includes = ('-I', include.name)
     database = scope / 'compile_commands.json'
     editor = Editor(world, scope)
-    for version, flags in enumerate(MODES, 1):
+    cases = (
+        ((LINUX,), None),
+        ((LINUX, *PIC), 'pic_database_sentinel'),
+        ((LINUX,), None),
+        ((DARWIN, *PIC, '-DMARK=1', *includes), 'pic_darwin_first'),
+        ((*PIC, DARWIN, '-DMARK=2', *includes), 'pic_darwin_second'),
+    )
+    for version, (flags, sentinel) in enumerate(cases, 1):
         database.write_text(json.dumps([{
             'directory': str(scope), 'file': unit.name,
-            'arguments': ['c++', LINUX, '-std=c++26', *flags, '-c', unit.name, '-o', 'editor.o'],
+            'arguments': ['c++', '-std=c++26', *flags, '-c', unit.name, '-o', 'editor.o'],
         }]))
         if version == 1:
             editor.open(unit, text)
         else:
             editor.change(unit, text, version)
         context = f'pic compile database version {version}'
-        expected = [(1, 21, 1, "use of undeclared identifier 'pic_database_sentinel'")] if flags else []
+        expected = []
+        if sentinel is not None:
+            line, spelling = next((i, row) for i, row in enumerate(text.splitlines()) if sentinel in row)
+            expected = [(line, spelling.index(sentinel), 1, f"use of undeclared identifier '{sentinel}'")]
         expect(editor.diagnostics(unit, version, context), expected, context)
     expect(editor.finish(), 0, 'pic LSP shutdown')
+
+    # Imported flags leave a valid Darwin command; an explicit CLI request still reports the unsupported option.
+    args = [DARWIN, '-std=c++26', '-DMARK=1', *includes, '-E', unit.name]
+    for env in (world.cold, world.daemon):
+        status, tokens, err = world.cxx(args, scope, env, timeout=30)
+        assert status == 0 and b'pic_darwin_first' in tokens and not err, (args, status, tokens, err)
+        status, _, err = world.cxx([*PIC, *args], scope, env, timeout=30)
+        assert status != 0 and b'-fPIC' in err, (args, status, err)
 
 
 def check_exports(elf):
