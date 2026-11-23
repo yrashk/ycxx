@@ -10003,13 +10003,14 @@ public:
       return expression;
     };
     Ex named = unparenthesized(callee);  // `(f)()` takes f's default arguments too ([expr.call]/1)
-    if (auto d = as<ast::DeclRef>(named); d && types().is_function(ft) && defaults.empty()) {
-      defaults = defaults_of(named, d->entity);
+    const auto declaration = types().is_function(ft) ? as<ast::DeclRef>(named) : std::nullopt;
+    const EntityId default_source = declaration ? declaration->entity : EntityId::none;
+    if (declaration && defaults.empty()) {
+      defaults = defaults_of(named, default_source);
       default_origin = DefaultArgumentOrigin::interned;
     }
-    if (auto d = as<ast::DeclRef>(named); d && types().is_function(ft) &&
-        (named.id == callee.id || is_consteval(d->entity))) {
-      function = d->entity;
+    if (declaration && (named.id == callee.id || is_consteval(default_source))) {
+      function = default_source;
     } else {
       // The address of a named immediate function is itself a known callee. It does not
       // supply default arguments because the call is through a pointer ([expr.call]).
@@ -10026,7 +10027,7 @@ public:
       return {NodeId::none, begin, end};
     }
     TypeRec fr = types().rec(ft);
-    auto children = call_args(fr, args, begin, paren_at, defaults, default_origin, function);
+    auto children = call_args(fr, args, begin, paren_at, defaults, default_origin, default_source);
     if (!children) return {NodeId::none, begin, end};
     ExprInfo info = result_info(fr.inner);
     return node(ast::Call{info, function, at(callee, begin), b_->list(*children)}, begin, end, info);
@@ -10329,7 +10330,7 @@ public:
   std::optional<std::vector<Child>> call_args(const TypeRec& fr, std::span<const Ex> given, u32 begin, u32 paren_at,
                                               std::span<const NodeId> defaults = {},
                                               DefaultArgumentOrigin origin = DefaultArgumentOrigin::interned,
-                                              EntityId function = EntityId::none) {
+                                              EntityId default_source = EntityId::none) {
     // Unevaluated calls still check parameter initialization. Only a decltype operand may
     // dispense with the result object. Subexpressions requiring materialization check it separately.
     const bool decltype_operand = decltype_unevaluated != 0 && unevaluated == decltype_unevaluated;
@@ -10343,7 +10344,7 @@ public:
     std::vector<QualType> params = fr.params;  // copied: converting may intern new types
     std::vector<Ex> args(given.begin(), given.end());
     for (std::size_t i = args.size(); i < params.size() && i < defaults.size() && defaults[i] != NodeId::none; ++i) {
-      auto a = default_argument(defaults[i], paren_at, origin, function, params[i]);
+      auto a = default_argument(defaults[i], paren_at, origin, default_source, params[i]);
       if (!a) return std::nullopt;
       args.push_back(*a);
     }
