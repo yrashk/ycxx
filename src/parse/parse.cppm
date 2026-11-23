@@ -128,6 +128,28 @@ struct Result {
   std::vector<sema::Demand> demands;  // in program order (query-engine.md §B1.4)
 };
 
+// A unit's items as a Program reads them (#947): every item it reads is recorded in `reads`, for
+// the trace of what a group's analysis depended on.
+class ItemsView {
+ public:
+  explicit ItemsView(const items::Items& its) : its_(&its) {}
+  ItemsView(const ItemsView&) = delete;
+  struct List {
+    const ItemsView* view;
+    const items::Item& operator[](std::size_t k) const {
+      if (view->reads) view->reads->insert(static_cast<u32>(k));
+      return view->its_->items[k];
+    }
+    std::size_t size() const { return view->its_->items.size(); }
+  };
+  const List items{this};
+  const items::Items& unlogged() const { return *its_; }
+  std::set<u32>* reads = nullptr;
+
+ private:
+  const items::Items* its_;
+};
+
 class Program {
 public:
   struct Index;
@@ -135,7 +157,8 @@ public:
   // `index`, when given, is `make_index` of the same world, region and items, shared (#947).
   Program(sema::World& w, const pp::Region& r, const items::Items& its, u32 template_depth = pp::Config::default_template_depth,
           std::shared_ptr<const Index> index = nullptr)
-      : instantiation_limit(template_depth), w_(&w), r_(&r), items_(&its), ix_(index ? std::move(index) : make_index(w, r, its)) {
+      : instantiation_limit(template_depth), w_(&w), r_(&r), view_(its), items_(&view_),
+        ix_(index ? std::move(index) : make_index(w, r, its)) {
     w.install_builtin_classes(classes_);
     may_have_virtual_layouts_ = classes_.has_virtual_layouts() || ix_->says_virtual;
   }
@@ -200,6 +223,8 @@ public:
     std::map<std::string, std::vector<InlineNamespace>> inline_namespaces;  // by enclosing namespace
     std::vector<Directive> directives;  // their targets unresolved
     bool says_virtual = false;          // the unit's tokens hold `virtual`
+    std::vector<bool> qualified;        // by item: its first declarator's name is qualified
+    std::vector<u32> specializations;   // the items outside classes that declare specializations
   };
   // Each item's namespace, from the namespace definitions that enclose it; and the using-
   // directives and aliases at namespace scope, whose targets are resolved when their items are
@@ -216,6 +241,7 @@ public:
       for (u32 k = 0; k < items.items[j].names.size(); ++k)
         if (!items.items[j].names[k].name.empty()) x.by_name[items.items[j].names[k].name].push_back({j, k});
     x.says_virtual = std::ranges::contains(r.tokens, lex::Tk::kw_virtual, &lex::Tok::kind);
+    for (const items::Item& it : items.items) x.qualified.push_back(it.qualifier_begin < it.qualifier_end);
     const auto& its = items.items;
     x.ns_of.assign(its.size(), "");
     x.eff_ns.assign(its.size(), "");
@@ -281,7 +307,14 @@ public:
       if (a == lex::Tk::kw_namespace && b == lex::Tk::identifier)
         x.directives.push_back({k, x.ns_of[k], w.ins.names.intern(r.name(r.tokens[its[k].begin + 1])), std::nullopt});
     }
-      return out;
+    for (u32 k = 0; k < items.items.size(); ++k) {
+      const items::Item& it = items.items[k];
+      if (!x.in_class[k] && (it.specialization || std::ranges::any_of(it.names, [](const items::DeclName& n) {
+                               return (n.flags & items::name_flag::specialization) != 0;
+                             })))
+        x.specializations.push_back(k);
+    }
+    return out;
   }
   void set_directive_target(u32 item, std::string target) {
     for (Directive& d : directives_)
@@ -290,7 +323,9 @@ public:
 
   sema::World& world() { return *w_; }
   const pp::Region& region() const { return *r_; }
-  const items::Items& items() const { return *items_; }
+  const ItemsView& items() const { return *items_; }
+  // Records the items this Program reads into `reads` (#947).
+  void record_reads(std::set<u32>* reads) { view_.reads = reads; }
   ItemId id(u32 item) const { return ids_[item]; }
   u32 index(ItemId id) const { return index_.at(std::to_underlying(id)); }
 
@@ -450,6 +485,53 @@ public:
       }
     return out;
   }
+  // A by-name question of the unit's items (#947): the items that declare `name` and pass
+  // `kind`'s filter for `path`, which reads only the index. A group's trace keeps the questions
+  // its analysis asked; it reads the items that pass through the items view.
+  enum class Probe : std::uint8_t { declared_in, declared_in_inhabit, namespace_members, class_members, same_namespace, declares };
+  struct NameProbe {
+    Probe kind;
+    std::string name;
+    std::string path;  // "*": any namespace (`declares` a C function)
+    auto operator<=>(const NameProbe&) const = default;
+  };
+  static const std::string& name_ns(const Index& x, u32 item, u32 name) {
+    auto it = x.name_scopes.find(item);
+    return it != x.name_scopes.end() && name < it->second.size() ? it->second[name].first : x.ns_of[item];
+  }
+  static const std::string& name_eff_ns(const Index& x, u32 item, u32 name) {
+    auto it = x.name_scopes.find(item);
+    return it != x.name_scopes.end() && name < it->second.size() ? it->second[name].second : x.eff_ns[item];
+  }
+  static bool passes(const Index& x, Probe kind, const std::string& path, u32 j, u32 k) {
+    switch (kind) {
+      case Probe::declared_in: return name_ns(x, j, k) == path || name_eff_ns(x, j, k) == path;
+      case Probe::declared_in_inhabit: return name_ns(x, j, k) == path;
+      case Probe::namespace_members: return !x.in_class[j] && x.ns_of[j] == path;
+      case Probe::class_members: return x.in_class[j] && x.ns_of[j] == path;
+      case Probe::same_namespace: return x.ns_of[j] == path;
+      case Probe::declares:
+        return path == "*" || name_ns(x, j, k) == path || name_eff_ns(x, j, k) == path ||
+               (x.qualified[j] && encloses(name_ns(x, j, k), path));
+    }
+    return true;
+  }
+  // The answer to a question: the items that pass, as (item, index in its names), in item order.
+  static std::vector<std::pair<u32, u32>> answer(const Index& x, const NameProbe& q) {
+    std::vector<std::pair<u32, u32>> out;
+    if (auto f = x.by_name.find(q.name); f != x.by_name.end())
+      for (auto [j, k] : f->second)
+        if (passes(x, q.kind, q.path, j, k)) out.push_back({j, k});
+    return out;
+  }
+  // Records the questions this Program asks into `probes` (#947).
+  void record_probes(std::set<NameProbe>* probes) { probes_ = probes; }
+  // A filtered question about `named(name)`'s entry (j, k): recorded, and an entry that fails the
+  // filter is skipped by the caller before it reads the item.
+  bool asks(Probe kind, std::string_view name, const std::string& path, u32 j, u32 k) {
+    if (probes_) probes_->insert({kind, std::string(name), path});
+    return passes(*ix_, kind, path, j, k);
+  }
   // Qualified lookup in namespace `ns` ([namespace.qual]/2): its own declarations, or, when it has
   // none, those of the namespaces its using-directives nominate.
   std::vector<DeclId> qualified_decls(std::string_view name, const std::string& ns, u32 item, bool self,
@@ -482,8 +564,8 @@ public:
     std::vector<DeclId> r;
     for (auto [j, k] : named(name)) {
       if (j >= item) break;
+      if (!asks(Probe::namespace_members, name, path, j, k)) continue;
       const items::DeclName& n = items_->items[j].names[k];
-      if (in_class_[j] || ns_of_[j] != path) continue;
       if ((n.flags & items::name_flag::unknown) && std::ranges::find(running_, j) == running_.end()) {
         item_sema(j);
         if (auto t = using_targets_.find({j, n.ordinal}); t != using_targets_.end())
@@ -505,6 +587,7 @@ public:
     std::vector<DeclId> result;
     for (auto [j, k] : named(name)) {
       if (j >= item) break;
+      if (!asks(Probe::same_namespace, name, ns_of_[item], j, k)) continue;
       const items::Item& candidate = items_->items[j];
       if (enclosing_class && candidate.parent != *enclosing_class) continue;
       const items::DeclName& n = candidate.names[k];
@@ -528,6 +611,7 @@ public:
     std::vector<DeclId> r;
     for (auto [j, k] : named(name)) {
       if (j >= item + (self ? 1 : 0)) break;
+      if (!asks(inhabit ? Probe::declared_in_inhabit : Probe::declared_in, name, path, j, k)) continue;
       const items::Item& it = items_->items[j];
       const items::DeclName& n = it.names[k];
       const bool nested = it.kind == ItemKind::namespace_def;  // only these have per-name scopes
@@ -680,15 +764,11 @@ public:
   }
   // Analyses the explicit and partial specializations before `item`, so what is said of a
   // specialization there does not depend on which cells ran first (§A1).
+  // They are the index's list, so a group's Program reads only them (#947).
   void specializations_before(u32 item) {
-    for (; spec_scan_ < item && spec_scan_ < items_->items.size(); ++spec_scan_) {
-      const items::Item& it = items_->items[spec_scan_];
-      bool spec = it.specialization || std::ranges::any_of(it.names, [](const items::DeclName& n) {
-                    return (n.flags & items::name_flag::specialization) != 0;
-                  });
-      if (in_class_[spec_scan_] || !spec || std::ranges::contains(running_, spec_scan_)) continue;
-      item_sema(spec_scan_);
-    }
+    const std::vector<u32>& specs = ix_->specializations;
+    for (; spec_scan_ < specs.size() && specs[spec_scan_] < item; ++spec_scan_)
+      if (!std::ranges::contains(running_, specs[spec_scan_])) item_sema(specs[spec_scan_]);
   }
   // A partial specialization of a template: its item, and the specialization of its parameters it
   // is the pattern of, whose arguments are the partial specialization's.
@@ -890,18 +970,11 @@ public:
     const std::string_view name = w_->ins.names.spelling(r.name);
     // The namespace it or its class belongs to: an item there declares it, or a qualified one in a
     // namespace enclosing it; a C function may be declared in any ([dcl.link]).
-    const std::string path = enclosing_namespace_path(r.scope);
-    const bool anywhere = r.lang == LangLinkage::c;
+    const std::string path = r.lang == LangLinkage::c ? "*" : enclosing_namespace_path(r.scope);
     for (auto [j, k] : named(name)) {
       if (j > point) break;
       if (j < scanned || std::ranges::contains(running_, j)) continue;
-      const items::Item& it = items_->items[j];
-      const bool nested = it.kind == ItemKind::namespace_def;
-      const std::string& ns = nested ? name_ns(j, k) : ns_of_[j];
-      const std::string& eff = nested ? name_eff_ns(j, k) : eff_ns_[j];
-      const bool qualified = it.qualifier_begin < it.qualifier_end;
-      if (!anywhere && ns != path && eff != path && !(qualified && encloses(ns, path))) continue;
-      settle(j);
+      if (asks(Probe::declares, name, path, j, k)) settle(j);
     }
     scanned = std::max(scanned, point + 1);
   }
@@ -954,8 +1027,12 @@ public:
   bool function_defined_before(EntityId e, u32 item) {
     if (auto known = definitions_.find(std::to_underlying(e)); known != definitions_.end() && known->second < item)
       return true;
-    for (auto [j, k] : named(w_->ins.names.spelling(w_->entities.rec(e).name))) {
+    const sema::EntityRec& r = w_->entities.rec(e);
+    const std::string_view name = w_->ins.names.spelling(r.name);
+    const std::string path = r.lang == LangLinkage::c ? "*" : enclosing_namespace_path(r.scope);
+    for (auto [j, k] : named(name)) {
       if (j >= item) break;
+      if (!asks(Probe::declares, name, path, j, k)) continue;
       const items::Item& it = items_->items[j];
       if (!in_global_scope(j) || it.kind != ItemKind::function) continue;
       DeclId id{ids_[j], ast::make_decl_ord(ast::DeclClass::syntactic, it.names[k].ordinal)};
@@ -1412,7 +1489,9 @@ private:
 
   sema::World* w_;
   const pp::Region* r_;
-  const items::Items* items_;
+  ItemsView view_;
+  const ItemsView* items_;
+  std::set<NameProbe>* probes_ = nullptr;
   bool may_have_virtual_layouts_ = true;
   std::map<u32, u32> declared_scan_;  // by entity: the items `ensure_declared` has gone through
   std::shared_ptr<const Index> ix_;
@@ -1525,7 +1604,7 @@ private:
   std::map<u32, u32> var_templates_;             // by variable template entity: its defining item
   std::map<u32, u32> explicit_specs_;            // by specialization: the item of its first explicit specialization
   std::map<u32, u32> class_points_;              // by class template specialization: its point of instantiation
-  u32 spec_scan_ = 0;                            // the items `specializations_before` has analysed
+  u32 spec_scan_ = 0;  // how many of the index's specializations `specializations_before` has analysed
   std::map<u32, std::vector<Partial>> partials_;  // by template entity, in order of declaration
   std::map<u32, PartialReplay> partial_replays_; // by item with deferred checks in its template arguments
   std::set<u32> partial_matching_;              // specializations whose arguments are being substituted
@@ -1649,8 +1728,9 @@ std::set<EntityId> Program::uncertain_object_layouts(bool include_lifecycle_sign
     return false;
   };
   for (std::uint32_t k = 0; k < items.size(); ++k) {
-    const auto& item = items[k];
     const auto* analysed = analysed_item(k);
+    if (!analysed) continue;  // before reading the item: a group reads only what it analysed (#947)
+    const auto& item = items[k];
     const bool definition = item.kind == items::ItemKind::class_def;
     const bool enum_definition = item.kind == items::ItemKind::enum_def;
     if (!analysed || (!definition && !enum_definition && item.kind != items::ItemKind::declaration)) continue;
@@ -4538,6 +4618,7 @@ private:
         std::string_view spelling = p_->world().ins.names.spelling(name);
         bool found = false;
         for (auto [item, ordinal] : p_->named(spelling)) {
+          if (!p_->asks(Program::Probe::class_members, spelling, p_->ns_of(k_), item, ordinal)) continue;
           const auto& member = p_->items().items[item];
           if (member.parent != it_->parent) continue;
           const auto& n = member.names[ordinal];
