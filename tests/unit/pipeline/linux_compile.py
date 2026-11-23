@@ -293,6 +293,12 @@ system_leaf:
                                 'member-aggregate-provider', 'member-aggregate-client')
         integer_aggregate_calls(compile, target, aggregates, scope, cold, cc,
                                 'final-byval-calls', 'final-byval-main')
+        empty_parameters = source_dir / 'linux_empty_parameters'
+        for case, client in (('constructor', 'consumer'), ('addressed', 'caller'), ('mixed-records', 'caller')):
+            integer_aggregate_calls(compile, target, empty_parameters / case, scope, cold, cc, 'provider', client)
+        compile(target, '-c', empty_parameters / 'nontrivial/provider.cpp', '-o', 'nontrivial-empty.o',
+                error='unsupported aggregate parameter layout')
+        assert not (scope / 'nontrivial-empty.o').exists()
         compile(target, '-isystem', libycxx / 'include', '-nostdlib',
                 aggregates / 'pointer-aggregate-empty-list.cpp', libycxx / 'src/runtime/linkage/static.cpp',
                 '-o', 'aggregate-empty-list')
