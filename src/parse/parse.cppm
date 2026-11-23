@@ -4747,6 +4747,8 @@ private:
           auto c = v.ok() ? sema::Evaluator(s_, q_).evaluate(v).value : std::nullopt;
           if (!c || s_.world().values.rec(*c).kind != sema::ValueKind::integer || !types.is_integral(v.type())) {
             if (x.ok()) s_.diag(x.begin, Diag::bound_not_constant);
+            // A nested enum instantiation can diagnose the error outside this item's result.
+            if (replay != EntityId::none) return;
           } else {
             sema::IntShape sh = sema::shape(s_.world().target, *types.builtin_of(v.type()));
             sema::u64 bits = s_.world().values.rec(*c).bits;
