@@ -178,11 +178,17 @@ with tempfile.TemporaryDirectory() as directory:
             assert invoke(args, error, env) == syntax(rules, caller, error=error)
 
             initial_limit = "struct LoopConfig { static constexpr unsigned limit = 2u; };\n"
-            header = write("loop_config.hpp", initial_limit)
+            header = write("loop_limit.hpp", initial_limit)
+            config = write("loop_config.hpp", '#include "loop_limit.hpp"\n')
             counted = write("counted_config.cpp", '#include "loop_config.hpp"\n' +
                 (root / "counted_loop.cpp").read_text().replace("i < 2u", "i < LoopConfig::limit"))
-            counted_args = [*base, "--daemon=require", "-fsyntax-only", counted]
+            object_path = counted.with_suffix(".o")
+            depfile = counted.with_suffix(".d")
+            counted_args = [*base, "--daemon=require", "-MD", "-MF", depfile, "-c", counted, "-o", object_path]
             invoke(counted_args, env=env)
+            dependencies = depfile.read_text()
+            assert all(str(path) in dependencies for path in (counted, config, header)), dependencies
+            artifacts = [(path.read_bytes(), path.stat().st_mtime_ns) for path in (object_path, depfile)]
             stamp = header.stat()
             write(header.name, initial_limit.replace("2u", "3u"))
             os.utime(header, ns=(stamp.st_atime_ns, stamp.st_mtime_ns))
@@ -190,6 +196,7 @@ with tempfile.TemporaryDirectory() as directory:
             assert (updated.st_size, updated.st_mtime_ns) == (stamp.st_size, stamp.st_mtime_ns)
             error = "exceeds its usage grade of 2"
             assert invoke(counted_args, error, env) == syntax(counted, error=error)
+            assert [(path.read_bytes(), path.stat().st_mtime_ns) for path in (object_path, depfile)] == artifacts
             write(header.name, initial_limit)
             os.utime(header, ns=(stamp.st_atime_ns, stamp.st_mtime_ns))
             invoke(counted_args, env=env)
