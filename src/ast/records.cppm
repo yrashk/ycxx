@@ -108,6 +108,7 @@ struct DeclSema {
   bool has_written_noexcept = false;
   bool has_trailing_return = false;
   bool hidden_visibility = false;  // an explicit GNU visibility("hidden") attribute on this declaration
+  bool explicit_weak = false;  // an explicit GNU weak attribute on this declaration
   bool is_pure = false;  // a written pure-specifier ([class.abstract])
   SeqId<AnnotationSema> annotations{};  // the occurrences written on this declaration
   bool is_final = false;  // written on a class head or virtual member ([class.pre], [class.virtual])

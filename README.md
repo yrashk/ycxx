@@ -131,7 +131,9 @@ its code, data and relocations. [#422](https://github.com/yrashk/ycxx/issues/422
 creates or replaces a deterministic indexed GNU archive from supported x86-64 ELF objects.
 Static links accept these archives and compatible archives from system `ar`. Place an archive
 after the inputs that reference its members, and include at least one source or ordinary object.
-[#389](https://github.com/yrashk/ycxx/issues/389), [#388](https://github.com/yrashk/ycxx/issues/388)
+Resident links reread explicit archives on each request.
+[#389](https://github.com/yrashk/ycxx/issues/389), [#388](https://github.com/yrashk/ycxx/issues/388),
+[#951](https://github.com/yrashk/ycxx/issues/951)
 
 An explicit dynamic link uses ycxx's startup and the target loader. Supply the absolute target
 interpreter path and explicit, self-contained shared objects with GNU or SysV hash tables and
@@ -192,6 +194,10 @@ On Linux x86-64, ordinary external non-inline namespace variables also preserve 
 visibility across declarations.
 [#422](https://github.com/yrashk/ycxx/issues/422) · [#602](https://github.com/yrashk/ycxx/issues/602)
 · [#124](https://github.com/yrashk/ycxx/issues/124) · [#936](https://github.com/yrashk/ycxx/issues/936)
+
+On Linux x86-64, an ordinary external namespace-scope function can use GNU `weak` so a
+strong definition in another object takes precedence. This covers the pinned libycxx
+debugger provider. [#937](https://github.com/yrashk/ycxx/issues/937)
 
 External inline namespace variables with relocation-free static initializers share one object
 across translation units on both targets. On Linux this lets two freestanding units using libycxx
@@ -554,8 +560,9 @@ watcher (FSEvents on macOS, inotify on Linux), the engine trace and the LSP serv
 same on both hosts. [#659](https://github.com/yrashk/ycxx/issues/659)
 Measured on 2026-11-22 (Release ycxx, arm64 macOS, 18 cores) with a generated 1 MB file of 290
 modules and 11,311 functions (`playground/genbig.py`): a cold build takes 0.91 s, and changing
-one module's constant rebuilds in 0.80 s. The back end re-runs only the two functions that read
-the constant; the front end still re-analyses the whole file on any edit, about 0.5 s of that
+one module's constant rebuilds in 0.80 s, and a comment or blank lines in 0.21 s, because an edit
+that changes no token stops before analysis. The back end re-runs only the two functions that read
+the constant; a changed token still re-analyses the whole file, about 0.5 s of the 0.80 s
 ([#938](https://github.com/yrashk/ycxx/issues/938), [#947](https://github.com/yrashk/ycxx/issues/947)).
 
 **See what the engine does.** `ycxx cxx --trace-engine a.cpp` (or `YCXX_TRACE_ENGINE=stream`)
@@ -564,7 +571,9 @@ reused, verified green or cut off early, how long it took and on which worker, a
 memory each cell allocated and retains, with sums per subtree, per query kind and per build. A second build
 shows everything reused. A compile error is marked red at the cell where it starts, and its
 message is shown up to the root. Diagnostic details include the file, line and column where
-available. `--trace-engine=interactive` opens a browser of the trace after the compile: a tree
+available. `--trace-engine=interactive` opens a browser of the trace that fills in while the
+compile runs, through the daemon or in-process: cells appear as they start, with their time so far,
+and settle as they end, while the view follows the newest activity. It has a tree
 with each function's IR and assembly, a timeline of the pool's workers, and filters. It follows
 the terminal's size and takes the mouse: click to select, fold and sort by a column, use the
 wheel to scroll, and drag to resize the pane. It copies a cell, a subtree, selected rows or any

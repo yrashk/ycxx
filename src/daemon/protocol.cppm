@@ -42,7 +42,9 @@ struct LspOut {
 };
 // A request's engine events (#245), a complete subtree per batch (`trace::Collector`): to the
 // client of a `compile` that asked, before its `done`, and to every watcher. A request's last
-// batch has no events and `end` set.
+// batch has no events and `end` set. Live (#939), for a client or watcher that asked: what came
+// since the last batch (`trace::Live`), frames' starts included, in the order it came, sent on the
+// request's tick while it runs.
 struct TraceBatch {
   std::uint64_t request = 0;      // the daemon's number for the request
   std::string label;              // what it is: `cxx a.cpp -o a`, `lsp a.cpp`
@@ -50,12 +52,16 @@ struct TraceBatch {
   std::vector<trace::Event> events;
   bool end = false;
   std::uint64_t ended_ns = 0;     // with `end`
-  trace::BuildMemory memory;      // with `end`: the process's bytes then, and their peak meanwhile (#274)
+  trace::BuildMemory memory;      // with `end`: the process's bytes then, and their peak meanwhile (#274); live, so far
+  bool live = false;              // events as they came, not subtrees
+  std::uint64_t sent_ns = 0;      // live: when it was sent, on the events' clock (where running cells' times reach)
 };
 // `watch{values}` (#245) attaches to the daemon: answered by an empty `watch`, then a `trace`
 // frame for each batch of every request it serves, until either end closes the connection.
+// `live`: its batches are live ones (#939).
 struct WatchRequest {
   bool values = false;
+  bool live = false;
 };
 struct WatchAck {};
 // `await_change` (`ycxx cxx --watch`, #245) is answered by `changed` once the file table's revision

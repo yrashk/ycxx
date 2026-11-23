@@ -35,6 +35,11 @@ using sema::u8;
 using ast::NameId;
 using ast::NodeId;
 
+struct DeclAttributes {
+  bool hidden_visibility = false;
+  bool weak = false;
+};
+
 // [dcl.spec]: what a decl-specifier-seq says.
 struct DeclSpec {
   u32 begin = 0;
@@ -49,7 +54,7 @@ struct DeclSpec {
   bool is_constinit = false;
   std::vector<ast::AnnotationSema> annotations;
   bool is_typedef = false;  // [dcl.typedef]: the declarators declare typedef-names
-  bool hidden_visibility = false;
+  DeclAttributes attributes;
   std::optional<u32> virtual_at;
   std::optional<u32> mutable_at;
   // An elaborated-type-specifier ([dcl.type.elab]): the class it names, and where its name is.
@@ -106,7 +111,7 @@ struct Declarator {
   std::optional<u32> replay_template_args_at;  // written arguments with deferred substitution checks
   // A GNU asm label, `__asm("_fopen")`: the symbol as written (docs/EXTENSIONS.md); empty if none.
   std::string asm_label;
-  bool hidden_visibility = false;
+  DeclAttributes attributes;
   std::vector<ast::AnnotationSema> annotations;
   bool pack = false;  // `T... x`: a declarator-id after an ellipsis ([dcl.fct]/23, [temp.param]/17)
   bool ok = true;
@@ -556,7 +561,7 @@ public:
     for (;;) {
       // A standard attribute after a decl-specifier-seq appertains to its type ([dcl.spec.general]).
       const bool annotation_type_context = in_type_id || pos() != d.begin;
-      if (skip_attributes(&d.hidden_visibility, attr_gnu, nullptr, annotation_type_context)) continue;
+      if (skip_attributes(&d.attributes, attr_gnu, nullptr, annotation_type_context)) continue;
       Tk k = kind();
       switch (k) {
       case Tk::kw_void: ++n_void; break;
@@ -966,7 +971,7 @@ public:
     u32 template_args_at = 0;
     std::optional<u32> replay_template_args_at;
     bool pack = false;
-    bool hidden_visibility = false;
+    DeclAttributes attributes;
     std::vector<ast::AnnotationSema> annotations;
     std::vector<Suffix> suffixes;
   };
@@ -1032,10 +1037,10 @@ public:
         !(d.qualified && d.scope.type && s_->types().is_class(*d.scope.type)))
       d.ok = check_named_ref_qualifier(d) && d.ok;
     if (d.ok) {
-      skip_attributes(&d.hidden_visibility, attr_gnu);
+      skip_attributes(&d.attributes, attr_gnu);
       if (!abstract) {
         d.asm_label = asm_label(d.ok);
-        skip_attributes(&d.hidden_visibility, attr_gnu);
+        skip_attributes(&d.attributes, attr_gnu);
       }
     }
     // Prototype names support type and constant-expression checking inside this
@@ -1054,10 +1059,10 @@ public:
     return false;
   }
 
-  // Attribute-specifiers ([dcl.attr.grammar]) and GNU `__attribute__((…))`. Keep an explicit
-  // hidden visibility attribute when requested by the declaring context.
+  // Attribute-specifiers ([dcl.attr.grammar]) and GNU `__attribute__((…))`. Keep ABI
+  // attributes when requested by the declaring context.
   static constexpr int attr_std = 1, attr_gnu = 2;
-  int skip_attributes(bool* hidden_visibility = nullptr, int visibility_forms = attr_std | attr_gnu,
+  int skip_attributes(DeclAttributes* declaration = nullptr, int declaration_forms = attr_std | attr_gnu,
                       std::vector<ast::AnnotationSema>* annotations = nullptr, bool annotation_type_context = false,
                       int forms = attr_std | attr_gnu) {
     int any = 0;
@@ -1089,8 +1094,8 @@ public:
         if (auto mixed = annotation_in_attribute_list(begin, index()))
           s_->diag(*mixed - begin_, Diag::annotation_mixed_list);
       }
-      if (hidden_visibility && !*hidden_visibility && (form & visibility_forms) && closed)
-        *hidden_visibility = hidden_visibility_in_attributes(begin, index(), std_attr);
+      if (declaration && (form & declaration_forms) && closed)
+        read_decl_attributes(*declaration, begin, index(), std_attr);
     }
   }
 
@@ -1141,31 +1146,36 @@ public:
     if (!expect(Tk::r_square) || !expect(Tk::r_square)) seek(limit);
   }
 
-  bool hidden_visibility_in_attributes(u32 begin, u32 end, bool scoped) const {
+  void read_decl_attributes(DeclAttributes& attributes, u32 begin, u32 end, bool scoped) const {
     auto token = [&](u32 at) { return r_->tokens[at].kind; };
     auto named = [&](u32 at, std::string_view plain, std::string_view reserved) {
       if (token(at) != Tk::identifier) return false;
       const auto spelling = r_->name(r_->tokens[at]);
       return spelling == plain || spelling == reserved;
     };
-    if (end - begin < 4 || token(begin + 1) != token(begin) || token(end - 2) != token(end - 1)) return false;
-    auto matches = [&](u32 first, u32 limit) {
+    if (end - begin < 4 || token(begin + 1) != token(begin) || token(end - 2) != token(end - 1)) return;
+    auto read = [&](u32 first, u32 limit) {
       if (scoped) {
         if (limit - first < 2 || !named(first, "gnu", "__gnu__") || token(first + 1) != Tk::coloncolon)
-          return false;
+          return;
         first += 2;
       }
-      if (limit - first < 4 || !named(first, "visibility", "__visibility__") ||
+      if (limit - first == 1 && named(first, "weak", "__weak__")) {
+        attributes.weak = true;
+        return;
+      }
+      if (attributes.hidden_visibility || limit - first < 4 || !named(first, "visibility", "__visibility__") ||
           token(first + 1) != Tk::l_paren || token(first + 2) != Tk::string_lit || token(limit - 1) != Tk::r_paren)
-        return false;
+        return;
       const auto& value = r_->literal(r_->tokens[first + 2]);
       for (u32 at = first + 3; at < limit - 1; ++at)
-        if (token(at) != Tk::string_lit || !r_->tokens[at].has(lex::tok_flag::continued)) return false;
-      return value.encoding == lex::Encoding::ordinary && value.ud_suffix == lex::no_name && !value.bad &&
-             std::ranges::equal(value.units, std::string_view("hidden"));
+        if (token(at) != Tk::string_lit || !r_->tokens[at].has(lex::tok_flag::continued)) return;
+      attributes.hidden_visibility =
+          value.encoding == lex::Encoding::ordinary && value.ud_suffix == lex::no_name && !value.bad &&
+          std::ranges::equal(value.units, std::string_view("hidden"));
     };
 
-    // Only complete attributes at the list's top level can give the declaration visibility.
+    // Only complete attributes at the list's top level affect the declaration.
     u32 entry = begin + 2;
     const u32 limit = end - 2;
     std::vector<Tk> closing;
@@ -1176,19 +1186,19 @@ public:
       case Tk::l_brace: closing.push_back(Tk::r_brace); break;
       case Tk::l_splice: closing.push_back(Tk::r_splice); break;
       case Tk::r_square: case Tk::r_paren: case Tk::r_brace: case Tk::r_splice:
-        if (closing.empty() || closing.back() != kind) return false;
+        if (closing.empty() || closing.back() != kind) return;
         closing.pop_back();
         break;
       case Tk::comma:
         if (closing.empty()) {
-          if (matches(entry, at)) return true;
+          read(entry, at);
           entry = at + 1;
         }
         break;
       default: break;
       }
     }
-    return closing.empty() && matches(entry, limit);
+    if (closing.empty()) read(entry, limit);
   }
 
   u32 past_attribute_specifier(u32 ahead) const {
@@ -1475,7 +1485,7 @@ public:
       ok = false;
     }
     if (l.named)  // appertains to the declarator-id ([dcl.meaning.general]/1)
-      skip_attributes(&l.hidden_visibility, attr_std | attr_gnu, &l.annotations);
+      skip_attributes(&l.attributes, attr_std | attr_gnu, &l.annotations);
     for (;;) {
       if (is(Tk::l_paren) && !abstract && in_params_ == 0 && !params_ahead()) break;  // `T x(args)`: an initializer
       if (is(Tk::l_paren)) {
@@ -1936,7 +1946,7 @@ public:
     d.template_args_at = l.template_args_at;
     d.replay_template_args_at = l.replay_template_args_at;
     d.pack = l.pack;
-    d.hidden_visibility = l.hidden_visibility;
+    d.attributes = l.attributes;
     d.annotations = std::move(l.annotations);
     return t;
   }

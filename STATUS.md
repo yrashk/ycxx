@@ -599,9 +599,11 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
 - `ycxx.pipeline` (`src/pipeline/`): every stage is an engine query (#63), run by `client::cxx`
   through a `Session` (the engine, the interners and sema's world, alive together; in-process
   until the daemon, #96):
-  - `:front`: `TuFront(TU)`: the file's text as the engine's `FileText`, `pp` and `RegionItems`,
-    then `parse::Program` (item_sema, analyze_body) inside the one cell until contextual queries
-    (#16). Its diagnostics by byte offset, and the `TranslationUnit`: entities, function
+  - `:front`: `TuSema(TU)`: `PpTokens` (the region without token locations, expansion sites,
+    `space_before` flags or error details) and `RegionItems`, then `parse::Program` (item_sema,
+    analyze_body) inside the one cell until contextual queries (#16, #947). `TuFront(TU)` places
+    its messages in files from `pp`'s full region, so an edit that changes no token (a comment,
+    blank lines) stops at `PpTokens` and analysis does not run again (#947, slice 0). Its diagnostics by byte offset, and the `TranslationUnit`: entities, function
     definitions with their analysed bodies, variable definitions with their constants.
     `tu_unit(TU)` projects the unit, so a whitespace edit stops there.
   - `:back`, per function `F`: `function_source(TU, F)` (a projection that backdates),
@@ -630,7 +632,7 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
     libycxx's link options force undefined (`___ycxx_allocation_table_anchor`, read from its
     `ycxx-link-options`). Members are selected as for any Darwin archive, so `<cstdio>` programs
     link against libycxx's linkage marker, and libycxx-abi's `__cxa_*` come before libc++abi's.
-    A trivial program grows from 17 KB to 118 KB with the allocation table. Archive operands are
+    A trivial program grows from 17 KB to 118 KB with the allocation table. Configured runtime archives are
     read once per process while their size and modification time hold, and every program's
     inputs share the bytes (`obj::archive::input`, fingerprinted once). `-nostdlib++` links
     without the runtime. `unit.darwin_runtime`, `own/headers/cstdio.run.cpp` and
@@ -803,10 +805,16 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
   [Design](docs/design/linux-inline-functions.md) · [#422](https://github.com/yrashk/ycxx/issues/422)
 - Explicit GNU `visibility("hidden")` follows ordinary external namespace-scope functions across
   redeclarations. On x86-64 ELF, inline definitions combine `STB_WEAK` with `STV_HIDDEN`.
-  Ordinary non-inline definitions and referenced declarations combine `STB_GLOBAL` with
-  `STV_HIDDEN`. `unit.linux_inline` checks both scoped attribute spellings, symbol metadata,
+  Ordinary non-inline definitions and referenced declarations combine their symbol binding
+  with `STV_HIDDEN`. `unit.linux_inline` checks both scoped attribute spellings, symbol metadata,
   and cross-unit address identity with the native and host linkers in both object orders.
   [#602](https://github.com/yrashk/ycxx/issues/602)
+- On Linux x86-64, GNU `weak` on an ordinary external namespace-scope function declaration
+  gives its non-inline definition `STB_WEAK`. This includes qualified definitions such as
+  libycxx's `std::is_debugger_present`. The ELF linker selects a strong definition in either
+  input order and diagnoses duplicate strong definitions. Explicit GNU visibility can
+  independently give the symbol `STV_HIDDEN`.
+  [Design](docs/design/linux-weak-functions.md) · [#937](https://github.com/yrashk/ycxx/issues/937)
 - On Linux x86-64, explicit GNU hidden visibility on any declaration of an ordinary external
   non-inline namespace-scope variable gives its ELF symbol `STB_GLOBAL` and `STV_HIDDEN`.
   This includes the C-linkage marker `__ycxx_linkage_static_v1` from the pinned libycxx runtime.
@@ -852,6 +860,10 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
   system linker, malformed and 64-bit indexes, and daemon equality and same-path replacement;
   `unit.darwin_inline` links an archive member with both linkers.
   [Design](docs/design/darwin-static-archives.md) · [#842](https://github.com/yrashk/ycxx/issues/842)
+- On both targets, the driver rereads explicit archive operands at request ingress and
+  fingerprints their bytes. This covers replacements with unchanged size and mtime.
+  Driver-appended Darwin runtime archives can reuse their process-local snapshots.
+  [#951](https://github.com/yrashk/ycxx/issues/951)
 - `ycxx archive -o lib.a [--] [object ...]` creates or replaces a regular GNU archive in process.
   It validates each member with the existing ELF object reader, copies its bytes, and indexes
   named nonlocal definitions, including weak and hidden definitions. Member basenames and
@@ -2661,6 +2673,22 @@ request it serves.
   filter, and `span_text`/`span_start` are in place. Tests: `unit.trace` (the spans of a real
   build, cells without spans, text, filter, JSON; mutation-checked) and `daemon.trace` (spans
   across the socket).
+- Live (#939): `Tracer::starts`/`started` report a frame's start where it opens its span (the
+  three span sites, cold, for tracers that ask: JSON and untraced builds pay nothing).
+  `trace::Live` buffers starts and ends under a lock held for the append alone; `trace::Tee`
+  feeds a batch collector and a live one. `Tree::apply` places events in any order (a child
+  before its parent waits, unseen, until it comes or `settle`; children in id order; identical
+  instants folded and refolded locally around a change), keeps the summary incrementally, and
+  caches its rows per `version`; `Tree::add` places batches as they come. The daemon sends live
+  `trace` frames (`TraceBatch::live`, `sent_ns`, the memory so far) on the request's tick to a
+  client asking `compile::Trace::live` and to watchers asking `WatchRequest::live`. The client
+  runs a browsed compile on a thread of its own (`browse_compile`), and the browser draws on a
+  timer, only when something changed, with following (`f`). Tests: `unit.trace` (starts, ends,
+  orphans, `is:running`; 180 simulated streams in the engine's order, shuffled and backwards,
+  every step's sums, depths, folding and summary checked, each ending equal to the batches'
+  tree, view and frames; two requests interleaved; following), `daemon.process` (`live_trace`:
+  a build parked at its checkpoint is already in the browser through the daemon; mutation-checked),
+  `daemon.trace_tui` (the first frame is live).
 - Not yet: the analysed tree as a value, and stages linked to source (#254); per-resumption
   spans, so a frame's waits are not drawn as work (#255).
 
