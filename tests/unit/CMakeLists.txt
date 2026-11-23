@@ -10,6 +10,9 @@ function(ycxxc_unit_test name source)
   add_test(NAME unit.${name} COMMAND unit_${name})
 endfunction()
 
+add_test(NAME unit.driver_queries
+  COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/driver_queries.py $<TARGET_FILE:ycxxc>)
+
 add_subdirectory(hash)
 add_subdirectory(ast)
 add_subdirectory(engine)
