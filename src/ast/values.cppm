@@ -172,6 +172,7 @@ enum class DepOp : u8 {
   has_unique_object_representations,
   reference_constructs_from_temporary,
   reference_converts_from_temporary,
+  alignof_type,  // replayed from the written dependent base argument
 };
 
 // A dependent operation (§5.5). The predicates take canonical qualified type operands.
