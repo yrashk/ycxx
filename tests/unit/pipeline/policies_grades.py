@@ -249,21 +249,22 @@ with tempfile.TemporaryDirectory() as directory:
               int requested;
               int capped = requested < 4 ? requested : 4;
             };
+            constexpr int uses = 1;
             template<bool Wide> struct Profile {
               static constexpr int uses = RequestedLimit{Wide ? 2 : 1}.capped;
             };
             template<class Payload> struct NativeConfig : Profile<site::Wide<Payload>> {};
-            using Active = NativeConfig<int>;
-            static_assert(Active::uses == 2);
+            struct Active : NativeConfig<int> { static constexpr int limit = uses; };
+            static_assert(Active::limit == 2);
             static_assert(NativeConfig<char>::uses == 1);
-            using Scope = fx::budget<Send, Active::uses>;
-            using Bound = fx::set<fx::at_most<Send, Active::uses>>;
+            using Scope = fx::budget<Send, Active::limit>;
+            using Bound = fx::set<fx::at_most<Send, Active::limit>>;
             [[=fx::trusted_contract<One>{}]] int transmit(Scope& scope, int value) noexcept {
               scope.spend();
               return value;
             }
             [[=fx::contract<Bound>{}]] int dispatch(Scope& scope) noexcept {
-              for (int i = Active::uses; i > 0; --i) transmit(scope, i);
+              for (int i = Active::limit; i > 0; --i) transmit(scope, i);
               return 2;
             }
             int main(int argc, char**) {
@@ -273,7 +274,7 @@ with tempfile.TemporaryDirectory() as directory:
               return 0;
             }
         """)
-        too_many = write("mediated_overuse.cpp", mediated.read_text().replace("i = Active::uses;", "i = 3;"))
+        too_many = write("mediated_overuse.cpp", mediated.read_text().replace("i = Active::limit;", "i = 3;"))
         error = "exceeds its usage grade of 2"
         resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
         trap_signals = (-signal.SIGILL, -signal.SIGTRAP) if mac_host else (-signal.SIGILL,)

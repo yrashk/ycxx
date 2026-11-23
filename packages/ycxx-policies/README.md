@@ -475,7 +475,7 @@ struct SiteConfig {
 ```
 
 You can reuse one configuration template for several limits. Here an aggregate's default
-member initializer caps each requested limit before the policy uses it.
+member initializer caps each request, and the deployment inherits the approved limit.
 
 ```cpp
 struct Limits {
@@ -485,10 +485,12 @@ struct Limits {
 
 template<unsigned Requested>
 struct SiteProfile {
-  static constexpr unsigned slots = Limits{Requested}.approved;
+  static constexpr unsigned approved = Limits{Requested}.approved;
 };
 
-using SiteConfig = SiteProfile<2u>;
+struct SiteConfig : SiteProfile<2u> {
+  static constexpr unsigned slots = approved;
+};
 ```
 
 The same `SiteConfig::slots` can supply the upper limit in a counted unsigned loop.
