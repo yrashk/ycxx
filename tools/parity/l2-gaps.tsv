@@ -2,3 +2,4 @@
 # <operation>	<back end missing it>	<parity issue>	<note>
 va_arg	aarch64	#647	by design: Apple arm64 expands va_arg into loads and a store in `lower`
 invoke	aarch64	#648	the hosted catch-all requires Darwin call-site tables and a catch personality
+int3	aarch64	#190	by design: this operation is the x86 breakpoint instruction

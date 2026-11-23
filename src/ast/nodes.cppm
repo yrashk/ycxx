@@ -374,6 +374,11 @@ struct IfConsteval {
   Child else_;
 };
 
+// A statement-position asm-declaration ([dcl.asm]) with an ordinary string.
+struct Asm {
+  ConstId text;
+};
+
 // [dcl.pre]: `static_assert(condition, message)`, checked when it was analysed. The condition is
 // converted to bool; the message is a string literal's `VString`, or none.
 struct StaticAssert {
@@ -574,7 +579,7 @@ using Nodes = closed_list<Literal, DeclRef, Paren, Unary, Binary, OrderedBinary,
                           DepName, CondDecl, Switch, Case, Default, Label, Goto, BuiltinCall, Lambda, DefaultArg,
                           StaticInit, StaticVar, NewObject, DeleteObject, VariadicBuiltin, AssignmentCall,
                           NewArray, DeleteArray, DelegatingInit, VirtualMemberCall, Throw, TryBlock, Handler,
-                          DefaultMemberInit, ExplicitDestroy, PeerRootInit, DynamicCastVoid, DynamicCastPointer>;
+                          DefaultMemberInit, ExplicitDestroy, PeerRootInit, DynamicCastVoid, DynamicCastPointer, Asm>;
 
 static_assert(Nodes::size < max_node_kinds);
 

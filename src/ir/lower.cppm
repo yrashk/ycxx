@@ -1135,6 +1135,17 @@ class Lowering {
         b_.emit(Op2::unreachable, {}, {}, {}, 0, {}, o);
         return {};
       }
+      case Op::asm_: {
+        const ConstId text{std::uint32_t(imms[0])};
+        constexpr std::uint32_t int3[] = {'i', 'n', 't', '3', 0};
+        if constexpr (requires { layout_.ordinary_string_is(text, int3); }) {
+          if (config_.sysv_amd64 && nd.nopnd == 1 && nd.nres == 1 && layout_.ordinary_string_is(text, int3)) {
+            out(n, 0, emit1(Op2::int3, T::state, {in(n, 0)}));
+            return {};
+          }
+        }
+        return fail("unsupported asm instruction");
+      }
       case Op::unreachable: {
         auto o = origin();
         b_.emit(Op2::unreachable, {}, {}, {}, 0, {}, o);
