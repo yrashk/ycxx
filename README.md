@@ -345,6 +345,9 @@ Both targets support named nested enum definitions followed by ordinary fields i
 member declaration, including scoped enum field initializers. [#500](https://github.com/yrashk/ycxx/issues/500)
 An enum with a fixed underlying type keeps that layout while its enumerators instantiate other
 enum definitions. [#897](https://github.com/yrashk/ycxx/issues/897)
+A named scoped enum in a class template has a fixed type available for layout. Looking up an
+enumerator replays the full list with that specialization's template arguments.
+[#893](https://github.com/yrashk/ycxx/issues/893)
 Scoped enumerators stay in their enumeration's scope, so class members and class template
 members may reuse their names. [#725](https://github.com/yrashk/ycxx/issues/725)
 Nested unscoped enumerators conflict with other non-type members regardless of declaration order.
@@ -614,6 +617,8 @@ written default member initializer are value-initialized.
   Namespace-scope `constexpr` pointers to `void` can retain scalar and array element addresses.
   `__builtin_addressof`, used by libycxx's `std::addressof`, bypasses overloaded `operator&`.
   It supports runtime addresses and constant expressions such as a scalar global's address.
+  `__builtin_constant_p` reports whether it can prove a scalar or string operand constant
+  without executing it. [#1065](https://github.com/yrashk/ycxx/issues/1065)
   `__builtin_strlen`, used by libycxx's exception headers, scans character storage in constant
   expressions and native code. [#531](https://github.com/yrashk/ycxx/issues/531)
 - `extern "C"` functions from libSystem, including `printf` with integers, characters,

@@ -114,7 +114,7 @@ struct ConstantByteCapture {
 // Namespace-scope reference initialization cannot extend the lifetime of a temporary in the
 // startup function's frame (#367).
 bool materializes_temporary(const ast::Ast& ast, ast::NodeId n) {
-  if (n == ast::NodeId::none) return false;
+  if (n == ast::NodeId::none || ast.is<ast::ConstantProbe>(n)) return false;
   if (ast.is<ast::Materialize>(n)) return true;
   bool found = false;
   ast::dispatch<ast::Nodes>(ast::kind_of(n), [&]<class T>(std::type_identity<T>) {
@@ -1594,7 +1594,7 @@ class Gen {
   // with the caller's other evaluations, not unsequenced ([intro.execution]), so it is outside
   // any `useq` group.
   int effects(At a) {
-    if (a.id == NodeId::none) return 0;
+    if (a.id == NodeId::none || is<ast::ConstantProbe>(a)) return 0;
     if (is<ast::Assign>(a) || is<ast::ExplicitDestroy>(a)) return 2;
     if (is<ast::VariadicBuiltin>(a) && get<ast::VariadicBuiltin>(a).op != ast::VaOp::end) return 2;
     if (is<ast::Unary>(a)) {
@@ -1637,6 +1637,7 @@ class Gen {
     ast::QualType t = ei.type;
     if (in_.types.is<ast::TMemberPtr>(in_.types.canon(t))) unsupported(a, "with a pointer-to-member value");
     if (is<ast::Literal>(a)) return constant(t, get<ast::Literal>(a).value);
+    if (is<ast::ConstantProbe>(a)) return int_constant(t, get<ast::ConstantProbe>(a).proved);
     if (is<ast::Paren>(a)) return rvalue_or_void(child(a, get<ast::Paren>(a).operand));
     if (is<ast::DefaultArg>(a)) return pinned([&] { return rvalue_or_void(child(a, get<ast::DefaultArg>(a).arg)); });
     if (is<ast::ImplicitConversion>(a)) return conversion(a);
@@ -2092,6 +2093,7 @@ class Gen {
   // The scalar initialization may run after storage is acquired only when it cannot throw.
   // Calls and temporaries need an exception analysis or an EH cleanup edge ([expr.new]).
   bool nonthrowing_initializer(At a) {
+    if (is<ast::ConstantProbe>(a)) return true;
     if (is<ast::ImplicitConversion>(a) &&
         get<ast::ImplicitConversion>(a).conversion == ast::ConversionKind::user_defined) return false;
     if (!(is<ast::Literal>(a) || is<ast::DeclRef>(a) || is<ast::LocalRef>(a) || is<ast::This>(a) ||

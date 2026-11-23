@@ -1512,7 +1512,7 @@ private:
       std::string_view name = s_->spellings.name(operand[0].tok.payload);
       const bool variadic = lex::va_builtin(name).has_value();
       const auto* function = lex::builtin_function(name);
-      const bool ordinary = function && (function->type != 'l' ||
+      const bool ordinary = function && function->advertised && (function->type != 'l' ||
           ast::computes((*s_->config.target)[ast::Builtin::long_double].format));
       const auto* trait = lex::type_trait(name);
       const bool supported = (trait && trait->advertised) || lex::builtin_template(name) || ordinary || variadic;

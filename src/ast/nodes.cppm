@@ -159,6 +159,14 @@ struct BuiltinCall {
   [[=indeterminately_sequenced]] ChildList args;
 };
 
+// A folded __builtin_constant_p result. The operand is retained for expression analysis,
+// including noexcept, but is never executed.
+struct ConstantProbe {
+  ExprInfo info;
+  [[=sequenced]] Child operand;
+  bool proved;
+};
+
 // Variadic operations ([cstdarg.syn]). Operands are the normalized cursor addresses.
 enum class VaOp : u8 { start, arg, copy, end };
 struct VariadicBuiltin {
@@ -579,7 +587,8 @@ using Nodes = closed_list<Literal, DeclRef, Paren, Unary, Binary, OrderedBinary,
                           DepName, CondDecl, Switch, Case, Default, Label, Goto, BuiltinCall, Lambda, DefaultArg,
                           StaticInit, StaticVar, NewObject, DeleteObject, VariadicBuiltin, AssignmentCall,
                           NewArray, DeleteArray, DelegatingInit, VirtualMemberCall, Throw, TryBlock, Handler,
-                          DefaultMemberInit, ExplicitDestroy, PeerRootInit, DynamicCastVoid, DynamicCastPointer, Asm>;
+                          DefaultMemberInit, ExplicitDestroy, PeerRootInit, DynamicCastVoid, DynamicCastPointer, Asm,
+                          ConstantProbe>;
 
 static_assert(Nodes::size < max_node_kinds);
 

@@ -135,11 +135,12 @@ constexpr const TypeTraitInfo* type_trait(std::string_view name) {
 // from `<math.h>`, `type` is the type they take and give: 'f' float, 'd' double, 'l' long
 // double. `__builtin_inf*` and `__builtin_huge_val*` are +infinity, `__builtin_nan*(s)` the quiet
 // NaN whose payload `s` spells (as `strtoull` reads it), `__builtin_fabs*(x)` |x|.
-enum class BuiltinFunction : std::uint8_t { fabs, inf, huge_val, nan, addressof, strlen, trap };
+enum class BuiltinFunction : std::uint8_t { fabs, inf, huge_val, nan, addressof, strlen, trap, constant_p };
 struct BuiltinFunctionInfo {
   std::string_view name;
   BuiltinFunction function;
   char type = 0;
+  bool advertised = true;
 };
 inline constexpr std::array builtin_functions{
     BuiltinFunctionInfo{"__builtin_addressof", BuiltinFunction::addressof},
@@ -157,6 +158,7 @@ inline constexpr std::array builtin_functions{
     BuiltinFunctionInfo{"__builtin_nanl", BuiltinFunction::nan, 'l'},
     BuiltinFunctionInfo{"__builtin_strlen", BuiltinFunction::strlen},
     BuiltinFunctionInfo{"__builtin_trap", BuiltinFunction::trap},
+    BuiltinFunctionInfo{.name = "__builtin_constant_p", .function = BuiltinFunction::constant_p, .advertised = false},
 };
 constexpr const BuiltinFunctionInfo* builtin_function(std::string_view name) {
   for (const BuiltinFunctionInfo& b : builtin_functions)
@@ -181,8 +183,8 @@ constexpr std::optional<VaBuiltin> va_builtin(std::string_view name) {
 // (docs/EXTENSIONS.md, #248): a call of one is diagnosed as not supported, its arguments skipped.
 // Any other `__builtin_` name is an ordinary name, undeclared unless declared, so a
 // requires-expression probing it is unsatisfied ([expr.prim.req]).
-inline constexpr std::array<std::string_view, 3> lacking_builtins{
-    "__builtin_alloca", "__builtin_constant_p", "__builtin_expect",
+inline constexpr std::array<std::string_view, 2> lacking_builtins{
+    "__builtin_alloca", "__builtin_expect",
 };
 constexpr bool lacking_builtin(std::string_view name) { return std::ranges::contains(lacking_builtins, name); }
 

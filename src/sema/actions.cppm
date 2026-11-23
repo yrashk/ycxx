@@ -124,8 +124,11 @@ public:
   virtual bool may_have_virtual_layouts() { return true; }
   // An omitted field's initializer, analysed at its declaration into the requesting builder.
   // `NodeId::none` records a diagnosed error. No answer means this context cannot replay it.
-  // A required base selects the call-free parenthesized aggregate form.
-  virtual std::optional<NodeId> replay_default_member(Sema&, EntityId, EntityId = EntityId::none) { return std::nullopt; }
+  // A required base selects the call-free parenthesized aggregate form. The fallback returns
+  // the literal from folding a template specialization's scalar initializer.
+  virtual std::optional<NodeId> replay_default_member(Sema&, EntityId, EntityId = EntityId::none, bool = false) {
+    return std::nullopt;
+  }
   virtual std::optional<NodeId> replay_function_default(Sema&, const ast::DefaultArg&, EntityId, QualType, u32) {
     return std::nullopt;
   }
@@ -157,6 +160,9 @@ public:
   // Inside the enumerator list of an enumeration this unit is defining: its record so far, which
   // is published only after the list (#156).
   virtual const EnumRec* defining_enum(EntityId) { return nullptr; }
+  // A scoped member enum's declaration supplies its fixed type. Looking up its enumerators
+  // requires the definition ([temp.inst]). False means its instantiation was diagnosed.
+  virtual bool require_enum_definition(EntityId) { return true; }
   // Scopedness is fixed even when the enum's enumerator list is still open.
   virtual std::optional<bool> defining_enum_is_scoped(EntityId e) {
     if (const EnumRec* record = defining_enum(e)) return record->scoped;
@@ -1091,7 +1097,8 @@ public:
       diag(at_, Diag::not_a_type, no_name());
       return;
     }
-    using_enums_.push_back({scopes_.size() - 1, types().enum_of(t)});
+    const EntityId enumeration = types().enum_of(t);
+    if (q_->require_enum_definition(enumeration)) using_enums_.push_back({scopes_.size() - 1, enumeration});
   }
 
   // ------------------------------------------------------------ concepts ([temp.concept], [temp.constr])
@@ -3104,9 +3111,11 @@ public:
   }
   Ex element_default(const Element& e, bool value, bool replay, u32 begin, u32 end,
                      EntityId required_base = EntityId::none) {
-    if ((replay || required_base != EntityId::none) && e.default_member != EntityId::none) {
-      if (auto init = q_->replay_default_member(*this, e.default_member, required_base)) {
+    const bool fallback = !replay && required_base == EntityId::none;
+    if (e.default_member != EntityId::none && (!fallback || e.init == ConstId::none)) {
+      if (auto init = q_->replay_default_member(*this, e.default_member, required_base, fallback)) {
         if (*init == NodeId::none) return {NodeId::none, begin, end};
+        if (fallback) return {*init, begin, end, {Types::unqualified(e.type), ValueCategory::prvalue, 0}};
         ExprInfo info{e.type, ValueCategory::prvalue, 0};
         // A named declaration in a template is also a newly supported replay.
         if ((!replay_default_members_ || templated()) && required_base == EntityId::none &&
@@ -5201,6 +5210,7 @@ public:
   void check_immediate_addresses(NodeId root, u32 offset = 0) {
     if (!has_immediate_addresses_ || root == NodeId::none) return;
     auto check = [&](this const auto& self, const ast::Red& node) -> void {
+      if (node.is<ast::ConstantProbe>()) return;
       if (node.is<ast::DefaultMemberInit>()) return;  // checked where its source was replayed
       if ((node.is<ast::Declarator>() || node.is<ast::LocalVar>() || node.is<ast::StaticVar>()) &&
           constant_immediate_initializers_.contains(node.offset())) return;
@@ -5654,6 +5664,8 @@ public:
         if (d.name == name && d.sema.kind == ast::DeclKind::enumerator && d.sema.entity != EntityId::none &&
             w_->entities.rec(d.sema.entity).scope == e)
           return enumerator_in_list(d, begin, end);
+    } else if (!q_->require_enum_definition(e)) {
+      return Ex{NodeId::none, begin, end};
     }
     if (const EnumRec* r = enum_rec(e))
       for (const EnumeratorRec& x : r->enumerators)
@@ -6746,6 +6758,7 @@ public:
     const auto root = b_->commit(ast::Child{operand.id, 0});
     bool supported = true;
     auto visit = [&](this const auto& self, const ast::Red& node) -> void {
+      if (node.is<ast::ConstantProbe>()) return;
       if (!supported) return;
       supported = supported_operation(node);
       if (supported) node.for_each_child(self);
@@ -7191,6 +7204,105 @@ public:
     return node(ast::BuiltinCall{info, op, b_->list({at(arg, begin)})}, begin, end, info);
   }
 
+  // Only send closed, read-only expressions to the fresh constant evaluator. In particular
+  // a probe cannot instantiate a speculative callee or run a write in a constexpr frame.
+  bool constant_probe_safe(const ast::Red& expression) {
+    if (expression.is<ast::Literal>() || expression.is<ast::ConstantProbe>()) return true;
+    if (expression.is<ast::ValueInit>()) return types().is_scalar(expression.get<ast::ValueInit>().info.type);
+    const auto known_scalar = [&](QualType t) {
+      t = types().canonical(t);
+      return Types::is_const(t) && !Types::is_volatile(t) &&
+          (types().is_arithmetic(t) || types().is_enum(t) || types().is(t, Builtin::nullptr_t));
+    };
+    if (expression.is<ast::LocalRef>()) {
+      const auto ref = expression.get<ast::LocalRef>();
+      return known_scalar(ref.info.type) && local_values_[ref.local].has_value();
+    }
+    if (expression.is<ast::DeclRef>()) {
+      const auto ref = expression.get<ast::DeclRef>();
+      if (ref.entity == EntityId::none || ref.reference || !known_scalar(ref.info.type)) return false;
+      const auto& entity = w_->entities.rec(ref.entity);
+      return entity.templ == EntityId::none &&
+          (entity.scope == EntityId::none || w_->entities.rec(entity.scope).kind == EntityKind::namespace_);
+    }
+    if (expression.is<ast::Unary>()) {
+      using enum ast::UnaryOp;
+      switch (expression.get<ast::Unary>().op) {
+      case plus: case minus: case not_: case compl_: break;
+      default: return false;
+      }
+    } else if (expression.is<ast::ImplicitConversion>()) {
+      using enum ast::ConversionKind;
+      switch (expression.get<ast::ImplicitConversion>().conversion) {
+      case lvalue_to_rvalue: case integral: case floating: case floating_integral:
+      case boolean: case null_pointer: case qualification: case array_to_pointer: break;
+      default: return false;
+      }
+    } else if (!expression.is<ast::Paren>() && !expression.is<ast::Binary>() &&
+               !expression.is<ast::OrderedBinary>() && !expression.is<ast::Conditional>()) {
+      return false;
+    }
+    bool safe = true;
+    expression.for_each_child([&](const ast::Red& child) { safe = safe && constant_probe_safe(child); });
+    return safe;
+  }
+
+  std::optional<ConstId> constant_probe_value(Ex operand) {
+    while (const auto paren = as<ast::Paren>(operand))
+      operand = {paren->operand.id, operand.begin + paren->operand.at, operand.end, paren->info};
+    if (const auto lit = as<ast::Literal>(operand)) return lit->value;
+    if (!types().is_scalar(operand.type()) && !types().is_floating(operand.type())) return std::nullopt;
+    const ExprInfo boolean{builtin(Builtin::bool_), ValueCategory::prvalue, 0};
+    const auto child = [&](Child expr, ExprInfo info) {
+      return Ex{expr.id, operand.begin + expr.at, operand.end, info};
+    };
+    if (const auto logical = as<ast::OrderedBinary>(operand);
+        logical && (logical->op == ast::OrderedOp::logical_and || logical->op == ast::OrderedOp::logical_or)) {
+      const auto lhs = constant_probe_value(child(logical->lhs, boolean));
+      if (lhs && ins().values.is<ast::VInt>(*lhs)) {
+        const bool truth = ins().values.get<ast::VInt>(*lhs).bits.lo != 0;
+        return truth == (logical->op == ast::OrderedOp::logical_or)
+            ? lhs : constant_probe_value(child(logical->rhs, boolean));
+      }
+      return std::nullopt;
+    }
+    if (const auto cond = as<ast::Conditional>(operand)) {
+      const auto choice = constant_probe_value(child(cond->condition, boolean));
+      if (!choice || !ins().values.is<ast::VInt>(*choice)) return std::nullopt;
+      return constant_probe_value(child(ins().values.get<ast::VInt>(*choice).bits.lo ? cond->then_ : cond->else_, cond->info));
+    }
+    const auto root = b_->commit(ast::Child{operand.id, 0});
+    if (!constant_of || !constant_probe_safe(ast::Red(ins().ast, root.id, operand.begin))) return std::nullopt;
+    const auto diagnostics = diag_count();
+    auto value = constant_of(operand);
+    if (diag_count() != diagnostics) {
+      truncate_diags(diagnostics);
+      return std::nullopt;
+    }
+    return value;
+  }
+
+  Ex builtin_constant_probe(Ex operand, u32 begin, u32 end) {
+    const QualType result = builtin(Builtin::int_);
+    if (!operand.ok()) return {NodeId::none, begin, end};
+    if (dependent(operand)) return dependent_node({operand}, begin, end, result);
+    if (address_set(operand) || is_bound_member(operand)) return rvalue(operand);
+    if (!operand.glvalue() && !check_destructor_access(operand.type(), operand.begin))
+      return {NodeId::none, begin, end};
+
+    // GNU constantness is narrower than the set of C++ constant values. Ordinary
+    // object and function addresses are not one of the folded result categories.
+    bool proved = false;
+    if (const auto value = constant_probe_value(operand)) {
+      const auto& values = ins().values;
+      proved = values.is<ast::VInt>(*value) || values.is<ast::VFloat>(*value) || values.is<ast::VNullptr>(*value) ||
+          values.is<ast::VString>(*value);
+      if (values.is<ast::VLvalue>(*value)) proved = values.is<ast::VString>(values.get<ast::VLvalue>(*value).base);
+    }
+    const ExprInfo info{result, ValueCategory::prvalue, 0};
+    return node(ast::ConstantProbe{info, at(operand, begin), proved}, begin, end, info);
+  }
+
   // Builtins with ordinary expression arguments (docs/EXTENSIONS.md).
   Ex builtin_call(const lex::BuiltinFunctionInfo& b, std::vector<Ex> args, u32 begin, u32 end) {
     using enum lex::BuiltinFunction;
@@ -7207,6 +7319,10 @@ public:
       if (!builtin_arity(1, args.size(), begin)) return {NodeId::none, begin, end};
       QualType param = types().pointer(types().add_cv(builtin(Builtin::char_), Cv::const_));
       return builtin_value_call(ast::BuiltinOp::strlen, builtin(w_->target.size_type), param, args.front(), begin, end);
+    }
+    if (b.function == constant_p) {
+      if (!builtin_arity(1, args.size(), begin)) return {NodeId::none, begin, end};
+      return builtin_constant_probe(args.front(), begin, end);
     }
     std::size_t want = b.function == fabs || b.function == nan ? 1 : 0;
     if (!builtin_arity(want, args.size(), begin)) return {NodeId::none, begin, end};
@@ -7229,7 +7345,8 @@ public:
     switch (b.function) {
       case addressof:
       case trap:
-      case strlen: std::unreachable();  // Handled before floating type selection.
+      case strlen:
+      case constant_p: std::unreachable();  // Handled before floating type selection.
       case inf:
       case huge_val:
         return literal(t, w_->values.floating(t, std::numeric_limits<double>::infinity()), ValueCategory::prvalue, begin, end);

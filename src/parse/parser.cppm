@@ -4022,9 +4022,12 @@ public:
           bump();
           std::vector<Ex> args;
           int saved = std::exchange(angle_, 0);
+          const bool probe = bf->function == lex::BuiltinFunction::constant_p;
+          s_->unevaluated += probe;
           if (!is(Tk::r_paren))
             do args.push_back(assignment_expression());
             while (accept(Tk::comma));
+          s_->unevaluated -= probe;
           angle_ = saved;
           if (!expect(Tk::r_paren)) return {NodeId::none, begin, pos()};
           Ex r = s_->builtin_call(*bf, std::move(args), begin, pos());
