@@ -1,7 +1,8 @@
 # Disabling runtime type information
 
-The CLI and compilation database share `-fno-rtti`. The effective mode
-distinguishes source configurations. Its flag occupies another bit of the
+The CLI and compilation database share `-fno-rtti` and `-frtti`. The last
+switch takes effect, and `-frtti` selects the default mode. The effective
+mode distinguishes source configurations. Its flag occupies another bit of the
 persisted mode byte, so earlier values decode with RTTI enabled. RTTI feature
 macros follow the existing implementation coverage policy.
 
