@@ -99,7 +99,6 @@ struct Evaluated {
 class Evaluator {
   struct ByteEvaluation {
     irgen::ConstantByteCapture capture;
-    QualType receiver_type;
     interp::ByteCapture result{ir::NodeId{ir::none}};
   };
 
@@ -125,8 +124,13 @@ public:
     if (!receiver.ok()) return std::nullopt;
     if (!receiver.glvalue()) receiver = s_->materialize(receiver, receiver.type(), false);
     if (!receiver.ok()) return std::nullopt;
-    const u32 local = u32(s_->locals().size());
+    struct RestoreLocals {
+      Sema& sema;
+      std::size_t first;
+      ~RestoreLocals() { sema.discard_local_declarations(first); }
+    } restore{*s_, s_->locals().size()};
     const u32 at = receiver.begin;
+    const u32 local = s_->declare_local(s_->no_name(), receiver.type(), 0, at);
     Ex object = s_->node(ast::LocalRef{receiver.info, local}, at, receiver.end, receiver.info);
     auto accessor = [&](std::string_view name, QualType type) {
       Ex callee = s_->member(object, false, s_->ins().names.intern(name), receiver.end, at, at);
@@ -140,7 +144,7 @@ public:
     if (!data.ok()) return std::nullopt;
 
     auto commit = [&](Ex e) { return s_->builder().commit(Sema::at(e, 0)); };
-    ByteEvaluation bytes{{commit(receiver), commit(size), commit(data), local}, receiver.type()};
+    ByteEvaluation bytes{{commit(receiver), commit(size), commit(data), local}};
     const Evaluated value = evaluate(s_->void_prvalue(at, receiver.end), false, {}, &bytes);
     if (!value.constant || !bytes.result.bytes) {
       if (!value.type_trait_failure && !(value.dependent && q_->instantiation_gave_up()))
@@ -187,7 +191,6 @@ private:
       // So does a variable whose initializer is being read to deduce its placeholder type.
       if (s_->types().is_dependent(l.type) || s_->types().has_placeholder(l.type)) l.type = s_->builtin(Builtin::int_);
     }
-    if (bytes) locals.push_back({NameId{~u32{0}}, bytes->receiver_type, EntityId::none, NodeId::none, 0});
     ast::DeclSema thunk{};
     thunk.entity = EntityId::none;
     thunk.type = s_->types().function(Types::unqualified(e.type()), {}, false, LangLinkage::cxx);
