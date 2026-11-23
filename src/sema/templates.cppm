@@ -460,6 +460,7 @@ public:
     case ast::DepOp::is_final:
     case ast::DepOp::is_polymorphic:
     case ast::DepOp::is_abstract:
+    case ast::DepOp::has_virtual_destructor:
     case ast::DepOp::is_standard_layout:
     case ast::DepOp::is_empty: return std::nullopt;
     case ast::DepOp::is_same:
@@ -647,6 +648,7 @@ public:
       case ast::DepOp::is_final:
       case ast::DepOp::is_polymorphic:
       case ast::DepOp::is_abstract:
+      case ast::DepOp::has_virtual_destructor:
       case ast::DepOp::is_standard_layout:
       case ast::DepOp::is_empty:
       case ast::DepOp::is_object: {
