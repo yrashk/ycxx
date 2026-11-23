@@ -1202,9 +1202,9 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
     if (linkage == ast::Linkage::external && std::ranges::any_of(r.args, [&](const ast::TemplateArg& arg) {
           return names_tu_local(program, arg, /*include_value_types=*/false);
         })) linkage = ast::Linkage::internal;
-    // A member of a TU-local specialization binds locally, including one with a value of a
-    // TU-local enum type as its argument ([basic.link]).
-    if ((r.kind == sema::EntityKind::destructor || ordinary_class_template_member(r)) &&
+    // A constructor, destructor or ordinary class-template member binds locally when its
+    // owner is TU-local, including a specialization for the value of a TU-local enum ([basic.link]).
+    if ((r.kind == sema::EntityKind::constructor || r.kind == sema::EntityKind::destructor || ordinary_class_template_member(r)) &&
         linkage == ast::Linkage::external &&
         names_tu_local(program, r.scope, /*include_value_types=*/true)) linkage = ast::Linkage::internal;
     tu.entities.push_back({e, std::move(id), d.type, fn, r.lang, linkage, false, at, r.scope,
@@ -1288,6 +1288,11 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
       if ((!in_class && !specialized) || f.decl.is_virtual || !owner || !owner->destructor_noexcept.value_or(false) ||
           internal_class(entity.scope) ||
           names_tu_local(program, entity.scope, /*include_value_types=*/true)) return;
+    } else if (entity.kind == sema::EntityKind::constructor) {
+      // Hosted constructor cleanups require strong definitions and unwind frames.
+      if (f.constructor_cleanup != EntityId::none || internal_class(entity.scope) ||
+          names_tu_local(program, entity.scope, /*include_value_types=*/true) ||
+          names_tu_local(program, f.decl.type, /*include_value_types=*/true)) return;
     } else if (entity.kind != sema::EntityKind::function) {
       return;
     }
@@ -1411,7 +1416,6 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
           else tu.base_object_variants.insert(d.entity);
         }
       }
-      coalesce_inline_function(tu.functions.back(), member);
       // A written ordinary body starts at '{'. Other starts include a function-try-block and a
       // constructor initializer. Synthetic bodies and instantiations never enter this path.
       if (linux && entity.kind == sema::EntityKind::constructor) {
@@ -1431,6 +1435,7 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
           else if (linux) f.unwind_through_constructor = hosted_union_constructor_caller(program, d, body);
         }
       }
+      coalesce_inline_function(tu.functions.back(), member);
       closures_of(body.closures, program.id(k), it.body_begin - it.begin);
       continue;
     }
