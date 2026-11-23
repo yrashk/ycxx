@@ -419,6 +419,13 @@ public:
   // A fieldless virtual root whose destructor may be emitted against a peer's table (#136).
   bool peer_root_destructor_producer(EntityId cls) const;
   bool peer_root_destructor_observer(EntityId function, EntityId cls) const;
+  struct DerivedVirtualDestructor {
+    EntityId base;
+    EntityId destructor;
+    EntityId base_destructor;
+    u64 size;
+  };
+  std::optional<DerivedVirtualDestructor> derived_virtual_destructor_producer(EntityId cls) const;
   // Whether an ordinary written definition can also supply its ELF base-object entry point (#136).
   bool supports_base_object_variant(EntityId function, const std::set<EntityId>& uncertain_layouts) const;
 
@@ -1529,6 +1536,7 @@ private:
   bool has_unapplied_class_layout(u32 item, const ClassContent& content) const;
   bool in_attributed_namespace(u32 item) const;
   std::optional<EntityId> peer_root_destructor_key(EntityId cls) const;
+  std::optional<DerivedVirtualDestructor> derived_virtual_destructor_layout(EntityId cls) const;
   bool class_layout_uncertain(EntityId cls, const sema::ClassRec& record, u32 point) const;
   std::optional<QualType> copy_move_constructor_parameter(const sema::MemberDeclRec& member, QualType owner) const;
   std::optional<QualType> assignment_parameter(const sema::MemberDeclRec& member, QualType owner) const;
@@ -5386,8 +5394,10 @@ private:
         s_.diag(name_at, Diag::redefinition, m->name);
         return bad();
       }
-      if (!p_->peer_root_destructor_key(c) || flags || template_ || explicit_ || inst_ || !it_->has_body() ||
+      const bool derived = p_->derived_virtual_destructor_layout(c).has_value();
+      if ((!derived && !p_->peer_root_destructor_key(c)) || flags || template_ || explicit_ || inst_ || !it_->has_body() ||
           p_->region().tokens[it_->body_begin].kind != Tk::l_brace ||
+          (derived && (it_->body_begin + 1 >= it_->end || p_->region().tokens[it_->body_begin + 1].kind != Tk::r_brace)) ||
           p_->in_attributed_namespace(k_) ||
           layout_attribute(p_->region(), it_->begin, it_->body_begin, LayoutAttributes::any) ||
           !Program::encloses(p_->ns_of(k_), p_->namespace_path(owner)) ||
@@ -5401,14 +5411,14 @@ private:
         if (ok) s_.diag(name_at, Diag::conflicting_declaration, m->name);
         return bad();
       }
-      if (!fs.has_noexcept || fs.noexcept_condition || !ps_.at_end()) {
+      if ((!derived && !fs.has_noexcept) || fs.noexcept_condition || !ps_.at_end()) {
         s_.diag(name_at, Diag::virtual_definition);
         return bad();
       }
     }
     // Its record, rebuilt in this frame (the declaration's lists belong to the class's item).
     ast::DeclSema sem = *mem;
-    if (ctor) sem.has_written_noexcept = fs.has_noexcept;
+    if (ctor || m->is_virtual) sem.has_written_noexcept = fs.has_noexcept;
     sem.flags |= flags | sema::decl_flag::definition;
     sem.attributes = b_.seq(std::span<const NodeId>{});
     std::vector<ast::ParamSema> params;
@@ -7907,6 +7917,93 @@ bool Program::peer_root_destructor_producer(EntityId cls) const {
   return def != definitions_.end() && in_global_scope(def->second) &&
          key_declarations != decls_.end() && key_declarations->second.size() == 1 &&
          destructor_declarations != decls_.end() && destructor_declarations->second.size() == 2;
+}
+
+std::optional<Program::DerivedVirtualDestructor> Program::derived_virtual_destructor_layout(EntityId cls) const {
+  using enum lex::Tk;
+  const auto& target = w_->target;
+  if (target.triple != ast::x86_64_linux.triple || r_->has_clang_attribute_pragma) return std::nullopt;
+  const auto* derived = classes_.find(cls);
+  if (!derived || derived->bases.size() != 1 || !derived->fields.empty()) return std::nullopt;
+  const auto& edge = derived->bases.front();
+  if (edge.access != ast::Access::public_ || edge.dependent_in_pattern) return std::nullopt;
+  const auto* base = classes_.find(edge.cls);
+  if (!base || !base->bases.empty() || base->fields.size() != 1) return std::nullopt;
+
+  const auto plain_destructor = [&](EntityId owner, const sema::ClassRec& record,
+                                    bool primary) -> const items::Item* {
+    const auto& entity = w_->entities.rec(owner);
+    const auto definition = class_items_.find(std::to_underlying(owner));
+    if (!record.defined || record.is_final || record.union_ || record.closure || record.is_abstract() ||
+        !record.virtual_destructor || !record.destructor_usable || !record.destructor_noexcept.value_or(false) ||
+        record.explicit_alignment || record.unapplied_layout || !record.types.empty() || !record.friends.empty() ||
+        entity.linkage != ast::Linkage::external || entity.templ != EntityId::none || !is_namespace(entity.scope) ||
+        unnamed(namespace_path(entity.scope)) || w_->ins.names.spelling(entity.name).empty() ||
+        definition == class_items_.end() || !peer_root_vtable_visible(owner)) return nullptr;
+    const auto& head = items_->items[definition->second];
+    const auto key = r_->tokens[head.begin].kind;
+    if ((key != kw_class && key != kw_struct) || head.template_depth || head.specialization ||
+        layout_attribute(*r_, head.brace_end, head.end, LayoutAttributes::any) ||
+        std::ranges::count_if(head.members, [&](u32 k) {
+          return items_->items[k].kind != ItemKind::access_spec;
+        }) != (primary ? 2 : 1)) return nullptr;
+
+    const auto declaration = member_decl(record.destructor);
+    const auto member = std::ranges::find(record.members, record.destructor, &sema::MemberDeclRec::entity);
+    if (!declaration || member == record.members.end() || !member->is_dtor || !member->is_virtual ||
+        member->is_pure || member->is_deleted || member->is_final ||
+        record.access_of(member->entity) != ast::Access::public_ || !asm_label(member->entity).empty()) return nullptr;
+    const auto& written = items_->items[index(declaration->item)];
+    if (written.parent != definition->second || written.kind != ItemKind::declaration) return nullptr;
+    auto tokens = std::span(r_->tokens).subspan(written.begin, written.end - written.begin);
+    const auto accept = [&](lex::Tk kind) {
+      if (tokens.empty() || tokens.front().kind != kind) return false;
+      tokens = tokens.subspan(1);
+      return true;
+    };
+    const bool written_virtual = accept(kw_virtual);
+    if ((primary && !written_virtual) || !accept(tilde) || tokens.empty() ||
+        tokens.front().kind != identifier || r_->name(tokens.front()) != w_->ins.names.spelling(entity.name)) return nullptr;
+    tokens = tokens.subspan(1);
+    if (!accept(l_paren) || !accept(r_paren)) return nullptr;
+    accept(kw_noexcept);
+    if (!primary && !tokens.empty() && tokens.front().kind == identifier && r_->name(tokens.front()) == "override")
+      tokens = tokens.subspan(1);
+    return accept(semi) && tokens.empty() ? &head : nullptr;
+  };
+
+  const auto* base_head = plain_destructor(edge.cls, *base, true);
+  if (!base_head || !plain_destructor(cls, *derived, false)) return std::nullopt;
+  const auto& field = base->fields.front();
+  const auto pointer = w_->types.rec(field.type);
+  if (field.dmi || field.bit_width || field.no_unique_address ||
+      base->access_of(field.entity) != ast::Access::public_ || pointer.kind != sema::TypeKind::pointer ||
+      w_->types.is_function(pointer.inner)) return std::nullopt;
+  if (std::ranges::any_of(base_head->members, [&](u32 k) {
+        const auto& source = items_->items[k];
+        return layout_attribute(*r_, source.begin, source.end, LayoutAttributes::any);
+      })) return std::nullopt;
+
+  // A dynamic root gets the vptr before its field. The derived record reuses that base at zero.
+  const std::array fields{ast::scalar_placed(target.pointer_size, target.pointer_align)};
+  const auto base_layout = ast::record_layout({}, fields, false, base->pod, std::to_underlying(edge.cls), &target);
+  const std::array bases{base_layout.placed};
+  const auto layout = ast::record_layout(bases, {}, false, derived->pod, std::to_underlying(cls));
+  if (base_layout.size != 16 || base_layout.align != 8 || layout.size != 16 || layout.align != 8 ||
+      layout.base_offsets.front() != 0) return std::nullopt;
+  return DerivedVirtualDestructor{edge.cls, derived->destructor, base->destructor, layout.size};
+}
+
+std::optional<Program::DerivedVirtualDestructor> Program::derived_virtual_destructor_producer(EntityId cls) const {
+  const auto layout = derived_virtual_destructor_layout(cls);
+  if (!layout) return std::nullopt;
+  const auto derived = decls_.find(std::to_underlying(layout->destructor));
+  const auto base = decls_.find(std::to_underlying(layout->base_destructor));
+  const auto definition = definitions_.find(std::to_underlying(layout->destructor));
+  if (base == decls_.end() || base->second.size() != 1 || definitions_.contains(std::to_underlying(layout->base_destructor)) ||
+      derived == decls_.end() || derived->second.size() != 2 || definition == definitions_.end() ||
+      !in_global_scope(definition->second)) return std::nullopt;
+  return layout;
 }
 
 bool Program::peer_root_destructor_observer(EntityId function, EntityId cls) const {
