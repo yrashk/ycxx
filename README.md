@@ -327,7 +327,10 @@ name. Earlier enumerators take precedence over enclosing class names within thei
 Unevaluated operands can name a preceding non-static data member without an object, including
 `sizeof(member)` in an initializer and `decltype(member)` as an underlying type. A call in an
 unevaluated operand can select a preceding static member from an overload set.
-[#760](https://github.com/yrashk/ycxx/issues/760) · [#882](https://github.com/yrashk/ycxx/issues/882)
+[#760](https://github.com/yrashk/ycxx/issues/760)
+Named unscoped member enums in class templates can use value-dependent initializers. Each
+specialization evaluates its enumerators and determines an inferred underlying type.
+[#861](https://github.com/yrashk/ycxx/issues/861) · [#882](https://github.com/yrashk/ycxx/issues/882)
 
 Automatic declarations of ordinary non-template classes with only scalar fields and no bases
 or unions can use default member initializers in `S s;` and `S s{…};`. A default runs in
@@ -459,7 +462,8 @@ written default member initializer are value-initialized.
   in-class alias declarations also check access to inherited aliases. [#1001](https://github.com/yrashk/ycxx/issues/1001)
 - namespaces, nested (`namespace a::b`) and inline ones, typedefs and aliases, including
   function type and function pointer aliases with qualified return types, `using` declarations
-  and directives;
+  and directives. A block-scope `using N::E;` makes `E` available as a qualifier in `E::member`.
+  [#953](https://github.com/yrashk/ycxx/issues/953)
 - named function-pointer declarations with qualified return types, qualified names in grouped
   declarators, and unnamed function-pointer parameters;
 - parenthesized direct initialization from functional conversions such as `S b(S(1));` and
@@ -497,9 +501,10 @@ written default member initializer are value-initialized.
   three member-pointer predicates as `bool` template arguments or defaults, including through
   alias templates
   [#209](https://github.com/yrashk/ycxx/issues/209);
-- dependent non-type template arguments from unqualified parameterless `consteval` function
-  templates with explicit type arguments, and unqualified calls to a single ordinary external
-  `consteval` function with direct integral template-parameter operands.
+- dependent non-type template arguments from parameterless namespace `consteval` function
+  templates with explicit type arguments, including fixed namespace-qualified calls. An
+  unqualified call to a single ordinary external `consteval` function can also use direct
+  integral template-parameter operands.
   [#209](https://github.com/yrashk/ycxx/issues/209)
 - `__is_constructible`, `__is_nothrow_constructible` and `__is_trivially_constructible` for
   supported scalar, reference, function and `void` queries, including argument packs in

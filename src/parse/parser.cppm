@@ -1616,7 +1616,7 @@ public:
     u32 at;
   };
 
-  enum class QualifierLookup { ordinary, type, elaborated_enum };
+  enum class QualifierLookup { ordinary, type, elaborated_enum, namespace_specifier };
 
   // A nested-name-specifier ([expr.prim.id.qual]) at token `start` ahead: `::`, `N::`, `N::C::`,
   // resolved as it is read, without consuming it. `next` is where the name after it is.
@@ -1646,7 +1646,8 @@ public:
     } else if (kind(j) == Tk::identifier && kind(j + 1) == Tk::coloncolon) {
       const std::optional<u32> at = lookup == QualifierLookup::elaborated_enum ? std::optional{pos() + j} : std::nullopt;
       bool ambiguous = false;
-      s = s_->scope_named(name_of(tok(j)), at, ambiguous_namespace ? &ambiguous : nullptr);
+      s = s_->scope_named(name_of(tok(j)), at, ambiguous_namespace ? &ambiguous : nullptr,
+                          lookup != QualifierLookup::namespace_specifier);
       if (ambiguous) *ambiguous_namespace = j;
       if (!s) return std::nullopt;
       j += 2;
@@ -1787,6 +1788,10 @@ public:
     if (!s || kind(next) != Tk::identifier || kind(next + 1) == Tk::coloncolon) return std::nullopt;
     // `N::X<args>`: a class template specialization named in a namespace ([temp.names]).
     qualified_half_ = false;
+    NameId name = name_of(tok(next));
+    if (template_argument && s->ns && kind(next + 1) == Tk::less &&
+        s_->namespace_names_call_template(*s->ns, name))
+      return std::nullopt;
     if (kind(next + 1) == Tk::less && s->ns) {
       u32 j = next;
       const auto diags = s_->diag_count();
@@ -1796,7 +1801,6 @@ public:
       }
       if (checked && s_->has_error_since(diags)) return std::nullopt;
     }
-    NameId name = name_of(tok(next));
     if (template_argument && next == 2 && s_->scope_names_static_data_member(*s, name))
       return std::nullopt;
     std::optional<u32> at = checked ? std::optional{pos() + next} : std::nullopt;
@@ -4086,12 +4090,7 @@ public:
             if (is(Tk::l_paren) && kind(1) == Tk::r_paren) {
               Ex callee = s_->name_expr(n, begin, pos(), true);
               if (!callee.ok()) return callee;
-              if (auto call = s_->dependent_immediate_template_call(callee, *args, pos() + 2)) {
-                ++deferred_immediate_calls_;
-                bump();
-                bump();
-                return *call;
-              }
+              if (auto call = deferred_immediate_template_call(callee, *args)) return *call;
             }
           }
           // A call of it is a dependent call ([temp.dep.candidate]): its instantiation adds
@@ -4263,13 +4262,15 @@ public:
     std::optional<sema::Sema::Scope> s;
     u32 next = 0;
     if (is(Tk::identifier) && kind(1) != Tk::coloncolon) {
-      s = s_->scope_named(name_of(tok()));
+      s = s_->scope_named(name_of(tok()), std::nullopt, /*ambiguous_namespace=*/nullptr,
+                          /*search_block_import_types=*/false);
       next = 0;
       if (s) {
         bump();
         if (s->ns) return s->ns;
       }
-    } else if ((s = nested_name(0, next)) && kind(next) == Tk::identifier) {
+    } else if ((s = nested_name(0, next, /*member_pointer=*/false, /*checked=*/false,
+                                QualifierLookup::namespace_specifier)) && kind(next) == Tk::identifier) {
       for (u32 j = 0; j < next; ++j) bump();
       auto m = s_->scope_member(*s, name_of(tok()));
       bump();
@@ -4341,6 +4342,17 @@ public:
     }
   }
 
+  // The caller has recognized the empty operand list of a dependent immediate call.
+  std::optional<Ex> deferred_immediate_template_call(Ex callee, std::span<const ast::TemplateArg> args) {
+    auto call = s_->dependent_immediate_template_call(callee, args, pos() + 2);
+    if (call) {
+      ++deferred_immediate_calls_;
+      bump();
+      bump();
+    }
+    return call;
+  }
+
   // A qualified-id ([expr.prim.id.qual]): `N::x`, `::x`, `C::m`, `E::e`, `N::C::f`.
   Ex qualified_id(u32 begin) {
     u32 next = 0;
@@ -4373,7 +4385,7 @@ public:
     auto name = expression_id(suffix);
     if (!name) return {NodeId::none, begin, pos()};
     NameId n = *name;
-    auto scope_expr = [&] {
+    auto scope_expr = [&](bool immediate_call = false) {
       // [expr.unary.op]: `&C::m` can form a pointer to member. Parentheses or postfix
       // operations make the operand something other than the qualified-id itself.
       bool postfix = is(Tk::l_paren) || is(Tk::l_square) || is(Tk::period) || is(Tk::arrow) ||
@@ -4387,7 +4399,7 @@ public:
       }
       const bool check_all_bases = in_template_value_argument_ && next == 2 &&
           (member_alias_type || s_->scope_names_static_data_member(*s, n));
-      return s_->scope_expr(*s, n, begin, name_at, pos(), postfix ? std::nullopt : address, check_all_bases);
+      return s_->scope_expr(*s, n, begin, name_at, pos(), postfix ? std::nullopt : address, check_all_bases, immediate_call);
     };
     if (operator_name) {
       if (is(Tk::less) && s_->scope_names_template(*s, n)) {
@@ -4396,7 +4408,9 @@ public:
       }
       return scope_expr();
     }
-    if (s->ns && is(Tk::less)) {
+    const bool qualified_value_template = s->ns && in_template_value_argument_ && is(Tk::less);
+    const bool immediate_template = qualified_value_template && s_->namespace_names_call_template(*s->ns, n);
+    if (s->ns && is(Tk::less) && !immediate_template) {
       // [expr.type.conv] permits a namespace-qualified simple-template-id as the
       // target type of a functional conversion.
       const auto diags = s_->diag_count();
@@ -4420,7 +4434,7 @@ public:
         return type_conversion(*t, begin);
       }
     if (is(Tk::less)) {
-      if (s->ns) {
+      if (s->ns && !immediate_template) {
         auto diags = s_->diag_count();
         auto c = s_->namespace_concept_for_expression(*s->ns, n, name_at);
         if (c || s_->has_error_since(diags)) {
@@ -4434,7 +4448,7 @@ public:
         }
       }
       // `N::v<args>`: a variable template of the namespace ([temp.names]/3).
-      if (s->ns)
+      if (s->ns && !immediate_template)
         if (auto v = s_->namespace_template(*s->ns, n, ast::DeclKind::variable)) {
           auto args = template_argument_list();
           if (!args) return {NodeId::none, begin, pos()};
@@ -4444,12 +4458,22 @@ public:
         }
       // `S::f<args>`: a member template of class S or a function template of namespace S, with
       // explicit arguments ([temp.arg.explicit]).
-      if (keyword || s_->scope_names_template(*s, n)) {
+      if (keyword || (qualified_value_template ? immediate_template : s_->scope_names_template(*s, n))) {
         auto args = template_argument_list();
         if (!args) return {NodeId::none, begin, pos()};
-        Ex r = scope_expr();
-        if (r.ok() && !s_->dependent(r) && std::ranges::any_of(*args, [&](const ast::TemplateArg& a) { return s_->dependent(a); }))
+        const bool dependent_args = std::ranges::any_of(*args, [&](const ast::TemplateArg& a) { return s_->dependent(a); });
+        const bool immediate_call = s->ns && in_template_value_argument_ &&
+                                    is(Tk::l_paren) && kind(1) == Tk::r_paren;
+        if ((immediate_call || immediate_template) && ambiguous_namespace) {
+          s_->diag(begin + *ambiguous_namespace, Diag::ambiguous_name, ambiguous_name);
+          return {NodeId::none, begin, pos()};
+        }
+        Ex r = scope_expr(immediate_call || immediate_template);
+        if (r.ok() && !s_->dependent(r) && dependent_args) {
+          if (immediate_call)
+            if (auto call = deferred_immediate_template_call(r, *args)) return *call;
           return s_->dependent_node({}, begin, pos());
+        }
         s_->explicit_template_args(r, std::move(*args));
         return r;
       }
@@ -5824,6 +5848,10 @@ public:
         return {NodeId::none, begin, pos()};
       }
       rt = *t;
+      if (e && e->ok() && !s_->check_destructor_access(rt, begin, Diag::return_unusable_destructor)) {
+        skip_to_semi();
+        return {NodeId::none, begin, pos()};
+      }
       if (e && s_->types().is_void(rt)) value = *e;
       else if (e && s_->types().is_reference(rt)) value = s_->bind_reference(*e, rt, e->begin);
       else if (e) value = s_->init_deduced_return(*e, rt);
@@ -5835,7 +5863,8 @@ public:
         // `return {…};` copy-list-initializes the result ([stmt.return]/2).
         auto b = braced_init_list();
         if (s_->types().is_void(rt)) s_->diag(begin, Diag::return_value_in_void);
-        else value = s_->list_init(rt, *b, sema::Construction::copy_list);
+        else if (s_->check_destructor_access(rt, begin, Diag::return_unusable_destructor))
+          value = s_->list_init(rt, *b, sema::Construction::copy_list);
         if (!expect(Tk::semi)) skip_to_semi();
         return s_->node(ast::Return{sema::Sema::at(value, begin)}, begin, pos());
       }
@@ -5843,7 +5872,7 @@ public:
       if (s_->types().is_void(rt)) {
         if (e.ok() && !s_->types().is_void(e.type()) && !s_->dependent(e)) s_->diag(begin, Diag::return_value_in_void);
         value = e;
-      } else {
+      } else if (e.ok() && s_->check_destructor_access(rt, begin, Diag::return_unusable_destructor)) {
         value = s_->init_explicit_return(e, rt);
       }
     } else if (!s_->types().is_void(rt) && !s_->types().is_dependent(rt)) {
@@ -6127,7 +6156,7 @@ public:
           skip_to_semi();
           return {NodeId::none, begin, pos()};
         }
-        if (!spec.is_static) s_->check_destructor_access(d.type, d.name_at);
+        s_->check_destructor_access(d.type, d.name_at);
         ast::EntityId dtor = s_->types().is_reference(d.type) ? ast::EntityId::none : s_->destructor_of(d.type);
         Ex var = variable_node(spec, local, init, dtor, dbegin);
         s_->set_local_decl(local, var.id);
@@ -6228,7 +6257,7 @@ public:
       } else if (sema::Types::is_const(d.type)) {
         s_->diag(d.name_at, Diag::const_uninitialized, d.name);
       }
-      if (!spec.is_static) s_->check_destructor_access(d.type, d.name_at);
+      s_->check_destructor_access(d.type, d.name_at);
       // The destructor that ends the variable at scope exit ([stmt.dcl]); a reference has none.
       ast::EntityId dtor = s_->types().is_reference(d.type) ? ast::EntityId::none : s_->destructor_of(d.type);
       Ex var = variable_node(spec, local, init, dtor, dbegin);
