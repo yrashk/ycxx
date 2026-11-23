@@ -819,6 +819,13 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
   non-inline namespace-scope variable gives its ELF symbol `STB_GLOBAL` and `STV_HIDDEN`.
   This includes the C-linkage marker `__ycxx_linkage_static_v1` from the pinned libycxx runtime.
   [#936](https://github.com/yrashk/ycxx/issues/936)
+- On Linux x86-64, ordinary external non-inline function declarations can inherit the
+  nearest explicit GNU `hidden` or `default` visibility from a namespace definition.
+  The canonical declaration carries consistent visibility to its unannotated qualified
+  definition and to reference-only objects. An explicit function attribute takes
+  precedence. Mixed inherited defaults retain the direct attribute rules.
+  [Design](docs/design/linux-namespace-visibility.md) ·
+  [#940](https://github.com/yrashk/ycxx/issues/940)
 - Constant-initialized and zero-initialized external inline namespace variables use weak ELF
   definitions when their initial values need no relocations. This includes explicitly inline
   full variable-template specializations with builtin type arguments. Static addresses and
