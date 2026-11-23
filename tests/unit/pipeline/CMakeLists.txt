@@ -165,6 +165,10 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_
   add_test(NAME unit.linux_archive_output
     COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/linux_archive_output.py
             $<TARGET_FILE:ycxxc> ${CMAKE_AR} ${CMAKE_NM} ${CMAKE_LINKER} ${CMAKE_C_COMPILER})
+  # PARITY: by design: .hidden is the ELF spelling. Mach-O uses .private_extern.
+  add_test(NAME unit.linux_constant_asm
+    COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/linux_constant_asm.py
+            $<TARGET_FILE:ycxxc> ${CMAKE_READELF})
   add_test(NAME unit.linux_inline
     COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/linux_inline.py
             $<TARGET_FILE:ycxxc> ${CMAKE_CXX_COMPILER} ${CMAKE_READELF} ${CMAKE_AR}

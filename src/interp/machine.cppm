@@ -70,6 +70,12 @@ struct Config {
   std::function<std::optional<ConstantRecordLayout>(QualType)> record_layout{};
 };
 
+// An interpreter-only observation of a generated call in the constant-evaluation entry.
+struct ByteCapture {
+  NodeId site;
+  std::optional<std::string> bytes{};
+};
+
 // An integer or enumeration is held normalized to its representation type: sign-extended from
 // its width when signed, zero-extended otherwise. A floating value is its encoding in its
 // type's format, binary32 in the low 32 bits.
@@ -140,8 +146,8 @@ struct Ops;
 
 class Machine {
 public:
-  Machine(const ast::Interners& in, const ast::Target& target, Config config)
-      : in_(&in), target_(&target), config_(std::move(config)) {
+  Machine(const ast::Interners& in, const ast::Target& target, Config config, ByteCapture* byte_capture = nullptr)
+      : in_(&in), target_(&target), config_(std::move(config)), byte_capture_(byte_capture) {
     paths_.push_back({0, {}});
   }
   Machine(const Machine&) = delete;
@@ -279,6 +285,7 @@ private:
   Result describe(const Value& v, QualType t);
   Flow capture_element(QualType t, u32 cell, Result& result);
   Flow capture_result(u32 object);
+  Flow capture_bytes(const Value& length, const Value& data, QualType pointer_type);
 
   // ------------------------------------------------------------ execution
 
@@ -315,6 +322,7 @@ private:
   const ast::Interners* in_;
   const ast::Target* target_;
   Config config_;
+  ByteCapture* byte_capture_;
 
   std::vector<Frame> frames_;
   std::vector<Object> objects_;
@@ -1130,6 +1138,45 @@ Machine::Flow Machine::pointer_index(const Value& p, QualType elem, u32& base_pa
   index = p.past ? 1 : 0;
   bound = 1;
   single = true;
+  return Flow::next;
+}
+
+Machine::Flow Machine::capture_bytes(const Value& length, const Value& data, QualType pointer_type) {
+  const Shape& pointer = shape(pointer_type);
+  const QualType element = pointer.inner;
+  if (length.kind != VKind::integer || pointer.kind != Kind::pointer ||
+      ast::builtin_of(*in_, element) != ast::Builtin::char_)
+    return fail(Reason::ill_formed);
+  const u64 count = length.bits;
+  if (count == 0) {
+    byte_capture_->bytes.emplace();
+    return Flow::next;
+  }
+  u32 base_path = 0;
+  i64 index = 0;
+  u64 bound = 0;
+  bool single = false;
+  if (Flow f = pointer_index(data, element, base_path, index, bound, single); f != Flow::next) return f;
+  if (index < 0 || u64(index) > bound || count > bound - u64(index)) return fail(Reason::pointer_bounds);
+  if (count > config_.step_limit - steps_) return fail(Reason::step_limit, config_.step_limit);
+
+  std::string bytes;
+  bytes.reserve(count);
+  const Value base{VKind::object, false, data.ref, base_path};
+  for (u64 i = 0; i < count; ++i) {
+    const u64 step = ir::encode({ir::Step::elem, u32(u64(index) + i)});
+    Place place;
+    if (Flow f = locate(base, std::span(&step, single ? 0 : 1), element, Use::read, false, place); f != Flow::next)
+      return f;
+    if (place.ncells != 1) return fail(Reason::ill_formed);
+    Value byte;
+    if (Flow f = read_cell(element, place.cell0, byte); f != Flow::next) return f;
+    if (byte.kind != VKind::integer) return fail(Reason::ill_formed);
+    bytes.push_back(static_cast<char>(byte.bits));
+  }
+  steps_ += count;
+  since_poll_ = u32(std::min<u64>(std::numeric_limits<u32>::max(), u64(since_poll_) + count));
+  byte_capture_->bytes = std::move(bytes);
   return Flow::next;
 }
 

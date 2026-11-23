@@ -407,6 +407,7 @@ enum class Diag : std::uint32_t {
   annotation_not_supported [[=message{Severity::error, "this declaration annotation is not supported yet"}]],
   annotation_mixed_list [[=message{Severity::error, "annotations and ordinary attributes require separate attribute-specifiers"}]],
   exceptions_disabled [[=message{Severity::error, "cannot use '{0:k}' with exceptions disabled by '-fno-exceptions'"}]],
+  namespace_asm_directive [[=message{Severity::error, "namespace-scope constant asm requires one '.hidden SYMBOL' directive"}]],
 };
 
 // A `{N:r}` argument: why an evaluation was not constant. 0 is an expression the front end
