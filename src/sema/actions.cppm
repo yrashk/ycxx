@@ -888,6 +888,20 @@ public:
     return std::nullopt;
   }
 
+  std::optional<ast::DeclSema> namespace_concept_for_expression(EntityId ns, NameId name, u32 at) {
+    auto decls = q_->namespace_members(ns, name);
+    auto concept_decl = std::ranges::find(decls, ast::DeclKind::concept_, &ast::DeclSema::kind);
+    if (concept_decl == decls.end()) return std::nullopt;
+    // Qualified lookup through using-directives can find distinct declarations ([namespace.qual]/4).
+    if (std::ranges::any_of(decls, [&](const ast::DeclSema& d) {
+          return d.entity != concept_decl->entity;
+        })) {
+      diag(at, Diag::ambiguous_name, name);
+      return std::nullopt;
+    }
+    return *concept_decl;
+  }
+
   // The specialization of class template `templ` for `args` ([temp.spec.general]): its entity is
   // the template and the canonical arguments (§B1.5). With dependent arguments it is a dependent
   // type ([temp.dep.type]).
@@ -1185,15 +1199,33 @@ public:
   }
   // A concept-id as an expression ([temp.names]/8): whether it is satisfied, a `bool` prvalue;
   // value-dependent while its arguments are.
-  Ex concept_id_expr(const ast::DeclSema& c, std::span<const TemplateArg> args, u32 begin, u32 end) {
+  Ex concept_id_expr(const ast::DeclSema& c, std::span<const TemplateArg> args, u32 begin, u32 end,
+                     bool preserve_value = false) {
     QualType b = builtin(Builtin::bool_);
-    if (std::ranges::any_of(args, [&](const TemplateArg& a) { return dependent(a); })) return dependent_node({}, begin, end, b);
+    if (std::ranges::any_of(args, [&](const TemplateArg& a) { return dependent(a); })) {
+      if (!preserve_value || !std::ranges::all_of(args, [&](const TemplateArg& a) {
+            return templates().structural_operand(a);
+          })) return dependent_node({}, begin, end, b);
+      if (!template_arguments(c, args, begin)) return {NodeId::none, begin, end};
+      auto value = ins().intern_value(ast::VDepConcept{c.entity, ins().intern_seq(args)});
+      return literal(b, value, ValueCategory::prvalue, begin, end);
+    }
     auto nf = concept_constraint(c, args, begin);
     if (!nf) return {NodeId::none, begin, end};
     auto sat = q_->satisfied(*nf);
     if (!sat) return dependent_node({}, begin, end, b);
     if (q_->satisfaction_failed(*nf)) return {NodeId::none, begin, end};
     return bool_literal(*sat, begin, end);
+  }
+
+  std::optional<ConstId> evaluate_dependent_concept(EntityId entity, std::span<const TemplateArg> args, u32 at) {
+    auto c = q_->template_decl(entity);
+    if (!c) return std::nullopt;
+    auto nf = concept_constraint(*c, args, at);
+    if (!nf) return std::nullopt;
+    auto sat = q_->satisfied(*nf);
+    if (!sat || q_->satisfaction_failed(*nf)) return std::nullopt;
+    return w_->values.integer(builtin(Builtin::bool_), *sat);
   }
 
   // ------------------------------------------------------------ type-trait built-ins (docs/EXTENSIONS.md)
@@ -1825,9 +1857,15 @@ public:
     std::optional<QualType> type;
   };
   static Scope global_scope() { return {EntityId::none, std::nullopt}; }
+  static bool competing_qualifier(EntityId ns, std::span<const ast::DeclSema> declarations) {
+    return std::ranges::any_of(declarations, [&](const ast::DeclSema& declaration) {
+      return declaration.entity != ns && (declaration.kind == ast::DeclKind::namespace_ || is_type(declaration.kind));
+    });
+  }
   // The first component of a nested-name-specifier, by unqualified lookup ([basic.lookup.qual]/1:
   // only namespaces, types and templates).
-  std::optional<Scope> scope_named(NameId n, std::optional<u32> enum_qualifier_at = std::nullopt) {
+  std::optional<Scope> scope_named(NameId n, std::optional<u32> enum_qualifier_at = std::nullopt,
+                                   bool* ambiguous_namespace = nullptr) {
     // A type template parameter as a nested-name-specifier names a dependent type
     // ([temp.dep.type]); in an instantiation, its argument.
     if (const ast::TemplateParamSema* p = template_param(n)) {
@@ -1848,7 +1886,11 @@ public:
       return std::nullopt;
     }
     if (auto t = class_name(n, true)) return Scope{std::nullopt, t};
-    if (auto ns = q_->namespace_named(n, directives())) return Scope{ns, std::nullopt};
+    if (auto ns = q_->namespace_named(n, directives())) {
+      if (ambiguous_namespace)
+        *ambiguous_namespace = competing_qualifier(*ns, q_->qualifier_decls(n, std::nullopt, directives()));
+      return Scope{ns, std::nullopt};
+    }
     return std::nullopt;
   }
   // A later component: a namespace or type member of a namespace, or a type nested in a class.
@@ -1886,7 +1928,8 @@ public:
     return std::nullopt;
   }
 
-  std::optional<Scope> scope_member(const Scope& s, NameId n, bool assume_dependent_type = true) {
+  std::optional<Scope> scope_member(const Scope& s, NameId n, bool assume_dependent_type = true,
+                                    bool* ambiguous_namespace = nullptr) {
     // A member type of the current instantiation is found where it is declared ([temp.dep.type]).
     // A type-only context can assume a dependent name denotes a type until instantiation
     // ([temp.res.general]).
@@ -1898,7 +1941,11 @@ public:
       if (auto t = direct_member_introduction(*s.ns, n)) return Scope{std::nullopt, t};
       auto members = q_->namespace_members(*s.ns, n);
       for (const ast::DeclSema& d : members) {
-        if (d.kind == ast::DeclKind::namespace_) return Scope{d.entity, std::nullopt};
+        if (d.kind == ast::DeclKind::namespace_) {
+          if (ambiguous_namespace)
+            *ambiguous_namespace = competing_qualifier(d.entity, members);
+          return Scope{d.entity, std::nullopt};
+        }
         if (is_type(d.kind)) return Scope{std::nullopt, d.type};
       }
       if (*s.ns == EntityId::none && members.empty())
@@ -3447,13 +3494,13 @@ public:
   }
   // `args` with the expansions whose packs are bound here expanded ([temp.variadic]/8); none when
   // there is none such.
-  std::optional<std::vector<TemplateArg>> expand_bound(std::span<const TemplateArg> args) {
+  std::optional<std::vector<TemplateArg>> expand_bound(std::span<const TemplateArg> args, bool expand_empty = false) {
     Templates t = templates();
     bool any = false;
     std::vector<TemplateArg> out;
     for (const TemplateArg& a : args) {
       auto n = t.is_expansion(a) ? t.expansion_length(t.pattern_of(a), template_args) : std::nullopt;
-      if (!n || !*n) {
+      if (!n || (!*n && !expand_empty)) {
         out.push_back(a);
         continue;
       }
@@ -3476,6 +3523,9 @@ public:
     };
     t.template_decl = [this](EntityId tmpl) { return q_->template_decl(tmpl); };
     t.variable_constant = [this](EntityId spec) { return q_->constant_value(spec); };
+    t.concept_constant = [this](EntityId entity, std::span<const TemplateArg> args) {
+      return evaluate_dependent_concept(entity, args, 0);
+    };
     t.call_constant = [this](EntityId templ, std::span<const TemplateArg> args) {
       return evaluate_dependent_call(templ, args, 0);
     };
@@ -3490,6 +3540,9 @@ public:
     auto t = templates();
     t.member_constant = [this, at](QualType qualifier, NameId name) {
       return qualified_member_constant(qualifier, name, at);
+    };
+    t.concept_constant = [this, at](EntityId entity, std::span<const TemplateArg> args) {
+      return evaluate_dependent_concept(entity, args, at);
     };
     t.call_constant = [this, at](EntityId templ, std::span<const TemplateArg> args) {
       return evaluate_dependent_call(templ, args, at);
