@@ -1854,7 +1854,7 @@ struct S { int f() & { return 1; } int f() && { return 2; } };
 int main() { S s; return s.f() + S().f() - 3; }
 '''
 issues = [311, 339]
-note = 'Ordinary non-template members and conversion functions distinguish lvalue and rvalue receivers. Ref-qualified virtual calls and broader template cases remain open'
+note = 'Ordinary non-template members and conversion functions distinguish lvalue and rvalue receivers. Namespace-scope class templates support ref-qualified deleted copy assignment. Ref-qualified virtual calls and broader template cases remain open'
 
 [[feature]]
 id = 'class-deducing-this'
