@@ -84,6 +84,27 @@ def main():
             return {row[-1]: row for line in run(readelf, '-Ws', *options, obj).splitlines()
                     if len(row := line.split(maxsplit=7)) == 8 and row[0].endswith(':')}
 
+        addresses = fixtures / 'object-address-members'
+        shared = '_ZN6config5ProbeIXadL_ZNS_6sharedEEEE4readEv'
+        local = '_ZN6config5ProbeIXadL_ZL13private_valueEEE4readEv'
+        for part in ('main', 'peer'):
+            obj = f'object-address-{part}.o'
+            compile(addresses / f'{part}.cpp', obj)
+            table = symbols(obj)
+            assert table[local][3:5] == ['FUNC', 'LOCAL'] and table[local][6] != 'UND', table[local]
+            assert table[shared][4] == 'GLOBAL' and (table[shared][6] != 'UND') == (part == 'main'), table[shared]
+            run(host_cxx, '-std=c++20', '-pedantic-errors', '-O0', '-fno-pie', '-c', addresses / f'{part}.cpp',
+                '-o', f'host-object-address-{part}.o')
+        for objects in (('object-address-main.o', 'object-address-peer.o'),
+                        ('object-address-peer.o', 'object-address-main.o')):
+            link(*objects)
+            run('./program')
+        for pairing in (('object-address-main.o', 'host-object-address-peer.o'),
+                        ('host-object-address-main.o', 'object-address-peer.o')):
+            for objects in (pairing, pairing[::-1]):
+                run(host_cxx, '-no-pie', *objects, '-o', 'host-program')
+                run('./host-program')
+
         weak_runtime_providers(Path(temp), Path(libycxx_source), host_cxx, readelf, compile, link, symbols, run)
 
         hidden = fixtures / 'inline-hidden'

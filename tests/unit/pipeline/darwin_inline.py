@@ -50,6 +50,21 @@ def main():
                     run('./host-program', *args)
 
         weak, strong = ('weak external', True), ('external', True)
+        addresses = fixtures / 'object-address-members'
+        shared = '__ZN6config5ProbeIXadL_ZNS_6sharedEEEE4readEv'
+        local = '__ZN6config5ProbeIXadL_ZL13private_valueEEE4readEv'
+        for part in ('main', 'peer'):
+            obj = f'object-address-{part}.o'
+            compile(addresses / f'{part}.cpp', obj)
+            table = symbols(obj)
+            assert table.get(local) == ('non-external', True), (obj, table)
+            assert table.get(shared) == ('external', part == 'main'), (obj, table)
+            run(host_cxx, '-std=c++20', '-pedantic-errors', '-O0', '-c', addresses / f'{part}.cpp',
+                '-o', f'host-object-address-{part}.o')
+        links('object-address-main.o', 'object-address-peer.o')
+        links('object-address-main.o', 'host-object-address-peer.o')
+        links('host-object-address-main.o', 'object-address-peer.o')
+
         # The assembly label gives g the linker spelling of f. The inline definition is weak,
         # and the linker must resolve the call to the strong definition of g (#694).
         (Path(temp) / 'same-spelling.cpp').write_text('''\
