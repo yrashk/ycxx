@@ -967,7 +967,7 @@ public:
         w_->entities.rec(tmpl.entity).kind == EntityKind::class_template &&
         args.size() == full->size() &&
         std::ranges::all_of(*full, [&](const TemplateArg& arg) {
-          return arg.kind == ast::TemplateArgKind::type && !dependent(arg);
+          return (arg.kind == ast::TemplateArgKind::type || arg.kind == ast::TemplateArgKind::value) && !dependent(arg);
         })) {
       const auto before = diag_count();
       if (!constraints_satisfied(tmpl, *full)) {

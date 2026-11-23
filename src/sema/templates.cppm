@@ -676,6 +676,10 @@ public:
       auto t = ins().values.get<ast::VType>(v);
       return type_arg(types().add_cv(t.type, Cv(t.cv)));
     }
+    if (ins().values.is<ast::VConstraintEnum>(v)) {
+      auto e = ins().values.get<ast::VConstraintEnum>(v);
+      return value_arg(e.type, e.value);
+    }
     // An integer carries its type; another value takes its parameter's (AtomAnalysis).
     return {TemplateArgKind::value, ins().values.is<ast::VInt>(v) ? ins().values.get<ast::VInt>(v).type : QualType{}, v};
   }
@@ -690,6 +694,8 @@ public:
       QualType c = types().canonical(a.type);
       return ins().intern_value(ast::VType{Types::unqualified(c), u8(std::to_underlying(Types::cv(c)))});
     }
+    if (ins().values.is<ast::VInt>(a.value) && types().is_enum(a.type))
+      return ins().intern_value(ast::VConstraintEnum{types().canonical(Types::unqualified(a.type)), a.value});
     return a.value;
   }
   // A normal form with the parameters `b` binds replaced in its atoms' mappings
@@ -721,6 +727,21 @@ public:
         }
         if (ins().values.is<ast::VType>(e))
           return substitute_arg(mapping_arg(e), b).transform([&](const TemplateArg& arg) { return mapping_value(arg); });
+        if (ins().values.is<ast::VDepParam>(e)) {
+          auto p = ins().values.get<ast::VDepParam>(e);
+          if (auto arg = b.at(p.depth, p.index); arg && arg->kind == TemplateArgKind::value)
+            return mapping_value(*arg);
+        }
+        if (ins().values.is<ast::VDepMember>(e))
+          return substitute_member_value(e, b).transform([&](const TemplateArg& arg) { return mapping_value(arg); });
+        if (ins().values.is<ast::VDepCall>(e))
+          return substitute_call_value(e, b).transform([&](const TemplateArg& arg) { return mapping_value(arg); });
+        if (ins().values.is<ast::VDepVariable>(e))
+          return substitute_variable_value(e, b, [&](EntityId spec) -> std::optional<ConstId> {
+            if (auto global = variable_global ? variable_global(spec) : std::nullopt; global && global->value)
+              return mapping_value(value_arg(types().referee(global->type), *global->value));
+            return variable_constant ? variable_constant(spec) : std::nullopt;
+          });
         return substitute_value(e, b);
       }();
       // An invalid mapping leaves the atom unsatisfied ([temp.constr.atomic]/3): an empty
