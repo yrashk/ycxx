@@ -82,7 +82,7 @@ class Constants {
 
 // An entity the translation unit declares (or defines): what its symbol is made of.
 // These symbols use special Itanium encodings (§5.1.4.3, §5.1.4.5).
-enum class Special : std::uint8_t { none, constructor, destructor, virtual_table, deleting_destructor, type_info };
+enum class Special : std::uint8_t { none, constructor, destructor, virtual_table, deleting_destructor, type_info, base_object_destructor };
 struct Entity {
   EntityId id = EntityId::none;
   std::string name;  // its identifier
@@ -148,7 +148,7 @@ struct FunctionDef {
   EntityId constructor_cleanup = EntityId::none;
   EntityId constructor_initializer_callee = EntityId::none;
   EntityId unwind_through_constructor = EntityId::none;
-  EntityId root_destructor_table = EntityId::none;  // a peer-owned table restored by D1 and D2
+  EntityId destructor_table = EntityId::none;  // the primary table installed by D1 and D2
 };
 
 // A variable definition at namespace scope with its constant initializer, or `ConstId::none` for
@@ -204,6 +204,7 @@ struct OwnedVirtualTable {
   EntityId entity;
   std::vector<EntityId> slots;  // in slot order, starting with the key function in the admitted profiles
   EntityId primary_base = EntityId::none;
+  bool peer_base_rtti = false;  // a peer's key owns the primary base descriptor
 };
 
 // A translation unit's definitions and declarations, in the order of their items.
@@ -1213,7 +1214,7 @@ engine::query_task<Generated> FunctionGen::run(engine::Ctx& cx, FnKey k) {
   irgen::FunctionInput input{d.entity, d.decl, d.body, d.item, d.body_offset};
   input.exceptions_enabled = !config || config->exceptions_enabled;
   input.this_type = d.this_type;
-  input.root_destructor_table = d.root_destructor_table;
+  input.destructor_table = d.destructor_table;
   const auto& seqs = universe().in->seqs;
   const auto locals = d.body.locals;
   for (std::uint32_t index = 0, count = seqs.size(locals); index < count; ++index) {
@@ -1678,6 +1679,7 @@ struct VirtualTable {
   std::string type_encoding;
   std::span<const EntityId> slots;
   std::optional<std::string> base_encoding;
+  bool peer_base_rtti = false;
 };
 
 struct KeylessTypeInfo {
@@ -1777,6 +1779,10 @@ void emit_virtual_table(obj::object& o, const VirtualTable& table, std::uint32_t
   emit_rtti_pointer(o, pointers, o.reference(prefix + std::string(runtime_type)), rtti_address_point);
   emit_rtti_pointer(o, pointers, name_object);
   if (const auto& base = table.base_encoding) {
+    if (table.peer_base_rtti) {
+      emit_rtti_pointer(o, pointers, o.reference(prefix + "_ZTI" + *base));
+      return;
+    }
     if (emitted_base) {
       emit_rtti_pointer(o, pointers, *emitted_base);
       return;
@@ -2138,7 +2144,7 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
           }
           base = std::move(*base_encoding);
         }
-        virtual_table = VirtualTable{e.id, std::move(*encoding), owned->slots, std::move(base)};
+        virtual_table = VirtualTable{e.id, std::move(*encoding), owned->slots, std::move(base), owned->peer_base_rtti};
       }
       if (!table && tu.keyless_type_info.contains(e.id)) keyless_type_info.push_back({e.id, std::move(*encoding)});
       continue;
@@ -2147,6 +2153,7 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
     // for a caller constructing or destroying a base subobject (Itanium ABI §5.1.4.3, §5.2.5).
     const std::string_view entry = e.special == Special::constructor ? "C1" :
                                    e.special == Special::destructor ? "D1" :
+                                   e.special == Special::base_object_destructor ? "D2" :
                                    e.special == Special::deleting_destructor ? "D0" : std::string_view(e.name);
     TemplateSpec spec{e.template_type.value_or(e.type), e.template_args, e.template_params, e.template_same_heads};
     const auto encode = [&](std::string_view name) {
