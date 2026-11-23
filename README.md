@@ -149,6 +149,9 @@ Resident links reread explicit archives on each request.
 [#389](https://github.com/yrashk/ycxx/issues/389), [#388](https://github.com/yrashk/ycxx/issues/388),
 [#951](https://github.com/yrashk/ycxx/issues/951)
 
+For x86-64 Linux, `-fPIC` selects explicit position-independent object mode and defines
+`__PIC__` and `__pic__` as `2`. [#983](https://github.com/yrashk/ycxx/issues/983)
+
 An explicit dynamic link uses ycxx's startup and the target loader. Supply the absolute target
 interpreter path and explicit, self-contained shared objects with GNU or SysV hash tables and
 slash-free SONAMEs. The executable can directly call their exported, unversioned functions. The
