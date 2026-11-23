@@ -194,6 +194,9 @@ export enum class Op : std::uint16_t {
   invoke [[=control({S, V}, 2).imms({entity, u32, u32, u32})]],
   // A void direct call, with one cleanup destination and no handler action.
   invoke_cleanup [[=control({S}, 2).imms({entity, u32, u32, u32})]],
+
+  // x86 INT3 can resume at the following instruction.
+  int3 [[=state({S}, {S})]],
 };
 
 export constexpr std::size_t op_count = std::meta::enumerators_of(^^Op).size();
