@@ -1736,6 +1736,7 @@ private:
   struct DestructorDeclaration {
     u32 at;
     std::optional<bool> nonthrowing;  // a written exception specification, if present
+    std::optional<bool> implicit_nonthrowing{};  // the specification inferred from the class's subobjects
   };
   std::map<EntityId, DestructorDeclaration> destructor_declarations_;
   std::map<EntityId, std::vector<std::optional<std::pair<u32, u32>>>> member_default_tokens_;
@@ -2889,8 +2890,7 @@ private:
       ps_.skip_attributes(&leading_attributes, Parser::attr_std | Parser::attr_gnu, &annotations);
     }
     ps_.set_linkage(lang);
-    // `template<>`: an explicit specialization ([temp.expl.spec]) of a class, function or variable
-    // template. Specializations of members of class templates are not supported yet.
+    // `template<>`: an explicit specialization ([temp.expl.spec]) of a template or its member.
     if (ps_.is(Tk::kw_template) && ps_.kind(1) == Tk::less && ps_.kind(2) == Tk::greater) {
       if (ps_.kind(3) == Tk::kw_template) {
         s_.diag(ps_.pos() + 3, Diag::not_supported, Tk::kw_template);
@@ -5341,10 +5341,27 @@ private:
     EntityId c = s_.types().class_of(cls);
     for (u32 j = 0; j < next; ++j) ps_.bump();
     bool ctor = !ps_.is(Tk::tilde);
+    const bool specialized_destructor = explicit_ && !ctor;
+    const bool definition = it_->kind == ItemKind::function;
     u32 name_at = ps_.pos();
     if (!ctor) ps_.bump();
     ps_.bump();
     EntityId owner = s_.world().entities.rec(c).scope;
+    if (specialized_destructor) {
+      const auto& entity = s_.world().entities.rec(c);
+      if (entity.templ == EntityId::none) {
+        s_.diag(name_at, Diag::not_supported, Tk::kw_template);
+        return bad();
+      }
+      if (p_->explicitly_specialized(c, k_)) {
+        s_.diag(name_at, Diag::member_of_explicit_specialization, entity.name);
+        return bad();
+      }
+      if (!Program::encloses(p_->ns_of(k_), p_->namespace_path(owner))) {
+        s_.diag(name_at, Diag::conflicting_declaration, entity.name);
+        return bad();
+      }
+    }
     if (flags & sema::decl_flag::constexpr_) {
       while (!p_->is_namespace(owner)) owner = s_.world().entities.rec(owner).scope;
       if (!Program::encloses(p_->ns_of(k_), p_->namespace_path(owner))) {
@@ -5381,7 +5398,7 @@ private:
     }
     auto md = p_->member_decl(m->entity);
     auto mem = md ? p_->decl_sema(*md) : std::nullopt;
-    if (!mem || it_->kind != ItemKind::function) return bad();
+    if (!mem || (!definition && !specialized_destructor)) return bad();
     if ((mem->flags & sema::decl_flag::constexpr_) != (flags & sema::decl_flag::constexpr_)) {
       s_.diag(name_at, Diag::constexpr_redeclared, m->name);
       return bad();
@@ -5396,7 +5413,9 @@ private:
       return bad();
     }
     if ((flags & sema::decl_flag::constexpr_) && !finish_constructor_declarator()) return bad();
-    if (mem->flags & sema::decl_flag::definition) {
+    if (specialized_destructor && !m->is_virtual) {
+      if (!check_destructor_specialization(*cr, *m, fs, name_at, definition)) return bad();
+    } else if (mem->flags & sema::decl_flag::definition) {
       s_.diag(name_at, Diag::redefinition, m->name);
       return bad();
     }
@@ -5429,8 +5448,16 @@ private:
     }
     // Its record, rebuilt in this frame (the declaration's lists belong to the class's item).
     ast::DeclSema sem = *mem;
-    if (ctor || m->is_virtual) sem.has_written_noexcept = fs.has_noexcept;
-    sem.flags |= flags | sema::decl_flag::definition;
+    if (ctor || m->is_virtual || specialized_destructor) sem.has_written_noexcept = fs.has_noexcept;
+    if (specialized_destructor) {
+      using namespace sema::decl_flag;
+      // [temp.expl.spec]: the selected member supplies the entity, and this declaration supplies
+      // the specialization's inline and definition flags.
+      sem.flags = u16(flags | member | destructor | specialization | (definition ? sema::decl_flag::definition : 0));
+      p_->specialization_named_at(sem.entity, name_at);
+    } else {
+      sem.flags |= flags | sema::decl_flag::definition;
+    }
     sem.attributes = b_.seq(std::span<const NodeId>{});
     std::vector<ast::ParamSema> params;
     for (const parse::Param& p : fs.params) params.push_back({EntityId::none, p.type, p.name, p.default_arg, p.element ? sema::param_flag::pack_element : u16(0)});
@@ -5442,6 +5469,38 @@ private:
     p_->declared(sem, k_);
     declarators_.push_back(s_.node(ast::Declarator{u32(decls_.size()), {}, ConstId::none}, name_at, ps_.pos()));
     decls_.push_back(sem);
+  }
+
+  bool check_destructor_specialization(const sema::ClassRec& cls, const sema::MemberDeclRec& member,
+                                       Parser::Suffix& suffix, u32 name_at, bool definition) {
+    if (member.is_deleted || (definition && (!it_->has_body() || p_->region().tokens[it_->body_begin].kind != Tk::l_brace))) {
+      s_.diag(name_at, Diag::not_supported, Tk::tilde);
+      return false;
+    }
+    if (definition && p_->explicitly_specialized(member.entity, k_)) {
+      const auto key = std::to_underlying(member.entity);
+      const auto previous = p_->definitions_.find(key);
+      if (previous != p_->definitions_.end() && previous->second >= p_->explicit_specs_.at(key) && previous->second < k_) {
+        s_.diag(name_at, Diag::redefinition, member.name);
+        return false;
+      }
+    }
+    bool ok = true;
+    ps_.exception_specifier(suffix, ok);
+    if (!ok) return false;
+    // [except.spec]: a destructor without a written specification uses the implicit one.
+    const auto original = p_->destructor_declarations_.find(member.entity);
+    std::optional<bool> nonthrowing;
+    if (suffix.has_noexcept) nonthrowing = ps_.noexcept_value(suffix.noexcept_condition, ok);
+    else if (original != p_->destructor_declarations_.end()) nonthrowing = original->second.implicit_nonthrowing;
+    if (!ok) return false;
+    if (nonthrowing != cls.destructor_noexcept) {
+      s_.diag(name_at, Diag::conflicting_declaration, member.name);
+      return false;
+    }
+    if (definition) return finish_constructor_declarator();
+    ps_.skip_attributes();
+    return ps_.expect(Tk::semi);
   }
 
   // `namespace N { … }` ([namespace.def]): the namespace its members belong to.
@@ -9511,6 +9570,7 @@ bool Program::special_members(u32 item, EntityId cls, sema::ClassRec& rec,
   }
   rec.destructor_noexcept = declaration != destructor_declarations_.end() && declaration->second.nonthrowing
                               ? declaration->second.nonthrowing : implicit_noexcept;
+  if (declaration != destructor_declarations_.end()) declaration->second.implicit_nonthrowing = implicit_noexcept;
   if (overrides_destructor && class_diags) {
     const bool unusable = !rec.destructor_usable || !base->destructor_usable;
     const bool unknown = !base->destructor_noexcept || !rec.destructor_noexcept;
@@ -10517,8 +10577,12 @@ interp::Callee Program::function_ir(EntityId f, u32 item) {
   // A specialization needed for constant evaluation uses the same instantiated body as
   // native lowering ([temp.inst]/8).
   const u32 key = std::to_underlying(f);
-  const EntityId templ = w_->entities.rec(f).templ;
-  const bool class_member = member_patterns_.contains(key);
+  const auto& entity = w_->entities.rec(f);
+  const EntityId templ = entity.templ;
+  const bool member_instance = member_patterns_.contains(key);
+  const bool specialized_destructor = member_instance && entity.kind == sema::EntityKind::destructor &&
+                                      explicitly_specialized(f, item);
+  const bool class_member = member_instance && !specialized_destructor;
   if (class_member || (templ != EntityId::none && !explicitly_specialized(f, item))) {
     if (!class_member) {
       ensure_declared(templ, item);
@@ -10549,6 +10613,7 @@ interp::Callee Program::function_ir(EntityId f, u32 item) {
   ensure_declared(f, item);
   auto def = definitions_.find(std::to_underlying(f));
   if (def == definitions_.end() || def->second >= item || !friend_body_ready(def->second)) return c;
+  if (specialized_destructor && def->second < explicit_specs_.at(key)) return c;
   u32 k = def->second;
   if (!irs_.contains(k)) {
     // A body with errors has no L1: the evaluation stops at the call.
