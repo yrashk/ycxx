@@ -451,6 +451,7 @@ public:
       }
       break;
     // The token-owning replay checks completeness and diagnoses a concrete operand.
+    case ast::DepOp::is_aggregate:
     case ast::DepOp::is_trivially_copyable:
     case ast::DepOp::is_destructible:
     case ast::DepOp::is_nothrow_destructible:
@@ -636,6 +637,7 @@ public:
       case ast::DepOp::is_member_pointer:
       case ast::DepOp::is_member_object_pointer:
       case ast::DepOp::is_member_function_pointer:
+      case ast::DepOp::is_aggregate:
       case ast::DepOp::is_trivially_copyable:
       case ast::DepOp::is_destructible:
       case ast::DepOp::is_nothrow_destructible:
