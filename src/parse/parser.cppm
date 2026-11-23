@@ -4005,12 +4005,7 @@ public:
             if (is(Tk::l_paren) && kind(1) == Tk::r_paren) {
               Ex callee = s_->name_expr(n, begin, pos(), true);
               if (!callee.ok()) return callee;
-              if (auto call = s_->dependent_immediate_template_call(callee, *args, pos() + 2)) {
-                ++deferred_immediate_calls_;
-                bump();
-                bump();
-                return *call;
-              }
+              if (auto call = deferred_immediate_template_call(callee, *args)) return *call;
             }
           }
           // A call of it is a dependent call ([temp.dep.candidate]): its instantiation adds
@@ -4259,6 +4254,17 @@ public:
     }
   }
 
+  // The caller has recognized the empty operand list of a dependent immediate call.
+  std::optional<Ex> deferred_immediate_template_call(Ex callee, std::span<const ast::TemplateArg> args) {
+    auto call = s_->dependent_immediate_template_call(callee, args, pos() + 2);
+    if (call) {
+      ++deferred_immediate_calls_;
+      bump();
+      bump();
+    }
+    return call;
+  }
+
   // A qualified-id ([expr.prim.id.qual]): `N::x`, `::x`, `C::m`, `E::e`, `N::C::f`.
   Ex qualified_id(u32 begin) {
     u32 next = 0;
@@ -4366,8 +4372,16 @@ public:
         auto args = template_argument_list();
         if (!args) return {NodeId::none, begin, pos()};
         Ex r = scope_expr();
-        if (r.ok() && !s_->dependent(r) && std::ranges::any_of(*args, [&](const ast::TemplateArg& a) { return s_->dependent(a); }))
+        if (r.ok() && !s_->dependent(r) && std::ranges::any_of(*args, [&](const ast::TemplateArg& a) { return s_->dependent(a); })) {
+          if (s->ns && in_template_value_argument_ && is(Tk::l_paren) && kind(1) == Tk::r_paren) {
+            if (ambiguous_namespace) {
+              s_->diag(begin + *ambiguous_namespace, Diag::ambiguous_name, ambiguous_name);
+              return {NodeId::none, begin, pos()};
+            }
+            if (auto call = deferred_immediate_template_call(r, *args)) return *call;
+          }
           return s_->dependent_node({}, begin, pos());
+        }
         s_->explicit_template_args(r, std::move(*args));
         return r;
       }
