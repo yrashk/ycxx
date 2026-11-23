@@ -61,6 +61,15 @@ with tempfile.TemporaryDirectory() as directory:
         ("effect_free_loop", "One", "while (n > 0) --n; return send(n);", None),
         ("loop_initializer", "One", "for (int i = send(n); i > 0; --i) {} return 0;", None),
         ("counted_loop", "Two", "for (unsigned i = 0u; i < 2u; ++i) send(i); return n;", None),
+        ("counted_signed", "Two", "for (int i = 2; i < 4; ++i) send(i); return n;", None),
+        ("counted_unsigned_offset", "Two", "for (unsigned i = 2u; i < 4u; i++) send(i); return n;", None),
+        ("counted_negative", "Two", "for (int i = -1; i < 1; ++i) send(i); return n;", None),
+        ("counted_descending", "Two", "for (int i = 1; i > -1; i--) send(i); return n;", None),
+        ("counted_unsigned_descending", "Two", "for (unsigned i = 2u; i > 0u; --i) send(i); return n;", None),
+        ("counted_offset_overuse", "Two", "for (int i = 7; i < 10; ++i) send(i); return n;",
+         "exceeds its usage grade of 2"),
+        ("counted_wrong_direction", "Two", "for (unsigned i = 0u; i < 2u; --i) send(i); return n;",
+         "unbounded usage"),
         ("counted_nested", "Four", "for (unsigned i = 0u; i < 2u; ++i) "
          "for (unsigned j = 0u; j < 2u; ++j) send(i + j); return n;", None),
         ("counted_zero", "One", "for (unsigned i = 0u; i < 0u; i++) send(n); return send(n);", None),
@@ -232,7 +241,7 @@ with tempfile.TemporaryDirectory() as directory:
               return value;
             }
             [[=fx::contract<Two>{}]] int dispatch(Scope& scope) noexcept {
-              for (unsigned i = 0u; i < 2u; ++i) transmit(scope, i + 1u);
+              for (int i = 2; i > 0; --i) transmit(scope, i);
               return 2;
             }
             int main(int argc, char**) {

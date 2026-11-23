@@ -1552,16 +1552,26 @@ static bool effect_counter_exposed(const ast::Red& node, ast::u32 counter) {
   return exposed;
 }
 
-static std::optional<ast::u64> effect_unsigned_literal(const sema::World& world, ast::Red expression) {
+static std::optional<std::int64_t> effect_counter_literal(const sema::World& world, ast::Red expression,
+                                                          ast::Builtin type) {
   expression = effect_unparen(expression);
+  bool negate = false;
+  if (type == ast::Builtin::int_ && expression.is<ast::Unary>()) {
+    const auto unary = expression.get<ast::Unary>();
+    if (unary.op != ast::UnaryOp::minus) return std::nullopt;
+    negate = true;
+    expression = effect_unparen(effect_child(expression, unary.operand));
+  }
   if (!expression.is<ast::Literal>()) return std::nullopt;
   const auto literal = expression.get<ast::Literal>();
-  if (!world.types.is(literal.info.type, ast::Builtin::unsigned_int) || !world.ins.values.is<ast::VInt>(literal.value))
+  if (!world.types.is(literal.info.type, type) || !world.ins.values.is<ast::VInt>(literal.value))
     return std::nullopt;
-  return ast::int_bits(world.ins, literal.value).lo;
+  const auto value = static_cast<std::int64_t>(ast::int_bits(world.ins, literal.value).lo);
+  if (negate && value < 0) return std::nullopt;
+  return negate ? -value : value;
 }
 
-// A private unsigned counter advances from zero to the strict upper bound without wrapping.
+// A private counter steps toward a strict bound of its own type without wrapping.
 static std::optional<ast::u64> effect_loop_limit(const sema::World& world, const ast::Red& node) {
   const auto loop = node.get<ast::For>();
   if (loop.init.id == ast::NodeId::none || loop.condition.id == ast::NodeId::none ||
@@ -1578,16 +1588,22 @@ static std::optional<ast::u64> effect_loop_limit(const sema::World& world, const
   const auto local = declaration.get<ast::LocalVar>();
   const auto comparison = condition.get<ast::Binary>();
   const auto step = increment.get<ast::Unary>();
-  if (local.init.id == ast::NodeId::none || comparison.op != ast::BinaryOp::lt ||
-      (step.op != ast::UnaryOp::pre_inc && step.op != ast::UnaryOp::post_inc) ||
+  const auto type = world.types.builtin_of(step.info.type);
+  const bool ascending = comparison.op == ast::BinaryOp::lt;
+  const auto prefix = ascending ? ast::UnaryOp::pre_inc : ast::UnaryOp::pre_dec;
+  const auto postfix = ascending ? ast::UnaryOp::post_inc : ast::UnaryOp::post_dec;
+  // The signed accumulator must be able to hold both endpoints and their difference.
+  if ((type != ast::Builtin::int_ && type != ast::Builtin::unsigned_int) || ast::width_of(world.target, *type) >= 64 ||
+      local.init.id == ast::NodeId::none || (!ascending && comparison.op != ast::BinaryOp::gt) ||
+      (step.op != prefix && step.op != postfix) ||
       !effect_counter_read(effect_child(condition, comparison.lhs), local.local) ||
-      !effect_counter_ref(effect_child(increment, step.operand), local.local) ||
-      !world.types.is(step.info.type, ast::Builtin::unsigned_int) ||
-      effect_unsigned_literal(world, effect_child(declaration, local.init)) != ast::u64{0})
+      !effect_counter_ref(effect_child(increment, step.operand), local.local))
     return std::nullopt;
-  const auto limit = effect_unsigned_literal(world, effect_child(condition, comparison.rhs));
-  if (!limit || effect_counter_exposed(effect_child(node, loop.body), local.local)) return std::nullopt;
-  return limit;
+  const auto first = effect_counter_literal(world, effect_child(declaration, local.init), *type);
+  const auto bound = effect_counter_literal(world, effect_child(condition, comparison.rhs), *type);
+  if (!first || !bound || effect_counter_exposed(effect_child(node, loop.body), local.local)) return std::nullopt;
+  const auto distance = ascending ? *bound - *first : *first - *bound;
+  return distance > 0 ? static_cast<ast::u64>(distance) : ast::u64{0};
 }
 
 static std::optional<EffectHandlerBinding> effect_handler_binding(const sema::World& world,

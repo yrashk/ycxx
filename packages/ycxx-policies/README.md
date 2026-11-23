@@ -311,9 +311,11 @@ Use `fx::set<fx::at_most<ReadSettings, 3>>` as the bound to give a function a fi
 maximum of three reads per call. The same set works with `fx::bound`, `fx::trusted`,
 and their declaration annotations. In a checked body, sequential calls add their
 declared costs. A conditional counts its condition and the more expensive branch.
-A counted loop such as `for (unsigned i = 0u; i < 3u; ++i)` can spend up to three
-iterations' worth of effects. The body can read `i` by value. Writes and references
-to the counter prevent YCXX from proving that bound. For other loops, a positive
+A counted loop such as `for (int i = 3; i > 0; --i)` can spend up to three
+iterations' worth of effects. YCXX recognizes `int` and `unsigned` counters with
+literal endpoints of the same type, incrementing toward `<` or decrementing toward
+`>`. The body can read `i` by value. Writes and references to the counter prevent
+YCXX from proving that bound. For other loops, a positive
 cost on a path to another iteration exceeds a finite grade. A cost on a path that
 breaks or returns counts once if every repeating path has zero cost. A `do` loop
 with a literal `false` condition executes at most once. A bare effect tag declares
