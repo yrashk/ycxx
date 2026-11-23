@@ -5,6 +5,7 @@
 module;
 #include <stdio.h>
 #include <stdlib.h>
+#include <sys/stat.h>
 #include <unistd.h>
 export module ycxx.compile;
 
@@ -481,18 +482,19 @@ std::string absolute_in(const Request& r, std::string_view path) {
 // Quote a file name in a make rule. A semicolon is read during both recipe splitting and
 // file-name parsing. Ninja's gcc depfile reader uses a smaller grammar for unusual names.
 // An explicit `-MT` supplies make syntax and is written literally.
-bool append_make_path(std::string& rule, std::string_view path, bool target = false) {
-  if (path.find_first_of("\r\n") != path.npos) return false;
+std::optional<std::size_t> append_make_path(std::string& rule, std::string_view path, bool target = false) {
+  if (path.find_first_of("\r\n") != path.npos) return std::nullopt;
   std::size_t backslashes = 0;
   for (char c : path) {
     if (c == ';') rule.append(3 * backslashes + 3, '\\');
-    else if (c == ' ' || c == '\t' || c == '#' || c == ':' || (target ? c == '%' : c == '|'))
+    else if (c == ' ' || c == '\t' || c == '#' || c == ':' || c == '*' || c == '?' || c == '[' ||
+             (target ? c == '%' : c == '|'))
       rule.append(backslashes + 1, '\\');
     else if (c == '$') rule += '$';
     rule += c;
     backslashes = c == '\\' ? backslashes + 1 : 0;
   }
-  return true;
+  return backslashes;
 }
 
 std::expected<DependencyFile, std::string> make_dependencies(
@@ -502,7 +504,11 @@ std::expected<DependencyFile, std::string> make_dependencies(
                  ? *opts.dependency_path
                  : std::filesystem::path(object).replace_extension(".d").native_encoded_string();
   const auto bad_path = std::unexpected("a dependency path cannot contain a newline");
-  if (opts.dependency_targets.empty() && !append_make_path(out.rule, object, true)) return bad_path;
+  if (opts.dependency_targets.empty()) {
+    const auto trailing = append_make_path(out.rule, object, true);
+    if (!trailing) return bad_path;
+    out.rule.append(*trailing, '\\');
+  }
   for (const std::string& target : opts.dependency_targets) {
     if (target.find_first_of("\r\n") != target.npos) return std::unexpected("'-MT' cannot contain a newline");
     if (!out.rule.empty()) out.rule += ' ';
@@ -511,11 +517,17 @@ std::expected<DependencyFile, std::string> make_dependencies(
   out.rule += ':';
   // Use the preprocessor's physical main path and each header's first observed spelling.
   std::set<std::string> seen;
+  std::size_t trailing = 0;
   for (const std::string& path : dependencies) {
     if (!seen.insert(absolute_in(r, path)).second) continue;
+    out.rule.append(trailing, '\\');
     out.rule += ' ';
-    if (!append_make_path(out.rule, path)) return bad_path;
+    const auto slashes = append_make_path(out.rule, path);
+    if (!slashes) return bad_path;
+    trailing = *slashes;
   }
+  // Keep a final backslash separate from the newline so it cannot continue the rule.
+  if (trailing != 0) out.rule += ' ';
   out.rule += '\n';
   return out;
 }
@@ -528,6 +540,16 @@ std::optional<std::filesystem::path> output_destination(const std::filesystem::p
   auto directory = std::filesystem::canonical(parent.empty() ? std::filesystem::path(".") : parent, ec);
   if (ec) return std::nullopt;
   return directory / path.filename();
+}
+
+std::optional<struct stat> output_entry(const std::filesystem::path& path) {
+  struct stat status{};
+  if (::lstat(path.c_str(), &status) != 0) return std::nullopt;
+  return status;
+}
+
+bool same_inode(const struct stat& a, const struct stat& b) {
+  return a.st_dev == b.st_dev && a.st_ino == b.st_ino;
 }
 
 // Stage a complete rule beside its destination, using a unique temporary file for each writer.
@@ -549,21 +571,68 @@ std::expected<std::filesystem::path, std::string> stage_dependencies(
   return std::unexpected(std::format("cannot write dependency file '{}'", dep.path));
 }
 
+// Publish a complete regular object with the usual creation permissions. Devices and pipes
+// still use the ordinary writer and have no newly installed file to retire.
+std::expected<std::optional<struct stat>, std::string> write_paired_object(
+    const Output& output, const std::filesystem::path& path) {
+  std::error_code ec;
+  using std::filesystem::file_type;
+  const auto type = std::filesystem::symlink_status(path, ec).type();
+  if (type != file_type::regular && type != file_type::symlink && type != file_type::not_found) {
+    if (auto error = pipeline::write_file(path, output.bytes, output.executable)) return std::unexpected(*error);
+    return std::nullopt;
+  }
+
+  auto name = (path.parent_path() / ".ycxx-obj-XXXXXX").native_encoded_string();
+  if (!::mkdtemp(name.data())) return std::unexpected(std::format("cannot stage object file '{}'", output.path));
+  const std::filesystem::path directory(name);
+  const auto staged = directory / "object";
+  const auto entry = pipeline::write_file(staged, output.bytes, output.executable) ? std::nullopt : output_entry(staged);
+  const bool ready = entry && S_ISREG(entry->st_mode);
+  std::error_code install;
+  if (ready) std::filesystem::rename(staged, path, install);
+  if (!ready || install) std::filesystem::remove(staged, ec);
+  std::filesystem::remove(directory, ec);
+  if (!ready) return std::unexpected(std::format("cannot stage object file '{}'", output.path));
+  if (install) return std::unexpected(std::format("cannot write '{}': {}", output.path, install.message()));
+  return entry;
+}
+
 std::optional<std::string> write_object_and_dependencies(const Output& output, const DependencyFile& dep) {
   const auto object_path = output_destination(output.path);
   if (!object_path) return std::format("cannot open '{}' for writing", output.path);
   const auto dep_path = output_destination(dep.path);
   if (!dep_path) return std::format("cannot open dependency file '{}' for writing", dep.path);
-  if (*object_path == *dep_path) return "the dependency file and object output must be different paths";
+  constexpr auto collision = "the dependency file and object output must be different paths";
+  if (*object_path == *dep_path) return collision;
+  // A single link proves two spellings name one existing entry. Distinct links can share an inode.
+  if (const auto before = output_entry(*object_path); before && before->st_nlink == 1) {
+    if (const auto existing = output_entry(*dep_path); existing && same_inode(*before, *existing)) return collision;
+  }
   auto staged = stage_dependencies(dep, *dep_path);
   if (!staged) return staged.error();
 
   std::error_code ec;
-  auto error = pipeline::write_file(*object_path, output.bytes, output.executable);
-  if (!error) {
+  const auto published = write_paired_object(output, *object_path);
+  if (!published) {
+    std::filesystem::remove(*staged, ec);
+    return published.error();
+  }
+  std::string error;
+  const auto existing = output_entry(*dep_path);
+  if (*published && existing && same_inode(**published, *existing)) {
+    // The second spelling can resolve to the fresh object on a case-insensitive filesystem.
+    error = collision;
+  } else {
     std::filesystem::rename(*staged, *dep_path, ec);
     if (!ec) return std::nullopt;
     error = std::format("cannot write dependency file '{}': {}", dep.path, ec.message());
+  }
+  // A fresh object with an old depfile could make the next build miss required work.
+  const auto current = output_entry(*object_path);
+  if (*published && current && same_inode(**published, *current)) {
+    std::filesystem::remove(*object_path, ec);
+    if (ec) error += std::format(" (cannot remove newly written object '{}': {})", output.path, ec.message());
   }
   std::filesystem::remove(*staged, ec);
   return error;
