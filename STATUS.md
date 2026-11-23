@@ -2030,6 +2030,16 @@ template's tokens again with the arguments bound.
   of a function template specialization as an expression stays in #335.
   Mangling a C-linkage function type stays in #287.
 
+## Native object pointer template arguments (#1055)
+
+- A native symbol can encode a pointer template argument naming a whole namespace-scope
+  object or a static data member of an ordinary namespace-scope class. Mangling uses the
+  symbolic object from constant evaluation, with the enclosing name's Itanium substitutions.
+- On both native targets, members specialized for pointers to distinct TU-local objects
+  keep their symbols and storage separate across translation units. Externally linked object
+  arguments preserve their identity when separate objects refer to the same specialization.
+  [#1055](https://github.com/yrashk/ycxx/issues/1055)
+
 ## Value-dependent template arguments in symbols (#773)
 
 - A function template whose signature holds a value-dependent template argument has a symbol:

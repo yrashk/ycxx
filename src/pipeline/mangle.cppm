@@ -45,6 +45,15 @@ struct FunctionName {
 };
 using FunctionNames = std::function<std::optional<FunctionName>(ast::EntityId)>;
 
+// A named whole object used as a pointer template argument.
+struct ObjectName {
+  std::string name;
+  ast::QualType type;
+  ast::EntityId scope;
+  bool internal;
+};
+using ObjectNames = std::function<std::optional<ObjectName>(ast::EntityId)>;
+
 // Fails, naming the type, on what the α subset does not mangle yet.
 // How a class, enumeration or namespace is named: its identifier ("(anonymous)" for an unnamed
 // namespace), and the class or namespace it is in, or none for the global namespace.
@@ -76,13 +85,14 @@ std::expected<std::string, std::string> mangled_type(const ast::Interners& in, a
 std::expected<std::string, std::string> mangled_function(const ast::Interners& in, std::string_view name,
                                                          ast::QualType type, const ClassNames& classes = {},
                                                          ast::EntityId scope = ast::EntityId::none,
-                                                         bool special = false, const FunctionNames& functions = {});
+                                                         bool special = false, const FunctionNames& functions = {},
+                                                         const ObjectNames& objects = {});
 
 // `special`: `name` is a <ctor-dtor-name> (`C1`), a constructor template's specialization.
 std::expected<std::string, std::string> mangled_specialization(const ast::Interners& in, std::string_view name,
                                                                const TemplateSpec& spec, const ClassNames& classes = {},
                                                                ast::EntityId scope = ast::EntityId::none, bool special = false,
-                                                               const FunctionNames& functions = {});
+                                                               const FunctionNames& functions = {}, const ObjectNames& objects = {});
 
 // <substitution> for the candidate at `index`: `S_`, then `S0_` … `SZ_`, `S10_` … (§5.1.10).
 std::string substitution(std::size_t index);
@@ -93,7 +103,8 @@ std::expected<std::string, std::string> symbol_name(const ast::Interners& in, st
                                                     const ClassNames& classes = {},
                                                     ast::EntityId scope = ast::EntityId::none,
                                                     bool special = false, const TemplateSpec* spec = nullptr,
-                                                    bool leading_underscore = true, const FunctionNames& functions = {});
+                                                    bool leading_underscore = true, const FunctionNames& functions = {},
+                                                    const ObjectNames& objects = {});
 
 }  // namespace ycxx::pipeline
 
@@ -145,8 +156,8 @@ std::optional<std::string_view> operator_code(std::string_view op, std::size_t a
 
 class Mangler {
  public:
-  Mangler(const ast::Interners& in, const ClassNames& classes, const FunctionNames& functions)
-      : in_(in), classes_(classes), functions_(functions) {}
+  Mangler(const ast::Interners& in, const ClassNames& classes, const FunctionNames& functions, const ObjectNames& objects)
+      : in_(in), classes_(classes), functions_(functions), objects_(objects) {}
   // The depth of the head of the template whose specialization is mangled: its parameters are
   // `T_`, `T0_`, …
   ast::u16 own_depth = 0;
@@ -435,6 +446,14 @@ class Mangler {
     if (scope == ast::EntityId::none || (classes_ && is_global_std(classes_(scope)))) return components;
     return "N" + components + "E";
   }
+  // The <data name> part of an <encoding> (§5.1.2), sharing substitutions with its use.
+  std::expected<std::string, std::string> object_encoding(std::string_view name, ast::EntityId scope, bool internal = false) {
+    std::string component = (internal ? "L" : "") + source_name(name);
+    if (scope == ast::EntityId::none) return component;
+    auto p = prefix(scope);
+    if (!p) return p;
+    return delimit_name(*p + component, scope);
+  }
   // <unnamed-type-name> ::= Ut [<number>] _ (Itanium ABI §5.1.5.5).
   static std::string class_component(const ClassName& n) {
     if (!n.unnamed_type_ordinal) return source_name(n.name);
@@ -637,6 +656,8 @@ class Mangler {
       }
       if (ast::is_pointer(in_, a.type) && ast::is_function(in_, ast::pointee_of(in_, a.type)))
         return function_pointer_argument(a);
+      if (ast::is_pointer(in_, a.type) && in_.values.is<ast::VLvalue>(a.value))
+        return object_pointer_argument(a);
       // A value of an enumeration type: `L <type> <value> E`, the type as any <type> is, the value
       // its integer, `n` before a negative one (§5.1.5.7).
       if (in_.types.is<ast::TEnum>(in_.types.canon(ast::without_cv(in_.canonical(a.type)))) && in_.values.is<ast::VInt>(a.value)) {
@@ -747,6 +768,22 @@ class Mangler {
                                                   : local_encoding(target->declaration);
     if (!name) return name;
     return expression + "adL_Z" + *name + "EE";
+  }
+
+  std::expected<std::string, std::string> object_pointer_argument(const ast::TemplateArg& arg) {
+    const auto address = in_.values.get<ast::VLvalue>(arg.value);
+    if (address.offset || in_.seqs.size(address.path) || !in_.values.is<ast::VEntity>(address.base))
+      return std::unexpected("an object pointer argument without a whole named object");
+    const auto entity = in_.values.get<ast::VEntity>(address.base).entity;
+    const auto target = objects_ ? objects_(entity) : std::nullopt;
+    if (!target) return std::unexpected("an object pointer argument without a supported object name");
+    if (ast::without_cv(in_.canonical(ast::pointee_of(in_, arg.type))) != ast::without_cv(in_.canonical(target->type)))
+      return std::unexpected("an object pointer argument with a different pointee type");
+    // Itanium §5.1.6.2: the address-of an entity literal. The name's prefix participates in the
+    // enclosing symbol's substitution table, and qualification conversions keep the same value.
+    auto name = object_encoding(target->name, target->scope, target->internal);
+    if (!name) return name;
+    return "XadL_Z" + *name + "EE";
   }
 
   // A class or alias template as a template argument: its <source-name>, in a namespace or class a
@@ -906,6 +943,7 @@ class Mangler {
   const ast::Interners& in_;
   const ClassNames& classes_;
   const FunctionNames& functions_;
+  const ObjectNames& objects_;
   std::vector<std::uint64_t> candidates_;  // in order of completion
 };
 
@@ -934,13 +972,14 @@ std::optional<std::string_view> operator_code(std::string_view op, std::size_t a
 }
 
 std::expected<std::string, std::string> mangled_type(const ast::Interners& in, ast::QualType type, const ClassNames& classes) {
-  return Mangler(in, classes, {}).type(type);
+  return Mangler(in, classes, {}, {}).type(type);
 }
 
 std::expected<std::string, std::string> mangled_function(const ast::Interners& in, std::string_view name,
                                                          ast::QualType type, const ClassNames& classes,
-                                                         ast::EntityId scope, bool special, const FunctionNames& functions) {
-  Mangler m(in, classes, functions);
+                                                         ast::EntityId scope, bool special, const FunctionNames& functions,
+                                                         const ObjectNames& objects) {
+  Mangler m(in, classes, functions, objects);
   auto e = m.encoding(name, type, scope, special);
   if (!e) return e;
   return "_Z" + *e;
@@ -948,8 +987,9 @@ std::expected<std::string, std::string> mangled_function(const ast::Interners& i
 
 std::expected<std::string, std::string> mangled_specialization(const ast::Interners& in, std::string_view name,
                                                                const TemplateSpec& spec, const ClassNames& classes,
-                                                               ast::EntityId scope, bool special, const FunctionNames& functions) {
-  Mangler m(in, classes, functions);
+                                                               ast::EntityId scope, bool special, const FunctionNames& functions,
+                                                               const ObjectNames& objects) {
+  Mangler m(in, classes, functions, objects);
   auto e = m.specialization_encoding(name, spec, scope, special);
   if (!e) return e;
   return "_Z" + *e;
@@ -959,24 +999,24 @@ std::expected<std::string, std::string> symbol_name(const ast::Interners& in, st
                                                     bool is_function, ast::LangLinkage lang,
                                                     const ClassNames& classes, ast::EntityId scope,
                                                     bool special, const TemplateSpec* spec, bool leading_underscore,
-                                                    const FunctionNames& functions) {
+                                                    const FunctionNames& functions, const ObjectNames& objects) {
   const std::string prefix = leading_underscore ? "_" : "";
   if (spec) {
-    auto m = mangled_specialization(in, name, *spec, classes, scope, special, functions);
+    auto m = mangled_specialization(in, name, *spec, classes, scope, special, functions, objects);
     if (!m) return m;
     return prefix + *m;
   }
   if (scope != ast::EntityId::none && !is_function) {
     // A static data member or a namespace's variable (§5.1.2).
-    Mangler m(in, classes, functions);
-    auto scope_name = m.prefix(scope);
-    if (!scope_name) return scope_name;
-    return prefix + "_Z" + m.delimit_name(*scope_name + Mangler::source_name(name), scope);
+    Mangler m(in, classes, functions, objects);
+    auto encoding = m.object_encoding(name, scope);
+    if (!encoding) return encoding;
+    return prefix + "_Z" + *encoding;
   }
   // [basic.start.main]: only the global namespace's `main` is the program's.
   if (!is_function || (name == "main" && scope == ast::EntityId::none) || lang == ast::LangLinkage::c)
     return prefix + std::string(name);
-  auto m = mangled_function(in, name, type, classes, scope, special, functions);
+  auto m = mangled_function(in, name, type, classes, scope, special, functions, objects);
   if (!m) return m;
   return prefix + *m;
 }
