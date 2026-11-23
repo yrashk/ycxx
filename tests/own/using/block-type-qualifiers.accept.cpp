@@ -32,3 +32,16 @@ namespace Enclosing {
     static_assert(static_cast<int>(E::one) == 23);
   }
 }
+
+// [basic.lookup.udir] restricts the directive and alias to namespace names.
+namespace Shadowed { constexpr int namespace_value = 41; }
+namespace Types { enum class Shadowed { enumerator = 43 }; }
+
+void namespace_only() {
+  using Types::Shadowed;
+  using namespace Shadowed;
+  static_assert(namespace_value == 41);
+  namespace Original = Shadowed;
+  static_assert(Original::namespace_value == 41);
+  static_assert(static_cast<int>(Shadowed::enumerator) == 43);
+}
