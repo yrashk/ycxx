@@ -12,6 +12,8 @@ from system_includes import LINUX
 LITERAL = "int warning_probe() { return 'ab'; }\n"
 PP_LITERAL = "#if 'ab'\nint preprocessor_probe = 17;\n#endif\n"
 REQUIRED = '#warning retained_required_warning\n#error retained_required_error\n'
+DIRECTIVES = '#warning main warning 173\n#include "directive.h"\n#error main error 429\n'
+DIRECTIVE_HEADER = '#warning header warning 286\n#error header error 541\n'
 SYSTEM_HEADER = '#warning retained_system_warning\n' + LITERAL
 PIN_FLAGS = ('-Wall', '-Wextra', '-Wno-sized-deallocation', '-Wno-attributes')
 UNKNOWN = '-Wycxx-spec-unknown-warning'
@@ -41,7 +43,8 @@ def warnings(diagnostics):
 
 def command_line(world, scope):
     for name, text in (('literal.cpp', LITERAL), ('pp.cpp', PP_LITERAL),
-                       ('required.cpp', REQUIRED), ('clean.cpp', 'int clean = 0;\n'),
+                       ('required.cpp', REQUIRED), ('directives.cpp', DIRECTIVES),
+                       ('directive.h', DIRECTIVE_HEADER), ('clean.cpp', 'int clean = 0;\n'),
                        ('system.cpp', '#include <warning.hpp>\n')):
         (scope / name).write_text(text)
     (scope / 'inc').mkdir()
@@ -85,11 +88,29 @@ def command_line(world, scope):
     assert any(b': error:' in line and b'retained_required_error' in line
                for line in diagnostic.splitlines()), diagnostic
 
+    # [cpp.error]: display the directive's tokens in the source file and in included headers.
+    _, diagnostic = invoke('directives.cpp', status=1)
+    for location, message in (
+        (b'directives.cpp:1:', b'warning: main warning 173'),
+        (b'directive.h:1:', b'warning: header warning 286'),
+        (b'directive.h:2:', b'error: header error 541'),
+        (b'directives.cpp:3:', b'error: main error 429'),
+    ):
+        assert any(location in line and line.endswith(message)
+                   for line in diagnostic.splitlines()), diagnostic
+
+    # A same-length header edit changes only the diagnostic payload.
+    (scope / 'directive.h').write_text(DIRECTIVE_HEADER.replace('286', '287'))
+    _, diagnostic = invoke('directives.cpp', status=1)
+    assert b'warning: header warning 287' in diagnostic, diagnostic
+    assert b'warning: header warning 286' not in diagnostic, diagnostic
+
     for include, expected in (('-I', 2), ('-isystem', 1)):
         _, diagnostic = invoke('system.cpp', '-Wno-all', '-Wmultichar', include, 'inc')
         emitted = warnings(diagnostic)
         assert len(emitted) == expected, (include, diagnostic)
-        assert any(b'warning.hpp:1:' in line and b'#warning' in line for line in emitted), diagnostic
+        assert any(b'warning.hpp:1:' in line and line.endswith(b'retained_system_warning')
+                   for line in emitted), diagnostic
         assert any(b'warning.hpp:2:' in line for line in emitted) == (include == '-I'), diagnostic
     return pid
 
