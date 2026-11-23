@@ -312,6 +312,18 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
   - Do: rerun Ninja in the same build directory after changing imports during a build.
   - Learned on #101.
 
+- **Find where an incremental build's time goes with the trace's counts and a sampler's times.**
+  On #938 the JSON trace of a 1 MB file had 280k events and doubled the build. Its per-kind self
+  times blamed `FunctionSourceQ` for 2 s of CPU after its scan was already gone, because each
+  traced cell pays the tracer's own cost. The development machine also runs other sessions'
+  builds (load 11–17 on 18 cores), so single timings varied by 50%.
+  - Do: take outcome counts per kind from `--trace-engine=json` (what re-executes, and why). Take
+    times from `sample <daemon pid> 3` started just before an untraced rebuild, and from wall
+    times: min of 5 runs, alternating the base and changed binaries (copy each to a path of its
+    own; a daemon is per binary). Check `ycxx ctl status` for memory without the trace's events.
+  - Look for O(n) scans of unit-wide values in per-function cells: each looks cheap in a small
+    test and is quadratic over a large unit.
+  - Learned on #938.
 - **Template code added to the engine can slow its hit paths without touching them.** #245's
   trace hooks were one branch each, yet `engine_bench` lost 6 ns a fetch hit and 6 ns a root get
   hit. The per-kind `describe` templates instantiated `std::format` in every engine user's unit,

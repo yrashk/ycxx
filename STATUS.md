@@ -610,7 +610,12 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
     `opt_cache_snapshot` input (consulted for B ≥ 1 only); `cost_model` is a stub input. `layout`
     is three cheap queries (`layout_type`, `layout_step`, `layout_constant`). `tu(TU)` assembles
     the object in definition order (§A5.3), with string literal objects as local `l_.str.N`
-    entities by first use; its value also holds the first-demand table (empty until #16). Errors
+    entities by first use; its value also holds the first-demand table (empty until #16). Per-unit
+    cells give the per-function ones what they read of the whole unit, so an edit re-runs them
+    cheaply or not at all (#938): `UnitIndexQ` (each definition's and entity's place),
+    `UnitFunctionFactsQ` (its constexpr and variadic functions), `UnitShapeIndex` (`layout`'s
+    class and enumeration lookup) and `SymbolAccessQ(TU, E)` (how a unit's code addresses `E`).
+    On x86-64, `Lower` still reads the whole unit (#943). Errors
     (what the α subset does not support yet) are values, pointing into the item when there is a
     node.
   - `:mangle`: Itanium names for global-namespace functions over fundamental, pointer and cv types
