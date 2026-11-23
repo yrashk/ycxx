@@ -5732,6 +5732,10 @@ public:
   Ex enumerator_in_list(const OwnDecl& d, u32 begin, u32 end) {
     if (d.enum_initializer != ConstId::none)
       return literal(d.sema.type, d.enum_initializer, ValueCategory::prvalue, begin, end);
+    // An unnamed enum does not have an entity before the closing brace. In its template's
+    // list, an earlier enumerator with no value yet still has its in-list type.
+    if (d.sema.entity == EntityId::none)
+      return dependent_node({}, begin, end, d.sema.type, ValueCategory::prvalue, expr_flag::unrepresented_value);
     return enumerator(d.sema.entity, d.sema.type, begin, end);
   }
   // The enumerator `name` of enumeration `e`, if it has one.
