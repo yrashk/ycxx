@@ -126,9 +126,11 @@ public:
   // `NodeId::none` records a diagnosed error. No answer means this context cannot replay it.
   // A required base selects the call-free parenthesized aggregate form.
   virtual std::optional<NodeId> replay_default_member(Sema&, EntityId, EntityId = EntityId::none) { return std::nullopt; }
-  virtual std::optional<NodeId> replay_function_default(Sema&, const ast::DefaultArg&, EntityId, QualType) {
+  virtual std::optional<NodeId> replay_function_default(Sema&, const ast::DefaultArg&, EntityId, QualType, u32) {
     return std::nullopt;
   }
+  // The effective specification of a written trivial destructor whose class is being completed.
+  virtual std::optional<bool> replay_destructor_exception(Sema&, EntityId, u32) { return std::nullopt; }
   // A selected specialization's exception specification ([except.spec]/13): of a member template,
   // of a member of a class template specialization, or of a function template.
   virtual std::optional<QualType> replay_member_exception(Sema&, const ast::DeclSema&, EntityId, QualType type) {
@@ -226,9 +228,8 @@ public:
   // A generic lambda's definition, as its body ends: the part it is in may instantiate it from
   // elsewhere (an instantiation of another lambda's operator) before the part is committed.
   virtual void generic_defined(const GenericClosure&) {}
-  // Publishes a closure type's record, made by the analysis of the part its lambda is in
-  // (docs/design/closures.md); the published record.
-  virtual const ClassRec& publish_class(EntityId c, ClassRec r) = 0;
+  // Publishes a closure type's record, checking its captures in the lambda's lexical context.
+  virtual const ClassRec& publish_class(EntityId c, ClassRec r, Sema& context) = 0;
   // In an instantiation: the pack expansions the definition of what it re-analyses recorded.
   virtual const std::vector<Expansion>* pattern_expansions() { return nullptr; }
   virtual ~Questions() = default;
@@ -2953,6 +2954,16 @@ public:
     std::vector<Ex> out;
     const bool replay = can_replay_default_members(t);
     const bool union_ = is_union(t);
+    // [dcl.init.aggr]: the caller can potentially destroy each initialized class element.
+    // The existing union check applies to the selected variant. Other aggregates also check
+    // a written trivial destructor, whose access is independent of its runtime cleanup.
+    for (const Element& element : elems) {
+      const QualType type = types().innermost_array_element(element.type);
+      const ClassRec* record = types().is_class(type) && !types().is_dependent(type)
+                                 ? class_rec(types().class_of(type)) : nullptr;
+      if ((union_ || (record && record->declared_destructor != EntityId::none && record->destructor == EntityId::none)) &&
+          !check_destructor_access(type, begin)) return fail;
+    }
     const auto omitted = [&](const Element& element, u32 at) {
       // [dcl.init.aggr]: copy-list-initialize an omitted union element and the
       // first variant of an empty union list in the absence of a default member initializer.
@@ -2963,8 +2974,6 @@ public:
     };
     bool elided = begin != b.begin || end != b.end;
     for (std::size_t i = 0; i < elems.size(); ++i) {
-      if (union_ && !check_destructor_access(types().innermost_array_element(elems[i].type), begin))
-        return fail;
       if (next == b.clauses.size()) {
         out.push_back(omitted(elems[i], end));
         if (!out.back().ok()) return fail;
@@ -4369,7 +4378,7 @@ public:
         invoker_body = invoker_tree(fr, call_type, nparams, body_begin);
       }
     }
-    q_->publish_class(fr.closure, std::move(rec));
+    q_->publish_class(fr.closure, std::move(rec), *this);
     u16 flags = u16((fr.mutable_ ? closure_flag::mutable_ : 0) | (captureless ? closure_flag::captureless : 0) |
                     (generic || in_pattern() ? closure_flag::pattern : 0) |
                     (fr.polymorphic_result ? closure_flag::polymorphic_result : 0));
@@ -5633,7 +5642,8 @@ public:
     if (unevaluated == 0 && d->head.empty() && closure_member(*w_, fe) &&
         !require_supported_virtual_layout(fr.inner, paren_at))
       return fail;
-    auto children = call_args(fr, args, begin, paren_at, cands[*chosen].defaults);
+    auto children = call_args(fr, args, begin, paren_at, cands[*chosen].defaults,
+                              DefaultArgumentOrigin::interned, fe);
     if (!children) return fail;
     ExprInfo info = result_info(fr.inner);
     if (d->is_static) {
@@ -6273,8 +6283,8 @@ public:
         diag(begin, polymorphic_base ? Diag::base_unusable_destructor : Diag::return_unusable_destructor, ut);
         return fail;
       }
-      if (cr->destructor != EntityId::none &&
-          !check_access(c, cr->destructor, w_->entities.rec(cr->destructor).name, begin)) return fail;
+      const EntityId destructor = cr->destructor_declaration();
+      if (destructor != EntityId::none && !check_access(c, destructor, w_->entities.rec(destructor).name, begin)) return fail;
     }
     if (k.entity != EntityId::none && k.entity == cr->defaulted_default_ctor) {
       if (!cr->trivial_defaulted_default_ctor) return fail;  // diagnosed at its declaration
@@ -6328,7 +6338,7 @@ public:
     }
     const auto supplied = args.size();
     for (std::size_t i = supplied; i < fr.params.size() && i < k.defaults.size(); ++i) {
-      auto a = default_argument(k.defaults[i], end);
+      auto a = default_argument(k.defaults[i], end, DefaultArgumentOrigin::interned, k.entity, fr.params[i]);
       if (!a) return fail;
       args.push_back(*a);
     }
@@ -6377,25 +6387,28 @@ public:
   }
 
   // [class.dtor]: a potentially invoked destructor must be accessible.
-  bool check_destructor_access(QualType type, u32 at) {
+  bool check_destructor_access(QualType type, u32 at, Diag unusable = Diag::object_unusable_destructor,
+                               bool base_subobject = false) {
+    type = types().innermost_array_element(type);
     if (!types().is_class(type) || types().is_dependent(type)) return true;
     const EntityId owner = types().class_of(type);
     const ClassRec* record = class_rec(owner);
-    if (!record || record->destructor == EntityId::none) return true;
-    const auto declaration = std::ranges::find(record->members, record->destructor, &MemberDeclRec::entity);
-    if (declaration != record->members.end() && declaration->is_deleted) {
-      diag(at, Diag::object_unusable_destructor, type);
+    if (!record) return true;
+    if (record->destructor_dependent && in_template_definition()) return true;
+    if (!record->destructor_usable) {
+      diag(at, unusable, type);
       return false;
     }
-    const EntityId destructor = record->destructor;
+    const EntityId destructor = record->destructor_declaration();
+    if (destructor == EntityId::none) return true;
     const NameId name = w_->entities.rec(destructor).name;
     if (defer_type_access && !accessible(owner, record->access_of(destructor))) {
       deferred_access_.push_back({owner, destructor, name, at, true});
       return true;
     }
-    // [class.protected]: these uses destroy a complete object of the
-    // declaring class. Access through a derived context needs a derived object.
-    if (record->access_of(destructor) == ast::Access::protected_ && !accessible(owner, ast::Access::private_)) {
+    // [class.protected]: access through a derived context needs a derived object.
+    if (!base_subobject && record->access_of(destructor) == ast::Access::protected_ &&
+        !accessible(owner, ast::Access::private_)) {
       diag(at, Diag::protected_member, name, types().class_type(owner));
       return false;
     }
@@ -6472,9 +6485,18 @@ public:
     if (!operand.ok()) return fail;
     if (dependent(operand)) return dependent_node({operand}, begin, end, builtin(Builtin::bool_));
     const auto before = diag_count();
+    bool missing_destructor_exception = false;
     auto destructor_throwing = [&](QualType type, u32 at) {
       if (!types().is_class(type) || !require_complete(type, at) || !check_destructor_access(type, at)) return false;
-      const ClassRec* record = class_rec(types().class_of(type));
+      const EntityId owner = types().class_of(type);
+      const ClassRec* record = class_rec(owner);
+      if (record && !record->destructor_noexcept && record->declared_destructor != EntityId::none &&
+          record->destructor == EntityId::none) {
+        if (missing_destructor_exception) return false;
+        const auto nonthrowing = q_->replay_destructor_exception(*this, owner, at);
+        missing_destructor_exception = !nonthrowing;
+        return nonthrowing && !*nonthrowing;
+      }
       return record && !record->destructor_noexcept.value_or(record->destructor == EntityId::none);
     };
     bool result_throws = !operand.glvalue() && destructor_throwing(operand.type(), operand.begin);
@@ -6550,7 +6572,7 @@ public:
       node.for_each_child(self);
     };
     visit(ast::Red(ins().ast, root.id, operand.begin));
-    if (has_error_since(before)) return fail;
+    if (missing_destructor_exception || has_error_since(before)) return fail;
     if (value_dependent) return dependent_node({operand}, begin, end, builtin(Builtin::bool_));
     return bool_literal(!result_throws, begin, end);
   }
@@ -6565,7 +6587,8 @@ public:
   // Temporary materialization ([conv.rval]) of the prvalue `v` as an object of type `t`.
   Ex materialize(Ex v, QualType t, bool extended, bool argument = false) {
     if (!v.ok()) return v;
-    if (!require_concrete_object(t, v.begin) || !require_supported_virtual_layout(t, v.begin))
+    if (!require_concrete_object(t, v.begin) || !require_supported_virtual_layout(t, v.begin) ||
+        !check_destructor_access(t, v.begin))
       return {NodeId::none, v.begin, v.end};
     ExprInfo info{t, ValueCategory::xvalue, 0};
     return node(ast::Materialize{info, destructor_of(t), extended ? 1u : argument ? 2u : 0u, at(v, v.begin)}, v.begin, v.end, info);
@@ -7904,7 +7927,8 @@ public:
     if (address_set(e)) return convert(e, to, at_);  // [over.over]: a cast supplies a target type
     QualType target = Types::unqualified(to);
     if (types().is_void(target)) {
-      if (!e.glvalue() && !require_concrete_object(e.type(), e.begin)) return {NodeId::none, e.begin, e.end};
+      if (!e.glvalue() && (!require_concrete_object(e.type(), e.begin) || !check_destructor_access(e.type(), e.begin)))
+        return {NodeId::none, e.begin, e.end};
       // A discarded tag prvalue still denotes a temporary object ([expr.context]/2).
       if (is_defaulted_tag_initializer(e)) e = discarded(e);
       return convert_node(e, ast::ConversionKind::to_void, target);  // /6
@@ -8739,14 +8763,7 @@ public:
   // [class.dtor]: the destructor of the hidden object or materialized temporary is potentially
   // invoked. A reference to an existing object does not itself invoke a destructor.
   bool check_binding_destructor(QualType type, u32 at_) {
-    EntityId entity = types().class_of(type);
-    const ClassRec* record = class_rec(entity);
-    if (!record || record->destructor == EntityId::none) return true;
-    if (!record->destructor_usable) {
-      diag(at_, Diag::binding_unusable_destructor, type);
-      return false;
-    }
-    return check_access(entity, record->destructor, w_->entities.rec(record->destructor).name, at_);
+    return check_destructor_access(type, at_, Diag::binding_unusable_destructor);
   }
 
   // Follow the glvalue designator through the operations in [class.temporary]. A temporary
@@ -9499,7 +9516,8 @@ public:
     }
     case comma:
       // [expr.comma]: the left operand is discarded. Only the right produces the result.
-      if (!l.glvalue() && !require_concrete_object(l.type(), l.begin)) return {NodeId::none, begin, end};
+      if (!l.glvalue() && (!require_concrete_object(l.type(), l.begin) || !check_destructor_access(l.type(), l.begin)))
+        return {NodeId::none, begin, end};
       return ordered(ast::OrderedOp::comma, l, r, r.info);
     case shl:
     case shr: {
@@ -9726,6 +9744,9 @@ public:
         state = copy->copy_assignment == CopyAssignment::memberwise ? CopyAssignment::unsupported
                                                                     : copy->copy_assignment;
       if (!usable_copy_assignment(state, Types::unqualified(l.type()), op_at)) return {NodeId::none, begin, end};
+      const auto* source = class_reference_list_operand(l.type(), b);
+      if ((!source || !source->glvalue()) && !check_destructor_access(l.type(), b.begin))
+        return {NodeId::none, begin, end};
     }
     Ex c = list_init(Types::unqualified(l.type()), b, Construction::copy_list);
     if (!c.ok()) return {NodeId::none, begin, end};
@@ -10036,13 +10057,14 @@ public:
       return expression;
     };
     Ex named = unparenthesized(callee);  // `(f)()` takes f's default arguments too ([expr.call]/1)
-    if (auto d = as<ast::DeclRef>(named); d && types().is_function(ft) && defaults.empty()) {
-      defaults = defaults_of(named, d->entity);
+    const auto declaration = types().is_function(ft) ? as<ast::DeclRef>(named) : std::nullopt;
+    const EntityId default_source = declaration ? declaration->entity : EntityId::none;
+    if (declaration && defaults.empty()) {
+      defaults = defaults_of(named, default_source);
       default_origin = DefaultArgumentOrigin::interned;
     }
-    if (auto d = as<ast::DeclRef>(named); d && types().is_function(ft) &&
-        (named.id == callee.id || is_consteval(d->entity))) {
-      function = d->entity;
+    if (declaration && (named.id == callee.id || is_consteval(default_source))) {
+      function = default_source;
     } else {
       // The address of a named immediate function is itself a known callee. It does not
       // supply default arguments because the call is through a pointer ([expr.call]).
@@ -10059,7 +10081,7 @@ public:
       return {NodeId::none, begin, end};
     }
     TypeRec fr = types().rec(ft);
-    auto children = call_args(fr, args, begin, paren_at, defaults, default_origin, function);
+    auto children = call_args(fr, args, begin, paren_at, defaults, default_origin, default_source);
     if (!children) return {NodeId::none, begin, end};
     ExprInfo info = result_info(fr.inner);
     return node(ast::Call{info, function, at(callee, begin), b_->list(*children)}, begin, end, info);
@@ -10250,9 +10272,11 @@ public:
     const auto value = interned == NodeId::none ? b_->get<ast::DefaultArg>(d) : ins().ast.get<ast::DefaultArg>(interned);
     if (ast::kind_of(value.arg.id) == ast::Nodes::index_of<ast::Dependent>()) {
       if (function != EntityId::none && value.source_end > value.source_begin) {
-        if (auto replay = q_->replay_function_default(*this, value, function, parameter)) {
+        if (auto replay = q_->replay_function_default(*this, value, function, parameter, at_)) {
           if (*replay == NodeId::none) return std::nullopt;
-          const auto concrete = b_->get<ast::DefaultArg>(*replay);
+          const NodeId committed = b_->adopted_node(*replay);
+          const auto concrete = committed == NodeId::none ? b_->get<ast::DefaultArg>(*replay)
+                                                           : ins().ast.get<ast::DefaultArg>(committed);
           return Ex{*replay, at_, at_, concrete.info};
         }
       }
@@ -10324,20 +10348,23 @@ public:
     return std::nullopt;
   }
 
-  // A class reference binds directly to a single reference-related expression.
+  // A class reference can bind directly to a single reference-related expression.
+  const Ex* class_reference_list_operand(QualType type, const Braced& list) {
+    if (list.clauses.size() != 1) return nullptr;
+    const Braced::Clause& clause = list.clauses.front();
+    if (clause.list || clause.designated || !clause.expr.ok() || !types().is_class(clause.expr.type())) return nullptr;
+    int paths = 0;
+    return same_unqualified(clause.expr.type(), type) ||
+           base_path(types().class_of(clause.expr.type()), types().class_of(type), paths) ? &clause.expr : nullptr;
+  }
+
   // Otherwise the list initializes a prvalue of the referenced class ([dcl.init.list]); the
   // materialized object lives until the end of the call's full-expression ([class.temporary]).
   Ex class_reference_list_init(QualType parameter, const Braced& list, bool extend,
                                bool call_argument = false) {
     QualType t = types().referee(parameter);
-    if (list.clauses.size() == 1) {
-      const Braced::Clause& c = list.clauses.front();
-      if (!c.list && !c.designated && c.expr.ok() && types().is_class(c.expr.type())) {
-        int paths = 0;
-        if (same_unqualified(c.expr.type(), t) || base_path(types().class_of(c.expr.type()), types().class_of(t), paths))
-          return bind_reference(c.expr, parameter, c.begin, extend);
-      }
-    }
+    if (const auto* source = class_reference_list_operand(t, list))
+      return bind_reference(*source, parameter, list.clauses.front().begin, extend);
     if (call_argument && !list.clauses.empty() && !types().rec(parameter).rvalue_ref && object_cv(t) == Cv::const_) {
       if (auto init = initializer_list_argument(t, list)) return bind_reference(*init, parameter, list.begin);
     }
@@ -10357,19 +10384,21 @@ public:
   std::optional<std::vector<Child>> call_args(const TypeRec& fr, std::span<const Ex> given, u32 begin, u32 paren_at,
                                               std::span<const NodeId> defaults = {},
                                               DefaultArgumentOrigin origin = DefaultArgumentOrigin::interned,
-                                              EntityId function = EntityId::none) {
+                                              EntityId default_source = EntityId::none) {
     // Unevaluated calls still check parameter initialization. Only a decltype operand may
     // dispense with the result object. Subexpressions requiring materialization check it separately.
+    const bool decltype_operand = decltype_unevaluated != 0 && unevaluated == decltype_unevaluated;
     if (unevaluated == 0) {
       if (!require_supported_virtual_signature(fr, paren_at)) return std::nullopt;
     } else if (!require_concrete_parameters(fr, paren_at) ||
-               (unevaluated != decltype_unevaluated && !require_concrete_object(fr.inner, paren_at))) {
+               (!decltype_operand && !require_concrete_object(fr.inner, paren_at))) {
       return std::nullopt;
     }
+    if (!decltype_operand && !check_destructor_access(fr.inner, paren_at)) return std::nullopt;
     std::vector<QualType> params = fr.params;  // copied: converting may intern new types
     std::vector<Ex> args(given.begin(), given.end());
     for (std::size_t i = args.size(); i < params.size() && i < defaults.size() && defaults[i] != NodeId::none; ++i) {
-      auto a = default_argument(defaults[i], paren_at, origin, function, params[i]);
+      auto a = default_argument(defaults[i], paren_at, origin, default_source, params[i]);
       if (!a) return std::nullopt;
       args.push_back(*a);
     }
@@ -10396,6 +10425,7 @@ public:
       // ([expr.call]/7): a temporary, which the caller destroys (Itanium C++ ABI §3.1.2).
       if (i < params.size() && types().is_class(params[i]) && !dependent(a) && !a.glvalue())
         a = materialize(a, Types::unqualified(params[i]), false, true);
+      if (!a.ok()) return std::nullopt;
       children.push_back(at(a, begin));
     }
     return children;
