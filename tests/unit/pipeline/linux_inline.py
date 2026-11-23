@@ -3,6 +3,7 @@
 import os
 from pathlib import Path
 import re
+import struct
 import subprocess
 import sys
 import tempfile
@@ -184,12 +185,27 @@ def main():
             obj = f'data-{name}.o'
             compile(data / f'{name}.cpp', obj)
             table = symbols(obj)
-            sections = dict(re.findall(r'\[\s*(\d+)\]\s+(\.[^\s]+)', run(readelf, '-WS', obj)))
+            headers = run(readelf, '-WS', obj)
+            sections = dict(re.findall(r'\[\s*(\d+)\]\s+(\.[^\s]+)', headers))
             relocations = run(readelf, '-Wr', obj).splitlines()
             for symbol, section in data_sections.items():
                 entry = table[symbol]
                 assert entry[4] == 'WEAK' and sections.get(entry[6]) == section, entry
                 assert any('R_X86_64_64' in line.split() and symbol in line.split() for line in relocations), symbol
+
+            rodata = re.search(r'\]\s+\.rodata\s+PROGBITS\s+\w+\s+([0-9a-fA-F]+)', headers)
+            assert rodata, headers
+            contents = (Path(temp) / obj).read_bytes()
+            for symbol, payload in {'_ZN6Record4seedE': struct.pack('<i', 42),
+                                    '_ZN6Record10descriptorE': struct.pack('<ii', 23, 47)}.items():
+                entry = table[symbol]
+                assert entry[4] == 'WEAK' and sections.get(entry[6]) == '.rodata', entry
+                # Ordinary data can omit ELF symbol size. Verify the stored bytes in either case.
+                assert int(entry[2]) == len(payload) or (entry[3] == 'NOTYPE' and entry[2] == '0'), entry
+                offset = int(rodata[1], 16) + int(entry[1], 16)
+                assert contents[offset:offset + len(payload)] == payload, (obj, symbol)
+            local = table['_ZN12_GLOBAL__N_111LocalRecord4seedE']
+            assert local[4] == 'LOCAL' and sections.get(local[6]) == '.rodata', local
 
         for objects in (('data-main.o', 'data-peer.o'), ('data-peer.o', 'data-main.o')):
             link(*objects)
@@ -209,22 +225,13 @@ def main():
             link(*objects)
             run('./program')
 
-        (Path(temp) / 'data-controls.cpp').write_text('''
-constexpr int ordinary_constant = 7;
-extern constexpr int external_constant = 9;
-static inline int local_inline = 11;
-int backing = 13;
-inline int* relocated = &backing;
-template<class T> inline int specialized = 17;
-template<> int specialized<int> = 19;
-struct NamedType {};
-template<> inline int specialized<NamedType> = 23;
-''')
-        compile('data-controls.cpp', 'data-controls.o')
+        compile(data / 'bindings.cpp', 'data-controls.o')
         table = symbols('data-controls.o')
-        for name in ('ordinary_constant', 'local_inline'):
+        entry = table['_ZN6Public6scalarE']
+        assert entry[4] == 'WEAK' and entry[6] != 'UND', entry
+        for name in ('ordinary_constant', 'local_inline', '_ZN6Public1pE', '_ZN6Public1kE'):
             assert table[name][4] == 'LOCAL', table[name]
-        for name in ('external_constant', 'backing', 'relocated',
+        for name in ('external_constant', 'backing', 'relocated', '_ZN8Ordinary5valueE',
                      '_Z11specializedIiE', '_Z11specializedI9NamedTypeE'):
             assert table[name][4] == 'GLOBAL' and table[name][6] != 'UND', table[name]
 
