@@ -474,8 +474,8 @@ std::expected<bool, std::string> take_option(std::span<const std::string_view> a
     cfg.exceptions_enabled = false;
     return true;
   }
-  if (a == "-fno-rtti") {
-    cfg.rtti_enabled = false;
+  if (a == "-frtti" || a == "-fno-rtti") {
+    cfg.rtti_enabled = a == "-frtti";
     return true;
   }
   return false;
