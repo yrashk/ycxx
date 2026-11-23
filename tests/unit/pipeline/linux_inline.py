@@ -304,6 +304,47 @@ def main():
         link('static-enum.o')
         run('./program')
 
+        template_members = fixtures / 'inline-template-members'
+        include = f'-I{template_members / "shared"}'
+        public_spend = '_ZN6BudgetILj2EE5spendEv'
+        for case, expected in (
+            ('state', {public_spend: 'WEAK'}),
+            ('static-address', {'_ZN6BudgetILj2EE7initialEv': 'WEAK', '_ZN6BudgetILj4EE7initialEv': 'WEAK'}),
+            ('local', {'_ZN11LocalBudgetIN12_GLOBAL__N_13TagEE5spendEv': 'LOCAL'}),
+            ('strong', {public_spend: 'GLOBAL'}),
+        ):
+            objects = tuple(f'member-{case}-{unit}.o' for unit in ('main', 'peer'))
+            for unit, obj in zip(('main', 'peer'), objects):
+                compile(template_members / case / f'{unit}.cpp', obj, include)
+                table = symbols(obj)
+                for name, binding in expected.items():
+                    entry = table[name]
+                    assert entry[4] == binding and entry[6] != 'UND', entry
+            for order in (objects, objects[::-1]):
+                if case == 'strong':
+                    link(*order, status=1, error=f"duplicate symbol '{public_spend}'")
+                else:
+                    link(*order)
+                    run('./program')
+
+        for case in ('state', 'static-address'):
+            host_peer = f'host-member-{case}-peer.o'
+            run(host_cxx, '-std=c++20', '-O0', '-fno-pie', include, '-c', template_members / case / 'peer.cpp',
+                '-o', host_peer)
+            objects = (f'member-{case}-main.o', host_peer)
+            for order in (objects, objects[::-1]):
+                run(host_cxx, '-no-pie', *order, '-o', 'host-program')
+                run('./host-program')
+
+        compile(template_members / 'enum-nttp.cpp', 'member-enum.o')
+        table = symbols('member-enum.o')
+        for name, binding in (('_ZN13PrivateBudgetILN12_GLOBAL__N_18LocalTagE11EE6chargeEv', 'LOCAL'),
+                              ('_ZN12PublicBudgetIL9PublicTag29EE6chargeEv', 'WEAK')):
+            entry = table[name]
+            assert entry[4] == binding and entry[6] != 'UND', entry
+        link('member-enum.o')
+        run('./program')
+
 
 if __name__ == '__main__':
     main()

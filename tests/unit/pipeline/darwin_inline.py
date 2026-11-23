@@ -261,6 +261,40 @@ int use() { return with_static() + with_lambda(1) + twice(2) + int(twice(2L)) + 
         run(ycxx, 'cxx', 'static-enum.o', '-o', 'program')
         run('./program')
 
+        template_members = fixtures / 'inline-template-members'
+        include = f'-I{template_members / "shared"}'
+        public_spend = '__ZN6BudgetILj2EE5spendEv'
+        for case, expected in (
+            ('state', {public_spend: weak}),
+            ('static-address', {'__ZN6BudgetILj2EE7initialEv': weak, '__ZN6BudgetILj4EE7initialEv': weak}),
+            ('local', {'__ZN11LocalBudgetIN12_GLOBAL__N_13TagEE5spendEv': ('non-external', True)}),
+            ('strong', {public_spend: strong}),
+        ):
+            objects = tuple(f'member-{case}-{unit}.o' for unit in ('main', 'peer'))
+            for unit, obj in zip(('main', 'peer'), objects):
+                compile(template_members / case / f'{unit}.cpp', obj, include)
+                table = symbols(obj)
+                for name, binding in expected.items():
+                    assert table.get(name) == binding, (obj, name, table.get(name))
+            if case == 'strong':
+                for order in (objects, objects[::-1]):
+                    run(ycxx, 'cxx', *order, '-o', 'program', status=1, error=f'duplicate symbol {public_spend}')
+            else:
+                links(*objects)
+
+        for case in ('state', 'static-address'):
+            host_peer = f'host-member-{case}-peer.o'
+            run(host_cxx, '-std=c++20', '-O0', include, '-c', template_members / case / 'peer.cpp', '-o', host_peer)
+            links(f'member-{case}-main.o', host_peer)
+
+        compile(template_members / 'enum-nttp.cpp', 'member-enum.o')
+        table = symbols('member-enum.o')
+        for name, binding in (('__ZN13PrivateBudgetILN12_GLOBAL__N_18LocalTagE11EE6chargeEv', ('non-external', True)),
+                              ('__ZN12PublicBudgetIL9PublicTag29EE6chargeEv', weak)):
+            assert table.get(name) == binding, (name, table.get(name))
+        run(ycxx, 'cxx', 'member-enum.o', '-o', 'program')
+        run('./program')
+
 
 if __name__ == '__main__':
     main()
