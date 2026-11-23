@@ -43,14 +43,15 @@ direct initialization from a named owner through the resource's ordinary nonthro
 constructor. The equivalent class annotation is `[[=ycxx::ownership::move_constructor::transfers]]`.
 These declarations trust the constructor to move the live obligation and invalidate the
 source. YCXX checks that the named source is live and unborrowed before the call.
-A local `const Resource&` can borrow a live named owner and be passed to a registered
-observation operation. YCXX propagates observation uses backward through the ownership graph,
+A local `const Resource&` can borrow a live named owner or bind to another local shared
+reference to that owner. Either reference can be passed to a registered observation operation.
+YCXX propagates reference uses backward through the ownership graph,
 stopping at the binding's declaration and scope exits. A consume or transfer conflicts when
 the reference may be bound and an observation of that binding is reachable afterward. This
 allows consumption after the last use in the same scope, including on a branch that can no
 longer reach a use. A loop backedge can carry a future use of an outer binding. Ending the
 borrow leaves the ownership obligation with the owner. References bound to temporaries, mutable
-aliases, reborrowing, captures, and exposing an address are outside this checked protocol. Observation
+aliases, captures, and exposing an address are outside this checked protocol. Observation
 contracts declared with `observes` trust the implementation to keep the reference within the
 call. Use `verified_observes<decltype(&inspect), &inspect>` in a policy or
 `[[=ycxx::ownership::operation::verified_observes]]` on the function to check its definition.
@@ -71,11 +72,14 @@ outside the supported loop control also receive an error.
 
 The unit of analysis is one dynamic binding of a local `const Resource&` to an owner place.
 The place can be a resource local, a tracked field or fixed-index array element, or the selected
-alternative of a tracked variant. Binding always requires a live owner. Reading the owner directly
-does not use any reference bound to it. The reference itself can only be used by an observation
-registered under the active policy.
+alternative of a tracked variant. Every binding requires that place to be live. A new binding
+from an existing local reference also requires the source reference's binding to be live and
+uses it at that point, even if the new reference is never observed. Each reference keeps its
+own lifetime in the analysis, and its observations protect the same owner place. A direct
+read of the owner does not use a reference. Each reference can be observed by a registered operation.
 
-For each reference slot, the checker walks backward from its observation nodes. At a branch,
+For each reference slot, the checker walks backward from its observations and from bindings
+that use it directly. At a branch,
 the existence of a use on either successor keeps the borrow live on entry. At a loop backedge,
 a use on a future iteration counts if the current binding survives the iteration. A scope exit
 or another execution of that reference's declaration bounds the walk. Uses of a fresh binding

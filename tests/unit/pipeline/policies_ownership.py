@@ -74,17 +74,30 @@ with tempfile.TemporaryDirectory() as directory:
         void consume_on_disjoint_branch(bool consume) {
           auto p = issue();
           const auto& view = p;
+          const auto& alias = view;
           if (consume) {
             redeem(static_cast<Permit&&>(p));
             return;
           }
-          inspect(view);
+          inspect(alias);
+        }
+        void observe_independent_aliases() {
+          auto p = issue();
+          const auto& view = p;
+          const auto& alias = view;
+          const auto& leaf = (alias);
+          const auto& sibling = view;
+          inspect(alias);
+          inspect(sibling);
+          inspect(leaf);
+          redeem(static_cast<Permit&&>(p));
         }
         void borrow_in_loop(bool repeat, bool stop) {
           while (repeat) {
             auto p = issue();
             const auto& view = p;
-            inspect(view);
+            const auto& alias = view;
+            inspect(alias);
             redeem(static_cast<Permit&&>(p));
             if (stop) break;
             repeat = false;
@@ -163,7 +176,31 @@ with tempfile.TemporaryDirectory() as directory:
     stderr = run(during_borrow, "-fcheck-policies", "-fsyntax-only", error=borrowed)
     assert f"{during_borrow}:6:" in stderr and f"previous borrow at {during_borrow}:5:" in stderr, stderr
 
-    loop_conflict = source("loop_conflict", """\
+    during_reborrow = source("during_reborrow", """\
+        void consume() {
+          auto p = issue();
+          const auto& view = p;
+          const auto& alias = view;
+          redeem(static_cast<Permit&&>(p));
+          inspect(alias);
+        }
+    """)
+    alias_borrowed = "affine resource 'p' may still have a live shared borrow 'alias'"
+    stderr = run(during_reborrow, "-fcheck-policies", "-fsyntax-only", error=alias_borrowed)
+    assert f"{during_reborrow}:7:" in stderr and f"previous borrow at {during_reborrow}:6:" in stderr, stderr
+
+    late_reborrow = source("late_reborrow", """\
+        void bind_without_observing() {
+          auto p = issue();
+          const auto& view = p;
+          redeem(static_cast<Permit&&>(p));
+          const auto& alias = view;
+        }
+    """)
+    stderr = run(late_reborrow, "-fcheck-policies", "-fsyntax-only", error=borrowed)
+    assert f"{late_reborrow}:6:" in stderr and f"previous borrow at {late_reborrow}:5:" in stderr, stderr
+
+    loop_source = """\
         void consume_with_backedge(bool repeat) {
           auto p = issue();
           const auto& view = p;
@@ -172,8 +209,13 @@ with tempfile.TemporaryDirectory() as directory:
             redeem(static_cast<Permit&&>(p));
           }
         }
-    """)
+    """
+    loop_conflict = source("loop_conflict", loop_source)
     run(loop_conflict, "-fcheck-policies", "-fsyntax-only", error=borrowed)
+    reborrow_loop = source("reborrow_loop", loop_source.replace(
+        "          const auto& view = p;\n", "          const auto& view = p;\n          const auto& alias = view;\n").replace(
+        "inspect(view)", "inspect(alias)"))
+    run(reborrow_loop, "-fcheck-policies", "-fsyntax-only", error=alias_borrowed)
 
     branch_conflict = source("branch_conflict", """\
         void consume_before_branch(bool use_again) {
@@ -213,7 +255,7 @@ with tempfile.TemporaryDirectory() as directory:
     run(borrow_move, "-fcheck-policies", "-fsyntax-only",
         error="linear resource 'tx' may still have a live shared borrow 'view'")
 
-    field_scope = source("owned_fields", """\
+    field_scope = source("owned_fields", watch_transaction + """\
         struct Group { Transaction first; int label; Transaction second; };
         void dispatch(bool transfer_first) {
           Group group{begin(), 19, begin()};
@@ -228,13 +270,22 @@ with tempfile.TemporaryDirectory() as directory:
             rollback(static_cast<Transaction&&>(group.first));
           }
         }
+        void observe_array_element() {
+          Transaction tasks[2]{begin(), begin()};
+          const auto& view = tasks[0];
+          const auto& alias = view;
+          commit(static_cast<Transaction&&>(tasks[1]));
+          inspect(alias);
+          commit(static_cast<Transaction&&>(tasks[0]));
+        }
     """, header="transaction.hpp")
     run(field_scope, "-fcheck-policies", "-c", "-o", str(root / "owned_fields.o"))
 
     for case, body, expected in (
         ("live", "commit(static_cast<Transaction&&>(group.first));", "linear resource 'group.second' may leave"),
-        ("borrow", "const auto& view = group.first; commit(static_cast<Transaction&&>(group.first)); inspect(view);",
-         "linear resource 'group.first' may still have a live shared borrow 'view'"),
+        ("borrow", "const auto& view = group.first; const auto& alias = view; "
+         "commit(static_cast<Transaction&&>(group.first)); inspect(alias);",
+         "linear resource 'group.first' may still have a live shared borrow 'alias'"),
         ("escape", "expose(group);", "outside the checked protocol"),
         ("field_address", "const int* pointer = &group.label;", "outside the checked protocol"),
     ):
@@ -268,9 +319,11 @@ with tempfile.TemporaryDirectory() as directory:
 
     for case, body, diagnostic in (
         ("temporary", "const Permit& view = issue();", "a shared borrow must bind directly to a named owner"),
-        ("reborrow", "const Permit& view = p; const Permit& second = view;",
-         "a shared borrow must bind directly to a named owner"),
-        ("pointer", "const auto& view = p; const void* address = &view;", "outside the checked protocol"),
+        ("self", "const Permit& view = view;", "a shared reborrow must resolve to a named owner"),
+        ("self_shadow", "const Permit& view = p; { const Permit& view = view; inspect(view); }",
+         "a shared reborrow must resolve to a named owner"),
+        ("pointer", "const auto& view = p; const auto& alias = view; const void* address = &alias;",
+         "outside the checked protocol"),
         ("capture", "const auto& view = p; auto closure = [&view] { inspect(view); };",
          "outside the checked protocol"),
         ("callback", "const auto& view = p; expose(view);", "outside the checked protocol"),
@@ -284,6 +337,17 @@ with tempfile.TemporaryDirectory() as directory:
         """)
         run(borrow_case, "-fsyntax-only")
         run(borrow_case, "-fcheck-policies", "-fsyntax-only", error=diagnostic)
+
+    returned = source("returned_alias", """\
+        const Permit& escape() {
+          auto p = issue();
+          const auto& view = p;
+          const auto& alias = view;
+          return alias;
+        }
+    """)
+    run(returned, "-fsyntax-only")
+    run(returned, "-fcheck-policies", "-fsyntax-only", error="disallows resource returns")
 
     overload = source("overload", """\
         namespace ycxx_affine { void inspect(Permit&) noexcept; }

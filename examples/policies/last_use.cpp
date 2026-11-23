@@ -33,10 +33,11 @@ void close_receipt(Receipt&& receipt) noexcept { receipt.state.consume(); }
 int same_block() {
   auto receipt = issue_receipt();
   const auto& view = receipt;
+  const auto& alias = view;
 #ifdef YCXX_DEMO_USE_AFTER_CLOSE
   close_receipt(static_cast<Receipt&&>(receipt));
 #endif
-  int number = read_receipt(view);
+  int number = read_receipt(alias);
 #ifndef YCXX_DEMO_USE_AFTER_CLOSE
   close_receipt(static_cast<Receipt&&>(receipt));
 #endif

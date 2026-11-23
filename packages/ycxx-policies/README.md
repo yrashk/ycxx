@@ -149,19 +149,21 @@ needs to refer to the alias.
 
 ### Verify shared observations
 
-A shared borrow through a local `const&` ends when no later observation of that binding is
-reachable. You can consume or move its owner after the last use in the same block.
+A shared borrow through a local `const&` ends when no later use of that binding is reachable.
+Initializing another local `const&` uses the source reference and binds to the same owner.
+You can consume or move the owner after the last use of all its references.
 
 ```cpp
 auto receipt = issue_receipt();
 const auto& view = receipt;
-inspect(view);  // a registered observer
+const auto& alias = view;
+inspect(alias);  // a registered observer
 close_receipt(static_cast<Receipt&&>(receipt));
 ```
 
 YCXX rejects moving or consuming the owner if a later branch or loop iteration can still
-observe that binding. A trusted `observes` declaration promises that the function keeps the
-reference within the call.
+observe one of its references or bind a new alias from it. A trusted `observes` declaration
+promises that the function keeps the reference within the call.
 
 From the YCXX repository root, try the [reflected receipt examples](../../examples/policies/last_use.cpp).
 They cover consumption in the same block, consumption on either branch with the read on only

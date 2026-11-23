@@ -698,7 +698,8 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
   in order for named owners, non-overlapping fields, and fixed-array elements.
   The 1,280-resource fixture composes four source fragments and checks that an
   equivalent reflection edit reuses the caller's proof while a conflicting edit reports both origins.
-  Local const references can borrow named owners until their last reachable observation.
+  Local const references can borrow named owners or bind to another local shared reference.
+  Each reference protects the original owner through its last reachable use.
   The checker rejects consuming or transferring an owner before a future use and rejects
   exposing the borrow through an address, capture, or unregistered operation.
   A `verified_observes` contract checks the observer's scalar reads and forwarding of the

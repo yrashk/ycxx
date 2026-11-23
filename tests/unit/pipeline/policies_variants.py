@@ -26,7 +26,8 @@ int main(int argc, char**) {
     Choice selected(own::first_t{}, initial.take_first());
     if (initial.holds_first() || !selected.holds_first()) return 2;
     const auto& view = selected.first();
-    read(view);
+    const auto& alias = view;
+    read(alias);
     auto receipt = selected.take_first();
     close(static_cast<Receipt&&>(receipt));
     return selected.holds_first();
@@ -34,7 +35,8 @@ int main(int argc, char**) {
   Choice selected(own::second_t{}, issue_permit());
   if (selected.holds_first()) return 3;
   const auto& view = selected.second();
-  read_permit(view);
+  const auto& alias = view;
+  read_permit(alias);
   return 0;
 }
 """
@@ -133,6 +135,9 @@ using Choice = own::variant<Receipt, Permit>;
     check("borrowed", source.replace("    read(view);\n", "").replace(
         "    auto receipt = choice.take_first();", "    auto receipt = choice.take_first();\n    read(view);"),
           "owner variant 'choice' may still have a live shared borrow 'view'")
+    check("reborrowed", source.replace("    read(view);\n", "    const auto& alias = view;\n").replace(
+        "    auto receipt = choice.take_first();", "    auto receipt = choice.take_first();\n    read(alias);"),
+          "owner variant 'choice' may still have a live shared borrow 'alias'")
     check("linear_alternative", source.replace("    auto receipt = choice.take_first();\n"
           "    close(static_cast<Receipt&&>(receipt));", "    return 0;"),
           "owner variant 'choice' may leave its scope")

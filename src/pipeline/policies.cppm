@@ -79,6 +79,7 @@ struct OwnershipFlow {
   struct Borrow {
     ast::u32 owner;
     ast::u32 offset;
+    VariantSide alternative = VariantSide::none;
   };
 
   struct Local {
@@ -168,6 +169,7 @@ class OwnershipFlowBuilder {
         parameters.locals.push_back({i, false});
     const Point end = leave(&parameters, nullptr, Flow::exit, last_token(root));
     flow_.entry = lower(checked_root, end, {&parameters, nullptr});
+    resolve_borrow_owners();
     return std::move(flow_);
   }
 
@@ -682,6 +684,48 @@ class OwnershipFlowBuilder {
     return add({.event = Event::unsupported, .offset = offset, .problem = std::move(message)});
   }
 
+  Point bind_reference(ast::u32 local, ast::u32 source, ast::u32 offset, Point next,
+                       VariantSide alternative = VariantSide::none) {
+    flow_.locals[local].borrow = Flow::Borrow{source, offset, alternative};
+    const Point point = add({.event = Event::borrow, .offset = offset, .next = next, .local = local, .source = source});
+    borrow_bindings_.push_back(point);
+    return point;
+  }
+
+  // Reverse lowering records the immediate source. Resolve each chain once, leaving
+  // Step::source unchanged so the binding still uses that particular reference.
+  void resolve_borrow_owners() {
+    if (borrow_bindings_.empty()) return;
+    std::vector<bool> visited(flow_.locals.size());
+    std::vector<ast::u32> chain;
+    for (const auto point : borrow_bindings_) {
+      auto& step = flow_.steps[point];
+      auto local = step.local;
+      while (!visited[local] && flow_.locals[local].borrow) {
+        visited[local] = true;
+        chain.push_back(local);
+        local = flow_.locals[local].borrow->owner;
+      }
+      for (const auto reference : std::views::reverse(chain)) {
+        auto& borrow = flow_.locals[reference].borrow;
+        const auto& source = flow_.locals[borrow->owner];
+        if (!source.shared_reference) continue;
+        // An unrooted source or cycle has no resolved non-reference owner.
+        if (!source.borrow || flow_.locals[source.borrow->owner].shared_reference) {
+          borrow.reset();
+          continue;
+        }
+        borrow->owner = source.borrow->owner;
+        borrow->alternative = source.borrow->alternative;
+      }
+      chain.clear();
+      if (!flow_.locals[step.local].borrow) {
+        step.event = Event::unsupported;
+        step.problem = "a shared reborrow must resolve to a named owner";
+      }
+    }
+  }
+
   Point leave(const Scope* scope, const Scope* keep, Point next, ast::u32 offset) {
     if (scope == keep) return next;
     next = leave(scope->outer, keep, next, offset);
@@ -936,22 +980,18 @@ class OwnershipFlowBuilder {
 
   Point lower_local(const ast::Red& node, Point next, Context context) {
     const auto var = node.get<ast::LocalVar>();
-    auto& local = flow_.locals[var.local];
+    const auto& local = flow_.locals[var.local];
     if (local.shared_reference) {
       if (var.init.id != ast::NodeId::none) {
         const auto init = unparenthesized(at(node, var.init));
-        if (const auto use = variant_member(init); use && use->operation == VariantOperation::access) {
-          local.borrow = Flow::Borrow{use->slot, node.offset()};
-          return add({.event = Event::borrow, .offset = node.offset(), .next = next, .local = var.local,
-                      .source = use->slot, .source_alternative = use->side});
-        }
-        if (const auto owner = named_local(init, false); owner &&
-            flow_.locals[*owner].ownership != Ownership::ordinary) {
-          local.borrow = Flow::Borrow{*owner, node.offset()};
-          return add({Event::borrow, node.offset(), next, Flow::exit, var.local, *owner});
-        }
+        if (const auto use = variant_member(init); use && use->operation == VariantOperation::access)
+          return bind_reference(var.local, use->slot, node.offset(), next, use->side);
+        if (const auto source = named_local(init, false); source &&
+            (flow_.locals[*source].ownership != Ownership::ordinary ||
+             (flow_.locals[*source].shared_reference && !flow_.locals[*source].parameter)))
+          return bind_reference(var.local, *source, node.offset(), next);
       }
-      return unsupported(node.offset(), "a shared borrow must bind directly to a named owner");
+      return unsupported(node.offset(), "a shared borrow must bind directly to a named owner or local shared reference");
     }
     if (const auto it = field_slots_.find(var.local); it != field_slots_.end())
       return initialize_fields(node, var.init, it->second, next, context);
@@ -1102,6 +1142,7 @@ class OwnershipFlowBuilder {
   std::span<const EntityId> nonthrowing_destructors_;
   OwnershipBody body_;
   Flow flow_;
+  std::vector<Point> borrow_bindings_;
   std::map<ast::u32, FieldSlot> field_slots_;
   CapabilityGuard capability_guard_ = CapabilityGuard::none;
   bool has_owner_ = false;
@@ -1183,6 +1224,8 @@ class OwnershipAnalysis {
       const auto& step = flow_.steps[point];
       if (step.event == Event::observe && flow_.locals[step.local].borrow)
         uses[step.local].push_back(point);
+      if (step.event == Event::borrow && flow_.locals[step.source].borrow)
+        uses[step.source].push_back(point);
     }
     if (uses.empty()) return {};
 
@@ -1285,10 +1328,14 @@ class OwnershipAnalysis {
     if (step.event == Event::may_unwind) return may_unwind(step.offset, state);
     auto& slot = state[step.local];
     switch (step.event) {
-    case Event::borrow:
-      if (auto problem = require_live(step, step.source, state[step.source], step.source_alternative)) return problem;
+    case Event::borrow: {
+      const auto& borrow = *flow_.locals[step.local].borrow;
+      if (step.source != borrow.owner)
+        if (auto problem = require_live(step, step.source, state[step.source])) return problem;
+      if (auto problem = require_live(step, borrow.owner, state[borrow.owner], borrow.alternative)) return problem;
       slot = {live};
       break;
+    }
     case Event::observe: return require_live(step, step.local, slot, step.alternative);
     case Event::consume:
       if (auto problem = require_live(step, step.local, slot, step.alternative)) return problem;

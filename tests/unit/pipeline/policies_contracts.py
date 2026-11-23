@@ -106,7 +106,8 @@ with tempfile.TemporaryDirectory() as directory:
         void run() {
           auto ticket = checkout::acquire();
           const auto& view = ticket;
-          checkout::inspect(view);
+          const auto& alias = view;
+          checkout::inspect(alias);
           checkout::submit(static_cast<checkout::Ticket&&>(ticket));
         }
     """)
