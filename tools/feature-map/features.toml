@@ -1369,8 +1369,9 @@ group = 'dcl'
 clauses = ['dcl.asm']
 std = 'C++98'
 detect = '\b(?:asm|__asm__|__asm)\s*(?:volatile\s*|__volatile__\s*)?\('
-status = 'missing'
-issues = [190]
+status = 'partial'
+note = 'Linux x86-64 lowers basic asm and GNU asm volatile statements with exact decoded int3 text to a resumable breakpoint.'
+issues = [190, 950]
 probe = '''
 int main() { asm("nop"); return 0; }
 '''
