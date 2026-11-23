@@ -596,8 +596,12 @@ int cxx(std::span<const std::string_view> args) {
   TraceMode trace_mode = trace_mode_from_environment();
   bool watch = false;
   std::vector<std::string> argv;
-  for (std::string_view a : args) {
-    if (auto m = trace_mode_named(a)) trace_mode = *m;
+  for (std::size_t i = 0; i < args.size(); ++i) {
+    const std::string_view a = args[i];
+    if (a == "-MF" || a == "-MT") {
+      argv.emplace_back(a);
+      if (i + 1 < args.size()) expand(args[++i], argv, 0);
+    } else if (auto m = trace_mode_named(a)) trace_mode = *m;
     else if (a.starts_with("--trace-engine=")) {
       std::println(std::cerr, "ycxx: error: unknown trace mode in '{}' (stream, interactive or json)", a);
       return 1;

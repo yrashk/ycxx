@@ -478,14 +478,16 @@ std::string absolute_in(const Request& r, std::string_view path) {
   return p.lexically_normal().generic_native_encoded_string();
 }
 
-// Quote a file name in a make-style rule. Preserve backslashes except where whitespace
-// would consume them. An explicit `-MT` supplies make syntax and is written literally.
+// Quote a file name in a make rule. A semicolon is read during both recipe splitting and
+// file-name parsing. Ninja's gcc depfile reader uses a smaller grammar for unusual names.
+// An explicit `-MT` supplies make syntax and is written literally.
 bool append_make_path(std::string& rule, std::string_view path, bool target = false) {
   if (path.find_first_of("\r\n") != path.npos) return false;
   std::size_t backslashes = 0;
   for (char c : path) {
-    if (c == ' ' || c == '\t') rule.append(backslashes + 1, '\\');
-    else if (c == '#' || c == ':' || (target && c == '%')) rule += '\\';
+    if (c == ';') rule.append(3 * backslashes + 3, '\\');
+    else if (c == ' ' || c == '\t' || c == '#' || c == ':' || (target ? c == '%' : c == '|'))
+      rule.append(backslashes + 1, '\\');
     else if (c == '$') rule += '$';
     rule += c;
     backslashes = c == '\\' ? backslashes + 1 : 0;
@@ -494,14 +496,11 @@ bool append_make_path(std::string& rule, std::string_view path, bool target = fa
 }
 
 std::expected<DependencyFile, std::string> make_dependencies(
-    const Request& r, const Options& opts, const std::string& object, const std::string& source,
-    const std::vector<std::string>& dependencies) {
+    const Request& r, const Options& opts, const std::string& object, const std::vector<std::string>& dependencies) {
   DependencyFile out;
   out.path = opts.dependency_path
                  ? *opts.dependency_path
                  : std::filesystem::path(object).replace_extension(".d").native_encoded_string();
-  if (absolute_in(r, out.path) == absolute_in(r, object))
-    return std::unexpected("the dependency file and object output must be different paths");
   const auto bad_path = std::unexpected("a dependency path cannot contain a newline");
   if (opts.dependency_targets.empty() && !append_make_path(out.rule, object, true)) return bad_path;
   for (const std::string& target : opts.dependency_targets) {
@@ -509,12 +508,10 @@ std::expected<DependencyFile, std::string> make_dependencies(
     if (!out.rule.empty()) out.rule += ' ';
     out.rule += target;
   }
-  out.rule += ": ";
-  if (!append_make_path(out.rule, source)) return bad_path;
-  // Keep the main file's command-line spelling, and keep the first spelling of each header
-  // when a relative path and an absolute one name the same input.
-  std::set<std::string> seen{absolute_in(r, source)};
-  for (const std::string& path : dependencies | std::views::drop(1)) {
+  out.rule += ':';
+  // Use the preprocessor's physical main path and each header's first observed spelling.
+  std::set<std::string> seen;
+  for (const std::string& path : dependencies) {
     if (!seen.insert(absolute_in(r, path)).second) continue;
     out.rule += ' ';
     if (!append_make_path(out.rule, path)) return bad_path;
@@ -523,26 +520,53 @@ std::expected<DependencyFile, std::string> make_dependencies(
   return out;
 }
 
-// Commit a complete rule beside its destination, using a unique temporary file for each writer.
-std::optional<std::string> write_dependencies(const DependencyFile& dep) {
-  const std::filesystem::path path(dep.path);
+// The writers replace the leaf, including a symlink there. Resolve the parent as the
+// filesystem does so paths through directory aliases name the same destination.
+std::optional<std::filesystem::path> output_destination(const std::filesystem::path& path) {
+  std::error_code ec;
+  const auto parent = path.parent_path();
+  auto directory = std::filesystem::canonical(parent.empty() ? std::filesystem::path(".") : parent, ec);
+  if (ec) return std::nullopt;
+  return directory / path.filename();
+}
+
+// Stage a complete rule beside its destination, using a unique temporary file for each writer.
+std::expected<std::filesystem::path, std::string> stage_dependencies(
+    const DependencyFile& dep, const std::filesystem::path& path) {
   std::error_code ec;
   using std::filesystem::file_type;
   const auto type = std::filesystem::symlink_status(path, ec).type();
   if (type != file_type::regular && type != file_type::symlink && type != file_type::not_found)
-    return std::format("cannot write dependency file '{}'", dep.path);
+    return std::unexpected(std::format("cannot write dependency file '{}'", dep.path));
   auto staging = (path.parent_path() / ".ycxx-dep-XXXXXX").native_encoded_string();
   const int fd = ::mkstemp(staging.data());
-  if (fd < 0) return std::format("cannot open dependency file '{}' for writing", dep.path);
+  if (fd < 0) return std::unexpected(std::format("cannot open dependency file '{}' for writing", dep.path));
   if (std::FILE* stream = ::fdopen(fd, "wb")) {
     const auto written = std::fwrite(dep.rule.data(), 1, dep.rule.size(), stream);
-    if (std::fclose(stream) == 0 && written == dep.rule.size()) {
-      std::filesystem::rename(staging, path, ec);
-      if (!ec) return std::nullopt;
-    }
+    if (std::fclose(stream) == 0 && written == dep.rule.size()) return std::filesystem::path(staging);
   } else ::close(fd);
   std::filesystem::remove(staging, ec);
-  return std::format("cannot write dependency file '{}'", dep.path);
+  return std::unexpected(std::format("cannot write dependency file '{}'", dep.path));
+}
+
+std::optional<std::string> write_object_and_dependencies(const Output& output, const DependencyFile& dep) {
+  const auto object_path = output_destination(output.path);
+  if (!object_path) return std::format("cannot open '{}' for writing", output.path);
+  const auto dep_path = output_destination(dep.path);
+  if (!dep_path) return std::format("cannot open dependency file '{}' for writing", dep.path);
+  if (*object_path == *dep_path) return "the dependency file and object output must be different paths";
+  auto staged = stage_dependencies(dep, *dep_path);
+  if (!staged) return staged.error();
+
+  std::error_code ec;
+  auto error = pipeline::write_file(*object_path, output.bytes, output.executable);
+  if (!error) {
+    std::filesystem::rename(*staged, *dep_path, ec);
+    if (!ec) return std::nullopt;
+    error = std::format("cannot write dependency file '{}': {}", dep.path, ec.message());
+  }
+  std::filesystem::remove(*staged, ec);
+  return error;
 }
 
 }  // namespace
@@ -791,7 +815,7 @@ Done run(const Request& r, pp::Host& host, pipeline::Session& session, const Sto
       Output output;
       output.path = opts->output ? *opts->output : object_name(path).native_encoded_string();
       if (opts->dependencies) {
-        auto dep = make_dependencies(r, *opts, output.path, path, u.dependencies);
+        auto dep = make_dependencies(r, *opts, output.path, u.dependencies);
         if (!dep) {
           render.file_level(dep.error());
           failed = true;
@@ -844,12 +868,9 @@ std::optional<pipeline::FileOffset> definition(const Request& r, pp::Host& host,
 
 void write_outputs(Done& d) {
   for (const Output& o : d.outputs) {
-    if (auto err = pipeline::write_file(o.path, o.bytes, o.executable)) {
-      fail(d, *err);
-      continue;
-    }
-    if (o.dependency_file)
-      if (auto err = write_dependencies(*o.dependency_file)) fail(d, *err);
+    auto err = o.dependency_file ? write_object_and_dependencies(o, *o.dependency_file)
+                                 : pipeline::write_file(o.path, o.bytes, o.executable);
+    if (err) fail(d, *err);
   }
 }
 
