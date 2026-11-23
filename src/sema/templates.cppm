@@ -455,6 +455,7 @@ public:
     case ast::DepOp::is_destructible:
     case ast::DepOp::is_nothrow_destructible:
     case ast::DepOp::is_trivially_destructible:
+    case ast::DepOp::is_final:
     case ast::DepOp::is_polymorphic:
     case ast::DepOp::is_abstract:
     case ast::DepOp::is_standard_layout:
@@ -639,6 +640,7 @@ public:
       case ast::DepOp::is_destructible:
       case ast::DepOp::is_nothrow_destructible:
       case ast::DepOp::is_trivially_destructible:
+      case ast::DepOp::is_final:
       case ast::DepOp::is_polymorphic:
       case ast::DepOp::is_abstract:
       case ast::DepOp::is_standard_layout:
