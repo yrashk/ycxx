@@ -901,6 +901,7 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
   std::set<EntityId> inline_declarations;
   std::set<EntityId> noexcept_declarations;
   std::set<EntityId> hidden_declarations;
+  std::set<EntityId> weak_declarations;
   std::vector<Dynamic> dynamic;
   // The type from the declaration, not the entity's record: a variable's type is not part of its
   // identity, so a record made before an edit may hold the old one (#115).
@@ -929,6 +930,7 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
       inline_declarations.insert(e);
     if (d.kind == ast::DeclKind::function && d.has_written_noexcept) noexcept_declarations.insert(e);
     if (d.hidden_visibility) hidden_declarations.insert(e);
+    if (linux && d.explicit_weak) weak_declarations.insert(e);
     if (!seen.insert(std::to_underlying(e)).second) return;
     const sema::EntityRec& r = world.entities.rec(e);
     if (r.kind == sema::EntityKind::class_ || r.kind == sema::EntityKind::data_member || r.kind == sema::EntityKind::type_alias ||
@@ -1223,6 +1225,7 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
     declare(table, at);
   };
   for (FunctionDef& f : tu.functions) {
+    f.explicit_weak = weak_declarations.contains(f.entity) && !inline_declarations.contains(f.entity);
     if (f.root_destructor_table != EntityId::none)
       declare_virtual_table(f.root_destructor_table, ast::Loc{f.item, f.body_offset});
     const auto locals = ins.seqs.elements(f.body.locals);
