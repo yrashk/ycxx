@@ -2641,6 +2641,19 @@ Calls to user functions and values from the active constexpr frame remain outsid
 proof domain. `__has_builtin` answers 0 while support is partial.
 [Issue #1065](https://github.com/yrashk/ycxx/issues/1065)
 
+## Checked signed integer builtins (#1077)
+
+The direct GNU `__builtin_add_overflow` and `__builtin_mul_overflow` calls accept matching
+signed target-`intmax_t` operands with a writable destination of the same type. Constant
+evaluation writes the width-converted result on both outcomes and returns whether the
+mathematical result exceeds the signed range. The destination uses the usual object and
+lifetime rules. `__has_builtin` answers 0 for the partial domain.
+
+An eligible immediate function template with a checked operation keeps its native symbol
+and entry ABI checks, with a single unreachable body. Constant evaluation still uses
+its full body. The pinned `<ratio>` probes now reach class-member assertions in #257.
+[#1077](https://github.com/yrashk/ycxx/issues/1077)
+
 ## Trap builtin (#548)
 
 `__builtin_trap()` is a zero-argument direct call of type `void`. It ends the

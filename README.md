@@ -672,6 +672,8 @@ written default member initializer are value-initialized.
   [#330](https://github.com/yrashk/ycxx/issues/330)
   `__builtin_constant_p` reports whether it can prove a scalar or string operand constant
   without executing it. [#1065](https://github.com/yrashk/ycxx/issues/1065)
+  The checked add and multiply builtins report overflow and store the converted signed
+  `intmax_t` result during constant evaluation. [#1077](https://github.com/yrashk/ycxx/issues/1077)
   `__builtin_strlen`, used by libycxx's exception headers, scans character storage in constant
   expressions and native code. [#531](https://github.com/yrashk/ycxx/issues/531)
   `__builtin_memchr`, `__builtin_memcmp`, `__builtin_memcpy`, `__builtin_memmove`,
