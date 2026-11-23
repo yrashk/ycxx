@@ -2157,6 +2157,32 @@ public:
       return std::nullopt;
     return m->type;
   }
+  // Ordinary qualified lookup still applies to a typename-specifier ([temp.res.general]).
+  std::optional<QualType> namespace_conversion_type(const Scope& s, NameId name, u32 at) {
+    if (auto t = direct_member_introduction(*s.ns, name)) return t;
+    auto found = q_->namespace_members(*s.ns, name);
+    if (found.empty()) return scope_type(s, name);
+    std::erase_if(found, [&](const ast::DeclSema& tag) {
+      if (tag.kind != ast::DeclKind::class_ && tag.kind != ast::DeclKind::enum_) return false;
+      const auto scope = w_->entities.rec(tag.entity).scope;
+      return std::ranges::any_of(q_->namespace_members(scope, name), [&](const ast::DeclSema& d) {
+        return d.kind != ast::DeclKind::class_ && d.kind != ast::DeclKind::enum_ &&
+               w_->entities.rec(d.entity).scope == scope;
+      });
+    });
+    if (found.empty()) return std::nullopt;
+    const auto& decl = found.front();
+    if (std::ranges::any_of(found, [&](const ast::DeclSema& d) {
+          if (d.entity == decl.entity) return false;
+          return ((d.flags | decl.flags) & decl_flag::template_) || !is_type(d.kind) || !is_type(decl.kind) ||
+                 types().canonical(d.type) != types().canonical(decl.type);
+        })) {
+      diag(at, Diag::ambiguous_name, name);
+      return std::nullopt;
+    }
+    if (!is_type(decl.kind) || (decl.flags & decl_flag::template_)) return std::nullopt;
+    return decl.type;
+  }
   // `S::n` as an expression ([expr.prim.id.qual]).
   Ex scope_expr(const Scope& s, NameId n, u32 begin, u32 name_at, u32 end, std::optional<u32> address_at = {},
                 bool check_all_bases = false) {

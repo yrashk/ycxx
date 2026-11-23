@@ -224,8 +224,8 @@ public:
 
   // Recognize a grouped declarator before treating `auto(...)` as a declaration
   // ([stmt.ambig]). A function or array suffix can follow the name inside the group.
-  bool grouped_auto_declarator_ahead(u32 close, bool statement) {
-    u32 next = 2;
+  bool grouped_declarator_ahead(u32 open, u32 close, bool statement) {
+    u32 next = open + 1;
     u32 groups = 0;
     while (next < close) {
       if (kind(next) == Tk::l_paren) {
@@ -256,6 +256,12 @@ public:
         ++next;
       } else if (kind(next) == Tk::l_paren && params_ahead(next, statement)) {
         next = past_parentheses(next);
+        while (kind(next) == Tk::kw_const || kind(next) == Tk::kw_volatile) ++next;
+        if (kind(next) == Tk::amp || kind(next) == Tk::ampamp) ++next;
+        if (kind(next) == Tk::kw_noexcept) {
+          ++next;
+          if (kind(next) == Tk::l_paren) next = past_parentheses(next);
+        }
       } else if (kind(next) == Tk::l_square) {
         u32 depth = 1;
         while (++next < close && depth != 0) {
@@ -283,7 +289,7 @@ public:
 
   // In a statement a second parenthesized group can be a direct initializer.
   // Otherwise it must be a parameter clause followed by declarator syntax.
-  bool grouped_auto_statement_suffix(u32 open) {
+  bool grouped_statement_suffix(u32 open) {
     const u32 after = past_parentheses(open);
     switch (kind(after)) {
     case Tk::semi: case Tk::comma:
@@ -329,12 +335,42 @@ public:
       }
       Tk after = kind(j + 1);
       if (is(Tk::kw_auto)) {
-        if (!grouped_auto_declarator_ahead(j, statement)) return false;
+        if (!grouped_declarator_ahead(1, j, statement)) return false;
         if (statement && after == Tk::l_paren && kind(past_parentheses(j + 1)) != Tk::r_paren)
-          return grouped_auto_statement_suffix(j + 1);
+          return grouped_statement_suffix(j + 1);
       }
       return after == Tk::semi || after == Tk::equal || after == Tk::comma || after == Tk::l_square ||
              after == Tk::l_paren || after == Tk::l_brace;
+    }
+    if (statement && is(Tk::kw_typename) && qualified_ahead(1)) {
+      const bool saved_half = qualified_half_;
+      auto q = qualified_type(1);
+      qualified_half_ = saved_half;
+      if (q) {
+        const u32 open = 1 + q->second;
+        if (kind(open) == Tk::l_brace) return false;
+        if (kind(open) == Tk::l_paren) {
+          u32 after = past_parentheses(open);
+          if (!grouped_declarator_ahead(open, after - 1, statement)) return false;
+          while (kind(after) == Tk::l_square) {
+            u32 depth = 1;
+            for (++after; depth != 0 && i_ + after < end_; ++after) {
+              if (kind(after) == Tk::l_square) ++depth;
+              else if (kind(after) == Tk::r_square) --depth;
+            }
+            if (depth != 0) return false;
+          }
+          switch (kind(after)) {
+          case Tk::semi: case Tk::equal: case Tk::comma:
+          case Tk::l_brace: case Tk::colon:
+            return true;
+          case Tk::l_paren:
+            return grouped_statement_suffix(after);
+          default:
+            return false;
+          }
+        }
+      }
     }
     if (starts_decl_specifier(kind())) return true;
     if (qualified_ahead()) {
@@ -1674,12 +1710,19 @@ public:
   // where to resume after its `::`.
   std::optional<sema::Sema::Scope> template_id_scope(std::optional<sema::Sema::Scope> in, u32& j, bool scope = true,
                                                      bool checked = false, bool* failed_qualifier = nullptr,
-                                                     std::optional<u32>* committed_failure = nullptr) {
+                                                     std::optional<u32>* committed_failure = nullptr,
+                                                     bool conversion = false) {
     if (kind(j) != Tk::identifier || kind(j + 1) != Tk::less) return std::nullopt;
     if (in && !in->ns) return std::nullopt;  // member templates of classes come later (#88)
     NameId n = name_of(tok(j));
     const ast::TemplateParamSema* tt = in ? nullptr : s_->template_template_param(n);
-    auto tmpl = in || !tt ? (in ? s_->namespace_type_template(*in->ns, n) : s_->type_template(n)) : std::nullopt;
+    std::optional<ast::DeclSema> tmpl;
+    if (in) {
+      tmpl = conversion ? s_->namespace_expression_type_template(*in->ns, n, pos() + j)
+                        : s_->namespace_type_template(*in->ns, n);
+    } else if (!tt) {
+      tmpl = s_->type_template(n);
+    }
     bool builtin = !in && !tt && !tmpl && s_->builtin_template(n);  // `__make_integer_seq<…>::`
     if (!tmpl && !tt && !builtin) return std::nullopt;
     u32 saved = i_;
@@ -1728,12 +1771,18 @@ public:
   std::optional<std::pair<QualType, u32>> qualified_type(u32 start, bool checked = false, bool type_only = false,
                                                        bool* failed_qualifier = nullptr,
                                                        bool* terminal_template_id = nullptr,
-                                                       bool template_argument = false) {
+                                                       bool template_argument = false,
+                                                       bool conversion = false) {
     u32 next = 0;
     bool check_qualifier = checked && substituting_partial_arguments;
     const auto diags = s_->diag_count();
+    std::optional<u32> ambiguous_namespace;
     auto s = nested_name(start, next, /*member_pointer=*/false, check_qualifier, QualifierLookup::type, checked,
-                         nullptr, failed_qualifier);
+                         nullptr, failed_qualifier, nullptr, conversion ? &ambiguous_namespace : nullptr);
+    if (ambiguous_namespace) {
+      s_->diag(pos() + *ambiguous_namespace, Diag::ambiguous_name, name_of(tok(*ambiguous_namespace)));
+      return std::nullopt;
+    }
     if (checked && s_->has_error_since(diags)) return std::nullopt;
     if (!s || kind(next) != Tk::identifier || kind(next + 1) == Tk::coloncolon) return std::nullopt;
     // `N::X<args>`: a class template specialization named in a namespace ([temp.names]).
@@ -1741,7 +1790,7 @@ public:
     if (kind(next + 1) == Tk::less && s->ns) {
       u32 j = next;
       const auto diags = s_->diag_count();
-      if (auto t = template_id_scope(s, j, /*scope=*/false, checked)) {
+      if (auto t = template_id_scope(s, j, /*scope=*/false, checked, nullptr, nullptr, conversion)) {
         if (terminal_template_id && kind(j) != Tk::coloncolon) *terminal_template_id = true;
         return std::pair{*t->type, j - start};
       }
@@ -1759,7 +1808,8 @@ public:
       auto t = s_->namespace_elaborated_type(*s->ns, name, at, ast::DeclKind::class_);
       return t ? std::optional{std::pair{*t, next + 1 - start}} : std::nullopt;
     }
-    auto t = s_->scope_type(*s, name);
+    auto t = conversion && s->ns && at ? s_->namespace_conversion_type(*s, name, *at)
+                                 : s_->scope_type(*s, name);
     if (!t) return std::nullopt;
     if (checked) check_type_access(*s, name, *at);
     return std::pair{*t, next + 1 - start};
@@ -1787,6 +1837,12 @@ public:
       u32 after_type = first + 1;
       if (constrained_auto_ahead(first)) {
         ++after_type;
+      } else if (k == Tk::kw_typename && qualified_ahead(after_type)) {
+        const bool saved_half = qualified_half_;
+        auto q = qualified_type(after_type);
+        qualified_half_ = saved_half;
+        if (!q) return true;  // diagnose a bad typename-specifier in the declaration
+        after_type += q->second;
       } else if (!simple_type_keyword(k)) {
         if (k == Tk::r_paren || k == Tk::ellipsis || starts_decl_specifier(k)) return true;
         if ((k == Tk::identifier && next == Tk::coloncolon) || k == Tk::coloncolon) {
@@ -1804,7 +1860,7 @@ public:
       Tk following = kind(after_type);
       if (following == Tk::l_brace) return false;  // `T{args}` is a functional conversion.
       if (following != Tk::l_paren) return true;
-      if (statement)
+      if (statement && k != Tk::kw_typename)
         // An unnamed grouped pointer such as `int (*)(int)` cannot be a cast operand.
         return function_pointer_declarator_ahead(after_type, PointerLookahead::abstract);
 
@@ -1829,6 +1885,17 @@ public:
       // A grouped argument such as `T(name)` leaves both readings open. A later argument
       // can settle the entire list, as in `Holder value(T(name), 2)`.
       const u32 after_group = past_parentheses(after_type);
+      if (k == Tk::kw_typename) {
+        if (kind(after_group) == Tk::period || kind(after_group) == Tk::arrow) return false;
+        // Parentheses around an abstract function declarator can enclose its whole parameter list.
+        u32 parameter_open = after_type;
+        if (const u32 wrappers = operand - after_type - 1; wrappers != 0 &&
+            past_parentheses(operand - 1) + wrappers == after_group)
+          parameter_open = operand - 1;
+        if (first_operand == Tk::identifier && !params_ahead(parameter_open) &&
+            !grouped_declarator_ahead(after_type, after_group - 1, statement))
+          return false;
+      }
       if (kind(after_group) != Tk::comma) return true;
       first = after_group + 1;
     }
@@ -3906,6 +3973,20 @@ public:
       return s_->bool_literal(v, begin, pos());
     }
     case Tk::kw_nullptr: bump(); return s_->nullptr_literal(begin, pos());
+    case Tk::kw_typename: {
+      bump();
+      const auto diags = s_->diag_count();
+      auto type = qualified_ahead()
+          ? qualified_type(0, /*checked=*/true, /*type_only=*/false, nullptr, nullptr,
+                           /*template_argument=*/false, /*conversion=*/true)
+          : std::nullopt;
+      if (!type) {
+        if (!s_->has_error_since(diags)) s_->diag(begin, Diag::expected_type_specifier);
+        return {NodeId::none, begin, pos()};
+      }
+      take_qualified(type->second);
+      return type_conversion(type->first, begin);
+    }
     case Tk::l_paren: {
       if (fold_ahead()) return fold_expression(begin);
       bump();
