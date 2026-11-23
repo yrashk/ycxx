@@ -814,6 +814,9 @@ std::expected<void, std::string> Emitter::node(NodeId n) {
       frame_row(FrameState::entry);
       e_.emit({0xc3});  // ret
       return {};
+    case Op::int3:
+      e_.emit({0xcc});  // INT3 (Intel SDM vol. 2)
+      return {};
     case Op::unreachable:
       e_.emit({0x0f, 0x0b});  // ud2
       return {};
