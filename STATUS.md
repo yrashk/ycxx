@@ -2480,6 +2480,10 @@ first; a dependent base is not searched. Redeclaring a hidden parameter's name i
 - In the template, a static member whose initializer is value-dependent is value-dependent
   ([temp.dep.constexpr]/2.3); one whose initializer is not is a constant there. `static const T k
   = 5;` is checked again in each specialization.
+- A static constexpr member initializer can read fields of a flat aggregate temporary with
+  scalar default member initializers. Concrete specialization replay uses the same ordered field
+  reads as an ordinary required constant initializer ([dcl.init.aggr], [temp.inst], [expr.const]).
+  [#991](https://github.com/yrashk/ycxx/issues/991)
 - `X<args>::m` with a dependent qualifier names a value, not a type, in a statement, a condition, a
   cast's parentheses or a template argument, unless `typename` says otherwise
   ([temp.res.general]/4).
