@@ -131,7 +131,9 @@ its code, data and relocations. [#422](https://github.com/yrashk/ycxx/issues/422
 creates or replaces a deterministic indexed GNU archive from supported x86-64 ELF objects.
 Static links accept these archives and compatible archives from system `ar`. Place an archive
 after the inputs that reference its members, and include at least one source or ordinary object.
-[#389](https://github.com/yrashk/ycxx/issues/389), [#388](https://github.com/yrashk/ycxx/issues/388)
+Resident links reread explicit archives on each request.
+[#389](https://github.com/yrashk/ycxx/issues/389), [#388](https://github.com/yrashk/ycxx/issues/388),
+[#951](https://github.com/yrashk/ycxx/issues/951)
 
 An explicit dynamic link uses ycxx's startup and the target loader. Supply the absolute target
 interpreter path and explicit, self-contained shared objects with GNU or SysV hash tables and
