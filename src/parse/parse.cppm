@@ -448,15 +448,19 @@ public:
   // A function body inside the class is a complete-class context ([class.mem.general]); past
   // the closing brace of the class an item defines (`own`), that class is complete too.
   bool is_complete(EntityId c, u32 item, bool body = false, bool own = false) {
+    const auto& entity = w_->entities.rec(c);
+    // A closure is complete once its class record is published. It has no source declaration
+    // to look up, and the variable owning a namespace lambda is still being deduced here.
+    if (entity.kind == sema::EntityKind::class_ && !entity.unnamed_type_ordinal && w_->ins.names.spelling(entity.name).empty())
+      return classes_.is_defined(c);
     ensure_declared(c, item);  // its definition, if an earlier item has it
-    EntityId templ = w_->entities.rec(c).templ;
+    EntityId templ = entity.templ;
     if (templ != EntityId::none) specializations_before(item);
     auto it = class_items_.find(std::to_underlying(c));
     // A class template specialization is instantiated where it must be complete ([temp.inst]/2),
     // after its template's definition, unless it is explicitly specialized ([temp.expl.spec]).
     if (it == class_items_.end()) {
-      // Built-in classes are complete from the start. A closure type is complete once its lambda's
-      // body ends, where its record is published.
+      // Built-in classes are complete from the start.
       if (templ == EntityId::none && classes_.is_defined(c)) return true;
       if (templ == EntityId::none || explicitly_specialized(c, item)) return false;
       const sema::ClassRec* r = instantiate_class(c, item);

@@ -1158,6 +1158,8 @@ struct World {
     ClassRec rec;
     rec.defined = true;
     rec.move_usable = true;
+    rec.destructor_noexcept = true;
+    rec.destructor_usable = true;
     QualType offset = types.builtin(Builtin::unsigned_int);
     QualType area = types.pointer(types.builtin(Builtin::void_));
     auto field = [&](std::string_view spelling, QualType type) {
