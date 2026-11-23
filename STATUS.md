@@ -1416,7 +1416,8 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   [#136](https://github.com/yrashk/ycxx/issues/136) · [#659](https://github.com/yrashk/ycxx/issues/659)
 - On Linux x86-64, a derived class with an empty out-of-line virtual destructor can own its
   32-byte table and single-inheritance RTTI. It has one public nonvirtual primary base with
-  one pointer field and a peer-owned public virtual destructor. `D1` and `D2` share a body
+  one directly written pointer field with a builtin pointee type and a peer-owned public
+  virtual destructor. `D1` and `D2` share a body
   that restores the derived address point and calls the base's `D2` at offset zero. `D0` then
   deallocates the original pointer with the complete 16-byte object size. The derived descriptor
   imports the peer's base descriptor. The destructor specifications can be implicit. A unit

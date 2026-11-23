@@ -2,10 +2,10 @@
 
 The pinned libycxx configuration probe defines a destructor for a named, ordinary
 class `D` with one public nonvirtual base `B`. On Linux x86-64 the certified `B`
-has a single public virtual destructor and one naturally aligned ordinary pointer
-field. Its destructor is the key and belongs to a peer. `D` adds no data members
-and its public overriding destructor is its only written member. Its empty out-of-class
-definition is the key. Both destructors must have a nonthrowing specification.
+has a single public virtual destructor and one naturally aligned plain pointer
+field written directly with a builtin pointee type. A peer owns `B`'s key destructor.
+`D` adds no data members, and its public overriding destructor is its only written member.
+Its empty out-of-class definition is the key. Both destructors must have a nonthrowing specification.
 An implicit nonthrowing destructor specification is sufficient.
 
 Astra reviewed the layout and ownership against the Itanium ABI. The base contains
