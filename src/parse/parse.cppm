@@ -6053,7 +6053,8 @@ private:
       sem.entity = s_.world().entities.entity(
           {sema::EntityKind::variable, d.name, d.type, LangLinkage::cxx, ast::Linkage::external, {}, c.entity});
       sem.flags = flags;
-      // Member lookup while this class is incomplete handles its earlier direct members.
+      // Lookup while an ordinary class is incomplete handles earlier direct members. Inherited
+      // names also need the incomplete-class base lookup in #967 before this path can use them.
       const bool braced = ps_.is(Tk::l_brace) || (ps_.is(Tk::equal) && ps_.kind(1) == Tk::l_brace);
       bool list_initialization = false;
       if (braced && (spec.is_inline || spec.is_constexpr) && s_.template_scopes.empty() && !inst_ &&

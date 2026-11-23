@@ -1150,7 +1150,8 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   This also covers one-dimensional arrays of those types with a written bound. Omitted array
   elements are value-initialized and the members have addressable static storage
   ([class.static.data], [dcl.init.list], [dcl.init.aggr]).
-  [#964](https://github.com/yrashk/ycxx/issues/964)
+  [#964](https://github.com/yrashk/ycxx/issues/964) ·
+  [Inherited initializer lookup #967](https://github.com/yrashk/ycxx/issues/967)
 - Constant expressions can read fields of an already initialized namespace-scope constexpr
   aggregate with a trivial destructor, no bases, and ordinary public integral and enumeration
   fields whose scalar representations fit in 64 bits. The interpreter uses the ordinary record
