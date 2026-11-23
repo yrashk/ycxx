@@ -401,7 +401,16 @@ Preprocessed preprocess(Session& s, std::string_view text, std::string_view path
   FileId main = s.files.id(path);
   s.files.set_content(main, std::string(text));
   Tree t = Unit(s).run(main, path);
-  return to_region(s, flatten(s, t));
+  Preprocessed out = to_region(s, flatten(s, t));
+  if (!t.main) return out;
+  out.region.dependencies.push_back(s.files.path(main));
+  // The main region's trace includes each child's content reads, including those replayed
+  // from cached regions. An include search or __has_include probe alone records no such read.
+  for (const Question& q : t.main->trace) {
+    if (q.ask != Ask::content || q.answer == Fp128{} || FileId{q.a} == main) continue;
+    out.region.dependencies.push_back(s.files.path(FileId{q.a}));
+  }
+  return out;
 }
 
 Preprocessed preprocess(std::string_view text, std::string_view path) {

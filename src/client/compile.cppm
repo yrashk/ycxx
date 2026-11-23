@@ -2,6 +2,11 @@
 // exit status and the output files out. The daemon and the in-process path run this same handler,
 // so `ycxx cxx` behaves the same with or without a daemon. Files are read through a `pp::Host`
 // (the daemon's file table, or the disk); the client writes the outputs (`write_outputs`).
+module;
+#include <stdio.h>
+#include <stdlib.h>
+#include <sys/stat.h>
+#include <unistd.h>
 export module ycxx.compile;
 
 import std;
@@ -35,11 +40,17 @@ struct Request {
   Trace trace = Trace::off;
 };
 
+struct DependencyFile {
+  std::string path;
+  std::string rule;
+};
+
 // A file the client writes, at a path relative to its working directory.
 struct Output {
   std::string path;
   std::vector<std::uint8_t> bytes;
   bool executable = false;
+  std::optional<DependencyFile> dependency_file = std::nullopt;  // written after this object
 };
 
 // What a request cost and where it was answered (§8.1). The in-process path answers at revision 0.
@@ -118,6 +129,9 @@ Request check_command(std::span<const std::string> args, std::string cwd, std::s
 // backslashes escape as in a shell's words.
 std::vector<std::string> split_words(std::string_view text);
 
+// Writes the requested files, adding any write errors to the reply.
+void write_outputs(Done& d);
+
 // Writes the outputs and prints stdout and stderr; the exit status. A failed write is reported on
 // stderr after the request's own diagnostics, with status 1.
 int finish(Done& d);
@@ -140,6 +154,9 @@ struct Options {
   bool nostdlib = false;
   bool nostdlibxx = false;  // `-nostdlib++`: no libycxx runtime in a Darwin link
   std::optional<std::string> output, interpreter;
+  bool dependencies = false;  // `-MD`
+  std::optional<std::string> dependency_path;  // `-MF`
+  std::vector<std::string> dependency_targets;  // `-MT`, in command-line order
   std::vector<std::string> sources;  // translation units
   std::vector<std::string> objects;  // objects named on the command line
   std::vector<std::string> archives;
@@ -187,7 +204,15 @@ std::expected<Options, std::string> parse_options(std::span<const std::string_vi
     } else if (a == "-c") o.stop = Options::Stop::object;
     else if (a == "-fsyntax-only") o.stop = Options::Stop::syntax;
     else if (a == "-E") o.stop = Options::Stop::preprocess;
-    else if (a == "-nostdlib") o.nostdlib = true;
+    else if (a == "-MD") o.dependencies = true;
+    else if (a.starts_with("-MF") || a.starts_with("-MT")) {
+      const auto option = a.substr(0, 3);
+      if (a == option && i + 1 == args.size()) return std::unexpected(std::format("argument to '{}' is missing", option));
+      const auto value = a == option ? args[++i] : a.substr(option.size());
+      if (value.empty()) return std::unexpected(std::format("argument to '{}' is empty", option));
+      if (option == "-MF") o.dependency_path = value;
+      else o.dependency_targets.emplace_back(value);
+    } else if (a == "-nostdlib") o.nostdlib = true;
     else if (a == "-nostdlib++") o.nostdlibxx = true;
     else if (a == "--dynamic-linker" || a.starts_with("--dynamic-linker=")) {
       if (a == "--dynamic-linker" && (i + 1 == args.size() || args[i + 1].starts_with('-')))
@@ -275,6 +300,12 @@ std::expected<Options, std::string> parse_options(std::span<const std::string_vi
     return std::unexpected("hosted Linux linking is not supported. Use '-nostdlib' for a freestanding executable");
   if (o.output && o.stop == Options::Stop::object && o.sources.size() > 1)
     return std::unexpected("cannot specify '-o' with '-c' and several input files");
+  if (!o.dependencies && (o.dependency_path || !o.dependency_targets.empty()))
+    return std::unexpected("'-MF' and '-MT' require '-MD'");
+  if (o.dependencies && (o.stop != Options::Stop::object || o.sources.empty()))
+    return std::unexpected("'-MD' requires an object-producing '-c' invocation");
+  if (o.dependency_path && o.sources.size() > 1)
+    return std::unexpected("cannot specify '-MF' with several input files");
   return o;
 }
 
@@ -448,6 +479,165 @@ std::string absolute_in(const Request& r, std::string_view path) {
   return p.lexically_normal().generic_native_encoded_string();
 }
 
+// Quote a file name in a make rule. A semicolon is read during both recipe splitting and
+// file-name parsing. Ninja's gcc depfile reader uses a smaller grammar for unusual names.
+// An explicit `-MT` supplies make syntax and is written literally.
+std::optional<std::size_t> append_make_path(std::string& rule, std::string_view path, bool target = false) {
+  if (path.find_first_of("\r\n") != path.npos) return std::nullopt;
+  std::size_t backslashes = 0;
+  for (char c : path) {
+    if (c == ';') rule.append(3 * backslashes + 3, '\\');
+    else if (c == ' ' || c == '\t' || c == '#' || c == ':' || c == '*' || c == '?' || c == '[' ||
+             (target ? c == '%' : c == '|'))
+      rule.append(backslashes + 1, '\\');
+    else if (c == '$') rule += '$';
+    rule += c;
+    backslashes = c == '\\' ? backslashes + 1 : 0;
+  }
+  return backslashes;
+}
+
+std::expected<DependencyFile, std::string> make_dependencies(
+    const Request& r, const Options& opts, const std::string& object, const std::vector<std::string>& dependencies) {
+  DependencyFile out;
+  out.path = opts.dependency_path
+                 ? *opts.dependency_path
+                 : std::filesystem::path(object).replace_extension(".d").native_encoded_string();
+  const auto bad_path = std::unexpected("a dependency path cannot contain a newline");
+  if (opts.dependency_targets.empty()) {
+    const auto trailing = append_make_path(out.rule, object, true);
+    if (!trailing) return bad_path;
+    out.rule.append(*trailing, '\\');
+  }
+  for (const std::string& target : opts.dependency_targets) {
+    if (target.find_first_of("\r\n") != target.npos) return std::unexpected("'-MT' cannot contain a newline");
+    if (!out.rule.empty()) out.rule += ' ';
+    out.rule += target;
+  }
+  out.rule += ':';
+  // Use the preprocessor's physical main path and each header's first observed spelling.
+  std::set<std::string> seen;
+  std::size_t trailing = 0;
+  for (const std::string& path : dependencies) {
+    if (!seen.insert(absolute_in(r, path)).second) continue;
+    out.rule.append(trailing, '\\');
+    out.rule += ' ';
+    const auto slashes = append_make_path(out.rule, path);
+    if (!slashes) return bad_path;
+    trailing = *slashes;
+  }
+  // Keep a final backslash separate from the newline so it cannot continue the rule.
+  if (trailing != 0) out.rule += ' ';
+  out.rule += '\n';
+  return out;
+}
+
+// The writers replace the leaf, including a symlink there. Resolve the parent as the
+// filesystem does so paths through directory aliases name the same destination.
+std::optional<std::filesystem::path> output_destination(const std::filesystem::path& path) {
+  std::error_code ec;
+  const auto parent = path.parent_path();
+  auto directory = std::filesystem::canonical(parent.empty() ? std::filesystem::path(".") : parent, ec);
+  if (ec) return std::nullopt;
+  return directory / path.filename();
+}
+
+std::optional<struct stat> output_entry(const std::filesystem::path& path) {
+  struct stat status{};
+  if (::lstat(path.c_str(), &status) != 0) return std::nullopt;
+  return status;
+}
+
+bool same_inode(const struct stat& a, const struct stat& b) {
+  return a.st_dev == b.st_dev && a.st_ino == b.st_ino;
+}
+
+// Stage a complete rule beside its destination, using a unique temporary file for each writer.
+std::expected<std::filesystem::path, std::string> stage_dependencies(
+    const DependencyFile& dep, const std::filesystem::path& path) {
+  std::error_code ec;
+  using std::filesystem::file_type;
+  const auto type = std::filesystem::symlink_status(path, ec).type();
+  if (type != file_type::regular && type != file_type::symlink && type != file_type::not_found)
+    return std::unexpected(std::format("cannot write dependency file '{}'", dep.path));
+  auto staging = (path.parent_path() / ".ycxx-dep-XXXXXX").native_encoded_string();
+  const int fd = ::mkstemp(staging.data());
+  if (fd < 0) return std::unexpected(std::format("cannot open dependency file '{}' for writing", dep.path));
+  if (std::FILE* stream = ::fdopen(fd, "wb")) {
+    const auto written = std::fwrite(dep.rule.data(), 1, dep.rule.size(), stream);
+    if (std::fclose(stream) == 0 && written == dep.rule.size()) return std::filesystem::path(staging);
+  } else ::close(fd);
+  std::filesystem::remove(staging, ec);
+  return std::unexpected(std::format("cannot write dependency file '{}'", dep.path));
+}
+
+// Publish a complete regular object with the usual creation permissions. Devices and pipes
+// still use the ordinary writer and have no newly installed file to retire.
+std::expected<std::optional<struct stat>, std::string> write_paired_object(
+    const Output& output, const std::filesystem::path& path) {
+  std::error_code ec;
+  using std::filesystem::file_type;
+  const auto type = std::filesystem::symlink_status(path, ec).type();
+  if (type != file_type::regular && type != file_type::symlink && type != file_type::not_found) {
+    if (auto error = pipeline::write_file(path, output.bytes, output.executable)) return std::unexpected(*error);
+    return std::nullopt;
+  }
+
+  auto name = (path.parent_path() / ".ycxx-obj-XXXXXX").native_encoded_string();
+  if (!::mkdtemp(name.data())) return std::unexpected(std::format("cannot stage object file '{}'", output.path));
+  const std::filesystem::path directory(name);
+  const auto staged = directory / "object";
+  const auto entry = pipeline::write_file(staged, output.bytes, output.executable) ? std::nullopt : output_entry(staged);
+  const bool ready = entry && S_ISREG(entry->st_mode);
+  std::error_code install;
+  if (ready) std::filesystem::rename(staged, path, install);
+  if (!ready || install) std::filesystem::remove(staged, ec);
+  std::filesystem::remove(directory, ec);
+  if (!ready) return std::unexpected(std::format("cannot stage object file '{}'", output.path));
+  if (install) return std::unexpected(std::format("cannot write '{}': {}", output.path, install.message()));
+  return entry;
+}
+
+std::optional<std::string> write_object_and_dependencies(const Output& output, const DependencyFile& dep) {
+  const auto object_path = output_destination(output.path);
+  if (!object_path) return std::format("cannot open '{}' for writing", output.path);
+  const auto dep_path = output_destination(dep.path);
+  if (!dep_path) return std::format("cannot open dependency file '{}' for writing", dep.path);
+  constexpr auto collision = "the dependency file and object output must be different paths";
+  if (*object_path == *dep_path) return collision;
+  // A single link proves two spellings name one existing entry. Distinct links can share an inode.
+  if (const auto before = output_entry(*object_path); before && before->st_nlink == 1) {
+    if (const auto existing = output_entry(*dep_path); existing && same_inode(*before, *existing)) return collision;
+  }
+  auto staged = stage_dependencies(dep, *dep_path);
+  if (!staged) return staged.error();
+
+  std::error_code ec;
+  const auto published = write_paired_object(output, *object_path);
+  if (!published) {
+    std::filesystem::remove(*staged, ec);
+    return published.error();
+  }
+  std::string error;
+  const auto existing = output_entry(*dep_path);
+  if (*published && existing && same_inode(**published, *existing)) {
+    // The second spelling can resolve to the fresh object on a case-insensitive filesystem.
+    error = collision;
+  } else {
+    std::filesystem::rename(*staged, *dep_path, ec);
+    if (!ec) return std::nullopt;
+    error = std::format("cannot write dependency file '{}': {}", dep.path, ec.message());
+  }
+  // A fresh object with an old depfile could make the next build miss required work.
+  const auto current = output_entry(*object_path);
+  if (*published && current && same_inode(**published, *current)) {
+    std::filesystem::remove(*object_path, ec);
+    if (ec) error += std::format(" (cannot remove newly written object '{}': {})", output.path, ec.message());
+  }
+  std::filesystem::remove(*staged, ec);
+  return error;
+}
+
 }  // namespace
 
 std::vector<std::string> sources_of(const Request& r) {
@@ -494,6 +684,11 @@ namespace {
 void checking_options(std::span<const std::string_view> args, bool std, std::vector<std::string>& out) {
   pp::Config scratch;
   for (std::size_t i = 0; i < args.size(); ++i) {
+    // Dependency-output operands are not options of the syntax check, even if they start with '-'.
+    if (args[i] == "-MF" || args[i] == "-MT") {
+      ++i;
+      continue;
+    }
     const std::size_t from = i;
     if (auto taken = pp::take_option(args, i, scratch); taken && *taken) {
       for (std::size_t k = from; k <= i; ++k) out.emplace_back(args[k]);
@@ -585,6 +780,7 @@ Done run(const Request& r, pp::Host& host, pipeline::Session& session, const Sto
   key.until = opts->stop == Options::Stop::syntax ? pipeline::Until::syntax
               : opts->stop == Options::Stop::object ? pipeline::Until::object
                                                     : pipeline::Until::link;
+  key.want_dependencies = opts->dependencies;
   for (const std::string& s : opts->sources)
     key.units.push_back(session.unit({s, r.cwd, config, object_name(s).native_encoded_string()}));
   std::filesystem::path out = opts->output.value_or("a.out");
@@ -685,7 +881,17 @@ Done run(const Request& r, pp::Host& host, pipeline::Session& session, const Sto
       continue;
     }
     if (until == pipeline::Until::object) {
-      std::string o = opts->output ? *opts->output : object_name(path).native_encoded_string();
+      Output output;
+      output.path = opts->output ? *opts->output : object_name(path).native_encoded_string();
+      if (opts->dependencies) {
+        auto dep = make_dependencies(r, *opts, output.path, u.dependencies);
+        if (!dep) {
+          render.file_level(dep.error());
+          failed = true;
+          continue;
+        }
+        output.dependency_file = std::move(*dep);
+      }
       if (u.object->arch == obj::target::x86_64_linux) {
         auto bytes = obj::elf::write_object(*u.object);
         if (!bytes) {
@@ -693,8 +899,9 @@ Done run(const Request& r, pp::Host& host, pipeline::Session& session, const Sto
           failed = true;
           continue;
         }
-        d.outputs.push_back({std::move(o), std::move(*bytes), false});
-      } else d.outputs.push_back({std::move(o), obj::macho::write_object(*u.object), false});
+        output.bytes = std::move(*bytes);
+      } else output.bytes = obj::macho::write_object(*u.object);
+      d.outputs.push_back(std::move(output));
     }
   }
   if (failed || until != pipeline::Until::link) {
@@ -728,10 +935,16 @@ std::optional<pipeline::FileOffset> definition(const Request& r, pp::Host& host,
   return found ? *found : std::nullopt;
 }
 
-int finish(Done& d) {
+void write_outputs(Done& d) {
   for (const Output& o : d.outputs) {
-    if (auto err = pipeline::write_file(o.path, o.bytes, o.executable)) fail(d, *err);
+    auto err = o.dependency_file ? write_object_and_dependencies(o, *o.dependency_file)
+                                 : pipeline::write_file(o.path, o.bytes, o.executable);
+    if (err) fail(d, *err);
   }
+}
+
+int finish(Done& d) {
+  write_outputs(d);
   std::cout << d.out << std::flush;
   std::cerr << d.err << std::flush;
   return d.exit_status;
