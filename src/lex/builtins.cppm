@@ -27,6 +27,7 @@ enum class TypeTrait : std::uint8_t {
   is_trivially_destructible,
   reference_converts_from_temporary, reference_constructs_from_temporary,
   is_standard_layout,
+  is_implicit_lifetime,
 };
 
 struct TypeTraitInfo {
@@ -88,6 +89,8 @@ inline constexpr std::array type_traits{
     TypeTraitInfo{"__remove_all_extents", TypeTrait::remove_all_extents, 1, true},
     TypeTraitInfo{"__decay", TypeTrait::decay, 1, true},
     TypeTraitInfo{"__underlying_type", TypeTrait::underlying_type, 1, true},
+    TypeTraitInfo{.name = "__builtin_is_implicit_lifetime", .trait = TypeTrait::is_implicit_lifetime, .arity = 1,
+                  .transforms = false, .advertised = false, .replay_dependent = true},
     TypeTraitInfo{.name = "__is_standard_layout", .trait = TypeTrait::is_standard_layout, .arity = 1,
                   .transforms = false, .advertised = false, .replay_dependent = true},
     TypeTraitInfo{.name = "__is_trivially_copyable", .trait = TypeTrait::is_trivially_copyable, .arity = 1,

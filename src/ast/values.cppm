@@ -167,6 +167,7 @@ enum class DepOp : u8 {
   is_standard_layout,
   is_final,
   is_aggregate,
+  is_implicit_lifetime,
 };
 
 // A dependent operation (§5.5). The predicates take canonical qualified type operands.
