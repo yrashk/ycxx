@@ -25,8 +25,8 @@ def main():
                                      f' and stderr containing {error!r}\n{result.stdout}{result.stderr}')
             return result.stdout
 
-        def compile(source, obj):
-            run(ycxx, 'cxx', '-c', source, '-o', obj)
+        def compile(source, obj, *flags):
+            run(ycxx, 'cxx', *flags, '-c', source, '-o', obj)
 
         def symbol_entries(obj):
             """Yield (name, (binding, defined)) for each symbol reported by `nm -m`."""
@@ -140,6 +140,30 @@ int main() { return g() - 2; }
             compile(assignment / f'{name}.cpp', f'assignment-{name}.o')
             assert symbols(f'assignment-{name}.o')['__ZN1HaSERKS_'] == weak, name
         links('assignment-main.o', 'assignment-peer.o')
+
+        destructors = fixtures / 'inline-destructors'
+        for fixture, binding, names in (
+            ('shared', weak, ('__ZN6MemberIiED1Ev', '__ZN6MemberIbED1Ev', '__ZN5OwnerD1Ev')),
+            ('local', ('non-external', True), ('__ZN6MemberIN12_GLOBAL__N_13TagEED1Ev',
+                                             '__ZN5OwnerIN12_GLOBAL__N_13TagEED1Ev')),
+        ):
+            first, second = f'{fixture}-dtor-first.o', f'{fixture}-dtor-second.o'
+            compile(destructors / fixture / 'first.cpp', first)
+            compile(destructors / fixture / 'second.cpp', second)
+            for obj in (first, second):
+                table = symbols(obj)
+                for name in names:
+                    assert table.get(name) == binding, (obj, name, table.get(name))
+            links(first, second)
+
+        ordinary = destructors / 'out-of-line'
+        compile(ordinary / 'first.cpp', 'strong-dtor-first.o')
+        compile(ordinary / 'second.cpp', 'strong-dtor-second.o')
+        assert symbols('strong-dtor-first.o')['__ZN5OwnerD1Ev'] == strong
+        links('strong-dtor-first.o', 'strong-dtor-second.o')
+        compile(ordinary / 'second.cpp', 'duplicate-dtor.o', '-DDUPLICATE_DESTRUCTOR')
+        run(ycxx, 'cxx', 'strong-dtor-first.o', 'duplicate-dtor.o', '-o', 'program', status=1,
+            error='duplicate symbol __ZN5OwnerD1Ev')
 
         # Shared inline definitions beside every other kind of content: the split sections and
         # dead stripping keep string literals, initializers, guarded statics and pointers intact.

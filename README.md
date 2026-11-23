@@ -212,6 +212,11 @@ visibility across declarations.
 [#422](https://github.com/yrashk/ycxx/issues/422) · [#602](https://github.com/yrashk/ycxx/issues/602)
 · [#124](https://github.com/yrashk/ycxx/issues/124) · [#936](https://github.com/yrashk/ycxx/issues/936)
 
+Both targets link nonthrowing, nonvirtual in-class destructors and implicit destructors across
+separate objects, including destructors of class-template specializations. Specializations with
+translation-unit-local template arguments retain local symbol binding.
+[#1025](https://github.com/yrashk/ycxx/issues/1025)
+
 On Linux x86-64, an ordinary external namespace-scope function can use GNU `weak` so a
 strong definition in another object takes precedence. This covers the pinned libycxx
 debugger provider. [#937](https://github.com/yrashk/ycxx/issues/937)
