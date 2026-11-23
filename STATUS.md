@@ -216,7 +216,10 @@ What is true of the code today. Work in progress and its owners are tracked in
     resource headers (#133). A native Linux build also searches `/usr/include/x86_64-linux-gnu`
     and `/usr/include` (#252). Darwin searches the configured SDK's `usr/include`, with a request's
     `SDKROOT` as an override. Cross-target requests without a target SDK can use explicit include
-    directories (#690);
+    directories (#690). `-nostdinc` omits those automatic include roots, including the
+    bundled library and resource headers, while keeping explicit `-I`, `-isystem`,
+    and `-iquote` paths, source-relative quoted includes, and macros.
+    [#251](https://github.com/yrashk/ycxx/issues/251)
   - `#define` and `#undef` with the redefinition check, rescanning and painting
     ([cpp.rescan]);
   - function-like macros (`:unit`'s `invocation`, `substitute`, `paste`): arguments across
@@ -1061,8 +1064,9 @@ in `lsp` frames (`LspOut`), the last of which carries LSP's exit status (1 after
   its identity changes; `@file` response files expanded relative to the entry's directory; a
   header or C entry is no unit), else the file alone in its directory. `daemon.lsp`'s
   `compile_commands` covers both forms, a response file, a header and a C file, a directory
-  spelled through a symbolic link, and a change (mutation-checked). Options `pp` does not take
-  yet (`-include`, `--sysroot`, …) are dropped (#251).
+  spelled through a symbolic link, and a change (mutation-checked). The check also keeps
+  `-nostdinc`. Options `pp` does not take yet (`-include`, `--sysroot`, …) are dropped.
+  [#251](https://github.com/yrashk/ycxx/issues/251)
 - Not yet: stopping a diagnosis on a newer edit,
   `$/cancelRequest`, debouncing and interactive priority (#168); `buffers_in`, the disk-view
   assertion and one view per session (#169); go-to-definition from a declaration part (a
