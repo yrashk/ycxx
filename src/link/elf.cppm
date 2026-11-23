@@ -358,7 +358,7 @@ std::expected<std::vector<obj::object>, std::string> select_archive_members(std:
       continue;
     }
     const auto& input = std::get<1>(operand).get();
-    auto archive = obj::archive::read(input.bytes, input.name);
+    auto archive = obj::archive::read(input.bytes(), input.name);
     if (!archive) return std::unexpected(archive.error());
 
     // New unresolved references can select an earlier member. Queue each indexed candidate

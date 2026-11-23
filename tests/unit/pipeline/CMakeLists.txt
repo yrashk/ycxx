@@ -40,6 +40,9 @@ if(APPLE AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(arm64|aarch64)$" AND NOT CMAKE_CR
   add_test(NAME unit.darwin_archive
     COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/darwin_archive.py
             $<TARGET_FILE:ycxxc> ${CMAKE_AR} ${CMAKE_C_COMPILER})
+  # libycxx's runtime in a default link, and -nostdlib++ without it (#842).
+  add_test(NAME unit.darwin_runtime
+    COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/darwin_runtime.py $<TARGET_FILE:ycxxc> ${YCXXC_NM})
   # The Mach-O counterpart of the linux_* virtual tests, over their fixtures (#650). Its peers
   # are Clang's, whose libc++ and RTTI conventions are the platform's C++ ABI.
   find_program(YCXXC_CLANGXX NAMES clang++ REQUIRED)
