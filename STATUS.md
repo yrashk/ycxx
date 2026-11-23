@@ -629,6 +629,9 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
       other items only as the group asks. `unit_of` makes each group's `UnitPart`, and
       `finish_unit` the decisions that need every group (init functions, `inline`, noexcept and
       hidden declarations anywhere, unwind checks). A unit that says `virtual` keeps one Program.
+    - The unit combines layout uncertainty from all groups before the native ABI checks class
+      shapes and chooses base-object constructor and destructor variants.
+      [#992](https://github.com/yrashk/ycxx/issues/992)
     - A Program answers the same whichever items ran first (§A1): `ensure_declared` analyses the
       earlier items that can declare an entity before a side table is read, `settle` completes a
       class reached lazily, and `may_have_virtual_layouts` is a fact of the tokens.
@@ -1428,6 +1431,15 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   `operator delete` with the original pointer and the complete root size.
   [Itanium ABI §2.5.2](https://itanium-cxx-abi.github.io/cxx-abi/abi.html#vtable-components) ·
   [#136](https://github.com/yrashk/ycxx/issues/136) · [#659](https://github.com/yrashk/ycxx/issues/659)
+- On Linux x86-64, a derived class with an empty out-of-line virtual destructor can own its
+  32-byte table and single-inheritance RTTI. It has one public nonvirtual primary base with
+  one directly written pointer field with a builtin pointee type and a peer-owned public
+  virtual destructor. `D1` and `D2` share a body
+  that restores the derived address point and calls the base's `D2` at offset zero. `D0` then
+  deallocates the original pointer with the complete 16-byte object size. The derived descriptor
+  imports the peer's base descriptor. The destructor specifications can be implicit. A unit
+  containing only the declarations leaves ownership with the units defining the keys.
+  [Design](docs/design/linux-derived-virtual-destructor.md) · [#999](https://github.com/yrashk/ycxx/issues/999)
 - A non-template constructor can delegate to another ordinary constructor of its class with
   a sole parenthesized or braced initializer ([class.base.init], #157). The target resolves in
   the complete class and constructs the same object. The delegating body starts after the
