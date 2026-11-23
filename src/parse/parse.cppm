@@ -713,10 +713,17 @@ public:
       const bool qualified = it.qualifier_begin < it.qualifier_end;
       auto d = bound_functions || qualified || n.member_elaborated_candidate ? decl_sema(id) : std::nullopt;
       if (n.member_elaborated_candidate && (!d || d->entity == EntityId::none)) continue;
-      if (qualified)
+      if (qualified) {
         if (auto target = qualified_c_functions_.find({j, n.ordinal});
             target != qualified_c_functions_.end() && target->second != ns)
           continue;
+        // [dcl.meaning.general]: a qualified C++ definition binds in its target scope.
+        if (d && d->entity != EntityId::none && d->kind == ast::DeclKind::function &&
+            !(d->flags & sema::decl_flag::lang_c) &&
+            ((d->flags & sema::decl_flag::member) ||
+             namespace_path(w_->entities.rec(d->entity).scope) != ns))
+          continue;
+      }
       if (bound_functions) {
         // A qualified definition can inhabit this namespace while binding its name elsewhere
         // ([dcl.meaning.general]). Targets of using-declarators were collected above.
