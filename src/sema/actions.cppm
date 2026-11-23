@@ -124,8 +124,11 @@ public:
   virtual bool may_have_virtual_layouts() { return true; }
   // An omitted field's initializer, analysed at its declaration into the requesting builder.
   // `NodeId::none` records a diagnosed error. No answer means this context cannot replay it.
-  // A required base selects the call-free parenthesized aggregate form.
-  virtual std::optional<NodeId> replay_default_member(Sema&, EntityId, EntityId = EntityId::none) { return std::nullopt; }
+  // A required base selects the call-free parenthesized aggregate form. The fallback returns
+  // the literal from folding a template specialization's scalar initializer.
+  virtual std::optional<NodeId> replay_default_member(Sema&, EntityId, EntityId = EntityId::none, bool = false) {
+    return std::nullopt;
+  }
   virtual std::optional<NodeId> replay_function_default(Sema&, const ast::DefaultArg&, EntityId, QualType, u32) {
     return std::nullopt;
   }
@@ -3105,9 +3108,11 @@ public:
   }
   Ex element_default(const Element& e, bool value, bool replay, u32 begin, u32 end,
                      EntityId required_base = EntityId::none) {
-    if ((replay || required_base != EntityId::none) && e.default_member != EntityId::none) {
-      if (auto init = q_->replay_default_member(*this, e.default_member, required_base)) {
+    const bool fallback = !replay && required_base == EntityId::none;
+    if (e.default_member != EntityId::none && (!fallback || e.init == ConstId::none)) {
+      if (auto init = q_->replay_default_member(*this, e.default_member, required_base, fallback)) {
         if (*init == NodeId::none) return {NodeId::none, begin, end};
+        if (fallback) return {*init, begin, end, {Types::unqualified(e.type), ValueCategory::prvalue, 0}};
         ExprInfo info{e.type, ValueCategory::prvalue, 0};
         // A named declaration in a template is also a newly supported replay.
         if ((!replay_default_members_ || templated()) && required_base == EntityId::none &&

@@ -1990,7 +1990,11 @@ public:
     return p_->publish_class(c, std::move(r), item_, context);
   }
   const sema::EnumRec* defining_enum(EntityId e) override { return p_->defining_enum(e); }
-  bool require_enum_definition(EntityId e) override { return p_->require_enum_definition(e, point()); }
+  bool require_enum_definition(EntityId e) override {
+    const bool ready = p_->require_enum_definition(e, point());
+    observed_enum_definition_failure |= !ready;
+    return ready;
+  }
   std::set<EntityId> uncertain_object_layouts() override { return p_->uncertain_object_layouts(); }
   bool peer_pure_dispatch(EntityId cls) override { return p_->peer_pure_dispatch(cls); }
   void use_typed_dynamic_cast() override { p_->has_typed_dynamic_cast_ = true; }
@@ -2090,7 +2094,8 @@ public:
     return at_point ? p_->is_complete(c, *at_point, true, true) : is_complete_at_item(c);
   }
   bool may_have_virtual_layouts() override { return p_->may_have_virtual_layouts(); }
-  std::optional<NodeId> replay_default_member(sema::Sema& caller, EntityId field, EntityId required_base) override;
+  std::optional<NodeId> replay_default_member(sema::Sema& caller, EntityId field, EntityId required_base,
+                                              bool fallback = false) override;
   std::optional<NodeId> replay_function_default(sema::Sema& caller, const ast::DefaultArg& value,
                                                 EntityId function, QualType parameter, u32 at) override;
   std::optional<bool> replay_destructor_exception(sema::Sema& caller, EntityId cls, u32 at) override;
@@ -2212,6 +2217,7 @@ public:
   // The original tokens when checking or replaying a default member initializer.
   std::optional<Program::Dmi> initializer_source;
   bool checking_default_member = false;  // the declaration's semantic check
+  bool observed_enum_definition_failure = false;
   bool retain_type_trait_pattern = false;
   bool observed_type_trait_failure = false;
   std::optional<u32> type_trait_demand;
@@ -2370,11 +2376,16 @@ bool AtItem::inherited_default_arithmetic(sema::Sema& replay, NodeId root, Entit
   return true;
 }
 
-std::optional<NodeId> AtItem::replay_default_member(sema::Sema& caller, EntityId field, EntityId required_base) {
+bool valid_member_declarations(std::span<const engine::Diagnostic> diagnostics);
+
+std::optional<NodeId> AtItem::replay_default_member(sema::Sema& caller, EntityId field, EntityId required_base,
+                                                  bool fallback) {
   const auto dmi = p_->dmi(field);
   if (!dmi) return std::nullopt;
-  if (dmi->invalid) return NodeId::none;
   const auto& entity = p_->world().entities.rec(field);
+  const auto arguments = p_->class_args_.find(std::to_underlying(entity.scope));
+  if (fallback && (arguments == p_->class_args_.end() || !caller.types().is_scalar(entity.type))) return std::nullopt;
+  if (dmi->invalid) return NodeId::none;
   const u32 offset = dmi->begin - p_->items().items[dmi->item].begin;
   AtItem source(*p_, dmi->item, false);
   source.completing_class = entity.scope;
@@ -2384,7 +2395,11 @@ std::optional<NodeId> AtItem::replay_default_member(sema::Sema& caller, EntityId
   replay.current_class = entity.scope;
   replay.this_type = replay.types().pointer(replay.types().class_type(entity.scope));
   replay.unevaluated = caller.unevaluated;
-  if (checking_default_member) replay.template_scopes = p_->enclosing_heads(dmi->item);
+  if (checking_default_member || arguments != p_->class_args_.end()) replay.template_scopes = p_->enclosing_heads(dmi->item);
+  if (arguments != p_->class_args_.end()) {
+    source.at_point = default_instantiation_point.value_or(point());
+    replay.template_args = arguments->second;
+  }
   replay.push_scope();
   const sema::Sema::DefaultMemberScope nested(replay, true);
 
@@ -2413,12 +2428,24 @@ std::optional<NodeId> AtItem::replay_default_member(sema::Sema& caller, EntityId
   Parser parser(p_->region(), dmi->begin, dmi->end, replay);
   parser.set_questions(source);
   const std::size_t diag_begin = replay.diag_count();
+  const std::size_t end_diag_begin = p_->end_diags_.size();
+  const auto instantiation_failed = [&] {
+    return source.observed_enum_definition_failure ||
+           !valid_member_declarations(std::span(p_->end_diags_).subspan(end_diag_begin));
+  };
   Ex init = parser.member_initializer(entity.type, dmi->braced, dmi->form);
-  if (replay.has_error_since(diag_begin)) return NodeId::none;
+  if (instantiation_failed() || replay.has_error_since(diag_begin)) return NodeId::none;
   if (!init.ok() || !parser.at_end()) {
     if (parser.at_end()) replay.diag(parser.pos(), Diag::expected_expression);
     else replay.diag(parser.pos(), Diag::unexpected_token, parser.kind());
     return NodeId::none;
+  }
+  if (fallback) {
+    const auto value = sema::Evaluator(replay, source).evaluate_initializer(init).value;
+    if (instantiation_failed()) return NodeId::none;
+    if (!value) return std::nullopt;
+    const Ex folded = replay.literal(sema::Types::unqualified(entity.type), *value, ast::ValueCategory::prvalue, 0, 0);
+    return folded.id;
   }
   if (!checking_default_member && (replay.dependent(init) || !replay.closures.empty())) {
     replay.diag(0, Diag::not_supported, Tk::equal);
@@ -2739,8 +2766,9 @@ public:
                                            const sema::Bindings& args) override {
     return at_.replay_alias_calls(caller, alias, args);
   }
-  std::optional<NodeId> replay_default_member(sema::Sema& caller, EntityId field, EntityId required_base) override {
-    return at_.replay_default_member(caller, field, required_base);
+  std::optional<NodeId> replay_default_member(sema::Sema& caller, EntityId field, EntityId required_base,
+                                              bool fallback) override {
+    return at_.replay_default_member(caller, field, required_base, fallback);
   }
   std::optional<NodeId> replay_function_default(sema::Sema& caller, const ast::DefaultArg& value,
                                                 EntityId function, QualType parameter, u32 at) override {
@@ -5293,14 +5321,29 @@ private:
         bool braced = ps_.is(Tk::l_brace) || ps_.kind(1) == Tk::l_brace;
         const auto form = ps_.accept(Tk::equal) ? sema::Construction::copy_list : sema::Construction::direct_list;
         u32 from = ps_.pos();
-        std::size_t n = s_.diag_count();
-        init = ps_.member_initializer(d.type, braced, form);
-        auto v = init.ok() && types.is_scalar(d.type) ? constant_initializer(init) : std::nullopt;
-        s_.truncate_diags(n);
-        if (v) value = *v;
-        else init = {};
-        p_->set_dmi(sem.entity, {.item = k_, .begin = it_->begin + from, .end = it_->begin + ps_.pos(),
-                                .braced = braced, .form = form});
+        std::optional<Program::Dmi> written;
+        if (inst_) {
+          // [temp.inst]/12: parsing or folding a default member initializer can instantiate a
+          // scoped enumeration through another dependency. Reuse the pattern's token extent.
+          const auto declarations = p_->item_sema(k_).value.decls;
+          if (decls_.size() < s_.ins().seqs.size(declarations)) {
+            const auto field = s_.ins().seqs.at(declarations, decls_.size());
+            written = p_->dmi(field.entity);
+          }
+        }
+        if (written && written->begin == it_->begin + from) {
+          ps_.seek(written->end);
+          p_->set_dmi(sem.entity, *written);
+        } else {
+          const std::size_t n = s_.diag_count();
+          init = ps_.member_initializer(d.type, braced, form);
+          auto v = init.ok() && types.is_scalar(d.type) ? constant_initializer(init) : std::nullopt;
+          s_.truncate_diags(n);
+          if (v) value = *v;
+          else init = {};
+          p_->set_dmi(sem.entity, {.item = k_, .begin = it_->begin + from, .end = it_->begin + ps_.pos(),
+                                  .braced = braced, .form = form});
+        }
       }
       s_.own.push_back({d.name, sem});
       declarators_.push_back(s_.node(ast::Declarator{u32(decls_.size()), sema::Sema::at(init, d.begin), value}, d.begin, ps_.pos()));
