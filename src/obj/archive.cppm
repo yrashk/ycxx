@@ -5,6 +5,8 @@
 export module ycxx.obj.archive;
 
 import std;
+import ycxx.engine;
+import ycxx.hash;
 import ycxx.obj;
 import ycxx.obj.elf;
 
@@ -29,10 +31,36 @@ enum class flavor : std::uint8_t { gnu, darwin };
 std::expected<contents, std::string> read(std::string_view bytes, std::string_view name, flavor kind = flavor::gnu);
 
 // An archive operand of a link: its name for diagnostics and its bytes, read at driver ingress.
-struct input {
+// The bytes are shared and immutable, and their fingerprint is computed once, so the libycxx
+// runtime every Darwin link names (#842) is held once per process, not once per program.
+class input {
+public:
+  input(std::string name, std::shared_ptr<const std::string> bytes)
+    pre(bytes != nullptr)
+    : name(std::move(name)), bytes_(std::move(bytes)), content_(fingerprint128(*bytes_)) {}
+  input(std::string name, std::string bytes) : input(std::move(name), std::make_shared<const std::string>(std::move(bytes))) {}
+
   std::string name;
-  std::string bytes;
+  std::string_view bytes() const noexcept { return *bytes_; }
+  // The fingerprint of the bytes, which with the name is the input's identity.
+  Fp128 content() const noexcept { return content_; }
+
+private:
+  std::shared_ptr<const std::string> bytes_;
+  Fp128 content_;
 };
+
+void hash_into(Hasher& h, const input& in) {
+  h.uint(static_cast<std::uint64_t>(in.name.size())).bytes(in.name).fp(in.content());
+}
+void serialize_into(engine::Sink& out, const input& in) {
+  engine::serialize(out, in.name);
+  engine::serialize(out, std::string(in.bytes()));
+}
+input deserialize_from(engine::Source& in, std::type_identity<input>) {
+  auto name = engine::deserialize<std::string>(in);
+  return input(std::move(name), engine::deserialize<std::string>(in));
+}
 
 inline constexpr std::uint64_t max_member_size = 9'999'999'999;  // 10 decimal digits
 
