@@ -768,6 +768,12 @@ public:
     if (ins().names.spelling(name) != "__builtin_va_list") return std::nullopt;
     return w_->builtin_va_list();
   }
+  bool conflicts_with_imported_alias(std::span<const ast::DeclSema> imported, QualType type) {
+    return std::ranges::any_of(imported, [&](const ast::DeclSema& decl) {
+      return decl.kind == ast::DeclKind::type_alias &&
+             ((decl.flags & decl_flag::template_) || types().canonical(decl.type) != types().canonical(type));
+    });
+  }
   // A block-scope typedef-name or alias-declaration ([dcl.typedef]); it may redeclare one of the
   // same block to the same type.
   void local_type_alias(NameId name, QualType type, u32 at_) {
@@ -779,6 +785,8 @@ public:
     if (guarded || std::ranges::any_of(scopes_.back(), [&](const auto& p) { return p.first == name; }) ||
         std::ranges::any_of(block_types_, [&](const BlockType& t) {
           return t.depth == depth && t.name == name && types().canonical(t.type) != types().canonical(type);
+        }) || std::ranges::any_of(block_usings_, [&](const BlockUsing& used) {
+          return used.depth == depth && used.name == name && conflicts_with_imported_alias(used.decls, type);
         })) {
       diag(at_, Diag::redeclared_local, name);
       return;
@@ -2223,10 +2231,13 @@ public:
       }
     }
     const std::size_t depth = scopes_.size() - 1;
-    if (type_index && std::ranges::any_of(block_usings_, [&](const BlockUsing& earlier) {
-          return earlier.depth == depth && earlier.name == n && earlier.type_index &&
-                 !same_type(found[*type_index], earlier.decls[*earlier.type_index]);
-        })) {
+    if (type_index &&
+        (std::ranges::any_of(block_usings_, [&](const BlockUsing& earlier) {
+           return earlier.depth == depth && earlier.name == n && earlier.type_index &&
+                  !same_type(found[*type_index], earlier.decls[*earlier.type_index]);
+         }) || std::ranges::any_of(block_types_, [&](const BlockType& alias) {
+           return alias.depth == depth && alias.name == n && conflicts_with_imported_alias(found, alias.type);
+         }))) {
       diag(at_, Diag::conflicting_declaration, n);
       return;
     }
