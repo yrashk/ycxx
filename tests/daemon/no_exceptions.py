@@ -91,6 +91,14 @@ def command_line(world, scope):
     for flags in MODE_REPLAY[1:]:
         syntax(world, scope, 'throw.cpp', flags, line=2 if flags else None)
 
+    # A virtual declaration selects the whole-unit path without moving either throw.
+    for source in ('throw.cpp', 'selected-throw.cpp'):
+        text, line = REJECTED[source]
+        whole_unit = 'whole-unit-' + source
+        (scope / whole_unit).write_text(text + '\nstruct ModeProbe { virtual int f(); };\n')
+        for flags in MODE_REPLAY:
+            syntax(world, scope, whole_unit, flags, line=line if flags else None)
+
     for source, (_, line) in REJECTED.items():
         if source != 'throw.cpp':
             syntax(world, scope, source)
