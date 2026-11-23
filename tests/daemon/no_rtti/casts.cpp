@@ -1,9 +1,9 @@
 #include "types.hpp"
 
-extern "C" const D* identity(D* source) {
-  return dynamic_cast<const D*>(source);
+extern "C" const CastDerived* identity(CastDerived* source) {
+  return dynamic_cast<const CastDerived*>(source);
 }
 
-extern "C" const B* upcast(D* source) {
-  return dynamic_cast<const B*>(source);
+extern "C" const CastBase* upcast(CastDerived* source) {
+  return dynamic_cast<const CastBase*>(source);
 }

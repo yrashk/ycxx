@@ -153,7 +153,7 @@ def linux_objects(world, scope, libycxx, host):
     owned = pipeline / 'linux_owned_derived_vtable'
     for name in ('base.hpp', 'key.cpp'):
         (scope / name).write_bytes((owned / name).read_bytes())
-    for name in ('types.hpp', 'casts.cpp', 'peer.cpp'):
+    for name in ('types.hpp', 'casts.cpp', 'poly_identity.cpp', 'peer.cpp'):
         (scope / name).write_bytes((fixtures / name).read_bytes())
     snapshots = {}
     ownership = []
@@ -179,8 +179,9 @@ def linux_objects(world, scope, libycxx, host):
     for flags, enabled in (((), True), (DISABLED, False)):
         (scope / 'owner.o').write_bytes(snapshots[enabled])
         check_no_class_rtti(object_file('casts.cpp', 'casts.o', *flags))
+        check_no_class_rtti(object_file('poly_identity.cpp', 'poly-identity.o', *flags))
         native(host, '-fno-lto', '-no-pie', 'peer.o', 'dispatch.o', 'owner.o', 'casts.o',
-               'marker.o', 'debugger.o', '-o', 'program')
+               'poly-identity.o', 'marker.o', 'debugger.o', '-o', 'program')
         native('./program')
 
     borrowed = pipeline / 'linux_dynamic_cast_void'

@@ -1,6 +1,7 @@
 #pragma once
 
-#include "base.hpp"
+struct CastBase { int base; };
+struct CastDerived : CastBase { int value; };
 
-extern "C" const D* identity(D* source);
-extern "C" const B* upcast(D* source);
+extern "C" const CastDerived* identity(CastDerived* source);
+extern "C" const CastBase* upcast(CastDerived* source);
