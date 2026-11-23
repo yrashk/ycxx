@@ -269,6 +269,41 @@ def main():
                      '_Z11specializedIiE', '_Z11specializedI9NamedTypeE'):
             assert table[name][4] == 'GLOBAL' and table[name][6] != 'UND', table[name]
 
+        static_members = fixtures / 'inline-template-statics'
+        for case, expected in (
+            ('constant', {}),
+            ('address', {'_ZN7ProfileILj2EE5limitE': 'WEAK', '_ZN7ProfileILj4EE5limitE': 'WEAK'}),
+            ('local', {'_ZN7ProfileIN12_GLOBAL__N_13TagEE5limitE': 'LOCAL'}),
+            ('strong-member', {'_ZN7ProfileILj2EE5limitE': 'GLOBAL'}),
+        ):
+            objects = tuple(f'static-{case}-{unit}.o' for unit in ('main', 'peer'))
+            for unit, obj in zip(('main', 'peer'), objects):
+                compile(static_members / case / f'{unit}.cpp', obj)
+                table = symbols(obj)
+                for name, binding in expected.items():
+                    entry = table[name]
+                    assert entry[4] == binding and entry[6] != 'UND', entry
+            if case == 'strong-member':
+                link(*objects, status=1, error="duplicate symbol '_ZN7ProfileILj2EE5limitE'")
+            else:
+                for order in (objects, objects[::-1]):
+                    link(*order)
+                    run('./program')
+
+        run(host_cxx, '-std=c++20', '-O0', '-fno-pie', '-c', static_members / 'address/peer.cpp',
+            '-o', 'host-static-address-peer.o')
+        run(host_cxx, '-no-pie', 'static-address-main.o', 'host-static-address-peer.o', '-o', 'host-program')
+        run('./host-program')
+
+        compile(static_members / 'enum-nttp.cpp', 'static-enum.o')
+        table = symbols('static-enum.o')
+        for name, binding in (('_ZN14PrivateProfileILN12_GLOBAL__N_18LocalTagE11EE5limitE', 'LOCAL'),
+                              ('_ZN13PublicProfileIL9PublicTag29EE5limitE', 'WEAK')):
+            entry = table[name]
+            assert entry[4] == binding and entry[6] != 'UND', entry
+        link('static-enum.o')
+        run('./program')
+
 
 if __name__ == '__main__':
     main()

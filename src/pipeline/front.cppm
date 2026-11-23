@@ -1122,17 +1122,19 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
       return internal_type(r.inner);
     return false;
   };
-  // An ordinary in-class static constexpr member is inline ([dcl.constexpr]). An owner or
-  // a declared type in an unnamed namespace gives the member's symbol TU-local binding.
+  // An in-class static constexpr member is inline ([dcl.constexpr]). An owner or a declared
+  // type in an unnamed namespace gives the member's symbol TU-local binding.
   auto constexpr_member_symbol_linkage = [&](const ast::DeclSema& d) -> std::optional<ast::Linkage> {
     if (d.kind != ast::DeclKind::variable || d.storage != ast::Storage::static_ ||
         !(d.flags & sema::decl_flag::member) || !(d.flags & sema::decl_flag::constexpr_))
       return {};
     const auto& member = world.entities.rec(d.entity);
     const auto& owner = world.entities.rec(member.scope);
-    if (owner.kind != sema::EntityKind::class_ || owner.templ != EntityId::none || !program.is_namespace(owner.scope))
+    if (owner.kind != sema::EntityKind::class_ || !program.is_namespace(owner.scope)) return {};
+    const bool instantiated = owner.templ != EntityId::none;
+    if (instantiated && (!world.types.is_arithmetic(d.type) || (d.flags & sema::decl_flag::specialization)))
       return {};
-    if (names_unnamed_namespace(program, member.scope) || names_unnamed_namespace(program, d.type))
+    if (names_unnamed_namespace(program, member.scope, instantiated) || names_unnamed_namespace(program, d.type))
       return ast::Linkage::internal;
     return owner.linkage;
   };
@@ -1472,6 +1474,7 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
       ast::Loc at{program.id(m.item), c.at};
       declare(d, at);
       tu.variables.push_back({d.entity, d.type, value, at});
+      if (value != ast::ConstId::none) tu.variables.back().coalesced = weak_inline_variable(d);
     }
   }
   for (EntityId spec : program.required()) {
