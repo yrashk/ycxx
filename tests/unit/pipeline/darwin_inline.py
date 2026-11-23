@@ -235,6 +235,32 @@ int use() { return with_static() + with_lambda(1) + twice(2) + int(twice(2L)) + 
         assert 'SUBSECTIONS_VIA_SYMBOLS' not in flags, flags
         assert 'SUBSECTIONS_VIA_SYMBOLS' in run('otool', '-hv', 'main.o').splitlines()[-1]
 
+        static_members = fixtures / 'inline-template-statics'
+        for case, expected in (
+            ('constant', {}),
+            ('address', {'__ZN7ProfileILj2EE5limitE': weak, '__ZN7ProfileILj4EE5limitE': weak}),
+            ('local', {'__ZN7ProfileIN12_GLOBAL__N_13TagEE5limitE': ('non-external', True)}),
+            ('strong-member', {'__ZN7ProfileILj2EE5limitE': strong}),
+        ):
+            objects = tuple(f'static-{case}-{unit}.o' for unit in ('main', 'peer'))
+            for unit, obj in zip(('main', 'peer'), objects):
+                compile(static_members / case / f'{unit}.cpp', obj)
+                table = symbols(obj)
+                for name, binding in expected.items():
+                    assert table.get(name) == binding, (obj, name, table.get(name))
+            if case == 'strong-member':
+                run(ycxx, 'cxx', *objects, '-o', 'program', status=1, error='duplicate symbol __ZN7ProfileILj2EE5limitE')
+            else:
+                links(*objects)
+
+        compile(static_members / 'enum-nttp.cpp', 'static-enum.o')
+        table = symbols('static-enum.o')
+        for name, binding in (('__ZN14PrivateProfileILN12_GLOBAL__N_18LocalTagE11EE5limitE', ('non-external', True)),
+                              ('__ZN13PublicProfileIL9PublicTag29EE5limitE', weak)):
+            assert table.get(name) == binding, (name, table.get(name))
+        run(ycxx, 'cxx', 'static-enum.o', '-o', 'program')
+        run('./program')
+
 
 if __name__ == '__main__':
     main()

@@ -1209,6 +1209,10 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   no relocations or runtime work. A member whose owner or declared type names an unnamed namespace
   has local symbol binding.
   [#903](https://github.com/yrashk/ycxx/issues/903)
+- In-class `static constexpr` arithmetic members of class templates use the same coalescing
+  rules for initialized storage. Separate objects observe one address for each externally
+  linked specialization. An unnamed-namespace template argument keeps the member local.
+  [#1038](https://github.com/yrashk/ycxx/issues/1038)
 - Inline static integral, pointer, and supported floating-point members in ordinary
   namespace-scope classes without bases use constant direct-list and copy-list initialization.
   This also covers one-dimensional arrays of those types with a written bound. Omitted array
