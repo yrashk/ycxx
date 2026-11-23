@@ -411,6 +411,7 @@ enum class Diag : std::uint32_t {
   annotation_mixed_list [[=message{Severity::error, "annotations and ordinary attributes require separate attribute-specifiers"}]],
   exceptions_disabled [[=message{Severity::error, "cannot use '{0:k}' with exceptions disabled by '-fno-exceptions'"}]],
   rtti_disabled [[=message{Severity::error, "cannot use '{0:k}' with RTTI disabled by '-fno-rtti'"}]],
+  namespace_asm_directive [[=message{Severity::error, "namespace-scope constant asm requires one '.hidden SYMBOL' directive"}]],
 };
 
 // A `{N:r}` argument: why an evaluation was not constant. 0 is an expression the front end

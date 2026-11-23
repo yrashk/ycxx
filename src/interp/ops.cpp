@@ -410,7 +410,15 @@ struct Ops {
     if (constant(m) && !it->second.is_constexpr) return m.fail(Reason::not_constexpr);
     return m.enter(f, n, it->second.body, e, f.fn->operands_of(n).subspan(first_arg));
   }
-  static Flow call(M& m, Frame& f, N n) { return call_entity(m, f, n, EntityId(u32(imms(f, n)[0])), 1); }
+  static Flow call(M& m, Frame& f, N n) {
+    const EntityId callee{u32(imms(f, n)[0])};
+    if (m.byte_capture_ && n == m.byte_capture_->site && m.frames_.size() == 1 &&
+        callee == EntityId::none && constant(m)) {
+      const auto data_type = m.type_of(f, f.fn->operands_of(n)[2]);
+      return m.capture_bytes(m.operand(f, n, 1), m.operand(f, n, 2), data_type);
+    }
+    return call_entity(m, f, n, callee, 1);
+  }
   static Flow call_ind(M& m, Frame& f, N n) {
     Value c = m.operand(f, n, 1);
     if (c.kind == VKind::null) return m.fail(Reason::null_call);
