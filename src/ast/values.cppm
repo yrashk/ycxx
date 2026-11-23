@@ -170,11 +170,14 @@ enum class DepOp : u8 {
   is_implicit_lifetime,
   has_virtual_destructor,
   has_unique_object_representations,
+  reference_constructs_from_temporary,
+  reference_converts_from_temporary,
 };
 
 // A dependent operation (§5.5). The predicates take canonical qualified type operands.
-// The constructibility predicates take a target and an argument sequence,
-// `is_same`, `is_base_of`, assignability and convertibility take two operands. The other predicates take one.
+// The constructibility predicates take a target and an argument sequence. `is_same`,
+// `is_base_of`, assignability, convertibility and the `reference_*_from_temporary` predicates
+// take two types. The other type predicates take one.
 // `logical_not` takes one bool value operand, and `logical_and` takes two.
 struct [[=dependent]] VDepOp {
   DepOp op;

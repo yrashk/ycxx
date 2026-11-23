@@ -614,6 +614,8 @@ written default member initializer are value-initialized.
   Namespace-scope `constexpr` pointers to `void` can retain scalar and array element addresses.
   `__builtin_addressof`, used by libycxx's `std::addressof`, bypasses overloaded `operator&`.
   It supports runtime addresses and constant expressions such as a scalar global's address.
+  `__builtin_constant_p` reports whether it can prove a scalar or string operand constant
+  without executing it. [#1065](https://github.com/yrashk/ycxx/issues/1065)
   `__builtin_strlen`, used by libycxx's exception headers, scans character storage in constant
   expressions and native code. [#531](https://github.com/yrashk/ycxx/issues/531)
 - `extern "C"` functions from libSystem, including `printf` with integers, characters,
@@ -795,7 +797,8 @@ and a peer-owned virtual destructor and RTTI. This is the shape of libycxx's fun
 
 - Standard headers, starting with `<cstdio>` ([#133](https://github.com/yrashk/ycxx/issues/133)).
   The pinned library work includes scalar type traits in class-template bases and variable
-  templates, including object representation queries for narrow characters
+  templates, including narrow-character object representations and supported reference-temporary
+  queries
   ([#218](https://github.com/yrashk/ycxx/issues/218)).
 - ι: statements and declarations, the C++98/11 core: default arguments, block-scope statics,
   casts and arrays ([#337](https://github.com/yrashk/ycxx/issues/337)).

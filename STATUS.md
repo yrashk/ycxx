@@ -2375,8 +2375,11 @@ session's.*
 - `__reference_converts_from_temporary(T, U)` and `__reference_constructs_from_temporary(T, U)`
   tell whether a reference T initialized from VAL<U> binds to a temporary: a converted arithmetic
   value or a materialized prvalue, for arithmetic operands, void and reference-related classes
-  (`tests/own/builtins/reference_temporary.run.cpp`). Unrelated classes, which need user-defined
-  conversions, are diagnosed as not supported yet (#218).
+  (`tests/own/builtins/reference_temporary.run.cpp`). A supported class-template base or
+  variable-template initializer replays either dependent operand. Class definitions are
+  checked at the written expression for concrete queries and at demand for dependent
+  queries. Unrelated classes that need user-defined conversions get a diagnostic.
+  `__has_builtin` answers 0 while support is partial ([meta.unary.prop], [dcl.init.ref], #1064, #218).
 - `__is_base_of(Base, Derived)` ignores top-level cv. Nonclass and union operands give false.
   The same nonunion class gives true, including when incomplete. For distinct nonunion classes,
   `Derived` must be complete. The trait follows the recorded base declarations, including private
@@ -2443,6 +2446,17 @@ scan's reads indeterminately sequenced with the caller's other evaluations ([int
 and diagnoses reads past the end of an unterminated array in a required constant expression
 ([expr.const]). Native lowering requires no runtime `strlen` symbol. Fixtures in
 `tests/own/builtins/` cover detection, result type, argument checks, and constant and runtime scans.
+
+## GNU constantness probe (#1065)
+
+`__builtin_constant_p(e)` returns an `int` prvalue. It gives 1 when a supported scalar or
+string operand folds safely to a known value, including a known false expression. It gives
+0 when the proof is unavailable. Operand formation and exception checks use the written
+expression. Native execution and constant evaluation of the result leave the operand
+unevaluated. A dependent probe is resolved when its template body is instantiated.
+Calls to user functions and values from the active constexpr frame remain outside the
+proof domain. `__has_builtin` answers 0 while support is partial.
+[Issue #1065](https://github.com/yrashk/ycxx/issues/1065)
 
 ## Trap builtin (#548)
 

@@ -2462,6 +2462,7 @@ std::optional<NodeId> AtItem::replay_default_member(sema::Sema& caller, EntityId
   }
   replay.check_immediate_addresses(root, init.begin);
   auto check = [&](this const auto& self, const ast::Red& node) -> void {
+    if (node.is<ast::ConstantProbe>()) return;
     if (node.is<ast::DefaultMemberInit>()) return;  // a nested replay checked this child
     if (node.is<ast::Throw>()) {
       replay.diag(node.offset(), Diag::not_supported, Tk::kw_throw);
@@ -10885,7 +10886,7 @@ const Program::Instance* Program::instance(EntityId spec, u32 point) {
 
 // The entities a tree names, in tree order.
 void Program::references(NodeId n, std::vector<EntityId>& out) const {
-  if (n == NodeId::none) return;
+  if (n == NodeId::none || w_->ins.ast.is<ast::ConstantProbe>(n)) return;
   ast::dispatch<ast::Nodes>(ast::kind_of(n), [&]<class T>(std::type_identity<T>) {
     T v = w_->ins.ast.get<T>(n);
     ast::for_each_ref(v, [&]<class H>(H& h) {
