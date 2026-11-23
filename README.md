@@ -475,7 +475,8 @@ written default member initializer are value-initialized.
   template parameters, concepts and requires-expressions (including `{ e } noexcept;`) in overload
   resolution and in choosing partial specializations, including
   explicit trailing type packs in ordinary constrained function overloads. Directly named
-  non-dependent primary class specializations with explicit type arguments check constraints.
+  non-dependent primary class specializations with explicit type or value arguments check
+  constraints. [#908](https://github.com/yrashk/ycxx/issues/908)
   Class templates and class partial specializations accept parenthesized requires-clause
   operands joined by `&&` or `||`.
   Non-template code outside requires-expression bodies also checks constraints on directly named
@@ -602,6 +603,9 @@ multicharacter-literal warning. [#1014](https://github.com/yrashk/ycxx/issues/10
 `ycxx -dumpmachine` prints the selected target triple and `ycxx -print-file-name=include` prints
 its compiler resource include directory. Both accept `--target` and run without a project.
 [#970](https://github.com/yrashk/ycxx/issues/970)
+
+`-ftrivial-auto-var-init=uninitialized` explicitly selects the default automatic-variable
+initialization behavior. [#1015](https://github.com/yrashk/ycxx/issues/1015)
 
 **Incremental builds through a resident daemon.** `ycxx cxx` hands its work to a per-project
 `ycxx daemon` (`YCXX_NO_DAEMON=1` runs in-process), which watches the files it has read and keeps

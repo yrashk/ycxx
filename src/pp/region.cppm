@@ -251,6 +251,9 @@ struct Region {
   std::optional<u32> first_visibility_pragma;
   // A Clang attribute pragma can attach ABI attributes without changing declaration tokens.
   bool has_clang_attribute_pragma = false;
+  // Physical inputs in first-read order, starting with the main file. Separate from the
+  // location table, which can contain presumed names and omit inputs that produced no tokens.
+  std::vector<std::string> dependencies;
   bool operator==(const Region&) const = default;
 
   std::size_t size() const { return tokens.size(); }

@@ -1,4 +1,6 @@
 # Process-level daemon tests (docs/design/daemon.md §8.2). #98 grows this suite.
+add_test(NAME daemon.auto_var_init
+  COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/auto_var_init.py $<TARGET_FILE:ycxxc>)
 add_test(NAME daemon.compare COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/compare.py $<TARGET_FILE:ycxxc> ${PROJECT_SOURCE_DIR}/tests/own)
 add_test(NAME daemon.no_rtti
   COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/no_rtti.py
@@ -25,6 +27,14 @@ add_test(NAME daemon.nostdincxx
 add_test(NAME daemon.nostdinc
   COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/nostdinc.py
           $<TARGET_FILE:ycxxc> ${PROJECT_SOURCE_DIR}/resources/linux/include)
+if(CMAKE_GENERATOR MATCHES "^Ninja")
+  set(YCXX_DEPFILE_TEST_NINJA "${CMAKE_MAKE_PROGRAM}")
+else()
+  find_program(YCXX_DEPFILE_TEST_NINJA NAMES ninja ninja-build)
+endif()
+add_test(NAME daemon.depfiles
+  COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/depfiles.py
+          $<TARGET_FILE:ycxxc> "${YCXX_DEPFILE_TEST_NINJA}")
 add_test(NAME daemon.no_exceptions
   COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/no_exceptions.py
           $<TARGET_FILE:ycxxc> ${PROJECT_SOURCE_DIR}/deps/libycxx "${CMAKE_READELF}")

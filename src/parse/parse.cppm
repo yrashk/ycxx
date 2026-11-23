@@ -8663,12 +8663,25 @@ public:
         s_.declare_local(prm.name, ty ? *ty : prm.type, sema::local_flag::parameter, 0, false);
       }
     // A value argument without a type of its own has its parameter's, substituted
-    // ([temp.arg.nontype]).
-    for (const auto& head : s_.template_scopes)
-      if (!head.empty() && head[0].depth == atom_.depth)
-        for (std::size_t i = 0; i < head.size() && i < s_.template_args.levels[atom_.depth].size(); ++i)
-          if (auto& a = s_.template_args.levels[atom_.depth][i]; a && a->kind == ast::TemplateArgKind::value && a->type == QualType{})
-            if (auto ty = t.substitute(head[i].type, s_.template_args); ty && !s_.types().is_dependent(*ty)) a->type = *ty;
+    // ([temp.arg.nontype]). Verify enum conversions after a dependent mapping becomes concrete.
+    for (const auto& head : s_.template_scopes) {
+      if (head.empty() || head[0].depth != atom_.depth) continue;
+      auto& mapped = s_.template_args.levels[atom_.depth];
+      for (std::size_t i = 0; i < head.size() && i < mapped.size(); ++i) {
+        auto& arg = mapped[i];
+        if (!arg || arg->kind != ast::TemplateArgKind::value) continue;
+        auto type = t.substitute(head[i].type, s_.template_args);
+        if (!type || s_.types().is_dependent(*type)) continue;
+        if (s_.types().is_enum(*type) || (ins.values.is<ast::VInt>(arg->value) && s_.types().is_enum(arg->type))) {
+          if (!ins.values.is<ast::VInt>(arg->value)) return false;
+          auto converted = t.converted_value(*arg, *type);
+          if (!converted) return false;
+          arg = *converted;
+        } else if (arg->type == QualType{}) {
+          arg->type = *type;
+        }
+      }
+    }
     Ex e = ps_.expression();
     bool failed = !e.ok() || !ps_.at_end();
     for (const engine::Diagnostic& d : sink_) {

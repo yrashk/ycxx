@@ -50,6 +50,7 @@ struct BuildKey {
   std::vector<TuId> units;
   Until until = Until::link;
   ProgramId program{};  // with `link`
+  bool want_dependencies = false;
   bool operator==(const BuildKey&) const = default;
 };
 // A request, numbered by the registry (`Session::request`): a key holds no vector.
@@ -69,6 +70,7 @@ struct UnitBuilt {
   bool front_failed = false;
   std::optional<obj::object> object;  // with `object` or `link`, when the back end succeeded
   std::vector<Message> errors;  // the back end's
+  std::vector<std::string> dependencies;  // with `want_dependencies`, when the back end succeeded
 };
 struct Built {
   std::vector<UnitBuilt> units;
@@ -462,6 +464,10 @@ engine::query_task<Built> Build::run(engine::Ctx& cx, RequestId r) {
       const TuValue& v = tus[j++];
       UnitBuilt& u = out.units[i];
       u.object = v.object;
+      if (k.want_dependencies && u.object) {
+        const pp::Region& region = co_await cx.fetch<pp::Pp>(pp::FileId{k.units[i].n});
+        u.dependencies = region.dependencies;
+      }
       all = all && v.object.has_value();
       for (const BackError& e : v.errors) {
         if (e.source) u.errors.push_back({e.source->offset, true, e.message, e.source->where});
