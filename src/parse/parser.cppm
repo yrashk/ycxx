@@ -2919,6 +2919,7 @@ public:
       s_->truncate_diags(n);
     }
     u32 begin = pos();
+    const sema::Sema::ConstraintAtomScope atom{*s_};
     Ex e = primaries ? primary_expression() : binary_expression(3);
     (void)e;
     // The template parameters the expression names: its parameter mapping's ([temp.constr.atomic]/1).

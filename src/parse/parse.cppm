@@ -2136,10 +2136,14 @@ public:
     // A generic lambda's specialization outside any template: a trait whose operands were
     // dependent in its body is answered at the end, as a function template's instantiation is.
     if (generic_at_end && dependent_type_trait_operand(loc)) return p_->is_complete(c, p_->end(), true, true);
+    // An atomic constraint whose operands were dependent where it is written: where its
+    // satisfaction is checked ([temp.constr.atomic]).
+    if (satisfying_atom && dependent_type_trait_operand(loc)) return p_->is_complete(c, point(), true, true);
     if (!replaying_type_trait_operand(loc)) return std::nullopt;
     return p_->is_complete(c, *type_trait_demand, true, true);
   }
   bool generic_at_end = false;
+  bool satisfying_atom = false;
   bool type_trait_instantiation_failed(EntityId e) override {
     const bool failed = p_->failed_type_trait_instantiations_.contains(e);
     observed_type_trait_failure |= failed;
@@ -9058,6 +9062,7 @@ public:
         s_(p.world(), b_, q_, sink_, a.item, a.begin), ps_(p.region(), it_->begin + a.begin, it_->begin + a.end, s_), atom_(a) {
     ps_.set_questions(q_);
     q_.at_point = point;
+    q_.satisfying_atom = true;
     q_.instantiation_calls = p.world().ins.seqs.elements(a.calls);
   }
 
