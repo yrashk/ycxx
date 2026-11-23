@@ -2,15 +2,14 @@
 int observed;
 struct Result {
   int value;
-  Result(int seed) : value(seed) {}
-  Result& operator[](int amount) { value += amount; return *this; }
   void mark() const { observed = value; }
 };
-struct Traits { using type = Result; };
-template<class T> void check(int seed) {
+struct Traits { using type = Result*; };
+template<class T> void check(Result* seed) {
   typename T::type(seed)[1].mark();
 }
 int main() {
-  check<Traits>(4);
+  Result values[] = {{4}, {5}};
+  check<Traits>(values);
   return observed != 5;
 }
