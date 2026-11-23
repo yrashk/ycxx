@@ -261,6 +261,13 @@ with tempfile.TemporaryDirectory() as directory:
             namespace site {
               template<class T> concept Wide = sizeof(T) > 1;
             }
+            struct Deployment {
+              constexpr int requested(bool wide) const { return wide ? 2 : 1; }
+            };
+            consteval Deployment load_deployment() {
+              Deployment deployment{};
+              return deployment;
+            }
             struct RequestedLimit {
               int requested;
               int capped = requested < 4 ? requested : 4;
@@ -271,7 +278,7 @@ with tempfile.TemporaryDirectory() as directory:
             }
             constexpr int uses = 1;
             template<bool Wide> struct Profile {
-              static constexpr int uses = request_limit(Wide ? 2 : 1).capped;
+              static constexpr int uses = request_limit(load_deployment().requested(Wide)).capped;
             };
             template<class Payload> struct NativeConfig : Profile<site::Wide<Payload>> {};
             struct Active : NativeConfig<int> { static constexpr int limit = uses; };
