@@ -206,6 +206,7 @@ public:
   // specialization's static data member, which instantiates its initializer ([temp.inst]/3).
   // The declaration of template `t` here: its head and, for an alias template, its type.
   virtual std::optional<ast::DeclSema> template_decl(EntityId /*t*/) { return std::nullopt; }
+  virtual std::optional<ast::DeclSema> replay_function_decl(EntityId function) { return template_decl(function); }
   virtual bool value_dependent_member(EntityId /*v*/) { return false; }
   // False when its initializer was in error, which was reported: what uses it says nothing more.
   virtual bool use_static_member(EntityId /*v*/) { return true; }
@@ -3808,7 +3809,7 @@ public:
   }
 
   std::optional<TemplateArg> evaluate_dependent_call(EntityId function, std::span<const TemplateArg> args, u32 at) {
-    auto decl = q_->template_decl(function);
+    auto decl = q_->replay_function_decl(function);
     if (!decl || !(decl->flags & decl_flag::consteval_)) return std::nullopt;
     Ex callee = decls_expr({*decl}, false, w_->entities.rec(function).name, at, at);
     std::vector<Ex> operands;

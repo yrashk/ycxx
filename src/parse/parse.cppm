@@ -1129,6 +1129,21 @@ public:
       if (k <= item) r = completed_declaration(d);
     return r;
   }
+  std::optional<ast::DeclSema> replay_function_decl(EntityId e) {
+    ensure_declared(e, end());
+    auto found = decls_.find(std::to_underlying(e));
+    if (found == decls_.end()) return std::nullopt;
+    // The entity index records declarations while their item is being built.
+    // Replay must read the parameter and default-argument handles from the committed item.
+    for (const auto& [item, indexed] : found->second | std::views::reverse) {
+      if (!item_cells_[item]) continue;
+      auto declarations = w_->ins.seqs.elements(item_cells_[item]->value.decls);
+      for (const auto& decl : declarations | std::views::reverse)
+        if (decl.entity == indexed.entity && decl.kind == ast::DeclKind::function)
+          return completed_declaration(decl);
+    }
+    return std::nullopt;
+  }
   bool inline_declared(EntityId entity, u32 item) {
     ensure_declared(entity, item);
     const auto declarations = decls_.find(std::to_underlying(entity));
@@ -2090,6 +2105,9 @@ public:
   bool satisfaction_failed(ConstId c) override { return p_->satisfaction_failed(c); }
   bool value_dependent_member(EntityId v) override { return p_->is_value_dependent_member(v); }
   std::optional<ast::DeclSema> template_decl(EntityId t) override;
+  std::optional<ast::DeclSema> replay_function_decl(EntityId function) override {
+    return p_->replay_function_decl(function);
+  }
   bool use_static_member(EntityId v) override {
     p_->use_member(v);
     return !p_->member_failed(v);
@@ -2723,6 +2741,9 @@ public:
   bool satisfaction_failed(ConstId c) override { return p_->satisfaction_failed(c); }
   bool value_dependent_member(EntityId v) override { return p_->is_value_dependent_member(v); }
   std::optional<ast::DeclSema> template_decl(EntityId t) override { return at_.template_decl(t); }
+  std::optional<ast::DeclSema> replay_function_decl(EntityId function) override {
+    return at_.replay_function_decl(function);
+  }
   bool use_static_member(EntityId v) override {
     p_->use_member(v);
     return !p_->member_failed(v);
