@@ -25,6 +25,7 @@ struct GroupMessage {
   bool error = true;
   std::string text;
   engine::Loc at;
+  bool depth_limit = false;  // [temp.inst]/16's limit, which a unit reports once
 };
 struct GroupResult {
   std::vector<GroupMessage> messages;
@@ -311,7 +312,7 @@ engine::query_task<SemaResult> TuSema::run(engine::Ctx& cx, TuId tu) {
       for (const engine::DiagArg& a : d.args) args.push_back(a.raw);
       r.messages.push_back({sema::message_of(*kind).severity == lex::Severity::error,
                             sema::render(*kind, args, [&](char how, std::uint64_t raw) { return program.spell(how, raw); }),
-                            d.at});
+                            d.at, *kind == sema::Diag::instantiation_depth});
     }
     // The unit's own records of its classes and enumerations (#115).
     const sema::Classes& classes = program.classes();
@@ -389,11 +390,16 @@ engine::query_task<SemaResult> TuSema::run(engine::Ctx& cx, TuId tu) {
   };
   // Puts a group's result into the unit's, in group order: each entity and shape once, and each
   // message an earlier group did not say (an instance two groups made); a group's own repeated
-  // messages stay, as the whole unit's Program says them.
+  // messages stay, as the whole unit's Program says them. The instantiation-depth limit is said
+  // once per unit, by the first group that reaches it, as the whole unit's Program says it (#993).
   std::set<std::tuple<std::uint32_t, std::uint32_t, bool, std::string>> said;
+  bool depth_said = false;
   auto merge = [&](const GroupResult& r) {
     std::set<std::tuple<std::uint32_t, std::uint32_t, bool, std::string>> here;
+    bool depth_here = false;
     for (const GroupMessage& m : r.messages) {
+      if (m.depth_limit && depth_said) continue;
+      depth_here = depth_here || m.depth_limit;
       std::tuple key{m.at.item, m.at.offset, m.error, m.text};
       if (said.contains(key)) continue;
       here.insert(std::move(key));
@@ -402,6 +408,7 @@ engine::query_task<SemaResult> TuSema::run(engine::Ctx& cx, TuId tu) {
       out.messages.push_back({m.error, m.text, static_cast<std::uint32_t>(token)});
     }
     said.merge(here);
+    depth_said = depth_said || depth_here;
     for (const auto& [e, at] : r.declared)
       if (declared_seen.insert(std::to_underlying(e)).second) out.declared.emplace_back(e, at);
     out.bodies.insert(out.bodies.end(), r.bodies.begin(), r.bodies.end());

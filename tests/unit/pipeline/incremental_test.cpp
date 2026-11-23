@@ -721,6 +721,47 @@ void too_deep() {
   check(s.get<pl::Link>(program).image == cold(v0), "the session goes on after a too-deep unit");
 }
 
+// [temp.inst]/16's limit is reported once per unit, by the first instantiation to reach it, whether
+// the unit is analysed a group at a time or whole (a `virtual` makes it whole, #947), cold or after
+// edits; the other messages are the same both ways (#993).
+void depth_limit_once() {
+  pp::Config config;
+  config.template_depth = 7;
+  const std::string first = "template<int N> struct First { static constexpr int value = First<N+1>::value; };\n"
+                            "int first = First<1>::value;\n";
+  const std::string fixed = "template<int N> struct First { static constexpr int value = N; };\n"
+                            "int first = First<1>::value;\n";
+  const std::string second = "template<int N> struct Second { static constexpr int value = Second<N+1>::value; };\n"
+                             "int second = Second<1>::value;\n";
+  const std::string whole = "struct Whole { virtual void f() {} };\n";
+  auto messages = [&](pl::Session& s, const std::string& text) {
+    s.set_source(tu, "depth.cpp", text, "depth.o", {}, config);
+    std::vector<std::string> texts;
+    for (const pl::Message& m : s.get<pl::TuFront>(tu).messages) texts.push_back(m.text);
+    return texts;
+  };
+  auto cold_messages = [&](const std::string& text) {
+    pl::Session s;
+    return messages(s, text);
+  };
+  auto depth = [](const std::vector<std::string>& texts) {
+    return std::ranges::count_if(texts, [](const std::string& t) { return t.contains("nest more than 7 deep"); });
+  };
+  const auto grouped = cold_messages(first + second), whole_unit = cold_messages(first + second + whole);
+  check(depth(grouped) == 1, "grouped: the depth limit is reported once");
+  check(depth(whole_unit) == 1, "whole: the depth limit is reported once");
+  check(grouped == whole_unit, "grouped and whole analysis say the same messages");
+  pl::Session s;
+  check(messages(s, first + second) == grouped, "a session's first build equals cold");
+  check(messages(s, first + second + "int third = 3;\n") == cold_messages(first + second + "int third = 3;\n") &&
+            depth(messages(s, first + second + "int third = 3;\n")) == 1,
+        "an unrelated edit: still once, as cold");
+  const auto only_second = messages(s, fixed + second);
+  check(depth(only_second) == 1 && only_second == cold_messages(fixed + second),
+        "the first family fixed: the second's reused group reports it, as cold");
+  check(depth(messages(s, first + second)) == 1, "the first family back: once again");
+}
+
 }  // namespace
 
 int main() {
@@ -737,5 +778,6 @@ int main() {
   bit_fields();
   unnamed_union_members();
   too_deep();
+  depth_limit_once();
   return ycxx::unit::result("unit.pipeline_incremental");
 }
