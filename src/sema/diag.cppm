@@ -418,6 +418,8 @@ enum class Diag : std::uint32_t {
   standard_layout_unsupported [[=message{Severity::error, "'__is_standard_layout' for '{0:t}' is not supported yet"}]],
   implicit_lifetime_incomplete [[=message{Severity::error, "incomplete type '{0:t}' cannot be queried by '__builtin_is_implicit_lifetime'"}]],
   implicit_lifetime_unsupported [[=message{Severity::error, "'__builtin_is_implicit_lifetime' for '{0:t}' is not supported yet"}]],
+  unique_object_representations_incomplete [[=message{Severity::error, "incomplete type '{0:t}' cannot be queried by '__has_unique_object_representations'"}]],
+  unique_object_representations_unsupported [[=message{Severity::error, "'__has_unique_object_representations' for '{0:t}' is not supported yet"}]],
 };
 
 // A `{N:r}` argument: why an evaluation was not constant. 0 is an expression the front end
@@ -488,7 +490,9 @@ constexpr bool is_type_trait_failure(engine::DiagId id) {
          id == diag_id(Diag::destructibility_incomplete) || id == diag_id(Diag::destructibility_unsupported) ||
          id == diag_id(Diag::virtual_class_trait_incomplete) || id == diag_id(Diag::standard_layout_incomplete) ||
          id == diag_id(Diag::standard_layout_unsupported) || id == diag_id(Diag::implicit_lifetime_incomplete) ||
-         id == diag_id(Diag::implicit_lifetime_unsupported);
+         id == diag_id(Diag::implicit_lifetime_unsupported) ||
+         id == diag_id(Diag::unique_object_representations_incomplete) ||
+         id == diag_id(Diag::unique_object_representations_unsupported);
 }
 // Whether a diagnostic stays an error where a substitution failure means "not satisfied": a limit
 // of ycxx's, an atomic constraint that is not a `bool` constant ([temp.constr.atomic]/3), or a
@@ -502,7 +506,8 @@ constexpr bool survives_substitution(engine::DiagId id) {
          id == diag_id(Diag::constructibility_incomplete) || id == diag_id(Diag::base_of_incomplete) ||
          id == diag_id(Diag::empty_incomplete) || id == diag_id(Diag::convertibility_incomplete) ||
          id == diag_id(Diag::destructibility_incomplete) || id == diag_id(Diag::virtual_class_trait_incomplete) ||
-         id == diag_id(Diag::standard_layout_incomplete) || id == diag_id(Diag::implicit_lifetime_incomplete);
+         id == diag_id(Diag::standard_layout_incomplete) || id == diag_id(Diag::implicit_lifetime_incomplete) ||
+         id == diag_id(Diag::unique_object_representations_incomplete);
 }
 
 constexpr std::string_view diag_name(Diag d) {

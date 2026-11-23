@@ -789,6 +789,9 @@ and a peer-owned virtual destructor and RTTI. This is the shape of libycxx's fun
 ### In progress
 
 - Standard headers, starting with `<cstdio>` ([#133](https://github.com/yrashk/ycxx/issues/133)).
+  The pinned library work includes scalar type traits in class-template bases and variable
+  templates, including object representation queries for narrow characters
+  ([#218](https://github.com/yrashk/ycxx/issues/218)).
 - ι: statements and declarations, the C++98/11 core: default arguments, block-scope statics,
   casts and arrays ([#337](https://github.com/yrashk/ycxx/issues/337)).
 - `auto` and lambdas ([#278](https://github.com/yrashk/ycxx/issues/278)): placeholder types,

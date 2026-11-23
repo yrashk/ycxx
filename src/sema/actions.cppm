@@ -1472,6 +1472,57 @@ public:
     return fail(Diag::implicit_lifetime_unsupported, operand);
   }
 
+  // Array operands query the innermost element, even when an extent is unknown
+  // ([meta.unary.prop]). Completeness is checked before looking for representation facts.
+  Ex unique_object_representations_expr(QualType operand, u32 begin, u32 end) {
+    const Types& ts = types();
+    const QualType type = ts.canonical(operand);
+    const engine::Loc loc = type_trait_loc(begin);
+    const auto fail = [&](Diag d, QualType reported) -> Ex {
+      diag_at(loc, d, reported);
+      return {NodeId::none, begin, end};
+    };
+    if (ts.is_dependent(type)) {
+      if (q_->in_type_trait_pattern())
+        if (auto value = templates().unary_trait_value(ast::DepOp::has_unique_object_representations, type)) {
+          q_->record_dependent_type_trait_operand(loc);
+          return literal(builtin(Builtin::bool_), *value, ValueCategory::prvalue, begin, end);
+        }
+      return fail(Diag::unique_object_representations_unsupported, operand);
+    }
+    const QualType element = ts.innermost_array_element(type);
+    if (ts.is_reference(element) || ts.is_function(element) || ts.is_void(element))
+      return bool_literal(false, begin, end);
+    if (ts.is_class(element)) {
+      const EntityId cls = ts.class_of(element);
+      const auto demand = q_->type_trait_at_demand(cls, loc);
+      if (!(demand ? *demand : q_->is_complete_at_source(cls))) {
+        if (q_->type_trait_instantiation_failed(cls)) return {NodeId::none, begin, end};
+        return fail(Diag::unique_object_representations_incomplete, element);
+      }
+    } else if (ts.is_enum(element)) {
+      const EntityId e = ts.enum_of(element);
+      if (auto fixed = q_->defining_enum_is_fixed(e)) {
+        if (!*fixed) return fail(Diag::unique_object_representations_incomplete, element);
+      } else if (const EnumRec* record = classes().find_enum(e); record && !record->fixed && !record->defined) {
+        return fail(Diag::unique_object_representations_incomplete, element);
+      }
+    } else if (auto b = ts.builtin_of(element)) {
+      using enum Builtin;
+      // Each bit pattern of a narrow character type represents a distinct value ([basic.fundamental]).
+      if (*b == char_ || *b == signed_char || *b == unsigned_char || *b == char8_t_)
+        return bool_literal(true, begin, end);
+      if (ast::is_standard_floating(*b)) {
+        const ast::FloatFormat format = w_->target[*b].format;
+        // These formats encode positive and negative zero differently.
+        if (format == ast::FloatFormat::binary32 || format == ast::FloatFormat::binary64 ||
+            format == ast::FloatFormat::x87_extended)
+          return bool_literal(false, begin, end);
+      }
+    }
+    return fail(Diag::unique_object_representations_unsupported, operand);
+  }
+
   // In this domain every destructible type has trivial, nonthrowing destruction ([meta.unary.prop]).
   Ex destructibility_expr(ast::DepOp op, NameId name, QualType operand, u32 begin, u32 end) {
     const Types& ts = types();
@@ -1991,6 +2042,7 @@ public:
     switch (t) {
     case is_same: return structural_trait(templates().is_same_value(args[0], args[1]));
     case is_implicit_lifetime: return implicit_lifetime_expr(args[0], begin, end);
+    case has_unique_object_representations: return unique_object_representations_expr(args[0], begin, end);
     case is_destructible: return destructibility_expr(ast::DepOp::is_destructible, name, args[0], begin, end);
     case is_nothrow_destructible:
       return destructibility_expr(ast::DepOp::is_nothrow_destructible, name, args[0], begin, end);
