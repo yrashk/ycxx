@@ -440,8 +440,43 @@ bool root_destructor_body_supported(parse::Program& program, EntityId cls, const
   return arguments.size() == 1 && tree.is<ast::This>(arguments.front().id);
 }
 
-ast::BodySema deleting_root_destructor_body(sema::World& world, const FunctionDef& complete,
-                                           const ast::DeclSema& deallocator) {
+EntityId destructor_variant(sema::World& world, EntityId complete, sema::EntityKind kind) {
+  const auto& d = world.entities.rec(complete);
+  return world.entities.entity({.kind = kind, .name = d.name, .type = d.type, .scope = d.scope});
+}
+
+bool lower_derived_destructor_body(sema::World& world, FunctionDef& complete,
+                                  const parse::Program::DerivedVirtualDestructor& layout, EntityId base_entry) {
+  const auto& tree = world.ins.ast;
+  const auto& body = complete.body;
+  if (!complete.this_type || body.tree == ast::NodeId::none || !tree.is<ast::Destructor>(body.tree) ||
+      world.ins.seqs.size(body.locals) != 0 || world.ins.seqs.size(body.closures) != 0) return false;
+  const auto destructor = tree.get<ast::Destructor>(body.tree);
+  if (!tree.is<ast::Compound>(destructor.body.id) ||
+      !tree.children(tree.get<ast::Compound>(destructor.body.id).stmts).empty()) return false;
+  const auto members = tree.children(destructor.members);
+  if (members.size() != 1 || !tree.is<ast::DestroyMember>(members.front().id)) return false;
+  const auto base = tree.get<ast::DestroyMember>(members.front().id);
+  const auto base_type = world.types.class_type(layout.base);
+  if (base.field != ~std::uint32_t{0} || base.destructor != layout.base_destructor ||
+      world.types.canonical(base.type) != world.types.canonical(base_type)) return false;
+
+  // The only epilogue operation is a direct D2 call on the certified offset-zero primary base.
+  ast::Builder b(world.ins);
+  const auto prvalue = [](QualType type) { return ast::ExprInfo{type, ast::ValueCategory::prvalue, 0}; };
+  const ast::Child receiver{b.add(ast::This{prvalue(*complete.this_type)}, 0), 0};
+  const ast::Child address{b.add(ast::ImplicitConversion{prvalue(world.types.pointer(base_type)),
+      ast::ConversionKind::pointer, EntityId::none, receiver}, 0), 0};
+  const auto void_type = world.types.builtin(sema::Builtin::void_);
+  const ast::Child destroy{b.add(ast::MemberCall{prvalue(void_type), base_entry, address, b.list({})}, 0), 0};
+  const ast::Child epilogue{b.add(ast::ExprStmt{destroy}, 0), 0};
+  const ast::Child compound{b.add(ast::Compound{b.list({epilogue})}, 0), 0};
+  complete.body.tree = b.commit(ast::Child{b.add(ast::Destructor{compound, b.list({})}, 0), 0}).id;
+  return true;
+}
+
+ast::BodySema deleting_destructor_body(sema::World& world, const FunctionDef& complete,
+                                      const ast::DeclSema& deallocator, std::uint64_t object_size) {
   ast::Builder b(world.ins);
   const auto prvalue = [](QualType type) { return ast::ExprInfo{type, ast::ValueCategory::prvalue, 0}; };
   const auto void_type = world.types.builtin(sema::Builtin::void_);
@@ -450,8 +485,7 @@ ast::BodySema deleting_root_destructor_body(sema::World& world, const FunctionDe
   const ast::Child destroy{b.add(ast::MemberCall{prvalue(void_type), complete.entity, receiver, b.list({})}, 0), 0};
   const ast::Child address{b.add(ast::ImplicitConversion{prvalue(world.types.pointer(void_type)),
       ast::ConversionKind::pointer, EntityId::none, receiver}, 0), 0};
-  // [Itanium ABI §2.4]: the certified fieldless root has only the primary vptr.
-  const ast::Child size{b.add(ast::Literal{prvalue(size_type), world.values.integer(size_type, world.target.pointer_size)}, 0), 0};
+  const ast::Child size{b.add(ast::Literal{prvalue(size_type), world.values.integer(size_type, object_size)}, 0), 0};
   const ast::Child callee{b.add(ast::DeclRef{{deallocator.type, ast::ValueCategory::lvalue, 0}, deallocator.entity}, 0), 0};
   const ast::Child release{b.add(ast::Call{prvalue(void_type), deallocator.entity, callee, b.list({address, size})}, 0), 0};
   const ast::Child statements[] = {{b.add(ast::ExprStmt{destroy}, 0), 0}, {b.add(ast::ExprStmt{release}, 0), 0}};
@@ -922,6 +956,7 @@ bool native_virtual_layouts(TranslationUnit& tu, parse::Program& program, sema::
                             const std::set<EntityId>& uncertain_layouts) {
   const auto& classes = program.classes();
   std::set<EntityId> automatic_primary_bases;
+  std::set<EntityId> derived_destructor_classes;
   if (classes.has_virtual_layouts()) {
     for (EntityId c : classes.classes()) {
       const auto& record = classes.rec(c);
@@ -936,6 +971,21 @@ bool native_virtual_layouts(TranslationUnit& tu, parse::Program& program, sema::
         if (*key != EntityId::none)
           tu.owned_virtual_table = OwnedVirtualTable{sema::virtual_table_entity(world, c), {*key}, base};
         automatic_primary_bases.insert(base);
+      }
+      if (const auto destructor = program.derived_virtual_destructor_ownership(c)) {
+        if ((destructor->owns_derived_key && tu.owned_virtual_table) ||
+            uncertain_layouts.contains(c) || uncertain_layouts.contains(destructor->base) ||
+            uncertain_layouts.contains(destructor->destructor) || uncertain_layouts.contains(destructor->base_destructor)) {
+          block_virtual_emission(tu, program, record);
+          return false;
+        }
+        derived_destructor_classes.insert(c);
+        derived_destructor_classes.insert(destructor->base);
+        if (destructor->owns_derived_key) {
+          const auto deleting = destructor_variant(world, destructor->destructor, sema::EntityKind::deleting_destructor);
+          tu.owned_virtual_table = OwnedVirtualTable{sema::virtual_table_entity(world, c),
+                                                     {destructor->destructor, deleting}, destructor->base, true};
+        }
       }
     }
   }
@@ -959,6 +1009,7 @@ bool native_virtual_layouts(TranslationUnit& tu, parse::Program& program, sema::
     const auto& record = classes.rec(c);
     if (!record.layout_requires_virtual_support) continue;
     if (record.peer_automatic_primary_base != EntityId::none || automatic_primary_bases.contains(c)) continue;
+    if (derived_destructor_classes.contains(c)) continue;
     if (!uncertain_layouts.contains(c) && program.peer_root_destructor_producer(c)) continue;
     // Check the full unit even if a pure call was admitted before a later redeclaration.
     if (!uncertain_layouts.contains(c) && program.peer_pure_dispatch(c)) continue;
@@ -1117,10 +1168,12 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
                            : r.kind == sema::EntityKind::constructor  ? Special::constructor
                            : r.kind == sema::EntityKind::destructor ? Special::destructor
                            : r.kind == sema::EntityKind::deleting_destructor ? Special::deleting_destructor
+                           : r.kind == sema::EntityKind::base_object_destructor ? Special::base_object_destructor
                                                                     : Special::none});
     Entity& emitted = tu.entities.back();
     emitted.asm_label = program.asm_label(e);
-    if (emitted.special == Special::destructor || emitted.special == Special::deleting_destructor) {
+    if (emitted.special == Special::destructor || emitted.special == Special::deleting_destructor ||
+        emitted.special == Special::base_object_destructor) {
       if (const auto* owner = classes.find(r.scope))
         emitted.nonthrowing = owner->destructor_noexcept.value_or(false);
     } else if (fn) {
@@ -1236,9 +1289,26 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
       if (body.deduced) d.type = body.deduced_type;
       tu.functions.push_back({d.entity, d, body, program.id(k), it.body_begin - it.begin, program.this_type(d)});
       const auto& entity = world.entities.rec(d.entity);
-      if (entity.kind == sema::EntityKind::destructor && d.is_virtual &&
-          program.peer_root_destructor_producer(entity.scope)) {
-        if (!root_destructor_body_supported(program, entity.scope, body)) {
+      const bool virtual_destructor = entity.kind == sema::EntityKind::destructor && d.is_virtual;
+      const auto derived = virtual_destructor ? program.derived_virtual_destructor_ownership(entity.scope) : std::nullopt;
+      const bool derived_producer = derived && derived->owns_derived_key;
+      if (virtual_destructor && (derived_producer || program.peer_root_destructor_producer(entity.scope))) {
+        auto& complete = tu.functions.back();
+        const ast::Loc location{complete.item, complete.body_offset};
+        std::uint64_t object_size = world.target.pointer_size;
+        if (derived_producer) {
+          const auto base_entry = destructor_variant(world, derived->base_destructor, sema::EntityKind::base_object_destructor);
+          if (!lower_derived_destructor_body(world, complete, *derived, base_entry)) {
+            block_virtual_emission(tu, program, classes.rec(entity.scope));
+            return tu;
+          }
+          ast::DeclSema imported{};
+          imported.kind = ast::DeclKind::function;
+          imported.entity = base_entry;
+          imported.type = world.entities.rec(base_entry).type;
+          declare(imported, location);
+          object_size = derived->size;
+        } else if (!root_destructor_body_supported(program, entity.scope, body)) {
           block_virtual_emission(tu, program, classes.rec(entity.scope));
           return tu;
         }
@@ -1251,15 +1321,12 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
           block_virtual_emission(tu, program, classes.rec(entity.scope));
           return tu;
         }
-        auto& complete = tu.functions.back();
-        complete.root_destructor_table = sema::virtual_table_entity(world, entity.scope);
+        complete.destructor_table = sema::virtual_table_entity(world, entity.scope);
         tu.base_object_variants.insert(complete.entity);
         ast::DeclSema deleting = d;
-        deleting.entity = world.entities.entity({.kind = sema::EntityKind::deleting_destructor,
-                                                .name = entity.name, .type = d.type, .scope = entity.scope});
-        const ast::Loc location{complete.item, complete.body_offset};
+        deleting.entity = destructor_variant(world, complete.entity, sema::EntityKind::deleting_destructor);
         declare(deleting, location);
-        tu.functions.push_back({deleting.entity, deleting, deleting_root_destructor_body(world, complete, *root_deallocator),
+        tu.functions.push_back({deleting.entity, deleting, deleting_destructor_body(world, complete, *root_deallocator, object_size),
                                 location.item, location.offset, complete.this_type});
         continue;
       }
@@ -1396,8 +1463,8 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
   };
   for (FunctionDef& f : tu.functions) {
     f.explicit_weak = weak_declarations.contains(f.entity) && !inline_declarations.contains(f.entity);
-    if (f.root_destructor_table != EntityId::none)
-      declare_virtual_table(f.root_destructor_table, ast::Loc{f.item, f.body_offset});
+    if (f.destructor_table != EntityId::none)
+      declare_virtual_table(f.destructor_table, ast::Loc{f.item, f.body_offset});
     const auto locals = ins.seqs.elements(f.body.locals);
     if (classes.has_virtual_layouts()) {
       for (const auto& local : locals) {
