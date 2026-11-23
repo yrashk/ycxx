@@ -289,10 +289,11 @@ struct Ops {
   }
 
   static Flow obj__begin(M& m, Frame& f, N n) {
+    const Value p = m.operand(f, n, 1);
     M::Place pl;
-    if (Flow fl = m.locate(m.operand(f, n, 1), {}, imm_type(f, n), M::Use::lifetime, false, pl); fl != Flow::next) return fl;
-    if (Flow fl = lifetime_change(m, m.operand(f, n, 1)); fl != Flow::next) return fl;
-    m.set_lifetime(pl, M::Life::alive);
+    if (Flow fl = m.locate(p, {}, imm_type(f, n), M::Use::lifetime, false, pl); fl != Flow::next) return fl;
+    if (Flow fl = lifetime_change(m, p); fl != Flow::next) return fl;
+    m.set_lifetime(pl, p.bits == 0, M::Life::alive);
     return Flow::next;
   }
 
@@ -304,12 +305,28 @@ struct Ops {
     auto pl = m.resolve(p, {}, past);
     if (!pl || past) return m.fail(Reason::past_end_access);
     if (Flow fl = lifetime_change(m, p); fl != Flow::next) return fl;
-    m.set_lifetime(*pl, M::Life::after);
+    m.set_lifetime(*pl, p.bits == 0, M::Life::after);
     return Flow::next;
   }
 
   static Flow obj__reuse(M& m, Frame&, N n) { return m.unsupported(n); }
   static Flow union__activate(M& m, Frame&, N n) { return m.unsupported(n); }
+
+  static Flow obj__check_receiver(M& m, Frame& f, N n) {
+    if (!constant(m)) return Flow::next;
+    const auto& pointer = m.shape(m.type_of(f, f.fn->operands_of(n)[1]));
+    if (pointer.kind != M::Kind::pointer || pointer.is_nullptr ||
+        !m.in_->types.is<ast::TClass>(m.in_->canonical(pointer.inner)))
+      return m.fail(Reason::ill_formed);
+    const Value receiver = m.operand(f, n, 1);
+    M::Place place;
+    if (Flow fl = m.locate(receiver, {}, pointer.inner, M::Use::lifetime, false, place); fl != Flow::next) return fl;
+    // [class.cdtor] permits calls during construction and destruction. Check a completed
+    // lifetime independently of the fields, which the call need not read.
+    const auto& object = m.objects_[place.obj];
+    if (receiver.bits == 0 && object.record_life == M::Life::after) return m.fail(Reason::outside_lifetime);
+    return Flow::next;
+  }
 
   static Flow nullptr_value(M& m, Frame& f, N n) {
     QualType t = m.result_type(f, n);

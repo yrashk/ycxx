@@ -1011,11 +1011,11 @@ class Gen {
 
   // Initializes the object at `p` from the prvalue `e` ([dcl.init]). In a `zeroed` object, a
   // value-initialized element is already zero.
-  void initialize(const Place& p, At e, bool zeroed, bool select_class = false, bool materialized = false) {
+  void initialize(const Place& p, At e, bool zeroed, bool select_class = false) {
     Position here(*this, e.offset);
-    if (is<ast::Paren>(e)) return initialize(p, child(e, get<ast::Paren>(e).operand), zeroed, select_class, materialized);
+    if (is<ast::Paren>(e)) return initialize(p, child(e, get<ast::Paren>(e).operand), zeroed, select_class);
     if (is<ast::DefaultArg>(e))
-      return pinned([&] { initialize(p, child(e, get<ast::DefaultArg>(e).arg), zeroed, select_class, materialized); });
+      return pinned([&] { initialize(p, child(e, get<ast::DefaultArg>(e).arg), zeroed, select_class); });
     if (facts_.is_reference(p.type)) {
       store(p, address(e));  // a reference member holds its object's address
       return;
@@ -1083,8 +1083,8 @@ class Gen {
             initialize(destination, x, zeroed, select_element);
           }
           // [basic.life], [dcl.init.aggr]: a later default can read an earlier initialized
-          // scalar member before initialization of the complete temporary finishes.
-          if (materialized && !array && bases.empty() && !destination.bit_field) {
+          // scalar member before initialization of the complete aggregate finishes.
+          if (!array && bases.empty() && !destination.bit_field) {
             TypeClass kind = cls(type);
             if (kind == TypeClass::bool_ || kind == TypeClass::integer) begin_lifetime(destination);
           }
@@ -1128,7 +1128,7 @@ class Gen {
     At v = child(a, m.operand);
     bool zeroed = value_initializes(v);
     Place p = begin_object(m.info.type, zeroed ? ir::Init::zero : ir::Init::indeterminate, ir::Storage::temporary);
-    initialize(p, v, zeroed, /*select_class=*/false, /*materialized=*/true);
+    initialize(p, v, zeroed);
     begin_lifetime(p);
     Ending end{p, m.destructor, ir::Storage::temporary};
     if (m.extended == 1) scopes_.back().push_back(end);
@@ -2272,6 +2272,7 @@ class Gen {
       if (into) args.push_back(*into);
       const uint32_t byval = argument_object(rhs) ? 1u << args.size() : 0;
       args.push_back(value);
+      stateful(ir::Op::obj__check_receiver, {}, std::span(args).first(1));
       return call_fn(c.function, result_type(c.info), args, 1, false, byval, into ? 2 : 0);
     }
     auto c = get<ast::MemberCall>(a);
@@ -2284,6 +2285,7 @@ class Gen {
       if (argument_object(x)) byval |= 1u << args.size();
       args.push_back(argument(x));
     }
+    stateful(ir::Op::obj__check_receiver, {}, std::span(args).first(1));
     return call_fn(c.function, result_type(c.info), args, 1, false, byval, into ? 2 : 0);
   }
   // A call whose result is a class object of its own, which a hidden argument names

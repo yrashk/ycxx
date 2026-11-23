@@ -198,7 +198,7 @@ private:
     ConstId literal{};
     u32 cell0 = 0, ncells = 0;
     const RecordStorage* record = nullptr;  // owned by records_
-    Life empty_life = Life::before;         // a record with no scalar cells still has a lifetime
+    Life record_life = Life::before;        // distinct from the lifetimes of its fields
   };
   struct PathNode {
     u32 parent = 0;
@@ -264,7 +264,7 @@ private:
   bool fill_record_constant(Object& object, ConstId value);
   std::optional<Place> resolve(const Value& p, std::span<const u64> extra, bool& past);
   Flow locate(const Value& p, std::span<const u64> extra, QualType t, Use use, bool volatile_, Place& out);
-  void set_lifetime(const Place& p, Life life);
+  void set_lifetime(const Place& p, bool complete, Life life);
   Flow read_cell(QualType type, u32 cell, Value& out);
   Flow copy_record(const Place& dst, const Place& src);
   Flow note_access(const Place& p, bool write);
@@ -557,7 +557,7 @@ bool Machine::fill_record_constant(Object& object, ConstId value) {
   if (!similar(object.type, aggregate.type) || elements.size() != fields.size()) return false;
   for (std::size_t i = 0; i < fields.size(); ++i)
     if (!fill_constant(fields[i].layout.type, object.cell0 + fields[i].cell, elements[i])) return false;
-  object.empty_life = Life::alive;
+  object.record_life = Life::alive;
   return true;
 }
 
@@ -615,7 +615,7 @@ Machine::Flow Machine::locate(const Value& p, std::span<const u64> extra, QualTy
   if (!accessible_as(pl->type, t)) return fail(Reason::access_type);
   out = *pl;
   if (use == Use::lifetime) return Flow::next;
-  if (pl->ncells == 0 && (ob.empty_life == Life::after || (use != Use::write && ob.empty_life == Life::before)))
+  if (pl->ncells == 0 && (ob.record_life == Life::after || (use != Use::write && ob.record_life == Life::before)))
     return fail(Reason::outside_lifetime);
   for (u32 c = pl->cell0; c < pl->cell0 + pl->ncells; ++c) {
     Life life = cells_[c].life;
@@ -624,7 +624,7 @@ Machine::Flow Machine::locate(const Value& p, std::span<const u64> extra, QualTy
   if (use == Use::write) {
     if (ob.read_only) return fail(Reason::modify_const);
     // The initializing store comes before `obj.begin`; a const object is not modified after it.
-    const Life life = pl->ncells == 0 ? ob.empty_life : cells_[pl->cell0].life;
+    const Life life = pl->ncells == 0 ? ob.record_life : cells_[pl->cell0].life;
     if (shape(pl->type).is_const && life == Life::alive)
       return fail(Reason::modify_const);
     if (config_.mode == Mode::constant && ob.outside) return fail(Reason::modify_outside);
@@ -634,8 +634,9 @@ Machine::Flow Machine::locate(const Value& p, std::span<const u64> extra, QualTy
   return use == Use::callee_read ? Flow::next : note_access(*pl, use == Use::write);
 }
 
-void Machine::set_lifetime(const Place& p, Life life) {
-  if (p.ncells == 0) objects_[p.obj].empty_life = life;
+void Machine::set_lifetime(const Place& p, bool complete, Life life) {
+  Object& ob = objects_[p.obj];
+  if (complete && ob.record) ob.record_life = life;
   for (u32 c = p.cell0; c < p.cell0 + p.ncells; ++c) cells_[c].life = life;
 }
 
@@ -1333,6 +1334,7 @@ Machine::Flow Machine::capture_element(QualType t, u32 cell, Result& result) {
 Machine::Flow Machine::capture_result(u32 object) {
   const Object& ob = objects_[object];
   if (!ob.storage) return fail(Reason::storage_ended);
+  if (ob.record_life == Life::after) return fail(Reason::outside_lifetime);
   Result result;
   result.kind = Result::Kind::aggregate;
   result.type = ob.type;
@@ -1340,7 +1342,7 @@ Machine::Flow Machine::capture_result(u32 object) {
   const auto& fields = ob.record->fields;
   result.elements.resize(fields.size());
   // The implicit caller's result lifetime begins after the entry initializes its storage.
-  set_lifetime({object, cell, ob.ncells, ob.type}, Life::alive);
+  set_lifetime({object, cell, ob.ncells, ob.type}, /*complete=*/true, Life::alive);
   for (std::size_t i = 0; i < fields.size(); ++i)
     if (Flow fl = capture_element(fields[i].layout.type, cell + fields[i].cell, result.elements[i]); fl != Flow::next)
       return fl;
