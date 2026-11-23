@@ -312,7 +312,8 @@ What is true of the code today. Work in progress and its owners are tracked in
     with stubs and a GOT. All imports are bound and all pointers rebased through chained fixups
     (`DYLD_CHAINED_PTR_64_OFFSET`). No lazy binding. A segment's chained starts cover only its
     pages with file contents: page-in linking maps every listed page from the file, so a listed
-    zero-fill page would hold `__LINKEDIT` bytes (#842).
+    zero-fill page would hold the bytes that follow it in the file (for `__DATA`, `__LINKEDIT`)
+    (#842).
   - Writes the exports trie, symbol tables, `LC_MAIN`, `LC_BUILD_VERSION` (macOS 12.0), an
     `LC_UUID` fingerprinted from the image, and an ad-hoc, linker-signed SHA-256 code signature.
   - Output is byte-identical across runs.
@@ -618,6 +619,18 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
   - `:executable` provides `link(P)`, the query over a program's `tu` objects. The Darwin link
     also takes `.o` files and libSystem's exports from `$SDKROOT`, else `xcrun --show-sdk-path`,
     else the Command Line Tools' SDK, looked up once per process outside the engine.
+  - `:runtime` (configured by CMake): what a Darwin link includes by default after its operands
+    (#842): this build's `libycxx.a` and `libycxx-abi.a`, `libemutls_w.a` from the GCC that built
+    them (GCC on Darwin lowers `thread_local` to `___emutls_get_address`), and the names
+    libycxx's link options force undefined (`___ycxx_allocation_table_anchor`, read from its
+    `ycxx-link-options`). Members are selected as for any Darwin archive, so `<cstdio>` programs
+    link against libycxx's linkage marker, and libycxx-abi's `__cxa_*` come before libc++abi's.
+    A trivial program grows from 17 KB to 118 KB with the allocation table. Archive operands are
+    read once per process while their size and modification time hold, and every program's
+    inputs share the bytes (`obj::archive::input`, fingerprinted once). `-nostdlib++` links
+    without the runtime. `unit.darwin_runtime`, `own/headers/cstdio.run.cpp` and
+    `own/runtime/ios-base-init.run.cpp` (libycxx's `std::ios_base::Init`, through emulated TLS)
+    check it.
   - `:lines`: a minimal line table for rendering (#34 owns the full one).
 - `ycxx cxx` (also `ycxx -…` with an option first) takes `-o`, `-c`, `-fsyntax-only` and
   `-std=c++26`. Errors are `path:line:col: error: message` on stderr. It exits 0 on success and 1
@@ -3289,7 +3302,8 @@ and runtime integration with ycxx's own linker remain under [#89]. See the
   its constant or zero; one initialized by code, or with a destructor, gets a guard variable
   (8 bytes) and its function the runtime's entry points (`Runtime`). Names are Clang's: the
   function's own symbol gives the <encoding> of `_ZZ<encoding>E<name>[_n]` and `_ZGVZ…` (back.cppm).
-  The Mach-O linker adds libc++abi (`__cxa_guard_*`) when the objects need it (`libcxxabi()`).
+  libycxx-abi provides them in a default Darwin link (#842); the Mach-O linker adds libc++abi
+  (`libcxxabi()`) for names that remain and only it exports, as with `-nostdlib++`.
 - **IR** (src/irgen/gen.cppm `static_var`): `if (__cxa_guard_acquire(&g)) { init; at_exit(d);
   __cxa_guard_release(&g); }`, the acquire called on every pass (#372); a static local's object is
   its entity's from the function's entry, so a jump past its declaration finds it.
