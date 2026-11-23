@@ -41,7 +41,7 @@ std::optional<Fp128> running_build_id() noexcept {
       uuid_command uuid{};
       std::memcpy(&uuid, commands.data(), sizeof(uuid));
       if (std::ranges::all_of(uuid.uuid, [](auto byte) { return byte == 0; })) return std::nullopt;
-      identity = fingerprint128(std::as_bytes(std::span(uuid.uuid)));
+      identity = fingerprint128(std::span<const unsigned char>(uuid.uuid));
     }
     commands = commands.subspan(command.cmdsize);
   }
