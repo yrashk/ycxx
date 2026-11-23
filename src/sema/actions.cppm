@@ -1866,17 +1866,10 @@ public:
       return declaration.entity != ns && (declaration.kind == ast::DeclKind::namespace_ || is_type(declaration.kind));
     });
   }
-  // Namespace-only lookup for using-directives and namespace aliases ([basic.lookup.udir]).
-  std::optional<Scope> namespace_scope_named(NameId n) {
-    for (const BlockAlias& alias : block_aliases_ | std::views::reverse)
-      if (alias.name == n) return Scope{alias.ns, std::nullopt};
-    if (auto ns = q_->namespace_named(n, directives())) return Scope{ns, std::nullopt};
-    return std::nullopt;
-  }
   // The first component of a nested-name-specifier, by unqualified lookup ([basic.lookup.qual]/1:
   // only namespaces, types and templates).
   std::optional<Scope> scope_named(NameId n, std::optional<u32> enum_qualifier_at = std::nullopt,
-                                   bool* ambiguous_namespace = nullptr) {
+                                   bool* ambiguous_namespace = nullptr, bool search_block_import_types = true) {
     // A type template parameter as a nested-name-specifier names a dependent type
     // ([temp.dep.type]); in an instantiation, its argument.
     if (const ast::TemplateParamSema* p = template_param(n)) {
@@ -1888,28 +1881,32 @@ public:
       }
       return Scope{std::nullopt, p->type};
     }
-    // A qualifier sees aliases and types introduced by using-declarations in the nearest block.
-    // [basic.lookup.qual] ignores local values when looking up a qualifier.
-    for (std::size_t depth = scopes_.size(); depth-- > 0;) {
-      for (const BlockAlias& alias : block_aliases_ | std::views::reverse)
-        if (alias.depth == depth && alias.name == n) return Scope{alias.ns, std::nullopt};
-      for (const BlockType& alias : block_types_ | std::views::reverse)
-        if (alias.depth == depth && alias.name == n) return Scope{std::nullopt, alias.type};
-      for (const BlockUsing& used : block_usings_) {
-        if (used.depth != depth || used.name != n) continue;
-        for (const ast::DeclSema& decl : used.decls)
-          if (is_type(decl.kind) && !(decl.flags & decl_flag::template_))
-            return Scope{std::nullopt, decl.type};
+    if (search_block_import_types) {
+      // A qualifier sees aliases and types introduced by using-declarations in the nearest block.
+      // [basic.lookup.qual] ignores local values when looking up a qualifier.
+      for (std::size_t depth = scopes_.size(); depth-- > 0;) {
+        for (const BlockAlias& alias : block_aliases_ | std::views::reverse)
+          if (alias.depth == depth && alias.name == n) return Scope{alias.ns, std::nullopt};
+        for (const BlockType& alias : block_types_ | std::views::reverse)
+          if (alias.depth == depth && alias.name == n) return Scope{std::nullopt, alias.type};
+        for (const BlockUsing& used : block_usings_)
+          if (used.depth == depth && used.name == n && used.qualifier_type)
+            return Scope{std::nullopt, used.qualifier_type};
       }
+    } else {
+      // A using-directive or namespace alias keeps its namespace lookup path ([basic.lookup.udir]).
+      for (const BlockAlias& alias : block_aliases_ | std::views::reverse)
+        if (alias.name == n) return Scope{alias.ns, std::nullopt};
     }
+    const bool search_local_aliases = !search_block_import_types;
     if (enum_qualifier_at) {
       std::optional<EntityId> ns;
-      if (auto t = class_name(n, true, true, enum_qualifier_at, /*search_locals=*/false, &ns))
+      if (auto t = class_name(n, true, true, enum_qualifier_at, search_local_aliases, &ns))
         return Scope{std::nullopt, t};
       if (ns) return Scope{ns, std::nullopt};
       return std::nullopt;
     }
-    if (auto t = class_name(n, /*elaborated=*/true, /*aliases=*/true, std::nullopt, /*search_locals=*/false))
+    if (auto t = class_name(n, /*elaborated=*/true, /*aliases=*/true, std::nullopt, search_local_aliases))
       return Scope{std::nullopt, t};
     if (auto ns = q_->namespace_named(n, directives())) {
       if (ambiguous_namespace)
@@ -2198,7 +2195,26 @@ public:
       diag(at_, Diag::no_namespace_member, n);
       return;
     }
-    block_usings_.push_back({scopes_.size() - 1, n, std::move(found)});
+    // [namespace.udecl] introduces the declarations found by qualified lookup. For a type
+    // qualifier, redeclarations and aliases to the same canonical type agree.
+    std::optional<QualType> qualifier_type;
+    for (const ast::DeclSema& decl : found) {
+      if (!is_type(decl.kind) || (decl.flags & decl_flag::template_)) continue;
+      if (!qualifier_type) qualifier_type = decl.type;
+      else if (types().canonical(*qualifier_type) != types().canonical(decl.type)) {
+        diag(at_, Diag::ambiguous_name, n);
+        return;
+      }
+    }
+    const std::size_t depth = scopes_.size() - 1;
+    if (qualifier_type && std::ranges::any_of(block_usings_, [&](const BlockUsing& earlier) {
+          return earlier.depth == depth && earlier.name == n && earlier.qualifier_type &&
+                 types().canonical(*earlier.qualifier_type) != types().canonical(*qualifier_type);
+        })) {
+      diag(at_, Diag::conflicting_declaration, n);
+      return;
+    }
+    block_usings_.push_back({depth, n, std::move(found), qualifier_type});
   }
   void namespace_alias(NameId n, EntityId ns) { block_aliases_.push_back({scopes_.size() - 1, n, ns}); }
 
@@ -10361,6 +10377,7 @@ private:
     std::size_t depth;
     NameId name;
     std::vector<ast::DeclSema> decls;
+    std::optional<QualType> qualifier_type;
   };
   struct BlockAlias {
     std::size_t depth;
