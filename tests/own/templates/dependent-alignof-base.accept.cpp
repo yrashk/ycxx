@@ -12,3 +12,4 @@ static_assert(direct_alignment<Aligned>() == 16);
 static_assert(alignment_value<Aligned> == 16);
 static_assert(alignof(Aligned[3]) == 16);
 static_assert(Alignment<Aligned&>::value == 16);
+static_assert(Alignment<Aligned[]>::value == 16);
