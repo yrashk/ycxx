@@ -64,6 +64,40 @@ int main() {
     run(['./visibility'], scope, env)
 
 
+def check_namespace_blocks(scope, readelf, env, compile):
+    (scope / 'blocks.cpp').write_text('''\
+namespace [[__gnu__::__visibility__("hidden")]] outer {
+inline namespace v1 {
+int f() noexcept;
+}
+namespace [[__gnu__::__visibility__("default")]] inner {
+int visible() noexcept;
+namespace [[__gnu__::__visibility__("hidden")]] leaf {
+int hidden() noexcept;
+}
+}
+}
+
+int outer::f() noexcept { return 17; }
+int outer::inner::visible() noexcept { return 19; }
+int outer::inner::leaf::hidden() noexcept { return 23; }
+
+namespace outer {
+inline namespace v1 {
+int g() noexcept;
+}
+}
+int outer::g() noexcept { return 29; }
+''')
+    compile('blocks.cpp', 'blocks.o')
+    check_functions(readelf, scope, env, 'blocks.o', {
+        '_ZN5outer2v11fEv': 'HIDDEN',
+        '_ZN5outer2v11gEv': 'DEFAULT',
+        '_ZN5outer5inner7visibleEv': 'DEFAULT',
+        '_ZN5outer5inner4leaf6hiddenEv': 'HIDDEN',
+    })
+
+
 def main():
     ycxx, readelf, libycxx = sys.argv[1:]
     options = (ycxx, 'cxx', '--target=x86_64-pc-linux-gnu', '-std=c++26')
@@ -78,6 +112,7 @@ def main():
             run([*options, '-nostdlib', *objects, '-o', 'visibility'], scope, env)
 
         check_namespace_visibility(scope, Path(libycxx), readelf, env, compile, link)
+        check_namespace_blocks(scope, readelf, env, compile)
 
 
 if __name__ == '__main__':
