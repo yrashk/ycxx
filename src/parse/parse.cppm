@@ -367,8 +367,8 @@ public:
   const Result<ast::ItemSema>& item_sema(u32 item);
   std::optional<ast::DeclSema> decl_sema(DeclId d);
   ast::DeclSema completed_declaration(ast::DeclSema decl) const {
-    if (auto found = constructor_exception_types_.find(decl.entity);
-        found != constructor_exception_types_.end() && found->second)
+    if (auto found = special_member_exception_types_.find(decl.entity);
+        found != special_member_exception_types_.end() && found->second)
       decl.type = *found->second;
     return decl;
   }
@@ -1741,9 +1741,9 @@ private:
   std::map<EntityId, std::vector<std::optional<std::pair<u32, u32>>>> member_default_tokens_;
   std::map<EntityId, EntityId> overridden_virtuals_;  // by overriding member's entity
   void bind_member_defaults(EntityId cls, sema::ClassRec& rec, Result<ast::ClassDef>& out);
-  std::map<EntityId, std::pair<u32, u32>> constructor_exception_tokens_;
-  std::map<EntityId, std::optional<QualType>> constructor_exception_types_;
-  void bind_constructor_exceptions(EntityId cls, const sema::ClassRec& rec, Result<ast::ClassDef>& out);
+  std::map<EntityId, std::pair<u32, u32>> special_member_exception_tokens_;
+  std::map<EntityId, std::optional<QualType>> special_member_exception_types_;
+  void bind_special_member_exceptions(EntityId cls, sema::ClassRec& rec, Result<ast::ClassDef>& out);
   struct MemberException {
     u32 item;
     std::optional<std::pair<u32, u32>> condition_tokens;
@@ -1937,7 +1937,7 @@ public:
     functions.push_back(f);
   }
   interp::Callee function_ir(EntityId f) override {
-    if (constructor_exception && p_->world().entities.rec(f).scope == completing_class)
+    if (special_member_exception && p_->world().entities.rec(f).scope == completing_class)
       return {.is_constexpr = p_->is_constexpr(f, point())};
     return p_->function_ir(f, point());
   }
@@ -2065,7 +2065,7 @@ public:
   bool own_class_complete = false;
   std::optional<u32> declaration_lookup_end;
   EntityId completing_class = EntityId::none;
-  bool constructor_exception = false;
+  bool special_member_exception = false;
   // The original tokens when checking or replaying a default member initializer.
   std::optional<Program::Dmi> initializer_source;
   bool checking_default_member = false;  // the declaration's semantic check
@@ -5388,9 +5388,9 @@ private:
       s_.diag(name_at, Diag::constexpr_redeclared, m->name);
       return bad();
     }
-    const auto resolved = p_->constructor_exception_types_.find(m->entity);
-    if (ctor && ((resolved != p_->constructor_exception_types_.end() && !resolved->second) ||
-                 p_->constructor_exception_tokens_.contains(m->entity)))
+    const auto resolved = p_->special_member_exception_types_.find(m->entity);
+    if (ctor && ((resolved != p_->special_member_exception_types_.end() && !resolved->second) ||
+                 p_->special_member_exception_tokens_.contains(m->entity)))
       return bad();  // class completion reports an invalid specification
     const QualType declared_type = mem->type;
     if (ctor && s_.types().rec(declared_type).fn_noexcept != nonthrowing) {
@@ -5771,7 +5771,7 @@ private:
     std::pair<u32, u32> exception_tokens{};
     bool has_exception_tokens = false;
     bool written_noexcept = false;
-    if (ctor && !member_template_ && s_.template_scopes.empty() && !inst_ &&
+    if ((ctor || defaulted_dtor) && !member_template_ && s_.template_scopes.empty() && !inst_ &&
         ps_.is(Tk::kw_noexcept) && ps_.kind(1) == Tk::l_paren) {
       const u32 begin = ps_.index();
       ps_.bump();
@@ -5800,11 +5800,13 @@ private:
         s_.diag(name_at, Diag::not_supported, Tk::tilde);
         return bad();
       }
-      ps_.exception_specifier(fs, ok);
-      if (!ok) return bad();
-      if (fs.has_noexcept) {
-        destructor_noexcept = ps_.noexcept_value(fs.noexcept_condition, ok);
+      if (!has_exception_tokens) {
+        ps_.exception_specifier(fs, ok);
         if (!ok) return bad();
+        if (fs.has_noexcept) {
+          destructor_noexcept = ps_.noexcept_value(fs.noexcept_condition, ok);
+          if (!ok) return bad();
+        }
       }
       ps_.skip_attributes();
       if (!member_virt_specifiers(overrides)) return bad();
@@ -5904,7 +5906,7 @@ private:
         }
       }
     }
-    if (has_exception_tokens) p_->constructor_exception_tokens_.emplace(sem.entity, exception_tokens);
+    if (has_exception_tokens) p_->special_member_exception_tokens_.emplace(sem.entity, exception_tokens);
     if (!ctor) p_->destructor_declarations_.emplace(sem.entity, Program::DestructorDeclaration{name_at, destructor_noexcept, defaulted});
     remember_member_defaults(sem.entity, fs.params);
     p_->declared(sem, k_);
@@ -8317,7 +8319,7 @@ const Result<ast::ClassDef>& Program::class_def(u32 item) {
     // Complete-class checks see the full member set before any function bodies are read.
     classes_.publish(*cls, std::move(rec), [&](sema::ClassRec& fresh) {
       bind_member_defaults(*cls, fresh, out);
-      bind_constructor_exceptions(*cls, fresh, out);
+      bind_special_member_exceptions(*cls, fresh, out);
       check_member_exception_patterns(*cls, fresh, out);
       if (member_declarations_valid && implicit_move) prepare_move_constructor(item, *cls, fresh);
       if (member_declarations_valid) check_default_member_initializers(fresh, out);
@@ -8342,22 +8344,24 @@ const Result<ast::ClassDef>& Program::class_def(u32 item) {
   return *class_cells_[item];
 }
 
-void Program::bind_constructor_exceptions(EntityId cls, const sema::ClassRec& rec, Result<ast::ClassDef>& out) {
+void Program::bind_special_member_exceptions(EntityId cls, sema::ClassRec& rec, Result<ast::ClassDef>& out) {
   ast::Builder b(w_->ins, &arena_);
-  for (const sema::MemberDeclRec& member : rec.members) {
-    auto tokens = constructor_exception_tokens_.extract(member.entity);
-    if (tokens.empty()) continue;
-    auto slot = constructor_exception_types_.try_emplace(member.entity, std::nullopt).first;
-    const DeclId decl = member_decls_.at(std::to_underlying(member.entity));
+  const auto bind = [&](EntityId entity) {
+    auto tokens = special_member_exception_tokens_.extract(entity);
+    if (tokens.empty()) return;
+    auto slot = special_member_exception_types_.try_emplace(entity, std::nullopt).first;
+    const DeclId decl = member_decls_.at(std::to_underlying(entity));
     const u32 item = index(decl.item);
     const auto& it = items_->items[item];
     const auto& cell = item_cells_[item]->value;
     const auto d = w_->ins.seqs.at(cell.decls, ast::number_of(decl.ord));
     AtItem q(*this, item, false);
     q.completing_class = cls;
-    q.constructor_exception = true;
+    q.special_member_exception = true;
     sema::Sema s(*w_, b, q, out.diags, decl.item, 0);
     s.current_class = cls;
+    const bool destructor = (d.flags & sema::decl_flag::destructor) != 0;
+    if (destructor) s.current_function = entity;
     s.this_type = w_->types.pointer(w_->types.class_type(cls));
     s.push_scope();
     for (const auto& param : w_->ins.seqs.elements(d.params))
@@ -8374,14 +8378,19 @@ void Program::bind_constructor_exceptions(EntityId cls, const sema::ClassRec& re
       p.exception_specifier(spec, ok);
       nonthrowing = ok && p.noexcept_value(spec.noexcept_condition, ok);
     } catch (const TooDeep&) {
-      continue;
+      return;
     }
-    if (!ok) continue;
-    const auto signature = w_->types.rec(member.type);
+    if (!ok) return;
+    const auto signature = w_->types.rec(d.type);
     slot->second = w_->types.function(signature.inner, signature.params, signature.variadic,
                                       signature.linkage, signature.fn_cv, signature.fn_ref, nonthrowing);
+    if (destructor) rec.destructor_noexcept = nonthrowing;
     out.demands.insert(out.demands.end(), s.demands.begin(), s.demands.end());
-  }
+  };
+  // Construction expressions in constructor specifications can potentially invoke destruction.
+  if (rec.declared_destructor != EntityId::none) bind(rec.declared_destructor);
+  for (const auto& member : rec.members)
+    if (member.is_ctor) bind(member.entity);
 }
 
 // An exception specification is a complete-class context ([class.mem.general]). Check the written
@@ -9534,8 +9543,10 @@ bool Program::special_members(u32 item, EntityId cls, sema::ClassRec& rec,
                             (user_dtor && std::ranges::contains(record->friends, user_dtor->entity));
     rec.destructor_usable &= accessible;
   }
-  rec.destructor_noexcept = declaration != destructor_declarations_.end() && declaration->second.nonthrowing
-                              ? declaration->second.nonthrowing : implicit_noexcept;
+  // [class.mem.general]: the parenthesized specification is evaluated in the complete class.
+  if (!defaulted_destructor || !special_member_exception_tokens_.contains(user_dtor->entity))
+    rec.destructor_noexcept = declaration != destructor_declarations_.end() && declaration->second.nonthrowing
+                                ? declaration->second.nonthrowing : implicit_noexcept;
   if (overrides_destructor && class_diags) {
     const bool unusable = !rec.destructor_usable || !base->destructor_usable;
     const bool unknown = !base->destructor_noexcept || !rec.destructor_noexcept;

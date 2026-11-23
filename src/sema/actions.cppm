@@ -2911,6 +2911,16 @@ public:
     std::vector<Ex> out;
     const bool replay = can_replay_default_members(t);
     const bool union_ = is_union(t);
+    // [dcl.init.aggr]: the caller can potentially destroy each initialized class element.
+    // The existing union check applies to the selected variant. Other aggregates also check
+    // a written trivial destructor, whose access is independent of its runtime cleanup.
+    for (const Element& element : elems) {
+      const QualType type = types().innermost_array_element(element.type);
+      const ClassRec* record = types().is_class(type) && !types().is_dependent(type)
+                                 ? class_rec(types().class_of(type)) : nullptr;
+      if ((union_ || (record && record->declared_destructor != EntityId::none && record->destructor == EntityId::none)) &&
+          !check_destructor_access(type, begin)) return fail;
+    }
     const auto omitted = [&](const Element& element, u32 at) {
       // [dcl.init.aggr]: copy-list-initialize an omitted union element and the
       // first variant of an empty union list in the absence of a default member initializer.
@@ -2921,8 +2931,6 @@ public:
     };
     bool elided = begin != b.begin || end != b.end;
     for (std::size_t i = 0; i < elems.size(); ++i) {
-      if (union_ && !check_destructor_access(types().innermost_array_element(elems[i].type), begin))
-        return fail;
       if (next == b.clauses.size()) {
         out.push_back(omitted(elems[i], end));
         if (!out.back().ok()) return fail;
@@ -6429,6 +6437,12 @@ public:
     auto destructor_throwing = [&](QualType type, u32 at) {
       if (!types().is_class(type) || !require_complete(type, at) || !check_destructor_access(type, at)) return false;
       const ClassRec* record = class_rec(types().class_of(type));
+      if (record && !record->destructor_noexcept && record->declared_destructor != EntityId::none &&
+          record->destructor == EntityId::none) {
+        if (current_function == record->declared_destructor) diag(at, Diag::recursive_noexcept);
+        else diag(at, Diag::not_supported, lex::Tk::kw_noexcept);
+        return false;
+      }
       return record && !record->destructor_noexcept.value_or(record->destructor == EntityId::none);
     };
     bool result_throws = !operand.glvalue() && destructor_throwing(operand.type(), operand.begin);
@@ -7857,7 +7871,8 @@ public:
     if (address_set(e)) return convert(e, to, at_);  // [over.over]: a cast supplies a target type
     QualType target = Types::unqualified(to);
     if (types().is_void(target)) {
-      if (!e.glvalue() && !require_concrete_object(e.type(), e.begin)) return {NodeId::none, e.begin, e.end};
+      if (!e.glvalue() && (!require_concrete_object(e.type(), e.begin) || !check_destructor_access(e.type(), e.begin)))
+        return {NodeId::none, e.begin, e.end};
       // A discarded tag prvalue still denotes a temporary object ([expr.context]/2).
       if (is_defaulted_tag_initializer(e)) e = discarded(e);
       return convert_node(e, ast::ConversionKind::to_void, target);  // /6
@@ -9441,7 +9456,8 @@ public:
     }
     case comma:
       // [expr.comma]: the left operand is discarded. Only the right produces the result.
-      if (!l.glvalue() && !require_concrete_object(l.type(), l.begin)) return {NodeId::none, begin, end};
+      if (!l.glvalue() && (!require_concrete_object(l.type(), l.begin) || !check_destructor_access(l.type(), l.begin)))
+        return {NodeId::none, begin, end};
       return ordered(ast::OrderedOp::comma, l, r, r.info);
     case shl:
     case shr: {
@@ -9668,6 +9684,9 @@ public:
         state = copy->copy_assignment == CopyAssignment::memberwise ? CopyAssignment::unsupported
                                                                     : copy->copy_assignment;
       if (!usable_copy_assignment(state, Types::unqualified(l.type()), op_at)) return {NodeId::none, begin, end};
+      const auto* source = class_reference_list_operand(l.type(), b);
+      if ((!source || !source->glvalue()) && !check_destructor_access(l.type(), b.begin))
+        return {NodeId::none, begin, end};
     }
     Ex c = list_init(Types::unqualified(l.type()), b, Construction::copy_list);
     if (!c.ok()) return {NodeId::none, begin, end};
@@ -10266,20 +10285,23 @@ public:
     return std::nullopt;
   }
 
-  // A class reference binds directly to a single reference-related expression.
+  // A class reference can bind directly to a single reference-related expression.
+  const Ex* class_reference_list_operand(QualType type, const Braced& list) {
+    if (list.clauses.size() != 1) return nullptr;
+    const Braced::Clause& clause = list.clauses.front();
+    if (clause.list || clause.designated || !clause.expr.ok() || !types().is_class(clause.expr.type())) return nullptr;
+    int paths = 0;
+    return same_unqualified(clause.expr.type(), type) ||
+           base_path(types().class_of(clause.expr.type()), types().class_of(type), paths) ? &clause.expr : nullptr;
+  }
+
   // Otherwise the list initializes a prvalue of the referenced class ([dcl.init.list]); the
   // materialized object lives until the end of the call's full-expression ([class.temporary]).
   Ex class_reference_list_init(QualType parameter, const Braced& list, bool extend,
                                bool call_argument = false) {
     QualType t = types().referee(parameter);
-    if (list.clauses.size() == 1) {
-      const Braced::Clause& c = list.clauses.front();
-      if (!c.list && !c.designated && c.expr.ok() && types().is_class(c.expr.type())) {
-        int paths = 0;
-        if (same_unqualified(c.expr.type(), t) || base_path(types().class_of(c.expr.type()), types().class_of(t), paths))
-          return bind_reference(c.expr, parameter, c.begin, extend);
-      }
-    }
+    if (const auto* source = class_reference_list_operand(t, list))
+      return bind_reference(*source, parameter, list.clauses.front().begin, extend);
     if (call_argument && !list.clauses.empty() && !types().rec(parameter).rvalue_ref && object_cv(t) == Cv::const_) {
       if (auto init = initializer_list_argument(t, list)) return bind_reference(*init, parameter, list.begin);
     }
@@ -10302,13 +10324,14 @@ public:
                                               EntityId function = EntityId::none) {
     // Unevaluated calls still check parameter initialization. Only a decltype operand may
     // dispense with the result object. Subexpressions requiring materialization check it separately.
+    const bool decltype_operand = decltype_unevaluated != 0 && unevaluated == decltype_unevaluated;
     if (unevaluated == 0) {
       if (!require_supported_virtual_signature(fr, paren_at)) return std::nullopt;
     } else if (!require_concrete_parameters(fr, paren_at) ||
-               (unevaluated != decltype_unevaluated && !require_concrete_object(fr.inner, paren_at))) {
+               (!decltype_operand && !require_concrete_object(fr.inner, paren_at))) {
       return std::nullopt;
     }
-    if (unevaluated != decltype_unevaluated && !check_destructor_access(fr.inner, paren_at)) return std::nullopt;
+    if (!decltype_operand && !check_destructor_access(fr.inner, paren_at)) return std::nullopt;
     std::vector<QualType> params = fr.params;  // copied: converting may intern new types
     std::vector<Ex> args(given.begin(), given.end());
     for (std::size_t i = args.size(); i < params.size() && i < defaults.size() && defaults[i] != NodeId::none; ++i) {
