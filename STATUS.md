@@ -220,6 +220,10 @@ What is true of the code today. Work in progress and its owners are tracked in
     bundled library and resource headers, while keeping explicit `-I`, `-isystem`,
     and `-iquote` paths, source-relative quoted includes, and macros.
     [#251](https://github.com/yrashk/ycxx/issues/251)
+  - `-print-file-name=include` prints the primary configured resource include directory, and
+    `-dumpmachine` prints the canonical target triple. The driver accepts `--target` for both
+    queries and answers without opening a translation unit or starting a daemon. Linux reports
+    `resources/linux/include` and Darwin reports `resources/common/include`. [#970](https://github.com/yrashk/ycxx/issues/970)
   - `#define` and `#undef` with the redefinition check, rescanning and painting
     ([cpp.rescan]);
   - function-like macros (`:unit`'s `invocation`, `substitute`, `paste`): arguments across
@@ -242,6 +246,9 @@ What is true of the code today. Work in progress and its owners are tracked in
     on the directive and cause a probe to return `__STDC_EMBED_NOT_FOUND__` (#473).
 - Predefined macros (`:predefined`, DECISIONS §1.5):
   - `__ycxx__` and its version, `__GNUC__` 4.2.1 (#229), and the draft's macros;
+  - `__STDC_HOSTED__` is `1` by default and `0` with `-ffreestanding`. The compiler and
+    editor honor the flag, and the mode is part of the source configuration.
+    [#973](https://github.com/yrashk/ycxx/issues/973) · [Design](docs/design/freestanding-mode.md)
   - a feature-test table, including `__cpp_pp_embed`;
   - the target's macros, generated from `ast::Target` and checked against Clang on AArch64
     Darwin and x86-64 Linux (`tests/own/pp/predefined-target*.pp.cpp`, #132);

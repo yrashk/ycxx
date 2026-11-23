@@ -62,6 +62,9 @@ struct Done {
   Report report;
 };
 
+// Answers a driver query without a project or a build session, if argv asks for one.
+std::optional<Done> driver_query(std::span<const std::string> argv);
+
 // Polled while the request runs (every 50 ms or so, on the calling thread); true cancels it, and
 // its answer is then meaningless. The daemon also applies batches from it, which restart the
 // request where it stopped (daemon design §4.1).
@@ -132,6 +135,7 @@ namespace {
 // What the c++-compatible command line asks for.
 struct Options {
   enum class Stop { link, object, syntax, preprocess } stop = Stop::link;
+  enum class Query { none, include, machine } query = Query::none;
   pp::Config pp;  // include paths, macros and target
   bool nostdlib = false;
   bool nostdlibxx = false;  // `-nostdlib++`: no libycxx runtime in a Darwin link
@@ -144,6 +148,12 @@ struct Options {
   std::vector<std::string> libraries;  // shared objects in command-line order
   std::vector<std::string> undefined;  // names an archive link starts with as referenced
 };
+
+Options::Query query_option(std::string_view arg) {
+  if (arg == "-dumpmachine") return Options::Query::machine;
+  if (arg == "-print-file-name=include") return Options::Query::include;
+  return Options::Query::none;
+}
 
 bool is_source(std::string_view f) {
   for (std::string_view ext : {".cpp", ".cc", ".cxx", ".c++", ".C", ".cppm", ".ixx"})
@@ -172,7 +182,9 @@ std::expected<Options, std::string> parse_options(std::span<const std::string_vi
     auto pp_option = pp::take_option(args, i, o.pp);
     if (!pp_option) return std::unexpected(pp_option.error());
     if (*pp_option) continue;
-    if (a == "-c") o.stop = Options::Stop::object;
+    if (auto query = query_option(a); query != Options::Query::none) {
+      if (o.query != Options::Query::machine) o.query = query;
+    } else if (a == "-c") o.stop = Options::Stop::object;
     else if (a == "-fsyntax-only") o.stop = Options::Stop::syntax;
     else if (a == "-E") o.stop = Options::Stop::preprocess;
     else if (a == "-nostdlib") o.nostdlib = true;
@@ -224,6 +236,7 @@ std::expected<Options, std::string> parse_options(std::span<const std::string_vi
   }
   if (!o.pp.target)
     return std::unexpected("no default target for this build. Use '--target=x86_64-pc-linux-gnu' or '--target=arm64-apple-darwin'");
+  if (o.query != Options::Query::none) return o;
   const bool linux_link = o.pp.target == &ast::x86_64_linux && o.stop == Options::Stop::link;
   const bool darwin_link = o.pp.target == &ast::aarch64_darwin && o.stop == Options::Stop::link;
   if (o.interpreter && !linux_link)
@@ -361,7 +374,35 @@ std::int32_t fail(Done& d, std::string_view message) {
   return d.exit_status = 1;
 }
 
+Done answer_query(const Options& options) {
+  Done d;
+  std::string_view answer = options.pp.target->triple;
+  if (options.query == Options::Query::include) {
+    answer = pp::resource_include_dir(*options.pp.target);
+    std::error_code ec;
+    if (!std::filesystem::is_directory(std::filesystem::path(answer), ec)) {
+      fail(d, std::format("compiler resource include directory is unavailable: '{}'", answer));
+      return d;
+    }
+  }
+  d.out = std::format("{}\n", answer);
+  return d;
+}
+
 }  // namespace
+
+std::optional<Done> driver_query(std::span<const std::string> argv) {
+  if (!std::ranges::any_of(argv, [](std::string_view arg) { return query_option(arg) != Options::Query::none; }))
+    return std::nullopt;
+  auto opts = parse_options(views(argv));
+  if (!opts) {
+    Done d;
+    fail(d, opts.error());
+    return d;
+  }
+  if (opts->query == Options::Query::none) return std::nullopt;
+  return answer_query(*opts);
+}
 
 std::vector<std::pair<std::string, std::string>> environment_now() {
   std::vector<std::pair<std::string, std::string>> env;
@@ -393,7 +434,7 @@ Threads threads() {
 
 std::optional<std::string> first_input(std::span<const std::string> argv) {
   auto opts = parse_options(views(argv));
-  if (!opts) return std::nullopt;
+  if (!opts || opts->query != Options::Query::none) return std::nullopt;
   if (!opts->sources.empty()) return opts->sources.front();
   if (!opts->objects.empty()) return opts->objects.front();
   return std::nullopt;
@@ -411,7 +452,7 @@ std::string absolute_in(const Request& r, std::string_view path) {
 
 std::vector<std::string> sources_of(const Request& r) {
   auto opts = parse_options(views(r.argv));
-  if (!opts) return {};
+  if (!opts || opts->query != Options::Query::none) return {};
   return opts->sources | std::views::transform([&](const std::string& s) { return absolute_in(r, s); }) |
          std::ranges::to<std::vector>();
 }
@@ -486,7 +527,7 @@ Request check_command(std::span<const std::string> args, std::string cwd, std::s
 
 std::optional<Request> check_one(const Request& r, std::string_view source) {
   auto opts = parse_options(views(r.argv));
-  if (!opts) return std::nullopt;
+  if (!opts || opts->query != Options::Query::none) return std::nullopt;
   auto spelled = std::ranges::find_if(opts->sources, [&](const std::string& s) { return absolute_in(r, s) == source; });
   if (spelled == opts->sources.end()) return std::nullopt;
   Request one{{}, r.cwd, r.env, r.build_time};
@@ -509,6 +550,7 @@ Done run(const Request& r, pp::Host& host, pipeline::Session& session, const Sto
     fail(d, opts.error());
     return d;
   }
+  if (opts->query != Options::Query::none) return answer_query(*opts);
   pp::Config config = preprocessing_config(std::move(opts->pp), r);
   config.view = units.view;
   pp::Session& ps = pp::configure(config, host);
@@ -676,7 +718,7 @@ Done run(const Request& r, pp::Host& host, pipeline::Session& session, const Sto
 std::optional<pipeline::FileOffset> definition(const Request& r, pp::Host& host, pipeline::Session& session,
                                                const std::string& file, std::uint32_t offset, Units units) {
   auto opts = parse_options(views(r.argv));
-  if (!opts || opts->sources.empty()) return std::nullopt;
+  if (!opts || opts->query != Options::Query::none || opts->sources.empty()) return std::nullopt;
   pp::Config config = preprocessing_config(std::move(opts->pp), r);
   config.view = units.view;
   pp::configure(config, host);

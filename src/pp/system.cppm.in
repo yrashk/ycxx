@@ -7,6 +7,12 @@ export module ycxx.pp:system;
 import std;
 import ycxx.ast.target;
 
+namespace ycxx::pp {
+namespace {
+constexpr std::string_view common_resource_include = "@YCXX_COMMON_RESOURCE_INCLUDE@";
+}  // namespace
+}  // namespace ycxx::pp
+
 export namespace ycxx::pp {
 
 // ycxx's version, for `__ycxx_major__` and its siblings.
@@ -16,18 +22,23 @@ inline constexpr int version_patch = @PROJECT_VERSION_PATCH@;
 
 inline constexpr const ast::Target* native_target = @YCXXC_NATIVE_TARGET@;
 
+// The primary compiler resource directory for a supported target.
+std::string_view resource_include_dir(const ast::Target& target) {
+  return target.triple == ast::x86_64_linux.triple ? "@YCXX_LINUX_RESOURCE_INCLUDE@" : common_resource_include;
+}
+
 // `sdkroot` is the request's absolute Darwin SDK override. An empty value uses the configured SDK.
 std::vector<std::string> system_dirs(const ast::Target& target, std::string_view sdkroot = {}) {
   std::vector<std::string> dirs{"@YCXX_LIBYCXX_INCLUDE@", "@YCXX_LIBYCXX_GENERATED_INCLUDE@"};
   if (target.triple == ast::x86_64_linux.triple) {
-    dirs.push_back("@YCXX_LINUX_RESOURCE_INCLUDE@");
-    dirs.push_back("@YCXX_COMMON_RESOURCE_INCLUDE@");
+    dirs.emplace_back(resource_include_dir(target));
+    dirs.emplace_back(common_resource_include);
     if (native_target == &ast::x86_64_linux) {
       dirs.push_back(std::format("/usr/include/{}", target.multiarch));
       dirs.push_back("/usr/include");
     }
   } else if (target.triple == ast::aarch64_darwin.triple) {
-    dirs.push_back("@YCXX_COMMON_RESOURCE_INCLUDE@");
+    dirs.emplace_back(resource_include_dir(target));
     namespace fs = std::filesystem;
     auto sdk = fs::path(sdkroot.empty() ? std::string_view("@CMAKE_OSX_SYSROOT@") : sdkroot).lexically_normal();
     std::error_code ec;
