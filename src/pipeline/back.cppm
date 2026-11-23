@@ -141,6 +141,7 @@ struct FunctionDef {
   // An ordinary external inline definition that every unit using it may emit: a weak definition,
   // coalesced by the linker (ELF #422, Mach-O #124).
   bool coalesced = false;
+  bool explicit_weak = false;  // an ordinary non-inline ELF definition (#937)
   UnwindEligibility unwind = UnwindEligibility::none;
   std::optional<HostedCatch> hosted_catch{};
   ast::NodeId cleanup_call = ast::NodeId::none;
@@ -158,7 +159,7 @@ struct Variable {
   ConstId init = ConstId::none;
   std::optional<ast::Loc> at;  // its declarator, for diagnostics
   bool dynamic = false;  // also initialized by code ([basic.start.dynamic]): writable, if const
-  bool coalesced = false;  // an eligible external inline namespace definition, weak (#432, #124)
+  bool coalesced = false;  // an eligible external inline data definition, weak (#432, #903)
 };
 
 // The classes and enumerations a unit defines, as `layout` reads them: a class's non-static data
@@ -224,6 +225,7 @@ struct TranslationUnit {
   std::optional<ir::CatchAllRuntime> catch_runtime;
   EntityId cleanup_resume = EntityId::none;
   std::optional<OwnedVirtualTable> owned_virtual_table;
+  std::set<EntityId> keyless_type_info;  // definitions selected by the typed-cast ownership check
   // The written complete-object definitions whose ELF base-object entries share their code.
   std::set<EntityId> base_object_variants;
 };
@@ -1669,6 +1671,11 @@ struct VirtualTable {
   std::optional<std::string> base_encoding;
 };
 
+struct KeylessTypeInfo {
+  EntityId entity;
+  std::string type_encoding;
+};
+
 obj::reloc_kind linux_relocation(x86_64::RelocKind kind) {
   switch (kind) {
     case x86_64::RelocKind::pc32: return obj::reloc_kind::x86_64_pc32;
@@ -1676,6 +1683,47 @@ obj::reloc_kind linux_relocation(x86_64::RelocKind kind) {
     case x86_64::RelocKind::rex_gotpcrelx: return obj::reloc_kind::x86_64_rex_gotpcrelx;
   }
   std::unreachable();
+}
+
+constexpr auto rtti_pointer_size = 8;
+constexpr auto rtti_address_point = 2 * rtti_pointer_size;
+constexpr std::string_view class_type_info = "_ZTVN10__cxxabiv117__class_type_infoE";
+constexpr std::string_view si_class_type_info = "_ZTVN10__cxxabiv120__si_class_type_infoE";
+
+void emit_rtti_pointer(obj::object& o, std::uint32_t index, std::uint32_t symbol, std::int64_t addend = 0) {
+  auto& section = o.sections[index];
+  section.emit64(0);
+  section.relocate(obj::reloc_kind::abs64, symbol, addend);
+}
+
+// The name keeps its own vague linkage even when the table and descriptor have a unique
+// owner (Itanium C++ ABI §5.2.4).
+std::uint32_t emit_type_info_name(obj::object& o, std::uint32_t names, const std::string& encoding, obj::binding bind) {
+  const bool elf = o.arch == obj::target::x86_64_linux;
+  const std::string name = (elf ? "_ZTS" : "__ZTS") + encoding;
+  const auto symbol = o.add_symbol({.name = name, .bind = bind, .section = names, .offset = o.sections[names].size(),
+                                    .weak = true, .object_size = encoding.size() + 1});
+  if (elf) o.comdat_groups.push_back({name, {names}});
+  o.sections[names].emit(encoding);
+  o.sections[names].bytes.push_back(0);
+  return symbol;
+}
+
+void emit_keyless_type_info(obj::object& o, std::uint32_t pointers, std::uint32_t names,
+                           std::uint32_t symbol, const std::string& encoding) {
+  const bool elf = o.arch == obj::target::x86_64_linux;
+  const auto bind = elf ? obj::binding::global : obj::binding::hidden;
+  auto& descriptor = o.symbols[symbol];
+  descriptor.bind = bind;
+  descriptor.section = pointers;
+  descriptor.offset = o.sections[pointers].size();
+  descriptor.weak = true;
+  descriptor.object_size = 2 * rtti_pointer_size;
+  if (elf) o.comdat_groups.push_back({descriptor.name, {pointers}});
+  const auto name = emit_type_info_name(o, names, encoding, bind);
+  const auto runtime_table = elf ? o.reference(class_type_info) : o.reference("_" + std::string(class_type_info));
+  emit_rtti_pointer(o, pointers, runtime_table, rtti_address_point);
+  emit_rtti_pointer(o, pointers, name, elf ? 0 : std::numeric_limits<std::int64_t>::min());
 }
 
 // Itanium C++ ABI §2.5.2 and §2.9.5: a primary table has zero offset-to-top, its RTTI pointer
@@ -1688,7 +1736,7 @@ obj::reloc_kind linux_relocation(x86_64::RelocKind kind) {
 // RTTI: private external, with bit 63 set in the descriptor's name pointer so that `type_info`
 // compares those names by content across images.
 void emit_virtual_table(obj::object& o, const VirtualTable& table, std::uint32_t table_symbol,
-                        std::span<const std::uint32_t> slots) {
+                        std::span<const std::uint32_t> slots, std::optional<std::uint32_t> emitted_base = std::nullopt) {
   using S = obj::standard_section;
   const bool elf = o.arch == obj::target::x86_64_linux;
   const std::string prefix = elf ? "" : "_";
@@ -1701,11 +1749,7 @@ void emit_virtual_table(obj::object& o, const VirtualTable& table, std::uint32_t
         if (o.sections[i].segment == standard.segment && o.sections[i].name == standard.name) return i;
     return o.add_section(standard);
   };
-  constexpr auto pointer_size = 8;
-  constexpr auto address_point = 2 * pointer_size;
-  const std::string class_type_info = prefix + "_ZTVN10__cxxabiv117__class_type_infoE";
-  const std::string si_class_type_info = prefix + "_ZTVN10__cxxabiv120__si_class_type_infoE";
-  const std::uint64_t table_size = address_point + pointer_size * slots.size();
+  const std::uint64_t table_size = rtti_address_point + rtti_pointer_size * slots.size();
   const auto pointers = section(S::data_const);
   o.sections[pointers].align(3);
   const std::uint64_t table_offset = o.sections[pointers].size();
@@ -1715,52 +1759,30 @@ void emit_virtual_table(obj::object& o, const VirtualTable& table, std::uint32_t
   o.symbols[table_symbol].object_size = table_size;
   const auto typeinfo = o.add_symbol({.name = prefix + "_ZTI" + table.type_encoding, .section = pointers,
                                       .offset = table_offset + table_size,
-                                      .object_size = table.base_encoding ? 3 * pointer_size : 2 * pointer_size});
-  // The name keeps its own vague linkage even when the table and descriptor have a unique
-  // owner (Itanium C++ ABI §5.2.4).
-  auto emit_type_name = [&](const std::string& encoding, obj::binding bind) {
-    const auto names = section(S::rodata);
-    const std::string name = prefix + "_ZTS" + encoding;
-    const auto symbol = o.add_symbol({.name = name, .bind = bind, .section = names, .offset = o.sections[names].size(),
-                                      .weak = true, .object_size = encoding.size() + 1});
-    if (elf) o.comdat_groups.push_back({name, {names}});
-    o.sections[names].emit(encoding);
-    o.sections[names].bytes.push_back(0);
-    return symbol;
-  };
-  const auto name_object = emit_type_name(table.type_encoding, obj::binding::global);
-
-  auto pointer = [&](std::uint32_t index, std::uint32_t symbol, std::int64_t addend = 0) {
-    auto& section = o.sections[index];
-    section.emit64(0);
-    section.relocate(obj::reloc_kind::abs64, symbol, addend);
-  };
+                                      .object_size = table.base_encoding ? 3 * rtti_pointer_size : 2 * rtti_pointer_size});
+  const auto name_object = emit_type_info_name(o, section(S::rodata), table.type_encoding, obj::binding::global);
   o.sections[pointers].emit64(0);  // offset-to-top
-  pointer(pointers, typeinfo);
-  for (std::uint32_t slot : slots) pointer(pointers, slot);
-  pointer(pointers, o.reference(table.base_encoding ? si_class_type_info : class_type_info), address_point);
-  pointer(pointers, name_object);
+  emit_rtti_pointer(o, pointers, typeinfo);
+  for (std::uint32_t slot : slots) emit_rtti_pointer(o, pointers, slot);
+  const auto runtime_type = table.base_encoding ? si_class_type_info : class_type_info;
+  emit_rtti_pointer(o, pointers, o.reference(prefix + std::string(runtime_type)), rtti_address_point);
+  emit_rtti_pointer(o, pointers, name_object);
   if (const auto& base = table.base_encoding) {
-    // The pure base has no key function. Its descriptor and its name are independently
-    // coalesced, and the descriptor's relocations travel with its payload in the group.
+    if (emitted_base) {
+      emit_rtti_pointer(o, pointers, *emitted_base);
+      return;
+    }
     const auto base_pointers = elf ? o.add_section(S::data_const) : pointers;
-    const std::string base_name = prefix + "_ZTI" + *base;
-    const auto bind = elf ? obj::binding::global : obj::binding::hidden;
-    const auto base_typeinfo = o.add_symbol({.name = base_name, .bind = bind, .section = base_pointers,
-                                             .offset = o.sections[base_pointers].size() + (elf ? 0 : pointer_size),
-                                             .weak = true, .object_size = 2 * pointer_size});
-    if (elf) o.comdat_groups.push_back({base_name, {base_pointers}});
-    const auto base_name_object = emit_type_name(*base, bind);
-    pointer(pointers, base_typeinfo);
-    pointer(base_pointers, o.reference(class_type_info), address_point);
-    pointer(base_pointers, base_name_object, elf ? 0 : std::numeric_limits<std::int64_t>::min());
+    const auto base_typeinfo = o.add_symbol({.name = prefix + "_ZTI" + *base, .section = std::nullopt});
+    emit_rtti_pointer(o, pointers, base_typeinfo);
+    emit_keyless_type_info(o, base_pointers, section(S::rodata), base_typeinfo, *base);
   }
 }
 
 std::expected<obj::object, aarch64::CodegenError> assemble_linux(
     const std::string& name, std::span<const LinuxFunction> functions,
     std::span<const aarch64::DataDef> data, std::span<const aarch64::Symbol> symbols,
-    const std::optional<VirtualTable>& table) {
+    const std::optional<VirtualTable>& table, std::span<const KeylessTypeInfo> keyless_type_info) {
   obj::object o;
   o.name = name;
   o.arch = obj::target::x86_64_linux;
@@ -1871,6 +1893,16 @@ std::expected<obj::object, aarch64::CodegenError> assemble_linux(
       }
     }
   }
+  // If a cast and a separately owned table use the same base, both reference the cast's symbol.
+  std::optional<std::uint32_t> emitted_base;
+  for (const auto& typeinfo : keyless_type_info) {
+    const auto symbol = symbol_of.find(typeinfo.entity);
+    if (symbol == symbol_of.end()) return missing(typeinfo.entity);
+    const auto pointers = o.add_section(S::data_const);
+    const auto names = o.add_section(S::rodata);
+    emit_keyless_type_info(o, pointers, names, symbol->second, typeinfo.type_encoding);
+    if (table && table->base_encoding == typeinfo.type_encoding) emitted_base = symbol->second;
+  }
   if (table) {
     const auto symbol = symbol_of.find(table->entity);
     if (symbol == symbol_of.end()) return missing(table->entity);
@@ -1880,7 +1912,7 @@ std::expected<obj::object, aarch64::CodegenError> assemble_linux(
       if (target == symbol_of.end()) return missing(slot);
       slots.push_back(target->second);
     }
-    emit_virtual_table(o, *table, symbol->second, slots);
+    emit_virtual_table(o, *table, symbol->second, slots, emitted_base);
   }
   return o;
 }
@@ -1904,7 +1936,7 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
   }
   if (tu.unsupported_typed_dynamic_cast) {
     errors.push_back({tu.unsupported_typed_dynamic_cast,
-                      "typed dynamic_cast requires a default-visible peer-owned root and its direct public derived class on Linux x86-64"});
+                      "typed dynamic_cast requires a supported default-visible root and its direct public peer-owned derived class on Linux x86-64"});
     co_return co_await locate_errors(cx, id, std::move(out));
   }
   if (tu.virtual_emission_blocked) {
@@ -2066,6 +2098,7 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
     return n;
   };
   std::optional<VirtualTable> virtual_table;
+  std::vector<KeylessTypeInfo> keyless_type_info;
   std::vector<const Entity*> locals;  // named after their functions, below
   std::map<std::uint32_t, std::string> mangled;  // by function entity
   std::map<EntityId, std::string> base_object_names;
@@ -2098,6 +2131,7 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
         }
         virtual_table = VirtualTable{e.id, std::move(*encoding), owned->slots, std::move(base)};
       }
+      if (!table && tu.keyless_type_info.contains(e.id)) keyless_type_info.push_back({e.id, std::move(*encoding)});
       continue;
     }
     // Calls still name the complete-object entry. An eligible definition also emits C2 or D2
@@ -2173,9 +2207,10 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
         const auto base_name = base_object_names.find(def.entity);
         const std::string_view name = base_name == base_object_names.end() ? std::string_view{} : base_name->second;
         const bool catch_int = def.unwind == UnwindEligibility::hosted_catch && def.hosted_catch->int_binding.has_value();
-        code.push_back({fns[i].fn, &*ms[i].get().linux_code, def.coalesced, def.unwind != UnwindEligibility::none, name, catch_int});
+        const bool weak = def.coalesced || def.explicit_weak;
+        code.push_back({fns[i].fn, &*ms[i].get().linux_code, weak, def.unwind != UnwindEligibility::none, name, catch_int});
       }
-      return assemble_linux(tu.name, code, data, symbols, virtual_table);
+      return assemble_linux(tu.name, code, data, symbols, virtual_table, keyless_type_info);
     }
     std::vector<aarch64::CompiledFunction> code;
     for (std::size_t i = 0; i < fns.size(); ++i) {

@@ -76,6 +76,10 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_
   add_test(NAME unit.linux_stack_probe
     COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/linux_stack_probe.py
             $<TARGET_FILE:ycxxc> ${CMAKE_C_COMPILER})
+  # PARITY: by design: checks ELF symbols and links with a native x86-64 peer.
+  add_test(NAME unit.linux_single_linkage_const
+    COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/linux_single_linkage_const.py
+            $<TARGET_FILE:ycxxc> ${CMAKE_CXX_COMPILER} ${CMAKE_READELF})
   add_test(NAME unit.linux_scalar_sse
     COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/linux_scalar_sse.py
             $<TARGET_FILE:ycxxc> ${CMAKE_CXX_COMPILER} ${PROJECT_SOURCE_DIR}/deps/libycxx)
@@ -114,6 +118,10 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_
   add_test(NAME unit.linux_executable
     COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/linux_executable.py
             $<TARGET_FILE:ycxxc> ${CMAKE_READELF})
+  # PARITY: by design: checks ELF visibility and runs the Linux x86-64 link.
+  add_test(NAME unit.linux_namespace_visibility
+    COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/linux_namespace_visibility.py
+            $<TARGET_FILE:ycxxc> ${CMAKE_READELF} ${PROJECT_SOURCE_DIR}/deps/libycxx)
   add_test(NAME unit.linux_cleanup_free_unwind
     COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/linux_cleanup_free_unwind.py
             $<TARGET_FILE:ycxxc> ${CMAKE_CXX_COMPILER} ${CMAKE_READELF} ${CMAKE_OBJDUMP})
@@ -155,7 +163,8 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_
             $<TARGET_FILE:ycxxc> ${CMAKE_AR} ${CMAKE_NM} ${CMAKE_LINKER} ${CMAKE_C_COMPILER})
   add_test(NAME unit.linux_inline
     COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/linux_inline.py
-            $<TARGET_FILE:ycxxc> ${CMAKE_CXX_COMPILER} ${CMAKE_READELF} ${CMAKE_AR})
+            $<TARGET_FILE:ycxxc> ${CMAKE_CXX_COMPILER} ${CMAKE_READELF} ${CMAKE_AR}
+            ${PROJECT_SOURCE_DIR}/deps/libycxx)
   add_test(NAME unit.linux_elf_comdat
     COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/linux_elf_comdat.py
             $<TARGET_FILE:ycxxc> ${CMAKE_C_COMPILER} ${CMAKE_AR})
@@ -170,6 +179,10 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_
   add_test(NAME unit.linux_dynamic
     COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/linux_dynamic.py
             $<TARGET_FILE:ycxxc> ${CMAKE_C_COMPILER} ${CMAKE_READELF})
+  # PARITY: #294 for the Darwin borrowed typed downcast counterpart.
+  add_test(NAME unit.linux_keyless_base_rtti
+    COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/linux_keyless_base_rtti.py
+            $<TARGET_FILE:ycxxc> ${CMAKE_CXX_COMPILER})
   add_test(NAME unit.linux_stdarg
     COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/linux_stdarg.py $<TARGET_FILE:ycxxc>)
   add_test(NAME unit.pipeline_elf_run

@@ -191,6 +191,32 @@ struct Dynamic {
   ast::ItemId item;
 };
 
+// A function's GNU visibility from its declarations (x86-64): the first written one, and whether
+// a namespace's attribute made it hidden or default.
+struct FunctionVisibility {
+  ast::GnuVisibility written = ast::GnuVisibility::none;
+  bool namespace_hidden = false;
+  bool namespace_default = false;
+};
+// The visibility of the unit's symbols, from every declaration in it.
+void apply_visibility(TranslationUnit& tu, const std::set<EntityId>& hidden_declarations, const std::set<EntityId>& inline_declarations,
+                      const std::map<EntityId, FunctionVisibility>& function_visibility, bool linux) {
+  if (hidden_declarations.empty() && function_visibility.empty()) return;
+  using Visibility = ast::GnuVisibility;
+  for (Entity& e : tu.entities) {
+    // An inline variable falls outside the ordinary data visibility profile.
+    e.hidden = hidden_declarations.contains(e.id) && (e.is_function || (linux && !inline_declarations.contains(e.id)));
+    if (!e.is_function || inline_declarations.contains(e.id)) continue;
+    const auto found = function_visibility.find(e.id);
+    if (found == function_visibility.end()) continue;
+    const auto& visibility = found->second;
+    // With no namespace setting or conflicting settings, use the direct-attribute behavior.
+    if (visibility.namespace_hidden != visibility.namespace_default)
+      e.hidden = visibility.written == Visibility::none
+                     ? visibility.namespace_hidden : visibility.written == Visibility::hidden;
+  }
+}
+
 // What a group's `unit_of` leaves to its unit (#947): the decisions that need every group's
 // declarations, made by `finish_unit` when the groups' parts are put together.
 struct UnitPart {
@@ -198,6 +224,8 @@ struct UnitPart {
   std::vector<Dynamic> dynamic;  // in definition order
   std::set<EntityId> inline_declarations, noexcept_declarations, hidden_declarations;
   std::set<EntityId> defined;  // functions a declaration here defines
+  std::set<EntityId> weak_declarations;  // explicitly weak (x86-64)
+  std::map<EntityId, FunctionVisibility> function_visibility;
   // Definitions that coalesce when any declaration in the unit says `inline`: functions (unless
   // `main`) and variables.
   std::set<EntityId> coalesce_if_inline, weak_if_inline;
@@ -1010,6 +1038,9 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
   std::set<EntityId> inline_declarations;
   std::set<EntityId> noexcept_declarations;
   std::set<EntityId> hidden_declarations;
+  std::set<EntityId> weak_declarations;
+  using Visibility = ast::GnuVisibility;
+  std::map<EntityId, FunctionVisibility> function_visibility;
   std::vector<Dynamic> dynamic;
   // The type from the declaration, not the entity's record: a variable's type is not part of its
   // identity, so a record made before an edit may hold the old one (#115).
@@ -1030,6 +1061,20 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
       return internal_type(r.inner);
     return false;
   };
+  // An ordinary in-class static constexpr member is inline ([dcl.constexpr]). An owner or
+  // a declared type in an unnamed namespace gives the member's symbol TU-local binding.
+  auto constexpr_member_symbol_linkage = [&](const ast::DeclSema& d) -> std::optional<ast::Linkage> {
+    if (d.kind != ast::DeclKind::variable || d.storage != ast::Storage::static_ ||
+        !(d.flags & sema::decl_flag::member) || !(d.flags & sema::decl_flag::constexpr_))
+      return {};
+    const auto& member = world.entities.rec(d.entity);
+    const auto& owner = world.entities.rec(member.scope);
+    if (owner.kind != sema::EntityKind::class_ || owner.templ != EntityId::none || !program.is_namespace(owner.scope))
+      return {};
+    if (names_unnamed_namespace(program, member.scope) || names_unnamed_namespace(program, d.type))
+      return ast::Linkage::internal;
+    return owner.linkage;
+  };
   auto declare = [&](const ast::DeclSema& d, std::optional<ast::Loc> at) {
     EntityId e = d.entity;
     if (e == EntityId::none) return;
@@ -1039,6 +1084,17 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
       inline_declarations.insert(e);
     if (d.kind == ast::DeclKind::function && d.has_written_noexcept) noexcept_declarations.insert(e);
     if (d.hidden_visibility) hidden_declarations.insert(e);
+    if (linux && d.explicit_weak) weak_declarations.insert(e);
+    if (linux && d.kind == ast::DeclKind::function &&
+        (d.hidden_visibility || d.explicit_default_visibility || d.namespace_visibility != Visibility::none)) {
+      auto& visibility = function_visibility[e];
+      if (visibility.written == Visibility::none) {
+        if (d.hidden_visibility) visibility.written = Visibility::hidden;
+        else if (d.explicit_default_visibility) visibility.written = Visibility::default_;
+      }
+      visibility.namespace_hidden |= d.namespace_visibility == Visibility::hidden;
+      visibility.namespace_default |= d.namespace_visibility == Visibility::default_;
+    }
     if (!seen.insert(std::to_underlying(e)).second) return;
     const sema::EntityRec& r = world.entities.rec(e);
     if (r.kind == sema::EntityKind::class_ || r.kind == sema::EntityKind::data_member || r.kind == sema::EntityKind::type_alias ||
@@ -1052,7 +1108,7 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
     std::string id(ins.names.spelling(r.name));
     if (fn && id == "main" && r.scope == EntityId::none) tu.main = e;  // [basic.start.main]: the global one
     // A member of a class local to the unit is local too.
-    ast::Linkage linkage = r.linkage;
+    ast::Linkage linkage = constexpr_member_symbol_linkage(d).value_or(r.linkage);
     for (EntityId sc = r.scope; linkage == ast::Linkage::external && sc != EntityId::none; sc = world.entities.rec(sc).scope)
       if (world.entities.rec(sc).kind == sema::EntityKind::class_ && internal_class(sc)) linkage = ast::Linkage::internal;
     tu.entities.push_back({e, std::move(id), d.type, fn, r.lang, linkage, false, at, r.scope,
@@ -1125,10 +1181,10 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
   // Whether a variable's definition is weak once a declaration says `inline`.
   auto weak_if_inline = [&](const ast::DeclSema& d) {
     const auto& entity = world.entities.rec(d.entity);
-    if (entity.linkage != ast::Linkage::external || !program.is_namespace(entity.scope) ||
-        d.storage == ast::Storage::thread_local_ || world.types.is_reference(d.type) ||
-        internal_type(d.type) || !program.asm_label(d.entity).empty())
+    if (entity.linkage != ast::Linkage::external || d.storage == ast::Storage::thread_local_ ||
+        world.types.is_reference(d.type) || internal_type(d.type) || !program.asm_label(d.entity).empty())
       return false;
+    if (!program.is_namespace(entity.scope)) return constexpr_member_symbol_linkage(d) == ast::Linkage::external;
     // The inline declaration belongs to the specialization itself ([temp.expl.spec]).
     // Builtin type arguments identify the same specialization in every translation unit.
     return entity.templ == EntityId::none || ((d.flags & sema::decl_flag::specialization) &&
@@ -1339,6 +1395,7 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
     declare(table, at);
   };
   for (FunctionDef& f : tu.functions) {
+    f.explicit_weak = weak_declarations.contains(f.entity) && !inline_declarations.contains(f.entity);
     if (f.root_destructor_table != EntityId::none)
       declare_virtual_table(f.root_destructor_table, ast::Loc{f.item, f.body_offset});
     const auto locals = ins.seqs.elements(f.body.locals);
@@ -1379,11 +1436,14 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
           const EntityId target = world.entities.rec(cast.target_rtti).scope;
           if (checked.emplace(source, target).second) {
             const ast::Loc at{f.item, node.offset()};
+            const auto rtti = program.peer_typed_dynamic_cast(source, target);
             if (uncertain_layouts.contains(source) || uncertain_layouts.contains(target) ||
-                !program.peer_typed_dynamic_cast(source, target)) {
+                rtti == parse::Program::TypedCastRtti::unsupported) {
               tu.unsupported_typed_dynamic_cast = at;
               return;
             }
+            if (rtti == parse::Program::TypedCastRtti::keyless_base)
+              tu.keyless_type_info.insert(cast.source_rtti);
             for (EntityId id : {cast.source_rtti, cast.target_rtti, cast.runtime}) {
               ast::DeclSema d{};
               d.kind = id == cast.runtime ? ast::DeclKind::function : ast::DeclKind::variable;
@@ -1419,12 +1479,13 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
   }
   if (root_deallocator) declare(*root_deallocator, std::nullopt);
   // A declaration anywhere in the unit can supply the visibility of the one object symbol.
-  if (!hidden_declarations.empty())
-    for (Entity& e : tu.entities) e.hidden = hidden_declarations.contains(e.id);
+  apply_visibility(tu, hidden_declarations, inline_declarations, function_visibility, linux);
   if (part) {
     part->inline_declarations = std::move(inline_declarations);
     part->noexcept_declarations = std::move(noexcept_declarations);
     part->hidden_declarations = std::move(hidden_declarations);
+    part->weak_declarations = std::move(weak_declarations);
+    part->function_visibility = std::move(function_visibility);
   }
   return tu;
 }
@@ -1437,6 +1498,8 @@ TranslationUnit finish_unit(std::vector<UnitPart>& parts, sema::World& world, st
   tu.name = std::move(name);
   std::set<EntityId> entities, functions, variables;
   std::set<EntityId> inline_declarations, noexcept_declarations, hidden_declarations, defined, coalesce_if_inline, weak_if_inline;
+  std::set<EntityId> weak_declarations;
+  std::map<EntityId, FunctionVisibility> function_visibility;
   std::vector<Dynamic> dynamic;
   for (UnitPart& p : parts) {
     for (Entity& e : p.tu.entities) {
@@ -1459,9 +1522,19 @@ TranslationUnit finish_unit(std::vector<UnitPart>& parts, sema::World& world, st
     dynamic.insert(dynamic.end(), p.dynamic.begin(), p.dynamic.end());
     for (auto [into, from] : {std::pair{&inline_declarations, &p.inline_declarations}, {&noexcept_declarations, &p.noexcept_declarations},
                              {&hidden_declarations, &p.hidden_declarations}, {&defined, &p.defined},
-                             {&coalesce_if_inline, &p.coalesce_if_inline}, {&weak_if_inline, &p.weak_if_inline}})
+                             {&coalesce_if_inline, &p.coalesce_if_inline}, {&weak_if_inline, &p.weak_if_inline},
+                             {&weak_declarations, &p.weak_declarations}})
       into->insert(from->begin(), from->end());
+    // The first written visibility in declaration order, and every namespace's.
+    for (const auto& [e, v] : p.function_visibility) {
+      FunctionVisibility& into = function_visibility[e];
+      if (into.written == ast::GnuVisibility::none) into.written = v.written;
+      into.namespace_hidden |= v.namespace_hidden;
+      into.namespace_default |= v.namespace_default;
+    }
   }
+  for (FunctionDef& f : tu.functions)
+    f.explicit_weak = weak_declarations.contains(f.entity) && !inline_declarations.contains(f.entity);
   // An `inline` declaration in any group reaches the definition (`unit_of`'s `coalesced`).
   for (FunctionDef& f : tu.functions)
     if (coalesce_if_inline.contains(f.entity)) f.coalesced = inline_declarations.contains(f.entity) && tu.main != f.entity;
@@ -1492,7 +1565,8 @@ TranslationUnit finish_unit(std::vector<UnitPart>& parts, sema::World& world, st
   };
   for (FunctionDef& f : tu.functions) validate_unwind(ins, tu, f, runtime, unwind_provider, unwind_definition);
   unwind_through_constructors(tu, unwind_definition);
-  for (Entity& e : tu.entities) e.hidden = hidden_declarations.contains(e.id);
+  apply_visibility(tu, hidden_declarations, inline_declarations, function_visibility,
+                   world.target.triple == ast::x86_64_linux.triple);
   return tu;
 }
 

@@ -110,10 +110,53 @@ as it was read.
   attached daemon, each request's start, and the end of the watch.
 - `{"note":…}`: a line of text.
 
+The JSON is written as subtrees complete, as ever: a live trace (#939) is the browser's only.
+
 ## The interactive browser
 
 `--trace-engine=interactive` and `ycxx ctl trace --interactive` open a full-screen browser on the
 terminal (`src/trace/browse.cppm`, whose model is `src/trace/view.cppm`). `?` lists its keys.
+
+- **Live** (#939). The browser opens at once and fills in while the build runs, in-process and
+  through the daemon; so do `--watch` and `ctl trace --interactive`, for each request.
+  - A cell appears when its frame starts, `▶ running` (orange) with its worker and the time so
+    far, and turns into its outcome, with its final time and memory, when it ends. Instants
+    (reuses, inputs) appear when they happen. `is:running` filters the running cells.
+  - The tree, sorting, filters, the timeline (running cells reach to now) and the histograms
+    show what has arrived. The header counts the running cells (`▶ 12 running`) beside those
+    that ended and the time so far, and shows the process's memory now and its peak so far
+    (`this build so far:`).
+  - **Following** is on while the build runs: the cell started last that still runs (or its
+    nearest ancestor the tree shows) is selected and kept in view, and the timeline's cursor
+    stays at the end. Any move, scroll or selection of yours stops it (a filter, a worker or a
+    fold does not), and `f` turns it back on; the status line says which. When the build ends,
+    a view still following goes back to the top.
+  - When the build ends the status line says so, and the tree is the one a browser opened after
+    the build would show. Closing the browser earlier waits for the build; either way the outputs
+    are written and the diagnostics printed after the browser closes. One difference: a failed
+    frame's child that ends after it (it was still running) is placed among its siblings by its
+    start, and may fold with them, where after the build it comes last.
+  - A run of the request that is abandoned (a lost daemon, the in-process fallback) starts the
+    tree afresh; with `--watch`, its cells still running when the build ends are shown `failed`,
+    and so are those running when `ctl trace`'s daemon goes away.
+  - A language server's requests have no tick: `ctl trace` gets each one's events when it ends.
+  - Without a terminal (`/dev/tty`), `--trace-engine=interactive` prints the stream after the
+    build, as before.
+  - How it works. A live trace (`trace::Live`) asks the engine for every frame's start
+    (`Tracer::started`) as well as its end, and buffers both as they come; nothing is dropped and
+    no worker waits for the browser. In-process, the browser takes what came on every frame;
+    through the daemon, the request's thread sends what came every 50 ms (a `trace` frame with
+    `live`, the process's memory and the daemon's clock). The tree (`Tree::apply`) takes events
+    in any order: a child before its parent waits for it, unseen; children are kept in start
+    order, and identical instants in a row fold when they are next to each other, so the tree
+    does not depend on the order events came in. The browser draws at most 30 times a second,
+    and less often when a frame takes long to draw, only when something changed.
+  - Cost (#939, a 1 MB generated file of 290 namespaces, 281,000 events, Release, macOS arm64,
+    the minimum of five runs to the process's exit): 1.29 s untraced, 1.76 s with the browser
+    attached, 2.37 s with `--trace-engine=json`; through a new daemon each run, 1.46 s, 1.85 s and
+    2.77 s. The browser closed at once costs the same as one attached (1.76 s), and the frames'
+    starts nothing measurable: what a traced build pays is the trace itself (each value rendered,
+    memory counted).
 
 - **Size.** It draws for the terminal's size and redraws at once when that changes (`SIGWINCH`).
   The summary at the top wraps onto more lines on a narrow screen. Autowrap is off while it runs,

@@ -188,7 +188,7 @@ class GroupFacts {
     }
     str(x_->ns_of[k]);
     str(x_->eff_ns[k]);
-    h.uint(std::uint8_t(x_->in_class[k])).uint(std::uint8_t(x_->qualified[k]));
+    h.uint(std::uint8_t(x_->in_class[k])).uint(std::uint8_t(x_->qualified[k])).uint(std::to_underlying(x_->namespace_visibility[k]));
     if (auto scopes = x_->name_scopes.find(k); scopes != x_->name_scopes.end())
       for (const auto& [ns, eff] : scopes->second) {
         str(ns);

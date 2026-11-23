@@ -90,6 +90,11 @@ struct FunctionInput {
   bool native_array_new = false;  // the backend's Linux x86-64 allocation in a certified frame
   std::span<const ast::EntityId> nonthrowing_functions{};  // native declarations, sorted by entity
   ast::EntityId root_destructor_table = ast::EntityId::none;
+  // The initialized prefix of a flat aggregate while evaluating one selected default.
+  struct InitializedFields {
+    ast::EntityId owner = ast::EntityId::none;
+    std::span<const ast::ConstId> values{};
+  } initialized_fields{};
 };
 
 struct FunctionIr {
@@ -1503,8 +1508,15 @@ class Gen {
   // Evaluates an expression for its side effects ([expr.context]).
   void discard(At a) {
     if (a.id == NodeId::none) return;
-    if (is_lvalue(a)) lvalue(a);
-    else rvalue_or_void(a);
+    const auto expr = info(a);
+    if (expr.category == ast::ValueCategory::prvalue) {
+      rvalue_or_void(a);
+      return;
+    }
+    // Discarding a nonvolatile direct field designator does not read its value.
+    const auto cv = ast::cv_of(expr.type);
+    if ((cv == ast::Cv::none || cv == ast::Cv::const_) && default_field(a)) return;
+    lvalue(a);
   }
 
   ValueId rvalue(At a) {
@@ -1739,14 +1751,62 @@ class Gen {
     std::unreachable();
   }
 
+  // A scalar default's receiver is represented only by its initialized field values.
+  // Recognize side-effect-free designators of that receiver's own non-reference fields.
+  std::optional<uint32_t> default_field(At operand) {
+    const auto owner = fn_.initialized_fields.owner;
+    if (owner == ast::EntityId::none || this_) return std::nullopt;
+    operand = strip_parens(operand);
+    if (!is<ast::Member>(operand)) return std::nullopt;
+    const auto member = get<ast::Member>(operand);
+    if (member.reference) return std::nullopt;
+    At receiver = strip_parens(child(operand, member.object));
+    if (!member.arrow) {
+      if (!is<ast::Unary>(receiver)) return std::nullopt;
+      const auto dereference = get<ast::Unary>(receiver);
+      if (dereference.op != ast::UnaryOp::deref) return std::nullopt;
+      receiver = strip_parens(child(receiver, dereference.operand));
+    }
+    if (!is<ast::This>(receiver) || facts_.class_entity(facts_.pointee(info(receiver).type)) != owner)
+      return std::nullopt;
+    return member.field;
+  }
+
+  ValueId load_glvalue(At operand, ast::QualType type) {
+    if (fn_.initialized_fields.owner != ast::EntityId::none && !this_) {
+      operand = strip_parens(operand);
+      // The conversion reads only the glvalue selected by the conditional. Join the
+      // values from that read, so neither arm needs an address for any initialized field.
+      const auto kind = cls(type);
+      if (kind == TypeClass::integer || kind == TypeClass::bool_) {
+        if (is<ast::Conditional>(operand))
+          return *conditional(operand, false, type).value;
+        if (is<ast::OrderedBinary>(operand)) {
+          const auto binary = get<ast::OrderedBinary>(operand);
+          if (binary.op == ast::OrderedOp::comma) {
+            discard(child(operand, binary.lhs));
+            return load_glvalue(child(operand, binary.rhs), type);
+          }
+        }
+      }
+      if (auto field = default_field(operand)) {
+        const auto values = fn_.initialized_fields.values;
+        if (*field < values.size()) return constant(type, values[*field]);
+        // This field's initialization has not completed. Let a read fail only if it executes.
+        return load(begin_object(type, ir::Init::indeterminate));
+      }
+    }
+    return load(lvalue(operand));
+  }
+
   std::optional<ValueId> conversion(At a) {
     auto c = get<ast::ImplicitConversion>(a);
     ast::QualType t = c.info.type;
     At from = child(a, c.operand);
     switch (c.conversion) {
       case ast::ConversionKind::lvalue_to_rvalue: {
+        if (!is_nullptr(t)) return load_glvalue(from, t);
         Place p = lvalue(from);
-        if (!is_nullptr(t)) return load(p);
         // [conv.lval]: a std::nullptr_t glvalue is evaluated without accessing its object.
         ir::Ty result[] = {vty(t)};
         ValueId operands[] = {state_, p.ptr};
@@ -2241,9 +2301,9 @@ class Gen {
     std::optional<ValueId> value;
     Place place;
   };
-  Chosen conditional(At a, bool glvalue) {
+  Chosen conditional(At a, bool glvalue, std::optional<ast::QualType> load_type = std::nullopt) {
     auto c = get<ast::Conditional>(a);
-    ast::QualType t = c.info.type;
+    ast::QualType t = load_type.value_or(c.info.type);
     bool has_value = glvalue || cls(t) != TypeClass::void_;
     ast::QualType jt = glvalue ? facts_.pointer_to(t) : t;
     ValueId cv = rvalue(child(a, c.condition));
@@ -2263,7 +2323,7 @@ class Gen {
         live_ = false;
         return {};
       }
-      if (!glvalue) return rvalue(x);
+      if (!glvalue) return load_type ? load_glvalue(x, t) : rvalue(x);
       Place place = lvalue(x);
       if (!bit_field_result) return place.ptr;
       // The only arm that reaches the join owns the enclosing record pointer.

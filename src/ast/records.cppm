@@ -19,6 +19,7 @@ enum class DeclKind : u8 { namespace_, class_, enum_, enumerator, variable, func
 enum class Linkage : u8 { none, internal, module, external };
 enum class Storage : u8 { none, static_, thread_local_, extern_, automatic };
 enum class Access : u8 { none, public_, protected_, private_ };
+enum class GnuVisibility : u8 { none, default_, hidden };
 
 // A template argument (§5.6): a type, or a value converted to its parameter's type
 // ([temp.arg.nontype]); `type` is canonical, and a value's is the value's type. A pack parameter's
@@ -108,9 +109,12 @@ struct DeclSema {
   bool has_written_noexcept = false;
   bool has_trailing_return = false;
   bool hidden_visibility = false;  // an explicit GNU visibility("hidden") attribute on this declaration
+  bool explicit_weak = false;  // an explicit GNU weak attribute on this declaration
   bool is_pure = false;  // a written pure-specifier ([class.abstract])
   SeqId<AnnotationSema> annotations{};  // the occurrences written on this declaration
   bool is_final = false;  // written on a class head or virtual member ([class.pre], [class.virtual])
+  bool explicit_default_visibility = false;
+  GnuVisibility namespace_visibility = GnuVisibility::none;  // lexical namespace-definition occurrence
   constexpr bool operator==(const DeclSema&) const = default;
 };
 

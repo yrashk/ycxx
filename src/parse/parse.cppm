@@ -215,6 +215,7 @@ public:
     // By declared name: (item, index in its names), in order; a lookup visits only its own name's.
     std::unordered_map<std::string_view, std::vector<std::pair<u32, u32>>> by_name;
     std::vector<std::string> ns_of, eff_ns;  // by item
+    std::vector<ast::GnuVisibility> namespace_visibility;  // by item: its enclosing namespaces' attribute
     // A namespace definition's components' namespaces, as declared and for lookup, by name
     // (`namespace a::b` declares `a` in the enclosing namespace and `b` in `a`).
     std::map<u32, std::vector<std::pair<std::string, std::string>>> name_scopes;
@@ -253,6 +254,8 @@ public:
     x.eff_ns.assign(its.size(), "");
     x.in_class.assign(its.size(), false);
     x.inner_of.assign(its.size(), "");
+    x.namespace_visibility.assign(its.size(), ast::GnuVisibility::none);
+    const bool linux = w.target.triple == ast::x86_64_linux.triple;
     std::vector<std::string> inner_eff(its.size());
     for (u32 k = 0; k < its.size(); ++k) {  // preorder: a parent comes first
       u32 p = its[k].parent;
@@ -261,6 +264,7 @@ public:
         bool ns = its[p].kind == ItemKind::namespace_def;
         x.ns_of[k] = ns ? x.inner_of[p] : x.ns_of[p];
         x.eff_ns[k] = ns ? inner_eff[p] : x.eff_ns[p];
+        x.namespace_visibility[k] = x.namespace_visibility[p];
       }
       if (its[k].kind != ItemKind::namespace_def) continue;
       // The identifiers of `namespace a::inline b`, or none for an unnamed one; `inline` before
@@ -268,25 +272,35 @@ public:
       // in the namespace the ones before it name.
       std::vector<std::pair<std::string, bool>> names;
       bool is_inline = false;
+      bool after_namespace = false;
+      DeclAttributes attributes;
       for (u32 t = its[k].begin; t < its[k].brace_begin; ++t) {
         // Past attributes, `[[…]]` and `__attribute__((…))`.
         if (r.tokens[t].kind == lex::Tk::l_square || r.tokens[t].kind == lex::Tk::l_paren) {
+          const u32 begin = t;
+          const bool scoped = r.tokens[t].kind == lex::Tk::l_square;
           int depth = 0;
           for (; t < its[k].brace_begin; ++t) {
             lex::Tk x = r.tokens[t].kind;
             depth += (x == lex::Tk::l_square || x == lex::Tk::l_paren) - (x == lex::Tk::r_square || x == lex::Tk::r_paren);
             if (depth == 0) break;
           }
+          if (linux && after_namespace && depth == 0 &&
+              (scoped || (begin > its[k].begin && r.tokens[begin - 1].kind == lex::Tk::identifier &&
+                          r.name(r.tokens[begin - 1]) == "__attribute__")))
+            Parser::read_decl_attributes(attributes, r, begin, t + 1, scoped);
           continue;
         }
         if (r.tokens[t].kind == lex::Tk::identifier && t + 1 < its[k].brace_begin && r.tokens[t + 1].kind == lex::Tk::l_paren)
           continue;  // `__attribute__`, whose parentheses come next
+        if (r.tokens[t].kind == lex::Tk::kw_namespace) after_namespace = true;
         if (r.tokens[t].kind == lex::Tk::kw_inline) is_inline = true;
         if (r.tokens[t].kind == lex::Tk::identifier) {
           names.push_back({std::string(r.name(r.tokens[t])), is_inline});
           is_inline = false;
         }
       }
+      if (attributes.visibility != ast::GnuVisibility::none) x.namespace_visibility[k] = attributes.visibility;
       bool anonymous = names.empty();
       if (anonymous) names.push_back({"(anonymous)", true});
       x.inner_of[k] = x.ns_of[k];
@@ -400,7 +414,8 @@ public:
   std::optional<EntityId> automatic_derived_vtable_key(EntityId cls) const;
   bool peer_pure_dispatch(EntityId cls) const;
   bool has_typed_dynamic_cast() const { return has_typed_dynamic_cast_; }
-  bool peer_typed_dynamic_cast(EntityId source, EntityId target) const;
+  enum class TypedCastRtti { unsupported, imported, keyless_base };
+  TypedCastRtti peer_typed_dynamic_cast(EntityId source, EntityId target) const;
   // A fieldless virtual root whose destructor may be emitted against a peer's table (#136).
   bool peer_root_destructor_producer(EntityId cls) const;
   bool peer_root_destructor_observer(EntityId function, EntityId cls) const;
@@ -1601,6 +1616,7 @@ private:
   const std::vector<std::string>& ns_of_ = ix_->ns_of;
   const std::vector<std::string>& eff_ns_ = ix_->eff_ns;
   const std::map<u32, std::vector<std::pair<std::string, std::string>>>& name_scopes_ = ix_->name_scopes;
+  const std::vector<ast::GnuVisibility>& namespace_visibility_ = ix_->namespace_visibility;  // by lexical occurrence
   const std::string& name_ns(u32 item, u32 name) const {
     auto it = name_scopes_.find(item);
     return it != name_scopes_.end() && name < it->second.size() ? it->second[name].first : ns_of_[item];
@@ -2832,11 +2848,11 @@ private:
     LangLinkage lang = enclosing.value_or(LangLinkage::cxx);
     bool explicit_lang = enclosing.has_value();
     u32 attrs_at = ps_.pos();
-    bool hidden_visibility = false;
+    DeclAttributes leading_attributes;
     // [dcl.link]: a linkage-specification has no attribute-specifier-seq.
     // (GNU attributes there are accepted, as GCC and Clang do.)
     std::vector<ast::AnnotationSema> annotations;
-    const int attributes = ps_.skip_attributes(&hidden_visibility, Parser::attr_std | Parser::attr_gnu, &annotations);
+    const int attributes = ps_.skip_attributes(&leading_attributes, Parser::attr_std | Parser::attr_gnu, &annotations);
     if ((attributes & Parser::attr_std) && ps_.is(Tk::kw_extern) && ps_.kind(1) == Tk::string_lit) {
       s_.diag(attrs_at, Diag::attributes_not_allowed);
       return bad();
@@ -2847,11 +2863,11 @@ private:
       if (!l) s_.diag(at, Diag::unknown_linkage);
       lang = l.value_or(LangLinkage::cxx);
       explicit_lang = true;
-      single_linkage_spec_ = true;  // [dcl.link]/7: it declares as if `extern` were given
+      single_linkage_spec_ = true;  // [dcl.link]: it declares as if `extern` were given
       ps_.bump();
       ps_.bump();
       while (ps_.is(Tk::string_lit) && ps_.tok().has(lex::tok_flag::continued)) ps_.bump();
-      ps_.skip_attributes(&hidden_visibility, Parser::attr_std | Parser::attr_gnu, &annotations);
+      ps_.skip_attributes(&leading_attributes, Parser::attr_std | Parser::attr_gnu, &annotations);
     }
     ps_.set_linkage(lang);
     // `template<>`: an explicit specialization ([temp.expl.spec]) of a class, function or variable
@@ -3073,7 +3089,8 @@ private:
     }
     s_.defer_type_access = true;
     DeclSpec spec = ps_.decl_specifiers();
-    spec.hidden_visibility |= hidden_visibility;
+    spec.attributes.visibility = std::max(spec.attributes.visibility, leading_attributes.visibility);
+    spec.attributes.weak |= leading_attributes.weak;
     if (spec.ok && spec.elaborated && s_.types().is_enum(spec.type)) {
       EntityId e = s_.types().enum_of(spec.type);
       if (!ps_.is(Tk::semi) || s_.world().entities.rec(e).scope == ns_entity()) {
@@ -6286,21 +6303,29 @@ private:
       sem.entity = s_.world().entities.entity(
           {sema::EntityKind::variable, d.name, d.type, LangLinkage::cxx, ast::Linkage::external, {}, c.entity});
       sem.flags = flags;
-      // Member lookup in the class being defined handles earlier direct members. The supported
-      // owning class has no enclosing class or bases to search while it is incomplete.
-      const bool direct_list = spec.is_constexpr && ps_.is(Tk::l_brace) && s_.template_scopes.empty() && !inst_ &&
-                               p_->is_namespace(s_.world().entities.rec(c.entity).scope) &&
-                               q_.defining_base_records(c.entity).empty() && supports_static_constexpr_aggregate(d.type);
+      // Lookup while an ordinary class is incomplete handles earlier direct members. Inherited
+      // names also need the incomplete-class base lookup in #967 before this path can use them.
+      const bool braced = ps_.is(Tk::l_brace) || (ps_.is(Tk::equal) && ps_.kind(1) == Tk::l_brace);
+      bool list_initialization = false;
+      if (braced && (spec.is_inline || spec.is_constexpr) && s_.template_scopes.empty() && !inst_ &&
+          p_->is_namespace(s_.world().entities.rec(c.entity).scope) && q_.defining_base_records(c.entity).empty()) {
+        const QualType element = types.is_array(d.type) ? types.rec(d.type).inner : d.type;
+        const bool scalar = types.is_integral(element) || types.is_pointer(element) ||
+                            (types.is_standard_floating(element) &&
+                             ast::computes(ast::float_format(s_.ins(), s_.world().target, element)));
+        list_initialization = scalar ||
+                              (spec.is_constexpr && ps_.is(Tk::l_brace) && supports_static_constexpr_aggregate(d.type));
+      }
       auto declare_member_name = [&] {
         s_.own.push_back({d.name, sem});
         if (!member_value_) p_->declared(sem, k_);
       };
       // [basic.scope.pdecl]: the member's name and type are visible in its initializer.
-      if (direct_list) declare_member_name();
+      if (list_initialization) declare_member_name();
       // A member whose initializer is in error is still declared, so its uses say nothing more.
       const u32 ordinal = u32(decls_.size());
       auto declare_member = [&](ConstId v, const Ex& e) {
-        if (!direct_list) declare_member_name();
+        if (!list_initialization) declare_member_name();
         declarators_.push_back(s_.node(ast::Declarator{ordinal, sema::Sema::at(e, d.begin), v}, d.begin, ps_.pos()));
         decls_.push_back(sem);
       };
@@ -6315,12 +6340,12 @@ private:
           return true;
         }
       }
-      if (direct_list || early || ps_.accept(Tk::equal)) {
+      if (list_initialization || early || ps_.accept(Tk::equal)) {
         u32 at;
-        if (direct_list) {
-          auto list = ps_.braced_init_list();
-          at = list->begin;
-          init = s_.list_init(d.type, *list, sema::Construction::direct_list);
+        if (list_initialization) {
+          const auto form = ps_.accept(Tk::equal) ? sema::Construction::copy_list : sema::Construction::direct_list;
+          at = ps_.pos();
+          init = ps_.member_initializer(d.type, true, form);
         } else {
           Ex e = early ? *early : ps_.assignment_expression();
           if (!inst_) p_->set_static_init_end(k_, ordinal, ps_.index());
@@ -6349,11 +6374,11 @@ private:
           declare_member(ConstId::none, {});
           return false;
         }
-        // An aggregate list can be evaluated element by element ([dcl.init.aggr]).
+        // Scalar lists and aggregate elements use the same constant initializer path ([dcl.init.list]).
         // The general evaluator needs class result storage to return a class value (#25).
         sema::Evaluator evaluator(s_, q_);
         const bool aggregate = spec.is_constexpr && types.is_class(d.type) && s_.as<ast::InitList>(init);
-        sema::Evaluated v = aggregate ? evaluator.evaluate_initializer(init) : evaluator.evaluate(init);
+        sema::Evaluated v = list_initialization || aggregate ? evaluator.evaluate_initializer(init) : evaluator.evaluate(init);
         if (!v.value) {
           s_.diag(at, usable ? Diag::not_constant : Diag::nonconstant_initializer, v.reason);
           declare_member(ConstId::none, {});
@@ -6556,6 +6581,8 @@ private:
         s_, (spec.is_constexpr || spec.is_constinit) && !types.is_function(d.type),
         /*trial=*/!types.is_function(d.type));
     u32 ord = static_cast<u32>(decls_.size());
+    // [dcl.link]: a single declaration is treated as `extern` for name linkage and definition.
+    const bool effective_extern = spec.is_extern || single_linkage_spec_;
     // `T a[] = {…}`: the bound from the list ([dcl.array]/8), parsed here and used below.
     std::unique_ptr<sema::Braced> early;
     if (d.unknown_bound && ps_.is(Tk::equal) && ps_.kind(1) == Tk::string_lit) {
@@ -6565,7 +6592,7 @@ private:
     } else if (d.unknown_bound && !(ps_.is(Tk::l_brace) || (ps_.is(Tk::equal) && ps_.kind(1) == Tk::l_brace))) {
       // `extern T a[];`: an incomplete type ([dcl.array]/6); a definition needs a bound.
       d.type = types.array_unknown(d.type);
-      if (!spec.is_extern && !single_linkage_spec_) {
+      if (!effective_extern) {
         s_.diag(d.name_at, Diag::incomplete_type, d.type);
         return false;
       }
@@ -6584,7 +6611,7 @@ private:
     // [basic.link]/3–4: static, certain const declarations, and names in unnamed namespaces.
     const auto has_internal_linkage = [&] {
       return spec.is_static || Program::unnamed(p_->ns_of(k_)) ||
-             (!fn && sema::Types::is_const(d.type) && !spec.is_extern && !spec.is_inline && !template_ && !explicit_);
+             (!fn && sema::Types::is_const(d.type) && !effective_extern && !spec.is_inline && !template_ && !explicit_);
     };
     const auto declaration_entity = [&](sema::EntityKind kind, QualType type, ast::Linkage linkage, sema::Fp128 head) {
       sema::EntityRec record{kind, d.name, type, lang, linkage,
@@ -6665,7 +6692,7 @@ private:
     if (deleted) is_function_def = true;
     if (deleted) flags |= sema::decl_flag::deleted;
     bool has_init = !deleted && (early || early_expr || ps_.is(Tk::equal) || ps_.is(Tk::l_brace) || (!fn && ps_.is(Tk::l_paren)));
-    bool definition = fn ? is_function_def || deleted : !((spec.is_extern || single_linkage_spec_) && !has_init);
+    bool definition = fn ? is_function_def || deleted : !(effective_extern && !has_init);
     if (!fn && definition &&
         (!s_.require_concrete_object(d.type, d.name_at) || !s_.require_supported_virtual_layout(d.type, d.name_at)))
       return false;
@@ -6985,9 +7012,20 @@ private:
       return false;
     }
     if (fn && p_->world().ins.names.spelling(d.name) == "main") check_main(spec, sem, d, lang);
-    if ((spec.hidden_visibility || d.hidden_visibility) && fn && !template_ && !explicit_ && !ordinary_friend &&
-        sem.linkage == ast::Linkage::external && (!d.qualified || d.scope.ns))
+    const auto visibility = std::max(spec.attributes.visibility, d.attributes.visibility);
+    const bool ordinary_external = !template_ && !explicit_ && !ordinary_friend &&
+                                   sem.linkage == ast::Linkage::external && (!d.qualified || d.scope.ns);
+    if (ordinary_external && visibility == ast::GnuVisibility::hidden &&
+        (fn || (!var_ && !(sem.flags & sema::decl_flag::inline_))))
       sem.hidden_visibility = true;
+    if (ordinary_external && fn && !(sem.flags & (sema::decl_flag::inline_ | sema::decl_flag::member))) {
+      if (spec.attributes.weak || d.attributes.weak) sem.explicit_weak = true;
+      if (p_->world().target.triple == ast::x86_64_linux.triple) {
+        sem.explicit_default_visibility = visibility == ast::GnuVisibility::default_;
+        // A qualified definition uses the namespace facts from its resolved declaration.
+        if (!d.qualified) sem.namespace_visibility = p_->namespace_visibility_[k_];
+      }
+    }
 
     // The initializer ([dcl.init]); the name is in scope from the end of its declarator.
     // An explicit or partial specialization, or an instantiation, declares no name: the
@@ -7065,7 +7103,7 @@ private:
             value = *v.value;
             if (spec.is_constexpr) p_->set_constant(sem.entity, *v.value, k_);
           } else if (!v.type_trait_failure) {
-            dynamic_ok(b->begin, sema::Evaluator(s_, q_).evaluate(init).reason);
+            dynamic_ok(b->begin, v.reason);
           }
         }
       }
@@ -7089,11 +7127,10 @@ private:
           ConstId lit = ConstId::none;
           if (types.is_enum(d.type))
             if (auto l = s_.as<ast::Literal>(init)) lit = l->value;
-          // A character array from a string literal is its elements' list ([dcl.init.string]).
+          // Evaluate an aggregate or character array by its elements ([dcl.init.aggr], [dcl.init.string]).
           sema::Evaluator evaluator(s_, q_);
-          sema::Evaluated list = s_.as<ast::InitList>(init) ? evaluator.evaluate_initializer(init) : sema::Evaluated{};
           sema::Evaluated v = lit != ConstId::none ? sema::Evaluated{lit, 0, true}
-                                  : list.value || list.type_trait_failure ? list : evaluator.evaluate(init);
+                                  : s_.as<ast::InitList>(init) ? evaluator.evaluate_initializer(init) : evaluator.evaluate(init);
           if (v.value) {
             value = *v.value;
             if (spec.is_constexpr || (sema::Types::is_const(d.type) && !sema::Types::is_volatile(d.type) &&
@@ -7165,7 +7202,7 @@ private:
       else if (sema::Types::is_const(d.type)) s_.diag(d.name_at, Diag::const_uninitialized, d.name);
     } else if (!fn && spec.is_constexpr) {
       s_.diag(d.name_at, Diag::constexpr_uninitialized, d.name);
-    } else if (!fn && sema::Types::is_const(d.type) && !spec.is_extern) {
+    } else if (!fn && sema::Types::is_const(d.type) && !effective_extern) {
       s_.diag(d.name_at, Diag::const_uninitialized, d.name);
     }
     if (value != ConstId::none && (requires_constinit || s_.folded_immediate_result != EntityId::none))
@@ -7679,20 +7716,28 @@ std::optional<EntityId> Program::automatic_derived_vtable_key(EntityId cls) cons
   return key;
 }
 
-bool Program::peer_typed_dynamic_cast(EntityId source, EntityId target) const {
+Program::TypedCastRtti Program::peer_typed_dynamic_cast(EntityId source, EntityId target) const {
   using sema::PeerVirtualLayout;
   const auto* base = classes_.find(source);
   const auto* derived = classes_.find(target);
+  if (w_->target.triple != ast::x86_64_linux.triple || !base || !derived || r_->has_clang_attribute_pragma)
+    return TypedCastRtti::unsupported;
+  // The automatic-primary-base certificate covers the pure base, the public edge and the
+  // directly declared override. A complete-unit check must still leave the key to a peer.
+  if (derived->peer_automatic_primary_base == source) {
+    const auto key = automatic_derived_vtable_key(target);
+    return key && *key == EntityId::none ? TypedCastRtti::keyless_base : TypedCastRtti::unsupported;
+  }
   // The primary-base profile establishes public nonvirtual inheritance at offset zero.
-  if (!base || !derived || base->peer_virtual_layout != PeerVirtualLayout::root ||
+  if (base->peer_virtual_layout != PeerVirtualLayout::root ||
       derived->peer_virtual_layout != PeerVirtualLayout::primary_base || derived->bases.size() != 1 ||
-      derived->bases.front().cls != source || r_->has_clang_attribute_pragma)
-    return false;
+      derived->bases.front().cls != source)
+    return TypedCastRtti::unsupported;
   const auto base_key = sema::borrowed_dynamic_cast_key(*base, w_->types);
   const auto derived_key = sema::borrowed_dynamic_cast_key(*derived, w_->types);
-  if (base_key == EntityId::none || derived_key == EntityId::none) return false;
+  if (base_key == EntityId::none || derived_key == EntityId::none) return TypedCastRtti::unsupported;
   const auto override = std::ranges::find(derived->members, derived_key, &sema::MemberDeclRec::entity);
-  if (override->overridden_virtual != base_key) return false;
+  if (override->overridden_virtual != base_key) return TypedCastRtti::unsupported;
 
   const auto peer_owned = [&](EntityId cls, const sema::ClassRec& record, EntityId key) {
     const auto& owner = w_->entities.rec(cls);
@@ -7711,7 +7756,8 @@ bool Program::peer_typed_dynamic_cast(EntityId source, EntityId target) const {
     return !(decl.flags & excluded) && !decl.hidden_visibility &&
            items_->items[item].kind == ItemKind::declaration && !in_attributed_namespace(item);
   };
-  return peer_owned(source, *base, base_key) && peer_owned(target, *derived, derived_key);
+  return peer_owned(source, *base, base_key) && peer_owned(target, *derived, derived_key)
+             ? TypedCastRtti::imported : TypedCastRtti::unsupported;
 }
 
 bool Program::peer_pure_dispatch(EntityId cls) const {

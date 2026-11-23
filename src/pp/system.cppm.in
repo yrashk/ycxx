@@ -1,6 +1,7 @@
 // The system include directories of this build (configured by CMake): libycxx's headers, the
-// ones libycxx's build generated, ycxx's resource headers for Linux, and the target's C
-// library headers. Linux uses native system directories and Darwin uses a selected SDK.
+// ones libycxx's build generated, ycxx's resource headers (Linux's own, then those every target
+// shares), and the target's C library headers. Linux uses native system directories and Darwin
+// uses a selected SDK.
 export module ycxx.pp:system;
 
 import std;
@@ -20,11 +21,13 @@ std::vector<std::string> system_dirs(const ast::Target& target, std::string_view
   std::vector<std::string> dirs{"@YCXX_LIBYCXX_INCLUDE@", "@YCXX_LIBYCXX_GENERATED_INCLUDE@"};
   if (target.triple == ast::x86_64_linux.triple) {
     dirs.push_back("@YCXX_LINUX_RESOURCE_INCLUDE@");
+    dirs.push_back("@YCXX_COMMON_RESOURCE_INCLUDE@");
     if (native_target == &ast::x86_64_linux) {
       dirs.push_back(std::format("/usr/include/{}", target.multiarch));
       dirs.push_back("/usr/include");
     }
   } else if (target.triple == ast::aarch64_darwin.triple) {
+    dirs.push_back("@YCXX_COMMON_RESOURCE_INCLUDE@");
     namespace fs = std::filesystem;
     auto sdk = fs::path(sdkroot.empty() ? std::string_view("@CMAKE_OSX_SYSROOT@") : sdkroot).lexically_normal();
     std::error_code ec;

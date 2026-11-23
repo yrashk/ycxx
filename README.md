@@ -52,7 +52,7 @@ A class template can grant private access to the class passed as a type argument
 and Mach-O linker on arm64 macOS, where `arm64-apple-darwin` is the default target. It also links
 object files from Clang or GCC, and static archives (`.a`) made by the system `ar`. Programs
 link libycxx's runtime by default, so `<cstdio>` works (`-nostdlib++` leaves it out)
-([#842](https://github.com/yrashk/ycxx/issues/842)). Variadic functions can be defined with `<cstdarg>` on both
+([#842](https://github.com/yrashk/ycxx/issues/842)). Variadic functions can be defined with `<cstdarg>` or `<stdarg.h>` on both
 macOS and Linux ([#647](https://github.com/yrashk/ycxx/issues/647)). Errors are reported as
 `file:line:col: error: …`.
 Errors during replay of a written default member initializer point to the initializer.
@@ -131,7 +131,9 @@ its code, data and relocations. [#422](https://github.com/yrashk/ycxx/issues/422
 creates or replaces a deterministic indexed GNU archive from supported x86-64 ELF objects.
 Static links accept these archives and compatible archives from system `ar`. Place an archive
 after the inputs that reference its members, and include at least one source or ordinary object.
-[#389](https://github.com/yrashk/ycxx/issues/389), [#388](https://github.com/yrashk/ycxx/issues/388)
+Resident links reread explicit archives on each request.
+[#389](https://github.com/yrashk/ycxx/issues/389), [#388](https://github.com/yrashk/ycxx/issues/388),
+[#951](https://github.com/yrashk/ycxx/issues/951)
 
 An explicit dynamic link uses ycxx's startup and the target loader. Supply the absolute target
 interpreter path and explicit, self-contained shared objects with GNU or SysV hash tables and
@@ -188,12 +190,24 @@ support those addresses. [#414](https://github.com/yrashk/ycxx/issues/414)
 On both targets, direct calls and saved pointers across translation units share one address for
 simple external inline functions, with ycxx's linker or the system's. Ordinary namespace-scope
 functions can use GNU hidden visibility, including coalesced inline and `constexpr` definitions.
+On Linux x86-64, ordinary external non-inline namespace variables also preserve GNU hidden
+visibility across declarations.
 [#422](https://github.com/yrashk/ycxx/issues/422) · [#602](https://github.com/yrashk/ycxx/issues/602)
-· [#124](https://github.com/yrashk/ycxx/issues/124)
+· [#124](https://github.com/yrashk/ycxx/issues/124) · [#936](https://github.com/yrashk/ycxx/issues/936)
 
-External inline namespace variables with relocation-free static initializers share one object
-across translation units on both targets. On Linux this lets two freestanding units using libycxx
-`<cstddef>` link with the pinned static library. [#432](https://github.com/yrashk/ycxx/issues/432)
+On Linux x86-64, an ordinary external namespace-scope function can use GNU `weak` so a
+strong definition in another object takes precedence. This covers the pinned libycxx
+debugger provider. [#937](https://github.com/yrashk/ycxx/issues/937)
+
+On Linux x86-64, an ordinary external non-inline function can inherit GNU visibility
+from its enclosing namespace declaration and use it at an out-of-line definition.
+[#940](https://github.com/yrashk/ycxx/issues/940)
+
+External inline namespace variables and in-class static constexpr members of ordinary namespace-scope
+classes share one object across translation units on both targets when their initial values need
+no relocations or runtime work. On Linux this lets two freestanding units using libycxx `<cstddef>`
+link with the pinned static library. [#432](https://github.com/yrashk/ycxx/issues/432)
+· [#903](https://github.com/yrashk/ycxx/issues/903)
 
 ycxx ELF objects record function types and code sizes. The ELF linker accepts supported
 system-assembled objects with function symbols and the GNU-built libycxx static linkage-marker
@@ -360,6 +374,9 @@ written default member initializer are value-initialized.
   declaration, including definitions written inside their namespace and qualified definitions
   outside it. [#426](https://github.com/yrashk/ycxx/issues/426),
   [#455](https://github.com/yrashk/ycxx/issues/455)
+  A single `extern "C"` or `extern "C++"` declaration gives an ordinary namespace `const`
+  variable the linkage and definition rules of a written `extern` storage specifier.
+  [#942](https://github.com/yrashk/ycxx/issues/942)
 - ordinary scalar `new` and single-object `delete` for integral and pointer objects, including
   cv-qualified objects. Scalar allocation uses the global Itanium allocation functions.
   Syntax checking also covers one-dimensional scalar `new T[n]` and `delete[] p`.
@@ -514,9 +531,14 @@ written default member initializer are value-initialized.
   and runtime field access. Direct-list braces also work for aggregates of public integral
   fields in namespace-scope classes without bases.
   [#262](https://github.com/yrashk/ycxx/issues/262)
+  Inline static integral, pointer, and supported floating-point members can use constant
+  direct and copy lists in those classes, including fixed arrays of those types.
+  [#964](https://github.com/yrashk/ycxx/issues/964)
   Constant expressions can read non-mutable integral and enumeration fields of flat
   namespace-scope constexpr aggregates.
   [#862](https://github.com/yrashk/ycxx/issues/862) · [#876](https://github.com/yrashk/ycxx/issues/876)
+  A default member initializer in a flat constexpr aggregate can directly read an earlier
+  integral or enumeration field. [#895](https://github.com/yrashk/ycxx/issues/895)
   Namespace-scope `constexpr` pointers to `void` can retain scalar and array element addresses.
   `__builtin_addressof`, used by libycxx's `std::addressof`, bypasses overloaded `operator&`.
   It supports runtime addresses and constant expressions such as a scalar global's address.
@@ -530,11 +552,13 @@ written default member initializer are value-initialized.
 macros, conditionals, `_Pragma` and the predefined macros. `ycxx cxx -E` matches Clang's output.
 `ycxx cxx -E --target=x86_64-linux-gnu` selects Linux macros and resource headers. On native
 x86-64 Linux it also searches glibc's multiarch include path and preprocesses glibc's `<stdio.h>`.
-Linux `<stdarg.h>` supplies the `va_list` declaration, and direct `<float.h>` and `<limits.h>`
-provide the target's numeric limits. On native Linux, glibc's `<stdint.h>` and the pinned libycxx's
+`<stdarg.h>` supplies `va_list` and its macros on both targets. On Linux, direct `<float.h>` and
+`<limits.h>` provide the target's numeric limits. On native Linux, glibc's `<stdint.h>` and the pinned libycxx's
 hosted `<cstdint>`, `<cinttypes>`, and `<inttypes.h>` compile. A Darwin target can use the configured
 SDK or one selected by `SDKROOT`. Cross-target builds can also supply target headers with `-I` or
 `-isystem`. When no target `<stdint.h>` is available, `<cstdint>` uses compiler predefines.
+`-nostdinc` omits the automatic include directories and keeps the explicit ones.
+[#251](https://github.com/yrashk/ycxx/issues/251) ·
 [#475](https://github.com/yrashk/ycxx/issues/475) · [#657](https://github.com/yrashk/ycxx/issues/657) ·
 [#664](https://github.com/yrashk/ycxx/issues/664) · [#690](https://github.com/yrashk/ycxx/issues/690)
 
@@ -559,7 +583,9 @@ reused, verified green or cut off early, how long it took and on which worker, a
 memory each cell allocated and retains, with sums per subtree, per query kind and per build. A second build
 shows everything reused. A compile error is marked red at the cell where it starts, and its
 message is shown up to the root. Diagnostic details include the file, line and column where
-available. `--trace-engine=interactive` opens a browser of the trace after the compile: a tree
+available. `--trace-engine=interactive` opens a browser of the trace that fills in while the
+compile runs, through the daemon or in-process: cells appear as they start, with their time so far,
+and settle as they end, while the view follows the newest activity. It has a tree
 with each function's IR and assembly, a timeline of the pool's workers, and filters. It follows
 the terminal's size and takes the mouse: click to select, fold and sort by a column, use the
 wheel to scroll, and drag to resize the pane. It copies a cell, a subtree, selected rows or any
@@ -614,7 +640,10 @@ On Linux x86-64, `dynamic_cast<D*>(p)` also supports a fieldless root `B` and it
 derived class `D` with one public nonvirtual base `B`. Each class declares one public virtual
 `int` member with no arguments, and `D` overrides that member. The hosted C++ peer defines
 both key functions and links the consumer with their RTTI and the cast runtime.
-[#294](https://github.com/yrashk/ycxx/issues/294)
+The cast also supports a keyless `B` with one public pure `int f()` and a `D` with its public
+override and one public `int` field. The consumer emits weak base RTTI, and the hosted peer
+supplies the derived key, its RTTI, and the cast runtime.
+[#294](https://github.com/yrashk/ycxx/issues/294) · [#930](https://github.com/yrashk/ycxx/issues/930)
 
 **Structured bindings.** Local bindings can copy or alias scalar-element arrays, including
 multidimensional arrays. They can also copy or alias ordinary non-template classes without

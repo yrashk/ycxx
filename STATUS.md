@@ -216,7 +216,10 @@ What is true of the code today. Work in progress and its owners are tracked in
     resource headers (#133). A native Linux build also searches `/usr/include/x86_64-linux-gnu`
     and `/usr/include` (#252). Darwin searches the configured SDK's `usr/include`, with a request's
     `SDKROOT` as an override. Cross-target requests without a target SDK can use explicit include
-    directories (#690);
+    directories (#690). `-nostdinc` omits those automatic include roots, including the
+    bundled library and resource headers, while keeping explicit `-I`, `-isystem`,
+    and `-iquote` paths, source-relative quoted includes, and macros.
+    [#251](https://github.com/yrashk/ycxx/issues/251)
   - `#define` and `#undef` with the redefinition check, rescanning and painting
     ([cpp.rescan]);
   - function-like macros (`:unit`'s `invocation`, `substitute`, `paste`): arguments across
@@ -419,8 +422,8 @@ stay open for the rest.
   their size rounded to 8. `va_arg` loads the slot and advances the cursor by 8, `va_copy`
   copies it and `va_end` does nothing. `own/variadic/definitions` calls ycxx's definitions
   from ycxx and from a Clang peer, and lets the peer's `va_arg` read a cursor ycxx started.
-  It fails if the named stack size is ignored or the cursor advances by 4. `<stdarg.h>`
-  itself is missing on Darwin ([#676](https://github.com/yrashk/ycxx/issues/676)); `<cstdarg>` works.
+  It fails if the named stack size is ignored or the cursor advances by 4. `<stdarg.h>` works
+  as well as `<cstdarg>` ([#676](https://github.com/yrashk/ycxx/issues/676), see the compiler resource `<stdarg.h>` section).
 - Not yet: the allocation
   validator and dependence checker (#29), SSA linear scan, list scheduling, unwind info and DWARF,
   a measured `cost_model` (#9), more than one result, frame objects aligned above 16 bytes.
@@ -649,7 +652,7 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
     libycxx's link options force undefined (`___ycxx_allocation_table_anchor`, read from its
     `ycxx-link-options`). Members are selected as for any Darwin archive, so `<cstdio>` programs
     link against libycxx's linkage marker, and libycxx-abi's `__cxa_*` come before libc++abi's.
-    A trivial program grows from 17 KB to 118 KB with the allocation table. Archive operands are
+    A trivial program grows from 17 KB to 118 KB with the allocation table. Configured runtime archives are
     read once per process while their size and modification time hold, and every program's
     inputs share the bytes (`obj::archive::input`, fingerprinted once). `-nostdlib++` links
     without the runtime. `unit.darwin_runtime`, `own/headers/cstdio.run.cpp` and
@@ -822,10 +825,27 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
   [Design](docs/design/linux-inline-functions.md) · [#422](https://github.com/yrashk/ycxx/issues/422)
 - Explicit GNU `visibility("hidden")` follows ordinary external namespace-scope functions across
   redeclarations. On x86-64 ELF, inline definitions combine `STB_WEAK` with `STV_HIDDEN`.
-  Ordinary non-inline definitions and referenced declarations combine `STB_GLOBAL` with
-  `STV_HIDDEN`. `unit.linux_inline` checks both scoped attribute spellings, symbol metadata,
+  Ordinary non-inline definitions and referenced declarations combine their symbol binding
+  with `STV_HIDDEN`. `unit.linux_inline` checks both scoped attribute spellings, symbol metadata,
   and cross-unit address identity with the native and host linkers in both object orders.
   [#602](https://github.com/yrashk/ycxx/issues/602)
+- On Linux x86-64, GNU `weak` on an ordinary external namespace-scope function declaration
+  gives its non-inline definition `STB_WEAK`. This includes qualified definitions such as
+  libycxx's `std::is_debugger_present`. The ELF linker selects a strong definition in either
+  input order and diagnoses duplicate strong definitions. Explicit GNU visibility can
+  independently give the symbol `STV_HIDDEN`.
+  [Design](docs/design/linux-weak-functions.md) · [#937](https://github.com/yrashk/ycxx/issues/937)
+- On Linux x86-64, explicit GNU hidden visibility on any declaration of an ordinary external
+  non-inline namespace-scope variable gives its ELF symbol `STB_GLOBAL` and `STV_HIDDEN`.
+  This includes the C-linkage marker `__ycxx_linkage_static_v1` from the pinned libycxx runtime.
+  [#936](https://github.com/yrashk/ycxx/issues/936)
+- On Linux x86-64, ordinary external non-inline function declarations can inherit the
+  nearest explicit GNU `hidden` or `default` visibility from a namespace definition.
+  The canonical declaration carries consistent visibility to its unannotated qualified
+  definition and to reference-only objects. An explicit function attribute takes
+  precedence. Mixed inherited defaults retain the direct attribute rules.
+  [Design](docs/design/linux-namespace-visibility.md) ·
+  [#940](https://github.com/yrashk/ycxx/issues/940)
 - Constant-initialized and zero-initialized external inline namespace variables use weak ELF
   definitions when their initial values need no relocations. This includes explicitly inline
   full variable-template specializations with builtin type arguments. Static addresses and
@@ -867,6 +887,10 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
   system linker, malformed and 64-bit indexes, and daemon equality and same-path replacement;
   `unit.darwin_inline` links an archive member with both linkers.
   [Design](docs/design/darwin-static-archives.md) · [#842](https://github.com/yrashk/ycxx/issues/842)
+- On both targets, the driver rereads explicit archive operands at request ingress and
+  fingerprints their bytes. This covers replacements with unchanged size and mtime.
+  Driver-appended Darwin runtime archives can reuse their process-local snapshots.
+  [#951](https://github.com/yrashk/ycxx/issues/951)
 - `ycxx archive -o lib.a [--] [object ...]` creates or replaces a regular GNU archive in process.
   It validates each member with the existing ELF object reader, copies its bytes, and indexes
   named nonlocal definitions, including weak and hidden definitions. Member basenames and
@@ -1057,8 +1081,9 @@ in `lsp` frames (`LspOut`), the last of which carries LSP's exit status (1 after
   its identity changes; `@file` response files expanded relative to the entry's directory; a
   header or C entry is no unit), else the file alone in its directory. `daemon.lsp`'s
   `compile_commands` covers both forms, a response file, a header and a C file, a directory
-  spelled through a symbolic link, and a change (mutation-checked). Options `pp` does not take
-  yet (`-include`, `--sysroot`, …) are dropped (#251).
+  spelled through a symbolic link, and a change (mutation-checked). The check also keeps
+  `-nostdinc`. Options `pp` does not take yet (`-include`, `--sysroot`, …) are dropped.
+  [#251](https://github.com/yrashk/ycxx/issues/251)
 - Not yet: stopping a diagnosis on a newer edit,
   `$/cancelRequest`, debouncing and interactive priority (#168); `buffers_in`, the disk-view
   assertion and one view per session (#169); go-to-definition from a declaration part (a
@@ -1143,6 +1168,18 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   64 bits. Constant evaluation records the field values and code generation emits addressable
   storage for runtime use ([class.static.data], [dcl.init.list], [dcl.init.aggr]).
   [#262](https://github.com/yrashk/ycxx/issues/262)
+- Both native targets give an externally linked in-class static constexpr data member of an
+  ordinary namespace-scope class one address across translation units when its stored value needs
+  no relocations or runtime work. A member whose owner or declared type names an unnamed namespace
+  has local symbol binding.
+  [#903](https://github.com/yrashk/ycxx/issues/903)
+- Inline static integral, pointer, and supported floating-point members in ordinary
+  namespace-scope classes without bases use constant direct-list and copy-list initialization.
+  This also covers one-dimensional arrays of those types with a written bound. Omitted array
+  elements are value-initialized and the members have addressable static storage
+  ([class.static.data], [dcl.init.list], [dcl.init.aggr]).
+  [#964](https://github.com/yrashk/ycxx/issues/964) ·
+  [Inherited initializer lookup #967](https://github.com/yrashk/ycxx/issues/967)
 - Constant expressions can read fields of an already initialized namespace-scope constexpr
   aggregate with a trivial destructor, no bases, and ordinary public integral and enumeration
   fields whose scalar representations fit in 64 bits. The interpreter uses the ordinary record
@@ -1150,6 +1187,11 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   nominal enumeration types for comparisons and template arguments and rejects reads of mutable
   fields of the stored object ([expr.ref], [expr.const], [dcl.init.aggr]).
   [#862](https://github.com/yrashk/ycxx/issues/862) · [#876](https://github.com/yrashk/ycxx/issues/876)
+- Constant evaluation of a flat scalar aggregate supplies its initialized field values to
+  the selected default member initializer. L1 uses them for direct field reads of the
+  initializer's object, including through a conditional glvalue. Reading a later field on
+  the executed path fails its lifetime check ([dcl.init.aggr], [expr.const]).
+  [#895](https://github.com/yrashk/ycxx/issues/895)
 - Constant evaluation can read namespace-scope `constexpr` pointers erased to `void`
   ([expr.const], [conv.ptr], #102). The interpreter reconstructs the original scalar or array
   subobject path, including one-past addresses, from the constant's path and byte offset.
@@ -1502,8 +1544,11 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   libycxx `<cstddef>` byte operator with matching GCC and Clang symbols (#64).
 - Tests: `tests/own/classes/s4-namespace*`, `s4-using` (spec-only, plus one from the review): 5
   of 5. Seven more draft examples pass.
-- A linkage-specification with one declaration (`extern "C" int v;`) declares as if `extern`
-  were given ([dcl.link]/7); a variable with C language linkage is one in every namespace.
+- A C or C++ linkage specification with one declaration treats `extern` as present for name
+  linkage and for distinguishing declarations from definitions ([dcl.link]). This includes a
+  first ordinary namespace `const` variable. A braced linkage block applies the ordinary
+  namespace rules. A variable with C language linkage is one in every namespace.
+  [#942](https://github.com/yrashk/ycxx/issues/942)
 - A qualified namespace function definition inherits C language linkage from a matching prior
   member declaration and uses its target namespace for body lookup. Ordinary and argument-dependent
   calls find the prior declaration and use the same unmangled symbol as C callers (#426).
@@ -1591,7 +1636,8 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   GNU `__attribute__((…))` before and after declarators, are parsed. The parser skips
   unrecognized attributes ([dcl.attr.grammar]/6) and diagnoses a standard attribute before a
   linkage-specification with a single declaration ([dcl.link]). GNU hidden visibility on ordinary
-  namespace-scope functions is implemented for x86-64 ELF. [#602](https://github.com/yrashk/ycxx/issues/602)
+  external namespace-scope functions and non-inline variables is implemented for x86-64 ELF.
+  [#602](https://github.com/yrashk/ycxx/issues/602) · [#936](https://github.com/yrashk/ycxx/issues/936)
 - **Asm labels:** `__asm("…")` after a declarator gives the entity's symbol exactly as written
   (`Program::asm_label`, `pipeline::Entity::asm_label`), as the SDK's `__DARWIN_ALIAS` needs.
   Both extensions are listed in `docs/EXTENSIONS.md` (DECISIONS §1.2).
@@ -2482,14 +2528,20 @@ first; a dependent base is not searched. Redeclaring a hidden parameter's name i
   The full resource header supplies `max_align_t` with 16-byte alignment (AMD64 psABI §3.1.2).
   `unit.pp` exercises both paths through the configured header search.
 
-## Linux compiler resource `<stdarg.h>` (#383)
+## Compiler resource `<stdarg.h>` (#383, #676)
 
 - Linux `__builtin_va_list` is an array of one compiler-owned record with the two unsigned
   offsets and two pointers of the AMD64 psABI §3.5.7. Ordinary array and record semantics give it
   size 24 and alignment 8 and adjust it to a pointer as a function parameter ([dcl.array],
   [dcl.fct]). The builtin name also works with explicit global qualification.
+- `resources/common/include` holds the resource headers every target shares. It is searched
+  after libycxx and Linux's own resource headers, and before glibc or the macOS SDK, neither of
+  which ships `<stdarg.h>`. The SDK's `<stdio.h>` and `<wchar.h>` include it.
 - The resource `<stdarg.h>` consumes each `__need___va_list` request and supplies the guarded
-  `__gnuc_va_list` typedef. A full include also supplies `va_list` ([cstdarg.syn]). glibc's
+  `__gnuc_va_list` typedef. A full include also supplies `va_list` and the `va_start`,
+  `va_arg`, `va_copy`, `va_end` and `__va_copy` macros ([cstdarg.syn]). Their replacement
+  lists match libycxx's `<cstdarg>`, so the two headers combine in either order.
+  `own/variadic/stdarg-header` runs a variadic definition through them on both targets. glibc's
   `<stdio.h>` preprocesses, and `unit.linux_stdarg` checks that path, both inclusion orders,
   and type semantics. The pinned libycxx `<cstdarg>` exposes the Linux variadic operations
   described in the x86-64 backend status (#196).
@@ -2661,6 +2713,22 @@ request it serves.
   filter, and `span_text`/`span_start` are in place. Tests: `unit.trace` (the spans of a real
   build, cells without spans, text, filter, JSON; mutation-checked) and `daemon.trace` (spans
   across the socket).
+- Live (#939): `Tracer::starts`/`started` report a frame's start where it opens its span (the
+  three span sites, cold, for tracers that ask: JSON and untraced builds pay nothing).
+  `trace::Live` buffers starts and ends under a lock held for the append alone; `trace::Tee`
+  feeds a batch collector and a live one. `Tree::apply` places events in any order (a child
+  before its parent waits, unseen, until it comes or `settle`; children in id order; identical
+  instants folded and refolded locally around a change), keeps the summary incrementally, and
+  caches its rows per `version`; `Tree::add` places batches as they come. The daemon sends live
+  `trace` frames (`TraceBatch::live`, `sent_ns`, the memory so far) on the request's tick to a
+  client asking `compile::Trace::live` and to watchers asking `WatchRequest::live`. The client
+  runs a browsed compile on a thread of its own (`browse_compile`), and the browser draws on a
+  timer, only when something changed, with following (`f`). Tests: `unit.trace` (starts, ends,
+  orphans, `is:running`; 180 simulated streams in the engine's order, shuffled and backwards,
+  every step's sums, depths, folding and summary checked, each ending equal to the batches'
+  tree, view and frames; two requests interleaved; following), `daemon.process` (`live_trace`:
+  a build parked at its checkpoint is already in the browser through the daemon; mutation-checked),
+  `daemon.trace_tui` (the first frame is live).
 - Not yet: the analysed tree as a value, and stages linked to source (#254); per-resumption
   spans, so a frame's waits are not drawn as work (#255).
 
@@ -2930,8 +2998,8 @@ the peer passes a secondary base. The cast introduces no RTTI symbols or calls.
 ## Borrowed typed downcasts (#294)
 
 Linux x86-64 can cast a borrowed root pointer to a pointer to its direct derived class.
-Both classes are ordinary, fieldless and default-visible. The derived class has one public
-nonvirtual primary base. Each class declares one public virtual `int` member with no
+The first profile uses two ordinary, fieldless, default-visible classes. The derived class has
+one public nonvirtual primary base. Each class declares one public virtual `int` member with no
 arguments, with the derived declaration overriding the base member. A hosted C++ peer
 defines the two key functions. The consumer checks eligibility against the complete
 translation unit and uses the peer's two RTTI objects and `__dynamic_cast`.
@@ -2940,8 +3008,18 @@ a typed null for a null operand or a failed check. A null operand can be used in
 evaluation. [Design](docs/design/linux-borrowed-typed-downcast.md) ·
 [#294](https://github.com/yrashk/ycxx/issues/294)
 
-Other cast forms, `typeid`, non-null constant evaluation, and Darwin parity are tracked
-in [#294](https://github.com/yrashk/ycxx/issues/294) and [#659](https://github.com/yrashk/ycxx/issues/659).
+The keyless-base profile uses a fieldless `B` with one public pure virtual `int f()` and a
+`D` with the public override and one public `int` field without an initializer. Both classes use
+the default-visible ABI. The consumer defines canonical weak `_ZTI` and `_ZTS` objects for `B`
+in separate ELF COMDAT groups. An independently owned table in the same unit uses the same
+base descriptor.
+The complete translation unit must leave the derived key to the peer. Hosted linking supplies
+the derived RTTI and `__dynamic_cast`.
+[Design](docs/design/linux-keyless-base-rtti.md) · [#930](https://github.com/yrashk/ycxx/issues/930)
+
+Keyless destinations, reference casts, `typeid`, non-null constant evaluation, and Darwin
+parity are tracked in [#294](https://github.com/yrashk/ycxx/issues/294) and
+[#659](https://github.com/yrashk/ycxx/issues/659).
 
 ## Deduced polymorphic lambda results (#569)
 
