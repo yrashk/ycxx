@@ -1292,11 +1292,11 @@ struct PolicyDeclarationsFor {
   using Value = PolicyDeclarations;
   static engine::query_task<Value> run(engine::Ctx& cx, Key unit) {
     const TuId tu{unit};
-    const auto& front = co_await cx.fetch<TuFront>(tu);
-    if (front.policy_aliases.empty() && front.policy_annotations.empty()) co_return Value{};
+    const auto& analysis = co_await cx.fetch<TuSema>(tu);
+    if (analysis.policy_aliases.empty() && analysis.policy_annotations.empty()) co_return Value{};
     const auto& source = cx.fetch<pp::SourceOf>(pp::FileId{unit});
-    co_return read_policy_declarations(*universe().world_for(*source.config.target), unit, front.policy_aliases,
-                                     front.policy_annotations);
+    co_return read_policy_declarations(*universe().world_for(*source.config.target), unit, analysis.policy_aliases,
+                                     analysis.policy_annotations);
   }
 };
 
@@ -1315,15 +1315,16 @@ struct PolicyRegistryFor {
     });
     if (!registry.problems.empty() || (registry.effects.empty() && !verified_observations)) co_return registry;
 
-    const auto fronts = co_await cx.par_map<TuFront>(units | std::views::transform([](ast::u32 unit) { return TuId{unit}; }));
+    const auto translation_units = co_await cx.par_map<TuUnit>(
+        units | std::views::transform([](ast::u32 unit) { return TuId{unit}; }));
     std::map<PolicyOperation, bool> observers, checked_effects;
     std::set<PolicyOperation> labeled_observers, labeled_effects;
     const auto add_definition = [](auto& definitions, PolicyOperation operation, bool supported) {
       const auto [it, fresh] = definitions.try_emplace(operation, supported);
       if (!fresh) it->second = false;
     };
-    for (std::size_t i = 0; i < fronts.size(); ++i) {
-      const auto& unit = fronts[i].get().unit;
+    for (std::size_t i = 0; i < translation_units.size(); ++i) {
+      const auto& unit = translation_units[i].get();
       for (const auto& entity : unit.entities) {
         if (entity.asm_label.empty()) continue;
         const auto operation = policy_operation(world, entity.id, units[i]);
@@ -1881,20 +1882,21 @@ struct VerifyEffectHandler {
   };
   using Value = bool;
   static engine::query_task<Value> run(engine::Ctx& cx, Key key) {
-    const auto& front = co_await cx.fetch<TuFront>(key.tu);
-    const auto definition = std::ranges::find(front.unit.functions, key.operation, &FunctionDef::entity);
-    const auto entity = std::ranges::find(front.unit.entities, key.operation, &Entity::id);
-    if (definition == front.unit.functions.end() || !definition->this_type ||
+    const auto& analysis = co_await cx.fetch<TuSema>(key.tu);
+    const auto& unit = analysis.unit;
+    const auto definition = std::ranges::find(unit.functions, key.operation, &FunctionDef::entity);
+    const auto entity = std::ranges::find(unit.entities, key.operation, &Entity::id);
+    if (definition == unit.functions.end() || !definition->this_type ||
         definition->body.tree == ast::NodeId::none || definition->decl.contracts != ast::NodeId::none ||
-        (entity != front.unit.entities.end() && !entity->asm_label.empty()))
+        (entity != unit.entities.end() && !entity->asm_label.empty()))
       co_return false;
     const auto& world = *universe().world_for(key.linux_target ? ast::x86_64_linux : ast::aarch64_darwin);
     const auto owner = world.types.rec(*definition->this_type).inner;
     const auto* handler = scoped_effect_handler(world, owner);
     if (!handler || handler->args.size() != 2 || handler->args[1].kind != ast::TemplateArgKind::type)
       co_return false;
-    const auto shape = std::ranges::find(front.shapes.classes, world.types.class_of(owner), &ClassShape::entity);
-    if (shape == front.shapes.classes.end() || !shape->bases.empty() || shape->fields.size() != 1 ||
+    const auto shape = std::ranges::find(analysis.shapes.classes, world.types.class_of(owner), &ClassShape::entity);
+    if (shape == analysis.shapes.classes.end() || !shape->bases.empty() || shape->fields.size() != 1 ||
         shape->union_ || shape->has_mutable_field)
       co_return false;
     const auto reference = world.types.rec(shape->fields.front());
@@ -1971,13 +1973,13 @@ struct CheckPolicies {
 
 engine::query_task<CheckPolicies::Value> CheckPolicies::run(engine::Ctx& cx, Key key) {
   const TuId tu = key.tu;
-  const FrontResult& front = co_await cx.fetch<TuFront>(tu);
-  if (front.has_errors()) co_return Value{};
+  const auto& analysis = co_await cx.fetch<TuSema>(tu);
+  if (analysis.has_errors()) co_return Value{};
   const auto& registry = co_await cx.fetch<PolicyRegistryFor>(key.sources);
   if (registry.ownership.resources.empty() && registry.effects.empty() && registry.problems.empty()) co_return Value{};
   if (key.effect_verification == EffectVerification::unavailable && !registry.effects.empty() && registry.problems.empty())
     co_return Value{{{std::nullopt, true, "checked effect bounds currently require explicit objects or sources at link", {}}}, {}};
-  if (front.unit.virtual_emission_blocked && !registry.ownership.resources.empty() && registry.problems.empty())
+  if (analysis.unit.virtual_emission_blocked && !registry.ownership.resources.empty() && registry.problems.empty())
     co_return Value{{{std::nullopt, true, "ownership analysis is unavailable for this unit's virtual declarations", {}}}, {}};
   std::vector<PolicyProblem> problems;
   if (const auto it = registry.problems.find(tu.n); it != registry.problems.end()) problems = it->second;
@@ -1999,7 +2001,7 @@ engine::query_task<CheckPolicies::Value> CheckPolicies::run(engine::Ctx& cx, Key
   std::vector<const FunctionDef*> effect_definitions;
   std::vector<CheckEffectBody::Key> effect_bodies;
   if (registry.problems.empty() && !missing_effects)
-    for (const auto& def : front.unit.functions) {
+    for (const auto& def : analysis.unit.functions) {
       if (def.body.tree == ast::NodeId::none) continue;
       if (!registry.ownership.resources.empty()) {
         definitions.push_back(&def);

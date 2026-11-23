@@ -87,6 +87,7 @@ struct SemaResult {
   Shapes shapes;                      // its classes and enumerations, for `layout` (#115)
   std::vector<std::pair<EntityId, ast::Loc>> declared;
   std::vector<BodyAt> bodies;
+  // Policy origins are item-relative tokens. CheckPolicies places them using current source.
   std::vector<PolicySite> policy_aliases;
   std::vector<PolicyAnnotationSite> policy_annotations;
   bool has_errors() const {
@@ -101,8 +102,6 @@ struct FrontResult {
   // declarator, else its item's start), in item order, and the analysed function bodies.
   std::vector<std::pair<EntityId, ast::Loc>> declared;
   std::vector<BodyAt> bodies;
-  std::vector<PolicySite> policy_aliases;
-  std::vector<PolicyAnnotationSite> policy_annotations;
   bool has_errors() const {
     return std::ranges::any_of(messages, [](const Message& m) { return m.error; });
   }
@@ -1821,8 +1820,6 @@ engine::query_task<FrontResult> TuFront::run(engine::Ctx& cx, TuId tu) {
   out.shapes = sema.shapes;
   out.declared = sema.declared;
   out.bodies = sema.bodies;
-  out.policy_aliases = sema.policy_aliases;
-  out.policy_annotations = sema.policy_annotations;
   co_return out;
 }
 

@@ -470,6 +470,11 @@ with tempfile.TemporaryDirectory() as directory:
             before_move = mixed_rejection(conflict)
             assert f"previous declaration at {mixed_rules}:{effects_line}:" in before_move, before_move
             write(mixed_rules.name, reflected.replace("struct [[=", "\n                struct [[="))
+            moved_trace = resident("--trace-engine=json", sources=mixed_sources)
+            assert moved_trace.returncode == 1, moved_trace.stderr
+            moved_records = (json.loads(line) for line in moved_trace.stderr.splitlines() if line.startswith("{"))
+            reexecuted = {record["kind"] for record in moved_records if record.get("outcome") in ("executed", "cutoff")}
+            assert {"TuSema", "PolicyDeclarationsFor"}.isdisjoint(reexecuted), reexecuted
             after_move = mixed_rejection(conflict)
             assert f"previous declaration at {mixed_rules}:{effects_line + 1}:" in after_move, after_move
 
