@@ -83,6 +83,10 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_
   add_test(NAME unit.linux_scalar_sse
     COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/linux_scalar_sse.py
             $<TARGET_FILE:ycxxc> ${CMAKE_CXX_COMPILER} ${PROJECT_SOURCE_DIR}/deps/libycxx)
+  # PARITY: by design: exercises the System V AMD64 argument convention with native Linux peers.
+  add_test(NAME unit.linux_sysv_reference_fields
+    COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/linux_sysv_reference_fields.py
+            $<TARGET_FILE:ycxxc> ${CMAKE_CXX_COMPILER} ${PROJECT_SOURCE_DIR}/deps/libycxx)
   # PARITY: by design: links x86-64 ELF objects against the host Itanium C++ ABI runtime.
   add_test(NAME unit.linux_borrowed_typed_downcast
     COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/linux_borrowed_typed_downcast.py
