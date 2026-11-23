@@ -1576,6 +1576,11 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   ordinary member collision checks. The enum identity uses the declaring class, canonical
   underlying type, and first enumerator.
   [#859](https://github.com/yrashk/ycxx/issues/859)
+- A standalone unnamed unscoped member enum can use dependent values. Class completion
+  evaluates its list, including earlier enumerators and implicit successors, and checks
+  fixed-base ranges or infers the underlying type. The class specialization, first
+  enumerator and completed underlying type determine its identity ([temp.inst], [dcl.enum]).
+  [#894](https://github.com/yrashk/ycxx/issues/894)
 - Named unscoped member enum definitions in class templates defer value-dependent initializers
   and their implicit successors. Specialization replay evaluates each list, including earlier
   enumerator references, fixed-base range checks, and underlying-type inference. Size and
@@ -1590,8 +1595,7 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
 - Further work includes opaque declarations in classes or blocks, unnamed empty definitions,
   unnamed definitions followed by declarators, and `E{}` and `E(v)` expressions
   (#157). Enumerations in a block are tracked in #117. Qualified lookup of earlier enumerators
-  while the unnamed definition is open is tracked in #879. Dependent unnamed definitions
-  remain in #894.
+  while the unnamed definition is open is tracked in #879.
 
 ## Direct explicit destructor calls (#722)
 
@@ -2390,6 +2394,11 @@ session's.*
   checked at the written expression for concrete queries and at demand for dependent
   queries. Unrelated classes that need user-defined conversions get a diagnostic.
   `__has_builtin` answers 0 while support is partial ([meta.unary.prop], [dcl.init.ref], #1064, #218).
+- A written dependent `alignof(type-id)` in an integral class-template base argument is
+  evaluated when the specialization requires its base. Forwarding aliases preserve the deferred
+  argument. The result uses the target size type. An array of unknown bound is supported when
+  its element type is complete. Pointer-only uses of the specialization leave evaluation deferred
+  ([expr.alignof], [temp.inst], #1067).
 - `__is_base_of(Base, Derived)` ignores top-level cv. Nonclass and union operands give false.
   The same nonunion class gives true, including when incomplete. For distinct nonunion classes,
   `Derived` must be complete. The trait follows the recorded base declarations, including private

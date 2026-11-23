@@ -4738,8 +4738,7 @@ private:
     // The enumerators: each the previous one's value plus one, or its initializer's, a converted
     // constant expression of the underlying type when it is fixed ([dcl.enum]/5).
     // The template checks the list with dependent values; replay evaluates them ([temp.inst]).
-    const bool pattern = !unnamed && cls != EntityId::none && !inst_ &&
-                         types.is_dependent(types.class_type(cls));
+    const bool pattern = cls != EntityId::none && !inst_ && types.is_dependent(types.class_type(cls));
     struct EnumValue {
       std::int64_t bits = 0;
       bool big = false;  // an unsigned value of 2^63 or more
@@ -4777,6 +4776,7 @@ private:
             if (x.ok()) s_.diag(x.begin, Diag::bound_not_constant);
             // A nested enum instantiation can diagnose the error outside this item's result.
             if (replay != EntityId::none) return;
+            if (unnamed && inst_) return bad();
           } else {
             sema::IntShape sh = sema::shape(s_.world().target, *types.builtin_of(v.type()));
             sema::u64 bits = s_.world().values.rec(*c).bits;
@@ -4835,8 +4835,10 @@ private:
       }
       const EntityId x = unnamed ? EntityId::none : enumerator_entity(en);
       const ConstId c = value ? s_.world().values.integer(prev_type, sema::u64(value->bits)) : ConstId::none;
-      if (!value) p_->value_dependent_member(x);
-      else if (!unnamed && !pattern) p_->set_constant(x, c, k_);
+      if (!unnamed) {
+        if (!value) p_->value_dependent_member(x);
+        else if (!pattern) p_->set_constant(x, c, k_);
+      }
       er.enumerators.push_back({en, x, ConstId::none});
       values.push_back(value);
       ast::DeclSema xs = class_decl(e, true);
@@ -4892,9 +4894,12 @@ private:
     if (unnamed) {
       if (er.enumerators.empty() || !ps_.expect(Tk::r_brace)) return bad();
       s_.defining_unnamed_enum_scope.reset();
-      // The linkage identity uses the first enumerator and the final underlying type.
+      if (inst_ && s_.has_error_since(0)) return bad();
+      // [dcl.enum]/12: the first enumerator and underlying type identify the enum in its scope.
+      // An enum with dependent values and no fixed base has no underlying type until replay.
+      const QualType identity_type = er.underlying ? types.canonical(*er.underlying) : s_.builtin(sema::Builtin::dependent);
       e = s_.world().entities.entity({.kind = sema::EntityKind::enum_, .name = name,
-                                       .type = types.canonical(*er.underlying), .scope = scope,
+                                       .type = identity_type, .scope = scope,
                                        .enum_linkage_name = er.enumerators.front().name});
       publish_head();
     } else {

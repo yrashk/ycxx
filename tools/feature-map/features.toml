@@ -1250,7 +1250,7 @@ std = 'C++98'
 detect = '\benum\b'
 status = 'done'
 issues = [157, 731, 859, 861, 894]
-note = 'Named nested enum definitions support trailing fields and named unscoped definitions replay value-dependent enumerators in class-template specializations. Nonempty standalone unnamed nested definitions are accepted. Unscoped enumerators enter class scope and hide tags in ordinary lookup.'
+note = 'Named nested enum definitions support trailing fields. Named and standalone unnamed unscoped definitions replay value-dependent enumerators when the class template specialization completes. Unscoped enumerators enter class scope and hide tags in ordinary lookup.'
 probe = '''
 enum Color { red, green = 5, blue };
 extern "C" { enum { bias = 1, expected = bias + 5 }; }

@@ -5654,6 +5654,10 @@ public:
   Ex enumerator_in_list(const OwnDecl& d, u32 begin, u32 end) {
     if (d.enum_initializer != ConstId::none)
       return literal(d.sema.type, d.enum_initializer, ValueCategory::prvalue, begin, end);
+    // An unnamed enum does not have an entity before the closing brace. In its template's
+    // list, an earlier enumerator with no value yet still has its in-list type.
+    if (d.sema.entity == EntityId::none)
+      return dependent_node({}, begin, end, d.sema.type, ValueCategory::prvalue, expr_flag::unrepresented_value);
     return enumerator(d.sema.entity, d.sema.type, begin, end);
   }
   // The enumerator `name` of enumeration `e`, if it has one.
@@ -8892,6 +8896,12 @@ public:
 
   // `sizeof` and `alignof` of a type ([expr.sizeof], [expr.alignof]), a `size_t` prvalue; zero
   // after a diagnostic.
+  Ex dependent_base_alignment(QualType operand, u32 begin, u32 end) {
+    const std::array args{templates().type_arg(operand)};
+    const auto value = ins().intern_value(ast::VDepOp{ast::DepOp::alignof_type, ins().intern_seq(std::span<const TemplateArg>(args))});
+    return literal(builtin(w_->target.size_type), value, ValueCategory::prvalue, begin, end);
+  }
+
   Ex size_of(QualType t, bool align, u32 begin, u32 end) {
     QualType st = builtin(w_->target.size_type);
     if (types().is_dependent(t)) return dependent_node({}, begin, end, st);

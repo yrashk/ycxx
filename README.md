@@ -334,8 +334,8 @@ Both targets accept nonempty standalone unnamed enum definitions at namespace sc
 fixed underlying types and definitions inside `extern "C"` blocks.
 [#157](https://github.com/yrashk/ycxx/issues/157)
 Nonempty standalone unnamed enum definitions introduce their enumerators into the enclosing
-class. Class template specializations support the same form with nondependent enumerator
-values. [#859](https://github.com/yrashk/ycxx/issues/859)
+class. Class template specializations evaluate dependent enumerator lists when the class
+is instantiated. [#859](https://github.com/yrashk/ycxx/issues/859) · [#894](https://github.com/yrashk/ycxx/issues/894)
 
 Qualified value lookup can read earlier static data members and injected unscoped enumerators
 while their current class is incomplete. [#857](https://github.com/yrashk/ycxx/issues/857)
@@ -541,6 +541,8 @@ written default member initializer are value-initialized.
   unqualified call to a single ordinary external `consteval` function can also use direct
   integral template-parameter operands.
   [#209](https://github.com/yrashk/ycxx/issues/209)
+- Dependent `alignof(type-id)` in integral class-template base arguments, including forwarding
+  through alias templates. [#1067](https://github.com/yrashk/ycxx/issues/1067)
 - `__is_constructible`, `__is_nothrow_constructible` and `__is_trivially_constructible` for
   supported scalar, reference, function and `void` queries, including argument packs in
   class-template base and variable-template initializer replay.
