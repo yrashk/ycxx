@@ -24,6 +24,9 @@ int system_headers() { return missing_system_header(); }
 '''
 RETAINED = '''\
 #include <stddef.h>
+#ifndef NULL
+#error expected NULL from stddef.h
+#endif
 #include <features.h>
 #ifndef __GLIBC__
 #error expected the native GNU C header
@@ -71,9 +74,12 @@ def command_line(world, scope, modes):
         snapshots.append(tokens)
     assert snapshots[0] == snapshots[-1] and snapshots[1] == snapshots[-2]
 
-    retained = preprocess('retained.cpp', ())
-    assert re.search(rb'\bglibc_header_major\s*=\s*[1-9][0-9]*\s*;', retained), retained
-    assert preprocess('retained.cpp', NO_CXX) == retained
+    # The bundled stddef.h and the compiler resource header may expand differently.
+    retained = [preprocess('retained.cpp', flags) for flags in ((), NO_CXX, ())]
+    for tokens in retained:
+        assert re.search(rb'\bsize_t\s+resource_header\s*;', tokens), tokens
+        assert re.search(rb'\bglibc_header_major\s*=\s*[1-9][0-9]*\s*;', tokens), tokens
+    assert retained[0] == retained[2]
     return pid
 
 
