@@ -1324,7 +1324,7 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const items
   // A later inline declaration of a variable puts it outside this visibility profile.
   if (!hidden_declarations.empty())
     for (Entity& e : tu.entities)
-      e.hidden = hidden_declarations.contains(e.id) && (e.is_function || !inline_declarations.contains(e.id));
+      e.hidden = hidden_declarations.contains(e.id) && (e.is_function || (linux && !inline_declarations.contains(e.id)));
   return tu;
 }
 
