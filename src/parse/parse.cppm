@@ -387,8 +387,7 @@ public:
     if (d.entity == EntityId::none || !(d.flags & sema::decl_flag::member) ||
         it.parent == items::none || items_->items[it.parent].kind != ItemKind::class_def || !defaulted_body(item))
       return false;
-    return (d.flags & sema::decl_flag::constructor) ||
-           (d.is_virtual && (d.flags & sema::decl_flag::destructor)) ||
+    return (d.flags & (sema::decl_flag::constructor | sema::decl_flag::destructor)) ||
            (d.kind == ast::DeclKind::function && w_->ins.names.spelling(w_->entities.rec(d.entity).name) == "operator=");
   }
   // `class_def(C)` (ast.md §3.6) of the class item `item`: the records of its members, each its
@@ -1736,6 +1735,7 @@ private:
   struct DestructorDeclaration {
     u32 at;
     std::optional<bool> nonthrowing;  // a written exception specification, if present
+    bool defaulted;
   };
   std::map<EntityId, DestructorDeclaration> destructor_declarations_;
   std::map<EntityId, std::vector<std::optional<std::pair<u32, u32>>>> member_default_tokens_;
@@ -5342,6 +5342,10 @@ private:
     for (u32 j = 0; j < next; ++j) ps_.bump();
     bool ctor = !ps_.is(Tk::tilde);
     u32 name_at = ps_.pos();
+    if (!ctor && p_->defaulted_body(k_)) {
+      s_.diag(name_at, Diag::defaulted_destructor_out_of_class);
+      return bad();
+    }
     if (!ctor) ps_.bump();
     ps_.bump();
     EntityId owner = s_.world().entities.rec(c).scope;
@@ -5370,9 +5374,7 @@ private:
     const sema::MemberDeclRec* m = nullptr;
     if (cr)
       for (const sema::MemberDeclRec& r : cr->members)
-        if ((ctor ? r.is_ctor : r.is_dtor) &&
-            (ctor ? same_function_parameters(r.type, type)
-                  : s_.types().canonical(r.type) == s_.types().canonical(type) || r.is_virtual) &&
+        if ((ctor ? r.is_ctor : r.is_dtor) && (r.is_virtual || same_function_parameters(r.type, type)) &&
             same_template(r, member_template))
           m = &r;
     if (!m) {
@@ -5761,6 +5763,7 @@ private:
     const bool defaulted = p_->defaulted_body(k_);
     const bool ordinary_defaulting = defaulted && !is_virtual;
     const bool defaulted_default = ordinary_defaulting && ctor && fs.params.empty() && !fs.variadic;
+    const bool defaulted_dtor = ordinary_defaulting && !ctor;
     // BOOTSTRAP: -Wmaybe-uninitialized: a pair and a flag, not std::optional. At -O3 GCC 16.2
     // reports the optional's payload as possibly uninitialized at `*exception_tokens`, read
     // under `if (exception_tokens)` (#748). Without the bug:
@@ -5798,6 +5801,7 @@ private:
         return bad();
       }
       ps_.exception_specifier(fs, ok);
+      if (!ok) return bad();
       if (fs.has_noexcept) {
         destructor_noexcept = ps_.noexcept_value(fs.noexcept_condition, ok);
         if (!ok) return bad();
@@ -5809,10 +5813,10 @@ private:
         return bad();
       }
       if (is_virtual && defaulted) flags |= sema::decl_flag::constexpr_ | sema::decl_flag::inline_;
-      written_noexcept = is_virtual && destructor_noexcept.value_or(false);
+      written_noexcept = (is_virtual || defaulted_dtor) && destructor_noexcept.value_or(false);
     }
     if (ordinary_defaulting) {
-      // [dcl.fct.def.default]: a first in-class defaulted copy or zero-parameter constructor.
+      // [dcl.fct.def.default]: a first in-class defaulted special member.
       if (!finish_constructor_declarator()) return bad();
       auto copy_reference = [&] {
         if (fs.params.size() != 1 || fs.variadic) return false;
@@ -5824,9 +5828,12 @@ private:
                sema::Types::unqualified(types.canonical(ref.inner)) == types.canonical(c.type);
       };
       const auto& owner = p_->world().entities.rec(c.entity);
-      if (!ctor || member_template_ || !s_.template_scopes.empty() || inst_ || !p_->is_namespace(owner.scope) ||
-          (defaulted_default ? owner.templ != EntityId::none : !copy_reference())) {
-        s_.diag(name_at, defaulted_default ? Diag::defaulted_default_constructor : Diag::defaulted_copy_declaration);
+      const bool supported_scope = !member_template_ && s_.template_scopes.empty() && !inst_ && p_->is_namespace(owner.scope);
+      const bool supported = defaulted_dtor ? owner.templ == EntityId::none && !p_->items().items[it_->parent].specialization
+                             : defaulted_default ? owner.templ == EntityId::none : copy_reference();
+      if (!supported_scope || !supported) {
+        s_.diag(name_at, defaulted_dtor ? Diag::defaulted_destructor
+                      : defaulted_default ? Diag::defaulted_default_constructor : Diag::defaulted_copy_declaration);
         return bad();
       }
       // A first-declaration defaulted special member is inline and, when constexpr-suitable,
@@ -5838,9 +5845,9 @@ private:
     if (ctor && !member_virt_specifiers(false)) return bad();
     std::vector<QualType> ps;
     for (const parse::Param& p : fs.params) ps.push_back(p.type);
-    // [except.spec]: completing the supported tag class proves there are no potentially throwing
-    // subobject initializations. The written specification stays separate from that inference.
-    const bool nonthrowing = fs.has_noexcept ? written_noexcept : defaulted_default;
+    // [except.spec]: the supported defaulted default constructor and destructor have no
+    // potentially throwing subobject operations. A written specification takes precedence.
+    const bool nonthrowing = fs.has_noexcept ? written_noexcept : defaulted_default || defaulted_dtor;
     QualType type = types.function(s_.builtin(sema::Builtin::void_), ps, fs.variadic, LangLinkage::cxx, fs.cv,
                                    ast::RefQual::none, nonthrowing);
     flags |= sema::decl_flag::member | (ctor ? sema::decl_flag::constructor : sema::decl_flag::destructor);
@@ -5882,7 +5889,7 @@ private:
                                               LangLinkage::cxx, ast::Linkage::external, {}, c.entity});
     }
     // One declaration of each ([class.mem.general]/5). An exception specification cannot
-    // distinguish overloads of a constructor ([over.load]).
+    // distinguish otherwise identical special members ([over.load]).
     for (u32 m : p_->items().items[it_->parent].members) {
       if (m == k_) break;
       for (const ast::DeclSema& o : p_->world().ins.seqs.elements(earlier(m).decls)) {
@@ -5890,16 +5897,15 @@ private:
             ctor && !member_template_ && (o.flags & sema::decl_flag::constructor) &&
             !(o.flags & sema::decl_flag::template_) &&
             same_function_parameters(o.type, sem.type);
-        const bool redeclared_virtual_destructor = !ctor && (sem.is_virtual || o.is_virtual) &&
-                                                  (o.flags & sema::decl_flag::destructor);
-        if (o.entity == sem.entity || redeclared_constructor || redeclared_virtual_destructor) {
+        const bool redeclared_destructor = !ctor && (o.flags & sema::decl_flag::destructor);
+        if (o.entity == sem.entity || redeclared_constructor || redeclared_destructor) {
           s_.diag(name_at, Diag::redeclared_member, name);
           return bad();
         }
       }
     }
     if (has_exception_tokens) p_->constructor_exception_tokens_.emplace(sem.entity, exception_tokens);
-    if (!ctor) p_->destructor_declarations_.emplace(sem.entity, Program::DestructorDeclaration{name_at, destructor_noexcept});
+    if (!ctor) p_->destructor_declarations_.emplace(sem.entity, Program::DestructorDeclaration{name_at, destructor_noexcept, defaulted});
     remember_member_defaults(sem.entity, fs.params);
     p_->declared(sem, k_);
     declarators_.push_back(s_.node(ast::Declarator{u32(decls_.size()), {}, ConstId::none}, name_at, ps_.pos()));
@@ -6324,7 +6330,8 @@ private:
       if (spec.is_inline || spec.is_constexpr) {
         // An inline static member defines an object ([class.static.data]).
         if (!s_.require_complete(d.type, d.name_at) || !s_.require_concrete_object(d.type, d.name_at) ||
-            !s_.require_supported_virtual_layout(d.type, d.name_at)) return false;
+            !s_.require_supported_virtual_layout(d.type, d.name_at) ||
+            !s_.check_destructor_access(d.type, d.name_at)) return false;
         flags |= sema::decl_flag::definition;
       }
       sem.entity = s_.world().entities.entity(
@@ -7232,6 +7239,7 @@ private:
     } else if (!fn && sema::Types::is_const(d.type) && !effective_extern) {
       s_.diag(d.name_at, Diag::const_uninitialized, d.name);
     }
+    if (!fn && definition && !pattern) s_.check_destructor_access(d.type, d.name_at);
     if (value != ConstId::none && (requires_constinit || s_.folded_immediate_result != EntityId::none))
       if (auto entity = s_.immediate_result_entity(value))
         s_.diag(init.begin, Diag::immediate_address, s_.world().entities.rec(*entity).name);
@@ -8797,8 +8805,10 @@ public:
           if (!s_.deduce_return(nullptr, ps_.pos() > 0 ? ps_.pos() - 1 : 0)) root = {};
       }
       s_.pop_scope();
+      const bool dtor = f->flags & sema::decl_flag::destructor;
+      if (root.ok() && (dtor || (ctor && !inits.delegation)) && !check_subobject_destructors(root.begin)) root = {};
       if (root.ok() && ctor) root = constructor_body(std::move(inits), root, signature.fn_noexcept);
-      if (root.ok() && (f->flags & sema::decl_flag::destructor)) root = destructor_body(s_, s_.current_class, root);
+      if (root.ok() && dtor) root = destructor_body(s_, s_.current_class, root);
     }
     std::vector<ast::LocalRec> locals(s_.locals().begin(), s_.locals().end());
     // A template's definition demands nothing; its instantiations do. What it keeps for them is
@@ -8883,6 +8893,19 @@ public:
   }
 
 private:
+  // [class.base.init], [class.dtor]: these bodies potentially invoke the non-variant subobject
+  // destructors, including those requiring no runtime cleanup.
+  bool check_subobject_destructors(u32 at) {
+    const auto& record = s_.classes().rec(s_.current_class);
+    if (record.union_) return true;  // the constructor checks its selected variant separately
+    return std::ranges::all_of(record.bases, [&](const sema::BaseRec& base) {
+      return s_.check_destructor_access(s_.types().class_type(base.cls), at, Diag::base_unusable_destructor,
+                                        /*base_subobject=*/true);
+    }) && std::ranges::all_of(record.fields, [&](const sema::FieldRec& field) {
+      return s_.check_destructor_access(field.type, at);
+    });
+  }
+
   struct ConstructorInitializers {
     std::map<u32, Ex> subobjects;
     std::optional<Ex> delegation;  // engaged even when a delegating initializer failed
@@ -9398,6 +9421,7 @@ bool Program::special_members(u32 item, EntityId cls, sema::ClassRec& rec,
     if (m.is_virtual) rec.polymorphic = true;
     if (m.is_dtor) {
       user_dtor = &m;
+      rec.declared_destructor = m.entity;
       rec.virtual_destructor |= m.is_virtual;
     }
     if (!m.is_ctor) continue;
@@ -9466,8 +9490,22 @@ bool Program::special_members(u32 item, EntityId cls, sema::ClassRec& rec,
   // [except.spec]: the absence of an explicit destructor specification takes the
   // specification of the destructor that would be implicitly declared.
   const auto declaration = user_dtor ? destructor_declarations_.find(user_dtor->entity) : destructor_declarations_.end();
+  const bool defaulted_destructor = !rec.virtual_destructor && declaration != destructor_declarations_.end() &&
+                                    declaration->second.defaulted;
   std::optional<bool> implicit_noexcept = true;
   rec.destructor_usable = !user_dtor || !user_dtor->is_deleted;
+  // Prove trivial destruction from the completed class before using the no-cleanup path.
+  if (defaulted_destructor && (rec.union_ || rec.polymorphic || !rec.bases.empty() ||
+      std::ranges::any_of(rec.fields, [&](const sema::FieldRec& field) {
+        return types.is_dependent(field.type) || (!types.is_scalar(field.type) && !types.is_reference(field.type));
+      }))) {
+    rec.destructor_usable = false;
+    if (class_diags) {
+      const auto member = member_decl(user_dtor->entity);
+      const engine::Loc at{std::to_underlying(member ? member->item : id(item)), declaration->second.at};
+      class_diags->push_back({at, sema::diag_id(Diag::defaulted_destructor), {}});
+    }
+  }
   for (std::size_t i = 0; i < subobjects.size(); ++i) {
     sema::TypeRec type = types.rec(subobjects[i]);
     while (type.kind == sema::TypeKind::array) type = types.rec(type.inner);
@@ -9487,8 +9525,9 @@ bool Program::special_members(u32 item, EntityId cls, sema::ClassRec& rec,
       rec.destructor_usable = false;
       continue;
     }
-    if (record->destructor == EntityId::none) continue;
-    const auto access = record->access_of(record->destructor);
+    const EntityId destructor = record->destructor_declaration();
+    if (destructor == EntityId::none) continue;
+    const auto access = record->access_of(destructor);
     const bool accessible = access == ast::Access::public_ ||
                             (i < rec.bases.size() && access == ast::Access::protected_) ||
                             std::ranges::contains(record->friends, cls) ||
@@ -9514,9 +9553,12 @@ bool Program::special_members(u32 item, EntityId cls, sema::ClassRec& rec,
   const bool deletes_implicit_copy = user_move || user_move_assignment;
   const bool implicit_copy = !user_copy && !deletes_implicit_copy;
   defaulted_copy(cls, rec, subobjects, implicit_copy);
-  // [class.dtor]/8: the implicit destructor is not trivial when a base's or member's is not.
-  if (user_dtor) rec.destructor = user_dtor->entity;
-  else if (!rec.union_ && std::ranges::any_of(subobjects, [&](QualType t) { return classes_.destructor_of(t) != EntityId::none; }))
+  // [class.dtor]: the first in-class defaulted destructor is trivial in the supported class.
+  // Its declaration does not require a cleanup. The implicit destructor needs one when a
+  // base or member needs one.
+  if (user_dtor) {
+    if (!defaulted_destructor) rec.destructor = user_dtor->entity;
+  } else if (!rec.union_ && std::ranges::any_of(subobjects, [&](QualType t) { return classes_.destructor_of(t) != EntityId::none; }))
     rec.destructor = synthesize(false);
   // [class.copy.ctor]/10–11: the implicit copy constructor is deleted with a member's, and not
   // trivial when a member's is not.
@@ -9567,7 +9609,7 @@ bool Program::special_members(u32 item, EntityId cls, sema::ClassRec& rec,
     const sema::ClassRec* r = classes_.find(b.cls);
     return r && (!r->fields.empty() || !r->pod);
   });
-  rec.pod = !rec.layout_requires_virtual_support && !rec.user_ctors && !user_dtor &&
+  rec.pod = !rec.layout_requires_virtual_support && !rec.user_ctors && rec.destructor_usable &&
             rec.destructor == EntityId::none &&
             !rec.copy_nontrivial() && !rec.copy_deleted && !user_move && !user_provided_assignment &&
             std::ranges::none_of(rec.fields, &sema::FieldRec::dmi) && one_access &&

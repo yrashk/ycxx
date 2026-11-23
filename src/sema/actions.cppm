@@ -6225,8 +6225,8 @@ public:
         diag(begin, polymorphic_base ? Diag::base_unusable_destructor : Diag::return_unusable_destructor, ut);
         return fail;
       }
-      if (cr->destructor != EntityId::none &&
-          !check_access(c, cr->destructor, w_->entities.rec(cr->destructor).name, begin)) return fail;
+      const EntityId destructor = cr->destructor_declaration();
+      if (destructor != EntityId::none && !check_access(c, destructor, w_->entities.rec(destructor).name, begin)) return fail;
     }
     if (k.entity != EntityId::none && k.entity == cr->defaulted_default_ctor) {
       if (!cr->trivial_defaulted_default_ctor) return fail;  // diagnosed at its declaration
@@ -6329,25 +6329,27 @@ public:
   }
 
   // [class.dtor]: a potentially invoked destructor must be accessible.
-  bool check_destructor_access(QualType type, u32 at) {
+  bool check_destructor_access(QualType type, u32 at, Diag unusable = Diag::object_unusable_destructor,
+                               bool base_subobject = false) {
+    type = types().innermost_array_element(type);
     if (!types().is_class(type) || types().is_dependent(type)) return true;
     const EntityId owner = types().class_of(type);
     const ClassRec* record = class_rec(owner);
-    if (!record || record->destructor == EntityId::none) return true;
-    const auto declaration = std::ranges::find(record->members, record->destructor, &MemberDeclRec::entity);
-    if (declaration != record->members.end() && declaration->is_deleted) {
-      diag(at, Diag::object_unusable_destructor, type);
+    if (!record) return true;
+    if (!record->destructor_usable) {
+      diag(at, unusable, type);
       return false;
     }
-    const EntityId destructor = record->destructor;
+    const EntityId destructor = record->destructor_declaration();
+    if (destructor == EntityId::none) return true;
     const NameId name = w_->entities.rec(destructor).name;
     if (defer_type_access && !accessible(owner, record->access_of(destructor))) {
       deferred_access_.push_back({owner, destructor, name, at, true});
       return true;
     }
-    // [class.protected]: these uses destroy a complete object of the
-    // declaring class. Access through a derived context needs a derived object.
-    if (record->access_of(destructor) == ast::Access::protected_ && !accessible(owner, ast::Access::private_)) {
+    // [class.protected]: access through a derived context needs a derived object.
+    if (!base_subobject && record->access_of(destructor) == ast::Access::protected_ &&
+        !accessible(owner, ast::Access::private_)) {
       diag(at, Diag::protected_member, name, types().class_type(owner));
       return false;
     }
@@ -6517,7 +6519,8 @@ public:
   // Temporary materialization ([conv.rval]) of the prvalue `v` as an object of type `t`.
   Ex materialize(Ex v, QualType t, bool extended, bool argument = false) {
     if (!v.ok()) return v;
-    if (!require_concrete_object(t, v.begin) || !require_supported_virtual_layout(t, v.begin))
+    if (!require_concrete_object(t, v.begin) || !require_supported_virtual_layout(t, v.begin) ||
+        !check_destructor_access(t, v.begin))
       return {NodeId::none, v.begin, v.end};
     ExprInfo info{t, ValueCategory::xvalue, 0};
     return node(ast::Materialize{info, destructor_of(t), extended ? 1u : argument ? 2u : 0u, at(v, v.begin)}, v.begin, v.end, info);
@@ -8685,14 +8688,7 @@ public:
   // [class.dtor]: the destructor of the hidden object or materialized temporary is potentially
   // invoked. A reference to an existing object does not itself invoke a destructor.
   bool check_binding_destructor(QualType type, u32 at_) {
-    EntityId entity = types().class_of(type);
-    const ClassRec* record = class_rec(entity);
-    if (!record || record->destructor == EntityId::none) return true;
-    if (!record->destructor_usable) {
-      diag(at_, Diag::binding_unusable_destructor, type);
-      return false;
-    }
-    return check_access(entity, record->destructor, w_->entities.rec(record->destructor).name, at_);
+    return check_destructor_access(type, at_, Diag::binding_unusable_destructor);
   }
 
   // Follow the glvalue designator through the operations in [class.temporary]. A temporary
@@ -10312,6 +10308,7 @@ public:
                (unevaluated != decltype_unevaluated && !require_concrete_object(fr.inner, paren_at))) {
       return std::nullopt;
     }
+    if (unevaluated != decltype_unevaluated && !check_destructor_access(fr.inner, paren_at)) return std::nullopt;
     std::vector<QualType> params = fr.params;  // copied: converting may intern new types
     std::vector<Ex> args(given.begin(), given.end());
     for (std::size_t i = args.size(); i < params.size() && i < defaults.size() && defaults[i] != NodeId::none; ++i) {
@@ -10342,6 +10339,7 @@ public:
       // ([expr.call]/7): a temporary, which the caller destroys (Itanium C++ ABI §3.1.2).
       if (i < params.size() && types().is_class(params[i]) && !dependent(a) && !a.glvalue())
         a = materialize(a, Types::unqualified(params[i]), false, true);
+      if (!a.ok()) return std::nullopt;
       children.push_back(at(a, begin));
     }
     return children;

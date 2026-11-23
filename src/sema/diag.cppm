@@ -275,6 +275,8 @@ enum class Diag : std::uint32_t {
   defaulted_copy_unsupported [[=message{Severity::error, "defaulted copy construction of '{0:t}' is not supported for this class"}]],
   defaulted_default_constructor [[=message{Severity::error, "an explicitly defaulted default constructor is not supported for this class"}]],
   defaulted_default_delegation [[=message{Severity::error, "delegation to an explicitly defaulted default constructor is not supported yet"}]],
+  defaulted_destructor [[=message{Severity::error, "an explicitly defaulted destructor is not supported for this class"}]],
+  defaulted_destructor_out_of_class [[=message{Severity::error, "explicitly defaulting a destructor outside its class is not supported yet"}]],
   reference_uninitialized [[=message{Severity::error, "a reference must be initialized"}]],
   bind_to_lvalue [[=message{Severity::error, "an rvalue reference to '{0:t}' cannot bind to an lvalue"}]],
   bind_to_rvalue [[=message{Severity::error, "a non-const lvalue reference to '{0:t}' cannot bind to a temporary"}]],
