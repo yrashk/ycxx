@@ -86,6 +86,7 @@ struct FunctionInput {
   ast::NodeId cleanup_call = ast::NodeId::none;  // the certified hosted cleanup call
   ast::EntityId constructor_cleanup = ast::EntityId::none;  // the selected union member's destructor
   UnwindCleanupChecks unwind_cleanup_checks = UnwindCleanupChecks::none;
+  bool exceptions_enabled = true;  // native lowering's language mode
   bool native_array_delete = false;  // the backend's Linux x86-64 cookie-free array deletion
   bool native_array_new = false;  // the backend's Linux x86-64 allocation in a certified frame
   std::span<const ast::EntityId> nonthrowing_functions{};  // native declarations, sorted by entity
@@ -2188,7 +2189,7 @@ class Gen {
     bool has_value = !result_arg && cls(result) != TypeClass::void_;
     if (has_value) results.push_back(vty(result));
     auto f = in_.types.get<ast::TFunction>(in_.types.canon(fn));
-    if (selecting_initializer_) {
+    if (selecting_initializer_ && fn_.exceptions_enabled) {
       const auto spec = f.noexcept_;
       if (spec == ast::ConstId::none || !in_.values.is<ast::VInt>(spec) || in_.values.get<ast::VInt>(spec).bits.lo == 0)
         throw Unsupported{"a potentially throwing indirect call in a class initializer selection"};
@@ -2281,7 +2282,7 @@ class Gen {
                                  ir::Flags flags = 0) {
     // The selected arm has a normal cleanup edge. An exception would also need to destroy
     // any completed argument, older condition temporaries and, during cleanup, the result.
-    if (selecting_initializer_ && !std::ranges::binary_search(fn_.nonthrowing_functions, f))
+    if (selecting_initializer_ && fn_.exceptions_enabled && !std::ranges::binary_search(fn_.nonthrowing_functions, f))
       throw Unsupported{"a potentially throwing call in a class initializer selection"};
     std::vector<ir::Ty> results;
     if (args.size() > 32) throw Unsupported{"a call with more than 32 arguments"};

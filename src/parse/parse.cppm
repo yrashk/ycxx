@@ -156,9 +156,9 @@ public:
   // `template_depth` is the limit on nested instantiations ([temp.inst]/16), `-ftemplate-depth`.
   // `index`, when given, is `make_index` of the same world, region and items, shared (#947).
   Program(sema::World& w, const pp::Region& r, const items::Items& its, u32 template_depth = pp::Config::default_template_depth,
-          std::shared_ptr<const Index> index = nullptr)
-      : instantiation_limit(template_depth), w_(&w), r_(&r), view_(its), items_(&view_),
-        ix_(index ? std::move(index) : make_index(w, r, its)) {
+          std::shared_ptr<const Index> index = nullptr, bool exceptions_enabled = true)
+      : instantiation_limit(template_depth), exceptions_enabled_(exceptions_enabled), w_(&w), r_(&r),
+        view_(its), items_(&view_), ix_(index ? std::move(index) : make_index(w, r, its)) {
     w.install_builtin_classes(classes_);
     may_have_virtual_layouts_ = classes_.has_virtual_layouts() || ix_->says_virtual;
   }
@@ -352,6 +352,7 @@ public:
 
   sema::World& world() { return *w_; }
   const pp::Region& region() const { return *r_; }
+  bool exceptions_enabled() const { return exceptions_enabled_; }
   const ItemsView& items() const { return *items_; }
   // Records the items this Program reads into `reads` (#947).
   void record_reads(std::vector<std::uint8_t>* reads) {
@@ -1565,6 +1566,7 @@ private:
     Result<V> result;
   };
 
+  const bool exceptions_enabled_;
   sema::World* w_;
   const pp::Region* r_;
   ItemsView view_;
@@ -1857,6 +1859,7 @@ std::set<EntityId> Program::uncertain_object_layouts(bool include_lifecycle_sign
 class AtItem final : public sema::Questions {
 public:
   AtItem(Program& p, u32 item, bool self) : from(p.ns_of(item)), p_(&p), item_(item), self_(self) {}
+  bool exceptions_enabled() const override { return p_->exceptions_enabled(); }
   const sema::Classes& classes() override { return p_->classes(); }
   sema::CopyAssignment require_copy_assignment(EntityId f) override { return p_->require_copy_assignment(f); }
   const sema::ClassRec& publish_class(EntityId c, sema::ClassRec r) override { return p_->publish_class(c, std::move(r), item_); }
@@ -2575,6 +2578,7 @@ public:
   AtInstantiation(Program& p, u32 item) : p_(&p), item_(item), at_(p, item, true) {
     at_.default_instantiation_point = p.end();
   }
+  bool exceptions_enabled() const override { return p_->exceptions_enabled(); }
   sema::AliasCallPattern alias_call_pattern(EntityId e) override { return at_.alias_call_pattern(e); }
   std::optional<QualType> replay_alias_calls(sema::Sema& caller, const ast::DeclSema& alias,
                                            const sema::Bindings& args) override {
