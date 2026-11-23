@@ -1456,6 +1456,10 @@ public:
     bool unapplied_field_layout = false;
   };
   ClassContent class_content(u32 item, const std::function<const ast::ItemSema&(u32)>& sema_of);
+  bool class_assertion(u32 member) const {
+    return r_->tokens[items_->items[member].begin].kind == lex::Tk::kw_static_assert;
+  }
+  bool valid_class_assertion(const Result<ast::ItemSema>& member) const;
   sema::PeerVirtualLayout peer_virtual_layout(u32 item, EntityId cls, const sema::ClassRec& rec,
                                              std::span<const ast::MemberRec> members);
   EntityId peer_automatic_primary_base(u32 item, EntityId cls, const sema::ClassRec& rec,
@@ -1717,6 +1721,9 @@ private:
   std::map<std::pair<u32, u32>, Result<ast::ItemSema>> class_member_cells_;  // by (member item, specialization)
   std::set<u32> classes_instantiating_;
   std::set<u32> classes_instantiated_;  // by specialization: instantiated in this unit
+  // A class can be blocked by its own assertion or one in a required class.
+  std::set<EntityId> failed_class_assertions_;
+  std::set<u32> items_with_failed_assertion_dependencies_;
   std::vector<std::pair<u32, u32>> class_member_order_;  // the cells above, in order of analysis
   struct ScopedEnumDefinition {
     u32 item;
@@ -2141,7 +2148,9 @@ public:
   }
   bool generic_at_end = false;
   bool type_trait_instantiation_failed(EntityId e) override {
-    const bool failed = p_->failed_type_trait_instantiations_.contains(e);
+    const bool failed_assertion = p_->failed_class_assertions_.contains(e);
+    observed_class_assertion_failure |= failed_assertion;
+    const bool failed = failed_assertion || p_->failed_type_trait_instantiations_.contains(e);
     observed_type_trait_failure |= failed;
     return failed;
   }
@@ -2220,6 +2229,7 @@ public:
   bool observed_enum_definition_failure = false;
   bool retain_type_trait_pattern = false;
   bool observed_type_trait_failure = false;
+  bool observed_class_assertion_failure = false;
   std::optional<u32> type_trait_demand;
   struct RestoreTypeTraitPattern {
     AtItem& q;
@@ -2977,6 +2987,7 @@ public:
     s_.template_args = var_->args;
   }
   bool type_trait_failure() const { return q_.observed_type_trait_failure; }
+  bool class_assertion_failure() const { return q_.observed_class_assertion_failure; }
 
   Result<ast::ItemSema> replay_scoped_enum(EntityId e) {
     q_.replaying_scoped_enum = e;
@@ -3255,10 +3266,7 @@ private:
     }
     if (ps_.is(Tk::kw_static_assert)) {
       if (!annotations.empty()) s_.diag(annotations.front().offset, Diag::attributes_not_allowed);
-      Ex sa = ps_.static_assert_declaration();
-      tree_ = sa.id;
-      if (!ps_.at_end()) s_.diag(ps_.pos(), Diag::unexpected_token, ps_.kind());
-      return;
+      return static_assert_declaration();
     }
     if (!template_ && !explicit_ && ps_.is(Tk::kw_asm)) {
       const u32 at = ps_.pos();
@@ -4961,14 +4969,27 @@ private:
     if (!ps_.expect(Tk::semi)) bad();
   }
 
-  // A member-declaration ([class.mem.general]) of the class item enclosing this one: non-static
-  // data members, so far.
+  void static_assert_declaration() {
+    tree_ = ps_.static_assert_declaration().id;
+    if (!ps_.at_end()) s_.diag(ps_.pos(), Diag::unexpected_token, ps_.kind());
+  }
+
+  // A member-declaration ([class.mem.general]) of the class item enclosing this one.
   void member_declaration() {
     EntityId ce = inst_ ? inst_->spec : p_->class_entity(it_->parent);
     if (ce == EntityId::none) return bad();
     ast::DeclSema c = class_decl(ce, true);
     s_.current_class = ce;  // names in a member declaration are looked up in the class first
     if (ps_.accept(Tk::semi)) return;
+    if (ps_.is(Tk::kw_static_assert)) {
+      const sema::Sema::ClassPrefixScope prefix(s_, ce);
+      const std::size_t before = p_->end_diags_.size();
+      static_assert_declaration();
+      if (q_.observed_type_trait_failure || q_.observed_enum_definition_failure ||
+          !valid_member_declarations(std::span(p_->end_diags_).subspan(before)))
+        tree_ = NodeId::none;
+      return;
+    }
     // An access-specifier missing its `:` ([class.access.spec]/1).
     if ((ps_.is(Tk::kw_public) || ps_.is(Tk::kw_protected) || ps_.is(Tk::kw_private)) && ps_.kind(1) != Tk::colon) {
       ps_.bump();
@@ -6714,7 +6735,7 @@ private:
       sem.storage = ast::Storage::static_;
       const sema::Sema::ImmediateReferenceScope references(s_, spec.is_constexpr);
       const auto& owner = s_.world().entities.rec(c.entity);
-      const sema::Sema::StaticInitializerScope initializer(s_,
+      const sema::Sema::ClassPrefixScope initializer(s_,
           !s_.templated() && owner.templ == EntityId::none ? c.entity : EntityId::none, d.name);
       if (spec.is_constexpr) d.type = types.add_cv(d.type, sema::Cv::const_);
       const sema::Sema::StaticConstexprInitializerScope constexpr_initializer(s_, spec.is_constexpr);
@@ -6756,7 +6777,7 @@ private:
         if (!member_value_) p_->declared(sem, k_);
       };
       // [basic.scope.pdecl]: the member's name and type are visible in its initializer.
-      const bool visible_in_initializer = list_initialization || !s_.static_initializer_bases(c.entity).empty();
+      const bool visible_in_initializer = list_initialization || !s_.class_prefix_bases(c.entity).empty();
       if (visible_in_initializer) declare_member_name();
       // A member whose initializer is in error is still declared, so its uses say nothing more.
       const u32 ordinal = u32(decls_.size());
@@ -7838,7 +7859,9 @@ const Result<ast::ItemSema>& Program::item_sema(u32 item) {
     // A cycle is an internal error (§A2).
     contract_assert(std::ranges::find(running_, item) == running_.end());
     running_.push_back(item);
-    item_cells_.at(item) = ItemAnalysis(*this, item).run();
+    ItemAnalysis analysis(*this, item);
+    item_cells_.at(item) = analysis.run();
+    if (analysis.class_assertion_failure()) items_with_failed_assertion_dependencies_.insert(item);
     running_.pop_back();
   }
   return *item_cells_[item];
@@ -7865,6 +7888,10 @@ bool valid_member_declarations(std::span<const engine::Diagnostic> diagnostics) 
     const auto kind = sema::sema_diag_of(d.id);
     return !kind || sema::message_of(*kind).severity == lex::Severity::error;
   });
+}
+
+bool Program::valid_class_assertion(const Result<ast::ItemSema>& member) const {
+  return w_->ins.ast.is<ast::StaticAssert>(member.value.tree) && valid_member_declarations(member.diags);
 }
 
 // The members of the class item `item` from its member items' records, read by `sema_of`: the
@@ -8681,9 +8708,12 @@ const Result<ast::ClassDef>& Program::class_def(u32 item) {
   // Its head first: the base-clause (`set_bases`).
   if (std::ranges::find(running_, item) == running_.end()) item_sema(item);
   bool member_declarations_valid = true;
+  bool can_complete = true;
   ClassContent c = class_content(item, [&](u32 m) -> const ast::ItemSema& {
     const auto& member = item_sema(m);
     member_declarations_valid &= valid_member_declarations(member.diags);
+    can_complete &= !items_with_failed_assertion_dependencies_.contains(m);
+    if (class_assertion(m)) can_complete &= valid_class_assertion(member);
     return member.value;
   });
   std::vector<ast::MemberRec>& members = c.members;
@@ -8705,9 +8735,10 @@ const Result<ast::ClassDef>& Program::class_def(u32 item) {
     for (const ast::MemberRec& m : members) rec.access.push_back({m.entity, m.access});
     rec.friends = std::move(c.friends);
     rec.adl_friends = c.adl_friends;
+    if (!can_complete) failed_class_assertions_.insert(*cls);
     // Classify the written declarations before special_members appends implicit assignments.
-    if (member_declarations_valid) rec.trivial_copyability = class_trivial_copyability(item, *cls, rec);
-    const bool implicit_move = special_members(item, *cls, rec, &out.diags);
+    if (can_complete && member_declarations_valid) rec.trivial_copyability = class_trivial_copyability(item, *cls, rec);
+    const bool implicit_move = can_complete && special_members(item, *cls, rec, &out.diags);
     if (rec.polymorphic) {
       if (rec.bases.size() == 1)
         if (const auto* base = classes_.find(rec.bases.front().cls))
@@ -8719,14 +8750,16 @@ const Result<ast::ClassDef>& Program::class_def(u32 item) {
         if (member.is_pure) rec.pure_final_overriders.push_back(member.entity);
       }
     }
-    classify_defaulted_default_ctor(rec, out.diags);
+    if (can_complete) classify_defaulted_default_ctor(rec, out.diags);
     if (rec.polymorphic) {
       rec.peer_virtual_layout = peer_virtual_layout(item, *cls, rec, members);
       if (rec.peer_virtual_layout == sema::PeerVirtualLayout::none)
         rec.peer_automatic_primary_base = peer_automatic_primary_base(item, *cls, rec, members);
     }
-    validate_class_alignment(item, *cls, rec, out.diags);
-    rec.defined = true;
+    if (can_complete) validate_class_alignment(item, *cls, rec, out.diags);
+    // Keep the written declarations for error recovery in member bodies. An assertion
+    // failure still prevents completion and cannot supply layout or class properties.
+    rec.defined = can_complete;
     // Complete-class checks see the full member set before any function bodies are read.
     classes_.publish(*cls, std::move(rec), [&](sema::ClassRec& fresh) {
       if (special_member_exception_tokens_.contains(fresh.declared_destructor))
@@ -10576,7 +10609,8 @@ std::optional<sema::BaseRec> Program::instantiate_base(EntityId specialization, 
   std::optional<EntityId> base;
   if (substituted && !s.has_error_since(0) && !q.observed_type_trait_failure)
     base = dependent ? complete_base_class(s, *substituted, pattern.begin) : std::optional(w_->types.class_of(type));
-  if (q.observed_type_trait_failure) failed_type_trait_instantiations_.insert(specialization);
+  if (q.observed_class_assertion_failure) failed_class_assertions_.insert(specialization);
+  else if (q.observed_type_trait_failure) failed_type_trait_instantiations_.insert(specialization);
   for (engine::Diagnostic& d : sink) {
     if (sema::is_type_trait_failure(d.id)) failed_type_trait_instantiations_.insert(specialization);
     if (!std::ranges::contains(end_diags_, d)) end_diags_.push_back(std::move(d));
@@ -10593,7 +10627,7 @@ const sema::ClassRec* Program::instantiate_class(EntityId spec, u32 point) {
   // first needed.
   if (classes_instantiated_.contains(key)) return point > last_member(class_patterns_.at(key)) ? classes_.find(spec) : nullptr;
   const sema::EntityRec rec = w_->entities.rec(spec);
-  if (failed_type_trait_instantiations_.contains(spec)) return nullptr;
+  if (failed_class_assertions_.contains(spec) || failed_type_trait_instantiations_.contains(spec)) return nullptr;
   if (w_->types.is_dependent(w_->types.class_type(spec)) || classes_instantiating_.contains(key) || partial_matching_.contains(key))
     return nullptr;
   // Its pattern: the partial specialization that matches it, else the template's definition.
@@ -10634,23 +10668,38 @@ const sema::ClassRec* Program::instantiate_class(EntityId spec, u32 point) {
   // Each member item's declaration part, again, with the arguments bound: the members of `spec`,
   // asked at the point of instantiation ([temp.point]).
   bool member_declarations_valid = true;
+  bool can_complete = true;
   ClassContent c = class_content(k, [&](u32 m) -> const ast::ItemSema& {
     auto cell_key = std::pair(m, key);
     const auto& written = item_sema(m);
     member_declarations_valid &= valid_member_declarations(written.diags);
+    const bool assertion = class_assertion(m);
+    can_complete &= !items_with_failed_assertion_dependencies_.contains(m);
+    if (assertion) can_complete &= valid_class_assertion(written);
     if (!class_member_cells_.contains(cell_key)) {
-      Result<ast::ItemSema> cell = ItemAnalysis(*this, m, ClassInstantiation{spec, args, point}).run();
+      ItemAnalysis analysis(*this, m, ClassInstantiation{spec, args, point});
+      Result<ast::ItemSema> cell = analysis.run();
+      can_complete &= !analysis.class_assertion_failure();
       member_declarations_valid &= valid_member_declarations(cell.diags);
       // What the definition diagnosed it says once, there.
-      if (!written.diags.empty()) cell.diags.clear();
+      if (assertion) {
+        std::erase_if(cell.diags, [&](const auto& diag) { return std::ranges::contains(written.diags, diag); });
+      } else if (!written.diags.empty()) {
+        cell.diags.clear();
+      }
       class_member_cells_.emplace(cell_key, std::move(cell));
       class_member_order_.push_back(cell_key);
     }
     const auto& member = class_member_cells_.at(cell_key);
     member_declarations_valid &= valid_member_declarations(member.diags);
+    if (assertion) can_complete &= valid_class_assertion(member);
     return member.value;
   });
   classes_instantiating_.erase(key);
+  if (!can_complete) {
+    failed_class_assertions_.insert(spec);
+    return nullptr;
+  }
   classes_instantiated_.insert(key);
   for (const ast::MemberRec& m : c.members)
     if (w_->entities.rec(m.entity).kind != sema::EntityKind::data_member)

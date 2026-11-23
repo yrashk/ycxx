@@ -895,10 +895,10 @@ public:
     return std::nullopt;
   }
 
-  // `r`, a definition's record, unless one is published already; the published one.
+  // Keep incomplete recovery records available to sema without exporting them as definitions.
   const ClassRec& publish(EntityId c, ClassRec r, const std::function<void(ClassRec&)>& finish = {}) {
     auto [it, fresh] = recs_.try_emplace(std::to_underlying(c), std::move(r));
-    if (fresh) {
+    if (fresh && it->second.defined) {
       class_order_.push_back(c);
       has_virtual_layouts_ |= it->second.layout_requires_virtual_support;
       if (finish) finish(it->second);
@@ -912,10 +912,10 @@ public:
     else if (!it->second.defined && r.defined) it->second = std::move(r);
     return it->second;
   }
-  // The classes and enumerations with records, in the order they were published.
+  // Defined classes and recorded enumerations, in publication order.
   std::span<const EntityId> classes() const { return class_order_; }
   std::span<const EntityId> enums() const { return enum_order_; }
-  // A defined class's record.
+  // A class record, including one retained for error recovery.
   const ClassRec& rec(EntityId c) const
     pre(find(c) != nullptr)
   {
