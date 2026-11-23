@@ -342,6 +342,35 @@ with tempfile.TemporaryDirectory() as directory:
             }
         """)
         too_many = write("mediated_overuse.cpp", mediated.read_text().replace("i = Active::limit;", "i = 3;"))
+        write("split_budget.hpp", """\
+            #pragma once
+            #include "linked_grade.hpp"
+            #include <ycxx/effects/runtime.hpp>
+            using SplitScope = fx::budget<Send, LinkProfile<2>::limit>;
+            using SplitBound = fx::set<fx::at_most<Send, LinkProfile<2>::limit>>;
+            int charge(SplitScope&) noexcept;
+        """)
+        split_provider = write("split_budget_provider.cpp", """\
+            #include "split_budget.hpp"
+            [[=fx::trusted_contract<One>{}]] void spend(SplitScope& scope) noexcept { scope.spend(); }
+            [[=fx::contract<SplitBound>{}]] int charge(SplitScope& scope) noexcept {
+              spend(scope);
+              return 7;
+            }
+        """)
+        split_caller = write("split_budget_caller.cpp", """\
+            #include "split_budget.hpp"
+            int forward(SplitScope& scope) noexcept { return charge(scope); }
+            using Rules = fx::use_policy<fx::bound<decltype(&charge), &charge, SplitBound>,
+                                         fx::bound<decltype(&forward), &forward, SplitBound>>;
+            int main(int argc, char**) {
+              SplitScope scope;
+              scope.spend();
+              if (forward(scope) != 7) return 1;
+              if (argc > 1) scope.spend();
+              return 0;
+            }
+        """)
         error = "exceeds its usage grade of 2"
         resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
         trap_signals = (-signal.SIGILL, -signal.SIGTRAP) if mac_host else (-signal.SIGILL,)
@@ -369,6 +398,20 @@ with tempfile.TemporaryDirectory() as directory:
                         assert invoke([*resident, *analysis], error, env) == invoke([*target, *analysis], error, env)
                 finally:
                     subprocess.run([compiler, "ctl", "shutdown"], cwd=root, env=env, capture_output=True, timeout=10)
+            # Both objects directly call the same instantiated inline budget member.
+            split = root / "split-budget"
+            for checks in (0, 1):
+                mode = f"-DYCXX_POLICIES_RUNTIME_CHECKS={checks}"
+                objects = []
+                for source in (split_caller, split_provider):
+                    obj = source.with_suffix(".o")
+                    invoke([*target, mode, "-c", source, "-o", obj])
+                    objects.append(obj)
+                invoke([*target, mode, *objects, "-o", split])
+                if can_run:
+                    subprocess.run([split], check=True, timeout=10)
+                    exhausted = subprocess.run([split, "exhausted"], timeout=10)
+                    assert exhausted.returncode in (trap_signals if checks else (0,)), exhausted
         assignment = write("budget_assignment.cpp", """\
             #include "grades.hpp"
             #include <ycxx/effects/runtime.hpp>
