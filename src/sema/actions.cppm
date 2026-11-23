@@ -107,6 +107,8 @@ public:
   // A use of a global allocation function that may lack a written declaration in the unit.
   // An aligned signature also brings its parameter's enum shape into the unit.
   virtual void use_allocation_function(EntityId, bool = false) {}
+  // A call of a C library function a builtin lowers to (`World::string_function`).
+  virtual void use_library_function(EntityId) {}
   // Check the selected implicitly declared copy assignment against its subobjects.
   virtual CopyAssignment require_copy_assignment(EntityId) { return CopyAssignment::unsupported; }
   // What a constant evaluation fetches (§B7): `function_ir` of a function defined before the
@@ -7214,6 +7216,28 @@ public:
     return node(ast::BuiltinCall{info, op, b_->list({at(arg, begin)})}, begin, end, info);
   }
 
+  // A builtin that is a C library function: a call of its implicit declaration, whose arguments
+  // are copy-initialized parameters as in any call ([expr.call]/7).
+  Ex builtin_library_call(StringFunction f, std::vector<Ex> args, u32 begin, u32 end) {
+    const ast::DeclSema d = w_->string_function(f);
+    const auto& signature = types().rec(d.type);
+    if (!builtin_arity(signature.params.size(), args.size(), begin)) return {NodeId::none, begin, end};
+    if (std::ranges::any_of(args, [](const Ex& a) { return !a.ok(); })) return {NodeId::none, begin, end};
+    const QualType result = signature.inner;
+    if (std::ranges::any_of(args, [&](const Ex& a) { return dependent(a); })) return dependent_node(args, begin, end, result);
+    std::vector<Child> converted;
+    for (std::size_t i = 0; i < args.size(); ++i) {
+      const Ex arg = convert(args[i], signature.params[i], args[i].begin);
+      if (!arg.ok()) return {NodeId::none, begin, end};
+      converted.push_back(at(arg, begin));
+    }
+    q_->use_library_function(d.entity);
+    const ExprInfo fn_info{d.type, ValueCategory::lvalue, 0};
+    const Ex callee = node(ast::DeclRef{fn_info, d.entity}, begin, begin, fn_info);
+    const ExprInfo info{result, ValueCategory::prvalue, 0};
+    return node(ast::Call{info, d.entity, at(callee, begin), b_->list(converted)}, begin, end, info);
+  }
+
   // Only send closed, read-only expressions to the fresh constant evaluator. In particular
   // a probe cannot instantiate a speculative callee or run a write in a constexpr frame.
   bool constant_probe_safe(const ast::Red& expression) {
@@ -7334,6 +7358,9 @@ public:
       if (!builtin_arity(1, args.size(), begin)) return {NodeId::none, begin, end};
       return builtin_constant_probe(args.front(), begin, end);
     }
+    if (b.function == memchr || b.function == memcmp)
+      return builtin_library_call(b.function == memchr ? StringFunction::memchr : StringFunction::memcmp, std::move(args),
+                                  begin, end);
     std::size_t want = b.function == fabs || b.function == nan ? 1 : 0;
     if (!builtin_arity(want, args.size(), begin)) return {NodeId::none, begin, end};
     if (std::ranges::any_of(args, [](const Ex& a) { return !a.ok(); })) return {NodeId::none, begin, end};
@@ -7356,6 +7383,8 @@ public:
       case addressof:
       case trap:
       case strlen:
+      case memchr:
+      case memcmp:
       case constant_p: std::unreachable();  // Handled before floating type selection.
       case inf:
       case huge_val:

@@ -141,7 +141,7 @@ struct FunctionDef {
   // An ordinary external inline definition that every unit using it may emit: a weak definition,
   // coalesced by the linker (ELF #422, Mach-O #124).
   bool coalesced = false;
-  bool explicit_weak = false;  // an ordinary non-inline ELF definition (#937)
+  bool explicit_weak = false;  // an ordinary non-inline definition (#937)
   UnwindEligibility unwind = UnwindEligibility::none;
   std::optional<HostedCatch> hosted_catch{};
   ast::NodeId cleanup_call = ast::NodeId::none;
@@ -2305,7 +2305,7 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
       const auto& def = tu.functions[i];
       code.push_back({.entity = fns[i].fn, .code = *ms[i].get().code,
                       .cleanup_free_unwind = def.unwind == UnwindEligibility::cleanup_free,
-                      .weak = def.coalesced});
+                      .weak = def.coalesced || def.explicit_weak});
     }
     auto o = aarch64::assemble(tu.name, code, data, symbols);
     if (!o) return o;

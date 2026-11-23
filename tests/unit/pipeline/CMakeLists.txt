@@ -15,6 +15,9 @@ ycxxc_unit_test(pipeline_elf_executable elf_executable_test.cpp ycxxc_pipeline)
 add_test(NAME unit.dependent_fabsl
   COMMAND ${CMAKE_COMMAND} -DYCXX=$<TARGET_FILE:ycxxc>
           -P ${CMAKE_CURRENT_SOURCE_DIR}/dependent_fabsl.cmake)
+# Both targets' objects, on every host: the string builtins' C symbols appear once (#248).
+add_test(NAME unit.string_builtin_symbols
+  COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/string_builtin_symbols.py $<TARGET_FILE:ycxxc>)
 # PARITY: by design: all hosts check the emitted and linked arm64 Mach-O records.
 # Only an arm64 macOS host can run the Mach-O exception propagation test.
 if(APPLE AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(arm64|aarch64)$" AND NOT CMAKE_CROSSCOMPILING)
@@ -48,6 +51,11 @@ if(APPLE AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(arm64|aarch64)$" AND NOT CMAKE_CR
   find_program(YCXXC_CLANGXX NAMES clang++ REQUIRED)
   add_test(NAME unit.darwin_virtual
     COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/darwin_virtual.py
+            $<TARGET_FILE:ycxxc> ${YCXXC_CLANGXX} ${YCXXC_NM})
+  # The Mach-O counterpart of unit.linux_namespace_visibility and linux_inline's weak providers,
+  # checked against Clang's symbol tables.
+  add_test(NAME unit.darwin_weak_visibility
+    COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/darwin_weak_visibility.py
             $<TARGET_FILE:ycxxc> ${YCXXC_CLANGXX} ${YCXXC_NM})
 endif()
 # PARITY: #647, #649 for the Darwin counterparts of unit.linux_variadic_definitions and
@@ -122,7 +130,8 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_
   add_test(NAME unit.linux_executable
     COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/linux_executable.py
             $<TARGET_FILE:ycxxc> ${CMAKE_READELF})
-  # PARITY: by design: checks ELF visibility and runs the Linux x86-64 link.
+  # PARITY: by design: checks ELF visibility and runs the Linux x86-64 link. Its Mach-O counterpart
+  # is unit.darwin_weak_visibility.
   add_test(NAME unit.linux_namespace_visibility
     COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/linux_namespace_visibility.py
             $<TARGET_FILE:ycxxc> ${CMAKE_READELF} ${PROJECT_SOURCE_DIR}/deps/libycxx)

@@ -863,12 +863,16 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
   gives its non-inline definition `STB_WEAK`. This includes qualified definitions such as
   libycxx's `std::is_debugger_present`. The ELF linker selects a strong definition in either
   input order and diagnoses duplicate strong definitions. Explicit GNU visibility can
-  independently give the symbol `STV_HIDDEN`.
+  independently give the symbol `STV_HIDDEN`. On arm64 Mach-O the same definitions are weak
+  external, or weak private external when hidden, and both ycxx's linker and the system linker
+  keep a strong definition over them (`unit.darwin_weak_visibility`).
   [Design](docs/design/linux-weak-functions.md) · [#937](https://github.com/yrashk/ycxx/issues/937)
+  · [#1085](https://github.com/yrashk/ycxx/issues/1085)
 - On Linux x86-64, explicit GNU hidden visibility on any declaration of an ordinary external
   non-inline namespace-scope variable gives its ELF symbol `STB_GLOBAL` and `STV_HIDDEN`.
   This includes the C-linkage marker `__ycxx_linkage_static_v1` from the pinned libycxx runtime.
-  [#936](https://github.com/yrashk/ycxx/issues/936)
+  On arm64 Mach-O the symbol is private external.
+  [#936](https://github.com/yrashk/ycxx/issues/936) · [#1085](https://github.com/yrashk/ycxx/issues/1085)
 - On Linux x86-64, a namespace-scope `asm((expression));` checks `size()` and `data()` in one
   constant evaluation and accepts a single `.hidden SYMBOL` directive with an optional final
   newline. The assembler sets `STV_HIDDEN` on the matching ordinary ELF symbol while preserving
@@ -878,9 +882,10 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
   nearest explicit GNU `hidden` or `default` visibility from a namespace definition.
   The canonical declaration carries consistent visibility to its unannotated qualified
   definition and to reference-only objects. An explicit function attribute takes
-  precedence. Mixed inherited defaults retain the direct attribute rules.
+  precedence. Mixed inherited defaults retain the direct attribute rules. arm64 Mach-O
+  follows the same rules, with hidden as private external.
   [Design](docs/design/linux-namespace-visibility.md) ·
-  [#940](https://github.com/yrashk/ycxx/issues/940)
+  [#940](https://github.com/yrashk/ycxx/issues/940) · [#1085](https://github.com/yrashk/ycxx/issues/1085)
 - Constant-initialized and zero-initialized external inline namespace variables use weak ELF
   definitions when their initial values need no relocations. This includes explicitly inline
   full variable-template specializations with builtin type arguments. Static addresses and
@@ -2472,6 +2477,18 @@ scan's reads indeterminately sequenced with the caller's other evaluations ([int
 and diagnoses reads past the end of an unterminated array in a required constant expression
 ([expr.const]). Native lowering requires no runtime `strlen` symbol. Fixtures in
 `tests/own/builtins/` cover detection, result type, argument checks, and constant and runtime scans.
+
+## Byte search and comparison builtins (#248)
+
+`__builtin_memchr(s, c, n)` and `__builtin_memcmp(s1, s2, n)` are direct calls of the C
+library's `memchr` and `memcmp`, as libycxx's `<cstring>` and its run-time string helpers
+(`include/ycxx/core/mem_builtins.hpp`) use them. Sema converts the arguments to the C signatures
+(`void*` and `int` results) and calls an implicit `extern "C"` declaration with the target's
+`<string.h>` exception specification (`World::string_function`), so a written declaration or
+definition of the function is the same entity and symbol (`unit.string_builtin_symbols`). The unit then references `memchr` or `memcmp` as an undefined symbol,
+which libSystem or the C library provides at link time. A dependent argument defers the call to
+instantiation. They are not constant expressions yet (#1092). Fixtures in `tests/own/builtins/`
+cover detection, signatures, argument checks and run-time results.
 
 ## GNU constantness probe (#1065)
 

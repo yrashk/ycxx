@@ -139,7 +139,8 @@ constexpr const TypeTraitInfo* type_trait(std::string_view name) {
 // from `<math.h>`, `type` is the type they take and give: 'f' float, 'd' double, 'l' long
 // double. `__builtin_inf*` and `__builtin_huge_val*` are +infinity, `__builtin_nan*(s)` the quiet
 // NaN whose payload `s` spells (as `strtoull` reads it), `__builtin_fabs*(x)` |x|.
-enum class BuiltinFunction : std::uint8_t { fabs, inf, huge_val, nan, addressof, strlen, trap, constant_p };
+// `__builtin_memchr` and `__builtin_memcmp` are the C library's `memchr` and `memcmp`, and call them.
+enum class BuiltinFunction : std::uint8_t { fabs, inf, huge_val, nan, addressof, strlen, memchr, memcmp, trap, constant_p };
 struct BuiltinFunctionInfo {
   std::string_view name;
   BuiltinFunction function;
@@ -161,6 +162,8 @@ inline constexpr std::array builtin_functions{
     BuiltinFunctionInfo{"__builtin_nan", BuiltinFunction::nan, 'd'},
     BuiltinFunctionInfo{"__builtin_nanl", BuiltinFunction::nan, 'l'},
     BuiltinFunctionInfo{"__builtin_strlen", BuiltinFunction::strlen},
+    BuiltinFunctionInfo{"__builtin_memchr", BuiltinFunction::memchr},
+    BuiltinFunctionInfo{"__builtin_memcmp", BuiltinFunction::memcmp},
     BuiltinFunctionInfo{"__builtin_trap", BuiltinFunction::trap},
     BuiltinFunctionInfo{.name = "__builtin_constant_p", .function = BuiltinFunction::constant_p, .advertised = false},
 };
