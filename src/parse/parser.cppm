@@ -1829,6 +1829,12 @@ public:
       u32 after_type = first + 1;
       if (constrained_auto_ahead(first)) {
         ++after_type;
+      } else if (k == Tk::kw_typename && qualified_ahead(after_type)) {
+        const bool saved_half = qualified_half_;
+        auto q = qualified_type(after_type);
+        qualified_half_ = saved_half;
+        if (!q) return true;  // diagnose a bad typename-specifier in the declaration
+        after_type += q->second;
       } else if (!simple_type_keyword(k)) {
         if (k == Tk::r_paren || k == Tk::ellipsis || starts_decl_specifier(k)) return true;
         if ((k == Tk::identifier && next == Tk::coloncolon) || k == Tk::coloncolon) {
