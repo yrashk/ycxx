@@ -241,6 +241,14 @@ def main():
                 link(*objects)
                 run('./program')
 
+        compile(destructors / 'enum-value.cpp', 'enum-dtor.o')
+        table = symbols('enum-dtor.o')
+        for name, binding in (('_ZN6MemberILN12_GLOBAL__N_13TagE7EED1Ev', 'LOCAL'),
+                              ('_ZN12PublicMemberIL9PublicTag7EED1Ev', 'WEAK')):
+            assert table[name][4] == binding and table[name][6] != 'UND', table[name]
+        link('enum-dtor.o')
+        run('./program')
+
         ordinary = destructors / 'out-of-line'
         compile(ordinary / 'first.cpp', 'strong-dtor-first.o')
         compile(ordinary / 'second.cpp', 'strong-dtor-second.o')

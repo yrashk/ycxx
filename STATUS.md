@@ -2482,9 +2482,10 @@ Fable decided the representation (ast.md §6.6); the Opus session wrote the code
   Both targets coalesce these inline friend definitions across objects (#422, [#124](https://github.com/yrashk/ycxx/issues/124)).
 - Both ELF and Mach-O coalesce eligible nonthrowing, nonvirtual in-class destructor definitions
   and implicitly defined destructors, including those of class-template specializations. A
-  specialization naming a translation-unit-local template argument retains local destructor
-  binding. The separate-object tests check both orders, distinct specializations, and the
-  duplicate diagnostic for two ordinary out-of-line definitions.
+  specialization naming a translation-unit-local type retains local destructor binding, including
+  when an enum value of that type is the template argument. The separate-object tests check both
+  orders, distinct specializations, and the duplicate diagnostic for two ordinary out-of-line
+  definitions.
   [#1025](https://github.com/yrashk/ycxx/issues/1025)
 - A namespace-scope declaration's qualified types are checked once what it declares is known
   (`Sema::defer_type_access`, `settle_type_access`): a member's definition outside its class and

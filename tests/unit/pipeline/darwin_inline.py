@@ -156,6 +156,13 @@ int main() { return g() - 2; }
                     assert table.get(name) == binding, (obj, name, table.get(name))
             links(first, second)
 
+        compile(destructors / 'enum-value.cpp', 'enum-dtor.o')
+        table = symbols('enum-dtor.o')
+        assert table.get('__ZN6MemberILN12_GLOBAL__N_13TagE7EED1Ev') == ('non-external', True), table
+        assert table.get('__ZN12PublicMemberIL9PublicTag7EED1Ev') == weak, table
+        run(ycxx, 'cxx', 'enum-dtor.o', '-o', 'program')
+        run('./program')
+
         ordinary = destructors / 'out-of-line'
         compile(ordinary / 'first.cpp', 'strong-dtor-first.o')
         compile(ordinary / 'second.cpp', 'strong-dtor-second.o')

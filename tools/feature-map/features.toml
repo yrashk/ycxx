@@ -551,8 +551,8 @@ clauses = ['basic.link', 'basic.def.odr', 'dcl.inline']
 std = 'C++98'
 core = true
 status = 'partial'
-issues = [124, 193, 422]
-note = 'Weak definitions for ordinary external inline functions on x86-64 ELF and arm64 Mach-O, and COMDAT input selection in explicit static links. COMDAT emission, grouped archive and dynamic links, inline functions with statics or closures, template specializations and internal-linkage mangling remain'
+issues = [124, 193, 422, 1025]
+note = 'Weak definitions for ordinary external inline functions and eligible nonthrowing in-class and implicit destructors on x86-64 ELF and arm64 Mach-O, and COMDAT input selection in explicit static links. Destructor specializations naming a translation-unit-local type use local symbols. COMDAT emission, grouped archive and dynamic links, inline functions with statics or closures, other template specializations and general internal-linkage mangling remain'
 
 [[feature]]
 id = 'basic-inline-vars'
