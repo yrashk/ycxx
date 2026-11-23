@@ -474,8 +474,8 @@ struct SiteConfig {
 };
 ```
 
-You can reuse one configuration template for several limits. Here an aggregate's default
-member initializer caps each request, and the deployment inherits the approved limit.
+You can reuse one configuration template for several limits. Here a constexpr function
+returns an aggregate with the capped request, and the deployment inherits the approved limit.
 
 ```cpp
 struct Limits {
@@ -483,9 +483,14 @@ struct Limits {
   unsigned approved = requested < 4u ? requested : 4u;
 };
 
+constexpr Limits make_limits(unsigned requested) {
+  Limits limits{requested};
+  return limits;
+}
+
 template<unsigned Requested>
 struct SiteProfile {
-  static constexpr unsigned approved = Limits{Requested}.approved;
+  static constexpr unsigned approved = make_limits(Requested).approved;
 };
 
 struct SiteConfig : SiteProfile<2u> {
