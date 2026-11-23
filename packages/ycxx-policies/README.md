@@ -444,3 +444,15 @@ using AuditBound = AuditPolicy::Bound;
 Use `[[=fx::contract<AuditBound>{}]]` on `run` and keep the `OneAudit` annotations
 on the individual operations. With `slots = 2`, two calls to `perform` succeed. A
 third call exceeds the declared grade in YCXX and traps in GCC or Clang builds.
+
+### Inspect a checked build
+
+Open YCXX's trace browser while it compiles the reflected handler.
+
+```sh
+ycxx cxx --trace-engine=interactive -fcheck-policies -I/path/to/include -c reflected_handler.cpp
+```
+
+Press `/` and filter by `kind:PolicyDeclarationsFor` to see declaration reads or
+`kind:CheckEffectBody` to see effect checks. The browser shows which queries ran and
+which reused cached results. Press `q` to close it.
