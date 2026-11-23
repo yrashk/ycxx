@@ -867,6 +867,11 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
   non-inline namespace-scope variable gives its ELF symbol `STB_GLOBAL` and `STV_HIDDEN`.
   This includes the C-linkage marker `__ycxx_linkage_static_v1` from the pinned libycxx runtime.
   [#936](https://github.com/yrashk/ycxx/issues/936)
+- On Linux x86-64, a namespace-scope `asm((expression));` checks `size()` and `data()` in one
+  constant evaluation and accepts a single `.hidden SYMBOL` directive with an optional final
+  newline. The assembler sets `STV_HIDDEN` on the matching ordinary ELF symbol while preserving
+  its binding and relocations.
+  [Design](docs/design/linux-namespace-constant-asm.md) · [#974](https://github.com/yrashk/ycxx/issues/974)
 - On Linux x86-64, ordinary external non-inline function declarations can inherit the
   nearest explicit GNU `hidden` or `default` visibility from a namespace definition.
   The canonical declaration carries consistent visibility to its unannotated qualified
