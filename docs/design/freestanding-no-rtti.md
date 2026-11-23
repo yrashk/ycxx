@@ -9,6 +9,9 @@ The front end diagnoses checked `typeid` and `dynamic_cast` operations that
 require RTTI. `dynamic_cast<cv void*>` still uses offset-to-top. Pointer casts
 to the same class or an unambiguous accessible base reuse ordinary pointer
 conversions, including their qualification and layout checks.
+GCC defers a nondependent downcast in a dormant function template, while Clang
+diagnoses it when checking the definition. ycxx checks the cast when its
+existing semantic analysis reaches the nondependent operation.
 
 The native Itanium producer keeps its vtable owner, binding, address point,
 offset-to-top and function slots. The owned table has a zero typeinfo word in
