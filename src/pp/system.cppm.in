@@ -42,7 +42,7 @@ std::vector<std::string> system_dirs(const ast::Target& target, std::string_view
   if (resource != common_resource_include) dirs.emplace_back(common_resource_include);
   if (target.operating_system == ast::OperatingSystem::linux_) {
     // Use the host C library only for the configured native target.
-    if (native_target && native_target->triple == target.triple) {
+    if (const auto* host = native_target; host && host->triple == target.triple) {
       if (!target.multiarch.empty())
         dirs.push_back(std::format("/usr/include/{}", target.multiarch));
       dirs.push_back("/usr/include");
