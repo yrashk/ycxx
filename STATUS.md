@@ -881,7 +881,9 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
   libc-free provider built by the host C compiler. It checks the ELF layout, argument passing,
   runtime rebinding, initialization and finalization, and reproducibility and invalidation in
   the daemon. `unit.linux_archive` tests system `ar` inputs, extraction order, symbol binding,
-  malformed archives, and output parity and same-path replacement in the daemon.
+  malformed archives, and output parity and same-path replacement in the daemon, including
+  explicit archives replaced with the same size and modification time.
+  [#952](https://github.com/yrashk/ycxx/issues/952)
   `unit.linux_archive_output` checks byte layout, deterministic member metadata, atomic
   replacement, and native and external archive consumption. It runs the system `ar`, `nm` and
   linker and also exercises `llvm-ar`, `llvm-nm` and `ld.lld` when available.

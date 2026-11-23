@@ -251,7 +251,13 @@ def main():
             assert link('main.cpp', 'chain.a', result=37, env=daemon) == image
             source('tail.cpp', 'extern "C" int tail() { return 53; }', 'tail.o')
             archive('replacement.a', 'tail.o', 'selected member with a long name.o', 'unselected data.bin')
-            (scope / 'replacement.a').replace(scope / 'chain.a')
+            chain_path = scope / 'chain.a'
+            replacement_path = scope / 'replacement.a'
+            stamp = chain_path.stat()
+            os.utime(replacement_path, ns=(stamp.st_atime_ns, stamp.st_mtime_ns))
+            replacement_path.replace(chain_path)
+            updated = chain_path.stat()
+            assert (updated.st_size, updated.st_mtime_ns) == (stamp.st_size, stamp.st_mtime_ns)
             replacement = link('main.cpp', 'chain.a', result=53, env=daemon)
             assert replacement != image and replacement == link('main.cpp', 'chain.a', result=53)
             assert daemon_pid() == pid
