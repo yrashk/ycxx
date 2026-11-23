@@ -105,7 +105,8 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
     new, even a follow-up to the same issue.
   - Make the check gate the push: `[ "$(gh pr view N --json state -q .state)" = OPEN ] && git push`.
     `gh pr view … -q .state && git push` only prints the state and pushes anyway; that pushed to
-    #753's merged branch, and the commit had to move to #770.
+    #753's merged branch, and the commit had to move to #770. It happened again on #921 (#842),
+    whose review nits had to move to the next PR.
   - The coordinator's sweep also checks every merged PR's branch for commits that aren't on main.
   - Rule: AGENTS.md, "PRs and branches".
   - Learned on #116 and #230, 2026-11-18.
@@ -312,6 +313,47 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
   - Do: rerun Ninja in the same build directory after changing imports during a build.
   - Learned on #101.
 
+- **Find where an incremental build's time goes with the trace's counts and a sampler's times.**
+  On #938 the JSON trace of a 1 MB file had 280k events and doubled the build. Its per-kind self
+  times blamed `FunctionSourceQ` for 2 s of CPU after its scan was already gone, because each
+  traced cell pays the tracer's own cost. The development machine also runs other sessions'
+  builds (load 11–17 on 18 cores), so single timings varied by 50%.
+  - Do: take outcome counts per kind from `--trace-engine=json` (what re-executes, and why). Take
+    times from `sample <daemon pid> 3` started just before an untraced rebuild, and from wall
+    times: min of 5 runs, alternating the base and changed binaries (copy each to a path of its
+    own; a daemon is per binary). Check `ycxx ctl status` for memory without the trace's events.
+  - Look for O(n) scans of unit-wide values in per-function cells: each looks cheap in a small
+    test and is quadratic over a large unit.
+  - Learned on #938.
+- **Find analysis-order dependence with an oracle before splitting analysis.** On #947 a debug
+  check analysed each top-level item in a `parse::Program` of its own and compared its results
+  with the whole unit's, over the core suite. It found 32 differences in 23 files: side tables
+  filled as items run, read on the assumption that every earlier item had run. Fixing their
+  causes took an afternoon; finding them by debugging failing groups would have taken days.
+  - Do: before running part of an analysis alone, compare part-alone with whole over the suite,
+    and fix each cause where the table is read (analyse what can fill it first).
+  - Learned on #947.
+- **The oracle finds only what the suite exercises; list per-unit state by hand too.** After #987
+  merged, source review found two regressions the oracle and 440 fuzz rounds had not. A typedef's
+  `aligned` attribute marked its class's layout uncertain only in the group that saw the typedef,
+  and the merge kept the defining group's shape (#992). The once-per-unit template-depth message
+  guard reset per group, so two families reported twice (#993). No suite file had either case.
+  - Do: when splitting an analysis, list every member that is once per unit (flags, counters) or
+    that a later item can change for an earlier entity, and write each one's merge rule down
+    (union, first-wins, once), with a test for each that is not first-wins.
+  - Learned on #947.
+- **Record a recorded question before its loop.** #947's by-name questions were recorded per
+  entry they visited. When no item declared the name yet, nothing was recorded, and a group
+  missed the declaration added later. The `.incr` suite caught it.
+  - Do: record the question, then walk its answer; check a reuse test by disabling one part of
+    the verification and seeing the test fail.
+  - Learned on #947.
+- **GCC 16.2's "Bad file data" can come from a partition's non-exported code too.** On #947, new
+  types and code in `src/pipeline/front.cppm` made every importer of `ycxx.pipeline` fail, exported
+  or not. Moving them into a module implementation unit (`src/pipeline/groups.cpp`, `module
+  ycxx.pipeline; import :front;`, as `src/interp/ops.cpp` does) fixed it.
+  - Do: put implementation that importers need not see in an implementation unit.
+  - Learned on #947.
 - **Template code added to the engine can slow its hit paths without touching them.** #245's
   trace hooks were one branch each, yet `engine_bench` lost 6 ns a fetch hit and 6 ns a root get
   hit. The per-kind `describe` templates instantiated `std::format` in every engine user's unit,
@@ -337,6 +379,24 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
   - Do: wait on a terminal with `select`. Drive a TUI in tests with Python's `pty.fork`, a set
     window size, and keys written with pauses; the last frame is after the last `ESC [ H`.
   - Learned on #245.
+
+- **Test a live, incremental model against its batch twin on simulated streams, in every order.**
+  #939's live trace tree must end equal to the tree the collector's batches build, whatever order
+  events come in.
+  - Do: generate engine-like event streams (frames with starts and ends, runs of alike instants).
+    Feed each to the real batch path and to the live path, in the engine's order, shuffled and
+    backwards, in random chunks. After every chunk, check the incremental bookkeeping (sums,
+    depths, folding, the summary) against a recount. At the end, compare everything the view
+    shows. Unit tests written by hand missed every bug this found: sums stopping at a subtree
+    waiting for its parent, and two folding cases.
+  - Do: make the out-of-order path as cheap as the in-order one. Workers' events reach a shared
+    buffer slightly out of id order all the time. A whole-parent refold per such event was
+    quadratic under a parent of 80k children, and the browser fell 2 s behind a 2 s build. Keep the
+    repair local, around the change.
+  - Do: guard an index into a container that can be replaced with a contract. A stale index read
+    zeroed memory, landed on row 0 by chance, and the mutation test stayed green until
+    `contract_assert` made it abort.
+  - Learned on #939.
 
 - **Test a terminal UI as a model fed events, and only the terminal around it under a pty.** The
   trace browser's keys went untested while it read `/dev/tty` itself (#245). Moving its state and
@@ -394,6 +454,15 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
   - Do: when ycxx's objects go through the system linker, emit what Clang emits for the same
     construct (`clang++ -c`, then `nm -m` and `otool -lv`), not just what the local linker accepts.
   - Learned on #124.
+- **A zero-fill word that changes with no store: compare it with the file.** On #842 a `__bss`
+  word of a ycxx-linked program held garbage by `main`, and lldb write watchpoints never fired.
+  The value was the file's bytes at the segment's `fileoff` plus the word's offset (an `nlist`
+  entry of `__LINKEDIT`): the chained fixups listed the zero-fill pages, and dyld's page-in
+  linking maps every listed page from the file, in the kernel. It also depended on member order,
+  since a set-ordered member list moved the word.
+  - Do: when a value appears without a store, `xxd -s <fileoff + offset>` the file there first,
+    and diff `dyld_info -fixup_chains` against the system linker's output for the same objects.
+  - Learned on #842.
 - **An executable killed at exec with status 137 says nothing about why.** A linked Mach-O whose
   `ncmds` was one too high passed `codesign -v`, then the kernel killed it before `main`.
   - Do: run `otool -l` on the output first. It reports "malformed load command" and where.
@@ -798,3 +867,17 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
   - Do: write the new body to a file, check it is not empty (`test -s body.md`, or read it), then
     edit; or write the whole body from what you know rather than editing the old one in a pipe.
   - Learned on #88 step 9.
+- **A one-OS test that asserts the other OS rejects the feature makes the parity change edit it.**
+  `linux_virtual_consumer.py` checked that Darwin rejected each virtual shape. Bringing the shapes
+  to Darwin (#650) meant flipping eleven of those assertions, in a test whose real checks are ELF.
+  Most of the Darwin work was lifting `x86_64_linux` checks that guarded nothing target-specific:
+  the lowering and the AArch64 back end already handled every shape.
+  - Do: state the other host's expectation as "the same as this one" when it is, and gate on the
+    target only where the code is target-specific (object format, calling convention). Before
+    porting a feature, compile its fixtures for both targets and diff the results.
+  - Learned on #650.
+- **On macOS the configured C++ compiler is Homebrew GCC, not the platform's C++ ABI.** Apple's
+  arm64 RTTI convention (private-external vague-linkage descriptors, bit 63 on the name pointer)
+  and libc++ are Clang's, so a test that exchanges RTTI or `typeid` with peers needs `clang++`
+  (`find_program(... clang++)`), not `${CMAKE_CXX_COMPILER}`.
+  - Learned on #650.

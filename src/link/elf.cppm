@@ -4,7 +4,7 @@ export module ycxx.link.elf;
 export import ycxx.obj;
 export import ycxx.link.elf.shared;
 import std;
-import ycxx.obj.archive;
+export import ycxx.obj.archive;
 import ycxx.obj.elf;
 
 export namespace ycxx::link::elf {
@@ -14,10 +14,7 @@ struct dynamic_options {
   std::vector<shared_object> libraries;
 };
 
-struct archive_input {
-  std::string name;
-  std::string bytes;
-};
+using archive_input = obj::archive::input;
 
 using static_operand = std::variant<std::reference_wrapper<const obj::object>, std::reference_wrapper<const archive_input>>;
 
@@ -361,7 +358,7 @@ std::expected<std::vector<obj::object>, std::string> select_archive_members(std:
       continue;
     }
     const auto& input = std::get<1>(operand).get();
-    auto archive = obj::archive::read(input.bytes, input.name);
+    auto archive = obj::archive::read(input.bytes(), input.name);
     if (!archive) return std::unexpected(archive.error());
 
     // New unresolved references can select an earlier member. Queue each indexed candidate

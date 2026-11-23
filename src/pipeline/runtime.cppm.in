@@ -1,0 +1,22 @@
+// The C++ runtime an arm64 macOS executable links by default (configured by CMake; DECISIONS
+// §1.3, #842): libycxx's static archives from this build, then the emulated TLS of the GCC that
+// built them (GCC on Darwin lowers `thread_local` to `___emutls_get_address`), and the names
+// libycxx's link options force undefined (`-u`, its `ycxx-link-options`). `-nostdlib++` omits
+// them. Empty when this build has no static libycxx.
+export module ycxx.pipeline:runtime;
+
+import std;
+
+export namespace ycxx::pipeline {
+
+struct Runtime {
+  std::vector<std::string> archives;   // absolute paths, in link order
+  std::vector<std::string> undefined;  // names the link starts with as undefined
+};
+
+inline const Runtime& darwin_runtime() {
+  static const Runtime runtime{{@YCXXC_DARWIN_RUNTIME_ARCHIVES@}, {@YCXXC_DARWIN_RUNTIME_UNDEFINED@}};
+  return runtime;
+}
+
+}  // namespace ycxx::pipeline

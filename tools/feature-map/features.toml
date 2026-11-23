@@ -1823,7 +1823,7 @@ struct D final : B { int f() override { return 0; } };
 int main() { D d; B& b = d; return b.f(); }
 '''
 issues = [309]
-note = 'Ordinary virtual declarations, single-base overrides, final and pure-specifiers on ordinary virtual members, abstract type checking, and unqualified parenthesized or flat braced initializers of a direct polymorphic base in syntax checking. Linux x86-64 supports virtual calls, size and alignment queries, and ordinary integral member access on peer-owned roots and on derived classes with one public nonvirtual root, at most one integral field, and at most one declaration-only override. A unit can emit one out-of-line non-key virtual member of a supported root. Linux key-owned table and RTTI emission covers one ordinary external default-visible root with one public integral field and two directly written fixed integer virtual signatures. Linux x86-64 supports plain automatic default initialization for that root with an implicit default constructor, a trivial destructor and no default member initializer, using a table from the same unit or a peer. Linux x86-64 can also call one or two directly declared public pure virtual slots on a peer-owned abstract root, with ordinary int or unsigned int signatures and bare noexcept. Broader construction and table emission, pure-slot signatures, covariance, further inheritance forms, class-head final, and pure declarations and final on virtual destructors and assignment operators remain open.'
+note = 'Ordinary virtual declarations, single-base overrides, final and pure-specifiers on ordinary virtual members, abstract type checking, and unqualified parenthesized or flat braced initializers of a direct polymorphic base in syntax checking. Linux x86-64 supports virtual calls, size and alignment queries, and ordinary integral member access on peer-owned roots and on derived classes with one public nonvirtual root, at most one integral field, and at most one declaration-only override. A unit can emit one out-of-line non-key virtual member of a supported root. Linux key-owned table and RTTI emission covers one ordinary external default-visible root with one public integral field and two directly written fixed integer virtual signatures. Linux x86-64 supports plain automatic default initialization for that root with an implicit default constructor, a trivial destructor and no default member initializer, using a table from the same unit or a peer. The automatic derived shape with a single public pure int() base slot, one direct int field and one override can also use its own key-owned table and single-inheritance RTTI or consume a table from a peer. Linux x86-64 can also call one or two directly declared public pure virtual slots on a peer-owned abstract root, with ordinary int or unsigned int signatures and bare noexcept. arm64 macOS supports each of these Linux shapes, with the Apple arm64 non-unique RTTI convention for the base class descriptor (#650). Broader construction and table emission, pure-slot signatures, covariance, further inheritance forms, class-head final, and pure declarations and final on virtual destructors and assignment operators remain open.'
 
 [[feature]]
 id = 'class-virtual-base'
@@ -2334,7 +2334,7 @@ clauses = ['dcl.constexpr', 'expr.const', 'expr.const.general', 'expr.const.core
 std = 'C++11'
 ftm = '__cpp_constexpr'
 detect = '\bconstexpr\b'
-issues = [102, 157, 262, 862]
+issues = [102, 157, 262, 862, 876, 900]
 probe = '''
 constexpr int fact(int n) { int r = 1; for (int i = 2; i <= n; ++i) r *= i; return r; }
 struct P { int x; constexpr P(int v) : x(v) {} };
@@ -2343,7 +2343,7 @@ static_assert(p.x == 24);
 int main() { return 0; }
 '''
 status = 'partial'
-note = '`constexpr` constructor declarations, runtime calls, scalar enum constant evaluation, and constant initialization of flat static aggregate members work. Direct-list initializers cover aggregates of public integral fields in non-template namespace-scope classes without bases. Constant expressions can read non-mutable integral fields of supported flat namespace-scope constexpr aggregates. Class-typed constant evaluation is partial.'
+note = '`constexpr` constructor declarations, runtime calls, scalar enum constant evaluation, and constant initialization of flat static aggregate members work. Direct-list initializers cover aggregates of public integral fields in non-template namespace-scope classes without bases. Constant expressions can read integral and enumeration fields of supported flat aggregate temporaries and non-mutable fields of stored namespace-scope constexpr aggregates. Class-typed constant evaluation is partial.'
 
 [[feature]]
 id = 'const-consteval'

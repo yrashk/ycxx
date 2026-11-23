@@ -40,7 +40,7 @@
 //
 // α slice (#39) and δ's aggregates (#86): scalars, pointers, string literals and aggregates; no
 // cleanups or exceptions, and no class parameters or results yet.
-// Ordinary calls let exceptions leave the function. A certified hosted catch-all uses
+// Ordinary calls let exceptions leave the function. A certified hosted handler uses
 // an `invoke` with explicit normal and exceptional continuations.
 export module ycxx.irgen:gen;
 
@@ -81,14 +81,21 @@ struct FunctionInput {
   std::span<const StaticGuard> guards{};
   ast::EntityId guard_acquire = ast::EntityId::none, guard_release = ast::EntityId::none;
   ast::EntityId atexit = ast::EntityId::none, dso = ast::EntityId::none;
-  bool hosted_catch_all = false;  // the native frontend has certified this occurrence
+  bool hosted_catch = false;  // the native frontend has certified this occurrence
+  std::optional<std::uint32_t> catch_int_binding{};  // local index after the handler's return has been checked
   ast::NodeId cleanup_call = ast::NodeId::none;  // the certified hosted cleanup call
   ast::EntityId constructor_cleanup = ast::EntityId::none;  // the selected union member's destructor
   UnwindCleanupChecks unwind_cleanup_checks = UnwindCleanupChecks::none;
+  bool exceptions_enabled = true;  // native lowering's language mode
   bool native_array_delete = false;  // the backend's Linux x86-64 cookie-free array deletion
   bool native_array_new = false;  // the backend's Linux x86-64 allocation in a certified frame
   std::span<const ast::EntityId> nonthrowing_functions{};  // native declarations, sorted by entity
-  ast::EntityId root_destructor_table = ast::EntityId::none;
+  ast::EntityId destructor_table = ast::EntityId::none;
+  // The initialized prefix of a flat aggregate while evaluating one selected default.
+  struct InitializedFields {
+    ast::EntityId owner = ast::EntityId::none;
+    std::span<const ast::ConstId> values{};
+  } initialized_fields{};
 };
 
 struct FunctionIr {
@@ -339,7 +346,7 @@ class Gen {
       return;
     }
     ValueId self[] = {p.ptr};
-    call_fn(destructor, facts_.int_type(), self, 1, true);
+    call_fn(destructor, facts_.int_type(), self, ImplicitObject::constructor_or_destructor, true);
   }
   // Ends the objects of the scopes above `depth`, innermost first; the scopes stay open.
   void exit_scopes(std::size_t depth) {
@@ -546,7 +553,7 @@ class Gen {
     pop_scope();
   }
 
-  void hosted_catch_all(At a) {
+  void hosted_catch(At a) {
     const auto trial = get<ast::TryBlock>(a);
     const At protected_body = child(a, trial.body);
     const At normal_return = child(protected_body, ast_.children(get<ast::Compound>(protected_body).stmts).front());
@@ -575,8 +582,18 @@ class Gen {
 
     enter(exceptional);
     const ValueId exception[] = {b_.param(exceptional, 1)};
-    const ir::Ty object[] = {vty(facts_.pointer_to(handler.type))};
-    stateful(ir::Op::catch__begin, object, exception);
+    const auto binding = fn_.catch_int_binding;
+    const auto type = binding ? ast::without_cv(in_.canonical(in_.seqs.at(fn_.body.locals, *binding).type)) : handler.type;
+    const ir::Ty object[] = {vty(facts_.pointer_to(type))};
+    const auto begin = stateful(ir::Op::catch__begin, object, exception);
+    if (binding) {
+      // [except.handle]: the by-value binding only supplies this return value.
+      // Take its copy while the adjusted exception object is still alive.
+      const auto value = load({b_.result(begin, 1), type});
+      stateful(ir::Op::catch__end, {}, exception);
+      ret_(value);
+      return;
+    }
     stateful(ir::Op::catch__end, {}, exception);
     stmt(child(handler_at, handler.body));
   }
@@ -591,7 +608,7 @@ class Gen {
       for (ast::Child c : ast_.children(s.stmts)) stmt(child(a, c));
       pop_scope();
     } else if (is<ast::TryBlock>(a)) {
-      if (fn_.hosted_catch_all) hosted_catch_all(a);
+      if (fn_.hosted_catch) hosted_catch(a);
       else unsupported(a, "with a retained try block");
     } else if (is<ast::ExprStmt>(a)) {
       full_expression([&] {
@@ -622,13 +639,13 @@ class Gen {
       });
     } else if (is<ast::Destructor>(a)) {
       auto d = get<ast::Destructor>(a);
-      if (fn_.root_destructor_table != ast::EntityId::none) {
-        // Itanium ABI §2.5.2: offset-to-top and RTTI precede the root's address point.
-        // [class.cdtor]: destruction of a derived object now dispatches as the root.
+      if (fn_.destructor_table != ast::EntityId::none) {
+        // Itanium ABI §2.5.2: offset-to-top and RTTI precede the table's address point.
+        // [class.cdtor]: virtual calls during destruction use the destructor's class.
         const auto byte = ast::builtin(facts_.interners(), ast::Builtin::unsigned_char);
         const auto table_type = facts_.pointer_to(byte);
         const auto vptr_type = facts_.pointer_to(table_type);
-        const auto table = pure(ir::Op::global, table_type, {}, {word(fn_.root_destructor_table)});
+        const auto table = pure(ir::Op::global, table_type, {}, {word(fn_.destructor_table)});
         const auto header_size = int_constant(facts_.ptrdiff_type(), 2 * ast::x86_64_linux.pointer_size);
         const auto address_point = pure(ir::Op::ptr_add, table_type, {table, header_size}, {word(ty(byte))});
         const auto vptr = pure(ir::Op::ptr_cast, vptr_type, {*this_}, {word(ty(vptr_type))});
@@ -772,9 +789,69 @@ class Gen {
     return false;
   }
 
+  struct ArmExit {
+    ir::BlockId block;
+    ValueId state;
+    std::optional<ValueId> value;
+    std::vector<Ending> temporaries{};
+    bool reaches_join = true;
+  };
+
+  ArmExit evaluate_arm(ir::BlockId entry, auto&& eval) {
+    enter(entry);
+    temps_.emplace_back();
+    std::optional<ValueId> value = eval();
+    ArmExit arm{block_, state_, value, std::move(temps_.back()), live_};
+    temps_.pop_back();
+    if (!arm.reaches_join) arm.temporaries.clear();
+    if (!arm.temporaries.empty() && temps_.empty()) throw Unsupported{"a temporary outside a full-expression"};
+    return arm;
+  }
+
+  struct ShortCircuit {
+    ir::BlockId rhs;
+    bool is_and;
+  };
+
+  // Each edge supplies its result and the addresses of the temporaries it created. Other
+  // addresses are null. The enclosing full-expression ends the live objects in reverse order.
+  std::optional<ValueId> join_arms(std::span<ArmExit> arms, std::optional<ast::QualType> result_type,
+                                   std::optional<ShortCircuit> shortcut = {}) {
+    std::vector<ir::Ty> parameters{ir::Ty::state()};
+    if (result_type) parameters.push_back(vty(*result_type));
+    for (const auto& arm : arms)
+      for (const auto& temporary : arm.temporaries)
+        parameters.push_back(vty(facts_.pointer_to(temporary.place.type)));
+    const auto join = b_.add_block(parameters);
+    for (const auto& arm : arms) {
+      if (!arm.reaches_join) continue;
+      block_ = arm.block;
+      state_ = arm.state;
+      ir::SuccRef next{join, {state_}};
+      if (arm.value) next.args.push_back(*arm.value);
+      for (const auto& source : arms)
+        for (const auto& temporary : source.temporaries)
+          next.args.push_back(&arm == &source ? temporary.place.ptr : zero(facts_.pointer_to(temporary.place.type)));
+      if (shortcut && &arm == &arms.front()) {
+        // The left operand can jump straight to the join with its own boolean result.
+        if (shortcut->is_and) cond_br(*arm.value, edge(shortcut->rhs), std::move(next));
+        else cond_br(*arm.value, std::move(next), edge(shortcut->rhs));
+      } else {
+        emit(ir::Op::br, {}, {}, {}, 0, std::span(&next, 1));
+      }
+    }
+    enter(join);
+    uint32_t index = result_type ? 2 : 1;
+    for (auto& arm : arms)
+      for (auto& temporary : arm.temporaries) {
+        temporary.place.ptr = b_.param(join, index++);
+        temporary.conditional = true;
+        temps_.back().push_back(temporary);
+      }
+    return result_type ? std::optional(b_.param(join, 1)) : std::nullopt;
+  }
+
   // A class prvalue initializes its result object directly ([dcl.init], [class.copy.elision]).
-  // Keep each selected arm's temporaries alive through the later clauses of the full-expression.
-  // The join takes their addresses; only the executed arm supplies live ones ([class.temporary]).
   void initialize_selection(const Place& p, At e, bool zeroed) {
     if (is<ast::OrderedBinary>(e)) {
       const auto comma = get<ast::OrderedBinary>(e);
@@ -786,44 +863,16 @@ class Gen {
     if (!class_prvalue(info(then_value)) || !class_prvalue(info(else_value)))
       unsupported(e, "with a non-value arm in a class initializer");
     const auto condition = rvalue(child(e, choice.condition));
-    struct Arm {
-      At value;
-      ir::BlockId entry;
-      ir::BlockId exit{};
-      ValueId state{};
-      std::vector<Ending> temporaries{};
+    const auto then_b = new_block(), else_b = new_block();
+    cond_br(condition, edge(then_b), edge(else_b));
+    auto init = [&](ir::BlockId block, At value) {
+      return evaluate_arm(block, [&] {
+        initialize(p, value, zeroed, true);
+        return std::nullopt;
+      });
     };
-    Arm arms[] = {{then_value, new_block()}, {else_value, new_block()}};
-    cond_br(condition, edge(arms[0].entry), edge(arms[1].entry));
-    std::vector<ir::Ty> parameters{ir::Ty::state()};
-    for (Arm& arm : arms) {
-      enter(arm.entry);
-      temps_.emplace_back();
-      initialize(p, arm.value, zeroed, true);
-      arm.exit = block_;
-      arm.state = state_;
-      arm.temporaries = std::move(temps_.back());
-      temps_.pop_back();
-      for (const Ending& temporary : arm.temporaries)
-        parameters.push_back(vty(facts_.pointer_to(temporary.place.type)));
-    }
-    const auto join = b_.add_block(parameters);
-    for (const Arm& arm : arms) {
-      block_ = arm.exit;
-      ir::SuccRef next{join, {arm.state}};
-      for (const Arm& source : arms)
-        for (const Ending& temporary : source.temporaries)
-          next.args.push_back(&arm == &source ? temporary.place.ptr : zero(facts_.pointer_to(temporary.place.type)));
-      emit(ir::Op::br, {}, {}, {}, 0, std::span(&next, 1));
-    }
-    enter(join);
-    uint32_t index = 1;
-    for (Arm& arm : arms)
-      for (Ending& temporary : arm.temporaries) {
-        temporary.place.ptr = b_.param(join, index++);
-        temporary.conditional = true;
-        temps_.back().push_back(temporary);
-      }
+    ArmExit arms[] = {init(then_b, then_value), init(else_b, else_value)};
+    join_arms(arms, std::nullopt);
   }
 
   // Whether initializer `e` value-initializes some element (`ValueInit`), so the object is
@@ -929,7 +978,36 @@ class Gen {
       if (argument_object(x)) byval |= 1u << args.size();
       args.push_back(argument(x));
     }
-    call_fn(c.ctor, facts_.int_type(), args, 1, true, byval, 0, call_flags);
+    call_fn(c.ctor, facts_.int_type(), args, ImplicitObject::constructor_or_destructor, true, byval, 0, call_flags);
+  }
+
+  // A folded immediate invocation has a structural value. Initialize its result place
+  // by field and element, so a later materialization obtains its own typed storage.
+  void initialize_constant(const Place& p, ast::ConstId value) {
+    const TypeClass kind = cls(p.type);
+    if (kind != TypeClass::array && kind != TypeClass::record) {
+      store(p, constant(p.type, value));
+      return;
+    }
+    if (!in_.values.is<ast::VAggregate>(value)) throw Unsupported{"an aggregate constant of the wrong kind"};
+    const auto aggregate = in_.values.get<ast::VAggregate>(value);
+    const auto elements = in_.seqs.elements(aggregate.elems);
+    if (kind == TypeClass::array) {
+      if (elements.size() != facts_.bound(p.type)) throw Unsupported{"an array constant with the wrong bound"};
+      const ast::QualType type = facts_.element(p.type);
+      for (uint32_t i = 0; i < elements.size(); ++i)
+        initialize_constant(subobject(p, ir::Step::elem, i, type), elements[i]);
+      return;
+    }
+    const ast::EntityId owner = facts_.class_entity(p.type);
+    if (!same_type(p.type, aggregate.type) || !facts_.bases_of(owner).empty() ||
+        facts_.field_type(owner, uint32_t(elements.size())))
+      throw Unsupported{"a record constant with a different layout"};
+    for (uint32_t i = 0; i < elements.size(); ++i) {
+      const auto type = facts_.field_type(owner, i);
+      if (!type) throw Unsupported{"a record constant with a different layout"};
+      initialize_constant(subobject(p, ir::Step::field, i, *type), elements[i]);
+    }
   }
 
   // Initializes the object at `p` from the prvalue `e` ([dcl.init]). In a `zeroed` object, a
@@ -942,6 +1020,10 @@ class Gen {
     if (facts_.is_reference(p.type)) {
       store(p, address(e));  // a reference member holds its object's address
       return;
+    }
+    if (is<ast::Literal>(e)) {
+      const auto literal = get<ast::Literal>(e);
+      if (in_.values.is<ast::VAggregate>(literal.value)) return initialize_constant(p, literal.value);
     }
     if (select_class && class_selection(e)) return initialize_selection(p, e, zeroed);
     if (is<ast::ImplicitConversion>(e)) {
@@ -1001,6 +1083,12 @@ class Gen {
           } else {
             initialize(destination, x, zeroed, select_element);
           }
+          // [basic.life], [dcl.init.aggr]: a later default can read an earlier initialized
+          // scalar member before initialization of the complete aggregate finishes.
+          if (!array && bases.empty() && !destination.bit_field) {
+            TypeClass kind = cls(type);
+            if (kind == TypeClass::bool_ || kind == TypeClass::integer) begin_lifetime(destination);
+          }
         }
         ++i;
       }
@@ -1036,15 +1124,13 @@ class Gen {
   // or, when a reference it is bound to extends it, with that reference's scope.
   Place materialize(At a) {
     auto m = get<ast::Materialize>(a);
-    if (selecting_initializer_ && (m.extended == 1 || branches_ > 0))
-      unsupported(a, "requiring lifetime extension or nested conditional cleanup in a class initializer");
+    if (m.extended == 1 && (selecting_initializer_ || branches_ > 0))
+      unsupported(a, "requiring lifetime extension in a conditional operand or class initializer selection");
     At v = child(a, m.operand);
     bool zeroed = value_initializes(v);
     Place p = begin_object(m.info.type, zeroed ? ir::Init::zero : ir::Init::indeterminate, ir::Storage::temporary);
     initialize(p, v, zeroed);
-    ValueId ops[] = {p.ptr};
-    std::uint64_t imms[] = {word(ty(p.type))};
-    stateful(ir::Op::obj__begin, {}, ops, imms);
+    begin_lifetime(p);
     Ending end{p, m.destructor, ir::Storage::temporary};
     if (m.extended == 1) scopes_.back().push_back(end);
     else if (temps_.empty()) unsupported(a, "outside a full-expression");
@@ -1152,7 +1238,7 @@ class Gen {
     ast::QualType vp = facts_.pointer_to(facts_.int_type());  // any object pointer: the callee takes void*
     auto atexit = [&](ValueId object) {
       ValueId args[] = {pure(ir::Op::func_addr, vp, {}, {word(destructor)}), object, pure(ir::Op::global, vp, {}, {word(dso)})};
-      call_fn(atexit_fn, facts_.int_type(), args, 0);
+      call_fn(atexit_fn, facts_.int_type(), args);
     };
     if (cls(p.type) != TypeClass::array) return atexit(p.ptr);
     // An array's elements are each registered, the first first, so that the last is destroyed
@@ -1214,7 +1300,7 @@ class Gen {
     if (!needs_guard) return;
     ast::QualType vp = facts_.pointer_to(facts_.int_type());
     ValueId guard[] = {pure(ir::Op::global, vp, {}, {word(g->guard)})};
-    ValueId first = *call_fn(fn_.guard_acquire, facts_.int_type(), guard, 0);
+    ValueId first = *call_fn(fn_.guard_acquire, facts_.int_type(), guard);
     ValueId taken = pure(ir::Op::icmp, facts_.bool_type(), {first, int_constant(facts_.int_type(), 0)}, {std::to_underlying(ir::Pred::ne)});
     ir::BlockId init_b = new_block(), join = new_block();
     cond_br(taken, edge(init_b), edge(join));
@@ -1226,7 +1312,7 @@ class Gen {
         return 0;
       });
     if (s.destructor != ast::EntityId::none) at_exit(p, s.destructor, fn_.atexit, fn_.dso);
-    call_fn(fn_.guard_release, facts_.int_type(), guard, 0, true);
+    call_fn(fn_.guard_release, facts_.int_type(), guard, ImplicitObject::none, true);
     br(join);
     enter(join);
   }
@@ -1460,8 +1546,15 @@ class Gen {
   // Evaluates an expression for its side effects ([expr.context]).
   void discard(At a) {
     if (a.id == NodeId::none) return;
-    if (is_lvalue(a)) lvalue(a);
-    else rvalue_or_void(a);
+    const auto expr = info(a);
+    if (expr.category == ast::ValueCategory::prvalue) {
+      rvalue_or_void(a);
+      return;
+    }
+    // Discarding a nonvolatile direct field designator does not read its value.
+    const auto cv = ast::cv_of(expr.type);
+    if ((cv == ast::Cv::none || cv == ast::Cv::const_) && default_field(a)) return;
+    lvalue(a);
   }
 
   ValueId rvalue(At a) {
@@ -1484,7 +1577,7 @@ class Gen {
           op == ast::UnaryOp::post_dec)
         return 2;
     }
-    int e = 0;
+    int e = is<ast::DynamicCastVoid>(a) || is<ast::DynamicCastPointer>(a) ? 1 : 0;
     if (is<ast::ImplicitConversion>(a)) {
       auto c = get<ast::ImplicitConversion>(a);
       if (c.conversion == ast::ConversionKind::lvalue_to_rvalue && !is_nullptr(c.info.type)) e = 1;
@@ -1521,6 +1614,8 @@ class Gen {
     if (is<ast::Paren>(a)) return rvalue_or_void(child(a, get<ast::Paren>(a).operand));
     if (is<ast::DefaultArg>(a)) return pinned([&] { return rvalue_or_void(child(a, get<ast::DefaultArg>(a).arg)); });
     if (is<ast::ImplicitConversion>(a)) return conversion(a);
+    if (is<ast::DynamicCastVoid>(a)) return dynamic_cast_void(a);
+    if (is<ast::DynamicCastPointer>(a)) return dynamic_cast_pointer(a);
     if (is<ast::Unary>(a)) return unary(a);
     if (is<ast::Binary>(a)) return binary(a);
     if (is<ast::OrderedBinary>(a)) return ordered(a);
@@ -1589,6 +1684,70 @@ class Gen {
     unsupported(a);
   }
 
+  ValueId dynamic_cast_void(At a) {
+    const auto cast = get<ast::DynamicCastVoid>(a);
+    const At operand = child(a, cast.operand);
+    const ValueId object = rvalue(operand);
+    const ValueId nonnull = pure(ir::Op::tobool, facts_.bool_type(), {object});
+    const auto result = cast.info.type;
+    const ValueId null = constant(result, facts_.null_constant(result));
+    const ir::BlockId adjust = new_block({info(operand).type}), join = new_block({result});
+    cond_br(nonnull, edge(adjust, {object}), edge(join, {null}));
+    enter(adjust);
+    ir::Ty results[] = {vty(result)};
+    ValueId operands[] = {state_, b_.param(adjust, 1)};
+    const ValueId most_derived = b_.result(emit(ir::Op::rtti__most_derived_addr, results, operands));
+    br(join, {most_derived});
+    enter(join);
+    return b_.param(join, 1);
+  }
+
+  // These expressions produce null in both evaluation modes. Their operands still
+  // need evaluating, for example when a call supplies a std::nullptr_t result.
+  bool known_null_pointer(At a) {
+    a = strip_parens(a);
+    if (is<ast::ValueInit>(a)) return true;
+    if (is<ast::Literal>(a)) return in_.values.is<ast::VNullptr>(get<ast::Literal>(a).value);
+    if (!is<ast::ImplicitConversion>(a)) return false;
+    const auto c = get<ast::ImplicitConversion>(a);
+    if (c.conversion == ast::ConversionKind::null_pointer) return true;
+    return (c.conversion == ast::ConversionKind::qualification || c.conversion == ast::ConversionKind::pointer) &&
+           known_null_pointer(child(a, c.operand));
+  }
+
+  ValueId dynamic_cast_pointer(At a) {
+    const auto cast = get<ast::DynamicCastPointer>(a);
+    const At operand = child(a, cast.operand);
+    const ValueId object = rvalue(operand);
+    const auto result = cast.info.type;
+    const ValueId null = constant(result, facts_.null_constant(result));
+    if (known_null_pointer(operand)) return null;
+
+    const ValueId nonnull = pure(ir::Op::tobool, facts_.bool_type(), {object});
+    const ir::BlockId runtime = new_block({info(operand).type}), join = new_block({result});
+    cond_br(nonnull, edge(runtime, {object}), edge(join, {null}));
+    enter(runtime);
+    auto& in = facts_.interners();
+    const auto opaque = facts_.pointer_to(ast::builtin(in, ast::Builtin::void_, ast::Cv::const_));
+    const auto result_pointer = facts_.pointer_to(ast::builtin(in, ast::Builtin::void_));
+    const auto rtti_pointer = facts_.pointer_to(ast::builtin(in, ast::Builtin::unsigned_char));
+    const auto erase_type = [&](ValueId pointer) {
+      return pure(ir::Op::ptr_cast, opaque, {pointer}, {word(ty(opaque))});
+    };
+    const auto rtti = [&](ast::EntityId entity) {
+      return erase_type(pure(ir::Op::global, rtti_pointer, {}, {word(entity)}));
+    };
+    // Itanium ABI §2.9.7: the source is a unique public nonvirtual base at offset zero.
+    // The runtime takes the original subobject address, including secondary subobjects.
+    const ValueId args[] = {erase_type(b_.param(runtime, 1)), rtti(cast.source_rtti), rtti(cast.target_rtti),
+                            int_constant(facts_.ptrdiff_type(), 0)};
+    const ValueId address = *call_fn(cast.runtime, result_pointer, args);
+    const ValueId adjusted = pure(ir::Op::ptr_cast, result, {address}, {word(ty(result))});
+    br(join, {adjusted});
+    enter(join);
+    return b_.param(join, 1);
+  }
+
   ValueId string_length(ast::QualType size, ast::QualType pointer, ValueId start) {
     ast::QualType element = facts_.pointee(pointer);
     ir::BlockId head = new_block({pointer, size}), advance = new_block(), done = new_block({size});
@@ -1630,14 +1789,62 @@ class Gen {
     std::unreachable();
   }
 
+  // A scalar default's receiver is represented only by its initialized field values.
+  // Recognize side-effect-free designators of that receiver's own non-reference fields.
+  std::optional<uint32_t> default_field(At operand) {
+    const auto owner = fn_.initialized_fields.owner;
+    if (owner == ast::EntityId::none || this_) return std::nullopt;
+    operand = strip_parens(operand);
+    if (!is<ast::Member>(operand)) return std::nullopt;
+    const auto member = get<ast::Member>(operand);
+    if (member.reference) return std::nullopt;
+    At receiver = strip_parens(child(operand, member.object));
+    if (!member.arrow) {
+      if (!is<ast::Unary>(receiver)) return std::nullopt;
+      const auto dereference = get<ast::Unary>(receiver);
+      if (dereference.op != ast::UnaryOp::deref) return std::nullopt;
+      receiver = strip_parens(child(receiver, dereference.operand));
+    }
+    if (!is<ast::This>(receiver) || facts_.class_entity(facts_.pointee(info(receiver).type)) != owner)
+      return std::nullopt;
+    return member.field;
+  }
+
+  ValueId load_glvalue(At operand, ast::QualType type) {
+    if (fn_.initialized_fields.owner != ast::EntityId::none && !this_) {
+      operand = strip_parens(operand);
+      // The conversion reads only the glvalue selected by the conditional. Join the
+      // values from that read, so neither arm needs an address for any initialized field.
+      const auto kind = cls(type);
+      if (kind == TypeClass::integer || kind == TypeClass::bool_) {
+        if (is<ast::Conditional>(operand))
+          return *conditional(operand, false, type).value;
+        if (is<ast::OrderedBinary>(operand)) {
+          const auto binary = get<ast::OrderedBinary>(operand);
+          if (binary.op == ast::OrderedOp::comma) {
+            discard(child(operand, binary.lhs));
+            return load_glvalue(child(operand, binary.rhs), type);
+          }
+        }
+      }
+      if (auto field = default_field(operand)) {
+        const auto values = fn_.initialized_fields.values;
+        if (*field < values.size()) return constant(type, values[*field]);
+        // This field's initialization has not completed. Let a read fail only if it executes.
+        return load(begin_object(type, ir::Init::indeterminate));
+      }
+    }
+    return load(lvalue(operand));
+  }
+
   std::optional<ValueId> conversion(At a) {
     auto c = get<ast::ImplicitConversion>(a);
     ast::QualType t = c.info.type;
     At from = child(a, c.operand);
     switch (c.conversion) {
       case ast::ConversionKind::lvalue_to_rvalue: {
+        if (!is_nullptr(t)) return load_glvalue(from, t);
         Place p = lvalue(from);
-        if (!is_nullptr(t)) return load(p);
         // [conv.lval]: a std::nullptr_t glvalue is evaluated without accessing its object.
         ir::Ty result[] = {vty(t)};
         ValueId operands[] = {state_, p.ptr};
@@ -1842,16 +2049,12 @@ class Gen {
         // not decide; the join receives whichever decided.
         bool is_and = o.op == ast::OrderedOp::logical_and;
         ValueId x = rvalue(l);
-        ir::BlockId rhs_b = new_block(), join = new_block({t});
-        if (is_and) cond_br(x, edge(rhs_b), edge(join, {x}));
-        else cond_br(x, edge(join, {x}), edge(rhs_b));
-        enter(rhs_b);
+        const auto rhs = new_block();
+        ArmExit left{block_, state_, x};
         ++branches_;
-        ValueId y = rvalue(r);
+        ArmExit arms[] = {std::move(left), evaluate_arm(rhs, [&] { return rvalue(r); })};
         --branches_;
-        br(join, {y});
-        enter(join);
-        return b_.param(join, 1);
+        return join_arms(arms, t, ShortCircuit{rhs, is_and});
       }
       case ast::OrderedOp::comma:
         discard(l);
@@ -1927,7 +2130,7 @@ class Gen {
     if_nonnull(addr, [&] {
       stateful(ir::Op::obj__end, {}, std::span(&addr, 1));
       ValueId args[] = {addr, rvalue(child(a, d.size))};
-      call_fn(d.function, d.info.type, args, 0);
+      call_fn(d.function, d.info.type, args);
     });
   }
 
@@ -1939,7 +2142,7 @@ class Gen {
       ast::QualType void_pointer = facts_.pointer_to(d.info.type);
       ValueId address = pure(ir::Op::ptr_cast, void_pointer, {operand}, {word(ty(void_pointer))});
       // The call releases the allocation root, including a zero-length array ([basic.life]).
-      call_fn(d.function, d.info.type, std::span(&address, 1), 0);
+      call_fn(d.function, d.info.type, std::span(&address, 1));
     });
   }
 
@@ -2008,7 +2211,7 @@ class Gen {
       args.push_back(argument(x));
     }
     if (through) return call_pointer(*through, result_type(c.info), args, byval, into ? 1 : 0);
-    return call_fn(c.function, result_type(c.info), args, 0, false, byval, into ? 1 : 0);
+    return call_fn(c.function, result_type(c.info), args, ImplicitObject::none, false, byval, into ? 1 : 0);
   }
   // A call through a function pointer, `args[0]`, of function type `fn`: `call_fn`'s `call_ind`.
   // `byval` and `result_arg` already exclude the callee pointer from their indices.
@@ -2019,7 +2222,7 @@ class Gen {
     bool has_value = !result_arg && cls(result) != TypeClass::void_;
     if (has_value) results.push_back(vty(result));
     auto f = in_.types.get<ast::TFunction>(in_.types.canon(fn));
-    if (selecting_initializer_) {
+    if (selecting_initializer_ && fn_.exceptions_enabled) {
       const auto spec = f.noexcept_;
       if (spec == ast::ConstId::none || !in_.values.is<ast::VInt>(spec) || in_.values.get<ast::VInt>(spec).bits.lo == 0)
         throw Unsupported{"a potentially throwing indirect call in a class initializer selection"};
@@ -2070,7 +2273,7 @@ class Gen {
       if (into) args.push_back(*into);
       const uint32_t byval = argument_object(rhs) ? 1u << args.size() : 0;
       args.push_back(value);
-      return call_fn(c.function, result_type(c.info), args, 1, false, byval, into ? 2 : 0);
+      return call_fn(c.function, result_type(c.info), args, ImplicitObject::member, false, byval, into ? 2 : 0);
     }
     auto c = get<ast::MemberCall>(a);
     if (class_prvalue(c.info) && !into) unsupported(a, "of class type outside an initialization");
@@ -2082,7 +2285,7 @@ class Gen {
       if (argument_object(x)) byval |= 1u << args.size();
       args.push_back(argument(x));
     }
-    return call_fn(c.function, result_type(c.info), args, 1, false, byval, into ? 2 : 0);
+    return call_fn(c.function, result_type(c.info), args, ImplicitObject::member, false, byval, into ? 2 : 0);
   }
   // A call whose result is a class object of its own, which a hidden argument names
   // ([stmt.return]); a call returning a reference to a class is a glvalue.
@@ -2102,29 +2305,35 @@ class Gen {
   ast::QualType result_type(const ast::ExprInfo& i) {
     return i.category == ast::ValueCategory::prvalue ? i.type : facts_.pointer_to(i.type);
   }
-  // A call to `f`. The first `implicit` arguments are not its parameters' (the object); the
-  // arguments after its parameters are the ones its ellipsis matches ([expr.call]/12), which
-  // sema already promoted.
+  enum class ImplicitObject { none, member, constructor_or_destructor };
+
+  // A call to `f`. An implicit object argument precedes the parameters. The arguments following
+  // the parameters match the ellipsis ([expr.call]/12), and sema has already promoted them.
   // `byval` and `result_arg` are the call op's masks (ir/ops.cppm); a class result is written
   // through the argument `result_arg` names and gives no value.
   std::optional<ValueId> call_fn(ast::EntityId f, ast::QualType result, std::span<const ValueId> args,
-                                 std::size_t implicit, bool void_ = false, uint32_t byval = 0, uint32_t result_arg = 0,
+                                 ImplicitObject object = ImplicitObject::none, bool void_ = false,
+                                 uint32_t byval = 0, uint32_t result_arg = 0,
                                  ir::Flags flags = 0) {
     // The selected arm has a normal cleanup edge. An exception would also need to destroy
     // any completed argument, older condition temporaries and, during cleanup, the result.
-    if (selecting_initializer_ && !std::ranges::binary_search(fn_.nonthrowing_functions, f))
+    if (selecting_initializer_ && fn_.exceptions_enabled && !std::ranges::binary_search(fn_.nonthrowing_functions, f))
       throw Unsupported{"a potentially throwing call in a class initializer selection"};
     std::vector<ir::Ty> results;
     if (args.size() > 32) throw Unsupported{"a call with more than 32 arguments"};
     bool has_value = !void_ && !result_arg && cls(result) != TypeClass::void_;
     if (has_value) results.push_back(vty(result));
     std::size_t through_ellipsis = 0;
-    std::size_t hidden = implicit + (result_arg ? 1 : 0);
+    std::size_t hidden = (object != ImplicitObject::none ? 1 : 0) + (result_arg ? 1 : 0);
     const auto named = facts_.ellipsis_after(f);
     if (named && args.size() > hidden + *named)
       through_ellipsis = args.size() - hidden - *named;
     std::uint64_t imms[] = {word(f), through_ellipsis, byval, result_arg};
     if (!facts_.is_constexpr(f)) flags |= ir::bit(ir::Flag::not_constexpr);
+    // Constant evaluation rejects a non-constexpr call itself ([expr.const]). Check the
+    // receiver only when the interpreter could enter an ordinary member's body.
+    if (object == ImplicitObject::member && !(flags & ir::bit(ir::Flag::not_constexpr)))
+      stateful(ir::Op::obj__check_receiver, {}, args.first(1));
     if (named) flags |= ir::bit(ir::Flag::variadic);
     ir::NodeId n = stateful(ir::Op::call, results, args, imms, flags);
     if (has_value) return b_.result(n, 1);
@@ -2136,47 +2345,43 @@ class Gen {
     std::optional<ValueId> value;
     Place place;
   };
-  Chosen conditional(At a, bool glvalue) {
+  Chosen conditional(At a, bool glvalue, std::optional<ast::QualType> load_type = std::nullopt) {
     auto c = get<ast::Conditional>(a);
-    ast::QualType t = c.info.type;
+    ast::QualType t = load_type.value_or(c.info.type);
     bool has_value = glvalue || cls(t) != TypeClass::void_;
     ast::QualType jt = glvalue ? facts_.pointer_to(t) : t;
     ValueId cv = rvalue(child(a, c.condition));
     ir::BlockId then_b = new_block(), else_b = new_block();
     const bool bit_field_result = glvalue && c.info.bit_width != 0;
-    ir::BlockId join = has_value && !bit_field_result ? new_block({jt}) : new_block();
     Place bit_field{};
     cond_br(cv, edge(then_b), edge(else_b));
-    for (auto [blk, arm] : {std::pair{then_b, c.then_}, std::pair{else_b, c.else_}}) {
-      enter(blk);
-      At x = child(a, arm);
-      ++branches_;
+    auto operand = [&](At x) -> std::optional<ValueId> {
       if (!has_value) {
         discard(x);
-        br(join);
-      } else if (cls(info(x).type) == TypeClass::void_) {
+        return {};
+      }
+      if (cls(info(x).type) == TypeClass::void_) {
         // This arm is a throw-expression and never supplies a value to the join.
         discard(x);
         emit(ir::Op::unreachable, {}, {});
         live_ = false;
-      } else if (glvalue) {
-        Place place = lvalue(x);
-        if (bit_field_result) {
-          // The only arm that reaches the join owns the enclosing record pointer.
-          bit_field = place;
-          br(join);
-        } else {
-          br(join, {place.ptr});
-        }
-      } else {
-        br(join, {rvalue(x)});
+        return {};
       }
-      --branches_;
-    }
-    enter(join);
+      if (!glvalue) return load_type ? load_glvalue(x, t) : rvalue(x);
+      Place place = lvalue(x);
+      if (!bit_field_result) return place.ptr;
+      // The only arm that reaches the join owns the enclosing record pointer.
+      bit_field = place;
+      return {};
+    };
+    ++branches_;
+    ArmExit arms[] = {evaluate_arm(then_b, [&] { return operand(child(a, c.then_)); }),
+                      evaluate_arm(else_b, [&] { return operand(child(a, c.else_)); })};
+    --branches_;
+    auto value = join_arms(arms, has_value && !bit_field_result ? std::optional(jt) : std::nullopt);
     if (!has_value) return {};
     if (bit_field_result) return {std::nullopt, bit_field};
-    ValueId v = b_.param(join, 1);
+    ValueId v = *value;
     return {glvalue ? std::nullopt : std::optional(v), {v, t}};
   }
 

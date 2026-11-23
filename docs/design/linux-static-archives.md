@@ -64,8 +64,9 @@ member objects.
 - Check malformed container and index bounds and the unsupported format diagnostics.
   Verify byte equality between in-process and daemon output and repeat after replacing an
   archive at the same path. Keep ordinary Linux and Darwin executable regressions green.
-- Mach-O archive inputs, combined archive and DSO resolution, and additional system-library
-  inputs remain under #388 and #390.
+- Mach-O archive inputs are [Darwin static archives](darwin-static-archives.md) (#842).
+  Combined archive and DSO resolution and additional system-library inputs remain under #388
+  and #390.
 
 Astra independently reviewed extraction semantics, format bounds, daemon input ordering,
 and the separation from shared-input resolution. The design uses [POSIX `c17` operand order](https://pubs.opengroup.org/onlinepubs/9799919799/utilities/c17.html),

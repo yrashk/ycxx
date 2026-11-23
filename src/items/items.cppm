@@ -248,8 +248,13 @@ private:
       } else if (t == Tk::kw_class && kind(key) == Tk::kw_enum && n == key + 1) {
         // `enum class`
       } else if (t == Tk::kw_struct && kind(key) == Tk::kw_enum && n == key + 1) {
-      } else if (t == Tk::identifier && !(named && is_name(n, "final"))) {
-        if (named && kind(n - 1) != Tk::coloncolon) return false;
+      } else if (t == Tk::identifier) {
+        if (named && kind(n - 1) != Tk::coloncolon) {
+          if (kind(key) == Tk::kw_enum) return false;
+          // Keep a repeated property in the class-head for its semantic diagnostic.
+          while (n < open && is_name(n, "final")) ++n;
+          return n == open;
+        }
         named = true;
       } else if (t == Tk::less) {
         n = angle_end(n) - 1;
@@ -271,11 +276,15 @@ private:
     for (u32 n = key + 1; n < end; ++n) {
       Tk t = kind(n);
       if (t == Tk::l_square || t == Tk::l_paren) n = match(n) - 1;
+      else if (kind(key) != Tk::kw_enum && is_name(n, "__attribute__") && kind(n + 1) == Tk::l_paren)
+        n = match(n + 1) - 1;
       else if (t == Tk::less) ++angle;
       else if (t == Tk::greater) --angle;
       else if (t == Tk::greatergreater) angle -= 2;
       else if (t == Tk::colon && angle <= 0) break;
-      else if (t == Tk::identifier && angle <= 0 && !is_name(n, "final")) at = n;
+      else if (t == Tk::identifier && angle <= 0 &&
+               (!is_name(n, "final") || (kind(key) != Tk::kw_enum && (at == 0 || kind(n - 1) == Tk::coloncolon))))
+        at = n;
     }
     return at;
   }
@@ -426,9 +435,36 @@ bool begins_declaration_only(Tk t) {
   }
 }
 
+// After a requires-clause's constraint-logical-or-expression ([temp.pre]): primaries joined by
+// `&&` and `||`.
+static u32 after_requires_clause(u32 j, auto kind, auto match, auto match_angle) {
+  for (;;) {
+    if (kind(j) == Tk::l_paren) {
+      j = match(j);
+    } else if (kind(j) == Tk::kw_requires) {
+      ++j;
+      if (kind(j) == Tk::l_paren) j = match(j);
+      if (kind(j) == Tk::l_brace) j = match(j);
+    } else if (kind(j) == Tk::kw_true || kind(j) == Tk::kw_false) {
+      ++j;
+    } else {
+      while (kind(j) == Tk::identifier || kind(j) == Tk::coloncolon) {
+        ++j;
+        if (kind(j) == Tk::less) j = match_angle(j);
+      }
+    }
+    if (kind(j) != Tk::ampamp && kind(j) != Tk::pipepipe) return j;
+    ++j;
+  }
+}
+
 // Any other item: a declaration, or a definition of a function, class or enum.
 void Splitter::general(u32 k, u32& unnamed_types) {
   u32 j = i_;
+  if (at(k).template_depth && kind(j) == Tk::kw_requires)
+    j = after_requires_clause(j + 1, [this](u32 n) { return kind(n); },
+                              [this](u32 n) { return match(n); },
+                              [this](u32 n) { return match_angle(n); });
   bool initializer = false;  // a depth-0 `=` was seen: braces are initializers
   bool params = false;       // a declarator's parameter list was seen
   u32 class_key = none;      // the class-key or `enum` of a class-head, if any
@@ -671,33 +707,13 @@ private:
       else if (t == Tk::kw_export) ++j;
       else if (t == Tk::kw_template && kind(j + 1) == Tk::less) j = match_angle(j + 1, it.end);
       else if (t == Tk::kw_extern && kind(j + 1) == Tk::string_lit) j += 2;
-      else if (t == Tk::kw_requires) j = after_requires_clause(j + 1, it.end);
+      else if (t == Tk::kw_requires)
+        j = after_requires_clause(j + 1, [this](u32 n) { return kind(n); },
+                                  [this](u32 n) { return match(n); },
+                                  [this, &it](u32 n) { return match_angle(n, it.end); });
       else break;
     }
     return j;
-  }
-
-  // After a requires-clause's constraint-logical-or-expression ([temp.pre]): primaries joined by
-  // `&&` and `||`.
-  u32 after_requires_clause(u32 j, u32 limit) const {
-    for (;;) {
-      if (kind(j) == Tk::l_paren) {
-        j = match(j);
-      } else if (kind(j) == Tk::kw_requires) {
-        ++j;
-        if (kind(j) == Tk::l_paren) j = match(j);
-        if (kind(j) == Tk::l_brace) j = match(j);
-      } else if (kind(j) == Tk::kw_true || kind(j) == Tk::kw_false) {
-        ++j;
-      } else {
-        while (kind(j) == Tk::identifier || kind(j) == Tk::coloncolon) {
-          ++j;
-          if (kind(j) == Tk::less) j = match_angle(j, limit);
-        }
-      }
-      if (kind(j) != Tk::ampamp && kind(j) != Tk::pipepipe) return j;
-      ++j;
-    }
   }
 
   // `namespace a::b::c` (C++17, [namespace.def]) declares each component in the one before it, the
@@ -738,10 +754,10 @@ private:
       else if (t == Tk::less) ++angle;
       else if (t == Tk::greater) --angle;
       else if (t == Tk::colon && angle <= 0) break;
-      else if (t == Tk::identifier && angle <= 0 && (is_enum || !is_name(n, "final"))) {
+      else if (t == Tk::identifier && angle <= 0) {
         if (kind(n + 1) == Tk::coloncolon) {
           if (qual == none) qual = n;
-        } else {
+        } else if (is_enum || head == none || !is_name(n, "final")) {
           head = n;
         }
       }

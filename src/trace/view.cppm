@@ -283,23 +283,46 @@ class Browser {
     rows_ = std::max<std::size_t>(rows, 5);
     cols_ = std::max<std::size_t>(cols, 20);
   }
-  // A live source (`ctl trace`, `--watch`): the latest request on top, and the source named.
-  void set_live(std::string source) {
+  // A live source (`ctl trace`, `--watch`, a build being traced): the source named, the latest
+  // request on top (`newest_first`), and following the newest activity (#939).
+  void set_live(std::string source, bool newest_first = true) {
     live_ = std::move(source);
-    tree_.set_newest_first(true);
+    if (newest_first) tree_.set_newest_first(true);
+    follow_ = true;
   }
-  // Runs `pump` (more events into the tree), keeping the selected node selected unless the view
-  // is at the top, where it follows what comes; false once the source has ended.
+  // The source has ended: the status line says so (`what`). A view still following goes back to
+  // the top, where a trace browsed after its build opens.
+  void end_live(std::string what) {
+    live_.reset();
+    ended_ = std::move(what);
+    if (follow_) cursor_ = top_ = time_ = 0, detail_scroll_ = 0;
+    follow_ = false;
+  }
+  // Runs `pump` (more events into the tree): following, the newest activity is selected; else the
+  // selected node stays selected (or the one it was folded into), unless the view is at the top,
+  // where it follows what comes; false once the source has ended.
   bool pump(const std::function<bool()>& f) {
     const auto before = tree_.rows();
     std::optional<std::int32_t> held = cursor_ > 0 && cursor_ < before.size() ? std::optional(before[cursor_].node) : std::nullopt;
     // A selection being made holds its end where it is, even at the top.
     if (rows_sel_ && (visual_ || drag_ == Drag::rows)) held = rows_sel_->end;
+    const std::uint64_t resets = tree_.resets();
     const bool more = f();
-    if (!more) live_.reset(), ended_ = true;
-    if (held) keep_selected(*held);
+    if (tree_.resets() != resets) {
+      // A new tree (a new run of the request): nothing held refers to it.
+      clear_selection();
+      drag_ = Drag::none;
+      cursor_ = top_ = detail_scroll_ = 0;
+      bar_ = bars_top_ = 0;
+      held.reset();
+    }
+    if (held && static_cast<std::size_t>(*held) >= tree_.nodes().size()) held.reset();
+    if (follow_ && !(rows_sel_ && (visual_ || drag_ == Drag::rows))) follow();
+    else if (held) keep_selected(tree_.shown(*held));
     return more;
   }
+  // Whether the view follows the newest activity (#939); `f` turns it back on.
+  bool following() const noexcept { return follow_; }
 
   Action handle(const Input& in, std::chrono::milliseconds now = {}) {
     if (const Mouse* m = std::get_if<Mouse>(&in)) {
@@ -319,13 +342,35 @@ class Browser {
       return {};
     }
     if (k == "q" || k == "\x03") return Action{.quit = true};
-    if (view_ == View::tree) {
-      if (std::optional<Action> a = selection_key(k)) return *a;
+    if (k == "f" && live_) {
+      follow_ = true;
+      follow();
+      notice_ = "following the newest activity";
+      return {};
     }
-    if (view_ == View::tree && pane_focused() && detail_key(k)) return {};
+    // Any scroll or selection by the user stops following (#939).
+    const auto before = std::tuple(cursor_, top_, detail_scroll_, lane_, time_, rows_sel_.has_value() || text_sel_.has_value());
+    const auto stop_following = [&] {
+      if (before != std::tuple(cursor_, top_, detail_scroll_, lane_, time_, rows_sel_.has_value() || text_sel_.has_value())) follow_ = false;
+    };
+    if (view_ == View::tree) {
+      if (std::optional<Action> a = selection_key(k)) {
+        stop_following();
+        return *a;
+      }
+    }
+    if (view_ == View::tree && pane_focused() && detail_key(k)) {
+      stop_following();
+      return {};
+    }
     if (view_ == View::histogram && histogram_key(k)) return {};
     if (view_ == View::tree) tree_key(k);
     else if (view_ == View::timeline) timeline_key(k);
+    // A filter, a worker or a fold puts the selection on a row it chose, not the user: those
+    // keep following.
+    if (k != "/" && !prompt_ && k != "\r" && k != " " && k != "e" && k != "E" && k != "w" && k != "a" && k != "m" &&
+        !(k.size() == 1 && std::isdigit(static_cast<unsigned char>(k[0]))))
+      stop_following();
     common_key(k);
     // V in the tree: the keys move its end.
     if (visual_ && rows_sel_)
@@ -433,6 +478,13 @@ class Browser {
   // ---- the mouse
   Action mouse(const Mouse& m, std::chrono::milliseconds now) {
     if (m.act == Mouse::Act::move) return {};
+    // A click on a row, the pane or the timeline, the wheel, or a drag: the user's own view, which
+    // following would move away from (#939).
+    if (m.act == Mouse::Act::drag || m.act == Mouse::Act::wheel_up || m.act == Mouse::Act::wheel_down) follow_ = false;
+    if (m.act == Mouse::Act::press && !help_) {
+      const Hit::Area a = hit(m.x, m.y).area;
+      if (a == Hit::Area::row || a == Hit::Area::marker || a == Hit::Area::detail || a == Hit::Area::lane) follow_ = false;
+    }
     if (m.act == Mouse::Act::drag) {
       drag_to(m);
       return {};
@@ -965,14 +1017,35 @@ class Browser {
       }
     }
   }
-  // The next cell that ran (executed or cut off), opening the tree to it.
+  // The next cell that ran (executed or cut off), in the tree's order, opening the tree to it.
   void next_execution(const std::vector<Tree::Row>& rows) {
-    const auto nodes = tree_.nodes();
-    const std::int32_t from = rows[cursor_].node;
-    for (std::size_t i = static_cast<std::size_t>(from) + 1; i < nodes.size(); ++i) {
-      const Outcome o = nodes[i].ev.outcome;
-      if ((o == Outcome::executed || o == Outcome::cutoff) && tree_.matches(nodes[i].ev)) {
-        select(static_cast<std::int32_t>(i));
+    const std::vector<std::int32_t> order = tree_.preorder();
+    const auto from = std::ranges::find(order, rows[cursor_].node);
+    for (auto it = from == order.end() ? order.end() : from + 1; it != order.end(); ++it) {
+      const Event& e = tree_.node(*it).ev;
+      if (ran(e) && tree_.matches(e)) {
+        select(*it);
+        return;
+      }
+    }
+  }
+  // Following (#939): the newest activity selected, and in view. That is the cell started last
+  // that still runs (the newest cell, once none runs), or the nearest of its ancestors the tree
+  // shows; in the timeline, the cursor at the end. The histogram's bars hang on the selection
+  // (`i`, the children grouping): there it stays put.
+  void follow() {
+    if (view_ == View::histogram) return;
+    time_ = lane_columns() - 1;
+    const std::optional<std::int32_t> newest = tree_.newest();
+    if (!newest) return;
+    const auto rows = tree_.rows();
+    std::unordered_map<std::int32_t, std::size_t> at;
+    for (std::size_t i = 0; i < rows.size(); ++i) at.emplace(rows[i].node, i);
+    for (std::int32_t n = tree_.shown(*newest); n >= 0; n = tree_.node(n).parent) {
+      if (const auto it = at.find(n); it != at.end()) {
+        if (cursor_ != it->second) detail_scroll_ = 0;
+        cursor_ = it->second;
+        // The view scrolls to it as it draws (`tree_body`).
         return;
       }
     }
@@ -986,17 +1059,19 @@ class Browser {
   }
   // The next node where errors start, after the selection (wrapping), opening the tree to it.
   void next_error(const std::vector<Tree::Row>& rows) {
-    const auto nodes = tree_.nodes();
-    const auto from = static_cast<std::size_t>(rows[cursor_].node);
-    for (std::size_t k = 1; k <= nodes.size(); ++k) {
-      const auto i = static_cast<std::int32_t>((from + k) % nodes.size());
-      if (tree_.error_here(i) && tree_.matches(nodes[static_cast<std::size_t>(i)].ev)) {
+    const std::vector<std::int32_t> order = tree_.preorder();
+    const auto from = static_cast<std::size_t>(std::ranges::find(order, rows[cursor_].node) - order.begin());
+    for (std::size_t k = 1; k <= order.size(); ++k) {
+      const std::int32_t i = order[(from + k) % order.size()];
+      if (tree_.error_here(i) && tree_.matches(tree_.node(i).ev)) {
         select(i);
         return;
       }
     }
   }
+  // The user's choice of a node (n, x, a slice or a bar): following stops.
   void select(std::int32_t node) {
+    follow_ = false;
     tree_.reveal(node);
     keep_selected(node);
   }
@@ -1115,11 +1190,14 @@ class Browser {
       if (s.counts[i] == 0) continue;
       pieces.push_back(paint(outcome_sgr(o), std::format("{} {} {}", outcome_glyph(o, true), s.counts[i], outcome_name(o))));
     }
+    // While cells run (#939): how many, before the counts of those that ended.
+    if (s.running > 0) pieces.insert(pieces.begin() + 1, paint(running_sgr, std::format("▶ {} running", s.running)));
     pieces.push_back(paint("2", std::format("{} events, {} workers, {}", s.events, s.workers, format_duration(s.span_ns))));
     // Memory (#274): what the frames allocated and the cells retain; the process's, when known.
     pieces.push_back(paint("2", std::format("{} allocated, {} retained", format_bytes(static_cast<std::int64_t>(s.alloc_bytes)), format_bytes(s.retained_bytes))));
     if (const auto m = tree_.memory())
-      pieces.push_back(paint("2", std::format("last build: process {}, peak {}", format_bytes(m->process_current), format_bytes(m->process_peak))));
+      pieces.push_back(paint("2", std::format("{}: process {}, peak {}", s.running > 0 ? "this build so far" : "last build", format_bytes(m->process_current),
+                                              format_bytes(m->process_peak))));
     std::vector<std::string> out{pieces[0]};
     for (std::size_t i = 1; i < pieces.size(); ++i) {
       if (columns(out.back()) + 2 + columns(pieces[i]) <= cols_) out.back() += "  " + pieces[i];
@@ -1140,8 +1218,12 @@ class Browser {
     else if (tree_.order() == Tree::Order::retained) out += "  " + paint("1", "by bytes retained");
     else if (tree_.order() == Tree::Order::time) out += "  " + paint("1", "by time");
     if (tree_.hide_reused()) out += "  " + paint("1", "reused hidden");
-    if (live_) out += "  " + paint("1;38;5;208", "● live") + paint("2", " " + *live_);
-    else if (ended_) out += "  " + paint("2", "(the daemon has gone)");
+    if (live_) {
+      out += "  " + paint(running_sgr, "● live") + paint("2", " " + *live_);
+      out += follow_ ? "  " + paint("1", "following") : "  " + paint("2", "f follows");
+    } else if (ended_) {
+      out += "  " + paint("2", "(" + *ended_ + ")");
+    }
     if (visual_) out += "  " + paint("1;7", " V: j/k extend, y copy, Esc drop ");
     if (!notice_.empty()) out += "  " + paint("1;32", notice_);
     return out;
@@ -1183,13 +1265,13 @@ class Browser {
     out += n.children.empty() ? "  " : (n.expanded ? "▾ " : "▸ ");
     if (tree_.error_here(r.node)) {
       // Where the errors start: the whole cell on red, and the first message on it.
-      return out + paint(error_here_sgr, std::format("{} {} {} ← {}", outcome_glyph(e.outcome, true), cell_name(e), outcome_name(e.outcome),
+      return out + paint(error_here_sgr, std::format("{} {} {} ← {}", state_glyph(e, true), cell_name(e), state_name(e),
                                                      first_line(e.errors)));
     }
-    out += paint(event_sgr(e), outcome_glyph(e.outcome, true));
+    out += paint(event_sgr(e), state_glyph(e, true));
     out += ' ';
     out += std::format("{}{}", paint(r.match ? "1" : "2", e.kind), e.key.empty() ? "" : std::format("({})", e.key));
-    out += ' ' + paint(event_sgr(e), outcome_name(e.outcome));
+    out += ' ' + paint(event_sgr(e), state_name(e));
     if (e.repeat > 1) out += paint("2", std::format(" ×{}", e.repeat));
     if (!e.errors.empty()) {
       // The message from where it starts, bubbled up; `x` goes there.
@@ -1290,8 +1372,8 @@ class Browser {
     wrapped(e.kind, "1");
     wrapped(e.key.empty() ? "(no key)" : e.key, "");
     add("");
-    wrapped(std::format("{} {}", outcome_glyph(e.outcome, true), outcome_name(e.outcome)), event_sgr(e));
-    wrapped(outcome_meaning(e.outcome), "2");
+    wrapped(std::format("{} {}", state_glyph(e, true), state_name(e)), event_sgr(e));
+    wrapped(state_meaning(e), "2");
     add("");
     add(std::format("started  {}", format_duration(e.start_ns)));
     add(std::format("took     {}", e.end_ns == e.start_ns ? std::string("(instant)") : format_duration(e.end_ns - e.start_ns)));
@@ -1579,7 +1661,7 @@ class Browser {
         for (std::int32_t p = node; p >= 0; p = tree_.node(p).parent) chain.push_back(tree_.node(p).ev.kind);
         std::ranges::reverse(chain);
         const Event& e = tree_.node(node).ev;
-        line += paint(event_sgr(e), outcome_glyph(e.outcome, true)) + " " + cell_name(e) + " " + paint(event_sgr(e), outcome_name(e.outcome)) +
+        line += paint(event_sgr(e), state_glyph(e, true)) + " " + cell_name(e) + " " + paint(event_sgr(e), state_name(e)) +
                 paint("2", "   " + (chain | std::views::join_with(std::string_view(" › ")) | std::ranges::to<std::string>()));
       }
       out.push_back(std::move(line));
@@ -1590,7 +1672,7 @@ class Browser {
       const auto o = static_cast<Outcome>(i);
       legend += paint(outcome_sgr(o), "█") + " " + std::string(outcome_name(o)) + "  ";
     }
-    out.push_back(legend + paint("2", "█▓▒░ shallower to deeper"));
+    out.push_back(legend + paint(running_sgr, "█") + " running  " + paint("2", "█▓▒░ shallower to deeper"));
     return out;
   }
 
@@ -1607,13 +1689,14 @@ class Browser {
                                 "",
                                 paint("1", " Filter (/)"),
                                 "  words      match kind or key, all of them",
-                                "  is:exec    an outcome (any prefix)",
+                                "  is:exec    an outcome (any prefix); is:running the cells still running",
                                 "  at:a.cpp:12  cells whose source touches line 12 of a.cpp (or at:a.cpp: any line)",
                                 "  kind:Lower   one kind, whole (what a histogram's bar opens)",
                                 "  w:3 w:main a worker",
                                 "",
                                 paint("1", " Showing"),
                                 "  r hides reused cells (what ran stays), o flips the order",
+                                "  while the build runs: f follows the newest activity (any move of yours stops it)",
                                 "  s sorts siblings: as they started, by bytes allocated below, by bytes retained, by time",
                                 "  the alloc and retains columns sum over each cell's subtree",
                                 "",
@@ -1659,7 +1742,8 @@ class Browser {
   Tree& tree_;
   std::size_t rows_ = 24, cols_ = 80;
   std::optional<std::string> live_;
-  bool ended_ = false;
+  std::optional<std::string> ended_;  // what the status line says once the source has ended
+  bool follow_ = false;               // the newest activity is selected as it comes (#939)
   View view_ = View::tree;
   Focus focus_ = Focus::tree;
   std::size_t cursor_ = 0, top_ = 0;

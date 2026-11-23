@@ -31,6 +31,11 @@ export import :system;
 export import :predefined;
 export import :cond;
 
+namespace {
+// Keep the original freestanding boolean's encoding when exceptions are enabled.
+constexpr std::uint8_t freestanding_bit = 1, no_exceptions_bit = 2;
+}
+
 export namespace ycxx::pp {
 
 // The process keeps one session per configuration, shared by every thread under its `mutex`.
@@ -81,12 +86,12 @@ Session& session_for(const Config& cfg);
 // `-E`: the text Clang's `-E` would print, and the diagnostics.
 std::pair<std::string, std::vector<Message>> preprocess_to_text(Session& s, std::string_view text, std::string_view path);
 
-// Takes a preprocessor option at `args[i]` (`-I dir`, `-Idir`, `-isystem`, `-iquote`, `-D`,
-// `-U`), advancing `i` past its argument: true if it was one, an error if its argument is missing.
+// Takes a preprocessing or language-mode option at `args[i]`. Advances `i` for a separate
+// argument. Returns an error for a missing argument.
 std::expected<bool, std::string> take_option(std::span<const std::string_view> args, std::size_t& i, Config& cfg);
-// The system directories after the command line's. A `-I` or `-isystem` directory that names one
-// of them (relative to `cwd`) is dropped, as GCC and Clang do, so it is searched once, at its
-// system place, and `#include_next` from it goes on past it.
+// Consumes the include suppression options before appending automatic search paths.
+// A command-line directory that names an automatic one (relative to `cwd`) is searched only
+// at its automatic place when present, so `#include_next` goes past it.
 Config with_system_dirs(Config cfg, std::string_view cwd = {}, std::string_view sdkroot = {});
 
 // The item of a file-level diagnostic location in the region's file `file` (lex::file_level for
@@ -143,6 +148,10 @@ void serialize_into(engine::Sink& out, const Source& s) {
   engine::serialize(out, static_cast<std::uint64_t>(s.config.view));
   engine::serialize(out, static_cast<std::uint64_t>(s.config.template_depth));
   engine::serialize(out, static_cast<std::uint64_t>(s.config.call_triviality ? 1 + std::to_underlying(*s.config.call_triviality) : 0));
+  std::uint8_t modes = 0;
+  if (s.config.freestanding) modes |= freestanding_bit;
+  if (!s.config.exceptions_enabled) modes |= no_exceptions_bit;
+  engine::serialize(out, modes);
 }
 Source deserialize_from(engine::Source& in, std::type_identity<Source>) {
   Source s;
@@ -161,6 +170,10 @@ Source deserialize_from(engine::Source& in, std::type_identity<Source>) {
   const auto calls = engine::deserialize<std::uint64_t>(in);
   if (calls > 1 + std::to_underlying(ast::CallTriviality::apple)) in.fail();
   if (calls != 0) s.config.call_triviality = static_cast<ast::CallTriviality>(calls - 1);
+  const auto modes = engine::deserialize<std::uint8_t>(in);
+  if ((modes & ~(freestanding_bit | no_exceptions_bit)) != 0) in.fail();
+  s.config.freestanding = (modes & freestanding_bit) != 0;
+  s.config.exceptions_enabled = (modes & no_exceptions_bit) == 0;
   return s;
 }
 
@@ -430,6 +443,14 @@ std::pair<std::string, std::vector<Message>> preprocess_to_text(Session& s, std:
 
 std::expected<bool, std::string> take_option(std::span<const std::string_view> args, std::size_t& i, Config& cfg) {
   std::string_view a = args[i];
+  if (a == "-nostdinc") {
+    cfg.nostdinc = true;
+    return true;
+  }
+  if (a == "-nostdinc++") {
+    cfg.nostdincxx = true;
+    return true;
+  }
   for (std::string_view opt : {"-isystem", "-iquote", "-I", "-D", "-U"}) {
     if (!a.starts_with(opt)) continue;
     std::string value(a.substr(opt.size()));
@@ -447,6 +468,14 @@ std::expected<bool, std::string> take_option(std::span<const std::string_view> a
     } else cfg.macros.emplace_back(value, std::nullopt);
     return true;
   }
+  if (a == "-ffreestanding") {
+    cfg.freestanding = true;
+    return true;
+  }
+  if (a == "-fno-exceptions") {
+    cfg.exceptions_enabled = false;
+    return true;
+  }
   return false;
 }
 
@@ -458,7 +487,9 @@ Config with_system_dirs(Config cfg, std::string_view cwd, std::string_view sdkro
     while (s.size() > 1 && s.ends_with('/')) s.pop_back();
     return s;
   };
-  auto dirs = system_dirs(*cfg.target, sdkroot);
+  std::vector<std::string> dirs;
+  const bool include_libycxx = !std::exchange(cfg.nostdincxx, false);
+  if (!std::exchange(cfg.nostdinc, false)) dirs = system_dirs(*cfg.target, sdkroot, include_libycxx);
   auto system = dirs | std::views::transform(normal) | std::ranges::to<std::vector>();
   // A `-I` or `-isystem` directory that is a system directory is searched at the system
   // directory's place only. -isystem directories are system directories too: a `-I` directory

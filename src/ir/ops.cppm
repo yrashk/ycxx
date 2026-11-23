@@ -216,6 +216,7 @@ export enum class Op : std::uint16_t {
   vfunc [[=state({S, V}, {V}).imms({entity, u32})]],  // the function in a class's vtable slot
   rtti__typeid [[=state({S, V}, {V})]],
   rtti__dyncast [[=state({S, V}, {V}).imms({type})]],
+  rtti__most_derived_addr [[=state({S, V}, {V})]],  // address of the most derived object from a non-null subobject pointer
 
   // Calls without an unwind edge: the callee cannot throw, or the exception leaves the function.
   // The first u32 is how many of the last arguments the callee's ellipsis matches
@@ -291,6 +292,9 @@ export enum class Op : std::uint16_t {
 
   // Allocate and default-initialize an automatic root with an external Itanium vtable.
   alloc_peer_root [[=state({S}, {S, V}).imms({type, entity}).with({nonconstant})]],
+
+  // The implicit object of an ordinary member call must designate valid storage ([basic.life]).
+  obj__check_receiver [[=state({S, V}, {S})]],
 };
 
 export constexpr std::size_t op_count = std::meta::enumerators_of(^^Op).size();

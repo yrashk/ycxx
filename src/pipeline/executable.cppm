@@ -5,7 +5,8 @@
 // export list read once per process.
 //
 // `link(P)` is the engine query over a program's translation units and disk inputs. Static
-// archive links follow operand order. The SDK is read outside the engine, once per process,
+// archive links follow operand order: GNU archives in x86-64 Linux links, Darwin archives in
+// arm64 macOS links (#842). The SDK is read outside the engine, once per process,
 // as configuration the daemon's file table will provide (#97).
 module;
 #include <stdio.h>
@@ -53,7 +54,8 @@ struct LinkOperand {
 struct ArchiveLinkInputs {
   obj::target target;
   std::vector<LinkOperand> operands;
-  std::vector<link::elf::archive_input> archives;
+  std::vector<obj::archive::input> archives;
+  std::vector<std::string> undefined = {};  // names referenced from the start (Darwin only)
 };
 
 // Ordinarily, translation units precede disk objects. Archive links carry a positional manifest
@@ -360,11 +362,11 @@ engine::query_task<Linked> Link::run(engine::Ctx& cx, ProgramId p) {
 
   std::vector<obj::object> objects;
   if (const auto& archive_link = in.archive_link) {
-    if (archive_link->target != obj::target::x86_64_linux || in.dynamic) {
+    if (in.dynamic) {
       out.errors.push_back("archive inputs require a static x86-64 Linux executable link");
       co_return out;
     }
-    std::vector<link::elf::static_operand> operands;
+    std::vector<link::static_operand> operands;
     operands.reserve(archive_link->operands.size());
     for (const auto [kind, index] : archive_link->operands) {
       switch (kind) {
@@ -373,7 +375,8 @@ engine::query_task<Linked> Link::run(engine::Ctx& cx, ProgramId p) {
         case LinkOperand::Kind::archive: operands.emplace_back(std::cref(archive_link->archives[index])); break;
       }
     }
-    auto selected = link::elf::select_archive_members(operands);
+    auto selected = archive_link->target == obj::target::x86_64_linux ? link::elf::select_archive_members(operands)
+                                                                       : link::select_archive_members(operands, archive_link->undefined);
     if (!selected) {
       out.errors.push_back(std::move(selected.error()));
       co_return out;

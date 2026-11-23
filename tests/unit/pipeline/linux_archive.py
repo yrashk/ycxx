@@ -69,18 +69,22 @@ def main():
             run([ar, flags, out, *members])
 
         def link(*inputs, result, env=cold):
+            program = scope / 'program'
+            program.unlink(missing_ok=True)
             run([ycxx, 'cxx', target, '-nostdlib', *inputs, '-o', 'program'], env=env)
             run(['./program'], status=result)
-            return (scope / 'program').read_bytes()
+            return program.read_bytes()
 
         def reject(*args, error, flags=(target, '-nostdlib'), env=cold):
             run([ycxx, 'cxx', *flags, *args, '-o', 'rejected'], status=1, error=error, env=env)
             assert not (scope / 'rejected').exists()
 
-        def daemon_pid():
+        def daemon_identity():
             status = run([ycxx, 'ctl', 'status'], env=base)
             pid, = (line.removeprefix('pid: ') for line in status.splitlines() if line.startswith('pid: '))
-            return int(pid)
+            # Linux /proc stat field 22 distinguishes a restarted process reusing a PID.
+            start = Path(f'/proc/{int(pid)}/stat').read_text().rsplit(') ', 1)[1].split()[19]
+            return pid, start
 
         source('main.cpp', 'extern "C" int head(); int main() { return head(); }', 'main.o')
         source('head.cpp', 'extern "C" int tail(); extern "C" int head() { return tail(); }',
@@ -121,8 +125,8 @@ def main():
         reject('chain.a', error='at least one source or ordinary object')
         reject('main.cpp', 'chain.a', flags=(target,), error='hosted Linux linking is not supported')
         reject('main.cpp', 'chain.a', flags=('--target=arm64-apple-darwin',),
-               error='archive inputs require an x86-64 Linux executable link')
-        reject('-c', 'main.cpp', 'chain.a', error='archive inputs require an x86-64 Linux executable link')
+               error="chain.a: GNU archive indexes and long names are unsupported in Darwin links")
+        reject('-c', 'main.cpp', 'chain.a', error='archive inputs require an executable link')
         reject('main.cpp', 'chain.a', '--dynamic-linker=/some/loader', error='archive inputs cannot be combined')
         reject('main.cpp', 'chain.a', 'provider.so', error='archive inputs cannot be combined')
         reject('main.cpp', 'absent.a', error="cannot read 'absent.a'")
@@ -225,16 +229,39 @@ def main():
 
         try:
             assert link('main.cpp', 'chain.a', result=37, env=daemon) == image
-            pid = daemon_pid()
+            identity = daemon_identity()
             assert link('main.cpp', 'chain.a', result=37, env=daemon) == image
             source('tail.cpp', 'extern "C" int tail() { return 53; }', 'tail.o')
             archive('replacement.a', 'tail.o', 'selected_member_with_a_long_name.o',
                     'unselected_data_with_a_long_name.bin')
-            assert (scope / 'replacement.a').stat().st_size == (scope / 'chain.a').stat().st_size
-            (scope / 'replacement.a').replace(scope / 'chain.a')
+            chain, staged = (scope / name for name in ('chain.a', 'replacement.a'))
+            old_bytes, new_bytes = chain.read_bytes(), staged.read_bytes()
+            assert len(old_bytes) == len(new_bytes) and old_bytes != new_bytes
+            old_mtime = chain.stat().st_mtime_ns
+            os.utime(staged, ns=(old_mtime, old_mtime + 1_000_000_000))
+            staged.replace(chain)
+            assert chain.stat().st_mtime_ns != old_mtime
             replacement = link('main.cpp', 'chain.a', result=53, env=daemon)
             assert replacement != image and replacement == link('main.cpp', 'chain.a', result=53)
-            assert daemon_pid() == pid
+            assert daemon_identity() == identity
+
+            # An explicit operand must see new bytes even when its size and mtime stay equal (#951).
+            for name, options in (('same-metadata.a', ()), ('same-metadata-no-runtime.a', ('-nostdlib++',))):
+                explicit = scope / name
+                explicit.write_bytes(old_bytes)
+                inputs = (*options, 'main.cpp', name)
+                before_image = link(*inputs, result=37, env=daemon)
+                assert daemon_identity() == identity
+                before = explicit.stat()
+                staged.write_bytes(new_bytes)
+                os.utime(staged, ns=(before.st_atime_ns, before.st_mtime_ns))
+                staged.replace(explicit)
+                after = explicit.stat()
+                assert after.st_ino != before.st_ino
+                assert (after.st_size, after.st_mtime_ns) == (before.st_size, before.st_mtime_ns)
+                cold_image = link(*inputs, result=53)
+                assert cold_image != before_image and link(*inputs, result=53, env=daemon) == cold_image
+                assert daemon_identity() == identity
             reject('chain.a', 'main.cpp', error="undefined symbol 'head'", env=daemon)
         finally:
             run([ycxx, 'ctl', 'shutdown'], env=base)

@@ -755,6 +755,18 @@ class Lowering {
         out(n, 0, add_offset(in(n, 0), -offset(derived, path_at(imms, 1))));
         return {};
       }
+      case Op::rtti__most_derived_addr: {
+        if (!config_.sysv_amd64) return fail("dynamic_cast to a void pointer requires the Linux x86-64 peer ABI");
+        // Itanium C++ ABI §2.5.2: the address point's preceding two words are the signed
+        // ptrdiff_t offset-to-top and the type-info pointer. Read only the offset-to-top.
+        const ValueId state = in(n, 0), object = in(n, 1);
+        const ValueId table = emit1(Op2::load, T::ptr, {state, object}, {0});
+        const ValueId header = constant(T::i64, -2 * ast::x86_64_linux.pointer_size);
+        const ValueId slot = emit1(Op2::ptradd, T::ptr, {table, header});
+        const ValueId offset_to_top = emit1(Op2::load, T::i64, {state, slot}, {0});
+        out(n, 0, emit1(Op2::ptradd, T::ptr, {object, offset_to_top}));
+        return {};
+      }
 
       case Op::alloc: {
         auto storage = Storage(imms[1]);
@@ -773,17 +785,15 @@ class Lowering {
       case Op::alloc_peer_root: {
         const QualType type{std::uint32_t(imms[0])};
         if constexpr (requires { layout_.peer_root_allocation(type); }) {
-          if (config_.sysv_amd64) {
-            if (const auto storage = layout_.peer_root_allocation(type)) {
-              const ValueId p = emit1(Op2::alloca, T::ptr, {}, {storage->size, storage->align, raw(n)});
-              const ValueId state = zero(in(n, 0), p, *storage, imms[0]);
-              // Itanium ABI §2.5.2: offset-to-top and RTTI precede the root's address point.
-              const ValueId table = emit1(Op2::symbol, T::ptr, {}, {imms[1]});
-              const ValueId address_point = add_offset(table, 2 * ast::x86_64_linux.pointer_size);
-              out(n, 0, emit1(Op2::store, T::state, {state, p, address_point}, {0}));
-              out(n, 1, p);
-              return {};
-            }
+          if (const auto storage = layout_.peer_root_allocation(type)) {
+            const ValueId p = emit1(Op2::alloca, T::ptr, {}, {storage->size, storage->align, raw(n)});
+            const ValueId state = zero(in(n, 0), p, *storage, imms[0]);
+            // Itanium ABI §2.5.2: offset-to-top and RTTI precede the root's address point.
+            const ValueId table = emit1(Op2::symbol, T::ptr, {}, {imms[1]});
+            const ValueId address_point = add_offset(table, 2 * ast::x86_64_linux.pointer_size);
+            out(n, 0, emit1(Op2::store, T::state, {state, p, address_point}, {0}));
+            out(n, 1, p);
+            return {};
           }
         }
         return fail("a peer virtual root needs a supported automatic-object layout");
@@ -792,6 +802,7 @@ class Lowering {
       case Op::obj__begin:
       case Op::obj__end:
       case Op::obj__reuse:
+      case Op::obj__check_receiver:
       case Op::union__activate:
       case Op::useq__begin:
       case Op::useq__next:

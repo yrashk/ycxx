@@ -1,0 +1,40 @@
+// ACTION: syntax
+--- main.cpp
+#include "owner.hpp"
+static_assert(Owner::narrow == sizeof(int));
+static_assert(Owner::wide == sizeof(long long));
+--- owner.hpp
+struct Owner {
+    unsigned short member;
+    static int f(int);
+    static long long f(long);
+    enum Result {
+        narrow = sizeof(f(0)),
+        wide = sizeof(f(0L)),
+        width = sizeof(member),
+    };
+};
+=== edit
+--- owner.hpp
+struct Owner {
+    unsigned short member;
+    static int f(int);
+    static long long f(long);
+    enum Result {
+        narrow = sizeof(f(0)),
+        wide = sizeof(f(0L)),
+        width = member, //! error
+    };
+};
+=== edit
+--- owner.hpp
+struct Owner {
+    unsigned short member;
+    static long long f(long);
+    static int f(int);
+    enum Result {
+        narrow = sizeof(f(0)),
+        wide = sizeof(f(0L)),
+        width = sizeof(member),
+    };
+};

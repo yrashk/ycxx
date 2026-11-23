@@ -392,6 +392,13 @@ public:
   virtual void event(TraceEvent e) noexcept = 0;
   // Whether events carry the cell's value as `show` renders it (slower: every event renders).
   virtual bool values() const noexcept { return false; }
+  // Whether a frame's start is reported too (#939): a live view's, which shows cells while they
+  // run. Asked once per frame, and only of a request that is traced.
+  virtual bool starts() const noexcept { return false; }
+  // A frame began its run (#939): the event `event` will report when it ends, with its id, parent,
+  // kind, key, cell and start, and the worker it started on; `end` is `start`, and the rest is
+  // left out. Called on the frame's worker, before the frame does any work.
+  virtual void started(TraceEvent) noexcept {}
 
 protected:
   ~Tracer() = default;
@@ -1168,6 +1175,8 @@ private:
   // Reports cell `c` to `t`: an instant, or the end of `span`'s work.
   [[gnu::cold, gnu::noinline]] void trace(Tracer* t, const Frame* by, CellId c, Outcome o, const Span* span,
                                           const memory::Snapshot* used) noexcept;
+  // Reports that the frame of `span` began running cell `c`, to a tracer that asks (#939).
+  [[gnu::cold, gnu::noinline]] void trace_start(Tracer* t, const Span& span, CellId c) noexcept;
   // Records what a cell's value retains (#274), in the cell and its kind's sum.
   // `first`: its first value.
   void retain(Cell& e, std::int64_t bytes, bool first) noexcept;
@@ -2131,9 +2140,10 @@ void Db::validate_sync(CellId c, std::uint64_t old, const Frame* chain) {
   vf.root = chain ? chain->root : nullptr;
   vf.cell = c;
   vf.sync_parent = chain;
-  if (tracer_of(chain)) {
+  if (Tracer* t = tracer_of(chain)) {
     vf.span = open_span();
     vf.span.parent = chain->span.id;
+    if (t->starts()) trace_start(t, vf.span, c);
   }
   const Revision since = verified_of(old);
   bool changed = false;
@@ -2173,9 +2183,11 @@ void Db::execute_sync(CellId c, std::uint64_t restore, const Frame* chain, const
     f.root = chain ? chain->root : nullptr;
     f.cell = c;
     f.sync_parent = chain;
-    if (tracer_of(chain)) {
+    if (Tracer* t = tracer_of(chain)) {
       f.span = span ? *span : open_span();
       f.span.parent = chain->span.id;
+      // A span handed on (a validation that went on to execute) was reported when it opened.
+      if (!span && t->starts()) trace_start(t, f.span, c);
     }
     std::optional<typename Q::Value> v;
     memory::Target mine(&f.mem);  // its own numbers, not its caller's
@@ -2287,6 +2299,7 @@ frame_task Db::run_frame(Db& db, CellId c, std::uint32_t id, Root& root, bool va
   if (root.tracer) {
     f.span = db.open_span();
     f.span.parent = parent;
+    if (root.tracer->starts()) db.trace_start(root.tracer, f.span, c);
   }
   Cell& e = db.cells_[c];
   // The word to restore if the frame leaves without publishing: Empty, or the old Done (§A1.6).
@@ -2610,6 +2623,24 @@ void Db::trace(Tracer* t, const Frame* by, CellId c, Outcome o, const Span* span
     ev.key = "?";  // a describer that throws loses its text, never the event
   }
   t->event(std::move(ev));
+}
+
+void Db::trace_start(Tracer* t, const Span& span, CellId c) noexcept {
+  memory::Target none(nullptr);  // as in `trace`: the trace's strings count for nobody
+  const Cell& e = cells_[c];
+  TraceEvent ev;
+  ev.id = span.id;
+  ev.parent = span.parent;
+  ev.kind = tables_[e.kind].load(std::memory_order_acquire)->name;
+  ev.start = ev.end = span.start;
+  ev.worker = ev.end_worker = span.worker;
+  ev.cell = e.key_fp.lo ^ e.key_fp.hi;
+  try {
+    ev.key = describe(c);
+  } catch (...) {
+    ev.key = "?";
+  }
+  t->started(std::move(ev));
 }
 
 void Db::retain(Cell& e, std::int64_t bytes, bool first) noexcept {

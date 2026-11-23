@@ -4,6 +4,8 @@ under a pseudo-terminal.
 
     tests/daemon/trace_tui.py <ycxx>
 
+- It opens at once and fills in while the build runs (#939): its first frame is drawn before the
+  build ends, and once it ends the status line says so.
 - It turns SGR mouse reports on (1000, 1002, 1006) and autowrap off, and back on `q`.
 - A click on a tab, sent as the terminal would send it, switches the view; a drag moves the
   divider.
@@ -121,14 +123,16 @@ def main(ycxx):
     env = {k: v for k, v in os.environ.items() if k not in ('NO_COLOR', 'YCXX_DAEMON')}
     clip = scope / 'clip.txt'
     env.update(YCXX_NO_DAEMON='1', TERM='xterm-256color', YCXX_CLIPBOARD=f'cat > {clip}')
-    # The browser opens after the compile, and `q` leaves with the compile's own status: whatever the
-    # same command says untraced (a host without a linker for the target fails the link).
+    # The browser opens at once, the build runs meanwhile (#939), and `q` leaves with the compile's own
+    # status: whatever the same command says untraced (a host without a linker for the target fails
+    # the link).
     plain = subprocess.run([ycxx, 'cxx', *COMPILE, 'a.cpp', '-o', 'a.o'], cwd=scope, env=env, capture_output=True, text=True, timeout=300)
 
     t = Tui(ycxx, scope, env)
     check(t.read_until(lambda o: b'ycxx engine trace' in o), 'the browser draws')
     check(b'\x1b[?7l' in t.out and b'\x1b[?1000h' in t.out and b'\x1b[?1002h' in t.out and b'\x1b[?1006h' in t.out, 'mouse reports on: clicks, drags, SGR')
     check(b'cell\xe2\x86\x93' in t.out, 'the tree, with its column headers')
+    check(t.read_until(lambda o: b'the build has ended' in o), 'the status line says when the build has ended')
     # Where the tabs are drawn (the summary above may wrap): click the timeline's, 1-based.
     t.read_until(lambda o: False, timeout=0.5)
     lines = plain_lines(t.last_frame())
@@ -212,6 +216,12 @@ def main(ycxx):
     (scope / 'big.cpp').write_text(''.join(f'int f{i}(int x) {{ return x + {i}; }}\n' for i in range(300)) + 'int main() { return f0(0); }\n')
     t = Tui(ycxx, scope, dict(env, YCXX_CLIPBOARD=f'(sleep 6; touch {marker}) & wait'), 'big.cpp')
     check(t.read_until(lambda o: b'ycxx engine trace' in o), 'the browser draws (a stuck clipboard command)')
+    # Live (#939): the first frame is drawn at once, while the build of 300 functions runs.
+    t.read_until(lambda o: o.count(b'\x1b[1;1H') >= 2)  # the first frame whole: the next one has begun
+    second = t.out.find(b'\x1b[1;1H', t.out.find(b'\x1b[1;1H') + 1)
+    first = Tui.frame_of(t.out[:second] if second > 0 else t.out)
+    check(any('● live' in l and 'building big.cpp' in l for l in plain_lines(first)), f'the first frame is drawn while the build runs: {plain_lines(first)[:4]}')
+    check(t.read_until(lambda o: b'the build has ended' in o), 'and the build ends')
     began = time.time()
     t.send(b'Y')
     check(t.read_until(lambda o: any('copied the subtree' in l and '(OSC 52)' in l for l in plain_lines(Tui.frame_of(o))), timeout=10),

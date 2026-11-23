@@ -20,6 +20,12 @@
 //   tu(TU)                   the object, in definition order (§A5.3), and the first-demand table
 //   layout                   `layout_type(T)`, `layout_step(T, s)`, `layout_constant(c)` (cheap)
 //
+// Per-unit cells give the per-function ones what they read of the whole unit, so that an edit
+// re-runs them cheaply or not at all (#938): `UnitIndexQ` (where each definition and entity is),
+// `UnitFunctionFactsQ` (the constexpr and variadic functions irgen asks about), `UnitShapeIndex`
+// (`layout`'s lookup of classes and enumerations) and `SymbolAccessQ(TU, E)` (how the unit's
+// code addresses one entity, read by `unit`).
+//
 // What a query reads besides its key and fetches: the process's interners, sema's constants and
 // the default target for pre-built units, bound by whoever owns them (`Universe`); handles in values are
 // numbers in those interners, so a cell's value is meaningful only with them (#17 persists them).
@@ -76,7 +82,7 @@ class Constants {
 
 // An entity the translation unit declares (or defines): what its symbol is made of.
 // These symbols use special Itanium encodings (§5.1.4.3, §5.1.4.5).
-enum class Special : std::uint8_t { none, constructor, destructor, virtual_table, deleting_destructor };
+enum class Special : std::uint8_t { none, constructor, destructor, virtual_table, deleting_destructor, type_info, base_object_destructor };
 struct Entity {
   EntityId id = EntityId::none;
   std::string name;  // its identifier
@@ -112,7 +118,12 @@ struct Entity {
 };
 
 // Certified on the typed definition, before IR drops lifetime information.
-enum class UnwindEligibility : std::uint8_t { none, cleanup_free, cleanup_free_with_throw, hosted_catch_all, hosted_cleanup };
+enum class UnwindEligibility : std::uint8_t { none, cleanup_free, cleanup_free_with_throw, hosted_catch, hosted_cleanup };
+
+struct HostedCatch {
+  EntityId callee;  // checked against the complete unit
+  std::optional<std::uint32_t> int_binding{};  // empty for a catch-all
+};
 
 // A function definition: what `function_ir(F)` reads (irgen::FunctionInput, without a thunk's
 // locals).
@@ -130,13 +141,14 @@ struct FunctionDef {
   // An ordinary external inline definition that every unit using it may emit: a weak definition,
   // coalesced by the linker (ELF #422, Mach-O #124).
   bool coalesced = false;
+  bool explicit_weak = false;  // an ordinary non-inline ELF definition (#937)
   UnwindEligibility unwind = UnwindEligibility::none;
-  EntityId catch_all_callee = EntityId::none;  // for the complete-unit exception-specification check
+  std::optional<HostedCatch> hosted_catch{};
   ast::NodeId cleanup_call = ast::NodeId::none;
   EntityId constructor_cleanup = EntityId::none;
   EntityId constructor_initializer_callee = EntityId::none;
   EntityId unwind_through_constructor = EntityId::none;
-  EntityId root_destructor_table = EntityId::none;  // a peer-owned table restored by D1 and D2
+  EntityId destructor_table = EntityId::none;  // the primary table installed by D1 and D2
 };
 
 // A variable definition at namespace scope with its constant initializer, or `ConstId::none` for
@@ -147,7 +159,7 @@ struct Variable {
   ConstId init = ConstId::none;
   std::optional<ast::Loc> at;  // its declarator, for diagnostics
   bool dynamic = false;  // also initialized by code ([basic.start.dynamic]): writable, if const
-  bool coalesced = false;  // an eligible external inline namespace definition, weak (#432, #124)
+  bool coalesced = false;  // an eligible external inline data definition, weak (#432, #903)
 };
 
 // The classes and enumerations a unit defines, as `layout` reads them: a class's non-static data
@@ -186,11 +198,13 @@ struct Shapes {
   std::vector<EnumShape> enums;
 };
 
-// The root table this unit owns, as established by its complete declaration set. This does
+// The table this unit owns, as established by its complete declaration set. This does
 // not depend on the functions' bodies or whether this unit ever uses the table.
 struct OwnedVirtualTable {
   EntityId entity;
-  std::array<EntityId, 2> slots;  // in declaration order, starting with the key function
+  std::vector<EntityId> slots;  // in slot order, starting with the key function in the admitted profiles
+  EntityId primary_base = EntityId::none;
+  bool peer_base_rtti = false;  // a peer's key owns the primary base descriptor
 };
 
 // A translation unit's definitions and declarations, in the order of their items.
@@ -207,10 +221,12 @@ struct TranslationUnit {
   bool front_failed = false;           // the front end reported errors: nothing to compile
   bool virtual_emission_blocked = false;
   std::optional<ast::Loc> virtual_declaration;
+  std::optional<ast::Loc> unsupported_typed_dynamic_cast;
   std::optional<ir::IntThrowRuntime> int_throw;
-  std::optional<ir::CatchAllRuntime> catch_all;
+  std::optional<ir::CatchAllRuntime> catch_runtime;
   EntityId cleanup_resume = EntityId::none;
   std::optional<OwnedVirtualTable> owned_virtual_table;
+  std::set<EntityId> keyless_type_info;  // definitions selected by the typed-cast ownership check
   // The written complete-object definitions whose ELF base-object entries share their code.
   std::set<EntityId> base_object_variants;
 };
@@ -412,19 +428,40 @@ struct StringUse {
   EntityId entity = EntityId::none;
 };
 
+// The unit's shapes by entity handle (#938): each function's `layout` looks its classes up here,
+// where it built a map of every class of the unit, which made lowering a unit quadratic.
+struct ShapeIndex {
+  std::vector<std::pair<EntityId, std::uint32_t>> classes;  // into `Shapes::classes`
+  std::vector<std::pair<EntityId, std::uint32_t>> enums;    // into `Shapes::enums`
+};
+engine::SourceSpan tu_span(const engine::Db& db, TuId tu);  // defined with the function cells' spans
+struct UnitShapeIndex {
+  using Key = TuId;
+  static engine::SourceSpan trace_span(const engine::Db& db, const Key& k) { return tu_span(db, k); }
+  using Value = ShapeIndex;
+  static engine::query_task<Value> run(engine::Ctx& cx, TuId tu);
+};
+// An entity's first class or enumeration record in the unit's shapes, or null.
+inline const ClassShape* class_shape(const Shapes& shapes, const ShapeIndex& index, EntityId e) {
+  auto it = std::ranges::lower_bound(index.classes, e, {}, &std::pair<EntityId, std::uint32_t>::first);
+  return it != index.classes.end() && it->first == e ? &shapes.classes[it->second] : nullptr;
+}
+inline const EnumShape* enum_shape(const Shapes& shapes, const ShapeIndex& index, EntityId e) {
+  auto it = std::ranges::lower_bound(index.enums, e, {}, &std::pair<EntityId, std::uint32_t>::first);
+  return it != index.enums.end() && it->first == e ? &shapes.enums[it->second] : nullptr;
+}
+
 // `layout` as `lower` reads it (ir::layout_source): types from the interners and the unit's
 // shapes (its classes' members and enumerations' underlying types, #115), constants through the
 // cell above. Records the string literal objects whose addresses it gave, in order of first use.
 class QueryLayout {
  public:
-  QueryLayout(engine::SyncCtx& cx, const Shapes& shapes, const ast::Target& target) : cx_(&cx), target_(&target) {
-    for (const ClassShape& c : shapes.classes) classes_.emplace(std::to_underlying(c.entity), &c);
-    for (const EnumShape& e : shapes.enums) enums_.emplace(std::to_underlying(e.entity), e.underlying);
-  }
+  QueryLayout(engine::SyncCtx& cx, const Shapes& shapes, const ShapeIndex& index, const ast::Target& target)
+      : cx_(&cx), target_(&target), shapes_(&shapes), index_(&index) {}
   ir::TypeLayout type(QualType q) const;
   std::optional<ir::TypeLayout> peer_root_allocation(QualType q) const;
   ir::SubObject step(QualType q, ir::PathStep s) const;
-  bool is_class(EntityId e) const { return classes_.contains(std::to_underlying(e)); }
+  bool is_class(EntityId e) const { return shape_of(e) != nullptr; }
   bool contains_mutable_field(QualType type) const;
   ir::ConstValue constant(ConstId c) const {
     ConstLayout v = cx_->fetch<LayoutConstant>(c);
@@ -439,10 +476,13 @@ class QueryLayout {
   std::uint8_t sysv_integer_eightbytes(const ClassShape& shape, const ClassLayout& layout) const;
   ast::Placed placed(QualType t) const;
 
+  const ClassShape* shape_of(EntityId e) const { return class_shape(*shapes_, *index_, e); }
+  const EnumShape* enum_of(EntityId e) const { return enum_shape(*shapes_, *index_, e); }
+
   engine::SyncCtx* cx_;
   const ast::Target* target_;
-  std::map<std::uint32_t, const ClassShape*> classes_;
-  std::map<std::uint32_t, QualType> enums_;
+  const Shapes* shapes_;
+  const ShapeIndex* index_;
   mutable std::vector<StringUse> strings_;
   // Each class's layout and type layout, once: a member's are needed by every class holding it.
   mutable std::map<std::uint32_t, std::optional<ClassLayout>> class_layouts_;
@@ -496,12 +536,39 @@ struct VariadicFunction {
   std::uint32_t parameters = 0;
 };
 
-// F's definition and the facts `function_ir` asks of the rest of the unit.
+// Where each function definition and entity is in the unit's `TranslationUnit`, by handle: a
+// function's projection finds its own records in O(log n) instead of scanning the unit (#938).
+struct UnitIndex {
+  std::vector<std::pair<EntityId, std::uint32_t>> functions;  // into `TranslationUnit::functions`
+  std::vector<std::pair<EntityId, std::uint32_t>> entities;   // into `TranslationUnit::entities`
+};
+struct UnitIndexQ {
+  using Key = TuId;
+  static engine::SourceSpan trace_span(const engine::Db& db, const Key& k) { return tu_span(db, k); }
+  using Value = UnitIndex;
+  static engine::query_task<Value> run(engine::Ctx& cx, TuId tu);
+};
+
+// The facts `function_ir` asks of the rest of the unit, computed once per unit (#938).
+struct UnitFunctionFacts {
+  std::vector<EntityId> constexpr_functions;        // the unit's, sorted by handle
+  std::vector<VariadicFunction> variadic_functions;  // the unit's, sorted by handle
+};
+struct UnitFunctionFactsQ {
+  using Key = TuId;
+  static engine::SourceSpan trace_span(const engine::Db& db, const Key& k) { return tu_span(db, k); }
+  using Value = UnitFunctionFacts;
+  static engine::query_task<Value> run(engine::Ctx& cx, TuId tu);
+};
+
+// F's definition, and what lowering on x86-64 asks of its own entity record.
 struct FunctionSource {
   FunctionDef def;
   bool is_main = false;
-  std::vector<EntityId> constexpr_functions;        // the unit's, sorted by handle
-  std::vector<VariadicFunction> variadic_functions;  // the unit's, sorted by handle
+  bool declared = false;        // the unit has an entity record for F
+  bool specialization = false;  // F is a function template specialization
+  EntityId scope = EntityId::none;
+  EntityId cleanup_resume = EntityId::none;  // the unit's, for a hosted cleanup only
 };
 struct FunctionSourceQ {
   using Key = FnKey;
@@ -663,11 +730,15 @@ Bind::~Bind() { bound() = old_; }
 
 namespace {
 
+const pp::Config* unit_config(engine::SyncCtx& cx, TuId tu) {
+  const TuSource& src = cx.fetch<TuSourceIn>(tu);
+  return src.file ? &cx.fetch<pp::SourceOf>(pp::FileId{*src.file}).config : nullptr;
+}
+
 // A source unit uses the target in its configuration; a given unit uses its owner's target.
 const ast::Target& unit_target(engine::SyncCtx& cx, TuId tu) {
-  const TuSource& src = cx.fetch<TuSourceIn>(tu);
-  if (src.file) return *cx.fetch<pp::SourceOf>(pp::FileId{*src.file}).config.target;
-  return *universe().target;
+  const auto* config = unit_config(cx, tu);
+  return config ? *config->target : *universe().target;
 }
 
 obj::target object_target(const ast::Target& target) {
@@ -741,25 +812,25 @@ ir::TypeLayout QueryLayout::type(QualType q) const {
   if (in.types.is<ast::TClass>(c)) {
     const auto key = std::to_underlying(in.types.get<ast::TClass>(c).entity);
     // A peer object's field offsets are available through step(), with no native complete-object type.
-    if (auto shape = classes_.find(key); shape != classes_.end() && shape->second->layout_requires_virtual_support)
+    if (const ClassShape* shape = shape_of(EntityId(key)); shape && shape->layout_requires_virtual_support)
       return {};
     if (auto done = records_.find(key); done != records_.end()) return done->second;
   }
   if (auto r = class_layout(c)) {
-    auto it = classes_.find(std::to_underlying(in.types.get<ast::TClass>(c).entity));
-    ir::TypeLayout l{record, r->size, r->align, false, {}, it->second->trivial_calls};
+    const ClassShape* it = shape_of(in.types.get<ast::TClass>(c).entity);
+    ir::TypeLayout l{record, r->size, r->align, false, {}, it->trivial_calls};
     l.empty = r->placed.empty;  // no data members, in it or its bases
     l.data = r->placed.nvsize;
-    l.copy_abi_unknown = it->second->copy_abi_unknown;
-    l.calls_abi_uncertain = it->second->calls_abi_uncertain;
-    l.layout_uncertain = it->second->layout_uncertain;
-    l.contains_explicit_alignment = it->second->explicit_alignment != 0;
+    l.copy_abi_unknown = it->copy_abi_unknown;
+    l.calls_abi_uncertain = it->calls_abi_uncertain;
+    l.layout_uncertain = it->layout_uncertain;
+    l.contains_explicit_alignment = it->explicit_alignment != 0;
     if (target.triple == ast::x86_64_linux.triple)
-      l.sysv_integer_eightbytes = sysv_integer_eightbytes(*it->second, *r);
+      l.sysv_integer_eightbytes = sysv_integer_eightbytes(*it, *r);
     // A homogeneous floating-point aggregate (AAPCS64 §5.9.5): every member, through arrays and
     // member classes, of one floating type, 1 to 4 of them; a union's members overlap, so it has
     // as many as its largest.
-    bool union_ = it->second->union_;
+    bool union_ = it->union_;
     std::uint32_t count = 0;
     std::uint8_t bytes = 0;
     // Its non-empty bases' members count as its own (AAPCS64 §5.9.5, as Clang has it).
@@ -800,21 +871,20 @@ ir::TypeLayout QueryLayout::type(QualType q) const {
   }
   // An enumeration is laid out as its underlying type ([dcl.enum]/8).
   if (in.types.is<ast::TEnum>(c))
-    if (auto it = enums_.find(std::to_underlying(in.types.get<ast::TEnum>(c).entity)); it != enums_.end()) return type(it->second);
+    if (const EnumShape* it = enum_of(in.types.get<ast::TEnum>(c).entity)) return type(it->underlying);
   return {};
 }
 
 // Only the certified automatic-object operation can request this virtual object's storage.
 // Passing or returning the class by value still asks type(), which guards virtual layouts.
 std::optional<ir::TypeLayout> QueryLayout::peer_root_allocation(QualType q) const {
-  if (target_->triple != ast::x86_64_linux.triple) return std::nullopt;
   auto& in = *universe().in;
   const auto c = in.types.canon(q);
   if (!in.types.is<ast::TClass>(c)) return std::nullopt;
-  const auto shape = classes_.find(std::to_underlying(in.types.get<ast::TClass>(c).entity));
-  if (shape == classes_.end() || shape->second->layout_uncertain || shape->second->fields.size() != 1 ||
-      (shape->second->peer_virtual_layout != sema::PeerVirtualLayout::root &&
-       shape->second->peer_automatic_primary_base == EntityId::none)) return std::nullopt;
+  const ClassShape* shape = shape_of(in.types.get<ast::TClass>(c).entity);
+  if (!shape || shape->layout_uncertain || shape->fields.size() != 1 ||
+      (shape->peer_virtual_layout != sema::PeerVirtualLayout::root &&
+       shape->peer_automatic_primary_base == EntityId::none)) return std::nullopt;
   if (const auto layout = class_layout(c))
     return ir::TypeLayout{.kind = ir::TypeKind::record, .size = layout->size, .align = layout->align};
   return std::nullopt;
@@ -830,16 +900,16 @@ bool QueryLayout::contains_mutable_field(QualType type) const {
     if (!in.types.is<ast::TClass>(kind)) return false;
     EntityId entity = in.types.get<ast::TClass>(kind).entity;
     if (!visited.insert(entity).second) return false;
-    auto found = classes_.find(std::to_underlying(entity));
-    if (found == classes_.end()) return false;
-    const ClassShape& shape = *found->second;
+    const ClassShape* found = shape_of(entity);
+    if (!found) return false;
+    const ClassShape& shape = *found;
     return shape.has_mutable_field || std::ranges::any_of(shape.fields, [&](QualType field) { return visit(field); }) ||
            std::ranges::any_of(shape.bases, [&](EntityId base) { return visit(in.intern_type(ast::TClass{base})); });
   };
   return contains(type);
 }
 
-// System V AMD64 psABI §3.2.3. Flat records of integral or ordinary object-pointer members.
+// System V AMD64 psABI §3.2.3. Flat records of integral, object-pointer or object lvalue-reference members.
 // Padding leaves the corresponding eightbyte class unchanged (initially NO_CLASS).
 std::uint8_t QueryLayout::sysv_integer_eightbytes(const ClassShape& shape, const ClassLayout& l) const {
   if (!shape.trivial_calls || shape.layout_uncertain || shape.union_ || !shape.bases.empty() || !shape.bit_widths.empty() ||
@@ -851,7 +921,8 @@ std::uint8_t QueryLayout::sysv_integer_eightbytes(const ClassShape& shape, const
     ast::BuiltinLayout field;
     if (auto b = ast::builtin_of(in, f.type); b && ast::is_integral(*b))
       field = (*target_)[*b];
-    else if (ast::is_pointer(in, f.type) && !ast::is_function(in, ast::pointee_of(in, f.type)))
+    else if ((ast::is_pointer(in, f.type) && !ast::is_function(in, ast::pointee_of(in, f.type))) ||
+             (in.types.is<ast::TLRef>(f.type) && !ast::is_function(in, in.types.get<ast::TLRef>(f.type).referee)))
       field = {target_->pointer_size, target_->pointer_align};
     else return 0;
     if (!field.size || field.size > 8 || field.align > l.align || f.offset % field.align ||
@@ -869,30 +940,30 @@ std::optional<ClassLayout> QueryLayout::class_layout(QualType c) const {
   if (!in.types.is<ast::TClass>(c)) return std::nullopt;
   auto key = std::to_underlying(in.types.get<ast::TClass>(c).entity);
   if (auto done = class_layouts_.find(key); done != class_layouts_.end()) return done->second;
-  auto it = classes_.find(key);
-  if (it == classes_.end() || (it->second->layout_requires_virtual_support &&
-                               it->second->peer_virtual_layout == sema::PeerVirtualLayout::none &&
-                               it->second->peer_automatic_primary_base == EntityId::none))
+  const ClassShape* it = shape_of(EntityId(key));
+  if (!it || (it->layout_requires_virtual_support &&
+                               it->peer_virtual_layout == sema::PeerVirtualLayout::none &&
+                               it->peer_automatic_primary_base == EntityId::none))
     return std::nullopt;
   std::vector<ast::Placed> bases, places;
-  for (EntityId b : it->second->bases) {
-    if (b == it->second->peer_automatic_primary_base)
+  for (EntityId b : it->bases) {
+    if (b == it->peer_automatic_primary_base)
       bases.push_back(ast::scalar_placed(target_->pointer_size, target_->pointer_align));
     else
       bases.push_back(placed(in.intern_type(ast::TClass{b})));
   }
-  for (std::size_t i = 0; i < it->second->fields.size(); ++i) {
-    ast::Placed f = placed(in.canonical(it->second->fields[i]));
-    if (!it->second->bit_widths.empty()) f.bit_width = it->second->bit_widths[i];
+  for (std::size_t i = 0; i < it->fields.size(); ++i) {
+    ast::Placed f = placed(in.canonical(it->fields[i]));
+    if (!it->bit_widths.empty()) f.bit_width = it->bit_widths[i];
     places.push_back(std::move(f));
   }
-  const ast::Target* root = it->second->peer_virtual_layout == sema::PeerVirtualLayout::root ? target_ : nullptr;
-  ast::RecordLayout r = ast::record_layout(bases, places, it->second->union_, it->second->pod, key, root,
-                                          it->second->explicit_alignment);
+  const ast::Target* root = it->peer_virtual_layout == sema::PeerVirtualLayout::root ? target_ : nullptr;
+  ast::RecordLayout r = ast::record_layout(bases, places, it->union_, it->pod, key, root,
+                                          it->explicit_alignment);
   ClassLayout out{r.size, std::uint32_t(r.align), {}, {}, r.placed};
   for (std::size_t i = 0; i < r.offsets.size(); ++i)
-    out.fields.push_back({r.offsets[i], in.canonical(it->second->fields[i]), r.bit_fields[i]});
-  for (std::size_t i = 0; i < r.base_offsets.size(); ++i) out.bases.push_back({r.base_offsets[i], in.intern_type(ast::TClass{it->second->bases[i]})});
+    out.fields.push_back({r.offsets[i], in.canonical(it->fields[i]), r.bit_fields[i]});
+  for (std::size_t i = 0; i < r.base_offsets.size(); ++i) out.bases.push_back({r.base_offsets[i], in.intern_type(ast::TClass{it->bases[i]})});
   class_layouts_[key] = out;
   return out;
 }
@@ -1027,14 +1098,40 @@ engine::query_task<UnitNonthrowingFunctions::Value> UnitNonthrowingFunctions::ru
   co_return functions;
 }
 
-engine::query_task<FunctionSource> FunctionSourceQ::run(engine::Ctx& cx, FnKey k) {
-  const TranslationUnit& tu = co_await cx.fetch<TuUnit>(k.tu);
-  FunctionSource out;
-  for (const FunctionDef& f : tu.functions)
-    if (f.entity == k.fn) out.def = f;
-  out.is_main = k.fn == tu.main;
-  irgen::TypeFacts types(*universe().in, unit_target(cx, k.tu));
-  for (const Entity& e : tu.entities) {
+namespace {
+template <class Pair>
+std::optional<std::uint32_t> indexed(const std::vector<Pair>& by_handle, EntityId e) {
+  auto it = std::ranges::lower_bound(by_handle, e, {}, &Pair::first);
+  if (it == by_handle.end() || it->first != e) return std::nullopt;
+  return it->second;
+}
+}  // namespace
+
+engine::query_task<UnitIndex> UnitIndexQ::run(engine::Ctx& cx, TuId tu) {
+  const TranslationUnit& u = co_await cx.fetch<TuUnit>(tu);
+  UnitIndex out;
+  for (std::uint32_t i = 0; i < u.functions.size(); ++i) out.functions.emplace_back(u.functions[i].entity, i);
+  for (std::uint32_t i = 0; i < u.entities.size(); ++i) out.entities.emplace_back(u.entities[i].id, i);
+  // Stable: equal handles keep the unit's order, so a lookup finds what a scan of it would.
+  for (auto* v : {&out.functions, &out.entities}) std::ranges::stable_sort(*v, {}, &std::pair<EntityId, std::uint32_t>::first);
+  co_return out;
+}
+
+engine::query_task<ShapeIndex> UnitShapeIndex::run(engine::Ctx& cx, TuId tu) {
+  const Shapes& shapes = co_await cx.fetch<UnitShapes>(tu);
+  ShapeIndex out;
+  for (std::uint32_t i = 0; i < shapes.classes.size(); ++i) out.classes.emplace_back(shapes.classes[i].entity, i);
+  for (std::uint32_t i = 0; i < shapes.enums.size(); ++i) out.enums.emplace_back(shapes.enums[i].entity, i);
+  // Stable: a lookup finds the first record of an entity, as the maps it replaces kept it.
+  for (auto* v : {&out.classes, &out.enums}) std::ranges::stable_sort(*v, {}, &std::pair<EntityId, std::uint32_t>::first);
+  co_return out;
+}
+
+engine::query_task<UnitFunctionFacts> UnitFunctionFactsQ::run(engine::Ctx& cx, TuId tu) {
+  const TranslationUnit& u = co_await cx.fetch<TuUnit>(tu);
+  UnitFunctionFacts out;
+  irgen::TypeFacts types(*universe().in, unit_target(cx, tu));
+  for (const Entity& e : u.entities) {
     if (!e.is_function) continue;
     if (e.is_constexpr) out.constexpr_functions.push_back(e.id);
     if (auto n = types.parameters_before_ellipsis(e.type)) out.variadic_functions.push_back({e.id, *n});
@@ -1044,60 +1141,80 @@ engine::query_task<FunctionSource> FunctionSourceQ::run(engine::Ctx& cx, FnKey k
   co_return out;
 }
 
+engine::query_task<FunctionSource> FunctionSourceQ::run(engine::Ctx& cx, FnKey k) {
+  auto [tu, index] = co_await cx.par_fetch(engine::q<TuUnit>{k.tu}, engine::q<UnitIndexQ>{k.tu});
+  FunctionSource out;
+  // The last definition, as a scan of the definitions in order would keep.
+  for (auto it = std::ranges::lower_bound(index.functions, k.fn, {}, &std::pair<EntityId, std::uint32_t>::first);
+       it != index.functions.end() && it->first == k.fn; ++it)
+    out.def = tu.functions[it->second];
+  out.is_main = k.fn == tu.main;
+  if (auto e = indexed(index.entities, k.fn)) {
+    const Entity& entity = tu.entities[*e];
+    out.declared = true;
+    out.specialization = entity.template_type.has_value();
+    out.scope = entity.scope;
+  }
+  if (out.def.unwind == UnwindEligibility::hosted_cleanup) out.cleanup_resume = tu.cleanup_resume;
+  co_return out;
+}
+
 // `Facts` for `function_ir`: types and integer constants from the interners, string literals from
 // `Constants`, declarations from the function's source.
 class UnitFacts : public irgen::TypeFacts {
  public:
-  UnitFacts(const FunctionSource& src, const Shapes& shapes, const ast::Target& target)
-      : TypeFacts(*universe().in, target), src_(&src) {
-    enum_underlying = [&shapes](EntityId e) {
-      for (const EnumShape& s : shapes.enums)
-        if (s.entity == e) return s.underlying;
+  UnitFacts(const FunctionSource& src, const UnitFunctionFacts& unit, const Shapes& shapes, const ShapeIndex& index,
+            const ast::Target& target)
+      : TypeFacts(*universe().in, target), src_(&src), unit_(&unit) {
+    // Looked up through the unit's index, not by a scan of its classes per question (#938).
+    enum_underlying = [&shapes, &index](EntityId e) {
+      if (const EnumShape* s = enum_shape(shapes, index, e)) return s->underlying;
       return ast::builtin(*universe().in, ast::Builtin::int_);
     };
-    bases_of = [&shapes](EntityId c) {
-      for (const ClassShape& s : shapes.classes)
-        if (s.entity == c) return s.bases;
+    bases_of = [&shapes, &index](EntityId c) {
+      if (const ClassShape* s = class_shape(shapes, index, c)) return s->bases;
       return std::vector<EntityId>{};
     };
-    bit_field_width = [&shapes](EntityId c, std::uint32_t field) -> std::uint8_t {
-      for (const ClassShape& shape : shapes.classes)
-        if (shape.entity == c && field < shape.bit_widths.size()) return shape.bit_widths[field];
-      return 0;
+    bit_field_width = [&shapes, &index](EntityId c, std::uint32_t field) -> std::uint8_t {
+      const ClassShape* s = class_shape(shapes, index, c);
+      return s && field < s->bit_widths.size() ? s->bit_widths[field] : 0;
     };
-    field_type = [&shapes](EntityId c, std::uint32_t field) -> std::optional<QualType> {
-      for (const ClassShape& shape : shapes.classes)
-        if (shape.entity == c && field < shape.fields.size()) return shape.fields[field];
+    field_type = [&shapes, &index](EntityId c, std::uint32_t field) -> std::optional<QualType> {
+      const ClassShape* s = class_shape(shapes, index, c);
+      if (s && field < s->fields.size()) return s->fields[field];
       return std::nullopt;
     };
-    potentially_overlapping_field = [&shapes](EntityId c, std::uint32_t field) {
-      for (const ClassShape& shape : shapes.classes)
-        if (shape.entity == c) return std::ranges::binary_search(shape.overlapping_fields, field);
-      return false;
+    potentially_overlapping_field = [&shapes, &index](EntityId c, std::uint32_t field) {
+      const ClassShape* s = class_shape(shapes, index, c);
+      return s && std::ranges::binary_search(s->overlapping_fields, field);
     };
   }
   ConstId string_address(ConstId c) { return universe().consts->address_of(c); }
-  bool is_constexpr(EntityId e) { return std::ranges::binary_search(src_->constexpr_functions, e); }
+  bool is_constexpr(EntityId e) { return std::ranges::binary_search(unit_->constexpr_functions, e); }
   bool is_main(EntityId e) { return e != EntityId::none && e == src_->def.entity && src_->is_main; }
   std::optional<std::uint32_t> ellipsis_after(EntityId e) {
-    auto it = std::ranges::lower_bound(src_->variadic_functions, e, {}, &VariadicFunction::entity);
-    if (it == src_->variadic_functions.end() || it->entity != e) return std::nullopt;
+    auto it = std::ranges::lower_bound(unit_->variadic_functions, e, {}, &VariadicFunction::entity);
+    if (it == unit_->variadic_functions.end() || it->entity != e) return std::nullopt;
     return it->parameters;
   }
 
  private:
   const FunctionSource* src_;
+  const UnitFunctionFacts* unit_;
 };
 static_assert(irgen::Facts<UnitFacts>);
 
 engine::query_task<Generated> FunctionGen::run(engine::Ctx& cx, FnKey k) {
-  const FunctionSource& src = co_await cx.fetch<FunctionSourceQ>(k);
-  const Shapes& shapes = co_await cx.fetch<UnitShapes>(k.tu);
-  UnitFacts facts(src, shapes, unit_target(cx, k.tu));
+  auto [src, unit, shapes, shape_index] =
+      co_await cx.par_fetch(engine::q<FunctionSourceQ>{k}, engine::q<UnitFunctionFactsQ>{k.tu}, engine::q<UnitShapes>{k.tu},
+                            engine::q<UnitShapeIndex>{k.tu});
+  const auto* config = unit_config(cx, k.tu);
+  UnitFacts facts(src, unit, shapes, shape_index, config ? *config->target : *universe().target);
   const FunctionDef& d = src.def;
   irgen::FunctionInput input{d.entity, d.decl, d.body, d.item, d.body_offset};
+  input.exceptions_enabled = !config || config->exceptions_enabled;
   input.this_type = d.this_type;
-  input.root_destructor_table = d.root_destructor_table;
+  input.destructor_table = d.destructor_table;
   const auto& seqs = universe().in->seqs;
   const auto locals = d.body.locals;
   for (std::uint32_t index = 0, count = seqs.size(locals); index < count; ++index) {
@@ -1112,11 +1229,16 @@ engine::query_task<Generated> FunctionGen::run(engine::Ctx& cx, FnKey k) {
   input.guard_release = d.guard_release;
   input.atexit = d.atexit;
   input.dso = d.dso;
-  input.hosted_catch_all = d.unwind == UnwindEligibility::hosted_catch_all;
+  if (d.unwind == UnwindEligibility::hosted_catch) {
+    input.hosted_catch = true;
+    input.catch_int_binding = d.hosted_catch->int_binding;
+  }
   const bool linux = facts.target().triple == ast::x86_64_linux.triple;
-  if (linux) input.unwind_cleanup_checks = irgen::UnwindCleanupChecks::all_calls;
-  else if (facts.target().triple == ast::aarch64_darwin.triple)
-    input.unwind_cleanup_checks = irgen::UnwindCleanupChecks::aggregate_defaults;
+  if (input.exceptions_enabled) {
+    if (linux) input.unwind_cleanup_checks = irgen::UnwindCleanupChecks::all_calls;
+    else if (facts.target().triple == ast::aarch64_darwin.triple)
+      input.unwind_cleanup_checks = irgen::UnwindCleanupChecks::aggregate_defaults;
+  }
   if (d.constructor_cleanup != EntityId::none && d.unwind == UnwindEligibility::none) {
     auto error = co_await located_error(cx, k.tu, ast::Loc{d.item, d.body_offset},
                                        "unsupported unwind from a union constructor with a nontrivial active member");
@@ -1258,17 +1380,19 @@ engine::query_task<Lowered> Lower::run(engine::Ctx& cx, FnKey k) {
   const ast::Target& target = unit_target(cx, k.tu);
   const bool linux = object_target(target) == obj::target::x86_64_linux;
   if (!f.body && !linux) co_return Lowered{std::nullopt, {}, f.error};
-  QueryLayout layout(cx, co_await cx.fetch<UnitShapes>(k.tu), target);
+  auto [shapes, shape_index] = co_await cx.par_fetch(engine::q<UnitShapes>{k.tu}, engine::q<UnitShapeIndex>{k.tu});
+  QueryLayout layout(cx, shapes, shape_index, target);
   ir::LowerConfig config;
   if (linux) {
     const ast::Interners& in = *universe().in;
-    const FunctionDef& def = (co_await cx.fetch<FunctionSourceQ>(k)).def;
+    const FunctionSource& src = co_await cx.fetch<FunctionSourceQ>(k);
+    const FunctionDef& def = src.def;
+    // The callees' records below still read the whole unit (#943).
     const TranslationUnit& tu = co_await cx.fetch<TuUnit>(k.tu);
     auto ordinary_free_function = [&](const Entity& e) {
       return !e.template_type && !layout.is_class(e.scope);
     };
-    auto fn = std::ranges::find(tu.entities, k.fn, &Entity::id);
-    bool ordinary = !def.this_type && fn != tu.entities.end() && ordinary_free_function(*fn);
+    bool ordinary = !def.this_type && src.declared && !src.specialization && !layout.is_class(src.scope);
     QualType type = def.body.deduced ? def.body.deduced_type : def.decl.type;
     if (auto error = linux_signature_error(in, layout, type, LinuxSignatureUse::definition, ordinary); !error.empty()) {
       auto message = std::format("x86-64 System V ABI: {}", error);
@@ -1322,15 +1446,14 @@ engine::query_task<Lowered> Lower::run(engine::Ctx& cx, FnKey k) {
     }
     config.sysv_amd64 = true;
     if (def.unwind == UnwindEligibility::cleanup_free_with_throw) config.int_throw = tu.int_throw;
-    if (def.unwind == UnwindEligibility::hosted_catch_all) config.catch_all = tu.catch_all;
+    if (def.unwind == UnwindEligibility::hosted_catch) config.catch_all = tu.catch_runtime;
     if (def.unwind == UnwindEligibility::hosted_cleanup) config.cleanup_resume = tu.cleanup_resume;
     // Extend outgoing narrow results for interoperability. Lowering truncates incoming results
     // to the declared width, as the System V AMD64 psABI §3.2.3 leaves excess bits unspecified.
     config.min_result_bits = 32;
   } else if (std::ranges::contains(f.body->nodes, ir::Op::invoke, &ir::Node::op)) {
-    const FunctionDef& def = (co_await cx.fetch<FunctionSourceQ>(k)).def;
-    if (def.unwind == UnwindEligibility::hosted_cleanup)
-      config.cleanup_resume = (co_await cx.fetch<TuUnit>(k.tu)).cleanup_resume;
+    const FunctionSource& src = co_await cx.fetch<FunctionSourceQ>(k);
+    if (src.def.unwind == UnwindEligibility::hosted_cleanup) config.cleanup_resume = src.cleanup_resume;
   }
   auto l2 = ir::lower(*f.body, k.fn, layout, config);
   if (!l2) {
@@ -1371,13 +1494,13 @@ struct TuSymbolAddresses {
   static engine::SourceSpan trace_span(const engine::Db& db, const Key& k) { return tu_span(db, k); }
   using Value = SymbolAddresses;
   static engine::query_task<Value> run(engine::Ctx& cx, TuId tu) {
-    const TranslationUnit& u = co_await cx.fetch<TuUnit>(tu);
+    auto [u, index] = co_await cx.par_fetch(engine::q<TuUnit>{tu}, engine::q<UnitIndexQ>{tu});
     const bool linux = object_target(unit_target(cx, tu)) == obj::target::x86_64_linux;
     Value out;
     auto add = [&](EntityId id) {
       if (linux) {
-        auto e = std::ranges::find(u.entities, id, &Entity::id);
-        if (e == u.entities.end() || !e->has_local_binding()) return;
+        auto e = indexed(index.entities, id);
+        if (!e || !u.entities[*e].has_local_binding()) return;
       }
       out.direct.push_back(id);
     };
@@ -1394,15 +1517,51 @@ struct TuSymbolAddresses {
   }
 };
 
+// How a function's code addresses one entity it refers to: a cell per entity of the unit, so an
+// edit that changes the unit's symbol list (a new definition, a variable's initializer, which is
+// part of its identity) re-checks these answers instead of every function's unit (#938).
+enum class SymbolAccess : std::uint8_t { other, direct, got };
+struct SymbolKey {
+  TuId tu;
+  EntityId entity = EntityId::none;
+  bool operator==(const SymbolKey&) const = default;
+};
+void trace_describe(std::string& out, const SymbolKey& k) {  // for traces (#245)
+  trace_describe(out, k.tu);
+  out += ", ";
+  trace_describe(out, FnKey{k.tu, k.entity});
+}
+struct SymbolAccessQ {
+  using Key = SymbolKey;
+  static engine::SourceSpan trace_span(const engine::Db& db, const Key& k) { return tu_span(db, k.tu); }
+  using Value = SymbolAccess;
+  static engine::query_task<Value> run(engine::Ctx& cx, SymbolKey k) {
+    const SymbolAddresses& symbols = co_await cx.fetch<TuSymbolAddresses>(k.tu);
+    if (std::ranges::binary_search(symbols.direct, k.entity)) co_return SymbolAccess::direct;
+    if (std::ranges::binary_search(symbols.got, k.entity)) co_return SymbolAccess::got;
+    co_return SymbolAccess::other;
+  }
+};
+
 engine::query_task<UnitRef> UnitQ::run(engine::Ctx& cx, FnKey k) {
-  auto [lowered, symbols] = co_await cx.par_fetch(engine::q<Lower>{k}, engine::q<TuSymbolAddresses>{k.tu});
+  const Lowered& lowered = co_await cx.fetch<Lower>(k);
   if (!lowered.body) co_return UnitRef{std::nullopt, lowered.error};
-  // Which references can be addressed directly, including the function's string literals.
+  // Which references can be addressed directly, including the function's string literals. The
+  // others are asked one entity at a time, in the order the body first refers to them.
   OptUnit u{*lowered.body, {}, {}};
-  for (auto [e, op] : references(u.body.f)) {
-    if (std::ranges::binary_search(symbols.direct, e) || std::ranges::contains(lowered.strings, e, &StringUse::entity))
+  const std::vector<SymbolReference> refs = references(u.body.f);
+  std::vector<SymbolKey> asked;
+  for (const SymbolReference& r : refs)
+    if (!std::ranges::contains(lowered.strings, r.entity, &StringUse::entity) &&
+        !std::ranges::contains(asked, r.entity, &SymbolKey::entity))
+      asked.push_back({k.tu, r.entity});
+  const auto access = co_await cx.par_map<SymbolAccessQ>(asked);
+  for (auto [e, op] : refs) {
+    auto at = std::ranges::find(asked, e, &SymbolKey::entity);
+    const SymbolAccess a = at == asked.end() ? SymbolAccess::direct : access[at - asked.begin()].get();
+    if (a == SymbolAccess::direct)
       u.local.push_back(e);
-    else if (op == l2::Op::symbol && std::ranges::binary_search(symbols.got, e))
+    else if (op == l2::Op::symbol && a == SymbolAccess::got)
       u.got_symbols.push_back(e);
   }
   for (auto* ids : {&u.local, &u.got_symbols}) {
@@ -1512,12 +1671,20 @@ struct LinuxFunction {
   bool weak;
   bool cleanup_free_unwind;
   std::string_view base_object_name;
+  bool catch_int;
 };
 
-struct LinuxVirtualTable {
+struct VirtualTable {
   EntityId entity;
   std::string type_encoding;
-  std::array<EntityId, 2> slots;
+  std::span<const EntityId> slots;
+  std::optional<std::string> base_encoding;
+  bool peer_base_rtti = false;
+};
+
+struct KeylessTypeInfo {
+  EntityId entity;
+  std::string type_encoding;
 };
 
 obj::reloc_kind linux_relocation(x86_64::RelocKind kind) {
@@ -1529,10 +1696,108 @@ obj::reloc_kind linux_relocation(x86_64::RelocKind kind) {
   std::unreachable();
 }
 
+constexpr auto rtti_pointer_size = 8;
+constexpr auto rtti_address_point = 2 * rtti_pointer_size;
+constexpr std::string_view class_type_info = "_ZTVN10__cxxabiv117__class_type_infoE";
+constexpr std::string_view si_class_type_info = "_ZTVN10__cxxabiv120__si_class_type_infoE";
+
+void emit_rtti_pointer(obj::object& o, std::uint32_t index, std::uint32_t symbol, std::int64_t addend = 0) {
+  auto& section = o.sections[index];
+  section.emit64(0);
+  section.relocate(obj::reloc_kind::abs64, symbol, addend);
+}
+
+// The name keeps its own vague linkage even when the table and descriptor have a unique
+// owner (Itanium C++ ABI §5.2.4).
+std::uint32_t emit_type_info_name(obj::object& o, std::uint32_t names, const std::string& encoding, obj::binding bind) {
+  const bool elf = o.arch == obj::target::x86_64_linux;
+  const std::string name = (elf ? "_ZTS" : "__ZTS") + encoding;
+  const auto symbol = o.add_symbol({.name = name, .bind = bind, .section = names, .offset = o.sections[names].size(),
+                                    .weak = true, .object_size = encoding.size() + 1});
+  if (elf) o.comdat_groups.push_back({name, {names}});
+  o.sections[names].emit(encoding);
+  o.sections[names].bytes.push_back(0);
+  return symbol;
+}
+
+void emit_keyless_type_info(obj::object& o, std::uint32_t pointers, std::uint32_t names,
+                           std::uint32_t symbol, const std::string& encoding) {
+  const bool elf = o.arch == obj::target::x86_64_linux;
+  const auto bind = elf ? obj::binding::global : obj::binding::hidden;
+  auto& descriptor = o.symbols[symbol];
+  descriptor.bind = bind;
+  descriptor.section = pointers;
+  descriptor.offset = o.sections[pointers].size();
+  descriptor.weak = true;
+  descriptor.object_size = 2 * rtti_pointer_size;
+  if (elf) o.comdat_groups.push_back({descriptor.name, {pointers}});
+  const auto name = emit_type_info_name(o, names, encoding, bind);
+  const auto runtime_table = elf ? o.reference(class_type_info) : o.reference("_" + std::string(class_type_info));
+  emit_rtti_pointer(o, pointers, runtime_table, rtti_address_point);
+  emit_rtti_pointer(o, pointers, name, elf ? 0 : std::numeric_limits<std::int64_t>::min());
+}
+
+// Itanium C++ ABI §2.5.2 and §2.9.5: a primary table has zero offset-to-top, its RTTI pointer
+// and the function slots. A single-inheritance descriptor adds the base RTTI pointer to the
+// runtime address point and type name fields. `table_symbol` (already named by the code that
+// uses it) and `slots` index `o.symbols`. On ELF the vague-linkage objects are COMDAT groups. On
+// Mach-O the names carry the C prefix `_`, the data joins the object's `__DATA,__const` and
+// `__TEXT,__const`, and the vague-linkage objects are weak definitions. There the base class's
+// descriptor and name, which every user emits, follow Apple's arm64 convention for non-unique
+// RTTI: private external, with bit 63 set in the descriptor's name pointer so that `type_info`
+// compares those names by content across images.
+void emit_virtual_table(obj::object& o, const VirtualTable& table, std::uint32_t table_symbol,
+                        std::span<const std::uint32_t> slots, std::optional<std::uint32_t> emitted_base = std::nullopt) {
+  using S = obj::standard_section;
+  const bool elf = o.arch == obj::target::x86_64_linux;
+  const std::string prefix = elf ? "" : "_";
+  // ELF gives each object its own section; Mach-O keeps one section of each kind, which the
+  // linker splits at symbols (MH_SUBSECTIONS_VIA_SYMBOLS, set for the weak definitions).
+  auto section = [&](S kind) {
+    const obj::section standard = obj::section::standard(kind);
+    if (!elf)
+      for (std::uint32_t i = 0; i < o.sections.size(); ++i)
+        if (o.sections[i].segment == standard.segment && o.sections[i].name == standard.name) return i;
+    return o.add_section(standard);
+  };
+  const std::uint64_t table_size = rtti_address_point + rtti_pointer_size * slots.size();
+  const auto pointers = section(S::data_const);
+  o.sections[pointers].align(3);
+  const std::uint64_t table_offset = o.sections[pointers].size();
+  // Code relocations already name this symbol by index. Define the existing entry.
+  o.symbols[table_symbol].section = pointers;
+  o.symbols[table_symbol].offset = table_offset;
+  o.symbols[table_symbol].object_size = table_size;
+  const auto typeinfo = o.add_symbol({.name = prefix + "_ZTI" + table.type_encoding, .section = pointers,
+                                      .offset = table_offset + table_size,
+                                      .object_size = table.base_encoding ? 3 * rtti_pointer_size : 2 * rtti_pointer_size});
+  const auto name_object = emit_type_info_name(o, section(S::rodata), table.type_encoding, obj::binding::global);
+  o.sections[pointers].emit64(0);  // offset-to-top
+  emit_rtti_pointer(o, pointers, typeinfo);
+  for (std::uint32_t slot : slots) emit_rtti_pointer(o, pointers, slot);
+  const auto runtime_type = table.base_encoding ? si_class_type_info : class_type_info;
+  emit_rtti_pointer(o, pointers, o.reference(prefix + std::string(runtime_type)), rtti_address_point);
+  emit_rtti_pointer(o, pointers, name_object);
+  if (const auto& base = table.base_encoding) {
+    if (table.peer_base_rtti) {
+      emit_rtti_pointer(o, pointers, o.reference(prefix + "_ZTI" + *base));
+      return;
+    }
+    if (emitted_base) {
+      emit_rtti_pointer(o, pointers, *emitted_base);
+      return;
+    }
+    const auto base_pointers = elf ? o.add_section(S::data_const) : pointers;
+    const auto base_typeinfo = o.add_symbol({.name = prefix + "_ZTI" + *base, .section = std::nullopt});
+    emit_rtti_pointer(o, pointers, base_typeinfo);
+    emit_keyless_type_info(o, base_pointers, section(S::rodata), base_typeinfo, *base);
+  }
+}
+
 std::expected<obj::object, aarch64::CodegenError> assemble_linux(
     const std::string& name, std::span<const LinuxFunction> functions,
     std::span<const aarch64::DataDef> data, std::span<const aarch64::Symbol> symbols,
-    const std::optional<LinuxVirtualTable>& table) {
+    const std::optional<VirtualTable>& table, std::span<const KeylessTypeInfo> keyless_type_info) {
   obj::object o;
   o.name = name;
   o.arch = obj::target::x86_64_linux;
@@ -1544,7 +1809,7 @@ std::expected<obj::object, aarch64::CodegenError> assemble_linux(
   std::optional<std::uint32_t> data_const;
   if (!functions.empty()) {
     const std::uint32_t text = o.add_section(obj::standard_section::text);
-    std::optional<std::uint32_t> frames, exception_tables, personality_cell;
+    std::optional<std::uint32_t> frames, exception_tables, personality_cell, int_type_cell;
     const bool has_handlers = std::ranges::any_of(functions, [](const LinuxFunction& f) {
       return f.code->unwind_sites.has_value();
     });
@@ -1557,6 +1822,11 @@ std::expected<obj::object, aarch64::CodegenError> assemble_linux(
       auto& pointers = o.sections[*data_const];
       pointers.emit64(0);
       pointers.relocate(obj::reloc_kind::abs64, o.reference("__gxx_personality_v0"));
+      if (std::ranges::any_of(functions, &LinuxFunction::catch_int)) {
+        int_type_cell = o.define({}, obj::binding::local, *data_const);
+        pointers.emit64(0);
+        pointers.relocate(obj::reloc_kind::abs64, o.reference("_ZTIi"));
+      }
     }
 
     x86_64::EhFrameCies cies;
@@ -1588,13 +1858,14 @@ std::expected<obj::object, aarch64::CodegenError> assemble_linux(
         std::optional<std::uint32_t> lsda_anchor;
         if (f.code->unwind_sites) {
           if (f.weak) return std::unexpected(aarch64::CodegenError{f.entity, "hosted unwind frames require strong definitions"});
-          auto lsda = x86_64::exception_lsda(*f.code);
+          auto lsda = x86_64::exception_lsda(*f.code, f.catch_int);
           if (!lsda) return std::unexpected(aarch64::CodegenError{f.entity, lsda.error()});
           auto& tables = o.sections[*exception_tables];
           if (lsda->size() + tables.size() > std::numeric_limits<std::uint32_t>::max())
             return std::unexpected(aarch64::CodegenError{f.entity, "the exception tables exceed the object offset limit"});
           lsda_anchor = o.define({}, obj::binding::local, *exception_tables);
           tables.emit(*lsda);
+          if (f.catch_int) tables.relocate(obj::reloc_kind::x86_64_pc32, *int_type_cell);
         }
         obj::section& frame = o.sections[*frames];
         auto fields = x86_64::append_eh_frame(frame.bytes, cies, *f.code);
@@ -1637,45 +1908,26 @@ std::expected<obj::object, aarch64::CodegenError> assemble_linux(
       }
     }
   }
+  // If a cast and a separately owned table use the same base, both reference the cast's symbol.
+  std::optional<std::uint32_t> emitted_base;
+  for (const auto& typeinfo : keyless_type_info) {
+    const auto symbol = symbol_of.find(typeinfo.entity);
+    if (symbol == symbol_of.end()) return missing(typeinfo.entity);
+    const auto pointers = o.add_section(S::data_const);
+    const auto names = o.add_section(S::rodata);
+    emit_keyless_type_info(o, pointers, names, symbol->second, typeinfo.type_encoding);
+    if (table && table->base_encoding == typeinfo.type_encoding) emitted_base = symbol->second;
+  }
   if (table) {
     const auto symbol = symbol_of.find(table->entity);
     if (symbol == symbol_of.end()) return missing(table->entity);
-    // Itanium C++ ABI §2.5.2 and §2.9.5: the root table has zero offset-to-top, a pointer
-    // to its RTTI, then the function pointers. The root descriptor points to the runtime
-    // __class_type_info table's address point and to the NUL-terminated type encoding.
-    const auto pointers = o.add_section(S::data_const);
-    const auto names = o.add_section(S::rodata);
-    constexpr auto pointer_size = 8;
-    constexpr auto address_point = 2 * pointer_size;
-    const std::uint64_t table_size = address_point + pointer_size * table->slots.size();
-    const std::string type_name = "_ZTS" + table->type_encoding;
-    // Code relocations already name this symbol by index. Define the existing entry.
-    o.symbols[symbol->second].section = pointers;
-    o.symbols[symbol->second].object_size = table_size;
-    const auto typeinfo = o.add_symbol({.name = "_ZTI" + table->type_encoding, .section = pointers,
-                                        .offset = table_size, .object_size = 2 * pointer_size});
-    const auto name_object = o.add_symbol({.name = type_name, .section = names, .weak = true,
-                                           .object_size = table->type_encoding.size() + 1});
-    // The name keeps its own vague linkage even when the table and descriptor have a unique
-    // owner (Itanium C++ ABI §5.2.4).
-    o.comdat_groups.push_back({type_name, {names}});
-    o.sections[names].emit(table->type_encoding);
-    o.sections[names].bytes.push_back(0);
-
-    auto& section = o.sections[pointers];
-    auto pointer = [&](std::uint32_t symbol, std::int64_t addend = 0) {
-      section.emit64(0);
-      section.relocate(obj::reloc_kind::abs64, symbol, addend);
-    };
-    section.emit64(0);  // offset-to-top
-    pointer(typeinfo);
+    std::vector<std::uint32_t> slots;
     for (EntityId slot : table->slots) {
       const auto target = symbol_of.find(slot);
       if (target == symbol_of.end()) return missing(slot);
-      pointer(target->second);
+      slots.push_back(target->second);
     }
-    pointer(o.reference("_ZTVN10__cxxabiv117__class_type_infoE"), address_point);
-    pointer(name_object);
+    emit_virtual_table(o, *table, symbol->second, slots, emitted_base);
   }
   return o;
 }
@@ -1696,6 +1948,11 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
     // Its diagnostics are the front end's (`TuFront`); this only keeps an object out of a link.
     errors.push_back({std::nullopt, "the translation unit has errors"});
     co_return out;
+  }
+  if (tu.unsupported_typed_dynamic_cast) {
+    errors.push_back({tu.unsupported_typed_dynamic_cast,
+                      "typed dynamic_cast requires a supported default-visible root and its direct public peer-owned derived class on Linux x86-64"});
+    co_return co_await locate_errors(cx, id, std::move(out));
   }
   if (tu.virtual_emission_blocked) {
     errors.push_back({tu.virtual_declaration, "native output for a translation unit with virtual member functions is not supported yet"});
@@ -1728,11 +1985,14 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
 
   // Variables: their initial bytes, by what they hold ([basic.start.static]).
   std::vector<aarch64::DataDef> data;
-  const Shapes& shapes = co_await cx.fetch<UnitShapes>(id);
+  auto [shapes, shape_index] = co_await cx.par_fetch(engine::q<UnitShapes>{id}, engine::q<UnitShapeIndex>{id});
+  // One layout for every variable, which keeps its class layouts between them (#938).
+  QueryLayout layout(cx, shapes, shape_index, target);
+  std::size_t strings_seen = 0;
   for (const Variable& v : tu.variables) {
-    QueryLayout layout(cx, shapes, target);
     auto b = initial_bytes(in, layout, v.type, v.init);
-    use(layout.strings());
+    use(layout.strings().subspan(strings_seen));
+    strings_seen = layout.strings().size();
     if (!b) {
       errors.push_back({v.at, std::format("{} is not supported yet", b.error())});
       continue;
@@ -1852,7 +2112,8 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
     }
     return n;
   };
-  std::optional<LinuxVirtualTable> virtual_table;
+  std::optional<VirtualTable> virtual_table;
+  std::vector<KeylessTypeInfo> keyless_type_info;
   std::vector<const Entity*> locals;  // named after their functions, below
   std::map<std::uint32_t, std::string> mangled;  // by function entity
   std::map<EntityId, std::string> base_object_names;
@@ -1862,21 +2123,37 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
       locals.push_back(&e);
       continue;
     }
-    if (e.special == Special::virtual_table) {
+    if (e.special == Special::virtual_table || e.special == Special::type_info) {
       auto encoding = mangled_type(in, in.intern_type(ast::TClass{e.scope}), names);
+      const bool table = e.special == Special::virtual_table;
       if (!encoding) {
-        errors.push_back({e.at, std::format("the virtual table's type name: {} is not supported yet", encoding.error())});
+        errors.push_back({e.at, std::format("the {} type name: {} is not supported yet",
+                                            table ? "virtual table's" : "RTTI object's", encoding.error())});
         continue;
       }
-      symbols.push_back({e.id, "_ZTV" + *encoding, obj::binding::global});
-      if (const auto& owned = tu.owned_virtual_table; owned && owned->entity == e.id)
-        virtual_table = LinuxVirtualTable{e.id, std::move(*encoding), owned->slots};
+      symbols.push_back({e.id, std::format("{}{}{}", linux ? "" : "_", table ? "_ZTV" : "_ZTI", *encoding),
+                         obj::binding::global});
+      if (const auto& owned = tu.owned_virtual_table; table && owned && owned->entity == e.id) {
+        std::optional<std::string> base;
+        if (owned->primary_base != EntityId::none) {
+          auto base_encoding = mangled_type(in, in.intern_type(ast::TClass{owned->primary_base}), names);
+          if (!base_encoding) {
+            errors.push_back({e.at, std::format("the virtual table's base type name: {} is not supported yet",
+                                                base_encoding.error())});
+            continue;
+          }
+          base = std::move(*base_encoding);
+        }
+        virtual_table = VirtualTable{e.id, std::move(*encoding), owned->slots, std::move(base), owned->peer_base_rtti};
+      }
+      if (!table && tu.keyless_type_info.contains(e.id)) keyless_type_info.push_back({e.id, std::move(*encoding)});
       continue;
     }
     // Calls still name the complete-object entry. An eligible definition also emits C2 or D2
     // for a caller constructing or destroying a base subobject (Itanium ABI §5.1.4.3, §5.2.5).
     const std::string_view entry = e.special == Special::constructor ? "C1" :
                                    e.special == Special::destructor ? "D1" :
+                                   e.special == Special::base_object_destructor ? "D2" :
                                    e.special == Special::deleting_destructor ? "D0" : std::string_view(e.name);
     TemplateSpec spec{e.template_type.value_or(e.type), e.template_args, e.template_params, e.template_same_heads};
     const auto encode = [&](std::string_view name) {
@@ -1898,7 +2175,7 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
     obj::binding binding = obj::binding::global;
     if (e.has_local_binding()) binding = obj::binding::local;
     else if (e.hidden) binding = obj::binding::hidden;
-    if (linux && tu.base_object_variants.contains(e.id)) {
+    if (tu.base_object_variants.contains(e.id)) {
       auto base_name = encode(e.special == Special::constructor ? "C2" : "D2");
       if (!base_name) {
         errors.push_back({e.at, std::format("the base-object name of '{}': {} is not supported yet", e.name, base_name.error())});
@@ -1945,9 +2222,11 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
         const auto& def = tu.functions[i];
         const auto base_name = base_object_names.find(def.entity);
         const std::string_view name = base_name == base_object_names.end() ? std::string_view{} : base_name->second;
-        code.push_back({fns[i].fn, &*ms[i].get().linux_code, def.coalesced, def.unwind != UnwindEligibility::none, name});
+        const bool catch_int = def.unwind == UnwindEligibility::hosted_catch && def.hosted_catch->int_binding.has_value();
+        const bool weak = def.coalesced || def.explicit_weak;
+        code.push_back({fns[i].fn, &*ms[i].get().linux_code, weak, def.unwind != UnwindEligibility::none, name, catch_int});
       }
-      return assemble_linux(tu.name, code, data, symbols, virtual_table);
+      return assemble_linux(tu.name, code, data, symbols, virtual_table, keyless_type_info);
     }
     std::vector<aarch64::CompiledFunction> code;
     for (std::size_t i = 0; i < fns.size(); ++i) {
@@ -1956,7 +2235,39 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
                       .cleanup_free_unwind = def.unwind == UnwindEligibility::cleanup_free,
                       .weak = def.coalesced});
     }
-    return aarch64::assemble(tu.name, code, data, symbols);
+    auto o = aarch64::assemble(tu.name, code, data, symbols);
+    if (!o) return o;
+    // The base-object entries share their complete-object definitions' code (Itanium C++ ABI
+    // §5.1.4.3): a second name at the same place.
+    for (const auto& [entity, base_name] : base_object_names) {
+      const auto named = std::ranges::find(symbols, entity, &aarch64::Symbol::entity);
+      const auto complete = named == symbols.end() ? o->symbols.end() :
+          std::ranges::find_if(o->symbols, [&](const obj::symbol& s) { return s.defined() && s.name_view() == named->name; });
+      if (complete == o->symbols.end()) continue;
+      obj::symbol alias = *complete;
+      alias.name = base_name;
+      o->add_symbol(std::move(alias));
+    }
+    if (!virtual_table) return o;
+    // The table and its slots by name: the code may or may not have referred to them.
+    auto symbol = [&](EntityId e) -> std::expected<std::uint32_t, aarch64::CodegenError> {
+      const auto named = std::ranges::find(symbols, e, &aarch64::Symbol::entity);
+      if (named == symbols.end())
+        return std::unexpected(aarch64::CodegenError{e, std::format("@{} has no symbol name", ir::raw(e))});
+      for (std::uint32_t i = 0; i < o->symbols.size(); ++i)
+        if (o->symbols[i].name_view() == named->name) return i;
+      return o->reference(named->name);
+    };
+    const auto table = symbol(virtual_table->entity);
+    if (!table) return std::expected<obj::object, aarch64::CodegenError>(std::unexpected(table.error()));
+    std::vector<std::uint32_t> slots;
+    for (EntityId slot : virtual_table->slots) {
+      const auto s = symbol(slot);
+      if (!s) return std::expected<obj::object, aarch64::CodegenError>(std::unexpected(s.error()));
+      slots.push_back(*s);
+    }
+    emit_virtual_table(*o, *virtual_table, *table, slots);
+    return o;
   }();
   if (!o) {
     std::optional<ast::Loc> at;

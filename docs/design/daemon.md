@@ -448,6 +448,9 @@ connection:
 - Diagnostics are published per file from the editor view's `tu(TU)`, debounced after edits.
 - A file's TU and command line come from the `compile` requests the daemon has served, then from
   `compile_commands.json` at the root. Open documents are eviction roots (§A6.2).
+  The command's `-nostdinc` flag omits automatic include directories during setup. The
+  editor and CLI use the same explicit directory options and cache by the effective
+  preprocessing configuration. [#251](https://github.com/yrashk/ycxx/issues/251)
 
 Rejected: an LSP server in the client process speaking a second protocol to the daemon. Every LSP
 request needs the engine, so the client would only translate, and a tunnel keeps one protocol.

@@ -103,10 +103,12 @@ int main() { return g() - 2; }
         # A second producer: the host compiler's peer, linked by both linkers.
         run(host_cxx, '-std=c++20', '-O0', '-c', odr / 'peer.cpp', '-o', 'host-peer.o')
         links('main.o', 'host-peer.o', args=('one', 'two'))
-        # An archive member, through the system linker (ycxx's Mach-O archive input is #388).
+        # An archive member, through both linkers.
         run(ar, 'crs', 'libinline.a', 'peer.o')
         run(host_cxx, 'main.o', 'libinline.a', '-o', 'host-program')
         run('./host-program', 'one', 'two')
+        run(ycxx, 'cxx', 'main.o', 'libinline.a', '-o', 'program')
+        run('./program', 'one', 'two')
 
         friend = fixtures / 'inline-friend'
         for name in ('main', 'peer'):
@@ -119,13 +121,16 @@ int main() { return g() - 2; }
         data = fixtures / 'inline-data'
         data_sections = {'__ZN4data11initializedE': '__DATA,__data', '__ZN4data16zero_initializedE': '__DATA,__data',
                          '__ZN4data9immutableE': '__TEXT,__const', '__ZN4data10redeclaredE': '__DATA,__data',
-                         '__ZN4data11specializedIiEE': '__DATA,__data'}
+                         '__ZN4data11specializedIiEE': '__DATA,__data', '__ZN6Record4seedE': '__TEXT,__const',
+                         '__ZN6Record10descriptorE': '__TEXT,__const'}
         for name in ('main', 'peer'):
             obj = f'data-{name}.o'
             compile(data / f'{name}.cpp', obj)
             listing = run(nm, '-m', obj)
             for symbol, section in data_sections.items():
                 assert re.search(rf'\({re.escape(section)}\) weak external {symbol}$', listing, re.M), (obj, symbol)
+            local = '__ZN12_GLOBAL__N_111LocalRecord4seedE'
+            assert re.search(rf'\(__TEXT,__const\) non-external {local}$', listing, re.M), (obj, local)
         links('data-main.o', 'data-peer.o')
         run(host_cxx, '-std=c++20', '-O0', '-c', data / 'peer.cpp', '-o', 'host-data-peer.o')
         links('data-main.o', 'host-data-peer.o')
@@ -186,22 +191,13 @@ int use() { return with_static() + with_lambda(1) + twice(2) + int(twice(2L)) + 
             (Path(temp) / f'{name}.cpp').write_text(text)
             compile(f'{name}.cpp', f'{name}.o')
         run(ycxx, 'cxx', 'strong1.o', 'strong2.o', '-o', 'program', status=1, error='duplicate symbol __Z8ordinaryi')
-        (Path(temp) / 'data-controls.cpp').write_text('''
-constexpr int ordinary_constant = 7;
-extern constexpr int external_constant = 9;
-static inline int local_inline = 11;
-int backing = 13;
-inline int* relocated = &backing;
-template<class T> inline int specialized = 17;
-template<> int specialized<int> = 19;
-struct NamedType {};
-template<> inline int specialized<NamedType> = 23;
-''')
-        compile('data-controls.cpp', 'data-controls.o')
+        compile(data / 'bindings.cpp', 'data-controls.o')
         table = symbols('data-controls.o')
-        for name in ('_ordinary_constant', '_local_inline'):
+        assert table['__ZN6Public6scalarE'] == weak, table['__ZN6Public6scalarE']
+        for name in ('_ordinary_constant', '_local_inline', '__ZN6Public1pE', '__ZN6Public1kE'):
             assert table[name] == ('non-external', True), (name, table[name])
-        for name in ('_external_constant', '_backing', '_relocated', '__Z11specializedIiE', '__Z11specializedI9NamedTypeE'):
+        for name in ('_external_constant', '_backing', '_relocated', '__ZN8Ordinary5valueE',
+                     '__Z11specializedIiE', '__Z11specializedI9NamedTypeE'):
             assert table[name] == strong, (name, table[name])
         # Without a weak definition the object makes no claim about splitting its sections.
         flags = run('otool', '-hv', 'strong2.o').splitlines()[-1]

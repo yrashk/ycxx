@@ -35,6 +35,9 @@ struct Event {
   std::int64_t peak_bytes = 0;
   std::int64_t retained_bytes = 0;
   engine::SourceSpan span;  // where in the source the cell is (#638); empty file: none
+  // A live trace's start of a frame (#939): it is running, and its outcome, end and memory come
+  // with its end. A running event's `end_ns` is its start until a live view moves it to now.
+  bool running = false;
   bool operator==(const Event&) const = default;
 };
 
@@ -162,6 +165,13 @@ std::optional<Outcome> outcome_named(std::string_view s) {
   return std::nullopt;
 }
 
+// A cell as shown, running or settled (#939): its glyph, name and colors. A running cell is bold
+// orange, `▶`.
+inline constexpr std::string_view running_sgr = "1;38;5;208";
+constexpr std::string_view state_glyph(const Event& e, bool unicode) { return e.running ? (unicode ? "▶" : ">") : outcome_glyph(e.outcome, unicode); }
+constexpr std::string_view state_name(const Event& e) { return e.running ? "running" : outcome_name(e.outcome); }
+constexpr std::string_view state_meaning(const Event& e) { return e.running ? "started, not ended yet" : outcome_meaning(e.outcome); }
+
 // `812ns`, `41µs`, `1.24ms`, `3.40s`.
 std::string format_duration(std::uint64_t ns) {
   if (ns < 1'000) return std::format("{}ns", ns);
@@ -220,7 +230,9 @@ constexpr bool settles(Outcome o) {
   return o == Outcome::executed || o == Outcome::cutoff || o == Outcome::verified || o == Outcome::durable || o == Outcome::input;
 }
 // What a cell retains as sums count it: once, where it settles, never below zero.
-std::int64_t counted_retained(const Event& e) { return settles(e.outcome) ? std::max<std::int64_t>(0, e.retained_bytes) : 0; }
+std::int64_t counted_retained(const Event& e) { return settles(e.outcome) && !e.running ? std::max<std::int64_t>(0, e.retained_bytes) : 0; }
+// Whether the event ran its cell's query (executed, or cut off early); a running one has not yet.
+constexpr bool ran(const Event& e) { return !e.running && (e.outcome == Outcome::executed || e.outcome == Outcome::cutoff); }
 
 // Sums over an event's subtree, itself included: what its frames allocated (only frames that ran
 // allocate), and what the cells it settled retain.
@@ -299,18 +311,18 @@ std::string memory_text(const Event& e, const Rollup& r) {
 // The stream's line: glyph, indentation by depth, the cell, its outcome, and its time, worker and
 // memory.
 //   ●   Tu(a.cpp) executed 1.24ms w2
-std::string_view event_sgr(const Event& e) { return e.errors.empty() ? outcome_sgr(e.outcome) : error_sgr; }
+std::string_view event_sgr(const Event& e) { return !e.errors.empty() ? error_sgr : e.running ? running_sgr : outcome_sgr(e.outcome); }
 
 // `here`: the errors start at this cell (none of its children has any), so the whole line is
 // marked, and its messages follow on their own lines.
 std::string stream_line(const Event& e, const Style& s, bool here = false, std::string_view below = {}, const Rollup& r = {}) {
-  std::string out = sgr(s, event_sgr(e), outcome_glyph(e.outcome, s.color));
+  std::string out = sgr(s, event_sgr(e), state_glyph(e, s.color));
   out += ' ';
   out.append(2 * e.depth, ' ');
   std::string body = sgr(s, here ? "" : "1", e.kind);
   if (!e.key.empty()) body += std::format("({})", e.key);
   body += ' ';
-  body += here ? std::string(outcome_name(e.outcome)) : sgr(s, event_sgr(e), outcome_name(e.outcome));
+  body += here ? std::string(state_name(e)) : sgr(s, event_sgr(e), state_name(e));
   if (s.times) {
     const bool instant = e.end_ns == e.start_ns;
     const std::string t = (instant ? std::format(" {}", format_workers(e)) : std::format(" {} {}", format_duration(e.end_ns - e.start_ns), format_workers(e))) +
@@ -414,6 +426,7 @@ struct Summary {
   std::uint64_t events = 0;
   std::uint64_t span_ns = 0;  // from the trace's start to its last event's end
   std::int32_t workers = 0;   // pool workers seen
+  std::uint64_t running = 0;  // cells started and not ended yet (a live trace, #939); not in `events`
   // Memory (#274): what the frames allocated, and what the cells settled retain.
   std::uint64_t alloc_bytes = 0;
   std::uint64_t allocs = 0;
@@ -477,9 +490,10 @@ std::string format_metric(Metric m, std::uint64_t v) {
 std::array<std::uint64_t, metric_count> metrics_of(const Event& e, std::uint64_t self_ns, bool outermost = true) {
   std::array<std::uint64_t, metric_count> v{};
   const auto at = [&](Metric m) -> std::uint64_t& { return v[std::to_underlying(m)]; };
-  const bool waiting = e.outcome == Outcome::waited;
+  const bool waiting = e.outcome == Outcome::waited && !e.running;
   at(Metric::self_time) = waiting ? 0 : self_ns;
   at(Metric::total_time) = waiting || !outermost ? 0 : e.end_ns - std::min(e.end_ns, e.start_ns);
+  if (e.running) return v;  // a running cell (#939): its time so far; its outcome and memory come at its end
   at(Metric::alloc) = e.alloc_bytes;
   at(Metric::peak) = static_cast<std::uint64_t>(std::max<std::int64_t>(0, e.peak_bytes));
   at(Metric::retained) = static_cast<std::uint64_t>(counted_retained(e));
@@ -598,20 +612,31 @@ std::string groups_json(const std::vector<Group>& gs, std::string_view key) {
   return out + "]";
 }
 
-// The browser's tree. Events arrive in collector batches (pre-order); a node's children are in
-// arrival order, which is their start order.
+// The browser's tree. Events arrive as collector batches (`add`: whole subtrees in pre-order) or
+// live (`apply`, #939): each frame's start and end, and each instant, as they happen, in any
+// order. Either way a node's children are in id order, which is their start order, and identical
+// instants in a row under one parent are folded into the first (`repeat`), as the collector folds
+// them, so the tree a live trace ends with is the one its batches build, whatever order the events
+// came in.
 class Tree {
  public:
   struct Node {
     Event ev;
     std::int32_t parent = -1;  // index, -1 at the top
-    std::vector<std::int32_t> children;
+    std::vector<std::int32_t> children;  // in id order; folded instants left out
     bool expanded = false;
     bool group = false;  // a request of a watched daemon, holding its top-level events
     // In this node's subtree (itself included): events, and executions (executed or cutoff).
     std::uint64_t subtree = 1;
     std::uint64_t executions = 0;
     Rollup incl;  // memory in its subtree, itself included (#274)
+    // Live (#939). Whether it is in the tree: false while its parent has not come.
+    bool attached = true;
+    // An instant folded into an earlier sibling, `folded_into`, which counts it in its `repeat`;
+    // it is shown, counted and summed nowhere.
+    std::int32_t folded_into = -1;
+    std::vector<std::int32_t> members;  // the instants folded into this one, in id order
+    std::uint32_t own_repeat = 1;       // `ev.repeat` as it came, before folding added to it
   };
   // How siblings are ordered: as they started, or most memory first (#274): bytes allocated in
   // the subtree, or retained in it; or longest first (#635).
@@ -621,20 +646,22 @@ class Tree {
     std::int32_t node;
     std::uint32_t depth;
     bool match;  // matches the filter itself (else shown as an ancestor of a match)
+    bool operator==(const Row&) const = default;
   };
 
   // Hides reused cells (leaves only: a request's node stays), to see what ran.
-  void set_hide_reused(bool on) noexcept { hide_reused_ = on; }
+  void set_hide_reused(bool on) noexcept { hide_reused_ = on, changed(); }
   bool hide_reused() const noexcept { return hide_reused_; }
 
   // Top-level nodes newest first (the live views' default: the latest request on top).
-  void set_newest_first(bool on) noexcept { newest_first_ = on; }
+  void set_newest_first(bool on) noexcept { newest_first_ = on, changed(); }
   bool newest_first() const noexcept { return newest_first_; }
 
-  void set_order(Order o) noexcept { order_ = o; }
+  void set_order(Order o) noexcept { order_ = o, changed(); }
   Order order() const noexcept { return order_; }
 
-  // The latest build's totals beyond its events, for the header (#274).
+  // The latest build's totals beyond its events, for the header (#274); while a live trace runs,
+  // the process's bytes now and their peak so far.
   void set_memory(BuildMemory m) noexcept { memory_ = m; }
   std::optional<BuildMemory> memory() const noexcept { return memory_; }
 
@@ -653,9 +680,11 @@ class Tree {
     n.group = true;
     n.executions = 0;
     n.expanded = true;
-    by_id_.emplace(id, static_cast<std::int32_t>(nodes_.size()));
-    roots_.push_back(static_cast<std::int32_t>(nodes_.size()));
+    const auto at = static_cast<std::int32_t>(nodes_.size());
+    by_id_.emplace(id, at);
     nodes_.push_back(std::move(n));
+    insert_sorted(roots_, at);
+    changed();
   }
   // Text for a request's node (`--watch`: its diagnostics), shown in the detail pane.
   void annotate(std::uint64_t id, std::string text, bool append = false) {
@@ -664,8 +693,10 @@ class Tree {
       v = append ? v + text : std::move(text);
     }
   }
-  // A request's end: its span, and its outcome: executed if anything under it ran.
+  // A request's end: its span, and its outcome: executed if anything under it ran. Live, the
+  // events whose parent never came go under it (`settle`).
   void close_group(std::uint64_t id, std::uint64_t end_ns) {
+    settle(id);
     if (const auto it = by_id_.find(id); it != by_id_.end()) {
       Node& n = nodes_[it->second];
       n.ev.end_ns = std::max(n.ev.start_ns, end_ns);
@@ -674,45 +705,118 @@ class Tree {
       if (std::ranges::any_of(n.children, [&](std::int32_t c) { return !nodes_[c].ev.errors.empty(); }))
         n.ev.errors = "the build has errors";
     }
+    changed();
   }
 
-  // Events in collector order; with `group`, top-level ones go under that request's node.
+  // Events in collector order; with `group`, top-level ones go under that request's node, and so
+  // does an event whose parent is not here (a late child of an earlier batch's).
+  // A batch comes folded already: it is placed as it is.
   void add(std::span<const Event> batch, std::uint64_t group = 0) {
-    for (const Event& given : batch) {
-      Event e = given;
-      // From the wire: an outcome and workers in range (lanes are indexed by worker).
-      if (std::to_underlying(e.outcome) >= outcome_count) e.outcome = Outcome::failed;
-      e.worker = std::clamp(e.worker, -1, max_worker);
-      e.end_worker = std::clamp(e.end_worker, -1, max_worker);
-      if (e.parent == 0 || !by_id_.contains(e.parent)) e.parent = group;
-      const auto at = static_cast<std::int32_t>(nodes_.size());
-      Node n;
-      n.ev = e;
-      n.executions = e.outcome == Outcome::executed || e.outcome == Outcome::cutoff;
-      n.incl = {e.alloc_bytes, counted_retained(e)};
-      // Top-level nodes and the first levels below them start open, the rest closed.
-      n.expanded = e.depth < open_depth;
-      if (const auto it = by_id_.find(e.parent); e.parent != 0 && it != by_id_.end()) {
-        n.parent = it->second;
-        nodes_[it->second].children.push_back(at);
-      } else {
-        roots_.push_back(at);
-      }
-      by_id_.emplace(e.id, at);
-      if (computed(e.outcome) && !e.errors.empty()) computed_with_errors_.insert(e.cell);
-      nodes_.push_back(std::move(n));
-      for (std::int32_t p = nodes_[at].parent; p >= 0; p = nodes_[p].parent) {
-        ++nodes_[p].subtree;
-        nodes_[p].executions += nodes_[at].executions;
-        nodes_[p].incl.alloc += nodes_[at].incl.alloc;
-        nodes_[p].incl.retained += nodes_[at].incl.retained;
+    folding_ = false;
+    for (const Event& e : batch) place(e, group, false);
+    folding_ = true;
+    changed();
+  }
+  // Live events (#939), in the order they came, which need not be the order they happened in: a
+  // frame's start (`running`), its end, or an instant. A start makes a running node and its end
+  // settles it; an end with no start before it (an instant, or a start that has not come yet) is
+  // placed settled. An event whose parent has not come waits for it, unseen, until `settle`.
+  void apply(std::span<const Event> events, std::uint64_t group = 0) {
+    for (const Event& e : events) place(e, group, true);
+    changed();
+  }
+  // The end of a live request (`group`; 0: the whole trace): what still waits for its parent goes
+  // under the request's node, or to the top, as the collector hands orphans on at its end.
+  void settle(std::uint64_t group = 0) {
+    std::vector<std::pair<std::uint64_t, std::int32_t>> due;  // (id, node), placed in id order
+    for (auto it = waiting_.begin(); it != waiting_.end();) {
+      std::erase_if(it->second, [&](const Waiting& w) {
+        if (w.group != group) return false;
+        due.emplace_back(nodes_[w.node].ev.id, w.node);
+        return true;
+      });
+      it = it->second.empty() ? waiting_.erase(it) : std::next(it);
+    }
+    std::ranges::sort(due);
+    for (const auto& [_, i] : due) {
+      // Still unattached: an earlier one in `due` may have been its parent, and taken it along.
+      if (!nodes_[i].attached) {
+        nodes_[i].ev.parent = group;
+        attach(i, group_node(group));
       }
     }
+    // What still runs never ends (a run abandoned for another: a lost daemon): it failed, where
+    // its time reached.
+    const std::int32_t g = group_node(group);
+    for (std::int32_t i : std::vector(running_)) {
+      if (!nodes_[i].ev.running) continue;
+      std::int32_t top = i;
+      while (nodes_[top].parent >= 0 && nodes_[top].parent != g) top = nodes_[top].parent;
+      if (group != 0 && nodes_[top].parent != g) continue;  // another request's
+      Event e = nodes_[i].ev;
+      e.running = false;
+      e.outcome = Outcome::failed;
+      settle_node(i, std::move(e));
+    }
+    changed();
+  }
+  // Everything shown goes (a new run of the request: a retry, the fallback in-process), the way it
+  // is shown stays; `resets` counts them, so a view holding nodes knows they are gone.
+  void reset() {
+    Tree fresh;
+    fresh.newest_first_ = newest_first_;
+    fresh.hide_reused_ = hide_reused_;
+    fresh.order_ = order_;
+    fresh.words_ = words_;
+    fresh.raw_words_ = raw_words_;
+    fresh.worker_ = worker_;
+    fresh.resets_ = resets_ + 1;
+    fresh.version_ = version_ + 1;
+    *this = std::move(fresh);
+  }
+  std::uint64_t resets() const noexcept { return resets_; }
+  // Moves running nodes' ends to `now_ns` (since the trace began), so their times, the timeline
+  // and the span grow while they run (#939).
+  void advance(std::uint64_t now_ns) {
+    std::erase_if(running_, [&](std::int32_t i) { return !nodes_[i].ev.running; });
+    if (running_.empty()) return;
+    for (std::int32_t i : running_) nodes_[i].ev.end_ns = std::max(nodes_[i].ev.start_ns, now_ns);
+    if (order_ == Order::time) changed();
+  }
+  // Cells started and not ended yet.
+  std::uint64_t running() const noexcept { return summary_.running; }
+  // The newest activity (#939): the cell started last that still runs, else the one that came last.
+  std::optional<std::int32_t> newest() const {
+    std::optional<std::int32_t> best;
+    for (std::int32_t i : running_) {
+      const Node& n = nodes_[i];
+      if (n.ev.running && n.attached && (!best || n.ev.id > nodes_[*best].ev.id)) best = i;
+    }
+    if (!best && last_ >= 0) best = last_;
+    return best;
+  }
+  // The node to show for `i`: itself, or the one it is folded into.
+  std::int32_t shown(std::int32_t i) const {
+    contract_assert(i >= 0 && static_cast<std::size_t>(i) < nodes_.size());  // a node of this tree, not of one reset since
+    return nodes_[i].folded_into >= 0 ? nodes_[i].folded_into : i;
   }
 
   std::span<const Node> nodes() const noexcept { return nodes_; }
   const Node& node(std::int32_t i) const { return nodes_[i]; }
   std::span<const std::int32_t> roots() const noexcept { return roots_; }
+  // The tree's nodes in pre-order, children in id order (folded instants and nodes still waiting
+  // for their parent left out).
+  std::vector<std::int32_t> preorder() const {
+    std::vector<std::int32_t> out;
+    const auto walk = [&](this const auto& self, std::int32_t i) -> void {
+      out.push_back(i);
+      for (std::int32_t c : nodes_[i].children) self(c);
+    };
+    for (std::int32_t r : roots_) walk(r);
+    return out;
+  }
+  // Changes with anything that can change what is shown; equal values: nothing has.
+  std::uint64_t version() const noexcept { return version_; }
 
   // The first node under `i` where errors start (pre-order), if any: what bubbles up to `i`.
   std::optional<std::int32_t> error_origin_below(std::int32_t i) const {
@@ -732,28 +836,32 @@ class Tree {
   }
 
   void toggle(std::int32_t i) {
-    if (!nodes_[i].children.empty()) nodes_[i].expanded = !nodes_[i].expanded;
+    if (!nodes_[i].children.empty()) nodes_[i].expanded = !nodes_[i].expanded, changed();
   }
-  void set_expanded(std::int32_t i, bool open) { nodes_[i].expanded = open && !nodes_[i].children.empty(); }
+  void set_expanded(std::int32_t i, bool open) { nodes_[i].expanded = open && !nodes_[i].children.empty(), changed(); }
   void expand_all(bool open) {
     for (Node& n : nodes_) n.expanded = open && !n.children.empty();
+    changed();
   }
   // Opens every ancestor of `i`, so it is visible.
   void reveal(std::int32_t i) {
     for (std::int32_t p = nodes_[i].parent; p >= 0; p = nodes_[p].parent) nodes_[p].expanded = true;
+    changed();
   }
 
   // The filter: words that must all match. `word` matches the kind or key (case-insensitively),
-  // `is:executed` (or a prefix, `is:ex`) an outcome, `w:3` or `w:main` a worker, `at:a.cpp:12` the
-  // cells whose source span touches that line (or file). Empty: all.
+  // `is:executed` (or a prefix, `is:ex`) an outcome, `is:running` the cells still running, `w:3`
+  // or `w:main` a worker, `at:a.cpp:12` the cells whose source span touches that line (or file).
+  // Empty: all.
   // Words split at spaces outside double quotes, the quotes dropped: `at:"/my dir/a.cpp"`.
   void set_filter(std::string_view text) {
     raw_words_ = filter_words(text);
     words_.clear();
     for (const std::string& w : raw_words_) words_.push_back(lower(w));
+    changed();
   }
   // Only events a worker ran (`std::nullopt`: any), on top of the text filter.
-  void set_worker(std::optional<std::int32_t> w) { worker_ = w; }
+  void set_worker(std::optional<std::int32_t> w) { worker_ = w, changed(); }
   std::optional<std::int32_t> worker() const noexcept { return worker_; }
   bool filtering() const noexcept { return !words_.empty() || worker_.has_value(); }
 
@@ -764,8 +872,13 @@ class Tree {
     for (std::size_t i = 0; i < words_.size(); ++i) {
       const std::string& w = words_[i];
       if (w.starts_with("is:")) {
-        const auto o = outcome_named(std::string_view(w).substr(3));
-        if (!o || *o != e.outcome) return false;
+        const std::string_view name = std::string_view(w).substr(3);
+        // An outcome by prefix first, as ever (`is:r` is reused); then the running cells.
+        if (const auto o = outcome_named(name)) {
+          if (e.running || *o != e.outcome) return false;
+        } else if (name.empty() || !std::string_view("running").starts_with(name) || !e.running) {
+          return false;
+        }
       } else if (w.starts_with("w:")) {
         const std::optional<std::int32_t> n = worker_named(std::string_view(w).substr(2));
         if (!n || (e.worker != *n && e.end_worker != *n)) return false;
@@ -783,34 +896,35 @@ class Tree {
 
   // The rows to draw. Unfiltered: what expansion shows. Filtered: every match, under its
   // ancestors (which are shown whether expanded or not), and a match's own subtree as expanded.
+  // Kept until something changes (`version`): a live view asks for them many times a frame.
   std::vector<Row> rows() const {
+    if (rows_at_ == version_ && rows_valid_) return rows_;
     std::vector<Row> out;
     if (!filtering()) {
       for (std::int32_t r : ordered_roots()) walk(r, 0, out);
-      return out;
+    } else {
+      std::vector<char> keep(nodes_.size(), 0);  // 1: an ancestor of a match, 2: a match
+      for (std::size_t i = 0; i < nodes_.size(); ++i) {
+        if (!nodes_[i].attached || nodes_[i].folded_into >= 0 || !matches(nodes_[i].ev)) continue;
+        keep[i] = 2;
+        for (std::int32_t p = nodes_[i].parent; p >= 0 && !keep[p]; p = nodes_[p].parent) keep[p] = 1;
+      }
+      for (std::int32_t r : ordered_roots()) walk_filtered(r, 0, keep, out);
     }
-    std::vector<char> keep(nodes_.size(), 0);  // 1: an ancestor of a match, 2: a match
-    for (std::size_t i = 0; i < nodes_.size(); ++i) {
-      if (!matches(nodes_[i].ev)) continue;
-      keep[i] = 2;
-      for (std::int32_t p = nodes_[i].parent; p >= 0 && !keep[p]; p = nodes_[p].parent) keep[p] = 1;
-    }
-    for (std::int32_t r : ordered_roots()) walk_filtered(r, 0, keep, out);
+    rows_ = out;
+    rows_at_ = version_;
+    rows_valid_ = true;
     return out;
   }
 
+  // Counts per outcome, the span, the workers and the memory, kept as events come.
+  // A running cell counts its start in the span kept as nodes come, and its time so far here, so
+  // that moving it on (`advance`) or ending it never makes the summary count again.
   Summary summary() const {
-    Summary s;
-    std::int32_t top = -1;
-    for (const Node& n : nodes_) {
-      if (n.group) continue;
-      ++s.counts[std::to_underlying(n.ev.outcome)];
-      ++s.events;
-      s.add_memory(n.ev);
-      s.span_ns = std::max(s.span_ns, n.ev.end_ns);
-      top = std::max({top, n.ev.worker, n.ev.end_worker});
-    }
-    s.workers = top + 1;
+    if (summary_dirty_) recount();
+    Summary s = summary_;
+    for (std::int32_t i : running_)
+      if (nodes_[i].ev.running) s.span_ns = std::max(s.span_ns, nodes_[i].ev.end_ns);
     return s;
   }
 
@@ -818,17 +932,296 @@ class Tree {
   static constexpr std::int32_t max_worker = 1023;
 
  private:
+  struct Waiting {
+    std::int32_t node;
+    std::uint64_t group;
+  };
+
+  void changed() noexcept { ++version_; }
   static std::string lower(std::string_view s) {
     std::string out(s);
     for (char& c : out) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
     return out;
   }
+  // `ids` (node indices) kept in event id order: `i` goes after every smaller id; true when it went
+  // last.
+  bool insert_sorted(std::vector<std::int32_t>& ids, std::int32_t i) const {
+    const std::uint64_t id = nodes_[i].ev.id;
+    const auto at = std::ranges::upper_bound(ids, id, {}, [&](std::int32_t k) { return nodes_[k].ev.id; });
+    const bool last = at == ids.end();
+    ids.insert(at, i);
+    return last;
+  }
+  std::int32_t group_node(std::uint64_t group) const {
+    if (group == 0) return -1;
+    const auto it = by_id_.find(group);
+    return it == by_id_.end() ? -1 : it->second;
+  }
+
+  // One event, from a batch (`wait` false: an unknown parent means the request's node) or live.
+  void place(const Event& given, std::uint64_t group, bool wait) {
+    Event e = given;
+    // From the wire: an outcome and workers in range (lanes are indexed by worker).
+    if (std::to_underlying(e.outcome) >= outcome_count) e.outcome = Outcome::failed;
+    e.worker = std::clamp(e.worker, -1, max_worker);
+    e.end_worker = std::clamp(e.end_worker, -1, max_worker);
+    e.end_ns = std::max(e.end_ns, e.start_ns);
+    if (e.repeat == 0) e.repeat = 1;
+    if (const auto it = by_id_.find(e.id); it != by_id_.end()) {
+      // The end of a frame whose start came; a second start or end of one event changes nothing.
+      if (!e.running && nodes_[it->second].ev.running && !nodes_[it->second].group) settle_node(it->second, std::move(e));
+      return;
+    }
+    const auto at = static_cast<std::int32_t>(nodes_.size());
+    Node n;
+    n.ev = std::move(e);
+    n.own_repeat = n.ev.repeat;
+    n.executions = ran(n.ev);
+    n.incl = {n.ev.alloc_bytes, counted_retained(n.ev)};
+    n.attached = false;
+    const std::uint64_t parent = n.ev.parent;
+    by_id_.emplace(n.ev.id, at);
+    nodes_.push_back(std::move(n));
+    last_ = at;
+    count(at, +1);
+    if (nodes_[at].ev.running) running_.push_back(at);
+    else if (computed(nodes_[at].ev.outcome) && !nodes_[at].ev.errors.empty()) computed_with_errors_.insert(nodes_[at].ev.cell);
+    const auto p = parent == 0 ? by_id_.end() : by_id_.find(parent);
+    if (parent != 0 && p != by_id_.end() && p->second != at) {
+      attach(at, p->second);
+    } else if (parent != 0 && wait) {
+      waiting_[parent].push_back({at, group});
+    } else {
+      nodes_[at].ev.parent = group;
+      attach(at, group_node(group));
+    }
+    // Children that came before it.
+    if (auto kids = waiting_.extract(nodes_[at].ev.id); !kids.empty()) {
+      std::vector<std::int32_t> ks;
+      for (const Waiting& w : kids.mapped()) ks.push_back(w.node);
+      std::ranges::sort(ks, {}, [&](std::int32_t k) { return nodes_[k].ev.id; });
+      for (std::int32_t k : ks) attach(k, at);
+    }
+  }
+
+  // A running node's end (#939): what it ran to, its memory, value and errors.
+  void settle_node(std::int32_t i, Event e) {
+    Node& n = nodes_[i];
+    count(i, -1);
+    e.depth = n.ev.depth;
+    e.parent = n.ev.parent;  // a top-level event's is its request's
+    e.repeat = n.own_repeat;
+    const std::uint64_t exec = ran(e);
+    const Rollup own{e.alloc_bytes, counted_retained(e)};
+    n.ev = std::move(e);
+    count(i, +1);
+    if (computed(n.ev.outcome) && !n.ev.errors.empty()) computed_with_errors_.insert(n.ev.cell);
+    // Its own share, into its subtree's sums and up (it counted nothing while it ran).
+    for (std::int32_t p = i; p >= 0; p = nodes_[p].parent) {
+      nodes_[p].executions += exec;
+      nodes_[p].incl.alloc += own.alloc;
+      nodes_[p].incl.retained += own.retained;
+      if (nodes_[p].folded_into >= 0) break;  // a folded node counts nowhere above it
+    }
+    // Ended at once, with nothing under it: an instant like its neighbours, perhaps.
+    if (n.attached && instant_leaf(i) && foldable(n.parent)) refold_around(n.parent, i);
+  }
+
+  // Puts node `i` (and what came under it before it) under `p` (-1: the top).
+  void attach(std::int32_t i, std::int32_t p) {
+    // A parent that was an instant leaf is one no more: its siblings fold again around it.
+    // While `p` is folded, the sums stop at it (below), and its unfolding counts it whole.
+    const bool was_instant = p >= 0 && nodes_[p].attached && instant_leaf(p) && foldable(nodes_[p].parent);
+    Node& n = nodes_[i];
+    n.parent = p;
+    n.attached = p < 0 || nodes_[p].attached;
+    // A subtree that waited for its parent joins the tree: it folds now.
+    const bool joins = n.attached && !n.children.empty();
+    if (n.attached) set_depth(i, p < 0 || nodes_[p].group ? 0 : nodes_[p].ev.depth + 1);
+    const bool last = insert_sorted(p < 0 ? roots_ : nodes_[p].children, i);
+    // Its subtree's sums, up to the top (of the tree, or of a subtree still waiting for its
+    // parent) or the first folded node, which counts nowhere above it.
+    for (std::int32_t a = p; a >= 0; a = nodes_[a].parent) {
+      nodes_[a].subtree += nodes_[i].subtree;
+      nodes_[a].executions += nodes_[i].executions;
+      nodes_[a].incl.alloc += nodes_[i].incl.alloc;
+      nodes_[a].incl.retained += nodes_[i].incl.retained;
+      if (nodes_[a].folded_into >= 0) break;  // a folded node counts nowhere above it
+    }
+    if (joins) refold_below(i);
+    if (was_instant) refold_around(nodes_[p].parent, p);
+    if (!foldable(p)) return;
+    // Last among those shown, but perhaps not after what the one before it folded in.
+    const auto& kids = nodes_[p].children;
+    const bool inside = last && kids.size() > 1 && !nodes_[kids[kids.size() - 2]].members.empty() &&
+                        nodes_[nodes_[kids[kids.size() - 2]].members.back()].ev.id > nodes_[i].ev.id;
+    if (!last || inside) refold_around(p, i);
+    else fold_last(p);
+  }
+  // Depths (as the collector gives them: 0 at the top and under a request's node) and the first
+  // expansion, for a subtree that joins the tree.
+  void set_depth(std::int32_t i, std::uint32_t depth) {
+    Node& n = nodes_[i];
+    n.ev.depth = depth;
+    n.attached = true;
+    // Top-level nodes and the first levels below them start open, the rest closed.
+    n.expanded = depth < open_depth;
+    for (std::int32_t m : n.members) nodes_[m].ev.depth = depth, nodes_[m].attached = true;
+    for (std::int32_t c : n.children) set_depth(c, depth + 1);
+  }
+
+  // Folding: children of an event (not the top, not a request's node) fold as the collector folds
+  // them: an instant with nothing under it, just like the instant before it (in id order, with
+  // nothing else between), counts in that one's `repeat`.
+  bool foldable(std::int32_t p) const { return folding_ && p >= 0 && !nodes_[p].group && nodes_[p].attached && nodes_[p].folded_into < 0; }
+  bool instant_leaf(std::int32_t i) const {
+    const Node& n = nodes_[i];
+    return !n.ev.running && n.ev.start_ns == n.ev.end_ns && n.children.empty();
+  }
+  bool same_instant(std::int32_t a, std::int32_t b) const {
+    const Event &x = nodes_[a].ev, &y = nodes_[b].ev;
+    return x.cell == y.cell && x.kind == y.kind && x.outcome == y.outcome && x.errors == y.errors;
+  }
+  // The last child of `p` just came: it folds into the one before it if they are alike.
+  void fold_last(std::int32_t p) {
+    auto& kids = nodes_[p].children;
+    if (kids.size() < 2) return;
+    const std::int32_t c = kids.back(), prev = kids[kids.size() - 2];
+    if (!instant_leaf(c) || !instant_leaf(prev) || !same_instant(prev, c)) return;
+    kids.pop_back();
+    absorb(c, prev);
+  }
+  // `c`, out of its parent's shown children, counts in `head`'s repeat from now on, and nowhere
+  // else.
+  void absorb(std::int32_t c, std::int32_t head) {
+    hide(c, -1);
+    nodes_[c].folded_into = head;
+    insert_sorted(nodes_[head].members, c);
+    nodes_[head].ev.repeat += nodes_[c].own_repeat;
+  }
+  // Where shown child `h` is among `p`'s (they are in id order).
+  std::size_t position(std::int32_t p, std::int32_t h) const {
+    const auto& kids = nodes_[p].children;
+    return static_cast<std::size_t>(std::ranges::lower_bound(kids, nodes_[h].ev.id, {}, [&](std::int32_t k) { return nodes_[k].ev.id; }) - kids.begin());
+  }
+  // The instants folded into shown child `h` of `p` shown again, each where its id puts it (a
+  // child that just came may be among them).
+  void unfold_head(std::int32_t p, std::int32_t h) {
+    Node& head = nodes_[h];
+    if (head.members.empty()) return;
+    auto& kids = nodes_[p].children;
+    for (std::int32_t m : head.members) {
+      nodes_[m].folded_into = -1;
+      hide(m, +1);
+      insert_sorted(kids, m);
+    }
+    head.members.clear();
+    head.ev.repeat = head.own_repeat;
+  }
+  // `p`'s children folded afresh around child `c` (shown, or folded into one that is): after it
+  // came out of order, or its shape changed. Only its run and its neighbours' can change: the runs
+  // beyond them are cut off from it by shown children that stay as they are.
+  void refold_around(std::int32_t p, std::int32_t c) {
+    auto& kids = nodes_[p].children;
+    const std::size_t k = position(p, shown(c));
+    const std::size_t lo = k > 0 ? k - 1 : 0, hi = std::min(k + 1, kids.size() - 1);
+    const std::int32_t after = hi + 1 < kids.size() ? kids[hi + 1] : -1;  // the first shown child past them
+    for (std::size_t j = hi + 1; j-- > lo;) unfold_head(p, kids[j]);
+    const std::size_t end = after < 0 ? kids.size() : position(p, after);
+    std::int32_t last = lo > 0 && instant_leaf(kids[lo - 1]) ? kids[lo - 1] : -1;  // the previous child, if it can take a repeat
+    std::vector<std::int32_t> out;
+    for (std::size_t j = lo; j < end; ++j) {
+      const std::int32_t x = kids[j];
+      if (instant_leaf(x) && last >= 0 && same_instant(last, x)) {
+        absorb(x, last);
+        continue;
+      }
+      out.push_back(x);
+      last = instant_leaf(x) ? x : -1;
+    }
+    kids.erase(kids.begin() + static_cast<std::ptrdiff_t>(lo), kids.begin() + static_cast<std::ptrdiff_t>(end));
+    kids.insert(kids.begin() + static_cast<std::ptrdiff_t>(lo), out.begin(), out.end());
+  }
+  // Every node of `i`'s subtree folded afresh, deepest first (a subtree that waited for its
+  // parent, which folded nothing meanwhile).
+  void refold_below(std::int32_t i) {
+    for (std::int32_t c : std::vector(nodes_[i].children)) refold_below(c);
+    if (!foldable(i) || nodes_[i].children.empty()) return;
+    auto& kids = nodes_[i].children;
+    std::vector<std::int32_t> out;
+    std::int32_t last = -1;
+    for (std::int32_t x : kids) {
+      if (instant_leaf(x) && last >= 0 && same_instant(last, x)) {
+        absorb(x, last);
+        continue;
+      }
+      out.push_back(x);
+      last = instant_leaf(x) ? x : -1;
+    }
+    kids = std::move(out);
+  }
+  // A folded instant's share taken out of (`sign` -1) or put back into (+1) its ancestors' sums
+  // and the summary.
+  void hide(std::int32_t c, int sign) {
+    const Node& n = nodes_[c];
+    for (std::int32_t a = n.parent; a >= 0; a = nodes_[a].parent) {
+      Node& x = nodes_[a];
+      x.subtree = static_cast<std::uint64_t>(static_cast<std::int64_t>(x.subtree) + sign * static_cast<std::int64_t>(n.subtree));
+      x.executions = static_cast<std::uint64_t>(static_cast<std::int64_t>(x.executions) + sign * static_cast<std::int64_t>(n.executions));
+      x.incl.alloc = static_cast<std::uint64_t>(static_cast<std::int64_t>(x.incl.alloc) + sign * static_cast<std::int64_t>(n.incl.alloc));
+      x.incl.retained += sign * n.incl.retained;
+      if (x.folded_into >= 0) break;
+    }
+    count(c, sign);
+  }
+
+  // The summary, kept as nodes come, settle, fold and unfold. Taking one out whose end or worker
+  // may have been the highest leaves the span and workers to count again.
+  void count(std::int32_t i, int sign) {
+    const Node& n = nodes_[i];
+    if (n.group) return;
+    const Event& e = n.ev;
+    Summary& s = summary_;
+    const auto step = [&](auto& v) { v = sign > 0 ? v + 1 : v - 1; };
+    if (e.running) {
+      step(s.running);
+    } else {
+      step(s.counts[std::to_underlying(e.outcome)]);
+      step(s.events);
+      s.alloc_bytes = sign > 0 ? s.alloc_bytes + e.alloc_bytes : s.alloc_bytes - e.alloc_bytes;
+      s.allocs = sign > 0 ? s.allocs + e.allocs : s.allocs - e.allocs;
+      s.retained_bytes += sign * counted_retained(e);
+    }
+    const std::int32_t top = std::max(e.worker, e.end_worker);
+    const std::uint64_t reach = e.running ? e.start_ns : e.end_ns;
+    if (sign > 0) {
+      s.span_ns = std::max(s.span_ns, reach);
+      s.workers = std::max(s.workers, top + 1);
+    } else if (reach >= s.span_ns || top + 1 >= s.workers) {
+      summary_dirty_ = true;
+    }
+  }
+  void recount() const {
+    Summary s;
+    std::int32_t top = -1;
+    for (const Node& n : nodes_) {
+      if (n.group || n.folded_into >= 0) continue;
+      if (n.ev.running) ++s.running;
+      else ++s.counts[std::to_underlying(n.ev.outcome)], ++s.events, s.add_memory(n.ev);
+      s.span_ns = std::max(s.span_ns, n.ev.running ? n.ev.start_ns : n.ev.end_ns);
+      top = std::max({top, n.ev.worker, n.ev.end_worker});
+    }
+    s.workers = top + 1;
+    summary_ = s;
+    summary_dirty_ = false;
+  }
+
   bool errors_below(std::int32_t i) const {
     return std::ranges::any_of(nodes_[i].children, [&](std::int32_t c) { return !nodes_[c].ev.errors.empty() || errors_below(c); });
   }
   bool hidden(std::int32_t i) const {
     const Node& n = nodes_[i];
-    return hide_reused_ && !n.group && n.children.empty() && n.ev.outcome == Outcome::reused;
+    return hide_reused_ && !n.group && n.children.empty() && !n.ev.running && n.ev.outcome == Outcome::reused;
   }
   // Siblings in the chosen order; ties keep their start order.
   std::vector<std::int32_t> ordered(std::span<const std::int32_t> ids) const {
@@ -860,13 +1253,24 @@ class Tree {
   }
 
   std::vector<Node> nodes_;
-  std::vector<std::int32_t> roots_;
+  std::vector<std::int32_t> roots_;  // in id order
   bool newest_first_ = false;
   bool hide_reused_ = false;
   Order order_ = Order::start;
   std::optional<BuildMemory> memory_;
   std::set<std::uint64_t> computed_with_errors_;  // cells some node computed with errors
   std::unordered_map<std::uint64_t, std::int32_t> by_id_;
+  std::unordered_map<std::uint64_t, std::vector<Waiting>> waiting_;  // by the parent's id they wait for
+  std::vector<std::int32_t> running_;                               // nodes that may still run
+  std::int32_t last_ = -1;                                          // the node that came last
+  std::uint64_t resets_ = 0;
+  bool folding_ = true;                                             // false while a batch is added
+  mutable Summary summary_;
+  mutable bool summary_dirty_ = false;
+  std::uint64_t version_ = 0;
+  mutable std::vector<Row> rows_;
+  mutable std::uint64_t rows_at_ = 0;
+  mutable bool rows_valid_ = false;
   std::vector<std::string> words_;
   std::vector<std::string> raw_words_;  // as typed, for paths
   std::optional<std::int32_t> worker_;
@@ -1066,15 +1470,21 @@ Timeline timeline(const Tree& t, std::size_t columns) {
   if (columns == 0) return tl;
   std::vector<std::vector<std::uint32_t>> depth(tl.lanes.size(), std::vector<std::uint32_t>(columns, 0));
   const auto nodes = t.nodes();
+  // The deepest wins a slice; of two as deep, the one that started first (then the lower id), so
+  // the timeline does not depend on the order the nodes came in (#939).
+  const auto before = [&](std::size_t a, std::int32_t b) {
+    const Event &x = nodes[a].ev, &y = nodes[static_cast<std::size_t>(b)].ev;
+    return std::tuple(x.start_ns, x.id) < std::tuple(y.start_ns, y.id);
+  };
   for (std::size_t i = 0; i < nodes.size(); ++i) {
     const Event& e = nodes[i].ev;
-    if (nodes[i].group || !t.matches(e)) continue;
+    if (nodes[i].group || !nodes[i].attached || nodes[i].folded_into >= 0 || !t.matches(e)) continue;
     auto& lane = tl.lanes[Timeline::lane_of(e.worker)];
     auto& d = depth[Timeline::lane_of(e.worker)];
     const std::size_t from = static_cast<std::size_t>(e.start_ns * columns / tl.span_ns);
     const std::size_t to = std::max(from + 1, static_cast<std::size_t>((e.end_ns * columns + tl.span_ns - 1) / tl.span_ns));
     for (std::size_t c = std::min(from, columns - 1); c < std::min(to, columns); ++c) {
-      if (lane[c] < 0 || e.depth + 1 > d[c]) {
+      if (lane[c] < 0 || e.depth + 1 > d[c] || (e.depth + 1 == d[c] && before(i, lane[c]))) {
         lane[c] = static_cast<std::int32_t>(i);
         d[c] = e.depth + 1;
       }

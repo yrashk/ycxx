@@ -134,6 +134,18 @@ struct [[=dependent]] VDepCall {
   SeqId<TemplateArg> args;
 };
 
+// A concept-id whose written template arguments still depend on a template parameter.
+struct [[=dependent]] VDepConcept {
+  EntityId concept_;
+  SeqId<TemplateArg> args;
+};
+
+// A value named through a dependent nested-name-specifier.
+struct [[=dependent]] VDepMember {
+  QualType qualifier;
+  NameId name;
+};
+
 enum class DepOp : u8 {
   is_same, is_reference, is_const, is_volatile, is_array, is_pointer, is_function,
   is_enum, is_union, is_class,
@@ -200,6 +212,7 @@ struct VAtom {
   SeqId<ConstId> mapping;
   SeqId<u32> calls;
   bool fn_params;  // it names a function parameter (a trailing requires-clause's), so it maps all
+  EntityId lookup_class;  // class scope visible at the atom's spelling
 };
 
 // A normal form ([temp.constr.normal]): the conjunction (`op` 0) or disjunction (`op` 1) of normal
@@ -211,7 +224,7 @@ struct VConstraint {
 
 using ValueKinds = closed_list<VInt, VFloat, VNullptr, VString, VLvalue, VEntity, VAggregate, VDepParam, VDepFnParam, VDepExpansion,
                                VDepSizeofPack, VType, VAtom, VConstraint, VDepOp, VMemberPtr, VDepVariable, VConstraintPack,
-                               VDepCall>;
+                               VDepCall, VDepMember, VDepConcept>;
 
 template <class T>
 constexpr bool is_value_kind = ValueKinds::contains<T>;
