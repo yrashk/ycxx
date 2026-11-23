@@ -446,7 +446,6 @@ own/function-pointers/iota-template-argument.run.cpp function pointers and refer
 own/classes/s1-byvalue-constexpr.run.cpp classes in constant evaluation (#25)
 own/classes/s1-elaborated.run.cpp block-scope elaborated type specifier (#117)
 own/classes/s1-locals-scopes.run.cpp local classes (#117)
-own/classes/s2-constexpr-members.run.cpp classes in constant evaluation (#25)
 own/floating/const-compare.accept.cpp@linux-x86_64 x87 long double literals are unsupported #645
 own/floating/conv-arith-types.accept.cpp@linux-x86_64 x87 long double literals are unsupported #645
 own/floating/conv-double-float.accept.cpp@linux-x86_64 x87 long double literals are unsupported #645
