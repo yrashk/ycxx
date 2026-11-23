@@ -2911,8 +2911,8 @@ the peer passes a secondary base. The cast introduces no RTTI symbols or calls.
 ## Borrowed typed downcasts (#294)
 
 Linux x86-64 can cast a borrowed root pointer to a pointer to its direct derived class.
-Both classes are ordinary, fieldless and default-visible. The derived class has one public
-nonvirtual primary base. Each class declares one public virtual `int` member with no
+The first profile uses two ordinary, fieldless, default-visible classes. The derived class has
+one public nonvirtual primary base. Each class declares one public virtual `int` member with no
 arguments, with the derived declaration overriding the base member. A hosted C++ peer
 defines the two key functions. The consumer checks eligibility against the complete
 translation unit and uses the peer's two RTTI objects and `__dynamic_cast`.
@@ -2921,8 +2921,18 @@ a typed null for a null operand or a failed check. A null operand can be used in
 evaluation. [Design](docs/design/linux-borrowed-typed-downcast.md) ·
 [#294](https://github.com/yrashk/ycxx/issues/294)
 
-Other cast forms, `typeid`, non-null constant evaluation, and Darwin parity are tracked
-in [#294](https://github.com/yrashk/ycxx/issues/294) and [#659](https://github.com/yrashk/ycxx/issues/659).
+The keyless-base profile uses a fieldless `B` with one public pure virtual `int f()` and a
+`D` with the public override and one public `int` field without an initializer. Both classes use
+the default-visible ABI. The consumer defines canonical weak `_ZTI` and `_ZTS` objects for `B`
+in separate ELF COMDAT groups. An independently owned table in the same unit uses the same
+base descriptor.
+The complete translation unit must leave the derived key to the peer. Hosted linking supplies
+the derived RTTI and `__dynamic_cast`.
+[Design](docs/design/linux-keyless-base-rtti.md) · [#930](https://github.com/yrashk/ycxx/issues/930)
+
+Keyless destinations, reference casts, `typeid`, non-null constant evaluation, and Darwin
+parity are tracked in [#294](https://github.com/yrashk/ycxx/issues/294) and
+[#659](https://github.com/yrashk/ycxx/issues/659).
 
 ## Deduced polymorphic lambda results (#569)
 
