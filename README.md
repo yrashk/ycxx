@@ -539,6 +539,8 @@ written default member initializer are value-initialized.
   unqualified call to a single ordinary external `consteval` function can also use direct
   integral template-parameter operands.
   [#209](https://github.com/yrashk/ycxx/issues/209)
+- Dependent `alignof(type-id)` in integral class-template base arguments, including forwarding
+  through alias templates. [#1067](https://github.com/yrashk/ycxx/issues/1067)
 - `__is_constructible`, `__is_nothrow_constructible` and `__is_trivially_constructible` for
   supported scalar, reference, function and `void` queries, including argument packs in
   class-template base and variable-template initializer replay.

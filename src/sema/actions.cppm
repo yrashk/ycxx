@@ -8896,6 +8896,12 @@ public:
 
   // `sizeof` and `alignof` of a type ([expr.sizeof], [expr.alignof]), a `size_t` prvalue; zero
   // after a diagnostic.
+  Ex dependent_base_alignment(QualType operand, u32 begin, u32 end) {
+    const std::array args{templates().type_arg(operand)};
+    const auto value = ins().intern_value(ast::VDepOp{ast::DepOp::alignof_type, ins().intern_seq(std::span<const TemplateArg>(args))});
+    return literal(builtin(w_->target.size_type), value, ValueCategory::prvalue, begin, end);
+  }
+
   Ex size_of(QualType t, bool align, u32 begin, u32 end) {
     QualType st = builtin(w_->target.size_type);
     if (types().is_dependent(t)) return dependent_node({}, begin, end, st);
