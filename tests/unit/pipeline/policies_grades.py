@@ -37,8 +37,9 @@ with tempfile.TemporaryDirectory() as directory:
         #include <ycxx/effects.hpp>
         namespace fx = ycxx::effects;
         struct Send;
+        struct SiteConfig { inline static constexpr unsigned slots[2]{1u, 2u}; };
         using One = fx::set<fx::at_most<Send, 1>>;
-        using Two = fx::set<fx::at_most<Send, 2>>;
+        using Two = fx::set<fx::at_most<Send, SiteConfig::slots[1]>>;
         using Unbounded = fx::set<Send>;
         int send(int) noexcept;
         int run(int) noexcept;
@@ -194,7 +195,7 @@ with tempfile.TemporaryDirectory() as directory:
         mediated = write("mediated.cpp", """\
             #include "grades.hpp"
             #include <ycxx/effects/runtime.hpp>
-            using Scope = fx::budget<Send, 2>;
+            using Scope = fx::budget<Send, SiteConfig::slots[1]>;
             [[=fx::trusted_contract<One>{}]] int transmit(Scope& scope, int value) noexcept {
               scope.spend();
               return value;

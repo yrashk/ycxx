@@ -445,6 +445,16 @@ Use `[[=fx::contract<AuditBound>{}]]` on `run` and keep the `OneAudit` annotatio
 on the individual operations. With `slots = 2`, two calls to `perform` succeed. A
 third call exceeds the declared grade in YCXX and traps in GCC or Clang builds.
 
+When a project keeps several limits in one header, the configuration can select a slot
+from a brace-initialized constexpr array. Replace `SiteConfig` with this declaration.
+
+```cpp
+struct SiteConfig {
+  inline static constexpr unsigned limits[2]{1u, 2u};
+  static constexpr unsigned slots = limits[1];
+};
+```
+
 ### Inspect a checked build
 
 Open YCXX's trace browser while it compiles the reflected handler.
