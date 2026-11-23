@@ -212,7 +212,7 @@ namespace caps = ycxx::capabilities;
 
 class Store {
   static constexpr caps::rights_mask write_right = 2;
-  inline static int cells_[2]{};
+  inline static int cells_[2];
 
   // Issuance belongs to the application's trusted authorization path.
   static caps::token<Store, write_right> issue_primary_writer() noexcept {
