@@ -26,6 +26,7 @@ enum class TypeTrait : std::uint8_t {
   is_nothrow_destructible,
   is_trivially_destructible,
   reference_converts_from_temporary, reference_constructs_from_temporary,
+  is_standard_layout,
 };
 
 struct TypeTraitInfo {
@@ -69,7 +70,8 @@ inline constexpr std::array type_traits{
                   .transforms = false, .replay_dependent = true},
     TypeTraitInfo{.name = "__is_abstract", .trait = TypeTrait::is_abstract, .arity = 1,
                   .transforms = false, .replay_dependent = true},
-    TypeTraitInfo{"__is_final", TypeTrait::is_final, 1, false},
+    TypeTraitInfo{.name = "__is_final", .trait = TypeTrait::is_final, .arity = 1,
+                  .transforms = false, .replay_dependent = true},
     TypeTraitInfo{"__has_virtual_destructor", TypeTrait::has_virtual_destructor, 1, false},
     TypeTraitInfo{"__remove_cv", TypeTrait::remove_cv, 1, true},
     TypeTraitInfo{"__remove_const", TypeTrait::remove_const, 1, true},
@@ -85,6 +87,8 @@ inline constexpr std::array type_traits{
     TypeTraitInfo{"__remove_all_extents", TypeTrait::remove_all_extents, 1, true},
     TypeTraitInfo{"__decay", TypeTrait::decay, 1, true},
     TypeTraitInfo{"__underlying_type", TypeTrait::underlying_type, 1, true},
+    TypeTraitInfo{.name = "__is_standard_layout", .trait = TypeTrait::is_standard_layout, .arity = 1,
+                  .transforms = false, .advertised = false, .replay_dependent = true},
     TypeTraitInfo{.name = "__is_trivially_copyable", .trait = TypeTrait::is_trivially_copyable, .arity = 1,
                   .transforms = false, .advertised = false, .replay_dependent = true},
     TypeTraitInfo{"__is_constructible", TypeTrait::is_constructible, 1, false, false, true},

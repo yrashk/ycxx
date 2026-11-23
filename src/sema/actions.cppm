@@ -162,6 +162,11 @@ public:
     if (const EnumRec* record = defining_enum(e)) return record->scoped;
     return std::nullopt;
   }
+  // A fixed enumeration is complete even before its enumerator list ends ([dcl.enum]).
+  virtual std::optional<bool> defining_enum_is_fixed(EntityId e) {
+    if (const EnumRec* record = defining_enum(e)) return record->fixed;
+    return std::nullopt;
+  }
   // This unit's class and enumeration records (#115).
   virtual const Classes& classes() = 0;
   // The constant a variable usable in constant expressions holds ([expr.const]), if it is known.
@@ -1376,6 +1381,52 @@ public:
     return fail(Diag::trivial_copyability_unsupported, operand);
   }
 
+  // The trait's domain requires the innermost array element to be complete or cv void
+  // ([meta.unary.prop]). Its class facts are read only after completing the operand at that point.
+  Ex standard_layout_expr(QualType operand, u32 begin, u32 end) {
+    const Types& ts = types();
+    const QualType type = ts.canonical(operand);
+    const engine::Loc loc = type_trait_loc(begin);
+    const auto fail = [&](Diag d, QualType reported) -> Ex {
+      diag_at(loc, d, reported);
+      return {NodeId::none, begin, end};
+    };
+    if (ts.is_dependent(type)) {
+      if (q_->in_type_trait_pattern())
+        if (auto value = templates().unary_trait_value(ast::DepOp::is_standard_layout, type)) {
+          q_->record_dependent_type_trait_operand(loc);
+          return literal(builtin(Builtin::bool_), *value, ValueCategory::prvalue, begin, end);
+        }
+      return fail(Diag::standard_layout_unsupported, operand);
+    }
+    const QualType element = ts.innermost_array_element(type);
+    if (ts.is_reference(element) || ts.is_function(element) || ts.is_void(element))
+      return bool_literal(false, begin, end);
+    if (ts.is_enum(element)) {
+      const EntityId e = ts.enum_of(element);
+      if (auto fixed = q_->defining_enum_is_fixed(e)) {
+        if (!*fixed) return fail(Diag::standard_layout_incomplete, element);
+      } else if (const EnumRec* record = classes().find_enum(e)) {
+        if (!record->fixed && !record->defined) return fail(Diag::standard_layout_incomplete, element);
+      } else {
+        return fail(Diag::standard_layout_unsupported, operand);
+      }
+      return bool_literal(true, begin, end);
+    }
+    if (ts.is_class(element)) {
+      const EntityId cls = ts.class_of(element);
+      const auto demand = q_->type_trait_at_demand(cls, loc);
+      if (!(demand ? *demand : q_->is_complete_at_source(cls))) {
+        if (q_->type_trait_instantiation_failed(cls)) return {NodeId::none, begin, end};
+        return fail(Diag::standard_layout_incomplete, element);
+      }
+      if (auto result = classes().standard_layout(cls)) return bool_literal(*result, begin, end);
+    } else if (ts.is_scalar(element) || ts.is_floating(element)) {
+      return bool_literal(true, begin, end);
+    }
+    return fail(Diag::standard_layout_unsupported, operand);
+  }
+
   // In this domain every destructible type has trivial, nonthrowing destruction ([meta.unary.prop]).
   Ex destructibility_expr(ast::DepOp op, NameId name, QualType operand, u32 begin, u32 end) {
     const Types& ts = types();
@@ -1807,10 +1858,10 @@ public:
     if (auto result = reaches_base(d, b)) return bool_literal(*result, begin, end);
     return fail(Diag::base_of_unsupported, base_type, derived_type);
   }
-  // These properties require a complete nonunion class at the point that queries it
-  // ([meta.unary.prop]). The owning replay supplies that point for a dependent operand.
-  Ex virtual_class_trait_expr(ast::DepOp op, QualType type, u32 begin, u32 end)
-    pre(op == ast::DepOp::is_polymorphic || op == ast::DepOp::is_abstract)
+  // The owning replay supplies the point of instantiation for class completeness
+  // ([meta.unary.prop]). Finality requires a complete class, including a union.
+  Ex class_property_trait_expr(ast::DepOp op, QualType type, u32 begin, u32 end)
+    pre(op == ast::DepOp::is_polymorphic || op == ast::DepOp::is_abstract || op == ast::DepOp::is_final)
   {
     type = types().canonical(type);
     const engine::Loc loc = type_trait_loc(begin);
@@ -1822,18 +1873,24 @@ public:
         }
       return dependent_node({}, begin, end, builtin(Builtin::bool_));
     }
-    if (!types().is_class(type) || is_union_type(type) == true) return bool_literal(false, begin, end);
+    if (!types().is_class(type)) return bool_literal(false, begin, end);
     const EntityId cls = types().class_of(type);
+    const bool final_trait = op == ast::DepOp::is_final;
+    if (!final_trait && is_union_type(type) == true) return bool_literal(false, begin, end);
     if (auto demand = q_->type_trait_at_demand(cls, loc)) {
       if (!*demand) {
         if (!q_->type_trait_instantiation_failed(cls)) diag_at(loc, Diag::virtual_class_trait_incomplete, type);
         return {NodeId::none, begin, end};
       }
-    } else if (!require_complete(type, begin)) {
-      return {NodeId::none, begin, end};
+    } else {
+      // Direct finality queries keep the class domain supported by #309.
+      if (final_trait && (is_union_type(type) == true || w_->entities.rec(cls).templ != EntityId::none))
+        return bool_literal(false, begin, end);
+      if (!require_complete(type, begin)) return {NodeId::none, begin, end};
     }
     const ClassRec* record = classes().find(cls);
     if (!record) return {NodeId::none, begin, end};
+    if (final_trait) return bool_literal(record->is_final, begin, end);
     return bool_literal(op == ast::DepOp::is_abstract ? record->is_abstract() : record->polymorphic, begin, end);
   }
 
@@ -1842,6 +1899,7 @@ public:
   Ex trait_expr(lex::TypeTrait t, NameId name, std::span<const QualType> args, u32 begin, u32 end) {
     using enum lex::TypeTrait;
     if (t == is_trivially_copyable) return trivial_copyability_expr(args[0], begin, end);
+    if (t == is_standard_layout) return standard_layout_expr(args[0], begin, end);
     if (t == is_empty) return empty_expr(args[0], begin, end);
     QualType b = builtin(Builtin::bool_);
     auto structural_trait = [&](std::optional<ConstId> v) {
@@ -1878,8 +1936,9 @@ public:
     case is_function: unary_op = ast::DepOp::is_function; break;
     case is_enum: unary_op = ast::DepOp::is_enum; break;
     case is_scoped_enum: unary_op = ast::DepOp::is_scoped_enum; break;
-    case is_polymorphic: return virtual_class_trait_expr(ast::DepOp::is_polymorphic, args[0], begin, end);
-    case is_abstract: return virtual_class_trait_expr(ast::DepOp::is_abstract, args[0], begin, end);
+    case is_polymorphic: return class_property_trait_expr(ast::DepOp::is_polymorphic, args[0], begin, end);
+    case is_abstract: return class_property_trait_expr(ast::DepOp::is_abstract, args[0], begin, end);
+    case is_final: return class_property_trait_expr(ast::DepOp::is_final, args[0], begin, end);
     case is_union: unary_op = ast::DepOp::is_union; break;
     case is_class: unary_op = ast::DepOp::is_class; break;
     case is_member_pointer: unary_op = ast::DepOp::is_member_pointer; break;
@@ -1915,14 +1974,6 @@ public:
         const ClassRec* r = cls();
         if (!r) return {NodeId::none, begin, end};
         v = r->virtual_destructor;
-      }
-      break;
-    case is_final:
-      if (types().is_class(c) && is_union_type(c) != true &&
-          w_->entities.rec(types().class_of(c)).templ == EntityId::none) {
-        const ClassRec* r = cls();
-        if (!r) return {NodeId::none, begin, end};
-        v = r->is_final;
       }
       break;
     case is_lvalue_reference: v = types().is_reference(c) && !types().rec(c).rvalue_ref; break;
