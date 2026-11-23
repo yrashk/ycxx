@@ -2258,7 +2258,10 @@ private:
     EntityId scope = entities.rec(v).scope;
     if (entities.rec(v).kind == sema::EntityKind::enumerator) scope = entities.rec(scope).scope;
     if (scope != completing_class) return point();
-    return p_->last_member(p_->class_items_.at(std::to_underlying(completing_class)));
+    const auto definition = p_->class_items_.find(std::to_underlying(completing_class));
+    // An implicit specialization has no defining item of its own. Its values are queried at
+    // the specialization's demand point, while a written class sees its complete member list.
+    return definition == p_->class_items_.end() ? point() : p_->last_member(definition->second);
   }
   u32 point() const { return at_point ? *at_point : item_; }
   Program* p_;
