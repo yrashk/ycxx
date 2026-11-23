@@ -977,11 +977,11 @@ class Gen {
 
   // Initializes the object at `p` from the prvalue `e` ([dcl.init]). In a `zeroed` object, a
   // value-initialized element is already zero.
-  void initialize(const Place& p, At e, bool zeroed, bool select_class = false) {
+  void initialize(const Place& p, At e, bool zeroed, bool select_class = false, bool materialized = false) {
     Position here(*this, e.offset);
-    if (is<ast::Paren>(e)) return initialize(p, child(e, get<ast::Paren>(e).operand), zeroed, select_class);
+    if (is<ast::Paren>(e)) return initialize(p, child(e, get<ast::Paren>(e).operand), zeroed, select_class, materialized);
     if (is<ast::DefaultArg>(e))
-      return pinned([&] { initialize(p, child(e, get<ast::DefaultArg>(e).arg), zeroed, select_class); });
+      return pinned([&] { initialize(p, child(e, get<ast::DefaultArg>(e).arg), zeroed, select_class, materialized); });
     if (facts_.is_reference(p.type)) {
       store(p, address(e));  // a reference member holds its object's address
       return;
@@ -1044,6 +1044,12 @@ class Gen {
           } else {
             initialize(destination, x, zeroed, select_element);
           }
+          // [basic.life], [dcl.init.aggr]: a later default can read an earlier initialized
+          // scalar member before initialization of the complete temporary finishes.
+          if (materialized && !array && bases.empty() && !destination.bit_field) {
+            TypeClass kind = cls(type);
+            if (kind == TypeClass::bool_ || kind == TypeClass::integer) begin_lifetime(destination);
+          }
         }
         ++i;
       }
@@ -1084,10 +1090,8 @@ class Gen {
     At v = child(a, m.operand);
     bool zeroed = value_initializes(v);
     Place p = begin_object(m.info.type, zeroed ? ir::Init::zero : ir::Init::indeterminate, ir::Storage::temporary);
-    initialize(p, v, zeroed);
-    ValueId ops[] = {p.ptr};
-    std::uint64_t imms[] = {word(ty(p.type))};
-    stateful(ir::Op::obj__begin, {}, ops, imms);
+    initialize(p, v, zeroed, /*select_class=*/false, /*materialized=*/true);
+    begin_lifetime(p);
     Ending end{p, m.destructor, ir::Storage::temporary};
     if (m.extended == 1) scopes_.back().push_back(end);
     else if (temps_.empty()) unsupported(a, "outside a full-expression");

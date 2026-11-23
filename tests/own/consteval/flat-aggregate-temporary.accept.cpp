@@ -21,3 +21,13 @@ static_assert(Limits{42, Capability::write, deny, true, 0x100000005ULL}.active);
 static_assert(Limits{42, Capability::write, deny, true, 0x100000005ULL}.bytes == 0x100000005ULL);
 static_assert(Limits{}.mode == unset);
 static_assert(Limits().bytes == 0);
+
+struct Earlier {
+  int first;
+  int second = first;
+};
+static_assert(Earlier{17}.second == 17);
+static_assert(Earlier{}.second == 0);
+
+constexpr int read_earlier(int value) { return Earlier{value}.second; }
+static_assert(read_earlier(23) == 23);
