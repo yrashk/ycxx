@@ -33,3 +33,15 @@ static_assert(DefaultRank<Matrix>::value == 3);
 
 template<class T, bool Rank = __array_rank(T)> struct Fits {};
 Fits<int[1]> accepted;
+
+template<bool> using Discard = int;
+template<class T> using DiscardedRank = Discard<__array_rank(T)>;
+template<class T> using ForwardDiscardedRank = DiscardedRank<T>;
+static_assert(__is_same(ForwardDiscardedRank<Incomplete[]>, int));
+
+template<class T, bool N = __array_rank(T)> using Ranked = IntValue<N>;
+template<class T> using ForwardRanked = Ranked<T>;
+template<class T> using ForwardOverride = Ranked<T, false>;
+static_assert(ForwardRanked<Incomplete[4]>::value == 1);
+static_assert(ForwardRanked<int>::value == 0);
+static_assert(ForwardOverride<Matrix>::value == 0);

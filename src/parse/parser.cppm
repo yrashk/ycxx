@@ -138,6 +138,7 @@ public:
   u32 pos() const { return i_ - begin_; }  // the current token's offset in the part
   u32 deferred_argument_checks() const { return deferred_argument_checks_; }
   u32 deferred_immediate_calls() const { return deferred_immediate_calls_; }
+  u32 deferred_rank_checks() const { return deferred_rank_checks_; }
   void bump() {
     half_ = false;
     if (i_ < end_) ++i_;
@@ -565,8 +566,18 @@ public:
     // still has to be valid when substituted ([temp.alias]).
     if (tmpl.kind == ast::DeclKind::type_alias && std::ranges::any_of(args, [&](const auto& a) { return s_->dependent(a); })) {
       ++deferred_argument_checks_;
-      if (s_->questions().alias_call_pattern(tmpl.entity) != sema::AliasCallPattern::none)
+      const auto pattern = s_->questions().alias_call_pattern(tmpl.entity);
+      if (pattern != sema::AliasCallPattern::none && pattern != sema::AliasCallPattern::rank_checks)
         ++deferred_immediate_calls_;
+      // A default may already have acquired its parameter type before the aliased type
+      // substitutes it again. Replay the written use to retain that conversion as well.
+      const auto params = s_->ins().seqs.elements(tmpl.template_params);
+      const auto missing = std::span(params).subspan(std::min(args.size(), params.size()));
+      const bool rank_default = std::ranges::any_of(missing, [&](const ast::TemplateParamSema& p) {
+        return p.has_default && s_->ins().values.is<ast::VDepOp>(p.default_.value) &&
+               s_->ins().values.get<ast::VDepOp>(p.default_.value).op == ast::DepOp::array_rank;
+      });
+      if (pattern == sema::AliasCallPattern::rank_checks || rank_default) ++deferred_rank_checks_;
     }
     return s_->class_template_id(tmpl, args, at);
   }
@@ -4057,8 +4068,10 @@ public:
           angle_ = saved;
           if (!expect(Tk::r_paren) || !ok) return {NodeId::none, begin, pos()};
           Ex result = s_->trait_expr(tr->trait, n, args, begin, pos());
-          if (tr->replay_dependent && s_->dependent(result))
+          if (tr->replay_dependent && s_->dependent(result)) {
             ++deferred_argument_checks_;  // Even an alias that erases the argument must replay it.
+            if (tr->trait == lex::TypeTrait::array_rank) ++deferred_rank_checks_;
+          }
           return result;
         }
       if (qualified_ahead()) return qualified_id(begin);
@@ -6413,6 +6426,7 @@ private:
   int angle_ = 0;               // inside a template argument or parameter list, outside parentheses
   u32 deferred_argument_checks_ = 0;  // checks a dependent canonical argument may not retain
   u32 deferred_immediate_calls_ = 0;
+  u32 deferred_rank_checks_ = 0;
   bool half_ = false;           // the current `>>` has had its first `>` taken by a template-id
 public:
   bool body = false;  // the part is a function body, not a declaration part

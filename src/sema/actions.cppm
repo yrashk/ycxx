@@ -84,7 +84,7 @@ struct GenericResult {
 
 class Sema;
 struct Ex;
-enum class AliasCallPattern { none, retained, may_erase };
+enum class AliasCallPattern { none, retained, may_erase, rank_checks };
 
 // What sema asks of its context (§B1.4, §B3). In the engine these are `visible_decls(::, name,
 // at item)` and fetches of `decl_sema`.

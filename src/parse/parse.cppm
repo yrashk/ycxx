@@ -3215,12 +3215,16 @@ private:
         const auto begin = ps_.pos();
         const auto calls = ps_.deferred_immediate_calls();
         const auto checks = ps_.deferred_argument_checks();
+        const auto ranks = ps_.deferred_rank_checks();
         auto t = ps_.type_id();
         if (!t || !alias_template(name, name_at, *t)) return bad();
         if (ps_.deferred_immediate_calls() != calls) {
           const auto kind = ps_.deferred_argument_checks() == checks ? sema::AliasCallPattern::retained
                                                                      : sema::AliasCallPattern::may_erase;
           p_->alias_call_patterns_.emplace(decls_.back().entity, Program::AliasCallPattern{k_, begin, ps_.pos(), kind});
+        } else if (ps_.deferred_rank_checks() != ranks) {
+          p_->alias_call_patterns_.emplace(decls_.back().entity,
+              Program::AliasCallPattern{k_, begin, ps_.pos(), sema::AliasCallPattern::rank_checks});
         }
         if (!ps_.expect(Tk::semi)) bad();
         return;
