@@ -147,24 +147,28 @@ def linux_object(world, scope, libycxx, readelf):
     # Use one project root for all commands, including the header-only library consumer.
     for name in ('native.cpp', 'peer.cpp'):
         (scope / name).write_bytes((fixtures / name).read_bytes())
-    flags = [LINUX, '-std=c++26', '-ffreestanding', *DISABLED, '-nostdinc', '-isystem', libycxx / 'include']
-    args = [*flags, '-I', libycxx / 'src/freestanding/new', '-c', 'native.cpp', '-o', 'native.o']
-    obj = scope / 'native.o'
-    images = []
-    for env in (world.cold, world.daemon):
-        obj.unlink(missing_ok=True)
-        result = world.cxx(args, scope, env, timeout=30)
-        assert result == (0, b'', b''), (args, result)
-        images.append(obj.read_bytes())
-    assert images[0] == images[1]
 
-    def metadata(*args):
+    def object_file(source, output, *flags):
+        args = [LINUX, '-std=c++26', *flags, '-c', source, '-o', output]
+        obj = scope / output
+        images = []
+        for env in (world.cold, world.daemon):
+            obj.unlink(missing_ok=True)
+            result = world.cxx(args, scope, env, timeout=30)
+            assert result == (0, b'', b''), (args, result)
+            images.append(obj.read_bytes())
+        assert images[0] == images[1], args
+        return obj
+
+    def metadata(obj, *args):
         result = subprocess.run([readelf, '-W', *args, obj], cwd=scope, env=world.cold,
                                 capture_output=True, text=True, timeout=30)
         assert result.returncode == 0, result
         return result.stdout
 
-    symbols = metadata('--sections', '--symbols', '--relocs')
+    flags = ('-ffreestanding', *DISABLED, '-nostdinc', '-isystem', libycxx / 'include')
+    obj = object_file('native.cpp', 'native.o', *flags, '-I', libycxx / 'src/freestanding/new')
+    symbols = metadata(obj, '--sections', '--symbols', '--relocs')
     for name in ('work', 'mark_cleanup', 'make_value', 'foreign'):
         assert re.search(rf'\bUND\s+{name}$', symbols, re.MULTILINE), (name, symbols)
     assert '.eh_frame' in symbols and '.gcc_except_table' not in symbols, symbols
@@ -172,14 +176,14 @@ def linux_object(world, scope, libycxx, readelf):
                          symbols), symbols
     plain, = (row.split() for row in symbols.splitlines() if row.split()[-1:] == ['plain_frame'])
     start, size = int(plain[1], 16), int(plain[2])
-    frames = metadata('--debug-dump=frames')
+    frames = metadata(obj, '--debug-dump=frames')
     assert set(re.findall(r'Augmentation:\s+"([^"]*)"', frames)) == {'zR'}, frames
     ranges = {(int(low, 16), int(high, 16))
               for low, high in re.findall(r'\bFDE\b[^\n]*\bpc=([0-9a-f]+)\.\.([0-9a-f]+)', frames)}
     assert size > 0 and (start, start + size) in ranges, (plain, frames)
 
     # The header's static linkage guard refers to the marker provided by this pinned source.
-    args = [*flags, '-c', libycxx / 'src/runtime/linkage/static.cpp', '-o', 'marker.o']
+    args = [LINUX, '-std=c++26', *flags, '-c', libycxx / 'src/runtime/linkage/static.cpp', '-o', 'marker.o']
     result = world.cxx(args, scope, world.cold, timeout=30)
     assert result == (0, b'', b''), (args, result)
     args = [LINUX, '-std=c++26', *DISABLED, '-nostdlib', 'peer.cpp', 'native.o', 'marker.o', '-o', 'program']
@@ -187,6 +191,17 @@ def linux_object(world, scope, libycxx, readelf):
     assert result == (0, b'', b''), (args, result)
     program = subprocess.run([scope / 'program'], cwd=scope, env=world.cold, capture_output=True, timeout=30)
     assert program.returncode == 0, program
+
+    cleanup = fixtures.parents[1] / 'unit/pipeline/linux_local_unwind/checked.cpp'
+    (scope / 'cleanup.cpp').write_bytes(cleanup.read_bytes())
+    images = []
+    for mode in MODE_REPLAY:
+        obj = object_file('cleanup.cpp', 'cleanup.o', *mode)
+        symbols = metadata(obj, '--sections', '--relocs')
+        for name in ('.gcc_except_table', '__gxx_personality_v0', '_Unwind_Resume'):
+            assert (name in symbols) == (not mode), (mode, name, symbols)
+        images.append(obj.read_bytes())
+    assert images[0] == images[2] and images[0] != images[1]
 
 
 def main():
