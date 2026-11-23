@@ -21,4 +21,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_
   add_test(NAME daemon.derived_virtual_destructor
     COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/derived_virtual_destructor.py
             $<TARGET_FILE:ycxxc> ${CMAKE_CXX_COMPILER} ${CMAKE_READELF})
+  add_test(NAME daemon.derived_virtual_destructor_alignment
+    COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/derived_virtual_destructor_alignment.py
+            $<TARGET_FILE:ycxxc> ${CMAKE_CXX_COMPILER})
 endif()
