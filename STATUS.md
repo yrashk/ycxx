@@ -1140,6 +1140,11 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   64 bits. Constant evaluation records the field values and code generation emits addressable
   storage for runtime use ([class.static.data], [dcl.init.list], [dcl.init.aggr]).
   [#262](https://github.com/yrashk/ycxx/issues/262)
+- Both native targets give an externally linked in-class static constexpr data member of an
+  ordinary namespace-scope class one address across translation units when its stored value needs
+  no relocations or runtime work. A member whose owner or declared type names an unnamed namespace
+  has local symbol binding.
+  [#903](https://github.com/yrashk/ycxx/issues/903)
 - Constant expressions can read fields of an already initialized namespace-scope constexpr
   aggregate with a trivial destructor, no bases, and ordinary public integral and enumeration
   fields whose scalar representations fit in 64 bits. The interpreter uses the ordinary record

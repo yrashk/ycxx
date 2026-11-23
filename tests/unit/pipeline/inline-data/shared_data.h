@@ -1,6 +1,15 @@
 #ifndef YCXX_INLINE_DATA_432_SHARED_DATA_H
 #define YCXX_INLINE_DATA_432_SHARED_DATA_H
 
+struct Descriptor { int first, second; };
+struct Record {
+    static constexpr int seed = 42;
+    static constexpr Descriptor descriptor = Descriptor{23, 47};
+};
+namespace {
+struct LocalRecord { static constexpr int seed = 42; };
+}
+
 namespace data {
 inline int initialized = 17;
 inline int zero_initialized;
@@ -27,6 +36,9 @@ int* peer_zero_address();
 int* peer_redeclared_address();
 int* peer_specialized_address();
 const int* peer_immutable_address();
+const int* peer_seed_address();
+const Descriptor* peer_descriptor_address();
+const int* peer_local_seed_address();
 
 int peer_values_match(int initialized, int zero, int redeclared, int specialized);
 void peer_write_values(int initialized, int zero, int redeclared, int specialized);
