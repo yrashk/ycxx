@@ -99,6 +99,10 @@ the expression form `t...[I]` is not done yet). Concrete constant template argum
 `Tag<auto{7}>` and integer-literal-led parenthesized conversions such as `Tag<auto(7)>`.
 [#286](https://github.com/yrashk/ycxx/issues/286)
 
+Fixed reference and single-pointer arguments can deduce through a unique most-derived
+base that matches a named class-template parameter.
+[#1144](https://github.com/yrashk/ycxx/issues/1144)
+
 Functional conversions can construct namespace-qualified class-template specializations with
 parentheses or braces, including through namespace aliases. [#697](https://github.com/yrashk/ycxx/issues/697)
 
