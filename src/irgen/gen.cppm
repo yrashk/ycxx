@@ -65,8 +65,8 @@ struct FunctionInput {
   std::uint32_t body_offset = 0;  // the declaration part's length in tokens
   // For the thunk of a constant expression (`{ return e; }`, query-engine.md §B7): the values of
   // the enclosing function's locals usable in constant expressions ([expr.const]), by local
-  // index. The thunk sets up their values at entry. A supported opaque record parameter is
-  // available only as an object designator. Other locals have no usable object.
+  // index. The thunk sets up their values at entry. A supported opaque record is available
+  // only as an object designator. Other locals have no usable object.
   bool thunk = false;
   std::span<const std::optional<ast::ConstId>> local_values{};
   // A non-static member function's `this` type ([expr.prim.this]): its implicit object argument,
@@ -98,8 +98,9 @@ struct FunctionInput {
     ast::EntityId owner = ast::EntityId::none;
     std::span<const ast::ConstId> values{};
   } initialized_fields{};
-  // By-value record parameters whose identity is available to a thunk. Their contents are
-  // unknown and their lifetimes began in the enclosing invocation. Sorted by local index.
+  // Record parameters and direct automatic receivers whose identity is available to a
+  // thunk. Their contents are unknown and their lifetimes began outside the evaluation.
+  // Sorted by local index.
   std::span<const std::uint32_t> opaque_record_locals{};
 };
 
@@ -451,7 +452,7 @@ class Gen {
       start_lifetime(p);
       slots_[i] = p;
     }
-    // The thunk imports known values and supported opaque parameter identities. Other
+    // The thunk imports known values and supported opaque record identities. Other
     // scalar objects have ended lifetimes and other record slots stay absent.
     for (uint32_t i = 0; fn_.thunk && i < slots_.size(); ++i) {
       if (slots_[i]) continue;
