@@ -2032,8 +2032,11 @@ public:
     diag_at(loc, Diag::convertibility_unsupported, name, target, source);
     return {NodeId::none, begin, end};
   }
-  // [meta.rel] uses existence of a base, regardless of access or the number of paths.
-  std::optional<bool> reaches_base(EntityId derived, EntityId base) {
+  // [meta.rel] uses existence of a base, regardless of access or the number of paths. With
+  // `virtual_only`, a virtual base class: one some class in the graph names with a virtual
+  // base-specifier ([class.mi]), not a nonvirtual base of a virtual base. None when a class on
+  // the way is not defined and no answer was found without it.
+  std::optional<bool> reaches_base(EntityId derived, EntityId base, bool virtual_only = false) {
     const Classes& records = classes();
     std::vector<EntityId> pending{derived};
     std::set<EntityId> visited;
@@ -2041,16 +2044,37 @@ public:
     while (!pending.empty()) {
       const EntityId current = pending.back();
       pending.pop_back();
-      if (current == base) return true;
+      if (current == base && !virtual_only) return true;
       if (!visited.insert(current).second) continue;
       const ClassRec* record = records.find(current);
       if (!record || !record->defined) {
         complete_graph = false;
         continue;
       }
-      for (const BaseRec& edge : record->bases) pending.push_back(edge.cls);
+      for (const BaseRec& edge : record->bases) {
+        if (virtual_only && edge.virtual_ && edge.cls == base) return true;
+        pending.push_back(edge.cls);
+      }
     }
     return complete_graph ? std::optional(false) : std::nullopt;
+  }
+  // A class-relation trait with a dependent operand ([meta.rel]) is decided once its operands are
+  // known, with completeness judged there ([temp.point]): when its class-template base or
+  // variable-template initializer is replayed, when its function template body is analysed again
+  // for an instantiation ([temp.inst]), or when its atomic constraint's satisfaction is checked.
+  // None elsewhere.
+  std::optional<Ex> dependent_class_relation(ast::DepOp op, QualType first, QualType second, u32 begin, u32 end) {
+    const engine::Loc loc = type_trait_loc(begin);
+    if (auto pattern = replayed_binary_type_trait(op, first, second, begin, end)) {
+      // Either operand becoming concrete at replay can change which classes need completion.
+      q_->record_dependent_type_trait_operand(loc);
+      return *pattern;
+    }
+    if (current_function != EntityId::none && templated()) {
+      q_->record_dependent_type_trait_operand(loc);
+      return dependent_node({}, begin, end, builtin(Builtin::bool_));
+    }
+    return trait_at_satisfaction(loc, begin, end);
   }
   Ex base_of_expr(QualType base_type, QualType derived_type, u32 begin, u32 end) {
     const Types& ts = types();
@@ -2062,19 +2086,7 @@ public:
       return {NodeId::none, begin, end};
     };
     if (ts.is_dependent(base) || ts.is_dependent(derived)) {
-      if (auto pattern = replayed_binary_type_trait(ast::DepOp::is_base_of, base, derived, begin, end)) {
-        // Either operand becoming concrete at replay can change whether Derived needs completion.
-        q_->record_dependent_type_trait_operand(loc);
-        return *pattern;
-      }
-      // A template's function body is analysed again with its arguments bound when it is
-      // instantiated ([temp.inst]), which evaluates the trait then, with Derived's completeness at
-      // the point of instantiation ([temp.point]).
-      if (current_function != EntityId::none && templated()) {
-        q_->record_dependent_type_trait_operand(loc);
-        return dependent_node({}, begin, end, builtin(Builtin::bool_));
-      }
-      if (auto at_satisfaction = trait_at_satisfaction(loc, begin, end)) return *at_satisfaction;
+      if (auto deferred = dependent_class_relation(ast::DepOp::is_base_of, base, derived, begin, end)) return *deferred;
       return fail(Diag::base_of_dependent);
     }
     if (!ts.is_class(base) || !ts.is_class(derived)) return bool_literal(false, begin, end);
@@ -2092,6 +2104,191 @@ public:
     if (auto result = reaches_base(d, b)) return bool_literal(*result, begin, end);
     return fail(Diag::base_of_unsupported, base_type, derived_type);
   }
+  // `__builtin_is_virtual_base_of(Base, Derived)` and `__is_pointer_interconvertible_base_of(Base,
+  // Derived)` ([meta.rel]) ignore cv. A nonclass or union operand gives false, and the same class
+  // gives `same`, complete or not. Distinct classes need a complete Derived: their entities then,
+  // or the result after a diagnostic.
+  std::expected<std::pair<EntityId, EntityId>, Ex> class_relation_operands(NameId name, QualType base_type,
+                                                                           QualType derived_type, bool same,
+                                                                           u32 begin, u32 end) {
+    const Types& ts = types();
+    const QualType base = Types::unqualified(ts.canonical(base_type));
+    const QualType derived = Types::unqualified(ts.canonical(derived_type));
+    const engine::Loc loc = type_trait_loc(begin);
+    if (!ts.is_class(base) || !ts.is_class(derived)) return std::unexpected(bool_literal(false, begin, end));
+    const auto base_union = is_union_type(base), derived_union = is_union_type(derived);
+    if (base_union == true || derived_union == true) return std::unexpected(bool_literal(false, begin, end));
+    if (!base_union || !derived_union) {
+      diag_at(loc, Diag::class_relation_unsupported, name, base_type, derived_type);
+      return std::unexpected(Ex{NodeId::none, begin, end});
+    }
+    const EntityId b = ts.class_of(base), d = ts.class_of(derived);
+    if (b == d) return std::unexpected(bool_literal(same, begin, end));
+    const auto complete_at_demand = q_->type_trait_at_demand(d, loc);
+    if (!(complete_at_demand ? *complete_at_demand : q_->is_complete_at_source(d))) {
+      if (!q_->type_trait_instantiation_failed(d)) diag_at(loc, Diag::class_relation_incomplete, derived_type, name);
+      return std::unexpected(Ex{NodeId::none, begin, end});
+    }
+    return std::pair{b, d};
+  }
+  // A class is not its own virtual base. The graph has no virtual edges until #310.
+  Ex virtual_base_of_expr(NameId name, QualType base_type, QualType derived_type, u32 begin, u32 end) {
+    if (types().is_dependent(base_type) || types().is_dependent(derived_type)) {
+      if (auto deferred = dependent_class_relation(ast::DepOp::is_virtual_base_of, base_type, derived_type, begin, end))
+        return *deferred;
+      diag_at(type_trait_loc(begin), Diag::class_relation_dependent, name);
+      return {NodeId::none, begin, end};
+    }
+    auto operands = class_relation_operands(name, base_type, derived_type, false, begin, end);
+    if (!operands) return operands.error();
+    if (auto result = reaches_base(operands->second, operands->first, true)) return bool_literal(*result, begin, end);
+    diag_at(type_trait_loc(begin), Diag::class_relation_unsupported, name, base_type, derived_type);
+    return {NodeId::none, begin, end};
+  }
+  // A standard-layout object is pointer-interconvertible with each of its base class subobjects
+  // ([basic.compound]), and a standard-layout class has no base type twice ([class.prop]), so
+  // the derivation is unambiguous. Access does not matter.
+  Ex pointer_interconvertible_base_of_expr(NameId name, QualType base_type, QualType derived_type, u32 begin, u32 end) {
+    const engine::Loc loc = type_trait_loc(begin);
+    if (types().is_dependent(base_type) || types().is_dependent(derived_type)) {
+      if (auto deferred = dependent_class_relation(ast::DepOp::is_pointer_interconvertible_base_of, base_type,
+                                                   derived_type, begin, end))
+        return *deferred;
+      diag_at(loc, Diag::class_relation_dependent, name);
+      return {NodeId::none, begin, end};
+    }
+    auto operands = class_relation_operands(name, base_type, derived_type, true, begin, end);
+    if (!operands) return operands.error();
+    const auto [b, d] = *operands;
+    std::optional<bool> result = reaches_base(d, b);
+    if (result == true) result = classes().standard_layout(d);
+    if (result) return bool_literal(*result, begin, end);
+    diag_at(loc, Diag::class_relation_unsupported, name, base_type, derived_type);
+    return {NodeId::none, begin, end};
+  }
+
+  // An enumeration's underlying type, once known: while its definition is read, too.
+  std::optional<QualType> enum_underlying(EntityId e) {
+    for (const EnumRec* record : {q_->defining_enum(e), classes().find_enum(e)})
+      if (record && record->underlying) return types().canonical(*record->underlying);
+    return std::nullopt;
+  }
+  // The non-static data members of a standard-layout class: all are declared in one class of its
+  // hierarchy ([class.prop]), itself or a base.
+  const std::vector<FieldRec>* standard_layout_members(EntityId cls) {
+    const ClassRec* record = classes().find(cls);
+    if (!record || !record->fields.empty()) return record ? &record->fields : nullptr;
+    for (const BaseRec& base : record->bases) {
+      const std::vector<FieldRec>* members = standard_layout_members(base.cls);
+      if (!members || !members->empty()) return members;
+    }
+    return &record->fields;
+  }
+  // Whether cv1 T1 and cv2 T2 are layout-compatible types ([basic.types.general]): the same type,
+  // enumerations with the same underlying type ([dcl.enum]), or layout-compatible standard-layout
+  // classes ([class.mem.general]). None when a fact it needs is not known.
+  std::optional<bool> layout_compatible(QualType first, QualType second) {
+    const Types& ts = types();
+    const QualType a = object_unqualified(ts.canonical(first)), b = object_unqualified(ts.canonical(second));
+    if (a == b) return true;
+    if (ts.is_enum(a) && ts.is_enum(b)) {
+      const auto x = enum_underlying(ts.enum_of(a)), y = enum_underlying(ts.enum_of(b));
+      if (!x || !y) return std::nullopt;
+      return Types::unqualified(*x) == Types::unqualified(*y);
+    }
+    if (!ts.is_class(a) || !ts.is_class(b)) return false;
+    const EntityId x = ts.class_of(a), y = ts.class_of(b);
+    const ClassRec* rx = classes().find(x);
+    const ClassRec* ry = classes().find(y);
+    if (!rx || !ry || !rx->defined || !ry->defined) return std::nullopt;
+    if (rx->union_ != ry->union_) return false;
+    for (EntityId c : {x, y}) {
+      const auto standard = classes().standard_layout(c);
+      if (standard != true) return standard;
+    }
+    const std::vector<FieldRec>* mx = standard_layout_members(x);
+    const std::vector<FieldRec>* my = standard_layout_members(y);
+    if (!mx || !my) return std::nullopt;
+    // Copies: deciding a member's type can read other class records.
+    const std::vector<FieldRec> fx = *mx, fy = *my;
+    if (fx.size() != fy.size()) return false;
+    // A struct's common initial sequence ends before a `[[no_unique_address]]` member when
+    // `__has_cpp_attribute(no_unique_address)` is nonzero; ycxx answers 0 for every attribute so
+    // far (#1141) and does not apply the attribute to the layout. A layout attribute the layout
+    // does not apply could also change a member's alignment.
+    const auto overlapping = [](const FieldRec& f) { return f.no_unique_address; };
+    if (std::ranges::any_of(fx, overlapping) || std::ranges::any_of(fy, overlapping) || rx->unapplied_layout ||
+        ry->unapplied_layout || q_->class_layout_uncertain(x) || q_->class_layout_uncertain(y))
+      return std::nullopt;
+    if (rx->union_) {
+      // Unions pair their members in any order. Layout compatibility is an equivalence, so any
+      // compatible partner will do; an undecided pair leaves the answer open only when no
+      // partner is found.
+      std::vector<bool> paired(fy.size(), false);
+      for (const FieldRec& f : fx) {
+        bool found = false, undecided = false;
+        for (std::size_t i = 0; i < fy.size() && !found; ++i) {
+          if (paired[i]) continue;
+          const auto same = layout_compatible(f.type, fy[i].type);
+          if (!same) undecided = true;
+          else if (*same) paired[i] = found = true;
+        }
+        if (!found) return undecided ? std::nullopt : std::optional(false);
+      }
+      return true;
+    }
+    // Structs: the common initial sequence must be all members of both.
+    for (std::size_t i = 0; i < fx.size(); ++i) {
+      const FieldRec &f = fx[i], &g = fy[i];
+      if (f.bit_width != g.bit_width) return false;
+      const auto same = layout_compatible(f.type, g.type);
+      if (same != true) return same;
+      const auto fa = layout_of(f.type, true), ga = layout_of(g.type, true);
+      if (!fa || !ga) return std::nullopt;
+      if (*fa != *ga) return false;
+    }
+    return true;
+  }
+  // `__is_layout_compatible(T, U)` ([meta.rel]): each operand must be complete, cv void or an
+  // array of unknown bound.
+  Ex layout_compatible_expr(NameId name, QualType first, QualType second, u32 begin, u32 end) {
+    const Types& ts = types();
+    const engine::Loc loc = type_trait_loc(begin);
+    if (ts.is_dependent(first) || ts.is_dependent(second)) {
+      if (auto deferred = dependent_class_relation(ast::DepOp::is_layout_compatible, first, second, begin, end))
+        return *deferred;
+      diag_at(loc, Diag::class_relation_dependent, name);
+      return {NodeId::none, begin, end};
+    }
+    const auto unsupported = [&]() -> Ex {
+      diag_at(loc, Diag::class_relation_unsupported, name, first, second);
+      return {NodeId::none, begin, end};
+    };
+    for (QualType operand : {first, second}) {
+      const QualType type = ts.canonical(operand);
+      if (ts.is_array(type) && ts.rec(type).bound_value == ConstId::none) continue;
+      const QualType element = ts.innermost_array_element(type);
+      bool complete = true;
+      if (ts.is_class(element)) {
+        const EntityId cls = ts.class_of(element);
+        const auto demand = q_->type_trait_at_demand(cls, loc);
+        complete = demand ? *demand : q_->is_complete_at_source(cls);
+        if (!complete && q_->type_trait_instantiation_failed(cls)) return {NodeId::none, begin, end};
+      } else if (ts.is_enum(element)) {
+        const EntityId e = ts.enum_of(element);
+        if (auto fixed = q_->defining_enum_is_fixed(e)) complete = *fixed;
+        else if (const EnumRec* record = classes().find_enum(e)) complete = record->fixed || record->defined;
+        else return unsupported();
+      }
+      if (!complete) {
+        diag_at(loc, Diag::class_relation_incomplete, element, name);
+        return {NodeId::none, begin, end};
+      }
+    }
+    if (auto result = layout_compatible(first, second)) return bool_literal(*result, begin, end);
+    return unsupported();
+  }
+
   // The owning replay checks class completeness at the point of instantiation
   // ([meta.unary.prop]). Among these traits, only finality requires a complete union.
   Ex class_property_trait_expr(ast::DepOp op, QualType type, u32 begin, u32 end)
@@ -2157,6 +2354,10 @@ public:
     case is_trivially_destructible:
       return destructibility_expr(ast::DepOp::is_trivially_destructible, name, args[0], begin, end);
     case is_base_of: return base_of_expr(args[0], args[1], begin, end);
+    case is_virtual_base_of: return virtual_base_of_expr(name, args[0], args[1], begin, end);
+    case is_pointer_interconvertible_base_of:
+      return pointer_interconvertible_base_of_expr(name, args[0], args[1], begin, end);
+    case is_layout_compatible: return layout_compatible_expr(name, args[0], args[1], begin, end);
     case reference_converts_from_temporary:
       return reference_temporary_expr(ast::DepOp::reference_converts_from_temporary, name, args[0], args[1], begin, end);
     case reference_constructs_from_temporary:
@@ -7347,7 +7548,8 @@ public:
   }
 
   // A builtin that is a C library function: a call of its implicit declaration, whose arguments
-  // are copy-initialized parameters as in any call ([expr.call]/7).
+  // are copy-initialized parameters as in any call ([expr.call]/7). The call carries the
+  // function's `constant`, so that constant evaluation reads the bytes itself (`ir::BuiltinFn`).
   Ex builtin_library_call(const StringFunction& f, std::vector<Ex> args, u32 begin, u32 end) {
     const ast::DeclSema d = w_->string_function(f);
     const auto& signature = types().rec(d.type);
@@ -7365,7 +7567,7 @@ public:
     const ExprInfo fn_info{d.type, ValueCategory::lvalue, 0};
     const Ex callee = node(ast::DeclRef{fn_info, d.entity}, begin, begin, fn_info);
     const ExprInfo info{result, ValueCategory::prvalue, 0};
-    return node(ast::Call{info, d.entity, at(callee, begin), b_->list(converted)}, begin, end, info);
+    return node(ast::Call{info, d.entity, at(callee, begin), b_->list(converted), f.constant}, begin, end, info);
   }
 
   // Only send closed, read-only expressions to the fresh constant evaluator. In particular

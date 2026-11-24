@@ -144,6 +144,9 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
 - **`tools/test <paths>` with no stage name runs every stage, `build` included.** Meant to
   check a few tests in a fresh worktree, it started a full build there.
   - Do: name the stages, as in `YCXX=<binary> tools/test core own/pp/x`, or `policy` alone.
+  - Hit again on #218, with oracles (`--cxx clang`): it built beside a background `tools/build`,
+    and two Ninja runs in one directory broke a module ("imports must be built before being
+    imported"). The rebuild cost 15 minutes on a loaded machine. Oracle runs need no build either.
   - Learned on #659.
 - **A reviewer running your binary blocks your rebuilds.** On #337 the reviewer probed with the
   worktree's `build/bin/ycxx`, so the next step could not be built for 15 minutes.
@@ -421,6 +424,18 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
   - Key a selection by the cells it covers, never by row numbers: a live feed, a sort or a
     filter moves the rows under it (#636's one P1).
   - Learned on #635 and #636.
+- **Show a terminal UI's change as pictures, rendered from a pty.** Polishing the trace browser's
+  layout (#1119) needed screenshots at fixed sizes, before and after, for the user to steer.
+  - Do: run the program under Python's `pty.fork` with `TIOCSWINSZ` set, send keys with pauses,
+    feed the output to `pyte`, and draw its cells with Pillow. Feed only the last frame (from
+    the last `ESC [ 1 ; 1 H`); a live build draws thousands, and pyte took minutes on all of them.
+    pyte ignores SGR 2 (faint), so map it to an attribute the program never uses before feeding.
+  - Copy a rebuilt binary to a new path (`rm` first). macOS kills a binary overwritten in place
+    with `SIGKILL` and no output, which looks like a crash.
+  - Give a scratch folder a `.git`, and stop its daemon when you replace the binary. The daemon's
+    root is the nearest `.git`, so a folder under `/tmp` without one was rooted at `$HOME`, and
+    runs hung behind stale daemons of replaced binaries until they were killed.
+  - Learned on #1119.
 - **Reduce a compiler crash from the build system's exact command, with a script.** A GCC ICE
   under CMake seemed to vanish when re-run by hand. Two things cost about 20 minutes of
   bisecting:
