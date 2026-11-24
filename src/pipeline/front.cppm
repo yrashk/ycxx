@@ -1137,6 +1137,17 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
       return internal_type(r.inner);
     return false;
   };
+  // A friend function or function template specialization a class template's specialization
+  // defines, whose signature names a class local to the unit, a closure type included: it is
+  // local too, as the specialization's members are ([basic.link], #259).
+  auto tu_local_class_friend = [&](EntityId f) {
+    const sema::EntityRec& r = world.entities.rec(f);
+    if (!program.class_friend(f) && (r.templ == EntityId::none || !program.class_friend(r.templ))) return false;
+    const sema::TypeRec t = world.types.rec(r.type);
+    return internal_type(t.inner) || std::ranges::any_of(t.params, [&](QualType p) {
+             return internal_type(p) || names_tu_local(program, p, /*include_value_types=*/true);
+           });
+  };
   auto ordinary_class_template_member = [&](const sema::EntityRec& member) {
     if (member.kind != sema::EntityKind::function || member.templ != EntityId::none || member.scope == EntityId::none)
       return false;
@@ -1206,6 +1217,7 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
     if (linkage == ast::Linkage::external && std::ranges::any_of(r.args, [&](const ast::TemplateArg& arg) {
           return names_tu_local(program, arg, /*include_value_types=*/false);
         })) linkage = ast::Linkage::internal;
+    if (linkage == ast::Linkage::external && fn && tu_local_class_friend(e)) linkage = ast::Linkage::internal;
     // A constructor, destructor or ordinary class-template member binds locally when its
     // owner is TU-local, including a specialization for the value of a TU-local enum ([basic.link]).
     if ((r.kind == sema::EntityKind::constructor || r.kind == sema::EntityKind::destructor || ordinary_class_template_member(r)) &&
@@ -1493,8 +1505,7 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
       // A friend function a class template's specialization defines is inline as its members
       // are ([class.friend]/7, #259).
       const bool class_friend = (in->decl.flags & sema::decl_flag::friend_) && entity.kind == sema::EntityKind::function &&
-                                entity.templ == EntityId::none &&
-                                !names_tu_local(program, in->decl.type, /*include_value_types=*/true);
+                                entity.templ == EntityId::none && !tu_local_class_friend(in->spec);
       if (entity.kind == sema::EntityKind::destructor || ordinary_member || class_friend)
         coalesce_inline_function(tu.functions.back(), true);
     }

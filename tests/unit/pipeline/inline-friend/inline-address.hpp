@@ -39,7 +39,18 @@ struct Cell {
     }
 };
 
+// A specialization for a closure type is local to each unit, and so is its friend ([basic.link]).
+template <class T>
+struct Holder {
+    T held;
+
+    friend int size_of(const Holder&) {
+        return int(sizeof(T));
+    }
+};
+
 int peer_take();
+int peer_local_size();
 }
 
 namespace derived_operand { struct Item; }

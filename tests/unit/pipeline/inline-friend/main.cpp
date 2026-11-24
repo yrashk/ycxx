@@ -1,5 +1,12 @@
 #include "inline-address.hpp"
 
+// The same closure type name as the peer's, of a different size.
+static int local_size() {
+    int x = 1;
+    auto f = [x] { return x; };
+    return size_of(inline_template::Holder<decltype(f)>{f});
+}
+
 int main() {
     inline_address::Item item{29};
     inline_address::Reader local_address = &inline_address::read;
@@ -9,5 +16,6 @@ int main() {
     nominated_operand::Item nominated;
     if (derived + 1 != 23 || nominated + 1 != 31) return 3;
     inline_template::Cell<int> cell{5};
-    return take(cell) == 6 && inline_template::peer_take() == 8 ? 0 : 4;
+    if (take(cell) != 6 || inline_template::peer_take() != 8) return 4;
+    return local_size() == 4 && inline_template::peer_local_size() == 16 ? 0 : 5;
 }

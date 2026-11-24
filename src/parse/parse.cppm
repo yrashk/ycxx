@@ -5675,11 +5675,22 @@ private:
     // A dependent noexcept-specifier is evaluated for each specialization when it is needed
     // ([except.spec]/13), in the specialization's scope.
     if (d.noexcept_tokens) p_->member_exceptions_.emplace(sem.entity, Program::MemberException{k_, d.noexcept_tokens});
+    // A function the namespace defined already is redefined ([basic.def.odr]/1); two
+    // specializations defining one function are `instantiate_class`'s to report.
+    if (inst_ && !own_head) {
+      const auto known = p_->definitions_.find(std::to_underlying(sem.entity));
+      const bool ours = known != p_->definitions_.end() && known->second == k_;
+      if (!ours && p_->function_defined_before(sem.entity, inst_->point)) {
+        s_.diag(d.name_at, Diag::redefinition, d.name);
+        return bad();
+      }
+    }
     decls_.push_back(sem);
     p_->templated_friend_items_.insert(k_);
-    // A template's specializations are instantiated from its definition (`Program::instance`):
-    // an ordinary class's, or a class template specialization's, not the pattern's.
-    if (own_head && (inst_ || p_->enclosing_heads(k_).empty())) p_->declared(sem, k_);
+    // Its declaration, an ordinary class's or a class template specialization's, not the
+    // pattern's: what makes it constexpr or consteval ([dcl.constexpr]), and for a template the
+    // definition its specializations are instantiated from (`Program::instance`).
+    if (inst_ || p_->enclosing_heads(k_).empty()) p_->declared(sem, k_);
   }
 
   // A typedef-name or alias-declaration that is a member of class `c` ([class.mem],
