@@ -501,7 +501,10 @@ written default member initializer are value-initialized.
   (`public`, `protected`, `private`) and friend functions and classes. Unqualified friend
   definitions in namespace-scope classes and class templates, and friend function templates
   defined there, are found by argument-dependent lookup or through a matching namespace
-  declaration. [#259](https://github.com/yrashk/ycxx/issues/259)
+  declaration. A class or class template can befriend a class template
+  (`template <class U> friend class X;`), granting access to all its specializations, and a
+  class template can befriend classes, including ones that depend on its arguments.
+  [#259](https://github.com/yrashk/ycxx/issues/259)
   A non-template class can default `operator==` as a member or a friend. `!=` and reversed `==`
   then use it as rewritten candidates. Defaulted `<=>` is not done yet.
   [#295](https://github.com/yrashk/ycxx/issues/295)

@@ -2745,6 +2745,18 @@ Fable decided the representation (ast.md §6.6); the Opus session wrote the code
 - **Friend function templates** defined in a class or class template
   (`template <class T> friend R f(…) {…}`) are function templates of the namespace that only ADL
   finds; a class template's specialization binds its own arguments for theirs (#259).
+- **Friend class templates** (`template <class U> friend class X;`, `friend_class_template` in
+  parse.cppm, [temp.friend]/1, #259), in a class or a class template: `ClassRec::friends` holds
+  the class template's entity, and `ClassRec::befriends` grants access to each of its
+  specializations, from the primary or a partial specialization. An unqualified name is looked
+  up in the innermost enclosing namespace only ([dcl.type.elab]/4); finding none, it names a
+  class template of that namespace, not visible until declared there. `N::X` must name an
+  earlier class template. The heads must agree in kinds, packs and non-dependent non-type
+  parameter types (`conflicting declaration` otherwise), and may give no default arguments. A
+  head's constraints are not compared with the template's yet (#1182).
+- **Class friends in class templates** (`friend class X;`, `friend N::X;`, `friend struct N::X<T>;`,
+  `friend C<T>;`) are analysed again in each specialization with its arguments; a dependent one
+  befriends nothing in the pattern.
 - **Checks** (`Sema::accessible`, `check_access`): a private or protected member may be named in
   a member function or default member initializer of its class, in the class's scope (the
   initializer of a static data member defined outside it), or in a friend function or friend
@@ -2752,9 +2764,13 @@ Fable decided the representation (ast.md §6.6); the Opus session wrote the code
   and unqualified names, as a static member, enumerator or nested type, for the member function
   overload resolution chooses ([class.access]/4), and for the constructor an initialization
   chooses. Protected is checked as private until base classes exist.
-- C-linkage friend definitions, other hidden friend operators, defaults on friend declarations,
-  non-defining friends in class templates and non-defining friend templates, destructor access, private member operator wording, and elaborated types
-  in member parameters remain under [#259](https://github.com/yrashk/ycxx/issues/259).
+- C-linkage friend definitions, defaults on friend declarations, non-defining friend functions in
+  class templates, private member operator wording, and elaborated types in member parameters
+  remain under [#259](https://github.com/yrashk/ycxx/issues/259). Hidden friend `~` and compound
+  assignment operators are [#1178](https://github.com/yrashk/ycxx/issues/1178), non-defining
+  friend function templates [#1179](https://github.com/yrashk/ycxx/issues/1179), friends with a
+  trailing requires-clause in class templates [#1180](https://github.com/yrashk/ycxx/issues/1180)
+  and deleted friend function templates [#1181](https://github.com/yrashk/ycxx/issues/1181).
   Both targets coalesce these inline friend definitions across objects (#422, [#124](https://github.com/yrashk/ycxx/issues/124)).
 - Both ELF and Mach-O coalesce eligible nonthrowing, nonvirtual in-class destructor definitions
   and implicitly defined destructors, including those of class-template specializations. A
