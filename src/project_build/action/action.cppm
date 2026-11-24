@@ -209,8 +209,8 @@ std::expected<pid_t, std::string> spawn(const fs::path& cwd, Command& command) {
   if (int error = isolate_spawn(files.state, attributes))
     return std::unexpected(os_error("cannot close inherited action descriptors", error));
   sigset_t signals;
-  ::sigemptyset(&signals);
-  ::sigaddset(&signals, SIGPIPE);
+  sigemptyset(&signals);
+  sigaddset(&signals, SIGPIPE);
   if (int error = ::posix_spawnattr_setsigdefault(&flags.state, &signals))
     return std::unexpected(os_error("cannot set action signal defaults", error));
   if (int error = ::posix_spawnattr_setflags(&flags.state, attributes))
