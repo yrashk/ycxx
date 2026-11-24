@@ -244,7 +244,8 @@ What is true of the code today. Work in progress and its owners are tracked in
     in `intmax_t`/`uintmax_t` (`:cond`), with `defined`, `__has_include`,
     `__has_include_next`, `__has_embed`, and the `__has_*` probes answering 0;
   - `#line` (presumed lines and names), `#error`, `#warning`, `_Pragma`, `#pragma once`
-    (other pragmas pass through to `-E`), and the null directive;
+    (other pragmas pass through to `-E`), and the null directive. Compiler diagnostics report the
+    text of `#error` and `#warning` in the main file and included headers (#172);
   - module and import lines go on to phase 7, their keywords flagged `tok_flag::directive`.
     Header-unit imports are diagnosed as unsupported.
   - `#embed` and `__has_embed` with `limit`, `offset`, `prefix`, `suffix` and `if_empty` (#125).
