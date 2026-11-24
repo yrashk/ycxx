@@ -624,7 +624,8 @@ public:
         if (!elaborated && !prefix_bases.empty() &&
             (name == static_initializer_name_ || own_initializer_static(name))) return std::nullopt;
         if (auto m = q_->earlier_member(name, elaborated)) {
-          if (m->flags & decl_flag::template_) return std::nullopt;  // a member alias template, not a type
+          if (m->kind == ast::DeclKind::type_alias && (m->flags & decl_flag::template_))
+            return std::nullopt;  // a member alias template, not a type
           if (m->kind == ast::DeclKind::enum_ || m->kind == ast::DeclKind::type_alias) return m->type;
           if (!elaborated && (m->kind == ast::DeclKind::data_member || m->kind == ast::DeclKind::variable ||
                               m->kind == ast::DeclKind::enumerator ||
