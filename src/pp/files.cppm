@@ -158,7 +158,7 @@ struct Config {
     if (freestanding) h.uint(u8(4));
     if (!exceptions_enabled) h.uint(u8(5));
     if (!rtti_enabled) h.uint(u8(6));
-    if (pic != 0) h.uint(u8(7)).uint(pic);
+    if (pic != 0 && !target->always_pic) h.uint(u8(7)).uint(pic);  // always PIC: the options change nothing
     return h.finish();
   }
 };

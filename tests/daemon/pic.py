@@ -149,8 +149,7 @@ def check(world, libycxx, host, linker):
     pic_obj.write_bytes(snapshots[1])
     check_exports(Elf(pic_obj))
 
-    compile_database(world, scope)
-    world.same_daemon('pic mode and compile database replay', pid)
+    world.same_daemon('pic mode', pid)
 
     run(host, *PEER, '-DPIC_PROVIDER', '-c', 'peer.cpp', '-o', 'provider.o')
     run(linker, '-shared', '-z', 'text', '-z', 'defs', '-o', 'libexports.so', pic_obj, 'provider.o')
@@ -175,15 +174,15 @@ def check(world, libycxx, host, linker):
 
 
 def main():
-    # PARITY: by design: the relocation and shared-link checks use x86-64 Linux ELF.
-    if not NATIVE_LINUX:
-        return 0
     ycxx, libycxx = (Path(arg).resolve() for arg in sys.argv[1:3])
     world = Env(str(ycxx))
     for env in (world.base, world.cold, world.daemon):
         env.update(LC_ALL='C', YCXX_THREADS='2')
     try:
-        check(world, libycxx, *sys.argv[3:])
+        compile_database(world, world.scope.resolve())
+        # PARITY: by design: the relocation and shared-link checks use x86-64 Linux ELF.
+        if NATIVE_LINUX:
+            check(world, libycxx, *sys.argv[3:])
     finally:
         world.close()
     return bool(failures)

@@ -739,7 +739,6 @@ namespace {
 // ycxx does not take.
 void checking_options(std::span<const std::string_view> args, bool std, std::vector<std::string>& out) {
   pp::Config scratch;
-  scratch.target = pp::native_target;
   for (std::size_t i = 0; i < args.size(); ++i) {
     // Dependency-output operands are not options of the syntax check, even if they start with '-'.
     if (args[i] == "-MF" || args[i] == "-MT") {
@@ -750,17 +749,13 @@ void checking_options(std::span<const std::string_view> args, bool std, std::vec
     if (auto taken = pp::take_option(args, i, scratch); taken && *taken) {
       for (std::size_t k = from; k <= i; ++k) out.emplace_back(args[k]);
     } else if (args[i] == "--target" && i + 1 < args.size()) {
-      if (const auto* target = ast::target_for_triple(args[i + 1])) {
-        scratch.target = target;
+      if (ast::target_for_triple(args[i + 1])) {
         out.emplace_back(args[i]);
         out.emplace_back(args[i + 1]);
       }
       ++i;
     } else if (args[i].starts_with("--target=")) {
-      if (const auto* target = ast::target_for_triple(args[i].substr(9))) {
-        scratch.target = target;
-        out.emplace_back(args[i]);
-      }
+      if (ast::target_for_triple(args[i].substr(9))) out.emplace_back(args[i]);
     } else if (args[i] == "-o" || args[i] == "--dynamic-linker") {
       ++i;
     } else if ((std && args[i].starts_with("-std=")) || args[i].starts_with("-ftemplate-depth=") ||
