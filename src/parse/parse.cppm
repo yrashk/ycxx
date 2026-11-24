@@ -6852,7 +6852,7 @@ private:
         const bool aggregate = spec.is_constexpr && types.is_class(d.type) && s_.as<ast::InitList>(init);
         sema::Evaluated v = list_initialization || aggregate ? evaluator.evaluate_initializer(init) : evaluator.evaluate(init);
         if (!v.value) {
-          if (!v.diagnosed_failure) s_.diag(at, usable ? Diag::not_constant : Diag::nonconstant_initializer, v.reason);
+          s_.diag(at, usable ? Diag::not_constant : Diag::nonconstant_initializer, v.reason);
           declare_member(ConstId::none, {});
           return false;
         }
@@ -7556,7 +7556,7 @@ private:
       if (v.value) {
         value = *v.value;
         p_->set_constant(sem.entity, value, k_);  // a reference is potentially constant ([expr.const.init])
-      } else if (!v.dependent && !v.diagnosed_failure) {
+      } else if (!v.dependent && !v.diagnosed_failure()) {
         dynamic_ok(at, v.reason);
       }
     };
@@ -7586,7 +7586,7 @@ private:
           if (v.value) {
             value = *v.value;
             if (spec.is_constexpr) p_->set_constant(sem.entity, *v.value, k_);
-          } else if (!v.diagnosed_failure) {
+          } else if (!v.diagnosed_failure()) {
             dynamic_ok(b->begin, v.reason);
           }
         }
@@ -7620,7 +7620,7 @@ private:
             if (spec.is_constexpr || (sema::Types::is_const(d.type) && !sema::Types::is_volatile(d.type) &&
                                       types.is_integral(d.type)))
               p_->set_constant(sem.entity, *v.value, k_);
-          } else if (!v.diagnosed_failure) {
+          } else if (!v.diagnosed_failure()) {
             dynamic_ok(e.begin, v.reason);
           }
         }
@@ -7648,7 +7648,7 @@ private:
           value = *v.value;
           if (spec.is_constexpr || (sema::Types::is_const(d.type) && !sema::Types::is_volatile(d.type) && types.is_integral(d.type)))
             p_->set_constant(sem.entity, *v.value, k_);
-        } else if (!v.diagnosed_failure) {
+        } else if (!v.diagnosed_failure()) {
           dynamic_ok(open, v.reason);
         }
       } else if (init.ok()) {
@@ -9169,7 +9169,7 @@ public:
       if (sema::survives_substitution(d.id)) hard.push_back(d);
       failed = true;
     }
-    if (q_.observed_type_trait_failure || q_.observed_variable_instantiation_failure) return std::nullopt;
+    if (q_.observed_type_trait_failure) return std::nullopt;
     if (failed) return false;
     QualType ty = sema::Types::unqualified(s_.types().canonical(s_.rvalue(e).type()));
     if (!s_.types().is(ty, sema::Builtin::bool_)) {
@@ -9178,7 +9178,7 @@ public:
       return false;
     }
     sema::Evaluated v = sema::Evaluator(s_, q_).evaluate(s_.rvalue(e));
-    if (v.diagnosed_failure) return std::nullopt;
+    if (v.type_trait_failure) return std::nullopt;
     if (!v.value) {
       s_.diag(0, Diag::constraint_not_constant, v.reason);
       hard.push_back(sink_.back());

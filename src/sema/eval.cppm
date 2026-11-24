@@ -92,8 +92,12 @@ struct Evaluated {
   // The expression is value-dependent ([temp.dep.constexpr]): it is evaluated when the template is
   // instantiated. Also set when instantiation gave up at its limit, which was diagnosed already.
   bool dependent = false;
-  // A demanded specialization already reported the error at its original spelling.
-  bool diagnosed_failure = false;
+  // A demanded specialization already diagnosed a type trait at its original spelling.
+  bool type_trait_failure = false;
+  // The global that caused this evaluation to fail already diagnosed its initializer.
+  bool variable_instantiation_failure = false;
+
+  bool diagnosed_failure() const { return type_trait_failure || variable_instantiation_failure; }
 };
 
 class Evaluator {
@@ -147,7 +151,7 @@ public:
     ByteEvaluation bytes{{commit(receiver), commit(size), commit(data), local}};
     const Evaluated value = evaluate(s_->void_prvalue(at, receiver.end), false, {}, &bytes);
     if (!value.constant || !bytes.result.bytes) {
-      if (!value.diagnosed_failure && !(value.dependent && q_->instantiation_gave_up()))
+      if (!value.type_trait_failure && !(value.dependent && q_->instantiation_gave_up()))
         s_->diag(at, Diag::not_constant, value.reason);
       return std::nullopt;
     }
@@ -213,20 +217,26 @@ private:
     interp::Outcome out = interp::evaluate(host, in, s_->world().target, body->body, EntityId::none, {}, std::move(config),
                                             bytes ? &bytes->result : nullptr).run();
     if (out.status != interp::Outcome::Status::value) {
-      if (host.type_trait_failure ||
-          (out.failure.global != EntityId::none && q_->variable_instantiation_failed(out.failure.global)))
-        return {std::nullopt, reason_unsupported, false, false, true};
-      if (q_->instantiation_gave_up()) return {std::nullopt, reason_unsupported, false, true};
+      Evaluated result{std::nullopt};
+      result.variable_instantiation_failure = out.failure.global != EntityId::none &&
+                                              q_->variable_instantiation_failed(out.failure.global);
+      result.type_trait_failure = host.type_trait_failure;
+      if (result.type_trait_failure) return result;
+      if (q_->instantiation_gave_up()) {
+        result.dependent = true;
+        return result;
+      }
       interp::Failure f = out.failure;
       // A missing interpreter operation may hide a binding that requires static initialization.
       if (reference_initializer && (f.reason == interp::Reason::unsupported || f.reason == interp::Reason::unsupported_constant ||
                                     f.reason == interp::Reason::callee_unsupported))
-        return {};
+        return result;
       // A selected default can also read a field before its lifetime has begun.
       if (f.reason == interp::Reason::outside_lifetime && initialized_fields.owner == EntityId::none &&
           !f.stack.empty() && f.stack[0].function == EntityId::none)
         f.reason = interp::Reason::not_usable;
-      return {std::nullopt, reason_arg(f)};
+      result.reason = reason_arg(f);
+      return result;
     }
     if (out.values.empty() && s_->types().is_void(e.type())) return {std::nullopt, 0, true};
     if (out.values.size() != 1) return {};
@@ -296,7 +306,7 @@ public:
     }
     const Evaluated result = evaluate_initializer(expression);
     if (!result.value) {
-      if (!result.diagnosed_failure) s_->diag(expression.begin, Diag::not_constant, result.reason);
+      if (!result.type_trait_failure) s_->diag(expression.begin, Diag::not_constant, result.reason);
       return std::nullopt;
     }
     if (!annotation_argument_value(*result.value)) {
