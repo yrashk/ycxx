@@ -113,6 +113,11 @@ C++26 reflection annotations on class heads and ordinary function declarations a
 constant payloads and retain their types for compiler consumers.
 [#662](https://github.com/yrashk/ycxx/issues/662)
 
+Constant evaluation can dispatch immediate virtual functions on supported completed
+local objects. Base reference calls select the final overrider and keep the statically
+selected default arguments. Qualification calls the named implementation.
+[#1097](https://github.com/yrashk/ycxx/issues/1097)
+
 **Preprocess binary resources.** Both targets support `#embed` and `__has_embed` with the standard
 parameters. [#125](https://github.com/yrashk/ycxx/issues/125)
 
