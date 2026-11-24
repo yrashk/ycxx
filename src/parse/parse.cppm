@@ -2132,12 +2132,19 @@ public:
     return {std::to_underlying(p_->id(dmi.item)), dmi.begin - p_->items().items[dmi.item].begin + offset};
   }
   bool in_type_trait_pattern() const override { return retain_type_trait_pattern; }
+  // A replay owning the trait's tokens, where a concrete operand is judged at its written source.
+  // An atom's satisfaction is not one: its concrete operands keep the check's own point.
   bool in_type_trait_replay() const override { return type_trait_demand.has_value(); }
   void record_dependent_type_trait_operand(engine::Loc loc) override {
     p_->dependent_type_trait_operands_.emplace(loc.item, loc.offset);
   }
+  // Where a type trait whose operands were dependent where it is written is answered: the
+  // replay's demand, or where an atomic constraint's satisfaction is checked ([temp.constr.atomic]).
+  std::optional<u32> type_trait_demand_point() const {
+    return satisfying_atom ? std::optional(point()) : type_trait_demand;
+  }
   bool replaying_type_trait_operand(engine::Loc loc) override {
-    return type_trait_demand && dependent_type_trait_operand(loc);
+    return type_trait_demand_point() && dependent_type_trait_operand(loc);
   }
   // Whether the type trait at `loc` had dependent operands where its template defines it.
   bool dependent_type_trait_operand(engine::Loc loc) const {
@@ -2148,9 +2155,10 @@ public:
     // dependent in its body is answered at the end, as a function template's instantiation is.
     if (generic_at_end && dependent_type_trait_operand(loc)) return p_->is_complete(c, p_->end(), true, true);
     if (!replaying_type_trait_operand(loc)) return std::nullopt;
-    return p_->is_complete(c, *type_trait_demand, true, true);
+    return p_->is_complete(c, *type_trait_demand_point(), true, true);
   }
   bool generic_at_end = false;
+  bool satisfying_atom = false;
   bool type_trait_instantiation_failed(EntityId e) override {
     const bool failed = p_->failed_type_trait_instantiations_.contains(e);
     observed_type_trait_failure |= failed;
@@ -3376,7 +3384,7 @@ private:
         bool dtor = ps_.kind(next) == Tk::tilde && ps_.kind(next + 1) == Tk::identifier &&
                     ps_.name_of(ps_.tok(next + 1)) == cname;
         if (ctor || dtor) {
-          auto flags = constructor_flags(ctor_at);
+          auto flags = constructor_flags(ctor_at, dtor);
           if (!flags) return bad();
           return out_of_class_special(*sc->type, next - ctor_at, *flags);
         }
@@ -5056,7 +5064,7 @@ private:
     if (ctor || dtor) {
       std::optional<u32> virtual_at;
       std::optional<u32> explicit_at;
-      auto flags = constructor_flags(ctor_at, dtor ? &virtual_at : nullptr, ctor ? &explicit_at : nullptr);
+      auto flags = constructor_flags(ctor_at, dtor, dtor ? &virtual_at : nullptr, ctor ? &explicit_at : nullptr);
       if (!flags) return bad();
       if (explicit_at && (!s_.template_scopes.empty() || inst_ || member_template_)) {
         s_.diag(*explicit_at, Diag::not_supported, Tk::kw_explicit);
@@ -5721,7 +5729,7 @@ private:
         return bad();
       }
     }
-    if (flags & sema::decl_flag::constexpr_) {
+    if (flags & (sema::decl_flag::constexpr_ | sema::decl_flag::consteval_)) {
       while (!p_->is_namespace(owner)) owner = s_.world().entities.rec(owner).scope;
       if (!Program::encloses(p_->ns_of(k_), p_->namespace_path(owner))) {
         s_.diag(name_at, Diag::constructor_namespace);
@@ -5760,6 +5768,10 @@ private:
       s_.diag(name_at, Diag::constexpr_redeclared, m->name);
       return bad();
     }
+    if ((mem->flags & sema::decl_flag::consteval_) != (flags & sema::decl_flag::consteval_)) {  // [dcl.constexpr]/1
+      s_.diag(name_at, Diag::consteval_redeclared, m->name);
+      return bad();
+    }
     const auto resolved = p_->special_member_exception_types_.find(m->entity);
     if (ctor && ((resolved != p_->special_member_exception_types_.end() && !resolved->second) ||
                  p_->special_member_exception_tokens_.contains(m->entity)))
@@ -5769,7 +5781,7 @@ private:
       s_.diag(name_at, Diag::conflicting_declaration, m->name);
       return bad();
     }
-    if ((flags & sema::decl_flag::constexpr_) && !finish_constructor_declarator()) return bad();
+    if ((flags & (sema::decl_flag::constexpr_ | sema::decl_flag::consteval_)) && !finish_constructor_declarator()) return bad();
     if (specialized_destructor && !m->is_virtual) {
       if (!check_destructor_specialization(*cr, *m, fs, name_at, definition)) return bad();
     } else if (mem->flags & sema::decl_flag::definition) {
@@ -5974,8 +5986,8 @@ private:
   // ordinary declaration parsing can read the class's name as a type.
   u32 constructor_start() {
     u32 next = ps_.past_attributes(0);
-    while (ps_.kind(next) == Tk::kw_constexpr || ps_.kind(next) == Tk::kw_inline || ps_.kind(next) == Tk::kw_static ||
-           ps_.kind(next) == Tk::kw_virtual ||
+    while (ps_.kind(next) == Tk::kw_constexpr || ps_.kind(next) == Tk::kw_consteval || ps_.kind(next) == Tk::kw_inline ||
+           ps_.kind(next) == Tk::kw_static || ps_.kind(next) == Tk::kw_virtual ||
            (ps_.kind(next) == Tk::kw_explicit && ps_.kind(next + 1) != Tk::l_paren))
       next = ps_.past_attributes(next + 1);
     return next;
@@ -5996,7 +6008,7 @@ private:
     return ps_.kind(next) == Tk::identifier && ps_.kind(next + 1) == Tk::l_paren;
   }
 
-  std::optional<u16> constructor_flags(u32 count, std::optional<u32>* virtual_at = nullptr,
+  std::optional<u16> constructor_flags(u32 count, bool destructor, std::optional<u32>* virtual_at = nullptr,
                                        std::optional<u32>* explicit_at = nullptr) {
     using namespace sema::decl_flag;
     u16 flags = 0;
@@ -6004,6 +6016,23 @@ private:
     while (ps_.pos() < end) {
       if (ps_.skip_attributes()) continue;
       Tk kind = ps_.kind();
+      if (kind == Tk::kw_consteval || kind == Tk::kw_constexpr) {
+        // [dcl.spec]/2: at most one of them.
+        if (flags & (kind == Tk::kw_consteval ? constexpr_ : consteval_)) {
+          s_.diag(ps_.pos(), Diag::constexpr_specifiers);
+          return std::nullopt;
+        }
+      }
+      if (kind == Tk::kw_consteval) {
+        if (destructor) {  // [dcl.constexpr]/2
+          s_.diag(ps_.pos(), Diag::consteval_destructor);
+          return std::nullopt;
+        }
+        if (flags & consteval_) s_.diag(ps_.pos(), Diag::duplicate_specifier, kind);
+        flags |= consteval_ | inline_;  // [dcl.constexpr]/1: implicitly inline
+        ps_.bump();
+        continue;
+      }
       if (kind == Tk::kw_static) {
         s_.diag(ps_.pos(), Diag::static_constructor);
         return std::nullopt;
@@ -6257,7 +6286,8 @@ private:
       // A first-declaration defaulted special member is inline and, when constexpr-suitable,
       // implicitly constexpr ([dcl.fct.def.default]).
       flags |= sema::decl_flag::constexpr_ | sema::decl_flag::inline_;
-    } else if (ctor && (flags & sema::decl_flag::constexpr_) && it_->has_body() && !finish_constructor_declarator()) {
+    } else if (ctor && (flags & (sema::decl_flag::constexpr_ | sema::decl_flag::consteval_)) && it_->has_body() &&
+               !finish_constructor_declarator()) {
       return bad();
     }
     if (ctor && !member_virt_specifiers(false)) return bad();
@@ -7620,7 +7650,15 @@ private:
           dynamic_ok(open, v.reason);
         }
       } else if (init.ok()) {
-        dynamic_ok(open, sema::reason_unsupported);
+        // A class object: constant initialization when the constructor call is a constant
+        // expression, for a class the evaluator can represent ([basic.start.static]).
+        sema::Evaluated v = sema::Evaluator(s_, q_).evaluate_initializer(init);
+        if (v.value) {
+          value = *v.value;
+          if (spec.is_constexpr) p_->set_constant(sem.entity, *v.value, k_);
+        } else if (!v.type_trait_failure) {
+          dynamic_ok(open, v.reason);
+        }
       }
     } else if (pattern) {
       // Its specializations' types are complete, or not ([temp.inst]/7).
@@ -7950,6 +7988,7 @@ Program::ClassContent Program::class_content(u32 item, const std::function<const
         statics.back().is_explicit = d.is_explicit;
         statics.back().is_final = d.is_final;
         statics.back().is_pure = d.is_pure;
+        statics.back().is_consteval = (d.flags & sema::decl_flag::consteval_) != 0;
         if (auto overridden = overridden_virtuals_.find(d.entity); overridden != overridden_virtuals_.end())
           statics.back().overridden_virtual = overridden->second;
         if (w_->ins.names.spelling(statics.back().name) == "operator=" && defaulted_member_definition(m, d))
@@ -9077,6 +9116,7 @@ public:
         s_(p.world(), b_, q_, sink_, a.item, a.begin), ps_(p.region(), it_->begin + a.begin, it_->begin + a.end, s_), atom_(a) {
     ps_.set_questions(q_);
     q_.at_point = point;
+    q_.satisfying_atom = true;
     q_.instantiation_calls = p.world().ins.seqs.elements(a.calls);
   }
 
@@ -9654,13 +9694,16 @@ private:
   Ex member_initializer(const sema::FieldRec& f, const Program::Dmi& d) {
     if (d.invalid) return {};
     auto saved = s_.take_scopes();
+    // `sub` rebinds the evaluator callbacks to itself; restore them before it goes away.
     auto evaluate = s_.constant_of;
+    auto evaluate_immediate = s_.evaluate_immediate;
     const auto source = std::exchange(at_->initializer_source, d);
     Parser sub(p_->region(), d.begin, d.end, s_);
     sub.set_questions(*q_);
     Ex init = sub.member_initializer(f.type, d.braced, d.form);
     at_->initializer_source = source;
-    s_.constant_of = evaluate;
+    s_.constant_of = std::move(evaluate);
+    s_.evaluate_immediate = std::move(evaluate_immediate);
     s_.put_scopes(std::move(saved));
     return init;
   }

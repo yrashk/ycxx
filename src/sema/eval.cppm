@@ -386,11 +386,14 @@ private:
   std::optional<interp::ConstantRecordLayout> constant_record_layout(QualType type) {
     Types& types = s_->types();
     type = types.canonical(type);
-    if (!types.is_class(type) || Types::is_volatile(type) || !s_->is_aggregate(type))
-      return std::nullopt;
+    if (!types.is_class(type) || Types::is_volatile(type)) return std::nullopt;
     const EntityId entity = types.class_of(type);
     const ClassRec* record = s_->class_rec(entity);
-    if (!record || record->union_ || !record->bases.empty() || record->unapplied_layout || q_->class_layout_uncertain(entity) ||
+    // An aggregate, or a class a constructor initializes ([class.ctor]): its fields are its
+    // value whatever their access.
+    const bool aggregate = s_->is_aggregate(type);
+    if (!record || (!aggregate && (!record->user_ctors || record->polymorphic)) || record->union_ ||
+        !record->bases.empty() || record->unapplied_layout || q_->class_layout_uncertain(entity) ||
         !record->destructor_usable || record->destructor != EntityId::none)
       return std::nullopt;
     const auto layout = s_->class_layout(entity);
@@ -400,7 +403,7 @@ private:
     result.fields.reserve(record->fields.size());
     for (std::size_t i = 0; i < record->fields.size(); ++i) {
       const FieldRec& field = record->fields[i];
-      if (record->access_of(field.entity) != ast::Access::public_ || field.bit_width || field.no_unique_address ||
+      if ((aggregate && record->access_of(field.entity) != ast::Access::public_) || field.bit_width || field.no_unique_address ||
           !constant_record_field(field.type))
         return std::nullopt;
       // Preserve the enum type in the field path. The interpreter decodes its underlying value.

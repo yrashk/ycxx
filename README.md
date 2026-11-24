@@ -555,14 +555,17 @@ written default member initializer are value-initialized.
 - `__is_assignable`, `__is_nothrow_assignable` and `__is_trivially_assignable` for arithmetic
   operands, including dependent operands in supported class-template bases and variable-template
   initializers. [Extension guide](docs/EXTENSIONS.md) · [#218](https://github.com/yrashk/ycxx/issues/218)
-- `__is_convertible` and `__is_nothrow_convertible` for arithmetic values, arithmetic references
-  and cv `void`, including dependent operands in the same template contexts.
+- `__is_convertible` and `__is_nothrow_convertible` for arithmetic values, arithmetic references,
+  cv `void` and object pointers (derived-to-base, `void*`, added qualifiers, `bool`), including
+  dependent operands in the same template contexts.
   [Extension guide](docs/EXTENSIONS.md) · [#218](https://github.com/yrashk/ycxx/issues/218)
 - `__reference_converts_from_temporary` and `__reference_constructs_from_temporary` for arithmetic
   and reference-related class operands. [#218](https://github.com/yrashk/ycxx/issues/218)
 - `__is_base_of` for known class hierarchies, including private and ambiguous bases and dependent
-  operands in supported class-template bases, variable-template initializers and function template
-  bodies.
+  operands in supported class-template bases, variable-template initializers, function template
+  bodies and atomic constraints (concepts and requires-clauses, nested-requirements inside them
+  included), as libycxx's `std::derived_from` needs. The other convertibility, assignability,
+  constructibility and destructibility traits defer dependent operands in constraints too.
   [Extension guide](docs/EXTENSIONS.md) · [#218](https://github.com/yrashk/ycxx/issues/218)
 - `__is_empty`, `__is_standard_layout`, and `__is_final` accept dependent operands in supported
   class-template bases and variable-template initializers. The emptiness query accounts for
@@ -602,6 +605,10 @@ written default member initializer are value-initialized.
 - ordinary namespace-scope `consteval` definitions with neither static locals nor closures
   can supply compile-time results without requiring a native function body.
   [#1006](https://github.com/yrashk/ycxx/issues/1006)
+  `consteval` constructors work, including the implicit conversion libycxx's comparison
+  categories use for their literal `0` operand, and `constexpr` and `consteval` constructors of
+  classes without bases or class-typed fields evaluate at compile time.
+  [#102](https://github.com/yrashk/ycxx/issues/102)
   A constant evaluation can bypass a block-scope static aggregate. [#872](https://github.com/yrashk/ycxx/issues/872)
   Scalar enumeration values work in constexpr variables, calls, casts and switch conditions.
   A flat static constexpr aggregate member initialized with `T{...}` has addressable storage
