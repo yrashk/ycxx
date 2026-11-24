@@ -4669,8 +4669,9 @@ public:
   }
 
   // The caller has recognized the empty operand list of a dependent immediate call.
-  std::optional<Ex> deferred_immediate_template_call(Ex callee, std::span<const ast::TemplateArg> args) {
-    auto call = s_->dependent_immediate_template_call(callee, args, pos() + 2);
+  std::optional<Ex> deferred_immediate_template_call(Ex callee, std::span<const ast::TemplateArg> args,
+                                                    bool allow_class_result = false) {
+    auto call = s_->dependent_immediate_template_call(callee, args, pos() + 2, allow_class_result);
     if (call) {
       ++deferred_immediate_calls_;
       bump();
@@ -4823,7 +4824,8 @@ public:
         Ex r = scope_expr(immediate_call || immediate_template);
         if (r.ok() && !s_->dependent(r) && dependent_args) {
           if (immediate_call)
-            if (auto call = deferred_immediate_template_call(r, *args)) return *call;
+            if (auto call = deferred_immediate_template_call(r, *args, namespace_alias_type && !s_->unevaluated))
+              return *call;
           return s_->dependent_node({}, begin, pos());
         }
         s_->explicit_template_args(r, std::move(*args));
@@ -6775,6 +6777,7 @@ public:
   bool dependent_decay_copy_body = false;  // a function template's compound statement, before replay
   bool substituting_partial_arguments = false;
   bool class_template_base = false;  // class instantiation substitutes or reparses this base type
+  bool namespace_alias_type = false;  // the namespace alias instantiation reparses this type-id
   bool member_alias_type = false;  // the class instantiation reparses this type-id
 private:
   struct TypeRequirementScope {

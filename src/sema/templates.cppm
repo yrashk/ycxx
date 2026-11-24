@@ -1890,6 +1890,8 @@ public:
       if (ins().values.is<ast::VDepParam>(a.value) &&
           ins().values.get<ast::VDepParam>(a.value).depth != dependent_depth)
         return value_arg(t, a.value);
+      if (ins().values.is<ast::VDepCall>(a.value) && ins().values.get<ast::VDepCall>(a.value).result_type == t)
+        return value_arg(t, a.value);
       if (!ins().values.is<ast::VAggregate>(a.value)) return std::nullopt;
       const auto& aggregate = ins().values.get<ast::VAggregate>(a.value);
       const auto values = ins().seqs.elements(aggregate.elems);
@@ -2307,7 +2309,7 @@ private:
     if (!args) return std::nullopt;
     if (std::ranges::any_of(*args, [&](const TemplateArg& a) { return w_->arg_dependent(a); })) {
       call.args = ins().intern_seq(std::span<const TemplateArg>(*args));
-      return value_arg(types().builtin(Builtin::dependent), ins().intern_value(call));
+      return value_arg(call.result_type, ins().intern_value(call));
     }
     return call_constant ? call_constant(call.callee, *args) : std::nullopt;
   }

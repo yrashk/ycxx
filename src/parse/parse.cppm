@@ -3481,7 +3481,9 @@ private:
         const auto calls = ps_.deferred_immediate_calls();
         const auto checks = ps_.deferred_argument_checks();
         const auto ranks = ps_.deferred_rank_checks();
+        ps_.namespace_alias_type = true;
         auto t = ps_.type_id();
+        ps_.namespace_alias_type = false;
         if (!t || !alias_template(name, name_at, *t)) return bad();
         if (ps_.deferred_immediate_calls() != calls) {
           const auto kind = ps_.deferred_argument_checks() == checks ? sema::AliasCallPattern::retained

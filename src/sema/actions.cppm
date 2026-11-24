@@ -4804,7 +4804,8 @@ public:
     return r;
   }
 
-  std::optional<Ex> dependent_immediate_template_call(Ex callee, std::span<const TemplateArg> args, u32 end) {
+  std::optional<Ex> dependent_immediate_template_call(Ex callee, std::span<const TemplateArg> args, u32 end,
+                                                      bool allow_class_result) {
     if (!types().is(callee.type(), Builtin::overload_set)) return std::nullopt;
     auto t = templates();
     if (!std::ranges::all_of(args, [&](const TemplateArg& a) {
@@ -4830,6 +4831,16 @@ public:
     if (args.size() < fixed || (!trailing_pack && args.size() != fixed) ||
         std::ranges::any_of(args.first(fixed), [&](const TemplateArg& a) { return t.is_expansion(a); }))
       return std::nullopt;
+    if (types().is_class(fn.inner)) {
+      // Ordinary alias replay checks the selected specialization even if the alias erases the call.
+      const EntityId result = types().class_of(fn.inner);
+      if (!allow_class_result || found->second.size() != 1 || fixed != 2 || trailing_pack ||
+          types().is_dependent(fn.inner) || !q_->is_complete(result) || q_->class_layout_uncertain(result) ||
+          !t.structural_class_parameter(fn.inner))
+        return std::nullopt;
+    } else if (!types().is_integral(fn.inner) && !types().is_enum(fn.inner)) {
+      return std::nullopt;
+    }
     return dependent_call_value(selected->entity, fn.inner, args, callee.begin, end);
   }
 
@@ -4857,12 +4868,13 @@ public:
         return std::nullopt;
       operands.push_back(TemplateArg{TemplateArgKind::value, types().canonical(Types::unqualified(arg.type())), value->value});
     }
+    if (!types().is_integral(fn.inner) && !types().is_enum(fn.inner)) return std::nullopt;
     return dependent_call_value(function->entity, fn.inner, operands, callee.begin, end);
   }
 
-  std::optional<Ex> dependent_call_value(EntityId callee, QualType type, std::span<const TemplateArg> args, u32 begin, u32 end) {
-    if (!types().is_integral(type) && !types().is_enum(type)) return std::nullopt;
-    auto value = ins().intern_value(ast::VDepCall{callee, ins().intern_seq(args)});
+  Ex dependent_call_value(EntityId callee, QualType type, std::span<const TemplateArg> args, u32 begin, u32 end) {
+    const auto result = Types::unqualified(types().canonical(type));
+    auto value = ins().intern_value(ast::VDepCall{result, callee, ins().intern_seq(args)});
     return literal(type, value, ValueCategory::prvalue, begin, end);
   }
 
