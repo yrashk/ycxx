@@ -1,21 +1,7 @@
 // [expr.const.imm], [expr.const.core]
-using Intmax = __INTMAX_TYPE__;
+#include "checked-sum.hpp"
 
-consteval Intmax checked_input(Intmax value) {
-    return value + 1;
-}
-
-template<int Increment>
-consteval bool checked_sum(Intmax value) {
-    Intmax result;
-    return !__builtin_add_overflow(checked_input(value), Intmax{Increment}, &result) &&
-           result == value + 1 + Increment;
-}
-
-static_assert(checked_sum<1>(40));
-static_assert(checked_sum<2>(-1));
-
-consteval int wrapper(int value) {
+consteval int checked_left(int value) {
     if (value < 0) {
         auto identity = [](int result) { return result; };
         return identity(checked_sum<2>(value) ? value : 0);
@@ -23,6 +9,18 @@ consteval int wrapper(int value) {
     return value;
 }
 
-int main() {
-    return wrapper(42) - 42;
+constexpr int left_choice(int value) {
+    if consteval {
+        return checked_left(value);
+    } else {
+        return value + 10;
+    }
+}
+
+static_assert(left_choice(2) == 2);
+
+int right_runtime(int value);
+
+int main(int argc, char**) {
+    return left_choice(argc) == argc + 10 && right_runtime(argc) == argc + 20 ? 0 : 1;
 }
