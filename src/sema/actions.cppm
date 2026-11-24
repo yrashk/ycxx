@@ -11418,8 +11418,8 @@ public:
   }
 
   bool supports_class_throw(EntityId cls, Ex value) {
-    if (w_->target.triple != ast::x86_64_linux.triple || value.cat() != ValueCategory::prvalue ||
-        !ordinary_default_member_owner(cls)) return false;
+    if (!w_->target.supports(ast::NativeOperation::hosted_trivial_class_throw) ||
+        value.cat() != ValueCategory::prvalue || !ordinary_default_member_owner(cls)) return false;
     const auto& entity = w_->entities.rec(cls);
     if (entity.linkage != ast::Linkage::external) return false;
     for (EntityId scope = entity.scope; scope != EntityId::none; scope = w_->entities.rec(scope).scope)
