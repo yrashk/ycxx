@@ -685,7 +685,7 @@ class Mangler {
         // Itanium's typed braced-init-list omits trailing zero initializers. The
         // aggregate constant itself still contains every field, including those zeroes.
         std::size_t count = fields.size();
-        while (count && ast::int_bits(in_, fields[count - 1]) == ast::Bits128{}) --count;
+        while (count && in_.values.get<ast::VInt>(fields[count - 1]).bits == ast::Bits128{}) --count;
         out = "Xtl" + *t;
         for (std::size_t i = 0; i < count; ++i) {
           const auto& field = in_.values.get<ast::VInt>(fields[i]);
