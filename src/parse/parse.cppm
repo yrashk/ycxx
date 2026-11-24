@@ -9283,7 +9283,7 @@ const Result<ast::ClassDef>& Program::class_def(u32 item) {
     // Complete-class checks see the full member set before any function bodies are read.
     classes_.publish(*cls, std::move(rec), [&](sema::ClassRec& fresh) {
       // First: default arguments and member initializers may compare objects of the class.
-      if (can_complete) complete_defaulted_comparisons(*cls, fresh);
+      complete_defaulted_comparisons(*cls, fresh);
       if (special_member_exception_tokens_.contains(fresh.declared_destructor))
         bind_destructor_and_defaults(*cls, fresh, out);
       else
@@ -9293,7 +9293,7 @@ const Result<ast::ClassDef>& Program::class_def(u32 item) {
       check_member_exception_patterns(*cls, fresh, out);
       if (member_declarations_valid && implicit_move) prepare_move_constructor(item, *cls, fresh);
       if (member_declarations_valid) check_default_member_initializers(fresh, out);
-      if (can_complete) validate_dynamic_constructors(fresh);
+      validate_dynamic_constructors(fresh);
     });
   }
   ast::Builder b(w_->ins, &arena_);
@@ -9890,7 +9890,8 @@ public:
       bool ctor = f->flags & sema::decl_flag::constructor;
       ConstructorInitializers inits;
       if (ctor && ps_.is(lex::Tk::colon)) inits = mem_initializers();
-      if (p_->defaulted_body(k_) && p_->defaulted_comparison(f->entity)) {
+      const bool defaulted = p_->defaulted_body(k_);
+      if (defaulted && p_->defaulted_comparison(f->entity)) {
         // [class.compare.default]: the implicit definition of a defaulted comparison that is
         // not deleted, `return x == y;` as [class.eq] expands it.
         if (auto result = p_->defaulted_comparison_result(s_, *f, param_locals); result && result->ok()) {
@@ -9898,8 +9899,10 @@ public:
           root = s_.node(ast::Compound{b_.list(std::vector<ast::Child>{sema::Sema::at(ret, 0)})}, 0, 0);
         }
       } else if (!ps_.is(lex::Tk::l_brace)) {
-        // `= default`, `= delete` or a function-try-block.
-        s_.diag(ps_.pos(), sema::Diag::not_supported, ps_.kind());
+        // A failed class keeps its written comparison declaration without completing its body.
+        const bool failed_comparison = defaulted && p_->failed_class_assertions_.contains(s_.current_class) &&
+            s_.ins().names.spelling(p_->world().entities.rec(f->entity).name) == "operator==";
+        if (!failed_comparison) s_.diag(ps_.pos(), sema::Diag::not_supported, ps_.kind());
       } else {
         ps_.dependent_decay_copy_body = function_template && !inst_;
         root = ps_.compound_statement();
