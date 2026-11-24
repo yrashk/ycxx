@@ -727,6 +727,8 @@ struct BaseRec {
   EntityId cls = EntityId::none;
   ast::Access access = ast::Access::public_;
   bool dependent_in_pattern = false;
+  // Named by a virtual base-specifier ([class.mi]). The base-clause parser admits none yet (#310).
+  bool virtual_ = false;
 };
 
 // Layout for access to a peer-owned object. A primary base already supplies the vptr at offset zero.
