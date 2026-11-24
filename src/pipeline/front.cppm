@@ -1461,8 +1461,9 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
     return true;
   };
   auto record_class_rtti_abi = [&](const ast::DeclSema& d, std::uint32_t k) {
-    if (linux && d.kind == ast::DeclKind::class_ && d.entity != EntityId::none &&
-        program.class_rtti_declaration_has_unapplied_abi(d.entity, k))
+    if (!linux || d.kind != ast::DeclKind::class_ || d.entity == EntityId::none) return;
+    const bool friend_declaration = (d.flags & sema::decl_flag::friend_) != 0;
+    if (program.class_rtti_declaration_has_unapplied_abi(d.entity, k, friend_declaration))
       classes_with_unapplied_rtti_abi.insert(d.entity);
   };
   for (std::uint32_t k = first; k < items.items.size() && k < end; ++k) {
