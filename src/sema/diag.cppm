@@ -404,6 +404,9 @@ enum class Diag : std::uint32_t {
   base_of_dependent [[=message{Severity::error, "dependent operands of '__is_base_of' are not supported yet"}]],
   base_of_incomplete [[=message{Severity::error, "incomplete derived class type '{0:t}' cannot be queried by '__is_base_of'"}]],
   base_of_unsupported [[=message{Severity::error, "'__is_base_of' for '{0:t}' and '{1:t}' is not supported yet"}]],
+  class_relation_dependent [[=message{Severity::error, "dependent operands of '{0:n}' are not supported yet"}]],
+  class_relation_incomplete [[=message{Severity::error, "incomplete type '{0:t}' cannot be queried by '{1:n}'"}]],
+  class_relation_unsupported [[=message{Severity::error, "'{0:n}' for '{1:t}' and '{2:t}' is not supported yet"}]],
   empty_incomplete [[=message{Severity::error, "incomplete class type '{0:t}' cannot be queried by '__is_empty'"}]],
   empty_unsupported [[=message{Severity::error, "'__is_empty' for '{0:t}' is not supported yet"}]],
   convertibility_incomplete [[=message{Severity::error, "incomplete type '{0:t}' cannot be queried by '{1:n}'"}]],
@@ -489,7 +492,8 @@ constexpr bool is_type_trait_failure(engine::DiagId id) {
          id == diag_id(Diag::nothrow_constructibility_unsupported) ||
          id == diag_id(Diag::trivial_constructibility_unsupported) || id == diag_id(Diag::assignability_unsupported) ||
          id == diag_id(Diag::convertibility_unsupported) || id == diag_id(Diag::base_of_incomplete) ||
-         id == diag_id(Diag::base_of_unsupported) || id == diag_id(Diag::empty_incomplete) ||
+         id == diag_id(Diag::base_of_unsupported) || id == diag_id(Diag::class_relation_incomplete) ||
+         id == diag_id(Diag::class_relation_unsupported) || id == diag_id(Diag::empty_incomplete) ||
          id == diag_id(Diag::empty_unsupported) || id == diag_id(Diag::convertibility_incomplete) ||
          id == diag_id(Diag::destructibility_incomplete) || id == diag_id(Diag::destructibility_unsupported) ||
          id == diag_id(Diag::virtual_class_trait_incomplete) || id == diag_id(Diag::standard_layout_incomplete) ||
@@ -508,7 +512,8 @@ constexpr bool survives_substitution(engine::DiagId id) {
          id == diag_id(Diag::exceptions_disabled) || id == diag_id(Diag::rtti_disabled) ||
          id == diag_id(Diag::trivial_copyability_incomplete) ||
          id == diag_id(Diag::constructibility_incomplete) || id == diag_id(Diag::base_of_incomplete) ||
-         id == diag_id(Diag::empty_incomplete) || id == diag_id(Diag::convertibility_incomplete) ||
+         id == diag_id(Diag::class_relation_incomplete) || id == diag_id(Diag::empty_incomplete) ||
+         id == diag_id(Diag::convertibility_incomplete) ||
          id == diag_id(Diag::destructibility_incomplete) || id == diag_id(Diag::virtual_class_trait_incomplete) ||
          id == diag_id(Diag::standard_layout_incomplete) || id == diag_id(Diag::implicit_lifetime_incomplete) ||
          id == diag_id(Diag::unique_object_representations_incomplete);
