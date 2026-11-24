@@ -1777,8 +1777,8 @@ clauses = ['class.friend', 'dcl.friend', 'temp.friend']
 std = 'C++98'
 detect = '\bfriend\b'
 status = 'partial'
-issues = [259, 689]
-note = 'Ordinary binary hidden friends and unary minus participate in ADL. Type friends can name a class template parameter. Friend function definitions in class templates (with dependent noexcept) and friend function templates defined in classes and class templates are found by ADL. Other hidden friend operators, C-linkage friend definitions, default arguments in friend declarations, non-defining friends in class templates and non-defining friend templates remain open.'
+issues = [259, 689, 1178, 1179, 1180, 1181, 1182, 1184, 1185]
+note = 'Ordinary binary hidden friends and unary minus participate in ADL. Type friends can name a class template parameter. Friend function definitions in class templates (with dependent noexcept) and friend function templates defined in classes and class templates are found by ADL. Friend class templates and class friends of class templates grant access per specialization. Other hidden friend operators (#1178), non-defining friend function templates (#1179), constrained friends in class templates (#1180), deleted friend templates (#1181), C-linkage friend definitions, default arguments in friend declarations and non-defining friend functions in class templates remain open.'
 probe = '''
 class C { int p = 2; friend int peek(const C& c) { return c.p; } };
 int main() { C c; return peek(c) - 2; }
@@ -1809,7 +1809,7 @@ int sum(const B& b) { return b.b; }
 int main() { D d; A* pa = &d; return pa->a + sum(d) + d.d - 6; }
 '''
 issues = [308, 1134]
-note = 'One nonvirtual, nonpolymorphic direct base in primary class templates and partial specializations, including dependent aliases and qualified static lookup; explicit specializations take the bases of an ordinary class. Additional class-template base forms and the object-expression rule of [class.protected] remain.'
+note = 'One nonvirtual, nonpolymorphic direct base in primary class templates and partial specializations, including dependent aliases, value-dependent template arguments (`B<T::value>`, `B<!bool(T::value) || sizeof...(Ts) == 0>`) and qualified static lookup; explicit specializations take the bases of an ordinary class. Additional class-template base forms and the object-expression rule of [class.protected] remain.'
 
 [[feature]]
 id = 'class-virtual'
@@ -2357,7 +2357,8 @@ std = 'C++20'
 ftm = '__cpp_consteval'
 detect = '\bconsteval\s+(?!\{)'
 status = 'done'
-issues = [102]
+issues = [102, 1097, 1175, 1183, 1189]
+note = 'Ordinary nonvirtual immediate member calls validate void and integral or enum results through 64 bits. Eligible nonvirtual members and function template specializations can omit native code when only constant evaluation uses them. Reference and field-address results remain open.'
 probe = '''
 consteval int sq(int x) { return x * x; }
 int main() { return sq(3) - 9; }

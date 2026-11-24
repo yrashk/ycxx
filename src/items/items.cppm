@@ -426,6 +426,7 @@ bool simple_type_keyword(Tk t) {
   case Tk::kw_void: case Tk::kw_bool: case Tk::kw_char: case Tk::kw_char8_t: case Tk::kw_char16_t:
   case Tk::kw_char32_t: case Tk::kw_wchar_t: case Tk::kw_short: case Tk::kw_int: case Tk::kw_long:
   case Tk::kw_signed: case Tk::kw_unsigned: case Tk::kw_float: case Tk::kw_double: case Tk::kw_auto:
+  case Tk::kw___int128:
     return true;
   default: return false;
   }

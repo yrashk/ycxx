@@ -922,8 +922,12 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
   keep a strong definition over them (`unit.darwin_weak_visibility`).
   [Design](docs/design/linux-weak-functions.md) · [#937](https://github.com/yrashk/ycxx/issues/937)
   · [#1085](https://github.com/yrashk/ycxx/issues/1085)
+- A GNU `weak` declaration of an ordinary external non-inline object gives its undefined ELF
+  symbol `STB_WEAK` on Linux x86-64. The pinned allocator's marker address comparison uses the
+  ordinary GOT address and remains a runtime decision.
+  [#984](https://github.com/yrashk/ycxx/issues/984) · [Design](docs/design/linux-weak-object-references.md)
 - On Linux x86-64, explicit GNU hidden visibility on any declaration of an ordinary external
-  non-inline namespace-scope variable gives its ELF symbol `STB_GLOBAL` and `STV_HIDDEN`.
+  non-inline namespace-scope variable sets `STV_HIDDEN` on its ELF symbol.
   This includes the C-linkage marker `__ycxx_linkage_static_v1` from the pinned libycxx runtime.
   On arm64 Mach-O the symbol is private external.
   [#936](https://github.com/yrashk/ycxx/issues/936) · [#1085](https://github.com/yrashk/ycxx/issues/1085)
@@ -1247,6 +1251,11 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
 - Native collection omits ordinary named namespace-scope immediate functions whose bodies
   have neither static locals nor closures. Their declarations and analysed bodies remain
   available for constant evaluation. [#1006](https://github.com/yrashk/ycxx/issues/1006)
+- Nonvirtual `consteval` member functions and function template specializations with neither
+  closures nor static locals can link without producing a native definition. The interpreter
+  still reads their checked bodies. The object pipeline emits a definition when lowered code,
+  tables or data refer to it, including references from retained immediate bodies.
+  [#1097](https://github.com/yrashk/ycxx/issues/1097)
 - `consteval` constructors, in class and out of class, among the other constructor specifiers.
   `Sema::construct` folds a call of one outside an immediate function context, including an
   implicit conversion of an argument or operand, into its value (`Sema::immediate_invocation`,
@@ -1331,6 +1340,13 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   subobject path, including one-past addresses, from the constant's path and byte offset.
 - Errors say why: "not a constant expression: <the interpreter's reason>", located at the
   evaluated expression.
+- Ordinary nonvirtual immediate member calls with void or integral and enum results up to
+  64 bits validate the complete invocation. The evaluator can import supported flat local
+  records and preserve the identity of supported unread runtime receivers. The static
+  through-object path evaluates the discarded receiver as part of the invocation.
+  Reference and field-address results remain tracked in #1183. Static arrow
+  indirection checks remain in #1189.
+  [#1175](https://github.com/yrashk/ycxx/issues/1175)
 - A constant evaluation can bypass a block-scope static aggregate ([expr.const], [stmt.dcl]).
   L1 forms static addresses at their uses and checks the executed declarations for usability in
   constant expressions. The runtime guard still initializes a static local on its first passage.
@@ -2629,6 +2645,21 @@ Calls to user functions and values from the active constexpr frame remain outsid
 proof domain. `__has_builtin` answers 0 while support is partial.
 [Issue #1065](https://github.com/yrashk/ycxx/issues/1065)
 
+## Checked signed integer builtins (#1077)
+
+The direct GNU `__builtin_add_overflow` and `__builtin_mul_overflow` calls accept matching
+signed target-`intmax_t` operands with a writable destination of the same type. Constant
+evaluation writes the width-converted result on both outcomes and returns whether the
+mathematical result exceeds the signed range. The destination uses the usual object and
+lifetime rules. `__has_builtin` answers 0 for the partial domain.
+
+Native emission can omit an unreferenced immediate function template specialization. A named
+namespace-scope specialization with checked arithmetic that is retained by the reference
+walk keeps its symbol and entry ABI checks with an unreachable native body. Ordinary external
+definitions of that same specialization coalesce across translation units. Constant evaluation
+uses the original body.
+[#1077](https://github.com/yrashk/ycxx/issues/1077)
+
 ## Trap builtin (#548)
 
 `__builtin_trap()` is a zero-argument direct call of type `void`. It ends the
@@ -2755,6 +2786,21 @@ Fable decided the representation (ast.md §6.6); the Opus session wrote the code
 - **Friend function templates** defined in a class or class template
   (`template <class T> friend R f(…) {…}`) are function templates of the namespace that only ADL
   finds; a class template's specialization binds its own arguments for theirs (#259).
+- **Friend class templates** (`template <class U> friend class X;`, `friend_class_template` in
+  parse.cppm, [temp.friend]/1, #259), in a class or a class template: `ClassRec::friends` holds
+  the class template's entity, and `ClassRec::befriends` grants access to each of its
+  specializations, from the primary or a partial specialization. An unqualified name is looked
+  up among the innermost enclosing namespace's members and using-declarations only
+  ([dcl.type.elab]/4); finding none, it names a class template of that namespace (keyed by its
+  head at depth 0), not visible until declared there. `N::X` must name an earlier class
+  template. The heads must agree in kinds, packs and non-dependent non-type parameter types
+  (`conflicting declaration` otherwise), may give no default arguments and may not redeclare a
+  template parameter. A head's constraints are not compared with the template's yet (#1182),
+  and a later conflicting declaration of a friend-declared name is not diagnosed (#1184).
+- **Class friends in class templates** (`friend class X;`, `friend N::X;`, `friend struct N::X<T>;`,
+  `friend C<T>;`) are analysed again in each specialization with its arguments; a dependent one
+  befriends nothing in the pattern. `friend class X;` still looks past the innermost namespace,
+  and `friend typename T::F;` and `friend class T::G;` are rejected (#1185).
 - **Checks** (`Sema::accessible`, `check_access`): a private or protected member may be named in
   a member function or default member initializer of its class, in the class's scope (the
   initializer of a static data member defined outside it), or in a friend function or friend
@@ -2762,9 +2808,13 @@ Fable decided the representation (ast.md §6.6); the Opus session wrote the code
   and unqualified names, as a static member, enumerator or nested type, for the member function
   overload resolution chooses ([class.access]/4), and for the constructor an initialization
   chooses. Protected is checked as private until base classes exist.
-- C-linkage friend definitions, other hidden friend operators, defaults on friend declarations,
-  non-defining friends in class templates and non-defining friend templates, destructor access, private member operator wording, and elaborated types
-  in member parameters remain under [#259](https://github.com/yrashk/ycxx/issues/259).
+- C-linkage friend definitions, defaults on friend declarations, non-defining friend functions in
+  class templates, private member operator wording, and elaborated types in member parameters
+  remain under [#259](https://github.com/yrashk/ycxx/issues/259). Hidden friend `~` and compound
+  assignment operators are [#1178](https://github.com/yrashk/ycxx/issues/1178), non-defining
+  friend function templates [#1179](https://github.com/yrashk/ycxx/issues/1179), friends with a
+  trailing requires-clause in class templates [#1180](https://github.com/yrashk/ycxx/issues/1180)
+  and deleted friend function templates [#1181](https://github.com/yrashk/ycxx/issues/1181).
   Both targets coalesce these inline friend definitions across objects (#422, [#124](https://github.com/yrashk/ycxx/issues/124)).
 - Both ELF and Mach-O coalesce eligible nonthrowing, nonvirtual in-class destructor definitions
   and implicitly defined destructors, including those of class-template specializations. A
@@ -2934,6 +2984,38 @@ first; a dependent base is not searched. Redeclaring a hidden parameter's name i
   the translation unit is freestanding. Linux integration tests cover `<cstdint>` before
   `<cinttypes>` and `<inttypes.h>` before `<cstdint>`.
   [#664](https://github.com/yrashk/ycxx/issues/664) · [libycxx#50](https://github.com/yrashk/libycxx/pull/50)
+
+## 128-bit integers, slices 1–3 (#1172)
+
+- `__int128` and `unsigned __int128` are `ast::Builtin::int128` and `unsigned_int128`, after
+  `unsigned_long_long`, so `ast::is_integral` covers them. `ast::is_extended_signed` and
+  `is_extended_unsigned` name them, and `is_signed_integer` and `is_unsigned_integer` take
+  standard and extended types together. Both targets lay them out in 16 bytes with 16-byte
+  alignment; their rank is 7, above `long long`'s 6.
+- `__int128` is a keyword (`Tk::kw___int128`, the last one). The decl-specifier rules accept it
+  alone or with `signed` or `unsigned`, in either order. `__int128_t` and `__uint128_t` are
+  typedef-names the implementation declares, beside `__builtin_va_list`.
+- `__SIZEOF_INT128__` is 16 on both targets, from `ast::Target`, checked against Clang in
+  `own/pp/predefined-target`.
+- Symbols spell the types `n` and `o`. Template arguments print their values with
+  `ast::wide::decimal`, so a value beyond 64 bits is written in full.
+- `ast::wide` holds 128-bit arithmetic over `ast::Bits128`: add, sub, mul, shifts, comparisons
+  and division by shift and subtract. The interpreter's `Value` and `Result` carry the high half
+  in `hi`, which is 0 for every narrower type. `arith`, `divide`, `shift`, `icmp`, `iconv`,
+  the floating conversions, `tobool`, `switch` and pointer offsets take 128-bit operands.
+  Conversion to a floating type rounds the top 64 bits with a sticky bit.
+- List-initialization narrowing reads constants in 128 bits. `sema::ValueRec::wide` marks an
+  integer outside [-2^63, 2^64), so array bounds, bit-field widths and array new bounds reject
+  it rather than read its low half.
+- Static data of 16-byte integer type is written with its high half.
+- Not yet:
+  - Native code that computes with a 128-bit value: lowering reports "no integer type of 16
+    bytes" (#1172, slice 4).
+  - Enumerations with a 128-bit underlying type or an enumerator initializer of 128-bit type
+    are diagnosed as not supported (#1176).
+- Tests: `own/int128` (types, constant evaluation, narrowing, specifiers, symbols against a Clang
+  peer). `-Wpedantic` and `-Wno-pedantic` are accepted and select no warning, so the tests pass
+  `-Wno-pedantic` for the oracles.
 
 ## Templates, ζ step 8: template template parameters and `__make_integer_seq` (#88, #208, 2026-11-19)
 
@@ -3157,6 +3239,16 @@ What the process allocates, attributed to the engine's cells, in the trace and t
   An explicit specialization's base-clause is an ordinary class's, and a partial
   specialization's is a primary template's, substituted with the arguments deduced for it;
   another specialization of the same template can be a base (#1134).
+  A base's template argument can be a value-dependent expression with no `VDep*` form
+  (`BC<T::value>`, `BC<!bool(T::value)>`, `cond_t<!bool(B1::value) || sizeof...(Bn) == 0, …>`).
+  `template_value` gives it the placeholder `VDepParam{dependent_depth, 0}`, and the base is parsed
+  again with the arguments bound (`instantiate_base`). A pack expansion of such an argument
+  (`PS<T::k...>`) and the same template-id outside a base (`BC<!T::value>::value` in a member) need
+  #209's representation (#308).
+- **Functional casts as template arguments** (`function_type_argument_ahead`): `int(…)` is a
+  type-id only if it can be a function type; `bool(x) || y`, `int(3) + 1` and `bool(T::value)`
+  are expressions ([temp.arg.general]/2). Shapes such as `bool(&g)` and `int((n))` are #1190, and
+  `R(A...)` with a type parameter `R` is #1186.
 - **Layout** (`ast::record_layout`, Itanium C++ ABI §2.4):
   - bases first, in declaration order; an empty base at offset 0 unless another subobject of its
     type is there;

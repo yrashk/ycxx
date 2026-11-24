@@ -133,6 +133,8 @@ std::optional<std::string_view> builtin_code(ast::Builtin b) {
     case unsigned_long: return "m";
     case long_long: return "x";
     case unsigned_long_long: return "y";
+    case int128: return "n";
+    case unsigned_int128: return "o";
     case float_: return "f";
     case double_: return "d";
     case long_double: return "e";
@@ -678,16 +680,14 @@ class Mangler {
         if (!t) return t;
         ast::Bits128 v = in_.values.get<ast::VInt>(a.value).bits;
         bool neg = ast::is_negative(v);
-        return std::format("L{}{}{}E", *t, neg ? "n" : "", neg ? ~v.lo + 1 : v.lo);
+        return std::format("L{}{}{}E", *t, neg ? "n" : "", ast::wide::decimal(neg ? ast::wide::neg(v) : v));
       }
       auto b = ast::builtin_of(in_, a.type);
       auto code = b ? builtin_code(*b) : std::nullopt;
       if (!code || !in_.values.is<ast::VInt>(a.value)) return std::unexpected("a template argument that is not a type or an integer");
       auto v = in_.values.get<ast::VInt>(a.value).bits;
       bool neg = ast::is_signed(ast::aarch64_darwin, *b) && ast::is_negative(v);
-      // The fundamental integral types are at most 64 bits wide on the target.
-      std::uint64_t mag = neg ? ~v.lo + 1 : v.lo;
-      out += std::format("L{}{}{}E", *code, neg ? "n" : "", mag);
+      out += std::format("L{}{}{}E", *code, neg ? "n" : "", ast::wide::decimal(neg ? ast::wide::neg(v) : v));
     }
     return out;
   }
