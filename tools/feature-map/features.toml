@@ -1807,8 +1807,8 @@ struct A { int a = 1; }; struct B { int b = 2; }; struct D : A, B { int d = 3; }
 int sum(const B& b) { return b.b; }
 int main() { D d; A* pa = &d; return pa->a + sum(d) + d.d - 6; }
 '''
-issues = [308]
-note = 'One nonvirtual, nonpolymorphic direct base in primary class templates, including dependent aliases and qualified static lookup. Additional class-template base forms and the object-expression rule of [class.protected] remain.'
+issues = [308, 1134]
+note = 'One nonvirtual, nonpolymorphic direct base in primary class templates and partial specializations, including dependent aliases and qualified static lookup; explicit specializations take the bases of an ordinary class. Additional class-template base forms and the object-expression rule of [class.protected] remain.'
 
 [[feature]]
 id = 'class-virtual'
