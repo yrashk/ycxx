@@ -1312,6 +1312,8 @@ public:
     SpecialMember kind;
   };
   const std::deque<Synthesized>& synthesized() const { return synth_; }
+  // An implicit constructor of a dynamic class or a class containing one: emitted only where called.
+  bool emitted_on_use(EntityId constructor) const { return dynamic_synthesized_.contains(constructor); }
   // Its body, analysed on first use.
   const ast::BodySema& synthesized_body(std::size_t i);
   bool special_members(u32 item, EntityId cls, sema::ClassRec& rec,

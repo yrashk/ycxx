@@ -171,21 +171,20 @@ def main():
 
         native_virtual_error = 'native output for a translation unit with virtual member functions is not supported yet'
         virtual_definition_error = 'an out-of-class definition of a virtual member function is not supported yet'
+        # A pure interface outside the peer profiles is an ordinary dynamic class (#309): its uses
+        # compile, and a unit that neither constructs nor destroys one emits no table for it.
         pure = 'struct B { virtual int read(int) = 0; };\n'
         for name, source in (
             ('pure-interface', pure + 'B* identity(B* object) { return object; }\n'),
             ('pure-overridden', pure + 'struct D : B { int read(int) override; };\n'
                                  'D* identity(D* object) { return object; }\n'),
+            ('pure-call', pure + 'int call(B* object) { return object->read(7); }\n'),
+            ('inline-root', scalar.replace('read(int);', 'read(int n) { return n; }')),
         ):
             (scope / f'{name}.cpp').write_text(source)
             compile(linux, '-fsyntax-only', f'{name}.cpp')
-            compile(linux, '-c', f'{name}.cpp', '-o', f'{name}.o', error=native_virtual_error)
-            assert not (scope / f'{name}.o').exists()
-
-        (scope / 'pure-call.cpp').write_text(pure + 'int call(B* object) { return object->read(7); }\n')
-        compile(linux, '-c', 'pure-call.cpp', '-o', 'pure-call.o',
-                error='a call to a virtual member function is not supported yet')
-        assert not (scope / 'pure-call.o').exists()
+            compile(linux, '-c', f'{name}.cpp', '-o', f'{name}.o')
+            assert (scope / f'{name}.o').is_file()
 
         guards = (
             (root + 'int B::read(int n) { return n; }', virtual_definition_error),
@@ -199,7 +198,6 @@ def main():
              layout_error),
             (scalar.replace('struct B', 'struct __attribute__((packed)) B') +
              'unsigned int read(B* object) { return object->word; }', layout_error),
-            (scalar.replace('read(int);', 'read(int n) { return n; }'), native_virtual_error),
             (scalar + 'struct D : B { virtual int extra(int); };', native_virtual_error),
             (scalar + 'struct D : B { int read(int n) override { return n; } };', native_virtual_error),
             (scalar + 'struct D : B {}; struct E : D {};', native_virtual_error),

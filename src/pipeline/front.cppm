@@ -1338,6 +1338,15 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
     if (entity.kind != sema::EntityKind::constructor && entity.kind != sema::EntityKind::destructor) return true;
     const auto* owner = classes.find(entity.scope);
     if (!owner || !owner->dynamic || f.body.tree == ast::NodeId::none) return true;
+    // Native layout does not apply every alignment attribute sema erases (#309, #999).
+    for (EntityId c = entity.scope; c != EntityId::none;) {
+      const auto& record = classes.rec(c);
+      if (uncertain_layouts.contains(c) || record.explicit_alignment) {
+        block_virtual_emission(tu, program, *owner);
+        return false;
+      }
+      c = record.dynamic && record.dynamic->primary_base ? record.bases.front().cls : EntityId::none;
+    }
     const EntityId table = sema::virtual_table_entity(world, entity.scope);
     tu.base_object_variants.insert(f.entity);
     if (entity.kind == sema::EntityKind::constructor) {
@@ -1345,6 +1354,39 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
       return true;
     }
     tu.functions[index].destructor_table = table;
+    // Itanium C++ ABI §5.1.4.3: a destructor destroys its base subobject with the base-object entry.
+    const auto& tree = ins.ast;
+    if (tree.is<ast::Destructor>(f.body.tree)) {
+      const auto destructor = tree.get<ast::Destructor>(f.body.tree);
+      ast::Builder b(world.ins);
+      std::vector<ast::Child> members;
+      bool changed = false;
+      for (ast::Child m : tree.children(destructor.members)) {
+        if (tree.is<ast::DestroyMember>(m.id)) {
+          const auto destroy = tree.get<ast::DestroyMember>(m.id);
+          const auto* base = destroy.field == ~0u ? classes.find(world.types.class_of(destroy.type)) : nullptr;
+          // A base destructor defined in this unit shares its code with its D2 alias here.
+          const bool defined_here = program.function_defined_before(destroy.destructor, program.end()) ||
+                                    std::ranges::contains(program.synthesized(), destroy.destructor,
+                                                          [](const auto& s) { return s.decl.entity; });
+          if (base && base->dynamic && !defined_here) {
+            const EntityId entry = destructor_variant(world, destroy.destructor, sema::EntityKind::base_object_destructor);
+            ast::DeclSema d{};
+            d.kind = ast::DeclKind::function;
+            d.entity = entry;
+            d.type = world.entities.rec(entry).type;
+            declare(d, ast::Loc{f.item, f.body_offset});
+            members.push_back({b.add(ast::DestroyMember{destroy.field, destroy.type, entry}, 0), m.at});
+            changed = true;
+            continue;
+          }
+        }
+        members.push_back(m);
+      }
+      if (changed)
+        tu.functions[index].body.tree =
+            b.commit(ast::Child{b.add(ast::Destructor{destructor.body, b.list(members)}, 0), 0}).id;
+    }
     if (!f.decl.is_virtual) return true;
     const auto size = program.class_size(entity.scope);
     if (!size) {
@@ -1588,7 +1630,23 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
   for (EntityId c : classes.classes())
     if (const auto& record = classes.rec(c); record.dynamic && record.dynamic->primary_base)
       profile_only_bases.erase(record.bases.front().cls);
-  // The implicitly defined special members needed by this unit ([special]).
+  // The implicitly defined special members needed by this unit ([special]). The implicit
+  // constructors of dynamic classes and of classes containing one are emitted where something
+  // calls them, as a keyless table is emitted where something installs it (#309).
+  std::vector<std::size_t> on_use;
+  const auto emit_synthesized = [&](std::size_t i) {
+    const parse::Program::Synthesized& s = program.synthesized()[i];
+    const EntityId cls = world.entities.rec(s.decl.entity).scope;
+    declare(s.decl, std::nullopt);
+    tu.functions.push_back({s.decl.entity, s.decl, program.synthesized_body(i), program.id(s.item), 0, program.this_type(s.decl)});
+    using enum parse::Program::SpecialMember;
+    if (s.kind == destructor) coalesce_inline_function(tu.functions.back(), true);
+    else tu.functions.back().coalesced = (s.kind == copy_assignment || s.kind == move_constructor ||
+                                          s.kind == default_constructor ||
+                                          (s.kind == copy_constructor && classes.rec(cls).layout_requires_virtual_support)) &&
+                                         !internal_class(cls);
+    return dynamic_member(tu.functions.size() - 1);
+  };
   for (std::size_t i = 0; i < program.synthesized().size(); ++i) {
     const parse::Program::Synthesized& s = program.synthesized()[i];
     const EntityId cls = world.entities.rec(s.decl.entity).scope;
@@ -1599,29 +1657,77 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
       continue;
     // A deleted implicit constructor of a dynamic class has no body (`validate_dynamic_constructors`).
     if (program.synthesized_body(i).tree == ast::NodeId::none) continue;
-    declare(s.decl, std::nullopt);
-    tu.functions.push_back({s.decl.entity, s.decl, program.synthesized_body(i), program.id(s.item), 0, program.this_type(s.decl)});
-    using enum parse::Program::SpecialMember;
-    if (s.kind == destructor) coalesce_inline_function(tu.functions.back(), true);
-    else tu.functions.back().coalesced = (s.kind == copy_assignment || s.kind == move_constructor ||
-                                          s.kind == default_constructor ||
-                                          (s.kind == copy_constructor && classes.rec(cls).layout_requires_virtual_support)) &&
-                                         !internal_class(cls);
-    if (!dynamic_member(tu.functions.size() - 1)) return tu;
+    if (program.emitted_on_use(s.decl.entity)) {
+      on_use.push_back(i);
+      continue;
+    }
+    if (!emit_synthesized(i)) return tu;
+  }
+  // The constructors the emitted code calls, to a fixed point over the bodies emitted for them.
+  std::set<EntityId> called;
+  std::size_t scanned = 0;
+  const auto scan = [&] {
+    for (; scanned < tu.functions.size(); ++scanned) {
+      const FunctionDef& f = tu.functions[scanned];
+      if (f.body.tree == ast::NodeId::none) continue;
+      auto visit = [&](this auto&& self, const ast::Red& node) -> void {
+        if (node.is<ast::CtorCall>()) called.insert(node.get<ast::CtorCall>().ctor);
+        node.for_each_child([&](const ast::Red& child) { self(child); });
+      };
+      visit(ast::Red(ins.ast, f.body.tree, f.body_offset));
+    }
+  };
+  for (bool more = true; more;) {
+    scan();
+    more = false;
+    for (std::size_t& i : on_use) {
+      if (i == std::numeric_limits<std::size_t>::max() || !called.contains(program.synthesized()[i].decl.entity)) continue;
+      if (!emit_synthesized(i)) return tu;
+      i = std::numeric_limits<std::size_t>::max();
+      more = true;
+    }
   }
   // The tables of the dynamic classes this unit defines: strong where the key function is
-  // defined here and not inline, weak where the class has none (Itanium C++ ABI §5.2.3).
+  // defined here and not inline; weak where it has none (or an inline one) and a constructor or
+  // destructor emitted here installs it (Itanium C++ ABI §5.2.3). A derived descriptor names
+  // its base's; a keyless base whose table is not used here gets its descriptor alone.
+  std::set<EntityId> installed;
+  for (const FunctionDef& f : tu.functions) {
+    installed.insert(f.constructor_table);
+    installed.insert(f.destructor_table);
+  }
+  const auto owned_here = [&](EntityId c) -> std::optional<bool> {  // weak, if emitted here
+    const auto& record = classes.rec(c);
+    const auto& dynamic = *record.dynamic;
+    if (dynamic.key_function != EntityId::none && !inline_declarations.contains(dynamic.key_function))
+      return program.function_defined_before(dynamic.key_function, program.end()) ? std::optional(false) : std::nullopt;
+    if (dynamic.key_function != EntityId::none && !program.function_defined_before(dynamic.key_function, program.end()))
+      return std::nullopt;
+    return installed.contains(sema::virtual_table_entity(world, c)) ? std::optional(true) : std::nullopt;
+  };
+  std::set<EntityId> tables, descriptors_only;
   for (EntityId c : classes.classes()) {
     const auto& record = classes.rec(c);
-    if (!record.dynamic || !record.defined || profile_only_bases.contains(c)) continue;
-    const auto& dynamic = *record.dynamic;
-    bool weak = dynamic.key_function == EntityId::none;
-    if (!weak) {
-      if (!program.function_defined_before(dynamic.key_function, program.end())) continue;
-      weak = inline_declarations.contains(dynamic.key_function);
+    if (!record.dynamic || !record.defined || profile_only_bases.contains(c) || !owned_here(c)) continue;
+    tables.insert(c);
+    // The bases' descriptors: owned by the key function's unit, or emitted here.
+    for (EntityId base = record.dynamic->primary_base ? record.bases.front().cls : EntityId::none;
+         base != EntityId::none;) {
+      const auto& base_record = classes.rec(base);
+      const auto key = base_record.dynamic->key_function;
+      if (tables.contains(base) || (key != EntityId::none && !inline_declarations.contains(key))) break;
+      descriptors_only.insert(base);
+      base = base_record.dynamic->primary_base ? base_record.bases.front().cls : EntityId::none;
     }
-    DynamicTable table{sema::virtual_table_entity(world, c), c, {},
-                       dynamic.primary_base ? record.bases.front().cls : EntityId::none, weak};
+  }
+  for (EntityId c : classes.classes()) {
+    const bool table_here = tables.contains(c);
+    if (!table_here && (!descriptors_only.contains(c) || tables.contains(c))) continue;
+    const auto& record = classes.rec(c);
+    const auto& dynamic = *record.dynamic;
+    const EntityId base = dynamic.primary_base ? record.bases.front().cls : EntityId::none;
+    const EntityId entity = table_here ? sema::virtual_table_entity(world, c) : sema::type_info_entity(world, c);
+    DynamicTable table{entity, c, {}, base, table_here ? *owned_here(c) : true, !table_here};
     const auto reference = [&](EntityId e) {
       if (seen.contains(std::to_underlying(e))) return;
       ast::DeclSema d{};
@@ -1630,7 +1736,7 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
       d.type = world.entities.rec(e).type;
       declare(d, std::nullopt);
     };
-    for (const sema::VirtualSlot& slot : dynamic.slots) {
+    for (const sema::VirtualSlot& slot : table_here ? dynamic.slots : std::vector<sema::VirtualSlot>{}) {
       EntityId e = slot.function;
       if (slot.pure) e = sema::pure_virtual_handler(world);
       else if (slot.kind == sema::VirtualSlotKind::deleting_destructor)

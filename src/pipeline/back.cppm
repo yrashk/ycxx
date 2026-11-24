@@ -224,6 +224,7 @@ struct DynamicTable {
   std::vector<EntityId> slots;
   EntityId base = EntityId::none;  // the single public primary base, whose RTTI the descriptor names
   bool weak = false;
+  bool rtti_only = false;  // a keyless base's descriptor for a derived one, its table not used here
 };
 
 struct AsmHiddenSymbol {
@@ -1853,6 +1854,7 @@ struct DynamicTableOut {
   std::optional<std::string> base_encoding;
   bool weak = false;
   bool emit_type_info = true;
+  bool rtti_only = false;
 };
 
 // Itanium C++ ABI §2.5.2, §2.9.5 and §5.2.3–4 for the general dynamic classes (#309): the table
@@ -1862,6 +1864,8 @@ struct DynamicTableOut {
 // weak descriptor and its name follow Apple's arm64 non-unique RTTI convention (hidden, bit 63
 // set in the name pointer) as `emit_keyless_type_info` does. `descriptors` maps each type
 // encoding to its descriptor's symbol, for derived classes emitted later in the same object.
+void emit_dynamic_descriptor(obj::object& o, const DynamicTableOut& table, std::uint32_t typeinfo_symbol,
+                             std::uint32_t shared_pointers, std::map<std::string, std::uint32_t>& descriptors);
 void emit_dynamic_table(obj::object& o, const DynamicTableOut& table, std::uint32_t table_symbol,
                         std::span<const std::uint32_t> slots, std::map<std::string, std::uint32_t>& descriptors) {
   using S = obj::standard_section;
@@ -1880,6 +1884,14 @@ void emit_dynamic_table(obj::object& o, const DynamicTableOut& table, std::uint3
       if (o.symbols[i].name_view() == name) return i;
     return o.add_symbol({name, obj::binding::global, std::nullopt, 0, false});
   };
+  // An RTTI-only entry's symbol is the descriptor itself.
+  if (table.rtti_only) {
+    if (!table.emit_type_info) return;
+    if (!o.symbols[table_symbol].defined())
+      emit_dynamic_descriptor(o, table, table_symbol, elf ? 0 : section(S::data_const), descriptors);
+    descriptors.emplace(table.type_encoding, table_symbol);
+    return;
+  }
   const std::uint64_t table_size = rtti_address_point + rtti_pointer_size * slots.size();
   const auto pointers = section(S::data_const);
   o.sections[pointers].align(3);
@@ -1897,11 +1909,29 @@ void emit_dynamic_table(obj::object& o, const DynamicTableOut& table, std::uint3
   for (std::uint32_t slot : slots) emit_rtti_pointer(o, pointers, slot);
   if (!typeinfo) return;
   // A descriptor this object already defines (a peer profile's keyless base) is reused.
-  if (o.symbols[*typeinfo].defined()) {
-    descriptors.emplace(table.type_encoding, *typeinfo);
-    return;
-  }
-  const auto descriptor_section = elf ? o.add_section(S::data_const) : pointers;
+  if (!o.symbols[*typeinfo].defined()) emit_dynamic_descriptor(o, table, *typeinfo, pointers, descriptors);
+  descriptors.emplace(table.type_encoding, *typeinfo);
+}
+
+void emit_dynamic_descriptor(obj::object& o, const DynamicTableOut& table, std::uint32_t typeinfo_symbol,
+                             std::uint32_t shared_pointers, std::map<std::string, std::uint32_t>& descriptors) {
+  using S = obj::standard_section;
+  const bool elf = o.arch == obj::target::x86_64_linux;
+  const std::string prefix = elf ? "" : "_";
+  const std::optional<std::uint32_t> typeinfo = typeinfo_symbol;
+  auto section = [&](S kind) {
+    const obj::section standard = obj::section::standard(kind);
+    if (!elf)
+      for (std::uint32_t i = 0; i < o.sections.size(); ++i)
+        if (o.sections[i].segment == standard.segment && o.sections[i].name == standard.name) return i;
+    return o.add_section(standard);
+  };
+  auto named = [&](const std::string& name) {
+    for (std::uint32_t i = 0; i < o.symbols.size(); ++i)
+      if (o.symbols[i].name_view() == name) return i;
+    return o.add_symbol({name, obj::binding::global, std::nullopt, 0, false});
+  };
+  const auto descriptor_section = elf ? o.add_section(S::data_const) : shared_pointers;
   o.sections[descriptor_section].align(3);
   const auto bind = !elf && table.weak ? obj::binding::hidden : obj::binding::global;
   auto& descriptor = o.symbols[*typeinfo];
@@ -1919,7 +1949,6 @@ void emit_dynamic_table(obj::object& o, const DynamicTableOut& table, std::uint3
     const auto found = descriptors.find(*base);
     emit_rtti_pointer(o, descriptor_section, found != descriptors.end() ? found->second : named(prefix + "_ZTI" + *base));
   }
-  descriptors.emplace(table.type_encoding, *typeinfo);
 }
 
 std::expected<obj::object, aarch64::CodegenError> assemble_linux(
@@ -2364,7 +2393,7 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
                                      owned->peer_base_rtti, emit_table_type_info};
       }
       if (const auto dynamic = std::ranges::find(tu.dynamic_tables, e.id, &DynamicTable::entity);
-          table && dynamic != tu.dynamic_tables.end()) {
+          dynamic != tu.dynamic_tables.end() && table != dynamic->rtti_only) {
         std::optional<std::string> base;
         if (dynamic->base != EntityId::none) {
           auto base_encoding = mangled_type(in, in.intern_type(ast::TClass{dynamic->base}), names);
@@ -2375,7 +2404,8 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
           }
           base = std::move(*base_encoding);
         }
-        dynamic_tables.push_back({e.id, *encoding, dynamic->slots, std::move(base), dynamic->weak, emit_table_type_info});
+        dynamic_tables.push_back({e.id, *encoding, dynamic->slots, std::move(base), dynamic->weak, emit_table_type_info,
+                                  dynamic->rtti_only});
       }
       if (!table && tu.keyless_type_info.contains(e.id)) keyless_type_info.push_back({e.id, std::move(*encoding)});
       continue;
