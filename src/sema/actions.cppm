@@ -943,7 +943,8 @@ public:
   // A template-name that names a type with its arguments ([temp.names]): a class template, or an
   // alias template ([temp.alias]).
   std::optional<ast::DeclSema> type_template(NameId name) {
-    if (auto m = own_member_alias_template(name)) return m;
+    bool found_member = false;
+    if (auto m = own_member_alias_template(name, found_member); found_member) return m;
     if (auto c = class_template(name)) return c;
     return named_template(name, ast::DeclKind::type_alias);
   }
@@ -2638,13 +2639,26 @@ public:
     }
     return std::nullopt;
   }
-  // `apply<args>` in the scope of the class that declares `apply` ([class.member.lookup]), unless
-  // a block scope or a template parameter hides it.
-  std::optional<ast::DeclSema> own_member_alias_template(NameId n) {
-    if (current_class == EntityId::none || template_param(n)) return std::nullopt;
-    for (const auto& s : scopes_)
-      if (std::ranges::contains(s, n, [](const auto& p) { return p.first; })) return std::nullopt;
-    return member_alias_template(current_class, n);
+  // Unqualified lookup skips the current class's dependent direct bases even during replay.
+  // A non-template member or an ambiguous lookup still hides outer declarations
+  // ([basic.lookup.unqual], [class.member.lookup], [temp.res.general]).
+  std::optional<ast::DeclSema> own_member_alias_template(NameId n, bool& found) {
+    if (current_class == EntityId::none || template_param(n) || local_named(n)) return std::nullopt;
+    std::optional<Found> member;
+    if (class_rec(current_class)) {
+      member = find_member(current_class, n, /*unqualified=*/true);
+    } else {
+      if (auto m = q_->earlier_member(n)) {
+        found = true;
+        if (m->kind == ast::DeclKind::type_alias && (m->flags & decl_flag::template_)) return *m;
+        return std::nullopt;
+      }
+      member = find_base_member(q_->defining_base_records(current_class), n, /*unqualified=*/true);
+    }
+    found = member.has_value();
+    if (!member || member->ambiguous || member->nested_type == EntityId::none || member->enumerator != EntityId::none ||
+        w_->entities.rec(member->nested_type).kind != EntityKind::alias_template) return std::nullopt;
+    return q_->template_decl(member->nested_type);
   }
   std::optional<QualType> member_type(EntityId c, NameId n) {
     if (class_rec(c)) {
