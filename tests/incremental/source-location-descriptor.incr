@@ -1,16 +1,17 @@
 // Indenting, inserting a blank line, and renaming the presumed file each change one
 // coordinate and add one failed assertion. Restoring the original call site clears them.
+// Initialize the descriptor directly in the edited header and observe it in the main file.
 --- main.cpp
 #include "expected.hpp"
 #include "observed.hpp"
-static_assert(observe().line() == 701);
-static_assert(observe().column() == observed_column);
-static_assert(observe().file_name()[0] == 'a');
+static_assert(observed.line() == 701);
+static_assert(observed.column() == observed_column);
+static_assert(observed.file_name()[0] == 'a');
 --- expected.hpp
 #if defined(__GNUC__) && !defined(__clang__) && !defined(__ycxx__)
-constexpr unsigned observed_column = 39;
+constexpr unsigned observed_column = 72;
 #else
-constexpr unsigned observed_column = 10;
+constexpr unsigned observed_column = 43;
 #endif
 --- source-location.hpp
 namespace std { inline namespace __y1 {
@@ -33,6 +34,7 @@ public:
     return location;
   }
 
+  constexpr source_location() noexcept = default;
   constexpr unsigned line() const noexcept { return value->_M_line; }
   constexpr unsigned column() const noexcept { return value->_M_column; }
   constexpr const char* file_name() const noexcept { return value->_M_file_name; }
@@ -41,61 +43,51 @@ public:
 }}
 --- observed.hpp
 #include "source-location.hpp"
-#line 700 "alpha-source.cpp"
-constexpr std::source_location observe() {
-  return std::source_location::current();
-}
+#line 701 "alpha-source.cpp"
+constexpr std::source_location observed = std::source_location::current();
 === edit
 --- main.cpp
 #include "expected.hpp"
 #include "observed.hpp"
-static_assert(observe().line() == 701);
-static_assert(observe().column() == observed_column); //! error
-static_assert(observe().file_name()[0] == 'a');
+static_assert(observed.line() == 701);
+static_assert(observed.column() == observed_column); //! error
+static_assert(observed.file_name()[0] == 'a');
 --- observed.hpp
 #include "source-location.hpp"
-#line 700 "alpha-source.cpp"
-constexpr std::source_location observe() {
-    return std::source_location::current();
-}
+#line 701 "alpha-source.cpp"
+  constexpr std::source_location observed = std::source_location::current();
 === edit
 --- main.cpp
 #include "expected.hpp"
 #include "observed.hpp"
-static_assert(observe().line() == 701); //! error
-static_assert(observe().column() == observed_column); //! error
-static_assert(observe().file_name()[0] == 'a');
+static_assert(observed.line() == 701); //! error
+static_assert(observed.column() == observed_column); //! error
+static_assert(observed.file_name()[0] == 'a');
 --- observed.hpp
 #include "source-location.hpp"
-#line 700 "alpha-source.cpp"
-constexpr std::source_location observe() {
+#line 701 "alpha-source.cpp"
 
-    return std::source_location::current();
-}
+  constexpr std::source_location observed = std::source_location::current();
 === edit
 --- main.cpp
 #include "expected.hpp"
 #include "observed.hpp"
-static_assert(observe().line() == 701); //! error
-static_assert(observe().column() == observed_column); //! error
-static_assert(observe().file_name()[0] == 'a'); //! error
+static_assert(observed.line() == 701); //! error
+static_assert(observed.column() == observed_column); //! error
+static_assert(observed.file_name()[0] == 'a'); //! error
 --- observed.hpp
 #include "source-location.hpp"
-#line 700 "beta-source.cpp"
-constexpr std::source_location observe() {
+#line 701 "beta-source.cpp"
 
-    return std::source_location::current();
-}
+  constexpr std::source_location observed = std::source_location::current();
 === edit
 --- main.cpp
 #include "expected.hpp"
 #include "observed.hpp"
-static_assert(observe().line() == 701);
-static_assert(observe().column() == observed_column);
-static_assert(observe().file_name()[0] == 'a');
+static_assert(observed.line() == 701);
+static_assert(observed.column() == observed_column);
+static_assert(observed.file_name()[0] == 'a');
 --- observed.hpp
 #include "source-location.hpp"
-#line 700 "alpha-source.cpp"
-constexpr std::source_location observe() {
-  return std::source_location::current();
-}
+#line 701 "alpha-source.cpp"
+constexpr std::source_location observed = std::source_location::current();
