@@ -81,6 +81,11 @@ using ClassNames = std::function<ClassName(ast::EntityId)>;
 // A standalone <type> encoding, with an initially empty substitution table (§5.1.5).
 std::expected<std::string, std::string> mangled_type(const ast::Interners& in, ast::QualType type, const ClassNames& classes);
 
+// The Itanium <special-name> for a class-valued template parameter object.
+std::expected<std::string, std::string> mangled_template_parameter_object(const ast::Interners& in,
+                                                                        const ast::TemplateArg& argument,
+                                                                        const ClassNames& classes);
+
 // `scope` is the class or namespace a function is a member of, none for the global namespace.
 // Direct members of ::std use an <unscoped-name> with St (§5.1.5 and §5.1.10).
 std::expected<std::string, std::string> mangled_function(const ast::Interners& in, std::string_view name,
@@ -669,6 +674,27 @@ class Mangler {
         if (!e) return e;
         return "X" + *e + "E";
       }
+      if (in_.values.is<ast::VAggregate>(a.value)) {
+        const auto& aggregate = in_.values.get<ast::VAggregate>(a.value);
+        auto t = type(aggregate.type);
+        if (!t) return t;
+        auto fields = in_.seqs.elements(aggregate.elems);
+        for (ast::ConstId field : fields)
+          if (!in_.values.is<ast::VInt>(field))
+            return std::unexpected("a non-integral template argument field");
+        // Itanium's typed braced-init-list omits trailing zero initializers. The
+        // aggregate constant itself still contains every field, including those zeroes.
+        std::size_t count = fields.size();
+        while (count && ast::int_bits(in_, fields[count - 1]) == ast::Bits128{}) --count;
+        out = "Xtl" + *t;
+        for (std::size_t i = 0; i < count; ++i) {
+          const auto& field = in_.values.get<ast::VInt>(fields[i]);
+          auto value = template_arg({ast::TemplateArgKind::value, field.type, fields[i]});
+          if (!value) return value;
+          out += *value;
+        }
+        return out + "EE";
+      }
       if (ast::is_pointer(in_, a.type) && ast::is_function(in_, ast::pointee_of(in_, a.type)))
         return function_pointer_argument(a);
       if (ast::is_pointer(in_, a.type) && in_.values.is<ast::VLvalue>(a.value))
@@ -1013,6 +1039,14 @@ std::optional<std::string_view> operator_code(std::string_view op, std::size_t a
 
 std::expected<std::string, std::string> mangled_type(const ast::Interners& in, ast::QualType type, const ClassNames& classes) {
   return Mangler(in, classes, {}, {}).type(type);
+}
+
+std::expected<std::string, std::string> mangled_template_parameter_object(const ast::Interners& in,
+                                                                        const ast::TemplateArg& argument,
+                                                                        const ClassNames& classes) {
+  auto encoding = Mangler(in, classes, {}, {}).template_arg(argument);
+  if (!encoding) return encoding;
+  return "_ZTA" + *encoding;
 }
 
 std::expected<std::string, std::string> mangled_function(const ast::Interners& in, std::string_view name,

@@ -1253,6 +1253,8 @@ public:
     return false;
   }
   std::optional<ConstId> constant_value(EntityId e, u32 item) {
+    if (const auto* r = w_->entities.find(e); r && r->kind == sema::EntityKind::template_parameter_object)
+      return r->args.front().value;
     ensure_declared(e, item);
     variable_instance(e, item);
     member_value(e);
@@ -1288,6 +1290,8 @@ public:
   // A namespace-scope variable as the interpreter sees it at `item`: its type and, if it is usable
   // in constant expressions, its value.
   std::optional<interp::GlobalVar> global(EntityId v, u32 item) {
+    if (const auto* r = w_->entities.find(v); r && r->kind == sema::EntityKind::template_parameter_object)
+      return interp::GlobalVar{r->type, r->args.front().value, true};
     // A static local: usable in constant expressions when const and constant-initialized
     // ([expr.const]); reading or writing another is not constant.
     if (auto s = static_locals_.find(std::to_underlying(v)); s != static_locals_.end())
@@ -1558,6 +1562,7 @@ public:
   std::span<const EntityId> implicit_allocation_functions() const { return implicit_allocation_functions_; }
   // The C library functions the unit's builtins call (`World::string_function`), in order of first use.
   std::span<const EntityId> library_functions() const { return library_functions_; }
+  std::span<const EntityId> template_parameter_objects() const { return template_parameter_objects_; }
   // The calls of a template's body that were dependent at its definition, by the template's item
   // ([temp.dep.candidate]); its instantiations add argument-dependent lookup to them.
   // Whether a call of the templated body of `item` at `offset` was dependent, read from the
@@ -1903,6 +1908,7 @@ private:
   std::vector<EntityId> required_;
   std::vector<EntityId> implicit_allocation_functions_;  // in order of first use
   std::vector<EntityId> library_functions_;              // in order of first use
+  std::vector<EntityId> template_parameter_objects_;     // in order of first use
   bool has_typed_dynamic_cast_ = false;
   std::map<u32, std::optional<irgen::FunctionIr>> instance_irs_;  // instantiated and implicit bodies, by entity
   std::map<u32, std::optional<irgen::FunctionIr>> closure_irs_;  // by closure member
@@ -2216,6 +2222,9 @@ public:
   }
   void use_library_function(EntityId f) override {
     if (!std::ranges::contains(p_->library_functions_, f)) p_->library_functions_.push_back(f);
+  }
+  void use_template_parameter_object(EntityId e) override {
+    if (!std::ranges::contains(p_->template_parameter_objects_, e)) p_->template_parameter_objects_.push_back(e);
   }
   interp::Callee function_ir(EntityId f) override {
     if (special_member_exception && p_->world().entities.rec(f).scope == completing_class)
@@ -3033,6 +3042,7 @@ public:
   std::optional<ast::DeclSema> class_friend(EntityId f) override { return at_.class_friend(f); }
   void use_allocation_function(EntityId f, bool aligned) override { at_.use_allocation_function(f, aligned); }
   void use_library_function(EntityId f) override { at_.use_library_function(f); }
+  void use_template_parameter_object(EntityId e) override { at_.use_template_parameter_object(e); }
   interp::Callee function_ir(EntityId f) override { return p_->function_ir(f, p_->end()); }
   std::optional<QualType> deduced_type(EntityId f) override { return p_->deduced_type(f, p_->end()); }
   sema::GenericResult generic_instance(EntityId spec, const sema::GenericClosure* known, const sema::GenericBinding&) override {

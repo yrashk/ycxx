@@ -82,7 +82,9 @@ class Constants {
 
 // An entity the translation unit declares (or defines): what its symbol is made of.
 // These symbols use special Itanium encodings (§5.1.4.3, §5.1.4.5).
-enum class Special : std::uint8_t { none, constructor, destructor, virtual_table, deleting_destructor, type_info, base_object_destructor };
+enum class Special : std::uint8_t {
+  none, constructor, destructor, virtual_table, deleting_destructor, type_info, base_object_destructor, template_parameter_object
+};
 struct Entity {
   EntityId id = EntityId::none;
   std::string name;  // its identifier
@@ -2513,6 +2515,12 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, Key k) {
                                   dynamic->rtti_only});
       }
       if (!table && tu.keyless_type_info.contains(e.id)) keyless_type_info.push_back({e.id, std::move(*encoding)});
+      continue;
+    }
+    if (e.special == Special::template_parameter_object) {
+      auto name = mangled_template_parameter_object(in, e.template_args.front(), names);
+      if (!name) errors.push_back({e.at, std::format("the template parameter object name: {}", name.error())});
+      else symbols.push_back({e.id, linux ? std::move(*name) : "_" + *name, obj::binding::global});
       continue;
     }
     // Calls still name the complete-object entry. An eligible definition also emits C2 or D2

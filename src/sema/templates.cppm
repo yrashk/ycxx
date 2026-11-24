@@ -70,6 +70,34 @@ public:
   TemplateArg type_arg(QualType t) { return {TemplateArgKind::type, types().canonical(t), ConstId::none}; }
   TemplateArg value_arg(QualType t, ConstId v) { return {TemplateArgKind::value, types().canonical(Types::unqualified(t)), v}; }
 
+  // The supported class-valued parameter profile ([temp.param]). Use a fixed, externally named
+  // class so its layout and template parameter object name agree in each translation unit.
+  bool structural_class_parameter(QualType t) {
+    t = types().canonical(t);
+    if (!types().is_class(t) || types().is_dependent(t)) return false;
+    EntityId id = types().class_of(t);
+    const ClassRec* c = classes_->find(id);
+    if (!c || !c->defined || !c->member_declarations_valid || c->union_ || c->user_ctors ||
+        c->closure || c->polymorphic || !c->bases.empty() || c->unapplied_layout ||
+        !c->destructor_usable || c->trivial_copyability.destructor != CopyOperation::eligible_trivial ||
+        c->trivial_copyability.copy_constructor != CopyOperation::eligible_trivial ||
+        c->copy_deleted || c->copy_nontrivial())
+      return false;
+    for (EntityId e = id; e != EntityId::none;) {
+      const EntityRec& r = w_->entities.rec(e);
+      const std::string_view name = ins().names.spelling(r.name);
+      if (r.linkage != ast::Linkage::external || r.templ != EntityId::none ||
+          (r.kind != EntityKind::namespace_ && r.kind != EntityKind::class_) ||
+          name.empty() || name == "(anonymous)")
+        return false;
+      e = r.scope;
+    }
+    return std::ranges::all_of(c->fields, [&](const FieldRec& f) {
+      return c->access_of(f.entity) == ast::Access::public_ && types().is_integral(f.type) &&
+             !Types::is_volatile(types().canonical(f.type)) && !f.mutable_ && !f.bit_width && !f.no_unique_address;
+    });
+  }
+
   // The specialization of variable template `templ` for canonical arguments ([temp.spec.general]).
   // `constraints`: a constrained partial specialization's pattern, keyed by its constraints'
   // token fingerprint too (Fable's decision on #234).
@@ -1452,6 +1480,7 @@ public:
     for (std::size_t i = 0; i < params.size(); ++i) {
       if (!out[i] || params[i].kind != TemplateArgKind::value || params[i].pack) continue;
       auto pt = substitute(params[i].type, bindings(depth, out));
+      if (pt && types().is_class(*pt) && types().is_dependent(params[i].type)) return std::nullopt;
       auto v = pt ? converted_value(*out[i], *pt) : std::nullopt;
       if (!v) return std::nullopt;
       out[i] = *v;
@@ -1528,6 +1557,7 @@ public:
       if (p.kind == TemplateArgKind::type) return a;
       if (p.kind == TemplateArgKind::template_) return template_matches(p, a) ? std::optional(a) : std::nullopt;
       auto pt = substitute(p.type, bindings(depth, out));
+      if (pt && types().is_class(*pt) && types().is_dependent(p.type)) return std::nullopt;
       if (deferred(a)) return pt && (types().is_integral(*pt) || types().is_dependent(*pt)) ? std::optional(a) : std::nullopt;
       return pt ? converted_value(a, *pt) : std::nullopt;
     };
@@ -1666,6 +1696,21 @@ public:
       }
     }
     if (types().is_dependent(t) || ins().values.is_dependent(a.value)) return TemplateArg{TemplateArgKind::value, t, a.value};
+    if (types().is_class(t)) {
+      if (!structural_class_parameter(t) || !ins().values.is<ast::VAggregate>(a.value)) return std::nullopt;
+      const auto& aggregate = ins().values.get<ast::VAggregate>(a.value);
+      const auto values = ins().seqs.elements(aggregate.elems);
+      const auto& fields = classes_->find(types().class_of(t))->fields;
+      if (aggregate.type != t || values.size() != fields.size()) return std::nullopt;
+      // Normalize to the declared field types so the value is independent of how it was formed.
+      std::vector<ConstId> canonical;
+      canonical.reserve(fields.size());
+      for (std::size_t i = 0; i < fields.size(); ++i) {
+        if (!ins().values.is<ast::VInt>(values[i])) return std::nullopt;
+        canonical.push_back(w_->values.integer(fields[i].type, ast::int_bits(ins(), values[i])));
+      }
+      return value_arg(t, w_->values.aggregate(t, canonical));
+    }
     if (types().is_integral(t) && ins().values.is<ast::VInt>(a.value)) {
       // An unscoped enumeration converts through its underlying type ([conv.prom]); a scoped one
       // does not convert ([dcl.enum]).
@@ -1718,6 +1763,7 @@ public:
         auto p = ins().values.get<ast::VDepParam>(d.value);
         auto a = p.depth == depth && p.index < i ? out[p.index] : std::nullopt;
         auto pt = substitute(params[i].type, bindings(depth, out));
+        if (pt && types().is_class(*pt) && types().is_dependent(params[i].type)) return std::nullopt;
         auto v = a && pt ? converted_value(*a, *pt) : std::nullopt;
         if (!v) return std::nullopt;
         d = *v;

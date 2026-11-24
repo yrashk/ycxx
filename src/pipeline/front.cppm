@@ -1637,6 +1637,15 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
     definition.emit_if_referenced = immediate_if_referenced(in->decl, entity, in->body.value);
     definition.plain_immediate_template = definition.emit_if_referenced && program.is_namespace(entity.scope) &&
                                           !ins.names.spelling(entity.name).empty();
+    // These implicit namespace specializations can occur in every unit using the same
+    // canonical class argument, including units compiled by an Itanium ABI peer.
+    if (entity.kind == sema::EntityKind::function && entity.templ != EntityId::none &&
+        entity.linkage == ast::Linkage::external && program.is_namespace(entity.scope) &&
+        !names_tu_local(program, entity.scope, true) && !names_tu_local(program, in->decl.type, true) &&
+        program.asm_label(in->spec).empty() &&
+        !std::ranges::any_of(entity.args, [&](const ast::TemplateArg& a) { return names_tu_local(program, a, true); }) &&
+        std::ranges::any_of(entity.args, [&](const ast::TemplateArg& a) { return ins.values.is<ast::VAggregate>(a.value); }))
+      definition.coalesced = true;
     if (it.parent != items::none && items.items[it.parent].kind == items::ItemKind::class_def) {
       const bool ordinary_member = ordinary_class_template_member(entity) && !in->decl.is_virtual &&
                                    !internal_class(entity.scope) &&
@@ -1942,6 +1951,12 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
     d.kind = ast::DeclKind::function;
     d.has_written_noexcept = world.types.rec(d.type).fn_noexcept;
     declare(d, std::nullopt);
+  }
+  for (EntityId e : program.template_parameter_objects()) {
+    const auto& object = world.entities.rec(e);
+    tu.entities.push_back({.id = e, .name = {}, .type = object.type, .at = {},
+                           .special = Special::template_parameter_object, .template_args = object.args});
+    tu.variables.push_back({.entity = e, .type = object.type, .init = object.args.front().value, .at = {}, .coalesced = true});
   }
   apply_symbol_attributes(tu, hidden_declarations, inline_declarations, weak_declarations, function_visibility, linux);
   if (part) {

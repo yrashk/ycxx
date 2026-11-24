@@ -2515,9 +2515,13 @@ public:
     if (s_->types().is_array(t)) t = s_->types().pointer(s_->types().rec(t).inner);
     else if (s_->types().is_function(t)) t = s_->types().pointer(t);
     t = sema::Types::unqualified(t);
-    // [temp.param]/7: a structural type; class types are not supported yet.
+    // [temp.param]: a structural type, including the supported flat aggregate profile.
+    const bool class_parameter = s_->types().is_class(t) && !s_->types().is_dependent(t) &&
+                                 s_->is_complete(t) && !questions().class_layout_uncertain(s_->types().class_of(t)) &&
+                                 s_->templates().structural_class_parameter(t);
     if (!s_->types().is_integral(t) && !s_->types().is_enum(t) && !s_->types().is_pointer(t) &&
-        !s_->types().is_reference(t) && !s_->types().is(t, Builtin::nullptr_t) && !s_->types().is_dependent(t)) {
+        !s_->types().is_reference(t) && !s_->types().is(t, Builtin::nullptr_t) &&
+        !s_->types().is_dependent(t) && !class_parameter) {
       bool later = s_->types().is_class(t) || s_->types().is_floating(t);  // structural, not supported yet (floating: #317)
       s_->diag(at, later ? Diag::not_supported : Diag::invalid_template_parameter_type,
                s_->types().is_class(t)      ? Tk::kw_class
@@ -2721,12 +2725,27 @@ public:
       s_->diag(e.begin, Diag::not_supported, Tk::kw_template);
       return std::nullopt;
     }
+    const bool class_argument = s_->types().is_class(t);
+    if (class_argument && (!s_->is_complete(t) || questions().class_layout_uncertain(s_->types().class_of(t)) ||
+                           !s_->templates().structural_class_parameter(t))) {
+      s_->diag(e.begin, Diag::not_supported, Tk::kw_class);
+      return std::nullopt;
+    }
     Ex c = s_->convert(e, t, e.begin);
     if (!c.ok()) return std::nullopt;
-    sema::Evaluated v = sema::Evaluator(*s_, questions()).evaluate(c);
+    sema::Evaluator evaluator(*s_, questions());
+    sema::Evaluated v = class_argument ? evaluator.evaluate_initializer(c) : evaluator.evaluate(c);
     if (!v.value) {
       if (!v.diagnosed_failure()) s_->diag(e.begin, Diag::not_constant, v.reason);
       return std::nullopt;
+    }
+    if (class_argument) {
+      const auto a = s_->templates().converted_value({ast::TemplateArgKind::value, t, *v.value}, t);
+      if (!a) {
+        s_->diag(e.begin, Diag::not_supported, Tk::kw_class);
+        return std::nullopt;
+      }
+      return a->value;
     }
     return *v.value;
   }
@@ -2884,10 +2903,12 @@ public:
                               template_argument);
       if (failed_qualifier) return true;  // let the committed parse diagnose the qualifier
       // A terminal namespace type-template-id can expand to a dependent member type.
-      return q && (terminal_template_id || s_->types().kind(q->first) != sema::TypeKind::dep_name);
+      return q && (!template_argument || kind(q->second) != Tk::l_brace) &&
+             (terminal_template_id || s_->types().kind(q->first) != sema::TypeKind::dep_name);
     }
     if (is(Tk::identifier) && kind(1) == Tk::less && s_->names_type_template(name_of(tok()))) return true;
-    return is(Tk::identifier) && kind(1) != Tk::coloncolon && s_->class_name(name_of(tok())).has_value();
+    return is(Tk::identifier) && kind(1) != Tk::coloncolon &&
+           (!template_argument || kind(1) != Tk::l_brace) && s_->class_name(name_of(tok())).has_value();
   }
 
   // The language linkage function types get: from an enclosing linkage-specification.
