@@ -171,6 +171,7 @@ struct Variable {
   std::optional<ast::Loc> at;  // its declarator, for diagnostics
   bool dynamic = false;  // also initialized by code ([basic.start.dynamic]): writable, if const
   bool coalesced = false;  // an eligible external inline data definition, weak (#432, #903)
+  bool inline_definition = false;
 };
 
 // The classes and enumerations a unit defines, as `layout` reads them: a class's non-static data
@@ -2316,13 +2317,13 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, Key k) {
       const auto* variable = world ? world->entities.find(v.entity) : nullptr;
       const auto* owner = variable && variable->scope != EntityId::none ? world->entities.find(variable->scope) : nullptr;
       const bool shared_storage = variable && variable->linkage != ast::Linkage::internal &&
-          (v.coalesced || variable->templ != EntityId::none || (owner && owner->kind == sema::EntityKind::class_ &&
+          (v.inline_definition || variable->templ != EntityId::none || (owner && owner->kind == sema::EntityKind::class_ &&
                                                                owner->templ != EntityId::none));
       if (shared_storage && std::ranges::any_of(b->relocs, [&](const aarch64::DataReloc& relocation) {
             const auto* entity = world->entities.find(relocation.target);
             return entity && entity->kind == sema::EntityKind::template_parameter_object;
           })) {
-        errors.push_back({v.at, "shared native pointer storage initialized with a template parameter object address is not supported yet"});
+        errors.push_back({v.at, "shared native storage initialized with a template parameter object address is not supported yet"});
         continue;
       }
     }

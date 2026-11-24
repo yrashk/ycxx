@@ -207,6 +207,8 @@ struct FunctionVisibility {
 void apply_symbol_attributes(TranslationUnit& tu, const std::set<EntityId>& hidden_declarations,
                              const std::set<EntityId>& inline_declarations, const std::set<EntityId>& weak_declarations,
                              const std::map<EntityId, FunctionVisibility>& function_visibility, bool linux) {
+  if (!inline_declarations.empty())
+    for (Variable& v : tu.variables) v.inline_definition = inline_declarations.contains(v.entity);
   if (hidden_declarations.empty() && function_visibility.empty() && weak_declarations.empty()) return;
   using Visibility = ast::GnuVisibility;
   for (Entity& e : tu.entities) {
