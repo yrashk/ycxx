@@ -1,0 +1,50 @@
+// ACTION: syntax
+// #317: each edit changes the record selected by the same qualified immediate call.
+--- main.cpp
+#include "producer.h"
+
+template<Value> struct Box;
+using Actual = Box<detail::make<int, char>()>;
+
+#include "expected.h"
+static_assert(__is_same(Actual, Expected));
+--- producer.h
+struct Value { long num, den; bool ok; };
+namespace detail {
+  template<class, class> consteval Value make() { return {-3, 5, true}; }
+}
+--- expected.h
+using Expected = Box<Value{-3, 5, true}>;
+=== edit
+--- producer.h
+struct Value { long num, den; bool ok; };
+namespace detail {
+  template<class, class> consteval Value make() { return {-4, 5, true}; }
+}
+--- expected.h
+using Expected = Box<Value{-4, 5, true}>;
+=== edit
+--- producer.h
+struct Value { long num, den; bool ok; };
+namespace detail {
+  template<class, class> consteval Value make() { return {-3, 5, true}; }
+}
+--- expected.h
+using Expected = Box<Value{-3, 5, true}>;
+=== edit
+--- producer.h
+struct Value { long num, den; bool ok; };
+namespace detail {
+  template<class, class> consteval Value make() { return {-3, 5, true}; }
+  template<> consteval Value make<int, char>() { return {7, 5, true}; }
+}
+--- expected.h
+using Expected = Box<Value{7, 5, true}>;
+=== edit
+--- producer.h
+struct Value { long num, den; bool ok; };
+namespace detail {
+  template<class, class> consteval Value make() { return {-3, 5, true}; }
+}
+--- expected.h
+using Expected = Box<Value{-3, 5, true}>;
