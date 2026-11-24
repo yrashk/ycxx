@@ -67,6 +67,8 @@ def main():
         "mismatched-declared.cpp": {"memcmp": False, "memchr": False},
         "mismatched-defined.cpp": {"memcmp": True},
     }
+    # Fixtures the object writers must reject, with the message they must give.
+    rejected = {"second-definition.cpp": "a second definition of symbol"}
     failures = []
     with tempfile.TemporaryDirectory(prefix="ycxx-string-builtins-") as temporary:
         work = Path(temporary)
@@ -88,6 +90,12 @@ def main():
                     entries = [d for n, d in table if n == prefix + name]
                     if entries != [defined]:
                         failures.append(f"{host} {fixture}: {prefix + name} entries {entries}, expected [{defined}]")
+            for fixture, message in rejected.items():
+                result = subprocess.run([ycxx, "cxx", f"--target={triple}", "-std=c++26", "-c", str(fixtures / fixture),
+                                         "-o", str(work / f"{host}-{fixture}.o")], cwd=work, env=env,
+                                        capture_output=True, text=True, timeout=60)
+                if result.returncode == 0 or message not in result.stderr:
+                    failures.append(f"{host} {fixture}: exit {result.returncode}, expected '{message}'\n{result.stderr}")
     for failure in failures:
         print(failure, file=sys.stderr)
     return 1 if failures else 0

@@ -2501,7 +2501,10 @@ library's `memchr` and `memcmp`, as libycxx's `<cstring>` and its run-time strin
 (`include/ycxx/core/mem_builtins.hpp`) use them. Sema converts the arguments to the C signatures
 (`void*` and `int` results) and calls an implicit `extern "C"` declaration with the target's
 `<string.h>` exception specification (`World::string_function`), so a written declaration or
-definition of the function is the same entity and symbol (`unit.string_builtin_symbols`). The unit then references `memchr` or `memcmp` as an undefined symbol,
+definition that matches the target's header is the same entity. One with another exception
+specification is a second entity (whether it should be is #1114), but both object writers give
+entities of one non-local name one symbol (#1095), so the object still lists the function once
+(`unit.string_builtin_symbols`). The unit then references `memchr` or `memcmp` as an undefined symbol,
 which libSystem or the C library provides at link time. A dependent argument defers the call to
 instantiation. They are not constant expressions yet (#1092). Fixtures in `tests/own/builtins/`
 cover detection, signatures, argument checks and run-time results.
