@@ -322,10 +322,10 @@ class Gen {
     std::optional<uint32_t> vacuous_local = {};  // a declaration a jump can bypass
     bool conditional = false;  // a null pointer denotes a temporary that was not created
   };
-  void begin_lifetime(const Place& p) {
+  void begin_lifetime(const Place& p, ir::Flags flags = 0) {
     ValueId ops[] = {p.ptr};
     std::uint64_t imms[] = {word(ty(p.type))};
-    stateful(ir::Op::obj__begin, {}, ops, imms);
+    stateful(ir::Op::obj__begin, {}, ops, imms, flags);
   }
   void start_lifetime(const Place& p, ast::EntityId destructor = ast::EntityId::none,
                       std::optional<uint32_t> vacuous_local = {}) {
@@ -455,9 +455,21 @@ class Gen {
       const ast::LocalRec rec = in_.seqs.at(fn_.body.locals, i);
       if (rec.flags & ast::local_flag::requires_parameter) continue;
       ast::QualType t = rec.type;
-      // A class or array local is never usable in a constant expression: naming it is
-      // unsupported, so it needs no object.
-      if (cls(t) == TypeClass::record || cls(t) == TypeClass::array || facts_.is_reference(t) ||
+      if (cls(t) == TypeClass::record) {
+        // A known initializer supplies the fields of this enclosing automatic object. Its
+        // lifetime began before the thunk and it remains automatic for address results.
+        if (i >= fn_.local_values.size() || !fn_.local_values[i]) continue;
+        const auto value = *fn_.local_values[i];
+        if (!in_.values.is<ast::VAggregate>(value)) continue;
+        const auto type = in_.values.get<ast::VAggregate>(value).type;
+        if (!same_type(ast::without_cv(t), ast::without_cv(type))) continue;
+        const Place p = begin_object(t, ir::Init::indeterminate);
+        initialize_constant({p.ptr, type}, value);
+        begin_lifetime(p, ir::bit(ir::Flag::outside_lifetime));
+        slots_[i] = p;
+        continue;
+      }
+      if (cls(t) == TypeClass::array || facts_.is_reference(t) ||
           in_.types.is<ast::TMemberPtr>(in_.types.canon(t)))
         continue;
       // An enclosing automatic nullptr_t can be converted without reading its object (CWG 2907).
