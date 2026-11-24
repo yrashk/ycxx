@@ -56,9 +56,18 @@ struct ConstantRecordField {
   bool mutable_;
 };
 
+struct ConstantRecordBase {
+  EntityId entity = EntityId::none;
+  QualType type;
+  u64 offset;
+  u64 size;
+};
+
 struct ConstantRecordLayout {
   u64 size;
-  std::vector<ConstantRecordField> fields;
+  std::vector<ConstantRecordField> fields{};
+  bool dynamic = false;
+  std::optional<ConstantRecordBase> primary_base{};
 };
 
 struct Config {
@@ -110,6 +119,7 @@ struct Callee {
   const ir::Function* body = nullptr;  // none: not defined ([expr.const]: before the evaluation)
   bool is_constexpr = false;           // a constexpr or consteval function ([dcl.constexpr])
   bool unsupported = false;            // defined, but its body has no L1 yet
+  EntityId default_constructs = EntityId::none;  // owner of a supported implicit default constructor
 };
 
 // Where an evaluation was: the function and the node, innermost first. The caller maps each to a
@@ -197,6 +207,8 @@ private:
     u64 size;
     u32 ncells;
     std::vector<Field> fields;
+    bool dynamic;
+    std::optional<ConstantRecordBase> primary_base;
   };
   struct Object {
     QualType type{};
@@ -210,6 +222,7 @@ private:
     u32 cell0 = 0, ncells = 0;
     const RecordStorage* record = nullptr;  // owned by records_
     Life record_life = Life::before;        // distinct from the lifetimes of its fields
+    bool dynamic_initialized = false;     // set only by a completed constructor
   };
   struct PathNode {
     u32 parent = 0;
@@ -233,6 +246,7 @@ private:
     EntityId entity{};
     std::vector<Value> regs;
     u32 node = 0;
+    std::optional<u32> initializing_dynamic_object{};
   };
   // A designated subobject: its object, its cells and its type.
   struct Place {
@@ -503,7 +517,7 @@ const Machine::RecordStorage* Machine::record_storage(QualType t, const Constant
     if (layout) known = &*layout;
   }
   if (!known) return nullptr;
-  RecordStorage record{known->size, 0, {}};
+  RecordStorage record{known->size, 0, {}, known->dynamic, known->primary_base};
   record.fields.reserve(known->fields.size());
   for (const auto& field : known->fields) {
     const u64 leaves = shape(field.type).leaves;
@@ -610,6 +624,13 @@ std::optional<Machine::Place> Machine::resolve(const Value& p, std::span<const u
   for (u64 w : extra) path.push_back(ir::decode_step(w));
   for (std::size_t i = 0; i < path.size(); ++i) {
     if (past) return std::nullopt;  // a step below a past-the-end place
+    if (i == 0 && path[i].step == ir::Step::base && ob.record && ob.record->primary_base) {
+      const auto& base = *ob.record->primary_base;
+      if (path[i].index != std::to_underlying(base.entity) || path.size() != 1) return std::nullopt;
+      pl.type = base.type;
+      pl.ncells = 0;  // the supported primary base is fieldless
+      continue;
+    }
     if (i == 0 && path[i].step == ir::Step::field && ob.record) {
       const auto index = path[i].index;
       if (index >= ob.record->fields.size()) return std::nullopt;
@@ -685,7 +706,10 @@ Machine::Flow Machine::locate(const Value& p, std::span<const u64> extra, QualTy
 
 void Machine::set_lifetime(const Place& p, bool complete, Life life) {
   Object& ob = objects_[p.obj];
-  if (complete && ob.record) ob.record_life = life;
+  if (complete && ob.record) {
+    ob.record_life = life;
+    if (life == Life::after) ob.dynamic_initialized = false;
+  }
   for (u32 c = p.cell0; c < p.cell0 + p.ncells; ++c) cells_[c].life = life;
 }
 
@@ -1448,6 +1472,10 @@ i64 Machine::offset_of(const Value& p) {
   QualType cur = object.type;
   i64 off = 0;
   for (PathStep st : steps_of(u32(p.bits))) {
+    if (st.step == ir::Step::base) {
+      const auto& base = *object.record->primary_base;
+      return i64(base.offset + (p.past ? base.size : 0));
+    }
     if (st.step == ir::Step::field) {
       const auto& field = object.record->fields[st.index];
       off += i64(field.layout.offset);
@@ -1640,6 +1668,7 @@ Machine::Flow Machine::capture_result(u32 object) {
   const Object& ob = objects_[object];
   if (!ob.storage) return fail(Reason::storage_ended);
   if (ob.record_life == Life::after) return fail(Reason::outside_lifetime);
+  if (ob.record->dynamic) return fail(Reason::unsupported_constant);
   Result result;
   result.kind = Result::Kind::aggregate;
   result.type = ob.type;

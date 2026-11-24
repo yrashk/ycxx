@@ -361,7 +361,7 @@ struct Ops {
     // [class.cdtor] permits calls during construction and destruction. Check a completed
     // lifetime independently of the fields, which the call need not read.
     const auto& object = m.objects_[place.obj];
-    if (receiver.bits == 0 && object.record_life == M::Life::after) return m.fail(Reason::outside_lifetime);
+    if (object.record_life == M::Life::after) return m.fail(Reason::outside_lifetime);
     return Flow::next;
   }
 
@@ -415,8 +415,10 @@ struct Ops {
     M::Place from, to;
     if (Flow fl = m.locate(src, {}, t, M::Use::read, false, from); fl != Flow::next) return fl;
     if (Flow fl = m.locate(dst, {}, t, M::Use::write, false, to); fl != Flow::next) return fl;
-    if (src.bits != 0 || dst.bits != 0 || !m.objects_[from.obj].record || !m.objects_[to.obj].record ||
-        from.ncells != to.ncells)
+    const auto* src_record = m.objects_[from.obj].record;
+    const auto* dst_record = m.objects_[to.obj].record;
+    if (src.bits != 0 || dst.bits != 0 || !src_record || !dst_record ||
+        src_record->dynamic || dst_record->dynamic || from.ncells != to.ncells)
       return m.unsupported(n);
     return m.copy_record(to, from);
   }
@@ -446,7 +448,27 @@ struct Ops {
     }
     if (!it->second.body) return m.fail(it->second.unsupported ? Reason::callee_unsupported : Reason::undefined_function);
     if (constant(m) && !it->second.is_constexpr) return m.fail(Reason::not_constexpr);
-    return m.enter(f, n, it->second.body, e, f.fn->operands_of(n).subspan(first_arg));
+    const auto args = f.fn->operands_of(n).subspan(first_arg);
+    std::optional<u32> initializing;
+    if (it->second.default_constructs != EntityId::none) {
+      if (args.empty()) return m.fail(Reason::ill_formed);
+      const auto& pointer = m.shape(m.type_of(f, args.front()));
+      const auto type = m.in_->canonical(pointer.inner);
+      if (pointer.kind != M::Kind::pointer || pointer.is_nullptr || !m.in_->types.is<ast::TClass>(type) ||
+          m.in_->types.get<ast::TClass>(type).entity != it->second.default_constructs)
+        return m.fail(Reason::ill_formed);
+      const Value receiver = m.reg(f, args.front());
+      M::Place place;
+      if (Flow fl = m.locate(receiver, {}, type, M::Use::lifetime, false, place); fl != Flow::next) return fl;
+      const auto& object = m.objects_[place.obj];
+      if (object.outside || !object.record || !object.record->dynamic || object.record_life != M::Life::before)
+        return m.unsupported(n);
+      // A base constructor is part of initialization, but does not complete the enclosing object.
+      if (receiver.bits == 0) initializing = place.obj;
+    }
+    const Flow flow = m.enter(f, n, it->second.body, e, args);
+    if (flow == Flow::called) m.frames_.back().initializing_dynamic_object = initializing;
+    return flow;
   }
   static Flow call(M& m, Frame& f, N n) {
     const EntityId callee{u32(imms(f, n)[0])};
@@ -560,6 +582,7 @@ struct Ops {
       vals.push_back(m.reg(f, v));
       types.push_back(m.type_of(f, v));
     }
+    if (f.initializing_dynamic_object) m.objects_[*f.initializing_dynamic_object].dynamic_initialized = true;
     std::size_t depth = m.frames_.size() - 1;
     std::erase_if(m.groups_, [&](const M::Group& g) { return g.frame >= depth; });
     m.frames_.pop_back();  // `f` dangles from here

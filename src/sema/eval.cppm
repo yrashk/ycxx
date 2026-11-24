@@ -241,7 +241,7 @@ private:
     Host host{q_, this};
     interp::Config config{
         .enum_layout = [&facts](EntityId e) { return facts.constant_enum_layout(e); },
-        .record_layout = [this](QualType t) { return constant_record_layout(t); }};
+        .record_layout = [this](QualType t) { return evaluation_record_layout(t); }};
     interp::Outcome out = interp::evaluate(host, in, s_->world().target, body->body, EntityId::none, {}, std::move(config),
                                             bytes ? &bytes->result : nullptr).run();
     if (out.status != interp::Outcome::Status::value) {
@@ -446,6 +446,29 @@ private:
         return std::nullopt;
       // Preserve the enum type in the field path. The interpreter decodes its underlying value.
       result.fields.push_back({s_->field_access_type(field, type), layout->offsets[i], field.mutable_});
+    }
+    return result;
+  }
+
+  // Dynamic layouts are available only for live interpreter storage. A stored record
+  // constant cannot represent a polymorphic object or its base subobject.
+  std::optional<interp::ConstantRecordLayout> evaluation_record_layout(QualType type) {
+    Types& types = s_->types();
+    type = types.canonical(type);
+    if (!types.is_class(type) || Types::is_volatile(type)) return std::nullopt;
+    const EntityId entity = types.class_of(type);
+    const ClassRec* record = s_->class_rec(entity);
+    if (!record || !record->dynamic) return constant_record_layout(type);
+    if (!q_->classes().constexpr_dynamic_default(entity) || q_->class_layout_uncertain(entity)) return std::nullopt;
+    const auto layout = s_->class_layout(entity);
+    if (!layout) return std::nullopt;
+    interp::ConstantRecordLayout result{.size = layout->size, .dynamic = true};
+    if (!record->bases.empty()) {
+      const EntityId base = record->bases.front().cls;
+      const auto base_layout = s_->class_layout(base);
+      if (!base_layout || q_->class_layout_uncertain(base)) return std::nullopt;
+      const QualType base_type = types.add_cv(types.class_type(base), Types::cv(type));
+      result.primary_base = interp::ConstantRecordBase{base, base_type, layout->base_offsets.front(), base_layout->size};
     }
     return result;
   }
