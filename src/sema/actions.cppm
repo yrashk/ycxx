@@ -8291,7 +8291,7 @@ public:
 
   Ex builtin_source_location(u32 begin, u32 end) {
     const Ex fail{NodeId::none, begin, end};
-    if (w_->target.triple != ast::x86_64_linux.triple) {
+    if (!w_->target.supports(ast::NativeOperation::source_location_descriptor)) {
       diag(begin, Diag::source_location_target);
       return fail;
     }

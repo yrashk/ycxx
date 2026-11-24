@@ -1,4 +1,6 @@
 // #327 [support.srcloc]: the library's ordinary current() default captures its call site.
+// XFAIL: ycxx@darwin-arm64 source-location descriptors on Darwin (#327)
+// PARITY: #327 Darwin source-location descriptors
 // FLAGS: -isystem ../../../deps/libycxx/include ../../../deps/libycxx/src/runtime/linkage/static.cpp
 #include <source_location>
 

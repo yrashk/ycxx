@@ -1,4 +1,6 @@
 // Indenting, inserting a blank line, and renaming the presumed file each change one
+// XFAIL: ycxx@darwin-arm64 source-location descriptors on Darwin (#327)
+// PARITY: #327 Darwin source-location descriptors
 // coordinate and add one failed assertion. Restoring the original call site clears them.
 // Initialize the descriptor directly in the edited header and observe it in the main file.
 --- main.cpp
