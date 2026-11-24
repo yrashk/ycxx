@@ -844,6 +844,8 @@ struct ClassRec {
   // Written zero-parameter defaulting, with the completed class's supported no-op proof.
   EntityId defaulted_default_ctor = EntityId::none;
   bool trivial_defaulted_default_ctor = false;
+  // The supported nonempty defaulted constructor initializes one pointer to null.
+  bool null_pointer_defaulted_default_ctor = false;
   EntityId declared_destructor = EntityId::none;  // retains the access of a written trivial destructor
   EntityId destructor = EntityId::none;
   EntityId destructor_declaration() const {

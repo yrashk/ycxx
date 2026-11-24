@@ -7284,10 +7284,16 @@ public:
       if (destructor != EntityId::none && !check_access(c, destructor, w_->entities.rec(destructor).name, begin)) return fail;
     }
     if (k.entity != EntityId::none && k.entity == cr->defaulted_default_ctor) {
-      if (!cr->trivial_defaulted_default_ctor) return fail;  // diagnosed at its declaration
+      if (!cr->trivial_defaulted_default_ctor && !cr->null_pointer_defaulted_default_ctor)
+        return fail;  // diagnosed at its declaration
       if (destination == ConstructorDestination::delegation) {
         diag(begin, Diag::defaulted_default_delegation);
         return fail;
+      }
+      if (cr->null_pointer_defaulted_default_ctor) {
+        const auto& field = cr->fields.front();
+        Ex init = literal(Types::unqualified(field.type), field.init, ValueCategory::prvalue, begin, end);
+        return list_of(ut, {init}, begin, end);
       }
       ExprInfo info{ut, ValueCategory::prvalue, 0};
       // [dcl.init.general]: value-initialization zero-initializes before the trivial constructor.

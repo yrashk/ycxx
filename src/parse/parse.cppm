@@ -11012,9 +11012,16 @@ void Program::classify_defaulted_default_ctor(sema::ClassRec& rec, std::vector<e
     if (!declaration || !defaulted_body(index(declaration->item)) || !w_->types.rec(member.type).params.empty()) continue;
     rec.defaulted_default_ctor = member.entity;
     // Inspect the complete member list, including declarations after the constructor.
-    rec.trivial_defaulted_default_ctor = !rec.union_ && !rec.polymorphic && rec.bases.empty() && rec.fields.empty() &&
-                                         rec.destructor_usable && rec.destructor == EntityId::none;
-    if (!rec.trivial_defaulted_default_ctor) {
+    const bool flat = !rec.union_ && !rec.polymorphic && rec.bases.empty() &&
+                      rec.destructor_usable && rec.destructor == EntityId::none;
+    rec.trivial_defaulted_default_ctor = flat && rec.fields.empty();
+    if (flat && !rec.unapplied_layout && rec.fields.size() == 1) {
+      const auto& field = rec.fields.front();
+      rec.null_pointer_defaulted_default_ctor = w_->types.is_pointer(field.type) && !field.no_unique_address &&
+          !sema::Types::is_volatile(w_->types.canonical(field.type)) && field.init != ConstId::none &&
+          w_->ins.values.is<ast::VNullptr>(field.init);
+    }
+    if (!rec.trivial_defaulted_default_ctor && !rec.null_pointer_defaulted_default_ctor) {
       const auto& source = items_->items[index(declaration->item)];
       diags.push_back({{std::to_underlying(declaration->item), source.body_begin - source.begin},
                        sema::diag_id(Diag::defaulted_default_constructor), {}});
