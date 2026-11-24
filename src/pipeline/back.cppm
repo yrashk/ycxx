@@ -82,7 +82,9 @@ class Constants {
 
 // An entity the translation unit declares (or defines): what its symbol is made of.
 // These symbols use special Itanium encodings (§5.1.4.3, §5.1.4.5).
-enum class Special : std::uint8_t { none, constructor, destructor, virtual_table, deleting_destructor, type_info, base_object_destructor };
+enum class Special : std::uint8_t {
+  none, constructor, destructor, virtual_table, deleting_destructor, type_info, base_object_destructor, template_parameter_object
+};
 struct Entity {
   EntityId id = EntityId::none;
   std::string name;  // its identifier
@@ -114,6 +116,7 @@ struct Entity {
   bool hidden = false;  // GNU hidden visibility: ELF STV_HIDDEN, Mach-O private extern (#602, #124)
   bool nonthrowing = false;  // including implicit exception specifications on destructors
   bool weak_reference = false;  // explicit GNU weak binding for an undefined ELF object
+  bool unsupported_class_parameter_signature = false;
 
   bool has_local_binding() const { return linkage == ast::Linkage::internal || local_parameter_binding; }
 };
@@ -156,6 +159,7 @@ struct FunctionDef {
   // A named namespace-scope immediate function template instance without local statics or closures.
   bool plain_immediate_template = false;
   bool private_constexpr = false;  // a candidate for demand-driven inline emission (#1174)
+  bool unsupported_class_parameter_abi = false;
 };
 
 // A variable definition at namespace scope with its constant initializer, or `ConstId::none` for
@@ -167,6 +171,7 @@ struct Variable {
   std::optional<ast::Loc> at;  // its declarator, for diagnostics
   bool dynamic = false;  // also initialized by code ([basic.start.dynamic]): writable, if const
   bool coalesced = false;  // an eligible external inline data definition, weak (#432, #903)
+  bool inline_definition = false;
 };
 
 // The classes and enumerations a unit defines, as `layout` reads them: a class's non-static data
@@ -1989,7 +1994,8 @@ std::expected<obj::object, aarch64::CodegenError> assemble_linux(
     const std::string& name, std::span<const LinuxFunction> functions,
     std::span<const aarch64::DataDef> data, std::span<const aarch64::Symbol> symbols,
     const std::optional<VirtualTable>& table, std::span<const KeylessTypeInfo> keyless_type_info,
-    std::span<const EntityId> asm_hidden, std::span<const DynamicTableOut> dynamic_tables) {
+    std::span<const EntityId> asm_hidden, std::span<const DynamicTableOut> dynamic_tables,
+    const std::set<EntityId>& template_parameter_objects) {
   obj::object o;
   o.name = name;
   o.arch = obj::target::x86_64_linux;
@@ -2118,11 +2124,13 @@ std::expected<obj::object, aarch64::CodegenError> assemble_linux(
   using S = obj::standard_section;
   for (auto [kind, section] : {std::pair{K::cstring, S::cstring}, {K::rodata, S::rodata}, {K::data_const, S::data_const},
                                {K::data, S::data}, {K::bss, S::bss}, {K::init_func, S::init_array}}) {
-    if (!std::ranges::contains(data, kind, &aarch64::DataDef::kind)) continue;
-    const std::uint32_t index = kind == K::data_const && data_const ? *data_const : o.add_section(section);
-    obj::section& sec = o.sections[index];
+    std::optional<std::uint32_t> ordinary = kind == K::data_const ? data_const : std::nullopt;
     for (const auto& d : data) {
       if (d.kind != kind) continue;
+      const bool parameter = template_parameter_objects.contains(d.entity);
+      if (!parameter && !ordinary) ordinary = o.add_section(section);
+      const std::uint32_t index = parameter ? o.add_section(section) : *ordinary;
+      obj::section& sec = o.sections[index];
       auto sym = symbol_of.find(d.entity);
       if (sym == symbol_of.end()) return missing(d.entity);
       sec.align(std::countr_zero(std::bit_ceil(d.align)));
@@ -2131,6 +2139,10 @@ std::expected<obj::object, aarch64::CodegenError> assemble_linux(
       symbol.section = index;
       symbol.offset = base;
       symbol.weak = symbol.bind == obj::binding::global && d.weak;
+      if (parameter) {
+        symbol.object_size = d.bytes.size();
+        o.comdat_groups.push_back({std::string(symbol.name_view()), {index}});
+      }
       if (kind == K::bss) sec.reserve_zerofill(d.size);
       else sec.emit(d.bytes);
       for (const auto& r : d.relocs) {
@@ -2214,6 +2226,11 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, Key k) {
     errors.push_back({tu.namespace_destruction, "namespace-scope destruction is not supported on x86-64 Linux"});
     co_return co_await locate_errors(cx, id, std::move(out));
   }
+  for (const FunctionDef& f : tu.functions)
+    if (f.unsupported_class_parameter_abi)
+      errors.push_back({ast::Loc{f.item, f.body_offset},
+                        "native functions with class-valued template arguments require supported default visibility and no closures or static locals"});
+  if (!errors.empty()) co_return co_await locate_errors(cx, id, std::move(out));
   // Checked policy records can require a definition, and raw linker names can refer to
   // another entity without an ordinary typed use of it.
   const bool defer_private_constexpr = !k.check_policies && !tu.has_raw_linkage_names && tu.asm_hidden_symbols.empty();
@@ -2294,6 +2311,21 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, Key k) {
     if (!b) {
       errors.push_back({v.at, std::format("{} is not supported yet", b.error())});
       continue;
+    }
+    if (!b->relocs.empty()) {
+      const auto* world = universe().world_for(target);
+      const auto* variable = world ? world->entities.find(v.entity) : nullptr;
+      const auto* owner = variable && variable->scope != EntityId::none ? world->entities.find(variable->scope) : nullptr;
+      const bool shared_storage = variable && variable->linkage != ast::Linkage::internal &&
+          (v.inline_definition || variable->templ != EntityId::none || (owner && owner->kind == sema::EntityKind::class_ &&
+                                                               owner->templ != EntityId::none));
+      if (shared_storage && std::ranges::any_of(b->relocs, [&](const aarch64::DataReloc& relocation) {
+            const auto* entity = world->entities.find(relocation.target);
+            return entity && entity->kind == sema::EntityKind::template_parameter_object;
+          })) {
+        errors.push_back({v.at, "shared native storage initialized with a template parameter object address is not supported yet"});
+        continue;
+      }
     }
     bool is_const = (std::to_underlying(ast::cv_of(in.canonical(v.type))) & 1) != 0;
     bool zero = b->relocs.empty() && std::ranges::all_of(b->bytes, [](std::uint8_t x) { return x == 0; });
@@ -2467,8 +2499,13 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, Key k) {
   std::map<std::string_view, bool> asm_names;
   for (const AsmHiddenSymbol& directive : tu.asm_hidden_symbols) asm_names.try_emplace(directive.name, false);
   std::vector<EntityId> asm_hidden;
+  std::set<EntityId> template_parameter_objects;
   for (const Entity& e : tu.entities) {
     if (!used.contains(ir::raw(e.id))) continue;
+    if (e.unsupported_class_parameter_signature) {
+      errors.push_back({e.at, "native functions with class-valued template arguments require default-visible signature and argument types"});
+      continue;
+    }
     if (e.local_function != EntityId::none) {
       locals.push_back(&e);
       continue;
@@ -2513,6 +2550,15 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, Key k) {
                                   dynamic->rtti_only});
       }
       if (!table && tu.keyless_type_info.contains(e.id)) keyless_type_info.push_back({e.id, std::move(*encoding)});
+      continue;
+    }
+    if (e.special == Special::template_parameter_object) {
+      auto name = mangled_template_parameter_object(in, e.template_args.front(), names);
+      if (!name) errors.push_back({e.at, std::format("the template parameter object name: {}", name.error())});
+      else {
+        symbols.push_back({e.id, linux ? std::move(*name) : "_" + *name, obj::binding::global});
+        template_parameter_objects.insert(e.id);
+      }
       continue;
     }
     // Calls still name the complete-object entry. An eligible definition also emits C2 or D2
@@ -2615,7 +2661,8 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, Key k) {
         code.push_back({fns[i].fn, &*ms[i].get().linux_code, weak_definition(def),
                         def.unwind != UnwindEligibility::none, name, catch_int});
       }
-      return assemble_linux(tu.name, code, data, symbols, virtual_table, keyless_type_info, asm_hidden, dynamic_tables);
+      return assemble_linux(tu.name, code, data, symbols, virtual_table, keyless_type_info, asm_hidden, dynamic_tables,
+                            template_parameter_objects);
     }
     std::vector<aarch64::CompiledFunction> code;
     for (std::size_t i = 0; i < fns.size(); ++i) {

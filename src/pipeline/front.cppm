@@ -205,6 +205,8 @@ struct FunctionVisibility {
 void apply_symbol_attributes(TranslationUnit& tu, const std::set<EntityId>& hidden_declarations,
                              const std::set<EntityId>& inline_declarations, const std::set<EntityId>& weak_declarations,
                              const std::map<EntityId, FunctionVisibility>& function_visibility, bool linux) {
+  if (!inline_declarations.empty())
+    for (Variable& v : tu.variables) v.inline_definition = inline_declarations.contains(v.entity);
   if (hidden_declarations.empty() && function_visibility.empty() && weak_declarations.empty()) return;
   using Visibility = ast::GnuVisibility;
   for (Entity& e : tu.entities) {
@@ -1177,6 +1179,32 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
       return ast::Linkage::internal;
     return owner.linkage;
   };
+  const auto has_class_argument = [&](const sema::EntityRec& r) {
+    return std::ranges::any_of(r.args, [&](const ast::TemplateArg& a) { return ins.values.is<ast::VAggregate>(a.value); });
+  };
+  const auto default_visible_type = [&](this auto&& check, QualType type) -> bool {
+    const auto t = world.types.rec(type);
+    using enum sema::TypeKind;
+    switch (t.kind) {
+    case builtin: return true;
+    case class_: return world.entities.rec(t.entity).templ == EntityId::none && program.plain_class_template_type(t.entity);
+    case pointer: case reference: case array: return check(t.inner);
+    case member_pointer: return check(t.member_owner) && check(t.inner);
+    case function: return check(t.inner) && std::ranges::all_of(t.params, check);
+    default: return false;
+    }
+  };
+  const auto default_visible_argument = [&](this auto&& check, const ast::TemplateArg& a) -> bool {
+    switch (a.kind) {
+    using enum ast::TemplateArgKind;
+    case type: return default_visible_type(a.type);
+    case value: return (ins.values.is<ast::VInt>(a.value) || ins.values.is<ast::VAggregate>(a.value)) &&
+                       default_visible_type(a.type);
+    case pack: return std::ranges::all_of(ins.seqs.elements(a.elems), check);
+    case template_: return false;
+    }
+    return false;
+  };
   auto declare = [&](const ast::DeclSema& d, std::optional<ast::Loc> at) {
     EntityId e = d.entity;
     if (e == EntityId::none) return;
@@ -1239,6 +1267,13 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
                            : r.kind == sema::EntityKind::base_object_destructor ? Special::base_object_destructor
                                                                     : Special::none});
     Entity& emitted = tu.entities.back();
+    if (fn) {
+      const auto* owner = r.scope == EntityId::none ? nullptr : world.entities.find(r.scope);
+      if (has_class_argument(r) || (owner && has_class_argument(*owner)))
+        emitted.unsupported_class_parameter_signature = !default_visible_type(d.type) ||
+            !std::ranges::all_of(r.args, default_visible_argument) ||
+            (owner && !std::ranges::all_of(owner->args, default_visible_argument));
+    }
     emitted.asm_label = program.asm_label(e);
     tu.has_raw_linkage_names |= !emitted.asm_label.empty();
     if (emitted.special == Special::destructor || emitted.special == Special::deleting_destructor ||
@@ -1498,6 +1533,8 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
       ast::DeclSema d = decls[0];
       if (body.deduced) d.type = body.deduced_type;
       const auto& entity = world.entities.rec(d.entity);
+      // The checked body has no native callers or table entry (Itanium C++ ABI §2.5.2).
+      if (d.is_virtual && (d.flags & sema::decl_flag::consteval_)) continue;
       // An immediate function's calls are all folded ([expr.const]), so it has no code: a free
       // function, or a constructor defined in or outside its class. Sema has checked the body and
       // keeps it for constant evaluation.
@@ -1635,6 +1672,21 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
     definition.emit_if_referenced = immediate_if_referenced(in->decl, entity, in->body.value);
     definition.plain_immediate_template = definition.emit_if_referenced && program.is_namespace(entity.scope) &&
                                           !ins.names.spelling(entity.name).empty();
+    const bool direct_class_arguments = has_class_argument(entity);
+    const bool class_value_member = entity.scope != EntityId::none && has_class_argument(world.entities.rec(entity.scope));
+    if (direct_class_arguments || class_value_member)
+      definition.unsupported_class_parameter_abi = !can_defer_body(in->body.value) ||
+          !program.plain_class_template_function(entity.templ, in->item) ||
+          (direct_class_arguments && !program.is_namespace(entity.scope));
+    // These implicit namespace specializations can occur in every unit using the same
+    // canonical class argument, including units compiled by an Itanium ABI peer.
+    if (direct_class_arguments && !definition.unsupported_class_parameter_abi &&
+        entity.kind == sema::EntityKind::function && entity.templ != EntityId::none &&
+        entity.linkage == ast::Linkage::external && program.is_namespace(entity.scope) &&
+        !names_tu_local(program, entity.scope, true) && !names_tu_local(program, in->decl.type, true) &&
+        program.asm_label(in->spec).empty() &&
+        !std::ranges::any_of(entity.args, [&](const ast::TemplateArg& a) { return names_tu_local(program, a, true); }))
+      definition.coalesced = true;
     if (it.parent != items::none && items.items[it.parent].kind == items::ItemKind::class_def) {
       const bool ordinary_member = ordinary_class_template_member(entity) && !in->decl.is_virtual &&
                                    !internal_class(entity.scope) &&
@@ -1940,6 +1992,12 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
     d.kind = ast::DeclKind::function;
     d.has_written_noexcept = world.types.rec(d.type).fn_noexcept;
     declare(d, std::nullopt);
+  }
+  for (EntityId e : program.template_parameter_objects()) {
+    const auto& object = world.entities.rec(e);
+    tu.entities.push_back({.id = e, .name = {}, .type = object.type, .at = {},
+                           .special = Special::template_parameter_object, .template_args = object.args});
+    tu.variables.push_back({.entity = e, .type = object.type, .init = object.args.front().value, .at = {}, .coalesced = true});
   }
   apply_symbol_attributes(tu, hidden_declarations, inline_declarations, weak_declarations, function_visibility, linux);
   if (part) {

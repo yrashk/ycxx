@@ -562,7 +562,8 @@ enum class EntityKind : u8 {
   virtual_table,  // an external Itanium vtable, with its class as `scope`
   deleting_destructor,  // an Itanium D0 entry, with its class as `scope`
   type_info,  // an external Itanium type information object, with its class as `scope`
-  base_object_destructor  // an Itanium D2 entry, with its class as `scope`
+  base_object_destructor,  // an Itanium D2 entry, with its class as `scope`
+  template_parameter_object  // a const object, identified by its one canonical value argument
 };
 
 // The structure behind an entity id (§4.3): for a function `(scope, name, canonical type)`, with
@@ -653,6 +654,7 @@ public:
       if ((r.kind == EntityKind::class_ || r.kind == EntityKind::variable) && r.constraints != Fp128{})
         f = ast::mix(ast::mix(f, ast::seed("ycxx.sema.constrained-partial")), r.constraints);
     }
+    if (r.kind == EntityKind::template_parameter_object) f = mix_arg(f, r.args.front());
     f = ast::mix(f, std::to_underlying(r.linkage));
     if (r.linkage == ast::Linkage::internal)
       f = ast::mix(ast::mix(f, ins_->items.fp(r.first.item)), std::to_underlying(r.first.ord));
@@ -763,7 +765,8 @@ struct VirtualSlot {
 // A dynamic class laid out by the general single-inheritance rules (#309): a root whose vptr is
 // at offset zero, or a class whose single public nonvirtual base is dynamic and primary. Its
 // table extends the primary base's: overriders replace inherited slots, and the declarations
-// that override nothing follow in declaration order (Itanium C++ ABI §2.5.2).
+// that override nothing follow in declaration order. Immediate functions have no slots, including
+// in a class whose only virtuals are immediate (Itanium C++ ABI §2.5.2).
 struct DynamicClass {
   bool primary_base = false;  // the single base supplies the vptr at offset zero
   // The first non-pure virtual function not inline at the end of the class definition
