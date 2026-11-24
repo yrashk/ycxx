@@ -113,6 +113,7 @@ struct Entity {
   bool local_parameter_binding = false;
   bool hidden = false;  // GNU hidden visibility: ELF STV_HIDDEN, Mach-O private extern (#602, #124)
   bool nonthrowing = false;  // including implicit exception specifications on destructors
+  bool weak_reference = false;  // explicit GNU weak binding for an undefined ELF object
 
   bool has_local_binding() const { return linkage == ast::Linkage::internal || local_parameter_binding; }
 };
@@ -1989,18 +1990,21 @@ std::expected<obj::object, aarch64::CodegenError> assemble_linux(
     symbol_of.emplace(s.entity, index);
   };
   for (const auto& s : symbols) {
-    if (s.bind != obj::binding::local && !definitions.contains(s.entity)) {
+    const bool undefined_nonlocal = s.bind != obj::binding::local && !definitions.contains(s.entity);
+    if (undefined_nonlocal) {
       if (defined_name.contains(s.name)) {
         defined_by_another.push_back(&s);
         continue;
       }
       if (auto shared = undefined_name.find(s.name); shared != undefined_name.end()) {
+        // Both declarations refer to this one undefined ELF symbol.
+        o.symbols[shared->second].weak |= s.weak_reference;
         share(s, shared->second);
         continue;
       }
       undefined_name.emplace(s.name, static_cast<std::uint32_t>(o.symbols.size()));
     }
-    symbol_of.emplace(s.entity, o.add_symbol({s.name, s.bind, {}, 0, false}));
+    symbol_of.emplace(s.entity, o.add_symbol({s.name, s.bind, {}, 0, undefined_nonlocal && s.weak_reference}));
   }
   for (const aarch64::Symbol* s : defined_by_another) share(*s, symbol_of.at(defined_name.at(s->name).first));
   auto missing = [](EntityId e) {
@@ -2480,7 +2484,7 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
       }
       base_object_names.emplace(e.id, std::move(*base_name));
     }
-    symbols.push_back({e.id, std::move(*name), binding});
+    symbols.push_back({e.id, std::move(*name), binding, e.weak_reference});
   }
   for (const AsmHiddenSymbol& directive : tu.asm_hidden_symbols)
     if (!asm_names.at(directive.name))
