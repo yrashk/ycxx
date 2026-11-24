@@ -57,6 +57,7 @@ export struct Symbol {
   ir::EntityId entity{};
   std::string name;  // as the object file spells it ("_main")
   obj::binding bind = obj::binding::global;
+  bool weak_reference = false;  // used by the ELF assembler for an undefined symbol
 };
 
 export struct Unit {

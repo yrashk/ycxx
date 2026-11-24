@@ -882,10 +882,14 @@ public:
     return parameter.type;
   }
   // A typedef-name the implementation declares where nothing else does (docs/EXTENSIONS.md):
-  // `__builtin_va_list`, the type used by the target's C headers and libycxx's `va_list`.
+  // `__builtin_va_list`, the type used by the target's C headers and libycxx's `va_list`, and
+  // `__int128_t` and `__uint128_t`, which the macOS SDK's `mach/arm/_structs.h` uses.
   std::optional<QualType> builtin_type_name(NameId name) {
-    if (ins().names.spelling(name) != "__builtin_va_list") return std::nullopt;
-    return w_->builtin_va_list();
+    const std::string_view spelling = ins().names.spelling(name);
+    if (spelling == "__builtin_va_list") return w_->builtin_va_list();
+    if (spelling == "__int128_t") return builtin(Builtin::int128);
+    if (spelling == "__uint128_t") return builtin(Builtin::unsigned_int128);
+    return std::nullopt;
   }
   bool conflicts_with_imported_alias(std::span<const ast::DeclSema> imported, QualType type) {
     return std::ranges::any_of(imported, [&](const ast::DeclSema& decl) {
@@ -1237,8 +1241,9 @@ public:
       return !template_args.at(p.depth, p.index);
     });
   }
+  bool in_function_or_lambda_body() const { return in_function_body || !lambdas_.empty(); }
   bool check_exception_construct(u32 at, lex::Tk keyword) {
-    if (q_->exceptions_enabled() || ((in_function_body || !lambdas_.empty()) && in_template_definition()))
+    if (q_->exceptions_enabled() || (in_function_or_lambda_body() && in_template_definition()))
       return true;
     diag(at, Diag::exceptions_disabled, keyword);
     return false;
@@ -3844,17 +3849,12 @@ public:
     if (*a == Builtin::bool_) sa = {1, false};
     if (ast::represents(w_->target, *b, sa.bits, sa.is_signed) || (*b == Builtin::bool_ && *a == Builtin::bool_)) return false;
     auto v = constant_of ? constant_of(from) : std::nullopt;
-    if (!v || w_->values.rec(*v).kind != ValueKind::integer) return true;
-    // The constant, read in the source type, must lie in the target type's range.
-    u64 mask = sa.bits >= 64 ? ~u64{0} : (u64{1} << sa.bits) - 1;
-    u64 raw = w_->values.rec(*v).bits & mask;
-    bool negative = sa.is_signed && ((raw >> (sa.bits - 1)) & 1);
-    u64 max = sb.is_signed ? (u64{1} << (sb.bits - 1)) - 1 : sb.bits >= 64 ? ~u64{0} : (u64{1} << sb.bits) - 1;
-    if (!negative) return raw > max;
-    if (!sb.is_signed) return true;
-    std::int64_t value = std::int64_t(raw | ~mask);
-    std::int64_t min = sb.bits >= 64 ? std::numeric_limits<std::int64_t>::min() : -(std::int64_t{1} << (sb.bits - 1));
-    return value < min;
+    if (!v || !ins().values.is<ast::VInt>(*v)) return true;
+    // The constant, read in the source type, must lie in the target type's range: reduced to the
+    // target's width it keeps its bits and its sign.
+    ast::Bits128 x = ast::wrap(ast::int_bits(ins(), *v), sa.bits, sa.is_signed);
+    ast::Bits128 y = ast::wrap(x, sb.bits, sb.is_signed);
+    return y != x || (sa.is_signed && ast::is_negative(x)) != (sb.is_signed && ast::is_negative(y));
   }
 
   // [dcl.init.list]/7.1–7.3 for a conversion from `a` to `b`, one of them floating.
@@ -3872,16 +3872,14 @@ public:
     }
     // /7.3: an integer to a floating type, unless the source is constant and its value converts
     // back unchanged: its significant bits fit the type's precision (the exponent range of every
-    // supported format covers 128-bit integers). Integer types are at most 64 bits wide here: a
-    // 128-bit one would need the constant's high word.
-    if (!v || w_->values.rec(*v).kind != ValueKind::integer) return true;
+    // supported format covers 128-bit integers).
+    if (!v || !ins().values.is<ast::VInt>(*v)) return true;
     IntShape sa = shape(w_->target, a);
     if (a == Builtin::bool_) sa = {1, false};
-    u64 raw = w_->values.rec(*v).bits & (sa.bits >= 64 ? ~u64{0} : (u64{1} << sa.bits) - 1);
-    if (sa.is_signed && sa.bits < 64 && ((raw >> (sa.bits - 1)) & 1)) raw |= ~((u64{1} << sa.bits) - 1);
-    u64 magnitude = sa.is_signed && std::int64_t(raw) < 0 ? u64(0) - raw : raw;
-    if (magnitude == 0) return false;
-    u32 significant = u32(std::bit_width(magnitude) - std::countr_zero(magnitude));
+    ast::Bits128 x = ast::wrap(ast::int_bits(ins(), *v), sa.bits, sa.is_signed);
+    ast::Bits128 magnitude = sa.is_signed && ast::is_negative(x) ? ast::wide::neg(x) : x;
+    if (ast::wide::is_zero(magnitude)) return false;
+    u32 significant = ast::wide::bit_width(magnitude) - ast::wide::countr_zero(magnitude);
     return significant > ast::shape_of(w_->target[b].format).precision;
   }
 
@@ -5766,7 +5764,7 @@ public:
       return true;
     const ClassRec* cr = class_rec(c);
     if (!cr) return true;
-    auto befriended = [&](EntityId e) { return std::ranges::find(cr->friends, e) != cr->friends.end(); };
+    auto befriended = [&](EntityId e) { return cr->befriends(e, w_->entities); };
     if (current_function != EntityId::none && befriended(current_function)) return true;
     for (EntityId k = current_class; k != EntityId::none; k = w_->entities.rec(k).scope) {
       const EntityRec& r = w_->entities.rec(k);
@@ -5914,6 +5912,26 @@ public:
       for (const MemberDeclRec& m : cr->members)
         if (m.entity == f) return &m;
     return nullptr;
+  }
+
+  bool ordinary_immediate_member(EntityId function, QualType result) {
+    if (function == EntityId::none) return false;
+    const auto& entity = w_->entities.rec(function);
+    if (entity.kind != EntityKind::function || entity.scope == EntityId::none || entity.templ != EntityId::none)
+      return false;
+    const auto& owner = w_->entities.rec(entity.scope);
+    if (owner.kind != EntityKind::class_ || owner.templ != EntityId::none) return false;
+    const auto* member = member_decl(function);
+    if (!member || !member->is_consteval || member->is_virtual || member->is_template) return false;
+    // Only the checked integral, enum and void result representations enter this path.
+    if (types().is_void(result)) return true;
+    if (types().is_enum(result)) {
+      const auto* enumeration = enum_rec(types().enum_of(result));
+      if (!enumeration || !enumeration->underlying) return false;
+      result = *enumeration->underlying;
+    }
+    const auto builtin = types().builtin_of(result);
+    return builtin && ast::is_integral(*builtin) && ast::width_of(w_->target, *builtin) <= 64;
   }
 
   // A member function named without a call yet: `a.f`, `p->f`, `f` or `S::f`, bound to its object
@@ -6413,7 +6431,10 @@ public:
     if (d->is_static) {
       // The object expression is evaluated, then discarded ([expr.ref]).
       Ex call = node(ast::Call{info, fe, at(callee, begin), b_->list(*children)}, begin, end, info);
-      if (!object) return call;
+      // Lookup can supply a `this` pointer to rank a mixed unqualified or qualified overload
+      // set. Selecting a static member evaluates a receiver only when the call has one.
+      if (!object || (m.arrow && !bound.explicit_receiver && ordinary_immediate_member(fe, fr.inner)))
+        return call;
       Ex discarded = convert_node(*object, ast::ConversionKind::to_void, builtin(Builtin::void_));
       return node(ast::OrderedBinary{info, ast::OrderedOp::comma, at(discarded, begin), at(call, begin)}, begin, end, info);
     }
@@ -7695,6 +7716,31 @@ public:
     return node(ast::Call{info, d.entity, at(callee, begin), b_->list(converted), f.constant}, begin, end, info);
   }
 
+  Ex builtin_overflow_call(ast::BuiltinOp op, std::span<const Ex> args, u32 begin, u32 end) {
+    const Ex invalid{NodeId::none, begin, end};
+    if (!builtin_arity(3, args.size(), begin) ||
+        std::ranges::any_of(args, [](const Ex& arg) { return !arg.ok(); }))
+      return invalid;
+    const QualType result = builtin(Builtin::bool_);
+    if (any_dependent(args)) return dependent_node(args, begin, end, result);
+
+    const QualType integer = builtin(w_->target.intmax_type);
+    const std::array params{integer, integer, types().pointer(integer)};
+    std::array<Child, 3> children;
+    for (std::size_t i = 0; i < params.size(); ++i) {
+      Ex arg = args[i];
+      if (!same_unqualified(arg.type(), params[i])) {
+        diag(arg.begin, Diag::builtin_overflow_operand, params[i], arg.type());
+        return invalid;
+      }
+      arg = convert(arg, params[i], arg.begin);
+      if (!arg.ok()) return invalid;
+      children[i] = at(arg, begin);
+    }
+    const ExprInfo info{result, ValueCategory::prvalue, 0};
+    return node(ast::BuiltinCall{info, op, b_->list(children)}, begin, end, info);
+  }
+
   // Only send closed, read-only expressions to the fresh constant evaluator. In particular
   // a probe cannot instantiate a speculative callee or run a write in a constexpr frame.
   bool constant_probe_safe(const ast::Red& expression) {
@@ -7819,6 +7865,10 @@ public:
     }
     if (b.function == library)
       return builtin_library_call(*string_function_named(lex::library_function_name(b)), std::move(args), begin, end);
+    if (b.function == add_overflow || b.function == mul_overflow) {
+      const auto op = b.function == add_overflow ? ast::BuiltinOp::add_overflow : ast::BuiltinOp::mul_overflow;
+      return builtin_overflow_call(op, args, begin, end);
+    }
     std::size_t want = b.function == fabs || b.function == nan ? 1 : 0;
     if (!builtin_arity(want, args.size(), begin)) return {NodeId::none, begin, end};
     if (std::ranges::any_of(args, [](const Ex& a) { return !a.ok(); })) return {NodeId::none, begin, end};
@@ -7843,7 +7893,9 @@ public:
       case unreachable:
       case strlen:
       case library:
-      case constant_p: std::unreachable();  // Handled before floating type selection.
+      case constant_p:
+      case add_overflow:
+      case mul_overflow: std::unreachable();  // Handled before floating type selection.
       case inf:
       case huge_val:
         return literal(t, w_->values.floating(t, std::numeric_limits<double>::infinity()), ValueCategory::prvalue, begin, end);
@@ -8262,8 +8314,8 @@ public:
     // The underlying value of an enum literal can be folded directly to an integer constant.
     if (auto lit = as<ast::Literal>(e); lit && types().is_enum(e.type()) && types().is_integral(to) &&
                                         (k == ast::ConversionKind::integral || k == ast::ConversionKind::boolean)) {
-      u64 bits = w_->values.rec(lit->value).bits;
-      if (k == ast::ConversionKind::boolean) bits = bits != 0;
+      ast::Bits128 bits = ast::int_bits(ins(), lit->value);
+      if (k == ast::ConversionKind::boolean) bits = {u64(!ast::wide::is_zero(bits)), 0};
       return literal(to, w_->values.integer(to, bits), ValueCategory::prvalue, e.begin, e.end);
     }
     u8 width = k == ast::ConversionKind::lvalue_to_rvalue || cat != ValueCategory::prvalue ? e.info.bit_width : u8(0);
@@ -8868,7 +8920,7 @@ public:
     if (types().is_enum(target) && (types().is_integral(from) || types().is_enum(from))) {
       if (types().canonical(from) == types().canonical(target)) return v;
       if (auto lit = as<ast::Literal>(v); lit && target_enum && target_enum->fixed)
-        return literal(target, w_->values.integer(underlying_of(target), w_->values.rec(lit->value).bits), ValueCategory::prvalue,
+        return literal(target, w_->values.integer(underlying_of(target), ast::int_bits(ins(), lit->value)), ValueCategory::prvalue,
                        v.begin, v.end);
       return convert_node(v, ast::ConversionKind::integral, target);
     }
@@ -9347,8 +9399,9 @@ public:
     bool negative = false;
     bool oversized = false;
     if (value.kind == ValueKind::integer) {
-      negative = ast::is_signed(w_->target, *types().builtin_of(value.type)) && i64(value.bits) < 0;
-      oversized = value.bits > max_count;
+      negative = ast::is_signed(w_->target, *types().builtin_of(value.type)) &&
+                 (value.wide ? ast::is_negative(ast::int_bits(ins(), known)) : i64(value.bits) < 0);
+      oversized = !negative && (value.wide || value.bits > max_count);
     } else if (value.kind == ValueKind::floating) {
       negative = value.real < 0;
       // Check representability before truncating to an integer.
@@ -11146,7 +11199,8 @@ public:
       defaults = defaults_of(named, default_source);
       default_origin = DefaultArgumentOrigin::interned;
     }
-    if (declaration && (named.id == callee.id || is_consteval(default_source))) {
+    if (declaration && (named.id == callee.id || is_consteval(default_source) ||
+                        ordinary_immediate_member(default_source, types().rec(ft).inner))) {
       function = default_source;
     } else {
       // The address of a named immediate function is itself a known callee. It does not

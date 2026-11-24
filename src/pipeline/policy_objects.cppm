@@ -62,6 +62,8 @@ std::optional<std::string> embed_policy_contracts(obj::object& object, const TuV
   // Gather the records first. Appending symbols can invalidate views into existing names.
   std::vector<obj::symbol> metadata;
   for (const auto& contract : contracts) {
+    // An omitted immediate definition has no native code to anchor its contracts.
+    if (compiled.omitted_immediate_functions.contains(contract.function)) continue;
     const auto origin = names.find(contract.function);
     const auto target = names.find(contract.target);
     const auto kind = description(contract.kind);

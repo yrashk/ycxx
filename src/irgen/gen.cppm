@@ -65,8 +65,8 @@ struct FunctionInput {
   std::uint32_t body_offset = 0;  // the declaration part's length in tokens
   // For the thunk of a constant expression (`{ return e; }`, query-engine.md §B7): the values of
   // the enclosing function's locals usable in constant expressions ([expr.const]), by local
-  // index. Each becomes a const object of the thunk, made at its entry; a local without a value
-  // becomes an object outside its lifetime.
+  // index. The thunk sets up their values at entry. A supported opaque record is available
+  // only as an object designator. Other locals have no usable object.
   bool thunk = false;
   std::span<const std::optional<ast::ConstId>> local_values{};
   // A non-static member function's `this` type ([expr.prim.this]): its implicit object argument,
@@ -98,6 +98,12 @@ struct FunctionInput {
     ast::EntityId owner = ast::EntityId::none;
     std::span<const ast::ConstId> values{};
   } initialized_fields{};
+  // Record parameters and direct automatic receivers whose identity is available to a
+  // thunk. Their contents are unknown and their lifetimes began outside the evaluation.
+  // Sorted by local index.
+  std::span<const std::uint32_t> opaque_record_locals{};
+  // Named record reference parameters in the thunk's enclosing frame, sorted by local index.
+  std::span<const std::uint32_t> discardable_reference_parameters{};
 };
 
 struct FunctionIr {
@@ -250,7 +256,7 @@ class Gen {
     std::uint64_t imms[] = {word(ty(p.type)), 0};  // the type, then an empty path
     return b_.result(emit(ir::Op::load, r, ops, imms, access_flags(p.type) | flags));
   }
-  void store(const Place& p, ValueId v) {
+  void store(const Place& p, ValueId v, ir::Flags flags = 0) {
     ValueId ops[] = {p.ptr, v};
     if (p.bit_field) {
       std::uint64_t imms[] = {*p.bit_field};
@@ -258,7 +264,7 @@ class Gen {
       return;
     }
     std::uint64_t imms[] = {word(ty(p.type)), 0};
-    stateful(ir::Op::store, {}, ops, imms, access_flags(p.type));
+    stateful(ir::Op::store, {}, ops, imms, access_flags(p.type) | flags);
   }
   // A nullptr_t initializer writes storage before the qualified object's lifetime begins.
   Place initializing_place(Place p) {
@@ -322,10 +328,10 @@ class Gen {
     std::optional<uint32_t> vacuous_local = {};  // a declaration a jump can bypass
     bool conditional = false;  // a null pointer denotes a temporary that was not created
   };
-  void begin_lifetime(const Place& p) {
+  void begin_lifetime(const Place& p, ir::Flags flags = 0) {
     ValueId ops[] = {p.ptr};
     std::uint64_t imms[] = {word(ty(p.type))};
-    stateful(ir::Op::obj__begin, {}, ops, imms);
+    stateful(ir::Op::obj__begin, {}, ops, imms, flags);
   }
   void start_lifetime(const Place& p, ast::EntityId destructor = ast::EntityId::none,
                       std::optional<uint32_t> vacuous_local = {}) {
@@ -448,16 +454,33 @@ class Gen {
       start_lifetime(p);
       slots_[i] = p;
     }
-    // A thunk's locals: those with values are const objects; any other is an object whose
-    // lifetime has ended, so reading or modifying it fails.
+    // The thunk imports known values and supported opaque record identities. Other
+    // scalar objects have ended lifetimes and other record slots stay absent.
     for (uint32_t i = 0; fn_.thunk && i < slots_.size(); ++i) {
       if (slots_[i]) continue;
       const ast::LocalRec rec = in_.seqs.at(fn_.body.locals, i);
       if (rec.flags & ast::local_flag::requires_parameter) continue;
       ast::QualType t = rec.type;
-      // A class or array local is never usable in a constant expression: naming it is
-      // unsupported, so it needs no object.
-      if (cls(t) == TypeClass::record || cls(t) == TypeClass::array || facts_.is_reference(t) ||
+      if (cls(t) == TypeClass::record) {
+        // Record imports keep their enclosing automatic identity and outside lifetime.
+        if (std::ranges::binary_search(fn_.opaque_record_locals, i)) {
+          const Place p = begin_object(t, ir::Init::indeterminate);
+          begin_lifetime(p, ir::bit(ir::Flag::outside_unknown));
+          slots_[i] = p;
+          continue;
+        }
+        if (i >= fn_.local_values.size() || !fn_.local_values[i]) continue;
+        const auto value = *fn_.local_values[i];
+        if (!in_.values.is<ast::VAggregate>(value)) continue;
+        const auto type = in_.values.get<ast::VAggregate>(value).type;
+        if (!same_type(ast::without_cv(t), ast::without_cv(type))) continue;
+        const Place p = begin_object(t, ir::Init::indeterminate);
+        initialize_constant({p.ptr, type}, value);
+        begin_lifetime(p, ir::bit(ir::Flag::outside_lifetime));
+        slots_[i] = p;
+        continue;
+      }
+      if (cls(t) == TypeClass::array || facts_.is_reference(t) ||
           in_.types.is<ast::TMemberPtr>(in_.types.canon(t)))
         continue;
       // An enclosing automatic nullptr_t can be converted without reading its object (CWG 2907).
@@ -1592,7 +1615,35 @@ class Gen {
     }
     // Discarding a nonvolatile direct field designator does not read its value.
     const auto cv = ast::cv_of(expr.type);
-    if ((cv == ast::Cv::none || cv == ast::Cv::const_) && default_field(a)) return;
+    if (cv == ast::Cv::none || cv == ast::Cv::const_) {
+      if (default_field(a)) return;
+      // In a thunk, discarding a record glvalue evaluates its effects without requiring
+      // the object's address. Preserve the sequence and selected arm of compound expressions.
+      if (fn_.thunk && cls(expr.type) == TypeClass::record && access_flags(expr.type) == 0) {
+        const At operand = strip_parens(a);
+        if (is<ast::OrderedBinary>(operand)) {
+          const auto sequence = get<ast::OrderedBinary>(operand);
+          if (sequence.op == ast::OrderedOp::comma) {
+            discard(child(operand, sequence.lhs));
+            discard(child(operand, sequence.rhs));
+            return;
+          }
+        }
+        if (is<ast::Conditional>(operand)) {
+          conditional(operand, /*glvalue=*/false, ast::builtin(facts_.interners(), ast::Builtin::void_));
+          return;
+        }
+        if (is<ast::DeclRef>(operand) && !get<ast::DeclRef>(operand).reference) return;
+        if (is<ast::LocalRef>(operand)) {
+          const auto local = get<ast::LocalRef>(operand).local;
+          // Naming a reference parameter need not observe the referent when the result is
+          // discarded ([expr.const.core]). An actual use still needs its binding.
+          if (!facts_.is_reference(in_.seqs.at(fn_.body.locals, local).type) ||
+              std::ranges::binary_search(fn_.discardable_reference_parameters, local))
+            return;
+        }
+      }
+    }
     lvalue(a);
   }
 
@@ -1708,11 +1759,25 @@ class Gen {
         ensure_live();
         return std::nullopt;
       }
-      At arg = child(a, ast_.children(b.args)[0]);
-      ValueId value = rvalue(arg);
+      const auto args = ast_.children(b.args);
       switch (b.op) {
-        case ast::BuiltinOp::fabs: return pure(ir::Op::fabs, t, {value});
-        case ast::BuiltinOp::strlen: return string_length(t, info(arg).type, value);
+        case ast::BuiltinOp::fabs: return pure(ir::Op::fabs, t, {rvalue(child(a, args[0]))});
+        case ast::BuiltinOp::strlen: {
+          const At arg = child(a, args[0]);
+          return string_length(t, info(arg).type, rvalue(arg));
+        }
+        case ast::BuiltinOp::add_overflow:
+        case ast::BuiltinOp::mul_overflow: {
+          const At left = child(a, args[0]);
+          const ValueId operands[] = {rvalue(left), rvalue(child(a, args[1]))};
+          const ValueId destination = rvalue(child(a, args[2]));
+          const ast::QualType integer = info(left).type;
+          const ir::Ty results[] = {vty(integer), vty(t)};
+          const auto op = b.op == ast::BuiltinOp::add_overflow ? ir::Op::sadd_overflow : ir::Op::smul_overflow;
+          const ir::NodeId checked = emit(op, results, operands);
+          store({destination, integer}, b_.result(checked), ir::bit(ir::Flag::call_body));
+          return b_.result(checked, 1);
+        }
         case ast::BuiltinOp::trap:
         case ast::BuiltinOp::unreachable: std::unreachable();
       }
