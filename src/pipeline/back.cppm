@@ -1447,6 +1447,7 @@ engine::query_task<Lowered> Lower::run(engine::Ctx& cx, FnKey k) {
   auto [shapes, shape_index] = co_await cx.par_fetch(engine::q<UnitShapes>{k.tu}, engine::q<UnitShapeIndex>{k.tu});
   QueryLayout layout(cx, shapes, shape_index, target);
   ir::LowerConfig config;
+  config.int3_statement_asm = target.supports(ast::NativeOperation::int3_statement_asm);
   if (f.body) {
     const auto checked = std::ranges::find_if(f.body->nodes, [](ir::Op op) {
       return op == ir::Op::sadd_overflow || op == ir::Op::smul_overflow;
