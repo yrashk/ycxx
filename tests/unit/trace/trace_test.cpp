@@ -439,58 +439,62 @@ void browser(const std::filesystem::path& golden_path, bool update) {
   };
   using std::chrono::milliseconds;
   step("start");
-  // Rows: 0 header, 1 status, 2 column headers, 3.. the tree; the divider at 72 (3/5 of 120).
+  // Rows: 0 the title bar, 1 the summary, 2 the toggles, 3 column headers, 4.. the tree; the
+  // divider at 72 (3/5 of 120).
   check(b.left_width() == 72, "the tree takes 3/5");
   check(b.hit(0, 0) == H{H::Area::header}, "the header");
-  check(b.hit(2, 1) == H{H::Area::tab, std::to_underlying(trace::View::tree)}, "the tree's tab");
-  check(b.hit(8, 1) == H{H::Area::tab, std::to_underlying(trace::View::timeline)}, "the timeline's tab");
-  check(b.hit(30, 1) == H{H::Area::status}, "the rest of the status line");
-  check(b.hit(1, 2) == H{H::Area::column, std::to_underlying(trace::Column::cell)}, "the cell's header");
-  check(b.hit(40, 2) == H{H::Area::column, std::to_underlying(trace::Column::time)}, "the time header");
-  check(b.hit(71, 2) == H{H::Area::column, std::to_underlying(trace::Column::retained)}, "the retains header");
-  check(b.hit(0, 3) == H{H::Area::marker, 0} && b.hit(5, 3) == H{H::Area::row, 0}, "the first row's marker, and the row");
-  check(b.hit(2, 4) == H{H::Area::marker, 1} && b.hit(0, 4) == H{H::Area::row, 1}, "a nested row's marker is indented");
-  check(b.hit(2, 5) == H{H::Area::row, 2}, "a leaf has no marker");
-  check(b.hit(5, 20) == H{}, "below the last row");
-  check(b.hit(72, 10) == H{H::Area::divider} && b.hit(73, 10) == H{H::Area::divider} && b.hit(71, 10) != H{H::Area::divider}, "the divider, two columns wide to grab");
-  check(b.hit(90, 2) == H{H::Area::title} && b.hit(90, 3) == H{H::Area::detail, 0} && b.hit(72, 2) == H{H::Area::divider}, "the pane's title and first line; the divider in the title row");
+  check(b.hit(14, 0) == H{H::Area::tab, std::to_underlying(trace::View::tree)}, "the tree's tab, in the title bar");
+  check(b.hit(20, 0) == H{H::Area::tab, std::to_underlying(trace::View::timeline)}, "the timeline's tab");
+  check(b.hit(5, 0) == H{H::Area::header}, "the title");
+  check(b.hit(1, 2) == H{H::Area::toggle, std::to_underlying(trace::Toggle::filter)}, "the filter's chip");
+  check(b.hit(12, 2) == H{H::Area::toggle, std::to_underlying(trace::Toggle::worker)}, "the worker's chip");
+  check(b.hit(0, 2) == H{H::Area::status} && b.hit(10, 2) == H{H::Area::status}, "between the chips");
+  check(b.hit(1, 3) == H{H::Area::column, std::to_underlying(trace::Column::cell)}, "the cell's header");
+  check(b.hit(40, 3) == H{H::Area::column, std::to_underlying(trace::Column::time)}, "the time header");
+  check(b.hit(71, 3) == H{H::Area::column, std::to_underlying(trace::Column::retained)}, "the retains header");
+  check(b.hit(0, 4) == H{H::Area::marker, 0} && b.hit(5, 4) == H{H::Area::row, 0}, "the first row's marker, and the row");
+  check(b.hit(2, 5) == H{H::Area::marker, 1} && b.hit(0, 5) == H{H::Area::row, 1}, "a nested row's marker is indented");
+  check(b.hit(2, 6) == H{H::Area::row, 2}, "a leaf has no marker");
+  check(b.hit(5, 21) == H{}, "below the last row");
+  check(b.hit(72, 11) == H{H::Area::divider} && b.hit(73, 11) == H{H::Area::divider} && b.hit(71, 11) != H{H::Area::divider}, "the divider, two columns wide to grab");
+  check(b.hit(90, 3) == H{H::Area::title} && b.hit(90, 4) == H{H::Area::detail, 0} && b.hit(72, 3) == H{H::Area::divider}, "the pane's title and first line; the divider in the title row");
   check(b.hit(5, 23) == H{H::Area::footer} && b.hit(5, 22) == H{}, "the footer, on the last row");
 
-  press(2, 7);  // FunctionIr(square)'s marker folds it (depth 1 starts open)
+  press(2, 8);  // FunctionIr(square)'s marker folds it (depth 1 starts open)
   step("a click on a marker folds the row, and selects it");
   check(b.cursor() == 4 && !t.node(4).expanded, "selected and folded");
-  press(2, 7);
+  press(2, 8);
   check(t.node(4).expanded, "a second click opens it again");
-  press(2, 7);
-  press(10, 4, milliseconds{1000});
-  press(10, 4, milliseconds{1200});  // a double click folds Pp
+  press(2, 8);
+  press(10, 5, milliseconds{1000});
+  press(10, 5, milliseconds{1200});  // a double click folds Pp
   step("a double click folds a row");
   check(b.cursor() == 1 && !t.node(1).expanded, "Pp is folded");
-  press(10, 4, milliseconds{2000});
-  press(10, 4, milliseconds{2500});  // too slow: two clicks
+  press(10, 5, milliseconds{2000});
+  press(10, 5, milliseconds{2500});  // too slow: two clicks
   check(!t.node(1).expanded, "two slow clicks fold nothing");
-  press(40, 2);
+  press(40, 3);
   step("a click on the time header sorts by time");
   check(t.order() == trace::Tree::Order::time, "by time");
-  press(40, 2);
+  press(40, 3);
   check(t.order() == trace::Tree::Order::start, "a second click goes back to start order");
   // Columns: cell 0–34, time 36–43, worker 45–51, alloc 53–61, retains 63–71.
-  press(58, 2);
+  press(58, 3);
   check(t.order() == trace::Tree::Order::alloc, "the alloc header");
-  press(66, 2);
+  press(66, 3);
   check(t.order() == trace::Tree::Order::retained, "the retains header");
-  press(58, 2);
-  press(48, 2);
+  press(58, 3);
+  press(48, 3);
   check(t.order() == trace::Tree::Order::alloc, "the worker header does not sort");
-  press(1, 2);
+  press(1, 3);
   check(t.order() == trace::Tree::Order::start, "the cell header: start order");
 
   // The pane: a click focuses it, the wheel scrolls it, keys then scroll it.
-  press(10, 5);  // FunctionIr(square), whose value is long
-  press(90, 8);
+  press(10, 6);  // FunctionIr(square), whose value is long
+  press(90, 9);
   check(b.focus() == trace::Focus::detail, "a click on the pane focuses it");
-  (void)b.handle(click(90, 8, trace::Mouse::Act::wheel_down));
-  (void)b.handle(click(90, 8, trace::Mouse::Act::wheel_down));
+  (void)b.handle(click(90, 9, trace::Mouse::Act::wheel_down));
+  (void)b.handle(click(90, 9, trace::Mouse::Act::wheel_down));
   step("the wheel scrolls the pane under it");
   check(b.detail_scroll() == 2 * trace::Browser::wheel_step, "two notches");
   (void)b.handle(trace::Key{"j"});
@@ -500,19 +504,19 @@ void browser(const std::filesystem::path& golden_path, bool update) {
   check(b.focus() == trace::Focus::tree && b.cursor() == 3, "Escape gives the keys back to the tree");
 
   // The divider drags, within bounds.
-  (void)b.handle(click(72, 10));
+  (void)b.handle(click(72, 11));
   check(b.dragging(), "a press on the divider starts a drag");
-  (void)b.handle(click(60, 10, trace::Mouse::Act::drag));
-  (void)b.handle(click(60, 10, trace::Mouse::Act::release));
+  (void)b.handle(click(60, 11, trace::Mouse::Act::drag));
+  (void)b.handle(click(60, 11, trace::Mouse::Act::release));
   step("the divider dragged to column 60");
   check(b.left_width() == 60 && !b.dragging(), "the tree is 60 wide");
-  (void)b.handle(click(74, 10));
+  (void)b.handle(click(74, 11));
   check(!b.dragging(), "the divider has moved: column 74 is the pane");
-  (void)b.handle(click(60, 10));
-  (void)b.handle(click(2, 10, trace::Mouse::Act::drag));
-  (void)b.handle(click(2, 10, trace::Mouse::Act::release));
+  (void)b.handle(click(60, 11));
+  (void)b.handle(click(2, 11, trace::Mouse::Act::drag));
+  (void)b.handle(click(2, 11, trace::Mouse::Act::release));
   check(b.left_width() == 24, "a pane keeps 24 columns");
-  check(b.hit(23, 2) == H{H::Area::column, std::to_underlying(trace::Column::cell)}, "a narrow tree drops its columns: the cell's is all");
+  check(b.hit(23, 3) == H{H::Area::column, std::to_underlying(trace::Column::cell)}, "a narrow tree drops its columns: the cell's is all");
   // < and > move the divider; it keeps its share of the width when the terminal is resized.
   (void)b.handle(trace::Key{">"});
   (void)b.handle(trace::Key{">"});
@@ -531,75 +535,75 @@ void browser(const std::filesystem::path& golden_path, bool update) {
   t.expand_all(true);
   b.resize(10, 120);  // 6 tree rows of 9
   (void)b.frame();
-  press(5, 3);  // the tree takes the keys again (the last click was on the pane)
+  press(5, 4);  // the tree takes the keys again (the last click was on the pane)
   (void)b.handle(trace::Key{"g"});
-  (void)b.handle(click(5, 5, trace::Mouse::Act::wheel_down));
+  (void)b.handle(click(5, 6, trace::Mouse::Act::wheel_down));
   (void)b.frame();
   check(b.top() == 3 && b.cursor() == 3, std::format("the view moved 3 rows, the selection with it ({} {})", b.top(), b.cursor()));
-  (void)b.handle(click(5, 5, trace::Mouse::Act::wheel_down));
-  (void)b.handle(click(5, 5, trace::Mouse::Act::wheel_down));
+  (void)b.handle(click(5, 6, trace::Mouse::Act::wheel_down));
+  (void)b.handle(click(5, 6, trace::Mouse::Act::wheel_down));
   (void)b.frame();
-  check(b.top() == 3, "and stops at the last page");
-  (void)b.handle(click(5, 5, trace::Mouse::Act::wheel_up));
+  check(b.top() == 4, "and stops at the last page (5 rows of 9)");
+  (void)b.handle(click(5, 6, trace::Mouse::Act::wheel_up));
   (void)b.frame();
-  check(b.top() == 0 && b.cursor() == 3, "up again; the selection stays where it was, in view");
+  check(b.top() == 1 && b.cursor() == 4, "up again; the selection stays where it was (clamped to the last page), in view");
   b.resize(24, 120);
 
   // A narrow screen: the summary wraps onto more lines rather than run off, and everything
   // below moves down with it.
   b.resize(24, 60);
   step("a narrow screen: the summary wraps");
-  check(b.header_height() == 3, std::format("three summary lines at 60 columns: {}", b.header_height()));
-  check(b.hit(2, 3) == H{H::Area::tab, std::to_underlying(trace::View::tree)}, "the status line moves down");
-  check(b.hit(5, 5) == H{H::Area::row, 0}, "and the rows");
+  check(b.header_height() == 5, std::format("three summary lines at 60 columns, the title bar and the toggles: {}", b.header_height()));
+  check(b.hit(14, 0) == H{H::Area::tab, std::to_underlying(trace::View::tree)} && b.hit(1, 4) == H{H::Area::toggle, 0}, "the toggles move down");
+  check(b.hit(5, 6) == H{H::Area::row, 0}, "and the rows");
   for (const std::string& l : b.frame().lines) check(trace::columns(l) == 60, "every line is the screen's width");
   b.resize(24, 120);
-  check(b.header_height() == 1, "one line at 120");
+  check(b.header_height() == 3, "one summary line at 120");
 
   // The timeline: its tab, a click on a slice, a double click opens it in the tree.
-  press(8, 1);
+  press(20, 0);
   check(b.view() == trace::View::timeline, "the timeline's tab");
   step("the timeline");
   // Lanes from row 3 (row 2 the axis): main, w0, w1, w2, w3; slices from column 9.
-  check(b.hit(20, 6) == H{H::Area::lane, 3, 11}, "a slice of w2's lane");
-  press(9 + 30, 6, milliseconds{5000});
+  check(b.hit(20, 7) == H{H::Area::lane, 3, 11}, "a slice of w2's lane");
+  press(9 + 30, 7, milliseconds{5000});
   check(b.lane() == 3 && b.time() == 30, "a click moves the cursor there");
-  (void)b.handle(click(9 + 40, 6, trace::Mouse::Act::wheel_down));
+  (void)b.handle(click(9 + 40, 7, trace::Mouse::Act::wheel_down));
   check(b.time() == 31, "the wheel scrubs");
-  press(9 + 30, 6, milliseconds{6000});
-  press(9 + 30, 6, milliseconds{6100});
+  press(9 + 30, 7, milliseconds{6000});
+  press(9 + 30, 7, milliseconds{6100});
   check(b.view() == trace::View::tree, "a double click opens the slice in the tree");
   check(t.node(t.rows()[b.cursor()].node).ev.kind == "FunctionGen", "at the cell w2 was in");
-  press(2, 1);
+  press(14, 0);
   check(b.view() == trace::View::tree, "the tree's tab");
 
   // Review fixes: a double click is twice on the same thing; a lost release ends no drag; the pane
   // gives the keys back when it is hidden; a marker cut off by the columns is not a target.
   (void)b.handle(trace::Key{"t"});
-  press(9 + 10, 6, milliseconds{7000});
-  press(9 + 50, 6, milliseconds{7100});
+  press(9 + 10, 7, milliseconds{7000});
+  press(9 + 50, 7, milliseconds{7100});
   check(b.view() == trace::View::timeline && b.time() == 50, "two clicks on different slices of a lane are no double click");
   (void)b.handle(trace::Key{"t"});
-  (void)b.handle(click(72, 10));  // a press on the divider whose release is lost
-  (void)b.handle(click(10, 5));   // the next press, on a row
-  (void)b.handle(click(30, 5, trace::Mouse::Act::drag));
+  (void)b.handle(click(72, 11));  // a press on the divider whose release is lost
+  (void)b.handle(click(10, 6));   // the next press, on a row
+  (void)b.handle(click(30, 6, trace::Mouse::Act::drag));
   check(b.left_width() == 72 && !b.dragging(), "a lost release: the next press ends the drag");
-  press(90, 8);
+  press(90, 9);
   check(b.focus() == trace::Focus::detail, "the pane has the keys");
   b.resize(24, 90);
   const std::size_t at = b.cursor();
   (void)b.handle(trace::Key{"j"});
   check(b.focus() == trace::Focus::tree && b.cursor() == at + 1, "a hidden pane gives the keys back to the tree");
   b.resize(24, 120);
-  press(5, 3);
+  press(5, 4);
 
   // Help closes on a click; a click closes the filter prompt and keeps what was typed.
   (void)b.handle(trace::Key{"?"});
-  press(5, 5);
+  press(5, 6);
   check(b.frame().lines[3].find("What the engine") == std::string::npos, "a click closes the help");
   (void)b.handle(trace::Key{"/"});
   for (char c : std::string_view("functiong")) (void)b.handle(trace::Key{std::string(1, c)});
-  press(5, 3);
+  press(5, 4);
   check(t.filtering() && t.rows().size() == 3, std::format("a click ends the prompt, the filter stays (Tu > FunctionIr > FunctionGen): {}", t.rows().size()));
   check(!b.frame().cursor, "and the cursor is hidden again");
 
@@ -616,9 +620,9 @@ void browser(const std::filesystem::path& golden_path, bool update) {
     trace::Browser db(deep);
     db.resize(30, 120);
     (void)db.frame();
-    check(db.hit(32, 2 + 1 + 16) == H{H::Area::marker, 16}, "depth 16: the marker fits (32–33)");
-    check(db.hit(34, 2 + 1 + 17) == H{H::Area::row, 17}, "depth 17: the marker (34–35) is cut off, so the row");
-    check(db.hit(36, 2 + 1 + 18) == H{H::Area::row, 18}, "depth 18: a click in the time column is the row");
+    check(db.hit(32, 3 + 1 + 16) == H{H::Area::marker, 16}, "depth 16: the marker fits (32–33)");
+    check(db.hit(34, 3 + 1 + 17) == H{H::Area::row, 17}, "depth 17: the marker (34–35) is cut off, so the row");
+    check(db.hit(36, 3 + 1 + 18) == H{H::Area::row, 18}, "depth 18: a click in the time column is the row");
   }
 
   const std::string text = got;
@@ -677,52 +681,52 @@ void copying() {
   const auto key = [&](std::string k) { return b.handle(trace::Key{std::move(k)}); };
 
   // Rows: 0 Tu, 1 Pp, 2–3 FileText, 4 FunctionIr, 5 FunctionGen, 6 Codegen, 7 Optimized, 8 SourceOf;
-  // row r on screen line 3 + r.
-  (void)act(10, 4, M::press);
-  (void)act(10, 5, M::drag);
+  // row r on screen line 4 + r.
+  (void)act(10, 5, M::press);
   (void)act(10, 6, M::drag);
-  trace::Action a = act(10, 6, M::release);
+  (void)act(10, 7, M::drag);
+  trace::Action a = act(10, 7, M::release);
   check(a.copy == "* Pp(a.cpp) executed 190µs w1 alloc 20.0KiB, retains 5.0KiB\n"
                   ".   FileText(a.cpp) input w1 retains 300B\n"
                   ".   FileText(x.h) input w1 retains 200B\n",
         std::format("a drag over three rows copies them as the stream prints them: {:?}", a.copy.value_or("(nothing)")));
-  check(trace::strip_sgr(b.frame().lines[1]).contains("copied 3 rows"), "the status line says so");
-  (void)act(10, 9, M::press);
-  a = act(10, 9, M::release);
-  check(!a.copy && b.cursor() == 6, "a click copies nothing");
-  check(!trace::strip_sgr(b.frame().lines[1]).contains("copied"), "and the note goes");
-  (void)act(10, 9, M::press);  // Codegen, whose error starts below it, and Optimized, where it starts
-  (void)act(10, 10, M::drag);
+  check(trace::strip_sgr(b.frame().lines.back()).contains("copied 3 rows"), "the status line says so");
+  (void)act(10, 10, M::press);
   a = act(10, 10, M::release);
+  check(!a.copy && b.cursor() == 6, "a click copies nothing");
+  check(!trace::strip_sgr(b.frame().lines.back()).contains("copied"), "and the note goes");
+  (void)act(10, 10, M::press);  // Codegen, whose error starts below it, and Optimized, where it starts
+  (void)act(10, 11, M::drag);
+  a = act(10, 11, M::release);
   check(a.copy == "* Codegen(main) executed 350µs w0 alloc 500B, 1.2KiB in all, retains 100B (error below: a.cpp:2:5: error: no instruction for this)\n"
                   "*   Optimized({1, aarch64_macos, 0}) executed 240µs w3 alloc 700B, retains 64B ← error here\n"
                   "      error: a.cpp:2:5: error: no instruction for this\n",
         std::format("errors copy as the stream shows them: {:?}", a.copy.value_or("(nothing)")));
 
-  // The pane: a drag over the value's text copies those columns. Its lines start at screen line 3;
-  // FunctionIr's value starts at pane line 20 (`func {`); the wheel scrolls 6 lines down.
-  (void)act(10, 7, M::press);
-  (void)act(10, 7, M::release);
-  (void)act(90, 10, M::wheel_down);
-  (void)act(90, 10, M::wheel_down);
+  // The pane: a drag over the value's text copies those columns. Its lines start at screen line 4;
+  // FunctionIr's value starts at pane line 21 (`func {`); the wheel scrolls 6 lines down.
+  (void)act(10, 8, M::press);
+  (void)act(10, 8, M::release);
+  (void)act(90, 11, M::wheel_down);
+  (void)act(90, 11, M::wheel_down);
   (void)b.frame();
   check(b.detail_scroll() == 6, "scrolled");
-  (void)act(73 + 3, 3 + 21 - 6, M::press);
-  (void)act(73 + 6, 3 + 22 - 6, M::drag);
-  a = act(73 + 6, 3 + 22 - 6, M::release);
+  (void)act(73 + 3, 4 + 22 - 6, M::press);
+  (void)act(73 + 6, 4 + 23 - 6, M::drag);
+  a = act(73 + 6, 4 + 23 - 6, M::release);
   check(a.copy == "%0 = const.i32 0\n  %1 =", std::format("a drag over the pane copies the text between its ends: {:?}", a.copy.value_or("(nothing)")));
   check(b.focus() == trace::Focus::detail, "and gives the pane the keys");
   // Backwards, and from the margin: the margin is never text.
-  (void)act(73 + 6, 3 + 22 - 6, M::press);
-  (void)act(72 + 1, 3 + 21 - 6, M::drag);
-  a = act(72 + 1, 3 + 21 - 6, M::release);
+  (void)act(73 + 6, 4 + 23 - 6, M::press);
+  (void)act(72 + 1, 4 + 22 - 6, M::drag);
+  a = act(72 + 1, 4 + 22 - 6, M::release);
   check(a.copy == "  %0 = const.i32 0\n  %1 =", std::format("backwards from the margin: {:?}", a.copy.value_or("(nothing)")));
 
   // V in the pane: whole lines from the top one shown; j extends; y copies.
   (void)key("V");
   (void)key("j");
   (void)key("j");
-  check(trace::strip_sgr(b.frame().lines[1]).contains("V: j/k extend"), "V says what it does");
+  check(trace::strip_sgr(b.frame().lines.back()).contains("VISUAL") && trace::strip_sgr(b.frame().lines.back()).contains("j/k extend"), "V says what it does, in the footer");
   a = key("y");
   check(a.copy == "started  200µs\ntook     300µs\nworker   w2\n", std::format("V, j, j, y copies three lines: {:?}", a.copy.value_or("(nothing)")));
   (void)key("V");
@@ -742,19 +746,21 @@ void copying() {
   a = key("y");
   check(a.copy && a.copy->starts_with("Tu\na.cpp\n\n● executed\nran, value changed\n\nstarted  0ns\ntook     900µs\nworker   w0\n"),
         std::format("y copies the cell as the pane shows it: {:?}", a.copy.value_or("(nothing)")));
-  check(a.copy && a.copy->ends_with("memory\nalloc    4.0KiB in 128 allocations\npeak     4.0KiB\nretains  1.0KiB\nin all   29.1KiB allocated, 6.9KiB retained\n\nno value shown for this kind\n"),
-        "its memory, and that it has no value");
+  // Memory as a table: the cell's own, and with everything below it.
+  check(a.copy && a.copy->ends_with("memory\n            own   in all\nalloc    4.0KiB  29.1KiB\nallocs      128\npeak     4.0KiB\nretains  1.0KiB   6.9KiB\n\n"
+                                    "no value shown for this kind\n"),
+        std::format("its memory, and that it has no value: {:?}", a.copy.value_or("(nothing)")));
   (void)key("E");  // fold everything: Y copies what is folded too
   a = key("Y");
   const auto lines = a.copy ? std::ranges::count(*a.copy, '\n') : 0;
   check(lines == 10 && a.copy->starts_with("* Tu(a.cpp) executed 900µs w0 alloc 4.0KiB, 29.1KiB in all, retains 1.0KiB\n"),
         std::format("Y copies the whole subtree, folded or not ({} lines: 9 cells and an error line)", lines));
-  check(trace::strip_sgr(b.frame().lines[1]).contains("copied the subtree (9 cells)"), "and says how much");
+  check(trace::strip_sgr(b.frame().lines.back()).contains("copied the subtree (9 cells)"), "and says how much");
 
   // A selection is of cells, not row numbers, and goes when its rows or its pane change under it.
   const auto status = [&] {
     const trace::Frame f = b.frame();
-    return trace::strip_sgr(f.lines[b.header_height()]);
+    return trace::strip_sgr(f.lines.back());  // notes are in the footer
   };
   (void)key("e");
   (void)key("g");
@@ -765,20 +771,20 @@ void copying() {
   a = key("y");
   check(status().contains("copied the cell"), "a sort drops a selection: y copies the cell");
   (void)key("s"), (void)key("s"), (void)key("s");  // back to start order
-  (void)act(10, 7, M::press);  // FunctionIr, whose pane is long
-  (void)act(10, 7, M::release);
-  (void)act(90, 6, M::press);
-  (void)act(90, 6, M::release);
+  (void)act(10, 8, M::press);  // FunctionIr, whose pane is long
+  (void)act(10, 8, M::release);
+  (void)act(90, 7, M::press);
+  (void)act(90, 7, M::release);
   (void)key("V");
   (void)key("j");
   (void)key("h");  // the keys go back to the tree: the pane's selection goes with them
   (void)key("j");
   a = key("y");
   check(status().contains("copied the cell") && a.copy && a.copy->starts_with("FunctionGen"), "leaving the pane drops its selection");
-  (void)act(10, 7, M::press);
-  (void)act(10, 7, M::release);
-  (void)act(73 + 3, 6, M::press);
-  (void)act(73 + 8, 6, M::drag);
+  (void)act(10, 8, M::press);
+  (void)act(10, 8, M::release);
+  (void)act(73 + 3, 7, M::press);
+  (void)act(73 + 8, 7, M::drag);
   (void)key("<");  // the pane is wider now: its lines are others
   a = key("y");
   check(status().contains("copied the cell"), "a resized pane drops a selection");
@@ -786,31 +792,31 @@ void copying() {
   // A click on the long pane's last row (where it says which lines it shows) scrolls nothing.
   (void)b.frame();
   const std::size_t scroll = b.detail_scroll();
-  (void)act(90, 3 + 19, M::press);
-  (void)act(90, 3 + 19, M::release);
+  (void)act(90, 4 + 19, M::press);
+  (void)act(90, 4 + 19, M::release);
   check(b.detail_scroll() == scroll, "a click on the pane's last row does not scroll it");
   // A drag over a blank line copies nothing, and says so.
-  (void)act(73 + 2, 3 + 2 - b.detail_scroll(), M::press);
-  (void)act(73 + 9, 3 + 2 - b.detail_scroll(), M::drag);
-  a = act(73 + 9, 3 + 2 - b.detail_scroll(), M::release);
+  (void)act(73 + 2, 4 + 2 - b.detail_scroll(), M::press);
+  (void)act(73 + 9, 4 + 2 - b.detail_scroll(), M::drag);
+  a = act(73 + 9, 4 + 2 - b.detail_scroll(), M::release);
   check(!a.copy && status().contains("nothing to copy"), std::format("an empty selection copies nothing: {}", status()));
 
   // A live feed adding rows above keeps a selection on its cells.
   b.set_live("test");
-  (void)act(10, 4, M::press);  // Pp (newest first: the one request is still on top)
-  (void)act(10, 6, M::drag);
+  (void)act(10, 5, M::press);  // Pp (newest first: the one request is still on top)
+  (void)act(10, 7, M::drag);
   (void)b.pump([&] {
     Event top = ev(100, 0, "Tu", "b.cpp", Outcome::executed, 950'000, 990'000);
     t.add(std::vector<Event>{top});
     return true;
   });
-  a = act(10, 7, M::release);
+  a = act(10, 8, M::release);
   check(a.copy && a.copy->starts_with("* Pp(a.cpp)") && std::ranges::count(*a.copy, '\n') == 3,
         std::format("the rows stay the cells that were selected: {:?}", a.copy.value_or("(nothing)")));
   // A drag held past the bottom edge keeps scrolling on ticks; the wheel moves its end too.
   b.resize(10, 120);  // 6 tree rows of 11
   (void)b.frame();
-  const std::size_t y0 = b.header_height() + 2;  // the first tree row
+  const std::size_t y0 = b.header_height() + 1;  // the first tree row
   (void)key("g");
   (void)act(10, y0, M::press);
   (void)act(10, y0 + 6, M::drag);  // the footer: past the edge
@@ -1006,15 +1012,15 @@ void histograms(const std::filesystem::path& golden_path, bool update) {
   check(b.view() == trace::View::histogram, "b opens the histogram");
   step("the histogram: by kind, most self time first");
   // Body rows from 2: the switches, the grouping, the headers, the bars.
-  check(b.hit(10, 2) == H{H::Area::metric, 0} && b.hit(24, 2) == H{H::Area::metric, 1}, std::format("the switches ({})", std::to_underlying(b.hit(24, 2).area)));
-  check(b.hit(11, 3) == H{H::Area::grouping, 0} && b.hit(17, 3) == H{H::Area::grouping, 1} && b.hit(23, 3) == H{H::Area::grouping, 2},
+  check(b.hit(10, 3) == H{H::Area::metric, 0} && b.hit(24, 3) == H{H::Area::metric, 1}, std::format("the switches ({})", std::to_underlying(b.hit(24, 3).area)));
+  check(b.hit(11, 4) == H{H::Area::grouping, 0} && b.hit(17, 4) == H{H::Area::grouping, 1} && b.hit(23, 4) == H{H::Area::grouping, 2},
         "the groupings");
-  check(b.hit(37, 3) == H{H::Area::scope}, "the scope");
-  check(b.hit(30, 4) == H{H::Area::order, 0} && b.hit(5, 5) == H{H::Area::bar, 0} && b.hit(5, 12) == H{H::Area::bar, 7} && b.hit(5, 13) == H{},
+  check(b.hit(37, 4) == H{H::Area::scope}, "the scope");
+  check(b.hit(30, 5) == H{H::Area::order, 0} && b.hit(5, 6) == H{H::Area::bar, 0} && b.hit(5, 13) == H{H::Area::bar, 7} && b.hit(5, 14) == H{},
         "the headers and the bars");
-  check(b.hit(18, 1) == H{H::Area::tab, std::to_underlying(trace::View::histogram)}, "its tab");
-  press(41, 2);  // □4 peak, the fourth switch (x 40–46)
-  const auto shown = [&](std::string_view m) { return trace::strip_sgr(b.frame().lines[4]).contains(m); };
+  check(b.hit(30, 0) == H{H::Area::tab, std::to_underlying(trace::View::histogram)}, "its tab");
+  press(41, 3);  // □4 peak, the fourth switch (x 40–46)
+  const auto shown = [&](std::string_view m) { return trace::strip_sgr(b.frame().lines[5]).contains(m); };
   check(shown("peak"), "a click on a switch shows its metric");
   (void)b.handle(trace::Key{"4"});
   check(!shown("peak"), "and its key hides it");
@@ -1023,20 +1029,20 @@ void histograms(const std::filesystem::path& golden_path, bool update) {
   for (const char* k : {"2", "3", "7"}) (void)b.handle(trace::Key{k});
   (void)b.handle(trace::Key{"s"});
   // Shown: time in all and allocated; the sort moved off each metric switched off, to time in all.
-  check(trace::strip_sgr(b.frame().lines[4]).contains("allocated↓"), "s sorts by the next metric");
-  press(17, 3);
+  check(trace::strip_sgr(b.frame().lines[5]).contains("allocated↓"), "s sorts by the next metric");
+  press(17, 4);
   step("by file, by time in all");
-  press(5, 6);  // the second bar: (no source)
+  press(5, 7);  // the second bar: (no source)
   check(b.view() == trace::View::histogram, "a cell with no source opens nothing");
-  press(5, 5);  // a.cpp, the most allocated
+  press(5, 6);  // a.cpp, the most allocated
   check(b.view() == trace::View::tree && t.filtering() && t.rows().size() >= 4, "a click on a bar shows its cells in the tree");
-  check(trace::strip_sgr(b.frame().lines[1]).contains("filter: at:=a.cpp"), "as a filter, exactly that file");
+  check(trace::strip_sgr(b.frame().lines[2]).contains("filter: at:=a.cpp"), "as a filter, exactly that file");
   (void)b.handle(trace::Key{"/"});
   (void)b.handle(trace::Key{"\x7f"});
   for (int i = 0; i < 12; ++i) (void)b.handle(trace::Key{"\x7f"});
   (void)b.handle(trace::Key{"\r"});
   (void)b.handle(trace::Key{"b"});
-  press(11, 3);  // by kind
+  press(11, 4);  // by kind
   (void)b.handle(trace::Key{"\r"});  // Optimized
   check(b.view() == trace::View::tree && t.rows().size() == 2 && t.node(t.rows()[1].node).ev.kind == "Pp",
         "Enter opens the selected bar (Pp: the most allocated, under Tu)");
@@ -1051,7 +1057,7 @@ void histograms(const std::filesystem::path& golden_path, bool update) {
   (void)b.handle(trace::Key{"j"});
   (void)b.handle(trace::Key{"\r"});
   check(b.view() == trace::View::tree && t.node(t.rows()[b.cursor()].node).ev.kind == "FunctionIr", "a child's bar selects it in the tree");
-  (void)b.handle(click(5, 6, trace::Mouse::Act::wheel_down));
+  (void)b.handle(click(5, 7, trace::Mouse::Act::wheel_down));
 
   // Spans in the browser (#638): the pane's `source` line, the S column, p to copy.
   t.expand_all(true);
@@ -1070,7 +1076,7 @@ void histograms(const std::filesystem::path& golden_path, bool update) {
   check(a.copy == "a.cpp:1:1", std::format("p copies path:line:col: {:?}", a.copy.value_or("(nothing)")));
   (void)b.handle(trace::Key{"g"});
   a = b.handle(trace::Key{"p"});
-  check(!a.copy && trace::strip_sgr(b.frame().lines[1]).contains("no source for this cell"), "a cell without a span copies nothing");
+  check(!a.copy && trace::strip_sgr(b.frame().lines.back()).contains("no source for this cell"), "a cell without a span copies nothing");
   (void)b.handle(trace::Key{"/"});
   for (char c : std::string_view("at:a.cpp:2")) (void)b.handle(trace::Key{std::string(1, c)});
   (void)b.handle(trace::Key{"\r"});
@@ -1133,16 +1139,16 @@ void histograms(const std::filesystem::path& golden_path, bool update) {
   (void)b.handle(trace::Key{"0"});
   check(!t.worker(), "0 picks no worker in the histogram");
   (void)b.handle(trace::Key{"c"});  // by kind again
-  const std::size_t y_bars = 5;
+  const std::size_t y_bars = 6;
   (void)b.handle(click(5, y_bars, trace::Mouse::Act::wheel_down));
   (void)b.frame();
   (void)b.handle(click(5, y_bars, trace::Mouse::Act::wheel_up));
   clock += std::chrono::seconds(5);
   (void)b.handle(click(5, y_bars), clock);
-  check(b.view() == trace::View::tree && trace::strip_sgr(b.frame().lines[1]).contains("filter: is:ex kind:"),
-        std::format("a bar adds its kind to the filter: {}", trace::strip_sgr(b.frame().lines[1])));
+  check(b.view() == trace::View::tree && trace::strip_sgr(b.frame().lines[2]).contains("filter: is:ex kind:"),
+        std::format("a bar adds its kind to the filter: {}", trace::strip_sgr(b.frame().lines[2])));
   const std::size_t at_open = b.cursor();
-  (void)b.handle(click(5, 8), clock + std::chrono::milliseconds(100));
+  (void)b.handle(click(5, 9), clock + std::chrono::milliseconds(100));
   check(b.cursor() == at_open, "the second press of a double click on a bar moves nothing");
   // A bar keeps the user's own at: when it adds a kind; quoted words survive the round trip.
   check(trace::filter_text(trace::filter_words(R"(is:ex at:"=/my dir/a.cpp" kind:Pp)")) == R"(is:ex at:"=/my dir/a.cpp" kind:Pp)",
@@ -1153,7 +1159,7 @@ void histograms(const std::filesystem::path& golden_path, bool update) {
   (void)b.handle(trace::Key{"\r"});
   (void)b.handle(trace::Key{"b"});
   (void)b.handle(trace::Key{"\r"});
-  check(trace::strip_sgr(b.frame().lines[1]).contains("filter: at:a.cpp kind:"), std::format("the user's at: stays: {}", trace::strip_sgr(b.frame().lines[1])));
+  check(trace::strip_sgr(b.frame().lines[2]).contains("filter: at:a.cpp kind:"), std::format("the user's at: stays: {}", trace::strip_sgr(b.frame().lines[2])));
   // Parent ids that form a cycle (from the wire) end the walk.
   {
     std::vector<Event> cyc = {ev(1, 2, "A", "a", Outcome::executed, 0, 10), ev(2, 1, "B", "b", Outcome::executed, 0, 10)};
@@ -1636,8 +1642,103 @@ void live() {
     check(!b.following(), "a slice opened from the timeline is the user's choice: following stops");
     (void)b.handle(trace::Key{"f"});
     b.end_live("the build has ended");
-    check(b.cursor() == 0 && !b.following() && plain(b.frame()).contains("(the build has ended)"), "the end goes back to the top, and says so");
+    check(b.cursor() == 0 && !b.following() && plain(b.frame()).contains("the build has ended"), "the end goes back to the top, and says so");
   }
+}
+
+// Layout (#1119): what fits a width, and that the bars at the top and the bottom keep what matters
+// at every width from 80, in every view, with the help or the filter prompt open.
+void layout() {
+  using trace::strip_sgr;
+  check(trace::ellipsize("abcdef", 6) == "abcdef" && strip_sgr(trace::ellipsize("abcdef", 4)) == "abc…", "a cut ends in …");
+  check(strip_sgr(trace::ellipsize("ab    ", 3)) == "ab ", "only blanks past the edge: no …");
+  check(trace::columns(trace::ellipsize("\x1b[1mé\x1b[0mabcd", 3)) == 3, "it counts columns, not bytes or SGR");
+  const std::vector<trace::Piece> ps{{"a", 1}, {"bbbb", 3}, {"cc", 2}};
+  check(strip_sgr(trace::pack(ps, 20)) == "a  bbbb  cc", "pieces that fit, in order");
+  check(strip_sgr(trace::pack(ps, 8)) == "bbbb  cc", "the lowest priority goes first");
+  check(strip_sgr(trace::pack(ps, 5)) == "bbbb" && strip_sgr(trace::pack(ps, 2)) == "b…", "down to the most important, cut");
+  check(trace::spread("left", "right", 12) == "left   right", "right-aligned on one line");
+  check(strip_sgr(trace::spread("a long left part", "right", 12)) == "a lon… right", "the left gives way first");
+  check(trace::home_relative("watching /home/u/p", "/home/u") == "watching ~/p" && trace::home_relative("(/home/u)", "/home/u") == "(~)",
+        "a path under home as ~");
+  check(trace::home_relative("/home/user2/p", "/home/u") == "/home/user2/p", "not a mere prefix");
+  check(trace::ellipsize_path("watching /a/b/c/project", 18) == "watching …/project" && trace::ellipsize_path("watching /a/b", 18) == "watching /a/b",
+        "a long path keeps its end");
+  check(trace::wrap("/a/b/ccc/ddd", 8) == std::vector<std::string>{"/a/b/", "ccc/ddd"}, "a path wraps after a /");
+  check(trace::wrap("abcdefghij", 4) == std::vector<std::string>{"abcd", "efgh", "ij"}, "a word longer than the line breaks in it");
+  check(trace::wrap("watching 1 file: x", 12) == std::vector<std::string>{"watching 1 ", "file: x"}, "words wrap at a space, kept");
+
+  trace::Tree t;
+  t.add(browser_events());
+  trace::Browser b(t);
+  b.set_live("watching /a/path/long/enough/that/it/never/fits/next/to/the/tabs/on/a/screen/of/eighty/columns", false);
+  for (std::size_t width : {80uz, 81uz, 99uz, 100uz, 120uz, 160uz, 200uz, 237uz}) {
+    b.resize(30, width);
+    for (const char* view : {"tree", "timeline", "histogram"}) {
+      (void)b.handle(trace::Key{std::string(view) == "histogram" ? "b" : std::string(view) == "timeline" ? "t" : "g"});
+      for (const char* open : {"", "?", "/"}) {
+        if (*open) (void)b.handle(trace::Key{open});
+        const trace::Frame f = b.frame();
+        const std::string what = std::format("{} at {}{}", view, width, *open ? std::format(" with {}", open) : "");
+        check(f.lines.size() == 30, what + ": the screen's height");
+        for (const std::string& l : f.lines) check(trace::columns(l) == width, what + ": every line the screen's width");
+        const std::string title = strip_sgr(f.lines.front()), foot = strip_sgr(f.lines.back());
+        check(title.starts_with(" ycxx trace ") && title.contains("● live") && title.contains("following"), what + ": the title bar: " + title);
+        check(f.lines.front().contains(std::format("\x1b[1;7m {} ", view)), what + ": the current tab lit");
+        if (*open == '/') check(foot.starts_with(" / ") && foot.contains("Esc cancel"), what + ": the prompt in the footer: " + foot);
+        else check(foot.contains("? help  q quit") && !foot.contains("…"), what + ": help and quit on the right, no key cut: " + foot);
+        if (!*open) {
+          const std::string toggles = strip_sgr(f.lines[b.header_height() - 1]);
+          check(toggles.contains("/ filter") && toggles.contains("w all workers"), what + ": the toggles: " + toggles);
+        }
+        if (*open == '?') (void)b.handle(trace::Key{"q"});  // closes the help, quits nothing
+        if (*open == '/') (void)b.handle(trace::Key{"\x1b"});
+      }
+      if (std::string(view) != "tree") (void)b.handle(trace::Key{std::string(view) == "histogram" ? "b" : "t"});
+    }
+  }
+  // A toggle off its default stands out, and a click on its chip toggles it.
+  b.resize(30, 120);
+  (void)b.handle(trace::Key{"r"});
+  check(b.frame().lines[b.header_height() - 1].contains("\x1b[1;33mreused hidden"), "reused hidden, in bold yellow");
+  const std::size_t y = b.header_height() - 1;
+  std::size_t x = 0;
+  for (; x < 120; ++x)
+    if (b.hit(x, y) == trace::Hit{trace::Hit::Area::toggle, std::to_underlying(trace::Toggle::reused)}) break;
+  (void)b.handle(click(x, y));
+  (void)b.handle(click(x, y, trace::Mouse::Act::release));
+  check(!t.hide_reused() && strip_sgr(b.frame().lines[y]).contains("reused shown"), "a click on the chip shows them again");
+  // Review fixes: on a narrow screen the prompt shows what is typed and its cursor stays on it;
+  // a tab the title bar cut takes no click; the help pages by what it shows.
+  b.resize(24, 30);
+  (void)b.handle(trace::Key{"/"});
+  for (char c : std::string_view("abc")) (void)b.handle(trace::Key{std::string(1, c)});
+  {
+    const trace::Frame f = b.frame();
+    check(strip_sgr(f.lines.back()).starts_with(" / abc") && f.cursor && f.cursor->second == 6, "a narrow prompt keeps what is typed: " + strip_sgr(f.lines.back()));
+  }
+  for (char c : std::string_view("defghijklmnopqrstuvwxyz0123456789")) (void)b.handle(trace::Key{std::string(1, c)});
+  {
+    const trace::Frame f = b.frame();
+    const std::string foot = strip_sgr(f.lines.back());
+    check(foot.starts_with(" / …") && foot.contains("6789") && f.cursor && f.cursor->second < 30, "a long filter shows its end: " + foot);
+  }
+  (void)b.handle(trace::Key{"\x1b"});
+  check(b.hit(29, 0) != trace::Hit{trace::Hit::Area::tab, std::to_underlying(trace::View::histogram)}, "a tab cut off the title bar is no target");
+  check(b.hit(14, 0) == trace::Hit{trace::Hit::Area::tab, std::to_underlying(trace::View::tree)}, "one drawn is");
+  b.resize(24, 80);
+  (void)b.handle(trace::Key{"?"});
+  (void)b.handle(trace::Key{"\x1b[6~"});
+  check(strip_sgr(b.frame().lines[1]).contains("keys 21–"), "PgDn in the help goes to the line after the last shown: " + strip_sgr(b.frame().lines[1]));
+  (void)b.handle(trace::Key{"x"});
+  // The help scrolls when it is taller than the screen, and says where it is.
+  b.resize(24, 80);
+  (void)b.handle(trace::Key{"?"});
+  const std::string top = strip_sgr(b.frame().lines[1]);
+  (void)b.handle(trace::Key{"j"});
+  check(top.contains("keys 1–") && strip_sgr(b.frame().lines[1]).contains("keys 2–"), "j scrolls the help: " + top);
+  (void)b.handle(trace::Key{"x"});
+  check(!strip_sgr(b.frame().lines[1]).contains("keys"), "any other key closes it");
 }
 
 }  // namespace
@@ -1659,5 +1760,6 @@ int main(int argc, char** argv) {
   spans();
   histograms(std::filesystem::path(argv[1]).parent_path() / "histogram.golden", update);
   live();
+  layout();
   return ycxx::unit::result("unit.trace");
 }
