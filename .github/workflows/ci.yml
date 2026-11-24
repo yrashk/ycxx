@@ -1,195 +1,46 @@
-name: ci
-
-# The pull-request and main tiers (DECISIONS §9). Both hosts, stages in fail-fast order: policy,
-# build with the bootstrap smoke test, then the test driver's tier. A newer push to the same
-# branch or PR cancels the older run, and documentation-only changes run nothing. The last job
-# records the run's wall time.
+name: CTest scheduling experiment
 
 on:
-  pull_request:
-    paths-ignore: ['**.md', 'docs/**', 'LICENSE']
-  push:
-    branches: [main]
-    paths-ignore: ['**.md', 'docs/**', 'LICENSE']
   workflow_dispatch:
-
-concurrency:
-  group: ci-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
 
 permissions:
   contents: read
-  actions: read
+
+concurrency:
+  group: ctest-scheduling-1230-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
-  test:
-    name: ${{ matrix.host.name }}
-    strategy:
-      # On a PR the first failing host cancels the other (fail fast); on main both finish.
-      fail-fast: ${{ github.event_name == 'pull_request' }}
-      matrix:
-        host:
-          - { name: linux-x86_64, runs-on: ubuntu-24.04, container: 'gcc:16', jobs: 4 }
-          - { name: macos-arm64, runs-on: macos-15, container: '', jobs: 3 }
-    runs-on: ${{ matrix.host.runs-on }}
-    container: ${{ matrix.host.container }}
-    # issues: the feature map's tracking issue (#282) is rewritten on main (DECISIONS §6.9).
-    permissions:
-      contents: read
-      actions: read
-      issues: write
-    timeout-minutes: ${{ matrix.host.name == 'macos-arm64' && 40 || 30 }}
-    env:
-      TIER: ${{ github.event_name == 'pull_request' && 'pr' || 'main' }}
+  benchmark:
+    if: github.ref == 'refs/heads/codex/early-daemon-compare-ctest-experiment'
+    runs-on: macos-15
+    timeout-minutes: 85
     steps:
       - uses: actions/checkout@v4
         with:
           submodules: true
-          # The affected stage needs the first parent of the PR merge commit.
-          fetch-depth: ${{ github.event_name == 'pull_request' && 2 || 1 }}
-
-      - name: Trust the checkout in the Linux container
-        if: matrix.host.name == 'linux-x86_64'
-        # actions/checkout sets safe.directory in its temporary HOME only.
-        run: |
-          git config --global --add safe.directory "$GITHUB_WORKSPACE"
-          git config --global --add safe.directory "$GITHUB_WORKSPACE/deps/libycxx"
+          fetch-depth: 2
+          persist-credentials: false
 
       - name: Toolchain (GCC 16)
         uses: ./.github/actions/setup
 
-      - name: Test driver self-test
-        if: env.TIER == 'main'
-        run: python3 -m unittest -q tests.driver.selftest
-
-      - name: Policy (tools/check-policy)
-        run: tools/check-policy
-
-      - name: Build and bootstrap smoke test (tools/build)
-        run: tools/build -j ${{ matrix.host.jobs }}
-
-      # The driver's fail-fast state (DECISIONS §9.6), keyed as tools/test (#5) expects.
-      - name: Restore test state
-        uses: actions/cache/restore@v4
-        with:
-          path: build/test-state
-          key: test-state-${{ github.head_ref || github.ref_name }}-${{ matrix.host.name }}-${{ github.run_id }}
-          restore-keys: |
-            test-state-${{ github.head_ref || github.ref_name }}-${{ matrix.host.name }}-
-            test-state-main-${{ matrix.host.name }}-
-
-      # The α slice end to end (#39, #43): ycxx compiles, links and runs these programs. It runs
-      # before the tier, so a broken pipeline is the first failure reported (DECISIONS §9.2).
-      - name: α slice (tools/test --cxx ycxx --no-unsupported core own/slice)
-        if: matrix.host.name == 'macos-arm64'
-        run: tools/test --cxx ycxx --no-unsupported core own/slice -j ${{ matrix.host.jobs }}
-
-      # The feature map (DECISIONS §6.9, #366): every feature's probe built and run by ycxx, then
-      # a status its probe contradicts fails the run. probes.tsv and feature-map.md are generated
-      # here, not committed: committed, they conflicted between every two feature PRs.
-      - name: Feature map (tools/feature-map/feature-map probe, check --probes)
-        if: matrix.host.name == 'macos-arm64'
-        run: |
-          tools/feature-map/feature-map probe -j ${{ matrix.host.jobs }}
-          tools/feature-map/feature-map render
-          tools/feature-map/feature-map check --probes
-
-      - name: Feature map tracking issue (#282, main only)
-        if: matrix.host.name == 'macos-arm64' && github.event_name == 'push'
+      - name: Build one Debug product
         env:
-          GH_TOKEN: ${{ github.token }}
+          YCXX_BUILD_DIR: build
+          YCXX_BUILD_TYPE: Debug
         run: |
-          tools/feature-map/feature-map issue > build/feature-map/issue.md
-          gh issue edit 282 -R "$GITHUB_REPOSITORY" --body-file build/feature-map/issue.md
+          test "$(uname -m)" = arm64
+          tools/build --no-smoke -j 3
 
-      - name: Tests (tools/test, ${{ env.TIER }} tier)
-        run: |
-          if [ "$TIER" = pr ]; then
-            # tools/build above already ran the bootstrap smoke test and the other CTests.
-            base=$(git rev-parse --verify HEAD^1)
-            tools/test -x policy failed affected core --base "$base" -j ${{ matrix.host.jobs }}
-          else
-            tools/test -x failed affected core wider rest -j ${{ matrix.host.jobs }}
-          fi
+      - name: Cold CTest A/B and B/A
+        run: python3 -I .github/scripts/ctest-scheduling-1230.py "$RUNNER_TEMP/ctest-scheduling-1230"
 
-      - name: Save test state
-        if: always()
-        uses: actions/cache/save@v4
-        with:
-          path: build/test-state
-          key: test-state-${{ github.head_ref || github.ref_name }}-${{ matrix.host.name }}-${{ github.run_id }}
-
-      - name: Feature map files
-        if: always() && matrix.host.name == 'macos-arm64'
-        uses: actions/upload-artifact@v4
-        with:
-          name: feature-map
-          path: build/feature-map/
-          if-no-files-found: ignore
-
-      - name: Test reports
+      - name: Timing and pass records
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: test-logs-${{ matrix.host.name }}
-          path: build/test-logs/
+          name: ctest-scheduling-1230
+          path: ${{ runner.temp }}/ctest-scheduling-1230/
           if-no-files-found: ignore
-
-  # Release (-O3 -DNDEBUG) compile-only, Linux only: GCC's warnings under -Werror and its crashes
-  # differ by optimization level, and the test job builds Debug (#726). macOS runners are shared
-  # across repositories (LESSONS), so macOS builds Release only in the nightly tier.
-  release-build:
-    name: linux-x86_64-release-build
-    runs-on: ubuntu-24.04
-    container: 'gcc:16'
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          submodules: true
-
-      - name: Trust the checkout in the Linux container
-        run: |
-          git config --global --add safe.directory "$GITHUB_WORKSPACE"
-          git config --global --add safe.directory "$GITHUB_WORKSPACE/deps/libycxx"
-
-      - name: Toolchain (GCC 16)
-        uses: ./.github/actions/setup
-
-      - name: Release build (tools/build --no-smoke)
-        env:
-          YCXX_BUILD_TYPE: Release
-        run: tools/build -j 4 --no-smoke
-
-  policies-package:
-    name: policies-package (${{ matrix.compiler }})
-    runs-on: ubuntu-24.04
-    timeout-minutes: 10
-    strategy:
-      fail-fast: false
-      matrix:
-        compiler: [g++, clang++]
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Standalone C++20 package conformance
-        env:
-          CXX: ${{ matrix.compiler }}
-        run: python3 tests/unit/pipeline/policies_package.py cmake "$CXX" packages/ycxx-policies
-
-  wall-time:
-    needs: [test, release-build, policies-package]
-    if: always()
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          sparse-checkout: tools/ci
-      - name: Record wall time (DECISIONS §9.8)
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: tools/ci/wall-time ${{ github.event_name == 'pull_request' && 'pr 15' || 'main 60' }}
-      - uses: actions/upload-artifact@v4
-        with:
-          name: wall-time
-          path: wall-time.json
+          retention-days: 7
