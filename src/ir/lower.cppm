@@ -115,7 +115,6 @@ export struct LowerConfig {
   std::uint32_t float_arg_registers = 8;
   // Use the System V AMD64 integer aggregate classification and argument placement.
   bool sysv_amd64 = false;
-  bool int3_statement_asm = false;
   std::optional<IntThrowRuntime> int_throw;
   std::optional<CatchAllRuntime> catch_all{};
   EntityId cleanup_resume = EntityId::none;
@@ -1158,11 +1157,15 @@ class Lowering {
       }
       case Op::asm_: {
         const ConstId text{std::uint32_t(imms[0])};
-        constexpr std::uint32_t int3[] = {'i', 'n', 't', '3', 0};
-        if constexpr (requires { layout_.ordinary_string_is(text, int3); }) {
-          if (config_.int3_statement_asm && nd.nopnd == 1 && nd.nres == 1 && layout_.ordinary_string_is(text, int3)) {
-            out(n, 0, emit1(Op2::int3, T::state, {in(n, 0)}));
-            return {};
+        if constexpr (requires { layout_.breakpoint_statement_asm(text); }) {
+          if (nd.nopnd == 1 && nd.nres == 1) {
+            if (const auto instruction = layout_.breakpoint_statement_asm(text)) {
+              switch (*instruction) {
+                case ast::BreakpointInstruction::x86_int3:
+                  out(n, 0, emit1(Op2::int3, T::state, {in(n, 0)}));
+                  return {};
+              }
+            }
           }
         }
         return fail("unsupported asm instruction");

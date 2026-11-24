@@ -510,14 +510,14 @@ class QueryLayout {
     return {*v.base, v.bits};
   }
   // An asm template is literal data, without a native string object's address.
-  bool ordinary_string_is(ConstId c, std::span<const std::uint32_t> units) const {
+  std::optional<ast::BreakpointInstruction> breakpoint_statement_asm(ConstId c) const {
     const ast::Interners& in = *universe().in;
-    if (!in.values.is<ast::VString>(c)) return false;
+    if (!in.values.is<ast::VString>(c)) return std::nullopt;
     const auto text = in.values.get<ast::VString>(c);
     const auto type = in.types.canon(text.type);
     if (!in.types.is<ast::TArray>(type) ||
-        ast::builtin_of(in, in.types.get<ast::TArray>(type).elem) != ast::Builtin::char_) return false;
-    return std::ranges::equal(in.seqs.elements(text.units), units);
+        ast::builtin_of(in, in.types.get<ast::TArray>(type).elem) != ast::Builtin::char_) return std::nullopt;
+    return target_->breakpoint_statement_asm(in.seqs.elements(text.units));
   }
   std::span<const StringUse> strings() const { return strings_; }
 
@@ -1452,7 +1452,6 @@ engine::query_task<Lowered> Lower::run(engine::Ctx& cx, FnKey k) {
   auto [shapes, shape_index] = co_await cx.par_fetch(engine::q<UnitShapes>{k.tu}, engine::q<UnitShapeIndex>{k.tu});
   QueryLayout layout(cx, shapes, shape_index, target);
   ir::LowerConfig config;
-  config.int3_statement_asm = target.supports(ast::NativeOperation::int3_statement_asm);
   if (f.body) {
     const auto checked = std::ranges::find_if(f.body->nodes, [](ir::Op op) {
       return op == ir::Op::sadd_overflow || op == ir::Op::smul_overflow;

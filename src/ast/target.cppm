@@ -62,8 +62,10 @@ enum class NativeOperation : std::uint64_t {
   derived_virtual_destructor = std::uint64_t{1} << 0,
   peer_typed_dynamic_cast = std::uint64_t{1} << 1,
   namespace_hidden_asm = std::uint64_t{1} << 2,
-  int3_statement_asm = std::uint64_t{1} << 3,
+  breakpoint_statement_asm = std::uint64_t{1} << 3,
 };
+
+enum class BreakpointInstruction : u8 { x86_int3 };
 
 struct Target {
   std::string_view triple;
@@ -97,6 +99,14 @@ struct Target {
   constexpr bool has(Builtin b) const { return (*this)[b].size != 0; }
   constexpr bool supports(NativeOperation operation) const {
     return (native_operations & std::to_underlying(operation)) != 0;
+  }
+
+  constexpr std::optional<BreakpointInstruction> breakpoint_statement_asm(std::span<const std::uint32_t> units) const {
+    if (!supports(NativeOperation::breakpoint_statement_asm) || architecture != Architecture::x86_64)
+      return std::nullopt;
+    constexpr std::uint32_t int3[] = {'i', 'n', 't', '3', 0};
+    if (std::ranges::equal(units, int3)) return BreakpointInstruction::x86_int3;
+    return std::nullopt;
   }
 };
 
@@ -325,7 +335,7 @@ inline constexpr Target x86_64_linux{
     .native_operations = std::to_underlying(NativeOperation::derived_virtual_destructor) |
                          std::to_underlying(NativeOperation::peer_typed_dynamic_cast) |
                          std::to_underlying(NativeOperation::namespace_hidden_asm) |
-                         std::to_underlying(NativeOperation::int3_statement_asm),
+                         std::to_underlying(NativeOperation::breakpoint_statement_asm),
 };
 
 constexpr const Target* target_for_triple(std::string_view triple) {
