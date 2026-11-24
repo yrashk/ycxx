@@ -1,3 +1,4 @@
+// XFAIL: gcc GCC 16 reads the object representation of objects of any type. ycxx's constant evaluation has no bytes for them and follows Clang 23, which reads only narrow character types; the builtins are extensions (docs/EXTENSIONS.md).
 // In constant expressions __builtin_memchr and __builtin_memcmp read only objects of narrow
 // character type (char, signed char, unsigned char, char8_t) or arrays of them, through a pointer
 // to an element (docs/EXTENSIONS.md). Other objects have no byte values the evaluation can read.

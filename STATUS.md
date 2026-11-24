@@ -2569,7 +2569,8 @@ objects of narrow character type, and elements of arrays of them, as `unsigned c
 interpreter's access, lifetime and initialization checks (`Machine::bytes_at`, `read_byte`); any
 other object is `Reason::byte_type`, as Clang rejects it. `memchr` reads in order up to the match;
 `memcmp` checks first that both objects hold all `n` bytes, as GCC does, then reads up to the
-first difference. The `memchr-memcmp-*` fixtures cover results, bounds, object types and values.
+first difference. The `memchr-*` fixtures cover results, bounds, object types and values, and the
+oracles' disagreements, each marked `XFAIL` for that oracle with its reason.
 
 ## GNU constantness probe (#1065)
 

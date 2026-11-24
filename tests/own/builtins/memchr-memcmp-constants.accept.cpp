@@ -1,12 +1,12 @@
 // __builtin_memchr and __builtin_memcmp in constant expressions (docs/EXTENSIONS.md): they read
 // arrays and objects of narrow character type, as unsigned char, under [expr.const]'s rules.
+// Cases where GCC 16 disagrees are in memchr-memcmp-reads-stop and memchr-offsets-and-values.
 using Size = decltype(sizeof(0));
 
 constexpr char text[] = "abcabc";
 
 // memchr finds the first match among the first n bytes, and gives a pointer to it.
 static_assert(__builtin_memchr(text, 'c', 6) == text + 2);
-static_assert(__builtin_memchr(text + 3, 'c', 3) == text + 5);
 static_assert(__builtin_memchr(text, 'z', 6) == nullptr);
 static_assert(__builtin_memchr(text, 'c', 2) == nullptr);
 static_assert(__builtin_memchr(text, 'a', 0) == nullptr);
@@ -17,13 +17,8 @@ static_assert(__builtin_memchr("xyz" + 1, 'z', 2) != nullptr);
 static_assert(__builtin_memchr(nullptr, 'a', 0) == nullptr);
 static_assert(__builtin_memchr(text + 7, 'a', 0) == nullptr);  // nothing is read
 
-// The search stops at the match ([cstring.syn] and C's memchr): bytes after it are not read.
-static_assert(__builtin_memchr(text, 'a', 100) == text);
-static_assert(__builtin_memchr(text, 'b', Size(-1)) == text + 1);
-
 // The value is converted to unsigned char, and so is each byte.
 constexpr unsigned char high[] = {0xff, 0x01};
-static_assert(__builtin_memchr(high, -1, 2) == high);
 static_assert(__builtin_memchr(high, 0x101, 2) == high + 1);
 constexpr signed char negative[] = {-1, 1};
 static_assert(__builtin_memchr(negative, 0xff, 2) == negative);
@@ -65,9 +60,7 @@ static_assert(__builtin_memchr(&single, 'q', 1) == &single);
 static_assert(__builtin_memchr(&single, 'r', 1) == nullptr);
 static_assert(__builtin_memcmp(&single, "q", 1) == 0);
 
-// A found pointer can be searched from again, and written through when the object is not const.
-constexpr const char* again = static_cast<const char*>(__builtin_memchr(found + 1, 'b', 5));
-static_assert(again == text + 4);
+// A found pointer can be written through when the object is not const.
 constexpr char written() {
   char a[] = {'a', 'b'};
   *static_cast<char*>(__builtin_memchr(a, 'b', 2)) = 'c';
@@ -91,14 +84,6 @@ constexpr int locals() {
   return r;
 }
 static_assert(locals() == 109);
-
-// memcmp stops reading at the first difference, so a later byte need not have a value.
-constexpr int partly_initialized() {
-  char a[3];
-  a[0] = 'a';
-  return __builtin_memcmp(a, "xbc", 3);
-}
-static_assert(partly_initialized() < 0);
 
 // In a template, evaluated once the arguments are known.
 template <class T, Size N>
