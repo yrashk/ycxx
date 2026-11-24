@@ -2274,8 +2274,8 @@ template's tokens again with the arguments bound.
   and checks its conversion when the initializer is instantiated with the selected definition's
   bindings ([temp.arg.nontype], [temp.inst]).
   A primary namespace variable template can use this replay in a fixed braced list that
-  infers the bound of an array of concrete scalar type. The bound-inference pass uses lists
-  free of pack expansions and occurrences of the declared name.
+  infers the bound of an array of concrete scalar type. An ellipsis token, a top-level designator,
+  or the declared name keeps the list on the earlier parsing path.
   [#1168](https://github.com/yrashk/ycxx/issues/1168)
 - **Dependent immediate calls** (#209, [temp.dep.constexpr], [temp.arg.nontype]): an unqualified
   or fixed namespace-qualified call to a uniquely resolved `consteval` function template with
