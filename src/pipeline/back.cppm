@@ -1832,9 +1832,28 @@ std::expected<obj::object, aarch64::CodegenError> assemble_linux(
   o.name = name;
   o.arch = obj::target::x86_64_linux;
   std::map<EntityId, std::uint32_t> symbol_of;
-  for (const auto& s : symbols) symbol_of.emplace(s.entity, o.add_symbol({s.name, s.bind, {}, 0, false}));
+  // One symbol per name outside the object: a builtin's implicit C declaration and a written one
+  // of another type are two entities with one C symbol (#1095), which the linker resolves by name.
+  std::map<std::string_view, std::uint32_t> nonlocal;
+  for (const auto& s : symbols) {
+    if (s.bind != obj::binding::local) {
+      if (auto shared = nonlocal.find(s.name); shared != nonlocal.end()) {
+        auto& bind = o.symbols[shared->second].bind;
+        if (s.bind == obj::binding::hidden) bind = obj::binding::hidden;  // the stricter visibility
+        symbol_of.emplace(s.entity, shared->second);
+        continue;
+      }
+    }
+    const auto index = o.add_symbol({s.name, s.bind, {}, 0, false});
+    if (s.bind != obj::binding::local) nonlocal.emplace(s.name, index);
+    symbol_of.emplace(s.entity, index);
+  }
   auto missing = [](EntityId e) {
     return std::unexpected(aarch64::CodegenError{e, std::format("@{} has no symbol name", ir::raw(e))});
+  };
+  auto redefined = [&](EntityId e, std::uint32_t symbol) {
+    return std::unexpected(aarch64::CodegenError{e, std::format("a second definition of symbol '{}'",
+                                                                o.symbols[symbol].name_view())});
   };
   std::optional<std::uint32_t> data_const;
   if (!functions.empty()) {
@@ -1867,6 +1886,7 @@ std::expected<obj::object, aarch64::CodegenError> assemble_linux(
       sec.align(4);
       const std::size_t base = sec.bytes.size();
       auto& symbol = o.symbols[sym->second];
+      if (symbol.defined()) return redefined(f.entity, sym->second);
       symbol.section = text;
       symbol.offset = base;
       symbol.weak = f.weak && symbol.bind != obj::binding::local;
@@ -1924,6 +1944,7 @@ std::expected<obj::object, aarch64::CodegenError> assemble_linux(
       sec.align(std::countr_zero(std::bit_ceil(d.align)));
       const std::uint64_t base = sec.size();
       auto& symbol = o.symbols[sym->second];
+      if (symbol.defined()) return redefined(d.entity, sym->second);
       symbol.section = index;
       symbol.offset = base;
       symbol.weak = symbol.bind == obj::binding::global && d.weak;

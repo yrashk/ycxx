@@ -2,7 +2,9 @@
 
 Each fixture is compiled for both targets. The C function's symbol must appear exactly once in
 the object's symbol table: undefined where the unit only declares it, defined where the unit
-defines it. A second entry means the builtin's implicit declaration became a second entity (#248).
+defines it. A second entry means the builtin's implicit declaration became a second entity (#248),
+or, where a written declaration differs from it and they are two entities, that the object writer
+gave each entity its own symbol (#1095).
 """
 
 import os
@@ -62,6 +64,8 @@ def main():
         "declared.cpp": {"memcmp": False, "memchr": False},
         "defined.cpp": {"memcmp": True},
         "builtin-only.cpp": {"memcmp": False, "memchr": False},
+        "mismatched-declared.cpp": {"memcmp": False, "memchr": False},
+        "mismatched-defined.cpp": {"memcmp": True},
     }
     failures = []
     with tempfile.TemporaryDirectory(prefix="ycxx-string-builtins-") as temporary:
