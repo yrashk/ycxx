@@ -539,6 +539,19 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
   - Rule: DECISIONS §5.6.
   - Learned on #33.
 
+- **A path filter alone still runs the build stage.** On #309 a test-writing subagent ran
+  `tools/test --cxx clang own/...` to check its tests against the oracles. That ran `tools/build`
+  first, in the build directory the implementing session was rebuilding, for 37 minutes, and failed.
+  - Do: name the stage with the path: `tools/test --cxx clang affected <path>` (or `core <path>`)
+    checks only the tests, in seconds, and leaves `build/` alone.
+  - Do: give a test author's brief that command, and tell it not to build.
+  - Learned on #309.
+- **Linux x86-64 run tests can be checked from the Mac without building ycxx in Docker.** Compile
+  with the Mac's ycxx (`ycxx cxx --target=x86_64-pc-linux-gnu -c`), then link and run with `g++`
+  in the `ycxx-linux-amd64` image (`docker run --platform linux/amd64 -v dir:/w`). On #309 this
+  ran 13 mixed-object tests in about a minute, against 25 minutes for an emulated build.
+  - Learned on #309.
+
 ## Data the front end needs
 
 - **Deferred analysis reads committed parameter lists.** On #713, the exception-specification

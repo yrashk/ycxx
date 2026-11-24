@@ -1896,6 +1896,11 @@ void emit_dynamic_table(obj::object& o, const DynamicTableOut& table, std::uint3
   else o.sections[pointers].emit64(0);
   for (std::uint32_t slot : slots) emit_rtti_pointer(o, pointers, slot);
   if (!typeinfo) return;
+  // A descriptor this object already defines (a peer profile's keyless base) is reused.
+  if (o.symbols[*typeinfo].defined()) {
+    descriptors.emplace(table.type_encoding, *typeinfo);
+    return;
+  }
   const auto descriptor_section = elf ? o.add_section(S::data_const) : pointers;
   o.sections[descriptor_section].align(3);
   const auto bind = !elf && table.weak ? obj::binding::hidden : obj::binding::global;

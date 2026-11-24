@@ -8442,8 +8442,9 @@ bool Program::peer_root_destructor_producer(EntityId cls) const {
 std::optional<sema::DynamicClass> Program::dynamic_class(u32 item, EntityId cls, const sema::ClassRec& rec) {
   const auto& head = items_->items[item];
   const auto& entity = w_->entities.rec(cls);
+  // A class in an unnamed namespace is TU-local ([basic.link]): its table needs local symbols (#1155).
   if (head.template_depth || head.specialization || entity.templ != EntityId::none || rec.union_ || rec.closure ||
-      rec.unapplied_layout || entity.linkage != ast::Linkage::external || rec.bases.size() > 1)
+      rec.unapplied_layout || entity.linkage != ast::Linkage::external || unnamed(ns_of(item)) || rec.bases.size() > 1)
     return std::nullopt;
   for (EntityId scope = entity.scope; !is_namespace(scope); scope = w_->entities.rec(scope).scope) {
     const auto& owner = w_->entities.rec(scope);

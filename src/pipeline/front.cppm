@@ -1577,12 +1577,26 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
     d.type = world.entities.rec(spec).type;
     declare(d, std::nullopt);
   }
+  // A dynamic class that serves only as the abstract primary base of a peer profile class (its
+  // `peer_automatic_primary_base`) keeps the profile's output: the profile installs the derived
+  // table directly, so the base needs neither its table nor its implicit constructors here (#1156).
+  std::set<EntityId> profile_only_bases;
+  for (EntityId c : classes.classes())
+    if (const EntityId base = classes.rec(c).peer_automatic_primary_base;
+        base != EntityId::none && classes.find(base) && classes.rec(base).dynamic)
+      profile_only_bases.insert(base);
+  for (EntityId c : classes.classes())
+    if (const auto& record = classes.rec(c); record.dynamic && record.dynamic->primary_base)
+      profile_only_bases.erase(record.bases.front().cls);
   // The implicitly defined special members needed by this unit ([special]).
   for (std::size_t i = 0; i < program.synthesized().size(); ++i) {
     const parse::Program::Synthesized& s = program.synthesized()[i];
     const EntityId cls = world.entities.rec(s.decl.entity).scope;
     // A class template's current instantiation is not code ([temp.dep.type]).
     if (world.types.is_dependent(world.types.class_type(cls))) continue;
+    if (profile_only_bases.contains(cls) && (s.kind == parse::Program::SpecialMember::default_constructor ||
+                                             s.kind == parse::Program::SpecialMember::copy_constructor))
+      continue;
     // A deleted implicit constructor of a dynamic class has no body (`validate_dynamic_constructors`).
     if (program.synthesized_body(i).tree == ast::NodeId::none) continue;
     declare(s.decl, std::nullopt);
@@ -1599,7 +1613,7 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
   // defined here and not inline, weak where the class has none (Itanium C++ ABI §5.2.3).
   for (EntityId c : classes.classes()) {
     const auto& record = classes.rec(c);
-    if (!record.dynamic || !record.defined) continue;
+    if (!record.dynamic || !record.defined || profile_only_bases.contains(c)) continue;
     const auto& dynamic = *record.dynamic;
     bool weak = dynamic.key_function == EntityId::none;
     if (!weak) {
