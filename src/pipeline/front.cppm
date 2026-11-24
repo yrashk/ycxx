@@ -1498,6 +1498,8 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
       ast::DeclSema d = decls[0];
       if (body.deduced) d.type = body.deduced_type;
       const auto& entity = world.entities.rec(d.entity);
+      // The checked body has no native callers or table entry (Itanium C++ ABI §2.5.2).
+      if (d.is_virtual && (d.flags & sema::decl_flag::consteval_)) continue;
       // An immediate function's calls are all folded ([expr.const]), so it has no code: a free
       // function, or a constructor defined in or outside its class. Sema has checked the body and
       // keeps it for constant evaluation.

@@ -5695,8 +5695,8 @@ private:
           s_.diag(d.name_at, Diag::virtual_placeholder_return);
           return bad();
         }
-        if (spec.is_consteval) {
-          s_.diag(spec.begin, Diag::not_supported, Tk::kw_consteval);
+        if (spec.is_consteval && s_.ins().names.spelling(d.name) == "operator=") {
+          s_.diag(spec.begin, Diag::not_supported, Tk::kw_consteval);  // implicit virtual assignments (#309)
           return bad();
         }
         if (ps_.is(Tk::kw_requires)) {
@@ -5709,7 +5709,7 @@ private:
           if (!d.ok) return bad();
           d.type = types.function(f.inner, f.params, f.variadic, f.linkage, f.fn_cv, f.fn_ref, nonthrowing);
         }
-        if (overridden && !validate_override(d, *overridden)) return bad();
+        if (overridden && !validate_override(d, *overridden, spec.is_consteval)) return bad();
       }
       std::optional<u32> final_at;
       if (function) {
@@ -7000,9 +7000,13 @@ private:
     return nullptr;
   }
 
-  bool validate_override(const parse::Declarator& d, const sema::MemberDeclRec& overridden) {
+  bool validate_override(const parse::Declarator& d, const sema::MemberDeclRec& overridden, bool immediate) {
     if (overridden.is_final) {
       s_.diag(d.name_at, Diag::virtual_override_final);
+      return false;
+    }
+    if (immediate != overridden.is_consteval) {  // [class.virtual]
+      s_.diag(d.name_at, Diag::virtual_override_consteval);
       return false;
     }
     const auto& types = s_.types();
@@ -7463,6 +7467,10 @@ private:
       return false;
     }
     if (m->is_virtual) {
+      if (m->is_consteval != spec.is_consteval) {  // [dcl.constexpr]
+        s_.diag(d.name_at, Diag::consteval_redeclared, d.name);
+        return false;
+      }
       if (!cr->dynamic && !native_virtual_definition(cls, *cr, m->entity, d, sem)) {
         s_.diag(d.name_at, Diag::virtual_definition);
         return false;
@@ -9420,7 +9428,8 @@ std::optional<sema::DynamicClass> Program::dynamic_class(u32 item, EntityId cls,
     return replaced;
   };
   for (const sema::MemberDeclRec& m : rec.members) {
-    if (!m.is_virtual) continue;
+    // Immediate virtuals participate in class semantics but have no ABI entry or key.
+    if (!m.is_virtual || m.is_consteval) continue;
     if (m.is_template) return std::nullopt;
     if (m.is_dtor) {
       if (!replace_destructor(m.entity, m.is_pure)) {
@@ -9925,7 +9934,7 @@ const Result<ast::ClassDef>& Program::class_def(u32 item) {
       if (rec.bases.size() == 1)
         if (const auto* base = classes_.find(rec.bases.front().cls))
           rec.pure_final_overriders = base->pure_final_overriders;
-      // The nearest overridden declaration already represents the inherited slot in this chain.
+      // Remove the nearest overridden declaration from the semantic set, including immediates.
       for (const auto& member : rec.members) {
         if (member.overridden_virtual != EntityId::none)
           std::erase(rec.pure_final_overriders, member.overridden_virtual);
