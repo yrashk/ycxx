@@ -9929,7 +9929,8 @@ public:
           if (types().canonical(g.params[i]) != types().canonical(ft.params[i])) return false;
         return true;
       };
-      if (const ClassRec* c = class_rec(fr.scope))
+      // A global namespace member's scope is none.
+      if (const ClassRec* c = fr.scope == EntityId::none ? nullptr : class_rec(fr.scope))
         return std::ranges::any_of(c->members, [&](const MemberDeclRec& m) {
           return m.name == ne && m.is_function && !m.is_template && corresponds(m.type);
         });
