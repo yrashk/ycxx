@@ -1885,12 +1885,17 @@ public:
   std::optional<TemplateArg> converted_value(const TemplateArg& a, QualType t) {
     t = types().canonical(Types::unqualified(t));
     if (needs_class_value_check(a.type, t, a.value)) {
-      if (types().canonical(Types::unqualified(a.type)) != t || !structural_class_parameter(t)) return std::nullopt;
+      if (!structural_class_parameter(t)) return std::nullopt;
+      if (ins().values.is<ast::VDepCall>(a.value)) {
+        const auto result = ins().values.get<ast::VDepCall>(a.value).result_type;
+        // The expression is still value-dependent. The call retains its own nominal
+        // result type for the conversion when an alias use demands the argument.
+        return types().is_class(result) ? std::optional(value_arg(t, a.value)) : std::nullopt;
+      }
+      if (types().canonical(Types::unqualified(a.type)) != t) return std::nullopt;
       // A direct reference to another class parameter retains its known type until substitution.
       if (ins().values.is<ast::VDepParam>(a.value) &&
           ins().values.get<ast::VDepParam>(a.value).depth != dependent_depth)
-        return value_arg(t, a.value);
-      if (ins().values.is<ast::VDepCall>(a.value) && ins().values.get<ast::VDepCall>(a.value).result_type == t)
         return value_arg(t, a.value);
       if (!ins().values.is<ast::VAggregate>(a.value)) return std::nullopt;
       const auto& aggregate = ins().values.get<ast::VAggregate>(a.value);
