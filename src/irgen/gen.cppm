@@ -102,6 +102,8 @@ struct FunctionInput {
   // thunk. Their contents are unknown and their lifetimes began outside the evaluation.
   // Sorted by local index.
   std::span<const std::uint32_t> opaque_record_locals{};
+  // Named record reference parameters in the thunk's enclosing frame, sorted by local index.
+  std::span<const std::uint32_t> discardable_reference_parameters{};
 };
 
 struct FunctionIr {
@@ -1634,7 +1636,11 @@ class Gen {
         if (is<ast::DeclRef>(operand) && !get<ast::DeclRef>(operand).reference) return;
         if (is<ast::LocalRef>(operand)) {
           const auto local = get<ast::LocalRef>(operand).local;
-          if (!facts_.is_reference(in_.seqs.at(fn_.body.locals, local).type)) return;
+          // Naming a reference parameter need not observe the referent when the result is
+          // discarded ([expr.const.core]). An actual use still needs its binding.
+          if (!facts_.is_reference(in_.seqs.at(fn_.body.locals, local).type) ||
+              std::ranges::binary_search(fn_.discardable_reference_parameters, local))
+            return;
         }
       }
     }

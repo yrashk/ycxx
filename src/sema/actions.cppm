@@ -1188,8 +1188,9 @@ public:
       return !template_args.at(p.depth, p.index);
     });
   }
+  bool in_function_or_lambda_body() const { return in_function_body || !lambdas_.empty(); }
   bool check_exception_construct(u32 at, lex::Tk keyword) {
-    if (q_->exceptions_enabled() || ((in_function_body || !lambdas_.empty()) && in_template_definition()))
+    if (q_->exceptions_enabled() || (in_function_or_lambda_body() && in_template_definition()))
       return true;
     diag(at, Diag::exceptions_disabled, keyword);
     return false;

@@ -192,8 +192,11 @@ private:
     auto local_values = s_->local_values();
     std::vector<std::optional<ConstId>> filtered_values;
     std::vector<u32> opaque_record_locals;
+    std::vector<u32> discardable_reference_parameters;
     for (std::size_t i = 0; i < locals.size(); ++i) {
       auto& l = locals[i];
+      const bool parameter = (l.flags & local_flag::parameter) &&
+                             !(l.flags & (ast::local_flag::requires_parameter | local_flag::default_argument_parameter));
       if (s_->types().is_class(l.type)) {
         if (i < local_values.size() && local_values[i]) {
           if (!importable_local_record(l.type, local_values[i])) {
@@ -201,14 +204,15 @@ private:
             filtered_values[i].reset();
           }
         } else if (s_->in_function_body) {
-          const bool parameter = (l.flags & local_flag::parameter) &&
-                                 !(l.flags & (ast::local_flag::requires_parameter | local_flag::default_argument_parameter));
           const bool named_receiver = receiver == i && l.entity == EntityId::none && l.name != s_->no_name() &&
                                       !(l.flags & ast::local_flag::structured_binding) &&
                                       s_->as<ast::LocalVar>({l.decl}).has_value();
           if ((parameter || named_receiver) && importable_local_record(l.type, std::nullopt))
             opaque_record_locals.push_back(static_cast<u32>(i));
         }
+      } else if (parameter && s_->in_function_or_lambda_body() && l.name != s_->no_name() &&
+                 s_->types().is_reference(l.type) && s_->types().is_class(s_->types().referee(l.type))) {
+        discardable_reference_parameters.push_back(static_cast<u32>(i));
       }
       l.decl = NodeId::none;  // drafts of the enclosing frame
       // In a template's definition a local of dependent type has no object yet; a non-dependent
@@ -229,6 +233,7 @@ private:
                                s_->item(), 0, true, local_values};
     input.initialized_fields = initialized_fields;
     input.opaque_record_locals = opaque_record_locals;
+    input.discardable_reference_parameters = discardable_reference_parameters;
     EvalFacts facts(s_->world(), *q_);
     auto body = bytes ? irgen::constant_byte_capture_ir(in, input, facts, bytes->capture) : irgen::function_ir(in, input, facts);
     if (!body) return {};
