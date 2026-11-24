@@ -121,6 +121,7 @@ struct Failure {
   Reason reason = Reason::ill_formed;
   u64 arg = 0;  // the message's `{0}`
   std::vector<Site> stack;
+  EntityId global = EntityId::none;  // the global whose missing value or declaration caused the failure
 };
 
 // A result, described without the machine's object numbers.
@@ -304,7 +305,7 @@ private:
 
   // ------------------------------------------------------------ execution
 
-  Flow fail(Reason r, u64 arg = 0);
+  Flow fail(Reason r, u64 arg = 0, EntityId global = EntityId::none);
   Flow unsupported(NodeId n) { return fail(Reason::unsupported, std::to_underlying(frames_.back().fn->node(n).op)); }
   Value& reg(Frame& f, ir::ValueId v) { return f.regs[ir::raw(v)]; }
   Value operand(Frame& f, NodeId n, u32 i) { return f.regs[ir::raw(f.fn->operands_of(n)[i])]; }
@@ -652,7 +653,8 @@ Machine::Flow Machine::locate(const Value& p, std::span<const u64> extra, QualTy
       return fail(Reason::modify_const);
     if (config_.mode == Mode::constant && ob.outside) return fail(Reason::modify_outside);
   } else if (config_.mode == Mode::constant && (!ob.usable || (ob.outside && pl->mutable_field))) {
-    return fail(Reason::not_usable);
+    const EntityId global = !ob.usable && ob.origin == Origin::global ? ob.entity : EntityId::none;
+    return fail(Reason::not_usable, 0, global);
   }
   return use == Use::callee_read ? Flow::next : note_access(*pl, use == Use::write);
 }
@@ -856,7 +858,7 @@ Machine::Flow Machine::global_object(EntityId e, u32& out) {
     pending_ = Event::need_global;
     return Flow::suspend;
   }
-  if (!info->second) return fail(Reason::ill_formed);
+  if (!info->second) return fail(Reason::ill_formed, 0, e);
   const GlobalVar& g = *info->second;
   const Shape s = shape(g.type);
   const RecordStorage* record = g.record ? record_storage(g.type, &*g.record) : nullptr;
@@ -1368,9 +1370,10 @@ Machine::Flow Machine::compare_pointers(Frame& f, NodeId n, ir::Pred pred, const
 
 // ------------------------------------------------------------------ execution
 
-Machine::Flow Machine::fail(Reason r, u64 arg) {
+Machine::Flow Machine::fail(Reason r, u64 arg, EntityId global) {
   failure_.reason = r;
   failure_.arg = arg;
+  failure_.global = global;
   failure_.stack.clear();
   for (auto it = frames_.rbegin(); it != frames_.rend(); ++it) failure_.stack.push_back({it->entity, NodeId(it->node)});
   failed_ = true;
