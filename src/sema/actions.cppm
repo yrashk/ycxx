@@ -3438,9 +3438,12 @@ public:
     }
     if (!require_complete(ct, op_at)) return fail;
     EntityId c = types().class_of(ct);
-    if (qualifier && (*qualifier != w_->entities.rec(c).name || !virtual_consumer(c))) {
-      diag(name_at, Diag::not_supported, lex::Tk::coloncolon);
-      return fail;
+    if (qualifier) {
+      const ClassRec* record = class_rec(c);
+      if (*qualifier != w_->entities.rec(c).name || ((!record || !record->dynamic) && !virtual_consumer(c))) {
+        diag(name_at, Diag::not_supported, lex::Tk::coloncolon);
+        return fail;
+      }
     }
     auto found = find_member(c, name);
     if (!found) {
@@ -6219,8 +6222,12 @@ public:
     const auto& owner = w_->entities.rec(entity.scope);
     if (owner.kind != EntityKind::class_ || owner.templ != EntityId::none) return false;
     const auto* member = member_decl(function);
-    if (!member || !member->is_consteval || member->is_virtual || member->is_template) return false;
-    // Only the checked integral, enum and void result representations enter this path.
+    return member && member->is_consteval && !member->is_virtual && !member->is_template &&
+           supported_immediate_member_result(result);
+  }
+
+  // Only the checked integral, enum and void result representations enter these paths.
+  bool supported_immediate_member_result(QualType result) {
     if (types().is_void(result)) return true;
     if (types().is_enum(result)) {
       const auto* enumeration = enum_rec(types().enum_of(result));
@@ -6648,12 +6655,14 @@ public:
     std::optional<u32> virtual_slot;
     const ClassRec* dynamic_owner = d->is_virtual ? class_rec(w_->entities.rec(d->entity).scope) : nullptr;
     if (dynamic_owner && !dynamic_owner->dynamic) dynamic_owner = nullptr;
+    const bool immediate_virtual = d->is_virtual && d->is_consteval;
     if (unevaluated == 0) {
-      if (d->is_virtual && d->is_consteval) {
-        diag(paren_at, Diag::virtual_immediate_call);
-        return fail;
-      }
-      if (dynamic_owner) {
+      if (immediate_virtual) {
+        if (!dynamic_owner || !object || assignment_notation) {
+          diag(paren_at, Diag::virtual_immediate_call);
+          return fail;
+        }
+      } else if (dynamic_owner) {
         // Itanium C++ ABI §3.2.4: dispatch through the slot the declaration occupies in its own
         // class's table. A qualified name calls the named function directly ([class.virtual]/16).
         if (!object || assignment_notation) {
@@ -6761,6 +6770,15 @@ public:
     if (assignment_notation) {
       contract_assert(children->size() == 1);
       return node(ast::AssignmentCall{info, fe, children->front(), at(o, begin)}, begin, end, info);
+    }
+    if (immediate_virtual) {
+      if (!unevaluated &&
+          (fr.variadic || info.category != ValueCategory::prvalue || !supported_immediate_member_result(info.type))) {
+        diag(paren_at, Diag::virtual_immediate_call);
+        return fail;
+      }
+      return immediate_invocation(node(ast::ImmediateVirtualCall{info, fe, at(o, begin), b_->list(*children), u8(bound.qualified)},
+                                       begin, end, info));
     }
     if (virtual_slot) {
       // BOOTSTRAP: -Warray-bounds: reserved and appended. At -O3 GCC 16.2 reports libycxx's
@@ -7656,6 +7674,7 @@ public:
         return !types().rec(type).fn_noexcept;
       }
       if (node.is<ast::MemberCall>()) return function_throwing(node.get<ast::MemberCall>().function);
+      if (node.is<ast::ImmediateVirtualCall>()) return function_throwing(node.get<ast::ImmediateVirtualCall>().function);
       if (node.is<ast::ExplicitDestroy>()) {
         const auto receiver = expression_info(node.get<ast::ExplicitDestroy>().object.id).type;
         return destructor_throwing(types().pointee(receiver), node.offset());

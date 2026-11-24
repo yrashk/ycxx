@@ -3520,6 +3520,17 @@ What the process allocates, attributed to the engine's cells, in the trace and t
   [#489](https://github.com/yrashk/ycxx/issues/489)
   [Design](docs/design/ordinary-virtual-declarations.md)
 
+## Evaluated immediate virtual calls (#1097)
+
+Fieldless completed local objects with one nonvirtual base can dispatch immediate
+virtual calls in constant evaluation. The checked receiver path selects the final
+overrider. Explicit qualification selects the named implementation. Default arguments
+come from the statically selected declaration. An unqualified call requires a known
+dynamic type. Immediate members remain absent from native vtables.
+
+Construction and destruction phases, persisted base references, and richer receiver
+layouts remain in [#1097](https://github.com/yrashk/ycxx/issues/1097).
+
 ## Virtual functions: general single inheritance (#309, 2026-11-24)
 
 - Both targets compile, link and run ordinary non-template polymorphic classes with external

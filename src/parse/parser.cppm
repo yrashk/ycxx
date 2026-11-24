@@ -4060,7 +4060,7 @@ public:
           return {NodeId::none, e.begin, pos()};
         }
         std::optional<NameId> member_class;
-        // This stage recognizes only a direct qualified invocation on the native consumer path.
+        // Recognize a direct invocation with one class qualifier ([expr.ref]).
         if (qualifier == 2 && !keyword && kind(2) == Tk::identifier && kind(3) == Tk::l_paren) {
           member_class = name_of(tok());
           bump();

@@ -184,6 +184,7 @@ private:
       return {};
     }
     const auto receiver = direct_local_receiver(e);
+    const bool immediate_virtual = s_->as<ast::ImmediateVirtualCall>(e).has_value();
     ast::Child root = s_->builder().commit(ast::Child{e.id, 0});
     if (reference_initializer && irgen::materializes_temporary(in.ast, root.id))
       return {std::nullopt, reason_arg({interp::Reason::local_address, 0, {}})};
@@ -207,12 +208,16 @@ private:
           const bool named_receiver = receiver == i && l.entity == EntityId::none && l.name != s_->no_name() &&
                                       !(l.flags & ast::local_flag::structured_binding) &&
                                       s_->as<ast::LocalVar>({l.decl}).has_value();
-          if ((parameter || named_receiver) && importable_local_record(l.type, std::nullopt))
+          if ((parameter || named_receiver) &&
+              (importable_local_record(l.type, std::nullopt) ||
+               (immediate_virtual && receiver == i && opaque_dynamic_record(l.type))))
             opaque_record_locals.push_back(static_cast<u32>(i));
         }
       } else if (parameter && s_->in_function_or_lambda_body() && l.name != s_->no_name() &&
                  s_->types().is_reference(l.type) && s_->types().is_class(s_->types().referee(l.type))) {
         discardable_reference_parameters.push_back(static_cast<u32>(i));
+        if (immediate_virtual && receiver == i && opaque_dynamic_record(s_->types().referee(l.type)))
+          opaque_record_locals.push_back(static_cast<u32>(i));
       }
       l.decl = NodeId::none;  // drafts of the enclosing frame
       // In a template's definition a local of dependent type has no object yet; a non-dependent
@@ -241,7 +246,10 @@ private:
     Host host{q_, this};
     interp::Config config{
         .enum_layout = [&facts](EntityId e) { return facts.constant_enum_layout(e); },
-        .record_layout = [this](QualType t) { return constant_record_layout(t); }};
+        .record_layout = [this](QualType t) { return evaluation_record_layout(t); },
+        .immediate_virtual_target = [this](EntityId selected, EntityId receiver, EntityId dynamic) {
+          return immediate_virtual_target(selected, receiver, dynamic);
+        }};
     interp::Outcome out = interp::evaluate(host, in, s_->world().target, body->body, EntityId::none, {}, std::move(config),
                                             bytes ? &bytes->result : nullptr).run();
     if (out.status != interp::Outcome::Status::value) {
@@ -450,12 +458,63 @@ private:
     return result;
   }
 
+  // Dynamic layouts are available only for live interpreter storage. A stored record
+  // constant cannot represent a polymorphic object or its base subobject.
+  std::optional<interp::ConstantRecordLayout> evaluation_record_layout(QualType type) {
+    Types& types = s_->types();
+    type = types.canonical(type);
+    if (!types.is_class(type) || Types::is_volatile(type)) return std::nullopt;
+    const EntityId entity = types.class_of(type);
+    const ClassRec* record = s_->class_rec(entity);
+    if (!record || !record->dynamic) return constant_record_layout(type);
+    if (!q_->classes().constexpr_dynamic_default(entity) || q_->class_layout_uncertain(entity)) return std::nullopt;
+    const auto layout = s_->class_layout(entity);
+    if (!layout) return std::nullopt;
+    interp::ConstantRecordLayout result{.size = layout->size, .dynamic = true};
+    if (!record->bases.empty()) {
+      const EntityId base = record->bases.front().cls;
+      const auto base_layout = s_->class_layout(base);
+      if (!base_layout || q_->class_layout_uncertain(base)) return std::nullopt;
+      const QualType base_type = types.add_cv(types.class_type(base), Types::cv(type));
+      result.primary_base = interp::ConstantRecordBase{base, base_type, layout->base_offsets.front(), base_layout->size};
+    }
+    return result;
+  }
+
+  bool opaque_dynamic_record(QualType type) {
+    const auto layout = evaluation_record_layout(type);
+    return layout && layout->dynamic;
+  }
+
+  // The direct-base path is checked by the interpreter. Select by the override
+  // edge recorded at class completion, in the context evaluating this call.
+  std::optional<interp::ImmediateVirtualTarget> immediate_virtual_target(EntityId selected, EntityId receiver,
+                                                                        EntityId dynamic) {
+    const auto* declaration = s_->member_decl(selected);
+    const auto* type = s_->class_rec(dynamic);
+    if (!declaration || !declaration->is_virtual || !declaration->is_consteval ||
+        s_->world().entities.rec(selected).scope != receiver || !type)
+      return std::nullopt;
+    if (dynamic != receiver) {
+      if (type->bases.size() != 1 || type->bases.front().cls != receiver) return std::nullopt;
+      const auto override = std::ranges::find(type->members, selected, &MemberDeclRec::overridden_virtual);
+      if (override != type->members.end()) {
+        if (!override->is_consteval || override->is_pure) return std::nullopt;
+        return interp::ImmediateVirtualTarget{override->entity, dynamic};
+      }
+    }
+    if (declaration->is_pure) return std::nullopt;
+    return interp::ImmediateVirtualTarget{selected, receiver};
+  }
+
   // An ordinary dot call passes the address of its receiver. Import only that named
   // local, without evaluating its declaration or allocating slots for unrelated locals.
   std::optional<u32> direct_local_receiver(Ex expression) {
-    const auto member = s_->as<ast::MemberCall>(expression);
-    if (!member) return std::nullopt;
-    const auto pointer = s_->as<ast::Unary>({member->object.id});
+    NodeId object_pointer = NodeId::none;
+    if (const auto member = s_->as<ast::MemberCall>(expression)) object_pointer = member->object.id;
+    if (const auto call = s_->as<ast::ImmediateVirtualCall>(expression)) object_pointer = call->object.id;
+    if (object_pointer == NodeId::none) return std::nullopt;
+    const auto pointer = s_->as<ast::Unary>({object_pointer});
     if (!pointer || pointer->op != ast::UnaryOp::address_of) return std::nullopt;
     Ex object{pointer->operand.id};
     while (const auto paren = s_->as<ast::Paren>(object)) object.id = paren->operand.id;
