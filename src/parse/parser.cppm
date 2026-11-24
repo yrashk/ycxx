@@ -138,6 +138,7 @@ public:
   u32 pos() const { return i_ - begin_; }  // the current token's offset in the part
   u32 deferred_argument_checks() const { return deferred_argument_checks_; }
   u32 deferred_immediate_calls() const { return deferred_immediate_calls_; }
+  u32 deferred_class_immediate_calls() const { return deferred_class_immediate_calls_; }
   u32 deferred_rank_checks() const { return deferred_rank_checks_; }
   void bump() {
     half_ = false;
@@ -624,9 +625,9 @@ public:
       if (tmpl.kind == ast::DeclKind::type_alias) {
         ++deferred_argument_checks_;
         const auto pattern = s_->questions().alias_call_pattern(tmpl.entity);
-        if (pattern != sema::AliasCallPattern::none && pattern != sema::AliasCallPattern::rank_checks)
-          ++deferred_immediate_calls_;
-        rank_check = rank_check || pattern == sema::AliasCallPattern::rank_checks;
+        if (pattern.kind != sema::AliasCallPattern::Kind::none) ++deferred_immediate_calls_;
+        if (pattern.class_result) ++deferred_class_immediate_calls_;
+        rank_check = rank_check || pattern.rank_checks;
         defer_rank_alias = type_alias_checks_ && (rank_check || written_rank_check);
       }
       if (rank_check) ++deferred_rank_checks_;
@@ -635,7 +636,8 @@ public:
     // while the surrounding grammar is deciding how to use it.
     bool constraint_failed = false;
     auto type = s_->class_template_id(tmpl, args, at, /*directly_named=*/true,
-                                      alias_constraints_enabled_ ? &constraint_failed : nullptr);
+                                      alias_constraints_enabled_ ? &constraint_failed : nullptr,
+                                      namespace_alias_type || replayed_member_alias_type);
     if (type && defer_rank_alias && !in_template_id_lookahead_)
       type_alias_checks_->emplace_back(tmpl.entity, std::vector<ast::TemplateArg>(args.begin(), args.end()));
     alias_constraint_failures_ += constraint_failed;
@@ -4674,6 +4676,7 @@ public:
     auto call = s_->dependent_immediate_template_call(callee, args, pos() + 2, allow_class_result);
     if (call) {
       ++deferred_immediate_calls_;
+      if (s_->types().is_class(call->type())) ++deferred_class_immediate_calls_;
       bump();
       bump();
     }
@@ -6764,6 +6767,7 @@ private:
   int angle_ = 0;               // inside a template argument or parameter list, outside parentheses
   u32 deferred_argument_checks_ = 0;  // checks a dependent canonical argument may not retain
   u32 deferred_immediate_calls_ = 0;
+  u32 deferred_class_immediate_calls_ = 0;
   u32 deferred_rank_checks_ = 0;
   using TypeAliasChecks = std::vector<std::pair<ast::EntityId, std::vector<ast::TemplateArg>>>;
   TypeAliasChecks* type_alias_checks_ = nullptr;
@@ -6782,6 +6786,7 @@ public:
   bool class_template_base = false;  // class instantiation substitutes or reparses this base type
   bool namespace_alias_type = false;  // the namespace alias instantiation reparses this type-id
   bool member_alias_type = false;  // the class instantiation reparses this type-id
+  bool replayed_member_alias_type = false;  // an ordinary member alias in a class template
 private:
   struct TypeRequirementScope {
     Parser& parser;

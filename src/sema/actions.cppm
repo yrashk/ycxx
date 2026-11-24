@@ -84,7 +84,11 @@ struct GenericResult {
 
 class Sema;
 struct Ex;
-enum class AliasCallPattern { none, retained, may_erase, rank_checks };
+struct AliasCallPattern {
+  enum class Kind { none, retained, may_erase } kind = Kind::none;
+  bool class_result = false;
+  bool rank_checks = false;
+};
 
 // What sema asks of its context (§B1.4, §B3). In the engine these are `visible_decls(::, name,
 // at item)` and fetches of `decl_sema`.
@@ -188,7 +192,7 @@ public:
   // The constant a variable usable in constant expressions holds ([expr.const]), if it is known.
   virtual std::optional<ConstId> constant_value(EntityId v) = 0;
   virtual std::optional<ConstId> constant_call(Sema&, const Ex&) { return std::nullopt; }
-  virtual AliasCallPattern alias_call_pattern(EntityId) { return AliasCallPattern::none; }
+  virtual AliasCallPattern alias_call_pattern(EntityId) { return {}; }
   virtual std::optional<QualType> replay_alias_calls(Sema&, const ast::DeclSema&, const Bindings&) {
     return std::nullopt;
   }
@@ -1149,7 +1153,8 @@ public:
   // alias template specialization stands for: its type with the arguments substituted
   // ([temp.alias]/2).
   std::optional<QualType> class_template_id(const ast::DeclSema& tmpl, std::span<const TemplateArg> args, u32 at,
-                                           bool directly_named = true, bool* alias_constraint_failed = nullptr) {
+                                           bool directly_named = true, bool* alias_constraint_failed = nullptr,
+                                           bool replay_partial_alias = false) {
     auto full = template_arguments(tmpl, args, at);
     if (!full) return std::nullopt;
     if (tmpl.kind == ast::DeclKind::type_alias) {
@@ -1161,7 +1166,7 @@ public:
         return std::nullopt;
       }
       const auto before = diag_count();
-      auto t = substitute_alias(tmpl, *full, bindings, at, replaying_type_default);
+      auto t = substitute_alias(tmpl, *full, bindings, at, replaying_type_default, replay_partial_alias);
       // Past the nesting limit, which was diagnosed, it says nothing more ([temp.inst]/16).
       if (!t && !has_error_since(before) && !q_->instantiation_gave_up())
         diag(at, Diag::template_args_mismatch, w_->entities.rec(tmpl.entity).name);
@@ -1185,7 +1190,8 @@ public:
   }
 
   std::optional<QualType> substitute_alias(const ast::DeclSema& tmpl, std::span<const TemplateArg> args,
-                                           const Bindings& bindings, u32 at, bool substituting_default = false) {
+                                           const Bindings& bindings, u32 at, bool substituting_default = false,
+                                           bool replay_partial_alias = false) {
     if (substituting_default && tmpl.constraints != ConstId::none &&
         std::ranges::none_of(args, [&](const TemplateArg& a) { return dependent(a); })) {
       auto t = templates();
@@ -1194,8 +1200,11 @@ public:
       if (hard_error || !sat.value_or(true)) return std::nullopt;
     }
     const auto pattern = q_->alias_call_pattern(tmpl.entity);
-    if (pattern != AliasCallPattern::none) {
-      if (std::ranges::none_of(args, [&](const TemplateArg& a) { return dependent(a); })) {
+    if (pattern.kind != AliasCallPattern::Kind::none || pattern.rank_checks) {
+      // Replay checks obligations that become concrete now. The enclosing alias or class
+      // member replays any that still depend on its own arguments when it is instantiated.
+      if ((pattern.class_result && replay_partial_alias) ||
+          std::ranges::none_of(args, [&](const TemplateArg& a) { return dependent(a); })) {
         const auto before = diag_count();
         const bool saved = std::exchange(replaying_type_default, substituting_default);
         auto type = q_->replay_alias_calls(*this, tmpl, bindings);
@@ -1204,7 +1213,7 @@ public:
         return type;
       }
       // Until signatures can retain the replay, do not form a type that can lose a call check.
-      if (pattern == AliasCallPattern::may_erase) return std::nullopt;
+      if (pattern.kind == AliasCallPattern::Kind::may_erase) return std::nullopt;
     }
     return templates_for_use(at).substitute(tmpl.type, bindings);
   }
