@@ -113,6 +113,7 @@ public:
   virtual void use_library_function(EntityId) {}
   // The static object denoted by a class-valued template parameter ([temp.param]).
   virtual void use_template_parameter_object(EntityId) {}
+  virtual bool plain_class_template_type(EntityId) { return false; }
   // Check the selected implicitly declared copy assignment against its subobjects.
   virtual CopyAssignment require_copy_assignment(EntityId) { return CopyAssignment::unsupported; }
   // What a constant evaluation fetches (§B7): `function_ir` of a function defined before the
@@ -4310,6 +4311,7 @@ public:
     t.member_constant = [this](QualType qualifier, NameId name) {
       return qualified_member_constant(qualifier, name, 0);
     };
+    t.plain_class_template_type = [this](EntityId c) { return q_->plain_class_template_type(c); };
     t.template_decl = [this](EntityId tmpl) { return q_->template_decl(tmpl); };
     t.variable_constant = [this](EntityId spec) { return q_->constant_value(spec); };
     t.concept_constant = [this](EntityId entity, std::span<const TemplateArg> args) {

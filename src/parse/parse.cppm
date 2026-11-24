@@ -436,6 +436,8 @@ public:
   // ABI attributes on declarations outside the entity's ordinary declaration records.
   bool has_unapplied_declaration_attributes(EntityId e) const { return unapplied_declaration_attributes_.contains(e); }
   bool peer_root_vtable_visible(EntityId cls) const;
+  bool plain_class_template_type(EntityId cls) const;
+  bool plain_class_template_function(EntityId pattern, u32 definition) const;
   // Empty on unsupported declarations, or EntityId::none when a peer owns the derived table.
   std::optional<EntityId> automatic_derived_vtable_key(EntityId cls) const;
   bool peer_pure_dispatch(EntityId cls) const;
@@ -936,6 +938,7 @@ public:
       if (const auto* record = defining_enum(e)) return record->scoped;
       return std::nullopt;
     };
+    t.plain_class_template_type = [this](EntityId c) { return plain_class_template_type(c); };
     t.template_decl = [this](EntityId e) { return declaration(e, end()); };
     t.variable_constant = [this](EntityId spec) { return constant_value(spec, end()); };
     t.variable_global = [this](EntityId spec) { return global(spec, end()); };
@@ -2226,6 +2229,7 @@ public:
   void use_template_parameter_object(EntityId e) override {
     if (!std::ranges::contains(p_->template_parameter_objects_, e)) p_->template_parameter_objects_.push_back(e);
   }
+  bool plain_class_template_type(EntityId c) override { return p_->plain_class_template_type(c); }
   interp::Callee function_ir(EntityId f) override {
     if (special_member_exception && p_->world().entities.rec(f).scope == completing_class)
       return {.is_constexpr = p_->is_constexpr(f, point())};
@@ -3043,6 +3047,7 @@ public:
   void use_allocation_function(EntityId f, bool aligned) override { at_.use_allocation_function(f, aligned); }
   void use_library_function(EntityId f) override { at_.use_library_function(f); }
   void use_template_parameter_object(EntityId e) override { at_.use_template_parameter_object(e); }
+  bool plain_class_template_type(EntityId c) override { return at_.plain_class_template_type(c); }
   interp::Callee function_ir(EntityId f) override { return p_->function_ir(f, p_->end()); }
   std::optional<QualType> deduced_type(EntityId f) override { return p_->deduced_type(f, p_->end()); }
   sema::GenericResult generic_instance(EntityId spec, const sema::GenericClosure* known, const sema::GenericBinding&) override {
@@ -9042,6 +9047,41 @@ bool Program::in_attributed_namespace(u32 item) const {
         layout_attribute(*r_, scope.begin, scope.brace_begin, LayoutAttributes::any)) return true;
   }
   return false;
+}
+
+// The supported class parameters have default-visible ABI names. The ordinary class
+// records erase most GNU attributes, so reject declarations with unapplied attributes.
+bool Program::plain_class_template_type(EntityId cls) const {
+  if (r_->first_visibility_pragma || r_->has_clang_attribute_pragma) return false;
+  const auto attributed = [&](u32 index) {
+    const auto& item = items_->items[index];
+    const bool definition = item.kind == ItemKind::class_def;
+    return in_attributed_namespace(index) ||
+           layout_attribute(*r_, item.begin, definition ? item.brace_begin : item.end,
+                            LayoutAttributes::any, class_alignment_specifiers(index)) ||
+           (definition && layout_attribute(*r_, item.brace_end, item.end, LayoutAttributes::any));
+  };
+  for (EntityId e = cls; e != EntityId::none && !is_namespace(e); e = w_->entities.rec(e).scope) {
+    const auto definition = class_items_.find(std::to_underlying(e));
+    if (definition == class_items_.end() || attributed(definition->second)) return false;
+    const auto decls = decls_.find(std::to_underlying(e));
+    if (decls != decls_.end() && std::ranges::any_of(decls->second, [&](const auto& d) { return attributed(d.first); }))
+      return false;
+  }
+  return true;
+}
+
+bool Program::plain_class_template_function(EntityId pattern, u32 definition) const {
+  if (r_->first_visibility_pragma || r_->has_clang_attribute_pragma) return false;
+  const auto attributed = [&](u32 index) {
+    const auto& item = items_->items[index];
+    return in_attributed_namespace(index) ||
+           layout_attribute(*r_, item.begin, item.has_body() ? item.body_begin : item.end, LayoutAttributes::any);
+  };
+  if (attributed(definition)) return false;
+  const auto decls = decls_.find(std::to_underlying(pattern));
+  return decls == decls_.end() ||
+         std::ranges::none_of(decls->second, [&](const auto& d) { return attributed(d.first); });
 }
 
 // The class, including earlier declarations and later friends of its slots, must use the

@@ -1637,14 +1637,23 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
     definition.emit_if_referenced = immediate_if_referenced(in->decl, entity, in->body.value);
     definition.plain_immediate_template = definition.emit_if_referenced && program.is_namespace(entity.scope) &&
                                           !ins.names.spelling(entity.name).empty();
+    const auto class_values = [&](const sema::EntityRec& r) {
+      return std::ranges::any_of(r.args, [&](const ast::TemplateArg& a) { return ins.values.is<ast::VAggregate>(a.value); });
+    };
+    const bool direct_class_arguments = class_values(entity);
+    const bool class_value_member = entity.scope != EntityId::none && class_values(world.entities.rec(entity.scope));
+    if (direct_class_arguments || class_value_member)
+      definition.unsupported_class_parameter_abi = !can_defer_body(in->body.value) ||
+          !program.plain_class_template_function(entity.templ, in->item) ||
+          (direct_class_arguments && !program.is_namespace(entity.scope));
     // These implicit namespace specializations can occur in every unit using the same
     // canonical class argument, including units compiled by an Itanium ABI peer.
-    if (entity.kind == sema::EntityKind::function && entity.templ != EntityId::none &&
+    if (direct_class_arguments && !definition.unsupported_class_parameter_abi &&
+        entity.kind == sema::EntityKind::function && entity.templ != EntityId::none &&
         entity.linkage == ast::Linkage::external && program.is_namespace(entity.scope) &&
         !names_tu_local(program, entity.scope, true) && !names_tu_local(program, in->decl.type, true) &&
         program.asm_label(in->spec).empty() &&
-        !std::ranges::any_of(entity.args, [&](const ast::TemplateArg& a) { return names_tu_local(program, a, true); }) &&
-        std::ranges::any_of(entity.args, [&](const ast::TemplateArg& a) { return ins.values.is<ast::VAggregate>(a.value); }))
+        !std::ranges::any_of(entity.args, [&](const ast::TemplateArg& a) { return names_tu_local(program, a, true); }))
       definition.coalesced = true;
     if (it.parent != items::none && items.items[it.parent].kind == items::ItemKind::class_def) {
       const bool ordinary_member = ordinary_class_template_member(entity) && !in->decl.is_virtual &&
