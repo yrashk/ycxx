@@ -300,6 +300,10 @@ private:
   // (`X<T*>`), so a partial or explicit specialization's members are not its template's.
   std::string class_scope(u32 name, u32 end) const {
     std::string r(r_.name(r_.tokens[name]));
+    // A qualified class-head-name (`O::I`, [class.pre]/3): the members are I's, not those of a
+    // namespace-scope class I.
+    for (u32 n = name; n >= 2 && kind(n - 1) == Tk::coloncolon && kind(n - 2) == Tk::identifier; n -= 2)
+      r = std::string(r_.name(r_.tokens[n - 2])) + "::" + r;
     if (kind(name + 1) == Tk::less)
       for (u32 n = name + 1, close = match_angle(name + 1); n < close && n < end; ++n) r += r_.spelling(r_.tokens[n]);
     return r;

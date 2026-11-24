@@ -96,6 +96,10 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_
   add_test(NAME unit.linux_class_new
     COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/linux_class_new.py
             $<TARGET_FILE:ycxxc> ${CMAKE_CXX_COMPILER} ${CMAKE_READELF})
+  # The Darwin runs of the same sources are tests/own/classes/nested in the core suite (#306).
+  add_test(NAME unit.linux_nested_classes
+    COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/linux_nested_classes.py
+            $<TARGET_FILE:ycxxc> ${CMAKE_CXX_COMPILER})
   if(CMAKE_CXX_COMPILER_ID MATCHES "^(GNU|Clang)$")
     add_test(NAME unit.linux_fixed_array_new
       COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/linux_fixed_array_new.py

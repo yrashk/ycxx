@@ -1423,9 +1423,9 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
   };
   for (std::uint32_t k = first; k < items.items.size() && k < end; ++k) {
     const items::Item& it = items.items[k];
-    // Items of the global namespace, and the members of its classes.
+    // Items of the global namespace, and the members of its classes and their nested classes.
     bool member = it.parent != items::none && items.items[it.parent].kind == items::ItemKind::class_def &&
-                  program.in_global_scope(it.parent);
+                  (program.in_global_scope(it.parent) || program.ordinary_nested_class(it.parent));
     if (!program.in_global_scope(k) && !member) continue;
     // A class template's members are patterns; its specializations' are instances, below.
     if (member && items.items[it.parent].template_depth > 0) continue;

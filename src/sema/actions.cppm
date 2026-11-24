@@ -191,6 +191,11 @@ public:
   // request the function declarations of that name in source order.
   virtual std::optional<ast::DeclSema> earlier_member(NameId name, bool type_only = false,
                                                      std::vector<ast::DeclSema>* functions = nullptr) = 0;
+  // In a member of a nested class ([class.nest]): the member named `name` that the enclosing
+  // class `cls`, still being defined, declares before the nested class.
+  virtual std::optional<ast::DeclSema> enclosing_earlier_member(EntityId /*cls*/, NameId /*name*/, bool /*type_only*/) {
+    return std::nullopt;
+  }
   // The direct bases of class `c` while it is being defined (its base-clause), none otherwise.
   virtual std::vector<EntityId> defining_bases(EntityId) { return {}; }
   virtual std::span<const BaseRec> defining_base_records(EntityId) { return {}; }
@@ -621,14 +626,17 @@ public:
         if (!elaborated && !prefix_bases.empty() &&
             (name == static_initializer_name_ || own_initializer_static(name))) return std::nullopt;
         if (auto m = q_->earlier_member(name, elaborated)) {
-          if (m->kind == ast::DeclKind::enum_ || m->kind == ast::DeclKind::type_alias) return m->type;
+          if (m->kind == ast::DeclKind::enum_ || m->kind == ast::DeclKind::type_alias || m->kind == ast::DeclKind::class_)
+            return m->type;
           if (!elaborated && (m->kind == ast::DeclKind::data_member || m->kind == ast::DeclKind::variable ||
                               m->kind == ast::DeclKind::enumerator ||
                               (m->kind == ast::DeclKind::function && c.name != name)))
             return std::nullopt;
         }
-        // The injected-class-name is declared in the class's own scope ([class.pre]).
-        if (!prefix_bases.empty() && c.name == name) return types().class_type(current_class);
+        // The injected-class-name is declared in the class's own scope ([class.pre]). A nested
+        // class's is the only declaration of its name lookup reaches from here ([class.nest]).
+        if ((!prefix_bases.empty() || enclosing_class(current_class) != EntityId::none) && c.name == name)
+          return types().class_type(current_class);
         if (!elaborated && !prefix_bases.empty()) {
           // A base declaration hides a namespace type. Merge base types by the types they name.
           auto hit = class_body_type(current_class, ClassRec{}, name, type_at, ClassBodyLookup::class_prefix);
@@ -640,6 +648,18 @@ public:
         // In the class being defined, a type of its (complete) bases.
         for (EntityId b : q_->defining_bases(current_class))
           if (auto r = nested_member(b, name)) return r->first.type;
+      }
+      // Then the classes the class is nested in, innermost first ([class.nest], [basic.lookup.unqual]/2).
+      for (EntityId k = enclosing_class(current_class); k != EntityId::none; k = enclosing_class(k)) {
+        if (const ClassRec* cr = class_rec(k); cr && cr->defined) {
+          if (!elaborated && unscoped_member_enumerator(k, name, /*unqualified=*/true)) return std::nullopt;
+          if (auto r = nested_member(k, name, true)) return r->first.type;
+          if (!elaborated && find_member(k, name, /*unqualified=*/true)) return std::nullopt;  // a non-type hides
+        } else if (auto m = q_->enclosing_earlier_member(k, name, elaborated)) {
+          if (is_type(m->kind)) return m->type;
+          if (!elaborated) return std::nullopt;
+        }
+        if (w_->entities.rec(k).name == name) return types().class_type(k);  // its injected-class-name
       }
     }
     // BOOTSTRAP: -Wmaybe-uninitialized: a value and a flag, not std::optional. At -O3 GCC 16.2
@@ -680,6 +700,15 @@ public:
   }
   static bool is_type(ast::DeclKind k) {
     return k == ast::DeclKind::class_ || k == ast::DeclKind::enum_ || k == ast::DeclKind::type_alias;
+  }
+  // The class that class `c` is a member of ([class.nest]), none at namespace scope. A class
+  // template's members are not nested classes of this kind (#306).
+  EntityId enclosing_class(EntityId c) const {
+    if (c == EntityId::none) return EntityId::none;
+    const EntityRec& r = w_->entities.rec(c);
+    if (r.kind != EntityKind::class_ || r.templ != EntityId::none || r.scope == EntityId::none) return EntityId::none;
+    const EntityRec& s = w_->entities.rec(r.scope);
+    return s.kind == EntityKind::class_ && s.templ == EntityId::none ? r.scope : EntityId::none;
   }
   static bool is_non_template_tag(const ast::DeclSema& decl) {
     return (decl.kind == ast::DeclKind::class_ || decl.kind == ast::DeclKind::enum_) &&
@@ -7481,6 +7510,21 @@ public:
       if (auto r = class_member(current_class, name, begin, end, begin, std::nullopt, /*unqualified=*/true)) return *r;
       if (!class_rec(current_class))
         if (auto r = incomplete_class_member(name, begin, end, begin, /*unqualified=*/true, callee)) return *r;
+      // Then the classes it is nested in ([class.nest], [basic.lookup.unqual]/2).
+      for (EntityId k = enclosing_class(current_class); k != EntityId::none; k = enclosing_class(k)) {
+        if (class_rec(k)) {
+          if (auto r = class_member(k, name, begin, end, begin, std::nullopt, /*unqualified=*/true)) return *r;
+        } else if (auto m = q_->enclosing_earlier_member(k, name, /*type_only=*/false)) {
+          if (m->kind == ast::DeclKind::enumerator) return enumerator(m->entity, m->type, begin, end);
+          if (m->kind == ast::DeclKind::variable) return static_member(k, m->entity, m->type, begin, end);
+          if (is_type(m->kind)) break;  // found a type: not an expression
+          // [expr.prim.id.general]/4: a non-static data member without an object, unevaluated.
+          if (m->kind == ast::DeclKind::data_member && unevaluated)
+            return unevaluated_data_member(m->entity, m->type, m->bit_width, begin, end);
+          diag(begin, Diag::member_without_object, name);
+          return Ex{NodeId::none, begin, end};
+        }
+      }
     }
     if (namespace_lambda && namespace_lambda->name == name)
       return undeduced_namespace_lambda(name, begin, end);
