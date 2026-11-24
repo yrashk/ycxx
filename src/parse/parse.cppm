@@ -370,6 +370,8 @@ public:
 
   const Result<ast::ItemSema>& item_sema(u32 item);
   std::optional<ast::DeclSema> decl_sema(DeclId d);
+  std::optional<ast::DeclSema> friend_decl(const ast::MemberRec& f);
+  std::optional<ast::DeclSema> class_friend(EntityId f);
   ast::DeclSema completed_declaration(ast::DeclSema decl) const {
     if (auto found = special_member_exception_types_.find(decl.entity);
         found != special_member_exception_types_.end() && found->second)
@@ -714,6 +716,12 @@ public:
     u32 parent = items_->items[item].parent;
     return parent != items::none && items_->items[parent].kind == ItemKind::class_def &&
            in_global_scope(parent) && items_->items[parent].template_depth == 0;
+  }
+  // A friend in a class template, or a partial specialization, of a namespace ([temp.friend]).
+  bool namespace_class_template_friend(u32 item) const {
+    u32 parent = items_->items[item].parent;
+    return parent != items::none && items_->items[parent].kind == ItemKind::class_def &&
+           in_global_scope(parent) && items_->items[parent].template_depth == 1;
   }
   // The declarations of `name` that are members of namespace `path` ([namespace.memdef]) before
   // the point: of its own definitions, and, unless `inhabit`, of its inline and unnamed members.
@@ -1834,6 +1842,7 @@ private:
   static constexpr u32 class_def_key(u32 item) { return item | 0x80000000u; }
   std::vector<u32> running_;
   std::set<u32> ordinary_friend_items_;  // the source item of each supported unqualified friend
+  std::set<u32> templated_friend_items_;  // the item of each friend function a class template defines
   std::set<EntityId> unapplied_declaration_attributes_;
   bool friend_body_ready(u32 definition) const {
     if (!ordinary_friend_items_.contains(definition)) return true;
@@ -2067,10 +2076,15 @@ public:
     if (auto s = p_->decl_sema(d)) return *s;
     return invalid_decl();
   }
+  ast::DeclSema friend_decl(const ast::MemberRec& f) override {
+    if (auto s = p_->friend_decl(f)) return *s;
+    return invalid_decl();
+  }
   std::optional<ast::DeclSema> written_member(EntityId f) override {
     const auto decl = p_->member_decl(f);
     return decl ? p_->decl_sema(*decl) : std::nullopt;
   }
+  std::optional<ast::DeclSema> class_friend(EntityId f) override { return p_->class_friend(f); }
   void use_allocation_function(EntityId f, bool aligned) override {
     auto& functions = p_->implicit_allocation_functions_;
     if (std::ranges::contains(functions, f)) return;
@@ -2564,7 +2578,15 @@ std::optional<QualType> AtItem::replay_member_exception(sema::Sema& caller, cons
   const auto& record = p_->world().entities.rec(function);
   auto& ins = p_->world().ins;
   ast::DeclSema member = decl;
-  if (written) {
+  // A friend a class template defines: in the scope of the specialization that defines it (#259).
+  const auto friend_of = (decl.flags & sema::decl_flag::friend_) ? p_->member_patterns_.find(std::to_underlying(decl.entity))
+                                                                 : p_->member_patterns_.end();
+  const bool class_friend = friend_of != p_->member_patterns_.end();
+  const EntityId cls = member_of_class ? record.scope : class_friend ? friend_of->second.spec : EntityId::none;
+  if (class_friend) {
+    for (const ast::DeclSema& d : ins.seqs.elements(p_->class_member_sema(item, cls).decls))
+      if (d.entity == decl.entity) member = d;
+  } else if (written) {
     // An overload candidate may come from a declaration registered before its builder committed
     // the parameter lists. Read the committed declaration in this class specialization.
     const auto& cell = p_->member_patterns_.contains(std::to_underlying(decl.entity))
@@ -2579,7 +2601,7 @@ std::optional<QualType> AtItem::replay_member_exception(sema::Sema& caller, cons
   const u32 item_begin = p_->items().items[item].begin;
   AtItem source(*p_, item, false);
   source.at_point = default_instantiation_point.value_or(point());
-  if (member_of_class) source.completing_class = record.scope;
+  if (cls != EntityId::none) source.completing_class = cls;
   sema::Sema replay(p_->world(), caller.builder(), source, caller.diagnostics(), p_->id(item), 0);
   if (const auto pattern = p_->member_exception_patterns_.find(item); pattern != p_->member_exception_patterns_.end()) {
     if (!pattern->second) return std::nullopt;
@@ -2587,6 +2609,7 @@ std::optional<QualType> AtItem::replay_member_exception(sema::Sema& caller, cons
     replay.expansions_override = &pattern->second->expansions;
   }
   const auto before = replay.diag_count();
+  if (class_friend) replay.current_class = cls;
   if (member_of_class) {
     replay.current_class = record.scope;
     // `this` points to the specialization's class, not to the class template's pattern.
@@ -2617,7 +2640,7 @@ std::optional<QualType> AtItem::replay_member_exception(sema::Sema& caller, cons
   const sema::u16 depth = head.empty() ? 0 : head.front().depth;
   replay.template_scopes = p_->enclosing_heads(item);
   if (own_head) replay.template_scopes.push_back(std::move(head));
-  if (auto outer = p_->class_args_.find(std::to_underlying(record.scope)); outer != p_->class_args_.end())
+  if (auto outer = p_->class_args_.find(std::to_underlying(class_friend ? cls : record.scope)); outer != p_->class_args_.end())
     replay.template_args = outer->second;
   if (own_head) {
     auto member_arguments = sema::Bindings::of(depth, record.args);
@@ -2837,7 +2860,9 @@ public:
     return is_complete(c) ? p_->classes().find(c) : nullptr;
   }
   ast::DeclSema decl_sema(DeclId d) override { return at_.decl_sema(d); }
+  ast::DeclSema friend_decl(const ast::MemberRec& f) override { return at_.friend_decl(f); }
   std::optional<ast::DeclSema> written_member(EntityId f) override { return at_.written_member(f); }
+  std::optional<ast::DeclSema> class_friend(EntityId f) override { return at_.class_friend(f); }
   void use_allocation_function(EntityId f, bool aligned) override { at_.use_allocation_function(f, aligned); }
   void use_library_function(EntityId f) override { at_.use_library_function(f); }
   interp::Callee function_ir(EntityId f) override { return p_->function_ir(f, p_->end()); }
@@ -5480,7 +5505,26 @@ private:
       s_.diag(annotations.front().offset, Diag::attributes_not_allowed);
       return bad();
     }
-    if (ps_.is(Tk::kw_template) || !p_->enclosing_heads(k_).empty() || inst_) {
+    // [temp.friend]: in a class template, a friend function definition defines a function for
+    // each specialization (`templated_friend`); its other friends are not supported yet (#259).
+    const bool templated = !p_->enclosing_heads(k_).empty() || inst_;
+    // `template <…> friend R f(…) {…}`: a friend function template the class defines.
+    bool friend_template = false;
+    if (ps_.is(Tk::kw_template) && ps_.kind(1) == Tk::less && definition && !friend_at &&
+        (p_->namespace_class_friend(k_) || p_->namespace_class_template_friend(k_))) {
+      if (!ps_.template_head(u16(p_->enclosing_heads(k_).size()))) return bad();
+      // [temp.local]/6: its parameters do not take the class template's names.
+      for (std::size_t h = 0; h + 1 < s_.template_scopes.size(); ++h)
+        for (const ast::TemplateParamSema& outer : s_.template_scopes[h])
+          for (const ast::TemplateParamSema& own : s_.template_scopes.back())
+            if (own.name == outer.name && own.name != s_.no_name()) {
+              s_.diag(0, Diag::redeclared_local, own.name);
+              return bad();
+            }
+      head_requires_clause();
+      friend_template = true;
+    }
+    if (ps_.is(Tk::kw_template) || (templated && (!definition || !p_->namespace_class_template_friend(k_)))) {
       s_.diag(friend_at.value_or(ps_.pos()), Diag::not_supported, Tk::kw_friend);  // in or of a template (#259)
       return bad();
     }
@@ -5532,7 +5576,8 @@ private:
     const bool binary_operator = name_token == Tk::kw_operator && d.params.size() == 2 && name.starts_with("operator") &&
                                  std::ranges::contains(sema::Sema::binary_spellings, name.substr(8));
     const bool unary_minus = name_token == Tk::kw_operator && d.params.size() == 1 && name == "operator-";
-    const bool ordinary = (definition || !c_context) && !d.qualified && !d.template_args && p_->namespace_class_friend(k_) &&
+    const bool ordinary = (definition || !c_context) && !d.qualified && !d.template_args &&
+                          (p_->namespace_class_friend(k_) || templated) &&
                           (name_token == Tk::identifier || binary_operator || unary_minus);
     if (!types.is_function(d.type) ||
         (definition ? !ordinary || !d.function || !ps_.at_end() || !it_->has_body() ||
@@ -5554,6 +5599,7 @@ private:
         s_.diag(*friend_at, Diag::not_supported, Tk::kw_friend);
         return bad();
       }
+      if (templated || friend_template) return templated_friend(spec, d, friend_template);
       if (!declare(spec, std::move(d), LangLinkage::cxx, false, definition, /*ordinary_friend=*/true)) return bad();
       p_->ordinary_friend_items_.insert(k_);
       if (!definition) ps_.expect(Tk::semi);
@@ -5604,6 +5650,74 @@ private:
     }
     decls_.push_back(sem);
     ps_.expect(Tk::semi);
+  }
+
+  // A friend function defined in a class template ([temp.friend]/1, [class.friend]/6-7): for each
+  // specialization, an inline function of the class's namespace with the arguments substituted
+  // into its type, which only argument-dependent lookup finds through the specialization. Its
+  // body is instantiated with the class's arguments when it is odr-used ([temp.inst]/4); the
+  // class template's own analysis declares the pattern.
+  // A friend function template (`own_head`) is the same, a function template of the namespace
+  // whose specializations are instantiated from this item.
+  void templated_friend(const DeclSpec& spec, const parse::Declarator& d, bool own_head) {
+    sema::Types& types = s_.types();
+    if (!operator_function_ok(d)) return bad();
+    const sema::TypeRec& r = types.rec(d.type);
+    if (r.fn_cv != sema::Cv::none || r.fn_ref != ast::RefQual::none) {
+      s_.diag(d.name_at, Diag::cv_on_non_member);  // [dcl.fct]/6
+      return bad();
+    }
+    if (spec.is_constinit) {
+      s_.diag(spec.begin, Diag::constinit_function);  // [dcl.constinit]/1
+      return bad();
+    }
+    const bool internal = Program::unnamed(p_->ns_of(k_));
+    ast::DeclSema sem = class_decl(EntityId::none, true);
+    sem.kind = ast::DeclKind::function;
+    sem.type = d.type;
+    sem.has_written_noexcept = d.has_noexcept;
+    sem.has_trailing_return = d.trailing_return;
+    sem.linkage = internal ? ast::Linkage::internal : ast::Linkage::external;
+    sem.flags = sema::decl_flag::friend_ | sema::decl_flag::inline_ | sema::decl_flag::definition;
+    if (spec.is_constexpr) sem.flags |= sema::decl_flag::constexpr_;
+    if (spec.is_consteval) sem.flags |= sema::decl_flag::consteval_;
+    if (r.variadic) sem.flags |= sema::decl_flag::variadic;
+    std::vector<ast::ParamSema> params;
+    for (const parse::Param& p : d.params)
+      params.push_back({EntityId::none, p.type, p.name, p.default_arg, p.element ? sema::param_flag::pack_element : u16(0)});
+    sem.params = b_.seq(std::span<const ast::ParamSema>(params));
+    if (own_head) {
+      // Its head, positional, and its constraints are part of it ([temp.over.link]).
+      sem.template_params = b_.seq(std::span<const ast::TemplateParamSema>(s_.template_scopes.back()));
+      sem.flags |= sema::decl_flag::template_;
+      sema::EntityRec e{sema::EntityKind::function_template, d.name, d.type, LangLinkage::cxx, sem.linkage, {}, ns_entity()};
+      e.head = head_fp(s_.template_scopes.back());
+      sem.constraints = associated_constraints();
+      e.constraints = constraints_fp_;
+      sem.entity = s_.world().entities.entity(e);
+    } else {
+      sem.entity = s_.world().entities.entity(
+          {sema::EntityKind::function, d.name, d.type, LangLinkage::cxx, sem.linkage, {}, ns_entity()});
+    }
+    // A dependent noexcept-specifier is evaluated for each specialization when it is needed
+    // ([except.spec]/13), in the specialization's scope.
+    if (d.noexcept_tokens) p_->member_exceptions_.emplace(sem.entity, Program::MemberException{k_, d.noexcept_tokens});
+    // A function the namespace defined already is redefined ([basic.def.odr]/1); two
+    // specializations defining one function are `instantiate_class`'s to report.
+    if (inst_ && !own_head) {
+      const auto known = p_->definitions_.find(std::to_underlying(sem.entity));
+      const bool ours = known != p_->definitions_.end() && known->second == k_;
+      if (!ours && p_->function_defined_before(sem.entity, inst_->point)) {
+        s_.diag(d.name_at, Diag::redefinition, d.name);
+        return bad();
+      }
+    }
+    decls_.push_back(sem);
+    p_->templated_friend_items_.insert(k_);
+    // Its declaration, an ordinary class's or a class template specialization's, not the
+    // pattern's: what makes it constexpr or consteval ([dcl.constexpr]), and for a template the
+    // definition its specializations are instantiated from (`Program::instance`).
+    if (inst_ || p_->enclosing_heads(k_).empty()) p_->declared(sem, k_);
   }
 
   // A typedef-name or alias-declaration that is a member of class `c` ([class.mem],
@@ -7919,6 +8033,25 @@ const Result<ast::ItemSema>& Program::item_sema(u32 item) {
   return *item_cells_[item];
 }
 
+// The declaration of friend `f` of a class: the one its class template's specialization made
+// ([temp.friend]), else its own.
+std::optional<ast::DeclSema> Program::friend_decl(const ast::MemberRec& f) {
+  if (member_patterns_.contains(std::to_underlying(f.entity))) return class_friend(f.entity);
+  return decl_sema(f.decl);
+}
+
+// The declaration a class template specialization made of the friend function or function
+// template `f` it defines, if it is one (#259).
+std::optional<ast::DeclSema> Program::class_friend(EntityId f) {
+  auto m = member_patterns_.find(std::to_underlying(f));
+  if (m == member_patterns_.end()) return std::nullopt;
+  auto cell = class_member_cells_.find(std::pair(m->second.item, std::to_underlying(m->second.spec)));
+  if (cell == class_member_cells_.end()) return std::nullopt;
+  for (const ast::DeclSema& d : w_->ins.seqs.elements(cell->second.value.decls))
+    if (d.entity == f && (d.flags & sema::decl_flag::friend_)) return d;
+  return std::nullopt;
+}
+
 std::optional<ast::DeclSema> Program::decl_sema(DeclId d) {
   if (ast::class_of(d.ord) != ast::DeclClass::syntactic) return std::nullopt;
   // The members of a class whose item is still being analysed (its declarators after the
@@ -7981,7 +8114,7 @@ Program::ClassContent Program::class_content(u32 item, const std::function<const
       // A friend declaration names a function or class that is not a member ([class.friend]/1).
       if (d.flags & sema::decl_flag::friend_) {
         if (std::ranges::find(out.friends, d.entity) == out.friends.end()) out.friends.push_back(d.entity);
-        if (ordinary_friend_items_.contains(m))
+        if (ordinary_friend_items_.contains(m) || templated_friend_items_.contains(m))
           out.adl_friends.push_back({{id(m), ast::make_decl_ord(ast::DeclClass::syntactic, i)}, d.entity, ast::Access::none});
         continue;
       }
@@ -9373,8 +9506,12 @@ public:
         scope = p_->world().entities.rec(scope).scope;
       } else if (f->flags & sema::decl_flag::friend_) {
         // [class.mem.general]: the body is a complete-class context even though the
-        // function belongs to the namespace and has no implicit object parameter.
-        s_.current_class = p_->class_entity(it_->parent);
+        // function belongs to the namespace and has no implicit object parameter. A class
+        // template's friend is instantiated in the specialization that defines it.
+        const EntityId templ = p_->world().entities.rec(f->entity).templ;
+        const auto friend_of = p_->member_patterns_.find(std::to_underlying(templ != EntityId::none ? templ : f->entity));
+        s_.current_class = inst_ && friend_of != p_->member_patterns_.end() ? friend_of->second.spec
+                                                                             : p_->class_entity(it_->parent);
         p_->is_complete(s_.current_class, k_, true);
         at_->completing_class = s_.current_class;
       }
@@ -10735,6 +10872,21 @@ const sema::ClassRec* Program::instantiate_class(EntityId spec, u32 point) {
   for (const ast::MemberRec& m : c.members)
     if (w_->entities.rec(m.entity).kind != sema::EntityKind::data_member)
       member_patterns_.emplace(std::to_underlying(m.entity), MemberOf{index(m.decl.item), spec});
+  // A friend function the class defines is instantiated from its item as members are
+  // ([temp.inst]/4); the first specialization to define it does.
+  for (const ast::MemberRec& f : c.adl_friends) {
+    const u32 m = index(f.decl.item);
+    auto [prior, fresh] = member_patterns_.emplace(std::to_underlying(f.entity), MemberOf{m, spec});
+    // Two specializations that define one function redefine it ([basic.def.odr]/1, [temp.inst]/3).
+    if (!fresh && prior->second.spec != spec) {
+      u32 offset = 0;
+      for (const items::DeclName& n : items_->items[m].names)
+        if (n.ordinal == ast::number_of(f.decl.ord)) offset = n.offset;
+      const ast::NameId name = w_->entities.rec(f.entity).name;
+      end_diags_.push_back({engine::Loc{std::to_underlying(id(m)), offset}, sema::diag_id(sema::Diag::redefinition),
+                            {{std::to_underlying(name), w_->ins.names.fp(name)}}});
+    }
+  }
   // Built whole, then published once (#156); the first publication wins.
   sema::ClassRec built;
   built.member_declarations_valid = member_declarations_valid;
@@ -10746,6 +10898,7 @@ const sema::ClassRec* Program::instantiate_class(EntityId spec, u32 point) {
   built.types = std::move(c.nested);
   for (const ast::MemberRec& m : c.members) built.access.push_back({m.entity, m.access});
   built.friends = std::move(c.friends);
+  built.adl_friends = std::move(c.adl_friends);
   special_members(k, spec, built, built.union_ ? &end_diags_ : nullptr);
   built.defined = true;
   return &classes_.publish(spec, std::move(built));
@@ -10902,7 +11055,11 @@ const Program::Instance* Program::instance(EntityId spec, u32 point) {
   sema::Bindings args = sema::Bindings::of(depth, rec.args);
   // A member template of a class template specialization ([temp.mem]): the class's arguments
   // bind the enclosing levels.
-  if (auto outer = class_args_.find(std::to_underlying(w_->entities.rec(rec.templ).scope)); outer != class_args_.end()) {
+  // A friend template of a class template specialization: that specialization's (#259).
+  auto outer = class_args_.find(std::to_underlying(w_->entities.rec(rec.templ).scope));
+  if (auto friend_of = member_patterns_.find(std::to_underlying(rec.templ)); outer == class_args_.end() && friend_of != member_patterns_.end())
+    outer = class_args_.find(std::to_underlying(friend_of->second.spec));
+  if (outer != class_args_.end()) {
     sema::Bindings all = outer->second;
     all.levels.resize(depth + 1);
     all.levels[depth] = args.levels[depth];
