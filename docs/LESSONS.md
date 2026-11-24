@@ -144,6 +144,9 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
 - **`tools/test <paths>` with no stage name runs every stage, `build` included.** Meant to
   check a few tests in a fresh worktree, it started a full build there.
   - Do: name the stages, as in `YCXX=<binary> tools/test core own/pp/x`, or `policy` alone.
+  - Hit again on #218, with oracles (`--cxx clang`): it built beside a background `tools/build`,
+    and two Ninja runs in one directory broke a module ("imports must be built before being
+    imported"). The rebuild cost 15 minutes on a loaded machine. Oracle runs need no build either.
   - Learned on #659.
 - **A reviewer running your binary blocks your rebuilds.** On #337 the reviewer probed with the
   worktree's `build/bin/ycxx`, so the next step could not be built for 15 minutes.
