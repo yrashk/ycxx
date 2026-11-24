@@ -17,6 +17,8 @@ import ycxx.pp;
 import ycxx.sema;
 import :back;
 import :front;
+import :policies;
+import :policy_objects;
 import :executable;
 import :lines;
 
@@ -51,6 +53,7 @@ struct BuildKey {
   Until until = Until::link;
   ProgramId program{};  // with `link`
   bool want_dependencies = false;
+  bool check_policies = false;
   bool operator==(const BuildKey&) const = default;
 };
 // A request, numbered by the registry (`Session::request`): a key holds no vector.
@@ -272,6 +275,7 @@ class Session {
       else if (k.until == Until::object) name += " -c";
       else if (k.program.n >= registry_base && k.program.n - registry_base < programs_.size())
         name += " → " + programs_[k.program.n - registry_base].identifier;
+      if (k.check_policies) name += " -fcheck-policies";
       name_for_trace(trace_names().requests, it->second, std::move(name));
       requests_.push_back(std::move(k));
     }
@@ -426,6 +430,7 @@ engine::query_task<Built> Build::run(engine::Ctx& cx, RequestId r) {
   const BuildKey& k = cx.fetch<BuildIn>(r);
   Built out;
   bool all = true;
+  std::vector<std::reference_wrapper<const CheckedPolicies>> policies;
   // Check each main file in this revision (the file table's, in the daemon).
   const pp::Source* first = nullptr;
   std::vector<TuId> readable;
@@ -452,6 +457,29 @@ engine::query_task<Built> Build::run(engine::Ctx& cx, RequestId r) {
     (*checkpoint)(first->path, cx.stop_token());
     co_await cx.stop_point();
   }
+  if (k.check_policies) {
+    std::vector<ast::u32> checked;
+    for (std::size_t i = 0; i < k.units.size(); ++i)
+      if (out.units[i].readable && !out.units[i].front_failed) checked.push_back(k.units[i].n);
+    const auto sources = universe().in->intern_seq<ast::u32>(checked);
+    auto effects = EffectVerification::complete_sources;
+    if (k.until == Until::object) effects = EffectVerification::deferred_objects;
+    if (k.until == Until::link) effects = effect_link_verification(cx.fetch<ProgramIn>(k.program));
+    const auto units = checked | std::views::transform([sources, defer = k.until != Until::syntax, effects](ast::u32 unit) {
+      return PolicyCheckUnit{sources, TuId{unit}, defer, effects};
+    });
+    policies = co_await cx.par_map<CheckPolicies>(units);
+    std::size_t j = 0;
+    for (UnitBuilt& u : out.units) {
+      if (!u.readable || u.front_failed) continue;
+      const auto& messages = policies[j++].get().messages;
+      u.messages.append_range(messages);
+      u.front_failed = !messages.empty();
+      all = all && !u.front_failed;
+    }
+    // A failed input can withhold part of the policy used to check every other input.
+    if (!all) co_return out;
+  }
   if (k.until == Until::syntax) co_return out;
   std::vector<TuId> compiled;
   for (std::size_t i = 0; i < k.units.size(); ++i)
@@ -469,6 +497,13 @@ engine::query_task<Built> Build::run(engine::Ctx& cx, RequestId r) {
         u.dependencies = region.dependencies;
       }
       all = all && v.object.has_value();
+      if (u.object && k.check_policies && k.until == Until::object) {
+        if (auto error = embed_policy_contracts(*u.object, v, policies[i].get().contracts)) {
+          u.errors.push_back({std::nullopt, true, std::move(*error), {}});
+          u.object.reset();
+          all = false;
+        }
+      }
       for (const BackError& e : v.errors) {
         if (e.source) u.errors.push_back({e.source->offset, true, e.message, e.source->where});
         else u.errors.push_back({std::nullopt, true, e.message, {}});

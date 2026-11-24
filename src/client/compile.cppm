@@ -200,6 +200,7 @@ struct Options {
   WarningOptions warnings;
   bool nostdlib = false;
   bool nostdlibxx = false;  // `-nostdlib++`: no libycxx runtime in a Darwin link
+  bool check_policies = false;
   std::optional<std::string> output, interpreter;
   bool dependencies = false;  // `-MD`
   std::optional<std::string> dependency_path;  // `-MF`
@@ -207,7 +208,6 @@ struct Options {
   std::vector<std::string> sources;  // translation units
   std::vector<std::string> objects;  // objects named on the command line
   std::vector<std::string> archives;
-  std::size_t explicit_archive_count = 0;  // subsequent archives are appended by the driver
   std::vector<pipeline::LinkOperand> operands;
   std::vector<std::string> libraries;  // shared objects in command-line order
   std::vector<std::string> undefined;  // names an archive link starts with as referenced
@@ -252,6 +252,7 @@ std::expected<Options, std::string> parse_options(std::span<const std::string_vi
       if (o.query != Options::Query::machine) o.query = query;
     } else if (a == "-c") o.stop = Options::Stop::object;
     else if (a == "-fsyntax-only") o.stop = Options::Stop::syntax;
+    else if (a == "-fcheck-policies") o.check_policies = true;
     else if (a == "-E") o.stop = Options::Stop::preprocess;
     else if (a == "-MD") o.dependencies = true;
     else if (a.starts_with("-MF") || a.starts_with("-MT")) {
@@ -342,10 +343,10 @@ std::expected<Options, std::string> parse_options(std::span<const std::string_vi
   if (o.pp.call_triviality == ast::CallTriviality::apple && !o.pp.target->apple_calls)
     return std::unexpected("invalid value in '-fclass-call-abi=apple'");
   if (o.sources.empty() && o.objects.empty()) return std::unexpected("no input files");
-  o.explicit_archive_count = o.archives.size();
   // An executable for arm64 macOS links libycxx's runtime after the operands (#842).
   if (darwin_link && !o.nostdlibxx) {
-    for (const auto& archive : pipeline::darwin_runtime().archives) add_operand(Kind::archive, o.archives, archive);
+    for (const auto& archive : pipeline::darwin_runtime().archives)
+      add_operand(Kind::darwin_runtime_archive, o.archives, archive);
     o.undefined = pipeline::darwin_runtime().undefined;
   }
   if (linux_link && !o.nostdlib)
@@ -735,8 +736,9 @@ std::vector<std::string> split_words(std::string_view text) {
 
 namespace {
 
-// A check keeps the preprocessing options, template depth, class call ABI and warning controls.
-// With `std` it also keeps the language standard. Another compiler may name one ycxx does not take.
+// A check keeps preprocessing options, template depth, class call ABI, warning controls and
+// policy checking. With `std` it also keeps the language standard. Another compiler may name one
+// ycxx does not take.
 void checking_options(std::span<const std::string_view> args, bool std, std::vector<std::string>& out) {
   pp::Config scratch;
   scratch.target = pp::native_target;
@@ -765,7 +767,8 @@ void checking_options(std::span<const std::string_view> args, bool std, std::vec
     } else if (args[i] == "-o" || args[i] == "--dynamic-linker") {
       ++i;
     } else if ((std && args[i].starts_with("-std=")) || args[i].starts_with("-ftemplate-depth=") ||
-               args[i].starts_with("-fclass-call-abi=") || warning_option(args[i])) {
+               args[i].starts_with("-fclass-call-abi=") || warning_option(args[i]) ||
+               args[i] == "-fcheck-policies") {
       out.emplace_back(args[i]);
     }
   }
@@ -841,6 +844,7 @@ Done run(const Request& r, pp::Host& host, pipeline::Session& session, const Sto
 
   // The units, named by what they are (#139), and the whole request as one root.
   pipeline::BuildKey key;
+  key.check_policies = opts->check_policies;
   key.until = opts->stop == Options::Stop::syntax ? pipeline::Until::syntax
               : opts->stop == Options::Stop::object ? pipeline::Until::object
                                                     : pipeline::Until::link;
@@ -858,9 +862,10 @@ Done run(const Request& r, pp::Host& host, pipeline::Session& session, const Sto
     using Kind = pipeline::LinkOperand::Kind;
     for (const auto [kind, index] : opts->operands) {
       if (kind == Kind::source) continue;
-      const auto& path = kind == Kind::archive ? opts->archives[index] : opts->objects[index];
-      if (kind == Kind::archive) {
-        const bool configured_runtime = index >= opts->explicit_archive_count;
+      const bool configured_runtime = kind == Kind::darwin_runtime_archive;
+      const bool archive_input = kind == Kind::archive || configured_runtime;
+      const auto& path = archive_input ? opts->archives[index] : opts->objects[index];
+      if (archive_input) {
         auto archive = read_archive(path, in_cwd(r, path), configured_runtime);
         if (!archive) {
           bad_input = configured_runtime
@@ -910,7 +915,8 @@ Done run(const Request& r, pp::Host& host, pipeline::Session& session, const Sto
           std::move(archives), std::move(opts->undefined)});
     if (bad_input) key.until = pipeline::Until::object;
     else key.program = session.program(
-        {key.units, std::move(objects), out.filename().native_encoded_string(), std::move(dynamic), std::move(archive_link)});
+        {key.units, std::move(objects), out.filename().native_encoded_string(), std::move(dynamic),
+         std::move(archive_link), key.check_policies});
   }
   const pipeline::Until until = bad_input ? pipeline::Until::link : key.until;
   pipeline::RunStats rs;

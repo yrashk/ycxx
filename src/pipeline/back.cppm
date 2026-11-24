@@ -141,7 +141,7 @@ struct FunctionDef {
   // An ordinary external inline definition that every unit using it may emit: a weak definition,
   // coalesced by the linker (ELF #422, Mach-O #124).
   bool coalesced = false;
-  bool explicit_weak = false;  // an ordinary non-inline ELF definition (#937)
+  bool explicit_weak = false;  // an ordinary non-inline definition (#937)
   UnwindEligibility unwind = UnwindEligibility::none;
   std::optional<HostedCatch> hosted_catch{};
   ast::NodeId cleanup_call = ast::NodeId::none;
@@ -188,6 +188,10 @@ struct ClassShape {
   bool has_mutable_field = false;
   sema::PeerVirtualLayout peer_virtual_layout = sema::PeerVirtualLayout::none;
   EntityId peer_automatic_primary_base = EntityId::none;
+  std::vector<ast::NameId> field_names{};
+  bool plain_ownership_record = false;
+  EntityId ownership_destructor = EntityId::none;
+  EntityId nonthrowing_destructor = EntityId::none;
 };
 struct EnumShape {
   EntityId entity = EntityId::none;
@@ -704,6 +708,7 @@ struct TuValue {
   std::optional<obj::object> object;  // none when there are errors
   std::vector<BackError> errors;
   std::vector<FirstDemand> first_demands;
+  std::vector<aarch64::Symbol> symbols;
 };
 struct Tu {
   using Key = TuId;
@@ -843,8 +848,12 @@ ir::TypeLayout QueryLayout::type(QualType q) const {
     l.calls_abi_uncertain = it->calls_abi_uncertain;
     l.layout_uncertain = it->layout_uncertain;
     l.contains_explicit_alignment = it->explicit_alignment != 0;
-    if (target.triple == ast::x86_64_linux.triple)
+    if (target.triple == ast::x86_64_linux.triple) {
       l.sysv_integer_eightbytes = sysv_integer_eightbytes(*it, *r);
+      l.sysv_empty_argument = l.empty && l.size == 1 && l.align == 1 && l.trivial_calls &&
+                              !l.copy_abi_unknown && !l.calls_abi_uncertain && !l.layout_uncertain &&
+                              !l.contains_explicit_alignment && !it->union_ && it->bases.empty() && it->fields.empty();
+    }
     // A homogeneous floating-point aggregate (AAPCS64 §5.9.5): every member, through arrays and
     // member classes, of one floating type, 1 to 4 of them; a union's members overlap, so it has
     // as many as its largest.
@@ -1351,6 +1360,7 @@ std::string_view linux_signature_error(const ast::Interners& in, const QueryLayo
                     : "defaulted copy ABI classification is unavailable for a parameter";
     if ((result && l.kind == ir::TypeKind::void_) || linux_integer_scalar(l) ||
         (allow_aggregates && l.sysv_integer_eightbytes)) return {};
+    if (fixed_direct && !result && l.sysv_empty_argument) return {};
     // A class not trivial for calls passes by address and returns through the hidden result
     // pointer; so does any result of more than two eightbytes (MEMORY) (#641).
     if (allow_aggregates && l.kind == ir::TypeKind::record && !l.empty && !l.layout_uncertain &&
@@ -1827,7 +1837,45 @@ std::expected<obj::object, aarch64::CodegenError> assemble_linux(
   o.name = name;
   o.arch = obj::target::x86_64_linux;
   std::map<EntityId, std::uint32_t> symbol_of;
-  for (const auto& s : symbols) symbol_of.emplace(s.entity, o.add_symbol({s.name, s.bind, {}, 0, false}));
+  // Each definition has its own symbol, even beside another of the same spelling (a weak inline
+  // body and a strong asm-labelled one, #694). An entity this object does not define shares a
+  // symbol by name, as the linker resolves it: a builtin's implicit C declaration and a written one of
+  // another type are two entities with one C symbol (#1095). It names this object's strong
+  // definition of the name if there is one, else its weak one, else one undefined symbol.
+  std::map<EntityId, bool> definitions;  // entity → weak
+  for (const auto& f : functions) definitions.emplace(f.entity, f.weak);
+  for (const auto& d : data) definitions.emplace(d.entity, d.weak);
+  for (const auto& t : keyless_type_info) definitions.emplace(t.entity, false);
+  if (table) definitions.emplace(table->entity, false);
+  std::map<std::string_view, std::pair<EntityId, bool>> defined_name;  // name → definition, weak
+  for (const auto& s : symbols) {
+    const auto d = definitions.find(s.entity);
+    if (s.bind == obj::binding::local || d == definitions.end()) continue;
+    auto [at, added] = defined_name.try_emplace(s.name, s.entity, d->second);
+    if (!added && at->second.second && !d->second) at->second = {s.entity, false};
+  }
+  std::map<std::string_view, std::uint32_t> undefined_name;
+  std::vector<const aarch64::Symbol*> defined_by_another;  // whose name another entity defines here
+  auto share = [&](const aarch64::Symbol& s, std::uint32_t index) {
+    auto& bind = o.symbols[index].bind;
+    if (s.bind == obj::binding::hidden) bind = obj::binding::hidden;  // the stricter visibility
+    symbol_of.emplace(s.entity, index);
+  };
+  for (const auto& s : symbols) {
+    if (s.bind != obj::binding::local && !definitions.contains(s.entity)) {
+      if (defined_name.contains(s.name)) {
+        defined_by_another.push_back(&s);
+        continue;
+      }
+      if (auto shared = undefined_name.find(s.name); shared != undefined_name.end()) {
+        share(s, shared->second);
+        continue;
+      }
+      undefined_name.emplace(s.name, static_cast<std::uint32_t>(o.symbols.size()));
+    }
+    symbol_of.emplace(s.entity, o.add_symbol({s.name, s.bind, {}, 0, false}));
+  }
+  for (const aarch64::Symbol* s : defined_by_another) share(*s, symbol_of.at(defined_name.at(s->name).first));
   auto missing = [](EntityId e) {
     return std::unexpected(aarch64::CodegenError{e, std::format("@{} has no symbol name", ir::raw(e))});
   };
@@ -2300,7 +2348,7 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
       const auto& def = tu.functions[i];
       code.push_back({.entity = fns[i].fn, .code = *ms[i].get().code,
                       .cleanup_free_unwind = def.unwind == UnwindEligibility::cleanup_free,
-                      .weak = def.coalesced});
+                      .weak = def.coalesced || def.explicit_weak});
     }
     auto o = aarch64::assemble(tu.name, code, data, symbols);
     if (!o) return o;
@@ -2344,6 +2392,7 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
     co_return co_await locate_errors(cx, id, std::move(out));
   }
   out.object = std::move(*o);
+  out.symbols = std::move(symbols);
   co_return out;
 }
 

@@ -687,6 +687,57 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
 - `ycxx cxx` (also `ycxx -…` with an option first) takes `-o`, `-c`, `-fsyntax-only` and
   `-std=c++26`. Errors are `path:line:col: error: message` on stderr. It exits 0 on success and 1
   on any error in the input or the command line.
+- `-fcheck-policies` applies YCXX Policies to ownership contracts before a syntax-only or native
+  build succeeds. It composes active C++ policy fragments and declaration annotations across the
+  build's source inputs by canonical types and resolved operations. It reports conflicting contracts
+  with both origins. A per-body control-flow query and worklist check named affine and linear
+  resources, including concrete template instances. Transfers invalidate the old owner.
+  A `move_transfers<T>` entry or its class annotation authorizes a nonthrowing move. A plain
+  wrapper around a move-only guard can use its implicit move constructor.
+  Conditional and comma initializers preserve the selected path and evaluate earlier operands
+  in order for named owners, non-overlapping fields, and fixed-array elements.
+  The 1,280-resource fixture composes four source fragments and checks that an
+  equivalent reflection edit reuses the caller's proof while a conflicting edit reports both origins.
+  Local const references can borrow named owners or bind to another local shared reference.
+  Each reference protects the original owner through its last reachable use.
+  The checker rejects consuming or transferring an owner before a future use and rejects
+  exposing the borrow through an address, capture, or unregistered operation.
+  A `verified_observes` contract checks the observer's scalar reads and forwarding of the
+  original shared borrow to other verified observers. An observer can return a copied
+  arithmetic or enum value. Checked ELF and Mach-O objects carry
+  observation requirements and guarantees through each forwarding function. The checked link
+  matches them to unique strong definitions in explicit input objects. One forwarded observation
+  can also require a verified effect bound from the selected provider.
+  Local arrays and aggregates track registered owners by nested field and literal-index
+  paths such as `queue.groups[1].tasks[0]`. Initializing, borrowing, transferring, and
+  consuming a subobject follow the same checks as individual named resources.
+  `tracks_variant<Choice>` checks the active alternative of a package owner variant. The
+  `holds` tests refine the branch, shared borrows delay extraction, and extraction transfers
+  the obligation to the destination. Checked executables run natively on x86-64 Linux and
+  arm64 macOS with or without runtime guards.
+  [Variant conformance](tests/unit/pipeline/policies_variants.py)
+  The standalone C++20 package also provides move-only issuer-scoped capability tokens with
+  rights constraints and runtime scope checks. On Linux x86-64, a checked YCXX object and a
+  hosted GCC or Clang object exchange the token by value in either direction.
+  [ABI support #661](https://github.com/yrashk/ycxx/issues/661) · [Dependent type friends #689](https://github.com/yrashk/ycxx/issues/689)
+  Finite effect bounds from `<ycxx/effects.hpp>` check every direct callee of an annotated
+  function, including calls in default arguments and recursive calls. Typed declarations
+  and C++26 annotations share the registry. Bounds use canonical sets of nominal tags.
+  Each verified body must have a unique supported definition among the checked source
+  inputs or in the objects at the final checked link. The link verifies all requirements
+  through intervening providers and reports inconsistent trusted declarations it encounters.
+  The checker rejects indirect calls and unmodeled implicit operations.
+  An `at_most<Tag, N>` entry adds a static usage grade for one tag. The check adds
+  sequential costs, takes the maximum across alternatives, and counts terminating loop paths.
+  Counted `int` and `unsigned` loops use the converted integer values of their endpoints.
+  Explicit object links carry graded contracts. The C++20 package also offers scope-local runtime budgets
+  and explicit scoped handlers. For a local handler bound to a named function, YCXX verifies
+  the constructor and forwarding method, prevents the handler from escaping, and uses the
+  selected function's outward effects and grade. The checked link verifies that function's
+  contract across explicit objects. Stateful callable handlers can use trusted adapters.
+  [YCXX Policies #660](https://github.com/yrashk/ycxx/issues/660)
+  Execution leaving the scope of a live transaction or reaching a possible unwind is diagnosed.
+  See [the protocols and examples](docs/design/policies-ownership.md).
 - `tests/features/ycxx.txt` lists `syntax` and `run darwin-arm64`: a feature can be limited to
   hosts. CI's macOS job runs the slice before its tier, with `--no-unsupported`.
 - `unit.pipeline`: the line table, linkage names, and the back half from hand-built analysed
@@ -773,10 +824,12 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
   ([#693](https://github.com/yrashk/ycxx/issues/693)).
   A class result in memory, of more than two eightbytes or not trivial for calls, goes
   through a hidden pointer that takes RDI ahead of `this` and comes back in RAX. A class
-  argument not trivial for calls passes by the address of the caller's object. Trivially
-  copyable arguments of more than two eightbytes and empty classes remain unsupported
-  ([#641](https://github.com/yrashk/ycxx/issues/641)), as do SSE records
-  ([#642](https://github.com/yrashk/ycxx/issues/642)). Records with source layout directives
+  argument not trivial for calls passes by the address of the caller's object. A naturally laid
+  out one-byte empty class trivial for calls uses no register or stack slot in a fixed direct
+  call. The callee still has a distinct parameter object. Trivially copyable arguments of more
+  than two eightbytes and empty class results remain tracked in
+  [#641](https://github.com/yrashk/ycxx/issues/641). SSE records are tracked in
+  [#642](https://github.com/yrashk/ycxx/issues/642). Records with source layout directives
   native layout does not apply stay out of memory passing, including records that contain
   those layouts as fields, array elements, or bases. A wrapper whose member makes its implicit
   destructor nontrivial uses the indirect result convention even when its copy and move traits
@@ -861,12 +914,16 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
   gives its non-inline definition `STB_WEAK`. This includes qualified definitions such as
   libycxx's `std::is_debugger_present`. The ELF linker selects a strong definition in either
   input order and diagnoses duplicate strong definitions. Explicit GNU visibility can
-  independently give the symbol `STV_HIDDEN`.
+  independently give the symbol `STV_HIDDEN`. On arm64 Mach-O the same definitions are weak
+  external, or weak private external when hidden, and both ycxx's linker and the system linker
+  keep a strong definition over them (`unit.darwin_weak_visibility`).
   [Design](docs/design/linux-weak-functions.md) · [#937](https://github.com/yrashk/ycxx/issues/937)
+  · [#1085](https://github.com/yrashk/ycxx/issues/1085)
 - On Linux x86-64, explicit GNU hidden visibility on any declaration of an ordinary external
   non-inline namespace-scope variable gives its ELF symbol `STB_GLOBAL` and `STV_HIDDEN`.
   This includes the C-linkage marker `__ycxx_linkage_static_v1` from the pinned libycxx runtime.
-  [#936](https://github.com/yrashk/ycxx/issues/936)
+  On arm64 Mach-O the symbol is private external.
+  [#936](https://github.com/yrashk/ycxx/issues/936) · [#1085](https://github.com/yrashk/ycxx/issues/1085)
 - On Linux x86-64, a namespace-scope `asm((expression));` checks `size()` and `data()` in one
   constant evaluation and accepts a single `.hidden SYMBOL` directive with an optional final
   newline. The assembler sets `STV_HIDDEN` on the matching ordinary ELF symbol while preserving
@@ -876,9 +933,10 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
   nearest explicit GNU `hidden` or `default` visibility from a namespace definition.
   The canonical declaration carries consistent visibility to its unannotated qualified
   definition and to reference-only objects. An explicit function attribute takes
-  precedence. Mixed inherited defaults retain the direct attribute rules.
+  precedence. Mixed inherited defaults retain the direct attribute rules. arm64 Mach-O
+  follows the same rules, with hidden as private external.
   [Design](docs/design/linux-namespace-visibility.md) ·
-  [#940](https://github.com/yrashk/ycxx/issues/940)
+  [#940](https://github.com/yrashk/ycxx/issues/940) · [#1085](https://github.com/yrashk/ycxx/issues/1085)
 - Constant-initialized and zero-initialized external inline namespace variables use weak ELF
   definitions when their initial values need no relocations. This includes explicitly inline
   full variable-template specializations with builtin type arguments. Static addresses and
@@ -1186,6 +1244,19 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
 - Native collection omits ordinary named namespace-scope immediate functions whose bodies
   have neither static locals nor closures. Their declarations and analysed bodies remain
   available for constant evaluation. [#1006](https://github.com/yrashk/ycxx/issues/1006)
+- `consteval` constructors, in class and out of class, among the other constructor specifiers.
+  `Sema::construct` folds a call of one outside an immediate function context, including an
+  implicit conversion of an argument or operand, into its value (`Sema::immediate_invocation`,
+  shared with consteval function calls). A selected operator whose operand conversion is not
+  constant is an error rather than a fall-back to the built-in operator. Every declaration must
+  agree on `consteval`, and a destructor cannot be `consteval`. Native collection omits consteval
+  constructors, of class templates and constructor templates too.
+  [#102](https://github.com/yrashk/ycxx/issues/102)
+- The evaluator lays out non-polymorphic classes with user-declared constructors, no bases and no
+  destructor, whatever their fields' access, as it does flat aggregates, so constructor calls
+  (`constexpr` and `consteval`) evaluate, and `T x(args)` at namespace scope is constant-initialized
+  when its constructor call is constant. Class-typed fields and bases are not laid out yet
+  ([#25](https://github.com/yrashk/ycxx/issues/25)). [#102](https://github.com/yrashk/ycxx/issues/102)
 - `static_assert(e)` and `static_assert(e, "message")` at namespace and block scope (the
   `StaticAssert` node); `if consteval` and `if !consteval` (`IfConsteval`, lowered to
   `consteval_br`).
@@ -1258,7 +1329,7 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   L1 forms static addresses at their uses and checks the executed declarations for usability in
   constant expressions. The runtime guard still initializes a static local on its first passage.
   [#872](https://github.com/yrashk/ycxx/issues/872)
-- Tests: `tests/own/consteval` (spec-only); the draft's [dcl.constexpr]/5 ex. 3, [dcl.constinit]/3
+- Tests: `tests/own/consteval` (spec-only; `constructors/` checked against Clang and GCC); the draft's [dcl.constexpr]/5 ex. 3, [dcl.constinit]/3
   ex. 1 and [stmt.if]/4 ex. 3 pass.
 - Not yet (#102): naming a consteval function outside a call, static_assert
   messages that are constant expressions, notes along the call chain, block-scope static constexpr
@@ -1424,6 +1495,11 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   constructors. Direct initialization includes them. Copy-list-initialization ranks them and
   diagnoses an explicit winner, including a default constructor or a temporary for a reference
   argument ([dcl.fct.spec], [over.match.ctor], [over.match.copy], [over.match.list], #157).
+- Both native targets coalesce eligible inline complete-object constructors across translation
+  units. This covers in-class bodies and out-of-class bodies marked inline by a declaration
+  ([dcl.inline], [basic.def.odr]). Translation-unit-local classes retain local constructor
+  symbols, and non-inline out-of-class definitions retain strong symbols.
+  [#1096](https://github.com/yrashk/ycxx/issues/1096)
 - A first-declaration in-class `C() = default` is supported for non-template, nonunion tag
   classes at namespace scope without fields, bases, virtual functions, or a nontrivial or deleted destructor.
   The constructor participates in overload selection and access checks, including bare `explicit`.
@@ -2378,9 +2454,15 @@ session's.*
   types. `__is_convertible` also checks a unique public nonvirtual base path between complete
   class types. It supports direct reference binding and by-value initialization of a fieldless base
   with no bases or written constructors of its own, an eligible implicit trivial copy or move
-  constructor, and an eligible implicit trivial destructor. Supported class-template bases and
-  variable-template initializers replay dependent operands and check class completeness at the
-  demand. Other combinations, including class `__is_nothrow_convertible`, get hard diagnostics.
+  constructor, and an eligible implicit trivial destructor. Both traits also answer object
+  pointer and `std::nullptr_t` sources converted to a non-reference target: same-type and
+  `cv void*` targets with added pointee qualifiers, Derived* to Base* through an accessible,
+  unambiguous base of a complete Derived (an incomplete one gives false; virtual functions do not
+  matter), the null pointer value, and `bool` targets ([conv.ptr], [conv.qual], [conv.bool]). An
+  array pointee's qualifiers are its elements'. Function, member and multi-level pointers and
+  conversions to an array of unknown bound are diagnosed. Supported class-template bases and variable-template initializers
+  replay dependent operands and check class completeness at the demand. Other combinations,
+  including class `__is_nothrow_convertible`, get hard diagnostics.
   `__has_builtin` answers 0 while support is partial ([meta.rel], [dcl.init.ref], #218).
 - `__reference_converts_from_temporary(T, U)` and `__reference_constructs_from_temporary(T, U)`
   tell whether a reference T initialized from VAL<U> binds to a temporary: a converted arithmetic
@@ -2402,7 +2484,9 @@ session's.*
   initializer checks completeness at instantiation. So does one in a function template body (also
   a member's, a member template's or a generic lambda's, in a template or not): the body defers it
   and its instantiation evaluates it, with completeness at the end of the unit
-  (`tests/own/builtins/base_of_dependent_*`).
+  (`tests/own/builtins/base_of_dependent_*`). In an atomic constraint (a concept's definition, a
+  requires-clause or a nested-requirement) it is evaluated when the atom's satisfaction is
+  checked, with completeness at that point (`tests/own/concepts/base-of-dependent*`).
   A concrete occurrence checks it at its original source point. Missing graph information gets a hard diagnostic when it prevents a result.
   `__has_builtin` answers 0 while support is partial ([meta.rel], [class.derived], #218).
 - `__is_empty(T)` gives false for nonclass types and unions. For a complete nonunion class, it
@@ -2462,6 +2546,37 @@ and diagnoses reads past the end of an unterminated array in a required constant
 ([expr.const]). Native lowering requires no runtime `strlen` symbol. Fixtures in
 `tests/own/builtins/` cover detection, result type, argument checks, and constant and runtime scans.
 
+## C library string and memory builtins (#248, #1093)
+
+`__builtin_memchr`, `__builtin_memcmp`, `__builtin_memcpy`, `__builtin_memmove`,
+`__builtin_memset`, `__builtin_strchr`, `__builtin_strpbrk`, `__builtin_strrchr` and
+`__builtin_strstr` are direct calls of the C library's function of the same name, as libycxx's
+`<cstring>`, its run-time string helpers (`include/ycxx/core/mem_builtins.hpp`) and the run-time
+paths of its containers use them. Each is one `lex::BuiltinFunction::library` entry, and its C
+signature is a row of `sema::string_functions`; the searches return `char*`, as Clang's and GCC's
+do. Sema converts the arguments to the C signature and calls an implicit `extern "C"` declaration
+with the target's `<string.h>` exception specification (`World::string_function`), so a written
+declaration or definition that matches the target's header is the same entity. One with another
+exception specification is a second entity (whether it should be is #1114), but in both object
+writers an entity the object does not define shares the symbol of its name: the definition of
+that name if the object has one, else one undefined symbol (#1095). The object still lists the
+function once (`unit.string_builtin_symbols`, ELF and Mach-O), and each definition keeps its own
+symbol (#694). The unit then references the function as an
+undefined symbol, which libSystem or the C library provides at link time. A dependent argument
+defers the call to instantiation. They are not constant expressions yet (#1092). Fixtures in
+`tests/own/builtins/` (`memchr-memcmp-*`, `string-memory-*`) cover detection, signatures,
+argument checks and run-time results.
+
+## Pack expansions in builtin arguments (#1099)
+
+An argument of a builtin with ordinary expression arguments (`src/lex/builtins.cppm`'s
+`builtin_functions`) may be a pack expansion, as a call's may (`__builtin_strlen(a...)`,
+`__builtin_memcmp(a..., n)`). The parser reads it through the same `expandable` path as call
+arguments. While a pack is unexpanded the call is one dependent operand and its arity is not
+checked; the instantiation checks arity and conversions on the expanded arguments, as Clang and
+GCC do. GCC rejects `__builtin_addressof(a...)`; ycxx accepts it, as Clang does. Fixtures:
+`tests/own/builtins/pack-arguments*`.
+
 ## GNU constantness probe (#1065)
 
 `__builtin_constant_p(e)` returns an `int` prvalue. It gives 1 when a supported scalar or
@@ -2505,7 +2620,11 @@ Fable decided the representation (ast.md §6.6); the Opus session wrote the code
   bound, its function parameters declared and argument-dependent lookup at the point of the
   check; an error there makes it unsatisfied, a non-`bool` or non-constant result and "not
   supported" are hard errors (`survives_substitution`), so a missing feature never picks another
-  overload. Results are memoized per atom (`Program::atom_satisfied`).
+  overload. Results are memoized per atom (`Program::atom_satisfied`). Where the constraint is
+  written, a type trait with dependent operands is left for satisfaction
+  (`Sema::trait_at_satisfaction`), which judges the classes it needs complete at the point of the
+  check (`AtItem::satisfying_atom`). A `bool` type-trait built-in can be a requires-clause's
+  operand without parentheses (`tests/own/concepts/requires-clause-trait-primary.run.cpp`).
 - **Overload resolution** drops candidates whose constraints are not satisfied
   ([over.match.viable]/3) and, between templates that are otherwise equally specialized, prefers
   the one whose constraints subsume the other's ([temp.constr.order], [temp.func.order]/6).

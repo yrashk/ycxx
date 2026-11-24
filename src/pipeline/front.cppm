@@ -17,6 +17,7 @@ import ycxx.sema;
 import ycxx.parse;
 import :back;
 import :lines;
+import :policy_registry;
 
 export namespace ycxx::pipeline {
 
@@ -86,6 +87,9 @@ struct SemaResult {
   Shapes shapes;                      // its classes and enumerations, for `layout` (#115)
   std::vector<std::pair<EntityId, ast::Loc>> declared;
   std::vector<BodyAt> bodies;
+  // Policy origins are item-relative tokens. CheckPolicies places them using current source.
+  std::vector<PolicySite> policy_aliases;
+  std::vector<PolicyAnnotationSite> policy_annotations;
   bool has_errors() const {
     return lex_errors || std::ranges::any_of(messages, [](const SemaMessage& m) { return m.error; });
   }
@@ -201,12 +205,12 @@ struct FunctionVisibility {
 };
 // The visibility of the unit's symbols, from every declaration in it.
 void apply_visibility(TranslationUnit& tu, const std::set<EntityId>& hidden_declarations, const std::set<EntityId>& inline_declarations,
-                      const std::map<EntityId, FunctionVisibility>& function_visibility, bool linux) {
+                      const std::map<EntityId, FunctionVisibility>& function_visibility) {
   if (hidden_declarations.empty() && function_visibility.empty()) return;
   using Visibility = ast::GnuVisibility;
   for (Entity& e : tu.entities) {
     // An inline variable falls outside the ordinary data visibility profile.
-    e.hidden = hidden_declarations.contains(e.id) && (e.is_function || (linux && !inline_declarations.contains(e.id)));
+    e.hidden = hidden_declarations.contains(e.id) && (e.is_function || !inline_declarations.contains(e.id));
     if (!e.is_function || inline_declarations.contains(e.id)) continue;
     const auto found = function_visibility.find(e.id);
     if (found == function_visibility.end()) continue;
@@ -225,7 +229,7 @@ struct UnitPart {
   std::vector<Dynamic> dynamic;  // in definition order
   std::set<EntityId> inline_declarations, noexcept_declarations, hidden_declarations;
   std::set<EntityId> defined;  // functions a declaration here defines
-  std::set<EntityId> weak_declarations;  // explicitly weak (x86-64)
+  std::set<EntityId> weak_declarations;  // explicitly weak
   std::map<EntityId, FunctionVisibility> function_visibility;
   // Definitions that coalesce when any declaration in the unit says `inline`: functions (unless
   // `main`) and variables.
@@ -1164,8 +1168,8 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
       inline_declarations.insert(e);
     if (d.kind == ast::DeclKind::function && d.has_written_noexcept) noexcept_declarations.insert(e);
     if (d.hidden_visibility) hidden_declarations.insert(e);
-    if (linux && d.explicit_weak) weak_declarations.insert(e);
-    if (linux && d.kind == ast::DeclKind::function &&
+    if (d.explicit_weak) weak_declarations.insert(e);
+    if (d.kind == ast::DeclKind::function &&
         (d.hidden_visibility || d.explicit_default_visibility || d.namespace_visibility != Visibility::none)) {
       auto& visibility = function_visibility[e];
       if (visibility.written == Visibility::none) {
@@ -1202,9 +1206,9 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
     if (linkage == ast::Linkage::external && std::ranges::any_of(r.args, [&](const ast::TemplateArg& arg) {
           return names_tu_local(program, arg, /*include_value_types=*/false);
         })) linkage = ast::Linkage::internal;
-    // A member of a TU-local specialization binds locally, including one with a value of a
-    // TU-local enum type as its argument ([basic.link]).
-    if ((r.kind == sema::EntityKind::destructor || ordinary_class_template_member(r)) &&
+    // A constructor, destructor or ordinary class-template member binds locally when its
+    // owner is TU-local, including a specialization for the value of a TU-local enum ([basic.link]).
+    if ((r.kind == sema::EntityKind::constructor || r.kind == sema::EntityKind::destructor || ordinary_class_template_member(r)) &&
         linkage == ast::Linkage::external &&
         names_tu_local(program, r.scope, /*include_value_types=*/true)) linkage = ast::Linkage::internal;
     tu.entities.push_back({e, std::move(id), d.type, fn, r.lang, linkage, false, at, r.scope,
@@ -1288,6 +1292,11 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
       if ((!in_class && !specialized) || f.decl.is_virtual || !owner || !owner->destructor_noexcept.value_or(false) ||
           internal_class(entity.scope) ||
           names_tu_local(program, entity.scope, /*include_value_types=*/true)) return;
+    } else if (entity.kind == sema::EntityKind::constructor) {
+      // Hosted constructor cleanups require strong definitions and unwind frames.
+      if (f.constructor_cleanup != EntityId::none || internal_class(entity.scope) ||
+          names_tu_local(program, entity.scope, /*include_value_types=*/true) ||
+          names_tu_local(program, f.decl.type, /*include_value_types=*/true)) return;
     } else if (entity.kind != sema::EntityKind::function) {
       return;
     }
@@ -1311,6 +1320,13 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
   auto weak_inline_variable = [&](const ast::DeclSema& d) {
     if (part && weak_if_inline(d)) part->weak_if_inline.insert(d.entity);
     return inline_declarations.contains(d.entity) && weak_if_inline(d);
+  };
+  // Leave collection of an immediate function's body-local statics and closures to the existing
+  // native path when they are present.
+  auto immediate_without_code = [&](const ast::BodySema& body) {
+    return ins.seqs.size(body.closures) == 0 && std::ranges::none_of(ins.seqs.elements(body.locals), [&](const ast::LocalRec& local) {
+      return local.entity != EntityId::none && local.decl != ast::NodeId::none && ins.ast.is<ast::StaticVar>(local.decl);
+    });
   };
   for (std::uint32_t k = first; k < items.items.size() && k < end; ++k) {
     const items::Item& it = items.items[k];
@@ -1354,14 +1370,15 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
       ast::DeclSema d = decls[0];
       if (body.deduced) d.type = body.deduced_type;
       const auto& entity = world.entities.rec(d.entity);
-      // Sema has checked the body and keeps it for constant evaluation. Leave collection of
-      // body-local statics and closures to the existing native path when they are present.
-      if ((d.flags & sema::decl_flag::consteval_) && !member && !it.template_depth && !it.specialization &&
-          entity.kind == sema::EntityKind::function && entity.templ == EntityId::none && program.is_namespace(entity.scope) &&
-          !ins.names.spelling(entity.name).empty() && ins.seqs.size(body.closures) == 0 &&
-          std::ranges::none_of(ins.seqs.elements(body.locals), [&](const ast::LocalRec& local) {
-            return local.entity != EntityId::none && local.decl != ast::NodeId::none && ins.ast.is<ast::StaticVar>(local.decl);
-          })) continue;
+      // An immediate function's calls are all folded ([expr.const]), so it has no code: a free
+      // function, or a constructor defined in or outside its class. Sema has checked the body and
+      // keeps it for constant evaluation.
+      const bool immediate_free = !member && entity.kind == sema::EntityKind::function && program.is_namespace(entity.scope) &&
+                                  !ins.names.spelling(entity.name).empty();
+      const bool immediate_constructor = entity.kind == sema::EntityKind::constructor;
+      if ((d.flags & sema::decl_flag::consteval_) && (immediate_free || immediate_constructor) && !it.template_depth &&
+          !it.specialization && entity.templ == EntityId::none && immediate_without_code(body))
+        continue;
       tu.functions.push_back({d.entity, d, body, program.id(k), it.body_begin - it.begin, program.this_type(d)});
       const bool virtual_destructor = entity.kind == sema::EntityKind::destructor && d.is_virtual;
       const auto derived = virtual_destructor ? program.derived_virtual_destructor_ownership(entity.scope) : std::nullopt;
@@ -1411,7 +1428,6 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
           else tu.base_object_variants.insert(d.entity);
         }
       }
-      coalesce_inline_function(tu.functions.back(), member);
       // A written ordinary body starts at '{'. Other starts include a function-try-block and a
       // constructor initializer. Synthetic bodies and instantiations never enter this path.
       if (linux && entity.kind == sema::EntityKind::constructor) {
@@ -1431,6 +1447,7 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
           else if (linux) f.unwind_through_constructor = hosted_union_constructor_caller(program, d, body);
         }
       }
+      coalesce_inline_function(tu.functions.back(), member);
       closures_of(body.closures, program.id(k), it.body_begin - it.begin);
       continue;
     }
@@ -1461,6 +1478,11 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
     if (in->failed || in->body.value.tree == ast::NodeId::none) continue;
     const items::Item& it = items.items[in->item];
     declare(in->decl, ast::Loc{program.id(in->item), 0});  // errors in its name point at the template
+    // An immediate constructor's calls are all folded ([expr.const]): a constructor template's
+    // specialization, or a constructor of a class template's specialization.
+    if ((in->decl.flags & sema::decl_flag::consteval_) && world.entities.rec(in->spec).kind == sema::EntityKind::constructor &&
+        immediate_without_code(in->body.value))
+      continue;
     tu.functions.push_back({in->spec, in->decl, in->body.value, program.id(in->item), it.body_begin - it.begin,
                             program.this_type(in->decl)});
     if (it.parent != items::none && items.items[it.parent].kind == items::ItemKind::class_def) {
@@ -1630,8 +1652,18 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
     declare(d, std::nullopt);
   }
   if (root_deallocator) declare(*root_deallocator, std::nullopt);
+  // The C library functions builtins call, declared as the target's C library declares them
+  // (`World::string_function`).
+  for (EntityId e : program.library_functions()) {
+    ast::DeclSema d{};
+    d.entity = e;
+    d.type = world.entities.rec(e).type;
+    d.kind = ast::DeclKind::function;
+    d.has_written_noexcept = world.types.rec(d.type).fn_noexcept;
+    declare(d, std::nullopt);
+  }
   // A declaration anywhere in the unit can supply the visibility of the one object symbol.
-  apply_visibility(tu, hidden_declarations, inline_declarations, function_visibility, linux);
+  apply_visibility(tu, hidden_declarations, inline_declarations, function_visibility);
   if (part) {
     part->inline_declarations = std::move(inline_declarations);
     part->noexcept_declarations = std::move(noexcept_declarations);
@@ -1725,8 +1757,7 @@ TranslationUnit finish_unit(std::vector<UnitPart>& parts, sema::World& world, st
   };
   for (FunctionDef& f : tu.functions) validate_unwind(ins, tu, f, runtime, unwind_provider, unwind_definition);
   unwind_through_constructors(tu, unwind_definition);
-  apply_visibility(tu, hidden_declarations, inline_declarations, function_visibility,
-                   world.target.triple == ast::x86_64_linux.triple);
+  apply_visibility(tu, hidden_declarations, inline_declarations, function_visibility);
   return tu;
 }
 
