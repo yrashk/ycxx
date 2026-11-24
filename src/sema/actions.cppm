@@ -2995,7 +2995,7 @@ public:
   }
   bool has_user_ctors(QualType t) {
     const ClassRec* c = types().is_class(t) ? class_rec(types().class_of(t)) : nullptr;
-    return c && (c->user_ctors || c->closure || (c->dynamic && c->implicit_default_ctor != EntityId::none));
+    return c && (c->user_ctors || c->closure || c->dynamic);
   }
   // A class whose implicit default constructor is a function of its own: a dynamic class, or one
   // with a dynamic subobject (#309).
@@ -6699,7 +6699,8 @@ public:
       const EntityId implicit = cr->implicit_default_ctor;
       const QualType type = implicit == EntityId::none ? types().function(void_, {}, false, LangLinkage::cxx)
                                                        : w_->entities.rec(implicit).type;
-      cands.push_back({implicit, type, true, false});
+      // A dynamic class's implicit default constructor can be deleted ([class.default.ctor]/2).
+      cands.push_back({implicit, type, true, cr->dynamic && cr->default_deleted});
     }
     if (polymorphic_base && list && std::ranges::any_of(cr->members, [&](const MemberDeclRec& member) {
           if (!member.is_ctor) return false;

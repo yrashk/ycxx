@@ -1463,7 +1463,9 @@ public:
   std::optional<sema::DynamicClass> dynamic_class(u32 item, EntityId cls, const sema::ClassRec& rec);
   // Its implicit default and copy constructors, which install the vptr ([class.cdtor]).
   void dynamic_special_members(u32 item, EntityId cls, sema::ClassRec& rec);
-  EntityId synthesize_constructor(u32 item, EntityId cls, bool copy, bool nonthrowing);
+  EntityId synthesize_constructor(u32 item, EntityId cls, bool copy, bool nonthrowing, bool const_source);
+  void validate_dynamic_constructors(sema::ClassRec& rec);
+  std::map<EntityId, std::size_t> dynamic_synthesized_;  // synthesized constructors by entity: their `synth_` index
   // A complete class's size, as sema lays it out (`sizeof`).
   std::optional<u64> class_size(EntityId cls);
   // The implicitly defined default constructor's body ([class.default.ctor]/4).
@@ -5809,6 +5811,10 @@ private:
           s_.diag(name_at, Diag::conflicting_declaration, m->name);
           return bad();
         }
+        if (fs.cv != sema::Cv::none || !fs.params.empty() || fs.variadic) {
+          s_.diag(name_at, Diag::conflicting_declaration, m->name);  // [class.dtor]/1
+          return bad();
+        }
         if (template_ || explicit_ || inst_) {
           s_.diag(name_at, Diag::virtual_definition);
           return bad();
@@ -8503,7 +8509,7 @@ std::optional<u64> Program::class_size(EntityId cls) {
   return s.layout_of(w_->types.class_type(cls), false);
 }
 
-EntityId Program::synthesize_constructor(u32 item, EntityId cls, bool copy, bool nonthrowing) {
+EntityId Program::synthesize_constructor(u32 item, EntityId cls, bool copy, bool nonthrowing, bool const_source) {
   sema::Types& types = w_->types;
   const QualType ct = types.class_type(cls);
   ast::Builder b(w_->ins, &arena_);
@@ -8511,7 +8517,7 @@ EntityId Program::synthesize_constructor(u32 item, EntityId cls, bool copy, bool
   std::vector<QualType> ps;
   std::vector<ast::ParamSema> params;
   if (copy) {
-    ps.push_back(types.lvalue_ref(types.add_cv(ct, sema::Cv::const_)));
+    ps.push_back(types.lvalue_ref(const_source ? types.add_cv(ct, sema::Cv::const_) : ct));
     params.push_back({EntityId::none, ps[0], w_->ins.names.intern("other"), NodeId::none, 0});
   }
   const QualType type = types.function(types.builtin(sema::Builtin::void_), ps, false, LangLinkage::cxx, sema::Cv::none,
@@ -8548,18 +8554,23 @@ void Program::dynamic_special_members(u32 item, EntityId cls, sema::ClassRec& re
   for (const sema::FieldRec& f : rec.fields) subobjects.push_back(f.type);
   if (!rec.user_ctors && !rec.default_deleted && rec.defaulted_default_ctor == EntityId::none) {
     // [except.spec]: potentially throwing when a subobject's default initialization may be.
-    // Default member initializers are treated as potentially throwing.
+    // Default member initializers and user-declared constructors count as potentially throwing
+    // (an approximation, #1157).
+    const auto nothrow_default = [&](this auto&& self, QualType t) -> bool {
+      t = types.innermost_array_element(t);
+      if (!types.is_class(t)) return true;
+      const auto* r = classes_.find(types.class_of(t));
+      if (!r) return false;
+      if (r->implicit_default_ctor != EntityId::none)
+        return types.rec(w_->entities.rec(r->implicit_default_ctor).type).fn_noexcept;
+      return !r->user_ctors && !r->closure && std::ranges::none_of(r->fields, &sema::FieldRec::dmi) &&
+             std::ranges::all_of(r->bases, [&](const sema::BaseRec& b) { return self(types.class_type(b.cls)); }) &&
+             std::ranges::all_of(r->fields, [&](const sema::FieldRec& f) { return self(f.type); });
+    };
     const bool nonthrowing = std::ranges::none_of(rec.fields, &sema::FieldRec::dmi) &&
-        std::ranges::all_of(subobjects, [&](QualType t) {
-          t = types.innermost_array_element(t);
-          if (!types.is_class(t)) return true;
-          const auto* r = classes_.find(types.class_of(t));
-          if (!r) return false;
-          if (r->implicit_default_ctor != EntityId::none)
-            return types.rec(w_->entities.rec(r->implicit_default_ctor).type).fn_noexcept;
-          return !r->user_ctors && std::ranges::none_of(r->fields, &sema::FieldRec::dmi) && !r->layout_requires_virtual_support;
-        });
-    rec.implicit_default_ctor = synthesize_constructor(item, cls, false, nonthrowing);
+                             std::ranges::all_of(subobjects, nothrow_default);
+    rec.implicit_default_ctor = synthesize_constructor(item, cls, false, nonthrowing, true);
+    dynamic_synthesized_.emplace(rec.implicit_default_ctor, synth_.size() - 1);
   }
   // A virtual destructor defaulted on its first declaration is defined there ([dcl.fct.def.default]).
   if (rec.dynamic && rec.declared_destructor != EntityId::none && rec.destructor == rec.declared_destructor) {
@@ -8577,7 +8588,27 @@ void Program::dynamic_special_members(u32 item, EntityId cls, sema::ClassRec& re
         const auto assignment = assignment_parameter(m, ct);
         return assignment && types.rec(*assignment).rvalue_ref;
       }))
-    rec.copy_ctor = synthesize_constructor(item, cls, true, false);
+  {
+    rec.copy_ctor = synthesize_constructor(item, cls, true, false, rec.defaulted_copy_const);
+    dynamic_synthesized_.emplace(rec.copy_ctor, synth_.size() - 1);
+  }
+}
+
+// [class.default.ctor]/2, [class.copy.ctor]/10: an implicit constructor whose initialization
+// cannot be formed is deleted. Its body is analysed once the class is complete.
+void Program::validate_dynamic_constructors(sema::ClassRec& rec) {
+  const auto valid = [&](EntityId ctor) {
+    const auto synthesized = dynamic_synthesized_.find(ctor);
+    return synthesized == dynamic_synthesized_.end() || synthesized_body(synthesized->second).tree != NodeId::none;
+  };
+  if (rec.implicit_default_ctor != EntityId::none && !valid(rec.implicit_default_ctor)) {
+    rec.implicit_default_ctor = EntityId::none;
+    rec.default_deleted = true;
+  }
+  if (rec.copy_ctor != EntityId::none && !valid(rec.copy_ctor)) {
+    rec.copy_ctor = EntityId::none;
+    rec.copy_deleted = true;
+  }
 }
 
 std::optional<Program::DerivedVirtualDestructor> Program::derived_virtual_destructor_layout(EntityId cls) const {
@@ -8975,6 +9006,7 @@ const Result<ast::ClassDef>& Program::class_def(u32 item) {
       check_member_exception_patterns(*cls, fresh, out);
       if (member_declarations_valid && implicit_move) prepare_move_constructor(item, *cls, fresh);
       if (member_declarations_valid) check_default_member_initializers(fresh, out);
+      validate_dynamic_constructors(fresh);
     });
   }
   ast::Builder b(w_->ins, &arena_);
@@ -9619,6 +9651,7 @@ public:
     Ex body = s_.node(ast::Compound{b_.list({})}, 0, 0);
     Ex root = constructor_body({}, body, s_.types().rec(ctor.type).fn_noexcept);
     s_.pop_scope();
+    if (s_.has_error_since(0)) root = {};  // a deleted constructor (`validate_dynamic_constructors`)
     std::vector<ast::LocalRec> locals(s_.locals().begin(), s_.locals().end());
     std::vector<sema::Expansion> none;
     return b_.commit(ast::BodySema{root.ok() ? root.id : NodeId::none, b_.seq(std::span<const ast::LocalRec>(locals)),
@@ -10288,6 +10321,9 @@ bool Program::special_members(u32 item, EntityId cls, sema::ClassRec& rec,
   rec.layout_requires_virtual_support = rec.polymorphic || std::ranges::any_of(subobjects, [&](QualType t) {
     return classes_.layout_requires_virtual_support(t);
   });
+  // Only a class definition can admit the class or its subobjects (`dynamic_class`, after this);
+  // class template specializations and closures keep the virtual layout guard (#1153).
+  rec.virtual_layout_unsupported = rec.layout_requires_virtual_support;
   const bool manual_union_destruction = rec.union_ && user_dtor;
   if (class_diags && rec.union_ && !user_dtor && std::ranges::any_of(subobjects, [&](QualType t) {
         return classes_.destructor_of(t) != EntityId::none;
@@ -10758,7 +10794,7 @@ const ast::BodySema& Program::synthesized_body(std::size_t i) {
     Ex body = sm.node(ast::Compound{b.list({})}, 0, 0);
     stmts.push_back({body.id, 0});
     // A copy that cannot be formed leaves no body: code generation reports it.
-    root = failed ? Ex{} : sm.node(ast::Compound{b.list(stmts)}, 0, 0);
+    root = failed || sm.has_error_since(0) ? Ex{} : sm.node(ast::Compound{b.list(stmts)}, 0, 0);
     sm.pop_scope();
   } else {
     Ex body = sm.node(ast::Compound{b.list({})}, 0, 0);

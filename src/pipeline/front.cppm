@@ -1583,6 +1583,8 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
     const EntityId cls = world.entities.rec(s.decl.entity).scope;
     // A class template's current instantiation is not code ([temp.dep.type]).
     if (world.types.is_dependent(world.types.class_type(cls))) continue;
+    // A deleted implicit constructor of a dynamic class has no body (`validate_dynamic_constructors`).
+    if (program.synthesized_body(i).tree == ast::NodeId::none) continue;
     declare(s.decl, std::nullopt);
     tu.functions.push_back({s.decl.entity, s.decl, program.synthesized_body(i), program.id(s.item), 0, program.this_type(s.decl)});
     using enum parse::Program::SpecialMember;
