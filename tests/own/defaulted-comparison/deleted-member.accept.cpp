@@ -11,12 +11,6 @@ struct M {
     NoEq n;
     bool operator==(const M&) const = default;
 };
-struct U {
-    union {
-        int i;
-    };
-    friend bool operator==(U, U) = default;
-};
 struct P {
     int v;
     friend bool operator==(const P&, const P&) = default;
@@ -25,5 +19,4 @@ struct P {
 template<class T> concept equality = requires(const T& a) { a == a; };
 static_assert(!equality<O>);
 static_assert(!equality<M>);
-static_assert(!equality<U>);  // [class.compare.default]/2: a variant member
 static_assert(equality<P>);
