@@ -111,6 +111,9 @@ public:
   virtual void use_allocation_function(EntityId, bool = false) {}
   // A call of a C library function a builtin lowers to (`World::string_function`).
   virtual void use_library_function(EntityId) {}
+  // The static object denoted by a class-valued template parameter ([temp.param]).
+  virtual void use_template_parameter_object(EntityId) {}
+  virtual bool plain_class_template_type(EntityId) { return false; }
   // Check the selected implicitly declared copy assignment against its subobjects.
   virtual CopyAssignment require_copy_assignment(EntityId) { return CopyAssignment::unsupported; }
   // What a constant evaluation fetches (§B7): `function_ir` of a function defined before the
@@ -4403,6 +4406,7 @@ public:
     t.member_constant = [this](QualType qualifier, NameId name) {
       return qualified_member_constant(qualifier, name, 0);
     };
+    t.plain_class_template_type = [this](EntityId c) { return q_->plain_class_template_type(c); };
     t.template_decl = [this](EntityId tmpl) { return q_->template_decl(tmpl); };
     t.variable_constant = [this](EntityId spec) { return q_->constant_value(spec); };
     t.concept_constant = [this](EntityId entity, std::span<const TemplateArg> args) {
@@ -7683,11 +7687,27 @@ public:
         diag(begin, Diag::unexpanded_pack, name);  // [temp.variadic]/5: outside every expansion
         return {NodeId::none, begin, end};
       }
-      if (auto a = bound_arg(*p))
-        return literal(Types::unqualified(a->type), a->value, ValueCategory::prvalue, begin, end);
+      if (auto a = bound_arg(*p)) {
+        if (!ins().values.is<ast::VAggregate>(a->value))
+          return literal(Types::unqualified(a->type), a->value, ValueCategory::prvalue, begin, end);
+        QualType declared = types().canonical(Types::unqualified(a->type));
+        QualType object_type = types().add_cv(declared, Cv::const_);
+        EntityId object = w_->entities.entity({.kind = EntityKind::template_parameter_object,
+                                               .name = no_name(), .type = object_type, .args = {*a}});
+        if (!unevaluated) q_->use_template_parameter_object(object);
+        ExprInfo info{object_type, ValueCategory::lvalue, 0};
+        Ex result = node(ast::DeclRef{info, object}, begin, end, info);
+        declared_types_[std::to_underlying(result.id)] = declared;
+        return result;
+      }
       ConstId v = ins().intern_value(ast::VDepParam{p->depth, p->index});
-      ExprInfo info{Types::unqualified(p->type), ValueCategory::prvalue, expr_flag::dependent};
-      return node(ast::Literal{info, v}, begin, end, info);
+      QualType declared = Types::unqualified(p->type);
+      const bool class_parameter = types().is_class(declared) && !types().is_dependent(declared);
+      ExprInfo info{class_parameter ? types().add_cv(declared, Cv::const_) : declared,
+                    class_parameter ? ValueCategory::lvalue : ValueCategory::prvalue, expr_flag::dependent};
+      Ex result = node(ast::Literal{info, v}, begin, end, info);
+      if (class_parameter) declared_types_[std::to_underlying(result.id)] = declared;
+      return result;
     }
     if (const auto* declaration = earlier_nested_enumerator(name))
       return enumerator_in_list(*declaration, begin, end);
@@ -10001,14 +10021,10 @@ public:
   QualType decltype_of(Ex e, bool parenthesized) {
     if (!parenthesized) {
       if (auto l = as<ast::LocalRef>(e)) return local_declared_type(locals_[l->local]);
-      if (as<ast::Dependent>(e))
-        if (auto it = declared_types_.find(std::to_underlying(e.id)); it != declared_types_.end()) return it->second;
+      if (auto it = declared_types_.find(std::to_underlying(e.id)); it != declared_types_.end()) return it->second;
       // The declared type: the declaration's that named the entity (a static data member's is
       // its type, a function's its function type), a data member's from its class.
-      if (as<ast::DeclRef>(e)) {
-        if (auto it = declared_types_.find(std::to_underlying(e.id)); it != declared_types_.end()) return it->second;
-        return e.type();
-      }
+      if (as<ast::DeclRef>(e)) return e.type();
       if (auto m = as<ast::Member>(e))
         if (const ClassRec* c = class_rec(w_->entities.rec(m->member).scope))
           for (const FieldRec& f : c->fields)

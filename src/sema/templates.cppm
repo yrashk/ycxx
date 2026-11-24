@@ -70,6 +70,42 @@ public:
   TemplateArg type_arg(QualType t) { return {TemplateArgKind::type, types().canonical(t), ConstId::none}; }
   TemplateArg value_arg(QualType t, ConstId v) { return {TemplateArgKind::value, types().canonical(Types::unqualified(t)), v}; }
 
+  // The supported class-valued parameter profile ([temp.param]). Use a fixed, externally named
+  // class so its layout and template parameter object name agree in each translation unit.
+  bool structural_class_parameter(QualType t) {
+    t = types().canonical(t);
+    if (!types().is_class(t) || types().is_dependent(t)) return false;
+    EntityId id = types().class_of(t);
+    const ClassRec* c = classes_->find(id);
+    if (!c || !c->defined || !c->member_declarations_valid || c->union_ || c->user_ctors ||
+        c->closure || c->polymorphic || !c->bases.empty() || c->unapplied_layout ||
+        !c->destructor_usable || c->trivial_copyability.destructor != CopyOperation::eligible_trivial ||
+        c->trivial_copyability.copy_constructor != CopyOperation::eligible_trivial ||
+        c->copy_deleted || c->copy_nontrivial() || !plain_class_template_type || !plain_class_template_type(id))
+      return false;
+    for (EntityId e = id; e != EntityId::none;) {
+      const EntityRec& r = w_->entities.rec(e);
+      const std::string_view name = ins().names.spelling(r.name);
+      if (r.linkage != ast::Linkage::external || r.templ != EntityId::none ||
+          (r.kind != EntityKind::namespace_ && r.kind != EntityKind::class_) ||
+          name.empty() || name == "(anonymous)")
+        return false;
+      e = r.scope;
+    }
+    return std::ranges::all_of(c->fields, [&](const FieldRec& f) {
+      return c->access_of(f.entity) == ast::Access::public_ && types().is_integral(f.type) &&
+             !Types::is_volatile(types().canonical(f.type)) && !f.mutable_ && !f.bit_width && !f.no_unique_address;
+    });
+  }
+
+  bool needs_class_value_check(QualType source, QualType target, ConstId value) {
+    // A concrete class argument cannot be relabelled as a different parameter type.
+    const auto concrete_class = [&](QualType t) { return types().is_class(t) && !types().is_dependent(t); };
+    return concrete_class(source) || concrete_class(target) ||
+           (ins().values.is<ast::VAggregate>(value) &&
+            types().is_class(ins().values.get<ast::VAggregate>(value).type));
+  }
+
   // The specialization of variable template `templ` for canonical arguments ([temp.spec.general]).
   // `constraints`: a constrained partial specialization's pattern, keyed by its constraints'
   // token fingerprint too (Fable's decision on #234).
@@ -595,6 +631,15 @@ public:
     QualType t = a.type;
     if (types().is_dependent(t))
       if (auto st = substitute(t, b)) t = types().canonical(Types::unqualified(*st));
+    if (ins().values.is<ast::VDepParam>(a.value)) {
+      const auto& parameter = ins().values.get<ast::VDepParam>(a.value);
+      if (auto bound = b.at(parameter.depth, parameter.index);
+          bound && (needs_class_value_check(bound->type, t, bound->value) ||
+                    needs_class_value_check(a.type, t, a.value))) {
+        if (bound->kind != TemplateArgKind::value) return std::nullopt;
+        return converted_value(*bound, t);
+      }
+    }
     if (ins().values.is<ast::VDepMember>(a.value)) {
       auto value = substitute_member_value(a.value, b);
       if (!value) return std::nullopt;
@@ -603,14 +648,16 @@ public:
     if (ins().values.is<ast::VDepCall>(a.value)) {
       auto value = substitute_call_value(a.value, b);
       if (!value) return std::nullopt;
-      if (ins().values.is_dependent(value->value)) return value_arg(t, value->value);
+      if (ins().values.is_dependent(value->value) && !needs_class_value_check(value->type, t, value->value))
+        return value_arg(t, value->value);
       return converted_value(*value, t);
     }
     if (ins().values.is<ast::VDepConcept>(a.value)) {
       auto value = substitute_concept_value(a.value, b);
       if (!value) return std::nullopt;
-      if (ins().values.is_dependent(*value)) return value_arg(t, *value);
-      return converted_value(value_arg(types().builtin(Builtin::bool_), *value), t);
+      const QualType source = types().builtin(Builtin::bool_);
+      if (ins().values.is_dependent(*value) && !needs_class_value_check(source, t, *value)) return value_arg(t, *value);
+      return converted_value(value_arg(source, *value), t);
     }
     auto v = substitute_value(a.value, b);
     if (!v) return std::nullopt;
@@ -620,6 +667,7 @@ public:
     };
     if ((is_predicate(a.value) || is_predicate(*v)) && !types().is(t, Builtin::bool_))
       return std::nullopt;
+    if (needs_class_value_check(a.type, t, *v)) return converted_value(value_arg(a.type, *v), t);
     if (ins().values.is<ast::VDepVariable>(a.value) && !ins().values.is_dependent(*v)) {
       QualType source = t;
       if (ins().values.is<ast::VInt>(*v)) source = ins().values.get<ast::VInt>(*v).type;
@@ -1311,8 +1359,15 @@ public:
       if (x.templ != EntityId::none || y.templ != EntityId::none) return x.templ == y.templ;
       return types().canonical(x.type) == types().canonical(y.type);
     }
-    if (ins().values.is<ast::VDepParam>(x.value) && ins().values.get<ast::VDepParam>(x.value).depth == depth)
-      return bind(out, ins().values.get<ast::VDepParam>(x.value).index, y);
+    if (ins().values.is<ast::VDepParam>(x.value) && ins().values.get<ast::VDepParam>(x.value).depth == depth) {
+      const u16 index = ins().values.get<ast::VDepParam>(x.value).index;
+      if (needs_class_value_check(y.type, x.type, y.value)) {
+        if (index >= head_.size() || head_[index].pack) return false;
+        auto value = converted_value(y, head_[index].type);
+        return value && bind(out, index, *value);
+      }
+      return bind(out, index, y);
+    }
     if (is_expansion(x) && is_expansion(y)) return deduce_arg(pattern_of(x), pattern_of(y), depth, out);
     // An expression naming parameters is a non-deduced context ([temp.deduct.type]). The
     // specialized type or substituted partial pattern is checked once the bindings are known.
@@ -1501,6 +1556,7 @@ public:
     for (std::size_t i = 0; i < params.size(); ++i) {
       if (!out[i] || params[i].kind != TemplateArgKind::value || params[i].pack) continue;
       auto pt = substitute(params[i].type, bindings(depth, out));
+      if (pt && types().is_class(*pt) && types().is_dependent(params[i].type)) return std::nullopt;
       auto v = pt ? converted_value(*out[i], *pt) : std::nullopt;
       if (!v) return std::nullopt;
       out[i] = *v;
@@ -1577,6 +1633,7 @@ public:
       if (p.kind == TemplateArgKind::type) return a;
       if (p.kind == TemplateArgKind::template_) return template_matches(p, a) ? std::optional(a) : std::nullopt;
       auto pt = substitute(p.type, bindings(depth, out));
+      if (pt && types().is_class(*pt) && types().is_dependent(p.type)) return std::nullopt;
       if (deferred(a)) return pt && (types().is_integral(*pt) || types().is_dependent(*pt)) ? std::optional(a) : std::nullopt;
       return pt ? converted_value(a, *pt) : std::nullopt;
     };
@@ -1704,6 +1761,26 @@ public:
   // pointer. None when it does not convert.
   std::optional<TemplateArg> converted_value(const TemplateArg& a, QualType t) {
     t = types().canonical(Types::unqualified(t));
+    if (needs_class_value_check(a.type, t, a.value)) {
+      if (types().canonical(Types::unqualified(a.type)) != t || !structural_class_parameter(t)) return std::nullopt;
+      // A direct reference to another class parameter retains its known type until substitution.
+      if (ins().values.is<ast::VDepParam>(a.value) &&
+          ins().values.get<ast::VDepParam>(a.value).depth != dependent_depth)
+        return value_arg(t, a.value);
+      if (!ins().values.is<ast::VAggregate>(a.value)) return std::nullopt;
+      const auto& aggregate = ins().values.get<ast::VAggregate>(a.value);
+      const auto values = ins().seqs.elements(aggregate.elems);
+      const auto& fields = classes_->find(types().class_of(t))->fields;
+      if (aggregate.type != t || values.size() != fields.size()) return std::nullopt;
+      // Normalize to the declared field types so the value is independent of how it was formed.
+      std::vector<ConstId> canonical;
+      canonical.reserve(fields.size());
+      for (std::size_t i = 0; i < fields.size(); ++i) {
+        if (!ins().values.is<ast::VInt>(values[i])) return std::nullopt;
+        canonical.push_back(w_->values.integer(fields[i].type, ast::int_bits(ins(), values[i])));
+      }
+      return value_arg(t, w_->values.aggregate(t, canonical));
+    }
     // Predicate conversions to non-bool destinations need a dependent conversion (#209).
     // A dependent base alignment is checked again when the written argument is replayed.
     ConstId pattern = is_expansion(a) ? pattern_of(a).value : a.value;
@@ -1745,6 +1822,12 @@ public:
     if (params.empty()) return std::vector<TemplateArg>{};
     u16 depth = params[0].depth;
     for (std::size_t i = 0; i < params.size(); ++i) {
+      // A class-valued parameter's declared type is fixed in this profile. Check before
+      // accepting a deduced argument or any form of omitted default ([temp.arg.nontype]).
+      if (params[i].kind == TemplateArgKind::value && types().is_dependent(params[i].type)) {
+        auto type = substitute(params[i].type, bindings(depth, out));
+        if (type && types().is_class(*type) && !types().is_dependent(*type)) return std::nullopt;
+      }
       if (out[i]) continue;
       // A pack neither given nor deduced is empty ([temp.arg.explicit]/4).
       if (params[i].pack) {
@@ -2234,6 +2317,7 @@ public:
   // The scopedness of an enumeration whose record has yet to be published.
   std::function<std::optional<bool>(EntityId)> defining_enum_is_scoped;
   // The declaration of template `templ` with its head, as lookup at a point finds it.
+  std::function<bool(EntityId)> plain_class_template_type;
   std::function<std::optional<ast::DeclSema>(EntityId)> template_decl;
   std::function<std::optional<ConstId>(EntityId)> variable_constant;
   std::function<std::optional<TemplateArg>(QualType, NameId)> member_constant;
