@@ -1513,7 +1513,9 @@ private:
       const bool variadic = lex::va_builtin(name).has_value();
       const auto* function = lex::builtin_function(name);
       const bool ordinary = function && function->advertised && (function->type != 'l' ||
-          ast::computes((*s_->config.target)[ast::Builtin::long_double].format));
+          ast::computes((*s_->config.target)[ast::Builtin::long_double].format)) &&
+          (function->function != lex::BuiltinFunction::source_location ||
+           s_->config.target->triple == ast::x86_64_linux.triple);
       const auto* trait = lex::type_trait(name);
       const bool supported = (trait && trait->advertised) || lex::builtin_template(name) || ordinary || variadic;
       return number_token(t, supported ? 1 : 0);

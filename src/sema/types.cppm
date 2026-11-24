@@ -369,6 +369,7 @@ public:
 
   // The type as it would be written, for diagnostics.
   std::string spell(QualType q) const { return spell(q, ""); }
+  std::string spell_declarator(QualType q, std::string name) const { return spell(q, std::move(name)); }
   // How a class is named in diagnostics; set by the world that knows the entities.
   std::function<std::string(EntityId)> class_name;
 
@@ -597,6 +598,8 @@ struct EntityRec {
   // An unnamed enumeration's first enumerator and canonical underlying `type` denote it for
   // linkage purposes ([dcl.enum]/12). Neither binds the type's name in source lookup.
   std::optional<NameId> enum_linkage_name{};
+  // The initial value of compiler-created immutable storage without a declaration.
+  ConstId constant_object = ConstId::none;
 };
 
 class Entities {
@@ -619,6 +622,8 @@ public:
 
   // A variable initializer can name the declarator as a closure owner before its type is known.
   EntityId identity(const EntityRec& r) {
+    if (r.constant_object != ConstId::none)
+      return ins_->entities.add<EntityId>(ast::mix(ast::seed("ycxx.sema.constant_object"), ins_->values.fp(r.constant_object)));
     Fp128 f = ast::seed("ycxx.sema.Entity");
     f = ast::mix(f, std::to_underlying(r.kind));
     f = ast::mix(f, ins_->names.fp(r.name));
@@ -844,6 +849,8 @@ struct ClassRec {
   // Written zero-parameter defaulting, with the completed class's supported no-op proof.
   EntityId defaulted_default_ctor = EntityId::none;
   bool trivial_defaulted_default_ctor = false;
+  // The supported nonempty defaulted constructor initializes one pointer to null.
+  bool null_pointer_defaulted_default_ctor = false;
   EntityId declared_destructor = EntityId::none;  // retains the access of a written trivial destructor
   EntityId destructor = EntityId::none;
   EntityId destructor_declaration() const {
