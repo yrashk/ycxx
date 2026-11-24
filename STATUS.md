@@ -2755,14 +2755,17 @@ Fable decided the representation (ast.md §6.6); the Opus session wrote the code
   parse.cppm, [temp.friend]/1, #259), in a class or a class template: `ClassRec::friends` holds
   the class template's entity, and `ClassRec::befriends` grants access to each of its
   specializations, from the primary or a partial specialization. An unqualified name is looked
-  up in the innermost enclosing namespace only ([dcl.type.elab]/4); finding none, it names a
-  class template of that namespace, not visible until declared there. `N::X` must name an
-  earlier class template. The heads must agree in kinds, packs and non-dependent non-type
-  parameter types (`conflicting declaration` otherwise), and may give no default arguments. A
-  head's constraints are not compared with the template's yet (#1182).
+  up among the innermost enclosing namespace's members and using-declarations only
+  ([dcl.type.elab]/4); finding none, it names a class template of that namespace (keyed by its
+  head at depth 0), not visible until declared there. `N::X` must name an earlier class
+  template. The heads must agree in kinds, packs and non-dependent non-type parameter types
+  (`conflicting declaration` otherwise), may give no default arguments and may not redeclare a
+  template parameter. A head's constraints are not compared with the template's yet (#1182),
+  and a later conflicting declaration of a friend-declared name is not diagnosed (#1184).
 - **Class friends in class templates** (`friend class X;`, `friend N::X;`, `friend struct N::X<T>;`,
   `friend C<T>;`) are analysed again in each specialization with its arguments; a dependent one
-  befriends nothing in the pattern.
+  befriends nothing in the pattern. `friend class X;` still looks past the innermost namespace,
+  and `friend typename T::F;` and `friend class T::G;` are rejected (#1185).
 - **Checks** (`Sema::accessible`, `check_access`): a private or protected member may be named in
   a member function or default member initializer of its class, in the class's scope (the
   initializer of a static data member defined outside it), or in a friend function or friend
