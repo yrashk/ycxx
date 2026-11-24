@@ -191,7 +191,7 @@ private:
     std::vector<u32> discardable_reference_parameters;
     for (std::size_t i = 0; i < locals.size(); ++i) {
       auto& l = locals[i];
-      const bool parameter = s_->in_function_body && (l.flags & local_flag::parameter) &&
+      const bool parameter = (l.flags & local_flag::parameter) &&
                              !(l.flags & (ast::local_flag::requires_parameter | local_flag::default_argument_parameter));
       if (s_->types().is_class(l.type)) {
         if (i < local_values.size() && local_values[i]) {
@@ -206,8 +206,8 @@ private:
           if ((parameter || named_receiver) && importable_local_record(l.type, std::nullopt))
             opaque_record_locals.push_back(static_cast<u32>(i));
         }
-      } else if (parameter && l.name != s_->no_name() && s_->types().is_reference(l.type) &&
-                 s_->types().is_class(s_->types().referee(l.type))) {
+      } else if (parameter && s_->in_function_or_lambda_body() && l.name != s_->no_name() &&
+                 s_->types().is_reference(l.type) && s_->types().is_class(s_->types().referee(l.type))) {
         discardable_reference_parameters.push_back(static_cast<u32>(i));
       }
       l.decl = NodeId::none;  // drafts of the enclosing frame
