@@ -2545,19 +2545,24 @@ and diagnoses reads past the end of an unterminated array in a required constant
 ([expr.const]). Native lowering requires no runtime `strlen` symbol. Fixtures in
 `tests/own/builtins/` cover detection, result type, argument checks, and constant and runtime scans.
 
-## Byte search and comparison builtins (#248)
+## C library string and memory builtins (#248, #1093)
 
-`__builtin_memchr(s, c, n)` and `__builtin_memcmp(s1, s2, n)` are direct calls of the C
-library's `memchr` and `memcmp`, as libycxx's `<cstring>` and its run-time string helpers
-(`include/ycxx/core/mem_builtins.hpp`) use them. Sema converts the arguments to the C signatures
-(`void*` and `int` results) and calls an implicit `extern "C"` declaration with the target's
-`<string.h>` exception specification (`World::string_function`), so a written declaration or
-definition of the function is the same entity and symbol (`unit.string_builtin_symbols`). The unit then references `memchr` or `memcmp` as an undefined symbol,
-which libSystem or the C library provides at link time. A dependent argument defers the call to
-instantiation. Fixtures in `tests/own/builtins/` cover detection, signatures, argument checks and
-run-time results.
+`__builtin_memchr`, `__builtin_memcmp`, `__builtin_memcpy`, `__builtin_memmove`,
+`__builtin_memset`, `__builtin_strchr`, `__builtin_strpbrk`, `__builtin_strrchr` and
+`__builtin_strstr` are direct calls of the C library's function of the same name, as libycxx's
+`<cstring>`, its run-time string helpers (`include/ycxx/core/mem_builtins.hpp`) and the run-time
+paths of its containers use them. Each is one `lex::BuiltinFunction::library` entry, and its C
+signature is a row of `sema::string_functions`; the searches return `char*`, as Clang's and GCC's
+do. Sema converts the arguments to the C signature and calls an implicit `extern "C"` declaration
+with the target's `<string.h>` exception specification (`World::string_function`), so a written
+declaration or definition of the function is the same entity and symbol
+(`unit.string_builtin_symbols`, ELF and Mach-O). The unit then references the function as an
+undefined symbol, which libSystem or the C library provides at link time. A dependent argument
+defers the call to instantiation. Fixtures in `tests/own/builtins/` (`memchr-memcmp-*`,
+`string-memory-*`) cover detection, signatures, argument checks and run-time results.
 
-In constant evaluation (#1092) the call is marked (`ast::Call::builtin`), and IR generation
+`memchr` and `memcmp` are constant expressions (#1092); the others are not. Their rows carry a
+`constant` (`ast::LibraryBuiltin`), which marks the call (`ast::Call::builtin`), and IR generation
 branches on `consteval_br`: the runtime edge is the library call, which `lower` keeps, and the
 consteval edge is the `builtin` op (`ir::BuiltinFn`), which the interpreter evaluates. It reads
 objects of narrow character type, and elements of arrays of them, as `unsigned char` with the
@@ -4084,4 +4089,3 @@ the body. A non-generic lambda body uses its own evaluation context.
 - General class objects, member pointers, operands whose type dependence is unresolved, and
   other direct parenthesized template argument spellings remain open, as do dependent
   template arguments, requirements, and exception specifications.
-  [#286](https://github.com/yrashk/ycxx/issues/286)
