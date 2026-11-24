@@ -4591,9 +4591,11 @@ private:
         return false;
       }
       EntityId b = types.class_of(spec.type);
-      const bool itself = self != EntityId::none
-                              ? b == self
-                              : p_->world().entities.rec(b).name == name && p_->world().entities.rec(b).scope == ns_entity();
+      // A class template's own pattern is dependent and returned above, so a nondependent base
+      // named like it is another of its specializations, complete or not on its own.
+      const bool itself = self != EntityId::none ? b == self
+                          : !template_ && p_->world().entities.rec(b).name == name &&
+                                p_->world().entities.rec(b).scope == ns_entity();
       if (itself) {
         s_.diag(at, Diag::incomplete_type, spec.type);  // the class itself: incomplete here
         return false;
