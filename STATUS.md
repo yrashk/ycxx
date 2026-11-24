@@ -4442,8 +4442,13 @@ the body. A non-generic lambda body uses its own evaluation context.
   R::equal; }` (`defaulted_three_way_body`). The exception specification covers the comparisons,
   the `vi != 0` tests and the equal result.
 - `x.operator@(…)` and `p->operator@(…)` name member operator functions.
-- A member operator that overload resolution selects and that is deleted, ambiguous or
-  inaccessible makes the expression ill-formed; the non-member candidates are not tried then.
+- For non-assignment binary operators without comparison rewrites, an access, deletion or
+  ambiguity diagnostic from the member-only probe can trigger joint ranking with nonmembers.
+  The recovery covers direct, non-template classes, exact bindings and integral conversions
+  by value. It retains the member diagnostic when a member wins, reports ambiguity when no
+  candidate wins, and preserves errors from using the selected nonmember. Comparison ranking
+  continues in
+  [#1223](https://github.com/yrashk/ycxx/issues/1223).
 - Remaining: the `==` a defaulted `<=>` declares implicitly
   ([#1196](https://github.com/yrashk/ycxx/issues/1196)); the synthesized three-way comparison from
   `==` and `<` ([#1197](https://github.com/yrashk/ycxx/issues/1197)); conversions between
