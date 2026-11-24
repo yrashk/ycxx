@@ -27,9 +27,9 @@ export namespace ycxx::trace {
 struct Feed {
   int fd = -1;
   std::function<bool()> pump;
-  std::string source;  // what it watches, for the status line (`daemon of /path/to/project`)
+  std::string source;  // what it watches, for the title bar (`daemon of /path/to/project`)
   std::function<bool()> tick = {};
-  std::string ended = "the daemon has gone";  // the status line's words once it has ended
+  std::string ended = "the daemon has gone";  // the title bar's words once it has ended
   bool newest_first = true;                   // the latest request on top
 };
 

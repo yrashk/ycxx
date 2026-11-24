@@ -421,6 +421,18 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
   - Key a selection by the cells it covers, never by row numbers: a live feed, a sort or a
     filter moves the rows under it (#636's one P1).
   - Learned on #635 and #636.
+- **Show a terminal UI's change as pictures, rendered from a pty.** Polishing the trace browser's
+  layout (#1119) needed screenshots at fixed sizes, before and after, for the user to steer.
+  - Do: run the program under Python's `pty.fork` with `TIOCSWINSZ` set, send keys with pauses,
+    feed the output to `pyte`, and draw its cells with Pillow. Feed only the last frame (from
+    the last `ESC [ 1 ; 1 H`); a live build draws thousands, and pyte took minutes on all of them.
+    pyte ignores SGR 2 (faint), so map it to an attribute the program never uses before feeding.
+  - Copy a rebuilt binary to a new path (`rm` first). macOS kills a binary overwritten in place
+    with `SIGKILL` and no output, which looks like a crash.
+  - Give a scratch folder a `.git`, and stop its daemon when you replace the binary. The daemon's
+    root is the nearest `.git`, so a folder under `/tmp` without one was rooted at `$HOME`, and
+    runs hung behind stale daemons of replaced binaries until they were killed.
+  - Learned on #1119.
 - **Reduce a compiler crash from the build system's exact command, with a script.** A GCC ICE
   under CMake seemed to vanish when re-run by hand. Two things cost about 20 minutes of
   bisecting:
