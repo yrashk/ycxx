@@ -3,9 +3,9 @@
 // interpreter (ycxx.interp) runs it in constant mode inside the query that analyses the
 // expression. Callees' bodies and namespace-scope variables come through `Questions`.
 //
-// The enclosing function's locals usable in constant expressions (constexpr, or const integral
-// with a constant initializer) become const objects of the thunk with their values; any other
-// local is an object outside its lifetime, so evaluating a use of it is not constant.
+// The thunk imports the enclosing function's locals usable in constant expressions with their
+// known values. Supported by-value record parameters also supply an object identity while their
+// contents remain unavailable to constant evaluation.
 export module ycxx.sema:eval;
 
 import std;
