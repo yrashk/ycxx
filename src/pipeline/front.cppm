@@ -1343,6 +1343,16 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
       return local.entity != EntityId::none && local.decl != ast::NodeId::none && ins.ast.is<ast::StaticVar>(local.decl);
     });
   };
+  // A retained immediate body can still refer to one of these functions in its native code.
+  // Object emission follows those references before it decides which bodies to omit (#1097).
+  auto immediate_if_referenced = [&](const ast::DeclSema& decl, const sema::EntityRec& entity,
+                                     const ast::BodySema& body) {
+    return (decl.flags & sema::decl_flag::consteval_) && !decl.is_virtual &&
+           entity.kind == sema::EntityKind::function &&
+           ((decl.flags & sema::decl_flag::member) ||
+            (entity.templ != EntityId::none && world.entities.rec(entity.templ).kind == sema::EntityKind::function_template)) &&
+           immediate_without_code(body);
+  };
   // A dynamic class's constructors and destructors install its table, share their code with
   // their base-object entries (no virtual bases), and a virtual destructor adds its deleting
   // entry, D1 then sized `operator delete` (Itanium C++ ABI §2.5.2, §3.2.3, §5.1.4.3; #309).
@@ -1473,6 +1483,7 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
           !it.specialization && entity.templ == EntityId::none && immediate_without_code(body))
         continue;
       tu.functions.push_back({d.entity, d, body, program.id(k), it.body_begin - it.begin, program.this_type(d)});
+      tu.functions.back().emit_if_referenced = immediate_if_referenced(d, entity, body);
       const bool virtual_destructor = entity.kind == sema::EntityKind::destructor && d.is_virtual;
       const auto derived = virtual_destructor ? program.derived_virtual_destructor_ownership(entity.scope) : std::nullopt;
       const bool derived_producer = derived && derived->owns_derived_key;
@@ -1574,13 +1585,14 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
     declare(in->decl, ast::Loc{program.id(in->item), 0});  // errors in its name point at the template
     // An immediate constructor's calls are all folded ([expr.const]): a constructor template's
     // specialization, or a constructor of a class template's specialization.
-    if ((in->decl.flags & sema::decl_flag::consteval_) && world.entities.rec(in->spec).kind == sema::EntityKind::constructor &&
+    const auto& entity = world.entities.rec(in->spec);
+    if ((in->decl.flags & sema::decl_flag::consteval_) && entity.kind == sema::EntityKind::constructor &&
         immediate_without_code(in->body.value))
       continue;
     tu.functions.push_back({in->spec, in->decl, in->body.value, program.id(in->item), it.body_begin - it.begin,
                             program.this_type(in->decl)});
+    tu.functions.back().emit_if_referenced = immediate_if_referenced(in->decl, entity, in->body.value);
     if (it.parent != items::none && items.items[it.parent].kind == items::ItemKind::class_def) {
-      const auto& entity = world.entities.rec(in->spec);
       const bool ordinary_member = ordinary_class_template_member(entity) && !in->decl.is_virtual &&
                                    !internal_class(entity.scope) &&
                                    !names_tu_local(program, entity.scope, /*include_value_types=*/true);
@@ -1821,8 +1833,8 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
     if (!part) validate_unwind(ins, tu, f, runtime, unwind_provider, unwind_definition);
   }
   if (has_typed_cast) {
-    // Only emitted trees need native RTTI. In particular, syntax-only expressions and
-    // constant initializers do not introduce references to the host runtime.
+    // Any definition that can reach native emission needs its RTTI checked here. The object
+    // stage can omit an unreferenced immediate definition after these checks.
     std::set<std::pair<EntityId, EntityId>> checked;
     for (const FunctionDef& f : tu.functions) {
       if (f.body.tree == ast::NodeId::none) continue;

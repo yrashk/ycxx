@@ -151,6 +151,7 @@ struct FunctionDef {
   EntityId destructor_table = EntityId::none;  // the primary table installed by D1 and D2
   // The primary table a dynamic class's constructor installs after its base subobject (#309).
   EntityId constructor_table = EntityId::none;
+  bool emit_if_referenced = false;  // an eligible immediate definition (#1097)
 };
 
 // A variable definition at namespace scope with its constant initializer, or `ConstId::none` for
@@ -2178,24 +2179,33 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
     co_return co_await locate_errors(cx, id, std::move(out));
   }
   std::vector<FnKey> fns;
-  for (const FunctionDef& f : tu.functions) fns.push_back({id, f.entity});
+  std::set<std::uint32_t> deferred;
+  for (const FunctionDef& f : tu.functions) {
+    if (f.emit_if_referenced) deferred.insert(ir::raw(f.entity));
+    else fns.push_back({id, f.entity});
+  }
 
-  // Functions: function_ir, then lower. An error points at the construct when it has a node.
-  std::vector<StringUse> strings;
-  auto use = [&](std::span<const StringUse> s) {
-    for (const StringUse& u : s)
-      if (!std::ranges::contains(strings, u.object, &StringUse::object)) strings.push_back(u);
+  // Native references to deferred immediate definitions can survive in another immediate
+  // function's retained code. Follow them in the lowered bodies, where only the runtime edge
+  // of an if consteval remains.
+  std::set<std::uint32_t> used;
+  std::vector<FnKey> pending;
+  auto use_entity = [&](std::uint32_t entity) {
+    if (used.insert(entity).second && deferred.contains(entity))
+      pending.push_back({id, EntityId(entity)});
   };
-  std::vector<FnKey> lowered;
-  {
-    auto ls = co_await cx.par_map<Lower>(fns);
-    for (std::size_t i = 0; i < fns.size(); ++i) {
-      const Lowered& l = ls[i];
+  auto collect_lowered = [&](std::span<const FnKey> keys, const auto& bodies) {
+    for (std::size_t i = 0; i < keys.size(); ++i) {
+      const Lowered& l = bodies[i];
       if (l.error) errors.push_back(*l.error);
       if (!l.body) continue;
-      use(l.strings);
-      lowered.push_back(fns[i]);
+      use_entity(ir::raw(keys[i].fn));
+      for (const auto& ref : references(l.body->f)) use_entity(ir::raw(ref.entity));
     }
+  };
+  {
+    const auto ls = co_await cx.par_map<Lower>(fns);
+    collect_lowered(fns, ls);
   }
 
   // Variables: their initial bytes, by what they hold ([basic.start.static]).
@@ -2203,11 +2213,8 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
   auto [shapes, shape_index] = co_await cx.par_fetch(engine::q<UnitShapes>{id}, engine::q<UnitShapeIndex>{id});
   // One layout for every variable, which keeps its class layouts between them (#938).
   QueryLayout layout(cx, shapes, shape_index, target);
-  std::size_t strings_seen = 0;
   for (const Variable& v : tu.variables) {
     auto b = initial_bytes(in, layout, v.type, v.init);
-    use(layout.strings().subspan(strings_seen));
-    strings_seen = layout.strings().size();
     if (!b) {
       errors.push_back({v.at, std::format("{} is not supported yet", b.error())});
       continue;
@@ -2236,6 +2243,46 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
     symbols.push_back({slot, std::format("l_.init_func.{}", i), obj::binding::local});
   }
 
+  // Tables and data can also reference definitions. Process these roots before lowering any
+  // deferred definitions, since each newly lowered body can reference another one.
+  if (const auto& table = tu.owned_virtual_table) {
+    use_entity(ir::raw(table->entity));
+    for (EntityId slot : table->slots) use_entity(ir::raw(slot));
+  }
+  for (const DynamicTable& table : tu.dynamic_tables) {
+    use_entity(ir::raw(table.entity));
+    for (EntityId slot : table.slots) use_entity(ir::raw(slot));
+  }
+  for (const aarch64::DataDef& d : data) {
+    use_entity(ir::raw(d.entity));
+    for (const aarch64::DataReloc& r : d.relocs) use_entity(ir::raw(r.target));
+  }
+  while (!pending.empty()) {
+    auto batch = std::exchange(pending, {});
+    const auto ls = co_await cx.par_map<Lower>(batch);
+    collect_lowered(batch, ls);
+  }
+
+  // Restore definition order for code and string literals after the reference walk.
+  std::vector<const FunctionDef*> definitions;
+  fns.clear();
+  for (const FunctionDef& f : tu.functions) {
+    if (f.emit_if_referenced && !used.contains(ir::raw(f.entity))) continue;
+    fns.push_back({id, f.entity});
+    definitions.push_back(&f);
+  }
+  std::vector<StringUse> strings;
+  auto use = [&](std::span<const StringUse> s) {
+    for (const StringUse& u : s)
+      if (!std::ranges::contains(strings, u.object, &StringUse::object)) strings.push_back(u);
+  };
+  {
+    const auto ls = co_await cx.par_map<Lower>(fns);  // all hits
+    for (const Lowered& l : ls)
+      if (l.body) use(l.strings);
+  }
+  use(layout.strings());
+
   // String literal objects, as `lower` and the variables met them ([lex.string]).
   std::uint32_t n = 0;
   for (auto [object, entity] : strings) {
@@ -2258,28 +2305,6 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
     symbols.push_back({entity, std::format("{}.str.{}", linux ? ".L" : "l_", n++), obj::binding::local});
   }
 
-  // Symbols for the entities the object defines or refers to; a declaration nothing uses needs
-  // no name.
-  std::set<std::uint32_t> used;
-  {
-    const auto ls = co_await cx.par_map<Lower>(lowered);  // all hits
-    for (const Lowered& l : ls) {
-      for (const auto& ref : references(l.body->f)) used.insert(ir::raw(ref.entity));
-    }
-  }
-  for (const FnKey& f : lowered) used.insert(ir::raw(f.fn));
-  if (const auto& table = tu.owned_virtual_table) {
-    used.insert(ir::raw(table->entity));
-    for (EntityId slot : table->slots) used.insert(ir::raw(slot));
-  }
-  for (const DynamicTable& table : tu.dynamic_tables) {
-    used.insert(ir::raw(table.entity));
-    for (EntityId slot : table.slots) used.insert(ir::raw(slot));
-  }
-  for (const aarch64::DataDef& d : data) {
-    used.insert(ir::raw(d.entity));
-    for (const aarch64::DataReloc& r : d.relocs) used.insert(ir::raw(r.target));
-  }
   // The declarations that own closure types, by entity (docs/design/closures.md).
   std::map<std::uint32_t, const Entity*> by_id;
   for (const Entity& e : tu.entities) by_id.emplace(ir::raw(e.id), &e);
@@ -2484,14 +2509,15 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
   auto ms = co_await cx.par_map<Codegen>(fns);
   for (std::size_t i = 0; i < fns.size(); ++i) {
     if (ms[i].get().ok()) continue;
-    errors.push_back({ast::Loc{tu.functions[i].item, tu.functions[i].body_offset}, "codegen: " + ms[i].get().error});
+    const auto& def = *definitions[i];
+    errors.push_back({ast::Loc{def.item, def.body_offset}, "codegen: " + ms[i].get().error});
     co_return co_await locate_errors(cx, id, std::move(out));
   }
   auto o = [&] {
     if (linux) {
       std::vector<LinuxFunction> code;
       for (std::size_t i = 0; i < fns.size(); ++i) {
-        const auto& def = tu.functions[i];
+        const auto& def = *definitions[i];
         const auto base_name = base_object_names.find(def.entity);
         const std::string_view name = base_name == base_object_names.end() ? std::string_view{} : base_name->second;
         const bool catch_int = def.unwind == UnwindEligibility::hosted_catch && def.hosted_catch->int_binding.has_value();
@@ -2502,7 +2528,7 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
     }
     std::vector<aarch64::CompiledFunction> code;
     for (std::size_t i = 0; i < fns.size(); ++i) {
-      const auto& def = tu.functions[i];
+      const auto& def = *definitions[i];
       code.push_back({.entity = fns[i].fn, .code = *ms[i].get().code,
                       .cleanup_free_unwind = def.unwind == UnwindEligibility::cleanup_free,
                       .weak = def.coalesced || def.explicit_weak});
