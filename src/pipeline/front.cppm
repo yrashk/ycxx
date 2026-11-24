@@ -1460,14 +1460,25 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
     tu.functions.push_back(std::move(d0));
     return true;
   };
+  auto record_class_rtti_abi = [&](const ast::DeclSema& d, std::uint32_t k) {
+    if (linux && d.kind == ast::DeclKind::class_ && d.entity != EntityId::none &&
+        program.class_rtti_declaration_has_unapplied_abi(d.entity, k))
+      classes_with_unapplied_rtti_abi.insert(d.entity);
+  };
   for (std::uint32_t k = first; k < items.items.size() && k < end; ++k) {
     const items::Item& it = items.items[k];
     // Items of the global namespace, and the members of its classes and their nested classes.
     bool member = it.parent != items::none && items.items[it.parent].kind == items::ItemKind::class_def &&
                   (program.in_global_scope(it.parent) || program.ordinary_nested_class(it.parent));
     if (!program.in_global_scope(k) && !member) continue;
-    // A class template's members are patterns; its specializations' are instances, below.
-    if (member && items.items[it.parent].template_depth > 0) continue;
+    // A class template member is not emitted from its pattern. A friend class declaration
+    // can still introduce an ordinary class in the enclosing namespace ([dcl.type.elab]).
+    if (member && items.items[it.parent].template_depth > 0) {
+      if (const auto* pattern = linux ? program.analysed_item(k) : nullptr)
+        for (const auto& declaration : ins.seqs.elements(pattern->decls))
+          if (declaration.flags & sema::decl_flag::friend_) record_class_rtti_abi(declaration, k);
+      continue;
+    }
     if (it.kind != items::ItemKind::declaration && it.kind != items::ItemKind::function &&
         it.kind != items::ItemKind::class_def && it.kind != items::ItemKind::enum_def)  // its declarators: `struct S { … } s;`
       continue;
@@ -1505,9 +1516,7 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
     for (std::size_t i = 0; i < decls.size(); ++i) {
       const auto& d = decls[i];
       declare(d, at[i]);
-      if (linux && d.kind == ast::DeclKind::class_ && d.entity != EntityId::none &&
-          program.class_rtti_declaration_has_unapplied_abi(d.entity, k))
-        classes_with_unapplied_rtti_abi.insert(d.entity);
+      record_class_rtti_abi(d, k);
       if (d.kind == ast::DeclKind::function && d.entity != EntityId::none &&
           (attributed || ins.seqs.size(d.annotations) != 0) &&
           !program.is_namespace(world.entities.rec(d.entity).scope))
