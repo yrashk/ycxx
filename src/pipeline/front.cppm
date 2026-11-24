@@ -561,7 +561,9 @@ bool unwind_aggregate_result(parse::Program& program, QualType type) {
 }
 
 // Prove a subset of the typed tree. Static initialization, calls with separately analysed
-// default arguments, and any unfamiliar operation need their own proof.
+// default arguments, and any unfamiliar operation need their own proof. NewObject stays out:
+// function_ir lowers a class new-expression without releasing the storage when its constructor
+// throws ([expr.new]/28, #1135), which is safe only in a frame without unwind information.
 using UnwindNodes = ast::closed_list<
     ast::Compound, ast::Return, ast::ExprStmt, ast::If, ast::While, ast::Do, ast::For, ast::Break,
     ast::Continue, ast::DeclStmt, ast::LocalVar, ast::CondDecl, ast::Switch, ast::Case, ast::Default,
@@ -1137,6 +1139,17 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
       return internal_type(r.inner);
     return false;
   };
+  // A friend function or function template specialization a class template's specialization
+  // defines, whose signature names a class local to the unit, a closure type included: it is
+  // local too, as the specialization's members are ([basic.link], #259).
+  auto tu_local_class_friend = [&](EntityId f) {
+    const sema::EntityRec& r = world.entities.rec(f);
+    if (!program.class_friend(f) && (r.templ == EntityId::none || !program.class_friend(r.templ))) return false;
+    const sema::TypeRec t = world.types.rec(r.type);
+    return internal_type(t.inner) || std::ranges::any_of(t.params, [&](QualType p) {
+             return internal_type(p) || names_tu_local(program, p, /*include_value_types=*/true);
+           });
+  };
   auto ordinary_class_template_member = [&](const sema::EntityRec& member) {
     if (member.kind != sema::EntityKind::function || member.templ != EntityId::none || member.scope == EntityId::none)
       return false;
@@ -1206,6 +1219,7 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
     if (linkage == ast::Linkage::external && std::ranges::any_of(r.args, [&](const ast::TemplateArg& arg) {
           return names_tu_local(program, arg, /*include_value_types=*/false);
         })) linkage = ast::Linkage::internal;
+    if (linkage == ast::Linkage::external && fn && tu_local_class_friend(e)) linkage = ast::Linkage::internal;
     // A constructor, destructor or ordinary class-template member binds locally when its
     // owner is TU-local, including a specialization for the value of a TU-local enum ([basic.link]).
     if ((r.kind == sema::EntityKind::constructor || r.kind == sema::EntityKind::destructor || ordinary_class_template_member(r)) &&
@@ -1490,7 +1504,11 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
       const bool ordinary_member = ordinary_class_template_member(entity) && !in->decl.is_virtual &&
                                    !internal_class(entity.scope) &&
                                    !names_tu_local(program, entity.scope, /*include_value_types=*/true);
-      if (entity.kind == sema::EntityKind::destructor || ordinary_member)
+      // A friend function a class template's specialization defines is inline as its members
+      // are ([class.friend]/7, #259).
+      const bool class_friend = (in->decl.flags & sema::decl_flag::friend_) && entity.kind == sema::EntityKind::function &&
+                                entity.templ == EntityId::none && !tu_local_class_friend(in->spec);
+      if (entity.kind == sema::EntityKind::destructor || ordinary_member || class_friend)
         coalesce_inline_function(tu.functions.back(), true);
     }
     closures_of(in->body.value.closures, program.id(in->item), it.body_begin - it.begin);

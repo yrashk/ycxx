@@ -28,6 +28,31 @@ Reader peer_address();
 int peer_sum();
 }
 
+// A friend each class template specialization defines ([temp.friend], #259).
+namespace inline_template {
+template <class T>
+struct Cell {
+    T number;
+
+    friend T take(const Cell& cell) {
+        return cell.number + 1;
+    }
+};
+
+// A specialization for a closure type is local to each unit, and so is its friend ([basic.link]).
+template <class T>
+struct Holder {
+    T held;
+
+    friend int size_of(const Holder&) {
+        return int(sizeof(T));
+    }
+};
+
+int peer_take();
+int peer_local_size();
+}
+
 namespace derived_operand { struct Item; }
 namespace associated_base {
 struct Base {};

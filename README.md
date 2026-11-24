@@ -164,7 +164,10 @@ Resident links reread explicit archives on each request.
 [#951](https://github.com/yrashk/ycxx/issues/951)
 
 For x86-64 Linux, `-fPIC` selects explicit position-independent object mode and defines
-`__PIC__` and `__pic__` as `2`. [#983](https://github.com/yrashk/ycxx/issues/983)
+`__PIC__` and `__pic__` as `2`, and `-fpic` defines them as `1`. arm64 Darwin code is always
+position independent: both are always `2`, and the PIC options change nothing, as with Clang.
+The last of `-fpic`, `-fPIC` and `-fno-pic` wins.
+[#983](https://github.com/yrashk/ycxx/issues/983), [#1089](https://github.com/yrashk/ycxx/issues/1089)
 
 An explicit dynamic link uses ycxx's startup and the target loader. Supply the absolute target
 interpreter path and explicit, self-contained shared objects with GNU or SysV hash tables and
@@ -448,6 +451,11 @@ written default member initializer are value-initialized.
   [#942](https://github.com/yrashk/ycxx/issues/942)
 - ordinary scalar `new` and single-object `delete` for integral and pointer objects, including
   cv-qualified objects. Scalar allocation uses the global Itanium allocation functions.
+  Single objects of class type, also in templates and with placement `new`, are constructed by
+  `new` with each form of initialization and destroyed by `delete`, except through a virtual
+  destructor. A throwing
+  constructor does not release the storage yet; the exception terminates the program
+  ([#1135](https://github.com/yrashk/ycxx/issues/1135)).
   Syntax checking also covers one-dimensional scalar `new T[n]` and `delete[] p`.
   Unary `noexcept` accounts for the selected global array allocation function.
   On Linux x86-64, ordinary functions with cleanup-free unwind frames can default-initialize
@@ -490,9 +498,10 @@ written default member initializer are value-initialized.
   with RAII, aggregate and designated initialization, namespace-scope objects initialized by
   code before `main` and destroyed after it, block-scope `static` variables initialized once, passing and returning them by value with
   Clang's calling convention, so ycxx and Clang objects call each other; access control
-  (`public`, `protected`, `private`) and friend functions and classes. Ordinary unqualified
-  friend definitions in non-template namespace-scope classes are found by argument-dependent
-  lookup or through a matching namespace declaration. [#259](https://github.com/yrashk/ycxx/issues/259)
+  (`public`, `protected`, `private`) and friend functions and classes. Unqualified friend
+  definitions in namespace-scope classes and class templates, and friend function templates
+  defined there, are found by argument-dependent lookup or through a matching namespace
+  declaration. [#259](https://github.com/yrashk/ycxx/issues/259)
   A non-template class can default `operator==` as a member or a friend. `!=` and reversed `==`
   then use it as rewritten candidates. Defaulted `<=>` is not done yet.
   [#295](https://github.com/yrashk/ycxx/issues/295)
@@ -590,9 +599,10 @@ written default member initializer are value-initialized.
   logical negation of a qualified dependent `bool` variable template-id in a `bool` template
   argument or default
   [#209](https://github.com/yrashk/ycxx/issues/209);
-- a single nonvirtual, nonpolymorphic base in a primary class template, including an
-  alias-selected dependent base and qualified lookup of its static members.
-  [#308](https://github.com/yrashk/ycxx/issues/308)
+- a single nonvirtual, nonpolymorphic base in a primary class template or a partial
+  specialization, including an alias-selected dependent base and qualified lookup of its static
+  members, and the bases of explicit specializations.
+  [#308](https://github.com/yrashk/ycxx/issues/308) · [#1134](https://github.com/yrashk/ycxx/issues/1134)
 - placeholder types: `auto` and `decltype(auto)` variables (`const auto&`, `auto*`, `auto&&`),
   deduced and trailing return types, in templates too. Ordinary block variables with an
   `= expression` initializer can use `Concept auto` with a prior unqualified type concept.
@@ -647,6 +657,9 @@ written default member initializer are value-initialized.
   Namespace-scope `constexpr` pointers to `void` can retain scalar and array element addresses.
   `__builtin_addressof`, used by libycxx's `std::addressof`, bypasses overloaded `operator&`.
   It supports runtime addresses and constant expressions such as a scalar global's address.
+  `__builtin_unreachable`, used by libycxx's `std::unreachable`, ends a path in a `[[noreturn]]`
+  or value-returning function; reaching it in a constant expression is an error.
+  [#330](https://github.com/yrashk/ycxx/issues/330)
   `__builtin_constant_p` reports whether it can prove a scalar or string operand constant
   without executing it. [#1065](https://github.com/yrashk/ycxx/issues/1065)
   `__builtin_strlen`, used by libycxx's exception headers, scans character storage in constant
