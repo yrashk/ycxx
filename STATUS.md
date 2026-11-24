@@ -2564,7 +2564,7 @@ and diagnoses reads past the end of an unterminated array in a required constant
 ([expr.const]). Native lowering requires no runtime `strlen` symbol. Fixtures in
 `tests/own/builtins/` cover detection, result type, argument checks, and constant and runtime scans.
 
-## C library string and memory builtins (#248, #1093)
+## C library string and memory builtins (#248, #1093, #1170)
 
 `__builtin_memchr`, `__builtin_memcmp`, `__builtin_memcpy`, `__builtin_memmove`,
 `__builtin_memset`, `__builtin_strchr`, `__builtin_strpbrk`, `__builtin_strrchr` and
@@ -2583,6 +2583,11 @@ symbol (#694). The unit then references the function as an
 undefined symbol, which libSystem or the C library provides at link time. A dependent argument
 defers the call to instantiation. Fixtures in `tests/own/builtins/` (`memchr-memcmp-*`,
 `string-memory-*`) cover detection, signatures, argument checks and run-time results.
+
+`__builtin_strcmp` uses the same path with the signature `int strcmp(const char*, const char*)`.
+The runtime comparison in the pinned libycxx's `type_info::operator==` and `type_info::before`
+uses the C library's unsigned-character ordering for null-terminated strings.
+[[cstring.syn]](https://eel.is/c++draft/cstring.syn) · [#1170](https://github.com/yrashk/ycxx/issues/1170)
 
 `memchr` and `memcmp` are constant expressions (#1092); the others are not. Their rows carry a
 `constant` (`ast::LibraryBuiltin`), which marks the call (`ast::Call::builtin`), and IR generation
