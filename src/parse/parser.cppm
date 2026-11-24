@@ -568,7 +568,11 @@ public:
       if (s_->questions().alias_call_pattern(tmpl.entity) != sema::AliasCallPattern::none)
         ++deferred_immediate_calls_;
     }
-    return s_->class_template_id(tmpl, args, at);
+    bool constraint_failed = false;
+    auto type = s_->class_template_id(tmpl, args, at, /*directly_named=*/true,
+                                      probing_alias_constraints_ ? nullptr : &constraint_failed);
+    alias_constraint_failures_ += constraint_failed;
+    return type;
   }
 
   // What an elaborated-type-specifier naming no declared class does: at namespace scope it
@@ -736,9 +740,10 @@ public:
         // until the template is instantiated.
         u32 at = pos();
         bump();
+        const auto alias_failures = alias_constraint_failures_;
         auto q = qualified_ahead() ? qualified_type(0, true) : std::nullopt;
         if (!q || any_type()) {
-          s_->diag(at, Diag::expected_type_specifier);
+          if (alias_constraint_failures_ == alias_failures) s_->diag(at, Diag::expected_type_specifier);
           d.ok = false;
           goto done;
         }
@@ -847,6 +852,7 @@ public:
           if (qualified_ahead()) {
             // `N::C`, `::C`, `C::E`, `X<T>::E` ([dcl.type.simple]).
             const auto diags = s_->diag_count();
+            const auto alias_failures = alias_constraint_failures_;
             if (auto q = qualified_type(0, true);
                 q && (in_type_id || kind(q->second) != Tk::l_paren ||
                       function_pointer_declarator_ahead(q->second) ||
@@ -855,7 +861,7 @@ public:
               take_qualified(q->second);
               continue;
             }
-            if (s_->has_error_since(diags)) d.ok = false;
+            if (s_->has_error_since(diags) || alias_constraint_failures_ != alias_failures) d.ok = false;
             goto done;
           }
           if (kind(1) == Tk::less && s_->names_type_template(name_of(tok()))) {
@@ -1455,9 +1461,12 @@ public:
       // that scope.
       u32 next = 0;
       l.qualifier_at = pos();
-      auto sc = nested_name(0, next);
+      const auto alias_failures = alias_constraint_failures_;
+      auto sc = nested_name(0, next, /*member_pointer=*/false, /*checked=*/false, QualifierLookup::ordinary,
+                            /*check_injected_access=*/false, nullptr, nullptr, nullptr, /*committed_type=*/true);
       if (!sc) {
-        s_->diag(pos(), Diag::not_a_namespace, is(Tk::identifier) ? name_of(tok()) : s_->no_name());
+        if (alias_constraint_failures_ == alias_failures)
+          s_->diag(pos(), Diag::not_a_namespace, is(Tk::identifier) ? name_of(tok()) : s_->no_name());
         ok = false;
         return l;
       }
@@ -1633,8 +1642,10 @@ public:
                                                std::vector<TypeQualifier>* type_qualifiers = nullptr,
                                                bool* failed_qualifier = nullptr,
                                                std::optional<u32>* committed_failure = nullptr,
-                                               std::optional<u32>* ambiguous_namespace = nullptr) {
+                                               std::optional<u32>* ambiguous_namespace = nullptr,
+                                               bool committed_type = false) {
     u32 j = start;
+    const auto alias_failures = alias_constraint_failures_;
     std::optional<sema::Sema::Scope> s;
     if (kind(j) == Tk::kw_decltype && kind(j + 1) == Tk::l_paren) {
       u32 saved = i_;
@@ -1659,7 +1670,8 @@ public:
       if (!s) return std::nullopt;
       j += 2;
     } else if (auto t = template_id_scope(std::nullopt, j, /*scope=*/true, checked || check_injected_access,
-                                          failed_qualifier, committed_failure)) {
+                                          failed_qualifier, committed_failure, /*conversion=*/false,
+                                          committed_type || member_pointer)) {
       s = t;
     } else {
       return std::nullopt;
@@ -1692,9 +1704,11 @@ public:
         s = m;
         j += 2;
       } else if (auto t = template_id_scope(s, j, /*scope=*/true, checked || check_injected_access,
-                                            failed_qualifier, committed_failure)) {
+                                            failed_qualifier, committed_failure, /*conversion=*/false,
+                                            committed_type || member_pointer)) {
         s = t;
       } else {
+        if (alias_constraint_failures_ != alias_failures) return std::nullopt;
         break;
       }
     }
@@ -1719,7 +1733,7 @@ public:
   std::optional<sema::Sema::Scope> template_id_scope(std::optional<sema::Sema::Scope> in, u32& j, bool scope = true,
                                                      bool checked = false, bool* failed_qualifier = nullptr,
                                                      std::optional<u32>* committed_failure = nullptr,
-                                                     bool conversion = false) {
+                                                     bool conversion = false, bool committed_type = false) {
     // `Q::template M<args>` ([temp.names]/4): the keyword says M names a template.
     const bool keyword = in && kind(j) == Tk::kw_template;
     const u32 k = keyword ? j + 1 : j;
@@ -1742,7 +1756,13 @@ public:
     u32 saved = i_;
     bool saved_half = half_;
     std::size_t diags = s_->diag_count();
+    const auto alias_failures = alias_constraint_failures_;
     const u32 name_at = pos() + k;
+    const bool committed = !probing_alias_constraints_ && (checked || committed_failure || committed_type);
+    const u32 qualifier_end = committed && scope ? past_template_args(k + 1) : 0;
+    // Looking for `::` can also read the arguments of a terminal template-id. Only the
+    // selected reading checks constraints, including on aliases nested in its arguments.
+    const AliasConstraintProbe probe{*this, !committed || (scope && kind(qualifier_end) != Tk::coloncolon)};
     i_ += k + 1;
     bool took_closer = false;
     auto args = template_argument_list(nullptr, &took_closer);
@@ -1758,17 +1778,20 @@ public:
     i_ = saved;
     half_ = saved_half;
     if (!scope) qualified_half_ = ended_half;
-    const bool probe_failure = args && failed_qualifier;
+    const bool alias_failed = alias_constraint_failures_ != alias_failures;
+    if (alias_failed && committed_failure) *committed_failure = qualifier_end + 1;
+    const bool constrained_alias = tmpl && tmpl->kind == ast::DeclKind::type_alias && tmpl->constraints != sema::ConstId::none;
+    const bool probe_failure = args && failed_qualifier && (scope || constrained_alias);
     const bool commit_argument_failure = scope && !args && committed_failure;
     if (!t && closed && (probe_failure || commit_argument_failure)) {
       const bool unsatisfied = std::ranges::any_of(std::span(s_->diagnostics()).subspan(diags), [](const auto& d) {
         return sema::sema_diag_of(d.id) == Diag::constraints_not_satisfied;
       });
-      if (probe_failure) *failed_qualifier = unsatisfied;
+      if (probe_failure) *failed_qualifier |= unsatisfied || constrained_alias;
       if (commit_argument_failure && unsatisfied) *committed_failure = after + 1;
     }
     if (t && checked && in && in->type && tmpl) s_->member_template_access(*in->type, tmpl->entity, n, name_at);
-    if (!checked && (!committed_failure || !*committed_failure)) s_->truncate_diags(diags);
+    if (!checked && !alias_failed && (!committed_failure || !*committed_failure)) s_->truncate_diags(diags);
     if (!t) return std::nullopt;
     j = scope ? after + 1 : after;
     return sema::Sema::Scope{std::nullopt, *t};
@@ -1791,9 +1814,11 @@ public:
                                                        bool* terminal_template_id = nullptr,
                                                        bool template_argument = false,
                                                        bool conversion = false) {
+    const AliasConstraintProbe probe{*this, !checked};
     u32 next = 0;
     bool check_qualifier = checked && substituting_partial_arguments;
     const auto diags = s_->diag_count();
+    const auto alias_failures = alias_constraint_failures_;
     std::optional<u32> ambiguous_namespace;
     auto s = nested_name(start, next, /*member_pointer=*/false, check_qualifier, QualifierLookup::type, checked,
                          nullptr, failed_qualifier, nullptr, conversion ? &ambiguous_namespace : nullptr);
@@ -1801,7 +1826,7 @@ public:
       s_->diag(pos() + *ambiguous_namespace, Diag::ambiguous_name, name_of(tok(*ambiguous_namespace)));
       return std::nullopt;
     }
-    if (checked && s_->has_error_since(diags)) return std::nullopt;
+    if (checked && (s_->has_error_since(diags) || alias_constraint_failures_ != alias_failures)) return std::nullopt;
     if (!s) return std::nullopt;
     // `C::M<args>`, `C::template M<args>`, `Q::template M<args>`: a member alias template's
     // specialization ([temp.mem], [temp.names]/4).
@@ -1824,11 +1849,11 @@ public:
     if (kind(next + 1) == Tk::less && s->ns) {
       u32 j = next;
       const auto diags = s_->diag_count();
-      if (auto t = template_id_scope(s, j, /*scope=*/false, checked, nullptr, nullptr, conversion)) {
+      if (auto t = template_id_scope(s, j, /*scope=*/false, checked, failed_qualifier, nullptr, conversion)) {
         if (terminal_template_id && kind(j) != Tk::coloncolon) *terminal_template_id = true;
         return std::pair{*t->type, j - start};
       }
-      if (checked && s_->has_error_since(diags)) return std::nullopt;
+      if (checked && (s_->has_error_since(diags) || alias_constraint_failures_ != alias_failures)) return std::nullopt;
     }
     if (template_argument && next == 2 && s_->scope_names_static_data_member(*s, name))
       return std::nullopt;
@@ -3133,6 +3158,7 @@ public:
   // an invalid requirement makes it false; elsewhere it is ill-formed (/5).
   Ex requires_expression() {
     DisableDependentDecayCopy disable{dependent_decay_copy_body};
+    const AliasConstraintProbe probe{*this, true};
     u32 begin = pos();
     bump();
     s_->push_scope();
@@ -4090,12 +4116,14 @@ public:
     case Tk::kw_typename: {
       bump();
       const auto diags = s_->diag_count();
+      const auto alias_failures = alias_constraint_failures_;
       auto type = qualified_ahead()
           ? qualified_type(0, /*checked=*/true, /*type_only=*/false, nullptr, nullptr,
                            /*template_argument=*/false, /*conversion=*/true)
           : std::nullopt;
       if (!type) {
-        if (!s_->has_error_since(diags)) s_->diag(begin, Diag::expected_type_specifier);
+        if (!s_->has_error_since(diags) && alias_constraint_failures_ == alias_failures)
+          s_->diag(begin, Diag::expected_type_specifier);
         return {NodeId::none, begin, pos()};
       }
       take_qualified(type->second);
@@ -6554,6 +6582,8 @@ private:
   int in_params_ = 0;
   bool in_template_value_argument_ = false;
   bool variable_template_initializer_ = false;
+  bool probing_alias_constraints_ = false;
+  u32 alias_constraint_failures_ = 0;
   int angle_ = 0;               // inside a template argument or parameter list, outside parentheses
   u32 deferred_argument_checks_ = 0;  // checks a dependent canonical argument may not retain
   u32 deferred_immediate_calls_ = 0;
@@ -6572,6 +6602,13 @@ public:
   bool class_template_base = false;  // class instantiation substitutes or reparses this base type
   bool member_alias_type = false;  // the class instantiation reparses this type-id
 private:
+  struct AliasConstraintProbe {
+    Parser& parser;
+    bool saved;
+    AliasConstraintProbe(Parser& parser, bool probe)
+        : parser(parser), saved(std::exchange(parser.probing_alias_constraints_, parser.probing_alias_constraints_ || probe)) {}
+    ~AliasConstraintProbe() { parser.probing_alias_constraints_ = saved; }
+  };
   // In a delimited operand, a `>` is an operator again ([temp.names]/4).
   struct Unangle {
     int& angle;

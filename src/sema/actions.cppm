@@ -1078,12 +1078,18 @@ public:
   // alias template specialization stands for: its type with the arguments substituted
   // ([temp.alias]/2).
   std::optional<QualType> class_template_id(const ast::DeclSema& tmpl, std::span<const TemplateArg> args, u32 at,
-                                           bool directly_named = true) {
+                                           bool directly_named = true, bool* alias_constraint_failed = nullptr) {
     auto full = template_arguments(tmpl, args, at);
     if (!full) return std::nullopt;
     if (tmpl.kind == ast::DeclKind::type_alias) {
       std::vector<ast::TemplateParamSema> params = ins().seqs.elements(tmpl.template_params);
       auto bindings = Bindings::of(params.empty() ? 0 : params[0].depth, *full);
+      const EntityId scope = w_->entities.rec(tmpl.entity).scope;
+      if (alias_constraint_failed && (scope == EntityId::none || w_->entities.rec(scope).kind == EntityKind::namespace_) &&
+          !check_named_type_constraints(tmpl, args.size(), *full, bindings, at)) {
+        *alias_constraint_failed = true;
+        return std::nullopt;
+      }
       const auto before = diag_count();
       auto t = substitute_alias(tmpl, *full, bindings, at);
       // Past the nesting limit, which was diagnosed, it says nothing more ([temp.inst]/16).
@@ -1120,6 +1126,23 @@ public:
     return templates_for_use(at).substitute(tmpl.type, bindings);
   }
 
+  // [temp.names]/9: naming a specialization requires satisfaction, even in an unevaluated
+  // operand. Check direct, concrete type arguments in ordinary code until constraints can replay.
+  bool check_named_type_constraints(const ast::DeclSema& tmpl, std::size_t written,
+                                    std::span<const TemplateArg> args, const Bindings& bindings, u32 at) {
+    if (tmpl.constraints == ConstId::none || in_requires_body_ || templated() || written != args.size() ||
+        !std::ranges::all_of(args, [&](const TemplateArg& arg) {
+          return arg.kind == ast::TemplateArgKind::type && !dependent(arg);
+        }))
+      return true;
+    auto normal = templates().substitute_constraint(tmpl.constraints, bindings);
+    auto sat = normal ? q_->satisfied(*normal) : std::optional<bool>(false);
+    if (normal && q_->satisfaction_failed(*normal)) return false;
+    if (sat.value_or(true)) return true;
+    diag(at, Diag::constraints_not_satisfied, w_->entities.rec(tmpl.entity).name);
+    return false;
+  }
+
   // `v<args>` naming a variable template specialization ([temp.pre], [temp.inst]/7): an lvalue of
   // the specialization, of the template's type with the arguments substituted. Its entity is the
   // template and the canonical arguments (§B1.5), as a function template specialization's is.
@@ -1130,21 +1153,9 @@ public:
     const Bindings bindings = Bindings::of(params.empty() ? 0 : params[0].depth, *full);
     const EntityRec& entity = w_->entities.rec(tmpl.entity);
     const NameId name = entity.name;
-    // [temp.names]/9: the name itself requires satisfaction, including in decltype. Limit this
-    // check to direct concrete uses in ordinary code until constraint replay handles this path.
-    if (tmpl.constraints != ConstId::none && entity.kind == EntityKind::variable_template &&
-        !in_requires_body_ && !templated() && args.size() == full->size() &&
-        std::ranges::all_of(*full, [&](const TemplateArg& arg) {
-          return arg.kind == ast::TemplateArgKind::type && !dependent(arg);
-        })) {
-      auto normal = templates().substitute_constraint(tmpl.constraints, bindings);
-      auto sat = normal ? q_->satisfied(*normal) : std::optional<bool>(false);
-      if (normal && q_->satisfaction_failed(*normal)) return {NodeId::none, begin, end};
-      if (!sat.value_or(true)) {
-        diag(begin, Diag::constraints_not_satisfied, name);
-        return {NodeId::none, begin, end};
-      }
-    }
+    if (entity.kind == EntityKind::variable_template &&
+        !check_named_type_constraints(tmpl, args.size(), *full, bindings, begin))
+      return {NodeId::none, begin, end};
     auto t = templates().substitute(tmpl.type, bindings);
     if (!t) {
       diag(begin, Diag::template_args_mismatch, name);

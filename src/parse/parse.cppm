@@ -3405,8 +3405,7 @@ private:
         return;
       }
     }
-    // A template-head ([temp.pre]): what follows declares a function or variable template, or
-    // declares a class template. Alias templates and nested heads are not supported yet.
+    // A template-head ([temp.pre]): what follows declares a template or a concept.
     else if (ps_.is(Tk::kw_template)) {
       if (ps_.kind(1) != Tk::less) {
         s_.diag(ps_.pos(), Diag::not_supported, Tk::kw_template);
@@ -4240,6 +4239,7 @@ private:
     sem.linkage = ast::Linkage::none;
     sem.flags = sema::decl_flag::template_;
     sem.template_params = b_.seq(std::span<const ast::TemplateParamSema>(head));
+    sem.constraints = associated_constraints();
     decls_.push_back(sem);
     s_.own.push_back({name, sem});
     p_->declared(sem, k_);
