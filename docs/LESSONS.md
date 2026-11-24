@@ -548,6 +548,11 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
   - Do: commit (or stash with a tag) before mutating, or undo with the same `sed` reversed, and
     check `git diff --stat` after.
   - Learned on #337.
+- **Let a worktree's first build finish before editing its sources.** On #340 the first
+  `tools/build` of a fresh worktree compiled some modules before the edits and some after, so it
+  failed. With no `main` binary, seeing the new tests fail meant saving the edits as a patch,
+  restoring `src`, rebuilding and reapplying. Start the build, write the tests and read code while
+  it runs, then edit. If you must edit early, build `main` in its own `YCXX_BUILD_DIR`.
 - **A mutation that does not build leaves the old binary under test.** On #647 a mutation
   left a variable unused, `-Werror` stopped the build, and the test passed against the
   previous, correct binary. The "surviving" mutation looked like a test gap.
