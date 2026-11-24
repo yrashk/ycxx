@@ -3638,6 +3638,20 @@ parity are tracked in [#294](https://github.com/yrashk/ycxx/issues/294) and
   `&S::get<int>`, explicit specializations of member templates; a non-type default depending on
   the class's parameter (#209). Found on the way: #345.
 
+## Flat structural class template arguments (#317, 2026-11-24)
+
+- Fixed-type parameters accept named complete flat aggregates with public nonmutable integral
+  fields. The canonical argument records the class type and converted field values. Named
+  constant expressions and equivalent braced values select the same specialization.
+- The template parameter denotes a const object. Equivalent values share a parameter object
+  across templates and translation units within the supported default-visible native scope.
+  Linux x86-64 emits weak ELF parameter object definitions. The native Itanium name retains
+  the argument type and value while omitting trailing zero fields.
+- The Linux x86-64 controls link and run in both directions with GCC 16 and Clang 23.
+  The fixtures cover named and braced values, specialization identity, direct address and
+  mutable-field rejection in `tests/own/templates/`. Floating-point arguments, richer
+  structural forms and the remaining dependent and visibility cases stay in #317.
+
 ## Member alias templates and `Q::template M` (#340, 2026-11-24)
 
 - **Member alias templates** ([temp.alias], [temp.mem]): `template<class U> using apply = …;` in a

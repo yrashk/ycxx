@@ -43,6 +43,10 @@ dependent exception specification when it is needed.
 A lambda's noexcept-specifier, including one that depends on an enclosing template's
 parameters, is part of its call operator's type. [#807](https://github.com/yrashk/ycxx/issues/807)
 
+Templates can take values of named flat aggregates with public integral fields as constant
+arguments. On Linux x86-64, equivalent values share a parameter object across translation
+units. [#317](https://github.com/yrashk/ycxx/issues/317)
+
 Classes and class templates can declare member alias templates, used as `C::M<args>`,
 `typename Q::template M<args>` and as template template arguments.
 [#340](https://github.com/yrashk/ycxx/issues/340)
