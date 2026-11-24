@@ -21,6 +21,7 @@ enum class Builtin : u8 {
   bool_,
   char_, signed_char, unsigned_char, wchar_t_, char8_t_, char16_t_, char32_t_,
   short_, unsigned_short, int_, unsigned_int, long_, unsigned_long, long_long, unsigned_long_long,
+  int128, unsigned_int128,  // the extended integer types `__int128`, `unsigned __int128` (docs/EXTENSIONS.md)
   float_, double_, long_double,
   float16, float32, float64, float128, bfloat16,  // [basic.extended.fp]
   meta_info,
@@ -34,11 +35,17 @@ constexpr bool is_standard_unsigned(Builtin b) {
   return b == Builtin::unsigned_char || b == Builtin::unsigned_short || b == Builtin::unsigned_int ||
          b == Builtin::unsigned_long || b == Builtin::unsigned_long_long;
 }
+// The extended integer types ([basic.fundamental]/1–2), GCC's and Clang's 128-bit types (#1172).
+constexpr bool is_extended_signed(Builtin b) { return b == Builtin::int128; }
+constexpr bool is_extended_unsigned(Builtin b) { return b == Builtin::unsigned_int128; }
+// The signed and unsigned integer types: standard and extended ([basic.fundamental]/1–2).
+constexpr bool is_signed_integer(Builtin b) { return is_standard_signed(b) || is_extended_signed(b); }
+constexpr bool is_unsigned_integer(Builtin b) { return is_standard_unsigned(b) || is_extended_unsigned(b); }
 // [basic.fundamental]: `char`, `wchar_t`, `char8_t`, `char16_t` and `char32_t`, whose signedness and
 // width come from their underlying type.
 constexpr bool is_char_type(Builtin b) { return b >= Builtin::char_ && b <= Builtin::char32_t_ && b != Builtin::signed_char && b != Builtin::unsigned_char; }
 // Integral types ([basic.fundamental]): bool, the character types, the signed and unsigned integer types.
-constexpr bool is_integral(Builtin b) { return b >= Builtin::bool_ && b <= Builtin::unsigned_long_long; }
+constexpr bool is_integral(Builtin b) { return b >= Builtin::bool_ && b <= Builtin::unsigned_int128; }
 constexpr bool is_floating(Builtin b) { return b >= Builtin::float_ && b <= Builtin::bfloat16; }
 constexpr bool is_standard_floating(Builtin b) { return b >= Builtin::float_ && b <= Builtin::long_double; }
 constexpr bool is_arithmetic(Builtin b) { return is_integral(b) || is_floating(b); }

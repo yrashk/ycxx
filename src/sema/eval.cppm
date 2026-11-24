@@ -496,7 +496,7 @@ private:
     const auto b = types.builtin_of(type);
     if (!b) return false;
     const auto& target = s_->world().target;
-    return *b == Builtin::nullptr_t || (ast::is_integral(*b) && ast::width_of(target, *b) <= 64) ||
+    return *b == Builtin::nullptr_t || (ast::is_integral(*b) && ast::width_of(target, *b) <= 128) ||
            (ast::is_floating(*b) && ast::computes(target[*b].format));
   }
 
@@ -531,7 +531,7 @@ private:
     switch (r.kind) {
     case K::integer: {
       QualType t = s_->types().is_enum(r.type) ? s_->underlying_of(r.type) : r.type;
-      return {vs.integer(t, r.bits), 0, true};
+      return {vs.integer(t, ast::Bits128{r.bits, r.hi}), 0, true};
     }
     case K::floating: return {ast::float_value(s_->ins(), s_->world().target, r.type, ast::Bits128{r.bits, 0}), 0, true};
     case K::null: return {vs.null_pointer(r.type), 0, true};
