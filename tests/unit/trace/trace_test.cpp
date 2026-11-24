@@ -1708,6 +1708,29 @@ void layout() {
   (void)b.handle(click(x, y));
   (void)b.handle(click(x, y, trace::Mouse::Act::release));
   check(!t.hide_reused() && strip_sgr(b.frame().lines[y]).contains("reused shown"), "a click on the chip shows them again");
+  // Review fixes: on a narrow screen the prompt shows what is typed and its cursor stays on it;
+  // a tab the title bar cut takes no click; the help pages by what it shows.
+  b.resize(24, 30);
+  (void)b.handle(trace::Key{"/"});
+  for (char c : std::string_view("abc")) (void)b.handle(trace::Key{std::string(1, c)});
+  {
+    const trace::Frame f = b.frame();
+    check(strip_sgr(f.lines.back()).starts_with(" / abc") && f.cursor && f.cursor->second == 6, "a narrow prompt keeps what is typed: " + strip_sgr(f.lines.back()));
+  }
+  for (char c : std::string_view("defghijklmnopqrstuvwxyz0123456789")) (void)b.handle(trace::Key{std::string(1, c)});
+  {
+    const trace::Frame f = b.frame();
+    const std::string foot = strip_sgr(f.lines.back());
+    check(foot.starts_with(" / …") && foot.contains("6789") && f.cursor && f.cursor->second < 30, "a long filter shows its end: " + foot);
+  }
+  (void)b.handle(trace::Key{"\x1b"});
+  check(b.hit(29, 0) != trace::Hit{trace::Hit::Area::tab, std::to_underlying(trace::View::histogram)}, "a tab cut off the title bar is no target");
+  check(b.hit(14, 0) == trace::Hit{trace::Hit::Area::tab, std::to_underlying(trace::View::tree)}, "one drawn is");
+  b.resize(24, 80);
+  (void)b.handle(trace::Key{"?"});
+  (void)b.handle(trace::Key{"\x1b[6~"});
+  check(strip_sgr(b.frame().lines[1]).contains("keys 21–"), "PgDn in the help goes to the line after the last shown: " + strip_sgr(b.frame().lines[1]));
+  (void)b.handle(trace::Key{"x"});
   // The help scrolls when it is taller than the screen, and says where it is.
   b.resize(24, 80);
   (void)b.handle(trace::Key{"?"});

@@ -390,7 +390,7 @@ class Browser {
   explicit Browser(Tree& tree) : tree_(tree) {}
 
   void resize(std::size_t rows, std::size_t cols) {
-    rows_ = std::max<std::size_t>(rows, 5);
+    rows_ = std::max<std::size_t>(rows, 6);  // the bars, the column headers and a row
     cols_ = std::max<std::size_t>(cols, 20);
   }
   // A live source (`ctl trace`, `--watch`, a build being traced): the source named, the latest
@@ -451,8 +451,8 @@ class Browser {
     if (help_) {
       if (k == "j" || k == "\x1b[B" || k == "\x1bOB") ++help_scroll_;
       else if (k == "k" || k == "\x1b[A" || k == "\x1bOA") help_scroll_ = help_scroll_ > 0 ? help_scroll_ - 1 : 0;
-      else if (k == "\x1b[6~" || k == " ") help_scroll_ += help_box_height();
-      else if (k == "\x1b[5~") help_scroll_ = help_scroll_ > help_box_height() ? help_scroll_ - help_box_height() : 0;
+      else if (k == "\x1b[6~" || k == " ") help_scroll_ += help_room();
+      else if (k == "\x1b[5~") help_scroll_ = help_scroll_ > help_room() ? help_scroll_ - help_room() : 0;
       else help_ = false;
       return {};
     }
@@ -521,7 +521,7 @@ class Browser {
     for (std::string& l : f.lines) l = fit(ellipsize(l, cols_), cols_);
     while (f.lines.size() < rows_) f.lines.push_back(fit("", cols_));
     f.lines.resize(rows_);
-    if (prompt_) f.cursor = std::pair<std::size_t, std::size_t>{rows_ - 1, std::min(cols_ - 1, prompt_label.size() + columns(typed_))};
+    if (prompt_) f.cursor = std::pair<std::size_t, std::size_t>{rows_ - 1, std::min(cols_ - 1, prompt_label.size() + columns(prompt_shown()))};
     return f;
   }
 
@@ -530,7 +530,9 @@ class Browser {
     const std::size_t hh = header_height();
     if (y == 0) {
       for (const Tab& t : tabs()) {
-        if (x >= t.x0 && x < t.x1) return {Hit::Area::tab, std::to_underlying(t.view)};
+        // A tab the narrow bar cut (its last column is `…`) is not there to click.
+        const bool drawn = t.x1 <= (tabs().back().x1 <= cols_ ? cols_ : cols_ - 1);
+        if (drawn && x >= t.x0 && x < t.x1) return {Hit::Area::tab, std::to_underlying(t.view)};
       }
       return {Hit::Area::header};
     }
@@ -563,7 +565,9 @@ class Browser {
     if (row >= rows.size()) return {};
     const std::size_t indent = 2 * rows[row].depth;
     // The marker, where it is drawn: a deep row's is cut off by the columns to its right.
-    if (x >= indent && x < indent + 2 && indent + 2 <= column_spans()[0].x1 && !tree_.node(rows[row].node).children.empty())
+    const auto spans = column_spans();
+    const std::size_t cell_w = spans.size() > 1 && spans[0].x1 > 1 ? spans[0].x1 - 1 : spans[0].x1;
+    if (x >= indent && x < indent + 2 && indent + 2 <= cell_w && !tree_.node(rows[row].node).children.empty())
       return {Hit::Area::marker, row};
     return {Hit::Area::row, row};
   }
@@ -1468,8 +1472,13 @@ class Browser {
   }
   static std::string hint_text(std::string_view keys, std::string_view what) { return paint("1", keys) + " " + std::string(what); }
   std::string footer() const {
-    if (prompt_)
-      return on_bar(spread(std::string(prompt_label) + typed_, paint("2", "⏎ keep  Esc cancel  ? help "), cols_));
+    if (prompt_) {
+      // What is typed comes first: the hint shows only beside it, and a long filter shows its end.
+      const std::string shown = prompt_shown();
+      std::string hint = paint("2", "⏎ keep  Esc cancel  ? help ");
+      if (prompt_label.size() + columns(shown) + 2 + columns(hint) > cols_) hint.clear();
+      return on_bar(spread(std::string(prompt_label) + shown, hint, cols_));
+    }
     std::vector<Piece> left;
     if (!notice_.empty()) left.push_back({paint("1;32", " " + notice_), 100});
     if (visual_) left.push_back({paint("1;7", " VISUAL "), 99});
@@ -1479,6 +1488,19 @@ class Browser {
     return on_bar(spread(" " + pack(left, room), right, cols_));
   }
   static constexpr std::string_view prompt_label = " / ";
+  // The filter as typed, its end kept when it is longer than the footer (a column stays for the
+  // cursor).
+  std::string prompt_shown() const {
+    const std::size_t room = cols_ > prompt_label.size() + 1 ? cols_ - prompt_label.size() - 1 : 1;
+    const std::size_t n = columns(typed_);
+    if (n <= room) return typed_;
+    std::size_t at = typed_.size(), col = 0;
+    while (at > 0 && col + 1 < room) {
+      --at;
+      if ((static_cast<unsigned char>(typed_[at]) & 0xc0) != 0x80) ++col;
+    }
+    return "…" + typed_.substr(at);
+  }
 
   std::string metric(const Tree::Node& n, Column c) const {
     const Event& e = n.ev;
@@ -1955,7 +1977,7 @@ class Browser {
     std::string out(cols, ' ');
     const auto at = [&](std::size_t c) { return cols > 1 ? span_ns * c / (cols - 1) : 0; };
     const std::string end = format_duration(span_ns);
-    const std::size_t end_x = cols > end.size() ? cols - end.size() : 0;
+    const std::size_t end_x = cols > columns(end) ? cols - columns(end) : 0;
     std::vector<std::pair<std::size_t, std::string>> labels;
     for (std::size_t c = 0; c + 1 < cols; c += 20) {
       std::string t = c == 0 ? std::string("0") : format_duration(at(c));
@@ -2064,12 +2086,14 @@ class Browser {
   }
   // The box: between the title bar and the footer, at most 100 wide.
   std::size_t help_box_height() const { return rows_ > 4 ? rows_ - 2 : rows_; }
+  // Lines of help the box shows: its height less its borders.
+  std::size_t help_room() const { return help_box_height() > 2 ? help_box_height() - 2 : 1; }
   static constexpr std::string_view help_sgr = "48;5;235";
   void overlay_help(std::vector<std::string>& lines) const {
     const std::size_t w = std::min<std::size_t>(cols_, 100);
     const std::size_t x = (cols_ - w) / 2, inner = w > 4 ? w - 4 : 1;
     const std::vector<std::string> help = help_lines(inner);
-    const std::size_t room = help_box_height() > 2 ? help_box_height() - 2 : 1;
+    const std::size_t room = help_room();
     const std::size_t h = std::min(help.size(), room);
     help_scroll_ = std::min(help_scroll_, help.size() - h);
     const std::size_t top = 2 + (room - h) / 2;
