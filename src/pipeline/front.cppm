@@ -561,7 +561,9 @@ bool unwind_aggregate_result(parse::Program& program, QualType type) {
 }
 
 // Prove a subset of the typed tree. Static initialization, calls with separately analysed
-// default arguments, and any unfamiliar operation need their own proof.
+// default arguments, and any unfamiliar operation need their own proof. NewObject stays out:
+// function_ir lowers a class new-expression without releasing the storage when its constructor
+// throws ([expr.new]/28, #1135), which is safe only in a frame without unwind information.
 using UnwindNodes = ast::closed_list<
     ast::Compound, ast::Return, ast::ExprStmt, ast::If, ast::While, ast::Do, ast::For, ast::Break,
     ast::Continue, ast::DeclStmt, ast::LocalVar, ast::CondDecl, ast::Switch, ast::Case, ast::Default,
