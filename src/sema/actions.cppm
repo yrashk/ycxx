@@ -102,6 +102,8 @@ public:
   virtual ast::DeclSema decl_sema(DeclId d) = 0;
   // The written in-class declaration of a member from this unit's class record.
   virtual std::optional<ast::DeclSema> written_member(EntityId) { return std::nullopt; }
+  // The declaration a class template specialization made of a friend function it defines (#259).
+  virtual std::optional<ast::DeclSema> class_friend(EntityId) { return std::nullopt; }
   virtual bool peer_pure_dispatch(EntityId) { return false; }
   virtual void use_typed_dynamic_cast() {}
   // A use of a global allocation function that may lack a written declaration in the unit.
@@ -208,6 +210,8 @@ public:
   virtual const ClassRec* adl_class(EntityId c, bool at_instantiation) = 0;
   // Earlier friend declarations in a class whose member list is still being read.
   virtual std::vector<DeclId> earlier_adl_friends(EntityId, NameId) { return {}; }
+  // The declaration of a class's friend `f`: a class template specialization's own (#259).
+  virtual ast::DeclSema friend_decl(const ast::MemberRec& f) { return decl_sema(f.decl); }
   // In an instantiation, whether the call at `offset` was dependent in the template definition.
   virtual bool dependent_call(u32 /*offset*/) { return false; }
   // Whether instantiation has given up at its nesting limit, which was diagnosed ([temp.inst]/16):
@@ -7151,7 +7155,8 @@ public:
     bool value_dependent = false;
     auto function_throwing = [&](EntityId function) {
       if (dependent_noexcept_calls_.contains(std::to_underlying(function))) value_dependent = true;
-      const auto written = q_->written_member(function);
+      auto written = q_->written_member(function);
+      if (!written) written = q_->class_friend(function);
       QualType type = written ? written->type : w_->entities.rec(function).type;
       // A specification that depends on the template's parameters, for this specialization.
       std::optional<ast::DeclSema> pattern = written;
@@ -11015,10 +11020,10 @@ public:
       if (!std::ranges::contains(result.namespaces, ns)) result.namespaces.push_back(ns);
     };
     auto add_class = [&](EntityId cls) {
-      // Friend declarations in class templates are outside this slice. Keep the existing
-      // dependent lookup's limits on when it instantiates associated classes.
+      // A class template specialization is associated too: its friends are found once it is
+      // instantiated, which `adl_class` does where it can be ([temp.inst]/2, #259).
       const EntityRec& entity = w_->entities.rec(cls);
-      if (entity.kind == EntityKind::class_template || entity.templ != EntityId::none) return;
+      if (entity.kind == EntityKind::class_template) return;
       if (!std::ranges::contains(result.classes, cls)) result.classes.push_back(cls);
     };
     // [basic.lookup.argdep]/3: bases contribute their entities. Expanding a base's template
@@ -11095,15 +11100,15 @@ public:
   // when their namespace has yet to bind the name for ordinary lookup.
   void for_each_associated_friend(const AdlAssociations& associations, NameId name, bool at_instantiation,
                                   auto&& add) {
-    auto add_friend = [&](DeclId f) {
-      if (auto d = q_->decl_sema(f); d.entity != EntityId::none) add(d);
+    auto add_friend = [&](const ast::DeclSema& d) {
+      if (d.entity != EntityId::none) add(d);
     };
     for (EntityId cls : associations.classes) {
       if (const ClassRec* rec = q_->adl_class(cls, at_instantiation)) {
         for (const ast::MemberRec& f : rec->adl_friends)
-          if (w_->entities.rec(f.entity).name == name) add_friend(f.decl);
+          if (w_->entities.rec(f.entity).name == name) add_friend(q_->friend_decl(f));
       } else if (!at_instantiation) {
-        for (DeclId f : q_->earlier_adl_friends(cls, name)) add_friend(f);
+        for (DeclId f : q_->earlier_adl_friends(cls, name)) add_friend(q_->decl_sema(f));
       }
     }
   }
