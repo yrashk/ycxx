@@ -324,6 +324,7 @@ enum class Diag : std::uint32_t {
   explicit_constructor_placement [[=message{Severity::error, "'explicit' is only allowed on a constructor declaration within its class"}]],
   copy_list_explicit_constructor [[=message{Severity::error, "copy-list-initialization of '{0:t}' selects an explicit constructor"}]],
   constructor_namespace [[=message{Severity::error, "constructor definition is outside a namespace enclosing its class"}]],
+  member_class_namespace [[=message{Severity::error, "definition of class '{0:n}' is outside a namespace enclosing its class"}]],
   no_member_declared [[=message{Severity::error, "'{1:t}' declares no member '{0:n}' with this type"}]],
   cv_on_non_member [[=message{Severity::error, "only a non-static member function can have a cv-qualifier"}]],
   bound_member_not_called [[=message{Severity::error, "a reference to the non-static member function '{0:n}' must be called"}]],
