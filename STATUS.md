@@ -1247,6 +1247,11 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
 - Native collection omits ordinary named namespace-scope immediate functions whose bodies
   have neither static locals nor closures. Their declarations and analysed bodies remain
   available for constant evaluation. [#1006](https://github.com/yrashk/ycxx/issues/1006)
+- Nonvirtual `consteval` member functions and function template specializations with neither
+  closures nor static locals can link without producing a native definition. The interpreter
+  still reads their checked bodies. The object pipeline emits a definition when lowered code,
+  tables or data refer to it, including references from retained immediate bodies.
+  [#1097](https://github.com/yrashk/ycxx/issues/1097)
 - `consteval` constructors, in class and out of class, among the other constructor specifiers.
   `Sema::construct` folds a call of one outside an immediate function context, including an
   implicit conversion of an argument or operand, into its value (`Sema::immediate_invocation`,
@@ -1331,6 +1336,13 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   subobject path, including one-past addresses, from the constant's path and byte offset.
 - Errors say why: "not a constant expression: <the interpreter's reason>", located at the
   evaluated expression.
+- Ordinary nonvirtual immediate member calls with void or integral and enum results up to
+  64 bits validate the complete invocation. The evaluator can import supported flat local
+  records and preserve the identity of supported unread runtime receivers. The static
+  through-object path evaluates the discarded receiver as part of the invocation.
+  Reference and field-address results remain tracked in #1183. Static arrow
+  indirection checks remain in #1189.
+  [#1175](https://github.com/yrashk/ycxx/issues/1175)
 - A constant evaluation can bypass a block-scope static aggregate ([expr.const], [stmt.dcl]).
   L1 forms static addresses at their uses and checks the executed declarations for usability in
   constant expressions. The runtime guard still initializes a static local on its first passage.

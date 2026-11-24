@@ -1196,8 +1196,9 @@ public:
       return !template_args.at(p.depth, p.index);
     });
   }
+  bool in_function_or_lambda_body() const { return in_function_body || !lambdas_.empty(); }
   bool check_exception_construct(u32 at, lex::Tk keyword) {
-    if (q_->exceptions_enabled() || ((in_function_body || !lambdas_.empty()) && in_template_definition()))
+    if (q_->exceptions_enabled() || (in_function_or_lambda_body() && in_template_definition()))
       return true;
     diag(at, Diag::exceptions_disabled, keyword);
     return false;
@@ -5954,6 +5955,26 @@ public:
     return nullptr;
   }
 
+  bool ordinary_immediate_member(EntityId function, QualType result) {
+    if (function == EntityId::none) return false;
+    const auto& entity = w_->entities.rec(function);
+    if (entity.kind != EntityKind::function || entity.scope == EntityId::none || entity.templ != EntityId::none)
+      return false;
+    const auto& owner = w_->entities.rec(entity.scope);
+    if (owner.kind != EntityKind::class_ || owner.templ != EntityId::none) return false;
+    const auto* member = member_decl(function);
+    if (!member || !member->is_consteval || member->is_virtual || member->is_template) return false;
+    // Only the checked integral, enum and void result representations enter this path.
+    if (types().is_void(result)) return true;
+    if (types().is_enum(result)) {
+      const auto* enumeration = enum_rec(types().enum_of(result));
+      if (!enumeration || !enumeration->underlying) return false;
+      result = *enumeration->underlying;
+    }
+    const auto builtin = types().builtin_of(result);
+    return builtin && ast::is_integral(*builtin) && ast::width_of(w_->target, *builtin) <= 64;
+  }
+
   // A member function named without a call yet: `a.f`, `p->f`, `f` or `S::f`, bound to its object
   // (none when there is none to bind, as in a static member function). Only a call may follow
   // ([expr.ref]/6.3.2).
@@ -6451,7 +6472,10 @@ public:
     if (d->is_static) {
       // The object expression is evaluated, then discarded ([expr.ref]).
       Ex call = node(ast::Call{info, fe, at(callee, begin), b_->list(*children)}, begin, end, info);
-      if (!object) return call;
+      // Lookup can supply a `this` pointer to rank a mixed unqualified or qualified overload
+      // set. Selecting a static member evaluates a receiver only when the call has one.
+      if (!object || (m.arrow && !bound.explicit_receiver && ordinary_immediate_member(fe, fr.inner)))
+        return call;
       Ex discarded = convert_node(*object, ast::ConversionKind::to_void, builtin(Builtin::void_));
       return node(ast::OrderedBinary{info, ast::OrderedOp::comma, at(discarded, begin), at(call, begin)}, begin, end, info);
     }
@@ -11175,7 +11199,8 @@ public:
       defaults = defaults_of(named, default_source);
       default_origin = DefaultArgumentOrigin::interned;
     }
-    if (declaration && (named.id == callee.id || is_consteval(default_source))) {
+    if (declaration && (named.id == callee.id || is_consteval(default_source) ||
+                        ordinary_immediate_member(default_source, types().rec(ft).inner))) {
       function = default_source;
     } else {
       // The address of a named immediate function is itself a known callee. It does not

@@ -312,6 +312,9 @@ specified by the accepted [optimization design](docs/design/optimization.md) (#3
    - [Stored typed array pointers](docs/design/ast.md#55-constants) retain their array subobject
      and position for constant evaluation, including one-past positions. Native relocations
      use the root symbol and byte addend (Astra, #111).
+   - [Immediate function emission](docs/design/immediate-function-emission.md) omits eligible
+     nonvirtual members and function template specializations during native collection.
+     The interpreter still reads their checked bodies (#1097).
 7. **One binary, many fronts.** The `ycxx` binary is the daemon and also its clients: a
    `c++`-compatible command line, an LSP server and a control interface (reload, status, query).
 8. **Optimization is search over verified transformations, and it runs while the compiler is idle.**

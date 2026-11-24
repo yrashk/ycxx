@@ -293,6 +293,14 @@ struct Ops {
     M::Place pl;
     if (Flow fl = m.locate(p, {}, imm_type(f, n), M::Use::lifetime, false, pl); fl != Flow::next) return fl;
     if (Flow fl = lifetime_change(m, p); fl != Flow::next) return fl;
+    const bool unknown = has(f, n, ir::Flag::outside_unknown);
+    if (unknown || has(f, n, ir::Flag::outside_lifetime)) {
+      auto& object = m.objects_[pl.obj];
+      if (p.bits != 0 || object.origin != M::Origin::automatic || (unknown && !object.record))
+        return m.fail(Reason::ill_formed);
+      object.outside = true;
+      object.usable = !unknown;
+    }
     m.set_lifetime(pl, p.bits == 0, M::Life::alive);
     return Flow::next;
   }

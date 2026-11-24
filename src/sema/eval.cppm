@@ -3,9 +3,9 @@
 // interpreter (ycxx.interp) runs it in constant mode inside the query that analyses the
 // expression. Callees' bodies and namespace-scope variables come through `Questions`.
 //
-// The enclosing function's locals usable in constant expressions (constexpr, or const integral
-// with a constant initializer) become const objects of the thunk with their values; any other
-// local is an object outside its lifetime, so evaluating a use of it is not constant.
+// The thunk imports the enclosing function's locals usable in constant expressions with their
+// known values. Supported by-value record parameters and direct named automatic receivers can
+// also supply an object identity while their contents remain unavailable to constant evaluation.
 export module ycxx.sema:eval;
 
 import std;
@@ -183,18 +183,44 @@ private:
         return {lit->value, 0, true};
       return {};
     }
+    const auto receiver = direct_local_receiver(e);
     ast::Child root = s_->builder().commit(ast::Child{e.id, 0});
     if (reference_initializer && irgen::materializes_temporary(in.ast, root.id))
       return {std::nullopt, reason_arg({interp::Reason::local_address, 0, {}})};
     NodeId ret = in.intern(ast::Return{root}, e.width());
     std::vector<ast::LocalRec> locals(s_->locals().begin(), s_->locals().end());
-    for (ast::LocalRec& l : locals) {
+    auto local_values = s_->local_values();
+    std::vector<std::optional<ConstId>> filtered_values;
+    std::vector<u32> opaque_record_locals;
+    std::vector<u32> discardable_reference_parameters;
+    for (std::size_t i = 0; i < locals.size(); ++i) {
+      auto& l = locals[i];
+      const bool parameter = (l.flags & local_flag::parameter) &&
+                             !(l.flags & (ast::local_flag::requires_parameter | local_flag::default_argument_parameter));
+      if (s_->types().is_class(l.type)) {
+        if (i < local_values.size() && local_values[i]) {
+          if (!importable_local_record(l.type, local_values[i])) {
+            if (filtered_values.empty()) filtered_values.assign(local_values.begin(), local_values.end());
+            filtered_values[i].reset();
+          }
+        } else if (s_->in_function_body) {
+          const bool named_receiver = receiver == i && l.entity == EntityId::none && l.name != s_->no_name() &&
+                                      !(l.flags & ast::local_flag::structured_binding) &&
+                                      s_->as<ast::LocalVar>({l.decl}).has_value();
+          if ((parameter || named_receiver) && importable_local_record(l.type, std::nullopt))
+            opaque_record_locals.push_back(static_cast<u32>(i));
+        }
+      } else if (parameter && s_->in_function_or_lambda_body() && l.name != s_->no_name() &&
+                 s_->types().is_reference(l.type) && s_->types().is_class(s_->types().referee(l.type))) {
+        discardable_reference_parameters.push_back(static_cast<u32>(i));
+      }
       l.decl = NodeId::none;  // drafts of the enclosing frame
       // In a template's definition a local of dependent type has no object yet; a non-dependent
       // expression cannot name it, so it stands as an `int` outside its lifetime.
       // So does a variable whose initializer is being read to deduce its placeholder type.
       if (s_->types().is_dependent(l.type) || s_->types().has_placeholder(l.type)) l.type = s_->builtin(Builtin::int_);
     }
+    if (!filtered_values.empty()) local_values = filtered_values;
     ast::DeclSema thunk{};
     thunk.entity = EntityId::none;
     thunk.type = s_->types().function(Types::unqualified(e.type()), {}, false, LangLinkage::cxx);
@@ -204,8 +230,10 @@ private:
                                ast::BodySema{ret, in.intern_seq(std::span<const ast::LocalRec>(locals)),
                                              in.intern_seq(std::span<const ast::ExpansionRec>{}), in.intern_seq(std::span<const u32>{}),
                                              ast::QualType{}, 0, in.intern_seq(std::span<const ast::ClosureDef>{})},
-                               s_->item(), 0, true, s_->local_values()};
+                               s_->item(), 0, true, local_values};
     input.initialized_fields = initialized_fields;
+    input.opaque_record_locals = opaque_record_locals;
+    input.discardable_reference_parameters = discardable_reference_parameters;
     EvalFacts facts(s_->world(), *q_);
     auto body = bytes ? irgen::constant_byte_capture_ir(in, input, facts, bytes->capture) : irgen::function_ir(in, input, facts);
     if (!body) return {};
@@ -420,6 +448,34 @@ private:
       result.fields.push_back({s_->field_access_type(field, type), layout->offsets[i], field.mutable_});
     }
     return result;
+  }
+
+  // An ordinary dot call passes the address of its receiver. Import only that named
+  // local, without evaluating its declaration or allocating slots for unrelated locals.
+  std::optional<u32> direct_local_receiver(Ex expression) {
+    const auto member = s_->as<ast::MemberCall>(expression);
+    if (!member) return std::nullopt;
+    const auto pointer = s_->as<ast::Unary>({member->object.id});
+    if (!pointer || pointer->op != ast::UnaryOp::address_of) return std::nullopt;
+    Ex object{pointer->operand.id};
+    while (const auto paren = s_->as<ast::Paren>(object)) object.id = paren->operand.id;
+    if (const auto local = s_->as<ast::LocalRef>(object)) return local->local;
+    return std::nullopt;
+  }
+
+  // A thunk can import addresses for supported flat records. Known initializers also
+  // supply integral field values without needing to fetch any other object.
+  bool importable_local_record(QualType type, std::optional<ConstId> value) {
+    const auto& in = s_->ins();
+    if (value && !in.values.is<ast::VAggregate>(*value)) return false;
+    const auto layout = constant_record_layout(type);
+    if (!layout || !std::ranges::all_of(layout->fields, [&](const auto& field) {
+          return s_->types().is_integral(field.type) || s_->types().is_enum(field.type);
+        })) return false;
+    if (!value) return true;
+    const auto elements = in.seqs.elements(in.values.get<ast::VAggregate>(*value).elems);
+    return elements.size() == layout->fields.size() &&
+           std::ranges::all_of(elements, [&](ConstId element) { return in.values.is<ast::VInt>(element); });
   }
 
   bool constant_record_field(QualType type) {
