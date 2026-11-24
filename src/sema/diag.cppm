@@ -509,7 +509,8 @@ constexpr bool survives_substitution(engine::DiagId id) {
          id == diag_id(Diag::exceptions_disabled) || id == diag_id(Diag::rtti_disabled) ||
          id == diag_id(Diag::trivial_copyability_incomplete) ||
          id == diag_id(Diag::constructibility_incomplete) || id == diag_id(Diag::base_of_incomplete) ||
-         id == diag_id(Diag::class_relation_incomplete) || id == diag_id(Diag::empty_incomplete) || id == diag_id(Diag::convertibility_incomplete) ||
+         id == diag_id(Diag::class_relation_incomplete) || id == diag_id(Diag::empty_incomplete) ||
+         id == diag_id(Diag::convertibility_incomplete) ||
          id == diag_id(Diag::destructibility_incomplete) || id == diag_id(Diag::virtual_class_trait_incomplete) ||
          id == diag_id(Diag::standard_layout_incomplete) || id == diag_id(Diag::implicit_lifetime_incomplete) ||
          id == diag_id(Diag::unique_object_representations_incomplete);

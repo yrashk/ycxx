@@ -2496,12 +2496,12 @@ session's.*
   enumerations' underlying types, and standard-layout classes' members (in order for structs, with
   alignment and bit-field widths; in any order for unions) ([class.mem.general]). A
   `[[no_unique_address]]` member is diagnosed as not supported yet: whether it ends the sequence
-  depends on `__has_cpp_attribute`, which answers 0 for everything so far (#1141). Distinct class operands need a complete Derived (both operands, for layout
-  compatibility); the same incomplete class is allowed where Clang and GCC reject it for the virtual
-  base trait. Dependent operands are decided at instantiation in class-template bases,
-  variable-template initializers, function template bodies and constraints
-  (`tests/own/builtins/virtual-base-of-*`, `pointer-interconvertible-base-of-*`,
-  `layout-compatible-*`, `relation-traits-dependent-body.run.cpp`). Unknown base graph,
+  depends on `__has_cpp_attribute`, which answers 0 for everything so far (#1141). Distinct class
+  operands need a complete Derived (both operands, for layout compatibility); the same incomplete
+  class is allowed where Clang and GCC reject it for the virtual base trait. Dependent operands
+  are decided at instantiation in class-template bases, variable-template initializers, function
+  template bodies and constraints (`tests/own/builtins/virtual-base-of-*`,
+  `pointer-interconvertible-base-of-*`, `layout-compatible-*`, `relation-traits-*`). Unknown base graph,
   standard-layout or alignment facts (unapplied layout attributes) get hard diagnostics.
   `__has_builtin` answers 0 for all three (#218).
 - `__is_empty(T)` gives false for nonclass types and unions. For a complete nonunion class, it

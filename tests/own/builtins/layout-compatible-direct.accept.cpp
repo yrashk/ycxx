@@ -31,6 +31,8 @@ struct V2 { virtual void f(); int a; };
 struct CI { const int a; };
 struct Ar1 { int a[2]; };
 struct Ar2 { int b[2]; };
+struct G : E1 { int y; };    // an empty base and members in the derived class
+struct K : E1 {};
 struct Inc;
 #define LC(a, b) __is_layout_compatible(a, b)
 static_assert(LC(int, int) && LC(const int, int) && LC(int&, int&) && LC(void, const void) && LC(int(), int()));
@@ -42,4 +44,5 @@ static_assert(!LC(S1, S3) && !LC(P1, P2) && !LC(BF1, BF3) && !LC(BF1, I1) && !LC
 static_assert(LC(U1, U2) && !LC(U1, U3) && !LC(U1, S1));
 static_assert(LC(EA, EB) && LC(EA, EC) && !LC(EA, ED) && !LC(EA, int));
 static_assert(LC(Inc[], Inc[]) && LC(Inc*, Inc*) && !LC(S1[2], S2[2]) && !LC(int S1::*, int S2::*));
+static_assert(LC(G, I1) && LC(K, E2) && !LC(G, S1));
 static_assert(__is_same(decltype(LC(int, int)), bool));

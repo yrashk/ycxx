@@ -13,3 +13,11 @@ static_assert(is_layout_compatible<int, const int>::value && !is_layout_compatib
 struct Late { int x; char y; };
 static_assert(is_layout_compatible<S1, Late>::value && is_layout_compatible_v<Late, const S1>);
 static_assert(!is_layout_compatible<S1, int>::value && is_layout_compatible_v<Late, Late>);
+
+union U1 { int a; char b; };
+union U2 { char c; int d; };
+enum EA : int {};
+enum class EC : int {};
+enum ED : long {};
+static_assert(is_layout_compatible<U1, U2>::value && !is_layout_compatible_v<U1, Late>);
+static_assert(is_layout_compatible<EA, EC>::value && !is_layout_compatible_v<EA, ED>);

@@ -2222,17 +2222,18 @@ public:
       return std::nullopt;
     if (rx->union_) {
       // Unions pair their members in any order. Layout compatibility is an equivalence, so any
-      // compatible partner will do.
+      // compatible partner will do; an undecided pair leaves the answer open only when no
+      // partner is found.
       std::vector<bool> paired(fy.size(), false);
       for (const FieldRec& f : fx) {
-        bool found = false;
+        bool found = false, undecided = false;
         for (std::size_t i = 0; i < fy.size() && !found; ++i) {
           if (paired[i]) continue;
           const auto same = layout_compatible(f.type, fy[i].type);
-          if (!same) return std::nullopt;
-          if (*same) paired[i] = found = true;
+          if (!same) undecided = true;
+          else if (*same) paired[i] = found = true;
         }
-        if (!found) return false;
+        if (!found) return undecided ? std::nullopt : std::optional(false);
       }
       return true;
     }
