@@ -7932,6 +7932,25 @@ private:
     return true;
   }
 
+  // The early bound needs the scalar clause count. A pack can change that count, and naming
+  // the primary needs lookup at its declaration point, which this early parse cannot supply.
+  bool fixed_scalar_array_initializer(std::string_view declarator_name) {
+    u32 depth = 1;  // the opening brace
+    for (u32 ahead = 1; depth != 0; ++ahead) {
+      const Tk token = ps_.kind(ahead);
+      if (token == Tk::ellipsis || token == Tk::eof ||
+          (token == Tk::identifier && p_->region().name(ps_.tok(ahead)) == declarator_name))
+        return false;
+      // Array clauses cannot have designators. Keep their usual diagnostics before replay.
+      if (depth == 1 && token == Tk::period &&
+          (ps_.kind(ahead - 1) == Tk::l_brace || ps_.kind(ahead - 1) == Tk::comma))
+        return false;
+      if (token == Tk::l_brace) ++depth;
+      if (token == Tk::r_brace) --depth;
+    }
+    return true;
+  }
+
   // One init-declarator at namespace scope; false after an error that leaves no record.
   bool declare(const DeclSpec& spec, parse::Declarator d, LangLinkage lang, bool explicit_lang,
                bool is_function_def, bool ordinary_friend = false) {
@@ -7975,6 +7994,10 @@ private:
       }
     } else if (d.unknown_bound) {
       ps_.accept(Tk::equal);
+      const bool replay = template_ && !var_ && !explicit_ && !d.qualified && !d.template_args &&
+                          types.is_scalar(d.type) && !types.is_dependent(d.type) && !types.has_placeholder(d.type) &&
+                          fixed_scalar_array_initializer(name);
+      const parse::Parser::VariableTemplateInitializerScope initializer(ps_, replay);
       early = ps_.braced_init_list();
       u64 n = s_.deduce_bound(d.type, *early);
       if (n == 0) {
