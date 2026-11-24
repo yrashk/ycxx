@@ -2112,10 +2112,15 @@ class Gen {
   ValueId new_object(At a) {
     auto n = get<ast::NewObject>(a);
     At init = child(a, n.init);
-    if (!fn_.thunk && !nonthrowing_initializer(init))
+    ast::QualType p = n.info.type;
+    // A class's constructor may throw, and [expr.new]/28 then calls the deallocation function.
+    // That needs an exceptional edge, which only certified frames get (#1135). A frame with a
+    // new-expression is never certified (the pipeline's unwind proof admits no NewObject), so
+    // the frame has no unwind information and such an exception terminates the program there,
+    // before a caller could observe the unreleased storage.
+    if (!fn_.thunk && cls(facts_.pointee(p)) != TypeClass::record && !nonthrowing_initializer(init))
       throw Unsupported{"cleanup for a potentially throwing new-initializer"};
     ValueId storage = rvalue(child(a, n.allocation));
-    ast::QualType p = n.info.type;
     if (n.placement) {
       ValueId objects[] = {storage};
       std::uint64_t types[] = {word(ty(facts_.pointee(p)))};
@@ -2126,7 +2131,16 @@ class Gen {
     // initializer can then fall back to runtime without evaluating the new-initializer.
     if (fn_.thunk) return object;
     ast::QualType t = facts_.pointee(p);
-    initialize({object, t}, init, false);
+    // [dcl.init.general]/9: value-initialization zero-initializes a class object before any
+    // constructor runs, and the allocated storage is not zero. Copy a zero object into it.
+    const bool zeroed = cls(t) == TypeClass::record && value_initializes(init);
+    if (zeroed) {
+      Place zeros = begin_object(t, ir::Init::zero, ir::Storage::temporary);
+      begin_lifetime(zeros);
+      copy({object, t}, zeros);
+      end_lifetime({zeros, ast::EntityId::none, ir::Storage::temporary});
+    }
+    initialize({object, t}, init, zeroed);
     ValueId objects[] = {object};
     std::uint64_t types[] = {word(ty(t))};
     stateful(ir::Op::obj__begin, {}, objects, types);
@@ -2154,10 +2168,18 @@ class Gen {
   void delete_object(At a) {
     if (fn_.thunk) unsupported(a, "in constant evaluation");
     auto d = get<ast::DeleteObject>(a);
-    ValueId addr = rvalue(child(a, d.address));
-    if_nonnull(addr, [&] {
-      stateful(ir::Op::obj__end, {}, std::span(&addr, 1));
-      ValueId args[] = {addr, rvalue(child(a, d.size))};
+    At operand = child(a, d.address);
+    ValueId object = rvalue(operand);
+    if_nonnull(object, [&] {
+      // [expr.delete]/6: the destructor ends the object, then its storage is released.
+      if (d.destructor != ast::EntityId::none) {
+        ValueId self[] = {object};
+        call_fn(d.destructor, facts_.int_type(), self, ImplicitObject::constructor_or_destructor, true);
+      }
+      stateful(ir::Op::obj__end, {}, std::span(&object, 1));
+      ast::QualType void_pointer = facts_.pointer_to(d.info.type);
+      ValueId address = pure(ir::Op::ptr_cast, void_pointer, {object}, {word(ty(void_pointer))});
+      ValueId args[] = {address, rvalue(child(a, d.size))};
       call_fn(d.function, d.info.type, args);
     });
   }

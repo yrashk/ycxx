@@ -6983,7 +6983,14 @@ public:
       // global operator new[] without a Call child. The visitor still checks the operands.
       if (node.is<ast::NewArray>() && node.get<ast::NewArray>().allocation.id == NodeId::none)
         return function_throwing(w_->allocation_function(AllocationFunction::allocate, /*array=*/true).entity);
-      if (node.is<ast::DeleteObject>()) return function_throwing(node.get<ast::DeleteObject>().function);
+      if (node.is<ast::DeleteObject>()) {
+        // [expr.unary.noexcept]: the destructor is potentially invoked, then the deallocation.
+        const auto d = node.get<ast::DeleteObject>();
+        if (d.destructor != EntityId::none &&
+            destructor_throwing(types().pointee(expression_info(d.address.id).type), node.offset()))
+          return true;
+        return function_throwing(d.function);
+      }
       if (node.is<ast::DeleteArray>()) return function_throwing(node.get<ast::DeleteArray>().function);
       if (node.is<ast::ImplicitConversion>()) {
         const auto conversion = node.get<ast::ImplicitConversion>();
@@ -8787,13 +8794,73 @@ public:
     return node(ast::Call{call_info, f.entity, at(callee, begin), b_->list(sizes)}, begin, begin, call_info);
   }
 
+  // Whether class `c` or one of its bases declares an allocation or deallocation function, which
+  // a new- or delete-expression would look up before the global ones ([expr.new], [expr.delete]).
+  bool class_allocation_functions(EntityId c) {
+    const ClassRec* r = class_rec(c);
+    if (!r) return false;
+    for (const MemberDeclRec& m : r->members)
+      if (m.is_function && is_allocation_name(ins().names.spelling(m.name))) return true;
+    return std::ranges::any_of(r->bases, [&](const BaseRec& b) { return class_allocation_functions(b.cls); });
+  }
+
+  // The class objects the usual `operator new(size_t)` and `operator delete(void*, size_t)` can
+  // allocate and release: no class-specific allocation functions (#293) and no new-extended
+  // alignment, which would select the `std::align_val_t` overloads ([expr.new]/19).
+  bool supported_class_allocation(QualType t) {
+    if (class_allocation_functions(types().class_of(t))) return false;
+    const auto alignment = layout_of(t, true);
+    return alignment && *alignment <= 2u * w_->target.pointer_size;
+  }
+
+  // [expr.new]/26: the new-initializer initializes the class object as in a declaration
+  // ([dcl.init.general]): default-initialization without one, value-initialization for `()`,
+  // and direct- or direct-list-initialization otherwise.
+  Ex new_class_initializer(QualType t, const std::optional<std::vector<Ex>>& args, const Braced* braces, u32 begin,
+                           u32 end) {
+    Ex fail{NodeId::none, begin, end};
+    if (braces) return list_init(t, *braces);
+    if (args && args->empty()) return value_init(t, end, end);
+    if (!args) {
+      if (default_deleted(t)) {
+        diag(begin, Diag::deleted_constructor, t);
+        return fail;
+      }
+      Ex init = default_init(t, end, end);
+      // [dcl.init.general]/8: a const object needs a const-default-constructible class, one whose
+      // default-initialization does some initialization.
+      if (init.ok() && as<ast::DefaultInit>(init) && Types::is_const(types().canonical(t))) {
+        diag(begin, Diag::new_const_uninitialized, t);
+        return fail;
+      }
+      return init;
+    }
+    if (std::ranges::any_of(*args, [](const Ex& e) { return !e.ok(); })) return fail;
+    const u32 open = args->front().begin;
+    const bool aggregate = can_parenthesize_aggregate(t, *args, !immediate_context);
+    if (aggregate || has_user_ctors(t) || args->size() != 1)
+      return construct(t, *args, open, end, aggregate ? Construction::direct_paren_aggregate : Construction::direct);
+    return convert(args->front(), t, open);
+  }
+
   // [expr.new]: initialize the object after the call to the global allocation function.
   Ex new_object(QualType t, const std::optional<std::vector<Ex>>& args, const Braced* braces, u32 begin, u32 end,
                 std::optional<Ex> placement) {
     Ex fail{NodeId::none, begin, end};
-    if (types().has_placeholder(t) || types().is_dependent(t)) {
+    if (types().has_placeholder(t)) {
       diag(begin, Diag::not_supported, lex::Tk::kw_new);
       return fail;
+    }
+    if (types().is_dependent(t)) {
+      // The instantiation analyses the new-expression's tokens again with T bound ([temp.res]).
+      std::vector<Ex> ops;
+      if (placement) ops.push_back(*placement);
+      if (args) ops.insert(ops.end(), args->begin(), args->end());
+      if (braces)
+        for (const Braced::Clause& c : braces->clauses)
+          if (!c.list) ops.push_back(c.expr);
+      if (std::ranges::any_of(ops, [](const Ex& e) { return !e.ok(); })) return fail;
+      return dependent_node(ops, begin, end);
     }
     if (!types().is_object(t)) {
       diag(begin, Diag::new_requires_object, t);
@@ -8801,7 +8868,12 @@ public:
     }
     if (types().is_class(t) && !require_complete(t, begin)) return fail;
     if (!require_concrete_object(t, begin)) return fail;
-    if (!scalar_allocation_type(t)) {
+    const bool class_type = types().is_class(t);
+    if (class_type && (placement || !supported_class_allocation(t))) {
+      diag(begin, Diag::not_supported, lex::Tk::kw_new);
+      return fail;
+    }
+    if (!class_type && !scalar_allocation_type(t)) {
       diag(begin, Diag::not_supported, lex::Tk::kw_new);
       return fail;
     }
@@ -8815,7 +8887,9 @@ public:
     }
 
     Ex init;
-    if (braces) {
+    if (class_type) {
+      init = new_class_initializer(t, args, braces, begin, end);
+    } else if (braces) {
       init = list_init(t, *braces);
     } else if (!args) {
       if (Types::is_const(types().canonical(t))) {
@@ -8886,18 +8960,30 @@ public:
       return fail;
     }
     QualType t = types().pointee(e.type());
+    // [expr.delete]/5: deleting an object of incomplete class type is ill-formed.
     if (types().is_class(t) && !require_complete(t, begin)) return fail;
-    if (!scalar_allocation_type(t)) {
+    EntityId destructor = EntityId::none;
+    if (types().is_class(t)) {
+      // A virtual destructor selects the deallocation function of the dynamic type through the
+      // deleting destructor (#931, #309).
+      const ClassRec* r = class_rec(types().class_of(t));
+      if (!r || r->virtual_destructor || !supported_class_allocation(t)) {
+        diag(begin, Diag::not_supported, lex::Tk::kw_delete);
+        return fail;
+      }
+      if (!check_destructor_access(t, begin)) return fail;
+      destructor = destructor_of(t);
+    } else if (!scalar_allocation_type(t)) {
       diag(begin, Diag::not_supported, lex::Tk::kw_delete);
       return fail;
     }
-    Ex addr = convert_node(rvalue(e), ast::ConversionKind::pointer, types().pointer(v));
-    if (!addr.ok()) return fail;
+    Ex pointer = rvalue(e);
+    if (!pointer.ok()) return fail;
     Ex size = size_of(t, false, begin, begin);
     EntityId f = w_->allocation_function(AllocationFunction::deallocate_sized).entity;
     q_->use_allocation_function(f);
     ExprInfo info{v, ValueCategory::prvalue, 0};
-    return node(ast::DeleteObject{info, f, at(addr, begin), at(size, begin)}, begin, end, info);
+    return node(ast::DeleteObject{info, f, at(pointer, begin), at(size, begin), destructor}, begin, end, info);
   }
 
   // Limit the object size to the largest positive byte distance representable by ptrdiff_t.
