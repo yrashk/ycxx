@@ -16,3 +16,7 @@ class D {
 template<class T, int N> class Fixed; class BadFixed { template<class T, T N> friend class Fixed; }; //! error
 template<class A, class B, A N> class Pair; class BadPair { template<class A, class B, B N> friend class Pair; }; //! error
 template<class T, T N> class Own; template<class Outer> class BadFree { template<class T, Outer N> friend class Own; }; BadFree<int> bad; //! error
+
+// [basic.scope.scope]/4: introducing a new template conflicts with an earlier declaration
+// of another entity binding that name in the target namespace.
+int Taken; class BadName { template<class> friend struct Taken; }; //! error

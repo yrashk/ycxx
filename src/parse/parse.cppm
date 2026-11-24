@@ -2077,9 +2077,20 @@ public:
     std::vector<ast::DeclSema> declarations;
     for (DeclId id : p_->visible_decls(p_->world().ins.names.spelling(name), namespace_lookup_item(),
                                         namespace_lookup_includes_item(name), p_->namespace_path(ns),
-                                        {}, Program::LookupNames::all, /*innermost_only=*/true))
+                                        {}, Program::LookupNames::types, /*innermost_only=*/true))
       if (auto d = lookup_declaration(id); d && d->entity != EntityId::none) declarations.push_back(*d);
     return declarations;
+  }
+  // Name conflicts when introducing a template concern declarations that bind in this namespace
+  // ([basic.scope.scope]), including direct using-declarations.
+  bool namespace_binds_name(EntityId ns, ast::NameId name) {
+    const auto declarations = p_->declared_in(p_->world().ins.names.spelling(name), p_->namespace_path(ns),
+                                               namespace_lookup_item(), namespace_lookup_includes_item(name),
+                                               /*inhabit=*/true);
+    return std::ranges::any_of(declarations, [&](DeclId id) {
+      auto d = lookup_declaration(id);
+      return d && d->entity != EntityId::none;
+    });
   }
   std::vector<ast::DeclSema> qualifier_decls(ast::NameId name, std::optional<EntityId> ns,
                                             std::span<const EntityId> directives) override {
@@ -5854,8 +5865,9 @@ private:
       }
     // A using-directive contributes at its common ancestor ([namespace.udir]), which can
     // be outside the innermost namespace that unqualified friend lookup may consider.
+    // The elaborated name is looked up as a type ([basic.lookup.elab]).
     const std::vector<ast::DeclSema> found =
-        ns ? q_.namespace_members(*ns, name) : q_.friend_namespace_decls(ns_entity(), name);
+        ns ? q_.namespace_members(*ns, name, /*type_only=*/true) : q_.friend_namespace_decls(ns_entity(), name);
     EntityId templ = EntityId::none;
     for (const ast::DeclSema& prior : found) {
       if (prior.entity == EntityId::none || (prior.flags & sema::decl_flag::friend_) ||
@@ -5881,6 +5893,10 @@ private:
     if (templ == EntityId::none) {
       if (ns) {
         s_.diag(name_at, Diag::no_friend_match, name);
+        return bad();
+      }
+      if (q_.namespace_binds_name(ns_entity(), name)) {
+        s_.diag(name_at, Diag::conflicting_declaration, name);
         return bad();
       }
       // Its head as the namespace's declaration of the template has it, at depth 0, so that
