@@ -2197,12 +2197,47 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, Key k) {
   // Checked policy records can require a definition, and raw linker names can refer to
   // another entity without an ordinary typed use of it.
   const bool defer_private_constexpr = !k.check_policies && !tu.has_raw_linkage_names && tu.asm_hidden_symbols.empty();
-  std::vector<FnKey> fns;
   std::set<std::uint32_t> deferred;
+  if (defer_private_constexpr) {
+    std::set<EntityId> candidates;
+    for (const FunctionDef& f : tu.functions)
+      if (f.private_constexpr && f.coalesced && f.body.tree != ast::NodeId::none)
+        candidates.insert(f.entity);
+    if (!candidates.empty()) {
+      const UnitIndex& index = co_await cx.fetch<UnitIndexQ>(id);
+      std::erase_if(candidates, [&](EntityId entity) {
+        const auto i = indexed(index.entities, entity);
+        if (!i) return true;
+        const Entity& symbol = tu.entities[*i];
+        return symbol.linkage != ast::Linkage::external || symbol.has_local_binding() || symbol.template_type.has_value();
+      });
+      // Find resolved direct calls in checked constant-evaluated arms before requesting any L1
+      // bodies. Other private helpers stay emission roots, including raw-name providers in
+      // another translation unit.
+      auto collect = [&](this auto&& visit, const ast::Red& node, bool consteval_arm) -> void {
+        if (candidates.empty() || node.is<ast::ConstantProbe>()) return;
+        if (node.is<ast::IfConsteval>()) {
+          const auto branch = node.get<ast::IfConsteval>();
+          const ast::Child arm = branch.negated ? branch.else_ : branch.then_;
+          if (arm.id != ast::NodeId::none) visit(ast::Red(in.ast, arm.id), true);
+          return;
+        }
+        if (consteval_arm && node.is<ast::Call>()) {
+          const EntityId function = node.get<ast::Call>().function;
+          if (candidates.erase(function)) deferred.insert(ir::raw(function));
+        }
+        node.for_each_child([&](const ast::Red& child) { visit(child, consteval_arm); });
+      };
+      for (const FunctionDef& f : tu.functions) {
+        if (candidates.empty()) break;
+        if (f.body.tree != ast::NodeId::none) collect(ast::Red(in.ast, f.body.tree), false);
+      }
+    }
+  }
+  std::vector<FnKey> fns;
   for (const FunctionDef& f : tu.functions) {
-    if (f.emit_if_referenced || (defer_private_constexpr && f.private_constexpr && f.coalesced))
-      deferred.insert(ir::raw(f.entity));
-    else fns.push_back({id, f.entity});
+    if (f.emit_if_referenced) deferred.insert(ir::raw(f.entity));
+    else if (!deferred.contains(ir::raw(f.entity))) fns.push_back({id, f.entity});
   }
 
   // Follow native references in the lowered bodies, where only the runtime edge of an

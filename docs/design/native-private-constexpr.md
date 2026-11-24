@@ -9,10 +9,13 @@ libycxx `<stdexcept>` header.
 
 Astra's design reuses the native reference walk from [#1097](https://github.com/yrashk/ycxx/issues/1097).
 An eligible in-class definition is an ordinary private static constexpr function of a named
-non-template class at namespace scope. It must qualify for the existing coalesced inline
-emission and have neither static locals nor closures. A native direct call or address in
-lowered code or data demands the real definition and follows its own native references.
-Definitions retain the existing weak binding, including when two objects use their addresses.
+non-template class at namespace scope. It must have external coalesced inline emission
+and have neither static locals nor closures. The object stage looks for a resolved direct
+call to the helper in the checked AST of a constant-evaluated arm before requesting L1
+bodies. Unrelated definitions remain available to other translation units that name their
+symbols directly. A native direct call or address in lowered code or data demands the real
+definition and follows its own native references. Definitions retain the existing weak
+binding, including when two objects use their addresses.
 
 The whole unit's declaration facts preserve emission for attributed definitions, including
 attributes on another declaration of the same function. A unit with raw assembly names can
