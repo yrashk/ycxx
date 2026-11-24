@@ -2357,7 +2357,7 @@ std = 'C++20'
 ftm = '__cpp_consteval'
 detect = '\bconsteval\s+(?!\{)'
 status = 'done'
-issues = [102, 1097, 1175, 1183]
+issues = [102, 1097, 1175, 1183, 1189]
 note = 'Ordinary nonvirtual immediate member calls validate void and integral or enum results through 64 bits. Eligible nonvirtual members and function template specializations can omit native code when only constant evaluation uses them. Reference and field-address results remain open.'
 probe = '''
 consteval int sq(int x) { return x * x; }
