@@ -1449,8 +1449,15 @@ public:
     EntityId spec;
     u32 item;
     Result<ast::ItemSema> cell;
+    bool diagnosed_failure = false;
   };
   const std::deque<VarInstance>& variable_instances() const { return var_instances_; }
+  bool variable_instantiation_failed(EntityId v, u32 point) const {
+    const auto it = var_index_.find(std::to_underlying(v));
+    if (it == var_index_.end()) return false;
+    const VarInstance& in = var_instances_[it->second];
+    return in.item < point && in.diagnosed_failure;
+  }
   // The members of class template specializations analysed, in order: (member item, specialization)
   // and the member's record for that specialization ([temp.inst]/3).
   struct MemberInstance {
@@ -2216,6 +2223,11 @@ public:
     observed_type_trait_failure |= failed;
     return failed;
   }
+  bool variable_instantiation_failed(EntityId v) override {
+    const bool failed = p_->variable_instantiation_failed(v, value_point(v));
+    observed_variable_instantiation_failure |= failed;
+    return failed;
+  }
   std::optional<ConstId> constant_value(EntityId v) override { return p_->constant_value(v, value_point(v)); }
   std::optional<ConstId> constant_call(sema::Sema& s, const sema::Ex& call) override {
     return sema::Evaluator(s, *this).evaluate(call).value;
@@ -2291,6 +2303,7 @@ public:
   bool observed_enum_definition_failure = false;
   bool retain_type_trait_pattern = false;
   bool observed_type_trait_failure = false;
+  bool observed_variable_instantiation_failure = false;
   std::optional<u32> type_trait_demand;
   struct RestoreTypeTraitPattern {
     AtItem& q;
@@ -2946,6 +2959,7 @@ public:
   }
   engine::Loc source_loc(engine::Loc loc, u32 offset) override { return at_.source_loc(loc, offset); }
   bool type_trait_instantiation_failed(EntityId e) override { return at_.type_trait_instantiation_failed(e); }
+  bool variable_instantiation_failed(EntityId v) override { return p_->variable_instantiation_failed(v, p_->end()); }
   std::optional<ConstId> constant_value(EntityId v) override { return p_->constant_value(v, p_->end()); }
   std::optional<ConstId> constant_call(sema::Sema& s, const sema::Ex& call) override {
     return sema::Evaluator(s, *this).evaluate(call).value;
@@ -3080,6 +3094,7 @@ public:
     s_.template_args = var_->args;
   }
   bool type_trait_failure() const { return q_.observed_type_trait_failure; }
+  bool variable_instantiation_failure() const { return q_.observed_variable_instantiation_failure; }
 
   Result<ast::ItemSema> replay_scoped_enum(EntityId e) {
     q_.replaying_scoped_enum = e;
@@ -7829,7 +7844,7 @@ private:
       if (v.value) {
         value = *v.value;
         p_->set_constant(sem.entity, value, k_);  // a reference is potentially constant ([expr.const.init])
-      } else if (!v.dependent && !v.type_trait_failure) {
+      } else if (!v.dependent && !v.diagnosed_failure()) {
         dynamic_ok(at, v.reason);
       }
     };
@@ -7859,7 +7874,7 @@ private:
           if (v.value) {
             value = *v.value;
             if (spec.is_constexpr) p_->set_constant(sem.entity, *v.value, k_);
-          } else if (!v.type_trait_failure) {
+          } else if (!v.diagnosed_failure()) {
             dynamic_ok(b->begin, v.reason);
           }
         }
@@ -7893,7 +7908,7 @@ private:
             if (spec.is_constexpr || (sema::Types::is_const(d.type) && !sema::Types::is_volatile(d.type) &&
                                       types.is_integral(d.type)))
               p_->set_constant(sem.entity, *v.value, k_);
-          } else if (!v.type_trait_failure) {
+          } else if (!v.diagnosed_failure()) {
             dynamic_ok(e.begin, v.reason);
           }
         }
@@ -7921,7 +7936,7 @@ private:
           value = *v.value;
           if (spec.is_constexpr || (sema::Types::is_const(d.type) && !sema::Types::is_volatile(d.type) && types.is_integral(d.type)))
             p_->set_constant(sem.entity, *v.value, k_);
-        } else if (!v.type_trait_failure) {
+        } else if (!v.diagnosed_failure()) {
           dynamic_ok(open, v.reason);
         }
       } else if (init.ok()) {
@@ -11468,12 +11483,15 @@ const Program::VarInstance* Program::variable_instance(EntityId v, u32 point,
   Result<ast::ItemSema> cell = analysis.run();
   var_instantiating_.erase(key);
   // What the definition diagnosed it says once, there.
-  if (!item_sema(k).diags.empty()) cell.diags.clear();
+  const auto& pattern_diags = item_sema(k).diags;
+  if (!pattern_diags.empty()) cell.diags.clear();
+  const bool diagnosed_failure = analysis.variable_instantiation_failure() ||
+                                  !valid_member_declarations(cell.diags) || !valid_member_declarations(pattern_diags);
   if (analysis.type_trait_failure() || std::ranges::any_of(cell.diags, [](const auto& d) {
         return sema::is_type_trait_failure(d.id);
       })) failed_type_trait_instantiations_.insert(v);
   var_index_.emplace(key, var_instances_.size());
-  var_instances_.push_back({v, k, std::move(cell)});
+  var_instances_.push_back({v, k, std::move(cell), diagnosed_failure});
   return &var_instances_.back();
 }
 

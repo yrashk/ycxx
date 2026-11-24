@@ -2710,7 +2710,7 @@ public:
     if (!c.ok()) return std::nullopt;
     sema::Evaluated v = sema::Evaluator(*s_, questions()).evaluate(c);
     if (!v.value) {
-      if (!v.type_trait_failure) s_->diag(e.begin, Diag::not_constant, v.reason);
+      if (!v.diagnosed_failure()) s_->diag(e.begin, Diag::not_constant, v.reason);
       return std::nullopt;
     }
     return *v.value;
@@ -5401,7 +5401,7 @@ public:
     } else if (v.dependent) {
       s_->diag(e.begin, Diag::not_constant, sema::reason_unsupported);  // nothing outside a template depends
     } else if (!v.value) {
-      if (!v.type_trait_failure) s_->diag(e.begin, Diag::not_constant, v.reason);
+      if (!v.diagnosed_failure()) s_->diag(e.begin, Diag::not_constant, v.reason);
     } else if (!s_->in_template_definition() && s_->world().values.rec(*v.value).bits == 0) {
       if (message == sema::ConstId::none) s_->diag(begin, Diag::static_assert_failed);
       else s_->diag(begin, Diag::static_assert_failed_message, message);
@@ -5636,7 +5636,7 @@ public:
       }
     } else if (v.dependent) {
       s_->set_local_value_dependent(local);
-    } else if (is_constexpr) {
+    } else if (is_constexpr && !v.variable_instantiation_failure) {
       s_->diag(init.begin, Diag::not_constant, v.reason);
     }
   }
@@ -5963,7 +5963,8 @@ public:
       sema::Evaluator evaluator(*s_, questions());
       sema::Evaluated v = s_->as<ast::InitList>(init) ? evaluator.evaluate_initializer(init) : evaluator.evaluate(init);
       if (v.value) value = *v.value;
-      else if (spec.is_constinit && !v.dependent) s_->diag(init.begin, Diag::not_constant, v.reason);
+      else if (spec.is_constinit && !v.dependent && !v.variable_instantiation_failure)
+        s_->diag(init.begin, Diag::not_constant, v.reason);
     }
     if (spec.is_constinit && value != ast::ConstId::none)
       if (auto entity = s_->immediate_result_entity(value))

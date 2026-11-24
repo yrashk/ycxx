@@ -117,6 +117,8 @@ public:
   // current point ([expr.const]), and a namespace-scope variable as the interpreter sees it.
   virtual interp::Callee function_ir(EntityId f) = 0;
   virtual std::optional<interp::GlobalVar> global(EntityId v) = 0;
+  // A variable template's required definition has already reported an error.
+  virtual bool variable_instantiation_failed(EntityId) { return false; }
   virtual bool is_immediate_function(EntityId) { return false; }
   virtual bool is_constexpr(EntityId f) = 0;  // a constexpr or consteval function
   // Whether class `c` is complete at the current point ([class.mem.general]): its definition
