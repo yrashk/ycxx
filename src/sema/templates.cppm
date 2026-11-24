@@ -1473,8 +1473,7 @@ public:
         if (!deduce_overload_argument(*p0, args[i], depth, out)) return std::nullopt;
         continue;
       }
-      auto [p, a, allow] = call_pair(*p0, args[i], depth);
-      if (!deduce(p, a, depth, out, allow)) return std::nullopt;
+      if (!deduce_fixed_call_argument(*p0, args[i], depth, out)) return std::nullopt;
     }
     if (trailing) {
       auto p0 = explicit_args.empty() ? substitute(types().rec(f.params[n - 1]).inner, given)
@@ -1535,6 +1534,75 @@ public:
       allow.function_conversion = types().is_pointer(p) && types().is_function(types().pointee(p));
     }
     return {p, a, allow};
+  }
+  // [temp.deduct.call]/4.3, /5: a fixed class reference or pointer parameter can deduce
+  // from a base when its adjusted argument type does not match directly.
+  bool deduce_fixed_call_argument(QualType param, const ArgShape& arg, u16 depth,
+                                  std::vector<std::optional<TemplateArg>>& out) {
+    const auto [p, a, allow] = call_pair(param, arg, depth);
+    const bool pointer = allow.qualification && types().is_pointer(a);
+    const QualType pattern = pointer ? types().pointee(p) : p;
+    const QualType actual = pointer ? types().pointee(a) : a;
+    if ((!pointer && !allow.more_cv) || !class_definition || !types().is_class(pattern) ||
+        !types().is_class(actual) || types().is_dependent(actual))
+      return deduce(p, a, depth, out, allow);
+    const EntityId templ = w_->entities.rec(types().class_of(pattern)).templ;
+    if (templ == EntityId::none) return deduce(p, a, depth, out, allow);
+
+    // Leave deduction through a referenced pack or template template parameter to its
+    // existing path. Explicit non-pack arguments have already been substituted into P.
+    std::vector<std::pair<u16, u16>> refs;
+    params_in(pattern, refs);
+    if (std::ranges::any_of(refs, [&](auto ref) {
+          auto [d, i] = ref;
+          return d == depth && i < head_.size() &&
+                 (head_[i].pack || head_[i].kind == TemplateArgKind::template_);
+        }))
+      return deduce(p, a, depth, out, allow);
+
+    // Each P/A pair deduces independently ([temp.deduct.type]/2). A match must agree with
+    // other arguments, but a disagreement cannot make a different base match.
+    auto matches = [&](QualType candidate) {
+      std::vector<std::optional<TemplateArg>> trial(out.size());
+      return deduce(p, candidate, depth, trial, allow);
+    };
+    if (matches(a)) return deduce(p, a, depth, out, allow);
+
+    const Cv class_cv = Types::cv(types().canonical(actual));
+    const Cv pointer_cv = Types::cv(types().canonical(a));
+    auto base_argument = [&](EntityId cls) {
+      QualType base = types().add_cv(types().class_type(cls), class_cv);
+      return pointer ? types().add_cv(types().pointer(base), pointer_cv) : base;
+    };
+    const EntityId root = types().class_of(actual);
+    std::map<EntityId, std::vector<EntityId>> bases;
+    std::vector<EntityId> matching;
+    std::vector<EntityId> pending{root};
+    while (!pending.empty()) {
+      const EntityId cls = pending.back();
+      pending.pop_back();
+      auto [it, inserted] = bases.try_emplace(cls);
+      if (!inserted) continue;
+      // Snapshot the edges before asking for any other class definition. Access and the
+      // number of subobjects of each type are conversion checks.
+      if (const ClassRec* rec = class_definition(cls))
+        for (const BaseRec& base : rec->bases) it->second.push_back(base.cls);
+      pending.append_range(it->second);
+      if (cls != root && w_->entities.rec(cls).templ == templ && matches(base_argument(cls)))
+        matching.push_back(cls);
+    }
+
+    // A match is discarded if it is a proper base of any other match, regardless of
+    // the paths from the argument to either base ([temp.deduct.call]/5).
+    for (EntityId cls : matching) pending.append_range(bases.at(cls));
+    std::set<EntityId> dominated;
+    while (!pending.empty()) {
+      const EntityId cls = pending.back();
+      pending.pop_back();
+      if (dominated.insert(cls).second) pending.append_range(bases.at(cls));
+    }
+    std::erase_if(matching, [&](EntityId cls) { return dominated.contains(cls); });
+    return matching.size() == 1 && deduce(p, base_argument(matching.front()), depth, out, allow);
   }
   // [temp.deduct.call]/6: try each non-template overload independently. Deduction from other
   // parameters cannot disambiguate these trials, but it must agree with a unique result.
@@ -2226,6 +2294,8 @@ private:
   const Classes* classes_;
 
 public:
+  // The definition of a class if it is complete at the deduction's point of use.
+  std::function<const ClassRec*(EntityId)> class_definition;
   // The type member of a class with a name, as lookup at a point finds it; set by whoever asks at
   // a point, which `classes_` alone does not know.
   std::function<std::optional<QualType>(EntityId, NameId)> member_type;
