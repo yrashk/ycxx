@@ -1256,6 +1256,11 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   still reads their checked bodies. The object pipeline emits a definition when lowered code,
   tables or data refer to it, including references from retained immediate bodies.
   [#1097](https://github.com/yrashk/ycxx/issues/1097)
+- An `if consteval` constant-evaluated arm can directly call a private static constexpr
+  helper defined inside an ordinary non-template class. Native emission can omit the helper
+  when the object needs neither a direct call nor its address. An emitted definition keeps
+  its weak inline binding. Both arms are checked and the interpreter can call the helper.
+  [Design](docs/design/native-private-constexpr.md) · [#1174](https://github.com/yrashk/ycxx/issues/1174)
 - `consteval` constructors, in class and out of class, among the other constructor specifiers.
   `Sema::construct` folds a call of one outside an immediate function context, including an
   implicit conversion of an argument or operand, into its value (`Sema::immediate_invocation`,
