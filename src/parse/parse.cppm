@@ -7490,6 +7490,10 @@ private:
       if (token == Tk::ellipsis || token == Tk::eof ||
           (token == Tk::identifier && p_->region().name(ps_.tok(ahead)) == declarator_name))
         return false;
+      // Array clauses cannot have designators. Keep their usual diagnostics before replay.
+      if (depth == 1 && token == Tk::period &&
+          (ps_.kind(ahead - 1) == Tk::l_brace || ps_.kind(ahead - 1) == Tk::comma))
+        return false;
       if (token == Tk::l_brace) ++depth;
       if (token == Tk::r_brace) --depth;
     }
