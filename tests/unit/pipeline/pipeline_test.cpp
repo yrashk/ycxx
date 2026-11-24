@@ -365,7 +365,7 @@ extern "C" {
     config.target = target;
     const pl::TuId tu{0};
     s.set_source(tu, "addresses.cpp", source, "addresses.o", {}, config);
-    const pl::TuValue& result = s.get<pl::Tu>(tu);
+    const pl::TuValue& result = s.get<pl::Tu>(pl::Tu::Key{tu});
     check(result.object.has_value(), pl::Tu::errors(result));
     if (!result.object) continue;
 

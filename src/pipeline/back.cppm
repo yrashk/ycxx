@@ -735,8 +735,6 @@ struct Tu {
   struct Key {
     TuId tu;
     bool check_policies = false;
-    Key() = default;
-    Key(TuId unit, bool checked = false) : tu(unit), check_policies(checked) {}
     bool operator==(const Key&) const = default;
 
     friend void hash_into(Hasher& h, const Key& k) noexcept {
@@ -2661,7 +2659,7 @@ std::expected<obj::object, std::vector<BackError>> compile(const TranslationUnit
   db.set<OptCacheSnapshot>(arch, {});
   db.set<OptLevel>(arch, 0);
   db.set<TuSourceIn>(TuId{0}, {tu.name, std::nullopt, tu});
-  const TuValue& v = db.get<Tu>(TuId{0});
+  const TuValue& v = db.get<Tu>(Tu::Key{TuId{0}});
   if (!v.object) return std::unexpected(v.errors);
   return *v.object;
 }

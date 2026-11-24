@@ -267,7 +267,7 @@ void two_units() {
 
   s.set_source(a, "a.cpp", "int f() { return 1 }\n", "a.o");
   check(s.get<pl::TuFront>(a).has_errors(), "the front end reports the error");
-  check(!s.get<pl::Tu>(a).object, "a unit with front-end errors has no object");
+  check(!s.get<pl::Tu>(pl::Tu::Key{a}).object, "a unit with front-end errors has no object");
   const pl::Linked& broken = s.get<pl::Link>(program);
   check(broken.image.empty() && !broken.errors.empty(), "a unit with front-end errors keeps the program from linking");
 
@@ -546,7 +546,7 @@ int main() { return 0; }
 
   pl::Session warm;
   build(warm, plain + interfaces + layout);
-  check(warm.get<pl::Tu>(tu).object.has_value(), "ordinary member and array layouts produce an object");
+  check(warm.get<pl::Tu>(pl::Tu::Key{tu}).object.has_value(), "ordinary member and array layouts produce an object");
 
   build(warm, dynamic + interfaces + layout);
   const auto& dynamic_front = warm.get<pl::TuFront>(tu);
@@ -568,7 +568,7 @@ int main() { return 0; }
   const auto& declarations = warm.get<pl::TuFront>(tu);
   check(!declarations.has_errors(), pl::TuFront::errors(declarations));
   check(blocked_shapes(declarations) == 2, "safe interfaces retain the cached layout requirement");
-  const auto& native = warm.get<pl::Tu>(tu);
+  const auto& native = warm.get<pl::Tu>(pl::Tu::Key{tu});
   check(!native.object && pl::Tu::errors(native).find("native output for a translation unit with virtual member functions") !=
                               std::string::npos,
         "a semantically checked unused virtual body cannot produce native output");
@@ -626,7 +626,7 @@ int main() {
   build(s, text);
   const auto& front = s.get<pl::TuFront>(tu);
   check(!front.has_errors(), pl::TuFront::errors(front));
-  const auto& result = s.get<pl::Tu>(tu);
+  const auto& result = s.get<pl::Tu>(pl::Tu::Key{tu});
   check(result.object.has_value(), pl::Tu::errors(result));
   if (!result.object) return;
   auto bytes_of = [](const auto& obj, std::string_view name) -> std::span<const std::uint8_t> {
@@ -642,7 +642,7 @@ int main() {
 
   text.replace(text.find("1 + 2"), 5, "1 + 3");
   build(s, text);
-  const auto& edited = s.get<pl::Tu>(tu);
+  const auto& edited = s.get<pl::Tu>(pl::Tu::Key{tu});
   check(edited.object.has_value(), pl::Tu::errors(edited));
   if (!edited.object) return;
   auto repacked = bytes_of(*edited.object, "_packed");
@@ -687,7 +687,7 @@ int main() {
     check(!peer_front.has_errors() && front.shapes.classes.size() == 5 &&
               std::ranges::equal(front.shapes.classes, peer_front.shapes.classes, {}, &pl::ClassShape::entity, &pl::ClassShape::entity),
           "unnamed nested union identities correspond across translation units");
-    const auto& result = s.get<pl::Tu>(tu);
+    const auto& result = s.get<pl::Tu>(pl::Tu::Key{tu});
     check(result.object.has_value(), pl::Tu::errors(result));
     if (!result.object) continue;
     const char* first = swapped ? "__Z10spare_typePN5StateUt_E" : "__Z10value_typePN5StateUt_E";
@@ -832,8 +832,8 @@ void implicit_runtime_policies() {
   s.db().set<pp::FileContent>(pp::path_id("peer.cpp"), peer_source);
   const auto& checked = s.get<pl::Build>(s.request({
       .units = {peer}, .until = pl::Until::object, .check_policies = true}));
-  const auto& compiled_runtime = s.get<pl::Tu>(runtime);
-  const auto& compiled_peer = s.get<pl::Tu>(peer);
+  const auto& compiled_runtime = s.get<pl::Tu>(pl::Tu::Key{runtime});
+  const auto& compiled_peer = s.get<pl::Tu>(pl::Tu::Key{peer});
   const auto& member = compiled_runtime.object;
   const auto& unchecked = compiled_peer.object;
   const bool built = checked.units.size() == 1 && checked.units[0].object && member && unchecked;

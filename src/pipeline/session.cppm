@@ -483,7 +483,7 @@ engine::query_task<Built> Build::run(engine::Ctx& cx, RequestId r) {
   if (k.until == Until::syntax) co_return out;
   std::vector<Tu::Key> compiled;
   for (std::size_t i = 0; i < k.units.size(); ++i)
-    if (out.units[i].readable && !out.units[i].front_failed) compiled.emplace_back(k.units[i], k.check_policies);
+    if (out.units[i].readable && !out.units[i].front_failed) compiled.push_back({k.units[i], k.check_policies});
   {
     const auto tus = co_await cx.par_map<Tu>(compiled);
     std::size_t j = 0;
