@@ -224,6 +224,10 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_
   add_test(NAME unit.linux_immediate_template_link
     COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/linux_immediate_template_link.py
             $<TARGET_FILE:ycxxc> ${CMAKE_CXX_COMPILER} ${CMAKE_READELF})
+  # PARITY: by design: checks x86-64 ELF symbol tables and runs the native link.
+  add_test(NAME unit.linux_consteval_private_inline
+    COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/linux_consteval_private_inline.py
+            $<TARGET_FILE:ycxxc> ${CMAKE_CXX_COMPILER} ${CMAKE_READELF})
   add_test(NAME unit.linux_elf_comdat
     COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/linux_elf_comdat.py
             $<TARGET_FILE:ycxxc> ${CMAKE_C_COMPILER} ${CMAKE_AR})
