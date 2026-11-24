@@ -52,6 +52,8 @@ struct Ops {
   static Flow add(M& m, Frame& f, N n) { return m.arith(f, n); }
   static Flow sub(M& m, Frame& f, N n) { return m.arith(f, n); }
   static Flow mul(M& m, Frame& f, N n) { return m.arith(f, n); }
+  static Flow sadd_overflow(M& m, Frame& f, N n) { return m.arith(f, n); }
+  static Flow smul_overflow(M& m, Frame& f, N n) { return m.arith(f, n); }
   static Flow neg(M& m, Frame& f, N n) { return m.arith(f, n); }
   static Flow and_(M& m, Frame& f, N n) { return m.arith(f, n); }
   static Flow or_(M& m, Frame& f, N n) { return m.arith(f, n); }
@@ -365,7 +367,8 @@ struct Ops {
     Value v = m.operand(f, n, 2);
     if (v.kind == VKind::none) return m.fail(Reason::ill_formed);
     M::Place pl;
-    if (Flow fl = m.locate(m.operand(f, n, 1), imm_path(f, n, 1), t, M::Use::write, has(f, n, ir::Flag::volatile_), pl);
+    M::Use use = has(f, n, ir::Flag::call_body) ? M::Use::callee_write : M::Use::write;
+    if (Flow fl = m.locate(m.operand(f, n, 1), imm_path(f, n, 1), t, use, has(f, n, ir::Flag::volatile_), pl);
         fl != Flow::next)
       return fl;
     const auto kind = m.shape(t).kind;

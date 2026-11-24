@@ -7654,6 +7654,31 @@ public:
     return node(ast::Call{info, d.entity, at(callee, begin), b_->list(converted), f.constant}, begin, end, info);
   }
 
+  Ex builtin_overflow_call(ast::BuiltinOp op, std::span<const Ex> args, u32 begin, u32 end) {
+    const Ex invalid{NodeId::none, begin, end};
+    if (!builtin_arity(3, args.size(), begin) ||
+        std::ranges::any_of(args, [](const Ex& arg) { return !arg.ok(); }))
+      return invalid;
+    const QualType result = builtin(Builtin::bool_);
+    if (any_dependent(args)) return dependent_node(args, begin, end, result);
+
+    const QualType integer = builtin(w_->target.intmax_type);
+    const std::array params{integer, integer, types().pointer(integer)};
+    std::array<Child, 3> children;
+    for (std::size_t i = 0; i < params.size(); ++i) {
+      Ex arg = args[i];
+      if (!same_unqualified(arg.type(), params[i])) {
+        diag(arg.begin, Diag::builtin_overflow_operand, params[i], arg.type());
+        return invalid;
+      }
+      arg = convert(arg, params[i], arg.begin);
+      if (!arg.ok()) return invalid;
+      children[i] = at(arg, begin);
+    }
+    const ExprInfo info{result, ValueCategory::prvalue, 0};
+    return node(ast::BuiltinCall{info, op, b_->list(children)}, begin, end, info);
+  }
+
   // Only send closed, read-only expressions to the fresh constant evaluator. In particular
   // a probe cannot instantiate a speculative callee or run a write in a constexpr frame.
   bool constant_probe_safe(const ast::Red& expression) {
@@ -7778,6 +7803,10 @@ public:
     }
     if (b.function == library)
       return builtin_library_call(*string_function_named(lex::library_function_name(b)), std::move(args), begin, end);
+    if (b.function == add_overflow || b.function == mul_overflow) {
+      const auto op = b.function == add_overflow ? ast::BuiltinOp::add_overflow : ast::BuiltinOp::mul_overflow;
+      return builtin_overflow_call(op, args, begin, end);
+    }
     std::size_t want = b.function == fabs || b.function == nan ? 1 : 0;
     if (!builtin_arity(want, args.size(), begin)) return {NodeId::none, begin, end};
     if (std::ranges::any_of(args, [](const Ex& a) { return !a.ok(); })) return {NodeId::none, begin, end};
@@ -7802,7 +7831,9 @@ public:
       case unreachable:
       case strlen:
       case library:
-      case constant_p: std::unreachable();  // Handled before floating type selection.
+      case constant_p:
+      case add_overflow:
+      case mul_overflow: std::unreachable();  // Handled before floating type selection.
       case inf:
       case huge_val:
         return literal(t, w_->values.floating(t, std::numeric_limits<double>::infinity()), ValueCategory::prvalue, begin, end);

@@ -256,7 +256,7 @@ class Gen {
     std::uint64_t imms[] = {word(ty(p.type)), 0};  // the type, then an empty path
     return b_.result(emit(ir::Op::load, r, ops, imms, access_flags(p.type) | flags));
   }
-  void store(const Place& p, ValueId v) {
+  void store(const Place& p, ValueId v, ir::Flags flags = 0) {
     ValueId ops[] = {p.ptr, v};
     if (p.bit_field) {
       std::uint64_t imms[] = {*p.bit_field};
@@ -264,7 +264,7 @@ class Gen {
       return;
     }
     std::uint64_t imms[] = {word(ty(p.type)), 0};
-    stateful(ir::Op::store, {}, ops, imms, access_flags(p.type));
+    stateful(ir::Op::store, {}, ops, imms, access_flags(p.type) | flags);
   }
   // A nullptr_t initializer writes storage before the qualified object's lifetime begins.
   Place initializing_place(Place p) {
@@ -1759,11 +1759,25 @@ class Gen {
         ensure_live();
         return std::nullopt;
       }
-      At arg = child(a, ast_.children(b.args)[0]);
-      ValueId value = rvalue(arg);
+      const auto args = ast_.children(b.args);
       switch (b.op) {
-        case ast::BuiltinOp::fabs: return pure(ir::Op::fabs, t, {value});
-        case ast::BuiltinOp::strlen: return string_length(t, info(arg).type, value);
+        case ast::BuiltinOp::fabs: return pure(ir::Op::fabs, t, {rvalue(child(a, args[0]))});
+        case ast::BuiltinOp::strlen: {
+          const At arg = child(a, args[0]);
+          return string_length(t, info(arg).type, rvalue(arg));
+        }
+        case ast::BuiltinOp::add_overflow:
+        case ast::BuiltinOp::mul_overflow: {
+          const At left = child(a, args[0]);
+          const ValueId operands[] = {rvalue(left), rvalue(child(a, args[1]))};
+          const ValueId destination = rvalue(child(a, args[2]));
+          const ast::QualType integer = info(left).type;
+          const ir::Ty results[] = {vty(integer), vty(t)};
+          const auto op = b.op == ast::BuiltinOp::add_overflow ? ir::Op::sadd_overflow : ir::Op::smul_overflow;
+          const ir::NodeId checked = emit(op, results, operands);
+          store({destination, integer}, b_.result(checked), ir::bit(ir::Flag::call_body));
+          return b_.result(checked, 1);
+        }
         case ast::BuiltinOp::trap:
         case ast::BuiltinOp::unreachable: std::unreachable();
       }

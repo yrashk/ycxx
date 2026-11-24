@@ -75,7 +75,7 @@ export struct PathStep {
 
 // Per-node flags (§2.3: `nsw`/`nuw`/`exact` on arithmetic; `volatile` and non-constexpr callees
 // make an operation non-constant). The enumerator is the bit position.
-// `call_body` marks reads of a lowered builtin body, which are indeterminately sequenced with
+// `call_body` marks accesses of a lowered builtin body, which are indeterminately sequenced with
 // the caller's other evaluations ([intro.execution]). `explicit_trap` and `assumed_unreachable`
 // mark an `unreachable` that `__builtin_trap()` and `__builtin_unreachable()` lower to.
 export enum class Flag : std::uint8_t {
@@ -215,7 +215,7 @@ export enum class Op : std::uint16_t {
   obj__end [[=state({S, V}, {S})]],
   union__activate [[=state({S, V}, {S}).imms({path})]],
   load [[=state({S, V}, {V}).imms({type, path}).accepts({volatile_, call_body})]],
-  store [[=state({S, V, V}, {S}).imms({type, path}).accepts({volatile_})]],
+  store [[=state({S, V, V}, {S}).imms({type, path}).accepts({volatile_, call_body})]],
   bit_field_load [[=state({S, V}, {V}).imms({u32}).with({nonconstant})]],  // record pointer and field index
   bit_field_store [[=state({S, V, V}, {S}).imms({u32}).with({nonconstant})]],
   copy [[=state({S, V, V}, {S}).imms({type})]],  // trivial copy of an object: dst, src
@@ -309,6 +309,10 @@ export enum class Op : std::uint16_t {
 
   // The implicit object of an ordinary member call must designate valid storage ([basic.life]).
   obj__check_receiver [[=state({S, V}, {S})]],
+
+  // Constant-evaluated signed intmax arithmetic yields the converted value, then overflow.
+  sadd_overflow [[=pinned({V, V}, {V, V}).with({commutative})]],
+  smul_overflow [[=pinned({V, V}, {V, V}).with({commutative})]],
 };
 
 export constexpr std::size_t op_count = std::meta::enumerators_of(^^Op).size();
