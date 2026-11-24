@@ -15,6 +15,7 @@ import ycxx.trace;
 
 export namespace ycxx::client {
 int cxx(std::span<const std::string_view> args);
+int build(std::span<const std::string_view> args);
 int lsp(std::span<const std::string_view> args);
 int control(std::span<const std::string_view> args);
 }
@@ -678,6 +679,59 @@ int cxx(std::span<const std::string_view> args) {
     traced->memory({memory::process().current, window->peak()});
   }
   return finish(d);
+}
+
+// Project builds use the resident session so action and compiler results survive requests.
+int build(std::span<const std::string_view> args) {
+  constexpr std::string_view usage = "usage: ycxx build <target> [--trace-engine=stream|interactive|json]";
+  std::string target;
+  std::optional<TraceMode> requested_trace;
+  std::string invalid;
+  for (std::string_view arg : args) {
+    if (arg == "--help") {
+      std::println("{}", usage);
+      return 0;
+    }
+    if (auto mode = trace_mode_named(arg)) requested_trace = *mode;
+    else if (!arg.empty() && !arg.starts_with('-') && target.empty()) target = arg;
+    else if (invalid.empty()) invalid = std::format("unexpected argument '{}'\n{}", arg, usage);
+  }
+  const TraceMode mode = requested_trace ? *requested_trace : trace_mode_from_environment();
+  const auto fail = [mode](std::string_view message, int status) {
+    if (mode == TraceMode::json) std::println(std::cerr, R"({{"error":{}}})", trace::json_string(message));
+    else std::println(std::cerr, "ycxx: error: {}", message);
+    return status;
+  };
+  if (!invalid.empty()) return fail(invalid, 2);
+  if (target.empty()) return fail(std::format("a build target is required\n{}", usage), 2);
+
+  daemon::ProjectBuildRequest request{.cwd = cwd_now(), .target = std::move(target),
+                                      .trace = mode != TraceMode::off,
+                                      .trace_values = mode == TraceMode::interactive || mode == TraceMode::json};
+  if (request.cwd.empty()) return fail("cannot determine the working directory", 1);
+  auto connection = daemon::reach(daemon::root_for(std::nullopt, request.cwd), true);
+  if (!connection) return fail(std::format("cannot reach the daemon: {}", connection.error()), 1);
+
+  std::optional<TraceOut> traced;
+  if (request.trace) traced.emplace(mode);
+  auto result = daemon::request_project_build(*connection, request, [&](daemon::TraceBatch&& batch) {
+    if (traced) traced->batch(std::move(batch));
+  });
+  if (traced) traced->finish();
+  if (!result) return fail(result.error().why, 1);
+  if (mode == TraceMode::json) {
+    std::string diagnostics;
+    for (const std::string& message : result->diagnostics) {
+      if (!diagnostics.empty()) diagnostics += ',';
+      diagnostics += trace::json_string(message);
+    }
+    std::println(std::cerr, R"({{"status":{},"output":{},"actions_executed":{},"diagnostics":[{}]}})",
+                 result->status, trace::json_string(result->output), result->actions_executed, diagnostics);
+  } else {
+    for (const std::string& diagnostic : result->diagnostics) std::println(std::cerr, "{}", diagnostic);
+    if (result->status == 0 && !result->output.empty()) std::println("{}", result->output);
+  }
+  return result->status;
 }
 
 // `ycxx lsp [--root DIR]`: the editor's language server, which runs in the daemon of DIR's scope
