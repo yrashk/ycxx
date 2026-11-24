@@ -351,7 +351,19 @@ std::expected<obj::object, CodegenError> assemble(std::string name, std::span<co
       if (!missing) missing = s.error();
       return 0;
     }
-    std::uint32_t i = o.reference((*s)->name);
+    // Another entity may define the name: a builtin's implicit C declaration and a written
+    // definition of another type are two entities with one symbol (#1095). Name the strong
+    // definition where a weak one shares its spelling (#694), as the linker resolves it.
+    auto defines = [&](const obj::symbol& d) {
+      return d.defined() && d.bind != obj::binding::local && d.name_view() == (*s)->name;
+    };
+    auto defined = o.symbols.end();
+    if ((*s)->bind != obj::binding::local) {
+      defined = std::ranges::find_if(o.symbols, [&](const obj::symbol& d) { return defines(d) && !d.weak; });
+      if (defined == o.symbols.end()) defined = std::ranges::find_if(o.symbols, defines);
+    }
+    const std::uint32_t i = defined != o.symbols.end() ? static_cast<std::uint32_t>(defined - o.symbols.begin())
+                                                        : o.reference((*s)->name);
     symbol_of[ir::raw(e)] = i;
     return i;
   };
