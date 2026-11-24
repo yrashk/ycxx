@@ -42,14 +42,16 @@ extern Layered layered;
 static_assert(__is_same(decltype(pair(mixed)), short));
 static_assert(__is_same(decltype(pair(layered)), short));
 
-// Base matching applies to the outer pattern. The conversion would make a
-// wrongly deduced specialization viable, as the explicit call demonstrates.
+// A derived class inside a template argument does not participate in base
+// matching. Deducing long here would instantiate NestedResult<long> and fail
+// because long has no member type Result.
 template<class T> struct Wrap {};
-template<> struct Wrap<Derived> {
-  operator Wrap<Box<long>>() const;
-};
-template<class T> T nested(const Wrap<Box<T>>&);
+struct WithResult { using Result = int; };
+template<class T> struct NestedResult { using Type = typename T::Result; };
+
+template<class T> typename NestedResult<T>::Type nested(const Wrap<Box<T>>&);
 void nested(...);
+extern Wrap<Box<WithResult>> matching_wrap;
 extern Wrap<Derived> wrapped;
-static_assert(__is_same(decltype(nested<long>(wrapped)), long));
+static_assert(__is_same(decltype(nested(matching_wrap)), int));
 static_assert(__is_same(decltype(nested(wrapped)), void));
