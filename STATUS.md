@@ -3911,10 +3911,25 @@ for calls and for selection against a static function-pointer target.
 - Native lowering supports initializers proven nonthrowing from the analyzed expression tree.
   Initializers that need an exception cleanup edge and constant evaluation of allocation remain
   in #293. Namespace-scope allocation uses the existing dynamic initialization path. The issue
-  also tracks class, array, enumeration, floating-point, placement and over-aligned allocation,
+  also tracks class arrays, enumeration, floating-point, placement and over-aligned allocation,
   and other allocation-function declarations.
 - Spec-only tests in `tests/own/scalar-allocation/` cover types, initialization, a typed null, and
   invalid operands. A separate provider checks the address and size passed to deallocation.
+- Single objects of complete, default-aligned class type can be allocated and deleted on both
+  targets, including in templates with a dependent type or initializer. `new` passes
+  `sizeof(T)` to `operator new(size_t)` and initializes the object as a declaration would:
+  default-initialization without an initializer, value-initialization for `()` (the storage is
+  zero-filled first when that requires zero-initialization), and direct- or
+  direct-list-initialization by the selected constructor or as an aggregate. `delete` evaluates
+  its operand once and, when non-null, runs the destructor (none when trivial) and passes the
+  address and `sizeof(T)` to `operator delete(void*, size_t)`. Deleting an incomplete class is
+  ill-formed in C++26 and diagnosed. A constructor that throws does not yet release the storage
+  ([expr.new]/28): the frame gets no unwind information, so the exception terminates the program
+  ([#1135](https://github.com/yrashk/ycxx/issues/1135)). Polymorphic deletion through a virtual
+  destructor ([#931](https://github.com/yrashk/ycxx/issues/931)), class-specific allocation
+  functions, over-aligned classes and class arrays are diagnosed as not supported yet (#293).
+  `tests/own/class-allocation/` runs on Darwin, and `unit.linux_class_new` runs the same
+  sources on Linux x86-64 with a host-built replacement allocator.
 - Syntax checking supports one-dimensional `new T[n]` and `delete[] p` for integral and ordinary
   pointer elements ([expr.new], [expr.delete]). The bound converts to `size_t`. A potentially
   evaluated constant bound can be zero and must keep the object size within the positive range
