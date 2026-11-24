@@ -1193,6 +1193,19 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
 - Native collection omits ordinary named namespace-scope immediate functions whose bodies
   have neither static locals nor closures. Their declarations and analysed bodies remain
   available for constant evaluation. [#1006](https://github.com/yrashk/ycxx/issues/1006)
+- `consteval` constructors, in class and out of class, among the other constructor specifiers.
+  `Sema::construct` folds a call of one outside an immediate function context, including an
+  implicit conversion of an argument or operand, into its value (`Sema::immediate_invocation`,
+  shared with consteval function calls). A selected operator whose operand conversion is not
+  constant is an error rather than a fall-back to the built-in operator. Every declaration must
+  agree on `consteval`, and a destructor cannot be `consteval`. Native collection omits consteval
+  constructors, of class templates and constructor templates too.
+  [#102](https://github.com/yrashk/ycxx/issues/102)
+- The evaluator lays out non-polymorphic classes with user-declared constructors, no bases and no
+  destructor, whatever their fields' access, as it does flat aggregates, so constructor calls
+  (`constexpr` and `consteval`) evaluate, and `T x(args)` at namespace scope is constant-initialized
+  when its constructor call is constant. Class-typed fields and bases are not laid out yet
+  ([#25](https://github.com/yrashk/ycxx/issues/25)). [#102](https://github.com/yrashk/ycxx/issues/102)
 - `static_assert(e)` and `static_assert(e, "message")` at namespace and block scope (the
   `StaticAssert` node); `if consteval` and `if !consteval` (`IfConsteval`, lowered to
   `consteval_br`).
@@ -1265,7 +1278,7 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   L1 forms static addresses at their uses and checks the executed declarations for usability in
   constant expressions. The runtime guard still initializes a static local on its first passage.
   [#872](https://github.com/yrashk/ycxx/issues/872)
-- Tests: `tests/own/consteval` (spec-only); the draft's [dcl.constexpr]/5 ex. 3, [dcl.constinit]/3
+- Tests: `tests/own/consteval` (spec-only; `constructors/` checked against Clang and GCC); the draft's [dcl.constexpr]/5 ex. 3, [dcl.constinit]/3
   ex. 1 and [stmt.if]/4 ex. 3 pass.
 - Not yet (#102): naming a consteval function outside a call, static_assert
   messages that are constant expressions, notes along the call chain, block-scope static constexpr
@@ -2389,9 +2402,15 @@ session's.*
   types. `__is_convertible` also checks a unique public nonvirtual base path between complete
   class types. It supports direct reference binding and by-value initialization of a fieldless base
   with no bases or written constructors of its own, an eligible implicit trivial copy or move
-  constructor, and an eligible implicit trivial destructor. Supported class-template bases and
-  variable-template initializers replay dependent operands and check class completeness at the
-  demand. Other combinations, including class `__is_nothrow_convertible`, get hard diagnostics.
+  constructor, and an eligible implicit trivial destructor. Both traits also answer object
+  pointer and `std::nullptr_t` sources converted to a non-reference target: same-type and
+  `cv void*` targets with added pointee qualifiers, Derived* to Base* through an accessible,
+  unambiguous base of a complete Derived (an incomplete one gives false; virtual functions do not
+  matter), the null pointer value, and `bool` targets ([conv.ptr], [conv.qual], [conv.bool]). An
+  array pointee's qualifiers are its elements'. Function, member and multi-level pointers and
+  conversions to an array of unknown bound are diagnosed. Supported class-template bases and variable-template initializers
+  replay dependent operands and check class completeness at the demand. Other combinations,
+  including class `__is_nothrow_convertible`, get hard diagnostics.
   `__has_builtin` answers 0 while support is partial ([meta.rel], [dcl.init.ref], #218).
 - `__reference_converts_from_temporary(T, U)` and `__reference_constructs_from_temporary(T, U)`
   tell whether a reference T initialized from VAL<U> binds to a temporary: a converted arithmetic
@@ -2413,7 +2432,9 @@ session's.*
   initializer checks completeness at instantiation. So does one in a function template body (also
   a member's, a member template's or a generic lambda's, in a template or not): the body defers it
   and its instantiation evaluates it, with completeness at the end of the unit
-  (`tests/own/builtins/base_of_dependent_*`).
+  (`tests/own/builtins/base_of_dependent_*`). In an atomic constraint (a concept's definition, a
+  requires-clause or a nested-requirement) it is evaluated when the atom's satisfaction is
+  checked, with completeness at that point (`tests/own/concepts/base-of-dependent*`).
   A concrete occurrence checks it at its original source point. Missing graph information gets a hard diagnostic when it prevents a result.
   `__has_builtin` answers 0 while support is partial ([meta.rel], [class.derived], #218).
 - `__is_empty(T)` gives false for nonclass types and unions. For a complete nonunion class, it
@@ -2528,7 +2549,11 @@ Fable decided the representation (ast.md §6.6); the Opus session wrote the code
   bound, its function parameters declared and argument-dependent lookup at the point of the
   check; an error there makes it unsatisfied, a non-`bool` or non-constant result and "not
   supported" are hard errors (`survives_substitution`), so a missing feature never picks another
-  overload. Results are memoized per atom (`Program::atom_satisfied`).
+  overload. Results are memoized per atom (`Program::atom_satisfied`). Where the constraint is
+  written, a type trait with dependent operands is left for satisfaction
+  (`Sema::trait_at_satisfaction`), which judges the classes it needs complete at the point of the
+  check (`AtItem::satisfying_atom`). A `bool` type-trait built-in can be a requires-clause's
+  operand without parentheses (`tests/own/concepts/requires-clause-trait-primary.run.cpp`).
 - **Overload resolution** drops candidates whose constraints are not satisfied
   ([over.match.viable]/3) and, between templates that are otherwise equally specialized, prefers
   the one whose constraints subsume the other's ([temp.constr.order], [temp.func.order]/6).

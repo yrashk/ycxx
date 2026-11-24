@@ -151,6 +151,14 @@ bool is_transform_trait(const pp::Region& r, u32 j) {
   return t && t->transforms;
 }
 
+// `__is_same` and the other `bool` type-trait built-ins at token `j`: a primary-expression with its
+// operands in parentheses (docs/EXTENSIONS.md), as in a requires-clause.
+bool is_value_trait(const pp::Region& r, u32 j) {
+  if (j >= r.tokens.size() || r.tokens[j].kind != Tk::identifier) return false;
+  const lex::TypeTraitInfo* t = lex::type_trait(r.name(r.tokens[j]));
+  return t && !t->transforms;
+}
+
 using namespace lex;
 
 bool is_class_key(Tk k) { return k == Tk::kw_class || k == Tk::kw_struct || k == Tk::kw_union; }
@@ -436,8 +444,8 @@ bool begins_declaration_only(Tk t) {
 }
 
 // After a requires-clause's constraint-logical-or-expression ([temp.pre]): primaries joined by
-// `&&` and `||`.
-static u32 after_requires_clause(u32 j, auto kind, auto match, auto match_angle) {
+// `&&` and `||`. A value type-trait built-in's parentheses belong to the primary.
+static u32 after_requires_clause(u32 j, auto kind, auto match, auto match_angle, auto value_trait) {
   for (;;) {
     if (kind(j) == Tk::l_paren) {
       j = match(j);
@@ -452,6 +460,7 @@ static u32 after_requires_clause(u32 j, auto kind, auto match, auto match_angle)
         ++j;
         if (kind(j) == Tk::less) j = match_angle(j);
       }
+      if (kind(j) == Tk::l_paren && value_trait(j - 1)) j = match(j);
     }
     if (kind(j) != Tk::ampamp && kind(j) != Tk::pipepipe) return j;
     ++j;
@@ -464,7 +473,8 @@ void Splitter::general(u32 k, u32& unnamed_types) {
   if (at(k).template_depth && kind(j) == Tk::kw_requires)
     j = after_requires_clause(j + 1, [this](u32 n) { return kind(n); },
                               [this](u32 n) { return match(n); },
-                              [this](u32 n) { return match_angle(n); });
+                              [this](u32 n) { return match_angle(n); },
+                              [this](u32 n) { return is_value_trait(r_, n); });
   bool initializer = false;  // a depth-0 `=` was seen: braces are initializers
   bool params = false;       // a declarator's parameter list was seen
   u32 class_key = none;      // the class-key or `enum` of a class-head, if any
@@ -710,7 +720,8 @@ private:
       else if (t == Tk::kw_requires)
         j = after_requires_clause(j + 1, [this](u32 n) { return kind(n); },
                                   [this](u32 n) { return match(n); },
-                                  [this, &it](u32 n) { return match_angle(n, it.end); });
+                                  [this, &it](u32 n) { return match_angle(n, it.end); },
+                                  [this](u32 n) { return is_value_trait(r_, n); });
       else break;
     }
     return j;

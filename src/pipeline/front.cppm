@@ -1317,6 +1317,13 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
     if (part && weak_if_inline(d)) part->weak_if_inline.insert(d.entity);
     return inline_declarations.contains(d.entity) && weak_if_inline(d);
   };
+  // Leave collection of an immediate function's body-local statics and closures to the existing
+  // native path when they are present.
+  auto immediate_without_code = [&](const ast::BodySema& body) {
+    return ins.seqs.size(body.closures) == 0 && std::ranges::none_of(ins.seqs.elements(body.locals), [&](const ast::LocalRec& local) {
+      return local.entity != EntityId::none && local.decl != ast::NodeId::none && ins.ast.is<ast::StaticVar>(local.decl);
+    });
+  };
   for (std::uint32_t k = first; k < items.items.size() && k < end; ++k) {
     const items::Item& it = items.items[k];
     // Items of the global namespace, and the members of its classes.
@@ -1359,14 +1366,15 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
       ast::DeclSema d = decls[0];
       if (body.deduced) d.type = body.deduced_type;
       const auto& entity = world.entities.rec(d.entity);
-      // Sema has checked the body and keeps it for constant evaluation. Leave collection of
-      // body-local statics and closures to the existing native path when they are present.
-      if ((d.flags & sema::decl_flag::consteval_) && !member && !it.template_depth && !it.specialization &&
-          entity.kind == sema::EntityKind::function && entity.templ == EntityId::none && program.is_namespace(entity.scope) &&
-          !ins.names.spelling(entity.name).empty() && ins.seqs.size(body.closures) == 0 &&
-          std::ranges::none_of(ins.seqs.elements(body.locals), [&](const ast::LocalRec& local) {
-            return local.entity != EntityId::none && local.decl != ast::NodeId::none && ins.ast.is<ast::StaticVar>(local.decl);
-          })) continue;
+      // An immediate function's calls are all folded ([expr.const]), so it has no code: a free
+      // function, or a constructor defined in or outside its class. Sema has checked the body and
+      // keeps it for constant evaluation.
+      const bool immediate_free = !member && entity.kind == sema::EntityKind::function && program.is_namespace(entity.scope) &&
+                                  !ins.names.spelling(entity.name).empty();
+      const bool immediate_constructor = entity.kind == sema::EntityKind::constructor;
+      if ((d.flags & sema::decl_flag::consteval_) && (immediate_free || immediate_constructor) && !it.template_depth &&
+          !it.specialization && entity.templ == EntityId::none && immediate_without_code(body))
+        continue;
       tu.functions.push_back({d.entity, d, body, program.id(k), it.body_begin - it.begin, program.this_type(d)});
       const bool virtual_destructor = entity.kind == sema::EntityKind::destructor && d.is_virtual;
       const auto derived = virtual_destructor ? program.derived_virtual_destructor_ownership(entity.scope) : std::nullopt;
@@ -1466,6 +1474,11 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
     if (in->failed || in->body.value.tree == ast::NodeId::none) continue;
     const items::Item& it = items.items[in->item];
     declare(in->decl, ast::Loc{program.id(in->item), 0});  // errors in its name point at the template
+    // An immediate constructor's calls are all folded ([expr.const]): a constructor template's
+    // specialization, or a constructor of a class template's specialization.
+    if ((in->decl.flags & sema::decl_flag::consteval_) && world.entities.rec(in->spec).kind == sema::EntityKind::constructor &&
+        immediate_without_code(in->body.value))
+      continue;
     tu.functions.push_back({in->spec, in->decl, in->body.value, program.id(in->item), it.body_begin - it.begin,
                             program.this_type(in->decl)});
     if (it.parent != items::none && items.items[it.parent].kind == items::ItemKind::class_def) {
