@@ -554,6 +554,8 @@ written default member initializer are value-initialized.
   dependent member types. [#406](https://github.com/yrashk/ycxx/issues/406) · [#630](https://github.com/yrashk/ycxx/issues/630)
   Dependent calls through class and alias template qualifiers expand argument packs, including
   packs preceded by an ordinary template parameter. [#890](https://github.com/yrashk/ycxx/issues/890)
+  Namespace variable template initializers can recurse with a dependent integral argument such as
+  `extent<T, I - 1>`. [#1091](https://github.com/yrashk/ycxx/issues/1091)
 - dependent `__is_same`, `__is_reference`, `__is_const`, `__is_volatile`, `__is_array`,
   `__is_pointer`, `__is_function`, `__is_enum`, `__is_union`, `__is_class`, `__is_object`, and the
   three member-pointer predicates as `bool` template arguments or defaults, including through
