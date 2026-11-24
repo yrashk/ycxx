@@ -1,6 +1,7 @@
 ## the histogram: by kind, most self time first
- ycxx engine trace   ● 6 executed  ○ 1 reused  · 2 input  9 events, 4 workers, 900µs  29.1KiB allocated, 6.9KiB retained
- tree  timeline  histogram    worker: all  oldest first
+ ycxx trace   tree  timeline  histogram
+ ● 6 executed  ○ 1 reused  · 2 input  9 events, 4 workers, 900µs  29.1KiB allocated, 6.9KiB retained
+ / filter   w all workers
  metrics: ■1 self  ■2 in all  ■3 alloc  □4 peak  □5 retained  □6 allocs  ■7 runs  □8 hits  □9 waits
  group by: kind  file  children     in everything   sorted by self time
  kind (8)                    self time↓            time in all           allocated             runs
@@ -21,11 +22,11 @@
 
 
 
-
- ↑↓/jk group  ⏎ its cells in the tree  1-9 metrics  c group by  i in the selected cell  s sort  b tree  / filter  mouse:
+ ↑↓ group  ⏎ its cells  1-9 metrics  c group by  s sort  i in the cell  / filter  b tree                 ? help  q quit
 ## by file, by time in all
- ycxx engine trace   ● 6 executed  ○ 1 reused  · 2 input  9 events, 4 workers, 900µs  29.1KiB allocated, 6.9KiB retained
- tree  timeline  histogram    worker: all  oldest first
+ ycxx trace   tree  timeline  histogram
+ ● 6 executed  ○ 1 reused  · 2 input  9 events, 4 workers, 900µs  29.1KiB allocated, 6.9KiB retained
+ / filter   w all workers
  metrics: □1 self  ■2 in all  ■3 alloc  □4 peak  □5 retained  □6 allocs  □7 runs  □8 hits  □9 waits
  group by: kind  file  children     in everything   sorted by allocated
  file (3)                    time in all                                  allocated↓
@@ -46,11 +47,11 @@
 
 
 
-
- ↑↓/jk group  ⏎ its cells in the tree  1-9 metrics  c group by  i in the selected cell  s sort  b tree  / filter  mouse:
+ ↑↓ group  ⏎ its cells  1-9 metrics  c group by  s sort  i in the cell  / filter  b tree                 ? help  q quit
 ## by the children of the selected cell
- ycxx engine trace   ● 6 executed  ○ 1 reused  · 2 input  9 events, 4 workers, 900µs  29.1KiB allocated, 6.9KiB retained
- tree  timeline  histogram    worker: all  oldest first
+ ycxx trace   tree  timeline  histogram
+ ● 6 executed  ○ 1 reused  · 2 input  9 events, 4 workers, 900µs  29.1KiB allocated, 6.9KiB retained
+ / filter   w all workers
  metrics: □1 self  ■2 in all  ■3 alloc  □4 peak  □5 retained  □6 allocs  □7 runs  □8 hits  □9 waits
  group by: kind  file  children     of the selected cell  Tu(a.cpp)   sorted by allocated
  children (4)                time in all                                  allocated↓
@@ -71,20 +72,20 @@
 
 
 
-
- ↑↓/jk group  ⏎ its cells in the tree  1-9 metrics  c group by  i in the selected cell  s sort  b tree  / filter  mouse:
+ ↑↓ group  ⏎ its cells  1-9 metrics  c group by  s sort  i in the cell  / filter  b tree                 ? help  q quit
 ## the source column (S)
- ycxx engine trace   ● 6 executed  ○ 1 reused  · 2 input  9 events, 4 workers, 900µs  29.1KiB allocated, 6.9KiB retained
- tree  timeline  histogram    worker: all  oldest first
- cell↓                                  time  worker     alloc   retains⇔ cell
+ ycxx trace   tree  timeline  histogram
+ ● 6 executed  ○ 1 reused  · 2 input  9 events, 4 workers, 900µs  29.1KiB allocated, 6.9KiB retained
+ / filter   w all workers   o oldest first   s in start order   r reused shown   S source column
+ cell↓                                  time  worker     alloc   retains│ cell
 ▾ ● Tu(a.cpp) executed                 900µs      w0   29.1KiB    6.9KiB│ FunctionIr
   ▾ ● Pp(a.cpp) executed               190µs      w1   20.0KiB    5.5KiB│ square
       · FileText(a.cpp) input                     w1                300B│
       · FileText(x.h) input                       w1                200B│ ● executed
   ▾ ● FunctionIr(square) executed      300µs      w2    3.9KiB      300B│ ran, value changed
-      ● FunctionGen(square) execute    190µs      w2    2.9KiB          │
-  ▾ ● Codegen(main) executed  (erro    350µs      w0    1.2KiB      164B│ started  200µs
-      ● Optimized({1, aarch64_macos    240µs      w3      700B       64B│ took     300µs
+      ● FunctionGen(square)            190µs      w2    2.9KiB          │
+  ▾ ● Codegen(main) executed  (er…     350µs      w0    1.2KiB      164B│ started  200µs
+      ● Optimized({1, aarch64_mac…     240µs      w3      700B       64B│ took     300µs
     ○ SourceOf(a.cpp) reused ×3                   w0                    │ worker   w2
                                                                         │ depth    1
                                                                         │ below    1 cells, 1 ran
@@ -92,9 +93,8 @@
                                                                         │ source   a.cpp:1:1–3:1
                                                                         │
                                                                         │ memory
-                                                                        │ alloc    1000B in 31 allocations
-                                                                        │ peak     1000B
-                                                                        │ retains  300B
-                                                                        │ in all   3.9KiB allocated, 300B retained
-                                                                        │ lines 1–19 of 53   shift+J/K line  ]/[ page  }
- ↑↓/jk move  ⏎/space fold  ←→ close/open  e/E all  n next run  x next error  r reused  s sort  shift+J/K ]/[ pane  </> r
+                                                                        │            own  in all
+                                                                        │ alloc    1000B  3.9KiB
+                                                                        │ allocs      31
+                                                                        │ 1–18 of 54  J/K ]/[ }/{ scroll
+ ↑↓ move  ⏎ fold  ←→ close/open  / filter  n next run  x next error  y/Y copy  t timeline  b histogram   ? help  q quit

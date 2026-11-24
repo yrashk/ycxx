@@ -1119,15 +1119,20 @@ private:
 // with the C library's signatures. The search functions return `char*` from a `const char*`, as in
 // C: the C++ library's const-correct overloads are its own functions ([cstring.syn]).
 enum class CType : u8 { int_, size, void_pointer, const_void_pointer, char_pointer, const_char_pointer };
+// `constant`: what constant evaluation computes for the builtin's call (`ast::Call::builtin`); a
+// function without one is not a constant expression.
 struct StringFunction {
   std::string_view name;
   CType result;
   std::array<CType, 3> params;
   u8 arity = 3;
+  ast::LibraryBuiltin constant = ast::LibraryBuiltin::none;
 };
 inline constexpr std::array string_functions{
-    StringFunction{"memchr", CType::void_pointer, {CType::const_void_pointer, CType::int_, CType::size}},
-    StringFunction{"memcmp", CType::int_, {CType::const_void_pointer, CType::const_void_pointer, CType::size}},
+    StringFunction{"memchr", CType::void_pointer, {CType::const_void_pointer, CType::int_, CType::size}, 3,
+                   ast::LibraryBuiltin::memchr},
+    StringFunction{"memcmp", CType::int_, {CType::const_void_pointer, CType::const_void_pointer, CType::size}, 3,
+                   ast::LibraryBuiltin::memcmp},
     StringFunction{"memcpy", CType::void_pointer, {CType::void_pointer, CType::const_void_pointer, CType::size}},
     StringFunction{"memmove", CType::void_pointer, {CType::void_pointer, CType::const_void_pointer, CType::size}},
     StringFunction{"memset", CType::void_pointer, {CType::void_pointer, CType::int_, CType::size}},

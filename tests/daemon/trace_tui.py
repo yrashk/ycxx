@@ -129,36 +129,36 @@ def main(ycxx):
     plain = subprocess.run([ycxx, 'cxx', *COMPILE, 'a.cpp', '-o', 'a.o'], cwd=scope, env=env, capture_output=True, text=True, timeout=300)
 
     t = Tui(ycxx, scope, env)
-    check(t.read_until(lambda o: b'ycxx engine trace' in o), 'the browser draws')
+    check(t.read_until(lambda o: b'ycxx trace' in o), 'the browser draws')
     check(b'\x1b[?7l' in t.out and b'\x1b[?1000h' in t.out and b'\x1b[?1002h' in t.out and b'\x1b[?1006h' in t.out, 'mouse reports on: clicks, drags, SGR')
     check(b'cell\xe2\x86\x93' in t.out, 'the tree, with its column headers')
     check(t.read_until(lambda o: b'the build has ended' in o), 'the status line says when the build has ended')
-    # Where the tabs are drawn (the summary above may wrap): click the timeline's, 1-based.
+    # The tabs are in the title bar, the first row (#1119): ` ycxx trace   tree  timeline …`;
+    # click the timeline's (columns 20–29, 1-based), then the tree's (14–19).
     t.read_until(lambda o: False, timeout=0.5)
     lines = plain_lines(t.last_frame())
-    row = next((i for i, l in enumerate(lines) if l.startswith(' tree  timeline')), None)
-    check(row is not None, f'the status line is drawn: {lines[:4]}')
-    row = (row or 1) + 1
-    t.send(f'\x1b[<0;10;{row}M'.encode())
-    t.send(f'\x1b[<0;10;{row}m'.encode())
+    check(lines and lines[0].startswith(' ycxx trace   tree  timeline  histogram'), f'the title bar is drawn: {lines[:2]}')
+    row = 1
+    t.send(f'\x1b[<0;22;{row}M'.encode())
+    t.send(f'\x1b[<0;22;{row}m'.encode())
     check(t.read_until(lambda o: b'scrub' in o), 'a click on the timeline tab shows the timeline')
-    t.send(f'\x1b[<0;3;{row}M\x1b[<0;3;{row}m'.encode())
+    t.send(f'\x1b[<0;16;{row}M\x1b[<0;16;{row}m'.encode())
     check(t.read_until(lambda o: o.rfind(b'cell\xe2\x86\x93') > o.rfind(b'scrub')), 'a click on the tree tab shows the tree')
     # Escape and a wheel report in one read (Escape during momentum scrolling) stay two inputs: the
     # report's bytes are no keys (`6` would pick worker 6).
     t.send(b'\x1b\x1b[<65;40;10M')
     t.read_until(lambda o: False, timeout=0.7)
-    check(any('worker: all' in l for l in plain_lines(t.last_frame())), 'Escape then a mouse report: no stray keys')
+    check(any('w all workers' in l for l in plain_lines(t.last_frame())), 'Escape then a mouse report: no stray keys')
     # A legacy report (a terminal without 1006): a click on the timeline's tab, then its release.
-    t.send(b'\x1b[M' + bytes([32, 33 + 9, 32 + row]) + b'\x1b[M' + bytes([35, 33 + 9, 32 + row]))
+    t.send(b'\x1b[M' + bytes([32, 33 + 21, 32 + row]) + b'\x1b[M' + bytes([35, 33 + 21, 32 + row]))
     check(t.read_until(lambda o: o.rfind(b'scrub') > o.rfind(b'cell\xe2\x86\x93')), 'a legacy click on the timeline tab shows the timeline')
-    t.send(f'\x1b[<0;3;{row}M\x1b[<0;3;{row}m'.encode())
+    t.send(f'\x1b[<0;16;{row}M\x1b[<0;16;{row}m'.encode())
     check(t.read_until(lambda o: o.rfind(b'cell\xe2\x86\x93') > o.rfind(b'scrub')), 'and back to the tree')
-    # A drag of the divider (marked ⇔ in the column headers' row) moves it.
+    # A drag of the divider (│ in the column headers' row) moves it.
     t.read_until(lambda o: False, timeout=0.5)
     lines = plain_lines(t.last_frame())
     hdr = next((i for i, l in enumerate(lines) if l.startswith(' cell')), None)
-    at = lines[hdr].find('⇔') if hdr is not None else -1
+    at = lines[hdr].find('│') if hdr is not None else -1
     check(at > 40, f'the divider is drawn: {lines[hdr] if hdr is not None else lines[:5]}')
     if at > 40:
         y = hdr + 1
@@ -166,7 +166,7 @@ def main(ycxx):
         for x in range(at, at - 21, -5):
             t.send(f'\x1b[<32;{x + 1};{y}M'.encode())
         t.send(f'\x1b[<0;{at - 19};{y}m'.encode())
-        moved = lambda o: any(l.startswith(' cell') and l.find('⇔') == at - 20 for l in plain_lines(Tui.frame_of(o)))
+        moved = lambda o: any(l.startswith(' cell') and l.find('│') == at - 20 for l in plain_lines(Tui.frame_of(o)))
         check(t.read_until(moved, timeout=10), f'a drag moves the divider from column {at} to {at - 20}: {[l for l in plain_lines(t.last_frame()) if l.startswith(" cell")]}')
     # Copying: y copies the selected cell (the first row, Build); a drag over three rows copies them.
     def osc52_last(o):
@@ -215,7 +215,7 @@ def main(ycxx):
     # must give up in time too.
     (scope / 'big.cpp').write_text(''.join(f'int f{i}(int x) {{ return x + {i}; }}\n' for i in range(300)) + 'int main() { return f0(0); }\n')
     t = Tui(ycxx, scope, dict(env, YCXX_CLIPBOARD=f'(sleep 6; touch {marker}) & wait'), 'big.cpp')
-    check(t.read_until(lambda o: b'ycxx engine trace' in o), 'the browser draws (a stuck clipboard command)')
+    check(t.read_until(lambda o: b'ycxx trace' in o), 'the browser draws (a stuck clipboard command)')
     # Live (#939): the first frame is drawn at once, while the build of 300 functions runs.
     t.read_until(lambda o: o.count(b'\x1b[1;1H') >= 2)  # the first frame whole: the next one has begun
     second = t.out.find(b'\x1b[1;1H', t.out.find(b'\x1b[1;1H') + 1)
@@ -236,7 +236,7 @@ def main(ycxx):
 
     for sig in (signal.SIGTERM, signal.SIGABRT):
         t = Tui(ycxx, scope, env)
-        check(t.read_until(lambda o: b'ycxx engine trace' in o), f'the browser draws ({sig.name})')
+        check(t.read_until(lambda o: b'ycxx trace' in o), f'the browser draws ({sig.name})')
         mark = len(t.out)
         os.kill(t.pid, sig)
         status, cooked = t.wait()

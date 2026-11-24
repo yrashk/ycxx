@@ -651,8 +651,10 @@ written default member initializer are value-initialized.
   `__builtin_memchr`, `__builtin_memcmp`, `__builtin_memcpy`, `__builtin_memmove`,
   `__builtin_memset`, `__builtin_strchr`, `__builtin_strpbrk`, `__builtin_strrchr` and
   `__builtin_strstr`, used by libycxx's `<cstring>`, string searches and containers, call the
-  C library's functions at run time. [#248](https://github.com/yrashk/ycxx/issues/248)
-  [#1093](https://github.com/yrashk/ycxx/issues/1093)
+  C library's functions at run time. `__builtin_memchr` and `__builtin_memcmp` also search
+  and compare character arrays in constant expressions.
+  [#248](https://github.com/yrashk/ycxx/issues/248) [#1093](https://github.com/yrashk/ycxx/issues/1093)
+  [#1092](https://github.com/yrashk/ycxx/issues/1092)
 - `extern "C"` functions from libSystem, including `printf` with integers, characters,
   floating values, pointers and strings as arguments, and the SDK `<math.h>`'s built-ins
   (`__builtin_fabs`, `__builtin_inf`, `__builtin_huge_val`, `__builtin_nan`).
@@ -711,8 +713,9 @@ message is shown up to the root. Diagnostic details include the file, line and c
 available. `--trace-engine=interactive` opens a browser of the trace that fills in while the
 compile runs, through the daemon or in-process: cells appear as they start, with their time so far,
 and settle as they end, while the view follows the newest activity. It has a tree
-with each function's IR and assembly, a timeline of the pool's workers, and filters. It follows
-the terminal's size and takes the mouse: click to select, fold and sort by a column, use the
+with each function's IR and assembly, a timeline of the pool's workers, and filters. It fits any
+terminal from 80 columns, with tabs, toggles that show their keys, a key bar per view and `?` for
+the rest. It follows the terminal's size and takes the mouse: click to select, fold and sort by a column, use the
 wheel to scroll, and drag to resize the pane. It copies a cell, a subtree, selected rows or any
 selected text of the IR and instructions to the clipboard, over SSH too. Its histogram view charts
 self and total time, memory, runs, cache hits and waits by query kind, source file or child, and a

@@ -2578,9 +2578,19 @@ that name if the object has one, else one undefined symbol (#1095). The object s
 function once (`unit.string_builtin_symbols`, ELF and Mach-O), and each definition keeps its own
 symbol (#694). The unit then references the function as an
 undefined symbol, which libSystem or the C library provides at link time. A dependent argument
-defers the call to instantiation. They are not constant expressions yet (#1092). Fixtures in
-`tests/own/builtins/` (`memchr-memcmp-*`, `string-memory-*`) cover detection, signatures,
-argument checks and run-time results.
+defers the call to instantiation. Fixtures in `tests/own/builtins/` (`memchr-memcmp-*`,
+`string-memory-*`) cover detection, signatures, argument checks and run-time results.
+
+`memchr` and `memcmp` are constant expressions (#1092); the others are not. Their rows carry a
+`constant` (`ast::LibraryBuiltin`), which marks the call (`ast::Call::builtin`), and IR generation
+branches on `consteval_br`: the runtime edge is the library call, which `lower` keeps, and the
+consteval edge is the `builtin` op (`ir::BuiltinFn`), which the interpreter evaluates. It reads
+objects of narrow character type, and elements of arrays of them, as `unsigned char` with the
+interpreter's access, lifetime and initialization checks (`Machine::bytes_at`, `read_byte`); any
+other object is `Reason::byte_type`, as Clang rejects it. `memchr` reads in order up to the match;
+`memcmp` checks first that both objects hold all `n` bytes, as GCC does, then reads up to the
+first difference. The `memchr-*` fixtures cover results, bounds, object types and values, and the
+oracles' disagreements, each marked `XFAIL` for that oracle with its reason.
 
 ## Pack expansions in builtin arguments (#1099)
 
@@ -2972,6 +2982,12 @@ request it serves.
   the workers' timeline. `:browse` is the full-screen termios browser: tree with a detail pane
   (the value: L1 for `FunctionIr`, L2 for `Lower`, instruction words for `Codegen`), timeline
   with a time cursor, worker selection, live feed.
+- The browser's layout (#1119): a title bar with the tabs and the live state, the summary (at
+  most three lines), a line of toggles that show their keys and state (clickable), and a footer
+  of the view's keys with `? help` and `q quit` pinned right; `?` is a scrolling box. Lines are
+  fitted by priority (`pack`, `spread`, `ellipsize` in `:view`), so nothing runs off at 80
+  columns or more. The timeline groups workers in the same cell (`w0–w17`) and cuts the demand
+  chain in the middle; the pane wraps at spaces and `/`, and shows memory as own / in all.
 - Names: units and files by their file, functions by qualified name, requests and programs by
   their units and output (`Build(a.cpp → a)`).
 - Errors: a compile error is a value, so a kind says which of its values hold errors
@@ -4110,4 +4126,3 @@ the body. A non-generic lambda body uses its own evaluation context.
 - General class objects, member pointers, operands whose type dependence is unresolved, and
   other direct parenthesized template argument spellings remain open, as do dependent
   template arguments, requirements, and exception specifications.
-  [#286](https://github.com/yrashk/ycxx/issues/286)
