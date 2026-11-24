@@ -335,6 +335,7 @@ enum class Diag : std::uint32_t {
   instantiation_depth [[=message{Severity::error, "template instantiations nest more than {0} deep"}]],
   nested_too_deeply [[=message{Severity::error, "nested too deeply to analyse: half of the stack is in use"}]],
   friend_template_default [[=message{Severity::error, "a friend class template declaration cannot give a default template argument"}]],
+  friend_template_head_not_supported [[=message{Severity::error, "comparing dependent parameter types in friend class template '{0:n}' is not supported yet"}]],
   default_not_last [[=message{Severity::error, "a template parameter after one with a default argument needs a default argument too"}]],
   default_redefined [[=message{Severity::error, "a template parameter's default argument is given again"}]],
   mutable_placement [[=message{Severity::error, "'mutable' requires a non-static data member of non-const, non-reference type"}]],

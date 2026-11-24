@@ -2824,14 +2824,15 @@ Fable decided the representation (ast.md §6.6); the Opus session wrote the code
 - **Friend class templates** (`template <class U> friend class X;`, `friend_class_template` in
   parse.cppm, [temp.friend]/1, #259), in a class or a class template: `ClassRec::friends` holds
   the class template's entity, and `ClassRec::befriends` grants access to each of its
-  specializations, from the primary or a partial specialization. An unqualified name is looked
-  up among the innermost enclosing namespace's members and using-declarations only
-  ([dcl.type.elab]/4); finding none, it names a class template of that namespace (keyed by its
-  head at depth 0), not visible until declared there. `N::X` must name an earlier class
-  template. The heads must agree in kinds, packs and non-dependent non-type parameter types
-  (`conflicting declaration` otherwise), may give no default arguments and may not redeclare a
-  template parameter. A head's constraints are not compared with the template's yet (#1182),
-  and a later conflicting declaration of a friend-declared name is not diagnosed (#1184).
+  specializations, from the primary or a partial specialization. Unqualified lookup stops at
+  the innermost enclosing namespace, including using-declarations and using-directives that
+  contribute at that level ([dcl.type.elab]/4, [namespace.udir]). Finding no declaration names a
+  template of that namespace (keyed by its head at depth 0), visible after a namespace declaration.
+  `N::X` must name an earlier class template. Matching heads compare parameter kinds, packs and
+  non-type parameter types, with the corresponding template parameter positions paired (#1211).
+  A friend head cannot give default arguments or redeclare a template parameter. A head's
+  constraints are not compared with the template's yet (#1182), and a later conflicting
+  declaration of a friend-declared name is not diagnosed (#1184).
 - **Class friends in class templates** (`friend class X;`, `friend N::X;`, `friend struct N::X<T>;`,
   `friend C<T>;`) are analysed again in each specialization with its arguments; a dependent one
   befriends nothing in the pattern. `friend class X;` still looks past the innermost namespace,
@@ -3040,8 +3041,9 @@ first; a dependent base is not searched. Redeclaring a hidden parameter's name i
   the floating conversions, `tobool`, `switch` and pointer offsets take 128-bit operands.
   Conversion to a floating type rounds the top 64 bits with a sticky bit.
 - List-initialization narrowing reads constants in 128 bits. `sema::ValueRec::wide` marks an
-  integer outside [-2^63, 2^64), so array bounds, bit-field widths and array new bounds reject
-  it rather than read its low half.
+  integer outside [-2^63, 2^64), so concrete array bounds, bit-field widths and array new
+  bounds reject it. Substitution checks a dependent array bound against the target's
+  `size_t` range before conversion. [#1212](https://github.com/yrashk/ycxx/issues/1212)
 - Static data of 16-byte integer type is written with its high half.
 - Not yet:
   - Native code that computes with a 128-bit value: lowering reports "no integer type of 16

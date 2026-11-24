@@ -520,6 +520,7 @@ public:
   // starting in namespace `from`: the first enclosing namespace that declares it before the
   // point, counting the namespaces using-directives nominate where [namespace.udir]/2 puts them.
   // `block` are the namespaces block-scope using-directives at the point nominate.
+  // A friend class-template declaration stops at the starting namespace ([dcl.type.elab]).
   enum class LookupNames { all, types, qualifiers, using_declaration, immediate_call };
 
   void filter_lookup(std::vector<DeclId>& declarations, LookupNames filter) {
@@ -533,7 +534,8 @@ public:
   }
 
   std::vector<DeclId> visible_decls(std::string_view name, u32 item, bool self, const std::string& from,
-                                    std::span<const std::string> block = {}, LookupNames filter = LookupNames::all) {
+                                    std::span<const std::string> block = {}, LookupNames filter = LookupNames::all,
+                                    bool innermost_only = false) {
     // Each nominated namespace, and those its own directives nominate ([namespace.udir]/4), with
     // the namespace that encloses both it and the directive: where its names appear.
     std::vector<std::pair<std::string, std::string>> nominated;  // (namespace, level)
@@ -553,7 +555,7 @@ public:
           r.insert(r.end(), more.begin(), more.end());
         }
       filter_lookup(r, filter);
-      if (!r.empty() || level.empty()) return r;
+      if (!r.empty() || level.empty() || innermost_only) return r;
     }
   }
   std::vector<DeclId> visible_decls(std::string_view name, u32 item, bool self) {
@@ -2115,6 +2117,25 @@ public:
     const auto& scope = initializer_source ? p_->ns_of(initializer_source->item) : from;
     return p_->visible_decls(p_->world().ins.names.spelling(name), namespace_lookup_item(),
                              namespace_lookup_includes_item(name), scope, paths);
+  }
+  std::vector<ast::DeclSema> friend_namespace_decls(EntityId ns, ast::NameId name) {
+    std::vector<ast::DeclSema> declarations;
+    for (DeclId id : p_->visible_decls(p_->world().ins.names.spelling(name), namespace_lookup_item(),
+                                        namespace_lookup_includes_item(name), p_->namespace_path(ns),
+                                        {}, Program::LookupNames::types, /*innermost_only=*/true))
+      if (auto d = lookup_declaration(id); d && d->entity != EntityId::none) declarations.push_back(*d);
+    return declarations;
+  }
+  // Name conflicts when introducing a template concern declarations that bind in this namespace
+  // ([basic.scope.scope]), including direct using-declarations.
+  bool namespace_binds_name(EntityId ns, ast::NameId name) {
+    const auto declarations = p_->declared_in(p_->world().ins.names.spelling(name), p_->namespace_path(ns),
+                                               namespace_lookup_item(), namespace_lookup_includes_item(name),
+                                               /*inhabit=*/true);
+    return std::ranges::any_of(declarations, [&](DeclId id) {
+      auto d = lookup_declaration(id);
+      return d && d->entity != EntityId::none;
+    });
   }
   std::vector<ast::DeclSema> qualifier_decls(ast::NameId name, std::optional<EntityId> ns,
                                             std::span<const EntityId> directives) override {
@@ -6088,17 +6109,29 @@ private:
           return bad();
         }
       }
-    // Unqualified, the namespace's own members and what its using-declarations introduce.
-    const std::vector<ast::DeclSema> found = q_.namespace_members(ns.value_or(ns_entity()), name);
+    // A using-directive contributes at its common ancestor ([namespace.udir]), which can
+    // be outside the innermost namespace that unqualified friend lookup may consider.
+    // The elaborated name is looked up as a type ([basic.lookup.elab]).
+    const std::vector<ast::DeclSema> found =
+        ns ? q_.namespace_members(*ns, name, /*type_only=*/true) : q_.friend_namespace_decls(ns_entity(), name);
     EntityId templ = EntityId::none;
     for (const ast::DeclSema& prior : found) {
       if (prior.entity == EntityId::none || (prior.flags & sema::decl_flag::friend_) ||
           (prior.flags & (sema::decl_flag::specialization | sema::decl_flag::partial)))
         continue;
       // [basic.scope.scope]/4: another kind of entity of this name in the namespace.
-      if (prior.kind != ast::DeclKind::class_ || !(prior.flags & sema::decl_flag::template_) ||
-          !same_template_head(s_.world().ins.seqs.elements(prior.template_params), head)) {
+      if (prior.kind != ast::DeclKind::class_ || !(prior.flags & sema::decl_flag::template_)) {
         s_.diag(name_at, Diag::conflicting_declaration, name);
+        return bad();
+      }
+      if (prior.entity == templ) continue;
+      if (templ != EntityId::none) {
+        s_.diag(name_at, Diag::ambiguous_name, name);
+        return bad();
+      }
+      auto match = same_template_head(s_.world().ins.seqs.elements(prior.template_params), head);
+      if (match != true) {
+        s_.diag(name_at, match ? Diag::conflicting_declaration : Diag::friend_template_head_not_supported, name);
         return bad();
       }
       templ = prior.entity;
@@ -6106,6 +6139,10 @@ private:
     if (templ == EntityId::none) {
       if (ns) {
         s_.diag(name_at, Diag::no_friend_match, name);
+        return bad();
+      }
+      if (q_.namespace_binds_name(ns_entity(), name)) {
+        s_.diag(name_at, Diag::conflicting_declaration, name);
         return bad();
       }
       // Its head as the namespace's declaration of the template has it, at depth 0, so that
@@ -6126,20 +6163,114 @@ private:
     ps_.bump();
   }
 
-  // Whether two heads of one class template's declarations agree ([temp.over.link]/6): their
-  // parameters' kinds and packs, non-type parameters' types where they depend on none of the
-  // parameters (the heads' depths can differ), and template template parameters' own heads.
-  bool same_template_head(std::span<const ast::TemplateParamSema> a, std::span<const ast::TemplateParamSema> b) {
+  // The paired binders in a namespace template and its friend declaration. A friend inside a
+  // class template has an extra enclosing head whose parameters cannot match the namespace
+  // template's own parameters, even when those two depths happen to have the same number.
+  struct FriendHeadDepth {
+    u16 prior, current;
+    const FriendHeadDepth* outer;
+  };
+
+  static bool same_friend_parameter_depth(u16 a, u16 b, const FriendHeadDepth& head) {
+    for (auto h = &head; h; h = h->outer)
+      if (h->prior == a || h->current == b) return h->prior == a && h->current == b;
+    return false;
+  }
+
+  std::optional<bool> same_friend_parameter_value(ConstId a, ConstId b, const FriendHeadDepth& head) {
+    auto& values = s_.ins().values;
+    if (a == ConstId::none || b == ConstId::none) return a == b;
+    const bool dependent_a = values.is_dependent(a), dependent_b = values.is_dependent(b);
+    if (!dependent_a || !dependent_b) return a == b;
+    if (!values.is<ast::VDepParam>(a) || !values.is<ast::VDepParam>(b)) return std::nullopt;
+    const auto x = values.get<ast::VDepParam>(a), y = values.get<ast::VDepParam>(b);
+    return x.index == y.index && same_friend_parameter_depth(x.depth, y.depth, head);
+  }
+
+  std::optional<bool> same_friend_parameter_args(std::span<const ast::TemplateArg> a, std::span<const ast::TemplateArg> b,
+                                                  const FriendHeadDepth& head) {
+    using enum ast::TemplateArgKind;
     if (a.size() != b.size()) return false;
+    for (std::size_t i = 0; i < a.size(); ++i) {
+      const auto& x = a[i];
+      const auto& y = b[i];
+      if (x.kind != y.kind) return false;
+      std::optional<bool> match;
+      if (x.kind == pack)
+        match = same_friend_parameter_args(s_.ins().seqs.elements(x.elems), s_.ins().seqs.elements(y.elems), head);
+      else if (x.kind == template_ && (x.templ != EntityId::none || y.templ != EntityId::none))
+        match = x.templ == y.templ;
+      else {
+        match = same_friend_parameter_type(x.type, y.type, head);
+        if (match == true && x.kind == value) match = same_friend_parameter_value(x.value, y.value, head);
+      }
+      if (match != true) return match;
+    }
+    return true;
+  }
+
+  // Compare the represented type without substitution, which can erase dependent syntax or
+  // accidentally capture a free parameter. None means the represented types cannot be compared.
+  std::optional<bool> same_friend_parameter_type(QualType a, QualType b, const FriendHeadDepth& head) {
+    using enum sema::TypeKind;
     sema::Types& types = s_.types();
+    a = types.canonical(a);
+    b = types.canonical(b);
+    if (!types.is_dependent(a) || !types.is_dependent(b)) return a == b;
+    const auto x = types.rec(a), y = types.rec(b);
+    if (x.kind != y.kind || sema::Types::cv(a) != sema::Types::cv(b)) return false;
+    auto inner = [&] { return same_friend_parameter_type(x.inner, y.inner, head); };
+    switch (x.kind) {
+    case template_param:
+      return x.index == y.index && x.pack == y.pack && same_friend_parameter_depth(x.depth, y.depth, head);
+    case pointer:
+    case pack_expansion:
+      return inner();
+    case reference:
+      return x.rvalue_ref == y.rvalue_ref ? inner() : std::optional(false);
+    case dep_name:
+      return x.name == y.name ? inner() : std::optional(false);
+    case transform:
+      return x.trait == y.trait ? inner() : std::optional(false);
+    case member_pointer:
+      if (auto owner = same_friend_parameter_type(x.member_owner, y.member_owner, head); owner != true) return owner;
+      return inner();
+    case array:
+      if (auto bound = same_friend_parameter_value(x.bound_value, y.bound_value, head); bound != true) return bound;
+      return inner();
+    case class_: {
+      const auto& first = s_.world().entities.rec(x.entity);
+      const auto& second = s_.world().entities.rec(y.entity);
+      if (first.templ == EntityId::none || second.templ == EntityId::none) return std::nullopt;
+      if (first.templ != second.templ) return false;
+      return same_friend_parameter_args(first.args, second.args, head);
+    }
+    case dep_spec:
+      if (x.index != y.index || x.pack != y.pack || !same_friend_parameter_depth(x.depth, y.depth, head)) return false;
+      return same_friend_parameter_args(s_.ins().seqs.elements(x.args), s_.ins().seqs.elements(y.args), head);
+    default:
+      return std::nullopt;
+    }
+  }
+
+  // [temp.over.link]/6: after pairing each head's own binders, compare the kinds, packs and
+  // non-type parameter types. A template template parameter adds another pair of binders.
+  std::optional<bool> same_template_head(std::span<const ast::TemplateParamSema> a, std::span<const ast::TemplateParamSema> b,
+                                          const FriendHeadDepth* outer = nullptr) {
+    if (a.size() != b.size()) return false;
+    if (a.empty()) return true;
+    const FriendHeadDepth head{a.front().depth, b.front().depth, outer};
+    auto templates = s_.templates();
     for (std::size_t i = 0; i < a.size(); ++i) {
       if (a[i].kind != b[i].kind || a[i].pack != b[i].pack) return false;
-      if (a[i].kind == ast::TemplateArgKind::value && !types.is_dependent(a[i].type) && !types.is_dependent(b[i].type) &&
-          types.canonical(a[i].type) != types.canonical(b[i].type))
-        return false;
-      if (a[i].kind == ast::TemplateArgKind::template_ &&
-          !same_template_head(s_.world().ins.seqs.elements(a[i].params), s_.world().ins.seqs.elements(b[i].params)))
-        return false;
+      if (a[i].kind == ast::TemplateArgKind::value) {
+        if (!templates.structural_operand(a[i].type) || !templates.structural_operand(b[i].type)) return std::nullopt;
+        if (auto match = same_friend_parameter_type(a[i].type, b[i].type, head); match != true) return match;
+      }
+      if (a[i].kind == ast::TemplateArgKind::template_) {
+        auto left = s_.ins().seqs.elements(a[i].params), right = s_.ins().seqs.elements(b[i].params);
+        if (auto match = same_template_head(left, right, &head); match != true) return match;
+      }
     }
     return true;
   }
