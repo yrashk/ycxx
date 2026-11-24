@@ -327,20 +327,18 @@ std::expected<obj::object, CodegenError> assemble(std::string name, std::span<co
     tables = o.add_section(obj::section{"__TEXT", "__gcc_except_tab", obj::section_flags::regular, 2, {}, 0, {}});
 
   // Defined symbols first, functions then variables, at offsets filled in as they are emitted.
-  // Two entities may share a name outside the object (#1095), but only one may define it.
-  std::set<std::string_view> defined_names;
-  auto define = [&](ir::EntityId e, std::uint32_t section, bool weak) -> std::expected<void, CodegenError> {
-    auto s = name_of(e);
+  for (const CompiledFunction& f : functions) {
+    auto s = name_of(f.entity);
     if (!s) return std::unexpected(s.error());
-    if ((*s)->bind != obj::binding::local && !defined_names.insert((*s)->name).second)
-      return std::unexpected(CodegenError{e, std::format("a second definition of symbol '{}'", (*s)->name)});
-    symbol_of[ir::raw(e)] = o.add_symbol({(*s)->name, (*s)->bind, section, 0, weak && (*s)->bind != obj::binding::local});
-    return {};
-  };
-  for (const CompiledFunction& f : functions)
-    if (auto r = define(f.entity, *text, f.weak); !r) return std::unexpected(r.error());
-  for (const DataDef& d : data)
-    if (auto r = define(d.entity, sections[d.kind], d.weak); !r) return std::unexpected(r.error());
+    const bool weak = f.weak && (*s)->bind != obj::binding::local;
+    symbol_of[ir::raw(f.entity)] = o.add_symbol({(*s)->name, (*s)->bind, *text, 0, weak});
+  }
+  for (const DataDef& d : data) {
+    auto s = name_of(d.entity);
+    if (!s) return std::unexpected(s.error());
+    const bool weak = d.weak && (*s)->bind != obj::binding::local;
+    symbol_of[ir::raw(d.entity)] = o.add_symbol({(*s)->name, (*s)->bind, sections[d.kind], 0, weak});
+  }
   const auto frame_base = frames ? o.define("ltmp_eh_frame", obj::binding::local, *frames) : 0;
   std::optional<std::uint32_t> personality;
   if (has_cleanup) personality = o.reference("___gxx_personality_v0");
@@ -354,11 +352,16 @@ std::expected<obj::object, CodegenError> assemble(std::string name, std::span<co
       return 0;
     }
     // Another entity may define the name: a builtin's implicit C declaration and a written
-    // definition of another type are two entities with one symbol (#1095).
-    const auto defined = (*s)->bind == obj::binding::local ? o.symbols.end() :
-        std::ranges::find_if(o.symbols, [&](const obj::symbol& d) {
-          return d.defined() && d.bind != obj::binding::local && d.name_view() == (*s)->name;
-        });
+    // definition of another type are two entities with one symbol (#1095). Name the strong
+    // definition where a weak one shares its spelling (#694), as the linker resolves it.
+    auto defines = [&](const obj::symbol& d) {
+      return d.defined() && d.bind != obj::binding::local && d.name_view() == (*s)->name;
+    };
+    auto defined = o.symbols.end();
+    if ((*s)->bind != obj::binding::local) {
+      defined = std::ranges::find_if(o.symbols, [&](const obj::symbol& d) { return defines(d) && !d.weak; });
+      if (defined == o.symbols.end()) defined = std::ranges::find_if(o.symbols, defines);
+    }
     const std::uint32_t i = defined != o.symbols.end() ? static_cast<std::uint32_t>(defined - o.symbols.begin())
                                                         : o.reference((*s)->name);
     symbol_of[ir::raw(e)] = i;

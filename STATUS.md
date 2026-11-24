@@ -2553,9 +2553,10 @@ library's `memchr` and `memcmp`, as libycxx's `<cstring>` and its run-time strin
 (`void*` and `int` results) and calls an implicit `extern "C"` declaration with the target's
 `<string.h>` exception specification (`World::string_function`), so a written declaration or
 definition that matches the target's header is the same entity. One with another exception
-specification is a second entity (whether it should be is #1114), but both object writers give
-entities of one non-local name one symbol (#1095), so the object still lists the function once
-(`unit.string_builtin_symbols`). The unit then references `memchr` or `memcmp` as an undefined symbol,
+specification is a second entity (whether it should be is #1114), but in both object writers an
+entity the object does not define shares the symbol of its name: the definition of that name if
+the object has one, else one undefined symbol (#1095). The object still lists the function once
+(`unit.string_builtin_symbols`), and each definition keeps its own symbol (#694). The unit then references `memchr` or `memcmp` as an undefined symbol,
 which libSystem or the C library provides at link time. A dependent argument defers the call to
 instantiation. They are not constant expressions yet (#1092). Fixtures in `tests/own/builtins/`
 cover detection, signatures, argument checks and run-time results.

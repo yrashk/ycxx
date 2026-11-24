@@ -4,7 +4,8 @@ Each fixture is compiled for both targets. The C function's symbol must appear e
 the object's symbol table: undefined where the unit only declares it, defined where the unit
 defines it. A second entry means the builtin's implicit declaration became a second entity (#248),
 or, where a written declaration differs from it and they are two entities, that the object writer
-gave each entity its own symbol (#1095).
+gave each entity its own symbol (#1095). Entities the object defines keep a symbol each, so a weak
+and a strong definition of one spelling list it twice (#694).
 """
 
 import os
@@ -66,9 +67,8 @@ def main():
         "builtin-only.cpp": {"memcmp": False, "memchr": False},
         "mismatched-declared.cpp": {"memcmp": False, "memchr": False},
         "mismatched-defined.cpp": {"memcmp": True},
+        "same-spelling.cpp": {"_Z1fv": [True, True]},
     }
-    # Fixtures the object writers must reject, with the message they must give.
-    rejected = {"second-definition.cpp": "a second definition of symbol"}
     failures = []
     with tempfile.TemporaryDirectory(prefix="ycxx-string-builtins-") as temporary:
         work = Path(temporary)
@@ -88,14 +88,9 @@ def main():
                 prefix = "" if host == "linux" else "_"
                 for name, defined in symbols.items():
                     entries = [d for n, d in table if n == prefix + name]
-                    if entries != [defined]:
-                        failures.append(f"{host} {fixture}: {prefix + name} entries {entries}, expected [{defined}]")
-            for fixture, message in rejected.items():
-                result = subprocess.run([ycxx, "cxx", f"--target={triple}", "-std=c++26", "-c", str(fixtures / fixture),
-                                         "-o", str(work / f"{host}-{fixture}.o")], cwd=work, env=env,
-                                        capture_output=True, text=True, timeout=60)
-                if result.returncode == 0 or message not in result.stderr:
-                    failures.append(f"{host} {fixture}: exit {result.returncode}, expected '{message}'\n{result.stderr}")
+                    expected_entries = defined if isinstance(defined, list) else [defined]
+                    if entries != expected_entries:
+                        failures.append(f"{host} {fixture}: {prefix + name} entries {entries}, expected {expected_entries}")
     for failure in failures:
         print(failure, file=sys.stderr)
     return 1 if failures else 0
