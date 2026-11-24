@@ -171,6 +171,7 @@ inline constexpr std::array builtin_functions{
     BuiltinFunctionInfo{"__builtin_memmove", BuiltinFunction::library},
     BuiltinFunctionInfo{"__builtin_memset", BuiltinFunction::library},
     BuiltinFunctionInfo{"__builtin_strchr", BuiltinFunction::library},
+    BuiltinFunctionInfo{"__builtin_strcmp", BuiltinFunction::library},
     BuiltinFunctionInfo{"__builtin_strpbrk", BuiltinFunction::library},
     BuiltinFunctionInfo{"__builtin_strrchr", BuiltinFunction::library},
     BuiltinFunctionInfo{"__builtin_strstr", BuiltinFunction::library},
