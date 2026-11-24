@@ -1,0 +1,2338 @@
+// Opt-in ownership and effect checks over typed body occurrences.
+module ycxx.pipeline:policies;
+
+import std;
+import ycxx.ast;
+import ycxx.engine;
+import ycxx.items;
+import ycxx.pp;
+import ycxx.sema;
+import :back;
+import :front;
+import :lines;
+import :policy_registry;
+
+namespace ycxx::pipeline {
+
+// One checked build's ordered input units, shared by all its body queries.
+using PolicySources = ast::SeqId<ast::u32>;
+
+// Body-relative offsets let the engine reuse the finding if the whole function moves.
+struct OwnershipBody {
+  PolicySources sources;
+  TuId tu;
+  EntityId function;
+  QualType type;
+  ast::NodeId tree;
+  ast::SeqId<ast::LocalRec> locals;
+  QualType this_type{};  // a pointer type for nonstatic members
+  bool linux_target;
+  bool defer_observers;
+  bool operator==(const OwnershipBody&) const = default;
+};
+
+enum class OwnershipEvent { branch, initialize, borrow, observe, consume, transfer, leave, may_unwind, variant_test, unsupported };
+
+struct OwnershipFinding {
+  ast::u32 offset;
+  std::string message;
+  std::optional<ast::u32> previous{};
+  OwnershipEvent previous_event = OwnershipEvent::consume;
+};
+
+struct OwnershipBodyCheck {
+  std::optional<OwnershipFinding> finding;
+  std::vector<EntityId> observers;
+};
+
+enum class PolicyContractKind { observation, effect, trusted_effect };
+
+struct PolicyContract {
+  EntityId function;
+  EntityId target;
+  ast::Fp128 signature;
+  PolicyContractKind kind;
+  bool provides;
+  std::optional<std::string> unstable_effect_tag{};
+};
+
+struct OwnershipRecord {
+  struct Field {
+    ast::NameId name;
+    QualType type;
+  };
+
+  EntityId entity;
+  std::vector<Field> fields;
+  bool supported;
+  EntityId destructor;
+};
+
+struct OwnershipRecords {
+  std::vector<OwnershipRecord> records;
+  std::vector<EntityId> nonthrowing_destructors;
+};
+
+struct OwnershipFlow {
+  using Point = ast::u32;
+  static constexpr Point exit = ~Point{};
+
+  struct Borrow {
+    ast::u32 owner;
+    ast::u32 offset;
+    VariantSide alternative = VariantSide::none;
+  };
+
+  struct Local {
+    ast::NameId name;
+    Ownership ownership;
+    bool parameter;
+    bool shared_reference;
+    std::optional<Borrow> borrow{};
+    std::string field{};
+    std::optional<TrackedVariant> variant{};
+  };
+
+  struct Step {
+    OwnershipEvent event;
+    ast::u32 offset;
+    Point next = exit;
+    Point other = exit;
+    ast::u32 local = 0;
+    ast::u32 source = 0;
+    bool throwing_destructor = false;
+    std::string problem{};
+    EntityId observer = EntityId::none;
+    VariantSide alternative = VariantSide::none;
+    VariantSide source_alternative = VariantSide::none;
+  };
+
+  std::vector<Local> locals;
+  std::vector<Step> steps;
+  std::vector<EntityId> forwarded_observers;
+  Point entry = exit;
+};
+
+namespace {
+
+using Flow = OwnershipFlow;
+using Point = Flow::Point;
+using Event = OwnershipEvent;
+using Effect = OwnershipEffect;
+
+class OwnershipFlowBuilder {
+ public:
+  OwnershipFlowBuilder(const sema::World& world, const OwnershipPolicy& policy,
+                       const OwnershipRecords& records, OwnershipBody body)
+      : world_(world), policy_(policy), records_(records.records),
+        nonthrowing_destructors_(records.nonthrowing_destructors), body_(body) {
+    bool has_subobjects = false;
+    for (const auto& local : world_.ins.seqs.elements(body.locals)) {
+      const auto kind = ownership(local.type);
+      flow_.locals.push_back({local.name, kind, (local.flags & sema::local_flag::parameter) != 0, shared_reference(local.type)});
+      if (const auto* variant = tracked_variant(local.type)) add_variant(flow_.locals.back(), *variant);
+      has_linear_ = has_linear_ || kind == Ownership::linear;
+      has_owner_ = has_owner_ || mentions_owner(local.type);
+      has_subobjects = has_subobjects || ownership_record(local.type) || owner_array(local.type);
+    }
+    if (has_subobjects) collect_subobject_slots(ast::Red(world_.ins.ast, body_.tree));
+  }
+
+  Flow build() {
+    const auto operation = effect(body_.function);
+    if (operation == Effect::verified_observe) {
+      if (!has_observer_definition(body_.function))
+        flow_.entry = unsupported(0, "verified observation requires a unique supported definition in the checked sources");
+      else if (auto problem = verify_observation(ast::Red(world_.ins.ast, body_.tree)))
+        flow_.entry = unsupported(problem->offset, std::move(problem->message));
+      std::ranges::sort(flow_.forwarded_observers);
+      flow_.forwarded_observers.erase(std::ranges::unique(flow_.forwarded_observers).begin(),
+                                      flow_.forwarded_observers.end());
+      return std::move(flow_);
+    }
+    if (operation != Effect::unknown || resource_lifetime_body()) return {};
+    const auto signature = world_.types.rec(body_.type);
+    const ast::Red root(world_.ins.ast, body_.tree);
+    const auto scope = capability_factory_scope(root, signature);
+    if ((mentions_owner(signature.inner) && !scope) || std::ranges::any_of(signature.params, [&](QualType param) {
+          return mentions_owner(param) && ownership(param) == Ownership::ordinary;
+        })) {
+      flow_.entry = unsupported(0, "ownership checking requires by-value resource parameters and disallows resource returns");
+      return std::move(flow_);
+    }
+    capability_guard_ = capability_guard(signature);
+    const auto checked_root = scope.value_or(root);
+    if (!has_owner_ && !owner_use(checked_root)) return {};
+
+    Scope parameters;
+    for (ast::u32 i = 0; i < flow_.locals.size(); ++i)
+      if (flow_.locals[i].parameter && flow_.locals[i].ownership != Ownership::ordinary)
+        parameters.locals.push_back({i, false});
+    const Point end = leave(&parameters, nullptr, Flow::exit, last_token(root));
+    flow_.entry = lower(checked_root, end, {&parameters, nullptr});
+    resolve_borrow_owners();
+    return std::move(flow_);
+  }
+
+ private:
+  enum class CapabilityGuard { none, require, release };
+
+  struct FieldSlot {
+    std::optional<ast::u32> owner;
+    std::vector<FieldSlot> children;
+    bool array = false;
+  };
+
+  struct Cleanup {
+    ast::u32 local;
+    bool throwing_destructor;
+  };
+  struct Scope {
+    const Scope* outer = nullptr;
+    std::vector<Cleanup> locals{};
+  };
+  struct Loop {
+    const Scope* break_scope;
+    Point on_break;
+    const Scope* continue_scope;
+    Point on_continue;
+  };
+  struct Context {
+    const Scope* scope;
+    const Loop* loop;
+  };
+  enum class VariantOperation { test, access, take };
+  struct VariantUse {
+    ast::u32 slot;
+    VariantSide side;
+    VariantOperation operation;
+  };
+
+  Ownership ownership(QualType type) const {
+    return policy_.ownership(world_.types.canonical(type));
+  }
+
+  const TrackedVariant* tracked_variant(QualType type) const {
+    return policy_.variant(world_.types.canonical(type));
+  }
+
+  void add_variant(Flow::Local& local, const TrackedVariant& variant) {
+    local.variant = variant;
+    has_linear_ = has_linear_ || variant.first_ownership == Ownership::linear ||
+                  variant.second_ownership == Ownership::linear;
+  }
+
+  bool owner_array(QualType type) const {
+    auto array = world_.types.rec(type);
+    if (array.kind != sema::TypeKind::array) return false;
+    do {
+      type = array.inner;
+      array = world_.types.rec(type);
+    } while (array.kind == sema::TypeKind::array);
+    return ast::cv_of(world_.types.canonical(type)) == ast::Cv::none &&
+           (ownership(type) != Ownership::ordinary || ownership_record(type) || tracked_variant(type));
+  }
+
+  void collect_subobject_slots(const ast::Red& node) {
+    if (node.is<ast::LocalVar>()) {
+      const auto var = node.get<ast::LocalVar>();
+      const auto local = world_.ins.seqs.at(body_.locals, var.local);
+      if (!flow_.locals[var.local].parameter && ast::cv_of(world_.types.canonical(local.type)) == ast::Cv::none &&
+          (ownership_record(local.type) || owner_array(local.type)) && var.init.id != ast::NodeId::none &&
+          (var.destructor == EntityId::none || nonthrowing(var.destructor))) {
+        const auto first = flow_.locals.size();
+        const bool had_linear = has_linear_;
+        const auto initializer = at(node, var.init);
+        if (auto slots = subobject_slots(local.type, local.name, "", initializer))
+          field_slots_.emplace(var.local, std::move(*slots));
+        else {
+          flow_.locals.resize(first);
+          has_linear_ = had_linear;
+        }
+      }
+    }
+    node.for_each_child([&](const ast::Red& child) { collect_subobject_slots(child); });
+  }
+
+  const OwnershipRecord* ownership_record(QualType type) const {
+    const auto record = world_.types.rec(type);
+    if (record.kind != sema::TypeKind::class_) return nullptr;
+    return ownership_record(record.entity);
+  }
+
+  const OwnershipRecord* ownership_record(EntityId entity) const {
+    const auto it = std::ranges::lower_bound(records_, entity, std::ranges::less{}, &OwnershipRecord::entity);
+    return it != records_.end() && it->entity == entity ? &*it : nullptr;
+  }
+
+  std::optional<FieldSlot> subobject_slots(QualType type, ast::NameId local, const std::string& path,
+                                           const ast::Red& initializer) {
+    const auto mode = ownership(type);
+    if (const auto* variant = tracked_variant(type); mode != Ownership::ordinary || variant) {
+      const auto slot = static_cast<ast::u32>(flow_.locals.size());
+      flow_.locals.push_back({local, mode, false, false, {}, path});
+      has_linear_ = has_linear_ || mode == Ownership::linear;
+      if (variant) add_variant(flow_.locals.back(), *variant);
+      return FieldSlot{slot, {}};
+    }
+    const auto shape = world_.types.rec(type);
+    const bool array = shape.kind == sema::TypeKind::array;
+    const auto* record = ownership_record(type);
+    if (!array && !record) return FieldSlot{};
+    if ((!array && !record->supported) || !initializer.is<ast::InitList>()) return std::nullopt;
+    const auto elements = initializer.ast().children(initializer.get<ast::InitList>().elems);
+    // Allocate only for a typed initializer with one entry per subobject.
+    if (elements.size() != (array ? shape.bound : record->fields.size())) return std::nullopt;
+    FieldSlot out{std::nullopt, {}, array};
+    out.children.reserve(elements.size());
+    for (std::size_t i = 0; i < elements.size(); ++i) {
+      if (elements[i].id == ast::NodeId::none) return std::nullopt;
+      const auto name = array ? std::format("{}[{}]", path, i)
+                              : field_path(path, record->fields[i].name);
+      auto child = subobject_slots(array ? shape.inner : record->fields[i].type, local, name,
+                                   at(initializer, elements[i]));
+      if (!child) return std::nullopt;
+      out.children.push_back(std::move(*child));
+    }
+    return out;
+  }
+
+  std::string field_path(const std::string& prefix, ast::NameId field) const {
+    const auto name = world_.ins.names.spelling(field);
+    return prefix.empty() ? std::string(name) : std::format("{}.{}", prefix, name);
+  }
+
+  bool shared_reference(QualType type) const {
+    const auto reference = world_.types.rec(type);
+    return reference.kind == sema::TypeKind::reference && !reference.rvalue_ref &&
+           ast::cv_of(world_.types.canonical(reference.inner)) == ast::Cv::const_ &&
+           ownership(reference.inner) != Ownership::ordinary;
+  }
+
+  Effect effect(EntityId function) const {
+    return policy_.effect(policy_operation(world_, function, body_.tu.n));
+  }
+
+  bool has_observer_definition(EntityId function) const {
+    return policy_.has_observer_definition(policy_operation(world_, function, body_.tu.n));
+  }
+
+  bool observer_is_available(PolicyOperation observer) const {
+    return !std::ranges::binary_search(policy_.labeled_observers, observer) &&
+           ((body_.defer_observers && !observer.second) || policy_.has_observer_definition(observer));
+  }
+
+  // The registered resource's construction and cleanup implement the adapter's contract.
+  bool resource_lifetime_body() const {
+    if (body_.this_type == QualType{}) return false;
+    const auto type = world_.types.rec(body_.this_type).inner;
+    if (const auto* record = ownership_record(type); record && record->destructor == body_.function) return true;
+    const auto* function = world_.entities.find(body_.function);
+    if (function && tracked_variant(type) && function->scope == world_.types.class_of(type))
+      return true;  // `tracks_variant` authorizes the package adapter's own operations.
+    return function && (function->kind == sema::EntityKind::constructor || function->kind == sema::EntityKind::destructor) &&
+           (ownership(type) != Ownership::ordinary ||
+            (function->scope == world_.types.class_of(type) && tracked_variant_helper(world_, policy_, type)));
+  }
+
+  // An issuer can return a freshly constructed token. The namespace-scope adapter
+  // still has to register the creation, and ownership checks still visit the scope argument.
+  std::optional<ast::Red> capability_factory_scope(const ast::Red& root, const sema::TypeRec& signature) const {
+    if (body_.this_type != QualType{} || ownership(signature.inner) != Ownership::affine ||
+        !signature.fn_noexcept || signature.variadic || !root.is<ast::Compound>() ||
+        !std::ranges::all_of(signature.params, [&](QualType type) { return observation_scalar(type); }))
+      return std::nullopt;
+    const auto issuer = capability_token_issuer(world_, signature.inner);
+    const auto* function = world_.entities.find(body_.function);
+    if (issuer == EntityId::none || !function || function->kind != sema::EntityKind::function || function->scope != issuer)
+      return std::nullopt;
+    const auto statements = root.ast().children(root.get<ast::Compound>().stmts);
+    if (statements.size() != 1 || !root.ast().is<ast::Return>(statements.front().id)) return std::nullopt;
+    const auto statement = at(root, statements.front());
+    const auto value = statement.get<ast::Return>().value;
+    if (value.id == ast::NodeId::none) return std::nullopt;
+    const auto result = unparenthesized(at(statement, value));
+    if (!result.is<ast::CtorCall>()) return std::nullopt;
+    const auto construct = result.get<ast::CtorCall>();
+    const auto* ctor = world_.entities.find(construct.ctor);
+    if (!ctor || ctor->kind != sema::EntityKind::constructor || ctor->scope != world_.types.class_of(signature.inner))
+      return std::nullopt;
+    const auto prototype = world_.types.rec(ctor->type);
+    const auto arguments = result.ast().children(construct.args);
+    if (prototype.params.size() != 1 || arguments.size() != 1 ||
+        !world_.types.is(prototype.params.front(), ast::Builtin::unsigned_long_long))
+      return std::nullopt;
+    return at(result, arguments.front());
+  }
+
+  CapabilityGuard capability_guard(const sema::TypeRec& signature) const {
+    if (body_.this_type == QualType{} || signature.variadic || signature.fn_ref != ast::RefQual::none ||
+        !world_.types.is_void(signature.inner))
+      return CapabilityGuard::none;
+    const auto type = world_.types.rec(body_.this_type).inner;
+    if (ownership(type) != Ownership::affine || capability_token_issuer(world_, type) == EntityId::none)
+      return CapabilityGuard::none;
+    const auto* function = world_.entities.find(body_.function);
+    if (!function || function->kind != sema::EntityKind::function || function->scope != world_.types.class_of(type))
+      return CapabilityGuard::none;
+    const auto name = world_.ins.names.spelling(function->name);
+    if (name == "release" && signature.fn_noexcept && ast::cv_of(type) == ast::Cv::none && signature.params.empty() &&
+        function->templ == EntityId::none)
+      return CapabilityGuard::release;
+    const auto* primary = world_.entities.find(function->templ);
+    if (name == "require" && ast::cv_of(type) == ast::Cv::const_ && signature.params.size() == 1 &&
+        world_.types.is(signature.params.front(), ast::Builtin::unsigned_long_long) &&
+        primary && primary->kind == sema::EntityKind::function_template && primary->scope == function->scope &&
+        function->args.size() == 1 && function->args.front().kind == ast::TemplateArgKind::value &&
+        world_.types.is(function->args.front().type, ast::Builtin::unsigned_long_long))
+      return CapabilityGuard::require;
+    return CapabilityGuard::none;
+  }
+
+  std::optional<QualType> capability_guard_field(const ast::Red& node, std::string_view name) const {
+    if (!node.is<ast::Member>()) return std::nullopt;
+    const auto member = node.get<ast::Member>();
+    if (!member.arrow || member.reference || !unparenthesized(at(node, member.object)).is<ast::This>() ||
+        mentions_owner(member.info.type))
+      return std::nullopt;
+    const auto* field = world_.entities.find(member.member);
+    if (!field || field->scope != world_.types.class_of(world_.types.rec(body_.this_type).inner) ||
+        world_.ins.names.spelling(field->name) != name)
+      return std::nullopt;
+    return member.info.type;
+  }
+
+  // Skip the ordinary value read or the receiver of a specific runtime-state call.
+  // A raw field reference still exposes the token's receiver to the normal check.
+  bool capability_guard_access(const ast::Red& node) const {
+    if (capability_guard_ == CapabilityGuard::none) return false;
+    const bool require = capability_guard_ == CapabilityGuard::require;
+    if (require && node.is<ast::ImplicitConversion>()) {
+      const auto read = node.get<ast::ImplicitConversion>();
+      if (read.conversion != ast::ConversionKind::lvalue_to_rvalue) return false;
+      const auto field = capability_guard_field(unparenthesized(at(node, read.operand)), "scope_");
+      return field && !sema::Types::is_volatile(*field) && world_.types.is(*field, ast::Builtin::unsigned_long_long);
+    }
+    if (!node.is<ast::MemberCall>()) return false;
+    const auto call = node.get<ast::MemberCall>();
+    if (!node.ast().children(call.args).empty()) return false;
+    const auto receiver = unparenthesized(at(node, call.object));
+    if (!receiver.is<ast::Unary>()) return false;
+    const auto address = receiver.get<ast::Unary>();
+    if (address.op != ast::UnaryOp::address_of) return false;
+    const auto state = capability_guard_field(unparenthesized(at(receiver, address.operand)), "state_");
+    if (!state || !is_affine_runtime_state(world_, *state)) return false;
+    const auto* method = world_.entities.find(call.function);
+    if (!method || method->kind != sema::EntityKind::function || method->scope != world_.types.class_of(*state) ||
+        method->templ != EntityId::none || world_.ins.names.spelling(method->name) != (require ? "observe" : "consume"))
+      return false;
+    const auto signature = world_.types.rec(method->type);
+    return signature.fn_noexcept && !signature.variadic && signature.params.empty() &&
+           signature.fn_cv == (require ? ast::Cv::const_ : ast::Cv::none) &&
+           signature.fn_ref == ast::RefQual::none && world_.types.is_void(signature.inner);
+  }
+
+  bool mentions_owner(QualType type) const {
+    if (ownership(type) != Ownership::ordinary || ownership_record(type) || tracked_variant(type)) return true;
+    const auto t = world_.types.rec(type);
+    using enum sema::TypeKind;
+    if (t.kind == class_)
+      if (const auto alternatives = variant_alternatives(world_, type))
+        return ownership(alternatives->first) != Ownership::ordinary || ownership(alternatives->second) != Ownership::ordinary;
+    if (t.kind == pointer || t.kind == reference || t.kind == array || t.kind == member_pointer)
+      return mentions_owner(t.inner) || (t.kind == member_pointer && mentions_owner(t.member_owner));
+    if (t.kind == function)
+      return mentions_owner(t.inner) || std::ranges::any_of(t.params, [&](QualType p) { return mentions_owner(p); });
+    return false;
+  }
+
+  // The red cursor distinguishes the source occurrences of shared AST nodes.
+  std::optional<ast::u32> owner_use(const ast::Red& node) const {
+    if (capability_guard_access(node)) return std::nullopt;
+    if (node.is<ast::ImplicitConversion>()) {
+      const auto cast = node.get<ast::ImplicitConversion>();
+      if (cast.conversion == ast::ConversionKind::lvalue_to_rvalue) {
+        if (const auto* slot = projection_slot(at(node, cast.operand)); slot && !slot->owner && slot->children.empty())
+          return std::nullopt;  // copy the scalar without exposing its containing record
+      }
+    }
+    const bool here = ast::dispatch<ast::Nodes>(node.kind(), [&]<class T>(std::type_identity<T>) {
+      const auto n = node.get<T>();
+      if constexpr (requires { n.info; } || std::is_same_v<T, ast::StaticInit> ||
+                    std::is_same_v<T, ast::MemberInit> || std::is_same_v<T, ast::DestroyMember>) {
+        if constexpr (requires { n.info; }) return mentions_owner(n.info.type);
+        else return mentions_owner(n.type);
+      } else if constexpr (std::is_same_v<T, ast::LocalVar> || std::is_same_v<T, ast::StaticVar>) {
+        return mentions_owner(world_.ins.seqs.at(body_.locals, n.local).type);
+      } else return false;
+    });
+    if (here) return node.offset();
+    std::optional<ast::u32> at;
+    node.for_each_child([&](const ast::Red& child) { if (!at) at = owner_use(child); });
+    return at;
+  }
+
+  ast::Red at(const ast::Red& parent, ast::Child child) const {
+    return ast::Red(parent.ast(), child.id, parent.offset() + child.at);
+  }
+
+  ast::u32 last_token(const ast::Red& node) const {
+    return node.end() - (node.width() != 0);
+  }
+
+  ast::Red unparenthesized(ast::Red node) const {
+    while (node.is<ast::Paren>()) node = at(node, node.get<ast::Paren>().operand);
+    return node;
+  }
+
+  const FieldSlot* projection_slot(ast::Red node) const {
+    node = unparenthesized(node);
+    if (node.is<ast::LocalRef>()) {
+      const auto it = field_slots_.find(node.get<ast::LocalRef>().local);
+      return it == field_slots_.end() ? nullptr : &it->second;
+    }
+    if (node.is<ast::Member>()) {
+      const auto member = node.get<ast::Member>();
+      if (member.arrow || member.reference) return nullptr;
+      const auto* parent = projection_slot(at(node, member.object));
+      return parent && !parent->array && member.field < parent->children.size() ? &parent->children[member.field] : nullptr;
+    }
+    if (!node.is<ast::Subscript>()) return nullptr;
+    const auto subscript = node.get<ast::Subscript>();
+    const auto base = unparenthesized(at(node, subscript.base));
+    if (!base.is<ast::ImplicitConversion>()) return nullptr;
+    const auto decay = base.get<ast::ImplicitConversion>();
+    if (decay.conversion != ast::ConversionKind::array_to_pointer) return nullptr;
+    const auto* parent = projection_slot(at(base, decay.operand));
+    if (!parent || !parent->array) return nullptr;
+    const auto index = unparenthesized(at(node, subscript.index));
+    // Read the selected integer literal after sema's promotions. Do not peel a
+    // conversion that might have changed which element the expression refers to.
+    if (!index.is<ast::Literal>()) return nullptr;
+    const auto value = index.get<ast::Literal>().value;
+    if (!world_.ins.values.is<ast::VInt>(value)) return nullptr;
+    const auto number = ast::int_bits(world_.ins, value);
+    return number.hi == 0 && number.lo < parent->children.size() ? &parent->children[number.lo] : nullptr;
+  }
+
+  bool observation_scalar(QualType type) const {
+    return ownership_observation_value(world_, type);
+  }
+
+  // Assignments can update scalar storage independent of the borrow. Reference variables
+  // would let an assignment address the resource indirectly.
+  bool observation_storage(const ast::Red& node) const {
+    if (node.is<ast::LocalRef>())
+      return observation_scalar(world_.ins.seqs.at(body_.locals, node.get<ast::LocalRef>().local).type);
+    if (node.is<ast::DeclRef>()) {
+      const auto ref = node.get<ast::DeclRef>();
+      return !ref.reference && observation_scalar(ref.info.type);
+    }
+    return false;
+  }
+
+  // The original shared borrow can be read through a scalar member or forwarded to
+  // another verified observer. No other operations can see an alias of the parameter.
+  std::optional<OwnershipFinding> verify_observation(const ast::Red& node) {
+    const auto unsupported_use = [&] {
+      return OwnershipFinding{node.offset(),
+        "verified observation cannot expose or mutate the borrowed resource or call an unverified function"};
+    };
+    if (node.is<ast::Call>()) {
+      const auto call = node.get<ast::Call>();
+      const auto args = node.ast().children(call.args);
+      if (direct_effect(node, call) != Effect::verified_observe || args.size() != 1)
+        return unsupported_use();
+      const auto argument = named_local(at(node, args.front()), false);
+      if (!argument || !flow_.locals[*argument].parameter || !flow_.locals[*argument].shared_reference)
+        return unsupported_use();
+      const auto observer = policy_operation(world_, call.function, body_.tu.n);
+      if (!observer_is_available(observer))
+        return OwnershipFinding{node.offset(), "verified observation requires a unique supported definition in the checked sources"};
+      if (!observer.second) flow_.forwarded_observers.push_back(call.function);
+      return std::nullopt;
+    }
+    if (node.is<ast::Member>()) {
+      const auto member = node.get<ast::Member>();
+      const auto object = unparenthesized(at(node, member.object));
+      if (!member.arrow && !member.reference && observation_scalar(member.info.type) && object.is<ast::LocalRef>()) {
+        const auto slot = object.get<ast::LocalRef>().local;
+        if (flow_.locals[slot].parameter && flow_.locals[slot].shared_reference) return std::nullopt;
+      }
+      return unsupported_use();
+    }
+    const bool supported = ast::dispatch<ast::Nodes>(node.kind(), [&]<class T>(std::type_identity<T>) {
+      const auto n = node.get<T>();
+      if constexpr (std::is_same_v<T, ast::Compound> || std::is_same_v<T, ast::DeclStmt> ||
+                    std::is_same_v<T, ast::If> || std::is_same_v<T, ast::Return> ||
+                    std::is_same_v<T, ast::ExprStmt> || std::is_same_v<T, ast::Paren>) return true;
+      else if constexpr (std::is_same_v<T, ast::LocalRef> || std::is_same_v<T, ast::DeclRef>)
+        return observation_storage(node);
+      else if constexpr (std::is_same_v<T, ast::LocalVar>)
+        return observation_scalar(world_.ins.seqs.at(body_.locals, n.local).type) &&
+               n.init.id != ast::NodeId::none && n.destructor == EntityId::none;
+      else if constexpr (std::is_same_v<T, ast::Assign>)
+        return n.op == ast::AssignOp::assign && observation_storage(unparenthesized(at(node, n.lhs)));
+      else if constexpr (std::is_same_v<T, ast::Unary>) {
+        using enum ast::UnaryOp;
+        return observation_scalar(n.info.type) && (n.op == plus || n.op == minus || n.op == not_ || n.op == compl_);
+      } else if constexpr (std::is_same_v<T, ast::ImplicitConversion>) {
+        using enum ast::ConversionKind;
+        return n.conversion == to_void || (observation_scalar(n.info.type) &&
+               (n.conversion == lvalue_to_rvalue || n.conversion == integral || n.conversion == floating ||
+                n.conversion == floating_integral || n.conversion == boolean));
+      } else if constexpr (std::is_same_v<T, ast::Literal> || std::is_same_v<T, ast::Binary> ||
+                           std::is_same_v<T, ast::Conditional> || std::is_same_v<T, ast::ValueInit>)
+        return observation_scalar(n.info.type);
+      else return false;
+    });
+    if (!supported) return unsupported_use();
+    std::optional<OwnershipFinding> problem;
+    node.for_each_child([&](const ast::Red& child) { if (!problem) problem = verify_observation(child); });
+    return problem;
+  }
+
+  std::optional<ast::u32> named_local(ast::Red node, bool allow_xvalue = true) const {
+    for (node = unparenthesized(node); node.is<ast::ImplicitConversion>(); node = unparenthesized(node)) {
+      const auto cast = node.get<ast::ImplicitConversion>();
+      if (ownership(cast.info.type) == Ownership::ordinary || cast.conversion != ast::ConversionKind::qualification ||
+          (!allow_xvalue && cast.info.category != ast::ValueCategory::lvalue))
+        return std::nullopt;
+      node = at(node, cast.operand);
+    }
+    if (node.is<ast::LocalRef>()) {
+      const auto local = node.get<ast::LocalRef>().local;
+      if (flow_.locals[local].ownership != Ownership::ordinary || flow_.locals[local].shared_reference) return local;
+    }
+    if (const auto* slot = projection_slot(node); slot && slot->owner && !flow_.locals[*slot->owner].variant)
+      return slot->owner;
+    return std::nullopt;
+  }
+
+  std::optional<VariantUse> variant_member(const ast::Red& node) const {
+    if (!node.is<ast::MemberCall>()) return std::nullopt;
+    const auto call = node.get<ast::MemberCall>();
+    auto address = unparenthesized(at(node, call.object));
+    if (address.is<ast::ImplicitConversion>()) {
+      const auto qualification = address.get<ast::ImplicitConversion>();
+      if (qualification.conversion == ast::ConversionKind::qualification)
+        address = unparenthesized(at(address, qualification.operand));
+    }
+    if (!address.is<ast::Unary>() || address.get<ast::Unary>().op != ast::UnaryOp::address_of)
+      return std::nullopt;
+    const auto object = unparenthesized(at(address, address.get<ast::Unary>().operand));
+    std::optional<ast::u32> slot;
+    if (object.is<ast::LocalRef>()) slot = object.get<ast::LocalRef>().local;
+    else if (const auto* projection = projection_slot(object)) slot = projection->owner;
+    if (!slot || !flow_.locals[*slot].variant || node.ast().children(call.args).size() != 0)
+      return std::nullopt;
+    const auto& variant = *flow_.locals[*slot].variant;
+    const auto* member = world_.entities.find(call.function);
+    if (!member || member->scope != world_.types.class_of(variant.type)) return std::nullopt;
+    const auto method = world_.types.rec(member->type);
+    if (method.kind != sema::TypeKind::function || !method.fn_noexcept || method.variadic ||
+        !method.params.empty()) return std::nullopt;
+    const auto name = world_.ins.names.spelling(member->name);
+    const auto side = name == "holds_first" || name == "first" || name == "take_first" ?
+                      VariantSide::first : VariantSide::second;
+    const auto type = side == VariantSide::first ? variant.first : variant.second;
+    if ((name == "holds_first" || name == "holds_second") && world_.types.is(method.inner, ast::Builtin::bool_))
+      return VariantUse{*slot, side, VariantOperation::test};
+    if ((name == "take_first" || name == "take_second") && world_.types.canonical(method.inner) == type)
+      return VariantUse{*slot, side, VariantOperation::take};
+    const auto result = world_.types.rec(method.inner);
+    if ((name == "first" || name == "second") && result.kind == sema::TypeKind::reference && !result.rvalue_ref) {
+      const auto target = world_.types.canonical(result.inner);
+      if (ast::cv_of(target) == ast::Cv::const_ && ast::without_cv(target) == type)
+        return VariantUse{*slot, side, VariantOperation::access};
+    }
+    return std::nullopt;
+  }
+
+  std::optional<VariantUse> variant_test(ast::Red node) const {
+    while (node.is<ast::ImplicitConversion>()) {
+      const auto cast = node.get<ast::ImplicitConversion>();
+      using enum ast::ConversionKind;
+      if (cast.conversion != integral && cast.conversion != floating_integral &&
+          cast.conversion != boolean && cast.conversion != to_void)
+        return std::nullopt;
+      node = unparenthesized(at(node, cast.operand));
+    }
+    if (const auto use = variant_member(node); use && use->operation == VariantOperation::test) return use;
+    return std::nullopt;
+  }
+
+  Effect direct_effect(const ast::Red& node, const ast::Call& call) const {
+    if (call.callee.id == ast::NodeId::none) return Effect::unknown;
+    const ast::Red callee = unparenthesized(at(node, call.callee));
+    if (!callee.is<ast::DeclRef>() || callee.get<ast::DeclRef>().entity != call.function) return Effect::unknown;
+    return effect(call.function);
+  }
+
+  std::optional<ast::u32> operation_argument(const ast::Red& node, const ast::Call& call) const {
+    const auto args = node.ast().children(call.args);
+    if (args.size() == 1) return named_local(at(node, args.front()));
+    return std::nullopt;
+  }
+
+  Point add(Flow::Step step) {
+    const auto id = static_cast<Point>(flow_.steps.size());
+    flow_.steps.push_back(std::move(step));
+    return id;
+  }
+
+  Point unsupported(ast::u32 offset, std::string message) {
+    return add({.event = Event::unsupported, .offset = offset, .problem = std::move(message)});
+  }
+
+  Point bind_reference(ast::u32 local, ast::u32 source, ast::u32 offset, Point next,
+                       VariantSide alternative = VariantSide::none) {
+    flow_.locals[local].borrow = Flow::Borrow{source, offset, alternative};
+    const Point point = add({.event = Event::borrow, .offset = offset, .next = next, .local = local, .source = source});
+    borrow_bindings_.push_back(point);
+    return point;
+  }
+
+  // Reverse lowering records the immediate source. Resolve each chain once, leaving
+  // Step::source unchanged so the binding still uses that particular reference.
+  void resolve_borrow_owners() {
+    if (borrow_bindings_.empty()) return;
+    std::vector<bool> visited(flow_.locals.size());
+    std::vector<ast::u32> chain;
+    for (const auto point : borrow_bindings_) {
+      auto& step = flow_.steps[point];
+      auto local = step.local;
+      while (!visited[local] && flow_.locals[local].borrow) {
+        visited[local] = true;
+        chain.push_back(local);
+        local = flow_.locals[local].borrow->owner;
+      }
+      for (const auto reference : std::views::reverse(chain)) {
+        auto& borrow = flow_.locals[reference].borrow;
+        const auto& source = flow_.locals[borrow->owner];
+        if (!source.shared_reference) continue;
+        // An unrooted source or cycle has no resolved non-reference owner.
+        if (!source.borrow || flow_.locals[source.borrow->owner].shared_reference) {
+          borrow.reset();
+          continue;
+        }
+        borrow->owner = source.borrow->owner;
+        borrow->alternative = source.borrow->alternative;
+      }
+      chain.clear();
+      if (!flow_.locals[step.local].borrow) {
+        step.event = Event::unsupported;
+        step.problem = "a shared reborrow must resolve to a named owner";
+      }
+    }
+  }
+
+  Point leave(const Scope* scope, const Scope* keep, Point next, ast::u32 offset) {
+    if (scope == keep) return next;
+    next = leave(scope->outer, keep, next, offset);
+    for (const Cleanup& c : scope->locals)
+      next = add({.event = Event::leave, .offset = offset, .next = next, .local = c.local,
+                  .throwing_destructor = c.throwing_destructor});
+    return next;
+  }
+
+  void collect_fields(Scope& scope, const FieldSlot& slot) const {
+    if (slot.owner) scope.locals.push_back({*slot.owner, false});
+    for (const auto& field : slot.children) collect_fields(scope, field);
+  }
+
+  // Declarations directly in this scope. A backedge can reach the same local slot again after
+  // its scope exits. Cleanup events for declarations that were skipped see an absent slot.
+  void collect(Scope& scope, const ast::Red& node) const {
+    if (node.is<ast::LocalVar>()) {
+      const auto var = node.get<ast::LocalVar>();
+      const bool throws = throwing_destructor(var.destructor);
+      const auto& local = flow_.locals[var.local];
+      if (local.ownership != Ownership::ordinary || local.variant || local.shared_reference || throws)
+        scope.locals.push_back({var.local, throws});
+      if (const auto it = field_slots_.find(var.local); it != field_slots_.end())
+        collect_fields(scope, it->second);
+    } else if (node.is<ast::DeclStmt>() || node.is<ast::CondDecl>()) {
+      node.for_each_child([&](const ast::Red& child) { collect(scope, child); });
+    }
+  }
+
+  void collect(Scope& scope, const ast::Red& parent, ast::Child child) const {
+    if (child.id != ast::NodeId::none) collect(scope, at(parent, child));
+  }
+
+  Point scoped(const ast::Red& node, ast::Child child, Point next, Context context) {
+    if (child.id == ast::NodeId::none) return next;
+    const ast::Red sub = at(node, child);
+    Scope scope{context.scope};
+    collect(scope, sub);
+    return lower(sub, leave(&scope, context.scope, next, last_token(sub)), {&scope, context.loop});
+  }
+
+  Point lower_child(const ast::Red& node, ast::Child child, Point next, Context context) {
+    return child.id == ast::NodeId::none ? next : lower(at(node, child), next, context);
+  }
+
+  Point sequence(const ast::Red& node, ast::ChildList children, Point next, Context context) {
+    for (ast::Child child : std::views::reverse(node.ast().children(children)))
+      next = lower_child(node, child, next, context);
+    return next;
+  }
+
+  std::optional<bool> literal_condition(const ast::Red& node, ast::Child condition) const {
+    if (condition.id == ast::NodeId::none) return true;  // an omitted `for` condition
+    const ast::Red expr = unparenthesized(at(node, condition));
+    if (!expr.is<ast::Literal>()) return std::nullopt;
+    const auto literal = expr.get<ast::Literal>();
+    if (!world_.types.is(literal.info.type, ast::Builtin::bool_) ||
+        !world_.ins.values.is<ast::VInt>(literal.value)) return std::nullopt;
+    return ast::int_bits(world_.ins, literal.value).lo != 0;
+  }
+
+  Point condition(const ast::Red& node, ast::Child expression, Point on_true, Point on_false, Context context) {
+    if (const auto known = literal_condition(node, expression)) return *known ? on_true : on_false;
+    const auto expr = unparenthesized(at(node, expression));
+    if (expr.is<ast::OrderedBinary>()) {
+      const auto binary = expr.get<ast::OrderedBinary>();
+      using enum ast::OrderedOp;
+      if (binary.op == comma || binary.op == logical_and || binary.op == logical_or) {
+        const Point right = condition(expr, binary.rhs, on_true, on_false, context);
+        if (binary.op == comma) return lower_child(expr, binary.lhs, right, context);
+        return binary.op == logical_and ? condition(expr, binary.lhs, right, on_false, context)
+                                         : condition(expr, binary.lhs, on_true, right, context);
+      }
+    }
+    if (expr.is<ast::Unary>() && expr.get<ast::Unary>().op == ast::UnaryOp::not_)
+      return condition(expr, expr.get<ast::Unary>().operand, on_false, on_true, context);
+    if (expr.is<ast::Conditional>()) {
+      const auto ternary = expr.get<ast::Conditional>();
+      const Point then_ = condition(expr, ternary.then_, on_true, on_false, context);
+      const Point else_ = condition(expr, ternary.else_, on_true, on_false, context);
+      return condition(expr, ternary.condition, then_, else_, context);
+    }
+    if (const auto use = variant_test(expr))
+      return add({.event = Event::branch, .offset = expr.offset(), .next = on_true, .other = on_false,
+                  .local = use->slot, .alternative = use->side});
+    const Point next = on_true == on_false ? on_true : add({Event::branch, expr.offset(), on_true, on_false});
+    return lower(expr, next, context);
+  }
+
+  Point lower_if(const ast::Red& node, Point next, Context context) {
+    const auto stmt = node.get<ast::If>();
+    Scope scope{context.scope};
+    collect(scope, node, stmt.init);
+    collect(scope, node, stmt.condition);
+    const Context inside{&scope, context.loop};
+    const Point end = leave(&scope, context.scope, next, last_token(node));
+    const Point then_ = scoped(node, stmt.then_, end, inside);
+    const Point else_ = scoped(node, stmt.else_, end, inside);
+    return lower_child(node, stmt.init, condition(node, stmt.condition, then_, else_, inside), inside);
+  }
+
+  // `for`'s initializer survives the loop. A condition declaration belongs to one iteration
+  // and stays alive through the increment. `while` has the same shape with neither extra part.
+  Point lower_loop(const ast::Red& node, ast::For stmt, Point next, Context context) {
+    Scope init{context.scope};
+    collect(init, node, stmt.init);
+    Scope iteration{&init};
+    collect(iteration, node, stmt.condition);
+    const auto end = last_token(node);
+    const Point head = add({Event::branch, node.offset()});
+    const Point done = leave(&iteration, context.scope, next, end);
+    const Point repeat = leave(&iteration, &init, head, end);
+    const Point increment = lower_child(node, stmt.increment, repeat, {&iteration, context.loop});
+    const Loop loop{context.scope, next, &iteration, increment};
+    const Point body = scoped(node, stmt.body, increment, {&iteration, &loop});
+    const Point entry = condition(node, stmt.condition, body, done, {&iteration, &loop});
+    flow_.steps[head].next = entry;
+    return lower_child(node, stmt.init, head, {&init, context.loop});
+  }
+
+  Point lower_do(const ast::Red& node, Point next, Context context) {
+    const auto stmt = node.get<ast::Do>();
+    const Point head = add({Event::branch, node.offset()});
+    const Point check = condition(node, stmt.condition, head, next, context);
+    const Loop loop{context.scope, next, context.scope, check};
+    const Point body = scoped(node, stmt.body, check, {context.scope, &loop});
+    flow_.steps[head].next = body;
+    return head;
+  }
+
+  std::optional<ast::u32> move_construction_source(const ast::Red& node) const {
+    const auto call = node.get<ast::CtorCall>();
+    const auto type = world_.types.canonical(call.info.type);
+    const auto* constructor = world_.entities.find(call.ctor);
+    if (!constructor || constructor->kind != sema::EntityKind::constructor ||
+        constructor->templ != EntityId::none || constructor->head != ast::Fp128{} ||
+        constructor->scope != world_.types.class_of(type))
+      return std::nullopt;
+    const auto signature = world_.types.rec(constructor->type);
+    const auto arguments = node.ast().children(call.args);
+    if (!signature.fn_noexcept || signature.variadic || signature.params.size() != 1 || arguments.size() != 1)
+      return std::nullopt;
+    const auto parameter = world_.types.rec(signature.params.front());
+    if (parameter.kind != sema::TypeKind::reference || !parameter.rvalue_ref ||
+        world_.types.canonical(parameter.inner) != type)
+      return std::nullopt;
+    const auto source = named_local(at(node, arguments.front()));
+    if (!source || flow_.locals[*source].shared_reference) return std::nullopt;
+    return source;
+  }
+
+  ast::Red materialized_prvalue(ast::Red node) const {
+    node = unparenthesized(node);
+    if (!node.is<ast::Materialize>()) return node;
+    const auto temporary = node.get<ast::Materialize>();
+    if (throwing_destructor(temporary.destructor)) return node;
+    return unparenthesized(at(node, temporary.operand));
+  }
+
+  Point initialize_variant(ast::u32 slot, const ast::Red& initializer, Point next, Context context) {
+    constexpr std::string_view problem = "an owner variant must be constructed with a selection tag and a registered owner";
+    if (!initializer.is<ast::CtorCall>()) return unsupported(initializer.offset(), std::string(problem));
+    const auto call = initializer.get<ast::CtorCall>();
+    const auto& variant = *flow_.locals[slot].variant;
+    const auto* constructor = world_.entities.find(call.ctor);
+    if (!constructor || constructor->scope != world_.types.class_of(variant.type))
+      return unsupported(initializer.offset(), std::string(problem));
+    const auto method = world_.types.rec(constructor->type);
+    const auto args = initializer.ast().children(call.args);
+    if (method.kind != sema::TypeKind::function || !method.fn_noexcept || method.variadic ||
+        method.params.size() != 2 || args.size() != 2)
+      return unsupported(initializer.offset(), std::string(problem));
+    const auto side = variant_tag(world_, method.params[0]);
+    const auto selected = side == VariantSide::first ? variant.first : variant.second;
+    const auto parameter = world_.types.rec(method.params[1]);
+    if (side == VariantSide::none || parameter.kind != sema::TypeKind::reference || !parameter.rvalue_ref ||
+        world_.types.canonical(parameter.inner) != selected)
+      return unsupported(initializer.offset(), std::string(problem));
+    const auto tag = materialized_prvalue(at(initializer, args[0]));
+    if (!tag.is<ast::ValueInit>() &&
+        (!tag.is<ast::InitList>() || !tag.ast().children(tag.get<ast::InitList>().elems).empty()))
+      return unsupported(tag.offset(), "an owner variant selection tag must be an empty initializer");
+    return initialize_owner(slot, materialized_prvalue(at(initializer, args[1])), next, context, side);
+  }
+
+  Point initialize_owner(ast::u32 slot, ast::Red initializer, Point next, Context context,
+                         VariantSide alternative = VariantSide::none) {
+    initializer = unparenthesized(initializer);
+    if (initializer.is<ast::Conditional>()) {
+      const auto expression = initializer.get<ast::Conditional>();
+      const auto then_ = initialize_owner(slot, at(initializer, expression.then_), next, context, alternative);
+      const auto else_ = initialize_owner(slot, at(initializer, expression.else_), next, context, alternative);
+      return condition(initializer, expression.condition, then_, else_, context);
+    }
+    if (initializer.is<ast::OrderedBinary>()) {
+      const auto expression = initializer.get<ast::OrderedBinary>();
+      if (expression.op == ast::OrderedOp::comma) {
+        const auto value = initialize_owner(slot, at(initializer, expression.rhs), next, context, alternative);
+        return lower_child(initializer, expression.lhs, value, context);
+      }
+    }
+    if (alternative == VariantSide::none && flow_.locals[slot].variant)
+      return initialize_variant(slot, initializer, next, context);
+    const auto transfer = [&](ast::u32 source, VariantSide source_alternative = VariantSide::none) {
+      return add({.event = Event::transfer, .offset = initializer.offset(), .next = next, .local = slot,
+                  .source = source, .alternative = alternative, .source_alternative = source_alternative});
+    };
+    if (initializer.is<ast::CtorCall>()) {
+      if (const auto source = move_construction_source(initializer)) {
+        const auto type = world_.types.canonical(initializer.get<ast::CtorCall>().info.type);
+        if (!policy_.transfers_on_move(type))
+          return unsupported(initializer.offset(), "direct owner move construction requires a move-transfer contract");
+        return transfer(*source);
+      }
+    }
+    if (const auto use = variant_member(initializer); use && use->operation == VariantOperation::take)
+      return transfer(use->slot, use->side);
+    if (initializer.is<ast::Call>()) {
+      const auto call = initializer.get<ast::Call>();
+      const auto operation = direct_effect(initializer, call);
+      if (operation == Effect::issue)
+        return add({.event = Event::initialize, .offset = initializer.offset(), .next = next, .local = slot,
+                    .alternative = alternative});
+      if (operation == Effect::transfer)
+        if (const auto source = operation_argument(initializer, call); source && !flow_.locals[*source].shared_reference)
+          return transfer(*source);
+    }
+    if (alternative != VariantSide::none)
+      if (const auto source = named_local(initializer); source && !flow_.locals[*source].shared_reference)
+        return transfer(*source);
+    return unsupported(initializer.offset(), "an owner must be initialized by a registered factory or transfer from a named owner");
+  }
+
+  Point initialize_fields(const ast::Red& parent, ast::Child child, const FieldSlot& slot, Point next, Context context) {
+    if (slot.owner) {
+      if (child.id == ast::NodeId::none)
+        return unsupported(parent.offset(), "an owner must be initialized by a registered factory or transfer from a named owner");
+      return initialize_owner(*slot.owner, at(parent, child), next, context);
+    }
+    if (slot.children.empty()) return lower_child(parent, child, next, context);
+    if (child.id == ast::NodeId::none || !parent.ast().is<ast::InitList>(child.id))
+      return unsupported(parent.offset(), "a record with owners requires aggregate initialization");
+    const auto init = at(parent, child);
+    const auto elements = init.ast().children(init.get<ast::InitList>().elems);
+    if (elements.size() != slot.children.size())
+      return unsupported(init.offset(), "cannot match aggregate initializers to owned fields");
+    for (std::size_t i = elements.size(); i-- > 0;)
+      next = initialize_fields(init, elements[i], slot.children[i], next, context);
+    return next;
+  }
+
+  Point lower_local(const ast::Red& node, Point next, Context context) {
+    const auto var = node.get<ast::LocalVar>();
+    const auto& local = flow_.locals[var.local];
+    if (local.shared_reference) {
+      if (var.init.id != ast::NodeId::none) {
+        const auto init = unparenthesized(at(node, var.init));
+        if (const auto use = variant_member(init); use && use->operation == VariantOperation::access)
+          return bind_reference(var.local, use->slot, node.offset(), next, use->side);
+        if (const auto source = named_local(init, false); source &&
+            (flow_.locals[*source].ownership != Ownership::ordinary ||
+             (flow_.locals[*source].shared_reference && !flow_.locals[*source].parameter)))
+          return bind_reference(var.local, *source, node.offset(), next);
+      }
+      return unsupported(node.offset(), "a shared borrow must bind directly to a named owner or local shared reference");
+    }
+    if (const auto it = field_slots_.find(var.local); it != field_slots_.end())
+      return initialize_fields(node, var.init, it->second, next, context);
+    if (local.ownership != Ownership::ordinary || local.variant) {
+      if (var.init.id != ast::NodeId::none) return initialize_owner(var.local, at(node, var.init), next, context);
+      return unsupported(node.offset(), "an owner must be initialized by a registered factory or transfer from a named owner");
+    }
+    const auto type = world_.ins.seqs.at(body_.locals, var.local).type;
+    if (owner_array(type))
+      return unsupported(node.offset(), "an owner array requires aggregate initialization and nonthrowing destruction");
+    if (const auto* record = ownership_record(type); record && record->supported)
+      return unsupported(node.offset(), "a record with owners requires aggregate initialization");
+    if (mentions_owner(type))
+      return unsupported(node.offset(), "resource aliases are outside the checked protocol");
+    if (throwing_destructor(var.destructor)) next = add({Event::initialize, node.offset(), next, Flow::exit, var.local});
+    return lower_child(node, var.init, next, context);
+  }
+
+  Point lower(const ast::Red& node, Point next, Context context) {
+    if (node.is<ast::Compound>()) {
+      const auto stmts = node.get<ast::Compound>().stmts;
+      Scope scope{context.scope};
+      for (ast::Child stmt : node.ast().children(stmts)) collect(scope, node, stmt);
+      const Point end = leave(&scope, context.scope, next, last_token(node));
+      return sequence(node, stmts, end, {&scope, context.loop});
+    }
+    if (node.is<ast::DeclStmt>()) return sequence(node, node.get<ast::DeclStmt>().decls, next, context);
+    if (node.is<ast::LocalVar>()) return lower_local(node, next, context);
+    if (node.is<ast::ExprStmt>()) return lower_child(node, node.get<ast::ExprStmt>().expr, next, context);
+    if (node.is<ast::If>()) return lower_if(node, next, context);
+    if (node.is<ast::While>()) {
+      const auto stmt = node.get<ast::While>();
+      return lower_loop(node, {{}, stmt.condition, {}, stmt.body}, next, context);
+    }
+    if (node.is<ast::For>()) return lower_loop(node, node.get<ast::For>(), next, context);
+    if (node.is<ast::Do>()) return lower_do(node, next, context);
+    if (node.is<ast::Break>())
+      return leave(context.scope, context.loop->break_scope, context.loop->on_break, node.offset());
+    if (node.is<ast::Continue>())
+      return leave(context.scope, context.loop->continue_scope, context.loop->on_continue, node.offset());
+    if (node.is<ast::Return>()) {
+      const Point end = leave(context.scope, nullptr, Flow::exit, node.offset());
+      return lower_child(node, node.get<ast::Return>().value, end, context);
+    }
+    if (node.is<ast::Throw>()) {
+      const Point end = add({Event::may_unwind, node.offset()});
+      return lower_child(node, node.get<ast::Throw>().operand, end, context);
+    }
+    if (node.is<ast::CondDecl>()) {
+      const auto expr = node.get<ast::CondDecl>();
+      return lower_child(node, expr.var, lower_child(node, expr.value, next, context), context);
+    }
+    if (node.is<ast::Conditional>()) {
+      const auto expr = node.get<ast::Conditional>();
+      const Point then_ = lower_child(node, expr.then_, next, context);
+      const Point else_ = lower_child(node, expr.else_, next, context);
+      return condition(node, expr.condition, then_, else_, context);
+    }
+    if (node.is<ast::OrderedBinary>()) {
+      const auto expr = node.get<ast::OrderedBinary>();
+      using enum ast::OrderedOp;
+      if (expr.op == comma) return lower_child(node, expr.lhs, lower_child(node, expr.rhs, next, context), context);
+      if (expr.op == logical_and || expr.op == logical_or) {
+        const Point rhs = lower_child(node, expr.rhs, next, context);
+        return expr.op == logical_and ? condition(node, expr.lhs, rhs, next, context)
+                                       : condition(node, expr.lhs, next, rhs, context);
+      }
+    }
+    if (node.is<ast::Call>()) {
+      const auto call = node.get<ast::Call>();
+      const auto operation = direct_effect(node, call);
+      if (is_observation(operation) || operation == Effect::consume) {
+        EntityId observer = EntityId::none;
+        if (operation == Effect::verified_observe) {
+          const auto key = policy_operation(world_, call.function, body_.tu.n);
+          if (!observer_is_available(key))
+            return unsupported(node.offset(), "verified observation requires a unique supported definition in the checked sources");
+          if (!key.second) observer = call.function;
+        }
+        if (const auto local = operation_argument(node, call)) {
+          if (operation == Effect::consume && flow_.locals[*local].shared_reference)
+            return unsupported(node.offset(), "a shared borrow cannot be consumed");
+          return add({.event = operation == Effect::consume ? Event::consume : Event::observe,
+                      .offset = node.offset(), .next = next, .local = *local, .observer = observer});
+        }
+        const auto arguments = node.ast().children(call.args);
+        if (arguments.size() == 1) {
+          const auto argument = materialized_prvalue(at(node, arguments.front()));
+          const bool consumes = operation == Effect::consume;
+          const auto expected = consumes ? VariantOperation::take : VariantOperation::access;
+          if (const auto use = variant_member(argument); use && use->operation == expected)
+            return add({.event = consumes ? Event::consume : Event::observe, .offset = node.offset(),
+                        .next = next, .local = use->slot, .observer = observer, .alternative = use->side});
+        }
+        return unsupported(node.offset(), "an ownership protocol operation requires a named owner");
+      }
+    }
+    if (const auto local = named_local(node); local && !flow_.locals[*local].shared_reference)
+      return add({Event::observe, node.offset(), next, Flow::exit, *local});
+    if (const auto use = variant_test(node))
+      return add({.event = Event::variant_test, .offset = node.offset(), .next = next, .local = use->slot});
+    if (node.is<ast::Paren>()) return lower_child(node, node.get<ast::Paren>().operand, next, context);
+    if (node.is<ast::Goto>() || node.is<ast::Label>() || node.is<ast::Switch>() || node.is<ast::TryBlock>() ||
+        node.is<ast::IfConsteval>()) return unsupported(node.offset(), "this control flow is outside the ownership prototype");
+    if (const auto offset = owner_use(node)) return unsupported(*offset, "this resource use is outside the checked protocol");
+    if (has_linear_)
+      if (const auto throwing = throwing_site(node)) return add({Event::may_unwind, *throwing, next});
+    return next;
+  }
+
+  bool nonthrowing_type(QualType type) const {
+    auto fn = world_.types.rec(type);
+    if (fn.kind == sema::TypeKind::pointer || fn.kind == sema::TypeKind::reference) fn = world_.types.rec(fn.inner);
+    return fn.kind == sema::TypeKind::function && fn.fn_noexcept;
+  }
+
+  bool nonthrowing(EntityId function) const {
+    const auto* entity = world_.entities.find(function);
+    return (entity && nonthrowing_type(entity->type)) || std::ranges::binary_search(nonthrowing_destructors_, function);
+  }
+
+  bool throwing_destructor(EntityId function) const {
+    return has_linear_ && function != EntityId::none && !nonthrowing(function);
+  }
+
+  std::optional<ast::u32> throwing_site(const ast::Red& node) const {
+    const bool here = ast::dispatch<ast::Nodes>(node.kind(), [&]<class T>(std::type_identity<T>) {
+      const auto expr = node.get<T>();
+      if constexpr (std::is_same_v<T, ast::Call> || std::is_same_v<T, ast::MemberCall> || std::is_same_v<T, ast::AssignmentCall>)
+        return !nonthrowing(expr.function);
+      else if constexpr (std::is_same_v<T, ast::VirtualMemberCall>) return !nonthrowing_type(expr.callee);
+      else if constexpr (std::is_same_v<T, ast::CtorCall>) return !nonthrowing(expr.ctor);
+      else if constexpr (std::is_same_v<T, ast::ImplicitConversion>)
+        return expr.conversion == ast::ConversionKind::user_defined && !nonthrowing(expr.function);
+      else if constexpr (std::is_same_v<T, ast::Materialize>) return throwing_destructor(expr.destructor);
+      else return std::is_same_v<T, ast::Throw> || std::is_same_v<T, ast::NewObject> || std::is_same_v<T, ast::NewArray> ||
+                  std::is_same_v<T, ast::DeleteObject> || std::is_same_v<T, ast::DeleteArray>;
+    });
+    if (here) return node.offset();
+    std::optional<ast::u32> offset;
+    node.for_each_child([&](const ast::Red& child) { if (!offset) offset = throwing_site(child); });
+    return offset;
+  }
+
+  const sema::World& world_;
+  const OwnershipPolicy& policy_;
+  std::span<const OwnershipRecord> records_;
+  std::span<const EntityId> nonthrowing_destructors_;
+  OwnershipBody body_;
+  Flow flow_;
+  std::vector<Point> borrow_bindings_;
+  std::map<ast::u32, FieldSlot> field_slots_;
+  CapabilityGuard capability_guard_ = CapabilityGuard::none;
+  bool has_owner_ = false;
+  bool has_linear_ = false;
+};
+
+class OwnershipAnalysis {
+ public:
+  OwnershipAnalysis(const ast::Interners& in, const Flow& flow)
+      : in_(in), flow_(flow), borrow_conflicts_(find_borrow_conflicts()) {}
+
+  OwnershipBodyCheck run() const {
+    if (flow_.entry == Flow::exit) return {std::nullopt, flow_.forwarded_observers};
+    std::vector<std::optional<State>> paths(flow_.steps.size());
+    std::deque<Point> work;
+    State entry;
+    for (const auto& local : flow_.locals)
+      entry.push_back({local.parameter && local.ownership != Ownership::ordinary ? live : absent});
+    paths[flow_.entry] = std::move(entry);
+    work.push_back(flow_.entry);
+    auto propagate = [&](Point point, const State& state) {
+      if (point == Flow::exit) return;
+      auto& incoming = paths[point];
+      if (!incoming) {
+        incoming = state;
+      } else {
+        bool changed = false;
+        for (std::size_t i = 0; i < state.size(); ++i) {
+          auto& slot = (*incoming)[i];
+          const auto merged = static_cast<Bits>(slot.possible | state[i].possible);
+          changed = changed || slot.possible != merged;
+          slot.possible = merged;
+          if (!slot.spent_at && state[i].spent_at) {
+            slot.spent_at = state[i].spent_at;
+            slot.transferred = state[i].transferred;
+          }
+        }
+        if (!changed) return;
+      }
+      work.push_back(point);
+    };
+    std::set<EntityId> observers;
+    while (!work.empty()) {
+      const auto point = work.front();
+      work.pop_front();
+      const auto& step = flow_.steps[point];
+      State state = *paths[point];
+      if (auto problem = apply(point, state)) return {std::move(problem), {}};
+      if (step.observer != EntityId::none) observers.insert(step.observer);
+      if (step.event == Event::branch && step.alternative != VariantSide::none) {
+        auto& selected = state[step.local];
+        const auto previous = selected.possible;
+        const auto active = live_state(step.alternative);
+        selected.possible &= active;
+        if (selected.possible != 0) propagate(step.next, state);
+        selected.possible = static_cast<Bits>(previous & ~active);
+        if (selected.possible != 0) propagate(step.other, state);
+      } else {
+        propagate(step.next, state);
+        if (step.event == Event::branch) propagate(step.other, state);
+      }
+    }
+    return {std::nullopt, {observers.begin(), observers.end()}};
+  }
+
+ private:
+  using Bits = std::uint8_t;
+  static constexpr Bits absent = 1, live = 2, spent = 4, first = 8, second = 16;
+  struct Slot {
+    Bits possible;
+    std::optional<ast::u32> spent_at{};
+    bool transferred = false;
+  };
+  using State = std::vector<Slot>;
+
+  std::vector<std::vector<ast::u32>> find_borrow_conflicts() const {
+    std::map<ast::u32, std::vector<Point>> uses;
+    for (Point point = 0; point < flow_.steps.size(); ++point) {
+      const auto& step = flow_.steps[point];
+      if (step.event == Event::observe && flow_.locals[step.local].borrow)
+        uses[step.local].push_back(point);
+      if (step.event == Event::borrow && flow_.locals[step.source].borrow)
+        uses[step.source].push_back(point);
+    }
+    if (uses.empty()) return {};
+
+    std::vector<std::vector<Point>> predecessors(flow_.steps.size());
+    for (Point point = 0; point < flow_.steps.size(); ++point) {
+      const auto& step = flow_.steps[point];
+      if (step.next != Flow::exit) predecessors[step.next].push_back(point);
+      if (step.event == Event::branch && step.other != Flow::exit)
+        predecessors[step.other].push_back(point);
+    }
+
+    // A use keeps this binding live backward through branches and loop backedges. Stop
+    // at cleanup and rebinding so a future iteration does not extend the old loan.
+    // Store the resulting facts only at operations that can invalidate the owner.
+    std::vector<Point> visited(flow_.steps.size(), Flow::exit);
+    std::vector<std::vector<ast::u32>> conflicts(flow_.steps.size());
+    for (auto& [local, work] : uses) {
+      const auto owner = flow_.locals[local].borrow->owner;
+      while (!work.empty()) {
+        const auto point = work.back();
+        work.pop_back();
+        if (visited[point] == local) continue;
+        visited[point] = local;
+        const auto& step = flow_.steps[point];
+        if (step.local == local && (step.event == Event::borrow || step.event == Event::leave)) continue;
+        if ((step.event == Event::transfer && step.source == owner) ||
+            ((step.event == Event::consume || step.event == Event::leave) && step.local == owner))
+          conflicts[point].push_back(local);
+        work.insert(work.end(), predecessors[point].begin(), predecessors[point].end());
+      }
+    }
+    return conflicts;
+  }
+
+  static Bits live_state(VariantSide side) {
+    switch (side) {
+    case VariantSide::first: return first;
+    case VariantSide::second: return second;
+    case VariantSide::none: return live;
+    }
+    return live;
+  }
+
+  static bool live_linear(const Flow::Local& local, const Slot& slot) {
+    if (const auto& variant = local.variant)
+      return (variant->first_ownership == Ownership::linear && (slot.possible & first)) ||
+             (variant->second_ownership == Ownership::linear && (slot.possible & second));
+    return local.ownership == Ownership::linear && (slot.possible & live);
+  }
+
+  std::string description(ast::u32 local) const {
+    const auto& owner = flow_.locals[local];
+    const auto name = in_.names.spelling(owner.name);
+    const auto kind = owner.variant ? "owner variant" : owner.shared_reference ? "shared borrow" :
+                      owner.ownership == Ownership::linear ? "linear resource" : "affine resource";
+    if (!owner.field.empty())
+      return std::format("{} '{}{}{}'", kind, name, owner.field.starts_with('[') ? "" : ".", owner.field);
+    return std::format("{} '{}'", kind, name.empty() ? "<unnamed>" : name);
+  }
+
+  std::optional<OwnershipFinding> require_live(const Flow::Step& step, ast::u32 local, const Slot& slot,
+                                               VariantSide side = VariantSide::none) const {
+    if (slot.possible == live_state(side)) return std::nullopt;
+    if (side != VariantSide::none)
+      return OwnershipFinding{step.offset, std::format("{} may not hold its {} alternative",
+                              description(local), side == VariantSide::first ? "first" : "second")};
+    if (slot.spent_at) {
+      const auto end = slot.transferred ? " may already have transferred its obligation" : " may already have been consumed";
+      return OwnershipFinding{step.offset, description(local) + end, slot.spent_at,
+                              slot.transferred ? Event::transfer : Event::consume};
+    }
+    return OwnershipFinding{step.offset, description(local) + " may be unavailable"};
+  }
+
+  std::optional<OwnershipFinding> may_unwind(ast::u32 offset, const State& state) const {
+    for (ast::u32 i = 0; i < state.size(); ++i)
+      if (live_linear(flow_.locals[i], state[i]))
+        return OwnershipFinding{offset, "operation may unwind while " + description(i) + " is live"};
+    return std::nullopt;
+  }
+
+  std::optional<OwnershipFinding> require_unborrowed(Point point, ast::u32 owner, const State& state) const {
+    if (borrow_conflicts_.empty()) return std::nullopt;
+    for (const auto local : borrow_conflicts_[point])
+      if (state[local].possible & live)
+        return OwnershipFinding{flow_.steps[point].offset, description(owner) + " may still have a live " + description(local),
+                                flow_.locals[local].borrow->offset, Event::borrow};
+    return std::nullopt;
+  }
+
+  std::optional<OwnershipFinding> apply(Point point, State& state) const {
+    const auto& step = flow_.steps[point];
+    if (step.event == Event::unsupported) return OwnershipFinding{step.offset, step.problem};
+    if (step.event == Event::variant_test || (step.event == Event::branch && step.alternative != VariantSide::none)) {
+      if (state[step.local].possible & absent)
+        return OwnershipFinding{step.offset, description(step.local) + " may be unavailable"};
+      return std::nullopt;
+    }
+    if (step.event == Event::branch) return std::nullopt;
+    if (step.event == Event::may_unwind) return may_unwind(step.offset, state);
+    auto& slot = state[step.local];
+    switch (step.event) {
+    case Event::borrow: {
+      const auto& borrow = *flow_.locals[step.local].borrow;
+      if (step.source != borrow.owner)
+        if (auto problem = require_live(step, step.source, state[step.source])) return problem;
+      if (auto problem = require_live(step, borrow.owner, state[borrow.owner], borrow.alternative)) return problem;
+      slot = {live};
+      break;
+    }
+    case Event::observe: return require_live(step, step.local, slot, step.alternative);
+    case Event::consume:
+      if (auto problem = require_live(step, step.local, slot, step.alternative)) return problem;
+      if (auto problem = require_unborrowed(point, step.local, state)) return problem;
+      slot = {spent, step.offset};
+      break;
+    case Event::transfer:
+      if (auto problem = require_live(step, step.source, state[step.source], step.source_alternative)) return problem;
+      if (auto problem = require_unborrowed(point, step.source, state)) return problem;
+      state[step.source] = {spent, step.offset, true};
+      [[fallthrough]];
+    case Event::initialize:
+      if (live_linear(flow_.locals[step.local], slot))
+        return OwnershipFinding{step.offset, "initialization would overwrite live " + description(step.local)};
+      slot = {live_state(step.alternative)};
+      break;
+    case Event::leave:
+      if (auto problem = require_unborrowed(point, step.local, state)) return problem;
+      if (live_linear(flow_.locals[step.local], slot))
+        return OwnershipFinding{step.offset, description(step.local) + " may leave its scope without being consumed or transferred"};
+      if (step.throwing_destructor && (slot.possible & live))
+        if (auto problem = may_unwind(step.offset, state)) return problem;
+      slot = {absent};
+      break;
+    default: break;
+    }
+    return std::nullopt;
+  }
+
+  const ast::Interners& in_;
+  const Flow& flow_;
+  std::vector<std::vector<ast::u32>> borrow_conflicts_;
+};
+
+}  // namespace
+
+struct PolicyDeclarationsFor {
+  using Key = ast::u32;
+  using Value = PolicyDeclarations;
+  static engine::query_task<Value> run(engine::Ctx& cx, Key unit) {
+    const TuId tu{unit};
+    const auto& analysis = co_await cx.fetch<TuSema>(tu);
+    if (analysis.policy_aliases.empty() && analysis.policy_annotations.empty()) co_return Value{};
+    const auto& source = cx.fetch<pp::SourceOf>(pp::FileId{unit});
+    co_return read_policy_declarations(*universe().world_for(*source.config.target), unit, analysis.policy_aliases,
+                                     analysis.policy_annotations);
+  }
+};
+
+struct PolicyRegistryFor {
+  using Key = PolicySources;
+  using Value = PolicyRegistry;
+  static engine::query_task<Value> run(engine::Ctx& cx, Key sources) {
+    const auto units = universe().in->seqs.elements(sources);
+    if (units.empty()) co_return Value{};
+    const auto fragments = co_await cx.par_map<PolicyDeclarationsFor>(units);
+    const auto& source = cx.fetch<pp::SourceOf>(pp::FileId{units.front()});
+    const auto& world = *universe().world_for(*source.config.target);
+    auto registry = compose_policy_registry(world, fragments);
+    const bool verified_observations = std::ranges::any_of(registry.ownership.operations, [](const auto& operation) {
+      return operation.second == Effect::verified_observe;
+    });
+    if (!registry.problems.empty() || (registry.effects.empty() && !verified_observations)) co_return registry;
+
+    const auto translation_units = co_await cx.par_map<TuUnit>(
+        units | std::views::transform([](ast::u32 unit) { return TuId{unit}; }));
+    std::map<PolicyOperation, bool> observers, checked_effects;
+    std::set<PolicyOperation> labeled_observers, labeled_effects;
+    const auto add_definition = [](auto& definitions, PolicyOperation operation, bool supported) {
+      const auto [it, fresh] = definitions.try_emplace(operation, supported);
+      if (!fresh) it->second = false;
+    };
+    for (std::size_t i = 0; i < translation_units.size(); ++i) {
+      const auto& unit = translation_units[i].get();
+      for (const auto& entity : unit.entities) {
+        if (entity.asm_label.empty()) continue;
+        const auto operation = policy_operation(world, entity.id, units[i]);
+        if (registry.ownership.effect(operation) == Effect::verified_observe) labeled_observers.insert(operation);
+        if (registry.effects.contains(operation)) labeled_effects.insert(operation);
+      }
+      for (const auto& def : unit.functions) {
+        const auto operation = policy_operation(world, def.entity, units[i]);
+        const bool strong = !def.coalesced && !(def.decl.flags & (sema::decl_flag::inline_ | sema::decl_flag::constexpr_));
+        const bool supported = def.body.tree != ast::NodeId::none && def.decl.contracts == ast::NodeId::none &&
+                               (operation.second || strong);
+        if (registry.ownership.effect(operation) == Effect::verified_observe)
+          add_definition(observers, operation, supported);
+        if (const auto effect = registry.effects.find(operation); effect != registry.effects.end() && !effect->second.trusted)
+          add_definition(checked_effects, operation, supported && !(def.decl.flags & sema::decl_flag::consteval_));
+      }
+    }
+    for (const auto& [operation, supported] : observers)
+      if (supported && !labeled_observers.contains(operation)) registry.ownership.observer_definitions.push_back(operation);
+    registry.ownership.labeled_observers.assign(labeled_observers.begin(), labeled_observers.end());
+    for (const auto& [operation, bound] : registry.effects) {
+      const auto origin = registry.effect_origins.at(operation);
+      if (labeled_effects.contains(operation)) {
+        registry.problems[origin.unit].push_back({origin, "effect bound does not support functions with an assembly label"});
+      } else if (!bound.trusted) {
+        const auto def = checked_effects.find(operation);
+        if (def == checked_effects.end() && !operation.second) {
+          registry.external_effect_declarations.insert(operation);
+        } else if (def == checked_effects.end() || !def->second) {
+          registry.problems[origin.unit].push_back({origin, "verified effect bound requires a unique supported definition in the checked source inputs"});
+        }
+      }
+    }
+    co_return registry;
+  }
+};
+
+// Keep declaration origins and effect bounds out of the ownership body's dependencies.
+// Observer availability is part of the ownership policy and still invalidates its uses.
+struct OwnershipPolicyFor {
+  using Key = PolicySources;
+  using Value = OwnershipPolicy;
+  static engine::query_task<Value> run(engine::Ctx& cx, Key sources) {
+    const auto& registry = co_await cx.fetch<PolicyRegistryFor>(sources);
+    co_return registry.ownership;
+  }
+};
+
+struct OwnershipRecordsFor {
+  struct Key {
+    PolicySources sources;
+    TuId tu;
+    bool operator==(const Key&) const = default;
+  };
+  using Value = OwnershipRecords;
+  static engine::query_task<Value> run(engine::Ctx& cx, Key key) {
+    const auto& policy = co_await cx.fetch<OwnershipPolicyFor>(key.sources);
+    if (policy.resources.empty()) co_return Value{};
+    const auto& shapes = co_await cx.fetch<UnitShapes>(key.tu);
+    const auto& source = cx.fetch<pp::SourceOf>(pp::FileId{key.tu.n});
+    const auto& types = universe().world_for(*source.config.target)->types;
+
+    // Trace containment in reverse from registered owners. Affected types outside the
+    // supported value containment remain visible so the checker can reject their use.
+    std::map<EntityId, std::vector<EntityId>> enclosing;
+    std::map<EntityId, const ClassShape*> by_entity;
+    Value result;
+    for (const auto& shape : shapes.classes) {
+      by_entity.emplace(shape.entity, &shape);
+      if (shape.nonthrowing_destructor != EntityId::none)
+        result.nonthrowing_destructors.push_back(shape.nonthrowing_destructor);
+      for (const auto base : shape.bases) enclosing[base].push_back(shape.entity);
+      std::set<QualType> seen;
+      auto collect = [&](auto&& self, QualType type) -> void {
+        if (!seen.insert(type).second) return;
+        const auto t = types.rec(type);
+        using enum sema::TypeKind;
+        switch (t.kind) {
+          case class_: enclosing[t.entity].push_back(shape.entity); break;
+          case member_pointer: self(self, t.member_owner); [[fallthrough]];
+          case pointer: case reference: case array: self(self, t.inner); break;
+          case function:
+            self(self, t.inner);
+            for (const auto param : t.params) self(self, param);
+            break;
+          default: break;
+        }
+      };
+      for (const auto field : shape.fields) collect(collect, field);
+    }
+    std::set<EntityId> affected;
+    std::vector<EntityId> pending;
+    for (const auto& [type, mode] : policy.resources) {
+      const auto id = types.class_of(type);
+      if (affected.insert(id).second) pending.push_back(id);
+    }
+    for (const auto& variant : policy.variants) {
+      const auto id = types.class_of(variant.type);
+      if (affected.insert(id).second) pending.push_back(id);
+    }
+    while (!pending.empty()) {
+      const auto owner = pending.back();
+      pending.pop_back();
+      const auto parents = enclosing.find(owner);
+      if (parents != enclosing.end())
+        for (const auto parent : parents->second)
+          if (affected.insert(parent).second) pending.push_back(parent);
+    }
+    for (const auto& [type, mode] : policy.resources) affected.erase(types.class_of(type));
+    for (const auto& variant : policy.variants) affected.erase(types.class_of(variant.type));
+
+    std::ranges::sort(result.nonthrowing_destructors);
+    auto& records = result.records;
+    for (const auto id : affected) {
+      const auto it = by_entity.find(id);
+      if (it == by_entity.end()) continue;
+      const auto& shape = *it->second;
+      OwnershipRecord record{id, {}, shape.plain_ownership_record, shape.ownership_destructor};
+      for (std::size_t i = 0; i < shape.fields.size(); ++i)
+        record.fields.push_back({shape.field_names[i], types.canonical(shape.fields[i])});
+      records.push_back(std::move(record));
+    }
+    std::map<EntityId, bool> supported;
+    const auto check = [&](auto&& self, const OwnershipRecord& record) -> bool {
+      if (!record.supported) return false;
+      const auto [cached, inserted] = supported.try_emplace(record.entity, false);
+      if (!inserted) return cached->second;
+      for (const auto& field : record.fields) {
+        auto type = field.type;
+        auto base = types.rec(type);
+        const bool array = base.kind == sema::TypeKind::array;
+        while (base.kind == sema::TypeKind::array) {
+          type = types.canonical(base.inner);
+          base = types.rec(type);
+        }
+        if (policy.ownership(type) != Ownership::ordinary || policy.variant(type)) {
+          if (ast::cv_of(type) != ast::Cv::none) return false;
+          continue;
+        }
+        if (base.kind == sema::TypeKind::class_ && ast::cv_of(type) == ast::Cv::none) {
+          const auto child = std::ranges::lower_bound(records, base.entity, std::ranges::less{}, &OwnershipRecord::entity);
+          if (child != records.end() && child->entity == base.entity && self(self, *child)) continue;
+        }
+        if (array || !(types.is_arithmetic(type) || base.kind == sema::TypeKind::enum_)) return false;
+      }
+      return cached->second = true;
+    };
+    for (auto& record : records) {
+      if (check(check, record)) continue;
+      record.supported = false;
+      record.fields.clear();
+      record.destructor = EntityId::none;
+    }
+    co_return result;
+  }
+};
+
+struct BuildOwnershipFlow {
+  using Key = OwnershipBody;
+  using Value = OwnershipFlow;
+  static engine::query_task<Value> run(engine::Ctx& cx, Key body) {
+    const auto& policy = co_await cx.fetch<OwnershipPolicyFor>(body.sources);
+    const auto& records = co_await cx.fetch<OwnershipRecordsFor>({body.sources, body.tu});
+    const auto& target = body.linux_target ? ast::x86_64_linux : ast::aarch64_darwin;
+    co_return OwnershipFlowBuilder(*universe().world_for(target), policy, records, body).build();
+  }
+};
+
+struct CheckOwnershipBody {
+  using Key = OwnershipBody;
+  using Value = OwnershipBodyCheck;
+  static engine::query_task<Value> run(engine::Ctx& cx, Key body) {
+    const auto& flow = co_await cx.fetch<BuildOwnershipFlow>(body);
+    co_return OwnershipAnalysis(*universe().in, flow).run();
+  }
+};
+
+struct EffectBody {
+  ast::NodeId tree;
+  ast::SeqId<ast::LocalRec> locals;
+  bool linux_target;
+  bool operator==(const EffectBody&) const = default;
+};
+
+struct EffectFinding {
+  ast::u32 offset;
+  std::string message;
+};
+
+struct EffectHandlerBinding {
+  EntityId constructor;
+  EntityId implementation;
+};
+
+static ast::Red effect_child(const ast::Red& node, ast::Child child) {
+  return ast::Red(node.ast(), child.id, node.offset() + child.at);
+}
+
+static ast::Red effect_unparen(ast::Red node) {
+  while (node.is<ast::Paren>()) node = effect_child(node, node.get<ast::Paren>().operand);
+  return node;
+}
+
+static bool effect_counter_ref(ast::Red expression, ast::u32 counter) {
+  expression = effect_unparen(expression);
+  return expression.is<ast::LocalRef>() && expression.get<ast::LocalRef>().local == counter;
+}
+
+static bool effect_counter_read(ast::Red expression, ast::u32 counter) {
+  expression = effect_unparen(expression);
+  if (!expression.is<ast::ImplicitConversion>()) return false;
+  const auto read = expression.get<ast::ImplicitConversion>();
+  return read.conversion == ast::ConversionKind::lvalue_to_rvalue &&
+         effect_counter_ref(effect_child(expression, read.operand), counter);
+}
+
+// A scalar value read cannot mutate the counter or let its address escape.
+static bool effect_counter_exposed(const ast::Red& node, ast::u32 counter) {
+  if (effect_counter_read(node, counter)) return false;
+  if (effect_counter_ref(node, counter)) return true;
+  bool exposed = false;
+  node.for_each_child([&](const ast::Red& child) {
+    if (!exposed) exposed = effect_counter_exposed(child, counter);
+  });
+  return exposed;
+}
+
+static std::optional<ast::ConstId> effect_counter_constant(const sema::World& world, ast::Red expression) {
+  expression = effect_unparen(expression);
+  if (expression.is<ast::ImplicitConversion>()) {
+    // Apply the typed conversion before using its value as an endpoint ([conv.integral]).
+    const auto conversion = expression.get<ast::ImplicitConversion>();
+    const auto type = world.types.builtin_of(conversion.info.type);
+    if (conversion.conversion != ast::ConversionKind::integral || conversion.function != EntityId::none ||
+        !type || !ast::is_integral(*type))
+      return std::nullopt;
+    if (const auto operand = effect_counter_constant(world, effect_child(expression, conversion.operand)))
+      return ast::convert_integral(world.ins, world.target, *operand, conversion.info.type);
+    return std::nullopt;
+  }
+  bool negate = false;
+  if (expression.is<ast::Unary>()) {
+    const auto unary = expression.get<ast::Unary>();
+    if (unary.op != ast::UnaryOp::minus || !world.types.is(unary.info.type, ast::Builtin::int_))
+      return std::nullopt;
+    negate = true;
+    expression = effect_unparen(effect_child(expression, unary.operand));
+  }
+  if (!expression.is<ast::Literal>()) return std::nullopt;
+  const auto literal = expression.get<ast::Literal>();
+  const auto type = world.types.builtin_of(literal.info.type);
+  if (!type || !ast::is_integral(*type) || !world.ins.values.is<ast::VInt>(literal.value))
+    return std::nullopt;
+  if (!negate) return literal.value;
+  if (*type != ast::Builtin::int_) return std::nullopt;
+  const auto value = static_cast<std::int64_t>(ast::int_bits(world.ins, literal.value).lo);
+  if (value < 0) return std::nullopt;
+  return ast::int_value(world.ins, world.target, literal.info.type, -value);
+}
+
+static std::optional<std::int64_t> effect_counter_endpoint(const sema::World& world, ast::Red expression,
+                                                           ast::Builtin type) {
+  const auto constant = effect_counter_constant(world, expression);
+  if (!constant || !world.types.is(world.ins.values.get<ast::VInt>(*constant).type, type)) return std::nullopt;
+  return static_cast<std::int64_t>(ast::int_bits(world.ins, *constant).lo);
+}
+
+// A private counter steps toward a strict bound of its own type without wrapping.
+static std::optional<ast::u64> effect_loop_limit(const sema::World& world, const ast::Red& node) {
+  const auto loop = node.get<ast::For>();
+  if (loop.init.id == ast::NodeId::none || loop.condition.id == ast::NodeId::none ||
+      loop.increment.id == ast::NodeId::none || loop.body.id == ast::NodeId::none)
+    return std::nullopt;
+  const auto init = effect_child(node, loop.init);
+  const auto condition = effect_unparen(effect_child(node, loop.condition));
+  const auto increment = effect_unparen(effect_child(node, loop.increment));
+  if (!init.is<ast::DeclStmt>() || !condition.is<ast::Binary>() || !increment.is<ast::Unary>()) return std::nullopt;
+  const auto declarations = node.ast().children(init.get<ast::DeclStmt>().decls);
+  if (declarations.size() != 1) return std::nullopt;
+  const auto declaration = effect_child(init, declarations.front());
+  if (!declaration.is<ast::LocalVar>()) return std::nullopt;
+  const auto local = declaration.get<ast::LocalVar>();
+  const auto comparison = condition.get<ast::Binary>();
+  const auto step = increment.get<ast::Unary>();
+  const auto type = world.types.builtin_of(step.info.type);
+  const bool ascending = comparison.op == ast::BinaryOp::lt;
+  const auto prefix = ascending ? ast::UnaryOp::pre_inc : ast::UnaryOp::pre_dec;
+  const auto postfix = ascending ? ast::UnaryOp::post_inc : ast::UnaryOp::post_dec;
+  // The signed accumulator must be able to hold both endpoints and their difference.
+  if ((type != ast::Builtin::int_ && type != ast::Builtin::unsigned_int) || ast::width_of(world.target, *type) >= 64 ||
+      local.init.id == ast::NodeId::none || (!ascending && comparison.op != ast::BinaryOp::gt) ||
+      (step.op != prefix && step.op != postfix) ||
+      !effect_counter_read(effect_child(condition, comparison.lhs), local.local) ||
+      !effect_counter_ref(effect_child(increment, step.operand), local.local))
+    return std::nullopt;
+  const auto first = effect_counter_endpoint(world, effect_child(declaration, local.init), *type);
+  const auto bound = effect_counter_endpoint(world, effect_child(condition, comparison.rhs), *type);
+  if (!first || !bound || effect_counter_exposed(effect_child(node, loop.body), local.local)) return std::nullopt;
+  const auto distance = ascending ? *bound - *first : *first - *bound;
+  return distance > 0 ? static_cast<ast::u64>(distance) : ast::u64{0};
+}
+
+static std::optional<EffectHandlerBinding> effect_handler_binding(const sema::World& world,
+                                                                 const sema::EntityRec& handler,
+                                                                 const ast::Red& declaration) {
+  const auto local = declaration.get<ast::LocalVar>();
+  if (local.destructor != EntityId::none || local.init.id == ast::NodeId::none ||
+      handler.args.size() != 2 || handler.args[1].kind != ast::TemplateArgKind::type ||
+      !world.types.is_function(handler.args[1].type))
+    return std::nullopt;
+  const auto init = effect_unparen(effect_child(declaration, local.init));
+  if (!init.is<ast::CtorCall>()) return std::nullopt;
+  const auto constructor = init.get<ast::CtorCall>();
+  const auto args = init.ast().children(constructor.args);
+  if (args.size() != 1) return std::nullopt;
+  const auto argument = effect_unparen(effect_child(init, args.front()));
+  if (!argument.is<ast::DeclRef>()) return std::nullopt;
+  const auto function = argument.get<ast::DeclRef>();
+  const auto* target = world.entities.find(function.entity);
+  if (!target || target->kind != sema::EntityKind::function || function.reference ||
+      world.types.canonical(target->type) != world.types.canonical(handler.args[1].type))
+    return std::nullopt;
+  return EffectHandlerBinding{constructor.ctor, function.entity};
+}
+
+static std::optional<ast::u32> effect_handler_receiver(const ast::Red& node, ast::MemberCall call) {
+  const auto address = effect_unparen(effect_child(node, call.object));
+  if (!address.is<ast::Unary>() || address.get<ast::Unary>().op != ast::UnaryOp::address_of) return std::nullopt;
+  const auto local = effect_unparen(effect_child(address, address.get<ast::Unary>().operand));
+  if (!local.is<ast::LocalRef>()) return std::nullopt;
+  return local.get<ast::LocalRef>().local;
+}
+
+struct EffectCalls {
+  std::vector<std::pair<EntityId, ast::u32>> calls;
+  std::vector<std::pair<EntityId, ast::u32>> handler_operations;
+  std::map<ast::NodeId, EntityId> handler_calls;
+  std::map<ast::NodeId, ast::u64> loop_limits;
+  std::optional<EffectFinding> unsupported;
+  std::optional<ast::u32> grade_jump;
+};
+
+struct EffectBodyCheck {
+  std::optional<EffectFinding> finding;
+  std::vector<EntityId> callees;
+};
+
+// A bound includes every possible call, regardless of control flow. Only AST nodes whose
+// evaluation needs no unmodeled calls are allowed. Constructors, class copies, destruction,
+// allocation, exceptions and virtual dispatch must be modeled before adding their nodes.
+struct EffectCallsFor {
+  using Key = EffectBody;
+  using Value = EffectCalls;
+  static engine::query_task<Value> run(engine::Ctx&, Key body) {
+    const auto& world = *universe().world_for(body.linux_target ? ast::x86_64_linux : ast::aarch64_darwin);
+    const auto locals = world.ins.seqs.elements(body.locals);
+    Value result;
+    std::set<EntityId> seen;
+    std::map<ast::u32, EffectHandlerBinding> handlers;
+    const auto record_call = [&](EntityId target, ast::u32 offset) {
+      if (seen.insert(target).second) result.calls.emplace_back(target, offset);
+    };
+    auto visit = [&](auto&& self, const ast::Red& node) -> void {
+      if (result.unsupported || node.is<ast::StaticAssert>()) return;
+      if (node.is<ast::LocalVar>()) {
+        const auto local = node.get<ast::LocalVar>().local;
+        if (const auto* handler = scoped_effect_handler(world, locals[local].type)) {
+          if (const auto binding = effect_handler_binding(world, *handler, node);
+              binding && ast::cv_of(world.types.canonical(locals[local].type)) == ast::Cv::none) {
+            handlers.emplace(local, *binding);
+            result.handler_operations.emplace_back(binding->constructor, node.offset());
+          } else
+            result.unsupported = EffectFinding{node.offset(), "a checked scoped handler must bind directly to a named function"};
+          return;
+        }
+      }
+      if (node.is<ast::MemberCall>()) {
+        const auto call = node.get<ast::MemberCall>();
+        if (const auto receiver = effect_handler_receiver(node, call)) {
+          const auto binding = handlers.find(*receiver);
+          const auto* method = world.entities.find(call.function);
+          if (binding != handlers.end() && method && !sema::Types::is_volatile(call.info.type) &&
+              world.ins.names.spelling(method->name) == "perform") {
+            record_call(binding->second.implementation, node.offset());
+            result.handler_operations.emplace_back(call.function, node.offset());
+            result.handler_calls.emplace(node.id(), binding->second.implementation);
+            for (auto argument : node.ast().children(call.args)) self(self, effect_child(node, argument));
+            return;
+          }
+        }
+      }
+      if (node.is<ast::LocalRef>() && handlers.contains(node.get<ast::LocalRef>().local)) {
+        result.unsupported = EffectFinding{node.offset(), "a checked scoped handler cannot escape its local perform calls"};
+        return;
+      }
+      if (!result.grade_jump && (node.is<ast::Goto>() || node.is<ast::Switch>()))
+        result.grade_jump = node.offset();
+      if (node.is<ast::For>()) {
+        if (const auto limit = effect_loop_limit(world, node)) result.loop_limits.emplace(node.id(), *limit);
+      }
+      const auto problem = ast::dispatch<ast::Nodes>(node.kind(), [&]<class T>(std::type_identity<T>) -> std::string_view {
+        using namespace ast;
+        if constexpr (is_expression(^^T)) {
+          const auto type = node.get<T>().info.type;
+          if (sema::Types::is_volatile(type)) return "volatile access is outside the checked effect subset";
+        }
+        if constexpr (std::is_same_v<T, Call>) {
+          const auto target = node.get<T>().function;
+          if (target == EntityId::none) return "indirect call has no verified effect bound";
+          record_call(target, node.offset());
+        } else if constexpr (std::is_same_v<T, LocalVar>) {
+          const auto local = node.get<T>();
+          const auto type = locals[local.local].type;
+          if (local.destructor != EntityId::none || !(world.types.is_scalar(type) || world.types.is_reference(type)))
+            return "local object initialization or cleanup is outside the checked effect subset";
+        } else if constexpr (std::is_same_v<T, ImplicitConversion>) {
+          const auto conversion = node.get<T>().conversion;
+          if (conversion == ConversionKind::user_defined || conversion == ConversionKind::array_copy)
+            return "implicit conversion is outside the checked effect subset";
+        } else if constexpr (std::is_same_v<T, Materialize>) {
+          const auto temporary = node.get<T>();
+          if (temporary.destructor != EntityId::none || !world.types.is_scalar(temporary.info.type))
+            return "temporary object cleanup is outside the checked effect subset";
+        } else if constexpr (std::is_same_v<T, Assign>) {
+          if (node.get<T>().op == AssignOp::trivial_class_copy)
+            return "class assignment is outside the checked effect subset";
+        } else if constexpr (!std::disjunction_v<
+                                 std::is_same<T, Literal>, std::is_same<T, DeclRef>, std::is_same<T, LocalRef>,
+                                 std::is_same<T, Paren>, std::is_same<T, Unary>, std::is_same<T, Binary>,
+                                 std::is_same<T, OrderedBinary>, std::is_same<T, Conditional>, std::is_same<T, Subscript>,
+                                 std::is_same<T, Member>, std::is_same<T, ValueInit>, std::is_same<T, DefaultInit>,
+                                 std::is_same<T, DefaultArg>, std::is_same<T, ExprStmt>, std::is_same<T, Return>,
+                                 std::is_same<T, Compound>, std::is_same<T, If>, std::is_same<T, While>,
+                                 std::is_same<T, Do>, std::is_same<T, For>, std::is_same<T, Break>, std::is_same<T, Continue>,
+                                 std::is_same<T, DeclStmt>, std::is_same<T, CondDecl>, std::is_same<T, Switch>,
+                                 std::is_same<T, Case>, std::is_same<T, Default>, std::is_same<T, Label>, std::is_same<T, Goto>>) {
+          return "operation is outside the checked effect subset";
+        }
+        return {};
+      });
+      if (!problem.empty()) {
+        result.unsupported = EffectFinding{node.offset(), std::string(problem)};
+        return;
+      }
+      node.for_each_child([&](const ast::Red& child) { self(self, child); });
+    };
+    visit(visit, ast::Red(world.ins.ast, body.tree));
+    co_return result;
+  }
+};
+
+struct EffectBoundFor {
+  struct Key {
+    PolicySources sources;
+    TuId tu;
+    EntityId function;
+    bool operator==(const Key&) const = default;
+  };
+  using Value = std::optional<EffectBound>;
+  static engine::query_task<Value> run(engine::Ctx& cx, Key key) {
+    const auto& registry = co_await cx.fetch<PolicyRegistryFor>(key.sources);
+    const auto& source = cx.fetch<pp::SourceOf>(pp::FileId{key.tu.n});
+    const auto& world = *universe().world_for(*source.config.target);
+    const auto bound = registry.effects.find(policy_operation(world, key.function, key.tu.n));
+    if (bound == registry.effects.end()) co_return std::nullopt;
+    co_return bound->second;
+  }
+};
+
+struct EffectCost {
+  bool unbounded = false;
+  ast::u64 uses = 0;
+  auto operator<=>(const EffectCost&) const = default;
+};
+
+struct EffectPaths {
+  std::optional<EffectCost> next = EffectCost{};
+  std::optional<EffectCost> returns{};
+  std::optional<EffectCost> breaks{};
+  std::optional<EffectCost> continues{};
+};
+
+static EffectPaths sequence(EffectPaths first, EffectPaths second) {
+  const auto add = [](std::optional<EffectCost> a, std::optional<EffectCost> b) -> std::optional<EffectCost> {
+    if (!a || !b) return std::nullopt;
+    if (a->unbounded || b->unbounded || a->uses > std::numeric_limits<ast::u64>::max() - b->uses)
+      return EffectCost{true};
+    return EffectCost{false, a->uses + b->uses};
+  };
+  return {add(first.next, second.next),
+          std::max(first.returns, add(first.next, second.returns)),
+          std::max(first.breaks, add(first.next, second.breaks)),
+          std::max(first.continues, add(first.next, second.continues))};
+}
+
+static EffectPaths choice(EffectPaths first, EffectPaths second) {
+  return {std::max(first.next, second.next), std::max(first.returns, second.returns),
+          std::max(first.breaks, second.breaks), std::max(first.continues, second.continues)};
+}
+
+static EffectCost maximum(EffectPaths paths) {
+  return std::max({paths.next, paths.returns, paths.breaks, paths.continues}).value_or(EffectCost{});
+}
+
+static EffectPaths effect_loop(EffectPaths iteration, EffectPaths tail,
+                               std::optional<EffectCost> entry_exit, bool may_repeat) {
+  const auto again = sequence({std::max(iteration.next, iteration.continues)}, tail).next;
+  if (may_repeat && again && *again > EffectCost{}) return {EffectCost{true}};
+  return {std::max({entry_exit, iteration.breaks, again}), iteration.returns};
+}
+
+static std::optional<EffectCost> repeat_effect_cost(std::optional<EffectCost> cost, ast::u64 count) {
+  if (count == 0) return EffectCost{};
+  if (!cost) return std::nullopt;
+  if (cost->unbounded || cost->uses > std::numeric_limits<ast::u64>::max() / count) return EffectCost{true};
+  return EffectCost{false, cost->uses * count};
+}
+
+static EffectPaths counted_effect_loop(EffectPaths iteration, ast::u64 limit) {
+  if (limit == 0) return {};
+  const auto again = std::max(iteration.next, iteration.continues);
+  const auto prefix = repeat_effect_cost(again, limit - 1).value_or(EffectCost{});
+  auto exits = sequence({prefix}, {iteration.breaks, iteration.returns});
+  exits.next = std::max(exits.next, repeat_effect_cost(again, limit));
+  return exits;
+}
+
+static bool false_effect_condition(const sema::World& world, const ast::Red& expr) {
+  const auto node = effect_unparen(expr);
+  if (!node.is<ast::Literal>()) return false;
+  const auto literal = node.get<ast::Literal>();
+  return world.types.is(literal.info.type, ast::Builtin::bool_) && world.ins.values.is<ast::VInt>(literal.value) &&
+         ast::int_bits(world.ins, literal.value).lo == 0;
+}
+
+// Count one tag over the structured AST. A positive repeating cost widens to unbounded.
+// A loop consumes the break and continue paths of its own body.
+static EffectPaths effect_usage(const sema::World& world, const ast::Red& node, const std::map<EntityId, ast::u64>& costs,
+                                const EffectCalls& calls) {
+  const auto child = [&](ast::Child edge) -> EffectPaths {
+    if (edge.id == ast::NodeId::none) return {};
+    return effect_usage(world, effect_child(node, edge), costs, calls);
+  };
+  const auto never = [&](ast::Child condition) {
+    return condition.id != ast::NodeId::none && false_effect_condition(world, effect_child(node, condition));
+  };
+  if (node.is<ast::StaticAssert>()) return {};
+  if (node.is<ast::If>()) {
+    const auto branch = node.get<ast::If>();
+    return sequence(sequence(child(branch.init), child(branch.condition)),
+                    choice(child(branch.then_), child(branch.else_)));
+  }
+  if (node.is<ast::Conditional>()) {
+    const auto branch = node.get<ast::Conditional>();
+    return sequence(child(branch.condition), choice(child(branch.then_), child(branch.else_)));
+  }
+  if (node.is<ast::For>()) {
+    const auto loop = node.get<ast::For>();
+    if (const auto limit = calls.loop_limits.find(node.id()); limit != calls.loop_limits.end())
+      return counted_effect_loop(child(loop.body), limit->second);
+    const auto test = child(loop.condition);
+    const auto repeated = never(loop.condition) ? test :
+        effect_loop(sequence(test, child(loop.body)), child(loop.increment), test.next, true);
+    return sequence(child(loop.init), repeated);
+  }
+  if (node.is<ast::While>()) {
+    const auto loop = node.get<ast::While>();
+    const auto test = child(loop.condition);
+    return never(loop.condition) ? test : effect_loop(sequence(test, child(loop.body)), {}, test.next, true);
+  }
+  if (node.is<ast::Do>()) {
+    const auto loop = node.get<ast::Do>();
+    return effect_loop(child(loop.body), child(loop.condition), std::nullopt, !never(loop.condition));
+  }
+  if (node.is<ast::Break>()) return {.next = std::nullopt, .breaks = EffectCost{}};
+  if (node.is<ast::Continue>()) return {.next = std::nullopt, .continues = EffectCost{}};
+
+  EffectPaths paths;
+  node.for_each_child([&](const ast::Red& edge) { paths = sequence(paths, effect_usage(world, edge, costs, calls)); });
+  if (node.is<ast::Return>()) return {std::nullopt, std::max(paths.next, paths.returns)};
+  EntityId target = EntityId::none;
+  if (node.is<ast::Call>()) target = node.get<ast::Call>().function;
+  if (node.is<ast::MemberCall>()) target = calls.handler_calls.at(node.id());
+  if (const auto found = costs.find(target); found != costs.end())
+    return sequence(paths, {EffectCost{false, found->second}, {}});
+  return paths;
+}
+
+static std::optional<EffectFinding> check_usage_grades(const sema::World& world, const ast::Red& body,
+                                                       const EffectCalls& calls, const EffectBound& caller,
+                                                       const std::map<EntityId, const EffectBound*>& bounds) {
+  for (const auto& [tag, limit] : caller.grades) {
+    std::map<EntityId, ast::u64> costs;
+    for (const auto& [target, offset] : calls.calls) {
+      const auto& callee = *bounds.at(target);
+      if (!std::ranges::binary_search(callee.tags, tag)) continue;
+      const auto grade = std::ranges::lower_bound(callee.grades, tag, {}, &decltype(callee.grades)::value_type::first);
+      if (grade == callee.grades.end() || grade->first != tag) {
+        const auto name = world.ins.names.spelling(world.entities.rec(target).name);
+        return EffectFinding{offset, std::format("call to '{}' has no finite usage grade for effect '{}'",
+                                                 name, world.types.spell(tag))};
+      }
+      costs.emplace(target, grade->second);
+    }
+    if (costs.empty()) continue;
+    if (calls.grade_jump)
+      return EffectFinding{*calls.grade_jump, "a finite usage grade with effectful calls requires control flow without goto or switch"};
+    const auto use = maximum(effect_usage(world, body, costs, calls));
+    if (use.unbounded || use.uses > limit)
+      return EffectFinding{body.offset(), std::format("effect '{}' exceeds its usage grade of {}{}",
+                                                     world.types.spell(tag), limit,
+                                                     use.unbounded ? " (unbounded usage)" : "")};
+  }
+  return std::nullopt;
+}
+
+// Verify the selected wrapper definitions before treating a perform call as a call to its
+// bound function. Matching a library template name alone would allow a different constructor
+// or a specialization of the method to add operations invisible to the effect checker.
+static bool effect_handler_parameter(ast::Red node, ast::u32 index) {
+  for (node = effect_unparen(node); node.is<ast::ImplicitConversion>(); node = effect_unparen(node)) {
+    const auto conversion = node.get<ast::ImplicitConversion>();
+    if (sema::Types::is_volatile(conversion.info.type) ||
+        (conversion.conversion != ast::ConversionKind::qualification &&
+         conversion.conversion != ast::ConversionKind::lvalue_to_rvalue))
+      return false;
+    node = effect_child(node, conversion.operand);
+  }
+  return node.is<ast::LocalRef>() && node.get<ast::LocalRef>().local == index;
+}
+
+static bool effect_handler_body(const ast::Red& root, bool constructor, std::size_t parameters) {
+  if (!root.is<ast::Compound>()) return false;
+  const auto statements = root.ast().children(root.get<ast::Compound>().stmts);
+  if (constructor) {
+    if (parameters != 1 || statements.size() != 2) return false;
+    const auto init = effect_child(root, statements[0]);
+    const auto body = effect_child(root, statements[1]);
+    if (!init.is<ast::MemberInit>() || !body.is<ast::Compound>() ||
+        !body.ast().children(body.get<ast::Compound>().stmts).empty())
+      return false;
+    const auto field = init.get<ast::MemberInit>();
+    return field.field == 0 && field.init.id != ast::NodeId::none &&
+           effect_handler_parameter(effect_child(init, field.init), 0);
+  }
+  if (statements.size() != 1) return false;
+  const auto statement = effect_child(root, statements.front());
+  if (!statement.is<ast::Return>()) return false;
+  const auto value = statement.get<ast::Return>().value;
+  if (value.id == ast::NodeId::none) return false;
+  const auto expr = effect_unparen(effect_child(statement, value));
+  if (!expr.is<ast::Call>() || expr.get<ast::Call>().callee.id == ast::NodeId::none) return false;
+  const auto call = expr.get<ast::Call>();
+  auto callee = effect_unparen(effect_child(expr, call.callee));
+  if (callee.is<ast::ImplicitConversion>() &&
+      callee.get<ast::ImplicitConversion>().conversion == ast::ConversionKind::function_to_pointer)
+    callee = effect_unparen(effect_child(callee, callee.get<ast::ImplicitConversion>().operand));
+  if (!callee.is<ast::Member>()) return false;
+  const auto field = callee.get<ast::Member>();
+  if (call.function != EntityId::none || !field.reference || field.field != 0 ||
+      !effect_child(callee, field.object).is<ast::This>())
+    return false;
+  const auto arguments = expr.ast().children(call.args);
+  if (arguments.size() != parameters) return false;
+  for (ast::u32 i = 0; i < arguments.size(); ++i)
+    if (!effect_handler_parameter(effect_child(expr, arguments[i]), i)) return false;
+  return true;
+}
+
+struct VerifyEffectHandler {
+  struct Key {
+    TuId tu;
+    EntityId operation;
+    bool linux_target;
+    bool operator==(const Key&) const = default;
+  };
+  using Value = bool;
+  static engine::query_task<Value> run(engine::Ctx& cx, Key key) {
+    const auto& analysis = co_await cx.fetch<TuSema>(key.tu);
+    const auto& unit = analysis.unit;
+    const auto definition = std::ranges::find(unit.functions, key.operation, &FunctionDef::entity);
+    const auto entity = std::ranges::find(unit.entities, key.operation, &Entity::id);
+    if (definition == unit.functions.end() || !definition->this_type ||
+        definition->body.tree == ast::NodeId::none || definition->decl.contracts != ast::NodeId::none ||
+        (entity != unit.entities.end() && !entity->asm_label.empty()))
+      co_return false;
+    const auto& world = *universe().world_for(key.linux_target ? ast::x86_64_linux : ast::aarch64_darwin);
+    const auto owner = world.types.rec(*definition->this_type).inner;
+    const auto* handler = scoped_effect_handler(world, owner);
+    if (!handler || handler->args.size() != 2 || handler->args[1].kind != ast::TemplateArgKind::type)
+      co_return false;
+    const auto shape = std::ranges::find(analysis.shapes.classes, world.types.class_of(owner), &ClassShape::entity);
+    if (shape == analysis.shapes.classes.end() || !shape->bases.empty() || shape->fields.size() != 1 ||
+        shape->union_ || shape->has_mutable_field)
+      co_return false;
+    const auto reference = world.types.rec(shape->fields.front());
+    if (reference.kind != sema::TypeKind::reference || reference.rvalue_ref ||
+        world.types.canonical(reference.inner) != world.types.canonical(handler->args[1].type))
+      co_return false;
+    const auto& function = world.entities.rec(key.operation);
+    const auto signature = world.types.rec(definition->decl.type);
+    co_return effect_handler_body(ast::Red(world.ins.ast, definition->body.tree),
+                                  function.kind == sema::EntityKind::constructor, signature.params.size());
+  }
+};
+
+struct CheckEffectBody {
+  struct Key {
+    PolicySources sources;
+    TuId tu;
+    EntityId function;
+    EffectBody body;
+    bool operator==(const Key&) const = default;
+  };
+  using Value = EffectBodyCheck;
+  static engine::query_task<Value> run(engine::Ctx& cx, Key key) {
+    const auto& calls = co_await cx.fetch<EffectCallsFor>(key.body);
+    if (calls.unsupported) co_return Value{calls.unsupported, {}};
+    const auto& world = *universe().world_for(key.body.linux_target ? ast::x86_64_linux : ast::aarch64_darwin);
+    const auto& caller = co_await cx.fetch<EffectBoundFor>({key.sources, key.tu, key.function});
+    if (!caller || caller->trusted) co_return Value{};
+    for (const auto& [operation, offset] : calls.handler_operations)
+      if (!(co_await cx.fetch<VerifyEffectHandler>({key.tu, operation, key.body.linux_target})))
+        co_return Value{EffectFinding{offset, "scoped handler wrapper must bind and forward to its function without other operations"}, {}};
+    Value out;
+    std::map<EntityId, const EffectBound*> bounds;
+    for (const auto& [target, offset] : calls.calls) {
+      const auto& callee = co_await cx.fetch<EffectBoundFor>({key.sources, key.tu, target});
+      const auto name = world.ins.names.spelling(world.entities.rec(target).name);
+      if (!callee)
+        co_return Value{EffectFinding{offset, std::format("call to '{}' has no declared effect bound", name)}, {}};
+      const auto missing = std::ranges::find_if(callee->tags, [&](QualType tag) {
+        return !std::ranges::binary_search(caller->tags, tag);
+      });
+      if (missing != callee->tags.end())
+        co_return Value{EffectFinding{offset, std::format("effect bound of '{}' exceeds the caller's declared bound (effect '{}')",
+                                                         name, world.types.spell(*missing))}, {}};
+      if (!caller->grades.empty()) bounds.emplace(target, &*callee);
+      if (!policy_operation(world, target, key.tu.n).second) out.callees.push_back(target);
+    }
+    if (!caller->grades.empty())
+      out.finding = check_usage_grades(world, ast::Red(world.ins.ast, key.body.tree), calls, *caller, bounds);
+    co_return out;
+  }
+};
+
+enum class EffectVerification { complete_sources, deferred_objects, unavailable };
+
+struct PolicyCheckUnit {
+  PolicySources sources;
+  TuId tu;
+  bool defer_observers;
+  EffectVerification effect_verification;
+  bool operator==(const PolicyCheckUnit&) const = default;
+};
+
+struct CheckedPolicies {
+  std::vector<Message> messages;
+  std::vector<PolicyContract> contracts;
+};
+
+struct CheckPolicies {
+  using Key = PolicyCheckUnit;
+  using Value = CheckedPolicies;
+  static engine::query_task<Value> run(engine::Ctx&, Key);
+};
+
+engine::query_task<CheckPolicies::Value> CheckPolicies::run(engine::Ctx& cx, Key key) {
+  const TuId tu = key.tu;
+  const auto& analysis = co_await cx.fetch<TuSema>(tu);
+  if (analysis.has_errors()) co_return Value{};
+  const auto& registry = co_await cx.fetch<PolicyRegistryFor>(key.sources);
+  if (registry.ownership.resources.empty() && registry.effects.empty() && registry.problems.empty()) co_return Value{};
+  if (key.effect_verification == EffectVerification::unavailable && !registry.effects.empty() && registry.problems.empty())
+    co_return Value{{{std::nullopt, true, "checked effect bounds currently require explicit objects or sources at link", {}}}, {}};
+  if (analysis.unit.virtual_emission_blocked && !registry.ownership.resources.empty() && registry.problems.empty())
+    co_return Value{{{std::nullopt, true, "ownership analysis is unavailable for this unit's virtual declarations", {}}}, {}};
+  std::vector<PolicyProblem> problems;
+  if (const auto it = registry.problems.find(tu.n); it != registry.problems.end()) problems = it->second;
+  const bool missing_effects = key.effect_verification == EffectVerification::complete_sources &&
+                               !registry.external_effect_declarations.empty();
+  if (missing_effects)
+    for (const auto& operation : registry.external_effect_declarations) {
+      const auto origin = registry.effect_origins.at(operation);
+      if (origin.unit == tu.n)
+        problems.push_back({origin, "verified effect bound requires a unique supported definition in the checked source inputs"});
+    }
+
+  const pp::FileId file{tu.n};
+  const pp::Source& source = cx.fetch<pp::SourceOf>(file);
+  const auto& world = *universe().world_for(*source.config.target);
+  const bool linux_target = source.config.target->triple == ast::x86_64_linux.triple;
+  std::vector<const FunctionDef*> definitions;
+  std::vector<OwnershipBody> bodies;
+  std::vector<const FunctionDef*> effect_definitions;
+  std::vector<CheckEffectBody::Key> effect_bodies;
+  if (registry.problems.empty() && !missing_effects)
+    for (const auto& def : analysis.unit.functions) {
+      if (def.body.tree == ast::NodeId::none) continue;
+      if (!registry.ownership.resources.empty()) {
+        definitions.push_back(&def);
+        bodies.push_back({key.sources, tu, def.entity, def.decl.type, def.body.tree, def.body.locals,
+                          def.this_type.value_or(QualType{}), linux_target, key.defer_observers});
+      }
+      const auto effect = registry.effects.find(policy_operation(world, def.entity, tu.n));
+      if (effect != registry.effects.end() && !effect->second.trusted) {
+        effect_definitions.push_back(&def);
+        effect_bodies.push_back({key.sources, tu, def.entity, {def.body.tree, def.body.locals, linux_target}});
+      }
+    }
+  const auto findings = co_await cx.par_map<CheckOwnershipBody>(bodies);
+  const auto effect_findings = co_await cx.par_map<CheckEffectBody>(effect_bodies);
+  Value result;
+  if (problems.empty() &&
+      std::ranges::none_of(findings, [](const auto& finding) { return finding.get().finding.has_value(); }) &&
+      std::ranges::none_of(effect_findings, [](const auto& finding) { return finding.get().finding.has_value(); })) {
+    if (key.defer_observers) {
+      auto signature = [&](EntityId observer) {
+        const auto type = world.types.canonical(world.entities.rec(observer).type);
+        const auto reference = world.types.rec(world.types.rec(type).params.front());
+        const auto mode = registry.ownership.ownership(world.types.canonical(reference.inner));
+        return fingerprint(std::tuple{observer, type, mode});
+      };
+      for (std::size_t i = 0; i < findings.size(); ++i) {
+        const auto function = definitions[i]->entity;
+        const auto operation = policy_operation(world, function, tu.n);
+        if (!operation.second && registry.ownership.effect(operation) == Effect::verified_observe)
+          result.contracts.push_back({function, function, signature(function), PolicyContractKind::observation, true});
+        for (const auto observer : findings[i].get().observers)
+          result.contracts.push_back({function, observer, signature(observer), PolicyContractKind::observation, false});
+      }
+      auto effect_signature = [&](EntityId function, const EffectBound& bound) {
+        // Handles have process-local order. The digest of an exported set uses stable type IDs.
+        auto tags = bound.tags | std::views::transform([&](QualType tag) { return world.types.fp(tag); })
+                    | std::ranges::to<std::vector>();
+        std::ranges::sort(tags);
+        const auto type = world.types.canonical(world.entities.rec(function).type);
+        const auto base = fingerprint(std::tuple{function, type, std::move(tags)});
+        if (bound.grades.empty()) return base;
+        auto grades = bound.grades | std::views::transform([&](const auto& grade) {
+          return std::pair{world.types.fp(grade.first), grade.second};
+        }) | std::ranges::to<std::vector>();
+        std::ranges::sort(grades);
+        return fingerprint(std::tuple{base, std::move(grades)});
+      };
+      EffectTagIdentity tag_identity{world};
+      auto add_effect_contract = [&](EntityId function, EntityId target, const EffectBound& bound,
+                                     PolicyContractKind kind, bool provides) {
+        PolicyContract contract{function, target, {}, kind, provides};
+        const auto unstable = std::ranges::find_if(bound.tags, [&](QualType tag) { return !tag_identity.stable(tag); });
+        if (unstable == bound.tags.end()) contract.signature = effect_signature(target, bound);
+        else contract.unstable_effect_tag = world.types.spell(*unstable);
+        result.contracts.push_back(std::move(contract));
+      };
+      for (std::size_t i = 0; i < effect_findings.size(); ++i) {
+        const auto function = effect_definitions[i]->entity;
+        const auto operation = policy_operation(world, function, tu.n);
+        const auto& bound = registry.effects.at(operation);
+        if (!operation.second)
+          add_effect_contract(function, function, bound, PolicyContractKind::effect, true);
+        for (const auto callee : effect_findings[i].get().callees) {
+          const auto& declared = registry.effects.at(policy_operation(world, callee, tu.n));
+          const auto kind = declared.trusted ? PolicyContractKind::trusted_effect : PolicyContractKind::effect;
+          add_effect_contract(function, callee, declared, kind, false);
+        }
+      }
+    }
+    co_return result;
+  }
+
+  const pp::Region& region = co_await cx.fetch<pp::Pp>(file);
+  const items::Items& items = co_await cx.fetch<items::RegionItems>(file);
+  SourceLocations locations(cx, source, file, region, items);
+  auto& in = *universe().in;
+  auto& messages = result.messages;
+  std::map<ast::u32, SourceLocations> previous_units;
+  for (const auto& problem : problems) {
+    const auto at = locations.at(in, problem.origin.at);
+    std::string text = problem.message;
+    if (problem.previous) {
+      const auto origin = *problem.previous;
+      SourceLocations* previous_locations = &locations;
+      if (origin.unit != tu.n) {
+        auto it = previous_units.find(origin.unit);
+        if (it == previous_units.end()) {
+          const pp::FileId other{origin.unit};
+          const auto& other_source = cx.fetch<pp::SourceOf>(other);
+          const auto& other_region = co_await cx.fetch<pp::Pp>(other);
+          const auto& other_items = co_await cx.fetch<items::RegionItems>(other);
+          it = previous_units.try_emplace(origin.unit, cx, other_source, other, other_region, other_items).first;
+        }
+        previous_locations = &it->second;
+      }
+      if (const auto previous = previous_locations->at(in, origin.at))
+        text += std::format(" (previous declaration at {})", previous->where);
+    }
+    messages.push_back({at ? std::optional(at->offset) : std::nullopt, true, std::move(text), at ? at->where : ""});
+  }
+  for (std::size_t i = 0; i < findings.size(); ++i) {
+    const auto& found = findings[i].get().finding;
+    if (!found) continue;
+    const auto& finding = *found;
+    const auto& def = *definitions[i];
+    const auto at = locations.at(in, {def.item, def.body_offset + finding.offset});
+    std::string text = finding.message;
+    if (finding.previous)
+      if (const auto previous = locations.at(in, {def.item, def.body_offset + *finding.previous})) {
+        std::string_view event = "consumption";
+        if (finding.previous_event == Event::transfer) event = "transfer";
+        if (finding.previous_event == Event::borrow) event = "borrow";
+        text += std::format(" (previous {} at {})", event, previous->where);
+      }
+    messages.push_back({at ? std::optional(at->offset) : std::nullopt, true, std::move(text), at ? at->where : ""});
+  }
+  for (std::size_t i = 0; i < effect_findings.size(); ++i) {
+    const auto& finding = effect_findings[i].get().finding;
+    if (!finding) continue;
+    const auto& def = *effect_definitions[i];
+    const auto at = locations.at(in, {def.item, def.body_offset + finding->offset});
+    messages.push_back({at ? std::optional(at->offset) : std::nullopt, true, finding->message, at ? at->where : ""});
+  }
+  co_return result;
+}
+
+}  // namespace ycxx::pipeline

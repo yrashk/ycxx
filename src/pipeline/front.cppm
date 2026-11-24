@@ -17,6 +17,7 @@ import ycxx.sema;
 import ycxx.parse;
 import :back;
 import :lines;
+import :policy_registry;
 
 export namespace ycxx::pipeline {
 
@@ -86,6 +87,9 @@ struct SemaResult {
   Shapes shapes;                      // its classes and enumerations, for `layout` (#115)
   std::vector<std::pair<EntityId, ast::Loc>> declared;
   std::vector<BodyAt> bodies;
+  // Policy origins are item-relative tokens. CheckPolicies places them using current source.
+  std::vector<PolicySite> policy_aliases;
+  std::vector<PolicyAnnotationSite> policy_annotations;
   bool has_errors() const {
     return lex_errors || std::ranges::any_of(messages, [](const SemaMessage& m) { return m.error; });
   }
