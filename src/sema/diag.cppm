@@ -25,6 +25,7 @@ enum class Diag : std::uint32_t {
   expected_token [[=message{Severity::error, "expected '{0:k}'"}]] = 1,
   expected_expression [[=message{Severity::error, "expected an expression"}]],
   type_as_expression [[=message{Severity::error, "unexpected type name '{0:n}': expected an expression"}]],
+  elaborated_template_param [[=message{Severity::error, "template parameter '{0:n}' after a class-key"}]],
   elaborated_typedef [[=message{Severity::error, "typedef-name '{0:n}' after a class-key or 'enum'"}]],
   typedef_definition [[=message{Severity::error, "a function definition cannot be declared 'typedef'"}]],
   using_namespace_name [[=message{Severity::error, "using-declaration names the namespace '{0:n}'"}]],

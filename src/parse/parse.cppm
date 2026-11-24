@@ -5604,6 +5604,11 @@ private:
     if (friend_at && (ps_.is(Tk::kw_class) || ps_.is(Tk::kw_struct)) && ps_.kind(1) == Tk::identifier &&
         ps_.kind(2) == Tk::semi) {
       NameId n = ps_.name_of(ps_.tok(1));
+      // [dcl.type.elab]/2: a class-key does not take a template parameter's name.
+      if (s_.declared_template_param(n)) {
+        s_.diag(ps_.pos() + 1, Diag::elaborated_template_param, n);
+        return bad();
+      }
       auto t = s_.class_name(n, false);
       sem.entity = t && types.is_class(*t) ? types.class_of(*t) : introduce_namespace_class(n);
       decls_.push_back(sem);
@@ -5780,12 +5785,18 @@ private:
     }
     const u32 name_at = ps_.pos() + next;
     const NameId name = ps_.name_of(ps_.tok(next));
-    std::vector<ast::DeclSema> found;
-    if (ns) found = q_.namespace_members(*ns, name);
-    else
-      for (DeclId d : q_.visible_decls(name))
-        if (const auto prior = p_->decl_sema(d); prior && prior->entity != EntityId::none && same_scope(*prior))
-          found.push_back(*prior);
+    // [temp.local]/6: neither its parameters nor its name redeclare a template parameter in scope.
+    for (std::size_t h = 0; h < s_.template_scopes.size(); ++h)
+      for (const ast::TemplateParamSema& outer : s_.template_scopes[h]) {
+        const bool shadowed = h + 1 < s_.template_scopes.size() &&
+                              std::ranges::any_of(head, [&](const ast::TemplateParamSema& own) { return own.name == outer.name; });
+        if (outer.name != s_.no_name() && (shadowed || (!ns && outer.name == name))) {
+          s_.diag(shadowed ? at : name_at, Diag::redeclared_local, outer.name);
+          return bad();
+        }
+      }
+    // Unqualified, the namespace's own members and what its using-declarations introduce.
+    const std::vector<ast::DeclSema> found = q_.namespace_members(ns.value_or(ns_entity()), name);
     EntityId templ = EntityId::none;
     for (const ast::DeclSema& prior : found) {
       if (prior.entity == EntityId::none || (prior.flags & sema::decl_flag::friend_) ||
@@ -5804,8 +5815,15 @@ private:
         s_.diag(name_at, Diag::no_friend_match, name);
         return bad();
       }
+      // Its head as the namespace's declaration of the template has it, at depth 0, so that
+      // declaration names the same entity ([temp.over.link]/6).
+      std::vector<ast::TemplateParamSema> own = head;
+      for (ast::TemplateParamSema& p : own) {
+        if (p.kind == ast::TemplateArgKind::value) p.type = s_.rebased(p.type, head);
+        p.depth = 0;
+      }
       sema::EntityRec t{sema::EntityKind::class_template, name, {}, LangLinkage::cxx, ast::Linkage::external, {}, ns_entity()};
-      t.head = head_fp(head);
+      t.head = head_fp(own);
       templ = s_.world().entities.entity(t);
     }
     ast::DeclSema sem = class_decl(templ, false);
