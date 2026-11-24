@@ -2488,6 +2488,22 @@ session's.*
   checked, with completeness at that point (`tests/own/concepts/base-of-dependent*`).
   A concrete occurrence checks it at its original source point. Missing graph information gets a hard diagnostic when it prevents a result.
   `__has_builtin` answers 0 while support is partial ([meta.rel], [class.derived], #218).
+- `__builtin_is_virtual_base_of(Base, Derived)`, `__is_pointer_interconvertible_base_of(Base,
+  Derived)` and `__is_layout_compatible(T, U)` ([meta.rel]) are built-ins. The first walks the
+  recorded base graph for a virtual base-specifier naming Base (`BaseRec::virtual_`, false until
+  #310, so it answers false for every class ycxx accepts). The second is true for the same nonunion
+  class or a base of a standard-layout Derived ([basic.compound]). The third compares the same type,
+  enumerations' underlying types, and standard-layout classes' members (in order for structs, with
+  alignment and bit-field widths; in any order for unions) ([class.mem.general]). A
+  `[[no_unique_address]]` member is diagnosed as not supported yet: whether it ends the sequence
+  depends on `__has_cpp_attribute`, which answers 0 for everything so far (#1141). Distinct class
+  operands need a complete Derived (both operands, for layout compatibility); the same incomplete
+  class is allowed where Clang and GCC reject it for the virtual base trait. Dependent operands
+  are decided at instantiation in class-template bases, variable-template initializers, function
+  template bodies and constraints (`tests/own/builtins/virtual-base-of-*`,
+  `pointer-interconvertible-base-of-*`, `layout-compatible-*`, `relation-traits-*`). Unknown base graph,
+  standard-layout or alignment facts (unapplied layout attributes) get hard diagnostics.
+  `__has_builtin` answers 0 for all three (#218).
 - `__is_empty(T)` gives false for nonclass types and unions. For a complete nonunion class, it
   checks polymorphism, non-static data members, and emptiness of the recorded bases. Missing base
   records and skipped layout attributes are diagnosed when they prevent a result. Dependent operands

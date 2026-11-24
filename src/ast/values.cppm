@@ -155,6 +155,9 @@ enum class DepOp : u8 {
   is_assignable, is_nothrow_assignable, is_trivially_assignable,
   is_convertible, is_nothrow_convertible,
   is_base_of,
+  is_virtual_base_of,
+  is_pointer_interconvertible_base_of,
+  is_layout_compatible,
   is_empty,
   is_destructible,
   is_nothrow_destructible,
@@ -176,9 +179,10 @@ enum class DepOp : u8 {
 };
 
 // A dependent operation (§5.5). The predicates take canonical qualified type operands.
-// The constructibility predicates take a target and an argument sequence. `is_same`,
-// `is_base_of`, assignability, convertibility and the `reference_*_from_temporary` predicates
-// take two types. The other type predicates take one.
+// The constructibility predicates take a target and an argument sequence. `is_same`, the class
+// relations (`is_base_of`, `is_virtual_base_of`, `is_pointer_interconvertible_base_of`),
+// `is_layout_compatible`, assignability, convertibility and the `reference_*_from_temporary`
+// predicates take two types. The other type predicates take one.
 // `logical_not` takes one bool value operand, and `logical_and` takes two.
 struct [[=dependent]] VDepOp {
   DepOp op;
