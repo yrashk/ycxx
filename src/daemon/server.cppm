@@ -19,6 +19,7 @@
 export module ycxx.daemon:server;
 
 import std;
+import ycxx.build.project;
 import ycxx.compile;
 import ycxx.engine;
 import ycxx.lsp;
@@ -263,6 +264,9 @@ class Server {
         return;
       case Kind::await_change:
         if (auto r = decode<AwaitChange>(*frame)) serve_await_change(fd, *r);
+        return;
+      case Kind::project_build:
+        if (auto r = decode<ProjectBuildRequest>(*frame)) serve_project_build(fd, *r);
         return;
       case Kind::compile:
         if (auto r = decode<compile::Request>(*frame)) serve_compile(fd, *r);
@@ -567,6 +571,40 @@ class Server {
     } while (!wait_readable(fd, every));
     std::lock_guard g(conn_mu_);
     lsp_fds_.erase(fd);
+  }
+
+  void serve_project_build(int fd, const ProjectBuildRequest& r) {
+    auto cwd = real_path(r.cwd);
+    if (!cwd || r.target.empty() || r.target == "." || r.target == ".." ||
+        r.target.contains('/') || r.target.contains('\0')) {
+      send(fd, Kind::project_build_done, ProjectBuildDone{1, {}, {"invalid workspace or target name"}, 0});
+      return;
+    }
+    auto& sess = session();
+    const auto mode = !r.trace ? compile::Trace::off : r.trace_values ? compile::Trace::values : compile::Trace::events;
+    auto traced = trace_for(fd, mode, "build " + r.target);
+    auto refresh = [&] {
+      std::lock_guard strand(strand_mu_);
+      catch_up();
+    };
+    auto cancelled = [&] { return hung_up(fd); };
+    auto apply = [&](const std::function<void(engine::Db&)>& write) {
+      std::lock_guard strand(strand_mu_);
+      restarted(sess.apply(write));
+    };
+    auto publish = [&](engine::Revision revision, const std::function<void()>& write) {
+      std::lock_guard strand(strand_mu_);
+      if (sess.db().revision() != revision || cancelled()) return false;
+      write();
+      return true;
+    };
+    auto report = build_->run(*cwd, r.target, refresh, cancelled, apply, publish, traced ? traced->tracer() : nullptr);
+    if (traced) {
+      traced->finish();
+      if (!cancelled()) traced->flush_client();
+    }
+    if (!cancelled()) send(fd, Kind::project_build_done, ProjectBuildDone{
+        report.status, std::move(report.output), std::move(report.diagnostics), report.actions_executed});
   }
 
   void serve_compile(int fd, const compile::Request& r) {
@@ -955,6 +993,7 @@ class Server {
       session_ = std::make_unique<pipeline::Session>(*pool_, o_.build_checkpoint);
       session_->db().set_provider<pp::FileContent>([this](pp::PathId id) { return provide(id); });
       session_->set_reader([this](const std::string& path) { return table_.read(path); });
+      build_ = std::make_unique<build::Coordinator>(*session_);
     });
     return *session_;
   }
@@ -1009,6 +1048,7 @@ class Server {
   std::once_flag session_once_;
   std::unique_ptr<engine::Pool> pool_;           // outlives the session
   std::unique_ptr<pipeline::Session> session_;  // created once, for the daemon's life
+  std::unique_ptr<build::Coordinator> build_;
   std::mutex provided_mu_;
   std::set<std::string> provided_;  // the table keys provided to session_'s FileContent cells
   std::vector<std::string> system_dirs_;

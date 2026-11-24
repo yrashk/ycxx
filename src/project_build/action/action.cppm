@@ -204,7 +204,15 @@ std::expected<pid_t, std::string> spawn(const fs::path& cwd, Command& command) {
     return std::unexpected(os_error("cannot redirect action stdout", error));
   if (int error = ::posix_spawn_file_actions_addopen(&files.state, STDERR_FILENO, ".stderr", O_WRONLY | O_CREAT | O_EXCL, 0600))
     return std::unexpected(os_error("cannot redirect action stderr", error));
-  if (int error = ::posix_spawnattr_setflags(&flags.state, POSIX_SPAWN_SETPGROUP))
+  // A concurrent client may have accepted a socket and not set FD_CLOEXEC yet.
+  short attributes = POSIX_SPAWN_SETPGROUP;
+#ifdef __APPLE__
+  attributes |= POSIX_SPAWN_CLOEXEC_DEFAULT;
+#else
+  if (int error = ::posix_spawn_file_actions_addclosefrom_np(&files.state, STDERR_FILENO + 1))
+    return std::unexpected(os_error("cannot close inherited action descriptors", error));
+#endif
+  if (int error = ::posix_spawnattr_setflags(&flags.state, attributes))
     return std::unexpected(os_error("cannot set action spawn flags", error));
   if (int error = ::posix_spawnattr_setpgroup(&flags.state, 0))
     return std::unexpected(os_error("cannot set action process group", error));

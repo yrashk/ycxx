@@ -3,3 +3,7 @@ target_sources(ycxxc_build_manifest PUBLIC FILE_SET CXX_MODULES FILES manifest.c
 target_link_libraries(ycxxc_build_manifest PUBLIC ycxxc_options)
 
 add_subdirectory(action)
+
+add_library(ycxxc_project_build STATIC)
+target_sources(ycxxc_project_build PUBLIC FILE_SET CXX_MODULES FILES plan.cppm project.cppm)
+target_link_libraries(ycxxc_project_build PUBLIC ycxxc_build_manifest ycxxc_build_action ycxxc_pipeline)
