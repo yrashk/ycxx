@@ -544,7 +544,7 @@ public:
       }
     }
     if (start == name && !ns)
-      return s_->current_class == EntityId::none && s_->names_type_template(name_of(tok(name)));
+      return s_->current_class == ast::EntityId::none && s_->names_type_template(name_of(tok(name)));
     while (start < name && kind(start + 1) == Tk::coloncolon) {
       const NameId component = name_of(tok(start));
       ns = ns ? s_->scope_member(*ns, component) : s_->scope_named(component);
