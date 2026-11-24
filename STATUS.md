@@ -2594,6 +2594,11 @@ executing IR block and requires no external runtime symbol. Linux x86-64 emits U
 and Darwin arm64 emits BRK. The builtin registry also exposes it through
 `__has_builtin`.
 
+`__builtin_unreachable()` ([utility.unreachable], #330) is the same `void` call and lowers to
+the same IR `unreachable`, flagged `assumed_unreachable`. Native code traps as above. A
+constant evaluation that reaches it fails with "execution reached __builtin_unreachable()"
+([expr.const]). IR node flags are 16 bits wide to make room for the flag.
+
 ## Basic Linux asm statements (#950)
 
 Statement-position `asm("int3");` and GNU `asm volatile("int3");` emit one INT3

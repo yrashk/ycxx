@@ -2645,7 +2645,7 @@ int main() { int i = 1; float f = __builtin_bit_cast(float, i); return (__builti
 '''
 status = 'partial'
 issues = [330]
-note = 'Expression-form __builtin_addressof accepts lvalues, preserves cv qualification, and bypasses overloaded address-of. The remaining utility builtins are tracked in #330 and the pinned memory-related header prerequisites in #469.'
+note = 'Expression-form __builtin_addressof accepts lvalues, preserves cv qualification, and bypasses overloaded address-of. __builtin_unreachable is a void call that traps at run time and is not a constant expression when reached. The remaining utility builtins are tracked in #330 and the pinned memory-related header prerequisites in #469.'
 
 [[feature]]
 id = 'lib-numeric-builtins'

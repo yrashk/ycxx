@@ -56,6 +56,8 @@ enum class Reason : std::uint8_t {
   static_definition [[=says{"control passes through the definition of a static variable"}]],
   unreachable [[=says{"control reached the end of a function that must return a value"}]],
   explicit_trap [[=says{"execution reached __builtin_trap()"}]],
+  // [utility.unreachable]: reaching it is undefined behavior.
+  assumed_unreachable [[=says{"execution reached __builtin_unreachable()"}]],
   local_address [[=says{"the result points to an object with automatic storage duration"}]],
   // Not yet: an operation the interpreter does not evaluate, by its op number.
   unsupported [[=says{"the interpreter does not evaluate '{0}' yet"}]],

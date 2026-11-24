@@ -1686,8 +1686,10 @@ class Gen {
     }
     if (is<ast::BuiltinCall>(a)) {
       auto b = get<ast::BuiltinCall>(a);
-      if (b.op == ast::BuiltinOp::trap) {
-        emit(ir::Op::unreachable, {}, {}, {}, ir::bit(ir::Flag::explicit_trap));
+      if (b.op == ast::BuiltinOp::trap || b.op == ast::BuiltinOp::unreachable) {
+        // Native code traps on both; constant evaluation names which was reached ([expr.const]).
+        const auto flag = b.op == ast::BuiltinOp::trap ? ir::Flag::explicit_trap : ir::Flag::assumed_unreachable;
+        emit(ir::Op::unreachable, {}, {}, {}, ir::bit(flag));
         live_ = false;
         // A parent expression can still emit its remaining operands or join edge.
         ensure_live();
@@ -1698,7 +1700,8 @@ class Gen {
       switch (b.op) {
         case ast::BuiltinOp::fabs: return pure(ir::Op::fabs, t, {value});
         case ast::BuiltinOp::strlen: return string_length(t, info(arg).type, value);
-        case ast::BuiltinOp::trap: std::unreachable();
+        case ast::BuiltinOp::trap:
+        case ast::BuiltinOp::unreachable: std::unreachable();
       }
       std::unreachable();
     }

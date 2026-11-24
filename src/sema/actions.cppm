@@ -7470,10 +7470,12 @@ public:
   // Builtins with ordinary expression arguments (docs/EXTENSIONS.md).
   Ex builtin_call(const lex::BuiltinFunctionInfo& b, std::vector<Ex> args, u32 begin, u32 end) {
     using enum lex::BuiltinFunction;
-    if (b.function == trap) {
+    if (b.function == trap || b.function == unreachable) {
+      // [utility.unreachable]: both are `void` and end the path they are on.
       if (!builtin_arity(0, args.size(), begin)) return {NodeId::none, begin, end};
       ExprInfo info{builtin(Builtin::void_), ValueCategory::prvalue, 0};
-      return node(ast::BuiltinCall{info, ast::BuiltinOp::trap, b_->list({})}, begin, end, info);
+      const auto op = b.function == trap ? ast::BuiltinOp::trap : ast::BuiltinOp::unreachable;
+      return node(ast::BuiltinCall{info, op, b_->list({})}, begin, end, info);
     }
     if (b.function == addressof) {
       if (!builtin_arity(1, args.size(), begin)) return {NodeId::none, begin, end};
@@ -7511,6 +7513,7 @@ public:
     switch (b.function) {
       case addressof:
       case trap:
+      case unreachable:
       case strlen:
       case library:
       case constant_p: std::unreachable();  // Handled before floating type selection.
