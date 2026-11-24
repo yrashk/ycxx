@@ -95,8 +95,8 @@ Functional conversions can construct namespace-qualified class-template speciali
 parentheses or braces, including through namespace aliases. [#697](https://github.com/yrashk/ycxx/issues/697)
 
 Class templates at namespace scope can delete their copy assignment on its first in-class
-declaration when the member has no ref-qualifier. Specializations retain the deleted overload.
-[#709](https://github.com/yrashk/ycxx/issues/709)
+declaration, including with an lvalue or rvalue ref-qualifier. Specializations retain the deleted
+overload. [#709](https://github.com/yrashk/ycxx/issues/709) · [#311](https://github.com/yrashk/ycxx/issues/311)
 
 In a class template, and in a member defined outside it, a member of a nondependent base hides a
 template parameter of the same name. [#800](https://github.com/yrashk/ycxx/issues/800)
@@ -671,10 +671,11 @@ written default member initializer are value-initialized.
   `__builtin_memchr`, `__builtin_memcmp`, `__builtin_memcpy`, `__builtin_memmove`,
   `__builtin_memset`, `__builtin_strchr`, `__builtin_strpbrk`, `__builtin_strrchr` and
   `__builtin_strstr`, used by libycxx's `<cstring>`, string searches and containers, call the
-  C library's functions at run time. `__builtin_memchr` and `__builtin_memcmp` also search
-  and compare character arrays in constant expressions.
+  C library's functions at run time. `__builtin_strcmp` does the same for libycxx's runtime
+  `type_info` comparisons. `__builtin_memchr` and `__builtin_memcmp` also search and compare
+  character arrays in constant expressions.
   [#248](https://github.com/yrashk/ycxx/issues/248) [#1093](https://github.com/yrashk/ycxx/issues/1093)
-  [#1092](https://github.com/yrashk/ycxx/issues/1092)
+  [#1092](https://github.com/yrashk/ycxx/issues/1092) [#1170](https://github.com/yrashk/ycxx/issues/1170)
 - `extern "C"` functions from libSystem, including `printf` with integers, characters,
   floating values, pointers and strings as arguments, and the SDK `<math.h>`'s built-ins
   (`__builtin_fabs`, `__builtin_inf`, `__builtin_huge_val`, `__builtin_nan`).

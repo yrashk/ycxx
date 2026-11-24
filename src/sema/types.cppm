@@ -1178,6 +1178,7 @@ inline constexpr std::array string_functions{
     StringFunction{"memmove", CType::void_pointer, {CType::void_pointer, CType::const_void_pointer, CType::size}},
     StringFunction{"memset", CType::void_pointer, {CType::void_pointer, CType::int_, CType::size}},
     StringFunction{"strchr", CType::char_pointer, {CType::const_char_pointer, CType::int_}, 2},
+    StringFunction{"strcmp", CType::int_, {CType::const_char_pointer, CType::const_char_pointer}, 2},
     StringFunction{"strpbrk", CType::char_pointer, {CType::const_char_pointer, CType::const_char_pointer}, 2},
     StringFunction{"strrchr", CType::char_pointer, {CType::const_char_pointer, CType::int_}, 2},
     StringFunction{"strstr", CType::char_pointer, {CType::const_char_pointer, CType::const_char_pointer}, 2},
