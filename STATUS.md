@@ -1617,7 +1617,7 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
 - Virtual members and the special-member features gated on "a class at namespace scope" accept a
   class nested in ordinary classes (`Program::outermost_class_scope`); peer-profile layouts still
   exclude classes with nested types.
-- Tests: `tests/own/classes/nested` (44; 26 from a spec-only author, 9 from the review), 5 draft
+- Tests: `tests/own/classes/nested` (47, including three independent #1216 controls), 5 draft
   examples, and `unit.darwin_nested_classes` / `unit.linux_nested_classes` (two units sharing a
   nested class; on Linux also every run test).
 - Not yet: nested classes of class templates, their partial and explicit specializations, and
