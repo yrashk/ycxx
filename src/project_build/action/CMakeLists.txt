@@ -1,0 +1,3 @@
+add_library(ycxxc_build_action STATIC)
+target_sources(ycxxc_build_action PUBLIC FILE_SET CXX_MODULES FILES action.cppm)
+target_link_libraries(ycxxc_build_action PUBLIC ycxxc_options)
