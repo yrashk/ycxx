@@ -2562,9 +2562,19 @@ that name if the object has one, else one undefined symbol (#1095). The object s
 function once (`unit.string_builtin_symbols`, ELF and Mach-O), and each definition keeps its own
 symbol (#694). The unit then references the function as an
 undefined symbol, which libSystem or the C library provides at link time. A dependent argument
-defers the call to instantiation. They are not constant expressions yet (#1092). Fixtures in
-`tests/own/builtins/` (`memchr-memcmp-*`, `string-memory-*`) cover detection, signatures,
-argument checks and run-time results.
+defers the call to instantiation. Fixtures in `tests/own/builtins/` (`memchr-memcmp-*`,
+`string-memory-*`) cover detection, signatures, argument checks and run-time results.
+
+`memchr` and `memcmp` are constant expressions (#1092); the others are not. Their rows carry a
+`constant` (`ast::LibraryBuiltin`), which marks the call (`ast::Call::builtin`), and IR generation
+branches on `consteval_br`: the runtime edge is the library call, which `lower` keeps, and the
+consteval edge is the `builtin` op (`ir::BuiltinFn`), which the interpreter evaluates. It reads
+objects of narrow character type, and elements of arrays of them, as `unsigned char` with the
+interpreter's access, lifetime and initialization checks (`Machine::bytes_at`, `read_byte`); any
+other object is `Reason::byte_type`, as Clang rejects it. `memchr` reads in order up to the match;
+`memcmp` checks first that both objects hold all `n` bytes, as GCC does, then reads up to the
+first difference. The `memchr-*` fixtures cover results, bounds, object types and values, and the
+oracles' disagreements, each marked `XFAIL` for that oracle with its reason.
 
 ## Pack expansions in builtin arguments (#1099)
 
@@ -4100,4 +4110,3 @@ the body. A non-generic lambda body uses its own evaluation context.
 - General class objects, member pointers, operands whose type dependence is unresolved, and
   other direct parenthesized template argument spellings remain open, as do dependent
   template arguments, requirements, and exception specifications.
-  [#286](https://github.com/yrashk/ycxx/issues/286)
