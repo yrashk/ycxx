@@ -5130,7 +5130,8 @@ private:
       const sema::Sema::ClassPrefixScope prefix(s_, ce);
       const std::size_t before = p_->end_diags_.size();
       static_assert_declaration();
-      if (q_.observed_type_trait_failure || q_.observed_enum_definition_failure ||
+      if (q_.observed_type_trait_failure || q_.observed_variable_instantiation_failure ||
+          q_.observed_enum_definition_failure ||
           !valid_member_declarations(std::span(p_->end_diags_).subspan(before)))
         tree_ = NodeId::none;
       return;
@@ -7967,7 +7968,7 @@ private:
         if (v.value) {
           value = *v.value;
           if (spec.is_constexpr) p_->set_constant(sem.entity, *v.value, k_);
-        } else if (!v.type_trait_failure) {
+        } else if (!v.diagnosed_failure()) {
           dynamic_ok(open, v.reason);
         }
       }
