@@ -568,8 +568,11 @@ written default member initializer are value-initialized.
   Class templates and class partial specializations accept parenthesized requires-clause
   operands joined by `&&` or `||`.
   Non-template code outside requires-expression bodies also checks constraints on directly named
-  primary namespace variable templates with explicit non-dependent type arguments. Templates support
-  `if constexpr`, deferred template static assertion failures, and two-phase lookup, with
+  primary namespace variable templates with explicit non-dependent type arguments. Directly
+  written namespace alias-template IDs check constraints before expansion in non-template code
+  outside requires-expressions when all type arguments are explicit and non-dependent.
+  [#1227](https://github.com/yrashk/ycxx/issues/1227)
+  Templates support `if constexpr`, deferred template static assertion failures, and two-phase lookup, with
   Itanium names identical to Clang's. Native function templates can call an unambiguous
   externally linked target supplied as a function pointer argument, including a concrete
   `noexcept` signature. The compiler supports Clang's `__make_integer_seq`. Template type
