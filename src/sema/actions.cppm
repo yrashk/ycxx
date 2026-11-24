@@ -1074,6 +1074,11 @@ public:
     return templates().specialize_class(templ, args, constraints);
   }
 
+  bool namespace_scoped(EntityId entity) const {
+    const EntityId scope = w_->entities.rec(entity).scope;
+    return scope == EntityId::none || w_->entities.rec(scope).kind == EntityKind::namespace_;
+  }
+
   // `X<args>` naming a class template specialization ([temp.names], [temp.arg]), or the type an
   // alias template specialization stands for: its type with the arguments substituted
   // ([temp.alias]/2).
@@ -1084,8 +1089,7 @@ public:
     if (tmpl.kind == ast::DeclKind::type_alias) {
       std::vector<ast::TemplateParamSema> params = ins().seqs.elements(tmpl.template_params);
       auto bindings = Bindings::of(params.empty() ? 0 : params[0].depth, *full);
-      const EntityId scope = w_->entities.rec(tmpl.entity).scope;
-      if (alias_constraint_failed && (scope == EntityId::none || w_->entities.rec(scope).kind == EntityKind::namespace_) &&
+      if (alias_constraint_failed && namespace_scoped(tmpl.entity) &&
           !check_named_type_constraints(tmpl, args.size(), *full, bindings, at)) {
         *alias_constraint_failed = true;
         return std::nullopt;
