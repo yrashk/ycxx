@@ -883,13 +883,14 @@ public:
     return with_template_defaults(*type, found);
   }
   // The variable template unqualified lookup finds for `name` ([temp.pre]/1), likewise.
-  std::optional<ast::DeclSema> variable_template(NameId name, std::optional<u32> at = std::nullopt) {
-    return named_template(name, ast::DeclKind::variable, at);
+  std::optional<ast::DeclSema> variable_template(NameId name, std::optional<u32> at = std::nullopt,
+                                                 bool initializer = false) {
+    return named_template(name, ast::DeclKind::variable, at, initializer);
   }
   // The template of kind `kind` unqualified lookup finds for `name`, with the default arguments of
   // every earlier declaration of it ([temp.param]/12).
   std::optional<ast::DeclSema> named_template(NameId name, ast::DeclKind kind,
-                                             std::optional<u32> at = std::nullopt) {
+                                             std::optional<u32> at = std::nullopt, bool initializer = false) {
     if (names_member(name)) return std::nullopt;
     for (auto s = scopes_.rbegin(); s != scopes_.rend(); ++s)
       for (auto p = s->rbegin(); p != s->rend(); ++p)
@@ -908,11 +909,11 @@ public:
       ast::DeclSema s = q_->decl_sema(d);
       if (s.entity != EntityId::none && !is_special(s)) decls.push_back(s);
     }
-    if (!found && at) {
+    if (!found && (at || initializer)) {
       auto matching = std::find_if(decls.rbegin(), decls.rend(), [&](const ast::DeclSema& d) {
         return d.kind == kind && (d.flags & decl_flag::template_);
       });
-      if (matching != decls.rend() && std::ranges::any_of(decls, [&](const ast::DeclSema& d) {
+      if (!initializer && at && matching != decls.rend() && std::ranges::any_of(decls, [&](const ast::DeclSema& d) {
             return d.entity != matching->entity && d.kind != ast::DeclKind::class_ && d.kind != ast::DeclKind::enum_;
           })) {
         diag(*at, Diag::ambiguous_name, name);
@@ -922,6 +923,12 @@ public:
     }
     if (!found && !decls.empty()) found = decls.back();
     if (!found || found->kind != kind || !(found->flags & decl_flag::template_)) return std::nullopt;
+    // The deferred argument retains no entity. Ordinary lookup at the initializer must
+    // determine one before replay. A tag from another namespace can make the name ambiguous.
+    if (initializer && at && std::ranges::any_of(decls, [&](const auto& d) { return d.entity != found->entity; })) {
+      diag(*at, Diag::ambiguous_name, name);
+      return std::nullopt;
+    }
     return with_template_defaults(*found, decls);
   }
 

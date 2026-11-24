@@ -1419,6 +1419,7 @@ public:
     EntityId spec;
     sema::Bindings args;
     u32 point;  // the item whose demand instantiates it ([temp.point])
+    std::optional<ast::DeclSema> primary;  // the current item's written declaration, if it is the primary
   };
   // `instantiate_var(spec)` ([temp.inst]/7): the declaration of a variable template specialization,
   // its initializer analysed and evaluated with the arguments bound; none if `v` is no such
@@ -2003,7 +2004,7 @@ public:
     for (EntityId ns : directives) paths.push_back(p_->namespace_path(ns));
     const auto& scope = initializer_source ? p_->ns_of(initializer_source->item) : from;
     return p_->visible_decls(p_->world().ins.names.spelling(name), namespace_lookup_item(),
-                             namespace_lookup_includes_item(), scope, paths);
+                             namespace_lookup_includes_item(name), scope, paths);
   }
   std::vector<ast::DeclSema> qualifier_decls(ast::NameId name, std::optional<EntityId> ns,
                                             std::span<const EntityId> directives) override {
@@ -2031,9 +2032,9 @@ public:
     auto filter = type_only ? Program::LookupNames::types : Program::LookupNames::all;
     if (immediate_call) filter = Program::LookupNames::immediate_call;
     for (DeclId d : p_->qualified_decls(p_->world().ins.names.spelling(name), p_->namespace_path(ns),
-                                       namespace_lookup_item(), namespace_lookup_includes_item(),
+                                       namespace_lookup_item(), namespace_lookup_includes_item(name),
                                        filter, direct_only))
-      if (auto s = p_->decl_sema(d); s && s->entity != EntityId::none) r.push_back(*s);
+      if (auto s = lookup_declaration(d); s && s->entity != EntityId::none) r.push_back(*s);
     return r;
   }
   std::vector<ast::DeclSema> adl_functions(EntityId ns, ast::NameId name, bool at_instantiation) override {
@@ -2056,7 +2057,7 @@ public:
   // names ([basic.lookup.unqual]/9).
   std::string from;
   ast::DeclSema decl_sema(DeclId d) override {
-    if (auto s = p_->decl_sema(d)) return *s;
+    if (auto s = lookup_declaration(d)) return *s;
     return invalid_decl();
   }
   std::optional<ast::DeclSema> written_member(EntityId f) override {
@@ -2226,6 +2227,19 @@ public:
     bool saved = q.retain_type_trait_pattern;
     ~RestoreTypeTraitPattern() { q.retain_type_trait_pattern = saved; }
   };
+  // At the initializer, lookup can find this declaration in its own namespace. Supply the
+  // written template during replay as well, since the specialization does not declare a name.
+  struct InitializerTemplate {
+    NameId name;
+    DeclId declaration;
+    const ast::DeclSema* pattern;
+  };
+  std::optional<InitializerTemplate> initializer_template;
+  struct RestoreInitializerTemplate {
+    AtItem& q;
+    std::optional<InitializerTemplate> saved = q.initializer_template;
+    ~RestoreInitializerTemplate() { q.initializer_template = saved; }
+  };
   // In a class template's instantiation (#88): completeness and constant evaluation are answered
   // at its point of instantiation ([temp.point]); lookup stays at the item.
   std::optional<u32> at_point;
@@ -2246,7 +2260,14 @@ private:
   u32 namespace_lookup_item() const {
     return initializer_source ? initializer_source->item : declaration_lookup_end.value_or(item_);
   }
-  bool namespace_lookup_includes_item() const { return self_ && !declaration_lookup_end && !initializer_source; }
+  bool namespace_lookup_includes_item(std::optional<NameId> name = std::nullopt) const {
+    return !declaration_lookup_end && !initializer_source &&
+           (self_ || (name && initializer_template && *name == initializer_template->name));
+  }
+  std::optional<ast::DeclSema> lookup_declaration(DeclId d) {
+    if (initializer_template && initializer_template->declaration == d) return *initializer_template->pattern;
+    return p_->decl_sema(d);
+  }
 
   bool is_complete_at_item(EntityId c) {
     return (completing_class != EntityId::none && completing_class == c) ||
@@ -7472,6 +7493,15 @@ private:
     if (!var_ && !(sem.flags & (sema::decl_flag::specialization | sema::decl_flag::partial | sema::decl_flag::friend_)))
       s_.own.push_back({d.name, sem});
     p_->declared(sem, k_);
+    const AtItem::RestoreInitializerTemplate restore_initializer{q_};
+    if (has_init && !d.qualified) {
+      const ast::DeclSema* primary = nullptr;
+      if (var_ && var_->primary) primary = &*var_->primary;
+      else if (pattern && s_.world().entities.rec(sem.entity).kind == sema::EntityKind::variable_template) primary = &sem;
+      if (primary)
+        q_.initializer_template = AtItem::InitializerTemplate{
+            d.name, {p_->id(k_), ast::make_decl_ord(ast::DeclClass::syntactic, ord)}, primary};
+    }
     Ex init;
     sema::ConstId value = sema::ConstId::none;
     // [dcl.constinit]: a reachable declaration's requirement applies to initialization.
@@ -10730,7 +10760,7 @@ const Program::VarInstance* Program::variable_instance(EntityId v, u32 point,
   std::vector<ast::TemplateParamSema> head = w_->ins.seqs.elements(tmpl.template_params);
   sema::Bindings args = partial ? partial->args : sema::Bindings::of(head.empty() ? 0 : head[0].depth, rec.args);
   var_instantiating_.insert(key);
-  ItemAnalysis analysis(*this, k, VarInstantiation{v, std::move(args), point});
+  ItemAnalysis analysis(*this, k, VarInstantiation{v, std::move(args), point, partial ? std::nullopt : std::optional(tmpl)});
   Result<ast::ItemSema> cell = analysis.run();
   var_instantiating_.erase(key);
   // What the definition diagnosed it says once, there.

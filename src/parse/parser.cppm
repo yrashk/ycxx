@@ -4098,11 +4098,12 @@ public:
       if (is(Tk::less) && s_->is_template_name(n)) {
         // A template-id ([temp.names]): `f<args>`.
         std::vector<Ex> deferred;
-        const bool replay_values = variable_template_initializer_ && !s_->unevaluated && s_->variable_template(n);
+        const bool replay_values = variable_template_initializer_ && !s_->unevaluated &&
+                                   s_->variable_template(n, std::nullopt, /*initializer=*/true);
         auto args = template_argument_list(nullptr, nullptr, /*expand_empty=*/false, replay_values ? &deferred : nullptr);
         if (!args) return {NodeId::none, begin, pos()};
         if (!deferred.empty()) {
-          auto v = s_->variable_template(n, begin);
+          auto v = s_->variable_template(n, begin, /*initializer=*/true);
           if (!v) return {NodeId::none, begin, pos()};
           return s_->replayed_variable_template_id(*v, *args, deferred, begin, pos());
         }
