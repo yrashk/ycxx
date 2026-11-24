@@ -654,6 +654,13 @@ Machine::Flow Machine::locate(const Value& p, std::span<const u64> extra, QualTy
     const Life life = pl->ncells == 0 ? ob.record_life : cells_[pl->cell0].life;
     if (shape(pl->type).is_const && life == Life::alive)
       return fail(Reason::modify_const);
+    if (use == Use::callee_write) {
+      // A cast can remove the destination's volatile qualification but does not change the
+      // object it designates, including a subobject of a volatile object ([dcl.type.cv]).
+      const auto cv = [&](QualType type) { return std::to_underlying(ast::cv_of(in_->canonical(type))); };
+      if ((cv(pl->type) | cv(ob.type)) & std::to_underlying(ast::Cv::volatile_))
+        return fail(Reason::volatile_object_access);
+    }
     if (config_.mode == Mode::constant && ob.outside) return fail(Reason::modify_outside);
   } else if (config_.mode == Mode::constant && (!ob.usable || (ob.outside && pl->mutable_field))) {
     const EntityId global = !ob.usable && ob.origin == Origin::global ? ob.entity : EntityId::none;
