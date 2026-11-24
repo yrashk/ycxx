@@ -12,7 +12,8 @@ template<Fraction V> struct Project {
   using type = Ratio<(V.ok ? V.num : 0), (V.ok ? V.den : 1)>;
 };
 
-template<> struct Project<Fraction{9, 0, false}> {
+constexpr Fraction specialized{9, 0, false};
+template<> struct Project<specialized> {
   using type = Ratio<7, 3>;
 };
 
