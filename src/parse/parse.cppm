@@ -1363,12 +1363,12 @@ public:
   const std::deque<Synthesized>& synthesized() const { return synth_; }
   // An implicit constructor of a dynamic class or a class containing one: emitted only where called.
   // A synthesized member of a dynamic class emitted only where something uses it: an implicit
-  // constructor, or a class template specialization's destructor ([temp.inst]).
+  // constructor, or its destructor ([class.dtor]).
   bool emitted_on_use(EntityId member) const {
     if (dynamic_synthesized_.contains(member)) return true;
     const auto& entity = w_->entities.rec(member);
     const auto* owner = entity.kind == sema::EntityKind::destructor ? classes_.find(entity.scope) : nullptr;
-    return owner && owner->dynamic && class_patterns_.contains(std::to_underlying(entity.scope));
+    return owner && owner->dynamic;
   }
   // Its body, analysed on first use.
   const ast::BodySema& synthesized_body(std::size_t i);
@@ -5755,9 +5755,12 @@ private:
         }
         if (d.has_noexcept) {
           const auto f = types.rec(d.type);
-          bool dependent = false;  // decided by each specialization
+          // In a class template, each specialization decides it, to compare with what it overrides.
           const bool pattern = !inst_ && !s_.template_scopes.empty();
-          const bool nonthrowing = ps_.noexcept_value(d.noexcept_condition, d.ok, pattern ? &dependent : nullptr);
+          bool dependent = pattern && d.noexcept_tokens;
+          if (inst_ && d.noexcept_tokens) read_deferred_noexcept(d);
+          const bool nonthrowing = !dependent &&
+                                   ps_.noexcept_value(d.noexcept_condition, d.ok, pattern ? &dependent : nullptr);
           if (!d.ok) return bad();
           d.type = types.function(f.inner, f.params, f.variadic, f.linkage, f.fn_cv, f.fn_ref, nonthrowing && !dependent);
         }
@@ -7103,6 +7106,21 @@ private:
     return true;
   }
 
+  // The condition of a virtual member's deferred noexcept-specifier, with the specialization's
+  // arguments bound and the parameters in scope ([except.spec]).
+  void read_deferred_noexcept(parse::Declarator& d) {
+    const u32 resume = ps_.index();
+    ps_.seek(d.noexcept_tokens->first);
+    s_.push_scope();
+    for (const parse::Param& p : d.params) s_.declare_local(p.name, p.type, sema::local_flag::parameter, 0, false);
+    Parser::Suffix suffix;
+    ps_.exception_specifier(suffix, d.ok);
+    s_.pop_scope();
+    ps_.seek(resume);
+    d.noexcept_condition = suffix.noexcept_condition;
+    d.noexcept_tokens.reset();
+  }
+
   // In a class template's definition, a base or a signature can be dependent: each specialization
   // checks what its member overrides ([temp.res.general]).
   bool may_override_dependent_base() {
@@ -7549,8 +7567,8 @@ private:
       auto& types = s_.types();
       if (d.has_noexcept) {
         bool ok = true;
-        bool dependent = false;
-        const bool nonthrowing = ps_.noexcept_value(d.noexcept_condition, ok, pattern ? &dependent : nullptr);
+        bool dependent = pattern && d.noexcept_tokens;
+        const bool nonthrowing = !dependent && ps_.noexcept_value(d.noexcept_condition, ok, pattern ? &dependent : nullptr);
         if (!ok) return false;
         const auto f = types.rec(sem.type);
         sem.type = types.function(f.inner, f.params, f.variadic, f.linkage, f.fn_cv, f.fn_ref, nonthrowing && !dependent);
