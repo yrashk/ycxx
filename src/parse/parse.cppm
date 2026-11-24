@@ -7816,11 +7816,15 @@ private:
     if (ordinary_external && visibility == ast::GnuVisibility::hidden &&
         (fn || (!var_ && !(sem.flags & sema::decl_flag::inline_))))
       sem.hidden_visibility = true;
-    if (ordinary_external && fn && !(sem.flags & (sema::decl_flag::inline_ | sema::decl_flag::member))) {
-      if (spec.attributes.weak || d.attributes.weak) sem.explicit_weak = true;
-      sem.explicit_default_visibility = visibility == ast::GnuVisibility::default_;
-      // A qualified definition uses the namespace facts from its resolved declaration.
-      if (!d.qualified) sem.namespace_visibility = p_->namespace_visibility_[k_];
+    if (ordinary_external && !(sem.flags & (sema::decl_flag::inline_ | sema::decl_flag::member))) {
+      const bool object_reference = !fn && !var_ && !definition && !reference &&
+                                    p_->world().target.triple == ast::x86_64_linux.triple;
+      if ((fn || object_reference) && (spec.attributes.weak || d.attributes.weak)) sem.explicit_weak = true;
+      if (fn) {
+        sem.explicit_default_visibility = visibility == ast::GnuVisibility::default_;
+        // A qualified definition uses the namespace facts from its resolved declaration.
+        if (!d.qualified) sem.namespace_visibility = p_->namespace_visibility_[k_];
+      }
     }
 
     // The initializer ([dcl.init]); the name is in scope from the end of its declarator.
