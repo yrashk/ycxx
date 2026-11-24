@@ -1604,7 +1604,19 @@ class Gen {
     }
     // Discarding a nonvolatile direct field designator does not read its value.
     const auto cv = ast::cv_of(expr.type);
-    if ((cv == ast::Cv::none || cv == ast::Cv::const_) && default_field(a)) return;
+    if (cv == ast::Cv::none || cv == ast::Cv::const_) {
+      if (default_field(a)) return;
+      // Naming a nonvolatile record object for discard needs neither its value nor an
+      // address in the thunk. A reference variable and a computed glvalue still evaluate.
+      if (fn_.thunk && cls(expr.type) == TypeClass::record) {
+        const At named = strip_parens(a);
+        if (is<ast::DeclRef>(named) && !get<ast::DeclRef>(named).reference) return;
+        if (is<ast::LocalRef>(named)) {
+          const auto local = get<ast::LocalRef>(named).local;
+          if (!facts_.is_reference(in_.seqs.at(fn_.body.locals, local).type)) return;
+        }
+      }
+    }
     lvalue(a);
   }
 
