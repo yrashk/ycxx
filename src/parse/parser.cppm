@@ -5392,7 +5392,7 @@ public:
       // then calling the selected function. The complete invocation includes both.
       if (auto invocation = s_->as<ast::Call>({sequence->rhs.id})) function = invocation->function;
     }
-    if (s_->ordinary_immediate_member(function)) return s_->immediate_invocation(call, /*preserve_glvalue=*/true);
+    if (!call.glvalue() && s_->ordinary_immediate_member(function)) return s_->immediate_invocation(call);
     if (direct && function != EntityId::none && s_->is_consteval(function))
       return s_->immediate_invocation(call);
     return call;

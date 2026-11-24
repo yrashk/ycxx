@@ -5517,18 +5517,9 @@ public:
   // A call of an immediate function outside an immediate function context is an immediate
   // invocation: it must be a constant expression, and it is replaced by its value ([expr.const]).
   // `call` calls a consteval function or constructor.
-  Ex immediate_invocation(Ex call, bool preserve_glvalue = false) {
+  Ex immediate_invocation(Ex call) {
     if (!call.ok() || immediate_context || unevaluated || !evaluate_immediate) return call;
-    // A reference-valued invocation designates an object or function. Evaluating its
-    // address preserves that designation without reading an object outside the invocation.
-    const bool fold_address = preserve_glvalue && call.glvalue();
-    Ex expression = call;
-    if (fold_address) {
-      const ExprInfo pointer{types().pointer(call.type()), ValueCategory::prvalue, 0};
-      expression = node(ast::Unary{pointer, ast::UnaryOp::address_of, at(call, call.begin)},
-                        call.begin, call.end, pointer);
-    }
-    const Evaluation v = evaluate_immediate(expression);
+    const Evaluation v = evaluate_immediate(call);
     if (!v.constant) {
       diag(call.begin, Diag::not_constant, v.reason);
       return {NodeId::none, call.begin, call.end};
@@ -5549,10 +5540,7 @@ public:
       }
       folded_immediate_result = *entity;
     }
-    Ex result = literal(expression.type(), *v.value, ValueCategory::prvalue, call.begin, call.end);
-    if (fold_address)
-      return node(ast::Unary{call.info, ast::UnaryOp::deref, at(result, call.begin)}, call.begin, call.end, call.info);
-    return result;
+    return literal(call.type(), *v.value, ValueCategory::prvalue, call.begin, call.end);
   }
 
   void retain_immediate_functions(const Sema& replay) {
@@ -6341,7 +6329,8 @@ public:
       Ex call = node(ast::Call{info, fe, at(callee, begin), b_->list(*children)}, begin, end, info);
       // Lookup can supply a `this` pointer to rank a mixed unqualified or qualified overload
       // set. Selecting a static member evaluates a receiver only when the call has one.
-      if (!object || (m.arrow && !bound.explicit_receiver && ordinary_immediate_member(fe))) return call;
+      if (!object || (m.arrow && !bound.explicit_receiver && !call.glvalue() && ordinary_immediate_member(fe)))
+        return call;
       Ex discarded = convert_node(*object, ast::ConversionKind::to_void, builtin(Builtin::void_));
       return node(ast::OrderedBinary{info, ast::OrderedOp::comma, at(discarded, begin), at(call, begin)}, begin, end, info);
     }
@@ -11058,7 +11047,7 @@ public:
       default_origin = DefaultArgumentOrigin::interned;
     }
     if (declaration && (named.id == callee.id || is_consteval(default_source) ||
-                        ordinary_immediate_member(default_source))) {
+                        (!types().is_reference(types().rec(ft).inner) && ordinary_immediate_member(default_source)))) {
       function = default_source;
     } else {
       // The address of a named immediate function is itself a known callee. It does not
