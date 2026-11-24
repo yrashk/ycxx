@@ -1322,13 +1322,15 @@ public:
   }
 
   // The implicitly defined special members needed by the unit ([special]).
-  enum class SpecialMember { destructor, copy_constructor, copy_assignment, move_constructor };
+  enum class SpecialMember { destructor, copy_constructor, copy_assignment, move_constructor, default_constructor };
   struct Synthesized {
     u32 item;  // the class's
     ast::DeclSema decl;
     SpecialMember kind;
   };
   const std::deque<Synthesized>& synthesized() const { return synth_; }
+  // An implicit constructor of a dynamic class or a class containing one: emitted only where called.
+  bool emitted_on_use(EntityId constructor) const { return dynamic_synthesized_.contains(constructor); }
   // Its body, analysed on first use.
   const ast::BodySema& synthesized_body(std::size_t i);
   bool special_members(u32 item, EntityId cls, sema::ClassRec& rec,
@@ -1476,6 +1478,18 @@ public:
                                              std::span<const ast::MemberRec> members);
   EntityId peer_automatic_primary_base(u32 item, EntityId cls, const sema::ClassRec& rec,
                                        std::span<const ast::MemberRec> members);
+  // The general single-inheritance layout of a polymorphic class outside the peer profiles (#309).
+  std::optional<sema::DynamicClass> dynamic_class(u32 item, EntityId cls, const sema::ClassRec& rec,
+                                                 std::span<const ast::MemberRec> members);
+  // Its implicit default and copy constructors, which install the vptr ([class.cdtor]).
+  void dynamic_special_members(u32 item, EntityId cls, sema::ClassRec& rec);
+  EntityId synthesize_constructor(u32 item, EntityId cls, bool copy, bool nonthrowing, bool const_source);
+  void validate_dynamic_constructors(sema::ClassRec& rec);
+  std::map<EntityId, std::size_t> dynamic_synthesized_;  // synthesized constructors by entity: their `synth_` index
+  // A complete class's size, as sema lays it out (`sizeof`).
+  std::optional<u64> class_size(EntityId cls);
+  // The implicitly defined default constructor's body ([class.default.ctor]/4).
+  ast::BodySema implicit_default_constructor_body(const Synthesized& s);
   // `instantiate_class(spec)` ([temp.inst]/2, §B6.2): the class record of a class template
   // specialization, its member items analysed with the arguments bound, built whole and then
   // published; none when the template has no definition before `item`, or for a dependent one.
@@ -5993,26 +6007,47 @@ private:
         s_.diag(name_at, Diag::redefinition, m->name);
         return bad();
       }
-      const bool derived = p_->derived_virtual_destructor_layout(c).has_value();
-      if ((!derived && !p_->peer_root_destructor_key(c)) || flags || template_ || explicit_ || inst_ || !it_->has_body() ||
-          p_->region().tokens[it_->body_begin].kind != Tk::l_brace ||
-          (derived && (it_->body_begin + 1 >= it_->end || p_->region().tokens[it_->body_begin + 1].kind != Tk::r_brace)) ||
-          p_->in_attributed_namespace(k_) ||
-          layout_attribute(p_->region(), it_->begin, it_->body_begin, LayoutAttributes::any) ||
-          !Program::encloses(p_->ns_of(k_), p_->namespace_path(owner)) ||
-          fs.cv != sema::Cv::none || !fs.params.empty() || fs.variadic) {
-        s_.diag(name_at, Diag::virtual_definition);
-        return bad();
-      }
-      ps_.exception_specifier(fs, ok);
-      if (!ok) return bad();
-      if (fs.has_noexcept && !ps_.noexcept_value(fs.noexcept_condition, ok)) {
-        if (ok) s_.diag(name_at, Diag::conflicting_declaration, m->name);
-        return bad();
-      }
-      if ((!derived && !fs.has_noexcept) || fs.noexcept_condition || !ps_.at_end()) {
-        s_.diag(name_at, Diag::virtual_definition);
-        return bad();
+      if (cr->dynamic) {
+        // [except.spec]: the definition repeats the declaration's specification or none.
+        ps_.exception_specifier(fs, ok);
+        if (!ok) return bad();
+        std::optional<bool> nonthrowing;
+        if (fs.has_noexcept) nonthrowing = ps_.noexcept_value(fs.noexcept_condition, ok);
+        if (!ok) return bad();
+        if (nonthrowing && nonthrowing != cr->destructor_noexcept) {
+          s_.diag(name_at, Diag::conflicting_declaration, m->name);
+          return bad();
+        }
+        if (fs.cv != sema::Cv::none || !fs.params.empty() || fs.variadic) {
+          s_.diag(name_at, Diag::conflicting_declaration, m->name);  // [class.dtor]/1
+          return bad();
+        }
+        if (template_ || explicit_ || inst_) {
+          s_.diag(name_at, Diag::virtual_definition);
+          return bad();
+        }
+      } else {
+        const bool derived = p_->derived_virtual_destructor_layout(c).has_value();
+        if ((!derived && !p_->peer_root_destructor_key(c)) || flags || template_ || explicit_ || inst_ || !it_->has_body() ||
+            p_->region().tokens[it_->body_begin].kind != Tk::l_brace ||
+            (derived && (it_->body_begin + 1 >= it_->end || p_->region().tokens[it_->body_begin + 1].kind != Tk::r_brace)) ||
+            p_->in_attributed_namespace(k_) ||
+            layout_attribute(p_->region(), it_->begin, it_->body_begin, LayoutAttributes::any) ||
+            !Program::encloses(p_->ns_of(k_), p_->namespace_path(owner)) ||
+            fs.cv != sema::Cv::none || !fs.params.empty() || fs.variadic) {
+          s_.diag(name_at, Diag::virtual_definition);
+          return bad();
+        }
+        ps_.exception_specifier(fs, ok);
+        if (!ok) return bad();
+        if (fs.has_noexcept && !ps_.noexcept_value(fs.noexcept_condition, ok)) {
+          if (ok) s_.diag(name_at, Diag::conflicting_declaration, m->name);
+          return bad();
+        }
+        if ((!derived && !fs.has_noexcept) || fs.noexcept_condition || !ps_.at_end()) {
+          s_.diag(name_at, Diag::virtual_definition);
+          return bad();
+        }
       }
     }
     // Its record, rebuilt in this frame (the declaration's lists belong to the class's item).
@@ -6777,7 +6812,7 @@ private:
       return false;
     }
     if (m->is_virtual) {
-      if (!native_virtual_definition(cls, *cr, m->entity, d, sem)) {
+      if (!cr->dynamic && !native_virtual_definition(cls, *cr, m->entity, d, sem)) {
         s_.diag(d.name_at, Diag::virtual_definition);
         return false;
       }
@@ -8578,7 +8613,7 @@ std::optional<EntityId> Program::peer_root_destructor_key(EntityId cls) const {
   using enum lex::Tk;
   if (r_->has_clang_attribute_pragma) return std::nullopt;
   const auto* record = classes_.find(cls);
-  if (!record || !record->defined ||
+  if (!record || !record->defined || record->dynamic ||
       !record->virtual_destructor || !record->destructor_noexcept.value_or(false) ||
       !record->destructor_usable || record->is_abstract() || record->union_ || record->closure ||
       !record->bases.empty() || !record->fields.empty() || !record->types.empty() || !record->friends.empty() ||
@@ -8636,13 +8671,203 @@ bool Program::peer_root_destructor_producer(EntityId cls) const {
          destructor_declarations != decls_.end() && destructor_declarations->second.size() == 2;
 }
 
+// Itanium C++ ABI §2.4–2.5 for a polymorphic class with at most one base, which is public,
+// nonvirtual and itself dynamic: its vptr is at offset zero, its own or its primary base's (#309).
+// Class templates, local classes, internal linkage and other base shapes are #309's follow-ups.
+std::optional<sema::DynamicClass> Program::dynamic_class(u32 item, EntityId cls, const sema::ClassRec& rec,
+                                                        std::span<const ast::MemberRec> members) {
+  const auto& head = items_->items[item];
+  const auto& entity = w_->entities.rec(cls);
+  // A class in an unnamed namespace is TU-local ([basic.link]): its table needs local symbols (#1155).
+  if (head.template_depth || head.specialization || entity.templ != EntityId::none || rec.union_ || rec.closure ||
+      rec.unapplied_layout || entity.linkage != ast::Linkage::external || unnamed(ns_of(item)) || rec.bases.size() > 1)
+    return std::nullopt;
+  for (EntityId scope = entity.scope; !is_namespace(scope); scope = w_->entities.rec(scope).scope) {
+    const auto& owner = w_->entities.rec(scope);
+    if (owner.kind != sema::EntityKind::class_ || owner.templ != EntityId::none) return std::nullopt;
+  }
+  // Sema does not carry an alignment attribute through `decltype` of a variable declared with an
+  // attributed alias, so such a field's layout is not known here (#1167).
+  // Only the declaration's specifiers, before its first declarator, are inspected; an alias
+  // declared elsewhere is #1167's.
+  for (const sema::FieldRec& field : rec.fields) {
+    const auto member = std::ranges::find(members, field.entity, &ast::MemberRec::entity);
+    if (member == members.end()) continue;
+    const auto& source = items_->items[index(member->decl.item)];
+    const u32 specifiers = source.names.empty() ? source.end - source.begin : source.names.front().offset;
+    if (std::ranges::contains(std::span(r_->tokens).subspan(source.begin, specifiers), lex::Tk::kw_decltype,
+                              &lex::Tok::kind))
+      return std::nullopt;
+  }
+  sema::DynamicClass out;
+  if (!rec.bases.empty()) {
+    const sema::BaseRec& edge = rec.bases.front();
+    const sema::ClassRec* base = classes_.find(edge.cls);
+    if (edge.access != ast::Access::public_ || edge.dependent_in_pattern || !base || !base->dynamic) return std::nullopt;
+    out.slots = base->dynamic->slots;
+    out.primary_base = true;
+  }
+  const auto replace_destructor = [&](EntityId destructor, bool pure) {
+    bool replaced = false;
+    for (auto& slot : out.slots) {
+      if (slot.kind == sema::VirtualSlotKind::function) continue;
+      slot.function = destructor;
+      slot.pure = pure;
+      replaced = true;
+    }
+    return replaced;
+  };
+  for (const sema::MemberDeclRec& m : rec.members) {
+    if (!m.is_virtual) continue;
+    if (m.is_template) return std::nullopt;
+    if (m.is_dtor) {
+      if (!replace_destructor(m.entity, m.is_pure)) {
+        out.slots.push_back({m.entity, sema::VirtualSlotKind::complete_destructor, m.is_pure});
+        out.slots.push_back({m.entity, sema::VirtualSlotKind::deleting_destructor, m.is_pure});
+      }
+    } else if (m.overridden_virtual != EntityId::none) {
+      const auto slot = out.slot_of(m.overridden_virtual);
+      if (!slot) return std::nullopt;
+      out.slots[*slot] = {m.entity, sema::VirtualSlotKind::function, m.is_pure};
+    } else {
+      out.slots.push_back({m.entity, sema::VirtualSlotKind::function, m.is_pure});
+    }
+    // The key function: declared in the class, not pure, and not inline there.
+    if (out.key_function == EntityId::none && !m.is_pure && !m.is_deleted) {
+      const auto decl = member_decl(m.entity);
+      const auto sem = decl ? decl_sema(*decl) : std::nullopt;
+      if (!sem) return std::nullopt;
+      using namespace sema::decl_flag;
+      if (!(sem->flags & (definition | inline_ | constexpr_ | consteval_ | deleted))) out.key_function = m.entity;
+    }
+  }
+  // An implicit destructor overrides a virtual base destructor ([class.dtor]).
+  if (rec.virtual_destructor && rec.declared_destructor == EntityId::none) {
+    if (rec.destructor == EntityId::none || !replace_destructor(rec.destructor, false)) return std::nullopt;
+  }
+  return out;
+}
+
+std::optional<u64> Program::class_size(EntityId cls) {
+  const auto item = class_items_.find(std::to_underlying(cls));
+  if (item == class_items_.end()) return std::nullopt;
+  AtItem q(*this, item->second, true);
+  q.own_class_complete = true;
+  ast::Builder b(w_->ins, &arena_);
+  std::vector<engine::Diagnostic> diags;
+  sema::Sema s(*w_, b, q, diags, id(item->second), 0);
+  return s.layout_of(w_->types.class_type(cls), false);
+}
+
+EntityId Program::synthesize_constructor(u32 item, EntityId cls, bool copy, bool nonthrowing, bool const_source) {
+  sema::Types& types = w_->types;
+  const QualType ct = types.class_type(cls);
+  ast::Builder b(w_->ins, &arena_);
+  const std::string cname(w_->ins.names.spelling(w_->entities.rec(cls).name));
+  std::vector<QualType> ps;
+  std::vector<ast::ParamSema> params;
+  if (copy) {
+    ps.push_back(types.lvalue_ref(const_source ? types.add_cv(ct, sema::Cv::const_) : ct));
+    params.push_back({EntityId::none, ps[0], w_->ins.names.intern("other"), NodeId::none, 0});
+  }
+  const QualType type = types.function(types.builtin(sema::Builtin::void_), ps, false, LangLinkage::cxx, sema::Cv::none,
+                                       ast::RefQual::none, nonthrowing);
+  ast::DeclSema d{};
+  d.kind = ast::DeclKind::function;
+  d.type = type;
+  d.linkage = ast::Linkage::external;
+  d.storage = ast::Storage::none;
+  d.access = ast::Access::public_;
+  d.flags = sema::decl_flag::member | sema::decl_flag::implicit | sema::decl_flag::definition | sema::decl_flag::inline_ |
+            sema::decl_flag::constructor;
+  d.attributes = b.seq(std::span<const NodeId>{});
+  d.constraint = NodeId::none;
+  d.constraints = ast::ConstId::none;
+  d.contracts = NodeId::none;
+  d.params = b.seq(std::span<const ast::ParamSema>(params));
+  d.template_params = b.seq(std::span<const ast::TemplateParamSema>{});
+  d.entity = w_->entities.entity({sema::EntityKind::constructor, w_->ins.names.intern(cname), type, LangLinkage::cxx,
+                                  ast::Linkage::external, {}, cls});
+  synth_.push_back({item, b.commit(d), copy ? SpecialMember::copy_constructor : SpecialMember::default_constructor});
+  return synth_.back().decl.entity;
+}
+
+// A dynamic class's implicit constructors install its vptr, so they are functions of their own;
+// a class containing one copies it through that class's copy constructor ([class.copy.ctor]).
+void Program::dynamic_special_members(u32 item, EntityId cls, sema::ClassRec& rec) {
+  auto& types = w_->types;
+  if (rec.union_ || rec.closure || items_->items[item].template_depth || w_->entities.rec(cls).templ != EntityId::none)
+    return;
+  const QualType ct = types.class_type(cls);
+  std::vector<QualType> subobjects;
+  for (const sema::BaseRec& b : rec.bases) subobjects.push_back(types.class_type(b.cls));
+  for (const sema::FieldRec& f : rec.fields) subobjects.push_back(f.type);
+  if (!rec.user_ctors && !rec.default_deleted && rec.defaulted_default_ctor == EntityId::none) {
+    // [except.spec]: potentially throwing when a subobject's default initialization may be.
+    // Default member initializers and user-declared constructors count as potentially throwing
+    // (an approximation, #1157).
+    const auto nothrow_default = [&](this auto&& self, QualType t) -> bool {
+      t = types.innermost_array_element(t);
+      if (!types.is_class(t)) return true;
+      const auto* r = classes_.find(types.class_of(t));
+      if (!r) return false;
+      if (r->implicit_default_ctor != EntityId::none)
+        return types.rec(w_->entities.rec(r->implicit_default_ctor).type).fn_noexcept;
+      return !r->user_ctors && !r->closure && std::ranges::none_of(r->fields, &sema::FieldRec::dmi) &&
+             std::ranges::all_of(r->bases, [&](const sema::BaseRec& b) { return self(types.class_type(b.cls)); }) &&
+             std::ranges::all_of(r->fields, [&](const sema::FieldRec& f) { return self(f.type); });
+    };
+    const bool nonthrowing = std::ranges::none_of(rec.fields, &sema::FieldRec::dmi) &&
+                             std::ranges::all_of(subobjects, nothrow_default);
+    rec.implicit_default_ctor = synthesize_constructor(item, cls, false, nonthrowing, true);
+    dynamic_synthesized_.emplace(rec.implicit_default_ctor, synth_.size() - 1);
+  }
+  // A virtual destructor defaulted on its first declaration is defined there ([dcl.fct.def.default]).
+  if (rec.dynamic && rec.declared_destructor != EntityId::none && rec.destructor == rec.declared_destructor) {
+    const auto declaration = destructor_declarations_.find(rec.declared_destructor);
+    const auto member = member_decl(rec.declared_destructor);
+    auto sem = member ? decl_sema(*member) : std::nullopt;
+    if (declaration != destructor_declarations_.end() && declaration->second.defaulted && sem) {
+      sem->flags |= sema::decl_flag::definition | sema::decl_flag::inline_;
+      synth_.push_back({item, *sem, SpecialMember::destructor});
+    }
+  }
+  if (rec.copy_ctor == EntityId::none && !rec.copy_deleted && rec.defaulted_copy == sema::CopyState::ordinary &&
+      std::ranges::none_of(rec.members, [&](const sema::MemberDeclRec& m) {
+        if (m.is_ctor && copy_move_constructor_parameter(m, ct)) return true;
+        const auto assignment = assignment_parameter(m, ct);
+        return assignment && types.rec(*assignment).rvalue_ref;
+      }))
+  {
+    rec.copy_ctor = synthesize_constructor(item, cls, true, false, rec.defaulted_copy_const);
+    dynamic_synthesized_.emplace(rec.copy_ctor, synth_.size() - 1);
+  }
+}
+
+// [class.default.ctor]/2, [class.copy.ctor]/10: an implicit constructor whose initialization
+// cannot be formed is deleted. Its body is analysed once the class is complete.
+void Program::validate_dynamic_constructors(sema::ClassRec& rec) {
+  const auto valid = [&](EntityId ctor) {
+    const auto synthesized = dynamic_synthesized_.find(ctor);
+    return synthesized == dynamic_synthesized_.end() || synthesized_body(synthesized->second).tree != NodeId::none;
+  };
+  if (rec.implicit_default_ctor != EntityId::none && !valid(rec.implicit_default_ctor)) {
+    rec.implicit_default_ctor = EntityId::none;
+    rec.default_deleted = true;
+  }
+  if (rec.copy_ctor != EntityId::none && !valid(rec.copy_ctor)) {
+    rec.copy_ctor = EntityId::none;
+    rec.copy_deleted = true;
+  }
+}
+
 std::optional<Program::DerivedVirtualDestructor> Program::derived_virtual_destructor_layout(EntityId cls) const {
   using enum lex::Tk;
   const auto& target = w_->target;
   if (!target.supports(ast::NativeOperation::derived_virtual_destructor) || r_->has_clang_attribute_pragma)
     return std::nullopt;
   const auto* derived = classes_.find(cls);
-  if (!derived || derived->bases.size() != 1 || !derived->fields.empty()) return std::nullopt;
+  if (!derived || derived->dynamic || derived->bases.size() != 1 || !derived->fields.empty()) return std::nullopt;
   const auto& edge = derived->bases.front();
   if (edge.access != ast::Access::public_ || edge.dependent_in_pattern) return std::nullopt;
   const auto* base = classes_.find(edge.cls);
@@ -9005,7 +9230,19 @@ const Result<ast::ClassDef>& Program::class_def(u32 item) {
       rec.peer_virtual_layout = peer_virtual_layout(item, *cls, rec, members);
       if (rec.peer_virtual_layout == sema::PeerVirtualLayout::none)
         rec.peer_automatic_primary_base = peer_automatic_primary_base(item, *cls, rec, members);
+      if (rec.peer_virtual_layout == sema::PeerVirtualLayout::none && rec.peer_automatic_primary_base == EntityId::none &&
+          member_declarations_valid)
+        rec.dynamic = dynamic_class(item, *cls, rec, members);
     }
+    rec.virtual_layout_unsupported = (rec.polymorphic && !rec.dynamic) ||
+        std::ranges::any_of(rec.bases, [&](const sema::BaseRec& base) {
+          return classes_.virtual_layout_unsupported(w_->types.class_type(base.cls));
+        }) ||
+        std::ranges::any_of(rec.fields, [&](const sema::FieldRec& field) {
+          return classes_.virtual_layout_unsupported(field.type);
+        });
+    if (member_declarations_valid && rec.layout_requires_virtual_support && !rec.virtual_layout_unsupported)
+      dynamic_special_members(item, *cls, rec);
     validate_class_alignment(item, *cls, rec, out.diags);
     rec.defined = true;
     // Complete-class checks see the full member set before any function bodies are read.
@@ -9021,6 +9258,7 @@ const Result<ast::ClassDef>& Program::class_def(u32 item) {
       check_member_exception_patterns(*cls, fresh, out);
       if (member_declarations_valid && implicit_move) prepare_move_constructor(item, *cls, fresh);
       if (member_declarations_valid) check_default_member_initializers(fresh, out);
+      validate_dynamic_constructors(fresh);
     });
   }
   ast::Builder b(w_->ins, &arena_);
@@ -9663,6 +9901,29 @@ public:
     return std::move(out_);
   }
 
+  // [class.default.ctor]/4: the implicitly defined default constructor of a dynamic class
+  // initializes as a user-written one with no ctor-initializer and an empty body would. Its
+  // default member initializers are analysed here, in the complete class (#309).
+  ast::BodySema implicit_default_constructor(const ast::DeclSema& ctor) {
+    static_cast<AtItem&>(*q_).own_class_complete = true;
+    s_.current_class = p_->world().entities.rec(ctor.entity).scope;
+    s_.current_function = ctor.entity;
+    s_.in_function_body = true;
+    s_.function_inline = true;
+    s_.this_type = p_->this_type(ctor);
+    s_.push_scope();
+    Ex body = s_.node(ast::Compound{b_.list({})}, 0, 0);
+    Ex root = constructor_body({}, body, s_.types().rec(ctor.type).fn_noexcept);
+    s_.pop_scope();
+    if (s_.has_error_since(0)) root = {};  // a deleted constructor (`validate_dynamic_constructors`)
+    std::vector<ast::LocalRec> locals(s_.locals().begin(), s_.locals().end());
+    std::vector<sema::Expansion> none;
+    return b_.commit(ast::BodySema{root.ok() ? root.id : NodeId::none, b_.seq(std::span<const ast::LocalRec>(locals)),
+                                   expansion_list(b_, none), b_.seq(std::span<const u32>{}),
+                                   s_.builtin(sema::Builtin::void_), 0,
+                                   b_.seq(std::span<const ast::ClosureDef>(s_.closures))});
+  }
+
   // A generic lambda's body as its operator's specialization: the enclosing function's constants
   // it names are this context's locals; the closure's frame, the head's arguments and the
   // parameters come from `open_generic`. The tree's root is at the lambda's `{`.
@@ -9891,8 +10152,11 @@ private:
       if (auto it = inits.subobjects.find(u32(rec.fields.size() + i)); it != inits.subobjects.end()) {
         init = it->second;
       } else if (const auto* record = p_->classes_.find(base); record && record->polymorphic) {
-        s_.check_polymorphic_base_default_init(bt, 0);
-        continue;
+        if (!record->dynamic) {
+          s_.check_polymorphic_base_default_init(bt, 0);
+          continue;
+        }
+        init = s_.construct(bt, {}, 0, 0, sema::Construction::default_init, sema::ConstructorDestination::polymorphic_base);
       } else {
         init = s_.default_init(bt, 0, 0);
       }
@@ -10321,6 +10585,9 @@ bool Program::special_members(u32 item, EntityId cls, sema::ClassRec& rec,
   rec.layout_requires_virtual_support = rec.polymorphic || std::ranges::any_of(subobjects, [&](QualType t) {
     return classes_.layout_requires_virtual_support(t);
   });
+  // Only a class definition can admit the class or its subobjects (`dynamic_class`, after this);
+  // class template specializations and closures keep the virtual layout guard (#1153).
+  rec.virtual_layout_unsupported = rec.layout_requires_virtual_support;
   const bool manual_union_destruction = rec.union_ && user_dtor;
   if (class_diags && rec.union_ && !user_dtor && std::ranges::any_of(subobjects, [&](QualType t) {
         return classes_.destructor_of(t) != EntityId::none;
@@ -10861,6 +11128,8 @@ const ast::BodySema& Program::synthesized_body(std::size_t i) {
   if (auto it = synth_bodies_.find(i); it != synth_bodies_.end()) return it->second;
   const Synthesized& s = synth_[i];
   if (s.kind == SpecialMember::copy_assignment) return *copy_assignments_.at(s.decl.entity).body;
+  if (s.kind == SpecialMember::default_constructor)
+    return synth_bodies_[i] = BodyAnalysis(*this, s.item).implicit_default_constructor(s.decl);
   ast::Builder b(w_->ins, &arena_);
   std::vector<engine::Diagnostic> diags;  // none: the class was analysed
   AtItem q(*this, s.item, true);
@@ -10877,21 +11146,30 @@ const ast::BodySema& Program::synthesized_body(std::size_t i) {
     sm.push_scope();
     sm.declare_local(other, w_->ins.seqs.at(s.decl.params, 0).type, sema::local_flag::parameter, 0, false);
     std::vector<ast::Child> stmts;
+    bool failed = false;
     // Each direct base from the other object's base class subobject.
     for (const sema::BaseRec& base : rec.bases) {
       QualType bt = w_->types.class_type(base.cls);
-      Ex init = copy_from(sm, sm.name_expr(other, 0, 0), bt);
+      // A dynamic base, abstract or not, is copied by its own copy constructor ([class.copy.ctor]/14).
+      const auto* base_record = classes_.find(base.cls);
+      Ex init = base_record && base_record->dynamic
+                    ? sm.construct(bt, {sm.name_expr(other, 0, 0)}, 0, 0, sema::Construction::direct,
+                                   sema::ConstructorDestination::polymorphic_base)
+                    : copy_from(sm, sm.name_expr(other, 0, 0), bt);
+      failed |= !init.ok();
       stmts.push_back({sm.node(ast::MemberInit{~0u, bt, {init.id, 0}}, 0, 0).id, 0});
     }
     for (u32 i = 0; i < rec.fields.size(); ++i) {
       const sema::FieldRec& f = rec.fields[i];
       Ex src = sm.member(sm.name_expr(other, 0, 0), false, f.name, 0, 0, 0);
       Ex init = copy_from(sm, src, f.type);
+      failed |= !init.ok();
       stmts.push_back({sm.node(ast::MemberInit{i, f.type, {init.id, 0}}, 0, 0).id, 0});
     }
     Ex body = sm.node(ast::Compound{b.list({})}, 0, 0);
     stmts.push_back({body.id, 0});
-    root = sm.node(ast::Compound{b.list(stmts)}, 0, 0);
+    // A copy that cannot be formed leaves no body: code generation reports it.
+    root = failed || sm.has_error_since(0) ? Ex{} : sm.node(ast::Compound{b.list(stmts)}, 0, 0);
     sm.pop_scope();
   } else {
     Ex body = sm.node(ast::Compound{b.list({})}, 0, 0);

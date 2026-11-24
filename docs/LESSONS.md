@@ -147,6 +147,8 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
   - Hit again on #218, with oracles (`--cxx clang`): it built beside a background `tools/build`,
     and two Ninja runs in one directory broke a module ("imports must be built before being
     imported"). The rebuild cost 15 minutes on a loaded machine. Oracle runs need no build either.
+  - Hit again on #309: a test-writing subagent's oracle run built for 37 minutes beside the
+    implementer's build. Give a test author's brief `tools/test --cxx clang affected <path>`.
   - Learned on #659.
 - **A reviewer running your binary blocks your rebuilds.** On #337 the reviewer probed with the
   worktree's `build/bin/ycxx`, so the next step could not be built for 15 minutes.
@@ -558,6 +560,12 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
   - Do: mutate a branch that some test input must take, and check that the suite turns red.
   - Rule: DECISIONS §5.6.
   - Learned on #33.
+
+- **Linux x86-64 run tests can be checked from the Mac without building ycxx in Docker.** Compile
+  with the Mac's ycxx (`ycxx cxx --target=x86_64-pc-linux-gnu -c`), then link and run with `g++`
+  in the `ycxx-linux-amd64` image (`docker run --platform linux/amd64 -v dir:/w`). On #309 this
+  ran 13 mixed-object tests in about a minute, against 25 minutes for an emulated build.
+  - Learned on #309.
 
 ## Data the front end needs
 

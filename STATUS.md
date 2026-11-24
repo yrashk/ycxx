@@ -3349,6 +3349,45 @@ What the process allocates, attributed to the engine's cells, in the trace and t
   [#489](https://github.com/yrashk/ycxx/issues/489)
   [Design](docs/design/ordinary-virtual-declarations.md)
 
+## Virtual functions: general single inheritance (#309, 2026-11-24)
+
+- Both targets compile, link and run ordinary non-template polymorphic classes with external
+  linkage, at namespace scope or nested in such classes, with no base or one public nonvirtual
+  dynamic base (`sema::DynamicClass`, computed at class completion). The peer profiles above keep
+  their classes, and a profile class is not a dynamic base.
+- Layout: a root's vptr at offset zero, a derived class sharing its primary base's.
+  `ClassRec::virtual_layout_unsupported` now guards layout instead of
+  `layout_requires_virtual_support`, so classes containing dynamic subobjects lay out too.
+- Construction: a dynamic class without user-declared constructors, or a class with a dynamic
+  subobject, gets an implicitly defined default constructor (`Program::synthesize_constructor`,
+  body from `BodyAnalysis::implicit_default_constructor`) and an implicit copy constructor that
+  copies a dynamic base with the base's own. Value-initialization zero-initializes first. Every
+  constructor of a dynamic class stores its table's address point after its base subobject and
+  before its members; every destructor stores it before its body ([class.cdtor]). A virtual
+  destructor defaulted in class gets the implicit body.
+- Entries: constructors and destructors of dynamic classes emit C2/D2 at the C1/D1 code, and
+  each virtual destructor definition adds D0 (D1, then sized `operator delete` of the class size).
+- Calls: an unqualified call of a virtual member loads the slot its declaration has in its own
+  class's table; `C::f()`, with an explicit object or implicit `this`, calls directly.
+- Out-of-class definitions of virtual members and virtual destructors.
+- Tables: a unit defining the key function out of class and not inline owns strong `_ZTV`/`_ZTI`;
+  a class without one gets weak ones (ELF COMDAT groups; Mach-O weak, non-unique RTTI for weak
+  descriptors) where an emitted constructor or destructor installs the table, and a keyless base's
+  descriptor alone where only a derived descriptor names it. Implicit constructors of dynamic
+  classes are emitted where called. A destructor destroys a base defined elsewhere with its D2.
+  Pure slots hold `__cxa_pure_virtual`; a derived descriptor is `__si_class_type_info`.
+- Not admitted (keep the virtual layout guard): classes in an unnamed namespace (#1155), fields
+  declared through `decltype` (alias alignment, #1167), and a class serving only as a peer
+  profile's abstract primary base keeps the profile's output (#1156).
+- Tests: `tests/own/classes/virtual-dispatch` (13 run tests from the spec, two with Clang peers)
+  on macOS; `unit.linux_virtual_dispatch` links the same tests with GCC and Clang on Linux
+  (with `-fno-exceptions`: local unwind cleanups around throwing calls are #1104/#648's).
+- Not yet: class templates with virtual members, local and internal-linkage classes,
+  non-polymorphic, non-public or multiple bases, `delete` through a virtual destructor (#293,
+  #931), covariant returns, `typeid` (#294), constant evaluation of polymorphic objects (#25),
+  virtual bases (#310); follow-ups are listed in #309.
+  [Design](docs/design/ordinary-virtual-declarations.md#general-single-inheritance-dynamic-classes-both-targets)
+
 The driver and editor honor `-fno-rtti` and `-frtti` in argument order. `-frtti` restores the
 default mode. With RTTI disabled, owned ELF and Mach-O vtables retain the same address point
 and function slots and have a zero typeinfo word. The parser diagnoses

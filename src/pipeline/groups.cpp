@@ -334,7 +334,7 @@ engine::query_task<SemaResult> TuSema::run(engine::Ctx& cx, TuId tu) {
     const sema::Classes& classes = program.classes();
     auto nontrivial_destructor = [&](this auto&& recurse, EntityId cls) -> bool {
       const auto* record = classes.find(cls);
-      if (!record || record->destructor == EntityId::none || record->layout_requires_virtual_support) return false;
+      if (!record || record->destructor == EntityId::none || record->virtual_layout_unsupported) return false;
       using enum sema::CopyOperation;
       if (record->trivial_copyability.destructor != unknown)
         return record->trivial_copyability.destructor == eligible_nontrivial;
@@ -397,7 +397,9 @@ engine::query_task<SemaResult> TuSema::run(engine::Ctx& cx, TuId tu) {
         shape.calls_abi_uncertain = !shape.trivial_calls && (!known || !nontrivial) &&
                                     !(linux && nontrivial_destructor(c));
       }
-      shape.layout_requires_virtual_support = record.layout_requires_virtual_support;
+      // Only a class outside the general dynamic layout lacks a native complete-object type.
+      shape.layout_requires_virtual_support = record.virtual_layout_unsupported;
+      shape.dynamic_root = record.dynamic && !record.dynamic->primary_base;
       if (record.peer_virtual_layout != sema::PeerVirtualLayout::none ||
           record.peer_automatic_primary_base != EntityId::none) {
         const EntityId primary = record.peer_virtual_layout == sema::PeerVirtualLayout::primary_base

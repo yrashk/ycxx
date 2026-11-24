@@ -20,7 +20,7 @@ The final Linux x86-64 self-check uses the freestanding support in [#380](https:
 
 ## Status
 
-**Pre-0.1** (as of 2026-11-23). ycxx compiles a substantial subset of C++ (C-like code, classes,
+**Pre-0.1** (as of 2026-11-24). ycxx compiles a substantial subset of C++ (C-like code, classes,
 templates and constant evaluation) on macOS arm64, from source to a signed, running executable,
 with no external compiler, assembler or linker. It also builds static executables from a
 freestanding C++ subset for x86-64 Linux. The standard library is out of reach: the gaps on
@@ -793,6 +793,18 @@ supplies the derived key, its RTTI, and the cast runtime.
 multidimensional arrays. They can also copy or alias ordinary non-template classes without
 bases and bind to their public, addressable data members, including array and reference
 members. [#285](https://github.com/yrashk/ycxx/issues/285)
+
+**Virtual functions.** On arm64 macOS and Linux x86-64, ordinary non-template classes with
+external linkage and single public nonvirtual inheritance can declare virtual functions, virtual
+destructors and pure virtuals, and programs using them compile and run. Objects are constructed by
+implicit or written constructors, copied and destroyed; virtual calls dispatch to the final
+overrider, and calls during construction and destruction use the class being built or torn down.
+Virtual members can be defined out of class. The unit defining the key function emits the vtable
+and RTTI, and classes without one get weak tables where they are constructed or destroyed. The objects link and interoperate
+with Clang and GCC objects. Class templates with virtual members, internal-linkage and local
+classes, other base shapes, `delete` through a virtual destructor and `typeid` are not supported
+yet. [#309](https://github.com/yrashk/ycxx/issues/309) · [#1153](https://github.com/yrashk/ycxx/issues/1153) ·
+[#1154](https://github.com/yrashk/ycxx/issues/1154) · [#1155](https://github.com/yrashk/ycxx/issues/1155)
 
 **Virtual tables.** On Linux x86-64 and arm64 macOS, a translation unit with the key definition emits the vtable and
 RTTI for an ordinary root with one public integral field and two fixed integer virtual
