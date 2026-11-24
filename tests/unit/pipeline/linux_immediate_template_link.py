@@ -1,4 +1,4 @@
-"""Link two x86-64 translation units that fold the same immediate specialization."""
+"""Check native linking after immediate calls fold."""
 
 import os
 from pathlib import Path
@@ -38,6 +38,16 @@ def main():
         subprocess.run([host_cxx, *objects, "-o", executable], check=True)
         check_symbols(readelf, executable)
         subprocess.run([executable], check=True)
+
+        retained = output / "retained-caller"
+        retained_obj = retained.with_suffix(".o")
+        subprocess.run(
+            [*compile_command, source_dir / "retained-caller.cpp", "-o", retained_obj],
+            env=env,
+            check=True,
+        )
+        subprocess.run([host_cxx, retained_obj, "-o", retained], check=True)
+        subprocess.run([retained], check=True)
 
 
 if __name__ == "__main__":
