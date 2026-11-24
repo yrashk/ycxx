@@ -17,8 +17,24 @@ A surviving relocation from a retained immediate body therefore keeps the callee
 original native emission path. A definition used only for constant evaluation needs
 no native lowering or symbol.
 
-Virtual functions keep their native path because a table slot can name one
-independently of its calls. A body with closures or static locals also keeps
-its existing collection path, which provides their members or storage.
+An ordinary virtual function may be referenced by a table independently of its
+calls. An immediate virtual has no entry in the Itanium ABI table and is inline,
+so it cannot be the key function. Class completion still includes it when matching
+overrides, finding pure final overriders and deciding polymorphic layout. The
+native table of an all-immediate class contains the header, with no function entries.
+Matching overrides agree on immediacy. Virtual assignment remains outside this slice
+because implicit assignments can introduce overrides.
+
+The frontend checks a virtual immediate function's body and omits it from native
+collection. The runtime slot used by the current call node cannot identify an
+immediate virtual or its semantic final overrider. Until immediate virtual evaluation
+is implemented, evaluated calls receive a diagnostic, including qualified calls.
+Unevaluated operands can still use the selected declaration's type.
+[[class.virtual]](https://eel.is/c++draft/class.virtual) ·
+[[class.abstract]](https://eel.is/c++draft/class.abstract) ·
+[Itanium C++ ABI §2.5.2](https://itanium-cxx-abi.github.io/cxx-abi/abi.html#vtable-components)
+
+Nonvirtual immediate bodies with closures or static locals keep their existing
+collection path, which provides their members or storage.
 [#1097](https://github.com/yrashk/ycxx/issues/1097) ·
 [#1077](https://github.com/yrashk/ycxx/issues/1077)

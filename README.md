@@ -43,6 +43,10 @@ dependent exception specification when it is needed.
 A lambda's noexcept-specifier, including one that depends on an enclosing template's
 parameters, is part of its call operator's type. [#807](https://github.com/yrashk/ycxx/issues/807)
 
+Templates can take values of named flat aggregates with public integral fields as constant
+arguments. On Linux x86-64, equivalent values share a parameter object across translation
+units. [#317](https://github.com/yrashk/ycxx/issues/317)
+
 Classes and class templates can declare member alias templates, used as `C::M<args>`,
 `typename Q::template M<args>` and as template template arguments.
 [#340](https://github.com/yrashk/ycxx/issues/340)
@@ -705,6 +709,8 @@ written default member initializer are value-initialized.
   character arrays in constant expressions.
   [#248](https://github.com/yrashk/ycxx/issues/248) [#1093](https://github.com/yrashk/ycxx/issues/1093)
   [#1092](https://github.com/yrashk/ycxx/issues/1092) [#1170](https://github.com/yrashk/ycxx/issues/1170)
+  `__builtin_LINE()` reports the presumed line, including the call site of an omitted ordinary
+  function argument. [#327](https://github.com/yrashk/ycxx/issues/327)
 - `extern "C"` functions from libSystem, including `printf` with integers, characters,
   floating values, pointers and strings as arguments, and the SDK `<math.h>`'s built-ins
   (`__builtin_fabs`, `__builtin_inf`, `__builtin_huge_val`, `__builtin_nan`).
@@ -850,6 +856,12 @@ with Clang and GCC objects. Class templates with virtual members, internal-linka
 classes, other base shapes, `delete` through a virtual destructor and `typeid` are not supported
 yet. [#309](https://github.com/yrashk/ycxx/issues/309) · [#1153](https://github.com/yrashk/ycxx/issues/1153) ·
 [#1154](https://github.com/yrashk/ycxx/issues/1154) · [#1155](https://github.com/yrashk/ycxx/issues/1155)
+
+Ordinary classes can also declare immediate virtual functions, including pure virtual
+declarations and immediate overrides. These declarations contribute to polymorphism
+and abstractness. Their definitions need no native symbol or vtable entry, and ordinary
+virtuals still dispatch. Evaluated calls to immediate virtual functions remain unsupported.
+[#1097](https://github.com/yrashk/ycxx/issues/1097)
 
 **Virtual tables.** On Linux x86-64 and arm64 macOS, a translation unit with the key definition emits the vtable and
 RTTI for an ordinary root with one public integral field and two fixed integer virtual

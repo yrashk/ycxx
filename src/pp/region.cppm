@@ -230,6 +230,8 @@ struct Region {
   std::vector<Tok> tokens;
   // Parallel to `tokens`; the eof's offset is the main file's size.
   std::vector<TokLoc> locs;
+  // Presumed lines parallel to tokens when the expanded unit contains __builtin_LINE.
+  std::vector<u32> presumed_lines;
   // Identifier and ud-suffix spellings in UTF-8, universal-character-names replaced; an
   // identifier's payload indexes them. Numbered in order of appearance.
   std::vector<std::string> names;

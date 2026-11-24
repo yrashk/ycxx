@@ -1128,6 +1128,9 @@ private daemons.
     request. Concurrent clients include two requests of one file and a distinct build root
     reaching the checkpoint while the first is parked.
   - All run on macOS and Linux.
+  - `daemon.compare`, `daemon.process`, `daemon.trace` and `unit.linux_elf_comdat` put their
+    private daemon runtimes under `TMPDIR` when the socket path fits, with `/tmp` as the fallback
+    for long paths (#793).
 - The first persistence slice (#17) shares phase-1 and phase-2 source preparation in immutable
   mapped snapshot files. A selected query cell can be loaded at quiescence with its direct input
   dependency fingerprints and then verified by the usual engine path. The lexer borrows mapped
@@ -1606,13 +1609,15 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   have declared I, and the namespace must enclose O (`member_class_qualifier`). That item binds
   no name in its namespace (`declared_in`), and its members' item scope is `O::I`.
 - The enclosing class's `class_content` lists each member class once as a nested type, so
-  qualified lookup (`O::I`), access checks and `earlier_member` find it.
+  qualified lookup (`O::I`), access checks and `earlier_member` find it. Redeclarations of a member
+  class use the same access.
 - Unqualified lookup from a nested class's members goes on to each enclosing class
-  (`Sema::enclosing_class`): its record when complete, otherwise the members before the nested
-  class (`Questions::enclosing_earlier_member`); qualified names into a still incomplete
-  enclosing class (`O::A`, `O::k`) use the same members. A non-type there hides a class of its
-  name, and non-static enclosing members can only be named unevaluated. The injected-class-name
-  is found in the nested class's own declarations.
+  (`Sema::enclosing_class`). It sees the complete class in a complete-class context. In an
+  incomplete enclosing class it searches preceding members, then bases, before continuing to
+  outer scopes. Qualified names see the same enclosing declarations. Lookup checks inherited
+  access and respects names hidden by non-types. Static functions need no receiver for either
+  spelling. Non-static data members can be named without an object in an unevaluated operand.
+  [#1216](https://github.com/yrashk/ycxx/issues/1216)
 - A nested class is complete in its enclosing class's complete-class contexts and implicit
   special members (`Program::is_complete`, `within_outer_class`). `analyze_group` completes a
   class, then its nested classes, then the members' bodies (`complete_class_items`); `front.cppm`
@@ -1620,7 +1625,7 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
 - Virtual members and the special-member features gated on "a class at namespace scope" accept a
   class nested in ordinary classes (`Program::outermost_class_scope`); peer-profile layouts still
   exclude classes with nested types.
-- Tests: `tests/own/classes/nested` (44; 26 from a spec-only author, 9 from the review), 5 draft
+- Tests: `tests/own/classes/nested` (47, including three independent #1216 controls), 5 draft
   examples, and `unit.darwin_nested_classes` / `unit.linux_nested_classes` (two units sharing a
   nested class; on Linux also every run test).
 - Not yet: nested classes of class templates, their partial and explicit specializations, and
@@ -2716,6 +2721,16 @@ the same IR `unreachable`, flagged `assumed_unreachable`. Native code traps as a
 constant evaluation that reaches it fails with "execution reached __builtin_unreachable()"
 ([expr.const]). IR node flags are 16 bits wide to make room for the flag.
 
+## Source line builtin (#327)
+
+`__builtin_LINE()` is a zero-argument `unsigned int` constant expression. It uses the presumed
+source line, including through macro expansion and `#line`. An omitted ordinary function
+argument evaluates its default with the invocation line, which nested defaults inherit.
+The interpreter and native code share the same scoped evaluation. Translation units with the
+builtin track presumed lines in their semantic input. The full `std::source_location` facility
+continues in [#327](https://github.com/yrashk/ycxx/issues/327).
+[Design](docs/design/source-line-defaults.md)
+
 ## Basic Linux asm statements (#950)
 
 Statement-position `asm("int3");` and GNU `asm volatile("int3");` emit one INT3
@@ -3527,6 +3542,12 @@ What the process allocates, attributed to the engine's cells, in the trace and t
   descriptor alone where only a derived descriptor names it. Implicit constructors of dynamic
   classes are emitted where called. A destructor destroys a base defined elsewhere with its D2.
   Pure slots hold `__cxa_pure_virtual`; a derived descriptor is `__si_class_type_info`.
+- Immediate virtual functions and overrides can be declared in the supported ordinary classes.
+  An override must agree with its base declaration on `consteval`. Immediate declarations count
+  toward polymorphism and pure final overriders. The vtable retains its header and contains only
+  ordinary virtual entries. Immediate definitions are checked and have no native symbol.
+  Evaluated calls and immediate virtual assignments remain unsupported.
+  [#1097](https://github.com/yrashk/ycxx/issues/1097)
 - Not admitted (keep the virtual layout guard): classes in an unnamed namespace (#1155), fields
   declared through `decltype` (alias alignment, #1167), and a class serving only as a peer
   profile's abstract primary base keeps the profile's output (#1156).
@@ -3619,6 +3640,20 @@ parity are tracked in [#294](https://github.com/yrashk/ycxx/issues/294) and
   templates (#339), trailing requires-clauses on member templates, static data member templates,
   `&S::get<int>`, explicit specializations of member templates; a non-type default depending on
   the class's parameter (#209). Found on the way: #345.
+
+## Flat structural class template arguments (#317, 2026-11-24)
+
+- Fixed-type parameters accept named complete flat aggregates with public nonmutable integral
+  fields. The canonical argument records the class type and converted field values. Named
+  constant expressions and equivalent braced values select the same specialization.
+- The template parameter denotes a const object. Equivalent values share a parameter object
+  across templates and translation units within the supported default-visible native scope.
+  Linux x86-64 emits weak ELF parameter object definitions. The native Itanium name retains
+  the argument type and value while omitting trailing zero fields.
+- The Linux x86-64 controls link and run in both directions with GCC 16 and Clang 23.
+  The fixtures cover named and braced values, specialization identity, direct address and
+  mutable-field rejection in `tests/own/templates/`. Floating-point arguments, richer
+  structural forms and the remaining dependent and visibility cases stay in #317.
 
 ## Member alias templates and `Q::template M` (#340, 2026-11-24)
 
@@ -4445,9 +4480,12 @@ the body. A non-generic lambda body uses its own evaluation context.
   (`Program::defaulted_three_way`) compares each subobject with `<=>`. A return type of plain
   `auto` becomes the common comparison category of the results (`strong_ordering` with no
   subobjects); a result that is not a category deletes the operator. Each result is converted to
-  the return type R. The body is `{ R v0 = x0 <=> y0; if (v0 != 0) return v0; … return
-  R::equal; }` (`defaulted_three_way_body`). The exception specification covers the comparisons,
-  the `vi != 0` tests and the equal result.
+  the return type R. A comparison category that cannot convert to an explicit scalar builtin R
+  makes the operator deleted ([class.spaceship]/1.2, /2.2). The body is
+  `{ R v0 = x0 <=> y0; if (v0 != 0) return v0; … return R(std::strong_ordering::equal); }`
+  (`defaulted_three_way_body`). Completion and the body build the same initialized local and
+  lvalue `vi != 0` test. The implicit exception specification covers the comparisons, the
+  lvalue tests, and initialization of either return value (#1225).
 - `x.operator@(…)` and `p->operator@(…)` name member operator functions.
 - For non-assignment binary operators without comparison rewrites, an access, deletion or
   ambiguity diagnostic from the member-only probe can trigger joint ranking with nonmembers.

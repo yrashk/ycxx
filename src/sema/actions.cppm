@@ -106,11 +106,15 @@ public:
   virtual std::optional<ast::DeclSema> class_friend(EntityId) { return std::nullopt; }
   virtual bool peer_pure_dispatch(EntityId) { return false; }
   virtual void use_typed_dynamic_cast() {}
+  virtual u32 presumed_line(engine::Loc) { return 0; }
   // A use of a global allocation function that may lack a written declaration in the unit.
   // An aligned signature also brings its parameter's enum shape into the unit.
   virtual void use_allocation_function(EntityId, bool = false) {}
   // A call of a C library function a builtin lowers to (`World::string_function`).
   virtual void use_library_function(EntityId) {}
+  // The static object denoted by a class-valued template parameter ([temp.param]).
+  virtual void use_template_parameter_object(EntityId) {}
+  virtual bool plain_class_template_type(EntityId) { return false; }
   // Check the selected implicitly declared copy assignment against its subobjects.
   virtual CopyAssignment require_copy_assignment(EntityId) { return CopyAssignment::unsupported; }
   // What a constant evaluation fetches (§B7): `function_ir` of a function defined before the
@@ -195,7 +199,8 @@ public:
                                                      std::vector<ast::DeclSema>* functions = nullptr) = 0;
   // In a member of a nested class ([class.nest]): the member named `name` that the enclosing
   // class `cls`, still being defined, declares before the nested class.
-  virtual std::optional<ast::DeclSema> enclosing_earlier_member(EntityId /*cls*/, NameId /*name*/, bool /*type_only*/) {
+  virtual std::optional<ast::DeclSema> enclosing_earlier_member(EntityId /*cls*/, NameId /*name*/, bool /*type_only*/,
+                                                               std::vector<ast::DeclSema>* /*functions*/ = nullptr) {
     return std::nullopt;
   }
   // The direct bases of class `c` while it is being defined (its base-clause), none otherwise.
@@ -658,15 +663,15 @@ public:
       for (EntityId k = enclosing_class(current_class); k != EntityId::none; k = enclosing_class(k)) {
         if (const ClassRec* cr = class_rec(k); cr && cr->defined) {
           // A data member, function or enumerator hides a class of the same name ([basic.scope.hiding]).
-          if (auto f = find_member(k, name, /*unqualified=*/true);
+          if (auto f = direct_member(k, *cr, name);
               !elaborated && f && (f->nested_type == EntityId::none || f->enumerator != EntityId::none))
             return std::nullopt;
-          if (auto r = nested_member(k, name, true)) return r->first.type;
-        } else if (auto m = q_->enclosing_earlier_member(k, name, elaborated)) {
-          if (is_type(m->kind)) return m->type;
-          if (!elaborated) return std::nullopt;
+          auto hit = class_body_type(k, *cr, name, type_at, ClassBodyLookup::class_prefix, elaborated);
+          if (hit.found) return hit.type;
+        } else {
+          auto hit = enclosing_prefix_type(k, name, type_at, elaborated);
+          if (hit.found) return hit.type;
         }
-        if (w_->entities.rec(k).name == name) return types().class_type(k);  // its injected-class-name
       }
     }
     // BOOTSTRAP: -Wmaybe-uninitialized: a value and a flag, not std::optional. At -O3 GCC 16.2
@@ -723,17 +728,33 @@ public:
       if (k == c) return true;
     return false;
   }
-  // Member `m` of enclosing class `k`, still being defined, named in an expression from a nested
-  // class: none for a type. A non-static member needs an object unless it is a data member in
-  // an unevaluated operand ([expr.prim.id.general]/4).
-  std::optional<Ex> enclosing_member_value(EntityId k, const ast::DeclSema& m, NameId name, u32 begin, u32 end) {
-    if (is_type(m.kind)) return std::nullopt;
-    if (m.kind == ast::DeclKind::enumerator) return enumerator(m.entity, m.type, begin, end);
-    if (m.kind == ast::DeclKind::variable) return static_member(k, m.entity, m.type, begin, end);
-    if (m.kind == ast::DeclKind::data_member && unevaluated)
-      return unevaluated_data_member(m.entity, m.type, m.bit_width, begin, end);
-    diag(begin, Diag::member_without_object, name);
-    return Ex{NodeId::none, begin, end};
+  // An incomplete enclosing class exposes its preceding declarations, then its bases.
+  // A non-static member needs an object unless it is a data member in an unevaluated operand.
+  std::optional<Ex> enclosing_prefix_value(EntityId cls, NameId name, u32 begin, u32 end, u32 name_at,
+                                           bool unqualified, bool callee, std::optional<u32> address_at = {}) {
+    std::vector<ast::DeclSema> functions;
+    if (auto m = q_->enclosing_earlier_member(cls, name, /*type_only=*/false, &functions)) {
+      if (m->kind == ast::DeclKind::enumerator) return enumerator(m->entity, m->type, begin, end);
+      if (m->kind == ast::DeclKind::variable) return static_member(cls, m->entity, m->type, begin, end);
+      if (m->kind == ast::DeclKind::function) {
+        const auto is_static = [](const ast::DeclSema& d) { return (d.flags & decl_flag::static_) != 0; };
+        if (!functions.empty() && std::ranges::all_of(functions, is_static))
+          return decls_expr(std::move(functions), true, name, begin, end, callee);
+        if (std::ranges::any_of(functions, is_static))
+          return bind_prefix_member_functions(cls, name, functions, begin, end);
+      }
+      if (m->kind == ast::DeclKind::data_member && unevaluated)
+        return unevaluated_data_member(m->entity, m->type, m->bit_width, begin, end);
+      diag(begin, is_type(m->kind) ? Diag::type_as_expression : Diag::member_without_object, name);
+      return Ex{NodeId::none, begin, end};
+    }
+    if (w_->entities.rec(cls).name == name) {
+      diag(name_at, Diag::type_as_expression, name);
+      return Ex{NodeId::none, begin, end};
+    }
+    const auto bases = class_prefix_bases(cls);
+    if (bases.empty()) return std::nullopt;
+    return class_member(cls, name, begin, end, name_at, address_at, unqualified, /*check_all_bases=*/true, bases);
   }
   static bool is_non_template_tag(const ast::DeclSema& decl) {
     return (decl.kind == ast::DeclKind::class_ || decl.kind == ast::DeclKind::enum_) &&
@@ -876,6 +897,15 @@ public:
     }
     return {true, first->type};
   }
+
+  ClassBodyType enclosing_prefix_type(EntityId cls, NameId name, std::optional<u32> at, bool type_only) {
+    if (auto member = q_->enclosing_earlier_member(cls, name, type_only)) {
+      const bool names_type = is_type(member->kind) && !(member->flags & decl_flag::template_);
+      return {true, names_type ? std::optional{member->type} : std::nullopt};
+    }
+    return class_body_type(cls, ClassRec{}, name, at, ClassBodyLookup::class_prefix, type_only);
+  }
+
   // A class template's nondependent bases are searched before the template parameter scope.
   std::optional<QualType> class_template_parameter_type(const ast::TemplateParamSema& parameter, NameId name, u32 at) {
     const auto before = diag_count();
@@ -1241,6 +1271,65 @@ public:
 
   Questions& questions() { return *q_; }
   u32 loc_base() const { return loc_base_; }
+  struct DefaultLineScope {
+    Sema& sema;
+    bool observed = false;
+    bool* saved;
+    explicit DefaultLineScope(Sema& sema, bool capture = true)
+        : sema(sema), saved(std::exchange(sema.default_line_observer_, capture ? &observed : nullptr)) {}
+    ~DefaultLineScope() { sema.default_line_observer_ = saved; }
+  };
+  u32 source_line_at(u32 at) {
+    return q_->presumed_line(q_->source_loc({std::to_underlying(item_), loc_base_ + at}, at));
+  }
+  bool observes_default_line(const Ex& expression) {
+    if (!default_line_observer_ || !*default_line_observer_) return false;
+    const auto root = b_->commit(ast::Child{expression.id, 0});
+    const auto& nodes = ins().ast;
+    // A literal through parentheses or contextual conversion to bool cannot observe the line.
+    auto literal_truth = [&](NodeId id) -> std::optional<bool> {
+      while (true) {
+        if (nodes.is<ast::Paren>(id)) {
+          id = nodes.get<ast::Paren>(id).operand.id;
+        } else if (nodes.is<ast::ImplicitConversion>(id)) {
+          const auto conversion = nodes.get<ast::ImplicitConversion>(id);
+          if (conversion.conversion != ast::ConversionKind::boolean) return std::nullopt;
+          id = conversion.operand.id;
+        } else {
+          break;
+        }
+      }
+      if (!nodes.is<ast::Literal>(id)) return std::nullopt;
+      const auto value = nodes.get<ast::Literal>(id).value;
+      if (!ins().values.is<ast::VInt>(value)) return std::nullopt;
+      return ast::int_bits(ins(), value) != ast::Bits128{};
+    };
+    bool observed = false;
+    auto visit = [&](this const auto& self, const ast::Red& n) -> void {
+      if (observed || n.is<ast::ConstantProbe>()) return;
+      if (n.is<ast::SourceLine>()) {
+        observed = true;
+        return;
+      }
+      if (n.is<ast::Conditional>()) {
+        const auto conditional = n.get<ast::Conditional>();
+        if (const auto truth = literal_truth(conditional.condition.id)) {
+          const auto arm = *truth ? conditional.then_ : conditional.else_;
+          self(ast::Red(nodes, arm.id));
+          return;
+        }
+      }
+      if (n.is<ast::OrderedBinary>()) {
+        const auto binary = n.get<ast::OrderedBinary>();
+        if ((binary.op == ast::OrderedOp::logical_and && literal_truth(binary.lhs.id) == false) ||
+            (binary.op == ast::OrderedOp::logical_or && literal_truth(binary.lhs.id) == true))
+          return;
+      }
+      n.for_each_child(self);
+    };
+    visit(ast::Red(nodes, root.id));
+    return observed;
+  }
   // Whether this is a templated context: a template's definition or one of its instantiations.
   bool templated() const { return !template_scopes.empty() || instantiating(); }
   // A generic lambda can still be in its definition while its enclosing function is instantiated.
@@ -2653,9 +2742,7 @@ public:
     }
     if (c == current_class)
       if (auto m = q_->earlier_member(n, /*type_only=*/true); m && !(m->flags & decl_flag::template_)) return m->type;
-    if (encloses_current_class(c))
-      if (auto m = q_->enclosing_earlier_member(c, n, /*type_only=*/true); m && !(m->flags & decl_flag::template_))
-        return m->type;
+    if (encloses_current_class(c)) return enclosing_prefix_type(c, n, std::nullopt, /*type_only=*/true).type;
     return std::nullopt;
   }
 
@@ -2722,6 +2809,11 @@ public:
       const EntityRec& record = w_->entities.rec(naming);
       if (record.kind != EntityKind::class_ || record.templ != EntityId::none) return true;
     }
+    if (!direct_alias_only && encloses_current_class(naming) && !class_rec(naming)) {
+      const auto before = diag_count();
+      enclosing_prefix_type(naming, n, at, /*type_only=*/true);
+      return !has_error_since(before);
+    }
     auto r = nested_member(naming, n);
     if (!r) return true;
     auto [t, c] = *r;
@@ -2769,7 +2861,12 @@ public:
     if (naming == current_class && (!cls || !cls->defined)) {
       if (q_->earlier_member(name, type_only)) return {};
     }
-    if (enclosing && (!cls || !cls->defined) && q_->enclosing_earlier_member(naming, name, type_only)) return {};
+    if (enclosing) {
+      if (entity.name != name)
+        return cls && cls->defined ? class_body_type(naming, *cls, name, at, ClassBodyLookup::class_prefix, type_only)
+                                   : enclosing_prefix_type(naming, name, at, type_only);
+      if ((!cls || !cls->defined) && q_->enclosing_earlier_member(naming, name, type_only)) return {};
+    }
     const ClassRec incomplete;
     return class_body_type(naming, cls ? *cls : incomplete, name, at, ClassBodyLookup::qualified, type_only);
   }
@@ -2906,8 +3003,8 @@ public:
           return {NodeId::none, begin, end};
         }
         if (encloses_current_class(cls))
-          if (auto m = q_->enclosing_earlier_member(cls, n, /*type_only=*/false))
-            if (auto r = enclosing_member_value(cls, *m, n, begin, end)) return *r;
+          if (auto r = enclosing_prefix_value(cls, n, begin, end, name_at, /*unqualified=*/false, immediate_call, address_at))
+            return *r;
         if (auto r = qualified_class_prefix_value(cls, n, begin, end)) return *r;
         if (!type_trait_failed(*s.type)) diag(begin, Diag::incomplete_type, *s.type);
         return {NodeId::none, begin, end};
@@ -4403,6 +4500,7 @@ public:
     t.member_constant = [this](QualType qualifier, NameId name) {
       return qualified_member_constant(qualifier, name, 0);
     };
+    t.plain_class_template_type = [this](EntityId c) { return q_->plain_class_template_type(c); };
     t.template_decl = [this](EntityId tmpl) { return q_->template_decl(tmpl); };
     t.variable_constant = [this](EntityId spec) { return q_->constant_value(spec); };
     t.concept_constant = [this](EntityId entity, std::span<const TemplateArg> args) {
@@ -5709,6 +5807,10 @@ public:
   // `call` calls a consteval function or constructor.
   Ex immediate_invocation(Ex call) {
     if (!call.ok() || immediate_context || unevaluated || !evaluate_immediate) return call;
+    if (observes_default_line(call)) {
+      diag(call.begin, Diag::default_arg_source_line_immediate);
+      return {NodeId::none, call.begin, call.end};
+    }
     const Evaluation v = evaluate_immediate(call);
     if (!v.constant) {
       diag(call.begin, Diag::not_constant, v.reason);
@@ -5822,7 +5924,7 @@ public:
   };
 
   std::span<const BaseRec> class_prefix_bases(EntityId owner) {
-    if (owner == class_prefix_owner_) return q_->defining_base_records(owner);
+    if (owner == class_prefix_owner_ || encloses_current_class(owner)) return q_->defining_base_records(owner);
     return {};
   }
   const ast::DeclSema* own_initializer_static(NameId name) {
@@ -6050,7 +6152,8 @@ public:
     return r;
   }
 
-  Ex bind_prefix_member_functions(NameId name, const std::vector<ast::DeclSema>& declarations, u32 begin, u32 end) {
+  Ex bind_prefix_member_functions(EntityId owner, NameId name, const std::vector<ast::DeclSema>& declarations,
+                                  u32 begin, u32 end) {
     std::vector<MemberDeclRec> records;
     std::vector<ast::DeclSema> statics;
     for (const auto& d : declarations | std::views::reverse) {
@@ -6065,7 +6168,7 @@ public:
     std::vector<const MemberDeclRec*> candidates;
     candidates.reserve(records.size());
     for (const MemberDeclRec& record : records) candidates.push_back(&record);
-    Ex set = bind_members(current_class, std::move(candidates), std::nullopt, false, begin, end, begin);
+    Ex set = bind_members(owner, std::move(candidates), std::nullopt, false, begin, end, begin);
     const u32 key = std::to_underlying(set.id);
     // The map's binding owns these records at a stable address. Swapping preserves the candidate pointers.
     bound_.at(key).prefix_candidates.swap(records);
@@ -6448,6 +6551,10 @@ public:
     const ClassRec* dynamic_owner = d->is_virtual ? class_rec(w_->entities.rec(d->entity).scope) : nullptr;
     if (dynamic_owner && !dynamic_owner->dynamic) dynamic_owner = nullptr;
     if (unevaluated == 0) {
+      if (d->is_virtual && d->is_consteval) {
+        diag(paren_at, Diag::virtual_immediate_call);
+        return fail;
+      }
       if (dynamic_owner) {
         // Itanium C++ ABI §3.2.4: dispatch through the slot the declaration occupies in its own
         // class's table. A qualified name calls the named function directly ([class.virtual]/16).
@@ -6521,7 +6628,8 @@ public:
     if (unevaluated == 0 && d->head.empty() && closure_member(*w_, fe) &&
         !require_supported_virtual_layout(fr.inner, paren_at))
       return fail;
-    auto children = call_args(fr, args, begin, paren_at, cands[*chosen].defaults,
+    const u32 invocation_at = bound.explicit_receiver ? bound.name_at : begin;
+    auto children = call_args(fr, args, begin, paren_at, invocation_at, cands[*chosen].defaults,
                               DefaultArgumentOrigin::interned, fe);
     if (!children) return fail;
     ExprInfo info = result_info(fr.inner);
@@ -7238,7 +7346,7 @@ public:
     }
     const auto supplied = args.size();
     for (std::size_t i = supplied; i < fr.params.size() && i < k.defaults.size(); ++i) {
-      auto a = default_argument(k.defaults[i], end, DefaultArgumentOrigin::interned, k.entity, fr.params[i]);
+      auto a = default_argument(k.defaults[i], end, DefaultArgumentOrigin::interned, k.entity, fr.params[i], begin);
       if (!a) return fail;
       args.push_back(*a);
     }
@@ -7367,7 +7475,8 @@ public:
         const auto conversion = node.get<ast::ImplicitConversion>().conversion;
         return conversion != ast::ConversionKind::user_defined && conversion != ast::ConversionKind::array_copy;
       }
-      return node.is<ast::Literal>() || node.is<ast::DeclRef>() || node.is<ast::LocalRef>() || node.is<ast::This>() ||
+      return node.is<ast::Literal>() || node.is<ast::SourceLine>() || node.is<ast::SourceLineContext>() ||
+             node.is<ast::DeclRef>() || node.is<ast::LocalRef>() || node.is<ast::This>() ||
              node.is<ast::Paren>() || node.is<ast::Member>() || node.is<ast::Subscript>() ||
              node.is<ast::Unary>() || node.is<ast::Binary>() || node.is<ast::OrderedBinary>() ||
              node.is<ast::Assign>() || node.is<ast::Conditional>() || node.is<ast::DefaultArg>();
@@ -7690,11 +7799,27 @@ public:
         diag(begin, Diag::unexpanded_pack, name);  // [temp.variadic]/5: outside every expansion
         return {NodeId::none, begin, end};
       }
-      if (auto a = bound_arg(*p))
-        return literal(Types::unqualified(a->type), a->value, ValueCategory::prvalue, begin, end);
+      if (auto a = bound_arg(*p)) {
+        if (!ins().values.is<ast::VAggregate>(a->value))
+          return literal(Types::unqualified(a->type), a->value, ValueCategory::prvalue, begin, end);
+        QualType declared = types().canonical(Types::unqualified(a->type));
+        QualType object_type = types().add_cv(declared, Cv::const_);
+        EntityId object = w_->entities.entity({.kind = EntityKind::template_parameter_object,
+                                               .name = no_name(), .type = object_type, .args = {*a}});
+        if (!unevaluated) q_->use_template_parameter_object(object);
+        ExprInfo info{object_type, ValueCategory::lvalue, 0};
+        Ex result = node(ast::DeclRef{info, object}, begin, end, info);
+        declared_types_[std::to_underlying(result.id)] = declared;
+        return result;
+      }
       ConstId v = ins().intern_value(ast::VDepParam{p->depth, p->index});
-      ExprInfo info{Types::unqualified(p->type), ValueCategory::prvalue, expr_flag::dependent};
-      return node(ast::Literal{info, v}, begin, end, info);
+      QualType declared = Types::unqualified(p->type);
+      const bool class_parameter = types().is_class(declared) && !types().is_dependent(declared);
+      ExprInfo info{class_parameter ? types().add_cv(declared, Cv::const_) : declared,
+                    class_parameter ? ValueCategory::lvalue : ValueCategory::prvalue, expr_flag::dependent};
+      Ex result = node(ast::Literal{info, v}, begin, end, info);
+      if (class_parameter) declared_types_[std::to_underlying(result.id)] = declared;
+      return result;
     }
     if (const auto* declaration = earlier_nested_enumerator(name))
       return enumerator_in_list(*declaration, begin, end);
@@ -7707,9 +7832,8 @@ public:
       for (EntityId k = enclosing_class(current_class); k != EntityId::none; k = enclosing_class(k)) {
         if (class_rec(k)) {
           if (auto r = class_member(k, name, begin, end, begin, std::nullopt, /*unqualified=*/true)) return *r;
-        } else if (auto m = q_->enclosing_earlier_member(k, name, /*type_only=*/false)) {
-          if (is_type(m->kind)) break;  // found a type: not an expression
-          return *enclosing_member_value(k, *m, name, begin, end);
+        } else if (auto r = enclosing_prefix_value(k, name, begin, end, begin, /*unqualified=*/true, callee)) {
+          return *r;
         }
       }
     }
@@ -7947,6 +8071,19 @@ public:
   // Builtins with ordinary expression arguments (docs/EXTENSIONS.md).
   Ex builtin_call(const lex::BuiltinFunctionInfo& b, std::vector<Ex> args, u32 begin, u32 end) {
     using enum lex::BuiltinFunction;
+    if (b.function == source_line) {
+      if (!builtin_arity(0, args.size(), begin)) return {NodeId::none, begin, end};
+      const QualType type = builtin(Builtin::unsigned_int);
+      const u32 line = source_line_at(begin);
+      if (default_line_observer_) {
+        // Constant probes retain unevaluated operands for proof, but the default's invocation
+        // line is still unknown. Only an evaluated use binds the enclosing default to a line.
+        if (!unevaluated) *default_line_observer_ = true;
+        const ExprInfo info{type, ValueCategory::prvalue, 0};
+        return node(ast::SourceLine{info, line}, begin, end, info);
+      }
+      return literal(type, w_->values.integer(type, line), ValueCategory::prvalue, begin, end);
+    }
     if (b.function == trap || b.function == unreachable) {
       // [utility.unreachable]: both are `void` and end the path they are on.
       if (!builtin_arity(0, args.size(), begin)) return {NodeId::none, begin, end};
@@ -7993,6 +8130,7 @@ public:
     }
     switch (b.function) {
       case addressof:
+      case source_line:
       case trap:
       case unreachable:
       case strlen:
@@ -10008,14 +10146,10 @@ public:
   QualType decltype_of(Ex e, bool parenthesized) {
     if (!parenthesized) {
       if (auto l = as<ast::LocalRef>(e)) return local_declared_type(locals_[l->local]);
-      if (as<ast::Dependent>(e))
-        if (auto it = declared_types_.find(std::to_underlying(e.id)); it != declared_types_.end()) return it->second;
+      if (auto it = declared_types_.find(std::to_underlying(e.id)); it != declared_types_.end()) return it->second;
       // The declared type: the declaration's that named the entity (a static data member's is
       // its type, a function's its function type), a data member's from its class.
-      if (as<ast::DeclRef>(e)) {
-        if (auto it = declared_types_.find(std::to_underlying(e.id)); it != declared_types_.end()) return it->second;
-        return e.type();
-      }
+      if (as<ast::DeclRef>(e)) return e.type();
       if (auto m = as<ast::Member>(e))
         if (const ClassRec* c = class_rec(w_->entities.rec(m->member).scope))
           for (const FieldRec& f : c->fields)
@@ -11759,7 +11893,7 @@ public:
       return {NodeId::none, begin, end};
     }
     TypeRec fr = types().rec(ft);
-    auto children = call_args(fr, args, begin, paren_at, defaults, default_origin, default_source);
+    auto children = call_args(fr, args, begin, paren_at, begin, defaults, default_origin, default_source);
     if (!children) return {NodeId::none, begin, end};
     ExprInfo info = result_info(fr.inner);
     return node(ast::Call{info, function, at(callee, begin), b_->list(*children)}, begin, end, info);
@@ -11943,11 +12077,24 @@ public:
   // tree, analysed at the declaration ([dcl.fct.default]/5). A supported dependent default
   // is replayed only for the selected specialization and only when omitted ([temp.inst]/12).
   std::optional<Ex> default_argument(NodeId d, u32 at_, DefaultArgumentOrigin origin = DefaultArgumentOrigin::interned,
-                                     EntityId function = EntityId::none, QualType parameter = {}) {
+                                     EntityId function = EntityId::none, QualType parameter = {},
+                                     std::optional<u32> invocation = std::nullopt) {
     const bool in_builder = origin == DefaultArgumentOrigin::current_item;
     // An earlier declarator's inherited defaults are already adopted by this builder.
     const NodeId interned = in_builder ? b_->adopted_node(d) : d;
     const auto value = interned == NodeId::none ? b_->get<ast::DefaultArg>(d) : ins().ast.get<ast::DefaultArg>(interned);
+    auto use = [&](NodeId id, NodeId global, ast::DefaultArg arg) {
+      if (!unevaluated && ast::kind_of(arg.arg.id) == ast::Nodes::index_of<ast::SourceLineContext>()) {
+        auto context = global == NodeId::none ? b_->get<ast::SourceLineContext>(arg.arg.id)
+                                              : ins().ast.get<ast::SourceLineContext>(arg.arg.id);
+        if (global != NodeId::none) context.arg.id = b_->adopt(context.arg.id);
+        context.line = source_line_at(invocation.value_or(at_));
+        if (default_line_observer_) *default_line_observer_ = true;
+        arg.arg.id = b_->add(context, 0);
+        return node(arg, at_, at_, arg.info);
+      }
+      return Ex{id == NodeId::none ? b_->adopt(global) : id, at_, at_, arg.info};
+    };
     if (ast::kind_of(value.arg.id) == ast::Nodes::index_of<ast::Dependent>()) {
       if (function != EntityId::none && value.source_end > value.source_begin) {
         if (auto replay = q_->replay_function_default(*this, value, function, parameter, at_)) {
@@ -11955,13 +12102,13 @@ public:
           const NodeId committed = b_->adopted_node(*replay);
           const auto concrete = committed == NodeId::none ? b_->get<ast::DefaultArg>(*replay)
                                                            : ins().ast.get<ast::DefaultArg>(committed);
-          return Ex{*replay, at_, at_, concrete.info};
+          return use(*replay, committed, concrete);
         }
       }
       diag(at_, Diag::default_arg_dependent);
       return std::nullopt;
     }
-    return Ex{in_builder ? d : b_->adopt(d), at_, at_, value.info};
+    return use(in_builder ? d : NodeId::none, interned, value);
   }
 
   Ex braced_argument(std::unique_ptr<Braced> b) {
@@ -12060,6 +12207,7 @@ public:
   // The arguments of a call to a function of type `fr`, each copy-initializing its parameter.
   // A parameter without an argument takes its default argument ([dcl.fct.default], [expr.call]/5).
   std::optional<std::vector<Child>> call_args(const TypeRec& fr, std::span<const Ex> given, u32 begin, u32 paren_at,
+                                              u32 invocation_at,
                                               std::span<const NodeId> defaults = {},
                                               DefaultArgumentOrigin origin = DefaultArgumentOrigin::interned,
                                               EntityId default_source = EntityId::none) {
@@ -12076,7 +12224,7 @@ public:
     std::vector<QualType> params = fr.params;  // copied: converting may intern new types
     std::vector<Ex> args(given.begin(), given.end());
     for (std::size_t i = args.size(); i < params.size() && i < defaults.size() && defaults[i] != NodeId::none; ++i) {
-      auto a = default_argument(defaults[i], paren_at, origin, default_source, params[i]);
+      auto a = default_argument(defaults[i], paren_at, origin, default_source, params[i], invocation_at);
       if (!a) return std::nullopt;
       args.push_back(*a);
     }
@@ -12169,7 +12317,8 @@ private:
         const auto is_static = [](const ast::DeclSema& d) { return (d.flags & decl_flag::static_) != 0; };
         if (!functions.empty() && std::ranges::all_of(functions, is_static))
           return decls_expr(std::move(functions), true, name, begin, end, callee);
-        if (std::ranges::any_of(functions, is_static)) return bind_prefix_member_functions(name, functions, begin, end);
+        if (std::ranges::any_of(functions, is_static))
+          return bind_prefix_member_functions(current_class, name, functions, begin, end);
         if (is_static(*m)) return decls_expr({*m}, true, name, begin, end, callee);
       }
       if (m->kind == ast::DeclKind::data_member) {
@@ -12208,6 +12357,7 @@ private:
   std::vector<engine::Diagnostic>* diags_;
   ast::ItemId item_;
   u32 loc_base_;
+  bool* default_line_observer_ = nullptr;
   bool in_requires_body_ = false;
   bool in_constraint_atom_ = false;
   EntityId class_prefix_owner_ = EntityId::none;
