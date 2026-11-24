@@ -128,7 +128,9 @@ struct Config {
   // An ABI option the unit's front end reads: `-fclass-call-abi=itanium|apple`, which classes pass
   // in registers (DECISIONS §1.6). None: the target's default.
   std::optional<ast::CallTriviality> call_triviality;
-  bool pic = false;  // `-fPIC` selects explicit Linux PIC predefines
+  // The PIC level `-fpic` (1) and `-fPIC` (2) ask for, which `__PIC__` and `__pic__` name; `-fno-pic`
+  // is 0. A target that is always PIC ignores it (`Target::always_pic`).
+  u8 pic = 0;
   // Setup options consumed by with_system_dirs. Queries use the effective directory lists.
   bool nostdinc = false;
   bool nostdincxx = false;
@@ -156,7 +158,7 @@ struct Config {
     if (freestanding) h.uint(u8(4));
     if (!exceptions_enabled) h.uint(u8(5));
     if (!rtti_enabled) h.uint(u8(6));
-    if (pic) h.uint(u8(7));
+    if (pic != 0) h.uint(u8(7)).uint(pic);
     return h.finish();
   }
 };

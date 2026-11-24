@@ -264,9 +264,11 @@ What is true of the code today. Work in progress and its owners are tracked in
   - a feature-test table, including `__cpp_pp_embed`;
   - the target's macros, generated from `ast::Target` and checked against Clang on AArch64
     Darwin and x86-64 Linux (`tests/own/pp/predefined-target*.pp.cpp`, #132);
-  - x86-64 Linux `-fPIC` defines `__PIC__` and `__pic__` as `2`. The compiler and editor
-    include the mode in the source configuration.
-    [#983](https://github.com/yrashk/ycxx/issues/983) · [Design](docs/design/freestanding-pic.md)
+  - x86-64 Linux `-fPIC` defines `__PIC__` and `__pic__` as `2`, and `-fpic` as `1`; the last of
+    `-fpic`, `-fPIC` and `-fno-pic` wins. arm64 Darwin always defines both as `2` and accepts the
+    same options, as Clang does. The compiler and editor include the mode in the source
+    configuration.
+    [#983](https://github.com/yrashk/ycxx/issues/983) · [#1089](https://github.com/yrashk/ycxx/issues/1089) · [Design](docs/design/freestanding-pic.md)
   - `__LINE__`, `__FILE__`, `__COUNTER__`, `__DATE__` and `__TIME__`.
 - `#include <cstdio>` preprocesses until libycxx's `#error` for unknown compilers
   (yrashk/libycxx#17).

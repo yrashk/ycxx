@@ -313,8 +313,6 @@ std::expected<Options, std::string> parse_options(std::span<const std::string_vi
   if (!o.pp.target)
     return std::unexpected("no default target for this build. Use '--target=x86_64-pc-linux-gnu' or '--target=arm64-apple-darwin'");
   if (o.query != Options::Query::none) return o;
-  if (o.pp.pic && !o.pp.target->supports(ast::NativeOperation::explicit_pic))
-    return std::unexpected("'-fPIC' requires the x86-64 Linux target");
   const bool linux_link = o.pp.target == &ast::x86_64_linux && o.stop == Options::Stop::link;
   const bool darwin_link = o.pp.target == &ast::aarch64_darwin && o.stop == Options::Stop::link;
   if (o.interpreter && !linux_link)
@@ -750,7 +748,6 @@ void checking_options(std::span<const std::string_view> args, bool std, std::vec
     }
     const std::size_t from = i;
     if (auto taken = pp::take_option(args, i, scratch); taken && *taken) {
-      if (args[from] == "-fPIC") continue;  // Forward it only after the final target is known.
       for (std::size_t k = from; k <= i; ++k) out.emplace_back(args[k]);
     } else if (args[i] == "--target" && i + 1 < args.size()) {
       if (const auto* target = ast::target_for_triple(args[i + 1])) {
@@ -772,8 +769,6 @@ void checking_options(std::span<const std::string_view> args, bool std, std::vec
       out.emplace_back(args[i]);
     }
   }
-  if (scratch.pic && scratch.target && scratch.target->supports(ast::NativeOperation::explicit_pic))
-    out.emplace_back("-fPIC");
 }
 
 }  // namespace
