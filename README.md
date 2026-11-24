@@ -797,7 +797,7 @@ destructors and pure virtuals, and programs using them compile and run. Objects 
 implicit or written constructors, copied and destroyed; virtual calls dispatch to the final
 overrider, and calls during construction and destruction use the class being built or torn down.
 Virtual members can be defined out of class. The unit defining the key function emits the vtable
-and RTTI, and classes without one get weak tables in each unit. The objects link and interoperate
+and RTTI, and classes without one get weak tables where they are constructed or destroyed. The objects link and interoperate
 with Clang and GCC objects. Class templates with virtual members, internal-linkage and local
 classes, other base shapes, `delete` through a virtual destructor and `typeid` are not supported
 yet. [#309](https://github.com/yrashk/ycxx/issues/309) · [#1153](https://github.com/yrashk/ycxx/issues/1153) ·

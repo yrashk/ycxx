@@ -1470,7 +1470,8 @@ public:
   EntityId peer_automatic_primary_base(u32 item, EntityId cls, const sema::ClassRec& rec,
                                        std::span<const ast::MemberRec> members);
   // The general single-inheritance layout of a polymorphic class outside the peer profiles (#309).
-  std::optional<sema::DynamicClass> dynamic_class(u32 item, EntityId cls, const sema::ClassRec& rec);
+  std::optional<sema::DynamicClass> dynamic_class(u32 item, EntityId cls, const sema::ClassRec& rec,
+                                                 std::span<const ast::MemberRec> members);
   // Its implicit default and copy constructors, which install the vptr ([class.cdtor]).
   void dynamic_special_members(u32 item, EntityId cls, sema::ClassRec& rec);
   EntityId synthesize_constructor(u32 item, EntityId cls, bool copy, bool nonthrowing, bool const_source);
@@ -8601,7 +8602,8 @@ bool Program::peer_root_destructor_producer(EntityId cls) const {
 // Itanium C++ ABI §2.4–2.5 for a polymorphic class with at most one base, which is public,
 // nonvirtual and itself dynamic: its vptr is at offset zero, its own or its primary base's (#309).
 // Class templates, local classes, internal linkage and other base shapes are #309's follow-ups.
-std::optional<sema::DynamicClass> Program::dynamic_class(u32 item, EntityId cls, const sema::ClassRec& rec) {
+std::optional<sema::DynamicClass> Program::dynamic_class(u32 item, EntityId cls, const sema::ClassRec& rec,
+                                                        std::span<const ast::MemberRec> members) {
   const auto& head = items_->items[item];
   const auto& entity = w_->entities.rec(cls);
   // A class in an unnamed namespace is TU-local ([basic.link]): its table needs local symbols (#1155).
@@ -8611,6 +8613,16 @@ std::optional<sema::DynamicClass> Program::dynamic_class(u32 item, EntityId cls,
   for (EntityId scope = entity.scope; !is_namespace(scope); scope = w_->entities.rec(scope).scope) {
     const auto& owner = w_->entities.rec(scope);
     if (owner.kind != sema::EntityKind::class_ || owner.templ != EntityId::none) return std::nullopt;
+  }
+  // Sema does not carry an alignment attribute through `decltype` of a variable declared with an
+  // attributed alias, so such a field's layout is not known here (#1167).
+  for (const sema::FieldRec& field : rec.fields) {
+    const auto member = std::ranges::find(members, field.entity, &ast::MemberRec::entity);
+    if (member == members.end()) return std::nullopt;
+    const auto& source = items_->items[index(member->decl.item)];
+    if (std::ranges::contains(std::span(r_->tokens).subspan(source.begin, source.end - source.begin), lex::Tk::kw_decltype,
+                              &lex::Tok::kind))
+      return std::nullopt;
   }
   sema::DynamicClass out;
   if (!rec.bases.empty()) {
@@ -9145,7 +9157,7 @@ const Result<ast::ClassDef>& Program::class_def(u32 item) {
         rec.peer_automatic_primary_base = peer_automatic_primary_base(item, *cls, rec, members);
       if (rec.peer_virtual_layout == sema::PeerVirtualLayout::none && rec.peer_automatic_primary_base == EntityId::none &&
           member_declarations_valid)
-        rec.dynamic = dynamic_class(item, *cls, rec);
+        rec.dynamic = dynamic_class(item, *cls, rec, members);
     }
     rec.virtual_layout_unsupported = (rec.polymorphic && !rec.dynamic) ||
         std::ranges::any_of(rec.bases, [&](const sema::BaseRec& base) {

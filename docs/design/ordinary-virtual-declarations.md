@@ -300,8 +300,13 @@ slot the declaration has in its own class's table, and passes the object pointer
 name calls the function directly ([class.virtual]/16).
 [Itanium ABI §3.2.4](https://itanium-cxx-abi.github.io/cxx-abi/abi.html#vcall.caller)
 
-A unit defining the key function out of class, not inline, owns a strong table and RTTI. A unit
-defining a class without a key function emits them weak. A root's descriptor is a
+A unit defining the key function out of class, not inline, owns a strong table and RTTI. A class
+without a key function (or with an inline one) gets a weak table where a constructor or
+destructor emitted in the unit installs it, as Clang emits such a table where it is used. The
+implicit constructors of dynamic classes are emitted where something calls them. A derived
+descriptor names its base's; a keyless base whose table is not used in the unit gets its
+descriptor alone. A destructor destroys a base defined elsewhere with the base's D2 entry. A
+root's descriptor is a
 `__class_type_info`; a derived class's is an `__si_class_type_info` that names its base's,
 referenced by name or defined in the same object. Pure slots hold `__cxa_pure_virtual`. On ELF a
 weak table and descriptor each have a COMDAT group keyed by its name; on Mach-O they are weak
@@ -309,6 +314,9 @@ definitions, with weak descriptors and names following Apple's non-unique RTTI c
 keyless descriptor above does. The run suite (`tests/own/classes/virtual-dispatch`) runs on macOS,
 and `unit.linux_virtual_dispatch` links the same tests with native GCC and Clang on Linux,
 including the mixed-object peers.
+
+A field declared through `decltype` keeps the class out (sema can lose an alias's alignment
+there, #1167), as does a class in an unnamed namespace (#1155).
 
 Class templates, local and internal-linkage classes, other base shapes (non-polymorphic or
 non-public bases, multiple inheritance), `delete` through a virtual destructor, covariant returns,

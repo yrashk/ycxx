@@ -1395,11 +1395,12 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
             continue;
           }
         }
-        members.push_back(m);
+        members.push_back({b.adopt(m.id), m.at});
       }
-      if (changed)
-        tu.functions[index].body.tree =
-            b.commit(ast::Child{b.add(ast::Destructor{destructor.body, b.list(members)}, 0), 0}).id;
+      if (changed) {
+        const ast::Child body{b.adopt(destructor.body.id), destructor.body.at};
+        tu.functions[index].body.tree = b.commit(ast::Child{b.add(ast::Destructor{body, b.list(members)}, 0), 0}).id;
+      }
     }
     if (!f.decl.is_virtual) return true;
     const auto size = program.class_size(entity.scope);

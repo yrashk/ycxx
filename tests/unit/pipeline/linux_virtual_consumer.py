@@ -241,6 +241,11 @@ def main():
         compile(linux, '-fsyntax-only', 'nonkey/measure.cpp')
         compile(linux, '-fsyntax-only', 'nonkey/controls/in-class.cpp')
         compile(linux, '-fsyntax-only', 'nonkey/prior-inline-friend.cpp')
+        # An inline virtual beside an external key makes Gauge an ordinary dynamic class (#309):
+        # its inline member compiles, and the key's unit owns the table.
+        compile(linux, '-c', 'nonkey/controls/in-class.cpp', '-o', 'nonkey-in-class.o')
+        output = run([readelf, '-Ws', 'nonkey-in-class.o'], scope, cold)
+        assert not any(fields[7].startswith(('_ZTV', '_ZTI', '_ZTS')) for fields in defined_symbols(output)), output
         compile(linux, '-c', 'nonkey/controls/lifetime.cpp', '-o', 'nonkey-lifetime.o')
         assert (scope / 'nonkey-lifetime.o').is_file()
         for source in (nonthrowing, nonthrowing.replace(b'noexcept {', b'noexcept(true) {', 1),
@@ -251,7 +256,6 @@ def main():
             (scope / 'nonkey-noexcept.o').unlink()
         for target, source, diagnostic in (
             (linux, 'nonkey/controls/inline.cpp', virtual_definition_error),
-            (linux, 'nonkey/controls/in-class.cpp', native_virtual_error),
             (linux, 'nonkey/late-key.cpp', native_virtual_error),
             (linux, 'nonkey/extra.cpp', native_virtual_error),
             (linux, 'nonkey/exception-mismatch.cpp', "conflicting declaration of 'measure'"),

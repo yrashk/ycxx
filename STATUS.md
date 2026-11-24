@@ -3372,8 +3372,13 @@ What the process allocates, attributed to the engine's cells, in the trace and t
 - Out-of-class definitions of virtual members and virtual destructors.
 - Tables: a unit defining the key function out of class and not inline owns strong `_ZTV`/`_ZTI`;
   a class without one gets weak ones (ELF COMDAT groups; Mach-O weak, non-unique RTTI for weak
-  descriptors) in every unit defining it. Pure slots hold `__cxa_pure_virtual`; a derived
-  descriptor is `__si_class_type_info`.
+  descriptors) where an emitted constructor or destructor installs the table, and a keyless base's
+  descriptor alone where only a derived descriptor names it. Implicit constructors of dynamic
+  classes are emitted where called. A destructor destroys a base defined elsewhere with its D2.
+  Pure slots hold `__cxa_pure_virtual`; a derived descriptor is `__si_class_type_info`.
+- Not admitted (keep the virtual layout guard): classes in an unnamed namespace (#1155), fields
+  declared through `decltype` (alias alignment, #1167), and a class serving only as a peer
+  profile's abstract primary base keeps the profile's output (#1156).
 - Tests: `tests/own/classes/virtual-dispatch` (13 run tests from the spec, two with Clang peers)
   on macOS; `unit.linux_virtual_dispatch` links the same tests with GCC and Clang on Linux
   (with `-fno-exceptions`: local unwind cleanups around throwing calls are #1104/#648's).

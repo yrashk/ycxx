@@ -1931,7 +1931,8 @@ void emit_dynamic_descriptor(obj::object& o, const DynamicTableOut& table, std::
       if (o.symbols[i].name_view() == name) return i;
     return o.add_symbol({name, obj::binding::global, std::nullopt, 0, false});
   };
-  const auto descriptor_section = elf ? o.add_section(S::data_const) : shared_pointers;
+  // A weak descriptor has its own ELF COMDAT group; a strong one follows its table.
+  const auto descriptor_section = elf && table.weak ? o.add_section(S::data_const) : shared_pointers;
   o.sections[descriptor_section].align(3);
   const auto bind = !elf && table.weak ? obj::binding::hidden : obj::binding::global;
   auto& descriptor = o.symbols[*typeinfo];
