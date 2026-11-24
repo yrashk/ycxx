@@ -727,6 +727,7 @@ struct TuValue {
   std::vector<BackError> errors;
   std::vector<FirstDemand> first_demands;
   std::vector<aarch64::Symbol> symbols;
+  std::set<EntityId> omitted_immediate_functions;
 };
 struct Tu {
   using Key = TuId;
@@ -2267,7 +2268,10 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
   std::vector<const FunctionDef*> definitions;
   fns.clear();
   for (const FunctionDef& f : tu.functions) {
-    if (f.emit_if_referenced && !used.contains(ir::raw(f.entity))) continue;
+    if (f.emit_if_referenced && !used.contains(ir::raw(f.entity))) {
+      out.omitted_immediate_functions.insert(f.entity);
+      continue;
+    }
     fns.push_back({id, f.entity});
     definitions.push_back(&f);
   }
