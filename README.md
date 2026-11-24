@@ -582,9 +582,10 @@ written default member initializer are value-initialized.
   logical negation of a qualified dependent `bool` variable template-id in a `bool` template
   argument or default
   [#209](https://github.com/yrashk/ycxx/issues/209);
-- a single nonvirtual, nonpolymorphic base in a primary class template, including an
-  alias-selected dependent base and qualified lookup of its static members.
-  [#308](https://github.com/yrashk/ycxx/issues/308)
+- a single nonvirtual, nonpolymorphic base in a primary class template or a partial
+  specialization, including an alias-selected dependent base and qualified lookup of its static
+  members, and the bases of explicit specializations.
+  [#308](https://github.com/yrashk/ycxx/issues/308) · [#1134](https://github.com/yrashk/ycxx/issues/1134)
 - placeholder types: `auto` and `decltype(auto)` variables (`const auto&`, `auto*`, `auto&&`),
   deduced and trailing return types, in templates too. Ordinary block variables with an
   `= expression` initializer can use `Concept auto` with a prior unqualified type concept.

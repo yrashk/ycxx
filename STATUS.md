@@ -3086,6 +3086,9 @@ What the process allocates, attributed to the engine's cells, in the trace and t
   substitutes a dependent base at the first completeness demand. Its concrete specialization publishes
   the resolved base before layout or qualified lookup. [Design](docs/design/class-template-bases.md)
   Base packs and additional class-template base forms remain in #308. Virtual bases are #310.
+  An explicit specialization's base-clause is an ordinary class's, and a partial
+  specialization's is a primary template's, substituted with the arguments deduced for it;
+  another specialization of the same template can be a base (#1134).
 - **Layout** (`ast::record_layout`, Itanium C++ ABI §2.4):
   - bases first, in declaration order; an empty base at offset 0 unless another subobject of its
     type is there;

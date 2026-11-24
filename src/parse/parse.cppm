@@ -3889,11 +3889,16 @@ private:
   void partial_class_definition(Tk key, NameId name, u32 name_at) {
     auto spec = partial_class(name, name_at);
     if (!spec) return bad();
+    EntityId pattern = *spec;
+    // Its base-clause, as a class template's: a dependent base is substituted with the deduced
+    // arguments when a specialization it matches is instantiated (`instantiate_base`).
+    std::vector<sema::BaseRec> bases;
+    std::optional<Program::ClassBasePattern> base_pattern;
+    if (ps_.is(Tk::colon) && !specialization_base_clause(key, name, pattern, bases, base_pattern)) return bad();
     if (!ps_.is(Tk::l_brace)) {
-      s_.diag(ps_.pos(), Diag::not_supported, ps_.kind());  // base classes, `final`
+      s_.diag(ps_.pos(), Diag::not_supported, ps_.kind());  // `final`
       return bad();
     }
-    EntityId pattern = *spec;
     if (auto prior = p_->declaration(pattern, k_); prior && (prior->flags & sema::decl_flag::definition)) {
       s_.diag(name_at, Diag::class_redefinition, name);
       return bad();
@@ -3903,6 +3908,8 @@ private:
     sem.template_params = b_.seq(std::span<const ast::TemplateParamSema>(s_.template_scopes.back()));
     sem.constraints = partial_constraints_;
     if (!class_declared(sem, key, name_at)) return bad();
+    if (!bases.empty()) p_->set_bases(pattern, std::move(bases));
+    if (base_pattern) p_->class_base_patterns_.emplace(k_, *base_pattern);
     p_->current_instantiation(pattern, k_, sem);
     ps_.seek(it_->brace_end);
     ps_.skip_attributes(nullptr, 0, nullptr, false, Parser::attr_gnu);
@@ -3939,6 +3946,16 @@ private:
     return true;
   }
 
+  // The base-clause of an explicit or partial specialization `self` of class template `name`
+  // ([class.derived.general]): a union has none ([class.union.general]/1).
+  bool specialization_base_clause(Tk key, NameId name, EntityId self, std::vector<sema::BaseRec>& bases,
+                                  std::optional<Program::ClassBasePattern>& pattern) {
+    if (key == Tk::kw_union) {
+      s_.diag(ps_.pos(), Diag::union_with_base);
+      return false;
+    }
+    return base_clause(key, name, bases, pattern, self);
+  }
   // `X<args>` after `template<> class-key X` ([temp.expl.spec]/1): the specialization of class
   // template X it declares; none, diagnosed, if X is no class template.
   std::optional<EntityId> explicit_class(NameId name, u32 name_at) {
@@ -3963,8 +3980,11 @@ private:
   void explicit_class_definition(Tk key, NameId name, u32 name_at) {
     auto spec = explicit_class(name, name_at);
     if (!spec) return bad();
+    std::vector<sema::BaseRec> bases;
+    std::optional<Program::ClassBasePattern> no_pattern;  // the class is not a template
+    if (ps_.is(Tk::colon) && !specialization_base_clause(key, name, *spec, bases, no_pattern)) return bad();
     if (!ps_.is(Tk::l_brace)) {
-      s_.diag(ps_.pos(), Diag::not_supported, ps_.kind());  // base classes, `final`
+      s_.diag(ps_.pos(), Diag::not_supported, ps_.kind());  // `final`
       return bad();
     }
     if (auto prior = p_->declaration(*spec, k_); prior && (prior->flags & sema::decl_flag::definition)) {
@@ -3974,6 +3994,7 @@ private:
     ast::DeclSema sem = class_decl(*spec, true);
     sem.flags |= sema::decl_flag::specialization;
     if (!class_declared(sem, key, name_at)) return bad();
+    if (!bases.empty()) p_->set_bases(*spec, std::move(bases));
     ps_.seek(it_->brace_end);
     ps_.skip_attributes(nullptr, 0, nullptr, false, Parser::attr_gnu);
     q_.own_class_complete = true;
@@ -4518,9 +4539,10 @@ private:
 
   // A base-clause ([class.derived.general]): `: [virtual] [access] class-name, …`. Each base is a
   // complete class other than this one, named once ([class.mi]/3); its access defaults to
-  // private for a `class`, public for a `struct` ([class.access.base]/2).
+  // private for a `class`, public for a `struct` ([class.access.base]/2). `self` is the class
+  // being defined when it is a specialization, whose other specializations may be bases.
   bool base_clause(Tk key, NameId name, std::vector<sema::BaseRec>& bases,
-                   std::optional<Program::ClassBasePattern>& pattern) {
+                   std::optional<Program::ClassBasePattern>& pattern, EntityId self = EntityId::none) {
     ps_.bump();
     sema::Types& types = s_.types();
     do {
@@ -4569,7 +4591,10 @@ private:
         return false;
       }
       EntityId b = types.class_of(spec.type);
-      if (p_->world().entities.rec(b).name == name && p_->world().entities.rec(b).scope == ns_entity()) {
+      const bool itself = self != EntityId::none
+                              ? b == self
+                              : p_->world().entities.rec(b).name == name && p_->world().entities.rec(b).scope == ns_entity();
+      if (itself) {
         s_.diag(at, Diag::incomplete_type, spec.type);  // the class itself: incomplete here
         return false;
       }
