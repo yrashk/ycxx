@@ -4402,9 +4402,12 @@ the body. A non-generic lambda body uses its own evaluation context.
   (`Program::defaulted_three_way`) compares each subobject with `<=>`. A return type of plain
   `auto` becomes the common comparison category of the results (`strong_ordering` with no
   subobjects); a result that is not a category deletes the operator. Each result is converted to
-  the return type R. The body is `{ R v0 = x0 <=> y0; if (v0 != 0) return v0; … return
-  R::equal; }` (`defaulted_three_way_body`). The exception specification covers the comparisons,
-  the `vi != 0` tests and the equal result.
+  the return type R. A comparison category that cannot convert to an explicit scalar builtin R
+  makes the operator deleted ([class.spaceship]/1.2, /2.2). The body is
+  `{ R v0 = x0 <=> y0; if (v0 != 0) return v0; … return R(std::strong_ordering::equal); }`
+  (`defaulted_three_way_body`). Completion and the body build the same initialized local and
+  lvalue `vi != 0` test. The implicit exception specification covers the comparisons, the
+  lvalue tests and the equal result (#1225).
 - `x.operator@(…)` and `p->operator@(…)` name member operator functions.
 - A member operator that overload resolution selects and that is deleted, ambiguous or
   inaccessible makes the expression ill-formed; the non-member candidates are not tried then.
