@@ -11,7 +11,7 @@ import std;
 export namespace ycxx::trace {
 
 // Whether this host has a clipboard of its own the browser writes directly, and its name for the
-// status line.
+// footer.
 inline constexpr std::string_view native_clipboard = "pasteboard";
 
 // Puts `text` on the pasteboard `name` (empty: the general one, the user's clipboard); false when

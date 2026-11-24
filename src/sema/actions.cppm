@@ -7352,7 +7352,8 @@ public:
   }
 
   // A builtin that is a C library function: a call of its implicit declaration, whose arguments
-  // are copy-initialized parameters as in any call ([expr.call]/7).
+  // are copy-initialized parameters as in any call ([expr.call]/7). The call carries the
+  // function's `constant`, so that constant evaluation reads the bytes itself (`ir::BuiltinFn`).
   Ex builtin_library_call(const StringFunction& f, std::vector<Ex> args, u32 begin, u32 end) {
     const ast::DeclSema d = w_->string_function(f);
     const auto& signature = types().rec(d.type);
@@ -7370,7 +7371,7 @@ public:
     const ExprInfo fn_info{d.type, ValueCategory::lvalue, 0};
     const Ex callee = node(ast::DeclRef{fn_info, d.entity}, begin, begin, fn_info);
     const ExprInfo info{result, ValueCategory::prvalue, 0};
-    return node(ast::Call{info, d.entity, at(callee, begin), b_->list(converted)}, begin, end, info);
+    return node(ast::Call{info, d.entity, at(callee, begin), b_->list(converted), f.constant}, begin, end, info);
   }
 
   // Only send closed, read-only expressions to the fresh constant evaluator. In particular

@@ -117,6 +117,25 @@ The JSON is written as subtrees complete, as ever: a live trace (#939) is the br
 `--trace-engine=interactive` and `ycxx ctl trace --interactive` open a full-screen browser on the
 terminal (`src/trace/browse.cppm`, whose model is `src/trace/view.cppm`). `?` lists its keys.
 
+- **Layout** (#1119). Top to bottom:
+  - The title bar: the views as tabs, the current one lit. On the right, `● live` while the build
+    runs, then `following` or `paused, f follows`, then what feeds it (`watching ~/project`); or
+    how the source ended.
+  - The summary: each outcome's count, events and time, then memory, on at most three lines (one
+    on a short screen). What does not fit is left out.
+  - The toggles: a chip per setting with its key (`/ filter`, `w all workers`, `o newest first`,
+    `s in start order`, `r reused shown`, `S no source column`). One off its default is bold
+    yellow. A click on a chip does what its key does. Narrow screens drop the least used.
+  - The body: the tree and its pane, the timeline, or the histogram.
+  - The footer: the keys that matter in the view and the pane, as many as fit, most used first,
+    with `? help` and `q quit` always on the right. Notes (`copied 3 rows`), `V`'s selection and
+    the filter prompt are drawn there too.
+  - `?` opens every key and symbol in a box that wraps to the width and scrolls when it is taller
+    than the screen (`↑↓`, PgUp/PgDn); any other key closes it.
+  - Nothing runs off the screen at any width from 80 columns. A line that is cut ends in `…`. A
+    tree row's fold count goes short first (`[+20, 1 ran]`, `[+20]`), then its outcome's name,
+    and only then is its key cut. The pane wraps after a space or `/` rather than mid-word.
+
 - **Live** (#939). The browser opens at once and fills in while the build runs, in-process and
   through the daemon; so do `--watch` and `ctl trace --interactive`, for each request.
   - A cell appears when its frame starts, `▶ running` (orange) with its worker and the time so
@@ -129,9 +148,9 @@ terminal (`src/trace/browse.cppm`, whose model is `src/trace/view.cppm`). `?` li
   - **Following** is on while the build runs: the cell started last that still runs (or its
     nearest ancestor the tree shows) is selected and kept in view, and the timeline's cursor
     stays at the end. Any move, scroll or selection of yours stops it (a filter, a worker or a
-    fold does not), and `f` turns it back on; the status line says which. When the build ends,
+    fold does not), and `f` turns it back on; the title bar says which. When the build ends,
     a view still following goes back to the top.
-  - When the build ends the status line says so, and the tree is the one a browser opened after
+  - When the build ends the title bar says so, and the tree is the one a browser opened after
     the build would show. Closing the browser earlier waits for the build; either way the outputs
     are written and the diagnostics printed after the browser closes. One difference: a failed
     frame's child that ends after it (it was still running) is placed among its siblings by its
@@ -159,7 +178,7 @@ terminal (`src/trace/browse.cppm`, whose model is `src/trace/view.cppm`). `?` li
     memory counted).
 
 - **Size.** It draws for the terminal's size and redraws at once when that changes (`SIGWINCH`).
-  The summary at the top wraps onto more lines on a narrow screen. Autowrap is off while it runs,
+  The summary at the top wraps onto at most three lines on a narrow screen. Autowrap is off while it runs,
   so a glyph the terminal draws wider than one column is cut at the edge instead of scrolling the
   screen.
 - **Mouse** (#635). It asks for SGR mouse reports (modes 1000, 1002 and 1006), which modern
@@ -167,12 +186,12 @@ terminal (`src/trace/browse.cppm`, whose model is `src/trace/view.cppm`). `?` li
   - Click a row to select it. Click its `▸`/`▾`, or double-click the row, to fold or open it.
   - Click a column header (`cell`, `time`, `alloc`, `retains`) to sort by it. Click it again to
     go back to start order. The `alloc` and `retains` columns sum over the cell's subtree.
-  - Click `tree` or `timeline` in the status line to switch views. Click the pane to give it
+  - Click a tab in the title bar to switch views. Click the pane to give it
     the keys: arrows, `j`/`k`, PgUp/PgDn and `g`/`G` then scroll it, and `h`, `←` or Escape give
     them back to the tree.
   - The wheel scrolls whatever is under it: the tree, the pane, or the timeline's cursor (Shift
     for bigger steps).
-  - Drag the divider (`│`, marked `⇔` in the title row) to resize the pane; `<` and `>` move it
+  - Drag the divider (`│`) to resize the pane; `<` and `>` move it
     from the keyboard. It keeps its share of the width when the terminal is resized.
   - In the timeline, click a slice to put the cursor there, or double-click it to open its cell
     in the tree.
@@ -200,8 +219,8 @@ terminal (`src/trace/browse.cppm`, whose model is `src/trace/view.cppm`). `?` li
 - **Source** (#638). The pane names the cell's `source` (`a.cpp:3:1–7:1`). `S` adds a source
   column. `p` copies `path:line:col`. The filter's `at:a.cpp:12` keeps the cells whose span
   touches line 12.
-- **Copy** (#636). What the browser copies goes to the system clipboard. The status line says
-  what was copied, and how.
+- **Copy** (#636). What the browser copies goes to the system clipboard. The footer says what
+  was copied, and how.
   - `y` copies the selected cell as the pane shows it: its kind and key, outcome, times, memory,
     errors and value (L1 or L2 IR, or instructions).
   - `Y` copies its whole subtree, folded or filtered parts included, as `--trace-engine` prints
