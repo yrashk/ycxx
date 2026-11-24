@@ -254,6 +254,8 @@ consteval std::array<BuiltinLayout, builtin_count> lp64(std::initializer_list<La
       {wchar_t_, {4, 4}}, {char8_t_, {1, 1}}, {char16_t_, {2, 2}}, {char32_t_, {4, 4}},
       {short_, {2, 2}}, {unsigned_short, {2, 2}}, {int_, {4, 4}}, {unsigned_int, {4, 4}},
       {long_, {8, 8}}, {unsigned_long, {8, 8}}, {long_long, {8, 8}}, {unsigned_long_long, {8, 8}},
+      // AAPCS64 §5.1 (quad-word integers) and the System V AMD64 psABI §3.1.2 (__int128).
+      {int128, {16, 16}}, {unsigned_int128, {16, 16}},
       {float_, {4, 4, binary32}}, {double_, {8, 8, binary64}},
       {float16, {2, 2, binary16}}, {float32, {4, 4, binary32}}, {float64, {8, 8, binary64}},
       {bfloat16, {2, 2, brain16}},

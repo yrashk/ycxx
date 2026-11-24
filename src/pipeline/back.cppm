@@ -1670,8 +1670,9 @@ std::expected<void, std::string> place_value(const ast::Interners& in, const Que
   }
   if (l.kind == ir::TypeKind::integer || l.kind == ir::TypeKind::boolean) {
     if (!in.values.is<ast::VInt>(init)) return std::unexpected("an integer variable's initializer is not an integer");
-    std::uint64_t v = in.values.get<ast::VInt>(init).bits.lo;
-    for (std::uint64_t i = 0; i < l.size; ++i) out.bytes[offset + i] = std::uint8_t(v >> (8 * i));
+    // Little-endian, the high half of a 128-bit integer after the low one.
+    ast::Bits128 v = in.values.get<ast::VInt>(init).bits;
+    for (std::uint64_t i = 0; i < l.size; ++i) out.bytes[offset + i] = std::uint8_t((i < 8 ? v.lo : v.hi) >> (8 * (i % 8)));
     return {};
   }
   if ((l.kind == ir::TypeKind::array || l.kind == ir::TypeKind::record) && in.values.is<ast::VAggregate>(init)) {

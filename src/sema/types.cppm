@@ -38,10 +38,11 @@ inline Builtin promoted(const ast::Target& target, Builtin b, u8 bit_width = 0) 
 inline Builtin common_integer(const ast::Target& target, Builtin a, Builtin b) { return *ast::usual_arithmetic(target, a, b); }
 
 constexpr std::string_view spelling(Builtin b) {
-  constexpr std::array<std::string_view, 21> names{
+  constexpr std::array<std::string_view, 23> names{
       "void", "std::nullptr_t", "bool", "char", "signed char", "unsigned char", "wchar_t", "char8_t", "char16_t",
       "char32_t", "short", "unsigned short", "int", "unsigned int", "long", "unsigned long", "long long",
-      "unsigned long long", "float", "double", "long double"};
+      "unsigned long long", "__int128", "unsigned __int128", "float", "double", "long double"};
+  static_assert(names.size() == std::to_underlying(Builtin::long_double) + 1);
   auto i = std::to_underlying(b);
   return i < names.size() ? names[i] : "<builtin>";
 }
@@ -463,6 +464,7 @@ public:
 
   // An integer of type `t`, wrapped to its width ([conv.integral]).
   ConstId integer(QualType t, u64 bits) { return ast::int_value(*ins_, *target_, t, ast::Bits128{bits, 0}); }
+  ConstId integer(QualType t, ast::Bits128 bits) { return ast::int_value(*ins_, *target_, t, bits); }
   // A value of standard floating type `t`: `v` rounded to its format ([conv.double]).
   ConstId floating(QualType t, double v) { return ast::float_value(*ins_, *target_, t, v); }
   // A string literal object of array type `t`, including its terminating code unit.

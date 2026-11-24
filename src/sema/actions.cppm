@@ -830,10 +830,14 @@ public:
     return parameter.type;
   }
   // A typedef-name the implementation declares where nothing else does (docs/EXTENSIONS.md):
-  // `__builtin_va_list`, the type used by the target's C headers and libycxx's `va_list`.
+  // `__builtin_va_list`, the type used by the target's C headers and libycxx's `va_list`, and
+  // `__int128_t` and `__uint128_t`, which the macOS SDK's `mach/arm/_structs.h` uses.
   std::optional<QualType> builtin_type_name(NameId name) {
-    if (ins().names.spelling(name) != "__builtin_va_list") return std::nullopt;
-    return w_->builtin_va_list();
+    const std::string_view spelling = ins().names.spelling(name);
+    if (spelling == "__builtin_va_list") return w_->builtin_va_list();
+    if (spelling == "__int128_t") return builtin(Builtin::int128);
+    if (spelling == "__uint128_t") return builtin(Builtin::unsigned_int128);
+    return std::nullopt;
   }
   bool conflicts_with_imported_alias(std::span<const ast::DeclSema> imported, QualType type) {
     return std::ranges::any_of(imported, [&](const ast::DeclSema& decl) {
@@ -3748,17 +3752,12 @@ public:
     if (*a == Builtin::bool_) sa = {1, false};
     if (ast::represents(w_->target, *b, sa.bits, sa.is_signed) || (*b == Builtin::bool_ && *a == Builtin::bool_)) return false;
     auto v = constant_of ? constant_of(from) : std::nullopt;
-    if (!v || w_->values.rec(*v).kind != ValueKind::integer) return true;
-    // The constant, read in the source type, must lie in the target type's range.
-    u64 mask = sa.bits >= 64 ? ~u64{0} : (u64{1} << sa.bits) - 1;
-    u64 raw = w_->values.rec(*v).bits & mask;
-    bool negative = sa.is_signed && ((raw >> (sa.bits - 1)) & 1);
-    u64 max = sb.is_signed ? (u64{1} << (sb.bits - 1)) - 1 : sb.bits >= 64 ? ~u64{0} : (u64{1} << sb.bits) - 1;
-    if (!negative) return raw > max;
-    if (!sb.is_signed) return true;
-    std::int64_t value = std::int64_t(raw | ~mask);
-    std::int64_t min = sb.bits >= 64 ? std::numeric_limits<std::int64_t>::min() : -(std::int64_t{1} << (sb.bits - 1));
-    return value < min;
+    if (!v || !ins().values.is<ast::VInt>(*v)) return true;
+    // The constant, read in the source type, must lie in the target type's range: reduced to the
+    // target's width it keeps its bits and its sign.
+    ast::Bits128 x = ast::wrap(ast::int_bits(ins(), *v), sa.bits, sa.is_signed);
+    ast::Bits128 y = ast::wrap(x, sb.bits, sb.is_signed);
+    return y != x || (sa.is_signed && ast::is_negative(x)) != (sb.is_signed && ast::is_negative(y));
   }
 
   // [dcl.init.list]/7.1–7.3 for a conversion from `a` to `b`, one of them floating.
@@ -3776,16 +3775,14 @@ public:
     }
     // /7.3: an integer to a floating type, unless the source is constant and its value converts
     // back unchanged: its significant bits fit the type's precision (the exponent range of every
-    // supported format covers 128-bit integers). Integer types are at most 64 bits wide here: a
-    // 128-bit one would need the constant's high word.
-    if (!v || w_->values.rec(*v).kind != ValueKind::integer) return true;
+    // supported format covers 128-bit integers).
+    if (!v || !ins().values.is<ast::VInt>(*v)) return true;
     IntShape sa = shape(w_->target, a);
     if (a == Builtin::bool_) sa = {1, false};
-    u64 raw = w_->values.rec(*v).bits & (sa.bits >= 64 ? ~u64{0} : (u64{1} << sa.bits) - 1);
-    if (sa.is_signed && sa.bits < 64 && ((raw >> (sa.bits - 1)) & 1)) raw |= ~((u64{1} << sa.bits) - 1);
-    u64 magnitude = sa.is_signed && std::int64_t(raw) < 0 ? u64(0) - raw : raw;
-    if (magnitude == 0) return false;
-    u32 significant = u32(std::bit_width(magnitude) - std::countr_zero(magnitude));
+    ast::Bits128 x = ast::wrap(ast::int_bits(ins(), *v), sa.bits, sa.is_signed);
+    ast::Bits128 magnitude = sa.is_signed && ast::is_negative(x) ? ast::wide::neg(x) : x;
+    if (ast::wide::is_zero(magnitude)) return false;
+    u32 significant = ast::wide::bit_width(magnitude) - ast::wide::countr_zero(magnitude);
     return significant > ast::shape_of(w_->target[b].format).precision;
   }
 
@@ -8156,8 +8153,8 @@ public:
     // The underlying value of an enum literal can be folded directly to an integer constant.
     if (auto lit = as<ast::Literal>(e); lit && types().is_enum(e.type()) && types().is_integral(to) &&
                                         (k == ast::ConversionKind::integral || k == ast::ConversionKind::boolean)) {
-      u64 bits = w_->values.rec(lit->value).bits;
-      if (k == ast::ConversionKind::boolean) bits = bits != 0;
+      ast::Bits128 bits = ast::int_bits(ins(), lit->value);
+      if (k == ast::ConversionKind::boolean) bits = {u64(!ast::wide::is_zero(bits)), 0};
       return literal(to, w_->values.integer(to, bits), ValueCategory::prvalue, e.begin, e.end);
     }
     u8 width = k == ast::ConversionKind::lvalue_to_rvalue || cat != ValueCategory::prvalue ? e.info.bit_width : u8(0);
