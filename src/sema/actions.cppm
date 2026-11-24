@@ -629,6 +629,8 @@ public:
         if (!elaborated && !prefix_bases.empty() &&
             (name == static_initializer_name_ || own_initializer_static(name))) return std::nullopt;
         if (auto m = q_->earlier_member(name, elaborated)) {
+          if (m->kind == ast::DeclKind::type_alias && (m->flags & decl_flag::template_))
+            return std::nullopt;  // a member alias template, not a type
           if (m->kind == ast::DeclKind::enum_ || m->kind == ast::DeclKind::type_alias || m->kind == ast::DeclKind::class_)
             return m->type;
           if (!elaborated && (m->kind == ast::DeclKind::data_member || m->kind == ast::DeclKind::variable ||
@@ -785,6 +787,11 @@ public:
         return;
       }
       if (auto member = direct_member(cls, cr, name)) {
+        // A member alias template is found and is no type without its arguments.
+        if (std::ranges::contains(cr.alias_templates, name, &NestedType::name)) {
+          hits.push_back({std::nullopt, cls, EntityId::none, ast::Access::public_, false, path});
+          return;
+        }
         auto nested = std::ranges::find(cr.types, name, &NestedType::name);
         if (nested != cr.types.end() &&
             (type_only || (member->nested_type != EntityId::none && member->enumerator == EntityId::none))) {
@@ -936,6 +943,7 @@ public:
   // A template-name that names a type with its arguments ([temp.names]): a class template, or an
   // alias template ([temp.alias]).
   std::optional<ast::DeclSema> type_template(NameId name) {
+    if (auto m = own_member_alias_template(name)) return m;
     if (auto c = class_template(name)) return c;
     return named_template(name, ast::DeclKind::type_alias);
   }
@@ -2600,11 +2608,43 @@ public:
     if (!cr) return std::nullopt;
     for (const NestedType& t : cr->types)
       if (t.name == n) return std::pair{t, c};
+    // A member alias template hides its bases' members and is no type by itself.
+    if (std::ranges::contains(cr->alias_templates, n, &NestedType::name)) return std::nullopt;
     for (const BaseRec& b : cr->bases) {
       if (unqualified && b.dependent_in_pattern) continue;
       if (auto r = nested_member(b.cls, n)) return r;
     }
     return std::nullopt;
+  }
+  // The member alias template `n` of class `c` or of a base ([temp.mem], [class.member.lookup]):
+  // from its record where it is complete, a specialization instantiated for it; or, in the class
+  // being defined or instantiated, among the members declared so far ([basic.scope.class]).
+  std::optional<ast::DeclSema> member_alias_template(EntityId c, NameId n) {
+    if (const ClassRec* cr = class_rec(c)) {
+      for (const NestedType& t : cr->alias_templates)
+        if (t.name == n) return q_->template_decl(t.entity);
+      if (direct_member(c, *cr, n)) return std::nullopt;  // hidden by a member that is not one
+      for (const BaseRec& b : cr->bases)
+        if (auto r = member_alias_template(b.cls, n)) return r;
+      return std::nullopt;
+    }
+    if (c == current_class) {
+      if (auto m = q_->earlier_member(n))  // any earlier member of the name hides the bases'
+        return m->kind == ast::DeclKind::type_alias && (m->flags & decl_flag::template_) ? std::optional(*m) : std::nullopt;
+      // [temp.dep.general]: a dependent base is not searched.
+      for (const BaseRec& b : q_->defining_base_records(c))
+        if (!b.dependent_in_pattern)
+          if (auto r = member_alias_template(b.cls, n)) return r;
+    }
+    return std::nullopt;
+  }
+  // `apply<args>` in the scope of the class that declares `apply` ([class.member.lookup]), unless
+  // a block scope or a template parameter hides it.
+  std::optional<ast::DeclSema> own_member_alias_template(NameId n) {
+    if (current_class == EntityId::none || template_param(n)) return std::nullopt;
+    for (const auto& s : scopes_)
+      if (std::ranges::contains(s, n, [](const auto& p) { return p.first; })) return std::nullopt;
+    return member_alias_template(current_class, n);
   }
   std::optional<QualType> member_type(EntityId c, NameId n) {
     if (class_rec(c)) {
@@ -2612,9 +2652,10 @@ public:
       return std::nullopt;
     }
     if (c == current_class)
-      if (auto m = q_->earlier_member(n, /*type_only=*/true)) return m->type;
+      if (auto m = q_->earlier_member(n, /*type_only=*/true); m && !(m->flags & decl_flag::template_)) return m->type;
     if (encloses_current_class(c))
-      if (auto m = q_->enclosing_earlier_member(c, n, /*type_only=*/true)) return m->type;
+      if (auto m = q_->enclosing_earlier_member(c, n, /*type_only=*/true); m && !(m->flags & decl_flag::template_))
+        return m->type;
     return std::nullopt;
   }
 
@@ -4063,6 +4104,8 @@ public:
         return class_template_id(*d, t.flatten(*full), at, /*directly_named=*/false);
       }
       TypeRec r = types().rec(a->type);
+      // Bound to `Q::template M` with Q dependent: `typename Q::template M<args>`.
+      if (r.kind == TypeKind::dep_name) return dependent_member_template_id(r.inner, r.name, *full);
       return types().dep_spec(r.depth, r.index, r.pack, *full);
     }
     return types().dep_spec(p.depth, p.index, p.pack != 0, *full);
@@ -4096,6 +4139,52 @@ public:
   // A template-name as a template argument ([temp.arg.template]/1): a class or alias template, in
   // namespace `ns` or found by unqualified lookup, or a template template parameter (its argument
   // when bound).
+  // `C::M` or `Q::template M` as a template template argument ([temp.arg.template]/1,
+  // [temp.names]/4): C's member alias template; with Q dependent, Q's member template once Q is
+  // known, which needs the keyword.
+  std::optional<TemplateArg> member_template_name_arg(const Scope& s, NameId name, bool keyword) {
+    if (!s.type) return std::nullopt;
+    const QualType q = *s.type;
+    const bool dependent = types().is_dependent(q);
+    if (types().is_class(q) && (!dependent || types().class_of(q) == current_class))
+      if (auto d = member_alias_template(types().class_of(q), name))
+        return TemplateArg{ast::TemplateArgKind::template_, QualType{}, ConstId::none, {}, d->entity};
+    if (!dependent || !keyword) return std::nullopt;
+    return TemplateArg{ast::TemplateArgKind::template_, types().dep_template(q, name, ast::DepNameForm::template_name),
+                       ConstId::none};
+  }
+  // `C::M<args>` or `Q::template M<args>` naming a member alias template's specialization
+  // ([temp.mem], [temp.names]/4): its declaration, or none with `dependent` set when Q is
+  // dependent and the keyword says M is a template.
+  std::optional<ast::DeclSema> member_template_scope(const Scope& s, NameId name, bool keyword, bool& dependent) {
+    dependent = false;
+    if (!s.type) return std::nullopt;
+    const QualType q = *s.type;
+    const bool dep = types().is_dependent(q);
+    if (types().is_class(q) && (!dep || types().class_of(q) == current_class))
+      if (auto d = member_alias_template(types().class_of(q), name)) return d;
+    // A dependent class whose pattern declares M, the current instantiation named outside its
+    // class (`Y<T>::M<args>` in a member's definition, [temp.names]/3), needs no keyword.
+    dependent = dep && (keyword || (types().is_class(q) && member_alias_template(types().class_of(q), name)));
+    return std::nullopt;
+  }
+  // Whether member alias template `templ`, named as `Q::M` at `at`, is accessible here
+  // ([class.access]/4); diagnosed if not, or deferred as a nested type's check is.
+  void member_template_access(QualType q, EntityId templ, NameId n, u32 at) {
+    if (!types().is_class(q) || types().is_dependent(q)) return;
+    const EntityId naming = types().class_of(q), owner = w_->entities.rec(templ).scope;
+    const ClassRec* cr = class_rec(owner);
+    if (!cr) return;
+    if (defer_type_access && (!accessible(owner, cr->access_of(templ), naming) || !accessible_naming_base(naming, owner))) {
+      deferred_access_.push_back({owner, templ, n, at});
+      return;
+    }
+    check_access(owner, templ, n, at, naming);
+  }
+  // `typename Q::template M<args>` with Q dependent ([temp.dep.type]): known once Q is.
+  QualType dependent_member_template_id(QualType q, NameId name, std::span<const TemplateArg> args) {
+    return types().dep_template(q, name, ast::DepNameForm::template_id, args);
+  }
   std::optional<TemplateArg> template_name_arg(std::optional<EntityId> ns, NameId name) {
     if (!ns)
       if (const ast::TemplateParamSema* p = template_param(name)) {
@@ -4307,6 +4396,10 @@ public:
     Templates t(*w_, classes());
     t.defining_enum_is_scoped = [this](EntityId e) { return q_->defining_enum_is_scoped(e); };
     t.member_type = [this](EntityId c, NameId n) { return member_type(c, n); };
+    t.member_template = [this](EntityId c, NameId n) -> std::optional<EntityId> {
+      auto d = member_alias_template(c, n);
+      return d ? std::optional(d->entity) : std::nullopt;
+    };
     t.member_constant = [this](QualType qualifier, NameId name) {
       return qualified_member_constant(qualifier, name, 0);
     };
@@ -5864,6 +5957,8 @@ public:
     }
     for (const NestedType& nested : cr.types)
       if (nested.name == name) return Found{.owner = c, .nested_type = nested.entity};
+    for (const NestedType& alias : cr.alias_templates)
+      if (alias.name == name) return Found{.owner = c, .nested_type = alias.entity};
     return std::nullopt;
   }
   std::optional<Found> find_member(EntityId c, NameId name, bool unqualified = false) {

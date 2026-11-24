@@ -136,6 +136,9 @@ reasoning; do not leave decisions only in issue threads.
      the converted `std::size_t` (`Lm0E`), a substituted parameter in that parameter's type
      (`Li1E`), and a bound pack as `J <args> E`. Clang writes the literal as spelled (`Li0E`) and
      a bound pack as a placeholder. ycxx writes GCC's form.
+   - The same holds for a dependent member template as a template template argument,
+     `Use<Y<T>::template apply>` (#340): GCC writes `N1YIT_E5applyE`, Clang `sr1YIT_EE5applyE`.
+     ycxx writes GCC's form.
 
 ## 2. Provenance
 

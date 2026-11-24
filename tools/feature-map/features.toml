@@ -1989,7 +1989,7 @@ group = 'temp'
 clauses = ['temp.mem']
 std = 'C++98'
 status = 'partial'
-note = 'member class and alias templates, conversion function templates'
+note = 'Member function templates and member alias templates, also as `Q::template M<args>` and as template template arguments, work. Member class templates (#306), conversion function templates (#339), trailing requires-clauses, static data member templates and `&S::f<int>` remain.'
 probe = '''
 struct S { template<class T> T get(T t) const { return t; } };
 template<class U> struct W { template<class T> int f(T) { return sizeof(U); } };

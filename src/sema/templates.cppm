@@ -110,8 +110,23 @@ public:
     case TypeKind::dep_name: {
       // `typename Q::n`: the member type `n` of the substituted Q, which must be a complete
       // class declaring one ([temp.deduct.general]/11).
+      if (r.dep_form == ast::DepNameForm::template_name) return std::nullopt;  // not a type
       auto q = substitute(r.inner, b);
       if (!q) return std::nullopt;
+      if (r.dep_form == ast::DepNameForm::template_id) {
+        // `typename Q::template n<args>`: Q's member alias template n applied to the arguments
+        // ([temp.names]/4, [temp.alias]/2).
+        auto args = substitute_args(ins().seqs.elements(r.args), b);
+        if (!args) return std::nullopt;
+        if (types().is_dependent(*q))
+          return types().add_cv(types().dep_template(*q, r.name, ast::DepNameForm::template_id, *args), cv);
+        if (!types().is_class(*q)) return std::nullopt;
+        auto templ = member_template_of(types().class_of(*q), r.name);
+        if (!templ) return std::nullopt;
+        auto t2 = apply_template(*templ, *args);
+        if (!t2) return std::nullopt;
+        return types().add_cv(*t2, cv);
+      }
       if (types().is_dependent(*q)) return types().add_cv(types().dep_name(*q, r.name), cv);
       if (!types().is_class(*q)) return std::nullopt;
       // Asked at a point: the class completed there, a specialization instantiated for it
@@ -212,6 +227,9 @@ public:
       if (x->kind != TemplateArgKind::template_) return std::nullopt;
       if (x->templ == EntityId::none) {
         TypeRec p = types().rec(x->type);
+        // `Q::template n` with Q still dependent: `typename Q::template n<args>`.
+        if (p.kind == TypeKind::dep_name)
+          return types().add_cv(types().dep_template(p.inner, p.name, ast::DepNameForm::template_id, *args), cv);
         return types().add_cv(types().dep_spec(p.depth, p.index, p.pack, *args), cv);
       }
       auto t2 = apply_template(x->templ, *args);
@@ -549,6 +567,19 @@ public:
   std::optional<TemplateArg> substitute_arg(const TemplateArg& a, const Bindings& b) {
     // A template: itself, or the argument of the template template parameter it is.
     if (a.kind == TemplateArgKind::template_) {
+      if (a.templ == EntityId::none && types().kind(a.type) == TypeKind::dep_name) {
+        // `Q::template n` ([temp.names]/4): Q's member template once Q is a class.
+        TypeRec r = types().rec(a.type);
+        auto q = substitute(r.inner, b);
+        if (!q) return std::nullopt;
+        if (types().is_dependent(*q))
+          return TemplateArg{TemplateArgKind::template_, types().dep_template(*q, r.name, ast::DepNameForm::template_name),
+                             ConstId::none};
+        if (!types().is_class(*q)) return std::nullopt;
+        auto templ = member_template_of(types().class_of(*q), r.name);
+        if (!templ) return std::nullopt;
+        return TemplateArg{TemplateArgKind::template_, QualType{}, ConstId::none, {}, *templ};
+      }
       if (a.templ != EntityId::none || types().kind(a.type) != TypeKind::template_param) return a;
       TypeRec r = types().rec(a.type);
       auto x = b.at(r.depth, r.index);
@@ -694,14 +725,23 @@ public:
     return v;
   }
 
-  // `t` with each `typename Q::n` that `f(Q, n)` resolves replaced by what it gives: a member of the
-  // current instantiation named with a qualifier, found ([temp.dep.type]/1).
-  QualType resolve_dep_names(QualType t, const std::function<std::optional<QualType>(QualType, NameId)>& f) {
+  // `t` with each `typename Q::n` and `typename Q::template n<args>` that `f(Q, n, args)` resolves
+  // replaced by what it gives: a member of the current instantiation named with a qualifier, found
+  // ([temp.dep.type]/1); `args` is none for a member type.
+  using DepNameResolver =
+      std::function<std::optional<QualType>(QualType, NameId, std::optional<std::span<const TemplateArg>>)>;
+  QualType resolve_dep_names(QualType t, const DepNameResolver& f) {
     TypeRec r = types().rec(t);
     Cv cv = Types::cv(types().canonical(t));
     switch (r.kind) {
     case TypeKind::dep_name:
-      if (auto m = f(r.inner, r.name)) return types().add_cv(*m, cv);
+      if (r.dep_form == ast::DepNameForm::template_name) return t;
+      if (r.dep_form == ast::DepNameForm::template_id) {
+        std::vector<TemplateArg> args = ins().seqs.elements(r.args);
+        if (auto m = f(r.inner, r.name, std::span<const TemplateArg>(args))) return types().add_cv(*m, cv);
+        return t;
+      }
+      if (auto m = f(r.inner, r.name, std::nullopt)) return types().add_cv(*m, cv);
       return t;
     case TypeKind::pointer: return types().add_cv(types().pointer(resolve_dep_names(r.inner, f)), cv);
     case TypeKind::member_pointer: {
@@ -952,9 +992,12 @@ public:
         params_in(r.inner, out, nested);
       params_in(r.bound_value, out, nested);
       return;
+    case TypeKind::dep_name:
+      params_in(r.inner, out, nested);
+      for (const TemplateArg& a : ins().seqs.elements(r.args)) params_in(a, out, nested);
+      return;
     case TypeKind::pointer:
     case TypeKind::reference:
-    case TypeKind::dep_name:
     case TypeKind::transform: params_in(r.inner, out, nested); return;
     case TypeKind::member_pointer:
       params_in(r.member_owner, out, nested);
@@ -1149,7 +1192,9 @@ public:
              deduce_args(ins().seqs.elements(pr.args), ins().seqs.elements(ar.args), depth, out);
     case TypeKind::builtin_spec: return true;
     case TypeKind::template_param: return pr.depth == ar.depth && pr.index == ar.index && pr.pack == ar.pack;
-    case TypeKind::dep_name: return types().canonical(pr.inner) == types().canonical(ar.inner) && pr.name == ar.name;
+    case TypeKind::dep_name:
+      return types().canonical(pr.inner) == types().canonical(ar.inner) && pr.name == ar.name && pr.dep_form == ar.dep_form &&
+             pr.args == ar.args;
     case TypeKind::transform: return pr.trait == ar.trait && types().canonical(pr.inner) == types().canonical(ar.inner);
     case TypeKind::pack_index:  // non-deduced, above
       return pr.inner == ar.inner && pr.bound_value == ar.bound_value && pr.pack == ar.pack && pr.args == ar.args;
@@ -1340,10 +1385,14 @@ public:
       for (const TemplateArg& a : flatten(w_->entities.rec(r.entity).args))
         if (a.kind == TemplateArgKind::type) pack_types_in(a.type, out);
       return;
+    case TypeKind::dep_name:
+      pack_types_in(r.inner, out);
+      for (const TemplateArg& a : flatten(ins().seqs.elements(r.args)))
+        if (a.kind == TemplateArgKind::type) pack_types_in(a.type, out);
+      return;
     case TypeKind::array:
     case TypeKind::pointer:
     case TypeKind::reference:
-    case TypeKind::dep_name:
     case TypeKind::transform:
     case TypeKind::pack_expansion: pack_types_in(r.inner, out); return;
     case TypeKind::member_pointer:
@@ -2149,6 +2198,17 @@ private:
     return Bindings::of(ps[0].depth, unique);
   }
 
+  // The member alias template `n` of class `c` ([temp.mem]), as lookup at a point finds it, or
+  // in the unit's record of `c`.
+  std::optional<EntityId> member_template_of(EntityId c, NameId n) {
+    if (member_template) return member_template(c, n);
+    const ClassRec* cr = classes_->find(c);
+    if (!cr) return std::nullopt;
+    for (const NestedType& t : cr->alias_templates)
+      if (t.name == n) return t.entity;
+    return std::nullopt;
+  }
+
   Bindings bindings(u16 depth, const std::vector<std::optional<TemplateArg>>& out) {
     Bindings b;
     b.levels.resize(depth + 1);
@@ -2169,6 +2229,8 @@ public:
   // The type member of a class with a name, as lookup at a point finds it; set by whoever asks at
   // a point, which `classes_` alone does not know.
   std::function<std::optional<QualType>(EntityId, NameId)> member_type;
+  // The member alias template of a class with a name, likewise (`Sema::member_alias_template`).
+  std::function<std::optional<EntityId>(EntityId, NameId)> member_template;
   // The scopedness of an enumeration whose record has yet to be published.
   std::function<std::optional<bool>(EntityId)> defining_enum_is_scoped;
   // The declaration of template `templ` with its head, as lookup at a point finds it.

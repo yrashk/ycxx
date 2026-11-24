@@ -1720,24 +1720,30 @@ public:
                                                      bool checked = false, bool* failed_qualifier = nullptr,
                                                      std::optional<u32>* committed_failure = nullptr,
                                                      bool conversion = false) {
-    if (kind(j) != Tk::identifier || kind(j + 1) != Tk::less) return std::nullopt;
-    if (in && !in->ns) return std::nullopt;  // member templates of classes come later (#88)
-    NameId n = name_of(tok(j));
+    // `Q::template M<args>` ([temp.names]/4): the keyword says M names a template.
+    const bool keyword = in && kind(j) == Tk::kw_template;
+    const u32 k = keyword ? j + 1 : j;
+    if (kind(k) != Tk::identifier || kind(k + 1) != Tk::less) return std::nullopt;
+    NameId n = name_of(tok(k));
     const ast::TemplateParamSema* tt = in ? nullptr : s_->template_template_param(n);
     std::optional<ast::DeclSema> tmpl;
-    if (in) {
-      tmpl = conversion ? s_->namespace_expression_type_template(*in->ns, n, pos() + j)
+    bool dependent_member = false;
+    if (in && in->ns) {
+      tmpl = conversion ? s_->namespace_expression_type_template(*in->ns, n, pos() + k)
                         : s_->namespace_type_template(*in->ns, n);
+    } else if (in) {
+      // A class's member alias template ([temp.mem]); a dependent class's, once it is known.
+      tmpl = s_->member_template_scope(*in, n, keyword, dependent_member);
     } else if (!tt) {
       tmpl = s_->type_template(n);
     }
     bool builtin = !in && !tt && !tmpl && s_->builtin_template(n);  // `__make_integer_seq<…>::`
-    if (!tmpl && !tt && !builtin) return std::nullopt;
+    if (!tmpl && !tt && !builtin && !dependent_member) return std::nullopt;
     u32 saved = i_;
     bool saved_half = half_;
     std::size_t diags = s_->diag_count();
-    const u32 name_at = pos() + j;
-    i_ += j + 1;
+    const u32 name_at = pos() + k;
+    i_ += k + 1;
     bool took_closer = false;
     auto args = template_argument_list(nullptr, &took_closer);
     u32 after = i_ - saved;
@@ -1745,7 +1751,10 @@ public:
     bool ended_half = half_;  // the list ended in the first half of a `>>`
     std::optional<QualType> t;
     if (args && closed)
-      t = tt ? s_->template_param_id(*tt, *args, 0) : builtin ? s_->builtin_template_id(n, *args, 0) : type_template_id(*tmpl, *args, name_at);
+      t = tt ? s_->template_param_id(*tt, *args, 0)
+          : builtin ? s_->builtin_template_id(n, *args, 0)
+          : dependent_member ? std::optional(s_->dependent_member_template_id(*in->type, n, *args))
+                             : type_template_id(*tmpl, *args, name_at);
     i_ = saved;
     half_ = saved_half;
     if (!scope) qualified_half_ = ended_half;
@@ -1758,6 +1767,7 @@ public:
       if (probe_failure) *failed_qualifier = unsatisfied;
       if (commit_argument_failure && unsatisfied) *committed_failure = after + 1;
     }
+    if (t && checked && in && in->type && tmpl) s_->member_template_access(*in->type, tmpl->entity, n, name_at);
     if (!checked && (!committed_failure || !*committed_failure)) s_->truncate_diags(diags);
     if (!t) return std::nullopt;
     j = scope ? after + 1 : after;
@@ -1792,7 +1802,19 @@ public:
       return std::nullopt;
     }
     if (checked && s_->has_error_since(diags)) return std::nullopt;
-    if (!s || kind(next) != Tk::identifier || kind(next + 1) == Tk::coloncolon) return std::nullopt;
+    if (!s) return std::nullopt;
+    // `C::M<args>`, `C::template M<args>`, `Q::template M<args>`: a member alias template's
+    // specialization ([temp.mem], [temp.names]/4).
+    if ((s->type || kind(next) == Tk::kw_template) && (kind(next) == Tk::identifier || kind(next) == Tk::kw_template)) {
+      u32 j = next;
+      qualified_half_ = false;
+      if (auto t = template_id_scope(s, j, /*scope=*/false, checked)) {
+        if (terminal_template_id && kind(j) != Tk::coloncolon) *terminal_template_id = true;
+        return std::pair{*t->type, j - start};
+      }
+      if (kind(next) == Tk::kw_template) return std::nullopt;
+    }
+    if (kind(next) != Tk::identifier || kind(next + 1) == Tk::coloncolon) return std::nullopt;
     // `N::X<args>`: a class template specialization named in a namespace ([temp.names]).
     qualified_half_ = false;
     NameId name = name_of(tok(next));
@@ -2589,29 +2611,34 @@ public:
   // a class or alias template, or a template template parameter, followed by the argument's end.
   bool template_name_ahead() {
     u32 at = 0;
-    std::optional<ast::TemplateArg> a;
-    if (qualified_ahead()) {
-      auto sc = nested_name(0, at);
-      if (!sc || !sc->ns || kind(at) != Tk::identifier) return false;
-      a = s_->template_name_arg(sc->ns, name_of(tok(at)));
-    } else if (is(Tk::identifier)) {
-      a = s_->template_name_arg(std::nullopt, name_of(tok()));
-    }
+    std::optional<ast::TemplateArg> a = template_name_at(at);
     Tk k = kind(at + 1);
     return a && (k == Tk::comma || k == Tk::greater || k == Tk::greatergreater || k == Tk::ellipsis);
   }
-  // A template argument that is a template-name, `X` or `N::X` ([temp.arg.template]/1): none, with
-  // nothing read, otherwise.
-  std::optional<ast::TemplateArg> template_name_argument() {
-    std::optional<ast::TemplateArg> a;
-    u32 at = 0;
+  // A template-name here, `X`, `N::X`, a class's member template `C::X` or `Q::template X`
+  // ([temp.arg.template]/1, [temp.names]/4), as a template argument; `at` is its last token.
+  std::optional<ast::TemplateArg> template_name_at(u32& at, bool checked = false) {
+    at = 0;
     if (qualified_ahead()) {
       auto sc = nested_name(0, at);
-      if (!sc || !sc->ns || kind(at) != Tk::identifier) return std::nullopt;
-      a = s_->template_name_arg(sc->ns, name_of(tok(at)));
-    } else if (is(Tk::identifier)) {
-      a = s_->template_name_arg(std::nullopt, name_of(tok()));
+      if (!sc) return std::nullopt;
+      const bool keyword = kind(at) == Tk::kw_template;
+      if (keyword) ++at;
+      if (kind(at) != Tk::identifier) return std::nullopt;
+      NameId n = name_of(tok(at));
+      if (sc->ns) return s_->template_name_arg(sc->ns, n);
+      auto a = s_->member_template_name_arg(*sc, n, keyword);
+      if (a && checked && a->templ != ast::EntityId::none) s_->member_template_access(*sc->type, a->templ, n, pos() + at);
+      return a;
     }
+    if (is(Tk::identifier)) return s_->template_name_arg(std::nullopt, name_of(tok()));
+    return std::nullopt;
+  }
+  // A template argument that is a template-name (`template_name_at`): none, with nothing read,
+  // otherwise.
+  std::optional<ast::TemplateArg> template_name_argument() {
+    u32 at = 0;
+    std::optional<ast::TemplateArg> a = template_name_at(at, /*checked=*/true);
     if (!a) return std::nullopt;
     for (u32 j = 0; j <= at; ++j) bump();
     return a;
@@ -4526,6 +4553,19 @@ public:
         return type_conversion(*type, begin);
       }
       if (s_->has_error_since(diags)) return {NodeId::none, begin, pos()};
+    }
+    // `C::M<args>(…)` or `C::M<args>{…}` ([expr.type.conv]): a member alias template's
+    // specialization as the target type of a functional conversion ([temp.mem]).
+    if (s->type && is(Tk::less)) {
+      bool dependent = false;
+      if (auto tmpl = s_->member_template_scope(*s, n, keyword, dependent)) {
+        s_->member_template_access(*s->type, tmpl->entity, n, name_at);
+        auto args = template_argument_list();
+        if (!args) return {NodeId::none, begin, pos()};
+        auto type = type_template_id(*tmpl, *args, name_at);
+        if (!type) return {NodeId::none, begin, pos()};
+        return type_conversion(*type, begin);
+      }
     }
     // `N::T(args)` or `N::T{…}` ([expr.type.conv]): a qualified type name, unless a function or
     // variable of the name hides it. Here an unresolved dependent name does not denote a type

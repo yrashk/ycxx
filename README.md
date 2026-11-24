@@ -43,6 +43,10 @@ dependent exception specification when it is needed.
 A lambda's noexcept-specifier, including one that depends on an enclosing template's
 parameters, is part of its call operator's type. [#807](https://github.com/yrashk/ycxx/issues/807)
 
+Classes and class templates can declare member alias templates, used as `C::M<args>`,
+`typename Q::template M<args>` and as template template arguments.
+[#340](https://github.com/yrashk/ycxx/issues/340)
+
 A class template can grant private access to the class passed as a type argument using
 `friend Authority;`. Each specialization grants access to its own authority.
 [#689](https://github.com/yrashk/ycxx/issues/689)
