@@ -103,15 +103,22 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
     `--match-head-commit <sha>` so a later push cannot slip in.
   - Learned on #721, 2026-11-22.
 
-- **Several green PRs that are behind `main` merge faster as one batch.** After each merge the
-  others fell behind again. Each "merge main, wait for CI" round took 30–40 minutes, and on a
-  loaded host local runs only timed out. #1124 through #1166 took four such rounds.
-  - Do: merge the PRs' heads onto `main` in a scratch worktree. If every merge is clean, push the
-    result as a draft PR titled `[do not merge]`. Hold pushes to the batched PRs. When it is green,
-    merge them in that order, then check `git diff --stat <batch> origin/main` is empty. Then close
-    the draft and delete its branch.
-  - A failure that needs two PRs together (an XPASS, say) goes into the PR merged last, after
-    the others are in: #1209 found `temp.friend-3`, which passes only with #1194 and #1204.
+- **A draft batch tests the final integration of several PRs.** After each merge the others
+  fell behind again. Each "merge main, wait for CI" round took 30–40 minutes, and on a loaded
+  host local runs only timed out. #1124 through #1166 took four such rounds.
+  - Merge the PR heads onto `main` in order in a scratch worktree. If every merge is clean,
+    use a draft PR titled `[do not merge]` to test the exact combined tree. A later PR can mask
+    a failure in an earlier prefix.
+  - For separate merges, require a green gate for every exact prefix, each against the
+    then-current `main`. Recheck the base and head before every merge and use
+    `--match-head-commit` for the tested head. Retest if either changes. After the last merge,
+    check `git diff --stat <batch> origin/main` to confirm the final trees match, then close the
+    draft and delete its branch.
+  - A single authorized combined PR can use the gate for its exact combined tree against
+    current `main`.
+  - Put a test expectation update that needs two PRs in the last PR. Test that prefix with
+    both changes present and require the earlier prefixes to pass with their own expectations.
+    #1209 found the `temp.friend-3` XPASS, which needs both #1194 and #1204.
   - Learned on #1165 and #1209, 2026-11-24.
 
 - **Commits pushed to a PR's branch after it merges never reach main.** #233's Apple-ABI change
@@ -178,15 +185,16 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
     To keep coding meanwhile, build into a scratchpad build directory (the entry above).
   - Stopping a `tools/test` that waits on a running `tools/build` in the same directory leaves
     half-built modules ("failed to read compiled module"). Let the build finish, then rebuild.
-- **On a loaded machine the fast gate fails with timeouts, not failures.** On #330, with other
-  sessions building and load averages of 120–250, two fast runs failed. The CTests had 10 s
-  executable timeouts, `daemon.trace_tui` has a 2 s budget, and draft tests that include
-  `<iostream>` have a 60 s timeout. Every one of them passed on a re-run. About an hour went to
-  re-running and checking.
-  - Do: check `uptime` first. Re-run only what timed out: `ctest --test-dir build -R '<names>'`,
+- **A loaded machine can cause timeouts in the fast gate.** On #330, with other sessions
+  building and load averages of 120–250, two fast runs failed. The CTests had 10 s executable
+  timeouts, `daemon.trace_tui` has a 2 s budget, and draft tests that include `<iostream>` have
+  a 60 s timeout. Every one of them passed on a re-run. About an hour went to re-running and
+  checking.
+  - Check `uptime` first. To isolate a timeout, rerun `ctest --test-dir build -R '<names>'`,
     then `tools/test failed affected core` to skip the rebuild. A test that times out only under
-    the driver is waiting in the daemon's queue. `YCXX_DAEMON=0 /usr/bin/time -p build/bin/ycxx …`
-    shows its own CPU time.
+    the driver may be waiting in the daemon's queue. `YCXX_DAEMON=0 /usr/bin/time -p build/bin/ycxx …`
+    shows its own CPU time. Require the exact merge candidate to pass its gate under suitable
+    load or in CI.
   - Learned on #330.
   - Learned on #218.
   - Hit again on the merge checks of #1124, #1131 and #1129, at load 16 to 87. Each time the build
