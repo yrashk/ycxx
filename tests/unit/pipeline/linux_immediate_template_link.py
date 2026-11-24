@@ -17,6 +17,26 @@ def check_symbols(readelf, artifact):
             raise SystemExit(f"{artifact.name} contains calculate<40>: {line.strip()}")
 
 
+
+def check_checked_specializations(readelf, artifact):
+    symbols = subprocess.check_output(
+        [readelf, "--wide", "--symbols", artifact], text=True
+    )
+    entries = [line.split() for line in symbols.splitlines()]
+    entries = [fields for fields in entries if len(fields) >= 8]
+    omitted = "_Z11checked_sumILi1EEbl"
+    retained = "_Z11checked_sumILi2EEbl"
+    if any(fields[7] == omitted for fields in entries):
+        raise SystemExit(f"{artifact.name} contains unreferenced checked_sum<1>")
+    if not any(fields[7] == retained and fields[3] == "FUNC" and fields[6].isdecimal()
+               for fields in entries):
+        raise SystemExit(f"{artifact.name} has no definition of retained checked_sum<2>")
+    relocations = subprocess.check_output(
+        [readelf, "--wide", "--relocs", artifact], text=True
+    )
+    if retained not in relocations or "checked_input" in relocations:
+        raise SystemExit(f"unexpected checked specialization relocations in {artifact.name}")
+
 def main():
     ycxx, host_cxx, readelf = sys.argv[1:]
     source_dir = Path(__file__).with_suffix("")
@@ -48,6 +68,17 @@ def main():
         )
         subprocess.run([host_cxx, retained_obj, "-o", retained], check=True)
         subprocess.run([retained], check=True)
+
+        checked = output / "retained-checked-caller"
+        checked_obj = checked.with_suffix(".o")
+        subprocess.run(
+            [*compile_command, source_dir / "retained-checked-caller.cpp", "-o", checked_obj],
+            env=env,
+            check=True,
+        )
+        check_checked_specializations(readelf, checked_obj)
+        subprocess.run([host_cxx, checked_obj, "-o", checked], check=True)
+        subprocess.run([checked], check=True)
 
 
 if __name__ == "__main__":

@@ -2649,9 +2649,10 @@ evaluation writes the width-converted result on both outcomes and returns whethe
 mathematical result exceeds the signed range. The destination uses the usual object and
 lifetime rules. `__has_builtin` answers 0 for the partial domain.
 
-An eligible immediate function template with a checked operation keeps its native symbol
-and entry ABI checks, with a single unreachable body. Constant evaluation still uses
-its full body. The pinned `<ratio>` probes now reach class-member assertions in #257.
+Native emission can omit an unreferenced immediate function template specialization. A named
+namespace-scope specialization with checked arithmetic that is retained by the reference
+walk keeps its symbol and entry ABI checks with an unreachable native body. Constant
+evaluation uses the original body.
 [#1077](https://github.com/yrashk/ycxx/issues/1077)
 
 ## Trap builtin (#548)
