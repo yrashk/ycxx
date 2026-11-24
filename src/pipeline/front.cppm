@@ -1626,7 +1626,7 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
     // specialization, or a constructor of a class template's specialization.
     const auto& entity = world.entities.rec(in->spec);
     if ((in->decl.flags & sema::decl_flag::consteval_) && entity.kind == sema::EntityKind::constructor &&
-        immediate_without_code(in->body.value))
+        can_defer_body(in->body.value))
       continue;
     tu.functions.push_back({in->spec, in->decl, in->body.value, program.id(in->item), it.body_begin - it.begin,
                             program.this_type(in->decl)});
