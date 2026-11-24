@@ -103,6 +103,17 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
     `--match-head-commit <sha>` so a later push cannot slip in.
   - Learned on #721, 2026-11-22.
 
+- **Several green PRs that are behind `main` merge faster as one batch.** After each merge the
+  others fell behind again. Each "merge main, wait for CI" round took 30–40 minutes, and on a
+  loaded host local runs only timed out. #1124 through #1166 took four such rounds.
+  - Do: merge the PRs' heads onto `main` in a scratch worktree. If every merge is clean, push the
+    result as a draft PR titled `[do not merge]`. Hold pushes to the batched PRs. When it is green,
+    merge them in that order, then check `git diff --stat <batch> origin/main` is empty. Then close
+    the draft and delete its branch.
+  - A failure that needs two PRs together (an XPASS, say) goes into the PR merged last, after
+    the others are in: #1209 found `temp.friend-3`, which passes only with #1194 and #1204.
+  - Learned on #1165 and #1209, 2026-11-24.
+
 - **Commits pushed to a PR's branch after it merges never reach main.** #233's Apple-ABI change
   was pushed to `claude/byvalue-116` after the coordinator had merged #233, so it never reached
   main (the same trap as #198, from the other side).
@@ -149,7 +160,11 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
     imported"). The rebuild cost 15 minutes on a loaded machine. Oracle runs need no build either.
   - Hit again on #309: a test-writing subagent's oracle run built for 37 minutes beside the
     implementer's build. Give a test author's brief `tools/test --cxx clang affected <path>`.
+  - Hit again on #259: `tools/test --cxx clang own/x` built beside a background build, and the
+    build stage's CTests then failed 9 timeouts that all passed alone. For a binary other than
+    `build/bin/ycxx`, set `YCXX=<path>`.
   - Learned on #659.
+  - Rule: AGENTS.md, "While working".
 - **A reviewer running your binary blocks your rebuilds.** On #337 the reviewer probed with the
   worktree's `build/bin/ycxx`, so the next step could not be built for 15 minutes.
   - Do: build the next step into a build directory in the scratchpad
@@ -174,6 +189,10 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
     shows its own CPU time.
   - Learned on #330.
   - Learned on #218.
+  - Hit again on the merge checks of #1124, #1131 and #1129, at load 16 to 87. Each time the build
+    stage's six timed-out CTests passed when run alone. At load 87 every stage timed out, and
+    CI on a head containing `main` became the combined test.
+  - Rule: AGENTS.md, "While working".
   - The same holds for the first build of a fresh worktree. On #295, edits made while it built went
     into the binary meant to show the new tests failing. A sibling worktree's binary of `main`
     served instead: check its commit with `git merge-base --is-ancestor`, copy it to the
@@ -561,18 +580,6 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
   - Rule: DECISIONS §5.6.
   - Learned on #33.
 
-- **A path filter alone runs every stage, the build included.** `tools/test --cxx clang own/x`,
-  meant to check new tests against an oracle, started `tools/build` in the build directory a
-  background build was already using, so two Ninja runs shared it. On a loaded machine (load
-  ~35) the build stage's CTest run then failed 9 tests on 10 s and 30 s timeouts, and all 9
-  passed when rerun alone.
-  - Do: name the stage when you only want tests, as in `tools/test --cxx clang core own/x`.
-    For a binary other than `build/bin/ycxx` (a baseline build of main, say), set
-    `YCXX=<path>`.
-  - Do: rerun CTest timeouts with `ctest --test-dir build -R '<names>' -j 2` before treating
-    them as failures, then run the remaining stages (`tools/test failed affected core`).
-  - Learned on #259.
-
 - **Linux x86-64 run tests can be checked from the Mac without building ycxx in Docker.** Compile
   with the Mac's ycxx (`ycxx cxx --target=x86_64-pc-linux-gnu -c`), then link and run with `g++`
   in the `ycxx-linux-amd64` image (`docker run --platform linux/amd64 -v dir:/w`). On #309 this
@@ -620,6 +627,19 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
   - Do: give a bounded query a tri-state result (`yes`, `no`, `unknown`), as `base_path` and
     `PointerConversion` now do, and let each caller decide what `unknown` means.
   - Learned on #218.
+
+- **`Program`'s per-entity maps hold only the items analysed so far.** Top-level items are
+  analysed one group at a time and earlier ones only when asked (#947). So `class_items_` and
+  `decls_` can miss an earlier definition. On #306 a second `struct O::I { … }` was accepted
+  because the first had not been analysed. In-class checks passed, because `earlier_member`
+  analyses the earlier members itself.
+  - Do: call `ensure_declared(entity, item)` before reading these maps for an entity that no
+    lookup reached, and test a redefinition across two top-level items.
+  - The same review found that `is_complete` judged completeness by item order alone. The
+    enclosing class's implicit constructor then treated its own nested class as incomplete and
+    emitted an empty body. Test a construct that adds a later item inside an earlier one with a
+    field of that type, not only with uses after the closing brace.
+  - Learned on #306.
 
 ## Evidence and tests
 
