@@ -67,6 +67,8 @@ struct Ops {
   static Flow icmp(M& m, Frame& f, N n) {
     Value a = m.operand(f, n, 0), b = m.operand(f, n, 1);
     if (a.kind != VKind::integer || b.kind != VKind::integer) return m.fail(Reason::ill_formed);
+    if (const M::Shape& s = m.shape(m.type_of(f, f.fn->operands_of(n)[0])); s.kind == M::Kind::integer && s.width == 128)
+      return icmp128(m, f, n, M::wide_of(a, s), M::wide_of(b, s));
     i64 sa = i64(a.bits), sb = i64(b.bits);
     u64 ua = a.bits, ub = b.bits;
     bool r;
@@ -82,6 +84,25 @@ struct Ops {
     case ule: r = ua <= ub; break;
     case ugt: r = ua > ub; break;
     case uge: r = ua >= ub; break;
+    default: return m.fail(Reason::ill_formed);
+    }
+    return m.set(f, n, Value::integer(r));
+  }
+
+  static Flow icmp128(M& m, Frame& f, N n, ast::Bits128 a, ast::Bits128 b) {
+    using ast::wide::slt, ast::wide::ult;
+    bool r;
+    switch (ir::Pred(imms(f, n)[0])) {
+    case ir::Pred::eq: r = a == b; break;
+    case ir::Pred::ne: r = a != b; break;
+    case ir::Pred::slt: r = slt(a, b); break;
+    case ir::Pred::sle: r = !slt(b, a); break;
+    case ir::Pred::sgt: r = slt(b, a); break;
+    case ir::Pred::sge: r = !slt(a, b); break;
+    case ir::Pred::ult: r = ult(a, b); break;
+    case ir::Pred::ule: r = !ult(b, a); break;
+    case ir::Pred::ugt: r = ult(b, a); break;
+    case ir::Pred::uge: r = !ult(a, b); break;
     default: return m.fail(Reason::ill_formed);
     }
     return m.set(f, n, Value::integer(r));
@@ -111,17 +132,20 @@ struct Ops {
     const M::Shape* s;
     if (Flow fl = m.int_shape(f, m.result_type(f, n), s); fl != Flow::next) return fl;
     if (a.kind != VKind::integer) return m.fail(Reason::ill_formed);
+    // A source the machine has no integer shape for is read as its low 64 bits.
+    const M::Shape& from = m.shape(m.type_of(f, f.fn->operands_of(n)[0]));
+    ast::Bits128 x = from.kind == M::Kind::integer ? M::wide_of(a, from) : ast::Bits128{a.bits, 0};
     // [expr.static.cast]/8 checks the original value when there is no fixed underlying type.
     if (s->enum_range && constant(m)) {
-      const M::Shape* from;
-      if (Flow fl = m.int_shape(f, m.type_of(f, f.fn->operands_of(n)[0]), from); fl != Flow::next) return fl;
+      if (from.kind != M::Kind::integer) return m.fail(Reason::ill_formed);
       auto [minimum, maximum] = *s->enum_range;
-      if (from->is_signed && i64(a.bits) < 0 ? i64(a.bits) < minimum : a.bits > maximum)
-        return m.fail(Reason::enum_range);
+      bool outside = from.is_signed && ast::is_negative(x) ? x.hi != ~u64{0} || i64(x.lo) >= 0 || i64(x.lo) < minimum
+                                                            : x.hi != 0 || x.lo > maximum;
+      if (outside) return m.fail(Reason::enum_range);
     }
     // To bool it is the boolean conversion ([conv.integral]/1 defers to [conv.bool]).
-    if (s->integer_type == ast::Builtin::bool_) return m.set(f, n, Value::integer(a.bits != 0));
-    return m.set(f, n, Value::integer(M::norm(a.bits, s->width, s->is_signed)));
+    if (s->integer_type == ast::Builtin::bool_) return m.set(f, n, Value::integer(!ast::wide::is_zero(x)));
+    return m.set(f, n, M::of_wide(x, *s));
   }
   static Flow fconv(M& m, Frame& f, N n) { return m.float_convert(f, n); }
   static Flow f2i(M& m, Frame& f, N n) { return m.float_convert(f, n); }
@@ -133,7 +157,7 @@ struct Ops {
   static Flow tobool(M& m, Frame& f, N n) {
     Value a = m.operand(f, n, 0);
     switch (a.kind) {
-    case VKind::integer: return m.set(f, n, Value::integer(a.bits != 0));
+    case VKind::integer: return m.set(f, n, Value::integer((a.bits | a.hi) != 0));
     case VKind::floating: {
       u64 magnitude = m.shape(m.type_of(f, f.fn->operands_of(n)[0])).width == 32 ? a.bits & 0x7fff'ffffu : a.bits & ~(u64{1} << 63);
       return m.set(f, n, Value::integer(magnitude != 0));
@@ -155,9 +179,12 @@ struct Ops {
     const M::Shape* is;
     if (Flow fl = m.int_shape(f, m.type_of(f, f.fn->operands_of(n)[1]), is); fl != Flow::next) return fl;
     if (i.kind != VKind::integer) return m.fail(Reason::ill_formed);
-    bool negative = is->is_signed && i64(i.bits) < 0;
-    if (!negative && i.bits > u64(std::numeric_limits<i64>::max())) return m.fail(Reason::pointer_bounds);
-    i64 by = i64(i.bits);
+    ast::Bits128 x = M::wide_of(i, *is);
+    bool negative = is->is_signed && ast::is_negative(x);
+    // The offset is within an array only if it fits 64 bits.
+    if (negative ? x.hi != ~u64{0} || i64(x.lo) >= 0 : x.hi != 0 || x.lo > u64(std::numeric_limits<i64>::max()))
+      return m.fail(Reason::pointer_bounds);
+    i64 by = i64(x.lo);
     if (p.kind == VKind::null) {
       if (by != 0) return m.fail(Reason::pointer_bounds);
       return m.set(f, n, p);
@@ -511,7 +538,7 @@ struct Ops {
     for (u32 i = 0; i < cases.size(); ++i) {
       Value c;
       if (Flow fl = m.constant(ConstId(u32(cases[i])), t, c); fl != Flow::next) return fl;
-      if (c.bits == v.bits) return m.jump(f, n, i + 1);
+      if (c.bits == v.bits && c.hi == v.hi) return m.jump(f, n, i + 1);
     }
     return m.jump(f, n, 0);
   }

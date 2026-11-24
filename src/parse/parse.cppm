@@ -4811,6 +4811,11 @@ private:
         s_.diag(u.begin, Diag::enum_base_not_integral);
         return bad();
       }
+      // Enumerator values are kept in 64 bits, so a 128-bit underlying type is not yet (#1176).
+      if (types.is(u.type, sema::Builtin::int128) || types.is(u.type, sema::Builtin::unsigned_int128)) {
+        s_.diag(u.begin, Diag::not_supported, Tk::kw___int128);
+        return bad();
+      }
       fixed = sema::Types::unqualified(types.canonical(u.type));
     } else if (scoped) {
       fixed = s_.builtin(sema::Builtin::int_);  // [dcl.enum]/5: int unless given
@@ -4931,6 +4936,11 @@ private:
             // A nested enum instantiation can diagnose the error outside this item's result.
             if (replay != EntityId::none) return;
             if (unnamed && inst_) return bad();
+          } else if (sema::shape(s_.world().target, *types.builtin_of(v.type())).bits > 64) {
+            // Enumerator values are kept in 64 bits and typed by their initializers until the
+            // closing brace ([dcl.enum]/5), so a 128-bit initializer is not yet (#1176).
+            s_.diag(x.begin, Diag::not_supported, Tk::kw___int128);
+            return bad();
           } else {
             sema::IntShape sh = sema::shape(s_.world().target, *types.builtin_of(v.type()));
             sema::u64 bits = s_.world().values.rec(*c).bits;
@@ -5553,7 +5563,7 @@ private:
     std::optional<ConstId> v;
     if (s_.types().is_integral(e.type())) v = sema::Evaluator(s_, q_).evaluate(e).value;
     auto& values = s_.world().values;
-    u64 width = v && values.rec(*v).kind == sema::ValueKind::integer ? values.rec(*v).bits : 0;
+    u64 width = v && values.rec(*v).kind == sema::ValueKind::integer && !values.rec(*v).wide ? values.rec(*v).bits : 0;
     if (width == 0 || width > 32) {
       s_.diag(at, Diag::bit_field_width);
       return std::nullopt;
