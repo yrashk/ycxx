@@ -449,7 +449,7 @@ struct ClassLayout {
 struct ConstLayout {
   std::int64_t bits = 0;
   std::optional<EntityId> base;    // an address constant
-  std::optional<ConstId> string;   // the string literal object `base` is the entity of
+  std::optional<ConstId> object;  // a string literal or compiler-created constant object
 };
 struct [[=engine::cheap]] LayoutConstant {
   using Key = ConstId;
@@ -457,8 +457,8 @@ struct [[=engine::cheap]] LayoutConstant {
   static Value run(engine::SyncCtx& cx, ConstId c);
 };
 
-// A string literal object a function or variable uses, and its entity.
-struct StringUse {
+// A constant object a function or variable uses, and its entity.
+struct ConstantObjectUse {
   ConstId object = ConstId::none;
   EntityId entity = EntityId::none;
 };
@@ -488,7 +488,7 @@ inline const EnumShape* enum_shape(const Shapes& shapes, const ShapeIndex& index
 
 // `layout` as `lower` reads it (ir::layout_source): types from the interners and the unit's
 // shapes (its classes' members and enumerations' underlying types, #115), constants through the
-// cell above. Records the string literal objects whose addresses it gave, in order of first use.
+// cell above. Records constant objects whose addresses it gave, in order of first use.
 class QueryLayout {
  public:
   QueryLayout(engine::SyncCtx& cx, const Shapes& shapes, const ShapeIndex& index, const ast::Target& target)
@@ -501,7 +501,8 @@ class QueryLayout {
   ir::ConstValue constant(ConstId c) const {
     ConstLayout v = cx_->fetch<LayoutConstant>(c);
     if (!v.base) return v.bits;
-    if (v.string && !std::ranges::contains(strings_, *v.string, &StringUse::object)) strings_.push_back({*v.string, *v.base});
+    if (v.object && !std::ranges::contains(objects_, *v.object, &ConstantObjectUse::object))
+      objects_.push_back({*v.object, *v.base});
     return {*v.base, v.bits};
   }
   // An asm template is literal data, without a native string object's address.
@@ -514,7 +515,7 @@ class QueryLayout {
         ast::builtin_of(in, in.types.get<ast::TArray>(type).elem) != ast::Builtin::char_) return false;
     return std::ranges::equal(in.seqs.elements(text.units), units);
   }
-  std::span<const StringUse> strings() const { return strings_; }
+  std::span<const ConstantObjectUse> objects() const { return objects_; }
 
  private:
   std::optional<ClassLayout> class_layout(QualType c) const;
@@ -528,7 +529,7 @@ class QueryLayout {
   const ast::Target* target_;
   const Shapes* shapes_;
   const ShapeIndex* index_;
-  mutable std::vector<StringUse> strings_;
+  mutable std::vector<ConstantObjectUse> objects_;
   // Each class's layout and type layout, once: a member's are needed by every class holding it.
   mutable std::map<std::uint32_t, std::optional<ClassLayout>> class_layouts_;
   mutable std::map<std::uint32_t, ir::TypeLayout> records_;
@@ -659,7 +660,7 @@ struct FunctionDebug {
 
 struct Lowered {
   std::optional<L2Body> body;
-  std::vector<StringUse> strings;  // in order of first use
+  std::vector<ConstantObjectUse> objects;  // in order of first use
   std::optional<BackError> error;
   bool unreachable_immediate = false;
 };
@@ -1064,8 +1065,14 @@ ir::SubObject QueryLayout::step(QualType q, ir::PathStep s) const {
 ConstLayout LayoutConstant::run(engine::SyncCtx&, ConstId c) {
   ast::Interners& in = *universe().in;
   if (auto a = universe().consts->address(c)) {
-    if (in.values.is<ast::VEntity>(a->object))
-      return {a->offset, in.values.get<ast::VEntity>(a->object).entity, {}};
+    if (in.values.is<ast::VEntity>(a->object)) {
+      const EntityId entity = in.values.get<ast::VEntity>(a->object).entity;
+      if (const auto* world = universe().linux_world) {
+        if (const auto* record = world->entities.find(entity); record && record->constant_object != ConstId::none)
+          return {a->offset, entity, record->constant_object};
+      }
+      return {a->offset, entity, {}};
+    }
     EntityId e = in.entities.add<EntityId>(ast::mix(ast::seed("ycxx.pipeline.string"), in.values.fp(a->object)));
     return {a->offset, e, a->object};
   }
@@ -1541,7 +1548,7 @@ engine::query_task<Lowered> Lower::run(engine::Ctx& cx, FnKey k) {
     auto error = co_await located_error(cx, k.tu, at, "lower: " + l2.error().message);
     co_return Lowered{std::nullopt, {}, std::move(error)};
   }
-  co_return Lowered{L2Body{std::move(*l2)}, {layout.strings().begin(), layout.strings().end()}, std::nullopt,
+  co_return Lowered{L2Body{std::move(*l2)}, {layout.objects().begin(), layout.objects().end()}, std::nullopt,
                     config.unreachable_body.has_value()};
 }
 
@@ -1624,13 +1631,13 @@ struct SymbolAccessQ {
 engine::query_task<UnitRef> UnitQ::run(engine::Ctx& cx, FnKey k) {
   const Lowered& lowered = co_await cx.fetch<Lower>(k);
   if (!lowered.body) co_return UnitRef{std::nullopt, lowered.error};
-  // Which references can be addressed directly, including the function's string literals. The
+  // Which references can be addressed directly, including the function's constant objects. The
   // others are asked one entity at a time, in the order the body first refers to them.
   OptUnit u{*lowered.body, {}, {}};
   const std::vector<SymbolReference> refs = references(u.body.f);
   std::vector<SymbolKey> asked;
   for (const SymbolReference& r : refs)
-    if (!std::ranges::contains(lowered.strings, r.entity, &StringUse::entity) &&
+    if (!std::ranges::contains(lowered.objects, r.entity, &ConstantObjectUse::entity) &&
         !std::ranges::contains(asked, r.entity, &SymbolKey::entity))
       asked.push_back({k.tu, r.entity});
   const auto access = co_await cx.par_map<SymbolAccessQ>(asked);
@@ -2339,7 +2346,7 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, Key k) {
     collect_lowered(batch, ls);
   }
 
-  // Restore definition order for code and string literals after the reference walk.
+  // Restore definition order for code and constant objects after the reference walk.
   std::vector<const FunctionDef*> definitions;
   fns.clear();
   for (const FunctionDef& f : tu.functions) {
@@ -2350,21 +2357,36 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, Key k) {
     fns.push_back({id, f.entity});
     definitions.push_back(&f);
   }
-  std::vector<StringUse> strings;
-  auto use = [&](std::span<const StringUse> s) {
-    for (const StringUse& u : s)
-      if (!std::ranges::contains(strings, u.object, &StringUse::object)) strings.push_back(u);
+  std::vector<ConstantObjectUse> objects;
+  auto use = [&](std::span<const ConstantObjectUse> uses) {
+    for (const ConstantObjectUse& u : uses)
+      if (!std::ranges::contains(objects, u.object, &ConstantObjectUse::object)) objects.push_back(u);
   };
   {
     const auto ls = co_await cx.par_map<Lower>(fns);  // all hits
     for (const Lowered& l : ls)
-      if (l.body) use(l.strings);
+      if (l.body) use(l.objects);
   }
-  use(layout.strings());
+  use(layout.objects());
 
-  // String literal objects, as `lower` and the variables met them ([lex.string]).
-  std::uint32_t n = 0;
-  for (auto [object, entity] : strings) {
+  // Emit the constant objects referenced by functions and variables. A descriptor's
+  // initializer can add the string objects to which its pointer fields refer.
+  std::uint32_t n = 0, descriptors = 0;
+  for (std::size_t i = 0; i < objects.size(); ++i) {
+    const auto [object, entity] = objects[i];
+    if (in.values.is<ast::VAggregate>(object)) {
+      const auto type = in.values.get<ast::VAggregate>(object).type;
+      auto bytes = initial_bytes(in, layout, type, object);
+      if (!bytes) {
+        errors.push_back({std::nullopt, std::format("source location descriptor: {}", bytes.error())});
+        continue;
+      }
+      data.push_back({entity, aarch64::DataKind::data_const, std::move(bytes->bytes), 0,
+                      layout.type(type).align, std::move(bytes->relocs)});
+      symbols.push_back({entity, std::format(".L.source_location.{}", descriptors++), obj::binding::local});
+      use(layout.objects());
+      continue;
+    }
     auto str = universe().consts->string_object(object);
     if (!str) {
       errors.push_back({std::nullopt, "an address constant whose object is not a string literal"});

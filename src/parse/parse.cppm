@@ -1288,6 +1288,8 @@ public:
   // A namespace-scope variable as the interpreter sees it at `item`: its type and, if it is usable
   // in constant expressions, its value.
   std::optional<interp::GlobalVar> global(EntityId v, u32 item) {
+    if (const auto* entity = w_->entities.find(v); entity && entity->constant_object != ConstId::none)
+      return interp::GlobalVar{entity->type, entity->constant_object, true};
     // A static local: usable in constant expressions when const and constant-initialized
     // ([expr.const]); reading or writing another is not constant.
     if (auto s = static_locals_.find(std::to_underlying(v)); s != static_locals_.end())
@@ -1710,6 +1712,11 @@ public:
     return std::min<u32>(it.begin + at.offset, static_cast<u32>(r_->tokens.size() - 1));
   }
   u32 presumed_line(engine::Loc at) const { return r_->presumed_lines.at(token(at)); }
+  sema::PresumedSource presumed_source(engine::Loc at) const {
+    const auto i = token(at);
+    const auto site = r_->presumed_sites.at(i);
+    return {r_->presumed_files.at(site.file), r_->presumed_lines.at(i), site.column};
+  }
   // The byte offset in its file of a diagnostic's location.
   u32 byte_offset(engine::Loc at) const { return site(at).offset; }
 
@@ -2132,6 +2139,8 @@ public:
   bool peer_pure_dispatch(EntityId cls) override { return p_->peer_pure_dispatch(cls); }
   void use_typed_dynamic_cast() override { p_->has_typed_dynamic_cast_ = true; }
   u32 presumed_line(engine::Loc at) override { return p_->presumed_line(at); }
+  sema::PresumedSource presumed_source(engine::Loc at) override { return p_->presumed_source(at); }
+  bool in_default_member_initializer() const override { return initializer_source.has_value(); }
   std::vector<DeclId> visible_decls(ast::NameId name, std::span<const EntityId> directives = {}) override {
     std::vector<std::string> paths;
     for (EntityId ns : directives) paths.push_back(p_->namespace_path(ns));
@@ -3024,6 +3033,8 @@ public:
   bool peer_pure_dispatch(EntityId cls) override { return at_.peer_pure_dispatch(cls); }
   void use_typed_dynamic_cast() override { at_.use_typed_dynamic_cast(); }
   u32 presumed_line(engine::Loc at) override { return at_.presumed_line(at); }
+  sema::PresumedSource presumed_source(engine::Loc at) override { return at_.presumed_source(at); }
+  bool in_default_member_initializer() const override { return at_.in_default_member_initializer(); }
   bool class_layout_uncertain(EntityId c) override { return at_.class_layout_uncertain(c); }
   bool explicit_specialization(EntityId c) override { return at_.explicit_specialization(c); }
   const sema::ClassRec& publish_class(EntityId c, sema::ClassRec r, sema::Sema& context) override {

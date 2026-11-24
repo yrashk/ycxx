@@ -16,13 +16,15 @@ export namespace ycxx::pp {
 // passes through and diagnostics sit before the token whose index they carry.
 struct Flat {
   std::vector<PTok> tokens;
-  // Changes to the line adjustment of the expansion sites, by flat token index.
+  // Changes to #line adjustments at expansion sites, by flat token index.
   struct LineDelta {
     std::size_t at;
     std::int32_t delta;
+    std::optional<u32> name;
   };
   std::vector<LineDelta> line_deltas;
   bool has_line_builtin = false;
+  bool has_location_builtin = false;
   std::vector<FileId> files;
   std::vector<u32> file_names;  // presumed names, `Spellings` ids
   std::vector<Expansion> expansions{Expansion{}};
@@ -68,7 +70,9 @@ TokLoc source_line_site(std::span<const Expansion> expansions, TokLoc loc) {
 
 class Flattener {
 public:
-  Flattener(Session& s, Flat& out) : s_(&s), out_(&out), line_builtin_(s.spellings.name(lex::builtin_line_name)) {}
+  Flattener(Session& s, Flat& out)
+      : s_(&s), out_(&out), line_builtin_(s.spellings.name(lex::builtin_line_name)),
+        location_builtin_(s.spellings.name(lex::builtin_source_location_name)) {}
 
   // Where a region's bindings are in the TU: a file of its table, and the definition's offset.
   using Bindings = std::vector<std::pair<u16, u32>>;
@@ -166,17 +170,24 @@ public:
       }
       if (k < r.tokens.size()) {
         PTok t = r.tokens[k];
-        out_->has_line_builtin |= t.tok.kind == Tk::identifier && t.tok.payload == line_builtin_;
+        if (t.tok.kind == Tk::identifier) {
+          out_->has_line_builtin |= t.tok.payload == line_builtin_;
+          out_->has_location_builtin |= t.tok.payload == location_builtin_;
+        }
         // The same file can occur under different #line directives. Capture the adjustment
         // here, before its physical file is shared in the flat table.
-        std::int32_t delta = 0;
+        Flat::LineDelta change{out_->tokens.size(), 0, std::nullopt};
         if (!r.lines.empty()) {
           const auto at = source_line_site(r.expansions, t.loc).offset;
           const auto line = std::ranges::upper_bound(r.lines, at, {}, &FileRegion::Line::at);
-          if (line != r.lines.begin()) delta = (line - 1)->delta;
+          if (line != r.lines.begin()) {
+            change.delta = (line - 1)->delta;
+            change.name = (line - 1)->name;
+          }
         }
-        if (delta != (out_->line_deltas.empty() ? 0 : out_->line_deltas.back().delta))
-          out_->line_deltas.push_back({out_->tokens.size(), delta});
+        const Flat::LineDelta previous = out_->line_deltas.empty() ? Flat::LineDelta{} : out_->line_deltas.back();
+        if (change.delta != previous.delta || change.name != previous.name)
+          out_->line_deltas.push_back(change);
         t.loc = map(t.loc);
         out_->tokens.push_back(t);
       }
@@ -196,6 +207,7 @@ private:
   Session* s_;
   Flat* out_;
   u32 line_builtin_;
+  u32 location_builtin_;
   std::map<std::pair<FileId, u32>, u16> index_;
 };
 
@@ -349,15 +361,16 @@ Preprocessed to_region(Session& s, const Flat& flat) {
     return tables.literal(std::move(l));
   };
   std::map<u16, std::vector<u32>> physical_lines;
+  std::map<u32, u32> presumed_files;
   std::size_t next_delta = 0;
-  std::int32_t delta = 0;
+  Flat::LineDelta adjustment{};
   auto emit = [&](Tok t, std::size_t i) {
     t.flags &= u8(tok_flag::line_start | tok_flag::space_before | tok_flag::alt | tok_flag::continued | tok_flag::directive);
     r.tokens.push_back(t);
     r.locs.push_back(pp[i].loc);
-    if (!flat.has_line_builtin) return;
+    if (!flat.has_line_builtin && !flat.has_location_builtin) return;
     while (next_delta < flat.line_deltas.size() && flat.line_deltas[next_delta].at <= i)
-      delta = flat.line_deltas[next_delta++].delta;
+      adjustment = flat.line_deltas[next_delta++];
     const TokLoc at = detail::source_line_site(flat.expansions, pp[i].loc);
     auto [entry, inserted] = physical_lines.try_emplace(at.file);
     if (inserted) {
@@ -365,7 +378,13 @@ Preprocessed to_region(Session& s, const Flat& flat) {
       entry->second = line_starts(content ? std::string_view(content->text) : std::string_view());
     }
     const auto line = std::ranges::upper_bound(entry->second, at.offset) - entry->second.begin();
-    r.presumed_lines.push_back(static_cast<u32>(static_cast<std::int64_t>(line) + delta));
+    r.presumed_lines.push_back(static_cast<u32>(static_cast<std::int64_t>(line) + adjustment.delta));
+    if (flat.has_location_builtin) {
+      const u32 name = adjustment.name.value_or(flat.file_names[at.file]);
+      auto [file, fresh] = presumed_files.try_emplace(name, static_cast<u32>(r.presumed_files.size()));
+      if (fresh) r.presumed_files.emplace_back(s.spellings.name(name));
+      r.presumed_sites.push_back({file->second, at.offset - entry->second[line - 1] + 1});
+    }
   };
   detail::AbiPragmas pragmas(s, flat, r);
   std::array<std::optional<u32>, 256> byte_literals;
@@ -449,7 +468,9 @@ Preprocessed to_region(Session& s, const Flat& flat) {
   const Files::Content* main = s.files.content(flat.main);
   r.tokens.push_back(Tok{Tk::eof, tok_flag::line_start, 0});
   r.locs.push_back({0, 0, main ? static_cast<u32>(main->text.size()) : 0});
-  if (flat.has_line_builtin) r.presumed_lines.push_back(0);  // no builtin or invocation at EOF
+  // No builtin or invocation at EOF.
+  if (flat.has_line_builtin || flat.has_location_builtin) r.presumed_lines.push_back(0);
+  if (flat.has_location_builtin) r.presumed_sites.emplace_back();
   r.literals = std::move(tables.literals);
   for (FileId f : flat.files) r.files.push_back(s.files.path(f));
   for (u32 n : flat.file_names) r.file_names.emplace_back(s.spellings.name(n));
