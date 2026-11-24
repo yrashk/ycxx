@@ -557,6 +557,7 @@ public:
     if (!args) return std::nullopt;
     if (tt) return s_->template_param_id(*tt, *args, at);  // `TT<args>` ([temp.param])
     if (!tmpl) return s_->builtin_template_id(name, *args, at);  // `__make_integer_seq<…>`
+    s_->unqualified_type_template_access(*tmpl, name, at);
     return type_template_id(*tmpl, *args, at);
   }
 
@@ -1767,7 +1768,10 @@ public:
       if (probe_failure) *failed_qualifier = unsatisfied;
       if (commit_argument_failure && unsatisfied) *committed_failure = after + 1;
     }
-    if (t && checked && in && in->type && tmpl) s_->member_template_access(*in->type, tmpl->entity, n, name_at);
+    if (t && checked && tmpl) {
+      if (!in) s_->unqualified_type_template_access(*tmpl, n, name_at);
+      else if (in->type) s_->member_template_access(*in->type, tmpl->entity, n, name_at);
+    }
     if (!checked && (!committed_failure || !*committed_failure)) s_->truncate_diags(diags);
     if (!t) return std::nullopt;
     j = scope ? after + 1 : after;
@@ -2634,7 +2638,8 @@ public:
       if (a && checked && a->templ != ast::EntityId::none) s_->member_template_access(*sc->type, a->templ, n, pos() + at);
       return a;
     }
-    if (is(Tk::identifier)) return s_->template_name_arg(std::nullopt, name_of(tok()));
+    if (is(Tk::identifier))
+      return s_->template_name_arg(std::nullopt, name_of(tok()), checked ? std::optional{pos()} : std::nullopt);
     return std::nullopt;
   }
   // A template argument that is a template-name (`template_name_at`): none, with nothing read,
