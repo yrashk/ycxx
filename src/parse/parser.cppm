@@ -1596,7 +1596,7 @@ public:
           continue;
         }
         if (!v || s_->world().values.rec(*v).kind != sema::ValueKind::integer || i64_of(*v) <= 0) {
-          if (e.ok()) s_->diag(at + 1, Diag::bound_not_constant);
+          if (e.ok() && !ev.diagnosed_failure) s_->diag(at + 1, Diag::bound_not_constant);
           ok = false;
         } else {
           s.bound = s_->world().values.rec(*v).bits;
@@ -2077,7 +2077,7 @@ public:
       return false;
     }
     if (result.dependent) s_->diag(e.begin, Diag::not_supported, Tk::kw_noexcept);
-    else if (e.ok()) s_->diag(e.begin, Diag::not_constant, result.reason);
+    else if (e.ok() && !result.diagnosed_failure) s_->diag(e.begin, Diag::not_constant, result.reason);
     ok = false;
     return false;
   }
@@ -2710,7 +2710,7 @@ public:
     if (!c.ok()) return std::nullopt;
     sema::Evaluated v = sema::Evaluator(*s_, questions()).evaluate(c);
     if (!v.value) {
-      if (!v.type_trait_failure) s_->diag(e.begin, Diag::not_constant, v.reason);
+      if (!v.diagnosed_failure) s_->diag(e.begin, Diag::not_constant, v.reason);
       return std::nullopt;
     }
     return *v.value;
@@ -3034,7 +3034,7 @@ public:
     sema::Evaluated r = sema::Evaluator(*s_, questions()).evaluate(v);
     if (r.dependent) return Truth::dependent;
     if (!r.value) {
-      if (!r.type_trait_failure) s_->diag(at, Diag::constraint_not_constant, r.reason);
+      if (!r.diagnosed_failure) s_->diag(at, Diag::constraint_not_constant, r.reason);
       return Truth::invalid;
     }
     return s_->world().values.as_signed(*r.value) != 0 ? Truth::yes : Truth::no;
@@ -5058,7 +5058,7 @@ public:
             c = s_->convert_node(s_->rvalue(c), ast::ConversionKind::integral, s_->underlying_of(sw->type));
           sema::Evaluated v = sema::Evaluator(*s_, questions()).evaluate(c);
           if (v.value) value = *v.value;
-          else if (!v.dependent) s_->diag(e.begin, Diag::not_constant, v.reason);
+          else if (!v.dependent && !v.diagnosed_failure) s_->diag(e.begin, Diag::not_constant, v.reason);
         }
       }
       if (value != ast::ConstId::none) {
@@ -5170,7 +5170,7 @@ public:
     if (c.node.ok() && c.value.ok() && !s_->dependent(c.value) && !s_->has_error_since(diags)) {
       sema::Evaluated v = sema::Evaluator(*s_, questions()).evaluate(c.value);
       if (v.value) take = s_->world().values.as_signed(*v.value) != 0;
-      else if (!v.dependent) s_->diag(c.value.begin, Diag::not_constant, v.reason);
+      else if (!v.dependent && !v.diagnosed_failure) s_->diag(c.value.begin, Diag::not_constant, v.reason);
     }
     if (!take) {  // dependent, or in error: both branches, as an ordinary `if`
       // Which branch returns is known only to an instantiation: neither deduces a placeholder
@@ -5383,7 +5383,7 @@ public:
     } else if (v.dependent) {
       s_->diag(e.begin, Diag::not_constant, sema::reason_unsupported);  // nothing outside a template depends
     } else if (!v.value) {
-      if (!v.type_trait_failure) s_->diag(e.begin, Diag::not_constant, v.reason);
+      if (!v.diagnosed_failure) s_->diag(e.begin, Diag::not_constant, v.reason);
     } else if (!s_->in_template_definition() && s_->world().values.rec(*v.value).bits == 0) {
       if (message == sema::ConstId::none) s_->diag(begin, Diag::static_assert_failed);
       else s_->diag(begin, Diag::static_assert_failed_message, message);
@@ -5399,7 +5399,7 @@ public:
       return call;
     sema::Evaluated v = sema::Evaluator(*s_, questions()).evaluate(call);
     if (!v.constant) {
-      s_->diag(call.begin, Diag::not_constant, v.reason);
+      if (!v.diagnosed_failure) s_->diag(call.begin, Diag::not_constant, v.reason);
       return {NodeId::none, call.begin, call.end};
     }
     if (!v.value) {
@@ -5640,7 +5640,7 @@ public:
       }
     } else if (v.dependent) {
       s_->set_local_value_dependent(local);
-    } else if (is_constexpr) {
+    } else if (is_constexpr && !v.diagnosed_failure) {
       s_->diag(init.begin, Diag::not_constant, v.reason);
     }
   }
@@ -5967,7 +5967,7 @@ public:
       sema::Evaluator evaluator(*s_, questions());
       sema::Evaluated v = s_->as<ast::InitList>(init) ? evaluator.evaluate_initializer(init) : evaluator.evaluate(init);
       if (v.value) value = *v.value;
-      else if (spec.is_constinit && !v.dependent) s_->diag(init.begin, Diag::not_constant, v.reason);
+      else if (spec.is_constinit && !v.dependent && !v.diagnosed_failure) s_->diag(init.begin, Diag::not_constant, v.reason);
     }
     if (spec.is_constinit && value != ast::ConstId::none)
       if (auto entity = s_->immediate_result_entity(value))
