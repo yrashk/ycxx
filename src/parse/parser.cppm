@@ -5379,11 +5379,23 @@ public:
   }
 
   // A call to a consteval function outside an immediate function context is an immediate
-  // invocation ([expr.const], `Sema::immediate_invocation`).
+  // invocation ([expr.const.imm], `Sema::immediate_invocation`).
   Ex immediate(Ex call) {
-    auto c = s_->as<ast::Call>(call);
-    if (!c || c->function == ast::EntityId::none || !s_->is_consteval(c->function)) return call;
-    return s_->immediate_invocation(call);
+    const auto direct = s_->as<ast::Call>(call);
+    EntityId function = EntityId::none;
+    if (direct) {
+      function = direct->function;
+    } else if (auto member = s_->as<ast::MemberCall>(call)) {
+      function = member->function;
+    } else if (auto sequence = s_->as<ast::OrderedBinary>(call); sequence && sequence->op == ast::OrderedOp::comma) {
+      // Sema represents a static call through an object by discarding the receiver,
+      // then calling the selected function. The complete invocation includes both.
+      if (auto invocation = s_->as<ast::Call>({sequence->rhs.id})) function = invocation->function;
+    }
+    if (s_->ordinary_immediate_member(function)) return s_->immediate_invocation(call, /*preserve_glvalue=*/true);
+    if (direct && function != EntityId::none && s_->is_consteval(function))
+      return s_->immediate_invocation(call);
+    return call;
   }
 
   // A condition ([stmt.pre]) and the init-statement before it, if any: `node` is what the
