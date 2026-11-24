@@ -3477,10 +3477,42 @@ parity are tracked in [#294](https://github.com/yrashk/ycxx/issues/294) and
   parameters `T_` at any depth; a constructor without a return type).
 - Tests: `tests/own/templates/m9-*` (13, 8 from the review; a PEER test links Clang's
   definitions); 5 more draft examples pass. Feature map: `temp-member` partial.
-- Not yet (#340): member class and alias templates (nested classes, #306), conversion function
+- Not yet (#340): member class templates (nested classes, #306), conversion function
   templates (#339), trailing requires-clauses on member templates, static data member templates,
   `&S::get<int>`, explicit specializations of member templates; a non-type default depending on
   the class's parameter (#209). Found on the way: #345.
+
+## Member alias templates and `Q::template M` (#340, 2026-11-24)
+
+- **Member alias templates** ([temp.alias], [temp.mem]): `template<class U> using apply = …;` in a
+  class or class template is an `alias_template` entity scoped in the class (its head one level
+  inside the class's), kept in `ClassRec::alias_templates` and never among the nested types, so it
+  is a type only with arguments. A class template specialization's instantiation declares its own,
+  with the class's arguments bound.
+- **Named** as `C::M<args>` and `C::template M<args>` ([temp.names]/4), by its own name in the
+  class and in classes derived from it, before `::`, in a functional conversion, and as a
+  template template argument (`C::M`, `C::template M`).
+- **Dependent qualifiers:** `typename Q::template M<args>` is `TDepName` with the `template_id`
+  form and its arguments (ast.md §5.1); `Q::template M` as a template template argument is a
+  `template_` argument whose type is `TDepName`'s `template_name` form. Substitution applies Q's
+  member alias template once Q is a class (`Templates::member_template_of`); a template template
+  parameter bound to `Q::template M` gives `typename Q::template M<args>`.
+- **Mangling:** `N <qualifier> <name> I…E E`, the template prefix a candidate, as Clang and GCC;
+  `Q::template M` as a template argument as GCC writes it (DECISIONS §1.7).
+- Access is checked where one is named; it hides a base's member of its name, and an earlier
+  member hides a base's. A member defined outside its class template may name one through the
+  current instantiation (`Y<T>::apply<int> Y<T>::f()`), the definition matching by
+  `Templates::resolve_dep_names`.
+- Tests: `tests/own/templates/member-alias-template*` (8, 2 from the review; a PEER test links
+  the oracle's calls).
+  `<iostream>` on macOS arm64: `'using' is not supported yet` 83 → 72 (the rest are #1150 and
+  `using enum`), errors 3,237 → 3,165.
+- Not yet: constraints of an alias template, namespace or member, are not checked when it is
+  named (#234); access through a dependent name substituted in an alias template, as for a member
+  type (#1199); `typename T::M<args>` without `template` (the oracles disagree); immediate calls
+  in a member alias template's type are not replayed per use as a namespace one's are (#340).
+  Member class templates, conversion function templates and the rest of #340 remain. Found on
+  the way: #1191, #1192.
 
 ## Placeholder types, θ step 1 (#279, 2026-11-19)
 
