@@ -1469,6 +1469,7 @@ public:
     std::vector<sema::FieldRec> fields;
     std::vector<sema::MemberDeclRec> statics;
     std::vector<sema::NestedType> nested;
+    std::vector<sema::NestedType> alias_templates;
     std::vector<EntityId> friends;
     std::vector<ast::MemberRec> adl_friends;
     bool unapplied_field_layout = false;
@@ -5144,6 +5145,21 @@ private:
             }
       head_requires_clause();
       member_template_ = true;
+      // `template<…> using N = type-id;`: a member alias template ([temp.alias], [temp.mem]).
+      if (ps_.is(Tk::kw_using) && ps_.kind(1) == Tk::identifier && ps_.kind(ps_.past_attributes(2)) == Tk::equal) {
+        ps_.bump();
+        NameId n = ps_.name_of(ps_.tok());
+        u32 at = ps_.pos();
+        ps_.bump();
+        ps_.skip_attributes();
+        ps_.bump();
+        ps_.member_alias_type = true;
+        auto t = ps_.type_id();
+        ps_.member_alias_type = false;
+        if (!t || !member_alias(c, n, at, *t, /*alias_template=*/true)) return bad();
+        if (!ps_.expect(Tk::semi)) bad();
+        return;
+      }
     }
     if (!member_template_ && s_.template_scopes.empty() && !inst_)
       ps_.member_template_name = [this](NameId name) -> std::optional<bool> {
@@ -5795,7 +5811,9 @@ private:
 
   // A typedef-name or alias-declaration that is a member of class `c` ([class.mem],
   // [dcl.typedef]): a type of the class's scope, `C::name` outside it.
-  bool member_alias(const ast::DeclSema& c, NameId name, u32 at, QualType type) {
+  // A member alias template's entity is (class, name, head), as a namespace one's is
+  // (`alias_template`).
+  bool member_alias(const ast::DeclSema& c, NameId name, u32 at, QualType type, bool alias_template = false) {
     if (literal_operator_named(name)) {
       s_.diag(at, Diag::literal_operator_scope);
       return false;
@@ -5817,15 +5835,29 @@ private:
       s_.diag(at, Diag::redeclared_member, name);
       return false;
     }
-    ast::DeclSema sem = class_decl(s_.world().entities.entity({sema::EntityKind::type_alias, name, {}, LangLinkage::cxx,
-                                                                 ast::Linkage::none, {}, c.entity}),
-                                   false);
+    sema::EntityRec e{alias_template ? sema::EntityKind::alias_template : sema::EntityKind::type_alias, name, {},
+                      LangLinkage::cxx, ast::Linkage::none, {}, c.entity};
+    if (alias_template) {
+      const std::vector<ast::TemplateParamSema>& head = s_.template_scopes.back();
+      if (!pack_last(head)) {
+        s_.diag(0, Diag::pack_not_last);
+        return false;
+      }
+      e.head = head_fp(head);
+    }
+    ast::DeclSema sem = class_decl(s_.world().entities.entity(e), false);
     sem.kind = ast::DeclKind::type_alias;
     sem.type = type;
     sem.linkage = ast::Linkage::none;
     sem.flags = sema::decl_flag::member;
+    if (alias_template) {
+      sem.flags |= sema::decl_flag::template_;
+      sem.template_params = b_.seq(std::span<const ast::TemplateParamSema>(s_.template_scopes.back()));
+    }
     decls_.push_back(sem);
     s_.own.push_back({name, sem});
+    // Its declaration, which `Templates::apply_template` reads when it is a template argument.
+    if (alias_template) p_->declared(sem, k_);
     return true;
   }
 
@@ -8263,7 +8295,9 @@ Program::ClassContent Program::class_content(u32 item, const std::function<const
         });
         fields.push_back({w_->entities.rec(d.entity).name, d.type, d.entity, inits.contains(i) ? inits[i] : ConstId::none,
                         dmis_.contains(std::to_underlying(d.entity)), d.bit_width, d.is_mutable, no_unique_address});
-      } else if (d.kind == ast::DeclKind::enum_ || d.kind == ast::DeclKind::type_alias)
+      } else if (d.kind == ast::DeclKind::type_alias && (d.flags & sema::decl_flag::template_))
+        out.alias_templates.push_back({w_->entities.rec(d.entity).name, d.type, d.entity});
+      else if (d.kind == ast::DeclKind::enum_ || d.kind == ast::DeclKind::type_alias)
         nested.push_back({w_->entities.rec(d.entity).name, d.type, d.entity});
       else if (d.kind == ast::DeclKind::function || d.kind == ast::DeclKind::variable) {
         member_decls_[std::to_underlying(d.entity)] = {id(m), ast::make_decl_ord(ast::DeclClass::syntactic, i)};
@@ -9237,6 +9271,7 @@ const Result<ast::ClassDef>& Program::class_def(u32 item) {
     rec.fields = std::move(fields);
     rec.members = std::move(statics);
     rec.types = std::move(nested);
+    rec.alias_templates = std::move(c.alias_templates);
     if (auto b = class_bases_.find(std::to_underlying(*cls)); b != class_bases_.end()) rec.bases = b->second;
     for (const ast::MemberRec& m : members) rec.access.push_back({m.entity, m.access});
     rec.friends = std::move(c.friends);
@@ -11421,6 +11456,7 @@ const sema::ClassRec* Program::instantiate_class(EntityId spec, u32 point) {
   built.fields = std::move(c.fields);
   built.members = std::move(c.statics);
   built.types = std::move(c.nested);
+  built.alias_templates = std::move(c.alias_templates);
   for (const ast::MemberRec& m : c.members) built.access.push_back({m.entity, m.access});
   built.friends = std::move(c.friends);
   built.adl_friends = std::move(c.adl_friends);

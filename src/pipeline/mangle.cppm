@@ -237,7 +237,18 @@ class Mangler {
         auto d = in_.types.get<ast::TDepName>(in_.types.canon(bare));
         auto p = type(d.qualifier);
         if (!p) return p;
-        inner = "N" + *p + source_name(in_.names.spelling(d.name)) + "E";
+        inner = "N" + *p + source_name(in_.names.spelling(d.name));
+        // `typename Q::template n<args>`: the template prefix `Q::n` is a candidate before its
+        // arguments (§5.1.5.3, §5.1.10).
+        if (ast::DepNameForm(d.form) == ast::DepNameForm::template_id) {
+          auto& ins = const_cast<ast::Interners&>(in_);
+          candidates_.push_back(
+              full_key(ins.intern_type(ast::TDepName{d.qualifier, d.name, std::uint8_t(ast::DepNameForm::template_name), {}})));
+          auto a = template_args(in_.seqs.elements(d.args));
+          if (!a) return a;
+          inner += *a;
+        }
+        inner += "E";
         candidates_.push_back(full_key(bare));
       } else if (in_.types.is<ast::TTransform>(in_.types.canon(bare))) {
         // A type-trait built-in of a dependent type: a vendor-extended type `u <source-name>` with

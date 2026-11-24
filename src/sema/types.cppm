@@ -70,6 +70,7 @@ struct TypeRec {
   bool rvalue_ref = false;           // a reference's kind; `inner` is what it refers to
   ConstId bound_value = ConstId::none;  // an array's bound or a pack index, possibly dependent
   NameId name{};                     // a dependent member type's name; `inner` is its qualifier
+  ast::DepNameForm dep_form = ast::DepNameForm::plain;  // a dependent member's: with `args`, or a template
   u16 depth = 0;                     // a template parameter's position ([temp.param])
   u16 index = 0;
   bool pack = false;  // a template parameter's; a pack index's: its pack is bound to `args`
@@ -219,9 +220,12 @@ public:
       r.rvalue_ref = t.is<ast::TRRef>(c);
       r.inner = r.rvalue_ref ? t.get<ast::TRRef>(c).referee : t.get<ast::TLRef>(c).referee;
     } else if (t.is<ast::TDepName>(c)) {
+      auto d = t.get<ast::TDepName>(c);
       r.kind = TypeKind::dep_name;
-      r.inner = t.get<ast::TDepName>(c).qualifier;
-      r.name = t.get<ast::TDepName>(c).name;
+      r.inner = d.qualifier;
+      r.name = d.name;
+      r.dep_form = ast::DepNameForm(d.form);
+      r.args = d.args;
     } else if (t.is<ast::TTransform>(c)) {
       r.kind = TypeKind::transform;
       r.inner = t.get<ast::TTransform>(c).arg;
@@ -292,6 +296,11 @@ public:
   std::function<bool(EntityId)> class_dependent;
   std::function<std::string(NameId)> dep_name_spelling;
   QualType dep_name(QualType qualifier, NameId name) { return ins_->intern_type(ast::TDepName{qualifier, name}); }
+  // `typename Q::template name<args>` ([temp.names]/4), or the template `Q::template name` as a
+  // template template argument (`DepNameForm::template_name`, no arguments).
+  QualType dep_template(QualType qualifier, NameId name, ast::DepNameForm form, std::span<const ast::TemplateArg> args = {}) {
+    return ins_->intern_type(ast::TDepName{qualifier, name, u8(form), ins_->intern_seq(args)});
+  }
 
   static Cv cv(QualType q) { return ast::cv_of(q); }
   static bool is_const(QualType q) { return (std::to_underlying(ast::cv_of(q)) & 1) != 0; }
@@ -404,8 +413,9 @@ private:
     case TypeKind::class_:
       return cvs + (class_name ? class_name(r.entity) : "<class>") + (inner.empty() || inner[0] == '[' ? "" : " ") + inner;
     case TypeKind::dep_name:
-      return cvs + "typename " + spell(r.inner) + "::" + (dep_name_spelling ? dep_name_spelling(r.name) : "<name>") +
-             (inner.empty() || inner[0] == '[' ? "" : " ") + inner;
+      return cvs + "typename " + spell(r.inner) + "::" + (r.dep_form == ast::DepNameForm::plain ? "" : "template ") +
+             (dep_name_spelling ? dep_name_spelling(r.name) : "<name>") +
+             (r.dep_form == ast::DepNameForm::template_id ? "<…>" : "") + (inner.empty() || inner[0] == '[' ? "" : " ") + inner;
     case TypeKind::template_param:
       // Parameters are positional in the type (ast.md §5.1).
       return cvs + std::format("type-parameter-{}-{}", r.depth, r.index) + (inner.empty() || inner[0] == '[' ? "" : " ") + inner;
@@ -810,6 +820,9 @@ struct ClassRec {
   EntityId implicit_default_ctor = EntityId::none;
   std::vector<FieldRec> fields;        // in declaration order
   std::vector<MemberDeclRec> members;  // member functions and static data members
+  // Member alias templates ([temp.alias], [temp.mem]): `type` is the pattern, at the member's own
+  // depth; named only with arguments (`Sema::member_alias_template`), so not among `types`.
+  std::vector<NestedType> alias_templates;
   std::vector<EntityId> pure_final_overriders;
   bool is_abstract() const { return !pure_final_overriders.empty(); }
   // Special members ([special]): whether a constructor is user-declared; the destructor and the
