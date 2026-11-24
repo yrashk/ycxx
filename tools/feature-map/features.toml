@@ -1809,7 +1809,7 @@ int sum(const B& b) { return b.b; }
 int main() { D d; A* pa = &d; return pa->a + sum(d) + d.d - 6; }
 '''
 issues = [308, 1134]
-note = 'One nonvirtual, nonpolymorphic direct base in primary class templates and partial specializations, including dependent aliases and qualified static lookup; explicit specializations take the bases of an ordinary class. Additional class-template base forms and the object-expression rule of [class.protected] remain.'
+note = 'One nonvirtual, nonpolymorphic direct base in primary class templates and partial specializations, including dependent aliases, value-dependent template arguments (`B<T::value>`, `B<!bool(T::value) || sizeof...(Ts) == 0>`) and qualified static lookup; explicit specializations take the bases of an ordinary class. Additional class-template base forms and the object-expression rule of [class.protected] remain.'
 
 [[feature]]
 id = 'class-virtual'
