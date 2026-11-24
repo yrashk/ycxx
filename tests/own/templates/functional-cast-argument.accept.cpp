@@ -28,3 +28,4 @@ static_assert(__is_same(Ty<void() &>::type, void() &) && __is_same(Ty<void() con
 static_assert(__is_same(Ty<int (F::*)()>::type, int (F::*)()));
 template<class T> struct Param : Ty<void(typename T::type)> {};
 static_assert(__is_same(Param<F>::type, void(long)));
+static_assert(__is_same(Ty<int(__attribute__((unused)) int)>::type, int(int)));

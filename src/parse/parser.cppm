@@ -2705,8 +2705,9 @@ public:
         return s_->world().ins.intern_value(ast::VDepParam{sema::dependent_depth, 0});
       // A class template's base-specifier is parsed again with the arguments bound when a
       // specialization is instantiated (`Program::instantiate_base`), so its pattern needs no
-      // representation of the value: it stands as an unevaluated placeholder (#308).
-      if (class_template_base) {
+      // representation of the value: it stands as an unevaluated placeholder (#308). A pack
+      // expansion's pattern must keep the packs it names, so it is not one.
+      if (class_template_base && !s_->pattern_names_pack() && !is(Tk::ellipsis)) {
         ++deferred_argument_checks_;
         return s_->world().ins.intern_value(ast::VDepParam{sema::dependent_depth, 0});
       }
@@ -2841,8 +2842,8 @@ public:
     }
     const Tk inner = kind(2);
     if (inner == Tk::r_paren || inner == Tk::ellipsis || inner == Tk::star || inner == Tk::amp || inner == Tk::ampamp ||
-        inner == Tk::caret || inner == Tk::l_paren || member_pointer_star(2))
-      return true;
+        inner == Tk::caret || inner == Tk::l_paren || member_pointer_star(2) || past_attributes(2) != 2)
+      return true;  // a parameter's attributes ([dcl.fct]/3) start one too
     // A name starts a parameter only if it names a type; a member of a dependent class does so
     // only after `typename` here ([temp.res.general]/4).
     const u32 saved = std::exchange(i_, i_ + 2);
