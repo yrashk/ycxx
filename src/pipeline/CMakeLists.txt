@@ -45,7 +45,10 @@ target_sources(ycxxc_pipeline PUBLIC FILE_SET CXX_MODULES
   lines.cppm
   mangle.cppm
   back.cppm
+  policy_registry.cppm
+  policy_objects.cppm
   front.cppm
+  policies.cppm
   executable.cppm
   session.cppm
   pipeline.cppm)

@@ -73,6 +73,14 @@ YCXX_BUILD_DIR=build-release tools/build`, [docs/BUILDING.md](docs/BUILDING.md#r
 builds and passes its tests on both hosts, and compiles a 40,000-statement function in 0.4 s
 instead of Debug's 5.3 s on an M-series Mac ([#726](https://github.com/yrashk/ycxx/issues/726)).
 
+**Check YCXX Policies.** Opt in with `-fcheck-policies` in a syntax check or a
+build. YCXX checks registered resource policies across branches and loops, ends shared borrows
+after their last reachable use, and verifies declared effect bounds and usage grades across direct
+calls in checked sources and explicit objects. Applications can compose typed C++ declarations
+and reflection annotations. The standalone C++20 package provides runtime ownership guards, scoped
+capability tokens, effect budgets, and scoped handlers for GCC and Clang builds.
+[YCXX Policies package](packages/ycxx-policies/README.md)
+
 Single-expression `auto(x)` and `auto{x}` perform scalar and pointer decay-copy, including
 array and function decay. Non-type template parameters can have enumeration types
 ([#774](https://github.com/yrashk/ycxx/issues/774)). Function-template bodies can defer supported dependent operands to

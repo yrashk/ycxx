@@ -1,0 +1,260 @@
+"""Build an ordinary C++ consumer of an independent YCXX Policies package."""
+
+import pathlib
+import resource
+import shutil
+import signal
+import subprocess
+import sys
+import tempfile
+
+
+cmake, compiler, source = sys.argv[1:]
+with tempfile.TemporaryDirectory() as tmp:
+    root = pathlib.Path(tmp)
+    vendor = root / "vendor"
+    shutil.copytree(source, vendor)
+
+    def configure(source, build, *options):
+        subprocess.run([cmake, "-S", str(source), "-B", str(build), "-G", "Ninja",
+                        f"-DCMAKE_CXX_COMPILER={compiler}", *options], check=True, timeout=30)
+
+    consumer = root / "consumer"
+    consumer.mkdir()
+    (consumer / "main.cpp").write_text("""\
+#include <ycxx/ownership.hpp>
+#include <ycxx/ownership/runtime.hpp>
+#include <ycxx/ownership/variant.hpp>
+#include <ycxx/capabilities.hpp>
+#include <ycxx/effects.hpp>
+#include <ycxx/effects/handler.hpp>
+#include <ycxx/effects/runtime.hpp>
+#include <cstdio>
+#include <type_traits>
+
+void inspect(const ycxx::ownership::linear_state& owner) noexcept { owner.observe(); }
+using Rule = ycxx::ownership::verified_observes<decltype(&inspect), &inspect>;
+using Check = ycxx::ownership::use_policy<Rule>;
+
+namespace caps = ycxx::capabilities;
+inline constexpr caps::rights_mask read_right = 1;
+inline constexpr caps::rights_mask write_right = 2;
+
+class Store {
+  friend int main(int, char**);
+  inline static int cells_[2]{17, 22};
+
+  static caps::token<Store, read_right> reader(caps::scope_id scope) noexcept {
+    return caps::token<Store, read_right>(scope);
+  }
+  static caps::token<Store, read_right | write_right> editor(caps::scope_id scope) noexcept {
+    return caps::token<Store, read_right | write_right>(scope);
+  }
+
+ public:
+  template<caps::rights_mask Granted> requires caps::grants<Granted, read_right>
+  static int get(const caps::token<Store, Granted>& authority, caps::scope_id scope) noexcept {
+    authority.template require<read_right>(scope);
+    return cells_[scope - 1];
+  }
+
+  template<caps::rights_mask Granted> requires caps::grants<Granted, write_right>
+  static void set(const caps::token<Store, Granted>& authority, caps::scope_id scope, int value) noexcept {
+    authority.template require<write_right>(scope);
+    cells_[scope - 1] = value;
+  }
+};
+
+template<class T>
+concept CanWrite = requires(const T& authority) { Store::set(authority, 1, 28); };
+template<class T>
+concept CanRead = requires(const T& authority) { Store::get(authority, 1); };
+
+struct OtherStore;
+using Reader = caps::token<Store, read_right>;
+using Editor = caps::token<Store, read_right | write_right>;
+static_assert(!std::is_default_constructible_v<Reader>);
+static_assert(!std::is_constructible_v<Reader, caps::scope_id>);
+static_assert(!std::is_copy_constructible_v<Reader>);
+static_assert(std::is_nothrow_move_constructible_v<Reader>);
+static_assert(CanRead<Reader> && !CanWrite<Reader> && CanWrite<Editor>);
+static_assert(!CanRead<caps::token<OtherStore, read_right>>);
+
+struct ReadEffect;
+namespace fx = ycxx::effects;
+using ReadBudget = fx::budget<ReadEffect, 2>;
+using ReadOnce = fx::set<fx::at_most<ReadEffect, 1>>;
+static_assert(!std::is_copy_constructible_v<ReadBudget>);
+static_assert(!std::is_move_constructible_v<ReadBudget>);
+static_assert(!std::is_copy_assignable_v<ReadBudget>);
+static_assert(!std::is_move_assignable_v<ReadBudget>);
+
+int read(const Reader& authority, ReadBudget& budget) noexcept {
+  budget.spend();
+  return Store::get(authority, 1);
+}
+using ReadPolicy = fx::use_policy<Rule, fx::trusted<decltype(&read), &read, ReadOnce>>;
+
+struct ReadHandler {
+  int contents;
+  int operator()(int offset) { return contents + offset; }
+};
+using ReadScope = fx::scoped_handler<ReadEffect, ReadHandler>;
+static_assert(!std::is_copy_constructible_v<ReadScope>);
+static_assert(!std::is_move_constructible_v<ReadScope>);
+
+int read_in(ReadScope& context, int offset) { return context.perform(offset); }
+
+namespace own = ycxx::ownership;
+struct Receipt { own::linear_state state; int value; };
+struct Permit { own::affine_state state; int value; };
+using Choice = own::variant<Receipt, Permit>;
+static_assert(!std::is_copy_constructible_v<Choice>);
+static_assert(!std::is_move_constructible_v<Choice>);
+
+int check_choice(bool choose_receipt) {
+  Choice choice = choose_receipt ? Choice(own::first_t{}, Receipt{{}, 27})
+                                 : Choice(own::second_t{}, Permit{{}, 31});
+  if (choice.holds_first()) {
+    if (choice.first().value != 27 || choice.holds_second()) return 4;
+    Receipt owned = choice.take_first();
+    owned.state.consume();
+    return choice.holds_first() || choice.holds_second() || owned.value != 27;
+  }
+  return !choice.holds_second() || choice.second().value != 31;
+}
+
+struct Counted {
+  int& moves;
+  int& drops;
+  Counted(int& moves, int& drops) noexcept : moves(moves), drops(drops) {}
+  Counted(Counted&& other) noexcept : moves(other.moves), drops(other.drops) { ++moves; }
+  ~Counted() noexcept { ++drops; }
+};
+
+bool check_variant_move() {
+  int moves = 0, drops = 0;
+  {
+    own::variant<Counted, Permit> choice(own::first_t{}, Counted(moves, drops));
+    if (moves != 1 || drops != 1) return false;
+    auto result = choice.take_first();
+    if (moves != 2 || drops != 2 || choice.holds_first()) return false;
+  }
+  return drops == 3;
+}
+
+int unwind_choice(bool choose_receipt) {
+  try {
+    Choice choice = choose_receipt ? Choice(own::first_t{}, Receipt{{}, 27})
+                                   : Choice(own::second_t{}, Permit{{}, 31});
+    throw 17;
+  } catch (int value) {
+    return value != 17;
+  }
+}
+
+int main(int argc, char**) {
+  if (argc == 10) {
+    std::printf("%zu/%zu %zu/%zu %zu/%zu %zu/%zu\\n",
+                sizeof(ycxx::ownership::linear_state), alignof(ycxx::ownership::linear_state),
+                sizeof(Reader), alignof(Reader), sizeof(ReadBudget), alignof(ReadBudget),
+                sizeof(Choice), alignof(Choice));
+    return 0;
+  }
+  ycxx::ownership::linear_state owner;
+  auto moved = static_cast<ycxx::ownership::linear_state&&>(owner);
+  inspect(moved);
+  moved.consume();
+
+  auto reader = Store::reader(1);
+  if (argc == 2) return Store::get(reader, 2);  // wrong resource scope
+  auto next = static_cast<Reader&&>(reader);
+  if (argc == 3) return Store::get(reader, 1);  // moved-from token
+  if (argc == 4) {
+    next.release();
+    return Store::get(next, 1);
+  }
+  ReadBudget budget;
+  if (read(next, budget) != 17 || read(next, budget) != 17) return 1;
+  if (argc == 5) return read(next, budget);  // exhausted effect budget
+  ReadHandler primary{17}, fallback{22};
+  ReadScope outer(primary);
+  {
+    ReadScope inner(fallback);
+    if (read_in(inner, 1) != 23) return 2;
+  }
+  if (read_in(outer, 1) != 18) return 3;
+  if (argc == 6) {
+    Choice abandoned(own::first_t{}, Receipt{{}, 27});
+    return abandoned.first().value != 27;  // a live linear alternative at scope exit
+  }
+  if (argc == 7) {
+    Choice inactive(own::second_t{}, Permit{{}, 31});
+    return inactive.first().value;  // wrong active alternative
+  }
+  if (argc == 8) {
+    Choice exhausted(own::first_t{}, Receipt{{}, 27});
+    Receipt owned = exhausted.take_first();
+    owned.state.consume();
+    return exhausted.first().value;  // no alternative after taking ownership
+  }
+  if (argc == 9) return unwind_choice(true);  // a live linear alternative during unwind
+  if (check_choice(true) || check_choice(false) || unwind_choice(false) || !check_variant_move()) return 5;
+  auto editor = Store::editor(2);
+  Store::set(editor, 2, 28);
+  return Store::get(editor, 2) != 28;
+}
+""")
+    resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+    (consumer / "CMakeLists.txt").write_text("""\
+cmake_minimum_required(VERSION 3.20)
+project(consumer LANGUAGES CXX)
+if(VENDORED)
+  add_subdirectory(../vendor policies)
+else()
+  find_package(YCXXPolicies 0.1 CONFIG REQUIRED)
+endif()
+add_executable(consumer main.cpp)
+target_link_libraries(consumer PRIVATE YCXXPolicies::policies)
+""")
+    cases = (
+        (("wrong-scope",), 22),
+        (("use", "moved"), 17),
+        (("use", "released", "token"), 17),
+        (("read", "with", "used", "budget"), 17),
+        (("drop", "a", "live", "linear", "owner"), 0),
+        (("read", "from", "the", "inactive", "variant", "arm"), None),
+        (("read", "a", "variant", "after", "taking", "its", "owner"), None),
+        (("unwind", "with", "a", "live", "linear", "variant", "arm", "open"), 0),
+    )
+    layout = None
+    for checks in (True, False):
+        mode = root / ("guarded" if checks else "unguarded")
+        settings = () if checks else ("-DYCXX_POLICIES_RUNTIME_CHECKS=OFF",)
+        prefix = mode / "install"
+        package_build = mode / "package-build"
+        configure(vendor, package_build, f"-DCMAKE_INSTALL_PREFIX={prefix}", *settings)
+        subprocess.run([cmake, "--install", str(package_build)], check=True, timeout=30)
+        relocated = mode / "relocated"
+        prefix.rename(relocated)
+
+        consumers = (
+            ("installed", (f"-DCMAKE_PREFIX_PATH={relocated}",)),
+            ("vendored", ("-DVENDORED=ON", *settings)),
+        )
+        for name, options in consumers:
+            build = mode / name
+            configure(consumer, build, *options)
+            subprocess.run([cmake, "--build", str(build)], check=True, timeout=30)
+            executable = str(build / "consumer")
+            subprocess.run([executable], check=True, timeout=10)
+            current_layout = subprocess.check_output([executable, *(["abi"] * 9)], timeout=10)
+            if layout is None:
+                layout = current_layout
+            assert current_layout == layout, (name, mode, current_layout, layout)
+            for args, unguarded_result in cases:
+                if not checks and unguarded_result is None:
+                    continue  # The guarded variant tests would access inactive storage.
+                expected = (-signal.SIGABRT, -signal.SIGILL, -signal.SIGTRAP) if checks else (unguarded_result,)
+                result = subprocess.run([executable, *args], timeout=10)
+                assert result.returncode in expected, result

@@ -687,6 +687,57 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
 - `ycxx cxx` (also `ycxx -…` with an option first) takes `-o`, `-c`, `-fsyntax-only` and
   `-std=c++26`. Errors are `path:line:col: error: message` on stderr. It exits 0 on success and 1
   on any error in the input or the command line.
+- `-fcheck-policies` applies YCXX Policies to ownership contracts before a syntax-only or native
+  build succeeds. It composes active C++ policy fragments and declaration annotations across the
+  build's source inputs by canonical types and resolved operations. It reports conflicting contracts
+  with both origins. A per-body control-flow query and worklist check named affine and linear
+  resources, including concrete template instances. Transfers invalidate the old owner.
+  A `move_transfers<T>` entry or its class annotation authorizes a nonthrowing move. A plain
+  wrapper around a move-only guard can use its implicit move constructor.
+  Conditional and comma initializers preserve the selected path and evaluate earlier operands
+  in order for named owners, non-overlapping fields, and fixed-array elements.
+  The 1,280-resource fixture composes four source fragments and checks that an
+  equivalent reflection edit reuses the caller's proof while a conflicting edit reports both origins.
+  Local const references can borrow named owners or bind to another local shared reference.
+  Each reference protects the original owner through its last reachable use.
+  The checker rejects consuming or transferring an owner before a future use and rejects
+  exposing the borrow through an address, capture, or unregistered operation.
+  A `verified_observes` contract checks the observer's scalar reads and forwarding of the
+  original shared borrow to other verified observers. An observer can return a copied
+  arithmetic or enum value. Checked ELF and Mach-O objects carry
+  observation requirements and guarantees through each forwarding function. The checked link
+  matches them to unique strong definitions in explicit input objects. One forwarded observation
+  can also require a verified effect bound from the selected provider.
+  Local arrays and aggregates track registered owners by nested field and literal-index
+  paths such as `queue.groups[1].tasks[0]`. Initializing, borrowing, transferring, and
+  consuming a subobject follow the same checks as individual named resources.
+  `tracks_variant<Choice>` checks the active alternative of a package owner variant. The
+  `holds` tests refine the branch, shared borrows delay extraction, and extraction transfers
+  the obligation to the destination. Checked executables run natively on x86-64 Linux and
+  arm64 macOS with or without runtime guards.
+  [Variant conformance](tests/unit/pipeline/policies_variants.py)
+  The standalone C++20 package also provides move-only issuer-scoped capability tokens with
+  rights constraints and runtime scope checks. On Linux x86-64, a checked YCXX object and a
+  hosted GCC or Clang object exchange the token by value in either direction.
+  [ABI support #661](https://github.com/yrashk/ycxx/issues/661) · [Dependent type friends #689](https://github.com/yrashk/ycxx/issues/689)
+  Finite effect bounds from `<ycxx/effects.hpp>` check every direct callee of an annotated
+  function, including calls in default arguments and recursive calls. Typed declarations
+  and C++26 annotations share the registry. Bounds use canonical sets of nominal tags.
+  Each verified body must have a unique supported definition among the checked source
+  inputs or in the objects at the final checked link. The link verifies all requirements
+  through intervening providers and reports inconsistent trusted declarations it encounters.
+  The checker rejects indirect calls and unmodeled implicit operations.
+  An `at_most<Tag, N>` entry adds a static usage grade for one tag. The check adds
+  sequential costs, takes the maximum across alternatives, and counts terminating loop paths.
+  Counted `int` and `unsigned` loops use the converted integer values of their endpoints.
+  Explicit object links carry graded contracts. The C++20 package also offers scope-local runtime budgets
+  and explicit scoped handlers. For a local handler bound to a named function, YCXX verifies
+  the constructor and forwarding method, prevents the handler from escaping, and uses the
+  selected function's outward effects and grade. The checked link verifies that function's
+  contract across explicit objects. Stateful callable handlers can use trusted adapters.
+  [YCXX Policies #660](https://github.com/yrashk/ycxx/issues/660)
+  Execution leaving the scope of a live transaction or reaching a possible unwind is diagnosed.
+  See [the protocols and examples](docs/design/policies-ownership.md).
 - `tests/features/ycxx.txt` lists `syntax` and `run darwin-arm64`: a feature can be limited to
   hosts. CI's macOS job runs the slice before its tier, with `--no-unsupported`.
 - `unit.pipeline`: the line table, linkage names, and the back half from hand-built analysed
