@@ -62,6 +62,7 @@ enum class NativeOperation : std::uint64_t {
   derived_virtual_destructor = std::uint64_t{1} << 0,
   peer_typed_dynamic_cast = std::uint64_t{1} << 1,
   namespace_hidden_asm = std::uint64_t{1} << 2,
+  int3_statement_asm = std::uint64_t{1} << 3,
 };
 
 struct Target {
@@ -323,7 +324,8 @@ inline constexpr Target x86_64_linux{
     .apple_calls = false,
     .native_operations = std::to_underlying(NativeOperation::derived_virtual_destructor) |
                          std::to_underlying(NativeOperation::peer_typed_dynamic_cast) |
-                         std::to_underlying(NativeOperation::namespace_hidden_asm),
+                         std::to_underlying(NativeOperation::namespace_hidden_asm) |
+                         std::to_underlying(NativeOperation::int3_statement_asm),
 };
 
 constexpr const Target* target_for_triple(std::string_view triple) {
