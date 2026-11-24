@@ -30,6 +30,24 @@ template <class... A> struct Outer {
 template <class... A> Size through_lambda(A... a) {
   return [&] { return __builtin_strlen(a...); }();
 }
+// A member template of a class template, expanding the class template's pack.
+template <class... A> struct Bound {
+  template <class N> static int compare(A... a, N n) { return __builtin_memcmp(a..., n); }
+  // A pattern naming both templates' packs.
+  template <class... B> static int skip(A... a, B... b) { return __builtin_memcmp((a + b)..., Size{1}); }
+};
+// A generic lambda's own pack, still unbound when the enclosing template is instantiated.
+template <class T> int generic(T t) {
+  return [](auto... x) { return __builtin_memcmp(x..., Size{2}); }(t, t);
+}
+// A pattern larger than the pack's name, and a builtin call inside an outer expansion.
+template <class... A> Size offset(A... a) { return __builtin_strlen((a + 1)...); }
+constexpr Size sum() { return 0; }
+template <class... T> constexpr Size sum(Size first, T... rest) { return first + sum(rest...); }
+template <class... A> Size lengths(A... a) { return sum(__builtin_strlen(a)...); }
+// A non-type pack in a constant expression.
+template <int... N> constexpr int constant = __builtin_constant_p(N...);
+static_assert(constant<3> == 1);
 
 int main() {
   if (length("abc") != 3) return 1;
@@ -44,5 +62,11 @@ int main() {
   if (typed("ab") != 2) return 9;
   if (Outer<int>::inner("abcd") != 4) return 10;
   if (through_lambda("ab") != 2) return 11;
+  if (Bound<const char*, const char*>::compare("ab", "ab", Size{2}) != 0) return 12;
+  if (Bound<const char*, const char*>::skip("xab", "yab", 1, 1) != 0) return 15;
+  if (Bound<const char*, const char*>::skip("xab", "yac", 2, 2) >= 0) return 16;
+  if (offset("abc") != 2) return 13;
+  if (lengths("a", "bc", "def") != 6) return 14;
+  if (generic("ab") != 0) return 17;
   return 0;
 }
