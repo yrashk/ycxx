@@ -14,7 +14,9 @@ namespace detail {
 template<class T, class U> using Mapped = typename Box<detail::make<T, U>()>::type;
 template<class T> using Forwarded = Mapped<T, Second>;
 
-template<> consteval Value detail::make<First, Second>() { return {7, -5, false}; }
+namespace detail {
+  template<> consteval Value make<First, Second>() { return {7, -5, false}; }
+}
 
 namespace detail {
   template<class T, class U> requires (sizeof(T) > 0)
