@@ -5614,6 +5614,11 @@ private:
       return bad();
     }
     if (defaulted_comparison) {
+      // A class template's defaulted comparison is not done yet (#295).
+      if (templated) {
+        s_.diag(d.name_at, Diag::not_supported, Tk::kw_default);
+        return bad();
+      }
       if (!defaulted_comparison_ok(d, types.class_type(p_->class_entity(it_->parent)), false)) return bad();
       // [dcl.fct.def.default]: implicitly constexpr; constexpr-suitable or not, a call is
       // constant only when its subobject comparisons are ([expr.const]).
