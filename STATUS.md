@@ -4383,6 +4383,20 @@ Each is removed once ycxx compiles itself.
 | M7 | libycxx under ycxx | libycxx's suite passes, compiled by ycxx |
 | M8 | Self-hosting | Stage 2 equals stage 3; the GCC-built bootstrap anchor is released (DECISIONS §3.5) |
 
+## Throwing a trivial class object on Linux (#1237)
+
+A cleanup-free x86-64 Linux function can throw an explicitly initialized,
+default-visible namespace-scope record with one ordinary public `int` member
+and trivial implicit copy and destruction. The hosted Itanium ABI path allocates
+the exception object and copies the target-layout bytes. The ELF object emits the
+root-class type identity with both `-frtti` and `-fno-rtti`. Mixed GCC and Clang
+links catch the record by const reference and observe the signed payload.
+
+More general exception-object construction, native class handlers and exceptional
+cleanup remain under [#89](https://github.com/yrashk/ycxx/issues/89) and
+[#135](https://github.com/yrashk/ycxx/issues/135). Darwin parity is
+[#648](https://github.com/yrashk/ycxx/issues/648).
+
 ## Ordinary block try and catch (#558)
 
 The front end retains the protected compound and ordered handlers. A named
