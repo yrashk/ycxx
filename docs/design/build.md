@@ -142,3 +142,24 @@ stay equal.
 Modules, host and target variants, richer link propagation and a foreign build
 adapter grow coverage after the first witness (#1259). Package acquisition and
 version solving sit outside the build.
+
+## Resolved plan inspection (#1256)
+
+`ycxx show app` reports the targets and facts the planner reached. Each source,
+include directory, dependency, tool, argument and output has an origin in
+`build.ycxx`. A generated source shows its producer and output name. A glob
+match shows the expression that selected it. The source format returns the
+original definition. The JSON format is a versioned snapshot, and the HTML
+format can be opened without a server.
+
+Save a snapshot with `ycxx show app --format=json > before.json`. Compare it
+with this checkout using `ycxx show app --against before.json`. The comparison
+uses fact kind, owner and name for identity and resolved values for equality.
+Locations and descriptions explain changes without causing changes when lines
+move. Ordered requirements use their position for identity. A new glob match
+is visible even when the manifest text is identical.
+
+Inspection reuses the build definition resolver and lists directory entries.
+It does no tool execution or native compilation. It reports planned generator
+inputs and tools by path, so a reviewer can inspect the layout before those
+tools are installed or the inputs are available.
