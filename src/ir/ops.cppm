@@ -76,9 +76,12 @@ export struct PathStep {
 // Per-node flags (§2.3: `nsw`/`nuw`/`exact` on arithmetic; `volatile` and non-constexpr callees
 // make an operation non-constant). The enumerator is the bit position.
 // `call_body` marks reads of a lowered builtin body, which are indeterminately sequenced with
-// the caller's other evaluations ([intro.execution]).
-export enum class Flag : std::uint8_t { nsw, nuw, exact, volatile_, not_constexpr, variadic, call_body, explicit_trap };
-export using Flags = std::uint8_t;
+// the caller's other evaluations ([intro.execution]). `explicit_trap` and `assumed_unreachable`
+// mark an `unreachable` that `__builtin_trap()` and `__builtin_unreachable()` lower to.
+export enum class Flag : std::uint8_t {
+  nsw, nuw, exact, volatile_, not_constexpr, variadic, call_body, explicit_trap, assumed_unreachable,
+};
+export using Flags = std::uint16_t;
 export constexpr Flags bit(Flag f) { return Flags(1u << std::to_underlying(f)); }
 
 // Traits of the op itself.
@@ -273,8 +276,9 @@ export enum class Op : std::uint16_t {
   cond_br [[=control({V}, {}, 2)]],                      // true, false
   switch_ [[=control({V}, {}, 1, true).imms({consts})]],  // default, then one per case value
   ret [[=control({S, Vs}, {}, 0)]],
-  // The flags distinguish an explicit trap and a static definition ([expr.const]) from falling off the end.
-  unreachable [[=control({}, {}, 0).accepts({not_constexpr, explicit_trap})]],
+  // The flags distinguish an explicit trap, `__builtin_unreachable()` and a static definition
+  // ([expr.const]) from falling off the end.
+  unreachable [[=control({}, {}, 0).accepts({not_constexpr, explicit_trap, assumed_unreachable})]],
   consteval_br [[=control({}, {}, 2)]],                  // consteval, runtime ([stmt.if])
   // normal, unwind; the u32 as for `call`
   invoke [[=control({S, Vs}, {S, Vs}, 2).imms({entity, u32}).accepts({not_constexpr})]],

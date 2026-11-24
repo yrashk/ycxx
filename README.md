@@ -653,6 +653,9 @@ written default member initializer are value-initialized.
   Namespace-scope `constexpr` pointers to `void` can retain scalar and array element addresses.
   `__builtin_addressof`, used by libycxx's `std::addressof`, bypasses overloaded `operator&`.
   It supports runtime addresses and constant expressions such as a scalar global's address.
+  `__builtin_unreachable`, used by libycxx's `std::unreachable`, ends a path in a `[[noreturn]]`
+  or value-returning function; reaching it in a constant expression is an error.
+  [#330](https://github.com/yrashk/ycxx/issues/330)
   `__builtin_constant_p` reports whether it can prove a scalar or string operand constant
   without executing it. [#1065](https://github.com/yrashk/ycxx/issues/1065)
   `__builtin_strlen`, used by libycxx's exception headers, scans character storage in constant
