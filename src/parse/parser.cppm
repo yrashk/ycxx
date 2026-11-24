@@ -5382,7 +5382,7 @@ public:
   // invocation ([expr.const.imm], `Sema::immediate_invocation`).
   Ex immediate(Ex call) {
     const auto direct = s_->as<ast::Call>(call);
-    EntityId function = EntityId::none;
+    ast::EntityId function = ast::EntityId::none;
     if (direct) {
       function = direct->function;
     } else if (auto member = s_->as<ast::MemberCall>(call)) {
@@ -5392,8 +5392,8 @@ public:
       // then calling the selected function. The complete invocation includes both.
       if (auto invocation = s_->as<ast::Call>({sequence->rhs.id})) function = invocation->function;
     }
-    if (s_->ordinary_immediate_member(function)) return s_->immediate_invocation(call, /*preserve_glvalue=*/true);
-    if (direct && function != EntityId::none && s_->is_consteval(function))
+    if (!call.glvalue() && s_->ordinary_immediate_member(function, call.type())) return s_->immediate_invocation(call);
+    if (direct && function != ast::EntityId::none && s_->is_consteval(function))
       return s_->immediate_invocation(call);
     return call;
   }

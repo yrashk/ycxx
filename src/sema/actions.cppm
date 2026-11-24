@@ -5517,18 +5517,9 @@ public:
   // A call of an immediate function outside an immediate function context is an immediate
   // invocation: it must be a constant expression, and it is replaced by its value ([expr.const]).
   // `call` calls a consteval function or constructor.
-  Ex immediate_invocation(Ex call, bool preserve_glvalue = false) {
+  Ex immediate_invocation(Ex call) {
     if (!call.ok() || immediate_context || unevaluated || !evaluate_immediate) return call;
-    // A reference-valued invocation designates an object or function. Evaluating its
-    // address preserves that designation without reading an object outside the invocation.
-    const bool fold_address = preserve_glvalue && call.glvalue();
-    Ex expression = call;
-    if (fold_address) {
-      const ExprInfo pointer{types().pointer(call.type()), ValueCategory::prvalue, 0};
-      expression = node(ast::Unary{pointer, ast::UnaryOp::address_of, at(call, call.begin)},
-                        call.begin, call.end, pointer);
-    }
-    const Evaluation v = evaluate_immediate(expression);
+    const Evaluation v = evaluate_immediate(call);
     if (!v.constant) {
       diag(call.begin, Diag::not_constant, v.reason);
       return {NodeId::none, call.begin, call.end};
@@ -5549,10 +5540,7 @@ public:
       }
       folded_immediate_result = *entity;
     }
-    Ex result = literal(expression.type(), *v.value, ValueCategory::prvalue, call.begin, call.end);
-    if (fold_address)
-      return node(ast::Unary{call.info, ast::UnaryOp::deref, at(result, call.begin)}, call.begin, call.end, call.info);
-    return result;
+    return literal(call.type(), *v.value, ValueCategory::prvalue, call.begin, call.end);
   }
 
   void retain_immediate_functions(const Sema& replay) {
@@ -5831,7 +5819,7 @@ public:
     return nullptr;
   }
 
-  bool ordinary_immediate_member(EntityId function) {
+  bool ordinary_immediate_member(EntityId function, QualType result) {
     if (function == EntityId::none) return false;
     const auto& entity = w_->entities.rec(function);
     if (entity.kind != EntityKind::function || entity.scope == EntityId::none || entity.templ != EntityId::none)
@@ -5839,7 +5827,16 @@ public:
     const auto& owner = w_->entities.rec(entity.scope);
     if (owner.kind != EntityKind::class_ || owner.templ != EntityId::none) return false;
     const auto* member = member_decl(function);
-    return member && member->is_consteval && !member->is_virtual && !member->is_template;
+    if (!member || !member->is_consteval || member->is_virtual || member->is_template) return false;
+    // Only the checked integral, enum and void result representations enter this path.
+    if (types().is_void(result)) return true;
+    if (types().is_enum(result)) {
+      const auto* enumeration = enum_rec(types().enum_of(result));
+      if (!enumeration || !enumeration->underlying) return false;
+      result = *enumeration->underlying;
+    }
+    const auto builtin = types().builtin_of(result);
+    return builtin && ast::is_integral(*builtin) && ast::width_of(w_->target, *builtin) <= 64;
   }
 
   // A member function named without a call yet: `a.f`, `p->f`, `f` or `S::f`, bound to its object
@@ -6341,7 +6338,8 @@ public:
       Ex call = node(ast::Call{info, fe, at(callee, begin), b_->list(*children)}, begin, end, info);
       // Lookup can supply a `this` pointer to rank a mixed unqualified or qualified overload
       // set. Selecting a static member evaluates a receiver only when the call has one.
-      if (!object || (m.arrow && !bound.explicit_receiver && ordinary_immediate_member(fe))) return call;
+      if (!object || (m.arrow && !bound.explicit_receiver && ordinary_immediate_member(fe, fr.inner)))
+        return call;
       Ex discarded = convert_node(*object, ast::ConversionKind::to_void, builtin(Builtin::void_));
       return node(ast::OrderedBinary{info, ast::OrderedOp::comma, at(discarded, begin), at(call, begin)}, begin, end, info);
     }
@@ -11058,7 +11056,7 @@ public:
       default_origin = DefaultArgumentOrigin::interned;
     }
     if (declaration && (named.id == callee.id || is_consteval(default_source) ||
-                        ordinary_immediate_member(default_source))) {
+                        ordinary_immediate_member(default_source, types().rec(ft).inner))) {
       function = default_source;
     } else {
       // The address of a named immediate function is itself a known callee. It does not
