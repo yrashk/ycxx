@@ -2631,7 +2631,8 @@ group = 'lib'
 clauses = ['support.srcloc']
 std = 'C++20'
 detect = '\bsource_location\b'
-status = 'missing'
+status = 'partial'
+note = 'Direct `__builtin_LINE()` and presumed invocation lines for supported ordinary omitted arguments. The descriptor and line-dependent immediate evaluation remain in #327.'
 probe = '''
 int main() { return __builtin_LINE() == 1 ? 0 : 1; }
 '''

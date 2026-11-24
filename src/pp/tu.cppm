@@ -16,6 +16,13 @@ export namespace ycxx::pp {
 // passes through and diagnostics sit before the token whose index they carry.
 struct Flat {
   std::vector<PTok> tokens;
+  // Changes to the line adjustment of the expansion sites, by flat token index.
+  struct LineDelta {
+    std::size_t at;
+    std::int32_t delta;
+  };
+  std::vector<LineDelta> line_deltas;
+  bool has_line_builtin = false;
   std::vector<FileId> files;
   std::vector<u32> file_names;  // presumed names, `Spellings` ids
   std::vector<Expansion> expansions{Expansion{}};
@@ -45,9 +52,23 @@ struct Preprocessed {
 
 namespace detail {
 
+// Clang's source-line builtin uses the closing line of a function-like macro invocation.
+// The closing offsets belong to this occurrence's physical file. A replacement can supply
+// the name of another macro whose written argument list closes later in that same file.
+TokLoc source_line_site(std::span<const Expansion> expansions, TokLoc loc) {
+  u32 after_closing = 0;
+  while (loc.expansion != 0) {
+    const Expansion& e = expansions[loc.expansion];
+    if (e.kind == ExpansionKind::function) after_closing = std::max(after_closing, e.operand_a);
+    loc = {e.site_file, e.parent, e.site_offset};
+  }
+  if (after_closing != 0) loc.offset = after_closing - 1;
+  return loc;
+}
+
 class Flattener {
 public:
-  Flattener(Session& s, Flat& out) : s_(&s), out_(&out) {}
+  Flattener(Session& s, Flat& out) : s_(&s), out_(&out), line_builtin_(s.spellings.name(lex::builtin_line_name)) {}
 
   // Where a region's bindings are in the TU: a file of its table, and the definition's offset.
   using Bindings = std::vector<std::pair<u16, u32>>;
@@ -145,6 +166,17 @@ public:
       }
       if (k < r.tokens.size()) {
         PTok t = r.tokens[k];
+        out_->has_line_builtin |= t.tok.kind == Tk::identifier && t.tok.payload == line_builtin_;
+        // The same file can occur under different #line directives. Capture the adjustment
+        // here, before its physical file is shared in the flat table.
+        std::int32_t delta = 0;
+        if (!r.lines.empty()) {
+          const auto at = source_line_site(r.expansions, t.loc).offset;
+          const auto line = std::ranges::upper_bound(r.lines, at, {}, &FileRegion::Line::at);
+          if (line != r.lines.begin()) delta = (line - 1)->delta;
+        }
+        if (delta != (out_->line_deltas.empty() ? 0 : out_->line_deltas.back().delta))
+          out_->line_deltas.push_back({out_->tokens.size(), delta});
         t.loc = map(t.loc);
         out_->tokens.push_back(t);
       }
@@ -163,6 +195,7 @@ private:
 
   Session* s_;
   Flat* out_;
+  u32 line_builtin_;
   std::map<std::pair<FileId, u32>, u16> index_;
 };
 
@@ -276,6 +309,8 @@ class AbiPragmas {
 
 }  // namespace detail
 
+std::vector<u32> line_starts(std::string_view text);
+
 // Phases 5 and 6 ([lex.phases]) over the flattened tokens: string-literal concatenation, then
 // pp-tokens become tokens (keywords, classified numbers, evaluated character literals).
 Preprocessed to_region(Session& s, const Flat& flat) {
@@ -313,10 +348,24 @@ Preprocessed to_region(Session& s, const Flat& flat) {
     if (l.ud_suffix != lex::no_name) l.ud_suffix = tables.name(s.spellings.name(l.ud_suffix));
     return tables.literal(std::move(l));
   };
-  auto emit = [&](Tok t, const PTok& p) {
+  std::map<u16, std::vector<u32>> physical_lines;
+  std::size_t next_delta = 0;
+  std::int32_t delta = 0;
+  auto emit = [&](Tok t, std::size_t i) {
     t.flags &= u8(tok_flag::line_start | tok_flag::space_before | tok_flag::alt | tok_flag::continued | tok_flag::directive);
     r.tokens.push_back(t);
-    r.locs.push_back(p.loc);
+    r.locs.push_back(pp[i].loc);
+    if (!flat.has_line_builtin) return;
+    while (next_delta < flat.line_deltas.size() && flat.line_deltas[next_delta].at <= i)
+      delta = flat.line_deltas[next_delta++].delta;
+    const TokLoc at = detail::source_line_site(flat.expansions, pp[i].loc);
+    auto [entry, inserted] = physical_lines.try_emplace(at.file);
+    if (inserted) {
+      const Files::Content* content = s.files.content(flat.files[at.file]);
+      entry->second = line_starts(content ? std::string_view(content->text) : std::string_view());
+    }
+    const auto line = std::ranges::upper_bound(entry->second, at.offset) - entry->second.begin();
+    r.presumed_lines.push_back(static_cast<u32>(static_cast<std::int64_t>(line) + delta));
   };
   detail::AbiPragmas pragmas(s, flat, r);
   std::array<std::optional<u32>, 256> byte_literals;
@@ -329,7 +378,7 @@ Preprocessed to_region(Session& s, const Flat& flat) {
       std::string_view name = s.spellings.name(tok.payload);
       if (auto k = lex::keyword(name)) tok = Tok{*k, tok.flags, 0};
       else tok.payload = tables.name(name);
-      emit(tok, p);
+      emit(tok, i);
       break;
     }
     case Tk::embed: {
@@ -337,7 +386,7 @@ Preprocessed to_region(Session& s, const Flat& flat) {
       // is allowed, including a single literal in an expression.
       bool first = true;
       for (unsigned char byte : s.spellings.resource(tok.payload)) {
-        if (!first) emit(Tok{Tk::comma, 0, 0}, p);
+        if (!first) emit(Tok{Tk::comma, 0, 0}, i);
         if (!byte_literals[byte]) {
           Literal l;
           l.spelling = std::to_string(byte);
@@ -345,7 +394,7 @@ Preprocessed to_region(Session& s, const Flat& flat) {
           l.base = byte == 0 ? 8 : 10;
           byte_literals[byte] = tables.literal(std::move(l));
         }
-        emit(Tok{Tk::int_lit, first ? tok.flags : u8(0), *byte_literals[byte]}, p);
+        emit(Tok{Tk::int_lit, first ? tok.flags : u8(0), *byte_literals[byte]}, i);
         first = false;
       }
       break;
@@ -353,12 +402,12 @@ Preprocessed to_region(Session& s, const Flat& flat) {
     case Tk::pp_number:
       tok.payload = literal(tok.payload);
       tok.kind = lex::classify_number(tables.literals[tok.payload], tables, report_at(i));
-      emit(tok, p);
+      emit(tok, i);
       break;
     case Tk::char_lit:
       tok.payload = literal(tok.payload);
       lex::evaluate_char(tables.literals[tok.payload], report_at(i));
-      emit(tok, p);
+      emit(tok, i);
       break;
     case Tk::string_lit: {
       // Phase 5: the run of adjacent string literals.
@@ -376,7 +425,7 @@ Preprocessed to_region(Session& s, const Flat& flat) {
         Tok t = pp[k].tok;
         t.payload = ids[k - i];
         if (k > i) t.flags |= tok_flag::continued;
-        emit(t, pp[k]);
+        emit(t, k);
       }
       i = j;
       break;
@@ -393,13 +442,14 @@ Preprocessed to_region(Session& s, const Flat& flat) {
       // Formed only where a directive reads it.
       contract_assert(false);
       break;
-    default: emit(tok, p); break;
+    default: emit(tok, i); break;
     }
   }
   pragmas.finish();
   const Files::Content* main = s.files.content(flat.main);
   r.tokens.push_back(Tok{Tk::eof, tok_flag::line_start, 0});
   r.locs.push_back({0, 0, main ? static_cast<u32>(main->text.size()) : 0});
+  if (flat.has_line_builtin) r.presumed_lines.push_back(0);  // no builtin or invocation at EOF
   r.literals = std::move(tables.literals);
   for (FileId f : flat.files) r.files.push_back(s.files.path(f));
   for (u32 n : flat.file_names) r.file_names.emplace_back(s.spellings.name(n));

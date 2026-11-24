@@ -230,7 +230,8 @@ class GroupFacts {
     h.uint(std::to_underlying(tok.kind)).uint(tok.flags).uint(spelling.size()).bytes(spelling);
   }
   // What every group reads: the namespaces, the using-directives and aliases at namespace scope,
-  // the inline namespaces and the specialization items.
+  // the inline namespaces and the specialization items. Defaults can read presumed lines in
+  // other groups, so the line table is also a unit fact when present (#327).
   Fp128 unit_facts() {
     Hasher h;
     auto str = [&](std::string_view s) { h.uint(s.size()).bytes(s); };
@@ -252,6 +253,10 @@ class GroupFacts {
       }
     }
     for (std::uint32_t k : x_->specializations) h.fp(id(k));
+    if (!r_->presumed_lines.empty()) {
+      h.uint(r_->presumed_lines.size());
+      for (auto line : r_->presumed_lines) h.uint(line);
+    }
     return h.finish();
   }
 

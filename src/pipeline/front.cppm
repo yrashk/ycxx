@@ -50,11 +50,9 @@ struct BodyAt {
   ast::NodeId tree = ast::NodeId::none;
 };
 
-// The region as sema reads it (#947, slice 0): its tokens without where they were written. The
-// tokens' offsets, expansion sites, `space_before` flags (sema reads none of them) and error
-// details are dropped, so an edit that moves tokens without changing them (a comment, blank
-// lines, spacing) stops here and analysis does not run again. Each token keeps its file alone
-// (`TokLoc::file`), which groups a header's items (slice 1).
+// The region as sema reads it (#947): its tokens without byte offsets, expansion sites,
+// `space_before` flags or error details. Each token keeps its file for grouping a header's items.
+// A unit with __builtin_LINE also observes its presumed lines (#327).
 struct PpTokens {
   using Key = pp::FileId;
   using Value = pp::Region;
@@ -111,7 +109,7 @@ struct FrontResult {
 engine::SourceSpan tu_span(const engine::Db& db, TuId tu);
 
 // One translation unit from its source file (`TuSource::file`), analysed, from `PpTokens` and the
-// items: it holds no file position, so an edit that only moves tokens leaves it green.
+// items. Only units with the source-line builtin depend on presumed line numbers.
 struct TuSema {
   using Key = TuId;
   using Value = SemaResult;
@@ -2055,6 +2053,7 @@ engine::query_task<pp::Region> PpTokens::run(engine::Ctx& cx, pp::FileId file) {
   // header holds, for grouping (#947).
   out.locs.resize(full.locs.size());
   for (std::size_t i = 0; i < full.locs.size(); ++i) out.locs[i].file = full.site(i).file;
+  out.presumed_lines = full.presumed_lines;
   out.names = full.names;
   out.literals = full.literals;
   out.files = full.files;
