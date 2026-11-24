@@ -2541,7 +2541,8 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, Key k) {
     obj::binding binding = obj::binding::global;
     if (e.has_local_binding()) binding = obj::binding::local;
     else if (e.hidden) binding = obj::binding::hidden;
-    if (linux && e.special == Special::none && binding != obj::binding::local) {
+    if (target.supports(ast::NativeOperation::namespace_hidden_asm) &&
+        e.special == Special::none && binding != obj::binding::local) {
       if (auto directive = asm_names.find(*name); directive != asm_names.end()) {
         directive->second = true;
         asm_hidden.push_back(e.id);

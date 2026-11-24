@@ -3477,7 +3477,7 @@ private:
     }
     if (!template_ && !explicit_ && ps_.is(Tk::kw_asm)) {
       const u32 at = ps_.pos();
-      if (p_->world().target.triple != ast::x86_64_linux.triple ||
+      if (!p_->world().target.supports(ast::NativeOperation::namespace_hidden_asm) ||
           ps_.kind(1) != Tk::l_paren || ps_.kind(2) != Tk::l_paren) {
         s_.diag(at, Diag::not_supported, Tk::kw_asm);
         return bad();
