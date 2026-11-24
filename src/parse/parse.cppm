@@ -3408,8 +3408,7 @@ private:
         return;
       }
     }
-    // A template-head ([temp.pre]): what follows declares a function or variable template, or
-    // declares a class template. Alias templates and nested heads are not supported yet.
+    // A template-head ([temp.pre]): what follows declares a template or a concept.
     else if (ps_.is(Tk::kw_template)) {
       if (ps_.kind(1) != Tk::less) {
         s_.diag(ps_.pos(), Diag::not_supported, Tk::kw_template);
@@ -3597,6 +3596,8 @@ private:
         bool dtor = ps_.kind(next) == Tk::tilde && ps_.kind(next + 1) == Tk::identifier &&
                     ps_.name_of(ps_.tok(next + 1)) == cname;
         if (ctor || dtor) {
+          sc = ps_.committed_nested_name(ctor_at, next);
+          if (!sc) return bad();
           auto flags = constructor_flags(ctor_at, dtor);
           if (!flags) return bad();
           return out_of_class_special(*sc->type, next - ctor_at, *flags);
@@ -4243,6 +4244,7 @@ private:
     sem.linkage = ast::Linkage::none;
     sem.flags = sema::decl_flag::template_;
     sem.template_params = b_.seq(std::span<const ast::TemplateParamSema>(head));
+    sem.constraints = associated_constraints();
     decls_.push_back(sem);
     s_.own.push_back({name, sem});
     p_->declared(sem, k_);
@@ -4778,9 +4780,10 @@ private:
     const u32 at = ps_.pos();
     u32 next = 0;
     const auto diags = s_.diag_count();
-    auto scope = ps_.nested_name(0, next);
+    bool alias_failed = false;
+    auto scope = ps_.committed_nested_name(0, next, &alias_failed);
     if (!scope) {
-      if (!s_.has_error_since(diags)) s_.diag(at, Diag::expected_unqualified_id);
+      if (!alias_failed && !s_.has_error_since(diags)) s_.diag(at, Diag::expected_unqualified_id);
       return EntityId::none;
     }
     if (ps_.kind(next) != Tk::identifier || ps_.kind(next + 1) == Tk::coloncolon || !scope->type ||
