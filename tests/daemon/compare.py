@@ -29,6 +29,8 @@ from concurrent.futures import ThreadPoolExecutor
 from itertools import islice
 from pathlib import Path
 
+from runtime_dir import runtime_root
+
 failures = []
 
 # Divergences known to come from a bug with its own issue: test -> (issue, the fields that may
@@ -94,7 +96,7 @@ def compare(name, reference, daemon):
 
 def main():
     ycxx, own = os.path.abspath(sys.argv[1]), Path(sys.argv[2]).resolve()
-    runtime = tempfile.mkdtemp(prefix='yd', dir='/tmp')  # short: sun_path holds 104 bytes on macOS
+    runtime = tempfile.mkdtemp(prefix='yd', dir=runtime_root('yd'))
     os.chmod(runtime, 0o700)
     base = dict(os.environ)
     for k in ('YCXX_DAEMON', 'YCXX_NO_DAEMON', 'YCXX_ROOT', 'YCXX_NO_WATCH', 'YCXX_THREADS', 'YCXX_CHAOS_SEED'):
