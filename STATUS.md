@@ -1464,9 +1464,10 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   specializations retain strong definitions. [#1051](https://github.com/yrashk/ycxx/issues/1051)
 - Tests: `tests/own/classes/s2-*` (spec-only, plus three from the review): 12 of 13 pass; the constexpr one waits for records
   in the interpreter (#25). In-class member functions are weak definitions on both targets (#422, #124).
-- Not yet: ref-qualifiers, `= default`.
+- First-declaration deleted copy assignments can carry a ref-qualifier. Other class-template
+  member ref-qualifiers and defaulted assignment remain open.
 
-## Ordinary ref-qualified member functions (#311)
+## Ref-qualified member functions (#311)
 
 - Ordinary non-template members in namespace-scope classes distinguish lvalue and rvalue
   receivers, including cv-qualified overloads and out-of-class definitions. Nested Itanium
@@ -3245,10 +3246,10 @@ What the process allocates, attributed to the engine's cells, in the trace and t
   in order, and returns `*this`. Deleted copy assignments participate in overload resolution.
   [Design](docs/design/implicit-copy-assignment.md#first-declaration-defaulted-copy-assignment) ·
   [#244](https://github.com/yrashk/ycxx/issues/244)
-- Namespace-scope class templates accept a deleted copy assignment without a ref-qualifier
-  on the first in-class declaration. Specializations preserve deletion and diagnose a selected
-  deleted overload.
-  [#709](https://github.com/yrashk/ycxx/issues/709)
+- Namespace-scope class templates accept a deleted copy assignment on the first in-class
+  declaration, including with an lvalue or rvalue ref-qualifier. Specializations preserve
+  deletion and diagnose a selected deleted overload.
+  [#709](https://github.com/yrashk/ycxx/issues/709) · [#311](https://github.com/yrashk/ycxx/issues/311)
 
 ## Ordinary virtual declarations (#309, 2026-11-21)
 
