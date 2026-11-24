@@ -183,6 +183,10 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_
   add_test(NAME unit.linux_native_int_throw
     COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/linux_native_int_throw.py
             $<TARGET_FILE:ycxxc> ${CMAKE_CXX_COMPILER} ${CMAKE_READELF})
+  # PARITY: #648 tracks the Darwin native exception counterpart.
+  add_test(NAME unit.linux_native_class_throw
+    COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/linux_native_class_throw.py
+            --ycxx $<TARGET_FILE:ycxxc> --peer ${CMAKE_CXX_COMPILER})
   add_test(NAME unit.linux_local_unwind
     COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/linux_local_unwind.py
             $<TARGET_FILE:ycxxc> ${CMAKE_CXX_COMPILER} ${CMAKE_READELF})

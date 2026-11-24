@@ -44,17 +44,21 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--gcc', default=os.environ.get('YCXX_GXX', 'g++'))
     parser.add_argument('--clang', default=os.environ.get('YCXX_CLANGXX', 'clang++'))
+    parser.add_argument('--ycxx', type=Path, help='ycxx executable to compile both producer modes')
+    parser.add_argument('--peer', help='use one configured host C++ compiler')
     parser.add_argument('--native-rtti', type=Path, help='ycxx producer object compiled with -frtti')
     parser.add_argument('--native-no-rtti', type=Path, help='ycxx producer object compiled with -fno-rtti')
     args = parser.parse_args()
     if bool(args.native_rtti) != bool(args.native_no_rtti):
         parser.error('provide both native producer objects or neither')
+    if args.ycxx and args.native_rtti:
+        parser.error('--ycxx and explicit producer objects are mutually exclusive')
     # PARITY: #648 tracks native Darwin EH. These metadata checks target x86-64 ELF.
     if (platform.system(), platform.machine()) != ('Linux', 'x86_64'):
         parser.error('requires a Linux x86-64 host')
 
     env = dict(os.environ, LC_ALL='C')
-    drivers = {'gcc': args.gcc, 'clang': args.clang}
+    drivers = {'host': args.peer} if args.peer else {'gcc': args.gcc, 'clang': args.clang}
     with tempfile.TemporaryDirectory(prefix='ycxx-class-throw-') as temp:
         scope = Path(temp)
         for label, driver in drivers.items():
@@ -66,11 +70,15 @@ def main():
             producers = [('ycxx', 'frtti', args.native_rtti.resolve()),
                          ('ycxx', 'fno-rtti', args.native_no_rtti.resolve())]
         else:
+            commands = {label: [driver, *HOST_FLAGS] for label, driver in drivers.items()}
+            if args.ycxx:
+                commands = {'ycxx': [args.ycxx.resolve(), 'cxx', '--no-daemon',
+                                     '--target=x86_64-pc-linux-gnu', '-std=c++26']}
             producers = []
-            for label, driver in drivers.items():
+            for label, command in commands.items():
                 for mode in ('frtti', 'fno-rtti'):
                     obj = scope / f'{label}-{mode}.o'
-                    run([driver, *HOST_FLAGS, f'-{mode}', '-c', FIXTURES / 'producer.cpp',
+                    run([*command, f'-{mode}', '-c', FIXTURES / 'producer.cpp',
                          '-o', obj], scope, env)
                     producers.append((label, mode, obj))
 
