@@ -147,6 +147,8 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
   - Hit again on #218, with oracles (`--cxx clang`): it built beside a background `tools/build`,
     and two Ninja runs in one directory broke a module ("imports must be built before being
     imported"). The rebuild cost 15 minutes on a loaded machine. Oracle runs need no build either.
+  - Hit again on #309: a test-writing subagent's oracle run built for 37 minutes beside the
+    implementer's build. Give a test author's brief `tools/test --cxx clang affected <path>`.
   - Learned on #659.
 - **A reviewer running your binary blocks your rebuilds.** On #337 the reviewer probed with the
   worktree's `build/bin/ycxx`, so the next step could not be built for 15 minutes.
@@ -542,13 +544,6 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
   - Rule: DECISIONS §5.6.
   - Learned on #33.
 
-- **A path filter alone still runs the build stage.** On #309 a test-writing subagent ran
-  `tools/test --cxx clang own/...` to check its tests against the oracles. That ran `tools/build`
-  first, in the build directory the implementing session was rebuilding, for 37 minutes, and failed.
-  - Do: name the stage with the path: `tools/test --cxx clang affected <path>` (or `core <path>`)
-    checks only the tests, in seconds, and leaves `build/` alone.
-  - Do: give a test author's brief that command, and tell it not to build.
-  - Learned on #309.
 - **Linux x86-64 run tests can be checked from the Mac without building ycxx in Docker.** Compile
   with the Mac's ycxx (`ycxx cxx --target=x86_64-pc-linux-gnu -c`), then link and run with `g++`
   in the `ycxx-linux-amd64` image (`docker run --platform linux/amd64 -v dir:/w`). On #309 this
