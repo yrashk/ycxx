@@ -234,23 +234,10 @@ class Mangler {
         // `typename Q::n`: <nested-name> N <prefix> <source-name> E, a substitution candidate
         // (§5.1.5.3).
         if (auto s = find(full_key(bare))) return qualify(qualifiers, *s, q);
-        auto d = in_.types.get<ast::TDepName>(in_.types.canon(bare));
-        auto p = type(d.qualifier);
+        auto p = dep_prefix(bare);
         if (!p) return p;
-        inner = "N" + *p + source_name(in_.names.spelling(d.name));
-        // `typename Q::template n<args>`: the template prefix `Q::n` is a candidate before its
-        // arguments (§5.1.5.3, §5.1.10).
-        if (ast::DepNameForm(d.form) == ast::DepNameForm::template_id) {
-          auto& ins = const_cast<ast::Interners&>(in_);
-          candidates_.push_back(
-              full_key(ins.intern_type(ast::TDepName{d.qualifier, d.name, std::uint8_t(ast::DepNameForm::template_name), {}})));
-          auto a = template_args(in_.seqs.elements(d.args));
-          if (!a) return a;
-          inner += *a;
-        }
-        inner += "E";
-        candidates_.push_back(full_key(bare));
-      } else if (in_.types.is<ast::TTransform>(in_.types.canon(bare))) {
+        inner = "N" + *p + "E";
+      } else if (in_.types.is<ast::TTransform>(in_.types.canon(bare))) {      } else if (in_.types.is<ast::TTransform>(in_.types.canon(bare))) {
         // A type-trait built-in of a dependent type: a vendor-extended type `u <source-name>` with
         // its argument, `u11__remove_cvIT_E`, as Clang spells it (docs/EXTENSIONS.md).
         if (auto s = find(full_key(bare))) return qualify(qualifiers, *s, q);
@@ -985,6 +972,45 @@ class Mangler {
   // Keys: a type is its canonical handle, an entity (a class or namespace) and a template name
   // have bit 32 or 33 set.
   std::uint64_t full_key(ast::QualType q) const { return std::to_underlying(in_.canonical(q)); }
+  // The <prefix> a dependent member name `Q::n` or `Q::template n<args>` stands for inside its
+  // `N … E` (§5.1.5.3): Q's own prefix when Q is one too, not a nested `N … E`; then the name, and
+  // the arguments after the <template-prefix> `Q::n`. Each prefix is a candidate, the template
+  // prefix keyed apart from the template-name argument `Q::template n`, which is a <type>.
+  std::expected<std::string, std::string> dep_prefix(ast::QualType q) {
+    ast::QualType bare = ast::without_cv(in_.canonical(q));
+    if (!in_.types.is<ast::TDepName>(in_.types.canon(bare)) || ast::Cv(std::to_underlying(in_.canonical(q)) & 3) != ast::Cv::none)
+      return type(q);
+    if (auto s = find(full_key(bare))) return *s;
+    auto d = in_.types.get<ast::TDepName>(in_.types.canon(bare));
+    std::string r;
+    auto prefix_and_name = [&]() -> std::expected<std::string, std::string> {
+      auto p = dep_prefix(d.qualifier);
+      if (!p) return p;
+      return *p + source_name(in_.names.spelling(d.name));
+    };
+    if (ast::DepNameForm(d.form) == ast::DepNameForm::template_id) {
+      auto& ins = const_cast<ast::Interners&>(in_);
+      const std::uint64_t key = (std::uint64_t{4} << 32) |
+          full_key(ins.intern_type(ast::TDepName{d.qualifier, d.name, std::uint8_t(ast::DepNameForm::template_name), {}}));
+      if (auto s = find(key)) {
+        r = *s;
+      } else {
+        auto p = prefix_and_name();
+        if (!p) return p;
+        r = *p;
+        candidates_.push_back(key);
+      }
+      auto a = template_args(in_.seqs.elements(d.args));
+      if (!a) return a;
+      r += *a;
+    } else {
+      auto p = prefix_and_name();
+      if (!p) return p;
+      r = *p;
+    }
+    candidates_.push_back(full_key(bare));
+    return r;
+  }
   std::optional<std::string> find(std::uint64_t key) const {
     for (std::size_t i = 0; i < candidates_.size(); ++i)
       if (candidates_[i] == key) return substitution(i);

@@ -1760,6 +1760,7 @@ public:
       if (probe_failure) *failed_qualifier = unsatisfied;
       if (commit_argument_failure && unsatisfied) *committed_failure = after + 1;
     }
+    if (t && checked && in && in->type && tmpl) s_->member_template_access(*in->type, tmpl->entity, n, name_at);
     if (!checked && (!committed_failure || !*committed_failure)) s_->truncate_diags(diags);
     if (!t) return std::nullopt;
     j = scope ? after + 1 : after;
@@ -2609,7 +2610,7 @@ public:
   }
   // A template-name here, `X`, `N::X`, a class's member template `C::X` or `Q::template X`
   // ([temp.arg.template]/1, [temp.names]/4), as a template argument; `at` is its last token.
-  std::optional<ast::TemplateArg> template_name_at(u32& at) {
+  std::optional<ast::TemplateArg> template_name_at(u32& at, bool checked = false) {
     at = 0;
     if (qualified_ahead()) {
       auto sc = nested_name(0, at);
@@ -2618,7 +2619,10 @@ public:
       if (keyword) ++at;
       if (kind(at) != Tk::identifier) return std::nullopt;
       NameId n = name_of(tok(at));
-      return sc->ns ? s_->template_name_arg(sc->ns, n) : s_->member_template_name_arg(*sc, n, keyword);
+      if (sc->ns) return s_->template_name_arg(sc->ns, n);
+      auto a = s_->member_template_name_arg(*sc, n, keyword);
+      if (a && checked && a->templ != ast::EntityId::none) s_->member_template_access(*sc->type, a->templ, n, pos() + at);
+      return a;
     }
     if (is(Tk::identifier)) return s_->template_name_arg(std::nullopt, name_of(tok()));
     return std::nullopt;
@@ -2627,7 +2631,7 @@ public:
   // otherwise.
   std::optional<ast::TemplateArg> template_name_argument() {
     u32 at = 0;
-    std::optional<ast::TemplateArg> a = template_name_at(at);
+    std::optional<ast::TemplateArg> a = template_name_at(at, /*checked=*/true);
     if (!a) return std::nullopt;
     for (u32 j = 0; j <= at; ++j) bump();
     return a;
@@ -4496,6 +4500,7 @@ public:
     if (s->type && is(Tk::less)) {
       bool dependent = false;
       if (auto tmpl = s_->member_template_scope(*s, n, keyword, dependent)) {
+        s_->member_template_access(*s->type, tmpl->entity, n, name_at);
         auto args = template_argument_list();
         if (!args) return {NodeId::none, begin, pos()};
         auto type = type_template_id(*tmpl, *args, name_at);

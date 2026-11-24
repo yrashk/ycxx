@@ -723,15 +723,23 @@ public:
     return v;
   }
 
-  // `t` with each `typename Q::n` that `f(Q, n)` resolves replaced by what it gives: a member of the
-  // current instantiation named with a qualifier, found ([temp.dep.type]/1).
-  QualType resolve_dep_names(QualType t, const std::function<std::optional<QualType>(QualType, NameId)>& f) {
+  // `t` with each `typename Q::n` and `typename Q::template n<args>` that `f(Q, n, args)` resolves
+  // replaced by what it gives: a member of the current instantiation named with a qualifier, found
+  // ([temp.dep.type]/1); `args` is none for a member type.
+  using DepNameResolver =
+      std::function<std::optional<QualType>(QualType, NameId, std::optional<std::span<const TemplateArg>>)>;
+  QualType resolve_dep_names(QualType t, const DepNameResolver& f) {
     TypeRec r = types().rec(t);
     Cv cv = Types::cv(types().canonical(t));
     switch (r.kind) {
     case TypeKind::dep_name:
-      if (r.dep_form != ast::DepNameForm::plain) return t;
-      if (auto m = f(r.inner, r.name)) return types().add_cv(*m, cv);
+      if (r.dep_form == ast::DepNameForm::template_name) return t;
+      if (r.dep_form == ast::DepNameForm::template_id) {
+        std::vector<TemplateArg> args = ins().seqs.elements(r.args);
+        if (auto m = f(r.inner, r.name, std::span<const TemplateArg>(args))) return types().add_cv(*m, cv);
+        return t;
+      }
+      if (auto m = f(r.inner, r.name, std::nullopt)) return types().add_cv(*m, cv);
       return t;
     case TypeKind::pointer: return types().add_cv(types().pointer(resolve_dep_names(r.inner, f)), cv);
     case TypeKind::member_pointer: {

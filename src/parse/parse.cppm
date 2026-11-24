@@ -6827,12 +6827,18 @@ private:
     }
     // `typename C<U>::T` in the definition names the class's own member type T ([temp.dep.type]/1).
     EntityId cls = s_.types().class_of(*t);
-    QualType own = s_.templates().resolve_dep_names(sem.type, [&](QualType q, NameId n) -> std::optional<QualType> {
-      if (!s_.types().is_class(q) || s_.types().class_of(q) != cls) return std::nullopt;
-      for (const auto& [name, mt, me] : cr->types)
-        if (name == n) return mt;
-      return std::nullopt;
-    });
+    QualType own = s_.templates().resolve_dep_names(
+        sem.type, [&](QualType q, NameId n, std::optional<std::span<const ast::TemplateArg>> args) -> std::optional<QualType> {
+          if (!s_.types().is_class(q) || s_.types().class_of(q) != cls) return std::nullopt;
+          if (args) {  // `typename C<U>::template M<args>`: the class's member alias template M
+            for (const auto& [name, mt, me] : cr->alias_templates)
+              if (name == n) return s_.templates().apply_template(me, *args);
+            return std::nullopt;
+          }
+          for (const auto& [name, mt, me] : cr->types)
+            if (name == n) return mt;
+          return std::nullopt;
+        });
     if (s_.types().canonical(own) != s_.types().canonical(sem.type)) sem.type = own;
     const bool deferred_class_exception = fn && !member_template_ && d.has_noexcept && s_.templated() &&
                                           s_.world().entities.rec(cls).templ != EntityId::none;
