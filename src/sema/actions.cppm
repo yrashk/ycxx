@@ -5669,7 +5669,7 @@ public:
       return true;
     const ClassRec* cr = class_rec(c);
     if (!cr) return true;
-    auto befriended = [&](EntityId e) { return std::ranges::find(cr->friends, e) != cr->friends.end(); };
+    auto befriended = [&](EntityId e) { return cr->befriends(e, w_->entities); };
     if (current_function != EntityId::none && befriended(current_function)) return true;
     for (EntityId k = current_class; k != EntityId::none; k = w_->entities.rec(k).scope) {
       const EntityRec& r = w_->entities.rec(k);

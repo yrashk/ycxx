@@ -872,10 +872,19 @@ struct ClassRec {
   // Each member's access ([class.access.spec]), by entity: data members, member functions,
   // constructors, static data members and nested types.
   std::vector<std::pair<EntityId, ast::Access>> access;
-  // Its friends ([class.friend]): functions and classes, by entity.
+  // Its friends ([class.friend]): functions, classes and class templates, by entity.
   std::vector<EntityId> friends;
   // The unqualified friend function declarations ADL can find through this class.
   std::vector<ast::MemberRec> adl_friends;
+
+  // Whether `e` is a friend: one of `friends`, or a specialization of a friend class template,
+  // whichever of its partial specializations it was instantiated from ([temp.friend]/1).
+  bool befriends(EntityId e, const Entities& entities) const {
+    if (e == EntityId::none) return false;
+    if (std::ranges::contains(friends, e)) return true;
+    const EntityId templ = entities.rec(e).templ;
+    return templ != EntityId::none && std::ranges::contains(friends, templ);
+  }
 
   const MemberDeclRec* implicit_copy_assignment() const {
     const auto copy = std::ranges::find_if(members, [](const MemberDeclRec& m) {

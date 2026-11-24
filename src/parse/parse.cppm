@@ -5582,7 +5582,10 @@ private:
       head_requires_clause();
       friend_template = true;
     }
-    if (ps_.is(Tk::kw_template) || (templated && (!definition || !p_->namespace_class_template_friend(k_)))) {
+    if (ps_.is(Tk::kw_template) && ps_.kind(1) == Tk::less && !definition && !friend_at) return friend_class_template();
+    // A class template's friend classes are analysed again in each specialization, with its
+    // arguments; a friend function it declares without defining is not supported yet (#259).
+    if (ps_.is(Tk::kw_template) || (templated && definition && !p_->namespace_class_template_friend(k_))) {
       s_.diag(friend_at.value_or(ps_.pos()), Diag::not_supported, Tk::kw_friend);  // in or of a template (#259)
       return bad();
     }
@@ -5610,6 +5613,8 @@ private:
     }
     spec.annotations = std::move(annotations);
     if (ps_.accept(Tk::semi)) {
+      // A dependent type in a class template's pattern: each specialization's friend is its own.
+      if (templated && !types.is_class(spec.type) && types.is_dependent(spec.type)) return;
       if (!types.is_class(spec.type)) {
         s_.diag(spec.begin, Diag::not_supported, Tk::kw_friend);  // a friend that is not a class
         return bad();
@@ -5617,6 +5622,10 @@ private:
       sem.entity = types.class_of(spec.type);
       decls_.push_back(sem);
       return;
+    }
+    if (templated && !definition) {
+      s_.diag(*friend_at, Diag::not_supported, Tk::kw_friend);  // a friend function of a template (#1179)
+      return bad();
     }
     parse::Declarator d = ps_.declarator(spec.type, false);
     if (!d.ok || !d.named) return bad();
@@ -5723,6 +5732,98 @@ private:
     }
     decls_.push_back(sem);
     ps_.expect(Tk::semi);
+  }
+
+  // `template <…> friend class X;` ([temp.friend]/1), in a class or a class template: every
+  // specialization of class template X, from its primary or a partial specialization, is a friend,
+  // so its members can name the class's private and protected members ([class.friend]/2).
+  // Unqualified, lookup for X does not leave the innermost enclosing namespace ([dcl.type.elab]/4);
+  // when it finds no class template there, X is one of that namespace, which the declaration does
+  // not make visible ([dcl.meaning.general]/2.3): a later declaration of the template there names
+  // it. Qualified, `N::X` is a class template N declared earlier.
+  // The template-heads must agree ([temp.over.link]/6); their constraints are not compared yet
+  // (#1182). Friend function templates without a definition are not supported yet (#1179).
+  void friend_class_template() {
+    const u32 at = ps_.pos();
+    if (!ps_.template_head(u16(p_->enclosing_heads(k_).size()))) return bad();
+    head_requires_clause();
+    const auto unsupported = [&] {
+      s_.diag(at, Diag::not_supported, Tk::kw_friend);
+      return bad();
+    };
+    if (!ps_.is(Tk::kw_friend) || (ps_.kind(1) != Tk::kw_class && ps_.kind(1) != Tk::kw_struct)) return unsupported();
+    // The name, after a nested-name-specifier naming a namespace, if any.
+    u32 next = 2;
+    std::optional<EntityId> ns;
+    if (ps_.kind(2) != Tk::identifier || ps_.kind(3) == Tk::coloncolon) {
+      auto scope = ps_.nested_name(2, next);
+      if (!scope || !scope->ns || scope->type) return unsupported();
+      ns = *scope->ns;
+    }
+    if (ps_.kind(next) != Tk::identifier || ps_.kind(next + 1) != Tk::semi) return unsupported();
+    const std::vector<ast::TemplateParamSema>& head = s_.template_scopes.back();
+    if (!pack_last(head)) {
+      s_.diag(at, Diag::pack_not_last);
+      return bad();
+    }
+    // [temp.param]/12: a friend class template's declaration gives no default arguments.
+    if (std::ranges::any_of(head, &ast::TemplateParamSema::has_default)) {
+      s_.diag(at, Diag::friend_template_default);
+      return bad();
+    }
+    const u32 name_at = ps_.pos() + next;
+    const NameId name = ps_.name_of(ps_.tok(next));
+    std::vector<ast::DeclSema> found;
+    if (ns) found = q_.namespace_members(*ns, name);
+    else
+      for (DeclId d : q_.visible_decls(name))
+        if (const auto prior = p_->decl_sema(d); prior && prior->entity != EntityId::none && same_scope(*prior))
+          found.push_back(*prior);
+    EntityId templ = EntityId::none;
+    for (const ast::DeclSema& prior : found) {
+      if (prior.entity == EntityId::none || (prior.flags & sema::decl_flag::friend_) ||
+          (prior.flags & (sema::decl_flag::specialization | sema::decl_flag::partial)))
+        continue;
+      // [basic.scope.scope]/4: another kind of entity of this name in the namespace.
+      if (prior.kind != ast::DeclKind::class_ || !(prior.flags & sema::decl_flag::template_) ||
+          !same_template_head(s_.world().ins.seqs.elements(prior.template_params), head)) {
+        s_.diag(name_at, Diag::conflicting_declaration, name);
+        return bad();
+      }
+      templ = prior.entity;
+    }
+    if (templ == EntityId::none) {
+      if (ns) {
+        s_.diag(name_at, Diag::no_friend_match, name);
+        return bad();
+      }
+      sema::EntityRec t{sema::EntityKind::class_template, name, {}, LangLinkage::cxx, ast::Linkage::external, {}, ns_entity()};
+      t.head = head_fp(head);
+      templ = s_.world().entities.entity(t);
+    }
+    ast::DeclSema sem = class_decl(templ, false);
+    sem.flags = sema::decl_flag::friend_;
+    decls_.push_back(sem);
+    while (!ps_.is(Tk::semi)) ps_.bump();
+    ps_.bump();
+  }
+
+  // Whether two heads of one class template's declarations agree ([temp.over.link]/6): their
+  // parameters' kinds and packs, non-type parameters' types where they depend on none of the
+  // parameters (the heads' depths can differ), and template template parameters' own heads.
+  bool same_template_head(std::span<const ast::TemplateParamSema> a, std::span<const ast::TemplateParamSema> b) {
+    if (a.size() != b.size()) return false;
+    sema::Types& types = s_.types();
+    for (std::size_t i = 0; i < a.size(); ++i) {
+      if (a[i].kind != b[i].kind || a[i].pack != b[i].pack) return false;
+      if (a[i].kind == ast::TemplateArgKind::value && !types.is_dependent(a[i].type) && !types.is_dependent(b[i].type) &&
+          types.canonical(a[i].type) != types.canonical(b[i].type))
+        return false;
+      if (a[i].kind == ast::TemplateArgKind::template_ &&
+          !same_template_head(s_.world().ins.seqs.elements(a[i].params), s_.world().ins.seqs.elements(b[i].params)))
+        return false;
+    }
+    return true;
   }
 
   // A friend function defined in a class template ([temp.friend]/1, [class.friend]/6-7): for each
@@ -10354,11 +10455,10 @@ void Program::defaulted_copy(EntityId cls, sema::ClassRec& rec, std::span<const 
   };
   // Each enclosing class examined here is an ordinary namespace-scope class without bases.
   // A non-public subobject operation is accessible only through friendship in this subset.
-  const auto inaccessible = [](const sema::ClassRec& leaf, EntityId e, EntityId owner, EntityId ctor) {
+  const auto inaccessible = [&](const sema::ClassRec& leaf, EntityId e, EntityId owner, EntityId ctor) {
     const ast::Access access = leaf.access_of(e);
-    return access != ast::Access::public_ && access != ast::Access::none &&
-           !std::ranges::contains(leaf.friends, owner) &&
-           (ctor == EntityId::none || !std::ranges::contains(leaf.friends, ctor));
+    return access != ast::Access::public_ && access != ast::Access::none && !leaf.befriends(owner, w_->entities) &&
+           !leaf.befriends(ctor, w_->entities);
   };
   std::map<EntityId, Subobject> implicit_fields;
   const auto inspect = [&](this const auto& self, QualType type, EntityId owner, EntityId ctor) -> Subobject {
@@ -10685,8 +10785,8 @@ bool Program::special_members(u32 item, EntityId cls, sema::ClassRec& rec,
     // this class type does not meet [class.protected]'s derived-object rule.
     const bool accessible = access == ast::Access::public_ ||
                             (i < rec.bases.size() && access == ast::Access::protected_) ||
-                            std::ranges::contains(record->friends, cls) ||
-                            (user_dtor && std::ranges::contains(record->friends, user_dtor->entity)) ||
+                            record->befriends(cls, w_->entities) ||
+                            (user_dtor && record->befriends(user_dtor->entity, w_->entities)) ||
                             (closure_context && closure_context->class_rec(type.entity) &&
                              closure_context->accessible(type.entity, ast::Access::private_));
     rec.destructor_usable &= accessible;
