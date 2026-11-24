@@ -803,7 +803,7 @@ probe = '''
 int main() { auto c = 1 <=> 2; return c < 0 ? 0 : 1; }
 '''
 issues = [295]
-note = 'Rewritten `!=` and reversed `==` candidates for class operands, tried when no ordinary candidate is viable. The `<=>` expression, rewritten relational candidates and joint ranking remain'
+note = 'The built-in `<=>` on arithmetic, enumeration and object pointer operands, user-declared `operator<=>`, and rewritten `!=`, `==`, `<=>`, `<`, `<=`, `>` and `>=` candidates, tried when no ordinary candidate is viable. Joint ranking of rewritten and ordinary candidates remains; the probe waits on `<compare>`, whose `<type_traits>` does not compile yet (#776)'
 
 [[feature]]
 id = 'expr-auto-cast'
@@ -1588,8 +1588,9 @@ group = 'class'
 clauses = ['class.nest']
 std = 'C++98'
 detect = '''\b(?:class|struct)\s+\w+\s*(?:final\s*)?[:{][^{}]*\b(?:class|struct)\s+\w+\s*[:{]'''
-status = 'missing'
-issues = [306]
+status = 'partial'
+issues = [306, 1187]
+note = 'Nested classes of ordinary classes: in-class and out-of-class definitions, member class declarations, enclosing-class lookup, both targets. Nested classes of class templates remain (#1187).'
 probe = '''
 struct S { struct In { int w; }; In i; };
 int main() { S s{{3}}; S::In j{4}; return s.i.w + j.w - 7; }
@@ -1777,8 +1778,8 @@ clauses = ['class.friend', 'dcl.friend', 'temp.friend']
 std = 'C++98'
 detect = '\bfriend\b'
 status = 'partial'
-issues = [259, 689]
-note = 'Ordinary binary hidden friends and unary minus participate in ADL. Type friends can name a class template parameter. Friend function definitions in class templates (with dependent noexcept) and friend function templates defined in classes and class templates are found by ADL. Other hidden friend operators, C-linkage friend definitions, default arguments in friend declarations, non-defining friends in class templates and non-defining friend templates remain open.'
+issues = [259, 689, 1178, 1179, 1180, 1181, 1182, 1184, 1185]
+note = 'Ordinary binary hidden friends and unary minus participate in ADL. Type friends can name a class template parameter. Friend function definitions in class templates (with dependent noexcept) and friend function templates defined in classes and class templates are found by ADL. Friend class templates and class friends of class templates grant access per specialization. Other hidden friend operators (#1178), non-defining friend function templates (#1179), constrained friends in class templates (#1180), deleted friend templates (#1181), C-linkage friend definitions, default arguments in friend declarations and non-defining friend functions in class templates remain open.'
 probe = '''
 class C { int p = 2; friend int peek(const C& c) { return c.p; } };
 int main() { C c; return peek(c) - 2; }
@@ -1809,7 +1810,7 @@ int sum(const B& b) { return b.b; }
 int main() { D d; A* pa = &d; return pa->a + sum(d) + d.d - 6; }
 '''
 issues = [308, 1134]
-note = 'One nonvirtual, nonpolymorphic direct base in primary class templates and partial specializations, including dependent aliases and qualified static lookup; explicit specializations take the bases of an ordinary class. Additional class-template base forms and the object-expression rule of [class.protected] remain.'
+note = 'One nonvirtual, nonpolymorphic direct base in primary class templates and partial specializations, including dependent aliases, value-dependent template arguments (`B<T::value>`, `B<!bool(T::value) || sizeof...(Ts) == 0>`) and qualified static lookup; explicit specializations take the bases of an ordinary class. Additional class-template base forms and the object-expression rule of [class.protected] remain.'
 
 [[feature]]
 id = 'class-virtual'
@@ -1885,8 +1886,8 @@ probe = '''
 struct P { int x, y; bool operator==(const P&) const = default; };
 int main() { P a{1, 2}, b{1, 2}; return (a == b && !(a != b)) ? 0 : 1; }
 '''
-issues = [295, 1140]
-note = 'Defaulted `operator==` as a member or friend of a non-template class, with deletion and the implicit exception specification. Defaulted `<=>` and secondary operators, class templates and constant evaluation of classes with class or array subobjects (#1140) remain'
+issues = [295, 1140, 1196, 1197, 339]
+note = 'Defaulted `operator==` and `operator<=>` as a member or friend of a non-template class, with deletion, the implicit exception specification and a deduced comparison category. The `==` a defaulted `<=>` declares (#1196), the synthesized three-way comparison from `==` and `<` (#1197), conversions between comparison categories (#339), secondary operators, class templates and constant evaluation of classes with class or array subobjects (#1140) remain'
 
 [[feature]]
 id = 'class-cond-trivial'
@@ -2337,7 +2338,7 @@ clauses = ['dcl.constexpr', 'expr.const', 'expr.const.general', 'expr.const.core
 std = 'C++11'
 ftm = '__cpp_constexpr'
 detect = '\bconstexpr\b'
-issues = [102, 157, 262, 862, 876, 900]
+issues = [102, 157, 262, 862, 876, 900, 1174]
 probe = '''
 constexpr int fact(int n) { int r = 1; for (int i = 2; i <= n; ++i) r *= i; return r; }
 struct P { int x; constexpr P(int v) : x(v) {} };
@@ -2346,7 +2347,7 @@ static_assert(p.x == 24);
 int main() { return 0; }
 '''
 status = 'partial'
-note = '`constexpr` constructor declarations, runtime calls, scalar enum constant evaluation, and constant initialization of flat static aggregate members work. Constructor calls evaluate for classes without bases, class-typed fields or a destructor. Direct-list initializers cover aggregates of public integral fields in non-template namespace-scope classes without bases. Constant expressions can read integral and enumeration fields of supported flat aggregate temporaries and non-mutable fields of stored namespace-scope constexpr aggregates. Class-typed constant evaluation is partial.'
+note = '`constexpr` constructor declarations, runtime calls, scalar enum constant evaluation, and constant initialization of flat static aggregate members work. Constructor calls evaluate for classes without bases, class-typed fields or a destructor. Direct-list initializers cover aggregates of public integral fields in non-template namespace-scope classes without bases. Constant expressions can read integral and enumeration fields of supported flat aggregate temporaries and non-mutable fields of stored namespace-scope constexpr aggregates. Eligible private static constexpr helpers used only in constant evaluation can omit native code. Class-typed constant evaluation is partial.'
 
 [[feature]]
 id = 'const-consteval'

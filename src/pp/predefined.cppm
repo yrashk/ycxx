@@ -208,6 +208,8 @@ std::string target_macros(const ast::Target& t) {
   def("__SIZEOF_INT__", t[Builtin::int_].size);
   def("__SIZEOF_LONG__", t[Builtin::long_].size);
   def("__SIZEOF_LONG_LONG__", t[Builtin::long_long].size);
+  // GCC's and Clang's name for "__int128 is available" (docs/EXTENSIONS.md, #1172).
+  if (t.has(Builtin::int128)) def("__SIZEOF_INT128__", t[Builtin::int128].size);
   def("__SIZEOF_POINTER__", t.pointer_size);
   def("__SIZEOF_FLOAT__", t[Builtin::float_].size);
   def("__SIZEOF_DOUBLE__", t[Builtin::double_].size);

@@ -194,6 +194,11 @@ public:
   // request the function declarations of that name in source order.
   virtual std::optional<ast::DeclSema> earlier_member(NameId name, bool type_only = false,
                                                      std::vector<ast::DeclSema>* functions = nullptr) = 0;
+  // In a member of a nested class ([class.nest]): the member named `name` that the enclosing
+  // class `cls`, still being defined, declares before the nested class.
+  virtual std::optional<ast::DeclSema> enclosing_earlier_member(EntityId /*cls*/, NameId /*name*/, bool /*type_only*/) {
+    return std::nullopt;
+  }
   // The direct bases of class `c` while it is being defined (its base-clause), none otherwise.
   virtual std::vector<EntityId> defining_bases(EntityId) { return {}; }
   virtual std::span<const BaseRec> defining_base_records(EntityId) { return {}; }
@@ -625,14 +630,17 @@ public:
         if (!elaborated && !prefix_bases.empty() &&
             (name == static_initializer_name_ || own_initializer_static(name))) return std::nullopt;
         if (auto m = q_->earlier_member(name, elaborated)) {
-          if (m->kind == ast::DeclKind::enum_ || m->kind == ast::DeclKind::type_alias) return m->type;
+          if (m->kind == ast::DeclKind::enum_ || m->kind == ast::DeclKind::type_alias || m->kind == ast::DeclKind::class_)
+            return m->type;
           if (!elaborated && (m->kind == ast::DeclKind::data_member || m->kind == ast::DeclKind::variable ||
                               m->kind == ast::DeclKind::enumerator ||
                               (m->kind == ast::DeclKind::function && c.name != name)))
             return std::nullopt;
         }
-        // The injected-class-name is declared in the class's own scope ([class.pre]).
-        if (!prefix_bases.empty() && c.name == name) return types().class_type(current_class);
+        // The injected-class-name is declared in the class's own scope ([class.pre]). A nested
+        // class's is the only declaration of its name lookup reaches from here ([class.nest]).
+        if ((!prefix_bases.empty() || enclosing_class(current_class) != EntityId::none) && c.name == name)
+          return types().class_type(current_class);
         if (!elaborated && !prefix_bases.empty()) {
           // A base declaration hides a namespace type. Merge base types by the types they name.
           auto hit = class_body_type(current_class, ClassRec{}, name, type_at, ClassBodyLookup::class_prefix);
@@ -644,6 +652,20 @@ public:
         // In the class being defined, a type of its (complete) bases.
         for (EntityId b : q_->defining_bases(current_class))
           if (auto r = nested_member(b, name)) return r->first.type;
+      }
+      // Then the classes the class is nested in, innermost first ([class.nest], [basic.lookup.unqual]/2).
+      for (EntityId k = enclosing_class(current_class); k != EntityId::none; k = enclosing_class(k)) {
+        if (const ClassRec* cr = class_rec(k); cr && cr->defined) {
+          // A data member, function or enumerator hides a class of the same name ([basic.scope.hiding]).
+          if (auto f = find_member(k, name, /*unqualified=*/true);
+              !elaborated && f && (f->nested_type == EntityId::none || f->enumerator != EntityId::none))
+            return std::nullopt;
+          if (auto r = nested_member(k, name, true)) return r->first.type;
+        } else if (auto m = q_->enclosing_earlier_member(k, name, elaborated)) {
+          if (is_type(m->kind)) return m->type;
+          if (!elaborated) return std::nullopt;
+        }
+        if (w_->entities.rec(k).name == name) return types().class_type(k);  // its injected-class-name
       }
     }
     // BOOTSTRAP: -Wmaybe-uninitialized: a value and a flag, not std::optional. At -O3 GCC 16.2
@@ -684,6 +706,33 @@ public:
   }
   static bool is_type(ast::DeclKind k) {
     return k == ast::DeclKind::class_ || k == ast::DeclKind::enum_ || k == ast::DeclKind::type_alias;
+  }
+  // The class that class `c` is a member of ([class.nest]), none at namespace scope. A class
+  // template's members are not nested classes of this kind (#306).
+  EntityId enclosing_class(EntityId c) const {
+    if (c == EntityId::none) return EntityId::none;
+    const EntityRec& r = w_->entities.rec(c);
+    if (r.kind != EntityKind::class_ || r.templ != EntityId::none || r.scope == EntityId::none) return EntityId::none;
+    const EntityRec& s = w_->entities.rec(r.scope);
+    return s.kind == EntityKind::class_ && s.templ == EntityId::none ? r.scope : EntityId::none;
+  }
+  // Whether class `c` encloses the class whose member is being analysed ([class.nest]).
+  bool encloses_current_class(EntityId c) const {
+    for (EntityId k = enclosing_class(current_class); k != EntityId::none; k = enclosing_class(k))
+      if (k == c) return true;
+    return false;
+  }
+  // Member `m` of enclosing class `k`, still being defined, named in an expression from a nested
+  // class: none for a type. A non-static member needs an object unless it is a data member in
+  // an unevaluated operand ([expr.prim.id.general]/4).
+  std::optional<Ex> enclosing_member_value(EntityId k, const ast::DeclSema& m, NameId name, u32 begin, u32 end) {
+    if (is_type(m.kind)) return std::nullopt;
+    if (m.kind == ast::DeclKind::enumerator) return enumerator(m.entity, m.type, begin, end);
+    if (m.kind == ast::DeclKind::variable) return static_member(k, m.entity, m.type, begin, end);
+    if (m.kind == ast::DeclKind::data_member && unevaluated)
+      return unevaluated_data_member(m.entity, m.type, m.bit_width, begin, end);
+    diag(begin, Diag::member_without_object, name);
+    return Ex{NodeId::none, begin, end};
   }
   static bool is_non_template_tag(const ast::DeclSema& decl) {
     return (decl.kind == ast::DeclKind::class_ || decl.kind == ast::DeclKind::enum_) &&
@@ -834,10 +883,14 @@ public:
     return parameter.type;
   }
   // A typedef-name the implementation declares where nothing else does (docs/EXTENSIONS.md):
-  // `__builtin_va_list`, the type used by the target's C headers and libycxx's `va_list`.
+  // `__builtin_va_list`, the type used by the target's C headers and libycxx's `va_list`, and
+  // `__int128_t` and `__uint128_t`, which the macOS SDK's `mach/arm/_structs.h` uses.
   std::optional<QualType> builtin_type_name(NameId name) {
-    if (ins().names.spelling(name) != "__builtin_va_list") return std::nullopt;
-    return w_->builtin_va_list();
+    const std::string_view spelling = ins().names.spelling(name);
+    if (spelling == "__builtin_va_list") return w_->builtin_va_list();
+    if (spelling == "__int128_t") return builtin(Builtin::int128);
+    if (spelling == "__uint128_t") return builtin(Builtin::unsigned_int128);
+    return std::nullopt;
   }
   bool conflicts_with_imported_alias(std::span<const ast::DeclSema> imported, QualType type) {
     return std::ranges::any_of(imported, [&](const ast::DeclSema& decl) {
@@ -2620,6 +2673,8 @@ public:
     }
     if (c == current_class)
       if (auto m = q_->earlier_member(n, /*type_only=*/true)) return m->type;
+    if (encloses_current_class(c))
+      if (auto m = q_->enclosing_earlier_member(c, n, /*type_only=*/true)) return m->type;
     return std::nullopt;
   }
 
@@ -2728,10 +2783,12 @@ public:
     const EntityRec& entity = w_->entities.rec(naming);
     if (entity.kind != EntityKind::class_ || entity.templ != EntityId::none) return {};
     const ClassRec* cls = class_rec(naming);
-    if (!cls && naming != current_class) return {};
+    const bool enclosing = encloses_current_class(naming);
+    if (!cls && naming != current_class && !enclosing) return {};
     if (naming == current_class && (!cls || !cls->defined)) {
       if (q_->earlier_member(name, type_only)) return {};
     }
+    if (enclosing && (!cls || !cls->defined) && q_->enclosing_earlier_member(naming, name, type_only)) return {};
     const ClassRec incomplete;
     return class_body_type(naming, cls ? *cls : incomplete, name, at, ClassBodyLookup::qualified, type_only);
   }
@@ -2867,6 +2924,9 @@ public:
           diag(name_at, Diag::no_member, n, *s.type);
           return {NodeId::none, begin, end};
         }
+        if (encloses_current_class(cls))
+          if (auto m = q_->enclosing_earlier_member(cls, n, /*type_only=*/false))
+            if (auto r = enclosing_member_value(cls, *m, n, begin, end)) return *r;
         if (auto r = qualified_class_prefix_value(cls, n, begin, end)) return *r;
         if (!type_trait_failed(*s.type)) diag(begin, Diag::incomplete_type, *s.type);
         return {NodeId::none, begin, end};
@@ -3847,19 +3907,16 @@ public:
     IntShape sa = shape(w_->target, *a), sb = shape(w_->target, *b);
     if (*b == Builtin::bool_) sb = {1, false};
     if (*a == Builtin::bool_) sa = {1, false};
+    // A bit-field narrower than its type holds only the values of its width ([dcl.init.list]/7.4).
+    if (from.info.bit_width && from.info.bit_width < sa.bits) sa.bits = from.info.bit_width;
     if (ast::represents(w_->target, *b, sa.bits, sa.is_signed) || (*b == Builtin::bool_ && *a == Builtin::bool_)) return false;
     auto v = constant_of ? constant_of(from) : std::nullopt;
-    if (!v || w_->values.rec(*v).kind != ValueKind::integer) return true;
-    // The constant, read in the source type, must lie in the target type's range.
-    u64 mask = sa.bits >= 64 ? ~u64{0} : (u64{1} << sa.bits) - 1;
-    u64 raw = w_->values.rec(*v).bits & mask;
-    bool negative = sa.is_signed && ((raw >> (sa.bits - 1)) & 1);
-    u64 max = sb.is_signed ? (u64{1} << (sb.bits - 1)) - 1 : sb.bits >= 64 ? ~u64{0} : (u64{1} << sb.bits) - 1;
-    if (!negative) return raw > max;
-    if (!sb.is_signed) return true;
-    std::int64_t value = std::int64_t(raw | ~mask);
-    std::int64_t min = sb.bits >= 64 ? std::numeric_limits<std::int64_t>::min() : -(std::int64_t{1} << (sb.bits - 1));
-    return value < min;
+    if (!v || !ins().values.is<ast::VInt>(*v)) return true;
+    // The constant, read in the source type, must lie in the target type's range: reduced to the
+    // target's width it keeps its bits and its sign.
+    ast::Bits128 x = ast::wrap(ast::int_bits(ins(), *v), sa.bits, sa.is_signed);
+    ast::Bits128 y = ast::wrap(x, sb.bits, sb.is_signed);
+    return y != x || (sa.is_signed && ast::is_negative(x)) != (sb.is_signed && ast::is_negative(y));
   }
 
   // [dcl.init.list]/7.1–7.3 for a conversion from `a` to `b`, one of them floating.
@@ -3877,16 +3934,14 @@ public:
     }
     // /7.3: an integer to a floating type, unless the source is constant and its value converts
     // back unchanged: its significant bits fit the type's precision (the exponent range of every
-    // supported format covers 128-bit integers). Integer types are at most 64 bits wide here: a
-    // 128-bit one would need the constant's high word.
-    if (!v || w_->values.rec(*v).kind != ValueKind::integer) return true;
+    // supported format covers 128-bit integers).
+    if (!v || !ins().values.is<ast::VInt>(*v)) return true;
     IntShape sa = shape(w_->target, a);
     if (a == Builtin::bool_) sa = {1, false};
-    u64 raw = w_->values.rec(*v).bits & (sa.bits >= 64 ? ~u64{0} : (u64{1} << sa.bits) - 1);
-    if (sa.is_signed && sa.bits < 64 && ((raw >> (sa.bits - 1)) & 1)) raw |= ~((u64{1} << sa.bits) - 1);
-    u64 magnitude = sa.is_signed && std::int64_t(raw) < 0 ? u64(0) - raw : raw;
-    if (magnitude == 0) return false;
-    u32 significant = u32(std::bit_width(magnitude) - std::countr_zero(magnitude));
+    ast::Bits128 x = ast::wrap(ast::int_bits(ins(), *v), sa.bits, sa.is_signed);
+    ast::Bits128 magnitude = sa.is_signed && ast::is_negative(x) ? ast::wide::neg(x) : x;
+    if (ast::wide::is_zero(magnitude)) return false;
+    u32 significant = ast::wide::bit_width(magnitude) - ast::wide::countr_zero(magnitude);
     return significant > ast::shape_of(w_->target[b].format).precision;
   }
 
@@ -5775,7 +5830,7 @@ public:
       return true;
     const ClassRec* cr = class_rec(c);
     if (!cr) return true;
-    auto befriended = [&](EntityId e) { return std::ranges::find(cr->friends, e) != cr->friends.end(); };
+    auto befriended = [&](EntityId e) { return cr->befriends(e, w_->entities); };
     if (current_function != EntityId::none && befriended(current_function)) return true;
     for (EntityId k = current_class; k != EntityId::none; k = w_->entities.rec(k).scope) {
       const EntityRec& r = w_->entities.rec(k);
@@ -7612,6 +7667,15 @@ public:
       if (auto r = class_member(current_class, name, begin, end, begin, std::nullopt, /*unqualified=*/true)) return *r;
       if (!class_rec(current_class))
         if (auto r = incomplete_class_member(name, begin, end, begin, /*unqualified=*/true, callee)) return *r;
+      // Then the classes it is nested in ([class.nest], [basic.lookup.unqual]/2).
+      for (EntityId k = enclosing_class(current_class); k != EntityId::none; k = enclosing_class(k)) {
+        if (class_rec(k)) {
+          if (auto r = class_member(k, name, begin, end, begin, std::nullopt, /*unqualified=*/true)) return *r;
+        } else if (auto m = q_->enclosing_earlier_member(k, name, /*type_only=*/false)) {
+          if (is_type(m->kind)) break;  // found a type: not an expression
+          return *enclosing_member_value(k, *m, name, begin, end);
+        }
+      }
     }
     if (namespace_lambda && namespace_lambda->name == name)
       return undeduced_namespace_lambda(name, begin, end);
@@ -8332,8 +8396,8 @@ public:
     // The underlying value of an enum literal can be folded directly to an integer constant.
     if (auto lit = as<ast::Literal>(e); lit && types().is_enum(e.type()) && types().is_integral(to) &&
                                         (k == ast::ConversionKind::integral || k == ast::ConversionKind::boolean)) {
-      u64 bits = w_->values.rec(lit->value).bits;
-      if (k == ast::ConversionKind::boolean) bits = bits != 0;
+      ast::Bits128 bits = ast::int_bits(ins(), lit->value);
+      if (k == ast::ConversionKind::boolean) bits = {u64(!ast::wide::is_zero(bits)), 0};
       return literal(to, w_->values.integer(to, bits), ValueCategory::prvalue, e.begin, e.end);
     }
     u8 width = k == ast::ConversionKind::lvalue_to_rvalue || cat != ValueCategory::prvalue ? e.info.bit_width : u8(0);
@@ -8938,7 +9002,7 @@ public:
     if (types().is_enum(target) && (types().is_integral(from) || types().is_enum(from))) {
       if (types().canonical(from) == types().canonical(target)) return v;
       if (auto lit = as<ast::Literal>(v); lit && target_enum && target_enum->fixed)
-        return literal(target, w_->values.integer(underlying_of(target), w_->values.rec(lit->value).bits), ValueCategory::prvalue,
+        return literal(target, w_->values.integer(underlying_of(target), ast::int_bits(ins(), lit->value)), ValueCategory::prvalue,
                        v.begin, v.end);
       return convert_node(v, ast::ConversionKind::integral, target);
     }
@@ -9417,8 +9481,9 @@ public:
     bool negative = false;
     bool oversized = false;
     if (value.kind == ValueKind::integer) {
-      negative = ast::is_signed(w_->target, *types().builtin_of(value.type)) && i64(value.bits) < 0;
-      oversized = value.bits > max_count;
+      negative = ast::is_signed(w_->target, *types().builtin_of(value.type)) &&
+                 (value.wide ? ast::is_negative(ast::int_bits(ins(), known)) : i64(value.bits) < 0);
+      oversized = !negative && (value.wide || value.bits > max_count);
     } else if (value.kind == ValueKind::floating) {
       negative = value.real < 0;
       // Check representability before truncating to an integer.
@@ -10170,10 +10235,14 @@ public:
             return Ex{r.id, begin, end, r.info};
           ref_qualified_member = Ex{r.id, begin, end, r.info};
         } else if (std::ranges::any_of(std::span(*diags_).subspan(n), [](const auto& d) {
-                     return d.id == diag_id(Diag::not_constant);
+                     return d.id == diag_id(Diag::not_constant) || d.id == diag_id(Diag::deleted_function) ||
+                            d.id == diag_id(Diag::ambiguous_call) || d.id == diag_id(Diag::private_member) ||
+                            d.id == diag_id(Diag::protected_member);
                    })) {
-          // The member was selected, and its operand conversion is an immediate invocation that is
-          // not constant ([expr.const]): as when it is constant, the member is the operator.
+          // The member was selected, and it is deleted, ambiguous or inaccessible, or its operand
+          // conversion is an immediate invocation that is not constant ([expr.const]): the
+          // expression is ill-formed, as when the member is a usable operator
+          // ([over.match.oper]/3, [over.match.best]).
           return Ex{NodeId::none, begin, end};
         } else {
           truncate_diags(n);
@@ -10567,11 +10636,11 @@ public:
 
   enum class BinOp : u8 {
     mul, div, rem, add, sub, shl, shr, lt, gt, le, ge, eq, ne, bit_and, bit_xor, bit_or, logical_and, logical_or, comma,
-    dot_star, arrow_star,
+    spaceship, dot_star, arrow_star,
   };
 
   static constexpr std::string_view binary_spellings[] = {"*", "/", "%", "+", "-", "<<", ">>", "<", ">", "<=", ">=",
-                                                          "==", "!=", "&", "^", "|", "&&", "||", ","};
+                                                          "==", "!=", "&", "^", "|", "&&", "||", ",", "<=>"};
 
   // The built-in member pointer operators ([expr.mptr.oper]). Access checking takes place when
   // the address expression names the field ([expr.unary.op]).
@@ -10648,6 +10717,9 @@ public:
     if (auto o = overloaded(binary_spellings[std::to_underlying(op)], {l, r}, begin, end, op_at)) return *o;
     if (op == eq || op == ne)
       if (auto o = rewritten_equality(op == ne, l, r, begin, end, op_at)) return *o;
+    if (op == spaceship || op == lt || op == gt || op == le || op == ge)
+      if (auto o = rewritten_three_way(op, l, r, begin, end, op_at)) return *o;
+    if (op == spaceship) return builtin_three_way(l, r, begin, end, op_at);
     auto bin = [&](ast::BinaryOp k, Ex a, Ex c, QualType t) {
       ExprInfo info{t, ValueCategory::prvalue, 0};
       return node(ast::Binary{info, k, at(a, begin), at(c, begin)}, begin, end, info);
@@ -10769,44 +10841,10 @@ public:
         diag(op_at, Diag::member_pointer_values);
         return {NodeId::none, begin, end};
       }
-      if (auto to = composite_void_pointer(ta, tc)) {
-        a = convert(a, *to, op_at);
-        c = convert(c, *to, op_at);
-        if (!a.ok() || !c.ok()) return {NodeId::none, begin, end};
-        return bin(k, a, c, b);
-      }
-      if (auto to = composite_function_pointer(ta, tc))
-        return bin(k, convert(a, *to, op_at), convert(c, *to, op_at), b);
-      if (types().is_pointer(ta) && types().is_pointer(tc)) {
-        QualType pa = types().pointee(ta), pc = types().pointee(tc);
-        // [expr.type]/4.6: a pointer to a derived class converted to one to its base class.
-        if (base_depth(pa, pc)) {
-          a = to_base(a, types().class_of(pc), op_at);
-          if (!a.ok()) return Ex{NodeId::none, begin, end};
-          ta = a.type();
-          pa = types().pointee(ta);
-        } else if (base_depth(pc, pa)) {
-          c = to_base(c, types().class_of(pa), op_at);
-          if (!c.ok()) return Ex{NodeId::none, begin, end};
-          tc = c.type();
-          pc = types().pointee(tc);
-        }
-        QualType unqualified = Types::unqualified(pa);
-        Cv ca = Types::cv(pa), cc = Types::cv(pc);
-        if (unqualified != Types::unqualified(pc)) {
-          // [expr.type], [conv.qual]: complete arrays of the same shape combine the
-          // cv-qualifiers of their elements, including through nested array dimensions.
-          if (!types().is_array(pa)) return invalid();
-          unqualified = object_unqualified(pa);
-          if (unqualified != object_unqualified(pc) || !is_complete(pa)) return invalid();
-          ca = object_cv(pa);
-          cc = object_cv(pc);
-        }
-        Cv cv = Cv(std::to_underlying(ca) | std::to_underlying(cc));
-        QualType composite = types().pointer(types().add_cv(unqualified, cv));
-        if (ta != composite) a = convert_node(a, ast::ConversionKind::qualification, composite);
-        if (tc != composite) c = convert_node(c, ast::ConversionKind::qualification, composite);
-        return bin(k, a, c, b);
+      switch (composite_pointers(a, c, /*function_pointers=*/true, op_at)) {
+      case Composite::converted: return bin(k, a, c, b);
+      case Composite::failed: return {NodeId::none, begin, end};
+      case Composite::none: break;
       }
       if (equality && types().is(ta, Builtin::nullptr_t) && types().is(tc, Builtin::nullptr_t)) return bin(k, a, c, b);
       if (equality && types().is_pointer(ta) && (types().is(tc, Builtin::nullptr_t) || is_null_pointer_constant(r)))
@@ -10819,6 +10857,215 @@ public:
     }
     std::unreachable();
   }
+
+  enum class Composite : u8 { none, converted, failed };
+  // [expr.type]/4: two pointer operands converted to their composite pointer type, as the
+  // relational, equality and three-way operators need: a pointer to void and one to an object,
+  // two function pointers (when `function_pointers`), or two object pointers, a pointer to a
+  // derived class becoming one to its base class and the cv-qualifiers combined. `none` when
+  // the operands have no composite pointer type (not diagnosed); `failed` when a conversion was
+  // diagnosed.
+  Composite composite_pointers(Ex& a, Ex& c, bool function_pointers, u32 op_at) {
+    QualType ta = a.type(), tc = c.type();
+    if (auto to = composite_void_pointer(ta, tc)) {
+      a = convert(a, *to, op_at);
+      c = convert(c, *to, op_at);
+      return a.ok() && c.ok() ? Composite::converted : Composite::failed;
+    }
+    if (auto to = composite_function_pointer(ta, tc)) {
+      if (!function_pointers) return Composite::none;
+      a = convert(a, *to, op_at);
+      c = convert(c, *to, op_at);
+      return Composite::converted;
+    }
+    if (!types().is_pointer(ta) || !types().is_pointer(tc)) return Composite::none;
+    QualType pa = types().pointee(ta), pc = types().pointee(tc);
+    if (!function_pointers && (types().is_function(pa) || types().is_function(pc))) return Composite::none;
+    // [expr.type]/4.6: a pointer to a derived class converted to one to its base class.
+    if (base_depth(pa, pc)) {
+      a = to_base(a, types().class_of(pc), op_at);
+      if (!a.ok()) return Composite::failed;
+      ta = a.type();
+      pa = types().pointee(ta);
+    } else if (base_depth(pc, pa)) {
+      c = to_base(c, types().class_of(pa), op_at);
+      if (!c.ok()) return Composite::failed;
+      tc = c.type();
+      pc = types().pointee(tc);
+    }
+    QualType unqualified = Types::unqualified(pa);
+    Cv ca = Types::cv(pa), cc = Types::cv(pc);
+    if (unqualified != Types::unqualified(pc)) {
+      // [expr.type], [conv.qual]: complete arrays of the same shape combine the
+      // cv-qualifiers of their elements, including through nested array dimensions.
+      if (!types().is_array(pa)) return Composite::none;
+      unqualified = object_unqualified(pa);
+      if (unqualified != object_unqualified(pc) || !is_complete(pa)) return Composite::none;
+      ca = object_cv(pa);
+      cc = object_cv(pc);
+    }
+    Cv cv = Cv(std::to_underlying(ca) | std::to_underlying(cc));
+    QualType composite = types().pointer(types().add_cv(unqualified, cv));
+    if (ta != composite) a = convert_node(a, ast::ConversionKind::qualification, composite);
+    if (tc != composite) c = convert_node(c, ast::ConversionKind::qualification, composite);
+    return Composite::converted;
+  }
+
+  // The comparison category types ([cmp.categories]), weakest first: the common comparison
+  // category of several is the weakest of them ([class.spaceship]).
+  enum class Ordering : u8 { partial, weak, strong };
+  struct ComparisonCategory {
+    QualType type;
+    std::vector<EntityId> values;  // as ast::ThreeWay::results
+  };
+  // [cmp.categories.pre]: `std::partial_ordering`, `std::weak_ordering` or `std::strong_ordering`,
+  // which <compare> declares, found by qualified lookup in `std`, with the static data members
+  // that name its values. Diagnosed at `at_` when it is not declared so or is incomplete.
+  std::optional<ComparisonCategory> comparison_category(Ordering k, std::optional<u32> at_) {
+    static constexpr std::string_view names[] = {"partial_ordering", "weak_ordering", "strong_ordering"};
+    const NameId name = ins().names.intern(names[std::to_underlying(k)]);
+    auto missing = [&] -> std::optional<ComparisonCategory> {
+      if (at_) diag(*at_, Diag::comparison_category_missing, name);
+      return std::nullopt;
+    };
+    const auto std_scope = scope_member(global_scope(), ins().names.intern("std"), false);
+    if (!std_scope || !std_scope->ns) return missing();
+    const auto found = scope_member(*std_scope, name, false);
+    if (!found || !found->type || !types().is_class(*found->type) || !is_complete(*found->type)) return missing();
+    const QualType type = Types::unqualified(*found->type);
+    const EntityId cls = types().class_of(type);
+    std::vector<std::string_view> members{"less", k == Ordering::strong ? "equal" : "equivalent", "greater"};
+    if (k == Ordering::partial) members.push_back("unordered");
+    ComparisonCategory r{type, {}};
+    for (std::string_view m : members) {
+      const auto value = find_member(cls, ins().names.intern(m));
+      if (!value || value->ambiguous || !value->member || value->member->is_function || !value->member->is_static ||
+          Types::unqualified(types().canonical(value->member->type)) != types().canonical(type))
+        return missing();
+      if (at_ && !q_->use_static_member(value->member->entity)) return std::nullopt;
+      r.values.push_back(value->member->entity);
+    }
+    return r;
+  }
+  // The comparison category type `t` is, if it is one.
+  std::optional<Ordering> ordering_of(QualType t) {
+    t = Types::unqualified(types().canonical(t));
+    if (!types().is_class(t)) return std::nullopt;
+    for (Ordering k : {Ordering::partial, Ordering::weak, Ordering::strong})
+      if (const auto c = comparison_category(k, std::nullopt); c && types().canonical(c->type) == t) return k;
+    return std::nullopt;
+  }
+
+  // [expr.spaceship]: the built-in three-way comparison, for operands of arithmetic, enumeration
+  // or object pointer type.
+  Ex builtin_three_way(Ex l, Ex r, u32 begin, u32 end, u32 op_at) {
+    const Ex fail{NodeId::none, begin, end};
+    auto invalid = [&] {
+      diag(op_at, Diag::invalid_operands, l.type(), r.type());
+      return fail;
+    };
+    // /6 converts an array operand only when the other is an object pointer.
+    if (types().is_array(types().referee(l.type())) && types().is_array(types().referee(r.type()))) return invalid();
+    Ex a = rvalue(l), c = rvalue(r);
+    if (!a.ok() || !c.ok()) return fail;
+    // /3: a `bool` operand only with another.
+    if (types().is(Types::unqualified(a.type()), Builtin::bool_) != types().is(Types::unqualified(c.type()), Builtin::bool_))
+      return invalid();
+    std::optional<Ordering> ordering;
+    // The operands before the usual arithmetic conversions, for the narrowing check. A bit-field
+    // keeps its width, which can make the conversion not narrowing ([dcl.init.list]/7.4).
+    Ex from_a = a, from_c = c;
+    from_a.info.bit_width = l.info.bit_width;
+    from_c.info.bit_width = r.info.bit_width;
+    if (types().is_enum(a.type()) || types().is_enum(c.type())) {
+      if (types().canonical(Types::unqualified(a.type())) == types().canonical(Types::unqualified(c.type()))) {
+        // /5: two of one enumeration, compared as its underlying type.
+        const QualType u = underlying_of(a.type());
+        a = convert_node(a, ast::ConversionKind::integral, u);
+        c = convert_node(c, ast::ConversionKind::integral, u);
+        ordering = Ordering::strong;
+      } else {
+        // /4: an unscoped enumeration with an integral type, as its promoted type.
+        auto integral = [&](const Ex& e) { return types().is_integral(e.type()) || is_unscoped_enum(e.type()); };
+        if (is_scoped_enum(a.type()) || is_scoped_enum(c.type()) ||
+            (types().is_enum(a.type()) && types().is_enum(c.type())) || !integral(a) || !integral(c))
+          return invalid();
+        if (types().is_enum(a.type())) a = promote(a);
+        if (types().is_enum(c.type())) c = promote(c);
+      }
+    }
+    if (!ordering && types().is_arithmetic(a.type()) && types().is_arithmetic(c.type())) {
+      // /4: the usual arithmetic conversions, where a narrowing conversion other than from an
+      // integral type to a floating type is ill-formed.
+      const QualType t = arithmetic_conversions(a, c);
+      for (const Ex& from : {from_a, from_c}) {
+        if (types().is_floating(t) && !types().is_floating(from.type())) continue;
+        if (narrows(from, t)) {
+          diag(from.begin, Diag::three_way_narrowing, from.type(), t);
+          return fail;
+        }
+      }
+      ordering = types().is_floating(t) ? Ordering::partial : Ordering::strong;
+    }
+    if (!ordering && types().is_pointer(a.type()) && types().is_pointer(c.type())) {
+      // /6: object pointers converted to their composite pointer type.
+      switch (composite_pointers(a, c, /*function_pointers=*/false, op_at)) {
+      case Composite::converted: ordering = Ordering::strong; break;
+      case Composite::failed: return fail;
+      case Composite::none: break;
+      }
+    }
+    if (!ordering) return invalid();  // /7
+    const auto category = comparison_category(*ordering, op_at);
+    if (!category) return fail;
+    ExprInfo info{category->type, ValueCategory::prvalue, 0};
+    const auto results = ins().intern_seq(std::span<const EntityId>(category->values));
+    return node(ast::ThreeWay{info, at(a, begin), at(c, begin), results}, begin, end, info);
+  }
+
+  // [over.match.oper]/3.4, /8: the rewritten candidates of a relational operator `x @ y` and of
+  // `x <=> y`, when no ordinary candidate is viable and an operand has class type: an
+  // `operator<=>` as `(x <=> y) @ 0`, then, synthesized with the operands reversed, as
+  // `0 @ (y <=> x)` (only the reversed one for `<=>` itself). A rewritten expression's own
+  // operator is not rewritten again. With enumeration operands and no class, only where the
+  // built-in operator is not viable: a scoped enumeration with anything but itself.
+  // (Rewritten candidates are not yet ranked against viable ordinary ones: #295.)
+  std::optional<Ex> rewritten_three_way(BinOp op, Ex l, Ex r, u32 begin, u32 end, u32 op_at) {
+    if (rewriting_three_way_) return std::nullopt;
+    const QualType lt = types().referee(l.type()), rt = types().referee(r.type());
+    if (!types().is_class(lt) && !types().is_class(rt)) {
+      const bool builtin_viable = (!is_scoped_enum(lt) && !is_scoped_enum(rt)) ||
+                                  types().canonical(Types::unqualified(lt)) == types().canonical(Types::unqualified(rt));
+      if (builtin_viable || (!types().is_enum(lt) && !types().is_enum(rt))) return std::nullopt;
+    }
+    const std::size_t n = diag_count();
+    std::optional<Ex> compared;
+    bool reversed = false;
+    if (op != BinOp::spaceship) compared = overloaded("<=>", {l, r}, begin, end, op_at);
+    if (!compared) {
+      truncate_diags(n);
+      compared = overloaded("<=>", {r, l}, begin, end, op_at);
+      reversed = true;
+    }
+    if (!compared) {
+      truncate_diags(n);
+      return std::nullopt;
+    }
+    if (!compared->ok()) return Ex{NodeId::none, begin, end};
+    // A literal `0`, one token wide, so it is a null pointer constant too ([conv.ptr]), as the
+    // library's comparison operators may take it.
+    const QualType int_type = builtin(Builtin::int_);
+    const u32 zero_at = reversed ? begin : end - 1;
+    const Ex zero = literal(int_type, w_->values.integer(int_type, 0), ValueCategory::prvalue, zero_at, zero_at + 1);
+    struct Restore {
+      bool& flag;
+      ~Restore() { flag = false; }
+    } restore{rewriting_three_way_};
+    rewriting_three_way_ = true;
+    const Ex result = reversed ? binary(op, zero, *compared, op_at) : binary(op, *compared, zero, op_at);
+    return Ex{result.id, begin, end, result.info};
+  }
+  bool rewriting_three_way_ = false;
 
   enum class AsgOp : u8 { assign, mul, div, rem, add, sub, shl, shr, bit_and, bit_xor, bit_or };
 

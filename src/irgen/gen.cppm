@@ -1086,6 +1086,46 @@ class Gen {
     }
   }
 
+  // [expr.spaceship]: compares the operands once, then copies the comparison category's static
+  // member that names the result ([cmp.categories]): less, equal, greater, or for a NaN operand
+  // (a partial ordering's fourth member) unordered.
+  void three_way(const Place& p, At e) {
+    const auto tw = get<ast::ThreeWay>(e);
+    const At l = child(e, tw.lhs), r = child(e, tw.rhs);
+    ValueId x{}, y{};
+    unsequenced(std::array{l, r}, [&](std::size_t i, At o) { (i ? y : x) = rvalue(o); });
+    const auto results = in_.seqs.elements(tw.results);
+    if (results.size() < 3) throw Unsupported{"a comparison category without its values"};
+    const ast::QualType ot = info(l).type, b = facts_.bool_type(), ptr = facts_.pointer_to(p.type);
+    // `x < y`, `x == y` or `x > y` in the operands' common type, as `binary` compares.
+    auto compare = [&](ast::BinaryOp op) {
+      using enum ast::BinaryOp;
+      switch (cls(ot)) {
+        case TypeClass::pointer:
+        case TypeClass::floating: {
+          const ir::Pred p = op == lt ? ir::Pred::lt : op == gt ? ir::Pred::gt : ir::Pred::eq;
+          const ir::Op k = cls(ot) == TypeClass::pointer ? ir::Op::ptr_cmp : ir::Op::fcmp;
+          return pure(k, b, {x, y}, {std::to_underlying(p)});
+        }
+        default: {
+          const bool s = is_signed(ot);
+          const ir::Pred p = op == lt ? (s ? ir::Pred::slt : ir::Pred::ult) : op == gt ? (s ? ir::Pred::sgt : ir::Pred::ugt)
+                                      : ir::Pred::eq;
+          return pure(ir::Op::icmp, b, {x, y}, {std::to_underlying(p)});
+        }
+      }
+    };
+    auto value = [&](std::size_t i) { return pure(ir::Op::global, ptr, {}, {word(results[i])}); };
+    const ValueId less = compare(ast::BinaryOp::lt), equal = compare(ast::BinaryOp::eq);
+    ValueId otherwise = value(2);
+    if (results.size() > 3) {
+      // Ordered: false when either operand is a NaN ([expr.rel]), which leaves `unordered`.
+      otherwise = pure(ir::Op::select, ptr, {compare(ast::BinaryOp::gt), value(2), value(3)});
+    }
+    const ValueId source = pure(ir::Op::select, ptr, {less, value(0), pure(ir::Op::select, ptr, {equal, value(1), otherwise})});
+    copy(p, {source, p.type});
+  }
+
   // Initializes the object at `p` from the prvalue `e` ([dcl.init]). In a `zeroed` object, a
   // value-initialized element is already zero.
   void initialize(const Place& p, At e, bool zeroed, bool select_class = false) {
@@ -1118,6 +1158,7 @@ class Gen {
       return;
     }
     if (is<ast::CtorCall>(e)) return call_constructor(p.ptr, e, zeroed);
+    if (is<ast::ThreeWay>(e)) return three_way(p, e);
     if (is<ast::InitList>(e)) {
       bool array = cls(p.type) == TypeClass::array;
       // A class's elements are its direct bases, then its members ([dcl.init.aggr]/2).
@@ -1625,6 +1666,12 @@ class Gen {
   // Evaluates an expression for its side effects ([expr.context]).
   void discard(At a) {
     if (a.id == NodeId::none) return;
+    // A discarded three-way comparison: only its operands' evaluations remain.
+    if (const At s = strip_parens(a); is<ast::ThreeWay>(s)) {
+      const auto tw = get<ast::ThreeWay>(s);
+      unsequenced(std::array{child(s, tw.lhs), child(s, tw.rhs)}, [&](std::size_t, At o) { discard(o); });
+      return;
+    }
     const auto expr = info(a);
     if (expr.category == ast::ValueCategory::prvalue) {
       rvalue_or_void(a);
@@ -2155,7 +2202,6 @@ class Gen {
       case add: case sub:
         if (cls(t) == TypeClass::pointer || cls(ot) == TypeClass::pointer) return pointer_arith(bn.op, t, l, x, r, y);
         return arith(bn.op, t, x, y);
-      case spaceship: unsupported(a, "<=>");
       default: return arith(bn.op, t, x, y);
     }
   }
@@ -2201,8 +2247,8 @@ class Gen {
           is<ast::ValueInit>(a) || is<ast::DefaultInit>(a) || is<ast::Paren>(a) || is<ast::Unary>(a) ||
           is<ast::Binary>(a) || is<ast::OrderedBinary>(a) || is<ast::Assign>(a) || is<ast::Conditional>(a) ||
           is<ast::Subscript>(a) || is<ast::Member>(a) || is<ast::ImplicitConversion>(a) ||
-          is<ast::BuiltinCall>(a) || is<ast::VariadicBuiltin>(a) || is<ast::SourceLine>(a) ||
-          is<ast::SourceLineContext>(a)))
+          is<ast::BuiltinCall>(a) || is<ast::VariadicBuiltin>(a) || is<ast::ThreeWay>(a) ||
+          is<ast::SourceLine>(a) || is<ast::SourceLineContext>(a)))
       return false;
     bool proven = true;
     ast::Red(ast_, a.id).for_each_child([&](const ast::Red& c) {

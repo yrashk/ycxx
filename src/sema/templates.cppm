@@ -162,10 +162,12 @@ public:
         if (a->kind != TemplateArgKind::value) return std::nullopt;
         if (ins().values.is<ast::VDepParam>(a->value)) return types().array_dependent(*e, a->value);  // a unique value
         if (!ins().values.is<ast::VInt>(a->value)) return std::nullopt;
-        // [dcl.array]/1: the bound's value is greater than zero.
-        if (ast::is_signed(w_->target, *types().builtin_of(a->type)) && ast::is_negative(ast::int_bits(ins(), a->value)))
+        // [dcl.array]/1: a positive converted constant expression of type std::size_t.
+        const auto bits = ast::int_bits(ins(), a->value);
+        if (ast::is_signed(w_->target, *types().builtin_of(a->type)) && ast::is_negative(bits))
           return std::nullopt;
-        if (ast::int_bits(ins(), a->value) == ast::Bits128{}) return std::nullopt;
+        const auto width = ast::width_of(w_->target, w_->target.size_type);
+        if (ast::wide::is_zero(bits) || ast::wrap(bits, width, false) != bits) return std::nullopt;
         return types().array_dependent(*e, a->value);
       }
       return types().array(*e, r.bound);

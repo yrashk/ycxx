@@ -61,6 +61,7 @@ enum class ObjectFormat : u8 { macho, elf };
 enum class NativeOperation : std::uint64_t {
   derived_virtual_destructor = std::uint64_t{1} << 0,
   peer_typed_dynamic_cast = std::uint64_t{1} << 1,
+  namespace_hidden_asm = std::uint64_t{1} << 2,
 };
 
 struct Target {
@@ -254,6 +255,8 @@ consteval std::array<BuiltinLayout, builtin_count> lp64(std::initializer_list<La
       {wchar_t_, {4, 4}}, {char8_t_, {1, 1}}, {char16_t_, {2, 2}}, {char32_t_, {4, 4}},
       {short_, {2, 2}}, {unsigned_short, {2, 2}}, {int_, {4, 4}}, {unsigned_int, {4, 4}},
       {long_, {8, 8}}, {unsigned_long, {8, 8}}, {long_long, {8, 8}}, {unsigned_long_long, {8, 8}},
+      // AAPCS64 §5.1 (quad-word integers) and the System V AMD64 psABI §3.1.2 (__int128).
+      {int128, {16, 16}}, {unsigned_int128, {16, 16}},
       {float_, {4, 4, binary32}}, {double_, {8, 8, binary64}},
       {float16, {2, 2, binary16}}, {float32, {4, 4, binary32}}, {float64, {8, 8, binary64}},
       {bfloat16, {2, 2, brain16}},
@@ -319,7 +322,8 @@ inline constexpr Target x86_64_linux{
     .call_triviality = CallTriviality::itanium,
     .apple_calls = false,
     .native_operations = std::to_underlying(NativeOperation::derived_virtual_destructor) |
-                         std::to_underlying(NativeOperation::peer_typed_dynamic_cast),
+                         std::to_underlying(NativeOperation::peer_typed_dynamic_cast) |
+                         std::to_underlying(NativeOperation::namespace_hidden_asm),
 };
 
 constexpr const Target* target_for_triple(std::string_view triple) {

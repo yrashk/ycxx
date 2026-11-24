@@ -1256,6 +1256,11 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   still reads their checked bodies. The object pipeline emits a definition when lowered code,
   tables or data refer to it, including references from retained immediate bodies.
   [#1097](https://github.com/yrashk/ycxx/issues/1097)
+- An `if consteval` constant-evaluated arm can directly call a private static constexpr
+  helper defined inside an ordinary non-template class. Native emission can omit the helper
+  when the object needs neither a direct call nor its address. An emitted definition keeps
+  its weak inline binding. Both arms are checked and the interpreter can call the helper.
+  [Design](docs/design/native-private-constexpr.md) · [#1174](https://github.com/yrashk/ycxx/issues/1174)
 - `consteval` constructors, in class and out of class, among the other constructor specifiers.
   `Sema::construct` folds a call of one outside an immediate function context, including an
   implicit conversion of an argument or operand, into its value (`Sema::immediate_invocation`,
@@ -1588,6 +1593,41 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   parameter as an xvalue, including parenthesized names. A written move constructor
   can be selected even when the copy constructor is deleted. [#749](https://github.com/yrashk/ycxx/issues/749)
 
+## Nested classes of ordinary classes (#306)
+
+- A class defined in a class with no template-head and no specialization, at any depth, is a
+  member class ([class.nest]): `Program::ordinary_nested_class` selects its item, and
+  `class_definition` gives it the entity `{class_, name, scope = enclosing class}`. Its declarators
+  after the braces are members of the enclosing class (`member_class_definition`).
+- `class-key identifier;` in such a class declares a member class (`member_class_declaration`),
+  and `typedef struct I { … } T;` defines I and declares T. A member class conflicts with a
+  same-named typedef-name or enumeration, and cannot have its enclosing class's name.
+- `class O::I … { … };` at namespace scope defines one ([class.pre]/3): O must be complete and
+  have declared I, and the namespace must enclose O (`member_class_qualifier`). That item binds
+  no name in its namespace (`declared_in`), and its members' item scope is `O::I`.
+- The enclosing class's `class_content` lists each member class once as a nested type, so
+  qualified lookup (`O::I`), access checks and `earlier_member` find it.
+- Unqualified lookup from a nested class's members goes on to each enclosing class
+  (`Sema::enclosing_class`): its record when complete, otherwise the members before the nested
+  class (`Questions::enclosing_earlier_member`); qualified names into a still incomplete
+  enclosing class (`O::A`, `O::k`) use the same members. A non-type there hides a class of its
+  name, and non-static enclosing members can only be named unevaluated. The injected-class-name
+  is found in the nested class's own declarations.
+- A nested class is complete in its enclosing class's complete-class contexts and implicit
+  special members (`Program::is_complete`, `within_outer_class`). `analyze_group` completes a
+  class, then its nested classes, then the members' bodies (`complete_class_items`); `front.cppm`
+  emits nested classes' members, and a nested class's constexpr static members are vague linkage.
+- Virtual members and the special-member features gated on "a class at namespace scope" accept a
+  class nested in ordinary classes (`Program::outermost_class_scope`); peer-profile layouts still
+  exclude classes with nested types.
+- Tests: `tests/own/classes/nested` (44; 26 from a spec-only author, 9 from the review), 5 draft
+  examples, and `unit.darwin_nested_classes` / `unit.linux_nested_classes` (two units sharing a
+  nested class; on Linux also every run test).
+- Not yet: nested classes of class templates, their partial and explicit specializations, and
+  member class templates (#1187, #340); a class head qualified by a namespace
+  (`class N::X { … }`, #1188). Found on the way: #1201 (members declared after a body), #1202
+  (hiding in the class's own scope), #124 (`static inline` members are strong).
+
 ## Ordinary destructor access (#259)
 
 - Automatic class objects and evaluated expressions of the form `T(args)` or `T{args}`
@@ -1623,7 +1663,7 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   the same declaration. The fields participate in lookup, initialization, and class layout.
   Tests in `tests/own/nested-enum-fields/` compare combined and separate declarations and
   cover scoped enum field initializers, and `tests/own/builtins/offsetof-after-nested-enum` their
-  offsets. Nested class definitions are tracked separately.
+  offsets. Nested class definitions are in "Nested classes of ordinary classes".
   [#500](https://github.com/yrashk/ycxx/issues/500) · [#306](https://github.com/yrashk/ycxx/issues/306) ·
   [#248](https://github.com/yrashk/ycxx/issues/248)
 - Nested scoped enumerators are looked up in their enumeration's scope in ordinary classes and
@@ -2796,6 +2836,22 @@ Fable decided the representation (ast.md §6.6); the Opus session wrote the code
 - **Friend function templates** defined in a class or class template
   (`template <class T> friend R f(…) {…}`) are function templates of the namespace that only ADL
   finds; a class template's specialization binds its own arguments for theirs (#259).
+- **Friend class templates** (`template <class U> friend class X;`, `friend_class_template` in
+  parse.cppm, [temp.friend]/1, #259), in a class or a class template: `ClassRec::friends` holds
+  the class template's entity, and `ClassRec::befriends` grants access to each of its
+  specializations, from the primary or a partial specialization. Unqualified lookup stops at
+  the innermost enclosing namespace, including using-declarations and using-directives that
+  contribute at that level ([dcl.type.elab]/4, [namespace.udir]). Finding no declaration names a
+  template of that namespace (keyed by its head at depth 0), visible after a namespace declaration.
+  `N::X` must name an earlier class template. Matching heads compare parameter kinds, packs and
+  non-type parameter types, with the corresponding template parameter positions paired (#1211).
+  A friend head cannot give default arguments or redeclare a template parameter. A head's
+  constraints are not compared with the template's yet (#1182), and a later conflicting
+  declaration of a friend-declared name is not diagnosed (#1184).
+- **Class friends in class templates** (`friend class X;`, `friend N::X;`, `friend struct N::X<T>;`,
+  `friend C<T>;`) are analysed again in each specialization with its arguments; a dependent one
+  befriends nothing in the pattern. `friend class X;` still looks past the innermost namespace,
+  and `friend typename T::F;` and `friend class T::G;` are rejected (#1185).
 - **Checks** (`Sema::accessible`, `check_access`): a private or protected member may be named in
   a member function or default member initializer of its class, in the class's scope (the
   initializer of a static data member defined outside it), or in a friend function or friend
@@ -2803,9 +2859,13 @@ Fable decided the representation (ast.md §6.6); the Opus session wrote the code
   and unqualified names, as a static member, enumerator or nested type, for the member function
   overload resolution chooses ([class.access]/4), and for the constructor an initialization
   chooses. Protected is checked as private until base classes exist.
-- C-linkage friend definitions, other hidden friend operators, defaults on friend declarations,
-  non-defining friends in class templates and non-defining friend templates, destructor access, private member operator wording, and elaborated types
-  in member parameters remain under [#259](https://github.com/yrashk/ycxx/issues/259).
+- C-linkage friend definitions, defaults on friend declarations, non-defining friend functions in
+  class templates, private member operator wording, and elaborated types in member parameters
+  remain under [#259](https://github.com/yrashk/ycxx/issues/259). Hidden friend `~` and compound
+  assignment operators are [#1178](https://github.com/yrashk/ycxx/issues/1178), non-defining
+  friend function templates [#1179](https://github.com/yrashk/ycxx/issues/1179), friends with a
+  trailing requires-clause in class templates [#1180](https://github.com/yrashk/ycxx/issues/1180)
+  and deleted friend function templates [#1181](https://github.com/yrashk/ycxx/issues/1181).
   Both targets coalesce these inline friend definitions across objects (#422, [#124](https://github.com/yrashk/ycxx/issues/124)).
 - Both ELF and Mach-O coalesce eligible nonthrowing, nonvirtual in-class destructor definitions
   and implicitly defined destructors, including those of class-template specializations. A
@@ -2845,7 +2905,7 @@ first; a dependent base is not searched. Redeclaring a hidden parameter's name i
 ([temp.local]/6, `Sema::declared_template_param`).
 - Tests: `tests/own/temp-local/` (one run test, two reject tests).
 - Not yet: the enclosing classes of a nested class are not searched before the outer head,
-  since nested classes of class templates are not supported (#306).
+  since nested classes of class templates are not supported (#1187).
 
 ## Templates, ζ step 7: static data members of class templates (#88, 2026-11-18)
 
@@ -2975,6 +3035,39 @@ first; a dependent base is not searched. Redeclaring a hidden parameter's name i
   the translation unit is freestanding. Linux integration tests cover `<cstdint>` before
   `<cinttypes>` and `<inttypes.h>` before `<cstdint>`.
   [#664](https://github.com/yrashk/ycxx/issues/664) · [libycxx#50](https://github.com/yrashk/libycxx/pull/50)
+
+## 128-bit integers, slices 1–3 (#1172)
+
+- `__int128` and `unsigned __int128` are `ast::Builtin::int128` and `unsigned_int128`, after
+  `unsigned_long_long`, so `ast::is_integral` covers them. `ast::is_extended_signed` and
+  `is_extended_unsigned` name them, and `is_signed_integer` and `is_unsigned_integer` take
+  standard and extended types together. Both targets lay them out in 16 bytes with 16-byte
+  alignment; their rank is 7, above `long long`'s 6.
+- `__int128` is a keyword (`Tk::kw___int128`, the last one). The decl-specifier rules accept it
+  alone or with `signed` or `unsigned`, in either order. `__int128_t` and `__uint128_t` are
+  typedef-names the implementation declares, beside `__builtin_va_list`.
+- `__SIZEOF_INT128__` is 16 on both targets, from `ast::Target`, checked against Clang in
+  `own/pp/predefined-target`.
+- Symbols spell the types `n` and `o`. Template arguments print their values with
+  `ast::wide::decimal`, so a value beyond 64 bits is written in full.
+- `ast::wide` holds 128-bit arithmetic over `ast::Bits128`: add, sub, mul, shifts, comparisons
+  and division by shift and subtract. The interpreter's `Value` and `Result` carry the high half
+  in `hi`, which is 0 for every narrower type. `arith`, `divide`, `shift`, `icmp`, `iconv`,
+  the floating conversions, `tobool`, `switch` and pointer offsets take 128-bit operands.
+  Conversion to a floating type rounds the top 64 bits with a sticky bit.
+- List-initialization narrowing reads constants in 128 bits. `sema::ValueRec::wide` marks an
+  integer outside [-2^63, 2^64), so concrete array bounds, bit-field widths and array new
+  bounds reject it. Substitution checks a dependent array bound against the target's
+  `size_t` range before conversion. [#1212](https://github.com/yrashk/ycxx/issues/1212)
+- Static data of 16-byte integer type is written with its high half.
+- Not yet:
+  - Native code that computes with a 128-bit value: lowering reports "no integer type of 16
+    bytes" (#1172, slice 4).
+  - Enumerations with a 128-bit underlying type or an enumerator initializer of 128-bit type
+    are diagnosed as not supported (#1176).
+- Tests: `own/int128` (types, constant evaluation, narrowing, specifiers, symbols against a Clang
+  peer). `-Wpedantic` and `-Wno-pedantic` are accepted and select no warning, so the tests pass
+  `-Wno-pedantic` for the oracles.
 
 ## Templates, ζ step 8: template template parameters and `__make_integer_seq` (#88, #208, 2026-11-19)
 
@@ -3198,6 +3291,16 @@ What the process allocates, attributed to the engine's cells, in the trace and t
   An explicit specialization's base-clause is an ordinary class's, and a partial
   specialization's is a primary template's, substituted with the arguments deduced for it;
   another specialization of the same template can be a base (#1134).
+  A base's template argument can be a value-dependent expression with no `VDep*` form
+  (`BC<T::value>`, `BC<!bool(T::value)>`, `cond_t<!bool(B1::value) || sizeof...(Bn) == 0, …>`).
+  `template_value` gives it the placeholder `VDepParam{dependent_depth, 0}`, and the base is parsed
+  again with the arguments bound (`instantiate_base`). A pack expansion of such an argument
+  (`PS<T::k...>`) and the same template-id outside a base (`BC<!T::value>::value` in a member) need
+  #209's representation (#308).
+- **Functional casts as template arguments** (`function_type_argument_ahead`): `int(…)` is a
+  type-id only if it can be a function type; `bool(x) || y`, `int(3) + 1` and `bool(T::value)`
+  are expressions ([temp.arg.general]/2). Shapes such as `bool(&g)` and `int((n))` are #1190, and
+  `R(A...)` with a type parameter `R` is #1186.
 - **Layout** (`ast::record_layout`, Itanium C++ ABI §2.4):
   - bases first, in declaration order; an empty base at offset 0 unless another subobject of its
     type is there;
@@ -4265,7 +4368,7 @@ the body. A non-generic lambda body uses its own evaluation context.
   other direct parenthesized template argument spellings remain open, as do dependent
   template arguments, requirements, and exception specifications.
 
-## Defaulted equality and rewritten `!=` (#295)
+## Comparisons: `<=>`, defaulted `==` and `<=>`, rewritten candidates (#295)
 
 - A defaulted `operator==` ([class.compare.default], [class.eq]) may be a const member taking
   `const C&`, or a hidden friend taking two `const C&` or two `C`, of a non-template class. It
@@ -4286,9 +4389,43 @@ the body. A non-generic lambda body uses its own evaluation context.
   scope), and its declared return type must be cv `bool`. A rewritten candidate is not yet
   ranked against a viable ordinary one, built-in candidates for enumerations included. Other
   rewrite targets are not tried when the selected one is not a target.
-- A hidden friend `operator<=>` with a body is accepted, as `<compare>` declares one.
-- Defaulted `<=>` and secondary operators, defaulted comparisons in class templates, out-of-class
-  defaulting, and the `<=>` expression remain open:
-  [#295](https://github.com/yrashk/ycxx/issues/295). Constant evaluation of the classes compared
-  fails when they have a class or array subobject:
+- The built-in `a <=> b` ([expr.spaceship], `Sema::builtin_three_way`) takes arithmetic operands
+  after the usual arithmetic conversions (a narrowing one other than integral to floating is
+  ill-formed), two of one enumeration as its underlying type, an unscoped enumeration with an
+  integral type, and object pointers converted to their composite pointer type
+  (`Sema::composite_pointers`, shared with the relational and equality operators). `bool` goes
+  only with `bool`. The result is `std::strong_ordering`, or `std::partial_ordering` for
+  floating operands, found by qualified lookup in `std` with its static members `less`,
+  `equal`/`equivalent`, `greater` and `unordered` (`Sema::comparison_category`); without
+  `<compare>` it is an error.
+- `ast::ThreeWay` holds the converted operands and those members. IR generation
+  (`Gen::three_way`) evaluates the operands once, compares them, selects the address of the
+  member that names the result and copies it into the result object; a NaN leaves `unordered`.
+  Discarded, only the operands are evaluated.
+- `Sema::rewritten_three_way` ([over.match.oper]/3.4, /8): with no viable ordinary candidate
+  and an operand of class type, or of scoped enumeration type where the built-in operator is
+  not viable, `x @ y` for a relational `@` tries `operator<=>` as `(x <=> y) @ 0`, then reversed
+  as `0 @ (y <=> x)`; `x <=> y` tries the reversed one, `0 <=> (y <=> x)`. The `0` is a
+  one-token literal, so it is a null pointer constant too. A rewritten expression's own
+  operator is not rewritten again.
+- A defaulted `operator<=>` ([class.spaceship]) is declared as `==` is. Completion
+  (`Program::defaulted_three_way`) compares each subobject with `<=>`. A return type of plain
+  `auto` becomes the common comparison category of the results (`strong_ordering` with no
+  subobjects); a result that is not a category deletes the operator. Each result is converted to
+  the return type R. The body is `{ R v0 = x0 <=> y0; if (v0 != 0) return v0; … return
+  R::equal; }` (`defaulted_three_way_body`). The exception specification covers the comparisons,
+  the `vi != 0` tests and the equal result.
+- `x.operator@(…)` and `p->operator@(…)` name member operator functions.
+- A member operator that overload resolution selects and that is deleted, ambiguous or
+  inaccessible makes the expression ill-formed; the non-member candidates are not tried then.
+- Remaining: the `==` a defaulted `<=>` declares implicitly
+  ([#1196](https://github.com/yrashk/ycxx/issues/1196)); the synthesized three-way comparison from
+  `==` and `<` ([#1197](https://github.com/yrashk/ycxx/issues/1197)); conversions between
+  comparison categories, which need conversion functions between classes, so a defaulted `<=>`
+  over mixed categories fails ([#339](https://github.com/yrashk/ycxx/issues/339)); defaulted
+  secondary operators, defaulted comparisons in class templates, out-of-class defaulting and
+  joint ranking of rewritten candidates ([#295](https://github.com/yrashk/ycxx/issues/295)).
+  Constant evaluation of the classes compared fails when they have a class or array subobject:
   [#1140](https://github.com/yrashk/ycxx/issues/1140).
+- Tests: `tests/own/three-way-comparison/`. Most use `inputs/compare.hpp`, a stand-in for
+  `<compare>`, because libycxx's `<compare>` stops at `<type_traits>` gaps (#776).
