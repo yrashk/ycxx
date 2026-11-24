@@ -1837,7 +1837,45 @@ std::expected<obj::object, aarch64::CodegenError> assemble_linux(
   o.name = name;
   o.arch = obj::target::x86_64_linux;
   std::map<EntityId, std::uint32_t> symbol_of;
-  for (const auto& s : symbols) symbol_of.emplace(s.entity, o.add_symbol({s.name, s.bind, {}, 0, false}));
+  // Each definition has its own symbol, even beside another of the same spelling (a weak inline
+  // body and a strong asm-labelled one, #694). An entity this object does not define shares a
+  // symbol by name, as the linker resolves it: a builtin's implicit C declaration and a written one of
+  // another type are two entities with one C symbol (#1095). It names this object's strong
+  // definition of the name if there is one, else its weak one, else one undefined symbol.
+  std::map<EntityId, bool> definitions;  // entity → weak
+  for (const auto& f : functions) definitions.emplace(f.entity, f.weak);
+  for (const auto& d : data) definitions.emplace(d.entity, d.weak);
+  for (const auto& t : keyless_type_info) definitions.emplace(t.entity, false);
+  if (table) definitions.emplace(table->entity, false);
+  std::map<std::string_view, std::pair<EntityId, bool>> defined_name;  // name → definition, weak
+  for (const auto& s : symbols) {
+    const auto d = definitions.find(s.entity);
+    if (s.bind == obj::binding::local || d == definitions.end()) continue;
+    auto [at, added] = defined_name.try_emplace(s.name, s.entity, d->second);
+    if (!added && at->second.second && !d->second) at->second = {s.entity, false};
+  }
+  std::map<std::string_view, std::uint32_t> undefined_name;
+  std::vector<const aarch64::Symbol*> defined_by_another;  // whose name another entity defines here
+  auto share = [&](const aarch64::Symbol& s, std::uint32_t index) {
+    auto& bind = o.symbols[index].bind;
+    if (s.bind == obj::binding::hidden) bind = obj::binding::hidden;  // the stricter visibility
+    symbol_of.emplace(s.entity, index);
+  };
+  for (const auto& s : symbols) {
+    if (s.bind != obj::binding::local && !definitions.contains(s.entity)) {
+      if (defined_name.contains(s.name)) {
+        defined_by_another.push_back(&s);
+        continue;
+      }
+      if (auto shared = undefined_name.find(s.name); shared != undefined_name.end()) {
+        share(s, shared->second);
+        continue;
+      }
+      undefined_name.emplace(s.name, static_cast<std::uint32_t>(o.symbols.size()));
+    }
+    symbol_of.emplace(s.entity, o.add_symbol({s.name, s.bind, {}, 0, false}));
+  }
+  for (const aarch64::Symbol* s : defined_by_another) share(*s, symbol_of.at(defined_name.at(s->name).first));
   auto missing = [](EntityId e) {
     return std::unexpected(aarch64::CodegenError{e, std::format("@{} has no symbol name", ir::raw(e))});
   };
