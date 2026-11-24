@@ -542,6 +542,7 @@ struct Ops {
 
   static Flow unreachable(M& m, Frame& f, N n) {
     if (has(f, n, ir::Flag::explicit_trap)) return m.fail(Reason::explicit_trap);
+    if (has(f, n, ir::Flag::assumed_unreachable)) return m.fail(Reason::assumed_unreachable);
     return m.fail(has(f, n, ir::Flag::not_constexpr) ? Reason::static_definition : Reason::unreachable);
   }
   static Flow invoke(M& m, Frame&, N n) { return m.unsupported(n); }

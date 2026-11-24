@@ -159,6 +159,18 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
   compiling the same build directory: the result would not have described any commit.
   - Do: commit, start the fast run, and spend its 10 minutes on documents, issues and the PR body.
     To keep coding meanwhile, build into a scratchpad build directory (the entry above).
+  - Stopping a `tools/test` that waits on a running `tools/build` in the same directory leaves
+    half-built modules ("failed to read compiled module"). Let the build finish, then rebuild.
+- **On a loaded machine the fast gate fails with timeouts, not failures.** On #330, with other
+  sessions building and load averages of 120–250, two fast runs failed. The CTests had 10 s
+  executable timeouts, `daemon.trace_tui` has a 2 s budget, and draft tests that include
+  `<iostream>` have a 60 s timeout. Every one of them passed on a re-run. About an hour went to
+  re-running and checking.
+  - Do: check `uptime` first. Re-run only what timed out: `ctest --test-dir build -R '<names>'`,
+    then `tools/test failed affected core` to skip the rebuild. A test that times out only under
+    the driver is waiting in the daemon's queue. `YCXX_DAEMON=0 /usr/bin/time -p build/bin/ycxx …`
+    shows its own CPU time.
+  - Learned on #330.
   - Learned on #218.
 
 ## Working with Fable subagents
