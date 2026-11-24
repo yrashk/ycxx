@@ -1,4 +1,4 @@
-"""Check -fPIC driver identity, ELF relocations and the pinned archive inputs (#983)."""
+"""Check PIC driver identity, ELF relocations and the pinned archive inputs (#983, #1089)."""
 
 import json
 from pathlib import Path
@@ -23,21 +23,23 @@ def compile_database(world, scope):
     # Exercise the database before this unit receives explicit driver flags.
     unit = scope / 'editor.cpp'
     text = '''\
-#if __PIC__ == 2 && __pic__ == 2 && !defined(__PIE__) && !defined(__pie__)
-int probe() { return pic_database_sentinel(); }
-#elif defined(MARK)
+#if defined(MARK)
 #include <pic_database_probe.h>
 #if !defined(__APPLE__) || !defined(__aarch64__) || PIC_DATABASE_HEADER != 7
 #error imported target or include directory was lost
 #endif
-#if defined(__PIC__) || defined(__pic__) || defined(__PIE__) || defined(__pie__)
-#error unsupported PIC changed the Darwin predefines
+#if __PIC__ != 2 || __pic__ != 2 || defined(__PIE__) || defined(__pie__)
+#error arm64 Darwin code is always PIC
 #endif
 #if MARK == 1
 int probe() { return pic_darwin_first(); }
 #elif MARK == 2
 int probe() { return pic_darwin_second(); }
 #endif
+#elif __PIC__ == 2 && __pic__ == 2 && !defined(__PIE__) && !defined(__pie__)
+int probe() { return pic_database_sentinel(); }
+#elif __PIC__ == 1 && __pic__ == 1
+int probe() { return pic_small_sentinel(); }
 #endif
 '''
     unit.write_text(text)
@@ -51,8 +53,11 @@ int probe() { return pic_darwin_second(); }
         ((LINUX,), None),
         ((LINUX, *PIC), 'pic_database_sentinel'),
         ((LINUX,), None),
+        ((LINUX, '-fpic'), 'pic_small_sentinel'),
+        ((LINUX, *PIC, '-fno-pic'), None),
         ((DARWIN, *PIC, '-DMARK=1', *includes), 'pic_darwin_first'),
         ((*PIC, DARWIN, '-DMARK=2', *includes), 'pic_darwin_second'),
+        ((DARWIN, '-fno-pic', '-DMARK=1', *includes), 'pic_darwin_first'),
     )
     for version, (flags, sentinel) in enumerate(cases, 1):
         database.write_text(json.dumps([{
@@ -71,13 +76,12 @@ int probe() { return pic_darwin_second(); }
         expect(editor.diagnostics(unit, version, context), expected, context)
     expect(editor.finish(), 0, 'pic LSP shutdown')
 
-    # Imported flags leave a valid Darwin command; an explicit CLI request still reports the unsupported option.
+    # On arm64 Darwin every PIC option leaves the same, always-PIC preprocessing (#1089).
     args = [DARWIN, '-std=c++26', '-DMARK=1', *includes, '-E', unit.name]
     for env in (world.cold, world.daemon):
-        status, tokens, err = world.cxx(args, scope, env, timeout=30)
-        assert status == 0 and b'pic_darwin_first' in tokens and not err, (args, status, tokens, err)
-        status, _, err = world.cxx([*PIC, *args], scope, env, timeout=30)
-        assert status != 0 and b'-fPIC' in err, (args, status, err)
+        for flags in ((), PIC, ('-fpic',), ('-fno-pic',)):
+            status, tokens, err = world.cxx([*flags, *args], scope, env, timeout=30)
+            assert status == 0 and b'pic_darwin_first' in tokens and not err, (flags, args, status, tokens, err)
 
 
 def check_exports(elf):
@@ -145,8 +149,7 @@ def check(world, libycxx, host, linker):
     pic_obj.write_bytes(snapshots[1])
     check_exports(Elf(pic_obj))
 
-    compile_database(world, scope)
-    world.same_daemon('pic mode and compile database replay', pid)
+    world.same_daemon('pic mode', pid)
 
     run(host, *PEER, '-DPIC_PROVIDER', '-c', 'peer.cpp', '-o', 'provider.o')
     run(linker, '-shared', '-z', 'text', '-z', 'defs', '-o', 'libexports.so', pic_obj, 'provider.o')
@@ -171,15 +174,15 @@ def check(world, libycxx, host, linker):
 
 
 def main():
-    # PARITY: by design: the relocation and shared-link checks use x86-64 Linux ELF.
-    if not NATIVE_LINUX:
-        return 0
     ycxx, libycxx = (Path(arg).resolve() for arg in sys.argv[1:3])
     world = Env(str(ycxx))
     for env in (world.base, world.cold, world.daemon):
         env.update(LC_ALL='C', YCXX_THREADS='2')
     try:
-        check(world, libycxx, *sys.argv[3:])
+        compile_database(world, world.scope.resolve())
+        # PARITY: by design: the relocation and shared-link checks use x86-64 Linux ELF.
+        if NATIVE_LINUX:
+            check(world, libycxx, *sys.argv[3:])
     finally:
         world.close()
     return bool(failures)
