@@ -4834,7 +4834,8 @@ public:
     if (types().is_class(fn.inner)) {
       // Ordinary alias replay checks the selected specialization even if the alias erases the call.
       const EntityId result = types().class_of(fn.inner);
-      if (!allow_class_result || found->second.size() != 1 || fixed != 2 || trailing_pack ||
+      if (!allow_class_result || found->second.size() != 1 ||
+          params.size() != 2 || params.front().pack || params.back().pack ||
           types().is_dependent(fn.inner) || !q_->is_complete(result) || q_->class_layout_uncertain(result) ||
           !t.structural_class_parameter(fn.inner))
         return std::nullopt;
