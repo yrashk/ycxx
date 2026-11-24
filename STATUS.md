@@ -1606,13 +1606,15 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   have declared I, and the namespace must enclose O (`member_class_qualifier`). That item binds
   no name in its namespace (`declared_in`), and its members' item scope is `O::I`.
 - The enclosing class's `class_content` lists each member class once as a nested type, so
-  qualified lookup (`O::I`), access checks and `earlier_member` find it.
+  qualified lookup (`O::I`), access checks and `earlier_member` find it. Redeclarations of a member
+  class use the same access.
 - Unqualified lookup from a nested class's members goes on to each enclosing class
-  (`Sema::enclosing_class`): its record when complete, otherwise the members before the nested
-  class (`Questions::enclosing_earlier_member`); qualified names into a still incomplete
-  enclosing class (`O::A`, `O::k`) use the same members. A non-type there hides a class of its
-  name, and non-static enclosing members can only be named unevaluated. The injected-class-name
-  is found in the nested class's own declarations.
+  (`Sema::enclosing_class`). It sees the complete class in a complete-class context. In an
+  incomplete enclosing class it searches preceding members, then bases, before continuing to
+  outer scopes. Qualified names see the same enclosing declarations. Lookup checks inherited
+  access and respects names hidden by non-types. Static functions need no receiver for either
+  spelling. Non-static data members can be named without an object in an unevaluated operand.
+  [#1216](https://github.com/yrashk/ycxx/issues/1216)
 - A nested class is complete in its enclosing class's complete-class contexts and implicit
   special members (`Program::is_complete`, `within_outer_class`). `analyze_group` completes a
   class, then its nested classes, then the members' bodies (`complete_class_items`); `front.cppm`
@@ -1620,7 +1622,7 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
 - Virtual members and the special-member features gated on "a class at namespace scope" accept a
   class nested in ordinary classes (`Program::outermost_class_scope`); peer-profile layouts still
   exclude classes with nested types.
-- Tests: `tests/own/classes/nested` (44; 26 from a spec-only author, 9 from the review), 5 draft
+- Tests: `tests/own/classes/nested` (47, including three independent #1216 controls), 5 draft
   examples, and `unit.darwin_nested_classes` / `unit.linux_nested_classes` (two units sharing a
   nested class; on Linux also every run test).
 - Not yet: nested classes of class templates, their partial and explicit specializations, and
