@@ -119,7 +119,7 @@ void incremental() {
         "a whitespace edit executes nothing past the front end");
 
   // One body: only its function's cells, `tu` and the link run.
-  const std::uint32_t tu0 = s.db().runs<pl::Tu>(tu), link0 = s.db().runs<pl::Link>(program);
+  const std::uint32_t tu0 = s.db().runs<pl::Tu>(pl::Tu::Key{tu}), link0 = s.db().runs<pl::Link>(program);
   build(s, v2);
   const std::vector<std::uint8_t> edited = s.get<pl::Link>(program).image;
   check(!edited.empty() && edited != image, "the edit changes the image");
@@ -129,7 +129,7 @@ void incremental() {
   check(square1.gen == square0.gen + 1 && square1.ir == square0.ir + 1 && square1.lower == square0.lower + 1 &&
             square1.unit == square0.unit + 1 && square1.codegen == square0.codegen + 1 && square1.optimized == 1,
         "the edited function's cells run once each, and its new unit is optimized once");
-  check(s.db().runs<pl::Tu>(tu) == tu0 + 1 && s.db().runs<pl::Link>(program) == link0 + 1, "tu and the link run again");
+  check(s.db().runs<pl::Tu>(pl::Tu::Key{tu}) == tu0 + 1 && s.db().runs<pl::Link>(program) == link0 + 1, "tu and the link run again");
 
   // A function inserted first, which this session numbers after every other entity.
   build(s, v3);
