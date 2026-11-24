@@ -70,6 +70,11 @@ struct ConstantRecordLayout {
   std::optional<ConstantRecordBase> primary_base{};
 };
 
+struct ImmediateVirtualTarget {
+  EntityId function = EntityId::none;
+  EntityId owner = EntityId::none;
+};
+
 struct Config {
   Mode mode = Mode::constant;
   u64 step_limit = u64{1} << 22;  // nodes executed
@@ -77,6 +82,7 @@ struct Config {
   u32 poll_interval = 4096;       // steps between cancellation polls; 0: never
   std::function<std::optional<EnumLayout>(EntityId)> enum_layout{};
   std::function<std::optional<ConstantRecordLayout>(QualType)> record_layout{};
+  std::function<std::optional<ImmediateVirtualTarget>(EntityId, EntityId, EntityId)> immediate_virtual_target{};
 };
 
 // An interpreter-only observation of a generated call in the constant-evaluation entry.
@@ -221,8 +227,10 @@ private:
     ConstId literal{};
     u32 cell0 = 0, ncells = 0;
     const RecordStorage* record = nullptr;  // owned by records_
-    Life record_life = Life::before;        // distinct from the lifetimes of its fields
+    Life record_life = Life::before;        // distinct from the lifetimes of its subobjects
+    Life primary_base_life = Life::before;
     bool dynamic_initialized = false;     // set only by a completed constructor
+    bool unknown_reference = false;       // an opaque referent can alias another outside object
   };
   struct PathNode {
     u32 parent = 0;
@@ -246,7 +254,7 @@ private:
     EntityId entity{};
     std::vector<Value> regs;
     u32 node = 0;
-    std::optional<u32> initializing_dynamic_object{};
+    std::optional<Value> initializing_dynamic_subobject{};
   };
   // A designated subobject: its object, its cells and its type.
   struct Place {
@@ -254,6 +262,7 @@ private:
     u32 cell0 = 0, ncells = 0;
     QualType type{};
     bool mutable_field = false;
+    bool primary_base = false;
   };
   // An unsequenced group ([intro.execution]): the accesses its operands made so far.
   struct Access {
@@ -334,7 +343,8 @@ private:
     return Flow::next;
   }
   Flow jump(Frame& f, NodeId n, u32 succ);
-  Flow enter(Frame& f, NodeId n, const ir::Function* body, EntityId callee, std::span<const ir::ValueId> args);
+  Flow enter(Frame& f, NodeId n, const ir::Function* body, EntityId callee, std::span<const ir::ValueId> args,
+             std::optional<Value> adjusted_receiver = {});
 
   // Integer helpers: `x` normalized to an integer type of `width` bits.
   static u64 norm(u64 x, u32 width, bool is_signed);
@@ -629,6 +639,7 @@ std::optional<Machine::Place> Machine::resolve(const Value& p, std::span<const u
       if (path[i].index != std::to_underlying(base.entity) || path.size() != 1) return std::nullopt;
       pl.type = base.type;
       pl.ncells = 0;  // the supported primary base is fieldless
+      pl.primary_base = true;
       continue;
     }
     if (i == 0 && path[i].step == ir::Step::field && ob.record) {
@@ -676,7 +687,8 @@ Machine::Flow Machine::locate(const Value& p, std::span<const u64> extra, QualTy
   if (use == Use::lifetime) return Flow::next;
   // Only an ordinary store can initialize storage before the lifetime begins.
   const bool requires_live = use != Use::write;
-  if (pl->ncells == 0 && (ob.record_life == Life::after || (requires_live && ob.record_life == Life::before)))
+  const Life record_life = pl->primary_base ? ob.primary_base_life : ob.record_life;
+  if (pl->ncells == 0 && (record_life == Life::after || (requires_live && record_life == Life::before)))
     return fail(Reason::outside_lifetime);
   for (u32 c = pl->cell0; c < pl->cell0 + pl->ncells; ++c) {
     Life life = cells_[c].life;
@@ -706,10 +718,9 @@ Machine::Flow Machine::locate(const Value& p, std::span<const u64> extra, QualTy
 
 void Machine::set_lifetime(const Place& p, bool complete, Life life) {
   Object& ob = objects_[p.obj];
-  if (complete && ob.record) {
-    ob.record_life = life;
-    if (life == Life::after) ob.dynamic_initialized = false;
-  }
+  if (complete && ob.record) ob.record_life = life;
+  if (p.primary_base || (complete && life == Life::after)) ob.primary_base_life = life;
+  if ((complete || p.primary_base) && life == Life::after) ob.dynamic_initialized = false;
   for (u32 c = p.cell0; c < p.cell0 + p.ncells; ++c) cells_[c].life = life;
 }
 
@@ -1529,6 +1540,9 @@ Machine::Flow Machine::compare_pointers(Frame& f, NodeId n, ir::Pred pred, const
     default: return fail(Reason::ill_formed);
     }
   }
+  if (a.kind == VKind::object && b.kind == VKind::object &&
+      (objects_[a.ref].unknown_reference || objects_[b.ref].unknown_reference))
+    return fail(Reason::unspecified_comparison);
   if (!equality) {
     if (a.kind == VKind::null && b.kind == VKind::null) return result(pred == le || pred == ge);
     return fail(Reason::unspecified_comparison);
@@ -1575,13 +1589,13 @@ Machine::Flow Machine::jump(Frame& f, NodeId n, u32 succ) {
 
 // Pushes the callee's frame; its entry block takes the state, then the arguments.
 Machine::Flow Machine::enter(Frame& f, NodeId, const ir::Function* body, EntityId callee,
-                             std::span<const ir::ValueId> args) {
+                             std::span<const ir::ValueId> args, std::optional<Value> adjusted_receiver) {
   if (frames_.size() >= config_.depth_limit) return fail(Reason::depth_limit, config_.depth_limit);
   if (body->blocks.empty() || body->block(ir::BlockId(0)).nparams != args.size() + 1) return fail(Reason::ill_formed);
   Frame callee_frame{body, callee, std::vector<Value>(body->values.size()), body->block(ir::BlockId(0)).node0};
-  u32 i = 0;
-  for (ir::ValueId p : body->params_of(ir::BlockId(0)))
-    if (i++ > 0) callee_frame.regs[ir::raw(p)] = reg(f, args[i - 2]);
+  const auto parameters = body->params_of(ir::BlockId(0));
+  for (std::size_t i = 0; i < args.size(); ++i)
+    callee_frame.regs[ir::raw(parameters[i + 1])] = i == 0 && adjusted_receiver ? *adjusted_receiver : reg(f, args[i]);
   frames_.push_back(std::move(callee_frame));  // `f` dangles from here
   return Flow::called;
 }
