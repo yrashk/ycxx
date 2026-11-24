@@ -1460,6 +1460,7 @@ public:
     EntityId spec;
     sema::Bindings args;
     u32 point;  // the item whose demand instantiates it ([temp.point])
+    std::optional<ast::DeclSema> primary;  // the current item's written declaration, if it is the primary
   };
   // `instantiate_var(spec)` ([temp.inst]/7): the declaration of a variable template specialization,
   // its initializer analysed and evaluated with the arguments bound; none if `v` is no such
@@ -1471,8 +1472,15 @@ public:
     EntityId spec;
     u32 item;
     Result<ast::ItemSema> cell;
+    bool diagnosed_failure = false;
   };
   const std::deque<VarInstance>& variable_instances() const { return var_instances_; }
+  bool variable_instantiation_failed(EntityId v, u32 point) const {
+    const auto it = var_index_.find(std::to_underlying(v));
+    if (it == var_index_.end()) return false;
+    const VarInstance& in = var_instances_[it->second];
+    return in.item < point && in.diagnosed_failure;
+  }
   // The members of class template specializations analysed, in order: (member item, specialization)
   // and the member's record for that specialization ([temp.inst]/3).
   struct MemberInstance {
@@ -2106,7 +2114,7 @@ public:
     for (EntityId ns : directives) paths.push_back(p_->namespace_path(ns));
     const auto& scope = initializer_source ? p_->ns_of(initializer_source->item) : from;
     return p_->visible_decls(p_->world().ins.names.spelling(name), namespace_lookup_item(),
-                             namespace_lookup_includes_item(), scope, paths);
+                             namespace_lookup_includes_item(name), scope, paths);
   }
   std::vector<ast::DeclSema> qualifier_decls(ast::NameId name, std::optional<EntityId> ns,
                                             std::span<const EntityId> directives) override {
@@ -2134,9 +2142,9 @@ public:
     auto filter = type_only ? Program::LookupNames::types : Program::LookupNames::all;
     if (immediate_call) filter = Program::LookupNames::immediate_call;
     for (DeclId d : p_->qualified_decls(p_->world().ins.names.spelling(name), p_->namespace_path(ns),
-                                       namespace_lookup_item(), namespace_lookup_includes_item(),
+                                       namespace_lookup_item(), namespace_lookup_includes_item(name),
                                        filter, direct_only))
-      if (auto s = p_->decl_sema(d); s && s->entity != EntityId::none) r.push_back(*s);
+      if (auto s = lookup_declaration(d); s && s->entity != EntityId::none) r.push_back(*s);
     return r;
   }
   std::vector<ast::DeclSema> adl_functions(EntityId ns, ast::NameId name, bool at_instantiation) override {
@@ -2159,7 +2167,7 @@ public:
   // names ([basic.lookup.unqual]/9).
   std::string from;
   ast::DeclSema decl_sema(DeclId d) override {
-    if (auto s = p_->decl_sema(d)) return *s;
+    if (auto s = lookup_declaration(d)) return *s;
     return invalid_decl();
   }
   ast::DeclSema friend_decl(const ast::MemberRec& f) override {
@@ -2269,6 +2277,11 @@ public:
     observed_type_trait_failure |= failed;
     return failed;
   }
+  bool variable_instantiation_failed(EntityId v) override {
+    const bool failed = p_->variable_instantiation_failed(v, value_point(v));
+    observed_variable_instantiation_failure |= failed;
+    return failed;
+  }
   std::optional<ConstId> constant_value(EntityId v) override { return p_->constant_value(v, value_point(v)); }
   std::optional<ConstId> constant_call(sema::Sema& s, const sema::Ex& call) override {
     return sema::Evaluator(s, *this).evaluate(call).value;
@@ -2366,11 +2379,25 @@ public:
   bool retain_type_trait_pattern = false;
   bool observed_type_trait_failure = false;
   bool observed_class_assertion_failure = false;
+  bool observed_variable_instantiation_failure = false;
   std::optional<u32> type_trait_demand;
   struct RestoreTypeTraitPattern {
     AtItem& q;
     bool saved = q.retain_type_trait_pattern;
     ~RestoreTypeTraitPattern() { q.retain_type_trait_pattern = saved; }
+  };
+  // At the initializer, lookup can find this declaration in its own namespace. Supply the
+  // written template during replay as well, since the specialization does not declare a name.
+  struct InitializerTemplate {
+    NameId name;
+    DeclId declaration;
+    const ast::DeclSema* pattern;
+  };
+  std::optional<InitializerTemplate> initializer_template;
+  struct RestoreInitializerTemplate {
+    AtItem& q;
+    std::optional<InitializerTemplate> saved = q.initializer_template;
+    ~RestoreInitializerTemplate() { q.initializer_template = saved; }
   };
   // In a class template's instantiation (#88): completeness and constant evaluation are answered
   // at its point of instantiation ([temp.point]); lookup stays at the item.
@@ -2392,7 +2419,14 @@ private:
   u32 namespace_lookup_item() const {
     return initializer_source ? initializer_source->item : declaration_lookup_end.value_or(item_);
   }
-  bool namespace_lookup_includes_item() const { return self_ && !declaration_lookup_end && !initializer_source; }
+  bool namespace_lookup_includes_item(std::optional<NameId> name = std::nullopt) const {
+    return !declaration_lookup_end && !initializer_source &&
+           (self_ || (name && initializer_template && *name == initializer_template->name));
+  }
+  std::optional<ast::DeclSema> lookup_declaration(DeclId d) {
+    if (initializer_template && initializer_template->declaration == d) return *initializer_template->pattern;
+    return p_->decl_sema(d);
+  }
 
   bool is_complete_at_item(EntityId c) {
     return (completing_class != EntityId::none && completing_class == c) ||
@@ -3001,6 +3035,7 @@ public:
   }
   engine::Loc source_loc(engine::Loc loc, u32 offset) override { return at_.source_loc(loc, offset); }
   bool type_trait_instantiation_failed(EntityId e) override { return at_.type_trait_instantiation_failed(e); }
+  bool variable_instantiation_failed(EntityId v) override { return p_->variable_instantiation_failed(v, p_->end()); }
   std::optional<ConstId> constant_value(EntityId v) override { return p_->constant_value(v, p_->end()); }
   std::optional<ConstId> constant_call(sema::Sema& s, const sema::Ex& call) override {
     return sema::Evaluator(s, *this).evaluate(call).value;
@@ -3136,6 +3171,7 @@ public:
   }
   bool type_trait_failure() const { return q_.observed_type_trait_failure; }
   bool class_assertion_failure() const { return q_.observed_class_assertion_failure; }
+  bool variable_instantiation_failure() const { return q_.observed_variable_instantiation_failure; }
 
   Result<ast::ItemSema> replay_scoped_enum(EntityId e) {
     q_.replaying_scoped_enum = e;
@@ -5336,7 +5372,8 @@ private:
       const sema::Sema::ClassPrefixScope prefix(s_, ce);
       const std::size_t before = p_->end_diags_.size();
       static_assert_declaration();
-      if (q_.observed_type_trait_failure || q_.observed_enum_definition_failure ||
+      if (q_.observed_type_trait_failure || q_.observed_variable_instantiation_failure ||
+          q_.observed_enum_definition_failure ||
           !valid_member_declarations(std::span(p_->end_diags_).subspan(before)))
         tree_ = NodeId::none;
       return;
@@ -7651,6 +7688,7 @@ private:
     // A variable template retains its initializer's pattern ([temp.res]). The placeholder path
     // reads the initializer before publishing the declaration ([dcl.type.auto.deduct]).
     const bool pattern = template_ && !var_ && !fn;
+    const parse::Parser::VariableTemplateInitializerScope initializer(ps_, pattern && !(d.qualified && d.scope.type));
     AtItem::RestoreTypeTraitPattern restore{q_};
     q_.retain_type_trait_pattern = pattern;
     std::optional<Ex> early_expr;
@@ -8042,6 +8080,15 @@ private:
     if (!var_ && !(sem.flags & (sema::decl_flag::specialization | sema::decl_flag::partial | sema::decl_flag::friend_)))
       s_.own.push_back({d.name, sem});
     p_->declared(sem, k_);
+    const AtItem::RestoreInitializerTemplate restore_initializer{q_};
+    if (has_init && !d.qualified) {
+      const ast::DeclSema* primary = nullptr;
+      if (var_ && var_->primary) primary = &*var_->primary;
+      else if (pattern && s_.world().entities.rec(sem.entity).kind == sema::EntityKind::variable_template) primary = &sem;
+      if (primary)
+        q_.initializer_template = AtItem::InitializerTemplate{
+            d.name, {p_->id(k_), ast::make_decl_ord(ast::DeclClass::syntactic, ord)}, primary};
+    }
     Ex init;
     sema::ConstId value = sema::ConstId::none;
     // [dcl.constinit]: a reachable declaration's requirement applies to initialization.
@@ -8081,7 +8128,7 @@ private:
       if (v.value) {
         value = *v.value;
         p_->set_constant(sem.entity, value, k_);  // a reference is potentially constant ([expr.const.init])
-      } else if (!v.dependent && !v.type_trait_failure) {
+      } else if (!v.dependent && !v.diagnosed_failure()) {
         dynamic_ok(at, v.reason);
       }
     };
@@ -8111,7 +8158,7 @@ private:
           if (v.value) {
             value = *v.value;
             if (spec.is_constexpr) p_->set_constant(sem.entity, *v.value, k_);
-          } else if (!v.type_trait_failure) {
+          } else if (!v.diagnosed_failure()) {
             dynamic_ok(b->begin, v.reason);
           }
         }
@@ -8145,7 +8192,7 @@ private:
             if (spec.is_constexpr || (sema::Types::is_const(d.type) && !sema::Types::is_volatile(d.type) &&
                                       types.is_integral(d.type)))
               p_->set_constant(sem.entity, *v.value, k_);
-          } else if (!v.type_trait_failure) {
+          } else if (!v.diagnosed_failure()) {
             dynamic_ok(e.begin, v.reason);
           }
         }
@@ -8173,7 +8220,7 @@ private:
           value = *v.value;
           if (spec.is_constexpr || (sema::Types::is_const(d.type) && !sema::Types::is_volatile(d.type) && types.is_integral(d.type)))
             p_->set_constant(sem.entity, *v.value, k_);
-        } else if (!v.type_trait_failure) {
+        } else if (!v.diagnosed_failure()) {
           dynamic_ok(open, v.reason);
         }
       } else if (init.ok()) {
@@ -8183,7 +8230,7 @@ private:
         if (v.value) {
           value = *v.value;
           if (spec.is_constexpr) p_->set_constant(sem.entity, *v.value, k_);
-        } else if (!v.type_trait_failure) {
+        } else if (!v.diagnosed_failure()) {
           dynamic_ok(open, v.reason);
         }
       }
@@ -11754,16 +11801,19 @@ const Program::VarInstance* Program::variable_instance(EntityId v, u32 point,
   std::vector<ast::TemplateParamSema> head = w_->ins.seqs.elements(tmpl.template_params);
   sema::Bindings args = partial ? partial->args : sema::Bindings::of(head.empty() ? 0 : head[0].depth, rec.args);
   var_instantiating_.insert(key);
-  ItemAnalysis analysis(*this, k, VarInstantiation{v, std::move(args), point});
+  ItemAnalysis analysis(*this, k, VarInstantiation{v, std::move(args), point, partial ? std::nullopt : std::optional(tmpl)});
   Result<ast::ItemSema> cell = analysis.run();
   var_instantiating_.erase(key);
   // What the definition diagnosed it says once, there.
-  if (!item_sema(k).diags.empty()) cell.diags.clear();
+  const auto& pattern_diags = item_sema(k).diags;
+  if (!pattern_diags.empty()) cell.diags.clear();
+  const bool diagnosed_failure = analysis.variable_instantiation_failure() ||
+                                  !valid_member_declarations(cell.diags) || !valid_member_declarations(pattern_diags);
   if (analysis.type_trait_failure() || std::ranges::any_of(cell.diags, [](const auto& d) {
         return sema::is_type_trait_failure(d.id);
       })) failed_type_trait_instantiations_.insert(v);
   var_index_.emplace(key, var_instances_.size());
-  var_instances_.push_back({v, k, std::move(cell)});
+  var_instances_.push_back({v, k, std::move(cell), diagnosed_failure});
   return &var_instances_.back();
 }
 

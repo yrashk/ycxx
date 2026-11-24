@@ -117,6 +117,8 @@ public:
   // current point ([expr.const]), and a namespace-scope variable as the interpreter sees it.
   virtual interp::Callee function_ir(EntityId f) = 0;
   virtual std::optional<interp::GlobalVar> global(EntityId v) = 0;
+  // A variable template's required definition has already reported an error.
+  virtual bool variable_instantiation_failed(EntityId) { return false; }
   virtual bool is_immediate_function(EntityId) { return false; }
   virtual bool is_constexpr(EntityId f) = 0;  // a constexpr or consteval function
   // Whether class `c` is complete at the current point ([class.mem.general]): its definition
@@ -305,6 +307,7 @@ inline constexpr u8 immediate_address = 2;  // checked after immediate invocatio
 inline constexpr u8 unrepresented_value = 4;  // this expression has no usable ConstId for a template argument
 inline constexpr u8 deferred_decay_copy = 8;  // a decay-copy still needs function body replay
 inline constexpr u8 type_dependent = 16;  // the producer proved dependence even without a structural type
+inline constexpr u8 dependent_integral_arithmetic = 32;  // integral arithmetic depending on value parameters
 }
 
 // Flags of `LocalRec::flags` and `DeclSema::flags`.
@@ -952,13 +955,14 @@ public:
     return with_template_defaults(*type, found);
   }
   // The variable template unqualified lookup finds for `name` ([temp.pre]/1), likewise.
-  std::optional<ast::DeclSema> variable_template(NameId name, std::optional<u32> at = std::nullopt) {
-    return named_template(name, ast::DeclKind::variable, at);
+  std::optional<ast::DeclSema> variable_template(NameId name, std::optional<u32> at = std::nullopt,
+                                                 bool initializer = false) {
+    return named_template(name, ast::DeclKind::variable, at, initializer);
   }
   // The template of kind `kind` unqualified lookup finds for `name`, with the default arguments of
   // every earlier declaration of it ([temp.param]/12).
   std::optional<ast::DeclSema> named_template(NameId name, ast::DeclKind kind,
-                                             std::optional<u32> at = std::nullopt) {
+                                             std::optional<u32> at = std::nullopt, bool initializer = false) {
     if (names_member(name)) return std::nullopt;
     for (auto s = scopes_.rbegin(); s != scopes_.rend(); ++s)
       for (auto p = s->rbegin(); p != s->rend(); ++p)
@@ -977,11 +981,11 @@ public:
       ast::DeclSema s = q_->decl_sema(d);
       if (s.entity != EntityId::none && !is_special(s)) decls.push_back(s);
     }
-    if (!found && at) {
+    if (!found && (at || initializer)) {
       auto matching = std::find_if(decls.rbegin(), decls.rend(), [&](const ast::DeclSema& d) {
         return d.kind == kind && (d.flags & decl_flag::template_);
       });
-      if (matching != decls.rend() && std::ranges::any_of(decls, [&](const ast::DeclSema& d) {
+      if (!initializer && at && matching != decls.rend() && std::ranges::any_of(decls, [&](const ast::DeclSema& d) {
             return d.entity != matching->entity && d.kind != ast::DeclKind::class_ && d.kind != ast::DeclKind::enum_;
           })) {
         diag(*at, Diag::ambiguous_name, name);
@@ -991,6 +995,12 @@ public:
     }
     if (!found && !decls.empty()) found = decls.back();
     if (!found || found->kind != kind || !(found->flags & decl_flag::template_)) return std::nullopt;
+    // The deferred argument retains no entity. Ordinary lookup at the initializer must
+    // determine one before replay. A tag from another namespace can make the name ambiguous.
+    if (initializer && at && std::ranges::any_of(decls, [&](const auto& d) { return d.entity != found->entity; })) {
+      diag(*at, Diag::ambiguous_name, name);
+      return std::nullopt;
+    }
     return with_template_defaults(*found, decls);
   }
 
@@ -1017,9 +1027,17 @@ public:
     return namespace_template(ns, name, ast::DeclKind::class_);
   }
   // The template of kind `kind` named `name` that is a member of namespace `ns`.
-  std::optional<ast::DeclSema> namespace_template(EntityId ns, NameId name, ast::DeclKind kind) {
-    for (const ast::DeclSema& d : q_->namespace_members(ns, name))
-      if (d.kind == kind && (d.flags & decl_flag::template_)) return d;
+  std::optional<ast::DeclSema> namespace_template(EntityId ns, NameId name, ast::DeclKind kind,
+                                                  std::optional<u32> at = std::nullopt) {
+    const auto decls = q_->namespace_members(ns, name);
+    for (const ast::DeclSema& d : decls) {
+      if (d.kind != kind || !(d.flags & decl_flag::template_)) continue;
+      if (at && std::ranges::any_of(decls, [&](const auto& other) { return other.entity != d.entity; })) {
+        diag(*at, Diag::ambiguous_name, name);
+        return std::nullopt;
+      }
+      return d;
+    }
     return std::nullopt;
   }
 
@@ -1132,6 +1150,23 @@ public:
     auto value = ins().intern_value(ast::VDepVariable{tmpl.entity, ins().intern_seq(std::span<const TemplateArg>(*full))});
     return literal(types().referee(tmpl.type), value, ValueCategory::lvalue, begin, end);
   }
+  // The initializer is replayed with bound arguments. Check the written arguments here without
+  // forming a specialization while an argument's integral expression still needs evaluation.
+  Ex replayed_variable_template_id(const ast::DeclSema& tmpl, std::span<const TemplateArg> args,
+                                   std::span<const Ex> deferred, u32 begin, u32 end) {
+    const NameId name = w_->entities.rec(tmpl.entity).name;
+    const auto params = ins().seqs.elements(tmpl.template_params);
+    Templates t = templates();
+    if (!check_template_expansions(t, params, args, begin)) return {NodeId::none, begin, end};
+    std::vector<std::optional<TemplateArg>> out(params.size());
+    const auto omitted = std::span(params).subspan(std::min(args.size(), params.size()));
+    if (!t.explicit_into(params, args, out, /*defer_values=*/true) ||
+        std::ranges::any_of(omitted, [](const auto& p) { return !p.pack && !p.has_default; })) {
+      diag(begin, Diag::template_args_mismatch, name);
+      return {NodeId::none, begin, end};
+    }
+    return dependent_node(deferred, begin, end, std::nullopt, ValueCategory::lvalue, expr_flag::type_dependent);
+  }
   // The specialization of variable template `templ` for `args` ([temp.spec.general]).
   EntityId variable_specialization(EntityId templ, std::span<const TemplateArg> args, Fp128 constraints = {}) {
     return templates().specialize_variable(templ, args, constraints);
@@ -1144,13 +1179,7 @@ public:
     NameId name = w_->entities.rec(tmpl.entity).name;
     bool type_template = tmpl.kind == ast::DeclKind::type_alias || tmpl.kind == ast::DeclKind::class_;
     Templates t = type_template ? templates_for_use(at) : templates();
-    // An expansion only for a pack parameter: for others it is not supported yet (#88).
-    std::size_t first_pack = std::ranges::find_if(params, [](const ast::TemplateParamSema& p) { return p.pack != 0; }) - params.begin();
-    for (std::size_t i = 0; i < args.size() && i < first_pack; ++i)
-      if (t.is_expansion(args[i])) {
-        diag(at, Diag::not_supported, lex::Tk::ellipsis);
-        return std::nullopt;
-      }
+    if (!check_template_expansions(t, params, args, at)) return std::nullopt;
     std::vector<std::optional<TemplateArg>> out(params.size());
     if (!t.explicit_into(params, args, out)) {
       diag(at, Diag::template_args_mismatch, name);
@@ -1159,6 +1188,17 @@ public:
     auto full = t.complete(tmpl, params, out);
     if (!full) diag(at, Diag::template_args_mismatch, name);
     return full;
+  }
+
+  bool check_template_expansions(Templates& t, std::span<const ast::TemplateParamSema> params,
+                                 std::span<const TemplateArg> args, u32 at) {
+    // An expansion only for a pack parameter: for others it is not supported yet (#88).
+    for (std::size_t i = 0; i < args.size() && i < params.size() && !params[i].pack; ++i)
+      if (t.is_expansion(args[i])) {
+        diag(at, Diag::not_supported, lex::Tk::ellipsis);
+        return false;
+      }
+    return true;
   }
 
   // `using enum E;` in a block ([enum.udecl]): E's enumerators are found in this scope.
@@ -4095,6 +4135,7 @@ public:
   // The packs the operand being read names, for the expansion that may follow it: one list for
   // each operand being read, innermost last.
   void begin_pattern() { pattern_packs_.emplace_back(); }
+  bool pattern_names_pack() const { return !pattern_packs_.back().empty(); }
   // After the operand: the packs it names. With `...` they are recorded as an expansion of the
   // definition ([temp.variadic]/5); without, they are the enclosing operand's too.
   // A template argument's expansion is substituted structurally, and not recorded (`record`);
@@ -10518,8 +10559,16 @@ public:
       if (types().is_integral(l.type()) && types().is_integral(r.type())) {
         switch (op) {
         case add: case sub: case mul: case div: case rem:
-        case bit_and: case bit_xor: case bit_or:
-          return dependent_node({l, r}, begin, end, integral_common_type(l, r));
+        case bit_and: case bit_xor: case bit_or: {
+          auto replay_operand = [&](Ex e) {
+            if (!dependent(e) || (e.info.flags & expr_flag::dependent_integral_arithmetic)) return true;
+            while (auto p = as<ast::Paren>(e)) e.id = p->operand.id;
+            auto literal = as<ast::Literal>(e);
+            return literal && ins().values.is<ast::VDepParam>(literal->value);
+          };
+          const u8 flags = replay_operand(l) && replay_operand(r) ? expr_flag::dependent_integral_arithmetic : u8{0};
+          return dependent_node({l, r}, begin, end, integral_common_type(l, r), ValueCategory::prvalue, flags);
+        }
         default: break;
         }
       }
