@@ -12,6 +12,8 @@ static_assert(BC<bool(3)>::value);
 static_assert(IC<int(3) + 1>::value == 4);
 static_assert(BC<bool(0) || true>::value);
 static_assert(!BC<bool(1) && false>::value);
+static_assert(BC<bool(1) && noexcept(0)>::value);
+static_assert(!BC<bool() && noexcept(0) && true>::value);
 template<int N> struct FromParam : BC<bool(N)> {};
 static_assert(FromParam<2>::value && !FromParam<0>::value);
 template<class T> struct Member : BC<bool(T::value)> {};
@@ -25,6 +27,8 @@ static_assert(__is_same(Ty<bool(F)>::type, bool(F)) && __is_same(Ty<void(...)>::
 static_assert(__is_same(Ty<void(int) noexcept>::type, void(int) noexcept));
 static_assert(__is_same(Ty<int (*)(int)>::type, int (*)(int)) && __is_same(Ty<int (&)[3]>::type, int (&)[3]));
 static_assert(__is_same(Ty<void() &>::type, void() &) && __is_same(Ty<void() const>::type, void() const));
+static_assert(__is_same(Ty<void() & noexcept>::type, void() & noexcept));
+static_assert(__is_same(Ty<int(short) && noexcept(false)>::type, int(short) && noexcept(false)));
 static_assert(__is_same(Ty<int (F::*)()>::type, int (F::*)()));
 template<class T> struct Param : Ty<void(typename T::type)> {};
 static_assert(__is_same(Param<F>::type, void(long)));

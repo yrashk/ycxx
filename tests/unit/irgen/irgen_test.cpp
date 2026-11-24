@@ -923,10 +923,11 @@ void unsupported() {
   World w;
   Body b{w};
   EntityId f = w.f.entity("f");
-  auto body = b.finish(b.block({b.ret(b.bin(ast::BinaryOp::spaceship, w.int_t, b.lit(w.int_t, "1"), b.lit(w.int_t, "2")))}));
+  // Pointer-to-member access is not lowered yet.
+  auto body = b.finish(b.block({b.ret(b.ord(ast::OrderedOp::dot_star, w.int_t, b.lit(w.int_t, "1"), b.lit(w.int_t, "2")))}));
   FunctionInput input{f, decl_of(w, {f, w.fn_i, {}}), body, ast::ItemId(7), 0};
   auto r = function_ir(w.in, input, w.f);
-  check(!r && r.error().contains("Binary <=>"), r ? "<=> generated" : r.error());
+  check(!r && r.error().contains("pointer-to-member access"), r ? ".* generated" : r.error());
 }
 
 }  // namespace

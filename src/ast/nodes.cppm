@@ -51,13 +51,25 @@ struct Unary {
 };
 
 // The binary operators whose operands are unsequenced ([intro.execution]).
-enum class BinaryOp : u8 { mul, div, rem, add, sub, lt, gt, le, ge, spaceship, eq, ne, bit_and, bit_xor, bit_or };
+enum class BinaryOp : u8 { mul, div, rem, add, sub, lt, gt, le, ge, eq, ne, bit_and, bit_xor, bit_or };
 
 struct Binary {
   ExprInfo info;
   BinaryOp op;
   [[=unsequenced]] Child lhs;
   [[=unsequenced]] Child rhs;
+};
+
+// The built-in three-way comparison `a <=> b` ([expr.spaceship]): `lhs` and `rhs` are prvalues of
+// their common arithmetic or object pointer type. The result, a prvalue of a comparison category
+// type ([cmp.categories]), is a copy of one of `results`: the static data members of that type
+// that name its values, `less`, `equal` (`equivalent`), `greater` and, for
+// `std::partial_ordering`, `unordered`.
+struct ThreeWay {
+  ExprInfo info;
+  [[=unsequenced]] Child lhs;
+  [[=unsequenced]] Child rhs;
+  SeqId<EntityId> results;
 };
 
 // The binary operators whose left operand is sequenced before the right: shifts ([expr.shift]),
@@ -595,7 +607,7 @@ using Nodes = closed_list<Literal, DeclRef, Paren, Unary, Binary, OrderedBinary,
                           StaticInit, StaticVar, NewObject, DeleteObject, VariadicBuiltin, AssignmentCall,
                           NewArray, DeleteArray, DelegatingInit, VirtualMemberCall, Throw, TryBlock, Handler,
                           DefaultMemberInit, ExplicitDestroy, PeerRootInit, DynamicCastVoid, DynamicCastPointer, Asm,
-                          ConstantProbe>;
+                          ConstantProbe, ThreeWay>;
 
 static_assert(Nodes::size < max_node_kinds);
 

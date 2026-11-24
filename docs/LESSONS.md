@@ -103,6 +103,24 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
     `--match-head-commit <sha>` so a later push cannot slip in.
   - Learned on #721, 2026-11-22.
 
+- **A draft batch tests the final integration of several PRs.** After each merge the others
+  fell behind again. Each "merge main, wait for CI" round took 30–40 minutes, and on a loaded
+  host local runs only timed out. #1124 through #1166 took four such rounds.
+  - Merge the PR heads onto `main` in order in a scratch worktree. If every merge is clean,
+    use a draft PR titled `[do not merge]` to test the exact combined tree. A later PR can mask
+    a failure in an earlier prefix.
+  - For separate merges, require a green gate for every exact prefix, each against the
+    then-current `main`. Recheck the base and head before every merge and use
+    `--match-head-commit` for the tested head. Retest if either changes. After the last merge,
+    check `git diff --stat <batch> origin/main` to confirm the final trees match, then close the
+    draft and delete its branch.
+  - A single authorized combined PR can use the gate for its exact combined tree against
+    current `main`.
+  - Put a test expectation update that needs two PRs in the last PR. Test that prefix with
+    both changes present and require the earlier prefixes to pass with their own expectations.
+    #1209 found the `temp.friend-3` XPASS, which needs both #1194 and #1204.
+  - Learned on #1165 and #1209, 2026-11-24.
+
 - **Commits pushed to a PR's branch after it merges never reach main.** #233's Apple-ABI change
   was pushed to `claude/byvalue-116` after the coordinator had merged #233, so it never reached
   main (the same trap as #198, from the other side).
@@ -149,7 +167,11 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
     imported"). The rebuild cost 15 minutes on a loaded machine. Oracle runs need no build either.
   - Hit again on #309: a test-writing subagent's oracle run built for 37 minutes beside the
     implementer's build. Give a test author's brief `tools/test --cxx clang affected <path>`.
+  - Hit again on #259: `tools/test --cxx clang own/x` built beside a background build, and the
+    build stage's CTests then failed 9 timeouts that all passed alone. For a binary other than
+    `build/bin/ycxx`, set `YCXX=<path>`.
   - Learned on #659.
+  - Rule: AGENTS.md, "While working".
 - **A reviewer running your binary blocks your rebuilds.** On #337 the reviewer probed with the
   worktree's `build/bin/ycxx`, so the next step could not be built for 15 minutes.
   - Do: build the next step into a build directory in the scratchpad
@@ -163,17 +185,22 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
     To keep coding meanwhile, build into a scratchpad build directory (the entry above).
   - Stopping a `tools/test` that waits on a running `tools/build` in the same directory leaves
     half-built modules ("failed to read compiled module"). Let the build finish, then rebuild.
-- **On a loaded machine the fast gate fails with timeouts, not failures.** On #330, with other
-  sessions building and load averages of 120–250, two fast runs failed. The CTests had 10 s
-  executable timeouts, `daemon.trace_tui` has a 2 s budget, and draft tests that include
-  `<iostream>` have a 60 s timeout. Every one of them passed on a re-run. About an hour went to
-  re-running and checking.
-  - Do: check `uptime` first. Re-run only what timed out: `ctest --test-dir build -R '<names>'`,
+- **A loaded machine can cause timeouts in the fast gate.** On #330, with other sessions
+  building and load averages of 120–250, two fast runs failed. The CTests had 10 s executable
+  timeouts, `daemon.trace_tui` has a 2 s budget, and draft tests that include `<iostream>` have
+  a 60 s timeout. Every one of them passed on a re-run. About an hour went to re-running and
+  checking.
+  - Check `uptime` first. To isolate a timeout, rerun `ctest --test-dir build -R '<names>'`,
     then `tools/test failed affected core` to skip the rebuild. A test that times out only under
-    the driver is waiting in the daemon's queue. `YCXX_DAEMON=0 /usr/bin/time -p build/bin/ycxx …`
-    shows its own CPU time.
+    the driver may be waiting in the daemon's queue. `YCXX_DAEMON=0 /usr/bin/time -p build/bin/ycxx …`
+    shows its own CPU time. Require the exact merge candidate to pass its gate under suitable
+    load or in CI.
   - Learned on #330.
   - Learned on #218.
+  - Hit again on the merge checks of #1124, #1131 and #1129, at load 16 to 87. Each time the build
+    stage's six timed-out CTests passed when run alone. At load 87 every stage timed out, and
+    CI on a head containing `main` became the combined test.
+  - Rule: AGENTS.md, "While working".
   - The same holds for the first build of a fresh worktree. On #295, edits made while it built went
     into the binary meant to show the new tests failing. A sibling worktree's binary of `main`
     served instead: check its commit with `git merge-base --is-ancestor`, copy it to the
@@ -548,6 +575,11 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
   - Do: commit (or stash with a tag) before mutating, or undo with the same `sed` reversed, and
     check `git diff --stat` after.
   - Learned on #337.
+- **Let a worktree's first build finish before editing its sources.** On #340 the first
+  `tools/build` of a fresh worktree compiled some modules before the edits and some after, so it
+  failed. With no `main` binary, seeing the new tests fail meant saving the edits as a patch,
+  restoring `src`, rebuilding and reapplying. Start the build, write the tests and read code while
+  it runs, then edit. If you must edit early, build `main` in its own `YCXX_BUILD_DIR`.
 - **A mutation that does not build leaves the old binary under test.** On #647 a mutation
   left a variable unused, `-Werror` stopped the build, and the test passed against the
   previous, correct binary. The "surviving" mutation looked like a test gap.
@@ -560,18 +592,6 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
   - Do: mutate a branch that some test input must take, and check that the suite turns red.
   - Rule: DECISIONS §5.6.
   - Learned on #33.
-
-- **A path filter alone runs every stage, the build included.** `tools/test --cxx clang own/x`,
-  meant to check new tests against an oracle, started `tools/build` in the build directory a
-  background build was already using, so two Ninja runs shared it. On a loaded machine (load
-  ~35) the build stage's CTest run then failed 9 tests on 10 s and 30 s timeouts, and all 9
-  passed when rerun alone.
-  - Do: name the stage when you only want tests, as in `tools/test --cxx clang core own/x`.
-    For a binary other than `build/bin/ycxx` (a baseline build of main, say), set
-    `YCXX=<path>`.
-  - Do: rerun CTest timeouts with `ctest --test-dir build -R '<names>' -j 2` before treating
-    them as failures, then run the remaining stages (`tools/test failed affected core`).
-  - Learned on #259.
 
 - **Linux x86-64 run tests can be checked from the Mac without building ycxx in Docker.** Compile
   with the Mac's ycxx (`ycxx cxx --target=x86_64-pc-linux-gnu -c`), then link and run with `g++`
@@ -647,6 +667,14 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
     Clang and GCC disagreed on the mangling there (#777), which made it a decision, not a fix.
   - Learned on #776.
 
+- **Check that a test's library header compiles before writing tests around it.** On #295 the
+  first eight `<=>` tests included `<compare>`. On main that header stopped at unrelated
+  `<type_traits>` gaps, so every test failed for reasons the feature could not fix, and the tests
+  were rewritten.
+  - Do: compile `#include <header>` alone with ycxx first. If it fails, give the tests a small
+    stand-in header under `inputs/` that declares what the feature needs, as the draft specifies
+    it. Keep one XFAIL test on the real header, citing the blocking issues.
+  - Learned on #295.
 - **A feature probe must use nothing but the feature.** On #282, 40 of the first 150 probes failed
   on something else: `auto` to hold a lambda, a nested `struct`, a default argument, `alignas`.
   Each would have filed the wrong status and the wrong failing example.

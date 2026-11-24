@@ -43,6 +43,10 @@ dependent exception specification when it is needed.
 A lambda's noexcept-specifier, including one that depends on an enclosing template's
 parameters, is part of its call operator's type. [#807](https://github.com/yrashk/ycxx/issues/807)
 
+Classes and class templates can declare member alias templates, used as `C::M<args>`,
+`typename Q::template M<args>` and as template template arguments.
+[#340](https://github.com/yrashk/ycxx/issues/340)
+
 A class template can grant private access to the class passed as a type argument using
 `friend Authority;`. Each specialization grants access to its own authority.
 [#689](https://github.com/yrashk/ycxx/issues/689)
@@ -508,9 +512,13 @@ written default member initializer are value-initialized.
   (`template <class U> friend class X;`), granting access to all its specializations, and a
   class template can befriend classes, including ones that depend on its arguments.
   [#259](https://github.com/yrashk/ycxx/issues/259)
-  A non-template class can default `operator==` as a member or a friend. `!=` and reversed `==`
-  then use it as rewritten candidates. Defaulted `<=>` is not done yet.
-  [#295](https://github.com/yrashk/ycxx/issues/295)
+  A non-template class can default `operator==` and `operator<=>` as a member or a friend, and a
+  defaulted `auto operator<=>` returns the common comparison category. `a <=> b` works on
+  arithmetic, enumeration and object pointer operands and with a user-declared `operator<=>`.
+  `!=`, reversed `==`, `<`, `<=`, `>` and `>=` are rewritten from `==` and `<=>`. The `==` a
+  defaulted `<=>` declares implicitly, and conversions between comparison categories, are not done
+  yet. [#295](https://github.com/yrashk/ycxx/issues/295) · [#1196](https://github.com/yrashk/ycxx/issues/1196) ·
+  [#339](https://github.com/yrashk/ycxx/issues/339)
 - explicit specialization of a class template's written nonvirtual destructor selects the specialized
   destructor for that class instance. The specialization's declaration determines its inline status.
   [#1027](https://github.com/yrashk/ycxx/issues/1027)
@@ -635,6 +643,8 @@ written default member initializer are value-initialized.
   value and a pointer. [#199](https://github.com/yrashk/ycxx/issues/199)
 - constant evaluation on ycxx's own interpreter: `constexpr`, `consteval`, `constinit`,
   `static_assert` and `if consteval`, with errors that explain why something is not constant.
+  Native objects can omit eligible private static constexpr helpers used only by the
+  constant-evaluated arms. [#1174](https://github.com/yrashk/ycxx/issues/1174)
   Class member assertions are checked when the containing class needs completion.
   [#257](https://github.com/yrashk/ycxx/issues/257)
   Scalar `&&`, `||` and `?:` expressions keep scalar reference-argument temporaries alive

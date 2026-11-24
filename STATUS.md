@@ -1256,6 +1256,11 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   still reads their checked bodies. The object pipeline emits a definition when lowered code,
   tables or data refer to it, including references from retained immediate bodies.
   [#1097](https://github.com/yrashk/ycxx/issues/1097)
+- An `if consteval` constant-evaluated arm can directly call a private static constexpr
+  helper defined inside an ordinary non-template class. Native emission can omit the helper
+  when the object needs neither a direct call nor its address. An emitted definition keeps
+  its weak inline binding. Both arms are checked and the interpreter can call the helper.
+  [Design](docs/design/native-private-constexpr.md) · [#1174](https://github.com/yrashk/ycxx/issues/1174)
 - `consteval` constructors, in class and out of class, among the other constructor specifiers.
   `Sema::construct` folds a call of one outside an immediate function context, including an
   implicit conversion of an argument or operand, into its value (`Sema::immediate_invocation`,
@@ -2826,14 +2831,15 @@ Fable decided the representation (ast.md §6.6); the Opus session wrote the code
 - **Friend class templates** (`template <class U> friend class X;`, `friend_class_template` in
   parse.cppm, [temp.friend]/1, #259), in a class or a class template: `ClassRec::friends` holds
   the class template's entity, and `ClassRec::befriends` grants access to each of its
-  specializations, from the primary or a partial specialization. An unqualified name is looked
-  up among the innermost enclosing namespace's members and using-declarations only
-  ([dcl.type.elab]/4); finding none, it names a class template of that namespace (keyed by its
-  head at depth 0), not visible until declared there. `N::X` must name an earlier class
-  template. The heads must agree in kinds, packs and non-dependent non-type parameter types
-  (`conflicting declaration` otherwise), may give no default arguments and may not redeclare a
-  template parameter. A head's constraints are not compared with the template's yet (#1182),
-  and a later conflicting declaration of a friend-declared name is not diagnosed (#1184).
+  specializations, from the primary or a partial specialization. Unqualified lookup stops at
+  the innermost enclosing namespace, including using-declarations and using-directives that
+  contribute at that level ([dcl.type.elab]/4, [namespace.udir]). Finding no declaration names a
+  template of that namespace (keyed by its head at depth 0), visible after a namespace declaration.
+  `N::X` must name an earlier class template. Matching heads compare parameter kinds, packs and
+  non-type parameter types, with the corresponding template parameter positions paired (#1211).
+  A friend head cannot give default arguments or redeclare a template parameter. A head's
+  constraints are not compared with the template's yet (#1182), and a later conflicting
+  declaration of a friend-declared name is not diagnosed (#1184).
 - **Class friends in class templates** (`friend class X;`, `friend N::X;`, `friend struct N::X<T>;`,
   `friend C<T>;`) are analysed again in each specialization with its arguments; a dependent one
   befriends nothing in the pattern. `friend class X;` still looks past the innermost namespace,
@@ -3042,8 +3048,9 @@ first; a dependent base is not searched. Redeclaring a hidden parameter's name i
   the floating conversions, `tobool`, `switch` and pointer offsets take 128-bit operands.
   Conversion to a floating type rounds the top 64 bits with a sticky bit.
 - List-initialization narrowing reads constants in 128 bits. `sema::ValueRec::wide` marks an
-  integer outside [-2^63, 2^64), so array bounds, bit-field widths and array new bounds reject
-  it rather than read its low half.
+  integer outside [-2^63, 2^64), so concrete array bounds, bit-field widths and array new
+  bounds reject it. Substitution checks a dependent array bound against the target's
+  `size_t` range before conversion. [#1212](https://github.com/yrashk/ycxx/issues/1212)
 - Static data of 16-byte integer type is written with its high half.
 - Not yet:
   - Native code that computes with a 128-bit value: lowering reports "no integer type of 16
@@ -3606,10 +3613,42 @@ parity are tracked in [#294](https://github.com/yrashk/ycxx/issues/294) and
   parameters `T_` at any depth; a constructor without a return type).
 - Tests: `tests/own/templates/m9-*` (13, 8 from the review; a PEER test links Clang's
   definitions); 5 more draft examples pass. Feature map: `temp-member` partial.
-- Not yet (#340): member class and alias templates (nested classes, #306), conversion function
+- Not yet (#340): member class templates (nested classes, #306), conversion function
   templates (#339), trailing requires-clauses on member templates, static data member templates,
   `&S::get<int>`, explicit specializations of member templates; a non-type default depending on
   the class's parameter (#209). Found on the way: #345.
+
+## Member alias templates and `Q::template M` (#340, 2026-11-24)
+
+- **Member alias templates** ([temp.alias], [temp.mem]): `template<class U> using apply = …;` in a
+  class or class template is an `alias_template` entity scoped in the class (its head one level
+  inside the class's), kept in `ClassRec::alias_templates` and never among the nested types, so it
+  is a type only with arguments. A class template specialization's instantiation declares its own,
+  with the class's arguments bound.
+- **Named** as `C::M<args>` and `C::template M<args>` ([temp.names]/4), by its own name in the
+  class and in classes derived from it, before `::`, in a functional conversion, and as a
+  template template argument (`C::M`, `C::template M`).
+- **Dependent qualifiers:** `typename Q::template M<args>` is `TDepName` with the `template_id`
+  form and its arguments (ast.md §5.1); `Q::template M` as a template template argument is a
+  `template_` argument whose type is `TDepName`'s `template_name` form. Substitution applies Q's
+  member alias template once Q is a class (`Templates::member_template_of`); a template template
+  parameter bound to `Q::template M` gives `typename Q::template M<args>`.
+- **Mangling:** `N <qualifier> <name> I…E E`, the template prefix a candidate, as Clang and GCC;
+  `Q::template M` as a template argument as GCC writes it (DECISIONS §1.7).
+- Access is checked where one is named; it hides a base's member of its name, and an earlier
+  member hides a base's. A member defined outside its class template may name one through the
+  current instantiation (`Y<T>::apply<int> Y<T>::f()`), the definition matching by
+  `Templates::resolve_dep_names`.
+- Tests: `tests/own/templates/member-alias-template*` (8, 2 from the review; a PEER test links
+  the oracle's calls).
+  `<iostream>` on macOS arm64: `'using' is not supported yet` 83 → 72 (the rest are #1150 and
+  `using enum`), errors 3,237 → 3,165.
+- Not yet: constraints of an alias template, namespace or member, are not checked when it is
+  named (#234); access through a dependent name substituted in an alias template, as for a member
+  type (#1199); `typename T::M<args>` without `template` (the oracles disagree); immediate calls
+  in a member alias template's type are not replayed per use as a namespace one's are (#340).
+  Member class templates, conversion function templates and the rest of #340 remain. Found on
+  the way: #1191, #1192.
 
 ## Placeholder types, θ step 1 (#279, 2026-11-19)
 
@@ -4353,7 +4392,7 @@ the body. A non-generic lambda body uses its own evaluation context.
   other direct parenthesized template argument spellings remain open, as do dependent
   template arguments, requirements, and exception specifications.
 
-## Defaulted equality and rewritten `!=` (#295)
+## Comparisons: `<=>`, defaulted `==` and `<=>`, rewritten candidates (#295)
 
 - A defaulted `operator==` ([class.compare.default], [class.eq]) may be a const member taking
   `const C&`, or a hidden friend taking two `const C&` or two `C`, of a non-template class. It
@@ -4374,9 +4413,43 @@ the body. A non-generic lambda body uses its own evaluation context.
   scope), and its declared return type must be cv `bool`. A rewritten candidate is not yet
   ranked against a viable ordinary one, built-in candidates for enumerations included. Other
   rewrite targets are not tried when the selected one is not a target.
-- A hidden friend `operator<=>` with a body is accepted, as `<compare>` declares one.
-- Defaulted `<=>` and secondary operators, defaulted comparisons in class templates, out-of-class
-  defaulting, and the `<=>` expression remain open:
-  [#295](https://github.com/yrashk/ycxx/issues/295). Constant evaluation of the classes compared
-  fails when they have a class or array subobject:
+- The built-in `a <=> b` ([expr.spaceship], `Sema::builtin_three_way`) takes arithmetic operands
+  after the usual arithmetic conversions (a narrowing one other than integral to floating is
+  ill-formed), two of one enumeration as its underlying type, an unscoped enumeration with an
+  integral type, and object pointers converted to their composite pointer type
+  (`Sema::composite_pointers`, shared with the relational and equality operators). `bool` goes
+  only with `bool`. The result is `std::strong_ordering`, or `std::partial_ordering` for
+  floating operands, found by qualified lookup in `std` with its static members `less`,
+  `equal`/`equivalent`, `greater` and `unordered` (`Sema::comparison_category`); without
+  `<compare>` it is an error.
+- `ast::ThreeWay` holds the converted operands and those members. IR generation
+  (`Gen::three_way`) evaluates the operands once, compares them, selects the address of the
+  member that names the result and copies it into the result object; a NaN leaves `unordered`.
+  Discarded, only the operands are evaluated.
+- `Sema::rewritten_three_way` ([over.match.oper]/3.4, /8): with no viable ordinary candidate
+  and an operand of class type, or of scoped enumeration type where the built-in operator is
+  not viable, `x @ y` for a relational `@` tries `operator<=>` as `(x <=> y) @ 0`, then reversed
+  as `0 @ (y <=> x)`; `x <=> y` tries the reversed one, `0 <=> (y <=> x)`. The `0` is a
+  one-token literal, so it is a null pointer constant too. A rewritten expression's own
+  operator is not rewritten again.
+- A defaulted `operator<=>` ([class.spaceship]) is declared as `==` is. Completion
+  (`Program::defaulted_three_way`) compares each subobject with `<=>`. A return type of plain
+  `auto` becomes the common comparison category of the results (`strong_ordering` with no
+  subobjects); a result that is not a category deletes the operator. Each result is converted to
+  the return type R. The body is `{ R v0 = x0 <=> y0; if (v0 != 0) return v0; … return
+  R::equal; }` (`defaulted_three_way_body`). The exception specification covers the comparisons,
+  the `vi != 0` tests and the equal result.
+- `x.operator@(…)` and `p->operator@(…)` name member operator functions.
+- A member operator that overload resolution selects and that is deleted, ambiguous or
+  inaccessible makes the expression ill-formed; the non-member candidates are not tried then.
+- Remaining: the `==` a defaulted `<=>` declares implicitly
+  ([#1196](https://github.com/yrashk/ycxx/issues/1196)); the synthesized three-way comparison from
+  `==` and `<` ([#1197](https://github.com/yrashk/ycxx/issues/1197)); conversions between
+  comparison categories, which need conversion functions between classes, so a defaulted `<=>`
+  over mixed categories fails ([#339](https://github.com/yrashk/ycxx/issues/339)); defaulted
+  secondary operators, defaulted comparisons in class templates, out-of-class defaulting and
+  joint ranking of rewritten candidates ([#295](https://github.com/yrashk/ycxx/issues/295)).
+  Constant evaluation of the classes compared fails when they have a class or array subobject:
   [#1140](https://github.com/yrashk/ycxx/issues/1140).
+- Tests: `tests/own/three-way-comparison/`. Most use `inputs/compare.hpp`, a stand-in for
+  `<compare>`, because libycxx's `<compare>` stops at `<type_traits>` gaps (#776).

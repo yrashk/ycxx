@@ -130,10 +130,16 @@ struct TTemplateParam {
 };
 
 // A member type of a dependent type, `typename Q::name` ([temp.res.general]/5, [temp.dep.type]):
-// known once `qualifier` is substituted.
+// known once `qualifier` is substituted. `form` says what `name` is: a member type (`plain`,
+// without `args`), a member alias template's specialization `Q::template name<args>`
+// ([temp.names]/4, `template_id`), or the member template itself as a template template
+// argument's `type` (`template_name`, without `args`).
+enum class DepNameForm : u8 { plain, template_id, template_name };
 struct TDepName {
   QualType qualifier;
   NameId name;
+  u8 form = 0;  // a `DepNameForm`
+  SeqId<TemplateArg> args{};
 };
 
 // A pack expansion `pattern...` ([temp.variadic]), stored in a dependent sequence of parameter

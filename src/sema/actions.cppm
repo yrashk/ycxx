@@ -630,6 +630,8 @@ public:
         if (!elaborated && !prefix_bases.empty() &&
             (name == static_initializer_name_ || own_initializer_static(name))) return std::nullopt;
         if (auto m = q_->earlier_member(name, elaborated)) {
+          if (m->kind == ast::DeclKind::type_alias && (m->flags & decl_flag::template_))
+            return std::nullopt;  // a member alias template, not a type
           if (m->kind == ast::DeclKind::enum_ || m->kind == ast::DeclKind::type_alias || m->kind == ast::DeclKind::class_)
             return m->type;
           if (!elaborated && (m->kind == ast::DeclKind::data_member || m->kind == ast::DeclKind::variable ||
@@ -802,6 +804,11 @@ public:
         return;
       }
       if (auto member = direct_member(cls, cr, name)) {
+        // A member alias template is found and is no type without its arguments.
+        if (std::ranges::contains(cr.alias_templates, name, &NestedType::name)) {
+          hits.push_back({std::nullopt, cls, EntityId::none, ast::Access::public_, false, path});
+          return;
+        }
         auto nested = std::ranges::find(cr.types, name, &NestedType::name);
         if (nested != cr.types.end() &&
             (type_only || (member->nested_type != EntityId::none && member->enumerator == EntityId::none))) {
@@ -888,8 +895,10 @@ public:
   }
 
   ClassBodyType enclosing_prefix_type(EntityId cls, NameId name, std::optional<u32> at, bool type_only) {
-    if (auto member = q_->enclosing_earlier_member(cls, name, type_only))
-      return {true, is_type(member->kind) ? std::optional{member->type} : std::nullopt};
+    if (auto member = q_->enclosing_earlier_member(cls, name, type_only)) {
+      const bool names_type = is_type(member->kind) && !(member->flags & decl_flag::template_);
+      return {true, names_type ? std::optional{member->type} : std::nullopt};
+    }
     return class_body_type(cls, ClassRec{}, name, at, ClassBodyLookup::class_prefix, type_only);
   }
 
@@ -960,6 +969,7 @@ public:
   // A template-name that names a type with its arguments ([temp.names]): a class template, or an
   // alias template ([temp.alias]).
   std::optional<ast::DeclSema> type_template(NameId name) {
+    if (auto m = own_member_alias_template(name)) return m;
     if (auto c = class_template(name)) return c;
     return named_template(name, ast::DeclKind::type_alias);
   }
@@ -2624,11 +2634,43 @@ public:
     if (!cr) return std::nullopt;
     for (const NestedType& t : cr->types)
       if (t.name == n) return std::pair{t, c};
+    // A member alias template hides its bases' members and is no type by itself.
+    if (std::ranges::contains(cr->alias_templates, n, &NestedType::name)) return std::nullopt;
     for (const BaseRec& b : cr->bases) {
       if (unqualified && b.dependent_in_pattern) continue;
       if (auto r = nested_member(b.cls, n)) return r;
     }
     return std::nullopt;
+  }
+  // The member alias template `n` of class `c` or of a base ([temp.mem], [class.member.lookup]):
+  // from its record where it is complete, a specialization instantiated for it; or, in the class
+  // being defined or instantiated, among the members declared so far ([basic.scope.class]).
+  std::optional<ast::DeclSema> member_alias_template(EntityId c, NameId n) {
+    if (const ClassRec* cr = class_rec(c)) {
+      for (const NestedType& t : cr->alias_templates)
+        if (t.name == n) return q_->template_decl(t.entity);
+      if (direct_member(c, *cr, n)) return std::nullopt;  // hidden by a member that is not one
+      for (const BaseRec& b : cr->bases)
+        if (auto r = member_alias_template(b.cls, n)) return r;
+      return std::nullopt;
+    }
+    if (c == current_class) {
+      if (auto m = q_->earlier_member(n))  // any earlier member of the name hides the bases'
+        return m->kind == ast::DeclKind::type_alias && (m->flags & decl_flag::template_) ? std::optional(*m) : std::nullopt;
+      // [temp.dep.general]: a dependent base is not searched.
+      for (const BaseRec& b : q_->defining_base_records(c))
+        if (!b.dependent_in_pattern)
+          if (auto r = member_alias_template(b.cls, n)) return r;
+    }
+    return std::nullopt;
+  }
+  // `apply<args>` in the scope of the class that declares `apply` ([class.member.lookup]), unless
+  // a block scope or a template parameter hides it.
+  std::optional<ast::DeclSema> own_member_alias_template(NameId n) {
+    if (current_class == EntityId::none || template_param(n)) return std::nullopt;
+    for (const auto& s : scopes_)
+      if (std::ranges::contains(s, n, [](const auto& p) { return p.first; })) return std::nullopt;
+    return member_alias_template(current_class, n);
   }
   std::optional<QualType> member_type(EntityId c, NameId n) {
     if (class_rec(c)) {
@@ -2636,7 +2678,7 @@ public:
       return std::nullopt;
     }
     if (c == current_class)
-      if (auto m = q_->earlier_member(n, /*type_only=*/true)) return m->type;
+      if (auto m = q_->earlier_member(n, /*type_only=*/true); m && !(m->flags & decl_flag::template_)) return m->type;
     if (encloses_current_class(c)) return enclosing_prefix_type(c, n, std::nullopt, /*type_only=*/true).type;
     return std::nullopt;
   }
@@ -3880,6 +3922,8 @@ public:
     IntShape sa = shape(w_->target, *a), sb = shape(w_->target, *b);
     if (*b == Builtin::bool_) sb = {1, false};
     if (*a == Builtin::bool_) sa = {1, false};
+    // A bit-field narrower than its type holds only the values of its width ([dcl.init.list]/7.4).
+    if (from.info.bit_width && from.info.bit_width < sa.bits) sa.bits = from.info.bit_width;
     if (ast::represents(w_->target, *b, sa.bits, sa.is_signed) || (*b == Builtin::bool_ && *a == Builtin::bool_)) return false;
     auto v = constant_of ? constant_of(from) : std::nullopt;
     if (!v || !ins().values.is<ast::VInt>(*v)) return true;
@@ -4094,6 +4138,8 @@ public:
         return class_template_id(*d, t.flatten(*full), at, /*directly_named=*/false);
       }
       TypeRec r = types().rec(a->type);
+      // Bound to `Q::template M` with Q dependent: `typename Q::template M<args>`.
+      if (r.kind == TypeKind::dep_name) return dependent_member_template_id(r.inner, r.name, *full);
       return types().dep_spec(r.depth, r.index, r.pack, *full);
     }
     return types().dep_spec(p.depth, p.index, p.pack != 0, *full);
@@ -4127,6 +4173,52 @@ public:
   // A template-name as a template argument ([temp.arg.template]/1): a class or alias template, in
   // namespace `ns` or found by unqualified lookup, or a template template parameter (its argument
   // when bound).
+  // `C::M` or `Q::template M` as a template template argument ([temp.arg.template]/1,
+  // [temp.names]/4): C's member alias template; with Q dependent, Q's member template once Q is
+  // known, which needs the keyword.
+  std::optional<TemplateArg> member_template_name_arg(const Scope& s, NameId name, bool keyword) {
+    if (!s.type) return std::nullopt;
+    const QualType q = *s.type;
+    const bool dependent = types().is_dependent(q);
+    if (types().is_class(q) && (!dependent || types().class_of(q) == current_class))
+      if (auto d = member_alias_template(types().class_of(q), name))
+        return TemplateArg{ast::TemplateArgKind::template_, QualType{}, ConstId::none, {}, d->entity};
+    if (!dependent || !keyword) return std::nullopt;
+    return TemplateArg{ast::TemplateArgKind::template_, types().dep_template(q, name, ast::DepNameForm::template_name),
+                       ConstId::none};
+  }
+  // `C::M<args>` or `Q::template M<args>` naming a member alias template's specialization
+  // ([temp.mem], [temp.names]/4): its declaration, or none with `dependent` set when Q is
+  // dependent and the keyword says M is a template.
+  std::optional<ast::DeclSema> member_template_scope(const Scope& s, NameId name, bool keyword, bool& dependent) {
+    dependent = false;
+    if (!s.type) return std::nullopt;
+    const QualType q = *s.type;
+    const bool dep = types().is_dependent(q);
+    if (types().is_class(q) && (!dep || types().class_of(q) == current_class))
+      if (auto d = member_alias_template(types().class_of(q), name)) return d;
+    // A dependent class whose pattern declares M, the current instantiation named outside its
+    // class (`Y<T>::M<args>` in a member's definition, [temp.names]/3), needs no keyword.
+    dependent = dep && (keyword || (types().is_class(q) && member_alias_template(types().class_of(q), name)));
+    return std::nullopt;
+  }
+  // Whether member alias template `templ`, named as `Q::M` at `at`, is accessible here
+  // ([class.access]/4); diagnosed if not, or deferred as a nested type's check is.
+  void member_template_access(QualType q, EntityId templ, NameId n, u32 at) {
+    if (!types().is_class(q) || types().is_dependent(q)) return;
+    const EntityId naming = types().class_of(q), owner = w_->entities.rec(templ).scope;
+    const ClassRec* cr = class_rec(owner);
+    if (!cr) return;
+    if (defer_type_access && (!accessible(owner, cr->access_of(templ), naming) || !accessible_naming_base(naming, owner))) {
+      deferred_access_.push_back({owner, templ, n, at});
+      return;
+    }
+    check_access(owner, templ, n, at, naming);
+  }
+  // `typename Q::template M<args>` with Q dependent ([temp.dep.type]): known once Q is.
+  QualType dependent_member_template_id(QualType q, NameId name, std::span<const TemplateArg> args) {
+    return types().dep_template(q, name, ast::DepNameForm::template_id, args);
+  }
   std::optional<TemplateArg> template_name_arg(std::optional<EntityId> ns, NameId name) {
     if (!ns)
       if (const ast::TemplateParamSema* p = template_param(name)) {
@@ -4338,6 +4430,10 @@ public:
     Templates t(*w_, classes());
     t.defining_enum_is_scoped = [this](EntityId e) { return q_->defining_enum_is_scoped(e); };
     t.member_type = [this](EntityId c, NameId n) { return member_type(c, n); };
+    t.member_template = [this](EntityId c, NameId n) -> std::optional<EntityId> {
+      auto d = member_alias_template(c, n);
+      return d ? std::optional(d->entity) : std::nullopt;
+    };
     t.member_constant = [this](QualType qualifier, NameId name) {
       return qualified_member_constant(qualifier, name, 0);
     };
@@ -5895,6 +5991,8 @@ public:
     }
     for (const NestedType& nested : cr.types)
       if (nested.name == name) return Found{.owner = c, .nested_type = nested.entity};
+    for (const NestedType& alias : cr.alias_templates)
+      if (alias.name == name) return Found{.owner = c, .nested_type = alias.entity};
     return std::nullopt;
   }
   std::optional<Found> find_member(EntityId c, NameId name, bool unqualified = false) {
@@ -10186,10 +10284,14 @@ public:
             return Ex{r.id, begin, end, r.info};
           ref_qualified_member = Ex{r.id, begin, end, r.info};
         } else if (std::ranges::any_of(std::span(*diags_).subspan(n), [](const auto& d) {
-                     return d.id == diag_id(Diag::not_constant);
+                     return d.id == diag_id(Diag::not_constant) || d.id == diag_id(Diag::deleted_function) ||
+                            d.id == diag_id(Diag::ambiguous_call) || d.id == diag_id(Diag::private_member) ||
+                            d.id == diag_id(Diag::protected_member);
                    })) {
-          // The member was selected, and its operand conversion is an immediate invocation that is
-          // not constant ([expr.const]): as when it is constant, the member is the operator.
+          // The member was selected, and it is deleted, ambiguous or inaccessible, or its operand
+          // conversion is an immediate invocation that is not constant ([expr.const]): the
+          // expression is ill-formed, as when the member is a usable operator
+          // ([over.match.oper]/3, [over.match.best]).
           return Ex{NodeId::none, begin, end};
         } else {
           truncate_diags(n);
@@ -10583,11 +10685,11 @@ public:
 
   enum class BinOp : u8 {
     mul, div, rem, add, sub, shl, shr, lt, gt, le, ge, eq, ne, bit_and, bit_xor, bit_or, logical_and, logical_or, comma,
-    dot_star, arrow_star,
+    spaceship, dot_star, arrow_star,
   };
 
   static constexpr std::string_view binary_spellings[] = {"*", "/", "%", "+", "-", "<<", ">>", "<", ">", "<=", ">=",
-                                                          "==", "!=", "&", "^", "|", "&&", "||", ","};
+                                                          "==", "!=", "&", "^", "|", "&&", "||", ",", "<=>"};
 
   // The built-in member pointer operators ([expr.mptr.oper]). Access checking takes place when
   // the address expression names the field ([expr.unary.op]).
@@ -10664,6 +10766,9 @@ public:
     if (auto o = overloaded(binary_spellings[std::to_underlying(op)], {l, r}, begin, end, op_at)) return *o;
     if (op == eq || op == ne)
       if (auto o = rewritten_equality(op == ne, l, r, begin, end, op_at)) return *o;
+    if (op == spaceship || op == lt || op == gt || op == le || op == ge)
+      if (auto o = rewritten_three_way(op, l, r, begin, end, op_at)) return *o;
+    if (op == spaceship) return builtin_three_way(l, r, begin, end, op_at);
     auto bin = [&](ast::BinaryOp k, Ex a, Ex c, QualType t) {
       ExprInfo info{t, ValueCategory::prvalue, 0};
       return node(ast::Binary{info, k, at(a, begin), at(c, begin)}, begin, end, info);
@@ -10785,44 +10890,10 @@ public:
         diag(op_at, Diag::member_pointer_values);
         return {NodeId::none, begin, end};
       }
-      if (auto to = composite_void_pointer(ta, tc)) {
-        a = convert(a, *to, op_at);
-        c = convert(c, *to, op_at);
-        if (!a.ok() || !c.ok()) return {NodeId::none, begin, end};
-        return bin(k, a, c, b);
-      }
-      if (auto to = composite_function_pointer(ta, tc))
-        return bin(k, convert(a, *to, op_at), convert(c, *to, op_at), b);
-      if (types().is_pointer(ta) && types().is_pointer(tc)) {
-        QualType pa = types().pointee(ta), pc = types().pointee(tc);
-        // [expr.type]/4.6: a pointer to a derived class converted to one to its base class.
-        if (base_depth(pa, pc)) {
-          a = to_base(a, types().class_of(pc), op_at);
-          if (!a.ok()) return Ex{NodeId::none, begin, end};
-          ta = a.type();
-          pa = types().pointee(ta);
-        } else if (base_depth(pc, pa)) {
-          c = to_base(c, types().class_of(pa), op_at);
-          if (!c.ok()) return Ex{NodeId::none, begin, end};
-          tc = c.type();
-          pc = types().pointee(tc);
-        }
-        QualType unqualified = Types::unqualified(pa);
-        Cv ca = Types::cv(pa), cc = Types::cv(pc);
-        if (unqualified != Types::unqualified(pc)) {
-          // [expr.type], [conv.qual]: complete arrays of the same shape combine the
-          // cv-qualifiers of their elements, including through nested array dimensions.
-          if (!types().is_array(pa)) return invalid();
-          unqualified = object_unqualified(pa);
-          if (unqualified != object_unqualified(pc) || !is_complete(pa)) return invalid();
-          ca = object_cv(pa);
-          cc = object_cv(pc);
-        }
-        Cv cv = Cv(std::to_underlying(ca) | std::to_underlying(cc));
-        QualType composite = types().pointer(types().add_cv(unqualified, cv));
-        if (ta != composite) a = convert_node(a, ast::ConversionKind::qualification, composite);
-        if (tc != composite) c = convert_node(c, ast::ConversionKind::qualification, composite);
-        return bin(k, a, c, b);
+      switch (composite_pointers(a, c, /*function_pointers=*/true, op_at)) {
+      case Composite::converted: return bin(k, a, c, b);
+      case Composite::failed: return {NodeId::none, begin, end};
+      case Composite::none: break;
       }
       if (equality && types().is(ta, Builtin::nullptr_t) && types().is(tc, Builtin::nullptr_t)) return bin(k, a, c, b);
       if (equality && types().is_pointer(ta) && (types().is(tc, Builtin::nullptr_t) || is_null_pointer_constant(r)))
@@ -10835,6 +10906,215 @@ public:
     }
     std::unreachable();
   }
+
+  enum class Composite : u8 { none, converted, failed };
+  // [expr.type]/4: two pointer operands converted to their composite pointer type, as the
+  // relational, equality and three-way operators need: a pointer to void and one to an object,
+  // two function pointers (when `function_pointers`), or two object pointers, a pointer to a
+  // derived class becoming one to its base class and the cv-qualifiers combined. `none` when
+  // the operands have no composite pointer type (not diagnosed); `failed` when a conversion was
+  // diagnosed.
+  Composite composite_pointers(Ex& a, Ex& c, bool function_pointers, u32 op_at) {
+    QualType ta = a.type(), tc = c.type();
+    if (auto to = composite_void_pointer(ta, tc)) {
+      a = convert(a, *to, op_at);
+      c = convert(c, *to, op_at);
+      return a.ok() && c.ok() ? Composite::converted : Composite::failed;
+    }
+    if (auto to = composite_function_pointer(ta, tc)) {
+      if (!function_pointers) return Composite::none;
+      a = convert(a, *to, op_at);
+      c = convert(c, *to, op_at);
+      return Composite::converted;
+    }
+    if (!types().is_pointer(ta) || !types().is_pointer(tc)) return Composite::none;
+    QualType pa = types().pointee(ta), pc = types().pointee(tc);
+    if (!function_pointers && (types().is_function(pa) || types().is_function(pc))) return Composite::none;
+    // [expr.type]/4.6: a pointer to a derived class converted to one to its base class.
+    if (base_depth(pa, pc)) {
+      a = to_base(a, types().class_of(pc), op_at);
+      if (!a.ok()) return Composite::failed;
+      ta = a.type();
+      pa = types().pointee(ta);
+    } else if (base_depth(pc, pa)) {
+      c = to_base(c, types().class_of(pa), op_at);
+      if (!c.ok()) return Composite::failed;
+      tc = c.type();
+      pc = types().pointee(tc);
+    }
+    QualType unqualified = Types::unqualified(pa);
+    Cv ca = Types::cv(pa), cc = Types::cv(pc);
+    if (unqualified != Types::unqualified(pc)) {
+      // [expr.type], [conv.qual]: complete arrays of the same shape combine the
+      // cv-qualifiers of their elements, including through nested array dimensions.
+      if (!types().is_array(pa)) return Composite::none;
+      unqualified = object_unqualified(pa);
+      if (unqualified != object_unqualified(pc) || !is_complete(pa)) return Composite::none;
+      ca = object_cv(pa);
+      cc = object_cv(pc);
+    }
+    Cv cv = Cv(std::to_underlying(ca) | std::to_underlying(cc));
+    QualType composite = types().pointer(types().add_cv(unqualified, cv));
+    if (ta != composite) a = convert_node(a, ast::ConversionKind::qualification, composite);
+    if (tc != composite) c = convert_node(c, ast::ConversionKind::qualification, composite);
+    return Composite::converted;
+  }
+
+  // The comparison category types ([cmp.categories]), weakest first: the common comparison
+  // category of several is the weakest of them ([class.spaceship]).
+  enum class Ordering : u8 { partial, weak, strong };
+  struct ComparisonCategory {
+    QualType type;
+    std::vector<EntityId> values;  // as ast::ThreeWay::results
+  };
+  // [cmp.categories.pre]: `std::partial_ordering`, `std::weak_ordering` or `std::strong_ordering`,
+  // which <compare> declares, found by qualified lookup in `std`, with the static data members
+  // that name its values. Diagnosed at `at_` when it is not declared so or is incomplete.
+  std::optional<ComparisonCategory> comparison_category(Ordering k, std::optional<u32> at_) {
+    static constexpr std::string_view names[] = {"partial_ordering", "weak_ordering", "strong_ordering"};
+    const NameId name = ins().names.intern(names[std::to_underlying(k)]);
+    auto missing = [&] -> std::optional<ComparisonCategory> {
+      if (at_) diag(*at_, Diag::comparison_category_missing, name);
+      return std::nullopt;
+    };
+    const auto std_scope = scope_member(global_scope(), ins().names.intern("std"), false);
+    if (!std_scope || !std_scope->ns) return missing();
+    const auto found = scope_member(*std_scope, name, false);
+    if (!found || !found->type || !types().is_class(*found->type) || !is_complete(*found->type)) return missing();
+    const QualType type = Types::unqualified(*found->type);
+    const EntityId cls = types().class_of(type);
+    std::vector<std::string_view> members{"less", k == Ordering::strong ? "equal" : "equivalent", "greater"};
+    if (k == Ordering::partial) members.push_back("unordered");
+    ComparisonCategory r{type, {}};
+    for (std::string_view m : members) {
+      const auto value = find_member(cls, ins().names.intern(m));
+      if (!value || value->ambiguous || !value->member || value->member->is_function || !value->member->is_static ||
+          Types::unqualified(types().canonical(value->member->type)) != types().canonical(type))
+        return missing();
+      if (at_ && !q_->use_static_member(value->member->entity)) return std::nullopt;
+      r.values.push_back(value->member->entity);
+    }
+    return r;
+  }
+  // The comparison category type `t` is, if it is one.
+  std::optional<Ordering> ordering_of(QualType t) {
+    t = Types::unqualified(types().canonical(t));
+    if (!types().is_class(t)) return std::nullopt;
+    for (Ordering k : {Ordering::partial, Ordering::weak, Ordering::strong})
+      if (const auto c = comparison_category(k, std::nullopt); c && types().canonical(c->type) == t) return k;
+    return std::nullopt;
+  }
+
+  // [expr.spaceship]: the built-in three-way comparison, for operands of arithmetic, enumeration
+  // or object pointer type.
+  Ex builtin_three_way(Ex l, Ex r, u32 begin, u32 end, u32 op_at) {
+    const Ex fail{NodeId::none, begin, end};
+    auto invalid = [&] {
+      diag(op_at, Diag::invalid_operands, l.type(), r.type());
+      return fail;
+    };
+    // /6 converts an array operand only when the other is an object pointer.
+    if (types().is_array(types().referee(l.type())) && types().is_array(types().referee(r.type()))) return invalid();
+    Ex a = rvalue(l), c = rvalue(r);
+    if (!a.ok() || !c.ok()) return fail;
+    // /3: a `bool` operand only with another.
+    if (types().is(Types::unqualified(a.type()), Builtin::bool_) != types().is(Types::unqualified(c.type()), Builtin::bool_))
+      return invalid();
+    std::optional<Ordering> ordering;
+    // The operands before the usual arithmetic conversions, for the narrowing check. A bit-field
+    // keeps its width, which can make the conversion not narrowing ([dcl.init.list]/7.4).
+    Ex from_a = a, from_c = c;
+    from_a.info.bit_width = l.info.bit_width;
+    from_c.info.bit_width = r.info.bit_width;
+    if (types().is_enum(a.type()) || types().is_enum(c.type())) {
+      if (types().canonical(Types::unqualified(a.type())) == types().canonical(Types::unqualified(c.type()))) {
+        // /5: two of one enumeration, compared as its underlying type.
+        const QualType u = underlying_of(a.type());
+        a = convert_node(a, ast::ConversionKind::integral, u);
+        c = convert_node(c, ast::ConversionKind::integral, u);
+        ordering = Ordering::strong;
+      } else {
+        // /4: an unscoped enumeration with an integral type, as its promoted type.
+        auto integral = [&](const Ex& e) { return types().is_integral(e.type()) || is_unscoped_enum(e.type()); };
+        if (is_scoped_enum(a.type()) || is_scoped_enum(c.type()) ||
+            (types().is_enum(a.type()) && types().is_enum(c.type())) || !integral(a) || !integral(c))
+          return invalid();
+        if (types().is_enum(a.type())) a = promote(a);
+        if (types().is_enum(c.type())) c = promote(c);
+      }
+    }
+    if (!ordering && types().is_arithmetic(a.type()) && types().is_arithmetic(c.type())) {
+      // /4: the usual arithmetic conversions, where a narrowing conversion other than from an
+      // integral type to a floating type is ill-formed.
+      const QualType t = arithmetic_conversions(a, c);
+      for (const Ex& from : {from_a, from_c}) {
+        if (types().is_floating(t) && !types().is_floating(from.type())) continue;
+        if (narrows(from, t)) {
+          diag(from.begin, Diag::three_way_narrowing, from.type(), t);
+          return fail;
+        }
+      }
+      ordering = types().is_floating(t) ? Ordering::partial : Ordering::strong;
+    }
+    if (!ordering && types().is_pointer(a.type()) && types().is_pointer(c.type())) {
+      // /6: object pointers converted to their composite pointer type.
+      switch (composite_pointers(a, c, /*function_pointers=*/false, op_at)) {
+      case Composite::converted: ordering = Ordering::strong; break;
+      case Composite::failed: return fail;
+      case Composite::none: break;
+      }
+    }
+    if (!ordering) return invalid();  // /7
+    const auto category = comparison_category(*ordering, op_at);
+    if (!category) return fail;
+    ExprInfo info{category->type, ValueCategory::prvalue, 0};
+    const auto results = ins().intern_seq(std::span<const EntityId>(category->values));
+    return node(ast::ThreeWay{info, at(a, begin), at(c, begin), results}, begin, end, info);
+  }
+
+  // [over.match.oper]/3.4, /8: the rewritten candidates of a relational operator `x @ y` and of
+  // `x <=> y`, when no ordinary candidate is viable and an operand has class type: an
+  // `operator<=>` as `(x <=> y) @ 0`, then, synthesized with the operands reversed, as
+  // `0 @ (y <=> x)` (only the reversed one for `<=>` itself). A rewritten expression's own
+  // operator is not rewritten again. With enumeration operands and no class, only where the
+  // built-in operator is not viable: a scoped enumeration with anything but itself.
+  // (Rewritten candidates are not yet ranked against viable ordinary ones: #295.)
+  std::optional<Ex> rewritten_three_way(BinOp op, Ex l, Ex r, u32 begin, u32 end, u32 op_at) {
+    if (rewriting_three_way_) return std::nullopt;
+    const QualType lt = types().referee(l.type()), rt = types().referee(r.type());
+    if (!types().is_class(lt) && !types().is_class(rt)) {
+      const bool builtin_viable = (!is_scoped_enum(lt) && !is_scoped_enum(rt)) ||
+                                  types().canonical(Types::unqualified(lt)) == types().canonical(Types::unqualified(rt));
+      if (builtin_viable || (!types().is_enum(lt) && !types().is_enum(rt))) return std::nullopt;
+    }
+    const std::size_t n = diag_count();
+    std::optional<Ex> compared;
+    bool reversed = false;
+    if (op != BinOp::spaceship) compared = overloaded("<=>", {l, r}, begin, end, op_at);
+    if (!compared) {
+      truncate_diags(n);
+      compared = overloaded("<=>", {r, l}, begin, end, op_at);
+      reversed = true;
+    }
+    if (!compared) {
+      truncate_diags(n);
+      return std::nullopt;
+    }
+    if (!compared->ok()) return Ex{NodeId::none, begin, end};
+    // A literal `0`, one token wide, so it is a null pointer constant too ([conv.ptr]), as the
+    // library's comparison operators may take it.
+    const QualType int_type = builtin(Builtin::int_);
+    const u32 zero_at = reversed ? begin : end - 1;
+    const Ex zero = literal(int_type, w_->values.integer(int_type, 0), ValueCategory::prvalue, zero_at, zero_at + 1);
+    struct Restore {
+      bool& flag;
+      ~Restore() { flag = false; }
+    } restore{rewriting_three_way_};
+    rewriting_three_way_ = true;
+    const Ex result = reversed ? binary(op, zero, *compared, op_at) : binary(op, *compared, zero, op_at);
+    return Ex{result.id, begin, end, result.info};
+  }
+  bool rewriting_three_way_ = false;
 
   enum class AsgOp : u8 { assign, mul, div, rem, add, sub, shl, shr, bit_and, bit_xor, bit_or };
 

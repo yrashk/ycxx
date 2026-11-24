@@ -803,7 +803,7 @@ probe = '''
 int main() { auto c = 1 <=> 2; return c < 0 ? 0 : 1; }
 '''
 issues = [295]
-note = 'Rewritten `!=` and reversed `==` candidates for class operands, tried when no ordinary candidate is viable. The `<=>` expression, rewritten relational candidates and joint ranking remain'
+note = 'The built-in `<=>` on arithmetic, enumeration and object pointer operands, user-declared `operator<=>`, and rewritten `!=`, `==`, `<=>`, `<`, `<=`, `>` and `>=` candidates, tried when no ordinary candidate is viable. Joint ranking of rewritten and ordinary candidates remains; the probe waits on `<compare>`, whose `<type_traits>` does not compile yet (#776)'
 
 [[feature]]
 id = 'expr-auto-cast'
@@ -1886,8 +1886,8 @@ probe = '''
 struct P { int x, y; bool operator==(const P&) const = default; };
 int main() { P a{1, 2}, b{1, 2}; return (a == b && !(a != b)) ? 0 : 1; }
 '''
-issues = [295, 1140]
-note = 'Defaulted `operator==` as a member or friend of a non-template class, with deletion and the implicit exception specification. Defaulted `<=>` and secondary operators, class templates and constant evaluation of classes with class or array subobjects (#1140) remain'
+issues = [295, 1140, 1196, 1197, 339]
+note = 'Defaulted `operator==` and `operator<=>` as a member or friend of a non-template class, with deletion, the implicit exception specification and a deduced comparison category. The `==` a defaulted `<=>` declares (#1196), the synthesized three-way comparison from `==` and `<` (#1197), conversions between comparison categories (#339), secondary operators, class templates and constant evaluation of classes with class or array subobjects (#1140) remain'
 
 [[feature]]
 id = 'class-cond-trivial'
@@ -1989,7 +1989,7 @@ group = 'temp'
 clauses = ['temp.mem']
 std = 'C++98'
 status = 'partial'
-note = 'member class and alias templates, conversion function templates'
+note = 'Member function templates and member alias templates, also as `Q::template M<args>` and as template template arguments, work. Member class templates (#306), conversion function templates (#339), trailing requires-clauses, static data member templates and `&S::f<int>` remain.'
 probe = '''
 struct S { template<class T> T get(T t) const { return t; } };
 template<class U> struct W { template<class T> int f(T) { return sizeof(U); } };
@@ -2338,7 +2338,7 @@ clauses = ['dcl.constexpr', 'expr.const', 'expr.const.general', 'expr.const.core
 std = 'C++11'
 ftm = '__cpp_constexpr'
 detect = '\bconstexpr\b'
-issues = [102, 157, 262, 862, 876, 900]
+issues = [102, 157, 262, 862, 876, 900, 1174]
 probe = '''
 constexpr int fact(int n) { int r = 1; for (int i = 2; i <= n; ++i) r *= i; return r; }
 struct P { int x; constexpr P(int v) : x(v) {} };
@@ -2347,7 +2347,7 @@ static_assert(p.x == 24);
 int main() { return 0; }
 '''
 status = 'partial'
-note = '`constexpr` constructor declarations, runtime calls, scalar enum constant evaluation, and constant initialization of flat static aggregate members work. Constructor calls evaluate for classes without bases, class-typed fields or a destructor. Direct-list initializers cover aggregates of public integral fields in non-template namespace-scope classes without bases. Constant expressions can read integral and enumeration fields of supported flat aggregate temporaries and non-mutable fields of stored namespace-scope constexpr aggregates. Class-typed constant evaluation is partial.'
+note = '`constexpr` constructor declarations, runtime calls, scalar enum constant evaluation, and constant initialization of flat static aggregate members work. Constructor calls evaluate for classes without bases, class-typed fields or a destructor. Direct-list initializers cover aggregates of public integral fields in non-template namespace-scope classes without bases. Constant expressions can read integral and enumeration fields of supported flat aggregate temporaries and non-mutable fields of stored namespace-scope constexpr aggregates. Eligible private static constexpr helpers used only in constant evaluation can omit native code. Class-typed constant evaluation is partial.'
 
 [[feature]]
 id = 'const-consteval'

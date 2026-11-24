@@ -422,6 +422,9 @@ draft/temp/temp.static-2.accept.cpp 'template' not supported yet
 draft/temp/temp.variadic-4.accept.cpp 'auto' not supported yet
 draft/temp/temp.variadic-8.accept.cpp 'template' not supported yet
 own/defaulted-comparison/template-friend.run.cpp 'default' is not supported yet (#295)
+own/three-way-comparison/defaulted-mixed.run.cpp no matching constructor: a conversion function between classes (#339)
+own/three-way-comparison/implicit-equality.run.cpp invalid operands: the '==' a defaulted '<=>' declares implicitly (#1196)
+own/three-way-comparison/library.accept.cpp <type_traits> before <compare> (#1082, #1091, #1172, #308, #340)
 own/function-pointers/iota-template-argument.run.cpp function pointers and references as constant template arguments (#406)
 own/classes/s1-byvalue-constexpr.run.cpp classes in constant evaluation (#25)
 own/classes/s1-elaborated.run.cpp block-scope elaborated type specifier (#117)
