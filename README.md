@@ -573,6 +573,11 @@ written default member initializer are value-initialized.
   included), as libycxx's `std::derived_from` needs. The other convertibility, assignability,
   constructibility and destructibility traits defer dependent operands in constraints too.
   [Extension guide](docs/EXTENSIONS.md) · [#218](https://github.com/yrashk/ycxx/issues/218)
+- `__builtin_is_virtual_base_of`, `__is_pointer_interconvertible_base_of` and
+  `__is_layout_compatible` for known classes, enumerations and other types, including dependent
+  operands, as libycxx's `<type_traits>` uses them. Virtual bases themselves are not supported yet
+  ([#310](https://github.com/yrashk/ycxx/issues/310)).
+  [Extension guide](docs/EXTENSIONS.md) · [#218](https://github.com/yrashk/ycxx/issues/218)
 - `__is_empty`, `__is_standard_layout`, and `__is_final` accept dependent operands in supported
   class-template bases and variable-template initializers. The emptiness query accounts for
   inherited data members. Finality queries require complete class operands, including unions and

@@ -379,6 +379,9 @@ public:
         (operands.size() == 2 && (op == ast::DepOp::is_assignable || op == ast::DepOp::is_nothrow_assignable ||
                                   op == ast::DepOp::is_trivially_assignable || op == ast::DepOp::is_convertible ||
                                   op == ast::DepOp::is_nothrow_convertible || op == ast::DepOp::is_base_of ||
+                                  op == ast::DepOp::is_virtual_base_of ||
+                                  op == ast::DepOp::is_pointer_interconvertible_base_of ||
+                                  op == ast::DepOp::is_layout_compatible ||
                                   op == ast::DepOp::reference_constructs_from_temporary ||
                                   op == ast::DepOp::reference_converts_from_temporary)))
   {
@@ -400,6 +403,8 @@ public:
         op != ast::DepOp::is_trivially_constructible && op != ast::DepOp::is_assignable &&
         op != ast::DepOp::is_nothrow_assignable && op != ast::DepOp::is_trivially_assignable &&
         op != ast::DepOp::is_convertible && op != ast::DepOp::is_nothrow_convertible && op != ast::DepOp::is_base_of &&
+        op != ast::DepOp::is_virtual_base_of && op != ast::DepOp::is_pointer_interconvertible_base_of &&
+        op != ast::DepOp::is_layout_compatible &&
         op != ast::DepOp::reference_constructs_from_temporary && op != ast::DepOp::reference_converts_from_temporary)
   {
     if (types().is_dependent(type)) {
@@ -478,6 +483,9 @@ public:
     case ast::DepOp::is_convertible:
     case ast::DepOp::is_nothrow_convertible:
     case ast::DepOp::is_base_of:
+    case ast::DepOp::is_virtual_base_of:
+    case ast::DepOp::is_pointer_interconvertible_base_of:
+    case ast::DepOp::is_layout_compatible:
     case ast::DepOp::reference_constructs_from_temporary:
     case ast::DepOp::reference_converts_from_temporary:
     case ast::DepOp::logical_not:
@@ -629,7 +637,10 @@ public:
       case ast::DepOp::is_nothrow_convertible:
       case ast::DepOp::reference_constructs_from_temporary:
       case ast::DepOp::reference_converts_from_temporary:
-      case ast::DepOp::is_base_of: {
+      case ast::DepOp::is_base_of:
+      case ast::DepOp::is_virtual_base_of:
+      case ast::DepOp::is_pointer_interconvertible_base_of:
+      case ast::DepOp::is_layout_compatible: {
         auto operands = substitute_args(ins().seqs.elements(op.operands), b);
         return operands ? replayed_type_trait_pattern(op.op, *operands) : std::nullopt;
       }
