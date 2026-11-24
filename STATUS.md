@@ -1336,6 +1336,12 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   subobject path, including one-past addresses, from the constant's path and byte offset.
 - Errors say why: "not a constant expression: <the interpreter's reason>", located at the
   evaluated expression.
+- Ordinary nonvirtual immediate member calls with void or integral and enum results up to
+  64 bits validate the complete invocation. The evaluator can import supported flat local
+  records and preserve the identity of supported unread runtime receivers. The static
+  through-object path evaluates the discarded receiver as part of the invocation.
+  Reference and field-address results remain tracked in #1183.
+  [#1175](https://github.com/yrashk/ycxx/issues/1175)
 - A constant evaluation can bypass a block-scope static aggregate ([expr.const], [stmt.dcl]).
   L1 forms static addresses at their uses and checks the executed declarations for usability in
   constant expressions. The runtime guard still initializes a static local on its first passage.

@@ -636,6 +636,9 @@ written default member initializer are value-initialized.
   Nonvirtual `consteval` member functions and function template specializations with the
   same body restrictions also link without a native definition when used only in constant
   evaluation. [#1097](https://github.com/yrashk/ycxx/issues/1097)
+  Ordinary nonvirtual member calls with void or supported integral and enum results use
+  immediate evaluation, including eligible flat local records as receivers.
+  [#1175](https://github.com/yrashk/ycxx/issues/1175)
   `consteval` constructors work, including the implicit conversion libycxx's comparison
   categories use for their literal `0` operand, and `constexpr` and `consteval` constructors of
   classes without bases or class-typed fields evaluate at compile time.
