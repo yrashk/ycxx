@@ -2327,7 +2327,8 @@ public:
     const EntityId owner = instantiating != EntityId::none ? instantiating : p_->class_entity(it.parent);
     return members_before(it.parent, item_, owner, name, type_only, functions);
   }
-  std::optional<ast::DeclSema> enclosing_earlier_member(EntityId cls, ast::NameId name, bool type_only) override {
+  std::optional<ast::DeclSema> enclosing_earlier_member(EntityId cls, ast::NameId name, bool type_only,
+                                                       std::vector<ast::DeclSema>* functions) override {
     if (instantiating != EntityId::none) return std::nullopt;
     const auto definition = p_->class_items_.find(std::to_underlying(cls));
     if (definition == p_->class_items_.end()) return std::nullopt;
@@ -2336,7 +2337,7 @@ public:
     while (limit != items::none && p_->items().items[limit].parent != definition->second)
       limit = p_->items().items[limit].parent;
     if (limit == items::none) return std::nullopt;
-    return members_before(definition->second, limit, cls, name, type_only, nullptr);
+    return members_before(definition->second, limit, cls, name, type_only, functions);
   }
   // The declarations of `name` by the members of class item `cls_item` before its member `limit`.
   // A class declared there is a member only when it is nested in `owner` ([class.nest]): an
@@ -4702,6 +4703,27 @@ private:
     return s_.world().entities.entity({.kind = sema::EntityKind::class_, .name = n, .scope = owner});
   }
 
+  // [class.access.general]: a member class keeps the access of its first declaration.
+  bool set_member_class_access(ast::DeclSema& sem, NameId name, u32 name_at) {
+    const auto key = p_->class_definition_keys_.find(it_->parent);
+    sem.access = key != p_->class_definition_keys_.end() && key->second == Tk::kw_class
+                     ? ast::Access::private_ : ast::Access::public_;
+    for (u32 member : p_->items().items[it_->parent].members) {
+      if (member == k_) break;
+      const auto& item = p_->items().items[member];
+      if (item.kind != ItemKind::access_spec) continue;
+      const Tk label = p_->region().tokens[item.begin].kind;
+      sem.access = label == Tk::kw_public ? ast::Access::public_ :
+                   label == Tk::kw_protected ? ast::Access::protected_ : ast::Access::private_;
+    }
+    if (auto previous = q_.earlier_member(name, /*type_only=*/true);
+        previous && (previous->entity != sem.entity || previous->access != sem.access)) {
+      s_.diag(name_at, Diag::conflicting_declaration, name);
+      return false;
+    }
+    return true;
+  }
+
   // `class-key attribute-specifier-seq(opt) identifier ;` in class `owner`: it declares a member
   // class, or redeclares one an earlier member declared ([class.nest], [dcl.type.elab]/3).
   void member_class_declaration(EntityId owner) {
@@ -4717,11 +4739,8 @@ private:
       s_.diag(name_at, Diag::member_named_as_class, name);
       return bad();
     }
-    if (auto previous = q_.earlier_member(name, /*type_only=*/true); previous && previous->entity != entity) {
-      s_.diag(name_at, Diag::conflicting_declaration, name);
-      return bad();
-    }
     ast::DeclSema sem = class_decl(entity, false);
+    if (!set_member_class_access(sem, name, name_at)) return bad();
     sem.annotations = b_.seq(std::span<const ast::AnnotationSema>(annotations));
     if (!class_declared(sem, key, name_at)) return bad();
     s_.own.push_back({name, sem});
@@ -4783,11 +4802,8 @@ private:
       s_.diag(name_at, Diag::member_named_as_class, name);
       return bad();
     }
-    if (owner != EntityId::none)
-      if (auto previous = q_.earlier_member(name, /*type_only=*/true); previous && previous->entity != entity) {
-        s_.diag(name_at, Diag::conflicting_declaration, name);
-        return bad();
-      }
+    ast::DeclSema sem = class_decl(entity, true);
+    if (owner != EntityId::none && !set_member_class_access(sem, name, name_at)) return bad();
     // An earlier definition: in the class, whose members were analysed above, or out of class in
     // an earlier top-level item, which is analysed only when asked (#947).
     p_->ensure_declared(entity, k_);
@@ -4795,7 +4811,6 @@ private:
       s_.diag(name_at, Diag::class_redefinition, name);
       return bad();
     }
-    ast::DeclSema sem = class_decl(entity, true);
     sem.is_final = is_final;
     sem.annotations = b_.seq(std::span<const ast::AnnotationSema>(annotations));
     if (!class_declared(sem, key, name_at)) return bad();

@@ -195,7 +195,8 @@ public:
                                                      std::vector<ast::DeclSema>* functions = nullptr) = 0;
   // In a member of a nested class ([class.nest]): the member named `name` that the enclosing
   // class `cls`, still being defined, declares before the nested class.
-  virtual std::optional<ast::DeclSema> enclosing_earlier_member(EntityId /*cls*/, NameId /*name*/, bool /*type_only*/) {
+  virtual std::optional<ast::DeclSema> enclosing_earlier_member(EntityId /*cls*/, NameId /*name*/, bool /*type_only*/,
+                                                               std::vector<ast::DeclSema>* /*functions*/ = nullptr) {
     return std::nullopt;
   }
   // The direct bases of class `c` while it is being defined (its base-clause), none otherwise.
@@ -656,15 +657,15 @@ public:
       for (EntityId k = enclosing_class(current_class); k != EntityId::none; k = enclosing_class(k)) {
         if (const ClassRec* cr = class_rec(k); cr && cr->defined) {
           // A data member, function or enumerator hides a class of the same name ([basic.scope.hiding]).
-          if (auto f = find_member(k, name, /*unqualified=*/true);
+          if (auto f = direct_member(k, *cr, name);
               !elaborated && f && (f->nested_type == EntityId::none || f->enumerator != EntityId::none))
             return std::nullopt;
-          if (auto r = nested_member(k, name, true)) return r->first.type;
-        } else if (auto m = q_->enclosing_earlier_member(k, name, elaborated)) {
-          if (is_type(m->kind)) return m->type;
-          if (!elaborated) return std::nullopt;
+          auto hit = class_body_type(k, *cr, name, type_at, ClassBodyLookup::class_prefix, elaborated);
+          if (hit.found) return hit.type;
+        } else {
+          auto hit = enclosing_prefix_type(k, name, type_at, elaborated);
+          if (hit.found) return hit.type;
         }
-        if (w_->entities.rec(k).name == name) return types().class_type(k);  // its injected-class-name
       }
     }
     // BOOTSTRAP: -Wmaybe-uninitialized: a value and a flag, not std::optional. At -O3 GCC 16.2
@@ -721,17 +722,33 @@ public:
       if (k == c) return true;
     return false;
   }
-  // Member `m` of enclosing class `k`, still being defined, named in an expression from a nested
-  // class: none for a type. A non-static member needs an object unless it is a data member in
-  // an unevaluated operand ([expr.prim.id.general]/4).
-  std::optional<Ex> enclosing_member_value(EntityId k, const ast::DeclSema& m, NameId name, u32 begin, u32 end) {
-    if (is_type(m.kind)) return std::nullopt;
-    if (m.kind == ast::DeclKind::enumerator) return enumerator(m.entity, m.type, begin, end);
-    if (m.kind == ast::DeclKind::variable) return static_member(k, m.entity, m.type, begin, end);
-    if (m.kind == ast::DeclKind::data_member && unevaluated)
-      return unevaluated_data_member(m.entity, m.type, m.bit_width, begin, end);
-    diag(begin, Diag::member_without_object, name);
-    return Ex{NodeId::none, begin, end};
+  // An incomplete enclosing class exposes its preceding declarations, then its bases.
+  // A non-static member needs an object unless it is a data member in an unevaluated operand.
+  std::optional<Ex> enclosing_prefix_value(EntityId cls, NameId name, u32 begin, u32 end, u32 name_at,
+                                           bool unqualified, bool callee, std::optional<u32> address_at = {}) {
+    std::vector<ast::DeclSema> functions;
+    if (auto m = q_->enclosing_earlier_member(cls, name, /*type_only=*/false, &functions)) {
+      if (m->kind == ast::DeclKind::enumerator) return enumerator(m->entity, m->type, begin, end);
+      if (m->kind == ast::DeclKind::variable) return static_member(cls, m->entity, m->type, begin, end);
+      if (m->kind == ast::DeclKind::function) {
+        const auto is_static = [](const ast::DeclSema& d) { return (d.flags & decl_flag::static_) != 0; };
+        if (!functions.empty() && std::ranges::all_of(functions, is_static))
+          return decls_expr(std::move(functions), true, name, begin, end, callee);
+        if (std::ranges::any_of(functions, is_static))
+          return bind_prefix_member_functions(cls, name, functions, begin, end);
+      }
+      if (m->kind == ast::DeclKind::data_member && unevaluated)
+        return unevaluated_data_member(m->entity, m->type, m->bit_width, begin, end);
+      diag(begin, is_type(m->kind) ? Diag::type_as_expression : Diag::member_without_object, name);
+      return Ex{NodeId::none, begin, end};
+    }
+    if (w_->entities.rec(cls).name == name) {
+      diag(name_at, Diag::type_as_expression, name);
+      return Ex{NodeId::none, begin, end};
+    }
+    const auto bases = class_prefix_bases(cls);
+    if (bases.empty()) return std::nullopt;
+    return class_member(cls, name, begin, end, name_at, address_at, unqualified, /*check_all_bases=*/true, bases);
   }
   static bool is_non_template_tag(const ast::DeclSema& decl) {
     return (decl.kind == ast::DeclKind::class_ || decl.kind == ast::DeclKind::enum_) &&
@@ -869,6 +886,13 @@ public:
     }
     return {true, first->type};
   }
+
+  ClassBodyType enclosing_prefix_type(EntityId cls, NameId name, std::optional<u32> at, bool type_only) {
+    if (auto member = q_->enclosing_earlier_member(cls, name, type_only))
+      return {true, is_type(member->kind) ? std::optional{member->type} : std::nullopt};
+    return class_body_type(cls, ClassRec{}, name, at, ClassBodyLookup::class_prefix, type_only);
+  }
+
   // A class template's nondependent bases are searched before the template parameter scope.
   std::optional<QualType> class_template_parameter_type(const ast::TemplateParamSema& parameter, NameId name, u32 at) {
     const auto before = diag_count();
@@ -2613,8 +2637,7 @@ public:
     }
     if (c == current_class)
       if (auto m = q_->earlier_member(n, /*type_only=*/true)) return m->type;
-    if (encloses_current_class(c))
-      if (auto m = q_->enclosing_earlier_member(c, n, /*type_only=*/true)) return m->type;
+    if (encloses_current_class(c)) return enclosing_prefix_type(c, n, std::nullopt, /*type_only=*/true).type;
     return std::nullopt;
   }
 
@@ -2681,6 +2704,11 @@ public:
       const EntityRec& record = w_->entities.rec(naming);
       if (record.kind != EntityKind::class_ || record.templ != EntityId::none) return true;
     }
+    if (!direct_alias_only && encloses_current_class(naming) && !class_rec(naming)) {
+      const auto before = diag_count();
+      enclosing_prefix_type(naming, n, at, /*type_only=*/true);
+      return !has_error_since(before);
+    }
     auto r = nested_member(naming, n);
     if (!r) return true;
     auto [t, c] = *r;
@@ -2728,7 +2756,12 @@ public:
     if (naming == current_class && (!cls || !cls->defined)) {
       if (q_->earlier_member(name, type_only)) return {};
     }
-    if (enclosing && (!cls || !cls->defined) && q_->enclosing_earlier_member(naming, name, type_only)) return {};
+    if (enclosing) {
+      if (entity.name != name)
+        return cls && cls->defined ? class_body_type(naming, *cls, name, at, ClassBodyLookup::class_prefix, type_only)
+                                   : enclosing_prefix_type(naming, name, at, type_only);
+      if ((!cls || !cls->defined) && q_->enclosing_earlier_member(naming, name, type_only)) return {};
+    }
     const ClassRec incomplete;
     return class_body_type(naming, cls ? *cls : incomplete, name, at, ClassBodyLookup::qualified, type_only);
   }
@@ -2865,8 +2898,8 @@ public:
           return {NodeId::none, begin, end};
         }
         if (encloses_current_class(cls))
-          if (auto m = q_->enclosing_earlier_member(cls, n, /*type_only=*/false))
-            if (auto r = enclosing_member_value(cls, *m, n, begin, end)) return *r;
+          if (auto r = enclosing_prefix_value(cls, n, begin, end, name_at, /*unqualified=*/false, immediate_call, address_at))
+            return *r;
         if (auto r = qualified_class_prefix_value(cls, n, begin, end)) return *r;
         if (!type_trait_failed(*s.type)) diag(begin, Diag::incomplete_type, *s.type);
         return {NodeId::none, begin, end};
@@ -5727,7 +5760,7 @@ public:
   };
 
   std::span<const BaseRec> class_prefix_bases(EntityId owner) {
-    if (owner == class_prefix_owner_) return q_->defining_base_records(owner);
+    if (owner == class_prefix_owner_ || encloses_current_class(owner)) return q_->defining_base_records(owner);
     return {};
   }
   const ast::DeclSema* own_initializer_static(NameId name) {
@@ -5953,7 +5986,8 @@ public:
     return r;
   }
 
-  Ex bind_prefix_member_functions(NameId name, const std::vector<ast::DeclSema>& declarations, u32 begin, u32 end) {
+  Ex bind_prefix_member_functions(EntityId owner, NameId name, const std::vector<ast::DeclSema>& declarations,
+                                  u32 begin, u32 end) {
     std::vector<MemberDeclRec> records;
     std::vector<ast::DeclSema> statics;
     for (const auto& d : declarations | std::views::reverse) {
@@ -5968,7 +6002,7 @@ public:
     std::vector<const MemberDeclRec*> candidates;
     candidates.reserve(records.size());
     for (const MemberDeclRec& record : records) candidates.push_back(&record);
-    Ex set = bind_members(current_class, std::move(candidates), std::nullopt, false, begin, end, begin);
+    Ex set = bind_members(owner, std::move(candidates), std::nullopt, false, begin, end, begin);
     const u32 key = std::to_underlying(set.id);
     // The map's binding owns these records at a stable address. Swapping preserves the candidate pointers.
     bound_.at(key).prefix_candidates.swap(records);
@@ -7603,9 +7637,8 @@ public:
       for (EntityId k = enclosing_class(current_class); k != EntityId::none; k = enclosing_class(k)) {
         if (class_rec(k)) {
           if (auto r = class_member(k, name, begin, end, begin, std::nullopt, /*unqualified=*/true)) return *r;
-        } else if (auto m = q_->enclosing_earlier_member(k, name, /*type_only=*/false)) {
-          if (is_type(m->kind)) break;  // found a type: not an expression
-          return *enclosing_member_value(k, *m, name, begin, end);
+        } else if (auto r = enclosing_prefix_value(k, name, begin, end, begin, /*unqualified=*/true, callee)) {
+          return *r;
         }
       }
     }
@@ -11628,7 +11661,8 @@ private:
         const auto is_static = [](const ast::DeclSema& d) { return (d.flags & decl_flag::static_) != 0; };
         if (!functions.empty() && std::ranges::all_of(functions, is_static))
           return decls_expr(std::move(functions), true, name, begin, end, callee);
-        if (std::ranges::any_of(functions, is_static)) return bind_prefix_member_functions(name, functions, begin, end);
+        if (std::ranges::any_of(functions, is_static))
+          return bind_prefix_member_functions(current_class, name, functions, begin, end);
         if (is_static(*m)) return decls_expr({*m}, true, name, begin, end, callee);
       }
       if (m->kind == ast::DeclKind::data_member) {
