@@ -236,6 +236,21 @@ struct [[=dependent]] VDepMember {
   NameId name;
 };
 
+// A field selected on a fixed class template parameter object ([expr.ref]).
+struct [[=dependent]] VDepField {
+  EntityId owner = EntityId::none;
+  EntityId member = EntityId::none;
+  QualType type;
+  ConstId object = ConstId::none;
+};
+
+// The guard and two typed alternatives of a structural parameter projection. An operand
+// holding a VEntity reads the named object only when that operand is selected.
+struct [[=dependent]] VDepConditional {
+  QualType type;
+  SeqId<TemplateArg> operands;
+};
+
 enum class DepOp : u8 {
   is_same, is_reference, is_const, is_volatile, is_array, is_pointer, is_function,
   is_enum, is_union, is_class,
@@ -339,7 +354,7 @@ struct VConstraint {
 
 using ValueKinds = closed_list<VInt, VFloat, VNullptr, VString, VLvalue, VEntity, VAggregate, VDepParam, VDepFnParam, VDepExpansion,
                                VDepSizeofPack, VType, VAtom, VConstraint, VDepOp, VMemberPtr, VDepVariable, VConstraintPack,
-                               VDepCall, VDepMember, VDepConcept, VConstraintEnum>;
+                               VDepCall, VDepMember, VDepConcept, VConstraintEnum, VDepField, VDepConditional>;
 
 template <class T>
 constexpr bool is_value_kind = ValueKinds::contains<T>;

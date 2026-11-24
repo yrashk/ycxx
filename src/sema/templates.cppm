@@ -645,6 +645,12 @@ public:
       if (!value) return std::nullopt;
       return converted_value(*value, t);
     }
+    if (is_projection(a.value)) {
+      auto value = substitute_value(a.value, b);
+      if (!value) return std::nullopt;
+      if (ins().values.is_dependent(*value)) return value_arg(t, *value);
+      return converted_value(value_arg(ins().values.get<ast::VInt>(*value).type, *value), t);
+    }
     if (ins().values.is<ast::VDepCall>(a.value)) {
       auto value = substitute_call_value(a.value, b);
       if (!value) return std::nullopt;
@@ -695,6 +701,8 @@ public:
     }
     if (ins().values.is<ast::VDepMember>(v))
       return substitute_member_value(v, b).transform([](const TemplateArg& a) { return a.value; });
+    if (ins().values.is<ast::VDepField>(v)) return substitute_field_value(v, b);
+    if (ins().values.is<ast::VDepConditional>(v)) return substitute_conditional_value(v, b, /*evaluate=*/true);
     if (ins().values.is<ast::VDepConcept>(v)) return substitute_concept_value(v, b);
     if (ins().values.is<ast::VDepVariable>(v)) return substitute_variable_value(v, b, variable_constant);
     if (ins().values.is<ast::VDepCall>(v))
@@ -1071,6 +1079,10 @@ public:
       for (const TemplateArg& a : ins().seqs.elements(ins().values.get<ast::VDepVariable>(v).args)) params_in(a, out, nested);
     else if (ins().values.is<ast::VDepMember>(v))
       params_in(ins().values.get<ast::VDepMember>(v).qualifier, out, nested);
+    else if (ins().values.is<ast::VDepField>(v))
+      params_in(ins().values.get<ast::VDepField>(v).object, out, nested);
+    else if (ins().values.is<ast::VDepConditional>(v))
+      for (const TemplateArg& a : ins().seqs.elements(ins().values.get<ast::VDepConditional>(v).operands)) params_in(a, out, nested);
     else if (ins().values.is<ast::VDepConcept>(v))
       for (const TemplateArg& a : ins().seqs.elements(ins().values.get<ast::VDepConcept>(v).args)) params_in(a, out, nested);
     else if (ins().values.is<ast::VDepCall>(v))
@@ -1781,6 +1793,7 @@ public:
       }
       return value_arg(t, w_->values.aggregate(t, canonical));
     }
+    if (is_projection(a.value) && !types().is_dependent(t) && !types().is_integral(t)) return std::nullopt;
     // Predicate conversions to non-bool destinations need a dependent conversion (#209).
     // A dependent base alignment is checked again when the written argument is replayed.
     ConstId pattern = is_expansion(a) ? pattern_of(a).value : a.value;
@@ -2090,6 +2103,71 @@ private:
 
   enum class BooleanSubstitution { evaluate, defer, discard };
 
+  bool is_projection(ConstId v) {
+    return ins().values.is<ast::VDepField>(v) || ins().values.is<ast::VDepConditional>(v);
+  }
+
+  std::optional<ConstId> substitute_field_value(ConstId v, const Bindings& b) {
+    auto field = ins().values.get<ast::VDepField>(v);
+    auto object = substitute_value(field.object, b);
+    if (!object) return std::nullopt;
+    if (ins().values.is<ast::VDepParam>(*object)) {
+      field.object = *object;
+      return ins().intern_value(field);
+    }
+    if (!ins().values.is<ast::VAggregate>(*object)) return std::nullopt;
+    const auto& aggregate = ins().values.get<ast::VAggregate>(*object);
+    const ClassRec* record = classes_->find(field.owner);
+    if (!record || !record->defined || aggregate.type != types().class_type(field.owner))
+      return std::nullopt;
+    auto member = std::ranges::find(record->fields, field.member, &FieldRec::entity);
+    if (member == record->fields.end() || types().canonical(member->type) != field.type ||
+        ins().seqs.size(aggregate.elems) != record->fields.size())
+      return std::nullopt;
+    const u32 index = static_cast<u32>(member - record->fields.begin());
+    const ConstId value = ins().seqs.at(aggregate.elems, index);
+    return ins().values.is<ast::VInt>(value) ? std::optional(value) : std::nullopt;
+  }
+
+  std::optional<ConstId> substitute_conditional_operand(const TemplateArg& a, const Bindings& b, bool evaluate) {
+    if (ins().values.is<ast::VDepConditional>(a.value)) return substitute_conditional_value(a.value, b, evaluate);
+    if (!ins().values.is<ast::VEntity>(a.value)) return substitute_value(a.value, b);
+    if (!evaluate) return a.value;
+    if (!variable_global || Types::is_volatile(a.type)) return std::nullopt;
+    auto g = variable_global(ins().values.get<ast::VEntity>(a.value).entity);
+    if (!g || !g->usable || !g->value || Types::is_volatile(types().canonical(g->type)) ||
+        !ins().values.is<ast::VInt>(*g->value))
+      return std::nullopt;
+    return g->value;
+  }
+
+  std::optional<ConstId> substitute_conditional_value(ConstId v, const Bindings& b, bool evaluate) {
+    auto conditional = ins().values.get<ast::VDepConditional>(v);
+    if (evaluate && Types::is_volatile(conditional.type)) return std::nullopt;
+    auto operands = ins().seqs.elements(conditional.operands);
+    auto guard = substitute_conditional_operand(operands[0], b, evaluate);
+    if (!guard) return std::nullopt;
+    operands[0].value = *guard;
+
+    std::size_t selected = 0;
+    if (evaluate && ins().values.is<ast::VInt>(*guard)) {
+      selected = ast::int_bits(ins(), *guard) == ast::Bits128{} ? 2 : 1;
+      auto value = substitute_conditional_operand(operands[selected], b, /*evaluate=*/true);
+      if (!value) return std::nullopt;
+      if (ins().values.is<ast::VInt>(*value))
+        return ast::convert_integral(ins(), w_->target, *value, conditional.type);
+      operands[selected].value = *value;
+    }
+    for (std::size_t i = 1; i < operands.size(); ++i) {
+      if (i == selected) continue;
+      auto value = substitute_conditional_operand(operands[i], b, /*evaluate=*/false);
+      if (!value) return std::nullopt;
+      operands[i].value = *value;
+    }
+    conditional.operands = ins().intern_seq(std::span<const TemplateArg>(operands));
+    return ins().intern_value(conditional);
+  }
+
   std::optional<TemplateArg> substitute_member_value(ConstId v, const Bindings& b) {
     auto member = ins().values.get<ast::VDepMember>(v);
     auto qualifier = substitute(member.qualifier, b);
@@ -2247,6 +2325,11 @@ private:
                                  [&](const TemplateArg& a) { return structural_operand(a); });
     if (ins().values.is<ast::VDepMember>(v))
       return structural_operand(ins().values.get<ast::VDepMember>(v).qualifier);
+    if (ins().values.is<ast::VDepField>(v))
+      return structural_value(ins().values.get<ast::VDepField>(v).object);
+    if (ins().values.is<ast::VDepConditional>(v))
+      return std::ranges::all_of(ins().seqs.elements(ins().values.get<ast::VDepConditional>(v).operands),
+                                 [&](const TemplateArg& a) { return structural_operand(a); });
     if (ins().values.is<ast::VDepConcept>(v))
       return std::ranges::all_of(ins().seqs.elements(ins().values.get<ast::VDepConcept>(v).args),
                                  [&](const TemplateArg& a) { return structural_operand(a); });
