@@ -2966,6 +2966,12 @@ request it serves.
   the workers' timeline. `:browse` is the full-screen termios browser: tree with a detail pane
   (the value: L1 for `FunctionIr`, L2 for `Lower`, instruction words for `Codegen`), timeline
   with a time cursor, worker selection, live feed.
+- The browser's layout (#1119): a title bar with the tabs and the live state, the summary (at
+  most three lines), a line of toggles that show their keys and state (clickable), and a footer
+  of the view's keys with `? help` and `q quit` pinned right; `?` is a scrolling box. Lines are
+  fitted by priority (`pack`, `spread`, `ellipsize` in `:view`), so nothing runs off at 80
+  columns or more. The timeline groups workers in the same cell (`w0–w17`) and cuts the demand
+  chain in the middle; the pane wraps at spaces and `/`, and shows memory as own / in all.
 - Names: units and files by their file, functions by qualified name, requests and programs by
   their units and output (`Build(a.cpp → a)`).
 - Errors: a compile error is a value, so a kind says which of its values hold errors
