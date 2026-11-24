@@ -1461,11 +1461,10 @@ public:
       // that scope.
       u32 next = 0;
       l.qualifier_at = pos();
-      const auto alias_failures = alias_constraint_failures_;
-      auto sc = nested_name(0, next, /*member_pointer=*/false, /*checked=*/false, QualifierLookup::ordinary,
-                            /*check_injected_access=*/false, nullptr, nullptr, nullptr, /*committed_type=*/true);
+      bool alias_failed = false;
+      auto sc = committed_nested_name(0, next, &alias_failed);
       if (!sc) {
-        if (alias_constraint_failures_ == alias_failures)
+        if (!alias_failed)
           s_->diag(pos(), Diag::not_a_namespace, is(Tk::identifier) ? name_of(tok()) : s_->no_name());
         ok = false;
         return l;
@@ -1725,6 +1724,14 @@ public:
     next = j;
     return s;
   }
+  // A selected nested name checks namespace alias constraints. Its caller still handles access.
+  std::optional<sema::Sema::Scope> committed_nested_name(u32 start, u32& next, bool* alias_failed = nullptr) {
+    const auto before = alias_constraint_failures_;
+    auto scope = nested_name(start, next, /*member_pointer=*/false, /*checked=*/false, QualifierLookup::ordinary,
+                             /*check_injected_access=*/false, nullptr, nullptr, nullptr, nullptr, /*committed_type=*/true);
+    if (alias_failed) *alias_failed = alias_constraint_failures_ != before;
+    return scope;
+  }
   // A component `X<args>::` at `j` ahead naming a class template specialization, found by
   // unqualified lookup or in namespace `in` ([temp.names]); `j` moves past the `::`. The arguments
   // are parsed ahead of the tokens being taken. A speculative lookup discards its diagnostics.
@@ -1759,22 +1766,40 @@ public:
     const auto alias_failures = alias_constraint_failures_;
     const u32 name_at = pos() + k;
     const bool committed = !probing_alias_constraints_ && (checked || committed_failure || committed_type);
-    const u32 qualifier_end = committed && scope ? past_template_args(k + 1) : 0;
+    u32 qualifier_end = committed && scope ? past_template_args(k + 1) : 0;
     // Looking for `::` can also read the arguments of a terminal template-id. Only the
     // selected reading checks constraints, including on aliases nested in its arguments.
-    const AliasConstraintProbe probe{*this, !committed || (scope && kind(qualifier_end) != Tk::coloncolon)};
+    const bool probe_arguments = !committed || (scope && kind(qualifier_end) != Tk::coloncolon);
     i_ += k + 1;
     bool took_closer = false;
-    auto args = template_argument_list(nullptr, &took_closer);
+    const auto deferred_checks = deferred_argument_checks_;
+    const auto deferred_calls = deferred_immediate_calls_;
+    auto args = [&] {
+      const AliasConstraintProbe probe{*this, probe_arguments};
+      return template_argument_list(nullptr, &took_closer);
+    }();
+    // `<` can be an operator in an argument. If the parser found a qualifier the
+    // token lookahead missed, read its arguments with alias checks enabled.
+    if (committed && scope && probe_arguments && took_closer && !half_ && kind() == Tk::coloncolon) {
+      qualifier_end = i_ - saved;
+      i_ = saved + k + 1;
+      half_ = saved_half;
+      deferred_argument_checks_ = deferred_checks;
+      deferred_immediate_calls_ = deferred_calls;
+      s_->truncate_diags(diags);
+      args = template_argument_list(nullptr, &took_closer);
+    }
     u32 after = i_ - saved;
     bool closed = took_closer && (!scope || (!half_ && kind() == Tk::coloncolon));
     bool ended_half = half_;  // the list ended in the first half of a `>>`
     std::optional<QualType> t;
-    if (args && closed)
+    if (args && closed) {
+      const AliasConstraintProbe probe{*this, !committed};
       t = tt ? s_->template_param_id(*tt, *args, 0)
           : builtin ? s_->builtin_template_id(n, *args, 0)
           : dependent_member ? std::optional(s_->dependent_member_template_id(*in->type, n, *args))
                              : type_template_id(*tmpl, *args, name_at);
+    }
     i_ = saved;
     half_ = saved_half;
     if (!scope) qualified_half_ = ended_half;
@@ -2632,20 +2657,21 @@ public:
     }
     return p;
   }
-  // Whether a template argument here is a template-name alone ([temp.arg.template]/1): one naming
-  // a class or alias template, or a template template parameter, followed by the argument's end.
-  bool template_name_ahead() {
+  // The last token of a template-name alone ([temp.arg.template]/1): a class or alias template
+  // or a template template parameter, followed by the argument's end.
+  std::optional<u32> template_name_end_ahead() {
     u32 at = 0;
     std::optional<ast::TemplateArg> a = template_name_at(at);
     Tk k = kind(at + 1);
-    return a && (k == Tk::comma || k == Tk::greater || k == Tk::greatergreater || k == Tk::ellipsis);
+    if (a && (k == Tk::comma || k == Tk::greater || k == Tk::greatergreater || k == Tk::ellipsis)) return at;
+    return std::nullopt;
   }
   // A template-name here, `X`, `N::X`, a class's member template `C::X` or `Q::template X`
   // ([temp.arg.template]/1, [temp.names]/4), as a template argument; `at` is its last token.
   std::optional<ast::TemplateArg> template_name_at(u32& at, bool checked = false) {
     at = 0;
     if (qualified_ahead()) {
-      auto sc = nested_name(0, at);
+      auto sc = checked ? committed_nested_name(0, at) : nested_name(0, at);
       if (!sc) return std::nullopt;
       const bool keyword = kind(at) == Tk::kw_template;
       if (keyword) ++at;
@@ -2821,8 +2847,12 @@ public:
         // Other `auto(...)` spellings keep type-id precedence ([temp.arg.general]/2).
         const bool decay_copy = is(Tk::kw_auto) &&
                                (kind(1) == Tk::l_brace || (kind(1) == Tk::l_paren && kind(2) == Tk::int_lit));
-        if (template_name_ahead()) {
-          args.push_back(*template_name_argument());
+        if (auto end = template_name_end_ahead()) {
+          if (auto a = template_name_argument()) args.push_back(*a);
+          else {
+            for (u32 j = 0; j <= *end; ++j) bump();
+            ok = false;
+          }
         } else if (!decay_copy && starts_type_id(/*template_argument=*/true)) {
           auto t = type_id();
           if (!t) ok = false;

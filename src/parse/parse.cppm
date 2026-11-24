@@ -3593,6 +3593,8 @@ private:
         bool dtor = ps_.kind(next) == Tk::tilde && ps_.kind(next + 1) == Tk::identifier &&
                     ps_.name_of(ps_.tok(next + 1)) == cname;
         if (ctor || dtor) {
+          sc = ps_.committed_nested_name(ctor_at, next);
+          if (!sc) return bad();
           auto flags = constructor_flags(ctor_at, dtor);
           if (!flags) return bad();
           return out_of_class_special(*sc->type, next - ctor_at, *flags);
@@ -4775,9 +4777,10 @@ private:
     const u32 at = ps_.pos();
     u32 next = 0;
     const auto diags = s_.diag_count();
-    auto scope = ps_.nested_name(0, next);
+    bool alias_failed = false;
+    auto scope = ps_.committed_nested_name(0, next, &alias_failed);
     if (!scope) {
-      if (!s_.has_error_since(diags)) s_.diag(at, Diag::expected_unqualified_id);
+      if (!alias_failed && !s_.has_error_since(diags)) s_.diag(at, Diag::expected_unqualified_id);
       return EntityId::none;
     }
     if (ps_.kind(next) != Tk::identifier || ps_.kind(next + 1) == Tk::coloncolon || !scope->type ||
