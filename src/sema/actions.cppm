@@ -420,6 +420,13 @@ EntityId type_info_entity(World& world, EntityId cls) {
                                 ast::Linkage::external, {}, cls});
 }
 
+// Itanium C++ ABI §3.2.6: the entry of a pure virtual function in a table.
+EntityId pure_virtual_handler(World& world) {
+  const auto lang = LangLinkage::c;
+  const auto type = world.types.function(world.types.builtin(Builtin::void_), {}, false, lang);
+  return world.entities.entity({EntityKind::function, world.ins.names.intern("__cxa_pure_virtual"), type, lang});
+}
+
 EntityId dynamic_cast_runtime(World& world) {
   const QualType v = world.types.builtin(Builtin::void_);
   const QualType p = world.types.pointer(world.types.add_cv(v, Cv::const_));
@@ -2724,7 +2731,7 @@ public:
     const QualType element = types().innermost_array_element(t);
     // Layout can be the first use that requires a class specialization to be complete.
     const ClassRec* record = types().is_class(element) ? class_rec(types().class_of(element)) : nullptr;
-    if (!record || !record->layout_requires_virtual_support) return true;
+    if (!record || !record->virtual_layout_unsupported) return true;
     diag(at, Diag::virtual_layout, t);
     return false;
   }
@@ -2988,7 +2995,13 @@ public:
   }
   bool has_user_ctors(QualType t) {
     const ClassRec* c = types().is_class(t) ? class_rec(types().class_of(t)) : nullptr;
-    return c && (c->user_ctors || c->closure);
+    return c && (c->user_ctors || c->closure || (c->dynamic && c->implicit_default_ctor != EntityId::none));
+  }
+  // A class whose implicit default constructor is a function of its own: a dynamic class, or one
+  // with a dynamic subobject (#309).
+  bool has_implicit_constructor(QualType t) {
+    const ClassRec* c = types().is_class(t) ? class_rec(types().class_of(t)) : nullptr;
+    return c && c->implicit_default_ctor != EntityId::none;
   }
 
   // [dcl.init.general]: the supported aggregate elements need no cleanup during unwinding.
@@ -3123,7 +3136,7 @@ public:
     if (r.kind == TypeKind::array) return has_member_inits(r.inner);
     if (r.kind != TypeKind::class_) return false;
     if (const ClassRec* c = class_rec(r.entity)) {
-      if (c->user_ctors) return true;
+      if (c->user_ctors || c->implicit_default_ctor != EntityId::none) return true;
       for (const BaseRec& b : c->bases)
         if (has_member_inits(types().class_type(b.cls))) return true;
       for (const FieldRec& f : c->fields)
@@ -3142,7 +3155,7 @@ public:
       diag(begin, Diag::member_pointer_values);
       return {NodeId::none, begin, end};
     }
-    if (has_user_ctors(t)) return construct(t, {}, begin, end);  // the default constructor
+    if (has_user_ctors(t) || has_implicit_constructor(t)) return construct(t, {}, begin, end);  // the default constructor
     if (has_member_inits(t)) return member_inits(t, true, begin, end);
     ExprInfo info{Types::unqualified(t), ValueCategory::prvalue, 0};
     return node(ast::ValueInit{info}, begin, end, info);
@@ -3159,7 +3172,7 @@ public:
   Ex default_init(QualType t, u32 begin, u32 end) {
     if (types().is_dependent(t)) return dependent_node({}, begin, end);
     if (!require_concrete_object(t, begin) || !require_supported_virtual_layout(t, begin)) return {NodeId::none, begin, end};
-    if (has_user_ctors(t)) return construct(t, {}, begin, end, Construction::default_init);
+    if (has_user_ctors(t) || has_implicit_constructor(t)) return construct(t, {}, begin, end, Construction::default_init);
     if (has_member_inits(t)) return member_inits(t, false, begin, end);
     ExprInfo info{Types::unqualified(t), ValueCategory::prvalue, 0};
     return node(ast::DefaultInit{info}, begin, end, info);
@@ -5743,7 +5756,8 @@ public:
       object = self_of();
       if (!object->ok()) return fail;
     }
-    Ex set = bound_member(c, name, object, true, begin, end, name_at, naming);
+    // `C::f` names the function itself: a call does not dispatch ([class.virtual]/16).
+    Ex set = bound_member(c, name, object, true, begin, end, name_at, naming, /*qualified=*/!unqualified);
     // Only static members match ordinary function pointers or references ([over.over]). Keep
     // the bound member for calls, whose candidate set also includes the non-static members.
     const u32 key = std::to_underlying(set.id);
@@ -6007,8 +6021,24 @@ public:
       return fail;
     }
     std::optional<u32> virtual_slot;
+    const ClassRec* dynamic_owner = d->is_virtual ? class_rec(w_->entities.rec(d->entity).scope) : nullptr;
+    if (dynamic_owner && !dynamic_owner->dynamic) dynamic_owner = nullptr;
     if (unevaluated == 0) {
-      if (d->is_virtual) {
+      if (dynamic_owner) {
+        // Itanium C++ ABI §3.2.4: dispatch through the slot the declaration occupies in its own
+        // class's table. A qualified name calls the named function directly ([class.virtual]/16).
+        if (!object || assignment_notation) {
+          diag(paren_at, Diag::virtual_call);
+          return fail;
+        }
+        if (!bound.qualified) {
+          virtual_slot = dynamic_owner->dynamic->slot_of(d->entity);
+          if (!virtual_slot) {
+            diag(paren_at, Diag::virtual_call);
+            return fail;
+          }
+        }
+      } else if (d->is_virtual) {
         const auto* record = virtual_consumer(bound.cls);
         // The pure interface has a known call shape independently of its object layout.
         if (!record && d->is_pure && bound.explicit_receiver && !bound.qualified && bound.naming == bound.cls &&
@@ -6110,7 +6140,8 @@ public:
       parameters.append_range(fr.params);
       // The pure dispatch profile certifies a nonthrowing prototype for initializer selection.
       const auto pointer = types().pointer(types().function(fr.inner, parameters, false, LangLinkage::cxx,
-                                                            Cv::none, ast::RefQual::none, d->is_pure && fr.fn_noexcept));
+                                                            Cv::none, ast::RefQual::none,
+                                                            (d->is_pure || dynamic_owner) && fr.fn_noexcept));
       return node(ast::VirtualMemberCall{info, pointer, *virtual_slot, at(o, begin), b_->list(*children)}, begin, end, info);
     }
     return node(ast::MemberCall{info, fe, at(o, begin), b_->list(*children)}, begin, end, info);
@@ -6663,7 +6694,13 @@ public:
         cands.push_back({EntityId::none, types().function(void_, std::span(&move, 1), false, LangLinkage::cxx), true, false});
       }
     }
-    if (!cr->user_ctors && !copy_init) cands.push_back({EntityId::none, types().function(void_, {}, false, LangLinkage::cxx), true, false});
+    if (!cr->user_ctors && !copy_init) {
+      // A dynamic class's implicit default constructor is a function of its own (#309).
+      const EntityId implicit = cr->implicit_default_ctor;
+      const QualType type = implicit == EntityId::none ? types().function(void_, {}, false, LangLinkage::cxx)
+                                                       : w_->entities.rec(implicit).type;
+      cands.push_back({implicit, type, true, false});
+    }
     if (polymorphic_base && list && std::ranges::any_of(cr->members, [&](const MemberDeclRec& member) {
           if (!member.is_ctor) return false;
           const auto params = types().rec(member.type).params;
@@ -6793,7 +6830,10 @@ public:
       cs.push_back({a.id, a.begin >= begin ? a.begin - begin : 0});
     }
     ExprInfo info{ut, ValueCategory::prvalue, 0};
-    Ex construction = node(ast::CtorCall{info, k.entity, 0, b_->list(cs)}, begin, end, info);
+    // [dcl.init.general]/9: value-initialization zero-initializes before a constructor that is
+    // not user-provided.
+    const u32 zero_first = k.entity == cr->implicit_default_ctor && form != Construction::default_init ? 1 : 0;
+    Ex construction = node(ast::CtorCall{info, k.entity, zero_first, b_->list(cs)}, begin, end, info);
     if (!k.is_consteval) return construction;
     consteval_.insert(std::to_underlying(k.entity));
     return immediate_invocation(construction);
@@ -9181,7 +9221,7 @@ public:
   }
   // Also used on a class about to be published, before its own alignment has been applied.
   std::optional<ast::RecordLayout> record_layout(const ClassRec& c, EntityId ce) {
-    if (c.layout_requires_virtual_support && c.peer_virtual_layout == PeerVirtualLayout::none &&
+    if (c.virtual_layout_unsupported && c.peer_virtual_layout == PeerVirtualLayout::none &&
         c.peer_automatic_primary_base == EntityId::none) return std::nullopt;
     std::vector<ast::Placed> bases, places;
     for (const BaseRec& b : c.bases) {
@@ -9199,7 +9239,8 @@ public:
       m->bit_width = f.bit_width;
       places.push_back(*m);
     }
-    const ast::Target* root = c.peer_virtual_layout == PeerVirtualLayout::root ? &w_->target : nullptr;
+    const bool dynamic_root = c.dynamic && !c.dynamic->primary_base;
+    const ast::Target* root = c.peer_virtual_layout == PeerVirtualLayout::root || dynamic_root ? &w_->target : nullptr;
     return ast::record_layout(bases, places, c.union_, c.pod, std::to_underlying(ce), root, c.explicit_alignment);
   }
   std::map<u32, ast::RecordLayout> class_places_;  // complete classes' layouts

@@ -262,6 +262,58 @@ handler.
 [#309](https://github.com/yrashk/ycxx/issues/309) · [#422](https://github.com/yrashk/ycxx/issues/422) ·
 [macOS parity #659](https://github.com/yrashk/ycxx/issues/659)
 
+## General single-inheritance dynamic classes (both targets)
+
+A polymorphic class outside the peer profiles above is a *dynamic class* when it is an ordinary
+non-template class with external linkage, at namespace scope or nested in such classes, and has
+at most one direct base, which is public, nonvirtual and itself dynamic. Class completion records
+its primary table (`sema::DynamicClass`): the base's slots, each overridden one replaced by its
+overrider, then the virtuals that override nothing in declaration order. A virtual destructor
+occupies a complete and a deleting slot, and an implicit destructor replaces both inherited ones.
+The key function is the first virtual declared in the class that is neither pure nor inline at
+the end of its definition. The profiles keep their classes; a profile class is not a dynamic base.
+[Itanium ABI §2.5.2](https://itanium-cxx-abi.github.io/cxx-abi/abi.html#vtable-components) ·
+[Itanium ABI §5.2.3](https://itanium-cxx-abi.github.io/cxx-abi/abi.html#vague-vtable)
+
+A dynamic root has its vptr at offset zero; a derived class shares its primary base's. A class is
+or contains a polymorphic class unsupported by this layout when `virtual_layout_unsupported` says
+so, and only those keep the layout guard. A dynamic class without user-declared constructors gets
+an implicitly defined default constructor whose body is the one a user-written constructor with no
+ctor-initializer and an empty compound statement would have ([class.default.ctor]), with its
+default member initializers. Value-initialization zero-initializes first. A dynamic class, or a
+class containing one, gets an implicit copy constructor that copies a dynamic base with the base's
+copy constructor. A virtual destructor defaulted on its first declaration gets the implicit body.
+[[class.default.ctor]](https://eel.is/c++draft/class.default.ctor) ·
+[[class.copy.ctor]](https://eel.is/c++draft/class.copy.ctor)
+
+Every constructor of a dynamic class stores its table's address point after the base subobject is
+initialized and before the first member; every destructor stores it before its body, so virtual
+calls during construction and destruction use the class whose constructor or destructor runs.
+Their base-object entries share the complete-object code (no virtual bases). A virtual
+destructor's definition adds the deleting entry, which runs the complete entry and then calls
+sized `operator delete` with the class's size.
+[[class.cdtor]](https://eel.is/c++draft/class.cdtor) ·
+[Itanium ABI §5.1.4.3](https://itanium-cxx-abi.github.io/cxx-abi/abi.html#mangling-special-ctor-dtor)
+
+An unqualified call of a virtual member through any object expression loads the vptr, indexes the
+slot the declaration has in its own class's table, and passes the object pointer. A qualified
+name calls the function directly ([class.virtual]/16).
+[Itanium ABI §3.2.4](https://itanium-cxx-abi.github.io/cxx-abi/abi.html#vcall.caller)
+
+A unit defining the key function out of class, not inline, owns a strong table and RTTI. A unit
+defining a class without a key function emits them weak. A root's descriptor is a
+`__class_type_info`; a derived class's is an `__si_class_type_info` that names its base's,
+referenced by name or defined in the same object. Pure slots hold `__cxa_pure_virtual`. On ELF a
+weak table and descriptor each have a COMDAT group keyed by its name; on Mach-O they are weak
+definitions, with weak descriptors and names following Apple's non-unique RTTI convention as the
+keyless descriptor above does. The run suite (`tests/own/classes/virtual-dispatch`) runs on macOS,
+and `unit.linux_virtual_dispatch` links the same tests with native GCC and Clang on Linux,
+including the mixed-object peers.
+
+Class templates, local and internal-linkage classes, other base shapes (non-polymorphic or
+non-public bases, multiple inheritance), `delete` through a virtual destructor, covariant returns,
+`typeid`, and constant evaluation of dynamic objects remain open; their issues are listed in #309.
+
 Broader table emission, covariant returns, further pure-slot signatures, out-of-class pure member
 definitions, explicit virtual destructor calls and virtual member addresses
 remain in #309. Pure declarations and `final` for virtual destructors and assignment operators

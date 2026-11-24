@@ -1031,7 +1031,7 @@ bool native_virtual_layouts(TranslationUnit& tu, parse::Program& program, sema::
   };
   for (EntityId c : classes.classes()) {
     const auto& record = classes.rec(c);
-    if (!record.layout_requires_virtual_support) continue;
+    if (!record.virtual_layout_unsupported) continue;
     if (record.peer_automatic_primary_base != EntityId::none || automatic_primary_bases.contains(c)) continue;
     if (derived_destructor_classes.contains(c)) continue;
     if (!uncertain_layouts.contains(c) && program.peer_root_destructor_producer(c)) continue;
@@ -1289,7 +1289,8 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
       // All eligible destructor entries are nonvirtual with a nonthrowing specification.
       const bool specialized = (f.decl.flags & sema::decl_flag::specialization) != 0;
       const auto* owner = classes.find(entity.scope);
-      if ((!in_class && !specialized) || f.decl.is_virtual || !owner || !owner->destructor_noexcept.value_or(false) ||
+      if ((!in_class && !specialized) || !owner || (f.decl.is_virtual && !owner->dynamic) ||
+          !owner->destructor_noexcept.value_or(false) ||
           internal_class(entity.scope) ||
           names_tu_local(program, entity.scope, /*include_value_types=*/true)) return;
     } else if (entity.kind == sema::EntityKind::constructor) {
@@ -1327,6 +1328,41 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
     return ins.seqs.size(body.closures) == 0 && std::ranges::none_of(ins.seqs.elements(body.locals), [&](const ast::LocalRec& local) {
       return local.entity != EntityId::none && local.decl != ast::NodeId::none && ins.ast.is<ast::StaticVar>(local.decl);
     });
+  };
+  // A dynamic class's constructors and destructors install its table, share their code with
+  // their base-object entries (no virtual bases), and a virtual destructor adds its deleting
+  // entry, D1 then sized `operator delete` (Itanium C++ ABI §2.5.2, §3.2.3, §5.1.4.3; #309).
+  auto dynamic_member = [&](std::size_t index) {
+    const FunctionDef f = tu.functions[index];
+    const auto& entity = world.entities.rec(f.entity);
+    if (entity.kind != sema::EntityKind::constructor && entity.kind != sema::EntityKind::destructor) return true;
+    const auto* owner = classes.find(entity.scope);
+    if (!owner || !owner->dynamic || f.body.tree == ast::NodeId::none) return true;
+    const EntityId table = sema::virtual_table_entity(world, entity.scope);
+    tu.base_object_variants.insert(f.entity);
+    if (entity.kind == sema::EntityKind::constructor) {
+      tu.functions[index].constructor_table = table;
+      return true;
+    }
+    tu.functions[index].destructor_table = table;
+    if (!f.decl.is_virtual) return true;
+    const auto size = program.class_size(entity.scope);
+    if (!size) {
+      block_virtual_emission(tu, program, *owner);
+      return false;
+    }
+    if (!root_deallocator) root_deallocator = world.allocation_function(sema::AllocationFunction::deallocate_sized);
+    const ast::Loc location{f.item, f.body_offset};
+    ast::DeclSema deleting = f.decl;
+    deleting.entity = destructor_variant(world, f.entity, sema::EntityKind::deleting_destructor);
+    declare(deleting, location);
+    FunctionDef d0{deleting.entity, deleting, deleting_destructor_body(world, f, *root_deallocator, *size),
+                   f.item, f.body_offset, f.this_type};
+    d0.body.locals = ins.intern_seq(std::span<const ast::LocalRec>{});
+    d0.body.closures = ins.intern_seq(std::span<const ast::ClosureDef>{});
+    d0.coalesced = f.coalesced;
+    tu.functions.push_back(std::move(d0));
+    return true;
   };
   for (std::uint32_t k = first; k < items.items.size() && k < end; ++k) {
     const items::Item& it = items.items[k];
@@ -1448,6 +1484,7 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
         }
       }
       coalesce_inline_function(tu.functions.back(), member);
+      if (!dynamic_member(tu.functions.size() - 1)) return tu;
       closures_of(body.closures, program.id(k), it.body_begin - it.begin);
       continue;
     }
@@ -1550,7 +1587,48 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
     tu.functions.push_back({s.decl.entity, s.decl, program.synthesized_body(i), program.id(s.item), 0, program.this_type(s.decl)});
     using enum parse::Program::SpecialMember;
     if (s.kind == destructor) coalesce_inline_function(tu.functions.back(), true);
-    else tu.functions.back().coalesced = (s.kind == copy_assignment || s.kind == move_constructor) && !internal_class(cls);
+    else tu.functions.back().coalesced = (s.kind == copy_assignment || s.kind == move_constructor ||
+                                          s.kind == default_constructor ||
+                                          (s.kind == copy_constructor && classes.rec(cls).layout_requires_virtual_support)) &&
+                                         !internal_class(cls);
+    if (!dynamic_member(tu.functions.size() - 1)) return tu;
+  }
+  // The tables of the dynamic classes this unit defines: strong where the key function is
+  // defined here and not inline, weak where the class has none (Itanium C++ ABI §5.2.3).
+  for (EntityId c : classes.classes()) {
+    const auto& record = classes.rec(c);
+    if (!record.dynamic || !record.defined) continue;
+    const auto& dynamic = *record.dynamic;
+    bool weak = dynamic.key_function == EntityId::none;
+    if (!weak) {
+      if (!program.function_defined_before(dynamic.key_function, program.end())) continue;
+      weak = inline_declarations.contains(dynamic.key_function);
+    }
+    DynamicTable table{sema::virtual_table_entity(world, c), c, {},
+                       dynamic.primary_base ? record.bases.front().cls : EntityId::none, weak};
+    const auto reference = [&](EntityId e) {
+      if (seen.contains(std::to_underlying(e))) return;
+      ast::DeclSema d{};
+      d.kind = ast::DeclKind::function;
+      d.entity = e;
+      d.type = world.entities.rec(e).type;
+      declare(d, std::nullopt);
+    };
+    for (const sema::VirtualSlot& slot : dynamic.slots) {
+      EntityId e = slot.function;
+      if (slot.pure) e = sema::pure_virtual_handler(world);
+      else if (slot.kind == sema::VirtualSlotKind::deleting_destructor)
+        e = destructor_variant(world, slot.function, sema::EntityKind::deleting_destructor);
+      reference(e);
+      table.slots.push_back(e);
+    }
+    const auto at = program.member_decl(dynamic.key_function);
+    ast::DeclSema d{};
+    d.kind = ast::DeclKind::variable;
+    d.entity = table.entity;
+    d.type = world.entities.rec(table.entity).type;
+    declare(d, at ? std::optional(ast::Loc{at->item, 0}) : std::nullopt);
+    tu.dynamic_tables.push_back(std::move(table));
   }
   auto unwind_provider = [&](EntityId callee) {
     return !program.function_defined_before(callee, program.end()) && !noexcept_declarations.contains(callee) &&
@@ -1572,6 +1650,8 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
     f.explicit_weak = weak_declarations.contains(f.entity) && !inline_declarations.contains(f.entity);
     if (f.destructor_table != EntityId::none)
       declare_virtual_table(f.destructor_table, ast::Loc{f.item, f.body_offset});
+    if (f.constructor_table != EntityId::none)
+      declare_virtual_table(f.constructor_table, ast::Loc{f.item, f.body_offset});
     const auto locals = ins.seqs.elements(f.body.locals);
     if (classes.has_virtual_layouts()) {
       for (const auto& local : locals) {

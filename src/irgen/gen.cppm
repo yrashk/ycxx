@@ -91,6 +91,8 @@ struct FunctionInput {
   bool native_array_new = false;  // the backend's Linux x86-64 allocation in a certified frame
   std::span<const ast::EntityId> nonthrowing_functions{};  // native declarations, sorted by entity
   ast::EntityId destructor_table = ast::EntityId::none;
+  // The table a dynamic class's constructor installs once its base subobject is initialized (#309).
+  ast::EntityId constructor_table = ast::EntityId::none;
   // The initialized prefix of a flat aggregate while evaluating one selected default.
   struct InitializedFields {
     ast::EntityId owner = ast::EntityId::none;
@@ -424,6 +426,7 @@ class Gen {
     if (fn_.this_type) this_ = b_.param(block_, 1);
     if (result_param_) result_ = Place{b_.param(block_, result_param_), rt};
     loc_ = fn_.body_offset;
+    pending_constructor_table_ = this_ ? fn_.constructor_table : ast::EntityId::none;
     push_scope();
     // The parameters are the first body locals (#41), named by `LocalRef` like the others.
     slots_.assign(in_.seqs.size(fn_.body.locals), std::nullopt);
@@ -621,10 +624,30 @@ class Gen {
     stmt(child(handler_at, handler.body));
   }
 
+  // Itanium ABI §2.5.2: offset-to-top and RTTI precede the table's address point, which the
+  // vptr at offset zero of `*this` holds.
+  void install_vptr(ast::EntityId table_entity) {
+    const auto byte = ast::builtin(facts_.interners(), ast::Builtin::unsigned_char);
+    const auto table_type = facts_.pointer_to(byte);
+    const auto vptr_type = facts_.pointer_to(table_type);
+    const auto table = pure(ir::Op::global, table_type, {}, {word(table_entity)});
+    const auto header_size = int_constant(facts_.ptrdiff_type(), 2 * ast::x86_64_linux.pointer_size);
+    const auto address_point = pure(ir::Op::ptr_add, table_type, {table, header_size}, {word(ty(byte))});
+    const auto vptr = pure(ir::Op::ptr_cast, vptr_type, {*this_}, {word(ty(vptr_type))});
+    store({vptr, table_type}, address_point);
+  }
+
   void stmt(At a) {
     if (a.id == NodeId::none) return;
     ensure_live();
     Position here(*this, a.offset);
+    // [class.cdtor], [class.base.init]: a dynamic class's constructor installs its own table
+    // after its base subobject and before its members. A delegating constructor's target does.
+    if (pending_constructor_table_ != ast::EntityId::none && a.id != fn_.body.tree &&
+        !(is<ast::MemberInit>(a) && get<ast::MemberInit>(a).field == ~0u)) {
+      if (!is<ast::DelegatingInit>(a)) install_vptr(pending_constructor_table_);
+      pending_constructor_table_ = ast::EntityId::none;
+    }
     if (is<ast::Compound>(a)) {
       auto s = get<ast::Compound>(a);
       push_scope();
@@ -662,18 +685,8 @@ class Gen {
       });
     } else if (is<ast::Destructor>(a)) {
       auto d = get<ast::Destructor>(a);
-      if (fn_.destructor_table != ast::EntityId::none) {
-        // Itanium ABI §2.5.2: offset-to-top and RTTI precede the table's address point.
-        // [class.cdtor]: virtual calls during destruction use the destructor's class.
-        const auto byte = ast::builtin(facts_.interners(), ast::Builtin::unsigned_char);
-        const auto table_type = facts_.pointer_to(byte);
-        const auto vptr_type = facts_.pointer_to(table_type);
-        const auto table = pure(ir::Op::global, table_type, {}, {word(fn_.destructor_table)});
-        const auto header_size = int_constant(facts_.ptrdiff_type(), 2 * ast::x86_64_linux.pointer_size);
-        const auto address_point = pure(ir::Op::ptr_add, table_type, {table, header_size}, {word(ty(byte))});
-        const auto vptr = pure(ir::Op::ptr_cast, vptr_type, {*this_}, {word(ty(vptr_type))});
-        store({vptr, table_type}, address_point);
-      }
+      // [class.cdtor]: virtual calls during destruction use the destructor's class.
+      if (fn_.destructor_table != ast::EntityId::none) install_vptr(fn_.destructor_table);
       for (ast::Child c : ast_.children(d.members)) epilogue_.push_back(child(a, c));
       stmt(child(a, d.body));
     } else if (is<ast::DeclStmt>(a)) {
@@ -2621,6 +2634,7 @@ class Gen {
   std::set<uint32_t> bypassed_locals_;       // discovered from scope transitions during first emission
   std::map<uint32_t, Place> jump_bindings_;  // local index to the address of its current instance
   std::optional<ValueId> this_;              // a non-static member function's `this`
+  ast::EntityId pending_constructor_table_ = ast::EntityId::none;  // installed before the first member
   std::optional<Place> result_;              // the object a class result initializes
   uint32_t byval_params_ = 0, result_param_ = 0;  // as ir::Function's
   std::vector<std::vector<Ending>> temps_;   // the open full-expressions' temporaries
