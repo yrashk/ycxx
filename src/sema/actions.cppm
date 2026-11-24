@@ -3786,6 +3786,8 @@ public:
     IntShape sa = shape(w_->target, *a), sb = shape(w_->target, *b);
     if (*b == Builtin::bool_) sb = {1, false};
     if (*a == Builtin::bool_) sa = {1, false};
+    // A bit-field narrower than its type holds only the values of its width ([dcl.init.list]/7.4).
+    if (from.info.bit_width && from.info.bit_width < sa.bits) sa.bits = from.info.bit_width;
     if (ast::represents(w_->target, *b, sa.bits, sa.is_signed) || (*b == Builtin::bool_ && *a == Builtin::bool_)) return false;
     auto v = constant_of ? constant_of(from) : std::nullopt;
     if (!v || w_->values.rec(*v).kind != ValueKind::integer) return true;
@@ -10035,10 +10037,14 @@ public:
             return Ex{r.id, begin, end, r.info};
           ref_qualified_member = Ex{r.id, begin, end, r.info};
         } else if (std::ranges::any_of(std::span(*diags_).subspan(n), [](const auto& d) {
-                     return d.id == diag_id(Diag::not_constant);
+                     return d.id == diag_id(Diag::not_constant) || d.id == diag_id(Diag::deleted_function) ||
+                            d.id == diag_id(Diag::ambiguous_call) || d.id == diag_id(Diag::private_member) ||
+                            d.id == diag_id(Diag::protected_member);
                    })) {
-          // The member was selected, and its operand conversion is an immediate invocation that is
-          // not constant ([expr.const]): as when it is constant, the member is the operator.
+          // The member was selected, and it is deleted, ambiguous or inaccessible, or its operand
+          // conversion is an immediate invocation that is not constant ([expr.const]): the
+          // expression is ill-formed, as when the member is a usable operator
+          // ([over.match.oper]/3, [over.match.best]).
           return Ex{NodeId::none, begin, end};
         } else {
           truncate_diags(n);
@@ -10760,11 +10766,19 @@ public:
       diag(op_at, Diag::invalid_operands, l.type(), r.type());
       return fail;
     };
+    // /6 converts an array operand only when the other is an object pointer.
+    if (types().is_array(types().referee(l.type())) && types().is_array(types().referee(r.type()))) return invalid();
     Ex a = rvalue(l), c = rvalue(r);
     if (!a.ok() || !c.ok()) return fail;
+    // /3: a `bool` operand only with another.
+    if (types().is(Types::unqualified(a.type()), Builtin::bool_) != types().is(Types::unqualified(c.type()), Builtin::bool_))
+      return invalid();
     std::optional<Ordering> ordering;
-    // The operands before the usual arithmetic conversions, for the narrowing check.
-    const Ex from_a = a, from_c = c;
+    // The operands before the usual arithmetic conversions, for the narrowing check. A bit-field
+    // keeps its width, which can make the conversion not narrowing ([dcl.init.list]/7.4).
+    Ex from_a = a, from_c = c;
+    from_a.info.bit_width = l.info.bit_width;
+    from_c.info.bit_width = r.info.bit_width;
     if (types().is_enum(a.type()) || types().is_enum(c.type())) {
       if (types().canonical(Types::unqualified(a.type())) == types().canonical(Types::unqualified(c.type()))) {
         // /5: two of one enumeration, compared as its underlying type.
@@ -10815,12 +10829,17 @@ public:
   // `x <=> y`, when no ordinary candidate is viable and an operand has class type: an
   // `operator<=>` as `(x <=> y) @ 0`, then, synthesized with the operands reversed, as
   // `0 @ (y <=> x)` (only the reversed one for `<=>` itself). A rewritten expression's own
-  // operator is not rewritten again.
+  // operator is not rewritten again. With enumeration operands and no class, only where the
+  // built-in operator is not viable: a scoped enumeration with anything but itself.
   // (Rewritten candidates are not yet ranked against viable ordinary ones: #295.)
   std::optional<Ex> rewritten_three_way(BinOp op, Ex l, Ex r, u32 begin, u32 end, u32 op_at) {
-    if (rewriting_three_way_ ||
-        (!types().is_class(types().referee(l.type())) && !types().is_class(types().referee(r.type()))))
-      return std::nullopt;
+    if (rewriting_three_way_) return std::nullopt;
+    const QualType lt = types().referee(l.type()), rt = types().referee(r.type());
+    if (!types().is_class(lt) && !types().is_class(rt)) {
+      const bool builtin_viable = (!is_scoped_enum(lt) && !is_scoped_enum(rt)) ||
+                                  types().canonical(Types::unqualified(lt)) == types().canonical(Types::unqualified(rt));
+      if (builtin_viable || (!types().is_enum(lt) && !types().is_enum(rt))) return std::nullopt;
+    }
     const std::size_t n = diag_count();
     std::optional<Ex> compared;
     bool reversed = false;
@@ -10835,9 +10854,11 @@ public:
       return std::nullopt;
     }
     if (!compared->ok()) return Ex{NodeId::none, begin, end};
+    // A literal `0`, one token wide, so it is a null pointer constant too ([conv.ptr]), as the
+    // library's comparison operators may take it.
     const QualType int_type = builtin(Builtin::int_);
-    const u32 zero_at = reversed ? begin : end;
-    const Ex zero = literal(int_type, w_->values.integer(int_type, 0), ValueCategory::prvalue, zero_at, zero_at);
+    const u32 zero_at = reversed ? begin : end - 1;
+    const Ex zero = literal(int_type, w_->values.integer(int_type, 0), ValueCategory::prvalue, zero_at, zero_at + 1);
     struct Restore {
       bool& flag;
       ~Restore() { flag = false; }

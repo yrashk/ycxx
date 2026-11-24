@@ -1950,6 +1950,7 @@ private:
   struct DefaultedThreeWay {
     QualType result;
     std::vector<Ex> comparisons;
+    std::vector<Ex> tests;  // each `vi != 0`, for the exception specification
     Ex equal;
   };
   std::optional<DefaultedThreeWay> defaulted_three_way(sema::Sema& sm, EntityId cls, Ex x, Ex y, QualType declared);
@@ -5912,6 +5913,16 @@ private:
     if (s_.ins().names.spelling(d.name) == "operator==" && types.canonical(f.inner) != types.builtin(sema::Builtin::bool_)) {
       s_.diag(d.name_at, Diag::defaulted_equality_return);
       return false;
+    }
+    // [class.spaceship]/2: a placeholder is `auto` alone, not `decltype(auto)`, a constrained or
+    // cv-qualified `auto`, or one in a compound type.
+    if (types.has_placeholder(f.inner)) {
+      const sema::TypeRec r = types.rec(f.inner);
+      if (r.kind != sema::TypeKind::placeholder || r.decltype_auto || r.entity != EntityId::none ||
+          sema::Types::cv(f.inner) != sema::Cv::none) {
+        s_.diag(d.name_at, Diag::defaulted_three_way_placeholder);
+        return false;
+      }
     }
     return true;
   }
@@ -10041,7 +10052,7 @@ public:
       s_.set_local_decl(local, var.id);
       s_.set_initialized(local);
       statements.push_back(sema::Sema::at(s_.node(ast::DeclStmt{b_.list(std::vector<ast::Child>{sema::Sema::at(var, 0)})}, 0, 0), 0));
-      const Ex zero = s_.literal(int_type, p_->world().values.integer(int_type, 0), ast::ValueCategory::prvalue, 0, 0);
+      const Ex zero = s_.literal(int_type, p_->world().values.integer(int_type, 0), ast::ValueCategory::prvalue, 0, 1);
       const Ex condition = s_.to_bool(s_.binary(sema::Sema::BinOp::ne, s_.local_ref(local, 0, 0), zero, 0), 0);
       const Ex value = s_.init_explicit_return(s_.local_ref(local, 0, 0), r);
       if (!condition.ok() || !value.ok()) return {};
@@ -11207,7 +11218,7 @@ std::optional<Ex> Program::defaulted_equality(sema::Sema& sm, EntityId cls, Ex x
 // of the subobjects' `xi <=> yi` (/2), `std::strong_ordering` with none; the operator is deleted
 // when one is not a comparison category type. Each result is converted to R (/1). Nullopt when
 // deleted or not usable; a comparison that is not usable leaves its diagnostics in `sm`.
-// (A synthesized three-way comparison from `==` and `<` when `<=>` is not usable is #295.)
+// (A synthesized three-way comparison from `==` and `<` when `<=>` is not usable is #1197.)
 std::optional<Program::DefaultedThreeWay> Program::defaulted_three_way(sema::Sema& sm, EntityId cls, Ex x, Ex y,
                                                                        QualType declared) {
   using Ordering = sema::Sema::Ordering;
@@ -11220,7 +11231,7 @@ std::optional<Program::DefaultedThreeWay> Program::defaulted_three_way(sema::Sem
         return ok;
       }) || !ok)
     return std::nullopt;
-  DefaultedThreeWay r{declared, {}, {}};
+  DefaultedThreeWay r{declared, {}, {}, {}};
   if (w_->types.has_placeholder(declared)) {
     Ordering common = Ordering::strong;
     for (const Ex& c : compared) {
@@ -11238,9 +11249,14 @@ std::optional<Program::DefaultedThreeWay> Program::defaulted_three_way(sema::Sem
     if (w_->types.canonical(sema::Types::unqualified(c.type())) == result) return sm.convert(c, r.result, 0);
     return sm.static_cast_to(c, r.result, 0, true);
   };
+  const QualType int_type = w_->types.builtin(sema::Builtin::int_);
   for (const Ex& c : compared) {
     r.comparisons.push_back(synthesized(c));
     if (!r.comparisons.back().ok()) return std::nullopt;
+    // `vi != 0`, its `0` one token wide so it is a null pointer constant too ([conv.ptr]).
+    const Ex zero = sm.literal(int_type, w_->values.integer(int_type, 0), ast::ValueCategory::prvalue, 0, 1);
+    r.tests.push_back(sm.to_bool(sm.binary(sema::Sema::BinOp::ne, r.comparisons.back(), zero, 0), 0));
+    if (!r.tests.back().ok()) return std::nullopt;
   }
   // `static_cast<R>(std::strong_ordering::equal)`: for a comparison category R, the value its
   // `equivalent` (or `equal`) member names ([cmp.categories]).
@@ -11309,6 +11325,7 @@ void Program::complete_defaulted_comparisons(EntityId cls, sema::ClassRec& rec) 
       if (const auto operands = comparison_operands(sm, d, params))
         if (const auto parts = defaulted_three_way(sm, operands->cls, operands->x, operands->y, w_->types.rec(d.type).inner)) {
           results = parts->comparisons;
+          results.insert(results.end(), parts->tests.begin(), parts->tests.end());
           results.push_back(parts->equal);
           result_type = parts->result;
         }

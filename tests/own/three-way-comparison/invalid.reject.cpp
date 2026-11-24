@@ -7,7 +7,7 @@ enum class S { s };
 void f();
 void g();
 
-void test(int* p, int i, double d) {
+void test(int* p, int i, double d, bool t, int (&x)[2], int (&y)[2]) {
     (void)(a <=> b);        //! error
     (void)(S::s <=> 0);     //! error
     (void)(S::s <=> d);     //! error
@@ -16,4 +16,9 @@ void test(int* p, int i, double d) {
     (void)(p <=> i);        //! error
     (void)(p <=> d);        //! error
     (void)(&f <=> &g);      //! error
+    (void)(t <=> i);        //! error
+    (void)(a <=> true);     //! error
+    (void)(true <=> 1.0);   //! error
+    (void)(x <=> y);        //! error
+    (void)(x <=> p);        // an array and an object pointer: allowed
 }
