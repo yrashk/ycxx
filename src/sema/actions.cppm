@@ -10391,11 +10391,11 @@ public:
 
   enum class BinOp : u8 {
     mul, div, rem, add, sub, shl, shr, lt, gt, le, ge, eq, ne, bit_and, bit_xor, bit_or, logical_and, logical_or, comma,
-    dot_star, arrow_star,
+    spaceship, dot_star, arrow_star,
   };
 
   static constexpr std::string_view binary_spellings[] = {"*", "/", "%", "+", "-", "<<", ">>", "<", ">", "<=", ">=",
-                                                          "==", "!=", "&", "^", "|", "&&", "||", ","};
+                                                          "==", "!=", "&", "^", "|", "&&", "||", ",", "<=>"};
 
   // The built-in member pointer operators ([expr.mptr.oper]). Access checking takes place when
   // the address expression names the field ([expr.unary.op]).
@@ -10464,6 +10464,9 @@ public:
     if (auto o = overloaded(binary_spellings[std::to_underlying(op)], {l, r}, begin, end, op_at)) return *o;
     if (op == eq || op == ne)
       if (auto o = rewritten_equality(op == ne, l, r, begin, end, op_at)) return *o;
+    if (op == spaceship || op == lt || op == gt || op == le || op == ge)
+      if (auto o = rewritten_three_way(op, l, r, begin, end, op_at)) return *o;
+    if (op == spaceship) return builtin_three_way(l, r, begin, end, op_at);
     auto bin = [&](ast::BinaryOp k, Ex a, Ex c, QualType t) {
       ExprInfo info{t, ValueCategory::prvalue, 0};
       return node(ast::Binary{info, k, at(a, begin), at(c, begin)}, begin, end, info);
@@ -10585,44 +10588,10 @@ public:
         diag(op_at, Diag::member_pointer_values);
         return {NodeId::none, begin, end};
       }
-      if (auto to = composite_void_pointer(ta, tc)) {
-        a = convert(a, *to, op_at);
-        c = convert(c, *to, op_at);
-        if (!a.ok() || !c.ok()) return {NodeId::none, begin, end};
-        return bin(k, a, c, b);
-      }
-      if (auto to = composite_function_pointer(ta, tc))
-        return bin(k, convert(a, *to, op_at), convert(c, *to, op_at), b);
-      if (types().is_pointer(ta) && types().is_pointer(tc)) {
-        QualType pa = types().pointee(ta), pc = types().pointee(tc);
-        // [expr.type]/4.6: a pointer to a derived class converted to one to its base class.
-        if (base_depth(pa, pc)) {
-          a = to_base(a, types().class_of(pc), op_at);
-          if (!a.ok()) return Ex{NodeId::none, begin, end};
-          ta = a.type();
-          pa = types().pointee(ta);
-        } else if (base_depth(pc, pa)) {
-          c = to_base(c, types().class_of(pa), op_at);
-          if (!c.ok()) return Ex{NodeId::none, begin, end};
-          tc = c.type();
-          pc = types().pointee(tc);
-        }
-        QualType unqualified = Types::unqualified(pa);
-        Cv ca = Types::cv(pa), cc = Types::cv(pc);
-        if (unqualified != Types::unqualified(pc)) {
-          // [expr.type], [conv.qual]: complete arrays of the same shape combine the
-          // cv-qualifiers of their elements, including through nested array dimensions.
-          if (!types().is_array(pa)) return invalid();
-          unqualified = object_unqualified(pa);
-          if (unqualified != object_unqualified(pc) || !is_complete(pa)) return invalid();
-          ca = object_cv(pa);
-          cc = object_cv(pc);
-        }
-        Cv cv = Cv(std::to_underlying(ca) | std::to_underlying(cc));
-        QualType composite = types().pointer(types().add_cv(unqualified, cv));
-        if (ta != composite) a = convert_node(a, ast::ConversionKind::qualification, composite);
-        if (tc != composite) c = convert_node(c, ast::ConversionKind::qualification, composite);
-        return bin(k, a, c, b);
+      switch (composite_pointers(a, c, /*function_pointers=*/true, op_at)) {
+      case Composite::converted: return bin(k, a, c, b);
+      case Composite::failed: return {NodeId::none, begin, end};
+      case Composite::none: break;
       }
       if (equality && types().is(ta, Builtin::nullptr_t) && types().is(tc, Builtin::nullptr_t)) return bin(k, a, c, b);
       if (equality && types().is_pointer(ta) && (types().is(tc, Builtin::nullptr_t) || is_null_pointer_constant(r)))
@@ -10635,6 +10604,200 @@ public:
     }
     std::unreachable();
   }
+
+  enum class Composite : u8 { none, converted, failed };
+  // [expr.type]/4: two pointer operands converted to their composite pointer type, as the
+  // relational, equality and three-way operators need: a pointer to void and one to an object,
+  // two function pointers (when `function_pointers`), or two object pointers, a pointer to a
+  // derived class becoming one to its base class and the cv-qualifiers combined. `none` when
+  // the operands have no composite pointer type (not diagnosed); `failed` when a conversion was
+  // diagnosed.
+  Composite composite_pointers(Ex& a, Ex& c, bool function_pointers, u32 op_at) {
+    QualType ta = a.type(), tc = c.type();
+    if (auto to = composite_void_pointer(ta, tc)) {
+      a = convert(a, *to, op_at);
+      c = convert(c, *to, op_at);
+      return a.ok() && c.ok() ? Composite::converted : Composite::failed;
+    }
+    if (auto to = composite_function_pointer(ta, tc)) {
+      if (!function_pointers) return Composite::none;
+      a = convert(a, *to, op_at);
+      c = convert(c, *to, op_at);
+      return Composite::converted;
+    }
+    if (!types().is_pointer(ta) || !types().is_pointer(tc)) return Composite::none;
+    QualType pa = types().pointee(ta), pc = types().pointee(tc);
+    if (!function_pointers && (types().is_function(pa) || types().is_function(pc))) return Composite::none;
+    // [expr.type]/4.6: a pointer to a derived class converted to one to its base class.
+    if (base_depth(pa, pc)) {
+      a = to_base(a, types().class_of(pc), op_at);
+      if (!a.ok()) return Composite::failed;
+      ta = a.type();
+      pa = types().pointee(ta);
+    } else if (base_depth(pc, pa)) {
+      c = to_base(c, types().class_of(pa), op_at);
+      if (!c.ok()) return Composite::failed;
+      tc = c.type();
+      pc = types().pointee(tc);
+    }
+    QualType unqualified = Types::unqualified(pa);
+    Cv ca = Types::cv(pa), cc = Types::cv(pc);
+    if (unqualified != Types::unqualified(pc)) {
+      // [expr.type], [conv.qual]: complete arrays of the same shape combine the
+      // cv-qualifiers of their elements, including through nested array dimensions.
+      if (!types().is_array(pa)) return Composite::none;
+      unqualified = object_unqualified(pa);
+      if (unqualified != object_unqualified(pc) || !is_complete(pa)) return Composite::none;
+      ca = object_cv(pa);
+      cc = object_cv(pc);
+    }
+    Cv cv = Cv(std::to_underlying(ca) | std::to_underlying(cc));
+    QualType composite = types().pointer(types().add_cv(unqualified, cv));
+    if (ta != composite) a = convert_node(a, ast::ConversionKind::qualification, composite);
+    if (tc != composite) c = convert_node(c, ast::ConversionKind::qualification, composite);
+    return Composite::converted;
+  }
+
+  // The comparison category types ([cmp.categories]), weakest first: the common comparison
+  // category of several is the weakest of them ([class.spaceship]).
+  enum class Ordering : u8 { partial, weak, strong };
+  struct ComparisonCategory {
+    QualType type;
+    std::vector<EntityId> values;  // as ast::ThreeWay::results
+  };
+  // [cmp.categories.pre]: `std::partial_ordering`, `std::weak_ordering` or `std::strong_ordering`,
+  // which <compare> declares, found by qualified lookup in `std`, with the static data members
+  // that name its values. Diagnosed at `at_` when it is not declared so or is incomplete.
+  std::optional<ComparisonCategory> comparison_category(Ordering k, std::optional<u32> at_) {
+    static constexpr std::string_view names[] = {"partial_ordering", "weak_ordering", "strong_ordering"};
+    const NameId name = ins().names.intern(names[std::to_underlying(k)]);
+    auto missing = [&] -> std::optional<ComparisonCategory> {
+      if (at_) diag(*at_, Diag::comparison_category_missing, name);
+      return std::nullopt;
+    };
+    const auto std_scope = scope_member(global_scope(), ins().names.intern("std"), false);
+    if (!std_scope || !std_scope->ns) return missing();
+    const auto found = scope_member(*std_scope, name, false);
+    if (!found || !found->type || !types().is_class(*found->type) || !is_complete(*found->type)) return missing();
+    const QualType type = Types::unqualified(*found->type);
+    const EntityId cls = types().class_of(type);
+    std::vector<std::string_view> members{"less", k == Ordering::strong ? "equal" : "equivalent", "greater"};
+    if (k == Ordering::partial) members.push_back("unordered");
+    ComparisonCategory r{type, {}};
+    for (std::string_view m : members) {
+      const auto value = find_member(cls, ins().names.intern(m));
+      if (!value || value->ambiguous || !value->member || value->member->is_function || !value->member->is_static ||
+          Types::unqualified(types().canonical(value->member->type)) != types().canonical(type))
+        return missing();
+      if (at_ && !q_->use_static_member(value->member->entity)) return std::nullopt;
+      r.values.push_back(value->member->entity);
+    }
+    return r;
+  }
+  // The comparison category type `t` is, if it is one.
+  std::optional<Ordering> ordering_of(QualType t) {
+    t = Types::unqualified(types().canonical(t));
+    if (!types().is_class(t)) return std::nullopt;
+    for (Ordering k : {Ordering::partial, Ordering::weak, Ordering::strong})
+      if (const auto c = comparison_category(k, std::nullopt); c && types().canonical(c->type) == t) return k;
+    return std::nullopt;
+  }
+
+  // [expr.spaceship]: the built-in three-way comparison, for operands of arithmetic, enumeration
+  // or object pointer type.
+  Ex builtin_three_way(Ex l, Ex r, u32 begin, u32 end, u32 op_at) {
+    const Ex fail{NodeId::none, begin, end};
+    auto invalid = [&] {
+      diag(op_at, Diag::invalid_operands, l.type(), r.type());
+      return fail;
+    };
+    Ex a = rvalue(l), c = rvalue(r);
+    if (!a.ok() || !c.ok()) return fail;
+    std::optional<Ordering> ordering;
+    // The operands before the usual arithmetic conversions, for the narrowing check.
+    const Ex from_a = a, from_c = c;
+    if (types().is_enum(a.type()) || types().is_enum(c.type())) {
+      if (types().canonical(Types::unqualified(a.type())) == types().canonical(Types::unqualified(c.type()))) {
+        // /5: two of one enumeration, compared as its underlying type.
+        const QualType u = underlying_of(a.type());
+        a = convert_node(a, ast::ConversionKind::integral, u);
+        c = convert_node(c, ast::ConversionKind::integral, u);
+        ordering = Ordering::strong;
+      } else {
+        // /4: an unscoped enumeration with an integral type, as its promoted type.
+        auto integral = [&](const Ex& e) { return types().is_integral(e.type()) || is_unscoped_enum(e.type()); };
+        if (is_scoped_enum(a.type()) || is_scoped_enum(c.type()) ||
+            (types().is_enum(a.type()) && types().is_enum(c.type())) || !integral(a) || !integral(c))
+          return invalid();
+        if (types().is_enum(a.type())) a = promote(a);
+        if (types().is_enum(c.type())) c = promote(c);
+      }
+    }
+    if (!ordering && types().is_arithmetic(a.type()) && types().is_arithmetic(c.type())) {
+      // /4: the usual arithmetic conversions, where a narrowing conversion other than from an
+      // integral type to a floating type is ill-formed.
+      const QualType t = arithmetic_conversions(a, c);
+      for (const Ex& from : {from_a, from_c}) {
+        if (types().is_floating(t) && !types().is_floating(from.type())) continue;
+        if (narrows(from, t)) {
+          diag(from.begin, Diag::three_way_narrowing, from.type(), t);
+          return fail;
+        }
+      }
+      ordering = types().is_floating(t) ? Ordering::partial : Ordering::strong;
+    }
+    if (!ordering && types().is_pointer(a.type()) && types().is_pointer(c.type())) {
+      // /6: object pointers converted to their composite pointer type.
+      switch (composite_pointers(a, c, /*function_pointers=*/false, op_at)) {
+      case Composite::converted: ordering = Ordering::strong; break;
+      case Composite::failed: return fail;
+      case Composite::none: break;
+      }
+    }
+    if (!ordering) return invalid();  // /7
+    const auto category = comparison_category(*ordering, op_at);
+    if (!category) return fail;
+    ExprInfo info{category->type, ValueCategory::prvalue, 0};
+    const auto results = ins().intern_seq(std::span<const EntityId>(category->values));
+    return node(ast::ThreeWay{info, at(a, begin), at(c, begin), results}, begin, end, info);
+  }
+
+  // [over.match.oper]/3.4, /8: the rewritten candidates of a relational operator `x @ y` and of
+  // `x <=> y`, when no ordinary candidate is viable and an operand has class type: an
+  // `operator<=>` as `(x <=> y) @ 0`, then, synthesized with the operands reversed, as
+  // `0 @ (y <=> x)` (only the reversed one for `<=>` itself). A rewritten expression's own
+  // operator is not rewritten again.
+  // (Rewritten candidates are not yet ranked against viable ordinary ones: #295.)
+  std::optional<Ex> rewritten_three_way(BinOp op, Ex l, Ex r, u32 begin, u32 end, u32 op_at) {
+    if (rewriting_three_way_ ||
+        (!types().is_class(types().referee(l.type())) && !types().is_class(types().referee(r.type()))))
+      return std::nullopt;
+    const std::size_t n = diag_count();
+    std::optional<Ex> compared;
+    bool reversed = false;
+    if (op != BinOp::spaceship) compared = overloaded("<=>", {l, r}, begin, end, op_at);
+    if (!compared) {
+      truncate_diags(n);
+      compared = overloaded("<=>", {r, l}, begin, end, op_at);
+      reversed = true;
+    }
+    if (!compared) {
+      truncate_diags(n);
+      return std::nullopt;
+    }
+    if (!compared->ok()) return Ex{NodeId::none, begin, end};
+    const QualType int_type = builtin(Builtin::int_);
+    const u32 zero_at = reversed ? begin : end;
+    const Ex zero = literal(int_type, w_->values.integer(int_type, 0), ValueCategory::prvalue, zero_at, zero_at);
+    struct Restore {
+      bool& flag;
+      ~Restore() { flag = false; }
+    } restore{rewriting_three_way_};
+    rewriting_three_way_ = true;
+    const Ex result = reversed ? binary(op, zero, *compared, op_at) : binary(op, *compared, zero, op_at);
+    return Ex{result.id, begin, end, result.info};
+  }
+  bool rewriting_three_way_ = false;
 
   enum class AsgOp : u8 { assign, mul, div, rem, add, sub, shl, shr, bit_and, bit_xor, bit_or };
 

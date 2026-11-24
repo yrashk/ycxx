@@ -3384,7 +3384,7 @@ public:
     return s_->conditional(cond, t, f, at);
   }
 
-  // The binary operators from `||` (precedence 1) to pointer-to-member access (11).
+  // The binary operators from `||` (precedence 1) to pointer-to-member access (12).
   struct BinInfo {
     int prec;
     sema::Sema::BinOp op;
@@ -3403,15 +3403,16 @@ public:
     case Tk::greater: return BinInfo{7, B::gt};
     case Tk::lessequal: return BinInfo{7, B::le};
     case Tk::greaterequal: return BinInfo{7, B::ge};
-    case Tk::lessless: return BinInfo{8, B::shl};
-    case Tk::greatergreater: return BinInfo{8, B::shr};
-    case Tk::plus: return BinInfo{9, B::add};
-    case Tk::minus: return BinInfo{9, B::sub};
-    case Tk::star: return BinInfo{10, B::mul};
-    case Tk::slash: return BinInfo{10, B::div};
-    case Tk::percent: return BinInfo{10, B::rem};
-    case Tk::periodstar: return BinInfo{11, B::dot_star};
-    case Tk::arrowstar: return BinInfo{11, B::arrow_star};
+    case Tk::spaceship: return BinInfo{8, B::spaceship};
+    case Tk::lessless: return BinInfo{9, B::shl};
+    case Tk::greatergreater: return BinInfo{9, B::shr};
+    case Tk::plus: return BinInfo{10, B::add};
+    case Tk::minus: return BinInfo{10, B::sub};
+    case Tk::star: return BinInfo{11, B::mul};
+    case Tk::slash: return BinInfo{11, B::div};
+    case Tk::percent: return BinInfo{11, B::rem};
+    case Tk::periodstar: return BinInfo{12, B::dot_star};
+    case Tk::arrowstar: return BinInfo{12, B::arrow_star};
     default: return std::nullopt;
     }
   }
@@ -3421,13 +3422,6 @@ public:
   Ex binary_expression(int min_prec) {
     Ex l = cast_expression();
     for (;;) {
-      if (is(Tk::spaceship)) {
-        s_->diag(pos(), Diag::not_supported, kind());
-        bump();
-        cast_expression();
-        l = {NodeId::none, l.begin, pos()};
-        continue;
-      }
       auto info = binary_operator(kind());
       if (!info || info->prec < min_prec) return l;
       // [temp.names]/4: in a template argument list the first `>` outside parentheses ends it.
@@ -3825,6 +3819,14 @@ public:
           member_class = name_of(tok());
           bump();
           bump();
+        }
+        // `E.operator@`: a member named by an operator-function-id ([over.oper.general]).
+        if (is(Tk::kw_operator) && !keyword && !punctuator_operator_suffix(1).empty()) {
+          const u32 name_at = pos();
+          const auto n = expression_id(punctuator_operator_suffix(1));
+          if (!n) return {NodeId::none, e.begin, pos()};
+          e = s_->member(e, arrow, *n, pos(), at, name_at);
+          break;
         }
         if (!is(Tk::identifier)) {
           if (is(Tk::tilde) || is(Tk::coloncolon) || is(Tk::kw_operator))

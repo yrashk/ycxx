@@ -257,6 +257,8 @@ enum class Diag : std::uint32_t {
   defaulted_comparison_declaration [[=message{Severity::error, "a defaulted comparison of '{0:t}' takes two parameters of type 'const {0:t}&' or two of type '{0:t}'"}]],
   defaulted_equality_return [[=message{Severity::error, "a defaulted 'operator==' returns 'bool'"}]],
   rewritten_equality_return [[=message{Severity::error, "'operator==' selected for a rewritten comparison returns '{0:t}', not 'bool'"}]],
+  three_way_narrowing [[=message{Severity::error, "narrowing conversion from '{0:t}' to '{1:t}' in a three-way comparison"}]],
+  comparison_category_missing [[=message{Severity::error, "the built-in '<=>' yields 'std::{0:n}', which is not declared as <compare> declares it; include <compare>"}]],
   mixed_designators [[=message{Severity::error, "either every initializer clause is designated or none is"}]],
   unknown_bound_member [[=message{Severity::error, "a non-static data member cannot be an array of unknown bound"}]],
   class_redefinition [[=message{Severity::error, "redefinition of class '{0:n}'"}]],
