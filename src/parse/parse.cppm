@@ -1362,7 +1362,14 @@ public:
   };
   const std::deque<Synthesized>& synthesized() const { return synth_; }
   // An implicit constructor of a dynamic class or a class containing one: emitted only where called.
-  bool emitted_on_use(EntityId constructor) const { return dynamic_synthesized_.contains(constructor); }
+  // A synthesized member of a dynamic class emitted only where something uses it: an implicit
+  // constructor, or a class template specialization's destructor ([temp.inst]).
+  bool emitted_on_use(EntityId member) const {
+    if (dynamic_synthesized_.contains(member)) return true;
+    const auto& entity = w_->entities.rec(member);
+    const auto* owner = entity.kind == sema::EntityKind::destructor ? classes_.find(entity.scope) : nullptr;
+    return owner && owner->dynamic && class_patterns_.contains(std::to_underlying(entity.scope));
+  }
   // Its body, analysed on first use.
   const ast::BodySema& synthesized_body(std::size_t i);
   bool special_members(u32 item, EntityId cls, sema::ClassRec& rec,
@@ -1528,6 +1535,12 @@ public:
                                                  std::span<const ast::MemberRec> members);
   // Its implicit default and copy constructors, which install the vptr ([class.cdtor]).
   void dynamic_special_members(u32 item, EntityId cls, sema::ClassRec& rec);
+  // What makes a defined polymorphic class, or one containing such objects, a dynamic one: its
+  // final overriders, its table's layout and its implicit constructors.
+  void complete_virtual_members(u32 item, EntityId cls, sema::ClassRec& rec, std::span<const ast::MemberRec> members,
+                                bool member_declarations_valid);
+  void pure_final_overriders(sema::ClassRec& rec, EntityId cls);
+  std::optional<ast::DeclSema> member_declaration(EntityId member);
   EntityId synthesize_constructor(u32 item, EntityId cls, bool copy, bool nonthrowing, bool const_source);
   void validate_dynamic_constructors(sema::ClassRec& rec);
   std::map<EntityId, std::size_t> dynamic_synthesized_;  // synthesized constructors by entity: their `synth_` index
@@ -1548,6 +1561,7 @@ public:
     EntityId spec;
   };
   std::map<u32, MemberOf> member_patterns_;
+  std::map<EntityId, EntityId> instantiating_bases_;  // the direct base of each specialization whose members are being analysed
   std::optional<u32> out_of_class_definition(EntityId spec, MemberOf of);
   // A class template specialization's record of its member item `m`, analysed already.
   const ast::ItemSema& class_member_sema(u32 m, EntityId spec) {
@@ -5021,8 +5035,8 @@ private:
         s_.diag(at, Diag::incomplete_type, spec.type);  // the class itself: incomplete here
         return false;
       }
-      const bool single_ordinary_base = !template_ && bases.empty() && !ps_.is(Tk::comma);
-      if (!complete_base_class(s_, spec.type, at, single_ordinary_base)) return false;
+      const bool single_base = bases.empty() && !ps_.is(Tk::comma);
+      if (!complete_base_class(s_, spec.type, at, single_base)) return false;
       if (sema::Types::cv(spec.type) != sema::Cv::none) {
         s_.diag(at, Diag::base_not_class, spec.type);
         return false;
@@ -5741,9 +5755,11 @@ private:
         }
         if (d.has_noexcept) {
           const auto f = types.rec(d.type);
-          const bool nonthrowing = ps_.noexcept_value(d.noexcept_condition, d.ok);
+          bool dependent = false;  // decided by each specialization
+          const bool pattern = !inst_ && !s_.template_scopes.empty();
+          const bool nonthrowing = ps_.noexcept_value(d.noexcept_condition, d.ok, pattern ? &dependent : nullptr);
           if (!d.ok) return bad();
-          d.type = types.function(f.inner, f.params, f.variadic, f.linkage, f.fn_cv, f.fn_ref, nonthrowing);
+          d.type = types.function(f.inner, f.params, f.variadic, f.linkage, f.fn_cv, f.fn_ref, nonthrowing && !dependent);
         }
         if (overridden && !validate_override(d, *overridden, spec.is_consteval)) return bad();
       }
@@ -5751,7 +5767,7 @@ private:
       if (function) {
         if (!member_virt_specifiers(overridden != nullptr, &final_at)) return bad();
         if (final_at) {
-          if (!is_virtual) {
+          if (!is_virtual && !may_override_dependent_base()) {
             s_.diag(*final_at, Diag::final_nonvirtual);
             return bad();
           }
@@ -6688,7 +6704,7 @@ private:
         s_.diag(name_at, Diag::redefinition, m->name);
         return bad();
       }
-      if (cr->dynamic) {
+      if (cr->dynamic && !template_ && !inst_) {
         // [except.spec]: the definition repeats the declaration's specification or none.
         ps_.exception_specifier(fs, ok);
         if (!ok) return bad();
@@ -6703,8 +6719,12 @@ private:
           s_.diag(name_at, Diag::conflicting_declaration, m->name);  // [class.dtor]/1
           return bad();
         }
-        if (template_ || explicit_ || inst_) {
-          s_.diag(name_at, Diag::virtual_definition);
+      } else if (template_ || inst_) {
+        // A class template's: each specialization has its own table ([temp.mem.func]).
+        ps_.exception_specifier(fs, ok);
+        if (!ok) return bad();
+        if (fs.cv != sema::Cv::none || !fs.params.empty() || fs.variadic) {
+          s_.diag(name_at, Diag::conflicting_declaration, m->name);  // [class.dtor]/1
           return bad();
         }
       } else {
@@ -7013,8 +7033,11 @@ private:
     return false;
   }
 
+  // A specialization being instantiated has its substituted base, dependent in the pattern or not.
   const sema::ClassRec* direct_polymorphic_base(EntityId cls) {
-    const auto bases = q_.defining_bases(cls);
+    std::vector<EntityId> bases = q_.defining_bases(cls);
+    if (inst_)
+      if (const auto own = p_->instantiating_bases_.find(cls); own != p_->instantiating_bases_.end()) bases = {own->second};
     const auto* base = bases.size() == 1 ? p_->classes_.find(bases.front()) : nullptr;
     return base && base->polymorphic ? base : nullptr;
   }
@@ -7037,6 +7060,8 @@ private:
   }
 
   bool validate_override(const parse::Declarator& d, const sema::MemberDeclRec& overridden, bool immediate) {
+    // A class template's definition can have a dependent return type: its specializations check.
+    if (!inst_ && !s_.template_scopes.empty()) return true;
     if (overridden.is_final) {
       s_.diag(d.name_at, Diag::virtual_override_final);
       return false;
@@ -7068,13 +7093,20 @@ private:
       s_.diag(at, Diag::virtual_union_member);
       return false;
     }
-    if (!s_.template_scopes.empty() || inst_ ||
-        (!q_.defining_bases(cls).empty() && !direct_polymorphic_base(cls)) ||
-        !p_->is_namespace(p_->outermost_class_scope(cls)) || p_->items().items[it_->parent].specialization) {
+    const bool specialized = !s_.template_scopes.empty() || inst_ || p_->items().items[it_->parent].specialization;
+    const bool has_base = !q_.defining_bases(cls).empty() || (inst_ && p_->instantiating_bases_.contains(cls));
+    if ((has_base && !direct_polymorphic_base(cls)) ||
+        !p_->is_namespace(specialized ? s_.world().entities.rec(cls).scope : p_->outermost_class_scope(cls))) {
       s_.diag(at, Diag::not_supported, Tk::kw_virtual);
       return false;
     }
     return true;
+  }
+
+  // In a class template's definition, a base or a signature can be dependent: each specialization
+  // checks what its member overrides ([temp.res.general]).
+  bool may_override_dependent_base() {
+    return !inst_ && !s_.template_scopes.empty() && p_->class_base_patterns_.contains(it_->parent);
   }
 
   // The constructor and destructor path supports its existing override checks only.
@@ -7084,7 +7116,7 @@ private:
       const auto spelling = s_.ins().names.spelling(ps_.name_of(ps_.tok()));
       const bool is_final = spelling == "final";
       if (!is_final && spelling != "override") break;
-      if (!s_.template_scopes.empty() || inst_ || (is_final && !final_at)) {
+      if (member_template_ || (is_final && !final_at)) {
         s_.diag(ps_.pos(), Diag::not_supported, Tk::identifier);
         return false;
       }
@@ -7095,8 +7127,8 @@ private:
         }
         *final_at = ps_.pos();
       } else {
-        if (!overrides || written_override) {
-          s_.diag(ps_.pos(), overrides ? Diag::duplicate_override : Diag::override_without_base);
+        if ((!overrides && !may_override_dependent_base()) || written_override) {
+          s_.diag(ps_.pos(), written_override ? Diag::duplicate_override : Diag::override_without_base);
           return false;
         }
         written_override = true;
@@ -7507,7 +7539,8 @@ private:
         s_.diag(d.name_at, Diag::consteval_redeclared, d.name);
         return false;
       }
-      if (!cr->dynamic && !native_virtual_definition(cls, *cr, m->entity, d, sem)) {
+      const bool pattern = !inst_ && s_.types().is_dependent(s_.types().class_type(cls));
+      if (!cr->dynamic && !pattern && !native_virtual_definition(cls, *cr, m->entity, d, sem)) {
         s_.diag(d.name_at, Diag::virtual_definition);
         return false;
       }
@@ -7516,10 +7549,11 @@ private:
       auto& types = s_.types();
       if (d.has_noexcept) {
         bool ok = true;
-        const bool nonthrowing = ps_.noexcept_value(d.noexcept_condition, ok);
+        bool dependent = false;
+        const bool nonthrowing = ps_.noexcept_value(d.noexcept_condition, ok, pattern ? &dependent : nullptr);
         if (!ok) return false;
         const auto f = types.rec(sem.type);
-        sem.type = types.function(f.inner, f.params, f.variadic, f.linkage, f.fn_cv, f.fn_ref, nonthrowing);
+        sem.type = types.function(f.inner, f.params, f.variadic, f.linkage, f.fn_cv, f.fn_ref, nonthrowing && !dependent);
       }
       if (types.canonical(sem.type) != types.canonical(m->type)) {
         s_.diag(d.name_at, Diag::conflicting_declaration, d.name);
@@ -9462,14 +9496,14 @@ bool Program::peer_root_destructor_producer(EntityId cls) const {
 
 // Itanium C++ ABI §2.4–2.5 for a polymorphic class with at most one base, which is public,
 // nonvirtual and itself dynamic: its vptr is at offset zero, its own or its primary base's (#309).
-// Class templates, local classes, internal linkage and other base shapes are #309's follow-ups.
+// A class template's specializations are dynamic classes, its pattern is not (#1153). Local classes,
+// internal linkage and other base shapes are #309's follow-ups.
 std::optional<sema::DynamicClass> Program::dynamic_class(u32 item, EntityId cls, const sema::ClassRec& rec,
                                                         std::span<const ast::MemberRec> members) {
   const auto& head = items_->items[item];
   const auto& entity = w_->entities.rec(cls);
   // A class in an unnamed namespace is TU-local ([basic.link]): its table needs local symbols (#1155).
-  if (head.template_depth || head.specialization || entity.templ != EntityId::none || rec.union_ || rec.closure ||
-      rec.unapplied_layout || entity.linkage != ast::Linkage::external || unnamed(ns_of(item)) || rec.bases.size() > 1)
+  if (w_->types.is_dependent(w_->types.class_type(cls)) || rec.union_ || rec.closure || rec.unapplied_layout || entity.linkage != ast::Linkage::external || unnamed(ns_of(item)) || rec.bases.size() > 1)
     return std::nullopt;
   for (EntityId scope = entity.scope; !is_namespace(scope); scope = w_->entities.rec(scope).scope) {
     const auto& owner = w_->entities.rec(scope);
@@ -9492,7 +9526,7 @@ std::optional<sema::DynamicClass> Program::dynamic_class(u32 item, EntityId cls,
   if (!rec.bases.empty()) {
     const sema::BaseRec& edge = rec.bases.front();
     const sema::ClassRec* base = classes_.find(edge.cls);
-    if (edge.access != ast::Access::public_ || edge.dependent_in_pattern || !base || !base->dynamic) return std::nullopt;
+    if (edge.access != ast::Access::public_ || !base || !base->dynamic) return std::nullopt;
     out.slots = base->dynamic->slots;
     out.primary_base = true;
   }
@@ -9522,8 +9556,9 @@ std::optional<sema::DynamicClass> Program::dynamic_class(u32 item, EntityId cls,
     } else {
       out.slots.push_back({m.entity, sema::VirtualSlotKind::function, m.is_pure});
     }
-    // The key function: declared in the class, not pure, and not inline there.
-    if (out.key_function == EntityId::none && !m.is_pure && !m.is_deleted) {
+    // The key function: declared in the class, not pure, and not inline there. An implicit
+    // specialization has none: its members are defined wherever they are used.
+    if (!head.template_depth && out.key_function == EntityId::none && !m.is_pure && !m.is_deleted) {
       const auto decl = member_decl(m.entity);
       const auto sem = decl ? decl_sema(*decl) : std::nullopt;
       if (!sem) return std::nullopt;
@@ -9538,14 +9573,29 @@ std::optional<sema::DynamicClass> Program::dynamic_class(u32 item, EntityId cls,
   return out;
 }
 
+// A member's declaration: a class template specialization's own, not its pattern's.
+std::optional<ast::DeclSema> Program::member_declaration(EntityId member) {
+  const auto decl = member_decl(member);
+  if (!decl) return std::nullopt;
+  const auto of = member_patterns_.find(std::to_underlying(member));
+  if (of == member_patterns_.end()) return decl_sema(*decl);
+  for (const ast::DeclSema& d : w_->ins.seqs.elements(class_member_sema(of->second.item, of->second.spec).decls))
+    if (d.entity == member) return d;
+  return std::nullopt;
+}
+
 std::optional<u64> Program::class_size(EntityId cls) {
-  const auto item = class_items_.find(std::to_underlying(cls));
-  if (item == class_items_.end()) return std::nullopt;
-  AtItem q(*this, item->second, true);
+  const u32 key = std::to_underlying(cls);
+  const auto written = class_items_.find(key);
+  const auto pattern = class_patterns_.find(key);  // a specialization's
+  if (written == class_items_.end() && pattern == class_patterns_.end()) return std::nullopt;
+  const u32 item = pattern != class_patterns_.end() ? pattern->second : written->second;
+  AtItem q(*this, item, true);
   q.own_class_complete = true;
+  if (pattern != class_patterns_.end()) q.at_point = end();  // a specialization is complete where it is instantiated
   ast::Builder b(w_->ins, &arena_);
   std::vector<engine::Diagnostic> diags;
-  sema::Sema s(*w_, b, q, diags, id(item->second), 0);
+  sema::Sema s(*w_, b, q, diags, id(item), 0);
   return s.layout_of(w_->types.class_type(cls), false);
 }
 
@@ -9586,9 +9636,8 @@ EntityId Program::synthesize_constructor(u32 item, EntityId cls, bool copy, bool
 // a class containing one copies it through that class's copy constructor ([class.copy.ctor]).
 void Program::dynamic_special_members(u32 item, EntityId cls, sema::ClassRec& rec) {
   auto& types = w_->types;
-  if (rec.union_ || rec.closure || items_->items[item].template_depth || w_->entities.rec(cls).templ != EntityId::none)
-    return;
   const QualType ct = types.class_type(cls);
+  if (rec.union_ || rec.closure || types.is_dependent(ct)) return;
   std::vector<QualType> subobjects;
   for (const sema::BaseRec& b : rec.bases) subobjects.push_back(types.class_type(b.cls));
   for (const sema::FieldRec& f : rec.fields) subobjects.push_back(f.type);
@@ -9615,8 +9664,7 @@ void Program::dynamic_special_members(u32 item, EntityId cls, sema::ClassRec& re
   // A virtual destructor defaulted on its first declaration is defined there ([dcl.fct.def.default]).
   if (rec.dynamic && rec.declared_destructor != EntityId::none && rec.destructor == rec.declared_destructor) {
     const auto declaration = destructor_declarations_.find(rec.declared_destructor);
-    const auto member = member_decl(rec.declared_destructor);
-    auto sem = member ? decl_sema(*member) : std::nullopt;
+    auto sem = member_declaration(rec.declared_destructor);
     if (declaration != destructor_declarations_.end() && declaration->second.defaulted && sem) {
       sem->flags |= sema::decl_flag::definition | sema::decl_flag::inline_;
       synth_.push_back({item, *sem, SpecialMember::destructor});
@@ -9631,6 +9679,45 @@ void Program::dynamic_special_members(u32 item, EntityId cls, sema::ClassRec& re
   {
     rec.copy_ctor = synthesize_constructor(item, cls, true, false, rec.defaulted_copy_const);
     dynamic_synthesized_.emplace(rec.copy_ctor, synth_.size() - 1);
+  }
+}
+
+void Program::complete_virtual_members(u32 item, EntityId cls, sema::ClassRec& rec, std::span<const ast::MemberRec> members,
+                                       bool member_declarations_valid) {
+  // A template's own class is no object's type: nothing lays it out or makes one ([temp.dep.type]).
+  if (w_->types.is_dependent(w_->types.class_type(cls))) {
+    rec.virtual_layout_unsupported = false;
+    return;
+  }
+  if (rec.polymorphic) {
+    const bool ordinary = w_->entities.rec(cls).templ == EntityId::none;
+    if (ordinary) rec.peer_virtual_layout = peer_virtual_layout(item, cls, rec, members);
+    if (ordinary && rec.peer_virtual_layout == sema::PeerVirtualLayout::none)
+      rec.peer_automatic_primary_base = peer_automatic_primary_base(item, cls, rec, members);
+    if (rec.peer_virtual_layout == sema::PeerVirtualLayout::none && rec.peer_automatic_primary_base == EntityId::none &&
+        member_declarations_valid)
+      rec.dynamic = dynamic_class(item, cls, rec, members);
+  }
+  rec.virtual_layout_unsupported = (rec.polymorphic && !rec.dynamic) ||
+      std::ranges::any_of(rec.bases, [&](const sema::BaseRec& base) {
+        return classes_.virtual_layout_unsupported(w_->types.class_type(base.cls));
+      }) ||
+      std::ranges::any_of(rec.fields, [&](const sema::FieldRec& field) {
+        return classes_.virtual_layout_unsupported(field.type);
+      });
+  if (member_declarations_valid && rec.layout_requires_virtual_support && !rec.virtual_layout_unsupported)
+    dynamic_special_members(item, cls, rec);
+}
+
+// [class.abstract]: the pure virtual functions that are final overriders, from its base's and its
+// own. An immediate one counts as any other.
+void Program::pure_final_overriders(sema::ClassRec& rec, EntityId cls) {
+  if (!rec.polymorphic || w_->types.is_dependent(w_->types.class_type(cls))) return;
+  if (rec.bases.size() == 1)
+    if (const auto* base = classes_.find(rec.bases.front().cls)) rec.pure_final_overriders = base->pure_final_overriders;
+  for (const auto& member : rec.members) {
+    if (member.overridden_virtual != EntityId::none) std::erase(rec.pure_final_overriders, member.overridden_virtual);
+    if (member.is_pure) rec.pure_final_overriders.push_back(member.entity);
   }
 }
 
@@ -10009,36 +10096,10 @@ const Result<ast::ClassDef>& Program::class_def(u32 item) {
     // Classify the written declarations before special_members appends implicit assignments.
     if (can_complete && member_declarations_valid) rec.trivial_copyability = class_trivial_copyability(item, *cls, rec);
     const bool implicit_move = can_complete && special_members(item, *cls, rec, &out.diags);
-    if (rec.polymorphic) {
-      if (rec.bases.size() == 1)
-        if (const auto* base = classes_.find(rec.bases.front().cls))
-          rec.pure_final_overriders = base->pure_final_overriders;
-      // Remove the nearest overridden declaration from the semantic set, including immediates.
-      for (const auto& member : rec.members) {
-        if (member.overridden_virtual != EntityId::none)
-          std::erase(rec.pure_final_overriders, member.overridden_virtual);
-        if (member.is_pure) rec.pure_final_overriders.push_back(member.entity);
-      }
-    }
+    pure_final_overriders(rec, *cls);
     if (can_complete) classify_defaulted_default_ctor(rec, out.diags);
     if (can_complete) {
-      if (rec.polymorphic) {
-        rec.peer_virtual_layout = peer_virtual_layout(item, *cls, rec, members);
-        if (rec.peer_virtual_layout == sema::PeerVirtualLayout::none)
-          rec.peer_automatic_primary_base = peer_automatic_primary_base(item, *cls, rec, members);
-        if (rec.peer_virtual_layout == sema::PeerVirtualLayout::none && rec.peer_automatic_primary_base == EntityId::none &&
-            member_declarations_valid)
-          rec.dynamic = dynamic_class(item, *cls, rec, members);
-      }
-      rec.virtual_layout_unsupported = (rec.polymorphic && !rec.dynamic) ||
-          std::ranges::any_of(rec.bases, [&](const sema::BaseRec& base) {
-            return classes_.virtual_layout_unsupported(w_->types.class_type(base.cls));
-          }) ||
-          std::ranges::any_of(rec.fields, [&](const sema::FieldRec& field) {
-            return classes_.virtual_layout_unsupported(field.type);
-          });
-      if (member_declarations_valid && rec.layout_requires_virtual_support && !rec.virtual_layout_unsupported)
-        dynamic_special_members(item, *cls, rec);
+      complete_virtual_members(item, *cls, rec, members, member_declarations_valid);
       validate_class_alignment(item, *cls, rec, out.diags);
     }
     // Keep the written declarations for error recovery in member bodies. An assertion
@@ -10734,7 +10795,11 @@ public:
   // initializes as a user-written one with no ctor-initializer and an empty body would. Its
   // default member initializers are analysed here, in the complete class (#309).
   ast::BodySema implicit_default_constructor(const ast::DeclSema& ctor) {
-    static_cast<AtItem&>(*q_).own_class_complete = true;
+    at_->own_class_complete = true;
+    if (inst_) {  // a class template specialization's, with the class's arguments bound
+      s_.template_scopes.push_back(p_->world().ins.seqs.elements(p_->world().ins.seqs.at(p_->item_sema(k_).value.decls, 0).template_params));
+      s_.template_args = inst_->args;
+    }
     s_.current_class = p_->world().entities.rec(ctor.entity).scope;
     s_.current_function = ctor.entity;
     s_.in_function_body = true;
@@ -10885,8 +10950,7 @@ private:
           } else if (base != rec.bases.end()) {
             type = s_.types().class_type(base->cls);
             field = u32(rec.fields.size() + (base - rec.bases.begin()));
-            if (const auto* record = p_->classes_.find(cls); rec.bases.size() == 1 && record && record->polymorphic &&
-                s_.template_scopes.empty() && !inst_)
+            if (const auto* record = p_->classes_.find(cls); rec.bases.size() == 1 && record && record->polymorphic)
               destination = sema::ConstructorDestination::polymorphic_base;
           }
         }
@@ -11413,8 +11477,8 @@ bool Program::special_members(u32 item, EntityId cls, sema::ClassRec& rec,
   rec.layout_requires_virtual_support = rec.polymorphic || std::ranges::any_of(subobjects, [&](QualType t) {
     return classes_.layout_requires_virtual_support(t);
   });
-  // Only a class definition can admit the class or its subobjects (`dynamic_class`, after this);
-  // class template specializations and closures keep the virtual layout guard (#1153).
+  // Only a class definition or an instantiation can admit the class or its subobjects
+  // (`complete_virtual_members`, after this); closures keep the virtual layout guard.
   rec.virtual_layout_unsupported = rec.layout_requires_virtual_support;
   const bool manual_union_destruction = rec.union_ && user_dtor;
   if (class_diags && rec.union_ && !user_dtor && std::ranges::any_of(subobjects, [&](QualType t) {
@@ -11489,7 +11553,7 @@ bool Program::special_members(u32 item, EntityId cls, sema::ClassRec& rec,
     rec.destructor_noexcept = declaration != destructor_declarations_.end() && declaration->second.nonthrowing
                                 ? declaration->second.nonthrowing : implicit_noexcept;
   if (declaration != destructor_declarations_.end()) declaration->second.implicit_nonthrowing = implicit_noexcept;
-  if (overrides_destructor && class_diags) {
+  if (overrides_destructor && class_diags && !types.is_dependent(ct)) {
     const bool unusable = !rec.destructor_usable || !base->destructor_usable;
     const bool unknown = !base->destructor_noexcept || !rec.destructor_noexcept;
     if (unusable || unknown || (*base->destructor_noexcept && !*rec.destructor_noexcept)) {
@@ -12080,14 +12144,19 @@ const ast::BodySema& Program::synthesized_body(std::size_t i) {
   if (auto it = synth_bodies_.find(i); it != synth_bodies_.end()) return it->second;
   const Synthesized& s = synth_[i];
   if (s.kind == SpecialMember::copy_assignment) return *copy_assignments_.at(s.decl.entity).body;
-  if (s.kind == SpecialMember::default_constructor)
-    return synth_bodies_[i] = BodyAnalysis(*this, s.item).implicit_default_constructor(s.decl);
+  if (s.kind == SpecialMember::default_constructor) {
+    std::optional<Instantiation> inst;
+    if (const auto args = class_args_.find(std::to_underlying(w_->entities.rec(s.decl.entity).scope)); args != class_args_.end())
+      inst = Instantiation{s.decl, args->second};
+    return synth_bodies_[i] = BodyAnalysis(*this, s.item, std::move(inst)).implicit_default_constructor(s.decl);
+  }
   ast::Builder b(w_->ins, &arena_);
   std::vector<engine::Diagnostic> diags;  // none: the class was analysed
   AtItem q(*this, s.item, true);
   q.own_class_complete = true;
   sema::Sema sm(*w_, b, q, diags, id(s.item), 0);
   EntityId cls = w_->entities.rec(s.decl.entity).scope;
+  if (class_patterns_.contains(std::to_underlying(cls))) q.at_point = end();  // complete where it is instantiated
   sm.current_class = cls;
   sm.this_type = this_type(s.decl);
   const sema::ClassRec& rec = classes_.rec(cls);
@@ -12215,7 +12284,7 @@ std::optional<sema::BaseRec> Program::instantiate_base(EntityId specialization, 
   // has dependent arguments whose validity must be checked here.
   std::optional<EntityId> base;
   if (substituted && !s.has_error_since(0) && !q.observed_type_trait_failure)
-    base = dependent ? complete_base_class(s, *substituted, pattern.begin) : std::optional(w_->types.class_of(type));
+    base = dependent ? complete_base_class(s, *substituted, pattern.begin, /*allow_polymorphic=*/true) : std::optional(w_->types.class_of(type));
   if (q.observed_class_assertion_failure) failed_class_assertions_.insert(specialization);
   else if (q.observed_type_trait_failure) failed_type_trait_instantiations_.insert(specialization);
   for (engine::Diagnostic& d : sink) {
@@ -12269,6 +12338,7 @@ const sema::ClassRec* Program::instantiate_class(EntityId spec, u32 point) {
     bases.push_back(*base);
     if (!base->dependent_in_pattern) set_bases(spec, bases);
   }
+  if (!bases.empty()) instantiating_bases_.insert_or_assign(spec, bases.front().cls);
   class_args_.emplace(key, args);
   class_patterns_.emplace(key, k);
   class_points_.emplace(key, point);
@@ -12303,6 +12373,7 @@ const sema::ClassRec* Program::instantiate_class(EntityId spec, u32 point) {
     return member.value;
   });
   classes_instantiating_.erase(key);
+  instantiating_bases_.erase(spec);
   if (!can_complete) {
     failed_class_assertions_.insert(spec);
     return nullptr;
@@ -12339,9 +12410,15 @@ const sema::ClassRec* Program::instantiate_class(EntityId spec, u32 point) {
   for (const ast::MemberRec& m : c.members) built.access.push_back({m.entity, m.access});
   built.friends = std::move(c.friends);
   built.adl_friends = std::move(c.adl_friends);
-  special_members(k, spec, built, built.union_ ? &end_diags_ : nullptr);
+  if (const auto head = class_heads_.find(k); head != class_heads_.end()) built.is_final = head->second.is_final;
+  std::vector<engine::Diagnostic> diags;
+  special_members(k, spec, built, built.union_ || !built.bases.empty() ? &diags : nullptr);
+  for (engine::Diagnostic& d : diags)
+    if (built.union_ || !std::ranges::contains(end_diags_, d)) end_diags_.push_back(std::move(d));
+  pure_final_overriders(built, spec);
+  complete_virtual_members(k, spec, built, c.members, member_declarations_valid);
   built.defined = true;
-  return &classes_.publish(spec, std::move(built));
+  return &classes_.publish(spec, std::move(built), [&](sema::ClassRec& fresh) { validate_dynamic_constructors(fresh); });
 }
 
 // The item that defines, outside its class, the member of a class template specialization that
@@ -12623,11 +12700,42 @@ void Program::instantiate_all() {
   std::vector<sema::Demand> work;
   // What a body requires, besides what its cell demanded: every member function of a class
   // template specialization it names, a constructor or destructor it runs included
-  // ([temp.inst]/4), found by walking its tree.
+  // ([temp.inst]/4), found by walking its tree. A synthesized member emitted only on use is walked
+  // where something uses it.
+  std::map<EntityId, std::size_t> unused_synthesized;
+  std::set<EntityId> used_special_members;
+  std::set<EntityId> tables;
+  std::function<void(std::span<const EntityId>, ItemId)> require;
   auto required_members = [&](NodeId root, ItemId at) {
     std::vector<EntityId> refs;
     references(root, refs);
+    require(refs, at);
+  };
+  // A dynamic class's table names the definitions in its slots: emitting a constructor or a
+  // destructor that installs it requires those of its class template specializations ([temp.inst]).
+  auto require_table = [&](EntityId cls, ItemId at) {
+    const auto* owner = classes_.find(cls);
+    if (!owner || !owner->dynamic || !tables.insert(cls).second) return;
+    std::vector<EntityId> slots;
+    for (const sema::VirtualSlot& slot : owner->dynamic->slots)
+      if (!slot.pure) slots.push_back(slot.function);
+    require(slots, at);
+  };
+  auto special_member = [&](EntityId e) {
+    const auto kind = w_->entities.rec(e).kind;
+    return kind == sema::EntityKind::constructor || kind == sema::EntityKind::destructor;
+  };
+  auto require_installed = [&](EntityId f, ItemId at) {
+    if (special_member(f)) require_table(w_->entities.rec(f).scope, at);
+  };
+  auto walk_one = [&](std::size_t i) {
+    require_installed(synth_[i].decl.entity, id(synth_[i].item));
+    required_members(synthesized_body(i).tree, id(synth_[i].item));
+  };
+  require = [&](std::span<const EntityId> refs, ItemId at) {
     for (EntityId e : refs) {
+      if (const auto unused = unused_synthesized.extract(e); !unused.empty()) walk_one(unused.mapped());
+      if (may_have_virtual_layouts_ && special_member(e)) used_special_members.insert(e);
       if (auto assign = copy_assignments_.find(e); assign != copy_assignments_.end() && assign->second.body &&
           !assign->second.emitted) {
         assign->second.emitted = true;
@@ -12668,7 +12776,7 @@ void Program::instantiate_all() {
             QualType t = d.type;
             while (w_->types.is_array(t)) t = w_->types.rec(t).inner;
             EntityId dtor = w_->types.is_class(t) ? classes_.destructor_of(t) : EntityId::none;
-            if (member_patterns_.contains(std::to_underlying(dtor))) work.push_back({dtor, ast::Loc{id(k), 0}});
+            if (dtor != EntityId::none) require(std::array{dtor}, id(k));
           }
       }
     }
@@ -12677,8 +12785,21 @@ void Program::instantiate_all() {
     if (body_cells_[k]) {
       work.insert(work.end(), body_cells_[k]->demands.begin(), body_cells_[k]->demands.end());
       const auto& part = body_cells_[k]->value;
-      if (!templated_body(k)) required_part(part.tree, part.closures, id(k));
+      if (!templated_body(k)) {
+        required_part(part.tree, part.closures, id(k));
+        if (w_->ins.seqs.size(item_cells_[k]->value.decls) > 0)
+          if (const EntityId f = w_->ins.seqs.at(item_cells_[k]->value.decls, 0).entity; f != EntityId::none)
+            require_installed(f, id(k));
+      }
     }
+  }
+  // A key function defined here owns its class's table (Itanium C++ ABI §5.2.3).
+  const auto classes = classes_.classes();
+  for (EntityId c : std::vector<EntityId>(classes.begin(), classes.end())) {
+    const auto& record = classes_.rec(c);
+    if (!record.dynamic || record.dynamic->key_function == EntityId::none ||
+        !function_defined_before(record.dynamic->key_function, end())) continue;
+    if (const auto at = member_decl(record.dynamic->key_function)) require_table(c, at->item);
   }
   for (const auto& [e, k] : explicit_specs_) {
     // Instantiated in a constant evaluation before it: an instance exists, since none is made
@@ -12717,7 +12838,9 @@ void Program::instantiate_all() {
     for (; walked < synth_.size(); ++walked) {
       EntityId cls = w_->entities.rec(synth_[walked].decl.entity).scope;
       if (w_->types.is_dependent(w_->types.class_type(cls))) continue;
-      required_members(synthesized_body(walked).tree, id(synth_[walked].item));
+      const EntityId member = synth_[walked].decl.entity;
+      if (emitted_on_use(member) && !used_special_members.contains(member)) unused_synthesized.emplace(member, walked);
+      else walk_one(walked);
     }
   };
   walk_synthesized();
@@ -12766,6 +12889,7 @@ void Program::instantiate_all() {
       depth.push_back(depth[i] + 1);
     }
     required_part(in->body.value.tree, in->body.value.closures, id(in->item));
+    require_installed(in->spec, id(in->item));
     walk_synthesized();
     depth.resize(work.size(), depth[i] + 1);
   }

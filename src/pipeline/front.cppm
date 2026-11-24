@@ -1411,6 +1411,11 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
       }
       c = record.dynamic && record.dynamic->primary_base ? record.bases.front().cls : EntityId::none;
     }
+    // A specialization for a TU-local type has a TU-local table, which needs local symbols (#1155).
+    if (internal_class(entity.scope) || names_tu_local(program, entity.scope, /*include_value_types=*/true)) {
+      block_virtual_emission(tu, program, *owner);
+      return false;
+    }
     const EntityId table = sema::virtual_table_entity(world, entity.scope);
     tu.base_object_variants.insert(f.entity);
     if (entity.kind == sema::EntityKind::constructor) {
@@ -1431,6 +1436,8 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
           const auto* base = destroy.field == ~0u ? classes.find(world.types.class_of(destroy.type)) : nullptr;
           // A base destructor defined in this unit shares its code with its D2 alias here.
           const bool defined_here = program.function_defined_before(destroy.destructor, program.end()) ||
+                                    std::ranges::contains(program.instances(), destroy.destructor,
+                                                          [](const auto* in) { return in->spec; }) ||
                                     std::ranges::contains(program.synthesized(), destroy.destructor,
                                                           [](const auto& s) { return s.decl.entity; });
           if (base && base->dynamic && !defined_here) {
@@ -1687,7 +1694,15 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
         program.asm_label(in->spec).empty() &&
         !std::ranges::any_of(entity.args, [&](const ast::TemplateArg& a) { return names_tu_local(program, a, true); }))
       definition.coalesced = true;
-    if (it.parent != items::none && items.items[it.parent].kind == items::ItemKind::class_def) {
+    // An implicit instantiation is defined in every unit that uses it ([temp.inst]). A dynamic
+    // class's are also named by its weak table, wherever the members are written.
+    const auto* dynamic_owner = entity.kind == sema::EntityKind::function_template ? nullptr : classes.find(entity.scope);
+    const bool dynamic_specialization = dynamic_owner && dynamic_owner->dynamic && entity.templ == EntityId::none &&
+                                        (in->decl.is_virtual || entity.kind != sema::EntityKind::function);
+    if (dynamic_specialization) {
+      definition.coalesced = true;
+      if (!dynamic_member(tu.functions.size() - 1)) return tu;
+    } else if (it.parent != items::none && items.items[it.parent].kind == items::ItemKind::class_def) {
       const bool ordinary_member = ordinary_class_template_member(entity) && !in->decl.is_virtual &&
                                    !internal_class(entity.scope) &&
                                    !names_tu_local(program, entity.scope, /*include_value_types=*/true);
@@ -1789,25 +1804,35 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
     }
     if (!emit_synthesized(i)) return tu;
   }
-  // The constructors the emitted code calls, to a fixed point over the bodies emitted for them.
-  std::set<EntityId> called;
+  // The special members the emitted code uses, to a fixed point over the bodies emitted for them
+  // and the tables they install.
+  std::set<EntityId> used;
+  const auto use_table = [&](EntityId cls) {
+    const auto* record = classes.find(cls);
+    if (!record || !record->dynamic) return;
+    for (const sema::VirtualSlot& slot : record->dynamic->slots) used.insert(slot.function);
+  };
+  for (EntityId c : classes.classes())
+    if (const auto& record = classes.rec(c);
+        record.dynamic && record.dynamic->key_function != EntityId::none &&
+        program.function_defined_before(record.dynamic->key_function, program.end()))
+      use_table(c);
   std::size_t scanned = 0;
   const auto scan = [&] {
+    std::vector<EntityId> refs;
     for (; scanned < tu.functions.size(); ++scanned) {
       const FunctionDef& f = tu.functions[scanned];
-      if (f.body.tree == ast::NodeId::none) continue;
-      auto visit = [&](this auto&& self, const ast::Red& node) -> void {
-        if (node.is<ast::CtorCall>()) called.insert(node.get<ast::CtorCall>().ctor);
-        node.for_each_child([&](const ast::Red& child) { self(child); });
-      };
-      visit(ast::Red(ins.ast, f.body.tree, f.body_offset));
+      if (f.body.tree != ast::NodeId::none) program.references(f.body.tree, refs);
+      for (EntityId table : {f.constructor_table, f.destructor_table})
+        if (table != EntityId::none) use_table(world.entities.rec(table).scope);
     }
+    used.insert(refs.begin(), refs.end());
   };
   for (bool more = true; more;) {
     scan();
     more = false;
     for (std::size_t& i : on_use) {
-      if (i == std::numeric_limits<std::size_t>::max() || !called.contains(program.synthesized()[i].decl.entity)) continue;
+      if (i == std::numeric_limits<std::size_t>::max() || !used.contains(program.synthesized()[i].decl.entity)) continue;
       if (!emit_synthesized(i)) return tu;
       i = std::numeric_limits<std::size_t>::max();
       more = true;

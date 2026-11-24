@@ -3220,6 +3220,7 @@ public:
     // Layout can be the first use that requires a class specialization to be complete.
     const ClassRec* record = types().is_class(element) ? class_rec(types().class_of(element)) : nullptr;
     if (!record || !record->virtual_layout_unsupported) return true;
+    if (record->polymorphic && !record->member_declarations_valid) return true;  // diagnosed at the member
     diag(at, Diag::virtual_layout, t);
     return false;
   }
@@ -6588,7 +6589,9 @@ public:
     std::optional<u32> virtual_slot;
     const ClassRec* dynamic_owner = d->is_virtual ? class_rec(w_->entities.rec(d->entity).scope) : nullptr;
     if (dynamic_owner && !dynamic_owner->dynamic) dynamic_owner = nullptr;
-    if (unevaluated == 0) {
+    // A pattern's own member: its specializations have the tables ([temp.dep.type]).
+    const bool pattern_member = d->is_virtual && types().is_dependent(types().class_type(w_->entities.rec(d->entity).scope));
+    if (unevaluated == 0 && !pattern_member) {
       if (d->is_virtual && d->is_consteval) {
         diag(paren_at, Diag::virtual_immediate_call);
         return fail;

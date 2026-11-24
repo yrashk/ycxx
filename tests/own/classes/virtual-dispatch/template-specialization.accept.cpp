@@ -1,4 +1,3 @@
-// XFAIL: ycxx #1153 class template specializations are not dynamic classes yet
 // [class.virtual]: a class template specialization deriving from a polymorphic class.
 struct Base {
   virtual ~Base() {}
