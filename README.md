@@ -708,8 +708,9 @@ message is shown up to the root. Diagnostic details include the file, line and c
 available. `--trace-engine=interactive` opens a browser of the trace that fills in while the
 compile runs, through the daemon or in-process: cells appear as they start, with their time so far,
 and settle as they end, while the view follows the newest activity. It has a tree
-with each function's IR and assembly, a timeline of the pool's workers, and filters. It follows
-the terminal's size and takes the mouse: click to select, fold and sort by a column, use the
+with each function's IR and assembly, a timeline of the pool's workers, and filters. It fits any
+terminal from 80 columns, with tabs, toggles that show their keys, a key bar per view and `?` for
+the rest. It follows the terminal's size and takes the mouse: click to select, fold and sort by a column, use the
 wheel to scroll, and drag to resize the pane. It copies a cell, a subtree, selected rows or any
 selected text of the IR and instructions to the clipboard, over SSH too. Its histogram view charts
 self and total time, memory, runs, cache hits and waits by query kind, source file or child, and a
