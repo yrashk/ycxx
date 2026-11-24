@@ -174,6 +174,11 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
     shows its own CPU time.
   - Learned on #330.
   - Learned on #218.
+  - The same holds for the first build of a fresh worktree. On #295, edits made while it built went
+    into the binary meant to show the new tests failing. A sibling worktree's binary of `main`
+    served instead: check its commit with `git merge-base --is-ancestor`, copy it to the
+    scratchpad, and run it as `YCXX=<copy> tools/test …`. Two `cmake --build` runs started in
+    one build directory also collide, and one stops with "subcommand failed".
 
 ## Working with Fable subagents
 

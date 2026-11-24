@@ -376,6 +376,10 @@ public:
     if (auto found = special_member_exception_types_.find(decl.entity);
         found != special_member_exception_types_.end() && found->second)
       decl.type = *found->second;
+    if (auto found = defaulted_comparisons_.find(decl.entity); found != defaulted_comparisons_.end()) {
+      decl.type = found->second.type;
+      if (found->second.deleted) decl.flags |= sema::decl_flag::deleted;
+    }
     return decl;
   }
   const Result<ast::BodySema>& analyze_body(u32 item);
@@ -387,6 +391,11 @@ public:
            r_->tokens[it.body_begin + 1].kind == lex::Tk::kw_default &&
            r_->tokens[it.body_begin + 2].kind == lex::Tk::semi;
   }
+  // A defaulted comparison operator function ([class.compare.default]) of a class completed here.
+  bool defaulted_comparison(EntityId f) const { return defaulted_comparisons_.contains(f); }
+  // [class.eq]: the result of defaulted comparison `f`'s implicit definition, whose parameters are
+  // the locals `params` (the class's members compared with the object parameter's first).
+  std::optional<Ex> defaulted_comparison_result(sema::Sema& sm, const ast::DeclSema& f, std::span<const u32> params);
   // An accepted in-class defaulted special member has a definition and no token body to analyse.
   bool defaulted_member_definition(u32 item, const ast::DeclSema& d) const {
     const auto& it = items_->items[item];
@@ -1908,6 +1917,17 @@ private:
                             Result<ast::ClassDef>& out);
   std::map<EntityId, std::pair<u32, u32>> special_member_exception_tokens_;
   std::map<EntityId, std::optional<QualType>> special_member_exception_types_;
+  // [class.compare.default]: what its complete class decides of a defaulted comparison operator
+  // function: whether it is deleted ([class.compare.default], [class.eq]), and its type with
+  // the implicit exception specification when none is written ([except.spec]).
+  struct DefaultedComparison {
+    bool deleted;
+    QualType type;
+    DeclId decl;
+  };
+  std::map<EntityId, DefaultedComparison> defaulted_comparisons_;
+  void complete_defaulted_comparisons(EntityId cls, sema::ClassRec& rec);
+  std::optional<Ex> defaulted_equality(sema::Sema& sm, EntityId cls, Ex x, Ex y);
   void bind_special_member_exception(EntityId cls, sema::ClassRec& rec, Result<ast::ClassDef>& out, EntityId entity);
   struct MemberException {
     u32 item;
@@ -2095,8 +2115,11 @@ public:
     return invalid_decl();
   }
   std::optional<ast::DeclSema> written_member(EntityId f) override {
-    const auto decl = p_->member_decl(f);
-    return decl ? p_->decl_sema(*decl) : std::nullopt;
+    if (const auto decl = p_->member_decl(f)) return p_->decl_sema(*decl);
+    // A defaulted comparison declared as a friend: its implicit exception specification.
+    if (const auto found = p_->defaulted_comparisons_.find(f); found != p_->defaulted_comparisons_.end())
+      return p_->decl_sema(found->second.decl);
+    return std::nullopt;
   }
   std::optional<ast::DeclSema> class_friend(EntityId f) override { return p_->class_friend(f); }
   void use_allocation_function(EntityId f, bool aligned) override {
@@ -5588,17 +5611,32 @@ private:
     const Tk name_token = p_->region().tokens[it_->begin + d.name_at].kind;
     const std::string_view name = s_.ins().names.spelling(d.name);
     const bool binary_operator = name_token == Tk::kw_operator && d.params.size() == 2 && name.starts_with("operator") &&
-                                 std::ranges::contains(sema::Sema::binary_spellings, name.substr(8));
+                                 (std::ranges::contains(sema::Sema::binary_spellings, name.substr(8)) || name == "operator<=>");
     const bool unary_minus = name_token == Tk::kw_operator && d.params.size() == 1 && name == "operator-";
     const bool ordinary = (definition || !c_context) && !d.qualified && !d.template_args &&
                           (p_->namespace_class_friend(k_) || templated) &&
                           (name_token == Tk::identifier || binary_operator || unary_minus);
+    // [class.compare.default]: `friend bool operator==(C, C) = default;`.
+    const bool defaulted_comparison = definition && name_token == Tk::kw_operator && name == "operator==" &&
+                                      p_->defaulted_body(k_);
     if (!types.is_function(d.type) ||
         (definition ? !ordinary || !d.function || !ps_.at_end() || !it_->has_body() ||
-                        (p_->region().tokens[it_->body_begin].kind != Tk::l_brace && !(unary_minus && deleted_body()))
+                        (p_->region().tokens[it_->body_begin].kind != Tk::l_brace && !(unary_minus && deleted_body()) &&
+                         !defaulted_comparison)
                     : !ps_.is(Tk::semi))) {
       s_.diag(d.name_at, Diag::not_supported, Tk::kw_friend);
       return bad();
+    }
+    if (defaulted_comparison) {
+      // A class template's defaulted comparison is not done yet (#295).
+      if (templated) {
+        s_.diag(d.name_at, Diag::not_supported, Tk::kw_default);
+        return bad();
+      }
+      if (!defaulted_comparison_ok(d, types.class_type(p_->class_entity(it_->parent)), false)) return bad();
+      // [dcl.fct.def.default]: implicitly constexpr; constexpr-suitable or not, a call is
+      // constant only when its subobject comparisons are ([expr.const]).
+      if (!spec.is_consteval) spec.is_constexpr = true;
     }
     if (ordinary) {
       if (c_context) {
@@ -5767,6 +5805,31 @@ private:
     sem.flags = sema::decl_flag::member;
     decls_.push_back(sem);
     s_.own.push_back({name, sem});
+    return true;
+  }
+
+  // [class.compare.default], [class.eq]: a defaulted `operator==` of class `cls`, a const
+  // member taking `const C&` (the implicit object parameter is the first `const C&`), or a friend
+  // taking two `const C&` or two `C`; it returns `bool`.
+  bool defaulted_comparison_ok(const parse::Declarator& d, QualType cls, bool member) {
+    sema::Types& types = s_.types();
+    const sema::TypeRec f = types.rec(d.type);
+    const QualType ref = types.canonical(types.lvalue_ref(types.add_cv(cls, sema::Cv::const_)));
+    const QualType value = types.canonical(cls);
+    auto all = [&](QualType t) {
+      return std::ranges::all_of(f.params, [&](QualType p) { return types.canonical(p) == t; });
+    };
+    const bool ok = !f.variadic && (member ? f.params.size() == 1 && all(ref) && f.fn_cv == sema::Cv::const_ &&
+                                                 f.fn_ref != ast::RefQual::rvalue
+                                           : f.params.size() == 2 && (all(ref) || all(value)));
+    if (!ok) {
+      s_.diag(d.name_at, Diag::defaulted_comparison_declaration, cls);
+      return false;
+    }
+    if (types.canonical(f.inner) != types.builtin(sema::Builtin::bool_)) {
+      s_.diag(d.name_at, Diag::defaulted_equality_return);
+      return false;
+    }
     return true;
   }
 
@@ -6828,6 +6891,15 @@ private:
     const bool defaulted = assignment && p_->defaulted_body(k_);
     const bool deleted = assignment && deleted_body() && it_->body_end - it_->body_begin == 3 &&
                          p_->region().tokens[it_->body_end - 1].kind == Tk::semi;
+    // [class.compare.default]: `bool operator==(const C&) const = default;`.
+    const bool comparison = fn && s_.ins().names.spelling(d.name) == "operator==" && p_->defaulted_body(k_);
+    if (comparison) {
+      if (spec.is_static || is_virtual || member_template_ || !s_.template_scopes.empty() || inst_) {
+        s_.diag(d.name_at, Diag::not_supported, Tk::kw_default);
+        return false;
+      }
+      if (!defaulted_comparison_ok(d, c.type, true)) return false;
+    }
     if (defaulted || deleted) {
       using sema::TypeKind;
       const auto parameter = p_->assignment_parameter({.name = d.name, .type = d.type, .is_function = true,
@@ -6862,7 +6934,7 @@ private:
     sem.is_final = is_final;
     u16 flags = sema::decl_flag::member;
     if (spec.is_static) flags |= sema::decl_flag::static_;
-    if (spec.is_constexpr || defaulted) flags |= sema::decl_flag::constexpr_;
+    if (spec.is_constexpr || defaulted || (comparison && !spec.is_consteval)) flags |= sema::decl_flag::constexpr_;
     if (spec.is_consteval) flags |= sema::decl_flag::consteval_;
     if (deleted) flags |= sema::decl_flag::deleted;
     if (spec.is_inline || spec.is_constexpr || spec.is_consteval || is_def) flags |= sema::decl_flag::inline_;
@@ -9175,6 +9247,8 @@ const Result<ast::ClassDef>& Program::class_def(u32 item) {
     rec.defined = true;
     // Complete-class checks see the full member set before any function bodies are read.
     classes_.publish(*cls, std::move(rec), [&](sema::ClassRec& fresh) {
+      // First: default arguments and member initializers may compare objects of the class.
+      complete_defaulted_comparisons(*cls, fresh);
       if (special_member_exception_tokens_.contains(fresh.declared_destructor))
         bind_destructor_and_defaults(*cls, fresh, out);
       else
@@ -9773,14 +9847,22 @@ public:
       if (inst_)
         for (const ast::ParamSema& prm : p_->world().ins.seqs.elements(pattern->params))
           if (s_.types().kind(prm.type) == sema::TypeKind::pack_expansion) s_.declare_param_pack(prm.name);
+      std::vector<u32> param_locals;
       for (const ast::ParamSema& prm : p_->world().ins.seqs.elements(f->params)) {
         if (prm.flags & sema::param_flag::pack_element) s_.declare_pack_element(prm.name, prm.type);
-        else s_.declare_local(prm.name, prm.type, sema::local_flag::parameter, 0, false);
+        else param_locals.push_back(s_.declare_local(prm.name, prm.type, sema::local_flag::parameter, 0, false));
       }
       bool ctor = f->flags & sema::decl_flag::constructor;
       ConstructorInitializers inits;
       if (ctor && ps_.is(lex::Tk::colon)) inits = mem_initializers();
-      if (!ps_.is(lex::Tk::l_brace)) {
+      if (p_->defaulted_body(k_) && p_->defaulted_comparison(f->entity)) {
+        // [class.compare.default]: the implicit definition of a defaulted comparison that is
+        // not deleted, `return x == y;` as [class.eq] expands it.
+        if (auto result = p_->defaulted_comparison_result(s_, *f, param_locals); result && result->ok()) {
+          Ex ret = s_.node(ast::Return{sema::Sema::at(*result, 0)}, 0, 0);
+          root = s_.node(ast::Compound{b_.list(std::vector<ast::Child>{sema::Sema::at(ret, 0)})}, 0, 0);
+        }
+      } else if (!ps_.is(lex::Tk::l_brace)) {
         // `= default`, `= delete` or a function-try-block.
         s_.diag(ps_.pos(), sema::Diag::not_supported, ps_.kind());
       } else {
@@ -10918,6 +11000,117 @@ sema::CopyAssignment Program::require_copy_assignment(EntityId f) {
 // The copy of the object `src` designates as an initializer of type `t` ([class.copy.ctor]/14):
 // a class through its copy constructor; an array whose elements' copy is not trivial element by
 // element, else as a whole.
+// [class.eq]: `x == y` for the defaulted equality operator of class `cls`. The expanded list of
+// subobjects (the direct bases in declaration order, then the non-static data members, an array's
+// elements in increasing index order) is compared pairwise, each `xi == yi` contextually converted
+// to `bool`, joined by `&&` so the first `false` decides; `true` with no subobjects. Nullopt when
+// the operator is deleted ([class.compare.default]: a reference or variant member); a
+// comparison that is not usable leaves its diagnostics in `sm` ([class.eq]).
+std::optional<Ex> Program::defaulted_equality(sema::Sema& sm, EntityId cls, Ex x, Ex y) {
+  using BinOp = sema::Sema::BinOp;
+  const sema::ClassRec& rec = classes_.rec(cls);
+  if (rec.union_) return std::nullopt;
+  std::optional<Ex> all;
+  bool ok = true;
+  auto compare = [&](this const auto& self, Ex a, Ex b, QualType t) -> void {
+    if (!ok) return;
+    if (w_->types.is_array(t)) {
+      const sema::TypeRec r = w_->types.rec(t);
+      const QualType index = w_->types.builtin(sema::Builtin::int_);
+      for (sema::u64 i = 0; ok && i < r.bound; ++i) {
+        auto at = [&] { return sm.literal(index, w_->values.integer(index, i), ast::ValueCategory::prvalue, 0, 0); };
+        self(sm.subscript(a, at(), 0, 0), sm.subscript(b, at(), 0, 0), r.inner);
+      }
+      return;
+    }
+    Ex c = sm.to_bool(sm.binary(BinOp::eq, a, b, 0), 0);
+    if (c.ok()) all = all ? sm.binary(BinOp::logical_and, *all, c, 0) : c;
+    ok = c.ok() && all->ok();
+  };
+  for (const sema::BaseRec& base : rec.bases)
+    compare(sm.to_base(x, base.cls, 0), sm.to_base(y, base.cls, 0), w_->types.class_type(base.cls));
+  for (const sema::FieldRec& f : rec.fields) {
+    if (w_->types.is_reference(f.type)) return std::nullopt;
+    if (w_->ins.names.spelling(f.name).empty()) {
+      if (f.bit_width) continue;  // an unnamed bit-field is not a member ([class.bit])
+      return std::nullopt;        // an anonymous union's variant members
+    }
+    compare(sm.member(x, false, f.name, 0, 0, 0), sm.member(y, false, f.name, 0, 0, 0), f.type);
+  }
+  if (!ok) return std::nullopt;
+  return all ? *all : sm.bool_literal(true, 0, 0);
+}
+
+std::optional<Ex> Program::defaulted_comparison_result(sema::Sema& sm, const ast::DeclSema& f, std::span<const u32> params) {
+  const sema::TypeRec fn = w_->types.rec(f.type);
+  auto parameter = [&](std::size_t i) {
+    const ast::ExprInfo info{w_->types.referee(fn.params[i]), ast::ValueCategory::lvalue, 0};
+    return sm.node(ast::LocalRef{info, params[i]}, 0, 0, info);
+  };
+  const bool member = f.flags & sema::decl_flag::member;
+  if (params.size() != (member ? 1u : 2u)) return std::nullopt;
+  const EntityId cls = member ? w_->entities.rec(f.entity).scope : w_->types.class_of(w_->types.referee(fn.params[0]));
+  Ex x = member ? sm.unary(ast::UnaryOp::deref, sm.this_expr(0, 0), 0, 0, 0) : parameter(0);
+  return defaulted_equality(sm, cls, x, parameter(member ? 0 : 1));
+}
+
+// [class.compare.default]: once its class is complete, whether each defaulted comparison operator
+// function declared in it (a member or a friend) is deleted, and its implicit exception
+// specification ([except.spec]): non-throwing unless an expression of the implicit definition
+// is potentially-throwing.
+void Program::complete_defaulted_comparisons(EntityId cls, sema::ClassRec& rec) {
+  auto complete = [&](EntityId f, DeclId decl, sema::MemberDeclRec* member) {
+    const u32 item = index(decl.item);
+    if (!defaulted_body(item) || w_->ins.names.spelling(w_->entities.rec(f).name) != "operator==") return;
+    const ast::ItemSema& is = item_sema(item).value;
+    if (ast::number_of(decl.ord) >= w_->ins.seqs.size(is.decls)) return;
+    const ast::DeclSema d = w_->ins.seqs.at(is.decls, ast::number_of(decl.ord));
+    if (d.kind != ast::DeclKind::function || d.entity != f) return;
+    ast::Builder b(w_->ins, &arena_);
+    std::vector<engine::Diagnostic> diags;
+    AtItem q(*this, item, true);
+    q.completing_class = cls;
+    q.own_class_complete = true;
+    sema::Sema sm(*w_, b, q, diags, id(item), 0);
+    sm.current_class = cls;
+    sm.current_function = f;
+    sm.this_type = this_type(d);
+    sm.in_function_body = true;
+    sm.push_scope();
+    std::vector<u32> params;
+    for (const ast::ParamSema& p : w_->ins.seqs.elements(d.params))
+      params.push_back(sm.declare_local(p.name, p.type, sema::local_flag::parameter, 0, false));
+    const std::optional<Ex> result = defaulted_comparison_result(sm, d, params);
+    // Deleted: a reference or variant member (no result and nothing diagnosed), or a subobject
+    // comparison that finds no viable, an ambiguous, a deleted or an inaccessible function. Any
+    // other diagnostic is ycxx's own limitation: the operator stays declared, and analysing its
+    // body reports it.
+    const bool deleted = diags.empty() ? !result || !result->ok() : std::ranges::all_of(diags, [](const engine::Diagnostic& g) {
+      return std::ranges::any_of(std::array{Diag::invalid_operands, Diag::ambiguous_call, Diag::deleted_function,
+                                            Diag::private_member, Diag::protected_member, Diag::inaccessible_base,
+                                            Diag::ambiguous_base, Diag::ambiguous_member},
+                                 [&](Diag k) { return g.id == sema::diag_id(k); });
+    });
+    QualType type = d.type;
+    if (!deleted && diags.empty() && !d.has_written_noexcept) {
+      const Ex nonthrowing = sm.unary_noexcept(*result, 0, 0);
+      const auto literal = sm.as<ast::Literal>(nonthrowing);
+      const QualType boolean = w_->types.builtin(sema::Builtin::bool_);
+      if (diags.empty() && literal && literal->value == w_->values.integer(boolean, 1)) {
+        const sema::TypeRec fn = w_->types.rec(d.type);
+        type = w_->types.function(fn.inner, fn.params, fn.variadic, fn.linkage, fn.fn_cv, fn.fn_ref, true);
+      }
+    }
+    sm.pop_scope();
+    defaulted_comparisons_.insert_or_assign(f, DefaultedComparison{deleted, type, decl});
+    if (member) member->is_deleted = deleted;
+  };
+  for (sema::MemberDeclRec& m : rec.members)
+    if (m.is_function && !m.is_static && !m.is_template)
+      if (const auto decl = member_decl(m.entity)) complete(m.entity, *decl, &m);
+  for (const ast::MemberRec& f : rec.adl_friends) complete(f.entity, f.decl, nullptr);
+}
+
 Ex Program::copy_from(sema::Sema& sm, Ex src, QualType t) {
   if (!w_->types.is_array(t)) return sm.convert(src, t, 0);
   if (!classes_.copy_of(t).first) return sm.convert_node(src, ast::ConversionKind::lvalue_to_rvalue, sema::Types::unqualified(t));

@@ -4210,3 +4210,31 @@ the body. A non-generic lambda body uses its own evaluation context.
 - General class objects, member pointers, operands whose type dependence is unresolved, and
   other direct parenthesized template argument spellings remain open, as do dependent
   template arguments, requirements, and exception specifications.
+
+## Defaulted equality and rewritten `!=` (#295)
+
+- A defaulted `operator==` ([class.compare.default], [class.eq]) may be a const member taking
+  `const C&`, or a hidden friend taking two `const C&` or two `C`, of a non-template class. It
+  returns `bool` and is implicitly constexpr. Other signatures are diagnosed.
+- When its class completes, `Program::complete_defaulted_comparisons` runs first, before default
+  arguments and member initializers are bound. It builds the comparison in a trial `Sema`
+  (`defaulted_equality`), comparing the bases, then the data members, then each array element,
+  joined with `&&`. The operator is deleted when a member is a reference or variant member, or
+  when a comparison finds no viable, an ambiguous, a deleted or an inaccessible function. Any
+  other diagnostic is ycxx's own limitation: the operator stays declared, and its body reports
+  it. Without a written noexcept-specifier, the exception specification is the noexcept of that
+  expression ([except.spec]). `completed_declaration` publishes both results, and so does the
+  friend's `written_member`. `BodyAnalysis` builds the same expression as the body.
+- `x != y` with no viable `operator!=`, and `x == y` with no viable `operator==`, try
+  `operator==` for `x == y`, then reversed as `y == x`, and negate the result for `!=`
+  (`Sema::rewritten_equality`, [over.match.oper]/3.4). This runs only when an operand has class
+  type. The selected function must be a rewrite target (no corresponding `operator!=` in its
+  scope), and its declared return type must be cv `bool`. A rewritten candidate is not yet
+  ranked against a viable ordinary one, built-in candidates for enumerations included. Other
+  rewrite targets are not tried when the selected one is not a target.
+- A hidden friend `operator<=>` with a body is accepted, as `<compare>` declares one.
+- Defaulted `<=>` and secondary operators, defaulted comparisons in class templates, out-of-class
+  defaulting, and the `<=>` expression remain open:
+  [#295](https://github.com/yrashk/ycxx/issues/295). Constant evaluation of the classes compared
+  fails when they have a class or array subobject:
+  [#1140](https://github.com/yrashk/ycxx/issues/1140).

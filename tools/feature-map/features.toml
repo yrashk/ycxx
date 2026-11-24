@@ -797,12 +797,13 @@ clauses = ['expr.spaceship', 'over.match.oper', 'cmp.categories']
 std = 'C++20'
 ftm = '__cpp_impl_three_way_comparison'
 detect = '<=>'
-status = 'missing'
+status = 'partial'
 probe = '''
 #include <compare>
 int main() { auto c = 1 <=> 2; return c < 0 ? 0 : 1; }
 '''
 issues = [295]
+note = 'Rewritten `!=` and reversed `==` candidates for class operands, tried when no ordinary candidate is viable. The `<=>` expression, rewritten relational candidates and joint ranking remain'
 
 [[feature]]
 id = 'expr-auto-cast'
@@ -1879,12 +1880,13 @@ clauses = ['class.compare', 'class.compare.default', 'class.eq', 'class.spaceshi
 std = 'C++20'
 ftm = '__cpp_impl_three_way_comparison'
 detect = '\boperator\s*(?:==|<=>)\s*\([^)]*\)\s*(?:const\s*)?(?:noexcept\s*)?=\s*default'
-status = 'missing'
+status = 'partial'
 probe = '''
 struct P { int x, y; bool operator==(const P&) const = default; };
 int main() { P a{1, 2}, b{1, 2}; return (a == b && !(a != b)) ? 0 : 1; }
 '''
-issues = [295]
+issues = [295, 1140]
+note = 'Defaulted `operator==` as a member or friend of a non-template class, with deletion and the implicit exception specification. Defaulted `<=>` and secondary operators, class templates and constant evaluation of classes with class or array subobjects (#1140) remain'
 
 [[feature]]
 id = 'class-cond-trivial'
