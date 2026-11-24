@@ -48,6 +48,14 @@ Work that never reaches `main` is lost. Twice, finished and reviewed work landed
   `std::execution`, `constexpr`. A bootstrap-compiler limitation gets the smallest workaround,
   marked `// BOOTSTRAP: <feature>: <reason>` and listed in STATUS.
 - Run `tools/test --fast` before pushing; CI confirms, it does not debug (DECISIONS §9).
+- To run tests without building, name the stage: `tools/test core <path>`, or
+  `tools/test --cxx clang affected <path>` for an oracle. A path alone also runs `tools/build`.
+  Never run two builds in one build directory. They broke modules and cost 15–37 minutes four
+  times (LESSONS, #659, #218, #259, #309).
+- A timeout is not a failure until it repeats on its own. Check `uptime`, rerun only the
+  timed-out tests (`ctest --test-dir build -R '<names>' -j 2`), then run
+  `tools/test failed affected core`. Under load, timeouts cost about an hour on #330, and the
+  merge checks of #1124 and #1129 hit them too (LESSONS).
 - macOS and Linux are meant to do the same things. A test or CTest you limit to one OS carries
   `PARITY:` with the issue that brings it to the other, or `by design:` with the host fact it is
   about. `tools/check-os-gates` enforces this for `REQUIRES:`, `ycxx.xfail` and `ycxx.txt` (an
