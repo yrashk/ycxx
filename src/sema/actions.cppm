@@ -973,10 +973,44 @@ public:
   // A template-name that names a type with its arguments ([temp.names]): a class template, or an
   // alias template ([temp.alias]).
   std::optional<ast::DeclSema> type_template(NameId name) {
-    if (auto m = own_member_alias_template(name)) return m;
+    if (auto block = block_type_template(name); block.found) return block.declaration;
+    bool found_member = false;
+    if (auto m = own_member_alias_template(name, found_member); found_member) return m;
     if (auto c = class_template(name)) return c;
     return named_template(name, ast::DeclKind::type_alias);
   }
+
+  struct BlockTypeTemplate {
+    bool found = false;
+    std::optional<ast::DeclSema> declaration;
+  };
+
+  // A block declaration, including one introduced by a using-declaration, hides the class
+  // and namespace scopes ([basic.lookup.unqual], [namespace.udecl]).
+  BlockTypeTemplate block_type_template(NameId name) {
+    for (std::size_t depth = scopes_.size(); depth-- > 0;) {
+      const auto names_here = [=](const auto& binding) { return binding.depth == depth && binding.name == name; };
+      if (std::ranges::contains(scopes_[depth], name, [](const auto& local) { return local.first; }) ||
+          std::ranges::any_of(block_types_, names_here) || std::ranges::any_of(block_aliases_, names_here))
+        return {true, std::nullopt};
+      for (const auto& [scope, e] : using_enums_) {
+        if (scope != depth) continue;
+        if (const EnumRec* record = enum_rec(e); record && std::ranges::contains(record->enumerators, name, &EnumeratorRec::name))
+          return {true, std::nullopt};
+      }
+      if (const auto used = std::ranges::find_if(block_usings_ | std::views::reverse, names_here);
+          used != block_usings_.rend()) {
+        if (used->type_index) {
+          const auto& declaration = used->decls[*used->type_index];
+          if (declaration.flags & decl_flag::template_)
+            return {true, with_template_defaults(declaration, used->decls)};
+        }
+        return {true, std::nullopt};
+      }
+    }
+    return {};
+  }
+
   std::optional<ast::DeclSema> namespace_type_template(EntityId ns, NameId name) {
     if (auto c = namespace_class_template(ns, name)) return c;
     return namespace_template(ns, name, ast::DeclKind::type_alias);
@@ -2765,13 +2799,26 @@ public:
     }
     return std::nullopt;
   }
-  // `apply<args>` in the scope of the class that declares `apply` ([class.member.lookup]), unless
-  // a block scope or a template parameter hides it.
-  std::optional<ast::DeclSema> own_member_alias_template(NameId n) {
+  // Unqualified lookup skips the current class's dependent direct bases even during replay.
+  // A non-template member or an ambiguous lookup still hides outer declarations
+  // ([basic.lookup.unqual], [class.member.lookup], [temp.res.general]).
+  std::optional<ast::DeclSema> own_member_alias_template(NameId n, bool& found) {
     if (current_class == EntityId::none || template_param(n)) return std::nullopt;
-    for (const auto& s : scopes_)
-      if (std::ranges::contains(s, n, [](const auto& p) { return p.first; })) return std::nullopt;
-    return member_alias_template(current_class, n);
+    std::optional<Found> member;
+    if (class_rec(current_class)) {
+      member = find_member(current_class, n, /*unqualified=*/true);
+    } else {
+      if (auto m = q_->earlier_member(n)) {
+        found = true;
+        if (m->kind == ast::DeclKind::type_alias && (m->flags & decl_flag::template_)) return *m;
+        return std::nullopt;
+      }
+      member = find_base_member(q_->defining_base_records(current_class), n, /*unqualified=*/true);
+    }
+    found = member.has_value();
+    if (!member || member->ambiguous || member->nested_type == EntityId::none || member->enumerator != EntityId::none ||
+        w_->entities.rec(member->nested_type).kind != EntityKind::alias_template) return std::nullopt;
+    return q_->template_decl(member->nested_type);
   }
   std::optional<QualType> member_type(EntityId c, NameId n) {
     if (class_rec(c)) {
@@ -4307,7 +4354,18 @@ public:
   // ([class.access]/4); diagnosed if not, or deferred as a nested type's check is.
   void member_template_access(QualType q, EntityId templ, NameId n, u32 at) {
     if (!types().is_class(q) || types().is_dependent(q)) return;
-    const EntityId naming = types().class_of(q), owner = w_->entities.rec(templ).scope;
+    check_member_template_access(types().class_of(q), templ, n, at);
+  }
+  // Unqualified lookup can find a member template before the naming class is complete
+  // ([class.access.general], [class.access.base]). Its declaration still supplies the access.
+  void unqualified_type_template_access(const ast::DeclSema& tmpl, NameId n, u32 at) {
+    if (current_class == EntityId::none || tmpl.kind != ast::DeclKind::type_alias || !(tmpl.flags & decl_flag::member))
+      return;
+    const ClassPrefixScope prefix(*this, current_class, static_initializer_name_);
+    check_member_template_access(current_class, tmpl.entity, n, at);
+  }
+  void check_member_template_access(EntityId naming, EntityId templ, NameId n, u32 at) {
+    const EntityId owner = w_->entities.rec(templ).scope;
     const ClassRec* cr = class_rec(owner);
     if (!cr) return;
     if (defer_type_access && (!accessible(owner, cr->access_of(templ), naming) || !accessible_naming_base(naming, owner))) {
@@ -4320,7 +4378,8 @@ public:
   QualType dependent_member_template_id(QualType q, NameId name, std::span<const TemplateArg> args) {
     return types().dep_template(q, name, ast::DepNameForm::template_id, args);
   }
-  std::optional<TemplateArg> template_name_arg(std::optional<EntityId> ns, NameId name) {
+  std::optional<TemplateArg> template_name_arg(std::optional<EntityId> ns, NameId name,
+                                                std::optional<u32> at = std::nullopt) {
     if (!ns)
       if (const ast::TemplateParamSema* p = template_param(name)) {
         if (p->kind != ast::TemplateArgKind::template_) return std::nullopt;
@@ -4331,11 +4390,12 @@ public:
     // class (the current instantiation, or the specialization) as a type one ([temp.local]/1).
     if (!ns && current_class != EntityId::none) {
       const EntityRec& c = w_->entities.rec(current_class);
-      if (c.templ != EntityId::none && c.name == name && !local_named(name))
+      if (c.templ != EntityId::none && c.name == name && !block_type_template(name).found)
         return TemplateArg{ast::TemplateArgKind::template_, types().class_type(current_class), ConstId::none, {}, c.templ};
     }
     auto t = ns ? namespace_type_template(*ns, name) : type_template(name);
     if (!t) return std::nullopt;
+    if (!ns && at) unqualified_type_template_access(*t, name, *at);
     return TemplateArg{ast::TemplateArgKind::template_, QualType{}, ConstId::none, {}, t->entity};
   }
   // The argument a template parameter named here stands for: its argument, or for a pack the
