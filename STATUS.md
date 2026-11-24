@@ -4358,7 +4358,7 @@ the body. A non-generic lambda body uses its own evaluation context.
   other direct parenthesized template argument spellings remain open, as do dependent
   template arguments, requirements, and exception specifications.
 
-## Defaulted equality and rewritten `!=` (#295)
+## Comparisons: `<=>`, defaulted `==` and `<=>`, rewritten candidates (#295)
 
 - A defaulted `operator==` ([class.compare.default], [class.eq]) may be a const member taking
   `const C&`, or a hidden friend taking two `const C&` or two `C`, of a non-template class. It
@@ -4379,9 +4379,43 @@ the body. A non-generic lambda body uses its own evaluation context.
   scope), and its declared return type must be cv `bool`. A rewritten candidate is not yet
   ranked against a viable ordinary one, built-in candidates for enumerations included. Other
   rewrite targets are not tried when the selected one is not a target.
-- A hidden friend `operator<=>` with a body is accepted, as `<compare>` declares one.
-- Defaulted `<=>` and secondary operators, defaulted comparisons in class templates, out-of-class
-  defaulting, and the `<=>` expression remain open:
-  [#295](https://github.com/yrashk/ycxx/issues/295). Constant evaluation of the classes compared
-  fails when they have a class or array subobject:
+- The built-in `a <=> b` ([expr.spaceship], `Sema::builtin_three_way`) takes arithmetic operands
+  after the usual arithmetic conversions (a narrowing one other than integral to floating is
+  ill-formed), two of one enumeration as its underlying type, an unscoped enumeration with an
+  integral type, and object pointers converted to their composite pointer type
+  (`Sema::composite_pointers`, shared with the relational and equality operators). `bool` goes
+  only with `bool`. The result is `std::strong_ordering`, or `std::partial_ordering` for
+  floating operands, found by qualified lookup in `std` with its static members `less`,
+  `equal`/`equivalent`, `greater` and `unordered` (`Sema::comparison_category`); without
+  `<compare>` it is an error.
+- `ast::ThreeWay` holds the converted operands and those members. IR generation
+  (`Gen::three_way`) evaluates the operands once, compares them, selects the address of the
+  member that names the result and copies it into the result object; a NaN leaves `unordered`.
+  Discarded, only the operands are evaluated.
+- `Sema::rewritten_three_way` ([over.match.oper]/3.4, /8): with no viable ordinary candidate
+  and an operand of class type, or of scoped enumeration type where the built-in operator is
+  not viable, `x @ y` for a relational `@` tries `operator<=>` as `(x <=> y) @ 0`, then reversed
+  as `0 @ (y <=> x)`; `x <=> y` tries the reversed one, `0 <=> (y <=> x)`. The `0` is a
+  one-token literal, so it is a null pointer constant too. A rewritten expression's own
+  operator is not rewritten again.
+- A defaulted `operator<=>` ([class.spaceship]) is declared as `==` is. Completion
+  (`Program::defaulted_three_way`) compares each subobject with `<=>`. A return type of plain
+  `auto` becomes the common comparison category of the results (`strong_ordering` with no
+  subobjects); a result that is not a category deletes the operator. Each result is converted to
+  the return type R. The body is `{ R v0 = x0 <=> y0; if (v0 != 0) return v0; … return
+  R::equal; }` (`defaulted_three_way_body`). The exception specification covers the comparisons,
+  the `vi != 0` tests and the equal result.
+- `x.operator@(…)` and `p->operator@(…)` name member operator functions.
+- A member operator that overload resolution selects and that is deleted, ambiguous or
+  inaccessible makes the expression ill-formed; the non-member candidates are not tried then.
+- Remaining: the `==` a defaulted `<=>` declares implicitly
+  ([#1196](https://github.com/yrashk/ycxx/issues/1196)); the synthesized three-way comparison from
+  `==` and `<` ([#1197](https://github.com/yrashk/ycxx/issues/1197)); conversions between
+  comparison categories, which need conversion functions between classes, so a defaulted `<=>`
+  over mixed categories fails ([#339](https://github.com/yrashk/ycxx/issues/339)); defaulted
+  secondary operators, defaulted comparisons in class templates, out-of-class defaulting and
+  joint ranking of rewritten candidates ([#295](https://github.com/yrashk/ycxx/issues/295)).
+  Constant evaluation of the classes compared fails when they have a class or array subobject:
   [#1140](https://github.com/yrashk/ycxx/issues/1140).
+- Tests: `tests/own/three-way-comparison/`. Most use `inputs/compare.hpp`, a stand-in for
+  `<compare>`, because libycxx's `<compare>` stops at `<type_traits>` gaps (#776).

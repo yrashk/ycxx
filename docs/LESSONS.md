@@ -662,6 +662,14 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
     Clang and GCC disagreed on the mangling there (#777), which made it a decision, not a fix.
   - Learned on #776.
 
+- **Check that a test's library header compiles before writing tests around it.** On #295 the
+  first eight `<=>` tests included `<compare>`. On main that header stopped at unrelated
+  `<type_traits>` gaps, so every test failed for reasons the feature could not fix, and the tests
+  were rewritten.
+  - Do: compile `#include <header>` alone with ycxx first. If it fails, give the tests a small
+    stand-in header under `inputs/` that declares what the feature needs, as the draft specifies
+    it. Keep one XFAIL test on the real header, citing the blocking issues.
+  - Learned on #295.
 - **A feature probe must use nothing but the feature.** On #282, 40 of the first 150 probes failed
   on something else: `auto` to hold a lambda, a nested `struct`, a default argument, `alignas`.
   Each would have filed the wrong status and the wrong failing example.
