@@ -53,6 +53,14 @@ export enum class Storage : std::uint8_t { automatic, temporary, dynamic, except
 // Initial state of an allocation's bytes ([dcl.init.general], P2795).
 export enum class Init : std::uint8_t { erroneous, indeterminate, zero };
 
+// What a `builtin` op computes; its u32 immediate. These are evaluated only in constant mode, on a
+// `consteval_br`'s consteval edge, whose runtime edge calls the C library function instead.
+//   - `memchr` (!state, s, c, n) -> (!state, pointer): the first of the n bytes at `s` equal to
+//     `c` converted to unsigned char, or null; the bytes are read in order up to the match.
+//   - `memcmp` (!state, a, b, n) -> (!state, int): the sign of the first difference between the
+//     n bytes at `a` and at `b`, as unsigned char, or 0; both must hold n bytes.
+export enum class BuiltinFn : std::uint8_t { memchr, memcmp };
+
 export enum class MemOrder : std::uint8_t { relaxed, consume, acquire, release, acq_rel, seq_cst };
 export enum class Rmw : std::uint8_t { xchg, add, sub, and_, or_, xor_, max, min };
 
@@ -228,7 +236,7 @@ export enum class Op : std::uint16_t {
   // `variadic` records the callee type even when the ellipsis matches zero arguments.
   call [[=state({S, Vs}, {S, Vs}).imms({entity, u32, u32, u32}).accepts({not_constexpr, variadic})]],
   call_ind [[=state({S, V, Vs}, {S, Vs}).imms({u32, u32, u32}).accepts({not_constexpr, variadic})]],
-  builtin [[=state({S, Vs}, {S, Vs}).imms({u32})]],
+  builtin [[=state({S, Vs}, {S, Vs}).imms({u32})]],  // a `BuiltinFn`, in constant evaluation only
   asm_ [[=state({S, Vs}, {S, Vs}).imms({constant}).with({nonconstant})]],
 
   // Constant evaluation ([expr.const]): `true` in constant mode, `false` in runtime mode.
