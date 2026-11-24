@@ -3182,6 +3182,11 @@ off compiler work. Ordinary include probes continue to use the daemon file table
 including missing candidates. The existing trace carries the native query tree,
 and reports external tool execution between workspace query attempts.
 
+`ycxx build --watch` uses the compiler watch loop and live trace browser
+(#1263). The daemon watches native compiler inputs and reobserves the project
+plan between runs for changes to the definition, generator inputs, and glob
+matches. It continues after a failed run.
+
 The initial build accepts a fixed host toolchain and explicit generator inputs.
 It checks host tool identity before admitting a receipt, and compares the resolved
 plan again before publishing. Rule packages, richer project configurations and
