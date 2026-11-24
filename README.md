@@ -31,6 +31,12 @@ freestanding C++ subset for x86-64 Linux. The standard library is out of reach: 
 
 ### What you can do today
 
+**Build a small project.** Run `ycxx build app` from the directory with `build.ycxx`.
+The resident engine builds executable targets from C++ source groups and declared external
+generators. The executable goes in `.ycxx/out/app`. Use `--trace-engine=interactive`
+or `--trace-engine=json` to inspect the tool steps and native compiler queries.
+[Build design](docs/design/build.md) [#1251](https://github.com/yrashk/ycxx/issues/1251)
+
 Ordinary function pointers and references preserve concrete `noexcept` type identity.
 A nonthrowing function can be used where the corresponding potentially throwing type is expected.
 The unary `noexcept` operator checks whether calls and constructions can throw.

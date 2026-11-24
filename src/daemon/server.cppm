@@ -594,6 +594,8 @@ class Server {
     };
     auto publish = [&](engine::Revision revision, const std::function<void()>& write) {
       std::lock_guard strand(strand_mu_);
+      if (cancelled()) return false;
+      catch_up();
       if (sess.db().revision() != revision || cancelled()) return false;
       write();
       return true;

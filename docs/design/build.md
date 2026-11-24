@@ -19,6 +19,32 @@ created header that shadows an old include invalidates the compile. A failed
 tool cannot publish a partial result. After each edit, compare the runnable
 output with a fresh build of that workspace.
 
+### Using the first slice
+
+Place `build.ycxx` in the working directory.
+
+```text
+cpp.library "core" {
+    sources = ["core.cc"]
+    public_include_dirs = ["include"]
+}
+
+cpp.executable "app" {
+    sources = glob("src/*.cc", exclude = ["src/*_test.cc"])
+    deps = ["core"]
+}
+```
+
+`ycxx build app` prints the path to `.ycxx/out/app` on success. Use
+`--trace-engine=stream`, `--trace-engine=interactive`, or `--trace-engine=json`
+to inspect the request. The library in this slice is an ordered group of
+native objects included in the executable link. The generator example in
+`tests/daemon/project_build.py` shows how to bind named staged paths with
+`input("name")` and `output("name")`. Tools must use the inputs declared by
+their rule. The first runner uses an explicit host executable and a private
+working directory. The coordinator rechecks the executable fingerprint before admitting a result. Support for outer toolchain envelopes follows #1254
+and #1259.
+
 ## Build definitions and tracked values
 
 The initial grammar is declarative (#1253). A target carries its rule name,

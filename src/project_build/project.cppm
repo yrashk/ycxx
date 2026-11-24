@@ -42,32 +42,29 @@ class Coordinator {
 }  // namespace ycxx::build
 
 namespace ycxx::build {
-namespace {
 
 namespace fs = std::filesystem;
 using Apply = std::function<void(const std::function<void(engine::Db&)>&)>;
 
-struct ProjectKey {
-  std::string cwd;
-  std::string target;
-  bool operator==(const ProjectKey&) const = default;
+struct Planned {
+  Fp128 workspace;
+  ProjectPlan resolved;
 };
 struct [[=engine::input{engine::Durability::low}]] WorkspacePlan {
-  using Key = ProjectKey;
-  using Value = ProjectPlan;
-  static void describe(std::string& out, const Key& key) { out += key.target; }
+  using Key = Fp128;  // The requested executable's output path.
+  using Value = Planned;
 };
 struct [[=engine::input{engine::Durability::low}]] ActionReceipt {
   using Key = Fp128;
   using Value = std::optional<std::vector<NamedArtifact>>;
 };
 struct Prepared {
-  std::string target;
+  Fp128 output;
   Fp128 plan;
   pipeline::RequestId request;
 };
 struct [[=engine::input{engine::Durability::low}]] PreparedBuild {
-  using Key = std::string;
+  using Key = Fp128;
   using Value = std::optional<Prepared>;
 };
 
@@ -83,18 +80,18 @@ struct Demand {
 };
 
 struct WorkspaceBuild {
-  using Key = ProjectKey;
+  using Key = WorkspacePlan::Key;
   using Value = Demand;
-  static void describe(std::string& out, const Key& key) { out += key.target; }
 
   static engine::query_task<Value> run(engine::Ctx& cx, const Key& key) {
-    const auto& plan = cx.fetch<WorkspacePlan>(key);
+    const auto& snapshot = cx.fetch<WorkspacePlan>(key);
+    const auto& plan = snapshot.resolved;
     Demand demand;
     for (std::size_t i = 0; i < plan.generators.size(); ++i)
       if (!cx.fetch<ActionReceipt>(action_key(plan.generators[i]))) demand.pending.push_back(i);
     if (!demand.pending.empty()) co_return demand;
-    const auto& prepared = cx.fetch<PreparedBuild>(key.cwd);
-    if (!prepared || prepared->target != key.target || prepared->plan != fingerprint(plan)) {
+    const auto& prepared = cx.fetch<PreparedBuild>(snapshot.workspace);
+    if (!prepared || prepared->output != key || prepared->plan != fingerprint(plan)) {
       demand.prepare = true;
       co_return demand;
     }
@@ -111,26 +108,41 @@ struct WorkspaceBuild {
   }
 };
 
+namespace {
+
 std::string native(const fs::path& path) { return path.generic_native_encoded_string(); }
 
-pipeline::RequestId register_native(pipeline::Session& session, const ProjectKey& key, const ProjectPlan& plan) {
+pipeline::RequestId register_native(pipeline::Session& session, const std::string& cwd, const std::string& target,
+                                    const ProjectPlan& plan) {
   pipeline::BuildKey build;
   for (const auto& source : plan.sources) {
     pp::Config config;
     config.view = pp::View::build;
-#ifdef __APPLE__
-    config.target = &ast::aarch64_darwin;
-#else
-    config.target = &ast::x86_64_linux;
-    config.freestanding = true;
-#endif
+    config.target = pp::native_target;
+    config.freestanding = config.target == &ast::x86_64_linux;
     config.angle_dirs = source.includes;
     config.system_from = config.angle_dirs.size();
     const std::string object = source.path + ".o";
-    build.units.push_back(session.unit({source.path, key.cwd, std::move(config), object}));
+    build.units.push_back(session.unit({source.path, cwd, std::move(config), object}));
   }
-  build.program = session.program({.tus = build.units, .objects = {}, .identifier = key.target});
+  build.program = session.program({.tus = build.units, .objects = {}, .identifier = target});
   return session.request(std::move(build));
+}
+
+std::expected<fs::path, std::string> build_directory(const fs::path& workspace, std::string_view name) {
+  fs::path path = workspace;
+  for (const auto part : {std::string_view(".ycxx"), name}) {
+    path /= part;
+    std::error_code ec;
+    auto status = fs::symlink_status(path, ec);
+    if (status.type() == fs::file_type::not_found) {
+      fs::create_directory(path, ec);
+      if (!ec) status = fs::symlink_status(path, ec);
+    }
+    if (ec || !fs::is_directory(status))
+      return std::unexpected(std::format("expected a build directory at '{}'", native(path)));
+  }
+  return path;
 }
 
 struct Scratch {
@@ -143,8 +155,13 @@ struct Scratch {
 
 std::optional<std::string> install(const fs::path& output, std::span<const std::uint8_t> image) {
   std::error_code ec;
-  fs::create_directories(output.parent_path(), ec);
-  if (ec) return std::format("cannot create build output directory: {}", ec.message());
+  const auto existing = fs::symlink_status(output, ec);
+  if (fs::is_regular_file(existing) && (existing.permissions() & fs::perms::owner_exec) != fs::perms::none) {
+    std::ifstream file(output, std::ios::binary);
+    if (file && std::ranges::equal(std::span(reinterpret_cast<const char*>(image.data()), image.size()),
+                                   std::ranges::subrange(std::istreambuf_iterator<char>(file),
+                                                         std::istreambuf_iterator<char>()))) return std::nullopt;
+  }
   auto path = native(output.parent_path() / ".publish-XXXXXX");
   if (!::mkdtemp(path.data())) return "cannot create temporary build output directory";
   const Scratch scratch{fs::path(path)};
@@ -169,7 +186,7 @@ Coordinator::Coordinator(pipeline::Session& session) : session_(session) {
   session_.db().set_provider<ActionReceipt>([](const Fp128&) -> engine::provided<ActionReceipt::Value> {
     return {std::nullopt, low};
   });
-  session_.db().set_provider<PreparedBuild>([](const std::string&) -> engine::provided<PreparedBuild::Value> {
+  session_.db().set_provider<PreparedBuild>([](const Fp128&) -> engine::provided<PreparedBuild::Value> {
     return {std::nullopt, low};
   });
 }
@@ -181,20 +198,25 @@ ProjectReport Coordinator::run(const fs::path& cwd, const std::string& target,
                                engine::Tracer* tracer) {
   std::lock_guard lock(mutex_);
   ProjectReport report;
-  const ProjectKey key{native(cwd), target};
+  const auto output = cwd / ".ycxx" / "out" / target;
+  const auto key = fingerprint128(native(output));
+  const std::string workspace_path = native(cwd);
+  const auto workspace = fingerprint128(workspace_path);
   const auto fail = [&](std::string diagnostic) {
     report.status = 1;
     report.diagnostics.push_back(std::move(diagnostic));
     return report;
   };
 
+  const auto* native_target = pp::native_target;
+  if (!native_target) return fail("project building is unavailable on this host");
   while (!cancelled()) {
     refresh();
     auto plan = plan_project(cwd, target);
     if (!plan) return fail(plan.error());
     const Fp128 plan_id = fingerprint(*plan);
-    if (const auto* prior = session_.db().peek<WorkspacePlan>(key); !prior || fingerprint(*prior) != plan_id)
-      apply([&](engine::Db& db) { db.set<WorkspacePlan>(key, *plan); });
+    if (const auto* prior = session_.db().peek<WorkspacePlan>(key); !prior || fingerprint(prior->resolved) != plan_id)
+      apply([&](engine::Db& db) { db.set<WorkspacePlan>(key, Planned{workspace, *plan}); });
 
     for (;;) {
       const auto before = session_.db().revision();
@@ -202,16 +224,15 @@ ProjectReport Coordinator::run(const fs::path& cwd, const std::string& target,
       if (!demand) return fail("build cancelled");
 
       if (!demand->pending.empty()) {
-        const auto scratch = cwd / ".ycxx" / "jobs";
-        std::error_code ec;
-        fs::create_directories(scratch, ec);
-        if (ec) return fail(std::format("cannot create action scratch directory: {}", ec.message()));
+        const auto scratch = build_directory(cwd, "jobs");
+        if (!scratch) return fail(scratch.error());
+        std::set<Fp128> attempted;
         for (const auto index : demand->pending) {
           if (cancelled()) return fail("build cancelled");
           const auto& generator = plan->generators[index];
           const auto id = action_key(generator);
           // Two targets in a plan can describe the same execution.
-          if (const auto* receipt = session_.db().peek<ActionReceipt>(id); receipt && *receipt) continue;
+          if (!attempted.insert(id).second) continue;
           std::inplace_stop_source stop;
           std::jthread monitor([&](std::stop_token finished) {
             while (!finished.stop_requested()) {
@@ -225,7 +246,7 @@ ProjectReport Coordinator::run(const fs::path& cwd, const std::string& target,
           ++report.actions_executed;
           const auto started = std::chrono::steady_clock::now();
           const auto trace_id = tracer ? session_.db().reserve_trace_id() : 0;
-          auto result = execute(generator.action, generator.inputs, scratch, stop.get_token());
+          auto result = execute(generator.action, generator.inputs, *scratch, stop.get_token());
           monitor.request_stop();
           monitor.join();
           if (tracer) {
@@ -234,6 +255,10 @@ ProjectReport Coordinator::run(const fs::path& cwd, const std::string& target,
                            .start = started, .end = std::chrono::steady_clock::now(), .value = {},
                            .errors = result.exit_status == 0 ? std::string{} : result.err, .span = {}});
           }
+          const auto observed = plan_project(cwd, target);
+          if (!observed || std::ranges::none_of(observed->generators, [&](const auto& current) {
+                return current.name == generator.name && action_key(current) == id;
+              })) break;
           if (result.exit_status != 0) {
             report.status = result.exit_status;
             report.diagnostics.push_back(std::format("generator '{}': {}", generator.name,
@@ -247,7 +272,7 @@ ProjectReport Coordinator::run(const fs::path& cwd, const std::string& target,
       }
 
       if (demand->prepare) {
-        const auto request = register_native(session_, key, *plan);
+        const auto request = register_native(session_, workspace_path, target, *plan);
         std::map<std::string, std::string> generated;
         for (const auto& generator : plan->generators) {
           const auto& receipt = *session_.db().peek<ActionReceipt>(action_key(generator));
@@ -258,12 +283,12 @@ ProjectReport Coordinator::run(const fs::path& cwd, const std::string& target,
                               std::string(bytes.begin(), bytes.end()));
           }
         }
-        auto& previous = generated_paths_[key.cwd];
+        auto& previous = generated_paths_[workspace_path];
         apply([&](engine::Db& db) {
           for (const auto& path : previous)
             if (!generated.contains(path)) session_.set_generated(path, std::nullopt);
           for (const auto& [path, bytes] : generated) session_.set_generated(path, bytes);
-          db.set<PreparedBuild>(key.cwd, Prepared{key.target, plan_id, request});
+          db.set<PreparedBuild>(workspace, Prepared{key, plan_id, request});
         });
         previous.clear();
         for (const auto& [path, bytes] : generated) previous.insert(path);
@@ -271,18 +296,20 @@ ProjectReport Coordinator::run(const fs::path& cwd, const std::string& target,
       }
 
       if (cancelled()) return fail("build cancelled");
-      refresh();
       const auto observed = plan_project(cwd, target);
-      if (!observed || fingerprint(*observed) != plan_id || before != session_.db().revision()) break;
+      if (!observed || fingerprint(*observed) != plan_id) break;
       if (demand->image.empty()) {
+        if (!publish(before, [] {})) break;
         report.status = 1;
         report.diagnostics.append_range(std::move(demand->errors));
         if (report.diagnostics.empty()) report.diagnostics.push_back("build produced no executable");
         return report;
       }
-      const auto output = cwd / ".ycxx" / "out" / target;
       std::optional<std::string> error;
-      if (!publish(before, [&] { error = install(output, demand->image); })) break;
+      if (!publish(before, [&] {
+            if (auto directory = build_directory(cwd, "out")) error = install(output, demand->image);
+            else error = std::move(directory.error());
+          })) break;
       if (error) return fail(std::move(*error));
       report.output = native(output);
       return report;

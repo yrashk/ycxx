@@ -94,14 +94,38 @@ def check_edit_sequence(ycxx, scope, env):
     executable = scope / '.ycxx' / 'out' / 'app'
     schema = scope / 'schema.txt'
     summary, events = traced_build(ycxx, scope, env, 'first build')
-    assert summary['actions_executed'] > 0, summary
+    assert summary['actions_executed'] == 1, summary
+    assert any(event.get('kind') == 'ExternalAction' for event in events), 'generator missing from trace'
     assert 'executed' in tu_outcomes(events, 'main.cc'), 'no native main.cc evaluation on first build'
     check_program(executable, 17)
     first = executable.read_bytes()
+    installed_at = executable.stat().st_mtime_ns
 
-    summary, _ = traced_build(ycxx, scope, env, 'unchanged build')
+    summary, events = traced_build(ycxx, scope, env, 'unchanged build')
     assert summary['actions_executed'] == 0, summary
-    assert executable.read_bytes() == first, 'unchanged build rewrote different executable bytes'
+    assert 'executed' not in tu_outcomes(events, 'main.cc'), 'unchanged native compile executed'
+    assert executable.read_bytes() == first, 'unchanged build produced different executable bytes'
+    assert executable.stat().st_mtime_ns == installed_at, 'unchanged build replaced the file'
+    executable.unlink()
+    summary, _ = traced_build(ycxx, scope, env, 'restore removed executable')
+    assert summary['actions_executed'] == 0, summary
+    assert executable.read_bytes() == first, 'restore changed executable bytes'
+
+    # The workspace reserves its output directory. A symlink must not redirect publication.
+    out = executable.parent
+    saved = out.with_name('out-saved')
+    out.rename(saved)
+    with tempfile.TemporaryDirectory(prefix='ycxx-outside-') as outside:
+        sentinel = Path(outside, 'app')
+        sentinel.write_bytes(b'outside the workspace')
+        out.symlink_to(outside, target_is_directory=True)
+        try:
+            summary, _ = traced_build(ycxx, scope, env, 'redirected output directory', succeeds=False)
+            assert any('expected a build directory' in diagnostic for diagnostic in summary['diagnostics']), summary
+            assert sentinel.read_bytes() == b'outside the workspace'
+        finally:
+            out.unlink()
+            saved.rename(out)
 
     schema.write_text('11\n')
     summary, events = traced_build(ycxx, scope, env, 'generator edit')

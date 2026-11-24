@@ -552,6 +552,12 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
     `docker run --rm -v "$PWD":/src:ro gcc:16 …`, copying the tree and running cmake and ctest
     directly (`tools/sync-submodules` cannot see a worktree's `.git` from inside the container).
   - Learned on #96/#97.
+- **Choose the module partition before starting the build.** The action runner's platform
+  helper was added after CMake had produced the active Ninja graph. That build had no mapping
+  for its import. On regeneration, an interface partition imported privately was rejected.
+  - Do: stop the active build before changing module edges, let CMake regenerate, and use an
+    implementation partition for a helper imported only by the primary module.
+  - Learned on #1255.
 - **A watcher test that passes at once may not test the race.** The FSEvents test of "an edit
   between the read and the new stream" passed with the replay removed: a stream created "since
   now" still saw an event `fseventsd` had not journaled yet.
