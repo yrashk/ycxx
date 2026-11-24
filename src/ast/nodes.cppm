@@ -109,6 +109,10 @@ struct Subscript {
   [[=sequenced(1)]] Child index;
 };
 
+// A builtin that is a call of a C library function (docs/EXTENSIONS.md). Constant evaluation
+// reads the bytes itself; at run time it stays the library call.
+enum class LibraryBuiltin : u8 { none, memchr, memcmp };
+
 // A call: the callee is sequenced before the arguments, which are indeterminately sequenced
 // with each other ([expr.call]).
 struct Call {
@@ -116,6 +120,7 @@ struct Call {
   EntityId function;  // none for a call through a pointer or object
   [[=sequenced(0)]] Child callee;
   [[=indeterminately_sequenced(1)]] ChildList args;
+  LibraryBuiltin builtin = LibraryBuiltin::none;
 };
 
 // A single-object new-expression ([expr.new]): allocation is sequenced before initialization.

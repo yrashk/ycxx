@@ -2284,7 +2284,28 @@ class Gen {
       args.push_back(argument(x));
     }
     if (through) return call_pointer(*through, result_type(c.info), args, byval, into ? 1 : 0);
+    if (c.builtin != ast::LibraryBuiltin::none) return library_builtin(c, args);
     return call_fn(c.function, result_type(c.info), args, ImplicitObject::none, false, byval, into ? 1 : 0);
+  }
+  // A builtin's call of a C library function, its arguments evaluated: in constant evaluation the
+  // interpreter reads the bytes (`ir::BuiltinFn`); at run time it is the library call, and `lower`
+  // keeps only that edge.
+  ValueId library_builtin(const ast::Call& c, std::span<const ValueId> args) {
+    const ast::QualType result = result_type(c.info);
+    const ir::BlockId evaluated = new_block(), library = new_block(), join = new_block({result});
+    const ir::SuccRef succs[] = {edge(evaluated), edge(library)};
+    emit(ir::Op::consteval_br, {}, {}, {}, 0, succs);
+    enter(evaluated);
+    const ir::Ty value[] = {vty(result)};
+    const auto fn = c.builtin == ast::LibraryBuiltin::memchr ? ir::BuiltinFn::memchr : ir::BuiltinFn::memcmp;
+    const std::uint64_t imms[] = {word(fn)};
+    const ValueId computed = b_.result(stateful(ir::Op::builtin, value, args, imms), 1);
+    br(join, {computed});
+    enter(library);
+    const ValueId called = *call_fn(c.function, result, args);
+    br(join, {called});
+    enter(join);
+    return b_.param(join, 1);
   }
   // A call through a function pointer, `args[0]`, of function type `fn`: `call_fn`'s `call_ind`.
   // `byval` and `result_arg` already exclude the callee pointer from their indices.
