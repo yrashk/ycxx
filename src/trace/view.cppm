@@ -112,6 +112,99 @@ std::string fit(std::string_view s, std::size_t width) {
   out.append(width - n, ' ');
   return out;
 }
+// What `s` (with SGR) shows from column `from` on, without its SGR.
+std::string slice_from(std::string_view s, std::size_t from) {
+  std::string out;
+  std::size_t col = 0;
+  for (std::size_t i = 0; i < s.size(); ++i) {
+    if (s[i] == '\x1b') {
+      const std::size_t j = s.find('m', i);
+      i = j == std::string_view::npos ? s.size() : j;
+      continue;
+    }
+    if ((static_cast<unsigned char>(s[i]) & 0xc0) != 0x80) ++col;
+    if (col > from) out += s[i];
+  }
+  return out;
+}
+// `s` in at most `width` columns, unpadded: cut, it ends in `…`, so a reader sees there is more.
+std::string ellipsize(std::string_view s, std::size_t width) {
+  if (columns(s) <= width) return std::string(s);
+  if (width == 0) return {};
+  // Only blanks past the edge: nothing is lost.
+  if (slice_from(s, width).find_first_not_of(' ') == std::string::npos) return fit(s, width);
+  std::string out = fit(s, width - 1);
+  // `fit` padded nothing (the text was longer) and ended in a reset: the mark goes after it.
+  return out + "…";
+}
+// A line made of pieces, each with a priority: those that fit `width`, in their order, `sep`
+// between them. A piece that does not fit is left out, lowest priority first, so the line keeps
+// what matters most and never runs off the screen; the last piece left is cut with `…`.
+struct Piece {
+  std::string text;
+  int priority = 0;  // higher stays longer
+};
+std::string pack(const std::vector<Piece>& pieces, std::size_t width, std::string_view sep = "  ") {
+  std::vector<bool> keep(pieces.size(), true);
+  const auto length = [&] {
+    std::size_t n = 0, k = 0;
+    for (std::size_t i = 0; i < pieces.size(); ++i)
+      if (keep[i]) n += columns(pieces[i].text) + (k++ ? columns(sep) : 0);
+    return std::pair(n, k);
+  };
+  while (length().first > width && length().second > 1) {
+    std::size_t drop = pieces.size();
+    for (std::size_t i = pieces.size(); i-- > 0;)
+      if (keep[i] && (drop == pieces.size() || pieces[i].priority < pieces[drop].priority)) drop = i;
+    keep[drop] = false;
+  }
+  std::string out;
+  bool first = true;
+  for (std::size_t i = 0; i < pieces.size(); ++i) {
+    if (!keep[i]) continue;
+    if (!first) out += sep;
+    out += pieces[i].text;
+    first = false;
+  }
+  return ellipsize(out, width);
+}
+// `left` and `right` on one line of `width`: the right part kept to its end, the left cut first.
+std::string spread(std::string_view left, std::string_view right, std::size_t width) {
+  const std::size_t r = columns(right);
+  if (r >= width) return ellipsize(right, width);
+  std::string l = ellipsize(left, width - r - (r ? 1 : 0));
+  const std::size_t gap = width - columns(l) - r;
+  return l + std::string(gap, ' ') + std::string(right);
+}
+// Plain text in at most `width` columns, cut in its path, so it ends as it did:
+// `watching …/scratch/pg`.
+std::string ellipsize_path(std::string_view s, std::size_t width) {
+  const std::size_t n = columns(s);
+  if (n <= width) return std::string(s);
+  const std::size_t slash = s.find('/');
+  const std::string_view head = s.substr(0, slash == std::string_view::npos ? 0 : slash);
+  if (width <= columns(head) + 2) return ellipsize(s, width);
+  // The last `keep` columns of the text, after the head and `…`.
+  const std::size_t keep = width - columns(head) - 1;
+  std::size_t at = s.size(), col = 0;
+  while (at > 0 && col < keep) {
+    --at;
+    if ((static_cast<unsigned char>(s[at]) & 0xc0) != 0x80) ++col;
+  }
+  return std::string(head) + "…" + std::string(s.substr(at));
+}
+// A path under `home` as `~/…`: the title bar's paths are the user's own.
+std::string home_relative(std::string_view text, std::string_view home) {
+  std::string out(text);
+  if (home.empty() || home == "/") return out;
+  for (std::size_t at = out.find(home); at != std::string::npos; at = out.find(home, at + 1)) {
+    const std::size_t end = at + home.size();
+    const bool starts = at == 0 || out[at - 1] == ' ' || out[at - 1] == '(';
+    const bool ends = end == out.size() || out[end] == '/' || out[end] == ')' || out[end] == ' ';
+    if (starts && ends) out.replace(at, home.size(), "~");
+  }
+  return out;
+}
 // `s` right-aligned in `width` columns (cut on the left when longer).
 std::string pad_left(std::string_view s, std::size_t width) {
   const std::size_t n = columns(s);
@@ -134,17 +227,25 @@ std::string strip_sgr(std::string_view s) {
   return out;
 }
 std::string paint(std::string_view params, std::string_view text) { return std::format("\x1b[{}m{}\x1b[0m", params, text); }
-// The selected row: reverse video, kept across the resets inside it.
-std::string selected(std::string_view line) {
-  std::string out = "\x1b[7m";
+// `line` under attributes `params` (a bar's background), kept across the resets inside it.
+std::string under(std::string_view params, std::string_view line) {
+  std::string out = std::format("\x1b[{}m", params);
+  const std::string again = std::format("\x1b[0;{}m", params);
   for (std::size_t i = 0; i < line.size(); ++i) {
     if (line.substr(i).starts_with("\x1b[0m")) {
-      out += "\x1b[0;7m";
+      out += again;
       i += 3;
     } else {
       out += line[i];
     }
   }
+  return out;
+}
+// The selected row: reverse video, kept across the resets inside it.
+std::string selected(std::string_view line) {
+  // Faint text in reverse video is hard to read: the selected row shows it plain.
+  std::string out = under("7", line);
+  for (std::size_t at = out.find("\x1b[2m"); at != std::string::npos; at = out.find("\x1b[2m", at)) out.erase(at, 4);
   return out;
 }
 
@@ -209,18 +310,24 @@ std::string osc52(std::string_view text, bool tmux) {
   return out;
 }
 
-// Splits text into lines of at most `width` columns.
+// Splits text into lines of at most `width` columns. A line breaks after a space, `/` or `,` in
+// its second half when it has one, else mid-word; no character is dropped, so the pieces joined
+// are the text again (a copy of wrapped lines is the line).
 std::vector<std::string> wrap(std::string_view text, std::size_t width) {
   std::vector<std::string> out;
+  width = std::max<std::size_t>(width, 1);
   for (auto part : text | std::views::split('\n')) {
     std::string_view line(part.begin(), part.end());
     do {
-      std::size_t cut = 0, n = 0;
+      std::size_t cut = 0, n = 0, soft = 0, soft_n = 0;
       while (cut < line.size() && n < width) {
+        const char c = line[cut];
         ++cut;
         while (cut < line.size() && (static_cast<unsigned char>(line[cut]) & 0xc0) == 0x80) ++cut;
         ++n;
+        if (c == ' ' || c == '/' || c == ',') soft = cut, soft_n = n;
       }
+      if (cut < line.size() && soft > 0 && soft_n * 2 >= width) cut = soft;
       out.emplace_back(line.substr(0, cut));
       line.remove_prefix(cut);
     } while (!line.empty());
@@ -229,6 +336,8 @@ std::vector<std::string> wrap(std::string_view text, std::size_t width) {
 }
 
 enum class View : std::uint8_t { tree, timeline, histogram };
+// What the toggles' line shows, each with its key: a click on one does what the key does.
+enum class Toggle : std::uint8_t { filter, worker, order, sort, reused, source };
 // Which pane the keys move: the tree, or the pane on its right (after a click on it).
 enum class Focus : std::uint8_t { tree, detail };
 // The tree pane's columns. A click on a header sorts by it (`cell`: as they started); `worker`
@@ -241,7 +350,8 @@ struct Hit {
     none,
     header,   // the summary line
     tab,      // a view's tab: `index` is the `View`
-    status,   // the rest of the status line
+    toggle,   // a toggle's chip: `index` is the `Toggle`
+    status,   // the rest of the toggles' line
     column,   // a column header: `index` is the `Column`
     row,      // a tree row: `index` in `Tree::rows()`
     marker,   // a tree row's ▸/▾: `index` as for `row`
@@ -286,11 +396,12 @@ class Browser {
   // A live source (`ctl trace`, `--watch`, a build being traced): the source named, the latest
   // request on top (`newest_first`), and following the newest activity (#939).
   void set_live(std::string source, bool newest_first = true) {
-    live_ = std::move(source);
+    const char* home = std::getenv("HOME");
+    live_ = home_relative(source, home ? home : "");
     if (newest_first) tree_.set_newest_first(true);
     follow_ = true;
   }
-  // The source has ended: the status line says so (`what`). A view still following goes back to
+  // The source has ended: the title bar says so (`what`). A view still following goes back to
   // the top, where a trace browsed after its build opens.
   void end_live(std::string what) {
     live_.reset();
@@ -338,7 +449,11 @@ class Browser {
       return {};
     }
     if (help_) {
-      help_ = false;
+      if (k == "j" || k == "\x1b[B" || k == "\x1bOB") ++help_scroll_;
+      else if (k == "k" || k == "\x1b[A" || k == "\x1bOA") help_scroll_ = help_scroll_ > 0 ? help_scroll_ - 1 : 0;
+      else if (k == "\x1b[6~" || k == " ") help_scroll_ += help_box_height();
+      else if (k == "\x1b[5~") help_scroll_ = help_scroll_ > help_box_height() ? help_scroll_ - help_box_height() : 0;
+      else help_ = false;
       return {};
     }
     if (k == "q" || k == "\x03") return Action{.quit = true};
@@ -377,7 +492,7 @@ class Browser {
       if (const auto n = selected_node()) rows_sel_->end = *n;
     return {};
   }
-  // What the last copy was, for the status line.
+  // What the last copy was, for the footer.
   void note(std::string text) { notice_ = std::move(text); }
   const std::string& notice() const noexcept { return notice_; }
 
@@ -397,31 +512,36 @@ class Browser {
     drop_stale_selection();
     Frame f;
     f.lines = header_lines();
-    f.lines.push_back(status_line());
     std::vector<std::string> body = view_ == View::tree ? tree_body() : view_ == View::timeline ? timeline_body() : histogram_body();
     body.resize(body_height());
     f.lines.append_range(body);
     f.lines.push_back(footer());
     if (help_) overlay_help(f.lines);
-    for (std::string& l : f.lines) l = fit(l, cols_);
+    // Nothing runs off the screen: a line cut ends in `…`.
+    for (std::string& l : f.lines) l = fit(ellipsize(l, cols_), cols_);
     while (f.lines.size() < rows_) f.lines.push_back(fit("", cols_));
     f.lines.resize(rows_);
-    if (prompt_) f.cursor = std::pair<std::size_t, std::size_t>{header_height(), std::min(cols_ - 1, 9 + columns(typed_))};
+    if (prompt_) f.cursor = std::pair<std::size_t, std::size_t>{rows_ - 1, std::min(cols_ - 1, prompt_label.size() + columns(typed_))};
     return f;
   }
 
   // What is at column `x`, row `y` of the last frame.
   Hit hit(std::size_t x, std::size_t y) const {
     const std::size_t hh = header_height();
-    if (y < hh) return {Hit::Area::header};
-    if (y == hh) {
+    if (y == 0) {
       for (const Tab& t : tabs()) {
         if (x >= t.x0 && x < t.x1) return {Hit::Area::tab, std::to_underlying(t.view)};
       }
+      return {Hit::Area::header};
+    }
+    if (y + 1 < hh) return {Hit::Area::header};
+    if (y + 1 == hh) {
+      for (const Chip& c : chips())
+        if (x >= c.x0 && x < c.x1) return {Hit::Area::toggle, std::to_underlying(c.toggle)};
       return {Hit::Area::status};
     }
-    if (y >= hh + 1 + body_height()) return {Hit::Area::footer};
-    const std::size_t by = y - hh - 1;
+    if (y >= hh + body_height()) return {Hit::Area::footer};
+    const std::size_t by = y - hh;
     if (view_ == View::histogram) return histogram_hit(x, by);
     if (view_ == View::timeline) {
       const std::size_t lanes = static_cast<std::size_t>(tree_.summary().workers) + 1;
@@ -462,7 +582,8 @@ class Browser {
     if (!split()) return cols_;
     return std::clamp(cols_ * split_ / 1000, min_pane, cols_ - min_pane);
   }
-  // Lines the summary takes: it wraps rather than run off a narrow screen.
+  // Rows above the body: the title bar, the summary (it wraps rather than run off a narrow
+  // screen) and the toggles.
   std::size_t header_height() const { return header_lines().size(); }
 
   // Two presses on one row this close together are a double click.
@@ -518,6 +639,9 @@ class Browser {
         break;
       case Hit::Area::column:
         sort_by(static_cast<Column>(h.index));
+        break;
+      case Hit::Area::toggle:
+        toggle(static_cast<Toggle>(h.index));
         break;
       case Hit::Area::row:
         focus_ = Focus::tree;
@@ -581,7 +705,7 @@ class Browser {
       if (split()) place_divider(m.x);
     } else if (drag_ == Drag::rows && rows_sel_) {
       const auto rows = tree_.rows();
-      const std::size_t n = rows.size(), first = header_height() + 2, hgt = list_height();
+      const std::size_t n = rows.size(), first = header_height() + 1, hgt = list_height();
       if (n == 0) return;
       std::size_t row = 0;
       past_edge_ = m.y < first || m.y - first >= hgt;
@@ -595,7 +719,7 @@ class Browser {
       if (cursor_ >= top_ + hgt) top_ = cursor_ - hgt + 1;
       rows_sel_->end = rows[row].node;
     } else if (drag_ == Drag::text && text_sel_) {
-      const std::size_t first = header_height() + 2;
+      const std::size_t first = header_height() + 1;
       past_edge_ = m.y < first || m.y - first >= pane_shown(pane_lines().size());
       const PanePoint p = pane_point(m.x, m.y, true);
       moved_ = moved_ || p != text_sel_->anchor;
@@ -748,7 +872,7 @@ class Browser {
   // The pane's point under the pointer; above or below the pane, while dragging (`scroll`), the
   // pane scrolls a line.
   PanePoint pane_point(std::size_t x, std::size_t y, bool scroll) {
-    const std::size_t lines = pane_lines().size(), first = header_height() + 2, shown = pane_shown(lines);
+    const std::size_t lines = pane_lines().size(), first = header_height() + 1, shown = pane_shown(lines);
     const std::size_t lw = left_width();
     PanePoint p;
     p.col = x > lw ? x - lw - 1 : 0;
@@ -913,7 +1037,7 @@ class Browser {
     else if (k == "\t") view_ = view_ == View::tree ? View::timeline : View::tree, clear_selection();  // as ever
     else if (k == "b") view_ = view_ == View::histogram ? View::tree : View::histogram, clear_selection();
     else if (k == "/") prompt_ = true, typed_ = filter_;
-    else if (k == "?") help_ = true;
+    else if (k == "?") help_ = true, help_scroll_ = 0;
     else if (k == "v") detail_ = !detail_, focus_ = Focus::tree;
     // The pane's width: < moves the divider left (a wider pane), > right.
     else if ((k == "<" || k == ">") && split()) place_divider(k == "<" ? (left_width() > resize_step ? left_width() - resize_step : 0) : left_width() + resize_step);
@@ -1099,9 +1223,9 @@ class Browser {
   }
 
   // ---- layout
-  // The body: what the summary, the status line and the footer leave.
+  // The body: what the title bar, the summary, the toggles and the footer leave.
   std::size_t body_height() const {
-    const std::size_t used = header_height() + 2;
+    const std::size_t used = header_height() + 1;  // and the footer
     return rows_ > used + 1 ? rows_ - used : 1;
   }
   // Tree rows: the body less its line of column headers.
@@ -1114,15 +1238,83 @@ class Browser {
     std::string_view name;
     std::size_t x0, x1;
   };
+  // The title bar's tabs, after its name: each padded by a column on either side.
+  static constexpr std::string_view title_name = " ycxx trace ";
   std::vector<Tab> tabs() const {
     std::vector<Tab> out;
-    std::size_t x = 1;
+    std::size_t x = title_name.size() + 1;
     for (const auto& [v, name] : {std::pair{View::tree, std::string_view("tree")}, std::pair{View::timeline, std::string_view("timeline")},
                                   std::pair{View::histogram, std::string_view("histogram")}}) {
-      out.push_back({v, name, x, x + name.size()});
+      out.push_back({v, name, x, x + name.size() + 2});
       x += name.size() + 2;
     }
     return out;
+  }
+  // The toggles' line: a chip per setting, its key and its state; those not at their default
+  // stand out. Narrow screens drop the least used.
+  struct Chip {
+    Toggle toggle;
+    std::string text;
+    std::size_t x0 = 0, x1 = 0;
+  };
+  std::vector<Chip> chips() const {
+    struct Want {
+      Toggle toggle;
+      std::string_view key;
+      std::string label;
+      bool set;
+      int priority;
+    };
+    std::vector<Want> want;
+    want.push_back({Toggle::filter, "/", filter_.empty() ? std::string("filter") : "filter: " + filter_, !filter_.empty(), 6});
+    want.push_back({Toggle::worker, "w", tree_.worker() ? "worker " + format_worker(*tree_.worker()) : std::string("all workers"), tree_.worker().has_value(), 5});
+    if (view_ == View::tree) {
+      want.push_back({Toggle::order, "o", tree_.newest_first() ? "newest first" : "oldest first", false, 3});
+      const std::string_view sort = tree_.order() == Tree::Order::alloc      ? "by bytes allocated"
+                                    : tree_.order() == Tree::Order::retained ? "by bytes retained"
+                                    : tree_.order() == Tree::Order::time     ? "by time"
+                                                                             : "in start order";
+      want.push_back({Toggle::sort, "s", std::string(sort), tree_.order() != Tree::Order::start, 4});
+      want.push_back({Toggle::reused, "r", tree_.hide_reused() ? "reused hidden" : "reused shown", tree_.hide_reused(), 2});
+      want.push_back({Toggle::source, "S", show_source_ ? "source column" : "no source column", show_source_, 1});
+    }
+    std::vector<Piece> pieces;
+    for (const Want& w : want) pieces.push_back({paint("1;36", w.key) + " " + paint(w.set ? "1;33" : "", w.label), w.priority});
+    // The pieces that fit, as `pack` keeps them, and where each lands.
+    const std::size_t width = cols_ > 1 ? cols_ - 1 : 1;
+    std::vector<Chip> out;
+    std::vector<bool> keep(pieces.size(), true);
+    const auto length = [&] {
+      std::size_t n = 0;
+      for (std::size_t i = 0; i < pieces.size(); ++i)
+        if (keep[i]) n += columns(pieces[i].text) + 3;
+      return n;
+    };
+    while (length() > width + 3 && std::ranges::count(keep, true) > 1) {
+      std::size_t drop = pieces.size();
+      for (std::size_t i = 0; i < pieces.size(); ++i)
+        if (keep[i] && (drop == pieces.size() || pieces[i].priority < pieces[drop].priority)) drop = i;
+      keep[drop] = false;
+    }
+    std::size_t x = 1;
+    for (std::size_t i = 0; i < pieces.size(); ++i) {
+      if (!keep[i]) continue;
+      const std::size_t w = columns(pieces[i].text);
+      out.push_back({want[i].toggle, pieces[i].text, x, x + w});
+      x += w + 3;
+    }
+    return out;
+  }
+  // What a toggle's key does, from its chip.
+  void toggle(Toggle t) {
+    switch (t) {
+      case Toggle::filter: common_key("/"); break;
+      case Toggle::worker: common_key("w"); break;
+      case Toggle::order: common_key("o"); break;
+      case Toggle::sort: common_key("s"); break;
+      case Toggle::reused: common_key("r"); break;
+      case Toggle::source: show_source_ = !show_source_; break;
+    }
   }
 
   // The tree pane's metric columns, right of the cell column, and their widths. Narrow panes drop
@@ -1180,63 +1372,113 @@ class Browser {
   }
 
   // ---- drawing
-  // The summary, in pieces that wrap onto as many lines as the width needs (at most a third of
-  // the screen): the title, each outcome's count, events and time, and memory.
-  std::vector<std::string> header_lines() const {
+  // The bars at the top and the bottom: a background of their own, kept across the resets inside.
+  static constexpr std::string_view bar_sgr = "48;5;236";
+  std::string on_bar(std::string_view line) const { return under(bar_sgr, fit(line, cols_)); }
+
+  // The title bar: the name, the tabs (the current one lit), and on the right whether the trace
+  // is live and followed, and what feeds it.
+  std::string title_bar() const {
+    std::string left = paint("1", title_name) + " ";
+    for (const Tab& t : tabs()) left += view_ == t.view ? paint("1;7", std::format(" {} ", t.name)) : std::format(" {} ", t.name);
+    std::vector<Piece> right;
+    if (live_) {
+      right.push_back({paint(running_sgr, "● live"), 3});
+      right.push_back({follow_ ? paint("1", "following") : paint("2", "paused, f follows"), 2});
+      // What feeds it, its path's end kept when it is long (`watching …/project`).
+      const std::size_t lw = columns(left) + 2, used = 6 + 2 + (follow_ ? 9 : 17) + 2 + 1;
+      if (!live_->empty() && cols_ > lw + used + 12) right.push_back({paint("2", ellipsize_path(*live_, cols_ - lw - used)), 1});
+    } else if (ended_) {
+      right.push_back({paint("2", *ended_), 1});
+    }
+    const std::size_t lw = columns(left);
+    const std::string r = right.empty() || cols_ <= lw + 2 ? std::string() : pack(right, cols_ - lw - 2) + " ";
+    return on_bar(spread(left, r, cols_));
+  }
+  // The summary, in pieces that wrap onto at most three lines (one on a short screen): each
+  // outcome's count, then events and time, then memory; what does not fit is left out.
+  std::vector<std::string> summary_lines() const {
     const Summary s = tree_.summary();
-    std::vector<std::string> pieces{paint("1;7", " ycxx engine trace ")};
+    std::vector<std::string> pieces;
+    // While cells run (#939): how many, before the counts of those that ended.
+    if (s.running > 0) pieces.push_back(paint(running_sgr, std::format("▶ {} running", s.running)));
     for (std::uint8_t i = 0; i < outcome_count; ++i) {
       const auto o = static_cast<Outcome>(i);
       if (s.counts[i] == 0) continue;
       pieces.push_back(paint(outcome_sgr(o), std::format("{} {} {}", outcome_glyph(o, true), s.counts[i], outcome_name(o))));
     }
-    // While cells run (#939): how many, before the counts of those that ended.
-    if (s.running > 0) pieces.insert(pieces.begin() + 1, paint(running_sgr, std::format("▶ {} running", s.running)));
     pieces.push_back(paint("2", std::format("{} events, {} workers, {}", s.events, s.workers, format_duration(s.span_ns))));
     // Memory (#274): what the frames allocated and the cells retain; the process's, when known.
     pieces.push_back(paint("2", std::format("{} allocated, {} retained", format_bytes(static_cast<std::int64_t>(s.alloc_bytes)), format_bytes(s.retained_bytes))));
     if (const auto m = tree_.memory())
       pieces.push_back(paint("2", std::format("{}: process {}, peak {}", s.running > 0 ? "this build so far" : "last build", format_bytes(m->process_current),
                                               format_bytes(m->process_peak))));
-    std::vector<std::string> out{pieces[0]};
-    for (std::size_t i = 1; i < pieces.size(); ++i) {
-      if (columns(out.back()) + 2 + columns(pieces[i]) <= cols_) out.back() += "  " + pieces[i];
-      else out.push_back(" " + pieces[i]);
+    const std::size_t most = rows_ < 16 ? 1 : 3;
+    std::vector<std::string> out;
+    for (const std::string& p : pieces) {
+      // A piece goes on the first line it fits on, so a short one after a long one still shows.
+      bool placed = false;
+      for (std::string& l : out) {
+        if (columns(l) + 2 + columns(p) <= cols_) {
+          l += "  " + p;
+          placed = true;
+          break;
+        }
+      }
+      if (placed) continue;
+      if (out.size() < most) out.push_back(" " + ellipsize(p, cols_ > 1 ? cols_ - 1 : 1));
     }
-    const std::size_t most = std::max<std::size_t>(1, rows_ / 3);
-    if (out.size() > most) out.resize(most);
+    if (out.empty()) out.emplace_back();
     return out;
   }
-  std::string status_line() const {
-    if (prompt_) return std::format(" filter: {}", typed_);
-    std::string out = " ";
-    for (const Tab& t : tabs()) out += (view_ == t.view ? paint("1;4", t.name) : paint("2", t.name)) + "  ";
-    if (!filter_.empty()) out += std::format(" filter: {}", paint("1", filter_));
-    out += std::format("  worker: {}", tree_.worker() ? paint("1", format_worker(*tree_.worker())) : std::string("all"));
-    out += tree_.newest_first() ? "  newest first" : "  oldest first";
-    if (tree_.order() == Tree::Order::alloc) out += "  " + paint("1", "by bytes allocated");
-    else if (tree_.order() == Tree::Order::retained) out += "  " + paint("1", "by bytes retained");
-    else if (tree_.order() == Tree::Order::time) out += "  " + paint("1", "by time");
-    if (tree_.hide_reused()) out += "  " + paint("1", "reused hidden");
-    if (live_) {
-      out += "  " + paint(running_sgr, "● live") + paint("2", " " + *live_);
-      out += follow_ ? "  " + paint("1", "following") : "  " + paint("2", "f follows");
-    } else if (ended_) {
-      out += "  " + paint("2", "(" + *ended_ + ")");
-    }
-    if (visual_) out += "  " + paint("1;7", " V: j/k extend, y copy, Esc drop ");
-    if (!notice_.empty()) out += "  " + paint("1;32", notice_);
+  // Everything above the body: the title bar, the summary, the toggles.
+  std::vector<std::string> header_lines() const {
+    std::vector<std::string> out{title_bar()};
+    out.append_range(summary_lines());
+    out.push_back(toggles_line());
     return out;
   }
-  std::string footer() const {
+  std::string toggles_line() const {
+    std::string out;
+    std::size_t x = 0;
+    for (const Chip& c : chips()) {
+      out += std::string(c.x0 - x, ' ') + c.text;
+      x = c.x1;
+    }
+    return out;
+  }
+  // The footer: a note when there is one, then the keys that matter in the view (as many as fit),
+  // and help and quit always, on the right.
+  struct Hint {
+    std::string_view keys, what;
+    int priority;
+  };
+  std::vector<Hint> hints() const {
+    if (visual_) return {{"j/k", "extend", 9}, {"y", "copy", 9}, {"Esc", "drop", 9}};
     if (view_ == View::tree && pane_focused())
-      return paint("2", " pane: ↑↓/jk line  PgUp/PgDn page  g/G top/end  V select lines  y copy  ←/h/Esc back to the tree  mouse: drag selects and copies, wheel scrolls  ? help  q quit");
+      return {{"↑↓", "scroll", 9}, {"PgUp/PgDn", "page", 7}, {"g/G", "top/end", 6}, {"V", "select lines", 5}, {"y", "copy", 8}, {"←/Esc", "back to the tree", 8}};
     if (view_ == View::tree)
-      return paint("2", " ↑↓/jk move  ⏎/space fold  ←→ close/open  e/E all  n next run  x next error  r reused  s sort  shift+J/K ]/[ pane  </> resize  / filter  w/0-9/m/a worker  o order  v pane  t timeline  y/Y/p copy cell/subtree/source  S source  V select  mouse: click, wheel, drag  ? help  q quit");
+      return {{"↑↓", "move", 9},       {"⏎", "fold", 8},       {"←→", "close/open", 4}, {"/", "filter", 8},      {"n", "next run", 6},
+              {"x", "next error", 6},  {"e/E", "open/close all", 3}, {"y/Y", "copy", 5},     {"J/K", "scroll pane", 2}, {"v", "pane", 2},
+              {"t", "timeline", 7},    {"b", "histogram", 7}};
     if (view_ == View::histogram)
-      return paint("2", " ↑↓/jk group  ⏎ its cells in the tree  1-9 metrics  c group by  i in the selected cell  s sort  b tree  / filter  mouse: click a switch, a header to sort, a bar to open it, wheel scrolls  ? help  q quit");
-    return paint("2", " ↑↓ lane  ←→/HL scrub  ⏎ open in tree  w/0-9/m/a worker  / filter  t tree  mouse: click a slice, double-click opens it, wheel scrubs  ? help  q quit");
+      return {{"↑↓", "group", 9}, {"⏎", "its cells", 8}, {"1-9", "metrics", 7}, {"c", "group by", 7}, {"s", "sort", 6}, {"i", "in the cell", 4},
+              {"/", "filter", 5}, {"b", "tree", 8}};
+    return {{"↑↓", "lane", 9}, {"←→", "scrub", 9}, {"H/L", "by 10", 4}, {"⏎", "open in tree", 8}, {"/", "filter", 5}, {"t", "tree", 8}, {"b", "histogram", 6}};
   }
+  static std::string hint_text(std::string_view keys, std::string_view what) { return paint("1", keys) + " " + std::string(what); }
+  std::string footer() const {
+    if (prompt_)
+      return on_bar(spread(std::string(prompt_label) + typed_, paint("2", "⏎ keep  Esc cancel  ? help "), cols_));
+    std::vector<Piece> left;
+    if (!notice_.empty()) left.push_back({paint("1;32", " " + notice_), 100});
+    if (visual_) left.push_back({paint("1;7", " VISUAL "), 99});
+    for (const Hint& h : hints()) left.push_back({hint_text(h.keys, h.what), h.priority});
+    const std::string right = hint_text("?", "help") + "  " + hint_text("q", "quit") + " ";
+    const std::size_t room = cols_ > columns(right) + 2 ? cols_ - columns(right) - 2 : 1;
+    return on_bar(spread(" " + pack(left, room), right, cols_));
+  }
+  static constexpr std::string_view prompt_label = " / ";
 
   std::string metric(const Tree::Node& n, Column c) const {
     const Event& e = n.ev;
@@ -1256,34 +1498,47 @@ class Browser {
     }
     return {};
   }
-  // The cell column: indentation, the marker, the outcome's glyph, the cell, its outcome, and what
-  // is folded under it.
-  std::string cell_text(const Tree::Row& r) const {
+  // The cell column, in `width` columns: indentation, the marker, the outcome's glyph, the cell,
+  // its outcome, and what is folded under it. When it does not fit, the count goes short
+  // (`[+20, 1 ran]`, `[+20]`), then the outcome's name (its glyph and color stay), then the key
+  // is cut with `…`: never mid-word into the next column.
+  std::string cell_text(const Tree::Row& r, std::size_t width) const {
     const Tree::Node& n = tree_.node(r.node);
     const Event& e = n.ev;
-    std::string out(2 * r.depth, ' ');
-    out += n.children.empty() ? "  " : (n.expanded ? "▾ " : "▸ ");
+    std::string lead(2 * r.depth, ' ');
+    lead += n.children.empty() ? "  " : (n.expanded ? "▾ " : "▸ ");
     if (tree_.error_here(r.node)) {
       // Where the errors start: the whole cell on red, and the first message on it.
-      return out + paint(error_here_sgr, std::format("{} {} {} ← {}", state_glyph(e, true), cell_name(e), state_name(e),
-                                                     first_line(e.errors)));
+      return ellipsize(lead + paint(error_here_sgr, std::format("{} {} {} ← {}", state_glyph(e, true), cell_name(e), state_name(e), first_line(e.errors))),
+                       width);
     }
-    out += paint(event_sgr(e), state_glyph(e, true));
-    out += ' ';
-    out += std::format("{}{}", paint(r.match ? "1" : "2", e.kind), e.key.empty() ? "" : std::format("({})", e.key));
-    out += ' ' + paint(event_sgr(e), state_name(e));
-    if (e.repeat > 1) out += paint("2", std::format(" ×{}", e.repeat));
+    const std::string name = paint(event_sgr(e), state_glyph(e, true)) + ' ' +
+                             std::format("{}{}", paint(r.match ? "1" : "2", e.kind), e.key.empty() ? "" : std::format("({})", e.key));
+    const std::string state = ' ' + paint(event_sgr(e), state_name(e));
+    std::string extra;
+    if (e.repeat > 1) extra += paint("2", std::format(" ×{}", e.repeat));
     if (!e.errors.empty()) {
       // The message from where it starts, bubbled up; `x` goes there.
       const auto at = tree_.error_origin_below(r.node);
-      out += paint(error_sgr, std::format("  (error below: {})", first_line(at ? tree_.node(*at).ev.errors : e.errors)));
+      extra += paint(error_sgr, std::format("  (error below: {})", first_line(at ? tree_.node(*at).ev.errors : e.errors)));
     }
-    if (!n.expanded && n.children.size() > 0) out += paint("2", std::format("  [{} below, {} ran]", n.subtree - 1, ran_below(n)));
-    return out;
+    std::vector<std::string> folds{""};
+    if (!n.expanded && n.children.size() > 0) {
+      const std::uint64_t below = n.subtree - 1, ran = ran_below(n);
+      folds = {paint("2", std::format("  [{} below, {} ran]", below, ran)), paint("2", std::format("  [+{}, {} ran]", below, ran)),
+               paint("2", std::format("  [+{}]", below)), ""};
+    }
+    const std::size_t fixed = columns(lead) + columns(name);
+    for (const std::string& f : folds)
+      if (fixed + columns(state) + columns(extra) + columns(f) <= width) return lead + name + state + extra + f;
+    if (fixed + columns(state) <= width) return ellipsize(lead + name + state + extra, width);
+    return ellipsize(lead + name, width);
   }
   std::string tree_row(const Tree::Row& r, const std::vector<Span>& spans) const {
     const Tree::Node& n = tree_.node(r.node);
-    std::string out = fit(cell_text(r), spans[0].x1);
+    // A column of space before the metrics, so a cut cell never touches them.
+    const std::size_t w = spans.size() > 1 && spans[0].x1 > 1 ? spans[0].x1 - 1 : spans[0].x1;
+    std::string out = fit(cell_text(r, w), spans[0].x1);
     for (std::size_t i = 1; i < spans.size(); ++i) out += ' ' + paint("2", pad_left(metric(n, spans[i].column), spans[i].x1 - spans[i].x0));
     return out;
   }
@@ -1333,7 +1588,7 @@ class Browser {
     detail_scroll_ = right.size() > shown ? std::min(detail_scroll_, right.size() - shown) : 0;
     std::vector<std::string> out;
     const std::string_view title_sgr = pane_focused() ? "1;4" : "1";
-    out.push_back(fit(left[0], lw) + paint(dragging() ? "1;7" : "2", "⇔") + paint(title_sgr, fit(" cell", rw)));
+    out.push_back(fit(left[0], lw) + paint(dragging() ? "1;7" : "2", "│") + paint(title_sgr, fit(" cell", rw)));
     for (std::size_t i = 0; i < hgt; ++i) {
       std::string l = i + 1 < left.size() ? left[i + 1] : std::string();
       const std::size_t at = i + detail_scroll_;
@@ -1343,8 +1598,7 @@ class Browser {
         if (from < to) r = highlight(r, from, to);
       }
       if (long_pane && i == hgt - 1)
-        r = paint("2;7", std::format(" lines {}–{} of {}   shift+J/K line  ]/[ page  }}/{{ end/top ", detail_scroll_ + 1, detail_scroll_ + shown,
-                                     right.size()));
+        r = paint("2;7", fit(std::format(" {}–{} of {}  J/K ]/[ }}/{{ scroll", detail_scroll_ + 1, detail_scroll_ + shown, right.size()), rw));
       out.push_back(fit(l, lw) + paint(dragging() ? "1;7" : "2", "│") + fit(r, rw));
     }
     return out;
@@ -1385,11 +1639,24 @@ class Browser {
     add("");
     // Memory (#274): this frame's own, its subtree's, and what the cell retains.
     if (e.alloc_bytes > 0 || n.incl.alloc > 0 || e.retained_bytes != 0) {
+      // A table: the cell's own frame, and with everything below it. A request's own is nothing:
+      // its cells did the work, and the second column says how much.
       wrapped("memory", "1;4");
-      add(std::format("alloc    {} in {} allocations", format_bytes(static_cast<std::int64_t>(e.alloc_bytes)), e.allocs));
-      add(std::format("peak     {}", format_bytes(e.peak_bytes)));
-      add(std::format("retains  {}", format_bytes(e.retained_bytes)));
-      add(std::format("in all   {} allocated, {} retained", format_bytes(static_cast<std::int64_t>(n.incl.alloc)), format_bytes(n.incl.retained)));
+      const std::array<std::array<std::string, 3>, 4> rows{{
+          {"alloc", format_bytes(static_cast<std::int64_t>(e.alloc_bytes)), format_bytes(static_cast<std::int64_t>(n.incl.alloc))},
+          {"allocs", std::format("{}", e.allocs), ""},
+          {"peak", format_bytes(e.peak_bytes), ""},
+          {"retains", format_bytes(e.retained_bytes), format_bytes(n.incl.retained)},
+      }};
+      std::size_t own = 3, all = 6;
+      for (const auto& r : rows) own = std::max(own, r[1].size()), all = std::max(all, r[2].size());
+      const auto line = [&](std::string_view a, std::string_view b, std::string_view c) {
+        std::string l = std::format("{:<9}{:>{}}  {:>{}}", a, b, own, c, all);
+        while (l.ends_with(' ')) l.pop_back();
+        return l;
+      };
+      wrapped(line("", "own", "in all"), "2");
+      for (const auto& r : rows) add(line(r[0], r[1], r[2]));
       add("");
     }
     if (!e.errors.empty()) {
@@ -1535,12 +1802,13 @@ class Browser {
   };
   std::vector<BarColumn> bar_columns(const std::vector<Group>& gs) const {
     const std::vector<Metric> on = shown_metrics();
-    const std::size_t avail = cols_ > bar_name_width + 1 ? cols_ - bar_name_width - 1 : 0;
+    // A column of margin on the right, so the last value never touches the edge.
+    const std::size_t avail = cols_ > bar_name_width + 2 ? cols_ - bar_name_width - 2 : 0;
     const std::size_t w = on.empty() ? 0 : std::max<std::size_t>(14, avail / on.size());
     std::vector<BarColumn> out;
     std::size_t x = bar_name_width + 1;
     for (Metric m : on) {
-      if (x + w > cols_) break;
+      if (x + w + 1 > cols_) break;
       std::size_t value_width = 3;
       for (const Group& g : gs) value_width = std::max(value_width, columns(format_metric(m, g.at(m))));
       const std::size_t inner = w - 1;
@@ -1598,7 +1866,7 @@ class Browser {
     if (const auto w = bars_within()) line += paint("2", "  " + cell_name(tree_.node(*w).ev));
     const auto cols = bar_columns(gs);
     line += paint("2", std::format("   sorted by {}", metric_name(sort_by_)));
-    if (cols.size() < shown_metrics().size()) line += paint("2", std::format(", {} more metric{} than fit", shown_metrics().size() - cols.size(), shown_metrics().size() - cols.size() == 1 ? "" : "s"));
+    if (cols.size() < shown_metrics().size()) line += paint("2", std::format(", {} hidden: too narrow", shown_metrics().size() - cols.size()));
     out.push_back(line);
     line = paint("1", fit(std::format(" {} ({})", grouping_name(group_by_), gs.size()), bar_name_width)) + " ";
     for (const BarColumn& c : cols) {
@@ -1611,7 +1879,7 @@ class Browser {
       for (std::size_t i = 0; i < metric_count; ++i) most[i] = std::max(most[i], g.v[i]);
     for (std::size_t i = bars_top_; i < gs.size() && i < bars_top_ + rows; ++i) {
       const Group& g = gs[i];
-      line = fit(std::format(" {} ×{}", g.name, g.cells), bar_name_width) + " ";
+      line = fit(ellipsize(std::format(" {} ×{}", g.name, g.cells), bar_name_width - 1), bar_name_width) + " ";
       for (const BarColumn& c : cols) {
         const std::size_t w = c.x1 - c.x0;
         line += paint("36", fit(bar(g.at(c.metric), most[std::to_underlying(c.metric)], c.bar_width), c.bar_width)) + " " +
@@ -1630,8 +1898,7 @@ class Browser {
     lane_ = std::min(lane_, tl.lanes.size() - 1);
     std::vector<std::string> out;
     const auto [from, to] = tl.slice(time_, cols);
-    // The axis: 0, the cursor's time, the end.
-    out.push_back(paint("2", std::format(" {:<7}0{:>{}}", "", format_duration(tl.span_ns), cols - 1)));
+    out.push_back(paint("2", std::string(lane_prefix, ' ') + axis(tl.span_ns, cols)));
     for (std::size_t lane = 0; lane < tl.lanes.size(); ++lane) {
       std::string line = std::format("{}{:>6} │", lane == lane_ ? "▶" : " ", format_worker(Timeline::worker_of(lane)));
       for (std::size_t c = 0; c < cols; ++c) {
@@ -1650,80 +1917,199 @@ class Browser {
     }
     out.emplace_back();
     out.push_back(paint("1", std::format(" at {} – {}", format_duration(from), format_duration(to))));
+    // What each worker was in then; workers next to each other in the same cell share a line.
+    struct Line {
+      std::size_t first, last;
+      std::string text;
+    };
+    std::vector<Line> lines;
     for (std::size_t lane = 0; lane < tl.lanes.size(); ++lane) {
-      const std::int32_t node = tl.lanes[lane][time_];
-      std::string line = std::format(" {}{:>6}  ", lane == lane_ ? "▶" : " ", format_worker(Timeline::worker_of(lane)));
-      if (node < 0) {
-        line += paint("2", "idle");
-      } else {
-        // The chain from the top-level request down to the cell, so a slice says why.
-        std::vector<std::string> chain;
-        for (std::int32_t p = node; p >= 0; p = tree_.node(p).parent) chain.push_back(tree_.node(p).ev.kind);
-        std::ranges::reverse(chain);
-        const Event& e = tree_.node(node).ev;
-        line += paint(event_sgr(e), state_glyph(e, true)) + " " + cell_name(e) + " " + paint(event_sgr(e), state_name(e)) +
-                paint("2", "   " + (chain | std::views::join_with(std::string_view(" › ")) | std::ranges::to<std::string>()));
-      }
-      out.push_back(std::move(line));
+      const std::string text = slice_text(tl.lanes[lane][time_], cols_ > 12 ? cols_ - 12 : 1);
+      if (!lines.empty() && lines.back().text == text && lines.back().last + 1 == lane) lines.back().last = lane;
+      else lines.push_back({lane, lane, text});
+    }
+    for (const Line& l : lines) {
+      const std::string who = l.first == l.last ? format_worker(Timeline::worker_of(l.first))
+                                                : std::format("{}–{}", format_worker(Timeline::worker_of(l.first)), format_worker(Timeline::worker_of(l.last)));
+      const bool here = lane_ >= l.first && lane_ <= l.last;
+      out.push_back(std::format(" {}{:>8}  {}", here ? "▶" : " ", who, l.text));
     }
     out.emplace_back();
-    std::string legend = " ";
+    std::vector<std::string> legend;
     for (std::uint8_t i = 0; i < outcome_count; ++i) {
       const auto o = static_cast<Outcome>(i);
-      legend += paint(outcome_sgr(o), "█") + " " + std::string(outcome_name(o)) + "  ";
+      legend.push_back(paint(outcome_sgr(o), "█") + " " + std::string(outcome_name(o)));
     }
-    out.push_back(legend + paint(running_sgr, "█") + " running  " + paint("2", "█▓▒░ shallower to deeper"));
+    legend.push_back(paint(running_sgr, "█") + " running");
+    legend.push_back(paint("2", "█▓▒░ shallower to deeper"));
+    std::string line = " ";
+    for (const std::string& l : legend) {
+      if (columns(line) + columns(l) + 2 > cols_ && line != " ") out.push_back(line), line = " ";
+      line += l + "  ";
+    }
+    out.push_back(line);
     return out;
   }
+  // The axis under the lanes: times at a tick every 20 columns or so, the end's at the end.
+  static std::string axis(std::uint64_t span_ns, std::size_t cols) {
+    std::string out(cols, ' ');
+    const auto at = [&](std::size_t c) { return cols > 1 ? span_ns * c / (cols - 1) : 0; };
+    const std::string end = format_duration(span_ns);
+    const std::size_t end_x = cols > end.size() ? cols - end.size() : 0;
+    std::vector<std::pair<std::size_t, std::string>> labels;
+    for (std::size_t c = 0; c + 1 < cols; c += 20) {
+      std::string t = c == 0 ? std::string("0") : format_duration(at(c));
+      if (c + columns(t) + 2 > end_x) break;
+      labels.emplace_back(c, "╵" + t);
+    }
+    labels.emplace_back(end_x > 0 ? end_x - 1 : 0, end + "╵");
+    std::string line;
+    std::size_t x = 0;
+    for (const auto& [c, t] : labels) {
+      if (c < x) continue;
+      line += std::string(c - x, ' ') + t;
+      x = c + columns(t);
+    }
+    return fit(line, cols);
+  }
+  // A slice of a lane: the cell, its outcome, and the chain of demand down to it, cut in the
+  // middle to fit `width`; or idle.
+  std::string slice_text(std::int32_t node, std::size_t width) const {
+    if (node < 0) return paint("2", "idle");
+    const Event& e = tree_.node(node).ev;
+    const std::string cell = paint(event_sgr(e), state_glyph(e, true)) + " " + cell_name(e) + " " + paint(event_sgr(e), state_name(e));
+    // The chain from the top-level request down to the cell's parent, so a slice says why.
+    std::vector<std::string> chain;
+    for (std::int32_t p = tree_.node(node).parent; p >= 0; p = tree_.node(p).parent) chain.push_back(tree_.node(p).ev.kind);
+    std::ranges::reverse(chain);
+    const std::size_t room = width > columns(cell) + 6 ? width - columns(cell) - 6 : 0;
+    const auto joined = [&] { return chain | std::views::join_with(std::string_view(" › ")) | std::ranges::to<std::string>(); };
+    bool elided = false;
+    while (chain.size() > 2 && columns(joined()) > room) {
+      // Out of the middle: the request it serves and the frames nearest the cell say the most.
+      chain.erase(chain.begin() + (elided ? 2 : 1));
+      if (!elided) chain.insert(chain.begin() + 1, "…"), elided = true;
+      if (chain.size() <= 3 && elided) break;
+    }
+    if (room < 4) return cell;
+    return cell + paint("2", "   in " + ellipsize(joined(), room));
+  }
 
-  void overlay_help(std::vector<std::string>& lines) const {
-    std::vector<std::string> help = {
-        paint("1", " What the engine did with each cell"),
-        "",
-    };
+  // The help: every key and symbol, in a box over the screen, a section per subject. Taller than
+  // the screen, it scrolls (↑↓, PgUp/PgDn); any other key or a click closes it.
+  std::vector<std::string> help_lines(std::size_t width) const {
+    using Row = std::pair<std::string, std::string_view>;
+    std::vector<std::pair<std::string_view, std::vector<Row>>> sections;
+    std::vector<Row> outcomes;
     for (std::uint8_t i = 0; i < outcome_count; ++i) {
       const auto o = static_cast<Outcome>(i);
-      help.push_back(std::format("  {} {:<9} {}", paint(outcome_sgr(o), outcome_glyph(o, true)), outcome_name(o), outcome_meaning(o)));
+      outcomes.push_back({paint(outcome_sgr(o), std::format("{} {}", outcome_glyph(o, true), outcome_name(o))), outcome_meaning(o)});
     }
-    help.insert(help.end(), {
-                                "",
-                                paint("1", " Filter (/)"),
-                                "  words      match kind or key, all of them",
-                                "  is:exec    an outcome (any prefix); is:running the cells still running",
-                                "  at:a.cpp:12  cells whose source touches line 12 of a.cpp (or at:a.cpp: any line)",
-                                "  kind:Lower   one kind, whole (what a histogram's bar opens)",
-                                "  w:3 w:main a worker",
-                                "",
-                                paint("1", " Showing"),
-                                "  r hides reused cells (what ran stays), o flips the order",
-                                "  while the build runs: f follows the newest activity (any move of yours stops it)",
-                                "  s sorts siblings: as they started, by bytes allocated below, by bytes retained, by time",
-                                "  the alloc and retains columns sum over each cell's subtree",
-                                "",
-                                paint("1", " The pane on the right"),
-                                "  shift+J / shift+K a line (j/k move in the tree), ]/[ a page, }/{ end and top",
-                                "  < and > move the divider (or drag it); v hides and shows the pane",
-                                "",
-                                paint("1", " Workers"),
-                                "  w cycles, 0-9 picks, m the requesting thread, a all",
-                                "",
-                                paint("1", " Copy (to the clipboard: OSC 52, and pbcopy, wl-copy or xclip when local)"),
-                                "  y the cell (what the pane shows), Y its subtree as the stream prints it, p where it is (path:line:col)",
-                                "  S shows a column of where each cell is in the source",
-                                "  drag over rows or the pane's text, or V and j/k then y: what is selected",
-                                "",
-                                paint("1", " Histogram (b, or the tab)"),
-                                "  1-9 switch metrics, c groups by kind, file or the selected cell's children, i only the selected cell",
-                                "  s or a header sorts; ⏎ or a click on a bar shows its cells in the tree (kind:Name or at:file filters)",
-                                "",
-                                paint("1", " Mouse"),
-                                "  click a row to select it, its ▸ or a double click to fold it; click a column header to sort",
-                                "  click a tab or a pane to switch to it; the wheel scrolls what is under it; drag the │ divider",
-                                "",
-                                paint("2", " any key or click to close"),
-                            });
-    const std::size_t top = 3;
-    for (std::size_t i = 0; i < help.size() && top + i < lines.size(); ++i) lines[top + i] = "  " + help[i];
+    outcomes.push_back({paint(running_sgr, "▶ running"), "started, not ended yet (while the build runs)"});
+    sections.push_back({"What the engine did with each cell", std::move(outcomes)});
+    sections.push_back({"Views", {{"t  Tab", "the tree and the timeline"}, {"b", "the histogram, and back"}, {"click", "a tab"}}});
+    sections.push_back({"Tree",
+                        {{"↑↓  j/k", "move; PgUp/PgDn a page, g/G the top and the end"},
+                         {"⏎  space", "fold or unfold; ←→ (h/l) close and open, ← again goes to the parent"},
+                         {"e  E", "open everything, close everything"},
+                         {"n  x", "the next cell that ran, the next error"},
+                         {"s", "sort siblings: as they started, bytes allocated, bytes retained, time (or click a header)"},
+                         {"o", "newest or oldest request first"},
+                         {"r", "hide the reused cells (what ran stays)"},
+                         {"S", "a column of where each cell is in the source"},
+                         {"columns", "alloc and retains sum over each cell's subtree"}}});
+    sections.push_back({"The pane on the right",
+                        {{"J/K", "a line (j/k move in the tree); ]/[ a page, }/{ the end and the top"},
+                         {"<  >", "move the divider (or drag it); v hides and shows the pane"},
+                         {"click", "focuses it: then ↑↓ scroll it, ← or Esc give the keys back"}}});
+    sections.push_back({"Filter (/)",
+                        {{"words", "match a cell's kind or key, all of them"},
+                         {"is:exec", "an outcome (any prefix); is:running the cells still running"},
+                         {"at:a.cpp:12", "cells whose source touches line 12 of a.cpp (at:a.cpp: any line)"},
+                         {"kind:Lower", "one kind, whole (what a histogram's bar opens)"},
+                         {"w:3  w:main", "a worker"}}});
+    sections.push_back({"Workers", {{"w", "cycle through them"}, {"0-9  m  a", "pick one, the requesting thread, all"}}});
+    sections.push_back({"Copy (OSC 52, and the system clipboard when local)",
+                        {{"y  Y", "the cell as the pane shows it; its subtree as the stream prints it"},
+                         {"p", "where the cell is: path:line:col"},
+                         {"V", "select rows (or the pane's lines), j/k extend, y copies"},
+                         {"drag", "over rows or the pane's text: selects and copies"}}});
+    sections.push_back({"Timeline",
+                        {{"↑↓  ←→", "a lane, and scrub through time; H/L by ten"}, {"⏎", "the cell under the cursor, in the tree"}, {"click", "a slice; a double click opens it"}}});
+    sections.push_back({"Histogram",
+                        {{"1-9", "switch metrics"},
+                         {"c", "group by kind, file, or the selected cell's children"},
+                         {"i", "only within the selected cell"},
+                         {"s", "sort by the next metric shown (or click a header)"},
+                         {"⏎", "the group's cells in the tree (a kind: or at: filter)"}}});
+    if (live_) sections.push_back({"While the build runs", {{"f", "follow the newest activity; any move of yours stops following"}}});
+    std::size_t key_w = 0;
+    for (const auto& [_, rows] : sections)
+      for (const auto& [k, _] : rows) key_w = std::max(key_w, columns(k));
+    key_w = std::min<std::size_t>(key_w, width / 3);
+    const std::size_t what_w = width > key_w + 3 ? width - key_w - 3 : 1;
+    std::vector<std::string> out;
+    for (const auto& [title, rows] : sections) {
+      if (!out.empty()) out.emplace_back();
+      out.push_back(paint("1;4", title));
+      for (const auto& [k, what] : rows) {
+        bool first = true;
+        for (const std::string& l : wrap(what, what_w)) {
+          out.push_back(" " + (first ? paint("1", fit(k, key_w)) : std::string(key_w, ' ')) + "  " + l);
+          first = false;
+        }
+      }
+    }
+    return out;
+  }
+  // The box: between the title bar and the footer, at most 100 wide.
+  std::size_t help_box_height() const { return rows_ > 4 ? rows_ - 2 : rows_; }
+  static constexpr std::string_view help_sgr = "48;5;235";
+  void overlay_help(std::vector<std::string>& lines) const {
+    const std::size_t w = std::min<std::size_t>(cols_, 100);
+    const std::size_t x = (cols_ - w) / 2, inner = w > 4 ? w - 4 : 1;
+    const std::vector<std::string> help = help_lines(inner);
+    const std::size_t room = help_box_height() > 2 ? help_box_height() - 2 : 1;
+    const std::size_t h = std::min(help.size(), room);
+    help_scroll_ = std::min(help_scroll_, help.size() - h);
+    const std::size_t top = 2 + (room - h) / 2;
+    const auto row = [&](std::size_t y, std::string text) {
+      if (y >= lines.size()) return;
+      // Left of the box the screen stays; right of it, too.
+      std::string plain = fit(lines[y], cols_);
+      lines[y] = fit(plain, x) + under(help_sgr, text) + "\x1b[0m" + slice_after(plain, x + w);
+    };
+    const std::string title = help.size() > h ? std::format(" keys {}–{} of {}: ↑↓ scroll, any other key closes ", help_scroll_ + 1, help_scroll_ + h, help.size())
+                                              : std::string(" keys: any key closes ");
+    const auto border = [&](std::string_view l, std::string_view r, std::string_view label) {
+      std::string out(l);
+      std::size_t n = 0;
+      if (columns(label) + 4 <= w) out += "─" + std::string(label), n = 1 + columns(label);
+      for (; n + 2 < w; ++n) out += "─";
+      return paint("1", out + std::string(r));
+    };
+    row(top - 1, border("┌", "┐", paint("1", title)));
+    for (std::size_t i = 0; i < h; ++i) row(top + i, paint("1", "│") + " " + fit(help[help_scroll_ + i], inner) + " " + paint("1", "│"));
+    row(top + h, border("└", "┘", ""));
+  }
+  // What a line shows from column `from` on, its attributes as they were there.
+  static std::string slice_after(std::string_view s, std::size_t from) {
+    std::string out, sgr;
+    std::size_t col = 0;
+    for (std::size_t i = 0; i < s.size(); ++i) {
+      if (s[i] == '\x1b') {
+        const std::size_t j = s.find('m', i);
+        const std::string_view seq = s.substr(i, j == std::string_view::npos ? s.size() - i : j - i + 1);
+        if (col >= from) out += seq;
+        else sgr = seq == "\x1b[0m" ? std::string() : sgr + std::string(seq);
+        i = j == std::string_view::npos ? s.size() : j;
+        continue;
+      }
+      const bool lead = (static_cast<unsigned char>(s[i]) & 0xc0) != 0x80;
+      if (lead) ++col;
+      if (col > from) out += s[i];
+    }
+    return sgr + out;
   }
 
   struct Press {
@@ -1742,7 +2128,7 @@ class Browser {
   Tree& tree_;
   std::size_t rows_ = 24, cols_ = 80;
   std::optional<std::string> live_;
-  std::optional<std::string> ended_;  // what the status line says once the source has ended
+  std::optional<std::string> ended_;  // what the title bar says once the source has ended
   bool follow_ = false;               // the newest activity is selected as it comes (#939)
   View view_ = View::tree;
   Focus focus_ = Focus::tree;
@@ -1750,6 +2136,7 @@ class Browser {
   std::size_t lane_ = 0, time_ = 0;
   std::size_t detail_scroll_ = 0;
   bool detail_ = true, help_ = false, prompt_ = false;
+  mutable std::size_t help_scroll_ = 0;  // clamped as the help is drawn
   std::string filter_, typed_;
   std::size_t split_ = 600;  // the divider's place, in thousandths of the width
   Drag drag_ = Drag::none;

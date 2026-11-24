@@ -355,7 +355,7 @@ int watch_builds(compile::Request r, bool verbose, TraceMode mode) {
       }
       post(std::move(done));
       changed = await_change(root, revision, instance, cut, false, [&](std::vector<std::string> paths) {
-        std::string text = std::format("\n\nwatching {} files:\n", paths.size());
+        std::string text = std::format("\n\nwatching {} file{}:\n", paths.size(), paths.size() == 1 ? "" : "s");
         for (const std::string& p : paths) text += "  " + p + "\n";
         post({Item::files, n, run, offset, {}, label, std::move(text)});
       });
@@ -422,7 +422,7 @@ int watch_builds(compile::Request r, bool verbose, TraceMode mode) {
                      }
                      return !ended;
                    },
-                   .source = std::format("rebuilding on every change of the files it reads ({})", root)};
+                   .source = std::format("watching {}", root)};
   feed.tick = [&] {
     tree.advance(sent_ns + static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - sent_at).count()));
     return true;
