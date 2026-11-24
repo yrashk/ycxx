@@ -221,11 +221,9 @@ draft/expr/expr.call-4.accept.cpp preprocessing directives are not supported yet
 draft/expr/expr.const.cast-1.accept.cpp 'typedef' not supported yet
 draft/expr/expr.const.const-1.reject.cpp errors elsewhere: 'template' is not supported yet
 draft/expr/expr.const.const-2.reject.cpp errors elsewhere: 'auto' is not supported yet
-draft/expr/expr.const.const-3.reject.cpp errors elsewhere: 'struct' not supported yet
 draft/expr/expr.const.core-1.accept.cpp 'static' is not supported yet
 draft/expr/expr.const.core-3.accept.cpp 'auto' not supported yet
 draft/expr/expr.const.core-4.reject.cpp errors elsewhere: preprocessing directives are not supported yet
-draft/expr/expr.const.core-5.reject.cpp errors elsewhere: 'struct' not supported yet
 draft/expr/expr.const.core-6.reject.cpp errors elsewhere: preprocessing directives are not supported yet
 draft/expr/expr.const.defns-1.reject.cpp errors elsewhere: preprocessing directives are not supported yet
 draft/expr/expr.const.imm-1.reject.cpp errors elsewhere: preprocessing directives are not supported yet
