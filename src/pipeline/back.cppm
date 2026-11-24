@@ -141,7 +141,7 @@ struct FunctionDef {
   // An ordinary external inline definition that every unit using it may emit: a weak definition,
   // coalesced by the linker (ELF #422, Mach-O #124).
   bool coalesced = false;
-  bool explicit_weak = false;  // an ordinary non-inline ELF definition (#937)
+  bool explicit_weak = false;  // an ordinary non-inline definition (#937)
   UnwindEligibility unwind = UnwindEligibility::none;
   std::optional<HostedCatch> hosted_catch{};
   ast::NodeId cleanup_call = ast::NodeId::none;
@@ -149,6 +149,8 @@ struct FunctionDef {
   EntityId constructor_initializer_callee = EntityId::none;
   EntityId unwind_through_constructor = EntityId::none;
   EntityId destructor_table = EntityId::none;  // the primary table installed by D1 and D2
+  // The primary table a dynamic class's constructor installs after its base subobject (#309).
+  EntityId constructor_table = EntityId::none;
 };
 
 // A variable definition at namespace scope with its constant initializer, or `ConstId::none` for
@@ -188,6 +190,11 @@ struct ClassShape {
   bool has_mutable_field = false;
   sema::PeerVirtualLayout peer_virtual_layout = sema::PeerVirtualLayout::none;
   EntityId peer_automatic_primary_base = EntityId::none;
+  bool dynamic_root = false;  // a dynamic class whose own vptr is at offset zero (#309)
+  std::vector<ast::NameId> field_names{};
+  bool plain_ownership_record = false;
+  EntityId ownership_destructor = EntityId::none;
+  EntityId nonthrowing_destructor = EntityId::none;
 };
 struct EnumShape {
   EntityId entity = EntityId::none;
@@ -205,6 +212,19 @@ struct OwnedVirtualTable {
   std::vector<EntityId> slots;  // in slot order, starting with the key function in the admitted profiles
   EntityId primary_base = EntityId::none;
   bool peer_base_rtti = false;  // a peer's key owns the primary base descriptor
+};
+
+// A dynamic class's primary table and RTTI this unit defines (Itanium C++ ABI §2.5.2, §2.9.5,
+// §5.2.3): strong in the unit defining the key function, else weak in every unit that defines the
+// class. `slots` holds the function entries (D1 and D0 for a virtual destructor, the pure virtual
+// handler for a pure one).
+struct DynamicTable {
+  EntityId entity;  // the virtual table
+  EntityId cls;
+  std::vector<EntityId> slots;
+  EntityId base = EntityId::none;  // the single public primary base, whose RTTI the descriptor names
+  bool weak = false;
+  bool rtti_only = false;  // a keyless base's descriptor for a derived one, its table not used here
 };
 
 struct AsmHiddenSymbol {
@@ -231,6 +251,7 @@ struct TranslationUnit {
   std::optional<ir::CatchAllRuntime> catch_runtime;
   EntityId cleanup_resume = EntityId::none;
   std::optional<OwnedVirtualTable> owned_virtual_table;
+  std::vector<DynamicTable> dynamic_tables;  // in class definition order: a base before its derived classes
   std::set<EntityId> keyless_type_info;  // definitions selected by the typed-cast ownership check
   // The written complete-object definitions whose ELF base-object entries share their code.
   std::set<EntityId> base_object_variants;
@@ -704,6 +725,7 @@ struct TuValue {
   std::optional<obj::object> object;  // none when there are errors
   std::vector<BackError> errors;
   std::vector<FirstDemand> first_demands;
+  std::vector<aarch64::Symbol> symbols;
 };
 struct Tu {
   using Key = TuId;
@@ -979,7 +1001,7 @@ std::optional<ClassLayout> QueryLayout::class_layout(QualType c) const {
     if (!it->bit_widths.empty()) f.bit_width = it->bit_widths[i];
     places.push_back(std::move(f));
   }
-  const ast::Target* root = it->peer_virtual_layout == sema::PeerVirtualLayout::root ? target_ : nullptr;
+  const ast::Target* root = it->peer_virtual_layout == sema::PeerVirtualLayout::root || it->dynamic_root ? target_ : nullptr;
   ast::RecordLayout r = ast::record_layout(bases, places, it->union_, it->pod, key, root,
                                           it->explicit_alignment);
   ClassLayout out{r.size, std::uint32_t(r.align), {}, {}, r.placed};
@@ -1237,6 +1259,7 @@ engine::query_task<Generated> FunctionGen::run(engine::Ctx& cx, FnKey k) {
   input.exceptions_enabled = !config || config->exceptions_enabled;
   input.this_type = d.this_type;
   input.destructor_table = d.destructor_table;
+  input.constructor_table = d.constructor_table;
   const auto& seqs = universe().in->seqs;
   const auto locals = d.body.locals;
   for (std::uint32_t index = 0, count = seqs.size(locals); index < count; ++index) {
@@ -1823,16 +1846,161 @@ void emit_virtual_table(obj::object& o, const VirtualTable& table, std::uint32_t
   }
 }
 
+// A dynamic class's table and RTTI as the object emits them (`DynamicTable`).
+struct DynamicTableOut {
+  EntityId entity;
+  std::string type_encoding;
+  std::vector<EntityId> slots;
+  std::optional<std::string> base_encoding;
+  bool weak = false;
+  bool emit_type_info = true;
+  bool rtti_only = false;
+};
+
+// Itanium C++ ABI §2.5.2, §2.9.5 and §5.2.3–4 for the general dynamic classes (#309): the table
+// (offset-to-top zero, RTTI, slots), then a `__class_type_info` descriptor for a root or a
+// `__si_class_type_info` one naming the primary base's. A weak table and its descriptor have
+// ELF COMDAT groups of their own, keyed by their names; on Mach-O they are weak definitions, and a
+// weak descriptor and its name follow Apple's arm64 non-unique RTTI convention (hidden, bit 63
+// set in the name pointer) as `emit_keyless_type_info` does. `descriptors` maps each type
+// encoding to its descriptor's symbol, for derived classes emitted later in the same object.
+void emit_dynamic_descriptor(obj::object& o, const DynamicTableOut& table, std::uint32_t typeinfo_symbol,
+                             std::uint32_t shared_pointers, std::map<std::string, std::uint32_t>& descriptors);
+void emit_dynamic_table(obj::object& o, const DynamicTableOut& table, std::uint32_t table_symbol,
+                        std::span<const std::uint32_t> slots, std::map<std::string, std::uint32_t>& descriptors) {
+  using S = obj::standard_section;
+  const bool elf = o.arch == obj::target::x86_64_linux;
+  const std::string prefix = elf ? "" : "_";
+  auto section = [&](S kind) {
+    const obj::section standard = obj::section::standard(kind);
+    if (!elf)
+      for (std::uint32_t i = 0; i < o.sections.size(); ++i)
+        if (o.sections[i].segment == standard.segment && o.sections[i].name == standard.name) return i;
+    return o.add_section(standard);
+  };
+  // A symbol by name: the one code already refers to, or a new undefined one.
+  auto named = [&](const std::string& name) {
+    for (std::uint32_t i = 0; i < o.symbols.size(); ++i)
+      if (o.symbols[i].name_view() == name) return i;
+    return o.add_symbol({name, obj::binding::global, std::nullopt, 0, false});
+  };
+  // An RTTI-only entry's symbol is the descriptor itself.
+  if (table.rtti_only) {
+    if (!table.emit_type_info) return;
+    if (!o.symbols[table_symbol].defined())
+      emit_dynamic_descriptor(o, table, table_symbol, elf ? 0 : section(S::data_const), descriptors);
+    descriptors.emplace(table.type_encoding, table_symbol);
+    return;
+  }
+  const std::uint64_t table_size = rtti_address_point + rtti_pointer_size * slots.size();
+  const auto pointers = section(S::data_const);
+  o.sections[pointers].align(3);
+  auto& symbol = o.symbols[table_symbol];
+  symbol.section = pointers;
+  symbol.offset = o.sections[pointers].size();
+  symbol.object_size = table_size;
+  symbol.weak = table.weak;
+  if (elf && table.weak) o.comdat_groups.push_back({std::string(symbol.name_view()), {pointers}});
+  std::optional<std::uint32_t> typeinfo;
+  if (table.emit_type_info) typeinfo = named(prefix + "_ZTI" + table.type_encoding);
+  o.sections[pointers].emit64(0);  // offset-to-top
+  if (typeinfo) emit_rtti_pointer(o, pointers, *typeinfo);
+  else o.sections[pointers].emit64(0);
+  for (std::uint32_t slot : slots) emit_rtti_pointer(o, pointers, slot);
+  if (!typeinfo) return;
+  // A descriptor this object already defines (a peer profile's keyless base) is reused.
+  if (!o.symbols[*typeinfo].defined()) emit_dynamic_descriptor(o, table, *typeinfo, pointers, descriptors);
+  descriptors.emplace(table.type_encoding, *typeinfo);
+}
+
+void emit_dynamic_descriptor(obj::object& o, const DynamicTableOut& table, std::uint32_t typeinfo_symbol,
+                             std::uint32_t shared_pointers, std::map<std::string, std::uint32_t>& descriptors) {
+  using S = obj::standard_section;
+  const bool elf = o.arch == obj::target::x86_64_linux;
+  const std::string prefix = elf ? "" : "_";
+  const std::optional<std::uint32_t> typeinfo = typeinfo_symbol;
+  auto section = [&](S kind) {
+    const obj::section standard = obj::section::standard(kind);
+    if (!elf)
+      for (std::uint32_t i = 0; i < o.sections.size(); ++i)
+        if (o.sections[i].segment == standard.segment && o.sections[i].name == standard.name) return i;
+    return o.add_section(standard);
+  };
+  auto named = [&](const std::string& name) {
+    for (std::uint32_t i = 0; i < o.symbols.size(); ++i)
+      if (o.symbols[i].name_view() == name) return i;
+    return o.add_symbol({name, obj::binding::global, std::nullopt, 0, false});
+  };
+  // A weak descriptor has its own ELF COMDAT group; a strong one follows its table.
+  const auto descriptor_section = elf && table.weak ? o.add_section(S::data_const) : shared_pointers;
+  o.sections[descriptor_section].align(3);
+  const auto bind = !elf && table.weak ? obj::binding::hidden : obj::binding::global;
+  auto& descriptor = o.symbols[*typeinfo];
+  descriptor.bind = bind;
+  descriptor.section = descriptor_section;
+  descriptor.offset = o.sections[descriptor_section].size();
+  descriptor.weak = table.weak;
+  descriptor.object_size = table.base_encoding ? 3 * rtti_pointer_size : 2 * rtti_pointer_size;
+  if (elf && table.weak) o.comdat_groups.push_back({prefix + "_ZTI" + table.type_encoding, {descriptor_section}});
+  const auto name_object = emit_type_info_name(o, section(S::rodata), table.type_encoding, bind);
+  const auto runtime_type = table.base_encoding ? si_class_type_info : class_type_info;
+  emit_rtti_pointer(o, descriptor_section, o.reference(prefix + std::string(runtime_type)), rtti_address_point);
+  emit_rtti_pointer(o, descriptor_section, name_object, !elf && table.weak ? std::numeric_limits<std::int64_t>::min() : 0);
+  if (const auto& base = table.base_encoding) {
+    const auto found = descriptors.find(*base);
+    emit_rtti_pointer(o, descriptor_section, found != descriptors.end() ? found->second : named(prefix + "_ZTI" + *base));
+  }
+}
+
 std::expected<obj::object, aarch64::CodegenError> assemble_linux(
     const std::string& name, std::span<const LinuxFunction> functions,
     std::span<const aarch64::DataDef> data, std::span<const aarch64::Symbol> symbols,
     const std::optional<VirtualTable>& table, std::span<const KeylessTypeInfo> keyless_type_info,
-    std::span<const EntityId> asm_hidden) {
+    std::span<const EntityId> asm_hidden, std::span<const DynamicTableOut> dynamic_tables) {
   obj::object o;
   o.name = name;
   o.arch = obj::target::x86_64_linux;
   std::map<EntityId, std::uint32_t> symbol_of;
-  for (const auto& s : symbols) symbol_of.emplace(s.entity, o.add_symbol({s.name, s.bind, {}, 0, false}));
+  // Each definition has its own symbol, even beside another of the same spelling (a weak inline
+  // body and a strong asm-labelled one, #694). An entity this object does not define shares a
+  // symbol by name, as the linker resolves it: a builtin's implicit C declaration and a written one of
+  // another type are two entities with one C symbol (#1095). It names this object's strong
+  // definition of the name if there is one, else its weak one, else one undefined symbol.
+  std::map<EntityId, bool> definitions;  // entity → weak
+  for (const auto& f : functions) definitions.emplace(f.entity, f.weak);
+  for (const auto& d : data) definitions.emplace(d.entity, d.weak);
+  for (const auto& t : keyless_type_info) definitions.emplace(t.entity, false);
+  if (table) definitions.emplace(table->entity, false);
+  for (const auto& t : dynamic_tables) definitions.emplace(t.entity, t.weak);
+  std::map<std::string_view, std::pair<EntityId, bool>> defined_name;  // name → definition, weak
+  for (const auto& s : symbols) {
+    const auto d = definitions.find(s.entity);
+    if (s.bind == obj::binding::local || d == definitions.end()) continue;
+    auto [at, added] = defined_name.try_emplace(s.name, s.entity, d->second);
+    if (!added && at->second.second && !d->second) at->second = {s.entity, false};
+  }
+  std::map<std::string_view, std::uint32_t> undefined_name;
+  std::vector<const aarch64::Symbol*> defined_by_another;  // whose name another entity defines here
+  auto share = [&](const aarch64::Symbol& s, std::uint32_t index) {
+    auto& bind = o.symbols[index].bind;
+    if (s.bind == obj::binding::hidden) bind = obj::binding::hidden;  // the stricter visibility
+    symbol_of.emplace(s.entity, index);
+  };
+  for (const auto& s : symbols) {
+    if (s.bind != obj::binding::local && !definitions.contains(s.entity)) {
+      if (defined_name.contains(s.name)) {
+        defined_by_another.push_back(&s);
+        continue;
+      }
+      if (auto shared = undefined_name.find(s.name); shared != undefined_name.end()) {
+        share(s, shared->second);
+        continue;
+      }
+      undefined_name.emplace(s.name, static_cast<std::uint32_t>(o.symbols.size()));
+    }
+    symbol_of.emplace(s.entity, o.add_symbol({s.name, s.bind, {}, 0, false}));
+  }
+  for (const aarch64::Symbol* s : defined_by_another) share(*s, symbol_of.at(defined_name.at(s->name).first));
   auto missing = [](EntityId e) {
     return std::unexpected(aarch64::CodegenError{e, std::format("@{} has no symbol name", ir::raw(e))});
   };
@@ -1958,6 +2126,18 @@ std::expected<obj::object, aarch64::CodegenError> assemble_linux(
       slots.push_back(target->second);
     }
     emit_virtual_table(o, *table, symbol->second, slots, emitted_base);
+  }
+  std::map<std::string, std::uint32_t> descriptors;
+  for (const auto& dynamic : dynamic_tables) {
+    const auto symbol = symbol_of.find(dynamic.entity);
+    if (symbol == symbol_of.end()) return missing(dynamic.entity);
+    std::vector<std::uint32_t> slots;
+    for (EntityId slot : dynamic.slots) {
+      const auto target = symbol_of.find(slot);
+      if (target == symbol_of.end()) return missing(slot);
+      slots.push_back(target->second);
+    }
+    emit_dynamic_table(o, dynamic, symbol->second, slots, descriptors);
   }
   // The directive changes only visibility. Keep the symbol indices that relocations use and
   // the binding, type, size and section determined by ordinary emission.
@@ -2092,6 +2272,10 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
     used.insert(ir::raw(table->entity));
     for (EntityId slot : table->slots) used.insert(ir::raw(slot));
   }
+  for (const DynamicTable& table : tu.dynamic_tables) {
+    used.insert(ir::raw(table.entity));
+    for (EntityId slot : table.slots) used.insert(ir::raw(slot));
+  }
   for (const aarch64::DataDef& d : data) {
     used.insert(ir::raw(d.entity));
     for (const aarch64::DataReloc& r : d.relocs) used.insert(ir::raw(r.target));
@@ -2172,6 +2356,7 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
   };
   std::optional<VirtualTable> virtual_table;
   std::vector<KeylessTypeInfo> keyless_type_info;
+  std::vector<DynamicTableOut> dynamic_tables;
   std::vector<const Entity*> locals;  // named after their functions, below
   std::map<std::uint32_t, std::string> mangled;  // by function entity
   std::map<EntityId, std::string> base_object_names;
@@ -2207,6 +2392,21 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
         }
         virtual_table = VirtualTable{e.id, std::move(*encoding), owned->slots, std::move(base),
                                      owned->peer_base_rtti, emit_table_type_info};
+      }
+      if (const auto dynamic = std::ranges::find(tu.dynamic_tables, e.id, &DynamicTable::entity);
+          dynamic != tu.dynamic_tables.end() && table != dynamic->rtti_only) {
+        std::optional<std::string> base;
+        if (dynamic->base != EntityId::none) {
+          auto base_encoding = mangled_type(in, in.intern_type(ast::TClass{dynamic->base}), names);
+          if (!base_encoding) {
+            errors.push_back({e.at, std::format("the virtual table's base type name: {} is not supported yet",
+                                                base_encoding.error())});
+            continue;
+          }
+          base = std::move(*base_encoding);
+        }
+        dynamic_tables.push_back({e.id, *encoding, dynamic->slots, std::move(base), dynamic->weak, emit_table_type_info,
+                                  dynamic->rtti_only});
       }
       if (!table && tu.keyless_type_info.contains(e.id)) keyless_type_info.push_back({e.id, std::move(*encoding)});
       continue;
@@ -2298,14 +2498,14 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
         const bool weak = def.coalesced || def.explicit_weak;
         code.push_back({fns[i].fn, &*ms[i].get().linux_code, weak, def.unwind != UnwindEligibility::none, name, catch_int});
       }
-      return assemble_linux(tu.name, code, data, symbols, virtual_table, keyless_type_info, asm_hidden);
+      return assemble_linux(tu.name, code, data, symbols, virtual_table, keyless_type_info, asm_hidden, dynamic_tables);
     }
     std::vector<aarch64::CompiledFunction> code;
     for (std::size_t i = 0; i < fns.size(); ++i) {
       const auto& def = tu.functions[i];
       code.push_back({.entity = fns[i].fn, .code = *ms[i].get().code,
                       .cleanup_free_unwind = def.unwind == UnwindEligibility::cleanup_free,
-                      .weak = def.coalesced});
+                      .weak = def.coalesced || def.explicit_weak});
     }
     auto o = aarch64::assemble(tu.name, code, data, symbols);
     if (!o) return o;
@@ -2320,7 +2520,7 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
       alias.name = base_name;
       o->add_symbol(std::move(alias));
     }
-    if (!virtual_table) return o;
+    if (!virtual_table && dynamic_tables.empty()) return o;
     // The table and its slots by name: the code may or may not have referred to them.
     auto symbol = [&](EntityId e) -> std::expected<std::uint32_t, aarch64::CodegenError> {
       const auto named = std::ranges::find(symbols, e, &aarch64::Symbol::entity);
@@ -2330,15 +2530,29 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
         if (o->symbols[i].name_view() == named->name) return i;
       return o->reference(named->name);
     };
-    const auto table = symbol(virtual_table->entity);
-    if (!table) return std::expected<obj::object, aarch64::CodegenError>(std::unexpected(table.error()));
-    std::vector<std::uint32_t> slots;
-    for (EntityId slot : virtual_table->slots) {
-      const auto s = symbol(slot);
-      if (!s) return std::expected<obj::object, aarch64::CodegenError>(std::unexpected(s.error()));
-      slots.push_back(*s);
+    if (virtual_table) {
+      const auto table = symbol(virtual_table->entity);
+      if (!table) return std::expected<obj::object, aarch64::CodegenError>(std::unexpected(table.error()));
+      std::vector<std::uint32_t> slots;
+      for (EntityId slot : virtual_table->slots) {
+        const auto s = symbol(slot);
+        if (!s) return std::expected<obj::object, aarch64::CodegenError>(std::unexpected(s.error()));
+        slots.push_back(*s);
+      }
+      emit_virtual_table(*o, *virtual_table, *table, slots);
     }
-    emit_virtual_table(*o, *virtual_table, *table, slots);
+    std::map<std::string, std::uint32_t> descriptors;
+    for (const auto& dynamic : dynamic_tables) {
+      const auto table = symbol(dynamic.entity);
+      if (!table) return std::expected<obj::object, aarch64::CodegenError>(std::unexpected(table.error()));
+      std::vector<std::uint32_t> slots;
+      for (EntityId slot : dynamic.slots) {
+        const auto s = symbol(slot);
+        if (!s) return std::expected<obj::object, aarch64::CodegenError>(std::unexpected(s.error()));
+        slots.push_back(*s);
+      }
+      emit_dynamic_table(*o, dynamic, *table, slots, descriptors);
+    }
     return o;
   }();
   if (!o) {
@@ -2349,6 +2563,7 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
     co_return co_await locate_errors(cx, id, std::move(out));
   }
   out.object = std::move(*o);
+  out.symbols = std::move(symbols);
   co_return out;
 }
 

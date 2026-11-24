@@ -182,7 +182,8 @@ def main():
             obj = f'friend-{name}.o'
             compile(friend / f'{name}.cpp', obj)
             table = symbols(obj)
-            for symbol in ('_ZN14inline_address4readERKNS_4ItemE', '_ZN14inline_addressplERKNS_4ItemEi'):
+            for symbol in ('_ZN14inline_address4readERKNS_4ItemE', '_ZN14inline_addressplERKNS_4ItemEi',
+                           '_ZN15inline_template4takeERKNS_4CellIiEE'):
                 entry = table[symbol]
                 assert entry[4] == 'WEAK' and entry[6] != 'UND', entry
         for objects in (('friend-main.o', 'friend-peer.o'), ('friend-peer.o', 'friend-main.o')):
@@ -245,6 +246,27 @@ def main():
         for objects in (('assignment-main.o', 'assignment-peer.o'), ('assignment-peer.o', 'assignment-main.o')):
             link(*objects)
             run('./program')
+
+        constructors = fixtures / 'inline-constructors'
+        for name in ('main', 'peer'):
+            compile(constructors / f'{name}.cpp', f'ctor-{name}.o')
+        for objects in (('ctor-main.o', 'ctor-peer.o'), ('ctor-peer.o', 'ctor-main.o')):
+            link(*objects)
+            run('./program')
+        strong_ctor = '_ZN9OutOfLineC1Ei'
+        for name in ('main', 'peer'):
+            table = symbols(f'ctor-{name}.o')
+            for ctor, binding in (
+                ('_ZN7InClassC1Ei', 'WEAK'), ('_ZN12OnDefinitionC1Ei', 'WEAK'),
+                ('_ZN13OnDeclarationC1Ei', 'WEAK'), ('_ZN12_GLOBAL__N_19LocalCtorC1Ei', 'LOCAL'),
+            ):
+                entry = table[ctor]
+                assert entry[4] == binding and entry[6] != 'UND', (name, entry)
+            entry = table[strong_ctor]
+            assert entry[4] == 'GLOBAL' and (entry[6] != 'UND') == (name == 'main'), (name, entry)
+        compile(constructors / 'peer.cpp', 'duplicate-ctor.o', '-DDUPLICATE_CONSTRUCTOR')
+        for objects in (('ctor-main.o', 'duplicate-ctor.o'), ('duplicate-ctor.o', 'ctor-main.o')):
+            link(*objects, status=1, error=f"duplicate symbol '{strong_ctor}'")
 
         destructors = fixtures / 'inline-destructors'
         for fixture, binding, names in (

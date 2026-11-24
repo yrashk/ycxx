@@ -53,6 +53,14 @@ export enum class Storage : std::uint8_t { automatic, temporary, dynamic, except
 // Initial state of an allocation's bytes ([dcl.init.general], P2795).
 export enum class Init : std::uint8_t { erroneous, indeterminate, zero };
 
+// What a `builtin` op computes; its u32 immediate. These are evaluated only in constant mode, on a
+// `consteval_br`'s consteval edge, whose runtime edge calls the C library function instead.
+//   - `memchr` (!state, s, c, n) -> (!state, pointer): the first of the n bytes at `s` equal to
+//     `c` converted to unsigned char, or null; the bytes are read in order up to the match.
+//   - `memcmp` (!state, a, b, n) -> (!state, int): the sign of the first difference between the
+//     n bytes at `a` and at `b`, as unsigned char, or 0; both must hold n bytes.
+export enum class BuiltinFn : std::uint8_t { memchr, memcmp };
+
 export enum class MemOrder : std::uint8_t { relaxed, consume, acquire, release, acq_rel, seq_cst };
 export enum class Rmw : std::uint8_t { xchg, add, sub, and_, or_, xor_, max, min };
 
@@ -68,9 +76,12 @@ export struct PathStep {
 // Per-node flags (§2.3: `nsw`/`nuw`/`exact` on arithmetic; `volatile` and non-constexpr callees
 // make an operation non-constant). The enumerator is the bit position.
 // `call_body` marks reads of a lowered builtin body, which are indeterminately sequenced with
-// the caller's other evaluations ([intro.execution]).
-export enum class Flag : std::uint8_t { nsw, nuw, exact, volatile_, not_constexpr, variadic, call_body, explicit_trap };
-export using Flags = std::uint8_t;
+// the caller's other evaluations ([intro.execution]). `explicit_trap` and `assumed_unreachable`
+// mark an `unreachable` that `__builtin_trap()` and `__builtin_unreachable()` lower to.
+export enum class Flag : std::uint8_t {
+  nsw, nuw, exact, volatile_, not_constexpr, variadic, call_body, explicit_trap, assumed_unreachable,
+};
+export using Flags = std::uint16_t;
 export constexpr Flags bit(Flag f) { return Flags(1u << std::to_underlying(f)); }
 
 // Traits of the op itself.
@@ -228,7 +239,7 @@ export enum class Op : std::uint16_t {
   // `variadic` records the callee type even when the ellipsis matches zero arguments.
   call [[=state({S, Vs}, {S, Vs}).imms({entity, u32, u32, u32}).accepts({not_constexpr, variadic})]],
   call_ind [[=state({S, V, Vs}, {S, Vs}).imms({u32, u32, u32}).accepts({not_constexpr, variadic})]],
-  builtin [[=state({S, Vs}, {S, Vs}).imms({u32})]],
+  builtin [[=state({S, Vs}, {S, Vs}).imms({u32})]],  // a `BuiltinFn`, in constant evaluation only
   asm_ [[=state({S, Vs}, {S, Vs}).imms({constant}).with({nonconstant})]],
 
   // Constant evaluation ([expr.const]): `true` in constant mode, `false` in runtime mode.
@@ -265,8 +276,9 @@ export enum class Op : std::uint16_t {
   cond_br [[=control({V}, {}, 2)]],                      // true, false
   switch_ [[=control({V}, {}, 1, true).imms({consts})]],  // default, then one per case value
   ret [[=control({S, Vs}, {}, 0)]],
-  // The flags distinguish an explicit trap and a static definition ([expr.const]) from falling off the end.
-  unreachable [[=control({}, {}, 0).accepts({not_constexpr, explicit_trap})]],
+  // The flags distinguish an explicit trap, `__builtin_unreachable()` and a static definition
+  // ([expr.const]) from falling off the end.
+  unreachable [[=control({}, {}, 0).accepts({not_constexpr, explicit_trap, assumed_unreachable})]],
   consteval_br [[=control({}, {}, 2)]],                  // consteval, runtime ([stmt.if])
   // normal, unwind; the u32 as for `call`
   invoke [[=control({S, Vs}, {S, Vs}, 2).imms({entity, u32}).accepts({not_constexpr})]],

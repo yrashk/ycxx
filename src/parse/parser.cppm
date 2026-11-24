@@ -2831,9 +2831,10 @@ public:
   // An operand that may be the pattern of a pack expansion `pattern...` ([temp.variadic]/5);
   // `read` reads one. In a definition the expansion is recorded and is one dependent operand; in
   // an instantiation its pattern is read once for each element, with the packs it names bound
-  // to that element (ast.md §6.4).
+  // to that element (ast.md §6.4). `*unexpanded` is set when the expansion stays one dependent
+  // operand, so the number of operands is not known yet.
   template <class F>
-  std::vector<Ex> expandable(F read, bool* written_expansion = nullptr) {
+  std::vector<Ex> expandable(F read, bool* written_expansion = nullptr, bool* unexpanded = nullptr) {
     u32 begin = pos();
     if (const sema::Expansion* x = s_->expansion_at(begin)) {
       if (written_expansion) *written_expansion = true;
@@ -2842,6 +2843,7 @@ public:
       std::vector<Ex> out;
       if (!n) {
         // A pack not bound yet (an enclosing template's): the expansion stays dependent.
+        if (unexpanded) *unexpanded = true;
         s_->begin_pattern();
         Ex p = read();
         s_->end_pattern(true, begin, e.end);
@@ -2863,6 +2865,7 @@ public:
     Ex p = read();
     if (is(Tk::ellipsis)) {
       if (written_expansion) *written_expansion = true;
+      if (unexpanded) *unexpanded = true;
       u32 end = pos();
       bump();
       if (s_->end_pattern(true, begin, end).empty()) s_->diag(end, Diag::expansion_without_pack);
@@ -2919,6 +2922,7 @@ public:
       s_->truncate_diags(n);
     }
     u32 begin = pos();
+    const sema::Sema::ConstraintAtomScope atom{*s_};
     Ex e = primaries ? primary_expression() : binary_expression(3);
     (void)e;
     // The template parameters the expression names: its parameter mapping's ([temp.constr.atomic]/1).
@@ -3580,7 +3584,11 @@ public:
       int saved = std::exchange(angle_, 0);
       if (!is(Tk::r_paren))
         do {
-          args->push_back(is(Tk::l_brace) ? s_->braced_argument(braced_init_list()) : assignment_expression());
+          // [temp.variadic]/5: an initializer-clause can be the pattern of a pack expansion.
+          auto part = expandable([&] {
+            return is(Tk::l_brace) ? s_->braced_argument(braced_init_list()) : assignment_expression();
+          });
+          args->insert(args->end(), part.begin(), part.end());
         } while (accept(Tk::comma));
       angle_ = saved;
       if (!expect(Tk::r_paren)) return {NodeId::none, begin, pos()};
@@ -4029,12 +4037,22 @@ public:
           int saved = std::exchange(angle_, 0);
           const bool probe = bf->function == lex::BuiltinFunction::constant_p;
           s_->unevaluated += probe;
+          // An argument may be a pack expansion, as a call's are ([expr.call], [temp.variadic]/5).
+          bool unexpanded = false;
           if (!is(Tk::r_paren))
-            do args.push_back(assignment_expression());
+            do
+              for (const Ex& x : expandable([&] { return assignment_expression(); }, nullptr, &unexpanded))
+                args.push_back(x);
             while (accept(Tk::comma));
           s_->unevaluated -= probe;
           angle_ = saved;
           if (!expect(Tk::r_paren)) return {NodeId::none, begin, pos()};
+          // Until the pack is expanded the arity is unknown: the call stays dependent, and the
+          // instantiation checks the expanded arguments.
+          if (unexpanded) {
+            if (std::ranges::any_of(args, [](const Ex& a) { return !a.ok(); })) return {NodeId::none, begin, pos()};
+            return s_->dependent_node(args, begin, pos());
+          }
           Ex r = s_->builtin_call(*bf, std::move(args), begin, pos());
           return {r.id, begin, pos(), r.info};
         }
@@ -5361,33 +5379,11 @@ public:
   }
 
   // A call to a consteval function outside an immediate function context is an immediate
-  // invocation: it must be a constant expression, and it is replaced by its value ([expr.const]).
+  // invocation ([expr.const], `Sema::immediate_invocation`).
   Ex immediate(Ex call) {
     auto c = s_->as<ast::Call>(call);
-    if (!c || c->function == ast::EntityId::none || !s_->is_consteval(c->function) || s_->immediate_context || s_->unevaluated)
-      return call;
-    sema::Evaluated v = sema::Evaluator(*s_, questions()).evaluate(call);
-    if (!v.constant) {
-      s_->diag(call.begin, Diag::not_constant, v.reason);
-      return {NodeId::none, call.begin, call.end};
-    }
-    if (!v.value) {
-      // A void function: the invocation is replaced by its (empty) result, `(void)0`, so the
-      // consteval function's body never runs at run time.
-      sema::QualType i = s_->builtin(sema::Builtin::int_);
-      Ex zero = s_->literal(i, s_->world().values.integer(i, 0), ast::ValueCategory::prvalue, call.begin, call.end);
-      return s_->convert_node(zero, ast::ConversionKind::to_void, s_->builtin(sema::Builtin::void_));
-    }
-    // A manifestly constant-evaluated expression may consume an immediate pointer.
-    // Its initializer checks the final value for an escape.
-    if (auto entity = s_->immediate_result_entity(*v.value)) {
-      if (!s_->constant_reference_context && !s_->trial_initializer) {
-        s_->diag(call.begin, Diag::immediate_address, s_->world().entities.rec(*entity).name);
-        return {NodeId::none, call.begin, call.end};
-      }
-      s_->folded_immediate_result = *entity;
-    }
-    return s_->literal(call.type(), *v.value, ast::ValueCategory::prvalue, call.begin, call.end);
+    if (!c || c->function == ast::EntityId::none || !s_->is_consteval(c->function)) return call;
+    return s_->immediate_invocation(call);
   }
 
   // A condition ([stmt.pre]) and the init-statement before it, if any: `node` is what the
@@ -6397,6 +6393,10 @@ public:
   void set_questions(sema::Questions& q) {
     q_ = &q;
     s_->constant_of = [this](Ex e) { return sema::Evaluator(*s_, questions()).evaluate(e).value; };
+    s_->evaluate_immediate = [this](Ex e) {
+      const sema::Evaluated v = sema::Evaluator(*s_, questions()).evaluate(e);
+      return sema::Sema::Evaluation{v.value, v.reason, v.constant};
+    };
   }
   sema::Questions& questions() { return *q_; }
 

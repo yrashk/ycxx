@@ -42,6 +42,8 @@ enum class Reason : std::uint8_t {
   pointer_difference [[=says{"subtraction of pointers that do not point into the same array"}]],
   unspecified_comparison [[=says{"the result of comparing these pointers is unspecified"}]],
   void_cast_type [[=says{"conversion from 'void*' to a pointer to a type the object does not have"}]],
+  // Builtins (docs/EXTENSIONS.md): their bytes are the values of objects of narrow character type.
+  byte_type [[=says{"memchr or memcmp reads an object whose type is not a narrow character type"}]],
   // Operations [expr.const] makes non-constant.
   not_usable [[=says{"read of a variable that is not usable in constant expressions"}]],
   modify_outside [[=says{"modification of an object whose lifetime began outside the constant evaluation"}]],
@@ -56,6 +58,8 @@ enum class Reason : std::uint8_t {
   static_definition [[=says{"control passes through the definition of a static variable"}]],
   unreachable [[=says{"control reached the end of a function that must return a value"}]],
   explicit_trap [[=says{"execution reached __builtin_trap()"}]],
+  // [utility.unreachable]: reaching it is undefined behavior.
+  assumed_unreachable [[=says{"execution reached __builtin_unreachable()"}]],
   local_address [[=says{"the result points to an object with automatic storage duration"}]],
   // Not yet: an operation the interpreter does not evaluate, by its op number.
   unsupported [[=says{"the interpreter does not evaluate '{0}' yet"}]],

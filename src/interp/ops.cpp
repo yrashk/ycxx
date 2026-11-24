@@ -425,7 +425,21 @@ struct Ops {
     if (c.kind != VKind::function) return m.fail(Reason::ill_formed);
     return call_entity(m, f, n, EntityId(c.ref), 2);
   }
-  static Flow builtin(M& m, Frame&, N n) { return m.unsupported(n); }
+  // `ir::BuiltinFn`; only constant evaluation reaches one (`consteval_br`).
+  static Flow builtin(M& m, Frame& f, N n) {
+    if (!constant(m) || f.fn->operands_of(n).size() != 4) return m.unsupported(n);
+    const Value count = m.operand(f, n, 3);
+    if (count.kind != VKind::integer) return m.fail(Reason::ill_formed);
+    Value result;
+    Flow fl = Flow::next;
+    switch (ir::BuiltinFn(imms(f, n)[0])) {
+    case ir::BuiltinFn::memchr: fl = m.find_byte(m.operand(f, n, 1), m.operand(f, n, 2), count.bits, result); break;
+    case ir::BuiltinFn::memcmp: fl = m.compare_bytes(m.operand(f, n, 1), m.operand(f, n, 2), count.bits, result); break;
+    default: return m.unsupported(n);
+    }
+    if (fl != Flow::next) return fl;
+    return m.set(f, n, result, 1);
+  }
   static Flow va_start(M& m, Frame&, N n) { return m.unsupported(n); }
   static Flow va_arg(M& m, Frame&, N n) { return m.unsupported(n); }
   static Flow va_copy(M& m, Frame&, N n) { return m.unsupported(n); }
@@ -528,6 +542,7 @@ struct Ops {
 
   static Flow unreachable(M& m, Frame& f, N n) {
     if (has(f, n, ir::Flag::explicit_trap)) return m.fail(Reason::explicit_trap);
+    if (has(f, n, ir::Flag::assumed_unreachable)) return m.fail(Reason::assumed_unreachable);
     return m.fail(has(f, n, ir::Flag::not_constexpr) ? Reason::static_definition : Reason::unreachable);
   }
   static Flow invoke(M& m, Frame&, N n) { return m.unsupported(n); }

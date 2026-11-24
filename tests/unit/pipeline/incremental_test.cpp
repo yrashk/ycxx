@@ -5,12 +5,16 @@
 import std;
 import ycxx.ast;
 import ycxx.engine;
+import ycxx.obj;
+import ycxx.obj.archive;
+import ycxx.obj.macho;
 import ycxx.pipeline;
 import ycxx.pp;
 import ycxx.unit;
 
 namespace ast = ycxx::ast;
 namespace engine = ycxx::engine;
+namespace obj = ycxx::obj;
 namespace pl = ycxx::pipeline;
 namespace pp = ycxx::pp;
 using ycxx::unit::check;
@@ -523,7 +527,11 @@ void records() {
 
 void virtual_declarations() {
   const std::string plain = "struct Root { int field; int value() const { return field; } };\n";
-  const std::string polymorphic = "struct Root { int field; virtual int value() const { return field; } };\n";
+  // A polymorphic class in an unnamed namespace is not a dynamic class yet (#1155): it keeps the
+  // virtual layout guard. A dynamic root lays out and emits code (#309).
+  const std::string polymorphic =
+      "namespace { struct Root { int field; virtual int value() const { return field; } }; }\n";
+  const std::string dynamic = "struct Root { int field; virtual int value() const { return field; } };\n";
   const std::string interfaces = R"cpp(
 struct Outer { Root elements[2]; };
 const Root& pass(const Root* pointer) { return *pointer; }
@@ -539,6 +547,12 @@ int main() { return 0; }
   pl::Session warm;
   build(warm, plain + interfaces + layout);
   check(warm.get<pl::Tu>(tu).object.has_value(), "ordinary member and array layouts produce an object");
+
+  build(warm, dynamic + interfaces + layout);
+  const auto& dynamic_front = warm.get<pl::TuFront>(tu);
+  check(!dynamic_front.has_errors() && blocked_shapes(dynamic_front) == 0, pl::TuFront::errors(dynamic_front));
+  check(warm.get<pl::Link>(program).image == cold(dynamic + interfaces + layout),
+        "a dynamic root and its containing class: equal to a cold build");
 
   build(warm, polymorphic + interfaces + layout);
   const auto& laid_out = warm.get<pl::TuFront>(tu);
@@ -564,7 +578,7 @@ int main() { return 0; }
   check(!restored.has_errors() && blocked_shapes(restored) == 0, "removing virtual restores class layout");
   check(warm.get<pl::Link>(program).image == cold(plain + interfaces + layout), "restored native output matches a cold build");
 
-  build(warm, "struct Root { virtual int value() const; };\nint Root::value() const { return 1; }\n");
+  build(warm, "namespace { struct Root { virtual int value() const; }; }\nint Root::value() const { return 1; }\n");
   const auto key_error = pl::TuFront::errors(warm.get<pl::TuFront>(tu));
   check(key_error.find("an out-of-class definition of a virtual member function") != std::string::npos,
         "an external key definition receives its own semantic diagnostic");
@@ -721,6 +735,163 @@ void too_deep() {
   check(s.get<pl::Link>(program).image == cold(v0), "the session goes on after a too-deep unit");
 }
 
+// [temp.inst]/16's limit is reported once per unit, where the whole unit's analysis first reaches
+// it, whether the unit is analysed a group at a time or whole (a `virtual` makes it whole, #947),
+// cold or after edits; here the other messages are the same both ways (#993).
+void depth_limit_once() {
+  pp::Config config;
+  config.template_depth = 7;
+  const std::string first = "template<int N> struct First { static constexpr int value = First<N+1>::value; };\n"
+                            "int first = First<1>::value;\n";
+  const std::string fixed = "template<int N> struct First { static constexpr int value = N; };\n"
+                            "int first = First<1>::value;\n";
+  const std::string second = "template<int N> struct Second { static constexpr int value = Second<N+1>::value; };\n"
+                             "int second = Second<1>::value;\n";
+  const std::string whole = "struct Whole { virtual void f() {} };\n";
+  auto messages = [&](pl::Session& s, const std::string& text) {
+    s.set_source(tu, "depth.cpp", text, "depth.o", {}, config);
+    std::vector<std::string> texts;
+    for (const pl::Message& m : s.get<pl::TuFront>(tu).messages) texts.push_back(m.text);
+    return texts;
+  };
+  auto cold_messages = [&](const std::string& text) {
+    pl::Session s;
+    return messages(s, text);
+  };
+  auto depth = [](const std::vector<std::string>& texts) {
+    return std::ranges::count_if(texts, [](const std::string& t) { return t.contains("nest more than 7 deep"); });
+  };
+  const auto grouped = cold_messages(first + second), whole_unit = cold_messages(first + second + whole);
+  check(depth(grouped) == 1, "grouped: the depth limit is reported once");
+  check(depth(whole_unit) == 1, "whole: the depth limit is reported once");
+  check(grouped == whole_unit, "grouped and whole analysis say the same messages");
+  pl::Session s;
+  check(messages(s, first + second) == grouped, "a session's first build equals cold");
+  // Both families' groups reused: the first reports it, as cold.
+  auto before = s.group_counts();
+  const auto third = messages(s, first + second + "int third = 3;\n");
+  auto after = s.group_counts();
+  check(after.first - before.first == 1 && after.second - before.second == 4,
+        std::format("an unrelated edit analyses its group alone ({} analysed, {} reused)", after.first - before.first,
+                    after.second - before.second));
+  check(depth(third) == 1 && third == cold_messages(first + second + "int third = 3;\n"),
+        "an unrelated edit: still once, as cold");
+  const auto only_second = messages(s, fixed + second);
+  check(depth(only_second) == 1 && only_second == cold_messages(fixed + second), "the first family fixed: the second's, as cold");
+  check(depth(messages(s, first + second)) == 1, "the first family back: once again");
+  // A function template's body reaches the limit only in the END worklist, which the whole unit
+  // runs after every item: a later class template's, reached while its item is analysed, is the
+  // one reported.
+  const std::string late = "template<int N> int f() { return f<N+1>(); }\nint g() { return f<1>(); }\n";
+  auto at = [](pl::Session& s) {
+    for (const pl::Message& m : s.get<pl::TuFront>(tu).messages)
+      if (m.text.contains("nest more than")) return m.where.substr(m.where.find(':'));
+    return std::string{};
+  };
+  pl::Session grouped_late, whole_late;
+  const auto g = messages(grouped_late, late + second), w = messages(whole_late, whole + late + second);
+  check(depth(g) == 1 && depth(w) == 1, "a limit reached at the end and one in an item: once");
+  check(at(grouped_late) == ":3:33" && at(whole_late) == ":4:33", "the item's is reported, both ways");
+}
+
+// A BSD archive with a ranlib index for a single Mach-O object. The test runs on either host.
+obj::archive::input runtime_archive(const obj::object& object) {
+  namespace mo = obj::macho;
+  constexpr std::string_view name = "_runtime_helper";
+  mo::byte_writer archive, index;
+  archive.raw("!<arch>\n");
+  index.u32(8);  // one ranlib entry
+  index.u32(0);  // name offset
+  index.u32(0);  // member header offset, filled below
+  index.u32(static_cast<std::uint32_t>(name.size() + 1));
+  index.raw(name);
+  index.u8(0);
+  constexpr std::size_t header_size = 60;
+  const auto member_offset = archive.size() + header_size + index.size() + index.size() % 2;
+  mo::store32(index.bytes, 8, static_cast<std::uint32_t>(member_offset));
+  const auto append = [&](std::string_view member, std::span<const std::uint8_t> bytes) {
+    archive.raw(std::format("{:16}{:<12}{:<6}{:<6}{:<8}{:<10}`\n", member, 0, 0, 0, 644, bytes.size()));
+    archive.raw(bytes);
+    if (bytes.size() % 2) archive.u8('\n');
+  };
+  append("__.SYMDEF", index.bytes);
+  append("runtime.o", mo::write_object(object));
+  return {"runtime.a", std::string(reinterpret_cast<const char*>(archive.bytes.data()), archive.size())};
+}
+
+void implicit_runtime_policies() {
+  pl::Session s;
+  const pl::TuId entry{0}, second{1}, peer{2}, runtime{3};
+  const std::string peer_source = "extern \"C\" int peer() { return 2; }";
+  s.set_source(entry, "main.cpp", "int second(); int main() { return second() != 42; }", "main.o");
+  s.set_source(second, "second.cpp", "extern \"C\" int runtime_helper(); extern \"C\" int peer(); int second() { "
+               "return runtime_helper() + peer(); }", "second.o");
+  s.set_source(peer, "peer.cpp", peer_source, "peer.o");
+  s.set_source(runtime, "runtime.cpp", "extern \"C\" int runtime_helper() { return 40; }", "runtime.o");
+  // Build checks path-keyed readability before consuming the translation unit's FileText.
+  s.db().set<pp::FileContent>(pp::path_id("peer.cpp"), peer_source);
+  const auto& checked = s.get<pl::Build>(s.request({
+      .units = {peer}, .until = pl::Until::object, .check_policies = true}));
+  const auto& compiled_runtime = s.get<pl::Tu>(runtime);
+  const auto& compiled_peer = s.get<pl::Tu>(peer);
+  const auto& member = compiled_runtime.object;
+  const auto& unchecked = compiled_peer.object;
+  const bool built = checked.units.size() == 1 && checked.units[0].object && member && unchecked;
+  check(built, "ordinary and runtime fixtures build: " + pl::Build::errors(checked) +
+               pl::Tu::errors(compiled_runtime) + pl::Tu::errors(compiled_peer));
+  if (!built) return;
+  const auto darwin = obj::target::aarch64_macos;
+  const bool mach = checked.units[0].object->arch == darwin && member->arch == darwin && unchecked->arch == darwin;
+  check(mach, "ordinary and runtime fixtures target arm64 Mach-O");
+  if (!mach) return;
+
+  using Kind = pl::LinkOperand::Kind;
+  pl::ProgramInputs automatic{{entry, second}, {*checked.units[0].object}, "checked-runtime",
+      std::nullopt, pl::ArchiveLinkInputs{obj::target::aarch64_macos,
+        {{Kind::object, 0}, {Kind::source, 1}, {Kind::darwin_runtime_archive, 0}, {Kind::source, 0}},
+        {runtime_archive(*member)}}, true};
+  const auto implicit = s.program(automatic);
+  const auto linked = s.get<pl::Link>(implicit);
+  check(linked.errors.empty() && !linked.image.empty(), "checked sources retain coverage across interleaved inputs");
+
+  auto explicit_archive = automatic;
+  explicit_archive.archive_link->operands[2].kind = Kind::archive;
+  const auto explicit_id = s.program(std::move(explicit_archive));
+  check(implicit != explicit_id, "program identity distinguishes explicit and driver runtime archives");
+  check(s.get<pl::Link>(explicit_id).errors ==
+        std::vector<std::string>{"checked ownership links require explicit objects and source inputs"},
+        "the same archive bytes supplied explicitly are rejected");
+
+  auto missing_coverage = automatic;
+  missing_coverage.objects[0] = *unchecked;
+  check(s.get<pl::Link>(s.program(std::move(missing_coverage))).errors ==
+        std::vector<std::string>{"peer.o: missing checked policy coverage"},
+        "ordinary object coverage remains mandatory");
+
+  auto forged_member = *member;
+  auto& caller = automatic.objects.front();
+  const auto attach = [](obj::object& object, std::string_view function, std::string_view kind) {
+    const auto symbol = std::ranges::find(object.symbols, function, &obj::symbol::name_view);
+    check(symbol != object.symbols.end() && symbol->defined(), "the test function has a text definition");
+    if (symbol == object.symbols.end() || !symbol->defined()) return;
+    const auto section = symbol->section;
+    const auto offset = symbol->offset;
+    std::erase_if(object.symbols, [](const auto& symbol) {
+      return symbol.name_view().starts_with("__ycxx_policy.1.checked.");
+    });
+    object.symbols.push_back({"__ycxx_policy.1.checked.1", obj::binding::local, 0, 0});
+    object.symbols.push_back({std::format("__ycxx_policy.3.effect.{}.{}._runtime_helper", kind, std::string(32, '0')),
+                              obj::binding::local, section, offset});
+  };
+  attach(caller, "_peer", "need");
+  attach(forged_member, "_runtime_helper", "have");
+  automatic.archive_link->archives[0] = runtime_archive(forged_member);
+  const auto denied = s.get<pl::Link>(s.program(std::move(automatic)));
+  check(denied.image.empty() && denied.errors == std::vector<std::string>{
+        "peer.o: verified effect bound '_runtime_helper' has no matching guarantee in runtime.a(runtime.o)"},
+        "the selected runtime member resolves the name and supplies no guarantee");
+}
+
 }  // namespace
 
 int main() {
@@ -737,5 +908,7 @@ int main() {
   bit_fields();
   unnamed_union_members();
   too_deep();
+  depth_limit_once();
+  implicit_runtime_policies();
   return ycxx::unit::result("unit.pipeline_incremental");
 }

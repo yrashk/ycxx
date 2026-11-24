@@ -109,6 +109,10 @@ struct Subscript {
   [[=sequenced(1)]] Child index;
 };
 
+// A builtin that is a call of a C library function (docs/EXTENSIONS.md). Constant evaluation
+// reads the bytes itself; at run time it stays the library call.
+enum class LibraryBuiltin : u8 { none, memchr, memcmp };
+
 // A call: the callee is sequenced before the arguments, which are indeterminately sequenced
 // with each other ([expr.call]).
 struct Call {
@@ -116,9 +120,10 @@ struct Call {
   EntityId function;  // none for a call through a pointer or object
   [[=sequenced(0)]] Child callee;
   [[=indeterminately_sequenced(1)]] ChildList args;
+  LibraryBuiltin builtin = LibraryBuiltin::none;
 };
 
-// A scalar new-expression ([expr.new]): allocation is sequenced before initialization.
+// A single-object new-expression ([expr.new]): allocation is sequenced before initialization.
 struct NewObject {
   ExprInfo info;
   [[=sequenced(0)]] Child allocation;
@@ -126,13 +131,15 @@ struct NewObject {
   bool placement = false;
 };
 
-// Single-object delete of a complete scalar ([expr.delete]): the operand has been converted
-// to void*. The deallocation function is called only when the address is non-null.
+// Single-object delete of a complete scalar or class object ([expr.delete]): the operand is
+// the typed pointer prvalue. When it is non-null, the destructor (none when trivial) ends the
+// object, and the usual sized deallocation function releases its storage.
 struct DeleteObject {
   ExprInfo info;
   EntityId function;
   [[=sequenced(0)]] Child address;
   [[=sequenced(1)]] Child size;
+  EntityId destructor = EntityId::none;
 };
 
 // One-dimensional array new ([expr.new]). The bound is converted to size_t, and the
@@ -152,7 +159,7 @@ struct DeleteArray {
 };
 
 // Built-in functions handled during evaluation (docs/EXTENSIONS.md).
-enum class BuiltinOp : u8 { fabs, strlen, trap };
+enum class BuiltinOp : u8 { fabs, strlen, trap, unreachable };
 struct BuiltinCall {
   ExprInfo info;
   BuiltinOp op;

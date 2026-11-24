@@ -713,6 +713,7 @@ struct MemberDeclRec {
   EntityId overridden_virtual = EntityId::none;
   bool is_final = false;
   bool is_pure = false;
+  bool is_consteval = false;  // an immediate function ([dcl.constexpr])
 };
 
 struct NestedType {
@@ -726,10 +727,38 @@ struct BaseRec {
   EntityId cls = EntityId::none;
   ast::Access access = ast::Access::public_;
   bool dependent_in_pattern = false;
+  // Named by a virtual base-specifier ([class.mi]). The base-clause parser admits none yet (#310).
+  bool virtual_ = false;
 };
 
 // Layout for access to a peer-owned object. A primary base already supplies the vptr at offset zero.
 enum class PeerVirtualLayout : u8 { none, root, primary_base };
+
+// A slot of a primary virtual table (Itanium C++ ABI §2.5.2): a virtual function's final
+// overrider, or one of the two entries a virtual destructor occupies (§3.2.3).
+enum class VirtualSlotKind : u8 { function, complete_destructor, deleting_destructor };
+struct VirtualSlot {
+  EntityId function = EntityId::none;  // the final overrider in this class; a destructor's complete entry
+  VirtualSlotKind kind = VirtualSlotKind::function;
+  bool pure = false;  // [class.abstract]: the slot holds the pure virtual handler
+};
+
+// A dynamic class laid out by the general single-inheritance rules (#309): a root whose vptr is
+// at offset zero, or a class whose single public nonvirtual base is dynamic and primary. Its
+// table extends the primary base's: overriders replace inherited slots, and the declarations
+// that override nothing follow in declaration order (Itanium C++ ABI §2.5.2).
+struct DynamicClass {
+  bool primary_base = false;  // the single base supplies the vptr at offset zero
+  // The first non-pure virtual function not inline at the end of the class definition
+  // (Itanium C++ ABI §5.2.3): the unit defining it owns the table. Else every user emits it.
+  EntityId key_function = EntityId::none;
+  std::vector<VirtualSlot> slots;
+  std::optional<u32> slot_of(EntityId function, VirtualSlotKind kind = VirtualSlotKind::function) const {
+    for (u32 i = 0; i < slots.size(); ++i)
+      if (slots[i].function == function && slots[i].kind == kind) return i;
+    return std::nullopt;
+  }
+};
 
 // Eligibility and triviality for [class.prop] and [special]. An absent or deleted operation is
 // ineligible. Unknown marks a record whose declarations or subobjects do not establish the fact.
@@ -769,10 +798,16 @@ struct ClassRec {
   std::optional<bool> destructor_noexcept;  // the effective specification, when known
   bool destructor_usable = false;          // its declaration and subobject destruction are known to be usable
   bool destructor_dependent = false;       // a closure pattern's captures leave usability unresolved
-  bool layout_requires_virtual_support = false;
+  bool layout_requires_virtual_support = false;  // it or a subobject is polymorphic
+  // It or a subobject is polymorphic outside the general dynamic layout (`dynamic`).
+  bool virtual_layout_unsupported = false;
   PeerVirtualLayout peer_virtual_layout = PeerVirtualLayout::none;
   // The sole abstract primary base of a class admitted for plain automatic default initialization.
   EntityId peer_automatic_primary_base = EntityId::none;
+  // A polymorphic class outside the peer profiles above, with its own table and constructors.
+  std::optional<DynamicClass> dynamic;
+  // The implicitly defined default constructor of a dynamic class without user-declared ones.
+  EntityId implicit_default_ctor = EntityId::none;
   std::vector<FieldRec> fields;        // in declaration order
   std::vector<MemberDeclRec> members;  // member functions and static data members
   std::vector<EntityId> pure_final_overriders;
@@ -1042,6 +1077,13 @@ public:
   }
 
   bool has_virtual_layouts() const { return has_virtual_layouts_; }
+  bool virtual_layout_unsupported(QualType t) const {
+    if (!has_virtual_layouts()) return false;
+    auto r = types_->rec(t);
+    while (r.kind == TypeKind::array) r = types_->rec(r.inner);
+    const ClassRec* c = r.kind == TypeKind::class_ ? find(r.entity) : nullptr;
+    return c && c->virtual_layout_unsupported;
+  }
   bool layout_requires_virtual_support(QualType t) const {
     if (!has_virtual_layouts()) return false;
     auto r = types_->rec(t);
@@ -1111,6 +1153,42 @@ private:
   std::vector<EntityId> class_order_, enum_order_;
   bool has_virtual_layouts_ = false;
 };
+
+// The C library functions builtins call (`lex::BuiltinFunction::library`, `World::string_function`),
+// with the C library's signatures. The search functions return `char*` from a `const char*`, as in
+// C: the C++ library's const-correct overloads are its own functions ([cstring.syn]).
+enum class CType : u8 { int_, size, void_pointer, const_void_pointer, char_pointer, const_char_pointer };
+// `constant`: what constant evaluation computes for the builtin's call (`ast::Call::builtin`); a
+// function without one is not a constant expression.
+struct StringFunction {
+  std::string_view name;
+  CType result;
+  std::array<CType, 3> params;
+  u8 arity = 3;
+  ast::LibraryBuiltin constant = ast::LibraryBuiltin::none;
+};
+inline constexpr std::array string_functions{
+    StringFunction{"memchr", CType::void_pointer, {CType::const_void_pointer, CType::int_, CType::size}, 3,
+                   ast::LibraryBuiltin::memchr},
+    StringFunction{"memcmp", CType::int_, {CType::const_void_pointer, CType::const_void_pointer, CType::size}, 3,
+                   ast::LibraryBuiltin::memcmp},
+    StringFunction{"memcpy", CType::void_pointer, {CType::void_pointer, CType::const_void_pointer, CType::size}},
+    StringFunction{"memmove", CType::void_pointer, {CType::void_pointer, CType::const_void_pointer, CType::size}},
+    StringFunction{"memset", CType::void_pointer, {CType::void_pointer, CType::int_, CType::size}},
+    StringFunction{"strchr", CType::char_pointer, {CType::const_char_pointer, CType::int_}, 2},
+    StringFunction{"strpbrk", CType::char_pointer, {CType::const_char_pointer, CType::const_char_pointer}, 2},
+    StringFunction{"strrchr", CType::char_pointer, {CType::const_char_pointer, CType::int_}, 2},
+    StringFunction{"strstr", CType::char_pointer, {CType::const_char_pointer, CType::const_char_pointer}, 2},
+};
+constexpr const StringFunction* string_function_named(std::string_view name) {
+  for (const StringFunction& f : string_functions)
+    if (f.name == name) return &f;
+  return nullptr;
+}
+// Every library builtin has a signature.
+static_assert(std::ranges::all_of(lex::builtin_functions, [](const lex::BuiltinFunctionInfo& b) {
+  return b.function != lex::BuiltinFunction::library || string_function_named(lex::library_function_name(b));
+}));
 
 // The ordinary implicit allocation signatures at global scope ([basic.stc.dynamic]).
 // The single-object and array operators share these shapes and the target's size_t.
@@ -1188,8 +1266,45 @@ struct World {
     if (allocation_has_alignment(f)) params[count++] = types.enum_type(alignment_enum());
     QualType type = types.function(allocating ? void_pointer : void_type, std::span(params).first(count),
                                    false, LangLinkage::cxx, Cv::none, ast::RefQual::none, !allocating);
+    return implicit_function(entities.entity({.kind = EntityKind::function, .name = ins.names.intern(allocation_name(f, array)),
+                                              .type = type}),
+                             type);
+  }
+
+  // The C library function a builtin calls (docs/EXTENSIONS.md), declared at global scope with
+  // C language linkage and the C library's signature (`string_functions`). Its exception
+  // specification is the target's `<string.h>`'s, so a written declaration or definition of the
+  // function is the same entity, with one symbol ([dcl.link]): glibc's `__THROW` is
+  // `noexcept(true)` in C++, the macOS SDK's declarations have none.
+  ast::DeclSema string_function(const StringFunction& f) {
+    const auto c_type = [&](CType t) {
+      const QualType void_type = types.builtin(Builtin::void_);
+      const QualType char_type = types.builtin(Builtin::char_);
+      switch (t) {
+        case CType::int_: return types.builtin(Builtin::int_);
+        case CType::size: return types.builtin(target.size_type);
+        case CType::void_pointer: return types.pointer(void_type);
+        case CType::const_void_pointer: return types.pointer(types.add_cv(void_type, Cv::const_));
+        case CType::char_pointer: return types.pointer(char_type);
+        case CType::const_char_pointer: return types.pointer(types.add_cv(char_type, Cv::const_));
+      }
+      std::unreachable();
+    };
+    std::vector<QualType> params;
+    for (CType t : std::span(f.params).first(f.arity)) params.push_back(c_type(t));
+    const bool nonthrowing = target.operating_system == ast::OperatingSystem::linux_;
+    const QualType type = types.function(c_type(f.result), params, false, LangLinkage::c, Cv::none,
+                                         ast::RefQual::none, nonthrowing);
+    ast::DeclSema d = implicit_function(
+        entities.entity({.kind = EntityKind::function, .name = ins.names.intern(f.name), .type = type, .lang = LangLinkage::c}),
+        type);
+    d.has_written_noexcept = nonthrowing;
+    return d;
+  }
+
+  ast::DeclSema implicit_function(EntityId entity, QualType type) {
     ast::DeclSema d{};
-    d.entity = entities.entity({.kind = EntityKind::function, .name = ins.names.intern(allocation_name(f, array)), .type = type});
+    d.entity = entity;
     d.type = type;
     d.kind = ast::DeclKind::function;
     d.linkage = ast::Linkage::external;

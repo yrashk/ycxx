@@ -102,11 +102,15 @@ public:
   virtual ast::DeclSema decl_sema(DeclId d) = 0;
   // The written in-class declaration of a member from this unit's class record.
   virtual std::optional<ast::DeclSema> written_member(EntityId) { return std::nullopt; }
+  // The declaration a class template specialization made of a friend function it defines (#259).
+  virtual std::optional<ast::DeclSema> class_friend(EntityId) { return std::nullopt; }
   virtual bool peer_pure_dispatch(EntityId) { return false; }
   virtual void use_typed_dynamic_cast() {}
   // A use of a global allocation function that may lack a written declaration in the unit.
   // An aligned signature also brings its parameter's enum shape into the unit.
   virtual void use_allocation_function(EntityId, bool = false) {}
+  // A call of a C library function a builtin lowers to (`World::string_function`).
+  virtual void use_library_function(EntityId) {}
   // Check the selected implicitly declared copy assignment against its subobjects.
   virtual CopyAssignment require_copy_assignment(EntityId) { return CopyAssignment::unsupported; }
   // What a constant evaluation fetches (§B7): `function_ir` of a function defined before the
@@ -206,6 +210,8 @@ public:
   virtual const ClassRec* adl_class(EntityId c, bool at_instantiation) = 0;
   // Earlier friend declarations in a class whose member list is still being read.
   virtual std::vector<DeclId> earlier_adl_friends(EntityId, NameId) { return {}; }
+  // The declaration of a class's friend `f`: a class template specialization's own (#259).
+  virtual ast::DeclSema friend_decl(const ast::MemberRec& f) { return decl_sema(f.decl); }
   // In an instantiation, whether the call at `offset` was dependent in the template definition.
   virtual bool dependent_call(u32 /*offset*/) { return false; }
   // Whether instantiation has given up at its nesting limit, which was diagnosed ([temp.inst]/16):
@@ -418,6 +424,13 @@ EntityId type_info_entity(World& world, EntityId cls) {
                                 ast::Linkage::external, {}, cls});
 }
 
+// Itanium C++ ABI §3.2.6: the entry of a pure virtual function in a table.
+EntityId pure_virtual_handler(World& world) {
+  const auto lang = LangLinkage::c;
+  const auto type = world.types.function(world.types.builtin(Builtin::void_), {}, false, lang);
+  return world.entities.entity({EntityKind::function, world.ins.names.intern("__cxa_pure_virtual"), type, lang});
+}
+
 EntityId dynamic_cast_runtime(World& world) {
   const QualType v = world.types.builtin(Builtin::void_);
   const QualType p = world.types.pointer(world.types.add_cv(v, Cv::const_));
@@ -542,6 +555,14 @@ public:
   // What constant evaluation answers for list-initialization's narrowing check ([dcl.init.list]);
   // set by the parser, which owns the evaluator.
   std::function<std::optional<ConstId>(Ex)> constant_of;
+  // What constant evaluation answers for an immediate invocation ([expr.const]): its value, none
+  // for a void call, or why it is not a constant expression. Set by the parser too.
+  struct Evaluation {
+    std::optional<ConstId> value;
+    u64 reason = reason_unsupported;
+    bool constant = false;
+  };
+  std::function<Evaluation(Ex)> evaluate_immediate;
 
   // ------------------------------------------------------------ classes ([class], [expr.ref])
 
@@ -1139,6 +1160,15 @@ public:
     explicit RequiresBodyScope(Sema& sema) : context(sema.in_requires_body_), saved(std::exchange(context, true)) {}
     ~RequiresBodyScope() { context = saved; }
   };
+  // An atomic constraint's expression where its constraint-expression is written: it is read
+  // again with its parameter mapping bound when its satisfaction is checked ([temp.constr.atomic]),
+  // so what needs the template arguments can wait for that.
+  struct ConstraintAtomScope {
+    bool& context;
+    bool saved;
+    explicit ConstraintAtomScope(Sema& sema) : context(sema.in_constraint_atom_), saved(std::exchange(context, true)) {}
+    ~ConstraintAtomScope() { context = saved; }
+  };
   // The concept unqualified lookup finds for `name`.
   std::optional<ast::DeclSema> concept_named(NameId name) { return named_template(name, ast::DeclKind::concept_); }
   // An ordinary unqualified type-constraint on a placeholder ([basic.lookup.unqual], [temp.param]).
@@ -1353,6 +1383,14 @@ public:
   engine::Loc type_trait_loc(u32 at) {
     return q_->source_loc({std::to_underlying(item_), loc_base_ + at}, at);
   }
+  // A type trait with dependent operands in an atomic constraint's expression is evaluated when
+  // the atom is read again for its satisfaction ([temp.constr.atomic]), and the classes it needs
+  // complete are judged there; none outside an atom.
+  std::optional<Ex> trait_at_satisfaction(engine::Loc loc, u32 begin, u32 end) {
+    if (!in_constraint_atom_) return std::nullopt;
+    q_->record_dependent_type_trait_operand(loc);
+    return dependent_node({}, begin, end, builtin(Builtin::bool_));
+  }
   // The innermost array element must be complete or cv void ([meta.unary.prop]). Only classes
   // need a copyability fact after peeling extents ([basic.types.general], [class.prop]).
   Ex trivial_copyability_expr(QualType operand, u32 begin, u32 end) {
@@ -1369,6 +1407,7 @@ public:
           q_->record_dependent_type_trait_operand(loc);
           return literal(builtin(Builtin::bool_), *value, ValueCategory::prvalue, begin, end);
         }
+      if (auto at_satisfaction = trait_at_satisfaction(loc, begin, end)) return *at_satisfaction;
       return fail(Diag::trivial_copyability_dependent);
     }
     const QualType element = ts.innermost_array_element(canonical);
@@ -1545,6 +1584,7 @@ public:
           q_->record_dependent_type_trait_operand(loc);
           return literal(builtin(Builtin::bool_), *value, ValueCategory::prvalue, begin, end);
         }
+      if (auto at_satisfaction = trait_at_satisfaction(loc, begin, end)) return *at_satisfaction;
       return fail(Diag::destructibility_dependent, name);
     }
     // References are destructible even when the referent is incomplete. An unknown-bound
@@ -1607,6 +1647,7 @@ public:
           q_->record_dependent_type_trait_operand(loc);
           return literal(builtin(Builtin::bool_), *value, ValueCategory::prvalue, begin, end);
         }
+      if (auto at_satisfaction = trait_at_satisfaction(loc, begin, end)) return *at_satisfaction;
       // A template body outside the trait's replay scopes can still re-parse it.
       return dependent_node({}, begin, end, builtin(Builtin::bool_));
     }
@@ -1638,6 +1679,7 @@ public:
           q_->record_dependent_type_trait_operand(loc);
           return literal(builtin(Builtin::bool_), *value, ValueCategory::prvalue, begin, end);
         }
+      if (auto at_satisfaction = trait_at_satisfaction(loc, begin, end)) return *at_satisfaction;
       return dependent_node({}, begin, end, builtin(Builtin::bool_));
     }
     if (!types().is_class(type)) return bool_literal(types().is_array(type), begin, end);
@@ -1736,6 +1778,11 @@ public:
           return literal(builtin(Builtin::bool_), *value, ValueCategory::prvalue, begin, end);
         }
       }
+      if (in_constraint_atom_) {
+        for (const ConstructibilityOperand& operand : args)
+          if (ts.is_dependent(operand.type)) q_->record_dependent_type_trait_operand(type_trait_loc(operand.at));
+        return dependent_node({}, begin, end, builtin(Builtin::bool_));
+      }
       const bool pack = std::ranges::any_of(args, [&](const ConstructibilityOperand& arg) {
         return ts.kind(arg.type) == TypeKind::pack_expansion;
       });
@@ -1772,6 +1819,7 @@ public:
     const QualType lhs = ts.canonical(left), rhs = ts.canonical(right);
     if (ts.is_dependent(lhs) || ts.is_dependent(rhs)) {
       if (auto pattern = replayed_binary_type_trait(op, lhs, rhs, begin, end)) return *pattern;
+      if (auto at_satisfaction = trait_at_satisfaction(type_trait_loc(begin), begin, end)) return *at_satisfaction;
       diag_at(type_trait_loc(begin), Diag::assignability_dependent, name);
       return {NodeId::none, begin, end};
     }
@@ -1782,17 +1830,21 @@ public:
     }
     return bool_literal(ts.is_reference(lhs) && !ts.rec(lhs).rvalue_ref && !Types::is_const(destination), begin, end);
   }
-  // The base-clause parser admits only nonvirtual bases. Count paths regardless of access:
-  // a private path can still make a public one ambiguous. Two arrivals at a class suffice
-  // to prove ambiguity for any base reached through it.
-  const ClassRec* unique_public_base(EntityId derived, EntityId base) {
+  // Whether `base` is a base of `derived` along exactly one path, and that path public: an
+  // unambiguous, accessible base from outside both classes ([class.derived], [class.access.base]).
+  // `unknown` when a class on the way is not defined or, with `ordinary_layouts`, is a union or
+  // needs virtual support. The base-clause parser admits only nonvirtual bases. Count paths
+  // regardless of access: a private path can still make a public one ambiguous. Two arrivals at
+  // a class suffice to prove ambiguity for any base reached through it.
+  enum class BasePath : u8 { none, unique_public, unknown };
+  BasePath base_path(EntityId derived, EntityId base, bool ordinary_layouts) {
     struct Path {
       EntityId cls;
       bool public_;
     };
     std::vector<Path> pending{{derived, true}};
     std::map<EntityId, unsigned> arrivals;
-    const ClassRec* found = nullptr;
+    bool found = false, unique_public = true;
     while (!pending.empty()) {
       const auto [cls, public_] = pending.back();
       pending.pop_back();
@@ -1800,16 +1852,22 @@ public:
       if (count == 2) continue;
       ++count;
       const ClassRec* record = classes().find(cls);
-      if (!record || !record->defined || record->union_ || record->polymorphic || record->layout_requires_virtual_support)
-        return nullptr;
+      if (!record || !record->defined ||
+          (ordinary_layouts && (record->union_ || record->polymorphic || record->layout_requires_virtual_support)))
+        return BasePath::unknown;
       if (cls == base) {
-        if (found || !public_) return nullptr;
-        found = record;
+        unique_public = unique_public && !found && public_;
+        found = true;
       }
       for (const BaseRec& edge : record->bases)
         pending.push_back({edge.cls, public_ && edge.access == ast::Access::public_});
     }
-    return found;
+    return found && unique_public ? BasePath::unique_public : BasePath::none;
+  }
+  // The base's record when it is a unique public base and every class on the way has an
+  // ordinary layout; the by-value and reference conversions model only those.
+  const ClassRec* unique_public_base(EntityId derived, EntityId base) {
+    return base_path(derived, base, true) == BasePath::unique_public ? classes().find(base) : nullptr;
   }
 
   // The source of the copy or move is the base subobject, not a newly constructed Derived
@@ -1827,6 +1885,49 @@ public:
     return operations.copy_constructor == eligible_trivial && !base.copy_deleted && base.defaulted_copy_const;
   }
 
+  // Whether a prvalue of pointer or `std::nullptr_t` type `from` converts implicitly to the
+  // non-reference type `to`. Function and multi-level pointers and class targets are not modelled;
+  // `failed` when Derived's instantiation failed, which was diagnosed there.
+  enum class PointerConversion : u8 { no, yes, unmodelled, failed };
+  PointerConversion object_pointer_conversion(QualType from, QualType to, engine::Loc loc) {
+    using enum PointerConversion;
+    const Types& ts = types();
+    // A null pointer value converts to any pointer type; to `bool` only by direct-initialization
+    // ([conv.ptr]/1, [conv.bool]).
+    if (ts.is(from, Builtin::nullptr_t)) {
+      if (ts.is_pointer(to)) return yes;
+      return ts.is_arithmetic(to) || ts.is_enum(to) ? no : unmodelled;
+    }
+    if (ts.is(to, Builtin::bool_)) return yes;  // [conv.bool]
+    if (ts.is_arithmetic(to) || ts.is_enum(to) || ts.is(to, Builtin::nullptr_t) || ts.is_member_pointer(to))
+      return no;
+    if (!ts.is_pointer(to)) return unmodelled;
+    const QualType source = ts.canonical(ts.pointee(from)), target = ts.canonical(ts.pointee(to));
+    if (ts.is_function(source) || ts.is_function(target) || ts.is_pointer(source) || ts.is_pointer(target) ||
+        ts.is_member_pointer(source) || ts.is_member_pointer(target))
+      return unmodelled;
+    // Every conversion here adds cv-qualifiers to the pointee, never removes them ([conv.qual]).
+    // An array's are its elements' ([basic.type.qualifier]/3).
+    if (!cv_within(object_cv(source), object_cv(target))) return no;
+    const QualType s = object_unqualified(source), t = object_unqualified(target);
+    if (s == t || ts.is_void(t)) return yes;  // the same type, or an object type to `cv void*`
+    // A known bound converts to an unknown one, also nested ([conv.qual]).
+    if (ts.is_array(s) || ts.is_array(t)) return unmodelled;
+    if (!ts.is_class(s) || !ts.is_class(t)) return no;
+    // Derived* to Base* needs a complete Derived whose Base is accessible and unambiguous
+    // ([conv.ptr]/3); without one, the pointer types are unrelated.
+    const EntityId derived = ts.class_of(s), base = ts.class_of(t);
+    const auto demand = q_->type_trait_at_demand(derived, loc);
+    if (!(demand ? *demand : q_->is_complete_at_source(derived)))
+      return q_->type_trait_instantiation_failed(derived) ? failed : no;
+    // Virtual functions do not change which bases a class has or the access to them.
+    switch (base_path(derived, base, false)) {
+      case BasePath::unique_public: return yes;
+      case BasePath::none: return no;
+      case BasePath::unknown: return unmodelled;
+    }
+    std::unreachable();
+  }
   // Reference binding follows the category of declval<From>() ([meta.rel], [dcl.init.ref]).
   Ex convertibility_expr(ast::DepOp op, NameId name, QualType source, QualType target, u32 begin, u32 end) {
     const Types& ts = types();
@@ -1837,6 +1938,7 @@ public:
         if (op == ast::DepOp::is_convertible) q_->record_dependent_type_trait_operand(loc);
         return *pattern;
       }
+      if (auto at_satisfaction = trait_at_satisfaction(loc, begin, end)) return *at_satisfaction;
       diag_at(loc, Diag::convertibility_dependent, name);
       return {NodeId::none, begin, end};
     }
@@ -1853,6 +1955,16 @@ public:
     const auto binds_directly = [&] {
       return cv_within(Types::cv(from_object), Types::cv(to_object)) && (source_lvalue ? !rvalue_target : binds_rvalue);
     };
+    // A pointer or `std::nullptr_t` source converts by a standard conversion only, which does not
+    // throw ([conv.ptr], [conv.qual], [conv.bool]).
+    if (!target_reference && (ts.is_pointer(from_object) || ts.is(from_object, Builtin::nullptr_t))) {
+      switch (object_pointer_conversion(from_object, to, loc)) {
+        case PointerConversion::no: return bool_literal(false, begin, end);
+        case PointerConversion::yes: return bool_literal(true, begin, end);
+        case PointerConversion::failed: return {NodeId::none, begin, end};
+        case PointerConversion::unmodelled: return unsupported();
+      }
+    }
     if (op == ast::DepOp::is_convertible && ts.is_class(from_object) && ts.is_class(to_object)) {
       const EntityId derived = ts.class_of(from_object), base = ts.class_of(to_object);
       if (derived == base || is_union_type(from_object) != false || is_union_type(to_object) != false)
@@ -1931,8 +2043,11 @@ public:
     diag_at(loc, Diag::convertibility_unsupported, name, target, source);
     return {NodeId::none, begin, end};
   }
-  // [meta.rel] uses existence of a base, regardless of access or the number of paths.
-  std::optional<bool> reaches_base(EntityId derived, EntityId base) {
+  // [meta.rel] uses existence of a base, regardless of access or the number of paths. With
+  // `virtual_only`, a virtual base class: one some class in the graph names with a virtual
+  // base-specifier ([class.mi]), not a nonvirtual base of a virtual base. None when a class on
+  // the way is not defined and no answer was found without it.
+  std::optional<bool> reaches_base(EntityId derived, EntityId base, bool virtual_only = false) {
     const Classes& records = classes();
     std::vector<EntityId> pending{derived};
     std::set<EntityId> visited;
@@ -1940,16 +2055,37 @@ public:
     while (!pending.empty()) {
       const EntityId current = pending.back();
       pending.pop_back();
-      if (current == base) return true;
+      if (current == base && !virtual_only) return true;
       if (!visited.insert(current).second) continue;
       const ClassRec* record = records.find(current);
       if (!record || !record->defined) {
         complete_graph = false;
         continue;
       }
-      for (const BaseRec& edge : record->bases) pending.push_back(edge.cls);
+      for (const BaseRec& edge : record->bases) {
+        if (virtual_only && edge.virtual_ && edge.cls == base) return true;
+        pending.push_back(edge.cls);
+      }
     }
     return complete_graph ? std::optional(false) : std::nullopt;
+  }
+  // A class-relation trait with a dependent operand ([meta.rel]) is decided once its operands are
+  // known, with completeness judged there ([temp.point]): when its class-template base or
+  // variable-template initializer is replayed, when its function template body is analysed again
+  // for an instantiation ([temp.inst]), or when its atomic constraint's satisfaction is checked.
+  // None elsewhere.
+  std::optional<Ex> dependent_class_relation(ast::DepOp op, QualType first, QualType second, u32 begin, u32 end) {
+    const engine::Loc loc = type_trait_loc(begin);
+    if (auto pattern = replayed_binary_type_trait(op, first, second, begin, end)) {
+      // Either operand becoming concrete at replay can change which classes need completion.
+      q_->record_dependent_type_trait_operand(loc);
+      return *pattern;
+    }
+    if (current_function != EntityId::none && templated()) {
+      q_->record_dependent_type_trait_operand(loc);
+      return dependent_node({}, begin, end, builtin(Builtin::bool_));
+    }
+    return trait_at_satisfaction(loc, begin, end);
   }
   Ex base_of_expr(QualType base_type, QualType derived_type, u32 begin, u32 end) {
     const Types& ts = types();
@@ -1961,18 +2097,7 @@ public:
       return {NodeId::none, begin, end};
     };
     if (ts.is_dependent(base) || ts.is_dependent(derived)) {
-      if (auto pattern = replayed_binary_type_trait(ast::DepOp::is_base_of, base, derived, begin, end)) {
-        // Either operand becoming concrete at replay can change whether Derived needs completion.
-        q_->record_dependent_type_trait_operand(loc);
-        return *pattern;
-      }
-      // A template's function body is analysed again with its arguments bound when it is
-      // instantiated ([temp.inst]), which evaluates the trait then, with Derived's completeness at
-      // the point of instantiation ([temp.point]).
-      if (current_function != EntityId::none && templated()) {
-        q_->record_dependent_type_trait_operand(loc);
-        return dependent_node({}, begin, end, builtin(Builtin::bool_));
-      }
+      if (auto deferred = dependent_class_relation(ast::DepOp::is_base_of, base, derived, begin, end)) return *deferred;
       return fail(Diag::base_of_dependent);
     }
     if (!ts.is_class(base) || !ts.is_class(derived)) return bool_literal(false, begin, end);
@@ -1990,6 +2115,191 @@ public:
     if (auto result = reaches_base(d, b)) return bool_literal(*result, begin, end);
     return fail(Diag::base_of_unsupported, base_type, derived_type);
   }
+  // `__builtin_is_virtual_base_of(Base, Derived)` and `__is_pointer_interconvertible_base_of(Base,
+  // Derived)` ([meta.rel]) ignore cv. A nonclass or union operand gives false, and the same class
+  // gives `same`, complete or not. Distinct classes need a complete Derived: their entities then,
+  // or the result after a diagnostic.
+  std::expected<std::pair<EntityId, EntityId>, Ex> class_relation_operands(NameId name, QualType base_type,
+                                                                           QualType derived_type, bool same,
+                                                                           u32 begin, u32 end) {
+    const Types& ts = types();
+    const QualType base = Types::unqualified(ts.canonical(base_type));
+    const QualType derived = Types::unqualified(ts.canonical(derived_type));
+    const engine::Loc loc = type_trait_loc(begin);
+    if (!ts.is_class(base) || !ts.is_class(derived)) return std::unexpected(bool_literal(false, begin, end));
+    const auto base_union = is_union_type(base), derived_union = is_union_type(derived);
+    if (base_union == true || derived_union == true) return std::unexpected(bool_literal(false, begin, end));
+    if (!base_union || !derived_union) {
+      diag_at(loc, Diag::class_relation_unsupported, name, base_type, derived_type);
+      return std::unexpected(Ex{NodeId::none, begin, end});
+    }
+    const EntityId b = ts.class_of(base), d = ts.class_of(derived);
+    if (b == d) return std::unexpected(bool_literal(same, begin, end));
+    const auto complete_at_demand = q_->type_trait_at_demand(d, loc);
+    if (!(complete_at_demand ? *complete_at_demand : q_->is_complete_at_source(d))) {
+      if (!q_->type_trait_instantiation_failed(d)) diag_at(loc, Diag::class_relation_incomplete, derived_type, name);
+      return std::unexpected(Ex{NodeId::none, begin, end});
+    }
+    return std::pair{b, d};
+  }
+  // A class is not its own virtual base. The graph has no virtual edges until #310.
+  Ex virtual_base_of_expr(NameId name, QualType base_type, QualType derived_type, u32 begin, u32 end) {
+    if (types().is_dependent(base_type) || types().is_dependent(derived_type)) {
+      if (auto deferred = dependent_class_relation(ast::DepOp::is_virtual_base_of, base_type, derived_type, begin, end))
+        return *deferred;
+      diag_at(type_trait_loc(begin), Diag::class_relation_dependent, name);
+      return {NodeId::none, begin, end};
+    }
+    auto operands = class_relation_operands(name, base_type, derived_type, false, begin, end);
+    if (!operands) return operands.error();
+    if (auto result = reaches_base(operands->second, operands->first, true)) return bool_literal(*result, begin, end);
+    diag_at(type_trait_loc(begin), Diag::class_relation_unsupported, name, base_type, derived_type);
+    return {NodeId::none, begin, end};
+  }
+  // A standard-layout object is pointer-interconvertible with each of its base class subobjects
+  // ([basic.compound]), and a standard-layout class has no base type twice ([class.prop]), so
+  // the derivation is unambiguous. Access does not matter.
+  Ex pointer_interconvertible_base_of_expr(NameId name, QualType base_type, QualType derived_type, u32 begin, u32 end) {
+    const engine::Loc loc = type_trait_loc(begin);
+    if (types().is_dependent(base_type) || types().is_dependent(derived_type)) {
+      if (auto deferred = dependent_class_relation(ast::DepOp::is_pointer_interconvertible_base_of, base_type,
+                                                   derived_type, begin, end))
+        return *deferred;
+      diag_at(loc, Diag::class_relation_dependent, name);
+      return {NodeId::none, begin, end};
+    }
+    auto operands = class_relation_operands(name, base_type, derived_type, true, begin, end);
+    if (!operands) return operands.error();
+    const auto [b, d] = *operands;
+    std::optional<bool> result = reaches_base(d, b);
+    if (result == true) result = classes().standard_layout(d);
+    if (result) return bool_literal(*result, begin, end);
+    diag_at(loc, Diag::class_relation_unsupported, name, base_type, derived_type);
+    return {NodeId::none, begin, end};
+  }
+
+  // An enumeration's underlying type, once known: while its definition is read, too.
+  std::optional<QualType> enum_underlying(EntityId e) {
+    for (const EnumRec* record : {q_->defining_enum(e), classes().find_enum(e)})
+      if (record && record->underlying) return types().canonical(*record->underlying);
+    return std::nullopt;
+  }
+  // The non-static data members of a standard-layout class: all are declared in one class of its
+  // hierarchy ([class.prop]), itself or a base.
+  const std::vector<FieldRec>* standard_layout_members(EntityId cls) {
+    const ClassRec* record = classes().find(cls);
+    if (!record || !record->fields.empty()) return record ? &record->fields : nullptr;
+    for (const BaseRec& base : record->bases) {
+      const std::vector<FieldRec>* members = standard_layout_members(base.cls);
+      if (!members || !members->empty()) return members;
+    }
+    return &record->fields;
+  }
+  // Whether cv1 T1 and cv2 T2 are layout-compatible types ([basic.types.general]): the same type,
+  // enumerations with the same underlying type ([dcl.enum]), or layout-compatible standard-layout
+  // classes ([class.mem.general]). None when a fact it needs is not known.
+  std::optional<bool> layout_compatible(QualType first, QualType second) {
+    const Types& ts = types();
+    const QualType a = object_unqualified(ts.canonical(first)), b = object_unqualified(ts.canonical(second));
+    if (a == b) return true;
+    if (ts.is_enum(a) && ts.is_enum(b)) {
+      const auto x = enum_underlying(ts.enum_of(a)), y = enum_underlying(ts.enum_of(b));
+      if (!x || !y) return std::nullopt;
+      return Types::unqualified(*x) == Types::unqualified(*y);
+    }
+    if (!ts.is_class(a) || !ts.is_class(b)) return false;
+    const EntityId x = ts.class_of(a), y = ts.class_of(b);
+    const ClassRec* rx = classes().find(x);
+    const ClassRec* ry = classes().find(y);
+    if (!rx || !ry || !rx->defined || !ry->defined) return std::nullopt;
+    if (rx->union_ != ry->union_) return false;
+    for (EntityId c : {x, y}) {
+      const auto standard = classes().standard_layout(c);
+      if (standard != true) return standard;
+    }
+    const std::vector<FieldRec>* mx = standard_layout_members(x);
+    const std::vector<FieldRec>* my = standard_layout_members(y);
+    if (!mx || !my) return std::nullopt;
+    // Copies: deciding a member's type can read other class records.
+    const std::vector<FieldRec> fx = *mx, fy = *my;
+    if (fx.size() != fy.size()) return false;
+    // A struct's common initial sequence ends before a `[[no_unique_address]]` member when
+    // `__has_cpp_attribute(no_unique_address)` is nonzero; ycxx answers 0 for every attribute so
+    // far (#1141) and does not apply the attribute to the layout. A layout attribute the layout
+    // does not apply could also change a member's alignment.
+    const auto overlapping = [](const FieldRec& f) { return f.no_unique_address; };
+    if (std::ranges::any_of(fx, overlapping) || std::ranges::any_of(fy, overlapping) || rx->unapplied_layout ||
+        ry->unapplied_layout || q_->class_layout_uncertain(x) || q_->class_layout_uncertain(y))
+      return std::nullopt;
+    if (rx->union_) {
+      // Unions pair their members in any order. Layout compatibility is an equivalence, so any
+      // compatible partner will do; an undecided pair leaves the answer open only when no
+      // partner is found.
+      std::vector<bool> paired(fy.size(), false);
+      for (const FieldRec& f : fx) {
+        bool found = false, undecided = false;
+        for (std::size_t i = 0; i < fy.size() && !found; ++i) {
+          if (paired[i]) continue;
+          const auto same = layout_compatible(f.type, fy[i].type);
+          if (!same) undecided = true;
+          else if (*same) paired[i] = found = true;
+        }
+        if (!found) return undecided ? std::nullopt : std::optional(false);
+      }
+      return true;
+    }
+    // Structs: the common initial sequence must be all members of both.
+    for (std::size_t i = 0; i < fx.size(); ++i) {
+      const FieldRec &f = fx[i], &g = fy[i];
+      if (f.bit_width != g.bit_width) return false;
+      const auto same = layout_compatible(f.type, g.type);
+      if (same != true) return same;
+      const auto fa = layout_of(f.type, true), ga = layout_of(g.type, true);
+      if (!fa || !ga) return std::nullopt;
+      if (*fa != *ga) return false;
+    }
+    return true;
+  }
+  // `__is_layout_compatible(T, U)` ([meta.rel]): each operand must be complete, cv void or an
+  // array of unknown bound.
+  Ex layout_compatible_expr(NameId name, QualType first, QualType second, u32 begin, u32 end) {
+    const Types& ts = types();
+    const engine::Loc loc = type_trait_loc(begin);
+    if (ts.is_dependent(first) || ts.is_dependent(second)) {
+      if (auto deferred = dependent_class_relation(ast::DepOp::is_layout_compatible, first, second, begin, end))
+        return *deferred;
+      diag_at(loc, Diag::class_relation_dependent, name);
+      return {NodeId::none, begin, end};
+    }
+    const auto unsupported = [&]() -> Ex {
+      diag_at(loc, Diag::class_relation_unsupported, name, first, second);
+      return {NodeId::none, begin, end};
+    };
+    for (QualType operand : {first, second}) {
+      const QualType type = ts.canonical(operand);
+      if (ts.is_array(type) && ts.rec(type).bound_value == ConstId::none) continue;
+      const QualType element = ts.innermost_array_element(type);
+      bool complete = true;
+      if (ts.is_class(element)) {
+        const EntityId cls = ts.class_of(element);
+        const auto demand = q_->type_trait_at_demand(cls, loc);
+        complete = demand ? *demand : q_->is_complete_at_source(cls);
+        if (!complete && q_->type_trait_instantiation_failed(cls)) return {NodeId::none, begin, end};
+      } else if (ts.is_enum(element)) {
+        const EntityId e = ts.enum_of(element);
+        if (auto fixed = q_->defining_enum_is_fixed(e)) complete = *fixed;
+        else if (const EnumRec* record = classes().find_enum(e)) complete = record->fixed || record->defined;
+        else return unsupported();
+      }
+      if (!complete) {
+        diag_at(loc, Diag::class_relation_incomplete, element, name);
+        return {NodeId::none, begin, end};
+      }
+    }
+    if (auto result = layout_compatible(first, second)) return bool_literal(*result, begin, end);
+    return unsupported();
+  }
+
   // The owning replay checks class completeness at the point of instantiation
   // ([meta.unary.prop]). Among these traits, only finality requires a complete union.
   Ex class_property_trait_expr(ast::DepOp op, QualType type, u32 begin, u32 end)
@@ -2004,6 +2314,7 @@ public:
           q_->record_dependent_type_trait_operand(loc);
           return literal(builtin(Builtin::bool_), *value, ValueCategory::prvalue, begin, end);
         }
+      if (auto at_satisfaction = trait_at_satisfaction(loc, begin, end)) return *at_satisfaction;
       return dependent_node({}, begin, end, builtin(Builtin::bool_));
     }
     if (!types().is_class(type)) return bool_literal(false, begin, end);
@@ -2054,6 +2365,10 @@ public:
     case is_trivially_destructible:
       return destructibility_expr(ast::DepOp::is_trivially_destructible, name, args[0], begin, end);
     case is_base_of: return base_of_expr(args[0], args[1], begin, end);
+    case is_virtual_base_of: return virtual_base_of_expr(name, args[0], args[1], begin, end);
+    case is_pointer_interconvertible_base_of:
+      return pointer_interconvertible_base_of_expr(name, args[0], args[1], begin, end);
+    case is_layout_compatible: return layout_compatible_expr(name, args[0], args[1], begin, end);
     case reference_converts_from_temporary:
       return reference_temporary_expr(ast::DepOp::reference_converts_from_temporary, name, args[0], args[1], begin, end);
     case reference_constructs_from_temporary:
@@ -2627,7 +2942,7 @@ public:
     const QualType element = types().innermost_array_element(t);
     // Layout can be the first use that requires a class specialization to be complete.
     const ClassRec* record = types().is_class(element) ? class_rec(types().class_of(element)) : nullptr;
-    if (!record || !record->layout_requires_virtual_support) return true;
+    if (!record || !record->virtual_layout_unsupported) return true;
     diag(at, Diag::virtual_layout, t);
     return false;
   }
@@ -2891,7 +3206,13 @@ public:
   }
   bool has_user_ctors(QualType t) {
     const ClassRec* c = types().is_class(t) ? class_rec(types().class_of(t)) : nullptr;
-    return c && (c->user_ctors || c->closure);
+    return c && (c->user_ctors || c->closure || c->dynamic);
+  }
+  // A class whose implicit default constructor is a function of its own: a dynamic class, or one
+  // with a dynamic subobject (#309).
+  bool has_implicit_constructor(QualType t) {
+    const ClassRec* c = types().is_class(t) ? class_rec(types().class_of(t)) : nullptr;
+    return c && c->implicit_default_ctor != EntityId::none;
   }
 
   // [dcl.init.general]: the supported aggregate elements need no cleanup during unwinding.
@@ -3026,7 +3347,7 @@ public:
     if (r.kind == TypeKind::array) return has_member_inits(r.inner);
     if (r.kind != TypeKind::class_) return false;
     if (const ClassRec* c = class_rec(r.entity)) {
-      if (c->user_ctors) return true;
+      if (c->user_ctors || c->implicit_default_ctor != EntityId::none) return true;
       for (const BaseRec& b : c->bases)
         if (has_member_inits(types().class_type(b.cls))) return true;
       for (const FieldRec& f : c->fields)
@@ -3045,7 +3366,7 @@ public:
       diag(begin, Diag::member_pointer_values);
       return {NodeId::none, begin, end};
     }
-    if (has_user_ctors(t)) return construct(t, {}, begin, end);  // the default constructor
+    if (has_user_ctors(t) || has_implicit_constructor(t)) return construct(t, {}, begin, end);  // the default constructor
     if (has_member_inits(t)) return member_inits(t, true, begin, end);
     ExprInfo info{Types::unqualified(t), ValueCategory::prvalue, 0};
     return node(ast::ValueInit{info}, begin, end, info);
@@ -3062,7 +3383,7 @@ public:
   Ex default_init(QualType t, u32 begin, u32 end) {
     if (types().is_dependent(t)) return dependent_node({}, begin, end);
     if (!require_concrete_object(t, begin) || !require_supported_virtual_layout(t, begin)) return {NodeId::none, begin, end};
-    if (has_user_ctors(t)) return construct(t, {}, begin, end, Construction::default_init);
+    if (has_user_ctors(t) || has_implicit_constructor(t)) return construct(t, {}, begin, end, Construction::default_init);
     if (has_member_inits(t)) return member_inits(t, false, begin, end);
     ExprInfo info{Types::unqualified(t), ValueCategory::prvalue, 0};
     return node(ast::DefaultInit{info}, begin, end, info);
@@ -5193,6 +5514,35 @@ public:
 
   bool is_consteval(EntityId f) const { return consteval_.contains(std::to_underlying(f)); }
 
+  // A call of an immediate function outside an immediate function context is an immediate
+  // invocation: it must be a constant expression, and it is replaced by its value ([expr.const]).
+  // `call` calls a consteval function or constructor.
+  Ex immediate_invocation(Ex call) {
+    if (!call.ok() || immediate_context || unevaluated || !evaluate_immediate) return call;
+    const Evaluation v = evaluate_immediate(call);
+    if (!v.constant) {
+      diag(call.begin, Diag::not_constant, v.reason);
+      return {NodeId::none, call.begin, call.end};
+    }
+    if (!v.value) {
+      // A void function: the invocation is replaced by its (empty) result, `(void)0`, so the
+      // consteval function's body never runs at run time.
+      QualType i = builtin(Builtin::int_);
+      Ex zero = literal(i, w_->values.integer(i, 0), ValueCategory::prvalue, call.begin, call.end);
+      return convert_node(zero, ast::ConversionKind::to_void, builtin(Builtin::void_));
+    }
+    // A manifestly constant-evaluated expression may consume an immediate pointer.
+    // Its initializer checks the final value for an escape.
+    if (auto entity = immediate_result_entity(*v.value)) {
+      if (!constant_reference_context && !trial_initializer) {
+        diag(call.begin, Diag::immediate_address, w_->entities.rec(*entity).name);
+        return {NodeId::none, call.begin, call.end};
+      }
+      folded_immediate_result = *entity;
+    }
+    return literal(call.type(), *v.value, ValueCategory::prvalue, call.begin, call.end);
+  }
+
   void retain_immediate_functions(const Sema& replay) {
     consteval_.insert(replay.consteval_.begin(), replay.consteval_.end());
     if (folded_immediate_result == EntityId::none) folded_immediate_result = replay.folded_immediate_result;
@@ -5618,7 +5968,8 @@ public:
       object = self_of();
       if (!object->ok()) return fail;
     }
-    Ex set = bound_member(c, name, object, true, begin, end, name_at, naming);
+    // `C::f` names the function itself: a call does not dispatch ([class.virtual]/16).
+    Ex set = bound_member(c, name, object, true, begin, end, name_at, naming, /*qualified=*/!unqualified);
     // Only static members match ordinary function pointers or references ([over.over]). Keep
     // the bound member for calls, whose candidate set also includes the non-static members.
     const u32 key = std::to_underlying(set.id);
@@ -5882,8 +6233,24 @@ public:
       return fail;
     }
     std::optional<u32> virtual_slot;
+    const ClassRec* dynamic_owner = d->is_virtual ? class_rec(w_->entities.rec(d->entity).scope) : nullptr;
+    if (dynamic_owner && !dynamic_owner->dynamic) dynamic_owner = nullptr;
     if (unevaluated == 0) {
-      if (d->is_virtual) {
+      if (dynamic_owner) {
+        // Itanium C++ ABI §3.2.4: dispatch through the slot the declaration occupies in its own
+        // class's table. A qualified name calls the named function directly ([class.virtual]/16).
+        if (!object || assignment_notation) {
+          diag(paren_at, Diag::virtual_call);
+          return fail;
+        }
+        if (!bound.qualified) {
+          virtual_slot = dynamic_owner->dynamic->slot_of(d->entity);
+          if (!virtual_slot) {
+            diag(paren_at, Diag::virtual_call);
+            return fail;
+          }
+        }
+      } else if (d->is_virtual) {
         const auto* record = virtual_consumer(bound.cls);
         // The pure interface has a known call shape independently of its object layout.
         if (!record && d->is_pure && bound.explicit_receiver && !bound.qualified && bound.naming == bound.cls &&
@@ -5985,7 +6352,8 @@ public:
       parameters.append_range(fr.params);
       // The pure dispatch profile certifies a nonthrowing prototype for initializer selection.
       const auto pointer = types().pointer(types().function(fr.inner, parameters, false, LangLinkage::cxx,
-                                                            Cv::none, ast::RefQual::none, d->is_pure && fr.fn_noexcept));
+                                                            Cv::none, ast::RefQual::none,
+                                                            (d->is_pure || dynamic_owner) && fr.fn_noexcept));
       return node(ast::VirtualMemberCall{info, pointer, *virtual_slot, at(o, begin), b_->list(*children)}, begin, end, info);
     }
     return node(ast::MemberCall{info, fe, at(o, begin), b_->list(*children)}, begin, end, info);
@@ -6010,6 +6378,7 @@ public:
     std::vector<NodeId> defaults{};
     bool is_explicit = false;
     DefaultArgumentOrigin default_origin = DefaultArgumentOrigin::interned;
+    bool is_consteval = false;  // an immediate function ([dcl.constexpr])
     // How many arguments a call must give ([over.match.viable]/2.3).
     std::size_t required(std::size_t params) const {
       std::size_t k = params;
@@ -6508,6 +6877,7 @@ public:
         auto st = t.specialization_type(td, *targs);
         if (!st) continue;
         Candidate k{EntityId::none, *st, true, m.is_deleted, &td, m.defaults};
+        k.is_consteval = (td.flags & decl_flag::consteval_) != 0;
         if (copy_init && (types().rec(*st).params.empty() || k.required(types().rec(*st).params.size()) > 1)) continue;
         // [class.copy.ctor]/5: never `S(S)`, a constructor taking its own class by value.
         if (TypeRec sr = types().rec(*st); sr.params.size() == 1 && Types::unqualified(types().canonical(sr.params[0])) == ut) continue;
@@ -6516,6 +6886,7 @@ public:
       } else if (m.is_ctor) {
         TypeRec fr = types().rec(m.type);
         Candidate k{m.entity, m.type, true, m.is_deleted, nullptr, m.defaults, m.is_explicit};
+        k.is_consteval = m.is_consteval;
         user_copy = user_copy || is_copy_ctor(fr, ut, k.required(fr.params.size()));
         // Copy-initialization converts with a constructor that takes one argument ([class.conv.ctor]).
         if (copy_init && (m.is_explicit || fr.params.empty() || k.required(fr.params.size()) > 1)) continue;
@@ -6535,7 +6906,14 @@ public:
         cands.push_back({EntityId::none, types().function(void_, std::span(&move, 1), false, LangLinkage::cxx), true, false});
       }
     }
-    if (!cr->user_ctors && !copy_init) cands.push_back({EntityId::none, types().function(void_, {}, false, LangLinkage::cxx), true, false});
+    if (!cr->user_ctors && !copy_init) {
+      // A dynamic class's implicit default constructor is a function of its own (#309).
+      const EntityId implicit = cr->implicit_default_ctor;
+      const QualType type = implicit == EntityId::none ? types().function(void_, {}, false, LangLinkage::cxx)
+                                                       : w_->entities.rec(implicit).type;
+      // A dynamic class's implicit default constructor can be deleted ([class.default.ctor]/2).
+      cands.push_back({implicit, type, true, cr->dynamic && cr->default_deleted});
+    }
     if (polymorphic_base && list && std::ranges::any_of(cr->members, [&](const MemberDeclRec& member) {
           if (!member.is_ctor) return false;
           const auto params = types().rec(member.type).params;
@@ -6665,7 +7043,13 @@ public:
       cs.push_back({a.id, a.begin >= begin ? a.begin - begin : 0});
     }
     ExprInfo info{ut, ValueCategory::prvalue, 0};
-    return node(ast::CtorCall{info, k.entity, 0, b_->list(cs)}, begin, end, info);
+    // [dcl.init.general]/9: value-initialization zero-initializes before a constructor that is
+    // not user-provided.
+    const u32 zero_first = k.entity == cr->implicit_default_ctor && form != Construction::default_init ? 1 : 0;
+    Ex construction = node(ast::CtorCall{info, k.entity, zero_first, b_->list(cs)}, begin, end, info);
+    if (!k.is_consteval) return construction;
+    consteval_.insert(std::to_underlying(k.entity));
+    return immediate_invocation(construction);
   }
   // In a syntax-only constructor definition, check the implicit default initialization of
   // its direct polymorphic base. There is no complete object or native initializer to build.
@@ -6819,7 +7203,8 @@ public:
     bool value_dependent = false;
     auto function_throwing = [&](EntityId function) {
       if (dependent_noexcept_calls_.contains(std::to_underlying(function))) value_dependent = true;
-      const auto written = q_->written_member(function);
+      auto written = q_->written_member(function);
+      if (!written) written = q_->class_friend(function);
       QualType type = written ? written->type : w_->entities.rec(function).type;
       // A specification that depends on the template's parameters, for this specialization.
       std::optional<ast::DeclSema> pattern = written;
@@ -6852,7 +7237,14 @@ public:
       // global operator new[] without a Call child. The visitor still checks the operands.
       if (node.is<ast::NewArray>() && node.get<ast::NewArray>().allocation.id == NodeId::none)
         return function_throwing(w_->allocation_function(AllocationFunction::allocate, /*array=*/true).entity);
-      if (node.is<ast::DeleteObject>()) return function_throwing(node.get<ast::DeleteObject>().function);
+      if (node.is<ast::DeleteObject>()) {
+        // [expr.unary.noexcept]: the destructor is potentially invoked, then the deallocation.
+        const auto d = node.get<ast::DeleteObject>();
+        if (d.destructor != EntityId::none &&
+            destructor_throwing(types().pointee(expression_info(d.address.id).type), node.offset()))
+          return true;
+        return function_throwing(d.function);
+      }
       if (node.is<ast::DeleteArray>()) return function_throwing(node.get<ast::DeleteArray>().function);
       if (node.is<ast::ImplicitConversion>()) {
         const auto conversion = node.get<ast::ImplicitConversion>();
@@ -7174,6 +7566,29 @@ public:
     return node(ast::BuiltinCall{info, op, b_->list({at(arg, begin)})}, begin, end, info);
   }
 
+  // A builtin that is a C library function: a call of its implicit declaration, whose arguments
+  // are copy-initialized parameters as in any call ([expr.call]/7). The call carries the
+  // function's `constant`, so that constant evaluation reads the bytes itself (`ir::BuiltinFn`).
+  Ex builtin_library_call(const StringFunction& f, std::vector<Ex> args, u32 begin, u32 end) {
+    const ast::DeclSema d = w_->string_function(f);
+    const auto& signature = types().rec(d.type);
+    if (!builtin_arity(signature.params.size(), args.size(), begin)) return {NodeId::none, begin, end};
+    if (std::ranges::any_of(args, [](const Ex& a) { return !a.ok(); })) return {NodeId::none, begin, end};
+    const QualType result = signature.inner;
+    if (std::ranges::any_of(args, [&](const Ex& a) { return dependent(a); })) return dependent_node(args, begin, end, result);
+    std::vector<Child> converted;
+    for (std::size_t i = 0; i < args.size(); ++i) {
+      const Ex arg = convert(args[i], signature.params[i], args[i].begin);
+      if (!arg.ok()) return {NodeId::none, begin, end};
+      converted.push_back(at(arg, begin));
+    }
+    q_->use_library_function(d.entity);
+    const ExprInfo fn_info{d.type, ValueCategory::lvalue, 0};
+    const Ex callee = node(ast::DeclRef{fn_info, d.entity}, begin, begin, fn_info);
+    const ExprInfo info{result, ValueCategory::prvalue, 0};
+    return node(ast::Call{info, d.entity, at(callee, begin), b_->list(converted), f.constant}, begin, end, info);
+  }
+
   // Only send closed, read-only expressions to the fresh constant evaluator. In particular
   // a probe cannot instantiate a speculative callee or run a write in a constexpr frame.
   bool constant_probe_safe(const ast::Red& expression) {
@@ -7276,10 +7691,12 @@ public:
   // Builtins with ordinary expression arguments (docs/EXTENSIONS.md).
   Ex builtin_call(const lex::BuiltinFunctionInfo& b, std::vector<Ex> args, u32 begin, u32 end) {
     using enum lex::BuiltinFunction;
-    if (b.function == trap) {
+    if (b.function == trap || b.function == unreachable) {
+      // [utility.unreachable]: both are `void` and end the path they are on.
       if (!builtin_arity(0, args.size(), begin)) return {NodeId::none, begin, end};
       ExprInfo info{builtin(Builtin::void_), ValueCategory::prvalue, 0};
-      return node(ast::BuiltinCall{info, ast::BuiltinOp::trap, b_->list({})}, begin, end, info);
+      const auto op = b.function == trap ? ast::BuiltinOp::trap : ast::BuiltinOp::unreachable;
+      return node(ast::BuiltinCall{info, op, b_->list({})}, begin, end, info);
     }
     if (b.function == addressof) {
       if (!builtin_arity(1, args.size(), begin)) return {NodeId::none, begin, end};
@@ -7294,6 +7711,8 @@ public:
       if (!builtin_arity(1, args.size(), begin)) return {NodeId::none, begin, end};
       return builtin_constant_probe(args.front(), begin, end);
     }
+    if (b.function == library)
+      return builtin_library_call(*string_function_named(lex::library_function_name(b)), std::move(args), begin, end);
     std::size_t want = b.function == fabs || b.function == nan ? 1 : 0;
     if (!builtin_arity(want, args.size(), begin)) return {NodeId::none, begin, end};
     if (std::ranges::any_of(args, [](const Ex& a) { return !a.ok(); })) return {NodeId::none, begin, end};
@@ -7315,7 +7734,9 @@ public:
     switch (b.function) {
       case addressof:
       case trap:
+      case unreachable:
       case strlen:
+      case library:
       case constant_p: std::unreachable();  // Handled before floating type selection.
       case inf:
       case huge_val:
@@ -8590,13 +9011,97 @@ public:
     return node(ast::Call{call_info, f.entity, at(callee, begin), b_->list(sizes)}, begin, begin, call_info);
   }
 
+  // Whether class `c` or one of its bases declares an allocation or deallocation function, which
+  // a new- or delete-expression would look up before the global ones ([expr.new], [expr.delete]).
+  bool class_allocation_functions(EntityId c) {
+    const ClassRec* r = class_rec(c);
+    if (!r) return false;
+    for (const MemberDeclRec& m : r->members)
+      if (m.is_function && is_allocation_name(ins().names.spelling(m.name))) return true;
+    return std::ranges::any_of(r->bases, [&](const BaseRec& b) { return class_allocation_functions(b.cls); });
+  }
+
+  // The class objects the usual `operator new(size_t)` and `operator delete(void*, size_t)` can
+  // allocate and release: no class-specific allocation functions (#293) and no new-extended
+  // alignment, which would select the `std::align_val_t` overloads ([expr.new]/19).
+  bool supported_class_allocation(QualType t) {
+    if (class_allocation_functions(types().class_of(t))) return false;
+    const auto alignment = layout_of(t, true);
+    return alignment && *alignment <= 2u * w_->target.pointer_size;
+  }
+
+  // [dcl.init.general]/8: default-initialization of a const `t` initializes it, by a
+  // user-provided default constructor or by default member initializers for every member.
+  bool const_default_constructible(QualType t) {
+    t = types().innermost_array_element(t);
+    if (!types().is_class(t)) return false;
+    const ClassRec* r = class_rec(types().class_of(t));
+    if (!r) return false;
+    for (const MemberDeclRec& m : r->members) {
+      if (!m.is_ctor || m.is_template || m.is_deleted || m.entity == r->defaulted_default_ctor) continue;
+      // A default constructor: every parameter has a default argument ([class.default.ctor]).
+      const std::size_t params = types().rec(m.type).params.size();
+      const std::size_t required = m.defaults.empty() ? params : std::size_t(std::ranges::count(m.defaults, NodeId::none));
+      if (required == 0) return true;
+    }
+    if (r->union_) return r->fields.empty() || std::ranges::count_if(r->fields, &FieldRec::dmi) == 1;
+    for (const FieldRec& f : r->fields)
+      if (!f.dmi && !const_default_constructible(f.type)) return false;
+    return std::ranges::all_of(r->bases, [&](const BaseRec& b) {
+      return const_default_constructible(types().class_type(b.cls));
+    });
+  }
+
+  // [expr.new]/26: the new-initializer initializes the class object as in a declaration
+  // ([dcl.init.general]): default-initialization without one, value-initialization for `()`,
+  // and direct- or direct-list-initialization otherwise.
+  Ex new_class_initializer(QualType t, const std::optional<std::vector<Ex>>& args, const Braced* braces, u32 begin,
+                           u32 end) {
+    Ex fail{NodeId::none, begin, end};
+    if (braces) return list_init(t, *braces);
+    if (args && args->empty()) return value_init(t, end, end);
+    if (!args) {
+      if (default_deleted(t)) {
+        diag(begin, Diag::deleted_constructor, t);
+        return fail;
+      }
+      Ex init = default_init(t, end, end);
+      if (init.ok() && Types::is_const(types().canonical(t)) && !const_default_constructible(t)) {
+        diag(begin, Diag::new_const_uninitialized, t);
+        return fail;
+      }
+      return init;
+    }
+    if (std::ranges::any_of(*args, [](const Ex& e) { return !e.ok(); })) return fail;
+    if (std::ranges::any_of(*args, [&](const Ex& e) { return is_braced(e); })) {
+      diag(begin, Diag::not_supported, lex::Tk::l_brace);  // a braced argument in parentheses (#293)
+      return fail;
+    }
+    const u32 open = args->front().begin;
+    const bool aggregate = can_parenthesize_aggregate(t, *args, !immediate_context);
+    if (aggregate || has_user_ctors(t) || args->size() != 1)
+      return construct(t, *args, open, end, aggregate ? Construction::direct_paren_aggregate : Construction::direct);
+    return convert(args->front(), t, open);
+  }
+
   // [expr.new]: initialize the object after the call to the global allocation function.
   Ex new_object(QualType t, const std::optional<std::vector<Ex>>& args, const Braced* braces, u32 begin, u32 end,
                 std::optional<Ex> placement) {
     Ex fail{NodeId::none, begin, end};
-    if (types().has_placeholder(t) || types().is_dependent(t)) {
+    if (types().has_placeholder(t)) {
       diag(begin, Diag::not_supported, lex::Tk::kw_new);
       return fail;
+    }
+    if (types().is_dependent(t)) {
+      // The instantiation analyses the new-expression's tokens again with T bound ([temp.res]).
+      std::vector<Ex> ops;
+      if (placement) ops.push_back(*placement);
+      if (args) ops.insert(ops.end(), args->begin(), args->end());
+      if (braces)
+        for (const Braced::Clause& c : braces->clauses)
+          if (!c.list) ops.push_back(c.expr);
+      if (std::ranges::any_of(ops, [](const Ex& e) { return !e.ok(); })) return fail;
+      return dependent_node(ops, begin, end);
     }
     if (!types().is_object(t)) {
       diag(begin, Diag::new_requires_object, t);
@@ -8604,7 +9109,12 @@ public:
     }
     if (types().is_class(t) && !require_complete(t, begin)) return fail;
     if (!require_concrete_object(t, begin)) return fail;
-    if (!scalar_allocation_type(t)) {
+    const bool class_type = types().is_class(t);
+    if (class_type && !supported_class_allocation(t)) {
+      diag(begin, Diag::not_supported, lex::Tk::kw_new);
+      return fail;
+    }
+    if (!class_type && !scalar_allocation_type(t)) {
       diag(begin, Diag::not_supported, lex::Tk::kw_new);
       return fail;
     }
@@ -8618,7 +9128,9 @@ public:
     }
 
     Ex init;
-    if (braces) {
+    if (class_type) {
+      init = new_class_initializer(t, args, braces, begin, end);
+    } else if (braces) {
       init = list_init(t, *braces);
     } else if (!args) {
       if (Types::is_const(types().canonical(t))) {
@@ -8689,18 +9201,30 @@ public:
       return fail;
     }
     QualType t = types().pointee(e.type());
+    // [expr.delete]/5: deleting an object of incomplete class type is ill-formed.
     if (types().is_class(t) && !require_complete(t, begin)) return fail;
-    if (!scalar_allocation_type(t)) {
+    EntityId destructor = EntityId::none;
+    if (types().is_class(t)) {
+      // A virtual destructor selects the deallocation function of the dynamic type through the
+      // deleting destructor (#931, #309).
+      const ClassRec* r = class_rec(types().class_of(t));
+      if (!r || r->virtual_destructor || !supported_class_allocation(t)) {
+        diag(begin, Diag::not_supported, lex::Tk::kw_delete);
+        return fail;
+      }
+      if (!check_destructor_access(t, begin)) return fail;
+      destructor = destructor_of(t);
+    } else if (!scalar_allocation_type(t)) {
       diag(begin, Diag::not_supported, lex::Tk::kw_delete);
       return fail;
     }
-    Ex addr = convert_node(rvalue(e), ast::ConversionKind::pointer, types().pointer(v));
-    if (!addr.ok()) return fail;
+    Ex pointer = rvalue(e);
+    if (!pointer.ok()) return fail;
     Ex size = size_of(t, false, begin, begin);
     EntityId f = w_->allocation_function(AllocationFunction::deallocate_sized).entity;
     q_->use_allocation_function(f);
     ExprInfo info{v, ValueCategory::prvalue, 0};
-    return node(ast::DeleteObject{info, f, at(addr, begin), at(size, begin)}, begin, end, info);
+    return node(ast::DeleteObject{info, f, at(pointer, begin), at(size, begin), destructor}, begin, end, info);
   }
 
   // Limit the object size to the largest positive byte distance representable by ptrdiff_t.
@@ -8984,7 +9508,7 @@ public:
   }
   // Also used on a class about to be published, before its own alignment has been applied.
   std::optional<ast::RecordLayout> record_layout(const ClassRec& c, EntityId ce) {
-    if (c.layout_requires_virtual_support && c.peer_virtual_layout == PeerVirtualLayout::none &&
+    if (c.virtual_layout_unsupported && c.peer_virtual_layout == PeerVirtualLayout::none &&
         c.peer_automatic_primary_base == EntityId::none) return std::nullopt;
     std::vector<ast::Placed> bases, places;
     for (const BaseRec& b : c.bases) {
@@ -9002,7 +9526,8 @@ public:
       m->bit_width = f.bit_width;
       places.push_back(*m);
     }
-    const ast::Target* root = c.peer_virtual_layout == PeerVirtualLayout::root ? &w_->target : nullptr;
+    const bool dynamic_root = c.dynamic && !c.dynamic->primary_base;
+    const ast::Target* root = c.peer_virtual_layout == PeerVirtualLayout::root || dynamic_root ? &w_->target : nullptr;
     return ast::record_layout(bases, places, c.union_, c.pod, std::to_underlying(ce), root, c.explicit_alignment);
   }
   std::map<u32, ast::RecordLayout> class_places_;  // complete classes' layouts
@@ -9468,6 +9993,12 @@ public:
           if (!selected || types().rec(w_->entities.rec(selected->function).type).fn_ref == ast::RefQual::none)
             return Ex{r.id, begin, end, r.info};
           ref_qualified_member = Ex{r.id, begin, end, r.info};
+        } else if (std::ranges::any_of(std::span(*diags_).subspan(n), [](const auto& d) {
+                     return d.id == diag_id(Diag::not_constant);
+                   })) {
+          // The member was selected, and its operand conversion is an immediate invocation that is
+          // not constant ([expr.const]): as when it is constant, the member is the operator.
+          return Ex{NodeId::none, begin, end};
         } else {
           truncate_diags(n);
         }
@@ -9676,7 +10207,7 @@ public:
       bool competing = r.ok();
       for (std::size_t i = n; !competing && i < diags_->size(); ++i)
         competing = (*diags_)[i].id == diag_id(Diag::deleted_function) ||
-                    (*diags_)[i].id == diag_id(Diag::ambiguous_call);
+                    (*diags_)[i].id == diag_id(Diag::ambiguous_call) || (*diags_)[i].id == diag_id(Diag::not_constant);
       truncate_diags(n);
       if (!competing) return ref_qualified_member;
       diag(op_at, Diag::ref_qualified_operator_candidates);
@@ -9684,14 +10215,80 @@ public:
     }
     if (!r.ok()) {
       // A deleted or ambiguous choice makes the expression ill-formed ([over.match.oper]/3,
-      // [over.match.best]); only when no candidate is viable does the built-in operator apply.
+      // [over.match.best]), and so does a selected candidate whose argument conversion is an
+      // immediate invocation that is not constant ([expr.const]); only when no candidate is
+      // viable does the built-in operator apply.
       for (std::size_t i = n; i < diags_->size(); ++i)
-        if ((*diags_)[i].id == diag_id(Diag::deleted_function) || (*diags_)[i].id == diag_id(Diag::ambiguous_call))
+        if ((*diags_)[i].id == diag_id(Diag::deleted_function) || (*diags_)[i].id == diag_id(Diag::ambiguous_call) ||
+            (*diags_)[i].id == diag_id(Diag::not_constant))
           return Ex{NodeId::none, begin, end};
       truncate_diags(n);
       return std::nullopt;
     }
     return Ex{r.id, begin, end, r.info};
+  }
+
+  // [over.match.oper]/3.4: the rewritten candidates of `x == y` and `x != y` when no
+  // `operator==` (for `==`) or `operator!=` (for `!=`) is viable: `operator==` as `x == y` for
+  // `!=`, then `operator==` with the operands reversed, as `y == x`; `!=` negates the result.
+  // Only for an operand of class type. The selected `operator==` must be a rewrite target: no
+  // `operator!=` corresponding to it is declared in its class, or its namespace for a
+  // non-member; and it returns cv `bool`.
+  // (A rewritten candidate is not yet ranked against a viable non-rewritten one, including the
+  // built-in candidates for enumerations, nor are other rewrite targets tried when the selected
+  // one is not one: #295.)
+  std::optional<Ex> rewritten_equality(bool not_equal, Ex l, Ex r, u32 begin, u32 end, u32 op_at) {
+    if (!types().is_class(types().referee(l.type())) && !types().is_class(types().referee(r.type()))) return std::nullopt;
+    auto selected = [&](const Ex& e) {
+      if (auto c = as<ast::Call>(e)) return c->function;
+      if (auto c = as<ast::MemberCall>(e)) return c->function;
+      return EntityId::none;
+    };
+    // [over.match.oper]/4: a search for `operator!=` finds a corresponding declaration.
+    auto suppressed = [&](EntityId f) {
+      if (f == EntityId::none) return false;
+      const EntityRec& fr = w_->entities.rec(f);
+      const TypeRec ft = types().rec(fr.type);
+      const NameId ne = ins().names.intern("operator!=");
+      auto corresponds = [&](QualType t) {
+        const TypeRec g = types().rec(t);
+        if (g.params.size() != ft.params.size() || g.fn_cv != ft.fn_cv || g.fn_ref != ft.fn_ref) return false;
+        for (std::size_t i = 0; i < g.params.size(); ++i)
+          if (types().canonical(g.params[i]) != types().canonical(ft.params[i])) return false;
+        return true;
+      };
+      // A global namespace member's scope is none.
+      if (const ClassRec* c = fr.scope == EntityId::none ? nullptr : class_rec(fr.scope))
+        return std::ranges::any_of(c->members, [&](const MemberDeclRec& m) {
+          return m.name == ne && m.is_function && !m.is_template && corresponds(m.type);
+        });
+      return std::ranges::any_of(q_->namespace_members(fr.scope, ne), [&](const ast::DeclSema& d) {
+        return d.kind == ast::DeclKind::function && !(d.flags & decl_flag::template_) && corresponds(d.type);
+      });
+    };
+    const std::size_t n = diag_count();
+    std::optional<Ex> equal;
+    if (not_equal) equal = overloaded("==", {l, r}, begin, end, op_at);
+    if (equal && equal->ok() && suppressed(selected(*equal))) equal.reset();
+    if (!equal) {
+      truncate_diags(n);
+      equal = overloaded("==", {r, l}, begin, end, op_at);
+      if (equal && equal->ok() && suppressed(selected(*equal))) equal.reset();
+    }
+    if (!equal) {
+      truncate_diags(n);
+      return std::nullopt;
+    }
+    if (!equal->ok()) return Ex{NodeId::none, begin, end};
+    // [over.match.oper]: the selected function's return type, not the call's, is cv `bool`.
+    const EntityId f = selected(*equal);
+    const QualType result = f != EntityId::none ? types().rec(w_->entities.rec(f).type).inner : equal->type();
+    if (types().is_reference(result) || Types::unqualified(types().canonical(result)) != builtin(Builtin::bool_)) {
+      diag(op_at, Diag::rewritten_equality_return, result);
+      return Ex{NodeId::none, begin, end};
+    }
+    if (!not_equal) return Ex{equal->id, begin, end, equal->info};
+    return unary(ast::UnaryOp::not_, Ex{equal->id, begin, end, equal->info}, begin, end, op_at);
   }
 
   Ex builtin_address_of(Ex e, u32 begin, u32 end, u32 op_at) {
@@ -9865,6 +10462,8 @@ public:
     }
     if (op == dot_star || op == arrow_star) return member_pointer_access(l, r, op == arrow_star, op_at);
     if (auto o = overloaded(binary_spellings[std::to_underlying(op)], {l, r}, begin, end, op_at)) return *o;
+    if (op == eq || op == ne)
+      if (auto o = rewritten_equality(op == ne, l, r, begin, end, op_at)) return *o;
     auto bin = [&](ast::BinaryOp k, Ex a, Ex c, QualType t) {
       ExprInfo info{t, ValueCategory::prvalue, 0};
       return node(ast::Binary{info, k, at(a, begin), at(c, begin)}, begin, end, info);
@@ -10494,10 +11093,10 @@ public:
       if (!std::ranges::contains(result.namespaces, ns)) result.namespaces.push_back(ns);
     };
     auto add_class = [&](EntityId cls) {
-      // Friend declarations in class templates are outside this slice. Keep the existing
-      // dependent lookup's limits on when it instantiates associated classes.
+      // A class template specialization is associated too: its friends are found once it is
+      // instantiated, which `adl_class` does where it can be ([temp.inst]/2, #259).
       const EntityRec& entity = w_->entities.rec(cls);
-      if (entity.kind == EntityKind::class_template || entity.templ != EntityId::none) return;
+      if (entity.kind == EntityKind::class_template) return;
       if (!std::ranges::contains(result.classes, cls)) result.classes.push_back(cls);
     };
     // [basic.lookup.argdep]/3: bases contribute their entities. Expanding a base's template
@@ -10574,15 +11173,15 @@ public:
   // when their namespace has yet to bind the name for ordinary lookup.
   void for_each_associated_friend(const AdlAssociations& associations, NameId name, bool at_instantiation,
                                   auto&& add) {
-    auto add_friend = [&](DeclId f) {
-      if (auto d = q_->decl_sema(f); d.entity != EntityId::none) add(d);
+    auto add_friend = [&](const ast::DeclSema& d) {
+      if (d.entity != EntityId::none) add(d);
     };
     for (EntityId cls : associations.classes) {
       if (const ClassRec* rec = q_->adl_class(cls, at_instantiation)) {
         for (const ast::MemberRec& f : rec->adl_friends)
-          if (w_->entities.rec(f.entity).name == name) add_friend(f.decl);
+          if (w_->entities.rec(f.entity).name == name) add_friend(q_->friend_decl(f));
       } else if (!at_instantiation) {
-        for (DeclId f : q_->earlier_adl_friends(cls, name)) add_friend(f);
+        for (DeclId f : q_->earlier_adl_friends(cls, name)) add_friend(q_->decl_sema(f));
       }
     }
   }
@@ -10901,6 +11500,7 @@ private:
   ast::ItemId item_;
   u32 loc_base_;
   bool in_requires_body_ = false;
+  bool in_constraint_atom_ = false;
   EntityId class_prefix_owner_ = EntityId::none;
   std::optional<NameId> static_initializer_name_;
   std::vector<ast::LocalRec> locals_;

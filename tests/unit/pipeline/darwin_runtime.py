@@ -34,6 +34,17 @@ def main():
         run('./without-runtime', status=3)
         assert '___ycxx_allocation_table_anchor' not in run(nm, 'without-runtime')
 
+        run(ycxx, 'cxx', '-fcheck-policies', 'trivial.cpp', '-o', 'checked-runtime')
+        run('./checked-runtime', status=3)
+        assert '___ycxx_allocation_table_anchor' in run(nm, 'checked-runtime')
+        run(ycxx, 'cxx', '-fcheck-policies', '-nostdlib++', 'trivial.cpp', '-o', 'checked-no-runtime')
+        run('./checked-no-runtime', status=3)
+        assert '___ycxx_allocation_table_anchor' not in run(nm, 'checked-no-runtime')
+        (scope / 'libycxx.a').write_bytes(b'!<arch>\n')
+        run(ycxx, 'cxx', '-fcheck-policies', 'trivial.cpp', 'libycxx.a', '-o', 'checked-explicit-archive',
+            status=1, error='checked ownership links require explicit objects and source inputs')
+        assert not (scope / 'checked-explicit-archive').exists()
+
         (scope / 'cstdio.cpp').write_text('#include <cstdio>\nint main() { std::puts("hi"); return 0; }\n')
         assert run(ycxx, 'cxx', 'cstdio.cpp', '-o', 'cstdio') == ''
         assert run('./cstdio') == 'hi\n'

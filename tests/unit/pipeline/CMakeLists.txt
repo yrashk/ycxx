@@ -12,9 +12,31 @@ endif()
 ycxxc_unit_test(pipeline_incremental incremental_test.cpp ycxxc_pipeline)
 
 ycxxc_unit_test(pipeline_elf_executable elf_executable_test.cpp ycxxc_pipeline)
+set(ownership_include ${PROJECT_SOURCE_DIR}/packages/ycxx-policies/include)
+add_test(NAME unit.policies_ownership
+  COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/policies_ownership.py
+          $<TARGET_FILE:ycxxc> ${PROJECT_SOURCE_DIR}/examples/affine ${ownership_include} --target=arm64-apple-darwin)
+add_test(NAME unit.policies_contracts
+  COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/policies_contracts.py
+          $<TARGET_FILE:ycxxc> ${CMAKE_CXX_COMPILER} ${ownership_include} ${PROJECT_SOURCE_DIR}/examples/affine)
+add_test(NAME unit.policies_variants
+  COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/policies_variants.py
+          $<TARGET_FILE:ycxxc> ${CMAKE_CXX_COMPILER} ${ownership_include})
+add_test(NAME unit.policies_effects
+  COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/policies_effects.py
+          $<TARGET_FILE:ycxxc> ${ownership_include})
+add_test(NAME unit.policies_grades
+  COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/policies_grades.py
+          $<TARGET_FILE:ycxxc> ${ownership_include})
+add_test(NAME unit.policies_package
+  COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/policies_package.py
+          ${CMAKE_COMMAND} ${CMAKE_CXX_COMPILER} ${PROJECT_SOURCE_DIR}/packages/ycxx-policies)
 add_test(NAME unit.dependent_fabsl
   COMMAND ${CMAKE_COMMAND} -DYCXX=$<TARGET_FILE:ycxxc>
           -P ${CMAKE_CURRENT_SOURCE_DIR}/dependent_fabsl.cmake)
+# Both targets' objects, on every host: the string builtins' C symbols appear once (#248).
+add_test(NAME unit.string_builtin_symbols
+  COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/string_builtin_symbols.py $<TARGET_FILE:ycxxc>)
 # PARITY: by design: all hosts check the emitted and linked arm64 Mach-O records.
 # Only an arm64 macOS host can run the Mach-O exception propagation test.
 if(APPLE AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(arm64|aarch64)$" AND NOT CMAKE_CROSSCOMPILING)
@@ -49,18 +71,30 @@ if(APPLE AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(arm64|aarch64)$" AND NOT CMAKE_CR
   add_test(NAME unit.darwin_virtual
     COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/darwin_virtual.py
             $<TARGET_FILE:ycxxc> ${YCXXC_CLANGXX} ${YCXXC_NM})
+  # The Mach-O counterpart of unit.linux_namespace_visibility and linux_inline's weak providers,
+  # checked against Clang's symbol tables.
+  add_test(NAME unit.darwin_weak_visibility
+    COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/darwin_weak_visibility.py
+            $<TARGET_FILE:ycxxc> ${YCXXC_CLANGXX} ${YCXXC_NM})
 endif()
 # PARITY: #647, #649 for the Darwin counterparts of unit.linux_variadic_definitions and
 # unit.linux_array_delete; the rest by design: they run x86-64 ELF executables, which only Linux
 # can. unit.darwin_virtual runs the virtual tests' fixtures on Mach-O (#650).
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$"
    AND NOT CMAKE_CROSSCOMPILING)
+  add_test(NAME unit.policies_ownership_linux
+    COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/policies_ownership.py
+            $<TARGET_FILE:ycxxc> ${PROJECT_SOURCE_DIR}/examples/affine ${ownership_include} --target=x86_64-linux-gnu)
   add_test(NAME unit.linux_compile
     COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/linux_compile.py
             $<TARGET_FILE:ycxxc> ${CMAKE_C_COMPILER} ${CMAKE_READELF} ${CMAKE_AR}
             ${PROJECT_SOURCE_DIR}/deps/libycxx)
   add_test(NAME unit.linux_array_delete
     COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/linux_array_delete.py
+            $<TARGET_FILE:ycxxc> ${CMAKE_CXX_COMPILER} ${CMAKE_READELF})
+  # The Darwin runs of the same sources are tests/own/class-allocation in the core suite.
+  add_test(NAME unit.linux_class_new
+    COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/linux_class_new.py
             $<TARGET_FILE:ycxxc> ${CMAKE_CXX_COMPILER} ${CMAKE_READELF})
   if(CMAKE_CXX_COMPILER_ID MATCHES "^(GNU|Clang)$")
     add_test(NAME unit.linux_fixed_array_new
@@ -80,6 +114,9 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_
   add_test(NAME unit.linux_single_linkage_const
     COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/linux_single_linkage_const.py
             $<TARGET_FILE:ycxxc> ${CMAKE_CXX_COMPILER} ${CMAKE_READELF})
+  add_test(NAME unit.linux_nontrivial_result
+    COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/linux_nontrivial_result.py
+            $<TARGET_FILE:ycxxc> ${CMAKE_CXX_COMPILER})
   add_test(NAME unit.linux_scalar_sse
     COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/linux_scalar_sse.py
             $<TARGET_FILE:ycxxc> ${CMAKE_CXX_COMPILER} ${PROJECT_SOURCE_DIR}/deps/libycxx)
@@ -122,7 +159,8 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_
   add_test(NAME unit.linux_executable
     COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/linux_executable.py
             $<TARGET_FILE:ycxxc> ${CMAKE_READELF})
-  # PARITY: by design: checks ELF visibility and runs the Linux x86-64 link.
+  # PARITY: by design: checks ELF visibility and runs the Linux x86-64 link. Its Mach-O counterpart
+  # is unit.darwin_weak_visibility.
   add_test(NAME unit.linux_namespace_visibility
     COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/linux_namespace_visibility.py
             $<TARGET_FILE:ycxxc> ${CMAKE_READELF} ${PROJECT_SOURCE_DIR}/deps/libycxx)
@@ -141,6 +179,11 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_
   # PARITY: by design: links the ELF base and complete object entries with native peers.
   add_test(NAME unit.linux_base_object_variants
     COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/linux_base_object_variants.py
+            $<TARGET_FILE:ycxxc> ${CMAKE_CXX_COMPILER} ${CMAKE_READELF})
+  # PARITY: by design: the run suite runs the same tests on macOS; this links them with native
+  # x86-64 ELF compilers and runtimes.
+  add_test(NAME unit.linux_virtual_dispatch
+    COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/linux_virtual_dispatch.py
             $<TARGET_FILE:ycxxc> ${CMAKE_CXX_COMPILER} ${CMAKE_READELF})
   # PARITY: by design: links virtual destructor entries with native x86-64 ELF peers.
   add_test(NAME unit.linux_root_virtual_destructor

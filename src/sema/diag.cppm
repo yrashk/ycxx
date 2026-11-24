@@ -171,6 +171,7 @@ enum class Diag : std::uint32_t {
   constexpr_uninitialized [[=message{Severity::error, "constexpr variable '{0:n}' must be initialized"}]],
   constexpr_specifiers [[=message{Severity::error, "at most one of 'constexpr', 'consteval' and 'constinit' may appear"}]],
   consteval_not_function [[=message{Severity::error, "'consteval' can only declare a function"}]],
+  consteval_destructor [[=message{Severity::error, "a destructor cannot be 'consteval'"}]],
   constinit_automatic [[=message{Severity::error, "'constinit' can only declare a variable with static storage duration"}]],
   constinit_function [[=message{Severity::error, "'constinit' can only declare a variable"}]],
   expected_string_literal [[=message{Severity::error, "expected a string literal"}]],
@@ -253,6 +254,9 @@ enum class Diag : std::uint32_t {
   const_member_assign [[=message{Severity::error, "'{0:t}' has a const member, so its copy assignment is deleted"}]],
   unsupported_copy_assignment [[=message{Severity::error, "defaulted copy assignment of '{0:t}' is unsupported for this operation"}]],
   defaulted_copy_assignment_declaration [[=message{Severity::error, "defaulted copy assignment does not match a supported copy assignment declaration"}]],
+  defaulted_comparison_declaration [[=message{Severity::error, "a defaulted comparison of '{0:t}' takes two parameters of type 'const {0:t}&' or two of type '{0:t}'"}]],
+  defaulted_equality_return [[=message{Severity::error, "a defaulted 'operator==' returns 'bool'"}]],
+  rewritten_equality_return [[=message{Severity::error, "'operator==' selected for a rewritten comparison returns '{0:t}', not 'bool'"}]],
   mixed_designators [[=message{Severity::error, "either every initializer clause is designated or none is"}]],
   unknown_bound_member [[=message{Severity::error, "a non-static data member cannot be an array of unknown bound"}]],
   class_redefinition [[=message{Severity::error, "redefinition of class '{0:n}'"}]],
@@ -400,6 +404,9 @@ enum class Diag : std::uint32_t {
   base_of_dependent [[=message{Severity::error, "dependent operands of '__is_base_of' are not supported yet"}]],
   base_of_incomplete [[=message{Severity::error, "incomplete derived class type '{0:t}' cannot be queried by '__is_base_of'"}]],
   base_of_unsupported [[=message{Severity::error, "'__is_base_of' for '{0:t}' and '{1:t}' is not supported yet"}]],
+  class_relation_dependent [[=message{Severity::error, "dependent operands of '{0:n}' are not supported yet"}]],
+  class_relation_incomplete [[=message{Severity::error, "incomplete type '{0:t}' cannot be queried by '{1:n}'"}]],
+  class_relation_unsupported [[=message{Severity::error, "'{0:n}' for '{1:t}' and '{2:t}' is not supported yet"}]],
   empty_incomplete [[=message{Severity::error, "incomplete class type '{0:t}' cannot be queried by '__is_empty'"}]],
   empty_unsupported [[=message{Severity::error, "'__is_empty' for '{0:t}' is not supported yet"}]],
   convertibility_incomplete [[=message{Severity::error, "incomplete type '{0:t}' cannot be queried by '{1:n}'"}]],
@@ -485,7 +492,8 @@ constexpr bool is_type_trait_failure(engine::DiagId id) {
          id == diag_id(Diag::nothrow_constructibility_unsupported) ||
          id == diag_id(Diag::trivial_constructibility_unsupported) || id == diag_id(Diag::assignability_unsupported) ||
          id == diag_id(Diag::convertibility_unsupported) || id == diag_id(Diag::base_of_incomplete) ||
-         id == diag_id(Diag::base_of_unsupported) || id == diag_id(Diag::empty_incomplete) ||
+         id == diag_id(Diag::base_of_unsupported) || id == diag_id(Diag::class_relation_incomplete) ||
+         id == diag_id(Diag::class_relation_unsupported) || id == diag_id(Diag::empty_incomplete) ||
          id == diag_id(Diag::empty_unsupported) || id == diag_id(Diag::convertibility_incomplete) ||
          id == diag_id(Diag::destructibility_incomplete) || id == diag_id(Diag::destructibility_unsupported) ||
          id == diag_id(Diag::virtual_class_trait_incomplete) || id == diag_id(Diag::standard_layout_incomplete) ||
@@ -504,7 +512,8 @@ constexpr bool survives_substitution(engine::DiagId id) {
          id == diag_id(Diag::exceptions_disabled) || id == diag_id(Diag::rtti_disabled) ||
          id == diag_id(Diag::trivial_copyability_incomplete) ||
          id == diag_id(Diag::constructibility_incomplete) || id == diag_id(Diag::base_of_incomplete) ||
-         id == diag_id(Diag::empty_incomplete) || id == diag_id(Diag::convertibility_incomplete) ||
+         id == diag_id(Diag::class_relation_incomplete) || id == diag_id(Diag::empty_incomplete) ||
+         id == diag_id(Diag::convertibility_incomplete) ||
          id == diag_id(Diag::destructibility_incomplete) || id == diag_id(Diag::virtual_class_trait_incomplete) ||
          id == diag_id(Diag::standard_layout_incomplete) || id == diag_id(Diag::implicit_lifetime_incomplete) ||
          id == diag_id(Diag::unique_object_representations_incomplete);

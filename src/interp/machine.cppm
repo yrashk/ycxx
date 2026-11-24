@@ -287,6 +287,21 @@ private:
   Flow capture_result(u32 object);
   Flow capture_bytes(const Value& length, const Value& data, QualType pointer_type);
 
+  // The bytes an `ir::BuiltinFn` reads from a pointer: the object of narrow character type it
+  // designates, and the elements after it in its array.
+  struct Bytes {
+    Value base;     // the array; the object itself when `single`
+    QualType type;  // the element's
+    u64 index = 0;  // of the first byte
+    u64 bound = 0;  // the array's elements; 1 when `single`
+    bool single = false;
+  };
+  Flow bytes_at(const Value& p, Bytes& out);
+  Flow read_byte(const Bytes& b, u64 i, u8& out);
+  Value byte_pointer(const Bytes& b, u64 i);
+  Flow find_byte(const Value& s, const Value& c, u64 n, Value& out);
+  Flow compare_bytes(const Value& a, const Value& b, u64 n, Value& out);
+
   // ------------------------------------------------------------ execution
 
   Flow fail(Reason r, u64 arg = 0);
@@ -1177,6 +1192,95 @@ Machine::Flow Machine::capture_bytes(const Value& length, const Value& data, Qua
   steps_ += count;
   since_poll_ = u32(std::min<u64>(std::numeric_limits<u32>::max(), u64(since_poll_) + count));
   byte_capture_->bytes = std::move(bytes);
+  return Flow::next;
+}
+
+// [basic.fundamental]: the narrow character types, whose objects' values are their bytes.
+Machine::Flow Machine::bytes_at(const Value& p, Bytes& out) {
+  if (p.kind == VKind::null) return fail(Reason::null_access);
+  if (p.kind != VKind::object) return fail(Reason::ill_formed);
+  const u32 path = u32(p.bits);
+  bool past = false;
+  if (path != 0 && paths_[path].step.step == ir::Step::elem && !p.past) {
+    const Value array{VKind::object, false, p.ref, paths_[path].parent};
+    const auto place = resolve(array, {}, past);
+    if (!place || past || shape(place->type).kind != Kind::array) return fail(Reason::ill_formed);
+    out = {array, shape(place->type).inner, paths_[path].step.index, shape(place->type).bound, false};
+  } else {
+    Value whole = p;
+    whole.past = false;
+    const auto place = resolve(whole, {}, past);
+    if (!place || past) return fail(Reason::ill_formed);
+    out = {whole, place->type, p.past ? 1u : 0u, 1, true};
+  }
+  using enum ast::Builtin;
+  const auto element = ast::builtin_of(*in_, out.type);
+  if (!element || (*element != char_ && *element != signed_char && *element != unsigned_char && *element != char8_t_))
+    return fail(Reason::byte_type);
+  return Flow::next;
+}
+
+// Byte `i` of `b`, as unsigned char, read under [expr.const]'s rules. A builtin's reads are
+// indeterminately sequenced with its caller's evaluations, as a callee's are.
+Machine::Flow Machine::read_byte(const Bytes& b, u64 i, u8& out) {
+  if (i >= b.bound - b.index) return fail(Reason::past_end_access);
+  if (steps_ >= config_.step_limit) return fail(Reason::step_limit, config_.step_limit);
+  ++steps_;
+  if (since_poll_ < std::numeric_limits<u32>::max()) ++since_poll_;
+  const u64 step = ir::encode({ir::Step::elem, u32(b.index + i)});
+  Place place;
+  if (Flow f = locate(b.base, std::span(&step, b.single ? 0 : 1), b.type, Use::callee_read, false, place);
+      f != Flow::next)
+    return f;
+  if (place.ncells != 1) return fail(Reason::ill_formed);
+  Value value;
+  if (Flow f = read_cell(b.type, place.cell0, value); f != Flow::next) return f;
+  if (value.kind != VKind::integer) return fail(Reason::ill_formed);
+  out = u8(value.bits);
+  return Flow::next;
+}
+
+Value Machine::byte_pointer(const Bytes& b, u64 i) {
+  if (b.single) return Value{VKind::object, b.index + i == 1, b.base.ref, b.base.bits};
+  return Value{VKind::object, false, b.base.ref, child(u32(b.base.bits), {ir::Step::elem, u32(b.index + i)})};
+}
+
+// C's memchr: the bytes are read in order, and the search stops at the first match.
+Machine::Flow Machine::find_byte(const Value& s, const Value& c, u64 n, Value& out) {
+  if (c.kind != VKind::integer) return fail(Reason::ill_formed);
+  out = Value::null();
+  if (n == 0) return Flow::next;
+  Bytes bytes;
+  if (Flow f = bytes_at(s, bytes); f != Flow::next) return f;
+  for (u64 i = 0; i < n; ++i) {
+    u8 byte = 0;
+    if (Flow f = read_byte(bytes, i, byte); f != Flow::next) return f;
+    if (byte == u8(c.bits)) {
+      out = byte_pointer(bytes, i);
+      return Flow::next;
+    }
+  }
+  return Flow::next;
+}
+
+// C's memcmp: both objects must hold the n bytes, which C's memcmp may read in any order. The
+// result is the sign of the first difference.
+Machine::Flow Machine::compare_bytes(const Value& a, const Value& b, u64 n, Value& out) {
+  out = Value::integer(0);
+  if (n == 0) return Flow::next;
+  Bytes left, right;
+  if (Flow f = bytes_at(a, left); f != Flow::next) return f;
+  if (Flow f = bytes_at(b, right); f != Flow::next) return f;
+  if (n > left.bound - left.index || n > right.bound - right.index) return fail(Reason::past_end_access);
+  for (u64 i = 0; i < n; ++i) {
+    u8 x = 0, y = 0;
+    if (Flow f = read_byte(left, i, x); f != Flow::next) return f;
+    if (Flow f = read_byte(right, i, y); f != Flow::next) return f;
+    if (x != y) {
+      out = Value::integer(x < y ? u64(-1) : 1);
+      return Flow::next;
+    }
+  }
   return Flow::next;
 }
 

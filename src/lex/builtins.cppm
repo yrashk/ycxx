@@ -21,7 +21,7 @@ enum class TypeTrait : std::uint8_t {
   is_trivially_copyable, is_constructible, is_nothrow_constructible, is_trivially_constructible,
   is_assignable, is_nothrow_assignable, is_trivially_assignable,
   is_convertible, is_nothrow_convertible,
-  is_base_of,
+  is_base_of, is_virtual_base_of, is_pointer_interconvertible_base_of, is_layout_compatible,
   is_destructible,
   is_nothrow_destructible,
   is_trivially_destructible,
@@ -114,6 +114,12 @@ inline constexpr std::array type_traits{
                   .transforms = false, .advertised = false, .replay_dependent = true},
     TypeTraitInfo{.name = "__is_base_of", .trait = TypeTrait::is_base_of, .arity = 2,
                   .transforms = false, .advertised = false, .replay_dependent = true},
+    TypeTraitInfo{.name = "__builtin_is_virtual_base_of", .trait = TypeTrait::is_virtual_base_of, .arity = 2,
+                  .transforms = false, .advertised = false, .replay_dependent = true},
+    TypeTraitInfo{.name = "__is_pointer_interconvertible_base_of", .trait = TypeTrait::is_pointer_interconvertible_base_of,
+                  .arity = 2, .transforms = false, .advertised = false, .replay_dependent = true},
+    TypeTraitInfo{.name = "__is_layout_compatible", .trait = TypeTrait::is_layout_compatible, .arity = 2,
+                  .transforms = false, .advertised = false, .replay_dependent = true},
     TypeTraitInfo{.name = "__is_destructible", .trait = TypeTrait::is_destructible, .arity = 1,
                   .transforms = false, .advertised = false, .replay_dependent = true},
     TypeTraitInfo{.name = "__is_nothrow_destructible", .trait = TypeTrait::is_nothrow_destructible, .arity = 1,
@@ -135,7 +141,9 @@ constexpr const TypeTraitInfo* type_trait(std::string_view name) {
 // from `<math.h>`, `type` is the type they take and give: 'f' float, 'd' double, 'l' long
 // double. `__builtin_inf*` and `__builtin_huge_val*` are +infinity, `__builtin_nan*(s)` the quiet
 // NaN whose payload `s` spells (as `strtoull` reads it), `__builtin_fabs*(x)` |x|.
-enum class BuiltinFunction : std::uint8_t { fabs, inf, huge_val, nan, addressof, strlen, trap, constant_p };
+// A `library` builtin `__builtin_f` is the C library's function `f`, and calls it; its signature is
+// sema's (`sema::string_functions`).
+enum class BuiltinFunction : std::uint8_t { fabs, inf, huge_val, nan, addressof, strlen, library, trap, unreachable, constant_p };
 struct BuiltinFunctionInfo {
   std::string_view name;
   BuiltinFunction function;
@@ -157,9 +165,22 @@ inline constexpr std::array builtin_functions{
     BuiltinFunctionInfo{"__builtin_nan", BuiltinFunction::nan, 'd'},
     BuiltinFunctionInfo{"__builtin_nanl", BuiltinFunction::nan, 'l'},
     BuiltinFunctionInfo{"__builtin_strlen", BuiltinFunction::strlen},
+    BuiltinFunctionInfo{"__builtin_memchr", BuiltinFunction::library},
+    BuiltinFunctionInfo{"__builtin_memcmp", BuiltinFunction::library},
+    BuiltinFunctionInfo{"__builtin_memcpy", BuiltinFunction::library},
+    BuiltinFunctionInfo{"__builtin_memmove", BuiltinFunction::library},
+    BuiltinFunctionInfo{"__builtin_memset", BuiltinFunction::library},
+    BuiltinFunctionInfo{"__builtin_strchr", BuiltinFunction::library},
+    BuiltinFunctionInfo{"__builtin_strpbrk", BuiltinFunction::library},
+    BuiltinFunctionInfo{"__builtin_strrchr", BuiltinFunction::library},
+    BuiltinFunctionInfo{"__builtin_strstr", BuiltinFunction::library},
     BuiltinFunctionInfo{"__builtin_trap", BuiltinFunction::trap},
+    BuiltinFunctionInfo{"__builtin_unreachable", BuiltinFunction::unreachable},
     BuiltinFunctionInfo{.name = "__builtin_constant_p", .function = BuiltinFunction::constant_p, .advertised = false},
 };
+inline constexpr std::string_view builtin_prefix = "__builtin_";
+// The C library function a `library` builtin calls.
+constexpr std::string_view library_function_name(const BuiltinFunctionInfo& b) { return b.name.substr(builtin_prefix.size()); }
 constexpr const BuiltinFunctionInfo* builtin_function(std::string_view name) {
   for (const BuiltinFunctionInfo& b : builtin_functions)
     if (b.name == name) return &b;
