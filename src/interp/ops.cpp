@@ -496,9 +496,15 @@ struct Ops {
     M::Place place;
     if (Flow fl = check_member_receiver(m, f, n, place); fl != Flow::next) return fl;
     const EntityId selected{u32(imms(f, n)[0])};
-    if (imms(f, n)[1]) return call_entity(m, f, n, selected, 1);
-
     const auto& object = m.objects_[place.obj];
+    if (imms(f, n)[1]) {
+      // [class.cdtor]/1: using a non-static member before construction starts is undefined.
+      // The completed-object profile and opaque reference imports both have a live receiver.
+      if (object.record_life != M::Life::alive || (place.primary_base && object.primary_base_life != M::Life::alive))
+        return m.fail(Reason::outside_lifetime);
+      return call_entity(m, f, n, selected, 1);
+    }
+
     if (object.outside) return m.fail(Reason::unknown_dynamic_type);
     if (!object.record || !object.record->dynamic || !m.config_.immediate_virtual_target) return m.unsupported(n);
     if (!object.dynamic_initialized || object.record_life != M::Life::alive)
