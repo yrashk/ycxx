@@ -2485,6 +2485,16 @@ which libSystem or the C library provides at link time. A dependent argument def
 instantiation. They are not constant expressions yet (#1092). Fixtures in `tests/own/builtins/`
 cover detection, signatures, argument checks and run-time results.
 
+## Pack expansions in builtin arguments (#1099)
+
+An argument of a builtin with ordinary expression arguments (`src/lex/builtins.cppm`'s
+`builtin_functions`) may be a pack expansion, as a call's may (`__builtin_strlen(a...)`,
+`__builtin_memcmp(a..., n)`). The parser reads it through the same `expandable` path as call
+arguments. While a pack is unexpanded the call is one dependent operand and its arity is not
+checked; the instantiation checks arity and conversions on the expanded arguments, as Clang and
+GCC do. GCC rejects `__builtin_addressof(a...)`; ycxx accepts it, as Clang does. Fixtures:
+`tests/own/builtins/pack-arguments*`.
+
 ## GNU constantness probe (#1065)
 
 `__builtin_constant_p(e)` returns an `int` prvalue. It gives 1 when a supported scalar or
