@@ -2711,7 +2711,10 @@ Fable decided the representation (ast.md §6.6); the Opus session wrote the code
   scope. `Questions::friend_decl` gives ADL the specialization's declaration. A dependent
   noexcept-specifier is kept as tokens and replayed in that scope ([except.spec]/13). A
   class template specialization is now an associated class of ADL, instantiated where needed,
-  as Clang and GCC do. Two specializations defining one function report a redefinition.
+  as Clang and GCC do. Two specializations defining one function report a redefinition, as
+  does a namespace definition of it (within an item group; #1148 across groups). The friend
+  is coalesced as the class's members are, and binds locally when its signature names a class
+  local to the unit (a closure type included).
 - **Friend function templates** defined in a class or class template
   (`template <class T> friend R f(…) {…}`) are function templates of the namespace that only ADL
   finds; a class template's specialization binds its own arguments for theirs (#259).
