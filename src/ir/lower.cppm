@@ -84,13 +84,14 @@ concept layout_source = requires(const L& l, QualType t, PathStep s, ConstId c) 
   { l.constant(c) } -> std::convertible_to<ConstValue>;
 };
 
-// The Itanium runtime imports for a certified Linux int throw. The type is the normalized
-// exception object type, before L2 replaces C++ types with machine widths.
-export struct IntThrowRuntime {
-  QualType type;
+// The Itanium runtime for certified Linux throws, keyed by normalized exception object type.
+// A record payload is represented by the address of its staged object in L1.
+export struct ThrowRuntime {
+  QualType int_type;
   EntityId allocate;
   EntityId throw_;
-  EntityId type_info;
+  EntityId int_type_info;
+  std::map<QualType, EntityId> class_type_info{};
 };
 
 export struct CatchAllRuntime {
@@ -115,7 +116,7 @@ export struct LowerConfig {
   std::uint32_t float_arg_registers = 8;
   // Use the System V AMD64 integer aggregate classification and argument placement.
   bool sysv_amd64 = false;
-  std::optional<IntThrowRuntime> int_throw;
+  const ThrowRuntime* throw_runtime = nullptr;
   std::optional<CatchAllRuntime> catch_all{};
   EntityId cleanup_resume = EntityId::none;
   // For an immediate function whose native body cannot execute, use this L1 origin
@@ -1132,24 +1133,46 @@ class Lowering {
         return {};
       }
       case Op::throw_: {
-        if (!config_.sysv_amd64 || !config_.int_throw || nd.nsucc != 0 || imms[0] != raw(config_.int_throw->type) ||
-            b_.peek().type(in(n, 1)) != T::i32)
+        if (!config_.sysv_amd64 || !config_.throw_runtime || nd.nsucc != 0)
           return fail("`throw` is not in the α subset");
-        const auto& abi = *config_.int_throw;
+        const auto& abi = *config_.throw_runtime;
+        const auto type = QualType(std::uint32_t(imms[0]));
+        const bool scalar = type == abi.int_type;
+        const ValueId operand = in(n, 1);
+        if (b_.peek().type(operand) != (scalar ? T::i32 : T::ptr))
+          return fail("`throw` is not in the α subset");
+
+        EntityId rtti = abi.int_type_info;
+        TypeLayout record;
+        if (!scalar) {
+          const auto found = abi.class_type_info.find(type);
+          if (found == abi.class_type_info.end()) return fail("`throw` is not in the α subset");
+          record = layout(type);
+          if (record.kind != TypeKind::record || record.size == 0 || record.layout_uncertain ||
+              record.contains_explicit_alignment)
+            return fail("`throw` is not in the α subset");
+          rtti = found->second;
+        }
         const auto o = origin();
         // The L1 operand has already been evaluated. Its call, if any, can unwind without
         // leaving an allocated exception object behind (Itanium EH ABI §2.4).
         const T allocation_results[] = {T::state, T::ptr};
-        const ValueId allocation_args[] = {in(n, 0), constant(T::i64, l2::bytes(T::i32))};
+        const auto size = scalar ? l2::bytes(T::i32) : record.size;
+        const ValueId allocation_args[] = {in(n, 0), constant(T::i64, size)};
         const std::uint64_t allocation_call[] = {raw(abi.allocate), 0, 0, 0};
         const NodeId allocation = b_.emit(Op2::call, allocation_results, allocation_args, allocation_call, 0, {}, o);
         const ValueId payload = b_.peek().result(allocation, 1);
         const T state_result[] = {T::state};
-        const ValueId store_args[] = {b_.peek().result(allocation), payload, in(n, 1)};
-        const std::uint64_t alias[] = {imms[0]};
-        const NodeId store = b_.emit(Op2::store, state_result, store_args, alias, 0, {}, o);
-        const ValueId type_info = emit1(Op2::symbol, T::ptr, {}, {raw(abi.type_info)});
-        const ValueId throw_args[] = {b_.peek().result(store), payload, type_info, constant(T::ptr, 0)};
+        ValueId state = b_.peek().result(allocation);
+        if (scalar) {
+          const ValueId store_args[] = {state, payload, operand};
+          const std::uint64_t alias[] = {imms[0]};
+          state = b_.peek().result(b_.emit(Op2::store, state_result, store_args, alias, 0, {}, o));
+        } else {
+          state = copy_bytes(state, payload, operand, record, imms[0]);
+        }
+        const ValueId type_info = emit1(Op2::symbol, T::ptr, {}, {raw(rtti)});
+        const ValueId throw_args[] = {state, payload, type_info, constant(T::ptr, 0)};
         const std::uint64_t throw_call[] = {raw(abi.throw_), 0, 0, 0};
         b_.emit(Op2::call, state_result, throw_args, throw_call, 0, {}, o);
         b_.emit(Op2::unreachable, {}, {}, {}, 0, {}, o);

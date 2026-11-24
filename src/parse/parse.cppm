@@ -435,6 +435,7 @@ public:
   }
   // ABI attributes on declarations outside the entity's ordinary declaration records.
   bool has_unapplied_declaration_attributes(EntityId e) const { return unapplied_declaration_attributes_.contains(e); }
+  bool class_rtti_declaration_has_unapplied_abi(EntityId cls, u32 item) const;
   bool peer_root_vtable_visible(EntityId cls) const;
   // Empty on unsupported declarations, or EntityId::none when a peer owns the derived table.
   std::optional<EntityId> automatic_derived_vtable_key(EntityId cls) const;
@@ -9152,6 +9153,17 @@ bool Program::in_attributed_namespace(u32 item) const {
         layout_attribute(*r_, scope.begin, scope.brace_begin, LayoutAttributes::any)) return true;
   }
   return false;
+}
+
+// A declaration can change a class's RTTI binding or representation even if the class
+// definition itself is unannotated.
+bool Program::class_rtti_declaration_has_unapplied_abi(EntityId cls, u32 k) const {
+  const auto& item = items_->items[k];
+  const bool definition = item.kind == ItemKind::class_def;
+  const u32 head_end = definition ? item.brace_begin : item.end;
+  return r_->first_visibility_pragma || has_unapplied_declaration_attributes(cls) || in_attributed_namespace(k) ||
+         layout_attribute(*r_, item.begin, head_end, LayoutAttributes::any) ||
+         (definition && layout_attribute(*r_, item.brace_end, item.end, LayoutAttributes::any));
 }
 
 // The class, including earlier declarations and later friends of its slots, must use the
