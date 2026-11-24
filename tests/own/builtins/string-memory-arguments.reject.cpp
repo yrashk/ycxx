@@ -67,8 +67,10 @@ char* copy_as_char(char* d, const char* s) {
   return __builtin_memcpy(d, s, 1); //! error
 }
 
-// The result is `char*`, which is not `const char*&`'s referent type.
-void search_as_reference(const char* s) {
-  const char*& r = __builtin_strchr(s, 'a'); //! error
-  (void)r;
+// The result is `char*`: `char**` does not convert to `const char**` ([conv.qual]), as it would
+// from a `const char*` result.
+void search_result_address(const char* s) {
+  auto found = __builtin_strchr(s, 'a');
+  const char** p = &found; //! error
+  (void)p;
 }
