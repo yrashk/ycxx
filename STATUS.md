@@ -2248,6 +2248,10 @@ template's tokens again with the arguments bound.
 - **Dependent variable-template arguments** (#209): an unqualified namespace variable template
   used as a dependent `bool` template argument keeps the declaration found by ordinary lookup.
   Substitution evaluates the selected specialization once its arguments are concrete.
+- **Integral arithmetic in variable template initializers** (#1091): a direct variable template-id
+  such as `extent<T, I - 1>` in a namespace variable template initializer evaluates its argument
+  and checks its conversion when the initializer is instantiated with the selected definition's
+  bindings ([temp.arg.nontype], [temp.inst]).
 - **Dependent immediate calls** (#209, [temp.dep.constexpr], [temp.arg.nontype]): an unqualified
   or fixed namespace-qualified call to a uniquely resolved `consteval` function template with
   no function parameters can supply a non-type template argument. The call retains its explicit
@@ -2295,9 +2299,9 @@ template's tokens again with the arguments bound.
   (`Kind<T*>`), so a specialization's members have ids of their own.
 - Tests: `tests/own/templates/s3-*` (spec-driven, plus ten from the review); 8 more draft examples pass.
 - Not yet (#88): alias templates, packs, concepts, member templates and their specializations,
-  static data members of class templates, non-type template arguments that are dependent
-  expressions other than a parameter (`A<I+5>`), and coalesced definitions of specializations
-  used in two units (#124).
+  static data members of class templates, dependent arithmetic template arguments in canonical
+  types and signatures (`A<I+5>`), and coalesced definitions of specializations used in two
+  units (#124).
 
 ## Templates, ζ step 4: parameter packs (#88, 2026-11-18)
 
