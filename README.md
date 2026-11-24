@@ -629,6 +629,8 @@ written default member initializer are value-initialized.
   value and a pointer. [#199](https://github.com/yrashk/ycxx/issues/199)
 - constant evaluation on ycxx's own interpreter: `constexpr`, `consteval`, `constinit`,
   `static_assert` and `if consteval`, with errors that explain why something is not constant.
+  Native objects can omit eligible private static constexpr helpers used only by the
+  constant-evaluated arms. [#1174](https://github.com/yrashk/ycxx/issues/1174)
   Class member assertions are checked when the containing class needs completion.
   [#257](https://github.com/yrashk/ycxx/issues/257)
   Scalar `&&`, `||` and `?:` expressions keep scalar reference-argument temporaries alive

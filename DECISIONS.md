@@ -312,6 +312,9 @@ specified by the accepted [optimization design](docs/design/optimization.md) (#3
    - [Immediate function emission](docs/design/immediate-function-emission.md) omits eligible
      nonvirtual members and function template specializations during native collection.
      The interpreter still reads their checked bodies (#1097).
+   - [Private static constexpr helpers](docs/design/native-private-constexpr.md) of ordinary
+     non-template classes can reuse the native reference walk. A runtime use demands the
+     coalesced inline definition. Astra reviewed the design (#1174).
 7. **One binary, many fronts.** The `ycxx` binary is the daemon and also its clients: a
    `c++`-compatible command line, an LSP server and a control interface (reload, status, query).
 8. **Optimization is search over verified transformations, and it runs while the compiler is idle.**

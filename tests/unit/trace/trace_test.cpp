@@ -40,7 +40,7 @@ void build(pl::Session& s, const std::string& text, std::string_view title, std:
   out << "## " << title << '\n';
   s.set_source(tu, "golden.cpp", text, "golden.o");
   (void)s.get<pl::TuFront>(tu, &c);
-  (void)s.get<pl::Tu>(tu, &c);
+  (void)s.get<pl::Tu>(pl::Tu::Key{tu}, &c);
   s.set_program(program, {{tu}, {}, "golden"});
   const pl::Linked& l = s.get<pl::Link>(program, &c);
   check(l.errors.empty(), "the golden unit links");
@@ -859,7 +859,7 @@ void spans() {
     for (const Event& e : batch) got[trace::cell_name(e)] = e.span, all.push_back(e);
   });
   s.set_source(tu, "spans.cpp", "int square(int x) {\n  return x * x;\n}\nint main() { return square(3) - 9; }\n", "spans.o");
-  (void)s.get<pl::Tu>(tu, &c);
+  (void)s.get<pl::Tu>(pl::Tu::Key{tu}, &c);
   c.finish();
   const auto at = [&](std::string_view cell) { return got.contains(std::string(cell)) ? got[std::string(cell)] : SourceSpan{"(no event)"}; };
   check(at("FunctionIr(square)") == SourceSpan{"spans.cpp", 1, 1, 3, 1}, std::format("a function's IR is its definition: {}", trace::span_text(at("FunctionIr(square)"))));
@@ -876,7 +876,7 @@ void spans() {
   // is now.
   got.clear();
   s.set_source(tu, "spans.cpp", "\n\nint square(int x) {\n  return x * x;\n}\nint main() { return square(3) - 9; }\n", "spans.o");
-  (void)s.get<pl::Tu>(tu, &c);
+  (void)s.get<pl::Tu>(pl::Tu::Key{tu}, &c);
   c.finish();
   check(at("FunctionIr(square)") == SourceSpan{"spans.cpp", 3, 1, 5, 1}, std::format("after an edit, where it is now: {}", trace::span_text(at("FunctionIr(square)"))));
 
@@ -892,7 +892,7 @@ void spans() {
   constexpr pl::TuId htu{1};
   got.clear();
   hs.set_source(htu, "m.cpp", main_text, "m.o", dir.native_encoded_string());
-  (void)hs.get<pl::Tu>(htu, &c);
+  (void)hs.get<pl::Tu>(pl::Tu::Key{htu}, &c);
   c.finish();
   const SourceSpan cube = at("FunctionIr(cube)");
   check(cube.file.ends_with("h.h") && cube.line == 2 && cube.column == 1 && cube.end_line == 2 && cube.end_column == 44,
@@ -903,7 +903,7 @@ void spans() {
   hs.db().set<ycxx::pp::Buffer>(ycxx::pp::path_id((dir / "h.h").lexically_normal().generic_native_encoded_string()), "// a\n// b\n" + header);
   got.clear();
   hs.set_source(editor, "m.cpp", "", "m.o", dir.native_encoded_string(), editor_config);
-  (void)hs.get<pl::Tu>(editor, &c);
+  (void)hs.get<pl::Tu>(pl::Tu::Key{editor}, &c);
   c.finish();
   const SourceSpan open = at("FunctionIr(cube)");
   check(open.file.ends_with("h.h") && open.line == 4, std::format("the editor view counts the buffer's lines: {}", trace::span_text(open)));
