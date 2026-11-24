@@ -59,6 +59,22 @@ static_assert(__builtin_memchr(record.pair, 'z', 2) == record.pair + 1);
 static_assert(__builtin_memcmp(&record.letter, "x", 1) == 0);
 static_assert(__builtin_memcmp(record.pair, "yz", 2) == 0);
 
+// A namespace-scope object of narrow character type.
+constexpr char single = 'q';
+static_assert(__builtin_memchr(&single, 'q', 1) == &single);
+static_assert(__builtin_memchr(&single, 'r', 1) == nullptr);
+static_assert(__builtin_memcmp(&single, "q", 1) == 0);
+
+// A found pointer can be searched from again, and written through when the object is not const.
+constexpr const char* again = static_cast<const char*>(__builtin_memchr(found + 1, 'b', 5));
+static_assert(again == text + 4);
+constexpr char written() {
+  char a[] = {'a', 'b'};
+  *static_cast<char*>(__builtin_memchr(a, 'b', 2)) = 'c';
+  return a[1];
+}
+static_assert(written() == 'c');
+
 // The examples of #1092, and local arrays of a constant evaluation.
 constexpr int compare(const char* a, const char* b) { return __builtin_memcmp(a, b, 1); }
 static_assert(compare("a", "b") < 0);
