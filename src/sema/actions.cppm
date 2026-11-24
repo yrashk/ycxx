@@ -9902,19 +9902,60 @@ public:
 
   // [over.match.oper]/3.4: the rewritten candidates of `x == y` and `x != y` when no
   // `operator==` (for `==`) or `operator!=` (for `!=`) is viable: `operator==` as `x == y` for
-  // `!=`, then `operator==` with the operands reversed, as `y == x`; `!=` negates the result,
-  // which is `bool`. Only for an operand of class type: with enumerations alone, a built-in
-  // candidate is always viable, and it wins a tie with a rewritten one ([over.match.best]).
-  // (A rewritten candidate is not yet ranked against a viable non-rewritten one.)
+  // `!=`, then `operator==` with the operands reversed, as `y == x`; `!=` negates the result.
+  // Only for an operand of class type. The selected `operator==` must be a rewrite target: no
+  // `operator!=` corresponding to it is declared in its class, or its namespace for a
+  // non-member; and it returns cv `bool`.
+  // (A rewritten candidate is not yet ranked against a viable non-rewritten one, including the
+  // built-in candidates for enumerations, nor are other rewrite targets tried when the selected
+  // one is not one: #295.)
   std::optional<Ex> rewritten_equality(bool not_equal, Ex l, Ex r, u32 begin, u32 end, u32 op_at) {
     if (!types().is_class(types().referee(l.type())) && !types().is_class(types().referee(r.type()))) return std::nullopt;
+    auto selected = [&](const Ex& e) {
+      if (auto c = as<ast::Call>(e)) return c->function;
+      if (auto c = as<ast::MemberCall>(e)) return c->function;
+      return EntityId::none;
+    };
+    // [over.match.oper]/4: a search for `operator!=` finds a corresponding declaration.
+    auto suppressed = [&](EntityId f) {
+      if (f == EntityId::none) return false;
+      const EntityRec& fr = w_->entities.rec(f);
+      const TypeRec ft = types().rec(fr.type);
+      const NameId ne = ins().names.intern("operator!=");
+      auto corresponds = [&](QualType t) {
+        const TypeRec g = types().rec(t);
+        if (g.params.size() != ft.params.size() || g.fn_cv != ft.fn_cv || g.fn_ref != ft.fn_ref) return false;
+        for (std::size_t i = 0; i < g.params.size(); ++i)
+          if (types().canonical(g.params[i]) != types().canonical(ft.params[i])) return false;
+        return true;
+      };
+      if (const ClassRec* c = class_rec(fr.scope))
+        return std::ranges::any_of(c->members, [&](const MemberDeclRec& m) {
+          return m.name == ne && m.is_function && !m.is_template && corresponds(m.type);
+        });
+      return std::ranges::any_of(q_->namespace_members(fr.scope, ne), [&](const ast::DeclSema& d) {
+        return d.kind == ast::DeclKind::function && !(d.flags & decl_flag::template_) && corresponds(d.type);
+      });
+    };
+    const std::size_t n = diag_count();
     std::optional<Ex> equal;
     if (not_equal) equal = overloaded("==", {l, r}, begin, end, op_at);
-    if (!equal) equal = overloaded("==", {r, l}, begin, end, op_at);
-    if (!equal) return std::nullopt;
+    if (equal && equal->ok() && suppressed(selected(*equal))) equal.reset();
+    if (!equal) {
+      truncate_diags(n);
+      equal = overloaded("==", {r, l}, begin, end, op_at);
+      if (equal && equal->ok() && suppressed(selected(*equal))) equal.reset();
+    }
+    if (!equal) {
+      truncate_diags(n);
+      return std::nullopt;
+    }
     if (!equal->ok()) return Ex{NodeId::none, begin, end};
-    if (Types::unqualified(types().canonical(equal->type())) != builtin(Builtin::bool_)) {
-      diag(op_at, Diag::rewritten_equality_return, equal->type());
+    // [over.match.oper]: the selected function's return type, not the call's, is cv `bool`.
+    const EntityId f = selected(*equal);
+    const QualType result = f != EntityId::none ? types().rec(w_->entities.rec(f).type).inner : equal->type();
+    if (types().is_reference(result) || Types::unqualified(types().canonical(result)) != builtin(Builtin::bool_)) {
+      diag(op_at, Diag::rewritten_equality_return, result);
       return Ex{NodeId::none, begin, end};
     }
     if (!not_equal) return Ex{equal->id, begin, end, equal->info};

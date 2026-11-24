@@ -8845,6 +8845,8 @@ const Result<ast::ClassDef>& Program::class_def(u32 item) {
     rec.defined = true;
     // Complete-class checks see the full member set before any function bodies are read.
     classes_.publish(*cls, std::move(rec), [&](sema::ClassRec& fresh) {
+      // First: default arguments and member initializers may compare objects of the class.
+      complete_defaulted_comparisons(*cls, fresh);
       if (special_member_exception_tokens_.contains(fresh.declared_destructor))
         bind_destructor_and_defaults(*cls, fresh, out);
       else
@@ -8854,7 +8856,6 @@ const Result<ast::ClassDef>& Program::class_def(u32 item) {
       check_member_exception_patterns(*cls, fresh, out);
       if (member_declarations_valid && implicit_move) prepare_move_constructor(item, *cls, fresh);
       if (member_declarations_valid) check_default_member_initializers(fresh, out);
-      complete_defaulted_comparisons(*cls, fresh);
     });
   }
   ast::Builder b(w_->ins, &arena_);
@@ -10644,9 +10645,18 @@ void Program::complete_defaulted_comparisons(EntityId cls, sema::ClassRec& rec) 
     for (const ast::ParamSema& p : w_->ins.seqs.elements(d.params))
       params.push_back(sm.declare_local(p.name, p.type, sema::local_flag::parameter, 0, false));
     const std::optional<Ex> result = defaulted_comparison_result(sm, d, params);
-    const bool deleted = !result || !result->ok() || !diags.empty();
+    // Deleted: a reference or variant member (no result and nothing diagnosed), or a subobject
+    // comparison that finds no viable, an ambiguous, a deleted or an inaccessible function. Any
+    // other diagnostic is ycxx's own limitation: the operator stays declared, and analysing its
+    // body reports it.
+    const bool deleted = diags.empty() ? !result || !result->ok() : std::ranges::all_of(diags, [](const engine::Diagnostic& g) {
+      return std::ranges::any_of(std::array{Diag::invalid_operands, Diag::ambiguous_call, Diag::deleted_function,
+                                            Diag::private_member, Diag::protected_member, Diag::inaccessible_base,
+                                            Diag::ambiguous_base, Diag::ambiguous_member},
+                                 [&](Diag k) { return g.id == sema::diag_id(k); });
+    });
     QualType type = d.type;
-    if (!deleted && !d.has_written_noexcept) {
+    if (!deleted && diags.empty() && !d.has_written_noexcept) {
       const Ex nonthrowing = sm.unary_noexcept(*result, 0, 0);
       const auto literal = sm.as<ast::Literal>(nonthrowing);
       const QualType boolean = w_->types.builtin(sema::Builtin::bool_);
