@@ -621,6 +621,19 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
     `PointerConversion` now do, and let each caller decide what `unknown` means.
   - Learned on #218.
 
+- **`Program`'s per-entity maps hold only the items analysed so far.** Top-level items are
+  analysed one group at a time and earlier ones only when asked (#947). So `class_items_` and
+  `decls_` can miss an earlier definition. On #306 a second `struct O::I { … }` was accepted
+  because the first had not been analysed. In-class checks passed, because `earlier_member`
+  analyses the earlier members itself.
+  - Do: call `ensure_declared(entity, item)` before reading these maps for an entity that no
+    lookup reached, and test a redefinition across two top-level items.
+  - The same review found that `is_complete` judged completeness by item order alone. The
+    enclosing class's implicit constructor then treated its own nested class as incomplete and
+    emitted an empty body. Test a construct that adds a later item inside an earlier one with a
+    field of that type, not only with uses after the closing brace.
+  - Learned on #306.
+
 ## Evidence and tests
 
 - **Map a header chain past its first wall with an overlay, and check both gates.** Every
