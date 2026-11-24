@@ -1,6 +1,5 @@
 // ι (#300): constexpr member functions and constructors with default arguments, evaluated in
 // constant expressions ([dcl.fct.default]/1, [dcl.constexpr], [expr.const]).
-// XFAIL: ycxx constexpr constructors and class objects in constant evaluation (#102)
 // EXIT: 0
 struct P {
   int x, y;

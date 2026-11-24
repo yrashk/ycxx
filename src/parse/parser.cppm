@@ -2922,6 +2922,7 @@ public:
       s_->truncate_diags(n);
     }
     u32 begin = pos();
+    const sema::Sema::ConstraintAtomScope atom{*s_};
     Ex e = primaries ? primary_expression() : binary_expression(3);
     (void)e;
     // The template parameters the expression names: its parameter mapping's ([temp.constr.atomic]/1).
@@ -5374,33 +5375,11 @@ public:
   }
 
   // A call to a consteval function outside an immediate function context is an immediate
-  // invocation: it must be a constant expression, and it is replaced by its value ([expr.const]).
+  // invocation ([expr.const], `Sema::immediate_invocation`).
   Ex immediate(Ex call) {
     auto c = s_->as<ast::Call>(call);
-    if (!c || c->function == ast::EntityId::none || !s_->is_consteval(c->function) || s_->immediate_context || s_->unevaluated)
-      return call;
-    sema::Evaluated v = sema::Evaluator(*s_, questions()).evaluate(call);
-    if (!v.constant) {
-      s_->diag(call.begin, Diag::not_constant, v.reason);
-      return {NodeId::none, call.begin, call.end};
-    }
-    if (!v.value) {
-      // A void function: the invocation is replaced by its (empty) result, `(void)0`, so the
-      // consteval function's body never runs at run time.
-      sema::QualType i = s_->builtin(sema::Builtin::int_);
-      Ex zero = s_->literal(i, s_->world().values.integer(i, 0), ast::ValueCategory::prvalue, call.begin, call.end);
-      return s_->convert_node(zero, ast::ConversionKind::to_void, s_->builtin(sema::Builtin::void_));
-    }
-    // A manifestly constant-evaluated expression may consume an immediate pointer.
-    // Its initializer checks the final value for an escape.
-    if (auto entity = s_->immediate_result_entity(*v.value)) {
-      if (!s_->constant_reference_context && !s_->trial_initializer) {
-        s_->diag(call.begin, Diag::immediate_address, s_->world().entities.rec(*entity).name);
-        return {NodeId::none, call.begin, call.end};
-      }
-      s_->folded_immediate_result = *entity;
-    }
-    return s_->literal(call.type(), *v.value, ast::ValueCategory::prvalue, call.begin, call.end);
+    if (!c || c->function == ast::EntityId::none || !s_->is_consteval(c->function)) return call;
+    return s_->immediate_invocation(call);
   }
 
   // A condition ([stmt.pre]) and the init-statement before it, if any: `node` is what the
@@ -6410,6 +6389,10 @@ public:
   void set_questions(sema::Questions& q) {
     q_ = &q;
     s_->constant_of = [this](Ex e) { return sema::Evaluator(*s_, questions()).evaluate(e).value; };
+    s_->evaluate_immediate = [this](Ex e) {
+      const sema::Evaluated v = sema::Evaluator(*s_, questions()).evaluate(e);
+      return sema::Sema::Evaluation{v.value, v.reason, v.constant};
+    };
   }
   sema::Questions& questions() { return *q_; }
 
