@@ -4407,7 +4407,7 @@ public:
       auto b = braced_init_list(&written_expansion);
       if (!s_->unevaluated && !s_->check_destructor_access(t, begin)) return {NodeId::none, begin, pos()};
       Ex r = s_->list_init(t, *b);
-      if (!written_expansion && b->begin == begin + 1) s_->note_explicit_aggregate_prvalue(t, *b, r, begin);
+      if (!written_expansion) s_->note_explicit_aggregate_prvalue(t, *b, r, begin);
       return {r.id, begin, pos(), r.info};
     }
     if (!expect(Tk::l_paren)) return {NodeId::none, begin, pos()};

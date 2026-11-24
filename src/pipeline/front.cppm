@@ -238,6 +238,7 @@ struct UnitPart {
   // `main`) and variables.
   std::set<EntityId> coalesce_if_inline, weak_if_inline;
   std::set<EntityId> attributed_members;  // a written attribute can require native emission
+  std::set<EntityId> classes_with_unapplied_rtti_abi;
   // A candidate C2/D2 alias and the layouts its eligibility depends on.
   std::vector<std::pair<EntityId, std::vector<EntityId>>> base_object_variant_layouts;
 };
@@ -289,7 +290,7 @@ struct Runtime {
     }
     return release_;
   }
-  ir::IntThrowRuntime int_throw() {
+  ir::ThrowRuntime throw_runtime() {
     // Itanium EH ABI §2.4. The type information object is opaque to this pipeline.
     const QualType size = world.types.builtin(world.target.size_type);
     const QualType v = world.types.builtin(sema::Builtin::void_);
@@ -300,6 +301,18 @@ struct Runtime {
     return {int_(), declared("__cxa_allocate_exception", world.types.function(p, std::span(&size, 1), false, lang), true),
             declared("__cxa_throw", world.types.function(v, params, false, lang), true),
             declared("_ZTIi", world.types.builtin(sema::Builtin::char_), false)};
+  }
+  void class_throw(TranslationUnit& tu, EntityId cls, ast::Loc at) {
+    auto& types = tu.throw_runtime->class_type_info;
+    const QualType type = world.types.class_type(cls);
+    if (types.contains(type)) return;
+    ast::DeclSema d{};
+    d.kind = ast::DeclKind::variable;
+    d.entity = sema::type_info_entity(world, cls);
+    d.type = world.entities.rec(d.entity).type;
+    declare(d, at);
+    types.emplace(type, d.entity);
+    tu.keyless_type_info.insert(d.entity);
   }
   ir::CatchAllRuntime catch_runtime() {
     // Itanium EH ABI §2.5. The unwind header crosses the runtime boundary as a pointer.
@@ -1070,12 +1083,22 @@ bool native_virtual_layouts(TranslationUnit& tu, parse::Program& program, sema::
 // noexcept, inline and asm labels, and the external providers it relies on.
 template <class R, class Provider, class Definition>
 void validate_unwind(ast::Interners& ins, TranslationUnit& tu, FunctionDef& f, R& runtime, Provider& unwind_provider,
-                     Definition& unwind_definition) {
+                     Definition& unwind_definition, const std::set<EntityId>& uncertain_layouts,
+                     const std::set<EntityId>& classes_with_unapplied_rtti_abi) {
   if (f.unwind == UnwindEligibility::none) return;
   if (!unwind_definition(f)) {
     f.unwind = UnwindEligibility::none;
-  } else if (f.unwind == UnwindEligibility::cleanup_free_with_throw && !tu.int_throw) {
-    tu.int_throw = runtime.int_throw();
+  } else if (f.unwind == UnwindEligibility::cleanup_free_with_throw) {
+    if (!tu.throw_runtime) tu.throw_runtime = runtime.throw_runtime();
+    auto collect = [&](this auto&& visit, const ast::Red& node) -> void {
+      if (node.is<ast::Throw>()) {
+        const EntityId cls = node.get<ast::Throw>().exception_class;
+        if (cls != EntityId::none && !uncertain_layouts.contains(cls) && !classes_with_unapplied_rtti_abi.contains(cls))
+          runtime.class_throw(tu, cls, ast::Loc{f.item, node.offset()});
+      }
+      node.for_each_child(visit);
+    };
+    collect(ast::Red(ins.ast, f.body.tree, f.body_offset));
   } else if (f.unwind == UnwindEligibility::hosted_catch) {
     // An external provider supplies its own unwind coverage. A definition in this unit can
     // introduce intervening frames without it. The ordinary function type erases written noexcept.
@@ -1124,6 +1147,7 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
   std::set<EntityId> hidden_declarations;
   std::set<EntityId> weak_declarations;
   std::set<EntityId> attributed_members;
+  std::set<EntityId> classes_with_unapplied_rtti_abi;
   using Visibility = ast::GnuVisibility;
   std::map<EntityId, FunctionVisibility> function_visibility;
   std::vector<Dynamic> dynamic;
@@ -1471,14 +1495,26 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
     tu.functions.push_back(std::move(d0));
     return true;
   };
+  auto record_class_rtti_abi = [&](const ast::DeclSema& d, std::uint32_t k) {
+    if (!linux || d.kind != ast::DeclKind::class_ || d.entity == EntityId::none) return;
+    const bool friend_declaration = (d.flags & sema::decl_flag::friend_) != 0;
+    if (program.class_rtti_declaration_has_unapplied_abi(d.entity, k, friend_declaration))
+      classes_with_unapplied_rtti_abi.insert(d.entity);
+  };
   for (std::uint32_t k = first; k < items.items.size() && k < end; ++k) {
     const items::Item& it = items.items[k];
     // Items of the global namespace, and the members of its classes and their nested classes.
     bool member = it.parent != items::none && items.items[it.parent].kind == items::ItemKind::class_def &&
                   (program.in_global_scope(it.parent) || program.ordinary_nested_class(it.parent));
     if (!program.in_global_scope(k) && !member) continue;
-    // A class template's members are patterns; its specializations' are instances, below.
-    if (member && items.items[it.parent].template_depth > 0) continue;
+    // A class template member is not emitted from its pattern. A friend class declaration
+    // can still introduce an ordinary class in the enclosing namespace ([dcl.type.elab]).
+    if (member && items.items[it.parent].template_depth > 0) {
+      if (const auto* pattern = linux ? program.analysed_item(k) : nullptr)
+        for (const auto& declaration : ins.seqs.elements(pattern->decls))
+          if (declaration.flags & sema::decl_flag::friend_) record_class_rtti_abi(declaration, k);
+      continue;
+    }
     if (it.kind != items::ItemKind::declaration && it.kind != items::ItemKind::function &&
         it.kind != items::ItemKind::class_def && it.kind != items::ItemKind::enum_def)  // its declarators: `struct S { … } s;`
       continue;
@@ -1516,6 +1552,7 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
     for (std::size_t i = 0; i < decls.size(); ++i) {
       const auto& d = decls[i];
       declare(d, at[i]);
+      record_class_rtti_abi(d, k);
       if (d.kind == ast::DeclKind::function && d.entity != EntityId::none &&
           (attributed || ins.seqs.size(d.annotations) != 0) &&
           !program.is_namespace(world.entities.rec(d.entity).scope))
@@ -1926,7 +1963,8 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
         }))
       part->coalesce_if_inline.erase(f.entity);
     // Check the complete unit by entity, including later redeclarations and qualified friends.
-    if (!part) validate_unwind(ins, tu, f, runtime, unwind_provider, unwind_definition);
+    if (!part) validate_unwind(ins, tu, f, runtime, unwind_provider, unwind_definition, uncertain_layouts,
+                               classes_with_unapplied_rtti_abi);
   }
   if (has_typed_cast) {
     // Any definition that can reach native emission needs its RTTI checked here. The object
@@ -2002,6 +2040,7 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
   apply_symbol_attributes(tu, hidden_declarations, inline_declarations, weak_declarations, function_visibility, linux);
   if (part) {
     part->attributed_members = std::move(attributed_members);
+    part->classes_with_unapplied_rtti_abi = std::move(classes_with_unapplied_rtti_abi);
     part->inline_declarations = std::move(inline_declarations);
     part->noexcept_declarations = std::move(noexcept_declarations);
     part->hidden_declarations = std::move(hidden_declarations);
@@ -2021,6 +2060,7 @@ TranslationUnit finish_unit(std::vector<UnitPart>& parts, sema::World& world, st
   std::set<EntityId> entities, functions, variables;
   std::set<EntityId> inline_declarations, noexcept_declarations, hidden_declarations, defined, coalesce_if_inline, weak_if_inline;
   std::set<EntityId> weak_declarations, attributed_members;
+  std::set<EntityId> classes_with_unapplied_rtti_abi;
   std::map<EntityId, FunctionVisibility> function_visibility;
   std::vector<Dynamic> dynamic;
   for (UnitPart& p : parts) {
@@ -2047,6 +2087,7 @@ TranslationUnit finish_unit(std::vector<UnitPart>& parts, sema::World& world, st
     tu.init_functions.insert(tu.init_functions.end(), p.tu.init_functions.begin(), p.tu.init_functions.end());
     for (AsmHiddenSymbol& directive : p.tu.asm_hidden_symbols) tu.asm_hidden_symbols.push_back(std::move(directive));
     tu.has_raw_linkage_names |= p.tu.has_raw_linkage_names;
+    classes_with_unapplied_rtti_abi.merge(p.classes_with_unapplied_rtti_abi);
     dynamic.insert(dynamic.end(), p.dynamic.begin(), p.dynamic.end());
     for (auto [into, from] : {std::pair{&inline_declarations, &p.inline_declarations}, {&noexcept_declarations, &p.noexcept_declarations},
                              {&hidden_declarations, &p.hidden_declarations}, {&defined, &p.defined},
@@ -2076,14 +2117,15 @@ TranslationUnit finish_unit(std::vector<UnitPart>& parts, sema::World& world, st
       f.coalesced = inline_declarations.contains(f.entity) && tu.main != f.entity && asm_label(f.entity).empty();
   for (Variable& v : tu.variables)
     if (weak_if_inline.contains(v.entity)) v.coalesced = inline_declarations.contains(v.entity) && asm_label(v.entity).empty();
-  // What is declared here has no template, scope or label: the runtime's entry points and the
-  // initialization functions.
+  // What is declared here has no template or label: the runtime's entry points, exception
+  // descriptors and the initialization functions.
   auto declare = [&](const ast::DeclSema& d, std::optional<ast::Loc> at) {
     if (d.entity == EntityId::none || !entities.insert(d.entity).second) return;
     const sema::EntityRec& r = world.entities.rec(d.entity);
-    const bool fn = r.kind != sema::EntityKind::variable;
+    const bool rtti = r.kind == sema::EntityKind::type_info;
+    const bool fn = r.kind != sema::EntityKind::variable && !rtti;
     tu.entities.push_back({d.entity, std::string(ins.names.spelling(r.name)), d.type, fn, r.lang, r.linkage, false, at, r.scope,
-                           Special::none});
+                           rtti ? Special::type_info : Special::none});
     if (fn) tu.entities.back().nonthrowing = world.types.rec(d.type).fn_noexcept;
   };
   Runtime<decltype(declare)> runtime{world, declare};
@@ -2095,7 +2137,9 @@ TranslationUnit finish_unit(std::vector<UnitPart>& parts, sema::World& world, st
     return !noexcept_declarations.contains(f.entity) && !f.coalesced && f.guards.empty() && asm_label(f.entity).empty() &&
            (!inline_declarations.contains(f.entity) || f.constructor_cleanup != EntityId::none);
   };
-  for (FunctionDef& f : tu.functions) validate_unwind(ins, tu, f, runtime, unwind_provider, unwind_definition);
+  for (FunctionDef& f : tu.functions)
+    validate_unwind(ins, tu, f, runtime, unwind_provider, unwind_definition, uncertain_layouts,
+                    classes_with_unapplied_rtti_abi);
   unwind_through_constructors(tu, unwind_definition);
   apply_symbol_attributes(tu, hidden_declarations, inline_declarations, weak_declarations, function_visibility,
                           world.target.triple == ast::x86_64_linux.triple);
