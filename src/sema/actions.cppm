@@ -84,7 +84,10 @@ struct GenericResult {
 
 class Sema;
 struct Ex;
-enum class AliasCallPattern { none, retained, may_erase };
+// What naming an alias template's specialization reads again: immediate calls its type retains or
+// may erase, or a type with a dependent operand that has no representation (`decltype(f<T>())`
+// of a deduced return type), known only once the arguments are.
+enum class AliasCallPattern { none, retained, may_erase, unrepresented };
 
 // What sema asks of its context (§B1.4, §B3). In the engine these are `visible_decls(::, name,
 // at item)` and fetches of `decl_sema`.
@@ -3372,6 +3375,11 @@ public:
   }
   bool class_has_member_template(EntityId c, NameId name) {
     const ClassRec* r = class_rec(c);
+    if (!r && c != EntityId::none && c == current_class) {  // the class being defined: its members so far
+      std::vector<ast::DeclSema> functions;
+      q_->earlier_member(name, /*type_only=*/false, &functions);
+      return std::ranges::any_of(functions, [](const ast::DeclSema& d) { return (d.flags & decl_flag::template_) != 0; });
+    }
     return r && std::ranges::any_of(r->members, [&](const MemberDeclRec& m) { return m.name == name && m.is_template; });
   }
   // Whether `S::name` names a function template ([temp.names]/3): a member template of class S,
@@ -12428,7 +12436,7 @@ private:
     const bool assertion = in_class_assertion();
     std::vector<ast::DeclSema> functions;
     if (auto m = q_->earlier_member(name, /*type_only=*/false,
-                                    (nested_enum_members_begin || assertion) ? &functions : nullptr)) {
+                                    (nested_enum_members_begin || assertion || unevaluated || in_function_body) ? &functions : nullptr)) {
       if (m->kind == ast::DeclKind::enumerator) return enumerator(m->entity, m->type, begin, end);
       // Rank mixed overloads before checking whether the selected member needs an object.
       if (m->kind == ast::DeclKind::function) {
