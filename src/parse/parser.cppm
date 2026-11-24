@@ -2386,7 +2386,7 @@ public:
       value.source_begin = source_begin;
       value.source_end = pos();
       value.dependent_calls = s_->builder().seq(std::span<const u32>(s_->dependent_calls).subspan(calls_before));
-    } else if (source.observed.line || source.observed.descriptor_type != EntityId::none) {
+    } else if (source.observed.line || source.observed.descriptor_type != ast::EntityId::none) {
       e = s_->node(ast::DefaultSourceContext{.info = e.info, .arg = sema::Sema::at(e, e.begin),
                                              .observes_line = source.observed.line,
                                              .descriptor_type = source.observed.descriptor_type},

@@ -86,14 +86,14 @@ class Sema;
 struct Ex;
 enum class AliasCallPattern { none, retained, may_erase };
 
-// What sema asks of its context (§B1.4, §B3). In the engine these are `visible_decls(::, name,
-// at item)` and fetches of `decl_sema`.
 struct PresumedSource {
   std::string_view file;
   u32 line = 0;
   u32 column = 0;
 };
 
+// What sema asks of its context (§B1.4, §B3). In the engine these are `visible_decls(::, name,
+// at item)` and fetches of `decl_sema`.
 class Questions {
 public:
   virtual bool exceptions_enabled() const { return true; }
