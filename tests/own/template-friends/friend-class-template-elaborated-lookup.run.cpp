@@ -2,10 +2,10 @@
 // does not hide the class template found by elaborated friend lookup.
 // EXIT: 0
 namespace Home {
-template<class> struct Reader;
-namespace Detail {
-void Reader();
-}
+template<class T> struct Reader {
+    static int read(const T& v) { return v.secret; }
+};
+namespace Detail { void Reader(); }
 using namespace Detail;
 
 class Vault {
@@ -13,10 +13,4 @@ class Vault {
     int secret = 37;
 };
 }
-
-template<class T>
-struct Home::Reader {
-    static int read(const Home::Vault& v) { return v.secret; }
-};
-
-int main() { return Home::Reader<int>::read(Home::Vault{}) == 37 ? 0 : 1; }
+int main() { return Home::Reader<Home::Vault>::read(Home::Vault{}) == 37 ? 0 : 1; }
