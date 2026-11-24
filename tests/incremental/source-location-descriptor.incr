@@ -1,0 +1,93 @@
+// Indenting, inserting a blank line, and renaming the presumed file each change one
+// coordinate and add one failed assertion. Restoring the original call site clears them.
+// Initialize the descriptor directly in the edited header and observe it in the main file.
+--- main.cpp
+#include "expected.hpp"
+#include "observed.hpp"
+static_assert(observed.line() == 701);
+static_assert(observed.column() == observed_column);
+static_assert(observed.file_name()[0] == 'a');
+--- expected.hpp
+#if defined(__GNUC__) && !defined(__clang__) && !defined(__ycxx__)
+constexpr unsigned observed_column = 72;
+#else
+constexpr unsigned observed_column = 43;
+#endif
+--- source-location.hpp
+namespace std { inline namespace __y1 {
+
+struct source_location {
+private:
+  struct __impl {
+    const char* _M_file_name;
+    const char* _M_function_name;
+    unsigned _M_line;
+    unsigned _M_column;
+  };
+
+  const __impl* value = nullptr;
+
+public:
+  static consteval source_location current(const void* p = __builtin_source_location()) noexcept {
+    source_location location;
+    location.value = static_cast<const __impl*>(p);
+    return location;
+  }
+
+  constexpr source_location() noexcept = default;
+  constexpr unsigned line() const noexcept { return value->_M_line; }
+  constexpr unsigned column() const noexcept { return value->_M_column; }
+  constexpr const char* file_name() const noexcept { return value->_M_file_name; }
+};
+
+}}
+--- observed.hpp
+#include "source-location.hpp"
+#line 701 "alpha-source.cpp"
+constexpr std::source_location observed = std::source_location::current();
+=== edit
+--- main.cpp
+#include "expected.hpp"
+#include "observed.hpp"
+static_assert(observed.line() == 701);
+static_assert(observed.column() == observed_column); //! error
+static_assert(observed.file_name()[0] == 'a');
+--- observed.hpp
+#include "source-location.hpp"
+#line 701 "alpha-source.cpp"
+  constexpr std::source_location observed = std::source_location::current();
+=== edit
+--- main.cpp
+#include "expected.hpp"
+#include "observed.hpp"
+static_assert(observed.line() == 701); //! error
+static_assert(observed.column() == observed_column); //! error
+static_assert(observed.file_name()[0] == 'a');
+--- observed.hpp
+#include "source-location.hpp"
+#line 701 "alpha-source.cpp"
+
+  constexpr std::source_location observed = std::source_location::current();
+=== edit
+--- main.cpp
+#include "expected.hpp"
+#include "observed.hpp"
+static_assert(observed.line() == 701); //! error
+static_assert(observed.column() == observed_column); //! error
+static_assert(observed.file_name()[0] == 'a'); //! error
+--- observed.hpp
+#include "source-location.hpp"
+#line 701 "beta-source.cpp"
+
+  constexpr std::source_location observed = std::source_location::current();
+=== edit
+--- main.cpp
+#include "expected.hpp"
+#include "observed.hpp"
+static_assert(observed.line() == 701);
+static_assert(observed.column() == observed_column);
+static_assert(observed.file_name()[0] == 'a');
+--- observed.hpp
+#include "source-location.hpp"
+#line 701 "alpha-source.cpp"
+constexpr std::source_location observed = std::source_location::current();
