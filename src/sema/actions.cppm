@@ -1135,12 +1135,35 @@ public:
           return arg.kind == ast::TemplateArgKind::type && !dependent(arg);
         }))
       return true;
-    auto normal = templates().substitute_constraint(tmpl.constraints, bindings);
-    auto sat = normal ? q_->satisfied(*normal) : std::optional<bool>(false);
-    if (normal && q_->satisfaction_failed(*normal)) return false;
+    auto t = templates();
+    bool hard_error = false;
+    auto sat = named_constraint_satisfaction(t, tmpl.constraints, bindings, tmpl.kind == ast::DeclKind::type_alias, hard_error);
+    if (hard_error) return false;
     if (sat.value_or(true)) return true;
     diag(at, Diag::constraints_not_satisfied, w_->entities.rec(tmpl.entity).name);
     return false;
+  }
+
+  std::optional<bool> named_constraint_satisfaction(Templates& t, ConstId c, const Bindings& bindings,
+                                                    bool bind_lazily, bool& hard_error) {
+    // [temp.constr.op]: an operand that satisfaction skips must not substitute its mapping.
+    if (bind_lazily && ins().values.is<ast::VConstraint>(c)) {
+      auto v = ins().values.get<ast::VConstraint>(c);
+      bool any_unknown = false;
+      for (ConstId operand : ins().seqs.elements(v.operands)) {
+        auto sat = named_constraint_satisfaction(t, operand, bindings, bind_lazily, hard_error);
+        if (hard_error) return std::nullopt;
+        if (!sat) any_unknown = true;
+        else if (*sat == (v.op == 1)) return *sat;
+      }
+      if (any_unknown) return std::nullopt;
+      return v.op == 0;
+    }
+    auto normal = t.substitute_constraint(c, bindings);
+    if (!normal) return false;
+    auto sat = q_->satisfied(*normal);
+    hard_error = q_->satisfaction_failed(*normal);
+    return sat;
   }
 
   // `v<args>` naming a variable template specialization ([temp.pre], [temp.inst]/7): an lvalue of

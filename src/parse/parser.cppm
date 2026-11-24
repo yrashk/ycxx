@@ -1740,7 +1740,8 @@ public:
   std::optional<sema::Sema::Scope> template_id_scope(std::optional<sema::Sema::Scope> in, u32& j, bool scope = true,
                                                      bool checked = false, bool* failed_qualifier = nullptr,
                                                      std::optional<u32>* committed_failure = nullptr,
-                                                     bool conversion = false, bool committed_type = false) {
+                                                     bool conversion = false, bool committed_type = false,
+                                                     bool classify_only = false) {
     // `Q::template M<args>` ([temp.names]/4): the keyword says M names a template.
     const bool keyword = in && kind(j) == Tk::kw_template;
     const u32 k = keyword ? j + 1 : j;
@@ -1792,20 +1793,24 @@ public:
     u32 after = i_ - saved;
     bool closed = took_closer && (!scope || (!half_ && kind() == Tk::coloncolon));
     bool ended_half = half_;  // the list ended in the first half of a `>>`
+    const bool constrained_alias = tmpl && tmpl->kind == ast::DeclKind::type_alias && tmpl->constraints != sema::ConstId::none;
     std::optional<QualType> t;
     if (args && closed) {
       const AliasConstraintProbe probe{*this, !committed};
-      t = tt ? s_->template_param_id(*tt, *args, 0)
-          : builtin ? s_->builtin_template_id(n, *args, 0)
-          : dependent_member ? std::optional(s_->dependent_member_template_id(*in->type, n, *args))
-                             : type_template_id(*tmpl, *args, name_at);
+      // A terminal namespace alias already names a type in lookahead. Its expansion may
+      // instantiate another template, so leave substitution to the committed parse.
+      if (classify_only && in && in->ns && constrained_alias) t = s_->builtin(Builtin::dependent);
+      else
+        t = tt ? s_->template_param_id(*tt, *args, 0)
+            : builtin ? s_->builtin_template_id(n, *args, 0)
+            : dependent_member ? std::optional(s_->dependent_member_template_id(*in->type, n, *args))
+                               : type_template_id(*tmpl, *args, name_at);
     }
     i_ = saved;
     half_ = saved_half;
     if (!scope) qualified_half_ = ended_half;
     const bool alias_failed = alias_constraint_failures_ != alias_failures;
     if (alias_failed && committed_failure) *committed_failure = qualifier_end + 1;
-    const bool constrained_alias = tmpl && tmpl->kind == ast::DeclKind::type_alias && tmpl->constraints != sema::ConstId::none;
     const bool probe_failure = args && failed_qualifier && (scope || constrained_alias);
     const bool commit_argument_failure = scope && !args && committed_failure;
     if (!t && closed && (probe_failure || commit_argument_failure)) {
@@ -1839,6 +1844,7 @@ public:
                                                        bool* terminal_template_id = nullptr,
                                                        bool template_argument = false,
                                                        bool conversion = false) {
+    const bool classify_only = !checked && !probing_alias_constraints_ && !s_->templated();
     const AliasConstraintProbe probe{*this, !checked};
     u32 next = 0;
     bool check_qualifier = checked && substituting_partial_arguments;
@@ -1858,7 +1864,8 @@ public:
     if ((s->type || kind(next) == Tk::kw_template) && (kind(next) == Tk::identifier || kind(next) == Tk::kw_template)) {
       u32 j = next;
       qualified_half_ = false;
-      if (auto t = template_id_scope(s, j, /*scope=*/false, checked)) {
+      if (auto t = template_id_scope(s, j, /*scope=*/false, checked, nullptr, nullptr,
+                                     /*conversion=*/false, /*committed_type=*/false, classify_only)) {
         if (terminal_template_id && kind(j) != Tk::coloncolon) *terminal_template_id = true;
         return std::pair{*t->type, j - start};
       }
@@ -1874,7 +1881,8 @@ public:
     if (kind(next + 1) == Tk::less && s->ns) {
       u32 j = next;
       const auto diags = s_->diag_count();
-      if (auto t = template_id_scope(s, j, /*scope=*/false, checked, failed_qualifier, nullptr, conversion)) {
+      if (auto t = template_id_scope(s, j, /*scope=*/false, checked, failed_qualifier, nullptr, conversion,
+                                     /*committed_type=*/false, classify_only)) {
         if (terminal_template_id && kind(j) != Tk::coloncolon) *terminal_template_id = true;
         return std::pair{*t->type, j - start};
       }
