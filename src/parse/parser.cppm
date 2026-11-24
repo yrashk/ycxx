@@ -2979,7 +2979,7 @@ public:
           if (!t) ok = false;
           else args.push_back({ast::TemplateArgKind::type, s_->types().canonical(*t), sema::ConstId::none});
         } else {
-          const bool saved_value_argument = std::exchange(in_template_value_argument_, true);
+          const auto saved_value_argument = std::exchange(in_template_value_argument_, s_->unevaluated);
           Ex e = conditional_expression();
           in_template_value_argument_ = saved_value_argument;
           if (e.ok()) {
@@ -4823,9 +4823,10 @@ public:
         }
         Ex r = scope_expr(immediate_call || immediate_template);
         if (r.ok() && !s_->dependent(r) && dependent_args) {
-          if (immediate_call)
-            if (auto call = deferred_immediate_template_call(r, *args, namespace_alias_type && !s_->unevaluated))
-              return *call;
+          if (immediate_call) {
+            const bool allow_class_result = namespace_alias_type && in_template_value_argument_ == s_->unevaluated;
+            if (auto call = deferred_immediate_template_call(r, *args, allow_class_result)) return *call;
+          }
           return s_->dependent_node({}, begin, pos());
         }
         s_->explicit_template_args(r, std::move(*args));
@@ -6752,7 +6753,9 @@ private:
   sema::Questions* q_ = nullptr;
   LangLinkage linkage_ = LangLinkage::cxx;
   int in_params_ = 0;
-  bool in_template_value_argument_ = false;
+  // A template argument may be in a type inside an unevaluated operand. Its own
+  // nested unevaluated operands still do not require immediate invocation.
+  std::optional<u32> in_template_value_argument_;  // unevaluated depth where the argument begins
   bool in_type_requirement_ = false;
   bool variable_template_initializer_ = false;
   bool in_template_id_lookahead_ = false;

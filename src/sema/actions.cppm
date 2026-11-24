@@ -4833,11 +4833,11 @@ public:
       return std::nullopt;
     if (types().is_class(fn.inner)) {
       // Ordinary alias replay checks the selected specialization even if the alias erases the call.
+      // Check the result profile before a completeness query can instantiate a class template.
       const EntityId result = types().class_of(fn.inner);
       if (!allow_class_result || found->second.size() != 1 ||
           params.size() != 2 || params.front().pack || params.back().pack ||
-          types().is_dependent(fn.inner) || !q_->is_complete(result) || q_->class_layout_uncertain(result) ||
-          !t.structural_class_parameter(fn.inner))
+          !t.structural_class_parameter(fn.inner) || !q_->is_complete(result) || q_->class_layout_uncertain(result))
         return std::nullopt;
     } else if (!types().is_integral(fn.inner) && !types().is_enum(fn.inner)) {
       return std::nullopt;
