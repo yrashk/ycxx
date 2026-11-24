@@ -4434,6 +4434,13 @@ the body. A non-generic lambda body uses its own evaluation context.
   as `0 @ (y <=> x)`; `x <=> y` tries the reversed one, `0 <=> (y <=> x)`. The `0` is a
   one-token literal, so it is a null pointer constant too. A rewritten expression's own
   operator is not rewritten again.
+- With viable forward and reversed candidates, `Sema::ranked_three_way` compares their
+  conversion sequences in source operand order before preferring the forward orientation on
+  a tie ([over.match.best.general], [#1223](https://github.com/yrashk/ycxx/issues/1223)).
+  This covers fixed-arity, non-template members and nonmembers for integral operands and
+  complete non-template class operands without bases or conversion functions. It compares exact
+  bindings and by-value integral conversions. For relational expressions this ranking applies
+  when lookup finds no ordinary relational operator declaration.
 - A defaulted `operator<=>` ([class.spaceship]) is declared as `==` is. Completion
   (`Program::defaulted_three_way`) compares each subobject with `<=>`. A return type of plain
   `auto` becomes the common comparison category of the results (`strong_ordering` with no
