@@ -2132,12 +2132,19 @@ public:
     return {std::to_underlying(p_->id(dmi.item)), dmi.begin - p_->items().items[dmi.item].begin + offset};
   }
   bool in_type_trait_pattern() const override { return retain_type_trait_pattern; }
+  // A replay owning the trait's tokens, where a concrete operand is judged at its written source.
+  // An atom's satisfaction is not one: its concrete operands keep the check's own point.
   bool in_type_trait_replay() const override { return type_trait_demand.has_value(); }
   void record_dependent_type_trait_operand(engine::Loc loc) override {
     p_->dependent_type_trait_operands_.emplace(loc.item, loc.offset);
   }
+  // Where a type trait whose operands were dependent where it is written is answered: the
+  // replay's demand, or where an atomic constraint's satisfaction is checked ([temp.constr.atomic]).
+  std::optional<u32> type_trait_demand_point() const {
+    return satisfying_atom ? std::optional(point()) : type_trait_demand;
+  }
   bool replaying_type_trait_operand(engine::Loc loc) override {
-    return type_trait_demand && dependent_type_trait_operand(loc);
+    return type_trait_demand_point() && dependent_type_trait_operand(loc);
   }
   // Whether the type trait at `loc` had dependent operands where its template defines it.
   bool dependent_type_trait_operand(engine::Loc loc) const {
@@ -2148,9 +2155,10 @@ public:
     // dependent in its body is answered at the end, as a function template's instantiation is.
     if (generic_at_end && dependent_type_trait_operand(loc)) return p_->is_complete(c, p_->end(), true, true);
     if (!replaying_type_trait_operand(loc)) return std::nullopt;
-    return p_->is_complete(c, *type_trait_demand, true, true);
+    return p_->is_complete(c, *type_trait_demand_point(), true, true);
   }
   bool generic_at_end = false;
+  bool satisfying_atom = false;
   bool type_trait_instantiation_failed(EntityId e) override {
     const bool failed = p_->failed_type_trait_instantiations_.contains(e);
     observed_type_trait_failure |= failed;
@@ -9104,6 +9112,7 @@ public:
         s_(p.world(), b_, q_, sink_, a.item, a.begin), ps_(p.region(), it_->begin + a.begin, it_->begin + a.end, s_), atom_(a) {
     ps_.set_questions(q_);
     q_.at_point = point;
+    q_.satisfying_atom = true;
     q_.instantiation_calls = p.world().ins.seqs.elements(a.calls);
   }
 
