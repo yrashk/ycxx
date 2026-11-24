@@ -14,6 +14,7 @@ import ycxx.pp;
 import ycxx.sema;
 import :back;
 import :front;
+import :policy_registry;
 
 namespace ycxx::pipeline {
 
@@ -31,6 +32,8 @@ struct GroupResult {
   std::vector<GroupMessage> messages;
   std::vector<std::pair<EntityId, ast::Loc>> declared;
   std::vector<BodyAt> bodies;
+  std::vector<PolicySite> policy_aliases;
+  std::vector<PolicyAnnotationSite> policy_annotations;
   std::vector<ClassShape> classes;
   std::vector<EnumShape> enums;
   std::set<EntityId> uncertain_layouts;  // includes entities with no shape in this group
@@ -300,9 +303,21 @@ engine::query_task<SemaResult> TuSema::run(engine::Ctx& cx, TuId tu) {
           auto dr = world.ins.ast.get<ast::Declarator>(c.id);
           if (dr.decl < decls.size()) at[dr.decl] = c.at;
         }
-      for (std::size_t i = 0; i < decls.size(); ++i)
+      for (std::size_t i = 0; i < decls.size(); ++i) {
         if (decls[i].entity != EntityId::none && declared_here.insert(decls[i].entity).second)
           r.declared.emplace_back(decls[i].entity, ast::Loc{program.id(k), at[i]});
+        if (decls[i].kind == ast::DeclKind::type_alias && program.in_global_scope(k))
+          if (const auto policy = policy_alias(world, decls[i].type))
+            r.policy_aliases.push_back({*policy, {program.id(k), at[i]}});
+        if (decls[i].entity == EntityId::none) continue;
+        for (const auto& annotation : world.ins.seqs.elements(decls[i].annotations)) {
+          const ast::Loc location{program.id(k), annotation.offset};
+          if (const auto policy = policy_alias(world, annotation.type); policy && policy->active)
+            r.policy_aliases.push_back({*policy, location});
+          else if (is_policy_annotation(world, annotation.type))
+            r.policy_annotations.push_back({decls[i].entity, decls[i].type, annotation.type, annotation.value, location});
+        }
+      }
       if (const ast::BodySema* body = program.analysed_body(k); body && body->tree != ast::NodeId::none && it.has_body())
         r.bodies.push_back({program.id(k), it.decl_length(), body->tree});
     }
@@ -339,6 +354,10 @@ engine::query_task<SemaResult> TuSema::run(engine::Ctx& cx, TuId tu) {
                return type.kind == sema::TypeKind::class_ && recurse(type.entity);
              });
     };
+    std::set<EntityId> implicit_destructors;
+    for (const auto& member : program.synthesized())
+      if (member.kind == parse::Program::SpecialMember::destructor)
+        implicit_destructors.insert(member.decl.entity);
     for (EntityId c : classes.classes()) {
       ClassShape& shape = r.classes.emplace_back(ClassShape{c, {}, {}});
       const auto& record = classes.rec(c);
@@ -346,11 +365,19 @@ engine::query_task<SemaResult> TuSema::run(engine::Ctx& cx, TuId tu) {
       for (const sema::FieldRec& f : fields) {
         if (f.no_unique_address) shape.overlapping_fields.push_back(std::uint32_t(shape.fields.size()));
         shape.fields.push_back(f.type);
+        shape.field_names.push_back(f.name);
         shape.has_mutable_field |= f.mutable_;
       }
       if (std::ranges::any_of(fields, [](const sema::FieldRec& f) { return f.bit_width != 0; }))
         for (const sema::FieldRec& f : fields) shape.bit_widths.push_back(f.bit_width);
       shape.union_ = record.union_;
+      const bool plain_destruction = record.destructor == EntityId::none ||
+          (record.destructor_noexcept.value_or(false) && implicit_destructors.contains(record.destructor));
+      shape.plain_ownership_record = plain_destruction && record.bases.empty() && !record.union_ &&
+          !record.user_ctors && !record.closure && !record.polymorphic &&
+          std::ranges::none_of(fields, &sema::FieldRec::no_unique_address);
+      if (shape.plain_ownership_record) shape.ownership_destructor = record.destructor;
+      if (record.destructor_noexcept.value_or(false)) shape.nonthrowing_destructor = record.destructor;
       shape.pod = record.pod;
       shape.explicit_alignment = record.explicit_alignment;
       for (const sema::BaseRec& b : record.bases) shape.bases.push_back(b.cls);
@@ -409,6 +436,8 @@ engine::query_task<SemaResult> TuSema::run(engine::Ctx& cx, TuId tu) {
     for (const auto& [e, at] : r.declared)
       if (declared_seen.insert(std::to_underlying(e)).second) out.declared.emplace_back(e, at);
     out.bodies.insert(out.bodies.end(), r.bodies.begin(), r.bodies.end());
+    out.policy_aliases.append_range(r.policy_aliases);
+    out.policy_annotations.append_range(r.policy_annotations);
     for (const ClassShape& c : r.classes)
       if (shaped.insert(c.entity).second) out.shapes.classes.push_back(c);
     for (const EnumShape& e : r.enums)

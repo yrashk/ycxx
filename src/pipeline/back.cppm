@@ -188,6 +188,10 @@ struct ClassShape {
   bool has_mutable_field = false;
   sema::PeerVirtualLayout peer_virtual_layout = sema::PeerVirtualLayout::none;
   EntityId peer_automatic_primary_base = EntityId::none;
+  std::vector<ast::NameId> field_names{};
+  bool plain_ownership_record = false;
+  EntityId ownership_destructor = EntityId::none;
+  EntityId nonthrowing_destructor = EntityId::none;
 };
 struct EnumShape {
   EntityId entity = EntityId::none;
@@ -704,6 +708,7 @@ struct TuValue {
   std::optional<obj::object> object;  // none when there are errors
   std::vector<BackError> errors;
   std::vector<FirstDemand> first_demands;
+  std::vector<aarch64::Symbol> symbols;
 };
 struct Tu {
   using Key = TuId;
@@ -2370,6 +2375,7 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
     co_return co_await locate_errors(cx, id, std::move(out));
   }
   out.object = std::move(*o);
+  out.symbols = std::move(symbols);
   co_return out;
 }
 

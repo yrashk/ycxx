@@ -12,6 +12,25 @@ endif()
 ycxxc_unit_test(pipeline_incremental incremental_test.cpp ycxxc_pipeline)
 
 ycxxc_unit_test(pipeline_elf_executable elf_executable_test.cpp ycxxc_pipeline)
+set(ownership_include ${PROJECT_SOURCE_DIR}/packages/ycxx-policies/include)
+add_test(NAME unit.policies_ownership
+  COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/policies_ownership.py
+          $<TARGET_FILE:ycxxc> ${PROJECT_SOURCE_DIR}/examples/affine ${ownership_include} --target=arm64-apple-darwin)
+add_test(NAME unit.policies_contracts
+  COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/policies_contracts.py
+          $<TARGET_FILE:ycxxc> ${CMAKE_CXX_COMPILER} ${ownership_include} ${PROJECT_SOURCE_DIR}/examples/affine)
+add_test(NAME unit.policies_variants
+  COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/policies_variants.py
+          $<TARGET_FILE:ycxxc> ${CMAKE_CXX_COMPILER} ${ownership_include})
+add_test(NAME unit.policies_effects
+  COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/policies_effects.py
+          $<TARGET_FILE:ycxxc> ${ownership_include})
+add_test(NAME unit.policies_grades
+  COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/policies_grades.py
+          $<TARGET_FILE:ycxxc> ${ownership_include})
+add_test(NAME unit.policies_package
+  COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/policies_package.py
+          ${CMAKE_COMMAND} ${CMAKE_CXX_COMPILER} ${PROJECT_SOURCE_DIR}/packages/ycxx-policies)
 add_test(NAME unit.dependent_fabsl
   COMMAND ${CMAKE_COMMAND} -DYCXX=$<TARGET_FILE:ycxxc>
           -P ${CMAKE_CURRENT_SOURCE_DIR}/dependent_fabsl.cmake)
@@ -63,6 +82,9 @@ endif()
 # can. unit.darwin_virtual runs the virtual tests' fixtures on Mach-O (#650).
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$"
    AND NOT CMAKE_CROSSCOMPILING)
+  add_test(NAME unit.policies_ownership_linux
+    COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/policies_ownership.py
+            $<TARGET_FILE:ycxxc> ${PROJECT_SOURCE_DIR}/examples/affine ${ownership_include} --target=x86_64-linux-gnu)
   add_test(NAME unit.linux_compile
     COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/linux_compile.py
             $<TARGET_FILE:ycxxc> ${CMAKE_C_COMPILER} ${CMAKE_READELF} ${CMAKE_AR}
@@ -88,6 +110,9 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_
   add_test(NAME unit.linux_single_linkage_const
     COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/linux_single_linkage_const.py
             $<TARGET_FILE:ycxxc> ${CMAKE_CXX_COMPILER} ${CMAKE_READELF})
+  add_test(NAME unit.linux_nontrivial_result
+    COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/linux_nontrivial_result.py
+            $<TARGET_FILE:ycxxc> ${CMAKE_CXX_COMPILER})
   add_test(NAME unit.linux_scalar_sse
     COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/linux_scalar_sse.py
             $<TARGET_FILE:ycxxc> ${CMAKE_CXX_COMPILER} ${PROJECT_SOURCE_DIR}/deps/libycxx)
