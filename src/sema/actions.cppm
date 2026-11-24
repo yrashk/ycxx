@@ -943,11 +943,44 @@ public:
   // A template-name that names a type with its arguments ([temp.names]): a class template, or an
   // alias template ([temp.alias]).
   std::optional<ast::DeclSema> type_template(NameId name) {
+    if (auto block = block_type_template(name); block.found) return block.declaration;
     bool found_member = false;
     if (auto m = own_member_alias_template(name, found_member); found_member) return m;
     if (auto c = class_template(name)) return c;
     return named_template(name, ast::DeclKind::type_alias);
   }
+
+  struct BlockTypeTemplate {
+    bool found = false;
+    std::optional<ast::DeclSema> declaration;
+  };
+
+  // A block declaration, including one introduced by a using-declaration, hides the class
+  // and namespace scopes ([basic.lookup.unqual], [namespace.udecl]).
+  BlockTypeTemplate block_type_template(NameId name) {
+    for (std::size_t depth = scopes_.size(); depth-- > 0;) {
+      const auto names_here = [=](const auto& binding) { return binding.depth == depth && binding.name == name; };
+      if (std::ranges::contains(scopes_[depth], name, [](const auto& local) { return local.first; }) ||
+          std::ranges::any_of(block_types_, names_here) || std::ranges::any_of(block_aliases_, names_here))
+        return {true, std::nullopt};
+      for (const auto& [scope, e] : using_enums_) {
+        if (scope != depth) continue;
+        if (const EnumRec* record = enum_rec(e); record && std::ranges::contains(record->enumerators, name, &EnumeratorRec::name))
+          return {true, std::nullopt};
+      }
+      if (const auto used = std::ranges::find_if(block_usings_ | std::views::reverse, names_here);
+          used != block_usings_.rend()) {
+        if (used->type_index) {
+          const auto& declaration = used->decls[*used->type_index];
+          if (declaration.flags & decl_flag::template_)
+            return {true, with_template_defaults(declaration, used->decls)};
+        }
+        return {true, std::nullopt};
+      }
+    }
+    return {};
+  }
+
   std::optional<ast::DeclSema> namespace_type_template(EntityId ns, NameId name) {
     if (auto c = namespace_class_template(ns, name)) return c;
     return namespace_template(ns, name, ast::DeclKind::type_alias);
@@ -2643,7 +2676,7 @@ public:
   // A non-template member or an ambiguous lookup still hides outer declarations
   // ([basic.lookup.unqual], [class.member.lookup], [temp.res.general]).
   std::optional<ast::DeclSema> own_member_alias_template(NameId n, bool& found) {
-    if (current_class == EntityId::none || template_param(n) || local_named(n)) return std::nullopt;
+    if (current_class == EntityId::none || template_param(n)) return std::nullopt;
     std::optional<Found> member;
     if (class_rec(current_class)) {
       member = find_member(current_class, n, /*unqualified=*/true);
@@ -4210,7 +4243,7 @@ public:
     // class (the current instantiation, or the specialization) as a type one ([temp.local]/1).
     if (!ns && current_class != EntityId::none) {
       const EntityRec& c = w_->entities.rec(current_class);
-      if (c.templ != EntityId::none && c.name == name && !local_named(name))
+      if (c.templ != EntityId::none && c.name == name && !block_type_template(name).found)
         return TemplateArg{ast::TemplateArgKind::template_, types().class_type(current_class), ConstId::none, {}, c.templ};
     }
     auto t = ns ? namespace_type_template(*ns, name) : type_template(name);
