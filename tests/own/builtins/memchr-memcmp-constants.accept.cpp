@@ -12,6 +12,8 @@ static_assert(__builtin_memchr(text, 'c', 2) == nullptr);
 static_assert(__builtin_memchr(text, 'a', 0) == nullptr);
 static_assert(__builtin_memchr(text, '\0', 7) == text + 6);  // a NUL does not end the search
 static_assert(__builtin_memchr("abc", 'b', 3) != nullptr);
+static_assert(__builtin_memcmp("abc" + 1, "bc", 2) == 0);  // a string literal at an offset
+static_assert(__builtin_memchr("xyz" + 1, 'z', 2) != nullptr);
 static_assert(__builtin_memchr(nullptr, 'a', 0) == nullptr);
 static_assert(__builtin_memchr(text + 7, 'a', 0) == nullptr);  // nothing is read
 
