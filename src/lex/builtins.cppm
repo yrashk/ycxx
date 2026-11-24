@@ -135,8 +135,9 @@ constexpr const TypeTraitInfo* type_trait(std::string_view name) {
 // from `<math.h>`, `type` is the type they take and give: 'f' float, 'd' double, 'l' long
 // double. `__builtin_inf*` and `__builtin_huge_val*` are +infinity, `__builtin_nan*(s)` the quiet
 // NaN whose payload `s` spells (as `strtoull` reads it), `__builtin_fabs*(x)` |x|.
-// `__builtin_memchr` and `__builtin_memcmp` are the C library's `memchr` and `memcmp`, and call them.
-enum class BuiltinFunction : std::uint8_t { fabs, inf, huge_val, nan, addressof, strlen, memchr, memcmp, trap, constant_p };
+// A `library` builtin `__builtin_f` is the C library's function `f`, and calls it; its signature is
+// sema's (`sema::string_functions`).
+enum class BuiltinFunction : std::uint8_t { fabs, inf, huge_val, nan, addressof, strlen, library, trap, constant_p };
 struct BuiltinFunctionInfo {
   std::string_view name;
   BuiltinFunction function;
@@ -158,11 +159,21 @@ inline constexpr std::array builtin_functions{
     BuiltinFunctionInfo{"__builtin_nan", BuiltinFunction::nan, 'd'},
     BuiltinFunctionInfo{"__builtin_nanl", BuiltinFunction::nan, 'l'},
     BuiltinFunctionInfo{"__builtin_strlen", BuiltinFunction::strlen},
-    BuiltinFunctionInfo{"__builtin_memchr", BuiltinFunction::memchr},
-    BuiltinFunctionInfo{"__builtin_memcmp", BuiltinFunction::memcmp},
+    BuiltinFunctionInfo{"__builtin_memchr", BuiltinFunction::library},
+    BuiltinFunctionInfo{"__builtin_memcmp", BuiltinFunction::library},
+    BuiltinFunctionInfo{"__builtin_memcpy", BuiltinFunction::library},
+    BuiltinFunctionInfo{"__builtin_memmove", BuiltinFunction::library},
+    BuiltinFunctionInfo{"__builtin_memset", BuiltinFunction::library},
+    BuiltinFunctionInfo{"__builtin_strchr", BuiltinFunction::library},
+    BuiltinFunctionInfo{"__builtin_strpbrk", BuiltinFunction::library},
+    BuiltinFunctionInfo{"__builtin_strrchr", BuiltinFunction::library},
+    BuiltinFunctionInfo{"__builtin_strstr", BuiltinFunction::library},
     BuiltinFunctionInfo{"__builtin_trap", BuiltinFunction::trap},
     BuiltinFunctionInfo{.name = "__builtin_constant_p", .function = BuiltinFunction::constant_p, .advertised = false},
 };
+inline constexpr std::string_view builtin_prefix = "__builtin_";
+// The C library function a `library` builtin calls.
+constexpr std::string_view library_function_name(const BuiltinFunctionInfo& b) { return b.name.substr(builtin_prefix.size()); }
 constexpr const BuiltinFunctionInfo* builtin_function(std::string_view name) {
   for (const BuiltinFunctionInfo& b : builtin_functions)
     if (b.name == name) return &b;

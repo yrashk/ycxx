@@ -2545,21 +2545,26 @@ and diagnoses reads past the end of an unterminated array in a required constant
 ([expr.const]). Native lowering requires no runtime `strlen` symbol. Fixtures in
 `tests/own/builtins/` cover detection, result type, argument checks, and constant and runtime scans.
 
-## Byte search and comparison builtins (#248)
+## C library string and memory builtins (#248, #1093)
 
-`__builtin_memchr(s, c, n)` and `__builtin_memcmp(s1, s2, n)` are direct calls of the C
-library's `memchr` and `memcmp`, as libycxx's `<cstring>` and its run-time string helpers
-(`include/ycxx/core/mem_builtins.hpp`) use them. Sema converts the arguments to the C signatures
-(`void*` and `int` results) and calls an implicit `extern "C"` declaration with the target's
-`<string.h>` exception specification (`World::string_function`), so a written declaration or
-definition that matches the target's header is the same entity. One with another exception
-specification is a second entity (whether it should be is #1114), but in both object writers an
-entity the object does not define shares the symbol of its name: the definition of that name if
-the object has one, else one undefined symbol (#1095). The object still lists the function once
-(`unit.string_builtin_symbols`), and each definition keeps its own symbol (#694). The unit then references `memchr` or `memcmp` as an undefined symbol,
-which libSystem or the C library provides at link time. A dependent argument defers the call to
-instantiation. They are not constant expressions yet (#1092). Fixtures in `tests/own/builtins/`
-cover detection, signatures, argument checks and run-time results.
+`__builtin_memchr`, `__builtin_memcmp`, `__builtin_memcpy`, `__builtin_memmove`,
+`__builtin_memset`, `__builtin_strchr`, `__builtin_strpbrk`, `__builtin_strrchr` and
+`__builtin_strstr` are direct calls of the C library's function of the same name, as libycxx's
+`<cstring>`, its run-time string helpers (`include/ycxx/core/mem_builtins.hpp`) and the run-time
+paths of its containers use them. Each is one `lex::BuiltinFunction::library` entry, and its C
+signature is a row of `sema::string_functions`; the searches return `char*`, as Clang's and GCC's
+do. Sema converts the arguments to the C signature and calls an implicit `extern "C"` declaration
+with the target's `<string.h>` exception specification (`World::string_function`), so a written
+declaration or definition that matches the target's header is the same entity. One with another
+exception specification is a second entity (whether it should be is #1114), but in both object
+writers an entity the object does not define shares the symbol of its name: the definition of
+that name if the object has one, else one undefined symbol (#1095). The object still lists the
+function once (`unit.string_builtin_symbols`, ELF and Mach-O), and each definition keeps its own
+symbol (#694). The unit then references the function as an
+undefined symbol, which libSystem or the C library provides at link time. A dependent argument
+defers the call to instantiation. They are not constant expressions yet (#1092). Fixtures in
+`tests/own/builtins/` (`memchr-memcmp-*`, `string-memory-*`) cover detection, signatures,
+argument checks and run-time results.
 
 ## GNU constantness probe (#1065)
 
