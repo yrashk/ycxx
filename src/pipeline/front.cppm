@@ -1179,6 +1179,32 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
       return ast::Linkage::internal;
     return owner.linkage;
   };
+  const auto has_class_argument = [&](const sema::EntityRec& r) {
+    return std::ranges::any_of(r.args, [&](const ast::TemplateArg& a) { return ins.values.is<ast::VAggregate>(a.value); });
+  };
+  const auto default_visible_type = [&](this auto&& check, QualType type) -> bool {
+    const auto t = world.types.rec(type);
+    using enum sema::TypeKind;
+    switch (t.kind) {
+    case builtin: return true;
+    case class_: return world.entities.rec(t.entity).templ == EntityId::none && program.plain_class_template_type(t.entity);
+    case pointer: case reference: case array: return check(t.inner);
+    case member_pointer: return check(t.member_owner) && check(t.inner);
+    case function: return check(t.inner) && std::ranges::all_of(t.params, check);
+    default: return false;
+    }
+  };
+  const auto default_visible_argument = [&](this auto&& check, const ast::TemplateArg& a) -> bool {
+    switch (a.kind) {
+    using enum ast::TemplateArgKind;
+    case type: return default_visible_type(a.type);
+    case value: return (ins.values.is<ast::VInt>(a.value) || ins.values.is<ast::VAggregate>(a.value)) &&
+                       default_visible_type(a.type);
+    case pack: return std::ranges::all_of(ins.seqs.elements(a.elems), check);
+    case template_: return false;
+    }
+    return false;
+  };
   auto declare = [&](const ast::DeclSema& d, std::optional<ast::Loc> at) {
     EntityId e = d.entity;
     if (e == EntityId::none) return;
@@ -1241,6 +1267,13 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
                            : r.kind == sema::EntityKind::base_object_destructor ? Special::base_object_destructor
                                                                     : Special::none});
     Entity& emitted = tu.entities.back();
+    if (fn) {
+      const auto* owner = r.scope == EntityId::none ? nullptr : world.entities.find(r.scope);
+      if (has_class_argument(r) || (owner && has_class_argument(*owner)))
+        emitted.unsupported_class_parameter_signature = !default_visible_type(d.type) ||
+            !std::ranges::all_of(r.args, default_visible_argument) ||
+            (owner && !std::ranges::all_of(owner->args, default_visible_argument));
+    }
     emitted.asm_label = program.asm_label(e);
     tu.has_raw_linkage_names |= !emitted.asm_label.empty();
     if (emitted.special == Special::destructor || emitted.special == Special::deleting_destructor ||
@@ -1637,11 +1670,8 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
     definition.emit_if_referenced = immediate_if_referenced(in->decl, entity, in->body.value);
     definition.plain_immediate_template = definition.emit_if_referenced && program.is_namespace(entity.scope) &&
                                           !ins.names.spelling(entity.name).empty();
-    const auto class_values = [&](const sema::EntityRec& r) {
-      return std::ranges::any_of(r.args, [&](const ast::TemplateArg& a) { return ins.values.is<ast::VAggregate>(a.value); });
-    };
-    const bool direct_class_arguments = class_values(entity);
-    const bool class_value_member = entity.scope != EntityId::none && class_values(world.entities.rec(entity.scope));
+    const bool direct_class_arguments = has_class_argument(entity);
+    const bool class_value_member = entity.scope != EntityId::none && has_class_argument(world.entities.rec(entity.scope));
     if (direct_class_arguments || class_value_member)
       definition.unsupported_class_parameter_abi = !can_defer_body(in->body.value) ||
           !program.plain_class_template_function(entity.templ, in->item) ||

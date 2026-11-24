@@ -1773,13 +1773,15 @@ public:
     if (params.empty()) return std::vector<TemplateArg>{};
     u16 depth = params[0].depth;
     for (std::size_t i = 0; i < params.size(); ++i) {
+      // A class-valued parameter's declared type is fixed in this profile. Check before
+      // accepting a deduced argument or any form of omitted default ([temp.arg.nontype]).
+      if (params[i].kind == TemplateArgKind::value && types().is_dependent(params[i].type)) {
+        auto type = substitute(params[i].type, bindings(depth, out));
+        if (type && types().is_class(*type) && !types().is_dependent(*type)) return std::nullopt;
+      }
       if (out[i]) continue;
       // A pack neither given nor deduced is empty ([temp.arg.explicit]/4).
       if (params[i].pack) {
-        if (params[i].kind == TemplateArgKind::value && types().is_dependent(params[i].type)) {
-          auto type = substitute(params[i].type, bindings(depth, out));
-          if (type && types().is_class(*type) && !types().is_dependent(*type)) return std::nullopt;
-        }
         out[i] = pack({});
         continue;
       }
@@ -1799,7 +1801,6 @@ public:
         auto p = ins().values.get<ast::VDepParam>(d.value);
         auto a = p.depth == depth && p.index < i ? out[p.index] : std::nullopt;
         auto pt = substitute(params[i].type, bindings(depth, out));
-        if (pt && types().is_class(*pt) && types().is_dependent(params[i].type)) return std::nullopt;
         auto v = a && pt ? converted_value(*a, *pt) : std::nullopt;
         if (!v) return std::nullopt;
         d = *v;

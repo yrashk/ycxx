@@ -116,6 +116,7 @@ struct Entity {
   bool hidden = false;  // GNU hidden visibility: ELF STV_HIDDEN, Mach-O private extern (#602, #124)
   bool nonthrowing = false;  // including implicit exception specifications on destructors
   bool weak_reference = false;  // explicit GNU weak binding for an undefined ELF object
+  bool unsupported_class_parameter_signature = false;
 
   bool has_local_binding() const { return linkage == ast::Linkage::internal || local_parameter_binding; }
 };
@@ -2500,6 +2501,10 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, Key k) {
   std::set<EntityId> template_parameter_objects;
   for (const Entity& e : tu.entities) {
     if (!used.contains(ir::raw(e.id))) continue;
+    if (e.unsupported_class_parameter_signature) {
+      errors.push_back({e.at, "native functions with class-valued template arguments require default-visible signature and argument types"});
+      continue;
+    }
     if (e.local_function != EntityId::none) {
       locals.push_back(&e);
       continue;

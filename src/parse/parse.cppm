@@ -9074,9 +9074,17 @@ bool Program::plain_class_template_type(EntityId cls) const {
 bool Program::plain_class_template_function(EntityId pattern, u32 definition) const {
   if (r_->first_visibility_pragma || r_->has_clang_attribute_pragma) return false;
   const auto attributed = [&](u32 index) {
-    const auto& item = items_->items[index];
-    return in_attributed_namespace(index) ||
-           layout_attribute(*r_, item.begin, item.has_body() ? item.body_begin : item.end, LayoutAttributes::any);
+    const auto& all = items_->items;
+    const auto& item = all[index];
+    if (in_attributed_namespace(index) ||
+        layout_attribute(*r_, item.begin, item.has_body() ? item.body_begin : item.end, LayoutAttributes::any))
+      return true;
+    for (u32 parent = item.parent; parent != items::none; parent = all[parent].parent)
+      if (all[parent].kind == ItemKind::class_def &&
+          layout_attribute(*r_, all[parent].begin, all[parent].brace_begin,
+                           LayoutAttributes::any, class_alignment_specifiers(parent)))
+        return true;
+    return false;
   };
   if (attributed(definition)) return false;
   const auto decls = decls_.find(std::to_underlying(pattern));
