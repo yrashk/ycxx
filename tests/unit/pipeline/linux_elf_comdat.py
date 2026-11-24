@@ -7,6 +7,9 @@ import subprocess
 import sys
 import tempfile
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'daemon'))
+from runtime_dir import runtime_root
+
 
 def check_group_payload(image, expected):
     phoff, = struct.unpack_from('<Q', image, 32)
@@ -23,7 +26,7 @@ def main():
     fixtures = Path(__file__).resolve().with_suffix('')
     target = '--target=x86_64-pc-linux-gnu'
     with tempfile.TemporaryDirectory(prefix='yccomdat-') as temp, \
-            tempfile.TemporaryDirectory(prefix='yccomdat-rt-', dir='/tmp') as runtime:
+            tempfile.TemporaryDirectory(prefix='yccomdat-rt-', dir=runtime_root('yccomdat-rt-')) as runtime:
         scope = Path(temp).resolve()
         (scope / '.ycxx').touch()
         base = {k: v for k, v in os.environ.items()

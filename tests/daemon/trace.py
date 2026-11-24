@@ -22,6 +22,8 @@
 import json, os, subprocess, sys, tempfile, threading, time, shutil
 from pathlib import Path
 
+from runtime_dir import runtime_root
+
 failures = []
 
 
@@ -40,7 +42,7 @@ EDITED = 'int square(int x) {\n  return x  *  x;\n}\nint main() { return square(
 
 
 def main(ycxx):
-    runtime = tempfile.mkdtemp(prefix='yt', dir='/tmp')  # sun_path holds 104 bytes on macOS
+    runtime = tempfile.mkdtemp(prefix='yt', dir=runtime_root('yt'))
     os.chmod(runtime, 0o700)
     scope = Path(tempfile.mkdtemp(prefix='ycxx-trace-'))
     (scope / '.ycxx').write_text('')

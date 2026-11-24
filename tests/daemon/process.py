@@ -26,6 +26,8 @@ import os, platform, shutil, signal, socket, subprocess, sys, tempfile, time
 from contextlib import ExitStack
 from pathlib import Path
 
+from runtime_dir import runtime_root
+
 failures = []
 GATES = {
     'mid.cpp': 'stop',
@@ -55,7 +57,7 @@ class Env:
     def __init__(self, ycxx, driver=None):
         self.ycxx = ycxx
         self.driver = ycxx if driver is None else driver
-        self.runtime = tempfile.mkdtemp(prefix='yp', dir='/tmp')  # sun_path holds 104 bytes on macOS
+        self.runtime = tempfile.mkdtemp(prefix='yp', dir=runtime_root('yp'))
         os.chmod(self.runtime, 0o700)
         self.scope = Path(tempfile.mkdtemp(prefix='ycxx-process-'))
         (self.scope / '.ycxx').write_text('')
