@@ -42,7 +42,6 @@ draft/basic/intro.object-2.accept.cpp preprocessing directives are not supported
 draft/basic/intro.object-3.reject.cpp errors elsewhere: preprocessing directives are not supported yet
 draft/basic/intro.object-4.accept.cpp preprocessing directives are not supported yet
 draft/basic/namespace.qual-4.reject.cpp errors elsewhere: 'namespace' not supported yet
-draft/class/class.abstract-1.accept.cpp 'class' not supported yet
 draft/class/class.abstract-3.accept.cpp 'class' not supported yet
 draft/class/class.access.base-2.reject.cpp errors elsewhere: 'class' not supported yet
 draft/class/class.access.general-3.reject.cpp errors elsewhere: 'class' not supported yet
@@ -105,7 +104,6 @@ draft/class/class.union.anon-2.reject.cpp errors elsewhere: 'union' not supporte
 draft/class/class.union.anon-3.reject.cpp errors elsewhere: 'union' not supported yet
 draft/class/class.union.general-1.accept.cpp preprocessing directives are not supported yet
 draft/class/class.virtual-1.accept.cpp 'struct' not supported yet
-draft/class/class.virtual-10.accept.cpp 'class' not supported yet
 draft/class/class.virtual-2.accept.cpp 'struct' not supported yet
 draft/class/class.virtual-6.reject.cpp errors elsewhere: 'class' not supported yet
 draft/class/class.virtual-7.reject.cpp errors elsewhere: 'struct' not supported yet
@@ -406,7 +404,6 @@ draft/temp/temp.local-5.reject.cpp errors elsewhere: 'template' not supported ye
 draft/temp/temp.mem-2.reject.cpp errors elsewhere: 'template' not supported yet
 draft/temp/temp.mem-3.accept.cpp 'template' not supported yet
 draft/temp/temp.mem-4.reject.cpp errors elsewhere: 'template' not supported yet
-draft/temp/temp.mem-5.accept.cpp 'class' not supported yet
 draft/temp/temp.mem-6.accept.cpp 'struct' not supported yet
 draft/temp/temp.mem.enum-1.accept.cpp 'template' not supported yet
 draft/temp/temp.mem.func-1.reject.cpp errors elsewhere: 'template' not supported yet
