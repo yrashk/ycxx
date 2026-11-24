@@ -6667,8 +6667,10 @@ public:
       // set. Selecting a static member evaluates a receiver only when the call has one.
       if (!object || (m.arrow && !bound.explicit_receiver && ordinary_immediate_member(fe, fr.inner)))
         return call;
-      Ex discarded = convert_node(*object, ast::ConversionKind::to_void, builtin(Builtin::void_));
-      return node(ast::OrderedBinary{info, ast::OrderedOp::comma, at(discarded, begin), at(call, begin)}, begin, end, info);
+      Ex receiver = types().is_class(fr.inner) && ordinary_immediate_member(fe, fr.inner) ? discarded(*object) : *object;
+      if (!receiver.ok()) return fail;
+      Ex effects = convert_node(receiver, ast::ConversionKind::to_void, builtin(Builtin::void_));
+      return node(ast::OrderedBinary{info, ast::OrderedOp::comma, at(effects, begin), at(call, begin)}, begin, end, info);
     }
     if (!object) {
       diag(begin, Diag::member_without_object, d->name);
@@ -11931,7 +11933,8 @@ public:
   // is replayed only for the selected specialization and only when omitted ([temp.inst]/12).
   std::optional<Ex> default_argument(NodeId d, u32 at_, DefaultArgumentOrigin origin = DefaultArgumentOrigin::interned,
                                      EntityId function = EntityId::none, QualType parameter = {},
-                                     std::optional<u32> invocation = std::nullopt) {
+                                     std::optional<u32> invocation = std::nullopt,
+                                     std::optional<u32> descriptor_invocation = std::nullopt) {
     const bool in_builder = origin == DefaultArgumentOrigin::current_item;
     // An earlier declarator's inherited defaults are already adopted by this builder.
     const NodeId interned = in_builder ? b_->adopted_node(d) : d;
@@ -11954,7 +11957,7 @@ public:
               diag(site, Diag::source_location_default_member);
               return Ex{NodeId::none, at_, at_};
             }
-            context.descriptor_address = source_location_address(context.descriptor_type, site);
+            context.descriptor_address = source_location_address(context.descriptor_type, descriptor_invocation.value_or(site));
           }
         }
         arg.arg.id = b_->add(context, 0);
@@ -12091,7 +12094,9 @@ public:
     std::vector<QualType> params = fr.params;  // copied: converting may intern new types
     std::vector<Ex> args(given.begin(), given.end());
     for (std::size_t i = args.size(); i < params.size() && i < defaults.size() && defaults[i] != NodeId::none; ++i) {
-      auto a = default_argument(defaults[i], paren_at, origin, default_source, params[i], invocation_at);
+      // The descriptor uses the call's beginning, including a written member receiver.
+      // __builtin_LINE keeps its separate member-name anchor.
+      auto a = default_argument(defaults[i], paren_at, origin, default_source, params[i], invocation_at, begin);
       if (!a) return std::nullopt;
       args.push_back(*a);
     }

@@ -750,7 +750,11 @@ class Gen {
       if (result_ && r.value.id != NodeId::none) {
         // A class result initializes the caller's object ([stmt.return], [dcl.init.general]/16.6).
         full_expression([&] {
-          initialize(*result_, value, false);
+          // The immediate evaluator can return a record after sequencing a static member's receiver.
+          const At written = strip_parens(value);
+          const bool sequence = fn_.thunk && is<ast::OrderedBinary>(written) &&
+                                get<ast::OrderedBinary>(written).op == ast::OrderedOp::comma;
+          initialize(*result_, value, false, sequence);
           return 0;
         });
       } else if (r.value.id != NodeId::none) {
