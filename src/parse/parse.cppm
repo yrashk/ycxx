@@ -1995,7 +1995,7 @@ private:
   // comparisons, each `xi <=> yi` as the synthesized three-way comparison of type R, then
   // `static_cast<R>(std::strong_ordering::equal)` for when every one is equal.
   struct ThreeWaySubobject {
-    Ex initializer, variable, unequal;
+    Ex initializer, variable, unequal, return_value;
     u32 local;
   };
   struct DefaultedThreeWay {
@@ -10565,14 +10565,12 @@ public:
     if (!parts) return {};
     // A deduced return type is the comparison category ([class.spaceship]/2).
     if (s_.deduces_return() && !s_.deduce_return(&parts->equal, 0)) return {};
-    const QualType r = parts->result;
     std::vector<ast::Child> statements;
     for (const auto& part : parts->subobjects) {
+      if (!part.return_value.ok()) return {};
       const auto decl = b_.list(std::vector<ast::Child>{sema::Sema::at(part.variable, 0)});
       statements.push_back(sema::Sema::at(s_.node(ast::DeclStmt{decl}, 0, 0), 0));
-      const Ex value = s_.init_explicit_return(s_.local_ref(part.local, 0, 0), r);
-      if (!value.ok()) return {};
-      const Ex ret = s_.node(ast::Return{sema::Sema::at(value, 0)}, 0, 0);
+      const Ex ret = s_.node(ast::Return{sema::Sema::at(part.return_value, 0)}, 0, 0);
       statements.push_back(sema::Sema::at(
           s_.node(ast::If{{}, sema::Sema::at(part.unequal, 0), sema::Sema::at(ret, 0), {}}, 0, 0), 0));
     }
@@ -11786,7 +11784,7 @@ std::optional<Program::DefaultedThreeWay> Program::defaulted_three_way(sema::Sem
     const Ex zero = sm.literal(int_type, w_->values.integer(int_type, 0), ast::ValueCategory::prvalue, 0, 1);
     const Ex unequal = sm.to_bool(sm.binary(sema::Sema::BinOp::ne, sm.local_ref(local, 0, 0), zero, 0), 0);
     if (!unequal.ok()) return std::nullopt;
-    r.subobjects.push_back({initializer, variable, unequal, local});
+    r.subobjects.push_back({initializer, variable, unequal, {}, local});
   }
   // `static_cast<R>(std::strong_ordering::equal)`: for a comparison category R, the value its
   // `equivalent` (or `equal`) member names ([cmp.categories]).
@@ -11796,6 +11794,12 @@ std::optional<Program::DefaultedThreeWay> Program::defaulted_three_way(sema::Sem
   const EntityId equal = category->values[1];
   r.equal = synthesized(sm.static_member(w_->types.class_of(category->type), equal, w_->entities.rec(equal).type, 0, 0));
   if (!r.equal.ok()) return std::nullopt;
+  // [class.spaceship]/3, [except.spec]: initializing the return value can throw. Resolve it
+  // after forming the synthesized comparisons, which determine implicit deletion (/2.2).
+  for (auto& part : r.subobjects) {
+    part.return_value = sm.init_explicit_return(sm.local_ref(part.local, 0, 0), r.result);
+    if (!part.return_value.ok()) break;
+  }
   return r;
 }
 
@@ -11847,16 +11851,19 @@ void Program::complete_defaulted_comparisons(EntityId cls, sema::ClassRec& rec) 
     std::vector<u32> params;
     for (const ast::ParamSema& p : w_->ins.seqs.elements(d.params))
       params.push_back(sm.declare_local(p.name, p.type, sema::local_flag::parameter, 0, false));
-    // `==` is one expression; `<=>` the converted comparison of each subobject, then the
-    // equal result ([class.spaceship]).
+    // `==` is one expression; `<=>` initializes, tests and returns subobject comparison results
+    // or the equal result ([class.spaceship]).
     std::vector<Ex> results;
     std::optional<QualType> result_type;
+    bool invalid_return = false;
     if (three_way) {
       if (const auto operands = comparison_operands(sm, d, params))
         if (const auto parts = defaulted_three_way(sm, operands->cls, operands->x, operands->y, w_->types.rec(d.type).inner)) {
           for (const auto& part : parts->subobjects) {
             results.push_back(part.initializer);
             results.push_back(part.unequal);
+            results.push_back(part.return_value);
+            invalid_return |= !part.return_value.ok();
           }
           results.push_back(parts->equal);
           result_type = parts->result;
@@ -11868,13 +11875,13 @@ void Program::complete_defaulted_comparisons(EntityId cls, sema::ClassRec& rec) 
     // Deleted: a reference or variant member (no result and nothing diagnosed), or a subobject
     // comparison that finds no viable, an ambiguous, a deleted or an inaccessible function. Any
     // other diagnostic is ycxx's own limitation: the operator stays declared, and analysing its
-    // body reports it.
-    const bool deleted = diags.empty() ? !usable : std::ranges::all_of(diags, [](const engine::Diagnostic& g) {
+    // body reports it. Failure to initialize the return value is diagnosed in the body too.
+    const bool deleted = !invalid_return && (diags.empty() ? !usable : std::ranges::all_of(diags, [](const engine::Diagnostic& g) {
       return std::ranges::any_of(std::array{Diag::invalid_operands, Diag::ambiguous_call, Diag::deleted_function,
                                             Diag::private_member, Diag::protected_member, Diag::inaccessible_base,
                                             Diag::ambiguous_base, Diag::ambiguous_member},
                                  [&](Diag k) { return g.id == sema::diag_id(k); });
-    });
+    }));
     QualType type = d.type;
     const sema::TypeRec fn = w_->types.rec(d.type);
     // [class.spaceship]/2: a deduced return type is the common comparison category.

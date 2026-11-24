@@ -4407,7 +4407,7 @@ the body. A non-generic lambda body uses its own evaluation context.
   `{ R v0 = x0 <=> y0; if (v0 != 0) return v0; … return R(std::strong_ordering::equal); }`
   (`defaulted_three_way_body`). Completion and the body build the same initialized local and
   lvalue `vi != 0` test. The implicit exception specification covers the comparisons, the
-  lvalue tests and the equal result (#1225).
+  lvalue tests, and initialization of either return value (#1225).
 - `x.operator@(…)` and `p->operator@(…)` name member operator functions.
 - A member operator that overload resolution selects and that is deleted, ambiguous or
   inaccessible makes the expression ill-formed; the non-member candidates are not tried then.
