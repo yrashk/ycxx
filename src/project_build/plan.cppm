@@ -3,6 +3,7 @@ export module ycxx.build.plan;
 
 import std;
 import ycxx.build.action;
+import ycxx.build.inspection_model;
 import ycxx.build.manifest;
 import ycxx.hash;
 
@@ -36,6 +37,7 @@ std::expected<ProjectPlan, std::string> plan_project(const std::filesystem::path
 // Reobserve planning inputs without launching any actions. Native source contents and include
 // probes are tracked separately by the daemon's file table.
 ProjectWatchState watch_project(const std::filesystem::path& cwd, std::string_view target);
+std::expected<PlanInspection, std::string> inspect_project(const std::filesystem::path& cwd, std::string_view target);
 
 }  // namespace ycxx::build
 
@@ -146,25 +148,66 @@ std::expected<std::vector<DirectoryEntry>, std::string> list_directory(const fs:
   return entries;
 }
 
-void include_once(std::vector<std::string>& includes, std::string path) {
-  if (!std::ranges::contains(includes, path)) includes.push_back(std::move(path));
+struct IncludeOrigin {
+  std::string text;
+  SourceLocation location;
+};
+
+struct TargetIncludes {
+  std::vector<std::string> paths;
+  std::vector<IncludeOrigin> origins;
+};
+
+std::string artifact_origin(const ArtifactRef& ref) {
+  return std::format("artifact({:?}, {:?})", ref.target, ref.output);
+}
+
+std::string glob_origin(const Glob& glob) {
+  std::string text = std::format("glob({:?}", glob.pattern);
+  if (!glob.exclusions.empty()) {
+    text += ", exclude = [";
+    for (std::size_t i = 0; i < glob.exclusions.size(); ++i) {
+      if (i != 0) text += ", ";
+      text += std::format("{:?}", glob.exclusions[i]);
+    }
+    text += ']';
+  }
+  text += ')';
+  return text;
 }
 
 class Planner {
  public:
-  Planner(const fs::path& cwd, const Manifest& manifest, WatchObservations* watch) : cwd_(cwd), watch_(watch) {
+  Planner(const fs::path& cwd, const Manifest& manifest, WatchObservations* watch, PlanInspection* inspection)
+      : cwd_(cwd), watch_(watch), inspection_(inspection) {
     for (const auto& decl : manifest.targets) declarations_.emplace(decl.name, &decl);
   }
 
   ProjectPlan run(std::string_view target) {
     const auto& root = find(target, {});
-    if (root.kind != "cpp.executable") fail(root.location, "build requires a cpp.executable target");
+    if (inspection_ && root.kind == "generate") {
+      resolve_generator(root);
+      return std::move(plan_);
+    }
+    if (root.kind != "cpp.executable" && !(inspection_ && root.kind == "cpp.library"))
+      fail(root.location, "build requires a cpp.executable target");
     cxx_target(root);
-    if (plan_.sources.empty()) fail(root.location, "build has no C++ source files");
+    if (root.kind == "cpp.executable" && plan_.sources.empty()) fail(root.location, "build has no C++ source files");
     return std::move(plan_);
   }
 
  private:
+  std::string display_path(const fs::path& path) const {
+    const auto relative = path.lexically_relative(cwd_);
+    return relative.empty() || *relative.begin() == ".." ? path_text(path) : path_text(relative);
+  }
+
+  void fact(std::string_view kind, const TargetDecl& target, std::string_view name, std::string_view value,
+            std::string_view origin, SourceLocation at) {
+    inspection_->facts.push_back({std::string(kind), target.name, std::string(name), std::string(value),
+                                  std::string(origin), at.line, at.column});
+  }
+
   void observe(const fs::path& path) const {
     if (!watch_) return;
     auto normalized = path.lexically_normal();
@@ -182,36 +225,48 @@ class Planner {
 
   GeneratorPlan generator(const TargetDecl& decl) {
     check_fields(decl, {"tool", "args", "inputs", "outputs"});
+    if (inspection_) fact("rule", decl, decl.name, decl.kind, "declared rule", decl.location);
     GeneratorPlan plan;
     plan.name = decl.name;
     const auto& tool = require_field(decl, "tool");
     const auto& spelling = as<std::string>(tool, "an absolute tool path");
     if (spelling.contains('\0') || !fs::path(spelling).is_absolute())
       fail(tool.location, "expected an absolute tool path");
-    observe(spelling);
-    std::error_code ec;
-    const auto tool_path = fs::canonical(spelling, ec);
-    if (ec) fail(tool.location, std::format("cannot locate tool '{}': {}", spelling, ec.message()));
-    observe(tool_path);
-    const auto status = regular_file(tool_path, tool.location);
-    if (!executable(status.permissions())) fail(tool.location, std::format("tool '{}' is not executable", spelling));
     plan.action.tool = spelling;
-    const auto fp = Hasher{}.bytes(read_file(tool_path, tool.location)).finish();
-    if (watch_) watch_->values.push_back(fp);
-    plan.tool_fingerprint = std::format("{:016x}{:016x}", fp.lo, fp.hi);
+    if (inspection_) {
+      fact("tool", decl, "tool", display_path(spelling), "declared in tool", tool.location);
+    } else {
+      observe(spelling);
+      std::error_code ec;
+      const auto tool_path = fs::canonical(spelling, ec);
+      if (ec) fail(tool.location, std::format("cannot locate tool '{}': {}", spelling, ec.message()));
+      observe(tool_path);
+      const auto status = regular_file(tool_path, tool.location);
+      if (!executable(status.permissions())) fail(tool.location, std::format("tool '{}' is not executable", spelling));
+      const auto fp = Hasher{}.bytes(read_file(tool_path, tool.location)).finish();
+      if (watch_) watch_->values.push_back(fp);
+      plan.tool_fingerprint = std::format("{:016x}{:016x}", fp.lo, fp.hi);
+    }
 
     std::set<std::string> input_paths;
     if (const auto* entries = field(decl, "inputs")) {
       for (const auto& [name, value] : as<Record>(*entries, "a record of named inputs")) {
         if (name.empty()) fail(value.location, "input name is empty");
         const auto path = relative_path(as<std::string>(value, "an input path"), value.location);
-        if (!input_paths.insert(path_text(path)).second) fail(value.location, "duplicate staged input path");
-        observe(cwd_ / path);
-        const auto input_status = regular_file(cwd_ / path, value.location);
-        const auto contents = read_file(cwd_ / path, value.location);
-        const bool can_execute = executable(input_status.permissions());
-        if (watch_) watch_->values.push_back(fingerprint(std::tie(contents, can_execute)));
-        plan.inputs.push_back({name, path_text(path), {{contents.begin(), contents.end()}, can_execute}});
+        const auto staged = path_text(path);
+        if (!input_paths.insert(staged).second) fail(value.location, "duplicate staged input path");
+        Artifact artifact;
+        if (inspection_) {
+          fact("input", decl, name, staged, "declared in inputs", value.location);
+        } else {
+          observe(cwd_ / path);
+          const auto input_status = regular_file(cwd_ / path, value.location);
+          const auto contents = read_file(cwd_ / path, value.location);
+          artifact.executable = executable(input_status.permissions());
+          if (watch_) watch_->values.push_back(fingerprint(std::tie(contents, artifact.executable)));
+          artifact.bytes.assign(contents.begin(), contents.end());
+        }
+        plan.inputs.push_back({name, staged, std::move(artifact)});
       }
     }
 
@@ -222,21 +277,32 @@ class Planner {
       if (name.empty() || !basename(filename)) fail(value.location, "expected a named output with a single filename");
       if (!output_paths.insert(filename).second) fail(value.location, "duplicate output filename");
       plan.action.outputs.push_back({name, filename});
+      if (inspection_)
+        fact("output", decl, name, display_path(generated_path(cwd_, decl.name, filename)),
+             "declared in outputs", value.location);
     }
     if (plan.action.outputs.empty()) fail(outputs.location, "generator has no declared outputs");
 
     if (const auto* args = field(decl, "args")) {
       using enum ActionArg::Kind;
       for (const auto& value : as<List>(*args, "a list of action arguments")) {
+        const auto argv_fact = [&](std::string_view argument, std::string_view origin) {
+          fact("argv", decl, std::to_string(plan.action.args.size()), argument, origin, value.location);
+        };
         if (const auto* text = std::get_if<std::string>(&value.data)) {
+          if (inspection_) argv_fact(*text, "declared in args");
           plan.action.args.push_back({literal, *text});
         } else if (const auto* input_name = std::get_if<InputArg>(&value.data)) {
-          if (std::ranges::find(plan.inputs, input_name->name, &ActionInput::name) == plan.inputs.end())
+          const auto binding = std::ranges::find(plan.inputs, input_name->name, &ActionInput::name);
+          if (binding == plan.inputs.end())
             fail(value.location, std::format("unknown input '{}'", input_name->name));
+          if (inspection_) argv_fact("inputs/" + binding->path, std::format("input({:?})", binding->name));
           plan.action.args.push_back({input, input_name->name});
         } else if (const auto* output_name = std::get_if<OutputArg>(&value.data)) {
-          if (std::ranges::find(plan.action.outputs, output_name->name, &ActionOutput::name) == plan.action.outputs.end())
+          const auto binding = std::ranges::find(plan.action.outputs, output_name->name, &ActionOutput::name);
+          if (binding == plan.action.outputs.end())
             fail(value.location, std::format("unknown output '{}'", output_name->name));
+          if (inspection_) argv_fact("outputs/" + binding->filename, std::format("output({:?})", binding->name));
           plan.action.args.push_back({output, output_name->name});
         } else {
           fail(value.location, "expected a string, input(name) or output(name)");
@@ -246,52 +312,81 @@ class Planner {
     return plan;
   }
 
-  std::string artifact(const ArtifactRef& ref, SourceLocation at) {
-    const auto& decl = find(ref.target, at);
-    if (decl.kind != "generate") fail(at, "artifact references require a generate target");
+  const GeneratorPlan& resolve_generator(const TargetDecl& decl) {
     auto match = generators_.find(decl.name);
     if (match == generators_.end()) {
       auto gen = generator(decl);
       match = generators_.emplace(decl.name, plan_.generators.size()).first;
       plan_.generators.push_back(std::move(gen));
     }
-    const auto& outputs = plan_.generators[match->second].action.outputs;
+    return plan_.generators[match->second];
+  }
+
+  std::string artifact(const ArtifactRef& ref, SourceLocation at) {
+    const auto& decl = find(ref.target, at);
+    if (decl.kind != "generate") fail(at, "artifact references require a generate target");
+    const auto& outputs = resolve_generator(decl).action.outputs;
     const auto output = std::ranges::find(outputs, ref.output, &ActionOutput::name);
     if (output == outputs.end()) fail(at, std::format("generator '{}' has no output '{}'", ref.target, ref.output));
     return generated_path(cwd_, decl.name, output->filename);
   }
 
-  const std::vector<std::string>& cxx_target(const TargetDecl& decl) {
+  const TargetIncludes& cxx_target(const TargetDecl& decl) {
     if (const auto it = finished_.find(decl.name); it != finished_.end()) return it->second;
     if (!active_.insert(decl.name).second) fail(decl.location, std::format("dependency cycle at '{}'", decl.name));
     check_fields(decl, {"sources", "deps", "public_include_dirs", "generated_headers"});
+    if (inspection_) fact("rule", decl, decl.name, decl.kind, "declared rule", decl.location);
 
-    std::vector<std::string> includes;
+    TargetIncludes includes;
+    const auto include = [&](std::string path, std::string_view origin, SourceLocation location) {
+      if (std::ranges::contains(includes.paths, path)) return;
+      if (inspection_) {
+        fact("include", decl, std::to_string(includes.paths.size()), display_path(path), origin, location);
+        includes.origins.push_back({std::string(origin), location});
+      }
+      includes.paths.push_back(std::move(path));
+    };
     if (const auto* dirs = field(decl, "public_include_dirs")) {
       for (const auto& value : as<List>(*dirs, "a list of include directories")) {
         const auto path = cwd_ / relative_path(as<std::string>(value, "an include directory"), value.location, true);
         observe(path);
-        include_once(includes, path_text(path));
+        include(path_text(path), "declared in public_include_dirs", value.location);
       }
     }
     if (const auto* headers = field(decl, "generated_headers")) {
       for (const auto& value : as<List>(*headers, "a list of generated headers")) {
-        const auto path = artifact(as<ArtifactRef>(value, "an artifact reference"), value.location);
-        include_once(includes, path_text(fs::path(path).parent_path()));
+        const auto& ref = as<ArtifactRef>(value, "an artifact reference");
+        const auto path = artifact(ref, value.location);
+        include(path_text(fs::path(path).parent_path()), inspection_ ? artifact_origin(ref) : std::string{}, value.location);
       }
     }
     if (const auto* deps = field(decl, "deps")) {
+      std::size_t position = 0;
       for (const auto& value : as<List>(*deps, "a list of dependencies")) {
         const auto& dep = find(as<std::string>(value, "a library target name"), value.location);
         if (dep.kind != "cpp.library") fail(value.location, std::format("'{}' is not a cpp.library", dep.name));
-        for (const auto& path : cxx_target(dep)) include_once(includes, path);
+        if (inspection_) fact("dependency", decl, std::to_string(position), dep.name, "declared in deps", value.location);
+        ++position;
+        const auto& inherited = cxx_target(dep);
+        for (std::size_t i = 0; i < inherited.paths.size(); ++i) {
+          if (inspection_) {
+            const auto& from = inherited.origins[i];
+            include(inherited.paths[i], std::format("inherited from {} ({})", dep.name, from.text), from.location);
+          } else {
+            include(inherited.paths[i], {}, {});
+          }
+        }
       }
     }
 
     std::set<std::string> source_paths;
-    const auto add = [&](std::string path, SourceLocation at) {
+    const auto add = [&](std::string path, SourceLocation at, std::string_view origin) {
       if (!source_paths.insert(path).second) fail(at, std::format("duplicate source '{}'", path));
-      plan_.sources.push_back({std::move(path), includes});
+      if (inspection_) {
+        const auto display = display_path(path);
+        fact("source", decl, display, display, origin, at);
+      }
+      plan_.sources.push_back({std::move(path), includes.paths});
     };
     const auto add_glob = [&](const Glob& glob, SourceLocation at) {
       const auto matches = expand_glob(glob, [&](std::string_view dir) {
@@ -300,10 +395,11 @@ class Planner {
       });
       if (!matches) fail(at, matches.error());
       if (watch_) watch_->values.push_back(fingerprint(*matches));
+      const auto origin = inspection_ ? glob_origin(glob) : std::string{};
       for (const auto& match : *matches) {
         const auto path = cwd_ / match;
         observe(path);
-        add(path_text(path), at);
+        add(path_text(path), at, origin);
       }
     };
     if (const auto* files = field(decl, "sources")) {
@@ -314,9 +410,9 @@ class Planner {
           if (const auto* path = std::get_if<std::string>(&value.data)) {
             const auto absolute = cwd_ / relative_path(*path, value.location);
             observe(absolute);
-            add(path_text(absolute), value.location);
+            add(path_text(absolute), value.location, "declared in sources");
           } else if (const auto* ref = std::get_if<ArtifactRef>(&value.data)) {
-            add(artifact(*ref, value.location), value.location);
+            add(artifact(*ref, value.location), value.location, inspection_ ? artifact_origin(*ref) : std::string{});
           } else if (const auto* glob = std::get_if<Glob>(&value.data)) {
             add_glob(*glob, value.location);
           } else {
@@ -331,15 +427,16 @@ class Planner {
 
   const fs::path& cwd_;
   WatchObservations* watch_;
+  PlanInspection* inspection_;
   std::map<std::string, const TargetDecl*, std::less<>> declarations_;
   std::map<std::string, std::size_t> generators_;
   std::set<std::string> active_;
-  std::map<std::string, std::vector<std::string>> finished_;
+  std::map<std::string, TargetIncludes> finished_;
   ProjectPlan plan_;
 };
 
 std::expected<ProjectPlan, std::string> read_project(const fs::path& cwd, std::string_view target,
-                                                   WatchObservations* watch) {
+                                                   WatchObservations* watch, PlanInspection* inspection = nullptr) {
   std::error_code ec;
   const auto root = fs::absolute(cwd, ec).lexically_normal();
   if (ec) return std::unexpected(std::format("cannot resolve workspace directory: {}", ec.message()));
@@ -347,11 +444,12 @@ std::expected<ProjectPlan, std::string> read_project(const fs::path& cwd, std::s
     const auto path = root / "build.ycxx";
     if (watch) watch->paths.insert(path_text(path));
     (void)regular_file(path, {});
-    const auto text = read_file(path, {});
+    auto text = read_file(path, {});
     if (watch) watch->manifest = fingerprint128(text);
     auto manifest = parse_manifest(text);
     if (!manifest) fail(manifest.error().location, std::move(manifest.error().message));
-    return Planner(root, *manifest, watch).run(target);
+    if (inspection) inspection->definition = std::move(text);
+    return Planner(root, *manifest, watch, inspection).run(target);
   } catch (PlanningError& error) {
     return std::unexpected(std::move(error.message));
   }
@@ -373,6 +471,13 @@ ProjectWatchState watch_project(const fs::path& cwd, std::string_view target) {
   const auto stamp = plan ? fingerprint(std::tie(observed.manifest, *plan)) :
                            fingerprint(std::tie(observed.manifest, observed.values, plan.error()));
   return {stamp, {observed.paths.begin(), observed.paths.end()}};
+}
+
+std::expected<PlanInspection, std::string> inspect_project(const fs::path& cwd, std::string_view target) {
+  PlanInspection inspection{.target = std::string(target), .definition = {}, .facts = {}};
+  auto plan = read_project(cwd, target, nullptr, &inspection);
+  if (!plan) return std::unexpected(std::move(plan.error()));
+  return inspection;
 }
 
 }  // namespace ycxx::build
