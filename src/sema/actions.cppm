@@ -4592,6 +4592,7 @@ public:
 
   Templates templates() {
     Templates t(*w_, classes());
+    t.class_definition = [this](EntityId c) { return class_rec(c); };
     t.defining_enum_is_scoped = [this](EntityId e) { return q_->defining_enum_is_scoped(e); };
     t.member_type = [this](EntityId c, NameId n) { return member_type(c, n); };
     t.member_template = [this](EntityId c, NameId n) -> std::optional<EntityId> {

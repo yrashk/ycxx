@@ -1960,8 +1960,8 @@ clauses = ['temp', 'temp.pre', 'temp.param', 'temp.names', 'temp.arg', 'temp.arg
 std = 'C++98'
 detect = '\btemplate\s*<'
 status = 'done'
-issues = [209, 210, 406]
-note = 'Native specialization names support unambiguous externally linked function pointer arguments. Function references and selection from overload sets remain open.'
+issues = [209, 210, 406, 1144]
+note = 'Native specialization names handle unambiguous external function pointers. Fixed class-reference and one-pointer parameters deduce through a unique matching base. Function references and overload-set selection remain open.'
 probe = '''
 template<class T> T mx(T a, T b) { return a > b ? a : b; }
 template<class T> int k(T*) { return 1; } template<class T> int k(T) { return 2; }
