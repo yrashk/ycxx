@@ -6109,6 +6109,14 @@ public:
     return nullptr;
   }
 
+  EntityId source_location_class() {
+    const auto std_scope = scope_member(global_scope(), ins().names.intern("std"), false);
+    if (!std_scope || !std_scope->ns) return EntityId::none;
+    const auto found = scope_member(*std_scope, ins().names.intern("source_location"), false);
+    if (!found || !found->type || !types().is_class(*found->type)) return EntityId::none;
+    return types().class_of(*found->type);
+  }
+
   bool ordinary_immediate_member(EntityId function, QualType result) {
     if (function == EntityId::none) return false;
     const auto& entity = w_->entities.rec(function);
@@ -6118,7 +6126,12 @@ public:
     if (owner.kind != EntityKind::class_ || owner.templ != EntityId::none) return false;
     const auto* member = member_decl(function);
     if (!member || !member->is_consteval || member->is_virtual || member->is_template) return false;
-    // Only the checked integral, enum and void result representations enter this path.
+    // The pinned library's static immediate member returns a one-pointer record.
+    // Its aggregate constant uses the same interpreted result storage as other record prvalues.
+    if (w_->target.triple == ast::x86_64_linux.triple && member->is_static && types().is_class(result) &&
+        ins().names.spelling(entity.name) == "current" && types().class_of(result) == entity.scope &&
+        source_location_class() == entity.scope) return true;
+    // The ordinary scalar path continues to accept integral, enum and void results.
     if (types().is_void(result)) return true;
     if (types().is_enum(result)) {
       const auto* enumeration = enum_rec(types().enum_of(result));
