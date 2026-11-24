@@ -7,5 +7,7 @@ int main() {
     if (item + 4 != 33 || item + 4L != -1 || operator+(item, 4) != 33 || inline_address::peer_sum() != 42) return 2;
     derived_operand::Item derived;
     nominated_operand::Item nominated;
-    return derived + 1 == 23 && nominated + 1 == 31 ? 0 : 3;
+    if (derived + 1 != 23 || nominated + 1 != 31) return 3;
+    inline_template::Cell<int> cell{5};
+    return take(cell) == 6 && inline_template::peer_take() == 8 ? 0 : 4;
 }

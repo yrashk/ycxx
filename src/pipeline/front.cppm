@@ -1490,7 +1490,12 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
       const bool ordinary_member = ordinary_class_template_member(entity) && !in->decl.is_virtual &&
                                    !internal_class(entity.scope) &&
                                    !names_tu_local(program, entity.scope, /*include_value_types=*/true);
-      if (entity.kind == sema::EntityKind::destructor || ordinary_member)
+      // A friend function a class template's specialization defines is inline as its members
+      // are ([class.friend]/7, #259).
+      const bool class_friend = (in->decl.flags & sema::decl_flag::friend_) && entity.kind == sema::EntityKind::function &&
+                                entity.templ == EntityId::none &&
+                                !names_tu_local(program, in->decl.type, /*include_value_types=*/true);
+      if (entity.kind == sema::EntityKind::destructor || ordinary_member || class_friend)
         coalesce_inline_function(tu.functions.back(), true);
     }
     closures_of(in->body.value.closures, program.id(in->item), it.body_begin - it.begin);

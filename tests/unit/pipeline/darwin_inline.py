@@ -129,7 +129,8 @@ int main() { return g() - 2; }
         for name in ('main', 'peer'):
             compile(friend / f'{name}.cpp', f'friend-{name}.o')
             table = symbols(f'friend-{name}.o')
-            for symbol in ('__ZN14inline_address4readERKNS_4ItemE', '__ZN14inline_addressplERKNS_4ItemEi'):
+            for symbol in ('__ZN14inline_address4readERKNS_4ItemE', '__ZN14inline_addressplERKNS_4ItemEi',
+                           '__ZN15inline_template4takeERKNS_4CellIiEE'):
                 assert table[symbol] == weak, (name, symbol, table[symbol])
         links('friend-main.o', 'friend-peer.o')
 

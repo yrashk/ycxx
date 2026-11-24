@@ -28,6 +28,20 @@ Reader peer_address();
 int peer_sum();
 }
 
+// A friend each class template specialization defines ([temp.friend], #259).
+namespace inline_template {
+template <class T>
+struct Cell {
+    T number;
+
+    friend T take(const Cell& cell) {
+        return cell.number + 1;
+    }
+};
+
+int peer_take();
+}
+
 namespace derived_operand { struct Item; }
 namespace associated_base {
 struct Base {};
