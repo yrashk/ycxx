@@ -2692,6 +2692,19 @@ Fable decided the representation (ast.md §6.6); the Opus session wrote the code
   namespace declaration. The existing Linux inline gate checks both object orders.
 - Ordinary unary minus finds hidden friends by ADL and ranks their operand conversions with
   ordinary nonmember and member candidates. Access and deletion are checked for the selected operator.
+- **Friends in class templates** ([temp.friend], `templated_friend` in parse.cppm, #259): an
+  unqualified friend function definition in a namespace-scope class template (or partial
+  specialization) declares, for each specialization, an inline function of the namespace with
+  the arguments substituted. It joins the specialization's `ClassRec::adl_friends`, and
+  `member_patterns_` maps it to its item and specialization, so its body is instantiated with
+  the class's arguments when odr-used ([temp.inst]/4), in the specialization's complete-class
+  scope. `Questions::friend_decl` gives ADL the specialization's declaration. A dependent
+  noexcept-specifier is kept as tokens and replayed in that scope ([except.spec]/13). A
+  class template specialization is now an associated class of ADL, instantiated where needed,
+  as Clang and GCC do. Two specializations defining one function report a redefinition.
+- **Friend function templates** defined in a class or class template
+  (`template <class T> friend R f(…) {…}`) are function templates of the namespace that only ADL
+  finds; a class template's specialization binds its own arguments for theirs (#259).
 - **Checks** (`Sema::accessible`, `check_access`): a private or protected member may be named in
   a member function or default member initializer of its class, in the class's scope (the
   initializer of a static data member defined outside it), or in a friend function or friend
@@ -2700,7 +2713,7 @@ Fable decided the representation (ast.md §6.6); the Opus session wrote the code
   overload resolution chooses ([class.access]/4), and for the constructor an initialization
   chooses. Protected is checked as private until base classes exist.
 - C-linkage friend definitions, other hidden friend operators, defaults on friend declarations,
-  friends in templates, destructor access, private member operator wording, and elaborated types
+  non-defining friends in class templates and non-defining friend templates, destructor access, private member operator wording, and elaborated types
   in member parameters remain under [#259](https://github.com/yrashk/ycxx/issues/259).
   Both targets coalesce these inline friend definitions across objects (#422, [#124](https://github.com/yrashk/ycxx/issues/124)).
 - Both ELF and Mach-O coalesce eligible nonthrowing, nonvirtual in-class destructor definitions

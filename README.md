@@ -490,9 +490,10 @@ written default member initializer are value-initialized.
   with RAII, aggregate and designated initialization, namespace-scope objects initialized by
   code before `main` and destroyed after it, block-scope `static` variables initialized once, passing and returning them by value with
   Clang's calling convention, so ycxx and Clang objects call each other; access control
-  (`public`, `protected`, `private`) and friend functions and classes. Ordinary unqualified
-  friend definitions in non-template namespace-scope classes are found by argument-dependent
-  lookup or through a matching namespace declaration. [#259](https://github.com/yrashk/ycxx/issues/259)
+  (`public`, `protected`, `private`) and friend functions and classes. Unqualified friend
+  definitions in namespace-scope classes and class templates, and friend function templates
+  defined there, are found by argument-dependent lookup or through a matching namespace
+  declaration. [#259](https://github.com/yrashk/ycxx/issues/259)
 - explicit specialization of a class template's written nonvirtual destructor selects the specialized
   destructor for that class instance. The specialization's declaration determines its inline status.
   [#1027](https://github.com/yrashk/ycxx/issues/1027)
