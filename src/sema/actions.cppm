@@ -3350,9 +3350,12 @@ public:
     }
     if (!require_complete(ct, op_at)) return fail;
     EntityId c = types().class_of(ct);
-    if (qualifier && (*qualifier != w_->entities.rec(c).name || !virtual_consumer(c))) {
-      diag(name_at, Diag::not_supported, lex::Tk::coloncolon);
-      return fail;
+    if (qualifier) {
+      const ClassRec* record = class_rec(c);
+      if (*qualifier != w_->entities.rec(c).name || ((!record || !record->dynamic) && !virtual_consumer(c))) {
+        diag(name_at, Diag::not_supported, lex::Tk::coloncolon);
+        return fail;
+      }
     }
     auto found = find_member(c, name);
     if (!found) {
