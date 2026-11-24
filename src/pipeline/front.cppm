@@ -1720,8 +1720,10 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
     const auto& dynamic = *record.dynamic;
     if (dynamic.key_function != EntityId::none && !inline_declarations.contains(dynamic.key_function))
       return program.function_defined_before(dynamic.key_function, program.end()) ? std::optional(false) : std::nullopt;
-    if (dynamic.key_function != EntityId::none && !program.function_defined_before(dynamic.key_function, program.end()))
-      return std::nullopt;
+    // Itanium C++ ABI §5.2.3: a key function made inline later puts the table in every object
+    // that defines it.
+    if (dynamic.key_function != EntityId::none)
+      return program.function_defined_before(dynamic.key_function, program.end()) ? std::optional(true) : std::nullopt;
     return installed.contains(sema::virtual_table_entity(world, c)) ? std::optional(true) : std::nullopt;
   };
   std::set<EntityId> tables, descriptors_only;

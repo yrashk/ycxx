@@ -8616,11 +8616,14 @@ std::optional<sema::DynamicClass> Program::dynamic_class(u32 item, EntityId cls,
   }
   // Sema does not carry an alignment attribute through `decltype` of a variable declared with an
   // attributed alias, so such a field's layout is not known here (#1167).
+  // Only the declaration's specifiers, before its first declarator, are inspected; an alias
+  // declared elsewhere is #1167's.
   for (const sema::FieldRec& field : rec.fields) {
     const auto member = std::ranges::find(members, field.entity, &ast::MemberRec::entity);
-    if (member == members.end()) return std::nullopt;
+    if (member == members.end()) continue;
     const auto& source = items_->items[index(member->decl.item)];
-    if (std::ranges::contains(std::span(r_->tokens).subspan(source.begin, source.end - source.begin), lex::Tk::kw_decltype,
+    const u32 specifiers = source.names.empty() ? source.end - source.begin : source.names.front().offset;
+    if (std::ranges::contains(std::span(r_->tokens).subspan(source.begin, specifiers), lex::Tk::kw_decltype,
                               &lex::Tok::kind))
       return std::nullopt;
   }
