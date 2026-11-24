@@ -3239,6 +3239,16 @@ What the process allocates, attributed to the engine's cells, in the trace and t
   An explicit specialization's base-clause is an ordinary class's, and a partial
   specialization's is a primary template's, substituted with the arguments deduced for it;
   another specialization of the same template can be a base (#1134).
+  A base's template argument can be a value-dependent expression with no `VDep*` form
+  (`BC<T::value>`, `BC<!bool(T::value)>`, `cond_t<!bool(B1::value) || sizeof...(Bn) == 0, …>`).
+  `template_value` gives it the placeholder `VDepParam{dependent_depth, 0}`, and the base is parsed
+  again with the arguments bound (`instantiate_base`). A pack expansion of such an argument
+  (`PS<T::k...>`) and the same template-id outside a base (`BC<!T::value>::value` in a member) need
+  #209's representation (#308).
+- **Functional casts as template arguments** (`function_type_argument_ahead`): `int(…)` is a
+  type-id only if it can be a function type; `bool(x) || y`, `int(3) + 1` and `bool(T::value)`
+  are expressions ([temp.arg.general]/2). Shapes such as `bool(&g)` and `int((n))` are #1190, and
+  `R(A...)` with a type parameter `R` is #1186.
 - **Layout** (`ast::record_layout`, Itanium C++ ABI §2.4):
   - bases first, in declaration order; an empty base at offset 0 unless another subobject of its
     type is there;
