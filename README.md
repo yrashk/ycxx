@@ -631,6 +631,9 @@ written default member initializer are value-initialized.
 - ordinary namespace-scope `consteval` definitions with neither static locals nor closures
   can supply compile-time results without requiring a native function body.
   [#1006](https://github.com/yrashk/ycxx/issues/1006)
+  Nonvirtual `consteval` member functions and function template specializations with the
+  same body restrictions also link without a native definition when used only in constant
+  evaluation. [#1097](https://github.com/yrashk/ycxx/issues/1097)
   `consteval` constructors work, including the implicit conversion libycxx's comparison
   categories use for their literal `0` operand, and `constexpr` and `consteval` constructors of
   classes without bases or class-typed fields evaluate at compile time.

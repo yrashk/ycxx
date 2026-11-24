@@ -2357,7 +2357,8 @@ std = 'C++20'
 ftm = '__cpp_consteval'
 detect = '\bconsteval\s+(?!\{)'
 status = 'done'
-issues = [102]
+issues = [102, 1097]
+note = 'Nonvirtual immediate members and function template specializations with neither a closure nor a static local can omit native code when only constant evaluation uses them.'
 probe = '''
 consteval int sq(int x) { return x * x; }
 int main() { return sq(3) - 9; }
