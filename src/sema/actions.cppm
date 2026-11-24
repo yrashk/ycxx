@@ -4172,7 +4172,18 @@ public:
   // ([class.access]/4); diagnosed if not, or deferred as a nested type's check is.
   void member_template_access(QualType q, EntityId templ, NameId n, u32 at) {
     if (!types().is_class(q) || types().is_dependent(q)) return;
-    const EntityId naming = types().class_of(q), owner = w_->entities.rec(templ).scope;
+    check_member_template_access(types().class_of(q), templ, n, at);
+  }
+  // Unqualified lookup can find a member template before the naming class is complete
+  // ([class.access.general], [class.access.base]). Its declaration still supplies the access.
+  void unqualified_type_template_access(const ast::DeclSema& tmpl, NameId n, u32 at) {
+    if (current_class == EntityId::none || tmpl.kind != ast::DeclKind::type_alias || !(tmpl.flags & decl_flag::member))
+      return;
+    const ClassPrefixScope prefix(*this, current_class, static_initializer_name_);
+    check_member_template_access(current_class, tmpl.entity, n, at);
+  }
+  void check_member_template_access(EntityId naming, EntityId templ, NameId n, u32 at) {
+    const EntityId owner = w_->entities.rec(templ).scope;
     const ClassRec* cr = class_rec(owner);
     if (!cr) return;
     if (defer_type_access && (!accessible(owner, cr->access_of(templ), naming) || !accessible_naming_base(naming, owner))) {
@@ -4185,7 +4196,8 @@ public:
   QualType dependent_member_template_id(QualType q, NameId name, std::span<const TemplateArg> args) {
     return types().dep_template(q, name, ast::DepNameForm::template_id, args);
   }
-  std::optional<TemplateArg> template_name_arg(std::optional<EntityId> ns, NameId name) {
+  std::optional<TemplateArg> template_name_arg(std::optional<EntityId> ns, NameId name,
+                                                std::optional<u32> at = std::nullopt) {
     if (!ns)
       if (const ast::TemplateParamSema* p = template_param(name)) {
         if (p->kind != ast::TemplateArgKind::template_) return std::nullopt;
@@ -4201,6 +4213,7 @@ public:
     }
     auto t = ns ? namespace_type_template(*ns, name) : type_template(name);
     if (!t) return std::nullopt;
+    if (!ns && at) unqualified_type_template_access(*t, name, *at);
     return TemplateArg{ast::TemplateArgKind::template_, QualType{}, ConstId::none, {}, t->entity};
   }
   // The argument a template parameter named here stands for: its argument, or for a pack the
