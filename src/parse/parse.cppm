@@ -9161,7 +9161,8 @@ bool Program::class_rtti_declaration_has_unapplied_abi(EntityId cls, u32 k) cons
   const auto& item = items_->items[k];
   const bool definition = item.kind == ItemKind::class_def;
   const u32 head_end = definition ? item.brace_begin : item.end;
-  return r_->first_visibility_pragma || has_unapplied_declaration_attributes(cls) || in_attributed_namespace(k) ||
+  return r_->first_visibility_pragma || r_->has_clang_attribute_pragma ||
+         has_unapplied_declaration_attributes(cls) || in_attributed_namespace(k) ||
          layout_attribute(*r_, item.begin, head_end, LayoutAttributes::any) ||
          (definition && layout_attribute(*r_, item.brace_end, item.end, LayoutAttributes::any));
 }
