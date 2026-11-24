@@ -499,12 +499,20 @@ struct SourceLine {
   u32 lexical_line;
 };
 
-// A default expression that observes the invocation line, including through nested defaults.
-// The declaration leaves the line unset. Use of the argument supplies a presumed line.
-struct SourceLineContext {
+// A source-location descriptor pointer in a default argument. Its value is bound at the call.
+struct SourceLocation {
+  ExprInfo info;
+};
+
+// A default expression that observes the invocation site, including through nested defaults.
+// The declaration records the observations; use of the argument supplies the values.
+struct DefaultSourceContext {
   ExprInfo info;
   [[=sequenced]] Child arg;
-  u32 line;
+  bool observes_line = false;
+  u32 line = 0;
+  EntityId descriptor_type = EntityId::none;
+  ConstId descriptor_address = ConstId::none;
 };
 
 // ---------------------------------------------------------------- declarations (item trees)
@@ -622,7 +630,7 @@ using Nodes = closed_list<Literal, DeclRef, Paren, Unary, Binary, OrderedBinary,
                           StaticInit, StaticVar, NewObject, DeleteObject, VariadicBuiltin, AssignmentCall,
                           NewArray, DeleteArray, DelegatingInit, VirtualMemberCall, Throw, TryBlock, Handler,
                           DefaultMemberInit, ExplicitDestroy, PeerRootInit, DynamicCastVoid, DynamicCastPointer, Asm,
-                          ConstantProbe, ThreeWay, SourceLine, SourceLineContext>;
+                          ConstantProbe, ThreeWay, SourceLine, DefaultSourceContext, SourceLocation>;
 
 static_assert(Nodes::size < max_node_kinds);
 

@@ -52,7 +52,7 @@ struct BodyAt {
 
 // The region as sema reads it (#947): its tokens without byte offsets, expansion sites,
 // `space_before` flags or error details. Each token keeps its file for grouping a header's items.
-// A unit with __builtin_LINE also observes its presumed lines (#327).
+// Source-location builtins also observe their presumed positions (#327).
 struct PpTokens {
   using Key = pp::FileId;
   using Value = pp::Region;
@@ -109,7 +109,7 @@ struct FrontResult {
 engine::SourceSpan tu_span(const engine::Db& db, TuId tu);
 
 // One translation unit from its source file (`TuSource::file`), analysed, from `PpTokens` and the
-// items. Only units with the source-line builtin depend on presumed line numbers.
+// items. Only units with a source-location builtin depend on presumed positions.
 struct TuSema {
   using Key = TuId;
   using Value = SemaResult;
@@ -2112,6 +2112,8 @@ engine::query_task<pp::Region> PpTokens::run(engine::Ctx& cx, pp::FileId file) {
   out.locs.resize(full.locs.size());
   for (std::size_t i = 0; i < full.locs.size(); ++i) out.locs[i].file = full.site(i).file;
   out.presumed_lines = full.presumed_lines;
+  out.presumed_sites = full.presumed_sites;
+  out.presumed_files = full.presumed_files;
   out.names = full.names;
   out.literals = full.literals;
   out.files = full.files;
