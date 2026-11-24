@@ -502,9 +502,13 @@ written default member initializer are value-initialized.
   definitions in namespace-scope classes and class templates, and friend function templates
   defined there, are found by argument-dependent lookup or through a matching namespace
   declaration. [#259](https://github.com/yrashk/ycxx/issues/259)
-  A non-template class can default `operator==` as a member or a friend. `!=` and reversed `==`
-  then use it as rewritten candidates. Defaulted `<=>` is not done yet.
-  [#295](https://github.com/yrashk/ycxx/issues/295)
+  A non-template class can default `operator==` and `operator<=>` as a member or a friend, and a
+  defaulted `auto operator<=>` returns the common comparison category. `a <=> b` works on
+  arithmetic, enumeration and object pointer operands and with a user-declared `operator<=>`.
+  `!=`, reversed `==`, `<`, `<=`, `>` and `>=` are rewritten from `==` and `<=>`. The `==` a
+  defaulted `<=>` declares implicitly, and conversions between comparison categories, are not done
+  yet. [#295](https://github.com/yrashk/ycxx/issues/295) · [#1196](https://github.com/yrashk/ycxx/issues/1196) ·
+  [#339](https://github.com/yrashk/ycxx/issues/339)
 - explicit specialization of a class template's written nonvirtual destructor selects the specialized
   destructor for that class instance. The specialization's declaration determines its inline status.
   [#1027](https://github.com/yrashk/ycxx/issues/1027)
