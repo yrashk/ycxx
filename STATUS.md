@@ -3193,10 +3193,14 @@ and reports external tool execution between workspace query attempts.
 plan between runs for changes to the definition, generator inputs, and glob
 matches. It continues after a failed run.
 
+`ycxx show <target>` uses the same resolver without executing any actions
+(#1256). It shows verbatim source, resolved facts with their declaration
+locations, or a semantic diff against a saved JSON snapshot. The HTML report
+includes the resolved plan and its definition.
+
 The initial build accepts a fixed host toolchain and explicit generator inputs.
 It checks host tool identity before admitting a receipt, and compares the resolved
-plan again before publishing. Rule packages, richer project configurations and
-resolved plan inspection are tracked under #1256, #1257 and #1259.
+plan again before publishing. Rule packages and richer project configurations are tracked under #1257 and #1259.
 
 ## The engine trace (#245, 2026-11-19)
 

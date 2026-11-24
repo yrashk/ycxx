@@ -68,3 +68,5 @@ add_test(NAME daemon.engine_snapshot
 add_test(NAME daemon.project_build COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/project_build.py $<TARGET_FILE:ycxxc>)
 
 add_test(NAME daemon.project_build_watch COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/project_build_watch.py $<TARGET_FILE:ycxxc>)
+
+add_test(NAME daemon.project_inspection COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/project_inspection.py $<TARGET_FILE:ycxxc>)
