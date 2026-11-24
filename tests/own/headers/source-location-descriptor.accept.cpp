@@ -1,4 +1,5 @@
 // #327: the pinned library's private descriptor has two pointers and two unsigned fields.
+// FLAGS: -isystem ../../../deps/libycxx/include
 #include <source_location>
 
 static_assert(sizeof(*__builtin_source_location()) ==

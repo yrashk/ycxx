@@ -1,4 +1,5 @@
 // #327 [support.srcloc]: the library's ordinary current() default captures its call site.
+// FLAGS: -isystem ../../../deps/libycxx/include ../../../deps/libycxx/src/runtime/linkage/static.cpp
 #include <source_location>
 
 bool same_text(const char* actual, const char* expected) {

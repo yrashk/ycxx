@@ -162,6 +162,12 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_
   add_test(NAME unit.linux_builtin_line
     COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/linux_builtin_line.py
             $<TARGET_FILE:ycxxc> ${PROJECT_SOURCE_DIR}/tests/own/builtins/builtin-line.run.cpp)
+  # PARITY: by design: the own run test covers Darwin. This links its x86-64 ELF object
+  # with the native Linux driver (#327).
+  add_test(NAME unit.linux_source_location_descriptor
+    COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/linux_source_location_descriptor.py
+            $<TARGET_FILE:ycxxc> ${CMAKE_CXX_COMPILER} ${PROJECT_SOURCE_DIR}/deps/libycxx
+            ${PROJECT_SOURCE_DIR}/tests/own/headers/source-location-descriptor.run.cpp)
   # PARITY: by design: links and runs x86-64 ELF objects with native peers.
   add_test(NAME unit.linux_virtual_member_final
     COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/linux_virtual_member_final.py

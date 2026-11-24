@@ -12,8 +12,35 @@ constexpr unsigned observed_column = 39;
 #else
 constexpr unsigned observed_column = 10;
 #endif
+--- source-location.hpp
+namespace std { inline namespace __y1 {
+
+struct source_location {
+private:
+  struct __impl {
+    const char* _M_file_name;
+    const char* _M_function_name;
+    unsigned _M_line;
+    unsigned _M_column;
+  };
+
+  const __impl* value = nullptr;
+
+public:
+  static consteval source_location current(const void* p = __builtin_source_location()) noexcept {
+    source_location location;
+    location.value = static_cast<const __impl*>(p);
+    return location;
+  }
+
+  constexpr unsigned line() const noexcept { return value->_M_line; }
+  constexpr unsigned column() const noexcept { return value->_M_column; }
+  constexpr const char* file_name() const noexcept { return value->_M_file_name; }
+};
+
+}}
 --- observed.hpp
-#include <source_location>
+#include "source-location.hpp"
 #line 700 "alpha-source.cpp"
 constexpr std::source_location observe() {
   return std::source_location::current();
@@ -26,7 +53,7 @@ static_assert(observe().line() == 701);
 static_assert(observe().column() == observed_column); //! error
 static_assert(observe().file_name()[0] == 'a');
 --- observed.hpp
-#include <source_location>
+#include "source-location.hpp"
 #line 700 "alpha-source.cpp"
 constexpr std::source_location observe() {
     return std::source_location::current();
@@ -39,7 +66,7 @@ static_assert(observe().line() == 701); //! error
 static_assert(observe().column() == observed_column); //! error
 static_assert(observe().file_name()[0] == 'a');
 --- observed.hpp
-#include <source_location>
+#include "source-location.hpp"
 #line 700 "alpha-source.cpp"
 constexpr std::source_location observe() {
 
@@ -53,7 +80,7 @@ static_assert(observe().line() == 701); //! error
 static_assert(observe().column() == observed_column); //! error
 static_assert(observe().file_name()[0] == 'a'); //! error
 --- observed.hpp
-#include <source_location>
+#include "source-location.hpp"
 #line 700 "beta-source.cpp"
 constexpr std::source_location observe() {
 
@@ -67,7 +94,7 @@ static_assert(observe().line() == 701);
 static_assert(observe().column() == observed_column);
 static_assert(observe().file_name()[0] == 'a');
 --- observed.hpp
-#include <source_location>
+#include "source-location.hpp"
 #line 700 "alpha-source.cpp"
 constexpr std::source_location observe() {
   return std::source_location::current();
