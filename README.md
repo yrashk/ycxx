@@ -694,6 +694,9 @@ The driver and editor recognize `-Wall`, `-Wextra` and the sized-deallocation an
 warning controls used by freestanding libycxx. `-Wno-multichar` suppresses the
 multicharacter-literal warning. [#1014](https://github.com/yrashk/ycxx/issues/1014)
 
+`ycxx cxx` reports the text of `#error` and `#warning` directives in source files and included
+headers. [#172](https://github.com/yrashk/ycxx/issues/172)
+
 `ycxx -dumpmachine` prints the selected target triple and `ycxx -print-file-name=include` prints
 its compiler resource include directory. Both accept `--target` and run without a project.
 [#970](https://github.com/yrashk/ycxx/issues/970)

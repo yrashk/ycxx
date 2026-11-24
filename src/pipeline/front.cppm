@@ -2029,7 +2029,7 @@ engine::query_task<FrontResult> TuFront::run(engine::Ctx& cx, TuId tu) {
     for (const engine::DiagArg& a : d.args) args.push_back(a.raw);
     const auto f = static_cast<std::uint16_t>(lex::file_level - d.at.item);
     const auto spec = lex::message_of(*kind);
-    Message m{d.at.offset, spec.severity == lex::Severity::error, lex::render(*kind, args),
+    Message m{d.at.offset, spec.severity == lex::Severity::error, pp::render_diagnostic(region, *kind, args),
               locations.at({f, 0, d.at.offset}), 0, spec.warning};
     // The first token at or after the position in its file, else (a header of only directives)
     // the first token of a file included after it (files are numbered as they are first met).
