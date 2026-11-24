@@ -713,6 +713,7 @@ struct MemberDeclRec {
   EntityId overridden_virtual = EntityId::none;
   bool is_final = false;
   bool is_pure = false;
+  bool is_consteval = false;  // an immediate function ([dcl.constexpr])
 };
 
 struct NestedType {
@@ -1112,6 +1113,37 @@ private:
   bool has_virtual_layouts_ = false;
 };
 
+// The C library functions builtins call (`lex::BuiltinFunction::library`, `World::string_function`),
+// with the C library's signatures. The search functions return `char*` from a `const char*`, as in
+// C: the C++ library's const-correct overloads are its own functions ([cstring.syn]).
+enum class CType : u8 { int_, size, void_pointer, const_void_pointer, char_pointer, const_char_pointer };
+struct StringFunction {
+  std::string_view name;
+  CType result;
+  std::array<CType, 3> params;
+  u8 arity = 3;
+};
+inline constexpr std::array string_functions{
+    StringFunction{"memchr", CType::void_pointer, {CType::const_void_pointer, CType::int_, CType::size}},
+    StringFunction{"memcmp", CType::int_, {CType::const_void_pointer, CType::const_void_pointer, CType::size}},
+    StringFunction{"memcpy", CType::void_pointer, {CType::void_pointer, CType::const_void_pointer, CType::size}},
+    StringFunction{"memmove", CType::void_pointer, {CType::void_pointer, CType::const_void_pointer, CType::size}},
+    StringFunction{"memset", CType::void_pointer, {CType::void_pointer, CType::int_, CType::size}},
+    StringFunction{"strchr", CType::char_pointer, {CType::const_char_pointer, CType::int_}, 2},
+    StringFunction{"strpbrk", CType::char_pointer, {CType::const_char_pointer, CType::const_char_pointer}, 2},
+    StringFunction{"strrchr", CType::char_pointer, {CType::const_char_pointer, CType::int_}, 2},
+    StringFunction{"strstr", CType::char_pointer, {CType::const_char_pointer, CType::const_char_pointer}, 2},
+};
+constexpr const StringFunction* string_function_named(std::string_view name) {
+  for (const StringFunction& f : string_functions)
+    if (f.name == name) return &f;
+  return nullptr;
+}
+// Every library builtin has a signature.
+static_assert(std::ranges::all_of(lex::builtin_functions, [](const lex::BuiltinFunctionInfo& b) {
+  return b.function != lex::BuiltinFunction::library || string_function_named(lex::library_function_name(b));
+}));
+
 // The ordinary implicit allocation signatures at global scope ([basic.stc.dynamic]).
 // The single-object and array operators share these shapes and the target's size_t.
 enum class AllocationFunction : u8 {
@@ -1188,8 +1220,45 @@ struct World {
     if (allocation_has_alignment(f)) params[count++] = types.enum_type(alignment_enum());
     QualType type = types.function(allocating ? void_pointer : void_type, std::span(params).first(count),
                                    false, LangLinkage::cxx, Cv::none, ast::RefQual::none, !allocating);
+    return implicit_function(entities.entity({.kind = EntityKind::function, .name = ins.names.intern(allocation_name(f, array)),
+                                              .type = type}),
+                             type);
+  }
+
+  // The C library function a builtin calls (docs/EXTENSIONS.md), declared at global scope with
+  // C language linkage and the C library's signature (`string_functions`). Its exception
+  // specification is the target's `<string.h>`'s, so a written declaration or definition of the
+  // function is the same entity, with one symbol ([dcl.link]): glibc's `__THROW` is
+  // `noexcept(true)` in C++, the macOS SDK's declarations have none.
+  ast::DeclSema string_function(const StringFunction& f) {
+    const auto c_type = [&](CType t) {
+      const QualType void_type = types.builtin(Builtin::void_);
+      const QualType char_type = types.builtin(Builtin::char_);
+      switch (t) {
+        case CType::int_: return types.builtin(Builtin::int_);
+        case CType::size: return types.builtin(target.size_type);
+        case CType::void_pointer: return types.pointer(void_type);
+        case CType::const_void_pointer: return types.pointer(types.add_cv(void_type, Cv::const_));
+        case CType::char_pointer: return types.pointer(char_type);
+        case CType::const_char_pointer: return types.pointer(types.add_cv(char_type, Cv::const_));
+      }
+      std::unreachable();
+    };
+    std::vector<QualType> params;
+    for (CType t : std::span(f.params).first(f.arity)) params.push_back(c_type(t));
+    const bool nonthrowing = target.operating_system == ast::OperatingSystem::linux_;
+    const QualType type = types.function(c_type(f.result), params, false, LangLinkage::c, Cv::none,
+                                         ast::RefQual::none, nonthrowing);
+    ast::DeclSema d = implicit_function(
+        entities.entity({.kind = EntityKind::function, .name = ins.names.intern(f.name), .type = type, .lang = LangLinkage::c}),
+        type);
+    d.has_written_noexcept = nonthrowing;
+    return d;
+  }
+
+  ast::DeclSema implicit_function(EntityId entity, QualType type) {
     ast::DeclSema d{};
-    d.entity = entities.entity({.kind = EntityKind::function, .name = ins.names.intern(allocation_name(f, array)), .type = type});
+    d.entity = entity;
     d.type = type;
     d.kind = ast::DeclKind::function;
     d.linkage = ast::Linkage::external;

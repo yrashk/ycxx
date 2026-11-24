@@ -171,6 +171,7 @@ enum class Diag : std::uint32_t {
   constexpr_uninitialized [[=message{Severity::error, "constexpr variable '{0:n}' must be initialized"}]],
   constexpr_specifiers [[=message{Severity::error, "at most one of 'constexpr', 'consteval' and 'constinit' may appear"}]],
   consteval_not_function [[=message{Severity::error, "'consteval' can only declare a function"}]],
+  consteval_destructor [[=message{Severity::error, "a destructor cannot be 'consteval'"}]],
   constinit_automatic [[=message{Severity::error, "'constinit' can only declare a variable with static storage duration"}]],
   constinit_function [[=message{Severity::error, "'constinit' can only declare a variable"}]],
   expected_string_literal [[=message{Severity::error, "expected a string literal"}]],

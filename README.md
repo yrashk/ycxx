@@ -73,6 +73,14 @@ YCXX_BUILD_DIR=build-release tools/build`, [docs/BUILDING.md](docs/BUILDING.md#r
 builds and passes its tests on both hosts, and compiles a 40,000-statement function in 0.4 s
 instead of Debug's 5.3 s on an M-series Mac ([#726](https://github.com/yrashk/ycxx/issues/726)).
 
+**Check YCXX Policies.** Opt in with `-fcheck-policies` in a syntax check or a
+build. YCXX checks registered resource policies across branches and loops, ends shared borrows
+after their last reachable use, and verifies declared effect bounds and usage grades across direct
+calls in checked sources and explicit objects. Applications can compose typed C++ declarations
+and reflection annotations. The standalone C++20 package provides runtime ownership guards, scoped
+capability tokens, effect budgets, and scoped handlers for GCC and Clang builds.
+[YCXX Policies package](packages/ycxx-policies/README.md)
+
 Single-expression `auto(x)` and `auto{x}` perform scalar and pointer decay-copy, including
 array and function decay. Non-type template parameters can have enumeration types
 ([#774](https://github.com/yrashk/ycxx/issues/774)). Function-template bodies can defer supported dependent operands to
@@ -130,8 +138,10 @@ effect. [#982](https://github.com/yrashk/ycxx/issues/982)
 Fixed-prototype calls (free and member functions, lambdas, function templates and calls
 through pointers) support passing and returning nonempty flat records with integral,
 ordinary object-pointer or object lvalue-reference fields by value. The record can occupy up to
-16 bytes and must be trivial for calls. Larger results and classes that are not trivial for
-calls (with a user-provided copy constructor or destructor) pass through memory, as on macOS. [Linux integer aggregate ABI](docs/design/linux-integer-aggregates.md)
+16 bytes and must be trivial for calls. Fixed direct calls also support ordinary one-byte empty
+classes as parameters. Larger results and classes that are not trivial for calls (with a
+user-provided copy constructor or destructor) pass through memory, as on macOS.
+[Linux integer aggregate ABI](docs/design/linux-integer-aggregates.md)
 
 Static x86-64 Linux executables resolve `R_X86_64_GOTPCREL` through GOT slots. A slot for an
 unresolved weak symbol contains zero. [#979](https://github.com/yrashk/ycxx/issues/979)
@@ -211,10 +221,11 @@ support those addresses. [#414](https://github.com/yrashk/ycxx/issues/414)
 On both targets, direct calls and saved pointers across translation units share one address for
 simple external inline functions, with ycxx's linker or the system's. Ordinary namespace-scope
 functions can use GNU hidden visibility, including coalesced inline and `constexpr` definitions.
-On Linux x86-64, ordinary external non-inline namespace variables also preserve GNU hidden
-visibility across declarations.
+Ordinary external non-inline namespace variables also preserve GNU hidden visibility across
+declarations.
 [#422](https://github.com/yrashk/ycxx/issues/422) · [#602](https://github.com/yrashk/ycxx/issues/602)
 · [#124](https://github.com/yrashk/ycxx/issues/124) · [#936](https://github.com/yrashk/ycxx/issues/936)
+· [#1085](https://github.com/yrashk/ycxx/issues/1085)
 
 Both targets also link eligible in-class nonvirtual functions of namespace-scope class-template
 specializations across objects. Members of a specialization with a translation-unit-local type
@@ -233,13 +244,14 @@ A fixed pointer parameter can also take a whole-object address converted to cv `
 the address of an array completed after its first declaration.
 [#1070](https://github.com/yrashk/ycxx/issues/1070)
 
-On Linux x86-64, an ordinary external namespace-scope function can use GNU `weak` so a
+On both targets, an ordinary external namespace-scope function can use GNU `weak` so a
 strong definition in another object takes precedence. This covers the pinned libycxx
 debugger provider. [#937](https://github.com/yrashk/ycxx/issues/937)
+· [#1085](https://github.com/yrashk/ycxx/issues/1085)
 
-On Linux x86-64, an ordinary external non-inline function can inherit GNU visibility
+On both targets, an ordinary external non-inline function can inherit GNU visibility
 from its enclosing namespace declaration and use it at an out-of-line definition.
-[#940](https://github.com/yrashk/ycxx/issues/940)
+[#940](https://github.com/yrashk/ycxx/issues/940) · [#1085](https://github.com/yrashk/ycxx/issues/1085)
 
 On Linux x86-64, namespace-scope `asm((expression));` can apply one `.hidden` directive to
 an ordinary ELF symbol. The expression supplies constant-evaluated `size()` and `data()`
@@ -296,11 +308,12 @@ arrays of supported scalar types, including arithmetic on saved pointers just pa
 
 Both targets support `constexpr` constructors in class definitions and plain out-of-class
 definitions for runtime construction. Ordinary in-class constructor declarations support
-bare `explicit`. An ordinary class can explicitly default its copy constructor as its first
+bare `explicit`. Eligible inline constructors link across separate objects on both targets.
+An ordinary class can explicitly default its copy constructor as its first
 declaration and use it for trivial member copies. A non-template empty tag class at namespace
 scope with no bases and an implicit trivial destructor can first declare `T() = default`
 in class and use it to initialize an `inline constexpr` tag object.
-[#157](https://github.com/yrashk/ycxx/issues/157)
+[#157](https://github.com/yrashk/ycxx/issues/157) · [#1096](https://github.com/yrashk/ycxx/issues/1096)
 
 An explicit class return can select a written move constructor for an eligible named local
 or parameter. [#749](https://github.com/yrashk/ycxx/issues/749)
@@ -548,14 +561,17 @@ written default member initializer are value-initialized.
 - `__is_assignable`, `__is_nothrow_assignable` and `__is_trivially_assignable` for arithmetic
   operands, including dependent operands in supported class-template bases and variable-template
   initializers. [Extension guide](docs/EXTENSIONS.md) · [#218](https://github.com/yrashk/ycxx/issues/218)
-- `__is_convertible` and `__is_nothrow_convertible` for arithmetic values, arithmetic references
-  and cv `void`, including dependent operands in the same template contexts.
+- `__is_convertible` and `__is_nothrow_convertible` for arithmetic values, arithmetic references,
+  cv `void` and object pointers (derived-to-base, `void*`, added qualifiers, `bool`), including
+  dependent operands in the same template contexts.
   [Extension guide](docs/EXTENSIONS.md) · [#218](https://github.com/yrashk/ycxx/issues/218)
 - `__reference_converts_from_temporary` and `__reference_constructs_from_temporary` for arithmetic
   and reference-related class operands. [#218](https://github.com/yrashk/ycxx/issues/218)
 - `__is_base_of` for known class hierarchies, including private and ambiguous bases and dependent
-  operands in supported class-template bases, variable-template initializers and function template
-  bodies.
+  operands in supported class-template bases, variable-template initializers, function template
+  bodies and atomic constraints (concepts and requires-clauses, nested-requirements inside them
+  included), as libycxx's `std::derived_from` needs. The other convertibility, assignability,
+  constructibility and destructibility traits defer dependent operands in constraints too.
   [Extension guide](docs/EXTENSIONS.md) · [#218](https://github.com/yrashk/ycxx/issues/218)
 - `__is_empty`, `__is_standard_layout`, and `__is_final` accept dependent operands in supported
   class-template bases and variable-template initializers. The emptiness query accounts for
@@ -595,6 +611,10 @@ written default member initializer are value-initialized.
 - ordinary namespace-scope `consteval` definitions with neither static locals nor closures
   can supply compile-time results without requiring a native function body.
   [#1006](https://github.com/yrashk/ycxx/issues/1006)
+  `consteval` constructors work, including the implicit conversion libycxx's comparison
+  categories use for their literal `0` operand, and `constexpr` and `consteval` constructors of
+  classes without bases or class-typed fields evaluate at compile time.
+  [#102](https://github.com/yrashk/ycxx/issues/102)
   A constant evaluation can bypass a block-scope static aggregate. [#872](https://github.com/yrashk/ycxx/issues/872)
   Scalar enumeration values work in constexpr variables, calls, casts and switch conditions.
   A flat static constexpr aggregate member initialized with `T{...}` has addressable storage
@@ -623,6 +643,11 @@ written default member initializer are value-initialized.
   without executing it. [#1065](https://github.com/yrashk/ycxx/issues/1065)
   `__builtin_strlen`, used by libycxx's exception headers, scans character storage in constant
   expressions and native code. [#531](https://github.com/yrashk/ycxx/issues/531)
+  `__builtin_memchr`, `__builtin_memcmp`, `__builtin_memcpy`, `__builtin_memmove`,
+  `__builtin_memset`, `__builtin_strchr`, `__builtin_strpbrk`, `__builtin_strrchr` and
+  `__builtin_strstr`, used by libycxx's `<cstring>`, string searches and containers, call the
+  C library's functions at run time. [#248](https://github.com/yrashk/ycxx/issues/248)
+  [#1093](https://github.com/yrashk/ycxx/issues/1093)
 - `extern "C"` functions from libSystem, including `printf` with integers, characters,
   floating values, pointers and strings as arguments, and the SDK `<math.h>`'s built-ins
   (`__builtin_fabs`, `__builtin_inf`, `__builtin_huge_val`, `__builtin_nan`).

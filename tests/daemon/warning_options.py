@@ -141,6 +141,37 @@ def compile_database(world, scope):
     expect(editor.finish(), 0, 'warning option LSP shutdown')
 
 
+def policy_compile_database(world, scope):
+    repo = Path(__file__).resolve().parents[2]
+    unit = scope / 'policy_editor.cpp'
+    source = LITERAL + (repo / 'examples/policies/last_use.cpp').read_text()
+    unit.write_text(source)
+    database = scope / 'compile_commands.json'
+    editor = Editor(world, scope)
+    version = 0
+    for target in (LINUX, '--target=arm64-apple-darwin'):
+        for policy, warning in ((True, False), (True, True), (False, True), (True, False)):
+            version += 1
+            args = ['c++', target, '-std=c++26', '-I', str(repo / 'packages/ycxx-policies/include'),
+                    '-DYCXX_DEMO_LOOP_USE_AFTER_CLOSE', '-Wmultichar' if warning else '-Wno-multichar']
+            if policy:
+                args.append('-fcheck-policies')
+            args += ['-c', unit.name, '-o', 'policy.o']
+            database.write_text(json.dumps([{'directory': str(scope), 'file': unit.name, 'arguments': args}]))
+            if version == 1:
+                editor.open(unit, source)
+            else:
+                editor.change(unit, source, version)
+            context = f'{target} policy and warning options, version {version}'
+            diagnostics = editor.diagnostics(unit, version, context)
+            expected = ([1] if policy else []) + ([2] if warning else [])
+            assert diagnostics is not None and sorted(d[2] for d in diagnostics) == expected, (context, diagnostics)
+            if policy:
+                assert any('may still have a live shared borrow' in message
+                           for _, _, _, message in diagnostics), diagnostics
+    expect(editor.finish(), 0, 'policy and warning option LSP shutdown')
+
+
 def main():
     world = Env(str(Path(sys.argv[1]).resolve()))
     scope = world.scope.resolve()
@@ -149,7 +180,8 @@ def main():
     try:
         pid = command_line(world, scope)
         compile_database(world, scope)
-        world.same_daemon('warning options and compile database', pid)
+        policy_compile_database(world, scope)
+        world.same_daemon('warning and policy options in compilation databases', pid)
     finally:
         world.close()
     return bool(failures)

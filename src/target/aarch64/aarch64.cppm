@@ -351,7 +351,19 @@ std::expected<obj::object, CodegenError> assemble(std::string name, std::span<co
       if (!missing) missing = s.error();
       return 0;
     }
-    std::uint32_t i = o.reference((*s)->name);
+    // Another entity may define the name: a builtin's implicit C declaration and a written
+    // definition of another type are two entities with one symbol (#1095). Name the strong
+    // definition where a weak one shares its spelling (#694), as the linker resolves it.
+    auto defines = [&](const obj::symbol& d) {
+      return d.defined() && d.bind != obj::binding::local && d.name_view() == (*s)->name;
+    };
+    auto defined = o.symbols.end();
+    if ((*s)->bind != obj::binding::local) {
+      defined = std::ranges::find_if(o.symbols, [&](const obj::symbol& d) { return defines(d) && !d.weak; });
+      if (defined == o.symbols.end()) defined = std::ranges::find_if(o.symbols, defines);
+    }
+    const std::uint32_t i = defined != o.symbols.end() ? static_cast<std::uint32_t>(defined - o.symbols.begin())
+                                                        : o.reference((*s)->name);
     symbol_of[ir::raw(e)] = i;
     return i;
   };
@@ -388,7 +400,11 @@ std::expected<obj::object, CodegenError> assemble(std::string name, std::span<co
       auto& unwind = o.sections[*frames];
       auto fields = append_eh_frame(unwind, cies, f.code, personality);
       if (!fields) return std::unexpected(CodegenError{f.entity, fields.error()});
-      unwind.relocate(obj::reloc_kind::abs64, fn_symbol, -static_cast<std::int64_t>(fields->pc), fields->pc, frame_base);
+      // A weak definition's name may resolve to another object's code, but this FDE describes
+      // these bytes: name them with a local label (as the ELF path does).
+      const auto code = o.symbols[fn_symbol].weak ? o.define(std::format("ltmp_code_{}", base), obj::binding::local, *text, base)
+                                                  : fn_symbol;
+      unwind.relocate(obj::reloc_kind::abs64, code, -static_cast<std::int64_t>(fields->pc), fields->pc, frame_base);
       if (fields->lsda && tables) {
         auto table = cleanup_lsda(f.code);
         if (!table) return std::unexpected(CodegenError{f.entity, table.error()});

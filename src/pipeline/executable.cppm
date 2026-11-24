@@ -18,6 +18,8 @@ import ycxx.engine;
 export import ycxx.link;
 export import ycxx.link.elf;
 import :back;
+import :policies;
+import :policy_objects;
 
 export namespace ycxx::pipeline {
 
@@ -46,7 +48,7 @@ struct ProgramId {
 // A program in engine traces (#245): its output's name, once a session has named it.
 void trace_describe(std::string& out, ProgramId p);
 struct LinkOperand {
-  enum class Kind : std::uint8_t { source, object, archive };
+  enum class Kind : std::uint8_t { source, object, archive, darwin_runtime_archive };
   Kind kind;
   std::size_t index;  // into the corresponding input vector
 };
@@ -67,7 +69,17 @@ struct ProgramInputs {
   std::string identifier;
   std::optional<link::elf::dynamic_options> dynamic = std::nullopt;
   std::optional<ArchiveLinkInputs> archive_link = std::nullopt;
+  bool check_policies = false;
 };
+
+EffectVerification effect_link_verification(const ProgramInputs& in) {
+  if (in.dynamic) return EffectVerification::unavailable;
+  if (const auto& archive = in.archive_link;
+      archive && (archive->target != obj::target::aarch64_macos ||
+                  std::ranges::contains(archive->operands, LinkOperand::Kind::archive, &LinkOperand::kind)))
+    return EffectVerification::unavailable;
+  return in.objects.empty() ? EffectVerification::complete_sources : EffectVerification::deferred_objects;
+}
 struct [[=engine::input{engine::Durability::low}]] ProgramIn {
   using Key = ProgramId;
   using Value = ProgramInputs;
@@ -354,12 +366,39 @@ std::optional<std::string> write_file(const std::filesystem::path& path, std::sp
 engine::query_task<Linked> Link::run(engine::Ctx& cx, ProgramId p) {
   const ProgramInputs& in = cx.fetch<ProgramIn>(p);
   Linked out;
+  const auto effects = effect_link_verification(in);
+  if (in.check_policies && effects == EffectVerification::unavailable) {
+    out.errors.push_back("checked ownership links require explicit objects and source inputs");
+    co_return out;
+  }
   const auto tus = co_await cx.par_map<Tu>(in.tus);
   for (std::size_t i = 0; i < in.tus.size(); ++i) {
     if (!tus[i].get().object) out.errors.push_back(std::format("translation unit {} did not compile", in.tus[i].n));
   }
   if (!out.errors.empty()) co_return out;
 
+  std::vector<obj::object> checked_sources;
+  if (in.check_policies) {
+    const auto units = in.tus | std::views::transform(&TuId::n) | std::ranges::to<std::vector>();
+    const auto sources = universe().in->intern_seq<ast::u32>(units);
+    const auto keys = in.tus | std::views::transform([sources, effects](TuId unit) {
+      return PolicyCheckUnit{sources, unit, true, effects};
+    });
+    const auto policies = co_await cx.par_map<CheckPolicies>(keys);
+    checked_sources.reserve(tus.size());
+    for (std::size_t i = 0; i < policies.size(); ++i) {
+      const auto& policy = policies[i].get();
+      if (!policy.messages.empty()) {
+        for (const auto& message : policy.messages) out.errors.push_back(message.text);
+        continue;
+      }
+      // Tag each source object before the archive operands put it in command-line order.
+      auto& object = checked_sources.emplace_back(*tus[i].get().object);
+      if (auto error = embed_policy_contracts(object, tus[i].get(), policy.contracts))
+        out.errors.push_back(std::format("{}: {}", object.name, *error));
+    }
+    if (!out.errors.empty()) co_return out;
+  }
   std::vector<obj::object> objects;
   if (const auto& archive_link = in.archive_link) {
     if (in.dynamic) {
@@ -370,9 +409,14 @@ engine::query_task<Linked> Link::run(engine::Ctx& cx, ProgramId p) {
     operands.reserve(archive_link->operands.size());
     for (const auto [kind, index] : archive_link->operands) {
       switch (kind) {
-        case LinkOperand::Kind::source: operands.emplace_back(std::cref(*tus[index].get().object)); break;
+        case LinkOperand::Kind::source:
+          operands.emplace_back(std::cref(in.check_policies ? checked_sources[index] : *tus[index].get().object));
+          break;
         case LinkOperand::Kind::object: operands.emplace_back(std::cref(in.objects[index])); break;
-        case LinkOperand::Kind::archive: operands.emplace_back(std::cref(archive_link->archives[index])); break;
+        case LinkOperand::Kind::archive:
+        case LinkOperand::Kind::darwin_runtime_archive:
+          operands.emplace_back(std::cref(archive_link->archives[index]));
+          break;
       }
     }
     auto selected = archive_link->target == obj::target::x86_64_linux ? link::elf::select_archive_members(operands)
@@ -383,9 +427,16 @@ engine::query_task<Linked> Link::run(engine::Ctx& cx, ProgramId p) {
     }
     objects = std::move(*selected);
   } else {
+    objects = std::move(checked_sources);
     objects.reserve(in.tus.size() + in.objects.size());
-    for (const TuValue& t : tus) objects.push_back(*t.object);
+    if (!in.check_policies)
+      for (const TuValue& t : tus) objects.push_back(*t.object);
     objects.append_range(in.objects);
+  }
+  if (in.check_policies) {
+    // The Darwin selector retains the ordinary inputs as a prefix before runtime members.
+    out.errors = check_object_policies(objects, in.tus.size() + in.objects.size());
+    if (!out.errors.empty()) co_return out;
   }
   if (auto selection = link::elf::select_comdat_groups(objects, in.dynamic.has_value()); !selection) {
     out.errors.push_back(std::move(selection.error()));

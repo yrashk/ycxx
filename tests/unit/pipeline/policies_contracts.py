@@ -1,0 +1,1325 @@
+"""The same ownership metadata and runtime adapter work in both enforcement modes."""
+
+import json
+import os
+import pathlib
+import platform
+import resource
+import signal
+import subprocess
+import sys
+import tempfile
+import textwrap
+
+
+compiler, host, include, examples = sys.argv[1:]
+with tempfile.TemporaryDirectory() as directory:
+    root = pathlib.Path(directory)
+    native_linux = sys.platform == "linux" and platform.machine() in ("x86_64", "amd64")
+    native_darwin = sys.platform == "darwin" and platform.machine() in ("arm64", "aarch64")
+
+    def write(name, source):
+        path = root / name
+        path.write_text(textwrap.dedent(source))
+        return path
+
+    def syntax(*paths, error=None):
+        args = [compiler, "cxx", "--no-daemon", "-fcheck-policies", "-fsyntax-only",
+                "-I", include, "-I", examples, *map(str, paths)]
+        result = subprocess.run(args, text=True, capture_output=True, timeout=90)
+        if error is None:
+            assert result.returncode == 0, (args, result.stderr)
+        else:
+            assert result.returncode == 1 and error in result.stderr, (args, result.stderr)
+        return result.stderr
+
+    write("resource.hpp", """\
+        #pragma once
+        #include <ycxx/ownership.hpp>
+        namespace checkout {
+        namespace own = ycxx::ownership;
+        struct Ticket { int value; mutable int flag; };
+        Ticket acquire() noexcept;
+        void inspect(const Ticket&) noexcept;
+        void submit(Ticket&&) noexcept;
+        void submit(int) noexcept;
+        using Resource = own::policy<own::linear<Ticket>>;
+        }
+    """)
+    write("operations.hpp", """\
+        #pragma once
+        #include "resource.hpp"
+        namespace checkout {
+        using Submit = void (*)(Ticket&&) noexcept;
+        using Operations = own::policy<
+            own::creates<decltype(&acquire), &acquire>,
+            own::consumes<Submit, static_cast<Submit>(&submit)>>;
+        using ApplicationPolicy = own::policy<Resource, Operations, own::policy<Resource, Operations>>;
+        using Activated = own::use_policy<ApplicationPolicy>;
+        }
+    """)
+    syntax(write("valid.cpp", """\
+        #include "operations.hpp"
+        void valid() {
+          auto ticket = checkout::acquire();
+          checkout::submit(42);
+          checkout::submit(static_cast<checkout::Ticket&&>(ticket));
+        }
+    """))
+    syntax(write("unfinished.cpp", """\
+        #include "operations.hpp"
+        void unfinished() {
+          auto ticket = checkout::acquire();
+          checkout::submit(42);
+        }
+    """), error="linear resource 'ticket' may leave its scope")
+    syntax(write("inactive.cpp", """\
+        #include "resource.hpp"
+        void inactive() { checkout::acquire(); }
+    """))
+    conflict = syntax(write("conflict.cpp", """\
+        #include "operations.hpp"
+        using CompetingPolicy = ycxx::ownership::use_policy<ycxx::ownership::affine<checkout::Ticket>>;
+    """), error="conflicting ownership policies")
+    assert "conflict.cpp:2:" in conflict and "previous declaration at" in conflict and "resource.hpp:" in conflict, conflict
+    syntax(write("bad_signature.cpp", """\
+        #include "resource.hpp"
+        using Invalid = checkout::own::use_policy<checkout::Resource,
+            checkout::own::consumes<decltype(&checkout::acquire), &checkout::acquire>>;
+    """), error="ownership operation signature does not match")
+
+    mode = write("mode.cpp", """\
+        #include "resource.hpp"
+        using Mode = checkout::own::use_policy<checkout::Resource>;
+    """)
+    operations = write("operations.cpp", """\
+        #include "resource.hpp"
+        namespace checkout {
+        [[=own::operation::creates]] Ticket acquire() noexcept;
+        using Submit = void (*)(Ticket&&) noexcept;
+        using Terminal = own::use_policy<own::consumes<Submit, static_cast<Submit>(&submit)>>;
+        [[=own::operation::observes]] void inspect(const Ticket&) noexcept;
+        }
+    """)
+    caller = write("caller.cpp", """\
+        #include "resource.hpp"
+        void run() {
+          auto ticket = checkout::acquire();
+          const auto& view = ticket;
+          const auto& alias = view;
+          checkout::inspect(alias);
+          checkout::submit(static_cast<checkout::Ticket&&>(ticket));
+        }
+    """)
+    syntax(operations, error="ownership operation signature does not match")
+    syntax(mode, operations, caller)
+    syntax(caller, operations, mode)
+    omission = write("omission.cpp", """\
+        #include "resource.hpp"
+        void run() { auto ticket = checkout::acquire(); }
+    """)
+    syntax(omission)
+    diagnostic = syntax(mode, operations, omission, error="linear resource 'ticket' may leave its scope")
+    assert "omission.cpp:2:" in diagnostic, diagnostic
+    competing_mode = write("competing_mode.cpp", """\
+        #include "resource.hpp"
+        using CompetingMode = checkout::own::use_policy<checkout::own::affine<checkout::Ticket>>;
+    """)
+    diagnostic = syntax(mode, competing_mode, error="conflicting ownership policies")
+    assert "competing_mode.cpp:2:" in diagnostic and "previous declaration at" in diagnostic and "resource.hpp:" in diagnostic, diagnostic
+    competing_operation = write("competing_operation.cpp", """\
+        #include "resource.hpp"
+        namespace checkout {
+        [[=own::operation::transfers]] void submit(Ticket&&) noexcept;
+        }
+    """)
+    diagnostic = syntax(mode, operations, competing_operation, error="conflicting contracts for an ownership operation")
+    assert "competing_operation.cpp:3:" in diagnostic and "previous declaration at" in diagnostic and "operations.cpp:5:" in diagnostic, diagnostic
+    rejected = subprocess.run([compiler, "cxx", "--no-daemon", "-fcheck-policies", "-c",
+                               "-I", include, *map(str, (mode, operations, competing_operation, caller))],
+                              cwd=root, text=True, capture_output=True, timeout=30)
+    assert rejected.returncode == 1 and "conflicting contracts" in rejected.stderr, rejected.stderr
+    assert not list(root.glob("*.o")), list(root.glob("*.o"))
+
+    # A static function in a header has a separate contract in each translation unit.
+    write("private_submit.hpp", """\
+        #include "resource.hpp"
+        static void private_submit(checkout::Ticket&&) noexcept;
+    """)
+    private_contract = write("private_contract.cpp", """\
+        #include "private_submit.hpp"
+        using Terminal = checkout::own::use_policy<checkout::own::consumes<decltype(&private_submit), &private_submit>>;
+    """)
+    private_caller = write("private_caller.cpp", """\
+        #include "private_submit.hpp"
+        void run() {
+          auto ticket = checkout::acquire();
+          private_submit(static_cast<checkout::Ticket&&>(ticket));
+        }
+    """)
+    syntax(mode, operations, private_contract, private_caller, error="outside the checked protocol")
+
+    verified = write("verified.cpp", """\
+        #include "resource.hpp"
+        namespace checkout {
+        using Submit = void (*)(Ticket&&) noexcept;
+        using Verify = own::use_policy<Resource, own::creates<decltype(&acquire), &acquire>,
+            own::verified_observes<decltype(&inspect), &inspect>, own::consumes<Submit, static_cast<Submit>(&submit)>>;
+        }
+    """)
+    observer_source = """\
+        #include "resource.hpp"
+        namespace checkout {
+        int inspected;
+        [[=own::operation::verified_observes]] void inspect(const Ticket& ticket) noexcept {
+          int snapshot = ticket.value;
+          if (snapshot > 0) inspected = snapshot;
+        }
+        }
+    """
+    observer = write("observer.cpp", observer_source)
+    syntax(verified, caller, observer)
+    syntax(verified, caller, error="verified observation requires a unique supported definition")
+    syntax(operations, verified, caller, observer)
+    syntax(verified, operations, caller, observer)
+    syntax(operations, verified, caller, error="verified observation requires a unique supported definition")
+    weak_observer = write("weak_observer.cpp", observer_source.replace("]] void inspect", "]] inline void inspect"))
+    syntax(verified, caller, weak_observer, error="verified observation requires a unique supported definition")
+    labeled_caller = write("labeled_caller.cpp", caller.read_text().replace(
+        "void run()", 'namespace checkout { void inspect(const Ticket&) noexcept asm("other_observer"); }\nvoid run()'))
+    syntax(verified, labeled_caller, observer, error="verified observation requires a unique supported definition")
+    forwarding_source = """\
+        #include "resource.hpp"
+        namespace checkout {
+        [[=own::operation::verified_observes]] void leaf(const Ticket&) noexcept;
+        [[=own::operation::verified_observes]] void inspect(const Ticket& ticket) noexcept {
+          leaf(ticket);
+        }
+        }
+    """
+    forwarding = write("forwarding.cpp", forwarding_source)
+    leaf_source = observer_source.replace("void inspect(", "void leaf(")
+    verified_leaf = write("leaf.cpp", leaf_source)
+    syntax(verified, caller, forwarding, verified_leaf)
+    syntax(verified, caller, forwarding, error="verified observation requires a unique supported definition")
+    trusted_forwarding = write("trusted_forwarding.cpp", forwarding_source.replace(
+        "verified_observes]] void leaf", "observes]] void leaf"))
+    syntax(verified, caller, trusted_forwarding, error="verified observation cannot expose or mutate")
+
+    escaping_observer = """\
+        #include "resource.hpp"
+        namespace checkout {
+        const Ticket* saved;
+        const int* saved_field;
+        void forward(const Ticket&) noexcept;
+        [[=own::operation::verified_observes]] void inspect(const Ticket& ticket) noexcept {
+          BODY
+        }
+        }
+    """
+    for case, body in (
+        ("resource", "saved = &ticket;"),
+        ("field", "saved_field = &ticket.value;"),
+        ("mutate", "ticket.flag = 42;"),
+        ("forward", "forward(ticket);"),
+        ("capture", "auto saved = [&ticket] { return ticket.value; };"),
+    ):
+        invalid = write(f"observer_{case}.cpp", escaping_observer.replace("BODY", body))
+        diagnostic = syntax(verified, caller, invalid, error="verified observation cannot expose or mutate")
+        assert f"{invalid}:7:" in diagnostic, diagnostic
+
+    # The final resource is used by a separate caller. Its duplicate can change spelling or
+    # conflict with the original without recompiling the unchanged source fragments.
+    write("large.hpp", """\
+        #pragma once
+        #include <ycxx/ownership.hpp>
+        namespace large {
+        namespace own = ycxx::ownership;
+        template<int Id> struct Resource { int value; };
+        Resource<1279> acquire() noexcept;
+        void use(Resource<1279>&&) noexcept;
+        }
+    """)
+    large_fragments = []
+    for fragment in range(4):
+        groups = []
+        for group in range(4):
+            start = fragment * 320 + group * 80
+            entries = [f"own::affine<Resource<{i}>>" for i in range(start, start + 80)]
+            groups.append(f"using Group{group} = own::policy<{', '.join(entries)}>;")
+        large_fragments.append(write(f"large_{fragment}.cpp", f"""\
+            #include "large.hpp"
+            namespace large::fragment{fragment} {{
+            {chr(10).join(groups)}
+            using All = own::use_policy<Group0, Group1, Group2, Group3, Group0, Group3>;
+            }}
+        """))
+    large_rules = "own::use_policy<Operations, own::affine<Resource<1279>>>"
+    typed_activation = f"using Active = {large_rules};"
+    large_tail_policy = f"""\
+        #include "large.hpp"
+        namespace large {{
+        using Operations = own::policy<own::creates<decltype(&acquire), &acquire>, own::consumes<decltype(&use), &use>>;
+        {typed_activation}
+        }}
+    """
+    large_tail = write("large_tail.cpp", large_tail_policy)
+    large_source = """\
+        #include "large.hpp"
+        namespace large {
+        void run() {
+          auto last = acquire();
+          SPEND
+        }
+        }
+    """
+    large_caller = write("large_caller.cpp", large_source.replace("SPEND", ""))
+    large_sources = (*large_fragments, large_tail, large_caller)
+    spend_twice = "use(static_cast<Resource<1279>&&>(last)); " * 2
+    large_repeated = write("large_repeated.cpp", large_source.replace("SPEND", spend_twice))
+    syntax(*large_fragments, large_tail, large_repeated, error="affine resource 'last' may already have been consumed")
+
+    # Exercise direct class annotations at the same scale as grouped typed policies.
+    direct_fragments = []
+    for fragment in range(4):
+        indices = range(320 * fragment, 320 * (fragment + 1))
+        resources = "\n".join(
+            f"struct [[=own::resource_mode::affine]] Resource{i} {{ int value; }};" for i in indices
+        )
+        header = write(f"direct_{fragment}.hpp", "#pragma once\n#include <ycxx/ownership.hpp>\n"
+                       "namespace direct_large {\nnamespace own = ycxx::ownership;\n"
+                       + resources + "\n}\n")
+        direct_fragments.append(write(f"direct_{fragment}.cpp", f'#include "{header.name}"\n'))
+    direct_caller = write("direct_caller.cpp", """\
+        #include "direct_3.hpp"
+        namespace direct_large {
+        [[=own::operation::creates]] Resource1279 acquire() noexcept;
+        [[=own::operation::consumes]] void finish(Resource1279&&) noexcept;
+        void run() {
+          auto last = acquire();
+          finish(static_cast<Resource1279&&>(last));
+        }
+        }
+    """)
+    syntax(*direct_fragments, direct_caller)
+    direct_conflict = write("direct_conflict.cpp", """\
+        #include <ycxx/ownership.hpp>
+        namespace direct_large {
+        namespace own = ycxx::ownership;
+        struct Resource0;
+        struct Resource1279;
+        using Conflict = own::use_policy<own::linear<Resource0>, own::linear<Resource1279>>;
+        }
+    """)
+    diagnostic = syntax(*direct_fragments, direct_caller, direct_conflict, error="conflicting ownership policies")
+    assert all(origin in diagnostic for origin in ("direct_0.hpp:", "direct_3.hpp:", "direct_conflict.cpp:")), diagnostic
+
+    annotated_source = """\
+        #include <ycxx/ownership.hpp>
+        namespace own = ycxx::ownership;
+        struct [[=own::resource_mode::linear]] Receipt { int value; };
+        [[=own::operation::creates]] Receipt open() noexcept;
+        [[=own::operation::consumes]] void close(Receipt&&) noexcept;
+        void run() {
+          auto receipt = open();
+          CLOSE_CALL
+        }
+    """
+    close = "close(static_cast<Receipt&&>(receipt));"
+    syntax(write("annotated_good.cpp", annotated_source.replace("CLOSE_CALL", close)))
+    syntax(write("annotated_missing.cpp", annotated_source.replace("CLOSE_CALL", "")),
+           error="linear resource 'receipt' may leave its scope")
+    syntax(write("agree.cpp", annotated_source.replace("CLOSE_CALL", close) + """\
+        using ReceiptRules = own::policy<own::linear<Receipt>, own::consumes<decltype(&close), &close>>;
+        struct ReceiptSelection { using Active = own::use_policy<ReceiptRules>; };
+        struct [[=ReceiptSelection::Active{}]] Activate {};
+    """))
+    disagreement = syntax(write("disagree.cpp", annotated_source.replace("CLOSE_CALL", close) + """\
+        using OtherMode = own::use_policy<own::affine<Receipt>>;
+    """), error="conflicting ownership policies for 'Receipt'")
+    assert "disagree.cpp:10:" in disagreement and "previous declaration at" in disagreement, disagreement
+    syntax(write("attribute_activation.cpp", """\
+        #include <ycxx/ownership.hpp>
+        namespace own = ycxx::ownership;
+        struct Receipt { int value; };
+        Receipt open() noexcept;
+        using Rules = own::policy<own::linear<Receipt>, own::creates<decltype(&open), &open>>;
+        struct ReceiptSelection { using Active = own::use_policy<Rules>; };
+        struct [[=ReceiptSelection::Active{}]] Activate {};
+        void run() { auto receipt = open(); }
+    """), error="linear resource 'receipt' may leave its scope")
+
+    # A policy-only edit must invalidate body proofs when its meaning changes and preserve
+    # them when it only changes the spelling of the active policy composition.
+    write("incremental.hpp", """\
+        #pragma once
+        #include <ycxx/ownership.hpp>
+        namespace own = ycxx::ownership;
+        struct Handle { int value; };
+        Handle acquire() noexcept;
+    """)
+    policy_source = """\
+        #include "incremental.hpp"
+        using Fragment = own::policy<own::affine<Handle>, own::creates<decltype(&acquire), &acquire>>;
+        using Enabled = own::use_policy<Fragment>;
+    """
+    rules = write("incremental_rules.cpp", policy_source)
+    incremental = write("incremental.cpp", """\
+        #include "incremental.hpp"
+        void run() { auto handle = acquire(); }
+    """)
+    with tempfile.TemporaryDirectory(prefix="ycp-", dir="/tmp") as sockets:
+        env = {k: v for k, v in os.environ.items() if k not in ("YCXX_DAEMON", "YCXX_NO_DAEMON")}
+        env.update(YCXX_RUNTIME_DIR=sockets, YCXX_ROOT=str(root), YCXX_THREADS="2")
+
+        def resident(*options, sources=(rules, incremental)):
+            return subprocess.run([compiler, "cxx", "--daemon=require", "-fcheck-policies", "-fsyntax-only",
+                                   "-I", include, *options, *map(str, sources)], cwd=root, env=env,
+                                  text=True, capture_output=True, timeout=30)
+
+        try:
+            first = resident("--trace-engine=json")
+            assert first.returncode == 0, first.stderr
+            assert any(json.loads(line).get("kind") == "BuildOwnershipFlow" for line in first.stderr.splitlines())
+            write("incremental_rules.cpp", policy_source.replace("use_policy<Fragment>", "use_policy<Fragment, Fragment>"))
+            repeated = resident("--trace-engine=json")
+            assert repeated.returncode == 0, repeated.stderr
+            assert not any(record.get("kind") == "BuildOwnershipFlow" and record.get("outcome") in ("executed", "cutoff")
+                           for record in map(json.loads, repeated.stderr.splitlines())), repeated.stderr
+            write("incremental_rules.cpp", policy_source.replace("own::affine<Handle>", "own::linear<Handle>"))
+            changed = resident()
+            cold = syntax(rules, incremental, error="linear resource 'handle' may leave its scope")
+            assert changed.returncode == 1 and changed.stderr == cold, (changed.stderr, cold)
+            single = resident(sources=(incremental,))
+            assert single.returncode == 0, single.stderr
+
+            first_large = resident("--trace-engine=json", sources=large_sources)
+            assert first_large.returncode == 0, first_large.stderr
+            assert any(json.loads(line).get("kind") == "BuildOwnershipFlow"
+                       for line in first_large.stderr.splitlines()), first_large.stderr
+            reflected_activation = f"struct [[={large_rules}{{}}]] Activate {{}};"
+            write(large_tail.name, large_tail_policy.replace(typed_activation, reflected_activation))
+            repeated = resident("--trace-engine=json", sources=large_sources)
+            assert repeated.returncode == 0, repeated.stderr
+            processed = [record["kind"] for record in map(json.loads, repeated.stderr.splitlines())
+                         if record.get("outcome") in ("executed", "cutoff")]
+            assert "BuildOwnershipFlow" not in processed, processed
+            assert processed.count("PolicyDeclarationsFor") == 1, processed
+            write(large_tail.name, large_tail_policy.replace("own::affine", "own::linear"))
+            denied = resident(sources=large_sources)
+            expected = syntax(*large_sources, error="conflicting ownership policies")
+            assert denied.returncode == 1 and denied.stderr == expected, (denied.stderr, expected)
+            assert "large_tail.cpp:" in expected and "large_3.cpp:" in expected, expected
+            write(large_tail.name, large_tail_policy)
+            restored = resident(sources=large_sources)
+            assert restored.returncode == 0, restored.stderr
+
+            write("mixed_incremental.hpp", """\
+                #include <ycxx/ownership.hpp>
+                #include <ycxx/effects.hpp>
+                namespace mixed {
+                namespace own = ycxx::ownership;
+                namespace fx = ycxx::effects;
+                struct Handle { int value; };
+                struct Audit;
+                Handle acquire() noexcept;
+                int observe(const Handle&) noexcept;
+                int leaf(int) noexcept;
+                int effectful(int) noexcept;
+                }
+            """)
+            mixed_policy = """\
+                #include "mixed_incremental.hpp"
+                namespace mixed {
+                using Owner = own::policy<own::affine<Handle>, own::creates<decltype(&acquire), &acquire>,
+                    own::verified_observes<decltype(&observe), &observe>>;
+                using Leaf = fx::set<fx::at_most<Audit, 1>>;
+                using Active = own::use_policy<Owner, fx::trusted<decltype(&leaf), &leaf, Leaf>,
+                    fx::bound<decltype(&effectful), &effectful, fx::set<fx::at_most<Audit, 1>>>>;
+                }
+            """
+            mixed_rules = write("mixed_incremental_rules.cpp", mixed_policy)
+            mixed_caller = write("mixed_incremental.cpp", """\
+                #include "mixed_incremental.hpp"
+                namespace mixed {
+                void run() { auto pending = acquire(); observe(pending); }
+                int leaf(int n) noexcept { return n; }
+                }
+            """)
+            observe_definition = "int observe(const Handle& owner) noexcept { return owner.value; }"
+            effect_definition = "int effectful(int n) noexcept { return leaf(n); }"
+            mixed_provider_code = textwrap.dedent(f"""\
+                #include "mixed_incremental.hpp"
+                namespace mixed {{
+                {observe_definition}
+                {effect_definition}
+                }}
+            """)
+            mixed_provider = write("mixed_incremental_provider.cpp", mixed_provider_code)
+            mixed_sources = (mixed_rules, mixed_caller, mixed_provider)
+
+            def mixed_queries():
+                traced = resident("--trace-engine=json", sources=mixed_sources)
+                assert traced.returncode == 0, traced.stderr
+                return [record["kind"] for record in map(json.loads, traced.stderr.splitlines())
+                        if record.get("outcome") in ("executed", "cutoff")]
+
+            def mixed_rejection(error):
+                denied = resident(sources=mixed_sources)
+                expected = syntax(*mixed_sources, error=error)
+                assert denied.returncode == 1 and denied.stderr == expected, (denied.stderr, expected)
+                return expected
+
+            initial_mixed = mixed_queries()
+            body_queries = {"OwnershipRecordsFor", "BuildOwnershipFlow", "CheckEffectBody"}
+            assert body_queries.issubset(initial_mixed), initial_mixed
+            reflected = mixed_policy.replace("using Active = ", "\n                struct [[=").replace(
+                "fx::at_most<Audit, 1>>>>;", "fx::at_most<Audit, 1>>>>{}]] Active {};")
+            write(mixed_rules.name, reflected)
+            equivalent_mixed = mixed_queries()
+            assert equivalent_mixed.count("PolicyDeclarationsFor") == 1, equivalent_mixed
+            assert body_queries.isdisjoint(equivalent_mixed), equivalent_mixed
+
+            write(mixed_rules.name, reflected.replace("using Leaf = fx::set<fx::at_most<Audit, 1>>;",
+                                                       "using Leaf = fx::set<fx::at_most<Audit, 2>>;"))
+            mixed_rejection("exceeds its usage grade of 1")
+            write(mixed_rules.name, reflected.replace("own::affine<Handle>", "own::linear<Handle>"))
+            mixed_rejection("linear resource 'pending' may leave its scope")
+            write(mixed_rules.name, reflected)
+            write(mixed_provider.name, mixed_provider_code.replace(observe_definition, ""))
+            mixed_rejection("verified observation requires a unique supported definition")
+            write(mixed_provider.name, mixed_provider_code.replace(effect_definition, ""))
+            mixed_rejection("verified effect bound requires a unique supported definition")
+
+            competing = """\
+                namespace mixed {
+                using Competing = fx::use_policy<
+                    fx::bound<decltype(&effectful), &effectful, fx::set<fx::at_most<Audit, 2>>>>;
+                }
+            """
+            write(mixed_provider.name, mixed_provider_code + textwrap.dedent(competing))
+            conflict = "conflicting effect bounds for a function"
+            effects_line = next(i for i, line in enumerate(textwrap.dedent(reflected).splitlines(), 1)
+                                if line.startswith("struct [[="))
+            before_move = mixed_rejection(conflict)
+            assert f"previous declaration at {mixed_rules}:{effects_line}:" in before_move, before_move
+            write(mixed_rules.name, reflected.replace("struct [[=", "\n                struct [[="))
+            moved_trace = resident("--trace-engine=json", sources=mixed_sources)
+            assert moved_trace.returncode == 1, moved_trace.stderr
+            moved_records = (json.loads(line) for line in moved_trace.stderr.splitlines() if line.startswith("{"))
+            reexecuted = {record["kind"] for record in moved_records if record.get("outcome") in ("executed", "cutoff")}
+            assert {"TuSema", "PolicyDeclarationsFor"}.isdisjoint(reexecuted), reexecuted
+            after_move = mixed_rejection(conflict)
+            assert f"previous declaration at {mixed_rules}:{effects_line + 1}:" in after_move, after_move
+
+            write(mixed_rules.name, reflected)
+            write(mixed_provider.name, mixed_provider_code)
+            restored = resident(sources=mixed_sources)
+            assert restored.returncode == 0, restored.stderr
+
+            verified_sources = (verified, caller, observer)
+            accepted = resident(sources=verified_sources)
+            assert accepted.returncode == 0, accepted.stderr
+            write("observer.cpp", escaping_observer.replace("BODY", "saved = &ticket;"))
+            denied = resident(sources=verified_sources)
+            expected = syntax(*verified_sources, error="verified observation cannot expose or mutate")
+            assert denied.returncode == 1 and denied.stderr == expected, (denied.stderr, expected)
+            write("observer.cpp", observer_source)
+
+            array_lifetime = """\
+                #include <ycxx/ownership.hpp>
+                namespace own = ycxx::ownership;
+                struct Work { int value; ~Work() noexcept {} };
+                Work start() noexcept { return {0}; }
+                void finish(Work&&) noexcept {}
+                using Active = own::use_policy<own::linear<Work>,
+                    own::creates<decltype(&start), &start>, own::consumes<decltype(&finish), &finish>>;
+                void drain() {
+                  Work tasks[2]{start(), start()};
+                  finish(static_cast<Work&&>(tasks[0]));
+                  finish(static_cast<Work&&>(tasks[1]));
+                }
+            """
+            destructor = write("array_lifetime.cpp", array_lifetime)
+            positive = resident(sources=(destructor,))
+            assert positive.returncode == 0, positive.stderr
+            write(destructor.name, array_lifetime.replace("~Work() noexcept", "~Work() noexcept(false)"))
+            denied = resident(sources=(destructor,))
+            expected = syntax(destructor, error="an owner array requires aggregate initialization and nonthrowing destruction")
+            assert denied.returncode == 1 and denied.stderr == expected, (denied.stderr, expected)
+            write(destructor.name, array_lifetime)
+            restored = resident(sources=(destructor,))
+            assert restored.returncode == 0, restored.stderr
+        finally:
+            subprocess.run([compiler, "ctl", "shutdown"], cwd=root, env=env, capture_output=True, timeout=10)
+
+    syntax(write("runtime_good.cpp", """\
+        #include "runtime_transaction.hpp"
+        void finish_work() {
+          auto first = example::start();
+          {
+            const auto& view = first;
+            example::inspect(view);
+          }
+          auto second = example::handoff(static_cast<example::Work&&>(first));
+          example::finish(static_cast<example::Work&&>(second));
+        }
+    """))
+    runtime = write("portable.cpp", """\
+        #include "runtime_transaction.hpp"
+        int main(int argc, char**) {
+          auto first = example::start();
+          if (argc == 2) return 0;
+          auto second = example::handoff(static_cast<example::Work&&>(first));
+          if (argc == 3) example::finish(static_cast<example::Work&&>(first));
+          example::finish(static_cast<example::Work&&>(second));
+          if (argc == 4) example::finish(static_cast<example::Work&&>(second));
+        }
+    """)
+    syntax(runtime, error="linear resource 'first' may leave its scope")
+    direct_move_type = textwrap.dedent("""\
+        #include <ycxx/ownership.hpp>
+        #include <ycxx/ownership/runtime.hpp>
+
+        namespace own = ycxx::ownership;
+        struct Work {
+          own::linear_state state;
+          int value;
+
+          Work(int n) noexcept : value(n) {}
+          Work(Work&& other) noexcept : state(static_cast<own::linear_state&&>(other.state)), value(other.value) {}
+        };
+
+        Work start() noexcept;
+        void finish(Work&& work) noexcept;
+    """)
+    direct_move_definitions = textwrap.dedent("""\
+        Work start() noexcept { return Work(31); }
+        void finish(Work&& work) noexcept { work.state.consume(); }
+    """)
+    direct_move_rules = textwrap.dedent("""\
+        using Rules = own::use_policy<own::linear<Work>, own::creates<decltype(&start), &start>,
+                                      own::consumes<decltype(&finish), &finish>>;
+    """)
+    direct_move_authorization = "using Moves = own::use_policy<own::move_transfers<Work>>;\n"
+    direct_move_main = textwrap.dedent("""\
+        int main() {
+          auto first = start();
+          Work second(static_cast<Work&&>(first));
+          finish(static_cast<Work&&>(second));
+        }
+    """)
+    legacy_move_source = direct_move_type + direct_move_definitions + direct_move_rules + direct_move_main
+    direct_move_source = legacy_move_source + direct_move_authorization
+    direct_move = write("direct_move.cpp", direct_move_source)
+    syntax(direct_move)
+    syntax(write("direct_move_affine.cpp", direct_move_source.replace("own::linear", "own::affine")))
+    tagged_move_source = direct_move_source.replace("struct Work {", "template<class Tag>\nstruct TaggedWork {")
+    tagged_move_source = tagged_move_source.replace("  Work(", "  TaggedWork(").replace("Work&& other", "TaggedWork&& other")
+    tagged_move_source = tagged_move_source.replace("\nWork start() noexcept;", "\nusing Work = TaggedWork<int>;\nWork start() noexcept;")
+    tagged_move = write("tagged_move.cpp", tagged_move_source)
+    syntax(tagged_move)
+
+    selected_move_source = direct_move_source.replace("int main()", "int main(int argc, char**)").replace(
+        "  Work second(static_cast<Work&&>(first));",
+        "  auto second = argc == 1 ? Work(static_cast<Work&&>(first)) :\n"
+        "                           (static_cast<void>(0), Work(static_cast<Work&&>(first)));")
+    syntax(write("selected_move.cpp", selected_move_source))
+    syntax(write("selected_move_live_branch.cpp", selected_move_source.replace(
+        "(static_cast<void>(0), Work(static_cast<Work&&>(first)))", "start()")),
+        error="linear resource 'first' may leave its scope")
+
+    needs_move_policy = "direct owner move construction requires a move-transfer contract"
+    syntax(write("unmarked_move.cpp", legacy_move_source), error=needs_move_policy)
+    dishonest_move = write("dishonest_unmarked_move.cpp", legacy_move_source.replace(
+        "state(static_cast<own::linear_state&&>(other.state)), value(other.value)", "value(other.value)"))
+    syntax(dishonest_move, error=needs_move_policy)
+    move_annotation = "[[=own::move_constructor::transfers]]"
+    annotated_move = write("annotated_move.cpp", legacy_move_source.replace("struct Work {", f"struct {move_annotation} Work {{"))
+    syntax(annotated_move)
+    reflected_move_type = direct_move_type.replace(
+        "struct Work {", "struct [[=own::resource_mode::linear, =own::move_constructor::transfers]] Work {")
+    reflected_move_type = reflected_move_type.replace(
+        "Work start() noexcept;", "[[=own::operation::creates]] Work start() noexcept;").replace(
+        "void finish(Work&& work) noexcept;", "[[=own::operation::consumes]] void finish(Work&& work) noexcept;")
+    reflected_move = write("reflected_move.cpp", reflected_move_type + direct_move_definitions + direct_move_main)
+    syntax(reflected_move)
+
+    implicit_move_source = textwrap.dedent("""\
+        #include <ycxx/ownership.hpp>
+        #include <ycxx/ownership/runtime.hpp>
+
+        namespace own = ycxx::ownership;
+        struct Work {
+          own::linear_state state;
+          int value = 0;
+        };
+        int observed;
+        Work start() noexcept { return Work{own::linear_state{}, 31}; }
+        void finish(Work&& work) noexcept {
+          observed = work.value;
+          work.state.consume();
+        }
+    """) + direct_move_rules + direct_move_main.replace(
+        "  finish(static_cast<Work&&>(second));",
+        "  finish(static_cast<Work&&>(second));\n  return observed != 31;")
+    implicit_move = write("implicit_move.cpp", implicit_move_source + direct_move_authorization)
+    syntax(implicit_move)
+    syntax(write("implicit_move_unmarked.cpp", implicit_move_source), error=needs_move_policy)
+    implicit_reflected_source = implicit_move_source.replace(direct_move_rules, "").replace(
+        "struct Work {", "struct [[=own::resource_mode::linear, =own::move_constructor::transfers]] Work {")
+    implicit_reflected_source = implicit_reflected_source.replace(
+        "Work start() noexcept", "[[=own::operation::creates]] Work start() noexcept").replace(
+        "void finish(Work&& work) noexcept", "[[=own::operation::consumes]] void finish(Work&& work) noexcept")
+    implicit_reflected = write("implicit_move_reflected.cpp", implicit_reflected_source)
+    syntax(implicit_reflected)
+    implicit_leak = write("implicit_move_reflected_leak.cpp", implicit_reflected_source.replace(
+        "  finish(static_cast<Work&&>(second));\n", ""))
+    leak_error = "linear resource 'second' may leave its scope"
+    syntax(implicit_leak, error=leak_error)
+    syntax("-DYCXX_POLICIES_RUNTIME_CHECKS=0", implicit_reflected)
+    syntax("-DYCXX_POLICIES_RUNTIME_CHECKS=0", implicit_leak, error=leak_error)
+
+    move_include = '#include "move_type.hpp"\n'
+    write("move_type.hpp", "#pragma once\n" + direct_move_type)
+    move_rules = write("move_rules.cpp", move_include + direct_move_rules)
+    move_caller = write("move_caller.cpp", move_include + direct_move_main)
+    move_alias_authorization = direct_move_authorization.replace("<Work>", "<MoveAlias>")
+    authorization_source = "#pragma once\n" + move_include + "using MoveAlias = Work;\n" + move_alias_authorization
+    move_header = write("move_authorization.hpp", authorization_source)
+    move_authorizer = write("move_authorization.cpp", '#include "move_authorization.hpp"\n')
+    reflected_authorizer = write("move_authorization_reflected.cpp", move_include + f"struct {move_annotation} Work;\n")
+    syntax(move_rules, move_caller, error=needs_move_policy)
+    syntax(move_rules, move_caller, move_authorizer)
+    syntax(move_rules, move_caller, reflected_authorizer)
+    syntax(move_rules, move_caller, move_authorizer, reflected_authorizer)
+    syntax(move_authorizer, error="requires an affine or linear resource declaration")
+    syntax(write("bad_move_policy.cpp", move_include + direct_move_authorization.replace("<Work>", "<const Work>")),
+           error="a move-transfer contract must name an unqualified class type")
+
+    with tempfile.TemporaryDirectory(prefix="ymove-", dir="/tmp") as sockets:
+        move_env = {key: value for key, value in os.environ.items() if key not in ("YCXX_NO_DAEMON", "YCXX_DAEMON")}
+        move_env.update(YCXX_RUNTIME_DIR=sockets, YCXX_ROOT=str(root), YCXX_THREADS="2")
+        resident_move = [compiler, "cxx", "--daemon=require", "-fcheck-policies", "-fsyntax-only",
+                         "-I", include, *map(str, (move_rules, move_caller, move_authorizer))]
+        try:
+            assert subprocess.run(resident_move, cwd=root, env=move_env, timeout=90).returncode == 0
+            move_header.write_text(authorization_source.replace(move_alias_authorization, ""))
+            denied = subprocess.run(resident_move, cwd=root, env=move_env, text=True,
+                                    capture_output=True, timeout=90)
+            assert denied.returncode == 1 and needs_move_policy in denied.stderr, denied.stderr
+            assert denied.stderr == syntax(move_rules, move_caller, move_authorizer, error=needs_move_policy)
+            move_header.write_text(authorization_source)
+            assert subprocess.run(resident_move, cwd=root, env=move_env, timeout=90).returncode == 0
+        finally:
+            subprocess.run([compiler, "ctl", "shutdown"], cwd=root, env=move_env, capture_output=True, timeout=10)
+
+    moved_source = write("direct_move_reuse.cpp", direct_move_source.replace(
+        "  finish(static_cast<Work&&>(second));",
+        "  finish(static_cast<Work&&>(first));\n  finish(static_cast<Work&&>(second));"))
+    syntax(moved_source, error="linear resource 'first' may already have transferred its obligation")
+    observe_work = """\
+        void inspect(const Work&) noexcept {}
+        using Observe = own::use_policy<own::observes<decltype(&inspect), &inspect>>;
+    """
+    direct_move_after_use = direct_move_source.replace("int main()", observe_work + "int main()").replace(
+        "  Work second(", "  const auto& view = first;\n  inspect(view);\n  Work second(")
+    syntax(write("direct_move_after_use.cpp", direct_move_after_use))
+    move_during_borrow = write("direct_move_borrowed.cpp", direct_move_after_use.replace(
+        "  inspect(view);\n", "").replace("  finish(", "  inspect(view);\n  finish("))
+    syntax(move_during_borrow, error="linear resource 'first' may still have a live shared borrow")
+    syntax(write("direct_move_self.cpp", direct_move_source.replace(
+        "Work second(static_cast<Work&&>(first))", "Work second(static_cast<Work&&>(second))")),
+        error="linear resource 'second' may be unavailable")
+    throwing_move = write("throwing_move.cpp", direct_move_source.replace(
+        "Work(Work&& other) noexcept", "Work(Work&& other) noexcept(false)"))
+    syntax(throwing_move, error="an owner must be initialized by a registered factory or transfer")
+    constructor_template = write("constructor_template.cpp", direct_move_source.replace(
+        "  Work(Work&& other) noexcept",
+        "  ~Work() noexcept {}\n  template<class Other>\n  Work(Other&& other) noexcept"))
+    syntax(constructor_template, error="an owner must be initialized by a registered factory or transfer")
+    executable = root / "portable"
+    subprocess.run([host, "-std=c++20", "-I", include, "-I", examples, str(runtime), "-o", str(executable)], check=True, timeout=30)
+    resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+    assert subprocess.run([executable], timeout=10).returncode == 0
+    for args in (("early",), ("use", "moved"), ("consume", "again", "now")):
+        assert subprocess.run([executable, *args], timeout=10).returncode in (
+            -signal.SIGABRT, -signal.SIGILL, -signal.SIGTRAP)
+    for source, expected in ((direct_move, (0,)), (tagged_move, (0,)), (implicit_move, (0,)),
+                             (dishonest_move, (-signal.SIGABRT, -signal.SIGILL, -signal.SIGTRAP))):
+        subprocess.run([host, "-std=c++20", "-I", include, str(source), "-o", str(executable)], check=True, timeout=30)
+        assert subprocess.run([executable], timeout=10).returncode in expected
+
+    nested_source = """\
+        #include "runtime_transaction.hpp"
+        using example::Work;
+        struct Branch { Work work; int score; };
+        struct Tree { Branch left; Branch right; };
+        int main() {
+          Tree tree{{example::start(), 11}, {example::start(), 31}};
+          const auto& view = tree.left.work;
+          example::finish(static_cast<Work&&>(tree.right.work));
+          example::inspect(view);
+          auto other = example::handoff(static_cast<Work&&>(tree.left.work));
+          example::finish(static_cast<Work&&>(other));
+          return tree.left.score + tree.right.score != 42;
+        }
+    """
+    nested = write("nested.cpp", nested_source)
+    syntax(nested)
+    nested_skip = write("nested_skip.cpp", nested_source.replace("int main()", "int main(int argc, char**)")
+                        .replace("  auto other =", "  if (argc > 1) return 0;\n  auto other ="))
+    syntax(nested_skip, error="linear resource 'tree.left.work' may leave its scope")
+    nested_borrow = write("nested_borrow.cpp", nested_source.replace("tree.right.work", "tree.left.work", 1))
+    syntax(nested_borrow, error="linear resource 'tree.left.work' may still have a live shared borrow 'view'")
+    nested_alias = write("nested_alias.cpp", nested_source.replace(
+        "  auto other =", "  const auto& escaped = tree.left;\n  auto other ="))
+    syntax(nested_alias, error="resource aliases are outside the checked protocol")
+    nested_unwind = write("nested_unwind.cpp", nested_source.replace("int main()", "int score();\nint main()")
+                          .replace("example::start(), 11", "example::start(), score()"))
+    syntax(nested_unwind, error="operation may unwind while linear resource 'tree.left.work' is live")
+    array_source = """\
+        #include "runtime_transaction.hpp"
+        using example::Work;
+        int main(int argc, char**) {
+          Work tasks[2]{example::start(), example::start()};
+          {
+            const auto& view = tasks[0];
+            example::inspect(view);
+            example::finish(static_cast<Work&&>(tasks[1]));
+          }
+          example::finish(static_cast<Work&&>(tasks[0]));
+          return argc < 1;
+        }
+    """
+    array = write("array.cpp", array_source)
+    syntax(array)
+    array_skip = write("array_skip.cpp", array_source.replace(
+        "  example::finish(static_cast<Work&&>(tasks[0]));",
+        "  if (argc > 1) return 0;\n  example::finish(static_cast<Work&&>(tasks[0]));"))
+    syntax(array_skip, error="linear resource 'tasks[0]' may leave its scope")
+    array_index = write("array_index.cpp", array_source.replace("tasks[1]", "tasks[argc % 2]"))
+    syntax(array_index, error="an ownership protocol operation requires a named owner")
+    array_alias = write("array_alias.cpp", array_source.replace(
+        "  return argc < 1;", "  auto* escaped = tasks;\n  return argc < 1;"))
+    syntax(array_alias, error="resource aliases are outside the checked protocol")
+    composed_source = """\
+        #include "runtime_transaction.hpp"
+        using example::Work;
+        struct Batch { Work tasks[2]; int count; };
+        struct Queue { Batch groups[2]; };
+
+        int main(int argc, char**) {
+          Queue queue{{
+              {{example::start(), example::start()}, 2},
+              {{example::start(), example::start()}, 2}}};
+          {
+            const auto& view = queue.groups[0].tasks[0];
+            example::finish(static_cast<Work&&>(queue.groups[0].tasks[1]));
+            example::inspect(view);
+          }
+          example::finish(static_cast<Work&&>(queue.groups[0].tasks[0]));
+          example::finish(static_cast<Work&&>(queue.groups[1].tasks[0]));
+          example::finish(static_cast<Work&&>(queue.groups[1].tasks[1]));
+          return queue.groups[1].count != 2;
+        }
+    """
+    composed = write("composed.cpp", composed_source)
+    syntax(composed)
+    composed_skip = write("composed_skip.cpp", composed_source.replace(
+        "  example::finish(static_cast<Work&&>(queue.groups[1].tasks[1]));",
+        "  if (argc > 1) return 0;\n  example::finish(static_cast<Work&&>(queue.groups[1].tasks[1]));"))
+    syntax(composed_skip, error="linear resource 'queue.groups[1].tasks[1]' may leave its scope")
+    composed_borrow = write("composed_borrow.cpp", composed_source.replace(
+        "queue.groups[0].tasks[1]", "queue.groups[0].tasks[0]"))
+    syntax(composed_borrow, error="linear resource 'queue.groups[0].tasks[0]' may still have a live shared borrow")
+    composed_index = write("composed_index.cpp", composed_source.replace(
+        "queue.groups[1].tasks[1]", "queue.groups[argc % 2].tasks[1]"))
+    syntax(composed_index, error="an ownership protocol operation requires a named owner")
+    composed_alias = write("composed_alias.cpp", composed_source.replace(
+        "  return queue.groups[1].count", "  auto* escaped = queue.groups[1].tasks;\n  return queue.groups[1].count"))
+    syntax(composed_alias, error="resource aliases are outside the checked protocol")
+    local_records = write("local_record_array.cpp", """
+        #include "runtime_transaction.hpp"
+        using example::Work;
+        struct Batch { Work task; int count; };
+        int main() {
+          Batch batches[2]{{example::start(), 1}, {example::start(), 2}};
+          example::finish(static_cast<Work&&>(batches[0].task));
+          example::finish(static_cast<Work&&>(batches[1].task));
+          return batches[1].count != 2;
+        }
+    """)
+    syntax(local_records)
+    selected_source = """\
+        #include "runtime_transaction.hpp"
+        using example::Work;
+        struct Inner { Work value; };
+        struct Fields { Work first; Inner inner; };
+
+        int main(int argc, char**) {
+          const bool choose = argc == 1;
+          auto source = example::start();
+          auto selected = choose ? example::handoff(static_cast<Work&&>(source)) :
+                                   (example::inspect(source), example::handoff(static_cast<Work&&>(source)));
+          int selected_path = 0;
+          Fields fields{choose ? (selected_path += 1, example::start()) : (selected_path += 2, example::start()),
+                        {(example::inspect(selected), example::start())}};
+          Work tasks[2]{choose ? (selected_path += 4, example::start()) : (selected_path += 8, example::start()),
+                        example::start()};
+          example::finish(static_cast<Work&&>(selected));
+          example::finish(static_cast<Work&&>(fields.first));
+          example::finish(static_cast<Work&&>(fields.inner.value));
+          example::finish(static_cast<Work&&>(tasks[0]));
+          example::finish(static_cast<Work&&>(tasks[1]));
+          return selected_path != (choose ? 5 : 10);
+        }
+    """
+    selected = write("selected.cpp", selected_source)
+    syntax(selected)
+    syntax(write("selected_live_branch.cpp", selected_source.replace(
+        "(example::inspect(source), example::handoff(static_cast<Work&&>(source)))", "example::start()")),
+        error="linear resource 'source' may leave its scope")
+    syntax(write("selected_spent_branch.cpp", selected_source.replace(
+        "example::inspect(source)", "example::finish(static_cast<Work&&>(source))")),
+        error="linear resource 'source' may already have been consumed")
+    syntax(write("selected_unwind.cpp", "void potentially_throwing();\n" + selected_source.replace(
+        "example::inspect(source)", "potentially_throwing()")),
+        error="operation may unwind while linear resource 'source' is live")
+    subprocess.run([host, "-std=c++20", "-I", include, "-I", examples, str(selected), "-o", str(executable)],
+                   check=True, timeout=30)
+    for extra in ((), ("alternate",)):
+        assert subprocess.run([executable, *extra], timeout=10).returncode == 0
+
+    darwin = [compiler, "cxx", "--no-daemon", "--target=arm64-apple-darwin", "-I", include, "-I", examples]
+    selected_macho = root / "selected-macho"
+    subprocess.run([*darwin, "-fcheck-policies", selected, "-o", selected_macho], check=True, timeout=30)
+    implicit_macho = root / "implicit-move-macho"
+    subprocess.run([*darwin, "-fcheck-policies", implicit_move, "-o", implicit_macho], check=True, timeout=30)
+    for executable_macho in (selected_macho, implicit_macho):
+        assert executable_macho.read_bytes()[:4] == bytes.fromhex("cffaedfe")
+    # PARITY: by design: run the linked Mach-O executable on its native host and ISA.
+    if native_darwin:
+        for extra in ((), ("alternate",)):
+            subprocess.run([selected_macho, *extra], check=True, timeout=10)
+        subprocess.run([implicit_macho], check=True, timeout=10)
+
+    for source, extra in ((nested, ()), (nested_skip, ("skip",)), (array, ()), (array_skip, ("skip",)),
+                          (composed, ()), (composed_skip, ("skip",)), (local_records, ())):
+        subprocess.run([host, "-std=c++20", "-I", include, "-I", examples, str(source), "-o", str(executable)],
+                       check=True, timeout=30)
+        expected = (-signal.SIGABRT, -signal.SIGILL, -signal.SIGTRAP) if extra else (0,)
+        assert subprocess.run([executable, *extra], timeout=10).returncode in expected
+
+    write("guarded_receipt.hpp", """\
+        #pragma once
+        #include <ycxx/ownership.hpp>
+        #include <ycxx/ownership/runtime.hpp>
+        namespace own = ycxx::ownership;
+        struct [[=own::resource_mode::linear]] Receipt {
+          own::linear_state state;
+          int number;
+        };
+        [[=own::operation::creates]] Receipt issue_receipt() noexcept;
+        [[=own::operation::verified_observes]] int read_receipt(const Receipt&) noexcept;
+        [[=own::operation::consumes]] void close_receipt(Receipt&&) noexcept;
+    """)
+    receipt_caller = write("guarded_receipt_caller.cpp", """\
+        #include "guarded_receipt.hpp"
+        Receipt issue_receipt() noexcept { return Receipt{own::linear_state{}, 7}; }
+        void close_receipt(Receipt&& receipt) noexcept { receipt.state.consume(); }
+        int main() {
+          auto receipt = issue_receipt();
+          const auto& view = receipt;
+          const auto& alias = view;
+          const int number = read_receipt(alias);
+          close_receipt(static_cast<Receipt&&>(receipt));
+          return number != 7;
+        }
+    """)
+    receipt_provider = write("guarded_receipt_provider.cpp", """\
+        #include "guarded_receipt.hpp"
+        int read_receipt(const Receipt& receipt) noexcept { return receipt.number; }
+    """)
+    receipt_targets = [(darwin, native_darwin)]
+    # PARITY: by design: use the native ELF runtime on the Linux host and cross-link Mach-O.
+    if native_linux:
+        receipt_targets.append(([compiler, "cxx", "--no-daemon", "--target=x86_64-linux-gnu",
+                                 "-nostdlib", "-I", include], True))
+    for driver, can_run in receipt_targets:
+        for guards in (0, 1):
+            args = [*driver, f"-DYCXX_POLICIES_RUNTIME_CHECKS={guards}"]
+            checked = [*args, "-fcheck-policies"]
+            caller_object = receipt_caller.with_suffix(".o")
+            provider_object = receipt_provider.with_suffix(".o")
+            for receipt_source, receipt_object in ((receipt_caller, caller_object),
+                                                    (receipt_provider, provider_object)):
+                subprocess.run([*checked, "-c", receipt_source, "-o", receipt_object],
+                               check=True, timeout=30)
+            receipt_executable = root / "guarded-receipt"
+            subprocess.run([*checked, caller_object, provider_object, "-o", receipt_executable],
+                           check=True, timeout=30)
+            if can_run:
+                subprocess.run([receipt_executable], check=True, timeout=10)
+
+            unchecked_provider = root / "unchecked-guarded-receipt.o"
+            subprocess.run([*args, "-c", receipt_provider, "-o", unchecked_provider],
+                           check=True, timeout=30)
+            missing_guarantee = subprocess.run([*checked, caller_object, unchecked_provider,
+                                                "-o", root / "guarded-receipt-missing-guarantee"],
+                                               text=True, capture_output=True, timeout=30)
+            assert missing_guarantee.returncode == 1 and "no matching guarantee" in missing_guarantee.stderr, (
+                args, missing_guarantee.stderr)
+
+    # A hosted peer owns the guard and catches its exception after unwinding through YCXX.
+    cleanup = write("cleanup.cpp", """\
+        #include <ycxx/ownership/runtime.hpp>
+        extern "C" void maybe_throw();
+        struct Completion {
+          ycxx::ownership::linear_state* state;
+          ~Completion() noexcept { state->consume(); }
+        };
+        extern "C" void run_cleanup(ycxx::ownership::linear_state* state) {
+          Completion completion{state};
+          maybe_throw();
+        }
+    """)
+    peer = write("cleanup_peer.cpp", """\
+        #include <ycxx/ownership/runtime.hpp>
+        using ycxx::ownership::linear_state;
+        extern "C" void run_cleanup(linear_state*);
+        bool throwing;
+        extern "C" void maybe_throw() {
+          if (throwing) throw 19;
+        }
+        int main(int argc, char**) {
+          {
+            linear_state state;
+            run_cleanup(&state);
+          }
+          throwing = true;
+          try {
+            linear_state state;
+            if (argc > 1) state.consume();
+            run_cleanup(&state);
+          } catch (int value) {
+            return value == 19 ? 0 : 1;
+          }
+          return 2;
+        }
+    """)
+    compile_cleanup = [compiler, "cxx", "--no-daemon", "-I", include, "-c", cleanup]
+    cleanup_object = root / "cleanup-macho.o"
+    subprocess.run([*compile_cleanup, "--target=arm64-apple-darwin", "-o", cleanup_object],
+                   check=True, timeout=30)
+    image = cleanup_object.read_bytes()
+    assert image[:4] == bytes.fromhex("cffaedfe") and b"__eh_frame" in image and b"__gcc_except_tab" in image
+    # PARITY: by design: the stock linker and exception runtime run on their native host and ISA.
+    if native_linux:
+        cleanup_object = root / "cleanup-elf.o"
+        subprocess.run([*compile_cleanup, "--target=x86_64-linux-gnu", "-o", cleanup_object],
+                       check=True, timeout=30)
+    if native_linux or native_darwin:
+        cleanup_native = root / "cleanup-native"
+        subprocess.run([host, "-std=c++20", "-I", include, peer, cleanup_object, "-o", cleanup_native],
+                       check=True, timeout=30)
+        subprocess.run([cleanup_native], check=True, timeout=10)
+        trapped = subprocess.run([cleanup_native, "already-consumed"], timeout=10)
+        assert trapped.returncode in (-signal.SIGABRT, -signal.SIGILL, -signal.SIGTRAP)
+
+    if native_linux:
+        native = root / "native"
+        args = [compiler, "cxx", "--no-daemon", "--target=x86_64-linux-gnu", "-nostdlib", "-I", include, "-I", examples]
+        adapter = write("adapter.cpp", """\
+            #include "resource.hpp"
+            namespace checkout {
+            Ticket acquire() noexcept { return {0}; }
+            void inspect(const Ticket&) noexcept {}
+            void submit(Ticket&&) noexcept {}
+            }
+        """)
+        split_main = write("split_main.cpp", """\
+            void run();
+            int main() { run(); }
+        """)
+        subprocess.run([*args, "-fcheck-policies", *map(str, (mode, operations, adapter, caller, split_main)),
+                        "-o", str(native)], check=True, timeout=30)
+        assert subprocess.run([native], timeout=10).returncode == 0
+
+        providers = write("providers.cpp", """\
+            #include "resource.hpp"
+            namespace checkout {
+            Ticket acquire() noexcept { return {7}; }
+            void submit(Ticket&&) noexcept {}
+            }
+        """)
+        observed_main = write("observed_main.cpp", """\
+            void run();
+            namespace checkout { extern int inspected; }
+            int main() {
+              run();
+              return checkout::inspected != 7;
+            }
+        """)
+        subprocess.run([*args, "-fcheck-policies", *map(str, (verified, caller, observer, providers, observed_main)),
+                        "-o", str(native)], check=True, timeout=30)
+        assert subprocess.run([native], timeout=10).returncode == 0
+
+        def compile_object(source, checked=True, flags=()):
+            path = source.with_suffix(".o")
+            mode_flag = ["-fcheck-policies"] if checked else []
+            subprocess.run([*args, *mode_flag, *flags, "-c", str(source), "-o", str(path)], check=True, timeout=30)
+            return path
+
+        checked_caller = write("checked_caller.cpp", verified.read_text() + caller.read_text())
+        checked_observer = write("checked_observer.cpp", mode.read_text() + observer_source)
+        caller_object = compile_object(checked_caller)
+        observer_object = compile_object(checked_observer)
+        other_objects = tuple(map(compile_object, (providers, observed_main)))
+        forwarding_object = compile_object(write("checked_forwarding.cpp", mode.read_text() + forwarding_source))
+        leaf_object = compile_object(write("checked_leaf.cpp", mode.read_text() + leaf_source))
+        unchecked_leaf_object = compile_object(write("unverified_leaf.cpp",
+            leaf_source.replace("[[=own::operation::verified_observes]] ", "")))
+
+        def checked_link(inputs, output, daemon="--no-daemon", env=None):
+            command = [option for option in args if option != "--no-daemon"]
+            return subprocess.run([*command, daemon, "-fcheck-policies", *map(str, inputs), "-o", str(output)],
+                                  cwd=root, env=env, text=True, capture_output=True, timeout=30)
+
+        objects = (caller_object, observer_object, *other_objects)
+        linked = checked_link(objects, native)
+        assert linked.returncode == 0, linked.stderr
+        assert subprocess.run([native], timeout=10).returncode == 0
+        mixed = checked_link((checked_caller, observer_object, *other_objects), native)
+        assert mixed.returncode == 0, mixed.stderr
+        assert subprocess.run([native], timeout=10).returncode == 0
+        subprocess.run([*args, *map(str, objects), "-o", str(native)], check=True, timeout=30)
+        assert subprocess.run([native], timeout=10).returncode == 0
+
+        unchecked_source = write("unverified_observer.cpp", observer_source.replace(
+            "[[=own::operation::verified_observes]] ", ""))
+        covered_without_proof = compile_object(unchecked_source)
+        unmarked_caller = compile_object(write("unmarked_caller.cpp", checked_caller.read_text()), checked=False)
+        stale = write("stale_observer.cpp", mode.read_text().replace("use_policy<checkout::Resource>",
+                      "use_policy<checkout::own::affine<checkout::Ticket>>") + observer_source)
+        stale_object = compile_object(stale)
+        incomplete = root / "incomplete_caller.o"
+        contents = caller_object.read_bytes()
+        assert b"__ycxx_policy.1.need." in contents
+        incomplete.write_bytes(contents.replace(b"__ycxx_policy.1.need.", b"__ycxx_otherx.1.need.", 1))
+
+        forward_run = checked_link((caller_object, forwarding_object, leaf_object, *other_objects), native)
+        assert forward_run.returncode == 0, forward_run.stderr
+        assert subprocess.run([native], timeout=10).returncode == 0
+        for inputs, error in (
+            ((caller_object, forwarding_object, unchecked_leaf_object, *other_objects), "no matching guarantee"),
+            ((caller_object, *other_objects), "requires one strong definition"),
+            ((caller_object, covered_without_proof, *other_objects), "no matching guarantee"),
+            ((caller_object, stale_object, *other_objects), "no matching guarantee"),
+            ((unmarked_caller, observer_object, *other_objects), "missing checked policy coverage"),
+            ((incomplete, observer_object, *other_objects), "incomplete checked policy metadata"),
+            ((caller_object, observer_object, stale_object, *other_objects), "requires one strong definition"),
+        ):
+            rejected_output = root / "rejected-link"
+            rejected = checked_link(inputs, rejected_output)
+            assert rejected.returncode == 1 and error in rejected.stderr, (inputs, rejected.returncode, rejected.stderr)
+            assert not rejected_output.exists()
+
+        # Replacing a provider at the same path must not reuse the daemon's previous link verdict.
+        snapshot = root / "provider-snapshot.o"
+        snapshot.write_bytes(observer_object.read_bytes())
+        with tempfile.TemporaryDirectory(prefix="ycp-link-", dir="/tmp") as sockets:
+            env = {k: v for k, v in os.environ.items() if k not in ("YCXX_DAEMON", "YCXX_NO_DAEMON")}
+            env.update(YCXX_RUNTIME_DIR=sockets, YCXX_ROOT=str(root), YCXX_THREADS="2")
+            inputs = (caller_object, snapshot, *other_objects)
+            try:
+                warm = checked_link(inputs, native, "--daemon=require", env)
+                assert warm.returncode == 0, warm.stderr
+                snapshot.write_bytes(stale_object.read_bytes())
+                stale_link = checked_link(inputs, native, "--daemon=require", env)
+                cold = checked_link(inputs, native)
+                assert stale_link.returncode == cold.returncode == 1, stale_link.stderr
+                assert stale_link.stderr == cold.stderr and "no matching guarantee" in cold.stderr, cold.stderr
+            finally:
+                subprocess.run([compiler, "ctl", "shutdown"], cwd=root, env=env, capture_output=True, timeout=10)
+
+        # Own and discharge the same object through native YCXX, keeping the guard in the ABI.
+        native_good = write("native_good.cpp", """\
+            #include "runtime_transaction.hpp"
+            struct Bundle { example::Work left; example::Work right; };
+            int main() {
+              Bundle bundle{example::start(), example::start()};
+              {
+                const auto& view = bundle.left;
+                example::inspect(view);
+                example::finish(static_cast<example::Work&&>(bundle.right));
+              }
+              auto second = example::handoff(static_cast<example::Work&&>(bundle.left));
+              example::finish(static_cast<example::Work&&>(second));
+            }
+        """)
+        subprocess.run([host, "-std=c++20", "-I", include, "-I", examples, str(native_good), "-o", str(executable)],
+                       check=True, timeout=30)
+        assert subprocess.run([executable], timeout=10).returncode == 0
+        subprocess.run([*args, "-fcheck-policies", str(native_good), "-o", str(native)], check=True, timeout=30)
+        assert subprocess.run([native], timeout=10).returncode == 0
+        unfinished_field = write("unfinished_field.cpp", native_good.read_text()
+                                 .replace("int main()", "int main(int argc, char**)")
+                                 .replace("  auto second =", "  if (argc > 1) return 0;\n  auto second ="))
+        syntax(unfinished_field, error="linear resource 'bundle.left' may leave its scope")
+        subprocess.run([host, "-std=c++20", "-I", include, "-I", examples, str(unfinished_field),
+                        "-o", str(executable)], check=True, timeout=30)
+        assert subprocess.run([executable, "skip"], timeout=10).returncode == -signal.SIGILL
+        subprocess.run([*args, str(unfinished_field), "-o", str(native)], check=True, timeout=30)
+        assert subprocess.run([native, "skip"], timeout=10).returncode == -signal.SIGILL
+        subprocess.run([*args, "-fcheck-policies", str(nested), "-o", str(native)], check=True, timeout=30)
+        assert subprocess.run([native], timeout=10).returncode == 0
+        subprocess.run([*args, str(nested_skip), "-o", str(native)], check=True, timeout=30)
+        assert subprocess.run([native, "skip"], timeout=10).returncode == -signal.SIGILL
+        subprocess.run([*args, "-fcheck-policies", str(array), "-o", str(native)], check=True, timeout=30)
+        assert subprocess.run([native], timeout=10).returncode == 0
+        subprocess.run([*args, str(array_skip), "-o", str(native)], check=True, timeout=30)
+        assert subprocess.run([native, "skip"], timeout=10).returncode == -signal.SIGILL
+        subprocess.run([*args, "-fcheck-policies", selected, "-o", native], check=True, timeout=30)
+        for extra in ((), ("alternate",)):
+            subprocess.run([native, *extra], check=True, timeout=10)
+        for source in (composed, local_records, direct_move, tagged_move, annotated_move, reflected_move,
+                       implicit_move, implicit_reflected):
+            subprocess.run([*args, "-fcheck-policies", str(source), "-o", str(native)], check=True, timeout=30)
+            assert subprocess.run([native], timeout=10).returncode == 0
+        subprocess.run([*args, str(composed_skip), "-o", str(native)], check=True, timeout=30)
+        assert subprocess.run([native, "skip"], timeout=10).returncode == -signal.SIGILL
+
+        subprocess.run([*args, str(runtime), "-o", str(native)], check=True, timeout=30)
+        assert subprocess.run([native], timeout=10).returncode == 0
+        assert subprocess.run([native, "early"], timeout=10).returncode == -signal.SIGILL
+
+        capability = write("capability.cpp", """\
+            #include <ycxx/capabilities.hpp>
+            namespace caps = ycxx::capabilities;
+            inline constexpr caps::rights_mask read_right = 1;
+            inline constexpr caps::rights_mask write_right = 2;
+            struct Store;
+            using Grant = caps::token<Store, read_right>;
+            struct Store {
+              static Grant grant() noexcept;
+              static int read(const Grant& authority, caps::scope_id scope) noexcept;
+            };
+            Grant Store::grant() noexcept { return Grant(1); }
+            int Store::read(const Grant& authority, caps::scope_id scope) noexcept {
+              authority.require<read_right>(scope);
+              return scope == 1 ? 17 : 22;
+            }
+            int main(int argc, char**) {
+              auto initial = Store::grant();
+              if (argc == 2) return Store::read(initial, 2);
+              auto moved = static_cast<Grant&&>(initial);
+              if (argc == 3) return Store::read(initial, 1);
+              const int value = Store::read(moved, 1);
+              moved.release();
+              if (argc == 4) return Store::read(moved, 1);
+              return value != 17;
+            }
+        """)
+        subprocess.run([*args, "-fcheck-policies", str(capability), "-o", str(native)], check=True, timeout=30)
+        assert subprocess.run([native], timeout=10).returncode == 0
+        for denied in (("wrong-scope",), ("use", "moved"), ("use", "released", "token")):
+            assert subprocess.run([native, *denied], timeout=10).returncode == -signal.SIGILL
+        overreach = write("capability_overreach.cpp", capability.read_text().replace(
+            "authority.require<read_right>", "authority.require<write_right>"))
+        syntax(overreach, error="no matching function for call to 'require'")
+        forged = write("capability_forged.cpp", capability.read_text().replace(
+            "auto initial = Store::grant();", "Grant initial(1);"))
+        syntax(forged, error="private member")
+        copied = write("capability_copied.cpp", capability.read_text().replace(
+            "static_cast<Grant&&>(initial)", "initial"))
+        syntax(copied, error="deleted")
+
+        # PARITY: by design: this native SysV test uses the x86-64 Linux host linker.
+        declarations = capability.read_text().split("Grant Store::grant()", 1)[0]
+        write("mixed_capability.hpp", declarations + textwrap.dedent("""\
+            #include <ycxx/ownership.hpp>
+            namespace own = ycxx::ownership;
+            Grant acquire() noexcept;
+            void set_scope(caps::scope_id scope) noexcept;
+            void access(const Grant&) noexcept;
+            void release(Grant&&) noexcept;
+            using Policy = own::use_policy<own::affine<Grant>,
+                own::creates<decltype(&acquire), &acquire>,
+                own::observes<decltype(&access), &access>,
+                own::consumes<decltype(&release), &release>>;
+            struct
+            #ifdef __ycxx__
+            [[=own::resource_mode::linear, =own::move_constructor::transfers]]
+            #endif
+            Receipt {
+              own::linear_state state;
+              int value;
+            };
+            #ifdef __ycxx__
+            [[=own::operation::creates]]
+            #endif
+            Receipt issue_receipt() noexcept;
+            #ifdef __ycxx__
+            [[=own::operation::observes]]
+            #endif
+            int inspect_receipt(const Receipt&) noexcept;
+            #ifdef __ycxx__
+            [[=own::operation::consumes]]
+            #endif
+            void finish_receipt(Receipt&&) noexcept;
+        """))
+        capability_provider = write("capability_provider.cpp", """\
+            #include "mixed_capability.hpp"
+            static caps::scope_id selected;
+            Grant Store::grant() noexcept { return Grant(1); }
+            Grant acquire() noexcept { return Store::grant(); }
+            void set_scope(caps::scope_id scope) noexcept { selected = scope; }
+            void access(const Grant& authority) noexcept { authority.require<read_right>(selected); }
+            void release(Grant&& authority) noexcept { authority.release(); }
+            Receipt issue_receipt() noexcept {
+              Receipt issued{own::linear_state{}, 42};
+              return Receipt(static_cast<Receipt&&>(issued));
+            }
+            int inspect_receipt(const Receipt& receipt) noexcept {
+              receipt.state.observe();
+              return receipt.value;
+            }
+            void finish_receipt(Receipt&& receipt) noexcept { receipt.state.consume(); }
+        """)
+        capability_peer = write("capability_peer.cpp", """\
+            #include "mixed_capability.hpp"
+            int main(int argc, char**) {
+              set_scope(argc == 1 ? 1 : 2);
+              auto authority = acquire();
+              {
+                const auto& view = authority;
+                access(view);
+              }
+              release(static_cast<Grant&&>(authority));
+              auto issued = issue_receipt();
+              Receipt receipt(static_cast<Receipt&&>(issued));
+              int value = inspect_receipt(receipt);
+              finish_receipt(static_cast<Receipt&&>(receipt));
+              return value != 42;
+            }
+        """)
+        dangling_use = write("capability_after_release.cpp", capability_peer.read_text().replace(
+            "  release(static_cast<Grant&&>(authority));",
+            "  release(static_cast<Grant&&>(authority));\n  access(authority);"))
+        guard_modes = (((), -signal.SIGILL), (("-DYCXX_POLICIES_RUNTIME_CHECKS=0",), 0))
+        for flags, wrong_scope_result in guard_modes:
+            syntax(*flags, dangling_use, error="affine resource 'authority' may already have been consumed")
+            ycxx_objects, host_objects = [], []
+            for source in (capability_provider, capability_peer):
+                ycxx_objects.append(compile_object(source, flags=flags))
+                output = source.with_suffix(".host.o")
+                subprocess.run([host, "-std=c++20", *flags, "-I", include, "-c", source, "-o", output],
+                               check=True, timeout=30)
+                host_objects.append(output)
+            ycxx_provider, ycxx_caller = ycxx_objects
+            host_provider, host_caller = host_objects
+            for provider_object, caller_object in ((ycxx_provider, host_caller), (host_provider, ycxx_caller)):
+                subprocess.run([host, provider_object, caller_object, "-o", native], check=True, timeout=30)
+                subprocess.run([native], check=True, timeout=10)
+                assert subprocess.run([native, "wrong-scope"], timeout=10).returncode == wrong_scope_result

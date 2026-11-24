@@ -18,6 +18,13 @@ not trivial for calls passes by the address of the caller's object, as on AArch6
 §3.1.2.3). A trivially copyable argument of more than two eightbytes is passed by value on the
 stack (MEMORY), which is not implemented yet.
 
+An ordinary empty, naturally laid out one-byte class trivial for calls has only NO_CLASS in a
+fixed direct argument (AMD64 psABI §3.2.3, Itanium C++ ABI §3.1.2.6). L1 evaluates and
+materializes the argument as usual. L2 omits its transport before assigning registers and stack
+slots. The callee gives each such parameter separate one-byte storage. A constructor's `this`
+and a following owner reference therefore occupy the first two INTEGER registers. The empty
+result convention is tracked separately in [#641](https://github.com/yrashk/ycxx/issues/641).
+
 The front end records when a layout attribute or active packing directive makes the
 computed natural layout uncertain. The by-value ABI check rejects those shapes even
 if their computed offsets fit, since a peer can apply the layout directive. This check

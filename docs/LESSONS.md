@@ -151,6 +151,12 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
     (`YCXX_BUILD_DIR=<scratchpad>/build-b tools/build --no-tests`, about 30 s from a warm cache) and
     run tests with `YCXX=<that>/bin/ycxx tools/test --state <scratchpad>/state-b …`.
   - Learned on #337.
+- **Editing sources during `tools/test --fast` spoils the run.** On #218 two fast runs were
+  stopped, about 15 minutes lost, because a source edit landed while their build stage was
+  compiling the same build directory: the result would not have described any commit.
+  - Do: commit, start the fast run, and spend its 10 minutes on documents, issues and the PR body.
+    To keep coding meanwhile, build into a scratchpad build directory (the entry above).
+  - Learned on #218.
 
 ## Working with Fable subagents
 
@@ -553,6 +559,15 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
   - Do: `tools/build` and `tools/test` run `tools/sync-submodules` first, so the pin is enforced
     rather than remembered.
   - Learned on the α slice (#39), 2026-11-18.
+
+- **A helper whose "no" also means "not modelled" misleads its next caller.**
+  `unique_public_base` returned null both for "no unique public base" and for "a polymorphic
+  class, which the value conversions do not model". On #218 pointer convertibility read the
+  null as "no", so `std::derived_from` was false for every polymorphic hierarchy (the review's
+  P1).
+  - Do: give a bounded query a tri-state result (`yes`, `no`, `unknown`), as `base_path` and
+    `PointerConversion` now do, and let each caller decide what `unknown` means.
+  - Learned on #218.
 
 ## Evidence and tests
 
