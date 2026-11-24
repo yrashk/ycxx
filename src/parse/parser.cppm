@@ -1601,7 +1601,8 @@ public:
           l.suffixes.push_back(std::move(s));
           continue;
         }
-        if (!v || s_->world().values.rec(*v).kind != sema::ValueKind::integer || i64_of(*v) <= 0) {
+        if (!v || s_->world().values.rec(*v).kind != sema::ValueKind::integer || s_->world().values.rec(*v).wide ||
+            i64_of(*v) <= 0) {
           if (e.ok()) s_->diag(at + 1, Diag::bound_not_constant);
           ok = false;
         } else {

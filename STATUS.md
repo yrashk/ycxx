@@ -2950,12 +2950,14 @@ first; a dependent base is not searched. Redeclaring a hidden parameter's name i
   in `hi`, which is 0 for every narrower type. `arith`, `divide`, `shift`, `icmp`, `iconv`,
   the floating conversions, `tobool`, `switch` and pointer offsets take 128-bit operands.
   Conversion to a floating type rounds the top 64 bits with a sticky bit.
-- List-initialization narrowing reads constants in 128 bits.
+- List-initialization narrowing reads constants in 128 bits. `sema::ValueRec::wide` marks an
+  integer outside [-2^63, 2^64), so array bounds, bit-field widths and array new bounds reject
+  it rather than read its low half.
 - Static data of 16-byte integer type is written with its high half.
 - Not yet:
   - Native code that computes with a 128-bit value: lowering reports "no integer type of 16
     bytes" (#1172, slice 4).
-  - Enumerations with a 128-bit underlying type or an enumerator value outside [-2^63, 2^64)
+  - Enumerations with a 128-bit underlying type or an enumerator initializer of 128-bit type
     are diagnosed as not supported (#1176).
 - Tests: `own/int128` (types, constant evaluation, narrowing, specifiers, symbols against a Clang
   peer). `-Wpedantic` and `-Wno-pedantic` are accepted and select no warning, so the tests pass

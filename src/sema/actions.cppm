@@ -8759,7 +8759,7 @@ public:
     if (types().is_enum(target) && (types().is_integral(from) || types().is_enum(from))) {
       if (types().canonical(from) == types().canonical(target)) return v;
       if (auto lit = as<ast::Literal>(v); lit && target_enum && target_enum->fixed)
-        return literal(target, w_->values.integer(underlying_of(target), w_->values.rec(lit->value).bits), ValueCategory::prvalue,
+        return literal(target, w_->values.integer(underlying_of(target), ast::int_bits(ins(), lit->value)), ValueCategory::prvalue,
                        v.begin, v.end);
       return convert_node(v, ast::ConversionKind::integral, target);
     }
@@ -9238,8 +9238,9 @@ public:
     bool negative = false;
     bool oversized = false;
     if (value.kind == ValueKind::integer) {
-      negative = ast::is_signed(w_->target, *types().builtin_of(value.type)) && i64(value.bits) < 0;
-      oversized = value.bits > max_count;
+      negative = ast::is_signed(w_->target, *types().builtin_of(value.type)) &&
+                 (value.wide ? ast::is_negative(ast::int_bits(ins(), known)) : i64(value.bits) < 0);
+      oversized = !negative && (value.wide || value.bits > max_count);
     } else if (value.kind == ValueKind::floating) {
       negative = value.real < 0;
       // Check representability before truncating to an integer.

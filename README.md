@@ -846,7 +846,7 @@ and a peer-owned virtual destructor and RTTI. This is the shape of libycxx's fun
 - Native code generation for member-pointer values and general member-pointer expressions.
   [#411](https://github.com/yrashk/ycxx/issues/411)
 - Native arithmetic on `__int128` values ([#1172](https://github.com/yrashk/ycxx/issues/1172)),
-  and enumerations with a 128-bit underlying type ([#1176](https://github.com/yrashk/ycxx/issues/1176)).
+  and enumerations with a 128-bit underlying type or initializer ([#1176](https://github.com/yrashk/ycxx/issues/1176)).
 - Constexpr lambdas (the interpreter has no class objects yet), further lambda declaration
   contexts ([#338](https://github.com/yrashk/ycxx/issues/338)),
   tuple-like structured bindings and structured bindings to bit-fields or inherited members,

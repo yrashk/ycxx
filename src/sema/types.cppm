@@ -452,6 +452,8 @@ struct ValueRec {
   ValueKind kind = ValueKind::other;
   QualType type{};
   u64 bits = 0;
+  // An integer outside [-2^63, 2^64), which only a 128-bit type holds: `bits` has its low half.
+  bool wide = false;
   double real = 0;
   std::vector<u32> units;
   ConstId base = ConstId::none;
@@ -503,6 +505,9 @@ public:
       r.kind = ValueKind::integer;
       r.type = i.type;
       r.bits = i.bits.lo;
+      const auto b = ast::builtin_of(*ins_, i.type);
+      const bool negative = b && ast::is_signed(*target_, *b) && ast::is_negative(i.bits);
+      r.wide = negative ? i.bits.hi != ~u64{0} || i64(i.bits.lo) >= 0 : i.bits.hi != 0;
     } else if (v.is<ast::VFloat>(c)) {
       auto f = v.get<ast::VFloat>(c);
       r.kind = ValueKind::floating;
