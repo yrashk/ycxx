@@ -102,6 +102,8 @@ public:
   virtual ast::DeclSema decl_sema(DeclId d) = 0;
   // The written in-class declaration of a member from this unit's class record.
   virtual std::optional<ast::DeclSema> written_member(EntityId) { return std::nullopt; }
+  // The declaration a class template specialization made of a friend function it defines (#259).
+  virtual std::optional<ast::DeclSema> class_friend(EntityId) { return std::nullopt; }
   virtual bool peer_pure_dispatch(EntityId) { return false; }
   virtual void use_typed_dynamic_cast() {}
   // A use of a global allocation function that may lack a written declaration in the unit.
@@ -208,6 +210,8 @@ public:
   virtual const ClassRec* adl_class(EntityId c, bool at_instantiation) = 0;
   // Earlier friend declarations in a class whose member list is still being read.
   virtual std::vector<DeclId> earlier_adl_friends(EntityId, NameId) { return {}; }
+  // The declaration of a class's friend `f`: a class template specialization's own (#259).
+  virtual ast::DeclSema friend_decl(const ast::MemberRec& f) { return decl_sema(f.decl); }
   // In an instantiation, whether the call at `offset` was dependent in the template definition.
   virtual bool dependent_call(u32 /*offset*/) { return false; }
   // Whether instantiation has given up at its nesting limit, which was diagnosed ([temp.inst]/16):
@@ -7192,7 +7196,8 @@ public:
     bool value_dependent = false;
     auto function_throwing = [&](EntityId function) {
       if (dependent_noexcept_calls_.contains(std::to_underlying(function))) value_dependent = true;
-      const auto written = q_->written_member(function);
+      auto written = q_->written_member(function);
+      if (!written) written = q_->class_friend(function);
       QualType type = written ? written->type : w_->entities.rec(function).type;
       // A specification that depends on the template's parameters, for this specialization.
       std::optional<ast::DeclSema> pattern = written;
@@ -7225,7 +7230,14 @@ public:
       // global operator new[] without a Call child. The visitor still checks the operands.
       if (node.is<ast::NewArray>() && node.get<ast::NewArray>().allocation.id == NodeId::none)
         return function_throwing(w_->allocation_function(AllocationFunction::allocate, /*array=*/true).entity);
-      if (node.is<ast::DeleteObject>()) return function_throwing(node.get<ast::DeleteObject>().function);
+      if (node.is<ast::DeleteObject>()) {
+        // [expr.unary.noexcept]: the destructor is potentially invoked, then the deallocation.
+        const auto d = node.get<ast::DeleteObject>();
+        if (d.destructor != EntityId::none &&
+            destructor_throwing(types().pointee(expression_info(d.address.id).type), node.offset()))
+          return true;
+        return function_throwing(d.function);
+      }
       if (node.is<ast::DeleteArray>()) return function_throwing(node.get<ast::DeleteArray>().function);
       if (node.is<ast::ImplicitConversion>()) {
         const auto conversion = node.get<ast::ImplicitConversion>();
@@ -7713,10 +7725,12 @@ public:
   // Builtins with ordinary expression arguments (docs/EXTENSIONS.md).
   Ex builtin_call(const lex::BuiltinFunctionInfo& b, std::vector<Ex> args, u32 begin, u32 end) {
     using enum lex::BuiltinFunction;
-    if (b.function == trap) {
+    if (b.function == trap || b.function == unreachable) {
+      // [utility.unreachable]: both are `void` and end the path they are on.
       if (!builtin_arity(0, args.size(), begin)) return {NodeId::none, begin, end};
       ExprInfo info{builtin(Builtin::void_), ValueCategory::prvalue, 0};
-      return node(ast::BuiltinCall{info, ast::BuiltinOp::trap, b_->list({})}, begin, end, info);
+      const auto op = b.function == trap ? ast::BuiltinOp::trap : ast::BuiltinOp::unreachable;
+      return node(ast::BuiltinCall{info, op, b_->list({})}, begin, end, info);
     }
     if (b.function == addressof) {
       if (!builtin_arity(1, args.size(), begin)) return {NodeId::none, begin, end};
@@ -7754,6 +7768,7 @@ public:
     switch (b.function) {
       case addressof:
       case trap:
+      case unreachable:
       case strlen:
       case library:
       case constant_p: std::unreachable();  // Handled before floating type selection.
@@ -9030,13 +9045,97 @@ public:
     return node(ast::Call{call_info, f.entity, at(callee, begin), b_->list(sizes)}, begin, begin, call_info);
   }
 
+  // Whether class `c` or one of its bases declares an allocation or deallocation function, which
+  // a new- or delete-expression would look up before the global ones ([expr.new], [expr.delete]).
+  bool class_allocation_functions(EntityId c) {
+    const ClassRec* r = class_rec(c);
+    if (!r) return false;
+    for (const MemberDeclRec& m : r->members)
+      if (m.is_function && is_allocation_name(ins().names.spelling(m.name))) return true;
+    return std::ranges::any_of(r->bases, [&](const BaseRec& b) { return class_allocation_functions(b.cls); });
+  }
+
+  // The class objects the usual `operator new(size_t)` and `operator delete(void*, size_t)` can
+  // allocate and release: no class-specific allocation functions (#293) and no new-extended
+  // alignment, which would select the `std::align_val_t` overloads ([expr.new]/19).
+  bool supported_class_allocation(QualType t) {
+    if (class_allocation_functions(types().class_of(t))) return false;
+    const auto alignment = layout_of(t, true);
+    return alignment && *alignment <= 2u * w_->target.pointer_size;
+  }
+
+  // [dcl.init.general]/8: default-initialization of a const `t` initializes it, by a
+  // user-provided default constructor or by default member initializers for every member.
+  bool const_default_constructible(QualType t) {
+    t = types().innermost_array_element(t);
+    if (!types().is_class(t)) return false;
+    const ClassRec* r = class_rec(types().class_of(t));
+    if (!r) return false;
+    for (const MemberDeclRec& m : r->members) {
+      if (!m.is_ctor || m.is_template || m.is_deleted || m.entity == r->defaulted_default_ctor) continue;
+      // A default constructor: every parameter has a default argument ([class.default.ctor]).
+      const std::size_t params = types().rec(m.type).params.size();
+      const std::size_t required = m.defaults.empty() ? params : std::size_t(std::ranges::count(m.defaults, NodeId::none));
+      if (required == 0) return true;
+    }
+    if (r->union_) return r->fields.empty() || std::ranges::count_if(r->fields, &FieldRec::dmi) == 1;
+    for (const FieldRec& f : r->fields)
+      if (!f.dmi && !const_default_constructible(f.type)) return false;
+    return std::ranges::all_of(r->bases, [&](const BaseRec& b) {
+      return const_default_constructible(types().class_type(b.cls));
+    });
+  }
+
+  // [expr.new]/26: the new-initializer initializes the class object as in a declaration
+  // ([dcl.init.general]): default-initialization without one, value-initialization for `()`,
+  // and direct- or direct-list-initialization otherwise.
+  Ex new_class_initializer(QualType t, const std::optional<std::vector<Ex>>& args, const Braced* braces, u32 begin,
+                           u32 end) {
+    Ex fail{NodeId::none, begin, end};
+    if (braces) return list_init(t, *braces);
+    if (args && args->empty()) return value_init(t, end, end);
+    if (!args) {
+      if (default_deleted(t)) {
+        diag(begin, Diag::deleted_constructor, t);
+        return fail;
+      }
+      Ex init = default_init(t, end, end);
+      if (init.ok() && Types::is_const(types().canonical(t)) && !const_default_constructible(t)) {
+        diag(begin, Diag::new_const_uninitialized, t);
+        return fail;
+      }
+      return init;
+    }
+    if (std::ranges::any_of(*args, [](const Ex& e) { return !e.ok(); })) return fail;
+    if (std::ranges::any_of(*args, [&](const Ex& e) { return is_braced(e); })) {
+      diag(begin, Diag::not_supported, lex::Tk::l_brace);  // a braced argument in parentheses (#293)
+      return fail;
+    }
+    const u32 open = args->front().begin;
+    const bool aggregate = can_parenthesize_aggregate(t, *args, !immediate_context);
+    if (aggregate || has_user_ctors(t) || args->size() != 1)
+      return construct(t, *args, open, end, aggregate ? Construction::direct_paren_aggregate : Construction::direct);
+    return convert(args->front(), t, open);
+  }
+
   // [expr.new]: initialize the object after the call to the global allocation function.
   Ex new_object(QualType t, const std::optional<std::vector<Ex>>& args, const Braced* braces, u32 begin, u32 end,
                 std::optional<Ex> placement) {
     Ex fail{NodeId::none, begin, end};
-    if (types().has_placeholder(t) || types().is_dependent(t)) {
+    if (types().has_placeholder(t)) {
       diag(begin, Diag::not_supported, lex::Tk::kw_new);
       return fail;
+    }
+    if (types().is_dependent(t)) {
+      // The instantiation analyses the new-expression's tokens again with T bound ([temp.res]).
+      std::vector<Ex> ops;
+      if (placement) ops.push_back(*placement);
+      if (args) ops.insert(ops.end(), args->begin(), args->end());
+      if (braces)
+        for (const Braced::Clause& c : braces->clauses)
+          if (!c.list) ops.push_back(c.expr);
+      if (std::ranges::any_of(ops, [](const Ex& e) { return !e.ok(); })) return fail;
+      return dependent_node(ops, begin, end);
     }
     if (!types().is_object(t)) {
       diag(begin, Diag::new_requires_object, t);
@@ -9044,7 +9143,12 @@ public:
     }
     if (types().is_class(t) && !require_complete(t, begin)) return fail;
     if (!require_concrete_object(t, begin)) return fail;
-    if (!scalar_allocation_type(t)) {
+    const bool class_type = types().is_class(t);
+    if (class_type && !supported_class_allocation(t)) {
+      diag(begin, Diag::not_supported, lex::Tk::kw_new);
+      return fail;
+    }
+    if (!class_type && !scalar_allocation_type(t)) {
       diag(begin, Diag::not_supported, lex::Tk::kw_new);
       return fail;
     }
@@ -9058,7 +9162,9 @@ public:
     }
 
     Ex init;
-    if (braces) {
+    if (class_type) {
+      init = new_class_initializer(t, args, braces, begin, end);
+    } else if (braces) {
       init = list_init(t, *braces);
     } else if (!args) {
       if (Types::is_const(types().canonical(t))) {
@@ -9129,18 +9235,30 @@ public:
       return fail;
     }
     QualType t = types().pointee(e.type());
+    // [expr.delete]/5: deleting an object of incomplete class type is ill-formed.
     if (types().is_class(t) && !require_complete(t, begin)) return fail;
-    if (!scalar_allocation_type(t)) {
+    EntityId destructor = EntityId::none;
+    if (types().is_class(t)) {
+      // A virtual destructor selects the deallocation function of the dynamic type through the
+      // deleting destructor (#931, #309).
+      const ClassRec* r = class_rec(types().class_of(t));
+      if (!r || r->virtual_destructor || !supported_class_allocation(t)) {
+        diag(begin, Diag::not_supported, lex::Tk::kw_delete);
+        return fail;
+      }
+      if (!check_destructor_access(t, begin)) return fail;
+      destructor = destructor_of(t);
+    } else if (!scalar_allocation_type(t)) {
       diag(begin, Diag::not_supported, lex::Tk::kw_delete);
       return fail;
     }
-    Ex addr = convert_node(rvalue(e), ast::ConversionKind::pointer, types().pointer(v));
-    if (!addr.ok()) return fail;
+    Ex pointer = rvalue(e);
+    if (!pointer.ok()) return fail;
     Ex size = size_of(t, false, begin, begin);
     EntityId f = w_->allocation_function(AllocationFunction::deallocate_sized).entity;
     q_->use_allocation_function(f);
     ExprInfo info{v, ValueCategory::prvalue, 0};
-    return node(ast::DeleteObject{info, f, at(addr, begin), at(size, begin)}, begin, end, info);
+    return node(ast::DeleteObject{info, f, at(pointer, begin), at(size, begin), destructor}, begin, end, info);
   }
 
   // Limit the object size to the largest positive byte distance representable by ptrdiff_t.
@@ -10944,10 +11062,10 @@ public:
       if (!std::ranges::contains(result.namespaces, ns)) result.namespaces.push_back(ns);
     };
     auto add_class = [&](EntityId cls) {
-      // Friend declarations in class templates are outside this slice. Keep the existing
-      // dependent lookup's limits on when it instantiates associated classes.
+      // A class template specialization is associated too: its friends are found once it is
+      // instantiated, which `adl_class` does where it can be ([temp.inst]/2, #259).
       const EntityRec& entity = w_->entities.rec(cls);
-      if (entity.kind == EntityKind::class_template || entity.templ != EntityId::none) return;
+      if (entity.kind == EntityKind::class_template) return;
       if (!std::ranges::contains(result.classes, cls)) result.classes.push_back(cls);
     };
     // [basic.lookup.argdep]/3: bases contribute their entities. Expanding a base's template
@@ -11024,15 +11142,15 @@ public:
   // when their namespace has yet to bind the name for ordinary lookup.
   void for_each_associated_friend(const AdlAssociations& associations, NameId name, bool at_instantiation,
                                   auto&& add) {
-    auto add_friend = [&](DeclId f) {
-      if (auto d = q_->decl_sema(f); d.entity != EntityId::none) add(d);
+    auto add_friend = [&](const ast::DeclSema& d) {
+      if (d.entity != EntityId::none) add(d);
     };
     for (EntityId cls : associations.classes) {
       if (const ClassRec* rec = q_->adl_class(cls, at_instantiation)) {
         for (const ast::MemberRec& f : rec->adl_friends)
-          if (w_->entities.rec(f.entity).name == name) add_friend(f.decl);
+          if (w_->entities.rec(f.entity).name == name) add_friend(q_->friend_decl(f));
       } else if (!at_instantiation) {
-        for (DeclId f : q_->earlier_adl_friends(cls, name)) add_friend(f);
+        for (DeclId f : q_->earlier_adl_friends(cls, name)) add_friend(q_->decl_sema(f));
       }
     }
   }

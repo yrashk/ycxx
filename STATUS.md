@@ -264,9 +264,11 @@ What is true of the code today. Work in progress and its owners are tracked in
   - a feature-test table, including `__cpp_pp_embed`;
   - the target's macros, generated from `ast::Target` and checked against Clang on AArch64
     Darwin and x86-64 Linux (`tests/own/pp/predefined-target*.pp.cpp`, #132);
-  - x86-64 Linux `-fPIC` defines `__PIC__` and `__pic__` as `2`. The compiler and editor
-    include the mode in the source configuration.
-    [#983](https://github.com/yrashk/ycxx/issues/983) · [Design](docs/design/freestanding-pic.md)
+  - x86-64 Linux `-fPIC` defines `__PIC__` and `__pic__` as `2`, and `-fpic` as `1`; the last of
+    `-fpic`, `-fPIC` and `-fno-pic` wins. arm64 Darwin always defines both as `2` and accepts the
+    same options, as Clang does. The compiler and editor include the mode in the source
+    configuration.
+    [#983](https://github.com/yrashk/ycxx/issues/983) · [#1089](https://github.com/yrashk/ycxx/issues/1089) · [Design](docs/design/freestanding-pic.md)
   - `__LINE__`, `__FILE__`, `__COUNTER__`, `__DATE__` and `__TIME__`.
 - `#include <cstdio>` preprocesses until libycxx's `#error` for unknown compilers
   (yrashk/libycxx#17).
@@ -2620,6 +2622,11 @@ executing IR block and requires no external runtime symbol. Linux x86-64 emits U
 and Darwin arm64 emits BRK. The builtin registry also exposes it through
 `__has_builtin`.
 
+`__builtin_unreachable()` ([utility.unreachable], #330) is the same `void` call and lowers to
+the same IR `unreachable`, flagged `assumed_unreachable`. Native code traps as above. A
+constant evaluation that reaches it fails with "execution reached __builtin_unreachable()"
+([expr.const]). IR node flags are 16 bits wide to make room for the flag.
+
 ## Basic Linux asm statements (#950)
 
 Statement-position `asm("int3");` and GNU `asm volatile("int3");` emit one INT3
@@ -2718,6 +2725,22 @@ Fable decided the representation (ast.md §6.6); the Opus session wrote the code
   namespace declaration. The existing Linux inline gate checks both object orders.
 - Ordinary unary minus finds hidden friends by ADL and ranks their operand conversions with
   ordinary nonmember and member candidates. Access and deletion are checked for the selected operator.
+- **Friends in class templates** ([temp.friend], `templated_friend` in parse.cppm, #259): an
+  unqualified friend function definition in a namespace-scope class template (or partial
+  specialization) declares, for each specialization, an inline function of the namespace with
+  the arguments substituted. It joins the specialization's `ClassRec::adl_friends`, and
+  `member_patterns_` maps it to its item and specialization, so its body is instantiated with
+  the class's arguments when odr-used ([temp.inst]/4), in the specialization's complete-class
+  scope. `Questions::friend_decl` gives ADL the specialization's declaration. A dependent
+  noexcept-specifier is kept as tokens and replayed in that scope ([except.spec]/13). A
+  class template specialization is now an associated class of ADL, instantiated where needed,
+  as Clang and GCC do. Two specializations defining one function report a redefinition, as
+  does a namespace definition of it (within an item group; #1148 across groups). The friend
+  is coalesced as the class's members are, and binds locally when its signature names a class
+  local to the unit (a closure type included).
+- **Friend function templates** defined in a class or class template
+  (`template <class T> friend R f(…) {…}`) are function templates of the namespace that only ADL
+  finds; a class template's specialization binds its own arguments for theirs (#259).
 - **Checks** (`Sema::accessible`, `check_access`): a private or protected member may be named in
   a member function or default member initializer of its class, in the class's scope (the
   initializer of a static data member defined outside it), or in a friend function or friend
@@ -2726,7 +2749,7 @@ Fable decided the representation (ast.md §6.6); the Opus session wrote the code
   overload resolution chooses ([class.access]/4), and for the constructor an initialization
   chooses. Protected is checked as private until base classes exist.
 - C-linkage friend definitions, other hidden friend operators, defaults on friend declarations,
-  friends in templates, destructor access, private member operator wording, and elaborated types
+  non-defining friends in class templates and non-defining friend templates, destructor access, private member operator wording, and elaborated types
   in member parameters remain under [#259](https://github.com/yrashk/ycxx/issues/259).
   Both targets coalesce these inline friend definitions across objects (#422, [#124](https://github.com/yrashk/ycxx/issues/124)).
 - Both ELF and Mach-O coalesce eligible nonthrowing, nonvirtual in-class destructor definitions
@@ -3118,6 +3141,9 @@ What the process allocates, attributed to the engine's cells, in the trace and t
   substitutes a dependent base at the first completeness demand. Its concrete specialization publishes
   the resolved base before layout or qualified lookup. [Design](docs/design/class-template-bases.md)
   Base packs and additional class-template base forms remain in #308. Virtual bases are #310.
+  An explicit specialization's base-clause is an ordinary class's, and a partial
+  specialization's is a primary template's, substituted with the arguments deduced for it;
+  another specialization of the same template can be a base (#1134).
 - **Layout** (`ast::record_layout`, Itanium C++ ABI §2.4):
   - bases first, in declaration order; an empty base at offset 0 unless another subobject of its
     type is there;
@@ -3977,10 +4003,29 @@ for calls and for selection against a static function-pointer target.
 - Native lowering supports initializers proven nonthrowing from the analyzed expression tree.
   Initializers that need an exception cleanup edge and constant evaluation of allocation remain
   in #293. Namespace-scope allocation uses the existing dynamic initialization path. The issue
-  also tracks class, array, enumeration, floating-point, placement and over-aligned allocation,
+  also tracks class arrays, enumeration, floating-point, placement and over-aligned allocation,
   and other allocation-function declarations.
 - Spec-only tests in `tests/own/scalar-allocation/` cover types, initialization, a typed null, and
   invalid operands. A separate provider checks the address and size passed to deallocation.
+- Single objects of complete, default-aligned class type can be allocated and deleted on both
+  targets, including in templates with a dependent type or initializer. `new` passes
+  `sizeof(T)` to `operator new(size_t)` and initializes the object as a declaration would:
+  default-initialization without an initializer, value-initialization for `()` (the storage is
+  zero-filled first when that requires zero-initialization), and direct- or
+  direct-list-initialization by the selected constructor or as an aggregate, including from a
+  pack expansion. A const object needs a const-default-constructible class
+  ([dcl.init.general]/8). Placement `new` constructs a class object the same way in storage
+  from a visible written reserved `operator new(size_t, void*)`. `delete` evaluates
+  its operand once and, when non-null, runs the destructor (none when trivial) and passes the
+  address and `sizeof(T)` to `operator delete(void*, size_t)`. Deleting an incomplete class is
+  ill-formed in C++26 and diagnosed. A constructor that throws does not yet release the storage
+  ([expr.new]/28): the frame gets no unwind information, so the exception terminates the program
+  ([#1135](https://github.com/yrashk/ycxx/issues/1135)). Polymorphic deletion through a virtual
+  destructor ([#931](https://github.com/yrashk/ycxx/issues/931)), class-specific allocation
+  functions, over-aligned classes, class arrays and a braced argument inside parentheses are
+  diagnosed as not supported yet (#293).
+  `tests/own/class-allocation/` runs on Darwin, and `unit.linux_class_new` runs the same
+  sources on Linux x86-64 with a host-built replacement allocator.
 - Syntax checking supports one-dimensional `new T[n]` and `delete[] p` for integral and ordinary
   pointer elements ([expr.new], [expr.delete]). The bound converts to `size_t`. A potentially
   evaluated constant bound can be zero and must keep the object size within the positive range

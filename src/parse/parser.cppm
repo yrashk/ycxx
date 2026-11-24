@@ -3584,7 +3584,11 @@ public:
       int saved = std::exchange(angle_, 0);
       if (!is(Tk::r_paren))
         do {
-          args->push_back(is(Tk::l_brace) ? s_->braced_argument(braced_init_list()) : assignment_expression());
+          // [temp.variadic]/5: an initializer-clause can be the pattern of a pack expansion.
+          auto part = expandable([&] {
+            return is(Tk::l_brace) ? s_->braced_argument(braced_init_list()) : assignment_expression();
+          });
+          args->insert(args->end(), part.begin(), part.end());
         } while (accept(Tk::comma));
       angle_ = saved;
       if (!expect(Tk::r_paren)) return {NodeId::none, begin, pos()};
