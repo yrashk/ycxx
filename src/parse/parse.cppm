@@ -7078,6 +7078,7 @@ private:
     // A variable template retains its initializer's pattern ([temp.res]). The placeholder path
     // reads the initializer before publishing the declaration ([dcl.type.auto.deduct]).
     const bool pattern = template_ && !var_ && !fn;
+    const parse::Parser::VariableTemplateInitializerScope initializer(ps_, pattern && !(d.qualified && d.scope.type));
     AtItem::RestoreTypeTraitPattern restore{q_};
     q_.retain_type_trait_pattern = pattern;
     std::optional<Ex> early_expr;

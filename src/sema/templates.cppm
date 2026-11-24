@@ -1497,9 +1497,14 @@ public:
   // Explicitly specified template arguments, by parameter ([temp.arg.explicit]): one each, and a
   // pack takes the rest; a value converted to its parameter's type with the arguments before it
   // substituted ([temp.arg.nontype]/1, [temp.deduct.general]/2). False if they do not fit.
+  // When checking a replayable variable initializer, a value with no constant is checked for
+  // kind and type but left unbound. The caller does not complete or use these bindings as a key.
   bool explicit_into(std::span<const ast::TemplateParamSema> params, std::span<const TemplateArg> written,
-                     std::vector<std::optional<TemplateArg>>& out) {
+                     std::vector<std::optional<TemplateArg>>& out, bool defer_values = false) {
     u16 depth = params.empty() ? 0 : params[0].depth;
+    auto deferred = [defer_values](const TemplateArg& a) {
+      return defer_values && a.kind == TemplateArgKind::value && a.value == ConstId::none;
+    };
     auto one = [&](const ast::TemplateParamSema& p, TemplateArg a) -> std::optional<TemplateArg> {
       // The injected-class-name names the class for a type parameter, the template for a template
       // template parameter ([temp.local]/1).
@@ -1510,24 +1515,29 @@ public:
       if (p.kind == TemplateArgKind::type) return a;
       if (p.kind == TemplateArgKind::template_) return template_matches(p, a) ? std::optional(a) : std::nullopt;
       auto pt = substitute(p.type, bindings(depth, out));
+      if (deferred(a)) return pt && (types().is_integral(*pt) || types().is_dependent(*pt)) ? std::optional(a) : std::nullopt;
       return pt ? converted_value(a, *pt) : std::nullopt;
     };
     std::size_t j = 0;
     for (std::size_t i = 0; i < params.size() && j < written.size(); ++i) {
       if (params[i].pack) {
         std::vector<TemplateArg> es;
+        bool deferred_pack = false;
         for (; j < written.size(); ++j) {
           auto v = one(params[i], written[j]);
           if (!v) return false;
-          es.push_back(*v);
+          if (deferred(*v)) deferred_pack = true;
+          else es.push_back(*v);
         }
-        out[i] = pack(es);
-        explicit_packs_.insert(u16(i));
+        if (!deferred_pack) {
+          out[i] = pack(es);
+          explicit_packs_.insert(u16(i));
+        }
         break;
       }
       auto v = one(params[i], written[j++]);
       if (!v) return false;
-      out[i] = *v;
+      if (!deferred(*v)) out[i] = *v;
     }
     return j == written.size();
   }

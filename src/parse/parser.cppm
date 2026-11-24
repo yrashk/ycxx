@@ -2632,6 +2632,7 @@ public:
   // A placeholder is allowed only where `placeholder_ok` says (a trailing return type,
   // [dcl.spec.auto.general]/3): not in a template argument, a cast or an alias ([dcl.spec.auto.general]/6).
   std::optional<QualType> type_id(bool placeholder_ok = false) {
+    const VariableTemplateInitializerScope initializer(*this, false);
     DeclSpec spec = decl_specifiers(/*in_type_id=*/true);
     if (!spec.ok) return std::nullopt;
     Declarator d = declarator(spec.type, true);
@@ -2718,7 +2719,10 @@ public:
   // A template-argument-list ([temp.arg.general]) after a template-name, from its `<`. An argument
   // that can be a type-id is one ([temp.arg.general]/2).
   std::optional<std::vector<ast::TemplateArg>> template_argument_list(std::optional<u32>* replay_at = nullptr,
-                                                                     bool* took_closer = nullptr, bool expand_empty = false) {
+                                                                     bool* took_closer = nullptr, bool expand_empty = false,
+                                                                     std::vector<Ex>* deferred_values = nullptr) {
+    // Any nested template-id must supply canonical arguments to its enclosing argument.
+    const VariableTemplateInitializerScope initializer(*this, false);
     if (took_closer) *took_closer = false;
     u32 begin = pos();
     u32 deferred = deferred_argument_checks_;
@@ -2764,9 +2768,16 @@ public:
             // Converted to its parameter's type when the template is known ([temp.arg.nontype]).
             auto v = negated_template_variable(e);
             QualType t = v ? s_->builtin(Builtin::bool_) : sema::Types::unqualified(s_->rvalue(e).type());
-            if (!v) v = template_value(e, t);
-            if (!v) ok = false;
-            else args.push_back({ast::TemplateArgKind::value, s_->types().canonical(t), *v});
+            if (deferred_values && (e.info.flags & sema::expr_flag::dependent_integral_arithmetic) &&
+                !s_->pattern_names_pack() && !is(Tk::ellipsis)) {
+              deferred_values->push_back(e);
+              // Positional and type checking only. No constant is available until replay.
+              args.push_back({ast::TemplateArgKind::value, s_->types().canonical(t), sema::ConstId::none});
+            } else {
+              if (!v) v = template_value(e, t);
+              if (!v) ok = false;
+              else args.push_back({ast::TemplateArgKind::value, s_->types().canonical(t), *v});
+            }
           } else {
             ok = false;
           }
@@ -4086,8 +4097,15 @@ public:
       bump();
       if (is(Tk::less) && s_->is_template_name(n)) {
         // A template-id ([temp.names]): `f<args>`.
-        auto args = template_argument_list();
+        std::vector<Ex> deferred;
+        const bool replay_values = variable_template_initializer_ && !s_->unevaluated && s_->variable_template(n);
+        auto args = template_argument_list(nullptr, nullptr, /*expand_empty=*/false, replay_values ? &deferred : nullptr);
         if (!args) return {NodeId::none, begin, pos()};
+        if (!deferred.empty()) {
+          auto v = s_->variable_template(n, begin);
+          if (!v) return {NodeId::none, begin, pos()};
+          return s_->replayed_variable_template_id(*v, *args, deferred, begin, pos());
+        }
         // [temp.dep.expr]/3: a template-id with a dependent argument is type-dependent.
         if (std::ranges::any_of(*args, [&](const ast::TemplateArg& a) { return s_->dependent(a); })) {
           if (in_template_value_argument_) {
@@ -4458,8 +4476,19 @@ public:
       // `N::v<args>`: a variable template of the namespace ([temp.names]/3).
       if (s->ns && !immediate_template)
         if (auto v = s_->namespace_template(*s->ns, n, ast::DeclKind::variable)) {
-          auto args = template_argument_list();
+          std::vector<Ex> deferred;
+          const bool replay_values = variable_template_initializer_ && !s_->unevaluated;
+          auto args = template_argument_list(nullptr, nullptr, /*expand_empty=*/false, replay_values ? &deferred : nullptr);
           if (!args) return {NodeId::none, begin, pos()};
+          if (!deferred.empty()) {
+            if (ambiguous_namespace) {
+              s_->diag(begin + *ambiguous_namespace, Diag::ambiguous_name, ambiguous_name);
+              return {NodeId::none, begin, pos()};
+            }
+            auto known = s_->namespace_template(*s->ns, n, ast::DeclKind::variable, name_at);
+            if (!known) return {NodeId::none, begin, pos()};
+            return s_->replayed_variable_template_id(*known, *args, deferred, begin, pos());
+          }
           if (std::ranges::any_of(*args, [&](const ast::TemplateArg& a) { return s_->dependent(a); }))
             return s_->dependent_variable_template_id(*v, *args, begin, pos());
           return s_->variable_template_id(*v, *args, begin, pos());
@@ -4582,6 +4611,7 @@ public:
   // lambda-expression ([expr.prim.lambda]): its introducer and declarator, read in the enclosing
   // context, then its compound-statement as the body of the closure's function call operator.
   Ex lambda_expression() {
+    const VariableTemplateInitializerScope initializer(*this, false);
     DisableDependentDecayCopy disable{dependent_decay_copy_body};
     using K = sema::Sema::CaptureSpec::Kind;
     sema::Sema::LambdaSpec spec;
@@ -6410,11 +6440,19 @@ private:
   LangLinkage linkage_ = LangLinkage::cxx;
   int in_params_ = 0;
   bool in_template_value_argument_ = false;
+  bool variable_template_initializer_ = false;
   int angle_ = 0;               // inside a template argument or parameter list, outside parentheses
   u32 deferred_argument_checks_ = 0;  // checks a dependent canonical argument may not retain
   u32 deferred_immediate_calls_ = 0;
   bool half_ = false;           // the current `>>` has had its first `>` taken by a template-id
 public:
+  struct VariableTemplateInitializerScope {
+    Parser& parser;
+    bool saved;
+    VariableTemplateInitializerScope(Parser& parser, bool enabled)
+        : parser(parser), saved(std::exchange(parser.variable_template_initializer_, enabled)) {}
+    ~VariableTemplateInitializerScope() { parser.variable_template_initializer_ = saved; }
+  };
   bool body = false;  // the part is a function body, not a declaration part
   bool dependent_decay_copy_body = false;  // a function template's compound statement, before replay
   bool substituting_partial_arguments = false;
