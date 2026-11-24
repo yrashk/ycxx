@@ -2925,6 +2925,36 @@ first; a dependent base is not searched. Redeclaring a hidden parameter's name i
   `<cinttypes>` and `<inttypes.h>` before `<cstdint>`.
   [#664](https://github.com/yrashk/ycxx/issues/664) · [libycxx#50](https://github.com/yrashk/libycxx/pull/50)
 
+## 128-bit integers, slices 1–3 (#1172)
+
+- `__int128` and `unsigned __int128` are `ast::Builtin::int128` and `unsigned_int128`, after
+  `unsigned_long_long`, so `ast::is_integral` covers them. `ast::is_extended_signed` and
+  `is_extended_unsigned` name them, and `is_signed_integer` and `is_unsigned_integer` take
+  standard and extended types together. Both targets lay them out in 16 bytes with 16-byte
+  alignment; their rank is 7, above `long long`'s 6.
+- `__int128` is a keyword (`Tk::kw___int128`, the last one). The decl-specifier rules accept it
+  alone or with `signed` or `unsigned`, in either order. `__int128_t` and `__uint128_t` are
+  typedef-names the implementation declares, beside `__builtin_va_list`.
+- `__SIZEOF_INT128__` is 16 on both targets, from `ast::Target`, checked against Clang in
+  `own/pp/predefined-target`.
+- Symbols spell the types `n` and `o`. Template arguments print their values with
+  `ast::wide::decimal`, so a value beyond 64 bits is written in full.
+- `ast::wide` holds 128-bit arithmetic over `ast::Bits128`: add, sub, mul, shifts, comparisons
+  and division by shift and subtract. The interpreter's `Value` and `Result` carry the high half
+  in `hi`, which is 0 for every narrower type. `arith`, `divide`, `shift`, `icmp`, `iconv`,
+  the floating conversions, `tobool`, `switch` and pointer offsets take 128-bit operands.
+  Conversion to a floating type rounds the top 64 bits with a sticky bit.
+- List-initialization narrowing reads constants in 128 bits.
+- Static data of 16-byte integer type is written with its high half.
+- Not yet:
+  - Native code that computes with a 128-bit value: lowering reports "no integer type of 16
+    bytes" (#1172, slice 4).
+  - Enumerations with a 128-bit underlying type or an enumerator value outside [-2^63, 2^64)
+    are diagnosed as not supported (#1176).
+- Tests: `own/int128` (types, constant evaluation, narrowing, specifiers, symbols against a Clang
+  peer). `-Wpedantic` and `-Wno-pedantic` are accepted and select no warning, so the tests pass
+  `-Wno-pedantic` for the oracles.
+
 ## Templates, ζ step 8: template template parameters and `__make_integer_seq` (#88, #208, 2026-11-19)
 
 Fable decided the representation (ast.md §6.7); the Opus session wrote the code.
