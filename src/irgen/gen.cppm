@@ -65,8 +65,8 @@ struct FunctionInput {
   std::uint32_t body_offset = 0;  // the declaration part's length in tokens
   // For the thunk of a constant expression (`{ return e; }`, query-engine.md §B7): the values of
   // the enclosing function's locals usable in constant expressions ([expr.const]), by local
-  // index. Each becomes a const object of the thunk, made at its entry; a local without a value
-  // becomes an object outside its lifetime.
+  // index. The thunk sets up their values at entry. A supported opaque record parameter is
+  // available only as an object designator. Other locals have no usable object.
   bool thunk = false;
   std::span<const std::optional<ast::ConstId>> local_values{};
   // A non-static member function's `this` type ([expr.prim.this]): its implicit object argument,
@@ -98,6 +98,9 @@ struct FunctionInput {
     ast::EntityId owner = ast::EntityId::none;
     std::span<const ast::ConstId> values{};
   } initialized_fields{};
+  // By-value record parameters whose identity is available to a thunk. Their contents are
+  // unknown and their lifetimes began in the enclosing invocation. Sorted by local index.
+  std::span<const std::uint32_t> opaque_record_locals{};
 };
 
 struct FunctionIr {
@@ -448,16 +451,21 @@ class Gen {
       start_lifetime(p);
       slots_[i] = p;
     }
-    // A thunk's locals: those with values are const objects; any other is an object whose
-    // lifetime has ended, so reading or modifying it fails.
+    // The thunk imports known values and supported opaque parameter identities. Other
+    // scalar objects have ended lifetimes and other record slots stay absent.
     for (uint32_t i = 0; fn_.thunk && i < slots_.size(); ++i) {
       if (slots_[i]) continue;
       const ast::LocalRec rec = in_.seqs.at(fn_.body.locals, i);
       if (rec.flags & ast::local_flag::requires_parameter) continue;
       ast::QualType t = rec.type;
       if (cls(t) == TypeClass::record) {
-        // A known initializer supplies the fields of this enclosing automatic object. Its
-        // lifetime began before the thunk and it remains automatic for address results.
+        // Record imports keep their enclosing automatic identity and outside lifetime.
+        if (std::ranges::binary_search(fn_.opaque_record_locals, i)) {
+          const Place p = begin_object(t, ir::Init::indeterminate);
+          begin_lifetime(p, ir::bit(ir::Flag::outside_unknown));
+          slots_[i] = p;
+          continue;
+        }
         if (i >= fn_.local_values.size() || !fn_.local_values[i]) continue;
         const auto value = *fn_.local_values[i];
         if (!in_.values.is<ast::VAggregate>(value)) continue;
@@ -1619,7 +1627,7 @@ class Gen {
           }
         }
         if (is<ast::Conditional>(operand)) {
-          conditional(operand, /*glvalue=*/false, ast::builtin(in_, ast::Builtin::void_));
+          conditional(operand, /*glvalue=*/false, ast::builtin(facts_.interners(), ast::Builtin::void_));
           return;
         }
         if (is<ast::DeclRef>(operand) && !get<ast::DeclRef>(operand).reference) return;
