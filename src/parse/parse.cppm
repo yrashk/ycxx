@@ -1268,7 +1268,7 @@ public:
 
   // `function_ir(F)` for a function defined in an item before `item` ([expr.const]: a function
   // defined later is not defined at the point of evaluation).
-  interp::Callee function_ir(EntityId f, u32 item);
+  interp::Callee function_ir(EntityId f, u32 item, bool* diagnosed_failure = nullptr);
   // A closure type's record, published by the analysis of `item`, its lambda's
   // (docs/design/closures.md), with its implicit special members ([expr.prim.lambda.closure]/14).
   const sema::ClassRec& publish_class(EntityId c, sema::ClassRec r, u32 item, sema::Sema& context) {
@@ -2260,10 +2260,10 @@ public:
     if (!std::ranges::contains(p_->template_parameter_objects_, e)) p_->template_parameter_objects_.push_back(e);
   }
   bool plain_class_template_type(EntityId c) override { return p_->plain_class_template_type(c); }
-  interp::Callee function_ir(EntityId f) override {
+  interp::Callee function_ir(EntityId f, bool& diagnosed_failure) override {
     if (special_member_exception && p_->world().entities.rec(f).scope == completing_class)
       return {.is_constexpr = p_->is_constexpr(f, point())};
-    return p_->function_ir(f, point());
+    return p_->function_ir(f, point(), &diagnosed_failure);
   }
   std::optional<QualType> deduced_type(EntityId f) override { return p_->deduced_type(f, point()); }
   sema::GenericResult generic_instance(EntityId spec, const sema::GenericClosure* known, const sema::GenericBinding&) override {
@@ -2765,6 +2765,7 @@ std::optional<QualType> AtItem::replay_alias_calls(sema::Sema& caller, const ast
   } catch (const TooDeep&) {
     // The parser has already diagnosed its limit.
   }
+  caller.diagnosed_constant_calls += s.diagnosed_constant_calls;
   return std::nullopt;
 }
 
@@ -3082,7 +3083,9 @@ public:
   void use_library_function(EntityId f) override { at_.use_library_function(f); }
   void use_template_parameter_object(EntityId e) override { at_.use_template_parameter_object(e); }
   bool plain_class_template_type(EntityId c) override { return at_.plain_class_template_type(c); }
-  interp::Callee function_ir(EntityId f) override { return p_->function_ir(f, p_->end()); }
+  interp::Callee function_ir(EntityId f, bool& diagnosed_failure) override {
+    return p_->function_ir(f, p_->end(), &diagnosed_failure);
+  }
   std::optional<QualType> deduced_type(EntityId f) override { return p_->deduced_type(f, p_->end()); }
   sema::GenericResult generic_instance(EntityId spec, const sema::GenericClosure* known, const sema::GenericBinding&) override {
     return p_->generic_instance(spec, known, p_->end());
@@ -12800,7 +12803,7 @@ void Program::instantiate_all() {
   }
 }
 
-interp::Callee Program::function_ir(EntityId f, u32 item) {
+interp::Callee Program::function_ir(EntityId f, u32 item, bool* diagnosed_failure) {
   if (sema::Sema::closure_member(*w_, f)) return closure_ir(f, item);
   interp::Callee c;
   c.is_constexpr = is_constexpr(f, item);
@@ -12870,6 +12873,10 @@ interp::Callee Program::function_ir(EntityId f, u32 item) {
     if (!in || in->item >= item) return c;
     if (in->failed || !in->body.diags.empty() || in->body.value.tree == NodeId::none) {
       c.unsupported = true;
+      if (diagnosed_failure)
+        *diagnosed_failure = !valid_member_declarations(in->body.diags) ||
+                             (in->failed && body_cells_[in->item] &&
+                              !valid_member_declarations(body_cells_[in->item]->diags));
       return c;
     }
     if (!instance_irs_.contains(key)) {
@@ -12910,8 +12917,10 @@ interp::Callee Program::function_ir(EntityId f, u32 item) {
     irs_.emplace(k, std::move(ir));
   }
   const auto& ir = irs_.at(k);
-  if (!ir) c.unsupported = true;
-  else c.body = &ir->body;
+  if (!ir) {
+    c.unsupported = true;
+    if (diagnosed_failure && body_cells_[k]) *diagnosed_failure = !valid_member_declarations(body_cells_[k]->diags);
+  } else c.body = &ir->body;
   return c;
 }
 

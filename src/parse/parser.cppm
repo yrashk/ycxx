@@ -810,9 +810,11 @@ public:
         u32 at = pos();
         bump();
         const auto alias_failures = alias_constraint_failures_;
+        const auto diagnosed = s_->diagnosed_constant_calls;
         auto q = qualified_ahead() ? qualified_type(0, true) : std::nullopt;
         if (!q || any_type()) {
-          if (alias_constraint_failures_ == alias_failures) s_->diag(at, Diag::expected_type_specifier);
+          if (alias_constraint_failures_ == alias_failures && diagnosed == s_->diagnosed_constant_calls)
+            s_->diag(at, Diag::expected_type_specifier);
           d.ok = false;
           goto done;
         }
@@ -2917,6 +2919,7 @@ public:
     sema::Evaluator evaluator(*s_, questions());
     sema::Evaluated v = class_argument ? evaluator.evaluate_initializer(c) : evaluator.evaluate(c);
     if (!v.value) {
+      if (v.function_instantiation_failure) ++s_->diagnosed_constant_calls;
       if (!v.diagnosed_failure()) s_->diag(e.begin, Diag::not_constant, v.reason);
       return std::nullopt;
     }
@@ -3366,7 +3369,8 @@ public:
           if (kind(end) == Tk::semi) bump();
         }
         auto t = type_id();
-        if (t && s_->types().is_dependent(*t)) dependent = true;
+        if (!t) failed = true;
+        else if (s_->types().is_dependent(*t)) dependent = true;
       } else if (accept(Tk::l_brace)) {  // a compound-requirement
         ++s_->unevaluated;
         Ex e = expression();
@@ -6742,7 +6746,7 @@ public:
     s_->constant_of = [this](Ex e) { return sema::Evaluator(*s_, questions()).evaluate(e).value; };
     s_->evaluate_immediate = [this](Ex e) {
       const sema::Evaluated v = sema::Evaluator(*s_, questions()).evaluate(e);
-      return sema::Sema::Evaluation{v.value, v.reason, v.constant};
+      return sema::Sema::Evaluation{v.value, v.reason, v.constant, v.function_instantiation_failure};
     };
   }
   sema::Questions& questions() { return *q_; }

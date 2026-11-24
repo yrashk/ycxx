@@ -123,7 +123,7 @@ public:
   virtual CopyAssignment require_copy_assignment(EntityId) { return CopyAssignment::unsupported; }
   // What a constant evaluation fetches (§B7): `function_ir` of a function defined before the
   // current point ([expr.const]), and a namespace-scope variable as the interpreter sees it.
-  virtual interp::Callee function_ir(EntityId f) = 0;
+  virtual interp::Callee function_ir(EntityId f, bool& diagnosed_failure) = 0;
   virtual std::optional<interp::GlobalVar> global(EntityId v) = 0;
   // A variable template's required definition has already reported an error.
   virtual bool variable_instantiation_failed(EntityId) { return false; }
@@ -535,6 +535,8 @@ public:
     diags_->push_back(std::move(x));
   }
   std::size_t diag_count() const { return diags_->size(); }
+  // A required constant call can diagnose its instantiated body in a separate cell.
+  std::size_t diagnosed_constant_calls = 0;
   std::vector<engine::Diagnostic>& diagnostics() { return *diags_; }
   bool has_error_since(std::size_t begin) const {
     return std::ranges::any_of(std::span(*diags_).subspan(begin), [](const engine::Diagnostic& d) {
@@ -579,6 +581,7 @@ public:
     std::optional<ConstId> value;
     u64 reason = reason_unsupported;
     bool constant = false;
+    bool function_instantiation_failure = false;
   };
   std::function<Evaluation(Ex)> evaluate_immediate;
 
@@ -1166,9 +1169,11 @@ public:
         return std::nullopt;
       }
       const auto before = diag_count();
+      const auto diagnosed = diagnosed_constant_calls;
       auto t = substitute_alias(tmpl, *full, bindings, at, replaying_type_default, replay_partial_alias);
-      // Past the nesting limit, which was diagnosed, it says nothing more ([temp.inst]/16).
-      if (!t && !has_error_since(before) && !q_->instantiation_gave_up())
+      // A producer body or the nesting limit may have been diagnosed in another cell
+      // ([temp.inst]/16). Keep that diagnostic as the cause of the failed alias.
+      if (!t && !has_error_since(before) && diagnosed == diagnosed_constant_calls && !q_->instantiation_gave_up())
         diag(at, Diag::template_args_mismatch, w_->entities.rec(tmpl.entity).name);
       return t;
     }
@@ -5981,7 +5986,8 @@ public:
     }
     const Evaluation v = evaluate_immediate(call);
     if (!v.constant) {
-      diag(call.begin, Diag::not_constant, v.reason);
+      if (v.function_instantiation_failure) ++diagnosed_constant_calls;
+      else diag(call.begin, Diag::not_constant, v.reason);
       return {NodeId::none, call.begin, call.end};
     }
     if (!v.value) {
