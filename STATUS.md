@@ -3005,8 +3005,9 @@ first; a dependent base is not searched. Redeclaring a hidden parameter's name i
   the floating conversions, `tobool`, `switch` and pointer offsets take 128-bit operands.
   Conversion to a floating type rounds the top 64 bits with a sticky bit.
 - List-initialization narrowing reads constants in 128 bits. `sema::ValueRec::wide` marks an
-  integer outside [-2^63, 2^64), so array bounds, bit-field widths and array new bounds reject
-  it rather than read its low half.
+  integer outside [-2^63, 2^64), so concrete array bounds, bit-field widths and array new
+  bounds reject it. Substitution checks a dependent array bound against the target's
+  `size_t` range before conversion. [#1212](https://github.com/yrashk/ycxx/issues/1212)
 - Static data of 16-byte integer type is written with its high half.
 - Not yet:
   - Native code that computes with a 128-bit value: lowering reports "no integer type of 16
