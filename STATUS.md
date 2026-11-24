@@ -2423,6 +2423,11 @@ session's.*
   `typename X<T>::type` needs, instantiating a specialization. A terminal namespace-qualified
   alias specialization such as `N::A<T>` stays a type argument when its expansion is a dependent
   member type ([temp.arg.general], #630).
+- Direct uses of namespace alias-template IDs in non-template code outside requires-expressions
+  check the alias template's associated constraints before expanding its type when every argument
+  is an explicit non-dependent type. Type-constraints and the template-head's requires-clause
+  contribute to the check ([temp.names]/9, [temp.constr.decl]).
+  [#1227](https://github.com/yrashk/ycxx/issues/1227)
 - Dependent static member calls through class and alias template qualifiers preserve argument
   pack expansions when an ordinary template parameter precedes the pack. The supported cases
   include forwarding empty and mixed lvalue/rvalue packs. A known member type of the current
@@ -3661,10 +3666,12 @@ parity are tracked in [#294](https://github.com/yrashk/ycxx/issues/294) and
   the oracle's calls).
   `<iostream>` on macOS arm64: `'using' is not supported yet` 83 → 72 (the rest are #1150 and
   `using enum`), errors 3,237 → 3,165.
-- Not yet: constraints of an alias template, namespace or member, are not checked when it is
-  named (#234); access through a dependent name substituted in an alias template, as for a member
-  type (#1199); `typename T::M<args>` without `template` (the oracles disagree); immediate calls
-  in a member alias template's type are not replayed per use as a namespace one's are (#340).
+- Not yet: checking member alias constraints and checking namespace alias constraints with
+  dependent, defaulted or pack arguments or during substitution in requirements
+  ([#234](https://github.com/yrashk/ycxx/issues/234)). Access through a dependent name substituted
+  in an alias template, as for a member type, remains open (#1199), as does `typename T::M<args>`
+  without `template` (the oracles disagree). Immediate calls in a member alias template's type
+  still need per-use replay (#340).
   Member class templates, conversion function templates and the rest of #340 remain. Found on
   the way: #1191, #1192.
 
