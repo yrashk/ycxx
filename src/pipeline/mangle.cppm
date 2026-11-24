@@ -239,7 +239,7 @@ class Mangler {
         auto p = dep_prefix(bare);
         if (!p) return p;
         inner = "N" + *p + "E";
-      } else if (in_.types.is<ast::TTransform>(in_.types.canon(bare))) {      } else if (in_.types.is<ast::TTransform>(in_.types.canon(bare))) {
+      } else if (in_.types.is<ast::TTransform>(in_.types.canon(bare))) {
         // A type-trait built-in of a dependent type: a vendor-extended type `u <source-name>` with
         // its argument, `u11__remove_cvIT_E`, as Clang spells it (docs/EXTENSIONS.md).
         if (auto s = find(full_key(bare))) return qualify(qualifiers, *s, q);
