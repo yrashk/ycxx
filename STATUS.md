@@ -2482,8 +2482,17 @@ library's `memchr` and `memcmp`, as libycxx's `<cstring>` and its run-time strin
 `<string.h>` exception specification (`World::string_function`), so a written declaration or
 definition of the function is the same entity and symbol (`unit.string_builtin_symbols`). The unit then references `memchr` or `memcmp` as an undefined symbol,
 which libSystem or the C library provides at link time. A dependent argument defers the call to
-instantiation. They are not constant expressions yet (#1092). Fixtures in `tests/own/builtins/`
-cover detection, signatures, argument checks and run-time results.
+instantiation. Fixtures in `tests/own/builtins/` cover detection, signatures, argument checks and
+run-time results.
+
+In constant evaluation (#1092) the call is marked (`ast::Call::builtin`), and IR generation
+branches on `consteval_br`: the runtime edge is the library call, which `lower` keeps, and the
+consteval edge is the `builtin` op (`ir::BuiltinFn`), which the interpreter evaluates. It reads
+objects of narrow character type, and elements of arrays of them, as `unsigned char` with the
+interpreter's access, lifetime and initialization checks (`Machine::bytes_at`, `read_byte`); any
+other object is `Reason::byte_type`, as Clang rejects it. `memchr` reads in order up to the match;
+`memcmp` checks first that both objects hold all `n` bytes, as GCC does, then reads up to the
+first difference. The `memchr-memcmp-*` fixtures cover results, bounds, object types and values.
 
 ## GNU constantness probe (#1065)
 
