@@ -184,13 +184,22 @@ private:
       return {std::nullopt, reason_arg({interp::Reason::local_address, 0, {}})};
     NodeId ret = in.intern(ast::Return{root}, e.width());
     std::vector<ast::LocalRec> locals(s_->locals().begin(), s_->locals().end());
-    for (ast::LocalRec& l : locals) {
+    auto local_values = s_->local_values();
+    std::vector<std::optional<ConstId>> filtered_values;
+    for (std::size_t i = 0; i < locals.size(); ++i) {
+      auto& l = locals[i];
       l.decl = NodeId::none;  // drafts of the enclosing frame
+      if (i < local_values.size() && local_values[i] && s_->types().is_class(l.type) &&
+          !importable_local_record(l.type, *local_values[i])) {
+        if (filtered_values.empty()) filtered_values.assign(local_values.begin(), local_values.end());
+        filtered_values[i].reset();
+      }
       // In a template's definition a local of dependent type has no object yet; a non-dependent
       // expression cannot name it, so it stands as an `int` outside its lifetime.
       // So does a variable whose initializer is being read to deduce its placeholder type.
       if (s_->types().is_dependent(l.type) || s_->types().has_placeholder(l.type)) l.type = s_->builtin(Builtin::int_);
     }
+    if (!filtered_values.empty()) local_values = filtered_values;
     ast::DeclSema thunk{};
     thunk.entity = EntityId::none;
     thunk.type = s_->types().function(Types::unqualified(e.type()), {}, false, LangLinkage::cxx);
@@ -200,7 +209,7 @@ private:
                                ast::BodySema{ret, in.intern_seq(std::span<const ast::LocalRec>(locals)),
                                              in.intern_seq(std::span<const ast::ExpansionRec>{}), in.intern_seq(std::span<const u32>{}),
                                              ast::QualType{}, 0, in.intern_seq(std::span<const ast::ClosureDef>{})},
-                               s_->item(), 0, true, s_->local_values()};
+                               s_->item(), 0, true, local_values};
     input.initialized_fields = initialized_fields;
     EvalFacts facts(s_->world(), *q_);
     auto body = bytes ? irgen::constant_byte_capture_ir(in, input, facts, bytes->capture) : irgen::function_ir(in, input, facts);
@@ -410,6 +419,24 @@ private:
       result.fields.push_back({s_->field_access_type(field, type), layout->offsets[i], field.mutable_});
     }
     return result;
+  }
+
+  // The thunk initializes these records up front. A flat integral field can be stored from
+  // its value without fetching another object or trying to decode an unsupported layout.
+  bool importable_local_record(QualType type, ConstId value) {
+    const auto& in = s_->ins();
+    if (!in.values.is<ast::VAggregate>(value)) return false;
+    const auto layout = constant_record_layout(type);
+    if (!layout) return false;
+    const auto elements = in.seqs.elements(in.values.get<ast::VAggregate>(value).elems);
+    if (elements.size() != layout->fields.size()) return false;
+    auto& types = s_->types();
+    for (std::size_t i = 0; i < elements.size(); ++i) {
+      const auto field = layout->fields[i].type;
+      if ((!types.is_integral(field) && !types.is_enum(field)) || !in.values.is<ast::VInt>(elements[i]))
+        return false;
+    }
+    return true;
   }
 
   bool constant_record_field(QualType type) {
