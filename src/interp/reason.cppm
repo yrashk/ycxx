@@ -68,6 +68,8 @@ enum class Reason : std::uint8_t {
   unsupported_constant [[=says{"the interpreter does not evaluate this constant yet"}]],
   // The body broke an invariant `ir::verify` does not check (a value of the wrong kind).
   ill_formed [[=says{"internal error: the IR is ill-formed here"}]],
+  unknown_dynamic_type [[=says{"a virtual call on an object whose dynamic type is constexpr-unknown"}]],
+  immediate_dispatch_phase [[=says{"an immediate virtual call during construction or destruction is not supported yet"}]],
 };
 
 consteval auto reason_enumerators() { return std::define_static_array(std::meta::enumerators_of(^^Reason)); }

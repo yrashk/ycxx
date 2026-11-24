@@ -1960,8 +1960,8 @@ clauses = ['temp', 'temp.pre', 'temp.param', 'temp.names', 'temp.arg', 'temp.arg
 std = 'C++98'
 detect = '\btemplate\s*<'
 status = 'done'
-issues = [209, 210, 406]
-note = 'Native specialization names support unambiguous externally linked function pointer arguments. Function references and selection from overload sets remain open.'
+issues = [209, 210, 406, 1144]
+note = 'Native specialization names handle unambiguous external function pointers. Fixed class-reference and one-pointer parameters deduce through a unique matching base. Function references and overload-set selection remain open.'
 probe = '''
 template<class T> T mx(T a, T b) { return a > b ? a : b; }
 template<class T> int k(T*) { return 1; } template<class T> int k(T) { return 2; }
@@ -2202,7 +2202,7 @@ ftm = '__cpp_concepts'
 detect = '\brequires\b'
 status = 'partial'
 issues = [234, 236]
-note = 'Ordinary function overloads support explicit trailing type packs in atomic constraints. Directly named non-dependent primary class specializations with explicit type arguments check constraints. Non-template code outside requires-expression bodies also checks directly named primary namespace variable templates with explicit non-dependent type arguments. Class and variable template partial specializations are matched and ordered by their constraints, including ones whose arguments are those of the primary template. Broader template and member constraints and constraint mangling remain.'
+note = 'Ordinary function overloads support explicit trailing type packs in atomic constraints. Directly named non-dependent primary class specializations with explicit type arguments check constraints. Non-template code also checks directly named namespace variable and alias template specializations with explicit non-dependent type arguments in ordinary uses. Class and variable template partial specializations are matched and ordered by their constraints, including ones whose arguments are those of the primary template. Broader template and member constraints and constraint mangling remain.'
 probe = '''
 template<class T> concept Int = sizeof(T) == 4;
 template<Int T> int f(T) { return 1; } template<class T> int f(T) { return 2; }
@@ -2360,7 +2360,7 @@ ftm = '__cpp_consteval'
 detect = '\bconsteval\s+(?!\{)'
 status = 'done'
 issues = [102, 1097, 1175, 1183, 1189]
-note = 'Ordinary nonvirtual immediate member calls validate void and integral or enum results through 64 bits. Eligible nonvirtual members and function template specializations can omit native code when only constant evaluation uses them. Reference and field-address results remain open.'
+note = 'Ordinary nonvirtual immediate member calls validate void and integral or enum results through 64 bits. Eligible nonvirtual members and function template specializations can omit native code when only constant evaluation uses them. Immediate virtual calls support completed fieldless local objects with one nonvirtual base. Reference and field-address results remain open.'
 probe = '''
 consteval int sq(int x) { return x * x; }
 int main() { return sq(3) - 9; }

@@ -916,6 +916,8 @@ class Lowering {
         else out(n, 0, store_field(in(n, 0), in(n, 1), field, in(n, 2)));
         return {};
       }
+      case Op::call_immediate_virtual:
+        return fail("an immediate virtual call reached native lowering");
       case Op::call:
       case Op::call_ind: {
         bool ind = nd.op == Op::call_ind;

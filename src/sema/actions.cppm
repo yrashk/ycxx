@@ -981,10 +981,44 @@ public:
   // A template-name that names a type with its arguments ([temp.names]): a class template, or an
   // alias template ([temp.alias]).
   std::optional<ast::DeclSema> type_template(NameId name) {
-    if (auto m = own_member_alias_template(name)) return m;
+    if (auto block = block_type_template(name); block.found) return block.declaration;
+    bool found_member = false;
+    if (auto m = own_member_alias_template(name, found_member); found_member) return m;
     if (auto c = class_template(name)) return c;
     return named_template(name, ast::DeclKind::type_alias);
   }
+
+  struct BlockTypeTemplate {
+    bool found = false;
+    std::optional<ast::DeclSema> declaration;
+  };
+
+  // A block declaration, including one introduced by a using-declaration, hides the class
+  // and namespace scopes ([basic.lookup.unqual], [namespace.udecl]).
+  BlockTypeTemplate block_type_template(NameId name) {
+    for (std::size_t depth = scopes_.size(); depth-- > 0;) {
+      const auto names_here = [=](const auto& binding) { return binding.depth == depth && binding.name == name; };
+      if (std::ranges::contains(scopes_[depth], name, [](const auto& local) { return local.first; }) ||
+          std::ranges::any_of(block_types_, names_here) || std::ranges::any_of(block_aliases_, names_here))
+        return {true, std::nullopt};
+      for (const auto& [scope, e] : using_enums_) {
+        if (scope != depth) continue;
+        if (const EnumRec* record = enum_rec(e); record && std::ranges::contains(record->enumerators, name, &EnumeratorRec::name))
+          return {true, std::nullopt};
+      }
+      if (const auto used = std::ranges::find_if(block_usings_ | std::views::reverse, names_here);
+          used != block_usings_.rend()) {
+        if (used->type_index) {
+          const auto& declaration = used->decls[*used->type_index];
+          if (declaration.flags & decl_flag::template_)
+            return {true, with_template_defaults(declaration, used->decls)};
+        }
+        return {true, std::nullopt};
+      }
+    }
+    return {};
+  }
+
   std::optional<ast::DeclSema> namespace_type_template(EntityId ns, NameId name) {
     if (auto c = namespace_class_template(ns, name)) return c;
     return namespace_template(ns, name, ast::DeclKind::type_alias);
@@ -1112,16 +1146,26 @@ public:
     return templates().specialize_class(templ, args, constraints);
   }
 
+  bool namespace_scoped(EntityId entity) const {
+    const EntityId scope = w_->entities.rec(entity).scope;
+    return scope == EntityId::none || w_->entities.rec(scope).kind == EntityKind::namespace_;
+  }
+
   // `X<args>` naming a class template specialization ([temp.names], [temp.arg]), or the type an
   // alias template specialization stands for: its type with the arguments substituted
   // ([temp.alias]/2).
   std::optional<QualType> class_template_id(const ast::DeclSema& tmpl, std::span<const TemplateArg> args, u32 at,
-                                           bool directly_named = true) {
+                                           bool directly_named = true, bool* alias_constraint_failed = nullptr) {
     auto full = template_arguments(tmpl, args, at);
     if (!full) return std::nullopt;
     if (tmpl.kind == ast::DeclKind::type_alias) {
       std::vector<ast::TemplateParamSema> params = ins().seqs.elements(tmpl.template_params);
       auto bindings = Bindings::of(params.empty() ? 0 : params[0].depth, *full);
+      if (alias_constraint_failed && namespace_scoped(tmpl.entity) &&
+          !check_named_type_constraints(tmpl, args.size(), *full, bindings, at)) {
+        *alias_constraint_failed = true;
+        return std::nullopt;
+      }
       const auto before = diag_count();
       auto t = substitute_alias(tmpl, *full, bindings, at);
       // Past the nesting limit, which was diagnosed, it says nothing more ([temp.inst]/16).
@@ -1158,6 +1202,46 @@ public:
     return templates_for_use(at).substitute(tmpl.type, bindings);
   }
 
+  // [temp.names]/9: naming a specialization requires satisfaction, even in an unevaluated
+  // operand. Check direct, concrete type arguments in ordinary code until constraints can replay.
+  bool check_named_type_constraints(const ast::DeclSema& tmpl, std::size_t written,
+                                    std::span<const TemplateArg> args, const Bindings& bindings, u32 at) {
+    if (tmpl.constraints == ConstId::none || in_requires_body_ || templated() || written != args.size() ||
+        !std::ranges::all_of(args, [&](const TemplateArg& arg) {
+          return arg.kind == ast::TemplateArgKind::type && !dependent(arg);
+        }))
+      return true;
+    auto t = templates();
+    bool hard_error = false;
+    auto sat = named_constraint_satisfaction(t, tmpl.constraints, bindings, tmpl.kind == ast::DeclKind::type_alias, hard_error);
+    if (hard_error) return false;
+    if (sat.value_or(true)) return true;
+    diag(at, Diag::constraints_not_satisfied, w_->entities.rec(tmpl.entity).name);
+    return false;
+  }
+
+  std::optional<bool> named_constraint_satisfaction(Templates& t, ConstId c, const Bindings& bindings,
+                                                    bool bind_lazily, bool& hard_error) {
+    // [temp.constr.op]: an operand that satisfaction skips must not substitute its mapping.
+    if (bind_lazily && ins().values.is<ast::VConstraint>(c)) {
+      auto v = ins().values.get<ast::VConstraint>(c);
+      bool any_unknown = false;
+      for (ConstId operand : ins().seqs.elements(v.operands)) {
+        auto sat = named_constraint_satisfaction(t, operand, bindings, bind_lazily, hard_error);
+        if (hard_error) return std::nullopt;
+        if (!sat) any_unknown = true;
+        else if (*sat == (v.op == 1)) return *sat;
+      }
+      if (any_unknown) return std::nullopt;
+      return v.op == 0;
+    }
+    auto normal = t.substitute_constraint(c, bindings);
+    if (!normal) return false;
+    auto sat = q_->satisfied(*normal);
+    hard_error = q_->satisfaction_failed(*normal);
+    return sat;
+  }
+
   // `v<args>` naming a variable template specialization ([temp.pre], [temp.inst]/7): an lvalue of
   // the specialization, of the template's type with the arguments substituted. Its entity is the
   // template and the canonical arguments (§B1.5), as a function template specialization's is.
@@ -1168,21 +1252,9 @@ public:
     const Bindings bindings = Bindings::of(params.empty() ? 0 : params[0].depth, *full);
     const EntityRec& entity = w_->entities.rec(tmpl.entity);
     const NameId name = entity.name;
-    // [temp.names]/9: the name itself requires satisfaction, including in decltype. Limit this
-    // check to direct concrete uses in ordinary code until constraint replay handles this path.
-    if (tmpl.constraints != ConstId::none && entity.kind == EntityKind::variable_template &&
-        !in_requires_body_ && !templated() && args.size() == full->size() &&
-        std::ranges::all_of(*full, [&](const TemplateArg& arg) {
-          return arg.kind == ast::TemplateArgKind::type && !dependent(arg);
-        })) {
-      auto normal = templates().substitute_constraint(tmpl.constraints, bindings);
-      auto sat = normal ? q_->satisfied(*normal) : std::optional<bool>(false);
-      if (normal && q_->satisfaction_failed(*normal)) return {NodeId::none, begin, end};
-      if (!sat.value_or(true)) {
-        diag(begin, Diag::constraints_not_satisfied, name);
-        return {NodeId::none, begin, end};
-      }
-    }
+    if (entity.kind == EntityKind::variable_template &&
+        !check_named_type_constraints(tmpl, args.size(), *full, bindings, begin))
+      return {NodeId::none, begin, end};
     auto t = templates().substitute(tmpl.type, bindings);
     if (!t) {
       diag(begin, Diag::template_args_mismatch, name);
@@ -2745,13 +2817,26 @@ public:
     }
     return std::nullopt;
   }
-  // `apply<args>` in the scope of the class that declares `apply` ([class.member.lookup]), unless
-  // a block scope or a template parameter hides it.
-  std::optional<ast::DeclSema> own_member_alias_template(NameId n) {
+  // Unqualified lookup skips the current class's dependent direct bases even during replay.
+  // A non-template member or an ambiguous lookup still hides outer declarations
+  // ([basic.lookup.unqual], [class.member.lookup], [temp.res.general]).
+  std::optional<ast::DeclSema> own_member_alias_template(NameId n, bool& found) {
     if (current_class == EntityId::none || template_param(n)) return std::nullopt;
-    for (const auto& s : scopes_)
-      if (std::ranges::contains(s, n, [](const auto& p) { return p.first; })) return std::nullopt;
-    return member_alias_template(current_class, n);
+    std::optional<Found> member;
+    if (class_rec(current_class)) {
+      member = find_member(current_class, n, /*unqualified=*/true);
+    } else {
+      if (auto m = q_->earlier_member(n)) {
+        found = true;
+        if (m->kind == ast::DeclKind::type_alias && (m->flags & decl_flag::template_)) return *m;
+        return std::nullopt;
+      }
+      member = find_base_member(q_->defining_base_records(current_class), n, /*unqualified=*/true);
+    }
+    found = member.has_value();
+    if (!member || member->ambiguous || member->nested_type == EntityId::none || member->enumerator != EntityId::none ||
+        w_->entities.rec(member->nested_type).kind != EntityKind::alias_template) return std::nullopt;
+    return q_->template_decl(member->nested_type);
   }
   std::optional<QualType> member_type(EntityId c, NameId n) {
     if (class_rec(c)) {
@@ -3371,9 +3456,12 @@ public:
     }
     if (!require_complete(ct, op_at)) return fail;
     EntityId c = types().class_of(ct);
-    if (qualifier && (*qualifier != w_->entities.rec(c).name || !virtual_consumer(c))) {
-      diag(name_at, Diag::not_supported, lex::Tk::coloncolon);
-      return fail;
+    if (qualifier) {
+      const ClassRec* record = class_rec(c);
+      if (*qualifier != w_->entities.rec(c).name || ((!record || !record->dynamic) && !virtual_consumer(c))) {
+        diag(name_at, Diag::not_supported, lex::Tk::coloncolon);
+        return fail;
+      }
     }
     auto found = find_member(c, name);
     if (!found) {
@@ -4287,7 +4375,18 @@ public:
   // ([class.access]/4); diagnosed if not, or deferred as a nested type's check is.
   void member_template_access(QualType q, EntityId templ, NameId n, u32 at) {
     if (!types().is_class(q) || types().is_dependent(q)) return;
-    const EntityId naming = types().class_of(q), owner = w_->entities.rec(templ).scope;
+    check_member_template_access(types().class_of(q), templ, n, at);
+  }
+  // Unqualified lookup can find a member template before the naming class is complete
+  // ([class.access.general], [class.access.base]). Its declaration still supplies the access.
+  void unqualified_type_template_access(const ast::DeclSema& tmpl, NameId n, u32 at) {
+    if (current_class == EntityId::none || tmpl.kind != ast::DeclKind::type_alias || !(tmpl.flags & decl_flag::member))
+      return;
+    const ClassPrefixScope prefix(*this, current_class, static_initializer_name_);
+    check_member_template_access(current_class, tmpl.entity, n, at);
+  }
+  void check_member_template_access(EntityId naming, EntityId templ, NameId n, u32 at) {
+    const EntityId owner = w_->entities.rec(templ).scope;
     const ClassRec* cr = class_rec(owner);
     if (!cr) return;
     if (defer_type_access && (!accessible(owner, cr->access_of(templ), naming) || !accessible_naming_base(naming, owner))) {
@@ -4300,7 +4399,8 @@ public:
   QualType dependent_member_template_id(QualType q, NameId name, std::span<const TemplateArg> args) {
     return types().dep_template(q, name, ast::DepNameForm::template_id, args);
   }
-  std::optional<TemplateArg> template_name_arg(std::optional<EntityId> ns, NameId name) {
+  std::optional<TemplateArg> template_name_arg(std::optional<EntityId> ns, NameId name,
+                                                std::optional<u32> at = std::nullopt) {
     if (!ns)
       if (const ast::TemplateParamSema* p = template_param(name)) {
         if (p->kind != ast::TemplateArgKind::template_) return std::nullopt;
@@ -4311,11 +4411,12 @@ public:
     // class (the current instantiation, or the specialization) as a type one ([temp.local]/1).
     if (!ns && current_class != EntityId::none) {
       const EntityRec& c = w_->entities.rec(current_class);
-      if (c.templ != EntityId::none && c.name == name && !local_named(name))
+      if (c.templ != EntityId::none && c.name == name && !block_type_template(name).found)
         return TemplateArg{ast::TemplateArgKind::template_, types().class_type(current_class), ConstId::none, {}, c.templ};
     }
     auto t = ns ? namespace_type_template(*ns, name) : type_template(name);
     if (!t) return std::nullopt;
+    if (!ns && at) unqualified_type_template_access(*t, name, *at);
     return TemplateArg{ast::TemplateArgKind::template_, QualType{}, ConstId::none, {}, t->entity};
   }
   // The argument a template parameter named here stands for: its argument, or for a pack the
@@ -4509,6 +4610,7 @@ public:
 
   Templates templates() {
     Templates t(*w_, classes());
+    t.class_definition = [this](EntityId c) { return class_rec(c); };
     t.defining_enum_is_scoped = [this](EntityId e) { return q_->defining_enum_is_scoped(e); };
     t.member_type = [this](EntityId c, NameId n) { return member_type(c, n); };
     t.member_template = [this](EntityId c, NameId n) -> std::optional<EntityId> {
@@ -6153,7 +6255,11 @@ public:
     if (w_->target.triple == ast::x86_64_linux.triple && member->is_static && types().is_class(result) &&
         ins().names.spelling(entity.name) == "current" && types().class_of(result) == entity.scope &&
         source_location_class() == entity.scope) return true;
-    // The ordinary scalar path continues to accept integral, enum and void results.
+    return supported_immediate_member_result(result);
+  }
+
+  // Only the checked integral, enum and void result representations enter these paths.
+  bool supported_immediate_member_result(QualType result) {
     if (types().is_void(result)) return true;
     if (types().is_enum(result)) {
       const auto* enumeration = enum_rec(types().enum_of(result));
@@ -6581,12 +6687,14 @@ public:
     std::optional<u32> virtual_slot;
     const ClassRec* dynamic_owner = d->is_virtual ? class_rec(w_->entities.rec(d->entity).scope) : nullptr;
     if (dynamic_owner && !dynamic_owner->dynamic) dynamic_owner = nullptr;
+    const bool immediate_virtual = d->is_virtual && d->is_consteval;
     if (unevaluated == 0) {
-      if (d->is_virtual && d->is_consteval) {
-        diag(paren_at, Diag::virtual_immediate_call);
-        return fail;
-      }
-      if (dynamic_owner) {
+      if (immediate_virtual) {
+        if (!dynamic_owner || !object || assignment_notation) {
+          diag(paren_at, Diag::virtual_immediate_call);
+          return fail;
+        }
+      } else if (dynamic_owner) {
         // Itanium C++ ABI §3.2.4: dispatch through the slot the declaration occupies in its own
         // class's table. A qualified name calls the named function directly ([class.virtual]/16).
         if (!object || assignment_notation) {
@@ -6696,6 +6804,15 @@ public:
     if (assignment_notation) {
       contract_assert(children->size() == 1);
       return node(ast::AssignmentCall{info, fe, children->front(), at(o, begin)}, begin, end, info);
+    }
+    if (immediate_virtual) {
+      if (!unevaluated &&
+          (fr.variadic || info.category != ValueCategory::prvalue || !supported_immediate_member_result(info.type))) {
+        diag(paren_at, Diag::virtual_immediate_call);
+        return fail;
+      }
+      return immediate_invocation(node(ast::ImmediateVirtualCall{info, fe, at(o, begin), b_->list(*children), u8(bound.qualified)},
+                                       begin, end, info));
     }
     if (virtual_slot) {
       // BOOTSTRAP: -Warray-bounds: reserved and appended. At -O3 GCC 16.2 reports libycxx's
@@ -7598,6 +7715,7 @@ public:
         return !types().rec(type).fn_noexcept;
       }
       if (node.is<ast::MemberCall>()) return function_throwing(node.get<ast::MemberCall>().function);
+      if (node.is<ast::ImmediateVirtualCall>()) return function_throwing(node.get<ast::ImmediateVirtualCall>().function);
       if (node.is<ast::ExplicitDestroy>()) {
         const auto receiver = expression_info(node.get<ast::ExplicitDestroy>().object.id).type;
         return destructor_throwing(types().pointee(receiver), node.offset());
@@ -10568,6 +10686,29 @@ public:
     return {.ambiguous = true};
   }
 
+  static void add_operator_nonmember(std::vector<ast::DeclSema>& set, const ast::DeclSema& declaration) {
+    if (declaration.kind == ast::DeclKind::function && declaration.entity != EntityId::none &&
+        !std::ranges::contains(set, declaration.entity, &ast::DeclSema::entity))
+      set.push_back(declaration);
+  }
+
+  std::vector<ast::DeclSema> ordinary_operator_nonmembers(NameId name) {
+    std::vector<ast::DeclSema> set;
+    for (const auto& o : own)
+      if (o.name == name) add_operator_nonmember(set, o.sema);
+    for (DeclId d : q_->visible_decls(name, directives())) add_operator_nonmember(set, q_->decl_sema(d));
+    return set;
+  }
+
+  void add_operator_adl(std::vector<ast::DeclSema>& set, NameId name, std::span<const Ex> operands,
+                        bool at_instantiation) {
+    auto associations = adl_associations(operands, at_instantiation, /*ordinary_call=*/!at_instantiation);
+    for_each_associated_friend(associations, name, at_instantiation,
+                               [&](const ast::DeclSema& d) { add_operator_nonmember(set, d); });
+    for (EntityId ns : associations.namespaces)
+      for (const ast::DeclSema& d : q_->adl_functions(ns, name, at_instantiation)) add_operator_nonmember(set, d);
+  }
+
   // [over.match.oper]: an operator with an operand of class or enumeration type calls an operator
   // function when one is viable: a member `operator@` of the left operand's class, else the
   // non-member ones that unqualified lookup and argument-dependent lookup find
@@ -10622,33 +10763,19 @@ public:
     const bool enum_only = binary && std::ranges::none_of(operands, [&](const Ex& operand) {
       return types().is_class(types().referee(operand.type()));
     });
-    std::vector<ast::DeclSema> set;
-    auto add = [&](const ast::DeclSema& d) {
-      if (d.kind == ast::DeclKind::function && d.entity != EntityId::none &&
-          !std::ranges::any_of(set, [&](const ast::DeclSema& x) { return x.entity == d.entity; }))
-        set.push_back(d);
-    };
-    for (const auto& o : own)
-      if (o.name == name) add(o.sema);
-    for (DeclId d : q_->visible_decls(name, directives())) add(q_->decl_sema(d));
+    auto set = ordinary_operator_nonmembers(name);
+    auto add = [&](const ast::DeclSema& d) { add_operator_nonmember(set, d); };
     for (const ast::DeclSema& d : unary_friends) add(d);
     if (binary) {
-      auto associations = adl_associations(operands, /*at_instantiation=*/false, /*ordinary_call=*/true);
-      for_each_associated_friend(associations, name, /*at_instantiation=*/false, add);
-      for (EntityId ns : associations.namespaces)
-        for (const ast::DeclSema& d : q_->adl_functions(ns, name, /*at_instantiation=*/false)) add(d);
+      add_operator_adl(set, name, operands, /*at_instantiation=*/false);
       const bool ordinary_classes = !enum_only && std::ranges::all_of(operands, [&](const Ex& operand) {
         const QualType type = types().referee(operand.type());
         if (!types().is_class(type)) return true;
         const auto& entity = w_->entities.rec(types().class_of(type));
         return entity.kind == EntityKind::class_ && entity.templ == EntityId::none;
       });
-      if (ordinary_classes && q_->dependent_call(op_at)) {
-        auto instantiated = adl_associations(operands, /*at_instantiation=*/true, /*ordinary_call=*/false);
-        for_each_associated_friend(instantiated, name, /*at_instantiation=*/true, add);
-        for (EntityId ns : instantiated.namespaces)
-          for (const ast::DeclSema& d : q_->adl_functions(ns, name, /*at_instantiation=*/true)) add(d);
-      }
+      if (ordinary_classes && q_->dependent_call(op_at))
+        add_operator_adl(set, name, operands, /*at_instantiation=*/true);
     } else if (!unary_friends.empty()) {
       for (EntityId ns : unary_associations.namespaces)
         for (const ast::DeclSema& d : q_->adl_functions(ns, name, /*at_instantiation=*/false)) add(d);
@@ -11105,6 +11232,8 @@ public:
     if (op == dot_star || op == arrow_star) return member_pointer_access(l, r, op == arrow_star, op_at);
     const bool equality_rewrite = op == eq || op == ne;
     const bool three_way_rewrite = op == spaceship || op == lt || op == gt || op == le || op == ge;
+    if (three_way_rewrite && !rewriting_three_way_)
+      if (auto result = ranked_three_way(op, l, r, begin, end, op_at)) return *result;
     if (auto o = overloaded(binary_spellings[std::to_underlying(op)], {l, r}, begin, end, op_at,
                             /*rank_failed_member=*/!equality_rewrite && !three_way_rewrite))
       return *o;
@@ -11416,6 +11545,142 @@ public:
     return node(ast::ThreeWay{info, at(a, begin), at(c, begin), results}, begin, end, info);
   }
 
+  // [over.match.oper], [over.match.best.general]: rank the direct and synthesized
+  // reversed orientations as one set. Leave the existing lookup and resolution path
+  // in charge when other candidate or conversion kinds may affect the result.
+  std::optional<Ex> ranked_three_way(BinOp op, Ex l, Ex r, u32 begin, u32 end, u32 op_at) {
+    const std::array operand_types{types().referee(l.type()), types().referee(r.type())};
+    if ((!types().is_class(operand_types[0]) && !types().is_class(operand_types[1])) ||
+        q_->dependent_call(op_at))
+      return std::nullopt;
+    const std::array operands{l, r};
+    const NameId conversion = ins().names.intern(lex::conversion_function_name);
+    std::array<EntityId, 2> owners{EntityId::none, EntityId::none};
+    for (std::size_t i = 0; i < operands.size(); ++i) {
+      const Ex& operand = operands[i];
+      const QualType type = operand_types[i];
+      if (operand.info.bit_width || Types::is_volatile(types().canonical(type))) return std::nullopt;
+      if (types().is_integral(type)) continue;
+      if (!types().is_class(type)) return std::nullopt;
+      const EntityId owner = types().class_of(type);
+      const auto& entity = w_->entities.rec(owner);
+      if (entity.kind != EntityKind::class_ || entity.templ != EntityId::none) return std::nullopt;
+      const ClassRec* record = class_rec(owner);
+      if (!record || !record->member_declarations_valid || !record->bases.empty() ||
+          std::ranges::contains(record->members, conversion, &MemberDeclRec::name) || !is_complete(type))
+        return std::nullopt;
+      owners[i] = owner;
+    }
+
+    // The complete ordinary relational candidate set is a separate ranking case.
+    // Check declarations, including those for which a call would fail.
+    if (op != BinOp::spaceship) {
+      const NameId ordinary = ins().names.intern(std::string("operator") +
+                                                std::string(binary_spellings[std::to_underlying(op)]));
+      if (owners[0] != EntityId::none && find_member(owners[0], ordinary)) return std::nullopt;
+      auto nonmembers = ordinary_operator_nonmembers(ordinary);
+      add_operator_adl(nonmembers, ordinary, operands, /*at_instantiation=*/false);
+      if (!nonmembers.empty()) return std::nullopt;
+    }
+
+    auto argument_rank = [&](const Ex& operand, QualType parameter) -> std::optional<Ics> {
+      const QualType source = types().referee(operand.type());
+      const QualType target = types().referee(parameter);
+      if (Types::is_volatile(types().canonical(target))) return std::nullopt;
+      if (same_unqualified(source, target)) return ics(operand, parameter);
+      if (types().is_class(target)) {
+        const ClassRec* record = class_rec(types().class_of(target));
+        if (!record || !record->member_declarations_valid || !is_complete(target) || has_user_ctors(target))
+          return std::nullopt;
+        return Ics{};
+      }
+      // The source class has no bases or conversion functions.
+      if (types().is_class(source)) return Ics{};
+      if (!types().is_integral(target) || types().is_reference(parameter)) return std::nullopt;
+      return ics(operand, parameter);
+    };
+    struct Ranked {
+      std::array<Ics, 2> conversions{};
+      const ast::DeclSema* nonmember = nullptr;
+      const MemberDeclRec* member = nullptr;
+      bool reversed = false;
+    };
+    const NameId name = ins().names.intern("operator<=>");
+    auto nonmembers = ordinary_operator_nonmembers(name);
+    add_operator_adl(nonmembers, name, operands, /*at_instantiation=*/false);
+    std::vector<Ranked> viable;
+    for (std::size_t first = 0; first < operands.size(); ++first) {
+      const std::size_t second = 1 - first;
+      const bool reversed = first != 0;
+      for (const ast::DeclSema& nonmember : nonmembers) {
+        const auto function = types().rec(nonmember.type);
+        if ((nonmember.flags & decl_flag::template_) || function.variadic || function.params.size() != 2)
+          return std::nullopt;
+        const auto first_rank = argument_rank(operands[first], function.params[0]);
+        if (first_rank && !first_rank->viable) continue;
+        const auto second_rank = argument_rank(operands[second], function.params[1]);
+        if (second_rank && !second_rank->viable) continue;
+        if (!first_rank || !second_rank) return std::nullopt;
+        Ranked candidate{.nonmember = &nonmember, .reversed = reversed};
+        candidate.conversions[first] = *first_rank;
+        candidate.conversions[second] = *second_rank;
+        viable.push_back(candidate);
+      }
+      if (owners[first] == EntityId::none) continue;
+      for (const auto* member : member_functions(owners[first], name)) {
+        const auto function = types().rec(member->type);
+        if (member->is_static || member->is_template || function.variadic || function.params.size() != 1 ||
+            (function.fn_cv != Cv::none && function.fn_cv != Cv::const_))
+          return std::nullopt;
+        const Ex& receiver = operands[first];
+        const auto object = implicit_object_rank(function, object_cv(receiver.type()),
+                                                 receiver.cat() != ValueCategory::lvalue);
+        if (!object.viable) continue;
+        const auto argument = argument_rank(operands[second], function.params[0]);
+        if (!argument) return std::nullopt;
+        if (!argument->viable) continue;
+        Ranked candidate{.member = member, .reversed = reversed};
+        candidate.conversions[first] = object;
+        candidate.conversions[second] = *argument;
+        viable.push_back(candidate);
+      }
+    }
+    if (viable.empty() || viable.front().reversed || !viable.back().reversed) return std::nullopt;
+    const auto better = [&](const Ranked& a, const Ranked& b) {
+      if (auto rank = better_conversions(a.conversions, b.conversions)) return *rank;
+      // For <=> the forward candidate is non-rewritten. For a relational operator
+      // both are rewritten and the forward candidate is not synthesized.
+      return !a.reversed && b.reversed;
+    };
+    const auto selected = std::ranges::find_if(viable, [&](const Ranked& candidate) {
+      return std::ranges::all_of(viable, [&](const Ranked& other) {
+        return &candidate == &other || better(candidate, other);
+      });
+    });
+    if (selected == viable.end()) {
+      diag(op_at, Diag::ambiguous_call, name);
+      return Ex{NodeId::none, begin, end};
+    }
+
+    const Ex first = selected->reversed ? r : l;
+    const Ex second = selected->reversed ? l : r;
+    Ex compared{NodeId::none, begin, end};
+    if (selected->member) {
+      Ex callee = member(first, false, name, first.end, op_at, op_at);
+      if (!callee.ok()) return Ex{NodeId::none, begin, end};
+      bound_.at(std::to_underlying(callee.id)).cands.assign(1, selected->member);
+      compared = call(callee, {second}, end, op_at);
+    } else {
+      ExprInfo info{builtin(Builtin::overload_set), ValueCategory::lvalue, 0};
+      Ex callee = node(ast::DeclRef{info, selected->nonmember->entity}, begin, begin, info);
+      overloads_[std::to_underlying(callee.id)] = {*selected->nonmember};
+      compared = call(callee, {first, second}, end, op_at);
+    }
+    if (!compared.ok()) return Ex{NodeId::none, begin, end};
+    if (op == BinOp::spaceship && !selected->reversed) return Ex{compared.id, begin, end, compared.info};
+    return apply_three_way_rewrite(op, compared, selected->reversed, begin, end, op_at);
+  }
+
   // [over.match.oper]/3.4, /8: the rewritten candidates of a relational operator `x @ y` and of
   // `x <=> y`, when no ordinary candidate is viable and an operand has class type: an
   // `operator<=>` as `(x <=> y) @ 0`, then, synthesized with the operands reversed, as
@@ -11445,6 +11710,10 @@ public:
       return std::nullopt;
     }
     if (!compared->ok()) return Ex{NodeId::none, begin, end};
+    return apply_three_way_rewrite(op, *compared, reversed, begin, end, op_at);
+  }
+
+  Ex apply_three_way_rewrite(BinOp op, Ex compared, bool reversed, u32 begin, u32 end, u32 op_at) {
     // A literal `0`, one token wide, so it is a null pointer constant too ([conv.ptr]), as the
     // library's comparison operators may take it.
     const QualType int_type = builtin(Builtin::int_);
@@ -11455,7 +11724,7 @@ public:
       ~Restore() { flag = false; }
     } restore{rewriting_three_way_};
     rewriting_three_way_ = true;
-    const Ex result = reversed ? binary(op, zero, *compared, op_at) : binary(op, *compared, zero, op_at);
+    const Ex result = reversed ? binary(op, zero, compared, op_at) : binary(op, compared, zero, op_at);
     return Ex{result.id, begin, end, result.info};
   }
   bool rewriting_three_way_ = false;

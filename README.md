@@ -99,6 +99,10 @@ the expression form `t...[I]` is not done yet). Concrete constant template argum
 `Tag<auto{7}>` and integer-literal-led parenthesized conversions such as `Tag<auto(7)>`.
 [#286](https://github.com/yrashk/ycxx/issues/286)
 
+Fixed reference and single-pointer arguments can deduce through a unique most-derived
+base that matches a named class-template parameter.
+[#1144](https://github.com/yrashk/ycxx/issues/1144)
+
 Functional conversions can construct namespace-qualified class-template specializations with
 parentheses or braces, including through namespace aliases. [#697](https://github.com/yrashk/ycxx/issues/697)
 
@@ -112,6 +116,11 @@ template parameter of the same name. [#800](https://github.com/yrashk/ycxx/issue
 C++26 reflection annotations on class heads and ordinary function declarations accept
 constant payloads and retain their types for compiler consumers.
 [#662](https://github.com/yrashk/ycxx/issues/662)
+
+Constant evaluation can dispatch immediate virtual functions on supported completed
+local objects. Base reference calls select the final overrider and keep the statically
+selected default arguments. Qualification calls the named implementation.
+[#1097](https://github.com/yrashk/ycxx/issues/1097)
 
 **Preprocess binary resources.** Both targets support `#embed` and `__has_embed` with the standard
 parameters. [#125](https://github.com/yrashk/ycxx/issues/125)
@@ -570,8 +579,11 @@ written default member initializer are value-initialized.
   Class templates and class partial specializations accept parenthesized requires-clause
   operands joined by `&&` or `||`.
   Non-template code outside requires-expression bodies also checks constraints on directly named
-  primary namespace variable templates with explicit non-dependent type arguments. Templates support
-  `if constexpr`, deferred template static assertion failures, and two-phase lookup, with
+  primary namespace variable templates with explicit non-dependent type arguments. Directly
+  written namespace alias-template IDs check constraints before expansion in non-template code
+  outside requires-expressions when all type arguments are explicit and non-dependent.
+  [#1227](https://github.com/yrashk/ycxx/issues/1227)
+  Templates support `if constexpr`, deferred template static assertion failures, and two-phase lookup, with
   Itanium names identical to Clang's. Native function templates can call an unambiguous
   externally linked target supplied as a function pointer argument, including a concrete
   `noexcept` signature. The compiler supports Clang's `__make_integer_seq`. Template type
