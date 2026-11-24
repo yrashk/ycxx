@@ -136,6 +136,11 @@ build/bin/ycxx cxx -nostdlib example.o -o example
 an entry point. On x86-64 Linux, `-nostdlib` selects the existing executable startup convention
 described above. [#973](https://github.com/yrashk/ycxx/issues/973)
 
+With the pinned libycxx headers, ordinary `std::source_location::current()` calls on
+Linux x86-64 capture the presumed filename, line, byte column and enclosing function.
+The recorded location remains available after the call returns.
+[#327](https://github.com/yrashk/ycxx/issues/327)
+
 `-fno-exceptions` diagnoses active `throw` and block `try` constructs. Native objects retain
 ordinary destruction and eligible plain unwind frames. [#980](https://github.com/yrashk/ycxx/issues/980)
 
