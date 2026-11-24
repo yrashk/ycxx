@@ -922,8 +922,12 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
   keep a strong definition over them (`unit.darwin_weak_visibility`).
   [Design](docs/design/linux-weak-functions.md) · [#937](https://github.com/yrashk/ycxx/issues/937)
   · [#1085](https://github.com/yrashk/ycxx/issues/1085)
+- A GNU `weak` declaration of an ordinary external non-inline object gives its undefined ELF
+  symbol `STB_WEAK` on Linux x86-64. The pinned allocator's marker address comparison uses the
+  ordinary GOT address and remains a runtime decision.
+  [#984](https://github.com/yrashk/ycxx/issues/984) · [Design](docs/design/linux-weak-object-references.md)
 - On Linux x86-64, explicit GNU hidden visibility on any declaration of an ordinary external
-  non-inline namespace-scope variable gives its ELF symbol `STB_GLOBAL` and `STV_HIDDEN`.
+  non-inline namespace-scope variable sets `STV_HIDDEN` on its ELF symbol.
   This includes the C-linkage marker `__ycxx_linkage_static_v1` from the pinned libycxx runtime.
   On arm64 Mach-O the symbol is private external.
   [#936](https://github.com/yrashk/ycxx/issues/936) · [#1085](https://github.com/yrashk/ycxx/issues/1085)

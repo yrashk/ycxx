@@ -252,6 +252,9 @@ strong definition in another object takes precedence. This covers the pinned lib
 debugger provider. [#937](https://github.com/yrashk/ycxx/issues/937)
 · [#1085](https://github.com/yrashk/ycxx/issues/1085)
 
+On Linux x86-64, an ordinary external object declaration can use GNU `weak` for an undefined ELF
+reference, as in the pinned allocator's marker test. [#984](https://github.com/yrashk/ycxx/issues/984)
+
 On both targets, an ordinary external non-inline function can inherit GNU visibility
 from its enclosing namespace declaration and use it at an out-of-line definition.
 [#940](https://github.com/yrashk/ycxx/issues/940) · [#1085](https://github.com/yrashk/ycxx/issues/1085)
