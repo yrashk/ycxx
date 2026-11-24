@@ -1411,7 +1411,7 @@ int main() { S s; return s.v - 1; }
 '''
 status = 'partial'
 issues = [157, 244, 709]
-note = 'First-declaration in-class copy constructors support trivial member copies and deletion. Namespace-scope class templates also support first-declaration deleted copy assignment without a ref-qualifier. Other explicitly defaulted forms and nontrivial copy bodies remain open.'
+note = 'First-declaration in-class copy constructors support trivial member copies and deletion. Namespace-scope class templates also support first-declaration deleted copy assignment, including with an lvalue or rvalue ref-qualifier. Other explicitly defaulted forms and nontrivial copy bodies remain open.'
 
 [[feature]]
 id = 'dcl-delete-reason'
@@ -1856,7 +1856,7 @@ struct S { int f() & { return 1; } int f() && { return 2; } };
 int main() { S s; return s.f() + S().f() - 3; }
 '''
 issues = [311, 339]
-note = 'Ordinary non-template members and conversion functions distinguish lvalue and rvalue receivers. Ref-qualified virtual calls and broader template cases remain open'
+note = 'Ordinary non-template members and conversion functions distinguish lvalue and rvalue receivers. Namespace-scope class templates support ref-qualified deleted copy assignment. Ref-qualified virtual calls and broader template cases remain open'
 
 [[feature]]
 id = 'class-deducing-this'
