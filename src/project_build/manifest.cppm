@@ -25,13 +25,21 @@ struct ArtifactRef {
   std::string output;
 };
 
+struct InputArg {
+  std::string name;
+};
+
+struct OutputArg {
+  std::string name;
+};
+
 struct Value;
 using List = std::vector<Value>;
 using Record = std::vector<std::pair<std::string, Value>>;
 
 struct Value {
   SourceLocation location;
-  std::variant<std::string, List, Record, Glob, ArtifactRef> data;
+  std::variant<std::string, List, Record, Glob, ArtifactRef, InputArg, OutputArg> data;
 };
 
 struct TargetDecl {
@@ -271,6 +279,14 @@ class Parser {
       expect(')');
       if (target.empty() || output.empty()) fail(at, "empty artifact target or output");
       return {at, ArtifactRef{std::move(target), std::move(output)}};
+    }
+    if (name == "input" || name == "output") {
+      expect('(');
+      auto binding = string();
+      expect(')');
+      if (binding.empty()) fail(at, "empty action argument binding");
+      if (name == "input") return {at, InputArg{std::move(binding)}};
+      return {at, OutputArg{std::move(binding)}};
     }
     fail(at, std::format("unknown value '{}'", name));
   }
