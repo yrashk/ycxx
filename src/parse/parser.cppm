@@ -2702,6 +2702,13 @@ public:
       constexpr u8 unavailable = sema::expr_flag::unrepresented_value | sema::expr_flag::deferred_decay_copy;
       if (body && !(e.info.flags & unavailable))
         return s_->world().ins.intern_value(ast::VDepParam{sema::dependent_depth, 0});
+      // A class template's base-specifier is parsed again with the arguments bound when a
+      // specialization is instantiated (`Program::instantiate_base`), so its pattern needs no
+      // representation of the value: it stands as an unevaluated placeholder (#308).
+      if (class_template_base) {
+        ++deferred_argument_checks_;
+        return s_->world().ins.intern_value(ast::VDepParam{sema::dependent_depth, 0});
+      }
       s_->diag(e.begin, Diag::not_supported, Tk::kw_template);
       return std::nullopt;
     }
