@@ -2841,9 +2841,17 @@ public:
     case Tk::comma: case Tk::greater: case Tk::greatergreater: case Tk::ellipsis: case Tk::l_paren:
     case Tk::l_square: case Tk::kw_const: case Tk::kw_volatile: case Tk::kw_noexcept:
       break;
-    case Tk::amp: case Tk::ampamp:  // a ref-qualifier: `void() &`, not `bool(x) && y`
-      if (!ends_argument(kind(close + 1))) return false;
+    case Tk::amp: case Tk::ampamp: {
+      // [dcl.fct]: A ref-qualifier can precede an exception specification. Check its end:
+      // `bool() && noexcept(0) && true` is a value argument.
+      u32 suffix_end = close + 1;
+      if (kind(suffix_end) == Tk::kw_noexcept) {
+        ++suffix_end;
+        if (kind(suffix_end) == Tk::l_paren) suffix_end = past_parentheses(suffix_end);
+      }
+      if (!ends_argument(kind(suffix_end))) return false;
       break;
+    }
     default:
       return false;
     }
