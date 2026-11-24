@@ -58,6 +58,11 @@ if(APPLE AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(arm64|aarch64)$" AND NOT CMAKE_CR
   add_test(NAME unit.tu_local_parameter_symbols
     COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/tu_local_parameter_symbols.py
             $<TARGET_FILE:ycxxc> ${CMAKE_CXX_COMPILER} darwin)
+  # Two units sharing a nested class's inline static members (#306); unit.linux_nested_classes
+  # checks the same on Linux.
+  add_test(NAME unit.darwin_nested_classes
+    COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/nested_classes.py
+            $<TARGET_FILE:ycxxc> ${CMAKE_CXX_COMPILER} darwin)
   # The Darwin counterpart of unit.linux_archive (#842), checked against the system linker.
   add_test(NAME unit.darwin_archive
     COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/darwin_archive.py
@@ -98,8 +103,8 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_
             $<TARGET_FILE:ycxxc> ${CMAKE_CXX_COMPILER} ${CMAKE_READELF})
   # The Darwin runs of the same sources are tests/own/classes/nested in the core suite (#306).
   add_test(NAME unit.linux_nested_classes
-    COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/linux_nested_classes.py
-            $<TARGET_FILE:ycxxc> ${CMAKE_CXX_COMPILER})
+    COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/nested_classes.py
+            $<TARGET_FILE:ycxxc> ${CMAKE_CXX_COMPILER} linux)
   if(CMAKE_CXX_COMPILER_ID MATCHES "^(GNU|Clang)$")
     add_test(NAME unit.linux_fixed_array_new
       COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/linux_fixed_array_new.py

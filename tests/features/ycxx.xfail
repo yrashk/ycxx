@@ -42,10 +42,8 @@ draft/basic/intro.object-4.accept.cpp preprocessing directives are not supported
 draft/basic/namespace.qual-4.reject.cpp errors elsewhere: 'namespace' not supported yet
 draft/class/class.abstract-3.accept.cpp 'class' not supported yet
 draft/class/class.access.base-2.reject.cpp errors elsewhere: 'class' not supported yet
-draft/class/class.access.general-3.reject.cpp errors elsewhere: 'class' not supported yet
 draft/class/class.access.general-4.accept.cpp 'class' not supported yet
 draft/class/class.access.general-5.reject.cpp errors elsewhere: 'class' not supported yet
-draft/class/class.access.nest-1.reject.cpp errors elsewhere: 'class' not supported yet
 draft/class/class.access.spec-3.reject.cpp errors elsewhere: 'struct' not supported yet
 draft/class/class.access.spec-4.reject.cpp errors elsewhere: 'class' not supported yet
 draft/class/class.access.virt-1.reject.cpp errors elsewhere: 'class' not supported yet
@@ -87,11 +85,8 @@ draft/class/class.mem.general-2.reject.cpp errors elsewhere: 'struct' not suppor
 draft/class/class.mem.general-4.accept.cpp 'struct' not supported yet
 draft/class/class.mfct-2.accept.cpp 'typedef' not supported yet
 draft/class/class.name-3.accept.cpp 'struct' not supported yet
-draft/class/class.nest-1.reject.cpp errors elsewhere: 'struct' not supported yet
-draft/class/class.nest-2.accept.cpp 'struct' not supported yet
 draft/class/class.paths-1.accept.cpp 'class' not supported yet
 draft/class/class.pre-1.accept.cpp 'namespace' not supported yet
-draft/class/class.pre-2.accept.cpp 'struct' not supported yet
 draft/class/class.prop-1.accept.cpp 'struct' not supported yet
 draft/class/class.protected-1.reject.cpp errors elsewhere: 'class' not supported yet
 draft/class/class.union.anon-1.accept.cpp 'union' not supported yet
@@ -321,7 +316,6 @@ draft/temp/temp.alias-3.reject.cpp errors elsewhere: 'template' not supported ye
 draft/temp/temp.alias-4.accept.cpp 'template' not supported yet
 draft/temp/temp.arg.explicit-2.reject.cpp errors elsewhere: 'template' not supported yet
 draft/temp/temp.arg.general-1.accept.cpp preprocessing directives are not supported yet
-draft/temp/temp.arg.general-3.reject.cpp errors elsewhere: 'template' not supported yet
 draft/temp/temp.arg.general-4.reject.cpp errors elsewhere: 'template' not supported yet
 draft/temp/temp.arg.general-6.accept.cpp 'template' not supported yet
 draft/temp/temp.arg.nontype-1.reject.cpp errors elsewhere: 'template' not supported yet

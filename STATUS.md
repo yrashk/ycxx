@@ -1572,6 +1572,41 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   parameter as an xvalue, including parenthesized names. A written move constructor
   can be selected even when the copy constructor is deleted. [#749](https://github.com/yrashk/ycxx/issues/749)
 
+## Nested classes of ordinary classes (#306)
+
+- A class defined in a class with no template-head and no specialization, at any depth, is a
+  member class ([class.nest]): `Program::ordinary_nested_class` selects its item, and
+  `class_definition` gives it the entity `{class_, name, scope = enclosing class}`. Its declarators
+  after the braces are members of the enclosing class (`member_class_definition`).
+- `class-key identifier;` in such a class declares a member class (`member_class_declaration`),
+  and `typedef struct I { … } T;` defines I and declares T. A member class conflicts with a
+  same-named typedef-name or enumeration, and cannot have its enclosing class's name.
+- `class O::I … { … };` at namespace scope defines one ([class.pre]/3): O must be complete and
+  have declared I, and the namespace must enclose O (`member_class_qualifier`). That item binds
+  no name in its namespace (`declared_in`), and its members' item scope is `O::I`.
+- The enclosing class's `class_content` lists each member class once as a nested type, so
+  qualified lookup (`O::I`), access checks and `earlier_member` find it.
+- Unqualified lookup from a nested class's members goes on to each enclosing class
+  (`Sema::enclosing_class`): its record when complete, otherwise the members before the nested
+  class (`Questions::enclosing_earlier_member`); qualified names into a still incomplete
+  enclosing class (`O::A`, `O::k`) use the same members. A non-type there hides a class of its
+  name, and non-static enclosing members can only be named unevaluated. The injected-class-name
+  is found in the nested class's own declarations.
+- A nested class is complete in its enclosing class's complete-class contexts and implicit
+  special members (`Program::is_complete`, `within_outer_class`). `analyze_group` completes a
+  class, then its nested classes, then the members' bodies (`complete_class_items`); `front.cppm`
+  emits nested classes' members, and a nested class's constexpr static members are vague linkage.
+- Virtual members and the special-member features gated on "a class at namespace scope" accept a
+  class nested in ordinary classes (`Program::outermost_class_scope`); peer-profile layouts still
+  exclude classes with nested types.
+- Tests: `tests/own/classes/nested` (44; 26 from a spec-only author, 9 from the review), 5 draft
+  examples, and `unit.darwin_nested_classes` / `unit.linux_nested_classes` (two units sharing a
+  nested class; on Linux also every run test).
+- Not yet: nested classes of class templates, their partial and explicit specializations, and
+  member class templates (#1187, #340); a class head qualified by a namespace
+  (`class N::X { … }`, #1188). Found on the way: #1201 (members declared after a body), #1202
+  (hiding in the class's own scope), #124 (`static inline` members are strong).
+
 ## Ordinary destructor access (#259)
 
 - Automatic class objects and evaluated expressions of the form `T(args)` or `T{args}`
@@ -1607,7 +1642,7 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   the same declaration. The fields participate in lookup, initialization, and class layout.
   Tests in `tests/own/nested-enum-fields/` compare combined and separate declarations and
   cover scoped enum field initializers, and `tests/own/builtins/offsetof-after-nested-enum` their
-  offsets. Nested class definitions are tracked separately.
+  offsets. Nested class definitions are in "Nested classes of ordinary classes".
   [#500](https://github.com/yrashk/ycxx/issues/500) · [#306](https://github.com/yrashk/ycxx/issues/306) ·
   [#248](https://github.com/yrashk/ycxx/issues/248)
 - Nested scoped enumerators are looked up in their enumeration's scope in ordinary classes and
@@ -2800,7 +2835,7 @@ first; a dependent base is not searched. Redeclaring a hidden parameter's name i
 ([temp.local]/6, `Sema::declared_template_param`).
 - Tests: `tests/own/temp-local/` (one run test, two reject tests).
 - Not yet: the enclosing classes of a nested class are not searched before the outer head,
-  since nested classes of class templates are not supported (#306).
+  since nested classes of class templates are not supported (#1187).
 
 ## Templates, ζ step 7: static data members of class templates (#88, 2026-11-18)
 

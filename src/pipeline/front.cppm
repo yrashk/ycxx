@@ -1164,7 +1164,7 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
       return {};
     const auto& member = world.entities.rec(d.entity);
     const auto& owner = world.entities.rec(member.scope);
-    if (owner.kind != sema::EntityKind::class_ || !program.is_namespace(owner.scope)) return {};
+    if (owner.kind != sema::EntityKind::class_ || !program.is_namespace(program.outermost_class_scope(member.scope))) return {};
     const bool instantiated = owner.templ != EntityId::none;
     if (instantiated && (!world.types.is_arithmetic(d.type) || (d.flags & sema::decl_flag::specialization)))
       return {};

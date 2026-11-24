@@ -493,9 +493,20 @@ public:
     }
     u32 d = it->second;
     bool inside = item > d && item <= last_member(d);
-    if ((item < d) || (item == d && !own) || (inside && !body)) return false;
+    // A class nested in the one being completed was defined before its closing brace; a member
+    // body is a complete-class context of every enclosing class ([class.mem.general]/8).
+    const bool nested_before_close = item < d && ((own && d <= last_member(item)) || (body && within_outer_class(d, item)));
+    if ((item < d && !nested_before_close) || (item == d && !own) || (inside && !body)) return false;
     if (!classes_.is_defined(c)) class_def(d);
     return classes_.is_defined(c);
+  }
+  // Whether item `d` is nested in the outermost class that encloses item `item` ([class.nest]).
+  bool within_outer_class(u32 d, u32 item) const {
+    u32 outer = items::none;
+    for (u32 p = items_->items[item].parent; p != items::none && items_->items[p].kind == ItemKind::class_def;
+         p = items_->items[p].parent)
+      outer = p;
+    return outer != items::none && d > outer && d <= last_member(outer);
   }
   // The last item nested in `k`, or `k` (items are in preorder).
   u32 last_member(u32 k) const {
@@ -4541,10 +4552,6 @@ private:
       s_.diag(ps_.pos(), Diag::not_supported, ps_.kind());  // unnamed classes, attributes
       return bad();
     }
-    if (nested && td) {
-      s_.diag(at, Diag::not_supported, Tk::kw_typedef);  // a typedef of a nested class definition
-      return bad();
-    }
     const u32 head_index = ps_.index();
     NameId name = ps_.is(Tk::identifier) ? ps_.name_of(ps_.tok()) : named.first;
     u32 name_at = ps_.is(Tk::identifier) ? ps_.pos() : named.second;
@@ -4591,7 +4598,7 @@ private:
     }
     if (member_class)
       return member_class_definition(key, name, name_at, entity_of(), owner, is_final, bases, annotations,
-                                     leading_annotations, at);
+                                     leading_annotations, at, td);
     for (DeclId p : q_.visible_decls(name))
       if (auto ds = p_->decl_sema(p); ds && ds->entity != EntityId::none && same_scope(*ds)) {
         if (ds->kind == ast::DeclKind::enum_) {
@@ -4670,6 +4677,10 @@ private:
     const u32 name_at = ps_.pos();
     ps_.bump();
     const EntityId entity = nested_class_entity(name, owner);
+    if (name == s_.world().entities.rec(owner).name) {  // [class.mem.general]: not the class's name
+      s_.diag(name_at, Diag::member_named_as_class, name);
+      return bad();
+    }
     if (auto previous = q_.earlier_member(name, /*type_only=*/true); previous && previous->entity != entity) {
       s_.diag(name_at, Diag::conflicting_declaration, name);
       return bad();
@@ -4687,8 +4698,12 @@ private:
   EntityId member_class_qualifier(NameId& name, u32& name_at) {
     const u32 at = ps_.pos();
     u32 next = 0;
+    const auto diags = s_.diag_count();
     auto scope = ps_.nested_name(0, next);
-    if (!scope) return EntityId::none;  // diagnosed
+    if (!scope) {
+      if (!s_.has_error_since(diags)) s_.diag(at, Diag::expected_unqualified_id);
+      return EntityId::none;
+    }
     if (ps_.kind(next) != Tk::identifier || ps_.kind(next + 1) == Tk::coloncolon || !scope->type ||
         !s_.types().is_class(*scope->type) || s_.types().is_dependent(*scope->type)) {
       s_.diag(at, Diag::not_supported, Tk::coloncolon);  // namespace-qualified and templated class heads
@@ -4727,14 +4742,19 @@ private:
   // its braces are members of `owner`, or namespace-scope declarations.
   void member_class_definition(Tk key, NameId name, u32 name_at, EntityId entity, EntityId owner, bool is_final,
                                std::vector<sema::BaseRec>& bases, std::vector<ast::AnnotationSema>& annotations,
-                               std::vector<ast::AnnotationSema>& leading_annotations, u32 at) {
+                               std::vector<ast::AnnotationSema>& leading_annotations, u32 at, bool td) {
+    if (owner != EntityId::none && name == s_.world().entities.rec(owner).name) {  // [class.mem.general]
+      s_.diag(name_at, Diag::member_named_as_class, name);
+      return bad();
+    }
     if (owner != EntityId::none)
       if (auto previous = q_.earlier_member(name, /*type_only=*/true); previous && previous->entity != entity) {
         s_.diag(name_at, Diag::conflicting_declaration, name);
         return bad();
       }
-    // The members before this one were analysed above; an out-of-class definition follows its
-    // class's completion, which analysed every member.
+    // An earlier definition: in the class, whose members were analysed above, or out of class in
+    // an earlier top-level item, which is analysed only when asked (#947).
+    p_->ensure_declared(entity, k_);
     if (const auto def = p_->class_items_.find(std::to_underlying(entity)); def != p_->class_items_.end() && def->second != k_) {
       s_.diag(name_at, Diag::class_redefinition, name);
       return bad();
@@ -4764,11 +4784,20 @@ private:
     spec.annotations = std::move(leading_annotations);
     if (owner != EntityId::none) {
       s_.current_class = owner;
-      return member_declarators(spec, class_decl(owner, true));
+      if (!td) return member_declarators(spec, class_decl(owner, true));
+      // `typedef class-specifier declarators;` in a class: member typedef-names ([dcl.typedef]).
+      do {
+        parse::Declarator d = ps_.declarator(spec.type, false, true);
+        if (!d.ok || !d.named || d.qualified || !member_alias(class_decl(owner, true), d.name, d.name_at, d.type))
+          return bad();
+      } while (ps_.accept(Tk::comma));
+      if (!ps_.expect(Tk::semi)) bad();
+      return;
     }
     s_.current_class = EntityId::none;
+    spec.is_typedef = td;
     do {
-      parse::Declarator d = ps_.declarator(spec.type, false, false);
+      parse::Declarator d = ps_.declarator(spec.type, false, td);
       if (!d.ok || !d.named || !declare(spec, d, LangLinkage::cxx, false, false)) {
         bad();
         ps_.skip_to_semi();
@@ -5005,6 +5034,12 @@ private:
     };
     if (!unnamed) {
       if (cls == EntityId::none && !enum_redeclaration_ok(name, name_at, scoped, fixed, definition)) return bad();
+      // A member class of the same name ([basic.scope.scope]/4).
+      if (cls != EntityId::none && replay == EntityId::none)
+        if (auto previous = q_.earlier_member(name, /*type_only=*/true); previous && previous->kind == ast::DeclKind::class_) {
+          s_.diag(name_at, Diag::conflicting_declaration, name);
+          return bad();
+        }
       // [support.dynamic]: the implicit prototypes use this scoped enum with a fixed base.
       // Check its shape on the first written declaration too.
       if (cls == EntityId::none && p_->ns_of(k_) == "std" && s_.ins().names.spelling(name) == "align_val_t") {
@@ -6033,6 +6068,11 @@ private:
     }
     if (member_declared(name)) {
       s_.diag(at, Diag::redeclared_member, name);
+      return false;
+    }
+    // A member class of the same name ([basic.scope.scope]/4: a typedef-name and a class name).
+    if (auto previous = q_.earlier_member(name, /*type_only=*/true); previous && previous->kind == ast::DeclKind::class_) {
+      s_.diag(at, Diag::conflicting_declaration, name);
       return false;
     }
     ast::DeclSema sem = class_decl(s_.world().entities.entity({sema::EntityKind::type_alias, name, {}, LangLinkage::cxx,
