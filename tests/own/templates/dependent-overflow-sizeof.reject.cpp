@@ -12,6 +12,4 @@ struct NeedsValue {
     int payload;
 };
 
-constexpr unsigned bytes = sizeof(NeedsValue<(-2147483647 - 1)>);
-// The later assertion probes whether recovery supplied a size for the invalid class.
-static_assert(bytes == 0);
+static_assert(sizeof(NeedsValue<(-2147483647 - 1)>) == 0);
