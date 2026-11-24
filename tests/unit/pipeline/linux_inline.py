@@ -182,7 +182,8 @@ def main():
             obj = f'friend-{name}.o'
             compile(friend / f'{name}.cpp', obj)
             table = symbols(obj)
-            for symbol in ('_ZN14inline_address4readERKNS_4ItemE', '_ZN14inline_addressplERKNS_4ItemEi'):
+            for symbol in ('_ZN14inline_address4readERKNS_4ItemE', '_ZN14inline_addressplERKNS_4ItemEi',
+                           '_ZN15inline_template4takeERKNS_4CellIiEE'):
                 entry = table[symbol]
                 assert entry[4] == 'WEAK' and entry[6] != 'UND', entry
         for objects in (('friend-main.o', 'friend-peer.o'), ('friend-peer.o', 'friend-main.o')):

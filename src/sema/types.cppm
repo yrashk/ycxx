@@ -734,6 +734,32 @@ struct BaseRec {
 // Layout for access to a peer-owned object. A primary base already supplies the vptr at offset zero.
 enum class PeerVirtualLayout : u8 { none, root, primary_base };
 
+// A slot of a primary virtual table (Itanium C++ ABI §2.5.2): a virtual function's final
+// overrider, or one of the two entries a virtual destructor occupies (§3.2.3).
+enum class VirtualSlotKind : u8 { function, complete_destructor, deleting_destructor };
+struct VirtualSlot {
+  EntityId function = EntityId::none;  // the final overrider in this class; a destructor's complete entry
+  VirtualSlotKind kind = VirtualSlotKind::function;
+  bool pure = false;  // [class.abstract]: the slot holds the pure virtual handler
+};
+
+// A dynamic class laid out by the general single-inheritance rules (#309): a root whose vptr is
+// at offset zero, or a class whose single public nonvirtual base is dynamic and primary. Its
+// table extends the primary base's: overriders replace inherited slots, and the declarations
+// that override nothing follow in declaration order (Itanium C++ ABI §2.5.2).
+struct DynamicClass {
+  bool primary_base = false;  // the single base supplies the vptr at offset zero
+  // The first non-pure virtual function not inline at the end of the class definition
+  // (Itanium C++ ABI §5.2.3): the unit defining it owns the table. Else every user emits it.
+  EntityId key_function = EntityId::none;
+  std::vector<VirtualSlot> slots;
+  std::optional<u32> slot_of(EntityId function, VirtualSlotKind kind = VirtualSlotKind::function) const {
+    for (u32 i = 0; i < slots.size(); ++i)
+      if (slots[i].function == function && slots[i].kind == kind) return i;
+    return std::nullopt;
+  }
+};
+
 // Eligibility and triviality for [class.prop] and [special]. An absent or deleted operation is
 // ineligible. Unknown marks a record whose declarations or subobjects do not establish the fact.
 enum class CopyOperation : u8 { unknown, ineligible, eligible_trivial, eligible_nontrivial };
@@ -772,10 +798,16 @@ struct ClassRec {
   std::optional<bool> destructor_noexcept;  // the effective specification, when known
   bool destructor_usable = false;          // its declaration and subobject destruction are known to be usable
   bool destructor_dependent = false;       // a closure pattern's captures leave usability unresolved
-  bool layout_requires_virtual_support = false;
+  bool layout_requires_virtual_support = false;  // it or a subobject is polymorphic
+  // It or a subobject is polymorphic outside the general dynamic layout (`dynamic`).
+  bool virtual_layout_unsupported = false;
   PeerVirtualLayout peer_virtual_layout = PeerVirtualLayout::none;
   // The sole abstract primary base of a class admitted for plain automatic default initialization.
   EntityId peer_automatic_primary_base = EntityId::none;
+  // A polymorphic class outside the peer profiles above, with its own table and constructors.
+  std::optional<DynamicClass> dynamic;
+  // The implicitly defined default constructor of a dynamic class without user-declared ones.
+  EntityId implicit_default_ctor = EntityId::none;
   std::vector<FieldRec> fields;        // in declaration order
   std::vector<MemberDeclRec> members;  // member functions and static data members
   std::vector<EntityId> pure_final_overriders;
@@ -1045,6 +1077,13 @@ public:
   }
 
   bool has_virtual_layouts() const { return has_virtual_layouts_; }
+  bool virtual_layout_unsupported(QualType t) const {
+    if (!has_virtual_layouts()) return false;
+    auto r = types_->rec(t);
+    while (r.kind == TypeKind::array) r = types_->rec(r.inner);
+    const ClassRec* c = r.kind == TypeKind::class_ ? find(r.entity) : nullptr;
+    return c && c->virtual_layout_unsupported;
+  }
   bool layout_requires_virtual_support(QualType t) const {
     if (!has_virtual_layouts()) return false;
     auto r = types_->rec(t);

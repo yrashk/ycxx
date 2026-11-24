@@ -658,7 +658,7 @@ clauses = ['expr.new', 'expr.delete', 'basic.stc.dynamic*', 'dcl.fct.def.replace
 std = 'C++98'
 detect = '\bnew\s+[\w:(]|\bdelete\s*(?:\[\s*\])?\s*[\w(*]'
 status = 'partial'
-note = 'Ordinary global scalar new and delete support integral and pointer objects, with syntax checking for one-dimensional scalar arrays. Linux x86-64 supports cookie-free array deletion and default-initialized scalar arrays with integer-literal arithmetic bounds in cleanup-free functions. The usual array operators, tagged overloads, and C++26 reserved placement functions support explicit calls. Runtime scalar placement new uses a visible written reserved allocator. Broader array and class allocation, constant evaluation, and exception cleanup remain open.'
+note = 'Ordinary global scalar new and delete support integral and pointer objects, and single objects of class type except deletion through a virtual destructor, with syntax checking for one-dimensional scalar arrays. Linux x86-64 supports cookie-free array deletion and default-initialized scalar arrays with integer-literal arithmetic bounds in cleanup-free functions. The usual array operators, tagged overloads, and C++26 reserved placement functions support explicit calls. Runtime scalar placement new uses a visible written reserved allocator. Broader array allocation, class-specific allocation functions, constant evaluation, and exception cleanup remain open.'
 probe = '''
 struct S { int v; S(int x) : v(x) {} };
 int main() { S* p = new S(5); int r = p->v; delete p; int* a = new int[3]; delete[] a; return r == 5 ? 0 : 1; }
@@ -797,12 +797,13 @@ clauses = ['expr.spaceship', 'over.match.oper', 'cmp.categories']
 std = 'C++20'
 ftm = '__cpp_impl_three_way_comparison'
 detect = '<=>'
-status = 'missing'
+status = 'partial'
 probe = '''
 #include <compare>
 int main() { auto c = 1 <=> 2; return c < 0 ? 0 : 1; }
 '''
 issues = [295]
+note = 'Rewritten `!=` and reversed `==` candidates for class operands, tried when no ordinary candidate is viable. The `<=>` expression, rewritten relational candidates and joint ranking remain'
 
 [[feature]]
 id = 'expr-auto-cast'
@@ -1777,7 +1778,7 @@ std = 'C++98'
 detect = '\bfriend\b'
 status = 'partial'
 issues = [259, 689]
-note = 'Ordinary binary hidden friends and unary minus participate in ADL. Type friends can name a class template parameter. Other hidden friend operators, C-linkage friend definitions, default arguments in friend declarations, and broader template friends remain open.'
+note = 'Ordinary binary hidden friends and unary minus participate in ADL. Type friends can name a class template parameter. Friend function definitions in class templates (with dependent noexcept) and friend function templates defined in classes and class templates are found by ADL. Other hidden friend operators, C-linkage friend definitions, default arguments in friend declarations, non-defining friends in class templates and non-defining friend templates remain open.'
 probe = '''
 class C { int p = 2; friend int peek(const C& c) { return c.p; } };
 int main() { C c; return peek(c) - 2; }
@@ -1807,8 +1808,8 @@ struct A { int a = 1; }; struct B { int b = 2; }; struct D : A, B { int d = 3; }
 int sum(const B& b) { return b.b; }
 int main() { D d; A* pa = &d; return pa->a + sum(d) + d.d - 6; }
 '''
-issues = [308]
-note = 'One nonvirtual, nonpolymorphic direct base in primary class templates, including dependent aliases and qualified static lookup. Additional class-template base forms and the object-expression rule of [class.protected] remain.'
+issues = [308, 1134]
+note = 'One nonvirtual, nonpolymorphic direct base in primary class templates and partial specializations, including dependent aliases and qualified static lookup; explicit specializations take the bases of an ordinary class. Additional class-template base forms and the object-expression rule of [class.protected] remain.'
 
 [[feature]]
 id = 'class-virtual'
@@ -1824,7 +1825,7 @@ struct D final : B { int f() override { return 0; } };
 int main() { D d; B& b = d; return b.f(); }
 '''
 issues = [309]
-note = 'Ordinary virtual declarations, single-base overrides, final and pure-specifiers on ordinary virtual members, abstract type checking, and unqualified parenthesized or flat braced initializers of a direct polymorphic base in syntax checking. Linux x86-64 supports virtual calls, size and alignment queries, and ordinary integral member access on peer-owned roots and on derived classes with one public nonvirtual root, at most one integral field, and at most one declaration-only override. A unit can emit one out-of-line non-key virtual member of a supported root. Linux key-owned table and RTTI emission covers one ordinary external default-visible root with one public integral field and two directly written fixed integer virtual signatures. Linux x86-64 supports plain automatic default initialization for that root with an implicit default constructor, a trivial destructor and no default member initializer, using a table from the same unit or a peer. The automatic derived shape with a single public pure int() base slot, one direct int field and one override can also use its own key-owned table and single-inheritance RTTI or consume a table from a peer. Linux x86-64 can also call one or two directly declared public pure virtual slots on a peer-owned abstract root, with ordinary int or unsigned int signatures and bare noexcept. arm64 macOS supports each of these Linux shapes, with the Apple arm64 non-unique RTTI convention for the base class descriptor (#650). Broader construction and table emission, pure-slot signatures, covariance, further inheritance forms, class-head final, and pure declarations and final on virtual destructors and assignment operators remain open.'
+note = 'Both targets compile and run ordinary non-template classes with external linkage and single public nonvirtual inheritance that declare virtual functions, virtual destructors and pure virtuals: vptr layout, implicit and user-written constructors and destructors that install the vptr, implicit copies, virtual calls (qualified names call directly), out-of-class virtual definitions, key-function and weak vtables with RTTI, and the C2/D2/D0 entries, linking with Clang and GCC objects. Ordinary declarations, overriding, final, class-head final, pure-specifiers and abstract type checking are checked in syntax mode. The earlier peer-owned Linux and macOS profiles remain. Class templates with virtual members, local and internal-linkage classes, non-polymorphic, non-public or multiple bases, delete through a virtual destructor, covariant returns, and constant evaluation of polymorphic objects remain open.'
 
 [[feature]]
 id = 'class-virtual-base'
@@ -1879,12 +1880,13 @@ clauses = ['class.compare', 'class.compare.default', 'class.eq', 'class.spaceshi
 std = 'C++20'
 ftm = '__cpp_impl_three_way_comparison'
 detect = '\boperator\s*(?:==|<=>)\s*\([^)]*\)\s*(?:const\s*)?(?:noexcept\s*)?=\s*default'
-status = 'missing'
+status = 'partial'
 probe = '''
 struct P { int x, y; bool operator==(const P&) const = default; };
 int main() { P a{1, 2}, b{1, 2}; return (a == b && !(a != b)) ? 0 : 1; }
 '''
-issues = [295]
+issues = [295, 1140]
+note = 'Defaulted `operator==` as a member or friend of a non-template class, with deletion and the implicit exception specification. Defaulted `<=>` and secondary operators, class templates and constant evaluation of classes with class or array subobjects (#1140) remain'
 
 [[feature]]
 id = 'class-cond-trivial'
@@ -2645,7 +2647,7 @@ int main() { int i = 1; float f = __builtin_bit_cast(float, i); return (__builti
 '''
 status = 'partial'
 issues = [330]
-note = 'Expression-form __builtin_addressof accepts lvalues, preserves cv qualification, and bypasses overloaded address-of. The remaining utility builtins are tracked in #330 and the pinned memory-related header prerequisites in #469.'
+note = 'Expression-form __builtin_addressof accepts lvalues, preserves cv qualification, and bypasses overloaded address-of. __builtin_unreachable is a void call that traps at run time and is not a constant expression when reached. The remaining utility builtins are tracked in #330 and the pinned memory-related header prerequisites in #469.'
 
 [[feature]]
 id = 'lib-numeric-builtins'

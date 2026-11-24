@@ -527,7 +527,11 @@ void records() {
 
 void virtual_declarations() {
   const std::string plain = "struct Root { int field; int value() const { return field; } };\n";
-  const std::string polymorphic = "struct Root { int field; virtual int value() const { return field; } };\n";
+  // A polymorphic class in an unnamed namespace is not a dynamic class yet (#1155): it keeps the
+  // virtual layout guard. A dynamic root lays out and emits code (#309).
+  const std::string polymorphic =
+      "namespace { struct Root { int field; virtual int value() const { return field; } }; }\n";
+  const std::string dynamic = "struct Root { int field; virtual int value() const { return field; } };\n";
   const std::string interfaces = R"cpp(
 struct Outer { Root elements[2]; };
 const Root& pass(const Root* pointer) { return *pointer; }
@@ -543,6 +547,12 @@ int main() { return 0; }
   pl::Session warm;
   build(warm, plain + interfaces + layout);
   check(warm.get<pl::Tu>(tu).object.has_value(), "ordinary member and array layouts produce an object");
+
+  build(warm, dynamic + interfaces + layout);
+  const auto& dynamic_front = warm.get<pl::TuFront>(tu);
+  check(!dynamic_front.has_errors() && blocked_shapes(dynamic_front) == 0, pl::TuFront::errors(dynamic_front));
+  check(warm.get<pl::Link>(program).image == cold(dynamic + interfaces + layout),
+        "a dynamic root and its containing class: equal to a cold build");
 
   build(warm, polymorphic + interfaces + layout);
   const auto& laid_out = warm.get<pl::TuFront>(tu);
@@ -568,7 +578,7 @@ int main() { return 0; }
   check(!restored.has_errors() && blocked_shapes(restored) == 0, "removing virtual restores class layout");
   check(warm.get<pl::Link>(program).image == cold(plain + interfaces + layout), "restored native output matches a cold build");
 
-  build(warm, "struct Root { virtual int value() const; };\nint Root::value() const { return 1; }\n");
+  build(warm, "namespace { struct Root { virtual int value() const; }; }\nint Root::value() const { return 1; }\n");
   const auto key_error = pl::TuFront::errors(warm.get<pl::TuFront>(tu));
   check(key_error.find("an out-of-class definition of a virtual member function") != std::string::npos,
         "an external key definition receives its own semantic diagnostic");

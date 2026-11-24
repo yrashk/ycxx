@@ -33,7 +33,7 @@ export import :cond;
 
 namespace {
 // Preserve the bit values of earlier source configurations.
-constexpr std::uint8_t freestanding_bit = 1, no_exceptions_bit = 2, no_rtti_bit = 4, pic_bit = 0x08;
+constexpr std::uint8_t freestanding_bit = 1, no_exceptions_bit = 2, no_rtti_bit = 4, pic_bit = 0x08, small_pic_bit = 0x10;
 }
 
 export namespace ycxx::pp {
@@ -155,7 +155,8 @@ void serialize_into(engine::Sink& out, const Source& s) {
   if (s.config.freestanding) modes |= freestanding_bit;
   if (!s.config.exceptions_enabled) modes |= no_exceptions_bit;
   if (!s.config.rtti_enabled) modes |= no_rtti_bit;
-  if (s.config.pic) modes |= pic_bit;
+  if (s.config.pic == 2) modes |= pic_bit;
+  if (s.config.pic == 1) modes |= small_pic_bit;
   engine::serialize(out, modes);
 }
 Source deserialize_from(engine::Source& in, std::type_identity<Source>) {
@@ -176,11 +177,13 @@ Source deserialize_from(engine::Source& in, std::type_identity<Source>) {
   if (calls > 1 + std::to_underlying(ast::CallTriviality::apple)) in.fail();
   if (calls != 0) s.config.call_triviality = static_cast<ast::CallTriviality>(calls - 1);
   const auto modes = engine::deserialize<std::uint8_t>(in);
-  if ((modes & ~(freestanding_bit | no_exceptions_bit | no_rtti_bit | pic_bit)) != 0) in.fail();
+  if ((modes & ~(freestanding_bit | no_exceptions_bit | no_rtti_bit | pic_bit | small_pic_bit)) != 0 ||
+      (modes & (pic_bit | small_pic_bit)) == (pic_bit | small_pic_bit))
+    in.fail();
   s.config.freestanding = (modes & freestanding_bit) != 0;
   s.config.exceptions_enabled = (modes & no_exceptions_bit) == 0;
   s.config.rtti_enabled = (modes & no_rtti_bit) == 0;
-  s.config.pic = (modes & pic_bit) != 0;
+  s.config.pic = (modes & pic_bit) != 0 ? 2 : (modes & small_pic_bit) != 0 ? 1 : 0;
   return s;
 }
 
@@ -510,8 +513,9 @@ std::expected<bool, std::string> take_option(std::span<const std::string_view> a
     cfg.rtti_enabled = a == "-frtti";
     return true;
   }
-  if (a == "-fPIC") {
-    cfg.pic = true;
+  // The last of `-fpic`, `-fPIC` and `-fno-pic` wins, as with Clang and GCC.
+  if (a == "-fpic" || a == "-fPIC" || a == "-fno-pic" || a == "-fno-PIC") {
+    cfg.pic = a == "-fPIC" ? 2 : a == "-fpic" ? 1 : 0;
     return true;
   }
   return false;

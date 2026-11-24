@@ -92,6 +92,10 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_
   add_test(NAME unit.linux_array_delete
     COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/linux_array_delete.py
             $<TARGET_FILE:ycxxc> ${CMAKE_CXX_COMPILER} ${CMAKE_READELF})
+  # The Darwin runs of the same sources are tests/own/class-allocation in the core suite.
+  add_test(NAME unit.linux_class_new
+    COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/linux_class_new.py
+            $<TARGET_FILE:ycxxc> ${CMAKE_CXX_COMPILER} ${CMAKE_READELF})
   if(CMAKE_CXX_COMPILER_ID MATCHES "^(GNU|Clang)$")
     add_test(NAME unit.linux_fixed_array_new
       COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/linux_fixed_array_new.py
@@ -175,6 +179,11 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_
   # PARITY: by design: links the ELF base and complete object entries with native peers.
   add_test(NAME unit.linux_base_object_variants
     COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/linux_base_object_variants.py
+            $<TARGET_FILE:ycxxc> ${CMAKE_CXX_COMPILER} ${CMAKE_READELF})
+  # PARITY: by design: the run suite runs the same tests on macOS; this links them with native
+  # x86-64 ELF compilers and runtimes.
+  add_test(NAME unit.linux_virtual_dispatch
+    COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/linux_virtual_dispatch.py
             $<TARGET_FILE:ycxxc> ${CMAKE_CXX_COMPILER} ${CMAKE_READELF})
   # PARITY: by design: links virtual destructor entries with native x86-64 ELF peers.
   add_test(NAME unit.linux_root_virtual_destructor

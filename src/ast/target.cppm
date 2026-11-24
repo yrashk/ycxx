@@ -60,8 +60,7 @@ enum class ObjectFormat : u8 { macho, elf };
 // preconditions are checked by each operation's own analysis.
 enum class NativeOperation : std::uint64_t {
   derived_virtual_destructor = std::uint64_t{1} << 0,
-  explicit_pic = std::uint64_t{1} << 1,  // permits the source mode that defines __PIC__ and __pic__
-  peer_typed_dynamic_cast = std::uint64_t{1} << 2,
+  peer_typed_dynamic_cast = std::uint64_t{1} << 1,
 };
 
 struct Target {
@@ -88,6 +87,9 @@ struct Target {
   CallTriviality call_triviality;  // the default
   bool apple_calls;                 // whether `-fclass-call-abi=apple` is offered
   std::uint64_t native_operations = 0;
+  // Whether all code for the target is position independent, whatever the options say: `__PIC__`
+  // and `__pic__` are then always 2, as Clang has them on arm64 Darwin.
+  bool always_pic = false;
 
   constexpr BuiltinLayout operator[](Builtin b) const { return layout[std::to_underlying(b)]; }
   constexpr bool has(Builtin b) const { return (*this)[b].size != 0; }
@@ -288,6 +290,7 @@ inline constexpr Target aarch64_darwin{
     .va_list = VaList::char_pointer,
     .call_triviality = CallTriviality::itanium,
     .apple_calls = true,
+    .always_pic = true,
 };
 
 // x86_64-linux-gnu (System V): `long double` is the x87 80-bit format in 16 bytes.
@@ -316,7 +319,6 @@ inline constexpr Target x86_64_linux{
     .call_triviality = CallTriviality::itanium,
     .apple_calls = false,
     .native_operations = std::to_underlying(NativeOperation::derived_virtual_destructor) |
-                         std::to_underlying(NativeOperation::explicit_pic) |
                          std::to_underlying(NativeOperation::peer_typed_dynamic_cast),
 };
 
