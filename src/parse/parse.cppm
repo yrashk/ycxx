@@ -1313,6 +1313,12 @@ public:
     return interp::GlobalVar{type, c, c.has_value()};
   }
   bool is_constexpr(EntityId f, u32 item) {
+    if (auto constructor = dynamic_synthesized_.find(f); constructor != dynamic_synthesized_.end()) {
+      const auto& synthesized = synth_[constructor->second];
+      const EntityId owner = w_->entities.rec(f).scope;
+      return synthesized.item < item && synthesized.kind == SpecialMember::default_constructor &&
+             classes_.constexpr_dynamic_default(owner) && classes_.rec(owner).implicit_default_ctor == f;
+    }
     if (auto copy = copy_assignments_.find(f); copy != copy_assignments_.end())
       return copy->second.definition.item <= item;
     // A specialization is as its template is declared, unless explicitly specialized ([temp.expl.spec]/14).
@@ -12752,6 +12758,34 @@ interp::Callee Program::function_ir(EntityId f, u32 item) {
   if (sema::Sema::closure_member(*w_, f)) return closure_ir(f, item);
   interp::Callee c;
   c.is_constexpr = is_constexpr(f, item);
+  if (auto constructor = dynamic_synthesized_.find(f); constructor != dynamic_synthesized_.end()) {
+    if (!c.is_constexpr) return c;
+    const std::size_t index = constructor->second;
+    const auto& s = synth_[index];
+    const u32 key = std::to_underlying(f);
+    if (!instance_irs_.contains(key)) {
+      const auto& body = synthesized_body(index);
+      std::optional<irgen::FunctionIr> ir;
+      if (body.tree != NodeId::none) {
+        irgen::FunctionInput input{f, s.decl, body, id(s.item), 0};
+        input.this_type = this_type(s.decl);
+        // L1 constant evaluation runs the checked initialization of the subobjects.
+        // Native IR generation separately supplies the constructor's ABI table.
+        AtItem q(*this, s.item, true);
+        q.own_class_complete = true;
+        sema::EvalFacts facts(*w_, q);
+        if (auto r = irgen::function_ir(w_->ins, input, facts)) ir = std::move(*r);
+      }
+      instance_irs_.emplace(key, std::move(ir));
+    }
+    const auto& ir = instance_irs_.at(key);
+    if (!ir) c.unsupported = true;
+    else {
+      c.body = &ir->body;
+      c.default_constructs = w_->entities.rec(f).scope;
+    }
+    return c;
+  }
   if (auto copy = copy_assignments_.find(f); copy != copy_assignments_.end()) {
     if (!c.is_constexpr || !copy->second.body) return c;
     const u32 key = std::to_underlying(f);
