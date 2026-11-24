@@ -9900,6 +9900,27 @@ public:
     return Ex{r.id, begin, end, r.info};
   }
 
+  // [over.match.oper]/3.4: the rewritten candidates of `x == y` and `x != y` when no
+  // `operator==` (for `==`) or `operator!=` (for `!=`) is viable: `operator==` as `x == y` for
+  // `!=`, then `operator==` with the operands reversed, as `y == x`; `!=` negates the result,
+  // which is `bool`. Only for an operand of class type: with enumerations alone, a built-in
+  // candidate is always viable, and it wins a tie with a rewritten one ([over.match.best]).
+  // (A rewritten candidate is not yet ranked against a viable non-rewritten one.)
+  std::optional<Ex> rewritten_equality(bool not_equal, Ex l, Ex r, u32 begin, u32 end, u32 op_at) {
+    if (!types().is_class(types().referee(l.type())) && !types().is_class(types().referee(r.type()))) return std::nullopt;
+    std::optional<Ex> equal;
+    if (not_equal) equal = overloaded("==", {l, r}, begin, end, op_at);
+    if (!equal) equal = overloaded("==", {r, l}, begin, end, op_at);
+    if (!equal) return std::nullopt;
+    if (!equal->ok()) return Ex{NodeId::none, begin, end};
+    if (Types::unqualified(types().canonical(equal->type())) != builtin(Builtin::bool_)) {
+      diag(op_at, Diag::rewritten_equality_return, equal->type());
+      return Ex{NodeId::none, begin, end};
+    }
+    if (!not_equal) return Ex{equal->id, begin, end, equal->info};
+    return unary(ast::UnaryOp::not_, Ex{equal->id, begin, end, equal->info}, begin, end, op_at);
+  }
+
   Ex builtin_address_of(Ex e, u32 begin, u32 end, u32 op_at) {
     if (e.glvalue() && e.info.bit_width) {
       diag(op_at, Diag::bit_field_address);
@@ -10071,6 +10092,8 @@ public:
     }
     if (op == dot_star || op == arrow_star) return member_pointer_access(l, r, op == arrow_star, op_at);
     if (auto o = overloaded(binary_spellings[std::to_underlying(op)], {l, r}, begin, end, op_at)) return *o;
+    if (op == eq || op == ne)
+      if (auto o = rewritten_equality(op == ne, l, r, begin, end, op_at)) return *o;
     auto bin = [&](ast::BinaryOp k, Ex a, Ex c, QualType t) {
       ExprInfo info{t, ValueCategory::prvalue, 0};
       return node(ast::Binary{info, k, at(a, begin), at(c, begin)}, begin, end, info);

@@ -157,6 +157,11 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
   - Do: commit, start the fast run, and spend its 10 minutes on documents, issues and the PR body.
     To keep coding meanwhile, build into a scratchpad build directory (the entry above).
   - Learned on #218.
+  - The same holds for the first build of a fresh worktree. On #295, edits made while it built went
+    into the binary meant to show the new tests failing. A sibling worktree's binary of `main`
+    served instead: check its commit with `git merge-base --is-ancestor`, copy it to the
+    scratchpad, and run it as `YCXX=<copy> tools/test …`. Two `cmake --build` runs started in
+    one build directory also collide, and one stops with "subcommand failed".
 
 ## Working with Fable subagents
 

@@ -4095,3 +4095,27 @@ the body. A non-generic lambda body uses its own evaluation context.
   other direct parenthesized template argument spellings remain open, as do dependent
   template arguments, requirements, and exception specifications.
   [#286](https://github.com/yrashk/ycxx/issues/286)
+
+## Defaulted equality and rewritten `!=` (#295)
+
+- A defaulted `operator==` ([class.compare.default], [class.eq]) may be a const member taking
+  `const C&`, or a hidden friend taking two `const C&` or two `C`, of a non-template class. It
+  returns `bool` and is implicitly constexpr. Other signatures are diagnosed.
+- When its class completes, `Program::complete_defaulted_comparisons` builds the comparison in a
+  trial `Sema` (`defaulted_equality`). It compares the bases, then the data members, then each
+  array element, and joins the results with `&&`. A reference or variant member, or a
+  comparison that is not usable, makes the operator deleted. Without a written
+  noexcept-specifier, the exception specification is the noexcept of that expression
+  ([except.spec]). `completed_declaration` and the friend's `written_member` publish both
+  results. `BodyAnalysis` builds the same expression as the body.
+- `x != y` with no viable `operator!=`, and `x == y` with no viable `operator==`, try
+  `operator==` for `x == y`, then reversed as `y == x`, and negate for `!=`
+  (`Sema::rewritten_equality`, [over.match.oper]/3.4). This runs only when an operand has class
+  type, and the selected `operator==` must return `bool`. A rewritten candidate is not yet ranked
+  against a viable ordinary one.
+- A hidden friend `operator<=>` with a body is accepted, as `<compare>` declares one.
+- Defaulted `<=>` and secondary operators, defaulted comparisons in class templates, out-of-class
+  defaulting, and the `<=>` expression remain open:
+  [#295](https://github.com/yrashk/ycxx/issues/295). Constant evaluation of the classes compared
+  fails when they have a class or array subobject:
+  [#1140](https://github.com/yrashk/ycxx/issues/1140).

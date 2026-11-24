@@ -493,6 +493,9 @@ written default member initializer are value-initialized.
   (`public`, `protected`, `private`) and friend functions and classes. Ordinary unqualified
   friend definitions in non-template namespace-scope classes are found by argument-dependent
   lookup or through a matching namespace declaration. [#259](https://github.com/yrashk/ycxx/issues/259)
+  A non-template class can default `operator==` as a member or a friend. `!=` and reversed `==`
+  then use it as rewritten candidates. Defaulted `<=>` is not done yet.
+  [#295](https://github.com/yrashk/ycxx/issues/295)
 - explicit specialization of a class template's written nonvirtual destructor selects the specialized
   destructor for that class instance. The specialization's declaration determines its inline status.
   [#1027](https://github.com/yrashk/ycxx/issues/1027)
