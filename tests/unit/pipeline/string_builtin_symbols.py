@@ -1,4 +1,7 @@
-"""Check that __builtin_memchr and __builtin_memcmp call the C library's functions by one symbol.
+"""Check that the C library builtins call the C library's functions by one symbol.
+
+The builtins are __builtin_memchr, memcmp, strchr, strpbrk, strrchr, strstr, memset, memcpy and
+memmove (docs/EXTENSIONS.md).
 
 Each fixture is compiled for both targets. The C function's symbol must appear exactly once in
 the object's symbol table: undefined where the unit only declares it, defined where the unit
@@ -58,10 +61,11 @@ def macho_symbols(data):
 def main():
     ycxx = str(Path(sys.argv[1]).resolve())
     fixtures = Path(__file__).resolve().with_suffix("")
+    library = ("memcmp", "memchr", "strchr", "strpbrk", "strrchr", "strstr", "memset", "memcpy", "memmove")
     expected = {
-        "declared.cpp": {"memcmp": False, "memchr": False},
-        "defined.cpp": {"memcmp": True},
-        "builtin-only.cpp": {"memcmp": False, "memchr": False},
+        "declared.cpp": dict.fromkeys(library, False),
+        "defined.cpp": {"memcmp": True, "memcpy": True, "memset": True},
+        "builtin-only.cpp": dict.fromkeys(library, False),
     }
     failures = []
     with tempfile.TemporaryDirectory(prefix="ycxx-string-builtins-") as temporary:
