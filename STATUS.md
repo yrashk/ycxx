@@ -3926,14 +3926,18 @@ for calls and for selection against a static function-pointer target.
   `sizeof(T)` to `operator new(size_t)` and initializes the object as a declaration would:
   default-initialization without an initializer, value-initialization for `()` (the storage is
   zero-filled first when that requires zero-initialization), and direct- or
-  direct-list-initialization by the selected constructor or as an aggregate. `delete` evaluates
+  direct-list-initialization by the selected constructor or as an aggregate, including from a
+  pack expansion. A const object needs a const-default-constructible class
+  ([dcl.init.general]/8). Placement `new` constructs a class object the same way in storage
+  from a visible written reserved `operator new(size_t, void*)`. `delete` evaluates
   its operand once and, when non-null, runs the destructor (none when trivial) and passes the
   address and `sizeof(T)` to `operator delete(void*, size_t)`. Deleting an incomplete class is
   ill-formed in C++26 and diagnosed. A constructor that throws does not yet release the storage
   ([expr.new]/28): the frame gets no unwind information, so the exception terminates the program
   ([#1135](https://github.com/yrashk/ycxx/issues/1135)). Polymorphic deletion through a virtual
   destructor ([#931](https://github.com/yrashk/ycxx/issues/931)), class-specific allocation
-  functions, over-aligned classes and class arrays are diagnosed as not supported yet (#293).
+  functions, over-aligned classes, class arrays and a braced argument inside parentheses are
+  diagnosed as not supported yet (#293).
   `tests/own/class-allocation/` runs on Darwin, and `unit.linux_class_new` runs the same
   sources on Linux x86-64 with a host-built replacement allocator.
 - Syntax checking supports one-dimensional `new T[n]` and `delete[] p` for integral and ordinary

@@ -448,8 +448,9 @@ written default member initializer are value-initialized.
   [#942](https://github.com/yrashk/ycxx/issues/942)
 - ordinary scalar `new` and single-object `delete` for integral and pointer objects, including
   cv-qualified objects. Scalar allocation uses the global Itanium allocation functions.
-  Single objects of class type, also in templates, are constructed by `new` with each form of
-  initialization and destroyed by `delete`, except through a virtual destructor. A throwing
+  Single objects of class type, also in templates and with placement `new`, are constructed by
+  `new` with each form of initialization and destroyed by `delete`, except through a virtual
+  destructor. A throwing
   constructor does not release the storage yet; the exception terminates the program
   ([#1135](https://github.com/yrashk/ycxx/issues/1135)).
   Syntax checking also covers one-dimensional scalar `new T[n]` and `delete[] p`.

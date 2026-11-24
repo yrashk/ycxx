@@ -18,6 +18,11 @@ struct Plain {
   int v;
 };
 const Plain* make_const() { return new const Plain; } //! error
+struct Partly {
+  int a = 1;
+  int b;
+};
+const Partly* make_partly() { return new const Partly; } //! error
 
 struct Abstract {
   virtual void f() = 0;

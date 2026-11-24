@@ -8813,6 +8813,28 @@ public:
     return alignment && *alignment <= 2u * w_->target.pointer_size;
   }
 
+  // [dcl.init.general]/8: default-initialization of a const `t` initializes it, by a
+  // user-provided default constructor or by default member initializers for every member.
+  bool const_default_constructible(QualType t) {
+    t = types().innermost_array_element(t);
+    if (!types().is_class(t)) return false;
+    const ClassRec* r = class_rec(types().class_of(t));
+    if (!r) return false;
+    for (const MemberDeclRec& m : r->members) {
+      if (!m.is_ctor || m.is_template || m.is_deleted || m.entity == r->defaulted_default_ctor) continue;
+      // A default constructor: every parameter has a default argument ([class.default.ctor]).
+      const std::size_t params = types().rec(m.type).params.size();
+      const std::size_t required = m.defaults.empty() ? params : std::size_t(std::ranges::count(m.defaults, NodeId::none));
+      if (required == 0) return true;
+    }
+    if (r->union_) return r->fields.empty() || std::ranges::count_if(r->fields, &FieldRec::dmi) == 1;
+    for (const FieldRec& f : r->fields)
+      if (!f.dmi && !const_default_constructible(f.type)) return false;
+    return std::ranges::all_of(r->bases, [&](const BaseRec& b) {
+      return const_default_constructible(types().class_type(b.cls));
+    });
+  }
+
   // [expr.new]/26: the new-initializer initializes the class object as in a declaration
   // ([dcl.init.general]): default-initialization without one, value-initialization for `()`,
   // and direct- or direct-list-initialization otherwise.
@@ -8827,15 +8849,17 @@ public:
         return fail;
       }
       Ex init = default_init(t, end, end);
-      // [dcl.init.general]/8: a const object needs a const-default-constructible class, one whose
-      // default-initialization does some initialization.
-      if (init.ok() && as<ast::DefaultInit>(init) && Types::is_const(types().canonical(t))) {
+      if (init.ok() && Types::is_const(types().canonical(t)) && !const_default_constructible(t)) {
         diag(begin, Diag::new_const_uninitialized, t);
         return fail;
       }
       return init;
     }
     if (std::ranges::any_of(*args, [](const Ex& e) { return !e.ok(); })) return fail;
+    if (std::ranges::any_of(*args, [&](const Ex& e) { return is_braced(e); })) {
+      diag(begin, Diag::not_supported, lex::Tk::l_brace);  // a braced argument in parentheses (#293)
+      return fail;
+    }
     const u32 open = args->front().begin;
     const bool aggregate = can_parenthesize_aggregate(t, *args, !immediate_context);
     if (aggregate || has_user_ctors(t) || args->size() != 1)
@@ -8869,7 +8893,7 @@ public:
     if (types().is_class(t) && !require_complete(t, begin)) return fail;
     if (!require_concrete_object(t, begin)) return fail;
     const bool class_type = types().is_class(t);
-    if (class_type && (placement || !supported_class_allocation(t))) {
+    if (class_type && !supported_class_allocation(t)) {
       diag(begin, Diag::not_supported, lex::Tk::kw_new);
       return fail;
     }

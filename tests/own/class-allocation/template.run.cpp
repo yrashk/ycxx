@@ -26,6 +26,7 @@ template <class T, class A> T* make_from(A a) { return new T(a); }
 template <class T, class A, class B> T* make_list(A a, B b) { return new T{a, b}; }
 template <class A> S* make_s(A a) { return new S(a); }  // a non-dependent type, dependent argument
 template <class T> void destroy(T* p) { delete p; }
+template <class T, class... A> T* make_pack(A... a) { return new T(a...); }
 
 template <class T> struct Box {
   T* value;
@@ -53,9 +54,14 @@ int main() {
   if (destroyed != 11 || release_count() != 6 || release_address(0) != allocation_address(2) ||
       release_size(0) != sizeof(S) || release_size(2) != sizeof(Point))
     return 4;
+  Point* q = make_pack<Point>(8, 9);  // a parenthesized aggregate from a pack
+  S* u = make_pack<S>(1);
+  if (q->x != 8 || q->y != 9 || u->v != 1 || allocation_count() != 8) return 7;
+  destroy(q);
+  destroy(u);
   {
     Box<S> box(7);
-    if (box.value->v != 7 || allocation_size(6) != sizeof(S)) return 5;
+    if (box.value->v != 7 || allocation_size(8) != sizeof(S)) return 5;
   }
-  return destroyed == 18 && release_count() == 7 ? 0 : 6;
+  return destroyed == 19 && release_count() == 9 ? 0 : 6;
 }

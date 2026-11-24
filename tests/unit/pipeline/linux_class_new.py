@@ -24,7 +24,8 @@ def main():
         (scope / '.ycxx').touch()
         run([host_cxx, '-std=c++26', '-pedantic-errors', '-O0', '-fno-lto', '-c',
              tests / 'class-allocation-provider.cpp', '-o', 'provider.o'], scope, env)
-        for name in ('single-object', 'template'):
+        # The tests with a PEER line link the replacement allocator; the others the host's.
+        for name, peer in (('single-object', True), ('template', True), ('placement', False), ('large', False)):
             obj = f'{name}.o'
             run([ycxx, 'cxx', '--target=x86_64-pc-linux-gnu', '-std=c++26', '-c', tests / f'{name}.run.cpp',
                  '-o', obj], scope, env)
@@ -32,9 +33,10 @@ def main():
             symbols = {fields[4] for fields in map(str.split, relocations.splitlines())
                        if len(fields) >= 5 and fields[2].startswith('R_X86_64_')}
             # The usual single-object functions: `operator new(size_t)` and the sized delete.
-            assert {'_Znwm', '_ZdlPvm'} <= symbols, relocations
+            if name != 'placement':
+                assert {'_Znwm', '_ZdlPvm'} <= symbols, relocations
             assert not symbols & {'_ZdlPv', '_Znam', '_ZdaPv'}, relocations
-            run([host_cxx, '-fno-lto', obj, 'provider.o', '-o', name], scope, env)
+            run([host_cxx, '-fno-lto', obj, *(['provider.o'] if peer else []), '-o', name], scope, env)
             run([f'./{name}'], scope, env)
 
 

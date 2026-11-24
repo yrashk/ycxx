@@ -2133,18 +2133,41 @@ class Gen {
     ast::QualType t = facts_.pointee(p);
     // [dcl.init.general]/9: value-initialization zero-initializes a class object before any
     // constructor runs, and the allocated storage is not zero. Copy a zero object into it.
+    // Zero it in place: a zero temporary would put the whole object on the stack.
     const bool zeroed = cls(t) == TypeClass::record && value_initializes(init);
-    if (zeroed) {
-      Place zeros = begin_object(t, ir::Init::zero, ir::Storage::temporary);
-      begin_lifetime(zeros);
-      copy({object, t}, zeros);
-      end_lifetime({zeros, ast::EntityId::none, ir::Storage::temporary});
-    }
+    if (zeroed) zero_bytes(storage, allocated_size(child(a, n.allocation)));
     initialize({object, t}, init, zeroed);
     ValueId objects[] = {object};
     std::uint64_t types[] = {word(ty(t))};
     stateful(ir::Op::obj__begin, {}, objects, types);
     return object;
+  }
+
+  // The byte count a new-expression passes to its allocation function: sema's `sizeof(T)`.
+  std::uint64_t allocated_size(At allocation) {
+    if (!is<ast::Call>(allocation)) unsupported(allocation, "as an allocation");
+    const auto args = ast_.children(get<ast::Call>(allocation).args);
+    At size = args.empty() ? At{} : strip_parens(child(allocation, args.front()));
+    if (args.empty() || !is<ast::Literal>(size) || !in_.values.is<ast::VInt>(get<ast::Literal>(size).value))
+      unsupported(allocation, "with a computed size");
+    return in_.values.get<ast::VInt>(get<ast::Literal>(size).value).bits.lo;
+  }
+  // Stores zero to each of `count` bytes from `storage`, in a loop.
+  void zero_bytes(ValueId storage, std::uint64_t count) {
+    const auto byte = ast::builtin(facts_.interners(), ast::Builtin::unsigned_char);
+    const auto bytes = facts_.pointer_to(byte);
+    const ValueId first = pure(ir::Op::ptr_cast, bytes, {storage}, {word(ty(bytes))});
+    const ast::QualType index_type = facts_.ptrdiff_type();
+    const ValueId end = int_constant(index_type, std::int64_t(count));
+    ir::BlockId head = new_block({index_type}), body = new_block(), done = new_block();
+    br(head, {int_constant(index_type, 0)});
+    enter(head);
+    const ValueId index = b_.param(head, 1);
+    cond_br(pure(ir::Op::icmp, facts_.bool_type(), {index, end}, {std::to_underlying(ir::Pred::slt)}), edge(body), edge(done));
+    enter(body);
+    store({pure(ir::Op::ptr_add, bytes, {first, index}, {word(ty(byte))}), byte}, zero(byte));
+    br(head, {arith(ast::BinaryOp::add, index_type, index, int_constant(index_type, 1))});
+    enter(done);
   }
 
   ValueId new_array(At a) {
