@@ -2809,8 +2809,42 @@ public:
     if (replay_at && deferred != deferred_argument_checks_) *replay_at = begin;
     return args;
   }
+  // A template argument `int(…)` ([temp.arg.general]/2) is a type-id only if it can be one: a
+  // function type, whose parentheses hold a parameter-declaration-clause or a grouped declarator
+  // and are followed by the declarator's suffixes or the argument's end. Otherwise it is a
+  // functional cast ([expr.type.conv]): `bool(T::value) || x`, `int(3) + 1`, `bool(N)`.
+  bool function_type_argument_ahead() {
+    auto ends_argument = [](Tk k) {
+      return k == Tk::comma || k == Tk::greater || k == Tk::greatergreater || k == Tk::ellipsis;
+    };
+    const u32 close = past_parentheses(1);
+    switch (kind(close)) {
+    case Tk::comma: case Tk::greater: case Tk::greatergreater: case Tk::ellipsis: case Tk::l_paren:
+    case Tk::l_square: case Tk::kw_const: case Tk::kw_volatile: case Tk::kw_noexcept:
+      break;
+    case Tk::amp: case Tk::ampamp:  // a ref-qualifier: `void() &`, not `bool(x) && y`
+      if (!ends_argument(kind(close + 1))) return false;
+      break;
+    default:
+      return false;
+    }
+    const Tk inner = kind(2);
+    if (inner == Tk::r_paren || inner == Tk::ellipsis || inner == Tk::star || inner == Tk::amp || inner == Tk::ampamp ||
+        inner == Tk::caret || inner == Tk::l_paren || member_pointer_star(2))
+      return true;
+    // A name starts a parameter only if it names a type; a member of a dependent class does so
+    // only after `typename` here ([temp.res.general]/4).
+    const u32 saved = std::exchange(i_, i_ + 2);
+    const bool saved_half = qualified_half_;
+    const bool parameter = starts_type_id();
+    qualified_half_ = saved_half;
+    i_ = saved;
+    return parameter;
+  }
+
   bool starts_type_id(bool template_argument = false) {
     if (transform_trait_ahead()) return true;
+    if (template_argument && simple_type_keyword(kind()) && kind(1) == Tk::l_paren) return function_type_argument_ahead();
     if (starts_decl_specifier(kind())) return !is(Tk::kw_static) && !is(Tk::kw_extern);
     // `X<args>::m` is a type only when m is: the nested name first. A member of a dependent class
     // is a type only after `typename` ([temp.res.general]/4).
