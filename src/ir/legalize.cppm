@@ -52,7 +52,7 @@ export struct Int128Support {
 export using RuntimeEntity = std::function<EntityId(Runtime)>;
 
 export struct LegalizeError {
-  NodeId node{};
+  std::optional<NodeId> at;  // the L1 node it came from
   std::string message;
 };
 
@@ -77,7 +77,7 @@ class Legalize {
     if (error_) return std::unexpected(std::move(*error_));
     std::vector<T> results = f_.results;
     if (std::ranges::contains(results, T::i128) && !target_.values)
-      return std::unexpected(LegalizeError{NodeId(0), "an i128 result"});
+      return std::unexpected(LegalizeError{std::nullopt, "an i128 result"});
     l2::Function out = b_.finish(std::move(results));
     out.indirect_result = f_.indirect_result;
     return out;
@@ -98,7 +98,7 @@ class Legalize {
   l2::Builder b_;
   std::vector<Value> map_;
   std::optional<LegalizeError> error_;
-  NodeId at_{};
+  NodeId at_ = NodeId(none);
   // The block's latest `!state` in the input: what a runtime call follows. The states a call in this
   // block replaced, to restore where the block does not dominate.
   ValueId state_ = ValueId(none);
@@ -106,7 +106,10 @@ class Legalize {
 
   bool wide(ValueId v) const { return f_.type(v) == T::i128; }
   void fail(std::string why) {
-    if (!error_) error_ = LegalizeError{at_, std::move(why)};
+    if (error_) return;
+    std::optional<NodeId> l1;
+    if (raw(at_) != none && !origin().empty()) l1 = origin().front().node;
+    error_ = LegalizeError{l1, std::move(why)};
   }
 
   std::span<const Origin> origin() const { return f_.origins.size() ? f_.origins.of(at_) : std::span<const Origin>{}; }

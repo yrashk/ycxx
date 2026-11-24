@@ -20,10 +20,10 @@ struct M {
 
 int main() {
   if (int e = check_calls(peer_first, peer_second, peer_split, peer_stack, peer_packed, peer_mixed, peer_box,
-                          peer_box_stack, peer_box_result, peer_signed, peer_many))
+                          peer_box_stack, peer_box_result, peer_signed, peer_many, peer_seven, peer_spills, peer_five))
     return e;
   if (int e = check_calls(our_first, our_second, our_split, our_stack, our_packed, our_mixed, our_box,
-                          our_box_stack, our_box_result, our_signed, our_many))
+                          our_box_stack, our_box_result, our_signed, our_many, our_seven, our_spills, our_five))
     return 30 + e;
   if (int e = peer_checks()) return 60 + e;
   // Through a function pointer and a member function.

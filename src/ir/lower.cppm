@@ -513,7 +513,7 @@ class Lowering {
             pad_registers(used(params, piece, 1, indirect_result_), pieces.words, piece,
                           [&] { params.push_back(piece); });
             if (piece == T::i64)
-              align_words(params, 1, indirect_result_, pieces.words, object.align, [&] { params.push_back(T::i64); });
+              align_words(params, 1, indirect_result_, pieces.words, object.align, [] { return T::i64; });
           }
           objects.push_back({p, std::uint32_t(params.size()), false, pieces});
           l2_of.push_back(-1);
@@ -528,7 +528,7 @@ class Lowering {
         if (place_amd64)
           amd64_args.add(std::uint32_t(params.size()), T::i64, 2, 2, 2);
         else
-          align_words(params, 1, indirect_result_, 2, 16, [&] { params.push_back(T::i64); });
+          align_words(params, 1, indirect_result_, 2, 16, [] { return T::i64; });
         joined.push_back({p, std::uint32_t(params.size())});
         l2_of.push_back(-1);
         params.insert(params.end(), 2, T::i64);
@@ -1022,8 +1022,8 @@ class Lowering {
                 pad_registers(used(args, piece, 0, indirect), pieces.words, piece,
                               [&] { ops.push_back(constant(piece, 0)); });
                 if (piece == T::i64)
-                  align_words(std::span<const ValueId>(ops).subspan(ind ? 2 : 1), 0, indirect, pieces.words, layout(c).align,
-                              [&] { ops.push_back(constant(T::i64, 0)); });
+                  align_words(ops, ind ? 2 : 1, indirect, pieces.words, layout(c).align,
+                              [&] { return constant(T::i64, 0); });
               }
               for (std::uint32_t w = 0; w < pieces.words; ++w)
                 ops.push_back(load_class_piece(state, v, pieces, w));
@@ -1036,8 +1036,7 @@ class Lowering {
             if (place_amd64)
               amd64_args.add(std::uint32_t(ops.size()), T::i64, 2, 2, 2);
             else
-              align_words(std::span<const ValueId>(ops).subspan(ind ? 2 : 1), 0, indirect, 2, 16,
-                          [&] { ops.push_back(constant(T::i64, 0)); });
+              align_words(ops, ind ? 2 : 1, indirect, 2, 16, [&] { return constant(T::i64, 0); });
             ops.append_range(words(v));
             continue;
           }
@@ -1267,24 +1266,24 @@ class Lowering {
     return n;
   }
   // Apple's arm64 convention: `n` integer words of a 16-byte-aligned value go to consecutive
-  // registers, or else on the stack at its alignment, which `add` reaches with a word no one
-  // reads. The words before are packed by their natural sizes.
-  template <class Vals, class Add>
-  void align_words(const Vals& vals, std::size_t first, std::uint32_t indirect, std::uint32_t n, std::uint32_t align,
-                   Add&& add) const {
-    pad_registers(used(vals, T::i64, first, indirect), n, T::i64, add);
+  // registers, or else on the stack at its alignment, which a `word` no one reads, appended to
+  // `vals`, reaches. The words before, from index `first`, are packed by their natural sizes.
+  template <class V, class Word>
+  void align_words(std::vector<V>& vals, std::size_t first, std::uint32_t indirect, std::uint32_t n, std::uint32_t align,
+                   Word&& word) {
+    pad_registers(used(vals, T::i64, first, indirect), n, T::i64, [&] { vals.push_back(word()); });
     if (align <= 8) return;
     std::uint32_t ints = 0, floats = 0, stack = 0;
     for (std::size_t i = first; i < vals.size(); ++i) {
       T t;
-      if constexpr (std::same_as<std::ranges::range_value_t<Vals>, T>) t = vals[i];
+      if constexpr (std::same_as<V, T>) t = vals[i];
       else t = b_.peek().type(vals[i]);
       if (t == T::state || i - first + 1 == indirect) continue;
       if (l2::is_float(t) ? floats++ < config_.float_arg_registers : ints++ < config_.int_arg_registers) continue;
       const std::uint32_t size = l2::bytes(t);
       stack = (stack + size - 1) / size * size + size;
     }
-    if (ints >= config_.int_arg_registers && (stack + 7) / 8 * 8 % align != 0) add();
+    if (ints >= config_.int_arg_registers && (stack + 7) / 8 * 8 % align != 0) vals.push_back(word());
   }
   // Whether a parameter of the entry block passes in two words.
   bool has_words(BlockId b) const {

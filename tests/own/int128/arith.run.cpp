@@ -1,7 +1,7 @@
 // #1172 slice 4: native 128-bit arithmetic agrees with constant evaluation. Each operation runs
 // over every pair of operands twice, in a constant expression and natively on values read through
 // a volatile object, and the digests of the results must be equal; main returns 1 plus the
-// operation's number. Division, remainder and the floating conversions call the compiler runtime
+// operation's number, or 150 and up for the later checks. Division, remainder and the floating conversions call the compiler runtime
 // (__divti3 and its siblings).
 // FLAGS: -Wno-pedantic
 using i128 = __int128;
@@ -129,35 +129,35 @@ int main() {
   if (int e = compare<0>()) return e;
   // Increments and compound assignments, carrying between the halves.
   u128 x = opaque(wide(0, 0xffffffffffffffff));
-  if (++x != wide(1, 0)) return 90;
-  if (x-- != wide(1, 0) || x != wide(0, 0xffffffffffffffff)) return 91;
+  if (++x != wide(1, 0)) return 160;
+  if (x-- != wide(1, 0) || x != wide(0, 0xffffffffffffffff)) return 161;
   x += opaque(1);
   x *= opaque(wide(1, 0)) + 3;
-  if (x != wide(3, 0)) return 92;  // 2^64 * (2^64 + 3), reduced
+  if (x != wide(3, 0)) return 162;  // 2^64 * (2^64 + 3), reduced
   x >>= opaque(60);
   x |= 5;
-  if (x != 53) return 83;
+  if (x != 53) return 153;
   i128 y = -(i128)opaque(12345678901234567890u);
   y /= 1000;
   y -= 1;
-  if (y != -(i128)12345678901234567 - 1) return 84;
-  if ((unsigned long)(opaque(wide(7, 9)) >> 64) != 7) return 85;
+  if (y != -(i128)12345678901234567 - 1) return 154;
+  if ((unsigned long)(opaque(wide(7, 9)) >> 64) != 7) return 155;
   // A pointer offset of 128-bit type and a 128-bit object's members in memory.
   int a[4] = {1, 2, 3, 4};
-  if (*(a + (i128)opaque(2)) != 3 || a[opaque(3)] != 4) return 86;
+  if (*(a + (i128)opaque(2)) != 3 || a[opaque(3)] != 4) return 156;
   S s{1, opaque(wide(8, 9)), 2};
   S t = s;
-  if (t.v != wide(8, 9) || t.c != 1 || t.d != 2 || alignof(S) != 16 || sizeof(S) != 48) return 87;
+  if (t.v != wide(8, 9) || t.c != 1 || t.d != 2 || alignof(S) != 16 || sizeof(S) != 48) return 157;
   u128 arr[3] = {opaque(1), opaque(wide(2, 2)), 3};
   u128 sum = 0;
   for (u128 v : arr) sum += v;
-  if (sum != wide(2, 6)) return 88;
+  if (sum != wide(2, 6)) return 158;
   // Unsigned values at or above 2^127, and the conversions of each floating type.
-  if ((double)opaque(wide(0x8000000000000000, 0)) != 170141183460469231731687303715884105728.0) return 89;
-  if ((float)opaque(wide(0x8000000000000000, 0)) != 170141183460469231731687303715884105728.0f) return 90;
+  if ((double)opaque(wide(0x8000000000000000, 0)) != 170141183460469231731687303715884105728.0) return 159;
+  if ((float)opaque(wide(0x8000000000000000, 0)) != 170141183460469231731687303715884105728.0f) return 160;
   volatile double d = 300000000000000000000000000000000000000.0;
-  if ((u128)d != wide(0xe1b1e5f90f944d6e, 0x1c00000000000000) && (double)(u128)d != d) return 91;
+  if ((u128)d != wide(0xe1b1e5f90f944d6e, 0x1c00000000000000) && (double)(u128)d != d) return 161;
   volatile float f = -18446744073709551616.0f;
-  if ((i128)f != -(i128)wide(1, 0) || (float)(i128)f != f) return 92;
+  if ((i128)f != -(i128)wide(1, 0) || (float)(i128)f != f) return 162;
   return 0;
 }

@@ -18,6 +18,10 @@ u128 wide(unsigned long hi, unsigned long lo);
   u128 p##_box_stack(long a, long b, long c, long d, long e, long f, long g, Box h, long i, Box j);   \
   Box p##_box_result(Box a, i128 b);                                                                  \
   i128 p##_signed(i128 a, int b, i128 c);                                                             \
+  u128 p##_seven(long a, long b, long c, long d, long e, long f, long g, u128 h);                     \
+  u128 p##_spills(int a, int b, int c, int d, int e, int f, int g, double h, double i, double j, double k, \
+                  double l, double m, double n, double o, double s, u128 v, int t);                   \
+  u128 p##_five(int a, u128 b, u128 c, u128 d, u128 e);                                               \
   u128 p##_many(u128 a, u128 b, u128 c, u128 d, u128 e, u128 f);
 DECLARE(our)
 DECLARE(peer)

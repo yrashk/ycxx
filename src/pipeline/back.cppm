@@ -1428,8 +1428,8 @@ std::string_view linux_signature_error(const ast::Interners& in, const QueryLayo
       return result ? "unsupported fixed-prototype result type" : "unsupported fixed-prototype parameter type";
     if (use == direct_call)
       return result ? "unsupported direct variadic result type" : "unsupported direct variadic parameter type";
-    return result ? "only void, bool, 8-, 16-, 32- and 64-bit integer, pointer and reference results are supported"
-                  : "only bool, 8-, 16-, 32- and 64-bit integer, pointer and reference parameters are supported";
+    return result ? "only void, bool, integer, pointer and reference results are supported"
+                  : "only bool, integer, pointer and reference parameters are supported";
   };
   if (auto error = error_for(f.ret, true); !error.empty()) return error;
   for (QualType p : in.seqs.elements(f.params))
@@ -1571,8 +1571,14 @@ engine::query_task<Lowered> Lower::run(engine::Ctx& cx, FnKey k) {
     runtime.push_back({r, e});
     return e;
   });
-  if (!legal)
-    co_return Lowered{std::nullopt, {}, BackError{std::nullopt, "legalize: " + legal.error().message}};
+  if (!legal) {
+    // The L2 node came from an L1 node, whose position it takes.
+    const ir::FunctionDebug& debug = co_await cx.fetch<FunctionDebug>(k);
+    std::optional<ast::Loc> at;
+    if (legal.error().at && ir::raw(*legal.error().at) < debug.loc.size()) at = debug.loc[ir::raw(*legal.error().at)];
+    auto error = co_await located_error(cx, k.tu, at, "legalize: " + legal.error().message);
+    co_return Lowered{std::nullopt, {}, std::move(error)};
+  }
   co_return Lowered{L2Body{std::move(*legal)}, {layout.strings().begin(), layout.strings().end()}, std::nullopt,
                     config.unreachable_body.has_value(), std::move(runtime)};
 }
