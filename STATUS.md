@@ -3516,6 +3516,12 @@ What the process allocates, attributed to the engine's cells, in the trace and t
   descriptor alone where only a derived descriptor names it. Implicit constructors of dynamic
   classes are emitted where called. A destructor destroys a base defined elsewhere with its D2.
   Pure slots hold `__cxa_pure_virtual`; a derived descriptor is `__si_class_type_info`.
+- Immediate virtual functions and overrides can be declared in the supported ordinary classes.
+  An override must agree with its base declaration on `consteval`. Immediate declarations count
+  toward polymorphism and pure final overriders. The vtable retains its header and contains only
+  ordinary virtual entries. Immediate definitions are checked and have no native symbol.
+  Evaluated calls and immediate virtual assignments remain unsupported.
+  [#1097](https://github.com/yrashk/ycxx/issues/1097)
 - Not admitted (keep the virtual layout guard): classes in an unnamed namespace (#1155), fields
   declared through `decltype` (alias alignment, #1167), and a class serving only as a peer
   profile's abstract primary base keeps the profile's output (#1156).

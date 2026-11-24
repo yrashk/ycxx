@@ -6351,6 +6351,10 @@ public:
     const ClassRec* dynamic_owner = d->is_virtual ? class_rec(w_->entities.rec(d->entity).scope) : nullptr;
     if (dynamic_owner && !dynamic_owner->dynamic) dynamic_owner = nullptr;
     if (unevaluated == 0) {
+      if (d->is_virtual && d->is_consteval) {
+        diag(paren_at, Diag::virtual_immediate_call);
+        return fail;
+      }
       if (dynamic_owner) {
         // Itanium C++ ABI §3.2.4: dispatch through the slot the declaration occupies in its own
         // class's table. A qualified name calls the named function directly ([class.virtual]/16).

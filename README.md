@@ -839,6 +839,12 @@ classes, other base shapes, `delete` through a virtual destructor and `typeid` a
 yet. [#309](https://github.com/yrashk/ycxx/issues/309) · [#1153](https://github.com/yrashk/ycxx/issues/1153) ·
 [#1154](https://github.com/yrashk/ycxx/issues/1154) · [#1155](https://github.com/yrashk/ycxx/issues/1155)
 
+Ordinary classes can also declare immediate virtual functions, including pure virtual
+declarations and immediate overrides. These declarations contribute to polymorphism
+and abstractness. Their definitions need no native symbol or vtable entry, and ordinary
+virtuals still dispatch. Evaluated calls to immediate virtual functions remain unsupported.
+[#1097](https://github.com/yrashk/ycxx/issues/1097)
+
 **Virtual tables.** On Linux x86-64 and arm64 macOS, a translation unit with the key definition emits the vtable and
 RTTI for an ordinary root with one public integral field and two fixed integer virtual
 signatures. A peer supplies the second virtual. Both targets also support ordinary

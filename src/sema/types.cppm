@@ -753,7 +753,8 @@ struct VirtualSlot {
 // A dynamic class laid out by the general single-inheritance rules (#309): a root whose vptr is
 // at offset zero, or a class whose single public nonvirtual base is dynamic and primary. Its
 // table extends the primary base's: overriders replace inherited slots, and the declarations
-// that override nothing follow in declaration order (Itanium C++ ABI §2.5.2).
+// that override nothing follow in declaration order. Immediate functions have no slots, including
+// in a class whose only virtuals are immediate (Itanium C++ ABI §2.5.2).
 struct DynamicClass {
   bool primary_base = false;  // the single base supplies the vptr at offset zero
   // The first non-pure virtual function not inline at the end of the class definition
