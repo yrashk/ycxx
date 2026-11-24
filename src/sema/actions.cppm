@@ -10132,14 +10132,16 @@ public:
     bool ambiguous = false;
   };
 
-  // Rank direct ordinary binary candidates in operand order. The initial subset uses
-  // identity and reference bindings, plus integral promotions and conversions.
+  // Rank direct ordinary binary candidates in operand order. This subset compares
+  // exact class and integral arguments, including integral conversions by value.
   OrdinaryOperatorChoice ordinary_binary_choice(NameId name, std::span<const Ex> operands,
                                                  std::span<const ast::DeclSema> nonmembers) {
     const NameId conversion = ins().names.intern(lex::conversion_function_name);
     for (const Ex& operand : operands) {
       const QualType type = types().referee(operand.type());
-      if (!types().is_class(type)) continue;
+      if (operand.info.bit_width || Types::is_volatile(types().canonical(type))) return {};
+      if (types().is_integral(type)) continue;
+      if (!types().is_class(type)) return {};
       const EntityId entity = types().class_of(type);
       const auto& owner = w_->entities.rec(entity);
       const auto* record = class_rec(entity);
@@ -10150,15 +10152,22 @@ public:
     const Ex& lhs = operands[0];
     const Ex& rhs = operands[1];
     const auto argument_rank = [&](const Ex& operand, QualType parameter) -> std::optional<Ics> {
+      const QualType source = types().referee(operand.type());
       const QualType target = types().referee(parameter);
-      if (types().is_class(operand.type()) && types().is_class(target) &&
-          !same_unqualified(operand.type(), target) && has_user_ctors(target))
-        return std::nullopt;  // this could require a user-defined conversion
-      const Ics rank = ics(operand, parameter, /*constructor_conversion=*/true);
-      if (rank.viable && rank.rank != 0 &&
-          (rank.rank >= Ics::user_defined || !types().is_integral(operand.type()) || !types().is_integral(target)))
+      const bool same_type = same_unqualified(source, target);
+      if (types().is_class(target) && !same_type) {
+        if (has_user_ctors(target)) return std::nullopt;
+        return Ics{};
+      }
+      // The class-operand check excludes conversion functions and base conversions.
+      if (types().is_class(source) && !same_type) return Ics{};
+      // Pointer qualification and conversions that bind a reference to a temporary
+      // of a different type need additional sequence ordering.
+      if ((!same_type && !types().is_integral(target)) ||
+          Types::is_volatile(types().canonical(target)) ||
+          (types().is_reference(parameter) && !same_type))
         return std::nullopt;
-      return rank;
+      return ics(operand, parameter);
     };
     struct Ranked {
       std::array<Ics, 2> conversions;
@@ -10180,7 +10189,9 @@ public:
     for (const auto* member : member_functions(types().class_of(types().referee(lhs.type())), name)) {
       const TypeRec function = types().rec(member->type);
       if (!function.variadic && function.params.empty()) continue;  // the unary overload
-      if (member->is_static || member->is_template || function.variadic || function.params.size() != 1) return {};
+      if (member->is_static || member->is_template || function.variadic || function.params.size() != 1 ||
+          function.fn_ref != ast::RefQual::none || (function.fn_cv != Cv::none && function.fn_cv != Cv::const_))
+        return {};
       const Ics receiver = implicit_object_rank(function, object_cv(lhs.type()), lhs.cat() != ValueCategory::lvalue);
       if (!receiver.viable) continue;
       const auto right = argument_rank(rhs, function.params[0]);
@@ -10202,7 +10213,8 @@ public:
   // recovery compares members and nonmembers when a member-only probe diagnoses access,
   // deletion or ambiguity.
   // General joint ranking with other candidates is outside this subset.
-  std::optional<Ex> overloaded(std::string_view op, std::vector<Ex> operands, u32 begin, u32 end, u32 op_at) {
+  std::optional<Ex> overloaded(std::string_view op, std::vector<Ex> operands, u32 begin, u32 end, u32 op_at,
+                               bool rank_failed_member = false) {
     auto user_type = [&](const Ex& e) {
       QualType t = types().referee(e.type());
       return types().is_class(t) || types().is_enum(t);
@@ -10241,7 +10253,7 @@ public:
             return d.id == diag_id(Diag::deleted_function) || d.id == diag_id(Diag::ambiguous_call) ||
                    d.id == diag_id(Diag::private_member) || d.id == diag_id(Diag::protected_member);
           });
-          if (member_only_failure && !binary) return Ex{NodeId::none, begin, end};
+          if (member_only_failure && !rank_failed_member) return Ex{NodeId::none, begin, end};
           if (!member_only_failure) truncate_diags(n);
         }
       }
@@ -10410,6 +10422,12 @@ public:
       const auto selected = *winner->nonmember;
       set.assign(1, selected);
     }
+    const auto call_nonmember = [&]() {
+      ExprInfo info{builtin(Builtin::overload_set), ValueCategory::lvalue, 0};
+      Ex callee = node(ast::DeclRef{info, set.front().entity}, begin, begin, info);
+      overloads_[std::to_underlying(callee.id)] = std::move(set);
+      return call(callee, std::move(operands), end, op_at, std::nullopt, enum_only);
+    };
     if (member_only_failure) {
       if (set.empty()) return Ex{NodeId::none, begin, end};
       const OrdinaryOperatorChoice choice = ordinary_binary_choice(name, operands, set);
@@ -10422,6 +10440,9 @@ public:
       truncate_diags(n);
       const ast::DeclSema selected = *choice.nonmember;
       set.assign(1, selected);
+      const Ex result = call_nonmember();
+      // A failure to use the selected function cannot revive a built-in candidate.
+      return Ex{result.id, begin, end, result.info};
     }
     if (set.empty()) return ref_qualified_member;
     if (binary && ref_qualified_member && q_->dependent_call(op_at)) {
@@ -10451,10 +10472,7 @@ public:
         }
       }
     }
-    ExprInfo info{builtin(Builtin::overload_set), ValueCategory::lvalue, 0};
-    Ex callee = node(ast::DeclRef{info, set.front().entity}, begin, begin, info);
-    overloads_[std::to_underlying(callee.id)] = std::move(set);
-    Ex r = call(callee, std::move(operands), end, op_at, std::nullopt, enum_only);
+    Ex r = call_nonmember();
     if (ref_qualified_member) {
       // Joint ranking is needed when the ref-qualified member competes with
       // at least one viable nonmember candidate.
@@ -10723,10 +10741,14 @@ public:
       return dependent_node({l, r}, begin, end);
     }
     if (op == dot_star || op == arrow_star) return member_pointer_access(l, r, op == arrow_star, op_at);
-    if (auto o = overloaded(binary_spellings[std::to_underlying(op)], {l, r}, begin, end, op_at)) return *o;
-    if (op == eq || op == ne)
+    const bool equality_rewrite = op == eq || op == ne;
+    const bool three_way_rewrite = op == spaceship || op == lt || op == gt || op == le || op == ge;
+    if (auto o = overloaded(binary_spellings[std::to_underlying(op)], {l, r}, begin, end, op_at,
+                            /*rank_failed_member=*/!equality_rewrite && !three_way_rewrite))
+      return *o;
+    if (equality_rewrite)
       if (auto o = rewritten_equality(op == ne, l, r, begin, end, op_at)) return *o;
-    if (op == spaceship || op == lt || op == gt || op == le || op == ge)
+    if (three_way_rewrite)
       if (auto o = rewritten_three_way(op, l, r, begin, end, op_at)) return *o;
     if (op == spaceship) return builtin_three_way(l, r, begin, end, op_at);
     auto bin = [&](ast::BinaryOp k, Ex a, Ex c, QualType t) {
