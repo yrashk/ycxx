@@ -7354,7 +7354,7 @@ public:
 
   // A builtin that is a C library function: a call of its implicit declaration, whose arguments
   // are copy-initialized parameters as in any call ([expr.call]/7).
-  Ex builtin_library_call(StringFunction f, std::vector<Ex> args, u32 begin, u32 end) {
+  Ex builtin_library_call(const StringFunction& f, std::vector<Ex> args, u32 begin, u32 end) {
     const ast::DeclSema d = w_->string_function(f);
     const auto& signature = types().rec(d.type);
     if (!builtin_arity(signature.params.size(), args.size(), begin)) return {NodeId::none, begin, end};
@@ -7494,9 +7494,8 @@ public:
       if (!builtin_arity(1, args.size(), begin)) return {NodeId::none, begin, end};
       return builtin_constant_probe(args.front(), begin, end);
     }
-    if (b.function == memchr || b.function == memcmp)
-      return builtin_library_call(b.function == memchr ? StringFunction::memchr : StringFunction::memcmp, std::move(args),
-                                  begin, end);
+    if (b.function == library)
+      return builtin_library_call(*string_function_named(lex::library_function_name(b)), std::move(args), begin, end);
     std::size_t want = b.function == fabs || b.function == nan ? 1 : 0;
     if (!builtin_arity(want, args.size(), begin)) return {NodeId::none, begin, end};
     if (std::ranges::any_of(args, [](const Ex& a) { return !a.ok(); })) return {NodeId::none, begin, end};
@@ -7519,8 +7518,7 @@ public:
       case addressof:
       case trap:
       case strlen:
-      case memchr:
-      case memcmp:
+      case library:
       case constant_p: std::unreachable();  // Handled before floating type selection.
       case inf:
       case huge_val:

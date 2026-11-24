@@ -73,6 +73,14 @@ YCXX_BUILD_DIR=build-release tools/build`, [docs/BUILDING.md](docs/BUILDING.md#r
 builds and passes its tests on both hosts, and compiles a 40,000-statement function in 0.4 s
 instead of Debug's 5.3 s on an M-series Mac ([#726](https://github.com/yrashk/ycxx/issues/726)).
 
+**Check YCXX Policies.** Opt in with `-fcheck-policies` in a syntax check or a
+build. YCXX checks registered resource policies across branches and loops, ends shared borrows
+after their last reachable use, and verifies declared effect bounds and usage grades across direct
+calls in checked sources and explicit objects. Applications can compose typed C++ declarations
+and reflection annotations. The standalone C++20 package provides runtime ownership guards, scoped
+capability tokens, effect budgets, and scoped handlers for GCC and Clang builds.
+[YCXX Policies package](packages/ycxx-policies/README.md)
+
 Single-expression `auto(x)` and `auto{x}` perform scalar and pointer decay-copy, including
 array and function decay. Non-type template parameters can have enumeration types
 ([#774](https://github.com/yrashk/ycxx/issues/774)). Function-template bodies can defer supported dependent operands to
@@ -637,9 +645,11 @@ written default member initializer are value-initialized.
   without executing it. [#1065](https://github.com/yrashk/ycxx/issues/1065)
   `__builtin_strlen`, used by libycxx's exception headers, scans character storage in constant
   expressions and native code. [#531](https://github.com/yrashk/ycxx/issues/531)
-  `__builtin_memchr` and `__builtin_memcmp`, used by libycxx's `<cstring>` and its string
-  searches, call the C library's `memchr` and `memcmp` at run time.
-  [#248](https://github.com/yrashk/ycxx/issues/248)
+  `__builtin_memchr`, `__builtin_memcmp`, `__builtin_memcpy`, `__builtin_memmove`,
+  `__builtin_memset`, `__builtin_strchr`, `__builtin_strpbrk`, `__builtin_strrchr` and
+  `__builtin_strstr`, used by libycxx's `<cstring>`, string searches and containers, call the
+  C library's functions at run time. [#248](https://github.com/yrashk/ycxx/issues/248)
+  [#1093](https://github.com/yrashk/ycxx/issues/1093)
 - `extern "C"` functions from libSystem, including `printf` with integers, characters,
   floating values, pointers and strings as arguments, and the SDK `<math.h>`'s built-ins
   (`__builtin_fabs`, `__builtin_inf`, `__builtin_huge_val`, `__builtin_nan`).
