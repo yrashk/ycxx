@@ -1193,6 +1193,19 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
 - Native collection omits ordinary named namespace-scope immediate functions whose bodies
   have neither static locals nor closures. Their declarations and analysed bodies remain
   available for constant evaluation. [#1006](https://github.com/yrashk/ycxx/issues/1006)
+- `consteval` constructors, in class and out of class, among the other constructor specifiers.
+  `Sema::construct` folds a call of one outside an immediate function context, including an
+  implicit conversion of an argument or operand, into its value (`Sema::immediate_invocation`,
+  shared with consteval function calls). A selected operator whose operand conversion is not
+  constant is an error rather than a fall-back to the built-in operator. Every declaration must
+  agree on `consteval`, and a destructor cannot be `consteval`. Native collection omits consteval
+  constructors, of class templates and constructor templates too.
+  [#102](https://github.com/yrashk/ycxx/issues/102)
+- The evaluator lays out non-polymorphic classes with user-declared constructors, no bases and no
+  destructor, whatever their fields' access, as it does flat aggregates, so constructor calls
+  (`constexpr` and `consteval`) evaluate, and `T x(args)` at namespace scope is constant-initialized
+  when its constructor call is constant. Class-typed fields and bases are not laid out yet
+  ([#25](https://github.com/yrashk/ycxx/issues/25)). [#102](https://github.com/yrashk/ycxx/issues/102)
 - `static_assert(e)` and `static_assert(e, "message")` at namespace and block scope (the
   `StaticAssert` node); `if consteval` and `if !consteval` (`IfConsteval`, lowered to
   `consteval_br`).
@@ -1265,7 +1278,7 @@ namespace-scope variable's type and, if usable in constant expressions, its valu
   L1 forms static addresses at their uses and checks the executed declarations for usability in
   constant expressions. The runtime guard still initializes a static local on its first passage.
   [#872](https://github.com/yrashk/ycxx/issues/872)
-- Tests: `tests/own/consteval` (spec-only); the draft's [dcl.constexpr]/5 ex. 3, [dcl.constinit]/3
+- Tests: `tests/own/consteval` (spec-only; `constructors/` checked against Clang and GCC); the draft's [dcl.constexpr]/5 ex. 3, [dcl.constinit]/3
   ex. 1 and [stmt.if]/4 ex. 3 pass.
 - Not yet (#102): naming a consteval function outside a call, static_assert
   messages that are constant expressions, notes along the call chain, block-scope static constexpr
