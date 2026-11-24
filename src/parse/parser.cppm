@@ -2831,9 +2831,10 @@ public:
   // An operand that may be the pattern of a pack expansion `pattern...` ([temp.variadic]/5);
   // `read` reads one. In a definition the expansion is recorded and is one dependent operand; in
   // an instantiation its pattern is read once for each element, with the packs it names bound
-  // to that element (ast.md §6.4).
+  // to that element (ast.md §6.4). `*unexpanded` is set when the expansion stays one dependent
+  // operand, so the number of operands is not known yet.
   template <class F>
-  std::vector<Ex> expandable(F read, bool* written_expansion = nullptr) {
+  std::vector<Ex> expandable(F read, bool* written_expansion = nullptr, bool* unexpanded = nullptr) {
     u32 begin = pos();
     if (const sema::Expansion* x = s_->expansion_at(begin)) {
       if (written_expansion) *written_expansion = true;
@@ -2842,6 +2843,7 @@ public:
       std::vector<Ex> out;
       if (!n) {
         // A pack not bound yet (an enclosing template's): the expansion stays dependent.
+        if (unexpanded) *unexpanded = true;
         s_->begin_pattern();
         Ex p = read();
         s_->end_pattern(true, begin, e.end);
@@ -2863,6 +2865,7 @@ public:
     Ex p = read();
     if (is(Tk::ellipsis)) {
       if (written_expansion) *written_expansion = true;
+      if (unexpanded) *unexpanded = true;
       u32 end = pos();
       bump();
       if (s_->end_pattern(true, begin, end).empty()) s_->diag(end, Diag::expansion_without_pack);
@@ -4030,12 +4033,22 @@ public:
           int saved = std::exchange(angle_, 0);
           const bool probe = bf->function == lex::BuiltinFunction::constant_p;
           s_->unevaluated += probe;
+          // An argument may be a pack expansion, as a call's are ([expr.call], [temp.variadic]/5).
+          bool unexpanded = false;
           if (!is(Tk::r_paren))
-            do args.push_back(assignment_expression());
+            do
+              for (const Ex& x : expandable([&] { return assignment_expression(); }, nullptr, &unexpanded))
+                args.push_back(x);
             while (accept(Tk::comma));
           s_->unevaluated -= probe;
           angle_ = saved;
           if (!expect(Tk::r_paren)) return {NodeId::none, begin, pos()};
+          // Until the pack is expanded the arity is unknown: the call stays dependent, and the
+          // instantiation checks the expanded arguments.
+          if (unexpanded) {
+            if (std::ranges::any_of(args, [](const Ex& a) { return !a.ok(); })) return {NodeId::none, begin, pos()};
+            return s_->dependent_node(args, begin, pos());
+          }
           Ex r = s_->builtin_call(*bf, std::move(args), begin, pos());
           return {r.id, begin, pos(), r.info};
         }

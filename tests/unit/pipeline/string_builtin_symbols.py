@@ -1,8 +1,14 @@
-"""Check that __builtin_memchr and __builtin_memcmp call the C library's functions by one symbol.
+"""Check that the C library builtins call the C library's functions by one symbol.
+
+The builtins are __builtin_memchr, memcmp, strchr, strpbrk, strrchr, strstr, memset, memcpy and
+memmove (docs/EXTENSIONS.md).
 
 Each fixture is compiled for both targets. The C function's symbol must appear exactly once in
 the object's symbol table: undefined where the unit only declares it, defined where the unit
-defines it. A second entry means the builtin's implicit declaration became a second entity (#248).
+defines it. A second entry means the builtin's implicit declaration became a second entity (#248),
+or, where a written declaration differs from it and they are two entities, that the object writer
+gave each entity its own symbol (#1095). Entities the object defines keep a symbol each, so a weak
+and a strong definition of one spelling list it twice (#694).
 """
 
 import os
@@ -58,10 +64,14 @@ def macho_symbols(data):
 def main():
     ycxx = str(Path(sys.argv[1]).resolve())
     fixtures = Path(__file__).resolve().with_suffix("")
+    library = ("memcmp", "memchr", "strchr", "strpbrk", "strrchr", "strstr", "memset", "memcpy", "memmove")
     expected = {
-        "declared.cpp": {"memcmp": False, "memchr": False},
-        "defined.cpp": {"memcmp": True},
-        "builtin-only.cpp": {"memcmp": False, "memchr": False},
+        "declared.cpp": dict.fromkeys(library, False),
+        "defined.cpp": {"memcmp": True, "memcpy": True, "memset": True},
+        "builtin-only.cpp": dict.fromkeys(library, False),
+        "mismatched-declared.cpp": {"memcmp": False, "memchr": False},
+        "mismatched-defined.cpp": {"memcmp": True},
+        "same-spelling.cpp": {"_Z1fv": [True, True]},
     }
     failures = []
     with tempfile.TemporaryDirectory(prefix="ycxx-string-builtins-") as temporary:
@@ -82,8 +92,9 @@ def main():
                 prefix = "" if host == "linux" else "_"
                 for name, defined in symbols.items():
                     entries = [d for n, d in table if n == prefix + name]
-                    if entries != [defined]:
-                        failures.append(f"{host} {fixture}: {prefix + name} entries {entries}, expected [{defined}]")
+                    expected_entries = defined if isinstance(defined, list) else [defined]
+                    if entries != expected_entries:
+                        failures.append(f"{host} {fixture}: {prefix + name} entries {entries}, expected {expected_entries}")
     for failure in failures:
         print(failure, file=sys.stderr)
     return 1 if failures else 0
