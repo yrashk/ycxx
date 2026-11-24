@@ -42,6 +42,8 @@ enum class Reason : std::uint8_t {
   pointer_difference [[=says{"subtraction of pointers that do not point into the same array"}]],
   unspecified_comparison [[=says{"the result of comparing these pointers is unspecified"}]],
   void_cast_type [[=says{"conversion from 'void*' to a pointer to a type the object does not have"}]],
+  // Builtins (docs/EXTENSIONS.md): their bytes are the values of objects of narrow character type.
+  byte_type [[=says{"memchr or memcmp reads an object whose type is not a narrow character type"}]],
   // Operations [expr.const] makes non-constant.
   not_usable [[=says{"read of a variable that is not usable in constant expressions"}]],
   modify_outside [[=says{"modification of an object whose lifetime began outside the constant evaluation"}]],
