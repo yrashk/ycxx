@@ -4,8 +4,8 @@
     tests/daemon/process.py <ycxx> <ycxxc_daemon_process>
 
 Covered, each answer compared with a cold (in-process) compile of the same files:
-- an edit that lands while a build runs: the build is restarted (§4.1), and its answer is the
-  final state's, with the restart counted (§8.1);
+- a source or policy-header edit during a build: the build is restarted (§4.1), and its answer
+  is the final state's, with the restart counted (§8.1);
 - a client killed mid-compile: its request stops (§3.2), the daemon counts it cancelled, and the
   next request is right;
 - the daemon killed mid-request: the client starts a new one and asks again (§7.2);
@@ -29,6 +29,7 @@ from pathlib import Path
 failures = []
 GATES = {
     'mid.cpp': 'stop',
+    'policy.cpp': 'stop',
     'moved.cpp': 'stop',
     'deleted.cpp': 'stop',
     'cancel.cpp': 'stop',
@@ -298,6 +299,49 @@ def edit_error_during_build(env):
             fail(f'edit of {name}: the client reported no restart')
 
 
+def edit_policy_during_build(env):
+    """Restart a checked build when its included policy changes without changing size or mtime."""
+    d = env.scope / 'edit-policy'
+    d.mkdir()
+    include = Path(__file__).resolve().parents[2] / 'packages/ycxx-policies/include'
+    args = ['-fcheck-policies', '-fsyntax-only', '-I', str(include), 'policy.cpp']
+    affine = '''\
+#include <ycxx/ownership.hpp>
+namespace own = ycxx::ownership;
+struct Receipt { int value; };
+Receipt issue() noexcept;
+using Rules = own::use_policy<own::affine<Receipt>, own::creates<decltype(&issue), &issue>>;
+'''
+    rules = d / 'rules.hpp'
+    rules.write_text(affine)
+    stamp = rules.stat()
+    (d / 'policy.cpp').write_text('#include "rules.hpp"\nvoid check() { auto pending = issue(); }\n')
+    replacement = d / 'replacement'
+    replacement.write_text(affine.replace('own::affine', 'own::linear'))
+    os.utime(replacement, ns=(stamp.st_atime_ns, stamp.st_mtime_ns))
+    client = env.start(args, d)
+    env.expect_gate('policy.cpp', b'P')
+    replacement.replace(rules)
+    updated = rules.stat()
+    assert (updated.st_size, updated.st_mtime_ns) == (stamp.st_size, stamp.st_mtime_ns)
+    env.expect_gate('policy.cpp', b'S')
+    out, err = client.communicate(timeout=60)
+    want_code, want_out, want_err = env.cxx(args, d, env.cold)
+    got_err = b''.join(line + b'\n' for line in err.splitlines() if not line.startswith(b'ycxx: answered by daemon'))
+    if (want_code != 1 or b"linear resource 'pending' may leave its scope" not in want_err or
+            (client.returncode, out, got_err) != (want_code, want_out, want_err)):
+        fail(f'policy edit during a build: {client.returncode} {got_err!r:.300} != cold {want_code} {want_err!r:.300}')
+    if (restarts_of(err) or 0) < 1:
+        fail('policy edit during a build: the client reported no restart')
+
+    replacement.write_text(affine)
+    os.utime(replacement, ns=(stamp.st_atime_ns, stamp.st_mtime_ns))
+    replacement.replace(rules)
+    result = env.cxx(args, d, env.daemon)
+    if result != (0, b'', b''):
+        fail(f'restored affine policy: the resident compile returned {result[0]} with {result[2]!r:.300}')
+
+
 def killed_client(env):
     """A client killed mid-compile: its request stops and is counted; the next one is right."""
     d = env.scope / 'killed-client'
@@ -459,7 +503,8 @@ def main():
                 env.pid() != env.fixture_daemon.pid):
             fail('the first request through the daemon failed: no test can run')
             return 1
-        for test in (edit_during_build, edit_error_during_build, killed_client, concurrent_clients, live_trace, killed_daemon, restart):
+        for test in (edit_during_build, edit_error_during_build, edit_policy_during_build, killed_client,
+                     concurrent_clients, live_trace, killed_daemon, restart):
             t0 = time.monotonic()
             pid = env.pid()
             if pid is None:
