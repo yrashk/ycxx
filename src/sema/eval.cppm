@@ -186,13 +186,21 @@ private:
     std::vector<ast::LocalRec> locals(s_->locals().begin(), s_->locals().end());
     auto local_values = s_->local_values();
     std::vector<std::optional<ConstId>> filtered_values;
+    std::vector<u32> opaque_record_locals;
     for (std::size_t i = 0; i < locals.size(); ++i) {
       auto& l = locals[i];
       l.decl = NodeId::none;  // drafts of the enclosing frame
-      if (i < local_values.size() && local_values[i] && s_->types().is_class(l.type) &&
-          !importable_local_record(l.type, *local_values[i])) {
-        if (filtered_values.empty()) filtered_values.assign(local_values.begin(), local_values.end());
-        filtered_values[i].reset();
+      if (s_->types().is_class(l.type)) {
+        if (i < local_values.size() && local_values[i]) {
+          if (!importable_local_record(l.type, local_values[i])) {
+            if (filtered_values.empty()) filtered_values.assign(local_values.begin(), local_values.end());
+            filtered_values[i].reset();
+          }
+        } else if (s_->in_function_body && (l.flags & local_flag::parameter) &&
+                   !(l.flags & (ast::local_flag::requires_parameter | local_flag::default_argument_parameter)) &&
+                   importable_local_record(l.type, std::nullopt)) {
+          opaque_record_locals.push_back(static_cast<u32>(i));
+        }
       }
       // In a template's definition a local of dependent type has no object yet; a non-dependent
       // expression cannot name it, so it stands as an `int` outside its lifetime.
@@ -211,6 +219,7 @@ private:
                                              ast::QualType{}, 0, in.intern_seq(std::span<const ast::ClosureDef>{})},
                                s_->item(), 0, true, local_values};
     input.initialized_fields = initialized_fields;
+    input.opaque_record_locals = opaque_record_locals;
     EvalFacts facts(s_->world(), *q_);
     auto body = bytes ? irgen::constant_byte_capture_ir(in, input, facts, bytes->capture) : irgen::function_ir(in, input, facts);
     if (!body) return {};
@@ -421,22 +430,19 @@ private:
     return result;
   }
 
-  // The thunk initializes these records up front. A flat integral field can be stored from
-  // its value without fetching another object or trying to decode an unsupported layout.
-  bool importable_local_record(QualType type, ConstId value) {
+  // A thunk can import addresses for supported flat records. Known initializers also
+  // supply integral field values without needing to fetch any other object.
+  bool importable_local_record(QualType type, std::optional<ConstId> value) {
     const auto& in = s_->ins();
-    if (!in.values.is<ast::VAggregate>(value)) return false;
+    if (value && !in.values.is<ast::VAggregate>(*value)) return false;
     const auto layout = constant_record_layout(type);
-    if (!layout) return false;
-    const auto elements = in.seqs.elements(in.values.get<ast::VAggregate>(value).elems);
-    if (elements.size() != layout->fields.size()) return false;
-    auto& types = s_->types();
-    for (std::size_t i = 0; i < elements.size(); ++i) {
-      const auto field = layout->fields[i].type;
-      if ((!types.is_integral(field) && !types.is_enum(field)) || !in.values.is<ast::VInt>(elements[i]))
-        return false;
-    }
-    return true;
+    if (!layout || !std::ranges::all_of(layout->fields, [&](const auto& field) {
+          return s_->types().is_integral(field.type) || s_->types().is_enum(field.type);
+        })) return false;
+    if (!value) return true;
+    const auto elements = in.seqs.elements(in.values.get<ast::VAggregate>(*value).elems);
+    return elements.size() == layout->fields.size() &&
+           std::ranges::all_of(elements, [&](ConstId element) { return in.values.is<ast::VInt>(element); });
   }
 
   bool constant_record_field(QualType type) {

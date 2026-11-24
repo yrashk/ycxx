@@ -98,6 +98,9 @@ struct FunctionInput {
     ast::EntityId owner = ast::EntityId::none;
     std::span<const ast::ConstId> values{};
   } initialized_fields{};
+  // By-value record parameters whose identity is available to a thunk. Their contents are
+  // unknown and their lifetimes began in the enclosing invocation. Sorted by local index.
+  std::span<const std::uint32_t> opaque_record_locals{};
 };
 
 struct FunctionIr {
@@ -458,6 +461,12 @@ class Gen {
       if (cls(t) == TypeClass::record) {
         // A known initializer supplies the fields of this enclosing automatic object. Its
         // lifetime began before the thunk and it remains automatic for address results.
+        if (std::ranges::binary_search(fn_.opaque_record_locals, i)) {
+          const Place p = begin_object(t, ir::Init::indeterminate);
+          begin_lifetime(p, ir::bit(ir::Flag::outside_unknown));
+          slots_[i] = p;
+          continue;
+        }
         if (i >= fn_.local_values.size() || !fn_.local_values[i]) continue;
         const auto value = *fn_.local_values[i];
         if (!in_.values.is<ast::VAggregate>(value)) continue;
