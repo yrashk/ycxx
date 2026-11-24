@@ -564,6 +564,8 @@ written default member initializer are value-initialized.
   packs preceded by an ordinary template parameter. [#890](https://github.com/yrashk/ycxx/issues/890)
   Namespace variable template initializers can recurse with a dependent integral argument such as
   `extent<T, I - 1>`. [#1091](https://github.com/yrashk/ycxx/issues/1091)
+  Fixed braced initializer lists can use this replay while inferring a scalar array's bound.
+  [#1168](https://github.com/yrashk/ycxx/issues/1168)
 - dependent `__is_same`, `__is_reference`, `__is_const`, `__is_volatile`, `__is_array`,
   `__is_pointer`, `__is_function`, `__is_enum`, `__is_union`, `__is_class`, `__is_object`, and the
   three member-pointer predicates as `bool` template arguments or defaults, including through
