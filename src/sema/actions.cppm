@@ -5819,7 +5819,7 @@ public:
     return nullptr;
   }
 
-  bool ordinary_immediate_member(EntityId function) {
+  bool ordinary_immediate_member(EntityId function, QualType result) {
     if (function == EntityId::none) return false;
     const auto& entity = w_->entities.rec(function);
     if (entity.kind != EntityKind::function || entity.scope == EntityId::none || entity.templ != EntityId::none)
@@ -5827,7 +5827,16 @@ public:
     const auto& owner = w_->entities.rec(entity.scope);
     if (owner.kind != EntityKind::class_ || owner.templ != EntityId::none) return false;
     const auto* member = member_decl(function);
-    return member && member->is_consteval && !member->is_virtual && !member->is_template;
+    if (!member || !member->is_consteval || member->is_virtual || member->is_template) return false;
+    // Only the checked integral, enum and void result representations enter this path.
+    if (types().is_void(result)) return true;
+    if (types().is_enum(result)) {
+      const auto* enumeration = enum_rec(types().enum_of(result));
+      if (!enumeration || !enumeration->underlying) return false;
+      result = *enumeration->underlying;
+    }
+    const auto builtin = types().builtin_of(result);
+    return builtin && ast::is_integral(*builtin) && ast::width_of(w_->target, *builtin) <= 64;
   }
 
   // A member function named without a call yet: `a.f`, `p->f`, `f` or `S::f`, bound to its object
@@ -6329,7 +6338,7 @@ public:
       Ex call = node(ast::Call{info, fe, at(callee, begin), b_->list(*children)}, begin, end, info);
       // Lookup can supply a `this` pointer to rank a mixed unqualified or qualified overload
       // set. Selecting a static member evaluates a receiver only when the call has one.
-      if (!object || (m.arrow && !bound.explicit_receiver && !call.glvalue() && ordinary_immediate_member(fe)))
+      if (!object || (m.arrow && !bound.explicit_receiver && ordinary_immediate_member(fe, fr.inner)))
         return call;
       Ex discarded = convert_node(*object, ast::ConversionKind::to_void, builtin(Builtin::void_));
       return node(ast::OrderedBinary{info, ast::OrderedOp::comma, at(discarded, begin), at(call, begin)}, begin, end, info);
@@ -11047,7 +11056,7 @@ public:
       default_origin = DefaultArgumentOrigin::interned;
     }
     if (declaration && (named.id == callee.id || is_consteval(default_source) ||
-                        (!types().is_reference(types().rec(ft).inner) && ordinary_immediate_member(default_source)))) {
+                        ordinary_immediate_member(default_source, types().rec(ft).inner))) {
       function = default_source;
     } else {
       // The address of a named immediate function is itself a known callee. It does not

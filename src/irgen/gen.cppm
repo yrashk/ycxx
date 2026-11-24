@@ -1606,13 +1606,25 @@ class Gen {
     const auto cv = ast::cv_of(expr.type);
     if (cv == ast::Cv::none || cv == ast::Cv::const_) {
       if (default_field(a)) return;
-      // Naming a nonvolatile record object for discard needs neither its value nor an
-      // address in the thunk. A reference variable and a computed glvalue still evaluate.
-      if (fn_.thunk && cls(expr.type) == TypeClass::record) {
-        const At named = strip_parens(a);
-        if (is<ast::DeclRef>(named) && !get<ast::DeclRef>(named).reference) return;
-        if (is<ast::LocalRef>(named)) {
-          const auto local = get<ast::LocalRef>(named).local;
+      // In a thunk, discarding a record glvalue evaluates its effects without requiring
+      // the object's address. Preserve the sequence and selected arm of compound expressions.
+      if (fn_.thunk && cls(expr.type) == TypeClass::record && access_flags(expr.type) == 0) {
+        const At operand = strip_parens(a);
+        if (is<ast::OrderedBinary>(operand)) {
+          const auto sequence = get<ast::OrderedBinary>(operand);
+          if (sequence.op == ast::OrderedOp::comma) {
+            discard(child(operand, sequence.lhs));
+            discard(child(operand, sequence.rhs));
+            return;
+          }
+        }
+        if (is<ast::Conditional>(operand)) {
+          conditional(operand, /*glvalue=*/false, ast::builtin(in_, ast::Builtin::void_));
+          return;
+        }
+        if (is<ast::DeclRef>(operand) && !get<ast::DeclRef>(operand).reference) return;
+        if (is<ast::LocalRef>(operand)) {
+          const auto local = get<ast::LocalRef>(operand).local;
           if (!facts_.is_reference(in_.seqs.at(fn_.body.locals, local).type)) return;
         }
       }
