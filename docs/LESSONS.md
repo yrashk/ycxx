@@ -566,6 +566,18 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
   - Rule: DECISIONS §5.6.
   - Learned on #33.
 
+- **A path filter alone runs every stage, the build included.** `tools/test --cxx clang own/x`,
+  meant to check new tests against an oracle, started `tools/build` in the build directory a
+  background build was already using, so two Ninja runs shared it. On a loaded machine (load
+  ~35) the build stage's CTest run then failed 9 tests on 10 s and 30 s timeouts, and all 9
+  passed when rerun alone.
+  - Do: name the stage when you only want tests, as in `tools/test --cxx clang core own/x`.
+    For a binary other than `build/bin/ycxx` (a baseline build of main, say), set
+    `YCXX=<path>`.
+  - Do: rerun CTest timeouts with `ctest --test-dir build -R '<names>' -j 2` before treating
+    them as failures, then run the remaining stages (`tools/test failed affected core`).
+  - Learned on #259.
+
 - **Linux x86-64 run tests can be checked from the Mac without building ycxx in Docker.** Compile
   with the Mac's ycxx (`ycxx cxx --target=x86_64-pc-linux-gnu -c`), then link and run with `g++`
   in the `ycxx-linux-amd64` image (`docker run --platform linux/amd64 -v dir:/w`). On #309 this
@@ -613,6 +625,19 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
   - Do: give a bounded query a tri-state result (`yes`, `no`, `unknown`), as `base_path` and
     `PointerConversion` now do, and let each caller decide what `unknown` means.
   - Learned on #218.
+
+- **`Program`'s per-entity maps hold only the items analysed so far.** Top-level items are
+  analysed one group at a time and earlier ones only when asked (#947). So `class_items_` and
+  `decls_` can miss an earlier definition. On #306 a second `struct O::I { … }` was accepted
+  because the first had not been analysed. In-class checks passed, because `earlier_member`
+  analyses the earlier members itself.
+  - Do: call `ensure_declared(entity, item)` before reading these maps for an entity that no
+    lookup reached, and test a redefinition across two top-level items.
+  - The same review found that `is_complete` judged completeness by item order alone. The
+    enclosing class's implicit constructor then treated its own nested class as incomplete and
+    emitted an empty body. Test a construct that adds a later item inside an earlier one with a
+    field of that type, not only with uses after the closing brace.
+  - Learned on #306.
 
 ## Evidence and tests
 

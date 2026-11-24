@@ -541,6 +541,25 @@ func {@c} {
 }
 )");
   expect_failure(cst.go(), Reason::modify_const, "a store to a const object after its initialization");
+
+  // The pointer has unqualified type after a cast. The allocation retains its actual type
+  // ([dcl.type.cv], [expr.const.core]).
+  Run checked_store(R"(
+func {@checked_store} {
+^0(%0: !state):
+  %1: !state, %2: {long*} = alloc %0 [{vlong}, automatic, indeterminate]
+  %3: !state = obj.begin %1, %2 [{vlong}]
+  %4: {long} = const [{l1}]
+  %5: {long} = const [{l2}]
+  %6: {long}, %7: {bool} = sadd_overflow %4, %5
+  %8: !state = store call_body %3, %2, %6 [{long}, /]
+  ret %8, %7
+}
+)", {}, [](World& w) {
+    w.type("vlong", ast::builtin(w.in, ast::Builtin::long_, ast::Cv::volatile_));
+  });
+  expect_failure(checked_store.go(), Reason::volatile_object_access,
+                 "a checked builtin store into a volatile object through a non-volatile glvalue");
 }
 
 void arrays_and_pointers() {

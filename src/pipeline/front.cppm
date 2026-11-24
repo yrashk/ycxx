@@ -203,15 +203,18 @@ struct FunctionVisibility {
   bool namespace_hidden = false;
   bool namespace_default = false;
 };
-// The visibility of the unit's symbols, from every declaration in it.
-void apply_visibility(TranslationUnit& tu, const std::set<EntityId>& hidden_declarations, const std::set<EntityId>& inline_declarations,
-                      const std::map<EntityId, FunctionVisibility>& function_visibility) {
-  if (hidden_declarations.empty() && function_visibility.empty()) return;
+// The attributes of the unit's symbols, from every declaration in it.
+void apply_symbol_attributes(TranslationUnit& tu, const std::set<EntityId>& hidden_declarations,
+                             const std::set<EntityId>& inline_declarations, const std::set<EntityId>& weak_declarations,
+                             const std::map<EntityId, FunctionVisibility>& function_visibility, bool linux) {
+  if (hidden_declarations.empty() && function_visibility.empty() && weak_declarations.empty()) return;
   using Visibility = ast::GnuVisibility;
   for (Entity& e : tu.entities) {
+    const bool inline_entity = inline_declarations.contains(e.id);
+    e.weak_reference = linux && !e.is_function && !inline_entity && weak_declarations.contains(e.id);
     // An inline variable falls outside the ordinary data visibility profile.
-    e.hidden = hidden_declarations.contains(e.id) && (e.is_function || !inline_declarations.contains(e.id));
-    if (!e.is_function || inline_declarations.contains(e.id)) continue;
+    e.hidden = hidden_declarations.contains(e.id) && (e.is_function || !inline_entity);
+    if (!e.is_function || inline_entity) continue;
     const auto found = function_visibility.find(e.id);
     if (found == function_visibility.end()) continue;
     const auto& visibility = found->second;
@@ -1164,7 +1167,7 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
       return {};
     const auto& member = world.entities.rec(d.entity);
     const auto& owner = world.entities.rec(member.scope);
-    if (owner.kind != sema::EntityKind::class_ || !program.is_namespace(owner.scope)) return {};
+    if (owner.kind != sema::EntityKind::class_ || !program.is_namespace(program.outermost_class_scope(member.scope))) return {};
     const bool instantiated = owner.templ != EntityId::none;
     if (instantiated && (!world.types.is_arithmetic(d.type) || (d.flags & sema::decl_flag::specialization)))
       return {};
@@ -1433,9 +1436,9 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
   };
   for (std::uint32_t k = first; k < items.items.size() && k < end; ++k) {
     const items::Item& it = items.items[k];
-    // Items of the global namespace, and the members of its classes.
+    // Items of the global namespace, and the members of its classes and their nested classes.
     bool member = it.parent != items::none && items.items[it.parent].kind == items::ItemKind::class_def &&
-                  program.in_global_scope(it.parent);
+                  (program.in_global_scope(it.parent) || program.ordinary_nested_class(it.parent));
     if (!program.in_global_scope(k) && !member) continue;
     // A class template's members are patterns; its specializations' are instances, below.
     if (member && items.items[it.parent].template_depth > 0) continue;
@@ -1591,7 +1594,10 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
       continue;
     tu.functions.push_back({in->spec, in->decl, in->body.value, program.id(in->item), it.body_begin - it.begin,
                             program.this_type(in->decl)});
-    tu.functions.back().emit_if_referenced = immediate_if_referenced(in->decl, entity, in->body.value);
+    auto& definition = tu.functions.back();
+    definition.emit_if_referenced = immediate_if_referenced(in->decl, entity, in->body.value);
+    definition.plain_immediate_template = definition.emit_if_referenced && program.is_namespace(entity.scope) &&
+                                          !ins.names.spelling(entity.name).empty();
     if (it.parent != items::none && items.items[it.parent].kind == items::ItemKind::class_def) {
       const bool ordinary_member = ordinary_class_template_member(entity) && !in->decl.is_virtual &&
                                    !internal_class(entity.scope) &&
@@ -1897,8 +1903,7 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
     d.has_written_noexcept = world.types.rec(d.type).fn_noexcept;
     declare(d, std::nullopt);
   }
-  // A declaration anywhere in the unit can supply the visibility of the one object symbol.
-  apply_visibility(tu, hidden_declarations, inline_declarations, function_visibility);
+  apply_symbol_attributes(tu, hidden_declarations, inline_declarations, weak_declarations, function_visibility, linux);
   if (part) {
     part->inline_declarations = std::move(inline_declarations);
     part->noexcept_declarations = std::move(noexcept_declarations);
@@ -1992,7 +1997,8 @@ TranslationUnit finish_unit(std::vector<UnitPart>& parts, sema::World& world, st
   };
   for (FunctionDef& f : tu.functions) validate_unwind(ins, tu, f, runtime, unwind_provider, unwind_definition);
   unwind_through_constructors(tu, unwind_definition);
-  apply_visibility(tu, hidden_declarations, inline_declarations, function_visibility);
+  apply_symbol_attributes(tu, hidden_declarations, inline_declarations, weak_declarations, function_visibility,
+                          world.target.triple == ast::x86_64_linux.triple);
   return tu;
 }
 

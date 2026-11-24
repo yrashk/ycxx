@@ -38,10 +38,11 @@ inline Builtin promoted(const ast::Target& target, Builtin b, u8 bit_width = 0) 
 inline Builtin common_integer(const ast::Target& target, Builtin a, Builtin b) { return *ast::usual_arithmetic(target, a, b); }
 
 constexpr std::string_view spelling(Builtin b) {
-  constexpr std::array<std::string_view, 21> names{
+  constexpr std::array<std::string_view, 23> names{
       "void", "std::nullptr_t", "bool", "char", "signed char", "unsigned char", "wchar_t", "char8_t", "char16_t",
       "char32_t", "short", "unsigned short", "int", "unsigned int", "long", "unsigned long", "long long",
-      "unsigned long long", "float", "double", "long double"};
+      "unsigned long long", "__int128", "unsigned __int128", "float", "double", "long double"};
+  static_assert(names.size() == std::to_underlying(Builtin::long_double) + 1);
   auto i = std::to_underlying(b);
   return i < names.size() ? names[i] : "<builtin>";
 }
@@ -461,6 +462,8 @@ struct ValueRec {
   ValueKind kind = ValueKind::other;
   QualType type{};
   u64 bits = 0;
+  // An integer outside [-2^63, 2^64), which only a 128-bit type holds: `bits` has its low half.
+  bool wide = false;
   double real = 0;
   std::vector<u32> units;
   ConstId base = ConstId::none;
@@ -473,6 +476,7 @@ public:
 
   // An integer of type `t`, wrapped to its width ([conv.integral]).
   ConstId integer(QualType t, u64 bits) { return ast::int_value(*ins_, *target_, t, ast::Bits128{bits, 0}); }
+  ConstId integer(QualType t, ast::Bits128 bits) { return ast::int_value(*ins_, *target_, t, bits); }
   // A value of standard floating type `t`: `v` rounded to its format ([conv.double]).
   ConstId floating(QualType t, double v) { return ast::float_value(*ins_, *target_, t, v); }
   // A string literal object of array type `t`, including its terminating code unit.
@@ -511,6 +515,9 @@ public:
       r.kind = ValueKind::integer;
       r.type = i.type;
       r.bits = i.bits.lo;
+      const auto b = ast::builtin_of(*ins_, i.type);
+      const bool negative = b && ast::is_signed(*target_, *b) && ast::is_negative(i.bits);
+      r.wide = negative ? i.bits.hi != ~u64{0} || i64(i.bits.lo) >= 0 : i.bits.hi != 0;
     } else if (v.is<ast::VFloat>(c)) {
       auto f = v.get<ast::VFloat>(c);
       r.kind = ValueKind::floating;
@@ -885,10 +892,19 @@ struct ClassRec {
   // Each member's access ([class.access.spec]), by entity: data members, member functions,
   // constructors, static data members and nested types.
   std::vector<std::pair<EntityId, ast::Access>> access;
-  // Its friends ([class.friend]): functions and classes, by entity.
+  // Its friends ([class.friend]): functions, classes and class templates, by entity.
   std::vector<EntityId> friends;
   // The unqualified friend function declarations ADL can find through this class.
   std::vector<ast::MemberRec> adl_friends;
+
+  // Whether `e` is a friend: one of `friends`, or a specialization of a friend class template,
+  // whichever of its partial specializations it was instantiated from ([temp.friend]/1).
+  bool befriends(EntityId e, const Entities& entities) const {
+    if (e == EntityId::none) return false;
+    if (std::ranges::contains(friends, e)) return true;
+    const EntityId templ = entities.rec(e).templ;
+    return templ != EntityId::none && std::ranges::contains(friends, templ);
+  }
 
   const MemberDeclRec* implicit_copy_assignment() const {
     const auto copy = std::ranges::find_if(members, [](const MemberDeclRec& m) {

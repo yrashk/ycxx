@@ -35,6 +35,7 @@ enum class Reason : std::uint8_t {
   past_end_access [[=says{"access through a pointer past the end of an object"}]],
   access_type [[=says{"access to an object through a glvalue of a different type"}]],
   modify_const [[=says{"modification of a const object"}]],
+  volatile_object_access [[=says{"access to a volatile object through a non-volatile glvalue"}]],
   unsequenced [[=says{"unsequenced modification and access to the same object"}]],
   // Pointers ([expr.add], [expr.eq], [expr.rel], [expr.static.cast]).
   pointer_bounds [[=says{"pointer arithmetic leaves the bounds of the array"}]],

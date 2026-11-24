@@ -300,6 +300,10 @@ private:
   // (`X<T*>`), so a partial or explicit specialization's members are not its template's.
   std::string class_scope(u32 name, u32 end) const {
     std::string r(r_.name(r_.tokens[name]));
+    // A qualified class-head-name (`O::I`, [class.pre]/3): the members are I's, not those of a
+    // namespace-scope class I.
+    for (u32 n = name; n >= 2 && kind(n - 1) == Tk::coloncolon && kind(n - 2) == Tk::identifier; n -= 2)
+      r = std::string(r_.name(r_.tokens[n - 2])) + "::" + r;
     if (kind(name + 1) == Tk::less)
       for (u32 n = name + 1, close = match_angle(name + 1); n < close && n < end; ++n) r += r_.spelling(r_.tokens[n]);
     return r;
@@ -426,6 +430,7 @@ bool simple_type_keyword(Tk t) {
   case Tk::kw_void: case Tk::kw_bool: case Tk::kw_char: case Tk::kw_char8_t: case Tk::kw_char16_t:
   case Tk::kw_char32_t: case Tk::kw_wchar_t: case Tk::kw_short: case Tk::kw_int: case Tk::kw_long:
   case Tk::kw_signed: case Tk::kw_unsigned: case Tk::kw_float: case Tk::kw_double: case Tk::kw_auto:
+  case Tk::kw___int128:
     return true;
   default: return false;
   }

@@ -2,7 +2,6 @@
 // as arrays of char, a class range inside an array loop), the inner loop's range depending on the
 // outer loop variable, each loop with its own `__range`, `__begin` and `__end`; the output is
 // written with putchar ([stmt.ranged]/1).
-// XFAIL: ycxx nested classes (#306)
 // EXIT: 0
 // STDOUT: ab-ab-ab
 // STDOUT: xyz

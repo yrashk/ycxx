@@ -207,7 +207,7 @@ public:
     case Tk::kw_signed: case Tk::kw_unsigned: case Tk::kw_const: case Tk::kw_volatile: case Tk::kw_static:
     case Tk::kw_extern: case Tk::kw_inline: case Tk::kw_constexpr: case Tk::kw_char8_t: case Tk::kw_char16_t:
     case Tk::kw_char32_t: case Tk::kw_wchar_t: case Tk::kw_float: case Tk::kw_double: case Tk::kw_auto:
-    case Tk::kw_typedef: case Tk::kw_struct: case Tk::kw_class: case Tk::kw_union: case Tk::kw_enum:
+    case Tk::kw___int128: case Tk::kw_typedef: case Tk::kw_struct: case Tk::kw_class: case Tk::kw_union: case Tk::kw_enum:
     case Tk::kw_thread_local: case Tk::kw_constinit: case Tk::kw_consteval: case Tk::kw_register:
     case Tk::kw_mutable: case Tk::kw_typename: case Tk::kw_decltype: case Tk::kw_virtual:
       return true;
@@ -583,12 +583,12 @@ public:
     DeclSpec d;
     d.begin = pos();
     int n_char = 0, n_short = 0, n_int = 0, n_long = 0, n_signed = 0, n_unsigned = 0, n_void = 0, n_bool = 0;
-    int n_char8 = 0, n_char16 = 0, n_char32 = 0, n_wchar = 0, n_float = 0, n_double = 0;
+    int n_char8 = 0, n_char16 = 0, n_char32 = 0, n_wchar = 0, n_float = 0, n_double = 0, n_int128 = 0;
     bool c = false, v = false;
     std::optional<QualType> cls;  // a class-name or elaborated-type-specifier
     auto any_type = [&] {
       return cls || n_char + n_short + n_int + n_long + n_signed + n_unsigned + n_void + n_bool + n_char8 + n_char16 +
-                        n_char32 + n_wchar + n_float + n_double > 0;
+                        n_char32 + n_wchar + n_float + n_double + n_int128 > 0;
     };
     auto once = [&](bool& flag, Tk k) {
       if (flag) s_->diag(pos(), Diag::duplicate_specifier, k);
@@ -609,6 +609,7 @@ public:
       case Tk::kw_wchar_t: ++n_wchar; break;
       case Tk::kw_float: ++n_float; break;  // types only: their values are #201
       case Tk::kw_double: ++n_double; break;
+      case Tk::kw___int128: ++n_int128; break;  // docs/EXTENSIONS.md
       case Tk::kw_short: ++n_short; break;
       case Tk::kw_int: ++n_int; break;
       case Tk::kw_long: ++n_long; break;
@@ -909,7 +910,7 @@ public:
     }
     // [dcl.type.general]: the combinations of simple-type-specifiers, as in its table.
     int total = n_char + n_short + n_int + n_long + n_signed + n_unsigned + n_void + n_bool + n_char8 + n_char16 +
-                n_char32 + n_wchar + n_float + n_double;
+                n_char32 + n_wchar + n_float + n_double + n_int128;
     if (cls) {
       if (total > 0) {
         s_->diag(d.begin, Diag::conflicting_specifiers, Tk::kw_int);
@@ -929,7 +930,12 @@ public:
     std::optional<Builtin> b;
     int sign = n_signed + n_unsigned;
     int others = n_void + n_bool + n_char8 + n_char16 + n_char32 + n_wchar;
-    if (n_signed > 1 || n_unsigned > 1 || sign > 1 || n_long > 2 || n_short > 1 || n_int > 1 || n_char > 1 || others > 1) {
+    if (n_signed > 1 || n_unsigned > 1 || sign > 1 || n_long > 2 || n_short > 1 || n_int > 1 || n_char > 1 || others > 1 ||
+        n_int128 > 1) {
+    } else if (n_int128 == 1) {
+      // `__int128` alone or with `signed` or `unsigned`, as GCC and Clang have it.
+      if (others + n_char + n_short + n_int + n_long + n_float + n_double == 0)
+        b = n_unsigned ? Builtin::unsigned_int128 : Builtin::int128;
     } else if (n_float + n_double > 0) {
       // `float`, `double`, `long double` alone ([dcl.type.general]).
       if (n_float + n_double == 1 && others + n_char + n_short + n_int + sign == 0 && n_long <= n_double)
@@ -1595,7 +1601,8 @@ public:
           l.suffixes.push_back(std::move(s));
           continue;
         }
-        if (!v || s_->world().values.rec(*v).kind != sema::ValueKind::integer || i64_of(*v) <= 0) {
+        if (!v || s_->world().values.rec(*v).kind != sema::ValueKind::integer || s_->world().values.rec(*v).wide ||
+            i64_of(*v) <= 0) {
           if (e.ok()) s_->diag(at + 1, Diag::bound_not_constant);
           ok = false;
         } else {
@@ -2730,6 +2737,14 @@ public:
       constexpr u8 unavailable = sema::expr_flag::unrepresented_value | sema::expr_flag::deferred_decay_copy;
       if (body && !(e.info.flags & unavailable))
         return s_->world().ins.intern_value(ast::VDepParam{sema::dependent_depth, 0});
+      // A class template's base-specifier is parsed again with the arguments bound when a
+      // specialization is instantiated (`Program::instantiate_base`), so its pattern needs no
+      // representation of the value: it stands as an unevaluated placeholder (#308). A pack
+      // expansion's pattern must keep the packs it names, so it is not one.
+      if (class_template_base && !s_->pattern_names_pack() && !is(Tk::ellipsis)) {
+        ++deferred_argument_checks_;
+        return s_->world().ins.intern_value(ast::VDepParam{sema::dependent_depth, 0});
+      }
       s_->diag(e.begin, Diag::not_supported, Tk::kw_template);
       return std::nullopt;
     }
@@ -2840,8 +2855,42 @@ public:
     if (replay_at && deferred != deferred_argument_checks_) *replay_at = begin;
     return args;
   }
+  // A template argument `int(…)` ([temp.arg.general]/2) is a type-id only if it can be one: a
+  // function type, whose parentheses hold a parameter-declaration-clause or a grouped declarator
+  // and are followed by the declarator's suffixes or the argument's end. Otherwise it is a
+  // functional cast ([expr.type.conv]): `bool(T::value) || x`, `int(3) + 1`, `bool(N)`.
+  bool function_type_argument_ahead() {
+    auto ends_argument = [](Tk k) {
+      return k == Tk::comma || k == Tk::greater || k == Tk::greatergreater || k == Tk::ellipsis;
+    };
+    const u32 close = past_parentheses(1);
+    switch (kind(close)) {
+    case Tk::comma: case Tk::greater: case Tk::greatergreater: case Tk::ellipsis: case Tk::l_paren:
+    case Tk::l_square: case Tk::kw_const: case Tk::kw_volatile: case Tk::kw_noexcept:
+      break;
+    case Tk::amp: case Tk::ampamp:  // a ref-qualifier: `void() &`, not `bool(x) && y`
+      if (!ends_argument(kind(close + 1))) return false;
+      break;
+    default:
+      return false;
+    }
+    const Tk inner = kind(2);
+    if (inner == Tk::r_paren || inner == Tk::ellipsis || inner == Tk::star || inner == Tk::amp || inner == Tk::ampamp ||
+        inner == Tk::caret || inner == Tk::l_paren || member_pointer_star(2) || past_attributes(2) != 2)
+      return true;  // a parameter's attributes ([dcl.fct]/3) start one too
+    // A name starts a parameter only if it names a type; a member of a dependent class does so
+    // only after `typename` here ([temp.res.general]/4).
+    const u32 saved = std::exchange(i_, i_ + 2);
+    const bool saved_half = qualified_half_;
+    const bool parameter = starts_type_id();
+    qualified_half_ = saved_half;
+    i_ = saved;
+    return parameter;
+  }
+
   bool starts_type_id(bool template_argument = false) {
     if (transform_trait_ahead()) return true;
+    if (template_argument && simple_type_keyword(kind()) && kind(1) == Tk::l_paren) return function_type_argument_ahead();
     if (starts_decl_specifier(kind())) return !is(Tk::kw_static) && !is(Tk::kw_extern);
     // `X<args>::m` is a type only when m is: the nested name first. A member of a dependent class
     // is a type only after `typename` ([temp.res.general]/4).
@@ -4268,7 +4317,7 @@ public:
     switch (k) {
     case Tk::kw_void: case Tk::kw_bool: case Tk::kw_char: case Tk::kw_char8_t: case Tk::kw_char16_t:
     case Tk::kw_char32_t: case Tk::kw_wchar_t: case Tk::kw_short: case Tk::kw_int: case Tk::kw_long:
-    case Tk::kw_signed: case Tk::kw_unsigned: case Tk::kw_float: case Tk::kw_double:
+    case Tk::kw_signed: case Tk::kw_unsigned: case Tk::kw_float: case Tk::kw_double: case Tk::kw___int128:
       return true;
     default: return false;
     }

@@ -113,6 +113,7 @@ struct Entity {
   bool local_parameter_binding = false;
   bool hidden = false;  // GNU hidden visibility: ELF STV_HIDDEN, Mach-O private extern (#602, #124)
   bool nonthrowing = false;  // including implicit exception specifications on destructors
+  bool weak_reference = false;  // explicit GNU weak binding for an undefined ELF object
 
   bool has_local_binding() const { return linkage == ast::Linkage::internal || local_parameter_binding; }
 };
@@ -152,6 +153,8 @@ struct FunctionDef {
   // The primary table a dynamic class's constructor installs after its base subobject (#309).
   EntityId constructor_table = EntityId::none;
   bool emit_if_referenced = false;  // an eligible immediate definition (#1097)
+  // A named namespace-scope immediate function template instance without local statics or closures.
+  bool plain_immediate_template = false;
 };
 
 // A variable definition at namespace scope with its constant initializer, or `ConstId::none` for
@@ -656,6 +659,7 @@ struct Lowered {
   std::optional<L2Body> body;
   std::vector<StringUse> strings;  // in order of first use
   std::optional<BackError> error;
+  bool unreachable_immediate = false;
 };
 struct Lower {
   using Key = FnKey;
@@ -1431,6 +1435,18 @@ engine::query_task<Lowered> Lower::run(engine::Ctx& cx, FnKey k) {
   auto [shapes, shape_index] = co_await cx.par_fetch(engine::q<UnitShapes>{k.tu}, engine::q<UnitShapeIndex>{k.tu});
   QueryLayout layout(cx, shapes, shape_index, target);
   ir::LowerConfig config;
+  if (f.body) {
+    const auto checked = std::ranges::find_if(f.body->nodes, [](ir::Op op) {
+      return op == ir::Op::sadd_overflow || op == ir::Op::smul_overflow;
+    }, &ir::Node::op);
+    if (checked != f.body->nodes.end()) {
+      const FunctionSource& src = co_await cx.fetch<FunctionSourceQ>(k);
+      // A retained immediate caller can reference this definition. Keep its ABI and symbol
+      // while constant evaluation continues to execute the original L1.
+      if (src.def.plain_immediate_template)
+        config.unreachable_body = ir::NodeId(std::uint32_t(checked - f.body->nodes.begin()));
+    }
+  }
   if (linux) {
     const ast::Interners& in = *universe().in;
     const FunctionSource& src = co_await cx.fetch<FunctionSourceQ>(k);
@@ -1449,7 +1465,8 @@ engine::query_task<Lowered> Lower::run(engine::Ctx& cx, FnKey k) {
     }
     if (!f.body) co_return Lowered{std::nullopt, {}, f.error};
     const ir::Function& body = *f.body;
-    for (std::size_t i = 0; i < body.nodes.size(); ++i) {
+    const std::size_t node_count = config.unreachable_body ? 0 : body.nodes.size();
+    for (std::size_t i = 0; i < node_count; ++i) {
       const auto n = ir::NodeId(static_cast<std::uint32_t>(i));
       const ir::Op op = body.node(n).op;
       const bool direct = op == ir::Op::call || op == ir::Op::invoke;
@@ -1499,7 +1516,7 @@ engine::query_task<Lowered> Lower::run(engine::Ctx& cx, FnKey k) {
     // Extend outgoing narrow results for interoperability. Lowering truncates incoming results
     // to the declared width, as the System V AMD64 psABI §3.2.3 leaves excess bits unspecified.
     config.min_result_bits = 32;
-  } else if (std::ranges::contains(f.body->nodes, ir::Op::invoke, &ir::Node::op)) {
+  } else if (!config.unreachable_body && std::ranges::contains(f.body->nodes, ir::Op::invoke, &ir::Node::op)) {
     const FunctionSource& src = co_await cx.fetch<FunctionSourceQ>(k);
     if (src.def.unwind == UnwindEligibility::hosted_cleanup) config.cleanup_resume = src.cleanup_resume;
   }
@@ -1512,7 +1529,8 @@ engine::query_task<Lowered> Lower::run(engine::Ctx& cx, FnKey k) {
     auto error = co_await located_error(cx, k.tu, at, "lower: " + l2.error().message);
     co_return Lowered{std::nullopt, {}, std::move(error)};
   }
-  co_return Lowered{L2Body{std::move(*l2)}, {layout.strings().begin(), layout.strings().end()}, std::nullopt};
+  co_return Lowered{L2Body{std::move(*l2)}, {layout.strings().begin(), layout.strings().end()}, std::nullopt,
+                    config.unreachable_body.has_value()};
 }
 
 // The entities a function's code refers to (address and direct call operands).
@@ -1672,8 +1690,9 @@ std::expected<void, std::string> place_value(const ast::Interners& in, const Que
   }
   if (l.kind == ir::TypeKind::integer || l.kind == ir::TypeKind::boolean) {
     if (!in.values.is<ast::VInt>(init)) return std::unexpected("an integer variable's initializer is not an integer");
-    std::uint64_t v = in.values.get<ast::VInt>(init).bits.lo;
-    for (std::uint64_t i = 0; i < l.size; ++i) out.bytes[offset + i] = std::uint8_t(v >> (8 * i));
+    // Little-endian, the high half of a 128-bit integer after the low one.
+    ast::Bits128 v = in.values.get<ast::VInt>(init).bits;
+    for (std::uint64_t i = 0; i < l.size; ++i) out.bytes[offset + i] = std::uint8_t((i < 8 ? v.lo : v.hi) >> (8 * (i % 8)));
     return {};
   }
   if ((l.kind == ir::TypeKind::array || l.kind == ir::TypeKind::record) && in.values.is<ast::VAggregate>(init)) {
@@ -1989,18 +2008,21 @@ std::expected<obj::object, aarch64::CodegenError> assemble_linux(
     symbol_of.emplace(s.entity, index);
   };
   for (const auto& s : symbols) {
-    if (s.bind != obj::binding::local && !definitions.contains(s.entity)) {
+    const bool undefined_nonlocal = s.bind != obj::binding::local && !definitions.contains(s.entity);
+    if (undefined_nonlocal) {
       if (defined_name.contains(s.name)) {
         defined_by_another.push_back(&s);
         continue;
       }
       if (auto shared = undefined_name.find(s.name); shared != undefined_name.end()) {
+        // Both declarations refer to this one undefined ELF symbol.
+        o.symbols[shared->second].weak |= s.weak_reference;
         share(s, shared->second);
         continue;
       }
       undefined_name.emplace(s.name, static_cast<std::uint32_t>(o.symbols.size()));
     }
-    symbol_of.emplace(s.entity, o.add_symbol({s.name, s.bind, {}, 0, false}));
+    symbol_of.emplace(s.entity, o.add_symbol({s.name, s.bind, {}, 0, undefined_nonlocal && s.weak_reference}));
   }
   for (const aarch64::Symbol* s : defined_by_another) share(*s, symbol_of.at(defined_name.at(s->name).first));
   auto missing = [](EntityId e) {
@@ -2190,6 +2212,7 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
   // function's retained code. Follow them in the lowered bodies, where only the runtime edge
   // of an if consteval remains.
   std::set<std::uint32_t> used;
+  std::set<EntityId> unreachable_immediate;
   std::vector<FnKey> pending;
   auto use_entity = [&](std::uint32_t entity) {
     if (used.insert(entity).second && deferred.contains(entity))
@@ -2200,6 +2223,7 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
       const Lowered& l = bodies[i];
       if (l.error) errors.push_back(*l.error);
       if (!l.body) continue;
+      if (l.unreachable_immediate) unreachable_immediate.insert(keys[i].fn);
       use_entity(ir::raw(keys[i].fn));
       for (const auto& ref : references(l.body->f)) use_entity(ir::raw(ref.entity));
     }
@@ -2480,7 +2504,7 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
       }
       base_object_names.emplace(e.id, std::move(*base_name));
     }
-    symbols.push_back({e.id, std::move(*name), binding});
+    symbols.push_back({e.id, std::move(*name), binding, e.weak_reference});
   }
   for (const AsmHiddenSymbol& directive : tu.asm_hidden_symbols)
     if (!asm_names.at(directive.name))
@@ -2517,6 +2541,17 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
     errors.push_back({ast::Loc{def.item, def.body_offset}, "codegen: " + ms[i].get().error});
     co_return co_await locate_errors(cx, id, std::move(out));
   }
+  const auto weak_definition = [&](const FunctionDef& def) {
+    if (def.coalesced || def.explicit_weak) return true;
+    if (!unreachable_immediate.contains(def.entity) || def.decl.contracts != ast::NodeId::none ||
+        in.seqs.size(def.decl.annotations) != 0)
+      return false;
+    // Different units can retain the same implicit immediate specialization. Coalesce only its
+    // synthesized unreachable definition, keeping source linkage, visibility, and named labels.
+    const auto found = by_id.find(ir::raw(def.entity));
+    return found != by_id.end() && found->second->linkage == ast::Linkage::external &&
+           !found->second->has_local_binding() && found->second->asm_label.empty();
+  };
   auto o = [&] {
     if (linux) {
       std::vector<LinuxFunction> code;
@@ -2525,8 +2560,8 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
         const auto base_name = base_object_names.find(def.entity);
         const std::string_view name = base_name == base_object_names.end() ? std::string_view{} : base_name->second;
         const bool catch_int = def.unwind == UnwindEligibility::hosted_catch && def.hosted_catch->int_binding.has_value();
-        const bool weak = def.coalesced || def.explicit_weak;
-        code.push_back({fns[i].fn, &*ms[i].get().linux_code, weak, def.unwind != UnwindEligibility::none, name, catch_int});
+        code.push_back({fns[i].fn, &*ms[i].get().linux_code, weak_definition(def),
+                        def.unwind != UnwindEligibility::none, name, catch_int});
       }
       return assemble_linux(tu.name, code, data, symbols, virtual_table, keyless_type_info, asm_hidden, dynamic_tables);
     }
@@ -2535,7 +2570,7 @@ engine::query_task<TuValue> Tu::run(engine::Ctx& cx, TuId id) {
       const auto& def = *definitions[i];
       code.push_back({.entity = fns[i].fn, .code = *ms[i].get().code,
                       .cleanup_free_unwind = def.unwind == UnwindEligibility::cleanup_free,
-                      .weak = def.coalesced || def.explicit_weak});
+                      .weak = weak_definition(def)});
     }
     auto o = aarch64::assemble(tu.name, code, data, symbols);
     if (!o) return o;
