@@ -2174,6 +2174,14 @@ template's tokens again with the arguments bound.
   overload set argument ([temp.deduct.call]/6), "required from here" notes. Coalesced (weak)
   definitions of specializations are #124.
 
+## Derived-base function template deduction (#1144)
+
+When ordinary deduction fails for a fixed class-reference or single-pointer parameter
+with a named class-template pattern, deduction examines concrete bases at the call site.
+A unique most-derived matching specialization supplies the arguments, and the normal
+conversion checks the selected call. By-value deduction and conversion ranking through
+repeated nonvirtual base subobjects remain in [#1144](https://github.com/yrashk/ycxx/issues/1144).
+
 ## Native function pointer template arguments (#406)
 
 - A function pointer template argument can name an unambiguous externally linked C++ or C
@@ -3519,6 +3527,17 @@ What the process allocates, attributed to the engine's cells, in the trace and t
   [#294](https://github.com/yrashk/ycxx/issues/294) · [#310](https://github.com/yrashk/ycxx/issues/310) ·
   [#489](https://github.com/yrashk/ycxx/issues/489)
   [Design](docs/design/ordinary-virtual-declarations.md)
+
+## Evaluated immediate virtual calls (#1097)
+
+Fieldless completed local objects with one nonvirtual base can dispatch immediate
+virtual calls in constant evaluation. The checked receiver path selects the final
+overrider. Explicit qualification selects the named implementation. Default arguments
+come from the statically selected declaration. An unqualified call requires a known
+dynamic type. Immediate members remain absent from native vtables.
+
+Construction and destruction phases, persisted base references, and richer receiver
+layouts remain in [#1097](https://github.com/yrashk/ycxx/issues/1097).
 
 ## Virtual functions: general single inheritance (#309, 2026-11-24)
 

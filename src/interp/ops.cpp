@@ -329,6 +329,7 @@ struct Ops {
         return m.fail(Reason::ill_formed);
       object.outside = true;
       object.usable = !unknown;
+      object.unknown_reference = unknown && has(f, n, ir::Flag::unknown_reference);
     }
     m.set_lifetime(pl, p.bits == 0, M::Life::alive);
     return Flow::next;
@@ -349,20 +350,25 @@ struct Ops {
   static Flow obj__reuse(M& m, Frame&, N n) { return m.unsupported(n); }
   static Flow union__activate(M& m, Frame&, N n) { return m.unsupported(n); }
 
-  static Flow obj__check_receiver(M& m, Frame& f, N n) {
-    if (!constant(m)) return Flow::next;
+  static Flow check_member_receiver(M& m, Frame& f, N n, M::Place& place) {
     const auto& pointer = m.shape(m.type_of(f, f.fn->operands_of(n)[1]));
     if (pointer.kind != M::Kind::pointer || pointer.is_nullptr ||
         !m.in_->types.is<ast::TClass>(m.in_->canonical(pointer.inner)))
       return m.fail(Reason::ill_formed);
     const Value receiver = m.operand(f, n, 1);
-    M::Place place;
     if (Flow fl = m.locate(receiver, {}, pointer.inner, M::Use::lifetime, false, place); fl != Flow::next) return fl;
     // [class.cdtor] permits calls during construction and destruction. Check a completed
     // lifetime independently of the fields, which the call need not read.
     const auto& object = m.objects_[place.obj];
-    if (receiver.bits == 0 && object.record_life == M::Life::after) return m.fail(Reason::outside_lifetime);
+    if (object.record_life == M::Life::after || (place.primary_base && object.primary_base_life == M::Life::after))
+      return m.fail(Reason::outside_lifetime);
     return Flow::next;
+  }
+
+  static Flow obj__check_receiver(M& m, Frame& f, N n) {
+    if (!constant(m)) return Flow::next;
+    M::Place place;
+    return check_member_receiver(m, f, n, place);
   }
 
   static Flow nullptr_value(M& m, Frame& f, N n) {
@@ -415,8 +421,10 @@ struct Ops {
     M::Place from, to;
     if (Flow fl = m.locate(src, {}, t, M::Use::read, false, from); fl != Flow::next) return fl;
     if (Flow fl = m.locate(dst, {}, t, M::Use::write, false, to); fl != Flow::next) return fl;
-    if (src.bits != 0 || dst.bits != 0 || !m.objects_[from.obj].record || !m.objects_[to.obj].record ||
-        from.ncells != to.ncells)
+    const auto* src_record = m.objects_[from.obj].record;
+    const auto* dst_record = m.objects_[to.obj].record;
+    if (src.bits != 0 || dst.bits != 0 || !src_record || !dst_record ||
+        src_record->dynamic || dst_record->dynamic || from.ncells != to.ncells)
       return m.unsupported(n);
     return m.copy_record(to, from);
   }
@@ -436,7 +444,8 @@ struct Ops {
 
   // A call to `e`: its body is fetched once per evaluation; in constant mode it must be a defined
   // constexpr function ([expr.const]).
-  static Flow call_entity(M& m, Frame& f, N n, EntityId e, u32 first_arg) {
+  static Flow call_entity(M& m, Frame& f, N n, EntityId e, u32 first_arg,
+                          std::optional<Value> adjusted_receiver = {}) {
     if (constant(m) && has(f, n, ir::Flag::not_constexpr)) return m.fail(Reason::not_constexpr);
     auto it = m.bodies_.find(std::to_underlying(e));
     if (it == m.bodies_.end()) {
@@ -446,7 +455,26 @@ struct Ops {
     }
     if (!it->second.body) return m.fail(it->second.unsupported ? Reason::callee_unsupported : Reason::undefined_function);
     if (constant(m) && !it->second.is_constexpr) return m.fail(Reason::not_constexpr);
-    return m.enter(f, n, it->second.body, e, f.fn->operands_of(n).subspan(first_arg));
+    const auto args = f.fn->operands_of(n).subspan(first_arg);
+    std::optional<Value> initializing;
+    if (it->second.default_constructs != EntityId::none) {
+      if (args.empty()) return m.fail(Reason::ill_formed);
+      const auto& pointer = m.shape(m.type_of(f, args.front()));
+      if (pointer.kind != M::Kind::pointer || pointer.is_nullptr) return m.fail(Reason::ill_formed);
+      const auto type = m.in_->canonical(pointer.inner);
+      if (!m.in_->types.is<ast::TClass>(type) || m.in_->types.get<ast::TClass>(type).entity != it->second.default_constructs)
+        return m.fail(Reason::ill_formed);
+      const Value receiver = m.reg(f, args.front());
+      M::Place place;
+      if (Flow fl = m.locate(receiver, {}, type, M::Use::lifetime, false, place); fl != Flow::next) return fl;
+      const auto& object = m.objects_[place.obj];
+      if (object.outside || !object.record || !object.record->dynamic || object.record_life != M::Life::before)
+        return m.unsupported(n);
+      initializing = receiver;
+    }
+    const Flow flow = m.enter(f, n, it->second.body, e, args, adjusted_receiver);
+    if (flow == Flow::called) m.frames_.back().initializing_dynamic_subobject = initializing;
+    return flow;
   }
   static Flow call(M& m, Frame& f, N n) {
     const EntityId callee{u32(imms(f, n)[0])};
@@ -463,6 +491,37 @@ struct Ops {
     if (c.kind != VKind::function) return m.fail(Reason::ill_formed);
     return call_entity(m, f, n, EntityId(c.ref), 2);
   }
+  static Flow call_immediate_virtual(M& m, Frame& f, N n) {
+    if (!constant(m)) return m.unsupported(n);
+    M::Place place;
+    if (Flow fl = check_member_receiver(m, f, n, place); fl != Flow::next) return fl;
+    const EntityId selected{u32(imms(f, n)[0])};
+    const auto& object = m.objects_[place.obj];
+    if (imms(f, n)[1]) {
+      // [class.cdtor]/1: using a non-static member before construction starts is undefined.
+      // The completed-object profile and opaque reference imports both have a live receiver.
+      if (object.record_life != M::Life::alive || (place.primary_base && object.primary_base_life != M::Life::alive))
+        return m.fail(Reason::outside_lifetime);
+      return call_entity(m, f, n, selected, 1);
+    }
+
+    if (object.outside) return m.fail(Reason::unknown_dynamic_type);
+    if (!object.record || !object.record->dynamic || !m.config_.immediate_virtual_target) return m.unsupported(n);
+    if (!object.dynamic_initialized || object.record_life != M::Life::alive)
+      return m.fail(Reason::immediate_dispatch_phase);
+    const auto cls = [&](QualType t) { return m.in_->types.get<ast::TClass>(m.in_->canonical(t)).entity; };
+    const EntityId receiver_class = cls(place.type);
+    const EntityId dynamic_class = cls(object.type);
+    const auto target = m.config_.immediate_virtual_target(selected, receiver_class, dynamic_class);
+    if (!target) return m.unsupported(n);
+    if (target->owner == receiver_class) return call_entity(m, f, n, target->function, 1);
+    if (target->owner != dynamic_class) return m.fail(Reason::ill_formed);
+    // The supported override is declared in the complete class. Discard the verified
+    // direct-base path and pass the address of that same complete object.
+    const Value self{VKind::object, false, place.obj, 0};
+    return call_entity(m, f, n, target->function, 1, self);
+  }
+
   // `ir::BuiltinFn`; only constant evaluation reaches one (`consteval_br`).
   static Flow builtin(M& m, Frame& f, N n) {
     if (!constant(m) || f.fn->operands_of(n).size() != 4) return m.unsupported(n);
@@ -559,6 +618,16 @@ struct Ops {
     for (ir::ValueId v : ops.subspan(1)) {
       vals.push_back(m.reg(f, v));
       types.push_back(m.type_of(f, v));
+    }
+    if (const auto init = f.initializing_dynamic_subobject) {
+      auto& object = m.objects_[init->ref];
+      if (init->bits != 0) {
+        // Initializing a base does not finish the enclosing object.
+        object.primary_base_life = M::Life::alive;
+      } else {
+        if (object.record->primary_base && object.primary_base_life != M::Life::alive) return m.fail(Reason::outside_lifetime);
+        object.dynamic_initialized = true;
+      }
     }
     std::size_t depth = m.frames_.size() - 1;
     std::erase_if(m.groups_, [&](const M::Group& g) { return g.frame >= depth; });

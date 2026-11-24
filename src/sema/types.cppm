@@ -1006,6 +1006,25 @@ public:
     return r && r->defined;
   }
 
+  // [class.default.ctor]: the checked implicit default initialization of a fieldless dynamic
+  // root or a fieldless class with one public nonvirtual root base. A root may be abstract
+  // because its constructor can initialize a base subobject.
+  bool constexpr_dynamic_default(EntityId cls) const {
+    const auto eligible = [](const ClassRec* r) {
+      return r && r->defined && r->dynamic && !r->virtual_layout_unsupported && !r->unapplied_layout &&
+             r->fields.empty() && r->destructor_usable && r->destructor == EntityId::none &&
+             r->implicit_default_ctor != EntityId::none;
+    };
+    const auto* r = find(cls);
+    if (!eligible(r)) return false;
+    if (r->bases.empty()) return true;
+    if (r->bases.size() != 1) return false;
+    const auto& edge = r->bases.front();
+    const auto* base = find(edge.cls);
+    return !edge.virtual_ && !edge.dependent_in_pattern && edge.access == ast::Access::public_ &&
+           eligible(base) && base->bases.empty();
+  }
+
   // [class.prop]: compute the source type property from complete declarations in this unit.
   // Stored members and bases need complete types; a missing record cannot supply a layout fact.
   std::optional<bool> standard_layout(EntityId root) const {
