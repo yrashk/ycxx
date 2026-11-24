@@ -58,11 +58,11 @@ equivalent class with implicit assignment.
 [[dcl.fct.def.default]](https://eel.is/c++draft/dcl.fct.def.default) ·
 [[class.copy.assign]](https://eel.is/c++draft/class.copy.assign)
 
-Namespace-scope class templates also accept a deleted copy assignment without a
-ref-qualifier on its first in-class declaration. Instantiating the class replays
-the member declaration with the specialization's type. The existing deleted flag
-remains available to member overload resolution and implicit special-member
-classification. Template member ref-qualifiers are tracked in #311.
+Namespace-scope class templates also accept a deleted copy assignment on its
+first in-class declaration, including with an lvalue or rvalue ref-qualifier.
+Instantiating the class replays the member declaration with the specialization's
+type and the written object ref-qualifier. The existing deleted flag remains
+available to member overload resolution and implicit special-member classification.
 [[temp.inst]](https://eel.is/c++draft/temp.inst) ·
 [[dcl.fct.def.delete]](https://eel.is/c++draft/dcl.fct.def.delete) ·
 [#311](https://github.com/yrashk/ycxx/issues/311) ·
