@@ -242,6 +242,8 @@ struct Region {
   std::vector<std::string> file_names;
   // The expansions `TokLoc::expansion` indexes; [0] is unused.
   std::vector<Expansion> expansions{Expansion{}};
+  // Directive messages keyed by text fingerprint, independent of session spelling numbers.
+  std::vector<std::pair<Fp128, std::string>> directive_messages;
   // Engine trace details, rendered while the source files of this preprocessing run are open.
   std::string error_details;
   // Token ranges where a pack pragma can change a record's layout. Layout still uses its

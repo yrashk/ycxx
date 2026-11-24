@@ -33,7 +33,7 @@ export import :cond;
 
 namespace {
 // Preserve the bit values of earlier source configurations.
-constexpr std::uint8_t freestanding_bit = 1, no_exceptions_bit = 2, no_rtti_bit = 4, pic_bit = 0x08;
+constexpr std::uint8_t freestanding_bit = 1, no_exceptions_bit = 2, no_rtti_bit = 4, pic_bit = 0x08, small_pic_bit = 0x10;
 }
 
 export namespace ycxx::pp {
@@ -80,6 +80,8 @@ Message message(Session& s, FileId file, std::string_view presumed, const Diag& 
 // The same, from the text of the file the diagnostic is in and the spellings of the session that
 // preprocessed it.
 Message message(const Spellings& sp, std::string_view text, std::string_view presumed, const Diag& d);
+// Render a diagnostic emitted by Pp, whose directive text lives in the returned region.
+std::string render_diagnostic(const Region& region, lex::LexDiag kind, std::span<const u64> args);
 // The process's session for a configuration (the one `Pp` uses for a unit with that `SourceOf`).
 // Sessions live as long as the process: the regions `Pp` returns hold their spellings' numbers.
 Session& session_for(const Config& cfg);
@@ -153,7 +155,8 @@ void serialize_into(engine::Sink& out, const Source& s) {
   if (s.config.freestanding) modes |= freestanding_bit;
   if (!s.config.exceptions_enabled) modes |= no_exceptions_bit;
   if (!s.config.rtti_enabled) modes |= no_rtti_bit;
-  if (s.config.pic) modes |= pic_bit;
+  if (s.config.pic == 2) modes |= pic_bit;
+  if (s.config.pic == 1) modes |= small_pic_bit;
   engine::serialize(out, modes);
 }
 Source deserialize_from(engine::Source& in, std::type_identity<Source>) {
@@ -174,11 +177,13 @@ Source deserialize_from(engine::Source& in, std::type_identity<Source>) {
   if (calls > 1 + std::to_underlying(ast::CallTriviality::apple)) in.fail();
   if (calls != 0) s.config.call_triviality = static_cast<ast::CallTriviality>(calls - 1);
   const auto modes = engine::deserialize<std::uint8_t>(in);
-  if ((modes & ~(freestanding_bit | no_exceptions_bit | no_rtti_bit | pic_bit)) != 0) in.fail();
+  if ((modes & ~(freestanding_bit | no_exceptions_bit | no_rtti_bit | pic_bit | small_pic_bit)) != 0 ||
+      (modes & (pic_bit | small_pic_bit)) == (pic_bit | small_pic_bit))
+    in.fail();
   s.config.freestanding = (modes & freestanding_bit) != 0;
   s.config.exceptions_enabled = (modes & no_exceptions_bit) == 0;
   s.config.rtti_enabled = (modes & no_rtti_bit) == 0;
-  s.config.pic = (modes & pic_bit) != 0;
+  s.config.pic = (modes & pic_bit) != 0 ? 2 : (modes & small_pic_bit) != 0 ? 1 : 0;
   return s;
 }
 
@@ -291,6 +296,10 @@ struct FileNames {
 FileNames& file_names() {
   static FileNames n;
   return n;
+}
+
+bool has_directive_text(lex::LexDiag kind) {
+  return kind == lex::LexDiag::error_directive || kind == lex::LexDiag::warning_directive;
 }
 
 }  // namespace ycxx::pp
@@ -422,6 +431,15 @@ Preprocessed preprocess(std::string_view text, std::string_view path) {
   return preprocess(s, text, path);
 }
 
+std::string render_diagnostic(const Region& region, lex::LexDiag kind, std::span<const u64> args) {
+  if (has_directive_text(kind)) {
+    const auto it = std::ranges::find(region.directive_messages, Fp128{args[0], args[1]},
+                                      &std::pair<Fp128, std::string>::first);
+    if (it != region.directive_messages.end()) return it->second;
+  }
+  return lex::render(kind, args);
+}
+
 Message message(Session& s, FileId file, std::string_view presumed, const Diag& d) {
   const Files::Content* c = s.files.content(file);
   return message(s.spellings, c ? std::string_view(c->text) : std::string_view(), presumed, d);
@@ -432,7 +450,7 @@ Message message(const Spellings& s, std::string_view file_text, std::string_view
   auto at = std::ranges::upper_bound(starts, d.offset);
   std::string text = lex::render(d.kind, d.args);
   // #error and #warning say their line's text, a spelling of the session.
-  if (d.kind == lex::LexDiag::error_directive || d.kind == lex::LexDiag::warning_directive)
+  if (has_directive_text(d.kind))
     text = s.name(static_cast<u32>(d.args[0]));
   u32 line = static_cast<u32>(at - starts.begin());
   std::string name(presumed);
@@ -495,8 +513,9 @@ std::expected<bool, std::string> take_option(std::span<const std::string_view> a
     cfg.rtti_enabled = a == "-frtti";
     return true;
   }
-  if (a == "-fPIC") {
-    cfg.pic = true;
+  // The last of `-fpic`, `-fPIC` and `-fno-pic` wins, as with Clang and GCC.
+  if (a == "-fpic" || a == "-fPIC" || a == "-fno-pic" || a == "-fno-PIC") {
+    cfg.pic = a == "-fPIC" ? 2 : a == "-fpic" ? 1 : 0;
     return true;
   }
   return false;
@@ -554,8 +573,16 @@ engine::query_task<Region> Pp::run(engine::Ctx& cx, FileId file) {
       std::vector<u32> starts;
     };
     std::map<u16, FileLines> files;
-    for (const Diag& d : result.diags) {
+    for (Diag& d : result.diags) {
       const lex::message info = lex::message_of(d.kind);
+      if (has_directive_text(d.kind)) {
+        const std::string_view text = s.spellings.name(static_cast<u32>(d.args[0]));
+        const Fp128 key = fingerprint128(text);
+        auto& messages = result.region.directive_messages;
+        if (std::ranges::find(messages, key, &std::pair<Fp128, std::string>::first) == messages.end())
+          messages.emplace_back(key, text);
+        d.args = {key.lo, key.hi};
+      }
       if (info.severity != lex::Severity::error || info.text[0] == 0) continue;
       auto [it, fresh] = files.try_emplace(d.file);
       if (fresh) {
@@ -570,7 +597,7 @@ engine::query_task<Region> Pp::run(engine::Ctx& cx, FileId file) {
         std::format_to(std::back_inserter(result.region.error_details), "{}:{}:{}: ", name,
                        line - starts.begin(), offset - *(line - 1) + 1);
       }
-      result.region.error_details += lex::render(d.kind, d.args);
+      result.region.error_details += render_diagnostic(result.region, d.kind, d.args);
       result.region.error_details += '\n';
     }
     return result;

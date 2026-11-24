@@ -23,19 +23,19 @@ def check_consumer_symbols(readelf, scope, env, obj):
     assert not names & forbidden, metadata
 
 
-def check_noexcept_guard(target, scope, cold, resident):
-    guards = ('native output for a translation unit with virtual member functions is not supported yet',
-              'a call to a virtual member function is not supported yet')
-    diagnostics = []
+def check_potentially_throwing_slot(target, scope, cold, resident):
+    # Without `noexcept` the root is no longer the borrowed pure-interface profile but an ordinary
+    # dynamic class (#309): the consumer still compiles, cold and resident alike, and still emits
+    # no table, RTTI or pure-virtual handler for a root it never constructs.
+    objects = []
     for mode, env in (('cold', cold), ('resident', resident)):
-        obj = f'rejected-{mode}.o'
+        obj = f'throwing-{mode}.o'
         result = subprocess.run([*target, '-c', 'consumer.cpp', '-o', obj], cwd=scope, env=env,
                                 capture_output=True, text=True, timeout=30)
-        messages = [line for line in result.stderr.splitlines() if any(guard in line for guard in guards)]
-        assert result.returncode > 0 and messages, result.stdout + result.stderr
-        assert not (scope / obj).exists(), obj
-        diagnostics.append(messages)
-    assert diagnostics[0] == diagnostics[1], diagnostics
+        assert result.returncode == 0, result.stdout + result.stderr
+        objects.append((scope / obj).read_bytes())
+    assert objects[0] == objects[1]
+    return 'throwing-cold.o'
 
 
 def native_compilers(host, scope, env):
@@ -89,7 +89,7 @@ def main():
             alpha = b'    virtual int alpha(int value) const noexcept = 0;\n'
             assert source.count(zeta + alpha) == 1
             header.write_bytes(source.replace(zeta, zeta.replace(b' noexcept', b'')))
-            check_noexcept_guard(target, scope, cold, resident)
+            check_consumer_symbols(readelf, scope, cold, check_potentially_throwing_slot(target, scope, cold, resident))
             header.write_bytes(source)
             assert build_case() == original
             header.write_bytes(source.replace(zeta + alpha, alpha + zeta))

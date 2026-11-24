@@ -147,6 +147,8 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
   - Hit again on #218, with oracles (`--cxx clang`): it built beside a background `tools/build`,
     and two Ninja runs in one directory broke a module ("imports must be built before being
     imported"). The rebuild cost 15 minutes on a loaded machine. Oracle runs need no build either.
+  - Hit again on #309: a test-writing subagent's oracle run built for 37 minutes beside the
+    implementer's build. Give a test author's brief `tools/test --cxx clang affected <path>`.
   - Learned on #659.
 - **A reviewer running your binary blocks your rebuilds.** On #337 the reviewer probed with the
   worktree's `build/bin/ycxx`, so the next step could not be built for 15 minutes.
@@ -159,7 +161,24 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
   compiling the same build directory: the result would not have described any commit.
   - Do: commit, start the fast run, and spend its 10 minutes on documents, issues and the PR body.
     To keep coding meanwhile, build into a scratchpad build directory (the entry above).
+  - Stopping a `tools/test` that waits on a running `tools/build` in the same directory leaves
+    half-built modules ("failed to read compiled module"). Let the build finish, then rebuild.
+- **On a loaded machine the fast gate fails with timeouts, not failures.** On #330, with other
+  sessions building and load averages of 120–250, two fast runs failed. The CTests had 10 s
+  executable timeouts, `daemon.trace_tui` has a 2 s budget, and draft tests that include
+  `<iostream>` have a 60 s timeout. Every one of them passed on a re-run. About an hour went to
+  re-running and checking.
+  - Do: check `uptime` first. Re-run only what timed out: `ctest --test-dir build -R '<names>'`,
+    then `tools/test failed affected core` to skip the rebuild. A test that times out only under
+    the driver is waiting in the daemon's queue. `YCXX_DAEMON=0 /usr/bin/time -p build/bin/ycxx …`
+    shows its own CPU time.
+  - Learned on #330.
   - Learned on #218.
+  - The same holds for the first build of a fresh worktree. On #295, edits made while it built went
+    into the binary meant to show the new tests failing. A sibling worktree's binary of `main`
+    served instead: check its commit with `git merge-base --is-ancestor`, copy it to the
+    scratchpad, and run it as `YCXX=<copy> tools/test …`. Two `cmake --build` runs started in
+    one build directory also collide, and one stops with "subcommand failed".
 
 ## Working with Fable subagents
 
@@ -541,6 +560,12 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
   - Do: mutate a branch that some test input must take, and check that the suite turns red.
   - Rule: DECISIONS §5.6.
   - Learned on #33.
+
+- **Linux x86-64 run tests can be checked from the Mac without building ycxx in Docker.** Compile
+  with the Mac's ycxx (`ycxx cxx --target=x86_64-pc-linux-gnu -c`), then link and run with `g++`
+  in the `ycxx-linux-amd64` image (`docker run --platform linux/amd64 -v dir:/w`). On #309 this
+  ran 13 mixed-object tests in about a minute, against 25 minutes for an emulated build.
+  - Learned on #309.
 
 ## Data the front end needs
 

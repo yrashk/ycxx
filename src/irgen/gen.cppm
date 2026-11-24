@@ -91,6 +91,8 @@ struct FunctionInput {
   bool native_array_new = false;  // the backend's Linux x86-64 allocation in a certified frame
   std::span<const ast::EntityId> nonthrowing_functions{};  // native declarations, sorted by entity
   ast::EntityId destructor_table = ast::EntityId::none;
+  // The table a dynamic class's constructor installs once its base subobject is initialized (#309).
+  ast::EntityId constructor_table = ast::EntityId::none;
   // The initialized prefix of a flat aggregate while evaluating one selected default.
   struct InitializedFields {
     ast::EntityId owner = ast::EntityId::none;
@@ -424,6 +426,7 @@ class Gen {
     if (fn_.this_type) this_ = b_.param(block_, 1);
     if (result_param_) result_ = Place{b_.param(block_, result_param_), rt};
     loc_ = fn_.body_offset;
+    pending_constructor_table_ = this_ ? fn_.constructor_table : ast::EntityId::none;
     push_scope();
     // The parameters are the first body locals (#41), named by `LocalRef` like the others.
     slots_.assign(in_.seqs.size(fn_.body.locals), std::nullopt);
@@ -621,10 +624,30 @@ class Gen {
     stmt(child(handler_at, handler.body));
   }
 
+  // Itanium ABI §2.5.2: offset-to-top and RTTI precede the table's address point, which the
+  // vptr at offset zero of `*this` holds.
+  void install_vptr(ast::EntityId table_entity) {
+    const auto byte = ast::builtin(facts_.interners(), ast::Builtin::unsigned_char);
+    const auto table_type = facts_.pointer_to(byte);
+    const auto vptr_type = facts_.pointer_to(table_type);
+    const auto table = pure(ir::Op::global, table_type, {}, {word(table_entity)});
+    const auto header_size = int_constant(facts_.ptrdiff_type(), 2 * ast::x86_64_linux.pointer_size);
+    const auto address_point = pure(ir::Op::ptr_add, table_type, {table, header_size}, {word(ty(byte))});
+    const auto vptr = pure(ir::Op::ptr_cast, vptr_type, {*this_}, {word(ty(vptr_type))});
+    store({vptr, table_type}, address_point);
+  }
+
   void stmt(At a) {
     if (a.id == NodeId::none) return;
     ensure_live();
     Position here(*this, a.offset);
+    // [class.cdtor], [class.base.init]: a dynamic class's constructor installs its own table
+    // after its base subobject and before its members. A delegating constructor's target does.
+    if (pending_constructor_table_ != ast::EntityId::none && a.id != fn_.body.tree &&
+        !(is<ast::MemberInit>(a) && get<ast::MemberInit>(a).field == ~0u)) {
+      if (!is<ast::DelegatingInit>(a)) install_vptr(pending_constructor_table_);
+      pending_constructor_table_ = ast::EntityId::none;
+    }
     if (is<ast::Compound>(a)) {
       auto s = get<ast::Compound>(a);
       push_scope();
@@ -662,18 +685,8 @@ class Gen {
       });
     } else if (is<ast::Destructor>(a)) {
       auto d = get<ast::Destructor>(a);
-      if (fn_.destructor_table != ast::EntityId::none) {
-        // Itanium ABI §2.5.2: offset-to-top and RTTI precede the table's address point.
-        // [class.cdtor]: virtual calls during destruction use the destructor's class.
-        const auto byte = ast::builtin(facts_.interners(), ast::Builtin::unsigned_char);
-        const auto table_type = facts_.pointer_to(byte);
-        const auto vptr_type = facts_.pointer_to(table_type);
-        const auto table = pure(ir::Op::global, table_type, {}, {word(fn_.destructor_table)});
-        const auto header_size = int_constant(facts_.ptrdiff_type(), 2 * ast::x86_64_linux.pointer_size);
-        const auto address_point = pure(ir::Op::ptr_add, table_type, {table, header_size}, {word(ty(byte))});
-        const auto vptr = pure(ir::Op::ptr_cast, vptr_type, {*this_}, {word(ty(vptr_type))});
-        store({vptr, table_type}, address_point);
-      }
+      // [class.cdtor]: virtual calls during destruction use the destructor's class.
+      if (fn_.destructor_table != ast::EntityId::none) install_vptr(fn_.destructor_table);
       for (ast::Child c : ast_.children(d.members)) epilogue_.push_back(child(a, c));
       stmt(child(a, d.body));
     } else if (is<ast::DeclStmt>(a)) {
@@ -1686,8 +1699,10 @@ class Gen {
     }
     if (is<ast::BuiltinCall>(a)) {
       auto b = get<ast::BuiltinCall>(a);
-      if (b.op == ast::BuiltinOp::trap) {
-        emit(ir::Op::unreachable, {}, {}, {}, ir::bit(ir::Flag::explicit_trap));
+      if (b.op == ast::BuiltinOp::trap || b.op == ast::BuiltinOp::unreachable) {
+        // Native code traps on both; constant evaluation names which was reached ([expr.const]).
+        const auto flag = b.op == ast::BuiltinOp::trap ? ir::Flag::explicit_trap : ir::Flag::assumed_unreachable;
+        emit(ir::Op::unreachable, {}, {}, {}, ir::bit(flag));
         live_ = false;
         // A parent expression can still emit its remaining operands or join edge.
         ensure_live();
@@ -1698,7 +1713,8 @@ class Gen {
       switch (b.op) {
         case ast::BuiltinOp::fabs: return pure(ir::Op::fabs, t, {value});
         case ast::BuiltinOp::strlen: return string_length(t, info(arg).type, value);
-        case ast::BuiltinOp::trap: std::unreachable();
+        case ast::BuiltinOp::trap:
+        case ast::BuiltinOp::unreachable: std::unreachable();
       }
       std::unreachable();
     }
@@ -2112,10 +2128,15 @@ class Gen {
   ValueId new_object(At a) {
     auto n = get<ast::NewObject>(a);
     At init = child(a, n.init);
-    if (!fn_.thunk && !nonthrowing_initializer(init))
+    ast::QualType p = n.info.type;
+    // A class's constructor may throw, and [expr.new]/28 then calls the deallocation function.
+    // That needs an exceptional edge, which only certified frames get (#1135). A frame with a
+    // new-expression is never certified (the pipeline's unwind proof admits no NewObject), so
+    // the frame has no unwind information and such an exception terminates the program there,
+    // before a caller could observe the unreleased storage.
+    if (!fn_.thunk && cls(facts_.pointee(p)) != TypeClass::record && !nonthrowing_initializer(init))
       throw Unsupported{"cleanup for a potentially throwing new-initializer"};
     ValueId storage = rvalue(child(a, n.allocation));
-    ast::QualType p = n.info.type;
     if (n.placement) {
       ValueId objects[] = {storage};
       std::uint64_t types[] = {word(ty(facts_.pointee(p)))};
@@ -2126,11 +2147,43 @@ class Gen {
     // initializer can then fall back to runtime without evaluating the new-initializer.
     if (fn_.thunk) return object;
     ast::QualType t = facts_.pointee(p);
-    initialize({object, t}, init, false);
+    // [dcl.init.general]/9: value-initialization zero-initializes a class object before any
+    // constructor runs, and the allocated storage is not zero. Copy a zero object into it.
+    // Zero it in place: a zero temporary would put the whole object on the stack.
+    const bool zeroed = cls(t) == TypeClass::record && value_initializes(init);
+    if (zeroed) zero_bytes(storage, allocated_size(child(a, n.allocation)));
+    initialize({object, t}, init, zeroed);
     ValueId objects[] = {object};
     std::uint64_t types[] = {word(ty(t))};
     stateful(ir::Op::obj__begin, {}, objects, types);
     return object;
+  }
+
+  // The byte count a new-expression passes to its allocation function: sema's `sizeof(T)`.
+  std::uint64_t allocated_size(At allocation) {
+    if (!is<ast::Call>(allocation)) unsupported(allocation, "as an allocation");
+    const auto args = ast_.children(get<ast::Call>(allocation).args);
+    At size = args.empty() ? At{} : strip_parens(child(allocation, args.front()));
+    if (args.empty() || !is<ast::Literal>(size) || !in_.values.is<ast::VInt>(get<ast::Literal>(size).value))
+      unsupported(allocation, "with a computed size");
+    return in_.values.get<ast::VInt>(get<ast::Literal>(size).value).bits.lo;
+  }
+  // Stores zero to each of `count` bytes from `storage`, in a loop.
+  void zero_bytes(ValueId storage, std::uint64_t count) {
+    const auto byte = ast::builtin(facts_.interners(), ast::Builtin::unsigned_char);
+    const auto bytes = facts_.pointer_to(byte);
+    const ValueId first = pure(ir::Op::ptr_cast, bytes, {storage}, {word(ty(bytes))});
+    const ast::QualType index_type = facts_.ptrdiff_type();
+    const ValueId end = int_constant(index_type, std::int64_t(count));
+    ir::BlockId head = new_block({index_type}), body = new_block(), done = new_block();
+    br(head, {int_constant(index_type, 0)});
+    enter(head);
+    const ValueId index = b_.param(head, 1);
+    cond_br(pure(ir::Op::icmp, facts_.bool_type(), {index, end}, {std::to_underlying(ir::Pred::slt)}), edge(body), edge(done));
+    enter(body);
+    store({pure(ir::Op::ptr_add, bytes, {first, index}, {word(ty(byte))}), byte}, zero(byte));
+    br(head, {arith(ast::BinaryOp::add, index_type, index, int_constant(index_type, 1))});
+    enter(done);
   }
 
   ValueId new_array(At a) {
@@ -2154,10 +2207,18 @@ class Gen {
   void delete_object(At a) {
     if (fn_.thunk) unsupported(a, "in constant evaluation");
     auto d = get<ast::DeleteObject>(a);
-    ValueId addr = rvalue(child(a, d.address));
-    if_nonnull(addr, [&] {
-      stateful(ir::Op::obj__end, {}, std::span(&addr, 1));
-      ValueId args[] = {addr, rvalue(child(a, d.size))};
+    At operand = child(a, d.address);
+    ValueId object = rvalue(operand);
+    if_nonnull(object, [&] {
+      // [expr.delete]/6: the destructor ends the object, then its storage is released.
+      if (d.destructor != ast::EntityId::none) {
+        ValueId self[] = {object};
+        call_fn(d.destructor, facts_.int_type(), self, ImplicitObject::constructor_or_destructor, true);
+      }
+      stateful(ir::Op::obj__end, {}, std::span(&object, 1));
+      ast::QualType void_pointer = facts_.pointer_to(d.info.type);
+      ValueId address = pure(ir::Op::ptr_cast, void_pointer, {object}, {word(ty(void_pointer))});
+      ValueId args[] = {address, rvalue(child(a, d.size))};
       call_fn(d.function, d.info.type, args);
     });
   }
@@ -2642,6 +2703,7 @@ class Gen {
   std::set<uint32_t> bypassed_locals_;       // discovered from scope transitions during first emission
   std::map<uint32_t, Place> jump_bindings_;  // local index to the address of its current instance
   std::optional<ValueId> this_;              // a non-static member function's `this`
+  ast::EntityId pending_constructor_table_ = ast::EntityId::none;  // installed before the first member
   std::optional<Place> result_;              // the object a class result initializes
   uint32_t byval_params_ = 0, result_param_ = 0;  // as ir::Function's
   std::vector<std::vector<Ending>> temps_;   // the open full-expressions' temporaries
