@@ -2765,6 +2765,22 @@ the same IR `unreachable`, flagged `assumed_unreachable`. Native code traps as a
 constant evaluation that reaches it fails with "execution reached __builtin_unreachable()"
 ([expr.const]). IR node flags are 16 bits wide to make room for the flag.
 
+## Function spelling for type ordering (#1361)
+
+`__PRETTY_FUNCTION__` in a namespace-scope function body is a static `const char[N]` lvalue.
+Function template definitions defer the text and array bound until the selected body is
+replayed. The NUL-terminated text uses canonical argument types and qualified names, so
+aliases of a type have the same spelling. It distinguishes nested types, qualifications,
+indirections, and class template arguments in the supported domain. The spelling uses the
+declared signature, including any return placeholder. Constant evaluation and native code
+use the same storage path as a string literal.
+
+Spelling is supported for the standard fundamental types, 128-bit integers, named classes
+and enums with named scopes, and their array, function, pointer and reference forms. Argument
+lists can include packs, named templates and integral, floating or null pointer values.
+Other arguments diagnose an unsupported spelling when the body is instantiated.
+[#1361](https://github.com/yrashk/ycxx/issues/1361)
+
 ## Source location builtins (#327)
 
 `__builtin_LINE()` is a zero-argument `unsigned int` constant expression. It uses the presumed
