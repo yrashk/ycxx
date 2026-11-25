@@ -2524,7 +2524,7 @@ public:
   NodeId default_argument(QualType t) {
     const u32 source_begin = pos();
     const auto calls_before = s_->dependent_calls.size();
-    sema::Sema::DefaultLineScope line(*s_);
+    sema::Sema::DefaultSourceScope source(*s_);
     // Not in the parameters of a parameter's own function type ([dcl.fct.default]/3).
     if (in_params_ > 1) s_->diag(pos(), Diag::default_arg_not_allowed);
     Ex e;
@@ -2553,8 +2553,11 @@ public:
       value.source_begin = source_begin;
       value.source_end = pos();
       value.dependent_calls = s_->builder().seq(std::span<const u32>(s_->dependent_calls).subspan(calls_before));
-    } else if (line.observed) {
-      e = s_->node(ast::SourceLineContext{e.info, sema::Sema::at(e, e.begin), 0}, e.begin, e.end, e.info);
+    } else if (source.observed.line || source.observed.descriptor_type != ast::EntityId::none) {
+      e = s_->node(ast::DefaultSourceContext{.info = e.info, .arg = sema::Sema::at(e, e.begin),
+                                             .observes_line = source.observed.line,
+                                             .descriptor_type = source.observed.descriptor_type},
+                   e.begin, e.end, e.info);
     }
     value.info = e.info;
     value.arg = sema::Sema::at(e, e.begin);
@@ -3327,7 +3330,7 @@ public:
     std::size_t n = s_->diag_count();
     u32 at = pos();
     Ex e = binary_expression(3);
-    if (s_->diag_count() > n || !e.ok()) {
+    if (s_->has_error_since(n) || !e.ok()) {
       if (templated) s_->drop_failures(n);
       return Truth::invalid;
     }
@@ -3357,6 +3360,7 @@ public:
     bump();
     s_->push_scope();
     const bool templated = s_->templated();
+    const bool substituting = s_->instantiating();
     const std::size_t param_diags = s_->diag_count();
     const std::size_t first_local = s_->locals().size();
     auto close_requires_scope = [&] {
@@ -3375,15 +3379,24 @@ public:
       close_requires_scope();
       return {NodeId::none, begin, pos()};
     }
+    auto skip_requirements = [&](u32 from) {
+      i_ = from;
+      half_ = false;
+      u32 depth = 0;
+      while (!at_end()) {
+        if (is(Tk::l_brace)) ++depth;
+        else if (is(Tk::r_brace)) {
+          if (depth == 0) break;
+          --depth;
+        }
+        bump();
+      }
+    };
     // [expr.prim.req.general]: substitution into the local parameter declarations can fail
     // before a requirement is checked. Consume the body without analysing it in that case.
     if (!ok) {
-      int depth = 1;
-      while (depth > 0 && !at_end()) {
-        if (is(Tk::l_brace)) ++depth;
-        else if (is(Tk::r_brace)) --depth;
-        bump();
-      }
+      skip_requirements(i_);
+      accept(Tk::r_brace);
       close_requires_scope();
       if (!templated) return {NodeId::none, begin, pos()};
       s_->drop_failures(param_diags);
@@ -3396,6 +3409,7 @@ public:
       std::size_t n = s_->diag_count();
       u32 before = i_;
       bool failed = false;
+      auto substitution_failed = [&] { return substituting && (failed || s_->has_error_since(n)); };
       if (is(Tk::kw_typename)) {  // a type-requirement
         const TypeRequirementScope requirement{*this};
         // A type-requirement also accepts an unqualified type-name ([expr.prim.req.type]).
@@ -3404,17 +3418,18 @@ public:
           if (kind(end) == Tk::semi) bump();
         }
         auto t = type_id();
-        if (!t) failed = true;
-        else if (s_->types().is_dependent(*t)) dependent = true;
+        failed = !t;
+        if (t && s_->types().is_dependent(*t)) dependent = true;
       } else if (accept(Tk::l_brace)) {  // a compound-requirement
         ++s_->unevaluated;
         Ex e = expression();
         --s_->unevaluated;
         expect(Tk::r_brace);
         bool dep = s_->dependent(e);
+        failed = !e.ok();
         // `{ e } noexcept`: e is not potentially-throwing ([expr.prim.req.compound]/2), as the
         // operator `noexcept(e)` answers.
-        if (accept(Tk::kw_noexcept) && !dep && e.ok()) {
+        if (accept(Tk::kw_noexcept) && !dep && !failed && !substitution_failed()) {
           ++s_->unevaluated;
           Ex answer = s_->unary_noexcept(e, e.begin, e.end);
           --s_->unevaluated;
@@ -3422,7 +3437,7 @@ public:
           if (!value || !s_->ins().values.is<ast::VInt>(value->value)) failed = true;
           else if (s_->ins().values.get<ast::VInt>(value->value).bits.lo == 0) failed = true;
         }
-        if (accept(Tk::arrow)) {  // `-> C<args>`: C<decltype((e)), args…> ([expr.prim.req.compound])
+        if (accept(Tk::arrow) && !substitution_failed()) {  // `-> C<args>`: C<decltype((e)), args…> ([expr.prim.req.compound])
           u32 at = pos();
           if (std::optional<ast::DeclSema> c = concept_name()) {
             std::vector<ast::TemplateArg> args;
@@ -3449,13 +3464,24 @@ public:
         ++s_->unevaluated;
         Ex e = expression();
         --s_->unevaluated;
+        failed = !e.ok();
         if (s_->dependent(e)) dependent = true;
       }
-      if (!expect(Tk::semi)) skip_to_semi();
-      if (i_ == before) bump();  // no progress: drop the token
+      if (!substitution_failed()) {
+        if (!expect(Tk::semi)) skip_to_semi();
+        if (i_ == before) bump();  // no progress: drop the token
+      }
       if (s_->diag_count() > n || failed) {
+        const bool stop = substitution_failed();
         satisfied = false;
         if (templated) s_->drop_failures(n);
+        // The template definition parses every requirement. On replay, a failed requirement
+        // determines the result before the remaining requirements can instantiate anything.
+        // Count braces from its start in case substitution failed inside a braced expression.
+        if (stop) {
+          skip_requirements(before);
+          break;
+        }
       }
     }
     expect(Tk::r_brace);
@@ -5217,7 +5243,7 @@ public:
       // A non-generic lambda's body is a separate evaluation context from its captures.
       const u32 enclosing_unevaluated = s_->unevaluated;
       const u32 enclosing_decltype = std::exchange(s_->decltype_unevaluated, 0);
-      sema::Sema::DefaultLineScope line(*s_, false);
+      sema::Sema::DefaultSourceScope source(*s_, false);
       if (!head) s_->unevaluated = 0;
       body = compound_statement();
       s_->unevaluated = enclosing_unevaluated;

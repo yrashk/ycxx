@@ -2747,15 +2747,21 @@ the same IR `unreachable`, flagged `assumed_unreachable`. Native code traps as a
 constant evaluation that reaches it fails with "execution reached __builtin_unreachable()"
 ([expr.const]). IR node flags are 16 bits wide to make room for the flag.
 
-## Source line builtin (#327)
+## Source location builtins (#327)
 
 `__builtin_LINE()` is a zero-argument `unsigned int` constant expression. It uses the presumed
 source line, including through macro expansion and `#line`. An omitted ordinary function
 argument evaluates its default with the invocation line, which nested defaults inherit.
 The interpreter and native code share the same scoped evaluation. Translation units with the
-builtin track presumed lines in their semantic input. The full `std::source_location` facility
-continues in [#327](https://github.com/yrashk/ycxx/issues/327).
+builtin track presumed lines in their semantic input.
 [Design](docs/design/source-line-defaults.md)
+
+Linux x86-64 supports the pinned libycxx `std::source_location::current()` descriptor
+for ordinary omitted arguments. The descriptor stores the presumed filename, line,
+one-based byte column and enclosing function in translation-unit-local storage.
+Resident results observe edits to presumed filenames and columns as well as lines.
+Constructor and default member initializer anchoring, and broader immediate-default
+contexts, remain in [#327](https://github.com/yrashk/ycxx/issues/327).
 
 ## Basic Linux asm statements (#950)
 
@@ -2795,6 +2801,9 @@ Fable decided the representation (ast.md §6.6); the Opus session wrote the code
 - **Requires-expressions** ([expr.prim.req]) with parameters and simple, type, compound (with a
   return-type-requirement, also a qualified concept) and nested requirements, checked in place:
   false in a templated entity when a requirement is invalid, ill-formed elsewhere.
+  During substitution with bound template arguments, a decisive failure ends the
+  requirement sequence before later dependent checks. A separately instantiated class
+  still emits a hard error when a reached requirement needs it (#1283).
 - **`if constexpr`** ([stmt.if]/2): the condition is evaluated as it is parsed; an
   instantiation skips the discarded branch, and outside templates its odr-uses demand nothing.
 - **`static_assert` in a template definition** (#241, P2593, [dcl.pre]): a non-dependent condition
@@ -3225,6 +3234,15 @@ locations, or a semantic diff against a saved JSON snapshot. The HTML report
 includes the resolved plan and its definition.
 Use the same `--target` option to read the chosen variant and its target
 provenance. The trace carries the compiler target for the request.
+
+Named-module discovery runs before native semantic analysis through
+`ModuleDirectives` and `ModuleGraph` (#1349). It follows the marked module
+and import directives in each unit's selected preprocessing view. The graph
+omits occurrence locations, so moving a directive can refresh provenance
+without changing the dependencies. Read-only plans show physical source
+locations and mark scans that need generated inputs as pending. Build
+traces include these units once the virtual inputs are available.
+Named-module semantics and BMI support are tracked in #319.
 
 The standard C++ and generator rule declarations use a compiled rule package.
 `use plugin("tools/custom/rules") as cpp` supplies a different C++ provider. The
@@ -3728,6 +3746,23 @@ dynamic type. Immediate members remain absent from native vtables.
 Construction and destruction phases, persisted base references, and richer receiver
 layouts remain in [#1097](https://github.com/yrashk/ycxx/issues/1097).
 
+## Evaluated ordinary virtual calls (#322)
+
+An ordinary virtual call with a supported scalar or void result can dispatch through
+a complete local polymorphic object in constant evaluation, including through a
+base reference in a constexpr helper ([class.virtual], [expr.const]). The object
+has completed implicit default construction and has implicit trivial destruction.
+This supports fieldless externally linked namespace-scope classes with no base
+or one direct public nonvirtual fieldless root base. The statically selected
+member supplies the arguments' defaults. Its final overrider must be constexpr
+and defined before the evaluation, including when the statically selected
+member is pure or lacks a constexpr specifier. Explicit qualification selects the
+named function. Both native targets keep ordinary vtable dispatch.
+
+Construction and destruction phases and broader receiver layouts remain tracked in
+[#322](https://github.com/yrashk/ycxx/issues/322) and
+[#25](https://github.com/yrashk/ycxx/issues/25).
+
 ## Virtual functions: general single inheritance (#309, 2026-11-24)
 
 - Both targets compile, link and run ordinary non-template polymorphic classes with external
@@ -3759,7 +3794,8 @@ layouts remain in [#1097](https://github.com/yrashk/ycxx/issues/1097).
   An override must agree with its base declaration on `consteval`. Immediate declarations count
   toward polymorphism and pure final overriders. The vtable retains its header and contains only
   ordinary virtual entries. Immediate definitions are checked and have no native symbol.
-  Evaluated calls and immediate virtual assignments remain unsupported.
+  Evaluated immediate calls have the completed-local profile described above.
+  Immediate virtual assignments remain tracked in #1097.
   [#1097](https://github.com/yrashk/ycxx/issues/1097)
 - Not admitted (keep the virtual layout guard): classes in an unnamed namespace (#1155), fields
   declared through `decltype` (alias alignment, #1167), and a class serving only as a peer
@@ -3781,8 +3817,9 @@ layouts remain in [#1097](https://github.com/yrashk/ycxx/issues/1097).
   them (`Program::emitted_on_use`).
   [[temp.inst]](https://eel.is/c++draft/temp.inst) · [#1153](https://github.com/yrashk/ycxx/issues/1153)
 - Not yet: specializations for TU-local types (blocked in `dynamic_member`, #1155), classes nested
-  in class templates (#1187), local and internal-linkage classes, non-polymorphic, non-public or multiple bases, `delete` through a virtual destructor (#293,
-  #931), covariant returns, `typeid` (#294), constant evaluation of polymorphic objects (#25),
+  in class templates (#1187), local and internal-linkage classes, non-polymorphic, non-public
+  or multiple bases, `delete` through a virtual destructor (#293, #931), covariant returns,
+  `typeid` (#294), broader constant evaluation of polymorphic objects (#322, #25),
   virtual bases (#310); follow-ups are listed in #309.
   [Design](docs/design/ordinary-virtual-declarations.md#general-single-inheritance-dynamic-classes-both-targets)
 

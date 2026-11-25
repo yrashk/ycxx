@@ -343,6 +343,44 @@ struct Demand {
   std::vector<std::string> errors;
 };
 
+struct ModuleUnitDependencies {
+  std::string source;
+  bool complete;
+  std::vector<std::pair<pipeline::ModuleDirectiveKind, std::string>> directives;
+};
+
+struct ModuleGraph {
+  using Key = pipeline::RequestId;
+  using Value = std::vector<ModuleUnitDependencies>;
+
+  static engine::query_task<Value> run(engine::Ctx& cx, Key request) {
+    const auto& build = cx.fetch<pipeline::BuildIn>(request);
+    const auto files = build.units | std::views::transform([](pipeline::TuId unit) { return pp::FileId{unit.n}; });
+    const auto scans = co_await cx.par_map<pipeline::ModuleDirectives>(files);
+    Value result;
+    for (std::size_t i = 0; i < scans.size(); ++i) {
+      const auto& source = cx.fetch<pp::SourceOf>(files[i]);
+      const auto& scan = scans[i].get();
+      auto& unit = result.emplace_back(ModuleUnitDependencies{source.path, scan.complete, {}});
+      for (const auto& directive : scan.directives)
+        unit.directives.emplace_back(directive.kind, directive.name);
+    }
+    co_return result;
+  }
+
+  static std::string show(const Value& graph) {
+    std::string text;
+    for (const auto& unit : graph) {
+      for (const auto& [kind, name] : unit.directives)
+        std::format_to(std::back_inserter(text), "{}: {} {}\n", unit.source, pipeline::module_directive_name(kind), name);
+      if (!unit.complete) std::format_to(std::back_inserter(text), "{}: preprocessing incomplete\n", unit.source);
+    }
+    if (text.empty()) return "no named module dependencies";
+    text.pop_back();
+    return text;
+  }
+};
+
 struct WorkspaceBuild {
   using Key = WorkspacePlan::Key;
   using Value = Demand;
@@ -365,6 +403,7 @@ struct WorkspaceBuild {
       demand.prepare = true;
       co_return demand;
     }
+    (void)co_await cx.fetch<ModuleGraph>(prepared->request);
     const auto& native = co_await cx.fetch<pipeline::Build>(prepared->request);
     if (native.linked) {
       demand.image = native.linked->image;
@@ -386,20 +425,23 @@ std::string_view explicit_triple(const ast::Target* target) {
   return target ? target->triple : std::string_view{};
 }
 
+pipeline::TuId register_project_unit(pipeline::Session& session, const std::string& cwd,
+                                     const SourcePlan& source, const ast::Target* target, bool explicit_target) {
+  pp::Config config;
+  config.view = explicit_target ? pp::View::explicit_target_build : pp::View::build;
+  config.target = target;
+  config.freestanding = target == &ast::x86_64_linux;
+  config.angle_dirs = source.includes;
+  config.system_from = config.angle_dirs.size();
+  return session.unit({source.path, cwd, std::move(config), source.path + ".o"});
+}
+
 pipeline::RequestId register_native(pipeline::Session& session, const std::string& cwd, const std::string& target,
                                     const ast::Target* native_target, const ProjectPlan& plan,
                                     LookupActionOutputs output_at, std::string_view native_triple) {
   pipeline::BuildKey build;
-  for (const auto& source : plan.sources) {
-    pp::Config config;
-    config.view = native_triple.empty() ? pp::View::build : pp::View::explicit_target_build;
-    config.target = native_target;
-    config.freestanding = config.target == &ast::x86_64_linux;
-    config.angle_dirs = source.includes;
-    config.system_from = config.angle_dirs.size();
-    const std::string object = source.path + ".o";
-    build.units.push_back(session.unit({source.path, cwd, std::move(config), object}));
-  }
+  for (const auto& source : plan.sources)
+    build.units.push_back(register_project_unit(session, cwd, source, native_target, !native_triple.empty()));
   std::optional<pipeline::ArchiveLinkInputs> archives;
   if (!plan.link_inputs.empty()) {
     using enum pipeline::LinkOperand::Kind;
@@ -420,6 +462,63 @@ pipeline::RequestId register_native(pipeline::Session& session, const std::strin
   build.program = session.program({.tus = build.units, .objects = {}, .identifier = target,
                                    .archive_link = std::move(archives)});
   return session.request(std::move(build));
+}
+
+void inspect_modules(PlanInspection& inspection, std::span<const SourcePlan> sources,
+                     const fs::path& cwd, const ast::Target* target, std::string_view native_triple) {
+  if (sources.empty()) return;
+  std::vector<pp::PathId> generated_probes;
+  pipeline::Session session;
+  auto& db = session.db();
+  db.set_provider<pp::GeneratedFile>([&](pp::PathId path) {
+    generated_probes.push_back(path);
+    return pp::no_generated_file(path);
+  });
+  std::set<engine::CellId> unavailable;
+  const auto uses_generated = [&](const auto& dependencies) {
+    return std::ranges::any_of(dependencies, [&](const auto& group) {
+      return std::ranges::any_of(group, [&](const auto& ref) { return unavailable.contains(ref.id); });
+    });
+  };
+  const std::string workspace = native(cwd);
+  const auto display = [&](const fs::path& path) {
+    const auto relative = path.lexically_relative(cwd);
+    return native(relative.empty() || *relative.begin() == ".." ? path : relative);
+  };
+  std::map<std::string, std::size_t> source_instances;
+  for (const auto& source : sources) {
+    auto shown_source = std::format("{:?}", display(source.path));
+    const auto instance = ++source_instances[source.path];
+    if (instance > 1) std::format_to(std::back_inserter(shown_source), " #{}", instance);
+    const auto unit = register_project_unit(session, workspace, source, target, !native_triple.empty());
+    const auto file = pp::FileId{unit.n};
+    const auto scan = session.run<pipeline::ModuleDirectives>(file);
+    for (const auto path : generated_probes) unavailable.insert(db.cell_of<pp::GeneratedFile>(path).id);
+    generated_probes.clear();
+    // A local inspection lacks the generated overlay. A missing virtual probe can even
+    // change a successful __has_include branch. Mark that unit pending instead of
+    // reporting dependencies discovered from a different set of inputs.
+    if (!unavailable.empty() && (uses_generated(db.dependencies<pipeline::ModuleDirectives>(file)) ||
+                                 uses_generated(db.dependencies<pp::Pp>(file)))) {
+      inspection.facts.push_back({"module-scan-pending", inspection.target, shown_source,
+                                  "generated inputs are available in the build trace", {}});
+      continue;
+    }
+    if (!scan->complete)
+      inspection.facts.push_back({"module-scan-pending", inspection.target, shown_source,
+                                  "preprocessing incomplete", {}});
+    std::map<std::pair<pipeline::ModuleDirectiveKind, std::string_view>, std::size_t> occurrences;
+    for (const auto& directive : scan->directives) {
+      using Kind = pipeline::ModuleDirectiveKind;
+      const bool declaration = directive.kind == Kind::interface_unit || directive.kind == Kind::implementation_unit;
+      auto name = std::format("{} · {} {}", shown_source, pipeline::module_directive_name(directive.kind), directive.name);
+      const auto ordinal = ++occurrences[{directive.kind, directive.name}];
+      if (ordinal > 1) std::format_to(std::back_inserter(name), " #{}", ordinal);
+      inspection.facts.push_back({declaration ? "module-unit" : "module-import", inspection.target, std::move(name),
+                                  directive.name, std::format("{}:{}:{}", display(directive.path),
+                                                              directive.line, directive.column)});
+    }
+  }
 }
 
 struct RuleInvocation {
@@ -987,11 +1086,14 @@ std::expected<PlanInspection, std::string> inspect_built_project(
         current.push_back(std::move(snapshot->expansions[i]));
     }
   }
-  auto inspection = inspect_project(cwd, target, current, native_triple);
+  std::vector<SourcePlan> sources;
+  auto inspection = inspect_project(cwd, target, current, native_triple, sources);
   const auto* native_target = selected_target ? selected_target : pp::native_target;
-  if (inspection && native_target)
+  if (inspection && native_target) {
     inspection->facts.push_back({"native-target", std::string(target), "triple", std::string(native_target->triple),
                                  selected_target ? "--target" : "host default"});
+    inspect_modules(*inspection, sources, cwd, native_target, native_triple);
+  }
   if (inspection && snapshot)
     for (auto& probe : snapshot->probes) {
       const bool expanded = std::ranges::any_of(current, [&](const auto& expansion) {

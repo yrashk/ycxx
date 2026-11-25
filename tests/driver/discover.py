@@ -19,8 +19,10 @@ NOT_SUITES = {'driver', 'features', 'bootstrap'}  # bootstrap: #4's toolchain sm
 
 DIRECTIVE = re.compile(r'^\s*//\s*(REQUIRES|XFAIL|FLAGS|TIMEOUT|EXIT|STDOUT|PP-COMPARE|ORACLE|DIFF|ACTION|MAIN|TIER|PEER|PEER-WITH|PARITY):(.*)$')
 # An expected error: `//! error` on its line, `//! error@+1` / `@-2` relative, `@12` absolute,
-# and an optional column, `//! error@+1:5`. `//! warning` expects a warning the same way.
-MARKER = re.compile(r'//!\s*(error|warning)(?:@([+-]?\d+))?(?::(\d+))?')
+# and an optional column, `//! error@+1:5`. `//! error[gcc]` applies only to GCC.
+# `//! warning` expects a warning the same way.
+MARKER = re.compile(r'//!\s*(?P<severity>error|warning)(?:(?<=error)\[(?P<compiler>[a-z]+)\])?'
+                    r'(?:@(?P<line>[+-]?\d+))?(?::(?P<column>\d+))?')
 
 
 @dataclass
@@ -58,16 +60,17 @@ def directives_of(text, incremental=False):
     return out
 
 
-def markers_in(text, severity='error'):
-    """[(line, col or None)] of the errors (or warnings) a file's `//!` markers expect."""
+def markers_in(text, severity='error', *, compiler=None):
+    """[(line, col or None)] of the diagnostic locations expected for the compiler under test."""
     out = []
     for n, line in enumerate(text.splitlines(), 1):
         for m in MARKER.finditer(line):
-            if m[1] != severity:
+            if m['severity'] != severity or m['compiler'] not in (None, compiler):
                 continue
-            at = m[2]
+            at = m['line']
             target = n if at is None else (n + int(at) if at[0] in '+-' else int(at))
-            out.append((target, int(m[3]) if m[3] else None))
+            col = m['column']
+            out.append((target, int(col) if col else None))
     return out
 
 

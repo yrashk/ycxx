@@ -43,6 +43,9 @@ Use `ycxx build app --target=arm64-apple-darwin` or
 inspect that variant.
 Use `target_triple()` in a declared action's `args` to pass the selected triple
 to a host tool that generates a target-specific input.
+The build trace and resolved plan show named C++ module declarations and
+imports for the selected target. Named-module compilation is tracked in
+[#319](https://github.com/yrashk/ycxx/issues/319).
 The bundled C++ rule package builds from source. A workspace can replace its C++ rules with
 `use plugin("tools/custom/rules") as cpp`.
 `ycxx show app` describes the resolved plan and how each input was selected. Its JSON snapshots
@@ -186,6 +189,11 @@ build/bin/ycxx cxx -nostdlib example.o -o example
 `-ffreestanding` defines `__STDC_HOSTED__` as `0` for runtime and library builds. Objects may omit
 an entry point. On x86-64 Linux, `-nostdlib` selects the existing executable startup convention
 described above. [#973](https://github.com/yrashk/ycxx/issues/973)
+
+With the pinned libycxx headers, ordinary `std::source_location::current()` calls on
+Linux x86-64 capture the presumed filename, line, byte column and enclosing function.
+The recorded location remains available after the call returns.
+[#327](https://github.com/yrashk/ycxx/issues/327)
 
 `-fno-exceptions` diagnoses active `throw` and block `try` constructs. Native objects retain
 ordinary destruction and eligible plain unwind frames. [#980](https://github.com/yrashk/ycxx/issues/980)
@@ -630,6 +638,8 @@ written default member initializer are value-initialized.
   constraints. [#908](https://github.com/yrashk/ycxx/issues/908)
   Class templates and class partial specializations accept parenthesized requires-clause
   operands joined by `&&` or `||`.
+  A failed dependent type requirement can end substitution before later requirements
+  instantiate their types. [#1283](https://github.com/yrashk/ycxx/issues/1283)
   Non-template code outside requires-expression bodies also checks constraints on directly named
   primary namespace variable templates with explicit non-dependent type arguments. Directly
   written namespace alias-template IDs check constraints before expansion in non-template code
@@ -732,6 +742,9 @@ written default member initializer are value-initialized.
   [#257](https://github.com/yrashk/ycxx/issues/257)
   Scalar `&&`, `||` and `?:` expressions keep scalar reference-argument temporaries alive
   until the end of the full-expression on each executed path. [#902](https://github.com/yrashk/ycxx/issues/902)
+  Ordinary virtual calls dispatch on a completed fieldless local object with implicit default
+  construction, including through its single public nonvirtual base. The final overrider must
+  be constexpr and defined before evaluation. [#322](https://github.com/yrashk/ycxx/issues/322)
 - ordinary namespace-scope `consteval` definitions with neither static locals nor closures
   can supply compile-time results without requiring a native function body.
   [#1006](https://github.com/yrashk/ycxx/issues/1006)

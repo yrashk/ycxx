@@ -215,8 +215,21 @@ separate identity per triple. Read-only inspection shows the argument and its
 manifest location. Value traces show the resolved argv position and origin.
 `host_action` package recipes build the rule package for the host.
 
-Modules, declared host and target toolchains, and broader project layouts grow
-coverage in #1259. Package acquisition and version solving sit outside the build.
+Named-module discovery reads the preprocessor's marked module and import
+directives before the native front end runs (#1349). It uses the registered
+unit's target, include paths, and generated-file view. Each unit contributes
+its declaration and named imports to a resident graph. The graph's value omits
+source locations, so moving a directive can update its provenance without
+changing the graph. Discovery reports dependency facts. Named-module
+compilation and BMI support are tracked in #319.
+
+Read-only inspection rescans available sources with the same configuration
+once their rules resolve. A scan that consulted a generated file, including
+a negative include probe, is marked pending in the local plan. The build
+trace can show that unit once its actions provide the virtual inputs.
+
+Declared host and target toolchains and broader project layouts grow coverage
+in #1259. Package acquisition and version solving sit outside the build.
 
 ## Shader bundles and runtime assets (#1258)
 

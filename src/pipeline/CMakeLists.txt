@@ -43,6 +43,7 @@ target_sources(ycxxc_pipeline PUBLIC FILE_SET CXX_MODULES
   FILES
   ${CMAKE_CURRENT_BINARY_DIR}/runtime.cppm
   lines.cppm
+  module_discovery.cppm
   mangle.cppm
   back.cppm
   policy_registry.cppm

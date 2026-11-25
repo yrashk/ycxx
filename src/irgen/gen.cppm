@@ -598,14 +598,20 @@ class Gen {
   }
 
   template <class Body>
-  auto with_source_line(At a, Body&& f) {
-    const auto context = get<ast::SourceLineContext>(a);
+  auto with_default_source(At a, Body&& f) {
+    const auto context = get<ast::DefaultSourceContext>(a);
     struct Restore {
       uint32_t& line;
-      uint32_t saved;
-      ~Restore() { line = saved; }
-    } restore{source_line_, source_line_};
+      uint32_t saved_line;
+      ast::ConstId& descriptor;
+      ast::ConstId saved_descriptor;
+      ~Restore() {
+        line = saved_line;
+        descriptor = saved_descriptor;
+      }
+    } restore{source_line_, source_line_, source_descriptor_, source_descriptor_};
     if (source_line_ == 0) source_line_ = context.line;
+    if (source_descriptor_ == ast::ConstId::none) source_descriptor_ = context.descriptor_address;
     return f(child(a, context.arg));
   }
 
@@ -746,7 +752,11 @@ class Gen {
       if (result_ && r.value.id != NodeId::none) {
         // A class result initializes the caller's object ([stmt.return], [dcl.init.general]/16.6).
         full_expression([&] {
-          initialize(*result_, value, false);
+          // The immediate evaluator can return a record after sequencing a static member's receiver.
+          const At written = strip_parens(value);
+          const bool sequence = fn_.thunk && is<ast::OrderedBinary>(written) &&
+                                get<ast::OrderedBinary>(written).op == ast::OrderedOp::comma;
+          initialize(*result_, value, false, sequence);
           return 0;
         });
       } else if (r.value.id != NodeId::none) {
@@ -857,7 +867,7 @@ class Gen {
     e = strip_parens(e);
     if (class_selection(e)) return true;
     if (is<ast::DefaultArg>(e)) return selects_class_initializer(child(e, get<ast::DefaultArg>(e).arg));
-    if (is<ast::SourceLineContext>(e)) return selects_class_initializer(child(e, get<ast::SourceLineContext>(e).arg));
+    if (is<ast::DefaultSourceContext>(e)) return selects_class_initializer(child(e, get<ast::DefaultSourceContext>(e).arg));
     if (is<ast::DefaultMemberInit>(e))
       return selects_class_initializer(child(e, get<ast::DefaultMemberInit>(e).init));
     if (!is<ast::InitList>(e)) return false;
@@ -959,7 +969,7 @@ class Gen {
     if (is<ast::CtorCall>(e)) return get<ast::CtorCall>(e).zero_first != 0;
     if (is<ast::Paren>(e)) return value_initializes(child(e, get<ast::Paren>(e).operand));
     if (is<ast::DefaultArg>(e)) return value_initializes(child(e, get<ast::DefaultArg>(e).arg));
-    if (is<ast::SourceLineContext>(e)) return value_initializes(child(e, get<ast::SourceLineContext>(e).arg));
+    if (is<ast::DefaultSourceContext>(e)) return value_initializes(child(e, get<ast::DefaultSourceContext>(e).arg));
     if (is<ast::OrderedBinary>(e)) {
       const auto binary = get<ast::OrderedBinary>(e);
       if (binary.op == ast::OrderedOp::comma) return value_initializes(child(e, binary.rhs));
@@ -1135,8 +1145,8 @@ class Gen {
     if (is<ast::Paren>(e)) return initialize(p, child(e, get<ast::Paren>(e).operand), zeroed, select_class);
     if (is<ast::DefaultArg>(e))
       return pinned([&] { initialize(p, child(e, get<ast::DefaultArg>(e).arg), zeroed, select_class); });
-    if (is<ast::SourceLineContext>(e))
-      return with_source_line(e, [&](At arg) { initialize(p, arg, zeroed, select_class); });
+    if (is<ast::DefaultSourceContext>(e))
+      return with_default_source(e, [&](At arg) { initialize(p, arg, zeroed, select_class); });
     if (facts_.is_reference(p.type)) {
       store(p, address(e));  // a reference member holds its object's address
       return;
@@ -1265,7 +1275,7 @@ class Gen {
   Place class_source(At e) {
     while (is<ast::Paren>(e) || is<ast::DefaultArg>(e))
       e = child(e, is<ast::Paren>(e) ? get<ast::Paren>(e).operand : get<ast::DefaultArg>(e).arg);
-    if (is<ast::SourceLineContext>(e)) return with_source_line(e, [&](At arg) { return class_source(arg); });
+    if (is<ast::DefaultSourceContext>(e)) return with_default_source(e, [&](At arg) { return class_source(arg); });
     if (is<ast::ImplicitConversion>(e)) {
       auto c = get<ast::ImplicitConversion>(e);
       if (c.conversion == ast::ConversionKind::lvalue_to_rvalue) return lvalue(child(e, c.operand));
@@ -1770,9 +1780,13 @@ class Gen {
     if (is<ast::ConstantProbe>(a)) return int_constant(t, get<ast::ConstantProbe>(a).proved);
     if (is<ast::SourceLine>(a))
       return int_constant(t, source_line_ != 0 ? source_line_ : get<ast::SourceLine>(a).lexical_line);
+    if (is<ast::SourceLocation>(a)) {
+      if (source_descriptor_ == ast::ConstId::none) unsupported(a, "without a bound source location");
+      return constant(t, source_descriptor_);
+    }
     if (is<ast::Paren>(a)) return rvalue_or_void(child(a, get<ast::Paren>(a).operand));
     if (is<ast::DefaultArg>(a)) return pinned([&] { return rvalue_or_void(child(a, get<ast::DefaultArg>(a).arg)); });
-    if (is<ast::SourceLineContext>(a)) return with_source_line(a, [&](At arg) { return rvalue_or_void(arg); });
+    if (is<ast::DefaultSourceContext>(a)) return with_default_source(a, [&](At arg) { return rvalue_or_void(arg); });
     if (is<ast::ImplicitConversion>(a)) return conversion(a);
     if (is<ast::DynamicCastVoid>(a)) return dynamic_cast_void(a);
     if (is<ast::DynamicCastPointer>(a)) return dynamic_cast_pointer(a);
@@ -2261,7 +2275,7 @@ class Gen {
           is<ast::Binary>(a) || is<ast::OrderedBinary>(a) || is<ast::Assign>(a) || is<ast::Conditional>(a) ||
           is<ast::Subscript>(a) || is<ast::Member>(a) || is<ast::ImplicitConversion>(a) ||
           is<ast::BuiltinCall>(a) || is<ast::VariadicBuiltin>(a) || is<ast::ThreeWay>(a) ||
-          is<ast::SourceLine>(a) || is<ast::SourceLineContext>(a)))
+          is<ast::SourceLine>(a) || is<ast::SourceLocation>(a) || is<ast::DefaultSourceContext>(a)))
       return false;
     bool proven = true;
     ast::Red(ast_, a.id).for_each_child([&](const ast::Red& c) {
@@ -2492,14 +2506,20 @@ class Gen {
   }
   // Itanium ABI §3.2.4: the address point sits at offset zero in this root subobject.
   std::optional<ValueId> virtual_member_call(At a) {
-    if (fn_.thunk) unsupported(a, "in constant evaluation");
     const auto c = get<ast::VirtualMemberCall>(a);
+    const auto selection = in_.seqs.at(c.selection, 0);
+    if constexpr (F::evaluating_constants) {
+      if (selection.function != ast::EntityId::none && c.info.category == ast::ValueCategory::prvalue &&
+          !class_prvalue(c.info) && !facts_.ellipsis_after(selection.function))
+        return evaluated_virtual_call(a, c.info, selection.function, c.object, c.args, ir::VirtualCallKind::ordinary);
+    }
+    if (fn_.thunk) unsupported(a, "in constant evaluation");
     const ValueId receiver = rvalue(child(a, c.object));
     const auto table_type = facts_.pointer_to(c.callee);
     const auto receiver_type = facts_.pointer_to(table_type);
     const ValueId vptr = pure(ir::Op::ptr_cast, receiver_type, {receiver}, {word(ty(receiver_type))});
     const ValueId table = load({vptr, table_type});
-    const ValueId index = int_constant(facts_.ptrdiff_type(), c.slot);
+    const ValueId index = int_constant(facts_.ptrdiff_type(), selection.slot);
     const ValueId slot = pure(ir::Op::ptr_add, table_type, {table, index}, {word(ty(c.callee))});
     std::vector<ValueId> args{load({slot, c.callee}), receiver};
     // Records by value need the by-value bits and result object of `member_call`; sema admits
@@ -2513,21 +2533,27 @@ class Gen {
     }
     return call_pointer(facts_.pointee(c.callee), result_type(c.info), args, 0, 0);
   }
-  std::optional<ValueId> immediate_virtual_call(At a) {
-    const auto call = get<ast::ImmediateVirtualCall>(a);
-    std::vector<ValueId> args{rvalue(child(a, call.object))};
-    for (ast::Child arg : ast_.children(call.args)) {
+  std::optional<ValueId> evaluated_virtual_call(At a, ast::ExprInfo info, ast::EntityId function,
+                                                ast::Child object, ast::ChildList arguments, ir::VirtualCallKind kind) {
+    Position here(*this, a.offset);
+    std::vector<ValueId> args{rvalue(child(a, object))};
+    for (ast::Child arg : ast_.children(arguments)) {
       At x = child(a, arg);
-      if (argument_object(x)) unsupported(a, "of an immediate virtual function with a by-value class argument");
+      if (argument_object(x)) unsupported(a, "of a virtual function with a by-value class argument");
       args.push_back(argument(x));
     }
     if (args.size() > 32) unsupported(a, "with more than 32 arguments");
-    const auto result = result_type(call.info);
+    const auto result = result_type(info);
     const ir::Ty value[] = {vty(result)};
     const bool has_value = cls(result) != TypeClass::void_;
-    const std::uint64_t imms[] = {word(call.function), call.qualified};
-    const auto n = stateful(ir::Op::call_immediate_virtual, std::span(value).first(has_value ? 1 : 0), args, imms);
+    const std::uint64_t imms[] = {word(function), word(kind)};
+    const auto n = stateful(ir::Op::call_virtual, std::span(value).first(has_value ? 1 : 0), args, imms);
     return has_value ? std::optional(b_.result(n, 1)) : std::nullopt;
+  }
+  std::optional<ValueId> immediate_virtual_call(At a) {
+    const auto call = get<ast::ImmediateVirtualCall>(a);
+    const auto kind = call.qualified ? ir::VirtualCallKind::qualified_immediate : ir::VirtualCallKind::immediate;
+    return evaluated_virtual_call(a, call.info, call.function, call.object, call.args, kind);
   }
 
   bool member_call_expression(At a) {
@@ -2714,7 +2740,7 @@ class Gen {
     }
     if (is<ast::Paren>(a)) return lvalue(child(a, get<ast::Paren>(a).operand));
     if (is<ast::DefaultArg>(a)) return pinned([&] { return lvalue(child(a, get<ast::DefaultArg>(a).arg)); });
-    if (is<ast::SourceLineContext>(a)) return with_source_line(a, [&](At arg) { return lvalue(arg); });
+    if (is<ast::DefaultSourceContext>(a)) return with_default_source(a, [&](At arg) { return lvalue(arg); });
     if (is<ast::Unary>(a)) {
       auto u = get<ast::Unary>(a);
       At o = child(a, u.operand);
@@ -2879,6 +2905,7 @@ class Gen {
   bool in_aggregate_default_ = false;        // evaluating a selected default member initializer
   int pinned_ = 0;                           // depth inside trees from other items (`Position`)
   uint32_t source_line_ = 0;                 // outermost active default argument's invocation line
+  ast::ConstId source_descriptor_ = ast::ConstId::none;  // its descriptor address
 };
 
 template <Facts F>
