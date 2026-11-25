@@ -1,9 +1,5 @@
 // One resident workspace request. External tools run between query roots, and their successful
 // results reach the graph as inputs at quiescence (#1255).
-module;
-#include <stdlib.h>
-#include <unistd.h>
-
 export module ycxx.build.project;
 
 import std;
@@ -11,6 +7,7 @@ import ycxx.ast;
 import ycxx.build.action;
 import ycxx.build.inspection_model;
 import ycxx.build.plan;
+import ycxx.build.publication;
 import ycxx.build.rule_protocol;
 import ycxx.build.rule_snapshot;
 import ycxx.build.rule_worker;
@@ -362,75 +359,6 @@ pipeline::RequestId register_native(pipeline::Session& session, const std::strin
   build.program = session.program({.tus = build.units, .objects = {}, .identifier = target});
   return session.request(std::move(build));
 }
-
-std::expected<fs::path, std::string> build_directory(const fs::path& workspace, std::string_view name,
-                                                    std::string_view child = {}) {
-  fs::path path = workspace;
-  for (const auto part : {std::string_view(".ycxx"), name, child}) {
-    if (part.empty()) continue;
-    path /= part;
-    std::error_code ec;
-    auto status = fs::symlink_status(path, ec);
-    if (status.type() == fs::file_type::not_found) {
-      fs::create_directory(path, ec);
-      if (!ec) status = fs::symlink_status(path, ec);
-    }
-    if (ec || !fs::is_directory(status))
-      return std::unexpected(std::format("expected a build directory at '{}'", native(path)));
-  }
-  return path;
-}
-
-struct StagedOutputs {
-  struct File {
-    fs::path temporary;
-    fs::path destination;
-  };
-  std::vector<File> files;
-
-  ~StagedOutputs() {
-    for (const auto& file : files) {
-      std::error_code ec;
-      fs::remove_all(file.temporary.parent_path(), ec);
-    }
-  }
-
-  std::optional<std::string> stage(const fs::path& output, std::span<const std::uint8_t> bytes, bool executable) {
-    using enum fs::perms;
-    std::error_code ec;
-    const auto existing = fs::symlink_status(output, ec);
-    if (fs::is_directory(existing))
-      return std::format("expected a build output file at '{}'", native(output));
-    if (fs::is_regular_file(existing) && ((existing.permissions() & owner_exec) != none) == executable) {
-      std::ifstream file(output, std::ios::binary);
-      if (file && std::ranges::equal(std::span(reinterpret_cast<const char*>(bytes.data()), bytes.size()),
-                                     std::ranges::subrange(std::istreambuf_iterator<char>(file),
-                                                           std::istreambuf_iterator<char>()))) return std::nullopt;
-    }
-    auto path = native(output.parent_path() / ".publish-XXXXXX");
-    if (!::mkdtemp(path.data())) return "cannot create temporary build output directory";
-    const auto& staged = files.emplace_back(fs::path(path) / "data", output);
-    std::ofstream file(staged.temporary, std::ios::binary | std::ios::noreplace);
-    if (!bytes.empty())
-      file.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
-    file.close();
-    if (!file) return std::format("cannot write build output '{}'", native(output));
-    auto permissions = owner_read | owner_write | group_read | others_read;
-    if (executable) permissions |= owner_exec | group_exec | others_exec;
-    fs::permissions(staged.temporary, permissions, fs::perm_options::replace, ec);
-    if (ec) return std::format("cannot set permissions for '{}': {}", native(output), ec.message());
-    return std::nullopt;
-  }
-
-  std::optional<std::string> publish() const {
-    for (const auto& file : files) {
-      std::error_code ec;
-      fs::rename(file.temporary, file.destination, ec);
-      if (ec) return std::format("cannot publish '{}': {}", native(file.destination), ec.message());
-    }
-    return std::nullopt;
-  }
-};
 
 struct RuleInvocation {
   RuleWorkerRequest request;
@@ -1395,30 +1323,30 @@ ProjectReport Coordinator::run(const fs::path& cwd, const std::string& target,
         if (report.diagnostics.empty()) report.diagnostics.push_back("build produced no executable");
         return report;
       }
-      std::optional<std::string> error;
+      const auto started = std::chrono::steady_clock::now();
+      std::expected<bool, std::string> publication = false;
       if (!publish(before, [&] {
-            const auto directory = build_directory(cwd, "out");
-            if (!directory) {
-              error = directory.error();
-              return;
+            std::vector<RuntimeAssetOutput> assets;
+            for (const auto& asset : plan.runtime_assets) {
+              const auto& name = plan.generators[asset.producer].action.outputs[asset.output].filename;
+              assets.push_back({name, (*output_at(asset.producer))[asset.output].contents});
             }
-            StagedOutputs staged;
-            if (!plan.runtime_assets.empty()) {
-              const auto assets = build_directory(cwd, "assets", target);
-              if (!assets) {
-                error = assets.error();
-                return;
-              }
-              for (const auto& asset : plan.runtime_assets) {
-                const auto& artifact = (*output_at(asset.producer))[asset.output].contents;
-                const auto& name = plan.generators[asset.producer].action.outputs[asset.output].filename;
-                if ((error = staged.stage(*assets / name, artifact.bytes, artifact.executable))) return;
-              }
-            }
-            if ((error = staged.stage(output, demand->image, true))) return;
-            error = staged.publish();
+            auto staged = PreparedPublication::stage(cwd, target, assets, demand->image);
+            publication = staged ? std::move(*staged).commit() : std::unexpected(std::move(staged.error()));
           })) break;
-      if (error) return fail(std::move(*error));
+      if (tracer && (!publication || *publication)) {
+        engine::TraceEvent event;
+        event.id = session_.db().reserve_trace_id();
+        event.kind = "ProjectPublication";
+        event.key = target;
+        event.start = started;
+        event.end = std::chrono::steady_clock::now();
+        event.outcome = publication ? engine::Outcome::executed : engine::Outcome::failed;
+        if (!publication) event.errors = publication.error();
+        else if (tracer->values()) event.value = std::format("published {} runtime assets", plan.runtime_assets.size());
+        tracer->event(std::move(event));
+      }
+      if (!publication) return fail(std::move(publication.error()));
       report.output = native(output);
       return report;
     }
