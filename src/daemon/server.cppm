@@ -627,7 +627,7 @@ class Server {
     auto tick = [&] {
       if (traced && !cancelled()) traced->pump(), traced->flush_client();
     };
-    auto report = build_->run(*cwd, r.target, refresh, cancelled, apply, publish, tick,
+    auto report = build_->run(*cwd, r.target, r.tool_path, refresh, cancelled, apply, publish, tick,
                               traced ? traced->tracer() : nullptr);
     if (traced) {
       traced->finish();
