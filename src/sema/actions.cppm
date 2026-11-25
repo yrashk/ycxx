@@ -85,8 +85,8 @@ struct GenericResult {
 class Sema;
 struct Ex;
 // What naming an alias template's specialization reads again: immediate calls its type retains or
-// may erase, checks of a dependent array's rank, or a type with a dependent operand that has no representation (`decltype(f<T>())`
-// of a deduced return type), known only once the arguments are.
+// may erase, checks of a dependent array's rank, or a type with a dependent operand that has no
+// representation (`decltype(f<T>())` of a deduced return type), known only once the arguments are.
 enum class AliasCallPattern { none, retained, may_erase, rank_checks, unrepresented };
 
 // What sema asks of its context (§B1.4, §B3). In the engine these are `visible_decls(::, name,
