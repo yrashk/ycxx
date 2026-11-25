@@ -397,8 +397,10 @@ class Planner {
   RulePackagePlan package(std::string_view target, std::string_view sdk_header,
                           const fs::path& invoking_directory, const RuleToolchain& toolchain,
                           std::span<const EmbeddedInput> embedded = {}) {
-    const auto [decl, kind] = find(target, {});
-    if (kind != Primitive::host_action) fail(decl.location, "rule package target must be a host_action");
+    const auto declaration = declarations_.find(target);
+    if (declaration == declarations_.end()) fail({}, std::format("unknown target '{}'", target));
+    const auto& decl = *declaration->second;
+    if (decl.kind != "host_action") fail(decl.location, "rule package target must be a host_action");
     auto plan = generator(decl, sdk_header, embedded);
     if (plan.action.outputs.size() != 1 || plan.action.outputs.front().name != "plugin")
       fail(decl.location, "rule package must declare exactly one output named 'plugin'");

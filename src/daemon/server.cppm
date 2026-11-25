@@ -557,8 +557,8 @@ class Server {
     const std::uint64_t since = r.instance == 0 ? revision() : r.since;
     std::vector<std::string> paths = table_.present_keys();
     const auto observe_project = [&] {
-      return build::watch_built_project(r.project->cwd, r.project->target,
-                                        {executable_path(), build_hash(), r.project->tool_path});
+      (void)session();
+      return build_->watch_state(r.project->cwd, r.project->target, r.project->tool_path);
     };
     bool plan_changed = false;
     if (r.project) {
@@ -605,7 +605,7 @@ class Server {
     auto traced = trace_for(fd, mode, "build " + r.target);
     std::optional<WatchedProject> watched;
     if (r.watch) {
-      const auto observed = build::watch_built_project(*cwd, r.target, {executable_path(), build_hash(), r.tool_path});
+      const auto observed = build_->watch_state(*cwd, r.target, r.tool_path);
       watched = WatchedProject{*cwd, r.target, observed.stamp, r.tool_path};
     }
     std::optional<std::uint64_t> started_at;

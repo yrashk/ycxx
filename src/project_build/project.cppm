@@ -32,12 +32,12 @@ struct ProjectReport {
 
 std::expected<PlanInspection, std::string> inspect_built_project(
     const std::filesystem::path& cwd, std::string_view target, const RuleToolchain& toolchain);
-ProjectWatchState watch_built_project(
-    const std::filesystem::path& cwd, std::string_view target, const RuleToolchain& toolchain);
 
 class Coordinator {
  public:
   Coordinator(pipeline::Session& session, std::string executable, std::uint64_t worker_build);
+  ProjectWatchState watch_state(const std::filesystem::path& cwd, const std::string& target,
+                                const std::optional<std::string>& tool_path);
 
   ProjectReport run(const std::filesystem::path& cwd, const std::string& target,
                     const std::optional<std::string>& tool_path, bool watch,
@@ -52,6 +52,9 @@ class Coordinator {
   std::uint64_t worker_build_;
   std::mutex mutex_;
   std::map<std::string, std::set<std::string>> generated_paths_;
+  using WatchKey = std::tuple<std::filesystem::path, std::string, std::optional<std::string>>;
+  std::mutex watch_mutex_;
+  std::map<WatchKey, std::shared_ptr<const RuleSnapshot>> watch_snapshots_;
 };
 
 }  // namespace ycxx::build
@@ -240,14 +243,18 @@ Fp128 package_key(const RulePackagePlan& plan) {
   return fingerprint(std::tie(plan.inputs, plan.candidates));
 }
 
-Fp128 observation_key(const RuleInvocation& invocation) {
-  return fingerprint(std::tie(invocation.request, invocation.reads));
+Fp128 observation_key(const RuleInvocation& invocation, std::uint64_t worker_build) {
+  return fingerprint(std::tie(invocation.request, invocation.reads, worker_build));
 }
 
 struct PreparedProject {
   ProjectPlan plan;
   RuleSnapshot rules;
+  std::optional<Fp128> attempt_watch;
 };
+
+ProjectWatchState watch_rules(const fs::path& cwd, std::string_view target, const RuleToolchain& toolchain,
+                              const RuleSnapshot& snapshot);
 
 using RunRuleAction = std::function<std::expected<std::vector<NamedArtifact>, std::string>(
     std::string_view, std::string_view, const Action&, std::span<const ActionInput>, Fp128,
@@ -257,7 +264,7 @@ using RunRulePackage = std::function<std::expected<std::vector<NamedArtifact>, s
 
 std::expected<void, std::string> prepare_project(
     const fs::path& cwd, std::string_view target, const RuleToolchain& toolchain,
-    const RunRuleAction& run, const RunRulePackage& run_package, PreparedProject& prepared) {
+    const RunRuleAction& run, const RunRulePackage& run_package, PreparedProject& prepared, bool watch) {
   for (;;) {
     auto attempt = plan_with_rules(cwd, target, prepared.rules.expansions);
     if (!attempt) return std::unexpected(attempt.error());
@@ -269,19 +276,21 @@ std::expected<void, std::string> prepare_project(
     if (std::ranges::any_of(prepared.rules.expansions, [&](const auto& entry) { return entry.demand == demand; }))
       return std::unexpected(std::format("rule '{}' did not resolve its declaration", demand.target));
     if (toolchain.executable.empty()) return std::unexpected("cannot locate the rule worker executable");
+    if (watch) prepared.attempt_watch = watch_rules(cwd, target, toolchain, prepared.rules).stamp;
 
     auto package = plan_rule_package(cwd, demand.package, rule_sdk_header(), toolchain);
     if (!package) return std::unexpected(package.error());
     const auto library_key = package_key(*package);
-    auto built = run_package(demand.package, *package, library_key, [&] {
+    const auto current_package = [&] {
       const auto current = plan_rule_package(cwd, demand.package, rule_sdk_header(), toolchain);
       return current && package_key(*current) == library_key;
-    });
+    };
+    auto built = run_package(demand.package, *package, library_key, current_package);
     if (!built) return std::unexpected(built.error());
 
     auto observation = rule_invocation(cwd, demand);
     if (!observation) return std::unexpected(observation.error());
-    const auto invocation_key = observation_key(*observation);
+    const auto invocation_key = observation_key(*observation, toolchain.executable_build);
     const auto request = lsp::dump(lsp::to_json(observation->request));
     using enum ActionArg::Kind;
     const Action worker{
@@ -293,7 +302,10 @@ std::expected<void, std::string> prepare_project(
     inputs.push_back({"library", "package/rules.so", std::move(built->front().contents)});
     inputs.push_back({"request", "request.json", text_artifact(request)});
     const Fp128 worker_key = fingerprint(std::tie(worker, inputs, toolchain.executable_build));
-    auto lowered = run("RuleWorker", demand.target, worker, inputs, worker_key, [] { return true; });
+    auto lowered = run("RuleWorker", demand.target, worker, inputs, worker_key, [&] {
+      const auto current = rule_invocation(cwd, demand);
+      return current && observation_key(*current, toolchain.executable_build) == invocation_key && current_package();
+    });
     if (!lowered) return std::unexpected(lowered.error());
     const auto& fragment = lowered->front().contents.bytes;
     prepared.rules.observations.push_back({demand, library_key, invocation_key});
@@ -305,7 +317,7 @@ bool current_rule(const fs::path& cwd, const RuleToolchain& toolchain, const Rul
   const auto package = plan_rule_package(cwd, record.demand.package, rule_sdk_header(), toolchain);
   if (!package || package_key(*package) != record.package) return false;
   const auto observed = rule_invocation(cwd, record.demand);
-  return observed && observation_key(*observed) == record.invocation;
+  return observed && observation_key(*observed, toolchain.executable_build) == record.invocation;
 }
 
 std::optional<ProjectPlan> observe_project(
@@ -324,17 +336,24 @@ ProjectWatchState watch_rules(const fs::path& cwd, std::string_view target, cons
   std::vector<RuleExpansion> current;
   std::vector<Fp128> observations;
   std::vector<std::string> paths;
+  std::map<std::pair<RulePackageRef::Kind, std::string>, std::pair<bool, Fp128>> packages;
   const auto observe = [&](const RuleDemand& demand) -> std::optional<std::pair<Fp128, Fp128>> {
-    std::vector<std::string> failed_paths;
-    const auto package = plan_rule_package(cwd, demand.package, rule_sdk_header(), toolchain, &failed_paths);
-    paths.append_range(package ? package->observed_paths : failed_paths);
+    const auto key = std::pair{demand.package.kind, demand.package.target};
+    auto package = packages.find(key);
+    if (package == packages.end()) {
+      std::vector<std::string> failed_paths;
+      const auto plan = plan_rule_package(cwd, demand.package, rule_sdk_header(), toolchain, &failed_paths);
+      paths.append_range(plan ? plan->observed_paths : failed_paths);
+      const auto stamp = plan ? package_key(*plan) : fingerprint128(plan.error());
+      package = packages.emplace(key, std::pair{plan.has_value(), stamp}).first;
+    }
     for (const auto& path : demand.reads) paths.push_back(native(cwd / path));
     const auto invocation = rule_invocation(cwd, demand);
-    const auto package_stamp = package ? package_key(*package) : fingerprint128(package.error());
-    const auto invocation_stamp = invocation ? observation_key(*invocation) : fingerprint128(invocation.error());
-    observations.push_back(fingerprint(std::tuple{package.has_value(), package_stamp,
-                                                  invocation.has_value(), invocation_stamp}));
-    if (!package || !invocation) return std::nullopt;
+    const auto [package_ok, package_stamp] = package->second;
+    const auto invocation_stamp = invocation ? observation_key(*invocation, toolchain.executable_build)
+                                             : fingerprint128(invocation.error());
+    observations.push_back(fingerprint(std::tuple{package_ok, package_stamp, invocation.has_value(), invocation_stamp}));
+    if (!package_ok || !invocation) return std::nullopt;
     return std::pair{package_stamp, invocation_stamp};
   };
   for (std::size_t i = 0; i < snapshot.observations.size(); ++i) {
@@ -369,11 +388,6 @@ std::expected<PlanInspection, std::string> inspect_built_project(
   return inspect_project(cwd, target, current);
 }
 
-ProjectWatchState watch_built_project(const fs::path& cwd, std::string_view target, const RuleToolchain& toolchain) {
-  auto snapshot = read_rule_snapshot(cwd, target);
-  return watch_rules(cwd, target, toolchain, snapshot ? *snapshot : RuleSnapshot{});
-}
-
 Coordinator::Coordinator(pipeline::Session& session, std::string executable, std::uint64_t worker_build)
     : session_(session), executable_(std::move(executable)), worker_build_(worker_build) {
   using enum engine::Durability;
@@ -383,6 +397,18 @@ Coordinator::Coordinator(pipeline::Session& session, std::string executable, std
   session_.db().set_provider<PreparedBuild>([](const Fp128&) -> engine::provided<PreparedBuild::Value> {
     return {std::nullopt, low};
   });
+}
+
+ProjectWatchState Coordinator::watch_state(const fs::path& cwd, const std::string& target,
+                                            const std::optional<std::string>& tool_path) {
+  std::shared_ptr<const RuleSnapshot> snapshot;
+  {
+    std::lock_guard lock(watch_mutex_);
+    const auto entry = watch_snapshots_.find({cwd, target, tool_path});
+    if (entry != watch_snapshots_.end()) snapshot = entry->second;
+  }
+  static const RuleSnapshot empty;
+  return watch_rules(cwd, target, {executable_, worker_build_, tool_path}, snapshot ? *snapshot : empty);
 }
 
 ProjectReport Coordinator::run(const fs::path& cwd, const std::string& target,
@@ -398,6 +424,7 @@ ProjectReport Coordinator::run(const fs::path& cwd, const std::string& target,
   const std::string workspace_path = native(cwd);
   const auto workspace = fingerprint128(workspace_path);
   const RuleToolchain toolchain{executable_, worker_build_, tool_path};
+  bool superseded = false;
   const auto fail = [&](std::string diagnostic) {
     report.status = 1;
     report.diagnostics.push_back(std::move(diagnostic));
@@ -452,7 +479,10 @@ ProjectReport Coordinator::run(const fs::path& cwd, const std::string& target,
     if (!known || cancelled()) return std::unexpected("build cancelled");
     if (*known) return std::move(**known);
     auto result = run_action(kind, label, action, inputs);
-    if (!still_current()) return std::unexpected(std::format("{} '{}' changed during execution", kind, label));
+    if (!still_current()) {
+      superseded = true;
+      return std::unexpected(std::format("{} '{}' changed during execution", kind, label));
+    }
     if (result.exit_status != 0)
       return std::unexpected(std::format("{} '{}': {}", kind, label,
           result.err.empty() ? std::format("exit status {}", result.exit_status) : result.err));
@@ -478,7 +508,7 @@ ProjectReport Coordinator::run(const fs::path& cwd, const std::string& target,
         apply([&](engine::Db& db) { db.set<ActionReceipt>(id, *compiled); });
         return compiled;
       }
-      if (cancelled() || !still_current()) return std::unexpected(compiled.error());
+      if (cancelled() || superseded) return std::unexpected(compiled.error());
       if (!errors.empty()) errors += '\n';
       errors += compiled.error();
     }
@@ -489,11 +519,18 @@ ProjectReport Coordinator::run(const fs::path& cwd, const std::string& target,
   if (!native_target) return fail("project building is unavailable on this host");
   while (!cancelled()) {
     refresh();
+    superseded = false;
     PreparedProject planned;
-    auto prepared = prepare_project(cwd, target, toolchain, run_rule, run_package, planned);
+    auto prepared = prepare_project(cwd, target, toolchain, run_rule, run_package, planned, watch);
     if (cancelled()) return fail("build cancelled");
+    if (superseded) continue;
     write_rule_snapshot(cwd, target, planned.rules);
-    if (watch) report.watch_stamp = watch_rules(cwd, target, toolchain, planned.rules).stamp;
+    if (watch) {
+      report.watch_stamp = prepared ? watch_rules(cwd, target, toolchain, planned.rules).stamp : planned.attempt_watch;
+      auto snapshot = std::make_shared<RuleSnapshot>(planned.rules);
+      std::lock_guard lock(watch_mutex_);
+      watch_snapshots_.insert_or_assign(WatchKey{cwd, target, tool_path}, std::move(snapshot));
+    }
     if (!prepared) return fail(prepared.error());
     const ProjectPlan& plan = planned.plan;
     const Fp128 plan_id = fingerprint(plan);
