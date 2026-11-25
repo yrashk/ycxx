@@ -30,10 +30,12 @@ std::expected<void, std::string> select_comdat_groups(std::span<obj::object> obj
 // relocations. Static links support GOTPCREL and canonical REX_GOTPCRELX address loads.
 // The ET_EXEC image has load segments and a non-executable stack.
 // It has no section table. `entry` names a nonlocal symbol. Dynamic links support direct calls
-// to functions provided by the supplied libraries.
+// to functions provided by the supplied libraries. `startup`, when supplied, is generated
+// for this output and is not a relocatable input to the GNU property merge.
 std::expected<std::vector<std::uint8_t>, std::string> link(std::span<const obj::object> objects,
                                                         std::string_view entry = "_start",
-                                                        const dynamic_options* dynamic = nullptr);
+                                                        const dynamic_options* dynamic = nullptr,
+                                                        std::optional<obj::object> startup = std::nullopt);
 
 // Emit a leaf ET_DYN shared object without imports or loader-time relocations.
 std::expected<std::vector<std::uint8_t>, std::string> link_shared(std::span<const obj::object> objects,
@@ -623,7 +625,7 @@ std::expected<void, std::string> select_comdat_groups(std::span<obj::object> obj
 }
 
 std::expected<bytes, std::string> link(std::span<const obj::object> objects, std::string_view entry,
-                                     const dynamic_options* dynamic) {
+                                     const dynamic_options* dynamic, std::optional<obj::object> startup) {
   if (dynamic) {
     if (!dynamic->interpreter.starts_with('/') || dynamic->interpreter.contains('\0'))
       return std::unexpected("ELF dynamic linking requires an absolute interpreter path");
@@ -635,6 +637,25 @@ std::expected<bytes, std::string> link(std::span<const obj::object> objects, std
       if (!sonames.insert(library.soname).second)
         return std::unexpected(std::format("{}: duplicate ELF shared object SONAME '{}'", library.name, library.soname));
     }
+  }
+
+  // The AMD64 psABI keeps only features claimed by every participating relocatable object.
+  // Archive selection has already decoded the participating members and validated their notes.
+  std::uint32_t feature_1_and = objects.empty() ? 0 : ~std::uint32_t{0};
+  for (const auto& object : objects) {
+    if (dynamic && object.elf_x86_feature_1_and)
+      return object_error(object, "ELF GNU property notes are unsupported in dynamic links");
+    feature_1_and &= object.elf_x86_feature_1_and.value_or(0);
+  }
+  if (feature_1_and != 0)
+    return std::unexpected(std::format("nonzero ELF GNU property FEATURE_1_AND result {:#x} is unsupported",
+                                       feature_1_and));
+
+  std::vector<obj::object> with_startup;
+  if (startup) {
+    with_startup.assign(objects.begin(), objects.end());
+    with_startup.push_back(std::move(*startup));
+    objects = with_startup;
   }
 
   std::array<std::vector<section_ref>, std::to_underlying(group::count)> sections;
@@ -938,6 +959,8 @@ std::expected<bytes, std::string> link_shared(std::span<const obj::object> objec
   for (std::size_t oi = 0; oi < objects.size(); ++oi) {
     const auto& object = objects[oi];
     if (object.arch != obj::target::x86_64_linux) return object_error(object, "expected an x86-64 Linux object");
+    if (object.elf_x86_feature_1_and)
+      return object_error(object, "ELF GNU property notes are unsupported in shared links");
     if (!object.comdat_groups.empty()) return object_error(object, "select ELF COMDAT groups before layout");
     offsets.emplace_back(object.sections.size());
     for (std::size_t si = 0; si < object.sections.size(); ++si) {
