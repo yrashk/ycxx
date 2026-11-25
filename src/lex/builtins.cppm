@@ -31,6 +31,8 @@ enum class TypeTrait : std::uint8_t {
   has_unique_object_representations,
   // Queries returning the target size type.
   array_rank,
+  // Deprecated predicates with bounded support.
+  is_trivial, is_pod,
 };
 
 struct TypeTraitInfo {
@@ -102,6 +104,10 @@ inline constexpr std::array type_traits{
     TypeTraitInfo{.name = "__is_standard_layout", .trait = TypeTrait::is_standard_layout, .arity = 1,
                   .transforms = false, .advertised = false, .replay_dependent = true},
     TypeTraitInfo{.name = "__is_trivially_copyable", .trait = TypeTrait::is_trivially_copyable, .arity = 1,
+                  .transforms = false, .advertised = false, .replay_dependent = true},
+    TypeTraitInfo{.name = "__is_trivial", .trait = TypeTrait::is_trivial, .arity = 1,
+                  .transforms = false, .advertised = false, .replay_dependent = true},
+    TypeTraitInfo{.name = "__is_pod", .trait = TypeTrait::is_pod, .arity = 1,
                   .transforms = false, .advertised = false, .replay_dependent = true},
     TypeTraitInfo{"__is_constructible", TypeTrait::is_constructible, 1, false, false, true},
     TypeTraitInfo{"__is_nothrow_constructible", TypeTrait::is_nothrow_constructible, 1, false, false, true},

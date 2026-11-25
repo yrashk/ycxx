@@ -2619,8 +2619,8 @@ clauses = ['meta.unary', 'meta.rel', 'meta.trans']
 std = 'C++11'
 detect = '\bstd::(?:is_\w+|enable_if|conditional|decay|remove_\w+|add_\w+|underlying_type|common_type|invoke_result)\w*\b'
 status = 'partial'
-note = 'assignment traits cover arithmetic operands, conversion traits cover arithmetic operands, cv void and object pointers, is_convertible also covers bounded values and references through a unique public nonvirtual base, is_base_of, is_virtual_base_of, is_pointer_interconvertible_base_of and is_empty query recorded base declarations, and is_layout_compatible compares standard-layout members and enumerations. Dependent is_base_of is evaluated in function template bodies, and dependent operands of these traits in concepts and requires-clauses at constraint satisfaction. __array_rank counts array dimensions with dependent type operands. Other object-model traits remain partial'
-issues = [218, 211, 1082]
+note = 'assignment traits cover arithmetic operands, conversion traits cover arithmetic operands, cv void and object pointers, is_convertible also covers bounded values and references through a unique public nonvirtual base, is_base_of, is_virtual_base_of, is_pointer_interconvertible_base_of and is_empty query recorded base declarations, and is_layout_compatible compares standard-layout members and enumerations. Dependent is_base_of is evaluated in function template bodies, and dependent operands of these traits in concepts and requires-clauses at constraint satisfaction. __array_rank counts array dimensions with dependent type operands. __is_trivial and __is_pod evaluate non-record operands, including in supported dependent bases and variable template initializers. Other object-model traits remain partial'
+issues = [218, 211, 1082, 1318]
 probe = '''
 enum E { e };
 int main() { return (__is_same(int, int) && __is_enum(E) && !__is_same(int, long)) ? 0 : 1; }

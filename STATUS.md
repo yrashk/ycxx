@@ -2513,6 +2513,13 @@ session's.*
   [#218](https://github.com/yrashk/ycxx/issues/218).
   [Replay design](docs/design/dependent-trivial-copyability-replay.md)
   `__has_builtin(__is_trivially_copyable)` answers 0 while support is partial ([meta.unary.prop]).
+- `__is_trivial(T)` and `__is_pod(T)` give a `bool` prvalue after removing all array extents,
+  including an unknown outer bound. They give true for scalar elements and false for references,
+  functions and cv `void`. They diagnose incomplete class and enumeration elements. Supported
+  class-template bases and variable-template initializers replay dependent operands at demand.
+  Complete class and union evaluation depends on the special-member facts in
+  [#1303](https://github.com/yrashk/ycxx/issues/1303). `__has_builtin` answers 0 while support is
+  partial ([depr.meta.types], [dcl.enum], #1318).
 - `__has_unique_object_representations(T)` peels array extents, including an unknown outer
   bound. It returns true for narrow character types, and false for modeled standard floats,
   references, functions and cv `void`. Incomplete class and enum operands have a dedicated
