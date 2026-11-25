@@ -3287,7 +3287,7 @@ public:
     std::size_t n = s_->diag_count();
     u32 at = pos();
     Ex e = binary_expression(3);
-    if (s_->diag_count() > n || !e.ok()) {
+    if (s_->has_error_since(n) || !e.ok()) {
       if (templated) s_->drop_failures(n);
       return Truth::invalid;
     }
@@ -3366,7 +3366,7 @@ public:
       std::size_t n = s_->diag_count();
       u32 before = i_;
       bool failed = false;
-      auto substitution_failed = [&] { return substituting && (failed || s_->diag_count() > n); };
+      auto substitution_failed = [&] { return substituting && (failed || s_->has_error_since(n)); };
       if (is(Tk::kw_typename)) {  // a type-requirement
         const TypeRequirementScope requirement{*this};
         // A type-requirement also accepts an unqualified type-name ([expr.prim.req.type]).
@@ -3429,12 +3429,13 @@ public:
         if (i_ == before) bump();  // no progress: drop the token
       }
       if (s_->diag_count() > n || failed) {
+        const bool stop = substitution_failed();
         satisfied = false;
         if (templated) s_->drop_failures(n);
         // The template definition parses every requirement. On replay, a failed requirement
         // determines the result before the remaining requirements can instantiate anything.
         // Count braces from its start in case substitution failed inside a braced expression.
-        if (substituting) {
+        if (stop) {
           skip_requirements(before);
           break;
         }
