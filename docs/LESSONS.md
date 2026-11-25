@@ -598,6 +598,18 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
   in the `ycxx-linux-amd64` image (`docker run --platform linux/amd64 -v dir:/w`). On #309 this
   ran 13 mixed-object tests in about a minute, against 25 minutes for an emulated build.
   - Learned on #309.
+- **Without that image, a freestanding static ELF in `busybox` runs the same tests.** Compile with
+  the Mac's ycxx, add a small Clang-built `_start` that runs `.init_array`, calls `main` and exits
+  with its result, link with `ld.lld -static`, and run it with `docker run --platform linux/amd64`.
+  Rosetta rejects some `.bss` segments ("bss_size overflow"), so a linker script puts `.bss` in
+  `.data`. Include a control whose `main` returns 7. No image of several gigabytes is needed, which
+  mattered when the disk was full.
+  - Learned on #157.
+- **Classify by what overload resolution selects, everywhere.** Defaulted special members were
+  classified by resolving each subobject's operation, but array elements, implicit moves and
+  trivial operations with a written `noexcept(false)` still followed older structural shortcuts.
+  An independent review found four P0s there, all where the two disagreed.
+  - Learned on #157.
 
 ## Data the front end needs
 
