@@ -31,6 +31,7 @@ struct ProjectPlan {
 struct ProjectWatchState {
   Fp128 stamp;
   std::vector<std::string> paths;
+  std::optional<RuleDemand> pending = std::nullopt;
 };
 
 struct RuleToolchain {
@@ -52,20 +53,17 @@ struct RulePackagePlan {
 
 std::string generated_path(const std::filesystem::path& cwd, std::string_view generator,
                            std::string_view filename);
-std::expected<ProjectPlan, std::string> plan_project(const std::filesystem::path& cwd, std::string_view target);
 // Reobserve planning inputs without launching any actions. Native source contents and include
 // probes are tracked separately by the daemon's file table.
-ProjectWatchState watch_project(const std::filesystem::path& cwd, std::string_view target);
 ProjectWatchState watch_project(const std::filesystem::path& cwd, std::string_view target,
                                 std::span<const RuleExpansion> expansions);
-std::expected<PlanInspection, std::string> inspect_project(const std::filesystem::path& cwd, std::string_view target);
 std::expected<PlanInspection, std::string> inspect_project(
     const std::filesystem::path& cwd, std::string_view target, std::span<const RuleExpansion> expansions);
 std::expected<std::variant<ProjectPlan, RuleDemand>, std::string> plan_with_rules(
     const std::filesystem::path& cwd, std::string_view target, std::span<const RuleExpansion> expansions);
 std::expected<RulePackagePlan, std::string> plan_rule_package(
     const std::filesystem::path& cwd, const RulePackageRef& package, std::string_view sdk_header,
-    const RuleToolchain& toolchain);
+    const RuleToolchain& toolchain, std::vector<std::string>* failed_paths = nullptr);
 
 }  // namespace ycxx::build
 
@@ -334,11 +332,13 @@ Primitive emitted_kind(std::string_view kind) {
   return Primitive::unknown;
 }
 
-Primitive legacy_kind(std::string_view kind) {
-  if (kind == "cpp.executable") return Primitive::executable;
-  if (kind == "cpp.library") return Primitive::library;
-  if (kind == "generate") return Primitive::generator;
-  return Primitive::unknown;
+void set_location(Value& value, SourceLocation at) {
+  value.location = at;
+  if (auto* list = std::get_if<List>(&value.data)) {
+    for (auto& entry : *list) set_location(entry, at);
+  } else if (auto* record = std::get_if<Record>(&value.data)) {
+    for (auto& [key, entry] : *record) set_location(entry, at);
+  }
 }
 
 LoweredTarget primitive(const TargetDecl& original, const RuleExpansion& expansion) {
@@ -354,18 +354,31 @@ LoweredTarget primitive(const TargetDecl& original, const RuleExpansion& expansi
     fail(original.location, std::format("rule emitted unsupported primitive '{}'", decl.kind));
   decl.location = original.location;
   decl.kind = original.kind;
+  for (auto& [key, value] : decl.fields) {
+    if (const auto* authored = field(original, key)) {
+      std::string declared, emitted;
+      append_value(declared, *authored);
+      append_value(emitted, value);
+      if (declared == emitted) {
+        value = *authored;
+        continue;
+      }
+    }
+    set_location(value, original.location);
+  }
   return {std::move(decl), kind};
 }
 
 class Planner {
  public:
   Planner(const fs::path& cwd, const Manifest& manifest, WatchObservations* watch, PlanInspection* inspection,
-          std::optional<std::span<const RuleExpansion>> expansions = std::nullopt)
+          std::span<const RuleExpansion> expansions = {})
       : cwd_(cwd), watch_(watch), inspection_(inspection), expansions_(expansions) {
     for (const auto& decl : manifest.targets) declarations_.emplace(decl.name, &decl);
     for (const auto& imported : manifest.plugins)
       prefixes_.emplace(imported.alias, RulePackageRef{
           RulePackageRef::Kind::workspace, path_text(relative_path(imported.package, imported.location))});
+    prefixes_.try_emplace("cpp", standard_package);
   }
 
   ProjectPlan run(std::string_view target) {
@@ -486,15 +499,10 @@ class Planner {
       rule = rule.substr(dot + 1);
       if (const auto supplied = prefixes_.find(alias); supplied != prefixes_.end())
         package = &supplied->second;
-      else if (expansions_ && alias == "cpp")
-        package = &standard_package;
-    } else if (expansions_ && decl.kind == "generate") {
+    } else if (decl.kind == "generate") {
       package = &standard_package;
     }
-    // Read-only callers still interpret the conventional declarations without a worker.
-    if (!package) return {decl, expansions_ ? Primitive::unknown : legacy_kind(decl.kind)};
-    if (!expansions_)
-      fail(decl.location, std::format("plugin rule '{}' requires rule expansion", decl.kind));
+    if (!package) return {decl, Primitive::unknown};
     if (rule.empty()) fail(decl.location, "missing imported rule name");
     auto demand = rule_demand(decl, rule, *package);
     if (watch_) {
@@ -502,8 +510,8 @@ class Planner {
         observe(cwd_ / fs::path(package->target).parent_path() / "build.ycxx");
       for (const auto& path : demand.reads) observe(cwd_ / path);
     }
-    const auto expansion = std::ranges::find(*expansions_, demand, &RuleExpansion::demand);
-    if (expansion == expansions_->end()) {
+    const auto expansion = std::ranges::find(expansions_, demand, &RuleExpansion::demand);
+    if (expansion == expansions_.end()) {
       if (inspection_)
         fact("unresolved", decl, decl.kind, demand.package.target,
              "no current admitted rule expansion. Build this target to resolve it", decl.location);
@@ -734,7 +742,7 @@ class Planner {
   const fs::path& cwd_;
   WatchObservations* watch_;
   PlanInspection* inspection_;
-  std::optional<std::span<const RuleExpansion>> expansions_;
+  std::span<const RuleExpansion> expansions_;
   std::map<std::string, const TargetDecl*, std::less<>> declarations_;
   std::map<std::string, RulePackageRef, std::less<>> prefixes_;
   std::map<std::string, LoweredTarget, std::less<>> primitives_;
@@ -745,8 +753,8 @@ class Planner {
 };
 
 std::expected<ProjectPlan, std::string> read_project(const fs::path& cwd, std::string_view target,
-                                                   WatchObservations* watch, PlanInspection* inspection = nullptr,
-                                                   std::optional<std::span<const RuleExpansion>> expansions = std::nullopt) {
+                                                   WatchObservations* watch, PlanInspection* inspection,
+                                                   std::span<const RuleExpansion> expansions) {
   std::error_code ec;
   const auto root = fs::absolute(cwd, ec).lexically_normal();
   if (ec) return std::unexpected(std::format("cannot resolve workspace directory: {}", ec.message()));
@@ -766,17 +774,19 @@ std::expected<ProjectPlan, std::string> read_project(const fs::path& cwd, std::s
 }
 
 ProjectWatchState watch_plan(const fs::path& cwd, std::string_view target,
-                             std::optional<std::span<const RuleExpansion>> expansions) {
+                             std::span<const RuleExpansion> expansions) {
   WatchObservations observed;
   Fp128 stamp;
+  std::optional<RuleDemand> pending;
   try {
     const auto plan = read_project(cwd, target, &observed, nullptr, expansions);
     stamp = plan ? fingerprint(std::tie(observed.manifest, *plan)) :
                    fingerprint(std::tie(observed.manifest, observed.values, plan.error()));
-  } catch (const RuleDemand& demand) {
+  } catch (RuleDemand& demand) {
     stamp = fingerprint(std::tie(observed.manifest, observed.values, demand));
+    pending = std::move(demand);
   }
-  return {stamp, {observed.paths.begin(), observed.paths.end()}};
+  return {stamp, {observed.paths.begin(), observed.paths.end()}, std::move(pending)};
 }
 
 }  // namespace
@@ -785,24 +795,9 @@ std::string generated_path(const fs::path& cwd, std::string_view generator, std:
   return path_text(cwd / ".ycxx" / "virtual" / generator / filename);
 }
 
-std::expected<ProjectPlan, std::string> plan_project(const fs::path& cwd, std::string_view target) {
-  return read_project(cwd, target, nullptr);
-}
-
-ProjectWatchState watch_project(const fs::path& cwd, std::string_view target) {
-  return watch_plan(cwd, target, std::nullopt);
-}
-
 ProjectWatchState watch_project(const fs::path& cwd, std::string_view target,
                                 std::span<const RuleExpansion> expansions) {
   return watch_plan(cwd, target, expansions);
-}
-
-std::expected<PlanInspection, std::string> inspect_project(const fs::path& cwd, std::string_view target) {
-  PlanInspection inspection{.target = std::string(target), .definition = {}, .facts = {}};
-  auto plan = read_project(cwd, target, nullptr, &inspection);
-  if (!plan) return std::unexpected(std::move(plan.error()));
-  return inspection;
 }
 
 std::expected<PlanInspection, std::string> inspect_project(
@@ -830,12 +825,12 @@ std::expected<std::variant<ProjectPlan, RuleDemand>, std::string> plan_with_rule
 
 std::expected<RulePackagePlan, std::string> plan_rule_package(
     const fs::path& cwd, const RulePackageRef& package, std::string_view sdk_header,
-    const RuleToolchain& toolchain) {
+    const RuleToolchain& toolchain, std::vector<std::string>* failed_paths) {
   std::error_code ec;
   const auto root = fs::absolute(cwd, ec).lexically_normal();
   if (ec) return std::unexpected(std::format("cannot resolve workspace directory: {}", ec.message()));
+  WatchObservations observed;
   try {
-    WatchObservations observed;
     const auto lower = [&](const fs::path& directory, std::string_view target, std::string_view text,
                            std::span<const EmbeddedInput> inputs) {
       auto manifest = parse_manifest(text);
@@ -855,6 +850,7 @@ std::expected<RulePackagePlan, std::string> plan_rule_package(
     (void)regular_file(path, {});
     return lower(directory, path_text(target.filename()), read_file(path, {}), {});
   } catch (PlanningError& error) {
+    if (failed_paths) failed_paths->assign(observed.paths.begin(), observed.paths.end());
     return std::unexpected(std::format("rule package '{}': {}", package.target, error.message));
   }
 }

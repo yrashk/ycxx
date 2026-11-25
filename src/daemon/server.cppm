@@ -556,7 +556,10 @@ class Server {
     // No build answered (refused, failed): wait from now, never answer at once.
     const std::uint64_t since = r.instance == 0 ? revision() : r.since;
     std::vector<std::string> paths = table_.present_keys();
-    const auto observe_project = [&] { return build::watch_project(r.project->cwd, r.project->target); };
+    const auto observe_project = [&] {
+      return build::watch_built_project(r.project->cwd, r.project->target,
+                                        {executable_path(), build_hash(), r.project->tool_path});
+    };
     bool plan_changed = false;
     if (r.project) {
       auto observed = observe_project();
@@ -601,7 +604,10 @@ class Server {
     if (r.trace) mode = r.trace_live ? compile::Trace::live : r.trace_values ? compile::Trace::values : compile::Trace::events;
     auto traced = trace_for(fd, mode, "build " + r.target);
     std::optional<WatchedProject> watched;
-    if (r.watch) watched = WatchedProject{*cwd, r.target, build::watch_project(*cwd, r.target).stamp};
+    if (r.watch) {
+      const auto observed = build::watch_built_project(*cwd, r.target, {executable_path(), build_hash(), r.tool_path});
+      watched = WatchedProject{*cwd, r.target, observed.stamp, r.tool_path};
+    }
     std::optional<std::uint64_t> started_at;
     auto refresh = [&] {
       std::lock_guard strand(strand_mu_);
@@ -627,8 +633,9 @@ class Server {
     auto tick = [&] {
       if (traced && !cancelled()) traced->pump(), traced->flush_client();
     };
-    auto report = build_->run(*cwd, r.target, r.tool_path, refresh, cancelled, apply, publish, tick,
+    auto report = build_->run(*cwd, r.target, r.tool_path, r.watch, refresh, cancelled, apply, publish, tick,
                               traced ? traced->tracer() : nullptr);
+    if (watched && report.watch_stamp) watched->stamp = *report.watch_stamp;
     if (traced) {
       traced->finish();
       if (!cancelled()) traced->flush_client();

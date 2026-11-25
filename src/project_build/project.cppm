@@ -27,9 +27,12 @@ struct ProjectReport {
   std::string output;
   std::vector<std::string> diagnostics;
   std::size_t actions_executed = 0;
+  std::optional<Fp128> watch_stamp = std::nullopt;
 };
 
 std::expected<PlanInspection, std::string> inspect_built_project(
+    const std::filesystem::path& cwd, std::string_view target, const RuleToolchain& toolchain);
+ProjectWatchState watch_built_project(
     const std::filesystem::path& cwd, std::string_view target, const RuleToolchain& toolchain);
 
 class Coordinator {
@@ -37,7 +40,7 @@ class Coordinator {
   Coordinator(pipeline::Session& session, std::string executable, std::uint64_t worker_build);
 
   ProjectReport run(const std::filesystem::path& cwd, const std::string& target,
-                    const std::optional<std::string>& tool_path,
+                    const std::optional<std::string>& tool_path, bool watch,
                     const std::function<void()>& refresh, const std::function<bool()>& cancelled,
                     const std::function<void(const std::function<void(engine::Db&)>&)>& apply,
                     const std::function<bool(engine::Revision, const std::function<void()>&)>& publish,
@@ -252,16 +255,15 @@ using RunRuleAction = std::function<std::expected<std::vector<NamedArtifact>, st
 using RunRulePackage = std::function<std::expected<std::vector<NamedArtifact>, std::string>(
     const RulePackageRef&, const RulePackagePlan&, Fp128, const std::function<bool()>&)>;
 
-std::expected<PreparedProject, std::string> prepare_project(
+std::expected<void, std::string> prepare_project(
     const fs::path& cwd, std::string_view target, const RuleToolchain& toolchain,
-    const RunRuleAction& run, const RunRulePackage& run_package) {
-  PreparedProject prepared;
+    const RunRuleAction& run, const RunRulePackage& run_package, PreparedProject& prepared) {
   for (;;) {
     auto attempt = plan_with_rules(cwd, target, prepared.rules.expansions);
     if (!attempt) return std::unexpected(attempt.error());
     if (auto* plan = std::get_if<ProjectPlan>(&*attempt)) {
       prepared.plan = std::move(*plan);
-      return prepared;
+      return {};
     }
     auto& demand = std::get<RuleDemand>(*attempt);
     if (std::ranges::any_of(prepared.rules.expansions, [&](const auto& entry) { return entry.demand == demand; }))
@@ -317,6 +319,41 @@ std::optional<ProjectPlan> observe_project(
   return std::nullopt;
 }
 
+ProjectWatchState watch_rules(const fs::path& cwd, std::string_view target, const RuleToolchain& toolchain,
+                              const RuleSnapshot& snapshot) {
+  std::vector<RuleExpansion> current;
+  std::vector<Fp128> observations;
+  std::vector<std::string> paths;
+  const auto observe = [&](const RuleDemand& demand) -> std::optional<std::pair<Fp128, Fp128>> {
+    std::vector<std::string> failed_paths;
+    const auto package = plan_rule_package(cwd, demand.package, rule_sdk_header(), toolchain, &failed_paths);
+    paths.append_range(package ? package->observed_paths : failed_paths);
+    for (const auto& path : demand.reads) paths.push_back(native(cwd / path));
+    const auto invocation = rule_invocation(cwd, demand);
+    const auto package_stamp = package ? package_key(*package) : fingerprint128(package.error());
+    const auto invocation_stamp = invocation ? observation_key(*invocation) : fingerprint128(invocation.error());
+    observations.push_back(fingerprint(std::tuple{package.has_value(), package_stamp,
+                                                  invocation.has_value(), invocation_stamp}));
+    if (!package || !invocation) return std::nullopt;
+    return std::pair{package_stamp, invocation_stamp};
+  };
+  for (std::size_t i = 0; i < snapshot.observations.size(); ++i) {
+    const auto& record = snapshot.observations[i];
+    const auto state = observe(record.demand);
+    if (state == std::pair{record.package, record.invocation}) current.push_back(snapshot.expansions[i]);
+  }
+  auto watch = watch_project(cwd, target, current);
+  if (watch.pending && std::ranges::none_of(snapshot.observations, [&](const auto& record) {
+        return record.demand == *watch.pending;
+      })) (void)observe(*watch.pending);
+  watch.stamp = fingerprint(std::tie(watch.stamp, observations));
+  watch.paths.append_range(std::move(paths));
+  std::ranges::sort(watch.paths);
+  auto duplicates = std::ranges::unique(watch.paths);
+  watch.paths.erase(duplicates.begin(), duplicates.end());
+  return watch;
+}
+
 }  // namespace
 
 std::expected<PlanInspection, std::string> inspect_built_project(
@@ -332,6 +369,11 @@ std::expected<PlanInspection, std::string> inspect_built_project(
   return inspect_project(cwd, target, current);
 }
 
+ProjectWatchState watch_built_project(const fs::path& cwd, std::string_view target, const RuleToolchain& toolchain) {
+  auto snapshot = read_rule_snapshot(cwd, target);
+  return watch_rules(cwd, target, toolchain, snapshot ? *snapshot : RuleSnapshot{});
+}
+
 Coordinator::Coordinator(pipeline::Session& session, std::string executable, std::uint64_t worker_build)
     : session_(session), executable_(std::move(executable)), worker_build_(worker_build) {
   using enum engine::Durability;
@@ -344,7 +386,7 @@ Coordinator::Coordinator(pipeline::Session& session, std::string executable, std
 }
 
 ProjectReport Coordinator::run(const fs::path& cwd, const std::string& target,
-                               const std::optional<std::string>& tool_path,
+                               const std::optional<std::string>& tool_path, bool watch,
                                const std::function<void()>& refresh, const std::function<bool()>& cancelled,
                                const Apply& apply,
                                const std::function<bool(engine::Revision, const std::function<void()>&)>& publish,
@@ -447,9 +489,13 @@ ProjectReport Coordinator::run(const fs::path& cwd, const std::string& target,
   if (!native_target) return fail("project building is unavailable on this host");
   while (!cancelled()) {
     refresh();
-    auto planned = prepare_project(cwd, target, toolchain, run_rule, run_package);
-    if (!planned) return fail(planned.error());
-    const ProjectPlan& plan = planned->plan;
+    PreparedProject planned;
+    auto prepared = prepare_project(cwd, target, toolchain, run_rule, run_package, planned);
+    if (cancelled()) return fail("build cancelled");
+    write_rule_snapshot(cwd, target, planned.rules);
+    if (watch) report.watch_stamp = watch_rules(cwd, target, toolchain, planned.rules).stamp;
+    if (!prepared) return fail(prepared.error());
+    const ProjectPlan& plan = planned.plan;
     const Fp128 plan_id = fingerprint(plan);
     if (const auto* prior = session_.db().peek<WorkspacePlan>(key); !prior || fingerprint(prior->resolved) != plan_id)
       apply([&](engine::Db& db) { db.set<WorkspacePlan>(key, Planned{workspace, plan}); });
@@ -469,7 +515,7 @@ ProjectReport Coordinator::run(const fs::path& cwd, const std::string& target,
           // Two targets in a plan can describe the same execution.
           if (!attempted.insert(id).second) continue;
           auto result = run_action("ExternalAction", generator.name, generator.action, generator.inputs);
-          const auto observed = observe_project(cwd, target, toolchain, *planned);
+          const auto observed = observe_project(cwd, target, toolchain, planned);
           if (!observed || std::ranges::none_of(observed->generators, [&](const auto& current) {
                 return current.name == generator.name && action_key(current) == id;
               })) break;
@@ -510,10 +556,10 @@ ProjectReport Coordinator::run(const fs::path& cwd, const std::string& target,
       }
 
       if (cancelled()) return fail("build cancelled");
-      const auto observed = observe_project(cwd, target, toolchain, *planned);
+      const auto observed = observe_project(cwd, target, toolchain, planned);
       if (!observed || fingerprint(*observed) != plan_id) break;
       if (demand->image.empty()) {
-        if (!publish(before, [&] { write_rule_snapshot(cwd, target, planned->rules); })) break;
+        if (!publish(before, [] {})) break;
         report.status = 1;
         report.diagnostics.append_range(std::move(demand->errors));
         if (report.diagnostics.empty()) report.diagnostics.push_back("build produced no executable");
@@ -521,7 +567,6 @@ ProjectReport Coordinator::run(const fs::path& cwd, const std::string& target,
       }
       std::optional<std::string> error;
       if (!publish(before, [&] {
-            write_rule_snapshot(cwd, target, planned->rules);
             if (auto directory = build_directory(cwd, "out")) error = install(output, demand->image);
             else error = std::move(directory.error());
           })) break;

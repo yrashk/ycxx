@@ -72,6 +72,7 @@ struct WatchedProject {
   std::string cwd;
   std::string target;
   Fp128 stamp;
+  std::optional<std::string> tool_path = std::nullopt;
 };
 struct AwaitChange {
   std::uint64_t since = 0;     // the revision the last build started from (`Report::started_at`)
