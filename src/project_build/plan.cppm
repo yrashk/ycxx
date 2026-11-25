@@ -43,6 +43,11 @@ struct ProjectPlan {
   std::vector<RuntimeAssetPlan> runtime_assets = {};
 };
 
+struct RuleInputPlan {
+  ProjectPlan producers;
+  std::vector<ArtifactInputPlan> inputs;
+};
+
 struct RuleWitnessPlan {
   GeneratorPlan witness;
   ProjectPlan producers;
@@ -91,6 +96,11 @@ std::expected<RulePackageRef, std::string> capability_package(std::string_view p
 std::expected<RulePackagePlan, std::string> plan_rule_package(
     const std::filesystem::path& cwd, const RulePackageRef& package, std::string_view sdk_header,
     const RuleToolchain& toolchain, std::vector<std::string>* failed_paths = nullptr);
+// Reobserve the reachable producers of a rule's generated planning inputs.
+// Include paths observed before an incomplete plan.
+std::expected<RuleInputPlan, std::string> plan_rule_inputs(
+    const std::filesystem::path& cwd, const RuleDemand& demand, std::span<const RuleExpansion> expansions,
+    std::vector<std::string>* paths = nullptr);
 // Capture the witness and its artifact producers, or demand the first missing rule expansion.
 // Include paths observed before an incomplete plan.
 std::expected<std::variant<RuleWitnessPlan, RuleDemand>, std::string> plan_rule_witness(
@@ -374,6 +384,21 @@ bool has_capability_bindings(const Value& value) {
   });
 }
 
+std::vector<RulePlanInput> rule_plan_inputs(const TargetDecl& decl, std::span<const std::string> reads) {
+  std::vector<RulePlanInput> result;
+  if (const auto* value = field(decl, "plan_inputs")) {
+    for (const auto& [name, entry] : as<Record>(*value, "a record of named planning inputs")) {
+      if (!basename(name)) fail(entry.location, "expected a planning input name with a single path component");
+      if (std::ranges::contains(reads, name))
+        fail(entry.location, std::format("planning input '{}' conflicts with a rule read path", name));
+      const auto& ref = as<ArtifactRef>(entry, "artifact(target, output) for a planning input");
+      result.push_back({name, ref.target, ref.output});
+    }
+  }
+  std::ranges::sort(result, {}, &RulePlanInput::name);
+  return result;
+}
+
 RuleDemand rule_demand(const TargetDecl& decl, std::string_view rule, const RulePackageRef& package) {
   RuleDemand demand{decl.name, std::string(rule), package, {}, {}, {}};
   const bool capability_header = package.kind == RulePackageRef::Kind::capabilities && rule == "header";
@@ -384,6 +409,7 @@ RuleDemand rule_demand(const TargetDecl& decl, std::string_view rule, const Rule
     (void)require_field(decl, "capabilities");
   }
   for (const auto& [name, value] : decl.fields) {
+    if (name == "plan_inputs") continue;
     if (name == "reads") {
       std::set<std::string> paths;
       for (const auto& entry : as<List>(value, "a list of rule read paths")) {
@@ -419,10 +445,11 @@ RuleDemand rule_demand(const TargetDecl& decl, std::string_view rule, const Rule
       demand.attributes.push_back({name, *text});
     }
   }
+  demand.plan_inputs = rule_plan_inputs(decl, demand.reads);
   std::ranges::sort(demand.capabilities, {}, &RuleCapabilityBinding::name);
   std::ranges::sort(demand.facts, {}, &RuleFactReference::name);
-  if (demand.capabilities.empty()) append_record(demand.definition, decl.fields, {"reads", "facts"});
-  else append_record(demand.definition, decl.fields, {"reads", "capabilities", "facts"});
+  if (demand.capabilities.empty()) append_record(demand.definition, decl.fields, {"reads", "facts", "plan_inputs"});
+  else append_record(demand.definition, decl.fields, {"reads", "capabilities", "facts", "plan_inputs"});
   return demand;
 }
 
@@ -618,6 +645,17 @@ class Planner {
     return {std::move(candidates), std::move(plan.inputs), {}, std::move(flags), std::move(resources)};
   }
 
+  RuleInputPlan planning_inputs(const RuleDemand& demand) {
+    const auto original = declarations_.find(demand.target);
+    if (original == declarations_.end()) fail({}, std::format("unknown target '{}'", demand.target));
+    const auto& decl = *original->second;
+    if (rule_plan_inputs(decl, demand.reads) != demand.plan_inputs)
+      fail(decl.location, std::format("planning inputs changed for target '{}'", decl.name));
+    resolving_rules_.emplace(decl.name, planning_edges_);
+    auto inputs = resolve_rule_inputs(decl, demand.plan_inputs);
+    return {std::move(plan_), std::move(inputs)};
+  }
+
   RuleWitnessPlan witness(const RuleExpansion& expansion) {
     const auto& demand = expansion.demand;
     if (!demand.value_export) fail({}, std::format("target '{}' has no requested value export", demand.target));
@@ -628,7 +666,7 @@ class Planner {
     require_value_export(decl, kind, *demand.value_export, decl.location);
     const auto schema = observation_schema(decl);
     // A producer may reach this observer through another rule's value bindings.
-    resolving_rules_.insert(decl.name);
+    resolving_rules_.emplace(decl.name, planning_edges_);
     auto witness = generator(decl, std::nullopt, {}, true);
     return {std::move(witness), std::move(plan_), schema ? std::optional<std::string>(*schema) : std::nullopt};
   }
@@ -670,10 +708,33 @@ class Planner {
     return key;
   }
 
+  std::vector<ArtifactInputPlan> resolve_rule_inputs(const TargetDecl& decl,
+                                                    std::span<const RulePlanInput> inputs) {
+    std::vector<ArtifactInputPlan> result;
+    if (inputs.empty()) return result;
+    const auto& bindings = as<Record>(require_field(decl, "plan_inputs"), "a record of named planning inputs");
+    result.reserve(inputs.size());
+    for (const auto& input : inputs) {
+      const auto& binding = *field(bindings, input.name);
+      const auto& ref = as<ArtifactRef>(binding, "artifact(target, output) for a planning input");
+      ++planning_edges_;
+      const auto [producer, output] = artifact(ref, binding.location);
+      --planning_edges_;
+      const auto& gen = plan_.generators[producer];
+      auto path = display_path(generated_path(cwd_, gen.name, gen.action.outputs[output].filename));
+      result.push_back({input.name, std::move(path), producer, output});
+    }
+    return result;
+  }
+
   ResolvedTarget find(std::string_view name, SourceLocation at,
                       std::optional<std::string_view> value_export = std::nullopt) {
     if (!basename(name)) fail(at, std::format("invalid target name '{}'", name));
-    if (resolving_rules_.contains(name)) fail(at, std::format("value dependency cycle at target '{}'", name));
+    if (const auto active = resolving_rules_.find(name); active != resolving_rules_.end()) {
+      if (active->second != planning_edges_)
+        fail(at, std::format("planning input dependency cycle at target '{}'", name));
+      fail(at, std::format("value dependency cycle at target '{}'", name));
+    }
     const auto match = declarations_.find(name);
     if (match == declarations_.end()) fail(at, std::format("unknown target '{}'", name));
     const auto& decl = *match->second;
@@ -696,7 +757,7 @@ class Planner {
     }
     if (!package) return {decl, Primitive::unknown};
     if (rule.empty()) fail(decl.location, "missing imported rule name");
-    resolving_rules_.insert(decl.name);
+    resolving_rules_.emplace(decl.name, planning_edges_);
     auto demand = rule_demand(decl, rule, *package);
     if (value_export) demand.value_export = *value_export;
     if (watch_) {
@@ -725,6 +786,7 @@ class Planner {
     }
     for (const auto& binding : demand.facts)
       require_binding(binding.value, field(*facts, binding.name)->location, true);
+    (void)resolve_rule_inputs(decl, demand.plan_inputs);
     const auto expansion = std::ranges::find(expansions_, demand, &RuleExpansion::demand);
     if (expansion == expansions_.end()) {
       if (inspection_)
@@ -745,8 +807,10 @@ class Planner {
     const auto& lowered = primitives_.find(decl.name)->second;
     if (inspection_) {
       if (lowered.kind == Primitive::observer) generator(lowered.declaration, std::nullopt, {}, true);
+      const auto* planning_inputs = find_bindings("plan_inputs");
       for (const auto& observation : expansion->capability_facts) {
-        const auto* bindings = observation.kind == "fact-input" ? facts : capabilities;
+        const auto* bindings = observation.kind == "plan-input" ? planning_inputs :
+                               observation.kind == "fact-input" ? facts : capabilities;
         const auto* binding = bindings && observation.kind != "value-export" ? field(*bindings, observation.name) : nullptr;
         fact(observation.kind, decl, observation.name, observation.value, observation.origin,
              binding ? binding->location : decl.location);
@@ -910,8 +974,12 @@ class Planner {
 
   std::size_t resolve_generator(const TargetDecl& decl) {
     if (const auto match = generators_.find(decl.name); match != generators_.end()) return match->second;
-    if (!active_generators_.insert(decl.name).second)
+    const auto [active, inserted] = active_generators_.emplace(decl.name, planning_edges_);
+    if (!inserted) {
+      if (active->second != planning_edges_)
+        fail(decl.location, std::format("planning input dependency cycle at target '{}'", decl.name));
       fail(decl.location, std::format("artifact dependency cycle at '{}'", decl.name));
+    }
     auto gen = generator(decl);
     active_generators_.erase(decl.name);
     const auto index = plan_.generators.size();
@@ -1065,8 +1133,10 @@ class Planner {
   std::map<std::string, LoweredTarget, std::less<>> primitives_;
   std::map<std::string, std::size_t> generators_;
   std::map<std::string, std::string, std::less<>> tool_fingerprints_;
-  std::set<std::string, std::less<>> resolving_rules_;
-  std::set<std::string> active_generators_;
+  // The edge count at each active frame distinguishes mixed cycles from value or artifact cycles.
+  std::map<std::string, std::size_t, std::less<>> resolving_rules_;
+  std::map<std::string, std::size_t, std::less<>> active_generators_;
+  std::size_t planning_edges_ = 0;
   std::set<std::string> active_;
   std::map<std::string, TargetIncludes> finished_;
   ProjectPlan plan_;
@@ -1201,6 +1271,29 @@ std::expected<RulePackagePlan, std::string> plan_rule_package(
     if (failed_paths) failed_paths->assign(observed.paths.begin(), observed.paths.end());
     return std::unexpected(std::format("rule package '{}': {}", package.target, error.message));
   }
+}
+
+std::expected<RuleInputPlan, std::string> plan_rule_inputs(
+    const fs::path& cwd, const RuleDemand& demand, std::span<const RuleExpansion> expansions,
+    std::vector<std::string>* paths) {
+  if (paths) paths->clear();
+  std::error_code ec;
+  const auto root = fs::absolute(cwd, ec).lexically_normal();
+  if (ec) return std::unexpected(std::format("cannot resolve workspace directory: {}", ec.message()));
+  WatchObservations observed;
+  std::expected<RuleInputPlan, std::string> result;
+  try {
+    auto* watch = paths ? &observed : nullptr;
+    const auto manifest = read_workspace_manifest(root, watch);
+    result = Planner(root, manifest, watch, nullptr, expansions).planning_inputs(demand);
+  } catch (PlanningError& error) {
+    result = std::unexpected(std::move(error.message));
+  } catch (const RuleDemand& producer) {
+    result = std::unexpected(std::format("unresolved planning input producer '{}' for target '{}'",
+                                        producer.target, demand.target));
+  }
+  if (paths) paths->assign(observed.paths.begin(), observed.paths.end());
+  return result;
 }
 
 std::expected<std::variant<RuleWitnessPlan, RuleDemand>, std::string> plan_rule_witness(
