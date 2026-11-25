@@ -684,8 +684,9 @@ written default member initializer are value-initialized.
   `*this`, init-captures, `mutable`, conversion to a pointer to function, generic lambdas (`auto`
   parameters) and template lambdas (`[]<class T>`), and closures passed to and called from
   function templates, with Clang's names for closure types;
-- noncapturing, non-generic lambdas as initializers of internal-linkage namespace variables,
-  with addressable static storage and scalar calls ([#338](https://github.com/yrashk/ycxx/issues/338));
+- lambdas in the initializers of namespace-scope variables, static data members (of class
+  templates too) and variable templates, and in constraints; constexpr lambdas, except captures by
+  reference ([#338](https://github.com/yrashk/ycxx/issues/338));
 - casts, including `static_cast<T&&>` from a compatible object lvalue and runtime `static_cast`
   downcasts of object pointers, lvalue references and base xvalues through accessible,
   unambiguous nonvirtual base paths, `sizeof`/`alignof` (classes included), direct-member `offsetof` for
@@ -944,8 +945,8 @@ and a peer-owned virtual destructor and RTTI. This is the shape of libycxx's fun
   [#411](https://github.com/yrashk/ycxx/issues/411)
 - 128-bit integers through an ellipsis ([#1247](https://github.com/yrashk/ycxx/issues/1247)),
   and enumerations with a 128-bit underlying type or initializer ([#1176](https://github.com/yrashk/ycxx/issues/1176)).
-- Constexpr lambdas (the interpreter has no class objects yet), further lambda declaration
-  contexts ([#338](https://github.com/yrashk/ycxx/issues/338)),
+- Lambdas in default member initializers, default arguments and unevaluated operands
+  ([#338](https://github.com/yrashk/ycxx/issues/338)),
   tuple-like structured bindings and structured bindings to bit-fields or inherited members,
   inheriting constructors, and base packs or multiple bases in a class template.
 - Broader native construction, virtual dispatch and table emission, virtual base classes,
@@ -977,8 +978,8 @@ and a peer-owned virtual destructor and RTTI. This is the shape of libycxx's fun
 - ι: statements and declarations, the C++98/11 core: default arguments, block-scope statics,
   casts and arrays ([#337](https://github.com/yrashk/ycxx/issues/337)).
 - `auto` and lambdas ([#278](https://github.com/yrashk/ycxx/issues/278)): placeholder types,
-  lambdas and generic lambdas are done; constexpr lambdas wait on class objects in the
-  interpreter ([#262](https://github.com/yrashk/ycxx/issues/262)).
+  lambdas, generic lambdas and constexpr lambdas are done; captures by reference in constant
+  evaluation wait on the interpreter ([#262](https://github.com/yrashk/ycxx/issues/262)).
 
 - x86-64 ↔ AArch64 back-end parity ([#639](https://github.com/yrashk/ycxx/issues/639)), one
   gap per PR in priority order.
