@@ -436,8 +436,12 @@ ModuleBindingText module_candidates(std::span<const ModuleUnitLabel> units,
                                     std::span<const ModuleProviderSite> providers,
                                     std::string_view status, ModuleDirectiveAt at, const fs::path& cwd) {
   std::vector<std::pair<std::string, std::string>> candidates;
-  for (const auto site : providers)
-    candidates.emplace_back(module_unit_display(units[site.unit]), module_site(at(site), cwd));
+  for (const auto site : providers) {
+    const auto& unit = units[site.unit];
+    // Quote paths that could obscure candidate boundaries or the unit instance suffix.
+    const bool quoted = unit.path.find_first_of(",\"\\\n\r\t") != std::string::npos || unit.path.contains(" #");
+    candidates.emplace_back(module_unit_display(unit, quoted), module_site(at(site), cwd));
+  }
   std::ranges::sort(candidates);
   ModuleBindingText text{std::string(status), {}};
   for (const auto& [path, origin] : candidates) {
@@ -557,6 +561,19 @@ std::string_view explicit_triple(const ast::Target* target) {
   return target ? target->triple : std::string_view{};
 }
 
+template<class Visit>
+void for_each_native_output(const ProjectPlan& plan, const fs::path& cwd, std::string_view native_triple,
+                            Visit visit) {
+  for (std::size_t producer = 0; producer < plan.generators.size(); ++producer) {
+    const auto& generator = plan.generators[producer];
+    if (!generator.native_outputs) continue;
+    for (std::size_t output = 0; output < generator.action.outputs.size(); ++output) {
+      const auto& filename = generator.action.outputs[output].filename;
+      visit(ArtifactOutputPlan{producer, output}, generated_path(cwd, generator.name, filename, native_triple));
+    }
+  }
+}
+
 pipeline::TuId register_project_unit(pipeline::Session& session, const std::string& cwd,
                                      const SourcePlan& source, const ast::Target* target, bool explicit_target) {
   pp::Config config;
@@ -596,17 +613,16 @@ pipeline::RequestId register_native(pipeline::Session& session, const std::strin
   return session.request(std::move(build));
 }
 
-void inspect_modules(PlanInspection& inspection, std::span<const SourcePlan> sources,
-                     const fs::path& cwd, const ast::Target* target, std::string_view native_triple) {
-  if (sources.empty()) return;
-  std::vector<pp::PathId> generated_probes;
+void inspect_modules(PlanInspection& inspection, const ProjectPlan& plan, const fs::path& cwd,
+                     const ast::Target* target, std::string_view native_triple) {
+  if (plan.sources.empty()) return;
   pipeline::Session session;
   auto& db = session.db();
-  db.set_provider<pp::GeneratedFile>([&](pp::PathId path) {
-    generated_probes.push_back(path);
-    return pp::no_generated_file(path);
-  });
   std::set<engine::CellId> unavailable;
+  for_each_native_output(plan, cwd, native_triple, [&](ArtifactOutputPlan, const std::string& path) {
+    const auto id = pp::path_id(pp::Files::normalize(path));
+    unavailable.insert(db.cell_of<pp::GeneratedFile>(id).id);
+  });
   const auto uses_generated = [&](const auto& dependencies) {
     return std::ranges::any_of(dependencies, [&](const auto& group) {
       return std::ranges::any_of(group, [&](const auto& ref) { return unavailable.contains(ref.id); });
@@ -618,16 +634,13 @@ void inspect_modules(PlanInspection& inspection, std::span<const SourcePlan> sou
   std::vector<ModuleUnitDependencies> graph;
   std::vector<pipeline::ModuleScan> scans;
   std::vector<std::vector<std::string>> fact_names;
-  for (const auto& source : sources) {
+  for (const auto& source : plan.sources) {
     const auto shown_source = module_unit_display({module_path(source.path, cwd), ++source_instances[source.path]}, true);
     const auto unit = register_project_unit(session, workspace, source, target, !native_triple.empty());
     const auto file = pp::FileId{unit.n};
     auto scan = *session.run<pipeline::ModuleDirectives>(file);
-    for (const auto path : generated_probes) unavailable.insert(db.cell_of<pp::GeneratedFile>(path).id);
-    generated_probes.clear();
-    // A local inspection lacks the generated overlay. A missing virtual probe can even
-    // change a successful __has_include branch. Mark that unit pending instead of
-    // reporting dependencies discovered from a different set of inputs.
+    // A declared output can change the answer to a negative include probe. An undeclared
+    // path stays absent in the live overlay too.
     if (!unavailable.empty() && (uses_generated(db.dependencies<pipeline::ModuleDirectives>(file)) ||
                                  uses_generated(db.dependencies<pp::Pp>(file)))) {
       inspection.facts.push_back({"module-scan-pending", inspection.target, shown_source,
@@ -1244,13 +1257,13 @@ std::expected<PlanInspection, std::string> inspect_built_project(
         current.push_back(std::move(snapshot->expansions[i]));
     }
   }
-  std::vector<SourcePlan> sources;
-  auto inspection = inspect_project(cwd, target, current, native_triple, sources);
+  ProjectPlan plan;
+  auto inspection = inspect_project(cwd, target, current, native_triple, plan);
   const auto* native_target = selected_target ? selected_target : pp::native_target;
   if (inspection && native_target) {
     inspection->facts.push_back({"native-target", std::string(target), "triple", std::string(native_target->triple),
                                  selected_target ? "--target" : "host default"});
-    inspect_modules(*inspection, sources, cwd, native_target, native_triple);
+    inspect_modules(*inspection, plan, cwd, native_target, native_triple);
   }
   if (inspection && snapshot)
     for (auto& probe : snapshot->probes) {
@@ -1758,17 +1771,10 @@ ProjectReport Coordinator::run(const fs::path& cwd, const std::string& target,
         const auto request = register_native(session_, workspace_path, target, native_target, plan, output_at,
                                              native_triple);
         std::map<std::string, std::string> generated;
-        for (std::size_t index = 0; index < plan.generators.size(); ++index) {
-          const auto& generator = plan.generators[index];
-          if (!generator.native_outputs) continue;
-          const auto& outputs = *output_at(index);
-          for (std::size_t i = 0; i < generator.action.outputs.size(); ++i) {
-            const auto& output = generator.action.outputs[i];
-            const auto& bytes = outputs[i].contents.bytes;
-            generated.emplace(generated_path(cwd, generator.name, output.filename, native_triple),
-                              std::string(bytes.begin(), bytes.end()));
-          }
-        }
+        for_each_native_output(plan, cwd, native_triple, [&](ArtifactOutputPlan output, std::string path) {
+          const auto& bytes = (*output_at(output.producer))[output.output].contents.bytes;
+          generated.emplace(std::move(path), std::string(bytes.begin(), bytes.end()));
+        });
         auto& previous = generated_paths_[native_workspace_path];
         apply([&](engine::Db& db) {
           for (const auto& path : previous)

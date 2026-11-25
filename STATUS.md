@@ -3258,8 +3258,8 @@ Named-module discovery runs before native semantic analysis through
 and import directives in each unit's selected preprocessing view. The graph
 omits occurrence locations, so moving a directive can refresh provenance
 without changing the dependencies. Read-only plans show physical source
-locations and mark scans that need generated inputs as pending. Build
-traces include these units once the virtual inputs are available.
+locations and mark scans that probe declared generated outputs as pending
+(#1354). Build traces include these units once the virtual inputs are available.
 Named-module semantics and BMI support are tracked in #319.
 
 `ModuleProviders` resolves written imports within the reachable module
