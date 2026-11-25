@@ -369,6 +369,12 @@ Artifact text_artifact(std::string_view text) {
   return {std::vector<std::uint8_t>(text.begin(), text.end()), false};
 }
 
+void add_rule_read(RuleInvocation& invocation, const std::string& name, Artifact contents) {
+  const auto staged = std::format("reads/{}", invocation.reads.size());
+  invocation.request.reads.push_back({name, std::format("inputs/{}", staged)});
+  invocation.reads.push_back({staged, staged, std::move(contents)});
+}
+
 std::expected<RuleInvocation, std::string> rule_invocation(const fs::path& cwd, const RuleDemand& demand) {
   RuleInvocation invocation{
       .request = {.target = demand.target, .rule = demand.rule, .definition = demand.definition,
@@ -388,9 +394,7 @@ std::expected<RuleInvocation, std::string> rule_invocation(const fs::path& cwd, 
     if (!stream) return std::unexpected(std::format("cannot read rule input '{}'", path));
     const std::string bytes{std::istreambuf_iterator<char>(stream), {}};
     if (stream.bad()) return std::unexpected(std::format("cannot read rule input '{}'", path));
-    auto staged = std::format("reads/{}", invocation.reads.size());
-    invocation.request.reads.push_back({path, std::format("inputs/{}", staged)});
-    invocation.reads.push_back({staged, staged, text_artifact(bytes)});
+    add_rule_read(invocation, path, text_artifact(bytes));
   }
   return invocation;
 }
@@ -495,22 +499,27 @@ std::optional<RuleValueData> classify_value(std::string_view output, std::string
   return std::nullopt;
 }
 
-std::expected<std::vector<Fp128>, std::string> stage_witness(
-    RuleWitnessPlan& plan, const RunRuleAction& run, std::function_ref<bool()> current) {
+struct StagedProducers {
   std::vector<ActionOutputs> outputs;
   std::vector<Fp128> keys;
-  const auto output_at = [&](std::size_t i) -> const ActionOutputs* { return &outputs.at(i); };
-  for (const auto& producer : plan.producers.generators) {
+
+  const ActionOutputs* output_at(std::size_t i) const { return &outputs.at(i); }
+};
+
+std::expected<StagedProducers, std::string> stage_producers(
+    const ProjectPlan& plan, const RunRuleAction& run, std::function_ref<bool()> current) {
+  StagedProducers staged;
+  const auto output_at = [&](std::size_t i) { return staged.output_at(i); };
+  for (const auto& producer : plan.generators) {
     auto inputs = producer.inputs;
     if (!producer.artifact_inputs.empty()) (void)append_artifact_inputs(producer, output_at, inputs);
     const auto key = action_key(producer, inputs);
     auto result = run("ExternalAction", producer.name, producer.action, inputs, key, current);
     if (!result) return std::unexpected(std::move(result.error()));
-    outputs.push_back(std::move(*result));
-    keys.push_back(key);
+    staged.outputs.push_back(std::move(*result));
+    staged.keys.push_back(key);
   }
-  if (!plan.witness.artifact_inputs.empty()) (void)append_artifact_inputs(plan.witness, output_at, plan.witness.inputs);
-  return keys;
+  return staged;
 }
 
 std::expected<std::string, std::string> invoke_rule_worker(
@@ -588,13 +597,22 @@ std::expected<void, std::string> prepare_project(
     }
     auto observation = rule_invocation(cwd, demand);
     if (!observation) return std::unexpected(observation.error());
-    // Profile and witness identity are revalidated separately from the worker's semantic arguments.
+    // Keep the ordinary reads and the generated producer graph independently observable.
     const auto invocation_key = observation_key(*observation, toolchain.executable_build);
+    std::optional<RuleInputPlan> planning_plan;
+    std::optional<Fp128> planning_stamp;
+    if (!demand.plan_inputs.empty()) {
+      auto captured = plan_rule_inputs(cwd, demand, prepared.rules.expansions);
+      if (!captured) return std::unexpected(std::move(captured.error()));
+      planning_stamp = fingerprint(*captured);
+      planning_plan = std::move(*captured);
+    }
     if (!arguments->values.empty()) observation->request.capabilities = std::move(arguments->values);
     if (!arguments->structured.empty()) observation->request.facts = std::move(arguments->structured);
     const bool consumes_values = !demand.facts.empty() || std::ranges::any_of(demand.capabilities, [](const auto& binding) {
       return binding.value.has_value();
     });
+    const bool depends_on_other_rules = consumes_values || planning_plan.has_value();
     const auto current_invocation = [&] {
       const auto current = rule_invocation(cwd, demand);
       if (manifest_stamp(cwd) != prepared.manifest ||
@@ -602,16 +620,37 @@ std::expected<void, std::string> prepare_project(
           !current_package() || !std::ranges::all_of(arguments->profiles, [&](const auto& profile) {
             return current_projection(cwd, toolchain, profile);
           })) return false;
-      return !consumes_values || current_rules(cwd, toolchain, prepared);
+      if (depends_on_other_rules && !current_rules(cwd, toolchain, prepared)) return false;
+      if (!planning_stamp) return true;
+      const auto current_inputs = plan_rule_inputs(cwd, demand, prepared.rules.expansions);
+      return current_inputs && fingerprint(*current_inputs) == *planning_stamp;
     };
+    const auto changed_rule_inputs = [&] {
+      superseded = true;
+      return std::unexpected(std::format("inputs for rule '{}' changed during resolution", demand.target));
+    };
+    if (planning_plan) {
+      if (!current_invocation()) return changed_rule_inputs();
+      auto staged = stage_producers(planning_plan->producers, run, current_invocation);
+      if (!staged) return std::unexpected(std::move(staged.error()));
+      if (!current_invocation()) return changed_rule_inputs();
+      for (const auto& input : planning_plan->inputs) {
+        const auto& producer = planning_plan->producers.generators[input.producer];
+        const auto& output = producer.action.outputs[input.output];
+        const auto& receipt = staged->outputs[input.producer][input.output].contents;
+        const auto action = staged->keys[input.producer];
+        // The read callback exposes bytes. The action ID and mode belong to provenance.
+        add_rule_read(*observation, input.name, {receipt.bytes, false});
+        arguments->facts.push_back({"plan-input", demand.target, input.name, input.path,
+            std::format("artifact({:?}, {:?}) · receipt {:016x}{:016x}", producer.name, output.name,
+                        action.lo, action.hi)});
+      }
+    }
     const auto& library = built->outputs.front().contents;
     auto lowered = invoke_rule_worker(run, toolchain, "RuleWorker", demand.target, library,
                                       *observation, current_invocation);
     if (!lowered) return std::unexpected(std::move(lowered.error()));
-    if (consumes_values && !current_invocation()) {
-      superseded = true;
-      return std::unexpected(std::format("value inputs for '{}' changed during rule resolution", demand.target));
-    }
+    if (depends_on_other_rules && !current_invocation()) return changed_rule_inputs();
     RuleExpansion expansion{demand, std::move(*lowered), std::move(arguments->facts)};
     std::optional<Fp128> witness_key;
     if (demand.value_export) {
@@ -637,7 +676,7 @@ std::expected<void, std::string> prepare_project(
       auto& plan = std::get<RuleWitnessPlan>(*witness_plan);
       witness_key = witness_stamp(plan);
       const auto current_witness = [&] {
-        if (!current_invocation() || (!consumes_values && !current_rules(cwd, toolchain, prepared))) return false;
+        if (!current_invocation() || (!depends_on_other_rules && !current_rules(cwd, toolchain, prepared))) return false;
         const auto current = plan_rule_witness(cwd, expansion, prepared.rules.expansions);
         const auto* recipe = current ? std::get_if<RuleWitnessPlan>(&*current) : nullptr;
         return recipe && witness_stamp(*recipe) == *witness_key;
@@ -647,15 +686,18 @@ std::expected<void, std::string> prepare_project(
         return std::unexpected(std::format("witness '{}' changed during classification", label));
       };
       if (!current_witness()) return changed_witness();
-      auto compiled = stage_witness(plan, run, current_witness);
+      auto compiled = stage_producers(plan.producers, run, current_witness);
       if (!compiled) return std::unexpected(std::move(compiled.error()));
+      const auto output_at = [&](std::size_t i) { return compiled->output_at(i); };
+      if (!plan.witness.artifact_inputs.empty()) (void)append_artifact_inputs(plan.witness, output_at, plan.witness.inputs);
       if (!current_witness()) return changed_witness();
       const auto witness_action = action_key(plan.witness);
       auto evidence = run_witness(label, plan.witness, witness_action, current_witness);
       if (!evidence) return std::unexpected(std::move(evidence.error()));
       observation->request.witness = RuleWitnessReport{
           field, evidence->exit_status, std::move(evidence->out), std::move(evidence->err), plan.schema};
-      const auto receipt = fingerprint(std::tie(library_key, invocation_key, witness_action, observation->request));
+      const auto classification_key = observation_key(*observation, toolchain.executable_build);
+      const auto receipt = fingerprint(std::tie(library_key, witness_action, classification_key));
       auto classified = invoke_rule_worker(run, toolchain, "RuleClassifier", label, library,
                                            std::move(*observation), current_witness);
       if (!classified) return std::unexpected(std::move(classified.error()));
@@ -665,7 +707,7 @@ std::expected<void, std::string> prepare_project(
       auto origin = std::format("{} via {} · {} · witness exit {} · receipt {:016x}{:016x}", label,
           plan.witness.action.tool, demand.package.target, evidence->exit_status, receipt.lo, receipt.hi);
       for (const auto& input : plan.witness.artifact_inputs) {
-        const auto key = (*compiled)[input.producer];
+        const auto key = compiled->keys[input.producer];
         origin += std::format(" · artifact {} receipt {:016x}{:016x}", input.name, key.lo, key.hi);
       }
       expansion.capability_facts.push_back(
@@ -675,7 +717,7 @@ std::expected<void, std::string> prepare_project(
     }
     prepared.rules.pending_projections.erase(demand.target);
     prepared.rules.observations.push_back(
-        {std::move(demand), library_key, invocation_key, std::move(arguments->profiles), witness_key});
+        {std::move(demand), library_key, invocation_key, std::move(arguments->profiles), witness_key, planning_stamp});
     prepared.rules.expansions.push_back(std::move(expansion));
     if (!deferred.empty()) {
       next = std::move(deferred.back());
@@ -693,6 +735,10 @@ bool current_rule(const fs::path& cwd, const RuleToolchain& toolchain, const Rul
       !std::ranges::all_of(record.projections, [&](const auto& profile) {
         return current_projection(cwd, toolchain, profile);
       })) return false;
+  if (record.planning) {
+    const auto planning = plan_rule_inputs(cwd, record.demand, upstream);
+    if (!planning || fingerprint(*planning) != *record.planning) return false;
+  }
   if (!record.witness) return true;
   const auto witness = plan_rule_witness(cwd, expansion, upstream);
   const auto* recipe = witness ? std::get_if<RuleWitnessPlan>(&*witness) : nullptr;
@@ -770,6 +816,19 @@ ProjectWatchState watch_rules(const fs::path& cwd, std::string_view target, cons
     }
     return matches && stamp == probe.stamp;
   };
+  const auto observe_planning = [&](const RuleDemand& demand) -> std::optional<Fp128> {
+    if (demand.plan_inputs.empty()) return std::nullopt;
+    std::vector<std::string> input_paths;
+    const auto plan = plan_rule_inputs(cwd, demand, current, &input_paths);
+    paths.append_range(std::move(input_paths));
+    if (!plan) {
+      observations.push_back(fingerprint128(plan.error()));
+      return std::nullopt;
+    }
+    const auto stamp = fingerprint(*plan);
+    observations.push_back(stamp);
+    return stamp;
+  };
   const auto observe_witness = [&](const RuleExpansion& expansion) -> std::optional<Fp128> {
     std::vector<std::string> witnessed_paths;
     const auto plan = plan_rule_witness(cwd, expansion, current, &witnessed_paths);
@@ -780,6 +839,7 @@ ProjectWatchState watch_rules(const fs::path& cwd, std::string_view target, cons
     }
     if (const auto* demand = std::get_if<RuleDemand>(&*plan)) {
       (void)observe(*demand);
+      (void)observe_planning(*demand);
       observations.push_back(fingerprint(*demand));
       return std::nullopt;
     }
@@ -794,8 +854,9 @@ ProjectWatchState watch_rules(const fs::path& cwd, std::string_view target, cons
     bool profiles_current = true;
     for (const auto& probe : record.projections)
       if (!observe_probe(probe)) profiles_current = false;
+    const bool planning_current = !record.planning || observe_planning(record.demand) == record.planning;
     const bool witness_current = !record.witness || observe_witness(expansion) == record.witness;
-    if (profiles_current && witness_current && state == std::pair{record.package, record.invocation})
+    if (profiles_current && planning_current && witness_current && state == std::pair{record.package, record.invocation})
       current.push_back(expansion);
   }
   for (const auto& probe : snapshot.probes) (void)observe_probe(probe);
@@ -805,7 +866,10 @@ ProjectWatchState watch_rules(const fs::path& cwd, std::string_view target, cons
   auto watch = observed ? *observed : watch_project(cwd, target, current);
   if (watch.pending && std::ranges::none_of(snapshot.observations, [&](const auto& record) {
         return record.demand == *watch.pending;
-      })) (void)observe(*watch.pending);
+      })) {
+    (void)observe(*watch.pending);
+    (void)observe_planning(*watch.pending);
+  }
   watch.stamp = fingerprint(std::tie(watch.stamp, observations));
   watch.paths.append_range(std::move(paths));
   std::ranges::sort(watch.paths);

@@ -298,6 +298,33 @@ registers its rules through the same worker contract. The kernel supplies
 native compiler queries and external actions to either provider. The
 standard package also provides the unqualified `generate` rule.
 
+### Generated planning inputs (#1335)
+
+```text
+shaders.bundle "scene" {
+    inventory = "inventory"
+    plan_inputs = { inventory = artifact("shader_inventory", "list") }
+}
+```
+
+A workspace rule can bind `plan_inputs` names to public generator outputs.
+An input has a single logical name and cannot share a name with an ordinary
+`reads` entry. The isolated worker uses `read` with that name and receives
+the selected receipt's bytes. The artifact is available to planning before
+the rule emits its declarations. The same generator and receipt serve any
+ordinary artifact consumers. The planner rejects cycles across planning,
+artifact and value edges.
+
+The worker's request depends on the named input bytes. When a generator
+runs and produces equal bytes, the existing worker result stays reusable.
+For inspection and watch, the admitted expansion records the selected output
+and its producer graph's recipe, tool and declared input identity separately.
+`ycxx show` verifies the captured graph before reporting the provenance of an
+expansion. A stale graph becomes unresolved until a build supplies a current
+receipt. Watch follows the generator graph even if it fails or returns an
+invalid inventory. Publication keeps the previous assets until planning,
+the ordinary actions and the native build succeed.
+
 ## Compiler capability observations
 
 ```sh

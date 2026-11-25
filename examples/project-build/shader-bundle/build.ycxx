@@ -1,8 +1,15 @@
 use plugin("rules/package") as shaders
 
+generate "shader_inventory" {
+    tool = "/bin/sh"
+    args = [input("script"), input("source"), output("list")]
+    inputs = { script = "rules/inventory.sh", source = "shaders/inventory.txt" }
+    outputs = { list = "inventory.txt" }
+}
+
 shaders.bundle "scene" {
-    inventory = "shaders/inventory.txt"
-    reads = ["shaders/inventory.txt"]
+    inventory = "inventory"
+    plan_inputs = { inventory = artifact("shader_inventory", "list") }
     compiler = "/usr/bin/glslc"
     python = "/usr/bin/python3"
 }

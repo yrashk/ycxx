@@ -147,14 +147,14 @@ extern "C" int ycxx_rule_plan_v1(const ycxx_rule_host_v1* host) {
       compiler.size == 0 || compiler.data[0] != '/' ||
       host->attribute(host->context, "python", &python) != 1 || python.size == 0 ||
       python.data[0] != '/')
-    return reject(host, "expected an inventory path of at most 255 bytes and absolute compiler and python paths");
+    return reject(host, "expected an inventory input of at most 255 bytes and absolute compiler and python paths");
 
-  char inventory_path[256];
-  for (size_t i = 0; i < inventory.size; ++i) inventory_path[i] = inventory.data[i];
-  inventory_path[inventory.size] = '\0';
+  char inventory_name[256];
+  for (size_t i = 0; i < inventory.size; ++i) inventory_name[i] = inventory.data[i];
+  inventory_name[inventory.size] = '\0';
   Text contents{};
-  if (host->read(host->context, inventory_path, &contents) != 1)
-    return reject(host, "the shader inventory must exist and be listed in reads");
+  if (host->read(host->context, inventory_name, &contents) != 1)
+    return reject(host, "the shader inventory must be available through reads or plan_inputs");
 
   Shader shaders[max_shaders];
   size_t count = 0;
