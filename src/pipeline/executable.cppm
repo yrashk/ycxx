@@ -1,4 +1,5 @@
-// Linking a program (#43) through ycxx's linkers. x86-64 Linux produces an ELF executable.
+// Linking a program (#43) through ycxx's linkers. x86-64 Linux produces an ELF executable
+// or a leaf shared library (#391).
 // arm64 macOS links the objects and libSystem into a signed Mach-O executable. Imports are checked
 // against the export list of the SDK's `usr/lib/libSystem.B.tbd`. The SDK is `$SDKROOT`, else what
 // `xcrun --show-sdk-path` prints, else the Command Line Tools' SDK. The SDK is located and its
@@ -62,7 +63,8 @@ struct ArchiveLinkInputs {
 
 // Ordinarily, translation units precede disk objects. Archive links carry a positional manifest
 // of all operands and the archive snapshots. Linux dynamic links carry their target interpreter
-// and ordered shared inputs. `identifier` names the Mach-O code signature.
+// and ordered shared inputs. `identifier` names the Mach-O code signature. A shared SONAME
+// requests Linux shared output with no executable startup.
 struct ProgramInputs {
   std::vector<TuId> tus;
   std::vector<obj::object> objects;
@@ -70,10 +72,11 @@ struct ProgramInputs {
   std::optional<link::elf::dynamic_options> dynamic = std::nullopt;
   std::optional<ArchiveLinkInputs> archive_link = std::nullopt;
   bool check_policies = false;
+  std::optional<std::string> shared_soname = std::nullopt;
 };
 
 EffectVerification effect_link_verification(const ProgramInputs& in) {
-  if (in.dynamic) return EffectVerification::unavailable;
+  if (in.dynamic || in.shared_soname) return EffectVerification::unavailable;
   if (const auto& archive = in.archive_link;
       archive && (archive->target != obj::target::aarch64_macos ||
                   std::ranges::contains(archive->operands, LinkOperand::Kind::archive, &LinkOperand::kind)))
@@ -366,6 +369,10 @@ std::optional<std::string> write_file(const std::filesystem::path& path, std::sp
 engine::query_task<Linked> Link::run(engine::Ctx& cx, ProgramId p) {
   const ProgramInputs& in = cx.fetch<ProgramIn>(p);
   Linked out;
+  if (in.shared_soname && (in.dynamic || in.archive_link)) {
+    out.errors.push_back("shared ELF output requires source or ordinary object inputs");
+    co_return out;
+  }
   const auto effects = effect_link_verification(in);
   if (in.check_policies && effects == EffectVerification::unavailable) {
     out.errors.push_back("checked ownership links require explicit objects and source inputs");
@@ -438,6 +445,12 @@ engine::query_task<Linked> Link::run(engine::Ctx& cx, ProgramId p) {
     // The Darwin selector retains the ordinary inputs as a prefix before runtime members.
     out.errors = check_object_policies(objects, in.tus.size() + in.objects.size());
     if (!out.errors.empty()) co_return out;
+  }
+  if (in.shared_soname) {
+    auto image = link::elf::link_shared(objects, *in.shared_soname);
+    if (image) out.image = std::move(*image);
+    else out.errors.push_back(std::move(image.error()));
+    co_return out;
   }
   if (auto selection = link::elf::select_comdat_groups(objects, in.dynamic.has_value()); !selection) {
     out.errors.push_back(std::move(selection.error()));
