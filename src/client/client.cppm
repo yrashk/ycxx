@@ -755,6 +755,7 @@ int build(std::span<const std::string_view> args) {
   daemon::ProjectBuildRequest request{.cwd = cwd_now(), .target = std::move(target),
                                       .trace = mode != TraceMode::off,
                                       .trace_values = mode == TraceMode::interactive || mode == TraceMode::json};
+  if (const char* path = std::getenv("PATH")) request.tool_path = path;
   if (request.cwd.empty()) return fail("cannot determine the working directory", 1);
   const std::string root = daemon::root_for(std::nullopt, request.cwd);
   if (watch) {
