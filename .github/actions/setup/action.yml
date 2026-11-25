@@ -19,13 +19,7 @@ runs:
         apt-get update -qq
         apt-get install -y -qq ninja-build cmake python3 git >/dev/null
     - if: runner.os == 'Linux' && inputs.oracle == 'true'
-      shell: bash
-      run: |
-        apt-get install -y -qq wget gnupg lsb-release >/dev/null
-        wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key > /etc/apt/trusted.gpg.d/apt.llvm.org.asc
-        echo "deb http://apt.llvm.org/$(lsb_release -cs)/ llvm-toolchain-$(lsb_release -cs)-23 main" > /etc/apt/sources.list.d/llvm.list
-        apt-get update -qq
-        apt-get install -y -qq clang-23 lld-23 >/dev/null
+      uses: ./.github/actions/setup-linux-oracle
     - if: runner.os == 'macOS'
       shell: bash
       run: |
