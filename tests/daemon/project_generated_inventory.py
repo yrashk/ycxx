@@ -165,7 +165,7 @@ def check_builds(ycxx, scope, env, journal):
     installed_inventory = publication(scope / ASSET_PATH)
     assert installed_inventory[0] == original.encode('utf-8'), installed_inventory
     initial_bundle = check_bundle(scope)
-    inspect(ycxx, scope, env, journal, published=True)
+    initial_receipt = inspect(ycxx, scope, env, journal, published=True)
 
     stable = original + '# Inventory comment filtered by the generator\n'
     replace_source(scope, INVENTORY, stable)
@@ -178,6 +178,7 @@ def check_builds(ycxx, scope, env, journal):
     assert publication(scope / ASSET_PATH) == installed_inventory, 'equal inventory changed the published list'
     check_native_reuse(scope, events, installed)
     stable_receipt = inspect(ycxx, scope, env, journal, published=True)
+    assert stable_receipt != initial_receipt, 'show kept stale receipt provenance for equal inventory bytes'
 
     expanded = stable + ACCENT_ROW
     replace_source(scope, INVENTORY, expanded)
