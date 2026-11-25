@@ -3443,9 +3443,10 @@ request it serves.
   builds through the daemon, a watcher, a stalled watcher beside 40 builds, shutdown).
 - The browser (#635): `:view` is its model, with no terminal: state, keys, mouse, and frames for a
   given size. `:browse` runs it on `/dev/tty`. It uses SGR mouse modes 1000, 1002 and 1006 with
-  autowrap off, and draws each line at its row. A `SIGWINCH` self-pipe redraws on resize. Fatal
-  signals restore the terminal, then re-raise. The tree has columns (time, worker, alloc and
-  retains, summed over the subtree) whose headers sort it (`Tree::Order::time` added). The
+  autowrap off, and draws each line at its row. A `SIGWINCH` self-pipe redraws on resize. An
+  interrupted terminal wait also checks the size, so a deferred handler cannot stall the redraw
+  (#1375). Fatal signals restore the terminal, then re-raise. The tree has columns (time, worker,
+  alloc and retains, summed over the subtree) whose headers sort it (`Tree::Order::time` added). The
   summary wraps on narrow screens. The divider drags (or `<`/`>`) and keeps its share of the
   width. Tests: `unit.trace` (SGR parsing, hit-testing, click, double click, marker, wheel,
   divider drag, sort, focus, wrap; frames against `browser.golden`); `daemon.trace_tui` (under a

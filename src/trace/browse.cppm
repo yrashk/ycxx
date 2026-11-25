@@ -197,14 +197,17 @@ class Terminal {
       if (winch >= 0) FD_SET(winch, &in);
       timeval tv{0, tick ? static_cast<suseconds_t>(tick->count() * 1000) : 0};
       const int r = ::select(std::max({fd_, feed, winch}) + 1, &in, nullptr, nullptr, tick ? &tv : nullptr);
-      if (r < 0) continue;
+      if (r < 0 && errno != EINTR) continue;
       if (r == 0) return Wake::tick;
-      if (winch >= 0 && FD_ISSET(winch, &in)) {
+      // ThreadSanitizer can defer the handler past an interrupted select. Drain any resize bytes
+      // already available, then let the browser check the terminal size before it waits again.
+      if (winch >= 0 && (r < 0 || FD_ISSET(winch, &in))) {
         char drain[64];
-        while (::read(winch, drain, sizeof drain) > 0) {
-        }
-        return Wake::resize;
+        bool resized = false;
+        while (::read(winch, drain, sizeof drain) > 0) resized = true;
+        if (resized) return Wake::resize;
       }
+      if (r < 0) return Wake::tick;
       if (FD_ISSET(fd_, &in)) return Wake::input;
       if (feed >= 0 && FD_ISSET(feed, &in)) return Wake::feed;
     }
