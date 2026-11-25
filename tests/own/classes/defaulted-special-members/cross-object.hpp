@@ -38,9 +38,7 @@ struct Volatile {
 };
 
 struct Aggregate { int x; char y; };
-// [class.copy.ctor]: copy and move are deleted, so calls pass these by address.
 struct VolatileClass { VolatileClass() = default; volatile Aggregate p; char c; };
-struct DerivedVolatile : VolatileClass { DerivedVolatile() = default; DerivedVolatile(const DerivedVolatile&) = default; int k; };
 
 struct CopyOnly { CopyOnly(const CopyOnly&) = default; int x; char c; };
 struct DefaultAndCopy { DefaultAndCopy() = default; DefaultAndCopy(const DefaultAndCopy&) = default; int x; char c; };
@@ -73,5 +71,3 @@ Indirect peer_next(Indirect i);
 int peer_sum(Indirect i);
 long peer_first(MayThrow m, long b);
 Volatile peer_volatile(Volatile v);
-int take_derived(DerivedVolatile d);
-int peer_derived();

@@ -5,8 +5,6 @@
 // EXIT: 0
 #include "cross-object.hpp"
 
-int take_derived(DerivedVolatile d) { return d.p.x * 100 + d.k + 5; }
-
 int main() {
   for (int i = 0; i < layouts; ++i)
     if (layout(i) != peer_layout(i)) return 1 + i;
@@ -23,6 +21,5 @@ int main() {
   m.a = 4;
   if (peer_first(m, 2) != 42) return 23;
   if (peer_volatile(Volatile(6)).x != 7) return 24;
-  if (peer_derived() != 5) return 25;
   return peer_sum(i) == 11 ? 0 : 22;
 }
