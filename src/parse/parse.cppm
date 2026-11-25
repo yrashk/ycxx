@@ -2771,6 +2771,7 @@ std::optional<QualType> AtItem::replay_alias_calls(sema::Sema& caller, const ast
   q.type_trait_demand = q.at_point;
   const auto before = caller.diag_count();
   sema::Sema s(p_->world(), caller.builder(), q, caller.diagnostics(), p_->id(pattern.item), 0);
+  s.replaying_type_default = caller.replaying_type_default;
   s.template_scopes.push_back(p_->world().ins.seqs.elements(alias.template_params));
   s.template_args = args;
   Parser ps(*p_->r_, item.begin, item.begin + pattern.end, s);
@@ -3498,12 +3499,16 @@ private:
         const auto begin = ps_.pos();
         const auto calls = ps_.deferred_immediate_calls();
         const auto checks = ps_.deferred_argument_checks();
+        const auto ranks = ps_.deferred_rank_checks();
         auto t = ps_.type_id();
         if (!t || !alias_template(name, name_at, *t)) return bad();
         if (ps_.deferred_immediate_calls() != calls) {
           const auto kind = ps_.deferred_argument_checks() == checks ? sema::AliasCallPattern::retained
                                                                      : sema::AliasCallPattern::may_erase;
           p_->alias_call_patterns_.emplace(decls_.back().entity, Program::AliasCallPattern{k_, begin, ps_.pos(), kind});
+        } else if (ps_.deferred_rank_checks() != ranks) {
+          p_->alias_call_patterns_.emplace(decls_.back().entity,
+              Program::AliasCallPattern{k_, begin, ps_.pos(), sema::AliasCallPattern::rank_checks});
         }
         if (!ps_.expect(Tk::semi)) bad();
         return;
@@ -3925,8 +3930,14 @@ private:
     std::size_t count = d.params.size();
     bool unary_only = op == "~" || op == "!", binary_only = !(unary_only || op == "+" || op == "-" || op == "*" || op == "&" ||
                                                               op == "++" || op == "--");
-    if (count == 0 || count > 2 || (unary_only && count != 1) || (binary_only && count != 2)) {
+    if (count == 0 || count > 2 || (unary_only && count != 1) || (binary_only && count != 2) || types.rec(d.type).variadic) {
       s_.diag(d.name_at, Diag::operator_arity, d.name);
+      return false;
+    }
+    // [over.inc]/1: the second parameter of a postfix form has type `int`.
+    if ((op == "++" || op == "--") && count == 2 && !types.is_dependent(d.params[1].type) &&
+        types.canonical(sema::Types::unqualified(d.params[1].type)) != types.builtin(sema::Builtin::int_)) {
+      s_.diag(d.params[1].at, Diag::operator_postfix_parameter, d.name);
       return false;
     }
     if (!std::ranges::any_of(d.params, [&](const parse::Param& p) {
@@ -6069,18 +6080,21 @@ private:
     const bool c_context = enclosing_linkage() == LangLinkage::c;
     const Tk name_token = p_->region().tokens[it_->begin + d.name_at].kind;
     const std::string_view name = s_.ins().names.spelling(d.name);
-    const bool binary_operator = name_token == Tk::kw_operator && d.params.size() == 2 && name.starts_with("operator") &&
-                                 (std::ranges::contains(sema::Sema::binary_spellings, name.substr(8)) || name == "operator<=>");
-    const bool unary_minus = name_token == Tk::kw_operator && d.params.size() == 1 && name == "operator-";
+    // An operator-function-id that names a punctuator ([over.oper.general]); `declare` checks that
+    // a non-member can have it, and its parameters.
+    const bool operator_function = name_token == Tk::kw_operator && name.size() > 8 && name.starts_with("operator") &&
+                                   !literal_operator_named(d.name) && !sema::is_allocation_name(name) &&
+                                   name != lex::conversion_function_name;
     const bool ordinary = (definition || !c_context) && !d.qualified && !d.template_args &&
                           (p_->namespace_class_friend(k_) || templated) &&
-                          (name_token == Tk::identifier || binary_operator || unary_minus);
+                          (name_token == Tk::identifier || operator_function);
+    const bool deleted_operator = operator_function && !templated && !friend_template && deleted_body();  // templates: #1181
     // [class.compare.default]: `friend bool operator==(C, C) = default;`, and `<=>` likewise.
     const bool defaulted_comparison = definition && name_token == Tk::kw_operator &&
                                       (name == "operator==" || name == "operator<=>") && p_->defaulted_body(k_);
     if (!types.is_function(d.type) ||
         (definition ? !ordinary || !d.function || !ps_.at_end() || !it_->has_body() ||
-                        (p_->region().tokens[it_->body_begin].kind != Tk::l_brace && !(unary_minus && deleted_body()) &&
+                        (p_->region().tokens[it_->body_begin].kind != Tk::l_brace && !deleted_operator &&
                          !defaulted_comparison)
                     : !ps_.is(Tk::semi))) {
       s_.diag(d.name_at, Diag::not_supported, Tk::kw_friend);

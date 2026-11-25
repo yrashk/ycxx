@@ -204,7 +204,8 @@ struct Options {
   bool nostdlib = false;
   bool nostdlibxx = false;  // `-nostdlib++`: no libycxx runtime in a Darwin link
   bool check_policies = false;
-  std::optional<std::string> output, interpreter;
+  bool shared = false;
+  std::optional<std::string> output, interpreter, soname;
   bool dependencies = false;  // `-MD`
   std::optional<std::string> dependency_path;  // `-MF`
   std::vector<std::string> dependency_targets;  // `-MT`, in command-line order
@@ -267,7 +268,16 @@ std::expected<Options, std::string> parse_options(std::span<const std::string_vi
       else o.dependency_targets.emplace_back(value);
     } else if (a == "-nostdlib") o.nostdlib = true;
     else if (a == "-nostdlib++") o.nostdlibxx = true;
-    else if (a == "--dynamic-linker" || a.starts_with("--dynamic-linker=")) {
+    else if (a == "-shared") o.shared = true;
+    else if (a == "-Wl,-soname" || a == "-Wl,--soname")
+      return std::unexpected("a SONAME is required after '-Wl,-soname,'");
+    else if (a.starts_with("-Wl,-soname,") || a.starts_with("-Wl,--soname,")) {
+      if (o.soname) return std::unexpected("duplicate SONAME option");
+      const std::string_view prefix = a.starts_with("-Wl,-soname,") ? "-Wl,-soname," : "-Wl,--soname,";
+      const auto name = a.substr(prefix.size());
+      if (name.contains(',')) return std::unexpected("the SONAME option takes one name");
+      o.soname = name;
+    } else if (a == "--dynamic-linker" || a.starts_with("--dynamic-linker=")) {
       if (a == "--dynamic-linker" && (i + 1 == args.size() || args[i + 1].starts_with('-')))
         return std::unexpected("argument to '--dynamic-linker' is missing");
       if (o.interpreter) return std::unexpected("duplicate '--dynamic-linker' option");
@@ -318,11 +328,25 @@ std::expected<Options, std::string> parse_options(std::span<const std::string_vi
   if (o.query != Options::Query::none) return o;
   const bool linux_link = o.pp.target == &ast::x86_64_linux && o.stop == Options::Stop::link;
   const bool darwin_link = o.pp.target == &ast::aarch64_darwin && o.stop == Options::Stop::link;
-  if (o.interpreter && !linux_link)
+  if (o.shared && !linux_link) return std::unexpected("'-shared' requires an x86-64 Linux link");
+  if (o.soname && !o.shared) return std::unexpected("the SONAME option requires '-shared'");
+  if (o.interpreter && (!linux_link || o.shared))
     return std::unexpected("'--dynamic-linker' requires an x86-64 Linux executable link");
   for (std::string_view path : other_inputs) {
     if (is_shared_object(path) || o.interpreter) o.libraries.emplace_back(path);
     else return std::unexpected(std::format("'{}': unknown kind of input file", path));
+  }
+  if (o.shared) {
+    if (!o.archives.empty() || !o.libraries.empty())
+      return std::unexpected("'-shared' does not support archive or shared object inputs");
+    if (!o.nostdlib) return std::unexpected("'-shared' requires '-nostdlib'");
+    if (!o.sources.empty() && o.pp.pic == 0)
+      return std::unexpected("'-shared' source compilation requires '-fPIC' or '-fpic'");
+    if (o.check_policies) return std::unexpected("'-shared' does not support '-fcheck-policies'");
+    if (!o.soname)
+      o.soname = std::filesystem::path(o.output.value_or("a.out")).filename().native_encoded_string();
+    if (o.soname->empty() || o.soname->contains('/') || o.soname->contains('\0'))
+      return std::unexpected("invalid ELF shared object SONAME");
   }
   if (!o.archives.empty()) {
     if (!linux_link && !darwin_link) return std::unexpected("archive inputs require an executable link");
@@ -909,7 +933,7 @@ Done run(const Request& r, pp::Host& host, pipeline::Session& session, const Sto
     if (bad_input) key.until = pipeline::Until::object;
     else key.program = session.program(
         {key.units, std::move(objects), out.filename().native_encoded_string(), std::move(dynamic),
-         std::move(archive_link), key.check_policies});
+         std::move(archive_link), key.check_policies, std::move(opts->soname)});
   }
   const pipeline::Until until = bad_input ? pipeline::Until::link : key.until;
   pipeline::RunStats rs;
@@ -981,7 +1005,7 @@ Done run(const Request& r, pp::Host& host, pipeline::Session& session, const Sto
     d.exit_status = 1;
     return d;
   }
-  d.outputs.push_back({out.native_encoded_string(), image.image, true});
+  d.outputs.push_back({out.native_encoded_string(), image.image, !opts->shared});
   return d;
 }
 

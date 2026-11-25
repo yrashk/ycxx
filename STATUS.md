@@ -1009,6 +1009,13 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
   path and ordered shared inputs, including provider content fingerprints, enter the `Link`
   query. Target CRT selection, versioned imports, provider dependencies and library discovery
   remain part of [#390](https://github.com/yrashk/ycxx/issues/390).
+- On Linux x86-64, `-shared -nostdlib` produces a leaf `ET_DYN` with a SONAME, SysV dynamic hash,
+  and mapped dynamic symbols. The loader uses the program headers, and native and system linkers
+  can consume the library. Only strong, default-visible functions are exported. References to
+  local and hidden definitions use position-independent relocations. Source inputs require
+  `-fPIC` or `-fpic`. The resident link key includes the SONAME. Loader-time fixups, initializers,
+  imports and interposable references remain in [#391](https://github.com/yrashk/ycxx/issues/391).
+  Mach-O shared output is tracked in [#393](https://github.com/yrashk/ycxx/issues/393).
 - ELF objects record namespace-scope initializer functions in `.init_array`, with 8-byte slots
   and `R_X86_64_64` relocations. The linker places arrays consecutively in input order and checks
   each slot resolves into executable input bytes. Generated startup calls the functions before
@@ -2565,6 +2572,12 @@ session's.*
   argument. The result uses the target size type. An array of unknown bound is supported when
   its element type is complete. Pointer-only uses of the specialization leave evaluation deferred
   ([expr.alignof], [temp.inst], #1067).
+- `__array_rank(T)` returns the number of array dimensions as the target size type. Unknown bounds
+  count, incomplete element types need no layout, and nonarrays have rank zero. Dependent type
+  operands resolve through template argument substitution and variable-template initializer replay.
+  Namespace aliases replay rank arguments they discard and preserve conversions of forwarded rank
+  defaults. An omitted type default checks those arguments before looking up the specialization
+  ([meta.unary.prop.query], [temp.alias], [temp.arg], #1082).
 - `__is_base_of(Base, Derived)` ignores top-level cv. Nonclass and union operands give false.
   The same nonunion class gives true, including when incomplete. For distinct nonunion classes,
   `Derived` must be complete. The trait follows the recorded base declarations, including private
@@ -2840,8 +2853,16 @@ Fable decided the representation (ast.md §6.6); the Opus session wrote the code
 - Ordinary binary hidden friend operators participate in ADL and compete with nonmember
   overloads from the associated namespaces. Qualified ordinary lookup still requires a
   namespace declaration. The existing Linux inline gate checks both object orders.
-- Ordinary unary minus finds hidden friends by ADL and ranks their operand conversions with
-  ordinary nonmember and member candidates. Access and deletion are checked for the selected operator.
+- The unary operators `+ - ! ~ * &`, prefix `++` and `--`, and the compound assignments find
+  hidden friends by ADL, on class and enumeration operands and, for a dependent operand, at the
+  point of instantiation (#1178). With no class operand only a candidate with an enumeration
+  parameter matching its operand takes part ([over.match.oper]/3). Unary operators rank the
+  conversions of hidden friends, other nonmembers and members together, a non-template before a
+  template. Compound assignments do
+  so where `ordinary_binary_choice` models the conversions; elsewhere the member is tried first
+  (#219). A postfix friend can be declared, and called in function notation only (#219). Access
+  and deletion are checked for the selected operator. Overloaded compound assignment is not yet
+  sequenced right to left (#1275). A friend function of a nested class is not supported (#1277).
 - **Friends in class templates** ([temp.friend], `templated_friend` in parse.cppm, #259): an
   unqualified friend function definition in a namespace-scope class template (or partial
   specialization) declares, for each specialization, an inline function of the namespace with
@@ -2883,11 +2904,10 @@ Fable decided the representation (ast.md §6.6); the Opus session wrote the code
   chooses. Protected is checked as private until base classes exist.
 - C-linkage friend definitions, defaults on friend declarations, non-defining friend functions in
   class templates, private member operator wording, and elaborated types in member parameters
-  remain under [#259](https://github.com/yrashk/ycxx/issues/259). Hidden friend `~` and compound
-  assignment operators are [#1178](https://github.com/yrashk/ycxx/issues/1178), non-defining
-  friend function templates [#1179](https://github.com/yrashk/ycxx/issues/1179), friends with a
+  remain under [#259](https://github.com/yrashk/ycxx/issues/259). Non-defining
+  friend function templates are [#1179](https://github.com/yrashk/ycxx/issues/1179), friends with a
   trailing requires-clause in class templates [#1180](https://github.com/yrashk/ycxx/issues/1180)
-  and deleted friend function templates [#1181](https://github.com/yrashk/ycxx/issues/1181).
+  and deleted friends of class templates and friend function templates [#1181](https://github.com/yrashk/ycxx/issues/1181).
   Both targets coalesce these inline friend definitions across objects (#422, [#124](https://github.com/yrashk/ycxx/issues/124)).
 - Both ELF and Mach-O coalesce eligible nonthrowing, nonvirtual in-class destructor definitions
   and implicitly defined destructors, including those of class-template specializations. A
@@ -3159,6 +3179,41 @@ Fable decided the representation (ast.md §6.7); the Opus session wrote the code
   references, empty and template classes), `s7-sizeof-incomplete.reject.cpp`,
   `s7-sizeof-deep.run.cpp` (22 levels of nesting), `tests/own/abi/sizeof-class.run.cpp` (agrees
   with Clang's sizes and member offsets).
+
+## Resident project builds (#1251, #1255)
+
+`ycxx build <target>` reads `build.ycxx` in the workspace and publishes a successful
+native executable under `.ycxx/out`. The first rules are `cpp.executable`,
+`cpp.library` (a source-backed object group), and `generate` (a declared host
+tool with staged inputs and named outputs). Explicit source globs are resolved on
+each request. Linux uses the native freestanding compiler and linker.
+
+A resident workspace query asks for generator receipts and fetches the native
+compiler under the same query context. The coordinator admits tool results between
+epochs. Each generated path is a separate input, so unchanged sibling bytes cut
+off compiler work. Ordinary include probes continue to use the daemon file table,
+including missing candidates. The existing trace carries the native query tree,
+and reports external tool execution between workspace query attempts.
+
+`ycxx build --watch` uses the compiler watch loop and live trace browser
+(#1263). The daemon watches native compiler inputs and reobserves the project
+plan between runs for changes to the definition, generator inputs, and glob
+matches. Rule package source, compiler discovery and declared reads also enter
+the observation. It continues after a failed run.
+
+`ycxx show <target>` uses the same resolver without executing any actions
+(#1256). It shows verbatim source, resolved facts with their declaration
+locations, or a semantic diff against a saved JSON snapshot. The HTML report
+includes the resolved plan and its definition.
+
+The standard C++ and generator rule declarations use a compiled rule package.
+`use plugin("tools/custom/rules") as cpp` supplies a different C++ provider. The
+bundled and workspace packages use the same worker. `cxx()` in a package recipe
+tries native ycxx first, then searches for host compilers. A `cxx("clang++")` pin
+selects one compiler. Package compilation and worker execution appear in the
+build trace, and inspection uses tracked admitted expansions. [#1281](https://github.com/yrashk/ycxx/issues/1281)
+Compiler discovery formats its filesystem diagnostic to avoid a GCC 16 Release false positive
+when inserting a prefix into a temporary string.
 
 ## The engine trace (#245, 2026-11-19)
 

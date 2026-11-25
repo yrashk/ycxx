@@ -1778,8 +1778,8 @@ clauses = ['class.friend', 'dcl.friend', 'temp.friend']
 std = 'C++98'
 detect = '\bfriend\b'
 status = 'partial'
-issues = [259, 689, 1178, 1179, 1180, 1181, 1182, 1184, 1185]
-note = 'Ordinary binary hidden friends and unary minus participate in ADL. Type friends can name a class template parameter. Friend function definitions in class templates (with dependent noexcept) and friend function templates defined in classes and class templates are found by ADL. Friend class templates and class friends of class templates grant access per specialization. Other hidden friend operators (#1178), non-defining friend function templates (#1179), constrained friends in class templates (#1180), deleted friend templates (#1181), C-linkage friend definitions, default arguments in friend declarations and non-defining friend functions in class templates remain open.'
+issues = [259, 689, 1179, 1180, 1181, 1182, 1184, 1185, 1277, 1278]
+note = 'Hidden friend operators (binary, unary, prefix increment and compound assignment) participate in ADL. Type friends can name a class template parameter. Friend function definitions in class templates (with dependent noexcept) and friend function templates defined in classes and class templates are found by ADL. Friend class templates and class friends of class templates grant access per specialization. Friend functions of nested classes (#1277), non-defining friend function templates (#1179), constrained friends in class templates (#1180), deleted friend templates (#1181), C-linkage friend definitions, default arguments in friend declarations and non-defining friend functions in class templates remain open.'
 probe = '''
 class C { int p = 2; friend int peek(const C& c) { return c.p; } };
 int main() { C c; return peek(c) - 2; }
@@ -2618,8 +2618,8 @@ clauses = ['meta.unary', 'meta.rel', 'meta.trans']
 std = 'C++11'
 detect = '\bstd::(?:is_\w+|enable_if|conditional|decay|remove_\w+|add_\w+|underlying_type|common_type|invoke_result)\w*\b'
 status = 'partial'
-note = 'assignment traits cover arithmetic operands, conversion traits cover arithmetic operands, cv void and object pointers, is_convertible also covers bounded values and references through a unique public nonvirtual base, is_base_of, is_virtual_base_of, is_pointer_interconvertible_base_of and is_empty query recorded base declarations, and is_layout_compatible compares standard-layout members and enumerations. Dependent is_base_of is evaluated in function template bodies, and dependent operands of these traits in concepts and requires-clauses at constraint satisfaction. Other object-model traits remain partial'
-issues = [218, 211]
+note = 'assignment traits cover arithmetic operands, conversion traits cover arithmetic operands, cv void and object pointers, is_convertible also covers bounded values and references through a unique public nonvirtual base, is_base_of, is_virtual_base_of, is_pointer_interconvertible_base_of and is_empty query recorded base declarations, and is_layout_compatible compares standard-layout members and enumerations. Dependent is_base_of is evaluated in function template bodies, and dependent operands of these traits in concepts and requires-clauses at constraint satisfaction. __array_rank counts array dimensions with dependent type operands. Other object-model traits remain partial'
+issues = [218, 211, 1082]
 probe = '''
 enum E { e };
 int main() { return (__is_same(int, int) && __is_enum(E) && !__is_same(int, long)) ? 0 : 1; }
