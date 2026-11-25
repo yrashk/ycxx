@@ -2894,11 +2894,10 @@ public:
       constexpr u8 unavailable = sema::expr_flag::unrepresented_value | sema::expr_flag::deferred_decay_copy;
       if (body && !(e.info.flags & unavailable))
         return s_->world().ins.intern_value(ast::VDepParam{sema::dependent_depth, 0});
-      // A class template's base-specifier is parsed again with the arguments bound when a
-      // specialization is instantiated (`Program::instantiate_base`), so its pattern needs no
-      // representation of the value: it stands as an unevaluated placeholder (#308). A pack
-      // expansion's pattern must keep the packs it names, so it is not one.
-      if (class_template_base && !s_->pattern_names_pack() && !is(Tk::ellipsis)) {
+      // Class bases and type requirements replay with their arguments bound. A dependent
+      // value whose expression has no representation can wait until replay, provided it
+      // contains no pack that an expansion needs to retain.
+      if ((class_template_base || in_type_requirement_) && !s_->pattern_names_pack() && !is(Tk::ellipsis)) {
         ++deferred_argument_checks_;
         return s_->world().ins.intern_value(ast::VDepParam{sema::dependent_depth, 0});
       }
@@ -3358,6 +3357,7 @@ public:
       u32 before = i_;
       bool failed = false;
       if (is(Tk::kw_typename)) {  // a type-requirement
+        const TypeRequirementScope requirement{*this};
         // A type-requirement also accepts an unqualified type-name ([expr.prim.req.type]).
         if (kind(1) == Tk::identifier && !qualified_ahead(1)) {
           const u32 end = kind(2) == Tk::less ? past_template_args(2) : 2;
@@ -6746,6 +6746,7 @@ private:
   LangLinkage linkage_ = LangLinkage::cxx;
   int in_params_ = 0;
   bool in_template_value_argument_ = false;
+  bool in_type_requirement_ = false;
   bool variable_template_initializer_ = false;
   bool in_template_id_lookahead_ = false;
   bool alias_constraints_enabled_ = true;
@@ -6771,6 +6772,11 @@ public:
   bool class_template_base = false;  // class instantiation substitutes or reparses this base type
   bool member_alias_type = false;  // the class instantiation reparses this type-id
 private:
+  struct TypeRequirementScope {
+    Parser& parser;
+    bool saved = std::exchange(parser.in_type_requirement_, true);
+    ~TypeRequirementScope() { parser.in_type_requirement_ = saved; }
+  };
   struct TypeAliasCheckScope {
     Parser& parser;
     TypeAliasChecks checks;
