@@ -17,12 +17,6 @@ import ycxx.lsp;
 
 export namespace ycxx::build {
 
-struct RuleObservation {
-  RuleDemand demand;
-  Fp128 package;
-  Fp128 invocation;
-};
-
 struct RuleProbeSnapshot {
   RulePackageRef package;
   Fp128 profile;
@@ -31,10 +25,18 @@ struct RuleProbeSnapshot {
   std::vector<PlanFact> facts;
 };
 
+struct RuleObservation {
+  RuleDemand demand;
+  Fp128 package;
+  Fp128 invocation;
+  std::vector<RuleProbeSnapshot> projections = {};
+};
+
 struct RuleSnapshot {
   std::vector<RuleExpansion> expansions;
   std::vector<RuleObservation> observations;  // in expansion order
   std::vector<RuleProbeSnapshot> probes;
+  std::vector<RuleProbeSnapshot> pending_projections = {};  // in-memory watch state for a failed rule
 };
 
 // Snapshot bytes are only a candidate. The caller validates the observations against current
@@ -141,6 +143,16 @@ void store(int parent, const char* name, std::string_view text) {
 
 // The JSON codec handles aggregates and exact small integers. Use an explicit package class and
 // hex for the full-width fingerprints.
+struct StoredProbe {
+  std::string package_target;
+  bool standard_package;
+  std::string profile;
+  ToolchainProbeInputs inputs;
+  std::string stamp;
+  std::vector<PlanFact> facts;
+  std::optional<std::uint8_t> package_kind = std::nullopt;
+};
+
 struct StoredRule {
   std::string target;
   std::string rule;
@@ -152,15 +164,10 @@ struct StoredRule {
   std::string definition;
   std::string package;
   std::string invocation;
-};
-
-struct StoredProbe {
-  std::string package_target;
-  bool standard_package;
-  std::string profile;
-  ToolchainProbeInputs inputs;
-  std::string stamp;
-  std::vector<PlanFact> facts;
+  std::optional<std::uint8_t> package_kind = std::nullopt;
+  std::optional<std::vector<RuleCapabilityBinding>> capabilities = std::nullopt;
+  std::optional<std::vector<StoredProbe>> projections = std::nullopt;
+  std::optional<std::vector<PlanFact>> capability_facts = std::nullopt;
 };
 
 struct SnapshotFile {
@@ -169,6 +176,33 @@ struct SnapshotFile {
   std::vector<StoredRule> rules;
   std::optional<std::vector<StoredProbe>> probes;
 };
+
+using PackageKind = RulePackageRef::Kind;
+
+std::optional<PackageKind> restore_kind(bool standard, std::optional<std::uint8_t> extended) {
+  if (!extended) return standard ? PackageKind::standard : PackageKind::workspace;
+  if (*extended == std::to_underlying(PackageKind::capabilities)) return PackageKind::capabilities;
+  return std::nullopt;
+}
+
+std::optional<std::uint8_t> store_kind(PackageKind kind) {
+  if (kind == PackageKind::capabilities) return std::to_underlying(kind);
+  return std::nullopt;
+}
+
+std::optional<RuleProbeSnapshot> restore_probe(StoredProbe item) {
+  const auto kind = restore_kind(item.standard_package, item.package_kind);
+  const auto profile = decode_fp(item.profile);
+  const auto stamp = decode_fp(item.stamp);
+  if (!kind || !profile || !stamp) return std::nullopt;
+  return RuleProbeSnapshot{{*kind, std::move(item.package_target)}, *profile,
+                           std::move(item.inputs), *stamp, std::move(item.facts)};
+}
+
+StoredProbe store_probe(const RuleProbeSnapshot& probe) {
+  return {probe.package.target, probe.package.kind == PackageKind::standard, hex(probe.profile),
+          probe.inputs, hex(probe.stamp), probe.facts, store_kind(probe.package.kind)};
+}
 
 }  // namespace
 
@@ -184,31 +218,37 @@ std::optional<RuleSnapshot> read_rule_snapshot(const std::filesystem::path& cwd,
   if (!saved || saved->version != snapshot_version || saved->target != target) return std::nullopt;
 
   RuleSnapshot result;
-  using Kind = RulePackageRef::Kind;
   for (auto& item : saved->rules) {
+    const auto kind = restore_kind(item.standard_package, item.package_kind);
     const auto package = decode_fp(item.package);
     const auto invocation = decode_fp(item.invocation);
-    if (!package || !invocation || item.definition.empty()) return std::nullopt;
+    if (!kind || !package || !invocation || item.definition.empty()) return std::nullopt;
     RuleDemand demand{
         .target = std::move(item.target),
         .rule = std::move(item.rule),
-        .package = {item.standard_package ? Kind::standard : Kind::workspace, std::move(item.package_target)},
+        .package = {*kind, std::move(item.package_target)},
         .definition = std::move(item.demand_definition),
         .attributes = std::move(item.attributes),
         .reads = std::move(item.reads),
     };
-    result.observations.push_back({demand, *package, *invocation});
-    result.expansions.push_back({std::move(demand), std::move(item.definition)});
+    if (item.capabilities) demand.capabilities = std::move(*item.capabilities);
+    std::vector<RuleProbeSnapshot> projections;
+    if (item.projections)
+      for (auto& projection : *item.projections) {
+        auto restored = restore_probe(std::move(projection));
+        if (!restored) return std::nullopt;
+        projections.push_back(std::move(*restored));
+      }
+    if (!demand.capabilities.empty() && (projections.empty() || !item.capability_facts ||
+                                        item.capability_facts->size() != demand.capabilities.size()))
+      return std::nullopt;
+    result.observations.push_back({demand, *package, *invocation, std::move(projections)});
+    result.expansions.push_back({std::move(demand), std::move(item.definition),
+                                 item.capability_facts ? std::move(*item.capability_facts) : std::vector<PlanFact>{}});
   }
   if (saved->probes)
-    for (auto& item : *saved->probes) {
-      const auto profile = decode_fp(item.profile);
-      const auto stamp = decode_fp(item.stamp);
-      if (!profile || !stamp) continue;
-      result.probes.push_back({{item.standard_package ? Kind::standard : Kind::workspace,
-                                std::move(item.package_target)},
-                               *profile, std::move(item.inputs), *stamp, std::move(item.facts)});
-    }
+    for (auto& item : *saved->probes)
+      if (auto probe = restore_probe(std::move(item))) result.probes.push_back(std::move(*probe));
   return result;
 }
 
@@ -220,17 +260,22 @@ void write_rule_snapshot(const std::filesystem::path& cwd, std::string_view targ
     const auto& observed = snapshot.observations[i];
     const auto& demand = expansion.demand;
     if (demand != observed.demand || expansion.definition.empty()) return;
-    saved.rules.push_back({
+    StoredRule rule{
         demand.target, demand.rule, demand.package.target, demand.package.kind == RulePackageRef::Kind::standard,
         demand.definition, demand.attributes, demand.reads, expansion.definition,
-        hex(observed.package), hex(observed.invocation),
-    });
+        hex(observed.package), hex(observed.invocation), store_kind(demand.package.kind)
+    };
+    if (!demand.capabilities.empty()) {
+      rule.capabilities = demand.capabilities;
+      rule.capability_facts = expansion.capability_facts;
+      auto& projections = rule.projections.emplace();
+      for (const auto& probe : observed.projections) projections.push_back(store_probe(probe));
+    }
+    saved.rules.push_back(std::move(rule));
   }
   if (!snapshot.probes.empty()) {
     auto& probes = saved.probes.emplace();
-    for (const auto& probe : snapshot.probes)
-      probes.push_back({probe.package.target, probe.package.kind == RulePackageRef::Kind::standard,
-                        hex(probe.profile), probe.inputs, hex(probe.stamp), probe.facts});
+    for (const auto& probe : snapshot.probes) probes.push_back(store_probe(probe));
   }
   const auto text = lsp::dump(lsp::to_json(saved));
   if (text.size() > max_snapshot_size) return;

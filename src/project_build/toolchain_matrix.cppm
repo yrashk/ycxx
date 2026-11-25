@@ -68,7 +68,8 @@ std::expected<ToolchainMatrix, std::string> measure_toolchain_matrix(
     const std::filesystem::path& cwd, std::string_view package, ToolchainProbeProfile profile,
     Fp128 identity, std::span<const std::string> declared_inputs,
     std::string_view worker, const RunProbe& run, const MeasureProbe& measure,
-    const std::function<bool()>& cancelled, std::span<const std::string> requested = {});
+    const std::function<bool()>& cancelled, std::span<const std::string> requested = {},
+    bool* inputs_changed = nullptr);
 
 }  // namespace ycxx::build
 
@@ -254,7 +255,7 @@ std::expected<ToolchainMatrix, std::string> measure_toolchain_matrix(
     const std::filesystem::path& cwd, std::string_view package, ToolchainProbeProfile profile,
     Fp128 identity, std::span<const std::string> declared_inputs,
     std::string_view worker, const RunProbe& run, const MeasureProbe& measure,
-    const std::function<bool()>& cancelled, std::span<const std::string> requested) {
+    const std::function<bool()>& cancelled, std::span<const std::string> requested, bool* inputs_changed) {
   for (const auto& id : requested)
     if (!known_toolchain_probe(id)) return std::unexpected(std::format("unknown toolchain probe '{}'", id));
   if (cancelled()) return std::unexpected("build cancelled");
@@ -335,8 +336,10 @@ std::expected<ToolchainMatrix, std::string> measure_toolchain_matrix(
   if (cancelled()) return std::unexpected("build cancelled");
   if (matrix.stamp != fingerprint_toolchain_probe_inputs(matrix.inputs) ||
       configured != fingerprint_toolchain_probe_inputs(configured_inputs) ||
-      (discovery && discovery->discovery_stamp != fingerprint_toolchain_probe_inputs(discovery->discovered_inputs)))
+      (discovery && discovery->discovery_stamp != fingerprint_toolchain_probe_inputs(discovery->discovered_inputs))) {
+    if (inputs_changed) *inputs_changed = true;
     return std::unexpected("toolchain inputs changed while measuring the profile");
+  }
   return matrix;
 }
 
