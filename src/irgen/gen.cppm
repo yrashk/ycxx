@@ -861,6 +861,20 @@ class Gen {
            class_prvalue(info(e));
   }
 
+  // Follow the value of a class selection so a discarded bit cast still has
+  // a result object. A supported cast proves trivial destruction for the result type.
+  bool has_bit_cast_result(At e) {
+    e = strip_parens(e);
+    if (is<ast::BitCast>(e)) {
+      const auto cast = get<ast::BitCast>(e);
+      return cast.supported && class_prvalue(cast.info);
+    }
+    if (!class_selection(e)) return false;
+    if (is<ast::OrderedBinary>(e)) return has_bit_cast_result(child(e, get<ast::OrderedBinary>(e).rhs));
+    const auto choice = get<ast::Conditional>(e);
+    return has_bit_cast_result(child(e, choice.then_)) || has_bit_cast_result(child(e, choice.else_));
+  }
+
   // A later aggregate initializer clause can run before earlier temporaries are destroyed.
   // Check the whole initializer for throwing evaluation and cleanup when it contains a selection.
   bool selects_class_initializer(At e) {
@@ -1277,7 +1291,9 @@ class Gen {
 
   Place materialize(At a, bool select_class = false) {
     const auto m = get<ast::Materialize>(a);
-    return materialize_value(a, child(a, m.operand), m.info.type, m.destructor, m.extended, select_class);
+    const At value = child(a, m.operand);
+    return materialize_value(a, value, m.info.type, m.destructor, m.extended,
+                             select_class || has_bit_cast_result(value));
   }
 
   // The object a class prvalue is copied from: a glvalue of the class converted to a prvalue
@@ -1698,8 +1714,11 @@ class Gen {
     }
     const auto expr = info(a);
     if (expr.category == ast::ValueCategory::prvalue) {
-      if (is<ast::BitCast>(written) && class_prvalue(expr)) materialize_value(written, written, expr.type);
-      else rvalue_or_void(a);
+      if (class_prvalue(expr) && has_bit_cast_result(written)) {
+        materialize_value(written, written, expr.type, ast::EntityId::none, /*extended=*/0, /*select_class=*/true);
+      } else {
+        rvalue_or_void(a);
+      }
       return;
     }
     // Discarding a nonvolatile direct field designator does not read its value.
