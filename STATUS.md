@@ -2181,6 +2181,14 @@ template's tokens again with the arguments bound.
   overload set argument ([temp.deduct.call]/6), "required from here" notes. Coalesced (weak)
   definitions of specializations are #124.
 
+## Derived-base function template deduction (#1144)
+
+When ordinary deduction fails for a fixed class-reference or single-pointer parameter
+with a named class-template pattern, deduction examines concrete bases at the call site.
+A unique most-derived matching specialization supplies the arguments, and the normal
+conversion checks the selected call. By-value deduction and conversion ranking through
+repeated nonvirtual base subobjects remain in [#1144](https://github.com/yrashk/ycxx/issues/1144).
+
 ## Native function pointer template arguments (#406)
 
 - A function pointer template argument can name an unambiguous externally linked C++ or C
@@ -3662,6 +3670,12 @@ parity are tracked in [#294](https://github.com/yrashk/ycxx/issues/294) and
   the class's parameter (#209). Found on the way: #345.
 
 ## Flat structural class template arguments (#317, 2026-11-24)
+
+A directly named explicit class specialization accepts a braced flat structural
+argument. The item splitter keeps grouped initializer tokens in the head and
+records the real class body and its child scope. Equivalent named and braced
+values select the same specialization. Native item checks and resident edits
+cover the body boundary, key changes, and restoration. [#1248](https://github.com/yrashk/ycxx/issues/1248)
 
 - Fixed-type parameters accept named complete flat aggregates with public nonmutable integral
   fields. The canonical argument records the class type and converted field values. Named
