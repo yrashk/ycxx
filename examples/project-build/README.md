@@ -10,6 +10,7 @@ out of the checkout and build it there.
 | [Custom rule](custom-rule) | A source-built rule package, a tracked read and a generated input |
 | [Typed capability header](typed-capabilities) | Compiler probes, a named header artifact and `if constexpr` |
 | [Package-defined probe](package-probe) | A workspace tool witness, a typed support export and incremental reuse |
+| [Shader bundle](shader-bundle) | A shader inventory, private compilation actions and a published runtime asset |
 
 Each project builds a target named `app`. The resident daemon can reuse
 work from an earlier request in the same workspace.

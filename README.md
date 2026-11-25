@@ -47,6 +47,8 @@ Import `builtin:capabilities` to project selected observations into a generated
 C++ header with `constexpr` values.
 A source-built rule package can also run its own witness and export a support
 state to a consumer using `value("target", "field")`.
+The shader example stages named compiler outputs into a bundle and publishes it
+through the executable's `runtime_assets`.
 [Runnable build examples](examples/project-build) · [Build design](docs/design/build.md) · [#1251](https://github.com/yrashk/ycxx/issues/1251)
 
 Ordinary function pointers and references preserve concrete `noexcept` type identity.

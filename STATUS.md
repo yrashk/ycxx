@@ -3241,6 +3241,14 @@ read-only inspection revalidate the provider and the staged witness inputs.
 Named admission callbacks avoid the same GCC 16 module limitation.
 [#1257](https://github.com/yrashk/ycxx/issues/1257)
 
+Package expansions can declare private actions feeding a public generator.
+Named artifact inputs stage selected receipt bytes and modes into downstream
+actions. Executables publish `runtime_assets` under `.ycxx/assets/<target>`
+after a successful build. These outputs have their own receipt dependencies
+and leave the native request reusable on shader edits. The sample packs real
+SPIR-V and the portable daemon test exercises watch, failed compilation, and
+restoration from receipts. [#1258](https://github.com/yrashk/ycxx/issues/1258)
+
 ## The engine trace (#245, 2026-11-19)
 
 `ycxx cxx --trace-engine[=stream|interactive]` (or `YCXX_TRACE_ENGINE`) shows what a request

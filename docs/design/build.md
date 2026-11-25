@@ -143,6 +143,46 @@ Modules, host and target variants, richer link propagation and a foreign build
 adapter grow coverage after the first witness (#1259). Package acquisition and
 version solving sit outside the build.
 
+## Shader bundles and runtime assets (#1258)
+
+```text
+use plugin("tools/shaders/rules") as shaders
+
+shaders.bundle "scene" {
+    inventory = "shaders/inventory.txt"
+    reads = ["shaders/inventory.txt"]
+    compiler = "/usr/bin/glslc"
+    python = "/usr/bin/python3"
+}
+
+cpp.executable "app" {
+    sources = ["main.cc"]
+    runtime_assets = [artifact("scene", "bundle")]
+}
+```
+
+A package can emit a bounded definition containing a public `action.generate`
+with the requested target name and private `action.generate` dependencies.
+Private names are local to that expansion. The existing worker protocol carries
+the whole definition. An action's named input can select a named output through
+`artifact(target, output)`. The planner checks the reachable graph and rejects
+cycles. The engine prepares downstream actions when their selected input
+receipts arrive. Action identity uses the concrete staged bytes and modes,
+the recipe, and the tool identity. A syntactically different expansion can
+therefore reuse an equivalent action. Plan inspection shows the artifact edges.
+
+The shader package stages one source per compile. The packer takes the named
+outputs and produces the bundle. A native target's `runtime_assets` are
+published under `.ycxx/assets/<target>/<filename>`. The selected assets are
+independent of the native compiler inputs. The coordinator publishes after
+the actions and native build succeed. A failed compile leaves the last
+published bundle in place. A missing published bundle can be restored from
+the resident receipts.
+
+The Astra architecture review identified named receipt bytes, private action
+names, and a separate runtime publication path as the seams for this slice.
+The structured reflection witness is tracked in [#1258](https://github.com/yrashk/ycxx/issues/1258).
+
 ## Resolved plan inspection (#1256)
 
 `ycxx show app` reports the targets and facts the planner reached. Each source,
