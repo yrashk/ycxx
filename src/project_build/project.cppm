@@ -384,7 +384,16 @@ Fp128 observation_key(const RuleInvocation& invocation, std::uint64_t worker_bui
   return fingerprint(std::tie(invocation.request, invocation.reads, worker_build));
 }
 
+std::optional<Fp128> manifest_stamp(const fs::path& cwd) {
+  std::ifstream stream(cwd / "build.ycxx", std::ios::binary);
+  if (!stream) return std::nullopt;
+  const std::string bytes{std::istreambuf_iterator<char>(stream), {}};
+  if (stream.bad()) return std::nullopt;
+  return fingerprint128(bytes);
+}
+
 struct PreparedProject {
+  std::optional<Fp128> manifest;
   ProjectPlan plan;
   RuleSnapshot rules;
   std::optional<Fp128> attempt_watch;
@@ -446,6 +455,11 @@ std::expected<void, std::string> prepare_project(
     const ResolveCapabilities& resolve_capabilities, PreparedProject& prepared, bool watch, bool& superseded) {
   for (;;) {
     auto attempt = plan_with_rules(cwd, target, prepared.rules.expansions);
+    // All expansions in one attempt must belong to a single workspace definition.
+    if (manifest_stamp(cwd) != prepared.manifest) {
+      superseded = true;
+      return std::unexpected("build.ycxx changed during rule resolution");
+    }
     if (!attempt) return std::unexpected(attempt.error());
     if (auto* plan = std::get_if<ProjectPlan>(&*attempt)) {
       prepared.plan = std::move(*plan);
@@ -481,7 +495,8 @@ std::expected<void, std::string> prepare_project(
     if (!capabilities->values.empty()) observation->request.capabilities = std::move(capabilities->values);
     const auto current_invocation = [&] {
       const auto current = rule_invocation(cwd, demand);
-      if (!current || observation_key(*current, toolchain.executable_build) != invocation_key ||
+      if (manifest_stamp(cwd) != prepared.manifest ||
+          !current || observation_key(*current, toolchain.executable_build) != invocation_key ||
           !current_package() || !std::ranges::all_of(capabilities->profiles, [&](const auto& profile) {
             return current_projection(cwd, toolchain, profile);
           })) return false;
@@ -560,11 +575,12 @@ bool current_rule(const fs::path& cwd, const RuleToolchain& toolchain, const Rul
 
 std::optional<ProjectPlan> observe_project(
     const fs::path& cwd, std::string_view target, const RuleToolchain& toolchain, const PreparedProject& prepared) {
+  if (manifest_stamp(cwd) != prepared.manifest) return std::nullopt;
   for (std::size_t i = 0; i < prepared.rules.observations.size(); ++i)
     if (!current_rule(cwd, toolchain, prepared.rules.observations[i], prepared.rules.expansions[i]))
       return std::nullopt;
   auto attempt = plan_with_rules(cwd, target, prepared.rules.expansions);
-  if (!attempt) return std::nullopt;
+  if (!attempt || manifest_stamp(cwd) != prepared.manifest) return std::nullopt;
   if (auto* plan = std::get_if<ProjectPlan>(&*attempt)) return std::move(*plan);
   return std::nullopt;
 }
@@ -1030,6 +1046,7 @@ ProjectReport Coordinator::run(const fs::path& cwd, const std::string& target,
     refresh();
     superseded = false;
     PreparedProject planned;
+    planned.manifest = manifest_stamp(cwd);
     measured.clear();
     const UseRuleCompiler use_compiler = [&](const RulePackageRef& package, const RulePackagePlan& plan,
                                              const RulePackageAction& selected) {
@@ -1053,7 +1070,7 @@ ProjectReport Coordinator::run(const fs::path& cwd, const std::string& target,
     auto prepared = prepare_project(cwd, target, toolchain, run_rule, run_package, run_witness, admit_value,
                                     use_compiler, resolve_capabilities, planned, watch, superseded);
     if (cancelled()) return fail("build cancelled");
-    if (superseded) continue;
+    if (superseded || manifest_stamp(cwd) != planned.manifest) continue;
     write_rule_snapshot(cwd, target, planned.rules);
     if (watch) {
       report.watch_stamp = prepared ? watch_rules(cwd, target, toolchain, planned.rules).stamp : planned.attempt_watch;
