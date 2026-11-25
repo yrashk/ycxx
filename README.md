@@ -57,7 +57,9 @@ parameters, is part of its call operator's type. [#807](https://github.com/yrash
 
 Templates can take values of named flat aggregates with public integral fields as constant
 arguments. On Linux x86-64, equivalent values share a parameter object across translation
-units. [#317](https://github.com/yrashk/ycxx/issues/317)
+units. A class template's ordinary member alias can use those fields directly or in a
+guarded integral argument such as `V.ok ? V.num : 0`.
+[#317](https://github.com/yrashk/ycxx/issues/317)
 
 An explicitly specialized class can name a flat structural argument directly, as in
 `template<> struct Pick<Key{1}>`. A later use with an equivalent named constant

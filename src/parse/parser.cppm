@@ -3655,6 +3655,10 @@ public:
     return l;
   }
 
+  bool structural_member_argument() const {
+    return member_alias_type && in_template_value_argument_ && !s_->unevaluated;
+  }
+
   // [expr.cond]: `logical-or-expression ? expression : assignment-expression`.
   Ex conditional_rest(Ex cond) {
     u32 at = pos();
@@ -3662,7 +3666,7 @@ public:
     Ex t = expression();
     expect(Tk::colon);
     Ex f = assignment_expression();
-    return s_->conditional(cond, t, f, at);
+    return s_->conditional(cond, t, f, at, structural_member_argument());
   }
 
   // The binary operators from `||` (precedence 1) to pointer-to-member access (12).
@@ -4127,7 +4131,8 @@ public:
           targs = template_argument_list();
           if (!targs) return {NodeId::none, e.begin, pos()};
         }
-        e = s_->member(e, arrow, n, pos(), at, name_at, member_class);
+        e = s_->member(e, arrow, n, pos(), at, name_at, member_class,
+                       structural_member_argument() && !keyword && !targs);
         if (targs) s_->explicit_template_args(e, std::move(*targs));
         break;
       }
