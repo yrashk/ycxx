@@ -2040,8 +2040,12 @@ std::expected<obj::object, aarch64::CodegenError> assemble_linux(
   // another type are two entities with one C symbol (#1095). It names this object's strong
   // definition of the name if there is one, else its weak one, else one undefined symbol.
   std::map<EntityId, bool> definitions;  // entity → weak
-  for (const auto& f : functions) definitions.emplace(f.entity, f.weak);
-  for (const auto& d : data) definitions.emplace(d.entity, d.weak);
+  for (const auto& f : functions)
+    if (!definitions.emplace(f.entity, f.weak).second)
+      return std::unexpected(aarch64::CodegenError{f.entity, std::format("@{} is defined twice in one object", ir::raw(f.entity))});
+  for (const auto& d : data)
+    if (!definitions.emplace(d.entity, d.weak).second)
+      return std::unexpected(aarch64::CodegenError{d.entity, std::format("@{} is defined twice in one object", ir::raw(d.entity))});
   for (const auto& t : keyless_type_info) definitions.emplace(t.entity, false);
   if (table) definitions.emplace(table->entity, false);
   for (const auto& t : dynamic_tables) definitions.emplace(t.entity, t.weak);

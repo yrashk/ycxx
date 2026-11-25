@@ -1896,7 +1896,10 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
     if (s.kind == destructor) coalesce_inline_function(tu.functions.back(), true);
     // Implicit and defaulted special members are inline ([class.copy.ctor], [dcl.fct.def.default]).
     else tu.functions.back().coalesced = !internal_class(cls) && !names_tu_local(program, cls, /*include_value_types=*/true);
-    return dynamic_member(tu.functions.size() - 1);
+    const std::size_t function = tu.functions.size() - 1;
+    // The lambdas of default member initializers that a constructor runs.
+    closures_of(tu.functions.back().body.closures, program.id(s.item), 0);
+    return dynamic_member(function);
   };
   for (std::size_t i = 0; i < program.synthesized().size(); ++i) {
     const parse::Program::Synthesized& s = program.synthesized()[i];

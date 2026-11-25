@@ -9855,7 +9855,8 @@ void Program::dynamic_special_members(u32 item, EntityId cls, sema::ClassRec& re
     dynamic_synthesized_.emplace(rec.implicit_default_ctor, synth_.size() - 1);
   }
   // A virtual destructor defaulted on its first declaration is defined there ([dcl.fct.def.default]).
-  if (rec.dynamic && rec.declared_destructor != EntityId::none && rec.destructor == rec.declared_destructor) {
+  // One that is not virtual waits in `defaulted_destructors_`, as in any class.
+  if (rec.dynamic && rec.virtual_destructor && rec.declared_destructor != EntityId::none && rec.destructor == rec.declared_destructor) {
     const auto declaration = destructor_declarations_.find(rec.declared_destructor);
     auto sem = member_declaration(rec.declared_destructor);
     if (declaration != destructor_declarations_.end() && declaration->second.defaulted && sem) {
@@ -13297,13 +13298,23 @@ void Program::instantiate_all() {
   };
   auto walk_one = [&](std::size_t i) {
     require_installed(synth_[i].decl.entity, id(synth_[i].item));
-    const NodeId body = synthesized_body(i).tree;
+    const auto [body, closures] = [&] {
+      const ast::BodySema& b = synthesized_body(i);
+      return std::pair(b.tree, b.closures);
+    }();
     if (const auto result = synth_results_.find(i); result != synth_results_.end()) {
       for (const engine::Diagnostic& d : result->second.second)
         if (!std::ranges::contains(end_diags_, d)) end_diags_.push_back(d);
       work.insert(work.end(), result->second.first.begin(), result->second.first.end());
     }
-    required_members(body, id(synth_[i].item));
+    const ItemId at = id(synth_[i].item);
+    required_members(body, at);
+    // The lambdas of default member initializers that a constructor runs.
+    for (const auto& closure : w_->ins.seqs.elements(closures)) {
+      if (!sema::Sema::closure_has_code(*w_, closure)) continue;
+      required_members(closure.body, at);
+      required_members(closure.invoker_body, at);
+    }
   };
   require = [&](std::span<const EntityId> refs, ItemId at) {
     for (EntityId e : refs) {
@@ -13438,29 +13449,35 @@ void Program::instantiate_all() {
   std::size_t walked_members = 0;
   std::size_t walked_closures = 0;
   for (std::size_t i = 0; ; ++i) {
-    // A class template's static data members' closures, and other class members' in their items
-    // (#338): their bodies are code where something refers to them.
-    for (; walked_closures < member_closures_.size(); ++walked_closures) {
-      const MemberClosures m = member_closures_[walked_closures];
-      work.insert(work.end(), m.demands.begin(), m.demands.end());
-      required_part(NodeId::none, m.value.closures, id(m.item));
-      depth.resize(work.size(), 1);
-    }
-    // Class-specialization replay can add member cells while processing this worklist.
-    for (; walked_members < class_member_order_.size(); ++walked_members) {
-      const auto& key = class_member_order_[walked_members];
-      const auto& cell = class_member_cells_.at(key);
-      if (!cell.diags.empty()) continue;
-      required_part(NodeId::none, cell.value.closures, id(key.first));
-      depth.resize(work.size(), 1);
-      for (sema::Demand demand : cell.demands) {
-        if (!demand.variable_type) continue;
-        const auto point = class_points_.at(key.second);
-        if (point < end()) demand.at = ast::Loc{id(point), 0};
-        work.push_back(demand);
-        depth.push_back(1);
+    // To a fixed point: a closure's body can need a synthesized member, whose body can instantiate
+    // a class with closures of its own.
+    do {
+      // A class template's static data members' closures, and other class members' in their items
+      // (#338): their bodies are code where something refers to them.
+      for (; walked_closures < member_closures_.size(); ++walked_closures) {
+        const MemberClosures m = member_closures_[walked_closures];
+        work.insert(work.end(), m.demands.begin(), m.demands.end());
+        required_part(NodeId::none, m.value.closures, id(m.item));
+        depth.resize(work.size(), 1);
       }
-    }
+      // Class-specialization replay can add member cells while processing this worklist.
+      for (; walked_members < class_member_order_.size(); ++walked_members) {
+        const auto key = class_member_order_[walked_members];
+        const auto& cell = class_member_cells_.at(key);
+        if (!cell.diags.empty()) continue;
+        required_part(NodeId::none, cell.value.closures, id(key.first));
+        depth.resize(work.size(), 1);
+        for (sema::Demand demand : cell.demands) {
+          if (!demand.variable_type) continue;
+          const auto point = class_points_.at(key.second);
+          if (point < end()) demand.at = ast::Loc{id(point), 0};
+          work.push_back(demand);
+          depth.push_back(1);
+        }
+      }
+      walk_synthesized();
+      depth.resize(work.size(), 1);
+    } while (walked_closures < member_closures_.size() || walked_members < class_member_order_.size());
     if (i == work.size()) break;
     if (!seen.insert(std::to_underlying(work[i].spec)).second) continue;
     required_.push_back(work[i].spec);
@@ -13481,6 +13498,7 @@ void Program::instantiate_all() {
         }
       if (v->cell.diags.empty()) {
         required_part(NodeId::none, v->cell.value.closures, id(v->item));
+        walk_synthesized();
         depth.resize(work.size(), depth[i] + 1);
       }
       continue;
