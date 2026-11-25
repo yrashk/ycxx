@@ -66,8 +66,47 @@ constexpr int dispatch() {
 int main() { return dispatch<cc::filesystem>(); }
 '''
 
+CUSTOM_MANIFEST = f'''\
+use plugin("{PACKAGE}") as custom
 
-def package_definition(wrapper, *flags):
+custom.header "profile" {{
+    capabilities = {{ filesystem = probe("{PACKAGE}", "{BINDINGS['filesystem']}") }}
+}}
+
+cpp.executable "app" {{
+    sources = ["main.cc"]
+    generated_headers = [artifact("profile", "header")]
+}}
+'''
+
+CUSTOM_RULE = r'''
+#include "ycxx_rule_api.h"
+
+#include <string_view>
+
+extern "C" int ycxx_rule_plan_v1(const ycxx_rule_host_v1* host) {
+    if (host->struct_size < sizeof(*host) || host->capability_count != 1 || !host->capabilities)
+        return 22;
+    const auto& capability = host->capabilities[0];
+    if (std::string_view(capability.name) != "filesystem")
+        return 23;
+    if (capability.support == YCXX_RULE_UNSUPPORTED_V1)
+        return 24;
+    if (capability.support != YCXX_RULE_SUPPORTED_V1)
+        return 25;
+
+    constexpr char plan[] = R"plan(action.generate "profile" {
+        tool = "/bin/sh"
+        args = ["-c", "printf '%s' \"$1\" > \"$2\"", "generator",
+                "inline constexpr int answer = 42;", output("header")]
+        outputs = { header = "compiler_profile.hh" }
+    })plan";
+    return host->emit(host->context, plan, sizeof(plan) - 1);
+}
+'''
+
+
+def package_definition(wrapper, *flags, probe_inputs=()):
     shared = '-dynamiclib' if sys.platform == 'darwin' else '-shared'
     return f'''\
 host_action "rules" {{
@@ -75,11 +114,40 @@ host_action "rules" {{
     args = ["-std=c++20", "-fPIC", "{shared}", "-Iinputs/sdk",
             input("source"), "-o", output("plugin")]
     probe_flags = {json.dumps(flags)}
+    probe_inputs = {json.dumps(probe_inputs)}
     environment = {{ PATH = "/usr/bin:/bin" }}
     inputs = {{ source = "rules.cc" }}
     outputs = {{ plugin = "rules.so" }}
 }}
 '''
+
+
+def write_compiler(wrapper, compiler, log, *, mode=None):
+    # Delegate real compilation to the pinned compiler. Inject one rejection and
+    # one clean exit without an object, independently of the host and driver.
+    wrapper.write_text(f'''\
+#!/bin/sh
+printf '%s\\n' "$*" >> {shlex.quote(str(log))}
+mode={shlex.quote(str(mode)) if mode else "''"}
+reject=0
+header=
+for arg do
+    case "$arg" in
+        {REJECT_FILESYSTEM_FLAG}) reject=1 ;;
+        --target=riscv64-unknown-linux-gnu) exit 0 ;;
+        *.cc|*.cpp)
+            if /usr/bin/grep -Fq '#include <cstddef>' "$arg"; then header=cstddef; fi
+            if /usr/bin/grep -Fq '#include <filesystem>' "$arg"; then header=filesystem; fi ;;
+    esac
+done
+if [ -n "$mode" ] && /usr/bin/grep -Fxq disabled "$mode"; then reject=1; fi
+if [ "$header" = cstddef ] || {{ [ "$header" = filesystem ] && [ "$reject" = 1 ]; }}; then
+    printf '%s\\n' "fixture: $header rejected by compiler profile" >&2
+    exit 1
+fi
+exec {shlex.quote(str(compiler))} "$@"
+''', encoding='utf-8')
+    wrapper.chmod(0o700)
 
 
 def prepare(scope, compiler, wrapper, log):
@@ -92,30 +160,7 @@ extern "C" int ycxx_rule_plan_v1(const ycxx_rule_host_v1*) { return 0; }
 ''', encoding='utf-8')
     (scope / 'build.ycxx').write_text(MANIFEST, encoding='utf-8')
     (scope / 'main.cc').write_text(CONSUMER, encoding='utf-8')
-
-    # Delegate real compilation to the pinned compiler. Inject one rejection and
-    # one clean exit without an object, independently of the host and driver.
-    wrapper.write_text(f'''\
-#!/bin/sh
-printf '%s\\n' "$*" >> {shlex.quote(str(log))}
-reject=0
-header=
-for arg do
-    case "$arg" in
-        {REJECT_FILESYSTEM_FLAG}) reject=1 ;;
-        --target=riscv64-unknown-linux-gnu) exit 0 ;;
-        *.cc|*.cpp)
-            if /usr/bin/grep -Fq '#include <cstddef>' "$arg"; then header=cstddef; fi
-            if /usr/bin/grep -Fq '#include <filesystem>' "$arg"; then header=filesystem; fi ;;
-    esac
-done
-if [ "$header" = cstddef ] || {{ [ "$header" = filesystem ] && [ "$reject" = 1 ]; }}; then
-    printf '%s\\n' "fixture: $header rejected by compiler profile" >&2
-    exit 1
-fi
-exec {shlex.quote(str(compiler))} "$@"
-''', encoding='utf-8')
-    wrapper.chmod(0o700)
+    write_compiler(wrapper, compiler, log)
 
 
 def profile_header(ycxx, scope, env, wrapper, filesystem):
@@ -236,19 +281,54 @@ def check_header(ycxx, scope, env, compiler):
         watch.close()
 
 
+def check_probe_input_recovery(ycxx, scope, env, compiler):
+    (scope / '.ycxx').mkdir()
+    (scope / 'tools/host').mkdir(parents=True)
+    mode = scope / 'tools/host/mode.txt'
+    mode.write_text('disabled\n', encoding='utf-8')
+    wrapper = scope / 'pinned-cxx'
+    write_compiler(wrapper, compiler, scope / 'compiler-commands', mode=mode)
+    (scope / PACKAGE_MANIFEST).write_text(
+        package_definition(wrapper, probe_inputs=('mode.txt',)), encoding='utf-8')
+    (scope / 'tools/host/rules.cc').write_text(CUSTOM_RULE, encoding='utf-8')
+    (scope / 'build.ycxx').write_text(CUSTOM_MANIFEST, encoding='utf-8')
+    (scope / 'main.cc').write_text(
+        '#include "compiler_profile.hh"\nint main() { return answer; }\n', encoding='utf-8')
+
+    executable = scope / '.ycxx/out/app'
+    watch = Watch(ycxx, scope, env)
+    try:
+        summary, events, watched = watch.build('cold watch with unsupported capability', succeeds=False)
+        assert any('failed with status 24' in diagnostic for diagnostic in summary['diagnostics']), summary
+        assert action_keys(events, 'RuleWorker', 'failed') == ['profile'], events
+        assert f"header.filesystem via {wrapper}" in probe_actions(events), events
+        assert str(mode) in watched, watched
+        assert not executable.exists()
+        watch.idle('failed custom rule awaits a compiler input change')
+
+        replace_source(scope, mode.relative_to(scope), 'enabled\n')
+        _, events, _ = watch.build('recover after editing only a declared compiler input')
+        assert f"header.filesystem via {wrapper}" in probe_actions(events), events
+        check_generation(events)
+        check_program(executable, 42)
+    finally:
+        watch.close()
+
+
 def main():
     ycxx = Path(sys.argv[1]).resolve()
     compiler = Path(sys.argv[2]).absolute()
-    with (
-        tempfile.TemporaryDirectory(prefix='ycxx-capability-header-') as directory,
-        tempfile.TemporaryDirectory(prefix='yb', dir=runtime_root('yb')) as runtime,
-    ):
-        scope = Path(directory).resolve()
-        env = env_for(runtime)
-        try:
-            check_header(ycxx, scope, env, compiler)
-        finally:
-            run_client(ycxx, scope, env, 'ctl', 'shutdown')
+    for check in (check_header, check_probe_input_recovery):
+        with (
+            tempfile.TemporaryDirectory(prefix='ycxx-capability-header-') as directory,
+            tempfile.TemporaryDirectory(prefix='yb', dir=runtime_root('yb')) as runtime,
+        ):
+            scope = Path(directory).resolve()
+            env = env_for(runtime)
+            try:
+                check(ycxx, scope, env, compiler)
+            finally:
+                run_client(ycxx, scope, env, 'ctl', 'shutdown')
 
 
 if __name__ == '__main__':
