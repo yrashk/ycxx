@@ -1721,6 +1721,7 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
     if (in->failed || in->body.value.tree == ast::NodeId::none) continue;
     const items::Item& it = items.items[in->item];
     declare(in->decl, ast::Loc{program.id(in->item), 0});  // errors in its name point at the template
+    if (!program.emits_instance(in->spec)) continue;
     // An immediate constructor's calls are all folded ([expr.const]): a constructor template's
     // specialization, or a constructor of a class template's specialization.
     const auto& entity = world.entities.rec(in->spec);
@@ -1785,7 +1786,7 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
   }
   // The variable template specializations instantiated ([temp.inst]/7), with their constants.
   for (const parse::Program::VarInstance& v : program.variable_instances()) {
-    if (!v.cell.diags.empty()) continue;
+    if (!v.cell.diags.empty() || !program.emits_instance(v.spec)) continue;
     const ast::ItemSema& is = v.cell.value;
     closures_of(is.closures, program.id(v.item), 0, true);
     for (std::size_t i = 0; i < ins.seqs.size(is.decls); ++i) {
