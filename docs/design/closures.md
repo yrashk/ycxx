@@ -79,20 +79,31 @@ Clang 23 and GCC 16 (the probes at the end) and wrote this document.
 13. **Incrementality:** an earlier lambda of the same signature shifts later closures' ids, as
     ast.md §4.5 says of local ids; the mangled names change with it, by the ABI.
 
-## Namespace variable initializers (#338)
+## Closures of declarations (#338)
 
-The first declaration slice gives a named internal-linkage namespace variable its own
-noncapturing, non-generic closure. Intern the variable's identity before placeholder deduction
-and publish its resolved entity record through the ordinary declaration path. The initializer
-uses the namespace for lexical lookup. Lookup of the variable itself during deduction diagnoses
-use of an undeduced placeholder.
+How decisions 3, 4, 6 and 11 apply to a declaration part, an item outside function bodies.
 
-The declaration part keeps its `ClosureDef`s in `ItemSema`. The compiler emits their functions
-through the existing closure member path, with the variable's `<closure-prefix>` for naming.
-A captureless closure initializer contributes a constant empty aggregate and complete object
-storage. Calls to the operator and scalar invoker use the existing implicit object pointer.
-Astra checked this application of the closure design. Other contexts and init-captures remain
-under [#338](https://github.com/yrashk/ycxx/issues/338).
+1. **A variable's identity is its closures' scope**, before its type is deduced and its record
+   published: a variable's type is no part of its identity. A variable template's definition uses
+   the template's entity, its specializations and those of class templates' static members their
+   own. Lookup of a placeholder variable in its own lambda diagnoses an undeduced placeholder.
+2. **A constraint has no declaration to own its closures** (its tokens are analysed again for each
+   satisfaction, [temp.constr.atomic]). Their scope is the class or namespace around it, TU-local,
+   with a discriminator in the closure's identity: the atom and its parameter mapping, or for the
+   definition the item. *Reason:* the definition and each satisfaction analyse the lambda anew, and
+   a closure's record is published once. They are never emitted or named.
+3. **A generic lambda keeps its part** (`GenericClosure::part`: the item, the part's first token
+   and the class around it). Its specializations are analysed there with the part's own questions,
+   not through the item's committed record, as the part may still be being analysed. They are
+   looked up at the point that uses them, or in the class while it is being defined.
+4. **Members are emitted where they are referred to.** Most are called in constant expressions
+   only, and Clang emits those nowhere. With external linkage they are weak.
+5. **A variable template's deduced closure type is its definition's only**, so it stays a
+   placeholder until a specialization deduces its own.
+
+Astra checked the application to internal namespace variables. Default member initializers,
+default arguments, `static_assert` and unevaluated operands remain under
+[#338](https://github.com/yrashk/ycxx/issues/338).
 
 ## Probes (Clang 23, GCC 16; 2026-11-19)
 
@@ -103,6 +114,8 @@ under [#338](https://github.com/yrashk/ycxx/issues/338).
   `_ZNK1S1mMUlvE_clEv`; a default member initializer of `S::d` → `_ZNK1S1dMUlvE_clEv`; a variable
   template `vt<int>` → `_ZNK2vtIiEMUlvE_clEv`; default arguments of an inline function, and
   closures in non-inline functions and variables, are local `$_N` symbols.
+- The `<closure-prefix>` is a substitution candidate: `_ZNK1A1gMUlT_PS_E_clIiEEDaS1_S2_` in both
+  (2026-11-24, #338). Apple Clang has `…DaS0_S1_`, and GCC omits a variable template's `M`.
 - Invoker and conversion: `_ZZ1hvENUlvE_8__invokeEv`, `_ZZ1hvENKUlvE_cvPFivEEv`.
 - Generic: `[](auto){}` is `UlT_E_` with `clIiEEDaS_`; `[]<class T>(T, int){}` is `UlTyT_iE_` with
   `clIiEEDaS_i`.
