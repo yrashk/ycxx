@@ -3667,6 +3667,12 @@ parity are tracked in [#294](https://github.com/yrashk/ycxx/issues/294) and
 
 ## Flat structural class template arguments (#317, 2026-11-24)
 
+A directly named explicit class specialization accepts a braced flat structural
+argument. The item splitter keeps grouped initializer tokens in the head and
+records the real class body and its child scope. Equivalent named and braced
+values select the same specialization. Native item checks and resident edits
+cover the body boundary, key changes, and restoration. [#1248](https://github.com/yrashk/ycxx/issues/1248)
+
 - Fixed-type parameters accept named complete flat aggregates with public nonmutable integral
   fields. The canonical argument records the class type and converted field values. Named
   constant expressions and equivalent braced values select the same specialization.
