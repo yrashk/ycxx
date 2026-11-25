@@ -13,14 +13,13 @@ its `retry_limit` constant as the process exit status.
 
 ## Run and inspect
 
-With a built `ycxx` on `PATH`, run from the repository root. Copying the example lets you try
-the edits in a separate workspace.
+With a current `ycxx` on `PATH`, run from this directory. Copying the example lets you try the
+edits in a separate workspace.
 
 ```sh
 example=$(mktemp -d "${TMPDIR:-/tmp}/ycxx-custom-rule.XXXXXX")
-cp -R examples/project-build/custom-rule/. "$example"
+cp -R . "$example"
 cd "$example"
-mkdir .ycxx
 
 ycxx build app --trace-engine=json 2> first.jsonl
 ./.ycxx/out/app || printf 'app exit status %s\n' "$?"
@@ -51,3 +50,6 @@ ycxx build app --trace-engine=json 2> changed.jsonl
   the engine reuses the generator result, compilation and link. The app still exits with `3`.
 - `changed.jsonl` records the worker and `ExternalAction` for `retry_policy`. The new header
   value recompiles `main.cc` and relinks `app`. The app exits with `5`.
+
+Run `ycxx build app --watch --trace-engine=interactive` to follow the same edits from another
+terminal. Press Ctrl-C to stop the watch.
