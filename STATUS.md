@@ -3323,6 +3323,16 @@ reports changes to units, imports, conflicts, cycles, and scan completeness.
 Body-only edits and moved source sites preserve the semantic results. Older
 graphs can use source-only matching when their unit paths are unambiguous.
 
+HTML comparisons show these semantic differences in **Module changes** when
+both plans contain graphs (#1390). The report shows before and after provider
+locations, resolution and scan states, conflicts, and cycles. After entries
+link to the corresponding imports, declarations, and units in the current
+graph. The section identifies source-only matches and explains when an older
+graph lacks enough configuration information to compare. An available
+comparison with equal semantic results reports no module changes. Earlier
+schema-1 snapshots without a graph still show **Plan changes** and the current
+**Module graph** when available.
+
 The standard C++ and generator rule declarations use a compiled rule package.
 `use plugin("tools/custom/rules") as cpp` supplies a different C++ provider. The
 bundled and workspace packages use the same worker. `cxx()` in a package recipe
