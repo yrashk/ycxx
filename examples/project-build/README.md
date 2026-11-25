@@ -10,7 +10,7 @@ out of the checkout and build it there.
 | [Custom rule](custom-rule) | Compare a whitespace edit and a digit edit in a retry limit read by a workspace plugin. |
 | [Typed capability header](typed-capabilities) | Inspect the compiler's `<filesystem>` probe and run the app that uses its generated constant. |
 | [Package-defined probe](package-probe) | Edit a codec profile and trace how a plugin classifies shell output as a typed support state. |
-| [Shader bundle](shader-bundle) | Build shaders from an inventory, then rename and remove a managed runtime asset under watch. |
+| [Shader bundle](shader-bundle) | Generate an inventory, add and remove a shader, and update managed runtime assets under watch. |
 | [Shader reflection](shader-reflection) | Build `runtime_only`, then `app`. Compare a shader body edit and a binding edit to see when a typed descriptor table rebuilds native code. |
 
 Each project builds a target named `app`. The resident daemon can reuse
