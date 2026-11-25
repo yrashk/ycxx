@@ -626,6 +626,9 @@ written default member initializer are value-initialized.
   `__is_trivially_destructible` give true for references, non-enum scalars, and bounded arrays
   of those scalars. They give false for cv `void`, function types, and arrays of unknown bound.
   [docs/EXTENSIONS.md](docs/EXTENSIONS.md)
+- `__PRETTY_FUNCTION__` in ordinary namespace-scope function bodies gives a static,
+  NUL-terminated spelling. A function template includes the canonical arguments of its
+  specialization, as needed by libycxx's type comparisons. [#1361](https://github.com/yrashk/ycxx/issues/1361)
 - templates: function, class and variable templates, deduction, partial ordering, explicit and
   partial specializations with substitution checks for dependent type arguments, static constexpr
   members of class templates, member function and

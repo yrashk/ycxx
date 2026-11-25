@@ -179,6 +179,8 @@ enum class Diag : std::uint32_t {
   constinit_automatic [[=message{Severity::error, "'constinit' can only declare a variable with static storage duration"}]],
   constinit_function [[=message{Severity::error, "'constinit' can only declare a variable"}]],
   expected_string_literal [[=message{Severity::error, "expected a string literal"}]],
+  pretty_function_context [[=message{Severity::error, "__PRETTY_FUNCTION__ is supported only in namespace-scope function bodies"}]],
+  pretty_function_spelling [[=message{Severity::error, "cannot spell this function or template argument for __PRETTY_FUNCTION__"}]],
   unevaluated_string [[=message{Severity::error, "this string cannot have an encoding prefix or a suffix"}]],
   consteval_redeclared [[=message{Severity::error, "'{0:n}' is declared both 'consteval' and not"}]],
   constexpr_redeclared [[=message{Severity::error, "'{0:n}' is declared both 'constexpr' and not"}]],
