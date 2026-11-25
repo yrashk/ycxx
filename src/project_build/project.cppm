@@ -493,6 +493,9 @@ std::expected<void, std::string> prepare_project(
     // Profile identity is revalidated separately. Only the support states enter the worker's key.
     const auto invocation_key = observation_key(*observation, toolchain.executable_build);
     if (!capabilities->values.empty()) observation->request.capabilities = std::move(capabilities->values);
+    const bool consumes_values = std::ranges::any_of(demand.capabilities, [](const auto& binding) {
+      return binding.value.has_value();
+    });
     const auto current_invocation = [&] {
       const auto current = rule_invocation(cwd, demand);
       if (manifest_stamp(cwd) != prepared.manifest ||
@@ -500,7 +503,7 @@ std::expected<void, std::string> prepare_project(
           !current_package() || !std::ranges::all_of(capabilities->profiles, [&](const auto& profile) {
             return current_projection(cwd, toolchain, profile);
           })) return false;
-      if (std::ranges::any_of(demand.capabilities, [](const auto& binding) { return binding.value.has_value(); }))
+      if (consumes_values)
         for (std::size_t i = 0; i < prepared.rules.observations.size(); ++i)
           if (!current_rule(cwd, toolchain, prepared.rules.observations[i], prepared.rules.expansions[i]))
             return false;
@@ -510,6 +513,10 @@ std::expected<void, std::string> prepare_project(
     auto lowered = invoke_rule_worker(run, toolchain, "RuleWorker", demand.target, library,
                                       *observation, current_invocation);
     if (!lowered) return std::unexpected(std::move(lowered.error()));
+    if (consumes_values && !current_invocation()) {
+      superseded = true;
+      return std::unexpected(std::format("value inputs for '{}' changed during rule resolution", demand.target));
+    }
     RuleExpansion expansion{demand, std::move(*lowered), std::move(capabilities->facts)};
     std::optional<Fp128> witness_key;
     if (demand.value_export) {
@@ -573,12 +580,17 @@ bool current_rule(const fs::path& cwd, const RuleToolchain& toolchain, const Rul
   return witness && action_key(*witness) == *record.witness;
 }
 
-std::optional<ProjectPlan> observe_project(
-    const fs::path& cwd, std::string_view target, const RuleToolchain& toolchain, const PreparedProject& prepared) {
-  if (manifest_stamp(cwd) != prepared.manifest) return std::nullopt;
+bool current_rules(const fs::path& cwd, const RuleToolchain& toolchain, const PreparedProject& prepared) {
+  if (manifest_stamp(cwd) != prepared.manifest) return false;
   for (std::size_t i = 0; i < prepared.rules.observations.size(); ++i)
     if (!current_rule(cwd, toolchain, prepared.rules.observations[i], prepared.rules.expansions[i]))
-      return std::nullopt;
+      return false;
+  return true;
+}
+
+std::optional<ProjectPlan> observe_project(
+    const fs::path& cwd, std::string_view target, const RuleToolchain& toolchain, const PreparedProject& prepared) {
+  if (!current_rules(cwd, toolchain, prepared)) return std::nullopt;
   auto attempt = plan_with_rules(cwd, target, prepared.rules.expansions);
   if (!attempt || manifest_stamp(cwd) != prepared.manifest) return std::nullopt;
   if (auto* plan = std::get_if<ProjectPlan>(&*attempt)) return std::move(*plan);
@@ -1070,7 +1082,7 @@ ProjectReport Coordinator::run(const fs::path& cwd, const std::string& target,
     auto prepared = prepare_project(cwd, target, toolchain, run_rule, run_package, run_witness, admit_value,
                                     use_compiler, resolve_capabilities, planned, watch, superseded);
     if (cancelled()) return fail("build cancelled");
-    if (superseded || manifest_stamp(cwd) != planned.manifest) continue;
+    if (superseded || !current_rules(cwd, toolchain, planned)) continue;
     write_rule_snapshot(cwd, target, planned.rules);
     if (watch) {
       report.watch_stamp = prepared ? watch_rules(cwd, target, toolchain, planned.rules).stamp : planned.attempt_watch;
