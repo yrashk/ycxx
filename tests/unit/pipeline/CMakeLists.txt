@@ -263,6 +263,10 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_
   add_test(NAME unit.linux_dynamic
     COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/linux_dynamic.py
             $<TARGET_FILE:ycxxc> ${CMAKE_C_COMPILER} ${CMAKE_READELF})
+  # PARITY: #393 for native Mach-O shared output; this test exercises ELF metadata and loading.
+  add_test(NAME unit.linux_shared_output
+    COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/linux_shared_output.py
+            $<TARGET_FILE:ycxxc> ${CMAKE_C_COMPILER} ${CMAKE_READELF})
   # PARITY: #294 for the Darwin borrowed typed downcast counterpart.
   add_test(NAME unit.linux_keyless_base_rtti
     COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/linux_keyless_base_rtti.py

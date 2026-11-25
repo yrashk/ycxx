@@ -95,9 +95,9 @@ private:
   std::map<FileId, std::optional<Content>> contents_;
 };
 
-// Which files a configuration reads (daemon design §6.1): the disk's, or the editor's open buffers
-// over them.
-enum class View : u8 { disk, editor };
+// The disk, the editor's open buffers over it (daemon design §6.1), or the disk with the
+// build's generated files under a reserved virtual directory.
+enum class View : u8 { disk, editor, build };
 
 // The configuration of a translation unit's preprocessing (§B1.1's root): search paths,
 // command-line macros and the view. Its fingerprint keys every region a session caches.
@@ -119,7 +119,7 @@ struct Config {
   bool exceptions_enabled = true;
   // `-fno-rtti` disables runtime type operations and the typeinfo word's relocation in vtables.
   bool rtti_enabled = true;
-  // The root of every prefix (§6.1): an editor-view region is never a disk-view one's.
+  // The root of every prefix (§6.1): regions are shared only within the same view.
   View view = View::disk;
   // A language option the unit's front end reads: `-ftemplate-depth=N`, the limit on nested
   // template instantiations ([temp.inst]/16, [implimits]).

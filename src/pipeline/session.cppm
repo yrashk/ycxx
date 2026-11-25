@@ -157,6 +157,7 @@ class Session {
     db_.set_provider<pp::FileContent>(pp::read_disk);
     // No editor buffer is open until the owner sets one (daemon design §6.1).
     db_.set_provider<pp::Buffer>(pp::no_buffer);
+    db_.set_provider<pp::GeneratedFile>(pp::no_generated_file);
     // Named units and programs (`unit`, `program`) are provided from the registry.
     db_.set_provider<pp::SourceOf>([this](pp::FileId f) {
       std::lock_guard lock(registry_m_);
@@ -215,8 +216,8 @@ class Session {
 
   // A translation unit from a source file: `path` names it (and locates its `#include "..."`),
   // `object` is the object's name; relative paths are relative to `cwd`, and `config` is its
-  // preprocessing configuration. The driver's file number is the unit's. An editor-view unit reads
-  // its text through the view (`pp::Buffer`), so `text` is not set for it.
+  // preprocessing configuration. The driver's file number is the unit's. Only a disk-view
+  // unit uses `text`. The editor and build views read the main file through their path inputs.
   void set_source(TuId tu, std::string path, std::string text, std::string object, std::string cwd = {},
                   pp::Config config = {}) {
     Bind bind(universe_);  // input values may hold handles, fingerprinted by their interners
@@ -295,6 +296,13 @@ class Session {
     bool changed = false;
     for (std::uint32_t n : ns) changed = db_.set<pp::FileText>(pp::FileId{n}, text.value_or(std::string{})) || changed;
     return changed;
+  }
+
+  // Updates a virtual file in the build view. The caller writes a batch under `apply`.
+  bool set_generated(std::string_view absolute_path, std::optional<std::string> contents)
+    pre(absolute_path.starts_with('/'))
+  {
+    return db_.set<pp::GeneratedFile>(pp::path_id(pp::Files::normalize(absolute_path)), std::move(contents));
   }
 
   // A request's root (#139). On a pooled session it is spawned into the current epoch: a batch
@@ -438,7 +446,7 @@ engine::query_task<Built> Build::run(engine::Ctx& cx, RequestId r) {
     const pp::Source& src = cx.fetch<pp::SourceOf>(pp::FileId{tu.n});
     if (!first) first = &src;
     UnitBuilt& u = out.units.emplace_back();
-    u.readable = source_content(cx, src, src.path).has_value();
+    u.readable = pp::source_content(cx, src, src.path).has_value();
     if (u.readable) readable.push_back(tu);
     else all = false;
   }
