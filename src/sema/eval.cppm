@@ -97,8 +97,12 @@ struct Evaluated {
   bool type_trait_failure = false;
   // The global that caused this evaluation to fail already diagnosed its initializer.
   bool variable_instantiation_failure = false;
+  // The selected callee already diagnosed its body.
+  bool function_instantiation_failure = false;
 
-  bool diagnosed_failure() const { return type_trait_failure || variable_instantiation_failure; }
+  bool diagnosed_failure() const {
+    return type_trait_failure || variable_instantiation_failure || function_instantiation_failure;
+  }
 };
 
 class Evaluator {
@@ -269,6 +273,7 @@ private:
       result.variable_instantiation_failure = out.failure.global != EntityId::none &&
                                               q_->variable_instantiation_failed(out.failure.global);
       result.type_trait_failure = host.type_trait_failure;
+      result.function_instantiation_failure = host.function_instantiation_failure;
       if (result.type_trait_failure) return result;
       if (q_->instantiation_gave_up()) {
         result.dependent = true;
@@ -593,9 +598,13 @@ private:
     Questions* q;
     Evaluator* e;
     bool type_trait_failure = false;
+    bool function_instantiation_failure = false;
     interp::ready<interp::Callee> body(EntityId f) {
       if (auto c = e->closure_callee(f)) return {*c};
-      return {q->function_ir(f)};
+      bool diagnosed = false;
+      auto callee = q->function_ir(f, diagnosed);
+      function_instantiation_failure |= diagnosed;
+      return {callee};
     }
     interp::ready<std::optional<interp::GlobalVar>> global(EntityId v) {
       auto value = q->global(v);

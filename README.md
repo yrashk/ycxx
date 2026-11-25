@@ -84,7 +84,9 @@ parameters, is part of its call operator's type. [#807](https://github.com/yrash
 Templates can take values of named flat aggregates with public integral fields as constant
 arguments. On Linux x86-64, equivalent values share a parameter object across translation
 units. A class template's ordinary member alias can use those fields directly or in a
-guarded integral argument such as `V.ok ? V.num : 0`.
+guarded integral argument such as `V.ok ? V.num : 0`. An alias template can
+use a namespace-qualified `consteval` call with explicit type arguments to
+produce the structural argument, as in `Box<detail::make<T, U>()>`.
 [#317](https://github.com/yrashk/ycxx/issues/317)
 
 An explicitly specialized class can name a flat structural argument directly, as in
