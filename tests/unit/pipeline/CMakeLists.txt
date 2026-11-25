@@ -99,6 +99,10 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_
     COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/linux_compile.py
             $<TARGET_FILE:ycxxc> ${CMAKE_C_COMPILER} ${CMAKE_READELF} ${CMAKE_AR}
             ${PROJECT_SOURCE_DIR}/deps/libycxx)
+  # PARITY: by design: checks native x86-64 ELF linkage and symbols. Darwin runs tests/own.
+  add_test(NAME unit.linux_deduced_callback
+    COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/linux_deduced_callback.py
+            $<TARGET_FILE:ycxxc> ${CMAKE_CXX_COMPILER} ${CMAKE_READELF})
   add_test(NAME unit.linux_array_delete
     COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/linux_array_delete.py
             $<TARGET_FILE:ycxxc> ${CMAKE_CXX_COMPILER} ${CMAKE_READELF})

@@ -1,5 +1,7 @@
+using ExplicitCallback = long (*)(int);
+
 extern "C" {
-    extern long (*volatile explicit_callback)(int);
+    extern ExplicitCallback explicit_callback;
 
     int verify_explicit_callback() {
         auto callback = explicit_callback;

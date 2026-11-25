@@ -5,8 +5,10 @@ struct ControlAdjustment {
     static auto apply(int input) { return 5L * input - 2L; }
 };
 
+using ExplicitCallback = long (*)(int);
+
 extern "C" {
-    long (*volatile explicit_callback)(int) = &ControlAdjustment<int>::apply;
+    ExplicitCallback explicit_callback = &ControlAdjustment<int>::apply;
     int verify_explicit_callback();
 }
 
