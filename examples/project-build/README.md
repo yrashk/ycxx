@@ -4,13 +4,14 @@ Each directory is a workspace with its own `build.ycxx`. Run the commands from
 that directory with a current `ycxx` on `PATH`. You can also copy a workspace
 out of the checkout and build it there.
 
-| Project | Features |
+| Project | What to try |
 | --- | --- |
-| [Native C++](native) | A library, source glob with an exclusion, and a declared generator |
-| [Custom rule](custom-rule) | A source-built rule package, a tracked read and a generated input |
-| [Typed capability header](typed-capabilities) | Compiler probes, a named header artifact and `if constexpr` |
-| [Package-defined probe](package-probe) | A workspace tool witness, a typed support export and incremental reuse |
-| [Shader bundle](shader-bundle) | A shader inventory, private compilation actions and a published runtime asset |
+| [Native C++](native) | Watch a generator input change and inspect the library dependency and source glob. |
+| [Custom rule](custom-rule) | Compare a whitespace edit and a digit edit in a retry limit read by a workspace plugin. |
+| [Typed capability header](typed-capabilities) | Inspect the compiler's `<filesystem>` probe and run the app that uses its generated constant. |
+| [Package-defined probe](package-probe) | Edit a codec profile and trace how a plugin classifies shell output as a typed support state. |
+| [Shader bundle](shader-bundle) | Build shaders from an inventory and trace private compile actions and runtime asset publication. |
+| [Shader reflection](shader-reflection) | Build `runtime_only`, then `app`. Compare a shader body edit and a binding edit to see when a typed descriptor table rebuilds native code. |
 
 Each project builds a target named `app`. The resident daemon can reuse
 work from an earlier request in the same workspace.
