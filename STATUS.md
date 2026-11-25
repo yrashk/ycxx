@@ -3263,6 +3263,13 @@ observes the producer graph, while read-only inspection validates its inputs
 and shows the selected receipt provenance. The shader example uses this to
 add and remove modules from a generated inventory. [#1335](https://github.com/yrashk/ycxx/issues/1335)
 
+Planning can compose cached rule results before validating the expanded
+prefix. Cache misses reobserve the prefix before launching tools and again
+before admitting their receipts. Staging follows the requested producers'
+ordinary artifact dependencies, and validation retains the full planning
+graph. Edits during a producer run discard its superseded result and retry
+without replacing published outputs. [#1337](https://github.com/yrashk/ycxx/issues/1337)
+
 A source-built rule package can stage a named generated artifact into an
 `action.observe` witness and classify it as a canonical table of typed rows.
 `facts` bindings resolve the stable `value("target", "field")` query without
