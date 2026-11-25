@@ -10,8 +10,9 @@ import :os;
 export namespace ycxx::daemon {
 
 // The scope's root, found from `start` (a file or directory; its real path is walked):
-// `YCXX_ROOT` if set; else the first directory upward holding `.ycxx` or a version-control marker
-// (`.git`, `.hg`, `.jj`), where a `.git` file of a submodule does not count; else `home`.
+// `YCXX_ROOT` if set; else the first directory upward holding `.ycxx`, a `build.ycxx` file, or a
+// version-control marker (`.git`, `.hg`, `.jj`), where a submodule's `.git` file does not count;
+// else `home`.
 // `.ycxx` may say `root = <relative path>` to widen the scope.
 std::string find_root(const std::string& start, const std::string& home);
 
@@ -109,6 +110,7 @@ std::string find_root(const std::string& start, const std::string& home) {
       if (auto w = widened(marker)) return w->native_encoded_string();
       return p.native_encoded_string();
     }
+    if (fs::is_regular_file(p / "build.ycxx", ec)) return p.native_encoded_string();
     for (std::string_view vcs : {".hg", ".jj"})
       if (fs::exists(p / vcs, ec)) return p.native_encoded_string();
     fs::path git = p / ".git";
