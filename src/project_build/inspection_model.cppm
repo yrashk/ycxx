@@ -17,11 +17,61 @@ struct PlanFact {
   std::size_t column = 0;
 };
 
+struct ModuleSourceLocation {
+  std::string path;
+  std::uint32_t line;
+  std::uint32_t column;
+};
+
+struct ModuleDeclarationInspection {
+  std::size_t directive_index;
+  std::string kind;
+  std::string name;
+  ModuleSourceLocation location;
+};
+
+struct ModuleUnitInspection {
+  std::size_t id;
+  std::string source;
+  std::string scan;
+  std::vector<ModuleDeclarationInspection> declarations;
+};
+
+struct ModuleCandidateInspection {
+  std::size_t unit_id;
+  std::size_t directive_index;
+};
+
+struct ModuleImportInspection {
+  std::size_t unit_id;
+  std::size_t directive_index;
+  std::string kind;
+  std::string name;
+  ModuleSourceLocation location;
+  std::string status;
+  std::vector<ModuleCandidateInspection> candidates;
+};
+
+struct ModuleConflictInspection {
+  std::string name;
+  std::vector<ModuleCandidateInspection> candidates;
+};
+
+struct ModuleGraphInspection {
+  std::string native_target;
+  bool complete = true;
+  std::vector<ModuleUnitInspection> units = {};
+  std::vector<ModuleImportInspection> imports = {};
+  std::vector<ModuleConflictInspection> conflicts = {};
+  std::vector<std::vector<std::size_t>> cycles = {};
+};
+
 struct PlanInspection {
   int schema = 1;
   std::string target;
   std::string definition;
   std::vector<PlanFact> facts;
+  std::optional<ModuleGraphInspection> module_graph = std::nullopt;
 };
 
 struct PlanChange {

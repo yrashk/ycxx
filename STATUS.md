@@ -3275,6 +3275,13 @@ provider locations. A location-only edit can update the report while
 reusing provider resolution. Incomplete read-only scans make missing or
 unique matches provisional.
 
+`ycxx show <target> --format=json` includes an optional `module_graph` for
+resolved plans under a native configuration (#1363). It records configured
+translation units, scan states, named directives with physical source locations,
+provider candidates, conflicts, and cyclic components. Its unit IDs are local
+to each snapshot.
+Schema-1 plan comparisons continue to use semantic facts.
+
 The standard C++ and generator rule declarations use a compiled rule package.
 `use plugin("tools/custom/rules") as cpp` supplies a different C++ provider. The
 bundled and workspace packages use the same worker. `cxx()` in a package recipe
