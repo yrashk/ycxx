@@ -313,6 +313,7 @@ inline constexpr u8 unrepresented_value = 4;  // this expression has no usable C
 inline constexpr u8 deferred_decay_copy = 8;  // a decay-copy still needs function body replay
 inline constexpr u8 type_dependent = 16;  // the producer proved dependence even without a structural type
 inline constexpr u8 dependent_integral_arithmetic = 32;  // integral arithmetic depending on value parameters
+inline constexpr u8 structural_projection = 64;  // a class parameter field in a member alias argument
 }
 
 // Flags of `LocalRec::flags` and `DeclSema::flags`.
@@ -3434,14 +3435,27 @@ public:
   }
 
   Ex member(Ex object, bool arrow, NameId name, u32 end, u32 op_at, u32 name_at,
-            std::optional<NameId> qualifier = {}) {
+            std::optional<NameId> qualifier = {}, bool retain_class_parameter = false) {
     u32 begin = object.begin;
     Ex fail{NodeId::none, begin, end};
     if (!object.ok()) return fail;
+    QualType ct = object.type();
+    std::optional<ConstId> parameter;
+    bool class_parameter = false;
+    if (retain_class_parameter && !arrow && !qualifier && types().is_class(ct) && !types().is_dependent(ct)) {
+      Ex base = object;
+      while (auto p = as<ast::Paren>(base)) base.id = p->operand.id;
+      if (auto lit = as<ast::Literal>(base); lit && ins().values.is<ast::VDepParam>(lit->value) &&
+          ins().values.get<ast::VDepParam>(lit->value).depth != dependent_depth) {
+        parameter = lit->value;
+      }
+      auto decl = as<ast::DeclRef>(base);
+      class_parameter = parameter || (decl && w_->entities.rec(decl->entity).kind == EntityKind::template_parameter_object);
+    }
     // A member of the current instantiation or of an unknown specialization is looked up when the
     // template is instantiated ([temp.dep.expr]/5).
-    if (dependent(object)) return dependent_node({object}, begin, end, std::nullopt, ValueCategory::lvalue);
-    QualType ct = object.type();
+    if (dependent(object) && !parameter)
+      return dependent_node({object}, begin, end, std::nullopt, ValueCategory::lvalue);
     if (arrow) {
       object = rvalue(object);
       if (!types().is_pointer(object.type()) || !types().is_class(types().pointee(object.type()))) {
@@ -3470,6 +3484,8 @@ public:
       diag(name_at, Diag::no_member, name, Types::unqualified(ct));
       return fail;
     }
+    if (parameter && !found->field)
+      return dependent_node({object}, begin, end, std::nullopt, ValueCategory::lvalue);
     if (found->ambiguous) {
       diag(name_at, Diag::ambiguous_member, name, Types::unqualified(ct));
       return fail;
@@ -3525,7 +3541,12 @@ public:
       return fail;
     }
     ValueCategory cat = ref || arrow || object.cat() == ValueCategory::lvalue ? ValueCategory::lvalue : ValueCategory::xvalue;
-    ExprInfo info{t, cat, 0, f.bit_width};
+    ExprInfo info{t, cat, class_parameter ? expr_flag::structural_projection : u8{0}, f.bit_width};
+    if (parameter) {
+      info.flags |= expr_flag::dependent;
+      ConstId value = ins().intern_value(ast::VDepField{c, f.entity, types().canonical(f.type), *parameter});
+      return node(ast::Literal{info, value}, begin, end, info);
+    }
     return node(ast::Member{info, f.entity, index, arrow ? 1u : 0u, ref ? 1u : 0u, at(object, begin)}, begin, end, info);
   }
 
@@ -11765,8 +11786,81 @@ public:
     return node(ast::Throw{info, at(value, begin)}, begin, end, info);
   }
 
+  // Retain a typed integral operand without reading a named object. The conditional's
+  // substitution and the concrete evaluator each read only the chosen alternative.
+  std::optional<TemplateArg> structural_conditional_operand(Ex e) {
+    while (auto p = as<ast::Paren>(e)) e.id = p->operand.id;
+    const QualType type = types().canonical(e.type());
+    if (auto lit = as<ast::Literal>(e)) {
+      const auto& values = ins().values;
+      if (values.is<ast::VInt>(lit->value) || values.is<ast::VDepField>(lit->value) ||
+          values.is<ast::VDepConditional>(lit->value) ||
+          (values.is<ast::VDepParam>(lit->value) && values.get<ast::VDepParam>(lit->value).depth != dependent_depth))
+        return TemplateArg{TemplateArgKind::value, type, lit->value};
+    }
+    if (auto decl = as<ast::DeclRef>(e); decl && !decl->reference && !dependent(e)) {
+      ConstId value = ins().intern_value(ast::VEntity{decl->entity});
+      return TemplateArg{TemplateArgKind::value, type, value};
+    }
+    if (auto unary = as<ast::Unary>(e);
+        unary && (unary->op == ast::UnaryOp::plus || unary->op == ast::UnaryOp::minus)) {
+      if (auto lit = as<ast::Literal>({unary->operand.id}); lit && ins().values.is<ast::VInt>(lit->value)) {
+        auto bits = ast::int_bits(ins(), lit->value);
+        if (unary->op == ast::UnaryOp::minus) bits = ast::wide::neg(bits);
+        return TemplateArg{TemplateArgKind::value, type, w_->values.integer(type, bits)};
+      }
+    }
+    return std::nullopt;
+  }
+
+  Ex structural_conditional(Ex cond, Ex t, Ex f, u32 q_at) {
+    const u32 begin = cond.begin, end = f.end;
+    const bool is_dependent = dependent(cond) || dependent(t) || dependent(f);
+    const QualType left = types().canonical(t.type()), right = types().canonical(f.type());
+    const QualType a = Types::unqualified(left), b = Types::unqualified(right);
+    const Cv left_cv = Types::cv(left), right_cv = Types::cv(right);
+    const bool left_to_right = cv_within(left_cv, right_cv);
+    const bool glvalue = t.glvalue() && t.cat() == f.cat() && a == b &&
+                         (left_to_right || cv_within(right_cv, left_cv));
+    if (glvalue && (t.info.bit_width || f.info.bit_width)) {
+      diag(q_at, Diag::bit_field_conditional);
+      return {NodeId::none, begin, end};
+    }
+    QualType result = a == b ? a : integral_common_type(t, f);
+    if (glvalue) result = left_to_right ? right : left;
+    ExprInfo info{result, glvalue ? t.cat() : ValueCategory::prvalue, expr_flag::structural_projection};
+    if (is_dependent) {
+      const auto c = structural_conditional_operand(cond);
+      const auto x = structural_conditional_operand(t), y = structural_conditional_operand(f);
+      if (!c || !x || !y) {
+        diag(q_at, Diag::not_supported, lex::Tk::question);
+        return {NodeId::none, begin, end};
+      }
+      const std::array operands{*c, *x, *y};
+      const auto value = ins().intern_value(ast::VDepConditional{result, b_->seq(std::span<const TemplateArg>(operands))});
+      info.flags |= expr_flag::dependent;
+      return node(ast::Literal{info, value}, begin, end, info);
+    }
+
+    // Form the ordinary conversions without folding an unchosen static constant reference.
+    auto load = [&](Ex e) {
+      return e.glvalue() ? convert_node(e, ast::ConversionKind::lvalue_to_rvalue, object_unqualified(e.type())) : e;
+    };
+    Ex c = load(cond);
+    if (!types().is(c.type(), Builtin::bool_)) c = arithmetic_conversion(c, builtin(Builtin::bool_));
+    if (glvalue) {
+      if (left != result) t = convert_node(t, ast::ConversionKind::qualification, result, t.cat());
+      if (right != result) f = convert_node(f, ast::ConversionKind::qualification, result, f.cat());
+    } else {
+      t = load(t);
+      f = load(f);
+      if (a != b) arithmetic_conversions(t, f);
+    }
+    return node(ast::Conditional{info, at(c, begin), at(t, begin), at(f, begin)}, begin, end, info);
+  }
+
   // [expr.cond]
-  Ex conditional(Ex cond, Ex t, Ex f, u32 q_at) {
+  Ex conditional(Ex cond, Ex t, Ex f, u32 q_at, bool retain_class_parameter = false) {
     u32 begin = cond.begin, end = f.end;
     if (!cond.ok() || !t.ok() || !f.ok()) return {NodeId::none, begin, end};
     auto throws = [&](Ex arm) {
@@ -11783,6 +11877,11 @@ public:
       if (dependent(c) || dependent(t) || dependent(f)) info.flags |= expr_flag::dependent;
       return node(ast::Conditional{info, at(c, begin), at(t, begin), at(f, begin)}, begin, end, info);
     }
+    if (retain_class_parameter &&
+        ((cond.info.flags | t.info.flags | f.info.flags) & expr_flag::structural_projection) &&
+        types().is_integral(cond.type()) && types().is_integral(t.type()) && types().is_integral(f.type()))
+      return structural_conditional(cond, t, f, q_at);
+
     if (dependent(cond) || dependent(t) || dependent(f)) {
       if (has_proven_dependent_type(cond) || has_proven_dependent_type(t) || has_proven_dependent_type(f))
         return dependent_node({cond, t, f}, begin, end, std::nullopt, ValueCategory::prvalue, expr_flag::type_dependent);

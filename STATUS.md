@@ -3759,6 +3759,13 @@ cover the body boundary, key changes, and restoration. [#1248](https://github.co
   mutable-field rejection in `tests/own/templates/`. Floating-point arguments, richer
   structural forms and the remaining dependent and visibility cases stay in #317.
 
+Ordinary member aliases can project a structural parameter's public integral fields into
+scalar template arguments. A guarded conditional uses its typed selected operand, so the
+result selects the same specialization as the corresponding literal. The resident fixtures
+check field-order and named-guard edits against cold compilation. General member alias
+template replay and record-valued immediate calls remain in #317. The separate dependent
+static operand in the pinned libycxx ratio header stays in #209.
+
 ## Member alias templates and `Q::template M` (#340, 2026-11-24)
 
 - **Member alias templates** ([temp.alias], [temp.mem]): `template<class U> using apply = …;` in a
