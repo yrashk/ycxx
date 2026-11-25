@@ -37,7 +37,8 @@ struct RuleSnapshot {
   std::vector<RuleExpansion> expansions;
   std::vector<RuleObservation> observations;  // in expansion order
   std::vector<RuleProbeSnapshot> probes;
-  std::vector<RuleProbeSnapshot> pending_projections = {};  // in-memory watch state for a failed rule
+  // A witness can defer to another rule. Keep both rules' observed inputs until each resolves.
+  std::map<std::string, std::vector<RuleProbeSnapshot>> pending_projections = {};
   std::vector<RuleExpansion> pending_witnesses = {};  // in-memory watch state for deferred or failed witnesses
 };
 

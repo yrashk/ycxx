@@ -646,7 +646,7 @@ std::expected<void, std::string> prepare_project(
     auto arguments = resolve_arguments(demand, prepared.rules);
     if (!arguments) return std::unexpected(arguments.error());
     if (watch && !arguments->profiles.empty()) {
-      prepared.rules.pending_projections = arguments->profiles;
+      prepared.rules.pending_projections.insert_or_assign(demand.target, arguments->profiles);
       prepared.attempt_watch = watch_rules(cwd, target, toolchain, prepared.rules).stamp;
     }
     auto observation = rule_invocation(cwd, demand);
@@ -736,10 +736,10 @@ std::expected<void, std::string> prepare_project(
       admit_value(demand.target, field, RuleValueRecord{std::move(*value), receipt, std::move(origin)});
       std::erase_if(prepared.rules.pending_witnesses, [&](const auto& entry) { return entry.demand == demand; });
     }
+    prepared.rules.pending_projections.erase(demand.target);
     prepared.rules.observations.push_back(
         {std::move(demand), library_key, invocation_key, std::move(arguments->profiles), witness_key});
     prepared.rules.expansions.push_back(std::move(expansion));
-    prepared.rules.pending_projections.clear();
     if (!deferred.empty()) {
       next = std::move(deferred.back());
       deferred.pop_back();
@@ -862,7 +862,8 @@ ProjectWatchState watch_rules(const fs::path& cwd, std::string_view target, cons
       current.push_back(expansion);
   }
   for (const auto& probe : snapshot.probes) (void)observe_probe(probe);
-  for (const auto& probe : snapshot.pending_projections) (void)observe_probe(probe);
+  for (const auto& [name, profiles] : snapshot.pending_projections)
+    for (const auto& probe : profiles) (void)observe_probe(probe);
   for (const auto& witness : snapshot.pending_witnesses) (void)observe_witness(witness);
   auto watch = observed ? *observed : watch_project(cwd, target, current);
   if (watch.pending && std::ranges::none_of(snapshot.observations, [&](const auto& record) {
