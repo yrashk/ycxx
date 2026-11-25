@@ -3226,6 +3226,15 @@ includes the resolved plan and its definition.
 Use the same `--target` option to read the chosen variant and its target
 provenance. The trace carries the compiler target for the request.
 
+Named-module discovery runs before native semantic analysis through
+`ModuleDirectives` and `ModuleGraph` (#1349). It follows the marked module
+and import directives in each unit's selected preprocessing view. The graph
+omits occurrence locations, so moving a directive can refresh provenance
+without changing the dependencies. Read-only plans show physical source
+locations and mark scans that need generated inputs as pending. Build
+traces include these units once the virtual inputs are available.
+Named-module semantics and BMI support are tracked in #319.
+
 The standard C++ and generator rule declarations use a compiled rule package.
 `use plugin("tools/custom/rules") as cpp` supplies a different C++ provider. The
 bundled and workspace packages use the same worker. `cxx()` in a package recipe

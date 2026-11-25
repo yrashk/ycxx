@@ -1,0 +1,3 @@
+cpp.executable "app" {
+    sources = ["main.cc", "score.cc", "bonus_linux.cc", "bonus_darwin.cc"]
+}
