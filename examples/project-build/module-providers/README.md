@@ -32,6 +32,41 @@ provenance. Open `linux-to-darwin.html` to compare both branches of the
 diamond. Each branch resolves `demo.shared` to the same file for a given
 target.
 
+## Read the provider edges from JSON
+
+Run this in the copied workspace after the builds above. Python 3 reads both
+JSON snapshots and joins each `demo.shared` import to its provider declaration
+using the candidate's unit ID and directive index.
+
+```sh
+python3 - x86_64-pc-linux-gnu-plan.json arm64-apple-darwin-plan.json <<'PY'
+import json
+from pathlib import Path
+import sys
+
+def site(location):
+    return f'{location["path"]}:{location["line"]}:{location["column"]}'
+
+for snapshot in sys.argv[1:]:
+    graph = json.loads(Path(snapshot).read_text(encoding='utf-8'))['module_graph']
+    declarations = {
+        (unit['id'], declaration['directive_index']): declaration['location']
+        for unit in graph['units']
+        for declaration in unit['declarations']
+    }
+    print(graph['native_target'])
+    for edge in graph['imports']:
+        if edge['name'] == 'demo.shared':
+            for candidate in edge['candidates']:
+                provider = declarations[candidate['unit_id'], candidate['directive_index']]
+                print(f'  {site(edge["location"])} -> {site(provider)} ({edge["status"]})')
+PY
+```
+
+Both import sites are on line 3 of their physical files. They point to line 2
+of `shared_linux.cc` for the Linux snapshot and line 2 of `shared_darwin.cc`
+for the Darwin snapshot.
+
 ## Watch a provider body edit
 
 In a second terminal in the copied workspace, start watch for Linux.

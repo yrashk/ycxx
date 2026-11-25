@@ -336,6 +336,48 @@ read observations. A rule with no current expansion appears as unresolved.
 Source output always reads the authored definition directly. Inspection runs no
 tools and reports generator inputs and tools by their planned paths.
 
+### Structured named-module graph (#1363)
+
+`ycxx show app --format=json` includes `module_graph` for a resolved plan under
+a supported native configuration. A plan with no C++ translation units has an
+empty graph. The field is absent while rule expansion is unresolved or when no
+native configuration is available.
+The graph reports `native_target` as the selected target triple. `complete`
+indicates whether every unit scan is complete. The graph contains `units`,
+`imports`, `conflicts`, and `cycles` arrays.
+
+- A unit has `id`, `source`, `scan`, and `declarations`. A translation unit
+  registered more than once appears once. Different configurations of the same
+  source have distinct IDs. `scan` is `complete`, `generated_inputs_unavailable`,
+  or `preprocessing_incomplete`.
+- A declaration has `directive_index`, `kind` (`interface_unit` or
+  `implementation_unit`), `name`, and `location`. An import adds `unit_id`,
+  `status`, and `candidates` and has kind `import` or `exported_import`.
+- Each import or conflict candidate identifies a declaration with
+  `unit_id` and `directive_index`. Unit IDs are zero-based integers scoped to
+  one snapshot. IDs and declaration indexes can be sparse. Look up declarations
+  by their `directive_index` field.
+- Conflicts have a `name` and `candidates`, including conflicts with no matching
+  import. Each cycle is an array of unit IDs in one cyclic component of the
+  known graph.
+
+| Import status | Meaning |
+| --- | --- |
+| `resolved` | One candidate in a complete graph. |
+| `provisional` | One known candidate in an incomplete graph. |
+| `ambiguous` | Multiple known candidates. |
+| `pending` | No known candidate in an incomplete graph. |
+| `unresolved_partition` | No candidate for a partition import in a complete graph. |
+| `external_or_unresolved` | No candidate for a named module import in a complete graph. |
+
+Each `location` has `path`, `line`, and `column` for the first keyword of the
+directive. Lines and byte columns are one-based and refer to the physical file.
+Paths within the workspace are relative to it. Moving a directive refreshes
+its provenance while preserving its dependencies. Schema 1 retains `facts` and
+`show --against` compares those semantic facts, so earlier schema-1 snapshots
+still work. The module-provider example joins these records to compare both
+target variants. [Module-provider example](../../examples/project-build/module-providers/README.md)
+
 ## Native rule packages (#1257)
 
 A package owns its definition and exports a host rule plugin target. A workspace
