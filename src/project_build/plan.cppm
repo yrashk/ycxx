@@ -12,6 +12,7 @@ import ycxx.build.publication;
 import ycxx.build.rule_compilers;
 import ycxx.build.rule_protocol;
 import ycxx.hash;
+import ycxx.pp;
 
 export namespace ycxx::build {
 
@@ -109,12 +110,12 @@ std::expected<RulePackagePlan, std::string> plan_rule_package(
 // Include paths observed before an incomplete plan.
 std::expected<RuleInputPlan, std::string> plan_rule_inputs(
     const std::filesystem::path& cwd, const RuleDemand& demand, std::span<const RuleExpansion> expansions,
-    std::vector<std::string>* paths = nullptr);
+    std::string_view native_triple, std::vector<std::string>* paths = nullptr);
 // Capture the witness and its artifact producers, or demand the first missing rule expansion.
 // Include paths observed before an incomplete plan.
 std::expected<std::variant<RuleWitnessPlan, RuleDemand>, std::string> plan_rule_witness(
     const std::filesystem::path& cwd, const RuleExpansion& expansion, std::span<const RuleExpansion> expansions,
-    std::vector<std::string>* paths = nullptr);
+    std::string_view native_triple, std::vector<std::string>* paths = nullptr);
 
 }  // namespace ycxx::build
 
@@ -396,6 +397,8 @@ void append_value(std::string& out, const Value& value) {
       out += "cxx(";
       if (data.compiler) quote(out, *data.compiler);
       out += ')';
+    } else if constexpr (std::same_as<T, TargetTriple>) {
+      out += "target_triple()";
     } else if constexpr (std::same_as<T, ProbeRef>) {
       fail(value.location, "probe() requires a named rule capability binding");
     } else if constexpr (std::same_as<T, ValueRef>) {
@@ -1021,6 +1024,13 @@ class Planner {
         if (const auto* text = std::get_if<std::string>(&value.data)) {
           if (inspection_) argv_fact(*text, "declared in args");
           plan.action.args.push_back({literal, *text});
+        } else if (std::holds_alternative<TargetTriple>(value.data)) {
+          if (sdk_header) fail(value.location, "target_triple() is only available in project action arguments");
+          const auto* host = pp::native_target;
+          if (native_triple_.empty() && !host) fail(value.location, "no default native target for this host");
+          const auto triple = native_triple_.empty() ? host->triple : native_triple_;
+          if (inspection_) argv_fact(triple, "target_triple()");
+          plan.action.args.push_back({target_triple, std::string(triple)});
         } else if (const auto* input_name = std::get_if<InputArg>(&value.data)) {
           const auto binding = std::ranges::find(plan.inputs, input_name->name, &ActionInput::name);
           if (binding != plan.inputs.end()) {
@@ -1039,7 +1049,7 @@ class Planner {
           if (inspection_) argv_fact("outputs/" + binding->filename, std::format("output({:?})", binding->name));
           plan.action.args.push_back({output, output_name->name});
         } else {
-          fail(value.location, "expected a string, input(name) or output(name)");
+          fail(value.location, "expected a string, input(name), output(name) or target_triple()");
         }
       }
     }
@@ -1403,7 +1413,7 @@ std::expected<RulePackagePlan, std::string> plan_rule_package(
 
 std::expected<RuleInputPlan, std::string> plan_rule_inputs(
     const fs::path& cwd, const RuleDemand& demand, std::span<const RuleExpansion> expansions,
-    std::vector<std::string>* paths) {
+    std::string_view native_triple, std::vector<std::string>* paths) {
   if (paths) paths->clear();
   std::error_code ec;
   const auto root = fs::absolute(cwd, ec).lexically_normal();
@@ -1413,7 +1423,7 @@ std::expected<RuleInputPlan, std::string> plan_rule_inputs(
   try {
     auto* watch = paths ? &observed : nullptr;
     const auto manifest = read_workspace_manifest(root, watch);
-    result = Planner(root, manifest, watch, nullptr, expansions).planning_inputs(demand);
+    result = Planner(root, manifest, watch, nullptr, expansions, native_triple).planning_inputs(demand);
   } catch (PlanningError& error) {
     result = std::unexpected(std::move(error.message));
   } catch (const RuleDemand& producer) {
@@ -1426,7 +1436,7 @@ std::expected<RuleInputPlan, std::string> plan_rule_inputs(
 
 std::expected<std::variant<RuleWitnessPlan, RuleDemand>, std::string> plan_rule_witness(
     const fs::path& cwd, const RuleExpansion& expansion, std::span<const RuleExpansion> expansions,
-    std::vector<std::string>* paths) {
+    std::string_view native_triple, std::vector<std::string>* paths) {
   if (paths) paths->clear();
   std::error_code ec;
   const auto root = fs::absolute(cwd, ec).lexically_normal();
@@ -1437,7 +1447,7 @@ std::expected<std::variant<RuleWitnessPlan, RuleDemand>, std::string> plan_rule_
   try {
     auto* watch = paths ? &observed : nullptr;
     const auto manifest = read_workspace_manifest(root, watch);
-    result = PlanResult(Planner(root, manifest, watch, nullptr, expansions).witness(expansion));
+    result = PlanResult(Planner(root, manifest, watch, nullptr, expansions, native_triple).witness(expansion));
   } catch (PlanningError& error) {
     result = std::unexpected(std::move(error.message));
   } catch (RuleDemand& demand) {
