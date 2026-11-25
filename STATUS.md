@@ -4104,7 +4104,9 @@ In a template's definition, `noexcept` on a call of such a function is value-dep
   `include/ycxx/core/concepts.hpp`. After overload selection, replay forms both written type-ids
   with the selected arguments and checks class completeness at the demand. A failing substitution
   in that specification is a hard error. A nested requirement's replay skips semantic analysis of
-  discarded operands that were parsed successfully in the template definition
+  discarded operands that were parsed successfully in the template definition, including logical
+  expressions in complete parenthesized groups. An enclosing equality, negation, call, cast,
+  conditional, assignment or comma keeps its expression atomic
   ([#1314](https://github.com/yrashk/ycxx/issues/1314)). The trait evaluators cover the arithmetic
   cases and the written exact move operations above. Broader class queries remain in
   [#218](https://github.com/yrashk/ycxx/issues/218), with implicit and defaulted special-member facts in
