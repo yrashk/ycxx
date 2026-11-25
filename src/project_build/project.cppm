@@ -385,7 +385,10 @@ Fp128 observation_key(const RuleInvocation& invocation, std::uint64_t worker_bui
 }
 
 std::optional<Fp128> manifest_stamp(const fs::path& cwd) {
-  std::ifstream stream(cwd / "build.ycxx", std::ios::binary);
+  const auto path = cwd / "build.ycxx";
+  std::error_code ec;
+  if (!fs::is_regular_file(path, ec)) return std::nullopt;
+  std::ifstream stream(path, std::ios::binary);
   if (!stream) return std::nullopt;
   const std::string bytes{std::istreambuf_iterator<char>(stream), {}};
   if (stream.bad()) return std::nullopt;
