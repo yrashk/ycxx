@@ -1,5 +1,5 @@
 template<class> using Ignore = int;
-template<class T> using DirectCode = typename T::code; //! error
-
 struct NoCode {};
-using Invalid = Ignore<DirectCode<NoCode>>;
+
+// Compilers diagnose the alias definition or the use, so both share the marked line.
+template<class T> using DirectCode = typename T::code; using Invalid = Ignore<DirectCode<NoCode>>; //! error
