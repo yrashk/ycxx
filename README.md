@@ -164,7 +164,10 @@ Resident links reread explicit archives on each request.
 [#951](https://github.com/yrashk/ycxx/issues/951)
 
 For x86-64 Linux, `-fPIC` selects explicit position-independent object mode and defines
-`__PIC__` and `__pic__` as `2`. [#983](https://github.com/yrashk/ycxx/issues/983)
+`__PIC__` and `__pic__` as `2`, and `-fpic` defines them as `1`. arm64 Darwin code is always
+position independent: both are always `2`, and the PIC options change nothing, as with Clang.
+The last of `-fpic`, `-fPIC` and `-fno-pic` wins.
+[#983](https://github.com/yrashk/ycxx/issues/983), [#1089](https://github.com/yrashk/ycxx/issues/1089)
 
 An explicit dynamic link uses ycxx's startup and the target loader. Supply the absolute target
 interpreter path and explicit, self-contained shared objects with GNU or SysV hash tables and
