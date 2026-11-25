@@ -343,7 +343,7 @@ system_leaf:
             ('struct X { double x; }; auto f() { return X{1.0}; }', aggregate_result),
             ('struct X { long a, b, c; }; int f(X) { return 1; }', aggregate_parameter),
             ('struct X {}; int f(int (*g)(X)) { return g(X{}); }', f'call: {aggregate_parameter}'),
-            ('struct X {}; X f() { return X{}; }', aggregate_result),
+            ('struct X {}; int f(X (*g)()) { X x = g(); return sizeof(x); }', f'call: {aggregate_result}'),
             ('struct X { double a; int b; }; int f(X x) { return x.b; }', aggregate_parameter),
             ('struct X { int a[2]; }; int f(X x) { return x.a[0]; }', aggregate_parameter),
             ('struct M { int a; }; struct X { M m; }; int f(X x) { return x.m.a; }', aggregate_parameter),

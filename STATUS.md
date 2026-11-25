@@ -829,8 +829,10 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
   through a hidden pointer that takes RDI ahead of `this` and comes back in RAX. A class
   argument not trivial for calls passes by the address of the caller's object. A naturally laid
   out one-byte empty class trivial for calls uses no register or stack slot in a fixed direct
-  call. The callee still has a distinct parameter object. Trivially copyable arguments of more
-  than two eightbytes and empty class results remain tracked in
+  call. The callee still has a distinct parameter object. A result with the same layout,
+  including a captureless closure, carries zero ABI value components in a fixed direct call.
+  The callee evaluates the return operand and the caller keeps the result object in its own
+  storage when used. Other empty records and trivial stack arguments remain tracked in
   [#641](https://github.com/yrashk/ycxx/issues/641). SSE records are tracked in
   [#642](https://github.com/yrashk/ycxx/issues/642). Records with source layout directives
   native layout does not apply stay out of memory passing, including records that contain
@@ -2660,6 +2662,15 @@ hit the ordinary address-of limitation. The tests in `tests/own/builtins/` cover
 address operators, dependent wrappers, qualified operands, constant evaluation on a scalar
 global, and a rejected rvalue.
 
+## Bit-cast expressions (#1359)
+
+`__builtin_bit_cast` reads a written destination type-id and preserves both operands through
+template substitution. The evaluated subset covers initialized unsigned scalars and gap-free
+flat records described by the target's size, byte order and member offsets. Result storage is
+independent, including when the cast is discarded. Constant evaluation uses the existing
+flat-record storage checks. Evaluated x87, padding and the remaining constant-evaluation
+layouts stay in #330. The pinned x87 template branch parses when discarded.
+
 ## String length builtin (#531)
 
 `__builtin_strlen` supports unqualified direct calls with one argument implicitly converted to
@@ -3259,6 +3270,13 @@ provider locations. A location-only edit can update the report while
 reusing provider resolution. Incomplete read-only scans make missing or
 unique matches provisional.
 
+`ycxx show <target> --format=json` includes an optional `module_graph` for
+resolved plans under a native configuration (#1363). It records configured
+translation units, scan states, named directives with physical source locations,
+provider candidates, conflicts, and cyclic components. Its unit IDs are local
+to each snapshot.
+Schema-1 plan comparisons continue to use semantic facts.
+
 The standard C++ and generator rule declarations use a compiled rule package.
 `use plugin("tools/custom/rules") as cpp` supplies a different C++ provider. The
 bundled and workspace packages use the same worker. `cxx()` in a package recipe
@@ -3533,7 +3551,7 @@ What the process allocates, attributed to the engine's cells, in the trace and t
   a parameter, a template argument or a base; in a statement, a member of a dependent one is a type
   only after `typename` ([temp.res.general]). A namespace-scope alias template whose type has such an operand with
   no representation (`typename decltype(select<T>())::type`, with a deduced return type) is read
-  again when it is named with known arguments (`AliasCallPattern::unrepresented`). A class
+  again when it is named with known arguments (`AliasCallPattern::Kind::unrepresented`). A class
   template's member declaration can call an earlier static member of the class, also with
   explicit template arguments: a deduced return type comes from the member's instantiation, made
   while the class is instantiated (`members_so_far`). That body cannot name a member declared
@@ -3942,9 +3960,20 @@ cover the body boundary, key changes, and restoration. [#1248](https://github.co
 Ordinary member aliases can project a structural parameter's public integral fields into
 scalar template arguments. A guarded conditional uses its typed selected operand, so the
 result selects the same specialization as the corresponding literal. The resident fixtures
-check field-order and named-guard edits against cold compilation. General member alias
-template replay and record-valued immediate calls remain in #317. The separate dependent
-static operand in the pinned libycxx ratio header stays in #209.
+check field-order and named-guard edits against cold compilation.
+
+An alias can use `Box<detail::make<T, U>()>` when the immediate call returns a named
+flat structural aggregate with public integral fields. Partial alias replay keeps the
+qualified producer and its type arguments until the value is needed. Evaluation uses
+the selected producer specialization and canonicalizes the result with equivalent
+named and braced records. The resident fixture checks producer and specialization edits
+against cold compilation. The Linux x86-64 ELF tests check the shared argument spelling
+with GCC and Clang.
+
+General member alias template replay remains in #317. Argument erasure during alias
+substitution is tracked in #1311 and namespace-qualified explicit specialization
+syntax in #1261. The pinned libycxx ratio header first reaches the separate named
+static argument tracked in #1301 and #209.
 
 ## Member alias templates and `Q::template M` (#340, 2026-11-24)
 
@@ -4023,6 +4052,9 @@ static operand in the pinned libycxx ratio header stays in #209.
   template member specialization instantiated where it is named ([temp.inst]/8); its own body
   sees the type once a return deduced it. The back end and the interpreter get the deduced type
   with the body. Mangling keeps a template's declared placeholder as `Da`/`Dc`.
+  An unevaluated use of a non-constexpr static function of a class template specialization
+  checks the member and its required callees when deducing the return type. An evaluated call
+  or an emitted function address also demands a native definition. [#1272](https://github.com/yrashk/ycxx/issues/1272)
 - **Linux direct calls:** the AMD64 ABI check uses the callee definition's deduced signature
   when the declaration still needs its result type. The definition is already in the translation
   unit. Calls can return supported `auto` and `decltype(auto)` results, including references and

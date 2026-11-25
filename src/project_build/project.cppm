@@ -432,6 +432,20 @@ struct ModuleBindingText {
   std::string origin;
 };
 
+struct ModuleImportStatus {
+  std::string_view code;
+  std::string_view display;
+};
+
+ModuleImportStatus module_import_status(std::size_t candidates, bool complete, std::string_view name) {
+  if (candidates > 1) return {"ambiguous", "ambiguous"};
+  if (candidates == 1) return complete ? ModuleImportStatus{"resolved", "resolved"} :
+                                         ModuleImportStatus{"provisional", "resolved in partial graph"};
+  if (!complete) return {"pending", "no known provider in partial graph"};
+  if (name.contains(':')) return {"unresolved_partition", "unresolved partition"};
+  return {"external_or_unresolved", "external or unresolved"};
+}
+
 ModuleBindingText module_candidates(std::span<const ModuleUnitLabel> units,
                                     std::span<const ModuleProviderSite> providers,
                                     std::string_view status, ModuleDirectiveAt at, const fs::path& cwd) {
@@ -456,13 +470,9 @@ ModuleBindingText module_candidates(std::span<const ModuleUnitLabel> units,
 ModuleBindingText module_binding(std::span<const ModuleUnitLabel> units, const ModuleImportResolution& import,
                                  bool complete, ModuleDirectiveAt at, const fs::path& cwd) {
   const auto& directive = at(import.importer);
-  if (import.providers.empty()) {
-    const auto status = !complete ? "no known provider in partial graph" :
-        directive.name.contains(':') ? "unresolved partition" : "external or unresolved";
-    return {status, module_site(directive, cwd)};
-  }
-  const auto status = import.providers.size() > 1 ? "ambiguous" : complete ? "resolved" : "resolved in partial graph";
-  auto text = module_candidates(units, import.providers, status, at, cwd);
+  const auto status = module_import_status(import.providers.size(), complete, directive.name);
+  if (import.providers.empty()) return {std::string(status.display), module_site(directive, cwd)};
+  auto text = module_candidates(units, import.providers, status.display, at, cwd);
   text.origin = std::format("{} → {}", module_site(directive, cwd), text.origin);
   return text;
 }
@@ -613,8 +623,30 @@ pipeline::RequestId register_native(pipeline::Session& session, const std::strin
   return session.request(std::move(build));
 }
 
+std::string_view module_directive_kind(pipeline::ModuleDirectiveKind kind) {
+  using Kind = pipeline::ModuleDirectiveKind;
+  switch (kind) {
+    case Kind::interface_unit: return "interface_unit";
+    case Kind::implementation_unit: return "implementation_unit";
+    case Kind::import: return "import";
+    case Kind::exported_import: return "exported_import";
+  }
+  std::unreachable();
+}
+
+ModuleSourceLocation module_location(const pipeline::ModuleDirective& directive, const fs::path& cwd) {
+  return {module_path(directive.path, cwd), directive.line, directive.column};
+}
+
+std::vector<ModuleCandidateInspection> module_candidate_ids(std::span<const ModuleProviderSite> sites) {
+  std::vector<ModuleCandidateInspection> result;
+  for (const auto site : sites) result.push_back({site.unit, site.directive});
+  return result;
+}
+
 void inspect_modules(PlanInspection& inspection, const ProjectPlan& plan, const fs::path& cwd,
                      const ast::Target* target, std::string_view native_triple) {
+  auto& report = inspection.module_graph.emplace(ModuleGraphInspection{.native_target = std::string(target->triple)});
   if (plan.sources.empty()) return;
   pipeline::Session session;
   auto& db = session.db();
@@ -639,6 +671,7 @@ void inspect_modules(PlanInspection& inspection, const ProjectPlan& plan, const 
     const auto unit = register_project_unit(session, workspace, source, target, !native_triple.empty());
     const auto file = pp::FileId{unit.n};
     auto scan = *session.run<pipeline::ModuleDirectives>(file);
+    std::string_view scan_status = "complete";
     // A declared output can change the answer to a negative include probe. An undeclared
     // path stays absent in the live overlay too.
     if (!unavailable.empty() && (uses_generated(db.dependencies<pipeline::ModuleDirectives>(file)) ||
@@ -646,15 +679,25 @@ void inspect_modules(PlanInspection& inspection, const ProjectPlan& plan, const 
       inspection.facts.push_back({"module-scan-pending", inspection.target, shown_source,
                                   "generated inputs are available in the build trace", {}});
       scan = {};
+      scan_status = "generated_inputs_unavailable";
     } else if (!scan.complete) {
       inspection.facts.push_back({"module-scan-pending", inspection.target, shown_source,
                                   "preprocessing incomplete", {}});
+      scan_status = "preprocessing_incomplete";
     }
+    const auto unit_id = graph.size();
+    append_module_unit(graph, units, file, source.path, scan);
+    const bool first_unit = !graph.back().same_unit_as;
+    if (first_unit) report.units.push_back({unit_id, module_path(source.path, cwd), std::string(scan_status), {}});
     auto& names = fact_names.emplace_back();
     std::map<std::pair<pipeline::ModuleDirectiveKind, std::string_view>, std::size_t> occurrences;
-    for (const auto& directive : scan.directives) {
+    for (std::size_t index = 0; index < scan.directives.size(); ++index) {
+      const auto& directive = scan.directives[index];
       using Kind = pipeline::ModuleDirectiveKind;
       const bool declaration = directive.kind == Kind::interface_unit || directive.kind == Kind::implementation_unit;
+      if (first_unit && declaration)
+        report.units.back().declarations.push_back({index, std::string(module_directive_kind(directive.kind)),
+                                                    directive.name, module_location(directive, cwd)});
       auto name = std::format("{} · {} {}", shown_source, pipeline::module_directive_name(directive.kind), directive.name);
       const auto ordinal = ++occurrences[{directive.kind, directive.name}];
       if (ordinal > 1) std::format_to(std::back_inserter(name), " #{}", ordinal);
@@ -662,10 +705,10 @@ void inspect_modules(PlanInspection& inspection, const ProjectPlan& plan, const 
       inspection.facts.push_back({declaration ? "module-unit" : "module-import", inspection.target, std::move(name),
                                   directive.name, module_site(directive, cwd)});
     }
-    append_module_unit(graph, units, file, source.path, scan);
     scans.push_back(std::move(scan));
   }
-  const auto resolution = resolve_module_providers(graph);
+  auto resolution = resolve_module_providers(graph);
+  report.complete = resolution.complete;
   if (resolution.imports.empty() && resolution.conflicts.empty()) return;
   const auto labels = module_unit_labels(graph, cwd);
   if (!resolution.complete)
@@ -679,17 +722,26 @@ void inspect_modules(PlanInspection& inspection, const ProjectPlan& plan, const 
     const auto [unit, directive] = import.importer;
     inspection.facts.push_back({"module-provider", inspection.target, std::move(fact_names[unit][directive]),
                                 std::move(text.value), std::move(text.origin)});
+    if (!graph[unit].same_unit_as) {
+      const auto& occurrence = at(import.importer);
+      const auto status = module_import_status(import.providers.size(), resolution.complete, occurrence.name);
+      report.imports.push_back({unit, directive, std::string(module_directive_kind(occurrence.kind)), occurrence.name,
+                                module_location(occurrence, cwd), std::string(status.code),
+                                module_candidate_ids(import.providers)});
+    }
   }
   for (const auto& conflict : resolution.conflicts) {
     auto text = module_candidates(labels, conflict.providers, "ambiguous", at, cwd);
     inspection.facts.push_back({"module-provider-conflict", inspection.target, conflict.name,
                                 std::move(text.value), std::move(text.origin)});
+    report.conflicts.push_back({conflict.name, module_candidate_ids(conflict.providers)});
   }
   // Each name identifies a strongly connected component, never an implied traversal order.
   for (const auto& cycle : resolution.cycles)
     inspection.facts.push_back({"module-cycle", inspection.target, module_cycle_members(labels, cycle),
                                 resolution.complete ? "cycle among project units" :
                                                       "cycle among known project units (partial graph)", {}});
+  report.cycles = std::move(resolution.cycles);
 }
 
 struct RuleInvocation {
@@ -1263,7 +1315,8 @@ std::expected<PlanInspection, std::string> inspect_built_project(
   if (inspection && native_target) {
     inspection->facts.push_back({"native-target", std::string(target), "triple", std::string(native_target->triple),
                                  selected_target ? "--target" : "host default"});
-    inspect_modules(*inspection, plan, cwd, native_target, native_triple);
+    if (!std::ranges::contains(inspection->facts, unresolved_fact_kind, &PlanFact::kind))
+      inspect_modules(*inspection, plan, cwd, native_target, native_triple);
   }
   if (inspection && snapshot)
     for (auto& probe : snapshot->probes) {

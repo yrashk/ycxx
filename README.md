@@ -45,7 +45,9 @@ Use `target_triple()` in a declared action's `args` to pass the selected triple
 to a host tool that generates a target-specific input.
 The build trace and resolved plan show named C++ module imports, their
 project providers, ambiguity, and cycles for the selected target.
-Named-module compilation is tracked in
+Use `ycxx show app --format=json` to read these dependencies and their physical
+source locations as a structured `module_graph`. Named-module compilation and
+BMI support are tracked in
 [#319](https://github.com/yrashk/ycxx/issues/319).
 The bundled C++ rule package builds from source. A workspace can replace its C++ rules with
 `use plugin("tools/custom/rules") as cpp`.
@@ -84,7 +86,9 @@ parameters, is part of its call operator's type. [#807](https://github.com/yrash
 Templates can take values of named flat aggregates with public integral fields as constant
 arguments. On Linux x86-64, equivalent values share a parameter object across translation
 units. A class template's ordinary member alias can use those fields directly or in a
-guarded integral argument such as `V.ok ? V.num : 0`.
+guarded integral argument such as `V.ok ? V.num : 0`. An alias template can
+use a namespace-qualified `consteval` call with explicit type arguments to
+produce the structural argument, as in `Box<detail::make<T, U>()>`.
 [#317](https://github.com/yrashk/ycxx/issues/317)
 
 An explicitly specialized class can name a flat structural argument directly, as in
@@ -204,9 +208,10 @@ effect. [#982](https://github.com/yrashk/ycxx/issues/982)
 Fixed-prototype calls (free and member functions, lambdas, function templates and calls
 through pointers) support passing and returning nonempty flat records with integral,
 ordinary object-pointer or object lvalue-reference fields by value. The record can occupy up to
-16 bytes and must be trivial for calls. Fixed direct calls also support ordinary one-byte empty
-classes as parameters. Larger results and classes that are not trivial for calls (with a
-user-provided copy constructor or destructor) pass through memory, as on macOS.
+16 bytes and must be trivial for calls. Fixed direct calls also support naturally laid out
+one-byte empty classes as parameters and results, including captureless closure results.
+Larger results and supported classes that are not trivial for calls pass through memory, as
+on macOS.
 [Linux integer aggregate ABI](docs/design/linux-integer-aggregates.md)
 
 Static x86-64 Linux executables resolve `R_X86_64_GOTPCREL` through GOT slots. A slot for an

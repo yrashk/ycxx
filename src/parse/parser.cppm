@@ -138,6 +138,7 @@ public:
   u32 pos() const { return i_ - begin_; }  // the current token's offset in the part
   u32 deferred_argument_checks() const { return deferred_argument_checks_; }
   u32 deferred_immediate_calls() const { return deferred_immediate_calls_; }
+  u32 deferred_class_immediate_calls() const { return deferred_class_immediate_calls_; }
   u32 deferred_rank_checks() const { return deferred_rank_checks_; }
   void bump() {
     half_ = false;
@@ -634,9 +635,10 @@ public:
       if (tmpl.kind == ast::DeclKind::type_alias) {
         ++deferred_argument_checks_;
         const auto pattern = s_->questions().alias_call_pattern(tmpl.entity);
-        if (pattern == sema::AliasCallPattern::retained || pattern == sema::AliasCallPattern::may_erase)
-          ++deferred_immediate_calls_;
-        rank_check = rank_check || pattern == sema::AliasCallPattern::rank_checks;
+        using Kind = sema::AliasCallPattern::Kind;
+        if (pattern.kind == Kind::retained || pattern.kind == Kind::may_erase) ++deferred_immediate_calls_;
+        if (pattern.class_result) ++deferred_class_immediate_calls_;
+        rank_check = rank_check || pattern.rank_checks;
         defer_rank_alias = type_alias_checks_ && (rank_check || written_rank_check);
       }
       if (rank_check) ++deferred_rank_checks_;
@@ -645,7 +647,8 @@ public:
     // while the surrounding grammar is deciding how to use it.
     bool constraint_failed = false;
     auto type = s_->class_template_id(tmpl, args, at, /*directly_named=*/true,
-                                      alias_constraints_enabled_ ? &constraint_failed : nullptr);
+                                      alias_constraints_enabled_ ? &constraint_failed : nullptr,
+                                      namespace_alias_type || replayed_member_alias_type);
     if (type && defer_rank_alias && !in_template_id_lookahead_)
       type_alias_checks_->emplace_back(tmpl.entity, std::vector<ast::TemplateArg>(args.begin(), args.end()));
     alias_constraint_failures_ += constraint_failed;
@@ -840,10 +843,12 @@ public:
         u32 at = pos();
         bump();
         const auto alias_failures = alias_constraint_failures_;
+        const auto diagnosed = s_->diagnosed_constant_calls;
         const auto diags = s_->diag_count();
         auto q = qualified_type_ahead() ? qualified_type(0, true) : std::nullopt;
         if (!q || any_type()) {
-          if (alias_constraint_failures_ == alias_failures && (q || !s_->has_error_since(diags)))
+          if (alias_constraint_failures_ == alias_failures && diagnosed == s_->diagnosed_constant_calls &&
+              (q || !s_->has_error_since(diags)))
             s_->diag(at, Diag::expected_type_specifier);
           d.ok = false;
           goto done;
@@ -2952,6 +2957,7 @@ public:
     sema::Evaluator evaluator(*s_, questions());
     sema::Evaluated v = class_argument ? evaluator.evaluate_initializer(c) : evaluator.evaluate(c);
     if (!v.value) {
+      if (v.function_instantiation_failure) ++s_->diagnosed_constant_calls;
       if (!v.diagnosed_failure()) s_->diag(e.begin, Diag::not_constant, v.reason);
       return std::nullopt;
     }
@@ -3016,7 +3022,7 @@ public:
           if (!t) ok = false;
           else args.push_back({ast::TemplateArgKind::type, s_->types().canonical(*t), sema::ConstId::none});
         } else {
-          const bool saved_value_argument = std::exchange(in_template_value_argument_, true);
+          const auto saved_value_argument = std::exchange(in_template_value_argument_, s_->unevaluated);
           Ex e = conditional_expression();
           in_template_value_argument_ = saved_value_argument;
           if (e.ok()) {
@@ -4055,6 +4061,19 @@ public:
     return s_->unary(*op, e, begin, e.end > begin ? e.end : pos(), begin);
   }
 
+  // This builtin takes a type-id and one assignment-expression (docs/EXTENSIONS.md).
+  Ex bit_cast_expression(u32 begin) {
+    bump();  // builtin name
+    bump();  // '('
+    Unangle unangle{angle_};
+    const u32 type_at = pos();
+    const auto destination = type_id();
+    if (!destination || !expect(Tk::comma)) return {NodeId::none, begin, pos()};
+    Ex source = assignment_expression();
+    if (!expect(Tk::r_paren)) return {NodeId::none, begin, pos()};
+    return s_->bit_cast(*destination, source, begin, pos(), type_at);
+  }
+
   // [support.types.layout]: a type-id and a direct non-static data member.
   Ex offsetof_expression(u32 begin) {
     bump();  // builtin name
@@ -4407,6 +4426,7 @@ public:
           Ex r = s_->builtin_call(*bf, std::move(args), begin, pos());
           return {r.id, begin, pos(), r.info};
         }
+      if (kind(1) == Tk::l_paren && s_->builtin_bit_cast(n)) return bit_cast_expression(begin);
       if (kind(1) == Tk::l_paren && s_->builtin_offsetof(n)) return offsetof_expression(begin);
       // A type-testing built-in, `__is_same(T, U)` (docs/EXTENSIONS.md).
       if (kind(1) == Tk::l_paren)
@@ -4730,10 +4750,12 @@ public:
   }
 
   // The caller has recognized the empty operand list of a dependent immediate call.
-  std::optional<Ex> deferred_immediate_template_call(Ex callee, std::span<const ast::TemplateArg> args) {
-    auto call = s_->dependent_immediate_template_call(callee, args, pos() + 2);
+  std::optional<Ex> deferred_immediate_template_call(Ex callee, std::span<const ast::TemplateArg> args,
+                                                    bool allow_class_result = false) {
+    auto call = s_->dependent_immediate_template_call(callee, args, pos() + 2, allow_class_result);
     if (call) {
       ++deferred_immediate_calls_;
+      if (s_->types().is_class(call->type())) ++deferred_class_immediate_calls_;
       bump();
       bump();
     }
@@ -4889,8 +4911,10 @@ public:
         }
         Ex r = scope_expr(immediate_call || immediate_template);
         if (r.ok() && !s_->dependent(r) && dependent_args) {
-          if (immediate_call)
-            if (auto call = deferred_immediate_template_call(r, *args)) return *call;
+          if (immediate_call) {
+            const bool allow_class_result = namespace_alias_type && in_template_value_argument_ == s_->unevaluated;
+            if (auto call = deferred_immediate_template_call(r, *args, allow_class_result)) return *call;
+          }
           return s_->dependent_node({}, begin, pos());
         }
         s_->explicit_template_args(r, std::move(*args));
@@ -6803,7 +6827,7 @@ public:
     s_->constant_of = [this](Ex e) { return sema::Evaluator(*s_, questions()).evaluate(e).value; };
     s_->evaluate_immediate = [this](Ex e) {
       const sema::Evaluated v = sema::Evaluator(*s_, questions()).evaluate(e);
-      return sema::Sema::Evaluation{v.value, v.reason, v.constant};
+      return sema::Sema::Evaluation{v.value, v.reason, v.constant, v.function_instantiation_failure};
     };
   }
   sema::Questions& questions() { return *q_; }
@@ -6817,7 +6841,9 @@ private:
   sema::Questions* q_ = nullptr;
   LangLinkage linkage_ = LangLinkage::cxx;
   int in_params_ = 0;
-  bool in_template_value_argument_ = false;
+  // A template argument may be in a type inside an unevaluated operand. Its own
+  // nested unevaluated operands still do not require immediate invocation.
+  std::optional<u32> in_template_value_argument_;  // unevaluated depth where the argument begins
   bool in_type_requirement_ = false;
   bool variable_template_initializer_ = false;
   bool in_template_id_lookahead_ = false;
@@ -6826,6 +6852,7 @@ private:
   int angle_ = 0;               // inside a template argument or parameter list, outside parentheses
   u32 deferred_argument_checks_ = 0;  // checks a dependent canonical argument may not retain
   u32 deferred_immediate_calls_ = 0;
+  u32 deferred_class_immediate_calls_ = 0;
   u32 deferred_rank_checks_ = 0;
   using TypeAliasChecks = std::vector<std::pair<ast::EntityId, std::vector<ast::TemplateArg>>>;
   TypeAliasChecks* type_alias_checks_ = nullptr;
@@ -6842,7 +6869,9 @@ public:
   bool dependent_decay_copy_body = false;  // a function template's compound statement, before replay
   bool substituting_partial_arguments = false;
   bool class_template_base = false;  // class instantiation substitutes or reparses this base type
+  bool namespace_alias_type = false;  // the namespace alias instantiation reparses this type-id
   bool member_alias_type = false;  // the class instantiation reparses this type-id
+  bool replayed_member_alias_type = false;  // an ordinary member alias in a class template
 private:
   struct TypeRequirementScope {
     Parser& parser;

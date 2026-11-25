@@ -95,7 +95,11 @@ struct Ex;
 // What naming an alias template's specialization reads again: immediate calls its type retains or
 // may erase, checks of a dependent array's rank, or a type with a dependent operand that has no
 // representation (`decltype(f<T>())` of a deduced return type), known only once the arguments are.
-enum class AliasCallPattern { none, retained, may_erase, rank_checks, unrepresented };
+struct AliasCallPattern {
+  enum class Kind { none, retained, may_erase, unrepresented } kind = Kind::none;
+  bool class_result = false;
+  bool rank_checks = false;
+};
 
 struct PresumedSource {
   std::string_view file;
@@ -138,7 +142,7 @@ public:
   virtual CopyAssignment require_copy_assignment(EntityId) { return CopyAssignment::unsupported; }
   // What a constant evaluation fetches (§B7): `function_ir` of a function defined before the
   // current point ([expr.const]), and a namespace-scope variable as the interpreter sees it.
-  virtual interp::Callee function_ir(EntityId f) = 0;
+  virtual interp::Callee function_ir(EntityId f, bool& diagnosed_failure) = 0;
   virtual std::optional<interp::GlobalVar> global(EntityId v) = 0;
   // A variable template's required definition has already reported an error.
   virtual bool variable_instantiation_failed(EntityId) { return false; }
@@ -207,7 +211,7 @@ public:
   // The constant a variable usable in constant expressions holds ([expr.const]), if it is known.
   virtual std::optional<ConstId> constant_value(EntityId v) = 0;
   virtual std::optional<ConstId> constant_call(Sema&, const Ex&) { return std::nullopt; }
-  virtual AliasCallPattern alias_call_pattern(EntityId) { return AliasCallPattern::none; }
+  virtual AliasCallPattern alias_call_pattern(EntityId) { return {}; }
   virtual std::optional<QualType> replay_alias_calls(Sema&, const ast::DeclSema&, const Bindings&) {
     return std::nullopt;
   }
@@ -550,6 +554,8 @@ public:
     diags_->push_back(std::move(x));
   }
   std::size_t diag_count() const { return diags_->size(); }
+  // A required constant call can diagnose its instantiated body in a separate cell.
+  std::size_t diagnosed_constant_calls = 0;
   std::vector<engine::Diagnostic>& diagnostics() { return *diags_; }
   bool has_error_since(std::size_t begin) const {
     return std::ranges::any_of(std::span(*diags_).subspan(begin), [](const engine::Diagnostic& d) {
@@ -594,6 +600,7 @@ public:
     std::optional<ConstId> value;
     u64 reason = reason_unsupported;
     bool constant = false;
+    bool function_instantiation_failure = false;
   };
   std::function<Evaluation(Ex)> evaluate_immediate;
 
@@ -1168,7 +1175,8 @@ public:
   // alias template specialization stands for: its type with the arguments substituted
   // ([temp.alias]/2).
   std::optional<QualType> class_template_id(const ast::DeclSema& tmpl, std::span<const TemplateArg> args, u32 at,
-                                           bool directly_named = true, bool* alias_constraint_failed = nullptr) {
+                                           bool directly_named = true, bool* alias_constraint_failed = nullptr,
+                                           bool replay_partial_alias = false) {
     auto full = template_arguments(tmpl, args, at);
     if (!full) return std::nullopt;
     if (tmpl.kind == ast::DeclKind::type_alias) {
@@ -1180,9 +1188,11 @@ public:
         return std::nullopt;
       }
       const auto before = diag_count();
-      auto t = substitute_alias(tmpl, *full, bindings, at, replaying_type_default);
-      // Past the nesting limit, which was diagnosed, it says nothing more ([temp.inst]/16).
-      if (!t && !has_error_since(before) && !q_->instantiation_gave_up())
+      const auto diagnosed = diagnosed_constant_calls;
+      auto t = substitute_alias(tmpl, *full, bindings, at, replaying_type_default, replay_partial_alias);
+      // A producer body or the nesting limit may have been diagnosed in another cell
+      // ([temp.inst]/16). Keep that diagnostic as the cause of the failed alias.
+      if (!t && !has_error_since(before) && diagnosed == diagnosed_constant_calls && !q_->instantiation_gave_up())
         diag(at, Diag::template_args_mismatch, w_->entities.rec(tmpl.entity).name);
       return t;
     }
@@ -1204,7 +1214,8 @@ public:
   }
 
   std::optional<QualType> substitute_alias(const ast::DeclSema& tmpl, std::span<const TemplateArg> args,
-                                           const Bindings& bindings, u32 at, bool substituting_default = false) {
+                                           const Bindings& bindings, u32 at, bool substituting_default = false,
+                                           bool replay_partial_alias = false) {
     if (substituting_default && tmpl.constraints != ConstId::none &&
         std::ranges::none_of(args, [&](const TemplateArg& a) { return dependent(a); })) {
       auto t = templates();
@@ -1213,8 +1224,11 @@ public:
       if (hard_error || !sat.value_or(true)) return std::nullopt;
     }
     const auto pattern = q_->alias_call_pattern(tmpl.entity);
-    if (pattern != AliasCallPattern::none) {
-      if (std::ranges::none_of(args, [&](const TemplateArg& a) { return dependent(a); })) {
+    if (pattern.kind != AliasCallPattern::Kind::none || pattern.rank_checks) {
+      // Replay checks obligations that become concrete now. The enclosing alias or class
+      // member replays any that still depend on its own arguments when it is instantiated.
+      if ((pattern.class_result && replay_partial_alias) ||
+          std::ranges::none_of(args, [&](const TemplateArg& a) { return dependent(a); })) {
         const auto before = diag_count();
         const bool saved = std::exchange(replaying_type_default, substituting_default);
         auto type = q_->replay_alias_calls(*this, tmpl, bindings);
@@ -1223,7 +1237,7 @@ public:
         return type;
       }
       // Until signatures can retain the replay, do not form a type that can lose a call check.
-      if (pattern == AliasCallPattern::may_erase) return std::nullopt;
+      if (pattern.kind == AliasCallPattern::Kind::may_erase) return std::nullopt;
     }
     return templates_for_use(at).substitute(tmpl.type, bindings);
   }
@@ -4894,7 +4908,8 @@ public:
     return r;
   }
 
-  std::optional<Ex> dependent_immediate_template_call(Ex callee, std::span<const TemplateArg> args, u32 end) {
+  std::optional<Ex> dependent_immediate_template_call(Ex callee, std::span<const TemplateArg> args, u32 end,
+                                                      bool allow_class_result) {
     if (!types().is(callee.type(), Builtin::overload_set)) return std::nullopt;
     auto t = templates();
     if (!std::ranges::all_of(args, [&](const TemplateArg& a) {
@@ -4920,6 +4935,17 @@ public:
     if (args.size() < fixed || (!trailing_pack && args.size() != fixed) ||
         std::ranges::any_of(args.first(fixed), [&](const TemplateArg& a) { return t.is_expansion(a); }))
       return std::nullopt;
+    if (types().is_class(fn.inner)) {
+      // Ordinary alias replay checks the selected specialization even if the alias erases the call.
+      // Check the result profile before a completeness query can instantiate a class template.
+      const EntityId result = types().class_of(fn.inner);
+      if (!allow_class_result || found->second.size() != 1 ||
+          params.size() != 2 || params.front().pack || params.back().pack ||
+          !t.structural_class_parameter(fn.inner) || !q_->is_complete(result) || q_->class_layout_uncertain(result))
+        return std::nullopt;
+    } else if (!types().is_integral(fn.inner) && !types().is_enum(fn.inner)) {
+      return std::nullopt;
+    }
     return dependent_call_value(selected->entity, fn.inner, args, callee.begin, end);
   }
 
@@ -4947,12 +4973,13 @@ public:
         return std::nullopt;
       operands.push_back(TemplateArg{TemplateArgKind::value, types().canonical(Types::unqualified(arg.type())), value->value});
     }
+    if (!types().is_integral(fn.inner) && !types().is_enum(fn.inner)) return std::nullopt;
     return dependent_call_value(function->entity, fn.inner, operands, callee.begin, end);
   }
 
-  std::optional<Ex> dependent_call_value(EntityId callee, QualType type, std::span<const TemplateArg> args, u32 begin, u32 end) {
-    if (!types().is_integral(type) && !types().is_enum(type)) return std::nullopt;
-    auto value = ins().intern_value(ast::VDepCall{callee, ins().intern_seq(args)});
+  Ex dependent_call_value(EntityId callee, QualType type, std::span<const TemplateArg> args, u32 begin, u32 end) {
+    const auto result = Types::unqualified(types().canonical(type));
+    auto value = ins().intern_value(ast::VDepCall{result, callee, ins().intern_seq(args)});
     return literal(type, value, ValueCategory::prvalue, begin, end);
   }
 
@@ -6085,7 +6112,8 @@ public:
     }
     const Evaluation v = evaluate_immediate(call);
     if (!v.constant) {
-      diag(call.begin, Diag::not_constant, v.reason);
+      if (v.function_instantiation_failure) ++diagnosed_constant_calls;
+      else diag(call.begin, Diag::not_constant, v.reason);
       return {NodeId::none, call.begin, call.end};
     }
     if (!v.value) {
@@ -8209,6 +8237,7 @@ public:
     const lex::BuiltinFunctionInfo* b = lex::builtin_function(ins().names.spelling(name));
     return b && !declared(name) ? b : nullptr;
   }
+  bool builtin_bit_cast(NameId name) { return ins().names.spelling(name) == lex::builtin_bit_cast_name; }
   bool builtin_offsetof(NameId name) {
     return ins().names.spelling(name) == lex::builtin_offsetof_name && !declared(name);
   }
@@ -10226,6 +10255,110 @@ public:
     }
     return literal(st, w_->values.integer(st, *n), ValueCategory::prvalue, begin, end);
   }
+  // A concrete operand is checked even when the other operand needs template substitution.
+  // A missing class fact or layout limits evaluation, but the expression can still be formed.
+  bool bit_cast_operand(QualType type, u32 at_, bool destination) {
+    const QualType element = types().innermost_array_element(type);
+    if (!types().is_object(type) || types().is(type, Builtin::overload_set) ||
+        types().is(type, Builtin::bound_member)) {
+      diag(at_, Diag::bit_cast_object, type);
+      return false;
+    }
+    if (destination && types().is_array(type)) {
+      diag(at_, Diag::bit_cast_array_result, type);
+      return false;
+    }
+    const EnumRec* definition = types().is_enum(element) ? q_->defining_enum(types().enum_of(element)) : nullptr;
+    if (!is_complete(type) || (definition && !definition->fixed)) {
+      if (!type_trait_failed(type)) diag(at_, Diag::bit_cast_incomplete, type);
+      return false;
+    }
+    if (types().is_class(element)) {
+      const auto* record = class_rec(types().class_of(element));
+      // Virtual functions and a nontrivial destructor disprove copyability even
+      // for a record whose other special-member facts are incomplete ([class.prop]).
+      if (record && (record->polymorphic || record->destructor != EntityId::none ||
+                     record->trivially_copyable() == false)) {
+        diag(at_, Diag::bit_cast_nontrivial, element);
+        return false;
+      }
+      if (destination && record && record->is_abstract()) {
+        diag(at_, Diag::abstract_object, type);
+        return false;
+      }
+    }
+    return true;
+  }
+
+  std::optional<u64> bit_cast_size(QualType type) {
+    const QualType element = types().innermost_array_element(type);
+    if (types().is_class(element) && q_->class_layout_uncertain(types().class_of(element))) return std::nullopt;
+    return layout_of(type, false);
+  }
+
+  // Verify that each ordinary unsigned field contributes exactly its storage bits. The
+  // lowering can then derive the layout from the field widths in declaration order.
+  bool bit_cast_representation(QualType type, u64 size) {
+    const auto unsigned_size = [&](QualType t) -> u64 {
+      const auto builtin = types().builtin_of(t);
+      if (Types::is_volatile(types().canonical(t)) || !builtin || !ast::is_standard_unsigned(*builtin))
+        return 0;
+      const auto bytes = w_->target[*builtin].size;
+      return bytes == 1 || bytes == 2 || bytes == 4 || bytes == 8 ? bytes : 0;
+    };
+    if (!w_->target.little_endian_unsigned_integers || Types::is_volatile(types().canonical(type))) return false;
+    if (!types().is_class(type)) return size != 0 && unsigned_size(type) == size;
+    const EntityId cls = types().class_of(type);
+    const ClassRec* record = class_rec(cls);
+    if (!record || record->union_ || record->polymorphic || !record->bases.empty() ||
+        record->trivially_copyable() != true) return false;
+    const auto layout = class_layout(cls);
+    if (!layout || layout->offsets.size() != record->fields.size()) return false;
+    u64 offset = 0;
+    for (std::size_t i = 0; i < record->fields.size(); ++i) {
+      const FieldRec& field = record->fields[i];
+      const u64 bytes = unsigned_size(field.type);
+      if (!bytes || field.bit_width || field.no_unique_address || layout->offsets[i] != offset) return false;
+      offset += bytes;
+    }
+    return offset == size;
+  }
+
+  Ex bit_cast(QualType destination, Ex source, u32 begin, u32 end, u32 type_at) {
+    const Ex fail{NodeId::none, begin, end};
+    if (!source.ok()) return fail;
+    const QualType from = types().referee(source.type());
+    const bool destination_dependent = types().is_dependent(destination);
+    const bool source_type_dependent = has_proven_dependent_type(source) || types().is_dependent(from);
+    if (!destination_dependent && !bit_cast_operand(destination, type_at, true)) return fail;
+    if (!source_type_dependent && !bit_cast_operand(from, source.begin, false)) return fail;
+    bool supported = false;
+    if (!destination_dependent && !source_type_dependent) {
+      const auto to_size = bit_cast_size(destination);
+      const auto from_size = bit_cast_size(from);
+      if (to_size && from_size) {
+        if (*to_size != *from_size) {
+          diag(begin, Diag::bit_cast_size, destination, from, *to_size, *from_size);
+          return fail;
+        }
+        supported = !source.info.bit_width && bit_cast_representation(destination, *to_size) &&
+                    bit_cast_representation(from, *from_size);
+      }
+    }
+    const bool deferred = destination_dependent || dependent(source);
+    if (supported && !deferred && !source.glvalue() && types().is_class(from)) {
+      source = materialize(source, from, false);
+      if (!source.ok()) return fail;
+    }
+    const QualType type = types().is_class(destination) || destination_dependent
+        ? destination : Types::unqualified(types().canonical(destination));
+    u8 flags = 0;
+    if (deferred) flags = expr_flag::dependent | (source.info.flags & expr_flag::deferred_decay_copy);
+    if (destination_dependent) flags |= expr_flag::type_dependent;
+    const ExprInfo info{type, ValueCategory::prvalue, flags};
+    return node(ast::BitCast{info, destination, at(source, begin), type_at - begin, supported}, begin, end, info);
+  }
+
   // The supported direct-member slice of [support.types.layout]. Its result uses the
   // same target record offsets as code generation and the target's size_t.
   Ex offset_of(QualType t, NameId name, u32 begin, u32 end, u32 name_at) {

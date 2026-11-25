@@ -22,8 +22,16 @@ An ordinary empty, naturally laid out one-byte class trivial for calls has only 
 fixed direct argument (AMD64 psABI §3.2.3, Itanium C++ ABI §3.1.2.6). L1 evaluates and
 materializes the argument as usual. L2 omits its transport before assigning registers and stack
 slots. The callee gives each such parameter separate one-byte storage. A constructor's `this`
-and a following owner reference therefore occupy the first two INTEGER registers. The empty
-result convention is tracked separately in [#641](https://github.com/yrashk/ycxx/issues/641).
+and a following owner reference therefore occupy the first two INTEGER registers.
+
+A fixed direct result with the same empty layout also uses NO_CLASS (AMD64 psABI §3.2.3).
+The result has zero ABI value components, and explicit arguments keep their usual positions.
+The callee executes the return operand using local storage for its result. L1 keeps the
+class type and uses ordinary destination or temporary storage at the call site ([stmt.return],
+[class.temporary]). Itanium C++ ABI §3.1.3.4 describes a one-byte C record for empty class
+results. The Linux GCC and Clang object checks in #641 verify the no-hidden-pointer contract
+with callers that ignore the contents of RAX. This also covers equally empty captureless
+closure results. [#641](https://github.com/yrashk/ycxx/issues/641)
 
 The front end records when a layout attribute or active packing directive makes the
 computed natural layout uncertain. The by-value ABI check rejects those shapes even

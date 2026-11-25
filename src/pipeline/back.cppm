@@ -900,9 +900,9 @@ ir::TypeLayout QueryLayout::type(QualType q) const {
     l.contains_explicit_alignment = it->explicit_alignment != 0;
     if (target.triple == ast::x86_64_linux.triple) {
       l.sysv_integer_eightbytes = sysv_integer_eightbytes(*it, *r);
-      l.sysv_empty_argument = l.empty && l.size == 1 && l.align == 1 && l.trivial_calls &&
-                              !l.copy_abi_unknown && !l.calls_abi_uncertain && !l.layout_uncertain &&
-                              !l.contains_explicit_alignment && !it->union_ && it->bases.empty() && it->fields.empty();
+      l.sysv_empty_record = l.empty && l.size == 1 && l.align == 1 && l.trivial_calls &&
+                            !l.copy_abi_unknown && !l.calls_abi_uncertain && !l.layout_uncertain &&
+                            !l.contains_explicit_alignment && !it->union_ && it->bases.empty() && it->fields.empty();
     }
     // A homogeneous floating-point aggregate (AAPCS64 §5.9.5): every member, through arrays and
     // member classes, of one floating type, 1 to 4 of them; a union's members overlap, so it has
@@ -1423,7 +1423,7 @@ std::string_view linux_signature_error(const ast::Interners& in, const QueryLayo
       return "128-bit integers in variadic functions are unsupported";
     if ((result && l.kind == ir::TypeKind::void_) || linux_integer_scalar(l) ||
         (allow_aggregates && l.sysv_integer_eightbytes)) return {};
-    if (fixed_direct && !result && l.sysv_empty_argument) return {};
+    if (fixed_direct && l.sysv_empty_record) return {};
     // A class not trivial for calls passes by address and returns through the hidden result
     // pointer; so does any result of more than two eightbytes (MEMORY) (#641).
     if (allow_aggregates && l.kind == ir::TypeKind::record && !l.empty && !l.layout_uncertain &&
