@@ -54,8 +54,7 @@ std::string failed(std::string_view action, const fs::path& path, std::error_cod
   return std::format("cannot {} '{}': {}", action, display(path), ec.message());
 }
 
-// A retired generation can contain unrelated entries. Never descend into a mount
-// or follow a symlink while removing the private copy of its directory tree.
+// Only used on unpublished temporary files and directories.
 void remove_temporary(const fs::path& path) {
   std::error_code ec;
   if (fs::is_directory(fs::symlink_status(path, ec))) {
@@ -227,7 +226,45 @@ std::expected<std::vector<fs::path>, std::string> directory_entries(const fs::pa
   return entries;
 }
 
-std::optional<std::string> stage_unrelated(const fs::path& old, const fs::path& staged) {
+using FileIdentity = std::pair<std::uintmax_t, std::uintmax_t>;
+
+std::optional<FileIdentity> identity(const fs::path& path) {
+  struct stat info{};
+  if (::lstat(path.c_str(), &info) != 0) return std::nullopt;
+  return FileIdentity{info.st_dev, info.st_ino};
+}
+
+Names observed_names(const fs::path& live, const std::vector<fs::path>& entries, const Names& claimed) {
+  Names actual;
+  for (const auto& entry : entries) actual.insert(entry.filename().native_encoded_string());
+  Names resolved;
+  for (const auto& name : claimed) {
+    if (actual.contains(name)) {
+      resolved.insert(name);
+      continue;
+    }
+    // A filesystem can expose a pathname under a different casing or spelling.
+    // When multiple entries share an inode, preserve the ambiguous entries.
+    const auto wanted = identity(live / name);
+    if (!wanted) continue;
+    fs::path match;
+    for (const auto& entry : entries) {
+      if (identity(entry) != wanted) continue;
+      if (!match.empty()) {
+        match.clear();
+        break;
+      }
+      match = entry.filename();
+    }
+    if (!match.empty()) resolved.insert(match.native_encoded_string());
+  }
+  return resolved;
+}
+
+using DirectoryObservations = std::vector<std::pair<fs::path, DirectoryStamp>>;
+
+std::optional<std::string> stage_unrelated(const fs::path& old, const fs::path& staged,
+                                           DirectoryObservations& observed) {
   std::error_code ec;
   const auto status = fs::symlink_status(old, ec);
   if (ec) return failed("inspect unrelated asset entry", old, ec);
@@ -239,12 +276,17 @@ std::optional<std::string> stage_unrelated(const fs::path& old, const fs::path& 
   const auto same = same_publication_mount(old.parent_path(), old);
   if (!same) return failed("inspect mount for unrelated asset directory", old, same.error());
   if (!*same) return std::format("cannot stage mounted asset directory '{}'", display(old));
+  auto stamp = read_directory(old);
+  if (!stamp) return std::move(stamp.error());
+  if (!*stamp) return std::format("asset directory changed during staging at '{}'", display(old));
+  observed.emplace_back(old, **stamp);
   if (!fs::create_directory(staged, ec)) return failed("stage unrelated asset directory", old, ec);
   auto entries = directory_entries(old);
   if (!entries) return std::move(entries.error());
   for (const auto& entry : *entries)
-    if (auto error = stage_unrelated(entry, staged / entry.filename())) return error;
-  fs::permissions(staged, status.permissions(), fs::perm_options::replace, ec);
+    if (auto error = stage_unrelated(entry, staged / entry.filename(), observed)) return error;
+  fs::last_write_time(staged, (**stamp).modified, ec);
+  if (!ec) fs::permissions(staged, status.permissions(), fs::perm_options::replace, ec);
   if (ec) return failed("preserve unrelated asset directory permissions for", old, ec);
   return std::nullopt;
 }
@@ -254,7 +296,9 @@ struct AssetStage {
   Temporary manifest;
   fs::path live;
   std::optional<DirectoryStamp> previous;
-  std::optional<Ownership> old_ownership;
+  DirectoryObservations observed;
+  Names previous_names;
+  std::optional<fs::path> old_manifest;
 };
 
 std::expected<std::optional<AssetStage>, std::string> stage_assets(const fs::path& workspace,
@@ -296,15 +340,16 @@ std::expected<std::optional<AssetStage>, std::string> stage_assets(const fs::pat
     if (!alternate) return std::unexpected(std::move(alternate.error()));
     std::swap(candidate->path, alternate->path);
   }
+  DirectoryObservations observed;
+  auto claimed = observed_names(live, *entries, *ownership ? (*ownership)->names : names);
   for (const auto& entry : *entries) {
     if (*ownership && entry == (*ownership)->marker) continue;
     const auto name = entry.filename().native_encoded_string();
-    const auto& claimed = *ownership ? (*ownership)->names : names;
     std::error_code ec;
     const auto status = fs::symlink_status(entry, ec);
     if (ec) return std::unexpected(failed("inspect asset entry", entry, ec));
     if (claimed.contains(name) && !fs::is_directory(status)) continue;
-    if (auto error = stage_unrelated(entry, candidate->path / entry.filename()))
+    if (auto error = stage_unrelated(entry, candidate->path / entry.filename(), observed))
       return std::unexpected(std::move(*error));
   }
   for (const auto& asset : assets) {
@@ -312,7 +357,11 @@ std::expected<std::optional<AssetStage>, std::string> stage_assets(const fs::pat
     std::error_code ec;
     if (fs::symlink_status(staged, ec).type() != fs::file_type::not_found)
       return std::unexpected(std::format("runtime asset '{}' collides with an unrelated entry", display(live / asset.name)));
-    if (auto error = write_output(staged, live / asset.name, asset.artifact.bytes, asset.artifact.executable))
+    const auto prior = live / asset.name;
+    if (claimed.contains(asset.name) &&
+        matches_file(prior, fs::symlink_status(prior, ec), asset.artifact.bytes, asset.artifact.executable) &&
+        ::linkat(AT_FDCWD, prior.c_str(), AT_FDCWD, staged.c_str(), 0) == 0) continue;
+    if (auto error = write_output(staged, prior, asset.artifact.bytes, asset.artifact.executable))
       return std::unexpected(std::move(*error));
   }
   auto manifest = stage_ownership(candidate->path, *manifests, names);
@@ -321,7 +370,46 @@ std::expected<std::optional<AssetStage>, std::string> stage_assets(const fs::pat
   const auto perms = *previous ? (*previous)->permissions : fs::status(*parent, ec).permissions();
   if (!ec) fs::permissions(candidate->path, perms, fs::perm_options::replace, ec);
   if (ec) return std::unexpected(failed("set asset directory permissions for", live, ec));
-  return AssetStage{std::move(*candidate), std::move(*manifest), live, *previous, std::move(*ownership)};
+  std::optional<fs::path> old_manifest;
+  if (*ownership) old_manifest = std::move((*ownership)->manifest);
+  return AssetStage{std::move(*candidate), std::move(*manifest), live, *previous, std::move(observed),
+                    std::move(claimed), std::move(old_manifest)};
+}
+
+// The retired directory may still be open elsewhere. Only unlink unrelated entries
+// whose inodes are also accessible in the new generation. Leave any late additions.
+void retire_shared_entry(const fs::path& retired, const fs::path& live) {
+  struct stat old{}, current{};
+  if (::lstat(retired.c_str(), &old) != 0 || ::lstat(live.c_str(), &current) != 0) return;
+  std::error_code ec;
+  if (S_ISDIR(old.st_mode)) {
+    if (!S_ISDIR(current.st_mode) ||
+        !same_publication_mount(retired.parent_path(), retired).value_or(false) ||
+        !same_publication_mount(live.parent_path(), live).value_or(false)) return;
+    for (fs::directory_iterator it(retired, ec), end; !ec && it != end; it.increment(ec))
+      retire_shared_entry(it->path(), live / it->path().filename());
+    fs::remove(retired, ec);  // A directory with unshared entries is kept.
+  } else if (old.st_dev == current.st_dev && old.st_ino == current.st_ino) {
+    fs::remove(retired, ec);
+  }
+}
+
+void retire_assets(AssetStage& assets) {
+  const auto retired = std::exchange(assets.candidate.path, {});
+  if (!assets.previous) return;
+  std::error_code ec;
+  for (fs::directory_iterator it(retired, ec), end; !ec && it != end; it.increment(ec)) {
+    const auto name = it->path().filename();
+    const auto status = it->symlink_status(ec);
+    if (ec) break;
+    const bool marker = assets.old_manifest && name == assets.old_manifest->filename();
+    if (marker || (assets.previous_names.contains(name.native_encoded_string()) && !fs::is_directory(status)))
+      fs::remove(it->path(), ec);
+    else
+      retire_shared_entry(it->path(), assets.live / name);
+  }
+  fs::remove(retired, ec);
+  if (assets.old_manifest) fs::remove(*assets.old_manifest, ec);
 }
 
 struct ExecutableStage {
@@ -377,6 +465,12 @@ struct PreparedPublication::State {
       if (!current) return std::unexpected(std::move(current.error()));
       if (*current != assets->previous)
         return std::unexpected(std::format("asset directory changed during staging at '{}'", display(assets->live)));
+      for (const auto& [directory, stamp] : assets->observed) {
+        auto current = read_directory(directory);
+        if (!current) return std::unexpected(std::move(current.error()));
+        if (*current != stamp)
+          return std::unexpected(std::format("asset directory changed during staging at '{}'", display(directory)));
+      }
     }
     if (executable) {
       std::error_code ec;
@@ -393,16 +487,21 @@ struct PreparedPublication::State {
     if (auto ec = move_publication(assets->candidate.path, assets->live, assets->previous.has_value())) {
       auto error = failed("publish runtime assets at", assets->live, ec);
       if (executable) {
-        if (auto restore = move_publication(executable->output, executable->temporary(), executable->existed))
+        auto restore = move_publication(executable->output, executable->temporary(), executable->existed);
+        if (restore == std::errc::no_such_file_or_directory && executable->existed)
+          restore = move_publication(executable->temporary(), executable->output, false);
+        if (restore) {
           error += "\n" + failed("restore the previous executable at", executable->output, restore);
+          if (executable->existed) {
+            error += std::format("\nprevious executable kept at '{}'", display(executable->temporary()));
+            executable->directory.release();
+          }
+        }
       }
       return std::unexpected(std::move(error));
     }
     assets->manifest.release();
-    if (assets->old_ownership) {
-      std::error_code ec;
-      fs::remove(assets->old_ownership->manifest, ec);
-    }
+    retire_assets(*assets);
     return true;
   }
 };
