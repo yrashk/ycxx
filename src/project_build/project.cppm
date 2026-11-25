@@ -101,6 +101,28 @@ struct RulePackageResult {
     co_return cx.fetch<RulePackageReceipt>(key);
   }
 };
+
+struct CapabilitySupport {
+  using Key = ProbeKey;
+  using Value = std::optional<ProbeSupport>;
+  static std::string describe(const Key& key) { return ToolchainProbeResult::describe(key); }
+  static std::string show(const Value& value) {
+    return value ? std::string(probe_support_name(*value)) : "Measurement needed";
+  }
+  static engine::query_task<Value> run(engine::Ctx& cx, const Key& key) {
+    const auto& result = co_await cx.fetch<ToolchainProbeResult>(key);
+    if (result) co_return result->evidence.support;
+    co_return std::nullopt;
+  }
+};
+
+// BOOTSTRAP: GCC 16 modules: a boxed nested lambda exposes TU-local operations.
+struct AdmitProbeReceipts {
+  std::span<std::pair<ProbeKey, MeasuredToolchainProbe>> pending;
+  void operator()(engine::Db& db) const {
+    for (auto& [key, record] : pending) db.set<ToolchainProbeReceipt>(key, std::move(record));
+  }
+};
 struct Prepared {
   Fp128 output;
   Fp128 plan;
@@ -277,6 +299,11 @@ bool current_probe_profile(const fs::path& cwd, const RuleToolchain& toolchain, 
   });
 }
 
+bool current_projection(const fs::path& cwd, const RuleToolchain& toolchain, const RuleProbeSnapshot& probe) {
+  return current_probe_profile(cwd, toolchain, probe) &&
+         fingerprint_toolchain_probe_inputs(probe.inputs) == probe.stamp;
+}
+
 Fp128 observation_key(const RuleInvocation& invocation, std::uint64_t worker_build) {
   return fingerprint(std::tie(invocation.request, invocation.reads, worker_build));
 }
@@ -287,20 +314,33 @@ struct PreparedProject {
   std::optional<Fp128> attempt_watch;
 };
 
+struct ProjectedCapabilities {
+  std::vector<RuleCapabilityValue> values;
+  std::vector<RuleProbeSnapshot> profiles;
+  std::vector<PlanFact> facts;
+};
+
+struct MeasuredProfile {
+  RuleProbeSnapshot snapshot;
+  std::vector<ToolchainObservation> observations;
+};
+
 ProjectWatchState watch_rules(const fs::path& cwd, std::string_view target, const RuleToolchain& toolchain,
                               const RuleSnapshot& snapshot);
 
 using RunRuleAction = std::function<std::expected<std::vector<NamedArtifact>, std::string>(
     std::string_view, std::string_view, const Action&, std::span<const ActionInput>, Fp128,
-    const std::function<bool()>&)>;
+    std::function_ref<bool()>)>;
 using RunRulePackage = std::function<std::expected<RulePackageBuild, std::string>(
-    const RulePackageRef&, const RulePackagePlan&, Fp128, const std::function<bool()>&)>;
+    const RulePackageRef&, const RulePackagePlan&, Fp128, std::function_ref<bool()>)>;
 using UseRuleCompiler = std::function<void(const RulePackageRef&, const RulePackagePlan&, const RulePackageAction&)>;
+using ResolveCapabilities = std::function<std::expected<ProjectedCapabilities, std::string>(
+    const RuleDemand&, std::vector<RuleProbeSnapshot>&)>;
 
 std::expected<void, std::string> prepare_project(
     const fs::path& cwd, std::string_view target, const RuleToolchain& toolchain,
     const RunRuleAction& run, const RunRulePackage& run_package, const UseRuleCompiler& use_compiler,
-    PreparedProject& prepared, bool watch) {
+    const ResolveCapabilities& resolve_capabilities, PreparedProject& prepared, bool watch) {
   for (;;) {
     auto attempt = plan_with_rules(cwd, target, prepared.rules.expansions);
     if (!attempt) return std::unexpected(attempt.error());
@@ -325,9 +365,17 @@ std::expected<void, std::string> prepare_project(
     if (!built) return std::unexpected(built.error());
     use_compiler(demand.package, *package, package->candidates[built->compiler]);
 
+    auto capabilities = resolve_capabilities(demand, prepared.rules.probes);
+    if (!capabilities) return std::unexpected(capabilities.error());
+    if (watch && !capabilities->profiles.empty()) {
+      prepared.rules.pending_projections = capabilities->profiles;
+      prepared.attempt_watch = watch_rules(cwd, target, toolchain, prepared.rules).stamp;
+    }
     auto observation = rule_invocation(cwd, demand);
     if (!observation) return std::unexpected(observation.error());
+    // Profile identity is revalidated separately. Only the support states enter the worker's key.
     const auto invocation_key = observation_key(*observation, toolchain.executable_build);
+    if (!capabilities->values.empty()) observation->request.capabilities = std::move(capabilities->values);
     const auto request = lsp::dump(lsp::to_json(observation->request));
     using enum ActionArg::Kind;
     const Action worker{
@@ -341,12 +389,17 @@ std::expected<void, std::string> prepare_project(
     const Fp128 worker_key = fingerprint(std::tie(worker, inputs, toolchain.executable_build));
     auto lowered = run("RuleWorker", demand.target, worker, inputs, worker_key, [&] {
       const auto current = rule_invocation(cwd, demand);
-      return current && observation_key(*current, toolchain.executable_build) == invocation_key && current_package();
+      return current && observation_key(*current, toolchain.executable_build) == invocation_key &&
+             current_package() && std::ranges::all_of(capabilities->profiles, [&](const auto& profile) {
+               return current_projection(cwd, toolchain, profile);
+             });
     });
     if (!lowered) return std::unexpected(lowered.error());
     const auto& fragment = lowered->front().contents.bytes;
-    prepared.rules.observations.push_back({demand, library_key, invocation_key});
-    prepared.rules.expansions.push_back({std::move(demand), std::string(fragment.begin(), fragment.end())});
+    prepared.rules.observations.push_back({demand, library_key, invocation_key, std::move(capabilities->profiles)});
+    prepared.rules.expansions.push_back({std::move(demand), std::string(fragment.begin(), fragment.end()),
+                                         std::move(capabilities->facts)});
+    prepared.rules.pending_projections.clear();
   }
 }
 
@@ -354,7 +407,10 @@ bool current_rule(const fs::path& cwd, const RuleToolchain& toolchain, const Rul
   const auto package = plan_rule_package(cwd, record.demand.package, rule_sdk_header(), toolchain);
   if (!package || package_key(*package) != record.package) return false;
   const auto observed = rule_invocation(cwd, record.demand);
-  return observed && observation_key(*observed, toolchain.executable_build) == record.invocation;
+  return observed && observation_key(*observed, toolchain.executable_build) == record.invocation &&
+         std::ranges::all_of(record.projections, [&](const auto& profile) {
+           return current_projection(cwd, toolchain, profile);
+         });
 }
 
 std::optional<ProjectPlan> observe_project(
@@ -373,32 +429,43 @@ ProjectWatchState watch_rules(const fs::path& cwd, std::string_view target, cons
   std::vector<RuleExpansion> current;
   std::vector<Fp128> observations;
   std::vector<std::string> paths;
-  std::map<std::pair<RulePackageRef::Kind, std::string>, std::pair<bool, Fp128>> packages;
-  const auto observe = [&](const RuleDemand& demand) -> std::optional<std::pair<Fp128, Fp128>> {
-    const auto key = std::pair{demand.package.kind, demand.package.target};
+  struct PackageObservation {
+    bool available;
+    Fp128 package;
+    Fp128 configuration;
+  };
+  std::map<std::pair<RulePackageRef::Kind, std::string>, PackageObservation> packages;
+  const auto observe_package = [&](const RulePackageRef& reference) {
+    const auto key = std::pair{reference.kind, reference.target};
     auto package = packages.find(key);
     if (package == packages.end()) {
       std::vector<std::string> failed_paths;
-      const auto plan = plan_rule_package(cwd, demand.package, rule_sdk_header(), toolchain, &failed_paths);
+      const auto plan = plan_rule_package(cwd, reference, rule_sdk_header(), toolchain, &failed_paths);
       paths.append_range(plan ? plan->observed_paths : failed_paths);
       const auto stamp = plan ? package_key(*plan) : fingerprint128(plan.error());
-      package = packages.emplace(key, std::pair{plan.has_value(), stamp}).first;
+      const auto config = plan ? fingerprint(std::tuple{
+          plan->probe_flags, plan->probe_inputs, fingerprint_toolchain_probe_inputs({plan->probe_inputs, {}})})
+          : Fp128{};
+      package = packages.emplace(key, PackageObservation{plan.has_value(), stamp, config}).first;
+    }
+    return package->second;
+  };
+  const auto observe = [&](const RuleDemand& demand) -> std::optional<std::pair<Fp128, Fp128>> {
+    const auto package = observe_package(demand.package);
+    for (const auto& binding : demand.capabilities) {
+      const auto reference = capability_package(binding.package);
+      if (reference) observations.push_back(fingerprint(observe_package(*reference)));
     }
     for (const auto& path : demand.reads) paths.push_back(native(cwd / path));
     const auto invocation = rule_invocation(cwd, demand);
-    const auto [package_ok, package_stamp] = package->second;
     const auto invocation_stamp = invocation ? observation_key(*invocation, toolchain.executable_build)
                                              : fingerprint128(invocation.error());
-    observations.push_back(fingerprint(std::tuple{package_ok, package_stamp, invocation.has_value(), invocation_stamp}));
-    if (!package_ok || !invocation) return std::nullopt;
-    return std::pair{package_stamp, invocation_stamp};
+    observations.push_back(fingerprint(std::tuple{package.available, package.package, invocation.has_value(),
+                                                    invocation_stamp}));
+    if (!package.available || !invocation) return std::nullopt;
+    return std::pair{package.package, invocation_stamp};
   };
-  for (std::size_t i = 0; i < snapshot.observations.size(); ++i) {
-    const auto& record = snapshot.observations[i];
-    const auto state = observe(record.demand);
-    if (state == std::pair{record.package, record.invocation}) current.push_back(snapshot.expansions[i]);
-  }
-  for (const auto& probe : snapshot.probes) {
+  const auto observe_probe = [&](const RuleProbeSnapshot& probe) {
     const auto matches = current_probe_profile(cwd, toolchain, probe);
     const auto stamp = matches ? fingerprint_toolchain_probe_inputs(probe.inputs) : Fp128{};
     observations.push_back(fingerprint(std::tie(matches, stamp)));
@@ -406,7 +473,19 @@ ProjectWatchState watch_rules(const fs::path& cwd, std::string_view target, cons
       paths.append_range(probe.inputs.files);
       paths.append_range(probe.inputs.trees);
     }
+    return matches && stamp == probe.stamp;
+  };
+  for (std::size_t i = 0; i < snapshot.observations.size(); ++i) {
+    const auto& record = snapshot.observations[i];
+    const auto state = observe(record.demand);
+    bool profiles_current = true;
+    for (const auto& probe : record.projections)
+      if (!observe_probe(probe)) profiles_current = false;
+    if (profiles_current && state == std::pair{record.package, record.invocation})
+      current.push_back(snapshot.expansions[i]);
   }
+  for (const auto& probe : snapshot.probes) (void)observe_probe(probe);
+  for (const auto& probe : snapshot.pending_projections) (void)observe_probe(probe);
   auto watch = watch_project(cwd, target, current);
   if (watch.pending && std::ranges::none_of(snapshot.observations, [&](const auto& record) {
         return record.demand == *watch.pending;
@@ -437,8 +516,14 @@ std::expected<PlanInspection, std::string> inspect_built_project(
       const bool expanded = std::ranges::any_of(current, [&](const auto& expansion) {
         return expansion.demand.package == probe.package;
       });
-      if (expanded && current_probe_profile(cwd, toolchain, probe) &&
-          fingerprint_toolchain_probe_inputs(probe.inputs) == probe.stamp)
+      const bool projected = std::ranges::any_of(snapshot->observations, [&](const auto& record) {
+        return std::ranges::any_of(record.projections, [&](const auto& projection) {
+          return projection.package == probe.package;
+        }) && std::ranges::any_of(inspection->facts, [&](const auto& fact) {
+          return fact.kind == "capability-input" && fact.target == record.demand.target;
+        });
+      });
+      if ((expanded || projected) && current_projection(cwd, toolchain, probe))
         inspection->facts.append_range(std::move(probe.facts));
     }
   return inspection;
@@ -543,7 +628,7 @@ ProjectReport Coordinator::run(const fs::path& cwd, const std::string& target,
   };
   const RunRuleAction run_rule = [&](std::string_view kind, std::string_view label, const Action& action,
                                    std::span<const ActionInput> inputs, Fp128 id,
-                                   const std::function<bool()>& still_current)
+                                   std::function_ref<bool()> still_current)
       -> std::expected<std::vector<NamedArtifact>, std::string> {
     auto known = session_.run<RuleActionResult>(id, poll, nullptr, tracer);
     if (!known || cancelled()) return std::unexpected("build cancelled");
@@ -561,7 +646,7 @@ ProjectReport Coordinator::run(const fs::path& cwd, const std::string& target,
     return std::move(result.outputs);
   };
   const RunRulePackage run_package = [&](const RulePackageRef& package, const RulePackagePlan& plan, Fp128 id,
-                                         const std::function<bool()>& still_current)
+                                         std::function_ref<bool()> still_current)
       -> std::expected<RulePackageBuild, std::string> {
     auto known = session_.run<RulePackageResult>(id, poll, nullptr, tracer);
     if (!known || cancelled()) return std::unexpected("build cancelled");
@@ -589,7 +674,133 @@ ProjectReport Coordinator::run(const fs::path& cwd, const std::string& target,
 
   const auto* native_target = pp::native_target;
   if (!native_target) return fail("project building is unavailable on this host");
+  const auto measure_profile = [&](const RulePackageRef& package, const RulePackagePlan& plan,
+                                   const RulePackageAction& selected, std::span<const std::string> requested)
+      -> std::expected<MeasuredProfile, std::string> {
+    if (!selected.cxx)
+      return std::unexpected(std::format("package '{}' needs a cxx() tool for compiler probes", package.target));
+    std::vector<std::pair<ProbeKey, MeasuredToolchainProbe>> pending;
+    const auto measure = [&](ProbeKey key, std::function_ref<MeasuredToolchainProbe()> execute) {
+      const auto known = session_.run<ToolchainProbeResult>(key, poll, nullptr, tracer);
+      if (known && *known &&
+          (!(**known).discovery_stamp ||
+           (**known).discovery_stamp == fingerprint_toolchain_probe_inputs((**known).discovered_inputs)))
+        return **known;
+      auto fresh = execute();
+      if (fresh.cacheable && !cancelled()) pending.emplace_back(key, fresh);
+      return fresh;
+    };
+    ToolchainProbeProfile profile{selected.action.tool, {}, {}, selected.native,
+                                  plan.probe_flags, selected.action.environment};
+    // A staged compiler has a single witness to check. Keep it from using the whole
+    // machine's worker pool by default when several build requests share the host.
+    if (profile.native && std::ranges::none_of(profile.environment, [](const auto& variable) {
+          return variable.first == "YCXX_THREADS";
+        })) profile.environment.emplace_back("YCXX_THREADS", "2");
+    const auto run_probe = [&](std::string_view kind, std::string_view label, const Action& action,
+                               std::span<const ActionInput> inputs) {
+      return run_action(kind, label, action, inputs, std::chrono::seconds(selected.native ? 3 : 10));
+    };
+    auto matrix = measure_toolchain_matrix(cwd, package.target, std::move(profile),
+        probe_identity(plan, selected, worker_build_), plan.probe_inputs, executable_, run_probe, measure,
+        cancelled, requested, &superseded);
+    if (cancelled()) return std::unexpected("build cancelled");
+    if (!matrix)
+      return std::unexpected(std::format("toolchain profile '{}' could not be measured: {}",
+                                         package.target, matrix.error()));
+
+    RuleProbeSnapshot captured{package, probe_snapshot_key(plan, selected, worker_build_),
+                               std::move(matrix->inputs), matrix->stamp, std::move(matrix->facts)};
+    if (!current_probe_profile(cwd, toolchain, captured)) {
+      superseded = true;
+      return std::unexpected(std::format("toolchain profile '{}' changed during measurement", package.target));
+    }
+    if (!pending.empty()) {
+      apply(AdmitProbeReceipts{pending});
+      for (const auto& [key, record] : pending)
+        (void)session_.run<ToolchainProbeResult>(key, poll, nullptr, tracer);
+    }
+    return MeasuredProfile{std::move(captured), std::move(matrix->observations)};
+  };
+
   const auto saved = read_rule_snapshot(cwd, target);
+  const ResolveCapabilities resolve_capabilities = [&](const RuleDemand& demand, std::vector<RuleProbeSnapshot>& profiles)
+      -> std::expected<ProjectedCapabilities, std::string> {
+    std::map<std::string, std::vector<std::string>, std::less<>> requests;
+    for (const auto& binding : demand.capabilities) {
+      if (!known_toolchain_probe(binding.probe))
+        return std::unexpected(std::format("rule '{}': unknown toolchain probe '{}'", demand.target, binding.probe));
+      auto& names = requests[binding.package];
+      if (!std::ranges::contains(names, binding.probe)) names.push_back(binding.probe);
+    }
+
+    ProjectedCapabilities result;
+    for (const auto& [spelling, names] : requests) {
+      const auto package = capability_package(spelling);
+      if (!package) return std::unexpected(package.error());
+      const auto plan = plan_rule_package(cwd, *package, rule_sdk_header(), toolchain);
+      if (!plan) return std::unexpected(plan.error());
+      if (std::ranges::none_of(plan->candidates, [](const auto& candidate) { return candidate.cxx; }))
+        return std::unexpected(std::format("package '{}' needs an available cxx() tool for compiler probes", spelling));
+      const auto key = package_key(*plan);
+      const auto winner = run_package(*package, *plan, key, [&] {
+        const auto current = plan_rule_package(cwd, *package, rule_sdk_header(), toolchain);
+        return current && package_key(*current) == key;
+      });
+      if (!winner) return std::unexpected(winner.error());
+      const auto& selected = plan->candidates[winner->compiler];
+      const bool recorded = std::ranges::any_of(profiles, [&](const auto& profile) {
+        return profile.package == *package;
+      });
+      const bool full = probe_toolchain && !recorded;
+      const std::span<const std::string> requested = full ? std::span<const std::string>{} : names;
+      auto measured = measure_profile(*package, *plan, selected, requested);
+      if (!measured) return std::unexpected(measured.error());
+      if (full) profiles.push_back(measured->snapshot);
+      else if (!recorded && saved) {
+        const auto prior = std::ranges::find_if(saved->probes, [&](const auto& profile) {
+          return profile.package == *package && profile.profile == measured->snapshot.profile;
+        });
+        if (prior != saved->probes.end()) profiles.push_back(*prior);
+      }
+      for (const auto& binding : demand.capabilities) {
+        if (binding.package != spelling) continue;
+        const auto observed = std::ranges::find_if(measured->observations, [&](const auto& entry) {
+          return entry.name == binding.probe;
+        });
+        if (observed == measured->observations.end())
+          return std::unexpected(std::format("rule '{}': missing observation for '{}'", demand.target, binding.probe));
+        // A retryable launch failure can still supply typed indeterminate evidence in this request.
+        const auto projected = session_.run<CapabilitySupport>(observed->key, poll, nullptr, tracer);
+        if (!projected || cancelled()) return std::unexpected("build cancelled");
+        const auto support = projected->value_or(observed->evidence.support);
+        const auto name = probe_support_name(support);
+        result.values.push_back({binding.name, static_cast<std::uint32_t>(support)});
+        const auto query = ToolchainProbeResult::describe(observed->key);
+        const auto& profile = measured->snapshot.profile;
+        auto origin = std::format("{} via {} · {} · profile {:016x}{:016x} · {}", query, selected.action.tool,
+                                  spelling, profile.lo, profile.hi, describe_probe_evidence(observed->evidence));
+        if (tracer) {
+          engine::TraceEvent event;
+          event.id = session_.db().reserve_trace_id();
+          event.kind = "CapabilityProjection";
+          event.key = std::format("{}.{} ← {} via {}", demand.target, binding.name, query, selected.action.tool);
+          event.outcome = engine::Outcome::input;
+          event.start = event.end = std::chrono::steady_clock::now();
+          if (tracer->values()) event.value = std::format("{}\n{}", name, origin);
+          tracer->event(std::move(event));
+          tick();
+        }
+        result.facts.push_back({"capability-input", demand.target, binding.name, std::string(name), std::move(origin)});
+      }
+      measured->snapshot.facts.clear();
+      result.profiles.push_back(std::move(measured->snapshot));
+    }
+    std::ranges::sort(result.values, {}, &RuleCapabilityValue::name);
+    std::ranges::sort(result.facts, {}, &PlanFact::name);
+    return result;
+  };
+
   std::vector<RulePackageRef> measured;
   while (!cancelled()) {
     refresh();
@@ -598,7 +809,9 @@ ProjectReport Coordinator::run(const fs::path& cwd, const std::string& target,
     measured.clear();
     const UseRuleCompiler use_compiler = [&](const RulePackageRef& package, const RulePackagePlan& plan,
                                              const RulePackageAction& selected) {
-      if (!selected.cxx || std::ranges::contains(measured, package) || cancelled()) return;
+      if (!selected.cxx || std::ranges::contains(measured, package) || cancelled() ||
+          std::ranges::any_of(planned.rules.probes, [&](const auto& profile) { return profile.package == package; }))
+        return;
       measured.push_back(package);
       const auto profile_key = probe_snapshot_key(plan, selected, worker_build_);
       if (!probe_toolchain) {
@@ -609,49 +822,12 @@ ProjectReport Coordinator::run(const fs::path& cwd, const std::string& target,
             planned.rules.probes.push_back(*found);
         return;
       }
-      std::vector<std::pair<ProbeKey, MeasuredToolchainProbe>> pending;
-      const MeasureProbe measure = [&](ProbeKey key, const std::function<MeasuredToolchainProbe()>& execute) {
-        const auto known = session_.run<ToolchainProbeResult>(key, poll, nullptr, tracer);
-        if (known && *known &&
-            (!(**known).discovery_stamp ||
-             (**known).discovery_stamp == fingerprint_toolchain_probe_inputs((**known).discovered_inputs)))
-          return **known;
-        auto fresh = execute();
-        if (fresh.cacheable && !cancelled()) pending.emplace_back(std::move(key), fresh);
-        return fresh;
-      };
-      ToolchainProbeProfile profile{selected.action.tool, {}, {}, selected.native,
-                                    plan.probe_flags, selected.action.environment};
-      // A staged compiler has a single witness to check. Keep it from using the whole
-      // machine's worker pool by default when several build requests share the host.
-      if (profile.native && std::ranges::none_of(profile.environment, [](const auto& variable) {
-            return variable.first == "YCXX_THREADS";
-          })) profile.environment.emplace_back("YCXX_THREADS", "2");
-      const RunProbe run_probe = [&](std::string_view kind, std::string_view label, const Action& action,
-                                     std::span<const ActionInput> inputs) {
-        return run_action(kind, label, action, inputs, std::chrono::seconds(selected.native ? 3 : 10));
-      };
-      auto matrix = measure_toolchain_matrix(cwd, package.target, std::move(profile),
-          probe_identity(plan, selected, worker_build_), plan.probe_inputs, executable_, run_probe, measure, cancelled);
-      if (cancelled()) return;
-      if (!matrix) {
-        report.diagnostics.push_back(std::format("toolchain profile '{}' could not be measured: {}",
-                                                 package.target, matrix.error()));
-        return;
-      }
-      RuleProbeSnapshot captured{package, profile_key, std::move(matrix->inputs), matrix->stamp,
-                                 std::move(matrix->facts)};
-      if (!current_probe_profile(cwd, toolchain, captured)) return;
-      if (!pending.empty()) {
-        apply([&](engine::Db& db) {
-          for (auto& [key, record] : pending) db.set<ToolchainProbeReceipt>(key, std::move(record));
-        });
-        for (const auto& [key, record] : pending)
-          (void)session_.run<ToolchainProbeResult>(key, poll, nullptr, tracer);
-      }
-      planned.rules.probes.push_back(std::move(captured));
+      auto measured = measure_profile(package, plan, selected, {});
+      if (measured) planned.rules.probes.push_back(std::move(measured->snapshot));
+      else if (!cancelled() && !superseded) report.diagnostics.push_back(std::move(measured.error()));
     };
-    auto prepared = prepare_project(cwd, target, toolchain, run_rule, run_package, use_compiler, planned, watch);
+    auto prepared = prepare_project(cwd, target, toolchain, run_rule, run_package, use_compiler, resolve_capabilities,
+                                    planned, watch);
     if (cancelled()) return fail("build cancelled");
     if (superseded) continue;
     write_rule_snapshot(cwd, target, planned.rules);

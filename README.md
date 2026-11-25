@@ -43,6 +43,8 @@ The bundled C++ rule package builds from source. A workspace can replace its C++
 can be compared with the checkout and rendered as a standalone HTML report.
 `ycxx build app --probe-toolchain` measures the selected rule compilers. Inspect the
 observations with `ycxx show app`.
+Import `builtin:capabilities` to project selected observations into a generated
+C++ header with `constexpr` values.
 [Build design](docs/design/build.md) [#1251](https://github.com/yrashk/ycxx/issues/1251)
 
 Ordinary function pointers and references preserve concrete `noexcept` type identity.

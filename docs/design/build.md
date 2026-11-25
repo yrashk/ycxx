@@ -239,7 +239,7 @@ ycxx show app --format=html > build-plan.html
 
 The probe request measures the compiler that successfully built each demanded
 `cxx()` package. It uses the same interface for native ycxx, PATH fallback, and a
-pinned host compiler. Ordinary builds skip probe actions. The inspector reads
+pinned host compiler. Ordinary builds measure the probes their rules declare. The inspector reads
 admitted observations and checks that their profile and inputs still match.
 
 A package can set `probe_flags = ["-std=c++23"]` to measure features in a
@@ -268,5 +268,42 @@ commands outside the query engine and records typed results from an unchanged
 input sample. Repeating the request on the same resident profile reuses those
 results. [#1289](https://github.com/yrashk/ycxx/issues/1289)
 
-The typed header package will project named observations into C++ `inline
-constexpr` values and template predicates. [#1290](https://github.com/yrashk/ycxx/issues/1290)
+## Typed capability headers
+
+```text
+use plugin("builtin:capabilities") as capabilities
+
+capabilities.header "profile" {
+    namespace = "project::compiler"
+    filename = "compiler_profile.hh"
+    capabilities = {
+        filesystem = probe("tools/host/rules", "header.filesystem")
+        native_objects = probe("builtin:cpp", "object.default")
+    }
+}
+
+cpp.executable "app" {
+    sources = ["main.cc"]
+    generated_headers = [artifact("profile", "header")]
+}
+```
+
+Each `probe(package, id)` demands a named observation from the compiler that
+builds that package. A workspace package is addressed by its relative target
+path. `builtin:cpp` selects the shipped C++ package. The optional
+`builtin:capabilities` package is built and invoked through the ordinary rule
+worker. A regular build measures the explicitly demanded probes. The
+`--probe-toolchain` flag still requests the full matrix for the selected packages.
+
+The rule worker receives a borrowed array of names and typed support states.
+Probe identity, profile, and diagnostics stay with the engine and inspection.
+Equivalent projected states keep the worker and generated artifact reusable
+across a reprobe. The header package validates names, emits facts in name order,
+and exports the header as a named artifact. The generated enum preserves
+`supported`, `unsupported` and `indeterminate`. Its `available<State>` variable
+template is a C++ constant expression usable in `if constexpr` and constraints.
+
+The trace shows the probes and their named projections. Read-only inspection
+revalidates the observation inputs before showing a cached expansion and its
+probe and compiler provenance. Watch reobserves both the package and its
+declared compiler inputs. [#1290](https://github.com/yrashk/ycxx/issues/1290)

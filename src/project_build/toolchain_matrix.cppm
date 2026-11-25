@@ -35,34 +35,41 @@ struct [[=engine::input{engine::Durability::low}]] ToolchainProbeReceipt {
 struct ToolchainProbeResult {
   using Key = ToolchainProbeReceipt::Key;
   using Value = ToolchainProbeReceipt::Value;
-  static std::string describe(const Key& key) {
-    const auto rows = baseline_toolchain_probes();
-    constexpr std::string_view synthetic[] = {"driver.search-paths", "link.host-shared.load", "link.hosted.run"};
-    const auto id = key.row < rows.size() ? rows[key.row].id : synthetic[key.row - rows.size()];
-    return std::format("{} [{:08x}]", id, static_cast<std::uint32_t>(key.profile.lo));
-  }
+  static std::string describe(const Key& key);
   static std::string show(const Value& value);
   static engine::query_task<Value> run(engine::Ctx& cx, const Key& key) {
     co_return cx.fetch<ToolchainProbeReceipt>(key);
   }
 };
 
+struct ToolchainObservation {
+  std::string name;
+  ProbeEvidence evidence;
+  ProbeKey key;
+};
+
 struct ToolchainMatrix {
   ToolchainProbeInputs inputs;
   Fp128 stamp;
   std::vector<PlanFact> facts;
+  std::vector<ToolchainObservation> observations;
 };
 
-using RunProbe = std::function<ActionResult(
+using RunProbe = std::function_ref<ActionResult(
     std::string_view kind, std::string_view label, const Action&, std::span<const ActionInput>)>;
-using MeasureProbe = std::function<MeasuredToolchainProbe(
-    ProbeKey, const std::function<MeasuredToolchainProbe()>&)>;
+using MeasureProbe = std::function_ref<MeasuredToolchainProbe(
+    ProbeKey, std::function_ref<MeasuredToolchainProbe()>)>;
+
+bool known_toolchain_probe(std::string_view id);
+std::string_view probe_support_name(ProbeSupport support);
+std::string describe_probe_evidence(const ProbeEvidence& evidence);
 
 std::expected<ToolchainMatrix, std::string> measure_toolchain_matrix(
     const std::filesystem::path& cwd, std::string_view package, ToolchainProbeProfile profile,
     Fp128 identity, std::span<const std::string> declared_inputs,
     std::string_view worker, const RunProbe& run, const MeasureProbe& measure,
-    const std::function<bool()>& cancelled);
+    const std::function<bool()>& cancelled, std::span<const std::string> requested = {},
+    bool* inputs_changed = nullptr);
 
 }  // namespace ycxx::build
 
@@ -70,6 +77,12 @@ namespace ycxx::build {
 namespace {
 
 inline constexpr int catalogue_version = 1;
+enum class SyntheticProbe : std::uint32_t { search_paths, shared_load, hosted_run };
+constexpr std::string_view synthetic_probes[] = {"driver.search-paths", "link.host-shared.load", "link.hosted.run"};
+
+std::string_view synthetic_name(SyntheticProbe probe) {
+  return synthetic_probes[std::to_underlying(probe)];
+}
 
 ProbeCompletion completion(const ActionResult& result) {
   switch (result.completion) {
@@ -98,12 +111,6 @@ MeasuredToolchainProbe unavailable(std::string reason, bool cacheable = true) {
   return observation;
 }
 
-std::string_view name(ProbeSupport support) {
-  constexpr std::string_view names[] = {"supported", "unsupported", "indeterminate"};
-  static_assert(std::size(names) == 1 + std::to_underlying(ProbeSupport::indeterminate));
-  return names[std::to_underlying(support)];
-}
-
 void add_diagnostic(ProbeEvidence& evidence, std::string_view stderr_text) {
   if (evidence.support == ProbeSupport::supported) return;
   if (const auto first = stderr_text.find_first_not_of(" \r\n\t"); first != stderr_text.npos) {
@@ -112,20 +119,11 @@ void add_diagnostic(ProbeEvidence& evidence, std::string_view stderr_text) {
   }
 }
 
-void add_fact(ToolchainMatrix& matrix, std::string_view package, std::string_view id,
-              const ProbeEvidence& evidence) {
-  auto origin = evidence.reason;
-  if (evidence.exit_status) origin += std::format(" (exit {})", *evidence.exit_status);
-  if (!evidence.target.empty()) origin += std::format(" · {}", evidence.target);
-  if (evidence.artifact) {
-    constexpr std::string_view formats[] = {"ELF", "Mach-O", "COFF"};
-    constexpr std::string_view kinds[] = {"object", "executable", "shared library"};
-    origin += std::format(" · {} {} {}", evidence.artifact->architecture,
-                          formats[std::to_underlying(evidence.artifact->format)],
-                          kinds[std::to_underlying(evidence.artifact->kind)]);
-  }
+void publish_observation(ToolchainMatrix& matrix, std::string_view package, std::string_view id,
+                         const ProbeEvidence& evidence, ProbeKey key) {
   matrix.facts.push_back({"toolchain-capability", std::string(package), std::string(id),
-                          std::string(name(evidence.support)), std::move(origin)});
+                          std::string(probe_support_name(evidence.support)), describe_probe_evidence(evidence)});
+  matrix.observations.push_back({std::string(id), evidence, key});
 }
 
 void merge_inputs(ToolchainProbeInputs& into, ToolchainProbeInputs from) {
@@ -192,9 +190,9 @@ MeasuredToolchainProbe run_host_witness(const ToolchainProbeProfile& profile, st
       .args = {{literal, shared ? "--internal-probe-shared" : "--internal-probe-executable"}, {input, "binary"}},
       .environment = profile.environment, .outputs = {}};
   const ActionInput artifact{"binary", shared ? "probe.so" : "probe", *linked.artifact};
-  const auto result = run(shared ? "ToolchainProbeLoad" : "ToolchainProbeRun",
-                          std::format("{} via {}", shared ? "link.host-shared.load" : "link.hosted.run",
-                                      profile.executable), action, std::span{&artifact, 1});
+  const auto id = synthetic_name(shared ? SyntheticProbe::shared_load : SyntheticProbe::hosted_run);
+  const auto label = std::format("{} via {}", id, profile.executable);
+  const auto result = run(shared ? "ToolchainProbeLoad" : "ToolchainProbeRun", label, action, std::span{&artifact, 1});
   const auto state = completion(result);
   observed.cacheable = reusable(state);
   observed.evidence.exit_status = result.exit_status;
@@ -213,26 +211,64 @@ MeasuredToolchainProbe run_host_witness(const ToolchainProbeProfile& profile, st
 
 }  // namespace
 
+std::string_view probe_support_name(ProbeSupport support) {
+  constexpr std::string_view names[] = {"supported", "unsupported", "indeterminate"};
+  static_assert(std::size(names) == 1 + std::to_underlying(ProbeSupport::indeterminate));
+  return names[std::to_underlying(support)];
+}
+
+std::string describe_probe_evidence(const ProbeEvidence& evidence) {
+  auto origin = evidence.reason;
+  if (evidence.exit_status) origin += std::format(" (exit {})", *evidence.exit_status);
+  if (!evidence.target.empty()) origin += std::format(" · {}", evidence.target);
+  if (evidence.artifact) {
+    constexpr std::string_view formats[] = {"ELF", "Mach-O", "COFF"};
+    constexpr std::string_view kinds[] = {"object", "executable", "shared library"};
+    origin += std::format(" · {} {} {}", evidence.artifact->architecture,
+                          formats[std::to_underlying(evidence.artifact->format)],
+                          kinds[std::to_underlying(evidence.artifact->kind)]);
+  }
+  return origin;
+}
+
+bool known_toolchain_probe(std::string_view id) {
+  return std::ranges::contains(baseline_toolchain_probes(), id, &ToolchainProbe::id) ||
+         id == synthetic_name(SyntheticProbe::shared_load) || id == synthetic_name(SyntheticProbe::hosted_run);
+}
+
+std::string ToolchainProbeResult::describe(const Key& key) {
+  const auto rows = baseline_toolchain_probes();
+  const auto id = key.row < rows.size() ? rows[key.row].id
+                                        : synthetic_name(static_cast<SyntheticProbe>(key.row - rows.size()));
+  return std::format("{} [{:08x}]", id, static_cast<std::uint32_t>(key.profile.lo));
+}
+
 std::string ToolchainProbeResult::show(const Value& value) {
   if (!value) return "Measurement needed";
   const auto& evidence = value->evidence;
   if (!evidence.target.empty())
-    return std::format("{}\n{}\nTarget {}\n", name(evidence.support), evidence.reason, evidence.target);
-  return std::format("{}\n{}\n", name(evidence.support), evidence.reason);
+    return std::format("{}\n{}\nTarget {}\n", probe_support_name(evidence.support), evidence.reason, evidence.target);
+  return std::format("{}\n{}\n", probe_support_name(evidence.support), evidence.reason);
 }
 
 std::expected<ToolchainMatrix, std::string> measure_toolchain_matrix(
     const std::filesystem::path& cwd, std::string_view package, ToolchainProbeProfile profile,
     Fp128 identity, std::span<const std::string> declared_inputs,
     std::string_view worker, const RunProbe& run, const MeasureProbe& measure,
-    const std::function<bool()>& cancelled) {
+    const std::function<bool()>& cancelled, std::span<const std::string> requested, bool* inputs_changed) {
+  for (const auto& id : requested)
+    if (!known_toolchain_probe(id)) return std::unexpected(std::format("unknown toolchain probe '{}'", id));
+  if (cancelled()) return std::unexpected("build cancelled");
   auto normalized = normalize_toolchain_probe_profile(std::move(profile));
   if (!normalized) return std::unexpected(normalized.error());
   profile = std::move(*normalized);
 
+  const auto wants = [&](std::string_view id) {
+    return requested.empty() || std::ranges::contains(requested, id);
+  };
   ToolchainMatrix matrix{.inputs = configured_toolchain_probe_inputs(cwd, profile.executable, profile.flags,
                                                                    profile.environment, declared_inputs),
-                         .stamp = {}, .facts = {}};
+                         .stamp = {}, .facts = {}, .observations = {}};
   if (profile.native) {
     const auto sdk = std::ranges::find_if(profile.environment, [](const auto& variable) {
       return variable.first == "SDKROOT";
@@ -243,50 +279,67 @@ std::expected<ToolchainMatrix, std::string> measure_toolchain_matrix(
   const auto configured = fingerprint_toolchain_probe_inputs(configured_inputs);
   const auto catalogue = baseline_toolchain_probes();
   const auto& target_probe = catalogue.front();
-  auto default_target = stage_toolchain_probe(target_probe, profile);
-  if (!default_target) return std::unexpected(default_target.error());
-  const auto default_key = fingerprint(std::tie(catalogue_version, identity, configured,
-                                                default_target->action, default_target->inputs));
-  const auto target = measure({default_key, 0},
-                              [&] { return execute_probe(target_probe, *default_target, run); });
-  if (target.evidence.support == ProbeSupport::supported) profile.observed_target = target.evidence.target;
+  const auto unstaged_key = [&](Fp128 stamp) {
+    return fingerprint(std::tuple{catalogue_version, identity, stamp, std::string_view("unstaged"), profile});
+  };
+  matrix.facts.push_back({"toolchain-compiler", std::string(package), "driver", profile.executable,
+                          profile.native ? "Selected native compiler" : "Selected host compiler"});
+  // Even an explicit target can match the driver's default. Staging uses the
+  // observed target to avoid passing a redundant target flag in that case.
+  if (wants(target_probe.id) || profile.observed_target.empty()) {
+    auto staged = stage_toolchain_probe(target_probe, profile);
+    const ProbeKey key{staged ? fingerprint(std::tie(catalogue_version, identity, configured,
+                                                       staged->action, staged->inputs))
+                              : unstaged_key(configured), 0};
+    const auto target = staged ? measure(key, [&] { return execute_probe(target_probe, *staged, run); })
+                               : unavailable(staged.error());
+    if (target.evidence.support == ProbeSupport::supported) profile.observed_target = target.evidence.target;
+    publish_observation(matrix, package, target_probe.id, target.evidence, key);
+  }
 
   std::optional<MeasuredToolchainProbe> discovery;
-  if (!profile.native && !cancelled()) {
+  const bool needs_discovery = requested.empty() || std::ranges::any_of(requested, [&](std::string_view id) {
+    return id != target_probe.id;
+  });
+  if (!profile.native && needs_discovery && !cancelled()) {
     const auto search_key = fingerprint(std::tie(catalogue_version, identity, configured, profile.observed_target));
-    discovery = measure({search_key, static_cast<std::uint32_t>(catalogue.size())},
+    discovery = measure({search_key, static_cast<std::uint32_t>(catalogue.size()) +
+                                         std::to_underlying(SyntheticProbe::search_paths)},
                         [&] { return discover_inputs(profile, run); });
     merge_inputs(matrix.inputs, discovery->discovered_inputs);
   }
   matrix.stamp = fingerprint_toolchain_probe_inputs(matrix.inputs);
-  matrix.facts.push_back({"toolchain-compiler", std::string(package), "driver", profile.executable,
-                          profile.native ? "Selected native compiler" : "Selected host compiler"});
-  add_fact(matrix, package, target_probe.id, target.evidence);
 
   for (std::uint32_t row = 1; row < catalogue.size(); ++row) {
     const auto& probe = catalogue[row];
+    const bool shared = probe.id == "link.host-shared";
+    const auto witness_kind = shared ? SyntheticProbe::shared_load : SyntheticProbe::hosted_run;
+    const auto witness_name = synthetic_name(witness_kind);
+    const bool wants_witness = (shared || probe.id == "link.hosted") && wants(witness_name);
+    if (!wants(probe.id) && !wants_witness) continue;
     if (cancelled()) return std::unexpected("build cancelled");
     auto staged = stage_toolchain_probe(probe, profile);
-    if (!staged) {
-      add_fact(matrix, package, probe.id, unavailable(staged.error()).evidence);
-      continue;
-    }
-    const auto key = fingerprint(std::tie(catalogue_version, identity, matrix.stamp, staged->action,
-                                         staged->inputs, staged->expected_target));
-    const auto result = measure({key, row}, [&] { return execute_probe(probe, *staged, run); });
-    add_fact(matrix, package, probe.id, result.evidence);
-    const bool shared = probe.phase == ToolchainProbePhase::shared_link;
-    if ((shared || probe.id == "link.hosted") && !cancelled()) {
-      const auto witness_key = fingerprint(std::tie(key, worker, result.evidence, result.artifact));
-      const auto witness = measure({witness_key, static_cast<std::uint32_t>(catalogue.size() + (shared ? 1 : 2))},
-                                   [&] { return run_host_witness(profile, worker, result, run, shared); });
-      add_fact(matrix, package, shared ? "link.host-shared.load" : "link.hosted.run", witness.evidence);
+    const ProbeKey key{staged ? fingerprint(std::tie(catalogue_version, identity, matrix.stamp, staged->action,
+                                                      staged->inputs, staged->expected_target))
+                              : unstaged_key(matrix.stamp), row};
+    const auto result = staged ? measure(key, [&] { return execute_probe(probe, *staged, run); })
+                               : unavailable(staged.error());
+    publish_observation(matrix, package, probe.id, result.evidence, key);
+    if (wants_witness && !cancelled()) {
+      const ProbeKey witness_key{fingerprint(std::tie(key.profile, worker, result.evidence, result.artifact)),
+                                  static_cast<std::uint32_t>(catalogue.size()) + std::to_underlying(witness_kind)};
+      const auto execute = [&] { return run_host_witness(profile, worker, result, run, shared); };
+      const auto witness = staged ? measure(witness_key, execute) : execute();
+      publish_observation(matrix, package, witness_name, witness.evidence, witness_key);
     }
   }
+  if (cancelled()) return std::unexpected("build cancelled");
   if (matrix.stamp != fingerprint_toolchain_probe_inputs(matrix.inputs) ||
       configured != fingerprint_toolchain_probe_inputs(configured_inputs) ||
-      (discovery && discovery->discovery_stamp != fingerprint_toolchain_probe_inputs(discovery->discovered_inputs)))
+      (discovery && discovery->discovery_stamp != fingerprint_toolchain_probe_inputs(discovery->discovered_inputs))) {
+    if (inputs_changed) *inputs_changed = true;
     return std::unexpected("toolchain inputs changed while measuring the profile");
+  }
   return matrix;
 }
 
