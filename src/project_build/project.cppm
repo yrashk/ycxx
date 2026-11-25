@@ -457,9 +457,10 @@ std::expected<void, std::string> prepare_project(
     const AdmitRuleValue& admit_value, const UseRuleCompiler& use_compiler,
     const ResolveCapabilities& resolve_capabilities, PreparedProject& prepared, bool watch, bool& superseded) {
   for (;;) {
-    auto attempt = plan_with_rules(cwd, target, prepared.rules.expansions);
+    std::optional<Fp128> definition;
+    auto attempt = plan_with_rules(cwd, target, prepared.rules.expansions, &definition);
     // All expansions in one attempt must belong to a single workspace definition.
-    if (manifest_stamp(cwd) != prepared.manifest) {
+    if (definition != prepared.manifest) {
       superseded = true;
       return std::unexpected("build.ycxx changed during rule resolution");
     }
@@ -594,8 +595,9 @@ bool current_rules(const fs::path& cwd, const RuleToolchain& toolchain, const Pr
 std::optional<ProjectPlan> observe_project(
     const fs::path& cwd, std::string_view target, const RuleToolchain& toolchain, const PreparedProject& prepared) {
   if (!current_rules(cwd, toolchain, prepared)) return std::nullopt;
-  auto attempt = plan_with_rules(cwd, target, prepared.rules.expansions);
-  if (!attempt || manifest_stamp(cwd) != prepared.manifest) return std::nullopt;
+  std::optional<Fp128> definition;
+  auto attempt = plan_with_rules(cwd, target, prepared.rules.expansions, &definition);
+  if (!attempt || definition != prepared.manifest) return std::nullopt;
   if (auto* plan = std::get_if<ProjectPlan>(&*attempt)) return std::move(*plan);
   return std::nullopt;
 }

@@ -64,7 +64,8 @@ ProjectWatchState watch_project(const std::filesystem::path& cwd, std::string_vi
 std::expected<PlanInspection, std::string> inspect_project(
     const std::filesystem::path& cwd, std::string_view target, std::span<const RuleExpansion> expansions);
 std::expected<std::variant<ProjectPlan, RuleDemand>, std::string> plan_with_rules(
-    const std::filesystem::path& cwd, std::string_view target, std::span<const RuleExpansion> expansions);
+    const std::filesystem::path& cwd, std::string_view target, std::span<const RuleExpansion> expansions,
+    std::optional<Fp128>* definition = nullptr);
 std::expected<RulePackageRef, std::string> capability_package(std::string_view package);
 std::expected<RulePackagePlan, std::string> plan_rule_package(
     const std::filesystem::path& cwd, const RulePackageRef& package, std::string_view sdk_header,
@@ -916,7 +917,9 @@ class Planner {
 
 std::expected<ProjectPlan, std::string> read_project(const fs::path& cwd, std::string_view target,
                                                    WatchObservations* watch, PlanInspection* inspection,
-                                                   std::span<const RuleExpansion> expansions) {
+                                                   std::span<const RuleExpansion> expansions,
+                                                   std::optional<Fp128>* definition = nullptr) {
+  if (definition) definition->reset();
   std::error_code ec;
   const auto root = fs::absolute(cwd, ec).lexically_normal();
   if (ec) return std::unexpected(std::format("cannot resolve workspace directory: {}", ec.message()));
@@ -925,7 +928,11 @@ std::expected<ProjectPlan, std::string> read_project(const fs::path& cwd, std::s
     if (watch) watch->paths.insert(path_text(path));
     (void)regular_file(path, {});
     auto text = read_file(path, {});
-    if (watch) watch->manifest = fingerprint128(text);
+    if (watch || definition) {
+      const auto stamp = fingerprint128(text);
+      if (watch) watch->manifest = stamp;
+      if (definition) *definition = stamp;
+    }
     auto manifest = parse_manifest(text);
     if (!manifest) fail(manifest.error().location, std::move(manifest.error().message));
     if (inspection) inspection->definition = std::move(text);
@@ -975,9 +982,10 @@ std::expected<PlanInspection, std::string> inspect_project(
 }
 
 std::expected<std::variant<ProjectPlan, RuleDemand>, std::string> plan_with_rules(
-    const fs::path& cwd, std::string_view target, std::span<const RuleExpansion> expansions) {
+    const fs::path& cwd, std::string_view target, std::span<const RuleExpansion> expansions,
+    std::optional<Fp128>* definition) {
   try {
-    auto plan = read_project(cwd, target, nullptr, nullptr, expansions);
+    auto plan = read_project(cwd, target, nullptr, nullptr, expansions, definition);
     if (!plan) return std::unexpected(std::move(plan.error()));
     return std::variant<ProjectPlan, RuleDemand>(std::move(*plan));
   } catch (RuleDemand& demand) {
