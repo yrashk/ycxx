@@ -973,10 +973,44 @@ public:
   // A template-name that names a type with its arguments ([temp.names]): a class template, or an
   // alias template ([temp.alias]).
   std::optional<ast::DeclSema> type_template(NameId name) {
-    if (auto m = own_member_alias_template(name)) return m;
+    if (auto block = block_type_template(name); block.found) return block.declaration;
+    bool found_member = false;
+    if (auto m = own_member_alias_template(name, found_member); found_member) return m;
     if (auto c = class_template(name)) return c;
     return named_template(name, ast::DeclKind::type_alias);
   }
+
+  struct BlockTypeTemplate {
+    bool found = false;
+    std::optional<ast::DeclSema> declaration;
+  };
+
+  // A block declaration, including one introduced by a using-declaration, hides the class
+  // and namespace scopes ([basic.lookup.unqual], [namespace.udecl]).
+  BlockTypeTemplate block_type_template(NameId name) {
+    for (std::size_t depth = scopes_.size(); depth-- > 0;) {
+      const auto names_here = [=](const auto& binding) { return binding.depth == depth && binding.name == name; };
+      if (std::ranges::contains(scopes_[depth], name, [](const auto& local) { return local.first; }) ||
+          std::ranges::any_of(block_types_, names_here) || std::ranges::any_of(block_aliases_, names_here))
+        return {true, std::nullopt};
+      for (const auto& [scope, e] : using_enums_) {
+        if (scope != depth) continue;
+        if (const EnumRec* record = enum_rec(e); record && std::ranges::contains(record->enumerators, name, &EnumeratorRec::name))
+          return {true, std::nullopt};
+      }
+      if (const auto used = std::ranges::find_if(block_usings_ | std::views::reverse, names_here);
+          used != block_usings_.rend()) {
+        if (used->type_index) {
+          const auto& declaration = used->decls[*used->type_index];
+          if (declaration.flags & decl_flag::template_)
+            return {true, with_template_defaults(declaration, used->decls)};
+        }
+        return {true, std::nullopt};
+      }
+    }
+    return {};
+  }
+
   std::optional<ast::DeclSema> namespace_type_template(EntityId ns, NameId name) {
     if (auto c = namespace_class_template(ns, name)) return c;
     return namespace_template(ns, name, ast::DeclKind::type_alias);
@@ -2765,13 +2799,26 @@ public:
     }
     return std::nullopt;
   }
-  // `apply<args>` in the scope of the class that declares `apply` ([class.member.lookup]), unless
-  // a block scope or a template parameter hides it.
-  std::optional<ast::DeclSema> own_member_alias_template(NameId n) {
+  // Unqualified lookup skips the current class's dependent direct bases even during replay.
+  // A non-template member or an ambiguous lookup still hides outer declarations
+  // ([basic.lookup.unqual], [class.member.lookup], [temp.res.general]).
+  std::optional<ast::DeclSema> own_member_alias_template(NameId n, bool& found) {
     if (current_class == EntityId::none || template_param(n)) return std::nullopt;
-    for (const auto& s : scopes_)
-      if (std::ranges::contains(s, n, [](const auto& p) { return p.first; })) return std::nullopt;
-    return member_alias_template(current_class, n);
+    std::optional<Found> member;
+    if (class_rec(current_class)) {
+      member = find_member(current_class, n, /*unqualified=*/true);
+    } else {
+      if (auto m = q_->earlier_member(n)) {
+        found = true;
+        if (m->kind == ast::DeclKind::type_alias && (m->flags & decl_flag::template_)) return *m;
+        return std::nullopt;
+      }
+      member = find_base_member(q_->defining_base_records(current_class), n, /*unqualified=*/true);
+    }
+    found = member.has_value();
+    if (!member || member->ambiguous || member->nested_type == EntityId::none || member->enumerator != EntityId::none ||
+        w_->entities.rec(member->nested_type).kind != EntityKind::alias_template) return std::nullopt;
+    return q_->template_decl(member->nested_type);
   }
   std::optional<QualType> member_type(EntityId c, NameId n) {
     if (class_rec(c)) {
@@ -3391,9 +3438,12 @@ public:
     }
     if (!require_complete(ct, op_at)) return fail;
     EntityId c = types().class_of(ct);
-    if (qualifier && (*qualifier != w_->entities.rec(c).name || !virtual_consumer(c))) {
-      diag(name_at, Diag::not_supported, lex::Tk::coloncolon);
-      return fail;
+    if (qualifier) {
+      const ClassRec* record = class_rec(c);
+      if (*qualifier != w_->entities.rec(c).name || ((!record || !record->dynamic) && !virtual_consumer(c))) {
+        diag(name_at, Diag::not_supported, lex::Tk::coloncolon);
+        return fail;
+      }
     }
     auto found = find_member(c, name);
     if (!found) {
@@ -4307,7 +4357,18 @@ public:
   // ([class.access]/4); diagnosed if not, or deferred as a nested type's check is.
   void member_template_access(QualType q, EntityId templ, NameId n, u32 at) {
     if (!types().is_class(q) || types().is_dependent(q)) return;
-    const EntityId naming = types().class_of(q), owner = w_->entities.rec(templ).scope;
+    check_member_template_access(types().class_of(q), templ, n, at);
+  }
+  // Unqualified lookup can find a member template before the naming class is complete
+  // ([class.access.general], [class.access.base]). Its declaration still supplies the access.
+  void unqualified_type_template_access(const ast::DeclSema& tmpl, NameId n, u32 at) {
+    if (current_class == EntityId::none || tmpl.kind != ast::DeclKind::type_alias || !(tmpl.flags & decl_flag::member))
+      return;
+    const ClassPrefixScope prefix(*this, current_class, static_initializer_name_);
+    check_member_template_access(current_class, tmpl.entity, n, at);
+  }
+  void check_member_template_access(EntityId naming, EntityId templ, NameId n, u32 at) {
+    const EntityId owner = w_->entities.rec(templ).scope;
     const ClassRec* cr = class_rec(owner);
     if (!cr) return;
     if (defer_type_access && (!accessible(owner, cr->access_of(templ), naming) || !accessible_naming_base(naming, owner))) {
@@ -4320,7 +4381,8 @@ public:
   QualType dependent_member_template_id(QualType q, NameId name, std::span<const TemplateArg> args) {
     return types().dep_template(q, name, ast::DepNameForm::template_id, args);
   }
-  std::optional<TemplateArg> template_name_arg(std::optional<EntityId> ns, NameId name) {
+  std::optional<TemplateArg> template_name_arg(std::optional<EntityId> ns, NameId name,
+                                                std::optional<u32> at = std::nullopt) {
     if (!ns)
       if (const ast::TemplateParamSema* p = template_param(name)) {
         if (p->kind != ast::TemplateArgKind::template_) return std::nullopt;
@@ -4331,11 +4393,12 @@ public:
     // class (the current instantiation, or the specialization) as a type one ([temp.local]/1).
     if (!ns && current_class != EntityId::none) {
       const EntityRec& c = w_->entities.rec(current_class);
-      if (c.templ != EntityId::none && c.name == name && !local_named(name))
+      if (c.templ != EntityId::none && c.name == name && !block_type_template(name).found)
         return TemplateArg{ast::TemplateArgKind::template_, types().class_type(current_class), ConstId::none, {}, c.templ};
     }
     auto t = ns ? namespace_type_template(*ns, name) : type_template(name);
     if (!t) return std::nullopt;
+    if (!ns && at) unqualified_type_template_access(*t, name, *at);
     return TemplateArg{ast::TemplateArgKind::template_, QualType{}, ConstId::none, {}, t->entity};
   }
   // The argument a template parameter named here stands for: its argument, or for a pack the
@@ -4529,6 +4592,7 @@ public:
 
   Templates templates() {
     Templates t(*w_, classes());
+    t.class_definition = [this](EntityId c) { return class_rec(c); };
     t.defining_enum_is_scoped = [this](EntityId e) { return q_->defining_enum_is_scoped(e); };
     t.member_type = [this](EntityId c, NameId n) { return member_type(c, n); };
     t.member_template = [this](EntityId c, NameId n) -> std::optional<EntityId> {
@@ -6159,8 +6223,12 @@ public:
     const auto& owner = w_->entities.rec(entity.scope);
     if (owner.kind != EntityKind::class_ || owner.templ != EntityId::none) return false;
     const auto* member = member_decl(function);
-    if (!member || !member->is_consteval || member->is_virtual || member->is_template) return false;
-    // Only the checked integral, enum and void result representations enter this path.
+    return member && member->is_consteval && !member->is_virtual && !member->is_template &&
+           supported_immediate_member_result(result);
+  }
+
+  // Only the checked integral, enum and void result representations enter these paths.
+  bool supported_immediate_member_result(QualType result) {
     if (types().is_void(result)) return true;
     if (types().is_enum(result)) {
       const auto* enumeration = enum_rec(types().enum_of(result));
@@ -6588,12 +6656,14 @@ public:
     std::optional<u32> virtual_slot;
     const ClassRec* dynamic_owner = d->is_virtual ? class_rec(w_->entities.rec(d->entity).scope) : nullptr;
     if (dynamic_owner && !dynamic_owner->dynamic) dynamic_owner = nullptr;
+    const bool immediate_virtual = d->is_virtual && d->is_consteval;
     if (unevaluated == 0) {
-      if (d->is_virtual && d->is_consteval) {
-        diag(paren_at, Diag::virtual_immediate_call);
-        return fail;
-      }
-      if (dynamic_owner) {
+      if (immediate_virtual) {
+        if (!dynamic_owner || !object || assignment_notation) {
+          diag(paren_at, Diag::virtual_immediate_call);
+          return fail;
+        }
+      } else if (dynamic_owner) {
         // Itanium C++ ABI §3.2.4: dispatch through the slot the declaration occupies in its own
         // class's table. A qualified name calls the named function directly ([class.virtual]/16).
         if (!object || assignment_notation) {
@@ -6701,6 +6771,15 @@ public:
     if (assignment_notation) {
       contract_assert(children->size() == 1);
       return node(ast::AssignmentCall{info, fe, children->front(), at(o, begin)}, begin, end, info);
+    }
+    if (immediate_virtual) {
+      if (!unevaluated &&
+          (fr.variadic || info.category != ValueCategory::prvalue || !supported_immediate_member_result(info.type))) {
+        diag(paren_at, Diag::virtual_immediate_call);
+        return fail;
+      }
+      return immediate_invocation(node(ast::ImmediateVirtualCall{info, fe, at(o, begin), b_->list(*children), u8(bound.qualified)},
+                                       begin, end, info));
     }
     if (virtual_slot) {
       // BOOTSTRAP: -Warray-bounds: reserved and appended. At -O3 GCC 16.2 reports libycxx's
@@ -7596,6 +7675,7 @@ public:
         return !types().rec(type).fn_noexcept;
       }
       if (node.is<ast::MemberCall>()) return function_throwing(node.get<ast::MemberCall>().function);
+      if (node.is<ast::ImmediateVirtualCall>()) return function_throwing(node.get<ast::ImmediateVirtualCall>().function);
       if (node.is<ast::ExplicitDestroy>()) {
         const auto receiver = expression_info(node.get<ast::ExplicitDestroy>().object.id).type;
         return destructor_throwing(types().pointee(receiver), node.offset());

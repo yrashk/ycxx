@@ -82,6 +82,7 @@ export enum class Flag : std::uint8_t {
   nsw, nuw, exact, volatile_, not_constexpr, variadic, call_body, explicit_trap, assumed_unreachable,
   outside_lifetime,  // obj.begin imports a local whose lifetime began outside an evaluation
   outside_unknown,   // obj.begin imports a record's identity without a readable value
+  unknown_reference, // the record is the unknown referent of a parameter
 };
 export using Flags = std::uint16_t;
 export constexpr Flags bit(Flag f) { return Flags(1u << std::to_underlying(f)); }
@@ -211,7 +212,7 @@ export enum class Op : std::uint16_t {
   // Memory and object lifetime ([basic.life], [basic.stc], [class.union]).
   alloc [[=state({S}, {S, V}).imms({type, storage, init})]],
   dealloc [[=state({S, V}, {S}).imms({storage})]],
-  obj__begin [[=state({S, V}, {S}).imms({type}).accepts({outside_lifetime, outside_unknown})]],
+  obj__begin [[=state({S, V}, {S}).imms({type}).accepts({outside_lifetime, outside_unknown, unknown_reference})]],
   obj__end [[=state({S, V}, {S})]],
   union__activate [[=state({S, V}, {S}).imms({path})]],
   load [[=state({S, V}, {V}).imms({type, path}).accepts({volatile_, call_body})]],
@@ -313,6 +314,10 @@ export enum class Op : std::uint16_t {
   // Constant-evaluated signed intmax arithmetic yields the converted value, then overflow.
   sadd_overflow [[=pinned({V, V}, {V, V}).with({commutative})]],
   smul_overflow [[=pinned({V, V}, {V, V}).with({commutative})]],
+
+  // An immediate virtual member invocation: receiver, converted arguments, selected function,
+  // and whether the member name was qualified ([expr.call], [expr.const.core]).
+  call_immediate_virtual [[=state({S, V, Vs}, {S, Vs}).imms({entity, u32})]],
 };
 
 export constexpr std::size_t op_count = std::meta::enumerators_of(^^Op).size();
