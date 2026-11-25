@@ -56,8 +56,9 @@ Work that never reaches `main` is lost. Twice, finished and reviewed work landed
   `ctest --test-dir build -R '<names>' -j 2`. Use `tools/test failed affected core` to rerun the
   driver stages without rebuilding. A passing isolated rerun can point to contention and can
   miss a concurrency bug. The required gate still has to pass for the exact merge candidate,
-  either locally under suitable load or in CI. Under load, timeouts cost about an hour on
-  #330, and the merge checks of #1124 and #1129 hit them too (LESSONS).
+  either locally under suitable load or in CI. Timeouts cost about an hour on #330 under load.
+  On macOS, 10 s program timeouts also fail gates at low load (#1123), so a low load does not make
+  one a real failure, nor a high load make it harmless (LESSONS).
 - macOS and Linux are meant to do the same things. A test or CTest you limit to one OS carries
   `PARITY:` with the issue that brings it to the other, or `by design:` with the host fact it is
   about. `tools/check-os-gates` enforces this for `REQUIRES:`, `ycxx.xfail` and `ycxx.txt` (an
