@@ -2157,7 +2157,7 @@ clauses = ['temp.param', 'temp.arg.nontype']
 std = 'C++20'
 ftm = '__cpp_nontype_template_args'
 status = 'partial'
-note = 'Flat structural class arguments, parameter objects and guarded integral member-alias projections. Floating-point arguments and further structural forms remain open.'
+note = 'Flat structural class arguments, parameter objects, guarded integral member-alias projections and record-valued immediate calls in alias replay. Floating-point arguments and further structural forms remain open.'
 probe = '''
 struct P { int x, y; };
 template<P p> int sum() { return p.x + p.y; }
