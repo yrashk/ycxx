@@ -14,6 +14,8 @@ std::string_view rule_sdk_header();
 
 // Arguments name the staged library, JSON request and output definition, respectively.
 int run_rule_worker(std::span<const std::string_view> args);
+// The staged library exports the same symbol with a probe-specific witness result.
+int run_shared_probe(std::span<const std::string_view> args);
 
 }  // namespace ycxx::build
 
@@ -201,6 +203,20 @@ int run_rule_worker(std::span<const std::string_view> args) {
   output.write(invocation.emitted.data(), static_cast<std::streamsize>(invocation.emitted.size()));
   output.close();
   if (!output) return fail("cannot write rule output");
+  return 0;
+}
+
+int run_shared_probe(std::span<const std::string_view> args) {
+  if (args.size() != 1 || !valid_key(args.front())) return fail("expected a staged probe library path");
+  const std::string path(args.front());
+  const Library library{::dlopen(path.c_str(), RTLD_NOW | RTLD_LOCAL)};
+  if (!library.handle) {
+    const char* detail = ::dlerror();
+    return fail(detail ? detail : "cannot load probe library");
+  }
+  const auto plan = reinterpret_cast<int (*)(const Host*)>(::dlsym(library.handle, "ycxx_rule_plan_v1"));
+  if (!plan) return fail("probe library has no ycxx_rule_plan_v1 entry point");
+  if (plan(nullptr) != 42) return fail("probe library returned the wrong witness");
   return 0;
 }
 

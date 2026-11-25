@@ -43,12 +43,16 @@ struct RuleToolchain {
 struct RulePackageAction {
   Action action;
   std::string tool_fingerprint;
+  bool native = false;
+  bool cxx = false;
 };
 
 struct RulePackagePlan {
   std::vector<RulePackageAction> candidates;
   std::vector<ActionInput> inputs;
   std::vector<std::string> observed_paths;
+  std::vector<std::string> probe_flags;
+  std::vector<std::string> probe_inputs;
 };
 
 std::string generated_path(const std::filesystem::path& cwd, std::string_view generator,
@@ -407,12 +411,34 @@ class Planner {
     const auto& tool = require_field(decl, "tool");
     const auto* selector = std::get_if<CxxTool>(&tool.data);
     const auto* native_args = field(decl, "native_args");
+    const auto* probe_flags = field(decl, "probe_flags");
+    const auto* probe_inputs = field(decl, "probe_inputs");
     if (!selector) {
       if (native_args) fail(native_args->location, "native_args requires a cxx() tool");
+      if (probe_flags) fail(probe_flags->location, "probe_flags requires a cxx() tool");
+      if (probe_inputs) fail(probe_inputs->location, "probe_inputs requires a cxx() tool");
       std::vector<RulePackageAction> candidates;
       candidates.push_back({std::move(plan.action), std::move(plan.tool_fingerprint)});
-      return {std::move(candidates), std::move(plan.inputs), {}};
+      return {std::move(candidates), std::move(plan.inputs), {}, {}, {}};
     }
+
+    std::vector<std::string> flags;
+    if (probe_flags)
+      for (const auto& value : as<List>(*probe_flags, "a list of compiler probe flags")) {
+        const auto& flag = as<std::string>(value, "a compiler probe flag");
+        if (flag.contains('\0')) fail(value.location, "invalid compiler probe flag");
+        flags.push_back(flag);
+      }
+    std::vector<std::string> resources;
+    if (probe_inputs)
+      for (const auto& value : as<List>(*probe_inputs, "a list of toolchain input paths")) {
+        const auto& text = as<std::string>(value, "a toolchain input path");
+        if (text.empty() || text.contains('\0')) fail(value.location, "invalid toolchain input path");
+        auto path = fs::path(text);
+        if (path.is_relative()) path = cwd_ / relative_path(text, value.location);
+        observe(path);
+        resources.push_back(path_text(path));
+      }
 
     using enum ActionArg::Kind;
     std::vector<ActionArg> prefix{{literal, "cxx"}, {literal, "--no-daemon"}, {literal, "-nostdlib"}};
@@ -444,9 +470,9 @@ class Planner {
           continue;
         }
       }
-      candidates.push_back({std::move(action), std::move(fingerprint)});
+      candidates.push_back({std::move(action), std::move(fingerprint), compiler.native, true});
     }
-    return {std::move(candidates), std::move(plan.inputs), {}};
+    return {std::move(candidates), std::move(plan.inputs), {}, std::move(flags), std::move(resources)};
   }
 
  private:
@@ -525,7 +551,8 @@ class Planner {
 
   GeneratorPlan generator(const TargetDecl& decl, std::optional<std::string_view> sdk_header = std::nullopt,
                           std::span<const EmbeddedInput> embedded = {}) {
-    if (sdk_header) check_fields(decl, {"tool", "args", "inputs", "outputs", "environment", "native_args"});
+    if (sdk_header)
+      check_fields(decl, {"tool", "args", "inputs", "outputs", "environment", "native_args", "probe_flags", "probe_inputs"});
     else check_fields(decl, {"tool", "args", "inputs", "outputs", "environment"});
     if (inspection_) fact("rule", decl, decl.name, decl.kind, "declared rule", decl.location);
     GeneratorPlan plan;

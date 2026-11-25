@@ -51,7 +51,7 @@ struct NamedArtifact {
   Artifact contents;
 };
 
-enum class ActionCompletion { exited, signalled, cancelled, setup_failed, output_failed };
+enum class ActionCompletion { exited, signalled, cancelled, timed_out, setup_failed, output_failed };
 
 struct ActionResult {
   int exit_status = 0;

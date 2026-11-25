@@ -9,7 +9,9 @@ module;
 export module ycxx.build.rule_snapshot;
 
 import std;
+import ycxx.build.inspection_model;
 import ycxx.build.rule_protocol;
+import ycxx.build.toolchain_inputs;
 import ycxx.hash;
 import ycxx.lsp;
 
@@ -21,9 +23,18 @@ struct RuleObservation {
   Fp128 invocation;
 };
 
+struct RuleProbeSnapshot {
+  RulePackageRef package;
+  Fp128 profile;
+  ToolchainProbeInputs inputs;
+  Fp128 stamp;
+  std::vector<PlanFact> facts;
+};
+
 struct RuleSnapshot {
   std::vector<RuleExpansion> expansions;
   std::vector<RuleObservation> observations;  // in expansion order
+  std::vector<RuleProbeSnapshot> probes;
 };
 
 // Snapshot bytes are only a candidate. The caller validates the observations against current
@@ -143,10 +154,20 @@ struct StoredRule {
   std::string invocation;
 };
 
+struct StoredProbe {
+  std::string package_target;
+  bool standard_package;
+  std::string profile;
+  ToolchainProbeInputs inputs;
+  std::string stamp;
+  std::vector<PlanFact> facts;
+};
+
 struct SnapshotFile {
   int version;
   std::string target;
   std::vector<StoredRule> rules;
+  std::optional<std::vector<StoredProbe>> probes;
 };
 
 }  // namespace
@@ -179,12 +200,21 @@ std::optional<RuleSnapshot> read_rule_snapshot(const std::filesystem::path& cwd,
     result.observations.push_back({demand, *package, *invocation});
     result.expansions.push_back({std::move(demand), std::move(item.definition)});
   }
+  if (saved->probes)
+    for (auto& item : *saved->probes) {
+      const auto profile = decode_fp(item.profile);
+      const auto stamp = decode_fp(item.stamp);
+      if (!profile || !stamp) continue;
+      result.probes.push_back({{item.standard_package ? Kind::standard : Kind::workspace,
+                                std::move(item.package_target)},
+                               *profile, std::move(item.inputs), *stamp, std::move(item.facts)});
+    }
   return result;
 }
 
 void write_rule_snapshot(const std::filesystem::path& cwd, std::string_view target, const RuleSnapshot& snapshot) {
   if (snapshot.expansions.size() != snapshot.observations.size()) return;
-  SnapshotFile saved{snapshot_version, std::string(target), {}};
+  SnapshotFile saved{snapshot_version, std::string(target), {}, {}};
   for (std::size_t i = 0; i < snapshot.expansions.size(); ++i) {
     const auto& expansion = snapshot.expansions[i];
     const auto& observed = snapshot.observations[i];
@@ -195,6 +225,12 @@ void write_rule_snapshot(const std::filesystem::path& cwd, std::string_view targ
         demand.definition, demand.attributes, demand.reads, expansion.definition,
         hex(observed.package), hex(observed.invocation),
     });
+  }
+  if (!snapshot.probes.empty()) {
+    auto& probes = saved.probes.emplace();
+    for (const auto& probe : snapshot.probes)
+      probes.push_back({probe.package.target, probe.package.kind == RulePackageRef::Kind::standard,
+                        hex(probe.profile), probe.inputs, hex(probe.stamp), probe.facts});
   }
   const auto text = lsp::dump(lsp::to_json(saved));
   if (text.size() > max_snapshot_size) return;
