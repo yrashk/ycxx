@@ -181,13 +181,13 @@ void append_changes(std::string& out, const std::vector<PlanChange>& changes, st
 }
 
 void append_facts(std::string& out, const std::vector<PlanFact>& facts, std::size_t lines) {
-  out += R"(<section class="panel" aria-labelledby="facts"><h2 id="facts">Resolved facts</h2>)";
+  out += R"(<section class="panel" aria-labelledby="facts"><h2 id="facts">Plan facts</h2>)";
   if (facts.empty()) {
-    out += R"(<p class="empty">No resolved facts.</p></section>)";
+    out += R"(<p class="empty">No plan facts.</p></section>)";
     return;
   }
   out += R"(<table class="facts" aria-labelledby="facts">
-  <thead><tr><th scope="col">Target · Kind</th><th scope="col">Resolved value</th><th scope="col">Defined at</th></tr></thead><tbody>
+  <thead><tr><th scope="col">Target · Kind</th><th scope="col">Value</th><th scope="col">Defined at</th></tr></thead><tbody>
 )";
   for (const PlanFact& fact : facts) {
     out += "<tr><td>";

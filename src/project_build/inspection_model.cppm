@@ -5,6 +5,8 @@ import std;
 
 export namespace ycxx::build {
 
+inline constexpr std::string_view unresolved_fact_kind = "unresolved";
+
 struct PlanFact {
   std::string kind;
   std::string target;

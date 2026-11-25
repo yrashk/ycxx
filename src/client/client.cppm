@@ -6,6 +6,7 @@ export module ycxx.client;
 
 import std;
 import ycxx.build.inspection;
+import ycxx.build.plan;
 import ycxx.compile;
 import ycxx.daemon;
 import ycxx.engine;
@@ -831,7 +832,12 @@ int show(std::span<const std::string_view> args) {
     std::println(std::cerr, "ycxx: cannot determine the working directory");
     return 1;
   }
-  auto shown = ycxx::build::show_project(cwd, target, format, against);
+  std::optional<std::string> tool_path;
+  if (const char* path = std::getenv("PATH")) tool_path = path;
+  const ycxx::build::RuleToolchain toolchain{
+      .executable = daemon::executable_path(), .executable_build = daemon::build_hash(), .path = std::move(tool_path),
+  };
+  auto shown = ycxx::build::show_project(cwd, target, format, toolchain, against);
   if (!shown) {
     std::println(std::cerr, "ycxx: {}", shown.error());
     return 1;

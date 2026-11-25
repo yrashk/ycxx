@@ -5,6 +5,7 @@ import std;
 import ycxx.build.inspection_html;
 import ycxx.build.inspection_model;
 import ycxx.build.plan;
+import ycxx.build.project;
 import ycxx.lsp;
 
 export namespace ycxx::build {
@@ -13,7 +14,7 @@ enum class InspectionFormat { text, json, source, html };
 
 std::expected<std::string, std::string> show_project(
     const std::filesystem::path& cwd, std::string_view target, InspectionFormat format,
-    const std::optional<std::filesystem::path>& against = std::nullopt);
+    const RuleToolchain& toolchain, const std::optional<std::filesystem::path>& against = std::nullopt);
 
 }  // namespace ycxx::build
 
@@ -44,6 +45,9 @@ std::expected<PlanComparison, std::string> compare(const PlanInspection& before,
     return std::unexpected(std::format("unsupported build snapshot schema {}", before.schema));
   if (before.target != after.target)
     return std::unexpected(std::format("snapshot is for '{}', expected '{}'", before.target, after.target));
+  const auto unresolved = [](const PlanFact& fact) { return fact.kind == unresolved_fact_kind; };
+  if (std::ranges::any_of(before.facts, unresolved) || std::ranges::any_of(after.facts, unresolved))
+    return std::unexpected("cannot compare plans with unresolved rules. Build the targets before taking and comparing snapshots.");
   auto old_facts = index_facts(before);
   if (!old_facts) return std::unexpected(old_facts.error());
   auto new_facts = index_facts(after);
@@ -60,13 +64,25 @@ std::expected<PlanComparison, std::string> compare(const PlanInspection& before,
   return diff;
 }
 
-std::expected<PlanInspection, std::string> read_snapshot(const std::filesystem::path& path) {
+std::expected<std::string, std::string> read_text(const std::filesystem::path& path, std::string_view kind) {
   const auto name = path.generic_native_encoded_string();
-  std::ifstream file(path, std::ios::binary);
-  if (!file) return std::unexpected(std::format("cannot open build snapshot '{}'", name));
-  std::string text{std::istreambuf_iterator<char>(file), {}};
-  if (file.bad()) return std::unexpected(std::format("cannot read build snapshot '{}'", name));
-  auto json = lsp::parse(text);
+  std::error_code error;
+  std::ifstream file;
+  if (!std::filesystem::is_directory(path, error)) file.open(path, std::ios::binary);
+  if (!file.is_open()) return std::unexpected(std::format("cannot open {} '{}'", kind, name));
+  std::string text;
+  std::array<char, 8192> buffer;
+  while (file.read(buffer.data(), buffer.size()) || file.gcount() != 0)
+    text.append(buffer.data(), static_cast<std::size_t>(file.gcount()));
+  if (!file.eof() || file.bad()) return std::unexpected(std::format("cannot read {} '{}'", kind, name));
+  return text;
+}
+
+std::expected<PlanInspection, std::string> read_snapshot(const std::filesystem::path& path) {
+  const auto text = read_text(path, "build snapshot");
+  if (!text) return std::unexpected(text.error());
+  const auto name = path.generic_native_encoded_string();
+  auto json = lsp::parse(*text);
   if (!json) return std::unexpected(std::format("{}: {}", name, json.error()));
   auto plan = lsp::from_json<PlanInspection>(*json);
   if (!plan) return std::unexpected(std::format("{}: {}", name, plan.error()));
@@ -102,10 +118,12 @@ std::string diff_text(const PlanComparison& diff) {
 
 std::expected<std::string, std::string> show_project(
     const std::filesystem::path& cwd, std::string_view target, InspectionFormat format,
-    const std::optional<std::filesystem::path>& against) {
-  if (against && format == InspectionFormat::source)
-    return std::unexpected("--against requires text, JSON, or HTML output");
-  auto inspected = inspect_project(cwd, target);
+    const RuleToolchain& toolchain, const std::optional<std::filesystem::path>& against) {
+  if (format == InspectionFormat::source) {
+    if (against) return std::unexpected("--against requires text, JSON, or HTML output");
+    return read_text(cwd / "build.ycxx", "build definition");
+  }
+  auto inspected = inspect_built_project(cwd, target, toolchain);
   if (!inspected) return std::unexpected(inspected.error());
 
   if (against) {
@@ -118,7 +136,6 @@ std::expected<std::string, std::string> show_project(
     return diff_text(*diff);
   }
 
-  if (format == InspectionFormat::source) return std::move(inspected->definition);
   if (format == InspectionFormat::json) return lsp::dump(lsp::to_json(*inspected)) + "\n";
   if (format == InspectionFormat::html) return render_inspection_html(*inspected);
   return as_text(*inspected);
