@@ -2859,8 +2859,16 @@ Fable decided the representation (ast.md §6.6); the Opus session wrote the code
 - Ordinary binary hidden friend operators participate in ADL and compete with nonmember
   overloads from the associated namespaces. Qualified ordinary lookup still requires a
   namespace declaration. The existing Linux inline gate checks both object orders.
-- Ordinary unary minus finds hidden friends by ADL and ranks their operand conversions with
-  ordinary nonmember and member candidates. Access and deletion are checked for the selected operator.
+- The unary operators `+ - ! ~ * &`, prefix `++` and `--`, and the compound assignments find
+  hidden friends by ADL, on class and enumeration operands and, for a dependent operand, at the
+  point of instantiation (#1178). With no class operand only a candidate with an enumeration
+  parameter matching its operand takes part ([over.match.oper]/3). Unary operators rank the
+  conversions of hidden friends, other nonmembers and members together, a non-template before a
+  template. Compound assignments do
+  so where `ordinary_binary_choice` models the conversions; elsewhere the member is tried first
+  (#219). A postfix friend can be declared, and called in function notation only (#219). Access
+  and deletion are checked for the selected operator. Overloaded compound assignment is not yet
+  sequenced right to left (#1275). A friend function of a nested class is not supported (#1277).
 - **Friends in class templates** ([temp.friend], `templated_friend` in parse.cppm, #259): an
   unqualified friend function definition in a namespace-scope class template (or partial
   specialization) declares, for each specialization, an inline function of the namespace with
@@ -2902,11 +2910,10 @@ Fable decided the representation (ast.md §6.6); the Opus session wrote the code
   chooses. Protected is checked as private until base classes exist.
 - C-linkage friend definitions, defaults on friend declarations, non-defining friend functions in
   class templates, private member operator wording, and elaborated types in member parameters
-  remain under [#259](https://github.com/yrashk/ycxx/issues/259). Hidden friend `~` and compound
-  assignment operators are [#1178](https://github.com/yrashk/ycxx/issues/1178), non-defining
-  friend function templates [#1179](https://github.com/yrashk/ycxx/issues/1179), friends with a
+  remain under [#259](https://github.com/yrashk/ycxx/issues/259). Non-defining
+  friend function templates are [#1179](https://github.com/yrashk/ycxx/issues/1179), friends with a
   trailing requires-clause in class templates [#1180](https://github.com/yrashk/ycxx/issues/1180)
-  and deleted friend function templates [#1181](https://github.com/yrashk/ycxx/issues/1181).
+  and deleted friends of class templates and friend function templates [#1181](https://github.com/yrashk/ycxx/issues/1181).
   Both targets coalesce these inline friend definitions across objects (#422, [#124](https://github.com/yrashk/ycxx/issues/124)).
 - Both ELF and Mach-O coalesce eligible nonthrowing, nonvirtual in-class destructor definitions
   and implicitly defined destructors, including those of class-template specializations. A
@@ -3197,12 +3204,38 @@ and reports external tool execution between workspace query attempts.
 `ycxx build --watch` uses the compiler watch loop and live trace browser
 (#1263). The daemon watches native compiler inputs and reobserves the project
 plan between runs for changes to the definition, generator inputs, and glob
-matches. It continues after a failed run.
+matches. Rule package source, compiler discovery and declared reads also enter
+the observation. It continues after a failed run.
 
-The initial build accepts a fixed host toolchain and explicit generator inputs.
-It checks host tool identity before admitting a receipt, and compares the resolved
-plan again before publishing. Rule packages, richer project configurations and
-resolved plan inspection are tracked under #1256, #1257 and #1259.
+`ycxx show <target>` uses the same resolver without executing any actions
+(#1256). It shows verbatim source, resolved facts with their declaration
+locations, or a semantic diff against a saved JSON snapshot. The HTML report
+includes the resolved plan and its definition.
+
+The standard C++ and generator rule declarations use a compiled rule package.
+`use plugin("tools/custom/rules") as cpp` supplies a different C++ provider. The
+bundled and workspace packages use the same worker. `cxx()` in a package recipe
+tries native ycxx first, then searches for host compilers. A `cxx("clang++")` pin
+selects one compiler. Package compilation and worker execution appear in the
+build trace, and inspection uses tracked admitted expansions. [#1281](https://github.com/yrashk/ycxx/issues/1281)
+Compiler discovery formats its filesystem diagnostic to avoid a GCC 16 Release false positive
+when inserting a prefix into a temporary string.
+
+`ycxx build app --probe-toolchain` measures the actual compiler selected for each
+demanded `cxx()` package. The named observations distinguish support, rejection and
+inconclusive evidence across target reporting, dialects, headers, language and
+library features, objects, executable links, and shared-library compile, link and
+load. The resident engine reuses typed receipts for unchanged inputs. Read-only
+inspection shows the admitted observations and their provenance. [#1289](https://github.com/yrashk/ycxx/issues/1289)
+
+The optional `builtin:capabilities` rule package consumes declared
+`probe(package, id)` bindings and emits a named C++ header artifact. The worker
+receives typed support states through the same ABI as workspace packages. A
+reprobe with the same states keeps the generated bytes and uses the existing
+worker, generator, and compiler results. The plan and trace retain the query
+and profile behind each binding. [#1290](https://github.com/yrashk/ycxx/issues/1290)
+The coordinator uses a named probe-receipt admission callback to avoid a GCC 16
+module error when boxing nested lambdas.
 
 ## The engine trace (#245, 2026-11-19)
 
@@ -3634,8 +3667,21 @@ layouts remain in [#1097](https://github.com/yrashk/ycxx/issues/1097).
 - Tests: `tests/own/classes/virtual-dispatch` (13 run tests from the spec, two with Clang peers)
   on macOS; `unit.linux_virtual_dispatch` links the same tests with GCC and Clang on Linux
   (with `-fno-exceptions`: local unwind cleanups around throwing calls are #1104/#648's).
-- Not yet: class templates with virtual members, local and internal-linkage classes,
-  non-polymorphic, non-public or multiple bases, `delete` through a virtual destructor (#293,
+- Class template specializations are dynamic classes too (#1153): implicit ones from
+  `Program::instantiate_class` (primary and partial patterns), explicit ones as ordinary classes
+  with a key function. `complete_virtual_members` and `pure_final_overriders` serve both class
+  definitions and instantiations; a pattern itself has no layout, is never abstract, and leaves
+  `override`, return types and noexcept conditions to its specializations when its base is
+  written there (`may_override_dependent_base`, `validate_override`). `instantiating_bases_` gives
+  a specialization's members its substituted base while they are analysed.
+- An implicit specialization has no key function: its table, RTTI and the members of its slots are
+  weak. `instantiate_all` requires the slots' definitions only when the unit emits a constructor
+  or destructor that installs the table, or a key function that owns it ([temp.inst]). Synthesized
+  constructors and destructors of dynamic classes are walked and emitted where something uses
+  them (`Program::emitted_on_use`).
+  [[temp.inst]](https://eel.is/c++draft/temp.inst) · [#1153](https://github.com/yrashk/ycxx/issues/1153)
+- Not yet: specializations for TU-local types (blocked in `dynamic_member`, #1155), classes nested
+  in class templates (#1187), local and internal-linkage classes, non-polymorphic, non-public or multiple bases, `delete` through a virtual destructor (#293,
   #931), covariant returns, `typeid` (#294), constant evaluation of polymorphic objects (#25),
   virtual bases (#310); follow-ups are listed in #309.
   [Design](docs/design/ordinary-virtual-declarations.md#general-single-inheritance-dynamic-classes-both-targets)
@@ -3740,6 +3786,13 @@ cover the body boundary, key changes, and restoration. [#1248](https://github.co
   The fixtures cover named and braced values, specialization identity, direct address and
   mutable-field rejection in `tests/own/templates/`. Floating-point arguments, richer
   structural forms and the remaining dependent and visibility cases stay in #317.
+
+Ordinary member aliases can project a structural parameter's public integral fields into
+scalar template arguments. A guarded conditional uses its typed selected operand, so the
+result selects the same specialization as the corresponding literal. The resident fixtures
+check field-order and named-guard edits against cold compilation. General member alias
+template replay and record-valued immediate calls remain in #317. The separate dependent
+static operand in the pinned libycxx ratio header stays in #209.
 
 ## Member alias templates and `Q::template M` (#340, 2026-11-24)
 
@@ -3863,8 +3916,7 @@ checked against Clang 23 and GCC 16 probes).
 - Tests: `tests/own/lambda/` (56 spec-only, 1 ABI): 55 pass, 2 XFAIL (default arguments #300,
   block-scope statics #291).
 - Not yet: further lambda declaration contexts ([#338](https://github.com/yrashk/ycxx/issues/338));
-  generic lambdas, template lambdas, pack
-  captures and constexpr lambdas (#281); the conversion function's own symbol, conversions in
+  the conversion function's own symbol, conversions in
   contextual and operator contexts, invokers for class or variadic parameters (#339); arrays of
   non-trivially-copyable classes captured by copy (#353); weak definitions of closure members in
   inline functions (#124). A constant named by a lambda with a capture-default is captured, where
@@ -3899,20 +3951,37 @@ pointer to function ([expr.prim.lambda.closure]/8, [conv.fctptr]).
 - Tests: `tests/own/lambda-noexcept/` (one run test, two reject tests).
 - Not yet: a generic lambda's condition naming its own template parameters is rejected (#820).
 
-## Namespace variable lambdas (#338)
+## Lambdas in declarations (#338)
 
-- A named internal-linkage namespace variable with a deduced type can be initialized by a
-  noncapturing, non-generic lambda. The declarator's identity owns the closure before deduction,
-  and its entity record is published with the resolved type. Its body looks up names in the
-  enclosing namespace. Use of the owner during deduction diagnoses an undeduced placeholder.
-- `ItemSema` records the closure members. The front end emits the call operator and scalar
-  invoker through the body closure path. Their local symbols use the variable's Itanium
-  `<closure-prefix>`. The completed empty closure occupies static storage and supports
-  `constinit`.
-- `unit.linux_namespace_lambda` checks runtime namespace lookup, static storage, function pointer
-  conversion, local names across objects, and daemon edits with a cold comparison. Other
-  declaration contexts and namespace init-captures remain under
-  [#338](https://github.com/yrashk/ycxx/issues/338).
+A lambda can be in the initializer of a namespace-scope variable, a static data member (of a class
+or a class template), or a variable template, and in a constraint-expression. The design is
+[docs/design/closures.md](docs/design/closures.md), "Closures of declarations".
+
+- **Owner:** `Sema::ClosureOwner` gives the closure types of a declaration part their scope and
+  linkage. A variable's is its entity, whose identity needs no type, so a placeholder's
+  initializer has it too. A constraint's is the class or namespace around it, TU-local, with a
+  discriminator: each satisfaction (`AtomAnalysis`) has its own closure types.
+- **Generic lambdas:** `GenericClosure::part` says which declaration part a generic lambda is in.
+  Its specializations are analysed in that part, which may still be being analysed.
+- **Records:** `ItemSema` keeps a part's `ClosureDef`s. `Program::declaration_closures_` finds one
+  by member for constant evaluation, and `Program::member_closures` keeps those of class templates'
+  static members, which are instantiated when they are used.
+- **Emission:** the closure's members have code where something refers to them (most are called
+  in constant expressions only). They are weak when the owner is an inline variable, a static data
+  member or a variable template's specialization with external linkage, and local otherwise.
+  Names use the `<closure-prefix>`, as Clang 23 has them.
+- **Constant evaluation:** closure objects are records the interpreter evaluates, with captures
+  whose fields it represents, so constexpr lambdas work in function bodies too (#262).
+- A lambda that is not local to a block has no capture-default ([expr.prim.lambda.capture]/3). Use
+  of a variable of placeholder type in its own lambda is diagnosed.
+- Tests: `tests/own/lambda-declarations/` (Clang 23 and GCC 16 agree; one ABI test against Clang
+  objects), `unit.darwin_lambda_declarations`, `unit.linux_lambda_declarations`, and
+  `unit.linux_namespace_lambda` (daemon edits with a cold comparison).
+- Not yet ([#338](https://github.com/yrashk/ycxx/issues/338)): default member initializers, default
+  arguments, `static_assert`, and unevaluated operands (`decltype([]{})`). Local classes in a lambda
+  (#117), captures by reference in constant evaluation (#262), and weak definitions of variable
+  template specializations, closure objects that are class templates' members and static locals
+  of closures (#124) wait on their issues.
 
 ## Floating point, the μ slice (#336, 2026-11-19)
 
@@ -3985,10 +4054,10 @@ values, end to end; results match Clang's bit for bit.
   others, mangled as member template specializations in a <local-name>.
 - **Constant evaluation of closures:** `Questions::function_ir` of a closure member is answered
   (`Evaluator::closure_callee` for the part being analysed, `Program::closure_ir` otherwise),
-  and closure members are constexpr; the interpreter does not evaluate class objects yet (#262),
-  so constexpr lambdas wait on it.
+  and closure members are constexpr. The interpreter evaluates closure objects (#338); captures by
+  reference wait on it (#262).
 - Tests: `tests/own/lambda/p3-*` (33 spec-only + 6 own, one an ABI test against Clang objects):
-  all but 11 pass; those are XFAIL (constexpr lambdas #262, default arguments #300,
+  all but 6 pass; those are XFAIL (default arguments #300,
   dependent `decltype` #199, a generic lambda's conversion #339, explicit
   template arguments #347).
 - **Packs:** `auto... xs` invents a template parameter pack and `[]<class... Ts>(Ts... xs)`

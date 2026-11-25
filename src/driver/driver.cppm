@@ -4,6 +4,7 @@
 export module ycxx.driver;
 
 import std;
+import ycxx.build.rule_worker;
 import ycxx.version;
 import ycxx.daemon;
 import ycxx.client;
@@ -11,13 +12,14 @@ import ycxx.driver.archive;
 
 namespace ycxx::driver {
 
-enum class front { daemon, cxx, build, lsp, ctl, archive };
+enum class front { daemon, cxx, build, show, lsp, ctl, archive };
 
 int run_front(front f, std::span<const std::string_view> args) {
   switch (f) {
     case front::daemon: return daemon::run(args);
     case front::cxx: return client::cxx(args);
     case front::build: return client::build(args);
+    case front::show: return client::show(args);
     case front::lsp: return client::lsp(args);
     case front::ctl: return client::control(args);
     case front::archive: return run_archive(args);
@@ -48,6 +50,9 @@ export int run(std::span<const std::string_view> argv)
     usage(std::cerr);
     return 2;
   }
+  if (args[0] == "--internal-rule-worker") return build::run_rule_worker(args.subspan(1));
+  if (args[0] == "--internal-probe-shared") return build::run_shared_probe(args.subspan(1));
+  if (args[0] == "--internal-probe-executable") return build::run_executable_probe(args.subspan(1));
   if (args[0] == "--version") {
     std::println("ycxx {}", version);
     return 0;

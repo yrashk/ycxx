@@ -238,7 +238,6 @@ draft/expr/expr.prim.id.unqual-1.accept.cpp '[' is not supported yet
 draft/expr/expr.prim.id.unqual-2.reject.cpp errors elsewhere: 'struct' not supported yet
 draft/expr/expr.prim.lambda.capture-12.accept.cpp preprocessing directives are not supported yet
 draft/expr/expr.prim.lambda.capture-13.accept.cpp preprocessing directives are not supported yet
-draft/expr/expr.prim.lambda.capture-3.reject.cpp errors elsewhere: 'auto' not supported yet
 draft/expr/expr.prim.lambda.capture-4.accept.cpp preprocessing directives are not supported yet
 draft/expr/expr.prim.lambda.capture-6.reject.cpp errors elsewhere: 'auto' not supported yet
 draft/expr/expr.prim.lambda.capture-7.reject.cpp errors elsewhere: '=' not supported yet
@@ -388,7 +387,6 @@ draft/temp/temp.local-4.reject.cpp errors elsewhere: 'template' not supported ye
 draft/temp/temp.local-5.reject.cpp errors elsewhere: 'template' not supported yet
 draft/temp/temp.mem-2.reject.cpp errors elsewhere: 'template' not supported yet
 draft/temp/temp.mem-3.accept.cpp 'template' not supported yet
-draft/temp/temp.mem-4.reject.cpp errors elsewhere: 'template' not supported yet
 draft/temp/temp.mem-6.accept.cpp 'struct' not supported yet
 draft/temp/temp.mem.enum-1.accept.cpp 'template' not supported yet
 draft/temp/temp.mem.func-1.reject.cpp errors elsewhere: 'template' not supported yet

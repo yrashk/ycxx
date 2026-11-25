@@ -611,6 +611,9 @@ struct EntityRec {
   // An unnamed enumeration's first enumerator and canonical underlying `type` denote it for
   // linkage purposes ([dcl.enum]/12). Neither binds the type's name in source lookup.
   std::optional<NameId> enum_linkage_name{};
+  // A closure type of a template's definition, outside function bodies: a dependent type, which
+  // each instantiation's own closure types replace (docs/design/closures.md).
+  bool closure_pattern = false;
   // The initial value of compiler-created immutable storage without a declaration.
   ConstId constant_object = ConstId::none;
 };
@@ -678,6 +681,15 @@ public:
     return ins_->entities.add<EntityId>(f);
   }
 
+  // The identity of a declaration whose record is not complete yet (a variable's type is not
+  // deduced), with a record that stands until `entity` publishes its own: its closures' scope.
+  EntityId reserve(EntityRec r) {
+    EntityId e = identity(r);
+    if (!recs_.find(std::to_underlying(e)) && !reserved_.find(std::to_underlying(e)))
+      reserved_.publish(std::to_underlying(e), std::move(r));
+    return e;
+  }
+
   EntityId entity(EntityRec r) {
     EntityId e = identity(r);
     // The interner is shared: the back end adds entities of its own (string literal objects), which
@@ -687,17 +699,21 @@ public:
     return e;
   }
   const EntityRec& rec(EntityId e) const
-    pre(recs_.find(std::to_underlying(e)) != nullptr)
+    pre(find(e) != nullptr)
   {
-    return *recs_.find(std::to_underlying(e));
+    return *find(e);
   }
   // The record, if sema made the entity (the back end's string literal objects have none).
-  const EntityRec* find(EntityId e) const { return recs_.find(std::to_underlying(e)); }
+  const EntityRec* find(EntityId e) const {
+    const EntityRec* r = recs_.find(std::to_underlying(e));
+    return r ? r : reserved_.find(std::to_underlying(e));
+  }
 
 private:
   ast::Interners* ins_;
   Types* types_;
   ast::Published<EntityRec> recs_;
+  ast::Published<EntityRec> reserved_;
 };
 
 // ---------------------------------------------------------------- classes (stand-in for #33)
@@ -1319,7 +1335,8 @@ struct World {
     };
     types.dep_name_spelling = [this](NameId n) { return std::string(ins.names.spelling(n)); };
     types.class_dependent = [this](EntityId e) {
-      return std::ranges::any_of(entities.rec(e).args, [&](const ast::TemplateArg& a) { return arg_dependent(a); });
+      const EntityRec& r = entities.rec(e);
+      return r.closure_pattern || std::ranges::any_of(r.args, [&](const ast::TemplateArg& a) { return arg_dependent(a); });
     };
   }
   World(const World&) = delete;

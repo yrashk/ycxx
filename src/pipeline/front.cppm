@@ -949,7 +949,10 @@ bool names_tu_local(parse::Program& program, EntityId entity, bool include_value
   while (entity != EntityId::none) {
     if (program.is_namespace(entity)) return parse::Program::unnamed(program.namespace_path(entity));
     const auto& r = entities.rec(entity);
-    if (r.kind != sema::EntityKind::class_ && r.kind != sema::EntityKind::enum_ &&
+    // A variable is the scope of its initializer's closures (#338).
+    const bool variable = r.kind == sema::EntityKind::variable;
+    if (variable && r.linkage == ast::Linkage::internal) return true;
+    if (!variable && r.kind != sema::EntityKind::class_ && r.kind != sema::EntityKind::enum_ &&
         r.kind != sema::EntityKind::class_template && r.kind != sema::EntityKind::alias_template)
       return false;
     if (std::ranges::any_of(r.args, [&](const ast::TemplateArg& arg) {
@@ -979,6 +982,36 @@ bool names_tu_local(parse::Program& program, QualType type, bool include_value_t
            });
   default: return false;
   }
+}
+
+// Whether an entity is a closure of a constraint-expression or in one, or it or a class it is a
+// member of has an argument that names one. Nothing names it outside that constraint, where it is called in
+// constant expressions only (docs/design/closures.md).
+bool names_constraint_closure(parse::Program& program, EntityId entity) {
+  auto& world = program.world();
+  const auto in_type = [&](this auto&& self, QualType type) -> bool {
+    const auto t = world.types.rec(type);
+    switch (t.kind) {
+      using enum sema::TypeKind;
+    case pointer: case reference: case array: return self(t.inner);
+    case member_pointer: return self(t.member_owner) || self(t.inner);
+    case function: return self(t.inner) || std::ranges::any_of(t.params, self);
+    case class_: return names_constraint_closure(program, t.entity);
+    default: return false;
+    }
+  };
+  const auto in_arg = [&](this auto&& self, const ast::TemplateArg& a) -> bool {
+    if (a.kind == ast::TemplateArgKind::pack) return std::ranges::any_of(world.ins.seqs.elements(a.elems), self);
+    return a.kind == ast::TemplateArgKind::type && in_type(a.type);
+  };
+  while (entity != EntityId::none) {
+    const auto& r = world.entities.rec(entity);
+    if (std::ranges::any_of(r.args, in_arg)) return true;
+    const bool closure = r.kind == sema::EntityKind::class_ && !r.unnamed_type_ordinal && world.ins.names.spelling(r.name).empty();
+    if (closure && (program.is_namespace(r.scope) || world.entities.rec(r.scope).kind == sema::EntityKind::class_)) return true;
+    entity = r.scope;
+  }
+  return false;
 }
 
 // Native compilation may consume peer-owned objects, including one non-key definition.
@@ -1205,6 +1238,34 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
     }
     return false;
   };
+  // The linkage of the symbol of the entity `d` declares.
+  auto symbol_linkage = [&](const ast::DeclSema& d) -> ast::Linkage {
+    // A member of a class local to the unit is local too.
+    const EntityId e = d.entity;
+    const sema::EntityRec& r = world.entities.rec(e);
+    const bool fn = r.kind != sema::EntityKind::variable && r.kind != sema::EntityKind::virtual_table &&
+                    r.kind != sema::EntityKind::type_info;
+    ast::Linkage linkage = constexpr_member_symbol_linkage(d).value_or(r.linkage);
+    for (EntityId sc = r.scope; linkage == ast::Linkage::external && sc != EntityId::none; sc = world.entities.rec(sc).scope) {
+      const auto& owner = world.entities.rec(sc);
+      if (owner.kind == sema::EntityKind::class_ &&
+          (internal_class(sc) || (owner.templ != EntityId::none && names_tu_local(program, sc))))
+        linkage = ast::Linkage::internal;
+      // A closure's members are local where the variable that owns the closure is (#338).
+      if (owner.kind == sema::EntityKind::variable && names_tu_local(program, sc, /*include_value_types=*/true))
+        linkage = ast::Linkage::internal;
+    }
+    if (linkage == ast::Linkage::external && std::ranges::any_of(r.args, [&](const ast::TemplateArg& arg) {
+          return names_tu_local(program, arg, /*include_value_types=*/false);
+        })) linkage = ast::Linkage::internal;
+    if (linkage == ast::Linkage::external && fn && tu_local_class_friend(e)) linkage = ast::Linkage::internal;
+    // A constructor, destructor or ordinary class-template member binds locally when its
+    // owner is TU-local, including a specialization for the value of a TU-local enum ([basic.link]).
+    if ((r.kind == sema::EntityKind::constructor || r.kind == sema::EntityKind::destructor || ordinary_class_template_member(r)) &&
+        linkage == ast::Linkage::external &&
+        names_tu_local(program, r.scope, /*include_value_types=*/true)) linkage = ast::Linkage::internal;
+    return linkage;
+  };
   auto declare = [&](const ast::DeclSema& d, std::optional<ast::Loc> at) {
     EntityId e = d.entity;
     if (e == EntityId::none) return;
@@ -1241,23 +1302,7 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
     bool fn = r.kind != sema::EntityKind::variable && !table && !rtti;
     std::string id(ins.names.spelling(r.name));
     if (fn && id == "main" && r.scope == EntityId::none) tu.main = e;  // [basic.start.main]: the global one
-    // A member of a class local to the unit is local too.
-    ast::Linkage linkage = constexpr_member_symbol_linkage(d).value_or(r.linkage);
-    for (EntityId sc = r.scope; linkage == ast::Linkage::external && sc != EntityId::none; sc = world.entities.rec(sc).scope) {
-      const auto& owner = world.entities.rec(sc);
-      if (owner.kind == sema::EntityKind::class_ &&
-          (internal_class(sc) || (owner.templ != EntityId::none && names_tu_local(program, sc))))
-        linkage = ast::Linkage::internal;
-    }
-    if (linkage == ast::Linkage::external && std::ranges::any_of(r.args, [&](const ast::TemplateArg& arg) {
-          return names_tu_local(program, arg, /*include_value_types=*/false);
-        })) linkage = ast::Linkage::internal;
-    if (linkage == ast::Linkage::external && fn && tu_local_class_friend(e)) linkage = ast::Linkage::internal;
-    // A constructor, destructor or ordinary class-template member binds locally when its
-    // owner is TU-local, including a specialization for the value of a TU-local enum ([basic.link]).
-    if ((r.kind == sema::EntityKind::constructor || r.kind == sema::EntityKind::destructor || ordinary_class_template_member(r)) &&
-        linkage == ast::Linkage::external &&
-        names_tu_local(program, r.scope, /*include_value_types=*/true)) linkage = ast::Linkage::internal;
+    const ast::Linkage linkage = symbol_linkage(d);
     tu.entities.push_back({e, std::move(id), d.type, fn, r.lang, linkage, false, at, r.scope,
                            table ? Special::virtual_table
                            : rtti ? Special::type_info
@@ -1316,9 +1361,17 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
         }
     }
   };
+  // A member of a closure that a declaration part owns (#338) has code where something refers to
+  // it, as most are called in constant expressions only; with external linkage, every unit that
+  // refers to it may define it.
+  auto declaration_closure_member = [&](FunctionDef& f) {
+    f.emit_if_referenced = true;
+    f.coalesced = symbol_linkage(f.decl) == ast::Linkage::external;
+  };
   // A part's closure members (docs/design/closures.md, decision 10). Their offsets are relative
   // to the enclosing declaration or body part, which begins at `offset` in the item.
-  auto closures_of = [&](ast::SeqId<ast::ClosureDef> closures, ast::ItemId item, std::uint32_t offset) {
+  auto closures_of = [&](ast::SeqId<ast::ClosureDef> closures, ast::ItemId item, std::uint32_t offset,
+                         bool in_declaration = false) {
     for (const ast::ClosureDef& c : ins.seqs.elements(closures)) {
       // A template's or a generic lambda's definition is not code; its instances are.
       if (!sema::Sema::closure_has_code(world, c)) continue;
@@ -1330,6 +1383,7 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
         sema::Sema::ClosureMember m = sema::Sema::closure_member_def(world, c, f, f == c.call ? c.body : c.invoker_body, locals);
         declare(m.decl, ast::Loc{item, offset + c.begin});
         tu.functions.push_back({f, m.decl, m.body, item, offset + c.body_begin, m.this_type});
+        if (in_declaration) declaration_closure_member(tu.functions.back());
       }
     }
   };
@@ -1411,6 +1465,11 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
       }
       c = record.dynamic && record.dynamic->primary_base ? record.bases.front().cls : EntityId::none;
     }
+    // A specialization for a TU-local type has a TU-local table, which needs local symbols (#1155).
+    if (internal_class(entity.scope) || names_tu_local(program, entity.scope, /*include_value_types=*/true)) {
+      block_virtual_emission(tu, program, *owner);
+      return false;
+    }
     const EntityId table = sema::virtual_table_entity(world, entity.scope);
     tu.base_object_variants.insert(f.entity);
     if (entity.kind == sema::EntityKind::constructor) {
@@ -1431,6 +1490,8 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
           const auto* base = destroy.field == ~0u ? classes.find(world.types.class_of(destroy.type)) : nullptr;
           // A base destructor defined in this unit shares its code with its D2 alias here.
           const bool defined_here = program.function_defined_before(destroy.destructor, program.end()) ||
+                                    std::ranges::contains(program.instances(), destroy.destructor,
+                                                          [](const auto* in) { return in->spec; }) ||
                                     std::ranges::contains(program.synthesized(), destroy.destructor,
                                                           [](const auto& s) { return s.decl.entity; });
           if (base && base->dynamic && !defined_here) {
@@ -1525,7 +1586,7 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
     // instances are, below.
     if (!decls.empty() && ((decls[0].flags & sema::decl_flag::template_) || ins.seqs.size(decls[0].template_params) > 0))
       continue;
-    closures_of(is.closures, program.id(k), 0);
+    closures_of(is.closures, program.id(k), 0, true);
     if (it.kind == items::ItemKind::function && it.has_body() && !decls.empty() && decls[0].entity != EntityId::none &&
         !(decls[0].flags & sema::decl_flag::deleted) && !program.defaulted_member_definition(k, decls[0])) {
       // A placeholder return type is the one its body deduced ([dcl.spec.auto]).
@@ -1666,9 +1727,18 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
     if ((in->decl.flags & sema::decl_flag::consteval_) && entity.kind == sema::EntityKind::constructor &&
         can_defer_body(in->body.value))
       continue;
-    tu.functions.push_back({in->spec, in->decl, in->body.value, program.id(in->item), it.body_begin - it.begin,
+    tu.functions.push_back({in->spec, in->decl, in->body.value, program.id(in->item), in->body_offset(it),
                             program.this_type(in->decl)});
+    if (in->part) {
+      declaration_closure_member(tu.functions.back());
+      closures_of(in->body.value.closures, program.id(in->item), *in->part, true);
+      continue;
+    }
     auto& definition = tu.functions.back();
+    if (names_constraint_closure(program, in->spec)) {
+      definition.emit_if_referenced = true;
+      continue;
+    }
     definition.emit_if_referenced = immediate_if_referenced(in->decl, entity, in->body.value);
     definition.plain_immediate_template = definition.emit_if_referenced && program.is_namespace(entity.scope) &&
                                           !ins.names.spelling(entity.name).empty();
@@ -1687,7 +1757,20 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
         program.asm_label(in->spec).empty() &&
         !std::ranges::any_of(entity.args, [&](const ast::TemplateArg& a) { return names_tu_local(program, a, true); }))
       definition.coalesced = true;
-    if (it.parent != items::none && items.items[it.parent].kind == items::ItemKind::class_def) {
+    // An implicit instantiation is defined in every unit that uses it ([temp.inst]). A dynamic
+    // class's are also named by its weak table, wherever the members are written.
+    const auto* dynamic_owner = entity.kind == sema::EntityKind::function_template ? nullptr : classes.find(entity.scope);
+    // A constructor template's specializations install the table too.
+    const bool dynamic_specialization = dynamic_owner && dynamic_owner->dynamic &&
+                                        (in->decl.is_virtual || entity.kind != sema::EntityKind::function);
+    if (dynamic_specialization) {
+      definition.coalesced = std::ranges::none_of(entity.args, [&](const ast::TemplateArg& a) {
+        return names_tu_local(program, a, true);
+      }) && std::ranges::none_of(entity.args, [&](const ast::TemplateArg& a) {
+        return a.kind == ast::TemplateArgKind::type && internal_type(a.type);
+      });
+      if (!dynamic_member(tu.functions.size() - 1)) return tu;
+    } else if (it.parent != items::none && items.items[it.parent].kind == items::ItemKind::class_def) {
       const bool ordinary_member = ordinary_class_template_member(entity) && !in->decl.is_virtual &&
                                    !internal_class(entity.scope) &&
                                    !names_tu_local(program, entity.scope, /*include_value_types=*/true);
@@ -1704,6 +1787,7 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
   for (const parse::Program::VarInstance& v : program.variable_instances()) {
     if (!v.cell.diags.empty()) continue;
     const ast::ItemSema& is = v.cell.value;
+    closures_of(is.closures, program.id(v.item), 0, true);
     for (std::size_t i = 0; i < ins.seqs.size(is.decls); ++i) {
       ast::DeclSema d = ins.seqs.at(is.decls, i);
       if (d.entity != v.spec) continue;
@@ -1718,9 +1802,12 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
   }
   // The static data members of class template specializations that are defined in the class
   // (constexpr or inline, [class.static.data]/4) and used, with their constants.
+  for (const parse::Program::MemberClosures& m : program.member_closures())
+    closures_of(m.value.closures, program.id(m.item), 0, true);
   for (const parse::Program::MemberInstance& m : program.member_instances()) {
     if (!m.cell->diags.empty() || world.types.is_dependent(world.types.class_type(m.spec))) continue;
     const ast::ItemSema& is = m.cell->value;
+    closures_of(is.closures, program.id(m.item), 0, true);
     if (is.tree == ast::NodeId::none || !ins.ast.is<ast::DeclGroup>(is.tree)) continue;
     for (ast::Child c : ins.ast.children(ins.ast.get<ast::DeclGroup>(is.tree).declarators)) {
       auto dr = ins.ast.get<ast::Declarator>(c.id);
@@ -1789,25 +1876,35 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
     }
     if (!emit_synthesized(i)) return tu;
   }
-  // The constructors the emitted code calls, to a fixed point over the bodies emitted for them.
-  std::set<EntityId> called;
+  // The special members the emitted code uses, to a fixed point over the bodies emitted for them
+  // and the tables they install.
+  std::set<EntityId> used;
+  const auto use_table = [&](EntityId cls) {
+    const auto* record = classes.find(cls);
+    if (!record || !record->dynamic) return;
+    for (const sema::VirtualSlot& slot : record->dynamic->slots) used.insert(slot.function);
+  };
+  for (EntityId c : classes.classes())
+    if (const auto& record = classes.rec(c);
+        record.dynamic && record.dynamic->key_function != EntityId::none &&
+        program.function_defined_before(record.dynamic->key_function, program.end()))
+      use_table(c);
   std::size_t scanned = 0;
   const auto scan = [&] {
+    std::vector<EntityId> refs;
     for (; scanned < tu.functions.size(); ++scanned) {
       const FunctionDef& f = tu.functions[scanned];
-      if (f.body.tree == ast::NodeId::none) continue;
-      auto visit = [&](this auto&& self, const ast::Red& node) -> void {
-        if (node.is<ast::CtorCall>()) called.insert(node.get<ast::CtorCall>().ctor);
-        node.for_each_child([&](const ast::Red& child) { self(child); });
-      };
-      visit(ast::Red(ins.ast, f.body.tree, f.body_offset));
+      if (f.body.tree != ast::NodeId::none) program.references(f.body.tree, refs);
+      for (EntityId table : {f.constructor_table, f.destructor_table})
+        if (table != EntityId::none) use_table(world.entities.rec(table).scope);
     }
+    used.insert(refs.begin(), refs.end());
   };
   for (bool more = true; more;) {
     scan();
     more = false;
     for (std::size_t& i : on_use) {
-      if (i == std::numeric_limits<std::size_t>::max() || !called.contains(program.synthesized()[i].decl.entity)) continue;
+      if (i == std::numeric_limits<std::size_t>::max() || !used.contains(program.synthesized()[i].decl.entity)) continue;
       if (!emit_synthesized(i)) return tu;
       i = std::numeric_limits<std::size_t>::max();
       more = true;
