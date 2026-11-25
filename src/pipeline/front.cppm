@@ -1767,10 +1767,11 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
     tu.functions.push_back({s.decl.entity, s.decl, program.synthesized_body(i), program.id(s.item), 0, program.this_type(s.decl)});
     using enum parse::Program::SpecialMember;
     if (s.kind == destructor) coalesce_inline_function(tu.functions.back(), true);
-    else tu.functions.back().coalesced = (s.kind == copy_assignment || s.kind == move_constructor ||
-                                          s.kind == default_constructor ||
+    // A constructor or assignment operator defaulted in its class is inline ([dcl.fct.def.default]).
+    else tu.functions.back().coalesced = (s.kind == copy_assignment || s.kind == move_assignment || s.kind == move_constructor ||
+                                          s.kind == default_constructor || !(s.decl.flags & sema::decl_flag::implicit) ||
                                           (s.kind == copy_constructor && classes.rec(cls).layout_requires_virtual_support)) &&
-                                         !internal_class(cls);
+                                         !internal_class(cls) && !names_tu_local(program, cls, /*include_value_types=*/true);
     return dynamic_member(tu.functions.size() - 1);
   };
   for (std::size_t i = 0; i < program.synthesized().size(); ++i) {

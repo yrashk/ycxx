@@ -409,7 +409,9 @@ private:
   std::optional<ConstId> zero_constant(QualType t) {
     Types& types = s_->types();
     Values& values = s_->world().values;
-    if (s_->is_aggregate(t)) {
+    // [dcl.init.general]: value-initialization by a trivial default constructor is zero-initialization.
+    const ClassRec* record = types.is_class(t) ? s_->class_rec(types.class_of(t)) : nullptr;
+    if (s_->is_aggregate(t) || (record && record->trivial_defaulted_default_ctor && constant_record_layout(t))) {
       std::vector<ConstId> elements;
       for (const Sema::Element& element : s_->elements(t)) {
         auto value = zero_constant(element.type);

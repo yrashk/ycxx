@@ -699,8 +699,9 @@ struct FieldRec {
   bool no_unique_address = false;  // the member is potentially overlapping ([intro.object])
 };
 
-// Classification of a defaulted copy affected by an explicit in-class definition. Deletion
-// takes precedence over an unsupported or nontrivial subobject operation.
+// What a complete class makes of a special member explicitly defaulted on its first declaration,
+// or of an implicit copy affected by one ([dcl.fct.def.default]). Deletion takes precedence over
+// an unsupported or nontrivial subobject operation. `ordinary`: not defaulted there.
 enum class CopyState : u8 { ordinary, trivial, nontrivial, unsupported, deleted };
 
 // What `class_def(C)` (ast.md §3.6) says of a class that member lookup and the layout need, kept
@@ -727,6 +728,7 @@ struct MemberDeclRec {
   std::vector<ast::NodeId> defaults;  // a function's default arguments by parameter, or empty
   CopyAssignment copy_assignment = CopyAssignment::none;
   bool explicit_defaulted_assignment = false;
+  CopyState defaulted = CopyState::ordinary;  // a constructor defaulted on its first declaration
   bool is_virtual = false;
   bool is_explicit = false;
   EntityId overridden_virtual = EntityId::none;
@@ -843,7 +845,7 @@ struct ClassRec {
   // (/1); with a lambda-capture, its default constructor and copy assignment are deleted (/13).
   bool closure = false;
   bool default_deleted = false;
-  // Written zero-parameter defaulting, with the completed class's supported no-op proof.
+  // The default constructor defaulted on its first declaration, and whether it is trivial.
   EntityId defaulted_default_ctor = EntityId::none;
   bool trivial_defaulted_default_ctor = false;
   EntityId declared_destructor = EntityId::none;  // retains the access of a written trivial destructor
@@ -853,7 +855,6 @@ struct ClassRec {
   }
   EntityId copy_ctor = EntityId::none;
   bool copy_deleted = false;
-  std::vector<EntityId> defaulted_copy_declarations;
   CopyState defaulted_copy = CopyState::ordinary;
   bool defaulted_copy_const = true;  // the implicit parameter when it depends on a defaulted copy
   // The move constructor ([class.copy.ctor]/8): whether one is declared and not deleted, and
