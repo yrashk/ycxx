@@ -278,8 +278,8 @@ system_leaf:
         finally:
             run([ycxx, 'ctl', 'shutdown'], scope, base)
 
-        parameters = 'only bool, 8-, 16-, 32- and 64-bit integer, pointer and reference parameters'
-        results = 'only void, bool, 8-, 16-, 32- and 64-bit integer, pointer and reference results'
+        parameters = 'only bool, integer, pointer and reference parameters'
+        results = 'only void, bool, integer, pointer and reference results'
         for name in ('direct-results', 'explicit-results'):
             source = source_dir / 'deduced-results' / f'{name}.cpp'
             compile(target, '-nostdlib', source, '-o', name)
