@@ -198,8 +198,9 @@ private:
     return static_cast<u32>(out_.items.size() - 1);
   }
 
-  // The index after the bracket that closes the one at `j`; at most the eof.
-  u32 match(u32 j) const {
+  // After the group opening at `j`. When a close is required, return `none` on a mismatch
+  // or at eof.
+  u32 match(u32 j, bool require_close = false) const {
     Tk open = kind(j);
     Tk close = open == Tk::l_paren ? Tk::r_paren : open == Tk::l_square ? Tk::r_square : Tk::r_brace;
     std::vector<Tk> stack{close};
@@ -209,32 +210,37 @@ private:
       else if (k == Tk::l_square) stack.push_back(Tk::r_square);
       else if (k == Tk::l_brace) stack.push_back(Tk::r_brace);
       else if (k == Tk::r_paren || k == Tk::r_square || k == Tk::r_brace) {
+        if (require_close && stack.back() != k) return none;
         // A mismatched closer ends every group up to its own.
         while (!stack.empty() && stack.back() != k) stack.pop_back();
         if (!stack.empty()) stack.pop_back();
         if (stack.empty()) return j + 1;
       }
     }
-    return j;
+    return require_close ? none : j;
   }
-  // After a template-head's `<…>`: angle brackets balanced outside parentheses ([temp.param]
-  // requires `>` in a default argument to be parenthesized).
-  u32 match_angle(u32 j) const {
+  // After `<…>`: angle brackets balance outside bracket groups ([temp.names]). When a
+  // close is required, return `none` if the groups or the angles do not balance.
+  u32 match_angle(u32 j, bool require_close = false) const {
     int depth = 0;
     for (; kind(j) != Tk::eof; ++j) {
       Tk k = kind(j);
       if (k == Tk::l_paren || k == Tk::l_square || k == Tk::l_brace) {
-        j = match(j) - 1;
+        u32 end = match(j, require_close);
+        if (end == none) return none;
+        j = end - 1;
       } else if (k == Tk::less) {
         ++depth;
       } else if (k == Tk::greater || k == Tk::greatergreater) {
         depth -= k == Tk::greater ? 1 : 2;
-        if (depth <= 0) return j + 1;
+        if (depth <= 0) return require_close && depth < 0 ? none : j + 1;
       } else if (k == Tk::semi || k == Tk::r_brace) {
-        return j;
+        break;
+      } else if (require_close && (k == Tk::r_paren || k == Tk::r_square)) {
+        return none;
       }
     }
-    return j;
+    return require_close ? none : j;
   }
 
   u32 item(u32 parent, const std::string& scope, u32& unnamed_types);
@@ -283,7 +289,7 @@ private:
     int angle = 0;
     for (u32 n = key + 1; n < end; ++n) {
       Tk t = kind(n);
-      if (t == Tk::l_square || t == Tk::l_paren) n = match(n) - 1;
+      if (t == Tk::l_square || t == Tk::l_paren || t == Tk::l_brace) n = match(n) - 1;
       else if (kind(key) != Tk::kw_enum && is_name(n, "__attribute__") && kind(n + 1) == Tk::l_paren)
         n = match(n + 1) - 1;
       else if (t == Tk::less) ++angle;
@@ -577,7 +583,19 @@ void Splitter::general(u32 k, u32& unnamed_types) {
     case Tk::kw_struct:
     case Tk::kw_union:
     case Tk::kw_enum:
-      if (class_key == none && !initializer && !params) class_key = j;
+      if (class_key == none && !initializer && !params) {
+        class_key = j;
+        // In a directly named explicit class specialization ([temp.expl.spec]), a balanced
+        // template-id keeps its argument groups inside the head.
+        if (j == i_ && t != Tk::kw_enum && at(k).specialization && at(k).template_depth == 0 &&
+            kind(j + 1) == Tk::identifier && kind(j + 2) == Tk::less) {
+          u32 end = match_angle(j + 2, /*require_close=*/true);
+          if (end != none && (kind(end) == Tk::l_brace || kind(end) == Tk::colon || kind(end) == Tk::semi)) {
+            j = end;
+            continue;
+          }
+        }
+      }
       ++j;
       continue;
     case Tk::kw_typedef:
@@ -765,11 +783,16 @@ private:
     int angle = 0;
     for (u32 n = key + 1; n < it.brace_begin; ++n) {
       Tk t = kind(n);
-      if (t == Tk::l_square || t == Tk::l_paren) n = match(n) - 1;
+      if (t == Tk::l_square || t == Tk::l_paren || t == Tk::l_brace) n = match(n) - 1;
       else if (gnu_extension(n)) n = match(n + 1) - 1;
       else if (t == Tk::less) ++angle;
-      else if (t == Tk::greater) --angle;
-      else if (t == Tk::colon && angle <= 0) break;
+      else if (t == Tk::greater || t == Tk::greatergreater) {
+        angle -= t == Tk::greater ? 1 : 2;
+        if (angle == 0 && kind(n + 1) == Tk::coloncolon && head != none) {
+          if (qual == none) qual = head;
+          head = none;
+        }
+      } else if (t == Tk::colon && angle <= 0) break;
       else if (t == Tk::identifier && angle <= 0) {
         if (kind(n + 1) == Tk::coloncolon) {
           if (qual == none) qual = n;
