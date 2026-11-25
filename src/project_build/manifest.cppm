@@ -42,13 +42,18 @@ struct ProbeRef {
   std::string probe;
 };
 
+struct ValueRef {
+  std::string target;
+  std::string field;
+};
+
 struct Value;
 using List = std::vector<Value>;
 using Record = std::vector<std::pair<std::string, Value>>;
 
 struct Value {
   SourceLocation location;
-  std::variant<std::string, List, Record, Glob, ArtifactRef, InputArg, OutputArg, CxxTool, ProbeRef> data;
+  std::variant<std::string, List, Record, Glob, ArtifactRef, InputArg, OutputArg, CxxTool, ProbeRef, ValueRef> data;
 };
 
 struct TargetDecl {
@@ -331,6 +336,18 @@ class Parser {
       if (probe.empty()) fail(probe_at, "empty probe id");
       expect(')');
       return {at, ProbeRef{std::move(package), std::move(probe)}};
+    }
+    if (name == "value") {
+      expect('(');
+      const auto target_at = next_location();
+      auto target = string();
+      if (target.empty()) fail(target_at, "empty value target");
+      expect(',');
+      const auto field_at = next_location();
+      auto field = string();
+      if (field.empty()) fail(field_at, "empty value export name");
+      expect(')');
+      return {at, ValueRef{std::move(target), std::move(field)}};
     }
     if (name == "input" || name == "output") {
       expect('(');
