@@ -1,8 +1,10 @@
-"""Exercise the foreign Make action and its native archive consumer (#1341)."""
+"""Exercise the foreign Make action, helper tools, and native consumer (#1341, #1343)."""
 
 import html
 import json
+import os
 from pathlib import Path
+import re
 import shlex
 import shutil
 import sys
@@ -28,20 +30,55 @@ NATIVE = '.ycxx/out/app'
 NATIVE_SOURCES = ('main.cc', 'bridge.cc')
 RAN = {'executed', 'cutoff', 'recomputed', 'failed'}
 REJECT = 'bad vendor edit'
+HELPER_REJECT = 'compiler helper failed on purpose'
 
 
 def prepare(scope, journal):
     shutil.copytree(EXAMPLE, scope, ignore=shutil.ignore_patterns('.ycxx'))
     # Count actual Make invocations without changing its arguments, environment, or cwd.
     tool = scope.parent / 'make-fixture'
-    tool.write_text(f'#!/bin/sh\nprintf "%s\\n" make >> {shlex.quote(str(journal))} || exit 1\n'
-                    'exec /usr/bin/make "$@"\n', encoding='utf-8')
-    tool.chmod(0o700)
+    write_executable(tool, f'#!/bin/sh\nprintf "%s\\n" make >> {shlex.quote(str(journal))} || exit 1\n'
+                           'exec /usr/bin/make "$@"\n')
+    compiler = scope.parent / 'cc-fixture'
+    actual = scope.parent / 'cc-original'
+    write_executable(actual, compiler_script())
+    compiler.symlink_to(actual.name)
     manifest = scope / 'build.ycxx'
     source = manifest.read_text(encoding='utf-8')
-    assert source.count('"/usr/bin/make"') == 1, source
-    manifest.write_text(source.replace('"/usr/bin/make"', json.dumps(str(tool))), encoding='utf-8')
-    return tool
+    for spelling, replacement in (('"/usr/bin/make"', tool), ('"/usr/bin/cc"', compiler)):
+        assert source.count(spelling) == 1, source
+        source = source.replace(spelling, json.dumps(str(replacement)))
+    manifest.write_text(source, encoding='utf-8')
+
+    # Let the copied fixture's compiler wrapper choose a bonus without editing a staged input.
+    config = scope / CONFIG
+    contents = config.read_text(encoding='utf-8')
+    anchor = '#define SCORE_BONUS 7'
+    assert contents.count(anchor) == 1, contents
+    config.write_text(contents.replace(anchor, f'#ifndef SCORE_BONUS\n{anchor}\n#endif'), encoding='utf-8')
+    return tool, compiler
+
+
+def compiler_script(bonus=None):
+    define = '' if bonus is None else f' -DSCORE_BONUS={bonus}'
+    return f'#!/bin/sh\nexec /usr/bin/cc{define} "$@"\n'
+
+
+def write_executable(path, contents):
+    path.write_text(contents, encoding='utf-8')
+    path.chmod(0o700)
+
+
+def replace_executable(scope, path, contents):
+    pending = scope / '.ycxx' / 'watch-test-helper'
+    write_executable(pending, contents)
+    pending.replace(path)
+
+
+def retarget_compiler(scope, compiler, target):
+    pending = scope / '.ycxx' / 'watch-test-helper'
+    pending.symlink_to(target)
+    pending.replace(compiler)
 
 
 def journal_bytes(journal):
@@ -56,6 +93,7 @@ def inspect(ycxx, scope, env, journal, tool, *, cold=False, inventory_files=(SOU
     assert plan['schema'] == 1 and plan['target'] == 'app', plan
     if cold:
         assert any(row['kind'] == 'unresolved' and row['target'] == 'app' for row in plan['facts']), plan
+        assert not any(row['kind'] == 'tool-input' for row in plan['facts']), plan
         assert not (scope / '.ycxx').exists(), 'cold show created build state'
     else:
         fact(plan, 'tool', PRODUCER, str(tool))
@@ -77,6 +115,7 @@ def inspect(ycxx, scope, env, journal, tool, *, cold=False, inventory_files=(SOU
         assert all(part in document for part in (f'inputs/{MAKEFILE}', *inventory_files, ARCHIVE,
                                                   'inherited from bridge')), document
     assert journal_bytes(journal) == before, 'show ran Make'
+    return plan
 
 
 def check_native(events, *, linked=False):
@@ -203,6 +242,120 @@ def check_builds(ycxx, scope, env, journal, tool):
     assert {path.relative_to(vendor) for path in vendor.rglob('*') if path.is_file()} == vendor_files
 
 
+def inspect_helpers(ycxx, scope, env, journal, tool, compiler, *, unavailable=False):
+    plan = inspect(ycxx, scope, env, journal, tool)
+    compiler_input = fact(plan, 'tool-input', PRODUCER, str(compiler))
+    archiver_input = fact(plan, 'tool-input', PRODUCER, '/usr/bin/ar')
+    assert compiler_input['name'] == 'cc' and archiver_input['name'] == 'ar', plan
+    canonical_ar = Path('/usr/bin/ar').resolve()
+    assert f'canonical {canonical_ar} · fingerprint ' in archiver_input['origin'], archiver_input
+    if unavailable:
+        assert compiler_input['origin'].startswith('unavailable · '), compiler_input
+        return None
+    prefix = f'declared in tool_inputs · canonical {compiler.resolve()} · fingerprint '
+    fingerprint = re.fullmatch(re.escape(prefix) + r'([0-9a-f]{32})', compiler_input['origin'])
+    assert fingerprint, compiler_input
+    return fingerprint[1]
+
+
+def check_helpers(ycxx, scope, env, journal, tool, compiler):
+    executable = scope / NATIVE
+    installed = publication(executable)
+    selected = compiler.resolve()
+    original = inspect_helpers(ycxx, scope, env, journal, tool, compiler)
+
+    replace_executable(scope, selected, compiler_script() + '# Equal compiler behavior\n')
+    current = inspect_helpers(ycxx, scope, env, journal, tool, compiler)
+    assert current != original, 'read-only show kept the previous helper fingerprint'
+    summary, events = traced_build(ycxx, scope, env, 'same-path compiler edit with equal output')
+    check_make(summary, events)
+    check_native(events)
+    assert publication(executable) == installed
+
+    replacement = scope.parent / 'cc-replacement'
+    write_executable(replacement, compiler_script(bonus=15))
+    watch = Watch(ycxx, scope, env)
+    try:
+        summary, events, watched = watch.build('watch declared and canonical helper paths')
+        assert summary['actions_executed'] == 0, summary
+        assert {str(compiler), str(selected)} <= set(watched), watched
+        check_native(events)
+
+        replace_executable(scope, selected, compiler_script(bonus=13))
+        summary, events, _ = watch.build('compiler behavior edit relinks the native app')
+        check_make(summary, events)
+        check_native(events, linked=True)
+        check_program(executable, 48)
+        installed = publication(executable)
+        changed = inspect_helpers(ycxx, scope, env, journal, tool, compiler)
+        assert changed != current, 'show kept the previous helper fingerprint after relinking'
+
+        # A non-root owner must be able to execute the helper using the owner mode bits.
+        selected.chmod(0o601 if os.geteuid() else 0o600)
+        summary, events, watched = watch.build('the helper loses execute access', succeeds=False)
+        assert summary['actions_executed'] == 0, summary
+        assert any('is not executable' in diagnostic for diagnostic in summary['diagnostics']), summary
+        assert {str(compiler), str(selected)} <= set(watched), watched
+        check_native(events)
+        assert publication(executable) == installed
+        inspect_helpers(ycxx, scope, env, journal, tool, compiler, unavailable=True)
+
+        selected.chmod(0o700)
+        summary, events, _ = watch.build('the helper regains execute access')
+        assert summary['actions_executed'] == 0, summary
+        check_native(events)
+        assert publication(executable) == installed
+
+        replace_executable(scope, selected, f'#!/bin/sh\nprintf "%s\\n" "{HELPER_REJECT}" >&2\nexit 1\n')
+        summary, events, watched = watch.build('compiler helper fails', succeeds=False)
+        check_make(summary, events, failed=True)
+        check_native(events)
+        assert any(HELPER_REJECT in diagnostic for diagnostic in summary['diagnostics']), summary
+        assert {str(compiler), str(selected)} <= set(watched), watched
+        assert publication(executable) == installed, 'helper failure replaced the executable'
+        check_program(executable, 48)
+
+        retarget_compiler(scope, compiler, replacement)
+        summary, events, watched = watch.build('retarget the declared helper and recover')
+        check_make(summary, events)
+        check_native(events, linked=True)
+        assert {str(compiler), str(replacement)} <= set(watched), watched
+        assert str(selected) not in watched, watched
+        check_program(executable, 50)
+        assert inspect_helpers(ycxx, scope, env, journal, tool, compiler) != changed
+        installed = publication(executable)
+
+        mirror = scope.parent / 'cc-mirror'
+        write_executable(mirror, compiler_script(bonus=15))
+        retarget_compiler(scope, compiler, mirror)
+        summary, events, watched = watch.build('retarget to equal helper bytes at a different path')
+        check_make(summary, events)
+        check_native(events)
+        assert {str(compiler), str(mirror)} <= set(watched), watched
+        assert publication(executable) == installed
+        inspect_helpers(ycxx, scope, env, journal, tool, compiler)
+
+        mirror.unlink()
+        summary, events, watched = watch.build('helper symlink target is missing', succeeds=False)
+        assert summary['actions_executed'] == 0, summary
+        assert any(str(compiler) in diagnostic for diagnostic in summary['diagnostics']), summary
+        assert str(compiler) in watched, watched
+        check_external_actions(events)
+        check_native(events)
+        assert publication(executable) == installed
+        inspect_helpers(ycxx, scope, env, journal, tool, compiler, unavailable=True)
+
+        replace_executable(scope, mirror, compiler_script(bonus=15))
+        summary, events, watched = watch.build('missing helper target reappears unchanged')
+        assert summary['actions_executed'] == 0, summary
+        check_native(events)
+        assert {str(compiler), str(mirror)} <= set(watched), watched
+        assert publication(executable) == installed
+        check_program(executable, 50)
+    finally:
+        watch.close()
+
+
 def main():
     ycxx = Path(sys.argv[1]).resolve()
     with (
@@ -213,9 +366,10 @@ def main():
         scope = root / 'project'
         journal = root / 'make-runs'
         env = env_for(runtime)
-        tool = prepare(scope, journal)
+        tool, compiler = prepare(scope, journal)
         try:
             check_builds(ycxx, scope, env, journal, tool)
+            check_helpers(ycxx, scope, env, journal, tool, compiler)
         finally:
             run_client(ycxx, scope, env, 'ctl', 'shutdown')
 

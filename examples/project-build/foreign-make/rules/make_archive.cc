@@ -161,6 +161,13 @@ extern "C" int ycxx_rule_plan_v1(const ycxx_rule_host_v1* host) {
         LC_ALL = "C"
         ZERO_AR_DATE = "1"
     }
+    tool_inputs = {
+        cc = )ycxx");
+  quote(definition, cc);
+  append(definition, "\n        ar = ");
+  quote(definition, ar);
+  append(definition, R"ycxx(
+    }
     outputs = { archive = "libforeign.a" }
 }
 )ycxx");

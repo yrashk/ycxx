@@ -94,10 +94,9 @@ action that stages the Makefile and the listed files in the same layout. The
 `public_link_inputs`. Read-only inspection shows the staged paths, the Make
 command, and the library that exports the archive.
 
-The receipt fingerprints Make and records the configured compiler and archiver
-paths. The example assumes those nested tools stay stable at their configured
-paths. Tracking their executable identities belongs to the toolchain work in
-[#1259](https://github.com/yrashk/ycxx/issues/1259).
+The rule declares its compiler and archiver as `tool_inputs`. Changes to
+either executable can rerun Make while equal archive bytes reuse the native
+link. [#1343](https://github.com/yrashk/ycxx/issues/1343)
 
 ## Build definitions and tracked values
 
@@ -126,6 +125,15 @@ as one successful result. The runner owns process lifecycle and diagnostics.
 The caller owns cache admission and materialization. A crash, cancellation
 or failed command produces no reusable successful result. The first runner
 can return owned bytes, before deciding on durable artifact storage.
+
+Generators can name helper executables through a record such as
+`tool_inputs = { cc = "/usr/bin/cc", ar = "/usr/bin/ar" }`. Each helper's name,
+declared absolute path, canonical pathname, and executable content fingerprint
+enter the ordinary action receipt identity. The declaration observes the
+helper at its host path. The direct tool still gets the declared arguments
+and environment. Watch reobserves both spellings, and `ycxx show` reports
+the current canonical path and fingerprint or the reason it is unavailable.
+[#1343](https://github.com/yrashk/ycxx/issues/1343)
 
 Keep subprocess execution outside ordinary reevaluation. A query returns
 pending action demands to the build coordinator. The coordinator deduplicates

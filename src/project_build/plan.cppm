@@ -1,4 +1,7 @@
 // Resolve reachable declarations and capture the external action inputs for a build request.
+module;
+#include <unistd.h>
+
 export module ycxx.build.plan;
 
 import std;
@@ -160,6 +163,20 @@ struct WatchObservations {
   // Keep observations made before a failed plan, when there is no ProjectPlan to fingerprint.
   std::vector<Fp128> values;
 };
+
+struct ExecutableObservation {
+  std::string canonical;
+  Fp128 contents;
+};
+
+struct HelperToolIdentity {
+  std::string_view name;
+  std::string_view spelling;
+  std::string_view canonical;
+  Fp128 contents;
+};
+
+std::string tool_digest(Fp128 fp) { return std::format("{:016x}{:016x}", fp.lo, fp.hi); }
 
 [[noreturn]] void fail(SourceLocation at, std::string why) {
   throw PlanningError{std::format("build.ycxx:{}:{}: {}", at.line, at.column, why)};
@@ -705,10 +722,9 @@ class Planner {
     watch_->paths.insert(path_text(normalized));
   }
 
-  std::string fingerprint_tool(std::string_view spelling, SourceLocation at) {
-    if (const auto known = tool_fingerprints_.find(spelling); known != tool_fingerprints_.end())
+  const ExecutableObservation& observe_tool(std::string_view spelling, SourceLocation at) {
+    if (const auto known = tools_.find(spelling); known != tools_.end())
       return known->second;
-    observe(spelling);
     std::error_code ec;
     const auto tool_path = fs::canonical(spelling, ec);
     if (ec) fail(at, std::format("cannot locate tool '{}': {}", spelling, ec.message()));
@@ -717,9 +733,44 @@ class Planner {
     if (!executable(status.permissions())) fail(at, std::format("tool '{}' is not executable", spelling));
     const auto fp = Hasher{}.bytes(read_file(tool_path, at)).finish();
     if (watch_) watch_->values.push_back(fp);
-    auto key = std::format("{:016x}{:016x}", fp.lo, fp.hi);
-    tool_fingerprints_.emplace(std::string(spelling), key);
-    return key;
+    return tools_.emplace(std::string(spelling), ExecutableObservation{path_text(tool_path), fp}).first->second;
+  }
+
+  std::string fingerprint_tool(std::string_view spelling, SourceLocation at) {
+    observe(spelling);
+    return tool_digest(observe_tool(spelling, at).contents);
+  }
+
+  std::vector<HelperToolIdentity> observe_helper_tools(const TargetDecl& decl, const Value& field) {
+    const auto& tools = as<Record>(field, "a record of named helper executables");
+    // Collect every spelling before accessing the filesystem. Keep `..` for paths whose
+    // symlink components affect resolution.
+    for (const auto& [name, value] : tools) {
+      const auto& path = as<std::string>(value, "an absolute helper executable path");
+      if (name.empty() || name.contains('\0')) fail(value.location, "invalid helper executable name");
+      if (path.contains('\0') || !fs::path(path).is_absolute())
+        fail(value.location, "expected an absolute helper executable path");
+      if (watch_) watch_->paths.insert(path);
+    }
+    std::vector<HelperToolIdentity> result;
+    for (const auto& [name, value] : tools) {
+      const auto& path = as<std::string>(value, "an absolute helper executable path");
+      try {
+        const auto& observation = observe_tool(path, value.location);
+        if (::access(path.c_str(), X_OK) != 0) fail(value.location, std::format("tool '{}' is not executable", path));
+        if (inspection_)
+          fact("tool-input", decl, name, path,
+               std::format("declared in tool_inputs · canonical {} · fingerprint {}", observation.canonical,
+                           tool_digest(observation.contents)), value.location);
+        else
+          result.push_back({name, path, observation.canonical, observation.contents});
+      } catch (const PlanningError& error) {
+        if (!inspection_) throw;
+        fact("tool-input", decl, name, path, std::format("unavailable · {}", error.message), value.location);
+      }
+    }
+    std::ranges::sort(result, {}, &HelperToolIdentity::name);
+    return result;
   }
 
   std::vector<ArtifactInputPlan> resolve_rule_inputs(const TargetDecl& decl,
@@ -857,7 +908,7 @@ class Planner {
     if (sdk_header)
       check_fields(decl, {"tool", "args", "inputs", "outputs", "environment", "native_args", "probe_flags", "probe_inputs"});
     else if (observer) check_fields(decl, {"export", "schema", "tool", "args", "inputs", "environment"});
-    else check_fields(decl, {"tool", "args", "inputs", "outputs", "environment"});
+    else check_fields(decl, {"tool", "args", "inputs", "outputs", "environment", "tool_inputs"});
     if (inspection_) fact("rule", decl, decl.name, decl.kind, "declared rule", decl.location);
     if (inspection_ && observer)
       if (const auto schema = observation_schema(decl))
@@ -913,9 +964,16 @@ class Planner {
         plan.inputs.push_back(std::move(input));
       }
     }
+    std::vector<HelperToolIdentity> helpers;
+    if (const auto* tool_inputs = field(decl, "tool_inputs")) helpers = observe_helper_tools(decl, *tool_inputs);
     if (!inspection_) {
       // Capture every declared path first so a missing tool or input leaves a watchable recipe.
       if (!plan.action.tool.empty()) plan.tool_fingerprint = fingerprint_tool(plan.action.tool, tool.location);
+      if (!helpers.empty()) {
+        // Actions without helpers keep the original tool fingerprint and receipt key.
+        constexpr std::string_view kind = "ycxx.tool_inputs.v1";
+        plan.tool_fingerprint = tool_digest(fingerprint(std::tie(kind, plan.tool_fingerprint, helpers)));
+      }
       if (bindings) {
         auto index = first_file_input;
         for (const auto& [name, value] : *bindings)
@@ -1192,7 +1250,7 @@ class Planner {
   std::map<std::string, RulePackageRef, std::less<>> prefixes_;
   std::map<std::string, LoweredTarget, std::less<>> primitives_;
   std::map<std::string, std::size_t> generators_;
-  std::map<std::string, std::string, std::less<>> tool_fingerprints_;
+  std::map<std::string, ExecutableObservation, std::less<>> tools_;
   // The edge count at each active frame distinguishes mixed cycles from value or artifact cycles.
   std::map<std::string, std::size_t, std::less<>> resolving_rules_;
   std::map<std::string, std::size_t, std::less<>> active_generators_;
