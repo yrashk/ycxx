@@ -829,8 +829,10 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
   through a hidden pointer that takes RDI ahead of `this` and comes back in RAX. A class
   argument not trivial for calls passes by the address of the caller's object. A naturally laid
   out one-byte empty class trivial for calls uses no register or stack slot in a fixed direct
-  call. The callee still has a distinct parameter object. Trivially copyable arguments of more
-  than two eightbytes and empty class results remain tracked in
+  call. The callee still has a distinct parameter object. A result with the same layout,
+  including a captureless closure, carries zero ABI value components in a fixed direct call.
+  The callee evaluates the return operand and the caller keeps the result object in its own
+  storage when used. Other empty records and trivial stack arguments remain tracked in
   [#641](https://github.com/yrashk/ycxx/issues/641). SSE records are tracked in
   [#642](https://github.com/yrashk/ycxx/issues/642). Records with source layout directives
   native layout does not apply stay out of memory passing, including records that contain
