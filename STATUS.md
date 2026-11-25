@@ -2538,7 +2538,8 @@ session's.*
   concrete types at the actual demand and retains hard errors at the builtin spelling. An empty
   pack contributes zero arguments. The target must be a separately written type-id.
   `__is_nothrow_constructible(C, C&&)` can use a written exact move constructor and the
-  effective destructor facts of a complete ordinary class without bases.
+  effective destructor facts of a complete ordinary class without bases. A query during class
+  completion gets an unsupported-operand diagnostic if the constructor's specification is pending.
   General dependent queries and broader class construction remain in [#218](https://github.com/yrashk/ycxx/issues/218).
   `__has_builtin` answers 0 for all three predicates while support is partial ([meta.unary.prop]).
   [Direct design](docs/design/direct-constructibility.md)
@@ -4106,7 +4107,7 @@ In a template's definition, `noexcept` on a call of such a function is value-dep
   the written exact move operations above. Broader class queries remain in
   [#218](https://github.com/yrashk/ycxx/issues/218), with implicit and defaulted special-member facts in
   [#1303](https://github.com/yrashk/ycxx/issues/1303).
-- Tests: `tests/own/template-noexcept/` (one run test, one reject test, one accept test).
+- Tests: `tests/own/template-noexcept/`.
 - Not yet: the resolved specification in `decltype` of a template-id, in deduction from one, and
   in the address of a class template member (#838).
 

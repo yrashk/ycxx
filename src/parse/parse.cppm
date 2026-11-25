@@ -381,6 +381,11 @@ public:
   std::optional<ast::DeclSema> decl_sema(DeclId d);
   std::optional<ast::DeclSema> friend_decl(const ast::MemberRec& f);
   std::optional<ast::DeclSema> class_friend(EntityId f);
+  bool unresolved_special_member_exception(EntityId entity) const {
+    const auto resolved = special_member_exception_types_.find(entity);
+    return (resolved != special_member_exception_types_.end() && !resolved->second) ||
+           special_member_exception_tokens_.contains(entity);
+  }
   ast::DeclSema completed_declaration(ast::DeclSema decl) const {
     if (auto found = special_member_exception_types_.find(decl.entity);
         found != special_member_exception_types_.end() && found->second)
@@ -2384,6 +2389,9 @@ public:
     const auto slot = p_->member_exceptions_.find(f);
     return slot != p_->member_exceptions_.end() && slot->second.condition_tokens.has_value();
   }
+  bool unresolved_special_member_exception(EntityId f) override {
+    return p_->unresolved_special_member_exception(f);
+  }
   std::optional<u32> default_instantiation_point;
   bool is_complete_at_source(EntityId c) override {
     // The initializer is a complete-class context at its member declaration ([class.mem.general]).
@@ -2896,6 +2904,7 @@ std::optional<QualType> AtItem::replay_member_exception(sema::Sema& caller, cons
     const auto f = types.rec(type);
     return types.function(f.inner, f.params, f.variadic, f.linkage, f.fn_cv, f.fn_ref, true);
   }
+  if (caller.in_discarded_constraint_operand) return type;  // [temp.constr.op]
   // An explicit specialization has its own declaration's ([temp.expl.spec]).
   if (p_->explicitly_specialized(function, p_->end())) return type;
   if (const auto cached = p_->resolved_member_exceptions_.find(function); cached != p_->resolved_member_exceptions_.end())
@@ -3176,6 +3185,7 @@ public:
     return at_.replay_member_exception(caller, decl, function, type);
   }
   bool deferred_exception(EntityId f) override { return at_.deferred_exception(f); }
+  bool unresolved_special_member_exception(EntityId f) override { return at_.unresolved_special_member_exception(f); }
   const sema::Classes& classes() override { return p_->classes(); }
   sema::CopyAssignment require_copy_assignment(EntityId f) override { return p_->require_copy_assignment(f); }
   std::set<EntityId> uncertain_object_layouts() override { return at_.uncertain_object_layouts(); }
@@ -6864,9 +6874,7 @@ private:
       s_.diag(name_at, Diag::consteval_redeclared, m->name);
       return bad();
     }
-    const auto resolved = p_->special_member_exception_types_.find(m->entity);
-    if (ctor && ((resolved != p_->special_member_exception_types_.end() && !resolved->second) ||
-                 p_->special_member_exception_tokens_.contains(m->entity)))
+    if (ctor && p_->unresolved_special_member_exception(m->entity))
       return bad();  // class completion reports an invalid specification
     const QualType declared_type = mem->type;
     if (ctor && s_.types().rec(declared_type).fn_noexcept != nonthrowing) {

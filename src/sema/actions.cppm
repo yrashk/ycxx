@@ -175,6 +175,8 @@ public:
   // Whether function (or function template) `f` has a noexcept condition kept for its
   // specializations' replays.
   virtual bool deferred_exception(EntityId) { return false; }
+  // Whether a special member's provisional type still lacks its completed specification.
+  virtual bool unresolved_special_member_exception(EntityId) { return false; }
   // A concrete source query keeps its original position if its tokens are read again.
   virtual bool is_complete_at_source(EntityId c) { return is_complete(c); }
   // Whether a class's layout, or a base's or stored member's, depends on attributes or packing
@@ -2077,6 +2079,7 @@ public:
 
   enum class ExceptionTypeTraits { ordinary, checking_pattern, dependent };
   ExceptionTypeTraits exception_type_traits = ExceptionTypeTraits::ordinary;
+  bool in_discarded_constraint_operand = false;
 
   bool defer_exception_type_trait(ast::DepOp op) {
     if (exception_type_traits == ExceptionTypeTraits::ordinary ||
@@ -2124,14 +2127,15 @@ public:
     // The traits check access as if from a context unrelated to the class.
     if (move->is_deleted || record->access_of(move->entity) != ast::Access::public_) return false;
     const auto declaration = q_->written_member(move->entity);
-    if (!declaration || q_->deferred_exception(move->entity)) return std::nullopt;
+    if (!declaration || q_->deferred_exception(move->entity) || q_->unresolved_special_member_exception(move->entity))
+      return std::nullopt;
     if (!ts.rec(declaration->type).fn_noexcept) return false;
     if (!constructing) return true;
     const EntityId destructor = record->destructor_declaration();
     if (record->access_of(destructor) != ast::Access::public_) return false;
     const auto written_destructor = std::ranges::find(record->members, destructor, &MemberDeclRec::entity);
     if (written_destructor != record->members.end() && written_destructor->is_deleted) return false;
-    if (!record->destructor_usable) return std::nullopt;
+    if (!record->destructor_usable || q_->unresolved_special_member_exception(destructor)) return std::nullopt;
     return record->destructor_noexcept;
   }
 

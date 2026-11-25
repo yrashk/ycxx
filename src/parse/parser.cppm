@@ -3297,10 +3297,19 @@ public:
   // short-circuit as satisfaction does ([temp.constr.op]), so an operand that is not checked may be
   // invalid. Its normal form is not needed: subsumption does not look into a requires-expression.
   enum class Truth : u8 { no, yes, dependent, invalid };
+  // The parser still consumes a discarded operand using provisional function types.
+  struct DiscardedConstraintOperand {
+    bool& discard;
+    bool saved;
+    explicit DiscardedConstraintOperand(sema::Sema& sema, bool skipped)
+        : discard(sema.in_discarded_constraint_operand), saved(std::exchange(discard, discard || skipped)) {}
+    ~DiscardedConstraintOperand() { discard = saved; }
+  };
   Truth nested_constraint(bool templated) {
     Truth l = nested_conjunction(templated);
     while (accept(Tk::pipepipe)) {
       std::size_t n = s_->diag_count();
+      const DiscardedConstraintOperand discard(*s_, l == Truth::yes);
       Truth r = nested_conjunction(templated);
       if (l == Truth::yes) {
         s_->drop_failures(n);
@@ -3316,6 +3325,7 @@ public:
     Truth l = nested_operand(templated);
     while (accept(Tk::ampamp)) {
       std::size_t n = s_->diag_count();
+      const DiscardedConstraintOperand discard(*s_, l == Truth::no || l == Truth::invalid);
       Truth r = nested_operand(templated);
       if (l == Truth::no || l == Truth::invalid) {
         s_->drop_failures(n);
