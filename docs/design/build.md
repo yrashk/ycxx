@@ -142,3 +142,95 @@ stay equal.
 Modules, host and target variants, richer link propagation and a foreign build
 adapter grow coverage after the first witness (#1259). Package acquisition and
 version solving sit outside the build.
+
+## Resolved plan inspection (#1256)
+
+`ycxx show app` reports the targets and facts the planner reached. Each source,
+include directory, dependency, tool, argument and output has an origin in
+`build.ycxx`. A generated source shows its producer and output name. A glob
+match shows the expression that selected it. The source format returns the
+original definition. The JSON format is a versioned snapshot, and the HTML
+format can be opened without a server.
+
+Save a snapshot with `ycxx show app --format=json > before.json`. Compare it
+with this checkout using `ycxx show app --against before.json`. The comparison
+uses fact kind, owner and name for identity and resolved values for equality.
+Locations and descriptions explain changes without causing changes when lines
+move. Ordered requirements use their position for identity. A new glob match
+is visible even when the manifest text is identical.
+
+Inspection reuses the build definition resolver and lists directory entries.
+It reads recently admitted rule expansions and verifies the package and declared
+read observations. A rule with no current expansion appears as unresolved.
+Source output always reads the authored definition directly. Inspection runs no
+tools and reports generator inputs and tools by their planned paths.
+
+## Native rule packages (#1257)
+
+A package owns its definition and exports a host rule plugin target. A workspace
+imports that target under a local alias.
+
+```text
+use plugin("tools/wire-rules/rules") as wire
+
+wire.generator "wire_files" {
+    schema = "schema.txt"
+    reads = ["settings.txt"]
+}
+```
+
+```text
+# tools/wire-rules/build.ycxx
+host_action "rules" {
+    tool = cxx()
+    args = ["-fPIC", "-shared", "-Iinputs/sdk",
+            input("source"), "-o", output("plugin")]
+    inputs = { source = "rule.cc" }
+    outputs = { plugin = "rules.so" }
+}
+```
+
+The planner returns a request when it reaches a custom declaration. The
+coordinator builds the package using the selected host C++ toolchain, stages
+the resulting shared library, and invokes a worker. Both steps use the
+declared action runner. The package definition declares the bootstrap host
+action and its shared-library output directly. The action gets the versioned
+SDK header through its staged inputs.
+
+`cxx()` tries the current ycxx driver, then looks for `c++`, `clang++`, and `g++`
+on the invoking client's `PATH`. It stops at the first successful compile and
+link. The trace records each attempted compiler, and unchanged requests reuse
+the winning package action. Use `tool = cxx("clang++")` or an absolute path inside
+`cxx(...)` to pin the compiler. A pin tries one compiler. `native_args` supplies
+extra flags for the native invocation. A successful compile followed by a load
+or rule error reports that error from the selected package.
+
+The worker loads the library in its own process and passes a versioned C ABI
+record to its entry point. The SDK exposes attributes as strings and declared
+file observations as byte ranges. It also supplies the normalized argument
+record for rules that pass structured fields on to a primitive. Missing files
+and empty files are different observations. A rule emits one native
+executable, native library, or external action declaration. The workspace
+planner validates that primitive and supplies the compiler and scheduler.
+A worker failure produces diagnostics
+before the coordinator can admit a successful result.
+
+The bootstrap action key includes the SDK, source and header inputs, host
+compiler identity, and build arguments. The worker action key includes the
+library bytes, invocation, and declared observations. Prepared declarations
+are revalidated against the current inputs. Equivalent expanded generator
+actions keep their own keys when the shared library changes. The worker
+process bounds crash effects, and cacheable rules use the SDK for their
+workspace observations.
+
+`cpp` is a conventional import alias. `use plugin("tools/other-cpp/rules") as cpp`
+binds the same declarations to a workspace package. The standard source
+package compiles on demand through the same host-action bootstrap and
+registers its rules through the same worker contract. The kernel supplies
+native compiler queries and external actions to either provider. The
+standard package also provides the unqualified `generate` rule.
+
+Compiler capability probes are tracked in [#1289](https://github.com/yrashk/ycxx/issues/1289).
+The typed header package in [#1290](https://github.com/yrashk/ycxx/issues/1290) projects named
+observations into C++ `inline constexpr` values and template predicates, including an
+indeterminate state for observations without a definitive result.
