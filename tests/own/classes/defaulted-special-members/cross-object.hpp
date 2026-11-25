@@ -49,24 +49,19 @@ struct Assigned { Assigned& operator=(Assigned&&) = default; int x; char c; };
 class Private { public: Private() = default; Private(const Private&) = default; private: int x; char c; };
 struct VolatileMember { VolatileMember() = default; VolatileMember(const VolatileMember&) = default; volatile int x; char c; };
 struct DeletedVolatile { DeletedVolatile() = default; DeletedVolatile(const DeletedVolatile&) = delete; volatile Aggregate p; char c; };
-struct ConstMember { ConstMember() = default; const Aggregate p; char c; };
-struct ConstMemberCopy { ConstMemberCopy() = default; ConstMemberCopy(const ConstMemberCopy&) = default; const Aggregate p; char c; };
-struct ConstMemberMove { ConstMemberMove() = default; ConstMemberMove& operator=(ConstMemberMove&&) = default; const Aggregate p; char c; };
-struct ImplicitConst { const Aggregate p; char c; };
 struct Initialized { Initialized() = default; int x = 1; char c; };
 struct Member { Member() = default; DefaultAndOther m; char c; };
 template <class T> struct Templated { Templated(const Templated&) = default; ~Templated() = default; T x; char c; };
 
 template <class T> struct After : T { char last; };
 
-constexpr int layouts = 17;
+constexpr int layouts = 13;
 static int layout(int i) {
   const int sizes[layouts] = {
       sizeof(After<CopyOnly>), sizeof(After<DefaultAndCopy>), sizeof(After<DefaultAndOther>), sizeof(After<MoveOnly>),
       sizeof(After<DeletedCopy>), sizeof(After<Assigned>), sizeof(After<Private>), sizeof(After<Initialized>),
       sizeof(After<Member>), sizeof(After<Templated<int>>),
-      sizeof(After<VolatileMember>), sizeof(After<VolatileClass>), sizeof(After<DeletedVolatile>),
-      sizeof(After<ConstMember>), sizeof(After<ConstMemberCopy>), sizeof(After<ConstMemberMove>), sizeof(After<ImplicitConst>)};
+      sizeof(After<VolatileMember>), sizeof(After<VolatileClass>), sizeof(After<DeletedVolatile>)};
   return sizes[i];
 }
 

@@ -1205,7 +1205,9 @@ public:
     const ClassRec* r = find(c);
     if (!r || !r->move_usable || declared_move(c, *r)) return false;
     const auto moved = [&](QualType t) {
-      t = types_->canonical(types_->innermost_array_element(t));
+      t = types_->canonical(t);
+      while (types_->is_array(t)) t = types_->canonical(types_->add_cv(types_->rec(t).inner, Types::cv(t)));
+      if (Types::is_const(t)) return false;  // a const source binds no move constructor of its class
       const TypeRec type = types_->rec(t);
       const ClassRec* sub = type.kind == TypeKind::class_ ? find(type.entity) : nullptr;
       if (!sub) return false;

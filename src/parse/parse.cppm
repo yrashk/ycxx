@@ -11845,14 +11845,7 @@ bool Program::special_members(u32 item, EntityId cls, sema::ClassRec& rec, std::
       : std::ranges::none_of(rec.members, provided_constructor) && rec.bases.empty() &&
         std::ranges::all_of(rec.fields, [&](const sema::FieldRec& f) { return rec.access_of(f.entity) == ast::Access::public_; });
   // No operation of a volatile class member is trivial for Apple's definition, even one that is deleted.
-  // A const class member makes a move assignment operator, declared or implicit, such an operation.
-  const bool move_assignment = user_move_assignment ||
-                               !(user_copy || user_move || user_copy_assignment || user_dtor);
-  const bool pod_fields = !w_->target.apple_calls || std::ranges::none_of(rec.fields, [&](const sema::FieldRec& f) {
-    QualType t = types.canonical(f.type);
-    while (types.is_array(t)) t = types.canonical(types.add_cv(types.rec(t).inner, sema::Types::cv(t)));
-    return types.is_class(t) && (sema::Types::is_volatile(t) || (move_assignment && sema::Types::is_const(t)));
-  });
+  const bool pod_fields = !w_->target.apple_calls || std::ranges::none_of(rec.fields, volatile_field);
   rec.pod = pod_fields && !rec.layout_requires_virtual_support && (rec.destructor == EntityId::none || (user_dtor && user_dtor->is_deleted)) &&
             pod_definition &&
             !provided_assignment(false) && std::ranges::none_of(rec.fields, &sema::FieldRec::dmi) &&

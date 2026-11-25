@@ -115,6 +115,22 @@ struct Qualified {
   Qualified& operator=(Qualified&&) & = default;
 };
 
+// A const member is copied by an implicit move, whatever its class's move constructor is.
+struct CopiedPart {
+  int v = 1;
+  CopiedPart() {}
+  CopiedPart(const CopiedPart& o) : v(o.v + 10) {}
+  CopiedPart(CopiedPart&&) = default;
+};
+struct ConstPart { const CopiedPart m; };
+struct MovedPart {
+  int v = 1;
+  MovedPart() {}
+  MovedPart(const MovedPart&) = default;
+  MovedPart(MovedPart&& o) : v(o.v + 100) {}
+};
+struct ConstMovedPart { const MovedPart m; };
+
 // The only copy or move operation is a trivial move.
 struct Moved {
   int v;
@@ -188,6 +204,12 @@ int main() {
   HoldsMoved hn(static_cast<HoldsMoved&&>(hm));
   Moved mm = make_moved(7);
   if (hn.m.v != 4 || mm.v != 7) return 17;
+
+  ConstPart cp;
+  ConstPart cq(static_cast<ConstPart&&>(cp));
+  ConstMovedPart cr;
+  ConstMovedPart cs(static_cast<ConstMovedPart&&>(cr));
+  if (cq.m.v != 11 || cs.m.v != 1) return 19;
 
   VolatileScalar va{1}, vb{2};
   va = vb;
