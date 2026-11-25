@@ -2797,6 +2797,7 @@ std::optional<QualType> AtItem::replay_alias_calls(sema::Sema& caller, const ast
   q.type_trait_demand = q.at_point;
   const auto before = caller.diag_count();
   sema::Sema s(p_->world(), caller.builder(), q, caller.diagnostics(), p_->id(pattern.item), 0);
+  s.replaying_type_default = caller.replaying_type_default;
   s.template_scopes.push_back(p_->world().ins.seqs.elements(alias.template_params));
   s.template_args = args;
   Parser ps(*p_->r_, item.begin, item.begin + pattern.end, s);
@@ -3525,12 +3526,16 @@ private:
         const auto begin = ps_.pos();
         const auto calls = ps_.deferred_immediate_calls();
         const auto checks = ps_.deferred_argument_checks();
+        const auto ranks = ps_.deferred_rank_checks();
         auto t = ps_.type_id();
         if (!t || !alias_template(name, name_at, *t)) return bad();
         if (ps_.deferred_immediate_calls() != calls) {
           const auto kind = ps_.deferred_argument_checks() == checks ? sema::AliasCallPattern::retained
                                                                      : sema::AliasCallPattern::may_erase;
           p_->alias_call_patterns_.emplace(decls_.back().entity, Program::AliasCallPattern{k_, begin, ps_.pos(), kind});
+        } else if (ps_.deferred_rank_checks() != ranks) {
+          p_->alias_call_patterns_.emplace(decls_.back().entity,
+              Program::AliasCallPattern{k_, begin, ps_.pos(), sema::AliasCallPattern::rank_checks});
         }
         if (!ps_.expect(Tk::semi)) bad();
         return;
