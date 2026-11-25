@@ -1,9 +1,11 @@
-"""Exercise the structured project module graph and legacy plan snapshots (#1363)."""
+"""Check project module graphs in JSON and HTML and legacy plan snapshots (#1363, #1378)."""
 
 from collections import Counter
 from copy import deepcopy
+from html.parser import HTMLParser
 import json
 from pathlib import Path
+import re
 import sys
 import tempfile
 
@@ -26,6 +28,160 @@ STATUS = {
     'unresolved partition': 'unresolved_partition',
     'external or unresolved': 'external_or_unresolved',
 }
+UNSAFE_SOURCE = 'x<&>.cc'
+
+
+class HTMLElement:
+    def __init__(self, tag, attributes):
+        self.tag = tag
+        self.attrs = dict(attributes)
+        self.descendants = []
+        self.text = []
+
+    def visible(self):
+        return ' '.join(self.text)
+
+
+class PlanHTML(HTMLParser):
+    VOID = {'area', 'base', 'br', 'col', 'embed', 'hr', 'img', 'input', 'link', 'meta', 'param',
+            'source', 'track', 'wbr'}
+
+    def __init__(self, document):
+        super().__init__()
+        self.document = document
+        self.elements = []
+        self.open = []
+        self.feed(document)
+        self.close()
+
+    def handle_starttag(self, tag, attrs):
+        node = HTMLElement(tag, attrs)
+        self.elements.append(node)
+        for parent in self.open:
+            parent.descendants.append(node)
+        if tag not in self.VOID:
+            self.open.append(node)
+
+    def handle_endtag(self, tag):
+        for index in range(len(self.open) - 1, -1, -1):
+            if self.open[index].tag == tag:
+                del self.open[index:]
+                break
+
+    def handle_data(self, data):
+        for node in self.open:
+            node.text.append(data)
+
+    def sections(self, identifier):
+        return [node for node in self.elements
+                if node.tag == 'section' and node.attrs.get('aria-labelledby') == identifier]
+
+    def section(self, identifier, title):
+        sections = self.sections(identifier)
+        assert len(sections) == 1, ('expected one HTML section', identifier, len(sections))
+        section, = sections
+        headings = [node.visible().strip() for node in section.descendants
+                    if node.tag == 'h2' and node.attrs.get('id') == identifier]
+        assert headings == [title], (identifier, headings)
+        return section
+
+
+def contains_words(block, phrase):
+    def words(text):
+        return ' '.join(re.findall(r'[^\W_]+', text.casefold()))
+
+    return f' {words(phrase)} ' in f' {words(block.visible())} '
+
+
+def module_links(block, kind):
+    prefix = f'#module-{kind}-'
+    return Counter(node.attrs['href'] for node in block.descendants
+                   if node.tag == 'a' and node.attrs.get('href', '').startswith(prefix))
+
+
+def notice_rows(section, title):
+    notices = [node for node in section.descendants if node.tag == 'div'
+               and any(heading.tag == 'h3' and heading.visible().strip() == title
+                       for heading in node.descendants)]
+    assert notices, ('missing graph notice', title)
+    return [node for node in notices[-1].descendants if node.tag == 'li']
+
+
+def directive_anchor(kind, unit, directive):
+    return f'module-{kind}-{unit}-{directive}'
+
+
+def candidate_links(entry, declarations):
+    return Counter('#' + directive_anchor('declaration', *ref)
+                   for ref in candidate_refs(entry, declarations))
+
+
+def check_graph_html(document, graph):
+    section = document.section('module-graph', 'Module graph')
+    assert graph['native_target'] in section.visible(), graph['native_target']
+    assert contains_words(section, 'Complete' if graph['complete'] else 'Incomplete'), section.visible()
+
+    units, declarations = index_graph(graph)
+    imports = {(entry['unit_id'], entry['directive_index']): entry for entry in graph['imports']}
+    expected_anchors = {f'module-unit-{unit}' for unit in units}
+    expected_anchors.update(directive_anchor('declaration', *ref) for ref in declarations)
+    expected_anchors.update(directive_anchor('import', *ref) for ref in imports)
+    anchors = [(node.attrs['id'], node) for node in section.descendants
+               if node.attrs.get('id', '').startswith(('module-unit-', 'module-declaration-', 'module-import-'))]
+    by_id = dict(anchors)
+    assert len(anchors) == len(by_id) and set(by_id) == expected_anchors, [anchor for anchor, _ in anchors]
+
+    for identifier, unit in units.items():
+        block = by_id[f'module-unit-{identifier}']
+        assert unit['source'] in block.visible(), (unit, block.visible())
+        if unit['scan'] != 'complete':
+            assert contains_words(block, unit['scan']), (unit, block.visible())
+        expected_directives = {directive_anchor(kind, *ref)
+                               for kind, rows in (('declaration', declarations), ('import', imports))
+                               for ref in rows if ref[0] == identifier}
+        observed = {node.attrs.get('id') for node in block.descendants} & expected_anchors
+        assert observed == expected_directives, (unit, observed, expected_directives)
+
+    for kind, entries in (('declaration', declarations), ('import', imports)):
+        for ref, entry in entries.items():
+            record = by_id[directive_anchor(kind, *ref)]
+            assert entry['name'] in record.visible() and site(entry['location']) in record.visible(), (
+                entry, record.visible())
+            spelling = 'export import' if entry['kind'] == 'exported_import' else entry['kind']
+            assert contains_words(record, spelling), (entry, record.visible())
+            if kind == 'import':
+                assert contains_words(record, entry['status']), (entry, record.visible())
+                assert module_links(record, 'declaration') == candidate_links(entry, declarations), entry
+                links = {node.attrs['href']: node.visible() for node in record.descendants
+                         if node.tag == 'a' and node.attrs.get('href', '').startswith('#module-declaration-')}
+                for candidate in candidate_refs(entry, declarations):
+                    href = '#' + directive_anchor('declaration', *candidate)
+                    assert site(declarations[candidate]['location']) in links[href], (entry, links)
+
+    if graph['conflicts']:
+        rows = notice_rows(section, 'Provider conflicts')
+        for conflict in graph['conflicts']:
+            links = candidate_links(conflict, declarations)
+            matching = [row for row in rows if conflict['name'] in row.visible()
+                        and module_links(row, 'declaration') == links]
+            assert len(matching) == 1, (conflict, [row.visible() for row in rows])
+
+    if graph['cycles']:
+        rows = notice_rows(section, 'Cyclic components')
+        observed = [module_links(row, 'unit') for row in rows]
+        expected = [Counter(f'#module-unit-{unit}' for unit in component) for component in graph['cycles']]
+        assert sorted(map(sorted, observed)) == sorted(map(sorted, expected)), (observed, expected)
+        assert all(count == 1 for component in observed for count in component.values()), observed
+
+
+def show_html(ycxx, scope, env, journal, triple, plan, *args):
+    document = PlanHTML(show(ycxx, scope, env, journal, triple, *args, format_='html'))
+    document.section('facts', 'Plan facts')
+    if 'module_graph' in plan:
+        check_graph_html(document, plan['module_graph'])
+    else:
+        assert not document.sections('module-graph'), 'HTML showed a graph for an unresolved plan'
+    return document
 
 
 def integer(value, minimum):
@@ -150,6 +306,8 @@ def check_edits(ycxx, scope, env, journal, before):
     for snapshot in (saved, current_snapshot):
         diff = show(ycxx, scope, env, journal, LINUX, '--against', str(snapshot))
         assert diff == {'schema': 1, 'target': 'app', 'changes': []}, diff
+    html = show_html(ycxx, scope, env, journal, LINUX, before, '--against', str(saved))
+    assert 'No changes.' in html.section('changes', 'Plan changes').visible()
 
     replace_source(scope, 'linux.cc', SOURCES['linux.cc'].replace('return 11;', 'return 12;'))
     summary, events = build(ycxx, scope, env, LINUX, 'body-only edit retains the structured graph')
@@ -176,26 +334,34 @@ def check_edits(ycxx, scope, env, journal, before):
     old_edge, = (row for row in facts(before, 'module-provider') if row['name'] == old_import['name'])
     assert len(diff) == 2 and all(row['change'] == 'removed' and row.get('after') is None for row in diff), diff
     assert [row['before'] for row in diff] == [old_import, old_edge], diff
+    html = show_html(ycxx, scope, env, journal, LINUX, reduced, '--against', str(saved))
+    changes = html.section('changes', 'Plan changes')
+    assert contains_words(changes, 'removed') and EXTERNAL in changes.visible(), changes.visible()
     replace_source(scope, 'main.cc', shifted)
 
 
 def check_project(ycxx, scope, env, journal):
     cold = show(ycxx, scope, env, journal, LINUX)
     assert facts(cold, 'unresolved') and 'module_graph' not in cold and not (scope / '.ycxx').exists(), cold
+    show_html(ycxx, scope, env, journal, LINUX, cold)
 
     build(ycxx, scope, env, LINUX, 'resolve the Linux project')
     before = show(ycxx, scope, env, journal, LINUX)
     check_graph(scope, before, LINUX)
+    show_html(ycxx, scope, env, journal, LINUX, before)
     daemon = daemon_identity(ycxx, scope, env)
     assert daemon is not None
     build(ycxx, scope, env, DARWIN, 'resolve the Darwin project')
-    check_graph(scope, show(ycxx, scope, env, journal, DARWIN), DARWIN)
+    darwin = show(ycxx, scope, env, journal, DARWIN)
+    check_graph(scope, darwin, DARWIN)
+    show_html(ycxx, scope, env, journal, DARWIN, darwin)
     assert show(ycxx, scope, env, journal, LINUX) == before
 
     check_edits(ycxx, scope, env, journal, before)
     replace_source(scope, 'darwin.cc', '#include "missing-fixture.h"\n' + SOURCES['darwin.cc'])
     partial = show(ycxx, scope, env, journal, LINUX)
     check_graph(scope, partial, LINUX, incomplete='darwin.cc', reason='preprocessing_incomplete')
+    show_html(ycxx, scope, env, journal, LINUX, partial)
     replace_source(scope, 'darwin.cc', SOURCES['darwin.cc'])
 
     replace_source(scope, 'build.ycxx', definition(journal, generated=True))
@@ -204,6 +370,7 @@ def check_project(ycxx, scope, env, journal):
     generated = str(namespace(LINUX) / 'virtual' / GENERATOR / GENERATED)
     partial = show(ycxx, scope, env, journal, LINUX)
     check_graph(scope, partial, LINUX, incomplete=generated, reason='generated_inputs_unavailable')
+    show_html(ycxx, scope, env, journal, LINUX, partial)
     assert journal_contents(journal) == 'generated\n' and daemon_identity(ycxx, scope, env) == daemon
 
 
@@ -212,7 +379,7 @@ def check_configurations(ycxx, scope, env, journal):
     (scope / 'main.cc').write_text('int main() { return 0; }\n', encoding='utf-8')
     # Discovery precedes semantic checks. The preceding import makes the first declaration's
     # directive index differ from its offset in the declarations array.
-    (scope / 'shared.cc').write_text('''\
+    (scope / UNSAFE_SOURCE).write_text('''\
 module;
 #include <config.hh>
 #if SIDE == 1
@@ -227,18 +394,19 @@ import cycle.right;
     for directory, side in (('left-include', 1), ('right-include', 2)):
         (scope / directory).mkdir()
         (scope / directory / 'config.hh').write_text(f'#define SIDE {side}\n', encoding='utf-8')
-    (scope / 'build.ycxx').write_text('''\
-cpp.library "left" { sources = ["shared.cc"] public_include_dirs = ["left-include"] }
-cpp.library "right" { sources = ["shared.cc"] public_include_dirs = ["right-include"] }
-cpp.library "again" { sources = ["shared.cc"] public_include_dirs = ["left-include"] }
-cpp.executable "app" { sources = ["main.cc"] deps = ["left", "right", "again"] }
+    (scope / 'build.ycxx').write_text(f'''\
+cpp.library "left" {{ sources = ["{UNSAFE_SOURCE}"] public_include_dirs = ["left-include"] }}
+cpp.library "right" {{ sources = ["{UNSAFE_SOURCE}"] public_include_dirs = ["right-include"] }}
+cpp.library "again" {{ sources = ["{UNSAFE_SOURCE}"] public_include_dirs = ["left-include"] }}
+cpp.executable "app" {{ sources = ["main.cc"] deps = ["left", "right", "again"] }}
 ''', encoding='utf-8')
     build(ycxx, scope, env, LINUX, 'resolve repeated and distinct configured units')
     plan = show(ycxx, scope, env, journal, LINUX)
     graph = module_graph(plan, LINUX)
     units, declarations = index_graph(graph)
-    shared = [unit for unit in units.values() if unit['source'] == 'shared.cc']
+    shared = [unit for unit in units.values() if unit['source'] == UNSAFE_SOURCE]
     assert len(shared) == 2 and len(units) == 3 and graph['complete'], units
+    assert max(units) + 1 > len(units), units
     assert len(facts(plan, 'module-import')) == 5 and len(graph['imports']) == 3, graph
     assert len(graph['cycles']) == 2 and {tuple(cycle) for cycle in graph['cycles']} == {(unit['id'],) for unit in shared}
 
@@ -251,6 +419,8 @@ cpp.executable "app" { sources = ["main.cc"] deps = ["left", "right", "again"] }
         assert edge['status'] == 'resolved' and reference == (unit['id'], expected_index), edge
         declaration, = unit['declarations']
         assert declaration['directive_index'] == expected_index and edge['directive_index'] == expected_index + 1, edge
+    html = show_html(ycxx, scope, env, journal, LINUX, plan)
+    assert UNSAFE_SOURCE not in html.document, 'the source name was embedded as unescaped HTML'
 
 
 def check_empty_graph(ycxx, scope, env, journal):
@@ -258,11 +428,13 @@ def check_empty_graph(ycxx, scope, env, journal):
     traced_build(ycxx, scope, env, 'resolve a host-default project without modules')
     (scope / executable(None)).unlink()
     host = {'linux': LINUX, 'darwin': DARWIN}[sys.platform]
-    graph = module_graph(show(ycxx, scope, env, journal, None), host)
+    plan = show(ycxx, scope, env, journal, None)
+    graph = module_graph(plan, host)
     units, declarations = index_graph(graph)
     unit, = units.values()
     assert unit['source'] == 'main.cc' and graph['complete'] and not declarations, graph
     assert graph['imports'] == graph['conflicts'] == graph['cycles'] == [], graph
+    show_html(ycxx, scope, env, journal, None, plan)
 
 
 def main():

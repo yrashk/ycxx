@@ -3277,6 +3277,12 @@ provider candidates, conflicts, and cyclic components. Its unit IDs are local
 to each snapshot.
 Schema-1 plan comparisons continue to use semantic facts.
 
+The standalone HTML plan renders that inspection data under **Module graph**
+(#1378). Configured translation unit panels group declarations and imports with
+physical locations and links to candidate declarations. The section identifies
+incomplete scans, provider conflicts, and cyclic components. With `--against`,
+it shows the current plan's graph below **Plan changes**.
+
 The standard C++ and generator rule declarations use a compiled rule package.
 `use plugin("tools/custom/rules") as cpp` supplies a different C++ provider. The
 bundled and workspace packages use the same worker. `cxx()` in a package recipe

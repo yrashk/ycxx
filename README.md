@@ -45,6 +45,8 @@ Use `target_triple()` in a declared action's `args` to pass the selected triple
 to a host tool that generates a target-specific input.
 The build trace and resolved plan show named C++ module imports, their
 project providers, ambiguity, and cycles for the selected target.
+Run `ycxx show app --format=html > plan.html` and find **Module graph** in the
+report to follow links from imports to their provider declarations.
 Use `ycxx show app --format=json` to read these dependencies and their physical
 source locations as a structured `module_graph`. Named-module compilation and
 BMI support are tracked in
