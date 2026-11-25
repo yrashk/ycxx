@@ -11,6 +11,7 @@ import tempfile
 
 PROVIDER = '''
 static int adjustment = BIAS;
+static int calls;
 static int add_adjustment(int value) { return value + adjustment; }
 
 extern "C" int score(int value) { return add_adjustment(value); }
@@ -22,7 +23,7 @@ struct Host {
 };
 
 extern "C" int plan(const Host* host) {
-    return host->emit(host->context, "plugin output");
+    return host->emit(host->context, "plugin output") + calls++;
 }
 '''
 
@@ -45,7 +46,8 @@ def emit(context, text):
 library = c.CDLL(sys.argv[1])
 library.plan.argtypes = (c.POINTER(Host),)
 assert library.plan(c.byref(Host(42, emit))) == 23
-assert calls == [(42, b'plugin output')]
+assert library.plan(c.byref(Host(42, emit))) == 24
+assert calls == [(42, b'plugin output'), (42, b'plugin output')]
 expected = int(sys.argv[2])
 assert library.score(35) == expected
 assert library.adjust(3) == expected - 35 + 3
