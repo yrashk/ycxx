@@ -90,5 +90,8 @@ add_test(NAME daemon.project_package_probe
 add_test(NAME daemon.project_shader_bundle
   COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/project_shader_bundle.py $<TARGET_FILE:ycxxc>)
 
+add_test(NAME daemon.project_generated_inventory
+  COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/project_generated_inventory.py $<TARGET_FILE:ycxxc>)
+
 add_test(NAME daemon.project_shader_reflection
   COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/project_shader_reflection.py $<TARGET_FILE:ycxxc>)
