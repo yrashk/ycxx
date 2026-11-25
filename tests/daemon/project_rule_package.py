@@ -101,6 +101,7 @@ host_action "rules" {{
     tool = {json.dumps(str(compiler))}
     args = ["-std=c++20", "-fPIC", "{link_mode}", "-Iinputs/sdk",
             input("source"), "-o", output("plugin")]
+    environment = {{ PATH = "/usr/bin:/bin" }}
     inputs = {{ source = "rules.cc" }}
     outputs = {{ plugin = "rules.so" }}
 }}

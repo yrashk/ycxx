@@ -366,7 +366,7 @@ class Planner {
   }
 
   GeneratorPlan generator(const TargetDecl& decl, std::optional<std::string_view> sdk_header = std::nullopt) {
-    check_fields(decl, {"tool", "args", "inputs", "outputs"});
+    check_fields(decl, {"tool", "args", "inputs", "outputs", "environment"});
     if (inspection_) fact("rule", decl, decl.name, decl.kind, "declared rule", decl.location);
     GeneratorPlan plan;
     plan.name = decl.name;
@@ -388,6 +388,16 @@ class Planner {
       const auto fp = Hasher{}.bytes(read_file(tool_path, tool.location)).finish();
       if (watch_) watch_->values.push_back(fp);
       plan.tool_fingerprint = std::format("{:016x}{:016x}", fp.lo, fp.hi);
+    }
+
+    if (const auto* entries = field(decl, "environment")) {
+      for (const auto& [name, value] : as<Record>(*entries, "a record of environment variables")) {
+        const auto& text = as<std::string>(value, "an environment value");
+        if (name.empty() || name.contains('=') || name.contains('\0') || text.contains('\0'))
+          fail(value.location, "invalid action environment entry");
+        plan.action.environment.emplace_back(name, text);
+        if (inspection_) fact("environment", decl, name, text, "declared in environment", value.location);
+      }
     }
 
     std::set<std::string> input_paths;

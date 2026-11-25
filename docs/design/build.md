@@ -184,6 +184,7 @@ host_action "rules" {
     tool = "/usr/bin/c++"
     args = ["-std=c++20", "-fPIC", "-shared", "-Iinputs/sdk",
             input("source"), "-o", output("plugin")]
+    environment = { PATH = "/usr/bin:/bin" }
     inputs = { source = "rule.cc" }
     outputs = { plugin = "rules.so" }
 }
