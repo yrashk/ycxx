@@ -675,10 +675,10 @@ rejected at its marked locations, with `tools/test --cxx ycxx own/slice` on arm6
     also takes `.o` files and libSystem's exports from `$SDKROOT`, else `xcrun --show-sdk-path`,
     else the Command Line Tools' SDK, looked up once per process outside the engine.
   - `:runtime` (configured by CMake): what a Darwin link includes by default after its operands
-    (#842): this build's `libycxx.a` and `libycxx-abi.a`, `libemutls_w.a` from the GCC that built
-    them (GCC on Darwin lowers `thread_local` to `___emutls_get_address`), and the names
-    libycxx's link options force undefined (`___ycxx_allocation_table_anchor`, read from its
-    `ycxx-link-options`). Members are selected as for any Darwin archive, so `<cstdio>` programs
+    (#842): this build's `libycxx.a` and `libycxx-abi.a`, GCC's `libemutls_w.a` for emulated TLS,
+    the two GCC shift helpers `___ashlti3` and `___lshrti3` for optimized `to_chars` (#1130),
+    and the names libycxx's link options force undefined (`___ycxx_allocation_table_anchor`, read
+    from its `ycxx-link-options`). Members are selected as for any Darwin archive, so `<cstdio>` programs
     link against libycxx's linkage marker, and libycxx-abi's `__cxa_*` come before libc++abi's.
     A trivial program grows from 17 KB to 118 KB with the allocation table. Configured runtime archives are
     read once per process while their size and modification time hold, and every program's

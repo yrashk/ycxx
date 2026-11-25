@@ -1,8 +1,8 @@
 # The pipeline (#43, #63): front end, function_ir, lower, codegen, tu and link, as engine queries.
 
 # The runtime arm64 macOS executables link by default (#842, DECISIONS §1.3): libycxx's static
-# archives, the GCC-built emulated TLS they call, and the names libycxx's link options force
-# undefined. Nothing when libycxx has no static archives or the host is not arm64 Darwin.
+# archives, the GCC runtime members they call, and the names libycxx's link options force undefined.
+# Nothing when libycxx has no static archives or the host is not arm64 Darwin.
 set(YCXXC_DARWIN_RUNTIME_ARCHIVES "")
 set(YCXXC_DARWIN_RUNTIME_UNDEFINED "")
 if(APPLE AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(arm64|aarch64)$" AND NOT CMAKE_CROSSCOMPILING
@@ -21,6 +21,26 @@ if(APPLE AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(arm64|aarch64)$" AND NOT CMAKE_CR
     # A copy in the build: an upgrade of the GCC install removes its versioned directory.
     configure_file(${_emutls} ${CMAKE_CURRENT_BINARY_DIR}/libemutls_w.a COPYONLY)
     list(APPEND _runtime "${CMAKE_CURRENT_BINARY_DIR}/libemutls_w.a")
+
+    # Optimized libycxx charconv calls ___ashlti3 and ___lshrti3 (#1130). Take only the
+    # corresponding libgcc members so the default link keeps its other runtime providers.
+    execute_process(COMMAND ${CMAKE_CXX_COMPILER} -print-libgcc-file-name
+                    OUTPUT_VARIABLE _libgcc OUTPUT_STRIP_TRAILING_WHITESPACE
+                    COMMAND_ERROR_IS_FATAL ANY)
+    if(NOT IS_ABSOLUTE "${_libgcc}" OR NOT EXISTS "${_libgcc}")
+      message(FATAL_ERROR "ycxx: ${CMAKE_CXX_COMPILER} does not provide libgcc.a, which libycxx needs")
+    endif()
+    set(_shift_dir "${CMAKE_CURRENT_BINARY_DIR}/libgcc-int128")
+    set(_shift_archive "${CMAKE_CURRENT_BINARY_DIR}/libgcc-int128.a")
+    file(MAKE_DIRECTORY "${_shift_dir}")
+    file(REMOVE "${_shift_dir}/_ashldi3.o" "${_shift_dir}/_lshrdi3.o" "${_shift_dir}/libgcc-int128.a")
+    execute_process(COMMAND ${CMAKE_AR} -x "${_libgcc}" _ashldi3.o _lshrdi3.o
+                    WORKING_DIRECTORY "${_shift_dir}" COMMAND_ERROR_IS_FATAL ANY)
+    execute_process(COMMAND ${CMAKE_AR} -crs libgcc-int128.a _ashldi3.o _lshrdi3.o
+                    WORKING_DIRECTORY "${_shift_dir}" COMMAND_ERROR_IS_FATAL ANY)
+    file(RENAME "${_shift_dir}/libgcc-int128.a" "${_shift_archive}")
+    list(APPEND _runtime "${_shift_archive}")
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${_libgcc}")
   endif()
   foreach(_archive IN LISTS _runtime)
     string(REPLACE "\\" "\\\\" _archive "${_archive}")
