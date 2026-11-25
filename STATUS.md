@@ -3191,16 +3191,20 @@ and reports external tool execution between workspace query attempts.
 `ycxx build --watch` uses the compiler watch loop and live trace browser
 (#1263). The daemon watches native compiler inputs and reobserves the project
 plan between runs for changes to the definition, generator inputs, and glob
-matches. It continues after a failed run.
+matches. Rule package source, compiler discovery and declared reads also enter
+the observation. It continues after a failed run.
 
 `ycxx show <target>` uses the same resolver without executing any actions
 (#1256). It shows verbatim source, resolved facts with their declaration
 locations, or a semantic diff against a saved JSON snapshot. The HTML report
 includes the resolved plan and its definition.
 
-The initial build accepts a fixed host toolchain and explicit generator inputs.
-It checks host tool identity before admitting a receipt, and compares the resolved
-plan again before publishing. Rule packages and richer project configurations are tracked under #1257 and #1259.
+The standard C++ and generator rule declarations use a compiled rule package.
+`use plugin("tools/custom/rules") as cpp` supplies a different C++ provider. The
+bundled and workspace packages use the same worker. `cxx()` in a package recipe
+tries native ycxx first, then searches for host compilers. A `cxx("clang++")` pin
+selects one compiler. Package compilation and worker execution appear in the
+build trace, and inspection uses tracked admitted expansions. [#1281](https://github.com/yrashk/ycxx/issues/1281)
 
 ## The engine trace (#245, 2026-11-19)
 

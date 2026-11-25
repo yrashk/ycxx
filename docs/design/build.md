@@ -160,9 +160,10 @@ move. Ordered requirements use their position for identity. A new glob match
 is visible even when the manifest text is identical.
 
 Inspection reuses the build definition resolver and lists directory entries.
-It does no tool execution or native compilation. It reports planned generator
-inputs and tools by path, so a reviewer can inspect the layout before those
-tools are installed or the inputs are available.
+It reads recently admitted rule expansions and verifies the package and declared
+read observations. A rule with no current expansion appears as unresolved.
+Source output always reads the authored definition directly. Inspection runs no
+tools and reports generator inputs and tools by their planned paths.
 
 ## Native rule packages (#1257)
 
@@ -181,10 +182,9 @@ wire.generator "wire_files" {
 ```text
 # tools/wire-rules/build.ycxx
 host_action "rules" {
-    tool = "/usr/bin/c++"
-    args = ["-std=c++20", "-fPIC", "-shared", "-Iinputs/sdk",
+    tool = cxx()
+    args = ["-fPIC", "-shared", "-Iinputs/sdk",
             input("source"), "-o", output("plugin")]
-    environment = { PATH = "/usr/bin:/bin" }
     inputs = { source = "rule.cc" }
     outputs = { plugin = "rules.so" }
 }
@@ -196,6 +196,14 @@ the resulting shared library, and invokes a worker. Both steps use the
 declared action runner. The package definition declares the bootstrap host
 action and its shared-library output directly. The action gets the versioned
 SDK header through its staged inputs.
+
+`cxx()` tries the current ycxx driver, then looks for `c++`, `clang++`, and `g++`
+on the invoking client's `PATH`. It stops at the first successful compile and
+link. The trace records each attempted compiler, and unchanged requests reuse
+the winning package action. Use `tool = cxx("clang++")` or an absolute path inside
+`cxx(...)` to pin the compiler. A pin tries one compiler. `native_args` supplies
+extra flags for the native invocation. A successful compile followed by a load
+or rule error reports that error from the selected package.
 
 The worker loads the library in its own process and passes a versioned C ABI
 record to its entry point. The SDK exposes attributes as strings and declared
@@ -220,4 +228,9 @@ binds the same declarations to a workspace package. The standard source
 package compiles on demand through the same host-action bootstrap and
 registers its rules through the same worker contract. The kernel supplies
 native compiler queries and external actions to either provider. The
-standard package migration replaces the legacy resolution paths.
+standard package also provides the unqualified `generate` rule.
+
+Compiler capability probes are tracked in [#1289](https://github.com/yrashk/ycxx/issues/1289).
+The typed header package in [#1290](https://github.com/yrashk/ycxx/issues/1290) projects named
+observations into C++ `inline constexpr` values and template predicates, including an
+indeterminate state for observations without a definitive result.
