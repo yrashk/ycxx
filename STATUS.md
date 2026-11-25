@@ -4736,6 +4736,15 @@ Each is removed once ycxx compiles itself.
     daemon's `socket_address`.
   - `-Wstringop-overread` on `string::find`: `pp::floating` keeps the position of `e`.
 
+
+## Dependent immediate calls in template defaults (#1327)
+
+An integral non-type template parameter default can call an eligible `consteval`
+function with earlier non-type parameters. The unqualified or namespace-qualified
+call selects its overload in the declaration context. Substituting an omitted
+argument evaluates the selected call and checks the converted constant expression
+for the destination parameter type. Explicit template arguments skip the default.
+
 ## Milestones
 
 | | Milestone | Done when |

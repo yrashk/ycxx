@@ -564,11 +564,15 @@ public:
       if (!d.alias && d.item < item && d.target && encloses(d.at, from)) add(d.at, *d.target);
     }
     for (const std::string& t : block) add(from, t);
+    auto declarations = [&](const std::string& path) {
+      return declared_in(name, path, item, self, /*inhabit=*/false, /*bound_functions=*/false,
+                         /*hide_function_tags=*/filter == LookupNames::immediate_call);
+    };
     for (std::string level = from;; level = parent_of(level)) {
-      std::vector<DeclId> r = declared_in(name, level, item, self);
+      std::vector<DeclId> r = declarations(level);
       for (const auto& [t, at] : nominated)
         if (at == level) {
-          std::vector<DeclId> more = declared_in(name, t, item, self);
+          std::vector<DeclId> more = declarations(t);
           r.insert(r.end(), more.begin(), more.end());
         }
       filter_lookup(r, filter);
@@ -1830,10 +1834,15 @@ public:
   // The byte offset in its file of a diagnostic's location.
   u32 byte_offset(engine::Loc at) const { return site(at).offset; }
 
-  // Spells a diagnostic argument: a name, a type, a string literal or why an evaluation failed.
+  // Spells a diagnostic argument: a name, a type, an integer, a string literal or why evaluation failed.
   std::string spell(char how, u64 raw) const {
     if (how == 'n') return std::string(w_->ins.names.spelling(ast::NameId(u32(raw))));
     if (how == 'r') return sema::spell_reason(raw);
+    if (how == 'i') {
+      const auto& value = w_->ins.values.get<ast::VInt>(ConstId(u32(raw)));
+      const bool negative = ast::is_signed(w_->target, *w_->types.builtin_of(value.type)) && ast::is_negative(value.bits);
+      return negative ? "-" + ast::wide::decimal(ast::wide::neg(value.bits)) : ast::wide::decimal(value.bits);
+    }
     if (how == 'c') {
       std::string t = w_->values.narrow_string(ConstId(u32(raw))).value_or("");
       if (!t.empty() && t.back() == '\0') t.pop_back();  // the terminating null
@@ -2265,12 +2274,14 @@ public:
   u32 presumed_line(engine::Loc at) override { return p_->presumed_line(at); }
   sema::PresumedSource presumed_source(engine::Loc at) override { return p_->presumed_source(at); }
   bool in_default_member_initializer() const override { return initializer_source.has_value(); }
-  std::vector<DeclId> visible_decls(ast::NameId name, std::span<const EntityId> directives = {}) override {
+  std::vector<DeclId> visible_decls(ast::NameId name, std::span<const EntityId> directives = {},
+                                    bool immediate_call = false) override {
     std::vector<std::string> paths;
     for (EntityId ns : directives) paths.push_back(p_->namespace_path(ns));
     const auto& scope = initializer_source ? p_->ns_of(initializer_source->item) : from;
+    auto filter = immediate_call ? Program::LookupNames::immediate_call : Program::LookupNames::all;
     return p_->visible_decls(p_->world().ins.names.spelling(name), namespace_lookup_item(),
-                             namespace_lookup_includes_item(name), scope, paths);
+                             namespace_lookup_includes_item(name), scope, paths, filter);
   }
   std::vector<ast::DeclSema> friend_namespace_decls(EntityId ns, ast::NameId name) {
     std::vector<ast::DeclSema> declarations;
@@ -2462,8 +2473,9 @@ public:
     return failed;
   }
   std::optional<ConstId> constant_value(EntityId v) override { return p_->constant_value(v, value_point(v)); }
-  std::optional<ConstId> constant_call(sema::Sema& s, const sema::Ex& call) override {
-    return sema::Evaluator(s, *this).evaluate(call).value;
+  sema::ConstantCallEvaluation constant_call(sema::Sema& s, const sema::Ex& call) override {
+    auto result = sema::Evaluator(s, *this).evaluate(call);
+    return {result.value, result.reason, result.diagnosed_failure()};
   }
   sema::AliasCallPattern alias_call_pattern(EntityId e) override {
     auto it = p_->alias_call_patterns_.find(e);
@@ -3198,8 +3210,9 @@ public:
   const sema::ClassRec& publish_class(EntityId c, sema::ClassRec r, sema::Sema& context) override {
     return p_->publish_class(c, std::move(r), item_, context);
   }
-  std::vector<DeclId> visible_decls(ast::NameId name, std::span<const EntityId> directives = {}) override {
-    return at_.visible_decls(name, directives);
+  std::vector<DeclId> visible_decls(ast::NameId name, std::span<const EntityId> directives = {},
+                                    bool immediate_call = false) override {
+    return at_.visible_decls(name, directives, immediate_call);
   }
   std::vector<ast::DeclSema> qualifier_decls(ast::NameId name, std::optional<EntityId> ns,
                                             std::span<const EntityId> directives) override {
@@ -3254,8 +3267,9 @@ public:
   bool type_trait_instantiation_failed(EntityId e) override { return at_.type_trait_instantiation_failed(e); }
   bool variable_instantiation_failed(EntityId v) override { return p_->variable_instantiation_failed(v, p_->end()); }
   std::optional<ConstId> constant_value(EntityId v) override { return p_->constant_value(v, p_->end()); }
-  std::optional<ConstId> constant_call(sema::Sema& s, const sema::Ex& call) override {
-    return sema::Evaluator(s, *this).evaluate(call).value;
+  sema::ConstantCallEvaluation constant_call(sema::Sema& s, const sema::Ex& call) override {
+    auto result = sema::Evaluator(s, *this).evaluate(call);
+    return {result.value, result.reason, result.diagnosed_failure()};
   }
   // In a member's body instantiated while its class is, for a deduced return type: the members
   // declared so far.
