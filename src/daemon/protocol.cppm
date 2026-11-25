@@ -73,6 +73,7 @@ struct WatchedProject {
   std::string target;
   Fp128 stamp;
   std::optional<std::string> tool_path = std::nullopt;
+  std::optional<std::string> target_triple = std::nullopt;  // canonical explicit target, or the host default
 };
 struct AwaitChange {
   std::uint64_t since = 0;     // the revision the last build started from (`Report::started_at`)
@@ -96,6 +97,7 @@ struct ProjectBuildRequest {
   bool trace_live = false;
   // The invoking client's PATH. An empty value is one component relative to cwd.
   std::optional<std::string> tool_path = std::nullopt;
+  std::optional<std::string> target_triple = std::nullopt;  // canonical explicit target, or the host default
 };
 struct ProjectBuildDone {
   int status = 0;

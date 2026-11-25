@@ -196,9 +196,17 @@ edit can change its SPIR-V without relinking the application. A structured
 reflection query can keep downstream bindings green if its relevant fields
 stay equal.
 
-Modules, host and target variants, richer link propagation and a foreign build
-adapter grow coverage after the first witness (#1259). Package acquisition and
-version solving sit outside the build.
+Project builds accept the standalone compiler's native target triples (#1345).
+Pass `--target=<triple>` to `build`, `build --watch`, and `show` to select the
+same variant. Explicit variants keep their executable, runtime assets, virtual
+generated inputs and rule snapshot under `.ycxx/targets/<triple>/`. The host
+default uses the original paths directly under `.ycxx/`. Rule packages and
+external actions run on the host and share receipts when their declared inputs
+match. An external action that supplies a linker input must produce an archive
+for the selected target.
+
+Modules, declared host and target toolchains, and broader project layouts grow
+coverage in #1259. Package acquisition and version solving sit outside the build.
 
 ## Shader bundles and runtime assets (#1258)
 

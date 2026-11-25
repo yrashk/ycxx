@@ -3190,6 +3190,13 @@ each request. Linux uses the native freestanding compiler and linker.
 The manifest identifies the daemon scope before the first build creates `.ycxx`,
 including when the workspace is nested in a checkout (#1305).
 
+`ycxx build <target> --target=<triple>` selects the standalone compiler and
+linker's native x86-64 Linux or arm64 Darwin target (#1345). An explicit
+selection publishes under `.ycxx/targets/<triple>/` and scopes generated-file
+overlays, rule snapshots, runtime assets and watch state to that configuration.
+Source-built rule packages and declared tools execute on the host. Their
+resident receipts can be shared across target configurations.
+
 A resident workspace query asks for generator receipts and fetches the native
 compiler under the same query context. The coordinator admits tool results between
 epochs. Each generated path is a separate input, so unchanged sibling bytes cut
@@ -3207,6 +3214,8 @@ the observation. It continues after a failed run.
 (#1256). It shows verbatim source, resolved facts with their declaration
 locations, or a semantic diff against a saved JSON snapshot. The HTML report
 includes the resolved plan and its definition.
+Use the same `--target` option to read the chosen variant and its target
+provenance. The trace carries the compiler target for the request.
 
 The standard C++ and generator rule declarations use a compiled rule package.
 `use plugin("tools/custom/rules") as cpp` supplies a different C++ provider. The

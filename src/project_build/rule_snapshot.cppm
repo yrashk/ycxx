@@ -45,8 +45,10 @@ struct RuleSnapshot {
 
 // Snapshot bytes are only a candidate. The caller validates the observations against current
 // package inputs, declared reads and planning inputs before using the stored expansions.
-std::optional<RuleSnapshot> read_rule_snapshot(const std::filesystem::path& cwd, std::string_view target);
-void write_rule_snapshot(const std::filesystem::path& cwd, std::string_view target, const RuleSnapshot& snapshot);
+std::optional<RuleSnapshot> read_rule_snapshot(const std::filesystem::path& cwd, std::string_view target,
+                                              std::string_view native_triple = {});
+void write_rule_snapshot(const std::filesystem::path& cwd, std::string_view target, const RuleSnapshot& snapshot,
+                         std::string_view native_triple = {});
 
 }  // namespace ycxx::build
 
@@ -71,12 +73,17 @@ Fd open_directory(int parent, const char* name, bool create) {
   return Fd(::openat(parent, name, directory_flags));
 }
 
-Fd snapshot_directory(const std::filesystem::path& cwd, bool create) {
+Fd snapshot_directory(const std::filesystem::path& cwd, std::string_view native_triple, bool create) {
   const Fd root(::open(cwd.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC));
   if (!root) return Fd();
   const auto state = open_directory(root.value, ".ycxx", create);
   if (!state) return Fd();
-  return open_directory(state.value, "rules", create);
+  if (native_triple.empty()) return open_directory(state.value, "rules", create);
+  const auto targets = open_directory(state.value, "targets", create);
+  if (!targets) return Fd();
+  const auto target = open_directory(targets.value, std::string(native_triple).c_str(), create);
+  if (!target) return Fd();
+  return open_directory(target.value, "rules", create);
 }
 
 std::string hex(Fp128 fp) { return std::format("{:016x}{:016x}", fp.lo, fp.hi); }
@@ -215,8 +222,9 @@ StoredProbe store_probe(const RuleProbeSnapshot& probe) {
 
 }  // namespace
 
-std::optional<RuleSnapshot> read_rule_snapshot(const std::filesystem::path& cwd, std::string_view target) {
-  const auto dir = snapshot_directory(cwd, false);
+std::optional<RuleSnapshot> read_rule_snapshot(const std::filesystem::path& cwd, std::string_view target,
+                                              std::string_view native_triple) {
+  const auto dir = snapshot_directory(cwd, native_triple, false);
   if (!dir) return std::nullopt;
   const auto name = entry_name(target);
   const auto text = read_text(dir.value, name.c_str());
@@ -276,7 +284,8 @@ std::optional<RuleSnapshot> read_rule_snapshot(const std::filesystem::path& cwd,
   return result;
 }
 
-void write_rule_snapshot(const std::filesystem::path& cwd, std::string_view target, const RuleSnapshot& snapshot) {
+void write_rule_snapshot(const std::filesystem::path& cwd, std::string_view target, const RuleSnapshot& snapshot,
+                         std::string_view native_triple) {
   if (snapshot.expansions.size() != snapshot.observations.size()) return;
   SnapshotFile saved{snapshot_version, std::string(target), {}, {}};
   for (std::size_t i = 0; i < snapshot.expansions.size(); ++i) {
@@ -313,7 +322,7 @@ void write_rule_snapshot(const std::filesystem::path& cwd, std::string_view targ
   const auto text = lsp::dump(lsp::to_json(saved));
   if (text.size() > max_snapshot_size) return;
 
-  const auto dir = snapshot_directory(cwd, true);
+  const auto dir = snapshot_directory(cwd, native_triple, true);
   if (!dir) return;
   const auto name = entry_name(target);
   if (read_text(dir.value, name.c_str()) != text) store(dir.value, name.c_str(), text);
