@@ -2,6 +2,7 @@
 
 import json
 from pathlib import Path
+import shlex
 import sys
 import tempfile
 
@@ -101,21 +102,27 @@ extern "C" int ycxx_rule_plan_v1(const ycxx_rule_host_v1* host) {
 ''').replace('@GENERATION@', generation)
 
 
-def prepare(scope, compiler):
-    (scope / '.ycxx').mkdir()
-    package = scope / PACKAGE
-    package.mkdir(parents=True)
+def write_package(package, tool, *, reject_native=False):
     link_mode = '-dynamiclib' if sys.platform == 'darwin' else '-shared'
+    native_args = ('    native_args = ["--ycxx-test-reject-native-rule", input("source"), '
+                   '"-o", output("plugin")]\n') if reject_native else ''
     (package / 'build.ycxx').write_text(f'''\
 host_action "rules" {{
-    tool = {json.dumps(str(compiler))}
+    tool = {tool}
     args = ["-std=c++20", "-fPIC", "{link_mode}", "-Iinputs/sdk",
             input("source"), "-o", output("plugin")]
-    environment = {{ PATH = "/usr/bin:/bin" }}
+{native_args}    environment = {{ PATH = "/usr/bin:/bin" }}
     inputs = {{ source = "rules.cc" }}
     outputs = {{ plugin = "rules.so" }}
 }}
 ''', encoding='utf-8')
+
+
+def prepare(scope, compiler):
+    (scope / '.ycxx').mkdir()
+    package = scope / PACKAGE
+    package.mkdir(parents=True)
+    write_package(package, json.dumps(str(compiler)))
     (package / 'rules.cc').write_text(plugin_source('edition-one'), encoding='utf-8')
     manifest = PLUGIN_IMPORT + ' as wire\n' + '''\
 wire.generator "wire" {
@@ -129,15 +136,17 @@ wire.generator "wire" {
     return manifest
 
 
-def executed_actions(events):
+def action_attempts(events):
     kinds = {'RulePackage', 'RuleWorker', 'ExternalAction'}
-    return [event['kind'] for event in events
-            if event.get('kind') in kinds and event.get('outcome') == 'executed']
+    return [event for event in events
+            if event.get('kind') in kinds and event.get('outcome') in ('executed', 'failed')]
 
 
-def check_actions(summary, events, *expected):
-    assert summary['actions_executed'] == len(expected), (expected, summary)
-    assert sorted(executed_actions(events)) == sorted(expected), (expected, executed_actions(events))
+def check_actions(summary, events, *expected, failed=0):
+    attempts = action_attempts(events)
+    successes = sorted(event['kind'] for event in attempts if event['outcome'] == 'executed')
+    assert summary['actions_executed'] == len(attempts) == len(expected) + failed, (expected, failed, attempts, summary)
+    assert successes == sorted(expected), (expected, attempts)
 
 
 def event_keys(events, kind, outcome='executed'):
@@ -148,6 +157,17 @@ def event_keys(events, kind, outcome='executed'):
 def check_event_keys(events, kind, *expected, outcome='executed'):
     actual = event_keys(events, kind, outcome)
     assert actual == sorted(expected), (kind, outcome, expected, actual)
+
+
+def compiler_attempts(events):
+    return [(event['key'], event['outcome']) for event in action_attempts(events)
+            if event['kind'] == 'RulePackage']
+
+
+def check_compiler_attempts(events, package, *expected):
+    actual = compiler_attempts(events)
+    wanted = [(f'{package} via {compiler}', outcome) for compiler, outcome in expected]
+    assert actual == wanted, (wanted, actual)
 
 
 def check_standard(ycxx, scope, env):
@@ -168,8 +188,18 @@ cpp.executable "app" {
     executable = scope / '.ycxx' / 'out' / 'app'
 
     summary, events = traced_build(ycxx, scope, env, 'cold bundled provider')
-    check_actions(summary, events, 'RulePackage', 'RuleWorker', 'RuleWorker', 'RuleWorker', 'ExternalAction')
-    check_event_keys(events, 'RulePackage', STANDARD_PACKAGE)
+    attempts = compiler_attempts(events)
+    if sys.platform == 'linux' or len(attempts) == 1:
+        check_compiler_attempts(events, STANDARD_PACKAGE, (ycxx, 'executed'))
+    else:
+        assert len(attempts) >= 2 and attempts[0] == (f'{STANDARD_PACKAGE} via {ycxx}', 'failed'), attempts
+        assert all(outcome == 'failed' for _, outcome in attempts[:-1]), attempts
+        assert attempts[-1][1] == 'executed', attempts
+        for key, _ in attempts:
+            assert key.startswith(f'{STANDARD_PACKAGE} via '), attempts
+            assert Path(key.split(' via ', 1)[1]).is_absolute(), attempts
+    check_actions(summary, events, 'RulePackage', 'RuleWorker', 'RuleWorker', 'RuleWorker', 'ExternalAction',
+                  failed=len(attempts) - 1)
     check_event_keys(events, 'RuleWorker', 'app', 'core', 'standard_wire')
     check_event_keys(events, 'ExternalAction', 'standard_wire')
     for source in ('main.cc', 'core.cc', 'wire.cc'):
@@ -220,7 +250,7 @@ def check_package(ycxx, scope, env, compiler):
 
     summary, events = traced_build(ycxx, scope, env, 'cold rule package')
     check_actions(summary, events, 'RulePackage', 'RuleWorker', 'RuleWorker', 'ExternalAction')
-    check_event_keys(events, 'RulePackage', f'{PACKAGE}/rules')
+    check_compiler_attempts(events, f'{PACKAGE}/rules', (compiler, 'executed'))
     check_event_keys(events, 'RuleWorker', 'app', 'wire')
     assert event_keys(events, 'Link'), 'standard app and custom generator did not reach the native linker'
     check_program(executable, 7)
@@ -245,7 +275,7 @@ def check_package(ycxx, scope, env, compiler):
     settings.write_text('fail\n', encoding='utf-8')
     summary, events = traced_build(ycxx, scope, env, 'worker failure', succeeds=False)
     assert summary['diagnostics'], 'a failing rule must explain the failure'
-    assert 'ExternalAction' not in executed_actions(events), 'a failed rule ran its generator'
+    check_actions(summary, events, failed=1)
     assert executable.read_bytes() == before_failure, 'a failed rule replaced the last successful output'
     check_program(executable, 11)
 
@@ -269,8 +299,8 @@ def check_package(ycxx, scope, env, compiler):
 
     (scope / PACKAGE / 'rules.cc').write_text(plugin_source('reject-executable'), encoding='utf-8')
     summary, events = traced_build(ycxx, scope, env, 'failing explicit provider', succeeds=False)
-    assert summary['actions_executed'] == 2, summary
-    check_event_keys(events, 'RulePackage', f'{PACKAGE}/rules')
+    check_actions(summary, events, 'RulePackage', failed=1)
+    check_compiler_attempts(events, f'{PACKAGE}/rules', (compiler, 'executed'))
     check_event_keys(events, 'RuleWorker', 'app', outcome='failed')
     assert not event_keys(events, 'RuleWorker'), 'explicit provider failure fell back to another worker'
     assert not event_keys(events, 'Link'), 'explicit provider failure reached the native linker'
@@ -279,6 +309,78 @@ def check_package(ycxx, scope, env, compiler):
     check_program(executable, 41)
 
     check_private_primitives(ycxx, scope, env)
+
+
+def compiler_wrapper(path, log, compiler=None):
+    command = (f'exec {shlex.quote(str(compiler))} "$@"' if compiler is not None
+               else f"printf '%s\\n' {shlex.quote(f'{path.name}: deliberate failure')} >&2\nexit 31")
+    path.write_text(f'''\
+#!/bin/sh
+printf '%s\\n' {shlex.quote(path.name)} >> {shlex.quote(str(log))}
+{command}
+''', encoding='utf-8')
+    path.chmod(0o755)
+
+
+def check_fallback(ycxx, scope, env, compiler):
+    package = scope / PACKAGE
+    package_ref = f'{PACKAGE}/rules'
+    (package / 'rules.cc').write_text(plugin_source('fallback-edition'), encoding='utf-8')
+    (scope / 'build.ycxx').write_text(PLUGIN_IMPORT + ' as cpp\n' + '''\
+cpp.executable "app" {
+    sources = ["replacement.cc"]
+}
+''', encoding='utf-8')
+    write_package(package, 'cxx()', reject_native=True)
+    executable = scope / '.ycxx' / 'out' / 'app'
+    log = scope / 'compiler-attempts'
+    tools = scope / 'host-compilers'
+    tools.mkdir()
+    compiler_wrapper(tools / 'c++', log)
+    compiler_wrapper(tools / 'clang++', log, compiler)
+    compiler_wrapper(tools / 'g++', log, compiler)
+
+    # This daemon is already running. Only the invoking client has this relative PATH.
+    build_env = dict(env, PATH=tools.name)
+    summary, events = traced_build(ycxx, scope, build_env, 'fallback to the first successful PATH compiler')
+    check_actions(summary, events, 'RulePackage', 'RuleWorker', failed=2)
+    check_compiler_attempts(events, package_ref, (ycxx, 'failed'), (tools / 'c++', 'failed'),
+                            (tools / 'clang++', 'executed'))
+    assert log.read_text(encoding='utf-8').splitlines() == ['c++', 'clang++']
+    check_program(executable, 41)
+    previous = executable.read_bytes()
+
+    summary, events = traced_build(ycxx, scope, build_env, 'warm fallback selection')
+    check_actions(summary, events)
+    assert log.read_text(encoding='utf-8').splitlines() == ['c++', 'clang++'], 'warm build launched a compiler'
+    assert executable.read_bytes() == previous, 'warm fallback build changed the output'
+
+    failing_tools = scope / 'failing-compilers'
+    failing_tools.mkdir()
+    failed_compilers = (scope / 'c++', failing_tools / 'clang++', failing_tools / 'g++')
+    for failing in failed_compilers:
+        compiler_wrapper(failing, log)
+    log.write_text('', encoding='utf-8')
+    # The leading empty component selects c++ from the client's working directory.
+    summary, events = traced_build(ycxx, scope, dict(env, PATH=f':{failing_tools.name}'),
+                                   'all compilers failed after client PATH changed', succeeds=False)
+    check_actions(summary, events, failed=4)
+    check_compiler_attempts(events, package_ref, (ycxx, 'failed'),
+                            *((failing, 'failed') for failing in failed_compilers))
+    assert log.read_text(encoding='utf-8').splitlines() == [failing.name for failing in failed_compilers]
+    assert summary['diagnostics'], 'compiler exhaustion must explain the failure'
+    assert executable.read_bytes() == previous, 'failed fallback changed the existing output'
+
+    for selector, pinned in [('mycc', tools / 'mycc'), (str(tools / 'absolute-compiler'), tools / 'absolute-compiler')]:
+        compiler_wrapper(pinned, log)
+        write_package(package, f'cxx({json.dumps(selector)})')
+        log.write_text('', encoding='utf-8')
+        summary, events = traced_build(ycxx, scope, build_env, f'pinned compiler failed: {selector}', succeeds=False)
+        check_actions(summary, events, failed=1)
+        check_compiler_attempts(events, package_ref, (pinned, 'failed'))
+        assert log.read_text(encoding='utf-8').splitlines() == [pinned.name]
+        assert summary['diagnostics'], 'a failed pinned compiler must explain the failure'
+        assert executable.read_bytes() == previous, 'failed pinned compiler changed the existing output'
 
 
 def main():
@@ -292,6 +394,7 @@ def main():
         env = env_for(runtime)
         try:
             check_package(ycxx, scope, env, compiler)
+            check_fallback(ycxx, scope, env, compiler)
         finally:
             run_client(ycxx, scope, env, 'ctl', 'shutdown')
 
