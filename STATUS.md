@@ -2747,15 +2747,21 @@ the same IR `unreachable`, flagged `assumed_unreachable`. Native code traps as a
 constant evaluation that reaches it fails with "execution reached __builtin_unreachable()"
 ([expr.const]). IR node flags are 16 bits wide to make room for the flag.
 
-## Source line builtin (#327)
+## Source location builtins (#327)
 
 `__builtin_LINE()` is a zero-argument `unsigned int` constant expression. It uses the presumed
 source line, including through macro expansion and `#line`. An omitted ordinary function
 argument evaluates its default with the invocation line, which nested defaults inherit.
 The interpreter and native code share the same scoped evaluation. Translation units with the
-builtin track presumed lines in their semantic input. The full `std::source_location` facility
-continues in [#327](https://github.com/yrashk/ycxx/issues/327).
+builtin track presumed lines in their semantic input.
 [Design](docs/design/source-line-defaults.md)
+
+Linux x86-64 supports the pinned libycxx `std::source_location::current()` descriptor
+for ordinary omitted arguments. The descriptor stores the presumed filename, line,
+one-based byte column and enclosing function in translation-unit-local storage.
+Resident results observe edits to presumed filenames and columns as well as lines.
+Constructor and default member initializer anchoring, and broader immediate-default
+contexts, remain in [#327](https://github.com/yrashk/ycxx/issues/327).
 
 ## Basic Linux asm statements (#950)
 

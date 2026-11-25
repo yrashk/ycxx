@@ -523,19 +523,30 @@ private:
     return std::nullopt;
   }
 
-  // A thunk can import addresses for supported flat records. Known initializers also
-  // supply integral field values without needing to fetch any other object.
+  // A thunk can import addresses for supported flat records and known integral field values.
+  // An immutable descriptor is also available through the host when importing a known pointer.
   bool importable_local_record(QualType type, std::optional<ConstId> value) {
     const auto& in = s_->ins();
     if (value && !in.values.is<ast::VAggregate>(*value)) return false;
     const auto layout = constant_record_layout(type);
-    if (!layout || !std::ranges::all_of(layout->fields, [&](const auto& field) {
-          return s_->types().is_integral(field.type) || s_->types().is_enum(field.type);
-        })) return false;
-    if (!value) return true;
+    if (!layout) return false;
+    const auto integral = [&](const auto& field) {
+      return s_->types().is_integral(field.type) || s_->types().is_enum(field.type);
+    };
+    if (!value) return std::ranges::all_of(layout->fields, integral);
     const auto elements = in.seqs.elements(in.values.get<ast::VAggregate>(*value).elems);
-    return elements.size() == layout->fields.size() &&
-           std::ranges::all_of(elements, [&](ConstId element) { return in.values.is<ast::VInt>(element); });
+    if (elements.size() != layout->fields.size()) return false;
+    for (std::size_t i = 0; i < elements.size(); ++i) {
+      const auto& field = layout->fields[i];
+      const ConstId element = elements[i];
+      if (integral(field) && in.values.is<ast::VInt>(element)) continue;
+      if (!s_->types().is_pointer(field.type) || !in.values.is<ast::VLvalue>(element)) return false;
+      const auto address = in.values.get<ast::VLvalue>(element);
+      if (address.offset != 0 || in.seqs.size(address.path) || !in.values.is<ast::VEntity>(address.base)) return false;
+      const auto* object = s_->world().entities.find(in.values.get<ast::VEntity>(address.base).entity);
+      if (!object || object->constant_object == ConstId::none) return false;
+    }
+    return true;
   }
 
   bool constant_record_field(QualType type) {

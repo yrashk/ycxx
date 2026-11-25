@@ -2636,7 +2636,7 @@ clauses = ['support.srcloc']
 std = 'C++20'
 detect = '\bsource_location\b'
 status = 'partial'
-note = 'Direct `__builtin_LINE()` and presumed invocation lines for supported ordinary omitted arguments. The descriptor and line-dependent immediate evaluation remain in #327.'
+note = 'Direct `__builtin_LINE()` and the pinned libycxx descriptor capture ordinary invocation locations. The descriptor is supported on Linux x86-64. More immediate-default contexts and other targets remain in #327.'
 probe = '''
 int main() { return __builtin_LINE() == 1 ? 0 : 1; }
 '''

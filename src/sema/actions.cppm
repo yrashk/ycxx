@@ -97,6 +97,12 @@ struct Ex;
 // representation (`decltype(f<T>())` of a deduced return type), known only once the arguments are.
 enum class AliasCallPattern { none, retained, may_erase, rank_checks, unrepresented };
 
+struct PresumedSource {
+  std::string_view file;
+  u32 line = 0;
+  u32 column = 0;
+};
+
 // What sema asks of its context (§B1.4, §B3). In the engine these are `visible_decls(::, name,
 // at item)` and fetches of `decl_sema`.
 class Questions {
@@ -118,6 +124,8 @@ public:
   virtual bool peer_pure_dispatch(EntityId) { return false; }
   virtual void use_typed_dynamic_cast() {}
   virtual u32 presumed_line(engine::Loc) { return 0; }
+  virtual PresumedSource presumed_source(engine::Loc) { return {}; }
+  virtual bool in_default_member_initializer() const { return false; }
   // A use of a global allocation function that may lack a written declaration in the unit.
   // An aligned signature also brings its parameter's enum shape into the unit.
   virtual void use_allocation_function(EntityId, bool = false) {}
@@ -1369,19 +1377,25 @@ public:
 
   Questions& questions() { return *q_; }
   u32 loc_base() const { return loc_base_; }
-  struct DefaultLineScope {
-    Sema& sema;
-    bool observed = false;
-    bool* saved;
-    explicit DefaultLineScope(Sema& sema, bool capture = true)
-        : sema(sema), saved(std::exchange(sema.default_line_observer_, capture ? &observed : nullptr)) {}
-    ~DefaultLineScope() { sema.default_line_observer_ = saved; }
+  struct DefaultSourceObservations {
+    bool line = false;
+    EntityId descriptor_type = EntityId::none;
   };
-  u32 source_line_at(u32 at) {
-    return q_->presumed_line(q_->source_loc({std::to_underlying(item_), loc_base_ + at}, at));
+  struct DefaultSourceScope {
+    Sema& sema;
+    DefaultSourceObservations observed;
+    DefaultSourceObservations* saved;
+    explicit DefaultSourceScope(Sema& sema, bool capture = true)
+        : sema(sema), saved(std::exchange(sema.default_source_observer_, capture ? &observed : nullptr)) {}
+    ~DefaultSourceScope() { sema.default_source_observer_ = saved; }
+  };
+  engine::Loc source_position(u32 at) {
+    return q_->source_loc({std::to_underlying(item_), loc_base_ + at}, at);
   }
-  bool observes_default_line(const Ex& expression) {
-    if (!default_line_observer_ || !*default_line_observer_) return false;
+  u32 source_line_at(u32 at) { return q_->presumed_line(source_position(at)); }
+  std::optional<Diag> unresolved_default_source(const Ex& expression) {
+    if (!default_source_observer_ || (!default_source_observer_->line &&
+        default_source_observer_->descriptor_type == EntityId::none)) return std::nullopt;
     const auto root = b_->commit(ast::Child{expression.id, 0});
     const auto& nodes = ins().ast;
     // A literal through parentheses or contextual conversion to bool cannot observe the line.
@@ -1402,11 +1416,15 @@ public:
       if (!ins().values.is<ast::VInt>(value)) return std::nullopt;
       return ast::int_bits(ins(), value) != ast::Bits128{};
     };
-    bool observed = false;
+    std::optional<Diag> observed;
     auto visit = [&](this const auto& self, const ast::Red& n) -> void {
       if (observed || n.is<ast::ConstantProbe>()) return;
       if (n.is<ast::SourceLine>()) {
-        observed = true;
+        observed = Diag::default_arg_source_line_immediate;
+        return;
+      }
+      if (n.is<ast::SourceLocation>()) {
+        observed = Diag::default_arg_source_location_immediate;
         return;
       }
       if (n.is<ast::Conditional>()) {
@@ -6007,8 +6025,8 @@ public:
   // `call` calls a consteval function or constructor.
   Ex immediate_invocation(Ex call) {
     if (!call.ok() || immediate_context || unevaluated || !evaluate_immediate) return call;
-    if (observes_default_line(call)) {
-      diag(call.begin, Diag::default_arg_source_line_immediate);
+    if (const auto unresolved = unresolved_default_source(call)) {
+      diag(call.begin, *unresolved);
       return {NodeId::none, call.begin, call.end};
     }
     const Evaluation v = evaluate_immediate(call);
@@ -6312,6 +6330,14 @@ public:
     return nullptr;
   }
 
+  EntityId source_location_class() {
+    const auto std_scope = scope_member(global_scope(), ins().names.intern("std"), false);
+    if (!std_scope || !std_scope->ns) return EntityId::none;
+    const auto found = scope_member(*std_scope, ins().names.intern("source_location"), false);
+    if (!found || !found->type || !types().is_class(*found->type)) return EntityId::none;
+    return types().class_of(*found->type);
+  }
+
   bool ordinary_immediate_member(EntityId function, QualType result) {
     if (function == EntityId::none) return false;
     const auto& entity = w_->entities.rec(function);
@@ -6320,8 +6346,13 @@ public:
     const auto& owner = w_->entities.rec(entity.scope);
     if (owner.kind != EntityKind::class_ || owner.templ != EntityId::none) return false;
     const auto* member = member_decl(function);
-    return member && member->is_consteval && !member->is_virtual && !member->is_template &&
-           supported_immediate_member_result(result);
+    if (!member || !member->is_consteval || member->is_virtual || member->is_template) return false;
+    // The pinned library's static immediate member returns a one-pointer record.
+    // Its aggregate constant uses the same interpreted result storage as other record prvalues.
+    if (w_->target.triple == ast::x86_64_linux.triple && member->is_static && types().is_class(result) &&
+        ins().names.spelling(entity.name) == "current" && types().class_of(result) == entity.scope &&
+        source_location_class() == entity.scope) return true;
+    return supported_immediate_member_result(result);
   }
 
   // Only the checked integral, enum and void result representations enter these paths.
@@ -6847,8 +6878,10 @@ public:
       // set. Selecting a static member evaluates a receiver only when the call has one.
       if (!object || (m.arrow && !bound.explicit_receiver && ordinary_immediate_member(fe, fr.inner)))
         return call;
-      Ex discarded = convert_node(*object, ast::ConversionKind::to_void, builtin(Builtin::void_));
-      return node(ast::OrderedBinary{info, ast::OrderedOp::comma, at(discarded, begin), at(call, begin)}, begin, end, info);
+      Ex receiver = types().is_class(fr.inner) && ordinary_immediate_member(fe, fr.inner) ? discarded(*object) : *object;
+      if (!receiver.ok()) return fail;
+      Ex effects = convert_node(receiver, ast::ConversionKind::to_void, builtin(Builtin::void_));
+      return node(ast::OrderedBinary{info, ast::OrderedOp::comma, at(effects, begin), at(call, begin)}, begin, end, info);
     }
     if (!object) {
       diag(begin, Diag::member_without_object, d->name);
@@ -7514,10 +7547,16 @@ public:
       if (destructor != EntityId::none && !check_access(c, destructor, w_->entities.rec(destructor).name, begin)) return fail;
     }
     if (k.entity != EntityId::none && k.entity == cr->defaulted_default_ctor) {
-      if (!cr->trivial_defaulted_default_ctor) return fail;  // diagnosed at its declaration
+      if (!cr->trivial_defaulted_default_ctor && !cr->null_pointer_defaulted_default_ctor)
+        return fail;  // diagnosed at its declaration
       if (destination == ConstructorDestination::delegation) {
         diag(begin, Diag::defaulted_default_delegation);
         return fail;
+      }
+      if (cr->null_pointer_defaulted_default_ctor) {
+        const auto& field = cr->fields.front();
+        Ex init = literal(Types::unqualified(field.type), field.init, ValueCategory::prvalue, begin, end);
+        return list_of(ut, {init}, begin, end);
       }
       ExprInfo info{ut, ValueCategory::prvalue, 0};
       // [dcl.init.general]: value-initialization zero-initializes before the trivial constructor.
@@ -7694,7 +7733,8 @@ public:
         const auto conversion = node.get<ast::ImplicitConversion>().conversion;
         return conversion != ast::ConversionKind::user_defined && conversion != ast::ConversionKind::array_copy;
       }
-      return node.is<ast::Literal>() || node.is<ast::SourceLine>() || node.is<ast::SourceLineContext>() ||
+      return node.is<ast::Literal>() || node.is<ast::SourceLine>() || node.is<ast::SourceLocation>() ||
+             node.is<ast::DefaultSourceContext>() ||
              node.is<ast::DeclRef>() || node.is<ast::LocalRef>() || node.is<ast::This>() ||
              node.is<ast::Paren>() || node.is<ast::Member>() || node.is<ast::Subscript>() ||
              node.is<ast::Unary>() || node.is<ast::Binary>() || node.is<ast::OrderedBinary>() ||
@@ -8288,17 +8328,109 @@ public:
     return node(ast::ConstantProbe{info, at(operand, begin), proved}, begin, end, info);
   }
 
+  QualType source_string_pointer() {
+    return types().pointer(types().add_cv(builtin(Builtin::char_), Cv::const_));
+  }
+
+  // Resolve the library's actual nested type. This compiler lookup does not name it in source.
+  EntityId source_location_descriptor_type() {
+    const EntityId owner = source_location_class();
+    if (owner == EntityId::none) return EntityId::none;
+    const auto nested = member_type(owner, ins().names.intern("__impl"));
+    if (!nested || !types().is_class(*nested)) return EntityId::none;
+    const EntityId descriptor = types().class_of(*nested);
+    const auto& entity = w_->entities.rec(descriptor);
+    if (entity.scope != owner || ins().names.spelling(entity.name) != "__impl") return EntityId::none;
+    const ClassRec* record = class_rec(descriptor);
+    if (!record || !is_aggregate(*nested) || record->union_ || !record->bases.empty() || record->fields.size() != 4 ||
+        record->unapplied_layout || q_->class_layout_uncertain(descriptor)) return EntityId::none;
+    constexpr std::array<std::string_view, 4> names{"_M_file_name", "_M_function_name", "_M_line", "_M_column"};
+    const QualType text = source_string_pointer(), number = builtin(Builtin::unsigned_int);
+    for (std::size_t i = 0; i < names.size(); ++i) {
+      const FieldRec& field = record->fields[i];
+      if (ins().names.spelling(field.name) != names[i] || types().canonical(field.type) != (i < 2 ? text : number) ||
+          field.mutable_ || field.bit_width || field.no_unique_address) return EntityId::none;
+    }
+    constexpr std::array<u64, 4> offsets{0, 8, 16, 20};
+    const auto layout = class_layout(descriptor);
+    return layout && layout->size == 24 && layout->align == 8 && std::ranges::equal(layout->offsets, offsets)
+        ? descriptor : EntityId::none;
+  }
+
+  std::string source_function_name() {
+    if (!in_function_or_lambda_body()) return {};
+    const EntityId function = lambdas_.empty() ? current_function : lambdas_.back().call;
+    if (function == EntityId::none) return {};
+    const auto& record = w_->entities.rec(function);
+    std::string name(ins().names.spelling(record.name));
+    for (EntityId owner = record.scope; owner != EntityId::none; owner = w_->entities.rec(owner).scope) {
+      const auto part = ins().names.spelling(w_->entities.rec(owner).name);
+      if (!part.empty()) name = std::string(part) + "::" + name;
+    }
+    return types().spell_declarator(record.type, std::move(name));
+  }
+
+  ConstId source_location_address(EntityId descriptor, u32 at) {
+    const auto source = q_->presumed_source(source_position(at));
+    const QualType chars = source_string_pointer();
+    auto string_address = [&](std::string_view value) {
+      std::vector<u32> units;
+      units.reserve(value.size() + 1);
+      for (unsigned char byte : value) units.push_back(byte);
+      units.push_back(0);
+      const auto array = types().array(types().pointee(chars), units.size());
+      return w_->values.address(chars, w_->values.string(array, units), 0);
+    };
+    const QualType number = builtin(Builtin::unsigned_int);
+    const ConstId fields[]{string_address(source.file), string_address(source_function_name()),
+                           w_->values.integer(number, source.line), w_->values.integer(number, source.column)};
+    const QualType type = types().add_cv(types().class_type(descriptor), Cv::const_);
+    const auto value = w_->values.aggregate(type, fields);
+    const auto entity = w_->entities.entity({.kind = EntityKind::variable, .name = no_name(), .type = type,
+                                             .linkage = ast::Linkage::internal, .constant_object = value});
+    return w_->values.address(types().pointer(type), w_->values.entity(entity), 0);
+  }
+
+  Ex builtin_source_location(u32 begin, u32 end) {
+    const Ex fail{NodeId::none, begin, end};
+    if (!w_->target.supports(ast::NativeOperation::source_location_descriptor)) {
+      diag(begin, Diag::source_location_target);
+      return fail;
+    }
+    const EntityId descriptor = source_location_descriptor_type();
+    if (descriptor == EntityId::none) {
+      diag(begin, Diag::source_location_descriptor);
+      return fail;
+    }
+    const QualType type = types().pointer(types().add_cv(types().class_type(descriptor), Cv::const_));
+    const ExprInfo info{type, ValueCategory::prvalue, 0};
+    if (unevaluated) return node(ast::SourceLocation{info}, begin, end, info);
+    if (default_source_observer_) {
+      default_source_observer_->descriptor_type = descriptor;
+      return node(ast::SourceLocation{info}, begin, end, info);
+    }
+    if (q_->in_default_member_initializer()) {
+      diag(begin, Diag::source_location_default_member);
+      return fail;
+    }
+    return literal(type, source_location_address(descriptor, begin), ValueCategory::prvalue, begin, end);
+  }
+
   // Builtins with ordinary expression arguments (docs/EXTENSIONS.md).
   Ex builtin_call(const lex::BuiltinFunctionInfo& b, std::vector<Ex> args, u32 begin, u32 end) {
     using enum lex::BuiltinFunction;
+    if (b.function == source_location) {
+      if (!builtin_arity(0, args.size(), begin)) return {NodeId::none, begin, end};
+      return builtin_source_location(begin, end);
+    }
     if (b.function == source_line) {
       if (!builtin_arity(0, args.size(), begin)) return {NodeId::none, begin, end};
       const QualType type = builtin(Builtin::unsigned_int);
       const u32 line = source_line_at(begin);
-      if (default_line_observer_) {
+      if (default_source_observer_) {
         // Constant probes retain unevaluated operands for proof, but the default's invocation
         // line is still unknown. Only an evaluated use binds the enclosing default to a line.
-        if (!unevaluated) *default_line_observer_ = true;
+        if (!unevaluated) default_source_observer_->line = true;
         const ExprInfo info{type, ValueCategory::prvalue, 0};
         return node(ast::SourceLine{info, line}, begin, end, info);
       }
@@ -8351,6 +8483,7 @@ public:
     switch (b.function) {
       case addressof:
       case source_line:
+      case source_location:
       case trap:
       case unreachable:
       case strlen:
@@ -12446,18 +12579,33 @@ public:
   // is replayed only for the selected specialization and only when omitted ([temp.inst]/12).
   std::optional<Ex> default_argument(NodeId d, u32 at_, DefaultArgumentOrigin origin = DefaultArgumentOrigin::interned,
                                      EntityId function = EntityId::none, QualType parameter = {},
-                                     std::optional<u32> invocation = std::nullopt) {
+                                     std::optional<u32> invocation = std::nullopt,
+                                     std::optional<u32> descriptor_invocation = std::nullopt) {
     const bool in_builder = origin == DefaultArgumentOrigin::current_item;
     // An earlier declarator's inherited defaults are already adopted by this builder.
     const NodeId interned = in_builder ? b_->adopted_node(d) : d;
     const auto value = interned == NodeId::none ? b_->get<ast::DefaultArg>(d) : ins().ast.get<ast::DefaultArg>(interned);
     auto use = [&](NodeId id, NodeId global, ast::DefaultArg arg) {
-      if (!unevaluated && ast::kind_of(arg.arg.id) == ast::Nodes::index_of<ast::SourceLineContext>()) {
-        auto context = global == NodeId::none ? b_->get<ast::SourceLineContext>(arg.arg.id)
-                                              : ins().ast.get<ast::SourceLineContext>(arg.arg.id);
+      if (!unevaluated && ast::kind_of(arg.arg.id) == ast::Nodes::index_of<ast::DefaultSourceContext>()) {
+        auto context = global == NodeId::none ? b_->get<ast::DefaultSourceContext>(arg.arg.id)
+                                              : ins().ast.get<ast::DefaultSourceContext>(arg.arg.id);
         if (global != NodeId::none) context.arg.id = b_->adopt(context.arg.id);
-        context.line = source_line_at(invocation.value_or(at_));
-        if (default_line_observer_) *default_line_observer_ = true;
+        const u32 site = invocation.value_or(at_);
+        if (context.observes_line) {
+          context.line = source_line_at(site);
+          if (default_source_observer_) default_source_observer_->line = true;
+        }
+        if (context.descriptor_type != EntityId::none) {
+          if (default_source_observer_) {
+            default_source_observer_->descriptor_type = context.descriptor_type;
+          } else {
+            if (q_->in_default_member_initializer()) {
+              diag(site, Diag::source_location_default_member);
+              return Ex{NodeId::none, at_, at_};
+            }
+            context.descriptor_address = source_location_address(context.descriptor_type, descriptor_invocation.value_or(site));
+          }
+        }
         arg.arg.id = b_->add(context, 0);
         return node(arg, at_, at_, arg.info);
       }
@@ -12592,7 +12740,9 @@ public:
     std::vector<QualType> params = fr.params;  // copied: converting may intern new types
     std::vector<Ex> args(given.begin(), given.end());
     for (std::size_t i = args.size(); i < params.size() && i < defaults.size() && defaults[i] != NodeId::none; ++i) {
-      auto a = default_argument(defaults[i], paren_at, origin, default_source, params[i], invocation_at);
+      // The descriptor uses the call's beginning, including a written member receiver.
+      // __builtin_LINE keeps its separate member-name anchor.
+      auto a = default_argument(defaults[i], paren_at, origin, default_source, params[i], invocation_at, begin);
       if (!a) return std::nullopt;
       args.push_back(*a);
     }
@@ -12725,7 +12875,7 @@ private:
   std::vector<engine::Diagnostic>* diags_;
   ast::ItemId item_;
   u32 loc_base_;
-  bool* default_line_observer_ = nullptr;
+  DefaultSourceObservations* default_source_observer_ = nullptr;
   bool in_requires_body_ = false;
   bool in_constraint_atom_ = false;
   EntityId class_prefix_owner_ = EntityId::none;
