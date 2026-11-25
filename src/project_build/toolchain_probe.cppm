@@ -44,6 +44,7 @@ constexpr std::string_view syntax23[] = {"-std=c++23"sv, "-fsyntax-only"sv};
 constexpr std::string_view syntax26[] = {"-std=c++26"sv, "-fsyntax-only"sv};
 constexpr std::string_view reflection[] = {"-std=c++26"sv, "-freflection"sv, "-fsyntax-only"sv};
 constexpr std::string_view object_args[] = {"-std=c++20"sv, "-ffreestanding"sv, "-c"sv};
+constexpr std::string_view pic_object_args[] = {"-std=c++20"sv, "-fPIC"sv, "-c"sv};
 constexpr std::string_view hosted_args[] = {"-std=c++20"sv};
 constexpr std::string_view freestanding_args[] = {"-std=c++20"sv, "-ffreestanding"sv, "-nostdlib"sv};
 constexpr std::string_view shared_args[] = {"-std=c++20"sv, "-fPIC"sv, "-shared"sv};
@@ -62,7 +63,9 @@ extern "C" void _start() {}
 )cpp"sv;
 constexpr auto plugin_entry = R"cpp(
 struct ycxx_rule_host_v1;
-extern "C" int ycxx_rule_plan_v1(const ycxx_rule_host_v1*) { return 0; }
+extern "C" int ycxx_rule_plan_v1(const ycxx_rule_host_v1* host) {
+    return host == nullptr ? 42 : 1;
+}
 )cpp"sv;
 
 constexpr ToolchainProbe probes[] = {
@@ -137,6 +140,7 @@ auto witness() { return std::format("{:04}", 42); }
 )cpp", syntax20, {}, {}},
 
     {"object.default", "Default target object", object, leaf_function, object_args, {}, "probe.o"},
+    {"object.host-shared", "Position-independent rule object", object, plugin_entry, pic_object_args, {}, "probe.o"},
     {"object.x86_64-linux", "x86-64 Linux object", object, leaf_function, object_args, "x86_64-pc-linux-gnu", "probe.o"},
     {"object.aarch64-linux", "AArch64 Linux object", object, leaf_function, object_args, "aarch64-unknown-linux-gnu", "probe.o"},
     {"object.arm64-darwin", "Arm64 Darwin object", object, leaf_function, object_args, "arm64-apple-darwin", "probe.o"},
