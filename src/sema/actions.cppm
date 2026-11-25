@@ -8087,6 +8087,8 @@ public:
   // namespace-scope ones. The `callee` of a call that lookup does not find is a `DepName`: the
   // call decides once it has its arguments ([temp.dep.candidate]).
   Ex name_expr(NameId name, u32 begin, u32 end, bool callee = false) {
+    if (ins().names.spelling(name) == "__PRETTY_FUNCTION__" && in_function_or_lambda_body())
+      return pretty_function(begin, end);
     // Block scopes, innermost first: a scope's locals and the names its using-declarations
     // brought in ([namespace.udecl]) hide those of enclosing scopes ([basic.scope.hiding]);
     // using-declarations of one scope make one set.
@@ -8929,11 +8931,188 @@ public:
       diag(begin, Diag::not_supported, lex::Tk::string_lit);
       return {NodeId::none, begin, end};
     }
-    std::vector<u32> units = l.units;
+    return string_lvalue(literal_character_type(l.encoding), l.units, begin, end);
+  }
+
+  Ex string_lvalue(Builtin elem, std::vector<u32> units, u32 begin, u32 end) {
     units.push_back(0);
-    Builtin elem = literal_character_type(l.encoding);
-    QualType t = types().array(types().add_cv(builtin(elem), Cv::const_), units.size());
+    const QualType t = types().array(types().add_cv(builtin(elem), Cv::const_), units.size());
     return literal(t, w_->values.string(t, units), ValueCategory::lvalue, begin, end);
+  }
+
+  Ex pretty_function(u32 begin, u32 end) {
+    if (!in_function_body || !lambdas_.empty() || current_function == EntityId::none || !namespace_scoped(current_function)) {
+      diag(begin, Diag::pretty_function_context);
+      return {NodeId::none, begin, end};
+    }
+    const EntityRec& function = w_->entities.rec(current_function);
+    // BodyAnalysis replays the expression with the selected specialization as current_function.
+    // The unbound body knows neither the bytes nor the resulting array bound.
+    if (function.kind == EntityKind::function_template)
+      return dependent_node({}, begin, end, std::nullopt, ValueCategory::lvalue, expr_flag::type_dependent);
+
+    const TypeRec signature = types().rec(function.type);
+    std::string spelling;
+    // Reading the declaration avoids asking for the return type the body is still deducing.
+    bool have_result = true;
+    if (types().has_placeholder(signature.inner)) spelling = types().spell(signature.inner);
+    else have_result = append_pretty_type(spelling, signature.inner);
+    spelling += ' ';
+    if (!have_result || !append_pretty_name(spelling, current_function, /*function_scope=*/true) ||
+        !append_pretty_parameters(spelling, signature)) {
+      diag(begin, Diag::pretty_function_spelling);
+      return {NodeId::none, begin, end};
+    }
+    if (function.templ != EntityId::none) {
+      // Overloads can have the same substituted signature and arguments. Discriminate their
+      // patterns using the declaration's semantic key, independent of its instantiation point.
+      const EntityRec& pattern = w_->entities.rec(function.templ);
+      const auto identity = ast::mix(ast::mix(types().fp(types().canonical(pattern.type)), pattern.head), pattern.constraints);
+      spelling += std::format(" [template {:016x}{:016x}]", identity.hi, identity.lo);
+    }
+    std::vector<u32> units;
+    units.reserve(spelling.size() + 1);
+    for (unsigned char byte : spelling) units.push_back(byte);
+    return string_lvalue(Builtin::char_, std::move(units), begin, end);
+  }
+
+  // Canonical arguments use their entire structure. Aliases are stripped by append_pretty_type,
+  // and the encoding's delimiters distinguish each level of qualification and indirection.
+  bool append_pretty_args(std::string& text, std::span<const TemplateArg> args) {
+    const char* separator = "<";
+    for (const TemplateArg& arg : args) {
+      text += separator;
+      separator = ", ";
+      switch (arg.kind) {
+        case TemplateArgKind::type:
+          if (!append_pretty_type(text, arg.type)) return false;
+          break;
+        case TemplateArgKind::pack:
+          text += "pack";
+          if (!append_pretty_args(text, ins().seqs.elements(arg.elems))) return false;
+          break;
+        case TemplateArgKind::template_:
+          text += "template<";
+          if (arg.templ == EntityId::none || !append_pretty_name(text, arg.templ)) return false;
+          text += '>';
+          break;
+        case TemplateArgKind::value: {
+          text += "value<";
+          if (!append_pretty_type(text, arg.type)) return false;
+          const auto& values = ins().values;
+          std::optional<ast::Bits128> bits;
+          if (values.is<ast::VInt>(arg.value)) bits = values.get<ast::VInt>(arg.value).bits;
+          if (values.is<ast::VFloat>(arg.value)) bits = values.get<ast::VFloat>(arg.value).bits;
+          if (bits) text += std::format(", 0x{:016x}{:016x}>", bits->hi, bits->lo);
+          else if (values.is<ast::VNullptr>(arg.value)) text += ", nullptr>";
+          else return false;
+          break;
+        }
+      }
+    }
+    if (args.empty()) text += '<';
+    text += '>';
+    return true;
+  }
+
+  bool append_pretty_name(std::string& text, EntityId id, bool function_scope = false) {
+    const EntityRec& entity = w_->entities.rec(id);
+    const std::string_view name = ins().names.spelling(entity.name);
+    if (name.empty() || entity.unnamed_type_ordinal || entity.enum_linkage_name) return false;
+    // An unnamed namespace is unambiguous for the function body within its own unit. Reject
+    // such type arguments, whose names alone cannot distinguish them across units.
+    if (name == "(anonymous)" && !function_scope) return false;
+    if (entity.scope != EntityId::none) {
+      const auto kind = w_->entities.rec(entity.scope).kind;
+      if ((kind != EntityKind::namespace_ && kind != EntityKind::class_) ||
+          !append_pretty_name(text, entity.scope, function_scope)) return false;
+    }
+    text += "::";
+    text += name;
+    return entity.templ == EntityId::none || append_pretty_args(text, entity.args);
+  }
+
+  static std::string_view pretty_cv(Cv cv) {
+    switch (cv) {
+      case Cv::none: return "";
+      case Cv::const_: return "const";
+      case Cv::volatile_: return "volatile";
+      case Cv::const_volatile: return "const volatile";
+    }
+    std::unreachable();
+  }
+
+  bool append_pretty_parameters(std::string& text, const TypeRec& type) {
+    text += '(';
+    const char* separator = "";
+    for (QualType p : type.params) {
+      text += separator;
+      separator = ", ";
+      if (!append_pretty_type(text, p)) return false;
+    }
+    if (type.variadic) {
+      text += separator;
+      text += "...";
+    }
+    text += ')';
+    if (type.fn_cv != Cv::none) {
+      text += ' ';
+      text += pretty_cv(type.fn_cv);
+    }
+    if (type.fn_ref != ast::RefQual::none) text += type.fn_ref == ast::RefQual::lvalue ? " &" : " &&";
+    if (type.fn_noexcept) text += " noexcept";
+    if (type.linkage == LangLinkage::c) text += " extern \"C\"";
+    return true;
+  }
+
+  bool append_pretty_type(std::string& text, QualType t) {
+    t = types().canonical(t);
+    const TypeRec type = types().rec(t);
+    if (const Cv cv = Types::cv(t); cv != Cv::none) {
+      text += pretty_cv(cv);
+      text += ' ';
+    }
+    switch (type.kind) {
+      case TypeKind::builtin:
+        if (type.builtin <= Builtin::long_double) text += sema::spelling(type.builtin);
+        else if (type.builtin == Builtin::meta_info) text += "std::meta::info";
+        else return false;
+        return true;
+      case TypeKind::class_:
+      case TypeKind::enum_:
+        return append_pretty_name(text, type.entity);
+      case TypeKind::function:
+        text += "function<";
+        if (!append_pretty_type(text, type.inner) || !append_pretty_parameters(text, type)) return false;
+        break;
+      case TypeKind::pointer:
+        text += "pointer<";
+        if (!append_pretty_type(text, type.inner)) return false;
+        break;
+      case TypeKind::member_pointer:
+        text += "member_pointer<";
+        if (!append_pretty_type(text, type.member_owner)) return false;
+        text += ", ";
+        if (!append_pretty_type(text, type.inner)) return false;
+        break;
+      case TypeKind::reference:
+        text += type.rvalue_ref ? "rvalue_reference<" : "lvalue_reference<";
+        if (!append_pretty_type(text, type.inner)) return false;
+        break;
+      case TypeKind::array:
+        text += "array<";
+        if (type.bound_value != ConstId::none) {
+          if (!ins().values.is<ast::VInt>(type.bound_value)) return false;
+          text += std::to_string(type.bound);
+        }
+        text += ", ";
+        if (!append_pretty_type(text, type.inner)) return false;
+        break;
+      default:
+        return false;
+    }
+    text += '>';
+    return true;
   }
 
   Ex bool_literal(bool v, u32 begin, u32 end) {

@@ -59,6 +59,10 @@ def main():
             run(['./bit-cast-program'])
             run(['./bit-cast-program', 'different-input'])
 
+        pretty_function = tests / 'own' / 'templates' / 'pretty-function.run.cpp'
+        compile(target, '-std=c++26', '-nostdlib', str(pretty_function), '-o', 'pretty-function-program')
+        run(['./pretty-function-program'])
+
         source('trap.cpp', """int main(int argc, char**) {
   return argc > 1 ? (__builtin_trap(), 91) : 37;
 }""")
