@@ -444,8 +444,8 @@ written default member initializer are value-initialized.
   Free function templates can instantiate omitted dependent scalar defaults after overload selection.
   Ordinary free binary operators use argument-dependent lookup, including associated base namespaces.
   Supported dependent binary operators on ordinary non-template classes also find associated
-  nonmember candidates at instantiation. Ordinary unary minus can find hidden friends by
-  argument-dependent lookup.
+  nonmember candidates at instantiation. Unary operators, prefix increment and compound
+  assignments can find hidden friends by argument-dependent lookup.
   Nonmember operators can be called explicitly by name, including with namespace qualification.
   [#219](https://github.com/yrashk/ycxx/issues/219)
   Overloaded free functions can take braced arguments for arithmetic parameters
