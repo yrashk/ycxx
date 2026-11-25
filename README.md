@@ -200,6 +200,15 @@ build/bin/ycxx cxx --target=x86_64-pc-linux-gnu -nostdlib --dynamic-linker="$tar
   example.cpp "$target_library" -o example
 ```
 
+On x86-64 Linux, `-shared` emits a loadable leaf shared library from position-independent C++
+or supported ELF object inputs. Its strong, default-visible function definitions are available
+to `dlopen` callers and to native and system linkers. The SONAME defaults to the output basename.
+Use `-Wl,-soname,NAME` to specify a different one. [#391](https://github.com/yrashk/ycxx/issues/391)
+
+```sh
+build/bin/ycxx cxx --target=x86_64-pc-linux-gnu -shared -fPIC -nostdlib provider.cpp -o libprovider.so
+```
+
 Linux objects pass and return `bool`, 8-, 16-, 32- and 64-bit integers and enums, pointers and
 references. Direct and function-pointer variadic calls accept promoted integer and pointer
 arguments. Ordinary free variadic definitions with scalar INTEGER and SSE signatures support
