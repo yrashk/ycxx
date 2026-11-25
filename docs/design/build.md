@@ -253,7 +253,7 @@ flags control the probe invocation and the package's `args` control its build.
 Each named observation has a phase and a witness. The matrix measures the
 unconfigured driver target, exact C++ modes, header inclusion, representative
 features, configured and named cross-target objects, hosted and freestanding
-links, and host shared-library compile, link and load. Linked artifact checks
+links, a hosted executable run, and shared-library compile, link and load. Linked artifact checks
 validate the architecture, format and kind. The load action runs only when
 the shared artifact matches the host target and calls the test entry point.
 

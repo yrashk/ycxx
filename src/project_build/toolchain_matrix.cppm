@@ -36,11 +36,11 @@ struct ToolchainProbeResult {
   using Value = ToolchainProbeReceipt::Value;
   static std::string describe(const Key& key) {
     const auto rows = baseline_toolchain_probes();
-    if (key.row == rows.size()) return "driver.search-paths";
-    if (key.row == rows.size() + 1) return "link.host-shared.load";
-    if (key.row == rows.size() + 2) return "link.hosted.run";
-    return std::string(rows[key.row].id);
+    constexpr std::string_view synthetic[] = {"driver.search-paths", "link.host-shared.load", "link.hosted.run"};
+    const auto id = key.row < rows.size() ? rows[key.row].id : synthetic[key.row - rows.size()];
+    return std::format("{} [{:08x}]", id, static_cast<std::uint32_t>(key.profile.lo));
   }
+  static std::string show(const Value& value);
   static engine::query_task<Value> run(engine::Ctx& cx, const Key& key) {
     co_return cx.fetch<ToolchainProbeReceipt>(key);
   }
@@ -103,6 +103,14 @@ std::string_view name(ProbeSupport support) {
   return names[std::to_underlying(support)];
 }
 
+void add_diagnostic(ProbeEvidence& evidence, std::string_view stderr_text) {
+  if (evidence.support == ProbeSupport::supported) return;
+  if (const auto first = stderr_text.find_first_not_of(" \r\n\t"); first != stderr_text.npos) {
+    stderr_text.remove_prefix(first);
+    evidence.reason += std::format(" · {}", stderr_text.substr(0, std::min(stderr_text.find('\n'), std::size_t{240})));
+  }
+}
+
 void add_fact(ToolchainMatrix& matrix, std::string_view package, std::string_view id,
               const ProbeEvidence& evidence) {
   auto origin = evidence.reason;
@@ -136,6 +144,7 @@ MeasuredToolchainProbe execute_probe(const ToolchainProbe& probe, const StagedTo
   const auto state = completion(result);
   MeasuredToolchainProbe record{.evidence = classify_toolchain_probe(probe, staged.expected_target, result, state),
                                 .artifact = {}, .discovered_inputs = {}, .cacheable = reusable(state)};
+  add_diagnostic(record.evidence, result.err);
   if ((probe.phase == ToolchainProbePhase::shared_link || probe.id == "link.hosted") &&
       record.evidence.support == ProbeSupport::supported)
     record.artifact = std::move(result.outputs.front().contents);
@@ -195,10 +204,19 @@ MeasuredToolchainProbe run_host_witness(const ToolchainProbeProfile& profile, st
     observed.evidence.reason = shared ? "host loader or rule entry point rejected the library"
                                       : "executable returned an unexpected status";
   }
+  add_diagnostic(observed.evidence, result.err);
   return observed;
 }
 
 }  // namespace
+
+std::string ToolchainProbeResult::show(const Value& value) {
+  if (!value) return "Measurement needed";
+  const auto& evidence = value->evidence;
+  if (!evidence.target.empty())
+    return std::format("{}\n{}\nTarget {}\n", name(evidence.support), evidence.reason, evidence.target);
+  return std::format("{}\n{}\n", name(evidence.support), evidence.reason);
+}
 
 std::expected<ToolchainMatrix, std::string> measure_toolchain_matrix(
     const std::filesystem::path& cwd, std::string_view package, ToolchainProbeProfile profile,
@@ -218,7 +236,8 @@ std::expected<ToolchainMatrix, std::string> measure_toolchain_matrix(
     });
     merge_inputs(matrix.inputs, {pp::all_system_dirs(sdk == profile.environment.end() ? "" : sdk->second), {}});
   }
-  const auto configured = fingerprint_toolchain_probe_inputs(matrix.inputs);
+  const auto configured_inputs = matrix.inputs;
+  const auto configured = fingerprint_toolchain_probe_inputs(configured_inputs);
   const auto catalogue = baseline_toolchain_probes();
   const auto& target_probe = catalogue.front();
   auto default_target = stage_toolchain_probe(target_probe, profile);
@@ -260,7 +279,8 @@ std::expected<ToolchainMatrix, std::string> measure_toolchain_matrix(
       add_fact(matrix, package, shared ? "link.host-shared.load" : "link.hosted.run", witness.evidence);
     }
   }
-  if (matrix.stamp != fingerprint_toolchain_probe_inputs(matrix.inputs))
+  if (matrix.stamp != fingerprint_toolchain_probe_inputs(matrix.inputs) ||
+      configured != fingerprint_toolchain_probe_inputs(configured_inputs))
     return std::unexpected("toolchain inputs changed while measuring the profile");
   return matrix;
 }
