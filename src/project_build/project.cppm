@@ -2,6 +2,7 @@
 // results reach the graph as inputs at quiescence (#1255).
 module;
 #include <stdlib.h>
+#include <unistd.h>
 
 export module ycxx.build.project;
 
