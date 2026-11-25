@@ -96,6 +96,8 @@ struct Target {
   // Whether all code for the target is position independent, whatever the options say: `__PIC__`
   // and `__pic__` are then always 2, as Clang has them on arm64 Darwin.
   bool always_pic = false;
+  // Standard unsigned integers have eight-bit bytes, pure binary values and no padding.
+  bool little_endian_unsigned_integers = false;
 
   constexpr BuiltinLayout operator[](Builtin b) const { return layout[std::to_underlying(b)]; }
   constexpr bool has(Builtin b) const { return (*this)[b].size != 0; }
@@ -307,6 +309,7 @@ inline constexpr Target aarch64_darwin{
     .call_triviality = CallTriviality::itanium,
     .apple_calls = true,
     .always_pic = true,
+    .little_endian_unsigned_integers = true,
 };
 
 // x86_64-linux-gnu (System V): `long double` is the x87 80-bit format in 16 bytes.
@@ -340,6 +343,7 @@ inline constexpr Target x86_64_linux{
                          std::to_underlying(NativeOperation::namespace_hidden_asm) |
                          std::to_underlying(NativeOperation::breakpoint_statement_asm) |
                          std::to_underlying(NativeOperation::source_location_descriptor),
+    .little_endian_unsigned_integers = true,
 };
 
 constexpr const Target* target_for_triple(std::string_view triple) {

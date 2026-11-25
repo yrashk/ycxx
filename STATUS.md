@@ -2445,6 +2445,10 @@ session's.*
   `typename X<T>::type` needs, instantiating a specialization. A terminal namespace-qualified
   alias specialization such as `N::A<T>` stays a type argument when its expansion is a dependent
   member type ([temp.arg.general], #630).
+- Namespace alias substitution checks dependent qualified type arguments written in the alias
+  body even when the result discards them. Forwarded aliases retain the check while its bindings
+  are dependent. Type requirements and function-template return deduction use the same
+  definition-point lookup ([temp.alias], #1311).
 - Direct uses of namespace alias-template IDs in non-template code outside requires-expressions
   check the alias template's associated constraints before expanding its type when every argument
   is an explicit non-dependent type. Type-constraints and the template-head's requires-clause
@@ -2662,6 +2666,15 @@ hit the ordinary address-of limitation. The tests in `tests/own/builtins/` cover
 address operators, dependent wrappers, qualified operands, constant evaluation on a scalar
 global, and a rejected rvalue.
 
+## Bit-cast expressions (#1359)
+
+`__builtin_bit_cast` reads a written destination type-id and preserves both operands through
+template substitution. The evaluated subset covers initialized unsigned scalars and gap-free
+flat records described by the target's size, byte order and member offsets. Result storage is
+independent, including when the cast is discarded. Constant evaluation uses the existing
+flat-record storage checks. Evaluated x87, padding and the remaining constant-evaluation
+layouts stay in #330. The pinned x87 template branch parses when discarded.
+
 ## String length builtin (#531)
 
 `__builtin_strlen` supports unqualified direct calls with one argument implicitly converted to
@@ -2755,6 +2768,22 @@ and Darwin arm64 emits BRK. The builtin registry also exposes it through
 the same IR `unreachable`, flagged `assumed_unreachable`. Native code traps as above. A
 constant evaluation that reaches it fails with "execution reached __builtin_unreachable()"
 ([expr.const]). IR node flags are 16 bits wide to make room for the flag.
+
+## Function spelling for type ordering (#1361)
+
+`__PRETTY_FUNCTION__` in a namespace-scope function body is a static `const char[N]` lvalue.
+Function template definitions defer the text and array bound until the selected body is
+replayed. The NUL-terminated text uses canonical argument types and qualified names, so
+aliases of a type have the same spelling. It distinguishes nested types, qualifications,
+indirections, and class template arguments in the supported domain. The spelling uses the
+declared signature, including any return placeholder. Constant evaluation and native code
+use the same storage path as a string literal.
+
+Spelling is supported for the standard fundamental types, 128-bit integers, named classes
+and enums with named scopes, and their array, function, pointer and reference forms. Argument
+lists can include packs, named templates and integral, floating or null pointer values.
+Other arguments diagnose an unsupported spelling when the body is instantiated.
+[#1361](https://github.com/yrashk/ycxx/issues/1361)
 
 ## Source location builtins (#327)
 
@@ -3249,8 +3278,8 @@ Named-module discovery runs before native semantic analysis through
 and import directives in each unit's selected preprocessing view. The graph
 omits occurrence locations, so moving a directive can refresh provenance
 without changing the dependencies. Read-only plans show physical source
-locations and mark scans that need generated inputs as pending. Build
-traces include these units once the virtual inputs are available.
+locations and mark scans that probe declared generated outputs as pending
+(#1354). Build traces include these units once the virtual inputs are available.
 Named-module semantics and BMI support are tracked in #319.
 
 `ModuleProviders` resolves written imports within the reachable module
@@ -3260,6 +3289,19 @@ ambiguous providers and finds cyclic components among unique edges.
 provider locations. A location-only edit can update the report while
 reusing provider resolution. Incomplete read-only scans make missing or
 unique matches provisional.
+
+`ycxx show <target> --format=json` includes an optional `module_graph` for
+resolved plans under a native configuration (#1363). It records configured
+translation units, scan states, named directives with physical source locations,
+provider candidates, conflicts, and cyclic components. Its unit IDs are local
+to each snapshot.
+Schema-1 plan comparisons continue to use semantic facts.
+
+The standalone HTML plan renders that inspection data under **Module graph**
+(#1378). Configured translation unit panels group declarations and imports with
+physical locations and links to candidate declarations. The section identifies
+incomplete scans, provider conflicts, and cyclic components. With `--against`,
+it shows the current plan's graph below **Plan changes**.
 
 The standard C++ and generator rule declarations use a compiled rule package.
 `use plugin("tools/custom/rules") as cpp` supplies a different C++ provider. The

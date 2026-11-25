@@ -26,7 +26,11 @@ runs:
         path: ~/.local/share/ycxx/toolchains/gcc-16.2.0
         key: ycxx-gcc-16.2.0-sanitizers-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('deps/libycxx/tools/toolchain/provision') }}
     - shell: bash
-      run: deps/libycxx/tools/toolchain/provision --gcc-only --with-sanitizers --jobs 4
+      run: |
+        deps/libycxx/tools/toolchain/provision --gcc-only --with-sanitizers --jobs 4
+        # The Linux ABI tests use YCXX_GXX to find the GCC peer instead of the system g++.
+        toolchains=${YCXX_TOOLCHAINS:-${XDG_DATA_HOME:-$HOME/.local/share}/ycxx/toolchains}
+        grep '^YCXX_GXX=' "$toolchains/toolchains.env" >> "$GITHUB_ENV"
     - if: steps.gcc-cache.outputs.cache-hit != 'true'
       uses: actions/cache/save@v4
       with:

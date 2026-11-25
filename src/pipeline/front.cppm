@@ -588,8 +588,9 @@ using UnwindNodes = ast::closed_list<
     ast::Binary, ast::OrderedBinary, ast::Assign, ast::Conditional, ast::Subscript, ast::Call, ast::Member,
     ast::NewArray, ast::DeleteArray, ast::ImplicitConversion, ast::InitList, ast::DefaultMemberInit,
     ast::Materialize, ast::This, ast::ValueInit, ast::DefaultInit, ast::Throw, ast::DynamicCastVoid,
-    ast::DynamicCastPointer>;
-using UnwindAggregateNodes = ast::closed_list<ast::InitList, ast::LocalRef, ast::Materialize, ast::Paren>;
+    ast::DynamicCastPointer, ast::BitCast>;
+using UnwindAggregateNodes =
+    ast::closed_list<ast::InitList, ast::LocalRef, ast::Materialize, ast::Paren, ast::BitCast>;
 
 enum class UnwindContext { function, cleanup_initializer, default_member };
 
@@ -648,6 +649,8 @@ bool unwind_body_node(parse::Program& program, ast::NodeId node, bool& has_throw
         if (context != UnwindContext::default_member) return false;
       } else if constexpr (std::is_same_v<T, ast::Materialize>) {
         if (!world.types.is_class(n.info.type) || n.destructor != EntityId::none || n.extended) return false;
+      } else if constexpr (std::is_same_v<T, ast::BitCast>) {
+        if (!n.supported) return false;
       } else if constexpr (std::is_same_v<T, ast::Call>) {
         if (n.callee.id == ast::NodeId::none) return false;
         if (n.function == EntityId::none) {

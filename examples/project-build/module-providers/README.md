@@ -27,10 +27,52 @@ ycxx show app --target=arm64-apple-darwin --against x86_64-pc-linux-gnu-plan.jso
     --format=html > linux-to-darwin.html
 ```
 
-The `module-provider` facts show the resolved or external status and source
-provenance. Open `linux-to-darwin.html` to compare both branches of the
-diamond. Each branch resolves `demo.shared` to the same file for a given
-target.
+## Follow provider links in HTML
+
+Open `x86_64-pc-linux-gnu-plan.html` in a browser and find **Module graph**.
+In the panels for `left.cc` and `right.cc`, follow each `demo.shared` import's
+candidate link to its declaration at `shared_linux.cc:2:1`. In
+`arm64-apple-darwin-plan.html`, both links land at `shared_darwin.cc:2:1`.
+The import sites are `left.cc:3:1` and `right.cc:3:1` in both reports.
+
+Open `linux-to-darwin.html` to see what changed. **Plan changes** compares the
+saved Linux snapshot with the current Darwin plan. **Module graph** below it
+shows the current Darwin graph.
+
+## Read the provider edges from JSON
+
+Run this in the copied workspace after the builds above. Python 3 reads both
+JSON snapshots and joins each `demo.shared` import to its provider declaration
+using the candidate's unit ID and directive index.
+
+```sh
+python3 - x86_64-pc-linux-gnu-plan.json arm64-apple-darwin-plan.json <<'PY'
+import json
+from pathlib import Path
+import sys
+
+def site(location):
+    return f'{location["path"]}:{location["line"]}:{location["column"]}'
+
+for snapshot in sys.argv[1:]:
+    graph = json.loads(Path(snapshot).read_text(encoding='utf-8'))['module_graph']
+    declarations = {
+        (unit['id'], declaration['directive_index']): declaration['location']
+        for unit in graph['units']
+        for declaration in unit['declarations']
+    }
+    print(graph['native_target'])
+    for edge in graph['imports']:
+        if edge['name'] == 'demo.shared':
+            for candidate in edge['candidates']:
+                provider = declarations[candidate['unit_id'], candidate['directive_index']]
+                print(f'  {site(edge["location"])} -> {site(provider)} ({edge["status"]})')
+PY
+```
+
+Both import sites are on line 3 of their physical files. They point to line 2
+of `shared_linux.cc` for the Linux snapshot and line 2 of `shared_darwin.cc`
+for the Darwin snapshot.
 
 ## Watch a provider body edit
 
@@ -75,3 +117,7 @@ test "$status" -eq 1
 ycxx show app --target=x86_64-pc-linux-gnu --against x86_64-pc-linux-gnu-plan.json \
     --format=html > ambiguous-plan.html
 ```
+
+Open `ambiguous-plan.html` and find **Module graph**. Each `demo.shared` import
+now shows an ambiguous status with links to `shared_linux.cc:2:1` and
+`shared_darwin.cc:2:1`. The `demo.shared` conflict links to both declarations.

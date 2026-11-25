@@ -77,6 +77,7 @@ struct TypeRec {
   bool pack = false;  // a template parameter's; a pack index's: its pack is bound to `args`
   u8 trait = 0;  // a transform's `lex::TypeTrait`; a built-in specialization's `ast::BuiltinTemplate`
   ast::SeqId<ast::TemplateArg> args{};  // a specialization's or a placeholder's written arguments
+  bool alias_type_default = false;  // a deferred alias in a template type parameter default
   bool decltype_auto = false;  // a placeholder's: `decltype(auto)`, not `auto`
 };
 
@@ -168,8 +169,8 @@ public:
   QualType builtin_spec(ast::BuiltinTemplate which, std::span<const ast::TemplateArg> args) {
     return ins_->intern_type(ast::TBuiltinSpec{u8(which), ins_->intern_seq(args)});
   }
-  QualType deferred_alias(EntityId alias, std::span<const ast::TemplateArg> args, QualType result) {
-    return ins_->intern_type(ast::TDeferredAlias{alias, ins_->intern_seq(args), canonical(result)});
+  QualType deferred_alias(EntityId alias, std::span<const ast::TemplateArg> args, QualType result, bool type_default) {
+    return ins_->intern_type(ast::TDeferredAlias{alias, ins_->intern_seq(args), canonical(result), type_default});
   }
   // A floating-point type ([basic.fundamental]); `float`, `double` and `long double` have values.
   bool is_floating(QualType q) const {
@@ -257,6 +258,7 @@ public:
       r.entity = a.alias;
       r.args = a.args;
       r.inner = a.result;
+      r.alias_type_default = a.type_default;
     } else if (t.is<ast::TPackExpansion>(c)) {
       r.kind = TypeKind::pack_expansion;
       r.inner = t.get<ast::TPackExpansion>(c).pattern;

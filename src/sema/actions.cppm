@@ -105,6 +105,7 @@ struct AliasCallPattern {
   enum class Kind { none, retained, may_erase, unrepresented } kind = Kind::none;
   bool class_result = false;
   bool rank_checks = false;
+  bool qualified_type_arguments = false;
 };
 
 struct PresumedSource {
@@ -1196,7 +1197,8 @@ public:
       }
       const auto before = diag_count();
       const auto diagnosed = diagnosed_constant_calls;
-      auto t = substitute_alias(tmpl, *full, bindings, at, replaying_type_default, replay_partial_alias);
+      const auto use = replaying_type_default ? AliasSubstitution::type_default : AliasSubstitution::ordinary;
+      auto t = substitute_alias(tmpl, *full, bindings, at, use, replay_partial_alias);
       // A producer body or the nesting limit may have been diagnosed in another cell
       // ([temp.inst]/16). Keep that diagnostic as the cause of the failed alias.
       if (!t && !has_error_since(before) && diagnosed == diagnosed_constant_calls && !q_->instantiation_gave_up())
@@ -1221,8 +1223,9 @@ public:
   }
 
   std::optional<QualType> substitute_alias(const ast::DeclSema& tmpl, std::span<const TemplateArg> args,
-                                           const Bindings& bindings, u32 at, bool substituting_default = false,
+                                           const Bindings& bindings, u32 at, AliasSubstitution use,
                                            bool replay_partial_alias = false) {
+    const bool substituting_default = use == AliasSubstitution::type_default;
     if (substituting_default && tmpl.constraints != ConstId::none &&
         std::ranges::none_of(args, [&](const TemplateArg& a) { return dependent(a); })) {
       auto t = templates();
@@ -1231,16 +1234,19 @@ public:
       if (hard_error || !sat.value_or(true)) return std::nullopt;
     }
     const auto pattern = q_->alias_call_pattern(tmpl.entity);
-    if (pattern.kind != AliasCallPattern::Kind::none || pattern.rank_checks) {
-      // Replay checks obligations that become concrete now. The enclosing alias or class
-      // member replays any that still depend on its own arguments when it is instantiated.
-      if ((pattern.class_result && replay_partial_alias) ||
+    if (pattern.kind != AliasCallPattern::Kind::none || pattern.rank_checks || pattern.qualified_type_arguments) {
+      // Replay checks obligations that become concrete now. The enclosing alias, member or
+      // signature retains checks whose arguments still depend on its own parameters.
+      const bool partial_type_arguments = pattern.qualified_type_arguments &&
+          (replay_partial_alias || use == AliasSubstitution::signature) &&
+          std::ranges::any_of(args, [&](const TemplateArg& a) { return !dependent(a); });
+      if ((pattern.class_result && replay_partial_alias) || partial_type_arguments ||
           std::ranges::none_of(args, [&](const TemplateArg& a) { return dependent(a); })) {
         const auto before = diag_count();
         const bool saved = std::exchange(replaying_type_default, substituting_default);
         auto type = q_->replay_alias_calls(*this, tmpl, bindings);
         replaying_type_default = saved;
-        if (!type && substituting_default) drop_failures(before);
+        if (!type && use != AliasSubstitution::ordinary) drop_failures(before);
         return type;
       }
       // Until signatures can retain the replay, do not form a type that can lose a call check.
@@ -2842,9 +2848,17 @@ public:
     // ([temp.dep.type]); in an instantiation, its argument.
     if (const ast::TemplateParamSema* p = template_param(n)) {
       if (p->kind != ast::TemplateArgKind::type) return std::nullopt;
-      // Bound to a type that has no members, it names no scope ([basic.lookup.qual]/1).
+      // A partially replayed alias can bind this parameter to a type that still needs substitution.
       if (auto a = bound_arg(*p)) {
-        if (!types().is_class(a->type) && !types().is_enum(a->type)) return std::nullopt;
+        if (!types().is_class(a->type) && !types().is_enum(a->type)) {
+          if (!replaying_alias_type_arguments || !types().is_dependent(a->type)) return std::nullopt;
+          // These type forms cannot name a scope even when their components are dependent.
+          switch (types().kind(a->type)) {
+          case TypeKind::pointer: case TypeKind::member_pointer: case TypeKind::reference:
+          case TypeKind::array: case TypeKind::function: return std::nullopt;
+          default: break;
+          }
+        }
         return Scope{std::nullopt, a->type};
       }
       return Scope{std::nullopt, p->type};
@@ -4381,6 +4395,7 @@ public:
   std::vector<std::vector<ast::TemplateParamSema>> template_scopes;
   Bindings template_args;
   bool replaying_type_default = false;
+  bool replaying_alias_type_arguments = false;
   // The template parameter `name` declares in the template parameter scopes enclosing this point,
   // whether or not a class member hides it: what [temp.local]/6 forbids redeclaring.
   const ast::TemplateParamSema* declared_template_param(NameId name) const {
@@ -4770,8 +4785,8 @@ public:
       return evaluate_dependent_call(templ, args, 0);
     };
     t.alias_type = [this](const ast::DeclSema& alias, std::span<const TemplateArg> args, const Bindings& b,
-                          bool substituting_default) {
-      return substitute_alias(alias, args, b, 0, substituting_default);
+                          AliasSubstitution use) {
+      return substitute_alias(alias, args, b, 0, use);
     };
     t.variable_global = [this](EntityId spec) { return q_->global(spec); };
     t.variable_specialization_type = [this](EntityId spec) { return q_->specialization_type(spec); };
@@ -4789,8 +4804,8 @@ public:
       return evaluate_dependent_call(templ, args, at);
     };
     t.alias_type = [this, at](const ast::DeclSema& alias, std::span<const TemplateArg> args, const Bindings& b,
-                            bool substituting_default) {
-      return substitute_alias(alias, args, b, at, substituting_default);
+                            AliasSubstitution use) {
+      return substitute_alias(alias, args, b, at, use);
     };
     t.demand_variable = [this, at](EntityId spec, QualType type) {
       demands.push_back({spec, ast::Loc{item_, loc_base_ + at}, type});
@@ -8130,6 +8145,8 @@ public:
   // namespace-scope ones. The `callee` of a call that lookup does not find is a `DepName`: the
   // call decides once it has its arguments ([temp.dep.candidate]).
   Ex name_expr(NameId name, u32 begin, u32 end, bool callee = false, bool immediate_default_call = false) {
+    if (ins().names.spelling(name) == "__PRETTY_FUNCTION__" && in_function_or_lambda_body())
+      return pretty_function(begin, end);
     // Block scopes, innermost first: a scope's locals and the names its using-declarations
     // brought in ([namespace.udecl]) hide those of enclosing scopes ([basic.scope.hiding]);
     // using-declarations of one scope make one set.
@@ -8298,6 +8315,7 @@ public:
     const lex::BuiltinFunctionInfo* b = lex::builtin_function(ins().names.spelling(name));
     return b && !declared(name) ? b : nullptr;
   }
+  bool builtin_bit_cast(NameId name) { return ins().names.spelling(name) == lex::builtin_bit_cast_name; }
   bool builtin_offsetof(NameId name) {
     return ins().names.spelling(name) == lex::builtin_offsetof_name && !declared(name);
   }
@@ -8974,11 +8992,188 @@ public:
       diag(begin, Diag::not_supported, lex::Tk::string_lit);
       return {NodeId::none, begin, end};
     }
-    std::vector<u32> units = l.units;
+    return string_lvalue(literal_character_type(l.encoding), l.units, begin, end);
+  }
+
+  Ex string_lvalue(Builtin elem, std::vector<u32> units, u32 begin, u32 end) {
     units.push_back(0);
-    Builtin elem = literal_character_type(l.encoding);
-    QualType t = types().array(types().add_cv(builtin(elem), Cv::const_), units.size());
+    const QualType t = types().array(types().add_cv(builtin(elem), Cv::const_), units.size());
     return literal(t, w_->values.string(t, units), ValueCategory::lvalue, begin, end);
+  }
+
+  Ex pretty_function(u32 begin, u32 end) {
+    if (!in_function_body || !lambdas_.empty() || current_function == EntityId::none || !namespace_scoped(current_function)) {
+      diag(begin, Diag::pretty_function_context);
+      return {NodeId::none, begin, end};
+    }
+    const EntityRec& function = w_->entities.rec(current_function);
+    // BodyAnalysis replays the expression with the selected specialization as current_function.
+    // The unbound body knows neither the bytes nor the resulting array bound.
+    if (function.kind == EntityKind::function_template)
+      return dependent_node({}, begin, end, std::nullopt, ValueCategory::lvalue, expr_flag::type_dependent);
+
+    const TypeRec signature = types().rec(function.type);
+    std::string spelling;
+    // Reading the declaration avoids asking for the return type the body is still deducing.
+    bool have_result = true;
+    if (types().has_placeholder(signature.inner)) spelling = types().spell(signature.inner);
+    else have_result = append_pretty_type(spelling, signature.inner);
+    spelling += ' ';
+    if (!have_result || !append_pretty_name(spelling, current_function, /*function_scope=*/true) ||
+        !append_pretty_parameters(spelling, signature)) {
+      diag(begin, Diag::pretty_function_spelling);
+      return {NodeId::none, begin, end};
+    }
+    if (function.templ != EntityId::none) {
+      // Overloads can have the same substituted signature and arguments. Discriminate their
+      // patterns using the declaration's semantic key, independent of its instantiation point.
+      const EntityRec& pattern = w_->entities.rec(function.templ);
+      const auto identity = ast::mix(ast::mix(types().fp(types().canonical(pattern.type)), pattern.head), pattern.constraints);
+      spelling += std::format(" [template {:016x}{:016x}]", identity.hi, identity.lo);
+    }
+    std::vector<u32> units;
+    units.reserve(spelling.size() + 1);
+    for (unsigned char byte : spelling) units.push_back(byte);
+    return string_lvalue(Builtin::char_, std::move(units), begin, end);
+  }
+
+  // Canonical arguments use their entire structure. Aliases are stripped by append_pretty_type,
+  // and the encoding's delimiters distinguish each level of qualification and indirection.
+  bool append_pretty_args(std::string& text, std::span<const TemplateArg> args) {
+    const char* separator = "<";
+    for (const TemplateArg& arg : args) {
+      text += separator;
+      separator = ", ";
+      switch (arg.kind) {
+        case TemplateArgKind::type:
+          if (!append_pretty_type(text, arg.type)) return false;
+          break;
+        case TemplateArgKind::pack:
+          text += "pack";
+          if (!append_pretty_args(text, ins().seqs.elements(arg.elems))) return false;
+          break;
+        case TemplateArgKind::template_:
+          text += "template<";
+          if (arg.templ == EntityId::none || !append_pretty_name(text, arg.templ)) return false;
+          text += '>';
+          break;
+        case TemplateArgKind::value: {
+          text += "value<";
+          if (!append_pretty_type(text, arg.type)) return false;
+          const auto& values = ins().values;
+          std::optional<ast::Bits128> bits;
+          if (values.is<ast::VInt>(arg.value)) bits = values.get<ast::VInt>(arg.value).bits;
+          if (values.is<ast::VFloat>(arg.value)) bits = values.get<ast::VFloat>(arg.value).bits;
+          if (bits) text += std::format(", 0x{:016x}{:016x}>", bits->hi, bits->lo);
+          else if (values.is<ast::VNullptr>(arg.value)) text += ", nullptr>";
+          else return false;
+          break;
+        }
+      }
+    }
+    if (args.empty()) text += '<';
+    text += '>';
+    return true;
+  }
+
+  bool append_pretty_name(std::string& text, EntityId id, bool function_scope = false) {
+    const EntityRec& entity = w_->entities.rec(id);
+    const std::string_view name = ins().names.spelling(entity.name);
+    if (name.empty() || entity.unnamed_type_ordinal || entity.enum_linkage_name) return false;
+    // An unnamed namespace is unambiguous for the function body within its own unit. Reject
+    // such type arguments, whose names alone cannot distinguish them across units.
+    if (name == "(anonymous)" && !function_scope) return false;
+    if (entity.scope != EntityId::none) {
+      const auto kind = w_->entities.rec(entity.scope).kind;
+      if ((kind != EntityKind::namespace_ && kind != EntityKind::class_) ||
+          !append_pretty_name(text, entity.scope, function_scope)) return false;
+    }
+    text += "::";
+    text += name;
+    return entity.templ == EntityId::none || append_pretty_args(text, entity.args);
+  }
+
+  static std::string_view pretty_cv(Cv cv) {
+    switch (cv) {
+      case Cv::none: return "";
+      case Cv::const_: return "const";
+      case Cv::volatile_: return "volatile";
+      case Cv::const_volatile: return "const volatile";
+    }
+    std::unreachable();
+  }
+
+  bool append_pretty_parameters(std::string& text, const TypeRec& type) {
+    text += '(';
+    const char* separator = "";
+    for (QualType p : type.params) {
+      text += separator;
+      separator = ", ";
+      if (!append_pretty_type(text, p)) return false;
+    }
+    if (type.variadic) {
+      text += separator;
+      text += "...";
+    }
+    text += ')';
+    if (type.fn_cv != Cv::none) {
+      text += ' ';
+      text += pretty_cv(type.fn_cv);
+    }
+    if (type.fn_ref != ast::RefQual::none) text += type.fn_ref == ast::RefQual::lvalue ? " &" : " &&";
+    if (type.fn_noexcept) text += " noexcept";
+    if (type.linkage == LangLinkage::c) text += " extern \"C\"";
+    return true;
+  }
+
+  bool append_pretty_type(std::string& text, QualType t) {
+    t = types().canonical(t);
+    const TypeRec type = types().rec(t);
+    if (const Cv cv = Types::cv(t); cv != Cv::none) {
+      text += pretty_cv(cv);
+      text += ' ';
+    }
+    switch (type.kind) {
+      case TypeKind::builtin:
+        if (type.builtin <= Builtin::long_double) text += sema::spelling(type.builtin);
+        else if (type.builtin == Builtin::meta_info) text += "std::meta::info";
+        else return false;
+        return true;
+      case TypeKind::class_:
+      case TypeKind::enum_:
+        return append_pretty_name(text, type.entity);
+      case TypeKind::function:
+        text += "function<";
+        if (!append_pretty_type(text, type.inner) || !append_pretty_parameters(text, type)) return false;
+        break;
+      case TypeKind::pointer:
+        text += "pointer<";
+        if (!append_pretty_type(text, type.inner)) return false;
+        break;
+      case TypeKind::member_pointer:
+        text += "member_pointer<";
+        if (!append_pretty_type(text, type.member_owner)) return false;
+        text += ", ";
+        if (!append_pretty_type(text, type.inner)) return false;
+        break;
+      case TypeKind::reference:
+        text += type.rvalue_ref ? "rvalue_reference<" : "lvalue_reference<";
+        if (!append_pretty_type(text, type.inner)) return false;
+        break;
+      case TypeKind::array:
+        text += "array<";
+        if (type.bound_value != ConstId::none) {
+          if (!ins().values.is<ast::VInt>(type.bound_value)) return false;
+          text += std::to_string(type.bound);
+        }
+        text += ", ";
+        if (!append_pretty_type(text, type.inner)) return false;
+        break;
+      default:
+        return false;
+    }
+    text += '>';
+    return true;
   }
 
   Ex bool_literal(bool v, u32 begin, u32 end) {
@@ -10316,6 +10511,110 @@ public:
     }
     return literal(st, w_->values.integer(st, *n), ValueCategory::prvalue, begin, end);
   }
+  // A concrete operand is checked even when the other operand needs template substitution.
+  // A missing class fact or layout limits evaluation, but the expression can still be formed.
+  bool bit_cast_operand(QualType type, u32 at_, bool destination) {
+    const QualType element = types().innermost_array_element(type);
+    if (!types().is_object(type) || types().is(type, Builtin::overload_set) ||
+        types().is(type, Builtin::bound_member)) {
+      diag(at_, Diag::bit_cast_object, type);
+      return false;
+    }
+    if (destination && types().is_array(type)) {
+      diag(at_, Diag::bit_cast_array_result, type);
+      return false;
+    }
+    const EnumRec* definition = types().is_enum(element) ? q_->defining_enum(types().enum_of(element)) : nullptr;
+    if (!is_complete(type) || (definition && !definition->fixed)) {
+      if (!type_trait_failed(type)) diag(at_, Diag::bit_cast_incomplete, type);
+      return false;
+    }
+    if (types().is_class(element)) {
+      const auto* record = class_rec(types().class_of(element));
+      // Virtual functions and a nontrivial destructor disprove copyability even
+      // for a record whose other special-member facts are incomplete ([class.prop]).
+      if (record && (record->polymorphic || record->destructor != EntityId::none ||
+                     record->trivially_copyable() == false)) {
+        diag(at_, Diag::bit_cast_nontrivial, element);
+        return false;
+      }
+      if (destination && record && record->is_abstract()) {
+        diag(at_, Diag::abstract_object, type);
+        return false;
+      }
+    }
+    return true;
+  }
+
+  std::optional<u64> bit_cast_size(QualType type) {
+    const QualType element = types().innermost_array_element(type);
+    if (types().is_class(element) && q_->class_layout_uncertain(types().class_of(element))) return std::nullopt;
+    return layout_of(type, false);
+  }
+
+  // Verify that each ordinary unsigned field contributes exactly its storage bits. The
+  // lowering can then derive the layout from the field widths in declaration order.
+  bool bit_cast_representation(QualType type, u64 size) {
+    const auto unsigned_size = [&](QualType t) -> u64 {
+      const auto builtin = types().builtin_of(t);
+      if (Types::is_volatile(types().canonical(t)) || !builtin || !ast::is_standard_unsigned(*builtin))
+        return 0;
+      const auto bytes = w_->target[*builtin].size;
+      return bytes == 1 || bytes == 2 || bytes == 4 || bytes == 8 ? bytes : 0;
+    };
+    if (!w_->target.little_endian_unsigned_integers || Types::is_volatile(types().canonical(type))) return false;
+    if (!types().is_class(type)) return size != 0 && unsigned_size(type) == size;
+    const EntityId cls = types().class_of(type);
+    const ClassRec* record = class_rec(cls);
+    if (!record || record->union_ || record->polymorphic || !record->bases.empty() ||
+        record->trivially_copyable() != true) return false;
+    const auto layout = class_layout(cls);
+    if (!layout || layout->offsets.size() != record->fields.size()) return false;
+    u64 offset = 0;
+    for (std::size_t i = 0; i < record->fields.size(); ++i) {
+      const FieldRec& field = record->fields[i];
+      const u64 bytes = unsigned_size(field.type);
+      if (!bytes || field.bit_width || field.no_unique_address || layout->offsets[i] != offset) return false;
+      offset += bytes;
+    }
+    return offset == size;
+  }
+
+  Ex bit_cast(QualType destination, Ex source, u32 begin, u32 end, u32 type_at) {
+    const Ex fail{NodeId::none, begin, end};
+    if (!source.ok()) return fail;
+    const QualType from = types().referee(source.type());
+    const bool destination_dependent = types().is_dependent(destination);
+    const bool source_type_dependent = has_proven_dependent_type(source) || types().is_dependent(from);
+    if (!destination_dependent && !bit_cast_operand(destination, type_at, true)) return fail;
+    if (!source_type_dependent && !bit_cast_operand(from, source.begin, false)) return fail;
+    bool supported = false;
+    if (!destination_dependent && !source_type_dependent) {
+      const auto to_size = bit_cast_size(destination);
+      const auto from_size = bit_cast_size(from);
+      if (to_size && from_size) {
+        if (*to_size != *from_size) {
+          diag(begin, Diag::bit_cast_size, destination, from, *to_size, *from_size);
+          return fail;
+        }
+        supported = !source.info.bit_width && bit_cast_representation(destination, *to_size) &&
+                    bit_cast_representation(from, *from_size);
+      }
+    }
+    const bool deferred = destination_dependent || dependent(source);
+    if (supported && !deferred && !source.glvalue() && types().is_class(from)) {
+      source = materialize(source, from, false);
+      if (!source.ok()) return fail;
+    }
+    const QualType type = types().is_class(destination) || destination_dependent
+        ? destination : Types::unqualified(types().canonical(destination));
+    u8 flags = 0;
+    if (deferred) flags = expr_flag::dependent | (source.info.flags & expr_flag::deferred_decay_copy);
+    if (destination_dependent) flags |= expr_flag::type_dependent;
+    const ExprInfo info{type, ValueCategory::prvalue, flags};
+    return node(ast::BitCast{info, destination, at(source, begin), type_at - begin, supported}, begin, end, info);
+  }
+
   // The supported direct-member slice of [support.types.layout]. Its result uses the
   // same target record offsets as code generation and the target's size_t.
   Ex offset_of(QualType t, NameId name, u32 begin, u32 end, u32 name_at) {
