@@ -7,6 +7,9 @@ import subprocess
 import sys
 import tempfile
 
+from project_build import env_for, run_client, traced_build
+from runtime_dir import runtime_root
+
 
 MARKUP = '<script>alert("definition")</script> & report'
 UNSAFE_SOURCE = 'src/literal <b>&".cc'
@@ -15,11 +18,16 @@ UNSAFE_SOURCE = 'src/literal <b>&".cc'
 def prepare(scope):
     for directory in ('src', 'auto', 'include', 'fallback'):
         (scope / directory).mkdir()
-    for source in ('src/main.cc', UNSAFE_SOURCE, 'src/core.cc', 'auto/first.cc'):
-        (scope / source).write_text('', encoding='utf-8')
+    (scope / 'src/main.cc').write_text('int main() { return 0; }\n', encoding='utf-8')
+    for index, source in enumerate((UNSAFE_SOURCE, 'src/core.cc', 'auto/first.cc')):
+        (scope / source).write_text(f'int fixture_{index}() {{ return {index}; }}\n', encoding='utf-8')
 
     generator = scope / 'generator.sh'
-    generator.write_text('#!/bin/sh\nprintf ran > "$1"\n', encoding='utf-8')
+    generator.write_text(r'''#!/bin/sh
+printf ran > "$1" || exit 5
+printf 'int generated_wire() { return 0; }\n' > "$3" || exit 5
+printf '\n' > "$4"
+''', encoding='utf-8')
     generator.chmod(0o700)
     (scope / 'schema.txt').write_text('schema\n', encoding='utf-8')
 
@@ -27,7 +35,7 @@ def prepare(scope):
     return f'''# {MARKUP}\r
 generate "wire" {{
     tool = {json.dumps(str(generator))}
-    args = [{json.dumps(str(scope / 'generator-ran'))}, input("schema"), output("source")]
+    args = [{json.dumps(str(scope / 'generator-ran'))}, input("schema"), output("source"), output("header")]
     inputs = {{ schema = "schema.txt" }}
     outputs = {{ source = "wire.cc" header = "wire.h" }}
 }}
@@ -72,10 +80,23 @@ def check_location(item, definition, spelling):
     assert (item['line'], item['column']) == (line, column), (spelling, line, column, item)
 
 
+def check_unresolved(ycxx, scope, definition):
+    assert show(ycxx, scope, '--format=source') == definition.encode('utf-8')
+    plan = show_json(ycxx, scope)
+    assert plan['definition'] == definition, plan
+    unresolved = fact(plan, 'unresolved', 'app', 'standard/rules')
+    assert unresolved['name'] == 'cpp.executable', unresolved
+    check_location(unresolved, definition, 'cpp.executable "app"')
+    assert not any(item['kind'] == 'source' for item in plan['facts']), plan
+    assert not (scope / '.ycxx').exists(), 'cold inspection created build state'
+    assert not (scope / 'generator-ran').exists(), 'cold inspection ran the generator'
+
+
 def check_views(ycxx, scope, definition):
     assert show(ycxx, scope, '--format=source') == definition.encode('utf-8')
     snapshot = show_json(ycxx, scope)
     assert snapshot['definition'] == definition, snapshot
+    assert not any(item['kind'] == 'unresolved' for item in snapshot['facts']), snapshot
 
     literal = fact(snapshot, 'source', 'app', 'src/main.cc')
     check_location(literal, definition, '"src/main.cc"')
@@ -137,18 +158,39 @@ def check_diff(ycxx, scope, definition, snapshot):
 
 def main():
     ycxx = Path(sys.argv[1]).resolve()
-    with tempfile.TemporaryDirectory(prefix='ycxx-inspection-') as directory:
+    with (
+        tempfile.TemporaryDirectory(prefix='ycxx-inspection-') as directory,
+        tempfile.TemporaryDirectory(prefix='yb', dir=runtime_root('yb')) as runtime,
+    ):
         scope = Path(directory).resolve()
         definition = prepare(scope)
         (scope / 'build.ycxx').write_bytes(definition.encode('utf-8'))
-        snapshot = check_views(ycxx, scope, definition)
+        check_unresolved(ycxx, scope, definition)
+        (scope / '.ycxx').mkdir()
+        env = env_for(runtime)
+        try:
+            traced_build(ycxx, scope, env, 'admit the inspection plan')
+            marker = scope / 'generator-ran'
+            assert marker.read_text(encoding='utf-8') == 'ran', 'build did not run the generator'
+            marker.unlink()
+            out = scope / '.ycxx' / 'out'
+            (out / 'app').unlink()
+            out.rmdir()
 
-        # Plan inspection still works with unavailable execution inputs.
-        (scope / 'generator.sh').unlink()
-        (scope / 'schema.txt').unlink()
-        assert show_json(ycxx, scope) == snapshot, 'inspection depended on action inputs being available'
-        check_diff(ycxx, scope, definition, snapshot)
-        assert not (scope / 'generator-ran').exists(), 'inspection ran the generator'
+            # Keep the admitted rule plans while making an accidental execution observable.
+            generator = scope / 'generator.sh'
+            generator.write_text('#!/bin/sh\nprintf ran > "$1"\nexit 7\n', encoding='utf-8')
+            snapshot = check_views(ycxx, scope, definition)
+
+            # Plan inspection still works with unavailable execution inputs.
+            generator.unlink()
+            (scope / 'schema.txt').unlink()
+            assert show_json(ycxx, scope) == snapshot, 'inspection depended on action inputs being available'
+            check_diff(ycxx, scope, definition, snapshot)
+            assert not marker.exists(), 'inspection ran the generator'
+            assert not out.exists(), 'inspection restored a removed build output'
+        finally:
+            run_client(ycxx, scope, env, 'ctl', 'shutdown')
 
 
 if __name__ == '__main__':
