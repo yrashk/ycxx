@@ -99,6 +99,7 @@ struct AliasCallPattern {
   enum class Kind { none, retained, may_erase, unrepresented } kind = Kind::none;
   bool class_result = false;
   bool rank_checks = false;
+  bool qualified_type_arguments = false;
 };
 
 struct PresumedSource {
@@ -1189,7 +1190,8 @@ public:
       }
       const auto before = diag_count();
       const auto diagnosed = diagnosed_constant_calls;
-      auto t = substitute_alias(tmpl, *full, bindings, at, replaying_type_default, replay_partial_alias);
+      const auto use = replaying_type_default ? AliasSubstitution::type_default : AliasSubstitution::ordinary;
+      auto t = substitute_alias(tmpl, *full, bindings, at, use, replay_partial_alias);
       // A producer body or the nesting limit may have been diagnosed in another cell
       // ([temp.inst]/16). Keep that diagnostic as the cause of the failed alias.
       if (!t && !has_error_since(before) && diagnosed == diagnosed_constant_calls && !q_->instantiation_gave_up())
@@ -1214,8 +1216,9 @@ public:
   }
 
   std::optional<QualType> substitute_alias(const ast::DeclSema& tmpl, std::span<const TemplateArg> args,
-                                           const Bindings& bindings, u32 at, bool substituting_default = false,
+                                           const Bindings& bindings, u32 at, AliasSubstitution use,
                                            bool replay_partial_alias = false) {
+    const bool substituting_default = use == AliasSubstitution::type_default;
     if (substituting_default && tmpl.constraints != ConstId::none &&
         std::ranges::none_of(args, [&](const TemplateArg& a) { return dependent(a); })) {
       auto t = templates();
@@ -1224,16 +1227,19 @@ public:
       if (hard_error || !sat.value_or(true)) return std::nullopt;
     }
     const auto pattern = q_->alias_call_pattern(tmpl.entity);
-    if (pattern.kind != AliasCallPattern::Kind::none || pattern.rank_checks) {
-      // Replay checks obligations that become concrete now. The enclosing alias or class
-      // member replays any that still depend on its own arguments when it is instantiated.
-      if ((pattern.class_result && replay_partial_alias) ||
+    if (pattern.kind != AliasCallPattern::Kind::none || pattern.rank_checks || pattern.qualified_type_arguments) {
+      // Replay checks obligations that become concrete now. The enclosing alias, member or
+      // signature retains checks whose arguments still depend on its own parameters.
+      const bool partial_type_arguments = pattern.qualified_type_arguments &&
+          (replay_partial_alias || use == AliasSubstitution::signature) &&
+          std::ranges::any_of(args, [&](const TemplateArg& a) { return !dependent(a); });
+      if ((pattern.class_result && replay_partial_alias) || partial_type_arguments ||
           std::ranges::none_of(args, [&](const TemplateArg& a) { return dependent(a); })) {
         const auto before = diag_count();
         const bool saved = std::exchange(replaying_type_default, substituting_default);
         auto type = q_->replay_alias_calls(*this, tmpl, bindings);
         replaying_type_default = saved;
-        if (!type && substituting_default) drop_failures(before);
+        if (!type && use != AliasSubstitution::ordinary) drop_failures(before);
         return type;
       }
       // Until signatures can retain the replay, do not form a type that can lose a call check.
@@ -2831,9 +2837,17 @@ public:
     // ([temp.dep.type]); in an instantiation, its argument.
     if (const ast::TemplateParamSema* p = template_param(n)) {
       if (p->kind != ast::TemplateArgKind::type) return std::nullopt;
-      // Bound to a type that has no members, it names no scope ([basic.lookup.qual]/1).
+      // A partially replayed alias can bind this parameter to a type that still needs substitution.
       if (auto a = bound_arg(*p)) {
-        if (!types().is_class(a->type) && !types().is_enum(a->type)) return std::nullopt;
+        if (!types().is_class(a->type) && !types().is_enum(a->type)) {
+          if (!replaying_alias_type_arguments || !types().is_dependent(a->type)) return std::nullopt;
+          // These type forms cannot name a scope even when their components are dependent.
+          switch (types().kind(a->type)) {
+          case TypeKind::pointer: case TypeKind::member_pointer: case TypeKind::reference:
+          case TypeKind::array: case TypeKind::function: return std::nullopt;
+          default: break;
+          }
+        }
         return Scope{std::nullopt, a->type};
       }
       return Scope{std::nullopt, p->type};
@@ -4369,6 +4383,7 @@ public:
   std::vector<std::vector<ast::TemplateParamSema>> template_scopes;
   Bindings template_args;
   bool replaying_type_default = false;
+  bool replaying_alias_type_arguments = false;
   // The template parameter `name` declares in the template parameter scopes enclosing this point,
   // whether or not a class member hides it: what [temp.local]/6 forbids redeclaring.
   const ast::TemplateParamSema* declared_template_param(NameId name) const {
@@ -4758,8 +4773,8 @@ public:
       return evaluate_dependent_call(templ, args, 0);
     };
     t.alias_type = [this](const ast::DeclSema& alias, std::span<const TemplateArg> args, const Bindings& b,
-                          bool substituting_default) {
-      return substitute_alias(alias, args, b, 0, substituting_default);
+                          AliasSubstitution use) {
+      return substitute_alias(alias, args, b, 0, use);
     };
     t.variable_global = [this](EntityId spec) { return q_->global(spec); };
     t.variable_specialization_type = [this](EntityId spec) { return q_->specialization_type(spec); };
@@ -4777,8 +4792,8 @@ public:
       return evaluate_dependent_call(templ, args, at);
     };
     t.alias_type = [this, at](const ast::DeclSema& alias, std::span<const TemplateArg> args, const Bindings& b,
-                            bool substituting_default) {
-      return substitute_alias(alias, args, b, at, substituting_default);
+                            AliasSubstitution use) {
+      return substitute_alias(alias, args, b, at, use);
     };
     t.demand_variable = [this, at](EntityId spec, QualType type) {
       demands.push_back({spec, ast::Loc{item_, loc_base_ + at}, type});
