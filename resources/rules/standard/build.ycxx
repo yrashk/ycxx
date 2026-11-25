@@ -1,8 +1,8 @@
 host_action "rules" {
-    tool = "/usr/bin/c++"
-    args = ["-std=c++20", "-fPIC", "-shared", "-Iinputs/sdk",
+    tool = cxx()
+    native_args = ["-nostdinc++", "-ffreestanding"]
+    args = ["-fPIC", "-shared", "-Iinputs/sdk",
             input("source"), "-o", output("plugin")]
-    environment = { PATH = "/usr/bin:/bin" }
     inputs = { source = "rules.cc" }
     outputs = { plugin = "rules.so" }
 }
