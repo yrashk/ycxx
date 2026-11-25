@@ -436,8 +436,12 @@ ModuleBindingText module_candidates(std::span<const ModuleUnitLabel> units,
                                     std::span<const ModuleProviderSite> providers,
                                     std::string_view status, ModuleDirectiveAt at, const fs::path& cwd) {
   std::vector<std::pair<std::string, std::string>> candidates;
-  for (const auto site : providers)
-    candidates.emplace_back(module_unit_display(units[site.unit]), module_site(at(site), cwd));
+  for (const auto site : providers) {
+    const auto& unit = units[site.unit];
+    // Quote paths that could obscure candidate boundaries or the unit instance suffix.
+    const bool quoted = unit.path.find_first_of(",\"\\\n\r\t") != std::string::npos || unit.path.contains(" #");
+    candidates.emplace_back(module_unit_display(unit, quoted), module_site(at(site), cwd));
+  }
   std::ranges::sort(candidates);
   ModuleBindingText text{std::string(status), {}};
   for (const auto& [path, origin] : candidates) {
