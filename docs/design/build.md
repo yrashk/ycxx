@@ -205,6 +205,16 @@ external actions run on the host and share receipts when their declared inputs
 match. An external action that supplies a linker input must produce an archive
 for the selected target.
 
+An action can opt into that selection by placing `target_triple()` in its
+`args` (#1347). The planner supplies one canonical argv word and the tool
+executes on the host. The default request supplies the host triple. The
+resolved word enters the action key, so requests with the same resolved argv
+and inputs can reuse its receipt. Generated planning inputs and rule witnesses
+resolve the argument with the same target. Typed witness values have a
+separate identity per triple. Read-only inspection shows the argument and its
+manifest location. Value traces show the resolved argv position and origin.
+`host_action` package recipes build the rule package for the host.
+
 Modules, declared host and target toolchains, and broader project layouts grow
 coverage in #1259. Package acquisition and version solving sit outside the build.
 

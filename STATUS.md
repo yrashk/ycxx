@@ -3197,6 +3197,15 @@ overlays, rule snapshots, runtime assets and watch state to that configuration.
 Source-built rule packages and declared tools execute on the host. Their
 resident receipts can be shared across target configurations.
 
+In project action arguments, `target_triple()` resolves to one canonical
+argument word for the selected compiler target, including the host default
+(#1347). That word enters the action receipt key. The same resolved words and
+inputs can share a receipt across default and explicit requests. The planner
+also resolves it in generated planning inputs and rule witnesses. Rule value
+exports and their consumers are scoped by triple. Package bootstrap recipes
+continue to describe host builds. Inspection shows the argument source and
+the action trace shows its position and resolved word.
+
 A resident workspace query asks for generator receipts and fetches the native
 compiler under the same query context. The coordinator admits tool results between
 epochs. Each generated path is a separate input, so unchanged sibling bytes cut
