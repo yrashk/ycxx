@@ -338,6 +338,9 @@ aggregate results through the target's supported ABI.
 [#853](https://github.com/yrashk/ycxx/issues/853)
 
 On x86-64 Linux, an eligible ycxx function can also throw an `int` to a hosted peer's handler.
+A hosted GCC or Clang handler can also catch by const reference a named trivial record thrown
+by a ycxx ELF object when the record is initialized explicitly and has one public `int` field.
+This works with either producer RTTI flag. [#1237](https://github.com/yrashk/ycxx/issues/1237)
 A host-linked ycxx function can use one `catch (...)` to return an integer literal when
 a direct call on its parameter to an externally defined `int(int)` function throws.
 It can also use one `catch (int value)` to return the caught integer and let exceptions of

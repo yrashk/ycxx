@@ -258,12 +258,12 @@ struct TranslationUnit {
   bool virtual_emission_blocked = false;
   std::optional<ast::Loc> virtual_declaration;
   std::optional<ast::Loc> unsupported_typed_dynamic_cast;
-  std::optional<ir::IntThrowRuntime> int_throw;
+  std::optional<ir::ThrowRuntime> throw_runtime;
   std::optional<ir::CatchAllRuntime> catch_runtime;
   EntityId cleanup_resume = EntityId::none;
   std::optional<OwnedVirtualTable> owned_virtual_table;
   std::vector<DynamicTable> dynamic_tables;  // in class definition order: a base before its derived classes
-  std::set<EntityId> keyless_type_info;  // definitions selected by the typed-cast ownership check
+  std::set<EntityId> keyless_type_info;  // owned root descriptors for typed casts and exception objects
   // The written complete-object definitions whose ELF base-object entries share their code.
   std::set<EntityId> base_object_variants;
   std::vector<AsmHiddenSymbol> asm_hidden_symbols;
@@ -1542,7 +1542,8 @@ engine::query_task<Lowered> Lower::run(engine::Ctx& cx, FnKey k) {
       co_return Lowered{std::nullopt, {}, std::move(located)};
     }
     config.sysv_amd64 = true;
-    if (def.unwind == UnwindEligibility::cleanup_free_with_throw) config.int_throw = tu.int_throw;
+    if (def.unwind == UnwindEligibility::cleanup_free_with_throw && tu.throw_runtime)
+      config.throw_runtime = &*tu.throw_runtime;
     if (def.unwind == UnwindEligibility::hosted_catch) config.catch_all = tu.catch_runtime;
     if (def.unwind == UnwindEligibility::hosted_cleanup) config.cleanup_resume = tu.cleanup_resume;
     // Extend outgoing narrow results for interoperability. Lowering truncates incoming results
