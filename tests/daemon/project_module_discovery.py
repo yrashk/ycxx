@@ -97,7 +97,7 @@ cpp.library "virtual_guard" {{
 }}
 cpp.executable "app" {{
     sources = ["{IMPORTER}", artifact("provider", "source")]
-    deps = ["surface", "virtual_guard"]
+    deps = ["virtual_guard", "surface"]
 }}
 ''', encoding='utf-8')
 
