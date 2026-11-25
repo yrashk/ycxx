@@ -3173,6 +3173,31 @@ Fable decided the representation (ast.md §6.7); the Opus session wrote the code
   `s7-sizeof-deep.run.cpp` (22 levels of nesting), `tests/own/abi/sizeof-class.run.cpp` (agrees
   with Clang's sizes and member offsets).
 
+## Resident project builds (#1251, #1255)
+
+`ycxx build <target>` reads `build.ycxx` in the workspace and publishes a successful
+native executable under `.ycxx/out`. The first rules are `cpp.executable`,
+`cpp.library` (a source-backed object group), and `generate` (a declared host
+tool with staged inputs and named outputs). Explicit source globs are resolved on
+each request. Linux uses the native freestanding compiler and linker.
+
+A resident workspace query asks for generator receipts and fetches the native
+compiler under the same query context. The coordinator admits tool results between
+epochs. Each generated path is a separate input, so unchanged sibling bytes cut
+off compiler work. Ordinary include probes continue to use the daemon file table,
+including missing candidates. The existing trace carries the native query tree,
+and reports external tool execution between workspace query attempts.
+
+`ycxx build --watch` uses the compiler watch loop and live trace browser
+(#1263). The daemon watches native compiler inputs and reobserves the project
+plan between runs for changes to the definition, generator inputs, and glob
+matches. It continues after a failed run.
+
+The initial build accepts a fixed host toolchain and explicit generator inputs.
+It checks host tool identity before admitting a receipt, and compares the resolved
+plan again before publishing. Rule packages, richer project configurations and
+resolved plan inspection are tracked under #1256, #1257 and #1259.
+
 ## The engine trace (#245, 2026-11-19)
 
 `ycxx cxx --trace-engine[=stream|interactive]` (or `YCXX_TRACE_ENGINE`) shows what a request

@@ -13,8 +13,8 @@ import :posix;
 export namespace ycxx::daemon {
 
 enum class Kind : std::uint16_t { hello = 1, welcome, compile, done, status, status_reply, shutdown, bye, lsp, refused, trace, watch,
-                                  await_change, changed, watching };
-inline constexpr Kind last_kind = Kind::watching;
+                                  await_change, changed, watching, project_build, project_build_done };
+inline constexpr Kind last_kind = Kind::project_build_done;
 
 struct Hello {
   std::uint64_t build_hash = 0;
@@ -68,9 +68,15 @@ struct WatchAck {};
 // is past `since`: a batch changed a file some build read, whichever request applied it. Another
 // daemon's build is answered at once (its revisions are not comparable); with no answered build,
 // the wait starts from now. The connection closes unanswered when the daemon stops.
+struct WatchedProject {
+  std::string cwd;
+  std::string target;
+  Fp128 stamp;
+};
 struct AwaitChange {
   std::uint64_t since = 0;     // the revision the last build started from (`Report::started_at`)
   std::uint64_t instance = 0;  // the daemon that answered it (`Welcome::instance`); 0: none did
+  std::optional<WatchedProject> project = std::nullopt;
 };
 struct Changed {
   std::uint64_t revisions = 0;  // batches applied since; 0 when another daemon answered
@@ -78,6 +84,22 @@ struct Changed {
 // Sent first by an `await_change` that waits: the files whose change would answer it.
 struct WatchedFiles {
   std::vector<std::string> paths;  // absolute, existing files builds have read
+};
+struct ProjectBuildRequest {
+  std::string cwd;
+  std::string target;
+  bool trace = false;
+  bool trace_values = false;
+  bool watch = false;
+  bool trace_live = false;
+};
+struct ProjectBuildDone {
+  int status = 0;
+  std::string output;
+  std::vector<std::string> diagnostics;
+  std::size_t actions_executed = 0;
+  std::uint64_t started_at = 0;
+  std::optional<WatchedProject> watched_project = std::nullopt;
 };
 struct StatusRequest {};
 struct ShutdownRequest {};
@@ -140,7 +162,10 @@ inline constexpr Fp128 schema_hash = [] {
   engine::fold_schema<compile::Request>(h);
   engine::fold_schema<compile::Done>(h);
   engine::fold_schema<TraceBatch>(h);
+  engine::fold_schema<ProjectBuildRequest>(h);
+  engine::fold_schema<ProjectBuildDone>(h);
   engine::fold_schema<WatchRequest>(h);
+  engine::fold_schema<AwaitChange>(h);
   engine::fold_schema<Changed>(h);
   engine::fold_schema<WatchedFiles>(h);
   return h.finish();
