@@ -2844,7 +2844,8 @@ Fable decided the representation (ast.md §6.6); the Opus session wrote the code
   hidden friends by ADL, on class and enumeration operands and, for a dependent operand, at the
   point of instantiation (#1178). With no class operand only a candidate with an enumeration
   parameter matching its operand takes part ([over.match.oper]/3). Unary operators rank the
-  conversions of hidden friends, other nonmembers and members together. Compound assignments do
+  conversions of hidden friends, other nonmembers and members together, a non-template before a
+  template. Compound assignments do
   so where `ordinary_binary_choice` models the conversions; elsewhere the member is tried first
   (#219). A postfix friend can be declared, and called in function notation only (#219). Access
   and deletion are checked for the selected operator. Overloaded compound assignment is not yet

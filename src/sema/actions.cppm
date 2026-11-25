@@ -10674,6 +10674,7 @@ public:
         Ics rank;
         QualType target;
         const ast::DeclSema* nonmember;
+        bool is_template;
       };
       std::vector<UnaryCandidate> viable;
       Ex object = operands.front();
@@ -10691,7 +10692,7 @@ public:
         }
         return t.specialization_type(pattern, *args);
       };
-      bool unsupported = false;
+      bool nonmember_resolution = false;
       bool ambiguous_base = false;
       bool member_viable = false;
       if (found && found->member && found->member->is_function) {
@@ -10712,12 +10713,11 @@ public:
           Ics rank = implicit_object_rank(fn, object_cv(lt), rvalue);
           if (!rank.viable || !fn.params.empty()) continue;
           member_viable = true;
-          unsupported |= candidate->is_template;
           if (depth) {
             rank.rank = 2;  // derived-to-base conversion
             rank.base_depth = depth;
           }
-          viable.push_back({rank, target, nullptr});
+          viable.push_back({rank, target, nullptr, candidate->is_template});
         }
       }
       for (const auto& candidate : set) {
@@ -10751,20 +10751,18 @@ public:
         }
         const auto rank = ics(object, parameter);
         if (!rank.viable) continue;
-        unsupported |= is_template || rank.rank >= Ics::user_defined;
-        viable.push_back({rank, target, &candidate});
+        nonmember_resolution |= is_template || rank.rank >= Ics::user_defined;
+        viable.push_back({rank, target, &candidate, is_template});
       }
-      // The call below ranks the non-member candidates alone, whatever their conversions.
-      const bool nonmembers_only = unsupported && !member_viable && !ambiguous_base;
-      if ((unsupported && !nonmembers_only) || (ambiguous_base && std::ranges::none_of(viable, [](const UnaryCandidate& c) {
-            return c.rank.rank == 0;
-          }))) {
+      // The call below ranks non-member candidates alone, whatever their conversions and templates.
+      const bool nonmembers_only = nonmember_resolution && !member_viable && !ambiguous_base;
+      if (ambiguous_base && std::ranges::none_of(viable, [](const UnaryCandidate& c) { return c.rank.rank == 0; })) {
         diag(op_at, Diag::ref_qualified_operator_candidates);
         return Ex{NodeId::none, begin, end};
       }
       if (viable.empty()) return std::nullopt;
       if (!nonmembers_only) {
-        auto better = [&](const UnaryCandidate& left, const UnaryCandidate& right) {
+        auto better_conversion = [&](const UnaryCandidate& left, const UnaryCandidate& right) {
           if (left.rank.base_depth && right.rank.base_depth &&
               types().class_of(left.target) != types().class_of(right.target)) {
             if (base_depth(left.target, right.target)) return true;
@@ -10774,12 +10772,24 @@ public:
           }
           return left.rank < right.rank;
         };
+        // [over.match.best.general]/2: then a non-template before a template specialization.
+        auto better = [&](const UnaryCandidate& left, const UnaryCandidate& right) {
+          return better_conversion(left, right) ||
+                 (!left.is_template && right.is_template && !better_conversion(right, left));
+        };
         auto winner = viable.begin();
         for (auto candidate = std::next(winner); candidate != viable.end(); ++candidate)
           if (better(*candidate, *winner)) winner = candidate;
-        if (std::ranges::any_of(viable, [&](const UnaryCandidate& candidate) {
-              return &candidate != &*winner && !better(*winner, candidate);
+        auto undecided = [&](const UnaryCandidate& candidate) {
+          return &candidate != &*winner && !better(*winner, candidate);
+        };
+        if (winner->is_template && std::ranges::any_of(viable, [&](const UnaryCandidate& candidate) {
+              return candidate.is_template && undecided(candidate);
             })) {
+          diag(op_at, Diag::ref_qualified_operator_candidates);  // partial ordering with a member template
+          return Ex{NodeId::none, begin, end};
+        }
+        if (std::ranges::any_of(viable, undecided)) {
           diag(op_at, Diag::ambiguous_call, name);
           return Ex{NodeId::none, begin, end};
         }
@@ -10815,28 +10825,29 @@ public:
       return Ex{result.id, begin, end, result.info};
     }
     if (set.empty()) return ref_qualified_member;
-    if (binary && ref_qualified_member && q_->dependent_call(op_at)) {
+    if (ref_qualified_member && (!binary || q_->dependent_call(op_at))) {
       const auto member_call = as<ast::MemberCall>(*ref_qualified_member);
       if (member_call) {
         const auto& member = w_->entities.rec(member_call->function);
         const auto fn = types().rec(member.type);
-        if (member.scope == types().class_of(lt) && fn.params.size() == 1 &&
-            fn.fn_ref == ast::RefQual::lvalue && operands[0].cat() == ValueCategory::lvalue) {
-          const auto receiver = types().lvalue_ref(types().add_cv(types().class_type(member.scope), fn.fn_cv));
-          const auto member_receiver = ics(operands[0], receiver);
-          const auto member_argument = ics(operands[1], fn.params[0]);
+        const bool lvalue = operands[0].cat() == ValueCategory::lvalue;
+        if (member.scope == types().class_of(lt) && fn.params.size() + 1 == operands.size() &&
+            (binary ? fn.fn_ref == ast::RefQual::lvalue && lvalue : (fn.fn_ref == ast::RefQual::lvalue) == lvalue)) {
+          const auto object = types().add_cv(types().class_type(member.scope), fn.fn_cv);
+          std::vector<Ics> member_ranks{ics(operands[0], lvalue ? types().lvalue_ref(object) : types().rvalue_ref(object))};
+          if (operands.size() == 2) member_ranks.push_back(ics(operands[1], fn.params[0]));
           // Keep the existing joint-ranking diagnostic unless the member dominates
           // every viable ordinary non-member candidate.
-          if (member_receiver.viable && member_argument.viable &&
+          if (std::ranges::all_of(member_ranks, &Ics::viable) &&
               std::ranges::all_of(set, [&](const ast::DeclSema& candidate) {
                 if (candidate.flags & decl_flag::template_) return false;
                 const auto free_fn = types().rec(candidate.type);
-                if (free_fn.params.size() != 2) return false;
-                const auto free_receiver = ics(operands[0], free_fn.params[0]);
-                const auto free_argument = ics(operands[1], free_fn.params[1]);
-                if (!free_receiver.viable || !free_argument.viable) return true;
-                return !(free_receiver < member_receiver) && !(free_argument < member_argument) &&
-                       (member_receiver < free_receiver || member_argument < free_argument);
+                if (free_fn.variadic) return false;
+                if (free_fn.params.size() != operands.size()) return true;  // another arity of the operator
+                std::vector<Ics> free_ranks;
+                for (std::size_t i = 0; i < operands.size(); ++i) free_ranks.push_back(ics(operands[i], free_fn.params[i]));
+                return !std::ranges::all_of(free_ranks, &Ics::viable) ||
+                       better_conversions(member_ranks, free_ranks).value_or(false);
               }))
             return ref_qualified_member;
         }
@@ -11432,9 +11443,7 @@ public:
   // in charge when other candidate or conversion kinds may affect the result.
   std::optional<Ex> ranked_three_way(BinOp op, Ex l, Ex r, u32 begin, u32 end, u32 op_at) {
     const std::array operand_types{types().referee(l.type()), types().referee(r.type())};
-    if ((!types().is_class(operand_types[0]) && !types().is_class(operand_types[1])) ||
-        q_->dependent_call(op_at))
-      return std::nullopt;
+    if (!types().is_class(operand_types[0]) && !types().is_class(operand_types[1])) return std::nullopt;
     const std::array operands{l, r};
     const NameId conversion = ins().names.intern(lex::conversion_function_name);
     std::array<EntityId, 2> owners{EntityId::none, EntityId::none};
@@ -11454,6 +11463,7 @@ public:
       owners[i] = owner;
     }
 
+    const bool instantiated = q_->dependent_call(op_at);  // [temp.dep.candidate]
     // The complete ordinary relational candidate set is a separate ranking case.
     // Check declarations, including those for which a call would fail.
     if (op != BinOp::spaceship) {
@@ -11462,6 +11472,7 @@ public:
       if (owners[0] != EntityId::none && find_member(owners[0], ordinary)) return std::nullopt;
       auto nonmembers = ordinary_operator_nonmembers(ordinary);
       add_operator_adl(nonmembers, ordinary, operands, /*at_instantiation=*/false);
+      if (instantiated) add_operator_adl(nonmembers, ordinary, operands, /*at_instantiation=*/true);
       if (!nonmembers.empty()) return std::nullopt;
     }
 
@@ -11490,6 +11501,7 @@ public:
     const NameId name = ins().names.intern("operator<=>");
     auto nonmembers = ordinary_operator_nonmembers(name);
     add_operator_adl(nonmembers, name, operands, /*at_instantiation=*/false);
+    if (instantiated) add_operator_adl(nonmembers, name, operands, /*at_instantiation=*/true);
     std::vector<Ranked> viable;
     for (std::size_t first = 0; first < operands.size(); ++first) {
       const std::size_t second = 1 - first;

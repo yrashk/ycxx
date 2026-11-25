@@ -3,6 +3,7 @@
 struct A {
     friend int operator~(); //! error
     friend int operator~(A, A); //! error
+    friend int operator-(A, ...); //! error
     friend bool operator!(A, int); //! error
     friend int operator+(); //! error
     friend int operator*(A, A, A); //! error

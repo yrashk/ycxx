@@ -3906,7 +3906,7 @@ private:
     std::size_t count = d.params.size();
     bool unary_only = op == "~" || op == "!", binary_only = !(unary_only || op == "+" || op == "-" || op == "*" || op == "&" ||
                                                               op == "++" || op == "--");
-    if (count == 0 || count > 2 || (unary_only && count != 1) || (binary_only && count != 2)) {
+    if (count == 0 || count > 2 || (unary_only && count != 1) || (binary_only && count != 2) || types.rec(d.type).variadic) {
       s_.diag(d.name_at, Diag::operator_arity, d.name);
       return false;
     }

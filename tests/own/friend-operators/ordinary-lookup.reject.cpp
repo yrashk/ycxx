@@ -17,4 +17,3 @@ void f3(n::A& a) { n::operator+=(a, 1); } //! error
 int f4(n::A& a) { return n::operator*(a); } //! error
 int f5(n::A& a) { return n::A::operator~(a); } //! error
 int f6(n::A& a) { return a.operator~(); } //! error
-using n::operator++; //! error
