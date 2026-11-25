@@ -181,7 +181,8 @@ the resident receipts.
 
 The Astra architecture review identified named receipt bytes, private action
 names, and a separate runtime publication path as the seams for this slice.
-The structured reflection witness is tracked in [#1258](https://github.com/yrashk/ycxx/issues/1258).
+The same artifact edges feed the structured reflection witness in
+[#1258](https://github.com/yrashk/ycxx/issues/1258).
 
 ## Resolved plan inspection (#1256)
 
@@ -387,3 +388,53 @@ from the shipped catalogue.
 
 The independent Astra design review identified the stable export address and
 separate receipt dependencies as the basis for semantic cutoff. [#1257](https://github.com/yrashk/ycxx/issues/1257)
+
+### Structured shader reflection
+
+```text
+use plugin("rules/package") as shaders
+
+shaders.module "fragment" {
+    source = "shaders/triangle.frag"
+    compiler = "/usr/bin/glslc"
+}
+
+shaders.reflect "fragment_reflection" {
+    module = "fragment"
+    reflector = "/usr/bin/spirv-cross"
+}
+
+shaders.bindings "scene_bindings" {
+    facts = { layout = value("fragment_reflection", "layout") }
+}
+
+cpp.executable "app" {
+    sources = ["main.cc"]
+    generated_headers = [artifact("scene_bindings", "header")]
+    runtime_assets = [artifact("scene", "bundle")]
+}
+```
+
+The bundle and reflection rule both select the `spirv` output of `fragment`.
+The reflection rule emits `action.observe` with a `schema` and an artifact
+input. The coordinator resolves the producer graph and stages the same named
+compile receipt that the packer uses. A witness and a generator may depend on
+the same action even when the observer needs its output before native planning
+can finish. A runtime-only request reaches the packer and its compile actions
+without demanding reflection.
+
+The classifier exports the declared schema and a bounded table of named rows
+with named fields. Fields are unsigned 32-bit integers or strings. The worker
+rejects duplicate names and canonicalizes row and field order. The shader
+package defines `shader.descriptors.v1` and emits one row per uniform buffer
+with its descriptor set and binding. Its bindings rule reads the typed table
+and generates C++ constants from it. The existing support-state ABI and
+`capabilities` bindings continue to use the same export address.
+
+An implementation edit can change the SPIR-V bytes and the witness receipt
+while leaving the descriptor table equal. The stable value query then cuts
+off propagation to the bindings rule. A descriptor edit reaches the generated
+header and the native build. Read-only inspection revalidates the observed
+producer graph's inputs and tools before showing the recorded layout. Failed
+compilation or reflection leaves the last successful executable and bundle
+available to run. Watch keeps the recipe inputs in scope for recovery.
