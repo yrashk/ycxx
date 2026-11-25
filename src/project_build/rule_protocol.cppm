@@ -18,6 +18,12 @@ struct RuleValueReference {
   bool operator==(const RuleValueReference&) const = default;
 };
 
+struct RuleFactReference {
+  std::string name;
+  RuleValueReference value;
+  bool operator==(const RuleFactReference&) const = default;
+};
+
 struct RuleCapabilityBinding {
   std::string name;
   std::string package;
@@ -42,6 +48,7 @@ struct RuleDemand {
   std::vector<std::string> reads;
   std::vector<RuleCapabilityBinding> capabilities = {};
   std::optional<std::string> value_export = std::nullopt;
+  std::vector<RuleFactReference> facts = {};
   bool operator==(const RuleDemand&) const = default;
 };
 
@@ -61,6 +68,32 @@ struct RuleCapabilityValue {
   std::uint32_t support;
 };
 
+struct RuleFactField {
+  std::string name;
+  // A field has exactly one of these values.
+  std::optional<std::uint32_t> number = std::nullopt;
+  std::optional<std::string> text = std::nullopt;
+  bool operator==(const RuleFactField&) const = default;
+};
+
+struct RuleFactRow {
+  std::string name;
+  std::vector<RuleFactField> fields;
+  bool operator==(const RuleFactRow&) const = default;
+};
+
+struct RuleFactValue {
+  std::string schema;
+  std::vector<RuleFactRow> rows;
+  bool operator==(const RuleFactValue&) const = default;
+};
+
+struct RuleFactBinding {
+  std::string name;
+  RuleFactValue value;
+  bool operator==(const RuleFactBinding&) const = default;
+};
+
 inline constexpr std::size_t rule_witness_stream_limit = 64 * 1024;
 
 struct RuleWitnessReport {
@@ -68,6 +101,7 @@ struct RuleWitnessReport {
   int exit_status;
   std::string out;
   std::string err;
+  std::optional<std::string> schema = std::nullopt;
 };
 
 struct RuleWorkerRequest {
@@ -79,6 +113,7 @@ struct RuleWorkerRequest {
   std::vector<RuleRead> reads;
   std::optional<std::vector<RuleCapabilityValue>> capabilities = std::nullopt;
   std::optional<RuleWitnessReport> witness = std::nullopt;
+  std::optional<std::vector<RuleFactBinding>> facts = std::nullopt;
 };
 
 }  // namespace ycxx::build

@@ -3249,6 +3249,15 @@ and leave the native request reusable on shader edits. The sample packs real
 SPIR-V and the portable daemon test exercises watch, failed compilation, and
 restoration from receipts. [#1258](https://github.com/yrashk/ycxx/issues/1258)
 
+A source-built rule package can stage a named generated artifact into an
+`action.observe` witness and classify it as a canonical table of typed rows.
+`facts` bindings resolve the stable `value("target", "field")` query without
+adding receipt provenance to the consumer's arguments. The shader reflection
+example consumes the same fragment SPIR-V receipt as its runtime bundle and
+generates a C++ header from the descriptor layout. An equal layout preserves
+native work. Read-only inspection and watch reobserve the producer graph,
+including the selected tools and input files. [#1258](https://github.com/yrashk/ycxx/issues/1258)
+
 ## The engine trace (#245, 2026-11-19)
 
 `ycxx cxx --trace-engine[=stream|interactive]` (or `YCXX_TRACE_ENGINE`) shows what a request
