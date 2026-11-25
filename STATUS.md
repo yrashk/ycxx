@@ -3249,6 +3249,13 @@ and leave the native request reusable on shader edits. The sample packs real
 SPIR-V and the portable daemon test exercises watch, failed compilation, and
 restoration from receipts. [#1258](https://github.com/yrashk/ycxx/issues/1258)
 
+Runtime asset publication stages a complete generation and switches the public
+directory with one filesystem operation on Linux and macOS. The ownership
+record moves with the assets, so the next successful build can retire removed
+or renamed outputs while preserving unrelated files. Failed staging or exchange
+preserves the last good asset set. Trace events report publication separately
+from tool execution. [#1329](https://github.com/yrashk/ycxx/issues/1329)
+
 A source-built rule package can stage a named generated artifact into an
 `action.observe` witness and classify it as a canonical table of typed rows.
 `facts` bindings resolve the stable `value("target", "field")` query without
