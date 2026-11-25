@@ -8536,6 +8536,24 @@ public:
       QualType param = types().pointer(types().add_cv(builtin(Builtin::char_), Cv::const_));
       return builtin_value_call(ast::BuiltinOp::strlen, builtin(w_->target.size_type), param, args.front(), begin, end);
     }
+    if (b.function == ctzg) {
+      const Ex invalid{NodeId::none, begin, end};
+      const QualType result = builtin(Builtin::int_);
+      if (args.size() == 2) {
+        if (!args[0].ok() || !args[1].ok()) return invalid;
+        // Keep dependent fallback calls in libycxx's <bit> well-formed until they are used.
+        if (any_dependent(args)) return dependent_node(args, begin, end, result);
+        diag(begin, Diag::builtin_ctzg_fallback);
+        return invalid;
+      }
+      if (!builtin_arity(1, args.size(), begin) || !args.front().ok()) return invalid;
+      const Ex& arg = args.front();
+      if (!types().is_dependent(arg.type()) && !types().is(arg.type(), Builtin::unsigned_int)) {
+        diag(arg.begin, Diag::builtin_ctzg_operand, arg.type());
+        return invalid;
+      }
+      return builtin_value_call(ast::BuiltinOp::ctz, result, builtin(Builtin::unsigned_int), arg, begin, end);
+    }
     if (b.function == constant_p) {
       if (!builtin_arity(1, args.size(), begin)) return {NodeId::none, begin, end};
       return builtin_constant_probe(args.front(), begin, end);
@@ -8571,6 +8589,7 @@ public:
       case trap:
       case unreachable:
       case strlen:
+      case ctzg:
       case library:
       case constant_p:
       case add_overflow:

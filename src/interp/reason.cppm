@@ -23,6 +23,7 @@ enum class Reason : std::uint8_t {
   quotient_overflow [[=says{"the quotient is not representable in the result type"}]],
   inexact [[=says{"an exact division or shift discarded nonzero bits"}]],
   shift_count [[=says{"shift count {0} is negative or not less than the width of the shifted type"}]],
+  ctz_zero [[=says{"counting trailing zeros with a zero operand"}]],
   float_nan [[=says{"floating-point arithmetic produces a NaN"}]],
   float_to_integer [[=says{"a floating value converted to an integer type is out of its range"}]],
   enum_range [[=says{"the converted value is outside the range of the enumeration type"}]],
