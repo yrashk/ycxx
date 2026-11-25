@@ -180,23 +180,30 @@ wire.generator "wire_files" {
 
 ```text
 # tools/wire-rules/build.ycxx
-ycxx.rule_plugin "rules" {
-    compiler = "/usr/bin/c++"
-    sources = ["rule.cc"]
+host_action "rules" {
+    tool = "/usr/bin/c++"
+    args = ["-std=c++20", "-fPIC", "-shared", "-Iinputs/sdk",
+            input("source"), "-o", output("plugin")]
+    inputs = { source = "rule.cc" }
+    outputs = { plugin = "rules.so" }
 }
 ```
 
 The planner returns a request when it reaches a custom declaration. The
 coordinator builds the package using the selected host C++ toolchain, stages
 the resulting shared library, and invokes a worker. Both steps use the
-declared action runner. The package definition uses the built-in plugin
-target, giving this slice a bootstrap path that needs no other plugin.
+declared action runner. The package definition declares the bootstrap host
+action and its shared-library output directly. The action gets the versioned
+SDK header through its staged inputs.
 
 The worker loads the library in its own process and passes a versioned C ABI
 record to its entry point. The SDK exposes attributes as strings and declared
-file observations as byte ranges. Missing files and empty files are different
-observations. A rule emits one ordinary generator declaration, which is
-validated by the workspace planner. A worker failure produces diagnostics
+file observations as byte ranges. It also supplies the normalized argument
+record for rules that pass structured fields on to a primitive. Missing files
+and empty files are different observations. A rule emits one native
+executable, native library, or external action declaration. The workspace
+planner validates that primitive and supplies the compiler and scheduler.
+A worker failure produces diagnostics
 before the coordinator can admit a successful result.
 
 The bootstrap action key includes the SDK, source and header inputs, host
@@ -206,3 +213,10 @@ are revalidated against the current inputs. Equivalent expanded generator
 actions keep their own keys when the shared library changes. The worker
 process bounds crash effects, and cacheable rules use the SDK for their
 workspace observations.
+
+`cpp` is a conventional import alias. `use plugin("tools/other-cpp/rules") as cpp`
+binds the same declarations to a workspace package. The standard source
+package compiles on demand through the same host-action bootstrap and
+registers its rules through the same worker contract. The kernel supplies
+native compiler queries and external actions to either provider. The
+standard package migration replaces the legacy resolution paths.

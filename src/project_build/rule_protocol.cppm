@@ -15,6 +15,7 @@ struct RuleDemand {
   std::string target;
   std::string rule;
   std::string package;
+  std::string definition;  // normalized record of the rule arguments
   std::vector<RuleAttribute> attributes;
   std::vector<std::string> reads;
   bool operator==(const RuleDemand&) const = default;
@@ -34,6 +35,7 @@ struct RuleWorkerRequest {
   int version = 1;
   std::string target;
   std::string rule;
+  std::string definition;
   std::vector<RuleAttribute> attributes;
   std::vector<RuleRead> reads;
 };
