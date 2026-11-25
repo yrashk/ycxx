@@ -136,7 +136,7 @@ def check_plan(plan, triple, importer=IMPORTER_TEXT, *, conditional=True):
             source_location(names[kind, name], IMPORTER, importer, f'import {name};')
     generated_path = str(namespace(triple) / 'virtual/provider' / GENERATED)
     pending = [row for row in plan['facts'] if row['kind'] == 'module-scan-pending']
-    assert len(pending) == 2 and {row['name'] for row in pending} == {generated_path, GUARD}, pending
+    assert len(pending) == 2 and {row['name'] for row in pending} == {json.dumps(generated_path), json.dumps(GUARD)}, pending
     include = fact(plan, 'include', 'app', 'config')
     assert 'surface' in include['origin'] and 'public_include_dirs' in include['origin'], include
     return names
