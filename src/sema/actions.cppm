@@ -3288,6 +3288,7 @@ public:
     // Layout can be the first use that requires a class specialization to be complete.
     const ClassRec* record = types().is_class(element) ? class_rec(types().class_of(element)) : nullptr;
     if (!record || !record->virtual_layout_unsupported) return true;
+    if (record->polymorphic && !record->member_declarations_valid) return true;  // diagnosed at the member
     diag(at, Diag::virtual_layout, t);
     return false;
   }
@@ -6701,7 +6702,9 @@ public:
     const ClassRec* dynamic_owner = d->is_virtual ? class_rec(w_->entities.rec(d->entity).scope) : nullptr;
     if (dynamic_owner && !dynamic_owner->dynamic) dynamic_owner = nullptr;
     const bool immediate_virtual = d->is_virtual && d->is_consteval;
-    if (unevaluated == 0) {
+    // A pattern's own member: its specializations have the tables ([temp.dep.type]).
+    const bool pattern_member = d->is_virtual && types().is_dependent(types().class_type(w_->entities.rec(d->entity).scope));
+    if (unevaluated == 0 && !pattern_member) {
       if (immediate_virtual) {
         if (!dynamic_owner || !object || assignment_notation) {
           diag(paren_at, Diag::virtual_immediate_call);
@@ -6826,6 +6829,9 @@ public:
                                        begin, end, info));
     }
     if (virtual_slot) {
+      // A virtual function that is not pure is odr-used ([basic.def.odr]): a specialization's is instantiated.
+      if (!d->is_pure && w_->entities.rec(w_->entities.rec(d->entity).scope).templ != EntityId::none)
+        demands.push_back({d->entity, ast::Loc{item_, loc_base_ + begin}});
       // BOOTSTRAP: -Warray-bounds: reserved and appended. At -O3 GCC 16.2 reports libycxx's
       // in-place insert after a one-element vector as writing past its allocation (#748).
       // Without the bug: `std::vector<QualType> parameters{o.type()};` and
