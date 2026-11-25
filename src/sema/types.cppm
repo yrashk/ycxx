@@ -1190,9 +1190,18 @@ public:
     if (!c) return false;
     return c->move_usable ? c->move_nontrivial : c->copy_nontrivial();
   }
+  // Whether a non-static member of `r` is a volatile class object, or an array of them.
+  bool has_volatile_class_member(const ClassRec& r) const {
+    return std::ranges::any_of(r.fields, [&](const FieldRec& f) {
+      QualType t = types_->canonical(f.type);
+      while (types_->is_array(t)) t = types_->canonical(types_->add_cv(types_->rec(t).inner, Types::cv(t)));
+      return types_->is_class(t) && Types::is_volatile(t);
+    });
+  }
   // Whether the implicit move constructor of `c` is not the copy that ycxx uses for it: a subobject
-  // is moved by a constructor of its own (#244). False when `c` declares a move constructor.
-  bool implicit_move_differs(EntityId c) const {
+  // is moved by a constructor of its own (#244). False when `c` declares a move constructor. With
+  // `defaulted`, only by one defaulted on its first declaration.
+  bool implicit_move_differs(EntityId c, bool defaulted = false) const {
     const ClassRec* r = find(c);
     if (!r || !r->move_usable || declared_move(c, *r)) return false;
     const auto moved = [&](QualType t) {
@@ -1201,8 +1210,9 @@ public:
       const ClassRec* sub = type.kind == TypeKind::class_ ? find(type.entity) : nullptr;
       if (!sub) return false;
       if (const MemberDeclRec* m = declared_move(type.entity, *sub))
-        return !m->is_deleted && !(m->defaulted == CopyState::trivial && !sub->copy_nontrivial());
-      return implicit_move_differs(type.entity);
+        return !m->is_deleted && !(m->defaulted == CopyState::trivial && !sub->copy_nontrivial()) &&
+               !(defaulted && m->defaulted == CopyState::ordinary);
+      return implicit_move_differs(type.entity, defaulted);
     };
     return std::ranges::any_of(r->bases, [&](const BaseRec& b) { return moved(types_->class_type(b.cls)); }) ||
            std::ranges::any_of(r->fields, [&](const FieldRec& f) { return moved(f.type); });
@@ -1234,6 +1244,9 @@ public:
       if (!m.is_ctor || m.is_template) return false;
       const auto params = types_->rec(m.type).params;
       if (params.empty() || !types_->is_reference(params.front())) return false;
+      // [class.copy.ctor]/2: every parameter after the first has a default argument.
+      for (std::size_t i = 1; i < params.size(); ++i)
+        if (i >= m.defaults.size() || m.defaults[i] == ast::NodeId::none) return false;
       return types_->rec(params.front()).rvalue_ref &&
              Types::unqualified(types_->canonical(types_->referee(params.front()))) == types_->class_type(c);
     });

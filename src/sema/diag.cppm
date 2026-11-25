@@ -493,7 +493,7 @@ constexpr message message_of(Diag d) {
 constexpr bool is_limit(engine::DiagId id) {
   auto d = sema_diag_of(id);
   if (!d) return false;
-  if (*d == Diag::instantiation_depth || *d == Diag::unsupported_copy_assignment) return true;
+  if (*d == Diag::instantiation_depth) return true;
   message m = message_of(*d);
   return std::string_view(m.text).contains("not supported");
 }

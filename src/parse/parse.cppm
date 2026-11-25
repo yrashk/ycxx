@@ -11785,7 +11785,15 @@ bool Program::special_members(u32 item, EntityId cls, sema::ClassRec& rec, std::
   const bool implicit_move = implicit_copy && !user_copy_assignment && !user_dtor;
   const auto volatile_field = [&](const sema::FieldRec& f) { return volatile_class(f.type); };
   const bool volatile_classes = !rec.closure && !types.is_dependent(ct) && std::ranges::any_of(rec.fields, volatile_field);
-  if (implicit_move && volatile_classes) {
+  // Overload resolution decides about a subobject with a defaulted move, which can be inaccessible
+  // or not take a const member.
+  const bool defaulted_moves = !rec.closure && !types.is_dependent(ct) && std::ranges::any_of(subobjects, [&](QualType t) {
+    t = types.canonical(types.innermost_array_element(t));
+    const auto* sub = types.is_class(t) ? classes_.find(types.class_of(t)) : nullptr;
+    const auto* move = sub ? classes_.declared_move(types.class_of(t), *sub) : nullptr;
+    return move && move->defaulted != sema::CopyState::ordinary;
+  });
+  if (implicit_move && (volatile_classes || defaulted_moves)) {
     const auto move = classify_special_member(item, cls, rec, EntityId::none, SpecialMember::move_constructor, false, point).state;
     rec.move_usable = move != sema::CopyState::deleted;
     rec.move_nontrivial = rec.move_usable && move != sema::CopyState::trivial;
@@ -11837,7 +11845,14 @@ bool Program::special_members(u32 item, EntityId cls, sema::ClassRec& rec, std::
       : std::ranges::none_of(rec.members, provided_constructor) && rec.bases.empty() &&
         std::ranges::all_of(rec.fields, [&](const sema::FieldRec& f) { return rec.access_of(f.entity) == ast::Access::public_; });
   // No operation of a volatile class member is trivial for Apple's definition, even one that is deleted.
-  const bool pod_fields = !w_->target.apple_calls || std::ranges::none_of(rec.fields, volatile_field);
+  // A const class member makes a move assignment operator, declared or implicit, such an operation.
+  const bool move_assignment = user_move_assignment ||
+                               !(user_copy || user_move || user_copy_assignment || user_dtor);
+  const bool pod_fields = !w_->target.apple_calls || std::ranges::none_of(rec.fields, [&](const sema::FieldRec& f) {
+    QualType t = types.canonical(f.type);
+    while (types.is_array(t)) t = types.canonical(types.add_cv(types.rec(t).inner, sema::Types::cv(t)));
+    return types.is_class(t) && (sema::Types::is_volatile(t) || (move_assignment && sema::Types::is_const(t)));
+  });
   rec.pod = pod_fields && !rec.layout_requires_virtual_support && (rec.destructor == EntityId::none || (user_dtor && user_dtor->is_deleted)) &&
             pod_definition &&
             !provided_assignment(false) && std::ranges::none_of(rec.fields, &sema::FieldRec::dmi) &&

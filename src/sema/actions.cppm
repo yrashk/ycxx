@@ -7414,8 +7414,19 @@ public:
       }
     }
     const bool paren_aggregate = form == Construction::direct_paren_aggregate;
+    const auto unresolved = diag_count();
     auto chosen = resolve(cands, args, begin, no_name(), std::nullopt, ut, {}, false, paren_aggregate);
     if (!chosen) {
+      // The deleted implicit copy stands in for an implicit move that a volatile member's own move
+      // constructor makes usable (#244).
+      if (!user_copy && cr->copy_deleted && cr->move_usable && cr->move_nontrivial && !classes().declared_move(c, *cr) &&
+          args.size() == 1 && args[0].cat() == ValueCategory::xvalue && same_unqualified(args[0].type(), ut) &&
+          object_cv(args[0].type()) == Cv::none && classes().has_volatile_class_member(*cr) &&
+          diag_count() == unresolved + 1 && diags_->back().id == diag_id(Diag::deleted_constructor)) {
+        truncate_diags(unresolved);
+        diag(begin, Diag::defaulted_copy_unsupported, ut);
+        return fail;
+      }
       if (chosen.error() == OverloadFailure::no_viable) return parenthesized_aggregate(t, args, begin, end);
       return fail;
     }
@@ -7481,7 +7492,8 @@ public:
     // The implicit copy of an rvalue stands in for an implicit move that would call a subobject's
     // own move constructor (#244).
     const bool stands_for_move = (implicit_copy || (k.entity == cr->copy_ctor && !selected_member)) &&
-        cr->defaulted_copy != CopyState::ordinary && classes().implicit_move_differs(c) &&
+        (cr->defaulted_copy != CopyState::ordinary ? classes().implicit_move_differs(c)
+                                                   : classes().implicit_move_differs(c, /*defaulted=*/true)) &&
         args[0].cat() != ValueCategory::lvalue && object_cv(args[0].type()) == Cv::none;
     if (copy == CopyState::unsupported || stands_for_move) {
       diag(begin, Diag::defaulted_copy_unsupported, ut);
@@ -9109,7 +9121,7 @@ public:
       if (!initializes(target, e)) {
         // A base class object copied from a derived class's ([dcl.init.general]/17.6.2): from its
         // base class subobject.
-        if (base_depth(e.type(), target)) {
+        if (base_depth(e.type(), target) && !Types::is_volatile(types().canonical(e.type()))) {
           if (!e.glvalue()) e = materialize(e, Types::unqualified(e.type()), false);
           Ex b = to_base(e, types().class_of(target), at_);
           if (!b.ok()) return b;

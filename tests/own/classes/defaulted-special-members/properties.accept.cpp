@@ -202,6 +202,32 @@ struct HasTrivialMove { HasTrivialMove() = default; HasTrivialMove(HasTrivialMov
 static_assert(made_from<TrivialMove, TrivialMove> && !made_from<TrivialMove, const TrivialMove&>);
 static_assert(made_from<HasTrivialMove, HasTrivialMove> && !made_from<HasTrivialMove, const HasTrivialMove&>);
 
+// A constructor whose other parameters have no default arguments is no move constructor ([class.copy.ctor]/2).
+struct NotMove { int&& r; NotMove(NotMove&&, int); };
+struct NotMoveMember { TrivialMove t; NotMoveMember(); NotMoveMember(NotMoveMember&&, int); };
+static_assert(made_from<NotMove, NotMove> && !made_from<NotMove, NotMove&>);
+static_assert(made_from<NotMoveMember, NotMoveMember> && !made_from<NotMoveMember, const NotMoveMember&>);
+// An implicit move of a class whose member's defaulted move is inaccessible, or takes no const member.
+class PrivateMove { PrivateMove(PrivateMove&&) = default; int x; public: PrivateMove(); };
+struct HasPrivateMove { HasPrivateMove(); PrivateMove m; };
+struct HasConstMove { HasConstMove(); const TrivialMove m; };
+static_assert(!made_from<HasPrivateMove, HasPrivateMove> && !made_from<HasConstMove, HasConstMove>);
+// A volatile object of a derived class.
+struct FromAggregate : Aggregate {};
+static_assert(!made_from<Aggregate, volatile FromAggregate&>);
+// Assignments that are deleted leave a requirement unsatisfied, whether or not ycxx supports the class.
+template <class T> struct Wraps { T t; };
+struct HasReference { int& r; };
+struct DeletedAssign { DeletedAssign& operator=(const DeletedAssign&) = delete; };
+struct DerivesDeleted : DeletedAssign { int z; };
+static_assert(!assigned_from<Wraps<HasReference>&, const Wraps<HasReference>&>);
+static_assert(!assigned_from<DerivesDeleted&, const DerivesDeleted&>);
+struct UserAssign { UserAssign& operator=(const UserAssign&); };
+struct DerivesUser : UserAssign {};
+template <class T> requires requires(T& a) { a = a; } char (&preferred(T&))[2];
+char (&preferred(DerivesUser&))[1];
+static_assert(sizeof(preferred(value<DerivesUser&>())) == 1);
+
 // Variant members ([class.default.ctor], [class.copy.ctor]).
 union TrivialUnion {
   TrivialUnion() = default;

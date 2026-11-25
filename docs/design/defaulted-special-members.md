@@ -70,7 +70,8 @@ implicit move of a class with a defaulted copy, are unsupported, not copies.
 
 The Itanium ABI's POD for layout, whose tail padding is not reused, follows Clang on each target.
 On arm64 macOS it is C++11's: trivial and standard-layout, where a deleted default constructor
-counts as trivial, and no class with a volatile class member is. On x86-64 Linux it is C++03's: no user-provided constructor, destructor or copy
+counts as trivial, and no class with a volatile class member is, or with a const class member and
+a move assignment operator, declared or implicit. On x86-64 Linux it is C++03's: no user-provided constructor, destructor or copy
 assignment, only public members and no bases. GCC 16 agrees on Linux except for class template
 specializations, whose defaulted constructors it counts as user-provided.
 
