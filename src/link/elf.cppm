@@ -35,6 +35,10 @@ std::expected<std::vector<std::uint8_t>, std::string> link(std::span<const obj::
                                                         std::string_view entry = "_start",
                                                         const dynamic_options* dynamic = nullptr);
 
+// Emit a leaf ET_DYN shared object without imports or loader-time relocations.
+std::expected<std::vector<std::uint8_t>, std::string> link_shared(std::span<const obj::object> objects,
+                                                               std::string_view soname);
+
 }  // namespace ycxx::link::elf
 
 namespace ycxx::link::elf {
@@ -44,7 +48,7 @@ using bytes = std::vector<std::uint8_t>;
 using obj::binding;
 using obj::reloc_kind;
 
-constexpr std::uint16_t et_exec = 2, em_x86_64 = 62;
+constexpr std::uint16_t et_exec = 2, et_dyn = 3, em_x86_64 = 62;
 constexpr std::uint16_t header_size = 64, program_header_size = 56;
 constexpr std::uint32_t pt_load = 1, pt_dynamic = 2, pt_interp = 3, pt_phdr = 6, pt_gnu_stack = 0x6474e551;
 constexpr std::uint64_t dt_null = 0, dt_needed = 1, dt_hash = 4, dt_strtab = 5, dt_symtab = 6;
@@ -347,6 +351,141 @@ std::expected<void, std::string> write_dynamic(bytes& image, const dynamic_layou
   tag(dt_relaent, rela_size);
   tag(dt_null, 0);
   return {};
+}
+
+// Shared output uses both program headers for loaders and section headers for link editors.
+enum shared_index : std::uint16_t { null_section, shared_text, shared_rodata, shared_data, shared_bss,
+                                  shared_dynstr, shared_dynsym, shared_hash, shared_dynamic, shared_shstrtab,
+                                  shared_section_count };
+
+struct shared_section {
+  std::string_view name;
+  std::uint32_t type;
+  std::uint64_t flags;
+  std::uint64_t offset = 0;
+  std::uint64_t size = 0;
+  std::uint64_t align = 1;
+  std::uint64_t entry_size = 0;
+  std::uint32_t link = 0;
+  std::uint32_t info = 0;
+};
+
+using shared_sections = std::array<shared_section, shared_section_count>;
+using shared_inputs = std::array<std::vector<section_ref>, shared_section_count>;
+
+constexpr std::uint16_t shared_program_count = 5;
+constexpr std::uint64_t shared_headers_end = header_size + shared_program_count * program_header_size;
+constexpr std::uint64_t shared_dynamic_size = 7 * dynamic_entry_size;
+
+bytes write_shared_headers(std::span<const load_segment> loads, const shared_section& dynamic,
+                           std::uint64_t section_table) {
+  bytes out{0x7f, 'E', 'L', 'F', 2, 1, 1};
+  out.resize(16);
+  append(out, et_dyn);
+  append(out, em_x86_64);
+  append(out, std::uint32_t{1});    // e_version
+  append(out, std::uint64_t{0});    // no entry point
+  append(out, std::uint64_t{header_size});
+  append(out, section_table);
+  append(out, std::uint32_t{0});    // e_flags
+  append(out, header_size);
+  append(out, program_header_size);
+  append(out, shared_program_count);
+  append(out, std::uint16_t{64});   // e_shentsize
+  append(out, std::uint16_t{shared_section_count});
+  append(out, std::uint16_t{shared_shstrtab});
+  for (const auto& segment : loads)
+    write_program_header(out, pt_load, segment.flags, segment.offset, segment.offset,
+                         segment.file_size, segment.memory_size, page_size);
+  write_program_header(out, pt_dynamic, pf_r | pf_w, dynamic.offset, dynamic.offset, dynamic.size, dynamic.size, 8);
+  write_program_header(out, pt_gnu_stack, pf_r | pf_w, 0, 0, 0, 0, 16);
+  return out;
+}
+
+void write_shared_section(bytes& out, const shared_section& section, std::uint32_t name) {
+  append(out, name);
+  append(out, section.type);
+  append(out, section.flags);
+  append(out, section.flags == 0 ? std::uint64_t{0} : section.offset);
+  append(out, section.offset);
+  append(out, section.size);
+  append(out, section.link);
+  append(out, section.info);
+  append(out, section.align);
+  append(out, section.entry_size);
+}
+
+std::expected<shared_index, std::string> shared_section_for(const obj::object& object, const obj::section& section) {
+  const auto kind = std::ranges::find_if(section_kinds, [&](const section_kind& spec) {
+    return section.segment == spec.segment && section.name == spec.name;
+  });
+  if (kind == section_kinds.end() || kind->output == group::init_array)
+    return section_error(object, section, "unsupported ELF shared output section");
+  const auto flags = kind->output == group::text ? section.flags & ~instruction_flags : section.flags;
+  if (flags != kind->flags) return section_error(object, section, "unsupported ELF section flags");
+  if (section.is_zerofill() ? !section.bytes.empty() || !section.relocs.empty() : section.zerofill_size != 0)
+    return section_error(object, section, "invalid zero-fill section contents");
+  if (section.align_log2 > std::countr_zero(page_size))
+    return section_error(object, section, "ELF shared output alignment exceeds one page");
+  switch (kind->output) {
+    case group::text: return shared_text;
+    case group::read_only: return shared_rodata;
+    case group::data: return shared_data;
+    case group::bss: return shared_bss;
+    default: std::unreachable();
+  }
+}
+
+std::expected<std::vector<patch>, std::string> shared_patches(
+    std::span<const obj::object> objects, const definitions& globals, const std::set<std::string_view>& hidden,
+    const std::vector<std::vector<std::uint64_t>>& offsets) {
+  std::vector<patch> patches;
+  for (std::size_t oi = 0; oi < objects.size(); ++oi) {
+    const auto& object = objects[oi];
+    for (std::size_t si = 0; si < object.sections.size(); ++si) {
+      const auto& section = object.sections[si];
+      for (const auto& reloc : section.relocs) {
+        const bool relax = reloc.kind == reloc_kind::x86_64_rex_gotpcrelx;
+        if (reloc.minus || (!relax && reloc.kind != reloc_kind::x86_64_pc32 && reloc.kind != reloc_kind::x86_64_plt32))
+          return section_error(object, section, "unsupported relocation for position-independent ELF shared output");
+        constexpr std::size_t width = 4;
+        if (reloc.offset > section.size() || width > section.size() - reloc.offset)
+          return section_error(object, section, "ELF relocation is outside its section");
+        if (reloc.symbol >= object.symbols.size())
+          return section_error(object, section, "invalid ELF relocation symbol index");
+        const auto& symbol = object.symbols[reloc.symbol];
+        definition resolved{oi, &symbol};
+        if (symbol.bind != binding::local) {
+          const auto global = globals.find(symbol.name_view());
+          if (global == globals.end())
+            return section_error(object, section, std::format("undefined symbol '{}'", symbol.name_view()));
+          resolved = global->second;
+          if (!hidden.contains(symbol.name_view()))
+            return section_error(object, section,
+                                 std::format("ELF shared reference to interposable symbol '{}' is unsupported",
+                                             symbol.name_view()));
+        }
+        if (relax && !canonical_got_load(section, reloc))
+          return section_error(object, section, "shared REX_GOTPCRELX requires a canonical 64-bit RIP-relative MOV");
+        const auto offset = offsets[oi][si] + reloc.offset;
+        const auto address = offsets[resolved.object][*resolved.symbol->section] + resolved.symbol->offset;
+        const auto value = displacement(address, offset, reloc.addend);
+        if (!value) return section_error(object, section, "ELF shared PC-relative relocation overflows");
+        patches.push_back({offset, *value, width, {oi, si}, relax ? patch_kind::relax_got : patch_kind::ordinary,
+                           symbol.name_view()});
+      }
+    }
+  }
+  std::ranges::sort(patches, {}, &patch::offset);
+  const patch* previous = nullptr;
+  for (const auto& p : patches) {
+    if (previous && p.offset - p.prefix_size() < previous->offset + previous->width) {
+      const auto& object = objects[p.source.object];
+      return section_error(object, object.sections[p.source.section], "overlapping ELF relocations are unsupported");
+    }
+    previous = &p;
+  }
+  return patches;
 }
 
 }  // namespace
@@ -783,6 +922,187 @@ std::expected<bytes, std::string> link(std::span<const obj::object> objects, std
     auto written = write_dynamic(image, *layout, *dynamic);
     if (!written) return std::unexpected(written.error());
   }
+  return image;
+}
+
+std::expected<bytes, std::string> link_shared(std::span<const obj::object> objects, std::string_view soname) {
+  if (soname.empty() || soname.contains('/') || soname.contains('\0') ||
+      soname.size() >= std::numeric_limits<std::uint32_t>::max() - 1)
+    return std::unexpected("ELF shared output needs a nonempty, slash-free SONAME");
+
+  shared_inputs inputs;
+  definitions globals;
+  std::set<std::string_view> hidden;
+  std::vector<std::vector<std::uint64_t>> offsets;
+  offsets.reserve(objects.size());
+  for (std::size_t oi = 0; oi < objects.size(); ++oi) {
+    const auto& object = objects[oi];
+    if (object.arch != obj::target::x86_64_linux) return object_error(object, "expected an x86-64 Linux object");
+    if (!object.comdat_groups.empty()) return object_error(object, "select ELF COMDAT groups before layout");
+    offsets.emplace_back(object.sections.size());
+    for (std::size_t si = 0; si < object.sections.size(); ++si) {
+      auto index = shared_section_for(object, object.sections[si]);
+      if (!index) return std::unexpected(index.error());
+      inputs[*index].push_back({oi, si});
+    }
+    if (auto result = register_symbols(object, oi, globals); !result) return std::unexpected(result.error());
+    for (const auto& symbol : object.symbols)
+      if (symbol.bind == binding::hidden) hidden.insert(symbol.name_view());
+  }
+  // ELF visibility follows the most constraining declaration, even a reference in another object.
+  for (const auto& object : objects)
+    for (const auto& symbol : object.symbols)
+      if (symbol.bind != binding::local && !symbol.defined() && !symbol.weak &&
+          hidden.contains(symbol.name_view()) && !globals.contains(symbol.name_view()))
+        return object_error(object, std::format("undefined hidden symbol '{}'", symbol.name_view()));
+
+  constexpr std::uint32_t sht_progbits = 1, sht_strtab = 3, sht_hash = 5, sht_dynamic = 6,
+                          sht_nobits = 8, sht_dynsym = 11;
+  constexpr std::uint64_t shf_write = 1, shf_alloc = 2, shf_exec = 4;
+  shared_sections sections{{
+      {.name = "", .type = 0, .flags = 0, .align = 0},
+      {".text", sht_progbits, shf_alloc | shf_exec},
+      {".rodata", sht_progbits, shf_alloc},
+      {".data", sht_progbits, shf_alloc | shf_write},
+      {".bss", sht_nobits, shf_alloc | shf_write},
+      {".dynstr", sht_strtab, shf_alloc},
+      {.name = ".dynsym", .type = sht_dynsym, .flags = shf_alloc,
+       .align = 8, .entry_size = symbol_size, .link = shared_dynstr, .info = 1},
+      {.name = ".hash", .type = sht_hash, .flags = shf_alloc, .align = 4, .entry_size = 4, .link = shared_dynsym},
+      {.name = ".dynamic", .type = sht_dynamic, .flags = shf_alloc | shf_write, .size = shared_dynamic_size,
+       .align = 8, .entry_size = dynamic_entry_size, .link = shared_dynstr},
+      {".shstrtab", sht_strtab, 0},
+  }};
+
+  struct shared_export { std::uint32_t name; definition def; };
+  std::vector<shared_export> exports;
+  bytes dynstr{0};
+  constexpr std::uint32_t soname_offset = 1;
+  dynstr.append_range(soname);
+  dynstr.push_back(0);
+  for (const auto& [name, def] : globals) {
+    const auto& symbol = *def.symbol;
+    if (hidden.contains(name)) continue;
+    const auto& object = objects[def.object];
+    const auto& section = object.sections[*symbol.section];
+    if (symbol.weak || !symbol.function_size || !executable(section) ||
+        std::max<std::uint64_t>(*symbol.function_size, 1) > section.size() - symbol.offset)
+      return object_error(object, std::format("ELF shared export '{}' must be a strong function in executable code", name));
+    if (name.size() >= std::numeric_limits<std::uint32_t>::max() - dynstr.size())
+      return std::unexpected("ELF shared output symbol names exceed the string table limit");
+    exports.push_back({static_cast<std::uint32_t>(dynstr.size()), def});
+    dynstr.append_range(name);
+    dynstr.push_back(0);
+  }
+
+  const auto symbol_count = static_cast<std::uint32_t>(exports.size() + 1);
+  sections[shared_dynstr].size = dynstr.size();
+  sections[shared_dynsym].size = symbol_count * symbol_size;
+  sections[shared_hash].size = (std::uint64_t{symbol_count} + 3) * 4;
+
+  const auto place = [&](shared_index index, std::uint64_t start) -> std::expected<std::uint64_t, std::string> {
+    auto& section = sections[index];
+    for (const auto [oi, si] : inputs[index])
+      section.align = std::max(section.align, std::uint64_t{1} << objects[oi].sections[si].align_log2);
+    section.offset = align_up(start, section.align);
+    auto next = section.offset + section.size;
+    for (const auto [oi, si] : inputs[index]) {
+      const auto& input = objects[oi].sections[si];
+      next = align_up(next, std::uint64_t{1} << input.align_log2);
+      if (next > image_size_limit || input.size() > image_size_limit - next)
+        return section_error(objects[oi], input, "section exceeds the ELF image address limit");
+      offsets[oi][si] = next;
+      next += input.size();
+    }
+    section.size = next - section.offset;
+    return next;
+  };
+
+  auto readable_end = place(shared_dynstr, shared_headers_end);
+  for (auto section : {shared_dynsym, shared_hash, shared_rodata}) {
+    if (!readable_end) return std::unexpected(readable_end.error());
+    readable_end = place(section, *readable_end);
+  }
+  if (!readable_end) return std::unexpected(readable_end.error());
+  const auto code_start = align_up(*readable_end, page_size);
+  const auto code_end = place(shared_text, code_start);
+  if (!code_end) return std::unexpected(code_end.error());
+  const auto data_start = align_up(std::max(*code_end, code_start + 1), page_size);
+  const auto dynamic_end = place(shared_dynamic, data_start);
+  if (!dynamic_end) return std::unexpected(dynamic_end.error());
+  const auto data_end = place(shared_data, *dynamic_end);
+  if (!data_end) return std::unexpected(data_end.error());
+  const auto memory_end = place(shared_bss, *data_end);
+  if (!memory_end) return std::unexpected(memory_end.error());
+
+  const auto patches = shared_patches(objects, globals, hidden, offsets);
+  if (!patches) return std::unexpected(patches.error());
+  const std::array loads{
+      load_segment{pf_r, 0, *readable_end, *readable_end},
+      load_segment{pf_r | pf_x, code_start, *code_end - code_start, *code_end - code_start},
+      load_segment{pf_r | pf_w, data_start, *data_end - data_start, *memory_end - data_start},
+  };
+
+  bytes section_names;
+  std::array<std::uint32_t, shared_section_count> name_offsets{};
+  for (std::size_t i = 0; i < sections.size(); ++i) {
+    name_offsets[i] = static_cast<std::uint32_t>(section_names.size());
+    section_names.append_range(sections[i].name);
+    section_names.push_back(0);
+  }
+  sections[shared_shstrtab].offset = *data_end;
+  sections[shared_shstrtab].size = section_names.size();
+  const auto section_table = align_up(*data_end + section_names.size(), 8);
+  auto image = write_shared_headers(loads, sections[shared_dynamic], section_table);
+  if (section_table > image.max_size() - sections.size() * 64)
+    return std::unexpected("ELF shared output exceeds the maximum file buffer size");
+  image.resize(section_table);
+  for (std::size_t oi = 0; oi < objects.size(); ++oi) {
+    for (std::size_t si = 0; si < objects[oi].sections.size(); ++si) {
+      const auto& input = objects[oi].sections[si];
+      if (!input.bytes.empty()) std::ranges::copy(input.bytes, image.data() + offsets[oi][si]);
+    }
+  }
+  const auto word = [&](std::uint64_t offset, std::size_t width, std::uint64_t value) {
+    write_word(std::span(image).subspan(offset, width), value);
+  };
+  for (const auto& p : *patches) {
+    if (p.kind == patch_kind::relax_got) image[p.offset - 2] = 0x8d;  // MOV -> LEA
+    word(p.offset, p.width, p.value);
+  }
+
+  const auto hash = sections[shared_hash].offset;
+  word(hash, 4, 1);  // All symbols hash into the same bucket.
+  word(hash + 4, 4, symbol_count);
+  if (!exports.empty()) word(hash + 8, 4, 1);
+  for (std::size_t i = 0; i < exports.size(); ++i) {
+    const auto& item = exports[i];
+    const auto& def = item.def;
+    const auto st = sections[shared_dynsym].offset + (i + 1) * symbol_size;
+    word(st, 4, item.name);
+    word(st + 4, 1, 0x12);  // STB_GLOBAL / STT_FUNC
+    word(st + 6, 2, shared_text);
+    word(st + 8, 8, offsets[def.object][*def.symbol->section] + def.symbol->offset);
+    word(st + 16, 8, *def.symbol->function_size);
+    if (i + 1 < exports.size()) word(hash + 12 + (i + 1) * 4, 4, i + 2);
+  }
+  auto dynamic = sections[shared_dynamic].offset;
+  const auto tag = [&](std::uint64_t kind, std::uint64_t value) {
+    word(dynamic, 8, kind);
+    word(dynamic + 8, 8, value);
+    dynamic += dynamic_entry_size;
+  };
+  constexpr std::uint64_t dt_soname = 14;
+  tag(dt_strtab, sections[shared_dynstr].offset);
+  tag(dt_strsz, dynstr.size());
+  tag(dt_symtab, sections[shared_dynsym].offset);
+  tag(dt_syment, symbol_size);
+  tag(dt_hash, hash);
+  tag(dt_soname, soname_offset);
+  tag(dt_null, 0);
+  std::ranges::copy(dynstr, image.data() + sections[shared_dynstr].offset);
+  std::ranges::copy(section_names, image.data() + sections[shared_shstrtab].offset);
+  for (std::size_t i = 0; i < sections.size(); ++i) write_shared_section(image, sections[i], name_offsets[i]);
   return image;
 }
 

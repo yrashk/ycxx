@@ -10,11 +10,12 @@ tool), recompute only what that change can affect.
 
 ## Watch mode demo
 
-Vim edits trigger live rebuilds in ycxx's interactive trace. The demo follows one function through
-L1 IR, lowered L2 IR, and emitted ARM64 instructions, then shows compiler errors and their fixes.
-The final Linux x86-64 self-check uses the freestanding support in [#380](https://github.com/yrashk/ycxx/pull/380).
+Vim edits trigger live rebuilds in ycxx's interactive trace. The demo follows a function through
+L1 IR, lowered L2 IR, and codegen byte and relocation counts. A source error shows its file,
+line and column. After recovery, objdump shows the emitted x86-64 instructions and the Linux
+executable passes its self-check.
 
-![Vim and ycxx watch mode showing live rebuilds, L1 and L2 IR, and ARM64 assembly](docs/media/ycxx-watch-ir-codegen.gif)
+![Vim and ycxx watch mode showing a live error and recovery, L1 and L2 IR, and x86-64 instructions](docs/media/ycxx-watch-ir-codegen.gif)
 
 [View the GIF at full size](docs/media/ycxx-watch-ir-codegen.gif)
 
@@ -198,6 +199,15 @@ loader must be able to find each SONAME when the executable runs. [#390](https:/
 ```sh
 build/bin/ycxx cxx --target=x86_64-pc-linux-gnu -nostdlib --dynamic-linker="$target_loader" \
   example.cpp "$target_library" -o example
+```
+
+On x86-64 Linux, `-shared` emits a loadable leaf shared library from position-independent C++
+or supported ELF object inputs. Its strong, default-visible function definitions are available
+to `dlopen` callers and to native and system linkers. The SONAME defaults to the output basename.
+Use `-Wl,-soname,NAME` to specify a different one. [#391](https://github.com/yrashk/ycxx/issues/391)
+
+```sh
+build/bin/ycxx cxx --target=x86_64-pc-linux-gnu -shared -fPIC -nostdlib provider.cpp -o libprovider.so
 ```
 
 Linux objects pass and return `bool`, 8-, 16-, 32- and 64-bit integers and enums, pointers and
@@ -561,8 +571,11 @@ written default member initializer are value-initialized.
 - `[[…]]` attributes, the GNU attributes and `asm` labels the macOS SDK's headers use, the
   GNU pointer qualifiers glibc uses, and the type-trait built-ins libycxx's headers use
   (`__is_same`, `__remove_cv`, …), and the 128-bit integer types `__int128` and
-  `unsigned __int128` (with `__SIZEOF_INT128__`) in declarations, templates, symbols and
-  constant evaluation. `__is_destructible`, `__is_nothrow_destructible`, and
+  `unsigned __int128` (with `__SIZEOF_INT128__`), in constant evaluation and in native code on
+  both targets. Their division, remainder and floating conversions call the compiler runtime
+  (`__divti3` and its siblings), which macOS's system library provides and which a Linux link
+  takes from libgcc or compiler-rt.
+  [#1172](https://github.com/yrashk/ycxx/issues/1172) `__is_destructible`, `__is_nothrow_destructible`, and
   `__is_trivially_destructible` give true for references, non-enum scalars, and bounded arrays
   of those scalars. They give false for cv `void`, function types, and arrays of unknown bound.
   [docs/EXTENSIONS.md](docs/EXTENSIONS.md)
@@ -914,7 +927,7 @@ and a peer-owned virtual destructor and RTTI. This is the shape of libycxx's fun
   `<cmath>` (which `<math.h>` includes) does not compile yet. [#349](https://github.com/yrashk/ycxx/issues/349)
 - Native code generation for member-pointer values and general member-pointer expressions.
   [#411](https://github.com/yrashk/ycxx/issues/411)
-- Native arithmetic on `__int128` values ([#1172](https://github.com/yrashk/ycxx/issues/1172)),
+- 128-bit integers through an ellipsis ([#1247](https://github.com/yrashk/ycxx/issues/1247)),
   and enumerations with a 128-bit underlying type or initializer ([#1176](https://github.com/yrashk/ycxx/issues/1176)).
 - Constexpr lambdas (the interpreter has no class objects yet), further lambda declaration
   contexts ([#338](https://github.com/yrashk/ycxx/issues/338)),

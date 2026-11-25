@@ -45,6 +45,7 @@ pattern neg_sub      : (sub (const 0) ?a)               => SUBrr ?d zr ?a
 pattern sub          : (sub ?a ?b)                      => SUBrr ?d ?a ?b
 pattern neg          : (neg ?a)                         => SUBrr ?d zr ?a
 pattern mul          : (mul ?a ?b)                      => MADD ?d ?a ?b zr
+pattern umulh        : (umulh ?a ?b)                    => UMULH ?d ?a ?b
 pattern sdiv         : (sdiv ?a ?b)                     => SDIV ?d ?a ?b                        where wide(?a)
 pattern udiv         : (udiv ?a ?b)                     => UDIV ?d ?a ?b                        where wide(?a)
 pattern srem         : (srem ?a ?b)                     => SDIV ?t0 ?a ?b ; MSUB ?d ?t0 ?b ?a   where wide(?a)

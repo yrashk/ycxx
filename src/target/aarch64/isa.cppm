@@ -132,6 +132,7 @@ export enum class Form : std::uint16_t {
   TST1 [[=f(0x72000000 | 31, Size::fixed, {U(rn)})]],  // ANDS wzr, Wn, #1
   // Data processing, 3 source and 2 source.
   MADD [[=f(0x1B000000, Size::sf, {D(), U(rn), U(rm), U(ra)})]],
+  UMULH [[=f(0x9BC07C00, Size::fixed, {D(), U(rn), U(rm)})]],
   MSUB [[=f(0x1B008000, Size::sf, {D(), U(rn), U(rm), U(ra)})]],
   SDIV [[=f(0x1AC00C00, Size::sf, {D(), U(rn), U(rm)})]],
   UDIV [[=f(0x1AC00800, Size::sf, {D(), U(rn), U(rm)})]],
