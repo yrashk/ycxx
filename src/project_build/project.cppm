@@ -6,6 +6,7 @@ import std;
 import ycxx.ast;
 import ycxx.build.action;
 import ycxx.build.inspection_model;
+import ycxx.build.module_providers;
 import ycxx.build.plan;
 import ycxx.build.publication;
 import ycxx.build.rule_protocol;
@@ -343,11 +344,14 @@ struct Demand {
   std::vector<std::string> errors;
 };
 
-struct ModuleUnitDependencies {
-  std::string source;
-  bool complete;
-  std::vector<std::pair<pipeline::ModuleDirectiveKind, std::string>> directives;
-};
+void append_module_unit(std::vector<ModuleUnitDependencies>& graph, std::map<pp::FileId, std::size_t>& units,
+                        pp::FileId file, const std::string& path, const pipeline::ModuleScan& scan) {
+  const auto [first, inserted] = units.try_emplace(file, graph.size());
+  auto& unit = graph.emplace_back(ModuleUnitDependencies{path, scan.complete, {}});
+  if (!inserted) unit.same_unit_as = first->second;
+  for (const auto& directive : scan.directives)
+    unit.directives.emplace_back(directive.kind, directive.name);
+}
 
 struct ModuleGraph {
   using Key = pipeline::RequestId;
@@ -358,12 +362,10 @@ struct ModuleGraph {
     const auto files = build.units | std::views::transform([](pipeline::TuId unit) { return pp::FileId{unit.n}; });
     const auto scans = co_await cx.par_map<pipeline::ModuleDirectives>(files);
     Value result;
+    std::map<pp::FileId, std::size_t> units;
     for (std::size_t i = 0; i < scans.size(); ++i) {
       const auto& source = cx.fetch<pp::SourceOf>(files[i]);
-      const auto& scan = scans[i].get();
-      auto& unit = result.emplace_back(ModuleUnitDependencies{source.path, scan.complete, {}});
-      for (const auto& directive : scan.directives)
-        unit.directives.emplace_back(directive.kind, directive.name);
+      append_module_unit(result, units, files[i], source.path, scans[i].get());
     }
     co_return result;
   }
@@ -379,6 +381,136 @@ struct ModuleGraph {
     text.pop_back();
     return text;
   }
+};
+
+struct ModuleProviders {
+  using Key = ModuleGraph::Key;
+  using Value = ModuleResolution;
+
+  static engine::query_task<Value> run(engine::Ctx& cx, Key request) {
+    co_return resolve_module_providers(co_await cx.fetch<ModuleGraph>(request));
+  }
+
+  static std::string show(const Value& resolution) {
+    return std::format("{} imports, {} conflicts, {} cyclic components ({})", resolution.imports.size(),
+                       resolution.conflicts.size(), resolution.cycles.size(), resolution.complete ? "complete" : "partial");
+  }
+};
+
+std::string module_path(const fs::path& path, const fs::path& cwd) {
+  const auto relative = path.lexically_relative(cwd);
+  return (relative.empty() || *relative.begin() == ".." ? path : relative).generic_native_encoded_string();
+}
+
+std::string module_site(const pipeline::ModuleDirective& directive, const fs::path& cwd) {
+  return std::format("{}:{}:{}", module_path(directive.path, cwd), directive.line, directive.column);
+}
+
+struct ModuleUnitLabel {
+  std::string path;
+  std::size_t instance;
+};
+
+std::vector<ModuleUnitLabel> module_unit_labels(std::span<const ModuleUnitDependencies> graph, const fs::path& cwd) {
+  std::map<std::string_view, std::size_t> instances;
+  std::vector<ModuleUnitLabel> result;
+  for (const auto& unit : graph)
+    result.push_back({module_path(unit.source, cwd), ++instances[unit.source]});
+  return result;
+}
+
+std::string module_unit_display(const ModuleUnitLabel& unit, bool quoted = false) {
+  auto text = quoted ? std::format("{:?}", unit.path) : unit.path;
+  if (unit.instance > 1) std::format_to(std::back_inserter(text), " #{}", unit.instance);
+  return text;
+}
+
+using ModuleDirectiveAt = std::function_ref<const pipeline::ModuleDirective&(ModuleProviderSite)>;
+
+struct ModuleBindingText {
+  std::string value;
+  std::string origin;
+};
+
+ModuleBindingText module_candidates(std::span<const ModuleUnitLabel> units,
+                                    std::span<const ModuleProviderSite> providers,
+                                    std::string_view status, ModuleDirectiveAt at, const fs::path& cwd) {
+  std::vector<std::pair<std::string, std::string>> candidates;
+  for (const auto site : providers)
+    candidates.emplace_back(module_unit_display(units[site.unit]), module_site(at(site), cwd));
+  std::ranges::sort(candidates);
+  ModuleBindingText text{std::string(status), {}};
+  for (const auto& [path, origin] : candidates) {
+    text.value += text.origin.empty() ? " · " : ", ";
+    text.value += path;
+    if (!text.origin.empty()) text.origin += ", ";
+    text.origin += origin;
+  }
+  return text;
+}
+
+ModuleBindingText module_binding(std::span<const ModuleUnitLabel> units, const ModuleImportResolution& import,
+                                 bool complete, ModuleDirectiveAt at, const fs::path& cwd) {
+  const auto& directive = at(import.importer);
+  if (import.providers.empty()) {
+    const auto status = !complete ? "no known provider in partial graph" :
+        directive.name.contains(':') ? "unresolved partition" : "external or unresolved";
+    return {status, module_site(directive, cwd)};
+  }
+  const auto status = import.providers.size() > 1 ? "ambiguous" : complete ? "resolved" : "resolved in partial graph";
+  auto text = module_candidates(units, import.providers, status, at, cwd);
+  text.origin = std::format("{} → {}", module_site(directive, cwd), text.origin);
+  return text;
+}
+
+std::string module_cycle_members(std::span<const ModuleUnitLabel> units, std::span<const std::size_t> component) {
+  std::vector<std::string> paths;
+  for (auto unit : component) paths.push_back(module_unit_display(units[unit], true));
+  std::ranges::sort(paths);
+  std::string text;
+  for (const auto& path : paths) {
+    if (!text.empty()) text += ", ";
+    text += path;
+  }
+  return text;
+}
+
+struct ModuleProviderReport {
+  using Key = ModuleProviders::Key;
+  using Value = std::string;
+
+  static engine::query_task<Value> run(engine::Ctx& cx, Key request) {
+    const auto& resolution = co_await cx.fetch<ModuleProviders>(request);
+    if (resolution.imports.empty() && resolution.conflicts.empty())
+      co_return resolution.complete ? "no named imports or provider conflicts" : "partial graph";
+    const auto& graph = co_await cx.fetch<ModuleGraph>(request);
+    const auto& build = cx.fetch<pipeline::BuildIn>(request);
+    const auto files = build.units | std::views::transform([](pipeline::TuId unit) { return pp::FileId{unit.n}; });
+    const fs::path cwd = cx.fetch<pp::SourceOf>(files[0]).cwd;
+    const auto units = module_unit_labels(graph, cwd);
+    const auto scans = co_await cx.par_map<pipeline::ModuleDirectives>(files);
+    const auto at = [&](ModuleProviderSite site) -> const pipeline::ModuleDirective& {
+      return scans[site.unit].get().directives[site.directive];
+    };
+    std::string text;
+    if (!resolution.complete) text += "partial graph\n";
+    for (const auto& import : resolution.imports) {
+      const auto binding = module_binding(units, import, resolution.complete, at, cwd);
+      const auto& directive = at(import.importer);
+      std::format_to(std::back_inserter(text), "{} {} · {} · {}\n", pipeline::module_directive_name(directive.kind),
+                     directive.name, binding.value, binding.origin);
+    }
+    for (const auto& conflict : resolution.conflicts) {
+      const auto binding = module_candidates(units, conflict.providers, "ambiguous", at, cwd);
+      std::format_to(std::back_inserter(text), "provider {} · {} · {}\n", conflict.name, binding.value, binding.origin);
+    }
+    for (const auto& cycle : resolution.cycles)
+      std::format_to(std::back_inserter(text), "cycle among project units · {}\n", module_cycle_members(units, cycle));
+    text.pop_back();
+    co_return text;
+  }
+
+  static std::string show(const Value& text) { return text; }
 };
 
 struct WorkspaceBuild {
@@ -403,7 +535,7 @@ struct WorkspaceBuild {
       demand.prepare = true;
       co_return demand;
     }
-    (void)co_await cx.fetch<ModuleGraph>(prepared->request);
+    (void)co_await cx.fetch<ModuleProviderReport>(prepared->request);
     const auto& native = co_await cx.fetch<pipeline::Build>(prepared->request);
     if (native.linked) {
       demand.image = native.linked->image;
@@ -493,41 +625,67 @@ void inspect_modules(PlanInspection& inspection, const ProjectPlan& plan, const 
     });
   };
   const std::string workspace = native(cwd);
-  const auto display = [&](const fs::path& path) {
-    const auto relative = path.lexically_relative(cwd);
-    return native(relative.empty() || *relative.begin() == ".." ? path : relative);
-  };
   std::map<std::string, std::size_t> source_instances;
+  std::map<pp::FileId, std::size_t> units;
+  std::vector<ModuleUnitDependencies> graph;
+  std::vector<pipeline::ModuleScan> scans;
+  std::vector<std::vector<std::string>> fact_names;
   for (const auto& source : plan.sources) {
-    auto shown_source = std::format("{:?}", display(source.path));
-    const auto instance = ++source_instances[source.path];
-    if (instance > 1) std::format_to(std::back_inserter(shown_source), " #{}", instance);
+    const auto shown_source = module_unit_display({module_path(source.path, cwd), ++source_instances[source.path]}, true);
     const auto unit = register_project_unit(session, workspace, source, target, !native_triple.empty());
     const auto file = pp::FileId{unit.n};
-    const auto scan = session.run<pipeline::ModuleDirectives>(file);
+    auto scan = *session.run<pipeline::ModuleDirectives>(file);
     // A declared output can change the answer to a negative include probe. An undeclared
     // path stays absent in the live overlay too.
     if (!unavailable.empty() && (uses_generated(db.dependencies<pipeline::ModuleDirectives>(file)) ||
                                  uses_generated(db.dependencies<pp::Pp>(file)))) {
       inspection.facts.push_back({"module-scan-pending", inspection.target, shown_source,
                                   "generated inputs are available in the build trace", {}});
-      continue;
-    }
-    if (!scan->complete)
+      scan = {};
+    } else if (!scan.complete) {
       inspection.facts.push_back({"module-scan-pending", inspection.target, shown_source,
                                   "preprocessing incomplete", {}});
+    }
+    auto& names = fact_names.emplace_back();
     std::map<std::pair<pipeline::ModuleDirectiveKind, std::string_view>, std::size_t> occurrences;
-    for (const auto& directive : scan->directives) {
+    for (const auto& directive : scan.directives) {
       using Kind = pipeline::ModuleDirectiveKind;
       const bool declaration = directive.kind == Kind::interface_unit || directive.kind == Kind::implementation_unit;
       auto name = std::format("{} · {} {}", shown_source, pipeline::module_directive_name(directive.kind), directive.name);
       const auto ordinal = ++occurrences[{directive.kind, directive.name}];
       if (ordinal > 1) std::format_to(std::back_inserter(name), " #{}", ordinal);
+      names.push_back(name);
       inspection.facts.push_back({declaration ? "module-unit" : "module-import", inspection.target, std::move(name),
-                                  directive.name, std::format("{}:{}:{}", display(directive.path),
-                                                              directive.line, directive.column)});
+                                  directive.name, module_site(directive, cwd)});
     }
+    append_module_unit(graph, units, file, source.path, scan);
+    scans.push_back(std::move(scan));
   }
+  const auto resolution = resolve_module_providers(graph);
+  if (resolution.imports.empty() && resolution.conflicts.empty()) return;
+  const auto labels = module_unit_labels(graph, cwd);
+  if (!resolution.complete)
+    inspection.facts.push_back({"module-resolution-pending", inspection.target, "module graph",
+                                "provider resolution is provisional", "one or more module scans are pending"});
+  const auto at = [&](ModuleProviderSite site) -> const pipeline::ModuleDirective& {
+    return scans[site.unit].directives[site.directive];
+  };
+  for (const auto& import : resolution.imports) {
+    auto text = module_binding(labels, import, resolution.complete, at, cwd);
+    const auto [unit, directive] = import.importer;
+    inspection.facts.push_back({"module-provider", inspection.target, std::move(fact_names[unit][directive]),
+                                std::move(text.value), std::move(text.origin)});
+  }
+  for (const auto& conflict : resolution.conflicts) {
+    auto text = module_candidates(labels, conflict.providers, "ambiguous", at, cwd);
+    inspection.facts.push_back({"module-provider-conflict", inspection.target, conflict.name,
+                                std::move(text.value), std::move(text.origin)});
+  }
+  // Each name identifies a strongly connected component, never an implied traversal order.
+  for (const auto& cycle : resolution.cycles)
+    inspection.facts.push_back({"module-cycle", inspection.target, module_cycle_members(labels, cycle),
+                                resolution.complete ? "cycle among project units" :
+                                                      "cycle among known project units (partial graph)", {}});
 }
 
 struct RuleInvocation {

@@ -78,6 +78,9 @@ add_test(NAME daemon.project_action_target
 add_test(NAME daemon.project_module_discovery
   COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/project_module_discovery.py $<TARGET_FILE:ycxxc>)
 
+add_test(NAME daemon.project_module_providers
+  COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/project_module_providers.py $<TARGET_FILE:ycxxc>)
+
 add_test(NAME daemon.project_link_inputs
   COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/project_link_inputs.py $<TARGET_FILE:ycxxc> "${CMAKE_AR}")
 

@@ -9,6 +9,7 @@ out of the checkout and build it there.
 | [Freestanding targets](freestanding-targets/README.md) | [build.ycxx](freestanding-targets/build.ycxx) | Build one app for Linux x86-64 and macOS arm64 and inspect each target's output. |
 | [Target-aware action](target-aware-action/README.md) | [build.ycxx](target-aware-action/build.ycxx) | Pass the selected target to a host tool and compile against the generated header. |
 | [Module discovery](module-discovery/README.md) | [build.ycxx](module-discovery/build.ycxx) | Inspect named module providers and compare the imports selected for Linux and macOS. |
+| [Module providers](module-providers/README.md) | [build.ycxx](module-providers/build.ycxx) | Resolve a shared module through two import paths and compare its provider on Linux and macOS. |
 | [Native C++](native/README.md) | [build.ycxx](native/build.ycxx) | Watch a generator input change and inspect the library dependency and source glob. |
 | [Custom rule](custom-rule/README.md) | [build.ycxx](custom-rule/build.ycxx) | Use a C++ workspace plugin to generate a retry-limit header and compare a whitespace edit with a digit edit. |
 | [Typed capability header](typed-capabilities/README.md) | [build.ycxx](typed-capabilities/build.ycxx) | Inspect the compiler's `<filesystem>` probe and run the app that uses its generated constant. |

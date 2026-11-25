@@ -113,6 +113,10 @@ must get an error and every error must be expected. Markers in a header the test
 expect errors in that header. Locations are parsed from
 `file:line:col: error:` lines. A crash (a signal, or an exit status above 1) is never a rejection. Leave the column out where Clang and GCC disagree on it.
 
+A compiler name in brackets limits an error expectation to that compiler under test. For example,
+`//! error[gcc]` requires an error on that line from GCC, and `//! error[gcc]@+1:5` requires one on
+the next line at column 5. Use `gcc`, `clang` or `ycxx` in brackets.
+
 **Warning markers:** `//! warning`, with the same `@` and `:` forms, expects a warning. An accept
 or reject test with any warning marker must get warnings exactly at its warning markers, from
 `file:line:col: warning:` lines; a test without one does not look at warnings.

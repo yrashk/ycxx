@@ -156,6 +156,10 @@ enum class Diag : std::uint32_t {
   default_arg_not_allowed [[=message{Severity::error, "a default argument is not allowed here"}]],
   default_arg_not_yet_defined [[=message{Severity::error, "the selected default argument has not yet been defined"}]],
   default_arg_source_line_immediate [[=message{Severity::error, "an immediate invocation that observes the call-site line of a default argument is not supported yet"}]],
+  default_arg_source_location_immediate [[=message{Severity::error, "an immediate invocation that observes the call-site location of a default argument is not supported yet"}]],
+  source_location_default_member [[=message{Severity::error, "source location in a default member initializer is not supported yet"}]],
+  source_location_target [[=message{Severity::error, "__builtin_source_location is not supported on this target"}]],
+  source_location_descriptor [[=message{Severity::error, "__builtin_source_location requires the std::source_location::__impl descriptor"}]],
   conflicting_declaration [[=message{Severity::error, "conflicting declaration of '{0:n}'"}]],
   expected_namespace_name [[=message{Severity::error, "expected a namespace name"}]],
   nested_namespace_inline [[=message{Severity::error, "a nested namespace definition cannot be 'inline'"}]],
@@ -436,6 +440,8 @@ enum class Diag : std::uint32_t {
   implicit_lifetime_unsupported [[=message{Severity::error, "'__builtin_is_implicit_lifetime' for '{0:t}' is not supported yet"}]],
   unique_object_representations_incomplete [[=message{Severity::error, "incomplete type '{0:t}' cannot be queried by '__has_unique_object_representations'"}]],
   unique_object_representations_unsupported [[=message{Severity::error, "'__has_unique_object_representations' for '{0:t}' is not supported yet"}]],
+  trivial_or_pod_incomplete [[=message{Severity::error, "incomplete type '{0:t}' cannot be queried by '{1:n}'"}]],
+  trivial_or_pod_unsupported [[=message{Severity::error, "'{1:n}' for '{0:t}' is not supported yet"}]],
 };
 
 // A `{N:r}` argument: why an evaluation was not constant. 0 is an expression the front end
@@ -509,7 +515,8 @@ constexpr bool is_type_trait_failure(engine::DiagId id) {
          id == diag_id(Diag::standard_layout_unsupported) || id == diag_id(Diag::implicit_lifetime_incomplete) ||
          id == diag_id(Diag::implicit_lifetime_unsupported) ||
          id == diag_id(Diag::unique_object_representations_incomplete) ||
-         id == diag_id(Diag::unique_object_representations_unsupported);
+         id == diag_id(Diag::unique_object_representations_unsupported) ||
+         id == diag_id(Diag::trivial_or_pod_incomplete) || id == diag_id(Diag::trivial_or_pod_unsupported);
 }
 // Whether a diagnostic stays an error where a substitution failure means "not satisfied": a limit
 // of ycxx's, an atomic constraint that is not a `bool` constant ([temp.constr.atomic]/3), or a
@@ -525,7 +532,7 @@ constexpr bool survives_substitution(engine::DiagId id) {
          id == diag_id(Diag::convertibility_incomplete) ||
          id == diag_id(Diag::destructibility_incomplete) || id == diag_id(Diag::virtual_class_trait_incomplete) ||
          id == diag_id(Diag::standard_layout_incomplete) || id == diag_id(Diag::implicit_lifetime_incomplete) ||
-         id == diag_id(Diag::unique_object_representations_incomplete);
+         id == diag_id(Diag::unique_object_representations_incomplete) || id == diag_id(Diag::trivial_or_pod_incomplete);
 }
 
 constexpr std::string_view diag_name(Diag d) {

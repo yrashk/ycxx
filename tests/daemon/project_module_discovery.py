@@ -200,8 +200,13 @@ def check_edits(ycxx, scope, env, journal, before, original_graph):
     check_plan(after, LINUX, shifted, conditional=False)
     changes = show(ycxx, scope, env, journal, LINUX, '--against', str(snapshot))['changes']
     old_import = check_plan(before, LINUX)['module-import', UNITS[LINUX]]
-    assert len(changes) == 1 and changes[0]['change'] == 'removed', changes
-    assert changes[0]['before'] == old_import and changes[0].get('after') is None, changes
+    old_provider = next(row for row in before['facts']
+                        if row['kind'] == 'module-provider' and row['name'] == old_import['name'])
+    assert len(changes) == 2, changes
+    assert all(change['change'] == 'removed' and change.get('after') is None for change in changes), changes
+    assert {change['before']['kind']: change['before'] for change in changes} == {
+        'module-import': old_import, 'module-provider': old_provider
+    }, changes
 
     summary, events, graph = build(ycxx, scope, env, LINUX, 'included manifest configuration drops an import')
     assert summary['actions_executed'] == 0, summary
@@ -218,7 +223,7 @@ def check_builds(ycxx, scope, env, journal):
 
     _, events, linux = build(ycxx, scope, env, LINUX, 'discover Linux module declarations and imports')
     check_external_actions(events, 'provider')
-    assert linux['outcome'] == 'executed', linux
+    assert any(event['outcome'] == 'executed' for event in trace_events(events, 'ModuleGraph')), events
     check_live_graph(linux, events, LINUX)
     before = show(ycxx, scope, env, journal, LINUX)
     check_plan(before, LINUX)
@@ -227,7 +232,7 @@ def check_builds(ycxx, scope, env, journal):
 
     _, events, darwin = build(ycxx, scope, env, DARWIN, 'discover Darwin module declarations and imports')
     check_external_actions(events)
-    assert darwin['outcome'] == 'executed', darwin
+    assert any(event['outcome'] == 'executed' for event in trace_events(events, 'ModuleGraph')), events
     check_live_graph(darwin, events, DARWIN)
     darwin_plan = check_plan(show(ycxx, scope, env, journal, DARWIN), DARWIN)
     check_plan(show(ycxx, scope, env, journal, LINUX), LINUX)

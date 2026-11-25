@@ -43,8 +43,9 @@ Use `ycxx build app --target=arm64-apple-darwin` or
 inspect that variant.
 Use `target_triple()` in a declared action's `args` to pass the selected triple
 to a host tool that generates a target-specific input.
-The build trace and resolved plan show named C++ module declarations and
-imports for the selected target. Named-module compilation is tracked in
+The build trace and resolved plan show named C++ module imports, their
+project providers, ambiguity, and cycles for the selected target.
+Named-module compilation is tracked in
 [#319](https://github.com/yrashk/ycxx/issues/319).
 The bundled C++ rule package builds from source. A workspace can replace its C++ rules with
 `use plugin("tools/custom/rules") as cpp`.
@@ -187,6 +188,11 @@ build/bin/ycxx cxx -nostdlib example.o -o example
 `-ffreestanding` defines `__STDC_HOSTED__` as `0` for runtime and library builds. Objects may omit
 an entry point. On x86-64 Linux, `-nostdlib` selects the existing executable startup convention
 described above. [#973](https://github.com/yrashk/ycxx/issues/973)
+
+With the pinned libycxx headers, ordinary `std::source_location::current()` calls on
+Linux x86-64 capture the presumed filename, line, byte column and enclosing function.
+The recorded location remains available after the call returns.
+[#327](https://github.com/yrashk/ycxx/issues/327)
 
 `-fno-exceptions` diagnoses active `throw` and block `try` constructs. Native objects retain
 ordinary destruction and eligible plain unwind frames. [#980](https://github.com/yrashk/ycxx/issues/980)
@@ -735,6 +741,9 @@ written default member initializer are value-initialized.
   [#257](https://github.com/yrashk/ycxx/issues/257)
   Scalar `&&`, `||` and `?:` expressions keep scalar reference-argument temporaries alive
   until the end of the full-expression on each executed path. [#902](https://github.com/yrashk/ycxx/issues/902)
+  Ordinary virtual calls dispatch on a completed fieldless local object with implicit default
+  construction, including through its single public nonvirtual base. The final overrider must
+  be constexpr and defined before evaluation. [#322](https://github.com/yrashk/ycxx/issues/322)
 - ordinary namespace-scope `consteval` definitions with neither static locals nor closures
   can supply compile-time results without requiring a native function body.
   [#1006](https://github.com/yrashk/ycxx/issues/1006)
@@ -1003,9 +1012,9 @@ and a peer-owned virtual destructor and RTTI. This is the shape of libycxx's fun
 
 - Standard headers, starting with `<cstdio>` ([#133](https://github.com/yrashk/ycxx/issues/133)).
   The pinned library work includes scalar type traits in class-template bases and variable
-  templates, including narrow-character object representations and supported reference-temporary
-  queries
-  ([#218](https://github.com/yrashk/ycxx/issues/218)).
+  templates, including triviality and POD queries for non-record types, narrow-character object
+  representations, and supported reference-temporary queries
+  ([#218](https://github.com/yrashk/ycxx/issues/218), [#1318](https://github.com/yrashk/ycxx/issues/1318)).
 - ι: statements and declarations, the C++98/11 core: default arguments, block-scope statics,
   casts and arrays ([#337](https://github.com/yrashk/ycxx/issues/337)).
 - `auto` and lambdas ([#278](https://github.com/yrashk/ycxx/issues/278)): placeholder types,

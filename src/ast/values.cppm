@@ -282,6 +282,7 @@ enum class DepOp : u8 {
   reference_converts_from_temporary,
   alignof_type,  // replayed from the written dependent base argument
   array_rank,
+  is_trivial, is_pod,
 };
 
 constexpr bool returns_size_type(DepOp op) {
