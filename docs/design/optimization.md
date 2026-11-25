@@ -76,6 +76,15 @@ become a load of the vptr and an indirect call, lifetime markers become stack-sl
 `consteval_br` takes the runtime branch, `is_const_eval` becomes `false`, coroutines are split
 into frame and resume functions, EH is explicit calls to the runtime with unwind edges.
 
+L2 integer types don't stop at the register width. A 128-bit integer is an `i128` on every target,
+and `legalize` (`src/ir/legalize.cppm`), an L2-to-L2 pass, expands the operations the target lacks:
+into 64-bit halves, or a compiler runtime call. `Int128Support` lists what a target has. It is
+empty for AArch64 and x86-64. A target with 128-bit registers names its operations there and
+selects them, and nothing before `legalize` changes. How a 128-bit value crosses a call is separate,
+the calling convention's (`LowerConfig::int128_in_words`). `legalize` runs in the `lower` cell
+today, so that a body names its runtime symbols; it moves after the optimizer when rules on `i128`
+exist. (#1172)
+
 Why three and not two: the interpreter needs the typed, lifetime-aware view ([expr.const]), and
 SMT needs the flat bit-vector view. Trying to serve both from one level would either burden the
 e-graph with C++ object semantics or lose the information the evaluator needs. Why not more:

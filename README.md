@@ -561,8 +561,11 @@ written default member initializer are value-initialized.
 - `[[…]]` attributes, the GNU attributes and `asm` labels the macOS SDK's headers use, the
   GNU pointer qualifiers glibc uses, and the type-trait built-ins libycxx's headers use
   (`__is_same`, `__remove_cv`, …), and the 128-bit integer types `__int128` and
-  `unsigned __int128` (with `__SIZEOF_INT128__`) in declarations, templates, symbols and
-  constant evaluation. `__is_destructible`, `__is_nothrow_destructible`, and
+  `unsigned __int128` (with `__SIZEOF_INT128__`), in constant evaluation and in native code on
+  both targets. Their division, remainder and floating conversions call the compiler runtime
+  (`__divti3` and its siblings), which macOS's system library provides and which a Linux link
+  takes from libgcc or compiler-rt.
+  [#1172](https://github.com/yrashk/ycxx/issues/1172) `__is_destructible`, `__is_nothrow_destructible`, and
   `__is_trivially_destructible` give true for references, non-enum scalars, and bounded arrays
   of those scalars. They give false for cv `void`, function types, and arrays of unknown bound.
   [docs/EXTENSIONS.md](docs/EXTENSIONS.md)
@@ -910,7 +913,7 @@ and a peer-owned virtual destructor and RTTI. This is the shape of libycxx's fun
   `<cmath>` (which `<math.h>` includes) does not compile yet. [#349](https://github.com/yrashk/ycxx/issues/349)
 - Native code generation for member-pointer values and general member-pointer expressions.
   [#411](https://github.com/yrashk/ycxx/issues/411)
-- Native arithmetic on `__int128` values ([#1172](https://github.com/yrashk/ycxx/issues/1172)),
+- 128-bit integers through an ellipsis ([#1247](https://github.com/yrashk/ycxx/issues/1247)),
   and enumerations with a 128-bit underlying type or initializer ([#1176](https://github.com/yrashk/ycxx/issues/1176)).
 - Lambdas in default member initializers, default arguments and unevaluated operands
   ([#338](https://github.com/yrashk/ycxx/issues/338)),
