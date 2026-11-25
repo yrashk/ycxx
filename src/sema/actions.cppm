@@ -5200,6 +5200,9 @@ public:
     EntityRec cr{EntityKind::class_, no_name(), rebased(call_type, spec.head), LangLinkage::cxx, linkage, {}, scope};
     cr.head = ast::mix(sig, u64(ordinal));
     cr.ordinal = ordinal;
+    // In a template's definition, its own template-head (pushed already) aside.
+    cr.closure_pattern = declaration_part && (in_generic_definition() ||
+                                              (template_scopes.size() > (spec.head.empty() ? 0u : 1u) && !instantiating() && !satisfying_atom));
     for (const ast::TemplateParamSema& h : spec.head)
       if (h.name != invented_name()) cr.closure_head.push_back(h);
     LambdaFrame f;
@@ -5438,7 +5441,9 @@ public:
       std::vector<NameId> captures;
       for (const FieldRec& fd : fr.fields) captures.push_back(fd.name);
       std::vector<Expansion> exps;
-      for (const Expansion& x : expansions)
+      // In an instantiation, they are those its definition recorded.
+      const std::vector<Expansion>* recorded = declaration_part ? pattern_expansions() : nullptr;
+      for (const Expansion& x : recorded ? *recorded : expansions)
         if (x.begin >= body_begin && x.begin < end) exps.push_back(x);
       std::vector<std::vector<ast::TemplateParamSema>> outer(template_scopes.begin(), template_scopes.end() - (template_scopes.empty() ? 0 : 1));
       generic_closures_[std::to_underlying(fr.call)] = {fr.closure, fr.call, call_type, fr.head, names, captures, body_begin, flags, consts,
@@ -5495,7 +5500,13 @@ public:
   }
   bool has_generic_lambdas() const { return !generic_closures_.empty(); }
   // Whether this is a template's definition (or a generic lambda's), not an instantiation.
-  bool in_pattern() const { return templated() && !instantiating() && !satisfying_atom; }
+  // A generic lambda's definition is one in an instantiation too: its own parameters are unbound.
+  bool in_generic_definition() const {
+    return std::ranges::any_of(lambdas_, [](const LambdaFrame& f) { return !f.head.empty(); });
+  }
+  bool in_pattern() const {
+    return in_generic_definition() || (templated() && !instantiating() && !satisfying_atom);
+  }
   // The satisfaction of an atomic constraint is checked ([temp.constr.atomic]): its parameter
   // mapping binds the parameters it names, perhaps none.
   bool satisfying_atom = false;

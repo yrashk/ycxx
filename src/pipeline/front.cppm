@@ -949,7 +949,10 @@ bool names_tu_local(parse::Program& program, EntityId entity, bool include_value
   while (entity != EntityId::none) {
     if (program.is_namespace(entity)) return parse::Program::unnamed(program.namespace_path(entity));
     const auto& r = entities.rec(entity);
-    if (r.kind != sema::EntityKind::class_ && r.kind != sema::EntityKind::enum_ &&
+    // A variable is the scope of its initializer's closures (#338).
+    const bool variable = r.kind == sema::EntityKind::variable;
+    if (variable && r.linkage == ast::Linkage::internal) return true;
+    if (!variable && r.kind != sema::EntityKind::class_ && r.kind != sema::EntityKind::enum_ &&
         r.kind != sema::EntityKind::class_template && r.kind != sema::EntityKind::alias_template)
       return false;
     if (std::ranges::any_of(r.args, [&](const ast::TemplateArg& arg) {
@@ -979,6 +982,36 @@ bool names_tu_local(parse::Program& program, QualType type, bool include_value_t
            });
   default: return false;
   }
+}
+
+// Whether an entity is a closure of a constraint-expression or in one, or it or a class it is a
+// member of has an argument that names one. Nothing names it outside that constraint, where it is called in
+// constant expressions only (docs/design/closures.md).
+bool names_constraint_closure(parse::Program& program, EntityId entity) {
+  auto& world = program.world();
+  const auto in_type = [&](this auto&& self, QualType type) -> bool {
+    const auto t = world.types.rec(type);
+    switch (t.kind) {
+      using enum sema::TypeKind;
+    case pointer: case reference: case array: return self(t.inner);
+    case member_pointer: return self(t.member_owner) || self(t.inner);
+    case function: return self(t.inner) || std::ranges::any_of(t.params, self);
+    case class_: return names_constraint_closure(program, t.entity);
+    default: return false;
+    }
+  };
+  const auto in_arg = [&](this auto&& self, const ast::TemplateArg& a) -> bool {
+    if (a.kind == ast::TemplateArgKind::pack) return std::ranges::any_of(world.ins.seqs.elements(a.elems), self);
+    return a.kind == ast::TemplateArgKind::type && in_type(a.type);
+  };
+  while (entity != EntityId::none) {
+    const auto& r = world.entities.rec(entity);
+    if (std::ranges::any_of(r.args, in_arg)) return true;
+    const bool closure = r.kind == sema::EntityKind::class_ && !r.unnamed_type_ordinal && world.ins.names.spelling(r.name).empty();
+    if (closure && (program.is_namespace(r.scope) || world.entities.rec(r.scope).kind == sema::EntityKind::class_)) return true;
+    entity = r.scope;
+  }
+  return false;
 }
 
 // Native compilation may consume peer-owned objects, including one non-key definition.
@@ -1219,10 +1252,7 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
           (internal_class(sc) || (owner.templ != EntityId::none && names_tu_local(program, sc))))
         linkage = ast::Linkage::internal;
       // A closure's members are local where the variable that owns the closure is (#338).
-      if (owner.kind == sema::EntityKind::variable &&
-          (owner.linkage == ast::Linkage::internal || std::ranges::any_of(owner.args, [&](const ast::TemplateArg& arg) {
-             return names_tu_local(program, arg, /*include_value_types=*/false);
-           })))
+      if (owner.kind == sema::EntityKind::variable && names_tu_local(program, sc, /*include_value_types=*/true))
         linkage = ast::Linkage::internal;
     }
     if (linkage == ast::Linkage::external && std::ranges::any_of(r.args, [&](const ast::TemplateArg& arg) {
@@ -1698,6 +1728,10 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
       continue;
     }
     auto& definition = tu.functions.back();
+    if (names_constraint_closure(program, in->spec)) {
+      definition.emit_if_referenced = true;
+      continue;
+    }
     definition.emit_if_referenced = immediate_if_referenced(in->decl, entity, in->body.value);
     definition.plain_immediate_template = definition.emit_if_referenced && program.is_namespace(entity.scope) &&
                                           !ins.names.spelling(entity.name).empty();

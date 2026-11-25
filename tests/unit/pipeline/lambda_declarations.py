@@ -5,7 +5,8 @@ compiler and run (their Darwin runs are in the core suite).
 
 On both targets, two units that include the same class, class template and inline variable call
 the closures these own: their members are of vague linkage (docs/design/closures.md, decision 4).
-A member that only constant expressions call has no code. A variable template's specialization, a
+Those of an unnamed
+namespace's classes and arguments are each unit's own. A member that only constant expressions call has no code. A variable template's specialization, a
 closure object that is a class template's member and a closure's static local are strong yet (#124).
 """
 
@@ -23,10 +24,20 @@ HEADER = '''struct A {
 };
 template <class T> struct B { static constexpr T m = [](T x) { return x * 2; }(T(3)); };
 inline constexpr auto w = [](int x) { return x + 7; };
+namespace {
+struct Local {
+  static constexpr auto f = [](int x) { return x + UNIT; };
+  static constexpr auto g = [](auto x) { return x + UNIT; };
+};
+struct Tag {};
+}
+template <class T> struct Of { static constexpr auto f = [](int x) { return x + UNIT; }; };
+template <class F> int take(F f, int x) { return f(x); }
+static int local_sum(int x) { return Local::f(x) + Local::g(x) + take(Local::f, x) + take(Of<Tag>::f, x); }
 inline int call(int x) { return A::f(x) + A::g(x) + B<int>::m + w(x) + A::folded; }
 '''
-UNIT_A = '#include "h.h"\nint a(int x) { return call(x) + A::f(x) + w(x); }\n'
-UNIT_B = '#include "h.h"\nint a(int);\nint main() { int x = 1; return a(x) == 34 && call(x) == 24 && A::g(x) == 3 && w(x) == 8 ? 0 : 1; }\n'
+UNIT_A = '#define UNIT 100\n#include "h.h"\nint a_local(int x) { return local_sum(x); }\nint a(int x) { return call(x) + A::f(x) + w(x); }\n'
+UNIT_B = '#define UNIT 200\n#include "h.h"\nint a(int);\nint a_local(int);\nint main() { int x = 1; if (a_local(x) != 404 || local_sum(x) != 804) return 2; return a(x) == 34 && call(x) == 24 && A::g(x) == 3 && w(x) == 8 ? 0 : 1; }\n'
 
 
 def main():

@@ -84,7 +84,10 @@ Clang 23 and GCC 16 (the probes at the end) and wrote this document.
 How decisions 3, 4, 6 and 11 apply to a declaration part, an item outside function bodies.
 
 1. **A variable's identity is its closures' scope**, before its type is deduced and its record
-   published: a variable's type is no part of its identity. A variable template's definition uses
+   published: a variable's type is no part of its identity. `Entities::reserve` gives it a record
+   until then, for lookups through the closure's scope. Where the final identity turns out to
+   differ (a const array without a bound, a deduced const type, an explicit specialization), the
+   closure keeps the reserved one, with internal linkage. A variable template's definition uses
    the template's entity, its specializations and those of class templates' static members their
    own. Lookup of a placeholder variable in its own lambda diagnoses an undeduced placeholder.
 2. **A constraint has no declaration to own its closures** (its tokens are analysed again for each
@@ -98,8 +101,9 @@ How decisions 3, 4, 6 and 11 apply to a declaration part, an item outside functi
    looked up at the point that uses them, or in the class while it is being defined.
 4. **Members are emitted where they are referred to.** Most are called in constant expressions
    only, and Clang emits those nowhere. With external linkage they are weak.
-5. **A variable template's deduced closure type is its definition's only**, so it stays a
-   placeholder until a specialization deduces its own.
+5. **A closure type of a template's definition is dependent** (`EntityRec::closure_pattern`):
+   what names it waits for an instantiation, whose own closure types replace it. So is one in a
+   generic lambda's definition, in an instantiation too.
 
 Astra checked the application to internal namespace variables. Default member initializers,
 default arguments, `static_assert` and unevaluated operands remain under
