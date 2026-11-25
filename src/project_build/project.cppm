@@ -590,10 +590,6 @@ ProjectReport Coordinator::run(const fs::path& cwd, const std::string& target,
   const auto* native_target = pp::native_target;
   if (!native_target) return fail("project building is unavailable on this host");
   const auto saved = read_rule_snapshot(cwd, target);
-  const RunProbe run_probe = [&](std::string_view kind, std::string_view label, const Action& action,
-                                 std::span<const ActionInput> inputs) {
-    return run_action(kind, label, action, inputs, std::chrono::seconds(10));
-  };
   std::vector<RulePackageRef> measured;
   while (!cancelled()) {
     refresh();
@@ -616,13 +612,25 @@ ProjectReport Coordinator::run(const fs::path& cwd, const std::string& target,
       std::vector<std::pair<ProbeKey, MeasuredToolchainProbe>> pending;
       const MeasureProbe measure = [&](ProbeKey key, const std::function<MeasuredToolchainProbe()>& execute) {
         const auto known = session_.run<ToolchainProbeResult>(key, poll, nullptr, tracer);
-        if (known && *known) return **known;
+        if (known && *known &&
+            (!(**known).discovery_stamp ||
+             (**known).discovery_stamp == fingerprint_toolchain_probe_inputs((**known).discovered_inputs)))
+          return **known;
         auto fresh = execute();
         if (fresh.cacheable && !cancelled()) pending.emplace_back(std::move(key), fresh);
         return fresh;
       };
       ToolchainProbeProfile profile{selected.action.tool, {}, {}, selected.native,
                                     plan.probe_flags, selected.action.environment};
+      // A staged compiler has a single witness to check. Keep it from using the whole
+      // machine's worker pool by default when several build requests share the host.
+      if (profile.native && std::ranges::none_of(profile.environment, [](const auto& variable) {
+            return variable.first == "YCXX_THREADS";
+          })) profile.environment.emplace_back("YCXX_THREADS", "2");
+      const RunProbe run_probe = [&](std::string_view kind, std::string_view label, const Action& action,
+                                     std::span<const ActionInput> inputs) {
+        return run_action(kind, label, action, inputs, std::chrono::seconds(selected.native ? 3 : 10));
+      };
       auto matrix = measure_toolchain_matrix(cwd, package.target, std::move(profile),
           probe_identity(plan, selected, worker_build_), plan.probe_inputs, executable_, run_probe, measure, cancelled);
       if (cancelled()) return;

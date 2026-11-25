@@ -23,6 +23,7 @@ struct MeasuredToolchainProbe {
   ProbeEvidence evidence;
   std::optional<Artifact> artifact;
   ToolchainProbeInputs discovered_inputs;
+  std::optional<Fp128> discovery_stamp = std::nullopt;
   bool cacheable = true;
 };
 
@@ -87,7 +88,7 @@ ProbeCompletion completion(const ActionResult& result) {
 
 bool reusable(ProbeCompletion state) {
   return state == ProbeCompletion::completed || state == ProbeCompletion::rejected ||
-         state == ProbeCompletion::output_failure;
+         state == ProbeCompletion::output_failure || state == ProbeCompletion::timed_out;
 }
 
 MeasuredToolchainProbe unavailable(std::string reason, bool cacheable = true) {
@@ -171,6 +172,7 @@ MeasuredToolchainProbe discover_inputs(const ToolchainProbeProfile& profile, con
   auto result = unavailable("reported compiler search paths", reusable(completion(include)) &&
                                                                 reusable(completion(directories)));
   result.discovered_inputs = reported_toolchain_probe_inputs(include.err, directories.out);
+  result.discovery_stamp = fingerprint_toolchain_probe_inputs(result.discovered_inputs);
   return result;
 }
 
@@ -183,7 +185,8 @@ MeasuredToolchainProbe run_host_witness(const ToolchainProbeProfile& profile, st
   observed.evidence.target = linked.evidence.target;
   observed.evidence.artifact = linked.evidence.artifact;
   const auto* host = pp::native_target;
-  if (!host || !toolchain_probe_host_matches(linked.evidence.target, host->triple))
+  if (!host || !linked.evidence.artifact || !linked.evidence.artifact->host_runnable ||
+      !toolchain_probe_host_matches(linked.evidence.target, host->triple))
     return observed;
   const Action action{.tool = std::string(worker),
       .args = {{literal, shared ? "--internal-probe-shared" : "--internal-probe-executable"}, {input, "binary"}},
@@ -248,11 +251,12 @@ std::expected<ToolchainMatrix, std::string> measure_toolchain_matrix(
                               [&] { return execute_probe(target_probe, *default_target, run); });
   if (target.evidence.support == ProbeSupport::supported) profile.observed_target = target.evidence.target;
 
+  std::optional<MeasuredToolchainProbe> discovery;
   if (!profile.native && !cancelled()) {
     const auto search_key = fingerprint(std::tie(catalogue_version, identity, configured, profile.observed_target));
-    auto discovery = measure({search_key, static_cast<std::uint32_t>(catalogue.size())},
-                             [&] { return discover_inputs(profile, run); });
-    merge_inputs(matrix.inputs, std::move(discovery.discovered_inputs));
+    discovery = measure({search_key, static_cast<std::uint32_t>(catalogue.size())},
+                        [&] { return discover_inputs(profile, run); });
+    merge_inputs(matrix.inputs, discovery->discovered_inputs);
   }
   matrix.stamp = fingerprint_toolchain_probe_inputs(matrix.inputs);
   matrix.facts.push_back({"toolchain-compiler", std::string(package), "driver", profile.executable,
@@ -280,7 +284,8 @@ std::expected<ToolchainMatrix, std::string> measure_toolchain_matrix(
     }
   }
   if (matrix.stamp != fingerprint_toolchain_probe_inputs(matrix.inputs) ||
-      configured != fingerprint_toolchain_probe_inputs(configured_inputs))
+      configured != fingerprint_toolchain_probe_inputs(configured_inputs) ||
+      (discovery && discovery->discovery_stamp != fingerprint_toolchain_probe_inputs(discovery->discovered_inputs)))
     return std::unexpected("toolchain inputs changed while measuring the profile");
   return matrix;
 }

@@ -27,11 +27,13 @@ def write_compiler(wrapper, compiler, log, *, reject_header):
     script = f'''\
 #!/bin/sh
 printf '%s\\n' "$*" >> {shlex.quote(str(log))}
+install={shlex.quote(str(wrapper.parent / 'install'))}
 profile=0
 header=0
 for arg do
     case "$arg" in
         {PROFILE_FLAG}) profile=1 ;;
+        -print-search-dirs) printf 'install: %s\\n' "$install" ;;
         --target=riscv64-unknown-linux-gnu) exit 0 ;;
         *.cc|*.cpp) if /usr/bin/grep -Fq '#include <cstddef>' "$arg"; then header=1; fi ;;
     esac
@@ -40,7 +42,8 @@ if [ {int(reject_header)} = 1 ] && [ "$profile" = 1 ] && [ "$header" = 1 ]; then
     printf '%s\\n' 'fixture: cstddef rejected by profile' >&2
     exit 1
 fi
-exec {shlex.quote(str(compiler))} "$@"
+active=$(/usr/bin/readlink "$install/active") || exit 126
+exec {shlex.quote(str(compiler))} "$@" "-I$active"
 '''
     wrapper.write_text(script, encoding='utf-8')
     wrapper.chmod(0o700)
@@ -65,6 +68,11 @@ host_action "rules" {{
 def prepare(scope, compiler, wrapper, log):
     (scope / 'cap').mkdir()
     (scope / 'profile.h').write_text('// Forced include for this compiler profile.\n', encoding='utf-8')
+    (scope / 'install').mkdir()
+    for tree in ('original-includes', 'updated-includes'):
+        (scope / tree).mkdir()
+        (scope / tree / 'cstddef').write_text('#include_next <cstddef>\n', encoding='utf-8')
+    (scope / 'install/active').symlink_to(scope / 'original-includes')
     write_compiler(wrapper, compiler, log, reject_header=True)
     write_package(scope, wrapper)
     (scope / 'cap/rules.cc').write_text('''\
@@ -189,6 +197,19 @@ def check_matrix(ycxx, scope, env, compiler):
     changed = probe_actions(probe(ycxx, scope, env))
     assert f'header.cstddef via {wrapper}' in changed, changed
     assert not any(action.endswith(f' via {winners[STANDARD]}') for action in changed), changed
+    assert capabilities(ycxx, scope, env, PINNED)['header.cstddef'] == 'unsupported'
+
+    # A compiler install may change its reported search paths while retaining its driver.
+    (scope / 'profile.h').write_text('// Forced include for this compiler profile.\n', encoding='utf-8')
+    probe(ycxx, scope, env)
+    (scope / 'install/active').unlink()
+    (scope / 'install/active').symlink_to(scope / 'updated-includes')
+    changed = probe_actions(probe(ycxx, scope, env))
+    assert f'driver.include-search via {wrapper}' in changed, changed
+    assert capabilities(ycxx, scope, env, PINNED)['header.cstddef'] == 'supported'
+    (scope / 'updated-includes/cstddef').write_text('#error updated toolchain header\n', encoding='utf-8')
+    assert not capabilities(ycxx, scope, env, PINNED), 'inspection retained an earlier include search'
+    assert f'header.cstddef via {wrapper}' in probe_actions(probe(ycxx, scope, env))
     assert capabilities(ycxx, scope, env, PINNED)['header.cstddef'] == 'unsupported'
     check_program(executable, 42)
 

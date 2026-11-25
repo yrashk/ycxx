@@ -34,6 +34,7 @@ struct ProbeArtifactEvidence {
   ProbeArtifactFormat format;
   ProbeArtifactKind kind;
   std::string architecture;
+  bool host_runnable = false;
 };
 
 struct ProbeEvidence {
@@ -116,8 +117,10 @@ bool same_default_target(std::string_view requested, std::string_view observed) 
 }
 
 bool darwin_host(std::string_view platform) {
-  if (!platform.starts_with("darwin")) return false;
-  platform.remove_prefix(std::string_view("darwin").size());
+  constexpr std::string_view names[] = {"darwin", "macosx", "macos"};
+  const auto name = std::ranges::find_if(names, [&](auto prefix) { return platform.starts_with(prefix); });
+  if (name == std::end(names)) return false;
+  platform.remove_prefix(name->size());
   if (platform.empty()) return true;
   for (;;) {
     const auto dot = platform.find('.');
@@ -182,6 +185,7 @@ ArtifactEvidence read_elf(Bytes bytes) {
   if (!bytes.contains(0, header) || bytes.read(header - 12, 2) != header || bytes.read(20, 4) != 1)
     return std::unexpected("invalid ELF header");
   const auto arch = elf_architecture(bytes.read(18, 2), wide, bytes.little);
+  const bool linux_abi = bytes.data[7] == 0 || bytes.data[7] == 3;  // System V or Linux
   const auto type = bytes.read(16, 2);
   if (type == 1) {
     const auto offset = bytes.read(24 + 2 * word, word);
@@ -238,9 +242,9 @@ ArtifactEvidence read_elf(Bytes bytes) {
     }
   }
   if (!loadable) return std::unexpected("ELF image has no loadable segment");
-  if (type == 2 || pie) return ProbeArtifactEvidence{elf, executable, std::string(arch)};
+  if (type == 2 || pie) return ProbeArtifactEvidence{elf, executable, std::string(arch), linux_abi};
   if (!dynamic || bytes.read(24, word) != 0) return std::unexpected("ambiguous ELF dynamic image type");
-  return ProbeArtifactEvidence{elf, shared_library, std::string(arch)};
+  return ProbeArtifactEvidence{elf, shared_library, std::string(arch), linux_abi};
 }
 
 std::string_view macho_architecture(std::uint64_t cpu) {
@@ -264,10 +268,24 @@ ArtifactEvidence read_macho(Bytes bytes, bool wide) {
     return std::unexpected("invalid Mach-O command table");
   const auto end = header + length;
   std::uint64_t offset = header;
+  std::optional<bool> macos;
   for (std::uint64_t i = 0; i < commands; ++i) {
     if (end - offset < 8) return std::unexpected("truncated Mach-O load command");
+    const auto command = bytes.read(offset, 4);
     const auto size = bytes.read(offset + 4, 4);
     if (size < 8 || size > end - offset) return std::unexpected("invalid Mach-O load command");
+    std::optional<bool> platform;
+    if (command == 0x32) {  // LC_BUILD_VERSION
+      if (size < 24) return std::unexpected("invalid Mach-O build version");
+      platform = bytes.read(offset + 8, 4) == 1;  // PLATFORM_MACOS
+    } else if (command == 0x24 || command == 0x25 || command == 0x2f || command == 0x30) {
+      if (size < 16) return std::unexpected("invalid Mach-O minimum OS version");
+      platform = command == 0x24;  // LC_VERSION_MIN_MACOSX, alongside the other legacy OS commands.
+    }
+    if (platform) {
+      if (macos && macos != platform) return std::unexpected("conflicting Mach-O build platforms");
+      macos = platform;
+    }
     offset += size;
   }
   if (offset != end) return std::unexpected("inconsistent Mach-O command table");
@@ -281,7 +299,7 @@ ArtifactEvidence read_macho(Bytes bytes, bool wide) {
   }
   const auto cpu = bytes.read(4, 4);
   if (((cpu & 0x01000000) != 0) != wide) return std::unexpected("inconsistent Mach-O processor width");
-  return ProbeArtifactEvidence{mach_o, kind, std::string(macho_architecture(cpu))};
+  return ProbeArtifactEvidence{mach_o, kind, std::string(macho_architecture(cpu)), macos.value_or(false)};
 }
 
 std::string_view coff_architecture(std::uint64_t machine) {

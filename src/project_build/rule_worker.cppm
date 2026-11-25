@@ -1,6 +1,8 @@
 // The rule library and its callbacks live in a short-lived process (#1257).
 module;
 #include <dlfcn.h>
+#include <errno.h>
+#include <string.h>
 #include <unistd.h>
 export module ycxx.build.rule_worker;
 
@@ -214,7 +216,8 @@ int run_shared_probe(std::span<const std::string_view> args) {
   const Library library{::dlopen(path.c_str(), RTLD_NOW | RTLD_LOCAL)};
   if (!library.handle) {
     const char* detail = ::dlerror();
-    return fail(detail ? detail : "cannot load probe library");
+    std::println(std::cerr, "ycxx: cannot load probe library: {}", detail ? detail : "unknown loader error");
+    return 126;
   }
   const auto plan = reinterpret_cast<int (*)(const Host*)>(::dlsym(library.handle, "ycxx_rule_plan_v1"));
   if (!plan) return fail("probe library has no ycxx_rule_plan_v1 entry point");
@@ -227,7 +230,8 @@ int run_executable_probe(std::span<const std::string_view> args) {
   std::string path(args.front());
   char* argv[]{path.data(), nullptr};
   ::execv(path.c_str(), argv);
-  return fail("cannot run staged probe executable");
+  std::println(std::cerr, "ycxx: cannot run probe executable: {}", ::strerror(errno));
+  return 126;
 }
 
 }  // namespace ycxx::build

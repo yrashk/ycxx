@@ -259,7 +259,9 @@ the shared artifact matches the host target and calls the test entry point.
 
 The result is `supported`, `unsupported` or `indeterminate`, with the
 available evidence. A compiler rejection and a cancelled, timed-out or
-unverifiable result are different observations. The key includes the versioned
+unverifiable result are different observations. A time-budget result remains
+an observation of that profile. A launch or loader setup failure can retry.
+The key includes the versioned
 probe recipe, compiler identity, profile, declared environment, and the
 observed compiler, include and library search inputs. The coordinator stages
 commands outside the query engine and records typed results from an unchanged
