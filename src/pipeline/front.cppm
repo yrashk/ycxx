@@ -1214,11 +1214,19 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
              return internal_type(p) || names_tu_local(program, p, /*include_value_types=*/true);
            });
   };
+  auto enclosing_class_template = [&](EntityId cls) {
+    const auto& record = world.entities.rec(cls);
+    if (record.kind != sema::EntityKind::class_) return EntityId::none;
+    const EntityId enclosing = record.templ != EntityId::none ? cls : program.outermost_class_scope(cls);
+    if (program.is_namespace(enclosing)) return EntityId::none;
+    const auto& owner = world.entities.rec(enclosing);
+    return owner.kind == sema::EntityKind::class_ && owner.templ != EntityId::none && program.is_namespace(owner.scope)
+        ? enclosing : EntityId::none;
+  };
   auto ordinary_class_template_member = [&](const sema::EntityRec& member) {
     if (member.kind != sema::EntityKind::function || member.templ != EntityId::none || member.scope == EntityId::none)
       return false;
-    const auto& owner = world.entities.rec(member.scope);
-    return owner.kind == sema::EntityKind::class_ && owner.templ != EntityId::none && program.is_namespace(owner.scope);
+    return enclosing_class_template(member.scope) != EntityId::none;
   };
   // An in-class static constexpr member is inline ([dcl.constexpr]). An owner or a declared
   // type in an unnamed namespace gives the member's symbol TU-local binding.
@@ -1228,11 +1236,14 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
       return {};
     const auto& member = world.entities.rec(d.entity);
     const auto& owner = world.entities.rec(member.scope);
-    if (owner.kind != sema::EntityKind::class_ || !program.is_namespace(program.outermost_class_scope(member.scope))) return {};
-    const bool instantiated = owner.templ != EntityId::none;
+    if (owner.kind != sema::EntityKind::class_) return {};
+    const EntityId specialization = enclosing_class_template(member.scope);
+    const bool instantiated = specialization != EntityId::none;
+    if (!instantiated && !program.is_namespace(program.outermost_class_scope(member.scope))) return {};
     if (instantiated && (!world.types.is_arithmetic(d.type) || (d.flags & sema::decl_flag::specialization)))
       return {};
-    if (names_tu_local(program, member.scope, instantiated) || names_tu_local(program, d.type))
+    if ((instantiated && internal_class(specialization)) ||
+        names_tu_local(program, member.scope, instantiated) || names_tu_local(program, d.type))
       return ast::Linkage::internal;
     return owner.linkage;
   };
@@ -1809,8 +1820,7 @@ TranslationUnit unit_of(parse::Program& program, sema::World& world, const parse
       if (!dynamic_member(tu.functions.size() - 1)) return tu;
     } else if (it.parent != items::none && items.items[it.parent].kind == items::ItemKind::class_def) {
       const bool ordinary_member = ordinary_class_template_member(entity) && !in->decl.is_virtual &&
-                                   !internal_class(entity.scope) &&
-                                   !names_tu_local(program, entity.scope, /*include_value_types=*/true);
+                                   symbol_linkage(in->decl) == ast::Linkage::external;
       // A friend function a class template's specialization defines is inline as its members
       // are ([class.friend]/7, #259).
       const bool class_friend = (in->decl.flags & sema::decl_flag::friend_) && entity.kind == sema::EntityKind::function &&

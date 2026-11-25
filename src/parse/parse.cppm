@@ -2384,7 +2384,8 @@ public:
     if (replaying_scoped_enum != EntityId::none && c == instantiating) return false;
     // A declaration replay uses the enclosing class's prefix at the written point.
     const u32 parent = p_->items().items[item_].parent;
-    if (instantiating != EntityId::none && parent != items::none && p_->named_nested_class(parent)) {
+    if (instantiating != EntityId::none &&
+        (p_->named_nested_class(item_) || (parent != items::none && p_->named_nested_class(parent)))) {
       for (EntityId owner = instantiating; owner != EntityId::none && !p_->is_namespace(owner);
            owner = p_->world().entities.rec(owner).scope)
         if (owner == c) return false;
@@ -12590,6 +12591,12 @@ std::optional<sema::BaseRec> Program::instantiate_base(EntityId specialization, 
   AtItem q(*this, item, false);
   q.at_point = point;
   sema::Sema s(*w_, b, q, sink, id(item), 0);
+  if (named_nested_class(item)) {
+    // The base-clause is in the owner's scope. The owner can still be declaring
+    // members if a later by-value field is what requires this class to be complete.
+    q.instantiating = w_->entities.rec(specialization).scope;
+    s.current_class = q.instantiating;
+  }
   std::optional<QualType> substituted;
   if (pattern.replay) {
     // An alias can discard an argument whose written type must still substitute ([temp.alias]).
