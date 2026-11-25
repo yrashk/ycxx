@@ -278,6 +278,41 @@ def check_builds(ycxx, scope, env, journal):
     assert journal_contents(journal) == 'generated\n' and daemon_identity(ycxx, scope, env) == daemon
 
 
+def check_provider_path_diff(ycxx, scope, env, journal):
+    scope.mkdir()
+    first = ('a.cc', 'b.cc, c.cc')
+    second = ('a.cc, b.cc', 'c.cc')
+    interface = 'export module m;\n'
+    inputs = json.dumps(['main.cc', *first, *second])
+    (scope / 'build.ycxx').write_text(f'cpp.executable "app" {{\n    sources = {inputs}\n}}\n',
+                                     encoding='utf-8')
+    (scope / 'main.cc').write_text('import m;\nint main() { return 0; }\n', encoding='utf-8')
+    for path in (*first, *second):
+        (scope / path).write_text(interface if path in first else '', encoding='utf-8')
+
+    build(ycxx, scope, env, LINUX, 'initial ambiguous providers with commas in their paths')
+    before = show(ycxx, scope, env, journal, LINUX)
+    snapshot = scope.parent / 'before-provider-paths.json'
+    snapshot.write_text(json.dumps(before), encoding='utf-8')
+    # Both candidate pairs have the same spelling when joined with comma-space.
+    for old, new in zip(first, second):
+        replace_source(scope, old, '')
+        replace_source(scope, new, interface)
+    after = show(ycxx, scope, env, journal, LINUX)
+    for plan, paths in ((before, first), (after, second)):
+        units = facts(plan, 'module-unit')
+        assert {row['origin'] for row in units if row['value'] == 'm'} == {
+            f'{path}:1:1' for path in paths
+        }, units
+
+    changes = show(ycxx, scope, env, journal, LINUX, '--against', str(snapshot))['changes']
+    for kind in ('module-provider', 'module-provider-conflict'):
+        old, = facts(before, kind)
+        new, = facts(after, kind)
+        assert any(change.get('before') == old and change.get('after') == new
+                   for change in changes), (kind, changes)
+
+
 def main():
     ycxx = Path(sys.argv[1]).resolve()
     with (
@@ -291,6 +326,12 @@ def main():
         prepare(scope, journal)
         try:
             check_builds(ycxx, scope, env, journal)
+        finally:
+            run_client(ycxx, scope, env, 'ctl', 'shutdown')
+
+        scope = root / 'provider-paths'
+        try:
+            check_provider_path_diff(ycxx, scope, env, journal)
         finally:
             run_client(ycxx, scope, env, 'ctl', 'shutdown')
 
