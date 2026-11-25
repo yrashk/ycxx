@@ -167,6 +167,34 @@ def check_invalid_classifier(ycxx, scope, env, log, executable, previous):
     inspect(ycxx, scope, env, log, stale=True)
 
 
+def check_manifest_edit(ycxx, scope, env):
+    log = prepare(scope)
+    marker = scope.parent / 'manifest-edit-done'
+    temporary = scope.parent / 'manifest-replacement'
+    manifest = scope / 'build.ycxx'
+    script = scope / 'rules/check-mode.sh'
+    comment = '# Changed during the first witness.'
+    # Rename a complete definition while the witness runs, preserving the authored recipe.
+    edit = f'''\
+if [ ! -e {shlex.quote(str(marker))} ]; then
+    /bin/cat {shlex.quote(str(manifest))} > {shlex.quote(str(temporary))} || exit 9
+    printf '%s\\n' {shlex.quote(comment)} >> {shlex.quote(str(temporary))} || exit 9
+    /bin/mv -f {shlex.quote(str(temporary))} {shlex.quote(str(manifest))} || exit 9
+    : > {shlex.quote(str(marker))}
+fi
+'''
+    source = script.read_text(encoding='utf-8')
+    script.write_text(source.replace('#!/bin/sh\n', '#!/bin/sh\n' + edit, 1), encoding='utf-8')
+    _, events = traced_build(ycxx, scope, env, 'root definition edited during the witness')
+    witnesses = [event for event in events if (event.get('kind'), event.get('key')) == ('RuleWitness', EXPORT)]
+    assert len(witnesses) == 2, witnesses
+    assert action_keys(events, 'RuleClassifier') == [EXPORT], events
+    assert marker.exists() and manifest.read_text(encoding='utf-8').count(comment) == 1
+    assert log.read_bytes() == b'enabled\nenabled\n'
+    check_program(scope / '.ycxx/out/app', 0)
+    inspect(ycxx, scope, env, log, 'supported')
+
+
 def main():
     ycxx = Path(sys.argv[1]).resolve()
     with tempfile.TemporaryDirectory(prefix='ycxx-package-probe-') as directory:
@@ -178,6 +206,12 @@ def main():
                 incremental = check_edits(ycxx, scope, env, log)
             finally:
                 run_client(ycxx, scope, env, 'ctl', 'shutdown')
+
+            edited_scope = scope.with_name('edited-project')
+            try:
+                check_manifest_edit(ycxx, edited_scope, env)
+            finally:
+                run_client(ycxx, edited_scope, env, 'ctl', 'shutdown')
 
         shutil.rmtree(scope / '.ycxx')
         with tempfile.TemporaryDirectory(prefix='yb', dir=runtime_root('yb')) as runtime:
