@@ -16,6 +16,7 @@ std::expected<std::vector<std::uint8_t>, std::string> write_object(const object&
 // used by libycxx's static linkage marker. Preserve types and sizes for defined functions
 // and for objects in COMDAT payloads.
 // Retained sections and symbols keep file order. Preserve COMDAT signatures and member sections.
+// A supported GNU property note contributes its x86 FEATURE_1_AND mask to the object.
 std::expected<object, std::string> read_object(std::span<const std::uint8_t> file, std::string name);
 
 }  // namespace ycxx::obj::elf
@@ -28,13 +29,16 @@ constexpr std::uint16_t shn_abs = 0xfff1;
 constexpr std::uint16_t header_size = 64, section_header_size = 64;
 constexpr std::uint64_t symbol_size = 24, rela_size = 24;
 constexpr std::uint32_t sht_progbits = 1, sht_symtab = 2, sht_strtab = 3, sht_rela = 4, sht_nobits = 8;
-constexpr std::uint32_t sht_init_array = 14, sht_group = 17, grp_comdat = 1;
+constexpr std::uint32_t sht_note = 7, sht_init_array = 14, sht_group = 17, grp_comdat = 1;
 constexpr std::uint32_t sht_x86_64_unwind = 0x70000001;
 constexpr std::uint64_t shf_write = 1, shf_alloc = 2, shf_execinstr = 4, shf_info_link = 0x40;
 constexpr std::uint64_t shf_merge = 0x10, shf_strings = 0x20, shf_group = 0x200;
 constexpr std::uint8_t stt_notype = 0, stt_object = 1, stt_func = 2, stt_section = 3, stt_file = 4;
 constexpr std::uint8_t stb_local = 0, stb_global = 1, stb_weak = 2;
 constexpr std::uint8_t stv_default = 0, stv_hidden = 2;
+constexpr std::string_view gnu_property_section_name = ".note.gnu.property";
+constexpr std::uint32_t nt_gnu_property_type_0 = 5, gnu_property_x86_feature_1_and = 0xc0000002;
+constexpr std::uint32_t gnu_property_x86_feature_1_ibt = 1, gnu_property_x86_feature_1_shstk = 2;
 
 struct section_mapping {
   standard_section kind;
@@ -128,6 +132,36 @@ struct section_header {
 
 bool all_zero(std::span<const std::uint8_t> record) {
   return std::ranges::all_of(record, [](auto b) { return b == 0; });
+}
+
+std::expected<std::uint32_t, std::string_view> gnu_property_features(const section_header& h,
+                                                                   std::span<const std::uint8_t> file) {
+  if (h.type != sht_note || h.flags != shf_alloc || h.link != 0 || h.info != 0 ||
+      h.align != 8 || h.offset % 8 != 0 || h.entsize != 0)
+    return std::unexpected("invalid ELF GNU property section header");
+
+  constexpr std::uint8_t owner[]{'G', 'N', 'U', 0};
+  constexpr std::size_t owner_offset = 12, descriptor_offset = owner_offset + sizeof(owner);
+  // The section table validation already bounded this SHT_NOTE in the file.
+  const auto note = file.subspan(h.offset, h.size);
+  if (note.size() < descriptor_offset) return std::unexpected("truncated ELF GNU property note");
+  if (load<std::uint32_t>(note, 0) != sizeof(owner) || load<std::uint32_t>(note, 8) != nt_gnu_property_type_0 ||
+      !std::ranges::equal(note.subspan(owner_offset, sizeof(owner)), owner))
+    return std::unexpected("invalid ELF GNU property note owner or type");
+  const auto descriptor = note.subspan(descriptor_offset);
+  if (load<std::uint32_t>(note, 4) != descriptor.size())
+    return std::unexpected("invalid ELF GNU property note descriptor size");
+
+  // The supported descriptor has one type/size header, one word and its ELF64 padding.
+  if (descriptor.size() != 16) return std::unexpected("expected a single ELF GNU property entry");
+  if (load<std::uint32_t>(descriptor, 0) != gnu_property_x86_feature_1_and)
+    return std::unexpected("unsupported ELF GNU property type");
+  if (load<std::uint32_t>(descriptor, 4) != 4 || !all_zero(descriptor.subspan(12)))
+    return std::unexpected("invalid ELF GNU property FEATURE_1_AND size or padding");
+  const auto features = load<std::uint32_t>(descriptor, 8);
+  if ((features & ~(gnu_property_x86_feature_1_ibt | gnu_property_x86_feature_1_shstk)) != 0)
+    return std::unexpected("unsupported ELF GNU property FEATURE_1_AND bits");
+  return features;
 }
 
 bool valid_string_table(const section_header& header, std::span<const std::uint8_t> table) {
@@ -316,6 +350,7 @@ std::expected<bytes, std::string> write_object(const object& o) {
     return std::unexpected(std::format("{}: {}", o.name.empty() ? "ELF object" : o.name, reason));
   };
   if (o.arch != target::x86_64_linux) return fail("expected an x86-64 Linux object");
+  if (o.elf_x86_feature_1_and) return fail("ELF GNU property notes are unsupported for relocatable output");
   if (auto error = handler_frame_error(o)) return fail(std::string(*error));
 
   // The null section, .note.GNU-stack, .symtab, .strtab and .shstrtab are always present.
@@ -629,14 +664,23 @@ std::expected<object, std::string> read_object(std::span<const std::uint8_t> fil
   }
   std::vector<std::optional<std::uint32_t>> sections(shnum);
   std::vector<bool> debug_sections(shnum);
+  std::optional<std::uint32_t> gnu_property_section;
   for (std::uint32_t i = 1; i < shnum; ++i) {
     const auto& h = headers[i];
     if (h.name >= names.size()) return fail(std::format("invalid name for ELF section {}", i));
+    const auto section_name = name_at(names, h.name);
+    if (section_name == gnu_property_section_name) {
+      if (gnu_property_section) return fail("multiple ELF GNU property sections");
+      auto features = gnu_property_features(h, file);
+      if (!features) return fail(features.error());
+      gnu_property_section = i;
+      o.elf_x86_feature_1_and = *features;
+      continue;
+    }
     const auto owner = group_owners[i];
     if ((h.flags & shf_group) != 0 && owner == 0)
       return fail(std::format("ELF section {} has SHF_GROUP without a group", i));
     if (i == shstrndx || i == symtab_index || i == symtab.link || h.type == sht_rela || h.type == sht_group) continue;
-    const auto section_name = name_at(names, h.name);
     if (section_name == ".note.GNU-stack" && h.type == sht_progbits && h.flags == 0 &&
         h.size == 0 && h.link == 0 && h.info == 0 && h.entsize == 0) continue;
     if ((section_name.starts_with(".debug_") || section_name == ".comment") && plain_metadata(h)) {
@@ -707,11 +751,13 @@ std::expected<object, std::string> read_object(std::span<const std::uint8_t> fil
     if (type == stt_section) {
       if (!local || name_index != 0 || index == 0 || value != 0)
         return fail(std::format("invalid ELF section symbol {}", i));
+      if (gnu_property_section == index) continue;
       if (index < shnum && debug_sections[index]) {
         symbols[i].debug = true;
         continue;
       }
     }
+    if (gnu_property_section == index) return fail("ELF GNU property notes cannot define symbols");
     if (index == 0) {
       if (local || value != 0 || size != 0) return fail(std::format("invalid undefined ELF symbol {}", i));
     } else if (index >= shnum || !sections[index] || value > headers[index].size || size > headers[index].size - value) {
@@ -735,6 +781,7 @@ std::expected<object, std::string> read_object(std::span<const std::uint8_t> fil
   for (std::uint32_t i = 1; i < shnum; ++i) {
     const auto& h = headers[i];
     if (h.type != sht_rela) continue;
+    if (gnu_property_section == h.info) return fail("ELF GNU property notes cannot have relocations");
     const auto flags = h.flags & ~shf_group;
     // SHT_RELA specifies the target in sh_info even if a grouped entry omits SHF_INFO_LINK.
     const bool valid_flags = flags == shf_info_link || (group_owners[i] != 0 && flags == 0);
