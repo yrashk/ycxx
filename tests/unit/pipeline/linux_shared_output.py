@@ -114,6 +114,13 @@ def main():
         assert re.search(r'\(SONAME\).*\[default\.so\]', summary), summary
         load('staging/default.so', 42)
 
+        # A hidden declaration changes the effective visibility of a definition in another object.
+        source('hide.s', '.globl score\n.hidden score\n.section .note.GNU-stack,"",@progbits')
+        run(cc, '-c', 'hide.s', '-o', 'hide.o')
+        cold(*shared, 'provider.o', 'hide.o', '-o', 'staging/hidden.so')
+        hidden = run(readelf, '--dyn-syms', '-W', 'staging/hidden.so').stdout
+        assert not re.search(r'\bscore\s*$', hidden, re.M), hidden
+
         source('system.c', 'extern int score(int); int main(void) { return score(35); }')
         run(cc, 'system.c', staged, '-o', 'system-client')
         system_headers = run(readelf, '-lW', 'system-client').stdout
@@ -135,6 +142,7 @@ def main():
 
         reject(*shared, 'provider.cpp', error="requires '-fPIC' or '-fpic'")
         reject(*shared, '-fPIC', '-Wl,-soname,dir/wrong.so', 'provider.cpp', error='SONAME')
+        reject(*shared, 'hide.o', error="undefined hidden symbol 'score'")
         source('unresolved.cpp', 'extern "C" int absent(); extern "C" int f() { return absent(); }')
         reject(*shared, '-fPIC', 'unresolved.cpp', error='absent')
         source('absolute.cpp', 'static int value; static int* volatile address = &value;\n'

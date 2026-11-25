@@ -437,7 +437,7 @@ std::expected<shared_index, std::string> shared_section_for(const obj::object& o
 }
 
 std::expected<std::vector<patch>, std::string> shared_patches(
-    std::span<const obj::object> objects, const definitions& globals,
+    std::span<const obj::object> objects, const definitions& globals, const std::set<std::string_view>& hidden,
     const std::vector<std::vector<std::uint64_t>>& offsets) {
   std::vector<patch> patches;
   for (std::size_t oi = 0; oi < objects.size(); ++oi) {
@@ -460,7 +460,7 @@ std::expected<std::vector<patch>, std::string> shared_patches(
           if (global == globals.end())
             return section_error(object, section, std::format("undefined symbol '{}'", symbol.name_view()));
           resolved = global->second;
-          if (resolved.symbol->bind != binding::hidden)
+          if (!hidden.contains(symbol.name_view()))
             return section_error(object, section,
                                  std::format("ELF shared reference to interposable symbol '{}' is unsupported",
                                              symbol.name_view()));
@@ -932,6 +932,7 @@ std::expected<bytes, std::string> link_shared(std::span<const obj::object> objec
 
   shared_inputs inputs;
   definitions globals;
+  std::set<std::string_view> hidden;
   std::vector<std::vector<std::uint64_t>> offsets;
   offsets.reserve(objects.size());
   for (std::size_t oi = 0; oi < objects.size(); ++oi) {
@@ -945,7 +946,15 @@ std::expected<bytes, std::string> link_shared(std::span<const obj::object> objec
       inputs[*index].push_back({oi, si});
     }
     if (auto result = register_symbols(object, oi, globals); !result) return std::unexpected(result.error());
+    for (const auto& symbol : object.symbols)
+      if (symbol.bind == binding::hidden) hidden.insert(symbol.name_view());
   }
+  // ELF visibility follows the most constraining declaration, even a reference in another object.
+  for (const auto& object : objects)
+    for (const auto& symbol : object.symbols)
+      if (symbol.bind != binding::local && !symbol.defined() && !symbol.weak &&
+          hidden.contains(symbol.name_view()) && !globals.contains(symbol.name_view()))
+        return object_error(object, std::format("undefined hidden symbol '{}'", symbol.name_view()));
 
   constexpr std::uint32_t sht_progbits = 1, sht_strtab = 3, sht_hash = 5, sht_dynamic = 6,
                           sht_nobits = 8, sht_dynsym = 11;
@@ -973,7 +982,7 @@ std::expected<bytes, std::string> link_shared(std::span<const obj::object> objec
   dynstr.push_back(0);
   for (const auto& [name, def] : globals) {
     const auto& symbol = *def.symbol;
-    if (symbol.bind == binding::hidden) continue;
+    if (hidden.contains(name)) continue;
     const auto& object = objects[def.object];
     const auto& section = object.sections[*symbol.section];
     if (symbol.weak || !symbol.function_size || !executable(section) ||
@@ -1026,7 +1035,7 @@ std::expected<bytes, std::string> link_shared(std::span<const obj::object> objec
   const auto memory_end = place(shared_bss, *data_end);
   if (!memory_end) return std::unexpected(memory_end.error());
 
-  const auto patches = shared_patches(objects, globals, offsets);
+  const auto patches = shared_patches(objects, globals, hidden, offsets);
   if (!patches) return std::unexpected(patches.error());
   const std::array loads{
       load_segment{pf_r, 0, *readable_end, *readable_end},
