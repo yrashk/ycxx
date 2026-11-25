@@ -21,9 +21,9 @@ constexpr std::string_view styles = R"HTML(
   }
   * { box-sizing: border-box; }
   body { margin: 0; }
-  main { max-width: 92rem; margin: 0 auto; padding: clamp(1rem, 4vw, 3.5rem); }
+  main { max-width: 92rem; margin: 0 auto; padding: 2rem; padding: clamp(1rem, 4vw, 3.5rem); }
   h1, h2, p, pre { margin: 0; }
-  h1 { margin-bottom: 1.5rem; font-size: clamp(1.75rem, 4vw, 2.6rem); line-height: 1.12;
+  h1 { margin-bottom: 1.5rem; font-size: 2.2rem; font-size: clamp(1.75rem, 4vw, 2.6rem); line-height: 1.12;
     letter-spacing: -.035em; overflow-wrap: anywhere; }
   h1 code { font-size: .9em; color: var(--link); }
   h2 { font-size: 1.12rem; font-weight: 680; }
@@ -48,6 +48,7 @@ constexpr std::string_view styles = R"HTML(
   .changes li { display: grid; grid-template-columns: minmax(0, 22%) minmax(0, 1fr);
     gap: 1rem; padding: .8rem 1.1rem; overflow-wrap: anywhere; }
   .changes li + li { border-top: 1px solid #e8edf2; }
+  .changes .origin { display: block; margin-top: .18rem; }
   .action { display: inline-block; font-size: .79rem; font-weight: 750; }
   .added { color: #116749; }
   .removed { color: #a0333a; }
