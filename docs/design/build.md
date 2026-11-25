@@ -84,6 +84,21 @@ The existing linker coverage is tracked in [#388](https://github.com/yrashk/ycxx
 transitive entry identifies the library that declared it and points to its
 original artifact reference in `build.ycxx`.
 
+### A Make-based C library (#1341)
+
+The [foreign Make example](../../examples/project-build/foreign-make) uses a
+source-built C++ rule package to read a declared file inventory. Each entry
+names a file relative to the Makefile's directory. The rule emits one Make
+action that stages the Makefile and the listed files in the same layout. The
+`archive` output is an ordinary generated artifact inherited through
+`public_link_inputs`. Read-only inspection shows the staged paths, the Make
+command, and the library that exports the archive.
+
+The receipt fingerprints Make and records the configured compiler and archiver
+paths. The example assumes those nested tools stay stable at their configured
+paths. Tracking their executable identities belongs to the toolchain work in
+[#1259](https://github.com/yrashk/ycxx/issues/1259).
+
 ## Build definitions and tracked values
 
 The initial grammar is declarative (#1253). A target carries its rule name,
