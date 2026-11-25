@@ -9,8 +9,10 @@ export module ycxx.build.project;
 import std;
 import ycxx.ast;
 import ycxx.build.action;
+import ycxx.build.inspection_model;
 import ycxx.build.plan;
 import ycxx.build.rule_protocol;
+import ycxx.build.rule_snapshot;
 import ycxx.build.rule_worker;
 import ycxx.engine;
 import ycxx.hash;
@@ -26,6 +28,9 @@ struct ProjectReport {
   std::vector<std::string> diagnostics;
   std::size_t actions_executed = 0;
 };
+
+std::expected<PlanInspection, std::string> inspect_built_project(
+    const std::filesystem::path& cwd, std::string_view target, const RuleToolchain& toolchain);
 
 class Coordinator {
  public:
@@ -236,15 +241,9 @@ Fp128 observation_key(const RuleInvocation& invocation) {
   return fingerprint(std::tie(invocation.request, invocation.reads));
 }
 
-struct RuleObservation {
-  RuleDemand demand;
-  Fp128 package;
-  Fp128 invocation;
-};
 struct PreparedProject {
   ProjectPlan plan;
-  std::vector<RuleExpansion> expansions;
-  std::vector<RuleObservation> observations;
+  RuleSnapshot rules;
 };
 
 using RunRuleAction = std::function<std::expected<std::vector<NamedArtifact>, std::string>(
@@ -258,14 +257,14 @@ std::expected<PreparedProject, std::string> prepare_project(
     const RunRuleAction& run, const RunRulePackage& run_package) {
   PreparedProject prepared;
   for (;;) {
-    auto attempt = plan_with_rules(cwd, target, prepared.expansions);
+    auto attempt = plan_with_rules(cwd, target, prepared.rules.expansions);
     if (!attempt) return std::unexpected(attempt.error());
     if (auto* plan = std::get_if<ProjectPlan>(&*attempt)) {
       prepared.plan = std::move(*plan);
       return prepared;
     }
     auto& demand = std::get<RuleDemand>(*attempt);
-    if (std::ranges::any_of(prepared.expansions, [&](const auto& entry) { return entry.demand == demand; }))
+    if (std::ranges::any_of(prepared.rules.expansions, [&](const auto& entry) { return entry.demand == demand; }))
       return std::unexpected(std::format("rule '{}' did not resolve its declaration", demand.target));
     if (toolchain.executable.empty()) return std::unexpected("cannot locate the rule worker executable");
 
@@ -295,26 +294,43 @@ std::expected<PreparedProject, std::string> prepare_project(
     auto lowered = run("RuleWorker", demand.target, worker, inputs, worker_key, [] { return true; });
     if (!lowered) return std::unexpected(lowered.error());
     const auto& fragment = lowered->front().contents.bytes;
-    prepared.observations.push_back({demand, library_key, invocation_key});
-    prepared.expansions.push_back({std::move(demand), std::string(fragment.begin(), fragment.end())});
+    prepared.rules.observations.push_back({demand, library_key, invocation_key});
+    prepared.rules.expansions.push_back({std::move(demand), std::string(fragment.begin(), fragment.end())});
   }
+}
+
+bool current_rule(const fs::path& cwd, const RuleToolchain& toolchain, const RuleObservation& record) {
+  const auto package = plan_rule_package(cwd, record.demand.package, rule_sdk_header(), toolchain);
+  if (!package || package_key(*package) != record.package) return false;
+  const auto observed = rule_invocation(cwd, record.demand);
+  return observed && observation_key(*observed) == record.invocation;
 }
 
 std::optional<ProjectPlan> observe_project(
     const fs::path& cwd, std::string_view target, const RuleToolchain& toolchain, const PreparedProject& prepared) {
-  for (const auto& record : prepared.observations) {
-    const auto package = plan_rule_package(cwd, record.demand.package, rule_sdk_header(), toolchain);
-    if (!package || package_key(*package) != record.package) return std::nullopt;
-    const auto observed = rule_invocation(cwd, record.demand);
-    if (!observed || observation_key(*observed) != record.invocation) return std::nullopt;
-  }
-  auto attempt = plan_with_rules(cwd, target, prepared.expansions);
+  if (!std::ranges::all_of(prepared.rules.observations, [&](const auto& record) {
+        return current_rule(cwd, toolchain, record);
+      })) return std::nullopt;
+  auto attempt = plan_with_rules(cwd, target, prepared.rules.expansions);
   if (!attempt) return std::nullopt;
   if (auto* plan = std::get_if<ProjectPlan>(&*attempt)) return std::move(*plan);
   return std::nullopt;
 }
 
 }  // namespace
+
+std::expected<PlanInspection, std::string> inspect_built_project(
+    const fs::path& cwd, std::string_view target, const RuleToolchain& toolchain) {
+  auto snapshot = read_rule_snapshot(cwd, target);
+  std::vector<RuleExpansion> current;
+  if (snapshot) {
+    for (std::size_t i = 0; i < snapshot->observations.size(); ++i) {
+      if (current_rule(cwd, toolchain, snapshot->observations[i]))
+        current.push_back(std::move(snapshot->expansions[i]));
+    }
+  }
+  return inspect_project(cwd, target, current);
+}
 
 Coordinator::Coordinator(pipeline::Session& session, std::string executable, std::uint64_t worker_build)
     : session_(session), executable_(std::move(executable)), worker_build_(worker_build) {
@@ -497,7 +513,7 @@ ProjectReport Coordinator::run(const fs::path& cwd, const std::string& target,
       const auto observed = observe_project(cwd, target, toolchain, *planned);
       if (!observed || fingerprint(*observed) != plan_id) break;
       if (demand->image.empty()) {
-        if (!publish(before, [] {})) break;
+        if (!publish(before, [&] { write_rule_snapshot(cwd, target, planned->rules); })) break;
         report.status = 1;
         report.diagnostics.append_range(std::move(demand->errors));
         if (report.diagnostics.empty()) report.diagnostics.push_back("build produced no executable");
@@ -505,6 +521,7 @@ ProjectReport Coordinator::run(const fs::path& cwd, const std::string& target,
       }
       std::optional<std::string> error;
       if (!publish(before, [&] {
+            write_rule_snapshot(cwd, target, planned->rules);
             if (auto directory = build_directory(cwd, "out")) error = install(output, demand->image);
             else error = std::move(directory.error());
           })) break;

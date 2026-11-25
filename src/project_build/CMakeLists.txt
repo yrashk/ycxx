@@ -6,6 +6,7 @@ add_subdirectory(action)
 
 add_library(ycxxc_project_build STATIC)
 target_sources(ycxxc_project_build PUBLIC FILE_SET CXX_MODULES FILES
+  rule_compilers.cppm
   rule_protocol.cppm
   rule_snapshot.cppm
   rule_worker.cppm
