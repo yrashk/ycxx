@@ -1294,12 +1294,19 @@ public:
     }
     return false;
   }
-  std::optional<ConstId> constant_value(EntityId e, u32 item) {
+  struct MemberDemand {
+    u32 item;
+    bool body = true;
+    bool own = true;
+    EntityId completing = EntityId::none;
+    auto operator<=>(const MemberDemand&) const = default;
+  };
+  std::optional<ConstId> constant_value(EntityId e, u32 item, std::optional<MemberDemand> member_demand = {}) {
     if (const auto* r = w_->entities.find(e); r && r->kind == sema::EntityKind::template_parameter_object)
       return r->args.front().value;
     ensure_declared(e, item);
     variable_instance(e, item);
-    member_value(e);
+    if (!member_value(e, member_demand.value_or(MemberDemand{item}))) return std::nullopt;
     auto it = constants_.find(std::to_underlying(e));
     if (it == constants_.end() || it->second.first > item) return std::nullopt;
     return it->second.second;
@@ -1358,7 +1365,7 @@ public:
   std::optional<QualType> deduced_type(EntityId f, u32 item);
   // A namespace-scope variable as the interpreter sees it at `item`: its type and, if it is usable
   // in constant expressions, its value.
-  std::optional<interp::GlobalVar> global(EntityId v, u32 item) {
+  std::optional<interp::GlobalVar> global(EntityId v, u32 item, std::optional<MemberDemand> member_demand = {}) {
     if (const auto* entity = w_->entities.find(v)) {
       if (entity->kind == sema::EntityKind::template_parameter_object)
         return interp::GlobalVar{entity->type, entity->args.front().value, true};
@@ -1373,7 +1380,7 @@ public:
     variable_instance(v, item);
     auto d = declaration(v, item);
     if (!d || d->kind != ast::DeclKind::variable) return std::nullopt;
-    auto c = constant_value(v, item);
+    auto c = constant_value(v, item, member_demand);
     QualType type = d->type;
     if (w_->types.is_reference(type) && !w_->types.is_function(w_->types.referee(type))) {
       const sema::EntityRec& entity = w_->entities.rec(v);
@@ -1492,29 +1499,40 @@ public:
   // each in-class initializer ends; a specialization declares the member and skips it
   // (`lazy_member`); its value is instantiated on first use (`member_value`). A native use
   // retains the storage and the initializer's native dependencies.
-  void set_static_init_end(u32 item, u32 ordinal, u32 end) { static_init_ends_[{item, ordinal}] = end; }
-  std::optional<u32> static_init_end(u32 item, u32 ordinal) {
+  struct StaticInitializer {
+    u32 end;
+    bool dependent_layout;
+  };
+  void set_static_initializer(u32 item, u32 ordinal, StaticInitializer initializer) {
+    static_initializers_[{item, ordinal}] = initializer;
+  }
+  std::optional<StaticInitializer> static_initializer(u32 item, u32 ordinal) {
     item_sema(item);  // the template's analysis records it
-    auto it = static_init_ends_.find({item, ordinal});
-    if (it == static_init_ends_.end()) return std::nullopt;
+    auto it = static_initializers_.find({item, ordinal});
+    if (it == static_initializers_.end()) return std::nullopt;
     return it->second;
   }
   struct LazyMember {
     u32 item;
     u32 ordinal;
     ClassInstantiation inst;
+    bool dependent_layout;
     enum class State : u8 { pending, running, done } state = State::pending;
     std::optional<std::size_t> initializer = std::nullopt;
   };
-  void lazy_member(EntityId e, u32 item, u32 ordinal, const ClassInstantiation& inst) {
-    lazy_members_.try_emplace(std::to_underlying(e), LazyMember{item, ordinal, inst});
+  void lazy_member(EntityId e, u32 item, u32 ordinal, const ClassInstantiation& inst, bool dependent_layout) {
+    lazy_members_.try_emplace(std::to_underlying(e), LazyMember{item, ordinal, inst, dependent_layout});
   }
   bool is_lazy_member(EntityId e) const { return lazy_members_.contains(std::to_underlying(e)); }
-  void member_value(EntityId e);
-  void use_member(EntityId e) {
-    if (!is_lazy_member(e) || used_member(e)) return;
-    used_members_.push_back(e);
-    member_value(e);
+  bool member_value(EntityId e, MemberDemand demand);
+  bool use_member(EntityId e, MemberDemand demand, bool unevaluated) {
+    auto it = lazy_members_.find(std::to_underlying(e));
+    if (it == lazy_members_.end() || (unevaluated && it->second.dependent_layout)) return true;
+    retain_member(e);
+    return member_value(e, demand);
+  }
+  void retain_member(EntityId e) {
+    if (!used_member(e)) used_members_.push_back(e);
   }
   bool used_member(EntityId e) const { return std::ranges::contains(used_members_, e); }
   std::optional<std::size_t> member_initializer_index(EntityId e) const {
@@ -2187,7 +2205,8 @@ private:
   void check_default_member_initializers(const sema::ClassRec& rec, Result<ast::ClassDef>& out);
   void prepare_move_constructor(u32 item, EntityId cls, sema::ClassRec& rec);
   std::map<u32, std::vector<std::vector<ast::TemplateParamSema>>> outer_heads_;  // by item
-  std::map<std::pair<u32, u32>, u32> static_init_ends_;  // by (member item, ordinal): its initializer's end
+  std::map<std::pair<u32, u32>, StaticInitializer> static_initializers_;  // by (member item, ordinal)
+  std::map<std::pair<EntityId, MemberDemand>, bool> member_layout_demands_;
   std::map<u32, LazyMember> lazy_members_;                 // by member entity
   std::vector<EntityId> used_members_;                     // in order of first use
   std::set<u32> value_dependent_members_;
@@ -2414,13 +2433,19 @@ public:
     return p_->generic_instance(spec, known, point());
   }
   void generic_defined(const sema::GenericClosure& g) override { p_->generic_defs_[std::to_underlying(g.call)] = g; }
-  std::optional<interp::GlobalVar> global(EntityId v) override { return p_->global(v, value_point(v)); }
+  std::optional<interp::GlobalVar> global(EntityId v) override {
+    const auto item = value_point(v);
+    return p_->global(v, item, member_demand(item));
+  }
   bool is_constexpr(EntityId f) override { return p_->is_constexpr(f, point()); }
   bool is_immediate_function(EntityId f) override { return p_->is_immediate_function(f, point()); }
   bool is_complete(EntityId c) override {
     // An enumerator initializer is read at its original class-member declaration, where the
     // enclosing class is incomplete ([class.mem.general]).
     if (replaying_scoped_enum != EntityId::none && c == instantiating) return false;
+    if (layout_member_demand)
+      return c == layout_member_demand->completing ||
+             p_->is_complete(c, layout_member_demand->item, layout_member_demand->body, layout_member_demand->own);
     // A declaration replay uses the enclosing class's prefix at the written point.
     const u32 parent = p_->items().items[item_].parent;
     if (instantiating != EntityId::none &&
@@ -2499,7 +2524,10 @@ public:
     observed_variable_instantiation_failure |= failed;
     return failed;
   }
-  std::optional<ConstId> constant_value(EntityId v) override { return p_->constant_value(v, value_point(v)); }
+  std::optional<ConstId> constant_value(EntityId v) override {
+    const auto item = value_point(v);
+    return p_->constant_value(v, item, member_demand(item));
+  }
   sema::ConstantCallEvaluation constant_call(sema::Sema& s, const sema::Ex& call) override {
     auto result = sema::Evaluator(s, *this).evaluate(call);
     return {result.value, result.reason, result.diagnosed_failure()};
@@ -2520,9 +2548,8 @@ public:
   std::optional<ast::DeclSema> replay_function_decl(EntityId function) override {
     return p_->replay_function_decl(function);
   }
-  bool use_static_member(EntityId v) override {
-    p_->use_member(v);
-    return !p_->member_failed(v);
+  bool use_static_member(EntityId v, bool unevaluated) override {
+    return p_->use_member(v, member_demand(value_point(v)), unevaluated);
   }
   std::vector<EntityId> defining_bases(EntityId c) override {
     std::vector<EntityId> r;
@@ -2648,6 +2675,12 @@ public:
   // In a class template's instantiation (#88): completeness and constant evaluation are answered
   // at its point of instantiation ([temp.point]); lookup stays at the item.
   std::optional<u32> at_point;
+  std::optional<Program::MemberDemand> layout_member_demand;
+  struct RestoreLayoutMemberDemand {
+    AtItem& q;
+    std::optional<Program::MemberDemand> saved = q.layout_member_demand;
+    ~RestoreLayoutMemberDemand() { q.layout_member_demand = saved; }
+  };
   EntityId instantiating = EntityId::none;  // the class specialization whose member this is
   EntityId replaying_scoped_enum = EntityId::none;
   // In a re-analysed operand: the offsets of calls that were dependent where it appears,
@@ -2689,7 +2722,12 @@ private:
     // the specialization's demand point, while a written class sees its complete member list.
     return definition == p_->class_items_.end() ? point() : p_->last_member(definition->second);
   }
-  u32 point() const { return at_point ? *at_point : item_; }
+  Program::MemberDemand member_demand(u32 item) const {
+    if (layout_member_demand) return *layout_member_demand;
+    if (at_point) return {item};
+    return {item, self_, own_class_complete, completing_class};
+  }
+  u32 point() const { return layout_member_demand ? layout_member_demand->item : at_point.value_or(item_); }
   Program* p_;
   u32 item_;
   bool self_;
@@ -3317,9 +3355,8 @@ public:
   std::optional<ast::DeclSema> replay_function_decl(EntityId function) override {
     return at_.replay_function_decl(function);
   }
-  bool use_static_member(EntityId v) override {
-    p_->use_member(v);
-    return !p_->member_failed(v);
+  bool use_static_member(EntityId v, bool unevaluated) override {
+    return p_->use_member(v, {p_->end()}, unevaluated);
   }
   void static_local(EntityId v, QualType t, std::optional<ConstId> value) override { p_->static_locals_[std::to_underlying(v)] = {t, value}; }
   bool dependent_call(sema::u32 offset) override {
@@ -3422,8 +3459,10 @@ public:
 
   // Analyses a member item of a class template specialization again, instantiating the
   // initializer of its static data member with declarator `ordinal` ([temp.inst]/3).
-  ItemAnalysis(Program& p, u32 item, Program::ClassInstantiation inst, u32 ordinal) : ItemAnalysis(p, item, std::move(inst)) {
+  ItemAnalysis(Program& p, u32 item, Program::ClassInstantiation inst, u32 ordinal,
+               std::optional<Program::MemberDemand> layout_demand) : ItemAnalysis(p, item, std::move(inst)) {
     member_value_ = ordinal;
+    member_layout_demand_ = layout_demand;
   }
 
   // `var` analyses a variable template's definition for the specialization it names, with the
@@ -3434,6 +3473,7 @@ public:
     q_.type_trait_demand = var_->point;
     s_.template_args = var_->args;
   }
+  bool has_member_initial_value() const { return member_initial_value_; }
   bool type_trait_failure() const { return q_.observed_type_trait_failure; }
   bool class_assertion_failure() const { return q_.observed_class_assertion_failure; }
   bool variable_instantiation_failure() const { return q_.observed_variable_instantiation_failure; }
@@ -8108,22 +8148,29 @@ private:
       // initializer of one defined in the class (inline or constexpr) is instantiated when the
       // member is used (`Program::member_value`), from the extent the template's analysis recorded.
       if (inst_ && !early && (spec.is_inline || spec.is_constexpr) && ps_.is(Tk::equal) && member_value_ != ordinal) {
-        if (auto end = p_->static_init_end(k_, ordinal)) {
-          ps_.seek(*end);
-          p_->lazy_member(sem.entity, k_, ordinal, *inst_);
+        if (auto initializer = p_->static_initializer(k_, ordinal)) {
+          ps_.seek(initializer->end);
+          p_->lazy_member(sem.entity, k_, ordinal, *inst_, initializer->dependent_layout);
           declare_member(ConstId::none, {});
           return true;
         }
       }
       if (list_initialization || early || ps_.accept(Tk::equal)) {
+        const AtItem::RestoreLayoutMemberDemand restore{q_};
+        if (member_value_ == ordinal) q_.layout_member_demand = member_layout_demand_;
         u32 at;
         if (list_initialization) {
           const auto form = ps_.accept(Tk::equal) ? sema::Construction::copy_list : sema::Construction::direct_list;
           at = ps_.pos();
           init = ps_.member_initializer(d.type, true, form);
         } else {
+          using Replay = Parser::InitializerReplay;
+          const Parser::InitializerReplayScope replay(ps_, s_.templated() && !early &&
+              (spec.is_inline || spec.is_constexpr) ? Replay::static_member : Replay::none);
+          const auto layout_arguments = ps_.dependent_layout_arguments();
           Ex e = early ? *early : ps_.assignment_expression();
-          if (!inst_) p_->set_static_init_end(k_, ordinal, ps_.index());
+          if (!inst_)
+            p_->set_static_initializer(k_, ordinal, {ps_.index(), ps_.dependent_layout_arguments() != layout_arguments});
           at = e.begin;
           init = s_.convert(e, d.type, at);
         }
@@ -8161,7 +8208,10 @@ private:
         }
         value = *v.value;
         if (usable) p_->set_constant(sem.entity, value, k_);
-        if (member_value_) p_->set_member_init(sem.entity, value);
+        if (member_value_ == ordinal) {
+          member_initial_value_ = true;
+          p_->set_member_init(sem.entity, value);
+        }
       } else if (spec.is_constexpr) {
         s_.diag(d.name_at, Diag::constexpr_uninitialized, d.name);
         declare_member(ConstId::none, {});
@@ -8431,7 +8481,8 @@ private:
       const bool replay = template_ && !var_ && !explicit_ && !d.qualified && !d.template_args &&
                           types.is_scalar(d.type) && !types.is_dependent(d.type) && !types.has_placeholder(d.type) &&
                           fixed_scalar_array_initializer(name);
-      const parse::Parser::VariableTemplateInitializerScope initializer(ps_, replay);
+      using Replay = Parser::InitializerReplay;
+      const Parser::InitializerReplayScope initializer(ps_, replay ? Replay::variable_template : Replay::none);
       const sema::Sema::ClosureOwnerScope closures(s_, initializer_owner());
       early = ps_.braced_init_list();
       u64 n = s_.deduce_bound(d.type, *early);
@@ -8453,7 +8504,9 @@ private:
     // A variable template retains its initializer's pattern ([temp.res]). The placeholder path
     // reads the initializer before publishing the declaration ([dcl.type.auto.deduct]).
     const bool pattern = template_ && !var_ && !fn;
-    const parse::Parser::VariableTemplateInitializerScope initializer(ps_, pattern && !(d.qualified && d.scope.type));
+    using Replay = Parser::InitializerReplay;
+    const Parser::InitializerReplayScope initializer(ps_, (pattern || var_) && !(d.qualified && d.scope.type)
+        ? Replay::variable_template : Replay::none);
     AtItem::RestoreTypeTraitPattern restore{q_};
     q_.retain_type_trait_pattern = pattern;
     std::optional<Ex> early_expr;
@@ -9206,6 +9259,8 @@ private:
   // Analysing a member item again for one static data member's value (`Program::member_value`):
   // the ordinal of the declarator whose initializer is instantiated.
   std::optional<u32> member_value_;
+  std::optional<Program::MemberDemand> member_layout_demand_;
+  bool member_initial_value_ = false;
   // The member declaration being analysed is a member template's ([temp.mem]).
   bool member_template_ = false;
   // The declaration has two template-heads: a member template of a class template's definition.
@@ -10947,9 +11002,18 @@ std::optional<bool> Program::atom_satisfied(ConstId c, u32 point) {
   return atoms_[key];
 }
 
-void Program::member_value(EntityId e) {
-  auto it = lazy_members_.find(std::to_underlying(e));
-  if (it == lazy_members_.end() || it->second.state != LazyMember::State::pending) return;
+bool Program::member_value(EntityId e, MemberDemand demand) {
+  const u32 key = std::to_underlying(e);
+  auto it = lazy_members_.find(key);
+  if (it == lazy_members_.end() || it->second.state == LazyMember::State::running) return true;
+  const auto demand_key = std::pair(e, demand);
+  if (it->second.dependent_layout) {
+    // Each demand has its own completeness context, even if another query in the group already
+    // reached this member. One successful definition supplies its ordinary specialization identity.
+    if (auto checked = member_layout_demands_.find(demand_key); checked != member_layout_demands_.end()) return checked->second;
+  } else if (it->second.state == LazyMember::State::done) {
+    return !member_failed(e);
+  }
   it->second.state = LazyMember::State::running;  // a use in its own initializer finds no value
   LazyMember m = it->second;
   // [temp.inst]/16: initializers instantiated through each other are limited as classes are; past
@@ -10959,15 +11023,19 @@ void Program::member_value(EntityId e) {
       end_diags_.push_back({engine::Loc{std::to_underlying(id(m.item)), 0}, sema::diag_id(sema::Diag::instantiation_depth),
                             {engine::diag_arg(instantiation_limit)}});
     depth_reported_ = true;
-    lazy_members_.at(std::to_underlying(e)).state = LazyMember::State::done;
-    return;
+    lazy_members_.at(key).state = LazyMember::State::done;
+    return false;
   }
   ++members_running_;
-  Result<ast::ItemSema> r = ItemAnalysis(*this, m.item, m.inst, m.ordinal).run();
+  const auto layout_demand = m.dependent_layout ? std::optional(demand) : std::nullopt;
+  ItemAnalysis analysis(*this, m.item, m.inst, m.ordinal, layout_demand);
+  Result<ast::ItemSema> r = analysis.run();
   --members_running_;
   if (r.diags.empty()) {
-    lazy_members_.at(std::to_underlying(e)).initializer = member_initializers_.size();
-    member_initializers_.push_back({e, m.item, r.value.closures, std::move(r.demands)});
+    if (!lazy_members_.at(key).initializer) {
+      lazy_members_.at(key).initializer = member_initializers_.size();
+      member_initializers_.push_back({e, m.item, r.value.closures, std::move(r.demands)});
+    }
     for (const auto& closure : w_->ins.seqs.elements(r.value.closures))
       for (EntityId f : {closure.call, closure.invoker})
         if (f != EntityId::none) declaration_closures_.at(std::to_underlying(f)).lazy_member = e;
@@ -10976,7 +11044,10 @@ void Program::member_value(EntityId e) {
   if (item_sema(m.item).diags.empty())
     for (engine::Diagnostic& d : r.diags)
       if (!std::ranges::contains(end_diags_, d)) end_diags_.push_back(std::move(d));
-  lazy_members_.at(std::to_underlying(e)).state = LazyMember::State::done;
+  lazy_members_.at(key).state = LazyMember::State::done;
+  const bool ready = m.dependent_layout ? analysis.has_member_initial_value() : !member_failed(e);
+  if (m.dependent_layout) member_layout_demands_.emplace(demand_key, ready);
+  return ready;
 }
 
 bool Program::require_enum_definition(EntityId e, u32 point) {
@@ -13259,7 +13330,8 @@ void Program::instantiate_all() {
       }
       if (const auto i = member_initializer_index(e); i && member_initializers_[*i].type_only) {
         member_initializers_[*i].type_only = false;
-        use_member(e);
+        // This initializer was already evaluated. Emitting its storage has no new semantic point.
+        retain_member(e);
         promoted_initializers.push_back(*i);
       }
       // A closure's callable address can survive folding even when its owner's storage does not.

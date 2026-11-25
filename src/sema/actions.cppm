@@ -276,7 +276,7 @@ public:
   virtual std::optional<ast::DeclSema> replay_function_decl(EntityId function) { return template_decl(function); }
   virtual bool value_dependent_member(EntityId /*v*/) { return false; }
   // False when its initializer was in error, which was reported: what uses it says nothing more.
-  virtual bool use_static_member(EntityId /*v*/) { return true; }
+  virtual bool use_static_member(EntityId /*v*/, bool /*unevaluated*/ = false) { return true; }
   // A static local declared ([stmt.dcl]/3), for constant evaluation's questions about it
   // (`global`): its type, and its constant if constant-initialized.
   virtual void static_local(EntityId /*v*/, QualType /*type*/, std::optional<ConstId> /*value*/) {}
@@ -6720,7 +6720,8 @@ public:
   // specialization, naming it instantiates its initializer ([temp.inst]/3).
   Ex static_member(EntityId c, EntityId v, QualType t, u32 begin, u32 end) {
     bool dep = types().is_dependent(types().class_type(c)) && q_->value_dependent_member(v);
-    if (!dep && !types().is_dependent(types().class_type(c)) && !q_->use_static_member(v)) return {NodeId::none, begin, end};
+    if (!dep && !types().is_dependent(types().class_type(c)) && !q_->use_static_member(v, unevaluated != 0))
+      return {NodeId::none, begin, end};
     ExprInfo info{t, ValueCategory::lvalue, dep ? expr_flag::dependent : u8(0)};
     return node(ast::DeclRef{info, v}, begin, end, info);
   }
@@ -10497,14 +10498,15 @@ public:
     ~ClassAlignmentOperand() { checking = saved; }
   };
 
-  // `sizeof` and `alignof` of a type ([expr.sizeof], [expr.alignof]), a `size_t` prvalue; zero
-  // after a diagnostic.
-  Ex dependent_base_alignment(QualType operand, u32 begin, u32 end) {
+  // A dependent layout query whose enclosing construct reparses the written operand.
+  Ex dependent_layout_query(QualType operand, bool align, u32 begin, u32 end) {
     const std::array args{templates().type_arg(operand)};
-    const auto value = ins().intern_value(ast::VDepOp{ast::DepOp::alignof_type, ins().intern_seq(std::span<const TemplateArg>(args))});
+    const auto op = align ? ast::DepOp::alignof_type : ast::DepOp::sizeof_type;
+    const auto value = ins().intern_value(ast::VDepOp{op, ins().intern_seq(std::span<const TemplateArg>(args))});
     return literal(builtin(w_->target.size_type), value, ValueCategory::prvalue, begin, end);
   }
 
+  // [expr.sizeof], [expr.alignof]: a `size_t` prvalue.
   Ex size_of(QualType t, bool align, u32 begin, u32 end) {
     QualType st = builtin(w_->target.size_type);
     if (types().is_dependent(t)) return dependent_node({}, begin, end, st);
