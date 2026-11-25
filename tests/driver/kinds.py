@@ -69,10 +69,11 @@ def rel(ctx, path):
 
 # --- accept / reject --------------------------------------------------------------------------
 
-def expected_errors(files, severity='error'):
+def expected_errors(files, severity='error', *, compiler=None):
     """{(realpath, line, col or None)} from the `//!` markers of files (paths)."""
     return {(os.path.realpath(f), line, col) for f in files
-            for line, col in markers_in(Path(f).read_text(encoding='utf-8', errors='replace'), severity)}
+            for line, col in markers_in(Path(f).read_text(encoding='utf-8', errors='replace'),
+                                        severity, compiler=compiler)}
 
 
 def warning_problems(ctx, r, expected, cwd):
@@ -151,7 +152,7 @@ def verdict_problems(ctx, r, expected, cwd):
 def run_verify(test, ctx, tr, flags, timeout):
     need(ctx.cut, 'syntax')
     files = with_headers(test.path, flags)
-    expected = expected_errors(files)
+    expected = expected_errors(files, compiler=ctx.cut.name)
     warnings = expected_errors(files, 'warning')
     if test.kind == 'accept' and expected:
         raise Unresolved('an accept test has //! error markers (make it a .reject.cpp)')
