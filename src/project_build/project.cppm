@@ -541,7 +541,7 @@ std::expected<void, std::string> prepare_project(
       if (!evidence) return std::unexpected(std::move(evidence.error()));
       observation->request.witness = RuleWitnessReport{
           field, evidence->exit_status, std::move(evidence->out), std::move(evidence->err)};
-      const auto receipt = fingerprint(std::tie(library_key, *witness_key, observation->request));
+      const auto receipt = fingerprint(std::tie(library_key, invocation_key, *witness_key, observation->request));
       auto classified = invoke_rule_worker(run, toolchain, "RuleClassifier", label, library,
                                            std::move(*observation), current_witness);
       if (!classified) return std::unexpected(std::move(classified.error()));

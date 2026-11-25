@@ -3233,6 +3233,14 @@ and profile behind each binding. [#1290](https://github.com/yrashk/ycxx/issues/1
 The coordinator uses a named probe-receipt admission callback to avoid a GCC 16
 module error when boxing nested lambdas.
 
+A source-built package can emit a declared `action.observe` witness and
+classify a normal exit through the optional isolated worker entry point.
+`value("target", "field")` makes the consumer's arguments depend on the stable
+typed export query. Equal support cuts off changes to the receipt. Watch and
+read-only inspection revalidate the provider and the staged witness inputs.
+Named admission callbacks avoid the same GCC 16 module limitation.
+[#1257](https://github.com/yrashk/ycxx/issues/1257)
+
 ## The engine trace (#245, 2026-11-19)
 
 `ycxx cxx --trace-engine[=stream|interactive]` (or `YCXX_TRACE_ENGINE`) shows what a request
