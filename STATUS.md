@@ -2690,6 +2690,14 @@ and diagnoses reads past the end of an unterminated array in a required constant
 ([expr.const]). Native lowering requires no runtime `strlen` symbol. Fixtures in
 `tests/own/builtins/` cover detection, result type, argument checks, and constant and runtime scans.
 
+## Trailing-zero count builtin (#1381)
+
+`__builtin_ctzg` accepts a single `unsigned int` and returns an `int` prvalue. It evaluates the
+operand once. The initializer of a local `constexpr` with a value-dependent operand is evaluated
+after function template substitution. The interpreter counts trailing zeros for nonzero inputs.
+Native code uses BSF on x86-64 and RBIT followed by CLZ on AArch64. `__has_builtin` answers 1.
+Other unsigned operand types and the optional fallback argument remain in #248.
+
 ## C library string and memory builtins (#248, #1093, #1170)
 
 `__builtin_memchr`, `__builtin_memcmp`, `__builtin_memcpy`, `__builtin_memmove`,
