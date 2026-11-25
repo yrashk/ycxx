@@ -2443,6 +2443,10 @@ session's.*
   `typename X<T>::type` needs, instantiating a specialization. A terminal namespace-qualified
   alias specialization such as `N::A<T>` stays a type argument when its expansion is a dependent
   member type ([temp.arg.general], #630).
+- Namespace alias substitution checks dependent qualified type arguments written in the alias
+  body even when the result discards them. Forwarded aliases retain the check while its bindings
+  are dependent. Type requirements and function-template return deduction use the same
+  definition-point lookup ([temp.alias], #1311).
 - Direct uses of namespace alias-template IDs in non-template code outside requires-expressions
   check the alias template's associated constraints before expanding its type when every argument
   is an explicit non-dependent type. Type-constraints and the template-head's requires-clause

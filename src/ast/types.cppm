@@ -194,12 +194,13 @@ struct TBuiltinSpec {
   SeqId<TemplateArg> args;
 };
 
-// A dependent alias in a type default whose written arguments still require substitution.
+// A dependent alias whose written arguments still require substitution.
 // `result` is the expanded type used for deduction and mangling ([temp.alias]).
 struct TDeferredAlias {
   EntityId alias = EntityId::none;
   SeqId<TemplateArg> args;
   QualType result;
+  bool type_default = true;
 };
 
 // ---------------------------------------------------------------- sugar kinds

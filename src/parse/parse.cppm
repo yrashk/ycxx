@@ -2875,6 +2875,9 @@ std::optional<QualType> AtItem::replay_alias_calls(sema::Sema& caller, const ast
   ps.set_questions(q);
   ps.seek(item.begin + pattern.begin);
   ps.namespace_alias_type = pattern.call.class_result;
+  ps.replaying_alias_type_arguments = pattern.call.qualified_type_arguments;
+  // Substitution stops at an invalid argument before a later argument can instantiate a class.
+  ps.substituting_partial_arguments = pattern.call.qualified_type_arguments;
   try {
     auto type = ps.type_id();
     if (type && ps.at_end() && !s.has_error_since(before)) return type;
@@ -3609,24 +3612,23 @@ private:
         const auto class_calls = ps_.deferred_class_immediate_calls();
         const auto checks = ps_.deferred_argument_checks();
         const auto ranks = ps_.deferred_rank_checks();
+        const auto type_arguments = ps_.deferred_alias_type_arguments();
         ps_.namespace_alias_type = true;
         auto t = ps_.type_id();
         ps_.namespace_alias_type = false;
         if (!t || !alias_template(name, name_at, *t)) return bad();
-        const bool rank_checks = ps_.deferred_rank_checks() != ranks;
+        sema::AliasCallPattern pattern;
+        pattern.rank_checks = ps_.deferred_rank_checks() != ranks;
+        pattern.qualified_type_arguments = ps_.deferred_alias_type_arguments() != type_arguments;
+        using Kind = sema::AliasCallPattern::Kind;
         if (ps_.deferred_immediate_calls() != calls) {
-          using Kind = sema::AliasCallPattern::Kind;
-          const auto kind = ps_.deferred_argument_checks() == checks ? Kind::retained : Kind::may_erase;
-          const bool class_result = ps_.deferred_class_immediate_calls() != class_calls;
-          p_->alias_call_patterns_.emplace(decls_.back().entity,
-              Program::AliasCallPattern{k_, begin, ps_.pos(), {kind, class_result, rank_checks}});
-        } else if (rank_checks) {
-          p_->alias_call_patterns_.emplace(decls_.back().entity,
-              Program::AliasCallPattern{k_, begin, ps_.pos(), {.rank_checks = true}});
-        } else if (!s_.templates().structural_operand(*t)) {
-          p_->alias_call_patterns_.emplace(decls_.back().entity, Program::AliasCallPattern{
-              k_, begin, ps_.pos(), {.kind = sema::AliasCallPattern::Kind::unrepresented}});
+          pattern.kind = ps_.deferred_argument_checks() == checks ? Kind::retained : Kind::may_erase;
+          pattern.class_result = ps_.deferred_class_immediate_calls() != class_calls;
+        } else if (!pattern.rank_checks && !s_.templates().structural_operand(*t)) {
+          pattern.kind = Kind::unrepresented;
         }
+        if (pattern.kind != Kind::none || pattern.rank_checks || pattern.qualified_type_arguments)
+          p_->alias_call_patterns_.emplace(decls_.back().entity, Program::AliasCallPattern{k_, begin, ps_.pos(), pattern});
         if (!ps_.expect(Tk::semi)) bad();
         return;
       }
@@ -3779,7 +3781,8 @@ private:
       return bad();
     }
     s_.defer_type_access = true;
-    DeclSpec spec = ps_.decl_specifiers();
+    Parser::TypeAliasChecks return_alias_checks;
+    DeclSpec spec = template_ ? ps_.function_template_decl_specifiers(return_alias_checks) : ps_.decl_specifiers();
     spec.attributes.visibility = std::max(spec.attributes.visibility, leading_attributes.visibility);
     spec.attributes.weak |= leading_attributes.weak;
     if (spec.ok && spec.elaborated && s_.types().is_enum(spec.type)) {
@@ -3832,6 +3835,8 @@ private:
         return;
       }
       ++declarators;
+      if (d.ok && d.function && !return_alias_checks.empty())
+        d.type = ps_.function_with_return_alias_checks(d.type, return_alias_checks);
       bool declared = d.ok && spec.ok && d.named && declare(spec, d, lang, explicit_lang, is_function_def);
       s_.settle_type_access(EntityId::none);  // what `declare` did not settle
       if (!declared) {
