@@ -226,6 +226,7 @@ bool append_artifact_inputs(const GeneratorPlan& generator, Lookup lookup, std::
     if (!outputs) return false;
     inputs.push_back({edge.name, edge.path, (*outputs)[edge.output].contents});
   }
+  std::ranges::sort(inputs, {}, &ActionInput::name);
   return true;
 }
 
@@ -488,7 +489,7 @@ struct MeasuredProfile {
 };
 
 ProjectWatchState watch_rules(const fs::path& cwd, std::string_view target, const RuleToolchain& toolchain,
-                              const RuleSnapshot& snapshot);
+                              const RuleSnapshot& snapshot, const ProjectWatchState* observed = nullptr);
 
 using RunRuleAction = std::function<std::expected<std::vector<NamedArtifact>, std::string>(
     std::string_view, std::string_view, const Action&, std::span<const ActionInput>, Fp128,
@@ -532,13 +533,17 @@ std::expected<void, std::string> prepare_project(
     const ResolveCapabilities& resolve_capabilities, PreparedProject& prepared, bool watch, bool& superseded) {
   for (;;) {
     std::optional<Fp128> definition;
-    auto attempt = plan_with_rules(cwd, target, prepared.rules.expansions, &definition);
+    ProjectWatchState observed;
+    auto attempt = plan_with_rules(cwd, target, prepared.rules.expansions, &definition, watch ? &observed : nullptr);
     // All expansions in one attempt must belong to a single workspace definition.
     if (definition != prepared.manifest) {
       superseded = true;
       return std::unexpected("build.ycxx changed during rule resolution");
     }
-    if (!attempt) return std::unexpected(attempt.error());
+    if (!attempt) {
+      if (watch) prepared.attempt_watch = watch_rules(cwd, target, toolchain, prepared.rules, &observed).stamp;
+      return std::unexpected(attempt.error());
+    }
     if (auto* plan = std::get_if<ProjectPlan>(&*attempt)) {
       prepared.plan = std::move(*plan);
       return {};
@@ -677,7 +682,7 @@ std::optional<ProjectPlan> observe_project(
 }
 
 ProjectWatchState watch_rules(const fs::path& cwd, std::string_view target, const RuleToolchain& toolchain,
-                              const RuleSnapshot& snapshot) {
+                              const RuleSnapshot& snapshot, const ProjectWatchState* observed) {
   std::vector<RuleExpansion> current;
   std::vector<Fp128> observations;
   std::vector<std::string> paths;
@@ -750,7 +755,7 @@ ProjectWatchState watch_rules(const fs::path& cwd, std::string_view target, cons
   for (const auto& probe : snapshot.probes) (void)observe_probe(probe);
   for (const auto& probe : snapshot.pending_projections) (void)observe_probe(probe);
   if (snapshot.pending_witness) (void)observe_witness(*snapshot.pending_witness);
-  auto watch = watch_project(cwd, target, current);
+  auto watch = observed ? *observed : watch_project(cwd, target, current);
   if (watch.pending && std::ranges::none_of(snapshot.observations, [&](const auto& record) {
         return record.demand == *watch.pending;
       })) (void)observe(*watch.pending);
@@ -1267,7 +1272,6 @@ ProjectReport Coordinator::run(const fs::path& cwd, const std::string& target,
               return;
             }
             StagedOutputs staged;
-            if ((error = staged.stage(output, demand->image, true))) return;
             if (!plan.runtime_assets.empty()) {
               const auto assets = build_directory(cwd, "assets", target);
               if (!assets) {
@@ -1280,6 +1284,7 @@ ProjectReport Coordinator::run(const fs::path& cwd, const std::string& target,
                 if ((error = staged.stage(*assets / name, artifact.bytes, artifact.executable))) return;
               }
             }
+            if ((error = staged.stage(output, demand->image, true))) return;
             error = staged.publish();
           })) break;
       if (error) return fail(std::move(*error));

@@ -80,7 +80,7 @@ std::expected<PlanInspection, std::string> inspect_project(
     const std::filesystem::path& cwd, std::string_view target, std::span<const RuleExpansion> expansions);
 std::expected<std::variant<ProjectPlan, RuleDemand>, std::string> plan_with_rules(
     const std::filesystem::path& cwd, std::string_view target, std::span<const RuleExpansion> expansions,
-    std::optional<Fp128>* definition = nullptr);
+    std::optional<Fp128>* definition = nullptr, ProjectWatchState* watch = nullptr);
 std::expected<RulePackageRef, std::string> capability_package(std::string_view package);
 std::expected<RulePackagePlan, std::string> plan_rule_package(
     const std::filesystem::path& cwd, const RulePackageRef& package, std::string_view sdk_header,
@@ -623,7 +623,9 @@ class Planner {
     watch_->paths.insert(path_text(normalized));
   }
 
-  std::string fingerprint_tool(std::string_view spelling, SourceLocation at) const {
+  std::string fingerprint_tool(std::string_view spelling, SourceLocation at) {
+    if (const auto known = tool_fingerprints_.find(spelling); known != tool_fingerprints_.end())
+      return known->second;
     observe(spelling);
     std::error_code ec;
     const auto tool_path = fs::canonical(spelling, ec);
@@ -633,7 +635,9 @@ class Planner {
     if (!executable(status.permissions())) fail(at, std::format("tool '{}' is not executable", spelling));
     const auto fp = Hasher{}.bytes(read_file(tool_path, at)).finish();
     if (watch_) watch_->values.push_back(fp);
-    return std::format("{:016x}{:016x}", fp.lo, fp.hi);
+    auto key = std::format("{:016x}{:016x}", fp.lo, fp.hi);
+    tool_fingerprints_.emplace(std::string(spelling), key);
+    return key;
   }
 
   ResolvedTarget find(std::string_view name, SourceLocation at,
@@ -856,6 +860,7 @@ class Planner {
         }
       }
     }
+    if (artifact_inputs_allowed) std::ranges::sort(plan.inputs, {}, &ActionInput::name);
     return plan;
   }
 
@@ -1015,6 +1020,7 @@ class Planner {
   std::map<std::string, RulePackageRef, std::less<>> prefixes_;
   std::map<std::string, LoweredTarget, std::less<>> primitives_;
   std::map<std::string, std::size_t> generators_;
+  std::map<std::string, std::string, std::less<>> tool_fingerprints_;
   std::set<std::string> resolving_rules_;
   std::set<std::string> active_generators_;
   std::set<std::string> active_;
@@ -1049,22 +1055,6 @@ std::expected<ProjectPlan, std::string> read_project(const fs::path& cwd, std::s
   }
 }
 
-ProjectWatchState watch_plan(const fs::path& cwd, std::string_view target,
-                             std::span<const RuleExpansion> expansions) {
-  WatchObservations observed;
-  Fp128 stamp;
-  std::optional<RuleDemand> pending;
-  try {
-    const auto plan = read_project(cwd, target, &observed, nullptr, expansions);
-    stamp = plan ? fingerprint(std::tie(observed.manifest, *plan)) :
-                   fingerprint(std::tie(observed.manifest, observed.values, plan.error()));
-  } catch (RuleDemand& demand) {
-    stamp = fingerprint(std::tie(observed.manifest, observed.values, demand));
-    pending = std::move(demand);
-  }
-  return {stamp, {observed.paths.begin(), observed.paths.end()}, std::move(pending)};
-}
-
 }  // namespace
 
 std::string generated_path(const fs::path& cwd, std::string_view generator, std::string_view filename) {
@@ -1073,7 +1063,9 @@ std::string generated_path(const fs::path& cwd, std::string_view generator, std:
 
 ProjectWatchState watch_project(const fs::path& cwd, std::string_view target,
                                 std::span<const RuleExpansion> expansions) {
-  return watch_plan(cwd, target, expansions);
+  ProjectWatchState watch;
+  (void)plan_with_rules(cwd, target, expansions, nullptr, &watch);
+  return watch;
 }
 
 std::expected<PlanInspection, std::string> inspect_project(
@@ -1090,14 +1082,31 @@ std::expected<PlanInspection, std::string> inspect_project(
 
 std::expected<std::variant<ProjectPlan, RuleDemand>, std::string> plan_with_rules(
     const fs::path& cwd, std::string_view target, std::span<const RuleExpansion> expansions,
-    std::optional<Fp128>* definition) {
-  try {
-    auto plan = read_project(cwd, target, nullptr, nullptr, expansions, definition);
-    if (!plan) return std::unexpected(std::move(plan.error()));
-    return std::variant<ProjectPlan, RuleDemand>(std::move(*plan));
-  } catch (RuleDemand& demand) {
-    return std::variant<ProjectPlan, RuleDemand>(std::move(demand));
+    std::optional<Fp128>* definition, ProjectWatchState* watch) {
+  using PlanResult = std::variant<ProjectPlan, RuleDemand>;
+  WatchObservations observed;
+  auto result = [&]() -> std::expected<PlanResult, std::string> {
+    try {
+      auto plan = read_project(cwd, target, watch ? &observed : nullptr, nullptr, expansions, definition);
+      if (!plan) return std::unexpected(std::move(plan.error()));
+      return PlanResult(std::move(*plan));
+    } catch (RuleDemand& demand) {
+      return PlanResult(std::move(demand));
+    }
+  }();
+  if (watch) {
+    watch->paths.assign(observed.paths.begin(), observed.paths.end());
+    watch->pending.reset();
+    if (!result) watch->stamp = fingerprint(std::tie(observed.manifest, observed.values, result.error()));
+    else if (const auto* plan = std::get_if<ProjectPlan>(&*result))
+      watch->stamp = fingerprint(std::tie(observed.manifest, *plan));
+    else {
+      const auto& demand = std::get<RuleDemand>(*result);
+      watch->stamp = fingerprint(std::tie(observed.manifest, observed.values, demand));
+      watch->pending = demand;
+    }
   }
+  return result;
 }
 
 std::expected<RulePackageRef, std::string> capability_package(std::string_view package) {

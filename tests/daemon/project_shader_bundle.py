@@ -139,6 +139,18 @@ def check_watch(ycxx, scope, env, executable, installed, changed, recovery):
         check_native_reused(events, executable, installed)
         check_application(scope, FRAGMENT)
         watch.idle('shader asset publication after recovery')
+
+        (scope / fragment_source).unlink()
+        summary, events, watched = watch.build('watch detects missing fragment source', succeeds=False)
+        assert summary['actions_executed'] == 0, summary
+        assert fragment_path in watched and bundle.read_bytes() == recovered, watched
+        check_native_reused(events, executable, installed)
+        watch.idle('missing shader source waits for restoration')
+        replace_source(scope, fragment_source, recovery)
+        summary, events, _ = watch.build('watch recovers when the source reappears')
+        assert summary['actions_executed'] == 0, summary
+        assert check_bundle(scope) == recovered
+        check_native_reused(events, executable, installed)
         return recovered
     finally:
         watch.close()
