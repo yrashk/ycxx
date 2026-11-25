@@ -521,9 +521,10 @@ project must survive any session ending.
 4. **Areas:** `area:*` labels partition the code. Two sessions never write the same area at the
    same time, and each works in its own git worktree and branch.
 5. **Model allocation:**
-   - Routine implementation, code review and testing use Claude Opus or Codex Sol at medium
-     effort. Use high effort for intricate work. Smaller models can handle mechanical work
-     such as data tables, extraction scripts and bulk test triage.
+   - Claude Opus uses medium effort for routine implementation, code review and testing,
+     and high effort for intricate work. Smaller Claude models can handle mechanical work.
+   - Codex Sol uses high effort for implementation, code review and testing. Use Sol medium
+     for mechanical work such as data tables, extraction scripts and bulk test triage.
    - Use the corresponding design model sparingly: Claude Opus escalates to Fable and Codex
      Sol escalates to Astra. Escalate architecture and design decisions, hard specification
      questions that affect a design or implementation, and independent verification of a
