@@ -220,7 +220,6 @@ def check_header(ycxx, scope, env, compiler):
     assert not any(row['kind'] == 'capability-input' for row in facts), facts
     assert not log.exists() and not (scope / '.ycxx').exists(), 'cold show executed project actions'
 
-    (scope / '.ycxx').mkdir()
     executable = scope / '.ycxx/out/app'
     _, events = traced_build(ycxx, scope, env, 'ordinary build with demanded capabilities')
     check_demand(events, wrapper, cold=True)
@@ -282,7 +281,6 @@ def check_header(ycxx, scope, env, compiler):
 
 
 def check_probe_input_recovery(ycxx, scope, env, compiler):
-    (scope / '.ycxx').mkdir()
     (scope / 'tools/host').mkdir(parents=True)
     mode = scope / 'tools/host/mode.txt'
     mode.write_text('disabled\n', encoding='utf-8')
@@ -323,12 +321,16 @@ def main():
             tempfile.TemporaryDirectory(prefix='ycxx-capability-header-') as directory,
             tempfile.TemporaryDirectory(prefix='yb', dir=runtime_root('yb')) as runtime,
         ):
-            scope = Path(directory).resolve()
+            checkout = Path(directory).resolve()
+            (checkout / '.git').mkdir()
+            scope = checkout / 'project'
+            scope.mkdir()
             env = env_for(runtime)
             try:
                 check(ycxx, scope, env, compiler)
             finally:
-                run_client(ycxx, scope, env, 'ctl', 'shutdown')
+                for root in (scope, checkout):
+                    run_client(ycxx, root, env, 'ctl', 'shutdown', '--root', str(root))
 
 
 if __name__ == '__main__':

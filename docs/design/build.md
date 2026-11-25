@@ -143,6 +143,46 @@ Modules, host and target variants, richer link propagation and a foreign build
 adapter grow coverage after the first witness (#1259). Package acquisition and
 version solving sit outside the build.
 
+## Shader bundles and runtime assets (#1258)
+
+```text
+use plugin("tools/shaders/rules") as shaders
+
+shaders.bundle "scene" {
+    inventory = "shaders/inventory.txt"
+    reads = ["shaders/inventory.txt"]
+    compiler = "/usr/bin/glslc"
+    python = "/usr/bin/python3"
+}
+
+cpp.executable "app" {
+    sources = ["main.cc"]
+    runtime_assets = [artifact("scene", "bundle")]
+}
+```
+
+A package can emit a bounded definition containing a public `action.generate`
+with the requested target name and private `action.generate` dependencies.
+Private names are local to that expansion. The existing worker protocol carries
+the whole definition. An action's named input can select a named output through
+`artifact(target, output)`. The planner checks the reachable graph and rejects
+cycles. The engine prepares downstream actions when their selected input
+receipts arrive. Action identity uses the concrete staged bytes and modes,
+the recipe, and the tool identity. A syntactically different expansion can
+therefore reuse an equivalent action. Plan inspection shows the artifact edges.
+
+The shader package stages one source per compile. The packer takes the named
+outputs and produces the bundle. A native target's `runtime_assets` are
+published under `.ycxx/assets/<target>/<filename>`. The selected assets are
+independent of the native compiler inputs. The coordinator publishes after
+the actions and native build succeed. A failed compile leaves the last
+published bundle in place. A missing published bundle can be restored from
+the resident receipts.
+
+The Astra architecture review identified named receipt bytes, private action
+names, and a separate runtime publication path as the seams for this slice.
+The structured reflection witness is tracked in [#1258](https://github.com/yrashk/ycxx/issues/1258).
+
 ## Resolved plan inspection (#1256)
 
 `ycxx show app` reports the targets and facts the planner reached. Each source,
@@ -307,3 +347,43 @@ The trace shows the probes and their named projections. Read-only inspection
 revalidates the observation inputs before showing a cached expansion and its
 probe and compiler provenance. Watch reobserves both the package and its
 declared compiler inputs. [#1290](https://github.com/yrashk/ycxx/issues/1290)
+
+## Package-defined observations
+
+A provider can export a support state for a tool it knows how to check.
+
+```text
+use plugin("tools/codec/rules") as codec
+use plugin("builtin:capabilities") as capabilities
+
+codec.profile "wire" {
+    tool = "/opt/codec/bin/check"
+    reads = ["profiles/wire.cfg"]
+}
+
+capabilities.header "config" {
+    capabilities = { fast = value("wire", "fast-mode") }
+}
+```
+
+A referenced rule emits an `action.observe` declaration with one `export`
+name, a tool, optional arguments, staged inputs and environment. The coordinator
+runs the declared witness outside the query epoch. For a normal exit, it gives
+the same isolated worker generation the named export, exit status, and up to
+64 KiB each of stdout and stderr. The optional SDK classifier supplies a single support state.
+A normal nonzero exit can support a classification. Setup failures, signals,
+timeouts, oversized evidence and invalid classifier replies fail the build
+without admitting a typed value. Declared inputs and the provider are observed
+even on a failed attempt.
+
+The result has a stable address made from the workspace, producer target and
+export name. The receipt tracks the action and provider generation separately.
+The consumer's argument query fetches the export and receives only its typed
+state. A receipt change with an equal state cuts off downstream work on the
+same query cell. Read-only inspection validates the provider and witness inputs
+before reading admitted provenance. Watch reobserves those same dependencies.
+Existing `probe(package, id)` bindings continue to select a compiler observation
+from the shipped catalogue.
+
+The independent Astra design review identified the stable export address and
+separate receipt dependencies as the basis for semantic cutoff. [#1257](https://github.com/yrashk/ycxx/issues/1257)

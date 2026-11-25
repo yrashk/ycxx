@@ -607,6 +607,7 @@ struct Attribute {
 struct Throw {
   ExprInfo info;
   [[=sequenced]] Child operand;
+  EntityId exception_class = EntityId::none;  // a certified class exception object
 };
 
 // [except.pre], [except.handle]: the protected block and its ordered handlers.

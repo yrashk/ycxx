@@ -435,6 +435,7 @@ public:
   }
   // ABI attributes on declarations outside the entity's ordinary declaration records.
   bool has_unapplied_declaration_attributes(EntityId e) const { return unapplied_declaration_attributes_.contains(e); }
+  bool class_rtti_declaration_has_unapplied_abi(EntityId cls, u32 item, bool friend_declaration) const;
   bool peer_root_vtable_visible(EntityId cls) const;
   bool plain_class_template_type(EntityId cls) const;
   bool plain_class_template_function(EntityId pattern, u32 definition) const;
@@ -9419,6 +9420,20 @@ bool Program::plain_class_template_function(EntityId pattern, u32 definition) co
   const auto decls = decls_.find(std::to_underlying(pattern));
   return decls == decls_.end() ||
          std::ranges::none_of(decls->second, [&](const auto& d) { return attributed(d.first); });
+}
+
+// A declaration can change a class's RTTI binding or representation even if the class
+// definition itself is unannotated.
+bool Program::class_rtti_declaration_has_unapplied_abi(EntityId cls, u32 k, bool friend_declaration) const {
+  const auto& item = items_->items[k];
+  const bool definition = item.kind == ItemKind::class_def;
+  const u32 head_end = definition ? item.brace_begin : item.end;
+  // A friend that introduces a class records its namespace attributes in
+  // introduce_namespace_class. A friend that only names a known class does not inherit them.
+  return r_->first_visibility_pragma || r_->has_clang_attribute_pragma ||
+         has_unapplied_declaration_attributes(cls) || (!friend_declaration && in_attributed_namespace(k)) ||
+         layout_attribute(*r_, item.begin, head_end, LayoutAttributes::any) ||
+         (definition && layout_attribute(*r_, item.brace_end, item.end, LayoutAttributes::any));
 }
 
 // The class, including earlier declarations and later friends of its slots, must use the

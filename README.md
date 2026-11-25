@@ -45,7 +45,11 @@ can be compared with the checkout and rendered as a standalone HTML report.
 observations with `ycxx show app`.
 Import `builtin:capabilities` to project selected observations into a generated
 C++ header with `constexpr` values.
-[Build design](docs/design/build.md) [#1251](https://github.com/yrashk/ycxx/issues/1251)
+A source-built rule package can also run its own witness and export a support
+state to a consumer using `value("target", "field")`.
+The shader example stages named compiler outputs into a bundle and publishes it
+through the executable's `runtime_assets`.
+[Runnable build examples](examples/project-build) · [Build design](docs/design/build.md) · [#1251](https://github.com/yrashk/ycxx/issues/1251)
 
 Ordinary function pointers and references preserve concrete `noexcept` type identity.
 A nonthrowing function can be used where the corresponding potentially throwing type is expected.
@@ -338,6 +342,9 @@ aggregate results through the target's supported ABI.
 [#853](https://github.com/yrashk/ycxx/issues/853)
 
 On x86-64 Linux, an eligible ycxx function can also throw an `int` to a hosted peer's handler.
+A hosted GCC or Clang handler can also catch by const reference a named trivial record thrown
+by a ycxx ELF object when the record is initialized explicitly and has one public `int` field.
+This works with either producer RTTI flag. [#1237](https://github.com/yrashk/ycxx/issues/1237)
 A host-linked ycxx function can use one `catch (...)` to return an integer literal when
 a direct call on its parameter to an externally defined `int(int)` function throws.
 It can also use one `catch (int value)` to return the caught integer and let exceptions of

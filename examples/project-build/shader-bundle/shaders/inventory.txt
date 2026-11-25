@@ -1,0 +1,2 @@
+triangle-vertex vertex shaders/triangle.vert
+triangle-fragment fragment shaders/triangle.frag

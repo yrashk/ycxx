@@ -1135,9 +1135,9 @@ private daemons.
     request. Concurrent clients include two requests of one file and a distinct build root
     reaching the checkpoint while the first is parked.
   - All run on macOS and Linux.
-  - `daemon.compare`, `daemon.process`, `daemon.trace` and `unit.linux_elf_comdat` put their
-    private daemon runtimes under `TMPDIR` when the socket path fits, with `/tmp` as the fallback
-    for long paths (#793).
+  - `daemon.compare`, `daemon.process`, `daemon.trace`, `unit.linux_basic_asm` and
+    `unit.linux_elf_comdat` put their private daemon runtimes under `TMPDIR` when the socket path
+    fits, with `/tmp` as the fallback for long paths (#793, #1273).
 - The first persistence slice (#17) shares phase-1 and phase-2 source preparation in immutable
   mapped snapshot files. A selected query cell can be loaded at quiescence with its direct input
   dependency fingerprints and then verified by the usual engine path. The lexer borrows mapped
@@ -3187,6 +3187,8 @@ native executable under `.ycxx/out`. The first rules are `cpp.executable`,
 `cpp.library` (a source-backed object group), and `generate` (a declared host
 tool with staged inputs and named outputs). Explicit source globs are resolved on
 each request. Linux uses the native freestanding compiler and linker.
+The manifest identifies the daemon scope before the first build creates `.ycxx`,
+including when the workspace is nested in a checkout (#1305).
 
 A resident workspace query asks for generator receipts and fetches the native
 compiler under the same query context. The coordinator admits tool results between
@@ -3230,6 +3232,22 @@ worker, generator, and compiler results. The plan and trace retain the query
 and profile behind each binding. [#1290](https://github.com/yrashk/ycxx/issues/1290)
 The coordinator uses a named probe-receipt admission callback to avoid a GCC 16
 module error when boxing nested lambdas.
+
+A source-built package can emit a declared `action.observe` witness and
+classify a normal exit through the optional isolated worker entry point.
+`value("target", "field")` makes the consumer's arguments depend on the stable
+typed export query. Equal support cuts off changes to the receipt. Watch and
+read-only inspection revalidate the provider and the staged witness inputs.
+Named admission callbacks avoid the same GCC 16 module limitation.
+[#1257](https://github.com/yrashk/ycxx/issues/1257)
+
+Package expansions can declare private actions feeding a public generator.
+Named artifact inputs stage selected receipt bytes and modes into downstream
+actions. Executables publish `runtime_assets` under `.ycxx/assets/<target>`
+after a successful build. These outputs have their own receipt dependencies
+and leave the native request reusable on shader edits. The sample packs real
+SPIR-V and the portable daemon test exercises watch, failed compilation, and
+restoration from receipts. [#1258](https://github.com/yrashk/ycxx/issues/1258)
 
 ## The engine trace (#245, 2026-11-19)
 
@@ -4549,6 +4567,20 @@ Each is removed once ycxx compiles itself.
 | M6 | x86-64 ELF | Same on Linux |
 | M7 | libycxx under ycxx | libycxx's suite passes, compiled by ycxx |
 | M8 | Self-hosting | Stage 2 equals stage 3; the GCC-built bootstrap anchor is released (DECISIONS §3.5) |
+
+## Throwing a trivial class object on Linux (#1237)
+
+A cleanup-free x86-64 Linux function can throw an explicitly initialized,
+default-visible namespace-scope record with one ordinary public `int` member
+and trivial implicit copy and destruction. The hosted Itanium ABI path allocates
+the exception object and copies the target-layout bytes. The ELF object emits the
+root-class type identity with both `-frtti` and `-fno-rtti`. Mixed GCC and Clang
+links catch the record by const reference and observe the signed payload.
+
+More general exception-object construction, native class handlers and exceptional
+cleanup remain under [#89](https://github.com/yrashk/ycxx/issues/89) and
+[#135](https://github.com/yrashk/ycxx/issues/135). Darwin parity is
+[#648](https://github.com/yrashk/ycxx/issues/648).
 
 ## Ordinary block try and catch (#558)
 

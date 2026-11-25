@@ -1,0 +1,13 @@
+use plugin("rules/package") as shaders
+
+shaders.bundle "scene" {
+    inventory = "shaders/inventory.txt"
+    reads = ["shaders/inventory.txt"]
+    compiler = "/usr/bin/glslc"
+    python = "/usr/bin/python3"
+}
+
+cpp.executable "app" {
+    sources = ["main.cc"]
+    runtime_assets = [artifact("scene", "bundle")]
+}

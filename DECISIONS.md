@@ -448,9 +448,9 @@ specified by the accepted [optimization design](docs/design/optimization.md) (#3
      identity before type deduction, and the declaration part carries its members (#338).
 10. **The resident daemon.** Specified by the accepted [daemon design](docs/design/daemon.md)
     (#83); the section references in this item point into it.
-    - **One daemon per project root and ycxx binary.** The root is the first `.ycxx` or
-      version-control marker found walking up from the source (submodules skipped, worktrees
-      counted). *Reason:* one revision per daemon, so one project's edits never stop another's
+    - **One daemon per project root and ycxx binary.** The root is found at the first `.ycxx`,
+      `build.ycxx` file or version-control marker walking up from the source (submodules skipped,
+      worktrees counted). *Reason:* one revision per daemon, so one project's edits never stop another's
       builds, and two binaries never share a daemon. (§2)
     - **A Unix socket named by scope and build hash; the client writes the outputs.** One
       `compile` request carries the whole command line, made absolute against its `cwd`, and the

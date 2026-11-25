@@ -4066,7 +4066,8 @@ public:
   }
   const Ex* explicit_aggregate_prvalue(const Ex& e) const {
     auto found = explicit_aggregate_prvalues_.find(e.begin);
-    if (found == explicit_aggregate_prvalues_.end() || found->second.id != e.id || found->second.end != e.end)
+    if (found == explicit_aggregate_prvalues_.end() || found->second.begin != e.begin + 1 ||
+        found->second.id != e.id || found->second.end != e.end)
       return nullptr;
     return &found->second;
   }
@@ -11818,6 +11819,44 @@ public:
                 begin, end, info);
   }
 
+  bool supports_class_throw(EntityId cls, Ex value) {
+    if (!w_->target.supports(ast::NativeOperation::hosted_trivial_class_throw) ||
+        value.cat() != ValueCategory::prvalue || !ordinary_default_member_owner(cls)) return false;
+    const auto& entity = w_->entities.rec(cls);
+    if (entity.linkage != ast::Linkage::external) return false;
+    for (EntityId scope = entity.scope; scope != EntityId::none; scope = w_->entities.rec(scope).scope)
+      if (ins().names.spelling(w_->entities.rec(scope).name) == "(anonymous)") return false;
+
+    // The original braces must explicitly initialize the field. Normalized lists can also
+    // contain synthesized initializers for omitted fields.
+    while (auto paren = as<ast::Paren>(value)) {
+      value.begin += paren->operand.at;
+      value.id = paren->operand.id;
+    }
+    const auto init = explicit_aggregate_prvalues_.find(value.begin);
+    if (init == explicit_aggregate_prvalues_.end() || init->second.id != value.id ||
+        list_elements(init->second).size() != 1) return false;
+
+    const auto* record = class_rec(cls);
+    if (!record || !record->member_declarations_valid || record->union_ || record->closure ||
+        record->layout_requires_virtual_support || record->explicit_alignment || record->unapplied_layout ||
+        !record->bases.empty() || record->fields.size() != 1 || record->user_ctors ||
+        record->destructor_declaration() != EntityId::none || !record->destructor_usable) return false;
+    // [except.throw]: construction from const T& in an unrelated context must also work.
+    // With only the ordinary int field, the eligible implicit copy takes const T& and is public.
+    const auto& copy = record->trivial_copyability;
+    if (copy.copy_constructor != CopyOperation::eligible_trivial ||
+        copy.destructor != CopyOperation::eligible_trivial) return false;
+    const auto& field = record->fields.front();
+    if (types().canonical(field.type) != builtin(Builtin::int_) ||
+        record->access_of(field.entity) != ast::Access::public_ || field.dmi ||
+        field.bit_width || field.no_unique_address) return false;
+    const auto* implicit = record->implicit_copy_assignment();
+    return std::ranges::none_of(record->members, [&](const MemberDeclRec& m) {
+      return &m != implicit && ins().names.spelling(m.name) == "operator=";
+    });
+  }
+
   // [expr.throw], [except.throw]: retain the operand, with array and function decay.
   Ex throw_expression(std::optional<Ex> operand, u32 begin, u32 end) {
     Ex fail{NodeId::none, begin, end};
@@ -11826,13 +11865,17 @@ public:
     if (!operand) return node(ast::Throw{info, {}}, begin, end, info);
     Ex value = *operand;
     if (!value.ok()) return fail;
+    EntityId exception_class = EntityId::none;
     if (dependent(value)) {
       info.flags |= expr_flag::dependent;
-    } else {
-      if (types().is_class(value.type())) {
-        if (require_complete(value.type(), value.begin)) diag(value.begin, Diag::throw_class_unsupported, value.type());
+    } else if (types().is_class(value.type())) {
+      if (!require_complete(value.type(), value.begin)) return fail;
+      exception_class = types().class_of(value.type());
+      if (!supports_class_throw(exception_class, value)) {
+        diag(value.begin, Diag::throw_class_unsupported, value.type());
         return fail;
       }
+    } else {
       value = rvalue(value);
       if (!value.ok() || !require_complete(value.type(), value.begin)) return fail;
       if (types().is_pointer(value.type())) {
@@ -11840,7 +11883,7 @@ public:
         if (!types().is_void(pointee) && !require_complete(pointee, value.begin)) return fail;
       }
     }
-    return node(ast::Throw{info, at(value, begin)}, begin, end, info);
+    return node(ast::Throw{info, at(value, begin), exception_class}, begin, end, info);
   }
 
   // Retain a typed integral operand without reading a named object. The conditional's
