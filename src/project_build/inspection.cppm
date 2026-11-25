@@ -5,6 +5,7 @@ import std;
 import ycxx.ast;
 import ycxx.build.inspection_html;
 import ycxx.build.inspection_model;
+import ycxx.build.module_graph_diff;
 import ycxx.build.plan;
 import ycxx.build.project;
 import ycxx.lsp;
@@ -26,6 +27,7 @@ struct PlanComparison {
   int schema = 1;
   std::string target;
   std::vector<PlanChange> changes;
+  std::optional<ModuleGraphChanges> module_changes = std::nullopt;
 };
 
 namespace {
@@ -134,7 +136,14 @@ std::expected<std::string, std::string> show_project(
     if (!before) return std::unexpected(before.error());
     auto diff = compare(*before, *inspected);
     if (!diff) return std::unexpected(diff.error());
-    if (format == InspectionFormat::json) return lsp::dump(lsp::to_json(*diff)) + "\n";
+    if (format == InspectionFormat::json) {
+      if (before->module_graph && inspected->module_graph) {
+        auto modules = compare_module_graph(*before->module_graph, *inspected->module_graph);
+        if (!modules) return std::unexpected(std::move(modules.error()));
+        diff->module_changes = std::move(*modules);
+      }
+      return lsp::dump(lsp::to_json(*diff)) + "\n";
+    }
     if (format == InspectionFormat::html) return render_inspection_html(*inspected, std::move(diff->changes));
     return diff_text(*diff);
   }
