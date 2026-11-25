@@ -178,6 +178,15 @@ struct BuiltinCall {
   [[=indeterminately_sequenced]] ChildList args;
 };
 
+// The written destination type and source expression of __builtin_bit_cast.
+struct BitCast {
+  ExprInfo info;
+  QualType destination;
+  [[=sequenced]] Child source;
+  u32 type_at;
+  bool supported;
+};
+
 // A folded __builtin_constant_p result. The operand is retained for expression analysis,
 // including noexcept, but is never executed.
 struct ConstantProbe {
@@ -651,7 +660,7 @@ using Nodes = closed_list<Literal, DeclRef, Paren, Unary, Binary, OrderedBinary,
                           NewArray, DeleteArray, DelegatingInit, VirtualMemberCall, Throw, TryBlock, Handler,
                           DefaultMemberInit, ExplicitDestroy, PeerRootInit, DynamicCastVoid, DynamicCastPointer, Asm,
                           ConstantProbe, ThreeWay, SourceLine, DefaultSourceContext, SourceLocation,
-                          ImmediateVirtualCall>;
+                          ImmediateVirtualCall, BitCast>;
 
 static_assert(Nodes::size < max_node_kinds);
 

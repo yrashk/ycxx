@@ -4055,6 +4055,19 @@ public:
     return s_->unary(*op, e, begin, e.end > begin ? e.end : pos(), begin);
   }
 
+  // This builtin takes a type-id and one assignment-expression (docs/EXTENSIONS.md).
+  Ex bit_cast_expression(u32 begin) {
+    bump();  // builtin name
+    bump();  // '('
+    Unangle unangle{angle_};
+    const u32 type_at = pos();
+    const auto destination = type_id();
+    if (!destination || !expect(Tk::comma)) return {NodeId::none, begin, pos()};
+    Ex source = assignment_expression();
+    if (!expect(Tk::r_paren)) return {NodeId::none, begin, pos()};
+    return s_->bit_cast(*destination, source, begin, pos(), type_at);
+  }
+
   // [support.types.layout]: a type-id and a direct non-static data member.
   Ex offsetof_expression(u32 begin) {
     bump();  // builtin name
@@ -4407,6 +4420,7 @@ public:
           Ex r = s_->builtin_call(*bf, std::move(args), begin, pos());
           return {r.id, begin, pos(), r.info};
         }
+      if (kind(1) == Tk::l_paren && s_->builtin_bit_cast(n)) return bit_cast_expression(begin);
       if (kind(1) == Tk::l_paren && s_->builtin_offsetof(n)) return offsetof_expression(begin);
       // A type-testing built-in, `__is_same(T, U)` (docs/EXTENSIONS.md).
       if (kind(1) == Tk::l_paren)

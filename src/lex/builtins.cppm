@@ -225,6 +225,7 @@ constexpr bool lacking_builtin(std::string_view name) { return std::ranges::cont
 
 // A built-in with a type operand and a member designator rather than a call argument list.
 inline constexpr std::string_view builtin_offsetof_name = "__builtin_offsetof";
+inline constexpr std::string_view builtin_bit_cast_name = "__builtin_bit_cast";
 
 // The built-in templates ycxx implements (docs/EXTENSIONS.md): Clang's
 // `__make_integer_seq<Seq, T, N>`, `Seq<T, 0, …, N-1>`, which libycxx's `make_integer_sequence`

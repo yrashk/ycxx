@@ -1171,6 +1171,10 @@ class Gen {
     }
     if (is<ast::CtorCall>(e)) return call_constructor(p.ptr, e, zeroed);
     if (is<ast::ThreeWay>(e)) return three_way(p, e);
+    if (is<ast::BitCast>(e) && cls(p.type) == TypeClass::record) {
+      bit_cast(e, p);
+      return;
+    }
     if (is<ast::InitList>(e)) {
       bool array = cls(p.type) == TypeClass::array;
       // A class's elements are its direct bases, then its members ([dcl.init.aggr]/2).
@@ -1744,6 +1748,7 @@ class Gen {
         return 2;
     }
     int e = is<ast::DynamicCastVoid>(a) || is<ast::DynamicCastPointer>(a) ? 1 : 0;
+    if (is<ast::BitCast>(a) && is_lvalue(child(a, get<ast::BitCast>(a).source))) e = 1;
     if (is<ast::ImplicitConversion>(a)) {
       auto c = get<ast::ImplicitConversion>(a);
       if (c.conversion == ast::ConversionKind::lvalue_to_rvalue && !is_nullptr(c.info.type)) e = 1;
@@ -1778,6 +1783,7 @@ class Gen {
     if (in_.types.is<ast::TMemberPtr>(in_.types.canon(t))) unsupported(a, "with a pointer-to-member value");
     if (is<ast::Literal>(a)) return constant(t, get<ast::Literal>(a).value);
     if (is<ast::ConstantProbe>(a)) return int_constant(t, get<ast::ConstantProbe>(a).proved);
+    if (is<ast::BitCast>(a)) return bit_cast(a);
     if (is<ast::SourceLine>(a))
       return int_constant(t, source_line_ != 0 ? source_line_ : get<ast::SourceLine>(a).lexical_line);
     if (is<ast::SourceLocation>(a)) {
@@ -1884,6 +1890,70 @@ class Gen {
     if (is<ast::Conditional>(a)) return conditional(a, false).value;
     if (is<ast::ValueInit>(a) && cls(t) != TypeClass::record && cls(t) != TypeClass::array) return zero(t);
     unsupported(a);
+  }
+
+  // Sema proved that the fields fill both representations in target byte order. Use
+  // ordinary typed reads and initialization so both evaluation paths check the same objects.
+  std::optional<ValueId> bit_cast(At a, std::optional<Place> into = {}) {
+    const auto cast = get<ast::BitCast>(a);
+    if (!cast.supported || (cls(cast.info.type) == TypeClass::record && !into))
+      throw Unsupported{"evaluating __builtin_bit_cast with this object representation"};
+
+    struct FieldValue {
+      ast::QualType type;
+      ValueId value;
+      uint32_t bits;
+    };
+    std::vector<FieldValue> source;
+    const At operand = child(a, cast.source);
+    const auto from_type = info(operand).type;
+    auto add_field = [&](ast::QualType type, ValueId value) {
+      source.push_back({type, value, facts_.integer(type).width});
+    };
+    if (cls(from_type) == TypeClass::record) {
+      const Place from = lvalue(operand);
+      const auto owner = facts_.class_entity(from_type);
+      for (uint32_t i = 0; const auto field = facts_.field_type(owner, i); ++i)
+        add_field(*field, load(subobject(from, ir::Step::field, i, *field)));
+    } else {
+      add_field(from_type, is_lvalue(operand) ? load_glvalue(operand, from_type) : rvalue(operand));
+    }
+
+    // Each step consumes a contiguous slice of the current source field. Logical shifts
+    // discard earlier bits, and conversion and left shift discard bits above the result field.
+    std::size_t source_index = 0;
+    uint32_t consumed = 0;
+    auto result_field = [&](ast::QualType type) {
+      const auto width = facts_.integer(type).width;
+      ValueId result{};
+      for (uint32_t written = 0; written < width;) {
+        const auto& field = source[source_index];
+        auto value = field.value;
+        if (consumed != 0)
+          value = shift(false, field.type, value, int_constant(facts_.int_type(), consumed));
+        value = arithmetic(field.type, type, value);
+        if (written == 0) {
+          result = value;
+        } else {
+          value = shift(true, type, value, int_constant(facts_.int_type(), written));
+          result = pure(ir::Op::or_, type, {result, value});
+        }
+        const auto count = std::min(width - written, field.bits - consumed);
+        written += count;
+        consumed += count;
+        if (consumed == field.bits) {
+          ++source_index;
+          consumed = 0;
+        }
+      }
+      return result;
+    };
+
+    if (!into) return result_field(cast.info.type);
+    const auto owner = facts_.class_entity(into->type);
+    for (uint32_t i = 0; const auto field = facts_.field_type(owner, i); ++i)
+      store(subobject(*into, ir::Step::field, i, *field), result_field(*field));
+    return std::nullopt;
   }
 
   ValueId dynamic_cast_void(At a) {
@@ -2274,7 +2344,7 @@ class Gen {
           is<ast::ValueInit>(a) || is<ast::DefaultInit>(a) || is<ast::Paren>(a) || is<ast::Unary>(a) ||
           is<ast::Binary>(a) || is<ast::OrderedBinary>(a) || is<ast::Assign>(a) || is<ast::Conditional>(a) ||
           is<ast::Subscript>(a) || is<ast::Member>(a) || is<ast::ImplicitConversion>(a) ||
-          is<ast::BuiltinCall>(a) || is<ast::VariadicBuiltin>(a) || is<ast::ThreeWay>(a) ||
+          is<ast::BuiltinCall>(a) || is<ast::VariadicBuiltin>(a) || is<ast::ThreeWay>(a) || is<ast::BitCast>(a) ||
           is<ast::SourceLine>(a) || is<ast::SourceLocation>(a) || is<ast::DefaultSourceContext>(a)))
       return false;
     bool proven = true;

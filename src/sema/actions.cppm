@@ -8155,6 +8155,7 @@ public:
     const lex::BuiltinFunctionInfo* b = lex::builtin_function(ins().names.spelling(name));
     return b && !declared(name) ? b : nullptr;
   }
+  bool builtin_bit_cast(NameId name) { return ins().names.spelling(name) == lex::builtin_bit_cast_name; }
   bool builtin_offsetof(NameId name) {
     return ins().names.spelling(name) == lex::builtin_offsetof_name && !declared(name);
   }
@@ -10172,6 +10173,106 @@ public:
     }
     return literal(st, w_->values.integer(st, *n), ValueCategory::prvalue, begin, end);
   }
+  // A concrete operand is checked even when the other operand needs template substitution.
+  // A missing class fact or layout limits evaluation, but the expression can still be formed.
+  bool bit_cast_operand(QualType type, u32 at_, bool destination) {
+    const QualType element = types().innermost_array_element(type);
+    if (!types().is_object(type) || types().is(type, Builtin::overload_set) ||
+        types().is(type, Builtin::bound_member)) {
+      diag(at_, Diag::bit_cast_object, type);
+      return false;
+    }
+    if (destination && types().is_array(type)) {
+      diag(at_, Diag::bit_cast_array_result, type);
+      return false;
+    }
+    const EnumRec* definition = types().is_enum(element) ? q_->defining_enum(types().enum_of(element)) : nullptr;
+    if (!is_complete(type) || (definition && !definition->fixed)) {
+      if (!type_trait_failed(type)) diag(at_, Diag::bit_cast_incomplete, type);
+      return false;
+    }
+    if (types().is_class(element)) {
+      const auto* record = class_rec(types().class_of(element));
+      if (record && record->trivially_copyable() == false) {
+        diag(at_, Diag::bit_cast_nontrivial, element);
+        return false;
+      }
+      if (destination && record && record->is_abstract()) {
+        diag(at_, Diag::abstract_object, type);
+        return false;
+      }
+    }
+    return true;
+  }
+
+  std::optional<u64> bit_cast_size(QualType type) {
+    const QualType element = types().innermost_array_element(type);
+    if (types().is_class(element) && q_->class_layout_uncertain(types().class_of(element))) return std::nullopt;
+    return layout_of(type, false);
+  }
+
+  // Verify that each ordinary unsigned field contributes exactly its storage bits. The
+  // lowering can then derive the layout from the field widths in declaration order.
+  bool bit_cast_representation(QualType type, u64 size) {
+    const auto unsigned_size = [&](QualType t) -> u64 {
+      const auto builtin = types().builtin_of(t);
+      if (Types::is_volatile(types().canonical(t)) || !builtin || !ast::is_standard_unsigned(*builtin))
+        return 0;
+      const auto bytes = w_->target[*builtin].size;
+      return bytes == 1 || bytes == 2 || bytes == 4 || bytes == 8 ? bytes : 0;
+    };
+    if (!w_->target.little_endian_unsigned_integers || Types::is_volatile(types().canonical(type))) return false;
+    if (!types().is_class(type)) return size != 0 && unsigned_size(type) == size;
+    const EntityId cls = types().class_of(type);
+    const ClassRec* record = class_rec(cls);
+    if (!record || record->union_ || record->polymorphic || !record->bases.empty() ||
+        record->trivially_copyable() != true) return false;
+    const auto layout = class_layout(cls);
+    if (!layout || layout->offsets.size() != record->fields.size()) return false;
+    u64 offset = 0;
+    for (std::size_t i = 0; i < record->fields.size(); ++i) {
+      const FieldRec& field = record->fields[i];
+      const u64 bytes = unsigned_size(field.type);
+      if (!bytes || field.bit_width || field.no_unique_address || layout->offsets[i] != offset) return false;
+      offset += bytes;
+    }
+    return offset == size;
+  }
+
+  Ex bit_cast(QualType destination, Ex source, u32 begin, u32 end, u32 type_at) {
+    const Ex fail{NodeId::none, begin, end};
+    if (!source.ok()) return fail;
+    const QualType from = types().referee(source.type());
+    const bool destination_dependent = types().is_dependent(destination);
+    const bool source_type_dependent = has_proven_dependent_type(source) || types().is_dependent(from);
+    if (!destination_dependent && !bit_cast_operand(destination, type_at, true)) return fail;
+    if (!source_type_dependent && !bit_cast_operand(from, source.begin, false)) return fail;
+    bool supported = false;
+    if (!destination_dependent && !source_type_dependent) {
+      const auto to_size = bit_cast_size(destination);
+      const auto from_size = bit_cast_size(from);
+      if (to_size && from_size) {
+        if (*to_size != *from_size) {
+          diag(begin, Diag::bit_cast_size, destination, from, *to_size, *from_size);
+          return fail;
+        }
+        supported = !source.info.bit_width && bit_cast_representation(destination, *to_size) &&
+                    bit_cast_representation(from, *from_size);
+      }
+    }
+    const bool deferred = destination_dependent || dependent(source);
+    if (supported && !deferred && !source.glvalue() && types().is_class(from)) {
+      source = materialize(source, from, false);
+      if (!source.ok()) return fail;
+    }
+    const QualType type = types().is_class(destination) || destination_dependent
+        ? destination : Types::unqualified(types().canonical(destination));
+    const u8 flags = deferred ? u8(expr_flag::dependent |
+                                  (source.info.flags & expr_flag::deferred_decay_copy)) : u8{0};
+    const ExprInfo info{type, ValueCategory::prvalue, flags};
+    return node(ast::BitCast{info, destination, at(source, begin), type_at - begin, supported}, begin, end, info);
+  }
+
   // The supported direct-member slice of [support.types.layout]. Its result uses the
   // same target record offsets as code generation and the target's size_t.
   Ex offset_of(QualType t, NameId name, u32 begin, u32 end, u32 name_at) {
