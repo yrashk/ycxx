@@ -12,6 +12,7 @@ cd "$example"
 ycxx build app --trace-engine=json 2> first.jsonl
 python3 run.py
 python3 run.py triangle-vertex
+cat .ycxx/assets/app/release-note.txt
 ycxx show app
 ycxx build app --trace-engine=json 2> unchanged.jsonl
 ```
@@ -24,12 +25,13 @@ compile action for each row and a public pack action named `scene`. The packer
 receives the named `spirv` artifacts in runtime-name order and writes one
 `name hex-bytes` line per shader.
 
-The app requests the `bundle` artifact as a runtime asset. To demonstrate loading
-with a freestanding executable, `run.py` reads `.ycxx/assets/app/scene.bundle` and
-passes its contents and a shader name to `.ycxx/out/app`. The C++ app selects the
-named entry and checks its SPIR-V magic and word alignment. It exits with `0` for
-a valid entry, `2` for a missing name, or `3` for malformed entry data. The default
-name is `triangle-fragment`.
+The app requests two runtime assets. The `scene` action supplies `scene.bundle`
+and the independent `release_note` generator supplies `release-note.txt`.
+To demonstrate loading with a freestanding executable, `run.py` reads
+`.ycxx/assets/app/scene.bundle` and passes its contents and a shader name to
+`.ycxx/out/app`. The C++ app selects the named entry and checks its SPIR-V magic
+and word alignment. It exits with `0` for a valid entry, `2` for a missing name,
+or `3` for malformed entry data. The default name is `triangle-fragment`.
 
 ## Edit the workspace
 
@@ -43,5 +45,40 @@ name is `triangle-fragment`.
   published bundle and rebuild once more to see the cached result restored.
 
 Run `ycxx show app --format=html > plan.html` to inspect the plan and its named
-artifact edges. Use `ycxx build app --watch --trace-engine=interactive` to follow
-the edits in another terminal.
+artifact edges.
+
+## Rename and remove a runtime asset under watch
+
+After the first successful build, add a local file beside the two managed assets.
+Start watch in another terminal in the same workspace and wait for the initial
+build to finish.
+
+```sh
+assets=.ycxx/assets/app
+printf 'Local note\n' > "$assets/local.txt"
+```
+
+```sh
+ycxx build app --watch --trace-engine=interactive
+```
+
+In `build.ycxx`, change `outputs = { note = "release-note.txt" }` to
+`outputs = { note = "shader-release.txt" }`. Once watch reports success, the old
+name is gone. Check the new name, the local file, and the runnable app from the
+first terminal.
+
+```sh
+test ! -e "$assets/release-note.txt" &&
+cat "$assets/shader-release.txt" "$assets/local.txt" &&
+python3 run.py
+```
+
+Now set `runtime_assets = [artifact("scene", "bundle")]` in `build.ycxx`. Wait
+for watch to report success again. The next published set drops
+`shader-release.txt` and carries forward `scene.bundle` and the local file.
+
+```sh
+test ! -e "$assets/shader-release.txt" &&
+cat "$assets/local.txt" &&
+python3 run.py
+```
