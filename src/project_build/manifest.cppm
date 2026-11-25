@@ -33,13 +33,17 @@ struct OutputArg {
   std::string name;
 };
 
+struct CxxTool {
+  std::optional<std::string> compiler;
+};
+
 struct Value;
 using List = std::vector<Value>;
 using Record = std::vector<std::pair<std::string, Value>>;
 
 struct Value {
   SourceLocation location;
-  std::variant<std::string, List, Record, Glob, ArtifactRef, InputArg, OutputArg> data;
+  std::variant<std::string, List, Record, Glob, ArtifactRef, InputArg, OutputArg, CxxTool> data;
 };
 
 struct TargetDecl {
@@ -49,8 +53,15 @@ struct TargetDecl {
   Record fields;
 };
 
+struct PluginUse {
+  SourceLocation location;
+  std::string package;
+  std::string alias;
+};
+
 struct Manifest {
   std::vector<TargetDecl> targets;
+  std::vector<PluginUse> plugins;
 };
 
 std::expected<Manifest, ManifestError> parse_manifest(std::string_view text);
@@ -100,10 +111,25 @@ class Parser {
   Manifest document() {
     Manifest result;
     std::set<std::string> names;
+    std::set<std::string> aliases;
     skip_space();
     while (pos_ != text_.size()) {
       const auto at = location();
       std::string kind = identifier();
+      if (kind == "use") {
+        if (identifier() != "plugin") fail(location(), "expected plugin import");
+        expect('(');
+        auto package = string();
+        expect(')');
+        if (identifier() != "as") fail(location(), "expected 'as' in plugin import");
+        const auto alias_at = next_location();
+        auto alias = identifier();
+        if (alias.contains('.')) fail(alias_at, "plugin alias must be a single name");
+        if (!aliases.insert(alias).second) fail(alias_at, std::format("duplicate plugin alias '{}'", alias));
+        result.plugins.push_back({at, std::move(package), std::move(alias)});
+        skip_space();
+        continue;
+      }
       const auto name_at = next_location();
       std::string name = string();
       if (name.empty()) fail(name_at, "target name is empty");
@@ -279,6 +305,15 @@ class Parser {
       expect(')');
       if (target.empty() || output.empty()) fail(at, "empty artifact target or output");
       return {at, ArtifactRef{std::move(target), std::move(output)}};
+    }
+    if (name == "cxx") {
+      expect('(');
+      if (consume(')')) return {at, CxxTool{}};
+      const auto compiler_at = next_location();
+      auto compiler = string();
+      if (compiler.empty()) fail(compiler_at, "empty compiler selector");
+      expect(')');
+      return {at, CxxTool{std::move(compiler)}};
     }
     if (name == "input" || name == "output") {
       expect('(');

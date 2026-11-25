@@ -78,8 +78,10 @@ Work that never reaches `main` is lost. Twice, finished and reviewed work landed
   a new handle field `= X::none`. Four bugs came from `T{}` (LESSONS, #25 and #88).
 - A design question beyond your issue goes to a new issue labelled `status:needs-decision`,
   and `model:fable` if it is hard. Don't decide it silently in code.
-- **Escalate design sparingly** (DECISIONS §6.5). Use Opus or Sol at medium effort for
-  implementation, code review and tests. Raise to high effort for intricate work.
+- **Escalate design sparingly** (DECISIONS §6.5). Use Opus at medium effort for routine
+  implementation, code review and tests, and high effort for intricate work. Use Codex
+  Sol at high effort for implementation, code review and tests. Sol medium is for
+  mechanical work.
   - Opus escalates to Fable. Sol escalates to Astra. Give the design model a self-contained
     brief for a design decision, hard specification question, independent design check, or
     diagnosis after two serious failed implementation attempts.

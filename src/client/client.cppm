@@ -5,6 +5,8 @@
 export module ycxx.client;
 
 import std;
+import ycxx.build.inspection;
+import ycxx.build.plan;
 import ycxx.compile;
 import ycxx.daemon;
 import ycxx.engine;
@@ -16,6 +18,7 @@ import ycxx.trace;
 export namespace ycxx::client {
 int cxx(std::span<const std::string_view> args);
 int build(std::span<const std::string_view> args);
+int show(std::span<const std::string_view> args);
 int lsp(std::span<const std::string_view> args);
 int control(std::span<const std::string_view> args);
 }
@@ -753,6 +756,7 @@ int build(std::span<const std::string_view> args) {
   daemon::ProjectBuildRequest request{.cwd = cwd_now(), .target = std::move(target),
                                       .trace = mode != TraceMode::off,
                                       .trace_values = mode == TraceMode::interactive || mode == TraceMode::json};
+  if (const char* path = std::getenv("PATH")) request.tool_path = path;
   if (request.cwd.empty()) return fail("cannot determine the working directory", 1);
   const std::string root = daemon::root_for(std::nullopt, request.cwd);
   if (watch) {
@@ -786,6 +790,60 @@ int build(std::span<const std::string_view> args) {
   if (traced) traced->finish();
   if (!result) return fail(result.error().why, 1);
   return finish_project(*result, mode);
+}
+
+int show(std::span<const std::string_view> args) {
+  using ycxx::build::InspectionFormat;
+  constexpr std::string_view usage = "usage: ycxx show <target> [--format=text|json|source|html] [--against FILE]";
+  std::string_view target;
+  InspectionFormat format = InspectionFormat::text;
+  std::optional<std::filesystem::path> against;
+  for (std::size_t i = 0; i < args.size(); ++i) {
+    const auto arg = args[i];
+    if (arg == "--help") {
+      std::println("{}", usage);
+      return 0;
+    }
+    if (arg.starts_with("--format=")) {
+      const auto named = arg.substr(9);
+      if (named == "text") format = InspectionFormat::text;
+      else if (named == "json") format = InspectionFormat::json;
+      else if (named == "source") format = InspectionFormat::source;
+      else if (named == "html") format = InspectionFormat::html;
+      else {
+        std::println(std::cerr, "ycxx: unknown plan format '{}'", named);
+        return 2;
+      }
+    } else if (arg == "--against" && i + 1 < args.size() && !args[i + 1].starts_with('-') && !against) {
+      against = std::filesystem::path(args[++i]);
+    } else if (!arg.empty() && !arg.starts_with('-') && target.empty()) {
+      target = arg;
+    } else {
+      std::println(std::cerr, "ycxx: unexpected argument '{}'\n{}", arg, usage);
+      return 2;
+    }
+  }
+  if (target.empty()) {
+    std::println(std::cerr, "{}", usage);
+    return 2;
+  }
+  const auto cwd = cwd_now();
+  if (cwd.empty()) {
+    std::println(std::cerr, "ycxx: cannot determine the working directory");
+    return 1;
+  }
+  std::optional<std::string> tool_path;
+  if (const char* path = std::getenv("PATH")) tool_path = path;
+  const ycxx::build::RuleToolchain toolchain{
+      .executable = daemon::executable_path(), .executable_build = daemon::build_hash(), .path = std::move(tool_path),
+  };
+  auto shown = ycxx::build::show_project(cwd, target, format, toolchain, against);
+  if (!shown) {
+    std::println(std::cerr, "ycxx: {}", shown.error());
+    return 1;
+  }
+  std::print("{}", *shown);
+  return 0;
 }
 
 // `ycxx lsp [--root DIR]`: the editor's language server, which runs in the daemon of DIR's scope

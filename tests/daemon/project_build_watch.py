@@ -11,7 +11,9 @@ import tempfile
 from threading import Thread
 import time
 
-from project_build import check_program, env_for, prepare, tu_outcomes
+from project_build import (
+    action_keys, check_cold_actions, check_program, check_wire_action, env_for, prepare, tu_outcomes,
+)
 from runtime_dir import runtime_root
 
 
@@ -101,8 +103,8 @@ def replace_source(scope, relative, text):
 def check_watch(scope, watch):
     executable = scope / '.ycxx' / 'out' / 'app'
     manifest = (scope / 'build.ycxx').read_text(encoding='utf-8')
-    summary, _, watched = watch.build('initial build')
-    assert summary['actions_executed'] == 1, summary
+    summary, events, watched = watch.build('initial build')
+    check_cold_actions(summary, events)
     watched_names = {Path(path).name for path in watched}
     assert {'build.ycxx', 'schema.txt', 'main.cc'} <= watched_names, watched
     check_program(executable, 17)
@@ -116,6 +118,7 @@ def check_watch(scope, watch):
     assert summary['actions_executed'] == 0, summary
     assert 'executed' in tu_outcomes(events, 'core.cc'), 'ordinary source was not recompiled'
     check_program(executable, 19)
+    watch.idle('ordinary source edit was observed once without an inspection cache')
 
     replace_source(scope, 'include/config.h', '#define CONFIG 13\n')
     summary, events, _ = watch.build('new earlier header')
@@ -125,14 +128,15 @@ def check_watch(scope, watch):
 
     replace_source(scope, 'schema.txt', '11\n')
     summary, events, _ = watch.build('generator input edit')
-    assert summary['actions_executed'] == 1, summary
+    check_wire_action(summary, events)
     assert 'executed' in tu_outcomes(events, 'wire.cc'), 'changed generator output was not recompiled'
     assert 'executed' not in tu_outcomes(events, 'main.cc'), 'unchanged generated header rebuilt main.cc'
     check_program(executable, 33)
 
     replace_source(scope, 'build.ycxx', manifest.replace('["include", "fallback"]', '["fallback", "include"]'))
-    summary, _, _ = watch.build('build definition edit')
-    assert summary['actions_executed'] == 0, summary
+    summary, events, _ = watch.build('build definition edit')
+    assert summary['actions_executed'] == 1, summary
+    assert action_keys(events, 'RuleWorker') == ['core'], events
     check_program(executable, 23)
 
     replace_source(scope, 'modules/extra.cc', 'int extra() { return 42; }\n')
@@ -143,14 +147,15 @@ def check_watch(scope, watch):
 
     previous = executable.read_bytes()
     replace_source(scope, 'schema.txt', 'rejected\n')
-    summary, _, _ = watch.build('generator failure', succeeds=False)
+    summary, events, _ = watch.build('generator failure', succeeds=False)
+    check_wire_action(summary, events, 'failed')
     assert any('schema rejected' in diagnostic for diagnostic in summary['diagnostics']), summary
     assert executable.read_bytes() == previous, 'failed watch build replaced the previous executable'
     check_program(executable, 23)
 
     replace_source(scope, 'schema.txt', '17\n')
-    summary, _, _ = watch.build('recover after generator failure')
-    assert summary['actions_executed'] == 1, summary
+    summary, events, _ = watch.build('recover after generator failure')
+    check_wire_action(summary, events)
     check_program(executable, 29)
     watch.idle('successful recovery and artifact publication')
 
@@ -163,6 +168,9 @@ def main():
     ):
         scope = Path(workspace).resolve()
         prepare(scope)
+        # A regular file blocks snapshot storage irrespective of test user permissions.
+        rules_cache = scope / '.ycxx' / 'rules'
+        rules_cache.write_text('inspection cache unavailable\n', encoding='utf-8')
         (scope / 'modules').mkdir()
         (scope / 'unrelated').mkdir()
         manifest = scope / 'build.ycxx'
@@ -174,6 +182,7 @@ def main():
         watch = Watch(ycxx, scope, env)
         try:
             check_watch(scope, watch)
+            assert rules_cache.read_text(encoding='utf-8') == 'inspection cache unavailable\n'
         finally:
             watch.close()
             subprocess.run([ycxx, 'ctl', 'shutdown'], cwd=scope, env=env, capture_output=True, timeout=10)

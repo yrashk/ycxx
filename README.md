@@ -37,6 +37,10 @@ The resident engine builds executable targets from C++ source groups and declare
 generators. The executable goes in `.ycxx/out/app`. Use `--trace-engine=interactive`
 or `--trace-engine=json` to inspect the tool steps and native compiler queries.
 Use `ycxx build app --watch` to rebuild after workspace edits.
+The bundled C++ rule package builds from source. A workspace can replace its C++ rules with
+`use plugin("tools/custom/rules") as cpp`.
+`ycxx show app` describes the resolved plan and how each input was selected. Its JSON snapshots
+can be compared with the checkout and rendered as a standalone HTML report.
 [Build design](docs/design/build.md) [#1251](https://github.com/yrashk/ycxx/issues/1251)
 
 Ordinary function pointers and references preserve concrete `noexcept` type identity.
@@ -474,8 +478,8 @@ written default member initializer are value-initialized.
   Free function templates can instantiate omitted dependent scalar defaults after overload selection.
   Ordinary free binary operators use argument-dependent lookup, including associated base namespaces.
   Supported dependent binary operators on ordinary non-template classes also find associated
-  nonmember candidates at instantiation. Ordinary unary minus can find hidden friends by
-  argument-dependent lookup.
+  nonmember candidates at instantiation. Unary operators, prefix increment and compound
+  assignments can find hidden friends by argument-dependent lookup.
   Nonmember operators can be called explicitly by name, including with namespace qualification.
   [#219](https://github.com/yrashk/ycxx/issues/219)
   Overloaded free functions can take braced arguments for arithmetic parameters

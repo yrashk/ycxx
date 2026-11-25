@@ -84,6 +84,28 @@ def tu_outcomes(events, file):
             if event.get('kind') == 'Tu' and Path(event['key']).name == file}
 
 
+def action_keys(events, kind, outcome='executed'):
+    return sorted(event['key'] for event in events
+                  if event.get('kind') == kind and event.get('outcome') == outcome)
+
+
+def check_cold_actions(summary, events):
+    packages = action_keys(events, 'RulePackage')
+    failed = action_keys(events, 'RulePackage', 'failed')
+    assert len(packages) == 1, (packages, failed)
+    if sys.platform == 'linux':
+        assert not failed, (packages, failed)
+    assert all(key.startswith('standard/rules via ') for key in packages + failed), (packages, failed)
+    assert action_keys(events, 'RuleWorker') == ['app', 'core', 'wire'], events
+    assert action_keys(events, 'ExternalAction') == ['wire'], events
+    assert summary['actions_executed'] == 5 + len(failed), summary
+
+
+def check_wire_action(summary, events, outcome='executed'):
+    assert summary['actions_executed'] == 1, summary
+    assert action_keys(events, 'ExternalAction', outcome) == ['wire'], events
+
+
 def check_program(executable, expected):
     p = subprocess.run([executable], cwd=executable.parent, capture_output=True, timeout=30)
     assert p.returncode == expected, (executable, expected, p.returncode, p.stderr)
@@ -94,8 +116,7 @@ def check_edit_sequence(ycxx, scope, env):
     executable = scope / '.ycxx' / 'out' / 'app'
     schema = scope / 'schema.txt'
     summary, events = traced_build(ycxx, scope, env, 'first build')
-    assert summary['actions_executed'] == 1, summary
-    assert any(event.get('kind') == 'ExternalAction' for event in events), 'generator missing from trace'
+    check_cold_actions(summary, events)
     assert 'executed' in tu_outcomes(events, 'main.cc'), 'no native main.cc evaluation on first build'
     check_program(executable, 17)
     first = executable.read_bytes()
@@ -129,7 +150,7 @@ def check_edit_sequence(ycxx, scope, env):
 
     schema.write_text('11\n')
     summary, events = traced_build(ycxx, scope, env, 'generator edit')
-    assert summary['actions_executed'] > 0, summary
+    check_wire_action(summary, events)
     assert 'executed' in tu_outcomes(events, 'wire.cc'), 'changed generated source did not recompile'
     main = tu_outcomes(events, 'main.cc')
     assert main and main <= {'reused', 'verified', 'durable'}, ('unchanged header did not cut off main.cc', main)
@@ -142,7 +163,8 @@ def check_edit_sequence(ycxx, scope, env):
     incremental = executable.read_bytes()
 
     schema.write_text('rejected\n')
-    summary, _ = traced_build(ycxx, scope, env, 'failed generator', succeeds=False)
+    summary, events = traced_build(ycxx, scope, env, 'failed generator', succeeds=False)
+    check_wire_action(summary, events, 'failed')
     assert any('schema rejected' in diagnostic for diagnostic in summary['diagnostics']), summary
     assert executable.read_bytes() == incremental, 'failed generator replaced the last successful output'
     check_program(executable, 31)
@@ -175,8 +197,8 @@ def main():
         with tempfile.TemporaryDirectory(prefix='yb', dir=runtime_root('yb')) as runtime:
             env = env_for(runtime)
             try:
-                summary, _ = traced_build(ycxx, scope, env, 'cold build of final inputs')
-                assert summary['actions_executed'] > 0, summary
+                summary, events = traced_build(ycxx, scope, env, 'cold build of final inputs')
+                check_cold_actions(summary, events)
                 assert executable.read_bytes() == incremental, 'incremental and cold executable bytes differ'
                 check_program(executable, 31)
             finally:

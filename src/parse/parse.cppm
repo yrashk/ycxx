@@ -3911,8 +3911,14 @@ private:
     std::size_t count = d.params.size();
     bool unary_only = op == "~" || op == "!", binary_only = !(unary_only || op == "+" || op == "-" || op == "*" || op == "&" ||
                                                               op == "++" || op == "--");
-    if (count == 0 || count > 2 || (unary_only && count != 1) || (binary_only && count != 2)) {
+    if (count == 0 || count > 2 || (unary_only && count != 1) || (binary_only && count != 2) || types.rec(d.type).variadic) {
       s_.diag(d.name_at, Diag::operator_arity, d.name);
+      return false;
+    }
+    // [over.inc]/1: the second parameter of a postfix form has type `int`.
+    if ((op == "++" || op == "--") && count == 2 && !types.is_dependent(d.params[1].type) &&
+        types.canonical(sema::Types::unqualified(d.params[1].type)) != types.builtin(sema::Builtin::int_)) {
+      s_.diag(d.params[1].at, Diag::operator_postfix_parameter, d.name);
       return false;
     }
     if (!std::ranges::any_of(d.params, [&](const parse::Param& p) {
@@ -6050,18 +6056,21 @@ private:
     const bool c_context = enclosing_linkage() == LangLinkage::c;
     const Tk name_token = p_->region().tokens[it_->begin + d.name_at].kind;
     const std::string_view name = s_.ins().names.spelling(d.name);
-    const bool binary_operator = name_token == Tk::kw_operator && d.params.size() == 2 && name.starts_with("operator") &&
-                                 (std::ranges::contains(sema::Sema::binary_spellings, name.substr(8)) || name == "operator<=>");
-    const bool unary_minus = name_token == Tk::kw_operator && d.params.size() == 1 && name == "operator-";
+    // An operator-function-id that names a punctuator ([over.oper.general]); `declare` checks that
+    // a non-member can have it, and its parameters.
+    const bool operator_function = name_token == Tk::kw_operator && name.size() > 8 && name.starts_with("operator") &&
+                                   !literal_operator_named(d.name) && !sema::is_allocation_name(name) &&
+                                   name != lex::conversion_function_name;
     const bool ordinary = (definition || !c_context) && !d.qualified && !d.template_args &&
                           (p_->namespace_class_friend(k_) || templated) &&
-                          (name_token == Tk::identifier || binary_operator || unary_minus);
+                          (name_token == Tk::identifier || operator_function);
+    const bool deleted_operator = operator_function && !templated && !friend_template && deleted_body();  // templates: #1181
     // [class.compare.default]: `friend bool operator==(C, C) = default;`, and `<=>` likewise.
     const bool defaulted_comparison = definition && name_token == Tk::kw_operator &&
                                       (name == "operator==" || name == "operator<=>") && p_->defaulted_body(k_);
     if (!types.is_function(d.type) ||
         (definition ? !ordinary || !d.function || !ps_.at_end() || !it_->has_body() ||
-                        (p_->region().tokens[it_->body_begin].kind != Tk::l_brace && !(unary_minus && deleted_body()) &&
+                        (p_->region().tokens[it_->body_begin].kind != Tk::l_brace && !deleted_operator &&
                          !defaulted_comparison)
                     : !ps_.is(Tk::semi))) {
       s_.diag(d.name_at, Diag::not_supported, Tk::kw_friend);
