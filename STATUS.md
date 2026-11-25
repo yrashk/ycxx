@@ -2662,6 +2662,15 @@ hit the ordinary address-of limitation. The tests in `tests/own/builtins/` cover
 address operators, dependent wrappers, qualified operands, constant evaluation on a scalar
 global, and a rejected rvalue.
 
+## Bit-cast expressions (#1359)
+
+`__builtin_bit_cast` reads a written destination type-id and preserves both operands through
+template substitution. The evaluated subset covers initialized unsigned scalars and gap-free
+flat records described by the target's size, byte order and member offsets. Result storage is
+independent, including when the cast is discarded. Constant evaluation uses the existing
+flat-record storage checks. Evaluated x87, padding and the remaining constant-evaluation
+layouts stay in #330. The pinned x87 template branch parses when discarded.
+
 ## String length builtin (#531)
 
 `__builtin_strlen` supports unqualified direct calls with one argument implicitly converted to
