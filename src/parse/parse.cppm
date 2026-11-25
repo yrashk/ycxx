@@ -1162,7 +1162,7 @@ public:
   bool after_running_member(u32 j) const {
     for (u32 p = items_->items[j].parent; p != items::none && items_->items[p].kind == ItemKind::class_def;
          p = items_->items[p].parent)
-      if (std::ranges::any_of(running_, [&](u32 r) { return r < j && r > p && last_member(r) < j && items_->items[r].parent == p; }))
+      if (std::ranges::any_of(running_, [&](u32 r) { return r < j && r > p && items_->items[r].parent == p && last_member(r) < j; }))
         return true;
     return false;
   }
@@ -1181,8 +1181,9 @@ public:
     ask(Probe::declares, name, path);
     for (auto [j, k] : named(name)) {
       if (j > point) break;
-      if (j < scanned || std::ranges::contains(running_, j) || after_running_member(j)) continue;
-      if (Program::passes(*ix_, Probe::declares, path, j, k)) settle(j);
+      if (j < scanned || std::ranges::contains(running_, j)) continue;
+      // An item is read only where it can declare `e`, so a group depends on no other (#947).
+      if (Program::passes(*ix_, Probe::declares, path, j, k) && !after_running_member(j)) settle(j);
     }
     scanned = std::max(scanned, point + 1);
   }
