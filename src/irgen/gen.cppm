@@ -1257,22 +1257,27 @@ class Gen {
 
   // A temporary ([class.temporary]): initialized from a prvalue, ended with the full-expression
   // or, when a reference it is bound to extends it, with that reference's scope.
-  Place materialize(At a, bool select_class = false) {
-    Position here(*this, a.offset);
-    auto m = get<ast::Materialize>(a);
-    if (m.extended == 1 && (selecting_initializer_ || branches_ > 0))
-      unsupported(a, "requiring lifetime extension in a conditional operand or class initializer selection");
-    At v = child(a, m.operand);
-    bool zeroed = value_initializes(v);
-    Place p = begin_object(m.info.type, zeroed ? ir::Init::zero : ir::Init::indeterminate, ir::Storage::temporary);
-    initialize(p, v, zeroed, select_class);
+  Place materialize_value(At site, At value, ast::QualType type,
+                          ast::EntityId destructor = ast::EntityId::none,
+                          uint32_t extended = 0, bool select_class = false) {
+    Position here(*this, site.offset);
+    if (extended == 1 && (selecting_initializer_ || branches_ > 0))
+      unsupported(site, "requiring lifetime extension in a conditional operand or class initializer selection");
+    bool zeroed = value_initializes(value);
+    Place p = begin_object(type, zeroed ? ir::Init::zero : ir::Init::indeterminate, ir::Storage::temporary);
+    initialize(p, value, zeroed, select_class);
     begin_lifetime(p);
-    Ending end{p, m.destructor, ir::Storage::temporary};
-    if (m.extended == 1) scopes_.back().push_back(end);
-    else if (temps_.empty()) unsupported(a, "outside a full-expression");
-    else if (branches_ > 0 && m.destructor != ast::EntityId::none) unsupported(a, "with a destructor, created conditionally");
+    Ending end{p, destructor, ir::Storage::temporary};
+    if (extended == 1) scopes_.back().push_back(end);
+    else if (temps_.empty()) unsupported(site, "outside a full-expression");
+    else if (branches_ > 0 && destructor != ast::EntityId::none) unsupported(site, "with a destructor, created conditionally");
     else temps_.back().push_back(end);
     return p;
+  }
+
+  Place materialize(At a, bool select_class = false) {
+    const auto m = get<ast::Materialize>(a);
+    return materialize_value(a, child(a, m.operand), m.info.type, m.destructor, m.extended, select_class);
   }
 
   // The object a class prvalue is copied from: a glvalue of the class converted to a prvalue
@@ -1684,14 +1689,17 @@ class Gen {
   void discard(At a) {
     if (a.id == NodeId::none) return;
     // A discarded three-way comparison: only its operands' evaluations remain.
-    if (const At s = strip_parens(a); is<ast::ThreeWay>(s)) {
-      const auto tw = get<ast::ThreeWay>(s);
-      unsequenced(std::array{child(s, tw.lhs), child(s, tw.rhs)}, [&](std::size_t, At o) { discard(o); });
+    const At written = strip_parens(a);
+    if (is<ast::ThreeWay>(written)) {
+      const auto tw = get<ast::ThreeWay>(written);
+      unsequenced(std::array{child(written, tw.lhs), child(written, tw.rhs)},
+                  [&](std::size_t, At operand) { discard(operand); });
       return;
     }
     const auto expr = info(a);
     if (expr.category == ast::ValueCategory::prvalue) {
-      rvalue_or_void(a);
+      if (is<ast::BitCast>(written) && class_prvalue(expr)) materialize_value(written, written, expr.type);
+      else rvalue_or_void(a);
       return;
     }
     // Discarding a nonvolatile direct field designator does not read its value.
