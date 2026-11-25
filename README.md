@@ -45,10 +45,11 @@ can be compared with the checkout and rendered as a standalone HTML report.
 observations with `ycxx show app`.
 Import `builtin:capabilities` to project selected observations into a generated
 C++ header with `constexpr` values.
-A source-built rule package can also run its own witness and export a support
-state to a consumer using `value("target", "field")`.
-The shader example stages named compiler outputs into a bundle and publishes it
-through the executable's `runtime_assets`.
+A source-built rule package can run its own witness and export a support
+state or a structured fact to a consumer using `value("target", "field")`.
+The shader examples publish bundles through `runtime_assets`. The reflection
+example also uses a compiled shader's descriptor layout to generate `constexpr`
+C++ bindings. Shader edits with the same layout reuse the native executable.
 [Runnable build examples](examples/project-build) · [Build design](docs/design/build.md) · [#1251](https://github.com/yrashk/ycxx/issues/1251)
 
 Ordinary function pointers and references preserve concrete `noexcept` type identity.
