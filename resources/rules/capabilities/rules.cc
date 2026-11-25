@@ -145,6 +145,19 @@ bool quote(Buffer& buffer, Text text) {
   return append(buffer, "\"");
 }
 
+int fail(const ycxx_rule_host_v1* host, RuleError status, const char* message, Text value) {
+  if (host->struct_size >= sizeof(*host) && host->diagnose) {
+    Buffer diagnostic{definition_bytes, 512};
+    if (append(diagnostic, message)) {
+      const size_t message_size = diagnostic.used;
+      if (value.data && (!append(diagnostic, " ") || !quote(diagnostic, value)))
+        diagnostic.used = message_size;
+      host->diagnose(host->context, diagnostic.data, diagnostic.used);
+    }
+  }
+  return status;
+}
+
 Text support_name(uint32_t support) {
   switch (support) {
     case YCXX_RULE_SUPPORTED_V1: return literal("supported");
@@ -157,15 +170,18 @@ Text support_name(uint32_t support) {
 }  // namespace
 
 extern "C" int ycxx_rule_plan_v1(const ycxx_rule_host_v1* host) {
-  if (!host || host->abi_version != YCXX_RULE_ABI_VERSION || host->struct_size < sizeof(*host) ||
+  if (!host || host->abi_version != YCXX_RULE_ABI_VERSION ||
+      host->struct_size < offsetof(ycxx_rule_host_v1, diagnose) ||
       !host->rule || !host->target || !*host->target || !host->attribute || !host->emit ||
       (host->capability_count != 0 && !host->capabilities)) return incompatible_host;
   if (compare(c_string(host->rule), literal("header")) != 0) return unknown_rule;
 
   Text scope = literal("ycxx_capabilities");
   Text filename = literal("compiler_profile.hh");
-  if (!attribute(host, "namespace", scope) || !valid_namespace(scope)) return invalid_namespace;
-  if (!attribute(host, "filename", filename) || !valid_filename(filename)) return invalid_filename;
+  if (!attribute(host, "namespace", scope)) return invalid_namespace;
+  if (!valid_namespace(scope)) return fail(host, invalid_namespace, "invalid C++ namespace", scope);
+  if (!attribute(host, "filename", filename)) return invalid_filename;
+  if (!valid_filename(filename)) return fail(host, invalid_filename, "invalid header filename", filename);
 
   Buffer header{header_bytes, sizeof header_bytes};
   if (!append(header, "#pragma once\n\nnamespace ") || !append(header, scope) ||
@@ -181,10 +197,13 @@ extern "C" int ycxx_rule_plan_v1(const ycxx_rule_host_v1* host) {
     if (!capability.name) return invalid_capability;
     const Text name = c_string(capability.name);
     const Text state = support_name(capability.support);
+    if (!valid_identifier(name) || compare(name, literal("support")) == 0 ||
+        compare(name, literal("available")) == 0)
+      return fail(host, invalid_capability, "invalid or reserved capability name", name);
+    if (!state.data) return fail(host, invalid_capability, "invalid support state for capability", name);
     // The worker supplies names in order. Strict ordering also rules out duplicates.
-    if (!valid_identifier(name) || !state.data || compare(previous, name) >= 0 ||
-        compare(name, literal("support")) == 0 || compare(name, literal("available")) == 0)
-      return invalid_capability;
+    if (compare(previous, name) >= 0)
+      return fail(host, invalid_capability, "duplicate or out-of-order capability name", name);
     if (!append(header, "inline constexpr support ") || !append(header, name) ||
         !append(header, " = support::") || !append(header, state) || !append(header, ";\n"))
       return oversized_definition;
