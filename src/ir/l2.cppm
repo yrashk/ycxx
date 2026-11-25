@@ -36,8 +36,9 @@ export using ir::bit;
 export using ir::none;
 
 // Value types. `i1` is a truth value; `ptr` is 64 bits; `f32` and `f64` are IEEE binary32 and
-// binary64 values.
-export enum class Type : std::uint8_t { state, i1, i8, i16, i32, i64, ptr, f32, f64 };
+// binary64 values. Every target's L2 has `i128`; `legalize` (legalize.cppm) expands the operations
+// on it that the target lacks.
+export enum class Type : std::uint8_t { state, i1, i8, i16, i32, i64, i128, ptr, f32, f64 };
 
 export constexpr std::uint32_t bits(Type t) {
   switch (t) {
@@ -49,6 +50,7 @@ export constexpr std::uint32_t bits(Type t) {
     case Type::i64:
     case Type::ptr:
     case Type::f64: return 64;
+    case Type::i128: return 128;
     case Type::state: return 0;
   }
   return 0;
@@ -63,6 +65,7 @@ export constexpr std::optional<Type> int_of_bits(std::uint64_t n) {
     case 16: return Type::i16;
     case 32: return Type::i32;
     case 64: return Type::i64;
+    case 128: return Type::i128;
     default: return std::nullopt;
   }
 }
@@ -150,15 +153,21 @@ export enum class Op : std::uint16_t {
   fcmp [[=pure({V, V}, {V}).imms({pred})]],  // result i1
   fpext [[=pure({V}, {V})]],                 // f32 to f64
   fptrunc [[=pure({V}, {V})]],               // f64 to f32, rounded
-  fptosi [[=pure({V}, {V})]],                // to i32 or i64
+  fptosi [[=pure({V}, {V})]],                // to i32, i64 or i128
   fptoui [[=pure({V}, {V})]],
-  sitofp [[=pure({V}, {V})]],                // from i32 or i64, rounded
+  sitofp [[=pure({V}, {V})]],                // from i32, i64 or i128, rounded
   uitofp [[=pure({V}, {V})]],
 
   // Width changes, to the result type.
   zext [[=pure({V}, {V})]],
   sext [[=pure({V}, {V})]],
   trunc [[=pure({V}, {V})]],
+
+  // The halves of a 128-bit value: `pair` joins two i64, low first; `high` is the upper one (`trunc`
+  // is the lower). `umulh` is the upper half of two i64's unsigned product.
+  pair [[=pure({V, V}, {V})]],
+  high [[=pure({V}, {V})]],
+  umulh [[=pure({V, V}, {V})]],
 
   // Pointers.
   ptradd [[=pure({V, V}, {V})]],  // ptr + i64 bytes
@@ -388,7 +397,7 @@ export std::string print(EntityId name, const Function& f) {
 }
 
 export std::string_view name_of(Type t) {
-  static constexpr std::string_view names[] = {"!state", "i1", "i8", "i16", "i32", "i64", "ptr", "f32", "f64"};
+  static constexpr std::string_view names[] = {"!state", "i1", "i8", "i16", "i32", "i64", "i128", "ptr", "f32", "f64"};
   return names[std::to_underlying(t)];
 }
 
@@ -467,10 +476,12 @@ std::expected<void, std::string> verify(const Function& f) {
           if (r != Type::f32 || t(0) != Type::f64) return at("rounds an f64 to f32");
           break;
         case Op::fptosi: case Op::fptoui:
-          if ((r != Type::i32 && r != Type::i64) || !is_float(t(0))) return at("converts a floating value to i32 or i64");
+          if ((r != Type::i32 && r != Type::i64 && r != Type::i128) || !is_float(t(0)))
+            return at("converts a floating value to i32, i64 or i128");
           break;
         case Op::sitofp: case Op::uitofp:
-          if (!is_float(r) || (t(0) != Type::i32 && t(0) != Type::i64)) return at("converts an i32 or i64 to a floating type");
+          if (!is_float(r) || (t(0) != Type::i32 && t(0) != Type::i64 && t(0) != Type::i128))
+            return at("converts an i32, i64 or i128 to a floating type");
           break;
         case Op::icmp:
           if (r != Type::i1 || t(0) != t(1) || is_float(t(0))) return at("compares two integers or pointers of one type into i1");
@@ -483,6 +494,15 @@ std::expected<void, std::string> verify(const Function& f) {
           break;
         case Op::trunc:
           if (!is_int(r) || !is_int(t(0)) || bits(t(0)) <= bits(r)) return at("truncates to a narrower integer");
+          break;
+        case Op::pair:
+          if (r != Type::i128 || t(0) != Type::i64 || t(1) != Type::i64) return at("joins two i64 into an i128");
+          break;
+        case Op::high:
+          if (r != Type::i64 || t(0) != Type::i128) return at("yields an i64 from an i128");
+          break;
+        case Op::umulh:
+          if (r != Type::i64 || t(0) != Type::i64 || t(1) != Type::i64) return at("multiplies two i64");
           break;
         case Op::ptradd:
           if (r != Type::ptr || t(0) != Type::ptr || t(1) != Type::i64) return at("adds an i64 to a ptr");

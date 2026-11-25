@@ -3,6 +3,7 @@
 import std;
 import ycxx.ir;
 import ycxx.ir.l2;
+import ycxx.ir.legalize;
 import ycxx.ir.lower;
 import ycxx.unit;
 import ycxx.unit.codegen;
@@ -305,6 +306,145 @@ void test_errors() {
         "`switch` is not in the α subset");
 }
 
+// #1172: `lower` writes `i128` for every target, and `legalize` expands what the target lacks.
+constexpr ir::EntityId first_runtime{900};
+
+std::optional<l2::Function> lower_one(std::string_view text) {
+  auto fs = ir::parse(text);
+  if (!fs) return std::nullopt;
+  auto l = ir::lower((*fs)[0].body, (*fs)[0].name, ycxx::unit::TestLayout{});
+  if (!l) return std::nullopt;
+  return std::move(*l);
+}
+std::string legalized(std::string_view text, const ir::Int128Support& target) {
+  auto l = lower_one(text);
+  if (!l) return "does not lower";
+  auto out = ir::legalize(std::move(*l), target, [](ir::Runtime r) {
+    return ir::EntityId(ir::raw(first_runtime) + std::uint32_t(std::to_underlying(r)));
+  });
+  if (!out) return out.error().message;
+  if (auto v = l2::verify(*out); !v) return "L2: " + v.error();
+  return l2::print(ir::EntityId(1), *out);
+}
+void golden_legal(std::string_view what, std::string_view l1, const ir::Int128Support& target, std::string_view want) {
+  const std::string got = legalized(l1, target);
+  check(got == want, std::format("{}: legalizes to\n{}\nwant\n{}", what, got, want));
+}
+
+void test_int128() {
+  constexpr std::string_view add = R"(
+func @1 {
+^0(%s: !state, %p: T23, %q: T23):
+  %a: T22 = load %s, %p [T22, /]
+  %b: T22 = load %s, %q [T22, /]
+  %c: T22 = add nsw %a, %b
+  %d: T22 = sdiv %c, %b
+  %s1: !state = store %s, %p, %d [T22, /]
+  ret %s1
+}
+)";
+  // `lower` is the same for every target.
+  golden("i128", add, R"(func @1 {
+^0(%0: !state, %1: ptr, %2: ptr):
+  %3: i128 = load %0, %1 [T22]
+  %4: i128 = load %0, %2 [T22]
+  %5: i128 = add nsw %3, %4
+  %6: i128 = sdiv %5, %4
+  %7: !state = store %0, %1, %6 [T22]
+  ret %7
+}
+)");
+  // A target with 64-bit registers: halves, a carry, and the runtime's division in the state chain.
+  golden_legal("i128, 64-bit target", add, ir::Int128Support{}, R"(func @1 {
+^0(%0: !state, %1: ptr, %2: ptr):
+  %3: i64 = load %0, %1 [T22]
+  %4: i64 = const [8]
+  %5: ptr = ptradd %1, %4
+  %6: i64 = load %0, %5 [T22]
+  %7: i64 = load %0, %2 [T22]
+  %8: i64 = const [8]
+  %9: ptr = ptradd %2, %8
+  %10: i64 = load %0, %9 [T22]
+  %11: i64 = add %3, %7
+  %12: i1 = icmp %11, %3 [ult]
+  %13: i64 = zext %12
+  %14: i64 = add %6, %10
+  %15: i64 = add %14, %13
+  %16: !state, %17: i64, %18: i64 = call %0, %11, %15, %7, %10 [@900, 0, 0, 0]
+  %19: !state = store %16, %1, %17 [T22]
+  %20: i64 = const [8]
+  %21: ptr = ptradd %1, %20
+  %22: !state = store %19, %21, %18 [T22]
+  ret %22
+}
+)");
+  // A target with 128-bit registers, addition and memory access, but no division: what it has is
+  // untouched, and the division takes its operands apart and joins its result.
+  ir::Int128Support native{.values = true};
+  for (l2::Op op : {l2::Op::add, l2::Op::load, l2::Op::store}) native.ops.set(std::to_underlying(op));
+  golden_legal("i128, native", add, native, R"(func @1 {
+^0(%0: !state, %1: ptr, %2: ptr):
+  %3: i128 = load %0, %1 [T22]
+  %4: i128 = load %0, %2 [T22]
+  %5: i128 = add nsw %3, %4
+  %6: i64 = trunc %5
+  %7: i64 = high %5
+  %8: i64 = trunc %4
+  %9: i64 = high %4
+  %10: !state, %11: i64, %12: i64 = call %0, %6, %7, %8, %9 [@900, 0, 0, 0]
+  %13: i128 = pair %11, %12
+  %14: !state = store %10, %1, %13 [T22]
+  ret %14
+}
+)");
+  // With everything native, nothing changes.
+  ir::Int128Support all{.values = true};
+  all.ops.set();
+  if (auto l = lower_one(add))
+    check(legalized(add, all) == l2::print(ir::EntityId(1), *l), "i128, all native: legalizes to itself");
+
+  // Block arguments: two each without 128-bit registers, whole with them.
+  constexpr std::string_view join = R"(
+func @1 {
+^0(%s: !state, %p: T23, %c: T2):
+  %a: T22 = load %s, %p [T22, /]
+  cond_br %c ^1(%s, %a), ^2(%s)
+^1(%s1: !state, %x: T22):
+  %s2: !state = store %s1, %p, %x [T22, /]
+  ret %s2
+^2(%s3: !state):
+  %k: T22 = const [#2130706944]
+  br ^1(%s3, %k)
+}
+)";
+  check(legalized(join, ir::Int128Support{}).contains("(%") && !legalized(join, ir::Int128Support{}).contains("i128"),
+        "i128 block argument: no i128 is left for a 64-bit target");
+  check(legalized(join, ir::Int128Support{}).contains("const [1]"), "a constant's high half is kept");
+  check(legalized(join, native).contains("i128)"), "i128 block argument: whole for a 128-bit target");
+
+  // A 128-bit parameter, argument and result pass in two words (both psABIs), whatever the
+  // arithmetic the target has.
+  golden("i128 call", R"(
+func @1 {
+^0(%s: !state, %a: T22, %n: T3):
+  %s1: !state, %r: T22 = call %s, %n, %a [@1, 0, 0, 0]
+  ret %s1, %r
+}
+)",
+         R"(func @1 {
+^0(%0: !state, %1: i64, %2: i64, %3: i64):
+  %4: i128 = pair %1, %2
+  %5: i64 = trunc %4
+  %6: i64 = high %4
+  %7: !state, %8: i64, %9: i64 = call %0, %3, %5, %6 [@1, 1, 0, 0]
+  %10: i128 = pair %8, %9
+  %11: i64 = trunc %10
+  %12: i64 = high %10
+  ret %7, %11, %12
+}
+)");
+}
+
 }  // namespace
 
 int main() {
@@ -313,5 +453,6 @@ int main() {
   test_control();
   test_invoke_verification();
   test_errors();
+  test_int128();
   return ycxx::unit::result("unit.lower");
 }
