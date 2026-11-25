@@ -9,11 +9,19 @@ extern "C" {
 #endif
 
 #define YCXX_RULE_ABI_VERSION 1u
+#define YCXX_RULE_SUPPORTED_V1 0u
+#define YCXX_RULE_UNSUPPORTED_V1 1u
+#define YCXX_RULE_INDETERMINATE_V1 2u
 
 typedef struct ycxx_rule_bytes_v1 {
   const char* data;
   size_t size;
 } ycxx_rule_bytes_v1;
+
+typedef struct ycxx_rule_capability_v1 {
+  const char* name;
+  uint32_t support;
+} ycxx_rule_capability_v1;
 
 typedef struct ycxx_rule_host_v1 {
   uint32_t abi_version;
@@ -30,6 +38,11 @@ typedef struct ycxx_rule_host_v1 {
 
   /* Supply one nonempty definition. The worker copies it. Return 0 on success. */
   int (*emit)(void* context, const char* definition, size_t size);
+
+  /* Check struct_size before accessing this extension. The array is sorted by name
+     and borrowed through the entry point's return. It is null when the count is zero. */
+  const ycxx_rule_capability_v1* capabilities;
+  size_t capability_count;
 } ycxx_rule_host_v1;
 
 /* Call the host from this thread before returning. Return 0 after successfully emitting

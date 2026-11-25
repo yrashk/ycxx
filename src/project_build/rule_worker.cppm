@@ -32,11 +32,17 @@ constexpr char sdk_header[] = {
 constexpr std::size_t max_request_size = 8 * 1024 * 1024;
 constexpr std::size_t max_definition_size = 1024 * 1024;
 constexpr std::uint32_t abi_version = 1;
+constexpr std::uint32_t max_capability_support = 2;  // YCXX_RULE_INDETERMINATE_V1
 
 // The C ABI in the staged SDK header. No C++ objects or ownership cross this boundary.
 struct Bytes {
   const char* data;
   std::size_t size;
+};
+
+struct Capability {
+  const char* name;
+  std::uint32_t support;
 };
 
 struct Host {
@@ -49,6 +55,8 @@ struct Host {
   int (*attribute)(void*, const char*, Bytes*);
   int (*read)(void*, const char*, Bytes*);
   int (*emit)(void*, const char*, std::size_t);
+  const Capability* capabilities;
+  std::size_t capability_count;
 };
 
 struct Library {
@@ -91,6 +99,18 @@ std::expected<RuleWorkerRequest, std::string> load_request(const std::string& pa
   for (const auto& read : request->reads)
     if (!valid_key(read.path) || !keys.insert(read.path).second)
       return std::unexpected("invalid or duplicate rule read");
+  if (request->capabilities) {
+    auto& capabilities = *request->capabilities;
+    std::ranges::sort(capabilities, {}, &RuleCapabilityValue::name);
+    std::string_view previous;
+    for (const auto& capability : capabilities) {
+      if (!valid_key(capability.name) || capability.name == previous)
+        return std::unexpected("invalid or duplicate rule capability name");
+      if (capability.support > max_capability_support)
+        return std::unexpected("invalid rule capability support");
+      previous = capability.name;
+    }
+  }
   return request;
 }
 
@@ -193,9 +213,16 @@ int run_rule_worker(std::span<const std::string_view> args) {
   const auto plan = reinterpret_cast<int (*)(const Host*)>(::dlsym(library.handle, "ycxx_rule_plan_v1"));
   if (!plan) return fail("rule library has no ycxx_rule_plan_v1 entry point");
 
+  std::vector<Capability> capabilities;
+  if (request->capabilities) {
+    capabilities.reserve(request->capabilities->size());
+    for (const auto& capability : *request->capabilities)
+      capabilities.push_back({capability.name.c_str(), capability.support});
+  }
   Invocation invocation{*request, *inputs, {}};
   const Host host{abi_version, sizeof(Host), request->rule.c_str(), request->target.c_str(),
-                  borrow(request->definition), &invocation, attribute, read, emit};
+                  borrow(request->definition), &invocation, attribute, read, emit,
+                  capabilities.empty() ? nullptr : capabilities.data(), capabilities.size()};
   const int status = plan(&host);
   if (invocation.invalid_read) return fail("rule attempted an invalid or undeclared read");
   if (invocation.invalid_emit) return fail("rule attempted an invalid, repeated or oversized definition");
