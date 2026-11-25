@@ -17,8 +17,8 @@ PINNED = 'cap/rules'
 PROFILE_FLAG = '-DYCXX_MATRIX_TEST_HEADER=1'
 REQUIRED = {'driver.default-target', 'dialect.cxx20', 'dialect.cxx23', 'dialect.cxx26',
             'header.cstddef', 'feature.concepts', 'object.default', 'object.arm64-darwin',
-            'object.riscv64-linux', 'link.hosted', 'link.freestanding', 'link.host-shared',
-            'link.host-shared.load'}
+            'object.riscv64-linux', 'object.host-shared', 'link.hosted', 'link.hosted.run',
+            'link.freestanding', 'link.host-shared', 'link.host-shared.load'}
 
 
 def write_compiler(wrapper, compiler, log, *, reject_header):
@@ -48,13 +48,14 @@ exec {shlex.quote(str(compiler))} "$@"
 
 def write_package(scope, wrapper, *flags):
     shared = '-dynamiclib' if sys.platform == 'darwin' else '-shared'
-    profile = f'    probe_flags = {json.dumps(list(flags))}\n' if flags else ''
+    probe_flags = json.dumps(['-include', str(scope / 'profile.h'), *flags])
     (scope / 'cap/build.ycxx').write_text(f'''\
 host_action "rules" {{
     tool = cxx({json.dumps(str(wrapper))})
     args = ["-std=c++20", "-fPIC", "{shared}", "-Iinputs/sdk",
             input("source"), "-o", output("plugin")]
-{profile}    environment = {{ PATH = "/usr/bin:/bin" }}
+    probe_flags = {probe_flags}
+    environment = {{ PATH = "/usr/bin:/bin" }}
     inputs = {{ source = "rules.cc" }}
     outputs = {{ plugin = "rules.so" }}
 }}
@@ -63,6 +64,7 @@ host_action "rules" {{
 
 def prepare(scope, compiler, wrapper, log):
     (scope / 'cap').mkdir()
+    (scope / 'profile.h').write_text('// Forced include for this compiler profile.\n', encoding='utf-8')
     write_compiler(wrapper, compiler, log, reject_header=True)
     write_package(scope, wrapper)
     (scope / 'cap/rules.cc').write_text('''\
@@ -111,7 +113,7 @@ def probe(ycxx, scope, env):
 
 def probe_actions(trace):
     return [event['key'] for event in trace
-            if event.get('kind') in {'ToolchainProbeAction', 'ToolchainProbeLoad'}
+            if event.get('kind') in {'ToolchainProbeAction', 'ToolchainProbeLoad', 'ToolchainProbeRun'}
             and event.get('outcome') in {'executed', 'failed'}]
 
 
@@ -146,7 +148,8 @@ def check_matrix(ycxx, scope, env, compiler):
     standard = capabilities(ycxx, scope, env, STANDARD)
     assert REQUIRED <= pinned.keys() and REQUIRED <= standard.keys(), (pinned, standard)
     for supported in ('driver.default-target', 'dialect.cxx20', 'header.cstddef', 'feature.concepts',
-                      'object.default', 'link.hosted', 'link.host-shared', 'link.host-shared.load'):
+                      'object.default', 'object.host-shared', 'link.hosted', 'link.hosted.run',
+                      'link.host-shared', 'link.host-shared.load'):
         assert pinned[supported] == 'supported', (supported, pinned)
     assert pinned['object.riscv64-linux'] == 'indeterminate', pinned
 
@@ -180,6 +183,13 @@ def check_matrix(ycxx, scope, env, compiler):
     assert capabilities(ycxx, scope, env, PINNED)['header.cstddef'] == 'supported'
     recorded = log.read_bytes()
     assert not probe_actions(probe(ycxx, scope, env)) and log.read_bytes() == recorded
+    (scope / 'profile.h').write_text('#error profile input changed\n', encoding='utf-8')
+    assert not capabilities(ycxx, scope, env, PINNED), 'inspection accepted stale toolchain inputs'
+    assert log.read_bytes() == recorded, 'inspection ran probes after a compiler input changed'
+    changed = probe_actions(probe(ycxx, scope, env))
+    assert f'header.cstddef via {wrapper}' in changed, changed
+    assert not any(action.endswith(f' via {winners[STANDARD]}') for action in changed), changed
+    assert capabilities(ycxx, scope, env, PINNED)['header.cstddef'] == 'unsupported'
     check_program(executable, 42)
 
 

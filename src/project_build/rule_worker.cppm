@@ -1,6 +1,7 @@
 // The rule library and its callbacks live in a short-lived process (#1257).
 module;
 #include <dlfcn.h>
+#include <unistd.h>
 export module ycxx.build.rule_worker;
 
 import std;
@@ -16,6 +17,7 @@ std::string_view rule_sdk_header();
 int run_rule_worker(std::span<const std::string_view> args);
 // The staged library exports the same symbol with a probe-specific witness result.
 int run_shared_probe(std::span<const std::string_view> args);
+int run_executable_probe(std::span<const std::string_view> args);
 
 }  // namespace ycxx::build
 
@@ -218,6 +220,14 @@ int run_shared_probe(std::span<const std::string_view> args) {
   if (!plan) return fail("probe library has no ycxx_rule_plan_v1 entry point");
   if (plan(nullptr) != 42) return fail("probe library returned the wrong witness");
   return 0;
+}
+
+int run_executable_probe(std::span<const std::string_view> args) {
+  if (args.size() != 1 || !valid_key(args.front())) return fail("expected a staged probe executable path");
+  std::string path(args.front());
+  char* argv[]{path.data(), nullptr};
+  ::execv(path.c_str(), argv);
+  return fail("cannot run staged probe executable");
 }
 
 }  // namespace ycxx::build

@@ -14,14 +14,14 @@ import ycxx.pp;
 export namespace ycxx::build {
 
 struct ProbeKey {
-  std::string name;
   Fp128 profile;
+  std::uint32_t row;
   bool operator==(const ProbeKey&) const = default;
 };
 
 struct MeasuredToolchainProbe {
   ProbeEvidence evidence;
-  std::optional<Artifact> shared_library;
+  std::optional<Artifact> artifact;
   ToolchainProbeInputs discovered_inputs;
   bool cacheable = true;
 };
@@ -34,6 +34,13 @@ struct [[=engine::input{engine::Durability::low}]] ToolchainProbeReceipt {
 struct ToolchainProbeResult {
   using Key = ToolchainProbeReceipt::Key;
   using Value = ToolchainProbeReceipt::Value;
+  static std::string describe(const Key& key) {
+    const auto rows = baseline_toolchain_probes();
+    if (key.row == rows.size()) return "driver.search-paths";
+    if (key.row == rows.size() + 1) return "link.host-shared.load";
+    if (key.row == rows.size() + 2) return "link.hosted.run";
+    return std::string(rows[key.row].id);
+  }
   static engine::query_task<Value> run(engine::Ctx& cx, const Key& key) {
     co_return cx.fetch<ToolchainProbeReceipt>(key);
   }
@@ -66,6 +73,8 @@ inline constexpr int catalogue_version = 1;
 ProbeCompletion completion(const ActionResult& result) {
   switch (result.completion) {
     case ActionCompletion::exited:
+      if (result.exit_status == 126 || result.exit_status == 127) return ProbeCompletion::setup_failure;
+      if (result.exit_status >= 128) return ProbeCompletion::signalled;
       return result.exit_status == 0 ? ProbeCompletion::completed : ProbeCompletion::rejected;
     case ActionCompletion::signalled: return ProbeCompletion::signalled;
     case ActionCompletion::cancelled: return ProbeCompletion::cancelled;
@@ -82,7 +91,7 @@ bool reusable(ProbeCompletion state) {
 }
 
 MeasuredToolchainProbe unavailable(std::string reason, bool cacheable = true) {
-  MeasuredToolchainProbe observation{.evidence = {}, .shared_library = {}, .discovered_inputs = {},
+  MeasuredToolchainProbe observation{.evidence = {}, .artifact = {}, .discovered_inputs = {},
                                      .cacheable = cacheable};
   observation.evidence.reason = std::move(reason);
   return observation;
@@ -96,7 +105,8 @@ std::string_view name(ProbeSupport support) {
 
 void add_fact(ToolchainMatrix& matrix, std::string_view package, std::string_view id,
               const ProbeEvidence& evidence) {
-  auto origin = std::format("{} (exit {})", evidence.reason, evidence.exit_status);
+  auto origin = evidence.reason;
+  if (evidence.exit_status) origin += std::format(" (exit {})", *evidence.exit_status);
   if (!evidence.target.empty()) origin += std::format(" · {}", evidence.target);
   if (evidence.artifact) {
     constexpr std::string_view formats[] = {"ELF", "Mach-O", "COFF"};
@@ -125,15 +135,16 @@ MeasuredToolchainProbe execute_probe(const ToolchainProbe& probe, const StagedTo
   auto result = run("ToolchainProbeAction", label, staged.action, staged.inputs);
   const auto state = completion(result);
   MeasuredToolchainProbe record{.evidence = classify_toolchain_probe(probe, staged.expected_target, result, state),
-                                .shared_library = {}, .discovered_inputs = {}, .cacheable = reusable(state)};
-  if (probe.phase == ToolchainProbePhase::shared_link && record.evidence.support == ProbeSupport::supported)
-    record.shared_library = std::move(result.outputs.front().contents);
+                                .artifact = {}, .discovered_inputs = {}, .cacheable = reusable(state)};
+  if ((probe.phase == ToolchainProbePhase::shared_link || probe.id == "link.hosted") &&
+      record.evidence.support == ProbeSupport::supported)
+    record.artifact = std::move(result.outputs.front().contents);
   return record;
 }
 
 MeasuredToolchainProbe discover_inputs(const ToolchainProbeProfile& profile, const RunProbe& run) {
-  constexpr std::string_view include_args[] = {"-E", "-x", "c++", "-v"};
-  constexpr std::string_view search_args[] = {"-print-search-dirs"};
+  static constexpr std::string_view include_args[] = {"-E", "-x", "c++", "-v"};
+  static constexpr std::string_view search_args[] = {"-print-search-dirs"};
   constexpr ToolchainProbe includes{"driver.include-search", "Compiler include search", ToolchainProbePhase::syntax,
                                      "// Search paths only.\n", include_args, {}, {}};
   constexpr ToolchainProbe search{"driver.tool-search", "Compiler tool search", ToolchainProbePhase::syntax,
@@ -154,33 +165,37 @@ MeasuredToolchainProbe discover_inputs(const ToolchainProbeProfile& profile, con
   return result;
 }
 
-MeasuredToolchainProbe load_shared(const ToolchainProbeProfile& profile, std::string_view worker,
-                                  const MeasuredToolchainProbe& linked, const RunProbe& run) {
+MeasuredToolchainProbe run_host_witness(const ToolchainProbeProfile& profile, std::string_view worker,
+                                       const MeasuredToolchainProbe& linked, const RunProbe& run, bool shared) {
   using enum ActionArg::Kind;
-  if (!linked.shared_library)
-    return unavailable("shared library link did not produce a verified artifact", linked.cacheable);
+  if (!linked.artifact)
+    return unavailable("preceding link did not produce a verified artifact", linked.cacheable);
+  auto observed = unavailable("artifact target cannot run on this host");
+  observed.evidence.target = linked.evidence.target;
+  observed.evidence.artifact = linked.evidence.artifact;
   const auto* host = pp::native_target;
   if (!host || !toolchain_probe_host_matches(linked.evidence.target, host->triple))
-    return unavailable("shared library target cannot be loaded on this host");
+    return observed;
   const Action action{.tool = std::string(worker),
-      .args = {{literal, "--internal-probe-shared"}, {input, "library"}},
+      .args = {{literal, shared ? "--internal-probe-shared" : "--internal-probe-executable"}, {input, "binary"}},
       .environment = profile.environment, .outputs = {}};
-  const ActionInput artifact{"library", "probe.so", *linked.shared_library};
-  const auto result = run("ToolchainProbeLoad", std::format("link.host-shared.load via {}", profile.executable),
-                          action, std::span{&artifact, 1});
+  const ActionInput artifact{"binary", shared ? "probe.so" : "probe", *linked.artifact};
+  const auto result = run(shared ? "ToolchainProbeLoad" : "ToolchainProbeRun",
+                          std::format("{} via {}", shared ? "link.host-shared.load" : "link.hosted.run",
+                                      profile.executable), action, std::span{&artifact, 1});
   const auto state = completion(result);
-  auto loaded = unavailable("host loader did not complete the rule entry point witness", reusable(state));
-  loaded.evidence.target = linked.evidence.target;
-  loaded.evidence.artifact = linked.evidence.artifact;
-  loaded.evidence.exit_status = result.exit_status;
+  observed.cacheable = reusable(state);
+  observed.evidence.exit_status = result.exit_status;
+  observed.evidence.reason = "host witness did not complete";
   if (state == ProbeCompletion::completed) {
-    loaded.evidence.support = ProbeSupport::supported;
-    loaded.evidence.reason = "loaded library and called ycxx_rule_plan_v1";
+    observed.evidence.support = ProbeSupport::supported;
+    observed.evidence.reason = shared ? "loaded library and called ycxx_rule_plan_v1" : "ran executable on the host";
   } else if (state == ProbeCompletion::rejected) {
-    loaded.evidence.support = ProbeSupport::unsupported;
-    loaded.evidence.reason = "host loader or rule entry point rejected the library";
+    observed.evidence.support = ProbeSupport::unsupported;
+    observed.evidence.reason = shared ? "host loader or rule entry point rejected the library"
+                                      : "executable returned an unexpected status";
   }
-  return loaded;
+  return observed;
 }
 
 }  // namespace
@@ -198,7 +213,9 @@ std::expected<ToolchainMatrix, std::string> measure_toolchain_matrix(
                                                                    profile.environment, declared_inputs),
                          .stamp = {}, .facts = {}};
   if (profile.native) {
-    const auto sdk = std::ranges::find(profile.environment, "SDKROOT", &std::pair<std::string, std::string>::first);
+    const auto sdk = std::ranges::find_if(profile.environment, [](const auto& variable) {
+      return variable.first == "SDKROOT";
+    });
     merge_inputs(matrix.inputs, {pp::all_system_dirs(sdk == profile.environment.end() ? "" : sdk->second), {}});
   }
   const auto configured = fingerprint_toolchain_probe_inputs(matrix.inputs);
@@ -208,13 +225,14 @@ std::expected<ToolchainMatrix, std::string> measure_toolchain_matrix(
   if (!default_target) return std::unexpected(default_target.error());
   const auto default_key = fingerprint(std::tie(catalogue_version, identity, configured,
                                                 default_target->action, default_target->inputs));
-  const auto target = measure({std::string(target_probe.id), default_key},
+  const auto target = measure({default_key, 0},
                               [&] { return execute_probe(target_probe, *default_target, run); });
   if (target.evidence.support == ProbeSupport::supported) profile.observed_target = target.evidence.target;
 
   if (!profile.native && !cancelled()) {
     const auto search_key = fingerprint(std::tie(catalogue_version, identity, configured, profile.observed_target));
-    auto discovery = measure({"driver.search-paths", search_key}, [&] { return discover_inputs(profile, run); });
+    auto discovery = measure({search_key, static_cast<std::uint32_t>(catalogue.size())},
+                             [&] { return discover_inputs(profile, run); });
     merge_inputs(matrix.inputs, std::move(discovery.discovered_inputs));
   }
   matrix.stamp = fingerprint_toolchain_probe_inputs(matrix.inputs);
@@ -222,7 +240,8 @@ std::expected<ToolchainMatrix, std::string> measure_toolchain_matrix(
                           profile.native ? "Selected native compiler" : "Selected host compiler"});
   add_fact(matrix, package, target_probe.id, target.evidence);
 
-  for (const auto& probe : catalogue.subspan(1)) {
+  for (std::uint32_t row = 1; row < catalogue.size(); ++row) {
+    const auto& probe = catalogue[row];
     if (cancelled()) return std::unexpected("build cancelled");
     auto staged = stage_toolchain_probe(probe, profile);
     if (!staged) {
@@ -231,13 +250,14 @@ std::expected<ToolchainMatrix, std::string> measure_toolchain_matrix(
     }
     const auto key = fingerprint(std::tie(catalogue_version, identity, matrix.stamp, staged->action,
                                          staged->inputs, staged->expected_target));
-    const auto result = measure({std::string(probe.id), key}, [&] { return execute_probe(probe, *staged, run); });
+    const auto result = measure({key, row}, [&] { return execute_probe(probe, *staged, run); });
     add_fact(matrix, package, probe.id, result.evidence);
-    if (probe.phase == ToolchainProbePhase::shared_link && !cancelled()) {
-      constexpr std::string_view load = "link.host-shared.load";
-      const auto load_key = fingerprint(std::tie(key, worker, result.evidence, result.shared_library));
-      const auto loaded = measure({std::string(load), load_key}, [&] { return load_shared(profile, worker, result, run); });
-      add_fact(matrix, package, load, loaded.evidence);
+    const bool shared = probe.phase == ToolchainProbePhase::shared_link;
+    if ((shared || probe.id == "link.hosted") && !cancelled()) {
+      const auto witness_key = fingerprint(std::tie(key, worker, result.evidence, result.artifact));
+      const auto witness = measure({witness_key, static_cast<std::uint32_t>(catalogue.size() + (shared ? 1 : 2))},
+                                   [&] { return run_host_witness(profile, worker, result, run, shared); });
+      add_fact(matrix, package, shared ? "link.host-shared.load" : "link.hosted.run", witness.evidence);
     }
   }
   if (matrix.stamp != fingerprint_toolchain_probe_inputs(matrix.inputs))

@@ -41,7 +41,7 @@ struct ProbeEvidence {
   std::string reason;
   std::string target;
   std::optional<ProbeArtifactEvidence> artifact;
-  int exit_status = 0;
+  std::optional<int> exit_status;
 };
 
 std::expected<ToolchainProbeProfile, std::string> normalize_toolchain_probe_profile(ToolchainProbeProfile profile);
