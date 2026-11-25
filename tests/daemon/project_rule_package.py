@@ -38,6 +38,7 @@ def plugin_source(generation):
 #include "ycxx_rule_api.h"
 
 #include <cstddef>
+#include <cstdlib>
 #include <string_view>
 
 namespace {
@@ -82,6 +83,8 @@ extern "C" int ycxx_rule_plan_v1(const ycxx_rule_host_v1* host) {
     const auto setting = text(bytes);
     if (setting == generation)
         return 24;
+    if (setting == "fail\n")
+        std::abort();
     if (setting == "11\n")
         return emit(host, plan_11);
     if (setting == "17\n")

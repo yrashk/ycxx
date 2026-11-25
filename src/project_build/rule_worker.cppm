@@ -88,10 +88,34 @@ std::expected<RuleWorkerRequest, std::string> load_request(const std::string& pa
   return request;
 }
 
+using RuleInputs = std::map<std::string, std::optional<std::string>, std::less<>>;
+
+std::expected<RuleInputs, std::string> load_reads(const RuleWorkerRequest& request) {
+  RuleInputs inputs;
+  for (const auto& read : request.reads) {
+    if (!read.staged) {
+      inputs.emplace(read.path, std::nullopt);
+      continue;
+    }
+    const auto& spelling = *read.staged;
+    const std::filesystem::path path(spelling);
+    if (!valid_key(spelling) || !spelling.starts_with("inputs/") ||
+        std::ranges::any_of(path, [](const auto& part) { return part == "." || part == ".."; }))
+      return std::unexpected("invalid staged rule input path");
+    std::ifstream file(path, std::ios::binary);
+    if (!file) return std::unexpected(std::format("cannot open staged rule input '{}'", read.path));
+    std::string bytes{std::istreambuf_iterator<char>(file), {}};
+    if (file.bad()) return std::unexpected(std::format("cannot read staged rule input '{}'", read.path));
+    inputs.emplace(read.path, std::move(bytes));
+  }
+  return inputs;
+}
+
 Bytes borrow(std::string_view bytes) { return {bytes.data(), bytes.size()}; }
 
 struct Invocation {
   const RuleWorkerRequest& request;
+  const RuleInputs& inputs;
   std::string emitted;
   bool invalid_read = false;
   bool invalid_emit = false;
@@ -112,11 +136,10 @@ int read(void* context, const char* path, Bytes* result) noexcept {
   if (!context) return -1;
   auto& invocation = *static_cast<Invocation*>(context);
   if (path && *path && result) {
-    const auto& reads = invocation.request.reads;
-    const auto found = std::ranges::find_if(reads, [&](const auto& item) { return item.path == path; });
-    if (found != reads.end()) {
-      if (!found->staged) return 0;
-      *result = borrow(*found->staged);
+    const auto found = invocation.inputs.find(path);
+    if (found != invocation.inputs.end()) {
+      if (!found->second) return 0;
+      *result = borrow(*found->second);
       return 1;
     }
   }
@@ -151,6 +174,8 @@ int run_rule_worker(std::span<const std::string_view> args) {
 
   auto request = load_request(std::string(args[1]));
   if (!request) return fail(request.error());
+  auto inputs = load_reads(*request);
+  if (!inputs) return fail(inputs.error());
 
   std::string library_path(args[0]);
   if (!library_path.contains('/')) library_path.insert(0, "./");
@@ -162,7 +187,7 @@ int run_rule_worker(std::span<const std::string_view> args) {
   const auto plan = reinterpret_cast<int (*)(const Host*)>(::dlsym(library.handle, "ycxx_rule_plan_v1"));
   if (!plan) return fail("rule library has no ycxx_rule_plan_v1 entry point");
 
-  Invocation invocation{*request, {}};
+  Invocation invocation{*request, *inputs, {}};
   const Host host{abi_version, sizeof(Host), request->rule.c_str(), request->target.c_str(),
                   borrow(request->definition), &invocation, attribute, read, emit};
   const int status = plan(&host);
