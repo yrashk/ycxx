@@ -8,6 +8,7 @@ export module ycxx.build.rule_worker;
 
 import std;
 import ycxx.build.rule_protocol;
+import ycxx.lex;
 import ycxx.lsp;
 
 export namespace ycxx::build {
@@ -15,8 +16,10 @@ export namespace ycxx::build {
 // The SDK staged as an input when compiling a rule package.
 std::string_view rule_sdk_header();
 
-// Arguments name the staged library, JSON request and output definition, respectively.
+// Arguments name the staged library, JSON request and output, respectively.
 int run_rule_worker(std::span<const std::string_view> args);
+// The coordinator verifies structured classifier replies before admitting them.
+bool canonical_rule_fact(const RuleFactBinding& fact);
 // The staged library exports the same symbol with a probe-specific witness result.
 int run_shared_probe(std::span<const std::string_view> args);
 int run_executable_probe(std::span<const std::string_view> args);
@@ -31,12 +34,56 @@ constexpr char sdk_header[] = {
     , 0};
 constexpr std::size_t max_request_size = 8 * 1024 * 1024;
 constexpr std::size_t max_definition_size = 1024 * 1024;
+constexpr std::size_t max_diagnostic_size = 4096;
 constexpr std::uint32_t abi_version = 1;
+constexpr std::uint32_t max_capability_support = 2;  // YCXX_RULE_INDETERMINATE_V1
+constexpr std::uint32_t fact_u32 = 1;  // YCXX_RULE_FACT_U32_V1
+constexpr std::uint32_t fact_text = 2;  // YCXX_RULE_FACT_TEXT_V1
+constexpr std::size_t max_fact_count = 64;
+constexpr std::size_t max_fact_rows = 256;
+constexpr std::size_t max_row_fields = 32;
+constexpr std::size_t max_fact_key_size = 255;
+constexpr std::size_t max_fact_text_size = 4096;
+constexpr std::size_t max_fact_size = 64 * 1024;
+constexpr std::size_t max_facts_size = 256 * 1024;
 
 // The C ABI in the staged SDK header. No C++ objects or ownership cross this boundary.
 struct Bytes {
   const char* data;
   std::size_t size;
+};
+
+struct Capability {
+  const char* name;
+  std::uint32_t support;
+};
+
+struct FactField {
+  const char* name;
+  std::uint32_t kind;
+  std::uint32_t number;
+  Bytes text;
+};
+
+struct FactRow {
+  const char* name;
+  const FactField* fields;
+  std::size_t field_count;
+};
+
+struct Fact {
+  const char* name;
+  const char* schema;
+  const FactRow* rows;
+  std::size_t row_count;
+};
+
+struct Witness {
+  const char* name;
+  int exit_status;
+  Bytes out;
+  Bytes err;
+  const char* schema;
 };
 
 struct Host {
@@ -49,6 +96,14 @@ struct Host {
   int (*attribute)(void*, const char*, Bytes*);
   int (*read)(void*, const char*, Bytes*);
   int (*emit)(void*, const char*, std::size_t);
+  const Capability* capabilities;
+  std::size_t capability_count;
+  int (*diagnose)(void*, const char*, std::size_t);
+  const Witness* witness;
+  int (*export_support)(void*, const char*, std::uint32_t);
+  const Fact* facts;
+  std::size_t fact_count;
+  int (*export_fact)(void*, const Fact*);
 };
 
 struct Library {
@@ -62,6 +117,86 @@ int fail(std::string_view detail) {
 }
 
 bool valid_key(std::string_view value) { return !value.empty() && !value.contains('\0'); }
+
+bool valid_utf8(std::string_view text) {
+  while (!text.empty()) {
+    auto decoded = lex::unicode::decode_utf8(text);
+    if (!decoded) return false;
+    text.remove_prefix(decoded->length);
+  }
+  return true;
+}
+
+bool valid_fact_key(std::string_view value) {
+  return value.size() <= max_fact_key_size && valid_key(value) && valid_utf8(value);
+}
+
+std::string_view bounded_fact_key(const char* value) {
+  return value ? std::string_view(value, ::strnlen(value, max_fact_key_size + 1)) : std::string_view{};
+}
+
+struct FactBudget {
+  std::size_t remaining = max_fact_size;
+
+  bool take(std::size_t size) {
+    if (size > remaining) return false;
+    remaining -= size;
+    return true;
+  }
+
+  bool key(std::string_view value) { return valid_fact_key(value) && take(value.size()); }
+  bool text(std::string_view value) {
+    return value.size() <= max_fact_text_size && valid_utf8(value) && take(value.size());
+  }
+  bool number() { return take(sizeof(std::uint32_t)); }
+};
+
+template <class T>
+bool sort_unique_names(std::vector<T>& items) {
+  std::ranges::sort(items, {}, &T::name);
+  return std::ranges::adjacent_find(items, {}, &T::name) == items.end();
+}
+
+template <class T>
+bool strictly_sorted_names(const std::vector<T>& items) {
+  return std::ranges::adjacent_find(items, std::ranges::greater_equal{}, &T::name) == items.end();
+}
+
+std::optional<std::size_t> canonical_fact_size(const RuleFactBinding& binding) {
+  FactBudget budget;
+  const auto& [schema, rows] = binding.value;
+  if (!budget.key(binding.name) || !budget.key(schema) ||
+      rows.size() > max_fact_rows || !strictly_sorted_names(rows))
+    return std::nullopt;
+  for (const auto& row : rows) {
+    if (!budget.key(row.name) || row.fields.size() > max_row_fields || !strictly_sorted_names(row.fields))
+      return std::nullopt;
+    for (const auto& field : row.fields) {
+      if (!budget.key(field.name) || field.number.has_value() == field.text.has_value())
+        return std::nullopt;
+      if (field.text ? !budget.text(*field.text) : !budget.number()) return std::nullopt;
+    }
+  }
+  return max_fact_size - budget.remaining;
+}
+
+bool canonicalize_facts(std::vector<RuleFactBinding>& facts) {
+  if (facts.size() > max_fact_count || !sort_unique_names(facts)) return false;
+  std::size_t remaining = max_facts_size;
+  for (auto& fact : facts) {
+    auto& rows = fact.value.rows;
+    if (rows.size() > max_fact_rows) return false;
+    for (auto& row : rows) {
+      if (row.fields.size() > max_row_fields) return false;
+      std::ranges::sort(row.fields, {}, &RuleFactField::name);
+    }
+    std::ranges::sort(rows, {}, &RuleFactRow::name);
+    auto size = canonical_fact_size(fact);
+    if (!size || *size > remaining) return false;
+    remaining -= *size;
+  }
+  return true;
+}
 
 std::expected<RuleWorkerRequest, std::string> load_request(const std::string& path) {
   std::ifstream file(path, std::ios::binary);
@@ -82,6 +217,14 @@ std::expected<RuleWorkerRequest, std::string> load_request(const std::string& pa
   if (request->version != abi_version) return std::unexpected("unsupported rule request version");
   if (!valid_key(request->rule) || !valid_key(request->target))
     return std::unexpected("invalid rule or target name");
+  if (const auto& witness = request->witness) {
+    if (!valid_key(witness->name) || witness->exit_status < 0 || witness->exit_status > 255)
+      return std::unexpected("invalid rule witness name or exit status");
+    if (witness->out.size() > rule_witness_stream_limit || witness->err.size() > rule_witness_stream_limit)
+      return std::unexpected("rule witness stream exceeds 64 KiB");
+    if (witness->schema && (!valid_fact_key(witness->name) || !valid_fact_key(*witness->schema)))
+      return std::unexpected("invalid rule witness name or schema");
+  }
 
   std::set<std::string_view> keys;
   for (const auto& attribute : request->attributes)
@@ -91,6 +234,20 @@ std::expected<RuleWorkerRequest, std::string> load_request(const std::string& pa
   for (const auto& read : request->reads)
     if (!valid_key(read.path) || !keys.insert(read.path).second)
       return std::unexpected("invalid or duplicate rule read");
+  if (request->capabilities) {
+    auto& capabilities = *request->capabilities;
+    std::ranges::sort(capabilities, {}, &RuleCapabilityValue::name);
+    std::string_view previous;
+    for (const auto& capability : capabilities) {
+      if (!valid_key(capability.name) || capability.name == previous)
+        return std::unexpected("invalid or duplicate rule capability name");
+      if (capability.support > max_capability_support)
+        return std::unexpected("invalid rule capability support");
+      previous = capability.name;
+    }
+  }
+  if (request->facts && !canonicalize_facts(*request->facts))
+    return std::unexpected("invalid, duplicate or oversized rule fact binding");
   return request;
 }
 
@@ -119,12 +276,54 @@ std::expected<RuleInputs, std::string> load_reads(const RuleWorkerRequest& reque
 
 Bytes borrow(std::string_view bytes) { return {bytes.data(), bytes.size()}; }
 
+// Keep the backing arrays stable until the rule returns.
+struct BorrowedFacts {
+  std::vector<Fact> facts;
+  std::vector<FactRow> rows;
+  std::vector<FactField> fields;
+
+  explicit BorrowedFacts(const std::optional<std::vector<RuleFactBinding>>& bindings) {
+    if (!bindings) return;
+    std::size_t row_count = 0;
+    std::size_t field_count = 0;
+    for (const auto& binding : *bindings) {
+      row_count += binding.value.rows.size();
+      for (const auto& row : binding.value.rows) field_count += row.fields.size();
+    }
+    facts.reserve(bindings->size());
+    rows.reserve(row_count);
+    fields.reserve(field_count);
+    for (const auto& binding : *bindings) {
+      const auto& value = binding.value;
+      const auto row_offset = rows.size();
+      for (const auto& row : value.rows) {
+        const auto field_offset = fields.size();
+        for (const auto& field : row.fields) {
+          if (field.number)
+            fields.push_back({field.name.c_str(), fact_u32, *field.number, {}});
+          else
+            fields.push_back({field.name.c_str(), fact_text, 0, borrow(*field.text)});
+        }
+        rows.push_back({row.name.c_str(), row.fields.empty() ? nullptr : &fields[field_offset], row.fields.size()});
+      }
+      facts.push_back({binding.name.c_str(), value.schema.c_str(),
+                       value.rows.empty() ? nullptr : &rows[row_offset], value.rows.size()});
+    }
+  }
+};
+
 struct Invocation {
   const RuleWorkerRequest& request;
   const RuleInputs& inputs;
   std::string emitted;
+  std::string diagnostic;
+  std::optional<std::uint32_t> support = std::nullopt;
+  std::optional<RuleFactBinding> fact = std::nullopt;
   bool invalid_read = false;
   bool invalid_emit = false;
+  bool invalid_diagnose = false;
+  bool invalid_support = false;
+  bool invalid_fact = false;
 };
 
 int attribute(void* context, const char* name, Bytes* result) noexcept {
@@ -153,26 +352,118 @@ int read(void* context, const char* path, Bytes* result) noexcept {
   return -1;
 }
 
-int emit(void* context, const char* definition, std::size_t size) noexcept {
-  if (!context) return -1;
-  auto& invocation = *static_cast<Invocation*>(context);
-  if (invocation.invalid_emit || !invocation.emitted.empty() || !definition || size == 0 ||
-      size > max_definition_size) {
-    invocation.invalid_emit = true;
+int copy_once(std::string& output, bool& invalid, const char* text, std::size_t size,
+              std::size_t limit) noexcept {
+  if (invalid || !output.empty() || !text || size == 0 || size > limit) {
+    invalid = true;
     return -1;
   }
   try {
-    invocation.emitted.assign(definition, size);
+    output.assign(text, size);
   } catch (...) {
-    invocation.invalid_emit = true;
+    invalid = true;
     return -1;
   }
   return 0;
 }
 
+int emit(void* context, const char* definition, std::size_t size) noexcept {
+  if (!context) return -1;
+  auto& invocation = *static_cast<Invocation*>(context);
+  if (invocation.request.witness) {
+    invocation.invalid_emit = true;
+    return -1;
+  }
+  return copy_once(invocation.emitted, invocation.invalid_emit, definition, size, max_definition_size);
+}
+
+int export_support(void* context, const char* name, std::uint32_t support) noexcept {
+  if (!context) return -1;
+  auto& invocation = *static_cast<Invocation*>(context);
+  const auto& witness = invocation.request.witness;
+  if (invocation.invalid_support || invocation.support || !witness || witness->schema ||
+      !name || witness->name != name || support > max_capability_support) {
+    invocation.invalid_support = true;
+    return -1;
+  }
+  invocation.support = support;
+  return 0;
+}
+
+std::optional<RuleFactBinding> copy_fact(const Fact& fact, std::string_view expected_name,
+                                        std::string_view expected_schema) {
+  const auto name = bounded_fact_key(fact.name);
+  const auto schema = bounded_fact_key(fact.schema);
+  FactBudget budget;
+  if (name != expected_name || schema != expected_schema || !budget.key(name) || !budget.key(schema) ||
+      fact.row_count > max_fact_rows || (fact.row_count && !fact.rows))
+    return std::nullopt;
+
+  RuleFactBinding result{std::string(name), {std::string(schema), {}}};
+  auto& rows = result.value.rows;
+  rows.reserve(fact.row_count);
+  for (std::size_t i = 0; i < fact.row_count; ++i) {
+    const auto& row = fact.rows[i];
+    const auto row_name = bounded_fact_key(row.name);
+    if (!budget.key(row_name) || row.field_count > max_row_fields || (row.field_count && !row.fields))
+      return std::nullopt;
+    RuleFactRow added{std::string(row_name), {}};
+    added.fields.reserve(row.field_count);
+    for (std::size_t j = 0; j < row.field_count; ++j) {
+      const auto& field = row.fields[j];
+      const auto field_name = bounded_fact_key(field.name);
+      if (!budget.key(field_name)) return std::nullopt;
+      switch (field.kind) {
+        case fact_u32:
+          if (field.text.data || field.text.size || !budget.number()) return std::nullopt;
+          added.fields.push_back({.name = std::string(field_name), .number = field.number});
+          break;
+        case fact_text: {
+          if (field.number || field.text.size > max_fact_text_size || (!field.text.data && field.text.size))
+            return std::nullopt;
+          const std::string_view text(field.text.data ? field.text.data : "", field.text.size);
+          if (!budget.text(text)) return std::nullopt;
+          added.fields.push_back({.name = std::string(field_name), .text = std::string(text)});
+          break;
+        }
+        default:
+          return std::nullopt;
+      }
+    }
+    if (!sort_unique_names(added.fields)) return std::nullopt;
+    rows.push_back(std::move(added));
+  }
+  if (!sort_unique_names(rows)) return std::nullopt;
+  return result;
+}
+
+int export_fact(void* context, const Fact* fact) noexcept {
+  if (!context) return -1;
+  auto& invocation = *static_cast<Invocation*>(context);
+  const auto& witness = invocation.request.witness;
+  if (!invocation.invalid_fact && !invocation.fact && witness && witness->schema && fact) {
+    try {
+      invocation.fact = copy_fact(*fact, witness->name, *witness->schema);
+      if (invocation.fact) return 0;
+    } catch (...) {
+      // A failed copy cannot admit a value.
+    }
+  }
+  invocation.invalid_fact = true;
+  return -1;
+}
+
+int diagnose(void* context, const char* text, std::size_t size) noexcept {
+  if (!context) return -1;
+  auto& invocation = *static_cast<Invocation*>(context);
+  return copy_once(invocation.diagnostic, invocation.invalid_diagnose, text, size, max_diagnostic_size);
+}
+
 }  // namespace
 
 std::string_view rule_sdk_header() { return {sdk_header, sizeof sdk_header - 1}; }
+
+bool canonical_rule_fact(const RuleFactBinding& fact) { return canonical_fact_size(fact).has_value(); }
 
 int run_rule_worker(std::span<const std::string_view> args) {
   if (args.size() != 3 || !std::ranges::all_of(args, valid_key))
@@ -190,21 +481,53 @@ int run_rule_worker(std::span<const std::string_view> args) {
     const char* detail = ::dlerror();
     return fail(detail ? detail : "cannot load rule library");
   }
-  const auto plan = reinterpret_cast<int (*)(const Host*)>(::dlsym(library.handle, "ycxx_rule_plan_v1"));
-  if (!plan) return fail("rule library has no ycxx_rule_plan_v1 entry point");
+  const auto& report = request->witness;
+  const bool structured = report && report->schema;
+  const char* entry = report ? "ycxx_rule_classify_v1" : "ycxx_rule_plan_v1";
+  const auto invoke = reinterpret_cast<int (*)(const Host*)>(::dlsym(library.handle, entry));
+  if (!invoke) return fail(std::format("rule library has no {} entry point", entry));
 
-  Invocation invocation{*request, *inputs, {}};
+  std::vector<Capability> capabilities;
+  if (request->capabilities) {
+    capabilities.reserve(request->capabilities->size());
+    for (const auto& capability : *request->capabilities)
+      capabilities.push_back({capability.name.c_str(), capability.support});
+  }
+  const BorrowedFacts facts(request->facts);
+  Witness witness{};
+  if (report)
+    witness = {report->name.c_str(), report->exit_status, borrow(report->out), borrow(report->err),
+               structured ? report->schema->c_str() : nullptr};
+  Invocation invocation{*request, *inputs, {}, {}};
   const Host host{abi_version, sizeof(Host), request->rule.c_str(), request->target.c_str(),
-                  borrow(request->definition), &invocation, attribute, read, emit};
-  const int status = plan(&host);
+                  borrow(request->definition), &invocation, attribute, read, emit,
+                  capabilities.empty() ? nullptr : capabilities.data(), capabilities.size(), diagnose,
+                  report ? &witness : nullptr, report ? export_support : nullptr,
+                  facts.facts.empty() ? nullptr : facts.facts.data(), facts.facts.size(),
+                  structured ? export_fact : nullptr};
+  const int status = invoke(&host);
   if (invocation.invalid_read) return fail("rule attempted an invalid or undeclared read");
+  if (report && invocation.invalid_emit) return fail("rule classifier attempted to emit a definition");
   if (invocation.invalid_emit) return fail("rule attempted an invalid, repeated or oversized definition");
-  if (status != 0) return fail(std::format("rule '{}' failed with status {}", request->rule, status));
-  if (invocation.emitted.empty()) return fail("rule did not emit a definition");
+  if (invocation.invalid_diagnose) return fail("rule supplied an invalid, repeated or oversized diagnostic");
+  if (invocation.invalid_support) return fail("rule classifier attempted an invalid or repeated support export");
+  if (invocation.invalid_fact) return fail("rule classifier attempted an invalid, repeated or oversized fact export");
+  if (status != 0) {
+    auto message = std::format("rule '{}' failed with status {}", request->rule, status);
+    if (!invocation.diagnostic.empty()) message.append(": ").append(invocation.diagnostic);
+    return fail(message);
+  }
+  if (structured && !invocation.fact) return fail("rule classifier did not export a fact");
+  if (report && !structured && !invocation.support) return fail("rule classifier did not export a support state");
+  if (!report && invocation.emitted.empty()) return fail("rule did not emit a definition");
 
+  std::string result;
+  if (invocation.fact) result = lsp::dump(lsp::to_json(*invocation.fact));
+  else if (invocation.support) result = lsp::dump(lsp::to_json(RuleCapabilityValue{report->name, *invocation.support}));
+  else result = std::move(invocation.emitted);
   std::ofstream output(std::string(args[2]), std::ios::binary | std::ios::noreplace);
   if (!output) return fail("cannot open rule output");
-  output.write(invocation.emitted.data(), static_cast<std::streamsize>(invocation.emitted.size()));
+  output.write(result.data(), static_cast<std::streamsize>(result.size()));
   output.close();
   if (!output) return fail("cannot write rule output");
   return 0;

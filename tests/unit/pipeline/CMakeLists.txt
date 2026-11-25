@@ -63,6 +63,11 @@ if(APPLE AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(arm64|aarch64)$" AND NOT CMAKE_CR
   add_test(NAME unit.darwin_nested_classes
     COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/nested_classes.py
             $<TARGET_FILE:ycxxc> ${CMAKE_CXX_COMPILER} darwin)
+  # Two units sharing the closures of static members, variable templates and inline variables
+  # (#338); unit.linux_lambda_declarations checks the same on Linux.
+  add_test(NAME unit.darwin_lambda_declarations
+    COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/lambda_declarations.py
+            $<TARGET_FILE:ycxxc> ${CMAKE_CXX_COMPILER} darwin)
   # The Darwin counterpart of unit.linux_archive (#842), checked against the system linker.
   add_test(NAME unit.darwin_archive
     COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/darwin_archive.py
@@ -104,6 +109,10 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_
   # The Darwin runs of the same sources are tests/own/classes/nested in the core suite (#306).
   add_test(NAME unit.linux_nested_classes
     COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/nested_classes.py
+            $<TARGET_FILE:ycxxc> ${CMAKE_CXX_COMPILER} linux)
+  # The Darwin runs of the same sources are tests/own/lambda-declarations in the core suite (#338).
+  add_test(NAME unit.linux_lambda_declarations
+    COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/lambda_declarations.py
             $<TARGET_FILE:ycxxc> ${CMAKE_CXX_COMPILER} linux)
   if(CMAKE_CXX_COMPILER_ID MATCHES "^(GNU|Clang)$")
     add_test(NAME unit.linux_fixed_array_new
@@ -187,6 +196,10 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_
   add_test(NAME unit.linux_native_int_throw
     COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/linux_native_int_throw.py
             $<TARGET_FILE:ycxxc> ${CMAKE_CXX_COMPILER} ${CMAKE_READELF})
+  # PARITY: #648 tracks the Darwin native exception counterpart.
+  add_test(NAME unit.linux_native_class_throw
+    COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/linux_native_class_throw.py
+            --ycxx $<TARGET_FILE:ycxxc> --peer ${CMAKE_CXX_COMPILER})
   add_test(NAME unit.linux_local_unwind
     COMMAND python3 -B ${CMAKE_CURRENT_SOURCE_DIR}/linux_local_unwind.py
             $<TARGET_FILE:ycxxc> ${CMAKE_CXX_COMPILER} ${CMAKE_READELF})

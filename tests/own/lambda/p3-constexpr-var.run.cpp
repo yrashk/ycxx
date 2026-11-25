@@ -1,7 +1,6 @@
 // θ step 3 (#281), spec-only: an immediately invoked lambda initializes a constexpr local variable, and a
 // constexpr closure object is called in later constant expressions such as an array bound and a
 // template argument ([expr.prim.lambda.closure], [dcl.constexpr], [expr.const]).
-// XFAIL: ycxx class objects in constant evaluation, #262
 template<int N> struct tag { static constexpr int value = N; };
 
 int main() {

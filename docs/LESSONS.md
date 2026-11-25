@@ -185,6 +185,11 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
     To keep coding meanwhile, build into a scratchpad build directory (the entry above).
   - Stopping a `tools/test` that waits on a running `tools/build` in the same directory leaves
     half-built modules ("failed to read compiled module"). Let the build finish, then rebuild.
+- **`clang++` on this Mac is Apple's, not the oracle.** On #338 a mangling difference seen with it
+  was "fixed" to match, and a 6-minute rebuild later Clang 23 turned out to agree with the old name:
+  Apple Clang numbers substitutions after a `<closure-prefix>` differently.
+  - Do: compare symbols with the toolchain's Clang (`~/.local/share/ycxx/toolchains/llvm-*/bin`),
+    the one `tools/test --cxx clang` runs. Learned on #338.
 - **A loaded machine can cause timeouts in the fast gate.** On #330, with other sessions
   building and load averages of 120–250, two fast runs failed. The CTests had 10 s executable
   timeouts, `daemon.trace_tui` has a 2 s budget, and draft tests that include `<iostream>` have
@@ -558,6 +563,10 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
   - Do: stop the active build before changing module edges, let CMake regenerate, and use an
     implementation partition for a helper imported only by the primary module.
   - Learned on #1255.
+- **Include `<unistd.h>` for `mkdtemp` in host tests.** The new publication test found
+  the declaration through `<stdlib.h>` on Linux, and the macOS build required
+  `<unistd.h>`. The existing build-action test includes both.
+  - Learned on #1329.
 - **A watcher test that passes at once may not test the race.** The FSEvents test of "an edit
   between the read and the new stream" passed with the replay removed: a stream created "since
   now" still saw an event `fseventsd` had not journaled yet.
@@ -927,6 +936,16 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
     member-specification is being read (`Sema::current_class`), or when matching an out-of-class
     member definition against its own class.
   - Learned on #88 step 5.
+- **Accepting a template can make a header reach an analysis order nothing reached before.** #1243
+  made `numeric_limits` a class. Its base is completed while another class's member is declared,
+  which analysed later partial specializations and re-entered that class (`<vector>` crashed).
+  Every own test passed; only the `<vector>` draft examples in the core stage crashed.
+  - Do: before the review, compile a list of standard headers with the base's binary and yours, and
+    compare error counts and crashes. The check itself must read an item only after `passes`, or
+    `unit.pipeline_incremental` re-analyses unrelated groups (#947).
+  - Run `git status` after `git merge -q … | tail`: the pipe hides a conflict's exit code, and a gate
+    ran for half an hour on a half-merged tree.
+  - Learned on #1243.
 - **The item splitter must learn every token-level construct that looks like `name(`.** It decides
   what a namespace-scope item declares from tokens alone, and a miss is silent: `typedef
   __remove_cv(const int) T;` was split as a function named `__remove_cv`, so `T` never existed and

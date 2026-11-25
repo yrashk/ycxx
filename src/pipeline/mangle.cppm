@@ -431,7 +431,7 @@ class Mangler {
       if (n.closure_variable != ast::EntityId::none) {
         auto owner = prefix(n.closure_variable);
         if (!owner) return owner;
-        r = *owner + "M";  // <closure-prefix> ::= <name> M (§5.1.8)
+        r = *owner + "M";  // <closure-prefix> ::= <name> M, a candidate of its own (§5.1.8)
       }
       auto sig = closure_sig(n);
       if (!sig) return sig;
@@ -553,7 +553,7 @@ class Mangler {
     if (sc.closure && in_.types.is<ast::TFunction>(c)) {
       auto f = in_.types.get<ast::TFunction>(c);
       std::string local;
-      if (sc.closure) {
+      if (sc.closure_variable == ast::EntityId::none) {  // else the variable is its <closure-prefix>
         if (!sc.local) return std::unexpected("a closure type whose function is unknown");
         auto l = local_encoding(*sc.local);
         if (!l) return l;

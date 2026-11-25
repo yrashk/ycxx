@@ -1,0 +1,27 @@
+use plugin("rules/package") as shaders
+
+generate "shader_inventory" {
+    tool = "/bin/sh"
+    args = [input("script"), input("source"), output("list")]
+    inputs = { script = "rules/inventory.sh", source = "shaders/inventory.txt" }
+    outputs = { list = "inventory.txt" }
+}
+
+shaders.bundle "scene" {
+    inventory = "inventory"
+    plan_inputs = { inventory = artifact("shader_inventory", "list") }
+    compiler = "/usr/bin/glslc"
+    python = "/usr/bin/python3"
+}
+
+generate "release_note" {
+    tool = "/bin/sh"
+    args = ["-c", "printf '%s\\n' \"$1\" > \"$2\"", "release-note",
+            "Scene bundle entries contain a shader name and hexadecimal SPIR-V.", output("note")]
+    outputs = { note = "release-note.txt" }
+}
+
+cpp.executable "app" {
+    sources = ["main.cc"]
+    runtime_assets = [artifact("scene", "bundle"), artifact("release_note", "note")]
+}

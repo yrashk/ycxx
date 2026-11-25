@@ -66,6 +66,14 @@ struct GenericClosure {
   Bindings args;
   std::vector<std::pair<NameId, QualType>> aliases;
   bool erroneous = false;  // its definition was diagnosed: its specializations say nothing more
+  // Set for a lambda outside every function body: the part it is in, which its specializations
+  // are analysed in, and the class it is in, if any. `body_begin` is an offset in that part.
+  struct Part {
+    ast::ItemId item{};
+    u32 begin = 0;  // the part's first token in the item
+    EntityId lookup_class = EntityId::none;
+  };
+  std::optional<Part> part{};
 };
 
 // The enclosing function's template arguments and entity where a generic lambda is defined, for
@@ -84,8 +92,11 @@ struct GenericResult {
 
 class Sema;
 struct Ex;
+// What naming an alias template's specialization reads again: immediate calls its type retains or
+// may erase, checks of a dependent array's rank, or a type with a dependent operand that has no
+// representation (`decltype(f<T>())` of a deduced return type), known only once the arguments are.
 struct AliasCallPattern {
-  enum class Kind { none, retained, may_erase } kind = Kind::none;
+  enum class Kind { none, retained, may_erase, unrepresented } kind = Kind::none;
   bool class_result = false;
   bool rank_checks = false;
 };
@@ -3408,6 +3419,11 @@ public:
   }
   bool class_has_member_template(EntityId c, NameId name) {
     const ClassRec* r = class_rec(c);
+    if (!r && c != EntityId::none && c == current_class) {  // the class being defined: its members so far
+      std::vector<ast::DeclSema> functions;
+      q_->earlier_member(name, /*type_only=*/false, &functions);
+      return std::ranges::any_of(functions, [](const ast::DeclSema& d) { return (d.flags & decl_flag::template_) != 0; });
+    }
     return r && std::ranges::any_of(r->members, [&](const MemberDeclRec& m) { return m.name == name && m.is_template; });
   }
   // Whether `S::name` names a function template ([temp.names]/3): a member template of class S,
@@ -4064,7 +4080,8 @@ public:
   }
   const Ex* explicit_aggregate_prvalue(const Ex& e) const {
     auto found = explicit_aggregate_prvalues_.find(e.begin);
-    if (found == explicit_aggregate_prvalues_.end() || found->second.id != e.id || found->second.end != e.end)
+    if (found == explicit_aggregate_prvalues_.end() || found->second.begin != e.begin + 1 ||
+        found->second.id != e.id || found->second.end != e.end)
       return nullptr;
     return &found->second;
   }
@@ -5225,19 +5242,18 @@ public:
     return t;
   }
   bool open_lambda(LambdaSpec spec) {
-    // The enclosing entity: the function, or the enclosing lambda's operator().
+    // The enclosing entity: the function, the enclosing lambda's operator(), or what owns the
+    // closures of the declaration being analysed (docs/design/closures.md, decision 3).
     EntityId scope = lambdas_.empty() ? current_function : lambdas_.back().call;
-    const bool in_initializer = scope == EntityId::none && namespace_lambda && namespace_lambda->begin == spec.begin;
-    if (in_initializer) {
-      if (spec.default_capture || spec.has_capture || !spec.head.empty()) {
-        diag(spec.begin, spec.default_capture ? Diag::namespace_lambda_capture_default
-                         : spec.has_capture ? Diag::namespace_lambda_init_capture
-                                            : Diag::namespace_lambda_generic);
-        return false;
-      }
-      scope = namespace_lambda->owner;
+    const ClosureOwner* owner = scope == EntityId::none && closure_owner ? &*closure_owner : nullptr;
+    // [expr.prim.lambda.capture]/3: only a block scope or a default member initializer gives a
+    // capture-default something to capture.
+    if (owner && spec.default_capture) {
+      diag(spec.begin, Diag::nonlocal_lambda_capture_default);
+      return false;
     }
-    if (scope == EntityId::none) {
+    if (owner) scope = owner->scope;
+    if (scope == EntityId::none && !owner) {
       diag(spec.begin, Diag::not_supported, lex::Tk::l_square);  // a lambda outside a function body
       return false;
     }
@@ -5249,6 +5265,7 @@ public:
     // The closure's identity: its enclosing entity, signature and ordinal among the closures of
     // that entity and signature completed before it (docs/design/closures.md, decision 2).
     Fp128 sig = ast::seed("ycxx.sema.closure");
+    if (owner && owner->discriminator != Fp128{}) sig = ast::mix(sig, owner->discriminator);
     for (QualType p : types().rec(call_type).params) sig = ast::mix(sig, types().fp(types().canonical(p)));
     sig = ast::mix(sig, u64(spec.variadic));
     // The <lambda-sig> declares the explicit template parameters only (`Ty`, `Tp`), so they and
@@ -5258,12 +5275,15 @@ public:
     u32 ordinal = 0;
     for (const auto& [sc, sg] : completed_closures_)
       if (sc == scope && sg == sig) ++ordinal;
-    ast::Linkage linkage = in_initializer ? ast::Linkage::internal : closure_linkage(scope);
+    ast::Linkage linkage = owner ? owner->linkage : closure_linkage(scope);
     // Its record's type, which names it (the <lambda-sig>), has a generic lambda's parameters at
     // depth 0, as the innermost template's are mangled.
     EntityRec cr{EntityKind::class_, no_name(), rebased(call_type, spec.head), LangLinkage::cxx, linkage, {}, scope};
     cr.head = ast::mix(sig, u64(ordinal));
     cr.ordinal = ordinal;
+    // In a template's definition, its own template-head (pushed already) aside.
+    cr.closure_pattern = declaration_part && (in_generic_definition() ||
+                                              (template_scopes.size() > (spec.head.empty() ? 0u : 1u) && !instantiating() && !satisfying_atom));
     for (const ast::TemplateParamSema& h : spec.head)
       if (h.name != invented_name()) cr.closure_head.push_back(h);
     LambdaFrame f;
@@ -5373,6 +5393,26 @@ public:
     for (const auto& [n, field] : lambdas_.back().init_captures) scopes_.back().push_back({n, capture_bit | field});
     return true;
   }
+  // What owns the closure types of the lambdas in a declaration part, outside every function body
+  // (docs/design/closures.md, decision 3): the variable whose initializer is analysed; or, for a
+  // constraint-expression, which is no declaration's, the scope around it, with a discriminator
+  // that tells its closures from those of other constraints and of other substitutions.
+  struct ClosureOwner {
+    EntityId scope = EntityId::none;
+    ast::Linkage linkage = ast::Linkage::internal;
+    Fp128 discriminator{};
+  };
+  std::optional<ClosureOwner> closure_owner;
+  // The part being analysed is no function's body: its generic lambdas are instantiated in it
+  // (`GenericClosure::part`).
+  bool declaration_part = false;
+  struct ClosureOwnerScope {
+    Sema& sema;
+    std::optional<ClosureOwner> saved;
+    ClosureOwnerScope(Sema& s, std::optional<ClosureOwner> owner) : sema(s), saved(std::exchange(s.closure_owner, owner)) {}
+    ClosureOwnerScope(const ClosureOwnerScope&) = delete;
+    ~ClosureOwnerScope() { sema.closure_owner = saved; }
+  };
   // The linkage of a closure in `scope` (docs/design/closures.md, decision 4): external in a
   // function whose definition may appear in several units, internal elsewhere.
   ast::Linkage closure_linkage(EntityId scope) {
@@ -5482,11 +5522,15 @@ public:
       std::vector<NameId> captures;
       for (const FieldRec& fd : fr.fields) captures.push_back(fd.name);
       std::vector<Expansion> exps;
-      for (const Expansion& x : expansions)
+      // In an instantiation, they are those its definition recorded.
+      const std::vector<Expansion>* recorded = declaration_part ? pattern_expansions() : nullptr;
+      for (const Expansion& x : recorded ? *recorded : expansions)
         if (x.begin >= body_begin && x.begin < end) exps.push_back(x);
       std::vector<std::vector<ast::TemplateParamSema>> outer(template_scopes.begin(), template_scopes.end() - (template_scopes.empty() ? 0 : 1));
       generic_closures_[std::to_underlying(fr.call)] = {fr.closure, fr.call, call_type, fr.head, names, captures, body_begin, flags, consts,
                                                          values, exps, outer, template_args, aliases, diag_count() > fr.diags_at};
+      if (declaration_part)
+        generic_closures_[std::to_underlying(fr.call)].part = GenericClosure::Part{item_, loc_base_, current_class};
       q_->generic_defined(generic_closures_[std::to_underlying(fr.call)]);
     }
     std::vector<NameId> capture_names;
@@ -5537,7 +5581,16 @@ public:
   }
   bool has_generic_lambdas() const { return !generic_closures_.empty(); }
   // Whether this is a template's definition (or a generic lambda's), not an instantiation.
-  bool in_pattern() const { return templated() && !instantiating(); }
+  // A generic lambda's definition is one in an instantiation too: its own parameters are unbound.
+  bool in_generic_definition() const {
+    return std::ranges::any_of(lambdas_, [](const LambdaFrame& f) { return !f.head.empty(); });
+  }
+  bool in_pattern() const {
+    return in_generic_definition() || (templated() && !instantiating() && !satisfying_atom);
+  }
+  // The satisfaction of an atomic constraint is checked ([temp.constr.atomic]): its parameter
+  // mapping binds the parameters it names, perhaps none.
+  bool satisfying_atom = false;
   // `t` with a generic lambda's template parameters (`head`, at its depth) at depth 0, as they
   // are mangled inside its closure type's name (Itanium C++ ABI §5.1.8).
   QualType rebased(QualType t, std::span<const ast::TemplateParamSema> head) {
@@ -6112,9 +6165,8 @@ public:
     return w_->entities.rec(current_class).name == name || name == static_initializer_name_ || own_initializer_static(name);
   }
   struct NamespaceLambda {
-    EntityId owner, scope;
+    EntityId scope;
     NameId name;
-    u32 begin;
   };
   std::optional<NamespaceLambda> namespace_lambda;
 
@@ -11795,6 +11847,44 @@ public:
                 begin, end, info);
   }
 
+  bool supports_class_throw(EntityId cls, Ex value) {
+    if (!w_->target.supports(ast::NativeOperation::hosted_trivial_class_throw) ||
+        value.cat() != ValueCategory::prvalue || !ordinary_default_member_owner(cls)) return false;
+    const auto& entity = w_->entities.rec(cls);
+    if (entity.linkage != ast::Linkage::external) return false;
+    for (EntityId scope = entity.scope; scope != EntityId::none; scope = w_->entities.rec(scope).scope)
+      if (ins().names.spelling(w_->entities.rec(scope).name) == "(anonymous)") return false;
+
+    // The original braces must explicitly initialize the field. Normalized lists can also
+    // contain synthesized initializers for omitted fields.
+    while (auto paren = as<ast::Paren>(value)) {
+      value.begin += paren->operand.at;
+      value.id = paren->operand.id;
+    }
+    const auto init = explicit_aggregate_prvalues_.find(value.begin);
+    if (init == explicit_aggregate_prvalues_.end() || init->second.id != value.id ||
+        list_elements(init->second).size() != 1) return false;
+
+    const auto* record = class_rec(cls);
+    if (!record || !record->member_declarations_valid || record->union_ || record->closure ||
+        record->layout_requires_virtual_support || record->explicit_alignment || record->unapplied_layout ||
+        !record->bases.empty() || record->fields.size() != 1 || record->user_ctors ||
+        record->destructor_declaration() != EntityId::none || !record->destructor_usable) return false;
+    // [except.throw]: construction from const T& in an unrelated context must also work.
+    // With only the ordinary int field, the eligible implicit copy takes const T& and is public.
+    const auto& copy = record->trivial_copyability;
+    if (copy.copy_constructor != CopyOperation::eligible_trivial ||
+        copy.destructor != CopyOperation::eligible_trivial) return false;
+    const auto& field = record->fields.front();
+    if (types().canonical(field.type) != builtin(Builtin::int_) ||
+        record->access_of(field.entity) != ast::Access::public_ || field.dmi ||
+        field.bit_width || field.no_unique_address) return false;
+    const auto* implicit = record->implicit_copy_assignment();
+    return std::ranges::none_of(record->members, [&](const MemberDeclRec& m) {
+      return &m != implicit && ins().names.spelling(m.name) == "operator=";
+    });
+  }
+
   // [expr.throw], [except.throw]: retain the operand, with array and function decay.
   Ex throw_expression(std::optional<Ex> operand, u32 begin, u32 end) {
     Ex fail{NodeId::none, begin, end};
@@ -11803,13 +11893,17 @@ public:
     if (!operand) return node(ast::Throw{info, {}}, begin, end, info);
     Ex value = *operand;
     if (!value.ok()) return fail;
+    EntityId exception_class = EntityId::none;
     if (dependent(value)) {
       info.flags |= expr_flag::dependent;
-    } else {
-      if (types().is_class(value.type())) {
-        if (require_complete(value.type(), value.begin)) diag(value.begin, Diag::throw_class_unsupported, value.type());
+    } else if (types().is_class(value.type())) {
+      if (!require_complete(value.type(), value.begin)) return fail;
+      exception_class = types().class_of(value.type());
+      if (!supports_class_throw(exception_class, value)) {
+        diag(value.begin, Diag::throw_class_unsupported, value.type());
         return fail;
       }
+    } else {
       value = rvalue(value);
       if (!value.ok() || !require_complete(value.type(), value.begin)) return fail;
       if (types().is_pointer(value.type())) {
@@ -11817,7 +11911,7 @@ public:
         if (!types().is_void(pointee) && !require_complete(pointee, value.begin)) return fail;
       }
     }
-    return node(ast::Throw{info, at(value, begin)}, begin, end, info);
+    return node(ast::Throw{info, at(value, begin), exception_class}, begin, end, info);
   }
 
   // Retain a typed integral operand without reading a named object. The conditional's
@@ -12131,7 +12225,11 @@ public:
       if (d.flags & decl_flag::consteval_) consteval_.insert(std::to_underlying(selected));
       // [temp.inst]: a known return type suffices for unevaluated calls to ordinary templates.
       // Keep the existing body demand for constant-evaluation candidates and placeholder returns.
-      if (k.pattern &&
+      // A member of the current instantiation has no instantiation of its own: each specialization
+      // of its class names its own ([temp.inst]).
+      const EntityId owner = (d.flags & decl_flag::member) ? w_->entities.rec(d.entity).scope : EntityId::none;
+      const bool unbound = in_pattern() && owner != EntityId::none && types().is_dependent(types().class_type(owner));
+      if (k.pattern && !unbound &&
           (!unevaluated || (d.flags & (decl_flag::member | decl_flag::constexpr_ | decl_flag::consteval_)) ||
            types().has_placeholder(types().rec(selected_type).inner)))
         demands.push_back({selected, ast::Loc{item_, loc_base_ + callee.begin}});
@@ -12608,7 +12706,7 @@ private:
     const bool assertion = in_class_assertion();
     std::vector<ast::DeclSema> functions;
     if (auto m = q_->earlier_member(name, /*type_only=*/false,
-                                    (nested_enum_members_begin || assertion) ? &functions : nullptr)) {
+                                    (nested_enum_members_begin || assertion || unevaluated || in_function_body) ? &functions : nullptr)) {
       if (m->kind == ast::DeclKind::enumerator) return enumerator(m->entity, m->type, begin, end);
       // Rank mixed overloads before checking whether the selected member needs an object.
       if (m->kind == ast::DeclKind::function) {

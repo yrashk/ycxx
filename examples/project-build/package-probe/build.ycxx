@@ -1,0 +1,17 @@
+use plugin("rules/package") as codec
+use plugin("builtin:capabilities") as capabilities
+
+codec.profile "wire" {
+    reads = ["wire.cfg", "rules/check-mode.sh"]
+}
+
+capabilities.header "config" {
+    namespace = "example::codec"
+    filename = "codec_config.hh"
+    capabilities = { fast = value("wire", "fast-mode") }
+}
+
+cpp.executable "app" {
+    sources = ["main.cc"]
+    generated_headers = [artifact("config", "header")]
+}

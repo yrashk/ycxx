@@ -37,13 +37,33 @@ The resident engine builds executable targets from C++ source groups and declare
 generators. The executable goes in `.ycxx/out/app`. Use `--trace-engine=interactive`
 or `--trace-engine=json` to inspect the tool steps and native compiler queries.
 Use `ycxx build app --watch` to rebuild after workspace edits.
+Use `ycxx build app --target=arm64-apple-darwin` or
+`--target=x86_64-pc-linux-gnu` for a separate native output under
+`.ycxx/targets/<triple>/out/app`. Pass the same option to `ycxx show app` to
+inspect that variant.
+Use `target_triple()` in a declared action's `args` to pass the selected triple
+to a host tool that generates a target-specific input.
 The bundled C++ rule package builds from source. A workspace can replace its C++ rules with
 `use plugin("tools/custom/rules") as cpp`.
 `ycxx show app` describes the resolved plan and how each input was selected. Its JSON snapshots
 can be compared with the checkout and rendered as a standalone HTML report.
 `ycxx build app --probe-toolchain` measures the selected rule compilers. Inspect the
 observations with `ycxx show app`.
-[Build design](docs/design/build.md) [#1251](https://github.com/yrashk/ycxx/issues/1251)
+Import `builtin:capabilities` to project selected observations into a generated
+C++ header with `constexpr` values.
+A source-built rule package can run its own witness and export a support
+state or a structured fact to a consumer using `value("target", "field")`.
+The shader examples publish bundles through `runtime_assets`. Each successful
+build switches the target's runtime asset set together and removes obsolete
+owned names. The shader bundle plans its modules from a generated inventory
+using a named `plan_inputs` binding. The reflection
+example also uses a compiled shader's descriptor layout to generate `constexpr`
+C++ bindings. Shader edits with the same layout reuse the native executable.
+Libraries can pass ordered generated static archives through their dependencies.
+The native link reuses equal archive bytes. A source-built example rule wraps
+a Make-based C library as one build action and links its archive into the app.
+Generated actions can track the executable bytes of declared helper tools.
+[Runnable build examples](examples/project-build) · [Build design](docs/design/build.md) · [#1251](https://github.com/yrashk/ycxx/issues/1251)
 
 Ordinary function pointers and references preserve concrete `noexcept` type identity.
 A nonthrowing function can be used where the corresponding potentially throwing type is expected.
@@ -338,6 +358,9 @@ aggregate results through the target's supported ABI.
 [#853](https://github.com/yrashk/ycxx/issues/853)
 
 On x86-64 Linux, an eligible ycxx function can also throw an `int` to a hosted peer's handler.
+A hosted GCC or Clang handler can also catch by const reference a named trivial record thrown
+by a ycxx ELF object when the record is initialized explicitly and has one public `int` field.
+This works with either producer RTTI flag. [#1237](https://github.com/yrashk/ycxx/issues/1237)
 A host-linked ycxx function can use one `catch (...)` to return an integer literal when
 a direct call on its parameter to an externally defined `int(int)` function throws.
 It can also use one `catch (int value)` to return the caught integer and let exceptions of
@@ -673,9 +696,14 @@ written default member initializer are value-initialized.
   [#209](https://github.com/yrashk/ycxx/issues/209);
 - a single nonvirtual, nonpolymorphic base in a primary class template or a partial
   specialization, including an alias-selected dependent base, a value-dependent template argument
-  (`B<T::value>`, `conditional_t<!bool(B1::value) || sizeof...(Bn) == 0, B1, …>`) and qualified
-  lookup of its static members, and the bases of explicit specializations.
+  (`B<T::value>`, `conditional_t<!bool(B1::value) || sizeof...(Bn) == 0, B1, …>`), a
+  decltype-specifier (`decltype(select<T>())`) and qualified lookup of its static members, and the
+  bases of explicit specializations.
   [#308](https://github.com/yrashk/ycxx/issues/308) · [#1134](https://github.com/yrashk/ycxx/issues/1134)
+- `decltype(e)::` before a member type or a member, dependent or not
+  (`typename decltype(pick<Ts...>())::type`), in class members, function bodies and
+  namespace-scope alias templates.
+  [#1243](https://github.com/yrashk/ycxx/issues/1243)
 - placeholder types: `auto` and `decltype(auto)` variables (`const auto&`, `auto*`, `auto&&`),
   deduced and trailing return types, in templates too. Ordinary block variables with an
   `= expression` initializer can use `Concept auto` with a prior unqualified type concept.
@@ -684,8 +712,9 @@ written default member initializer are value-initialized.
   `*this`, init-captures, `mutable`, conversion to a pointer to function, generic lambdas (`auto`
   parameters) and template lambdas (`[]<class T>`), and closures passed to and called from
   function templates, with Clang's names for closure types;
-- noncapturing, non-generic lambdas as initializers of internal-linkage namespace variables,
-  with addressable static storage and scalar calls ([#338](https://github.com/yrashk/ycxx/issues/338));
+- lambdas in the initializers of namespace-scope variables, static data members (of class
+  templates too) and variable templates, and in constraints; constexpr lambdas, except captures by
+  reference ([#338](https://github.com/yrashk/ycxx/issues/338));
 - casts, including `static_cast<T&&>` from a compatible object lvalue and runtime `static_cast`
   downcasts of object pointers, lvalue references and base xvalues through accessible,
   unambiguous nonvirtual base paths, `sizeof`/`alignof` (classes included), direct-member `offsetof` for
@@ -944,8 +973,8 @@ and a peer-owned virtual destructor and RTTI. This is the shape of libycxx's fun
   [#411](https://github.com/yrashk/ycxx/issues/411)
 - 128-bit integers through an ellipsis ([#1247](https://github.com/yrashk/ycxx/issues/1247)),
   and enumerations with a 128-bit underlying type or initializer ([#1176](https://github.com/yrashk/ycxx/issues/1176)).
-- Constexpr lambdas (the interpreter has no class objects yet), further lambda declaration
-  contexts ([#338](https://github.com/yrashk/ycxx/issues/338)),
+- Lambdas in default member initializers, default arguments and unevaluated operands
+  ([#338](https://github.com/yrashk/ycxx/issues/338)),
   tuple-like structured bindings and structured bindings to bit-fields or inherited members,
   inheriting constructors, and base packs or multiple bases in a class template.
 - Broader native construction, virtual dispatch and table emission, virtual base classes,
@@ -977,8 +1006,8 @@ and a peer-owned virtual destructor and RTTI. This is the shape of libycxx's fun
 - ι: statements and declarations, the C++98/11 core: default arguments, block-scope statics,
   casts and arrays ([#337](https://github.com/yrashk/ycxx/issues/337)).
 - `auto` and lambdas ([#278](https://github.com/yrashk/ycxx/issues/278)): placeholder types,
-  lambdas and generic lambdas are done; constexpr lambdas wait on class objects in the
-  interpreter ([#262](https://github.com/yrashk/ycxx/issues/262)).
+  lambdas, generic lambdas and constexpr lambdas are done; captures by reference in constant
+  evaluation wait on the interpreter ([#262](https://github.com/yrashk/ycxx/issues/262)).
 
 - x86-64 ↔ AArch64 back-end parity ([#639](https://github.com/yrashk/ycxx/issues/639)), one
   gap per PR in priority order.

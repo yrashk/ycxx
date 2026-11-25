@@ -17,12 +17,6 @@ import ycxx.lsp;
 
 export namespace ycxx::build {
 
-struct RuleObservation {
-  RuleDemand demand;
-  Fp128 package;
-  Fp128 invocation;
-};
-
 struct RuleProbeSnapshot {
   RulePackageRef package;
   Fp128 profile;
@@ -31,16 +25,30 @@ struct RuleProbeSnapshot {
   std::vector<PlanFact> facts;
 };
 
+struct RuleObservation {
+  RuleDemand demand;
+  Fp128 package;
+  Fp128 invocation;
+  std::vector<RuleProbeSnapshot> projections = {};
+  std::optional<Fp128> witness = std::nullopt;
+  std::optional<Fp128> planning = std::nullopt;  // producer graph of the generated planning inputs
+};
+
 struct RuleSnapshot {
   std::vector<RuleExpansion> expansions;
   std::vector<RuleObservation> observations;  // in expansion order
   std::vector<RuleProbeSnapshot> probes;
+  // A witness can defer to another rule. Keep both rules' observed inputs until each resolves.
+  std::map<std::string, std::vector<RuleProbeSnapshot>> pending_projections = {};
+  std::vector<RuleExpansion> pending_witnesses = {};  // in-memory watch state for deferred or failed witnesses
 };
 
 // Snapshot bytes are only a candidate. The caller validates the observations against current
-// package inputs and declared reads before using the stored expansions.
-std::optional<RuleSnapshot> read_rule_snapshot(const std::filesystem::path& cwd, std::string_view target);
-void write_rule_snapshot(const std::filesystem::path& cwd, std::string_view target, const RuleSnapshot& snapshot);
+// package inputs, declared reads and planning inputs before using the stored expansions.
+std::optional<RuleSnapshot> read_rule_snapshot(const std::filesystem::path& cwd, std::string_view target,
+                                              std::string_view native_triple = {});
+void write_rule_snapshot(const std::filesystem::path& cwd, std::string_view target, const RuleSnapshot& snapshot,
+                         std::string_view native_triple = {});
 
 }  // namespace ycxx::build
 
@@ -65,12 +73,17 @@ Fd open_directory(int parent, const char* name, bool create) {
   return Fd(::openat(parent, name, directory_flags));
 }
 
-Fd snapshot_directory(const std::filesystem::path& cwd, bool create) {
+Fd snapshot_directory(const std::filesystem::path& cwd, std::string_view native_triple, bool create) {
   const Fd root(::open(cwd.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC));
   if (!root) return Fd();
   const auto state = open_directory(root.value, ".ycxx", create);
   if (!state) return Fd();
-  return open_directory(state.value, "rules", create);
+  if (native_triple.empty()) return open_directory(state.value, "rules", create);
+  const auto targets = open_directory(state.value, "targets", create);
+  if (!targets) return Fd();
+  const auto target = open_directory(targets.value, std::string(native_triple).c_str(), create);
+  if (!target) return Fd();
+  return open_directory(target.value, "rules", create);
 }
 
 std::string hex(Fp128 fp) { return std::format("{:016x}{:016x}", fp.lo, fp.hi); }
@@ -141,6 +154,16 @@ void store(int parent, const char* name, std::string_view text) {
 
 // The JSON codec handles aggregates and exact small integers. Use an explicit package class and
 // hex for the full-width fingerprints.
+struct StoredProbe {
+  std::string package_target;
+  bool standard_package;
+  std::string profile;
+  ToolchainProbeInputs inputs;
+  std::string stamp;
+  std::vector<PlanFact> facts;
+  std::optional<std::uint8_t> package_kind = std::nullopt;
+};
+
 struct StoredRule {
   std::string target;
   std::string rule;
@@ -152,15 +175,15 @@ struct StoredRule {
   std::string definition;
   std::string package;
   std::string invocation;
-};
-
-struct StoredProbe {
-  std::string package_target;
-  bool standard_package;
-  std::string profile;
-  ToolchainProbeInputs inputs;
-  std::string stamp;
-  std::vector<PlanFact> facts;
+  std::optional<std::uint8_t> package_kind = std::nullopt;
+  std::optional<std::vector<RuleCapabilityBinding>> capabilities = std::nullopt;
+  std::optional<std::vector<StoredProbe>> projections = std::nullopt;
+  std::optional<std::vector<PlanFact>> capability_facts = std::nullopt;
+  std::optional<std::string> value_export = std::nullopt;
+  std::optional<std::string> witness = std::nullopt;
+  std::optional<std::vector<RuleFactReference>> facts = std::nullopt;
+  std::optional<std::vector<RulePlanInput>> plan_inputs = std::nullopt;
+  std::optional<std::string> planning = std::nullopt;
 };
 
 struct SnapshotFile {
@@ -170,10 +193,38 @@ struct SnapshotFile {
   std::optional<std::vector<StoredProbe>> probes;
 };
 
+using PackageKind = RulePackageRef::Kind;
+
+std::optional<PackageKind> restore_kind(bool standard, std::optional<std::uint8_t> extended) {
+  if (!extended) return standard ? PackageKind::standard : PackageKind::workspace;
+  if (*extended == std::to_underlying(PackageKind::capabilities)) return PackageKind::capabilities;
+  return std::nullopt;
+}
+
+std::optional<std::uint8_t> store_kind(PackageKind kind) {
+  if (kind == PackageKind::capabilities) return std::to_underlying(kind);
+  return std::nullopt;
+}
+
+std::optional<RuleProbeSnapshot> restore_probe(StoredProbe item) {
+  const auto kind = restore_kind(item.standard_package, item.package_kind);
+  const auto profile = decode_fp(item.profile);
+  const auto stamp = decode_fp(item.stamp);
+  if (!kind || !profile || !stamp) return std::nullopt;
+  return RuleProbeSnapshot{{*kind, std::move(item.package_target)}, *profile,
+                           std::move(item.inputs), *stamp, std::move(item.facts)};
+}
+
+StoredProbe store_probe(const RuleProbeSnapshot& probe) {
+  return {probe.package.target, probe.package.kind == PackageKind::standard, hex(probe.profile),
+          probe.inputs, hex(probe.stamp), probe.facts, store_kind(probe.package.kind)};
+}
+
 }  // namespace
 
-std::optional<RuleSnapshot> read_rule_snapshot(const std::filesystem::path& cwd, std::string_view target) {
-  const auto dir = snapshot_directory(cwd, false);
+std::optional<RuleSnapshot> read_rule_snapshot(const std::filesystem::path& cwd, std::string_view target,
+                                              std::string_view native_triple) {
+  const auto dir = snapshot_directory(cwd, native_triple, false);
   if (!dir) return std::nullopt;
   const auto name = entry_name(target);
   const auto text = read_text(dir.value, name.c_str());
@@ -184,58 +235,94 @@ std::optional<RuleSnapshot> read_rule_snapshot(const std::filesystem::path& cwd,
   if (!saved || saved->version != snapshot_version || saved->target != target) return std::nullopt;
 
   RuleSnapshot result;
-  using Kind = RulePackageRef::Kind;
   for (auto& item : saved->rules) {
+    const auto kind = restore_kind(item.standard_package, item.package_kind);
     const auto package = decode_fp(item.package);
     const auto invocation = decode_fp(item.invocation);
-    if (!package || !invocation || item.definition.empty()) return std::nullopt;
+    if (!kind || !package || !invocation || item.definition.empty()) return std::nullopt;
     RuleDemand demand{
         .target = std::move(item.target),
         .rule = std::move(item.rule),
-        .package = {item.standard_package ? Kind::standard : Kind::workspace, std::move(item.package_target)},
+        .package = {*kind, std::move(item.package_target)},
         .definition = std::move(item.demand_definition),
         .attributes = std::move(item.attributes),
         .reads = std::move(item.reads),
     };
-    result.observations.push_back({demand, *package, *invocation});
-    result.expansions.push_back({std::move(demand), std::move(item.definition)});
+    if (item.capabilities) demand.capabilities = std::move(*item.capabilities);
+    if (item.facts) demand.facts = std::move(*item.facts);
+    if (item.plan_inputs) demand.plan_inputs = std::move(*item.plan_inputs);
+    demand.value_export = std::move(item.value_export);
+    const auto witness = item.witness ? decode_fp(*item.witness) : std::nullopt;
+    if (item.witness.has_value() != witness.has_value() ||
+        demand.value_export.has_value() != witness.has_value()) return std::nullopt;
+    const auto planning = item.planning ? decode_fp(*item.planning) : std::nullopt;
+    const bool has_plan_inputs = !demand.plan_inputs.empty();
+    if (item.planning.has_value() != planning.has_value() ||
+        has_plan_inputs != planning.has_value()) return std::nullopt;
+    std::vector<RuleProbeSnapshot> projections;
+    if (item.projections)
+      for (auto& projection : *item.projections) {
+        auto restored = restore_probe(std::move(projection));
+        if (!restored) return std::nullopt;
+        projections.push_back(std::move(*restored));
+      }
+    const bool compiler_bindings = std::ranges::any_of(demand.capabilities, [](const auto& binding) {
+      return !binding.value;
+    });
+    const auto facts = demand.capabilities.size() + demand.facts.size() + demand.plan_inputs.size() +
+                       (demand.value_export ? 1 : 0);
+    if ((compiler_bindings && projections.empty()) ||
+        (facts != 0 && (!item.capability_facts || item.capability_facts->size() != facts)))
+      return std::nullopt;
+    result.observations.push_back({demand, *package, *invocation, std::move(projections), witness, planning});
+    result.expansions.push_back({std::move(demand), std::move(item.definition),
+                                 item.capability_facts ? std::move(*item.capability_facts) : std::vector<PlanFact>{}});
   }
   if (saved->probes)
-    for (auto& item : *saved->probes) {
-      const auto profile = decode_fp(item.profile);
-      const auto stamp = decode_fp(item.stamp);
-      if (!profile || !stamp) continue;
-      result.probes.push_back({{item.standard_package ? Kind::standard : Kind::workspace,
-                                std::move(item.package_target)},
-                               *profile, std::move(item.inputs), *stamp, std::move(item.facts)});
-    }
+    for (auto& item : *saved->probes)
+      if (auto probe = restore_probe(std::move(item))) result.probes.push_back(std::move(*probe));
   return result;
 }
 
-void write_rule_snapshot(const std::filesystem::path& cwd, std::string_view target, const RuleSnapshot& snapshot) {
+void write_rule_snapshot(const std::filesystem::path& cwd, std::string_view target, const RuleSnapshot& snapshot,
+                         std::string_view native_triple) {
   if (snapshot.expansions.size() != snapshot.observations.size()) return;
   SnapshotFile saved{snapshot_version, std::string(target), {}, {}};
   for (std::size_t i = 0; i < snapshot.expansions.size(); ++i) {
     const auto& expansion = snapshot.expansions[i];
     const auto& observed = snapshot.observations[i];
     const auto& demand = expansion.demand;
-    if (demand != observed.demand || expansion.definition.empty()) return;
-    saved.rules.push_back({
+    const bool has_plan_inputs = !demand.plan_inputs.empty();
+    if (demand != observed.demand || expansion.definition.empty() ||
+        has_plan_inputs != observed.planning.has_value()) return;
+    StoredRule rule{
         demand.target, demand.rule, demand.package.target, demand.package.kind == RulePackageRef::Kind::standard,
         demand.definition, demand.attributes, demand.reads, expansion.definition,
-        hex(observed.package), hex(observed.invocation),
-    });
+        hex(observed.package), hex(observed.invocation), store_kind(demand.package.kind)
+    };
+    if (!demand.capabilities.empty()) {
+      rule.capabilities = demand.capabilities;
+      auto& projections = rule.projections.emplace();
+      for (const auto& probe : observed.projections) projections.push_back(store_probe(probe));
+    }
+    if (!expansion.capability_facts.empty()) rule.capability_facts = expansion.capability_facts;
+    if (!demand.facts.empty()) rule.facts = demand.facts;
+    rule.value_export = demand.value_export;
+    if (observed.witness) rule.witness = hex(*observed.witness);
+    if (observed.planning) {
+      rule.plan_inputs = demand.plan_inputs;
+      rule.planning = hex(*observed.planning);
+    }
+    saved.rules.push_back(std::move(rule));
   }
   if (!snapshot.probes.empty()) {
     auto& probes = saved.probes.emplace();
-    for (const auto& probe : snapshot.probes)
-      probes.push_back({probe.package.target, probe.package.kind == RulePackageRef::Kind::standard,
-                        hex(probe.profile), probe.inputs, hex(probe.stamp), probe.facts});
+    for (const auto& probe : snapshot.probes) probes.push_back(store_probe(probe));
   }
   const auto text = lsp::dump(lsp::to_json(saved));
   if (text.size() > max_snapshot_size) return;
 
-  const auto dir = snapshot_directory(cwd, true);
+  const auto dir = snapshot_directory(cwd, native_triple, true);
   if (!dir) return;
   const auto name = entry_name(target);
   if (read_text(dir.value, name.c_str()) != text) store(dir.value, name.c_str(), text);

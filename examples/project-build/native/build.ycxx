@@ -1,0 +1,20 @@
+generate "input_header" {
+    tool = "/bin/sh"
+    args = [input("script"), input("value"), output("header")]
+    inputs = {
+        script = "tools/generate-input.sh"
+        value = "input.txt"
+    }
+    outputs = { header = "input_value.h" }
+}
+
+cpp.library "arithmetic" {
+    sources = ["lib/twice.cc"]
+    public_include_dirs = ["include"]
+}
+
+cpp.executable "app" {
+    sources = glob("src/*.cc", exclude = ["src/*_test.cc"])
+    deps = ["arithmetic"]
+    generated_headers = [artifact("input_header", "header")]
+}

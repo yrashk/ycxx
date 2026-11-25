@@ -147,8 +147,8 @@ struct Source {
   std::string cwd;
   Config config;
 };
-// Read a path in the source's view. In the build view cwd is the workspace root and
-// `.ycxx/virtual/` within it is reserved for generated contents.
+// Read a path in the source's view. A build view reserves a virtual directory for
+// generated contents under the workspace's selected build state directory.
 const std::optional<std::string>& source_content(engine::SyncCtx& cx, const Source& source, std::string_view name);
 const std::string* peek_source_content(const engine::Db& db, const Source& source, std::string_view name);
 
@@ -185,7 +185,7 @@ Source deserialize_from(engine::Source& in, std::type_identity<Source>) {
   if (auto target = ast::target_for_triple(engine::deserialize<std::string>(in))) s.config.target = target;
   else in.fail();
   const auto view = engine::deserialize<std::uint64_t>(in);
-  if (view > std::to_underlying(View::build)) in.fail();
+  if (view > std::to_underlying(View::explicit_target_build)) in.fail();
   s.config.view = static_cast<View>(view);
   s.config.template_depth = static_cast<std::uint32_t>(engine::deserialize<std::uint64_t>(in));
   const auto calls = engine::deserialize<std::uint64_t>(in);
@@ -272,8 +272,11 @@ PathId source_path(const Source& source, std::string_view name) {
 }
 
 bool is_generated_path(const Source& source, PathId id) {
-  if (source.config.view != View::build) return false;
-  const auto root = (std::filesystem::path(source.cwd) / ".ycxx/virtual").lexically_normal();
+  const auto view = source.config.view;
+  if (view != View::build && view != View::explicit_target_build) return false;
+  auto state = std::filesystem::path(source.cwd) / ".ycxx";
+  if (view == View::explicit_target_build) state = state / "targets" / source.config.target->triple;
+  const auto root = (state / "virtual").lexically_normal();
   const std::string prefix = root.generic_native_encoded_string() + '/';
   return path_of(id).starts_with(prefix);
 }

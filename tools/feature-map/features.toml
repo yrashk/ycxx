@@ -862,7 +862,7 @@ std = 'C++11'
 ftm = '__cpp_lambdas'
 detect = '(?:^|[=(,{;:?!]|\breturn)\s*\[[^\[\]]*\]\s*(?:\(|\{|<|mutable\b|->|constexpr\b|noexcept\b)'
 status = 'partial'
-note = 'function bodies and captureless non-generic initializers of internal namespace variables'
+note = 'not in default member initializers, default arguments, static_assert or unevaluated operands'
 issues = [338]
 probe = '''
 int main() { int k = 2; int s = 0; [&] { ++s; }(); return ([k](int x) { return x + k; }(1) == 3 && s == 1) ? 0 : 1; }
@@ -904,8 +904,9 @@ group = 'lambda'
 clauses = ['expr.prim.lambda.closure', 'dcl.constexpr']
 std = 'C++17'
 detect = '\]\s*\([^)]*\)\s*(?:mutable\s+)?(?:constexpr|consteval)\b'
-status = 'missing'
-issues = [262, 102]
+status = 'partial'
+note = 'not captures by reference in constant evaluation, nor consteval lambdas'
+issues = [262, 350]
 probe = '''
 int main() { constexpr auto sq = [](int x) { return x * x; }; static_assert(sq(3) == 9); return 0; }
 '''
@@ -1166,10 +1167,12 @@ clauses = ['dcl.type.decltype']
 std = 'C++11'
 ftm = '__cpp_decltype'
 detect = '\bdecltype\s*\((?!\s*auto\s*\))'
-status = 'done'
+status = 'partial'
 probe = '''
 int main() { int i = 0; decltype(i) j = 1; decltype((i)) r = i; r = j; return i - 1; }
 '''
+issues = [1269, 1115, 1116]
+note = 'As a base class and before `::` too, dependent or not (#1243). A namespace-scope function template signature, variable template type or default argument whose dependent operand has no representation stays dependent.'
 
 [[feature]]
 id = 'dcl-trailing-return'
@@ -1810,7 +1813,7 @@ int sum(const B& b) { return b.b; }
 int main() { D d; A* pa = &d; return pa->a + sum(d) + d.d - 6; }
 '''
 issues = [308, 1134]
-note = 'One nonvirtual, nonpolymorphic direct base in primary class templates and partial specializations, including dependent aliases, value-dependent template arguments (`B<T::value>`, `B<!bool(T::value) || sizeof...(Ts) == 0>`) and qualified static lookup; explicit specializations take the bases of an ordinary class. Additional class-template base forms and the object-expression rule of [class.protected] remain.'
+note = 'One nonvirtual, nonpolymorphic direct base in primary class templates and partial specializations, including dependent aliases, value-dependent template arguments (`B<T::value>`, `B<!bool(T::value) || sizeof...(Ts) == 0>`), decltype-specifiers (`decltype(select<T>())`) and qualified static lookup; explicit specializations take the bases of an ordinary class. Additional class-template base forms and the object-expression rule of [class.protected] remain.'
 
 [[feature]]
 id = 'class-virtual'
@@ -2245,8 +2248,8 @@ clauses = ['except', 'except.pre', 'except.throw', 'except.ctor', 'except.handle
 std = 'C++98'
 detect = '\bthrow\b|\btry\b|\bcatch\s*\('
 status = 'partial'
-issues = [89, 72, 572, 578, 583, 648, 663, 737, 781, 849]
-note = 'Throw and block try/catch syntax. On Linux x86-64 and macOS arm64, hosted exceptions can cross eligible cleanup-free frames, including selected defaults in scalar aggregates, and one automatic aggregate cleanup. Linux also supports int throws from eligible frames and one catch-all around an external call.'
+issues = [89, 72, 572, 578, 583, 648, 663, 737, 781, 849, 1237]
+note = 'Throw and block try/catch syntax. On Linux x86-64 and macOS arm64, hosted exceptions can cross eligible cleanup-free frames, including selected defaults in scalar aggregates, and one automatic aggregate cleanup. Linux supports int and trivial class throws to peer code and one catch-all around an external call.'
 probe = '''
 int d = 0; struct G { ~G() { ++d; } };
 int f() { G g; throw 3; }

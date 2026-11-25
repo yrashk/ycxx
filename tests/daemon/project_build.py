@@ -62,8 +62,8 @@ cpp.executable "app" {{
     (scope / 'schema.txt').write_text('7\n')
 
 
-def traced_build(ycxx, scope, env, label, *, succeeds=True):
-    p = run_client(ycxx, scope, env, 'build', 'app', '--trace-engine=json')
+def traced_build(ycxx, scope, env, label, *args, succeeds=True, output='.ycxx/out/app'):
+    p = run_client(ycxx, scope, env, 'build', 'app', '--trace-engine=json', *args)
     assert (p.returncode == 0) == succeeds, (label, p.returncode, p.stderr[-5000:])
     try:
         records = [json.loads(line) for line in p.stderr.splitlines() if line.strip()]
@@ -75,7 +75,7 @@ def traced_build(ycxx, scope, env, label, *, succeeds=True):
     assert type(summary.get('actions_executed')) is int, (label, summary)
     assert isinstance(summary.get('diagnostics'), list), (label, summary)
     if succeeds:
-        assert (scope / summary['output']).resolve() == scope / '.ycxx' / 'out' / 'app', (label, summary)
+        assert (scope / summary['output']).resolve() == scope / output, (label, summary)
     return summary, records
 
 
@@ -180,6 +180,43 @@ def env_for(runtime):
     return env
 
 
+def daemon_identity(ycxx, scope, env):
+    status = run_client(ycxx, scope, env, 'ctl', 'status')
+    if status.returncode != 0:
+        return None
+    fields = dict(line.split(': ', 1) for line in status.stdout.splitlines() if ': ' in line)
+    return fields['root'], int(fields['pid'])
+
+
+def check_nested_scope(ycxx):
+    with tempfile.TemporaryDirectory(prefix='ycxx-nested-') as workspace, \
+         tempfile.TemporaryDirectory(prefix='yb', dir=runtime_root('yb')) as runtime:
+        checkout = Path(workspace).resolve()
+        (checkout / '.git').mkdir()
+        scope = checkout / 'nested'
+        scope.mkdir()
+        (scope / 'main.cc').write_text('int main() { return 0; }\n')
+        (scope / 'build.ycxx').write_text('cpp.executable "app" { sources = ["main.cc"] }\n')
+        env = env_for(runtime)
+        try:
+            first, _ = traced_build(ycxx, scope, env, 'nested first build')
+            # Status discovers the root without starting a daemon. The first build has now
+            # created .ycxx, so also look for a daemon the build may have started at .git.
+            first_daemon = daemon_identity(ycxx, scope, env)
+            enclosing_daemon = daemon_identity(ycxx, checkout, env)
+            second, _ = traced_build(ycxx, scope, env, 'nested unchanged build')
+            second_daemon = daemon_identity(ycxx, scope, env)
+            actions = first['actions_executed'], second['actions_executed']
+            assert first_daemon is not None and first_daemon[0] == str(scope), (
+                'first build did not start the nested daemon', first_daemon, enclosing_daemon, actions)
+            assert enclosing_daemon is None, ('enclosing daemon started', enclosing_daemon)
+            assert second_daemon == first_daemon, ('nested daemon changed', first_daemon, second_daemon)
+            assert actions[0] > 0 and actions[1] == 0, ('nested first and unchanged build actions', actions)
+        finally:
+            for root in (scope, checkout):
+                run_client(ycxx, root, env, 'ctl', 'shutdown', '--root', str(root))
+
+
 def main():
     ycxx = Path(sys.argv[1]).resolve()
     with tempfile.TemporaryDirectory(prefix='ycxx-project-') as workspace:
@@ -203,6 +240,8 @@ def main():
                 check_program(executable, 31)
             finally:
                 run_client(ycxx, scope, env, 'ctl', 'shutdown')
+
+    check_nested_scope(ycxx)
 
 
 if __name__ == '__main__':
