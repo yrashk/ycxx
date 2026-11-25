@@ -8,6 +8,7 @@ import std;
 import ycxx.build.action;
 import ycxx.build.inspection_model;
 import ycxx.build.manifest;
+import ycxx.build.publication;
 import ycxx.build.rule_compilers;
 import ycxx.build.rule_protocol;
 import ycxx.hash;
@@ -88,16 +89,18 @@ struct RulePackagePlan {
 };
 
 std::string generated_path(const std::filesystem::path& cwd, std::string_view generator,
-                           std::string_view filename);
+                           std::string_view filename, std::string_view native_triple = {});
 // Reobserve planning inputs without launching any actions. Native source contents and include
 // probes are tracked separately by the daemon's file table.
 ProjectWatchState watch_project(const std::filesystem::path& cwd, std::string_view target,
-                                std::span<const RuleExpansion> expansions);
+                                std::span<const RuleExpansion> expansions, std::string_view native_triple = {});
 std::expected<PlanInspection, std::string> inspect_project(
-    const std::filesystem::path& cwd, std::string_view target, std::span<const RuleExpansion> expansions);
+    const std::filesystem::path& cwd, std::string_view target, std::span<const RuleExpansion> expansions,
+    std::string_view native_triple = {});
 std::expected<std::variant<ProjectPlan, RuleDemand>, std::string> plan_with_rules(
     const std::filesystem::path& cwd, std::string_view target, std::span<const RuleExpansion> expansions,
-    std::optional<Fp128>* definition = nullptr, ProjectWatchState* watch = nullptr);
+    std::optional<Fp128>* definition = nullptr, ProjectWatchState* watch = nullptr,
+    std::string_view native_triple = {});
 std::expected<RulePackageRef, std::string> capability_package(std::string_view package);
 std::expected<RulePackagePlan, std::string> plan_rule_package(
     const std::filesystem::path& cwd, const RulePackageRef& package, std::string_view sdk_header,
@@ -576,8 +579,8 @@ std::vector<LoweredTarget> primitives(const TargetDecl& original, const RuleExpa
 class Planner {
  public:
   Planner(const fs::path& cwd, const Manifest& manifest, WatchObservations* watch, PlanInspection* inspection,
-          std::span<const RuleExpansion> expansions = {})
-      : cwd_(cwd), watch_(watch), inspection_(inspection), expansions_(expansions) {
+          std::span<const RuleExpansion> expansions = {}, std::string_view native_triple = {})
+      : cwd_(cwd), watch_(watch), inspection_(inspection), expansions_(expansions), native_triple_(native_triple) {
     for (const auto& decl : manifest.targets) declarations_.emplace(decl.name, &decl);
     for (const auto& imported : manifest.plugins)
       prefixes_.emplace(imported.alias, imported.package == capabilities_package.target
@@ -786,7 +789,7 @@ class Planner {
       const auto [producer, output] = artifact(ref, binding.location);
       --planning_edges_;
       const auto& gen = plan_.generators[producer];
-      auto path = display_path(generated_path(cwd_, gen.name, gen.action.outputs[output].filename));
+      auto path = display_path(generated_path(cwd_, gen.name, gen.action.outputs[output].filename, native_triple_));
       result.push_back({input.name, std::move(path), producer, output});
     }
     return result;
@@ -1003,7 +1006,7 @@ class Planner {
         if (!output_paths.insert(filename).second) fail(value.location, "duplicate output filename");
         plan.action.outputs.push_back({name, filename});
         if (inspection_)
-          fact("output", decl, name, display_path(generated_path(cwd_, decl.name, filename)),
+          fact("output", decl, name, display_path(generated_path(cwd_, decl.name, filename, native_triple_)),
                "declared in outputs", value.location);
       }
       if (plan.action.outputs.empty()) fail(outputs.location, "generator has no declared outputs");
@@ -1083,7 +1086,7 @@ class Planner {
     const auto [producer, output] = artifact(ref, at);
     auto& gen = plan_.generators[producer];
     gen.native_outputs = true;
-    return generated_path(cwd_, gen.name, gen.action.outputs[output].filename);
+    return generated_path(cwd_, gen.name, gen.action.outputs[output].filename, native_triple_);
   }
 
   void append_link_inputs(const CxxTargetPlan& root) {
@@ -1102,7 +1105,8 @@ class Planner {
         if (inspection_) {
           const auto [producer, output] = input.artifact;
           const auto& generator = plan_.generators[producer];
-          const auto path = generated_path(cwd_, generator.name, generator.action.outputs[output].filename);
+          const auto path = generated_path(cwd_, generator.name, generator.action.outputs[output].filename,
+                                           native_triple_);
           auto origin = target == &root ? input.origin :
               std::format("inherited from {} ({})", target->declaration->name, input.origin);
           fact("link-input", *root.declaration, std::to_string(plan_.link_inputs.size()), display_path(path),
@@ -1233,7 +1237,8 @@ class Planner {
         if (!filenames.insert(filename).second)
           fail(value.location, std::format("duplicate runtime asset filename '{}'", filename));
         if (inspection_)
-          fact("runtime-asset", decl, filename, path_text(fs::path(".ycxx") / "assets" / decl.name / filename),
+          fact("runtime-asset", decl, filename,
+               path_text(project_state_path({}, native_triple_) / "assets" / decl.name / filename),
                artifact_origin(ref), value.location);
         plan_.runtime_assets.push_back(asset);
       }
@@ -1246,6 +1251,7 @@ class Planner {
   WatchObservations* watch_;
   PlanInspection* inspection_;
   std::span<const RuleExpansion> expansions_;
+  std::string_view native_triple_;
   std::map<std::string, const TargetDecl*, std::less<>> declarations_;
   std::map<std::string, RulePackageRef, std::less<>> prefixes_;
   std::map<std::string, LoweredTarget, std::less<>> primitives_;
@@ -1281,14 +1287,14 @@ Manifest read_workspace_manifest(const fs::path& root, WatchObservations* watch,
 std::expected<ProjectPlan, std::string> read_project(const fs::path& cwd, std::string_view target,
                                                    WatchObservations* watch, PlanInspection* inspection,
                                                    std::span<const RuleExpansion> expansions,
-                                                   std::optional<Fp128>* definition = nullptr) {
+                                                   std::optional<Fp128>* definition, std::string_view native_triple) {
   if (definition) definition->reset();
   std::error_code ec;
   const auto root = fs::absolute(cwd, ec).lexically_normal();
   if (ec) return std::unexpected(std::format("cannot resolve workspace directory: {}", ec.message()));
   try {
     const auto manifest = read_workspace_manifest(root, watch, inspection, definition);
-    return Planner(root, manifest, watch, inspection, expansions).run(target);
+    return Planner(root, manifest, watch, inspection, expansions, native_triple).run(target);
   } catch (PlanningError& error) {
     return std::unexpected(std::move(error.message));
   }
@@ -1296,22 +1302,24 @@ std::expected<ProjectPlan, std::string> read_project(const fs::path& cwd, std::s
 
 }  // namespace
 
-std::string generated_path(const fs::path& cwd, std::string_view generator, std::string_view filename) {
-  return path_text(cwd / ".ycxx" / "virtual" / generator / filename);
+std::string generated_path(const fs::path& cwd, std::string_view generator, std::string_view filename,
+                           std::string_view native_triple) {
+  return path_text(project_state_path(cwd, native_triple) / "virtual" / generator / filename);
 }
 
 ProjectWatchState watch_project(const fs::path& cwd, std::string_view target,
-                                std::span<const RuleExpansion> expansions) {
+                                std::span<const RuleExpansion> expansions, std::string_view native_triple) {
   ProjectWatchState watch;
-  (void)plan_with_rules(cwd, target, expansions, nullptr, &watch);
+  (void)plan_with_rules(cwd, target, expansions, nullptr, &watch, native_triple);
   return watch;
 }
 
 std::expected<PlanInspection, std::string> inspect_project(
-    const fs::path& cwd, std::string_view target, std::span<const RuleExpansion> expansions) {
+    const fs::path& cwd, std::string_view target, std::span<const RuleExpansion> expansions,
+    std::string_view native_triple) {
   PlanInspection inspection{.target = std::string(target), .definition = {}, .facts = {}};
   try {
-    auto plan = read_project(cwd, target, nullptr, &inspection, expansions);
+    auto plan = read_project(cwd, target, nullptr, &inspection, expansions, nullptr, native_triple);
     if (!plan) return std::unexpected(std::move(plan.error()));
   } catch (const RuleDemand&) {
     // The unresolved fact was recorded where the planner first needed the rule.
@@ -1321,12 +1329,13 @@ std::expected<PlanInspection, std::string> inspect_project(
 
 std::expected<std::variant<ProjectPlan, RuleDemand>, std::string> plan_with_rules(
     const fs::path& cwd, std::string_view target, std::span<const RuleExpansion> expansions,
-    std::optional<Fp128>* definition, ProjectWatchState* watch) {
+    std::optional<Fp128>* definition, ProjectWatchState* watch, std::string_view native_triple) {
   using PlanResult = std::variant<ProjectPlan, RuleDemand>;
   WatchObservations observed;
   auto result = [&]() -> std::expected<PlanResult, std::string> {
     try {
-      auto plan = read_project(cwd, target, watch ? &observed : nullptr, nullptr, expansions, definition);
+      auto plan = read_project(cwd, target, watch ? &observed : nullptr, nullptr, expansions, definition,
+                               native_triple);
       if (!plan) return std::unexpected(std::move(plan.error()));
       return PlanResult(std::move(*plan));
     } catch (RuleDemand& demand) {

@@ -5,6 +5,7 @@
 export module ycxx.client;
 
 import std;
+import ycxx.ast;
 import ycxx.build.inspection;
 import ycxx.build.plan;
 import ycxx.compile;
@@ -64,6 +65,25 @@ void expand(std::string_view a, std::vector<std::string>& out, int depth) {
 std::string cwd_now() {
   std::error_code ec;
   return std::filesystem::current_path(ec).native_encoded_string();
+}
+
+constexpr std::string_view target_prefix = "--target=";
+
+bool project_target_option(std::string_view arg) {
+  return arg == "--target" || arg.starts_with(target_prefix);
+}
+
+std::expected<const ast::Target*, std::string> project_target(std::span<const std::string_view> args,
+                                                            std::size_t& i) {
+  std::string_view triple;
+  if (args[i] == "--target") {
+    if (i + 1 < args.size() && !args[i + 1].starts_with('-')) triple = args[++i];
+  } else {
+    triple = args[i].substr(target_prefix.size());
+  }
+  if (triple.empty()) return std::unexpected("argument to '--target' is missing");
+  if (const auto* target = ast::target_for_triple(triple)) return target;
+  return std::unexpected(std::format("unsupported target '{}'", triple));
 }
 
 // `--trace-engine[=stream|interactive]` (#245): what the request's engine did, as an indented
@@ -729,14 +749,16 @@ int cxx(std::span<const std::string_view> args) {
 
 // Project builds use the resident session so action and compiler results survive requests.
 int build(std::span<const std::string_view> args) {
-  constexpr std::string_view usage = "usage: ycxx build <target> [--watch] [--probe-toolchain]"
+  constexpr std::string_view usage = "usage: ycxx build <target> [--target TRIPLE] [--watch] [--probe-toolchain]"
                                      " [--trace-engine=stream|interactive|json]";
   std::string target;
   std::optional<TraceMode> requested_trace;
   std::string invalid;
+  const ast::Target* native_target = nullptr;
   bool watch = false;
   bool probe_toolchain = false;
-  for (std::string_view arg : args) {
+  for (std::size_t i = 0; i < args.size(); ++i) {
+    const auto arg = args[i];
     if (arg == "--help") {
       std::println("{}", usage);
       return 0;
@@ -744,7 +766,11 @@ int build(std::span<const std::string_view> args) {
     if (auto mode = trace_mode_named(arg)) requested_trace = *mode;
     else if (arg == "--watch") watch = true;
     else if (arg == "--probe-toolchain") probe_toolchain = true;
-    else if (!arg.empty() && !arg.starts_with('-') && target.empty()) target = arg;
+    else if (project_target_option(arg)) {
+      const auto resolved = project_target(args, i);
+      if (resolved) native_target = *resolved;
+      else if (invalid.empty()) invalid = resolved.error();
+    } else if (!arg.empty() && !arg.starts_with('-') && target.empty()) target = arg;
     else if (invalid.empty()) invalid = std::format("unexpected argument '{}'\n{}", arg, usage);
   }
   const TraceMode mode = requested_trace ? *requested_trace : trace_mode_from_environment();
@@ -761,6 +787,7 @@ int build(std::span<const std::string_view> args) {
                                       .trace_values = mode == TraceMode::interactive || mode == TraceMode::json,
                                       .watch = watch, .probe_toolchain = probe_toolchain};
   if (const char* path = std::getenv("PATH")) request.tool_path = path;
+  if (native_target) request.target_triple.emplace(native_target->triple);
   if (request.cwd.empty()) return fail("cannot determine the working directory", 1);
   const std::string root = daemon::root_for(std::nullopt, request.cwd);
   if (watch) {
@@ -797,8 +824,10 @@ int build(std::span<const std::string_view> args) {
 
 int show(std::span<const std::string_view> args) {
   using ycxx::build::InspectionFormat;
-  constexpr std::string_view usage = "usage: ycxx show <target> [--format=text|json|source|html] [--against FILE]";
+  constexpr std::string_view usage =
+      "usage: ycxx show <target> [--target TRIPLE] [--format=text|json|source|html] [--against FILE]";
   std::string_view target;
+  const ast::Target* native_target = nullptr;
   InspectionFormat format = InspectionFormat::text;
   std::optional<std::filesystem::path> against;
   for (std::size_t i = 0; i < args.size(); ++i) {
@@ -817,6 +846,13 @@ int show(std::span<const std::string_view> args) {
         std::println(std::cerr, "ycxx: unknown plan format '{}'", named);
         return 2;
       }
+    } else if (project_target_option(arg)) {
+      const auto resolved = project_target(args, i);
+      if (!resolved) {
+        std::println(std::cerr, "ycxx: error: {}", resolved.error());
+        return 2;
+      }
+      native_target = *resolved;
     } else if (arg == "--against" && i + 1 < args.size() && !args[i + 1].starts_with('-') && !against) {
       against = std::filesystem::path(args[++i]);
     } else if (!arg.empty() && !arg.starts_with('-') && target.empty()) {
@@ -840,7 +876,7 @@ int show(std::span<const std::string_view> args) {
   const ycxx::build::RuleToolchain toolchain{
       .executable = daemon::executable_path(), .executable_build = daemon::build_hash(), .path = std::move(tool_path),
   };
-  auto shown = ycxx::build::show_project(cwd, target, format, toolchain, against);
+  auto shown = ycxx::build::show_project(cwd, target, format, toolchain, against, native_target);
   if (!shown) {
     std::println(std::cerr, "ycxx: {}", shown.error());
     return 1;

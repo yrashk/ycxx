@@ -32,20 +32,23 @@ struct ProjectReport {
 };
 
 std::expected<PlanInspection, std::string> inspect_built_project(
-    const std::filesystem::path& cwd, std::string_view target, const RuleToolchain& toolchain);
+    const std::filesystem::path& cwd, std::string_view target, const RuleToolchain& toolchain,
+    const ast::Target* selected_target = nullptr);
 
 class Coordinator {
  public:
   Coordinator(pipeline::Session& session, std::string executable, std::uint64_t worker_build);
   ProjectWatchState watch_state(const std::filesystem::path& cwd, const std::string& target,
-                                const std::optional<std::string>& tool_path);
+                                const std::optional<std::string>& tool_path,
+                                const ast::Target* selected_target = nullptr);
 
   ProjectReport run(const std::filesystem::path& cwd, const std::string& target,
                     const std::optional<std::string>& tool_path, bool watch, bool probe_toolchain,
                     const std::function<void()>& refresh, const std::function<bool()>& cancelled,
                     const std::function<void(const std::function<void(engine::Db&)>&)>& apply,
                     const std::function<bool(engine::Revision, const std::function<void()>&)>& publish,
-                    const std::function<void()>& tick, engine::Tracer* tracer = nullptr);
+                    const std::function<void()>& tick, engine::Tracer* tracer = nullptr,
+                    const ast::Target* selected_target = nullptr);
 
  private:
   pipeline::Session& session_;
@@ -53,7 +56,7 @@ class Coordinator {
   std::uint64_t worker_build_;
   std::mutex mutex_;
   std::map<std::string, std::set<std::string>> generated_paths_;
-  using WatchKey = std::tuple<std::filesystem::path, std::string, std::optional<std::string>>;
+  using WatchKey = std::tuple<std::filesystem::path, std::string, std::optional<std::string>, std::string_view>;
   std::mutex watch_mutex_;
   std::map<WatchKey, std::shared_ptr<const RuleSnapshot>> watch_snapshots_;
 };
@@ -299,10 +302,12 @@ struct LinkArtifact {
   std::span<const std::uint8_t> bytes;
 };
 
-LinkArtifact link_artifact(const ProjectPlan& plan, const LinkInputPlan& input, LookupActionOutputs output_at) {
+LinkArtifact link_artifact(const ProjectPlan& plan, const LinkInputPlan& input, LookupActionOutputs output_at,
+                           std::string_view native_triple = {}) {
   const auto& generator = plan.generators[input.producer];
   const auto& output = generator.action.outputs[input.output];
-  return {generated_path({}, generator.name, output.filename), (*output_at(input.producer))[input.output].contents.bytes};
+  return {generated_path({}, generator.name, output.filename, native_triple),
+          (*output_at(input.producer))[input.output].contents.bytes};
 }
 
 Fp128 native_plan_key(const ProjectPlan& plan, const std::vector<std::optional<Fp128>>& keys,
@@ -367,13 +372,18 @@ namespace {
 
 std::string native(const fs::path& path) { return path.generic_native_encoded_string(); }
 
+std::string_view explicit_triple(const ast::Target* target) {
+  return target ? target->triple : std::string_view{};
+}
+
 pipeline::RequestId register_native(pipeline::Session& session, const std::string& cwd, const std::string& target,
-                                    const ProjectPlan& plan, LookupActionOutputs output_at) {
+                                    const ast::Target* native_target, const ProjectPlan& plan,
+                                    LookupActionOutputs output_at, std::string_view native_triple) {
   pipeline::BuildKey build;
   for (const auto& source : plan.sources) {
     pp::Config config;
-    config.view = pp::View::build;
-    config.target = pp::native_target;
+    config.view = native_triple.empty() ? pp::View::build : pp::View::explicit_target_build;
+    config.target = native_target;
     config.freestanding = config.target == &ast::x86_64_linux;
     config.angle_dirs = source.includes;
     config.system_from = config.angle_dirs.size();
@@ -383,7 +393,7 @@ pipeline::RequestId register_native(pipeline::Session& session, const std::strin
   std::optional<pipeline::ArchiveLinkInputs> archives;
   if (!plan.link_inputs.empty()) {
     using enum pipeline::LinkOperand::Kind;
-    const auto format = pp::native_target == &ast::x86_64_linux ? obj::target::x86_64_linux : obj::target::aarch64_macos;
+    const auto format = native_target == &ast::x86_64_linux ? obj::target::x86_64_linux : obj::target::aarch64_macos;
     archives.emplace(pipeline::ArchiveLinkInputs{.target = format, .operands = {}, .archives = {}});
     for (std::size_t i = 0; i < build.units.size(); ++i) archives->operands.push_back({source, i});
 
@@ -391,7 +401,7 @@ pipeline::RequestId register_native(pipeline::Session& session, const std::strin
     for (const auto& input : plan.link_inputs) {
       const auto [position, inserted] = positions.try_emplace({input.producer, input.output}, archives->archives.size());
       if (inserted) {
-        auto [name, bytes] = link_artifact(plan, input, output_at);
+        auto [name, bytes] = link_artifact(plan, input, output_at, native_triple);
         archives->archives.emplace_back(std::move(name), std::string(bytes.begin(), bytes.end()));
       }
       archives->operands.push_back({archive, position->second});
@@ -501,7 +511,8 @@ struct MeasuredProfile {
 };
 
 ProjectWatchState watch_rules(const fs::path& cwd, std::string_view target, const RuleToolchain& toolchain,
-                              const RuleSnapshot& snapshot, const ProjectWatchState* observed = nullptr);
+                              const RuleSnapshot& snapshot, std::string_view native_triple,
+                              const ProjectWatchState* observed = nullptr);
 
 using RunRuleAction = std::function<std::expected<std::vector<NamedArtifact>, std::string>(
     std::string_view, std::string_view, const Action&, std::span<const ActionInput>, Fp128,
@@ -598,7 +609,8 @@ std::expected<void, std::string> prepare_project(
     const fs::path& cwd, std::string_view target, const RuleToolchain& toolchain,
     const RunRuleAction& run, const RunRulePackage& run_package, const RunRuleWitness& run_witness,
     const AdmitRuleValue& admit_value, const UseRuleCompiler& use_compiler,
-    const ResolveRuleArguments& resolve_arguments, PreparedProject& prepared, bool watch, bool& superseded) {
+    const ResolveRuleArguments& resolve_arguments, PreparedProject& prepared, bool watch, bool& superseded,
+    std::string_view native_triple) {
   std::vector<RuleDemand> deferred;
   std::optional<RuleDemand> next;
   for (;;) {
@@ -609,14 +621,16 @@ std::expected<void, std::string> prepare_project(
     } else {
       std::optional<Fp128> definition;
       ProjectWatchState observed;
-      auto attempt = plan_with_rules(cwd, target, prepared.rules.expansions, &definition, watch ? &observed : nullptr);
+      auto attempt = plan_with_rules(cwd, target, prepared.rules.expansions, &definition,
+                                     watch ? &observed : nullptr, native_triple);
       // All expansions in one attempt must belong to a single workspace definition.
       if (definition != prepared.manifest) {
         superseded = true;
         return std::unexpected("build.ycxx changed during rule resolution");
       }
       if (!attempt) {
-        if (watch) prepared.attempt_watch = watch_rules(cwd, target, toolchain, prepared.rules, &observed).stamp;
+        if (watch)
+          prepared.attempt_watch = watch_rules(cwd, target, toolchain, prepared.rules, native_triple, &observed).stamp;
         return std::unexpected(attempt.error());
       }
       if (auto* plan = std::get_if<ProjectPlan>(&*attempt)) {
@@ -628,7 +642,7 @@ std::expected<void, std::string> prepare_project(
     if (std::ranges::any_of(prepared.rules.expansions, [&](const auto& entry) { return entry.demand == demand; }))
       return std::unexpected(std::format("rule '{}' did not resolve its declaration", demand.target));
     if (toolchain.executable.empty()) return std::unexpected("cannot locate the rule worker executable");
-    if (watch) prepared.attempt_watch = watch_rules(cwd, target, toolchain, prepared.rules).stamp;
+    if (watch) prepared.attempt_watch = watch_rules(cwd, target, toolchain, prepared.rules, native_triple).stamp;
 
     auto package = plan_rule_package(cwd, demand.package, rule_sdk_header(), toolchain);
     if (!package) return std::unexpected(package.error());
@@ -653,7 +667,7 @@ std::expected<void, std::string> prepare_project(
     if (!arguments) return std::unexpected(arguments.error());
     if (watch && !arguments->profiles.empty()) {
       prepared.rules.pending_projections.insert_or_assign(demand.target, arguments->profiles);
-      prepared.attempt_watch = watch_rules(cwd, target, toolchain, prepared.rules).stamp;
+      prepared.attempt_watch = watch_rules(cwd, target, toolchain, prepared.rules, native_triple).stamp;
     }
     auto observation = rule_invocation(cwd, demand);
     if (!observation) return std::unexpected(observation.error());
@@ -693,7 +707,8 @@ std::expected<void, std::string> prepare_project(
         const auto action = staged->keys[input.producer];
         // The read callback exposes bytes. The action ID and mode belong to provenance.
         add_rule_read(*observation, input.name, {receipt.bytes, false});
-        arguments->facts.push_back({"plan-input", demand.target, input.name, input.path,
+        arguments->facts.push_back({"plan-input", demand.target, input.name,
+            generated_path({}, producer.name, output.filename, native_triple),
             std::format("artifact({:?}, {:?}) · receipt {:016x}{:016x}", producer.name, output.name,
                         action.lo, action.hi)});
       }
@@ -716,7 +731,7 @@ std::expected<void, std::string> prepare_project(
           *entry = expansion;
         else
           pending.push_back(expansion);
-        prepared.attempt_watch = watch_rules(cwd, target, toolchain, prepared.rules).stamp;
+        prepared.attempt_watch = watch_rules(cwd, target, toolchain, prepared.rules, native_triple).stamp;
       }
       auto witness_plan = plan_rule_witness(cwd, expansion, prepared.rules.expansions);
       if (!witness_plan) {
@@ -823,17 +838,19 @@ bool current_rules(const fs::path& cwd, const RuleToolchain& toolchain, const Pr
 }
 
 std::optional<ProjectPlan> observe_project(
-    const fs::path& cwd, std::string_view target, const RuleToolchain& toolchain, const PreparedProject& prepared) {
+    const fs::path& cwd, std::string_view target, const RuleToolchain& toolchain, const PreparedProject& prepared,
+    std::string_view native_triple) {
   if (!current_rules(cwd, toolchain, prepared)) return std::nullopt;
   std::optional<Fp128> definition;
-  auto attempt = plan_with_rules(cwd, target, prepared.rules.expansions, &definition);
+  auto attempt = plan_with_rules(cwd, target, prepared.rules.expansions, &definition, nullptr, native_triple);
   if (!attempt || definition != prepared.manifest) return std::nullopt;
   if (auto* plan = std::get_if<ProjectPlan>(&*attempt)) return std::move(*plan);
   return std::nullopt;
 }
 
 ProjectWatchState watch_rules(const fs::path& cwd, std::string_view target, const RuleToolchain& toolchain,
-                              const RuleSnapshot& snapshot, const ProjectWatchState* observed) {
+                              const RuleSnapshot& snapshot, std::string_view native_triple,
+                              const ProjectWatchState* observed) {
   std::vector<RuleExpansion> current;
   std::vector<Fp128> observations;
   std::vector<std::string> paths;
@@ -931,14 +948,14 @@ ProjectWatchState watch_rules(const fs::path& cwd, std::string_view target, cons
   for (const auto& [name, profiles] : snapshot.pending_projections)
     for (const auto& probe : profiles) (void)observe_probe(probe);
   for (const auto& witness : snapshot.pending_witnesses) (void)observe_witness(witness);
-  auto watch = observed ? *observed : watch_project(cwd, target, current);
+  auto watch = observed ? *observed : watch_project(cwd, target, current, native_triple);
   if (watch.pending && std::ranges::none_of(snapshot.observations, [&](const auto& record) {
         return record.demand == *watch.pending;
       })) {
     (void)observe(*watch.pending);
     (void)observe_planning(*watch.pending);
   }
-  watch.stamp = fingerprint(std::tie(watch.stamp, observations));
+  watch.stamp = fingerprint(std::tie(watch.stamp, observations, native_triple));
   watch.paths.append_range(std::move(paths));
   std::ranges::sort(watch.paths);
   auto duplicates = std::ranges::unique(watch.paths);
@@ -949,8 +966,9 @@ ProjectWatchState watch_rules(const fs::path& cwd, std::string_view target, cons
 }  // namespace
 
 std::expected<PlanInspection, std::string> inspect_built_project(
-    const fs::path& cwd, std::string_view target, const RuleToolchain& toolchain) {
-  auto snapshot = read_rule_snapshot(cwd, target);
+    const fs::path& cwd, std::string_view target, const RuleToolchain& toolchain, const ast::Target* selected_target) {
+  const auto native_triple = explicit_triple(selected_target);
+  auto snapshot = read_rule_snapshot(cwd, target, native_triple);
   std::vector<RuleExpansion> current;
   if (snapshot) {
     ObservedPackageStamps packages;
@@ -959,7 +977,11 @@ std::expected<PlanInspection, std::string> inspect_built_project(
         current.push_back(std::move(snapshot->expansions[i]));
     }
   }
-  auto inspection = inspect_project(cwd, target, current);
+  auto inspection = inspect_project(cwd, target, current, native_triple);
+  const auto* native_target = selected_target ? selected_target : pp::native_target;
+  if (inspection && native_target)
+    inspection->facts.push_back({"native-target", std::string(target), "triple", std::string(native_target->triple),
+                                 selected_target ? "--target" : "host default"});
   if (inspection && snapshot)
     for (auto& probe : snapshot->probes) {
       const bool expanded = std::ranges::any_of(current, [&](const auto& expansion) {
@@ -1004,15 +1026,17 @@ Coordinator::Coordinator(pipeline::Session& session, std::string executable, std
 }
 
 ProjectWatchState Coordinator::watch_state(const fs::path& cwd, const std::string& target,
-                                            const std::optional<std::string>& tool_path) {
+                                            const std::optional<std::string>& tool_path,
+                                            const ast::Target* selected_target) {
+  const auto native_triple = explicit_triple(selected_target);
   std::shared_ptr<const RuleSnapshot> snapshot;
   {
     std::lock_guard lock(watch_mutex_);
-    const auto entry = watch_snapshots_.find({cwd, target, tool_path});
+    const auto entry = watch_snapshots_.find({cwd, target, tool_path, native_triple});
     if (entry != watch_snapshots_.end()) snapshot = entry->second;
   }
   static const RuleSnapshot empty;
-  return watch_rules(cwd, target, {executable_, worker_build_, tool_path}, snapshot ? *snapshot : empty);
+  return watch_rules(cwd, target, {executable_, worker_build_, tool_path}, snapshot ? *snapshot : empty, native_triple);
 }
 
 ProjectReport Coordinator::run(const fs::path& cwd, const std::string& target,
@@ -1020,13 +1044,20 @@ ProjectReport Coordinator::run(const fs::path& cwd, const std::string& target,
                                const std::function<void()>& refresh, const std::function<bool()>& cancelled,
                                const Apply& apply,
                                const std::function<bool(engine::Revision, const std::function<void()>&)>& publish,
-                               const std::function<void()>& tick, engine::Tracer* tracer) {
+                               const std::function<void()>& tick, engine::Tracer* tracer,
+                               const ast::Target* selected_target) {
   std::lock_guard lock(mutex_);
   ProjectReport report;
-  const auto output = cwd / ".ycxx" / "out" / target;
+  const auto native_triple = explicit_triple(selected_target);
+  const auto state_path = project_state_path(cwd, native_triple);
+  const auto output = state_path / "out" / target;
   const auto key = fingerprint128(native(output));
   const std::string workspace_path = native(cwd);
   const auto workspace = fingerprint128(workspace_path);
+  // Native overlays have one active plan per workspace and target configuration. Host
+  // rule values and action receipts still describe the same workspace across variants.
+  const auto native_workspace_path = native(state_path);
+  const auto native_workspace = fingerprint128(native_workspace_path);
   const RuleToolchain toolchain{executable_, worker_build_, tool_path};
   bool superseded = false;
   const auto fail = [&](std::string diagnostic) {
@@ -1034,6 +1065,19 @@ ProjectReport Coordinator::run(const fs::path& cwd, const std::string& target,
     report.diagnostics.push_back(std::move(diagnostic));
     return report;
   };
+  const auto* host_target = pp::native_target;
+  if (!host_target) return fail("project building is unavailable on this host");
+  const auto* native_target = selected_target ? selected_target : host_target;
+  if (tracer) {
+    engine::TraceEvent event;
+    event.id = session_.db().reserve_trace_id();
+    event.kind = "ProjectTarget";
+    event.key = native_target->triple;
+    event.start = event.end = std::chrono::steady_clock::now();
+    event.outcome = engine::Outcome::executed;
+    if (tracer->values()) event.value = selected_target ? "--target" : "host default";
+    tracer->event(std::move(event));
+  }
 
   const auto poll = [&] {
     tick();
@@ -1168,8 +1212,6 @@ ProjectReport Coordinator::run(const fs::path& cwd, const std::string& target,
     return std::unexpected(std::move(errors));
   };
 
-  const auto* native_target = pp::native_target;
-  if (!native_target) return fail("project building is unavailable on this host");
   const auto measure_profile = [&](const RulePackageRef& package, const RulePackagePlan& plan,
                                    const RulePackageAction& selected, std::span<const std::string> requested)
       -> std::expected<MeasuredProfile, std::string> {
@@ -1219,7 +1261,7 @@ ProjectReport Coordinator::run(const fs::path& cwd, const std::string& target,
     return MeasuredProfile{std::move(captured), std::move(matrix->observations)};
   };
 
-  const auto saved = read_rule_snapshot(cwd, target);
+  const auto saved = read_rule_snapshot(cwd, target, native_triple);
   const ResolveRuleArguments resolve_arguments = [&](const RuleDemand& demand, RuleSnapshot& snapshot)
       -> std::expected<ProjectedRuleArguments, std::string> {
     auto& profiles = snapshot.probes;
@@ -1372,21 +1414,22 @@ ProjectReport Coordinator::run(const fs::path& cwd, const std::string& target,
       else if (!cancelled() && !superseded) report.diagnostics.push_back(std::move(measured.error()));
     };
     auto prepared = prepare_project(cwd, target, toolchain, run_rule, run_package, run_witness, admit_value,
-                                    use_compiler, resolve_arguments, planned, watch, superseded);
+                                    use_compiler, resolve_arguments, planned, watch, superseded, native_triple);
     if (cancelled()) return fail("build cancelled");
     if (superseded || !current_rules(cwd, toolchain, planned)) continue;
-    write_rule_snapshot(cwd, target, planned.rules);
+    write_rule_snapshot(cwd, target, planned.rules, native_triple);
     if (watch) {
-      report.watch_stamp = prepared ? watch_rules(cwd, target, toolchain, planned.rules).stamp : planned.attempt_watch;
+      report.watch_stamp =
+          prepared ? watch_rules(cwd, target, toolchain, planned.rules, native_triple).stamp : planned.attempt_watch;
       auto snapshot = std::make_shared<RuleSnapshot>(planned.rules);
       std::lock_guard lock(watch_mutex_);
-      watch_snapshots_.insert_or_assign(WatchKey{cwd, target, tool_path}, std::move(snapshot));
+      watch_snapshots_.insert_or_assign(WatchKey{cwd, target, tool_path, native_triple}, std::move(snapshot));
     }
     if (!prepared) return fail(prepared.error());
     const ProjectPlan& plan = planned.plan;
     const Fp128 plan_id = fingerprint(plan);
     if (const auto* prior = session_.db().peek<WorkspacePlan>(key); !prior || fingerprint(prior->resolved) != plan_id)
-      apply([&](engine::Db& db) { db.set<WorkspacePlan>(key, Planned{workspace, plan}); });
+      apply([&](engine::Db& db) { db.set<WorkspacePlan>(key, Planned{native_workspace, plan}); });
 
     for (;;) {
       const auto before = session_.db().revision();
@@ -1414,7 +1457,7 @@ ProjectReport Coordinator::run(const fs::path& cwd, const std::string& target,
             inputs = staged;
           }
           auto result = run_action("ExternalAction", generator.name, generator.action, inputs);
-          const auto observed = observe_project(cwd, target, toolchain, planned);
+          const auto observed = observe_project(cwd, target, toolchain, planned, native_triple);
           if (!observed) break;
           const auto current = std::ranges::find(observed->generators, generator.name, &GeneratorPlan::name);
           if (current == observed->generators.end()) break;
@@ -1433,7 +1476,8 @@ ProjectReport Coordinator::run(const fs::path& cwd, const std::string& target,
       }
 
       if (demand->prepare) {
-        const auto request = register_native(session_, workspace_path, target, plan, output_at);
+        const auto request = register_native(session_, workspace_path, target, native_target, plan, output_at,
+                                             native_triple);
         std::map<std::string, std::string> generated;
         for (std::size_t index = 0; index < plan.generators.size(); ++index) {
           const auto& generator = plan.generators[index];
@@ -1442,16 +1486,16 @@ ProjectReport Coordinator::run(const fs::path& cwd, const std::string& target,
           for (std::size_t i = 0; i < generator.action.outputs.size(); ++i) {
             const auto& output = generator.action.outputs[i];
             const auto& bytes = outputs[i].contents.bytes;
-            generated.emplace(generated_path(cwd, generator.name, output.filename),
+            generated.emplace(generated_path(cwd, generator.name, output.filename, native_triple),
                               std::string(bytes.begin(), bytes.end()));
           }
         }
-        auto& previous = generated_paths_[workspace_path];
+        auto& previous = generated_paths_[native_workspace_path];
         apply([&](engine::Db& db) {
           for (const auto& path : previous)
             if (!generated.contains(path)) session_.set_generated(path, std::nullopt);
           for (const auto& [path, bytes] : generated) session_.set_generated(path, bytes);
-          db.set<PreparedBuild>(workspace, Prepared{key, demand->native_plan, request});
+          db.set<PreparedBuild>(native_workspace, Prepared{key, demand->native_plan, request});
         });
         previous.clear();
         for (const auto& [path, bytes] : generated) previous.insert(path);
@@ -1459,7 +1503,7 @@ ProjectReport Coordinator::run(const fs::path& cwd, const std::string& target,
       }
 
       if (cancelled()) return fail("build cancelled");
-      const auto observed = observe_project(cwd, target, toolchain, planned);
+      const auto observed = observe_project(cwd, target, toolchain, planned, native_triple);
       if (!observed || fingerprint(*observed) != plan_id) break;
       if (demand->image.empty()) {
         if (!publish(before, [] {})) break;
@@ -1476,7 +1520,7 @@ ProjectReport Coordinator::run(const fs::path& cwd, const std::string& target,
               const auto& name = plan.generators[asset.producer].action.outputs[asset.output].filename;
               assets.push_back({name, (*output_at(asset.producer))[asset.output].contents});
             }
-            auto staged = PreparedPublication::stage(cwd, target, assets, demand->image);
+            auto staged = PreparedPublication::stage(cwd, target, assets, demand->image, native_triple);
             publication = staged ? std::move(*staged).commit() : std::unexpected(std::move(staged.error()));
           })) break;
       if (tracer && (!publication || *publication)) {
