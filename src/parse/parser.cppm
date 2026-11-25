@@ -4907,7 +4907,8 @@ public:
         return r;
       }
     }
-    return scope_expr();
+    const bool immediate_default_call = s->ns && in_integral_template_default_ && !s_->unevaluated && is(Tk::l_paren);
+    return scope_expr(immediate_default_call);
   }
 
   // ------------------------------------------------------------ [stmt]
