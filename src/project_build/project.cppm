@@ -139,17 +139,26 @@ struct RuleValueData {
   bool operator==(const RuleValueData&) const = default;
 };
 
+std::string describe_fact_name(std::string_view name) {
+  const bool plain = std::ranges::all_of(name, [](char c) {
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
+           c == '_' || c == '-' || c == '.';
+  });
+  return plain ? std::string(name) : std::format("{:?}", name);
+}
+
 std::string describe_rule_value(const RuleValueData& value) {
   if (!value.fact) return std::string(probe_support_name(value.support));
   const auto& fact = *value.fact;
-  std::string text = fact.schema;
+  std::string text = describe_fact_name(fact.schema);
   for (const auto& row : fact.rows) {
-    text += std::format("\n{}", row.name);
+    text += std::format("\n{}", describe_fact_name(row.name));
     for (const auto& field : row.fields) {
+      const auto name = describe_fact_name(field.name);
       if (field.number)
-        text += std::format(" {}={}", field.name, *field.number);
+        text += std::format(" {}={}", name, *field.number);
       else
-        text += std::format(" {}={:?}", field.name, *field.text);
+        text += std::format(" {}={:?}", name, *field.text);
     }
   }
   return text;
