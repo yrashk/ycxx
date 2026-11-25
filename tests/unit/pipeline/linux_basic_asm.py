@@ -12,6 +12,9 @@ import tempfile
 from linux_compile import run
 from linux_peer_derived_default_construction import native_compilers
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'daemon'))
+from runtime_dir import runtime_root
+
 
 def rejected(args, scope, env):
     result = subprocess.run(args, cwd=scope, env=env, capture_output=True, text=True, timeout=30)
@@ -96,7 +99,7 @@ def main():
     peer = fixture / 'peer.cpp'
     resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
     with tempfile.TemporaryDirectory(prefix='ycxx-basic-asm-', dir='.') as temp, \
-            tempfile.TemporaryDirectory(prefix='yd-', dir='/tmp') as runtime:
+            tempfile.TemporaryDirectory(prefix='yd-', dir=runtime_root('yd-')) as runtime:
         scope = Path(temp).resolve()
         (scope / '.ycxx').touch()
         env = {key: value for key, value in os.environ.items()

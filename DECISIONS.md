@@ -448,9 +448,9 @@ specified by the accepted [optimization design](docs/design/optimization.md) (#3
      identity before type deduction, and the declaration part carries its members (#338).
 10. **The resident daemon.** Specified by the accepted [daemon design](docs/design/daemon.md)
     (#83); the section references in this item point into it.
-    - **One daemon per project root and ycxx binary.** The root is the first `.ycxx` or
-      version-control marker found walking up from the source (submodules skipped, worktrees
-      counted). *Reason:* one revision per daemon, so one project's edits never stop another's
+    - **One daemon per project root and ycxx binary.** The root is found at the first `.ycxx`,
+      `build.ycxx` file or version-control marker walking up from the source (submodules skipped,
+      worktrees counted). *Reason:* one revision per daemon, so one project's edits never stop another's
       builds, and two binaries never share a daemon. (§2)
     - **A Unix socket named by scope and build hash; the client writes the outputs.** One
       `compile` request carries the whole command line, made absolute against its `cwd`, and the
@@ -521,9 +521,10 @@ project must survive any session ending.
 4. **Areas:** `area:*` labels partition the code. Two sessions never write the same area at the
    same time, and each works in its own git worktree and branch.
 5. **Model allocation:**
-   - Routine implementation, code review and testing use Claude Opus or Codex Sol at medium
-     effort. Use high effort for intricate work. Smaller models can handle mechanical work
-     such as data tables, extraction scripts and bulk test triage.
+   - Claude Opus uses medium effort for routine implementation, code review and testing,
+     and high effort for intricate work. Smaller Claude models can handle mechanical work.
+   - Codex Sol uses high effort for implementation, code review and testing. Use Sol medium
+     for mechanical work such as data tables, extraction scripts and bulk test triage.
    - Use the corresponding design model sparingly: Claude Opus escalates to Fable and Codex
      Sol escalates to Astra. Escalate architecture and design decisions, hard specification
      questions that affect a design or implementation, and independent verification of a

@@ -862,7 +862,7 @@ std = 'C++11'
 ftm = '__cpp_lambdas'
 detect = '(?:^|[=(,{;:?!]|\breturn)\s*\[[^\[\]]*\]\s*(?:\(|\{|<|mutable\b|->|constexpr\b|noexcept\b)'
 status = 'partial'
-note = 'function bodies and captureless non-generic initializers of internal namespace variables'
+note = 'not in default member initializers, default arguments, static_assert or unevaluated operands'
 issues = [338]
 probe = '''
 int main() { int k = 2; int s = 0; [&] { ++s; }(); return ([k](int x) { return x + k; }(1) == 3 && s == 1) ? 0 : 1; }
@@ -904,8 +904,9 @@ group = 'lambda'
 clauses = ['expr.prim.lambda.closure', 'dcl.constexpr']
 std = 'C++17'
 detect = '\]\s*\([^)]*\)\s*(?:mutable\s+)?(?:constexpr|consteval)\b'
-status = 'missing'
-issues = [262, 102]
+status = 'partial'
+note = 'not captures by reference in constant evaluation, nor consteval lambdas'
+issues = [262, 350]
 probe = '''
 int main() { constexpr auto sq = [](int x) { return x * x; }; static_assert(sq(3) == 9); return 0; }
 '''
@@ -1778,8 +1779,8 @@ clauses = ['class.friend', 'dcl.friend', 'temp.friend']
 std = 'C++98'
 detect = '\bfriend\b'
 status = 'partial'
-issues = [259, 689, 1178, 1179, 1180, 1181, 1182, 1184, 1185]
-note = 'Ordinary binary hidden friends and unary minus participate in ADL. Type friends can name a class template parameter. Friend function definitions in class templates (with dependent noexcept) and friend function templates defined in classes and class templates are found by ADL. Friend class templates and class friends of class templates grant access per specialization. Other hidden friend operators (#1178), non-defining friend function templates (#1179), constrained friends in class templates (#1180), deleted friend templates (#1181), C-linkage friend definitions, default arguments in friend declarations and non-defining friend functions in class templates remain open.'
+issues = [259, 689, 1179, 1180, 1181, 1182, 1184, 1185, 1277, 1278]
+note = 'Hidden friend operators (binary, unary, prefix increment and compound assignment) participate in ADL. Type friends can name a class template parameter. Friend function definitions in class templates (with dependent noexcept) and friend function templates defined in classes and class templates are found by ADL. Friend class templates and class friends of class templates grant access per specialization. Friend functions of nested classes (#1277), non-defining friend function templates (#1179), constrained friends in class templates (#1180), deleted friend templates (#1181), C-linkage friend definitions, default arguments in friend declarations and non-defining friend functions in class templates remain open.'
 probe = '''
 class C { int p = 2; friend int peek(const C& c) { return c.p; } };
 int main() { C c; return peek(c) - 2; }
@@ -1826,7 +1827,7 @@ struct D final : B { int f() override { return 0; } };
 int main() { D d; B& b = d; return b.f(); }
 '''
 issues = [309]
-note = 'Both targets compile and run ordinary non-template classes with external linkage and single public nonvirtual inheritance that declare virtual functions, virtual destructors and pure virtuals: vptr layout, implicit and user-written constructors and destructors that install the vptr, implicit copies, virtual calls (qualified names call directly), out-of-class virtual definitions, key-function and weak vtables with RTTI, and the C2/D2/D0 entries, linking with Clang and GCC objects. Ordinary declarations, overriding, final, class-head final, pure-specifiers and abstract type checking are checked in syntax mode. The earlier peer-owned Linux and macOS profiles remain. Class templates with virtual members, local and internal-linkage classes, non-polymorphic, non-public or multiple bases, delete through a virtual destructor, covariant returns, and constant evaluation of polymorphic objects remain open.'
+note = 'Both targets compile and run ordinary classes and class template specializations with external linkage and single public nonvirtual inheritance that declare virtual functions, virtual destructors and pure virtuals: vptr layout, implicit and user-written constructors and destructors that install the vptr, implicit copies, virtual calls (qualified names call directly), out-of-class virtual definitions, key-function and weak vtables with RTTI, and the C2/D2/D0 entries, linking with Clang and GCC objects. Ordinary declarations, overriding, final, class-head final, pure-specifiers and abstract type checking are checked in syntax mode. The earlier peer-owned Linux and macOS profiles remain. Specializations for TU-local types, classes nested in class templates, local and internal-linkage classes, non-polymorphic, non-public or multiple bases, delete through a virtual destructor, covariant returns, and constant evaluation of polymorphic objects remain open.'
 
 [[feature]]
 id = 'class-virtual-base'
@@ -2157,7 +2158,7 @@ clauses = ['temp.param', 'temp.arg.nontype']
 std = 'C++20'
 ftm = '__cpp_nontype_template_args'
 status = 'partial'
-note = 'Flat named structural class values with public integral fields and native parameter objects. Floating-point arguments and further structural forms remain open.'
+note = 'Flat structural class arguments, parameter objects and guarded integral member-alias projections. Floating-point arguments and further structural forms remain open.'
 probe = '''
 struct P { int x, y; };
 template<P p> int sum() { return p.x + p.y; }
@@ -2245,8 +2246,8 @@ clauses = ['except', 'except.pre', 'except.throw', 'except.ctor', 'except.handle
 std = 'C++98'
 detect = '\bthrow\b|\btry\b|\bcatch\s*\('
 status = 'partial'
-issues = [89, 72, 572, 578, 583, 648, 663, 737, 781, 849]
-note = 'Throw and block try/catch syntax. On Linux x86-64 and macOS arm64, hosted exceptions can cross eligible cleanup-free frames, including selected defaults in scalar aggregates, and one automatic aggregate cleanup. Linux also supports int throws from eligible frames and one catch-all around an external call.'
+issues = [89, 72, 572, 578, 583, 648, 663, 737, 781, 849, 1237]
+note = 'Throw and block try/catch syntax. On Linux x86-64 and macOS arm64, hosted exceptions can cross eligible cleanup-free frames, including selected defaults in scalar aggregates, and one automatic aggregate cleanup. Linux supports int and trivial class throws to peer code and one catch-all around an external call.'
 probe = '''
 int d = 0; struct G { ~G() { ++d; } };
 int f() { G g; throw 3; }

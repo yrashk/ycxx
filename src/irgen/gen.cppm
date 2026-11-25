@@ -1819,9 +1819,20 @@ class Gen {
         emit(ir::Op::rethrow, {}, ops);
       } else {
         At operand = child(a, expr.operand);
-        ValueId value = rvalue(operand);
+        const auto exception_type = ast::without_cv(ty(info(operand).type));
+        ValueId value;
+        if (expr.exception_class == ast::EntityId::none) {
+          value = rvalue(operand);
+        } else {
+          // Stage the trivial representation before entering the runtime. If the initializer
+          // throws, there is no allocated exception object to release.
+          const Place payload = begin_object(exception_type, ir::Init::indeterminate, ir::Storage::temporary);
+          initialize(payload, operand, false);
+          begin_lifetime(payload);
+          value = payload.ptr;
+        }
         ValueId ops[] = {state_, value};
-        std::uint64_t type[] = {word(ty(info(operand).type))};
+        std::uint64_t type[] = {word(exception_type)};
         emit(ir::Op::throw_, {}, ops, type);
       }
       live_ = false;

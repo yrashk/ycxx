@@ -37,7 +37,20 @@ The resident engine builds executable targets from C++ source groups and declare
 generators. The executable goes in `.ycxx/out/app`. Use `--trace-engine=interactive`
 or `--trace-engine=json` to inspect the tool steps and native compiler queries.
 Use `ycxx build app --watch` to rebuild after workspace edits.
-[Build design](docs/design/build.md) [#1251](https://github.com/yrashk/ycxx/issues/1251)
+The bundled C++ rule package builds from source. A workspace can replace its C++ rules with
+`use plugin("tools/custom/rules") as cpp`.
+`ycxx show app` describes the resolved plan and how each input was selected. Its JSON snapshots
+can be compared with the checkout and rendered as a standalone HTML report.
+`ycxx build app --probe-toolchain` measures the selected rule compilers. Inspect the
+observations with `ycxx show app`.
+Import `builtin:capabilities` to project selected observations into a generated
+C++ header with `constexpr` values.
+A source-built rule package can run its own witness and export a support
+state or a structured fact to a consumer using `value("target", "field")`.
+The shader examples publish bundles through `runtime_assets`. The reflection
+example also uses a compiled shader's descriptor layout to generate `constexpr`
+C++ bindings. Shader edits with the same layout reuse the native executable.
+[Runnable build examples](examples/project-build) · [Build design](docs/design/build.md) · [#1251](https://github.com/yrashk/ycxx/issues/1251)
 
 Ordinary function pointers and references preserve concrete `noexcept` type identity.
 A nonthrowing function can be used where the corresponding potentially throwing type is expected.
@@ -53,7 +66,9 @@ parameters, is part of its call operator's type. [#807](https://github.com/yrash
 
 Templates can take values of named flat aggregates with public integral fields as constant
 arguments. On Linux x86-64, equivalent values share a parameter object across translation
-units. [#317](https://github.com/yrashk/ycxx/issues/317)
+units. A class template's ordinary member alias can use those fields directly or in a
+guarded integral argument such as `V.ok ? V.num : 0`.
+[#317](https://github.com/yrashk/ycxx/issues/317)
 
 An explicitly specialized class can name a flat structural argument directly, as in
 `template<> struct Pick<Key{1}>`. A later use with an equivalent named constant
@@ -328,6 +343,9 @@ aggregate results through the target's supported ABI.
 [#853](https://github.com/yrashk/ycxx/issues/853)
 
 On x86-64 Linux, an eligible ycxx function can also throw an `int` to a hosted peer's handler.
+A hosted GCC or Clang handler can also catch by const reference a named trivial record thrown
+by a ycxx ELF object when the record is initialized explicitly and has one public `int` field.
+This works with either producer RTTI flag. [#1237](https://github.com/yrashk/ycxx/issues/1237)
 A host-linked ycxx function can use one `catch (...)` to return an integer literal when
 a direct call on its parameter to an externally defined `int(int)` function throws.
 It can also use one `catch (int value)` to return the caught integer and let exceptions of
@@ -474,8 +492,8 @@ written default member initializer are value-initialized.
   Free function templates can instantiate omitted dependent scalar defaults after overload selection.
   Ordinary free binary operators use argument-dependent lookup, including associated base namespaces.
   Supported dependent binary operators on ordinary non-template classes also find associated
-  nonmember candidates at instantiation. Ordinary unary minus can find hidden friends by
-  argument-dependent lookup.
+  nonmember candidates at instantiation. Unary operators, prefix increment and compound
+  assignments can find hidden friends by argument-dependent lookup.
   Nonmember operators can be called explicitly by name, including with namespace qualification.
   [#219](https://github.com/yrashk/ycxx/issues/219)
   Overloaded free functions can take braced arguments for arithmetic parameters
@@ -674,8 +692,9 @@ written default member initializer are value-initialized.
   `*this`, init-captures, `mutable`, conversion to a pointer to function, generic lambdas (`auto`
   parameters) and template lambdas (`[]<class T>`), and closures passed to and called from
   function templates, with Clang's names for closure types;
-- noncapturing, non-generic lambdas as initializers of internal-linkage namespace variables,
-  with addressable static storage and scalar calls ([#338](https://github.com/yrashk/ycxx/issues/338));
+- lambdas in the initializers of namespace-scope variables, static data members (of class
+  templates too) and variable templates, and in constraints; constexpr lambdas, except captures by
+  reference ([#338](https://github.com/yrashk/ycxx/issues/338));
 - casts, including `static_cast<T&&>` from a compatible object lvalue and runtime `static_cast`
   downcasts of object pointers, lvalue references and base xvalues through accessible,
   unambiguous nonvirtual base paths, `sizeof`/`alignof` (classes included), direct-member `offsetof` for
@@ -883,15 +902,16 @@ defined later, also out of class (`class O::I : public B { … };`), with member
 can have virtual functions. Nested classes of class templates are not supported yet.
 [#306](https://github.com/yrashk/ycxx/issues/306) · [#1187](https://github.com/yrashk/ycxx/issues/1187)
 
-**Virtual functions.** On arm64 macOS and Linux x86-64, ordinary non-template classes with
-external linkage and single public nonvirtual inheritance can declare virtual functions, virtual
-destructors and pure virtuals, and programs using them compile and run. Objects are constructed by
+**Virtual functions.** On arm64 macOS and Linux x86-64, ordinary classes and specializations of
+class templates with external linkage and single public nonvirtual inheritance can declare virtual
+functions, virtual destructors and pure virtuals, and programs using them compile and run. Objects are constructed by
 implicit or written constructors, copied and destroyed; virtual calls dispatch to the final
 overrider, and calls during construction and destruction use the class being built or torn down.
 Virtual members can be defined out of class. The unit defining the key function emits the vtable
 and RTTI, and classes without one get weak tables where they are constructed or destroyed. The objects link and interoperate
-with Clang and GCC objects. Class templates with virtual members, internal-linkage and local
-classes, other base shapes, `delete` through a virtual destructor and `typeid` are not supported
+with Clang and GCC objects. A class template can have polymorphic, dependent bases, and each
+specialization's table and virtual members are weak, instantiated where the table is used.
+Internal-linkage and local classes, specializations for them, other base shapes, `delete` through a virtual destructor and `typeid` are not supported
 yet. [#309](https://github.com/yrashk/ycxx/issues/309) · [#1153](https://github.com/yrashk/ycxx/issues/1153) ·
 [#1154](https://github.com/yrashk/ycxx/issues/1154) · [#1155](https://github.com/yrashk/ycxx/issues/1155)
 
@@ -933,8 +953,8 @@ and a peer-owned virtual destructor and RTTI. This is the shape of libycxx's fun
   [#411](https://github.com/yrashk/ycxx/issues/411)
 - 128-bit integers through an ellipsis ([#1247](https://github.com/yrashk/ycxx/issues/1247)),
   and enumerations with a 128-bit underlying type or initializer ([#1176](https://github.com/yrashk/ycxx/issues/1176)).
-- Constexpr lambdas (the interpreter has no class objects yet), further lambda declaration
-  contexts ([#338](https://github.com/yrashk/ycxx/issues/338)),
+- Lambdas in default member initializers, default arguments and unevaluated operands
+  ([#338](https://github.com/yrashk/ycxx/issues/338)),
   tuple-like structured bindings and structured bindings to bit-fields or inherited members,
   inheriting constructors, and base packs or multiple bases in a class template.
 - Broader native construction, virtual dispatch and table emission, virtual base classes,
@@ -966,8 +986,8 @@ and a peer-owned virtual destructor and RTTI. This is the shape of libycxx's fun
 - ι: statements and declarations, the C++98/11 core: default arguments, block-scope statics,
   casts and arrays ([#337](https://github.com/yrashk/ycxx/issues/337)).
 - `auto` and lambdas ([#278](https://github.com/yrashk/ycxx/issues/278)): placeholder types,
-  lambdas and generic lambdas are done; constexpr lambdas wait on class objects in the
-  interpreter ([#262](https://github.com/yrashk/ycxx/issues/262)).
+  lambdas, generic lambdas and constexpr lambdas are done; captures by reference in constant
+  evaluation wait on the interpreter ([#262](https://github.com/yrashk/ycxx/issues/262)).
 
 - x86-64 ↔ AArch64 back-end parity ([#639](https://github.com/yrashk/ycxx/issues/639)), one
   gap per PR in priority order.

@@ -185,6 +185,11 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
     To keep coding meanwhile, build into a scratchpad build directory (the entry above).
   - Stopping a `tools/test` that waits on a running `tools/build` in the same directory leaves
     half-built modules ("failed to read compiled module"). Let the build finish, then rebuild.
+- **`clang++` on this Mac is Apple's, not the oracle.** On #338 a mangling difference seen with it
+  was "fixed" to match, and a 6-minute rebuild later Clang 23 turned out to agree with the old name:
+  Apple Clang numbers substitutions after a `<closure-prefix>` differently.
+  - Do: compare symbols with the toolchain's Clang (`~/.local/share/ycxx/toolchains/llvm-*/bin`),
+    the one `tools/test --cxx clang` runs. Learned on #338.
 - **A loaded machine can cause timeouts in the fast gate.** On #330, with other sessions
   building and load averages of 120–250, two fast runs failed. The CTests had 10 s executable
   timeouts, `daemon.trace_tui` has a 2 s budget, and draft tests that include `<iostream>` have
@@ -601,7 +606,8 @@ applies. A lesson that becomes a rule moves to DECISIONS or AGENTS.md and leaves
 
 - **Linux x86-64 run tests can be checked from the Mac without building ycxx in Docker.** Compile
   with the Mac's ycxx (`ycxx cxx --target=x86_64-pc-linux-gnu -c`), then link and run with `g++`
-  in the `ycxx-linux-amd64` image (`docker run --platform linux/amd64 -v dir:/w`). On #309 this
+  in the `ycxx-linux-amd64` image (`docker run --platform linux/amd64 -v dir:/w`), or in `gcc:16`
+  with `--pull never` where that platform of it is already local (#1153). On #309 this
   ran 13 mixed-object tests in about a minute, against 25 minutes for an emulated build.
   - Learned on #309.
 - **Without that image, a freestanding static ELF in `busybox` runs the same tests.** Compile with

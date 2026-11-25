@@ -84,6 +84,28 @@ def tu_outcomes(events, file):
             if event.get('kind') == 'Tu' and Path(event['key']).name == file}
 
 
+def action_keys(events, kind, outcome='executed'):
+    return sorted(event['key'] for event in events
+                  if event.get('kind') == kind and event.get('outcome') == outcome)
+
+
+def check_cold_actions(summary, events):
+    packages = action_keys(events, 'RulePackage')
+    failed = action_keys(events, 'RulePackage', 'failed')
+    assert len(packages) == 1, (packages, failed)
+    if sys.platform == 'linux':
+        assert not failed, (packages, failed)
+    assert all(key.startswith('standard/rules via ') for key in packages + failed), (packages, failed)
+    assert action_keys(events, 'RuleWorker') == ['app', 'core', 'wire'], events
+    assert action_keys(events, 'ExternalAction') == ['wire'], events
+    assert summary['actions_executed'] == 5 + len(failed), summary
+
+
+def check_wire_action(summary, events, outcome='executed'):
+    assert summary['actions_executed'] == 1, summary
+    assert action_keys(events, 'ExternalAction', outcome) == ['wire'], events
+
+
 def check_program(executable, expected):
     p = subprocess.run([executable], cwd=executable.parent, capture_output=True, timeout=30)
     assert p.returncode == expected, (executable, expected, p.returncode, p.stderr)
@@ -94,8 +116,7 @@ def check_edit_sequence(ycxx, scope, env):
     executable = scope / '.ycxx' / 'out' / 'app'
     schema = scope / 'schema.txt'
     summary, events = traced_build(ycxx, scope, env, 'first build')
-    assert summary['actions_executed'] == 1, summary
-    assert any(event.get('kind') == 'ExternalAction' for event in events), 'generator missing from trace'
+    check_cold_actions(summary, events)
     assert 'executed' in tu_outcomes(events, 'main.cc'), 'no native main.cc evaluation on first build'
     check_program(executable, 17)
     first = executable.read_bytes()
@@ -129,7 +150,7 @@ def check_edit_sequence(ycxx, scope, env):
 
     schema.write_text('11\n')
     summary, events = traced_build(ycxx, scope, env, 'generator edit')
-    assert summary['actions_executed'] > 0, summary
+    check_wire_action(summary, events)
     assert 'executed' in tu_outcomes(events, 'wire.cc'), 'changed generated source did not recompile'
     main = tu_outcomes(events, 'main.cc')
     assert main and main <= {'reused', 'verified', 'durable'}, ('unchanged header did not cut off main.cc', main)
@@ -142,7 +163,8 @@ def check_edit_sequence(ycxx, scope, env):
     incremental = executable.read_bytes()
 
     schema.write_text('rejected\n')
-    summary, _ = traced_build(ycxx, scope, env, 'failed generator', succeeds=False)
+    summary, events = traced_build(ycxx, scope, env, 'failed generator', succeeds=False)
+    check_wire_action(summary, events, 'failed')
     assert any('schema rejected' in diagnostic for diagnostic in summary['diagnostics']), summary
     assert executable.read_bytes() == incremental, 'failed generator replaced the last successful output'
     check_program(executable, 31)
@@ -156,6 +178,43 @@ def env_for(runtime):
     env.update(YCXX_RUNTIME_DIR=runtime, YCXX_DAEMON_IDLE_EXIT='120',
                YCXX_DAEMON='require', YCXX_THREADS='2')
     return env
+
+
+def daemon_identity(ycxx, scope, env):
+    status = run_client(ycxx, scope, env, 'ctl', 'status')
+    if status.returncode != 0:
+        return None
+    fields = dict(line.split(': ', 1) for line in status.stdout.splitlines() if ': ' in line)
+    return fields['root'], int(fields['pid'])
+
+
+def check_nested_scope(ycxx):
+    with tempfile.TemporaryDirectory(prefix='ycxx-nested-') as workspace, \
+         tempfile.TemporaryDirectory(prefix='yb', dir=runtime_root('yb')) as runtime:
+        checkout = Path(workspace).resolve()
+        (checkout / '.git').mkdir()
+        scope = checkout / 'nested'
+        scope.mkdir()
+        (scope / 'main.cc').write_text('int main() { return 0; }\n')
+        (scope / 'build.ycxx').write_text('cpp.executable "app" { sources = ["main.cc"] }\n')
+        env = env_for(runtime)
+        try:
+            first, _ = traced_build(ycxx, scope, env, 'nested first build')
+            # Status discovers the root without starting a daemon. The first build has now
+            # created .ycxx, so also look for a daemon the build may have started at .git.
+            first_daemon = daemon_identity(ycxx, scope, env)
+            enclosing_daemon = daemon_identity(ycxx, checkout, env)
+            second, _ = traced_build(ycxx, scope, env, 'nested unchanged build')
+            second_daemon = daemon_identity(ycxx, scope, env)
+            actions = first['actions_executed'], second['actions_executed']
+            assert first_daemon is not None and first_daemon[0] == str(scope), (
+                'first build did not start the nested daemon', first_daemon, enclosing_daemon, actions)
+            assert enclosing_daemon is None, ('enclosing daemon started', enclosing_daemon)
+            assert second_daemon == first_daemon, ('nested daemon changed', first_daemon, second_daemon)
+            assert actions[0] > 0 and actions[1] == 0, ('nested first and unchanged build actions', actions)
+        finally:
+            for root in (scope, checkout):
+                run_client(ycxx, root, env, 'ctl', 'shutdown', '--root', str(root))
 
 
 def main():
@@ -175,12 +234,14 @@ def main():
         with tempfile.TemporaryDirectory(prefix='yb', dir=runtime_root('yb')) as runtime:
             env = env_for(runtime)
             try:
-                summary, _ = traced_build(ycxx, scope, env, 'cold build of final inputs')
-                assert summary['actions_executed'] > 0, summary
+                summary, events = traced_build(ycxx, scope, env, 'cold build of final inputs')
+                check_cold_actions(summary, events)
                 assert executable.read_bytes() == incremental, 'incremental and cold executable bytes differ'
                 check_program(executable, 31)
             finally:
                 run_client(ycxx, scope, env, 'ctl', 'shutdown')
+
+    check_nested_scope(ycxx)
 
 
 if __name__ == '__main__':

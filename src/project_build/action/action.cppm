@@ -51,11 +51,14 @@ struct NamedArtifact {
   Artifact contents;
 };
 
+enum class ActionCompletion { exited, signalled, cancelled, timed_out, setup_failed, output_failed };
+
 struct ActionResult {
   int exit_status = 0;
   std::string out;
   std::string err;
   std::vector<NamedArtifact> outputs;
+  ActionCompletion completion = ActionCompletion::exited;
 };
 
 // Runs a tool in a private working directory within the caller's existing scratch root. The
@@ -63,7 +66,8 @@ struct ActionResult {
 // working directory. All named outputs become available together on success. The tool can use
 // its ambient filesystem, so the caller needs an input contract before reusing its result.
 ActionResult execute(const Action& action, std::span<const ActionInput> inputs,
-                     const std::filesystem::path& scratch_root, std::inplace_stop_token stop = {});
+                     const std::filesystem::path& scratch_root, std::inplace_stop_token stop = {},
+                     std::optional<std::size_t> log_limit = std::nullopt);
 
 }  // namespace ycxx::build
 
@@ -76,8 +80,8 @@ std::string os_error(std::string_view operation, int error) {
   return std::format("{}: {}", operation, ::strerror(error));
 }
 
-ActionResult failed(std::string message) {
-  return {.exit_status = 1, .out = {}, .err = std::move(message), .outputs = {}};
+ActionResult failed(std::string message, ActionCompletion completion = ActionCompletion::setup_failed) {
+  return {.exit_status = 1, .out = {}, .err = std::move(message), .outputs = {}, .completion = completion};
 }
 
 bool valid_path(std::string_view text) {
@@ -256,7 +260,8 @@ struct File {
   FileIdentity identity;
 };
 
-std::expected<File, std::string> read_file(int dir, const std::string& name) {
+std::expected<File, std::string> read_file(int dir, const std::string& name,
+                                          std::optional<std::size_t> limit = std::nullopt) {
   const Fd fd{::openat(dir, name.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK)};
   if (fd.value < 0) return std::unexpected(os_error("cannot read action output " + name, errno));
   struct stat entry{};
@@ -271,12 +276,15 @@ std::expected<File, std::string> read_file(int dir, const std::string& name) {
       if (errno == EINTR) continue;
       return std::unexpected(os_error("cannot read action output " + name, errno));
     }
+    if (limit && static_cast<std::size_t>(n) > *limit - result.contents.bytes.size())
+      return std::unexpected(std::format("action log {} exceeds {} bytes", name, *limit));
     result.contents.bytes.insert(result.contents.bytes.end(), buffer.begin(), buffer.begin() + n);
   }
 }
 
-std::expected<std::string, std::string> read_log(int dir, const std::string& file) {
-  auto captured = read_file(dir, file);
+std::expected<std::string, std::string> read_log(int dir, const std::string& file,
+                                               std::optional<std::size_t> limit) {
+  auto captured = read_file(dir, file, limit);
   if (!captured) return std::unexpected(std::move(captured.error()));
   const auto& bytes = captured->contents.bytes;
   return std::string(bytes.begin(), bytes.end());
@@ -285,10 +293,11 @@ std::expected<std::string, std::string> read_log(int dir, const std::string& fil
 }  // namespace
 
 ActionResult execute(const Action& action, std::span<const ActionInput> inputs,
-                     const fs::path& scratch_root, std::inplace_stop_token stop) {
+                     const fs::path& scratch_root, std::inplace_stop_token stop,
+                     std::optional<std::size_t> log_limit) {
   auto cmd = prepare(action, inputs);
   if (!cmd) return failed(std::move(cmd.error()));
-  if (stop.stop_requested()) return failed("action cancelled");
+  if (stop.stop_requested()) return failed("action cancelled", ActionCompletion::cancelled);
 
   std::error_code ec;
   auto root = fs::absolute(scratch_root, ec);
@@ -302,19 +311,21 @@ ActionResult execute(const Action& action, std::span<const ActionInput> inputs,
   const Fd outputs{::openat(cwd.value, "outputs", O_RDONLY | O_DIRECTORY | O_CLOEXEC)};
   if (outputs.value < 0) return failed(os_error("cannot open action output directory", errno));
 
-  if (stop.stop_requested()) return failed("action cancelled");
+  if (stop.stop_requested()) return failed("action cancelled", ActionCompletion::cancelled);
   auto child = spawn(scratch.path, *cmd);
   if (!child) return failed(std::move(child.error()));
   auto status = wait_for(*child, stop);
+  if (stop.stop_requested()) return failed("action cancelled", ActionCompletion::cancelled);
   if (!status) return failed(std::move(status.error()));
-  if (stop.stop_requested()) return failed("action cancelled");
 
-  auto out = read_log(cwd.value, ".stdout");
-  if (!out) return failed(std::move(out.error()));
-  auto err = read_log(cwd.value, ".stderr");
-  if (!err) return failed(std::move(err.error()));
-  const int code = WIFEXITED(*status) ? WEXITSTATUS(*status) : 128 + WTERMSIG(*status);
-  ActionResult result{code, std::move(*out), std::move(*err), {}};
+  auto out = read_log(cwd.value, ".stdout", log_limit);
+  if (!out) return failed(std::move(out.error()), ActionCompletion::output_failed);
+  auto err = read_log(cwd.value, ".stderr", log_limit);
+  if (!err) return failed(std::move(err.error()), ActionCompletion::output_failed);
+  const bool exited = WIFEXITED(*status);
+  const int code = exited ? WEXITSTATUS(*status) : 128 + WTERMSIG(*status);
+  ActionResult result{code, std::move(*out), std::move(*err), {},
+                      exited ? ActionCompletion::exited : ActionCompletion::signalled};
   if (code != 0) return result;
 
   std::vector<NamedArtifact> artifacts;
@@ -325,13 +336,14 @@ ActionResult execute(const Action& action, std::span<const ActionInput> inputs,
       file = std::unexpected("action output aliases another declared output: " + output.filename);
     if (!file) {
       result.exit_status = 1;
+      result.completion = ActionCompletion::output_failed;
       if (!result.err.empty() && result.err.back() != '\n') result.err.push_back('\n');
       result.err += file.error();
       return result;
     }
     artifacts.push_back({output.name, std::move(file->contents)});
   }
-  if (stop.stop_requested()) return failed("action cancelled");
+  if (stop.stop_requested()) return failed("action cancelled", ActionCompletion::cancelled);
   result.outputs = std::move(artifacts);
   return result;
 }
