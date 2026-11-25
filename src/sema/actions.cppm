@@ -9342,7 +9342,8 @@ public:
     // ([lex.icon]); a character or bool literal is not an integer-literal.
     auto b = types().builtin_of(e.type());
     if (!b || !ast::is_integral(*b) || *b == Builtin::bool_ || rank_below_int(*b) || is_character(*b)) return false;
-    return w_->values.rec(b_->get<ast::Literal>(n).value).bits == 0;
+    const ConstId value = b_->get<ast::Literal>(n).value;
+    return ins().values.is<ast::VInt>(value) && ast::wide::is_zero(ast::int_bits(ins(), value));
   }
   bool is_data_member_pointer(QualType t) {
     return types().is_member_pointer(t) && !types().is_function(types().rec(t).inner);
