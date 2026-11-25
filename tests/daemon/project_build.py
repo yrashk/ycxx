@@ -92,7 +92,9 @@ def action_keys(events, kind, outcome='executed'):
 def check_cold_actions(summary, events):
     packages = action_keys(events, 'RulePackage')
     failed = action_keys(events, 'RulePackage', 'failed')
-    assert len(packages) == 1 and len(failed) <= 1, (packages, failed)
+    assert len(packages) == 1, (packages, failed)
+    if sys.platform == 'linux':
+        assert not failed, (packages, failed)
     assert all(key.startswith('standard/rules via ') for key in packages + failed), (packages, failed)
     assert action_keys(events, 'RuleWorker') == ['app', 'core', 'wire'], events
     assert action_keys(events, 'ExternalAction') == ['wire'], events
