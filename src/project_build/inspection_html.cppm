@@ -67,6 +67,7 @@ constexpr std::string_view styles = R"HTML(
   .module-unit { border-top: 1px solid var(--border); scroll-margin-block: .65rem; }
   .module-unit summary { padding: .65rem 1.1rem; cursor: pointer; overflow-wrap: anywhere; }
   .module-unit summary .module-meta { margin-left: .45rem; }
+  .module-unit code, .module-notice code { white-space: pre-wrap; }
   .module-directives { margin: 0 1.1rem .7rem 2.15rem; padding: 0; list-style: none; }
   .module-directives > li { padding: .4rem .55rem; border-left: 2px solid #dbe2ea;
     overflow-wrap: anywhere; scroll-margin-block: .65rem; }
