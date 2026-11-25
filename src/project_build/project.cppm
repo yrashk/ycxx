@@ -584,13 +584,17 @@ void for_each_native_output(const ProjectPlan& plan, const fs::path& cwd, std::s
   }
 }
 
+std::string normalized_include_directory(const fs::path& path) {
+  return native(path.has_filename() || path == path.root_path() ? path : path.parent_path());
+}
+
 pipeline::TuId register_project_unit(pipeline::Session& session, const std::string& cwd,
                                      const SourcePlan& source, const ast::Target* target, bool explicit_target) {
   pp::Config config;
   config.view = explicit_target ? pp::View::explicit_target_build : pp::View::build;
   config.target = target;
   config.freestanding = target == &ast::x86_64_linux;
-  config.angle_dirs = source.includes;
+  for (const auto& include : source.includes) config.angle_dirs.push_back(normalized_include_directory(include));
   config.system_from = config.angle_dirs.size();
   return session.unit({source.path, cwd, std::move(config), source.path + ".o"});
 }
@@ -692,7 +696,8 @@ void inspect_modules(PlanInspection& inspection, const ProjectPlan& plan, const 
       const auto path = module_path(source.path, cwd);
       ModuleUnitConfiguration configuration{logical_module_path(path, native_triple), {}};
       for (const auto& include : source.includes)
-        configuration.include_dirs.push_back(logical_module_path(module_path(include, cwd), native_triple));
+        configuration.include_dirs.push_back(
+            logical_module_path(module_path(normalized_include_directory(include), cwd), native_triple));
       report.units.push_back({unit_id, path, std::string(scan_status), {}, std::move(configuration)});
     }
     auto& names = fact_names.emplace_back();

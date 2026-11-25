@@ -87,10 +87,14 @@ std::expected<Candidates, std::string> candidate_keys(std::string_view name,
     if (found == declarations.end() || std::get<2>(found->second) != name)
       return std::unexpected(std::format("invalid provider for '{}' at unit {} directive {}",
                                          name, candidate.unit_id, candidate.directive_index));
+    const auto kind = std::get<1>(found->second);
+    if (kind != "interface_unit" && !(kind == "implementation_unit" && name.contains(':')))
+      return std::unexpected(std::format("non-provider declaration for '{}' in unit {}", name, candidate.unit_id));
     result.push_back(found->second);
   }
   std::ranges::sort(result);
-  if (std::ranges::adjacent_find(result) != result.end())
+  const auto unit = [](const DirectiveKey& key) { return std::get<0>(key); };
+  if (std::ranges::adjacent_find(result, std::ranges::equal_to{}, unit) != result.end())
     return std::unexpected(std::format("duplicate provider for '{}'", name));
   return result;
 }
@@ -141,17 +145,19 @@ std::expected<GraphIndex, std::string> index_graph(const ModuleGraphInspection& 
     if (!index.conflicts.emplace(conflict.name, std::pair{&conflict, std::move(*providers)}).second)
       return std::unexpected(std::format("duplicate module conflict '{}'", conflict.name));
   }
+  std::set<std::size_t> cyclic_units;
   for (const auto& cycle : graph.cycles) {
     Members members;
     for (const auto unit : cycle) {
       const auto found = ids.find(unit);
       if (found == ids.end()) return std::unexpected(std::format("unknown cyclic unit {}", unit));
+      if (!cyclic_units.insert(found->second).second)
+        return std::unexpected(std::format("module unit {} appears repeatedly in cyclic components", unit));
       members.push_back(found->second);
     }
     std::ranges::sort(members);
-    if (members.empty() || std::ranges::adjacent_find(members) != members.end() ||
-        !index.cycles.emplace(std::move(members), std::pair{&cycle, std::monostate{}}).second)
-      return std::unexpected("invalid or repeated cyclic component");
+    if (members.empty()) return std::unexpected("empty cyclic component");
+    index.cycles.emplace(std::move(members), std::pair{&cycle, std::monostate{}});
   }
   return index;
 }
