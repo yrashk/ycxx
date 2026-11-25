@@ -1,0 +1,10 @@
+use plugin("rules/package") as policy
+
+policy.header "retry_policy" {
+    reads = ["retry-limit.txt"]
+}
+
+cpp.executable "app" {
+    sources = ["main.cc"]
+    generated_headers = [artifact("retry_policy", "header")]
+}
