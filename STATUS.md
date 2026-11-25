@@ -3926,8 +3926,7 @@ checked against Clang 23 and GCC 16 probes).
 - Tests: `tests/own/lambda/` (56 spec-only, 1 ABI): 55 pass, 2 XFAIL (default arguments #300,
   block-scope statics #291).
 - Not yet: further lambda declaration contexts ([#338](https://github.com/yrashk/ycxx/issues/338));
-  generic lambdas, template lambdas, pack
-  captures and constexpr lambdas (#281); the conversion function's own symbol, conversions in
+  the conversion function's own symbol, conversions in
   contextual and operator contexts, invokers for class or variadic parameters (#339); arrays of
   non-trivially-copyable classes captured by copy (#353); weak definitions of closure members in
   inline functions (#124). A constant named by a lambda with a capture-default is captured, where
@@ -3962,20 +3961,37 @@ pointer to function ([expr.prim.lambda.closure]/8, [conv.fctptr]).
 - Tests: `tests/own/lambda-noexcept/` (one run test, two reject tests).
 - Not yet: a generic lambda's condition naming its own template parameters is rejected (#820).
 
-## Namespace variable lambdas (#338)
+## Lambdas in declarations (#338)
 
-- A named internal-linkage namespace variable with a deduced type can be initialized by a
-  noncapturing, non-generic lambda. The declarator's identity owns the closure before deduction,
-  and its entity record is published with the resolved type. Its body looks up names in the
-  enclosing namespace. Use of the owner during deduction diagnoses an undeduced placeholder.
-- `ItemSema` records the closure members. The front end emits the call operator and scalar
-  invoker through the body closure path. Their local symbols use the variable's Itanium
-  `<closure-prefix>`. The completed empty closure occupies static storage and supports
-  `constinit`.
-- `unit.linux_namespace_lambda` checks runtime namespace lookup, static storage, function pointer
-  conversion, local names across objects, and daemon edits with a cold comparison. Other
-  declaration contexts and namespace init-captures remain under
-  [#338](https://github.com/yrashk/ycxx/issues/338).
+A lambda can be in the initializer of a namespace-scope variable, a static data member (of a class
+or a class template), or a variable template, and in a constraint-expression. The design is
+[docs/design/closures.md](docs/design/closures.md), "Closures of declarations".
+
+- **Owner:** `Sema::ClosureOwner` gives the closure types of a declaration part their scope and
+  linkage. A variable's is its entity, whose identity needs no type, so a placeholder's
+  initializer has it too. A constraint's is the class or namespace around it, TU-local, with a
+  discriminator: each satisfaction (`AtomAnalysis`) has its own closure types.
+- **Generic lambdas:** `GenericClosure::part` says which declaration part a generic lambda is in.
+  Its specializations are analysed in that part, which may still be being analysed.
+- **Records:** `ItemSema` keeps a part's `ClosureDef`s. `Program::declaration_closures_` finds one
+  by member for constant evaluation, and `Program::member_closures` keeps those of class templates'
+  static members, which are instantiated when they are used.
+- **Emission:** the closure's members have code where something refers to them (most are called
+  in constant expressions only). They are weak when the owner is an inline variable, a static data
+  member or a variable template's specialization with external linkage, and local otherwise.
+  Names use the `<closure-prefix>`, as Clang 23 has them.
+- **Constant evaluation:** closure objects are records the interpreter evaluates, with captures
+  whose fields it represents, so constexpr lambdas work in function bodies too (#262).
+- A lambda that is not local to a block has no capture-default ([expr.prim.lambda.capture]/3). Use
+  of a variable of placeholder type in its own lambda is diagnosed.
+- Tests: `tests/own/lambda-declarations/` (Clang 23 and GCC 16 agree; one ABI test against Clang
+  objects), `unit.darwin_lambda_declarations`, `unit.linux_lambda_declarations`, and
+  `unit.linux_namespace_lambda` (daemon edits with a cold comparison).
+- Not yet ([#338](https://github.com/yrashk/ycxx/issues/338)): default member initializers, default
+  arguments, `static_assert`, and unevaluated operands (`decltype([]{})`). Local classes in a lambda
+  (#117), captures by reference in constant evaluation (#262), and weak definitions of variable
+  template specializations, closure objects that are class templates' members and static locals
+  of closures (#124) wait on their issues.
 
 ## Floating point, the μ slice (#336, 2026-11-19)
 
@@ -4048,10 +4064,10 @@ values, end to end; results match Clang's bit for bit.
   others, mangled as member template specializations in a <local-name>.
 - **Constant evaluation of closures:** `Questions::function_ir` of a closure member is answered
   (`Evaluator::closure_callee` for the part being analysed, `Program::closure_ir` otherwise),
-  and closure members are constexpr; the interpreter does not evaluate class objects yet (#262),
-  so constexpr lambdas wait on it.
+  and closure members are constexpr. The interpreter evaluates closure objects (#338); captures by
+  reference wait on it (#262).
 - Tests: `tests/own/lambda/p3-*` (33 spec-only + 6 own, one an ABI test against Clang objects):
-  all but 11 pass; those are XFAIL (constexpr lambdas #262, default arguments #300,
+  all but 6 pass; those are XFAIL (default arguments #300,
   dependent `decltype` #199, a generic lambda's conversion #339, explicit
   template arguments #347).
 - **Packs:** `auto... xs` invents a template parameter pack and `[]<class... Ts>(Ts... xs)`

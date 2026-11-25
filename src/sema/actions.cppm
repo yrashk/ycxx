@@ -66,6 +66,14 @@ struct GenericClosure {
   Bindings args;
   std::vector<std::pair<NameId, QualType>> aliases;
   bool erroneous = false;  // its definition was diagnosed: its specializations say nothing more
+  // Set for a lambda outside every function body: the part it is in, which its specializations
+  // are analysed in, and the class it is in, if any. `body_begin` is an offset in that part.
+  struct Part {
+    ast::ItemId item{};
+    u32 begin = 0;  // the part's first token in the item
+    EntityId lookup_class = EntityId::none;
+  };
+  std::optional<Part> part{};
 };
 
 // The enclosing function's template arguments and entity where a generic lambda is defined, for
@@ -5206,19 +5214,18 @@ public:
     return t;
   }
   bool open_lambda(LambdaSpec spec) {
-    // The enclosing entity: the function, or the enclosing lambda's operator().
+    // The enclosing entity: the function, the enclosing lambda's operator(), or what owns the
+    // closures of the declaration being analysed (docs/design/closures.md, decision 3).
     EntityId scope = lambdas_.empty() ? current_function : lambdas_.back().call;
-    const bool in_initializer = scope == EntityId::none && namespace_lambda && namespace_lambda->begin == spec.begin;
-    if (in_initializer) {
-      if (spec.default_capture || spec.has_capture || !spec.head.empty()) {
-        diag(spec.begin, spec.default_capture ? Diag::namespace_lambda_capture_default
-                         : spec.has_capture ? Diag::namespace_lambda_init_capture
-                                            : Diag::namespace_lambda_generic);
-        return false;
-      }
-      scope = namespace_lambda->owner;
+    const ClosureOwner* owner = scope == EntityId::none && closure_owner ? &*closure_owner : nullptr;
+    // [expr.prim.lambda.capture]/3: only a block scope or a default member initializer gives a
+    // capture-default something to capture.
+    if (owner && spec.default_capture) {
+      diag(spec.begin, Diag::nonlocal_lambda_capture_default);
+      return false;
     }
-    if (scope == EntityId::none) {
+    if (owner) scope = owner->scope;
+    if (scope == EntityId::none && !owner) {
       diag(spec.begin, Diag::not_supported, lex::Tk::l_square);  // a lambda outside a function body
       return false;
     }
@@ -5230,6 +5237,7 @@ public:
     // The closure's identity: its enclosing entity, signature and ordinal among the closures of
     // that entity and signature completed before it (docs/design/closures.md, decision 2).
     Fp128 sig = ast::seed("ycxx.sema.closure");
+    if (owner && owner->discriminator != Fp128{}) sig = ast::mix(sig, owner->discriminator);
     for (QualType p : types().rec(call_type).params) sig = ast::mix(sig, types().fp(types().canonical(p)));
     sig = ast::mix(sig, u64(spec.variadic));
     // The <lambda-sig> declares the explicit template parameters only (`Ty`, `Tp`), so they and
@@ -5239,12 +5247,15 @@ public:
     u32 ordinal = 0;
     for (const auto& [sc, sg] : completed_closures_)
       if (sc == scope && sg == sig) ++ordinal;
-    ast::Linkage linkage = in_initializer ? ast::Linkage::internal : closure_linkage(scope);
+    ast::Linkage linkage = owner ? owner->linkage : closure_linkage(scope);
     // Its record's type, which names it (the <lambda-sig>), has a generic lambda's parameters at
     // depth 0, as the innermost template's are mangled.
     EntityRec cr{EntityKind::class_, no_name(), rebased(call_type, spec.head), LangLinkage::cxx, linkage, {}, scope};
     cr.head = ast::mix(sig, u64(ordinal));
     cr.ordinal = ordinal;
+    // In a template's definition, its own template-head (pushed already) aside.
+    cr.closure_pattern = declaration_part && (in_generic_definition() ||
+                                              (template_scopes.size() > (spec.head.empty() ? 0u : 1u) && !instantiating() && !satisfying_atom));
     for (const ast::TemplateParamSema& h : spec.head)
       if (h.name != invented_name()) cr.closure_head.push_back(h);
     LambdaFrame f;
@@ -5354,6 +5365,26 @@ public:
     for (const auto& [n, field] : lambdas_.back().init_captures) scopes_.back().push_back({n, capture_bit | field});
     return true;
   }
+  // What owns the closure types of the lambdas in a declaration part, outside every function body
+  // (docs/design/closures.md, decision 3): the variable whose initializer is analysed; or, for a
+  // constraint-expression, which is no declaration's, the scope around it, with a discriminator
+  // that tells its closures from those of other constraints and of other substitutions.
+  struct ClosureOwner {
+    EntityId scope = EntityId::none;
+    ast::Linkage linkage = ast::Linkage::internal;
+    Fp128 discriminator{};
+  };
+  std::optional<ClosureOwner> closure_owner;
+  // The part being analysed is no function's body: its generic lambdas are instantiated in it
+  // (`GenericClosure::part`).
+  bool declaration_part = false;
+  struct ClosureOwnerScope {
+    Sema& sema;
+    std::optional<ClosureOwner> saved;
+    ClosureOwnerScope(Sema& s, std::optional<ClosureOwner> owner) : sema(s), saved(std::exchange(s.closure_owner, owner)) {}
+    ClosureOwnerScope(const ClosureOwnerScope&) = delete;
+    ~ClosureOwnerScope() { sema.closure_owner = saved; }
+  };
   // The linkage of a closure in `scope` (docs/design/closures.md, decision 4): external in a
   // function whose definition may appear in several units, internal elsewhere.
   ast::Linkage closure_linkage(EntityId scope) {
@@ -5463,11 +5494,15 @@ public:
       std::vector<NameId> captures;
       for (const FieldRec& fd : fr.fields) captures.push_back(fd.name);
       std::vector<Expansion> exps;
-      for (const Expansion& x : expansions)
+      // In an instantiation, they are those its definition recorded.
+      const std::vector<Expansion>* recorded = declaration_part ? pattern_expansions() : nullptr;
+      for (const Expansion& x : recorded ? *recorded : expansions)
         if (x.begin >= body_begin && x.begin < end) exps.push_back(x);
       std::vector<std::vector<ast::TemplateParamSema>> outer(template_scopes.begin(), template_scopes.end() - (template_scopes.empty() ? 0 : 1));
       generic_closures_[std::to_underlying(fr.call)] = {fr.closure, fr.call, call_type, fr.head, names, captures, body_begin, flags, consts,
                                                          values, exps, outer, template_args, aliases, diag_count() > fr.diags_at};
+      if (declaration_part)
+        generic_closures_[std::to_underlying(fr.call)].part = GenericClosure::Part{item_, loc_base_, current_class};
       q_->generic_defined(generic_closures_[std::to_underlying(fr.call)]);
     }
     std::vector<NameId> capture_names;
@@ -5518,7 +5553,16 @@ public:
   }
   bool has_generic_lambdas() const { return !generic_closures_.empty(); }
   // Whether this is a template's definition (or a generic lambda's), not an instantiation.
-  bool in_pattern() const { return templated() && !instantiating(); }
+  // A generic lambda's definition is one in an instantiation too: its own parameters are unbound.
+  bool in_generic_definition() const {
+    return std::ranges::any_of(lambdas_, [](const LambdaFrame& f) { return !f.head.empty(); });
+  }
+  bool in_pattern() const {
+    return in_generic_definition() || (templated() && !instantiating() && !satisfying_atom);
+  }
+  // The satisfaction of an atomic constraint is checked ([temp.constr.atomic]): its parameter
+  // mapping binds the parameters it names, perhaps none.
+  bool satisfying_atom = false;
   // `t` with a generic lambda's template parameters (`head`, at its depth) at depth 0, as they
   // are mangled inside its closure type's name (Itanium C++ ABI §5.1.8).
   QualType rebased(QualType t, std::span<const ast::TemplateParamSema> head) {
@@ -6092,9 +6136,8 @@ public:
     return w_->entities.rec(current_class).name == name || name == static_initializer_name_ || own_initializer_static(name);
   }
   struct NamespaceLambda {
-    EntityId owner, scope;
+    EntityId scope;
     NameId name;
-    u32 begin;
   };
   std::optional<NamespaceLambda> namespace_lambda;
 

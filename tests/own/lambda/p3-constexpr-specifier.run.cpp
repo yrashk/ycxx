@@ -1,7 +1,6 @@
 // θ step 3 (#281), spec-only: the constexpr specifier in a lambda-declarator makes the function call
 // operator constexpr explicitly, for an ordinary and a generic lambda, with or without mutable
 // ([expr.prim.lambda.general], [expr.prim.lambda.closure], [dcl.constexpr], [expr.const]).
-// XFAIL: ycxx class objects in constant evaluation, #262
 int main() {
   constexpr auto cube = [](int x) constexpr { return x * x * x; };
   static_assert(cube(3) == 27);
