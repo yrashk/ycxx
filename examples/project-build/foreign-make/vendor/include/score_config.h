@@ -1,0 +1,6 @@
+#ifndef FOREIGN_SCORE_CONFIG_H
+#define FOREIGN_SCORE_CONFIG_H
+
+#define SCORE_BONUS 7
+
+#endif

@@ -54,7 +54,8 @@ using a named `plan_inputs` binding. The reflection
 example also uses a compiled shader's descriptor layout to generate `constexpr`
 C++ bindings. Shader edits with the same layout reuse the native executable.
 Libraries can pass ordered generated static archives through their dependencies.
-The native link reuses equal archive bytes.
+The native link reuses equal archive bytes. A source-built example rule wraps
+a Make-based C library as one build action and links its archive into the app.
 [Runnable build examples](examples/project-build) · [Build design](docs/design/build.md) · [#1251](https://github.com/yrashk/ycxx/issues/1251)
 
 Ordinary function pointers and references preserve concrete `noexcept` type identity.

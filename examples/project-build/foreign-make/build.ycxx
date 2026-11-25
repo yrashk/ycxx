@@ -1,0 +1,20 @@
+use plugin("rules/package") as foreign
+
+foreign.archive "foreign_score" {
+    make = "/usr/bin/make"
+    cc = "/usr/bin/cc"
+    ar = "/usr/bin/ar"
+    makefile = "vendor/Makefile"
+    inventory = "vendor/files.txt"
+    reads = ["vendor/files.txt"]
+}
+
+cpp.library "bridge" {
+    sources = ["bridge.cc"]
+    public_link_inputs = [artifact("foreign_score", "archive")]
+}
+
+cpp.executable "app" {
+    sources = ["main.cc"]
+    deps = ["bridge"]
+}

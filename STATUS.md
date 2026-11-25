@@ -3280,6 +3280,13 @@ Inspection shows the declaring library, archive order, and artifact reference.
 Watch preserves the last successful executable if the archive cannot be linked.
 [#1339](https://github.com/yrashk/ycxx/issues/1339)
 
+The foreign Make example builds its adapter as a C++ rule package. The worker
+reads an explicit file inventory and emits one action that runs Make on the
+staged C project. The ordinary named archive output enters the existing native
+link through a library. File edits reuse the rule expansion, equal archive bytes
+reuse the link, and a failed Make keeps the last good executable under watch.
+[#1341](https://github.com/yrashk/ycxx/issues/1341)
+
 A source-built rule package can stage a named generated artifact into an
 `action.observe` witness and classify it as a canonical table of typed rows.
 `facts` bindings resolve the stable `value("target", "field")` query without
