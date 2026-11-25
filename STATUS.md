@@ -3316,6 +3316,13 @@ physical locations and links to candidate declarations. The section identifies
 incomplete scans, provider conflicts, and cyclic components. With `--against`,
 it shows the current plan's graph below **Plan changes**.
 
+JSON plan comparisons include `module_changes` when both snapshots contain a
+module graph (#1383). Units match by logical source and ordered include paths,
+so provider changes can be compared across target variants. The comparison
+reports changes to units, imports, conflicts, cycles, and scan completeness.
+Body-only edits and moved source sites preserve the semantic results. Older
+graphs can use source-only matching when their unit paths are unambiguous.
+
 The standard C++ and generator rule declarations use a compiled rule package.
 `use plugin("tools/custom/rules") as cpp` supplies a different C++ provider. The
 bundled and workspace packages use the same worker. `cxx()` in a package recipe
