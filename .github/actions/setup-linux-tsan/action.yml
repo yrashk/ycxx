@@ -1,13 +1,19 @@
 name: setup-linux-tsan
 description: >
   The toolchain for a ThreadSanitizer build of ycxx (#105), as libycxx's own action of the same
-  name (deps/libycxx/.github/actions/setup-linux-tsan): on the bare ubuntu-24.04 runner, not the
-  gcc:16 container, whose kernel settings cannot be changed and whose GCC may lack libsanitizer.
-  vm.mmap_rnd_bits at most 28 (ThreadSanitizer's shadow memory layout needs it), and GCC 16.2 with
+  name (deps/libycxx/.github/actions/setup-linux-tsan). The bare Linux runner lets the job lower
+  vm.mmap_rnd_bits to 28 for ThreadSanitizer's shadow memory layout. The job uses GCC 16.2 with
   its sanitizer runtimes, built by libycxx's provision --with-sanitizers (about 17 minutes) and cached.
 runs:
   using: composite
   steps:
+    - name: Report host glibc
+      id: glibc
+      shell: bash
+      run: |
+        glibc=$(getconf GNU_LIBC_VERSION)
+        echo "$glibc"
+        echo "version=${glibc#glibc }" >> "$GITHUB_OUTPUT"
     # ThreadSanitizer maps its shadow memory at fixed addresses, which the 32 bits of mmap
     # randomization of the runners' kernels can collide with ("FATAL: ThreadSanitizer: unexpected
     # memory mapping").
@@ -24,7 +30,7 @@ runs:
       uses: actions/cache/restore@v4
       with:
         path: ~/.local/share/ycxx/toolchains/gcc-16.2.0
-        key: ycxx-gcc-16.2.0-sanitizers-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('deps/libycxx/tools/toolchain/provision') }}
+        key: ycxx-gcc-16.2.0-sanitizers-${{ runner.os }}-${{ runner.arch }}-glibc-${{ steps.glibc.outputs.version }}-${{ hashFiles('deps/libycxx/tools/toolchain/provision') }}
     - shell: bash
       run: |
         deps/libycxx/tools/toolchain/provision --gcc-only --with-sanitizers --jobs 4
