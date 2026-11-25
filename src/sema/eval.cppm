@@ -46,6 +46,7 @@ public:
       return r && field < r->fields.size() && r->fields[field].no_unique_address;
     };
   }
+  static constexpr bool evaluating_constants = true;
   ConstId string_address(ConstId s) { return w_->values.address({}, s, 0); }
   bool is_constexpr(EntityId f) { return Sema::closure_member(*w_, f) || q_->is_constexpr(f); }
   bool is_main(EntityId) { return false; }  // `main` is never evaluated ([basic.start.main])
@@ -183,8 +184,19 @@ private:
         return {lit->value, 0, true};
       return {};
     }
-    const auto receiver = direct_local_receiver(e);
-    const bool immediate_virtual = s_->as<ast::ImmediateVirtualCall>(e).has_value();
+    NodeId object_pointer = NodeId::none;
+    bool virtual_receiver = false;
+    if (const auto member = s_->as<ast::MemberCall>(e)) object_pointer = member->object.id;
+    if (const auto call = s_->as<ast::ImmediateVirtualCall>(e)) {
+      object_pointer = call->object.id;
+      virtual_receiver = true;
+    }
+    if (const auto call = s_->as<ast::VirtualMemberCall>(e);
+        call && in.seqs.at(call->selection, 0).function != EntityId::none) {
+      object_pointer = call->object.id;
+      virtual_receiver = true;
+    }
+    const auto receiver = direct_local_receiver(object_pointer);
     ast::Child root = s_->builder().commit(ast::Child{e.id, 0});
     if (reference_initializer && irgen::materializes_temporary(in.ast, root.id))
       return {std::nullopt, reason_arg({interp::Reason::local_address, 0, {}})};
@@ -210,13 +222,13 @@ private:
                                       s_->as<ast::LocalVar>({l.decl}).has_value();
           if ((parameter || named_receiver) &&
               (importable_local_record(l.type, std::nullopt) ||
-               (immediate_virtual && receiver == i && opaque_dynamic_record(l.type))))
+               (virtual_receiver && receiver == i && opaque_dynamic_record(l.type))))
             opaque_record_locals.push_back(static_cast<u32>(i));
         }
       } else if (parameter && s_->in_function_or_lambda_body() && l.name != s_->no_name() &&
                  s_->types().is_reference(l.type) && s_->types().is_class(s_->types().referee(l.type))) {
         discardable_reference_parameters.push_back(static_cast<u32>(i));
-        if (immediate_virtual && receiver == i && opaque_dynamic_record(s_->types().referee(l.type)))
+        if (virtual_receiver && receiver == i && opaque_dynamic_record(s_->types().referee(l.type)))
           opaque_record_locals.push_back(static_cast<u32>(i));
       }
       l.decl = NodeId::none;  // drafts of the enclosing frame
@@ -247,8 +259,8 @@ private:
     interp::Config config{
         .enum_layout = [&facts](EntityId e) { return facts.constant_enum_layout(e); },
         .record_layout = [this](QualType t) { return evaluation_record_layout(t); },
-        .immediate_virtual_target = [this](EntityId selected, EntityId receiver, EntityId dynamic) {
-          return immediate_virtual_target(selected, receiver, dynamic);
+        .virtual_target = [this](EntityId selected, EntityId receiver, EntityId dynamic, bool immediate) {
+          return virtual_target(selected, receiver, dynamic, immediate);
         }};
     interp::Outcome out = interp::evaluate(host, in, s_->world().target, body->body, EntityId::none, {}, std::move(config),
                                             bytes ? &bytes->result : nullptr).run();
@@ -488,31 +500,37 @@ private:
 
   // The direct-base path is checked by the interpreter. Select by the override
   // edge recorded at class completion, in the context evaluating this call.
-  std::optional<interp::ImmediateVirtualTarget> immediate_virtual_target(EntityId selected, EntityId receiver,
-                                                                        EntityId dynamic) {
+  std::optional<interp::VirtualTarget> virtual_target(EntityId selected, EntityId receiver, EntityId dynamic,
+                                                      bool immediate) {
     const auto* declaration = s_->member_decl(selected);
     const auto* type = s_->class_rec(dynamic);
-    if (!declaration || !declaration->is_virtual || !declaration->is_consteval ||
-        s_->world().entities.rec(selected).scope != receiver || !type)
+    const auto& entities = s_->world().entities;
+    if (!declaration || !declaration->is_virtual || declaration->is_consteval != immediate ||
+        entities.rec(selected).scope != receiver || !type)
       return std::nullopt;
+    if (!immediate) {
+      // The ordinary slice uses namespace-scope classes admitted by dynamic layout.
+      const auto namespace_class = [&](EntityId cls) {
+        const EntityId scope = entities.rec(cls).scope;
+        return scope == EntityId::none || entities.rec(scope).kind == EntityKind::namespace_;
+      };
+      if (!namespace_class(receiver) || !namespace_class(dynamic)) return std::nullopt;
+    }
     if (dynamic != receiver) {
       if (type->bases.size() != 1 || type->bases.front().cls != receiver) return std::nullopt;
       const auto override = std::ranges::find(type->members, selected, &MemberDeclRec::overridden_virtual);
       if (override != type->members.end()) {
-        if (!override->is_consteval || override->is_pure) return std::nullopt;
-        return interp::ImmediateVirtualTarget{override->entity, dynamic};
+        if (override->is_consteval != immediate || override->is_pure) return std::nullopt;
+        return interp::VirtualTarget{override->entity, dynamic, immediate || q_->is_constexpr(override->entity)};
       }
     }
     if (declaration->is_pure) return std::nullopt;
-    return interp::ImmediateVirtualTarget{selected, receiver};
+    return interp::VirtualTarget{selected, receiver, immediate || q_->is_constexpr(selected)};
   }
 
   // An ordinary dot call passes the address of its receiver. Import only that named
   // local, without evaluating its declaration or allocating slots for unrelated locals.
-  std::optional<u32> direct_local_receiver(Ex expression) {
-    NodeId object_pointer = NodeId::none;
-    if (const auto member = s_->as<ast::MemberCall>(expression)) object_pointer = member->object.id;
-    if (const auto call = s_->as<ast::ImmediateVirtualCall>(expression)) object_pointer = call->object.id;
+  std::optional<u32> direct_local_receiver(NodeId object_pointer) {
     if (object_pointer == NodeId::none) return std::nullopt;
     const auto pointer = s_->as<ast::Unary>({object_pointer});
     if (!pointer || pointer->op != ast::UnaryOp::address_of) return std::nullopt;

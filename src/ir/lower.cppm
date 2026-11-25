@@ -956,8 +956,10 @@ class Lowering {
         else out(n, 0, store_field(in(n, 0), in(n, 1), field, in(n, 2)));
         return {};
       }
-      case Op::call_immediate_virtual:
-        return fail("an immediate virtual call reached native lowering");
+      case Op::call_virtual:
+        return fail(imms[1] == std::to_underlying(VirtualCallKind::ordinary)
+                        ? "a constant-evaluated virtual call reached native lowering"
+                        : "an immediate virtual call reached native lowering");
       case Op::call:
       case Op::call_ind: {
         bool ind = nd.op == Op::call_ind;

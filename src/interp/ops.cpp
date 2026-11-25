@@ -491,13 +491,14 @@ struct Ops {
     if (c.kind != VKind::function) return m.fail(Reason::ill_formed);
     return call_entity(m, f, n, EntityId(c.ref), 2);
   }
-  static Flow call_immediate_virtual(M& m, Frame& f, N n) {
+  static Flow call_virtual(M& m, Frame& f, N n) {
     if (!constant(m)) return m.unsupported(n);
+    const auto kind = ir::VirtualCallKind(imms(f, n)[1]);
     M::Place place;
     if (Flow fl = check_member_receiver(m, f, n, place); fl != Flow::next) return fl;
     const EntityId selected{u32(imms(f, n)[0])};
     const auto& object = m.objects_[place.obj];
-    if (imms(f, n)[1]) {
+    if (kind == ir::VirtualCallKind::qualified_immediate) {
       // [class.cdtor]/1: using a non-static member before construction starts is undefined.
       // The completed-object profile and opaque reference imports both have a live receiver.
       if (object.record_life != M::Life::alive || (place.primary_base && object.primary_base_life != M::Life::alive))
@@ -506,14 +507,17 @@ struct Ops {
     }
 
     if (object.outside) return m.fail(Reason::unknown_dynamic_type);
-    if (!object.record || !object.record->dynamic || !m.config_.immediate_virtual_target) return m.unsupported(n);
-    if (!object.dynamic_initialized || object.record_life != M::Life::alive)
-      return m.fail(Reason::immediate_dispatch_phase);
+    if (!object.record || !object.record->dynamic || !m.config_.virtual_target) return m.unsupported(n);
+    const bool immediate = kind == ir::VirtualCallKind::immediate;
+    if (!object.dynamic_initialized || object.record_life != M::Life::alive ||
+        (place.primary_base && object.primary_base_life != M::Life::alive))
+      return m.fail(immediate ? Reason::immediate_dispatch_phase : Reason::virtual_dispatch_phase);
     const auto cls = [&](QualType t) { return m.in_->types.get<ast::TClass>(m.in_->canonical(t)).entity; };
     const EntityId receiver_class = cls(place.type);
     const EntityId dynamic_class = cls(object.type);
-    const auto target = m.config_.immediate_virtual_target(selected, receiver_class, dynamic_class);
+    const auto target = m.config_.virtual_target(selected, receiver_class, dynamic_class, immediate);
     if (!target) return m.unsupported(n);
+    if (!target->is_constexpr) return m.fail(Reason::not_constexpr);
     if (target->owner == receiver_class) return call_entity(m, f, n, target->function, 1);
     if (target->owner != dynamic_class) return m.fail(Reason::ill_formed);
     // The supported override is declared in the complete class. Discard the verified

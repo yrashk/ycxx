@@ -70,9 +70,10 @@ struct ConstantRecordLayout {
   std::optional<ConstantRecordBase> primary_base{};
 };
 
-struct ImmediateVirtualTarget {
+struct VirtualTarget {
   EntityId function = EntityId::none;
   EntityId owner = EntityId::none;
+  bool is_constexpr = false;
 };
 
 struct Config {
@@ -82,7 +83,7 @@ struct Config {
   u32 poll_interval = 4096;       // steps between cancellation polls; 0: never
   std::function<std::optional<EnumLayout>(EntityId)> enum_layout{};
   std::function<std::optional<ConstantRecordLayout>(QualType)> record_layout{};
-  std::function<std::optional<ImmediateVirtualTarget>(EntityId, EntityId, EntityId)> immediate_virtual_target{};
+  std::function<std::optional<VirtualTarget>(EntityId, EntityId, EntityId, bool)> virtual_target{};
 };
 
 // An interpreter-only observation of a generated call in the constant-evaluation entry.

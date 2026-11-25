@@ -61,6 +61,10 @@ export enum class Init : std::uint8_t { erroneous, indeterminate, zero };
 //     n bytes at `a` and at `b`, as unsigned char, or 0; both must hold n bytes.
 export enum class BuiltinFn : std::uint8_t { memchr, memcmp };
 
+// The semantic call forms represented by call_virtual. A qualified ordinary member call is
+// a direct call, including during constant evaluation.
+export enum class VirtualCallKind : std::uint8_t { ordinary, immediate, qualified_immediate };
+
 export enum class MemOrder : std::uint8_t { relaxed, consume, acquire, release, acq_rel, seq_cst };
 export enum class Rmw : std::uint8_t { xchg, add, sub, and_, or_, xor_, max, min };
 
@@ -315,9 +319,9 @@ export enum class Op : std::uint16_t {
   sadd_overflow [[=pinned({V, V}, {V, V}).with({commutative})]],
   smul_overflow [[=pinned({V, V}, {V, V}).with({commutative})]],
 
-  // An immediate virtual member invocation: receiver, converted arguments, selected function,
-  // and whether the member name was qualified ([expr.call], [expr.const.core]).
-  call_immediate_virtual [[=state({S, V, Vs}, {S, Vs}).imms({entity, u32})]],
+  // A virtual member invocation for constant evaluation: receiver, converted arguments,
+  // selected function, and VirtualCallKind ([expr.call], [expr.const.core]).
+  call_virtual [[=state({S, V, Vs}, {S, Vs}).imms({entity, u32})]],
 };
 
 export constexpr std::size_t op_count = std::meta::enumerators_of(^^Op).size();
