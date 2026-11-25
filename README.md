@@ -45,7 +45,7 @@ can be compared with the checkout and rendered as a standalone HTML report.
 observations with `ycxx show app`.
 Import `builtin:capabilities` to project selected observations into a generated
 C++ header with `constexpr` values.
-[Build design](docs/design/build.md) [#1251](https://github.com/yrashk/ycxx/issues/1251)
+[Runnable build examples](examples/project-build) · [Build design](docs/design/build.md) · [#1251](https://github.com/yrashk/ycxx/issues/1251)
 
 Ordinary function pointers and references preserve concrete `noexcept` type identity.
 A nonthrowing function can be used where the corresponding potentially throwing type is expected.

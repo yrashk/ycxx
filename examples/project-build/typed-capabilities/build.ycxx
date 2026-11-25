@@ -1,0 +1,14 @@
+use plugin("builtin:capabilities") as capabilities
+
+capabilities.header "profile" {
+    namespace = "example::compiler"
+    filename = "compiler_profile.hh"
+    capabilities = {
+        filesystem = probe("builtin:cpp", "header.filesystem")
+    }
+}
+
+cpp.executable "app" {
+    sources = ["main.cc"]
+    generated_headers = [artifact("profile", "header")]
+}
