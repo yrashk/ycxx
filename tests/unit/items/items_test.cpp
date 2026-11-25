@@ -113,7 +113,9 @@ void classes() {
   check(in.kind == ItemKind::class_def && in.scope == "S" && t[in.members[0]].scope == "S::In", "nested class");
   // Not class definitions.
   auto d = split("struct S s{1}; struct T* f() { return 0; } class X; enum class F : int;");
-  check(d.top(0).kind == ItemKind::declaration && names(d.top(0)) == v({"s"}), "struct S s{1}");
+  check(d.top(0).kind == ItemKind::declaration && names(d.top(0)) == v({"s"}) && d.top(0).members.empty() &&
+            tokens(d, d.top(0).begin, d.top(0).end) == "struct S s { 1 } ;",
+        "struct S s{1} keeps its initializer in the declaration");
   check(d.top(1).kind == ItemKind::function && names(d.top(1)) == v({"f"}), "a function returning struct T*");
   check(names(d.top(2)) == v({"X"}) && (d.top(2).names[0].flags & nf::type), "forward declaration");
   check(names(d.top(3)) == v({"F"}), "opaque enum declaration");
@@ -126,6 +128,46 @@ void classes() {
   auto p = split("template<class T> struct V<T*> final : Base<(1 > 2)> { };");
   check(p.top(0).kind == ItemKind::class_def && names(p.top(0)) == v({"V"}) && p.top(0).template_depth == 1,
         "partial specialization");
+}
+
+void braced_specialization_heads() {
+  struct Head {
+    std::string_view argument;
+    std::string_view base_clause;
+  };
+  for (auto [arg, base] : {Head{"Key{1}", ""}, Head{"(Key{1})", ""}, Head{"false?one:Key{1}", ""},
+                          Head{"Key{high>low?high:low}", ""}, Head{"Tag<Key{high>>1}>", " : Base"}}) {
+    auto s = split(std::format("namespace N {{ template<> struct Pick<{}>{} {{ using type = long; }}; int after; }}",
+                               arg, base));
+    check(s.size() == 1 && s.top(0).members.size() == 2, arg);
+    if (s.size() != 1 || s.top(0).members.size() != 2) continue;
+    const auto& n = s.top(0);
+    const auto& c = s[n.members[0]];
+    const auto& after = s[n.members[1]];
+    check(c.kind == ItemKind::class_def && c.specialization && c.template_depth == 0 &&
+              c.parent == s.items.top[0] && c.scope == "N",
+          std::format("{} defines an explicit specialization in N", arg));
+    check(names(c) == v({"Pick"}) && c.names[0].offset == 4 &&
+              (c.names[0].flags & (nf::type | nf::definition)) == (nf::type | nf::definition),
+          std::format("{} keeps Pick as the defined type name", arg));
+    check(c.begin == n.brace_begin + 1 && c.begin < c.brace_begin && c.brace_begin < c.brace_end &&
+              c.end == c.brace_end + 1 && c.end <= n.brace_end &&
+              tokens(s, c.brace_begin, c.end) == "{ using type = long ; } ;",
+          std::format("{} starts the class body at the member list", arg));
+    check(c.members.size() == 1, std::format("{} contributes only the real class member", arg));
+    if (c.members.size() == 1) {
+      const auto& m = s[c.members[0]];
+      auto scope = m.scope;
+      scope.erase(std::remove(scope.begin(), scope.end(), ' '), scope.end());
+      check(names(m) == v({"type"}) && m.parent == n.members[0] &&
+                m.begin == c.brace_begin + 1 && m.end + 1 == c.brace_end &&
+                scope == std::format("N::Pick<{}>", arg),
+            std::format("{} keeps the complete head in its member scope", arg));
+    }
+    check(after.begin == c.end && names(after) == v({"after"}) &&
+              after.parent == s.items.top[0] && after.scope == "N",
+          std::format("{} leaves the following declaration in N", arg));
+  }
 }
 
 void functions_and_bodies() {
@@ -198,6 +240,16 @@ void recovery() {
   check(s.size() == 3 && s.top(1).kind == ItemKind::stray && names(s.top(2)) == v({"b"}), "a stray }");
   auto t = split("void f() { if (x) {");
   check(t.size() == 1 && t.top(0).end + 1 == t.region.size(), "an unterminated body runs to the end");
+
+  auto missing_angle = split("template<> struct Pick<Tag<Key{1}>; using sentinel = int;");
+  check(missing_angle.size() >= 2 && names(missing_angle.top(missing_angle.size() - 1)) == v({"sentinel"}),
+        "a missing outer > recovers at the semicolon");
+
+  auto missing_semi = split("template<> struct Pick<Key{1}> { using type = long; } using sentinel = int;");
+  check(missing_semi.size() == 2 && missing_semi.top(0).kind == ItemKind::class_def &&
+            missing_semi.top(0).end == missing_semi.top(0).brace_end &&
+            missing_semi.top(1).begin == missing_semi.top(0).end && names(missing_semi.top(1)) == v({"sentinel"}),
+        "a missing semicolon after the class body preserves the following declaration");
 }
 
 void ids() {
@@ -258,7 +310,8 @@ void robustness() {
       "namespace N { template<class T> struct S : B<T> { S() : x{1} {} int f() try { return 1; } catch (...) "
       "{ return 0; } private: int x = [] { return 2; }(); enum E { A, B } e; }; } extern \"C\" { int puts(const "
       "char*); } int main() { return N::S<int>{}.f(); } using I = int; template<class T> requires requires (T t) "
-      "{ t; } void g(T) {} } ; struct { int a; } anon; consteval { }";
+      "{ t; } void g(T) {} } ; struct { int a; } anon; consteval { } "
+      "template<> struct Pick<Tag<(Key{1})>> { using type = long; }; int after;";
   std::size_t checked = 0;
   for (std::size_t n = 0; n <= sample.size(); ++n) {
     auto p = pp::preprocess(std::string_view(sample).substr(0, n));
@@ -312,6 +365,7 @@ int main() {
   alpha();
   nesting();
   classes();
+  braced_specialization_heads();
   functions_and_bodies();
   initializers_and_templates();
   using_and_typedef();

@@ -1,0 +1,30 @@
+// ACTION: syntax
+--- main.cpp
+struct Key { int value; };
+constexpr Key one{1};
+
+template<Key> struct Pick { using type = int; };
+#include "selection.hpp"
+--- selection.hpp
+template<> struct Pick<Key{1}> { using type = long; };
+static_assert(__is_same(Pick<one>::type, long));
+static_assert(__is_same(Pick<Key{1}>::type, long));
+static_assert(__is_same(Pick<Key{2}>::type, int));
+=== edit
+--- selection.hpp
+template<> struct Pick<Key{2}> { using type = long; };
+static_assert(__is_same(Pick<one>::type, long)); //! error
+static_assert(__is_same(Pick<Key{1}>::type, long)); //! error
+static_assert(__is_same(Pick<Key{2}>::type, int)); //! error
+=== edit
+--- selection.hpp
+template<> struct Pick<one> { using type = long; };
+static_assert(__is_same(Pick<one>::type, long));
+static_assert(__is_same(Pick<Key{1}>::type, long));
+static_assert(__is_same(Pick<Key{2}>::type, int));
+=== edit
+--- selection.hpp
+template<> struct Pick<Key{1}> { using type = long; };
+static_assert(__is_same(Pick<one>::type, long));
+static_assert(__is_same(Pick<Key{1}>::type, long));
+static_assert(__is_same(Pick<Key{2}>::type, int));
